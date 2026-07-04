@@ -17,7 +17,7 @@
   width="333">
     <panel
       top="18"
-      class="sidepanel_appearance"
+      panel_class="sidepanel_appearance"
       name="main_panel"
       filename="sidepanel_appearance.xml"
       label="Edit Appearance"

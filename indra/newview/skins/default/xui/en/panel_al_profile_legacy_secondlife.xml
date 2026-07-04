@@ -4,7 +4,7 @@
  label="Second Life"
  height="360"
  width="304"
- class="panel_avatar_secondlife"
+ panel_class="panel_avatar_secondlife"
  name="avatar_secondlife_tab">
   <layout_stack
     follows="all"

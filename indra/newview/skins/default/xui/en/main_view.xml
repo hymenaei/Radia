@@ -127,7 +127,7 @@
          height="768"
          mouse_opaque="false"
          name="popup_holder"
-         class="popup_holder"
+         panel_class="popup_holder"
          width="1024">
     <icon follows="right|bottom"
           image_name="Resize_Corner"
@@ -150,7 +150,7 @@
          mouse_opaque="true"
          name="progress_view"
          filename="panel_progress.xml"
-         class="progress_view"
+         panel_class="progress_view"
          width="1024"
          visible="false"/>
   <menu_holder top="0"

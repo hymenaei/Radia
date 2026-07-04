@@ -7,7 +7,7 @@
  left="0"
  min_height="350"
  name="event_info"
- class="event_info"
+ panel_class="event_info"
  top="20"
  width="333">
   <panel.string name="free">

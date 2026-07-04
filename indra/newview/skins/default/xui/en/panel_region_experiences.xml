@@ -73,7 +73,7 @@ Blocked Experiences may not run on this parcel.
       <panel follows="all"
              width="330"
              name="panel_trusted"
-             class="panel_experience_list_editor"
+             panel_class="panel_experience_list_editor"
              filename="panel_experience_list_editor.xml" />
       <text
         layout="topleft"
@@ -95,7 +95,7 @@ Blocked Experiences may not run on this parcel.
       <panel
         width="330"
         name="panel_allowed"
-        class="panel_experience_list_editor"
+        panel_class="panel_experience_list_editor"
         filename="panel_experience_list_editor.xml"/>
       <text
         layout="topleft"
@@ -117,7 +117,7 @@ Blocked Experiences may not run on this parcel.
       <panel
         width="330"
         name="panel_blocked"
-        class="panel_experience_list_editor"
+        panel_class="panel_experience_list_editor"
         filename="panel_experience_list_editor.xml"/>
       <text
         layout="topleft"

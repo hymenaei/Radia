@@ -541,7 +541,7 @@
                             width="700">
                         <panel
                                 border="true"
-                                class="panel_settings_water"
+                                panel_class="panel_settings_water"
                                 filename="panel_settings_water.xml"
                                 label="Water"
                                 layout="topleft"
@@ -572,7 +572,7 @@
                             width="700">
                         <panel
                                 border="true"
-                                class="panel_settings_atmos"
+                                panel_class="panel_settings_atmos"
                                 filename="panel_settings_sky_atmos.xml"
                                 label="Atmosphere &amp; Lighting"
                                 layout="topleft"
@@ -581,7 +581,7 @@
                                 name="atmosphere_panel" />
                         <panel
                                 border="true"
-                                class="panel_settings_cloud"
+                                panel_class="panel_settings_cloud"
                                 filename="panel_settings_sky_clouds.xml"
                                 label="Clouds"
                                 layout="topleft"
@@ -590,7 +590,7 @@
                                 name="clouds_panel" />
                         <panel
                                 border="true"
-                                class="panel_settings_sunmoon"
+                                panel_class="panel_settings_sunmoon"
                                 filename="panel_settings_sky_sunmoon.xml"
                                 label="Sun &amp; Moon"
                                 layout="topleft"
@@ -600,7 +600,7 @@
                         <!-- added programatically so it doesn't show up whether we want it or not
                         <panel
                                 border="true"
-                                class="panel_settings_density"
+                                panel_class="panel_settings_density"
                                 filename="panel_settings_sky_density.xml"
                                 label="Density"
                                 layout="topleft"

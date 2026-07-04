@@ -82,7 +82,7 @@ LLPanel::Params::Params()
     min_height("min_height", 100),
     strings("string"),
     filename("filename"),
-    class_name("class"),
+    class_name("panel_class"),
     help_topic("help_topic"),
     visible_callback("visible_callback"),
     accepts_badge("accepts_badge")
@@ -368,7 +368,7 @@ LLView* LLPanel::fromXML(LLXMLNodePtr node, LLView* parent, LLXMLNodePtr output_
     node->getAttributeString("name", name);
 
     std::string class_attr;
-    node->getAttributeString("class", class_attr);
+    node->getAttributeString("panel_class", class_attr);
 
     LLPanel* panelp = NULL;
 

@@ -15,7 +15,7 @@
 		CREATE NEW GROUP...
 	</floater.string>
   <panel
-    class="panel_group_info_sidetray"
+    panel_class="panel_group_info_sidetray"
     name="panel_group_info_sidetray"
     filename="panel_group_info_sidetray.xml"
     visible="true"
@@ -27,7 +27,7 @@
     width="373"
     height="577"/>
   <panel
-    class="panel_group_creation_sidetray"
+    panel_class="panel_group_creation_sidetray"
     name="panel_group_creation_sidetray"
     filename="panel_group_creation_sidetray.xml"
     visible="false"

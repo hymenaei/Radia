@@ -44,6 +44,15 @@ target_sources(llui
     lllayoutstack.cpp
     lllineeditor.cpp
     llloadingindicator.cpp
+    lllsscolorfunction.cpp
+    lllsserror.cpp
+    lllssexpression.cpp
+    lllssmanager.cpp
+    lllssparser.cpp
+    lllssresolver.cpp
+    lllssstylesheet.cpp
+    lllsstokenregistry.cpp
+    lllssvalue.cpp
     lllocalcliprect.cpp
     llmenubutton.cpp
     llmenugl.cpp
@@ -159,6 +168,15 @@ target_sources(llui
     lllazyvalue.h
     lllineeditor.h
     llloadingindicator.h
+    lllsscolorfunction.h
+    lllsserror.h
+    lllssexpression.h
+    lllssmanager.h
+    lllssparser.h
+    lllssresolver.h
+    lllssstylesheet.h
+    lllsstokenregistry.h
+    lllssvalue.h
     lllocalcliprect.h
     llmenubutton.h
     llmenugl.h
@@ -309,4 +327,10 @@ if(BUILD_TESTING)
   set(test_project llui)
   LL_ADD_INTEGRATION_TEST(llurlentry llurlentry.cpp "${test_libs}" "${test_project}")
   LL_ADD_INTEGRATION_TEST(llemojidictionary llemojidictionary.cpp "${test_libs}" "${test_project}")
+
+  LL_ADD_INTEGRATION_TEST(lllssparser       "" "${test_libs}" "${test_project}")
+  LL_ADD_INTEGRATION_TEST(lllssresolver     "" "${test_libs}" "${test_project}")
+  LL_ADD_INTEGRATION_TEST(lllayoutengine    "" "${test_libs}" "${test_project}")
+  LL_ADD_INTEGRATION_TEST(llsvgcache        "" "${test_libs}" "${test_project}")
+  LL_ADD_INTEGRATION_TEST(lltrans_icu       "" "${test_libs}" "${test_project}")
 endif()

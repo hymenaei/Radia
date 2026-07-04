@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <panel
  name="ao_mini"
- class="ao_mini"
+ panel_class="ao_mini"
  left="0"
  top="0"
  width="120"

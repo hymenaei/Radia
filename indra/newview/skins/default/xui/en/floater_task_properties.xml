@@ -12,7 +12,7 @@
    follows="all"
    layout="topleft"
    left="0"
-   class="sidepanel_task_info"
+   panel_class="sidepanel_task_info"
    filename="sidepanel_task_info.xml"
    name="sidepanel"
    top="20"

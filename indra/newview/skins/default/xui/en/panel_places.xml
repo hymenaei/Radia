@@ -171,7 +171,7 @@ background_visible="true"
      width="318"
      visible="true"/>
     <panel
-     class="panel_place_profile"
+     panel_class="panel_place_profile"
      filename="panel_place_profile.xml"
      follows="all"
      layout="topleft"
@@ -183,7 +183,7 @@ background_visible="true"
      visible="false"
      width="318" />
     <panel
-     class="panel_landmark_info"
+     panel_class="panel_landmark_info"
      filename="panel_landmark_info.xml"
      follows="all"
      layout="topleft"

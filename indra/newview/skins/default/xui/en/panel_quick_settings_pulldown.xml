@@ -10,7 +10,7 @@
  name="quick_settings_pulldown">
   <panel
    name="quick_settings"
-   class="quick_settings"
+   panel_class="quick_settings"
    filename="panel_quick_settings.xml"
    layout="topleft"/>
 </panel>

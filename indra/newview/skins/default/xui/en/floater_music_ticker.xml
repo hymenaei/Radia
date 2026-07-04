@@ -18,7 +18,7 @@
  single_instance="true"
  reuse_instance="false">
   <panel
-   class="music_ticker"
+   panel_class="music_ticker"
    name="music_ticker"
    filename="panel_music_ticker.xml"
    layout="topleft"

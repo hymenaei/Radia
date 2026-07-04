@@ -17,7 +17,7 @@
    bottom="590"
    left="0"
    right="313"
-   class="panel_al_event_info"
+   panel_class="panel_al_event_info"
    filename="panel_al_event_info.xml" />
 </floater>
 

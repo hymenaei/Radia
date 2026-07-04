@@ -23,7 +23,7 @@
          border="false"
          label="People"
          filename="panel_dir_people.xml"
-         class="panel_dir_people"
+         panel_class="panel_dir_people"
          name="panel_dir_people"
          follows="left|top|right"
          layout="topleft"
@@ -34,7 +34,7 @@
          border="false"
          label="Groups"
          filename="panel_dir_groups.xml"
-         class="panel_dir_groups"
+         panel_class="panel_dir_groups"
          name="panel_dir_groups"
          follows="left|top|right"
          layout="topleft"
@@ -45,7 +45,7 @@
          border="false"
          label="Places"
          filename="panel_dir_places.xml"
-         class="panel_dir_places"
+         panel_class="panel_dir_places"
          name="panel_dir_places"
          follows="left|top|right"
          layout="topleft"
@@ -56,7 +56,7 @@
          border="false"
          label="Land Sales"
          filename="panel_dir_land.xml"
-         class="panel_dir_land"
+         panel_class="panel_dir_land"
          name="panel_dir_land"
          follows="left|top|right"
          layout="topleft"
@@ -67,7 +67,7 @@
          border="false"
          label="Events"
          filename="panel_dir_events.xml"
-         class="panel_dir_events"
+         panel_class="panel_dir_events"
          name="panel_dir_events"
          follows="left|top|right"
          layout="topleft"
@@ -78,7 +78,7 @@
          border="false"
          label="Classifieds"
          filename="panel_dir_classified.xml"
-         class="panel_dir_classified"
+         panel_class="panel_dir_classified"
          name="panel_dir_classified"
          follows="left|top|right"
          layout="topleft"
@@ -89,7 +89,7 @@
          border="false"
          label="Web"
          filename="panel_dir_web.xml"
-         class="panel_dir_web"
+         panel_class="panel_dir_web"
          name="panel_dir_web"
          follows="left|top|right"
          layout="topleft"
@@ -104,7 +104,7 @@
      left="345"
      visible="false"
      name="panel_profile_secondlife"
-     class="panel_profile_secondlife"
+     panel_class="panel_profile_secondlife"
      filename="panel_profile_secondlife.xml"
      width="425" />
     <panel
@@ -114,7 +114,7 @@
      left="345"
      visible="false"
      name="panel_group_info_sidetray"
-     class="panel_group_info_sidetray"
+     panel_class="panel_group_info_sidetray"
      filename="panel_group_info_sidetray.xml"
      width="425" />
     <panel
@@ -124,7 +124,7 @@
      left="345"
      visible="false"
      name="panel_places"
-     class="panel_places"
+     panel_class="panel_places"
      filename="panel_places.xml"
      width="425" />
     <panel
@@ -134,7 +134,7 @@
      left="345"
      visible="false"
      name="panel_classified_info"
-     class="panel_classified_info"
+     panel_class="panel_classified_info"
      filename="panel_classified_info.xml"
      width="425" />
     <panel
@@ -144,7 +144,7 @@
      left="345"
      visible="false"
      name="panel_event_info"
-     class="panel_event_info"
+     panel_class="panel_event_info"
      filename="panel_event_info.xml"
      width="425" />
 </floater>

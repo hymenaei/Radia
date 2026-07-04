@@ -10,7 +10,7 @@
  name="ao_pulldown">
   <panel
    name="ao_mini"
-   class="ao_mini"
+   panel_class="ao_mini"
    filename="panel_ao_mini.xml"
    layout="topleft" />
 </panel>

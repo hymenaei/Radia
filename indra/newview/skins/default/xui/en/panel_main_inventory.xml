@@ -317,7 +317,7 @@
         min_width="150"
         name="comb_gallery_layout">
         <panel
-         class="inventory_gallery"
+         panel_class="inventory_gallery"
          filename="panel_inventory_gallery.xml"
          left="0"
          top="1"

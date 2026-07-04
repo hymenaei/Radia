@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8" standalone="yes" ?>
 <panel
- class="quick_settings"
+ panel_class="quick_settings"
  layout="topleft"
  width="300"
  height="209"

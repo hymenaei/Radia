@@ -35,7 +35,7 @@
          help_topic="roles_members_tab"
          name="members_sub_tab"
          tool_tip="Members"
-         class="panel_group_members_subtab">
+         panel_class="panel_group_members_subtab">
             <panel.string
              name="help_text">
                 You can add or remove Roles assigned to Members.
@@ -184,7 +184,7 @@ clicking on their names.
          label="ROLES"
          help_topic="roles_roles_tab"
          name="roles_sub_tab"
-         class="panel_group_roles_subtab">
+         panel_class="panel_group_roles_subtab">
             <!--<button
              enabled="false"
              height="20"
@@ -283,7 +283,7 @@ including the Everyone and Owner Roles.
          label="ABILITIES"
          help_topic="roles_actions_tab"
          name="actions_sub_tab"
-         class="panel_group_actions_subtab"
+         panel_class="panel_group_actions_subtab"
          tool_tip="You can view an Ability&apos;s Description and which Roles and Members can execute the Ability.">
             <panel.string
              name="help_text">
@@ -342,7 +342,7 @@ things in this group. There&apos;s a broad variety of Abilities.
          label="BANNED RESIDENTS"
          help_topic="roles_banlist_tab"
          name="banlist_sub_tab"
-         class="panel_group_banlist_subtab"
+         panel_class="panel_group_banlist_subtab"
          tool_tip="View the banned residents from this group.">
             <panel.string
              name="help_text">

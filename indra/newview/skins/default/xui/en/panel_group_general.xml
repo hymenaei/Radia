@@ -3,7 +3,7 @@
  label="General"
  height="420"
  width="304"
- class="panel_group_general"
+ panel_class="panel_group_general"
  name="general_tab">
     <panel.string
      name="help_text">

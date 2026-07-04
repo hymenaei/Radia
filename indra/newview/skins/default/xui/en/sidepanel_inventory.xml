@@ -35,7 +35,7 @@
                  follows="bottom|left|right"
                  height="300">
                  <panel
-                      class="panel_main_inventory"
+                      panel_class="panel_main_inventory"
                       filename="panel_main_inventory.xml"
                       follows="all"
                       layout="topleft"
@@ -60,7 +60,7 @@
                       layout="topleft"
                       left="0"
                       name="marketplace_inbox"
-                      class="panel_marketplace_inbox"
+                      panel_class="panel_marketplace_inbox"
                       top="0"
                       label=""
                       height="235">

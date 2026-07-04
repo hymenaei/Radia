@@ -20,7 +20,7 @@
      height="500"
      width="505"
      follows="all"
-     class="panel_profile"
+     panel_class="panel_profile"
     >
         <tab_container
          name="panel_profile_tabs"
@@ -38,7 +38,7 @@
              name="panel_profile_secondlife"
              label="BIO"
              layout="topleft"
-             class="panel_profile_secondlife"
+             panel_class="panel_profile_secondlife"
              filename="panel_profile_secondlife.xml"
              help_topic="profile_secondlife_tab"
             />
@@ -46,7 +46,7 @@
              name="panel_profile_web"
              label="FEED"
              layout="topleft"
-             class="panel_profile_web"
+             panel_class="panel_profile_web"
              filename="panel_profile_web.xml"
              help_topic="profile_web_tab"
             />
@@ -54,7 +54,7 @@
              name="panel_profile_picks"
              label="PICKS"
              layout="topleft"
-             class="panel_profile_picks"
+             panel_class="panel_profile_picks"
              filename="panel_profile_picks.xml"
              help_topic="profile_picks_tab"
             />
@@ -62,7 +62,7 @@
              name="panel_profile_classifieds"
              label="CLASSIFIEDS"
              layout="topleft"
-             class="panel_profile_classifieds"
+             panel_class="panel_profile_classifieds"
              filename="panel_profile_classifieds.xml"
              help_topic="profile_classified_tab"
             />
@@ -70,7 +70,7 @@
              name="panel_profile_firstlife"
              label="REAL LIFE"
              layout="topleft"
-             class="panel_profile_firstlife"
+             panel_class="panel_profile_firstlife"
              filename="panel_profile_firstlife.xml"
              help_topic="profile_firstlife_tab"
             />
@@ -78,7 +78,7 @@
              name="panel_profile_notes"
              label="MY NOTES"
              layout="topleft"
-             class="panel_profile_notes"
+             panel_class="panel_profile_notes"
              filename="panel_profile_notes.xml"
              help_topic="profile_notes_tab"
             />

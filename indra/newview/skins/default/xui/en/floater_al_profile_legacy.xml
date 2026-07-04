@@ -12,7 +12,7 @@
   title="PROFILE"
   width="370">
     <panel
-      class="panel_profile_legacy_sidetray"
+      panel_class="panel_profile_legacy_sidetray"
       name="panel_profile_legacy_sidetray"
       filename="panel_al_profile_legacy_sidetray.xml"
       label="Profile"

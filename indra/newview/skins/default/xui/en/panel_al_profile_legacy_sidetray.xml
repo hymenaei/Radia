@@ -139,7 +139,7 @@ Remove Friend
          fit_panel="true">
           <panel
            border="false"
-           class="panel_profile_legacy_groups"
+           panel_class="panel_profile_legacy_groups"
            filename="panel_al_profile_legacy_groups.xml"
            follows="all"
            layout="topleft"
@@ -155,7 +155,7 @@ Remove Friend
          fit_panel="true">
           <panel
            border="false"
-           class="panel_profile_legacy_picks"
+           panel_class="panel_profile_legacy_picks"
            filename="panel_al_profile_legacy_picks.xml"
            follows="all"
            layout="topleft"

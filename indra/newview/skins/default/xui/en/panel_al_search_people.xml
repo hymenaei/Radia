@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8" standalone="yes" ?>
 <panel
  height="70"
- class="panel_search_people"
+ panel_class="panel_search_people"
  name="panel_search_people"
  width="602"
  default_tab_group="2">

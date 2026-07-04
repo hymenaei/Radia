@@ -265,7 +265,7 @@
      top_pad="5"
      width="215">
       <panel
-       class="llpanelsnapshotoptions"
+       panel_class="llpanelsnapshotoptions"
        filename="panel_snapshot_options.xml"
        follows="all"
        layout="topleft"
@@ -273,25 +273,25 @@
        name="panel_snapshot_options"
        top="0" />
       <panel
-       class="llpanelsnapshotprofile"
+       panel_class="llpanelsnapshotprofile"
        follows="all"
        layout="topleft"
        name="panel_snapshot_profile"
        filename="panel_snapshot_profile.xml" />
       <panel
-       class="llpanelsnapshotpostcard"
+       panel_class="llpanelsnapshotpostcard"
        follows="all"
        layout="topleft"
        name="panel_snapshot_postcard"
        filename="panel_snapshot_postcard.xml" />
       <panel
-       class="llpanelsnapshotinventory"
+       panel_class="llpanelsnapshotinventory"
        follows="all"
        layout="topleft"
        name="panel_snapshot_inventory"
        filename="panel_snapshot_inventory.xml" />
       <panel
-       class="llpanelsnapshotlocal"
+       panel_class="llpanelsnapshotlocal"
        follows="all"
        layout="topleft"
        name="panel_snapshot_local"

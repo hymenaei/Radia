@@ -203,7 +203,7 @@ It is calculated as border_size + 2*UIResizeBarOverlap
                     <!-- List containing items from the COF and Base outfit -->
                     <panel
                             background_visible="false"
-                            class="cof_wearables"
+                            panel_class="cof_wearables"
                             filename="panel_cof_wearables.xml"
                             follows="all"
                             height="129"

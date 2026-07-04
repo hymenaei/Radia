@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8" standalone="yes"?>
 <panel
  border="true"
- class="panel_preference_sound"
+ panel_class="panel_preference_sound"
  follows="all"
  height="511"
  label="Sounds"
@@ -777,7 +777,7 @@
     top_pad="0"
     width="480"
     left="18"
-    class="panel_voice_device_settings"/>
+    panel_class="panel_voice_device_settings"/>
     </panel>
 
 </tab_container>

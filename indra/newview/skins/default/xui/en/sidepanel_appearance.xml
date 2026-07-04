@@ -193,7 +193,7 @@ width="333">
     </layout_panel>
   </layout_stack>
    <panel
-   class="panel_outfits_inventory"
+   panel_class="panel_outfits_inventory"
    filename="panel_outfits_inventory.xml"
    name="panel_outfits_inventory"
    height="493"
@@ -205,7 +205,7 @@ width="333">
    top_pad="4"
    follows="all" />
    <panel
-   class="panel_outfit_edit"
+   panel_class="panel_outfit_edit"
    filename="panel_outfit_edit.xml"
    height="565"
    follows="all"
@@ -217,7 +217,7 @@ width="333">
    visible="false" 
    width="320"/>
    <panel
-   class="panel_edit_wearable"
+   panel_class="panel_edit_wearable"
    filename="panel_edit_wearable.xml"
    follows="all"
    layout="topleft"

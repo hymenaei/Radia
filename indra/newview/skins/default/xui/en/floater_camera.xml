@@ -104,7 +104,7 @@
          <!--TODO: replace + - images -->
          <panel
             border="false"
-            class="camera_zoom_panel"
+            panel_class="camera_zoom_panel"
             height="84"
             layout="topleft"
             left="0"

@@ -18,7 +18,7 @@
     <panel
       top="18"
       tab_group="1"
-      class="panel_places"
+      panel_class="panel_places"
       name="main_panel"
       filename="panel_places.xml"
       label="Places"

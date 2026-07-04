@@ -155,7 +155,7 @@ background_visible="true"
             fit_panel="false">
                    <panel
                       border="false"
-                      class="panel_group_general"
+                      panel_class="panel_group_general"
                       filename="panel_group_general.xml"
                       layout="topleft"
                       left="0"
@@ -172,7 +172,7 @@ background_visible="true"
             fit_panel="false">
                 <panel
                    border="false"
-                   class="panel_group_roles"
+                   panel_class="panel_group_roles"
                    filename="panel_group_roles.xml"
                    follows="left|top|right"
                    layout="topleft"
@@ -188,7 +188,7 @@ background_visible="true"
             fit_panel="false">
                 <panel
                     border="false"
-                    class="panel_group_notices"
+                    panel_class="panel_group_notices"
                     filename="panel_group_notices.xml"
                     follows="left|top|right"
                     layout="topleft"
@@ -205,7 +205,7 @@ background_visible="true"
              fit_panel="false">
                  <panel
 					 border="false"
-                     class="panel_group_land_money"
+                     panel_class="panel_group_land_money"
                      filename="panel_group_land_money.xml"
                      follows="left|top|right"
                      layout="topleft"
@@ -221,7 +221,7 @@ background_visible="true"
              fit_panel="false">
            <panel
                border="false"
-               class="panel_group_experiences"
+               panel_class="panel_group_experiences"
                filename="panel_experiences.xml"
                follows="left|top|right"
                layout="topleft"

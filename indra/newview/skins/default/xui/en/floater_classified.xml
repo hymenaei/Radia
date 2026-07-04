@@ -13,7 +13,7 @@
  title="Classified"
  width="333" >
    <panel
-    class="panel_classified_info"
+    panel_class="panel_classified_info"
     name="main_panel"
     filename="panel_classified_info.xml"
     follows="all"/>

@@ -32,7 +32,7 @@
      top="8"
      width="315">
          <panel
-           class="outfit_gallery"
+           panel_class="outfit_gallery"
            filename="panel_outfit_gallery.xml"
            height="520"
            name="outfit_gallery_tab"
@@ -43,7 +43,7 @@
            layout="topleft"
            width="315" />
          <panel
-           class="outfits_list"
+           panel_class="outfits_list"
            filename="panel_outfits_list.xml"
            height="520"
            name="outfitslist_tab"
@@ -56,7 +56,7 @@
          <panel
            background_visible="true"
            bg_alpha_color="DkGray"
-           class="panel_wearing"
+           panel_class="panel_wearing"
            filename="panel_outfits_wearing.xml"
            follows="all"
            height="520"

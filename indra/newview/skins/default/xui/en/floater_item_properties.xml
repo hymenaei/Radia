@@ -11,7 +11,7 @@
    follows="all"
    layout="topleft"
    left="0"
-   class="sidepanel_item_info"
+   panel_class="sidepanel_item_info"
    filename="sidepanel_item_info.xml"
    name="sidepanel"
    top="20"

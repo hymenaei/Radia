@@ -5,7 +5,7 @@
  width="350"
  height="66"
  name="music_ticker"
- class="music_ticker">
+ panel_class="music_ticker">
     <string name="paused">
         (not playing)
     </string>

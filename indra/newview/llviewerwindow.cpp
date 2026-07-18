@@ -46,6 +46,8 @@
 #include "llsetkeybinddialog.h"
 #include "llviewerinput.h"
 #include "llviewermenu.h"
+#include "rdfloaterdemo.h"
+#include "rduiruntime.h"
 
 #include "llviewquery.h"
 #include "llxmltree.h"
@@ -272,6 +274,19 @@ static const F32 MAX_UI_SCALE = 7.0f;
 static const F32 MIN_DISPLAY_SCALE = 0.5f;
 
 static const char KEY_MOUSELOOK = 'M';
+
+static bool shouldShowDetachedRdui()
+{
+    return LLStartUp::getStartupState() == STATE_STARTED
+        && !LLAppViewer::instance()->quitRequested()
+        && !gDisconnected
+        && gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI);
+}
+
+static bool shouldShowAttachedRdui()
+{
+    return shouldShowDetachedRdui() && !gAgentCamera.cameraMouselook();
+}
 
 LLTrace::SampleStatHandle<> LLViewerWindow::sMouseVelocityStat("Mouse Velocity");
 
@@ -1034,7 +1049,6 @@ bool LLViewerWindow::handleAnyMouseClick(LLWindow *window, LLCoordGL pos, MASK m
     // only send mouse clicks to UI if UI is visible
     if(gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI))
     {
-
         if (down)
         {
             buttonstatestr = "down" ;
@@ -1086,16 +1100,69 @@ bool LLViewerWindow::handleAnyMouseClick(LLWindow *window, LLCoordGL pos, MASK m
         }
 
         // Make sure we get a corresponding mouseup event, even if the mouse leaves the window
-        if (down)
-            mWindow->captureMouse();
-        else
-            mWindow->releaseMouse();
+        if (down) mWindow->captureMouse();
 
         // Indicate mouse was active
         LLUI::getInstance()->resetMouseIdleTimer();
 
-        // Don't let the user move the mouse out of the window until mouse up.
-        if( LLToolMgr::getInstance()->getCurrentTool()->clipMouseWhenDown() )
+        rdui::viewer::NativePointerButton rdui_button = rdui::viewer::NativePointerButton::None;
+        U8 rdui_click_count = 1;
+        switch (clicktype)
+        {
+            case CLICK_LEFT:
+                rdui_button = rdui::viewer::NativePointerButton::Left;
+                break;
+            case CLICK_DOUBLELEFT:
+                rdui_button = rdui::viewer::NativePointerButton::Left;
+                rdui_click_count = down ? 2 : 1;
+                break;
+            case CLICK_RIGHT:
+                rdui_button = rdui::viewer::NativePointerButton::Right;
+                break;
+            case CLICK_MIDDLE:
+                rdui_button = rdui::viewer::NativePointerButton::Middle;
+                break;
+            case CLICK_BUTTON4:
+                rdui_button = rdui::viewer::NativePointerButton::Button4;
+                break;
+            case CLICK_BUTTON5:
+                rdui_button = rdui::viewer::NativePointerButton::Button5;
+                break;
+            default:
+                break;
+        }
+        F32 rdui_dx = 0.f;
+        F32 rdui_dy = 0.f;
+#if (LL_WINDOWS || LL_SDL_WINDOW) && !LL_MESA_HEADLESS
+        if (!down && mRduiRuntime && mRduiRuntime->hasPointerCapture())
+        {
+            // Mouse-up may be queued before the next frame consumes raw input.
+            // Preserve that final high-speed motion for the Floater drag.
+            LLCoordCommon delta{0, 0};
+            mWindow->getCursorDelta(&delta);
+            rdui_dx = static_cast<F32>(delta.mX) / mDisplayScale.mV[VX];
+            rdui_dy = static_cast<F32>(delta.mY) / mDisplayScale.mV[VY];
+        }
+#endif
+        const bool rdui_handled = mRduiRuntime
+            && rdui_button != rdui::viewer::NativePointerButton::None
+            && mRduiRuntime->dispatch({rdui::viewer::NativePointerInput{
+                   down ? rdui::viewer::NativePointerPhase::Down : rdui::viewer::NativePointerPhase::Up,
+                   static_cast<F32>(x), static_cast<F32>(y),
+                   rdui_button, mask, rdui_click_count, rdui_dx, rdui_dy}}).handled;
+        if (!down) mWindow->releaseMouse();
+        if (rdui_handled)
+        {
+            // RDUI owns its clipping policy while captured. Detachable Floater
+            // drags confine the visible cursor immediately and use raw motion
+            // to measure deliberate movement beyond the client border.
+            return true;
+        }
+
+        // World tools may require a confined cursor, but only after RDUI has
+        // declined the press. Applying this before arbitration prevents
+        // detachable Floaters from ever reaching their breakaway distance.
+        if (LLToolMgr::getInstance()->getCurrentTool()->clipMouseWhenDown())
         {
             mWindow->setMouseClipping(down);
         }
@@ -1686,7 +1753,24 @@ void LLViewerWindow::handleMouseMove(LLWindow *window,  LLCoordGL pos, MASK mask
         LLUI::getInstance()->resetMouseIdleTimer();
     }
 
-    saveLastMouse(mouse_point);
+    const bool rdui_captured = mRduiRuntime && mRduiRuntime->hasPointerCapture();
+    if (rdui_captured)
+    {
+        mCurrentMousePoint = mouse_point;
+    }
+    else
+    {
+        saveLastMouse(mouse_point);
+    }
+
+    if (rdui_captured
+        && (x < 0 || y < 0 || x > getWindowWidthScaled() || y > getWindowHeightScaled())
+        && gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI))
+    {
+        if (mRduiRuntime) mRduiRuntime->dispatch({rdui::viewer::NativePointerInput{
+            rdui::viewer::NativePointerPhase::Move, static_cast<F32>(x), static_cast<F32>(y),
+            rdui::viewer::NativePointerButton::None, mask}});
+    }
 
     mWindow->showCursorFromMouseMove();
 
@@ -1721,10 +1805,15 @@ void LLViewerWindow::handleMouseDragged(LLWindow *window,  LLCoordGL pos, MASK m
 
 void LLViewerWindow::handleMouseLeave(LLWindow *window)
 {
-    // SDL3 delivers SDL_EVENT_WINDOW_MOUSE_LEAVE whenever the cursor crosses
-    // the window edge, including while we have capture (e.g. mid-drag). In
-    // that case the mouse is still logically ours, so don't drop the
-    // in-window state or block tooltips.
+    if (mRduiRuntime && mRduiRuntime->hasPointerCapture())
+    {
+        return;
+    }
+
+    if (mRduiRuntime)
+        mRduiRuntime->dispatch({rdui::viewer::NativePointerInput{
+            rdui::viewer::NativePointerPhase::Leave}});
+
     if (gFocusMgr.getMouseCapture() != NULL)
     {
         return;
@@ -1812,6 +1901,8 @@ void LLViewerWindow::handleFocus(LLWindow *window)
 // The top-level window has lost focus (e.g. via ALT-TAB)
 void LLViewerWindow::handleFocusLost(LLWindow *window)
 {
+    if (mRduiRuntime) mRduiRuntime->dispatch({rdui::viewer::NativeInteractionLoss::Focus});
+
     gFocusMgr.setAppHasFocus(false);
     //LLModalDialog::onAppFocusLost();
     LLToolMgr::getInstance()->onAppFocusLost();
@@ -1839,6 +1930,11 @@ void LLViewerWindow::handleFocusLost(LLWindow *window)
     gForegroundTime.pause();
 }
 
+void LLViewerWindow::handleMouseCaptureLost(LLWindow*)
+{
+    if (mRduiRuntime) mRduiRuntime->dispatch({rdui::viewer::NativeInteractionLoss::Capture});
+}
+
 
 bool LLViewerWindow::handleTranslatedKeyDown(KEY key,  MASK mask, bool repeated)
 {
@@ -1853,6 +1949,13 @@ bool LLViewerWindow::handleTranslatedKeyDown(KEY key,  MASK mask, bool repeated)
     else
     {
         gAwayTriggerTimer.reset();
+    }
+
+    if (gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI))
+    {
+        if (mRduiRuntime
+            && mRduiRuntime->dispatch({rdui::viewer::NativeKeyInput{key, mask, true, repeated}}).handled)
+            return true;
     }
 
     // *NOTE: We want to interpret KEY_RETURN later when it arrives as
@@ -1877,6 +1980,13 @@ bool LLViewerWindow::handleTranslatedKeyUp(KEY key,  MASK mask)
     // Handle non-consuming global keybindings, like voice
     // Never affects event processing.
     gViewerInput.handleGlobalBindsKeyUp(key, mask);
+
+    if (gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI))
+    {
+        if (mRduiRuntime
+            && mRduiRuntime->dispatch({rdui::viewer::NativeKeyInput{key, mask, false, false}}).handled)
+            return true;
+    }
 
     // Let the inspect tool code check for ALT key to set LLToolSelectRect active instead LLToolCamera
     LLToolCompInspect * tool_inspectp = LLToolCompInspect::getInstance();
@@ -2458,6 +2568,15 @@ void LLViewerWindow::initBase()
 
     gMenuHolder = getRootView()->getChild<LLViewerMenuHolderGL>("Menu Holder");
     LLMenuGL::sMenuContainer = gMenuHolder;
+
+    mRduiRuntime = std::make_unique<rdui::viewer::Runtime>();
+    rdui::viewer::registerFloaterDemo(*mRduiRuntime);
+    mRduiRuntime->initialize();
+    mRduiRuntime->setVisibility(shouldShowAttachedRdui(), shouldShowDetachedRdui());
+    LLAppViewer::instance()->setOnLoginCompletedCallback([this]
+    {
+        if (mRduiRuntime) mRduiRuntime->restoreOpenFloaters();
+    });
 }
 
 void LLViewerWindow::initWorldUI()
@@ -2619,6 +2738,8 @@ void LLViewerWindow::initWorldUI()
 // Destroy the UI
 void LLViewerWindow::shutdownViews()
 {
+    mRduiRuntime.reset();
+
     // clean up warning logger
     RecordToChatConsole::getInstance()->stopRecorder();
     LL_INFOS() << "Warning logger is cleaned." << LL_ENDL ;
@@ -2965,6 +3086,11 @@ void LLViewerWindow::drawDebugText()
     gUIProgram.unbind();
 }
 
+void LLViewerWindow::updateRdui()
+{
+    if (mRduiRuntime) mRduiRuntime->idle();
+}
+
 void LLViewerWindow::draw()
 {
 
@@ -3079,6 +3205,8 @@ void LLViewerWindow::draw()
                 LLColor4(1, 1, 1, 0.4f),
                 LLFontGL::HCENTER, LLFontGL::TOP);
         }
+
+        if (mRduiRuntime) mRduiRuntime->frame(getWindowWidthScaled(), getWindowHeightScaled());
 
         LLUI::setScaleFactor(old_scale_factor);
     }
@@ -3457,6 +3585,14 @@ bool LLViewerWindow::handleKey(KEY key, MASK mask)
 
 bool LLViewerWindow::handleUnicodeChar(llwchar uni_char, MASK mask)
 {
+    if (gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI))
+    {
+        if (mRduiRuntime
+            && mRduiRuntime->dispatch({rdui::viewer::NativeCharacterInput{
+                static_cast<U32>(uni_char), mask}}).handled)
+            return true;
+    }
+
     // HACK:  We delay processing of return keys until they arrive as a Unicode char,
     // so that if you're typing chat text at low frame rate, we don't send the chat
     // until all keystrokes have been entered. JC
@@ -3502,6 +3638,16 @@ void LLViewerWindow::handleScrollWheel(LLScrollDelta delta)
     // Discrete consumers read delta.mClicks and are intentionally left untouched.
     static LLCachedControl<F32> scroll_sensitivity(gSavedSettings, "MouseWheelScrollSensitivity", 1.f);
     delta.mPrecise *= scroll_sensitivity;
+
+    if (gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI))
+    {
+        if (mRduiRuntime && mRduiRuntime->dispatch({rdui::viewer::NativeScrollInput{
+                mCurrentMousePoint.mX, mCurrentMousePoint.mY, 0.f, delta.mPrecise,
+                gKeyboard ? gKeyboard->currentMask(false) : MASK_NONE}}).handled)
+        {
+            return;
+        }
+    }
 
     LLMouseHandler* mouse_captor = gFocusMgr.getMouseCapture();
     if( mouse_captor )
@@ -3560,6 +3706,16 @@ void LLViewerWindow::handleScrollHWheel(LLScrollDelta delta)
 
     static LLCachedControl<F32> scroll_sensitivity(gSavedSettings, "MouseWheelScrollSensitivity", 1.f);
     delta.mPrecise *= scroll_sensitivity;
+
+    if (gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI))
+    {
+        if (mRduiRuntime && mRduiRuntime->dispatch({rdui::viewer::NativeScrollInput{
+                mCurrentMousePoint.mX, mCurrentMousePoint.mY, delta.mPrecise, 0.f,
+                gKeyboard ? gKeyboard->currentMask(false) : MASK_NONE}}).handled)
+        {
+            return;
+        }
+    }
 
     LLMouseHandler* mouse_captor = gFocusMgr.getMouseCapture();
     if (mouse_captor)
@@ -3733,7 +3889,10 @@ void LLViewerWindow::updateUI()
     }
 
     // use full window for world view when not rendering UI
-    bool world_view_uses_full_window = gAgentCamera.cameraMouselook() || !gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI);
+    const bool attached_rdui_visible = shouldShowAttachedRdui();
+    if (mRduiRuntime)
+        mRduiRuntime->setVisibility(attached_rdui_visible, shouldShowDetachedRdui());
+    bool world_view_uses_full_window = gAgentCamera.cameraMouselook() || !attached_rdui_visible;
     updateWorldViewRect(world_view_uses_full_window);
 
     LLView::sMouseHandlerMessage.clear();
@@ -3762,6 +3921,23 @@ void LLViewerWindow::updateUI()
     updateKeyboardFocus();
 
     bool handled = false;
+    bool rdui_hover_handled = false;
+    if (mRduiRuntime && attached_rdui_visible
+        && (mMouseInWindow || mRduiRuntime->hasPointerCapture()))
+    {
+        const rdui::viewer::NativeInputDispatchResult result =
+            mRduiRuntime->dispatch({rdui::viewer::NativePointerInput{
+                rdui::viewer::NativePointerPhase::Move, static_cast<F32>(x), static_cast<F32>(y),
+                rdui::viewer::NativePointerButton::None, mask, 1,
+                static_cast<F32>(mCurrentRawMouseDelta.mX) / mDisplayScale.mV[VX],
+                static_cast<F32>(mCurrentRawMouseDelta.mY) / mDisplayScale.mV[VY]}});
+        handled = result.handled;
+        rdui_hover_handled = result.handled;
+        if (result.cursor)
+        {
+            mWindow->setCursor(*result.cursor);
+        }
+    }
 
     LLUICtrl* top_ctrl = gFocusMgr.getTopCtrl();
     LLMouseHandler* mouse_captor = gFocusMgr.getMouseCapture();
@@ -3933,6 +4109,8 @@ void LLViewerWindow::updateUI()
         }
     }
 
+    if (rdui_hover_handled) mouse_hover_set.clear();
+
     typedef std::vector<LLHandle<LLView> > view_handle_list_t;
 
     // call onMouseEnter() on all views which contain the mouse cursor but did not before
@@ -3976,7 +4154,7 @@ void LLViewerWindow::updateUI()
     if (gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI))
     {
 
-        if( mouse_captor )
+        if( !handled && mouse_captor )
         {
             // Pass hover events to object capturing mouse events.
             S32 local_x;
@@ -3993,7 +4171,7 @@ void LLViewerWindow::updateUI()
                 LL_DEBUGS("UserInput") << "hover not handled by mouse captor" << LL_ENDL;
             }
         }
-        else
+        else if( !handled )
         {
             if (top_ctrl)
             {
@@ -4040,6 +4218,7 @@ void LLViewerWindow::updateUI()
         bool tool_tip_handled = false;
         std::string tool_tip_msg;
         if( handled
+            && !rdui_hover_handled
             && !mWindow->isCursorHidden())
         {
             LLRect screen_sticky_rect = mRootView->getLocalRect();
@@ -4225,6 +4404,8 @@ void LLViewerWindow::updateMouseDelta()
     S32 dx = lltrunc((F32) (mCurrentMousePoint.mX - mLastMousePoint.mX) * LLUI::getScaleFactor().mV[VX]);
     S32 dy = lltrunc((F32) (mCurrentMousePoint.mY - mLastMousePoint.mY) * LLUI::getScaleFactor().mV[VY]);
 #endif
+
+    mCurrentRawMouseDelta.set(dx, dy);
 
     //RN: fix for asynchronous notification of mouse leaving window not working
     LLCoordWindow mouse_pos;

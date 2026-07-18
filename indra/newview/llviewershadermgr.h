@@ -205,6 +205,7 @@ extern LLGLSLShader         gBloomCompositeProgram;
 
 //interface shaders
 extern LLGLSLShader         gHighlightProgram;
+extern LLGLSLShader         gRduiProgram;
 extern LLGLSLShader         gHighlightNormalProgram;
 extern LLGLSLShader         gHighlightSpecularProgram;
 

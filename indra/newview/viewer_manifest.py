@@ -76,6 +76,9 @@ class ViewerManifest(LLManifest):
             self.path("*.luau")
             self.path("*.yml")
 
+        with self.prefix(src_dst="skins"):
+            self.path("*/rdui")
+
         if self.is_packaging_viewer():
             with self.prefix(src_dst="app_settings"):
                 self.exclude("logcontrol.xml")

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<floater id="floater_demo"
+         title="floater_demo.title"
+         icon="search"
+         can_minimize="true"
+         can_resize="true">
+
+    <label id="status">floater_demo.status</label>
+
+    <button class="primary" on_click="press">
+        <icon name="search"/>
+        floater_demo.press
+    </button>
+
+    <field class="switch_demo">
+        <label>floater_demo.switch</label>
+        <switch checked="true" on_change="switch_changed"/>
+    </field>
+
+    <button class="compact" disabled="true"/>
+
+    <label id="language_heading">floater_demo.language</label>
+    <label id="active_language"/>
+
+    <field id="language_buttons">
+        <button id="previous_language" class="language previous" on_click="previous_language">floater_demo.previous</button>
+        <button id="next_language" class="language next" on_click="next_language">floater_demo.next</button>
+    </field>
+
+    <button class="reload" on_click="reload_resources">floater_demo.reload_now</button>
+
+    <field class="authoring">
+        <content><label>floater_demo.automatic_watching</label></content>
+        <switch id="authoring_mode" on_change="authoring_mode_changed"/>
+    </field>
+</floater>

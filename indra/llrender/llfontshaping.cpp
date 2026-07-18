@@ -1,6 +1,6 @@
 /**
  * @file llfontshaping.cpp
- * @brief HarfBuzz shaping for multi-codepoint emoji sequences.
+ * @brief FriBidi paragraph layout and HarfBuzz text shaping.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Alchemy Viewer Source Code
@@ -33,17 +33,22 @@
 #include <boost/functional/hash.hpp>
 #include <boost/unordered_map.hpp>
 
+#include <fribidi.h>
 #include <hb.h>
 
+#include <algorithm>
+#include <iterator>
 #include <list>
+#include <limits>
 #include <string>
 #include <string_view>
 
 namespace
 {
     // LRU cache for shaped runs. Keyed by the codepoint sequence plus the
-    // owning face — direction/script/language are fixed in shapeRun(), so
-    // they don't need to participate in the key. Clusters in the cached
+    // owning face — direction and script are derived deterministically from
+    // the codepoints, and language is fixed in shapeRun(), so they don't
+    // need to participate in the key. Clusters in the cached
     // glyphs are stored in *slice-local* coordinates (begin=0) and rebased
     // to original-wstr coords at copy-out time, so the same codepoint
     // sequence in different wstring positions can share an entry.
@@ -160,6 +165,7 @@ namespace
                        size_t                       sub_begin_in_slice,
                        size_t                       sub_end_in_slice,
                        hb_script_t                  script,
+                       hb_direction_t               direction,
                        std::vector<LLShapedGlyph>&  out_glyphs)
     {
         if (!face || sub_begin_in_slice >= sub_end_in_slice)
@@ -318,7 +324,10 @@ namespace
             // offset=0 so HB cluster values come back local to this sub-run;
             // we rebase below to the slice's coordinate system.
             hb_buffer_add_utf32(buf, in_cps, in_len, 0, in_len);
-            hb_buffer_set_direction(buf, HB_DIRECTION_LTR);
+            // FriBidi resolves the direction of this embedding-level run.
+            // HarfBuzz then performs contextual shaping and emits glyphs in
+            // visual order within the run while preserving logical clusters.
+            hb_buffer_set_direction(buf, direction);
             hb_buffer_set_script(buf, script);
             hb_buffer_set_language(buf, hb_language_get_default());
             hb_shape(hbf, buf, features, num_features);
@@ -478,8 +487,55 @@ namespace
         return root_face;
     }
 
+    struct BidiParagraph
+    {
+        std::vector<FriBidiLevel> levels;
+        std::vector<FriBidiStrIndex> logical_to_visual;
+        bool resolved = false;
+    };
+
+    BidiParagraph resolve_bidi(std::u32string_view slice)
+    {
+        BidiParagraph result;
+        const size_t n = slice.size();
+        result.levels.assign(n, 0);
+        result.logical_to_visual.resize(n);
+        for (size_t i = 0; i < n; ++i)
+            result.logical_to_visual[i] = static_cast<FriBidiStrIndex>(i);
+        if (n == 0 || n > static_cast<size_t>(std::numeric_limits<FriBidiStrIndex>::max()))
+            return result;
+
+        // LLWString is UTF-32, as is FriBidi, but copy rather than aliasing
+        // char32_t storage as FriBidiChar. This runs only on a shape-cache
+        // miss and keeps the C++ strict-aliasing contract intact.
+        std::vector<FriBidiChar> logical;
+        logical.reserve(n);
+        for (char32_t codepoint : slice)
+            logical.push_back(static_cast<FriBidiChar>(codepoint));
+
+        FriBidiParType base_direction = FRIBIDI_PAR_ON;
+        result.resolved = fribidi_log2vis(logical.data(), static_cast<FriBidiStrIndex>(n),
+                                          &base_direction, nullptr,
+                                          result.logical_to_visual.data(), nullptr,
+                                          result.levels.data()) != 0;
+        if (!result.resolved)
+        {
+            std::fill(result.levels.begin(), result.levels.end(), 0);
+            for (size_t i = 0; i < n; ++i)
+                result.logical_to_visual[i] = static_cast<FriBidiStrIndex>(i);
+        }
+        return result;
+    }
+
+    struct ShapedVisualRun
+    {
+        FriBidiStrIndex visual_start = 0;
+        std::vector<LLShapedGlyph> glyphs;
+    };
+
     // Itemize [begin, end) into contiguous sub-runs whose codepoints share
-    // both an owning face and a Unicode script. Within an emoji cluster
+    // an embedding level, owning face, and Unicode script. Within an emoji
+    // cluster
     // (per wstring_find_emoji_clusters) the whole cluster rides on one
     // face chosen by pick_cluster_face — that's what keeps a keycap like
     // 9️⃣ on the emoji face that can compose '9' + U+FE0F + U+20E3 into
@@ -491,7 +547,8 @@ namespace
     // (spaces, punctuation, VS selectors, ZWJ) inherit the surrounding
     // script and never trigger a boundary by themselves; this keeps
     // "Hello, world!" as one run with script LATIN rather than fragmenting
-    // at every comma.
+    // at every comma. Once shaped, FriBidi's logical-to-visual map orders the
+    // runs for painting; glyph clusters remain logical source indices.
     void shape_all_sub_runs(const LLFontFreetype* root_face,
                             std::u32string_view   slice,
                             std::vector<LLShapedGlyph>& out_glyphs)
@@ -501,6 +558,8 @@ namespace
             return;
 
         hb_unicode_funcs_t* uf = hb_unicode_funcs_get_default();
+        const BidiParagraph bidi = resolve_bidi(slice);
+        std::vector<ShapedVisualRun> shaped_runs;
 
         // Authoritative emoji cluster boundaries — the single source of truth
         // for "what counts as one emoji glyph in this slice" (see
@@ -511,6 +570,7 @@ namespace
 
         const LLFontFreetype* cur_face   = nullptr;
         hb_script_t           cur_script = HB_SCRIPT_INVALID;  // unknown until first non-neutral cp
+        FriBidiLevel          cur_level  = 0;
         size_t                cur_begin  = 0;
         // True when the current run is (or begins with) an emoji cluster.
         // Drives the keeper's decision to retain emoji extenders on cur_face
@@ -530,7 +590,18 @@ namespace
             // codepoints (e.g. a string of spaces); fall back to COMMON.
             const hb_script_t script = (cur_script == HB_SCRIPT_INVALID) ? HB_SCRIPT_COMMON
                                                                          : cur_script;
-            shape_sub_run(cur_face, root_face, slice, cur_begin, end_excl, script, out_glyphs);
+            const hb_direction_t direction = bidi.resolved
+                ? ((cur_level & 1) ? HB_DIRECTION_RTL : HB_DIRECTION_LTR)
+                : hb_script_get_horizontal_direction(script);
+
+            ShapedVisualRun run;
+            run.visual_start = bidi.logical_to_visual[cur_begin];
+            for (size_t k = cur_begin + 1; k < end_excl; ++k)
+                run.visual_start = std::min(run.visual_start, bidi.logical_to_visual[k]);
+            shape_sub_run(cur_face, root_face, slice, cur_begin, end_excl,
+                          script, direction, run.glyphs);
+            if (!run.glyphs.empty())
+                shaped_runs.push_back(std::move(run));
         };
 
         for (size_t i = 0; i < n; ++i)
@@ -586,6 +657,7 @@ namespace
                 cur_face  = cluster_face;
                 cur_begin = cb;
                 cur_script = cluster_script;
+                cur_level = bidi.levels[cb];
                 emit(ce);
                 cur_face = nullptr;
                 cur_script = HB_SCRIPT_INVALID;
@@ -607,6 +679,7 @@ namespace
             {
                 cur_face  = face;
                 cur_begin = i;
+                cur_level = bidi.levels[i];
                 cur_run_is_emoji = LLStringOps::isPictographBase(slice[i]);
                 set_cur_script_from(cp_script, is_neutral);
                 continue;
@@ -699,12 +772,14 @@ namespace
             const bool script_change = !is_neutral
                                        && cur_script != HB_SCRIPT_INVALID
                                        && cp_script != cur_script;
+            const bool level_change  = bidi.levels[i] != cur_level;
 
-            if (face_change || script_change)
+            if (face_change || script_change || level_change)
             {
                 emit(i);
                 cur_face  = face;
                 cur_begin = i;
+                cur_level = bidi.levels[i];
                 cur_run_is_emoji = LLStringOps::isPictographBase(slice[i]);
                 set_cur_script_from(cp_script, is_neutral);
             }
@@ -717,6 +792,20 @@ namespace
         }
         if (cur_face != nullptr)
             emit(n);
+
+        std::stable_sort(shaped_runs.begin(), shaped_runs.end(),
+            [](const ShapedVisualRun& left, const ShapedVisualRun& right)
+            {
+                return left.visual_start < right.visual_start;
+            });
+        size_t glyph_count = 0;
+        for (const ShapedVisualRun& run : shaped_runs)
+            glyph_count += run.glyphs.size();
+        out_glyphs.reserve(out_glyphs.size() + glyph_count);
+        for (ShapedVisualRun& run : shaped_runs)
+            out_glyphs.insert(out_glyphs.end(),
+                              std::make_move_iterator(run.glyphs.begin()),
+                              std::make_move_iterator(run.glyphs.end()));
     }
 }
 

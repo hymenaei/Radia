@@ -1,7 +1,7 @@
 /**
  * @file llfontshaping_test.cpp
- * @brief Unit tests for LLFontShaping — HarfBuzz wrapper, ZWJ ligature
- *        retry, VS-16 strip, monospace feature plans, LRU cache contract.
+ * @brief Unit tests for LLFontShaping — FriBidi paragraph layout, HarfBuzz
+ *        shaping, emoji handling, feature plans, and LRU cache contract.
  *
  * The bulk of the tests are pure-CPU: HB shaping itself doesn't touch
  * the atlas. The GL-backed kerning test at the bottom exercises
@@ -36,9 +36,11 @@
 #include <hb.h>
 #include <hb-ft.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdint>
 #include <cmath>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -1521,6 +1523,91 @@ namespace tut
                       post[0].face, b.get());
         ensure_not_equals("post-fallback glyph is real (not notdef)",
                           post[0].glyph_id, 0u);
+    }
+
+    // Arabic is stored in logical order but must be shaped right-to-left.
+    // HarfBuzz returns a visual glyph stream for RTL runs, reflected by
+    // descending source clusters. This pins both contextual Arabic shaping
+    // and the ordering contract consumed by LLFontGL::render.
+    template<> template<>
+    void llfontshaping_object::test<35>()
+    {
+        const std::string path = std::string(kFontDir) + "DejaVuSans.woff2";
+        if (!fileExists(path))
+            skip("DejaVuSans.woff2 not present");
+        LLPointer<LLFontFreetype> ft = loadFt(path);
+        ensure("DejaVuSans loaded", ft.notNull());
+
+        // U+0627 U+0636 U+063A U+0637: اضغط ("press").
+        LLWString text = wstr(0x0627, 0x0636, 0x063A, 0x0637);
+        std::vector<LLShapedGlyph> out;
+        LLFontShaping::shapeRun(ft, text, 0, text.size(), out);
+
+        ensure_equals("Arabic word produces one glyph per letter", out.size(), 4u);
+        ensure_equals("RTL visual stream starts at final logical letter", out.front().cluster, 3);
+        ensure_equals("RTL visual stream ends at first logical letter", out.back().cluster, 0);
+        for (const LLShapedGlyph& glyph : out)
+            ensure("Arabic glyph advance is positive", glyph.x_advance > 0.f);
+        for (size_t i = 1; i < out.size(); ++i)
+        {
+            ensure("Arabic clusters descend in visual order",
+                   out[i - 1].cluster > out[i].cluster);
+        }
+
+        LLWString isolated_ghain = wstr(0x063A);
+        std::vector<LLShapedGlyph> isolated;
+        LLFontShaping::shapeRun(ft, isolated_ghain, 0, isolated_ghain.size(), isolated);
+        ensure_equals("isolated Arabic letter produces one glyph", isolated.size(), 1u);
+        const auto joined_ghain = std::find_if(out.begin(), out.end(),
+            [](const LLShapedGlyph& glyph) { return glyph.cluster == 2; });
+        ensure("joined Arabic letter remains in shaped word", joined_ghain != out.end());
+        ensure_not_equals("Arabic medial form differs from isolated form",
+                          joined_ghain->glyph_id, isolated.front().glyph_id);
+    }
+
+    // Mixed Arabic/Latin title from the RDUI demo. The paragraph begins RTL,
+    // so its visual runs must be: Arabic suffix, Latin acronym, Arabic prefix.
+    // HarfBuzz alone shapes those runs but does not reorder them; FriBidi owns
+    // the paragraph order while clusters remain logical source positions.
+    template<> template<>
+    void llfontshaping_object::test<36>()
+    {
+        const std::string path = std::string(kFontDir) + "DejaVuSans.woff2";
+        if (!fileExists(path))
+            skip("DejaVuSans.woff2 not present");
+        LLPointer<LLFontFreetype> ft = loadFt(path);
+        ensure("DejaVuSans loaded", ft.notNull());
+
+        // "عرض RDUI التجريبي"
+        LLWString text = wstr(0x0639, 0x0631, 0x0636, ' ',
+                              'R', 'D', 'U', 'I', ' ',
+                              0x0627, 0x0644, 0x062A, 0x062C,
+                              0x0631, 0x064A, 0x0628, 0x064A);
+        std::vector<LLShapedGlyph> out;
+        LLFontShaping::shapeRun(ft, text, 0, text.size(), out);
+        ensure("mixed-direction title shaped", !out.empty());
+
+        auto visual_position = [&](S32 cluster)
+        {
+            const auto found = std::find_if(out.begin(), out.end(),
+                [cluster](const LLShapedGlyph& glyph) { return glyph.cluster == cluster; });
+            ensure(("cluster present: " + std::to_string(cluster)).c_str(), found != out.end());
+            return static_cast<size_t>(std::distance(out.begin(), found));
+        };
+
+        // Left-to-right screen order. The Arabic reader consumes it from the
+        // right edge, yielding the original logical phrase.
+        ensure("Arabic suffix is visually before embedded Latin",
+               visual_position(16) < visual_position(4));
+        ensure("embedded Latin is visually before Arabic prefix",
+               visual_position(7) < visual_position(2));
+        ensure("LTR acronym keeps its internal order",
+               visual_position(4) < visual_position(5)
+            && visual_position(5) < visual_position(6)
+            && visual_position(6) < visual_position(7));
+        ensure("RTL prefix keeps visual reverse-cluster order",
+               visual_position(2) < visual_position(1)
+            && visual_position(1) < visual_position(0));
     }
 
 #if LL_MESA_HEADLESS

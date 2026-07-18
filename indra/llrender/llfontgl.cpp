@@ -111,7 +111,8 @@ namespace
     };
 
     // Build the shape layout for `slice` against `root_face`. One
-    // all-encompassing range, shaped end-to-end through HarfBuzz. The
+    // all-encompassing range, itemized into BiDi embedding/script/face runs,
+    // reordered by FriBidi, and shaped through HarfBuzz. The
     // monospace feature plan in shape_sub_run (kern + ligatures off for
     // strict-mono, kern off only for ligatures-opt-in) preserves column
     // alignment without a separate codepoint partition. Empty slice or
@@ -1292,17 +1293,19 @@ S32 LLFontGL::maxDrawableChars(const llwchar* wchars, F32 max_pixels, S32 max_ch
     LLFontGlyphInfo* next_glyph = NULL;
 
     // Pre-shape the entire slice so advance accounts for GPOS pair-kerning
-    // and ligatures. The codepoint loop below uses a parallel walker
-    // (shape_idx) to map shaped advances onto codepoints — a ligature
-    // glyph spans multiple cps but its full advance fires on the cluster's
-    // start cp, so trailing cps of the cluster contribute zero.
+    // and ligatures. Project shaped advances onto logical codepoints before
+    // walking them: RTL glyph streams carry descending cluster indices, so a
+    // parallel glyph walker would incorrectly assign the whole run to its
+    // final logical codepoint. A ligature's full advance is attributed to
+    // its cluster start; trailing codepoints contribute zero.
     // shapeLine returns a const ref into the shape LRU; clusters come back
     // slice-local (relative to begin=0), which equals 0..measure_end here.
     // Keep the ref bound for the lifetime of the loop — no other shape*
     // calls fire below, so the LRU entry can't be evicted underneath us.
     static const std::vector<LLShapedGlyph> sEmptyShape;
     const std::vector<LLShapedGlyph>* shape_glyphs = &sEmptyShape;
-    size_t shape_idx = 0;
+    std::vector<F32> per_cp_advance;
+    std::vector<F32> per_cp_extent;
     if (max_chars > 0 && wchars[0])
     {
         S32 measure_end = 0;
@@ -1312,9 +1315,28 @@ S32 LLFontGL::maxDrawableChars(const llwchar* wchars, F32 max_pixels, S32 max_ch
         {
             LLWStringView slice(wchars, (size_t)measure_end);
             shape_glyphs = &LLFontShaping::shapeLine(mFontFreetype, slice, 0, (size_t)measure_end);
+            if (!shape_glyphs->empty())
+            {
+                per_cp_advance.assign((size_t)measure_end, 0.f);
+                per_cp_extent.assign((size_t)measure_end, 0.f);
+                for (const LLShapedGlyph& sg : *shape_glyphs)
+                {
+                    if (sg.cluster < 0 || sg.cluster >= measure_end)
+                        continue;
+                    per_cp_advance[(size_t)sg.cluster] += sg.x_advance;
+                    const LLFontGlyphInfo* sfgi = mFontFreetype->getGlyphInfoByIndex(
+                        sg.face, sg.glyph_id, EFontGlyphType::Unspecified);
+                    if (sfgi)
+                    {
+                        per_cp_extent[(size_t)sg.cluster] = llmax(
+                            per_cp_extent[(size_t)sg.cluster],
+                            (F32)(sfgi->mWidth + sfgi->mXBearing));
+                    }
+                }
+            }
         }
     }
-    const bool use_shaped = !shape_glyphs->empty();
+    const bool use_shaped = !per_cp_advance.empty();
     // shape_glyphs points into the shape LRU until the loop's last use.
     const size_t shape_gen = LLFontShaping::cacheMutationCount();
     (void)shape_gen;
@@ -1363,23 +1385,10 @@ S32 LLFontGL::maxDrawableChars(const llwchar* wchars, F32 max_pixels, S32 max_ch
 
         if (use_shaped)
         {
-            // Sum advances and the largest extent of any glyph whose cluster
-            // lands on this codepoint. Trailing codepoints of a multi-cp
-            // cluster (ligatures, ZWJ sequences) consume zero glyphs and
-            // pass through with cur_x unchanged.
-            F32 advance_this = 0.f;
-            F32 extent_this  = 0.f;
-            while (shape_idx < shape_glyphs->size()
-                   && (*shape_glyphs)[shape_idx].cluster <= i)
-            {
-                const auto& sg = (*shape_glyphs)[shape_idx];
-                advance_this += sg.x_advance;
-                const LLFontGlyphInfo* sfgi = mFontFreetype->getGlyphInfoByIndex(
-                    sg.face, sg.glyph_id, EFontGlyphType::Unspecified);
-                if (sfgi)
-                    extent_this = llmax(extent_this, (F32)(sfgi->mWidth + sfgi->mXBearing));
-                ++shape_idx;
-            }
+            // Trailing codepoints of a multi-cp cluster (ligatures, ZWJ
+            // sequences) have zero projected advance.
+            const F32 advance_this = per_cp_advance[(size_t)i];
+            const F32 extent_this  = per_cp_extent[(size_t)i];
             width_padding = llmax(0.f,
                                   width_padding - advance_this,
                                   extent_this - advance_this);
@@ -2378,4 +2387,3 @@ void LLFontGL::drawGlyphForeground(S32& glyph_count, LLVector4a* vertex_out, LLV
         glyph_count++;
     }
 }
-

@@ -119,6 +119,7 @@ LLGLSLShader        gUnderWaterProgram;
 
 //interface shaders
 LLGLSLShader        gHighlightProgram;
+LLGLSLShader        gRduiProgram;
 LLGLSLShader        gSkinnedHighlightProgram;
 LLGLSLShader        gHighlightNormalProgram;
 LLGLSLShader        gHighlightSpecularProgram;
@@ -3684,6 +3685,16 @@ bool LLViewerShaderMgr::loadShadersInterface()
 
     if (success)
     {
+        gRduiProgram.mName = "Radia UI Shape Shader";
+        gRduiProgram.mShaderFiles.clear();
+        gRduiProgram.mShaderFiles.push_back(make_pair("interface/rduiV.glsl", GL_VERTEX_SHADER));
+        gRduiProgram.mShaderFiles.push_back(make_pair("interface/rduiF.glsl", GL_FRAGMENT_SHADER));
+        gRduiProgram.mShaderLevel = mShaderLevel[SHADER_INTERFACE];
+        success = gRduiProgram.createShader();
+    }
+
+    if (success)
+    {
         gPathfindingProgram.mName = "Pathfinding Shader";
         gPathfindingProgram.mShaderFiles.clear();
         gPathfindingProgram.mShaderFiles.push_back(make_pair("interface/pathfindingV.glsl", GL_VERTEX_SHADER));
@@ -4029,4 +4040,3 @@ LLViewerShaderMgr::shader_iter LLViewerShaderMgr::endShaders() const
 {
     return mShaderList.end();
 }
-

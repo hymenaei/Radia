@@ -1,0 +1,208 @@
+#ifndef LL_RDUI_BINDER_H
+#define LL_RDUI_BINDER_H
+
+#include "rduidiagnostic.h"
+#include "rduiwidget.h"
+#include <functional>
+#include <map>
+#include <memory>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace rdui
+{
+    class Binder;
+
+    class Binding
+    {
+        friend class Binder;
+
+        public:
+            Binding() = default;
+            Binding(const Binding&) = delete;
+            Binding& operator=(const Binding&) = delete;
+            Binding(Binding&&) noexcept = default;
+            Binding& operator=(Binding&&) noexcept = default;
+
+            explicit operator bool() const { return !mHandlers.empty(); }
+            void reset() { mHandlers.clear(); }
+
+        private:
+            std::vector<std::shared_ptr<detail::ActionHandler>> mHandlers;
+    };
+
+    class PreparedBinding
+    {
+        friend class Binder;
+
+        public:
+            PreparedBinding();
+            ~PreparedBinding();
+            PreparedBinding(PreparedBinding&&) noexcept;
+            PreparedBinding& operator=(PreparedBinding&&) noexcept;
+
+            PreparedBinding(const PreparedBinding&) = delete;
+            PreparedBinding& operator=(const PreparedBinding&) = delete;
+
+            explicit operator bool() const { return mBinder != nullptr; }
+            Binding commit();
+
+        private:
+            std::unique_ptr<Binder> mBinder;
+    };
+
+    struct BindingResult : DiagnosticResult
+    {
+        bool ok() const { return !hasErrors(); }
+        Binding binding;
+    };
+
+    struct PreparedBindingResult : DiagnosticResult
+    {
+        bool ok() const { return !hasErrors() && static_cast<bool>(binding); }
+        PreparedBinding binding;
+    };
+
+    class Binder
+    {
+        public:
+            explicit Binder(Widget& root) : mRoot(&root) {}
+
+            Binder(const Binder&) = delete;
+            Binder& operator=(const Binder&) = delete;
+
+            template<typename WidgetT>
+            void require(std::string id, WidgetRef<WidgetT>& output)
+            {
+                Pending pending;
+                pending.id = std::move(id);
+                pending.expected_type = WidgetT::ELEMENT;
+                pending.accepts = [](Widget* widget) { return dynamic_cast<WidgetT*>(widget) != nullptr; };
+                pending.commit = [&output](Widget* widget) { output.set(static_cast<WidgetT*>(widget)); };
+                mPending.push_back(std::move(pending));
+            }
+
+            // Action registrations are optional capabilities of a layout:
+            // matching declarations are bound, while an absent declaration is valid.
+            template<typename Callback>
+            void onClick(std::string action, Callback callback)
+            {
+                on<ClickActionEvent>(ActionEventKind::Click, std::move(action), std::move(callback));
+            }
+
+            template<typename Callback>
+            void onDoubleClick(std::string action, Callback callback)
+            {
+                on<MouseActionEvent>(ActionEventKind::DoubleClick, std::move(action), std::move(callback));
+            }
+
+            template<typename Callback>
+            void onChange(std::string action, Callback callback)
+            {
+                on<ChangeActionEvent>(ActionEventKind::Change, std::move(action), std::move(callback));
+            }
+
+            template<typename Callback>
+            void onMouseDown(std::string action, Callback callback)
+            {
+                on<MouseActionEvent>(ActionEventKind::MouseDown, std::move(action), std::move(callback));
+            }
+
+            template<typename Callback>
+            void onMouseUp(std::string action, Callback callback)
+            {
+                on<MouseActionEvent>(ActionEventKind::MouseUp, std::move(action), std::move(callback));
+            }
+
+            template<typename Callback>
+            void onMouseMove(std::string action, Callback callback)
+            {
+                on<MouseActionEvent>(ActionEventKind::MouseMove, std::move(action), std::move(callback));
+            }
+
+            template<typename Callback>
+            void onLongClick(std::string action, Callback callback)
+            {
+                on<LongClickActionEvent>(ActionEventKind::LongClick, std::move(action), std::move(callback));
+            }
+
+            template<typename Callback>
+            void onContextMenu(std::string action, Callback callback)
+            {
+                on<MouseActionEvent>(ActionEventKind::ContextMenu, std::move(action), std::move(callback));
+            }
+
+            template<typename Callback>
+            void scope(std::string id, Callback callback)
+            {
+                static_assert(std::is_invocable_v<Callback, Binder&>, "Scope callback must accept a Binder reference.");
+
+                auto binder = std::unique_ptr<Binder>(new Binder());
+                callback(*binder);
+                mPendingScopes.push_back({std::move(id), std::move(binder)});
+            }
+
+            BindingResult finish();
+            PreparedBindingResult prepare();
+
+        private:
+            struct Pending
+            {
+                std::string id;
+                const char* expected_type = nullptr;
+                std::function<bool(Widget*)> accepts;
+                std::function<void(Widget*)> commit;
+                Widget* resolved = nullptr;
+            };
+
+            struct PendingAction
+            {
+                std::string name;
+                ActionEventKind kind;
+                std::shared_ptr<detail::ActionHandler> handler;
+            };
+
+            struct PendingScope
+            {
+                std::string id;
+                std::unique_ptr<Binder> binder;
+                Widget* resolved = nullptr;
+            };
+
+            Binder() = default;
+            Binder(Binder&&) noexcept = default;
+            Binder& operator=(Binder&&) noexcept = default;
+
+            template<typename EventT, typename Callback>
+            void on(ActionEventKind kind, std::string action, Callback callback)
+            {
+                using CallbackT = std::decay_t<Callback>;
+                static_assert(std::is_invocable_v<CallbackT, const EventT&> || std::is_invocable_v<CallbackT>,
+                              "Action callback must accept its typed event or no arguments.");
+
+                auto handler = std::make_shared<detail::ActionHandler>();
+                handler->kind = kind;
+                handler->invoke = [callback = CallbackT(std::move(callback))](const ActionEvent& event) mutable
+                {
+                    if constexpr (std::is_invocable_v<CallbackT, const EventT&>) callback(static_cast<const EventT&>(event));
+                    else callback();
+                };
+                mPendingActions.push_back({std::move(action), kind, std::move(handler)});
+            }
+
+            void validate(Widget& root, DiagnosticResult& result);
+            void commit(Widget& root, Binding& binding);
+
+            Widget* mRoot = nullptr;
+            std::vector<Pending> mPending;
+            std::vector<PendingAction> mPendingActions;
+            std::vector<PendingScope> mPendingScopes;
+            bool mFinished = false;
+
+            friend class PreparedBinding;
+    };
+}
+
+#endif // LL_RDUI_BINDER_H

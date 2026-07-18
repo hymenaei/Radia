@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<localizations default="en">
+    <localization id="en" lang="English" direction="ltr">
+        <string id="floater_demo.title">RDUI Demo</string>
+        <string id="floater_demo.status">Ready</string>
+        <string id="floater_demo.press">Press</string>
+        <string id="floater_demo.clicked">Button clicked; event consumed</string>
+        <string id="floater_demo.switch_on">Switch on</string>
+        <string id="floater_demo.switch_off">Switch off</string>
+        <string id="floater_demo.switch">Demo switch</string>
+        <string id="floater_demo.disabled">Disabled example</string>
+        <string id="floater_demo.language">Language</string>
+        <string id="floater_demo.previous">Previous</string>
+        <string id="floater_demo.next">Next</string>
+        <string id="floater_demo.reload_now">Reload now</string>
+        <string id="floater_demo.automatic_watching">Automatic watching</string>
+        <string id="floater_demo.reload_succeeded">Reload complete</string>
+        <string id="floater_demo.reload_failed">Reload failed; last valid UI kept</string>
+    </localization>
+    <localization id="pt" lang="Português" direction="ltr">
+        <string id="floater_demo.title">RDUI Demo</string>
+        <string id="floater_demo.status">Pronto</string>
+        <string id="floater_demo.press">Pressione</string>
+        <string id="floater_demo.clicked">Botão pressionado; evento consumido</string>
+        <string id="floater_demo.switch_on">Interruptor ligado</string>
+        <string id="floater_demo.switch_off">Interruptor desligado</string>
+        <string id="floater_demo.switch">Interruptor de demonstração</string>
+        <string id="floater_demo.disabled">Exemplo desativado</string>
+        <string id="floater_demo.language">Idioma</string>
+        <string id="floater_demo.previous">Anterior</string>
+        <string id="floater_demo.next">Seguinte</string>
+        <string id="floater_demo.reload_now">Recarregar agora</string>
+        <string id="floater_demo.automatic_watching">Monitorização automática</string>
+        <string id="floater_demo.reload_succeeded">Recarregamento concluído</string>
+        <string id="floater_demo.reload_failed">Falha ao recarregar; a última interface válida foi mantida</string>
+    </localization>
+    <localization id="ar" lang="العربية" direction="rtl">
+        <string id="floater_demo.title">عرض RDUI التجريبي</string>
+        <string id="floater_demo.status">جاهز</string>
+        <string id="floater_demo.press">اضغط</string>
+        <string id="floater_demo.clicked">تم النقر على الزر؛ تمت معالجة الحدث</string>
+        <string id="floater_demo.switch_on">المفتاح مفعّل</string>
+        <string id="floater_demo.switch_off">المفتاح متوقف</string>
+        <string id="floater_demo.switch">مفتاح تجريبي</string>
+        <string id="floater_demo.disabled">مثال معطّل</string>
+        <string id="floater_demo.language">اللغة</string>
+        <string id="floater_demo.previous">السابق</string>
+        <string id="floater_demo.next">التالي</string>
+        <string id="floater_demo.reload_now">إعادة التحميل الآن</string>
+        <string id="floater_demo.automatic_watching">المراقبة التلقائية</string>
+        <string id="floater_demo.reload_succeeded">اكتملت إعادة التحميل</string>
+        <string id="floater_demo.reload_failed">فشلت إعادة التحميل؛ تم الاحتفاظ بآخر واجهة صالحة</string>
+    </localization>
+</localizations>

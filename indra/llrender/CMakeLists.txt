@@ -76,6 +76,7 @@ if (BUILD_HEADLESS)
           llfilesystem
           llwindowheadless
           ll::freetype
+          ll::fribidi
           ll::harfbuzz
           ll::plutosvg
           ll::glext
@@ -98,6 +99,7 @@ target_link_libraries(llrender
         llxml
         llwindow
         ll::freetype
+        ll::fribidi
         ll::harfbuzz
         ll::plutosvg
         ll::glext
@@ -116,7 +118,7 @@ endif()
 
 if (BUILD_TESTING)
   # llrender pulls in llcommon / llimage / llmath / llfilesystem / llxml /
-  # llwindow + ll::freetype / ll::harfbuzz / ll::plutosvg / ll::glext via
+  # llwindow + ll::freetype / ll::fribidi / ll::harfbuzz / ll::plutosvg / ll::glext via
   # its own target_link_libraries; transitive linking propagates them to
   # consumers, so listing llrender alone is enough.
   #

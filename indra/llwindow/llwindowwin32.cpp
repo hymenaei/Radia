@@ -2149,6 +2149,7 @@ void LLWindowWin32::initCursors()
 
     HMODULE module = GetModuleHandle(NULL);
     mCursor[ UI_CURSOR_TOOLGRAB ]   = LoadCursor(module, TEXT("TOOLGRAB"));
+    mCursor[ UI_CURSOR_TOOLGRABBING ] = LoadCursor(module, TEXT("TOOLGRABBING"));
     mCursor[ UI_CURSOR_TOOLLAND ]   = LoadCursor(module, TEXT("TOOLLAND"));
     mCursor[ UI_CURSOR_TOOLFOCUS ]  = LoadCursor(module, TEXT("TOOLFOCUS"));
     mCursor[ UI_CURSOR_TOOLCREATE ] = LoadCursor(module, TEXT("TOOLCREATE"));
@@ -2224,11 +2225,13 @@ ECursorType LLWindowWin32::getCursor() const
 void LLWindowWin32::captureMouse()
 {
     SetCapture(mWindowHandle);
+    mOwnsMouseCapture = GetCapture() == mWindowHandle;
 }
 
 void LLWindowWin32::releaseMouse()
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_WIN32;
+    mOwnsMouseCapture = false;
     ReleaseCapture();
 }
 
@@ -3094,6 +3097,16 @@ LRESULT CALLBACK LLWindowWin32::mainWindowProc(HWND h_wnd, UINT u_msg, WPARAM w_
         {
             LL_PROFILE_ZONE_NAMED_CATEGORY_WIN32("mwp - WM_KILLFOCUS");
             WINDOW_IMP_POST(window_imp->mCallbacks->handleFocusLost(window_imp));
+            return 0;
+        }
+
+        case WM_CAPTURECHANGED:
+        {
+            if (window_imp->mOwnsMouseCapture)
+            {
+                window_imp->mOwnsMouseCapture = false;
+                WINDOW_IMP_POST(window_imp->mCallbacks->handleMouseCaptureLost(window_imp));
+            }
             return 0;
         }
 

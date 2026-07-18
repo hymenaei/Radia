@@ -902,6 +902,16 @@ set(viewer_SOURCE_FILES
     lutcube.cpp
     noise.cpp
     pipeline.cpp
+    rduidetachedfloatermanager.cpp
+    rduifloaterdocumentmanager.cpp
+    rduifloaterplacementstore.cpp
+    rduiinputbridge.cpp
+    rduinativewindow.cpp
+    rduiskinreloadcoordinator.cpp
+    rduiskinresolver.cpp
+    rduiskinresources.cpp
+    rduiruntime.cpp
+    rdfloaterdemo.cpp
     rlvactions.cpp
     rlvenvironment.cpp
     rlvcommon.cpp
@@ -917,6 +927,7 @@ set(viewer_SOURCE_FILES
 
 set(viewer_HEADER_FILES
     ViewerInstall.cmake
+    rduinativewindow.h
     ao.h
     aoengine.h
     aoset.h
@@ -1667,6 +1678,16 @@ set(viewer_HEADER_FILES
     lutcube.h
     noise.h
     pipeline.h
+    rduidetachedfloatermanager.h
+    rduifloaterdocumentmanager.h
+    rduifloaterplacementstore.h
+    rduiinputbridge.h
+    rduinativeinput.h
+    rduiskinreloadcoordinator.h
+    rduiskinresolver.h
+    rduiskinresources.h
+    rduiruntime.h
+    rdfloaterdemo.h
     rlvactions.h
     rlvcommon.h
     rlvdefines.h
@@ -1867,6 +1888,7 @@ set(viewer_APPSETTINGS_FILES
     app_settings/logcontrol.xml
     app_settings/settings.xml
     app_settings/settings_alchemy.xml
+    app_settings/settings_radia.xml
     app_settings/settings_crash_behavior.xml
     app_settings/settings_files.xml
     app_settings/settings_per_account.xml
@@ -1931,6 +1953,20 @@ add_executable(${VIEWER_BINARY_NAME}
     ${viewer_SOURCE_FILES}
     )
 
+# Development viewers load shaders from the configuration staging directory.
+# Keep that runtime copy current even when only a HEADER_FILE_ONLY shader source
+# changes and the viewer binary itself does not need to relink.
+if (WINDOWS)
+  add_custom_target(copy_viewer_shaders ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
+      "${CMAKE_CURRENT_SOURCE_DIR}/app_settings/shaders"
+      "${VIEWER_STAGING_DIR}/app_settings/shaders"
+    DEPENDS ${viewer_SHADER_FILES}
+    COMMENT "Staging viewer shaders"
+    )
+  add_dependencies(${VIEWER_BINARY_NAME} copy_viewer_shaders)
+endif ()
+
 check_message_template(${VIEWER_BINARY_NAME})
 
 target_include_directories(${VIEWER_BINARY_NAME} PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
@@ -1994,6 +2030,7 @@ target_link_libraries(${VIEWER_BINARY_NAME}
         ll::tinygltf
         ll::tinyexr
         ll::minizip
+        rdui
         )
 
 if (TARGET ll::velopack)
@@ -2381,9 +2418,31 @@ if (BUILD_TESTING)
 #    llremoteparcelrequest.cpp
     llviewerhelputil.cpp
     llversioninfo.cpp
+    rduidetachedfloatermanager.cpp
+    rduifloaterdocumentmanager.cpp
+    rduifloaterplacementstore.cpp
+    rduiinputbridge.cpp
+    rduiskinreloadcoordinator.cpp
+    rduiskinresolver.cpp
 #    llvocache.cpp
     llworldmap.cpp
     llworldmipmap.cpp
+  )
+
+  set_source_files_properties(
+    rduidetachedfloatermanager.cpp
+    rduifloaterdocumentmanager.cpp
+    rduiinputbridge.cpp
+    rduiskinreloadcoordinator.cpp
+    rduiskinresolver.cpp
+    PROPERTIES
+    LL_TEST_ADDITIONAL_PROJECTS rdui
+  )
+
+  set_source_files_properties(
+    rduidetachedfloatermanager.cpp
+    PROPERTIES
+    LL_TEST_ADDITIONAL_SOURCE_FILES rduifloaterplacementstore.cpp
   )
 
   set_source_files_properties(

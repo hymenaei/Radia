@@ -51,6 +51,12 @@
 #include <boost/signals2.hpp>
 
 #include <functional>
+#include <memory>
+
+namespace rdui::viewer
+{
+    class Runtime;
+}
 
 class LLView;
 class LLViewerObject;
@@ -227,6 +233,7 @@ public:
     /*virtual*/ void handleResize(LLWindow *window,  S32 x,  S32 y);
     /*virtual*/ void handleFocus(LLWindow *window);
     /*virtual*/ void handleFocusLost(LLWindow *window);
+    /*virtual*/ void handleMouseCaptureLost(LLWindow *window);
     /*virtual*/ bool handleActivate(LLWindow *window, bool activated);
     /*virtual*/ bool handleActivateApp(LLWindow *window, bool activating);
     /*virtual*/ void handleMenuSelect(LLWindow *window,  S32 menu_item);
@@ -368,6 +375,7 @@ public:
     void            sendShapeToSim();
 
     void            draw();
+    void            updateRdui();
     void            updateDebugText();
     void            drawDebugText();
 
@@ -474,6 +482,7 @@ public:
 
     F32             getWorldViewAspectRatio() const;
     const LLVector2& getDisplayScale() const { return mDisplayScale; }
+    rdui::viewer::Runtime* getRduiRuntime() const { return mRduiRuntime.get(); }
     void            calcDisplayScale();
     static LLRect   calcScaledRect(const LLRect & rect, const LLVector2& display_scale);
 
@@ -499,6 +508,7 @@ private:
 
 private:
     LLWindow*       mWindow;                        // graphical window object
+    std::unique_ptr<rdui::viewer::Runtime> mRduiRuntime;
     bool            mActive;
     bool            mUIVisible;
 
@@ -523,6 +533,7 @@ private:
     LLCoordGL       mCurrentMousePoint;         // last mouse position in GL coords
     LLCoordGL       mLastMousePoint;        // Mouse point at last frame.
     LLCoordGL       mCurrentMouseDelta;     //amount mouse moved this frame
+    LLCoordGL       mCurrentRawMouseDelta;  //unsmoothed device motion for exact UI gestures
     bool            mLeftMouseDown;
     bool            mMiddleMouseDown;
     bool            mRightMouseDown;

@@ -1,6 +1,6 @@
 /**
  * @file llfontshaping.h
- * @brief HarfBuzz shaping for multi-codepoint emoji sequences.
+ * @brief FriBidi paragraph layout and HarfBuzz text shaping.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Alchemy Viewer Source Code
@@ -48,13 +48,14 @@ struct LLShapedGlyph
 namespace LLFontShaping
 {
     // Shape wstr[begin..end) using `root_face`'s fallback chain to pick a
-    // single owning face for the whole run. Produces glyphs laid out LTR in
-    // common script — the minimum setup needed for ZWJ families, VS15/16,
-    // skin-tone modifiers, regional-indicator flag pairs, keycap sequences
-    // and tag subdivision flags. General BiDi and script-aware shaping are
-    // deliberately out of scope here, and HarfBuzz pre/post-context is not
-    // populated at face/script split boundaries — Arabic init/medi/fina
-    // forms across a split won't fire correctly.
+    // single owning face for the whole run. Each script sub-run uses its
+    // resolved embedding direction. FriBidi reorders those runs according to
+    // the Unicode Bidirectional Algorithm, while HarfBuzz supplies contextual
+    // shaping and visual glyph order inside each run. Logical source clusters
+    // are preserved for hit-testing and measurement. This also handles ZWJ
+    // families, VS15/16, skin-tone modifiers, regional-indicator flag pairs,
+    // keycap sequences and tag subdivision flags. HarfBuzz pre/post-context
+    // is not populated at face/script split boundaries.
     //
     // Results are cached behind a bounded LRU keyed by (codepoints, face),
     // so repeated render/width/hit-test calls on the same text do not pay

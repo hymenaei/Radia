@@ -2,7 +2,7 @@
 #define LL_RDUI_PAINT_CONTEXT_H
 
 #include "rduistyle.h"
-#include "rduitext.h"
+#include "rduitextmetrics.h"
 #include <string>
 
 namespace rdui

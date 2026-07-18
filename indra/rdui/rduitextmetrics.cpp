@@ -1,5 +1,5 @@
 #include "linden_common.h"
-#include "rduitext.h"
+#include "rduitextmetrics.h"
 #include "llstring.h"
 #include "rduistyle.h"
 #include <algorithm>

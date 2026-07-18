@@ -49,7 +49,7 @@ namespace rdui
         mLabel.set(nullptr);
     }
 
-    WidgetContract detail::WidgetContractRegistry::button()
+    WidgetContract detail::buttonContract()
     {
         return defineWidget<Button>(Button::ELEMENT)
             .actions({

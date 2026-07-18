@@ -5,10 +5,12 @@
 
 namespace rdui
 {
+    struct WidgetContract;
+    namespace detail { WidgetContract iconContract(); }
 
     class Icon : public Widget
     {
-        friend class detail::WidgetContractRegistry;
+        friend WidgetContract detail::iconContract();
         public:
             static constexpr const char* ELEMENT = "icon";
 

@@ -4,6 +4,7 @@
 #include "rduidiagnostic.h"
 #include "rduilayoutdocument.h"
 #include "rduilocalization.h"
+#include "rduischema.h"
 #include "rduiviewresult.h"
 #include <cstdint>
 #include <functional>
@@ -308,7 +309,7 @@ namespace rdui
                     };
                 }
                 for (const ChildContainer& container : mChildContainers)
-                    mContract.part_attributes.emplace(container.name, container.attributes);
+                    mContract.part_attributes.emplace(schemaNameKey(container.name), container.attributes);
                 if (!mChildContainers.empty())
                 {
                     mContract.child_container = [containers = std::move(mChildContainers)](
@@ -317,7 +318,7 @@ namespace rdui
                     {
                         for (const ChildContainer& container : containers)
                         {
-                            if (container.name != child.name()) continue;
+                            if (schemaNameKey(container.name) != schemaNameKey(child.name())) continue;
                             return container.claim(child, static_cast<WidgetT&>(widget), result, source);
                         }
                         return std::nullopt;
@@ -348,7 +349,6 @@ namespace rdui
         return WidgetContractBuilder<WidgetT>(std::move(element));
     }
 
-    const std::unordered_map<std::string, WidgetContract>& builtInWidgetContracts();
     const WidgetContract* findWidgetContract(const std::string& element);
     const CompositePartContract* findCompositePartContract(const WidgetContract& widget,
                                                            const std::vector<std::string>& parts);
@@ -357,20 +357,6 @@ namespace rdui
     const char* actionAttribute(ActionEventKind kind);
     namespace detail
     {
-        class WidgetContractRegistry
-        {
-            public:
-                static WidgetContract button();
-                static WidgetContract content();
-                static WidgetContract description();
-                static WidgetContract field();
-                static WidgetContract floater();
-                static WidgetContract icon();
-                static WidgetContract label();
-                static WidgetContract panel();
-                static WidgetContract toggleSwitch();
-        };
-
         class WidgetCompilerAccess
         {
             public:

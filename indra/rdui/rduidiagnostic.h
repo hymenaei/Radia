@@ -2,6 +2,7 @@
 #define LL_RDUI_DIAGNOSTIC_H
 
 #include <cstddef>
+#include <iterator>
 #include <string>
 #include <utility>
 #include <vector>
@@ -42,6 +43,16 @@ namespace rdui
         std::vector<Diagnostic> errors;
 
         bool hasErrors() const { return !errors.empty(); }
+
+        void append(DiagnosticResult&& source)
+        {
+            warnings.insert(warnings.end(),
+                            std::make_move_iterator(source.warnings.begin()),
+                            std::make_move_iterator(source.warnings.end()));
+            errors.insert(errors.end(),
+                          std::make_move_iterator(source.errors.begin()),
+                          std::make_move_iterator(source.errors.end()));
+        }
 
         void warning(std::string code, std::string message, std::string source = {}, std::size_t line = 0, std::size_t column = 0)
         {

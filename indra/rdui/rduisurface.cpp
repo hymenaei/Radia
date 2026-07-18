@@ -5,7 +5,7 @@
 #include "rduifloaterresize.h"
 #include "rduipaintcontext.h"
 #include "rduisystem.h"
-#include "rduitext.h"
+#include "rduitextmetrics.h"
 #include <algorithm>
 #include <iterator>
 #include <vector>

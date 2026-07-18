@@ -4,7 +4,7 @@
 #include "rduiskincompiler.h"
 #include "rduisurface.h"
 #include "rduisystem.h"
-#include "rduitext.h"
+#include "rduitextmetrics.h"
 #include <utility>
 
 namespace tut
@@ -116,8 +116,8 @@ namespace tut
     void rduisystem_object::test<4>()
     {
         rdui::ResourceSnapshot snapshot = skinSnapshot({}, "icon { size: 16px; }");
-        snapshot.add("known.xml", "<icon name=\"actions/search\"/>");
-        snapshot.add("missing.xml", "<icon name=\"actions/missing\"/>");
+        snapshot.add("known.xml", "<icon source=\"actions/search\"/>");
+        snapshot.add("missing.xml", "<icon source=\"actions/missing\"/>");
         snapshot.add("resources/icons/actions/search.svg", "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0 L10 10\"/></svg>");
 
         const rdui::SkinGenerationPrepareResult rejected = rdui::SkinCompiler().prepare(std::move(snapshot));

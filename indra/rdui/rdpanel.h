@@ -5,10 +5,12 @@
 
 namespace rdui
 {
+    struct WidgetContract;
+    namespace detail { WidgetContract panelContract(); }
 
     class Panel : public Widget
     {
-        friend class detail::WidgetContractRegistry;
+        friend WidgetContract detail::panelContract();
         public:
             static constexpr const char* ELEMENT = "panel";
 

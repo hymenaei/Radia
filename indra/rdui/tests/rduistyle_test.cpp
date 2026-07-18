@@ -801,4 +801,24 @@ namespace tut
         ensure_equals("failed imports preserve live stylesheet",
                       stylesheet.resolve("panel", "", {}, 0).width.pixels(), 44.f);
     }
+
+    template<> template<>
+    void rduistyle_object::test<33>()
+    {
+        rdui::StyleSheet stylesheet;
+        ensure("RSL type selector lookup is ASCII case-insensitive",
+               stylesheet.loadCss("BuTtOn { width: 23px; }").ok());
+        ensure_equals("RSL stores the canonical Widget spelling for matching",
+                      stylesheet.resolve("button", "", {}, 0).width.pixels(), 23.f);
+
+        const auto invalid_id = stylesheet.loadCss("button#bad_id { width: 1px; }");
+        ensure("RSL rejects non-kebab Widget IDs", !invalid_id.ok());
+        ensure_equals("RSL invalid identifier diagnostic is stable", invalid_id.errors.front().code,
+                      std::string("stylesheet.selector.identifier_invalid"));
+
+        const auto invalid_part = stylesheet.loadCss("floater::Header { width: 1px; }");
+        ensure("RSL rejects non-kebab Part names", !invalid_part.ok());
+        ensure_equals("RSL invalid Part diagnostic is stable", invalid_part.errors.front().code,
+                      std::string("stylesheet.selector.part_invalid"));
+    }
 }

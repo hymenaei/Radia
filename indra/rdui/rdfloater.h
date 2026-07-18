@@ -12,11 +12,13 @@ namespace rdui
     class Icon;
     class Label;
     class Panel;
+    struct WidgetContract;
+    namespace detail { WidgetContract floaterContract(); }
 
     class Floater : public Widget
     {
         friend class Surface;
-        friend class detail::WidgetContractRegistry;
+        friend WidgetContract detail::floaterContract();
 
         public:
             static constexpr const char* ELEMENT = "floater";

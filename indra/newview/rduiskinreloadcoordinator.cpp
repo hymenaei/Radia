@@ -8,7 +8,6 @@
 #include "rduisystem.h"
 
 #include <algorithm>
-#include <iterator>
 #include <utility>
 
 namespace rdui::viewer
@@ -22,16 +21,6 @@ namespace rdui::viewer
         {
             return left.resources() == right.resources()
                 && left.layeredResources() == right.layeredResources();
-        }
-
-        void appendDiagnostics(DiagnosticResult& destination, DiagnosticResult&& source)
-        {
-            destination.warnings.insert(destination.warnings.end(),
-                                        std::make_move_iterator(source.warnings.begin()),
-                                        std::make_move_iterator(source.warnings.end()));
-            destination.errors.insert(destination.errors.end(),
-                                      std::make_move_iterator(source.errors.begin()),
-                                      std::make_move_iterator(source.errors.end()));
         }
 
         struct PendingDocument
@@ -163,7 +152,7 @@ namespace rdui::viewer
                 }
 
                 const bool capture_ok = captured.ok();
-                appendDiagnostics(result, std::move(captured));
+                result.append(std::move(captured));
                 if (!capture_ok)
                 {
                     result.generation = mSystem.generation();
@@ -172,7 +161,7 @@ namespace rdui::viewer
 
                 SkinGenerationPrepareResult prepared = mCompiler.prepare(std::move(captured.snapshot));
                 const bool generation_ok = prepared.ok();
-                appendDiagnostics(result, std::move(prepared));
+                result.append(std::move(prepared));
                 if (!generation_ok)
                 {
                     result.generation = mSystem.generation();
@@ -190,7 +179,7 @@ namespace rdui::viewer
                     if (view.ok() && !candidate)
                         view.error("view.root.type_mismatch", "Reloaded View must have a <floater> root.", resource_id);
                     const bool view_ok = view.ok() && candidate;
-                    appendDiagnostics(result, std::move(view));
+                    result.append(std::move(view));
                     if (!view_ok)
                     {
                         result.generation = mSystem.generation();
@@ -199,7 +188,7 @@ namespace rdui::viewer
 
                     PreparedBindingResult binding = document.prepareBindings(*candidate);
                     const bool binding_ok = binding.ok();
-                    appendDiagnostics(result, std::move(binding));
+                    result.append(std::move(binding));
                     if (!binding_ok)
                     {
                         result.generation = mSystem.generation();

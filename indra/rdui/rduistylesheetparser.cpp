@@ -1,6 +1,7 @@
 #include "linden_common.h"
 #include "rduistylecompiler.h"
 #include "rduicolor.h"
+#include "rduischema.h"
 #include "rduistylesheet.h"
 #include "rduiviewcontract.h"
 #include <algorithm>
@@ -520,8 +521,24 @@ namespace rdui
 
         for (std::size_t index = 0; index < rule.selectors.size(); ++index)
         {
-            const StyleSelector& component = rule.selectors[index];
+            StyleSelector& component = rule.selectors[index];
             const bool declaration_component = index + 1 == rule.selectors.size();
+            if ((!component.id.empty() && !isLocalIdentifier(component.id))
+                || (!component.class_name.empty() && !isLocalIdentifier(component.class_name)))
+            {
+                result.error("stylesheet.selector.identifier_invalid",
+                             "Widget IDs and classes in selectors must use lowercase kebab-case: " + selector + ".",
+                             source_name);
+                return;
+            }
+            if (std::any_of(component.parts.begin(), component.parts.end(),
+                            [](const std::string& part) { return !isLocalIdentifier(part); }))
+            {
+                result.error("stylesheet.selector.part_invalid",
+                             "Widget parts in selectors must use lowercase kebab-case: " + selector + ".",
+                             source_name);
+                return;
+            }
             if (!isSupportedState(component.state))
             {
                 result.error("stylesheet.selector.state_unknown", "Unknown selector state: " + component.state + ".", source_name);
@@ -554,6 +571,7 @@ namespace rdui
                 result.error("stylesheet.selector.element_unknown", "Unknown widget element: " + component.element + ".", source_name);
                 return;
             }
+            component.element = component_owner->element;
             const CompositePartContract* component_part = component.parts.empty()
                                                        ? nullptr
                                                        : findCompositePartContract(*component_owner, component.parts);

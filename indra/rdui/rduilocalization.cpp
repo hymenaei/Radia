@@ -2,7 +2,6 @@
 #include "rduilocalization.h"
 #include "llxmlnode.h"
 #include <initializer_list>
-#include <iterator>
 
 namespace rdui
 {
@@ -197,12 +196,7 @@ namespace rdui
         {
             LocalizationCatalog parsed;
             LocalizationLoadResult loaded = parsed.loadXmlDocument(layer.source, layer.source_name, false);
-            result.warnings.insert(result.warnings.end(),
-                                   std::make_move_iterator(loaded.warnings.begin()),
-                                   std::make_move_iterator(loaded.warnings.end()));
-            result.errors.insert(result.errors.end(),
-                                 std::make_move_iterator(loaded.errors.begin()),
-                                 std::make_move_iterator(loaded.errors.end()));
+            result.append(std::move(loaded));
             if (loaded.hasErrors()) continue;
 
             if (!initialized)

@@ -38,16 +38,6 @@ namespace rdui::viewer
             bool ok() const { return !hasErrors() && manifest.has_value(); }
         };
 
-        void appendDiagnostics(DiagnosticResult& destination, DiagnosticResult&& source)
-        {
-            destination.warnings.insert(destination.warnings.end(),
-                                        std::make_move_iterator(source.warnings.begin()),
-                                        std::make_move_iterator(source.warnings.end()));
-            destination.errors.insert(destination.errors.end(),
-                                      std::make_move_iterator(source.errors.begin()),
-                                      std::make_move_iterator(source.errors.end()));
-        }
-
         std::optional<std::string> readFile(const std::filesystem::path& filename)
         {
             std::ifstream input(filename, std::ios::binary);
@@ -359,7 +349,7 @@ namespace rdui::viewer
         ManifestResult selected_result = parseManifest(selected_root);
         if (!selected_result.ok())
         {
-            appendDiagnostics(result, std::move(selected_result));
+            result.append(std::move(selected_result));
             return result;
         }
 

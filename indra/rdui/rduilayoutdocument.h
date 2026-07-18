@@ -25,6 +25,7 @@ namespace rdui
 
     struct LayoutAttribute
     {
+        std::string authored_name;
         std::string value;
         SourceRange source;
     };

@@ -38,25 +38,25 @@ namespace rdui::viewer
     {
         Binder binder(floater);
         binder.require("status", mStatus);
-        binder.require("active_language", mActiveLanguage);
-        binder.require("previous_language", mPreviousLanguage);
-        binder.require("next_language", mNextLanguage);
-        binder.require("authoring_mode", mAuthoringMode);
+        binder.require("active-language", mActiveLanguage);
+        binder.require("previous-language", mPreviousLanguage);
+        binder.require("next-language", mNextLanguage);
+        binder.require("authoring-mode", mAuthoringMode);
         binder.onClick("press", [this]
         {
             mStatus->setText(mSystem.localized("floater_demo.clicked"));
         });
-        binder.onChange("switch_changed", [this](const ChangeActionEvent& event)
+        binder.onChange("switch-changed", [this](const ChangeActionEvent& event)
         {
             mStatus->setText(mSystem.localized(event.checked ? "floater_demo.switch_on" : "floater_demo.switch_off"));
         });
-        binder.onClick("previous_language", [this] { selectRelativeLanguage(-1); });
-        binder.onClick("next_language", [this] { selectRelativeLanguage(1); });
-        binder.onClick("reload_resources", [this]
+        binder.onClick("previous-language", [this] { selectRelativeLanguage(-1); });
+        binder.onClick("next-language", [this] { selectRelativeLanguage(1); });
+        binder.onClick("reload-resources", [this]
         {
             if (mReloadHandler) mReloadHandler();
         });
-        binder.onChange("authoring_mode_changed", [this](const ChangeActionEvent& event)
+        binder.onChange("authoring-mode-changed", [this](const ChangeActionEvent& event)
         {
             if (mAuthoringModeSetter) mAuthoringModeSetter(event.checked);
         });

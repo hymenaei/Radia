@@ -9,7 +9,7 @@
 #include "rdswitch.h"
 #include "rduilayout.h"
 #include "rduistylesheet.h"
-#include "rduitext.h"
+#include "rduitextmetrics.h"
 
 namespace tut
 {

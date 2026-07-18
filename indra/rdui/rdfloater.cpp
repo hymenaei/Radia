@@ -18,7 +18,7 @@ namespace rdui
 {
     Floater::Floater() : Widget(ELEMENT)
     {
-        detail::instantiateCompositeParts(*this, detail::WidgetContractRegistry::floater());
+        detail::instantiateCompositeParts(*this, detail::floaterContract());
         configureCompositeParts();
     }
 
@@ -35,30 +35,30 @@ namespace rdui
         updateHeaderPresentation();
     }
 
-    WidgetContract detail::WidgetContractRegistry::floater()
+    WidgetContract detail::floaterContract()
     {
         return defineWidget<Floater>(Floater::ELEMENT)
             .attributes({
                 localizedStringAttribute("title", &Floater::setResolvedTitle),
                 stringAttribute("icon", &Floater::setIcon),
-                stringAttribute("close_icon", &Floater::setCloseIcon),
-                stringAttribute("minimize_icon", &Floater::setMinimizeIcon),
-                booleanAttribute("can_close", &Floater::setCanClose),
-                booleanAttribute("can_minimize", &Floater::setCanMinimize),
-                booleanAttribute("can_resize", &Floater::setCanResize),
-                booleanAttribute("can_detach", &Floater::setCanDetach),
-                booleanAttribute("show_header_identity", &Floater::setShowHeaderIdentity),
+                stringAttribute("closeIcon", &Floater::setCloseIcon),
+                stringAttribute("minimizeIcon", &Floater::setMinimizeIcon),
+                booleanAttribute("canClose", &Floater::setCanClose),
+                booleanAttribute("canMinimize", &Floater::setCanMinimize),
+                booleanAttribute("canResize", &Floater::setCanResize),
+                booleanAttribute("canDetach", &Floater::setCanDetach),
+                booleanAttribute("showHeaderIdentity", &Floater::setShowHeaderIdentity),
             })
             .validate([](const LayoutElement&, Floater& floater, ViewBuildResult& result, const std::string& source, const ViewBuildContext*)
             {
                 if (floater.canMinimize() && floater.title().empty())
                     result.error("view.floater.title_required", "A minimizable floater requires a non-empty title.", source);
             })
-            .childContainer("floater.header", {},
+            .childContainer("header", {},
                 [](const LayoutElement& child, Floater& floater, ViewBuildResult& result, const std::string& source) -> Widget*
             {
                 Panel* header = floater.claimCustomHeader();
-                if (!header) result.error("view.part.duplicate", "A floater may declare only one <floater.header>.", source);
+                if (!header) result.error("view.part.duplicate", "A floater may declare only one <header>.", source);
                 else applyCommonViewAttributes(child, *header, result, source);
                 return header;
             })
@@ -381,7 +381,7 @@ namespace rdui
         mDetachRequested = false;
         mMinimized = false;
         setState(WidgetState::Minimized, false);
-        detail::instantiateCompositeParts(*this, detail::WidgetContractRegistry::floater());
+        detail::instantiateCompositeParts(*this, detail::floaterContract());
         configureCompositeParts();
     }
 }

@@ -5,9 +5,17 @@
 
 namespace rdui
 {
+    struct WidgetContract;
+    namespace detail
+    {
+        WidgetContract contentContract();
+        WidgetContract descriptionContract();
+        WidgetContract fieldContract();
+    }
+
     class Field : public Widget
     {
-        friend class detail::WidgetContractRegistry;
+        friend WidgetContract detail::fieldContract();
         public:
             static constexpr const char* ELEMENT = "field";
 
@@ -19,7 +27,7 @@ namespace rdui
 
     class Content : public Widget
     {
-        friend class detail::WidgetContractRegistry;
+        friend WidgetContract detail::contentContract();
         public:
             static constexpr const char* ELEMENT = "content";
 
@@ -31,7 +39,7 @@ namespace rdui
 
     class Description : public Widget
     {
-        friend class detail::WidgetContractRegistry;
+        friend WidgetContract detail::descriptionContract();
         public:
             static constexpr const char* ELEMENT = "description";
 

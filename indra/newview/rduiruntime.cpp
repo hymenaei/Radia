@@ -24,7 +24,6 @@
 #include "rduisystem.h"
 #include <algorithm>
 #include <chrono>
-#include <iterator>
 #include <memory>
 #include <optional>
 #include <unordered_set>
@@ -41,22 +40,12 @@ namespace
     rdui::SkinGenerationPrepareResult prepareSkin(rdui::viewer::SkinSnapshotResult captured)
     {
         rdui::SkinGenerationPrepareResult result;
-        result.warnings.insert(result.warnings.end(),
-                               std::make_move_iterator(captured.warnings.begin()),
-                               std::make_move_iterator(captured.warnings.end()));
-        result.errors.insert(result.errors.end(),
-                             std::make_move_iterator(captured.errors.begin()),
-                             std::make_move_iterator(captured.errors.end()));
+        result.append(std::move(captured));
         if (result.hasErrors()) return result;
 
         rdui::SkinGenerationPrepareResult compiled =
             rdui::SkinCompiler().prepare(std::move(captured.snapshot));
-        result.warnings.insert(result.warnings.end(),
-                               std::make_move_iterator(compiled.warnings.begin()),
-                               std::make_move_iterator(compiled.warnings.end()));
-        result.errors.insert(result.errors.end(),
-                             std::make_move_iterator(compiled.errors.begin()),
-                             std::make_move_iterator(compiled.errors.end()));
+        result.append(std::move(compiled));
         result.generation = std::move(compiled.generation);
         return result;
     }

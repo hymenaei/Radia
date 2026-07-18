@@ -28,6 +28,8 @@ target_sources(rdui
     rduipath.cpp
     rduiopenglpaintcontext.cpp
     rduirecordingpaintcontext.cpp
+    rduischema.cpp
+    rduischema.h
     rduiskincompiler.cpp
     rduiskingeneration.cpp
     rduiskingenerationinternal.h
@@ -37,11 +39,13 @@ target_sources(rdui
     rduistylesheet.cpp
     rduistylesheetparser.cpp
     rduisystem.cpp
-    rduitext.cpp
+    rduitextmetrics.cpp
     rduisvg.cpp
     rduitessellator.cpp
     rduiviewcontract.cpp
     rduiviewcontract.h
+    rduiwidgetcatalog.cpp
+    rduiwidgetcatalog.h
 
     PUBLIC
     FILE_SET HEADERS
@@ -70,7 +74,7 @@ target_sources(rdui
     rduistyle.h
     rduistylesheet.h
     rduisystem.h
-    rduitext.h
+    rduitextmetrics.h
     rduitypes.h
     rduiviewresult.h
     )
@@ -108,7 +112,7 @@ if (BUILD_TESTING)
     add_dependencies(BUILD_TESTS ${target})
   endfunction()
 
-  foreach(test_name rduibinder rduicolor rduifloaterresize rduisurface rduipath rduilayout rduilocalization rduistyle rduisystem rduisvg rduiwidget rduitessellator rduilayoutresourcecompiler)
+  foreach(test_name rduibinder rduicolor rduidiagnostic rduifloaterresize rduisurface rduipath rduilayout rduilocalization rduistyle rduisystem rduisvg rduiwidget rduitessellator rduilayoutresourcecompiler)
     rdui_add_test(${test_name})
   endforeach()
 endif ()

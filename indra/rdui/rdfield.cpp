@@ -12,7 +12,7 @@ namespace rdui
         style.flow = Flow::Row;
     }
 
-    WidgetContract detail::WidgetContractRegistry::field()
+    WidgetContract detail::fieldContract()
     {
         return defineWidget<Field>(Field::ELEMENT).build();
     }
@@ -24,7 +24,7 @@ namespace rdui
         style.flow = Flow::Column;
     }
 
-    WidgetContract detail::WidgetContractRegistry::content()
+    WidgetContract detail::contentContract()
     {
         return defineWidget<Content>(Content::ELEMENT).build();
     }
@@ -36,7 +36,7 @@ namespace rdui
         style.flow = Flow::Row;
     }
 
-    WidgetContract detail::WidgetContractRegistry::description()
+    WidgetContract detail::descriptionContract()
     {
         return defineWidget<Description>(Description::ELEMENT)
             .textChildren()

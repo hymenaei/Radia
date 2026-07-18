@@ -6,7 +6,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <initializer_list>
-#include <iterator>
 
 namespace rdui
 {
@@ -140,12 +139,7 @@ namespace rdui
 
         void appendPathDiagnostics(SvgCompileResult& result, PathCompileResult&& path_result)
         {
-            result.warnings.insert(result.warnings.end(),
-                                   std::make_move_iterator(path_result.warnings.begin()),
-                                   std::make_move_iterator(path_result.warnings.end()));
-            result.errors.insert(result.errors.end(),
-                                 std::make_move_iterator(path_result.errors.begin()),
-                                 std::make_move_iterator(path_result.errors.end()));
+            result.append(std::move(path_result));
         }
     }
 

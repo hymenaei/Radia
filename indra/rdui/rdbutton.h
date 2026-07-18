@@ -8,10 +8,12 @@ namespace rdui
 {
     class Icon;
     class Label;
+    struct WidgetContract;
+    namespace detail { WidgetContract buttonContract(); }
 
     class Button : public Widget
     {
-        friend class detail::WidgetContractRegistry;
+        friend WidgetContract detail::buttonContract();
         public:
             static constexpr const char* ELEMENT = "button";
 

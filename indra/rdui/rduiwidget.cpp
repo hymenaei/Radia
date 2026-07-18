@@ -2,7 +2,7 @@
 #include "rduiwidget.h"
 #include "rduipaintcontext.h"
 #include "rduisurface.h"
-#include "rduitext.h"
+#include "rduitextmetrics.h"
 #include "rduistyle.h"
 #include "rduisystem.h"
 

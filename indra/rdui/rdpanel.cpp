@@ -6,7 +6,7 @@ namespace rdui
 {
     Panel::Panel() : Widget(ELEMENT) {}
 
-    WidgetContract detail::WidgetContractRegistry::panel()
+    WidgetContract detail::panelContract()
     {
         return defineWidget<Panel>(Panel::ELEMENT)
             .attributes({allowedAttribute("filename")})

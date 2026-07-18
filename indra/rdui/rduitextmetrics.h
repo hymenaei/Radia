@@ -1,5 +1,5 @@
-#ifndef LL_RDUI_TEXT_H
-#define LL_RDUI_TEXT_H
+#ifndef LL_RDUI_TEXT_METRICS_H
+#define LL_RDUI_TEXT_METRICS_H
 
 #include "rduitypes.h"
 #include <string>
@@ -31,4 +31,4 @@ namespace rdui
     const TextMetrics& fixedTextMetrics();
 }
 
-#endif // LL_RDUI_TEXT_H
+#endif // LL_RDUI_TEXT_METRICS_H

@@ -4,7 +4,6 @@
 #include "rdfloater.h"
 #include "rduisystem.h"
 
-#include <iterator>
 #include <map>
 #include <utility>
 
@@ -12,16 +11,6 @@ namespace rdui::viewer
 {
     namespace
     {
-        void appendDiagnostics(DiagnosticResult& destination, DiagnosticResult&& source)
-        {
-            destination.warnings.insert(destination.warnings.end(),
-                                        std::make_move_iterator(source.warnings.begin()),
-                                        std::make_move_iterator(source.warnings.end()));
-            destination.errors.insert(destination.errors.end(),
-                                      std::make_move_iterator(source.errors.begin()),
-                                      std::make_move_iterator(source.errors.end()));
-        }
-
         std::string instanceId(const std::string& definition_id,
                                const std::string& instance_key)
         {
@@ -118,12 +107,12 @@ namespace rdui::viewer
             view.error("view.root.type_mismatch",
                        "RDUI Floater definition must have a <floater> root.", resource_id);
         const bool view_ok = view.ok() && candidate;
-        appendDiagnostics(result, std::move(view));
+        result.append(std::move(view));
         if (!view_ok) return result;
 
         PreparedBindingResult binding = controller->prepareBindings(*candidate);
         const bool binding_ok = binding.ok();
-        appendDiagnostics(result, std::move(binding));
+        result.append(std::move(binding));
         if (!binding_ok) return result;
 
         auto instance = std::make_unique<Impl::Instance>(

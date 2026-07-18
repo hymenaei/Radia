@@ -1,8 +1,8 @@
-label#language_heading {
+label#language-heading {
     text-color: var(--muted);
 }
 
-label#active_language {
+label#active-language {
     font-family: sans-bold;
 }
 
@@ -15,7 +15,7 @@ button.language {
     width: 120px;
 }
 
-field.switch_demo {
+field.switch-demo {
     gap: auto;
 }
 
@@ -24,6 +24,6 @@ field.authoring {
     gap: auto;
 }
 
-field#language_buttons {
+field#language-buttons {
     gap: auto;
 }

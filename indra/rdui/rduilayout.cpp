@@ -2,7 +2,7 @@
 #include "rduilayout.h"
 #include "rduiwidget.h"
 #include "rduistylesheet.h"
-#include "rduitext.h"
+#include "rduitextmetrics.h"
 #include <algorithm>
 #include <vector>
 

@@ -20,10 +20,10 @@ namespace rdui
         context.paintIcon(mName, rect(), style, scale);
     }
 
-    WidgetContract detail::WidgetContractRegistry::icon()
+    WidgetContract detail::iconContract()
     {
         return defineWidget<Icon>(Icon::ELEMENT)
-            .attributes({stringAttribute({"icon", "name"}, &Icon::setName)})
+            .attributes({stringAttribute("source", &Icon::setName)})
             .build();
     }
 }

@@ -3,24 +3,12 @@
 #include "rduiskingeneration.h"
 #include "rduiskingenerationinternal.h"
 #include "rduilayoutdocument.h"
-#include <iterator>
 #include <unordered_map>
 
 namespace rdui
 {
     namespace
     {
-        template<typename DestinationT, typename SourceT>
-        void appendDiagnostics(DestinationT& destination, SourceT&& source)
-        {
-            destination.warnings.insert(destination.warnings.end(),
-                                        std::make_move_iterator(source.warnings.begin()),
-                                        std::make_move_iterator(source.warnings.end()));
-            destination.errors.insert(destination.errors.end(),
-                                      std::make_move_iterator(source.errors.begin()),
-                                      std::make_move_iterator(source.errors.end()));
-        }
-
         bool endsWith(const std::string& value, const std::string& suffix)
         {
             return value.size() >= suffix.size() && value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
@@ -45,10 +33,10 @@ namespace rdui
 
         const std::vector<ResourceLayer>& localization_layers = resources.layers("localization.xml");
         const std::vector<ResourceLayer>& style_layers = resources.layers("skin.radia");
-        appendDiagnostics(result, localization_layers.empty()
+        result.append(localization_layers.empty()
             ? localization.loadXml(*localization_xml, "localization.xml")
             : localization.loadXmlLayers(localization_layers));
-        appendDiagnostics(result, style_layers.empty()
+        result.append(style_layers.empty()
             ? style_sheet.loadCss(*style_source, "skin.radia")
             : style_sheet.loadCssLayers(style_layers));
 
@@ -80,7 +68,7 @@ namespace rdui
             SvgCompileResult icon_result = compileSvgIcon(source_text, resource_id);
             if (icon_result.ok() && !icons.emplace(name, std::move(*icon_result.icon)).second)
                 result.error("rdui.icon.duplicate", "Duplicate icon resource: " + name + ".", resource_id);
-            appendDiagnostics(result, std::move(icon_result));
+            result.append(std::move(icon_result));
         }
         if (result.hasErrors()) return result;
 
@@ -110,7 +98,7 @@ namespace rdui
             }
 
             LayoutDocumentParseResult parsed = LayoutDocumentParser().parse(source_text, resource_id);
-            appendDiagnostics(result, std::move(parsed));
+            result.append(std::move(parsed));
             if (parsed.document)
                 layout_documents.emplace(resource_id, std::shared_ptr<const LayoutDocument>(std::move(parsed.document)));
         }
@@ -127,9 +115,9 @@ namespace rdui
             if (resource_id.rfind("widgets/", 0) == 0)
             {
                 const std::string element = resource_id.substr(sizeof("widgets/") - 1, resource_id.size() - (sizeof("widgets/") - 1) - (sizeof(".xml") - 1));
-                appendDiagnostics(result, generation->validateWidgetDefaults(element));
+                result.append(generation->validateWidgetDefaults(element));
             }
-            else appendDiagnostics(result, generation->createView(resource_id, generation->defaultLocale()));
+            else result.append(generation->createView(resource_id, generation->defaultLocale()));
         }
         if (result.hasErrors()) return result;
 

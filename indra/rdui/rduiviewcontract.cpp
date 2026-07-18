@@ -1,12 +1,6 @@
 #include "linden_common.h"
 #include "rduiviewcontract.h"
-#include "rdbutton.h"
-#include "rdfloater.h"
-#include "rdfield.h"
-#include "rdicon.h"
-#include "rdlabel.h"
-#include "rdpanel.h"
-#include "rdswitch.h"
+#include "rduiwidgetcatalog.h"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -39,38 +33,20 @@ namespace rdui
     {
         switch (kind)
         {
-            case ActionEventKind::Click: return "on_click";
-            case ActionEventKind::DoubleClick: return "on_double_click";
-            case ActionEventKind::Change: return "on_change";
-            case ActionEventKind::MouseDown: return "on_mouse_down";
-            case ActionEventKind::MouseUp: return "on_mouse_up";
-            case ActionEventKind::MouseMove: return "on_mouse_move";
-            case ActionEventKind::LongClick: return "on_long_click";
-            case ActionEventKind::ContextMenu: return "on_context_menu";
+            case ActionEventKind::Click: return "onClick";
+            case ActionEventKind::DoubleClick: return "onDoubleClick";
+            case ActionEventKind::Change: return "onChange";
+            case ActionEventKind::MouseDown: return "onMouseDown";
+            case ActionEventKind::MouseUp: return "onMouseUp";
+            case ActionEventKind::MouseMove: return "onMouseMove";
+            case ActionEventKind::LongClick: return "onLongClick";
+            case ActionEventKind::ContextMenu: return "onContextMenu";
         }
         return "";
     }
 
     namespace
     {
-        bool validActionName(const std::string& name)
-        {
-            if (name.empty() || name.front() == '.' || name.back() == '.') return false;
-            bool previous_dot = false;
-            for (unsigned char character : name)
-            {
-                if (character == '.')
-                {
-                    if (previous_dot) return false;
-                    previous_dot = true;
-                    continue;
-                }
-                previous_dot = false;
-                if (!std::isalnum(character) && character != '_' && character != '-') return false;
-            }
-            return true;
-        }
-
         std::optional<std::chrono::milliseconds> durationValue(const std::string& value)
         {
             char* suffix = nullptr;
@@ -157,34 +133,10 @@ namespace rdui
         }
     }
 
-    const std::unordered_map<std::string, WidgetContract>& builtInWidgetContracts()
-    {
-        static const std::unordered_map<std::string, WidgetContract> contracts = []
-        {
-            std::unordered_map<std::string, WidgetContract> result;
-            auto add = [&result](WidgetContract contract)
-            {
-                std::string element = contract.element;
-                result.emplace(std::move(element), std::move(contract));
-            };
-            add(detail::WidgetContractRegistry::button());
-            add(detail::WidgetContractRegistry::content());
-            add(detail::WidgetContractRegistry::description());
-            add(detail::WidgetContractRegistry::field());
-            add(detail::WidgetContractRegistry::floater());
-            add(detail::WidgetContractRegistry::icon());
-            add(detail::WidgetContractRegistry::label());
-            add(detail::WidgetContractRegistry::panel());
-            add(detail::WidgetContractRegistry::toggleSwitch());
-            return result;
-        }();
-        return contracts;
-    }
-
     const WidgetContract* findWidgetContract(const std::string& element)
     {
         const auto& contracts = builtInWidgetContracts();
-        const auto widget = contracts.find(element);
+        const auto widget = contracts.find(schemaNameKey(element));
         return widget == contracts.end() ? nullptr : &widget->second;
     }
 
@@ -297,18 +249,21 @@ namespace rdui
     void validateViewAttributes(const LayoutElement& element, const std::vector<std::string>& widget_attributes, ViewBuildResult& result, const std::string& source)
     {
         static const std::unordered_set<std::string> common = {
-            "id", "class", "visibility", "disabled", "long_click_delay",
-            "on_click", "on_double_click", "on_change", "on_mouse_down", "on_mouse_up", "on_mouse_move",
-            "on_long_click", "on_context_menu",
+            "id", "class", "visibility", "disabled", "longClickDelay",
+            "onClick", "onDoubleClick", "onChange", "onMouseDown", "onMouseUp", "onMouseMove",
+            "onLongClick", "onContextMenu",
             // Diagnosed more specifically by the common compiler.
-            "x", "y", "width", "height", "interactive", "blocks_pointer", "action",
+            "x", "y", "width", "height", "interactive", "blocksPointer", "action",
         };
-        std::unordered_set<std::string> allowed(widget_attributes.begin(), widget_attributes.end());
-        allowed.insert(common.begin(), common.end());
+        std::unordered_set<std::string> allowed;
+        for (const std::string& name : widget_attributes) allowed.insert(schemaNameKey(name));
+        for (const std::string& name : common) allowed.insert(schemaNameKey(name));
+        const WidgetContract* widget_contract = findWidgetContract(element.name());
+        const std::string element_name = widget_contract ? widget_contract->element : schemaNameKey(element.name());
         for (const auto& [attribute_name, attribute] : element.attributes())
         {
             if (!allowed.count(attribute_name))
-                result.error("view.attribute.unknown", "Unknown attribute on <" + element.name() + ">: " + attribute_name + ".", source,
+                result.error("view.attribute.unknown", "Unknown attribute on <" + element_name + ">: " + attribute.authored_name + ".", source,
                              attribute.source.begin.line, attribute.source.begin.column);
         }
     }
@@ -318,7 +273,7 @@ namespace rdui
                                    const std::vector<ActionEventKind>& supported_actions)
     {
         static const char* unsupported[] = {
-            "x", "y", "width", "height", "interactive", "blocks_pointer", "action",
+            "x", "y", "width", "height", "interactive", "blocksPointer", "action",
         };
         for (const char* name : unsupported)
         {
@@ -329,11 +284,27 @@ namespace rdui
         }
 
         std::string value;
-        if (readViewAttribute(element, "id", value)) widget.setId(value);
+        if (readViewAttribute(element, "id", value))
+        {
+            const LayoutAttribute* attribute = element.attribute("id");
+            if (!isLocalIdentifier(value))
+                result.error("view.id.invalid", "Widget id must be a lowercase kebab-case identifier.", source,
+                             attribute->source.begin.line, attribute->source.begin.column);
+            else widget.setId(value);
+        }
         if (readViewAttribute(element, "class", value))
         {
             std::stringstream classes(value);
-            while (classes >> value) widget.addClass(value);
+            while (classes >> value)
+            {
+                if (!isLocalIdentifier(value))
+                {
+                    const LayoutAttribute* attribute = element.attribute("class");
+                    result.error("view.class.invalid", "Widget class must be a lowercase kebab-case identifier.", source,
+                                 attribute->source.begin.line, attribute->source.begin.column);
+                }
+                else widget.addClass(value);
+            }
         }
         Visibility visibility = Visibility::Visible;
         if (readViewVisibility(element, visibility, result, source)) widget.setVisibility(visibility);
@@ -348,25 +319,29 @@ namespace rdui
             if (!readViewAttribute(element, name, value)) continue;
             if (std::find(supported_actions.begin(), supported_actions.end(), kind) == supported_actions.end())
                 result.error("view.action.unsupported", "Action attribute " + std::string(name) + " is not supported on <" + widget.element() + ">.", source);
-            else if (!validActionName(value))
-                result.error("view.action.name_invalid", "Invalid action name for " + std::string(name) + ".", source);
+            else if (!isLocalIdentifier(value))
+            {
+                const LayoutAttribute* attribute = element.attribute(name);
+                result.error("view.action.name_invalid", "Invalid action name for " + std::string(name) + ".", source,
+                             attribute->source.begin.line, attribute->source.begin.column);
+            }
             else
                 widget.setAction(kind, value);
         }
 
-        if (readViewAttribute(element, "long_click_delay", value))
+        if (readViewAttribute(element, "longClickDelay", value))
         {
             const bool supports_long_click = std::find(supported_actions.begin(), supported_actions.end(), ActionEventKind::LongClick)
                                             != supported_actions.end();
             if (supports_long_click && widget.action(ActionEventKind::LongClick).empty())
-                result.error("view.long_click.action_missing", "long_click_delay requires on_long_click.", source);
+                result.error("view.long_click.action_missing", "longClickDelay requires onLongClick.", source);
             else if (!supports_long_click)
-                result.error("view.action.unsupported", "long_click_delay is not supported on <" + widget.element() + ">.", source);
+                result.error("view.action.unsupported", "longClickDelay is not supported on <" + widget.element() + ">.", source);
             else
             {
                 const auto duration = durationValue(value);
                 if (duration) widget.setLongClickDelay(*duration);
-                else result.error("view.attribute.duration_invalid", "Invalid duration for long_click_delay: " + value + ".", source);
+                else result.error("view.attribute.duration_invalid", "Invalid duration for longClickDelay: " + value + ".", source);
             }
         }
     }

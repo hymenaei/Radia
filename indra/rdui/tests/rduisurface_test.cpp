@@ -9,7 +9,7 @@
 #include "rduirecordingpaintcontext.h"
 #include "rduisurface.h"
 #include "rduisystem.h"
-#include "rduitext.h"
+#include "rduitextmetrics.h"
 #include <algorithm>
 
 namespace tut

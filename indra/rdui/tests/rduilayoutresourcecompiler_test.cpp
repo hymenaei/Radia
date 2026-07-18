@@ -14,7 +14,7 @@
 #include "rduiskincompiler.h"
 #include "rduisurface.h"
 #include "rduisystem.h"
-#include "rduitext.h"
+#include "rduitextmetrics.h"
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -87,9 +87,9 @@ namespace tut
     template<> template<>
     void rduilayoutresourcecompiler_object::test<1>()
     {
-        const char* xml = "<floater title=\"title\" close_icon=\"close\" minimize_icon=\"minimize\" can_minimize=\"true\"><label id=\"status\">Ready</label>"
-                          "<button id=\"go\" on_click=\"demo.go\" on_double_click=\"demo.double\" on_mouse_down=\"demo.press\" on_long_click=\"demo.hold\" on_context_menu=\"demo.menu\" long_click_delay=\"750ms\"><icon name=\"search\"/>Go</button>"
-                          "<switch id=\"toggle\" checked=\"true\" on_change=\"demo.changed\"/></floater>";
+        const char* xml = "<floater title=\"title\" closeIcon=\"close\" minimizeIcon=\"minimize\" canMinimize=\"true\"><label id=\"status\">Ready</label>"
+                          "<button id=\"go\" onClick=\"demo-go\" onDoubleClick=\"demo-double\" onMouseDown=\"demo-press\" onLongClick=\"demo-hold\" onContextMenu=\"demo-menu\" longClickDelay=\"750ms\"><icon source=\"search\"/>Go</button>"
+                          "<switch id=\"toggle\" checked=\"true\" onChange=\"demo-changed\"/></floater>";
         rdui::ViewBuildResult result = factory.createFromString(xml, "floater.xml");
         auto* floater = result.rootAs<rdui::Floater>();
         ensure("arbitrary floater root parsed", result.ok() && floater);
@@ -99,20 +99,20 @@ namespace tut
         auto toggle = requireWidget<rdui::Switch>(*floater, "toggle");
         ensure("Binder resolves parsed controls", go && toggle);
         ensure("typed lookup", toggle->checked());
-        ensure_equals("click action parsed", go->action(rdui::ActionEventKind::Click), "demo.go");
-        ensure_equals("double click action parsed", go->action(rdui::ActionEventKind::DoubleClick), "demo.double");
-        ensure_equals("mouse action parsed", go->action(rdui::ActionEventKind::MouseDown), "demo.press");
-        ensure_equals("long click action parsed", go->action(rdui::ActionEventKind::LongClick), "demo.hold");
-        ensure_equals("context menu action parsed", go->action(rdui::ActionEventKind::ContextMenu), "demo.menu");
+        ensure_equals("click action parsed", go->action(rdui::ActionEventKind::Click), "demo-go");
+        ensure_equals("double click action parsed", go->action(rdui::ActionEventKind::DoubleClick), "demo-double");
+        ensure_equals("mouse action parsed", go->action(rdui::ActionEventKind::MouseDown), "demo-press");
+        ensure_equals("long click action parsed", go->action(rdui::ActionEventKind::LongClick), "demo-hold");
+        ensure_equals("context menu action parsed", go->action(rdui::ActionEventKind::ContextMenu), "demo-menu");
         ensure_equals("long click delay parsed", go->longClickDelay()->count(), 750LL);
-        ensure_equals("switch action parsed", toggle->action(rdui::ActionEventKind::Change), "demo.changed");
+        ensure_equals("switch action parsed", toggle->action(rdui::ActionEventKind::Change), "demo-changed");
     }
 
     template<> template<>
     void rduilayoutresourcecompiler_object::test<2>()
     {
-        resources["shared.xml"] = "<panel id=\"base\" class=\"shared\"><label id=\"resource_child\">base</label></panel>";
-        const char* xml = "<panel><panel filename=\"shared.xml\" id=\"one\" class=\"first\"><label id=\"inline_child\"/></panel>"
+        resources["shared.xml"] = "<panel id=\"base\" class=\"shared\"><label id=\"resource-child\">base</label></panel>";
+        const char* xml = "<panel><panel filename=\"shared.xml\" id=\"one\" class=\"first\"><label id=\"inline-child\"/></panel>"
                           "<panel filename=\"shared.xml\" id=\"two\"/></panel>";
         rdui::ViewBuildResult result = factory.createFromString(xml, "outer.xml");
         ensure("embedded panels parsed", result.ok());
@@ -121,8 +121,8 @@ namespace tut
         ensure("independent panel instances", first && second && first.get() != second.get());
         ensure("referenced class retained", first->classes().count("shared") == 1);
         ensure("inline class appended", first->classes().count("first") == 1);
-        ensure("referenced child first", first->children().front()->id() == "resource_child");
-        ensure("inline child appended", first->children().back()->id() == "inline_child");
+        ensure("referenced child first", first->children().front()->id() == "resource-child");
+        ensure("inline child appended", first->children().back()->id() == "inline-child");
         first->setVisibility(rdui::Visibility::Collapsed);
         ensure("second visibility independent", second->visibility() == rdui::Visibility::Visible);
     }
@@ -189,13 +189,13 @@ namespace tut
     template<> template<>
     void rduilayoutresourcecompiler_object::test<6>()
     {
-        rdui::ViewBuildResult result = factory.createFromString("<button>first<icon name=\"one\"/></button>");
+        rdui::ViewBuildResult result = factory.createFromString("<button>first<icon source=\"one\"/></button>");
         auto* button = result.rootAs<rdui::Button>();
         ensure("button parses", result.ok() && button);
         ensure_equals("inline icon retained", button->icon()->name(), "one");
         ensure_equals("inline label retained", button->label()->text(), "first");
         ensure("text before icon preserves authored order", button->children()[0].get() == button->label());
-        rdui::ViewBuildResult icon_first = factory.createFromString("<button><icon name=\"search\"/>second</button>");
+        rdui::ViewBuildResult icon_first = factory.createFromString("<button><icon source=\"search\"/>second</button>");
         auto* reversed = icon_first.rootAs<rdui::Button>();
         ensure("icon before text preserves authored order", icon_first.ok() && reversed->children()[0].get() == reversed->icon());
         button->setIcon("updated");
@@ -317,11 +317,11 @@ namespace tut
         ensure("unknown widget attribute rejects document", !unknown_attribute.ok() && !unknown_attribute.root);
         ensure_equals("unknown attribute diagnostic code", unknown_attribute.errors.front().code, "view.attribute.unknown");
 
-        const rdui::ViewBuildResult unsupported_action = factory.createFromString("<label on_click=\"click\"/>", "action.xml");
+        const rdui::ViewBuildResult unsupported_action = factory.createFromString("<label onClick=\"click\"/>", "action.xml");
         ensure("unsupported widget event rejects view", !unsupported_action.ok() && !unsupported_action.root);
         ensure_equals("unsupported action diagnostic code", unsupported_action.errors.front().code, "view.action.unsupported");
 
-        const rdui::ViewBuildResult expression_action = factory.createFromString("<button on_click=\"save(force=true)\"/>", "expression.xml");
+        const rdui::ViewBuildResult expression_action = factory.createFromString("<button onClick=\"save(force=true)\"/>", "expression.xml");
         ensure("action expressions reject view", !expression_action.ok() && !expression_action.root);
         ensure_equals("invalid action name diagnostic code", expression_action.errors.front().code, "view.action.name_invalid");
     }
@@ -340,7 +340,7 @@ namespace tut
     void rduilayoutresourcecompiler_object::test<11>()
     {
         const rdui::ViewBuildResult invalid = factory.createFromString(
-            "<floater can_close=\"sometimes\"><switch checked=\"yes\"/></floater>", "booleans.xml");
+            "<floater canClose=\"sometimes\"><switch checked=\"yes\"/></floater>", "booleans.xml");
         ensure("invalid booleans reject whole view", !invalid.ok() && !invalid.root);
         ensure_equals("both invalid booleans diagnosed", invalid.errors.size(), 2U);
         ensure_equals("boolean diagnostic code", invalid.errors.front().code, "view.attribute.boolean_invalid");
@@ -350,17 +350,17 @@ namespace tut
     template<> template<>
     void rduilayoutresourcecompiler_object::test<12>()
     {
-        ensure("delay requires action", !factory.createFromString("<button long_click_delay=\"1s\"/>").ok());
-        ensure("duration requires unit", !factory.createFromString("<button on_long_click=\"hold\" long_click_delay=\"500\"/>").ok());
-        ensure("label rejects long click", !factory.createFromString("<label on_long_click=\"hold\"/>").ok());
+        ensure("delay requires action", !factory.createFromString("<button longClickDelay=\"1s\"/>").ok());
+        ensure("duration requires unit", !factory.createFromString("<button onLongClick=\"hold\" longClickDelay=\"500\"/>").ok());
+        ensure("label rejects long click", !factory.createFromString("<label onLongClick=\"hold\"/>").ok());
     }
 
     template<> template<>
     void rduilayoutresourcecompiler_object::test<13>()
     {
         rdui::ViewBuildResult result = factory.createFromString(
-            "<floater title=\"tools\" icon=\"search\" can_minimize=\"true\" show_header_identity=\"false\">"
-            "<floater.header><button id=\"refresh\">Refresh</button></floater.header><panel id=\"content\"/></floater>",
+            "<floater title=\"tools\" icon=\"search\" canMinimize=\"true\" showHeaderIdentity=\"false\">"
+            "<header><button id=\"refresh\">Refresh</button></header><panel id=\"content\"/></floater>",
             "custom_header.xml");
         auto* floater = result.rootAs<rdui::Floater>();
         ensure("custom-header floater builds", result.ok() && floater);
@@ -394,17 +394,17 @@ namespace tut
         ensure("clearing authored children expires custom header reference", !refresh);
 
         const rdui::ViewBuildResult missing_title = factory.createFromString(
-            "<floater can_minimize=\"true\"/>", "missing_title.xml");
+            "<floater canMinimize=\"true\"/>", "missing_title.xml");
         ensure("minimizable floater requires title", !missing_title.ok());
         ensure_equals("title diagnostic is stable", missing_title.errors.front().code, "view.floater.title_required");
 
         const rdui::ViewBuildResult duplicate_header = factory.createFromString(
-            "<floater><floater.header/><floater.header/></floater>", "duplicate_header.xml");
+            "<floater><header/><header/></floater>", "duplicate_header.xml");
         ensure("duplicate custom header rejects view", !duplicate_header.ok());
         ensure_equals("duplicate header diagnostic is stable", duplicate_header.errors.front().code, "view.part.duplicate");
 
         const rdui::ViewBuildResult attached_only = factory.createFromString(
-            "<floater can_detach=\"false\"/>", "attached_only.xml");
+            "<floater canDetach=\"false\"/>", "attached_only.xml");
         ensure("floater accepts detach policy", attached_only.ok());
         ensure("floater detach policy defaults on and can opt out",
                !attached_only.rootAs<rdui::Floater>()->canDetach());
@@ -413,11 +413,11 @@ namespace tut
     template<> template<>
     void rduilayoutresourcecompiler_object::test<14>()
     {
-        resources["widgets/floater.xml"] = "<floater close_icon=\"close\" minimize_icon=\"minimize\" can_close=\"false\"/>";
-        resources["defaulted.xml"] = "<floater title=\"defaulted\" can_close=\"true\"/>";
+        resources["widgets/floater.xml"] = "<floater closeIcon=\"close\" minimizeIcon=\"minimize\" canClose=\"false\"/>";
+        resources["defaulted.xml"] = "<floater title=\"defaulted\" canClose=\"true\"/>";
 
-        ensure("Widget Defaults validate independently",
-               !factory.validateWidgetDefaults("floater").hasErrors());
+        ensure("Widget Defaults validate independently with case-insensitive lookup",
+               !factory.validateWidgetDefaults("FLOATER").hasErrors());
 
         rdui::ViewBuildResult result = factory.createFromResource("defaulted.xml");
         auto* floater = result.rootAs<rdui::Floater>();
@@ -440,9 +440,9 @@ namespace tut
     void rduilayoutresourcecompiler_object::test<15>()
     {
         const rdui::ViewBuildResult result = factory.createFromString(
-            "<field id=\"example_field\"><content><label>label.example</label>"
+            "<field id=\"example-field\"><content><label>label.example</label>"
             "<description>description.prefix <label>description.middle</label> description.suffix</description>"
-            "</content><switch checked=\"true\" on_change=\"switch_changed\"/></field>", "field.xml");
+            "</content><switch checked=\"true\" onChange=\"switch-changed\"/></field>", "field.xml");
         auto* field = result.rootAs<rdui::Field>();
         ensure("field markup builds", result.ok() && field);
         ensure_equals("field contains content and switch", field->children().size(), 2U);
@@ -509,6 +509,64 @@ namespace tut
         ensure("Widget Defaults validate widget-specific typed values", widget_attribute.hasErrors());
         ensure_equals("Widget Defaults preserve widget attribute diagnostics", widget_attribute.errors.front().code,
                       "view.attribute.boolean_invalid");
+    }
+
+    template<> template<>
+    void rduilayoutresourcecompiler_object::test<18>()
+    {
+        rdui::ViewBuildResult result = factory.createFromString(
+            "<FlOaTeR TiTlE=\"tools\" CaNMiNiMiZe=\"true\">"
+            "<HeAdEr><BuTtOn ID=\"save-file\" ONCLICK=\"save-file\">"
+            "<IcOn SoUrCe=\"search\"/>Save</BuTtOn></HeAdEr></FlOaTeR>",
+            "case-insensitive.xml");
+        auto* floater = result.rootAs<rdui::Floater>();
+        ensure("element and attribute lookup is ASCII case-insensitive", result.ok() && floater);
+        auto button = requireWidget<rdui::Button>(*floater, "save-file");
+        ensure("mixed-case schema names retain canonical widget behavior", button && button->icon());
+        ensure_equals("contract retains canonical element spelling", button->element(), std::string("button"));
+        ensure_equals("mixed-case action attribute resolves", button->action(rdui::ActionEventKind::Click),
+                      std::string("save-file"));
+    }
+
+    template<> template<>
+    void rduilayoutresourcecompiler_object::test<19>()
+    {
+        const rdui::ViewBuildResult snake = factory.createFromString(
+            "<BuTtOn\n  on_click=\"save-file\"/>", "legacy-snake.xml");
+        ensure("legacy snake_case attribute is rejected", !snake.ok());
+        ensure_equals("legacy attribute is not an alias", snake.errors.front().code,
+                      std::string("view.attribute.unknown"));
+        ensure_equals("legacy attribute diagnostic retains source line", snake.errors.front().line, std::size_t(1));
+        ensure("known element names use canonical spelling in diagnostics",
+               snake.errors.front().message.find("<button>") != std::string::npos);
+
+        const rdui::ViewBuildResult duplicate = factory.createFromString(
+            "<button onClick=\"save-one\" ONCLICK=\"save-two\"/>", "duplicate-case.xml");
+        ensure("attributes colliding after case folding are rejected", !duplicate.ok());
+        ensure_equals("case-folded duplicate has a stable diagnostic", duplicate.errors.front().code,
+                      std::string("view.attribute.duplicate"));
+
+        const rdui::ViewBuildResult invalid_id = factory.createFromString("<panel id=\"bad_id\"/>", "id.xml");
+        ensure("non-kebab Widget ID is rejected", !invalid_id.ok());
+        ensure_equals("invalid ID diagnostic is stable", invalid_id.errors.front().code,
+                      std::string("view.id.invalid"));
+
+        const rdui::ViewBuildResult invalid_class = factory.createFromString(
+            "<panel class=\"BadClass\"/>", "class.xml");
+        ensure("non-kebab Widget class is rejected", !invalid_class.ok());
+        ensure_equals("invalid class diagnostic is stable", invalid_class.errors.front().code,
+                      std::string("view.class.invalid"));
+
+        const rdui::ViewBuildResult invalid_action = factory.createFromString(
+            "<button onClick=\"bad_action\"/>", "action-name.xml");
+        ensure("non-kebab Action is rejected", !invalid_action.ok());
+        ensure_equals("invalid Action diagnostic is stable", invalid_action.errors.front().code,
+                      std::string("view.action.name_invalid"));
+
+        ensure("Icon name alias is removed", !factory.createFromString("<icon name=\"search\"/>").ok());
+        ensure("Icon icon alias is removed", !factory.createFromString("<icon icon=\"search\"/>").ok());
+        ensure("legacy qualified header element is removed",
+               !factory.createFromString("<floater><floater.header/></floater>").ok());
     }
 
 }

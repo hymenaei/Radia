@@ -25,13 +25,13 @@ namespace rdui
 
     Switch::Switch() : Widget(ELEMENT)
     {
-        detail::instantiateCompositeParts(*this, detail::WidgetContractRegistry::toggleSwitch());
+        detail::instantiateCompositeParts(*this, detail::switchContract());
     }
 
     void Switch::onChildrenCleared()
     {
         mThumb.set(nullptr);
-        detail::instantiateCompositeParts(*this, detail::WidgetContractRegistry::toggleSwitch());
+        detail::instantiateCompositeParts(*this, detail::switchContract());
     }
 
     Switch& Switch::setChecked(bool checked)
@@ -60,7 +60,7 @@ namespace rdui
         style.justify_content = checked() ? JustifyContent::End : JustifyContent::Start;
     }
 
-    WidgetContract detail::WidgetContractRegistry::toggleSwitch()
+    WidgetContract detail::switchContract()
     {
         return defineWidget<Switch>(Switch::ELEMENT)
             .attributes({booleanAttribute("checked", &Switch::setChecked)})

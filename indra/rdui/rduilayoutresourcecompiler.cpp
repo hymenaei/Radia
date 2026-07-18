@@ -1,5 +1,6 @@
 #include "linden_common.h"
 #include "rduilayoutresourcecompiler.h"
+#include "rduiwidgetcatalog.h"
 #include "rdbutton.h"
 #include "rdfloater.h"
 #include "rdicon.h"
@@ -9,7 +10,6 @@
 #include <algorithm>
 #include <cctype>
 #include <functional>
-#include <iterator>
 #include <unordered_set>
 
 namespace rdui
@@ -24,17 +24,6 @@ namespace rdui
 
     namespace
     {
-        template<typename DestinationT, typename SourceT>
-        void appendDiagnostics(DestinationT& destination, SourceT&& source)
-        {
-            destination.warnings.insert(destination.warnings.end(),
-                                        std::make_move_iterator(source.warnings.begin()),
-                                        std::make_move_iterator(source.warnings.end()));
-            destination.errors.insert(destination.errors.end(),
-                                      std::make_move_iterator(source.errors.begin()),
-                                      std::make_move_iterator(source.errors.end()));
-        }
-
         std::string textKey(const std::string& text)
         {
             const auto first = std::find_if_not(text.begin(), text.end(), [](unsigned char character) { return std::isspace(character); });
@@ -150,7 +139,7 @@ namespace rdui
         ViewBuildResult result;
         const std::string source = normalizeResource(source_name);
         LayoutDocumentParseResult parsed = LayoutDocumentParser().parse(xml, source);
-        appendDiagnostics(result, std::move(parsed));
+        result.append(std::move(parsed));
         if (!parsed.document) return result;
 
         BuildState state;
@@ -180,16 +169,18 @@ namespace rdui
 
     void LayoutResourceCompiler::loadWidgetDefaults(const std::string& element, BuildState& state) const
     {
-        if (state.widget_defaults.find(element) != state.widget_defaults.end()) return;
-        const auto contract = mWidgetContracts.find(element);
-        const std::string default_resource = "widgets/" + element + ".xml";
+        const std::string lookup = schemaNameKey(element);
+        if (state.widget_defaults.find(lookup) != state.widget_defaults.end()) return;
+        const auto contract = mWidgetContracts.find(lookup);
+        const std::string canonical = contract == mWidgetContracts.end() ? element : contract->second.element;
+        const std::string default_resource = "widgets/" + canonical + ".xml";
         const LayoutNode* default_root = nullptr;
         if (contract == mWidgetContracts.end())
         {
             state.result.error("view.defaults.element_unknown",
-                               "Widget Defaults target an unsupported element: " + element + ".",
+                               "Widget Defaults target an unsupported element: " + canonical + ".",
                                default_resource);
-            state.widget_defaults.emplace(element, nullptr);
+            state.widget_defaults.emplace(lookup, nullptr);
             return;
         }
 
@@ -198,15 +189,15 @@ namespace rdui
             const auto document = mDocuments->find(default_resource);
             if (document == mDocuments->end() || !document->second || !document->second->root)
             {
-                state.widget_defaults.emplace(element, nullptr);
+                state.widget_defaults.emplace(lookup, nullptr);
                 return;
             }
             default_root = document->second->root.get();
             const std::size_t errors_before = state.result.errors.size();
             const LayoutElement defaults(*default_root);
-            if (default_root->name != element)
+            if (schemaNameKey(default_root->name) != lookup)
             {
-                state.result.error("view.defaults.root_invalid", "Widget Defaults root must be <" + element + ">.", default_resource,
+                state.result.error("view.defaults.root_invalid", "Widget Defaults root must be <" + canonical + ">.", default_resource,
                                    default_root->source.begin.line, default_root->source.begin.column);
                 default_root = nullptr;
             }
@@ -221,7 +212,7 @@ namespace rdui
                 validateViewAttributes(defaults, contract->second.attributes, state.result, default_resource);
                 std::string ignored;
                 if (readViewAttribute(defaults, "id", ignored) || readViewAttribute(defaults, "filename", ignored)
-                    || readViewAttribute(defaults, "long_click_delay", ignored))
+                    || readViewAttribute(defaults, "longClickDelay", ignored))
                 {
                     state.result.error("view.defaults.controller_attribute", "Widget Defaults cannot declare IDs, includes, or controller behavior.", default_resource);
                     default_root = nullptr;
@@ -249,7 +240,7 @@ namespace rdui
             }
             if (state.result.errors.size() != errors_before) default_root = nullptr;
         }
-        state.widget_defaults.emplace(element, default_root);
+        state.widget_defaults.emplace(lookup, default_root);
     }
 
     std::unique_ptr<Widget> LayoutResourceCompiler::createResourceWidget(const std::string& filename, BuildState& state) const
@@ -303,17 +294,18 @@ namespace rdui
         buildNode = [&](const LayoutNode& layout_node, const std::string& current_source,
                         std::unique_ptr<Widget> node) -> std::unique_ptr<Widget>
         {
-            const std::string& tag = layout_node.name;
-            const auto contract = mWidgetContracts.find(tag);
+            const std::string lookup = schemaNameKey(layout_node.name);
+            const auto contract = mWidgetContracts.find(lookup);
             if (contract == mWidgetContracts.end())
             {
-                state.result.error("view.element.unknown", "Unsupported XML element: " + tag + ".", current_source,
+                state.result.error("view.element.unknown", "Unsupported XML element: " + layout_node.name + ".", current_source,
                                    layout_node.source.begin.line, layout_node.source.begin.column);
                 return nullptr;
             }
+            const std::string& tag = contract->second.element;
 
             loadWidgetDefaults(tag, state);
-            const LayoutNode* defaults = state.widget_defaults.find(tag)->second;
+            const LayoutNode* defaults = state.widget_defaults.find(lookup)->second;
             const LayoutElement element(layout_node, defaults);
             std::string filename;
             if (tag != Panel::ELEMENT && readViewAttribute(element, "filename", filename))
@@ -389,7 +381,7 @@ namespace rdui
 
                 const LayoutNode& child_node = *content.element;
                 const LayoutElement child(child_node);
-                const auto part_contract = contract->second.part_attributes.find(child.name());
+                const auto part_contract = contract->second.part_attributes.find(schemaNameKey(child.name()));
                 if (part_contract != contract->second.part_attributes.end())
                     validateViewAttributes(child, part_contract->second, state.result, current_source);
                 if (contract->second.child_container)

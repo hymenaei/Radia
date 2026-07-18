@@ -1,5 +1,6 @@
 #include "linden_common.h"
 #include "rduilayoutdocument.h"
+#include "rduischema.h"
 #include <expat.h>
 #include <limits>
 
@@ -7,10 +8,11 @@ namespace rdui
 {
     const LayoutAttribute* LayoutElement::attribute(const std::string& name) const
     {
-        const auto found = mNode.attributes.find(name);
+        const std::string key = schemaNameKey(name);
+        const auto found = mNode.attributes.find(key);
         if (found != mNode.attributes.end()) return &found->second;
         if (!mDefaults) return nullptr;
-        const auto default_value = mDefaults->attributes.find(name);
+        const auto default_value = mDefaults->attributes.find(key);
         return default_value == mDefaults->attributes.end() ? nullptr : &default_value->second;
     }
 
@@ -19,6 +21,7 @@ namespace rdui
         struct ParserState
         {
             XML_Parser parser = nullptr;
+            DiagnosticResult* result = nullptr;
             std::unique_ptr<LayoutDocument> document;
             std::vector<LayoutNode*> elements;
         };
@@ -56,10 +59,17 @@ namespace rdui
             for (const XML_Char** attribute = attributes; attribute && *attribute; attribute += 2)
             {
                 LayoutAttribute value;
+                value.authored_name = attribute[0];
                 value.value = attribute[1] ? attribute[1] : "";
                 value.source.begin = node->source.begin;
                 value.source.end = node->source.begin;
-                node->attributes.emplace(attribute[0], std::move(value));
+                const std::string key = schemaNameKey(value.authored_name);
+                if (!node->attributes.emplace(key, std::move(value)).second && state.result)
+                {
+                    state.result->error("view.attribute.duplicate",
+                                        "Attributes differing only by ASCII case are duplicate declarations.",
+                                        state.document->source, node->source.begin.line, node->source.begin.column);
+                }
             }
 
             LayoutNode* next = node.get();
@@ -117,6 +127,7 @@ namespace rdui
         ParserState state;
         state.document = std::make_unique<LayoutDocument>();
         state.document->source = source;
+        state.result = &result;
         state.parser = XML_ParserCreate(nullptr);
         if (!state.parser)
         {

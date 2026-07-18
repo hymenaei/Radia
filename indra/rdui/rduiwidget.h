@@ -33,7 +33,6 @@ namespace rdui
     namespace detail
     {
         class WidgetCompilerAccess;
-        class WidgetContractRegistry;
     }
 
     template<typename WidgetT>

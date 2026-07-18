@@ -46,7 +46,7 @@ namespace rdui
         context.paintText(mText.value(), rect(), style);
     }
 
-    WidgetContract detail::WidgetContractRegistry::label()
+    WidgetContract detail::labelContract()
     {
         return defineWidget<Label>(Label::ELEMENT)
             .widgetText([](std::string value, Label& label, ViewBuildResult& result,

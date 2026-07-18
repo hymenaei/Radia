@@ -11,8 +11,10 @@
 #include "rdfloater.h"
 #include "rdbutton.h"
 #include "rduidetachedfloatermanager.h"
+#include "rduidetachedfloaterwindow.h"
 #include "rduifloaterdocumentmanager.h"
 #include "rduifloaterplacementstore.h"
+#include "rduifloaterstatestore.h"
 #include "rduiinputbridge.h"
 #include "rduinativewindow.h"
 #include "rduiskincompiler.h"
@@ -50,354 +52,6 @@ namespace
         return result;
     }
 
-    class SavedSettingsFloaterPlacementPersistence final
-        : public rdui::viewer::FloaterPlacementStore::Persistence
-    {
-        public:
-            LLSD read() const override
-            {
-                return gSavedSettings.getLLSD("RduiFloaterPlacements");
-            }
-
-            void write(const LLSD& placements) override
-            {
-                gSavedSettings.setLLSD("RduiFloaterPlacements", placements);
-            }
-    };
-
-    std::vector<rdui::viewer::FloaterDocumentId> savedOpenFloaters()
-    {
-        std::vector<rdui::viewer::FloaterDocumentId> result;
-        const LLSD saved = gSavedSettings.getLLSD("RduiOpenFloaters");
-        if (!saved.isArray())
-        {
-            LL_WARNS("rdui") << "RduiOpenFloaters is not an array; ignoring it." << LL_ENDL;
-            return result;
-        }
-
-        for (LLSD::array_const_iterator entry = saved.beginArray(); entry != saved.endArray(); ++entry)
-        {
-            if (!entry->isMap()) continue;
-            const std::string definition_id = (*entry)["definition"].asString();
-            if (definition_id.empty()) continue;
-            result.push_back({definition_id, (*entry)["instance"].asString()});
-        }
-        return result;
-    }
-
-    void saveOpenFloaters(const std::vector<rdui::viewer::FloaterDocumentId>& documents)
-    {
-        LLSD saved = LLSD::emptyArray();
-        for (const rdui::viewer::FloaterDocumentId& document : documents)
-        {
-            LLSD entry = LLSD::emptyMap();
-            entry["definition"] = document.definitionId;
-            entry["instance"] = document.instanceKey;
-            saved.append(std::move(entry));
-        }
-        gSavedSettings.setLLSD("RduiOpenFloaters", saved);
-    }
-
-    class DetachedFloater final : public rdui::viewer::DetachedFloaterPresentation,
-                                  public RduiNativeWindowClient,
-                                  private rdui::SurfaceFloaterDelegate
-    {
-        public:
-            DetachedFloater(RduiNativeWindowFactory& native_windows,
-                            rdui::System& system, rdui::viewer::DetachedFloaterManager& manager,
-                            std::unique_ptr<rdui::Floater> floater)
-                          : mNativeWindows(native_windows), mManager(manager), mPaintContext(gRduiProgram, system),
-                            mSurface(system.createSurface(mPaintContext)), mFloater(floater.get())
-            {
-                mSurface->setFloaterDelegate(this);
-                mSurface->mountFloater(std::move(floater));
-            }
-
-            bool open(const RduiNativeRect& rect, float scale_multiplier,
-                      const std::optional<rdui::Vec2>& drag_offset,
-                      const std::optional<rdui::Vec2>& logical_size = std::nullopt,
-                      const std::optional<RduiNativePoint>& drag_cursor = std::nullopt) override
-            {
-                mWindow = mNativeWindows.create(rect, mFloater->title(), *this);
-                if (!mWindow) return false;
-                mWindow->setScaleMultiplier(scale_multiplier);
-                rdui::Vec2 size = logical_size.value_or(rdui::Vec2{mFloater->rect().w, mFloater->rect().h});
-                if (mFloater->canResize())
-                {
-                    const rdui::Vec2 minimum = mSurface->minimumFloaterSize(*mFloater);
-                    size.x = std::max(size.x, minimum.x);
-                    size.y = std::max(size.y, minimum.y);
-                }
-                mLogicalSize = size;
-                mWindow->setLogicalSize(size.x, size.y);
-                const RduiNativeRect actual_rect = mWindow->rect();
-                const float scale = mWindow->scale();
-                const float width = static_cast<float>(actual_rect.width) / scale;
-                const float height = static_cast<float>(actual_rect.height) / scale;
-                mSurface->setViewport(width, height);
-                mSurface->placeFloater(*mFloater, {0.f, 0.f, width, height});
-                mSurface->updateLayout();
-                mNativeTitle = mFloater->title();
-                // Taking focus here makes the main viewer process focus loss in
-                // the middle of the pointer handoff. Capture is sufficient for
-                // the continuing drag; later clicks activate the window normally.
-                mWindow->show(false);
-                // Fill the companion window before returning to the viewer's
-                // input loop so breakaway does not expose an empty native frame.
-                mWindow->render();
-                if (drag_offset) mWindow->beginDrag(drag_offset->x, drag_offset->y, drag_cursor);
-                return true;
-            }
-
-            bool beginResize() override
-            {
-                if (!mWindow) return false;
-                mWindow->beginResize();
-                return true;
-            }
-
-            void applyResize(const rdui::Rect& logical_rect) override
-            {
-                if (!mWindow) return;
-                mLogicalSize = {logical_rect.w, logical_rect.h};
-                mWindow->setLogicalRect(logical_rect);
-            }
-
-            void tick() override
-            {
-                if (!mWindow) return;
-                const auto now = std::chrono::steady_clock::now();
-                mWindow->pump();
-                if (mFloater && mFloater->title() != mNativeTitle)
-                {
-                    mNativeTitle = mFloater->title();
-                    mWindow->setTitle(mNativeTitle);
-                }
-                if (mLastTick != std::chrono::steady_clock::time_point())
-                    mSurface->update(std::chrono::duration_cast<std::chrono::milliseconds>(now - mLastTick));
-                mLastTick = now;
-                if (!mCloseRequested && !mMinimizeRequested
-                    && (mSurface->needsPaint() || nativePresentationChanged()))
-                    mWindow->render();
-            }
-
-            void setVisible(bool visible) override
-            {
-                if (mWindow) mWindow->setVisible(visible);
-                if (!visible) mSurface->clearInteractionState();
-            }
-
-            std::unique_ptr<rdui::Floater> releaseFloater() override
-            {
-                if (!mFloater) return nullptr;
-                std::unique_ptr<rdui::Floater> floater = mSurface->unmountFloater(*mFloater);
-                mFloater.set(nullptr);
-                return floater;
-            }
-
-            rdui::Floater& replaceFloater(std::unique_ptr<rdui::Floater> replacement,
-                                          const std::optional<rdui::Vec2>& logical_size) override
-            {
-                if (mFloater) mSurface->unmountFloater(*mFloater);
-                if (logical_size && mWindow)
-                {
-                    rdui::Vec2 size = *logical_size;
-                    if (replacement->canResize())
-                    {
-                        const rdui::Vec2 minimum = mSurface->minimumFloaterSize(*replacement);
-                        size.x = std::max(size.x, minimum.x);
-                        size.y = std::max(size.y, minimum.y);
-                    }
-                    mLogicalSize = size;
-                    mWindow->setLogicalSize(size.x, size.y);
-                    const RduiNativeRect native = mWindow->rect();
-                    const float scale = mWindow->scale();
-                    mSurface->setViewport(static_cast<float>(native.width) / scale,
-                                          static_cast<float>(native.height) / scale);
-                }
-                replacement->setRect({0.f, 0.f, mSurface->width(), mSurface->height()});
-                rdui::Floater& mounted = mSurface->mountFloater(std::move(replacement));
-                mSurface->placeFloater(mounted, {0.f, 0.f, mSurface->width(), mSurface->height()});
-                mSurface->updateLayout();
-                mFloater.set(&mounted);
-                mNativeTitle.clear();
-                return mounted;
-            }
-
-            rdui::viewer::NativeInputDispatchResult dispatchNative(
-                const rdui::viewer::NativeInputEvent& event) override
-            {
-                const rdui::viewer::SurfaceInputEvent translated = INPUT_BRIDGE.translate(event);
-                if (const auto* pointer = std::get_if<rdui::viewer::SurfacePointerInput>(&translated))
-                {
-                    if (pointer->phase == rdui::viewer::NativePointerPhase::Leave)
-                    {
-                        mSurface->pointerLeave();
-                        return {};
-                    }
-                    const bool handled = pointer->phase == rdui::viewer::NativePointerPhase::Move
-                        ? mSurface->pointerMove(pointer->event)
-                        : pointer->phase == rdui::viewer::NativePointerPhase::Down
-                            ? mSurface->pointerDown(pointer->event)
-                            : mSurface->pointerUp(pointer->event);
-                    if (pointer->phase == rdui::viewer::NativePointerPhase::Down
-                        && pointer->event.button == rdui::PointerButton::Left
-                        && mFloater->dragging())
-                    {
-                        mSurface->clearInteractionState();
-                        if (mWindow) mWindow->beginDrag(pointer->event.position.x, pointer->event.position.y);
-                        return {true, UI_CURSOR_ARROW};
-                    }
-                    return {handled, handled
-                        ? std::optional<ECursorType>(INPUT_BRIDGE.translateCursor(mSurface->cursor()))
-                        : std::nullopt};
-                }
-                if (const auto* scroll = std::get_if<rdui::ScrollEvent>(&translated))
-                    return {mSurface->scroll(*scroll), std::nullopt};
-                if (const auto* key = std::get_if<rdui::viewer::SurfaceKeyInput>(&translated))
-                {
-                    return {key->down ? mSurface->keyDown(key->event) : mSurface->keyUp(key->event), std::nullopt};
-                }
-                if (const auto* character = std::get_if<rdui::viewer::SurfaceCharacterInput>(&translated))
-                    return {mSurface->charInput(character->codepoint), std::nullopt};
-                if (std::holds_alternative<rdui::viewer::NativeInteractionLoss>(translated))
-                    mSurface->clearInteractionState();
-                return {};
-            }
-
-            void paintNative(S32 pixel_width, S32 pixel_height, F32 scale) override
-            {
-                if (!mFloater || pixel_width <= 0 || pixel_height <= 0) return;
-                mLastPaintWidth = pixel_width;
-                mLastPaintHeight = pixel_height;
-                mLastPaintScale = scale;
-                const float width = static_cast<float>(pixel_width) / scale;
-                const float height = static_cast<float>(pixel_height) / scale;
-                if (mSurface->width() != width || mSurface->height() != height)
-                {
-                    mSurface->setViewport(width, height);
-                    mSurface->placeFloater(*mFloater, {0.f, 0.f, width, height});
-                    mSurface->updateLayout();
-                }
-
-                GLint framebuffer = 0;
-                GLint viewport[4]{};
-                GLfloat clear_color[4]{};
-                GLboolean color_mask[4]{};
-                glGetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
-                glGetIntegerv(GL_VIEWPORT, viewport);
-                glGetFloatv(GL_COLOR_CLEAR_VALUE, clear_color);
-                glGetBooleanv(GL_COLOR_WRITEMASK, color_mask);
-                const GLboolean scissor_enabled = glIsEnabled(GL_SCISSOR_TEST);
-                glViewport(0, 0, pixel_width, pixel_height);
-                glDisable(GL_SCISSOR_TEST);
-                glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-                glClearColor(0.f, 0.f, 0.f, 0.f);
-                glClear(GL_COLOR_BUFFER_BIT);
-                if (scissor_enabled) glEnable(GL_SCISSOR_TEST);
-
-                const LLRender::eMatrixMode previous_mode = gGL.getMatrixMode();
-                gGL.matrixMode(LLRender::MM_PROJECTION);
-                gGL.pushMatrix();
-                gGL.loadIdentity();
-                gGL.ortho(0.f, width, 0.f, height, -1.f, 1.f);
-                gGL.matrixMode(LLRender::MM_MODELVIEW);
-                gGL.pushMatrix();
-                gGL.loadIdentity();
-                gGL.pushUIMatrix();
-                gGL.loadUIIdentity();
-                gGL.blendFunc(LLRender::BF_SOURCE_ALPHA, LLRender::BF_ONE_MINUS_SOURCE_ALPHA, LLRender::BF_ONE, LLRender::BF_ONE_MINUS_SOURCE_ALPHA);
-                mSurface->refreshHover();
-                mSurface->paint(mPaintContext, scale);
-                gGL.setSceneBlendType(LLRender::BT_ALPHA);
-                gGL.popUIMatrix();
-                gGL.popMatrix();
-                gGL.matrixMode(LLRender::MM_PROJECTION);
-                gGL.popMatrix();
-                gGL.matrixMode(previous_mode);
-                gGL.flush();
-
-                glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
-                glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
-                glColorMask(color_mask[0], color_mask[1], color_mask[2], color_mask[3]);
-                glClearColor(clear_color[0], clear_color[1], clear_color[2], clear_color[3]);
-            }
-
-            void closeNative() override
-            {
-                if (mFloater) mFloater->close();
-            }
-
-            void nativeDragEnded() override { mDragEnded = true; }
-
-            void nativeResizeEnded(F32 logical_width, F32 logical_height) override
-            {
-                mLogicalSize = {logical_width, logical_height};
-                mResizeEnded = true;
-            }
-
-            bool closeRequested() const override { return mCloseRequested; }
-            bool minimizeRequested() const override { return mMinimizeRequested; }
-            bool takeDragEnded() override { return std::exchange(mDragEnded, false); }
-            bool takeResizeEnded() override { return std::exchange(mResizeEnded, false); }
-            rdui::Floater* floater() const override { return mFloater.get(); }
-            RduiNativeRect nativeRect() const override { return mWindow ? mWindow->rect() : RduiNativeRect{}; }
-            std::string monitorId() const override { return mWindow ? mWindow->monitorId() : std::string(); }
-            float scale() const { return mWindow ? mWindow->scale() : 1.f; }
-            rdui::Vec2 logicalSize() const override { return mLogicalSize; }
-
-            rdui::Vec2 headerCenterScreen() const override
-            {
-                if (!mWindow || !mFloater || !mFloater->header()) return {};
-                const RduiNativeRect window_rect = mWindow->rect();
-                const rdui::Rect header = mFloater->header()->rect();
-                return {window_rect.x + (header.x + header.w * 0.5f) * mWindow->scale(),
-                        window_rect.y + (mSurface->height() - header.y - header.h * 0.5f) * mWindow->scale()};
-            }
-
-        private:
-            void floaterClosed(rdui::Surface&, rdui::Floater&) override { mCloseRequested = true; }
-
-            void floaterMinimizedChanged(rdui::Surface&, rdui::Floater&, bool minimized) override
-            {
-                if (minimized) mMinimizeRequested = true;
-            }
-
-            bool beginNativeFloaterResize(rdui::Surface&, rdui::Floater&) override
-            {
-                return mFloater && mManager.beginResize(*mFloater);
-            }
-
-            void floaterResized(rdui::Surface&, rdui::Floater& floater, bool) override
-            {
-                mManager.applyResize(floater, floater.rect());
-            }
-
-            bool nativePresentationChanged() const
-            {
-                if (!mWindow) return false;
-                const RduiNativeRect native = mWindow->rect();
-                return native.width != mLastPaintWidth || native.height != mLastPaintHeight
-                    || mWindow->scale() != mLastPaintScale;
-            }
-
-            RduiNativeWindowFactory& mNativeWindows;
-            rdui::viewer::DetachedFloaterManager& mManager;
-            rdui::OpenGLPaintContext mPaintContext;
-            std::unique_ptr<rdui::Surface> mSurface;
-            rdui::WidgetRef<rdui::Floater> mFloater;
-            std::unique_ptr<RduiNativeWindow> mWindow;
-            bool mCloseRequested = false;
-            bool mMinimizeRequested = false;
-            bool mDragEnded = false;
-            bool mResizeEnded = false;
-            S32 mLastPaintWidth = 0;
-            S32 mLastPaintHeight = 0;
-            F32 mLastPaintScale = 0.f;
-            std::string mNativeTitle;
-            rdui::Vec2 mLogicalSize;
-            std::chrono::steady_clock::time_point mLastTick;
-    };
 
 }
 
@@ -408,15 +62,15 @@ namespace rdui::viewer
                                  private FloaterDocumentManager::Host
     {
         public:
-            explicit Impl(RduiNativeWindowFactory& native_windows = defaultRduiNativeWindowFactory())
-                         : mPlacementStore(mPlacementPersistence),
+            explicit Impl(NativeWindowFactory& native_windows = defaultNativeWindowFactory())
+                         : mPlacementStore(mFloaterStateStore.placementPersistence()),
                            mNativeWindows(native_windows),
                            mReloadCoordinator(mSystem, mResources),
                            mPaintContext(gRduiProgram, mSystem), mSurface(mSystem.createSurface(mPaintContext)),
                            mDetachedManager(*mSurface, mPlacementStore,
                                [this](std::unique_ptr<rdui::Floater>& floater)
                                {
-                                   return std::make_unique<DetachedFloater>(
+                                   return std::make_unique<DetachedFloaterWindow>(
                                        mNativeWindows, mSystem, mDetachedManager, std::move(floater));
                                }, *this),
                            mDocuments(mSystem, *this)
@@ -481,7 +135,7 @@ namespace rdui::viewer
             void restoreOpenFloaters()
             {
                 if (mInitialization != InitializationState::Ready || mSessionRestored) return;
-                for (const FloaterDocumentId& document : savedOpenFloaters())
+                for (const FloaterDocumentId& document : mFloaterStateStore.openDocuments())
                     openFloater(document.definitionId, document.instanceKey);
                 mSessionRestored = true;
                 persistOpenFloaters();
@@ -627,7 +281,7 @@ namespace rdui::viewer
                 if (!mSessionRestored) return;
                 const std::vector<FloaterDocumentId> documents = mDocuments.openDocuments();
                 if (mPersistedOpenDocuments && *mPersistedOpenDocuments == documents) return;
-                saveOpenFloaters(documents);
+                mFloaterStateStore.saveOpenDocuments(documents);
                 mPersistedOpenDocuments = documents;
             }
 
@@ -637,7 +291,7 @@ namespace rdui::viewer
                 if (mInitialization != InitializationState::Ready) return;
 
                 std::optional<rdui::viewer::SkinReloadResult> result = mReloadCoordinator.update(
-                    std::chrono::steady_clock::now(), mDocuments.reloadTargets());
+                    std::chrono::steady_clock::now(), mDocuments);
                 if (!result) return;
                 if (!result->ok())
                 {
@@ -763,7 +417,7 @@ namespace rdui::viewer
                         mDetachedManager.requestDetach(*identity, floater, desired, drag_offset);
             }
 
-            RduiNativeRect mainRectToNative(const rdui::Rect& rect) const override
+            NativeRect mainRectToNative(const rdui::Rect& rect) const override
             {
                 if (!gWindowp) return {};
                 LLCoordScreen top_left;
@@ -774,7 +428,7 @@ namespace rdui::viewer
                         std::abs(bottom_right.mX - top_left.mX), std::abs(bottom_right.mY - top_left.mY)};
             }
 
-            RduiNativePoint mainPointToNative(const rdui::Vec2& point) const
+            NativePoint mainPointToNative(const rdui::Vec2& point) const
             {
                 if (!gWindowp) return {};
                 const LLVector2 scale = gViewerWindow ? gViewerWindow->getDisplayScale() : LLVector2(1.f, 1.f);
@@ -787,12 +441,12 @@ namespace rdui::viewer
             float nativeScaleMultiplier() const override
             {
                 if (!gWindowp) return 1.f;
-                const RduiNativeRect sample = mainRectToNative({0.f, 0.f, 100.f, 100.f});
+                const NativeRect sample = mainRectToNative({0.f, 0.f, 100.f, 100.f});
                 const float effective_scale = sample.width > 0 ? static_cast<float>(sample.width) / 100.f : 1.f;
                 return effective_scale / std::max(0.25f, gWindowp->getSystemUISize());
             }
 
-            rdui::Vec2 nativeBottomLeftInMain(const RduiNativeRect& rect) const override
+            rdui::Vec2 nativeBottomLeftInMain(const NativeRect& rect) const override
             {
                 if (!gWindowp) return {};
                 LLCoordGL bottom_left;
@@ -811,16 +465,16 @@ namespace rdui::viewer
                     && point.y >= std::min(first.mY, second.mY) && point.y <= std::max(first.mY, second.mY);
             }
 
-            bool placementVisible(const RduiNativeRect& rect, const std::string& monitor_id) const override
+            bool placementVisible(const NativeRect& rect, const std::string& monitor_id) const override
             {
                 return mNativeWindows.placementVisible(rect, monitor_id);
             }
 
-            std::optional<RduiNativePoint> releasePointerForDetach(
+            std::optional<NativePoint> releasePointerForDetach(
                 const rdui::Vec2& main_position) override
             {
-                const std::optional<RduiNativePoint> cursor = gWindowp
-                    ? std::optional<RduiNativePoint>(mainPointToNative(main_position))
+                const std::optional<NativePoint> cursor = gWindowp
+                    ? std::optional<NativePoint>(mainPointToNative(main_position))
                     : std::nullopt;
                 clearDragCursorState();
                 if (gWindowp) gWindowp->releaseMouse();
@@ -944,9 +598,9 @@ namespace rdui::viewer
                 mSurface->refreshHover();
             }
 
-            SavedSettingsFloaterPlacementPersistence mPlacementPersistence;
+            FloaterStateStore mFloaterStateStore;
             rdui::viewer::FloaterPlacementStore mPlacementStore;
-            RduiNativeWindowFactory& mNativeWindows;
+            NativeWindowFactory& mNativeWindows;
             rdui::viewer::SkinResources mResources;
             rdui::System mSystem;
             rdui::viewer::SkinReloadCoordinator mReloadCoordinator;

@@ -2,7 +2,7 @@
 #define LL_RDUI_FLOATER_DEMO_H
 
 #include "rduibinder.h"
-#include "rduiskinreloadcoordinator.h"
+#include "rduifloatercontroller.h"
 #include <functional>
 
 namespace rdui
@@ -17,16 +17,16 @@ namespace rdui
     {
         class Runtime;
 
-        class FloaterDemo final : public ReloadableFloater
+        class FloaterDemo final : public FloaterController
         {
             public:
-                static constexpr const char* resourceId() { return "floater_demo.xml"; }
+                static constexpr const char* RESOURCE_ID = "floater_demo.xml";
                 explicit FloaterDemo(System& system,
                                      std::function<void()> reload_handler = {},
                                      std::function<bool()> authoring_mode_getter = {},
                                      std::function<void(bool)> authoring_mode_setter = {});
 
-                std::string reloadResourceId() const override { return resourceId(); }
+                std::string resourceId() const override { return RESOURCE_ID; }
                 PreparedBindingResult prepareBindings(Floater& floater) override;
                 void commitBindings(PreparedBinding&& binding) override;
                 void idle() override { refreshAuthoringModeControl(); }

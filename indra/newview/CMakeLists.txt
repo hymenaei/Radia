@@ -903,8 +903,10 @@ set(viewer_SOURCE_FILES
     noise.cpp
     pipeline.cpp
     rduidetachedfloatermanager.cpp
+    rduidetachedfloaterwindow.cpp
     rduifloaterdocumentmanager.cpp
     rduifloaterplacementstore.cpp
+    rduifloaterstatestore.cpp
     rduiinputbridge.cpp
     rduinativewindow.cpp
     rduiskinreloadcoordinator.cpp
@@ -1679,8 +1681,11 @@ set(viewer_HEADER_FILES
     noise.h
     pipeline.h
     rduidetachedfloatermanager.h
+    rduidetachedfloaterwindow.h
+    rduifloatercontroller.h
     rduifloaterdocumentmanager.h
     rduifloaterplacementstore.h
+    rduifloaterstatestore.h
     rduiinputbridge.h
     rduinativeinput.h
     rduiskinreloadcoordinator.h
@@ -2443,6 +2448,12 @@ if (BUILD_TESTING)
     rduidetachedfloatermanager.cpp
     PROPERTIES
     LL_TEST_ADDITIONAL_SOURCE_FILES rduifloaterplacementstore.cpp
+  )
+
+  set_source_files_properties(
+    rduiskinreloadcoordinator.cpp
+    PROPERTIES
+    LL_TEST_ADDITIONAL_SOURCE_FILES rduifloaterdocumentmanager.cpp
   )
 
   set_source_files_properties(

@@ -63,7 +63,7 @@ namespace rdui::viewer
             const DetachedFloaterPresentation& presentation = *entry.presentation;
             const Floater* floater = presentation.floater();
             if (!floater) return;
-            const RduiNativeRect rect = presentation.nativeRect();
+            const NativeRect rect = presentation.nativeRect();
             std::optional<FloaterPlacementSize> logical_size;
             if (floater->canResize())
                 logical_size = FloaterPlacementSize{presentation.logicalSize().x, presentation.logicalSize().y};
@@ -82,7 +82,7 @@ namespace rdui::viewer
             Floater& floater = *pending->floater;
             const Rect desired{pending->desired.x, pending->desired.y, floater.rect().w, floater.rect().h};
             const Rect attached_rect = floater.rect();
-            const std::optional<RduiNativePoint> drag_cursor =
+            const std::optional<NativePoint> drag_cursor =
                 environment.releasePointerForDetach(pending->desired + pending->dragOffset);
             std::unique_ptr<Floater> transferred = surface.unmountFloater(floater);
             if (!transferred)
@@ -125,7 +125,7 @@ namespace rdui::viewer
         {
             DetachedEntry& entry = detached[index];
             DetachedFloaterPresentation& presentation = *entry.presentation;
-            const RduiNativeRect native_rect = presentation.nativeRect();
+            const NativeRect native_rect = presentation.nativeRect();
             std::unique_ptr<Floater> floater = presentation.releaseFloater();
             if (!floater)
             {
@@ -254,7 +254,7 @@ namespace rdui::viewer
     bool DetachedFloaterManager::restore(const FloaterInstanceId& identity, Floater& floater,
                                          const DetachedFloaterPlacement& placement)
     {
-        const RduiNativeRect native{placement.x, placement.y, placement.width, placement.height};
+        const NativeRect native{placement.x, placement.y, placement.width, placement.height};
         if (native.width <= 0 || native.height <= 0
             || !mImpl->environment.placementVisible(native, placement.monitor)) return false;
 

@@ -1,13 +1,12 @@
 #include "llviewerprecompiledheaders.h"
 #include "rduiskinreloadcoordinator.h"
 
-#include "rdfloater.h"
+#include "rduifloaterdocumentmanager.h"
 #include "rduiskincompiler.h"
 #include "rduiskinresolver.h"
 #include "rduiskingeneration.h"
 #include "rduisystem.h"
 
-#include <algorithm>
 #include <utility>
 
 namespace rdui::viewer
@@ -23,19 +22,6 @@ namespace rdui::viewer
                 && left.layeredResources() == right.layeredResources();
         }
 
-        struct PendingDocument
-        {
-            std::unique_ptr<Floater> floater;
-            PreparedBinding binding;
-            ReloadableFloater* document = nullptr;
-            std::function<void(std::unique_ptr<Floater>)> install;
-        };
-
-        struct PendingCommit
-        {
-            std::vector<PendingDocument> documents;
-            bool committed = false;
-        };
     }
 
     class SkinReloadCoordinator::Impl
@@ -63,7 +49,7 @@ namespace rdui::viewer
             }
 
             std::optional<SkinReloadResult> update(
-                TimePoint now, const std::vector<FloaterReloadTarget>& targets)
+                TimePoint now, FloaterDocumentManager& documents)
             {
                 if (std::optional<SkinSnapshotResult> settled = poll(now))
                 {
@@ -77,7 +63,7 @@ namespace rdui::viewer
                     ? std::move(*mRequestedSnapshot) : mSnapshots.capture();
                 mRequestedSnapshot.reset();
                 acknowledge(captured.snapshot, now);
-                SkinReloadResult result = reload(std::move(captured), targets);
+                SkinReloadResult result = reload(std::move(captured), documents);
                 mRetryAfterAnyChange = !result.ok();
                 return result;
             }
@@ -140,17 +126,9 @@ namespace rdui::viewer
             }
 
             SkinReloadResult reload(SkinSnapshotResult captured,
-                                    const std::vector<FloaterReloadTarget>& targets)
+                                    FloaterDocumentManager& documents)
             {
                 SkinReloadResult result;
-                if (std::any_of(targets.begin(), targets.end(), [](const FloaterReloadTarget& target)
-                    { return !target.document || !target.install; }))
-                {
-                    result.error("reload.target.invalid", "Reload targets require a document and installation callback.");
-                    result.generation = mSystem.generation();
-                    return result;
-                }
-
                 const bool capture_ok = captured.ok();
                 result.append(std::move(captured));
                 if (!capture_ok)
@@ -168,47 +146,21 @@ namespace rdui::viewer
                     return result;
                 }
 
-                auto pending = std::make_shared<PendingCommit>();
-                pending->documents.reserve(targets.size());
-                for (const FloaterReloadTarget& target : targets)
+                FloaterDocumentManager::ReplacementResult replacement =
+                    documents.prepareReplacement(*prepared.generation, mSystem.activeLocale());
+                const bool replacement_ok = replacement.ok();
+                result.append(std::move(replacement));
+                if (!replacement_ok)
                 {
-                    ReloadableFloater& document = *target.document;
-                    const std::string resource_id = document.reloadResourceId();
-                    ViewBuildResult view = prepared.generation->createView(resource_id, mSystem.activeLocale());
-                    Floater* candidate = view.rootAs<Floater>();
-                    if (view.ok() && !candidate)
-                        view.error("view.root.type_mismatch", "Reloaded View must have a <floater> root.", resource_id);
-                    const bool view_ok = view.ok() && candidate;
-                    result.append(std::move(view));
-                    if (!view_ok)
-                    {
-                        result.generation = mSystem.generation();
-                        return result;
-                    }
-
-                    PreparedBindingResult binding = document.prepareBindings(*candidate);
-                    const bool binding_ok = binding.ok();
-                    result.append(std::move(binding));
-                    if (!binding_ok)
-                    {
-                        result.generation = mSystem.generation();
-                        return result;
-                    }
-
-                    pending->documents.push_back({
-                        std::unique_ptr<Floater>(static_cast<Floater*>(view.root.release())),
-                        std::move(binding.binding), &document, target.install});
+                    result.generation = mSystem.generation();
+                    return result;
                 }
 
-                mSystem.publish(std::move(prepared.generation), [pending]
+                mSystem.publish(std::move(prepared.generation), [&replacement]
                 {
-                    for (PendingDocument& document : pending->documents)
-                        document.install(std::move(document.floater));
-                    for (PendingDocument& document : pending->documents)
-                        document.document->commitBindings(std::move(document.binding));
-                    pending->committed = true;
+                    replacement.replacement.commit();
                 });
-                result.committed = pending->committed;
+                result.committed = !replacement.replacement;
                 result.generation = mSystem.generation();
                 return result;
             }
@@ -243,8 +195,8 @@ namespace rdui::viewer
     }
 
     std::optional<SkinReloadResult> SkinReloadCoordinator::update(
-        TimePoint now, const std::vector<FloaterReloadTarget>& targets)
+        TimePoint now, FloaterDocumentManager& documents)
     {
-        return mImpl->update(now, targets);
+        return mImpl->update(now, documents);
     }
 }

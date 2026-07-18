@@ -15,13 +15,13 @@ namespace rdui
 
 namespace rdui::viewer
 {
-    class ReloadableFloater;
+    class FloaterController;
 
     class Runtime final
     {
         public:
             using ControllerFactory =
-                std::function<std::unique_ptr<ReloadableFloater>(System& system)>;
+                std::function<std::unique_ptr<FloaterController>(System& system)>;
 
             Runtime();
             ~Runtime();

@@ -30,7 +30,7 @@ namespace tut
             bool resizeEnded = false;
             bool resizeStarted = false;
             int ticks = 0;
-            RduiNativeRect native{100, 200, 320, 240};
+            rdui::viewer::NativeRect native{100, 200, 320, 240};
             rdui::Vec2 logical{320.f, 240.f};
             rdui::Vec2 headerCenter{120.f, 220.f};
         };
@@ -41,10 +41,10 @@ namespace tut
                 FakePresentation(std::unique_ptr<rdui::Floater> floater, PresentationState& state)
                     : mFloater(std::move(floater)), mState(state) {}
 
-                bool open(const RduiNativeRect& rect, float,
+                bool open(const rdui::viewer::NativeRect& rect, float,
                           const std::optional<rdui::Vec2>&,
                           const std::optional<rdui::Vec2>& logical_size,
-                          const std::optional<RduiNativePoint>&) override
+                          const std::optional<rdui::viewer::NativePoint>&) override
                 {
                     mState.opened = true;
                     mState.native = rect;
@@ -75,7 +75,7 @@ namespace tut
                 bool takeDragEnded() override { return std::exchange(mState.dragEnded, false); }
                 bool takeResizeEnded() override { return std::exchange(mState.resizeEnded, false); }
                 rdui::Floater* floater() const override { return mFloater.get(); }
-                RduiNativeRect nativeRect() const override { return mState.native; }
+                rdui::viewer::NativeRect nativeRect() const override { return mState.native; }
                 std::string monitorId() const override { return "test-monitor"; }
                 rdui::Vec2 logicalSize() const override { return mState.logical; }
                 rdui::Vec2 headerCenterScreen() const override { return mState.headerCenter; }
@@ -87,20 +87,20 @@ namespace tut
 
         struct FakeEnvironment final : rdui::viewer::DetachedFloaterManager::Environment
         {
-            RduiNativeRect mainRectToNative(const rdui::Rect& rect) const override
+            rdui::viewer::NativeRect mainRectToNative(const rdui::Rect& rect) const override
             {
                 return {static_cast<S32>(rect.x), static_cast<S32>(rect.y),
                         static_cast<S32>(rect.w), static_cast<S32>(rect.h)};
             }
             float nativeScaleMultiplier() const override { return 1.f; }
-            rdui::Vec2 nativeBottomLeftInMain(const RduiNativeRect&) const override { return {15.f, 25.f}; }
+            rdui::Vec2 nativeBottomLeftInMain(const rdui::viewer::NativeRect&) const override { return {15.f, 25.f}; }
             bool nativePointInsideMain(const rdui::Vec2&) const override { return pointInside; }
-            bool placementVisible(const RduiNativeRect&, const std::string&) const override { return visiblePlacement; }
-            std::optional<RduiNativePoint> releasePointerForDetach(const rdui::Vec2& position) override
+            bool placementVisible(const rdui::viewer::NativeRect&, const std::string&) const override { return visiblePlacement; }
+            std::optional<rdui::viewer::NativePoint> releasePointerForDetach(const rdui::Vec2& position) override
             {
                 releasedPointer = true;
                 releasedAt = position;
-                return RduiNativePoint{77, 88};
+                return rdui::viewer::NativePoint{77, 88};
             }
 
             bool pointInside = false;
@@ -260,7 +260,7 @@ namespace tut
     void detached_floater_manager_object::test<8>()
     {
         set_test_name("logical resize geometry converts from one canonical baseline");
-        const RduiNativeRect native = rduiNativeRectForLogicalResize(
+        const rdui::viewer::NativeRect native = rdui::viewer::nativeRectForLogicalResize(
             {100, 200, 300, 240}, {-10.5f, 5.25f, 220.5f, 150.25f}, 1.5f);
 
         ensure_equals("left edge converts at current scale", native.x, 84);

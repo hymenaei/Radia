@@ -2,6 +2,7 @@
 #include "rduifloaterdocumentmanager.h"
 
 #include "rdfloater.h"
+#include "rduiskingeneration.h"
 #include "rduisystem.h"
 
 #include <map>
@@ -24,7 +25,7 @@ namespace rdui::viewer
         {
             Instance(std::string definition_id, std::string instance_key,
                      FloaterInstanceId instance_identity,
-                     std::unique_ptr<ReloadableFloater> instance_controller)
+                     std::unique_ptr<FloaterController> instance_controller)
                 : definitionId(std::move(definition_id)), instanceKey(std::move(instance_key)),
                   identity(std::move(instance_identity)),
                   controller(std::move(instance_controller)) {}
@@ -32,7 +33,7 @@ namespace rdui::viewer
             std::string definitionId;
             std::string instanceKey;
             FloaterInstanceId identity;
-            std::unique_ptr<ReloadableFloater> controller;
+            std::unique_ptr<FloaterController> controller;
             WidgetRef<Floater> floater;
         };
 
@@ -60,6 +61,24 @@ namespace rdui::viewer
         : mImpl(std::make_unique<Impl>(system, host)) {}
 
     FloaterDocumentManager::~FloaterDocumentManager() = default;
+
+    FloaterDocumentManager::PreparedReplacement::PreparedReplacement(
+        std::function<void()> commit)
+        : mCommit(std::move(commit)) {}
+
+    FloaterDocumentManager::PreparedReplacement::~PreparedReplacement() = default;
+    FloaterDocumentManager::PreparedReplacement::PreparedReplacement(
+        PreparedReplacement&&) noexcept = default;
+    FloaterDocumentManager::PreparedReplacement&
+        FloaterDocumentManager::PreparedReplacement::operator=(PreparedReplacement&&) noexcept = default;
+
+    bool FloaterDocumentManager::PreparedReplacement::commit()
+    {
+        if (!mCommit) return false;
+        std::function<void()> commit = std::exchange(mCommit, {});
+        commit();
+        return true;
+    }
 
     bool FloaterDocumentManager::registerDefinition(
         std::string definition_id, ControllerFactory factory)
@@ -91,7 +110,7 @@ namespace rdui::viewer
             return result;
         }
 
-        std::unique_ptr<ReloadableFloater> controller = definition->second(mImpl->system);
+        std::unique_ptr<FloaterController> controller = definition->second(mImpl->system);
         if (!controller)
         {
             result.error("floater.controller.missing",
@@ -100,7 +119,7 @@ namespace rdui::viewer
             return result;
         }
 
-        const std::string resource_id = controller->reloadResourceId();
+        const std::string resource_id = controller->resourceId();
         ViewBuildResult view = mImpl->system.createView(resource_id);
         Floater* candidate = view.rootAs<Floater>();
         if (view.ok() && !candidate)
@@ -158,19 +177,58 @@ namespace rdui::viewer
         return result;
     }
 
-    std::vector<FloaterReloadTarget> FloaterDocumentManager::reloadTargets()
+    FloaterDocumentManager::ReplacementResult FloaterDocumentManager::prepareReplacement(
+        const SkinGeneration& generation, const std::string& locale)
     {
-        std::vector<FloaterReloadTarget> result;
-        result.reserve(mImpl->instances.size());
+        struct PendingDocument
+        {
+            std::string identity;
+            std::unique_ptr<Floater> floater;
+            PreparedBinding binding;
+            FloaterController* controller = nullptr;
+        };
+
+        struct PendingCommit
+        {
+            std::vector<PendingDocument> documents;
+        };
+
+        ReplacementResult result;
+        auto pending = std::make_shared<PendingCommit>();
+        pending->documents.reserve(mImpl->instances.size());
         for (const auto& [identity, instance] : mImpl->instances)
         {
             if (!instance->floater) continue;
-            result.push_back({instance->controller.get(),
-                [this, identity](std::unique_ptr<Floater> replacement)
-                {
-                    mImpl->installReplacement(identity, std::move(replacement));
-                }});
+
+            FloaterController& controller = *instance->controller;
+            const std::string resource_id = controller.resourceId();
+            ViewBuildResult view = generation.createView(resource_id, locale);
+            Floater* candidate = view.rootAs<Floater>();
+            if (view.ok() && !candidate)
+                view.error("view.root.type_mismatch",
+                           "Reloaded View must have a <floater> root.", resource_id);
+            const bool view_ok = view.ok() && candidate;
+            result.append(std::move(view));
+            if (!view_ok) return result;
+
+            PreparedBindingResult binding = controller.prepareBindings(*candidate);
+            const bool binding_ok = binding.ok();
+            result.append(std::move(binding));
+            if (!binding_ok) return result;
+
+            pending->documents.push_back({identity,
+                std::unique_ptr<Floater>(static_cast<Floater*>(view.root.release())),
+                std::move(binding.binding), &controller});
         }
+
+        Impl* impl = mImpl.get();
+        result.replacement = PreparedReplacement([impl, pending]
+        {
+            for (PendingDocument& document : pending->documents)
+                impl->installReplacement(document.identity, std::move(document.floater));
+            for (PendingDocument& document : pending->documents)
+                document.controller->commitBindings(std::move(document.binding));
+        });
         return result;
     }
 

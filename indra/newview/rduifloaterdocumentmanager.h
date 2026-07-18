@@ -2,8 +2,8 @@
 #define LL_RDUI_FLOATER_DOCUMENT_MANAGER_H
 
 #include "rduidiagnostic.h"
+#include "rduifloatercontroller.h"
 #include "rduifloaterplacementstore.h"
-#include "rduiskinreloadcoordinator.h"
 
 #include <functional>
 #include <memory>
@@ -13,6 +13,7 @@
 namespace rdui
 {
     class Floater;
+    class SkinGeneration;
     class System;
 }
 
@@ -35,6 +36,31 @@ namespace rdui::viewer
     class FloaterDocumentManager final
     {
         public:
+            class PreparedReplacement final
+            {
+                public:
+                    PreparedReplacement() = default;
+                    ~PreparedReplacement();
+                    PreparedReplacement(PreparedReplacement&&) noexcept;
+                    PreparedReplacement& operator=(PreparedReplacement&&) noexcept;
+                    PreparedReplacement(const PreparedReplacement&) = delete;
+                    PreparedReplacement& operator=(const PreparedReplacement&) = delete;
+
+                    explicit operator bool() const { return static_cast<bool>(mCommit); }
+                    bool commit();
+
+                private:
+                    friend class FloaterDocumentManager;
+                    explicit PreparedReplacement(std::function<void()> commit);
+                    std::function<void()> mCommit;
+            };
+
+            struct ReplacementResult : DiagnosticResult
+            {
+                PreparedReplacement replacement;
+                bool ok() const { return !hasErrors() && replacement; }
+            };
+
             class Host
             {
                 public:
@@ -48,7 +74,7 @@ namespace rdui::viewer
             };
 
             using ControllerFactory =
-                std::function<std::unique_ptr<ReloadableFloater>(System& system)>;
+                std::function<std::unique_ptr<FloaterController>(System& system)>;
 
             FloaterDocumentManager(System& system, Host& host);
             ~FloaterDocumentManager();
@@ -62,7 +88,8 @@ namespace rdui::viewer
             const FloaterInstanceId* identity(const Floater& floater) const;
             std::vector<Floater*> floaters() const;
             std::vector<FloaterDocumentId> openDocuments() const;
-            std::vector<FloaterReloadTarget> reloadTargets();
+            ReplacementResult prepareReplacement(const SkinGeneration& generation,
+                                                 const std::string& locale);
             void idle();
             void reportReloadSucceeded();
             void reportReloadFailed(const DiagnosticResult& diagnostics);

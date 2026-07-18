@@ -2,9 +2,11 @@
 #include "../test/lltut.h"
 
 #include "../rduiskinreloadcoordinator.h"
+#include "../rduifloaterdocumentmanager.h"
 #include "../rduiskinresolver.h"
 
 #include "rdfloater.h"
+#include "rduiskincompiler.h"
 #include "rduisystem.h"
 
 #include <chrono>
@@ -58,14 +60,24 @@ namespace tut
             mutable int captures = 0;
         };
 
-        struct Document final : rdui::viewer::ReloadableFloater
+        struct ControllerState
         {
-            std::string reloadResourceId() const override { return "view.xml"; }
+            bool rejectBinding = false;
+            int prepares = 0;
+            int commits = 0;
+            rdui::Binding binding;
+        };
+
+        struct Controller final : rdui::viewer::FloaterController
+        {
+            explicit Controller(ControllerState& state) : mState(state) {}
+
+            std::string resourceId() const override { return "view.xml"; }
 
             rdui::PreparedBindingResult prepareBindings(rdui::Floater& floater) override
             {
-                ++prepares;
-                if (rejectBinding)
+                ++mState.prepares;
+                if (mState.rejectBinding)
                 {
                     rdui::PreparedBindingResult result;
                     result.error("binding.test.rejected", "Test binding rejected.");
@@ -77,31 +89,73 @@ namespace tut
 
             void commitBindings(rdui::PreparedBinding&& prepared) override
             {
-                binding = prepared.commit();
-                ++commits;
+                mState.binding = prepared.commit();
+                ++mState.commits;
             }
 
-            bool rejectBinding = false;
-            int prepares = 0;
-            int commits = 0;
-            rdui::Binding binding;
+            ControllerState& mState;
+        };
+
+        struct Host final : rdui::viewer::FloaterDocumentManager::Host
+        {
+            rdui::Floater* mount(const rdui::viewer::FloaterInstanceId& identity,
+                                 std::unique_ptr<rdui::Floater> floater) override
+            {
+                rdui::Floater* result = floater.get();
+                mounted.insert_or_assign(identity.value(), std::move(floater));
+                return result;
+            }
+
+            rdui::Floater* replace(const rdui::viewer::FloaterInstanceId& identity,
+                                   rdui::Floater& current,
+                                   std::unique_ptr<rdui::Floater> replacement) override
+            {
+                const auto found = mounted.find(identity.value());
+                if (found == mounted.end() || found->second.get() != &current) return nullptr;
+                rdui::Floater* result = replacement.get();
+                found->second = std::move(replacement);
+                ++replacements;
+                return result;
+            }
+
+            void show(rdui::Floater&) override {}
+
+            std::map<std::string, std::unique_ptr<rdui::Floater>> mounted;
+            int replacements = 0;
         };
 
         SnapshotSource snapshots;
         rdui::System system;
-        Document document;
+        Host host;
+        ControllerState document;
+        rdui::viewer::FloaterDocumentManager documents{system, host};
         rdui::viewer::SkinReloadCoordinator coordinator{system, snapshots};
-        std::unique_ptr<rdui::Floater> installed;
+
+        skin_reload_coordinator()
+        {
+            rdui::SkinGenerationPrepareResult prepared =
+                rdui::SkinCompiler().prepare(skinSnapshot());
+            if (prepared.ok()) system.publish(std::move(prepared.generation));
+            documents.registerDefinition("document", [this](rdui::System&)
+            {
+                return std::make_unique<Controller>(document);
+            });
+            documents.open("document");
+            document.prepares = 0;
+            document.commits = 0;
+            host.replacements = 0;
+        }
+
+        rdui::Floater* installed(const std::string& identity = "document") const
+        {
+            const auto found = host.mounted.find(identity);
+            return found == host.mounted.end() ? nullptr : found->second.get();
+        }
 
         std::optional<rdui::viewer::SkinReloadResult> update(
             rdui::viewer::SkinReloadCoordinator::TimePoint now = {})
         {
-            std::vector<rdui::viewer::FloaterReloadTarget> targets;
-            targets.push_back({&document, [this](std::unique_ptr<rdui::Floater> floater)
-                {
-                    installed = std::move(floater);
-                }});
-            return coordinator.update(now, targets);
+            return coordinator.update(now, documents);
         }
     };
 
@@ -120,9 +174,9 @@ namespace tut
 
         ensure("reload produced a result", result.has_value());
         ensure("reload committed", result->ok());
-        ensure_equals("generation published once", system.generation(), 1ULL);
-        ensure_equals("result reports generation", result->generation, 1ULL);
-        ensure("replacement installed", installed != nullptr);
+        ensure_equals("candidate generation published", system.generation(), 2ULL);
+        ensure_equals("result reports generation", result->generation, 2ULL);
+        ensure("replacement installed", installed() != nullptr);
         ensure_equals("binding prepared once", document.prepares, 1);
         ensure_equals("binding committed once", document.commits, 1);
         ensure("request consumed", !update().has_value());
@@ -134,7 +188,7 @@ namespace tut
         set_test_name("invalid candidate preserves the live generation and document");
         coordinator.request();
         ensure("baseline committed", update()->ok());
-        rdui::Floater* live = installed.get();
+        rdui::Floater* live = installed();
         const int prepares = document.prepares;
         const int commits = document.commits;
 
@@ -146,8 +200,8 @@ namespace tut
         ensure("rejection produced a result", rejected.has_value());
         ensure("invalid candidate rejected", !rejected->ok());
         ensure("diagnostics returned", !rejected->errors.empty());
-        ensure_equals("live generation preserved", system.generation(), 1ULL);
-        ensure("live Floater preserved", installed.get() == live);
+        ensure_equals("live generation preserved", system.generation(), 2ULL);
+        ensure("live Floater preserved", installed() == live);
         ensure_equals("binding preparation not reached", document.prepares, prepares);
         ensure_equals("binding commit not reached", document.commits, commits);
     }
@@ -157,13 +211,14 @@ namespace tut
     {
         set_test_name("binding rejection prevents publication and installation");
         document.rejectBinding = true;
+        rdui::Floater* live = installed();
         coordinator.request();
         const auto rejected = update();
 
         ensure("binding rejection returned", rejected.has_value());
         ensure("binding rejection failed", !rejected->ok());
-        ensure_equals("candidate was not published", system.generation(), 0ULL);
-        ensure("candidate was not installed", installed == nullptr);
+        ensure_equals("candidate was not published", system.generation(), 1ULL);
+        ensure("live document was preserved", installed() == live);
         ensure_equals("binding prepared", document.prepares, 1);
         ensure_equals("binding not committed", document.commits, 0);
         ensure_equals("binding diagnostic retained", rejected->errors.front().code,
@@ -184,7 +239,7 @@ namespace tut
         const auto settled = update(start + 500ms);
 
         ensure("settled snapshot committed", settled && settled->ok());
-        ensure_equals("one generation published", system.generation(), 1ULL);
+        ensure_equals("one candidate generation published", system.generation(), 2ULL);
         ensure_equals("one binding committed", document.commits, 1);
         ensure("acknowledged snapshot does not repeat", !update(start + 750ms).has_value());
     }
@@ -201,7 +256,7 @@ namespace tut
         ensure("resolution rejection returned", rejected.has_value());
         ensure("resolution rejection failed", !rejected->ok());
         ensure_equals("diagnostic retained", rejected->errors.front().code, std::string("skin.test.rejected"));
-        ensure_equals("generation not published", system.generation(), 0ULL);
+        ensure_equals("candidate generation not published", system.generation(), 1ULL);
         ensure_equals("binding not prepared", document.prepares, 0);
     }
 
@@ -235,7 +290,7 @@ namespace tut
         const auto settled = update(start + 1s);
 
         ensure("imported module edit reloads", settled && settled->ok());
-        ensure_equals("only dependency edit publishes again", system.generation(), 2ULL);
+        ensure_equals("only dependency edit publishes again", system.generation(), 3ULL);
     }
 
     template<> template<>
@@ -260,7 +315,7 @@ namespace tut
         ensure("new import waits to settle", !update(start + 250ms).has_value());
         const auto rejected = update(start + 500ms);
         ensure("invalid new dependency is rejected", rejected && !rejected->ok());
-        ensure_equals("rejection preserves live generation", system.generation(), 1ULL);
+        ensure_equals("rejection preserves live generation", system.generation(), 2ULL);
 
         snapshots.snapshot = importedStyleSnapshot(
             "@import \"new.radia\";",
@@ -270,30 +325,66 @@ namespace tut
         const auto recovered = update(start + 1s);
 
         ensure("fixed rejected dependency retries", recovered && recovered->ok());
-        ensure_equals("fixed candidate publishes", system.generation(), 2ULL);
+        ensure_equals("fixed candidate publishes", system.generation(), 3ULL);
     }
 
     template<> template<>
     void skin_reload_coordinator_object::test<8>()
     {
         set_test_name("one generation atomically replaces every open document");
-        Document second_document;
-        std::unique_ptr<rdui::Floater> second_installed;
-        std::vector<rdui::viewer::FloaterReloadTarget> targets{
-            {&document, [this](std::unique_ptr<rdui::Floater> floater)
-                { installed = std::move(floater); }},
-            {&second_document, [&second_installed](std::unique_ptr<rdui::Floater> floater)
-                { second_installed = std::move(floater); }},
-        };
+        ControllerState second_document;
+        ensure("second definition registered", documents.registerDefinition(
+            "second", [&second_document](rdui::System&)
+            {
+                return std::make_unique<skin_reload_coordinator::Controller>(second_document);
+            }));
+        ensure("second document opened", documents.open("second").ok());
+        second_document.prepares = 0;
+        second_document.commits = 0;
+        rdui::Floater* first_live = installed();
+        rdui::Floater* second_live = installed("second");
         coordinator.request();
 
-        const auto result = coordinator.update({}, targets);
+        const auto result = coordinator.update({}, documents);
 
         ensure("multi-document reload committed", result && result->ok());
-        ensure("first document installed", installed != nullptr);
-        ensure("second document installed", second_installed != nullptr);
+        ensure("first document replaced", installed() != first_live);
+        ensure("second document replaced", installed("second") != second_live);
         ensure_equals("first binding committed", document.commits, 1);
         ensure_equals("second binding committed", second_document.commits, 1);
-        ensure_equals("one generation published", system.generation(), 1ULL);
+        ensure_equals("one candidate generation published", system.generation(), 2ULL);
+    }
+
+    template<> template<>
+    void skin_reload_coordinator_object::test<9>()
+    {
+        set_test_name("one rejected binding rolls back every open document");
+        ControllerState rejected_document;
+        rejected_document.rejectBinding = true;
+        ensure("second definition registered", documents.registerDefinition(
+            "second", [&rejected_document](rdui::System&)
+            {
+                return std::make_unique<skin_reload_coordinator::Controller>(rejected_document);
+            }));
+        // Open succeeds before binding rejection is enabled for reload.
+        rejected_document.rejectBinding = false;
+        ensure("second document opened", documents.open("second").ok());
+        rejected_document.rejectBinding = true;
+        document.prepares = 0;
+        document.commits = 0;
+        rejected_document.prepares = 0;
+        rejected_document.commits = 0;
+        rdui::Floater* first_live = installed();
+        rdui::Floater* second_live = installed("second");
+        coordinator.request();
+
+        const auto result = coordinator.update({}, documents);
+
+        ensure("transaction rejected", result && !result->ok());
+        ensure("first document preserved", installed() == first_live);
+        ensure("second document preserved", installed("second") == second_live);
+        ensure_equals("live generation preserved", system.generation(), 1ULL);
+        ensure_equals("no binding committed", document.commits, 0);
+        ensure_equals("rejected binding not committed", rejected_document.commits, 0);
     }
 }

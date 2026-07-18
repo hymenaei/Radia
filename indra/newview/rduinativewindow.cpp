@@ -12,6 +12,13 @@
 #include <algorithm>
 #include <cmath>
 
+#endif
+
+namespace rdui::viewer
+{
+
+#if LL_WINDOWS
+
 namespace
 {
     constexpr wchar_t WINDOW_CLASS[] = L"RadiaDetachedFloater";
@@ -78,10 +85,10 @@ namespace
         }
     }
 
-    class Win32NativeWindow final : public RduiNativeWindow
+    class Win32NativeWindow final : public NativeWindow
     {
     public:
-        Win32NativeWindow(const RduiNativeRect& rect, const std::string& title, RduiNativeWindowClient& client)
+        Win32NativeWindow(const NativeRect& rect, const std::string& title, NativeWindowClient& client)
             : mClient(client)
         {
             registerClass();
@@ -234,14 +241,14 @@ namespace
                 return;
             }
 
-            const RduiNativeRect native = rduiNativeRectForLogicalResize(
+            const NativeRect native = nativeRectForLogicalResize(
                 mResizeInitialRect, logical, scale());
             SetWindowPos(mWindow, nullptr, native.x, native.y, native.width, native.height,
                          SWP_NOACTIVATE | SWP_NOZORDER);
         }
 
         void beginDrag(F32 logical_x, F32 logical_y,
-                       const std::optional<RduiNativePoint>& requested_cursor) override
+                       const std::optional<NativePoint>& requested_cursor) override
         {
             if (!mWindow) return;
             mLogicalDragOffset = {logical_x, logical_y};
@@ -274,7 +281,7 @@ namespace
             SetCapture(mWindow);
         }
 
-        RduiNativeRect rect() const override
+        NativeRect rect() const override
         {
             RECT value{};
             if (mWindow) GetWindowRect(mWindow, &value);
@@ -629,7 +636,7 @@ namespace
             return self ? self->handleMessage(message, wparam, lparam) : DefWindowProcW(window, message, wparam, lparam);
         }
 
-        RduiNativeWindowClient& mClient;
+        NativeWindowClient& mClient;
         HWND mWindow = nullptr;
         HWND mRenderWindow = nullptr;
         HDC mDC = nullptr;
@@ -641,7 +648,7 @@ namespace
         int mLayerHeight = 0;
         LLRenderTarget mRenderTarget;
         POINT mDragOffset{};
-        RduiNativeRect mResizeInitialRect;
+        NativeRect mResizeInitialRect;
         struct { F32 x = 0.f; F32 y = 0.f; } mLogicalDragOffset;
         F32 mDpiScale = 1.f;
         F32 mScaleMultiplier = 1.f;
@@ -655,14 +662,14 @@ namespace
     };
 }
 
-std::unique_ptr<RduiNativeWindow> RduiNativeWindow::create(
-    const RduiNativeRect& rect, const std::string& title, RduiNativeWindowClient& client)
+std::unique_ptr<NativeWindow> NativeWindow::create(
+    const NativeRect& rect, const std::string& title, NativeWindowClient& client)
 {
     auto window = std::make_unique<Win32NativeWindow>(rect, title, client);
     return window->valid() ? std::move(window) : nullptr;
 }
 
-bool RduiNativeWindow::placementVisible(const RduiNativeRect& rect, const std::string& monitor_id)
+bool NativeWindow::placementVisible(const NativeRect& rect, const std::string& monitor_id)
 {
     RECT native{rect.x, rect.y, rect.x + rect.width, rect.y + rect.height};
     HMONITOR monitor = MonitorFromRect(&native, MONITOR_DEFAULTTONULL);
@@ -671,13 +678,13 @@ bool RduiNativeWindow::placementVisible(const RduiNativeRect& rect, const std::s
 
 #else
 
-std::unique_ptr<RduiNativeWindow> RduiNativeWindow::create(
-    const RduiNativeRect&, const std::string&, RduiNativeWindowClient&)
+std::unique_ptr<NativeWindow> NativeWindow::create(
+    const NativeRect&, const std::string&, NativeWindowClient&)
 {
     return nullptr;
 }
 
-bool RduiNativeWindow::placementVisible(const RduiNativeRect&, const std::string&)
+bool NativeWindow::placementVisible(const NativeRect&, const std::string&)
 {
     return false;
 }
@@ -686,26 +693,28 @@ bool RduiNativeWindow::placementVisible(const RduiNativeRect&, const std::string
 
 namespace
 {
-    class DefaultRduiNativeWindowFactory final : public RduiNativeWindowFactory
+    class DefaultNativeWindowFactory final : public NativeWindowFactory
     {
         public:
-            std::unique_ptr<RduiNativeWindow> create(
-                const RduiNativeRect& rect, const std::string& title,
-                RduiNativeWindowClient& client) override
+            std::unique_ptr<NativeWindow> create(
+                const NativeRect& rect, const std::string& title,
+                NativeWindowClient& client) override
             {
-                return RduiNativeWindow::create(rect, title, client);
+                return NativeWindow::create(rect, title, client);
             }
 
-            bool placementVisible(const RduiNativeRect& rect,
+            bool placementVisible(const NativeRect& rect,
                                   const std::string& monitor_id) const override
             {
-                return RduiNativeWindow::placementVisible(rect, monitor_id);
+                return NativeWindow::placementVisible(rect, monitor_id);
             }
     };
 }
 
-RduiNativeWindowFactory& defaultRduiNativeWindowFactory()
+NativeWindowFactory& defaultNativeWindowFactory()
 {
-    static DefaultRduiNativeWindowFactory factory;
+    static DefaultNativeWindowFactory factory;
     return factory;
+}
+
 }

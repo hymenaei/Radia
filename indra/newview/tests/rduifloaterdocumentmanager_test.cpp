@@ -22,13 +22,13 @@ namespace tut
             int failed = 0;
         };
 
-        class Controller final : public rdui::viewer::ReloadableFloater
+        class Controller final : public rdui::viewer::FloaterController
         {
             public:
                 Controller(std::string resource, ControllerState& state)
                     : mResource(std::move(resource)), mState(state) {}
 
-                std::string reloadResourceId() const override { return mResource; }
+                std::string resourceId() const override { return mResource; }
                 rdui::PreparedBindingResult prepareBindings(rdui::Floater& floater) override
                 {
                     return rdui::Binder(floater).prepare();
@@ -79,6 +79,12 @@ namespace tut
 
         floater_document_manager() : manager(system, host)
         {
+            rdui::SkinGenerationPrepareResult prepared = prepareGeneration();
+            if (prepared.ok()) system.publish(std::move(prepared.generation));
+        }
+
+        static rdui::SkinGenerationPrepareResult prepareGeneration()
+        {
             rdui::ResourceSnapshot resources;
             resources.add("localization.xml",
                           "<localizations default=\"en\">"
@@ -87,8 +93,7 @@ namespace tut
             resources.add("skin.radia", "");
             resources.add("one.xml", "<floater/>");
             resources.add("two.xml", "<floater/>");
-            rdui::SkinGenerationPrepareResult prepared = rdui::SkinCompiler().prepare(std::move(resources));
-            if (prepared.ok()) system.publish(std::move(prepared.generation));
+            return rdui::SkinCompiler().prepare(std::move(resources));
         }
 
         bool registerOne(const std::string& definition = "one")
@@ -157,10 +162,12 @@ namespace tut
         const auto opened = manager.open("one");
         ensure("instance opened", opened.ok());
         rdui::Floater* original = opened.floater;
-        std::vector<rdui::viewer::FloaterReloadTarget> targets = manager.reloadTargets();
-        ensure_equals("one reload target", targets.size(), std::size_t(1));
-
-        targets.front().install(std::make_unique<rdui::Floater>());
+        rdui::SkinGenerationPrepareResult generation = prepareGeneration();
+        ensure("candidate generation prepared", generation.ok());
+        auto prepared = manager.prepareReplacement(*generation.generation, "en");
+        ensure("replacement prepared", prepared.ok());
+        ensure("replacement not installed before commit", manager.floaters().front() == original);
+        ensure("replacement transaction committed", prepared.replacement.commit());
         rdui::Floater* replacement = manager.floaters().front();
         manager.idle();
         manager.reportReloadSucceeded();

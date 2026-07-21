@@ -192,7 +192,7 @@ namespace rdui
     {
         if (mClosed || !mCanClose) return;
         mClosed = true;
-        mInteraction = FloaterInteraction::None;
+        mInteraction = FloaterInteraction::Idle;
         setVisibility(Visibility::Collapsed);
         if (Surface* surface = attachedSurface()) surface->floaterClosed(*this);
     }
@@ -298,7 +298,7 @@ namespace rdui
         if (event.button != PointerButton::Left || !mHeader || !mHeader->rect().contains(event.position) || overChromeButton(event.position)) return false;
         if (event.clickCount >= 2 && mCanMinimize)
         {
-            mInteraction = FloaterInteraction::None;
+            mInteraction = FloaterInteraction::Idle;
             toggleMinimized();
             return true;
         }
@@ -355,8 +355,8 @@ namespace rdui
     bool Floater::endPointerInteraction(const PointerEvent&)
     {
         const FloaterInteraction interaction = mInteraction;
-        const bool handled = interaction != FloaterInteraction::None;
-        mInteraction = FloaterInteraction::None;
+        const bool handled = interaction != FloaterInteraction::Idle;
+        mInteraction = FloaterInteraction::Idle;
         mDetachRequested = false;
         if (interaction == FloaterInteraction::Resize)
         {
@@ -377,7 +377,7 @@ namespace rdui
         mMinimizeButton.set(nullptr);
         mMinimizeButtonIcon.set(nullptr);
         mCustomHeaderClaimed = false;
-        mInteraction = FloaterInteraction::None;
+        mInteraction = FloaterInteraction::Idle;
         mDetachRequested = false;
         mMinimized = false;
         setState(WidgetState::Minimized, false);

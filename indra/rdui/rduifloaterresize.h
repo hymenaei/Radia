@@ -13,7 +13,7 @@ namespace rdui::detail
 
     enum class ResizeEdges : std::uint8_t
     {
-        None = 0,
+        NoEdges = 0,
         Left = 1,
         Right = 2,
         Bottom = 4,

@@ -1105,7 +1105,7 @@ bool LLViewerWindow::handleAnyMouseClick(LLWindow *window, LLCoordGL pos, MASK m
         // Indicate mouse was active
         LLUI::getInstance()->resetMouseIdleTimer();
 
-        rdui::viewer::NativePointerButton rdui_button = rdui::viewer::NativePointerButton::None;
+        rdui::viewer::NativePointerButton rdui_button = rdui::viewer::NativePointerButton::NoButton;
         U8 rdui_click_count = 1;
         switch (clicktype)
         {
@@ -1145,7 +1145,7 @@ bool LLViewerWindow::handleAnyMouseClick(LLWindow *window, LLCoordGL pos, MASK m
         }
 #endif
         const bool rdui_handled = mRduiRuntime
-            && rdui_button != rdui::viewer::NativePointerButton::None
+            && rdui_button != rdui::viewer::NativePointerButton::NoButton
             && mRduiRuntime->dispatch({rdui::viewer::NativePointerInput{
                    down ? rdui::viewer::NativePointerPhase::Down : rdui::viewer::NativePointerPhase::Up,
                    static_cast<F32>(x), static_cast<F32>(y),
@@ -1769,7 +1769,7 @@ void LLViewerWindow::handleMouseMove(LLWindow *window,  LLCoordGL pos, MASK mask
     {
         if (mRduiRuntime) mRduiRuntime->dispatch({rdui::viewer::NativePointerInput{
             rdui::viewer::NativePointerPhase::Move, static_cast<F32>(x), static_cast<F32>(y),
-            rdui::viewer::NativePointerButton::None, mask}});
+            rdui::viewer::NativePointerButton::NoButton, mask}});
     }
 
     mWindow->showCursorFromMouseMove();
@@ -3928,7 +3928,7 @@ void LLViewerWindow::updateUI()
         const rdui::viewer::NativeInputDispatchResult result =
             mRduiRuntime->dispatch({rdui::viewer::NativePointerInput{
                 rdui::viewer::NativePointerPhase::Move, static_cast<F32>(x), static_cast<F32>(y),
-                rdui::viewer::NativePointerButton::None, mask, 1,
+                rdui::viewer::NativePointerButton::NoButton, mask, 1,
                 static_cast<F32>(mCurrentRawMouseDelta.mX) / mDisplayScale.mV[VX],
                 static_cast<F32>(mCurrentRawMouseDelta.mY) / mDisplayScale.mV[VY]}});
         handled = result.handled;

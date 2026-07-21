@@ -17,7 +17,7 @@ namespace rdui::viewer
                 case NativePointerButton::Middle: return PointerButton::Middle;
                 case NativePointerButton::Button4: return PointerButton::Button4;
                 case NativePointerButton::Button5: return PointerButton::Button5;
-                default: return PointerButton::None;
+                default: return PointerButton::NoButton;
             }
         }
 

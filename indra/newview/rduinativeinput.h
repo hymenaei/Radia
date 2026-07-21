@@ -11,7 +11,7 @@ namespace rdui::viewer
 {
     enum class NativePointerButton : std::uint8_t
     {
-        None,
+        NoButton,
         Left,
         Right,
         Middle,
@@ -32,7 +32,7 @@ namespace rdui::viewer
         NativePointerPhase phase = NativePointerPhase::Move;
         float x = 0.f;
         float y = 0.f;
-        NativePointerButton button = NativePointerButton::None;
+        NativePointerButton button = NativePointerButton::NoButton;
         std::uint32_t modifiers = 0;
         std::uint8_t clickCount = 1;
         float dx = 0.f;

@@ -1,7 +1,11 @@
 #include "linden_common.h"
 #include "../test/lltut.h"
 
+#pragma push_macro("None")
+#undef None
+#define None 0L
 #include "rduifloaterresize.h"
+#pragma pop_macro("None")
 #include <array>
 #include <utility>
 
@@ -29,8 +33,8 @@ namespace tut
         }};
         for (const auto& [point, expected] : regions)
             ensure("all edge and corner regions classify", rdui::detail::resizeEdgesAt(bounds, point) == expected);
-        ensure("interior is not resizeable", rdui::detail::resizeEdgesAt(bounds, {70.f, 70.f}) == ResizeEdges::None);
-        ensure("outside is not resizeable", rdui::detail::resizeEdgesAt(bounds, {19.f, 70.f}) == ResizeEdges::None);
+        ensure("interior is not resizeable", rdui::detail::resizeEdgesAt(bounds, {70.f, 70.f}) == ResizeEdges::NoEdges);
+        ensure("outside is not resizeable", rdui::detail::resizeEdgesAt(bounds, {19.f, 70.f}) == ResizeEdges::NoEdges);
     }
 
     template<> template<>

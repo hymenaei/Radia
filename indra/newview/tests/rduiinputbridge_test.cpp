@@ -1,7 +1,11 @@
 #include "linden_common.h"
 #include "../test/lltut.h"
 
+#pragma push_macro("None")
+#undef None
+#define None 0L
 #include "../rduiinputbridge.h"
+#pragma pop_macro("None")
 
 #include "indra_constants.h"
 #include "llkeyboard.h"

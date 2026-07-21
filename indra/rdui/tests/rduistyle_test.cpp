@@ -1,5 +1,9 @@
 #include "linden_common.h"
 #include "../test/lltut.h"
+
+#pragma push_macro("None")
+#undef None
+#define None 0L
 #include "rdbutton.h"
 #include "rdfloater.h"
 #include "rdicon.h"
@@ -8,6 +12,7 @@
 #include "rduilayout.h"
 #include "rduistylesheet.h"
 #include "rduiviewcontract.h"
+#pragma pop_macro("None")
 
 namespace tut
 {
@@ -67,7 +72,7 @@ namespace tut
         ensure("nested stylesheet loads", theme.loadCss(
             "button { background-color: #101010ff; &:hover { background-color: #202020ff; } "
             "> icon { size: 16px; } &:hover > icon { stroke-width: 3px; } }").ok());
-        const uint8_t hover = rdui::WidgetState::Hovered | rdui::WidgetState::None;
+        const uint8_t hover = rdui::WidgetState::Hovered | rdui::WidgetState::Default;
         ensure_equals("nested state", theme.resolve("button", "", {}, hover).background_color.r, 32.f / 255.f);
         rdui::Button button;
         rdui::detail::WidgetCompilerAccess::setState(button, rdui::WidgetState::Hovered, true);
@@ -84,7 +89,7 @@ namespace tut
         theme.loadCss("panel { flow: row; pointer-events: none; } label { text-align: right; vertical-align: middle; pointer-events: auto; }");
         const rdui::Style panel = theme.resolve("panel", "", {}, 0);
         ensure_equals("row enum", static_cast<int>(panel.flow), static_cast<int>(rdui::Flow::Row));
-        ensure_equals("pointer enum", static_cast<int>(panel.pointer_events), static_cast<int>(rdui::PointerEvents::None));
+        ensure_equals("pointer enum", static_cast<int>(panel.pointer_events), static_cast<int>(rdui::PointerEvents::PassThrough));
         const rdui::Style label = theme.resolve("label", "", {}, 0);
         ensure_equals("horizontal enum", static_cast<int>(label.text_align), static_cast<int>(rdui::TextAlign::Right));
         ensure_equals("vertical enum", static_cast<int>(label.vertical_align), static_cast<int>(rdui::VerticalAlign::Center));

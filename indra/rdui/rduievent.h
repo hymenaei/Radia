@@ -29,7 +29,7 @@ namespace rdui
 
     enum class PointerButton : uint8_t
     {
-        None,
+        NoButton,
         Left,
         Right,
         Middle,
@@ -40,7 +40,7 @@ namespace rdui
     struct PointerEvent
     {
         Vec2 position;
-        PointerButton button = PointerButton::None;
+        PointerButton button = PointerButton::NoButton;
         uint32_t modifiers = 0;
         uint8_t clickCount = 1;
         Vec2 delta;

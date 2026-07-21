@@ -75,7 +75,7 @@ namespace rdui
             void onLocaleChanged(const System& system) override;
 
         private:
-            enum class FloaterInteraction : std::uint8_t { None, Move, Resize };
+            enum class FloaterInteraction : std::uint8_t { Idle, Move, Resize };
 
             struct ResizeInteraction
             {
@@ -124,7 +124,7 @@ namespace rdui
             bool mShowHeaderIdentity = true;
             bool mClosed = false;
             bool mMinimized = false;
-            FloaterInteraction mInteraction = FloaterInteraction::None;
+            FloaterInteraction mInteraction = FloaterInteraction::Idle;
             bool mOriginalSizeCaptured = false;
             bool mDetachRequested = false;
             bool mCustomHeaderClaimed = false;

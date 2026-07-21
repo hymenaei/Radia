@@ -181,7 +181,7 @@ namespace rdui
     enum class AlignItems { Normal, Start, Center, End, Stretch };
     enum class AlignSelf { Auto, Start, Center, End, Stretch };
     enum class Overflow { Visible, Hidden };
-    enum class PointerEvents { Default, Auto, None };
+    enum class PointerEvents { Default, Auto, PassThrough };
     enum class CursorStyle
     {
         Auto,
@@ -218,7 +218,7 @@ namespace rdui
 
     enum class InheritedStyleProperty : uint16_t
     {
-        None       = 0,
+        NotInherited = 0,
         FontFamily = 1 << 0,
         FontSize   = 1 << 1,
         FontWeight = 1 << 2,

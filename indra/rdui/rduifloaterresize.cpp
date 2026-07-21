@@ -7,7 +7,7 @@ namespace rdui::detail
 {
     ResizeEdges resizeEdgesAt(const Rect& bounds, const Vec2& point)
     {
-        if (!bounds.contains(point)) return ResizeEdges::None;
+        if (!bounds.contains(point)) return ResizeEdges::NoEdges;
 
         const bool corner_left = point.x <= bounds.left() + FLOATER_RESIZE_CORNER_SPAN;
         const bool corner_right = point.x >= bounds.right() - FLOATER_RESIZE_CORNER_SPAN;
@@ -23,7 +23,7 @@ namespace rdui::detail
         if (point.x >= bounds.right() - FLOATER_RESIZE_BORDER) return ResizeEdges::Right;
         if (point.y <= bounds.bottom() + FLOATER_RESIZE_BORDER) return ResizeEdges::Bottom;
         if (point.y >= bounds.top() - FLOATER_RESIZE_BORDER) return ResizeEdges::Top;
-        return ResizeEdges::None;
+        return ResizeEdges::NoEdges;
     }
 
     CursorStyle resizeCursor(ResizeEdges edges)

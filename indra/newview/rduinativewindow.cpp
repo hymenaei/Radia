@@ -503,7 +503,7 @@ namespace
                     updateDragPosition();
                 }
                 else dispatchPointer(rdui::viewer::NativePointerPhase::Move,
-                                     rdui::viewer::NativePointerButton::None, lparam);
+                                     rdui::viewer::NativePointerButton::NoButton, lparam);
                 return 0;
             case WM_MOUSELEAVE:
                 mTrackingMouse = false;

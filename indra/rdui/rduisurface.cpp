@@ -38,7 +38,7 @@ namespace rdui
         {
             const PointerEvents policy = resolveWidgetStyle(style_sheet, widget).pointer_events;
             if (policy == PointerEvents::Auto) return true;
-            if (policy == PointerEvents::None) return false;
+            if (policy == PointerEvents::PassThrough) return false;
             return widget.pointerEvents();
         }
 

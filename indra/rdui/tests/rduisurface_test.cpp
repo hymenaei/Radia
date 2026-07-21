@@ -478,7 +478,7 @@ namespace tut
         rdui::Binder binder(context.root());
         binder.onMouseDown("press", [&](const rdui::MouseActionEvent& event)
         {
-            ensure("mouse context reports button", event.mouse.button != rdui::PointerButton::None);
+            ensure("mouse context reports button", event.mouse.button != rdui::PointerButton::NoButton);
             events.push_back("down");
         });
         binder.onMouseUp("release", [&] { events.push_back("up"); });

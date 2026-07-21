@@ -103,7 +103,7 @@ namespace rdui
 
     enum class WidgetState : uint8_t
     {
-        None = 0,
+        Default = 0,
         Hovered = 1 << 0,
         Active = 1 << 1,
         Focused = 1 << 2,

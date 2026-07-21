@@ -41,7 +41,7 @@ namespace rdui
                 if (!floater || floater->visibility() != Visibility::Visible || floater->closed()
                     || !floater->canResize() || floater->minimized()) continue;
                 const detail::ResizeEdges hit = detail::resizeEdgesAt(floater->rect(), point);
-                if (hit == detail::ResizeEdges::None) continue;
+                if (hit == detail::ResizeEdges::NoEdges) continue;
                 edges = static_cast<std::uint8_t>(hit);
                 return floater;
             }

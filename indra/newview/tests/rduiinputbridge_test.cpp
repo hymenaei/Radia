@@ -1,11 +1,7 @@
 #include "linden_common.h"
 #include "../test/lltut.h"
 
-#pragma push_macro("None")
-#undef None
-#define None 0L
 #include "../rduiinputbridge.h"
-#pragma pop_macro("None")
 
 #include "indra_constants.h"
 #include "llkeyboard.h"
@@ -30,7 +26,7 @@ namespace tut
         const rdui::viewer::SurfaceInputEvent translated = bridge.translate(
             rdui::viewer::NativePointerInput{
                 rdui::viewer::NativePointerPhase::Down, 12.5f, 34.25f,
-                rdui::viewer::NativePointerButton::Button4,
+                rdui::viewer::NativePointerButton::Auxiliary1,
                 MASK_SHIFT | MASK_ALT, 2, 3.5f, -4.f});
 
         const auto* pointer = std::get_if<rdui::viewer::SurfacePointerInput>(&translated);
@@ -38,7 +34,7 @@ namespace tut
         ensure("phase preserved", pointer->phase == rdui::viewer::NativePointerPhase::Down);
         ensure_equals("fractional x remains canonical", pointer->event.position.x, 12.5f);
         ensure_equals("fractional y remains canonical", pointer->event.position.y, 34.25f);
-        ensure("button translated", pointer->event.button == rdui::PointerButton::Button4);
+        ensure("button translated", pointer->event.button == rdui::PointerButton::Auxiliary1);
         ensure_equals("modifiers translated", pointer->event.modifiers,
                       rdui::MODIFIER_SHIFT | rdui::MODIFIER_ALT);
         ensure_equals("click count preserved", pointer->event.clickCount, std::uint8_t{2});

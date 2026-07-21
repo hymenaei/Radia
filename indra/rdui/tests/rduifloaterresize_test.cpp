@@ -1,11 +1,7 @@
 #include "linden_common.h"
 #include "../test/lltut.h"
 
-#pragma push_macro("None")
-#undef None
-#define None 0L
 #include "rduifloaterresize.h"
-#pragma pop_macro("None")
 #include <array>
 #include <utility>
 

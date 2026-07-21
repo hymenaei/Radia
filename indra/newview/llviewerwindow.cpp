@@ -1123,10 +1123,10 @@ bool LLViewerWindow::handleAnyMouseClick(LLWindow *window, LLCoordGL pos, MASK m
                 rdui_button = rdui::viewer::NativePointerButton::Middle;
                 break;
             case CLICK_BUTTON4:
-                rdui_button = rdui::viewer::NativePointerButton::Button4;
+                rdui_button = rdui::viewer::NativePointerButton::Auxiliary1;
                 break;
             case CLICK_BUTTON5:
-                rdui_button = rdui::viewer::NativePointerButton::Button5;
+                rdui_button = rdui::viewer::NativePointerButton::Auxiliary2;
                 break;
             default:
                 break;

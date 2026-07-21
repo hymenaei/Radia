@@ -290,7 +290,7 @@ namespace tut
         context.root().addChild(std::move(button));
 
         for (rdui::PointerButton pointer_button : {rdui::PointerButton::Right, rdui::PointerButton::Middle,
-                                                   rdui::PointerButton::Button4, rdui::PointerButton::Button5})
+                                                   rdui::PointerButton::Auxiliary1, rdui::PointerButton::Auxiliary2})
         {
             ensure("non-left down is consumed over control", context.pointerDown({{15.f, 15.f}, pointer_button}));
             ensure("non-left up is consumed over control", context.pointerUp({{15.f, 15.f}, pointer_button}));

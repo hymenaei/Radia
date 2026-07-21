@@ -33,8 +33,8 @@ namespace rdui
         Left,
         Right,
         Middle,
-        Button4,
-        Button5,
+        Auxiliary1,
+        Auxiliary2,
     };
 
     struct PointerEvent

@@ -15,8 +15,8 @@ namespace rdui::viewer
         Left,
         Right,
         Middle,
-        Button4,
-        Button5,
+        Auxiliary1,
+        Auxiliary2,
     };
 
     enum class NativePointerPhase : std::uint8_t

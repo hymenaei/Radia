@@ -1,9 +1,6 @@
 #include "linden_common.h"
 #include "../test/lltut.h"
 
-#pragma push_macro("None")
-#undef None
-#define None 0L
 #include "rdbutton.h"
 #include "rdfloater.h"
 #include "rdicon.h"
@@ -12,7 +9,6 @@
 #include "rduilayout.h"
 #include "rduistylesheet.h"
 #include "rduiviewcontract.h"
-#pragma pop_macro("None")
 
 namespace tut
 {

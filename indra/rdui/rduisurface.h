@@ -27,8 +27,6 @@ namespace rdui
             virtual void floaterMinimizedChanged(Surface&, Floater&, bool) {}
             virtual void floaterMoved(Surface&, Floater&) {}
             virtual void floaterDetachRequested(Surface&, Floater&, const Vec2&, const Vec2&) {}
-            // Returning true selects an unbounded logical gesture hosted by a
-            // native window. Surface still owns classification and geometry.
             virtual bool beginNativeFloaterResize(Surface&, Floater&) { return false; }
             virtual void floaterResized(Surface&, Floater&, bool) {}
     };
@@ -69,8 +67,8 @@ namespace rdui
             void placeFloater(Floater& floater, const Rect& rect);
             Vec2 preferredFloaterSize(const Floater& floater) const;
             Vec2 minimumFloaterSize(const Floater& floater) const;
-            Rect initialFloaterRect(const Floater& floater, float margin) const;
-            Rect prepareFloater(Floater& floater, float margin) const;
+            Rect initialFloaterRect(const Floater& floater) const;
+            Rect prepareFloater(Floater& floater) const;
             void updateLayout();
             void paint(PaintContext& context, float scale = 1.f);
             void clearInteractionState();
@@ -134,6 +132,7 @@ namespace rdui
             void floaterResized(Floater& floater, bool complete);
             void generationChanged(const StyleSheet& style_sheet);
             void localeChanged();
+            void keybindingsChanged();
 
             std::unique_ptr<Widget> mRoot;
             std::array<std::unique_ptr<Widget>, static_cast<std::size_t>(SurfaceLayer::Modal)> mLayerRoots;

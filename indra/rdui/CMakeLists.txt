@@ -9,13 +9,20 @@ target_sources(rdui
     rduifloaterresize.cpp
     rduifloaterresize.h
     rdfield.cpp
+    rdfieldset.cpp
     rdicon.cpp
     rdlabel.cpp
     rdpanel.cpp
     rdswitch.cpp
+    rdtext.cpp
     rduibinder.cpp
     rduicolor.cpp
+    rduiinlinecontent.cpp
+    rduiinlinecontentcompiler.cpp
+    rduiinlinecontentcompiler.h
     rduisurface.cpp
+    rduisurfacefloaters.cpp
+    rduisurfaceinput.cpp
     rduisurfaceresize.cpp
     rduilayout.cpp
     rduilayout.h
@@ -38,12 +45,16 @@ target_sources(rdui
     rduistyleresolver.cpp
     rduistylesheet.cpp
     rduistylesheetparser.cpp
+    rduistylevalueparser.cpp
     rduisystem.cpp
     rduitextmetrics.cpp
+    rduitexthost.cpp
     rduisvg.cpp
     rduitessellator.cpp
     rduiviewcontract.cpp
     rduiviewcontract.h
+    rduivaluebinding.h
+    rduivaluecontrol.h
     rduiwidgetcatalog.cpp
     rduiwidgetcatalog.h
 
@@ -53,13 +64,16 @@ target_sources(rdui
     rdbutton.h
     rdfloater.h
     rdfield.h
+    rdfieldset.h
     rdicon.h
     rdlabel.h
     rdpanel.h
     rdswitch.h
+    rdtext.h
     rduiaction.h
     rduibinder.h
     rduicolor.h
+    rduiinlinecontent.h
     rduisurface.h
     rduidiagnostic.h
     rduievent.h
@@ -75,7 +89,10 @@ target_sources(rdui
     rduistylesheet.h
     rduisystem.h
     rduitextmetrics.h
+    rduitexthost.h
     rduitypes.h
+    rduivaluebinding.h
+    rduivaluecontrol.h
     rduiviewresult.h
     )
 
@@ -112,7 +129,7 @@ if (BUILD_TESTING)
     add_dependencies(BUILD_TESTS ${target})
   endfunction()
 
-  foreach(test_name rduibinder rduicolor rduidiagnostic rduifloaterresize rduisurface rduipath rduilayout rduilocalization rduistyle rduisystem rduisvg rduiwidget rduitessellator rduilayoutresourcecompiler)
+  foreach(test_name rduibinder rduicolor rduicomponentcontract rduidiagnostic rduifloaterresize rduisurface rduisurfacefloater rduipath rduilayout rduilocalization rduistyle rduistyleproperty rduisystem rduisvg rduivaluebinding rduiwidget rduitessellator rduilayoutresourcecompiler)
     rdui_add_test(${test_name})
   endforeach()
 endif ()

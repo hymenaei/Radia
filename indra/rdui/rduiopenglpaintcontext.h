@@ -26,7 +26,8 @@ namespace rdui
             void popClip() override;
             void beginEffects(const Rect& rect, const Style& style, float scale) override;
             void endEffects() override;
-            void paintBox(const Rect& rect, const Style& style) override;
+            void paintBox(const Rect& rect, const Style& style,
+                          std::optional<TopBorderGap> top_border_gap = std::nullopt) override;
             void paintText(const std::string& text, const Rect& rect, const Style& style) override;
             void paintIcon(const std::string& name, const Rect& rect,
                            const Style& style, float scale) override;
@@ -35,9 +36,11 @@ namespace rdui
             struct Impl;
             void drawMesh(const Mesh& mesh);
             void drawRoundedShape(int mode, const Rect& rect, float radius, float border_width, const Color& color,
-                                  OutlineStyle outline_style = OutlineStyle::Solid);
+                                  OutlineStyle outline_style = OutlineStyle::Solid,
+                                  std::optional<TopBorderGap> top_border_gap = std::nullopt);
             void drawRoundedGradient(const Rect& rect, float radius, const Gradient& gradient,
-                                     const EdgeInsets* border_widths = nullptr);
+                                     const EdgeInsets* border_widths = nullptr,
+                                     std::optional<TopBorderGap> top_border_gap = std::nullopt);
             void drawShadow(const Rect& rect, float radius, const BoxShadow& shadow);
             bool captureFramebuffer(const Rect& capture, float scale, ::LLRenderTarget& target);
             ::LLRenderTarget* applyBlur(::LLRenderTarget& source, ::LLRenderTarget& horizontal_target,
@@ -48,7 +51,8 @@ namespace rdui
             void pushEffectMatrices(const Rect& bounds);
             void popEffectMatrices();
             void reapplyClip();
-            void drawBorder(const Rect& rect, const Style& style);
+            void drawBorder(const Rect& rect, const Style& style,
+                            std::optional<TopBorderGap> top_border_gap = std::nullopt);
             void drawOutline(const Rect& rect, const Style& style);
             static void drawShapeQuad(const Rect& rect);
             void prepareVectorDraw();

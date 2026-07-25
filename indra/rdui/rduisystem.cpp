@@ -148,6 +148,24 @@ namespace rdui
         return true;
     }
 
+    void System::setKeybindingResolver(
+        std::function<KeybindingPresentation(const std::string&)> resolver)
+    {
+        mKeybindingResolver = std::move(resolver);
+        refreshKeybindings();
+    }
+
+    KeybindingPresentation System::resolveKeybinding(const std::string& id) const
+    {
+        return mKeybindingResolver ? mKeybindingResolver(id) : KeybindingPresentation{};
+    }
+
+    void System::refreshKeybindings()
+    {
+        for (Surface* surface : mSurfaces)
+            if (surface) surface->keybindingsChanged();
+    }
+
     void System::registerSurface(Surface& surface) const
     {
         mSurfaces.insert(&surface);

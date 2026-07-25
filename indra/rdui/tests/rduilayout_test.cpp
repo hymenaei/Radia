@@ -10,6 +10,7 @@
 #include "rduilayout.h"
 #include "rduistylesheet.h"
 #include "rduitextmetrics.h"
+#include "rduiviewcontract.h"
 
 namespace tut
 {
@@ -22,8 +23,8 @@ namespace tut
     void rduilayout_object::test<1>()
     {
         rdui::StyleSheet theme;
-        theme.loadCss("button { left: 10px; top: 10px; padding: 7px; gap: 6px; flow: row; }"
-                      "button > icon { size: 14px; } button > label { height: 18px; font-size: 13px; }");
+        theme.loadRadia("button { left: 10px; top: 10px; padding: 7px; gap: 6px; flow: row; font-size: 13px; line-height: 18px; }"
+                      "button > icon { size: 14px; }");
         rdui::Panel root;
         root.setRect({0.f, 0.f, 300.f, 200.f});
         auto button = std::make_unique<rdui::Button>();
@@ -41,7 +42,7 @@ namespace tut
     void rduilayout_object::test<2>()
     {
         rdui::StyleSheet theme;
-        theme.loadCss("button { width: 128px; height: 32px; padding: 7px; gap: 6px; flow: row; justify-content: center; } button > icon { size: 14px; } button > label { height: 18px; }");
+        theme.loadRadia("button { width: 128px; height: 32px; padding: 7px; gap: 6px; flow: row; justify-content: center; line-height: 18px; } button > icon { size: 14px; }");
         rdui::Panel root;
         root.setRect({0.f, 0.f, 300.f, 200.f});
         auto button = std::make_unique<rdui::Button>();
@@ -58,7 +59,7 @@ namespace tut
     void rduilayout_object::test<3>()
     {
         rdui::StyleSheet theme;
-        theme.loadCss("panel { padding: 10px; flow: column; gap: 5px; } label { height: 20px; }");
+        theme.loadRadia("panel { padding: 10px; flow: column; gap: 5px; } label { height: 20px; }");
         rdui::Panel root;
         root.setRect({0.f, 0.f, 100.f, 100.f});
         root.addChild(std::make_unique<rdui::Label>("one"));
@@ -72,7 +73,7 @@ namespace tut
     void rduilayout_object::test<4>()
     {
         rdui::StyleSheet theme;
-        theme.loadCss("panel { width: 40px; height: 30px; right: 5px; bottom: 7px; }");
+        theme.loadRadia("panel { width: 40px; height: 30px; right: 5px; bottom: 7px; }");
         rdui::Panel root;
         root.setRect({0.f, 0.f, 100.f, 100.f});
         root.addChild(std::make_unique<rdui::Panel>());
@@ -85,7 +86,7 @@ namespace tut
     void rduilayout_object::test<5>()
     {
         rdui::StyleSheet theme;
-        theme.loadCss("floater { padding: 10px; flow: column; } floater::header { height: 30px; } floater::content { grow: 1; }"
+        theme.loadRadia("floater { padding: 10px; flow: column; } floater::header { height: 30px; } floater::content { flex-grow: 1; }"
                       "floater::header::title { left: 5px; top: 5px; height: 15px; } label { height: 20px; }");
         rdui::Floater floater;
         floater.setTitle("title").setRect({0.f, 0.f, 100.f, 100.f});
@@ -99,7 +100,7 @@ namespace tut
     void rduilayout_object::test<6>()
     {
         rdui::StyleSheet theme;
-        theme.loadCss("floater { flow: column; } floater::header { height: 30px; } floater::content { grow: 1; } label { height: 20px; }");
+        theme.loadRadia("floater { flow: column; } floater::header { height: 30px; } floater::content { flex-grow: 1; } label { height: 20px; }");
         rdui::Floater floater;
         floater.setTitle("title").setRect({0.f, 0.f, 100.f, 100.f});
         floater.addChild(std::make_unique<rdui::Label>("content"));
@@ -112,7 +113,7 @@ namespace tut
     void rduilayout_object::test<7>()
     {
         rdui::StyleSheet theme;
-        theme.loadCss("panel { flow: row; } label { width: 10px; height: 10px; } #first { margin: 0px auto 0px 0px; }");
+        theme.loadRadia("panel { flow: row; } label { width: 10px; height: 10px; } #first { margin: 0px auto 0px 0px; }");
         rdui::Panel panel;
         panel.setRect({0.f, 0.f, 100.f, 20.f});
         auto first = std::make_unique<rdui::Label>("first");
@@ -128,7 +129,7 @@ namespace tut
     void rduilayout_object::test<8>()
     {
         rdui::StyleSheet theme;
-        theme.loadCss("panel { flow: column; } label { width: 20px; height: 10px; margin: 0px auto; }");
+        theme.loadRadia("panel { flow: column; } label { width: 20px; height: 10px; margin: 0px auto; }");
         rdui::Panel panel;
         panel.setRect({0.f, 0.f, 100.f, 40.f});
         panel.addChild(std::make_unique<rdui::Label>("center"));
@@ -140,7 +141,7 @@ namespace tut
     void rduilayout_object::test<9>()
     {
         rdui::StyleSheet theme;
-        theme.loadCss("button { size: 24px; padding: 20px; flow: row; justify-content: center; } button > icon { size: 16px; }");
+        theme.loadRadia("button { size: 24px; padding: 20px; flow: row; justify-content: center; } button > icon { size: 16px; }");
         rdui::Button button;
         button.setRect({0.f, 0.f, 24.f, 24.f});
         button.setIcon("search");
@@ -153,7 +154,7 @@ namespace tut
     void rduilayout_object::test<10>()
     {
         rdui::StyleSheet theme;
-        theme.loadCss("panel { flow: column; justify-content: end; } label { height: 10px; }");
+        theme.loadRadia("panel { flow: column; justify-content: end; } label { height: 10px; }");
         rdui::Panel panel;
         panel.setRect({0.f, 0.f, 100.f, 40.f});
         panel.addChild(std::make_unique<rdui::Label>("bottom"));
@@ -165,8 +166,8 @@ namespace tut
     void rduilayout_object::test<11>()
     {
         rdui::StyleSheet theme;
-        ensure("flex stylesheet compiles", theme.loadCss(
-            "panel { flow: row; } label { width: 10px; height: 10px; grow: 1; }").ok());
+        ensure("flex stylesheet compiles", theme.loadRadia(
+            "panel { flow: row; } label { width: 10px; height: 10px; flex: 1; }").ok());
         rdui::Panel panel;
         panel.setRect({0.f, 0.f, 100.f, 20.f});
         panel.addChild(std::make_unique<rdui::Label>("first"));
@@ -180,7 +181,7 @@ namespace tut
     void rduilayout_object::test<12>()
     {
         rdui::StyleSheet theme;
-        ensure("measure stylesheet compiles", theme.loadCss(
+        ensure("measure stylesheet compiles", theme.loadRadia(
             "panel { flow: row; gap: 3px; padding: 2px; } label { width: 10px; height: 8px; }").ok());
         rdui::Panel panel;
         panel.addChild(std::make_unique<rdui::Label>("first"));
@@ -217,10 +218,10 @@ namespace tut
     void rduilayout_object::test<14>()
     {
         rdui::StyleSheet theme;
-        const rdui::StyleSheetLoadResult intrinsic = theme.loadCss(
+        const rdui::StyleSheetLoadResult intrinsic = theme.loadRadia(
             "switch { flow: column; justify-content: center; }", "switch.radia");
         ensure("switch accepts valid authored layout properties", intrinsic.ok());
-        ensure("switch part layout compiles", theme.loadCss(
+        ensure("switch part layout compiles", theme.loadRadia(
             "switch { width: 64px; height: 32px; padding: 3px 5px; flow: column; justify-content: center; } "
             "switch::thumb { border-radius: 7px; }").ok());
         rdui::Switch control;
@@ -273,7 +274,7 @@ namespace tut
     void rduilayout_object::test<16>()
     {
         rdui::StyleSheet theme;
-        ensure("direction stylesheet compiles", theme.loadCss(
+        ensure("direction stylesheet compiles", theme.loadRadia(
             "panel { flow: row; justify-content: start; gap: 5px; } "
             "label { width: 10px; height: 10px; } #physical { margin: 0px 7px 0px 0px; }").ok());
         rdui::Panel panel;
@@ -292,7 +293,7 @@ namespace tut
     void rduilayout_object::test<17>()
     {
         rdui::StyleSheet theme;
-        ensure("negative position stylesheet compiles", theme.loadCss(
+        ensure("negative position stylesheet compiles", theme.loadRadia(
             "label { width: 10px; height: 10px; left: -8px; bottom: -3px; }").ok());
         rdui::Panel panel;
         panel.setRect({0.f, 0.f, 100.f, 100.f});
@@ -307,8 +308,8 @@ namespace tut
     void rduilayout_object::test<18>()
     {
         rdui::StyleSheet theme;
-        ensure("field container stylesheet compiles", theme.loadCss(
-            "field { flow: column; } content { flow: row; } "
+        ensure("field container stylesheet compiles", theme.loadRadia(
+            "field { flow: column; } "
             "switch { width: 20px; height: 10px; } "
             "label { width: 30px; height: 10px; }").ok());
 
@@ -318,20 +319,13 @@ namespace tut
         field.addChild(std::make_unique<rdui::Switch>());
         rdui::layoutTree(field, theme, text);
         ensure_equals("field keeps its default row flow", field.children()[1]->rect().left(), 30.f);
-
-        rdui::Content content;
-        content.setRect({0.f, 0.f, 30.f, 20.f});
-        content.addChild(std::make_unique<rdui::Label>("First"));
-        content.addChild(std::make_unique<rdui::Label>("Second"));
-        rdui::layoutTree(content, theme, text);
-        ensure_equals("content keeps its default column flow", content.children()[1]->rect().top(), 10.f);
     }
 
     template<> template<>
     void rduilayout_object::test<19>()
     {
         rdui::StyleSheet theme;
-        ensure("percentage geometry compiles", theme.loadCss(
+        ensure("percentage geometry compiles", theme.loadRadia(
             "label { width: 50%; height: 25%; left: 10%; top: 20%; }").ok());
         rdui::Panel panel;
         panel.setRect({0.f, 0.f, 200.f, 100.f});
@@ -349,7 +343,7 @@ namespace tut
     void rduilayout_object::test<20>()
     {
         rdui::StyleSheet theme;
-        ensure("automatic gap stylesheet compiles", theme.loadCss(
+        ensure("automatic gap stylesheet compiles", theme.loadRadia(
             "panel { flow: row; gap: auto; } label { width: 10px; height: 10px; }").ok());
         rdui::Panel panel;
         panel.setRect({0.f, 0.f, 100.f, 20.f});
@@ -362,7 +356,7 @@ namespace tut
         ensure_equals("automatic row gap places final child at the edge", panel.children()[2]->rect().right(), 100.f);
         ensure_equals("automatic gap contributes zero to intrinsic size", panel.desiredSize().x, 30.f);
 
-        ensure("automatic column gap stylesheet compiles", theme.loadCss(
+        ensure("automatic column gap stylesheet compiles", theme.loadRadia(
             "panel { flow: column; gap: auto; } label { width: 10px; height: 10px; }").ok());
         panel.setRect({0.f, 0.f, 20.f, 100.f});
         rdui::layoutTree(panel, theme, text);
@@ -374,7 +368,7 @@ namespace tut
     void rduilayout_object::test<21>()
     {
         rdui::StyleSheet theme;
-        ensure("automatic floater size stylesheet compiles", theme.loadCss(
+        ensure("automatic floater size stylesheet compiles", theme.loadRadia(
             "floater { size: auto 100px; flow: column; } "
             "floater::header { height: 30px; } floater::content { flow: column; gap: 5px; } "
             "label { height: 20px; }").ok());
@@ -392,7 +386,7 @@ namespace tut
     void rduilayout_object::test<22>()
     {
         rdui::StyleSheet theme;
-        ensure("row alignment stylesheet compiles", theme.loadCss(
+        ensure("row alignment stylesheet compiles", theme.loadRadia(
             "panel { flow: row; align-items: start; } label { width: 10px; height: 10px; } "
             "label#center { align-self: center; } label#end { align-self: end; } "
             "label#stretch { height: auto; align-self: stretch; }").ok());
@@ -411,7 +405,7 @@ namespace tut
         ensure_equals("row align-self end reaches cross-end", panel.children()[2]->rect().bottom(), 0.f);
         ensure_equals("row stretch fills an automatic cross size", panel.children()[3]->rect().h, 40.f);
 
-        ensure("column alignment stylesheet compiles", theme.loadCss(
+        ensure("column alignment stylesheet compiles", theme.loadRadia(
             "panel { flow: column; align-items: start; } label { width: 10px; height: 10px; } "
             "label#center { align-self: center; } label#end { align-self: end; } "
             "label#stretch { width: auto; align-self: stretch; }").ok());
@@ -431,7 +425,7 @@ namespace tut
     void rduilayout_object::test<23>()
     {
         rdui::StyleSheet theme;
-        ensure("visibility layout stylesheet compiles", theme.loadCss(
+        ensure("visibility layout stylesheet compiles", theme.loadRadia(
             "panel { flow: row; } label { width: 10px; height: 10px; }").ok());
         rdui::Panel panel;
         panel.addChild(std::make_unique<rdui::Label>("visible"));
@@ -456,5 +450,167 @@ namespace tut
         rdui::layoutTree(panel, theme, text);
         ensure_equals("showing Collapsed invalidates parent measurement", panel.desiredSize().x, 20.f);
         ensure_equals("newly Visible child takes the second layout slot", panel.children()[2]->rect().left(), 10.f);
+    }
+
+    template<> template<>
+    void rduilayout_object::test<24>()
+    {
+        rdui::StyleSheet theme;
+        ensure("vertical container alignment stylesheet compiles", theme.loadRadia(
+            "panel { size: 40px 100px; flow: row; } label { size: 10px; } "
+            "panel.middle { vertical-align: middle; } panel.bottom { vertical-align: bottom; } "
+            "panel.column { flow: column; vertical-align: bottom; } "
+            "panel.free-bottom { flow: free; vertical-align: bottom; } "
+            "button { size: 40px 100px; } button > * { size: 10px; } "
+            "button.top { vertical-align: top; }").ok());
+
+        auto add_label = [](rdui::Widget& container)
+        {
+            container.addChild(std::make_unique<rdui::Label>("child"));
+        };
+
+        rdui::Panel top;
+        top.setRect({0.f, 0.f, 100.f, 40.f});
+        add_label(top);
+        rdui::layoutTree(top, theme, text);
+        ensure_equals("row content defaults to the top", top.children()[0]->rect().top(), 40.f);
+
+        rdui::Panel middle;
+        middle.setRect({0.f, 0.f, 100.f, 40.f});
+        middle.addClass("middle");
+        add_label(middle);
+        rdui::layoutTree(middle, theme, text);
+        ensure_equals("row content supports middle alignment", middle.children()[0]->rect().bottom(), 15.f);
+
+        rdui::Panel bottom;
+        bottom.setRect({0.f, 0.f, 100.f, 40.f});
+        bottom.addClass("bottom");
+        add_label(bottom);
+        rdui::layoutTree(bottom, theme, text);
+        ensure_equals("row content supports bottom alignment", bottom.children()[0]->rect().bottom(), 0.f);
+
+        rdui::Panel column;
+        column.setRect({0.f, 0.f, 100.f, 40.f});
+        column.addClass("column");
+        add_label(column);
+        add_label(column);
+        rdui::layoutTree(column, theme, text);
+        ensure_equals("column vertical alignment moves the complete stack", column.children()[0]->rect().top(), 20.f);
+        ensure_equals("column stack reaches the bottom", column.children()[1]->rect().bottom(), 0.f);
+
+        rdui::Panel free_bottom;
+        free_bottom.setRect({0.f, 0.f, 100.f, 40.f});
+        free_bottom.addClass("free-bottom");
+        add_label(free_bottom);
+        rdui::layoutTree(free_bottom, theme, text);
+        ensure_equals("free-flow unpositioned content follows vertical alignment",
+                      free_bottom.children()[0]->rect().bottom(), 0.f);
+
+        rdui::Button button;
+        button.setRect({0.f, 0.f, 100.f, 40.f});
+        button.setLabel("button");
+        rdui::layoutTree(button, theme, text);
+        ensure_equals("Button content intrinsically defaults to middle",
+                      button.children()[0]->rect().bottom(), 15.f);
+        ensure_equals("Button content is horizontally centered by its intrinsic defaults",
+                      button.children()[0]->rect().left(), 45.f);
+
+        rdui::Button top_button;
+        top_button.setRect({0.f, 0.f, 100.f, 40.f});
+        top_button.addClass("top");
+        top_button.setLabel("button");
+        rdui::layoutTree(top_button, theme, text);
+        ensure_equals("authored Button vertical alignment overrides its intrinsic default",
+                      top_button.children()[0]->rect().top(), 40.f);
+    }
+
+    template<> template<>
+    void rduilayout_object::test<25>()
+    {
+        rdui::StyleSheet theme;
+        ensure("row Flow Break stylesheet compiles", theme.loadRadia(
+            "panel { flow: row; gap: 2px; } label { size: 10px; }").ok());
+
+        rdui::Panel panel;
+        auto first = std::make_unique<rdui::Label>("first");
+        auto second = std::make_unique<rdui::Label>("second");
+        auto third = std::make_unique<rdui::Label>("third");
+        rdui::detail::WidgetCompilerAccess::setFlowBreakBefore(*second, true);
+        panel.addChild(std::move(first));
+        panel.addChild(std::move(second));
+        panel.addChild(std::move(third));
+
+        rdui::measureTree(panel, theme, text);
+        ensure_equals("Flow Break measures the widest explicit row", panel.desiredSize().x, 22.f);
+        ensure_equals("Flow Break measures both rows and their gap", panel.desiredSize().y, 22.f);
+
+        panel.setRect({0.f, 0.f, 40.f, 40.f});
+        rdui::layoutTree(panel, theme, text);
+        ensure_equals("first explicit row starts at the container top", panel.children()[0]->rect().top(), 40.f);
+        ensure_equals("Flow Break starts its child on the next row", panel.children()[1]->rect().top(), 28.f);
+        ensure_equals("following children remain in the new row", panel.children()[2]->rect().left(), 12.f);
+    }
+
+    template<> template<>
+    void rduilayout_object::test<26>()
+    {
+        rdui::StyleSheet theme;
+        ensure("flex basis and shrink stylesheet compiles", theme.loadRadia(
+            "panel { flow: row; } label { height: 10px; flex: 0 1 80px; } label.second { flex-basis: 40px; }").ok());
+
+        rdui::Panel intrinsic;
+        intrinsic.addChild(std::make_unique<rdui::Label>());
+        auto intrinsic_second = std::make_unique<rdui::Label>();
+        intrinsic_second->addClass("second");
+        intrinsic.addChild(std::move(intrinsic_second));
+        rdui::measureTree(intrinsic, theme, text);
+        ensure_equals("flex basis contributes to intrinsic width", intrinsic.desiredSize().x, 120.f);
+
+        rdui::StyleSheet percentage_theme;
+        ensure("percentage flex basis stylesheet compiles", percentage_theme.loadRadia(
+            "panel { flow: row; } label { width: 30px; flex-basis: 50%; }").ok());
+        rdui::Panel indefinite;
+        indefinite.addChild(std::make_unique<rdui::Label>());
+        rdui::measureTree(indefinite, percentage_theme, text);
+        ensure_equals("percentage flex basis is auto in an indefinite container", indefinite.desiredSize().x, 30.f);
+
+        rdui::Panel panel;
+        panel.setRect({0.f, 0.f, 100.f, 20.f});
+        panel.addChild(std::make_unique<rdui::Label>());
+        auto second = std::make_unique<rdui::Label>();
+        second->addClass("second");
+        panel.addChild(std::move(second));
+        rdui::layoutTree(panel, theme, text);
+        ensure_approximately_equals("scaled flex shrink reduces the larger basis proportionally",
+                                    panel.children()[0]->rect().w, 200.f / 3.f, 5);
+        ensure_approximately_equals("scaled flex shrink reduces the smaller basis proportionally",
+                                    panel.children()[1]->rect().w, 100.f / 3.f, 5);
+        ensure_approximately_equals("shrunk items fill the row", panel.children()[1]->rect().right(), 100.f, 5);
+    }
+
+    template<> template<>
+    void rduilayout_object::test<27>()
+    {
+        rdui::StyleSheet theme;
+        ensure("floater header stylesheet compiles", theme.loadRadia(
+            "floater::header { height: 48px; flow: row; padding: 12px; } "
+            "floater::header::icon { size: 28px; } "
+            "floater::header::title { line-height: 18px; } "
+            "floater::header::custom { height: 24px; flex-grow: 1; } "
+            "floater::header::close { size: 24px; }").ok());
+
+        rdui::Floater floater;
+        floater.setIcon("search").setTitle("title");
+        floater.header()->setRect({0.f, 0.f, 200.f, 48.f});
+        rdui::layoutTree(*floater.header(), theme, text);
+
+        const float header_center = floater.header()->rect().y + floater.header()->rect().h * .5f;
+        for (const auto& child : floater.header()->children())
+        {
+            if (child->visibility() != rdui::Visibility::Visible) continue;
+            const float child_center = child->rect().y + child->rect().h * .5f;
+            ensure_equals("an oversized header icon does not pull the row below center",
+                          child_center, header_center);
+        }
     }
 }

@@ -42,9 +42,12 @@ namespace rdui
         mCommands.push_back({PaintCommandKind::EndEffects});
     }
 
-    void RecordingPaintContext::paintBox(const Rect& rect, const Style& style)
+    void RecordingPaintContext::paintBox(const Rect& rect, const Style& style,
+                                         std::optional<TopBorderGap> top_border_gap)
     {
-        mCommands.push_back({PaintCommandKind::Box, rect, style});
+        PaintCommand command{PaintCommandKind::Box, rect, style};
+        command.top_border_gap = top_border_gap;
+        mCommands.push_back(std::move(command));
     }
 
     void RecordingPaintContext::paintText(const std::string& text, const Rect& rect, const Style& style)

@@ -1,5 +1,6 @@
 #include "linden_common.h"
 #include "rduilayoutresourcecompiler.h"
+#include "rduiinlinecontentcompiler.h"
 #include "rduiwidgetcatalog.h"
 #include "rdbutton.h"
 #include "rdfloater.h"
@@ -16,9 +17,19 @@ namespace rdui
 {
     struct LayoutResourceCompiler::BuildState
     {
+        struct AuthoredWidget
+        {
+            Widget* widget = nullptr;
+            const LayoutNode* node = nullptr;
+            const LayoutNode* defaults = nullptr;
+            const WidgetContract* contract = nullptr;
+            std::string source;
+        };
+
         ViewBuildResult result;
         std::vector<std::string> resources;
         std::unordered_map<std::string, const LayoutNode*> widget_defaults;
+        std::unordered_map<const Widget*, AuthoredWidget> authored_widgets;
         const ViewBuildContext* context = nullptr;
     };
 
@@ -59,24 +70,17 @@ namespace rdui
             return false;
         }
 
-        void validateIdScope(const Widget& scope, ViewBuildResult& result, const std::string& source, bool count_root = true)
+        void rejectLogicalAttributes(const LayoutElement& element, ViewBuildResult& result,
+                                     const std::string& source)
         {
-            std::unordered_set<std::string> ids;
-            std::function<void(const Widget&, bool)> visit = [&](const Widget& widget, bool root)
-            {
-                if (!root && widget.idScopeRoot())
-                {
-                    if (!widget.id().empty() && !ids.insert(widget.id()).second)
-                        result.error("view.id.duplicate", "Duplicate widget id: " + widget.id() + ".", source);
-                    validateIdScope(widget, result, source, false);
-                    return;
-                }
-                if ((!root || count_root) && !widget.id().empty() && !ids.insert(widget.id()).second)
-                    result.error("view.id.duplicate", "Duplicate widget id: " + widget.id() + ".", source);
-                for (const auto& child : widget.children()) visit(*child, false);
-            };
-            visit(scope, true);
+            for (const auto& [name, attribute] : element.attributes())
+                result.error("view.attribute.unknown",
+                             "Unknown attribute on <" + element.name() + ">: "
+                             + attribute.authored_name + ".",
+                             source, attribute.source.begin.line, attribute.source.begin.column);
         }
+
+
     }
 
     LayoutResourceCompiler::LayoutResourceCompiler(const LayoutDocumentMap* documents)
@@ -126,7 +130,7 @@ namespace rdui
         if (root && !state.result.hasErrors())
         {
             detail::WidgetCompilerAccess::setIdScopeRoot(*root);
-            validateIdScope(*root, state.result, resource);
+            validateViewScope(*root, state, resource);
         }
         if (!state.result.hasErrors()) state.result.root = std::move(root);
         return std::move(state.result);
@@ -149,10 +153,54 @@ namespace rdui
         if (root && !state.result.hasErrors())
         {
             detail::WidgetCompilerAccess::setIdScopeRoot(*root);
-            validateIdScope(*root, state.result, source);
+            validateViewScope(*root, state, source);
         }
         if (!state.result.hasErrors()) state.result.root = std::move(root);
         return std::move(state.result);
+    }
+
+    void LayoutResourceCompiler::validateViewScope(Widget& scope, BuildState& state,
+                                                   const std::string& source, bool count_root) const
+    {
+        std::unordered_map<std::string, Widget*> ids;
+        std::unordered_set<std::string> duplicates;
+        std::vector<const BuildState::AuthoredWidget*> authored_widgets;
+        std::function<void(Widget&, bool)> visit = [&](Widget& widget, bool root)
+        {
+            if (!root && widget.idScopeRoot())
+            {
+                if (!widget.id().empty() && !ids.emplace(widget.id(), &widget).second)
+                {
+                    duplicates.insert(widget.id());
+                    state.result.error("view.id.duplicate", "Duplicate widget id: " + widget.id() + ".", source);
+                }
+                validateViewScope(widget, state, source, false);
+                return;
+            }
+            if ((!root || count_root) && !widget.id().empty() && !ids.emplace(widget.id(), &widget).second)
+            {
+                duplicates.insert(widget.id());
+                state.result.error("view.id.duplicate", "Duplicate widget id: " + widget.id() + ".", source);
+            }
+            const auto authored = state.authored_widgets.find(&widget);
+            if (authored != state.authored_widgets.end()) authored_widgets.push_back(&authored->second);
+            for (const auto& child : widget.children()) visit(*child, false);
+        };
+        visit(scope, true);
+
+        const ViewScopeContext context(ids, duplicates, [this](const Widget& widget)
+        {
+            const auto contract = mWidgetContracts.find(schemaNameKey(widget.element()));
+            return contract != mWidgetContracts.end() && contract->second.labelable;
+        });
+        for (const BuildState::AuthoredWidget* authored : authored_widgets)
+        {
+            if (!authored->widget || !authored->node || !authored->contract
+                || !authored->contract->validate_composition) continue;
+            const LayoutElement element(*authored->node, authored->defaults);
+            authored->contract->validate_composition(
+                element, *authored->widget, context, state.result, authored->source);
+        }
     }
 
     DiagnosticResult LayoutResourceCompiler::validateWidgetDefaults(const std::string& element,
@@ -212,9 +260,12 @@ namespace rdui
                 validateViewAttributes(defaults, contract->second.attributes, state.result, default_resource);
                 std::string ignored;
                 if (readViewAttribute(defaults, "id", ignored) || readViewAttribute(defaults, "filename", ignored)
+                    || readViewAttribute(defaults, "for", ignored)
                     || readViewAttribute(defaults, "longClickDelay", ignored))
                 {
-                    state.result.error("view.defaults.controller_attribute", "Widget Defaults cannot declare IDs, includes, or controller behavior.", default_resource);
+                    state.result.error("view.defaults.controller_attribute",
+                                       "Widget Defaults cannot declare IDs, relationships, includes, or controller behavior.",
+                                       default_resource);
                     default_root = nullptr;
                 }
                 for (ActionEventKind kind : {ActionEventKind::Click, ActionEventKind::DoubleClick, ActionEventKind::Change,
@@ -303,6 +354,13 @@ namespace rdui
                 return nullptr;
             }
             const std::string& tag = contract->second.element;
+            if (contract->second.scoped_only)
+            {
+                state.result.error("view.element.scoped",
+                                   "<" + tag + "> is valid only in its owning composite.",
+                                   current_source, layout_node.source.begin.line, layout_node.source.begin.column);
+                return nullptr;
+            }
 
             loadWidgetDefaults(tag, state);
             const LayoutNode* defaults = state.widget_defaults.find(lookup)->second;
@@ -351,8 +409,29 @@ namespace rdui
             applyCommonViewAttributes(element, *target, state.result, current_source, contract->second.supported_actions);
             if (contract->second.apply_attributes)
                 contract->second.apply_attributes(element, *target, state.result, current_source, state.context);
+            if (contract->second.validate_composition)
+                state.authored_widgets.emplace(target, BuildState::AuthoredWidget{
+                    target, &layout_node, defaults, &contract->second, current_source});
+
+            if (contract->second.text_content == ViewTextContent::Inline)
+            {
+                if (contract->second.apply_inline_content)
+                    contract->second.apply_inline_content(
+                        compileInlineContent(element.content(), tag, contract->second.accepted_inline_content,
+                                             state.result, current_source, state.context),
+                        *target);
+                return node;
+            }
 
             std::string widget_text;
+            bool pending_flow_break = false;
+            bool has_layout_child = false;
+            const auto markLayoutChild = [&](Widget& child)
+            {
+                detail::WidgetCompilerAccess::setFlowBreakBefore(child, pending_flow_break);
+                pending_flow_break = false;
+                has_layout_child = true;
+            };
             for (const LayoutContent& content : element.content())
             {
                 if (content.isText())
@@ -371,16 +450,62 @@ namespace rdui
                     }
                     else
                     {
-                        auto label = std::make_unique<Label>();
-                        label->setText(localizedViewText(std::move(value), state.result, current_source, state.context,
-                                                         content.source.begin.line));
-                        target->addChild(std::move(label));
+                        TextValue text = localizedViewText(std::move(value), state.result, current_source, state.context,
+                                                           content.source.begin.line);
+                        if (contract->second.create_text_child)
+                        {
+                            if (auto child = contract->second.create_text_child(std::move(text)))
+                            {
+                                markLayoutChild(*child);
+                                target->addChild(std::move(child));
+                            }
+                        }
+                        else
+                        {
+                            auto label = std::make_unique<Label>();
+                            label->setText(std::move(text));
+                            markLayoutChild(*label);
+                            target->addChild(std::move(label));
+                        }
                     }
                     continue;
                 }
 
                 const LayoutNode& child_node = *content.element;
                 const LayoutElement child(child_node);
+                if (schemaNameKey(child.name()) == schemaNameKey("br"))
+                {
+                    rejectLogicalAttributes(child, state.result, current_source);
+                    if (hasAuthoredContent(child_node))
+                        state.result.error("view.flow_break.children_unsupported",
+                                           "Flow Break <br> cannot contain content.", current_source,
+                                           child_node.source.begin.line, child_node.source.begin.column);
+                    if (!has_layout_child)
+                        state.result.error("view.flow_break.leading",
+                                           "Flow Break requires a preceding layout child.", current_source,
+                                           child_node.source.begin.line, child_node.source.begin.column);
+                    else if (pending_flow_break)
+                        state.result.error("view.flow_break.consecutive",
+                                           "Consecutive Flow Break directives are not supported.", current_source,
+                                           child_node.source.begin.line, child_node.source.begin.column);
+                    else pending_flow_break = true;
+                    continue;
+                }
+
+                const auto scoped_inline = contract->second.scoped_inline_content.find(schemaNameKey(child.name()));
+                if (scoped_inline != contract->second.scoped_inline_content.end())
+                {
+                    rejectLogicalAttributes(child, state.result, current_source);
+                    Widget* scoped_part = scoped_inline->second.apply(
+                        compileInlineContent(child.content(), scoped_inline->second.element,
+                                             scoped_inline->second.accepted, state.result,
+                                             current_source, state.context),
+                        *target, state.result, current_source,
+                        child.source().begin.line, child.source().begin.column);
+                    if (scoped_part) markLayoutChild(*scoped_part);
+                    continue;
+                }
+
                 const auto part_contract = contract->second.part_attributes.find(schemaNameKey(child.name()));
                 if (part_contract != contract->second.part_attributes.end())
                     validateViewAttributes(child, part_contract->second, state.result, current_source);
@@ -408,8 +533,15 @@ namespace rdui
                     }
                 }
                 if (auto child_widget = buildNode(child_node, current_source, nullptr))
+                {
+                    markLayoutChild(*child_widget);
                     target->addChild(std::move(child_widget));
+                }
             }
+            if (pending_flow_break)
+                state.result.error("view.flow_break.trailing",
+                                   "Flow Break requires a following layout child.", current_source,
+                                   element.source().end.line, element.source().end.column);
             if (contract->second.text_content == ViewTextContent::Widget && !widget_text.empty() && contract->second.apply_text)
                 contract->second.apply_text(std::move(widget_text), *target, state.result, current_source, state.context,
                                             element.source().begin.line);

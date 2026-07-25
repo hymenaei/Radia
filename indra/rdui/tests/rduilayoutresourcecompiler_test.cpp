@@ -4,17 +4,22 @@
 #include "rdbutton.h"
 #include "rdfloater.h"
 #include "rdfield.h"
+#include "rdfieldset.h"
 #include "rdicon.h"
 #include "rdlabel.h"
 #include "rdpanel.h"
 #include "rdswitch.h"
+#include "rdtext.h"
 #include "rduibinder.h"
 #include "rduilayoutdocument.h"
+#include "rduilayout.h"
 #include "rduilayoutresourcecompiler.h"
+#include "rduirecordingpaintcontext.h"
 #include "rduiskincompiler.h"
 #include "rduisurface.h"
 #include "rduisystem.h"
 #include "rduitextmetrics.h"
+#include <algorithm>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -74,7 +79,7 @@ namespace tut
         {
             rdui::WidgetRef<WidgetT> output;
             rdui::Binder binder(root);
-            binder.require(id, output);
+            binder.bind(id, output);
             rdui::BindingResult result = binder.finish();
             if (!result.ok()) output.set(nullptr);
             return output;
@@ -87,7 +92,7 @@ namespace tut
     template<> template<>
     void rduilayoutresourcecompiler_object::test<1>()
     {
-        const char* xml = "<floater title=\"title\" closeIcon=\"close\" minimizeIcon=\"minimize\" canMinimize=\"true\"><label id=\"status\">Ready</label>"
+        const char* xml = "<floater title=\"title\" closeIcon=\"close\" minimizeIcon=\"minimize\" canMinimize=\"true\"><text id=\"status\">Ready</text>"
                           "<button id=\"go\" onClick=\"demo-go\" onDoubleClick=\"demo-double\" onMouseDown=\"demo-press\" onLongClick=\"demo-hold\" onContextMenu=\"demo-menu\" longClickDelay=\"750ms\"><icon source=\"search\"/>Go</button>"
                           "<switch id=\"toggle\" checked=\"true\" onChange=\"demo-changed\"/></floater>";
         rdui::ViewBuildResult result = factory.createFromString(xml, "floater.xml");
@@ -111,8 +116,8 @@ namespace tut
     template<> template<>
     void rduilayoutresourcecompiler_object::test<2>()
     {
-        resources["shared.xml"] = "<panel id=\"base\" class=\"shared\"><label id=\"resource-child\">base</label></panel>";
-        const char* xml = "<panel><panel filename=\"shared.xml\" id=\"one\" class=\"first\"><label id=\"inline-child\"/></panel>"
+        resources["shared.xml"] = "<panel id=\"base\" class=\"shared\"><text id=\"resource-child\">base</text></panel>";
+        const char* xml = "<panel><panel filename=\"shared.xml\" id=\"one\" class=\"first\"><text id=\"inline-child\"/></panel>"
                           "<panel filename=\"shared.xml\" id=\"two\"/></panel>";
         rdui::ViewBuildResult result = factory.createFromString(xml, "outer.xml");
         ensure("embedded panels parsed", result.ok());
@@ -152,7 +157,7 @@ namespace tut
         ensure_equals("cycle has stable diagnostic code", cycle.errors.front().code, "view.resource.cycle");
         ensure_equals("cycle diagnostic identifies source", cycle.errors.front().source, "a.xml");
         ensure("missing panel rejected", !factory.createFromString("<panel><panel filename=\"missing.xml\"/></panel>", "root.xml").ok());
-        resources["wrong.xml"] = "<label/>";
+        resources["wrong.xml"] = "<text/>";
         ensure("non-panel reference rejected", !factory.createFromString("<panel><panel filename=\"wrong.xml\"/></panel>", "root.xml").ok());
         ensure("filename on non-panel rejected", !factory.createFromString("<button filename=\"x.xml\"/>").ok());
         ensure("resource-root escape rejected", !factory.createFromString("<panel><panel filename=\"../outside.xml\"/></panel>", "root.xml").ok());
@@ -173,7 +178,7 @@ namespace tut
         ensure_equals("compiler diagnostic retains source column", invalid.errors.front().column, 3U);
 
         rdui::LayoutDocumentParseResult parsed = rdui::LayoutDocumentParser().parse(
-            "<description>before<label>middle</label>after</description>", "mixed.xml");
+            "<panel>before<label>middle</label>after</panel>", "mixed.xml");
         ensure("one document tree parses", parsed.ok());
         ensure_equals("mixed content order is represented once", parsed.document->root->content.size(), 3U);
         ensure("text-child-text order retained",
@@ -194,6 +199,8 @@ namespace tut
         ensure("button parses", result.ok() && button);
         ensure_equals("inline icon retained", button->icon()->name(), "one");
         ensure_equals("inline label retained", button->label()->text(), "first");
+        ensure_equals("button caption is not a standalone label style target", button->label()->element(),
+                      std::string("button-caption"));
         ensure("text before icon preserves authored order", button->children()[0].get() == button->label());
         rdui::ViewBuildResult icon_first = factory.createFromString("<button><icon source=\"search\"/>second</button>");
         auto* reversed = icon_first.rootAs<rdui::Button>();
@@ -226,6 +233,8 @@ namespace tut
         ensure("vertex shader forwards shape coordinates", vertex.str().find("shape_coord = texcoord0") != std::string::npos);
         ensure("fragment shader keeps passthrough mode", fragment.str().find("rduiShapeMode == 0") != std::string::npos);
         ensure("fragment shader has analytic border mode", fragment.str().find("rduiShapeMode == 2") != std::string::npos && fragment.str().find("fwidth") != std::string::npos);
+        ensure("fragment shader supports a Fieldset Legend border gap",
+               fragment.str().find("rduiTopBorderGap") != std::string::npos);
         ensure("fragment shader supports radial and conic gradients", fragment.str().find("rduiGradientKind") != std::string::npos
             && fragment.str().find("atan(delta.x, delta.y)") != std::string::npos);
         ensure("fragment shader supports repeating gradient paint", fragment.str().find("rduiGradientRepeating") != std::string::npos
@@ -258,7 +267,8 @@ namespace tut
             "</localizations>");
         resources.add("skin.radia", "label { text-color: #ffffffff; }");
         resources.add("localized.xml",
-            "<floater title=\"title\"><label id=\"status\">status</label><button id=\"press\">press</button></floater>");
+            "<floater title=\"title\"><label id=\"status\" for=\"target\">status</label>"
+            "<switch id=\"target\"/><button id=\"press\">press</button></floater>");
         rdui::SkinGenerationPrepareResult prepared = rdui::SkinCompiler().prepare(resources);
         ensure("localizations load", prepared.ok());
         system.publish(prepared.generation);
@@ -296,7 +306,7 @@ namespace tut
         ensure("Portuguese restored", system.setLocale("pt"));
         ensure_equals("literal assignment clears binding", status->text(), "Literal");
 
-        resources.add("missing.xml", "<label>missing</label>");
+        resources.add("missing.xml", "<text>missing</text>");
         const rdui::SkinGenerationPrepareResult missing = rdui::SkinCompiler().prepare(std::move(resources));
         ensure("missing default-language key rejects generation", !missing.ok() && !missing.generation);
     }
@@ -330,7 +340,7 @@ namespace tut
     void rduilayoutresourcecompiler_object::test<10>()
     {
         const rdui::ViewBuildResult duplicate = factory.createFromString(
-            "<panel><label id=\"same\"/><button id=\"same\">Same</button></panel>", "duplicates.xml");
+            "<panel><text id=\"same\"/><button id=\"same\">Same</button></panel>", "duplicates.xml");
         ensure("duplicate ids reject whole view", !duplicate.ok() && !duplicate.root);
         ensure_equals("duplicate id diagnostic code", duplicate.errors.front().code, "view.id.duplicate");
         ensure_equals("duplicate id diagnostic source", duplicate.errors.front().source, "duplicates.xml");
@@ -436,43 +446,14 @@ namespace tut
         ensure("invalid Widget Defaults expose no partial root", invalid.root == nullptr);
     }
 
+
     template<> template<>
     void rduilayoutresourcecompiler_object::test<15>()
     {
         const rdui::ViewBuildResult result = factory.createFromString(
-            "<field id=\"example-field\"><content><label>label.example</label>"
-            "<description>description.prefix <label>description.middle</label> description.suffix</description>"
-            "</content><switch checked=\"true\" onChange=\"switch-changed\"/></field>", "field.xml");
-        auto* field = result.rootAs<rdui::Field>();
-        ensure("field markup builds", result.ok() && field);
-        ensure_equals("field contains content and switch", field->children().size(), 2U);
-        auto* content = dynamic_cast<rdui::Content*>(field->children()[0].get());
-        auto* description = content && content->children().size() == 2
-                            ? dynamic_cast<rdui::Description*>(content->children()[1].get()) : nullptr;
-        ensure("content and description use concrete container widgets", content && description);
-        ensure_equals("mixed description has prefix, label, and suffix", description->children().size(), 3U);
-        auto* middle = dynamic_cast<rdui::Label*>(description->children()[1].get());
-        ensure("description preserves an explicit inline label",
-               middle && middle->text() == "description.middle");
-        ensure_equals("description prefix remains before explicit label",
-                      dynamic_cast<rdui::Label*>(description->children()[0].get())->text(), "description.prefix");
-        ensure_equals("description suffix remains after explicit label",
-                      dynamic_cast<rdui::Label*>(description->children()[2].get())->text(), "description.suffix");
-
-        const rdui::ViewBuildResult anchor = factory.createFromString(
-            "<description><a href=\"https://example.com\">link</a></description>", "anchor.xml");
-        ensure("incomplete Anchor is absent from the widget contract", !anchor.ok());
-        ensure_equals("removed Anchor reports an unknown element", anchor.errors.front().code,
-                      "view.element.unknown");
-    }
-
-    template<> template<>
-    void rduilayoutresourcecompiler_object::test<16>()
-    {
-        const rdui::ViewBuildResult result = factory.createFromString(
-            "<panel><label id=\"shown\" visibility=\"visible\"/>"
-            "<label id=\"hidden\" visibility=\"hidden\"/>"
-            "<label id=\"collapsed\" visibility=\"collapsed\"/></panel>", "visibility.xml");
+            "<panel><text id=\"shown\" visibility=\"visible\"/>"
+            "<text id=\"hidden\" visibility=\"hidden\"/>"
+            "<text id=\"collapsed\" visibility=\"collapsed\"/></panel>", "visibility.xml");
         ensure("typed visibility values compile", result.ok());
         ensure_equals("Visible value is typed", static_cast<int>(result.root->children()[0]->visibility()),
                       static_cast<int>(rdui::Visibility::Visible));
@@ -482,20 +463,20 @@ namespace tut
                       static_cast<int>(rdui::Visibility::Collapsed));
 
         const rdui::ViewBuildResult invalid = factory.createFromString(
-            "<label visibility=\"invisible\"/>", "invalid_visibility.xml");
+            "<text visibility=\"invisible\"/>", "invalid_visibility.xml");
         ensure("invalid visibility is rejected", !invalid.ok());
         ensure_equals("invalid visibility diagnostic is stable", invalid.errors.front().code,
                       "view.attribute.visibility_invalid");
 
         const rdui::ViewBuildResult legacy = factory.createFromString(
-            "<label visible=\"false\"/>", "legacy_visibility.xml");
+            "<text visible=\"false\"/>", "legacy_visibility.xml");
         ensure("legacy boolean visibility is rejected", !legacy.ok());
         ensure_equals("legacy visibility is an unknown attribute", legacy.errors.front().code,
                       "view.attribute.unknown");
     }
 
     template<> template<>
-    void rduilayoutresourcecompiler_object::test<17>()
+    void rduilayoutresourcecompiler_object::test<16>()
     {
         resources["widgets/label.xml"] = "<label visibility=\"sometimes\"/>";
         const rdui::DiagnosticResult visibility = factory.validateWidgetDefaults("label");
@@ -512,7 +493,7 @@ namespace tut
     }
 
     template<> template<>
-    void rduilayoutresourcecompiler_object::test<18>()
+    void rduilayoutresourcecompiler_object::test<17>()
     {
         rdui::ViewBuildResult result = factory.createFromString(
             "<FlOaTeR TiTlE=\"tools\" CaNMiNiMiZe=\"true\">"
@@ -529,7 +510,7 @@ namespace tut
     }
 
     template<> template<>
-    void rduilayoutresourcecompiler_object::test<19>()
+    void rduilayoutresourcecompiler_object::test<18>()
     {
         const rdui::ViewBuildResult snake = factory.createFromString(
             "<BuTtOn\n  on_click=\"save-file\"/>", "legacy-snake.xml");

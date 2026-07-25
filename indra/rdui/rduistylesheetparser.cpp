@@ -1,6 +1,7 @@
 #include "linden_common.h"
 #include "rduistylecompiler.h"
 #include "rduicolor.h"
+#include "rduiinlinecontent.h"
 #include "rduischema.h"
 #include "rduistylesheet.h"
 #include "rduiviewcontract.h"
@@ -38,13 +39,14 @@ namespace rdui
         {
             return state.empty() || state == "hover" || state == "active" || state == "focus"
                 || state == "focus-visible" || state == "disabled" || state == "checked"
-                || state == "minimized";
+                || state == "minimized" || state == "invalid";
         }
 
         std::optional<WidgetState> targetSpecificState(const std::string& state)
         {
             if (state == "checked") return WidgetState::Checked;
             if (state == "minimized") return WidgetState::Minimized;
+            if (state == "invalid") return WidgetState::Invalid;
             return std::nullopt;
         }
 
@@ -288,12 +290,12 @@ namespace rdui
         return rule;
     }
 
-    StyleSheetLoadResult StyleSheet::loadCss(const std::string& css, const std::string& source_name)
+    StyleSheetLoadResult StyleSheet::loadRadia(const std::string& radia, const std::string& source_name)
     {
-        return loadCssLayers({ResourceLayer{source_name, css}});
+        return loadRadiaLayers({ResourceLayer{source_name, radia}});
     }
 
-    StyleSheetLoadResult StyleSheet::loadCssLayers(const std::vector<ResourceLayer>& layers)
+    StyleSheetLoadResult StyleSheet::loadRadiaLayers(const std::vector<ResourceLayer>& layers)
     {
         Impl candidate;
         StyleSheetLoadResult result;
@@ -304,10 +306,6 @@ namespace rdui
         }
         for (const ResourceLayer& layer : layers)
         {
-            // Collect tokens from every reachable module before declarations are
-            // compiled. This lets a conventional top-of-file @import consume
-            // tokens declared by its owning entrypoint without exposing tokens
-            // from unrelated or later Skin layers.
             std::vector<std::string> token_stack;
             std::function<void(const std::string&, const std::string&, const std::string&)> collectTokens;
             collectTokens = [&](const std::string& source, const std::string& resource_id,
@@ -560,6 +558,26 @@ namespace rdui
                 {
                     result.error("stylesheet.selector.target_required",
                                  "Parts and states require an element-qualified selector: " + selector + ".", source_name);
+                    return;
+                }
+                continue;
+            }
+
+            if (isInlineStyleElement(component.element))
+            {
+                if (!component.id.empty() || !component.class_name.empty())
+                {
+                    result.error("stylesheet.selector.inline_identity_unsupported",
+                                 "Inline style elements do not have Widget IDs or classes: " + selector + ".",
+                                 source_name);
+                    return;
+                }
+                component.element = inlineContentElement(InlineContentKind::Kbd);
+                if (!component.parts.empty())
+                {
+                    result.error("stylesheet.selector.part_unknown",
+                                 "Unknown style part for " + component.element + ".",
+                                 source_name);
                     return;
                 }
                 continue;

@@ -37,8 +37,8 @@ namespace rdui
             ? localization.loadXml(*localization_xml, "localization.xml")
             : localization.loadXmlLayers(localization_layers));
         result.append(style_layers.empty()
-            ? style_sheet.loadCss(*style_source, "skin.radia")
-            : style_sheet.loadCssLayers(style_layers));
+            ? style_sheet.loadRadia(*style_source, "skin.radia")
+            : style_sheet.loadRadiaLayers(style_layers));
 
         constexpr const char* RESOURCE_PREFIX = "resources/";
         constexpr std::size_t RESOURCE_PREFIX_SIZE = sizeof("resources/") - 1;

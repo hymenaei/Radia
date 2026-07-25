@@ -49,7 +49,10 @@ namespace rdui
             {StyleProperty::Gap,              "gap",              StyleCapability::Container,  StylePropagation::Local,      InheritedStyleProperty::NotInherited, StyleValueType::Gap},
             {StyleProperty::JustifyContent,   "justify-content",  StyleCapability::Container,  StylePropagation::Local,      InheritedStyleProperty::NotInherited, StyleValueType::JustifyContent},
             {StyleProperty::AlignSelf,        "align-self",       StyleCapability::FlowItem,   StylePropagation::Local,      InheritedStyleProperty::NotInherited, StyleValueType::AlignSelf},
-            {StyleProperty::Grow,             "grow",             StyleCapability::FlowItem,   StylePropagation::Local,      InheritedStyleProperty::NotInherited, StyleValueType::Number},
+            {StyleProperty::Flex,             "flex",             StyleCapability::FlowItem,   StylePropagation::Local,      InheritedStyleProperty::NotInherited, StyleValueType::Flex},
+            {StyleProperty::FlexBasis,        "flex-basis",       StyleCapability::FlowItem,   StylePropagation::Local,      InheritedStyleProperty::NotInherited, StyleValueType::Dimension},
+            {StyleProperty::FlexGrow,         "flex-grow",        StyleCapability::FlowItem,   StylePropagation::Local,      InheritedStyleProperty::NotInherited, StyleValueType::Number},
+            {StyleProperty::FlexShrink,       "flex-shrink",      StyleCapability::FlowItem,   StylePropagation::Local,      InheritedStyleProperty::NotInherited, StyleValueType::Number},
             {StyleProperty::Order,            "order",            StyleCapability::FlowItem,   StylePropagation::Local,      InheritedStyleProperty::NotInherited, StyleValueType::Integer},
             {StyleProperty::FontFamily,       "font-family",      StyleCapability::Typography, StylePropagation::Inherited,  InheritedStyleProperty::FontFamily, StyleValueType::FontFamily},
             {StyleProperty::FontSize,         "font-size",        StyleCapability::Typography, StylePropagation::Inherited,  InheritedStyleProperty::FontSize,   StyleValueType::Number},
@@ -58,7 +61,7 @@ namespace rdui
             {StyleProperty::LineHeight,       "line-height",      StyleCapability::Typography, StylePropagation::Inherited,  InheritedStyleProperty::LineHeight, StyleValueType::Length},
             {StyleProperty::TextAlign,        "text-align",       StyleCapability::Typography, StylePropagation::Inherited,  InheritedStyleProperty::TextAlign,  StyleValueType::TextAlign},
             {StyleProperty::TextColor,        "text-color",       StyleCapability::Typography, StylePropagation::Inherited,  InheritedStyleProperty::TextColor,  StyleValueType::Color},
-            {StyleProperty::VerticalAlign,    "vertical-align",   StyleCapability::Text,       StylePropagation::Local,      InheritedStyleProperty::NotInherited, StyleValueType::VerticalAlign},
+            {StyleProperty::VerticalAlign,    "vertical-align",   StyleCapability::Container,  StylePropagation::Local,      InheritedStyleProperty::NotInherited, StyleValueType::VerticalAlign},
             {StyleProperty::IconStroke,       "stroke",           StyleCapability::Icon,       StylePropagation::Local,      InheritedStyleProperty::NotInherited, StyleValueType::IconStroke},
             {StyleProperty::IconStrokeColor,  "stroke-color",     StyleCapability::Icon,       StylePropagation::Local,      InheritedStyleProperty::NotInherited, StyleValueType::Color},
             {StyleProperty::IconStrokeLinecap,"stroke-linecap",   StyleCapability::Icon,       StylePropagation::Local,      InheritedStyleProperty::NotInherited, StyleValueType::StrokeCap},
@@ -191,11 +194,20 @@ namespace rdui
             case StyleProperty::Top: style.top = std::get<Length>(declaration.value); break;
             case StyleProperty::Width: style.width = std::get<Dimension>(declaration.value); break;
             case StyleProperty::AlignItems: style.align_items = std::get<AlignItems>(declaration.value); break;
-            case StyleProperty::Flow: style.flow = std::get<Flow>(declaration.value); break;
+            case StyleProperty::Flow:
+                style.flow = std::get<Flow>(declaration.value);
+                style.flow_set = true;
+                break;
             case StyleProperty::Gap: style.gap = std::get<GapValue>(declaration.value); break;
-            case StyleProperty::JustifyContent: style.justify_content = std::get<JustifyContent>(declaration.value); break;
+            case StyleProperty::JustifyContent:
+                style.justify_content = std::get<JustifyContent>(declaration.value);
+                style.justify_content_set = true;
+                break;
             case StyleProperty::AlignSelf: style.align_self = std::get<AlignSelf>(declaration.value); break;
-            case StyleProperty::Grow: style.grow = std::get<float>(declaration.value); break;
+            case StyleProperty::Flex: break;
+            case StyleProperty::FlexBasis: style.flex_basis = std::get<Dimension>(declaration.value); break;
+            case StyleProperty::FlexGrow: style.flex_grow = std::get<float>(declaration.value); break;
+            case StyleProperty::FlexShrink: style.flex_shrink = std::get<float>(declaration.value); break;
             case StyleProperty::Order: style.order = std::get<int>(declaration.value); break;
             case StyleProperty::FontFamily: style.font_family = std::get<FontFamily>(declaration.value); break;
             case StyleProperty::FontSize: style.font_size = std::get<float>(declaration.value); break;
@@ -204,7 +216,10 @@ namespace rdui
             case StyleProperty::LineHeight: style.line_height = std::get<Length>(declaration.value); break;
             case StyleProperty::TextAlign: style.text_align = std::get<TextAlign>(declaration.value); break;
             case StyleProperty::TextColor: style.text_color = std::get<Color>(declaration.value); break;
-            case StyleProperty::VerticalAlign: style.vertical_align = std::get<VerticalAlign>(declaration.value); break;
+            case StyleProperty::VerticalAlign:
+                style.vertical_align = std::get<VerticalAlign>(declaration.value);
+                style.vertical_align_set = true;
+                break;
             case StyleProperty::IconStroke:
             {
                 const StyleIconStroke& stroke = std::get<StyleIconStroke>(declaration.value);
@@ -374,16 +389,7 @@ namespace rdui
             case StyleProperty::FontFamily:
             {
                 const std::string family = lower(trim(value));
-                std::optional<FontFamily> parsed;
-                if (family == "sans") parsed = FontFamily::Sans;
-                else if (family == "sans-small" || family == "small") parsed = FontFamily::Small;
-                else if (family == "sans-small-bold" || family == "small-bold") parsed = FontFamily::SmallBold;
-                else if (family == "sans-small-italic" || family == "small-italic") parsed = FontFamily::SmallItalic;
-                else if (family == "sans-medium" || family == "medium") parsed = FontFamily::Medium;
-                else if (family == "sans-big" || family == "big" || family == "large") parsed = FontFamily::Big;
-                else if (family == "sans-huge" || family == "huge") parsed = FontFamily::Huge;
-                else if (family == "sans-bold" || family == "bold") parsed = FontFamily::Bold;
-                return parsed ? compiled(*parsed) : invalid();
+                return family == "sans" ? compiled(FontFamily::Sans) : invalid();
             }
             case StyleProperty::FontWeight:
             {
@@ -404,7 +410,7 @@ namespace rdui
                 std::optional<TextAlign> parsed;
                 if (alignment == "left") parsed = TextAlign::Left;
                 else if (alignment == "start") parsed = TextAlign::Start;
-                else if (alignment == "center" || alignment == "middle") parsed = TextAlign::Center;
+                else if (alignment == "center") parsed = TextAlign::Center;
                 else if (alignment == "right") parsed = TextAlign::Right;
                 else if (alignment == "end") parsed = TextAlign::End;
                 return parsed ? compiled(*parsed) : invalid();
@@ -414,7 +420,7 @@ namespace rdui
                 const std::string alignment = lower(trim(value));
                 std::optional<VerticalAlign> parsed;
                 if (alignment == "top") parsed = VerticalAlign::Top;
-                else if (alignment == "center" || alignment == "middle") parsed = VerticalAlign::Center;
+                else if (alignment == "middle") parsed = VerticalAlign::Middle;
                 else if (alignment == "bottom") parsed = VerticalAlign::Bottom;
                 return parsed ? compiled(*parsed) : invalid();
             }
@@ -469,6 +475,73 @@ namespace rdui
                 else if (alignment == "end") parsed = AlignSelf::End;
                 else if (alignment == "stretch") parsed = AlignSelf::Stretch;
                 return parsed ? compiled(*parsed) : invalid();
+            }
+            case StyleProperty::Flex:
+            {
+                const std::vector<std::string> tokens = tokenizeTopLevel(value);
+                if (tokens.empty() || tokens.size() > 3) return invalid();
+
+                const std::string keyword = lower(trim(value));
+                if (keyword == "none")
+                    return std::vector<StyleDeclaration>{
+                        {StyleProperty::FlexGrow, 0.f},
+                        {StyleProperty::FlexShrink, 0.f},
+                        {StyleProperty::FlexBasis, Dimension()},
+                    };
+                if (keyword == "auto")
+                    return std::vector<StyleDeclaration>{
+                        {StyleProperty::FlexGrow, 1.f},
+                        {StyleProperty::FlexShrink, 1.f},
+                        {StyleProperty::FlexBasis, Dimension()},
+                    };
+
+                auto nonnegativeNumber = [&](const std::string& raw) -> std::optional<float>
+                {
+                    const std::string token = lower(trim(raw));
+                    if (endsWith(token, "px") || endsWith(token, "%")) return std::nullopt;
+                    const auto parsed = number(raw);
+                    return parsed && *parsed >= 0.f ? parsed : std::nullopt;
+                };
+                auto basis = [&](const std::string& raw) -> std::optional<Dimension>
+                {
+                    if (lower(trim(raw)) == "auto") return Dimension();
+                    const auto parsed = nonnegativeLength(raw);
+                    return parsed ? std::optional<Dimension>(Dimension::fromLength(*parsed)) : std::nullopt;
+                };
+
+                float grow = 1.f;
+                float shrink = 1.f;
+                Dimension flex_basis = Dimension::fromLength(Length{});
+                if (tokens.size() == 1)
+                {
+                    if (const auto parsed = nonnegativeNumber(tokens[0])) grow = *parsed;
+                    else if (const auto parsed = basis(tokens[0])) flex_basis = *parsed;
+                    else return invalid();
+                }
+                else if (tokens.size() == 2)
+                {
+                    const auto parsed_grow = nonnegativeNumber(tokens[0]);
+                    if (!parsed_grow) return invalid();
+                    grow = *parsed_grow;
+                    if (const auto parsed_shrink = nonnegativeNumber(tokens[1])) shrink = *parsed_shrink;
+                    else if (const auto parsed_basis = basis(tokens[1])) flex_basis = *parsed_basis;
+                    else return invalid();
+                }
+                else
+                {
+                    const auto parsed_grow = nonnegativeNumber(tokens[0]);
+                    const auto parsed_shrink = nonnegativeNumber(tokens[1]);
+                    const auto parsed_basis = basis(tokens[2]);
+                    if (!parsed_grow || !parsed_shrink || !parsed_basis) return invalid();
+                    grow = *parsed_grow;
+                    shrink = *parsed_shrink;
+                    flex_basis = *parsed_basis;
+                }
+                return std::vector<StyleDeclaration>{
+                    {StyleProperty::FlexGrow, grow},
+                    {StyleProperty::FlexShrink, shrink},
+                    {StyleProperty::FlexBasis, flex_basis},
+                };
             }
             case StyleProperty::PointerEvents:
             {
@@ -534,12 +607,16 @@ namespace rdui
             case StyleProperty::Height:
                 if (lower(trim(value)) == "auto") return compiled(Dimension());
                 [[fallthrough]];
+            case StyleProperty::FlexBasis:
+                if (lower(trim(value)) == "auto") return compiled(Dimension());
+                [[fallthrough]];
             case StyleProperty::MinWidth:
             case StyleProperty::MinHeight:
             {
                 const auto parsed = length();
                 if (!parsed || parsed->pixels < 0.f || parsed->percent < 0.f) return invalid();
-                if (property == StyleProperty::Width || property == StyleProperty::Height)
+                if (property == StyleProperty::Width || property == StyleProperty::Height
+                    || property == StyleProperty::FlexBasis)
                     return compiled(Dimension::fromLength(*parsed));
                 return compiled(*parsed);
             }
@@ -556,8 +633,12 @@ namespace rdui
             case StyleProperty::FontSize:
             case StyleProperty::LineHeight:
             case StyleProperty::Opacity:
-            case StyleProperty::Grow:
+            case StyleProperty::FlexGrow:
+            case StyleProperty::FlexShrink:
             {
+                const std::string raw = lower(trim(value));
+                if ((property == StyleProperty::FlexGrow || property == StyleProperty::FlexShrink)
+                    && (endsWith(raw, "px") || endsWith(raw, "%"))) return invalid();
                 const auto parsed = number();
                 if (!parsed) return invalid();
                 const bool nonnegative = property != StyleProperty::Opacity;

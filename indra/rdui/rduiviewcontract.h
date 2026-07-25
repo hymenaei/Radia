@@ -3,6 +3,7 @@
 
 #include "rduidiagnostic.h"
 #include "rduilayoutdocument.h"
+#include "rduiinlinecontent.h"
 #include "rduilocalization.h"
 #include "rduischema.h"
 #include "rduiviewresult.h"
@@ -13,11 +14,14 @@
 #include <string>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 namespace rdui
 {
+    class Label;
+
     class ViewBuildContext
     {
         public:
@@ -50,6 +54,7 @@ namespace rdui
         Unsupported,
         Widget,
         Children,
+        Inline,
     };
 
     struct CompositePartContract
@@ -62,6 +67,14 @@ namespace rdui
         std::function<void(Widget&, Widget&)> bind;
         std::vector<WidgetState> produced_states;
         bool eager = true;
+    };
+
+    struct ScopedInlineContentContract
+    {
+        std::string element;
+        std::vector<InlineContentKind> accepted;
+        std::function<Widget*(InlineContent, Widget&, ViewBuildResult&, const std::string&,
+                              std::size_t, std::size_t)> apply;
     };
 
     namespace detail
@@ -103,6 +116,37 @@ namespace rdui
         contract.names.push_back(std::move(name));
         return contract;
     }
+
+    class ViewScopeContext
+    {
+        public:
+            using LabelablePredicate = std::function<bool(const Widget&)>;
+
+            ViewScopeContext(const std::unordered_map<std::string, Widget*>& widgets,
+                             const std::unordered_set<std::string>& ambiguous_ids,
+                             LabelablePredicate is_labelable)
+                : mWidgets(widgets), mAmbiguousIds(ambiguous_ids),
+                  mIsLabelable(std::move(is_labelable)) {}
+
+            Widget* find(const std::string& id) const
+            {
+                if (id.empty() || ambiguous(id)) return nullptr;
+                const auto found = mWidgets.find(id);
+                return found == mWidgets.end() ? nullptr : found->second;
+            }
+
+            bool ambiguous(const std::string& id) const
+            {
+                return mAmbiguousIds.find(id) != mAmbiguousIds.end();
+            }
+
+            bool labelable(const Widget& widget) const { return mIsLabelable(widget); }
+
+        private:
+            const std::unordered_map<std::string, Widget*>& mWidgets;
+            const std::unordered_set<std::string>& mAmbiguousIds;
+            LabelablePredicate mIsLabelable;
+    };
 
     template<typename WidgetT, typename SetterT>
     WidgetAttributeContract stringAttribute(std::initializer_list<std::string> names, SetterT setter)
@@ -204,13 +248,21 @@ namespace rdui
         std::vector<std::string> attributes;
         std::unordered_map<std::string, std::vector<std::string>> part_attributes;
         std::function<void(const LayoutElement&, Widget&, ViewBuildResult&, const std::string&, const ViewBuildContext*)> apply_attributes;
+        std::function<void(const LayoutElement&, Widget&, const ViewScopeContext&,
+                           ViewBuildResult&, const std::string&)> validate_composition;
         std::vector<ActionEventKind> supported_actions;
         std::function<std::optional<Widget*>(const LayoutElement&, Widget&, ViewBuildResult&, const std::string&)> child_container;
         std::vector<WidgetState> produced_states;
         std::vector<CompositePartContract> composite_parts;
+        bool labelable = false;
         ViewTextContent text_content = ViewTextContent::Unsupported;
+        std::function<std::unique_ptr<Widget>(TextValue)> create_text_child;
         std::function<void(std::string, Widget&, ViewBuildResult&, const std::string&,
                            const ViewBuildContext*, std::size_t)> apply_text;
+        std::vector<InlineContentKind> accepted_inline_content;
+        std::function<void(InlineContent, Widget&)> apply_inline_content;
+        std::unordered_map<std::string, ScopedInlineContentContract> scoped_inline_content;
+        bool scoped_only = false;
     };
 
     template<typename WidgetT>
@@ -236,6 +288,18 @@ namespace rdui
                 return *this;
             }
 
+            template<typename ValidatorT>
+            WidgetContractBuilder& composition(ValidatorT validator)
+            {
+                mContract.validate_composition = [validator = std::move(validator)](
+                    const LayoutElement& element, Widget& widget, const ViewScopeContext& scope,
+                    ViewBuildResult& result, const std::string& source)
+                {
+                    validator(element, static_cast<WidgetT&>(widget), scope, result, source);
+                };
+                return *this;
+            }
+
             WidgetContractBuilder& actions(std::initializer_list<ActionEventKind> actions)
             {
                 mContract.supported_actions.assign(actions.begin(), actions.end());
@@ -248,23 +312,50 @@ namespace rdui
                 return *this;
             }
 
+            WidgetContractBuilder& labelable()
+            {
+                mContract.labelable = true;
+                return *this;
+            }
+
+            WidgetContractBuilder& scopedOnly()
+            {
+                mContract.scoped_only = true;
+                return *this;
+            }
+
             template<typename PartT, typename OwnerT, typename SlotT>
-            WidgetContractBuilder& part(std::string path, WidgetRef<SlotT> OwnerT::* slot)
+            WidgetContractBuilder& part(std::string path, WidgetRef<SlotT> OwnerT::* slot,
+                                        bool eager = true)
             {
                 static_assert(std::is_same_v<OwnerT, WidgetT>);
-                mContract.composite_parts.push_back(detail::makeWidgetPart<PartT>(std::move(path), slot));
+                CompositePartContract part = detail::makeWidgetPart<PartT>(std::move(path), slot);
+                part.eager = eager;
+                mContract.composite_parts.push_back(std::move(part));
                 return *this;
             }
 
             template<typename OwnerT, typename PartT>
-            WidgetContractBuilder& part(std::string path, WidgetRef<PartT> OwnerT::* slot)
+            WidgetContractBuilder& part(std::string path, WidgetRef<PartT> OwnerT::* slot,
+                                        bool eager = true)
             {
-                return part<PartT>(std::move(path), slot);
+                return part<PartT>(std::move(path), slot, eager);
             }
 
             WidgetContractBuilder& textChildren()
             {
                 mContract.text_content = ViewTextContent::Children;
+                return *this;
+            }
+
+            template<typename CreateT>
+            WidgetContractBuilder& textChildren(CreateT create)
+            {
+                mContract.text_content = ViewTextContent::Children;
+                mContract.create_text_child = [create = std::move(create)](TextValue text) -> std::unique_ptr<Widget>
+                {
+                    return create(std::move(text));
+                };
                 return *this;
             }
 
@@ -278,6 +369,37 @@ namespace rdui
                 {
                     apply(std::move(value), static_cast<WidgetT&>(widget), result, source, context, line);
                 };
+                return *this;
+            }
+
+            template<typename ApplyT>
+            WidgetContractBuilder& inlineContent(std::initializer_list<InlineContentKind> accepted, ApplyT apply)
+            {
+                mContract.text_content = ViewTextContent::Inline;
+                mContract.accepted_inline_content.assign(accepted.begin(), accepted.end());
+                mContract.apply_inline_content = [apply = std::move(apply)](InlineContent content, Widget& widget)
+                {
+                    apply(std::move(content), static_cast<WidgetT&>(widget));
+                };
+                return *this;
+            }
+
+            template<typename ApplyT>
+            WidgetContractBuilder& scopedInlineContent(std::string element,
+                                                       std::initializer_list<InlineContentKind> accepted,
+                                                       ApplyT apply)
+            {
+                ScopedInlineContentContract contract;
+                contract.element = std::move(element);
+                contract.accepted.assign(accepted.begin(), accepted.end());
+                contract.apply = [apply = std::move(apply)](InlineContent content, Widget& widget,
+                                                             ViewBuildResult& result, const std::string& source,
+                                                             std::size_t line, std::size_t column) -> Widget*
+                {
+                    return apply(std::move(content), static_cast<WidgetT&>(widget), result,
+                                 source, line, column);
+                };
+                mContract.scoped_inline_content.emplace(schemaNameKey(contract.element), std::move(contract));
                 return *this;
             }
 
@@ -363,6 +485,10 @@ namespace rdui
                 static void setStyleIdentity(Widget& widget, std::string element, std::string part);
                 static void setIdScopeRoot(Widget& widget);
                 static void setState(Widget& widget, WidgetState state, bool enabled);
+                static const std::string& labelTargetId(const Label& label);
+                static Widget* labelTarget(const Label& label);
+                static void setLabelTarget(Label& label, Widget* target);
+                static void setFlowBreakBefore(Widget& widget, bool enabled);
         };
 
         void instantiateCompositeParts(Widget& owner, const WidgetContract& contract);

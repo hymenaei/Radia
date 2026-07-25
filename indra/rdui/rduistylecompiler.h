@@ -39,7 +39,10 @@ namespace rdui
         Gap,
         JustifyContent,
         AlignSelf,
-        Grow,
+        Flex,
+        FlexBasis,
+        FlexGrow,
+        FlexShrink,
         Order,
         FontFamily,
         FontSize,
@@ -170,7 +173,8 @@ namespace rdui
                               uint8_t owner_states,
                               const std::vector<std::string>& part_path,
                               uint8_t part_states,
-                              const Widget* widget = nullptr) const;
+                              const Widget* widget = nullptr,
+                              const std::vector<std::string>* inline_ancestors = nullptr) const;
         void parseBlock(const std::string& selector,
                         const std::string& body,
                         const StyleRule& parent,
@@ -193,7 +197,6 @@ namespace rdui::detail
         Container,
         FlowItem,
         Typography,
-        Text,
         Icon,
     };
 
@@ -229,6 +232,7 @@ namespace rdui::detail
         JustifyContent,
         AlignItems,
         AlignSelf,
+        Flex,
         Overflow,
         PointerEvents,
         Cursor,

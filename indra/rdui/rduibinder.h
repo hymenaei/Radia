@@ -2,11 +2,13 @@
 #define LL_RDUI_BINDER_H
 
 #include "rduidiagnostic.h"
+#include "rduivaluebinding.h"
 #include "rduiwidget.h"
 #include <functional>
 #include <map>
 #include <memory>
 #include <string>
+#include <typeindex>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -14,6 +16,7 @@
 namespace rdui
 {
     class Binder;
+    class ValueControl;
 
     class Binding
     {
@@ -26,11 +29,18 @@ namespace rdui
             Binding(Binding&&) noexcept = default;
             Binding& operator=(Binding&&) noexcept = default;
 
-            explicit operator bool() const { return !mHandlers.empty(); }
-            void reset() { mHandlers.clear(); }
+            explicit operator bool() const { return mCommitted; }
+            void reset()
+            {
+                mValueSubscriptions.clear();
+                mHandlers.clear();
+                mCommitted = false;
+            }
 
         private:
             std::vector<std::shared_ptr<detail::ActionHandler>> mHandlers;
+            std::vector<ValueBindingSubscription> mValueSubscriptions;
+            bool mCommitted = false;
     };
 
     class PreparedBinding
@@ -74,7 +84,7 @@ namespace rdui
             Binder& operator=(const Binder&) = delete;
 
             template<typename WidgetT>
-            void require(std::string id, WidgetRef<WidgetT>& output)
+            void bind(std::string id, WidgetRef<WidgetT>& output)
             {
                 Pending pending;
                 pending.id = std::move(id);
@@ -84,8 +94,35 @@ namespace rdui
                 mPending.push_back(std::move(pending));
             }
 
-            // Action registrations are optional capabilities of a layout:
-            // matching declarations are bound, while an absent declaration is valid.
+            template<typename BindingT>
+            void provideValue(std::string id, std::shared_ptr<BindingT> binding)
+            {
+                using T = typename BindingT::ValueType;
+                static_assert(std::is_base_of_v<ValueBinding<T>, BindingT>,
+                              "Value provider must derive from ValueBinding<T>.");
+
+                PendingValueProvider pending;
+                pending.id = std::move(id);
+                pending.type = typeid(T);
+                pending.type_name = detail::valueTypeName<T>();
+                pending.binding = std::static_pointer_cast<ValueBinding<T>>(binding);
+                mPendingValueProviders.push_back(std::move(pending));
+            }
+
+            template<typename T>
+            void requireValue(std::string id, ValueBindingRef<T>& output)
+            {
+                PendingValueRequirement pending;
+                pending.id = std::move(id);
+                pending.type = typeid(T);
+                pending.type_name = detail::valueTypeName<T>();
+                pending.commit = [&output](const std::shared_ptr<ValueBindingBase>& binding)
+                {
+                    output.set(std::static_pointer_cast<ValueBinding<T>>(binding));
+                };
+                mPendingValueRequirements.push_back(std::move(pending));
+            }
+
             template<typename Callback>
             void onClick(std::string action, Callback callback)
             {
@@ -171,6 +208,23 @@ namespace rdui
                 Widget* resolved = nullptr;
             };
 
+            struct PendingValueProvider
+            {
+                std::string id;
+                std::type_index type{typeid(void)};
+                const char* type_name = nullptr;
+                std::shared_ptr<ValueBindingBase> binding;
+            };
+
+            struct PendingValueRequirement
+            {
+                std::string id;
+                std::type_index type{typeid(void)};
+                const char* type_name = nullptr;
+                std::function<void(const std::shared_ptr<ValueBindingBase>&)> commit;
+                std::shared_ptr<ValueBindingBase> resolved;
+            };
+
             Binder() = default;
             Binder(Binder&&) noexcept = default;
             Binder& operator=(Binder&&) noexcept = default;
@@ -199,6 +253,9 @@ namespace rdui
             std::vector<Pending> mPending;
             std::vector<PendingAction> mPendingActions;
             std::vector<PendingScope> mPendingScopes;
+            std::vector<PendingValueProvider> mPendingValueProviders;
+            std::vector<PendingValueRequirement> mPendingValueRequirements;
+            std::vector<ValueControl*> mValueControls;
             bool mFinished = false;
 
             friend class PreparedBinding;

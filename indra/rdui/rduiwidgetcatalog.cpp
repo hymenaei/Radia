@@ -4,10 +4,12 @@
 #include "rdbutton.h"
 #include "rdfloater.h"
 #include "rdfield.h"
+#include "rdfieldset.h"
 #include "rdicon.h"
 #include "rdlabel.h"
 #include "rdpanel.h"
 #include "rdswitch.h"
+#include "rdtext.h"
 
 namespace rdui
 {
@@ -22,14 +24,17 @@ namespace rdui
                 result.emplace(key, std::move(contract));
             };
             add(detail::buttonContract());
-            add(detail::contentContract());
-            add(detail::descriptionContract());
             add(detail::fieldContract());
+            add(detail::hintContract());
+            add(detail::errorContract());
+            add(detail::fieldsetContract());
+            add(detail::legendContract());
             add(detail::floaterContract());
             add(detail::iconContract());
             add(detail::labelContract());
             add(detail::panelContract());
             add(detail::switchContract());
+            add(detail::textContract());
             return result;
         }();
         return contracts;

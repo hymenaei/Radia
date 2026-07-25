@@ -31,8 +31,8 @@ namespace rdui
             StyleSheet(StyleSheet&& other) noexcept;
             StyleSheet& operator=(StyleSheet&& other) noexcept;
 
-            StyleSheetLoadResult loadCss(const std::string& css, const std::string& source_name = {});
-            StyleSheetLoadResult loadCssLayers(const std::vector<ResourceLayer>& layers);
+            StyleSheetLoadResult loadRadia(const std::string& radia, const std::string& source_name = {});
+            StyleSheetLoadResult loadRadiaLayers(const std::vector<ResourceLayer>& layers);
             std::uint64_t generation() const;
             const DependencyMap& dependencies() const;
 
@@ -48,6 +48,8 @@ namespace rdui
                               uint8_t part_states = 0) const;
             Style resolveWidget(const Widget& widget) const;
             Style resolveWidgetPart(const Widget& owner, const Widget& part) const;
+            Style resolveInline(const Widget& owner, const std::string& element,
+                                const std::vector<std::string>& inline_ancestors = {}) const;
 
         private:
             struct Impl;

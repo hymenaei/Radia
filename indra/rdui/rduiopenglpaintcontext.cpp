@@ -100,13 +100,6 @@ namespace rdui
                  : LLFontGL::LEFT;
         }
 
-        LLFontGL::VAlign verticalAlignment(const Style& style)
-        {
-            if (style.vertical_align == VerticalAlign::Center) return LLFontGL::VCENTER;
-            if (style.vertical_align == VerticalAlign::Bottom) return LLFontGL::BOTTOM;
-            return LLFontGL::TOP;
-        }
-
         float textX(const Rect& rect, LLFontGL::HAlign align)
         {
             return align == LLFontGL::HCENTER ? rect.x + rect.w * 0.5f
@@ -121,30 +114,23 @@ namespace rdui
                  : rect.top();
         }
 
+        float textBaseline(const Rect& rect, LLFontGL::VAlign align, const LLFontGL& font)
+        {
+            const float anchor = textY(rect, align);
+            if (align == LLFontGL::TOP) return anchor - font.getAscenderHeight();
+            if (align == LLFontGL::BOTTOM) return anchor + font.getDescenderHeight();
+            if (align == LLFontGL::VCENTER)
+                return anchor - (font.getAscenderHeight() - font.getDescenderHeight()) * .5f;
+            return anchor;
+        }
+
         const LLFontGL& fontForStyle(const Style& style)
         {
-            LLFontGL* font = nullptr;
-            switch (style.font_family)
-            {
-                case FontFamily::Small:       font = LLFontGL::getFontSansSerifSmall(); break;
-                case FontFamily::SmallBold:   font = LLFontGL::getFontSansSerifSmallBold(); break;
-                case FontFamily::SmallItalic: font = LLFontGL::getFontSansSerifSmallItalic(); break;
-                case FontFamily::Medium:      font = LLFontGL::getFontSansSerifMedium(); break;
-                case FontFamily::Big:         font = LLFontGL::getFontSansSerifBig(); break;
-                case FontFamily::Huge:        font = LLFontGL::getFontSansSerifHuge(); break;
-                case FontFamily::Bold:        font = LLFontGL::getFontSansSerifBold(); break;
-                case FontFamily::Sans:
-                    // LLFontGL exposes the viewer's named, skin-configurable
-                    // sizes rather than arbitrary point-size construction.
-                    // Select the nearest production face so RSL font-size has
-                    // the same observable effect in measure and paint.
-                    font = style.font_size <= 11.f ? LLFontGL::getFontSansSerifSmall()
-                         : style.font_size <= 15.f ? LLFontGL::getFontSansSerif()
-                         : style.font_size <= 19.f ? LLFontGL::getFontSansSerifMedium()
-                         : style.font_size <= 25.f ? LLFontGL::getFontSansSerifBig()
-                         : LLFontGL::getFontSansSerifHuge();
-                    break;
-            }
+            LLFontGL* font = style.font_size <= 11.f ? LLFontGL::getFontSansSerifSmall()
+                           : style.font_size <= 15.f ? LLFontGL::getFontSansSerif()
+                           : style.font_size <= 19.f ? LLFontGL::getFontSansSerifMedium()
+                           : style.font_size <= 25.f ? LLFontGL::getFontSansSerifBig()
+                           : LLFontGL::getFontSansSerifHuge();
             if (!font) LL_ERRS("rdui") << "OpenGL text adapter used before viewer fonts were initialized." << LL_ENDL;
             return *font;
         }
@@ -355,8 +341,12 @@ namespace rdui
         const float extent = (std::abs(direction.x) * effect_rect.w + std::abs(direction.y) * effect_rect.h) * scale;
         const Vec2 center((effect_rect.x + effect_rect.w * .5f - capture.x) * scale,
                           (effect_rect.y + effect_rect.h * .5f - capture.y) * scale);
-        const Vec2 gradient_start = center - direction * (extent * .5f);
-        const Vec2 gradient_end = center + direction * (extent * .5f);
+        const Vec2 gradient_line_start = center - direction * (extent * .5f);
+        const Vec2 gradient_line = direction * extent;
+        const Vec2 gradient_start = gradient_line_start + gradient_line * effect.start_position;
+        Vec2 gradient_end = gradient_line_start + gradient_line * effect.end_position;
+        if (effect.start_position == effect.end_position)
+            gradient_end = gradient_start + direction * std::max(1.f, scale);
         const float maximum_radius = static_cast<float>(std::max(width, height));
 
         static LLStaticHashedString shape_mode("rduiShapeMode");
@@ -561,14 +551,27 @@ namespace rdui
         const LLFontGL& font = fontForStyle(style);
         prepareTextDraw();
         const LLFontGL::HAlign horizontal = horizontalAlignment(style);
-        const LLFontGL::VAlign vertical = verticalAlignment(style);
+        constexpr LLFontGL::VAlign vertical = LLFontGL::VCENTER;
         font.renderUTF8(text, 0, textX(rect, horizontal), textY(rect, vertical),
                         LLColor4(style.text_color.r, style.text_color.g, style.text_color.b, style.text_color.a),
                         horizontal, vertical, fontFlagsForStyle(style), LLFontGL::NO_SHADOW);
+        if (style.font_strike)
+        {
+            const float width = font.getWidthF32(text);
+            const float anchor = textX(rect, horizontal);
+            const float left = horizontal == LLFontGL::RIGHT ? anchor - width
+                             : horizontal == LLFontGL::HCENTER ? anchor - width * .5f
+                             : anchor;
+            const float thickness = std::max(1.f, std::round(font.getLineHeight() / 14.f));
+            const float y = textBaseline(rect, vertical, font) + font.getAscenderHeight() * .3f;
+            drawRoundedShape(1, {left, y - thickness * .5f, width, thickness},
+                             0.f, 0.f, style.text_color);
+        }
     }
 
     void OpenGLPaintContext::drawRoundedShape(int mode, const Rect& rect, float radius, float border_width,
-                                              const Color& color, OutlineStyle outline_style)
+                                              const Color& color, OutlineStyle outline_style,
+                                              std::optional<TopBorderGap> top_border_gap)
     {
         if (!mShapeProgram.mProgramObject || rect.empty() || color.a <= 0.f || (mode == 2 && border_width <= 0.f)) return;
         static LLStaticHashedString shape_mode("rduiShapeMode");
@@ -578,6 +581,7 @@ namespace rdui
         static LLStaticHashedString shape_color("rduiShapeColor");
         static LLStaticHashedString shape_offset("rduiShapeOffset");
         static LLStaticHashedString shape_outline_style("rduiOutlineStyle");
+        static LLStaticHashedString border_gap("rduiTopBorderGap");
         const float padding = mode == 2 ? 1.f : 0.f;
         const Rect quad = {rect.x - padding, rect.y - padding,
                            rect.w + padding * 2.f, rect.h + padding * 2.f};
@@ -590,13 +594,17 @@ namespace rdui
         mShapeProgram.uniform4f(shape_color, color.r, color.g, color.b, color.a);
         mShapeProgram.uniform2f(shape_offset, padding, padding);
         mShapeProgram.uniform1i(shape_outline_style, static_cast<GLint>(outline_style));
+        mShapeProgram.uniform2f(border_gap,
+            top_border_gap ? top_border_gap->left - rect.left() : -1.f,
+            top_border_gap ? top_border_gap->right - rect.left() : -1.f);
         drawShapeQuad(quad);
         gGL.flush();
         mShapeProgram.uniform1i(shape_mode, 0);
     }
 
     void OpenGLPaintContext::drawRoundedGradient(const Rect& rect, float radius, const Gradient& gradient,
-                                                 const EdgeInsets* border_widths)
+                                                 const EdgeInsets* border_widths,
+                                                 std::optional<TopBorderGap> top_border_gap)
     {
         if (!mShapeProgram.mProgramObject || rect.empty() || gradient.stops.size() < 2 || gradient.stops.size() > 8
             || (border_widths && !border_widths->any())) return;
@@ -615,6 +623,7 @@ namespace rdui
         static LLStaticHashedString gradient_count("rduiGradientStopCount");
         static LLStaticHashedString gradient_colors("rduiGradientColors");
         static LLStaticHashedString gradient_stops("rduiGradientStops");
+        static LLStaticHashedString border_gap("rduiTopBorderGap");
 
         constexpr float radians_per_degree = 0.0174532925199f;
         const float angle = gradient.angle_degrees * radians_per_degree;
@@ -659,6 +668,9 @@ namespace rdui
         if (border_widths)
             mShapeProgram.uniform4f(border_edges, border_widths->top, border_widths->right,
                                    border_widths->bottom, border_widths->left);
+        mShapeProgram.uniform2f(border_gap,
+            top_border_gap ? top_border_gap->left - rect.left() : -1.f,
+            top_border_gap ? top_border_gap->right - rect.left() : -1.f);
         mShapeProgram.uniform1i(gradient_kind, static_cast<GLint>(gradient.kind));
         mShapeProgram.uniform1i(gradient_repeating, gradient.repeating ? 1 : 0);
         mShapeProgram.uniform2f(gradient_start, start.x, start.y);
@@ -732,23 +744,38 @@ namespace rdui
         gGL.end();
     }
 
-    void OpenGLPaintContext::drawBorder(const Rect& rect, const Style& style)
+    void OpenGLPaintContext::drawBorder(const Rect& rect, const Style& style,
+                                        std::optional<TopBorderGap> top_border_gap)
     {
         if (!style.border_width.any()) return;
         const Rect box = snapped(rect);
         if (style.border_gradient)
         {
-            drawRoundedGradient(box, style.border_radius, *style.border_gradient, &style.border_width);
+            drawRoundedGradient(box, style.border_radius, *style.border_gradient,
+                                &style.border_width, top_border_gap);
             return;
         }
         if (style.border_color.a <= 0.f) return;
         if (style.border_width.is_uniform())
         {
-            drawRoundedShape(2, box, style.border_radius, style.border_width.top, style.border_color);
+            drawRoundedShape(2, box, style.border_radius, style.border_width.top, style.border_color,
+                             OutlineStyle::Solid, top_border_gap);
             return;
         }
         const EdgeInsets& width = style.border_width;
-        drawRoundedShape(1, {box.left(), box.top() - width.top, box.w, width.top}, 0.f, 0.f, style.border_color);
+        if (top_border_gap && !top_border_gap->empty())
+        {
+            const float gap_left = std::clamp(top_border_gap->left, box.left(), box.right());
+            const float gap_right = std::clamp(top_border_gap->right, gap_left, box.right());
+            drawRoundedShape(1, {box.left(), box.top() - width.top,
+                                 std::max(0.f, gap_left - box.left()), width.top},
+                             0.f, 0.f, style.border_color);
+            drawRoundedShape(1, {gap_right, box.top() - width.top,
+                                 std::max(0.f, box.right() - gap_right), width.top},
+                             0.f, 0.f, style.border_color);
+        }
+        else drawRoundedShape(1, {box.left(), box.top() - width.top, box.w, width.top},
+                              0.f, 0.f, style.border_color);
         drawRoundedShape(1, {box.left(), box.bottom(), box.w, width.bottom}, 0.f, 0.f, style.border_color);
         drawRoundedShape(1, {box.left(), box.bottom() + width.bottom, width.left, box.h - width.top - width.bottom}, 0.f, 0.f, style.border_color);
         drawRoundedShape(1, {box.right() - width.right, box.bottom() + width.bottom, width.right, box.h - width.top - width.bottom}, 0.f, 0.f, style.border_color);
@@ -758,8 +785,6 @@ namespace rdui
     {
         if (style.outline.width <= 0.f || style.outline.color.a <= 0.f) return;
         const float width = style.outline.width;
-        // Offset anchors the outline's inner edge; its full width grows
-        // outward from there rather than straddling the widget edge.
         const float expansion = width + style.outline.offset;
         const Rect box = snapped(rect);
         drawRoundedShape(2, {box.x - expansion, box.y - expansion,
@@ -768,7 +793,8 @@ namespace rdui
                          style.outline.style);
     }
 
-    void OpenGLPaintContext::paintBox(const Rect& rect, const Style& style)
+    void OpenGLPaintContext::paintBox(const Rect& rect, const Style& style,
+                                      std::optional<TopBorderGap> top_border_gap)
     {
         for (auto shadow = style.shadows.rbegin(); shadow != style.shadows.rend(); ++shadow)
             if (!shadow->inset) drawShadow(rect, style.border_radius, *shadow);
@@ -778,17 +804,12 @@ namespace rdui
         const bool bordered = hasVisibleBorder(style);
         if (bordered)
         {
-            // The border owns the outer rounded coverage. Painting it first and
-            // the background against the concentric inner edge prevents corner
-            // pixels from receiving the same antialiasing coverage twice.
-            if (hasOpaqueBackground(style))
+            if (hasOpaqueBackground(style) && (!top_border_gap || top_border_gap->empty()))
             {
-                // An opaque inner paint can cover a full border backing. This
-                // avoids a second antialiased ring mask at the inner edge too.
                 if (style.border_gradient) drawRoundedGradient(fill_box, style.border_radius, *style.border_gradient);
                 else drawRoundedShape(1, fill_box, style.border_radius, 0.f, style.border_color);
             }
-            else drawBorder(rect, style);
+            else drawBorder(rect, style, top_border_gap);
             fill_box = insetRect(fill_box, style.border_width);
             fill_radius = std::max(0.f, style.border_radius - style.border_width.max_value());
         }
@@ -797,7 +818,7 @@ namespace rdui
         if (style.background_gradient) drawRoundedGradient(fill_box, fill_radius, *style.background_gradient);
         for (auto shadow = style.shadows.rbegin(); shadow != style.shadows.rend(); ++shadow)
             if (shadow->inset) drawShadow(fill_box, fill_radius, *shadow);
-        if (!bordered) drawBorder(rect, style);
+        if (!bordered) drawBorder(rect, style, top_border_gap);
         drawOutline(rect, style);
     }
 

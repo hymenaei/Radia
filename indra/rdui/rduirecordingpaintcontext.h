@@ -28,6 +28,7 @@ namespace rdui
         Style style;
         std::string value;
         float scale = 1.f;
+        std::optional<TopBorderGap> top_border_gap;
     };
 
     class RecordingPaintContext final : public PaintContext
@@ -42,7 +43,8 @@ namespace rdui
             void popClip() override;
             void beginEffects(const Rect& rect, const Style& style, float scale) override;
             void endEffects() override;
-            void paintBox(const Rect& rect, const Style& style) override;
+            void paintBox(const Rect& rect, const Style& style,
+                          std::optional<TopBorderGap> top_border_gap = std::nullopt) override;
             void paintText(const std::string& text, const Rect& rect, const Style& style) override;
             void paintIcon(const std::string& name, const Rect& rect, const Style& style, float scale) override;
 

@@ -37,8 +37,17 @@ namespace rdui::detail
         std::optional<Rect> bounds;
     };
 
+    struct FloaterAuthoredGeometry
+    {
+        Vec2 outer;
+        Vec2 content;
+    };
+
     ResizeEdges resizeEdgesAt(const Rect& bounds, const Vec2& point);
     CursorStyle resizeCursor(ResizeEdges edges);
+    bool preserveUserResizeOnReload(bool current_resizable, bool replacement_resizable,
+                                    const FloaterAuthoredGeometry& current,
+                                    const FloaterAuthoredGeometry& replacement);
     Rect resizedRect(const Rect& initial, const Vec2& initial_pointer,
                      const Vec2& pointer, ResizeEdges edges,
                      const FloaterResizeConstraints& constraints);

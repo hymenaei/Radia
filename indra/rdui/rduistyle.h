@@ -171,6 +171,8 @@ namespace rdui
         EffectKind kind = EffectKind::LayerBlur;
         float start_radius = 0.f;
         float end_radius = 0.f;
+        float start_position = 0.f;
+        float end_position = 1.f;
         float angle_degrees = 180.f;
 
         bool progressive() const { return start_radius != end_radius; }
@@ -213,8 +215,8 @@ namespace rdui
         Cell,
     };
     enum class TextAlign { Left, Center, Right, Start, End };
-    enum class VerticalAlign { Top, Center, Bottom };
-    enum class FontFamily { Sans, Small, SmallBold, SmallItalic, Medium, Big, Huge, Bold };
+    enum class VerticalAlign { Top, Middle, Bottom };
+    enum class FontFamily { Sans };
 
     enum class InheritedStyleProperty : uint16_t
     {
@@ -261,15 +263,22 @@ namespace rdui
         MarginInsets margin;
         EdgeInsets padding;
         GapValue gap;
-        float grow = 0.f;
+        float flex_grow = 0.f;
+        float flex_shrink = 1.f;
+        Dimension flex_basis;
         int order = 0;
         FontFamily font_family = FontFamily::Sans;
         bool font_bold = false;
         bool font_italic = false;
+        bool font_strike = false;
         TextAlign text_align = TextAlign::Start;
         VerticalAlign vertical_align = VerticalAlign::Top;
+        bool vertical_align_set = false;
+        LayoutDirection direction = LayoutDirection::LeftToRight;
         Flow flow = Flow::Free;
+        bool flow_set = false;
         JustifyContent justify_content = JustifyContent::Start;
+        bool justify_content_set = false;
         AlignItems align_items = AlignItems::Normal;
         AlignSelf align_self = AlignSelf::Auto;
         std::optional<float> aspect_ratio;

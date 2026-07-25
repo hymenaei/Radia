@@ -8,6 +8,7 @@ uniform vec4 rduiShapeColor;
 uniform vec2 rduiShapeOffset;
 uniform int rduiOutlineStyle;
 uniform vec4 rduiBorderWidths;
+uniform vec2 rduiTopBorderGap;
 uniform int rduiGradientKind;
 uniform int rduiGradientRepeating;
 uniform vec2 rduiGradientStart;
@@ -334,6 +335,17 @@ void main()
         }
         if (rduiShapeMode == 2 && rduiOutlineStyle == 1)
             alpha *= dashedOutlineCoverage(local_coord, size, rduiShapeRadius, rduiShapeBorderWidth);
+        if (rduiTopBorderGap.y > rduiTopBorderGap.x)
+        {
+            float edge_aa = max(fwidth(local_coord.x), 1.0e-4);
+            float inside_gap = smoothstep(rduiTopBorderGap.x - edge_aa,
+                                          rduiTopBorderGap.x + edge_aa, local_coord.x)
+                             * (1.0 - smoothstep(rduiTopBorderGap.y - edge_aa,
+                                                 rduiTopBorderGap.y + edge_aa, local_coord.x));
+            float top_border = step(size.y - widths.x - max(fwidth(outer_distance), 1.0e-4),
+                                    local_coord.y);
+            alpha *= 1.0 - inside_gap * top_border;
+        }
     }
 
     if (rduiShapeMode == 3 || rduiShapeMode == 6)

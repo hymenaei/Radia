@@ -1,16 +1,19 @@
 #ifndef LL_RDUI_FIELD_H
 #define LL_RDUI_FIELD_H
 
+#include "rdtext.h"
+#include "rduivaluecontrol.h"
 #include "rduiwidget.h"
 
 namespace rdui
 {
+    class Label;
     struct WidgetContract;
     namespace detail
     {
-        WidgetContract contentContract();
-        WidgetContract descriptionContract();
         WidgetContract fieldContract();
+        WidgetContract hintContract();
+        WidgetContract errorContract();
     }
 
     class Field : public Widget
@@ -21,32 +24,38 @@ namespace rdui
 
             Field();
 
-        protected:
-            void constrainResolvedStyle(Style& style) const override;
-    };
-
-    class Content : public Widget
-    {
-        friend WidgetContract detail::contentContract();
-        public:
-            static constexpr const char* ELEMENT = "content";
-
-            Content();
-
-        protected:
-            void constrainResolvedStyle(Style& style) const override;
-    };
-
-    class Description : public Widget
-    {
-        friend WidgetContract detail::descriptionContract();
-        public:
-            static constexpr const char* ELEMENT = "description";
-
-            Description();
+            Label* label() { return mLabel.get(); }
+            const Label* label() const { return mLabel.get(); }
+            Widget* control();
+            const Widget* control() const;
+            Text* hint() { return mHint.get(); }
+            const Text* hint() const { return mHint.get(); }
+            Text* error() { return mError.get(); }
+            const Text* error() const { return mError.get(); }
+            bool dirty() const { return mDirty; }
+            bool invalid() const { return hasState(WidgetState::Invalid); }
 
         protected:
             void constrainResolvedStyle(Style& style) const override;
+            void onChildAdded(Widget& child) override;
+            void onChildrenCleared() override;
+
+        private:
+            Widget* setHintContent(InlineContent content);
+            Widget* setErrorContent(InlineContent content);
+            Widget* createSupportIndent(WidgetRef<Widget>& slot, const char* part, bool collapsed);
+            bool controlPrecedesLabel() const;
+            void refreshValueState(const ValueControlState& state);
+
+            WidgetRef<Label> mLabel;
+            ValueControl* mControl = nullptr;
+            WidgetRef<Text> mHint;
+            WidgetRef<Text> mError;
+            WidgetRef<Widget> mHintIndent;
+            WidgetRef<Widget> mErrorIndent;
+            InlineContent mAuthoredError;
+            ValueBindingSubscription mControlSubscription;
+            bool mDirty = false;
     };
 
 }

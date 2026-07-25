@@ -30,6 +30,8 @@ namespace rdui
             std::unique_ptr<Widget> createResourceWidget(const std::string& filename,
                                                          BuildState& state) const;
             void loadWidgetDefaults(const std::string& element, BuildState& state) const;
+            void validateViewScope(Widget& scope, BuildState& state,
+                                   const std::string& source, bool count_root = true) const;
 
             const LayoutDocumentMap* mDocuments = nullptr;
             std::unordered_map<std::string, WidgetContract> mWidgetContracts;

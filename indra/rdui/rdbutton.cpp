@@ -8,7 +8,26 @@
 
 namespace rdui
 {
+    namespace
+    {
+        class ButtonCaption final : public Label
+        {
+            public:
+                explicit ButtonCaption(TextValue text) : Label("button-caption", {})
+                {
+                    setText(std::move(text));
+                }
+        };
+    }
+
     Button::Button() : Widget(ELEMENT) {}
+
+    void Button::constrainResolvedStyle(Style& style) const
+    {
+        if (!style.flow_set) style.flow = Flow::Row;
+        if (!style.justify_content_set) style.justify_content = JustifyContent::Center;
+        if (!style.vertical_align_set) style.vertical_align = VerticalAlign::Middle;
+    }
 
     void Button::onChildAdded(Widget& child)
     {
@@ -29,7 +48,7 @@ namespace rdui
     {
         if (!mLabel)
         {
-            addChild(std::make_unique<Label>());
+            addChild(std::make_unique<ButtonCaption>(TextValue::literal(std::string())));
         }
         return mLabel->setText(std::move(text));
     }
@@ -38,7 +57,7 @@ namespace rdui
     {
         if (!mLabel)
         {
-            addChild(std::make_unique<Label>());
+            addChild(std::make_unique<ButtonCaption>(TextValue::literal(std::string())));
         }
         return mLabel->setText(std::move(text));
     }
@@ -60,7 +79,7 @@ namespace rdui
                 ActionEventKind::MouseMove,
                 ActionEventKind::LongClick,
                 ActionEventKind::ContextMenu})
-            .textChildren()
+            .textChildren([](TextValue text) { return std::make_unique<ButtonCaption>(std::move(text)); })
             .build();
     }
 

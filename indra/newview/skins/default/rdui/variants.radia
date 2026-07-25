@@ -1,29 +1,27 @@
-label#language-heading {
-    text-color: var(--muted);
-}
-
-label#active-language {
-    font-family: sans-bold;
-}
-
 button.compact {
     size: 32px;
     padding: 4px;
 }
 
+field.switch {
+    gap: 8px;
+
+    > label { flex-grow: 1; }
+}
+
+text#language-heading {
+    text-color: var(--muted);
+}
+
+text#active-language {
+    font-weight: bold;
+}
+
+panel#language-buttons {
+    flow: row;
+    gap: 8px;
+}
+
 button.language {
-    width: 120px;
-}
-
-field.switch-demo {
-    gap: auto;
-}
-
-field.authoring {
-    width: 100%;
-    gap: auto;
-}
-
-field#language-buttons {
-    gap: auto;
+    flex: 1;
 }

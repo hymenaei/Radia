@@ -31,6 +31,7 @@ namespace rdui
             bool focusable() const override { return true; }
 
         protected:
+            void constrainResolvedStyle(Style& style) const override;
             void onChildAdded(Widget& child) override;
             void onChildrenCleared() override;
 

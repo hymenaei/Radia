@@ -5,32 +5,42 @@
          canMinimize="true"
          canResize="true">
 
-    <label id="status">floater_demo.status</label>
+    <text id="status">floater_demo.status</text>
+
+    <text>floater_demo.inline_plain <b>floater_demo.inline_bold</b><br/><i>floater_demo.inline_italic</i> <s>floater_demo.inline_strike</s><br/>floater_demo.inline_keybinding <kbd binding="toggle-fly"/></text>
 
     <button class="primary" onClick="press">
         <icon source="search"/>
         floater_demo.press
     </button>
 
-    <field class="switch-demo">
-        <label>floater_demo.switch</label>
-        <switch checked="true" onChange="switch-changed"/>
-    </field>
+    <fieldset class="demo-settings">
+        <legend>floater_demo.settings</legend>
+
+        <field class="switch demo-setting">
+            <label for="demo-switch">floater_demo.switch</label>
+            <switch id="demo-switch" bind="demo-switch-enabled" onChange="switch-changed"/><br/>
+            <hint>floater_demo.switch_hint</hint><br/>
+            <error>floater_demo.switch_error</error>
+        </field>
+
+        <field class="switch control-first">
+            <switch id="authoring-mode" onChange="authoring-mode-changed"/>
+            <label for="authoring-mode">floater_demo.automatic_watching</label><br/>
+            <hint>floater_demo.automatic_watching_hint</hint><br/>
+            <error>floater_demo.automatic_watching_error</error>
+        </field>
+    </fieldset>
 
     <button class="compact" disabled="true"/>
 
-    <label id="language-heading">floater_demo.language</label>
-    <label id="active-language"/>
+    <text id="language-heading">floater_demo.language</text>
+    <text id="active-language"/>
 
-    <field id="language-buttons">
+    <panel id="language-buttons">
         <button id="previous-language" class="language previous" onClick="previous-language">floater_demo.previous</button>
         <button id="next-language" class="language next" onClick="next-language">floater_demo.next</button>
-    </field>
+    </panel>
 
     <button class="reload" onClick="reload-resources">floater_demo.reload_now</button>
-
-    <field class="authoring">
-        <content><label>floater_demo.automatic_watching</label></content>
-        <switch id="authoring-mode" onChange="authoring-mode-changed"/>
-    </field>
 </floater>

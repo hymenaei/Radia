@@ -111,6 +111,7 @@ namespace rdui
         Checked = 1 << 4,
         FocusVisible = 1 << 5,
         Minimized = 1 << 6,
+        Invalid = 1 << 7,
     };
 
     inline uint8_t operator|(WidgetState lhs, WidgetState rhs)

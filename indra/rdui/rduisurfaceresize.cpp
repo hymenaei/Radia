@@ -10,7 +10,7 @@ namespace rdui
 {
     Vec2 Surface::minimumFloaterSize(const Floater& floater) const
     {
-        const Vec2 original = floater.originalSize();
+        const Vec2 original = floater.authoredSize();
         const Style floater_style = resolveWidgetStyle(*mStyleSheet, floater);
         Vec2 minimum{
             floater_style.min_width ? floater_style.min_width->resolve(original.x) : 0.f,

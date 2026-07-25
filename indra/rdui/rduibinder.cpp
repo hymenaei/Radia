@@ -1,5 +1,7 @@
 #include "linden_common.h"
 #include "rduibinder.h"
+#include "rduischema.h"
+#include "rduivaluecontrol.h"
 #include <map>
 
 namespace rdui
@@ -51,10 +53,22 @@ namespace rdui
             for (const auto& child : widget.children())
                 if (!child->idScopeRoot()) collectActions(*child, kinds, declarations, result);
         }
+
+        void collectValueControls(Widget& widget, std::vector<ValueControl*>& controls)
+        {
+            if (auto* control = dynamic_cast<ValueControl*>(&widget); control && !control->bindingId().empty())
+                controls.push_back(control);
+            for (const auto& child : widget.children())
+                if (!child->idScopeRoot()) collectValueControls(*child, controls);
+        }
     }
 
     void Binder::validate(Widget& root, DiagnosticResult& result)
     {
+        mValueControls.clear();
+        collectValueControls(root, mValueControls);
+        for (ValueControl* control : mValueControls) control->prepareValueBinding(*this);
+
         std::map<std::string, ActionEventKind> declared_kinds;
         std::vector<std::pair<Widget*, ActionEventKind>> declarations;
         collectActions(root, declared_kinds, declarations, result);
@@ -79,9 +93,49 @@ namespace rdui
         for (Pending& pending : mPending)
         {
             pending.resolved = findInScope(root, pending.id);
-            if (!pending.resolved) result.error("binding.id.missing", "Required widget id is missing: " + pending.id + ".");
-            else if (!pending.accepts(pending.resolved))
+            if (pending.resolved && !pending.accepts(pending.resolved))
                 result.error("binding.type.mismatch", "Widget " + pending.id + " must be <" + pending.expected_type + ">, found <" + pending.resolved->element() + ">.");
+        }
+
+        std::map<std::string, PendingValueProvider*> value_providers;
+        for (PendingValueProvider& pending : mPendingValueProviders)
+        {
+            if (!isLocalIdentifier(pending.id))
+            {
+                result.error("binding.value.name_invalid", "Value binding name must be lowercase kebab-case: " + pending.id + ".");
+                continue;
+            }
+            if (!pending.binding)
+            {
+                result.error("binding.value.null", "Value binding provider is empty: " + pending.id + ".");
+                continue;
+            }
+            if (!value_providers.emplace(pending.id, &pending).second)
+                result.error("binding.value.duplicate", "Value binding is provided more than once: " + pending.id + ".");
+        }
+
+        for (PendingValueRequirement& pending : mPendingValueRequirements)
+        {
+            if (!isLocalIdentifier(pending.id))
+            {
+                result.error("binding.value.name_invalid", "Value binding name must be lowercase kebab-case: " + pending.id + ".");
+                continue;
+            }
+            const auto found = value_providers.find(pending.id);
+            if (found == value_providers.end())
+            {
+                result.error("binding.value.missing", "Required value binding is missing: " + pending.id + ".");
+                continue;
+            }
+            PendingValueProvider& provider = *found->second;
+            if (provider.type != pending.type)
+            {
+                result.error("binding.value.type_mismatch",
+                             "Value binding " + pending.id + " must be " + pending.type_name
+                             + ", found " + provider.type_name + ".");
+                continue;
+            }
+            pending.resolved = provider.binding;
         }
 
         for (PendingScope& pending : mPendingScopes)
@@ -103,12 +157,19 @@ namespace rdui
 
     void Binder::commit(Widget& root, Binding& binding)
     {
+        binding.mCommitted = true;
         std::map<std::string, ActionEventKind> declared_kinds;
         std::vector<std::pair<Widget*, ActionEventKind>> declarations;
         BindingResult unused;
         collectActions(root, declared_kinds, declarations, unused);
 
         for (Pending& pending : mPending) pending.commit(pending.resolved);
+        for (PendingValueRequirement& pending : mPendingValueRequirements) pending.commit(pending.resolved);
+        for (ValueControl* control : mValueControls)
+        {
+            ValueBindingSubscription subscription = control->commitValueBinding();
+            if (subscription) binding.mValueSubscriptions.push_back(std::move(subscription));
+        }
         for (PendingAction& pending : mPendingActions)
         {
             for (const auto& declaration : declarations)

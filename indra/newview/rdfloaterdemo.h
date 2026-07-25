@@ -9,9 +9,9 @@ namespace rdui
 {
     class Button;
     class Floater;
-    class Label;
     class Switch;
     class System;
+    class Text;
 
     namespace viewer
     {
@@ -39,11 +39,12 @@ namespace rdui
                 void selectRelativeLanguage(int direction);
 
                 System& mSystem;
-                WidgetRef<Label> mStatus;
-                WidgetRef<Label> mActiveLanguage;
+                WidgetRef<Text> mStatus;
+                WidgetRef<Text> mActiveLanguage;
                 WidgetRef<Button> mPreviousLanguage;
                 WidgetRef<Button> mNextLanguage;
                 WidgetRef<Switch> mAuthoringMode;
+                std::shared_ptr<ValueBinding<bool>> mDemoSwitchBinding;
                 Binding mBinding;
                 std::function<void()> mReloadHandler;
                 std::function<bool()> mAuthoringModeGetter;

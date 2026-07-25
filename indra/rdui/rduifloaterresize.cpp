@@ -1,6 +1,7 @@
 #include "linden_common.h"
 #include "rduifloaterresize.h"
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace rdui::detail
@@ -37,6 +38,21 @@ namespace rdui::detail
         if (left || right) return CursorStyle::EastWestResize;
         if (bottom || top) return CursorStyle::NorthSouthResize;
         return CursorStyle::Auto;
+    }
+
+    bool preserveUserResizeOnReload(bool current_resizable, bool replacement_resizable,
+                                    const FloaterAuthoredGeometry& current,
+                                    const FloaterAuthoredGeometry& replacement)
+    {
+        constexpr float SIZE_EPSILON = .5f;
+        const auto unchanged = [=](const Vec2& left, const Vec2& right)
+        {
+            return std::abs(left.x - right.x) < SIZE_EPSILON
+                && std::abs(left.y - right.y) < SIZE_EPSILON;
+        };
+        return current_resizable && replacement_resizable
+            && unchanged(current.outer, replacement.outer)
+            && unchanged(current.content, replacement.content);
     }
 
     Rect resizedRect(const Rect& initial, const Vec2& initial_pointer,

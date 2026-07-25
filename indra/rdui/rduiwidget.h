@@ -100,11 +100,13 @@ namespace rdui
             Visibility visibility() const { return mVisibility; }
             bool disabled() const { return has_state(mStates, WidgetState::Disabled); }
             bool idScopeRoot() const { return mIdScopeRoot; }
+            bool flowBreakBefore() const { return mFlowBreakBefore; }
             const std::string& action(ActionEventKind kind) const;
             const std::optional<std::chrono::milliseconds>& longClickDelay() const { return mLongClickDelay; }
 
             bool hasState(WidgetState state) const { return has_state(mStates, state); }
             void activate();
+            void activateFromLabel();
 
             virtual Vec2 intrinsicSize(const StyleSheet& theme, const Style& style, const TextMetrics& text_metrics) const;
             virtual bool defaultPointerEvents() const { return false; }
@@ -131,9 +133,16 @@ namespace rdui
             Surface* attachedSurface() const { return mSurface; }
             const TextMetrics& attachedTextMetrics() const;
             virtual void onActivate() {}
+            virtual void onLabelActivate() { activate(); }
             virtual void onChildAdded(Widget&) {}
             virtual void onChildrenCleared() {}
             virtual void onLocaleChanged(const System&) {}
+            virtual bool onKeybindingsChanged(const System&) { return false; }
+            virtual void onArranged(const Style&) {}
+            virtual Rect paintBounds() const { return mRect; }
+            virtual bool hasLayoutGapBetween(const Widget&, const Widget&) const { return true; }
+            virtual float layoutOverlapBetween(const Widget&, const Widget&, const Style&) const { return 0.f; }
+            void translateChild(Widget& child, const Vec2& delta);
             void setState(WidgetState state, bool enabled);
 
         private:
@@ -172,6 +181,7 @@ namespace rdui
             std::optional<bool> mPointerEvents;
             Visibility mVisibility = Visibility::Visible;
             bool mIdScopeRoot = false;
+            bool mFlowBreakBefore = false;
             bool mRectExplicit = false;
             bool mMeasureDirty = true;
             bool mArrangeDirty = true;

@@ -3,6 +3,7 @@
 #include "rduistylesheet.h"
 #include "rduiwidget.h"
 #include <algorithm>
+#include <optional>
 
 namespace rdui
 {
@@ -19,6 +20,7 @@ namespace rdui
             if (state == "disabled") return has_state(states, WidgetState::Disabled);
             if (state == "checked") return has_state(states, WidgetState::Checked);
             if (state == "minimized") return has_state(states, WidgetState::Minimized);
+            if (state == "invalid") return has_state(states, WidgetState::Invalid);
             return false;
         }
 
@@ -77,7 +79,8 @@ namespace rdui
                          uint8_t owner_states,
                          const std::vector<std::string>& parts,
                          uint8_t part_states,
-                         const Widget* widget)
+                         const Widget* widget,
+                         const std::vector<std::string>* inline_ancestors)
         {
             if (rule.selectors.empty()
                 || !matchesSelector(rule.selectors.back(), element, id, classes, owner_states, parts, part_states))
@@ -85,19 +88,34 @@ namespace rdui
             if (rule.selectors.size() == 1) return true;
             if (!widget || rule.combinators.size() + 1 != rule.selectors.size()) return false;
 
-            const Widget* ancestor = structuralParent(widget);
+            std::size_t inline_index = inline_ancestors ? inline_ancestors->size() : 0;
+            const Widget* ancestor = inline_ancestors ? widget : structuralParent(widget);
+            const auto nextAncestorMatches = [&](const StyleSelector& selector) -> std::optional<bool>
+            {
+                static const std::set<std::string> no_classes;
+                static const std::vector<std::string> no_parts;
+                if (inline_ancestors && inline_index)
+                {
+                    const std::string& inline_element = (*inline_ancestors)[--inline_index];
+                    return matchesSelector(selector, inline_element, {}, no_classes, 0, no_parts, 0);
+                }
+                if (!ancestor) return std::nullopt;
+                const Widget* candidate = ancestor;
+                ancestor = structuralParent(ancestor);
+                return matchesStructuralSelector(selector, *candidate);
+            };
             for (std::size_t index = rule.selectors.size() - 1; index-- > 0;)
             {
                 const StyleSelector& selector = rule.selectors[index];
                 if (rule.combinators[index] == SelectorCombinator::Child)
                 {
-                    if (!ancestor || !matchesStructuralSelector(selector, *ancestor)) return false;
-                    ancestor = structuralParent(ancestor);
+                    const std::optional<bool> matches = nextAncestorMatches(selector);
+                    if (!matches || !*matches) return false;
                     continue;
                 }
-                while (ancestor && !matchesStructuralSelector(selector, *ancestor)) ancestor = structuralParent(ancestor);
-                if (!ancestor) return false;
-                ancestor = structuralParent(ancestor);
+                std::optional<bool> matches;
+                do matches = nextAncestorMatches(selector); while (matches && !*matches);
+                if (!matches) return false;
             }
             return true;
         }
@@ -142,18 +160,29 @@ namespace rdui
                                       detail::splitPartPath(part.part()), part.states(), &owner);
     }
 
+    Style StyleSheet::resolveInline(const Widget& owner, const std::string& element,
+                                    const std::vector<std::string>& inline_ancestors) const
+    {
+        static const std::set<std::string> no_classes;
+        static const std::vector<std::string> no_parts;
+        return mImpl->resolveInternal(element, {}, no_classes, 0, no_parts, 0,
+                                      &owner, &inline_ancestors);
+    }
+
     Style StyleSheet::Impl::resolveInternal(const std::string& element,
                                       const std::string& id,
                                       const std::set<std::string>& classes,
                                       uint8_t owner_states,
                                       const std::vector<std::string>& parts,
                                       uint8_t part_states,
-                                      const Widget* widget) const
+                                      const Widget* widget,
+                                      const std::vector<std::string>* inline_ancestors) const
     {
         Style style;
         for (const StyleRule& rule : rules)
         {
-            if (!matchesRule(rule, element, id, classes, owner_states, parts, part_states, widget)) continue;
+            if (!matchesRule(rule, element, id, classes, owner_states, parts, part_states,
+                             widget, inline_ancestors)) continue;
             for (const StyleDeclaration& declaration : rule.declarations)
                 detail::applyStyleDeclaration(style, declaration);
         }

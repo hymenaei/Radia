@@ -1,5 +1,6 @@
 #include "linden_common.h"
 #include "rduiviewcontract.h"
+#include "rdlabel.h"
 #include "rduiwidgetcatalog.h"
 #include <algorithm>
 #include <cctype>
@@ -27,6 +28,26 @@ namespace rdui
     void detail::WidgetCompilerAccess::setState(Widget& widget, WidgetState state, bool enabled)
     {
         widget.setState(state, enabled);
+    }
+
+    const std::string& detail::WidgetCompilerAccess::labelTargetId(const Label& label)
+    {
+        return label.mTargetId;
+    }
+
+    Widget* detail::WidgetCompilerAccess::labelTarget(const Label& label)
+    {
+        return label.mTarget.get();
+    }
+
+    void detail::WidgetCompilerAccess::setLabelTarget(Label& label, Widget* target)
+    {
+        label.mTarget.set(target);
+    }
+
+    void detail::WidgetCompilerAccess::setFlowBreakBefore(Widget& widget, bool enabled)
+    {
+        widget.mFlowBreakBefore = enabled;
     }
 
     const char* actionAttribute(ActionEventKind kind)
@@ -123,8 +144,6 @@ namespace rdui
             llassert_always(child != nullptr);
             detail::WidgetCompilerAccess::setStyleIdentity(*child, owner.styleElement(), part.path);
             Widget* instance = child.get();
-            // Owned composite parts bypass content-routing overrides such as
-            // Floater::addChild(); authored children still use those overrides.
             parent->Widget::addChild(std::move(child));
             instances.emplace(part.path, instance);
             constructing.erase(part.path);
@@ -252,7 +271,6 @@ namespace rdui
             "id", "class", "visibility", "disabled", "longClickDelay",
             "onClick", "onDoubleClick", "onChange", "onMouseDown", "onMouseUp", "onMouseMove",
             "onLongClick", "onContextMenu",
-            // Diagnosed more specifically by the common compiler.
             "x", "y", "width", "height", "interactive", "blocksPointer", "action",
         };
         std::unordered_set<std::string> allowed;

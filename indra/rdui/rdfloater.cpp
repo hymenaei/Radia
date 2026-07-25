@@ -16,6 +16,18 @@
 
 namespace rdui
 {
+    namespace
+    {
+        class MiddleAlignedPanel final : public Panel
+        {
+            protected:
+                void constrainResolvedStyle(Style& style) const override
+                {
+                    if (!style.vertical_align_set) style.vertical_align = VerticalAlign::Middle;
+                }
+        };
+    }
+
     Floater::Floater() : Widget(ELEMENT)
     {
         detail::instantiateCompositeParts(*this, detail::floaterContract());
@@ -63,10 +75,10 @@ namespace rdui
                 return header;
             })
             .state(WidgetState::Minimized)
-            .part("header", &Floater::mHeader)
+            .part<MiddleAlignedPanel>("header", &Floater::mHeader)
             .part("header::icon", &Floater::mHeaderIcon)
             .part("header::title", &Floater::mHeaderTitle)
-            .part("header::custom", &Floater::mCustomHeader)
+            .part<MiddleAlignedPanel>("header::custom", &Floater::mCustomHeader)
             .part("header::minimize", &Floater::mMinimizeButton)
             .part("header::minimize::icon", &Floater::mMinimizeButtonIcon)
             .part("header::close", &Floater::mCloseButton)
@@ -272,15 +284,16 @@ namespace rdui
         };
     }
 
-    void Floater::setOriginalSize(const Vec2& size)
+    void Floater::setAuthoredSize(const Vec2& size, const Vec2& content_size)
     {
-        mOriginalSize = {std::max(0.f, size.x), std::max(0.f, size.y)};
-        mOriginalSizeCaptured = true;
+        mAuthoredSize = {std::max(0.f, size.x), std::max(0.f, size.y)};
+        mAuthoredContentSize = {std::max(0.f, content_size.x), std::max(0.f, content_size.y)};
+        mAuthoredSizeCaptured = true;
     }
 
-    Vec2 Floater::originalSize() const
+    Vec2 Floater::authoredSize() const
     {
-        return mOriginalSizeCaptured ? mOriginalSize : Vec2{rect().w, rect().h};
+        return mAuthoredSizeCaptured ? mAuthoredSize : Vec2{rect().w, rect().h};
     }
 
     bool Floater::beginResizeInteraction(const PointerEvent& event, std::uint8_t edges,

@@ -1,6 +1,7 @@
 #include "linden_common.h"
 #include "../test/lltut.h"
 #include "rdlabel.h"
+#include "rdtext.h"
 #include "rduiskincompiler.h"
 #include "rduisurface.h"
 #include "rduisystem.h"
@@ -57,7 +58,7 @@ namespace tut
         rdui::ResourceSnapshot snapshot = skinSnapshot(
             "<localizations default=\"en\"><localization id=\"en\" lang=\"English\" direction=\"ltr\"><string id=\"message\">Ready</string></localization></localizations>",
             "label { width: 40px; }");
-        snapshot.add("view.xml", "<label id=\"message\">message</label>");
+        snapshot.add("view.xml", "<text id=\"message\">message</text>");
         snapshot.add("resources/icons/search.svg", "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0 L10 10\"/></svg>");
 
         const rdui::SkinGenerationPrepareResult prepared = rdui::SkinCompiler().prepare(std::move(snapshot));
@@ -72,7 +73,7 @@ namespace tut
 
         rdui::ViewBuildResult view = system.createView("view.xml");
         ensure("System creates localized View", view.ok());
-        ensure_equals("View uses published localization", view.rootAs<rdui::Label>()->text(), "Ready");
+        ensure_equals("View uses published localization", view.rootAs<rdui::Text>()->text(), "Ready");
 
         std::unique_ptr<rdui::Surface> surface = system.createSurface(rdui::fixedTextMetrics());
         ensure("System creates Surface", surface != nullptr);
@@ -202,14 +203,14 @@ namespace tut
         rdui::ResourceSnapshot snapshot = skinSnapshot(
             "<localizations default=\"en\"><localization id=\"en\" lang=\"English\" direction=\"ltr\"><string id=\"message\">New</string></localization></localizations>",
             "label { width: 90px; }");
-        snapshot.add("view.xml", "<label>message</label>");
+        snapshot.add("view.xml", "<text>message</text>");
         rdui::SkinGenerationPrepareResult prepared = rdui::SkinCompiler().prepare(std::move(snapshot));
         ensure("candidate generation prepares", prepared.ok());
         ensure_equals("preparation does not advance live generation", system.generation(), 1ULL);
         ensure_equals("preparation preserves live localization", system.resolveText("message"), "Old");
         rdui::ViewBuildResult candidate_view = prepared.generation->createView("view.xml", system.activeLocale());
         ensure("candidate View builds against candidate generation", candidate_view.ok());
-        ensure_equals("candidate View uses candidate localization", candidate_view.rootAs<rdui::Label>()->text(), "New");
+        ensure_equals("candidate View uses candidate localization", candidate_view.rootAs<rdui::Text>()->text(), "New");
 
         bool document_commit = false;
         system.publish(prepared.generation, [&document_commit] { document_commit = true; });
@@ -239,11 +240,47 @@ namespace tut
     void rduisystem_object::test<10>()
     {
         rdui::ResourceSnapshot invalid = skinSnapshot({}, "label { width: 90px; }");
-        invalid.add("valid.xml", "<label>Ready</label>");
+        invalid.add("valid.xml", "<text>Ready</text>");
         invalid.add("unused.xml", "<unsupported/>");
 
         const rdui::SkinGenerationPrepareResult rejected = rdui::SkinCompiler().prepare(std::move(invalid));
         ensure("invalid unmounted Layout Resource rejects complete generation", !rejected.ok());
         ensure("rejected complete generation is not exposed", rejected.generation == nullptr);
+    }
+
+    template<> template<>
+    void rduisystem_object::test<11>()
+    {
+        rdui::ResourceSnapshot snapshot = skinSnapshot(
+            "<localizations default=\"en\"><localization id=\"en\" lang=\"English\" direction=\"ltr\">"
+            "<string id=\"fly.label\">Fly</string></localization></localizations>");
+        snapshot.add("view.xml", "<text>fly.label <kbd binding=\"toggle-fly\"/></text>");
+        rdui::SkinGenerationPrepareResult prepared = rdui::SkinCompiler().prepare(std::move(snapshot));
+        ensure("Kbd presentation fixture prepares", prepared.ok());
+
+        rdui::KeybindingPresentation presentation{{"F"}};
+        rdui::System system;
+        system.setKeybindingResolver([&presentation](const std::string& binding)
+        {
+            return binding == "toggle-fly" ? presentation : rdui::KeybindingPresentation{};
+        });
+        system.publish(prepared.generation);
+        rdui::ViewBuildResult view = system.createView("view.xml");
+        auto* text = view.rootAs<rdui::Text>();
+        ensure("Kbd View builds", view.ok() && text);
+
+        std::unique_ptr<rdui::Surface> surface = system.createSurface(rdui::fixedTextMetrics());
+        surface->setViewport(200.f, 100.f);
+        surface->mount(std::move(view.root));
+        surface->updateLayout();
+        ensure_equals("Kbd resolves through the System presentation seam", text->text(), "Fly F");
+        const float initial_width = text->desiredSize().x;
+
+        presentation = {{"Ctrl", "F"}};
+        system.refreshKeybindings();
+        surface->updateLayout();
+        ensure_equals("Kbd refreshes after a user keybinding change", text->text(), "Fly Ctrl F");
+        ensure("changed Kbd presentation invalidates intrinsic measurement",
+               text->desiredSize().x > initial_width);
     }
 }

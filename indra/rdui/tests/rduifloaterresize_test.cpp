@@ -66,4 +66,25 @@ namespace tut
         ensure("vertical cursor", rdui::detail::resizeCursor(ResizeEdges::Top)
             == rdui::CursorStyle::NorthSouthResize);
     }
+
+    template<> template<>
+    void rduifloaterresize_object::test<4>()
+    {
+        using rdui::detail::preserveUserResizeOnReload;
+        ensure("user resize survives a reload with unchanged authored size",
+               preserveUserResizeOnReload(true, true,
+                   {{300.f, 240.f}, {280.f, 200.f}}, {{300.f, 240.f}, {280.f, 200.f}}));
+        ensure("authored width change discards the user resize",
+               !preserveUserResizeOnReload(true, true,
+                   {{300.f, 240.f}, {280.f, 200.f}}, {{320.f, 240.f}, {280.f, 200.f}}));
+        ensure("authored height change discards the user resize",
+               !preserveUserResizeOnReload(true, true,
+                   {{300.f, 240.f}, {280.f, 200.f}}, {{300.f, 260.f}, {280.f, 200.f}}));
+        ensure("content height change discards the user resize even when an outer minimum masks it",
+               !preserveUserResizeOnReload(true, true,
+                   {{300.f, 240.f}, {280.f, 200.f}}, {{300.f, 240.f}, {280.f, 182.f}}));
+        ensure("resizability changes discard the user resize",
+               !preserveUserResizeOnReload(true, false,
+                   {{300.f, 240.f}, {280.f, 200.f}}, {{300.f, 240.f}, {280.f, 200.f}}));
+    }
 }

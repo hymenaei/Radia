@@ -2,6 +2,7 @@
 #define LL_RDUI_SYSTEM_H
 
 #include "rduidiagnostic.h"
+#include "rduiinlinecontent.h"
 #include "rduilocalization.h"
 #include "rduistylesheet.h"
 #include "rduiviewresult.h"
@@ -37,6 +38,9 @@ namespace rdui
             {
                 mLocaleChangedHandler = std::move(handler);
             }
+            void setKeybindingResolver(
+                std::function<KeybindingPresentation(const std::string&)> resolver);
+            void refreshKeybindings();
 
             const std::vector<LanguageInfo>& languages() const;
             const std::string& activeLocale() const { return mActiveLocale; }
@@ -49,6 +53,7 @@ namespace rdui
             }
             bool hasLocalizationKey(const std::string& id) const;
             std::string resolveText(const std::string& id) const;
+            KeybindingPresentation resolveKeybinding(const std::string& id) const;
             TextValue localized(std::string id) const;
             bool hasIcon(const std::string& name) const;
             bool sameReloadInputs(const ResourceSnapshot& left,
@@ -65,6 +70,7 @@ namespace rdui
             std::chrono::milliseconds mLongClickDelay{500};
             mutable std::unordered_set<Surface*> mSurfaces;
             std::function<void(const std::string&)> mLocaleChangedHandler;
+            std::function<KeybindingPresentation(const std::string&)> mKeybindingResolver;
 
             const SvgIcon* icon(const std::string& name) const;
             const StyleSheet& styleSheet() const;

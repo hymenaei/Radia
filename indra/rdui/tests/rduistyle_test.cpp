@@ -2,10 +2,12 @@
 #include "../test/lltut.h"
 
 #include "rdbutton.h"
+#include "rdfield.h"
 #include "rdfloater.h"
 #include "rdicon.h"
 #include "rdlabel.h"
 #include "rdpanel.h"
+#include "rdtext.h"
 #include "rduilayout.h"
 #include "rduistylesheet.h"
 #include "rduiviewcontract.h"
@@ -17,210 +19,34 @@ namespace tut
     typedef rduistyle_test::object rduistyle_object;
     rduistyle_test rduistyle_testcase("rduistyle");
 
+
     template<> template<>
     void rduistyle_object::test<1>()
     {
-        rdui::StyleSheet stylesheet;
-        ensure("selector stylesheet loads", stylesheet.loadCss("button.primary:hover > icon { width: 17px; }").ok());
-        rdui::Button button;
-        button.addClass("primary");
-        rdui::detail::WidgetCompilerAccess::setState(button, rdui::WidgetState::Hovered, true);
-        rdui::Icon& icon = button.setIcon("search");
-        ensure_equals("compiled selector matches element, class, state, and child",
-                      rdui::resolveWidgetStyle(stylesheet, icon).width.pixels(), 17.f);
-    }
-
-    template<> template<>
-    void rduistyle_object::test<2>()
-    {
         rdui::StyleSheet theme;
-        theme.loadCss(":root { --accent: #204060ff; --space: 12px; } button { background-color: var(--accent); padding: var(--space); border-radius: 5px; }");
-        const rdui::Style style = theme.resolve("button", "", {}, 0);
-        ensure_approximately_equals("color token", style.background_color.b, 96.f / 255.f, 6);
-        ensure_equals("number token", style.padding.left, 12.f);
-        ensure_equals("radius", style.border_radius, 5.f);
-    }
-
-    template<> template<>
-    void rduistyle_object::test<3>()
-    {
-        rdui::StyleSheet theme;
-        theme.loadCss("button { width: 10px; size: 20px 30px; width: 40px; }");
-        const rdui::Style style = theme.resolve("button", "", {}, 0);
-        ensure_equals("later declaration wins", style.width.pixels(), 40.f);
-        ensure_equals("size height retained", style.height.pixels(), 20.f);
-    }
-
-    template<> template<>
-    void rduistyle_object::test<4>()
-    {
-        rdui::StyleSheet theme;
-        theme.loadCss("button.primary { width: 30px; } button { width: 10px; } #save { width: 50px; }");
-        const std::set<std::string> classes{"primary"};
-        ensure_equals("specificity sorted at load", theme.resolve("button", "save", classes, 0).width.pixels(), 50.f);
-        ensure_equals("class beats later element", theme.resolve("button", "", classes, 0).width.pixels(), 30.f);
-    }
-
-    template<> template<>
-    void rduistyle_object::test<5>()
-    {
-        rdui::StyleSheet theme;
-        ensure("nested stylesheet loads", theme.loadCss(
-            "button { background-color: #101010ff; &:hover { background-color: #202020ff; } "
-            "> icon { size: 16px; } &:hover > icon { stroke-width: 3px; } }").ok());
-        const uint8_t hover = rdui::WidgetState::Hovered | rdui::WidgetState::Default;
-        ensure_equals("nested state", theme.resolve("button", "", {}, hover).background_color.r, 32.f / 255.f);
-        rdui::Button button;
-        rdui::detail::WidgetCompilerAccess::setState(button, rdui::WidgetState::Hovered, true);
-        const rdui::Style icon = rdui::resolveWidgetStyle(theme, button.setIcon("search"));
-        ensure_equals("nested child width", icon.width.pixels(), 16.f);
-        ensure("nested child stroke width is set", icon.svg_stroke_width.has_value());
-        ensure_equals("nested owner state", icon.svg_stroke_width->pixels, 3.f);
-    }
-
-    template<> template<>
-    void rduistyle_object::test<6>()
-    {
-        rdui::StyleSheet theme;
-        theme.loadCss("panel { flow: row; pointer-events: none; } label { text-align: right; vertical-align: middle; pointer-events: auto; }");
-        const rdui::Style panel = theme.resolve("panel", "", {}, 0);
-        ensure_equals("row enum", static_cast<int>(panel.flow), static_cast<int>(rdui::Flow::Row));
-        ensure_equals("pointer enum", static_cast<int>(panel.pointer_events), static_cast<int>(rdui::PointerEvents::PassThrough));
-        const rdui::Style label = theme.resolve("label", "", {}, 0);
-        ensure_equals("horizontal enum", static_cast<int>(label.text_align), static_cast<int>(rdui::TextAlign::Right));
-        ensure_equals("vertical enum", static_cast<int>(label.vertical_align), static_cast<int>(rdui::VerticalAlign::Center));
-        ensure_equals("auto pointer enum", static_cast<int>(label.pointer_events), static_cast<int>(rdui::PointerEvents::Auto));
-        ensure("logical text alignment compiles", theme.loadCss("label { text-align: start; }").ok());
-        ensure_equals("logical text alignment remains distinct", static_cast<int>(theme.resolve("label", "", {}, 0).text_align),
-                      static_cast<int>(rdui::TextAlign::Start));
-        ensure("cross-axis alignment compiles", theme.loadCss(
-            "panel { align-items: end; } panel.normal { align-items: normal; } "
-            "button { align-self: start; } button.auto { align-self: auto; }").ok());
-        ensure_equals("container cross-axis alignment is typed",
-                      static_cast<int>(theme.resolve("panel", "", {}, 0).align_items),
-                      static_cast<int>(rdui::AlignItems::End));
-        ensure_equals("flow-item cross-axis override is typed",
-                      static_cast<int>(theme.resolve("button", "", {}, 0).align_self),
-                      static_cast<int>(rdui::AlignSelf::Start));
-        ensure_equals("normal container alignment can be authored",
-                      static_cast<int>(theme.resolve("panel", "", {"normal"}, 0).align_items),
-                      static_cast<int>(rdui::AlignItems::Normal));
-        ensure_equals("auto flow-item alignment can be authored",
-                      static_cast<int>(theme.resolve("button", "", {"auto"}, 0).align_self),
-                      static_cast<int>(rdui::AlignSelf::Auto));
-    }
-
-    template<> template<>
-    void rduistyle_object::test<7>()
-    {
-        rdui::StyleSheet theme;
-        theme.loadCss("label#a { font-family: sans-big; font-weight: bold; font-style: italic; } label#b { font-family: small-bold; }");
-        const rdui::Style a = theme.resolve("label", "a", {}, 0);
-        ensure_equals("font enum", static_cast<int>(a.font_family), static_cast<int>(rdui::FontFamily::Big));
-        ensure("bold", a.font_bold);
-        ensure("italic", a.font_italic);
-        ensure_equals("small bold enum", static_cast<int>(theme.resolve("label", "b", {}, 0).font_family), static_cast<int>(rdui::FontFamily::SmallBold));
-    }
-
-    template<> template<>
-    void rduistyle_object::test<8>()
-    {
-        rdui::StyleSheet theme;
-        theme.loadCss("button { border: 1px #112233ff; border-width: 2px 3px; border-color: #ffffffff; } button > icon { stroke: 4px #abcdef88; stroke-linecap: square; }");
-        const rdui::Style style = theme.resolve("button", "", {}, 0);
-        ensure_equals("ordered border width top", style.border_width.top, 2.f);
-        ensure_equals("ordered border width right", style.border_width.right, 3.f);
-        ensure_equals("border color override", style.border_color.r, 1.f);
-        rdui::Button button;
-        rdui::Icon& button_icon = button.setIcon("search");
-        const rdui::Style icon = rdui::resolveWidgetStyle(theme, button_icon);
-        ensure("svg width is set", icon.svg_stroke_width.has_value());
-        ensure_equals("svg width", icon.svg_stroke_width->pixels, 4.f);
-        ensure_equals("cap", static_cast<int>(icon.svg_stroke_cap), static_cast<int>(rdui::StrokeCap::Square));
-    }
-
-    template<> template<>
-    void rduistyle_object::test<9>()
-    {
-        rdui::StyleSheet theme;
-        const rdui::StyleSheetLoadResult result = theme.loadCss("panel { flow: grid; } panel#bad { flow: sideways; }", "test.radia");
-        ensure_equals("grid falls back", static_cast<int>(theme.resolve("panel", "", {}, 0).flow), static_cast<int>(rdui::Flow::Free));
-        ensure_equals("unknown falls back", static_cast<int>(theme.resolve("panel", "bad", {}, 0).flow), static_cast<int>(rdui::Flow::Free));
-        ensure("unknown flow prevents commit", !result.ok());
-        ensure_equals("unsupported flow warns", result.warnings.size(), 1U);
-        ensure_equals("unknown flow errors", result.errors.size(), 1U);
-        ensure_equals("flow diagnostic identifies source", result.errors.front().source, "test.radia");
-    }
-
-    template<> template<>
-    void rduistyle_object::test<10>()
-    {
-        rdui::StyleSheet theme;
-        theme.loadCss("button, switch { height: 32px; } button > icon { width: 14px; } button:disabled { opacity: .5; }");
-        ensure_equals("selector list button", theme.resolve("button", "", {}, 0).height.pixels(), 32.f);
-        ensure_equals("selector list switch", theme.resolve("switch", "", {}, 0).height.pixels(), 32.f);
-        rdui::Button button;
-        ensure_equals("direct icon child", rdui::resolveWidgetStyle(theme, button.setIcon("search")).width.pixels(), 14.f);
-        const uint8_t disabled = static_cast<uint8_t>(rdui::WidgetState::Disabled);
-        ensure_equals("state selector", theme.resolve("button", "", {}, disabled).opacity, .5f);
-    }
-
-    template<> template<>
-    void rduistyle_object::test<11>()
-    {
-        rdui::StyleSheet theme;
-        theme.loadCss("panel { padding: 1px 2px 3px 4px; min-width: 20px; min-height: 10px; gap: 7px; grow: 2; order: -2; }");
-        const rdui::Style style = theme.resolve("panel", "", {}, 0);
-        ensure_equals("padding top", style.padding.top, 1.f);
-        ensure_equals("padding right", style.padding.right, 2.f);
-        ensure_equals("padding bottom", style.padding.bottom, 3.f);
-        ensure_equals("padding left", style.padding.left, 4.f);
-        ensure("min width is set", style.min_width.has_value());
-        ensure_equals("min width", style.min_width->pixels, 20.f);
-        ensure_equals("gap", style.gap.fixedPixels(), 7.f);
-        ensure_equals("grow", style.grow, 2.f);
-        ensure_equals("order", style.order, -2);
-    }
-
-    template<> template<>
-    void rduistyle_object::test<12>()
-    {
-        const rdui::Style style;
-        ensure_equals("default flow", static_cast<int>(style.flow), static_cast<int>(rdui::Flow::Free));
-        ensure_equals("default justification", static_cast<int>(style.justify_content), static_cast<int>(rdui::JustifyContent::Start));
-        ensure_equals("default container alignment", static_cast<int>(style.align_items), static_cast<int>(rdui::AlignItems::Normal));
-        ensure_equals("default flow-item alignment", static_cast<int>(style.align_self), static_cast<int>(rdui::AlignSelf::Auto));
-        ensure_equals("default flow-item order", style.order, 0);
-        ensure("default gap is fixed", !style.gap.isAuto());
-        ensure_equals("default gap is zero", style.gap.fixedPixels(), 0.f);
-        ensure_equals("default pointer behavior", static_cast<int>(style.pointer_events), static_cast<int>(rdui::PointerEvents::Default));
-        ensure_equals("default font", static_cast<int>(style.font_family), static_cast<int>(rdui::FontFamily::Sans));
-        ensure_equals("initial box fill is presentation-neutral", style.background_color.a, 0.f);
-    }
-
-    template<> template<>
-    void rduistyle_object::test<13>()
-    {
-        rdui::StyleSheet theme;
-        ensure("valid colors compile", theme.loadCss(":root { --accent: hsl(120 100% 50%); --ink: rgb(255, 0, 0, 50%); }"
-                                                     "button { background-color: var(--accent); text-color: var(--ink); }").ok());
+        ensure("valid colors compile", theme.loadRadia(":root { --accent: hsl(120 100% 50%); --ink: rgb(255, 0, 0, 50%); }"
+                                                     "button { background-color: var(--accent); text-color: var(--ink); font-size: 17px; }"
+                                                     "label { text-color: #00ff00ff; font-size: 29px; }").ok());
         const rdui::Style button = theme.resolve("button", "", {}, 0);
         ensure_approximately_equals("hsl color token", button.background_color.g, 1.f, 6);
         rdui::Button control;
         rdui::Label& label = control.setLabel("Inherited");
         ensure_approximately_equals("rgb color token with alpha inherits into button label",
                                     rdui::resolveWidgetStyle(theme, label).text_color.a, .5f, 6);
-        const rdui::StyleSheetLoadResult invalid = theme.loadCss("switch { background-color: ##invalid; }", "invalid.radia");
+        ensure_equals("button caption inherits button font size", rdui::resolveWidgetStyle(theme, label).font_size, 17.f);
+        rdui::Label standalone("Standalone");
+        ensure_equals("standalone Label keeps its own font size", rdui::resolveWidgetStyle(theme, standalone).font_size, 29.f);
+        const rdui::StyleSheetLoadResult invalid = theme.loadRadia("switch { background-color: ##invalid; }", "invalid.radia");
         ensure("invalid color rejects candidate", !invalid.ok());
         ensure_equals("invalid value diagnostic code", invalid.errors.front().code, "stylesheet.property.value_invalid");
         ensure_approximately_equals("failed candidate keeps prior stylesheet", theme.resolve("button", "", {}, 0).background_color.g, 1.f, 6);
     }
 
     template<> template<>
-    void rduistyle_object::test<14>()
+    void rduistyle_object::test<2>()
     {
         rdui::StyleSheet theme;
-        theme.loadCss("panel { margin: 1px auto 3px -4px; padding: 5px 6px; gap: 7px; }");
+        theme.loadRadia("panel { margin: 1px auto 3px -4px; padding: 5px 6px; gap: 7px; }");
         const rdui::Style style = theme.resolve("panel", "", {}, 0);
         ensure_equals("margin top", style.margin.top.fixedPixels(), 1.f);
         ensure("margin right auto", style.margin.right.isAuto());
@@ -233,10 +59,10 @@ namespace tut
     }
 
     template<> template<>
-    void rduistyle_object::test<15>()
+    void rduistyle_object::test<3>()
     {
         rdui::StyleSheet theme;
-        theme.loadCss("button { border-width: 1px; &:focus { opacity: .8; } &:focus-visible { border-width: 3px; } }");
+        theme.loadRadia("button { border-width: 1px; &:focus { opacity: .8; } &:focus-visible { border-width: 3px; } }");
         const uint8_t focused = static_cast<uint8_t>(rdui::WidgetState::Focused);
         const uint8_t focus_visible = rdui::WidgetState::Focused | rdui::WidgetState::FocusVisible;
         ensure_equals(":focus remains supported", theme.resolve("button", "", {}, focused).opacity, .8f);
@@ -246,11 +72,11 @@ namespace tut
     }
 
     template<> template<>
-    void rduistyle_object::test<16>()
+    void rduistyle_object::test<4>()
     {
         rdui::StyleSheet theme;
-        ensure("initial stylesheet loads", theme.loadCss("button { width: 12px; }").ok());
-        const rdui::StyleSheetLoadResult failed = theme.loadCss("button { width: 99px; unknown-property: 1; }", "candidate.radia");
+        ensure("initial stylesheet loads", theme.loadRadia("button { width: 12px; }").ok());
+        const rdui::StyleSheetLoadResult failed = theme.loadRadia("button { width: 99px; unknown-property: 1; }", "candidate.radia");
         ensure("unknown property rejects candidate", !failed.ok());
         ensure_equals("failed candidate leaves live stylesheet unchanged", theme.resolve("button", "", {}, 0).width.pixels(), 12.f);
         ensure_equals("property diagnostic code", failed.errors.front().code, "stylesheet.property.unknown");
@@ -258,23 +84,23 @@ namespace tut
     }
 
     template<> template<>
-    void rduistyle_object::test<17>()
+    void rduistyle_object::test<5>()
     {
         rdui::StyleSheet stylesheet;
-        const rdui::StyleSheetLoadResult malformed = stylesheet.loadCss(":root { --bad: nonsense; }", "tokens.radia");
+        const rdui::StyleSheetLoadResult malformed = stylesheet.loadRadia(":root { --bad: nonsense; }", "tokens.radia");
         ensure("malformed token rejects candidate", !malformed.ok());
         ensure_equals("token diagnostic code", malformed.errors.front().code, "stylesheet.token.value_invalid");
 
-        const rdui::StyleSheetLoadResult missing = stylesheet.loadCss("button { width: var(--missing); }", "missing-token.radia");
+        const rdui::StyleSheetLoadResult missing = stylesheet.loadRadia("button { width: var(--missing); }", "missing-token.radia");
         ensure("unknown token reference rejects candidate", !missing.ok());
         ensure_equals("property diagnostic source", missing.errors.front().source, "missing-token.radia");
     }
 
     template<> template<>
-    void rduistyle_object::test<18>()
+    void rduistyle_object::test<6>()
     {
         rdui::StyleSheet stylesheet;
-        ensure("child-owner stylesheet loads", stylesheet.loadCss(
+        ensure("child-owner stylesheet loads", stylesheet.loadRadia(
             "button.primary > icon { width: 10px; } button.primary:hover > icon { width: 18px; }").ok());
         rdui::Button button;
         button.addClass("primary");
@@ -286,10 +112,10 @@ namespace tut
     }
 
     template<> template<>
-    void rduistyle_object::test<19>()
+    void rduistyle_object::test<7>()
     {
         rdui::StyleSheet stylesheet;
-        ensure("interactive-part stylesheet loads", stylesheet.loadCss(
+        ensure("interactive-part stylesheet loads", stylesheet.loadRadia(
             "floater { &::header { &::close { width: 10px; &:hover { width: 18px; } } } }").ok());
         rdui::Floater floater;
 
@@ -302,10 +128,10 @@ namespace tut
     }
 
     template<> template<>
-    void rduistyle_object::test<20>()
+    void rduistyle_object::test<8>()
     {
         rdui::StyleSheet stylesheet;
-        ensure("cursor properties compile", stylesheet.loadCss(
+        ensure("cursor properties compile", stylesheet.loadRadia(
             "button { cursor: pointer; } #horizontal { cursor: e-resize; } #diagonal { cursor: sw-resize; }"
             "#grab { cursor: grab; } #grabbing { cursor: grabbing; }").ok());
         ensure_equals("pointer cursor is typed",
@@ -327,7 +153,7 @@ namespace tut
                stylesheet.resolve("panel", "grab", {}, 0).cursor
                    != stylesheet.resolve("panel", "grabbing", {}, 0).cursor);
 
-        const rdui::StyleSheetLoadResult invalid = stylesheet.loadCss("button { cursor: teleport; }", "cursor.radia");
+        const rdui::StyleSheetLoadResult invalid = stylesheet.loadRadia("button { cursor: teleport; }", "cursor.radia");
         ensure("unknown cursor rejects candidate", !invalid.ok());
         ensure_equals("failed cursor candidate preserves stylesheet",
                       static_cast<int>(stylesheet.resolve("button", "", {}, 0).cursor),
@@ -335,10 +161,10 @@ namespace tut
     }
 
     template<> template<>
-    void rduistyle_object::test<21>()
+    void rduistyle_object::test<9>()
     {
         rdui::StyleSheet stylesheet;
-        const rdui::StyleSheetLoadResult valid = stylesheet.loadCss(
+        const rdui::StyleSheetLoadResult valid = stylesheet.loadRadia(
             "switch { padding: 4px; &:checked::thumb { background-color: #ffffffff; } }"
             "switch::thumb { border-radius: 10px; } label { font-size: 13px; }"
             "panel { flow: row; font-size: 14px; } switch { flow: row; }"
@@ -349,7 +175,7 @@ namespace tut
 
         auto rejects = [&](const std::string& css, const std::string& code)
         {
-            const rdui::StyleSheetLoadResult result = stylesheet.loadCss(css, "contract.radia");
+            const rdui::StyleSheetLoadResult result = stylesheet.loadRadia(css, "contract.radia");
             ensure("invalid RSL rejects stylesheet", !result.ok());
             ensure_equals("RSL diagnostic", result.errors.front().code, code);
         };
@@ -357,13 +183,15 @@ namespace tut
         rejects("switch::missing { width: 10px; }", "stylesheet.selector.part_unknown");
         rejects("panel { align-items: sideways; }", "stylesheet.property.value_invalid");
         rejects("button { align-self: sideways; }", "stylesheet.property.value_invalid");
+        rejects("label { text-align: middle; }", "stylesheet.property.value_invalid");
+        rejects("panel { vertical-align: center; }", "stylesheet.property.value_invalid");
         rejects("mystery { width: 10px; }", "stylesheet.selector.element_unknown");
         rejects("label:cheked { opacity: .5; }", "stylesheet.selector.state_unknown");
         rejects("button { --local: 2px; }", "stylesheet.token.root_required");
         rejects("label { order: 1.5; }", "stylesheet.property.value_invalid");
         rejects("label { order: 1px; }", "stylesheet.property.value_invalid");
 
-        const rdui::StyleSheetLoadResult dead_states = stylesheet.loadCss(
+        const rdui::StyleSheetLoadResult dead_states = stylesheet.loadRadia(
             "switch::thumb:checked { width: 10px; } label:checked { opacity: .5; }",
             "contract.radia");
         ensure("known target-specific states remain valid RSL", dead_states.ok());
@@ -373,12 +201,12 @@ namespace tut
     }
 
     template<> template<>
-    void rduistyle_object::test<22>()
+    void rduistyle_object::test<10>()
     {
         rdui::StyleSheet stylesheet;
-        ensure("inherited property stylesheet compiles", stylesheet.loadCss(
-            "panel { font-family: sans-big; font-size: 19px; font-weight: bold; font-style: italic;"
-            " line-height: 23px; text-color: #204060ff; text-align: center; cursor: grab;"
+        ensure("inherited property stylesheet compiles", stylesheet.loadRadia(
+            "panel { font-family: sans; font-size: 19px; font-weight: bold; font-style: italic;"
+            " line-height: 23px; text-color: #204060ff; text-align: center; vertical-align: bottom; cursor: grab;"
             " opacity: .5; pointer-events: none; background-color: #ffffffff; }"
             "label#override { font-size: 11px; cursor: default; }").ok());
 
@@ -392,7 +220,7 @@ namespace tut
         parent->addChild(std::move(overridden));
 
         const rdui::Style inherited_style = rdui::resolveWidgetStyle(stylesheet, *inherited_label);
-        ensure_equals("font family inherits", static_cast<int>(inherited_style.font_family), static_cast<int>(rdui::FontFamily::Big));
+        ensure_equals("font family inherits", static_cast<int>(inherited_style.font_family), static_cast<int>(rdui::FontFamily::Sans));
         ensure_equals("font size inherits", inherited_style.font_size, 19.f);
         ensure("font weight inherits", inherited_style.font_bold);
         ensure("font style inherits", inherited_style.font_italic);
@@ -400,6 +228,7 @@ namespace tut
         ensure_equals("line height inherits", inherited_style.line_height->pixels, 23.f);
         ensure_approximately_equals("text color inherits", inherited_style.text_color.b, 96.f / 255.f, 6);
         ensure_equals("text alignment inherits", static_cast<int>(inherited_style.text_align), static_cast<int>(rdui::TextAlign::Center));
+        ensure_equals("container vertical alignment does not inherit", static_cast<int>(inherited_style.vertical_align), static_cast<int>(rdui::VerticalAlign::Top));
         ensure_equals("cursor inherits", static_cast<int>(inherited_style.cursor), static_cast<int>(rdui::CursorStyle::Grab));
         ensure_equals("opacity remains local for paint composition", inherited_style.opacity, 1.f);
         ensure_equals("pointer event policy does not inherit", static_cast<int>(inherited_style.pointer_events), static_cast<int>(rdui::PointerEvents::Default));
@@ -409,15 +238,13 @@ namespace tut
         ensure_equals("explicit child font size overrides inheritance", overridden_style.font_size, 11.f);
         ensure_equals("explicit child cursor overrides inheritance", static_cast<int>(overridden_style.cursor), static_cast<int>(rdui::CursorStyle::Default));
 
-        const rdui::StyleSheetLoadResult irrelevant = stylesheet.loadCss("panel { vertical-align: middle; }", "inheritance.radia");
-        ensure("valid properties compile on targets that do not consume them", irrelevant.ok());
     }
 
     template<> template<>
-    void rduistyle_object::test<23>()
+    void rduistyle_object::test<11>()
     {
         rdui::StyleSheet stylesheet;
-        ensure("overflow stylesheet compiles", stylesheet.loadCss(
+        ensure("overflow stylesheet compiles", stylesheet.loadRadia(
             "panel { overflow: hidden; } #visible { overflow: visible; }").ok());
         ensure_equals("hidden overflow is typed",
                       static_cast<int>(stylesheet.resolve("panel", "", {}, 0).overflow),
@@ -426,17 +253,17 @@ namespace tut
                       static_cast<int>(stylesheet.resolve("panel", "visible", {}, 0).overflow),
                       static_cast<int>(rdui::Overflow::Visible));
 
-        const rdui::StyleSheetLoadResult invalid = stylesheet.loadCss(
+        const rdui::StyleSheetLoadResult invalid = stylesheet.loadRadia(
             "panel { overflow: scroll; }", "overflow.radia");
         ensure("unsupported overflow rejects candidate", !invalid.ok());
         ensure_equals("overflow diagnostic code", invalid.errors.front().code, "stylesheet.property.value_invalid");
     }
 
     template<> template<>
-    void rduistyle_object::test<24>()
+    void rduistyle_object::test<12>()
     {
         rdui::StyleSheet stylesheet;
-        ensure("minimized floater state compiles", stylesheet.loadCss(
+        ensure("minimized floater state compiles", stylesheet.loadRadia(
             "floater { &::header { border-width: 0px 0px 1px; }"
             " &:minimized::header { border-width: 0px; } }").ok());
         rdui::Floater floater;
@@ -455,7 +282,7 @@ namespace tut
     }
 
     template<> template<>
-    void rduistyle_object::test<25>()
+    void rduistyle_object::test<13>()
     {
         const rdui::Style initial;
         ensure("initial width is explicitly auto", initial.width.isAuto());
@@ -467,7 +294,7 @@ namespace tut
         ensure("initial effect list is empty", initial.effects.empty());
 
         rdui::StyleSheet stylesheet;
-        ensure("typed lengths compile", stylesheet.loadCss(
+        ensure("typed lengths compile", stylesheet.loadRadia(
             "panel { width: 40px; min-width: 20px; left: -8px; line-height: 18px; } ").ok());
         const rdui::Style style = stylesheet.resolve("panel", "", {}, 0);
         ensure("explicit width is not auto", !style.width.isAuto());
@@ -476,7 +303,7 @@ namespace tut
         ensure_equals("negative offset remains a specified length", style.left->pixels, -8.f);
         ensure_equals("line height stores a length", style.line_height->pixels, 18.f);
 
-        ensure("auto dimensions compile", stylesheet.loadCss(
+        ensure("auto dimensions compile", stylesheet.loadRadia(
             "panel { width: 40px; height: 20px; width: auto; height: auto; }"
             "button { size: auto; } icon { size: auto 16px; }").ok());
         const rdui::Style automatic = stylesheet.resolve("panel", "", {}, 0);
@@ -489,17 +316,17 @@ namespace tut
         ensure("two-value size accepts auto height", mixed_size.height.isAuto());
         ensure_equals("two-value size retains fixed width", mixed_size.width.pixels(), 16.f);
 
-        ensure("automatic gap compiles", stylesheet.loadCss("panel { gap: auto; }").ok());
+        ensure("automatic gap compiles", stylesheet.loadRadia("panel { gap: auto; }").ok());
         const rdui::Style automatic_gap = stylesheet.resolve("panel", "", {}, 0);
         ensure("gap retains its automatic state", automatic_gap.gap.isAuto());
         ensure_equals("automatic gap has no intrinsic pixels", automatic_gap.gap.fixedPixels(), 0.f);
     }
 
     template<> template<>
-    void rduistyle_object::test<26>()
+    void rduistyle_object::test<14>()
     {
         rdui::StyleSheet stylesheet;
-        ensure("structural selectors compile", stylesheet.loadCss(
+        ensure("structural selectors compile", stylesheet.loadRadia(
             "* { opacity: .8; }"
             "panel.root > label { width: 10px; }"
             "panel.root label { height: 11px; }"
@@ -536,10 +363,10 @@ namespace tut
     }
 
     template<> template<>
-    void rduistyle_object::test<27>()
+    void rduistyle_object::test<15>()
     {
         rdui::StyleSheet stylesheet;
-        ensure("box effects compile", stylesheet.loadCss(
+        ensure("box effects compile", stylesheet.loadRadia(
             "panel { background-color: linear-gradient(to right, #ff0000ff, rgb(0, 255, 0, 50%) 75%, #0000ffff);"
             " shadow: 1px 2px #11223344, 3px 4px 5px 6px rgb(10, 20, 30, 40%) inset;"
             " outline: 2px 3px #abcdef88; } label { outline: 1px dashed #ffffffff; }").ok());
@@ -562,20 +389,24 @@ namespace tut
         ensure("dashed outline style is typed",
                stylesheet.resolve("label", "", {}, 0).outline.style == rdui::OutlineStyle::Dashed);
 
-        ensure("composed blur effects compile", stylesheet.loadCss(
-            "panel { effect: background-blur(to bottom, 0px 16px), layer-blur(4px); }"
+        ensure("composed blur effects compile", stylesheet.loadRadia(
+            "panel { effect: background-blur(to bottom, 0px 25%, 16px 75%), layer-blur(4px); }"
+            "button { effect: layer-blur(to right, 0px 50%, 4px 50%); }"
             "label { effect: none; }").ok());
         const rdui::Style effects = stylesheet.resolve("panel", "", {}, 0);
         ensure_equals("effect list preserves both functions", effects.effects.size(), 2U);
         ensure("first effect targets background", effects.effects[0].kind == rdui::EffectKind::BackgroundBlur);
         ensure_equals("progressive blur stores start radius", effects.effects[0].start_radius, 0.f);
         ensure_equals("progressive blur stores end radius", effects.effects[0].end_radius, 16.f);
+        ensure_approximately_equals("progressive blur stores start position", effects.effects[0].start_position, .25f, 6);
+        ensure_approximately_equals("progressive blur stores end position", effects.effects[0].end_position, .75f, 6);
         ensure_equals("progressive blur stores direction", effects.effects[0].angle_degrees, 180.f);
         ensure("second effect targets layer", effects.effects[1].kind == rdui::EffectKind::LayerBlur);
         ensure_equals("uniform blur has matching radii", effects.effects[1].end_radius, 4.f);
+        ensure("equal progressive blur positions compile", stylesheet.resolve("button", "", {}, 0).effects[0].progressive());
         ensure("effect none clears the list", stylesheet.resolve("label", "", {}, 0).effects.empty());
 
-        ensure("all box gradient kinds compile", stylesheet.loadCss(
+        ensure("all box gradient kinds compile", stylesheet.loadRadia(
             "panel { background-color: radial-gradient(circle at 25% 75%, #ffffffff, #00000000 80%);"
             " border-width: 3px; border-color: conic-gradient(from 45deg at top left, #ff0000ff 0deg 90deg, #0000ffff 100%); }"
             "button { border: 2px repeating-linear-gradient(90deg, #ffffffff 0%, #000000ff 20%); }"
@@ -612,7 +443,7 @@ namespace tut
 
         auto rejects = [&](const std::string& css)
         {
-            ensure("invalid box effect rejects stylesheet", !stylesheet.loadCss(css, "effects.radia").ok());
+            ensure("invalid box effect rejects stylesheet", !stylesheet.loadRadia(css, "effects.radia").ok());
         };
         rejects("panel { background-color: linear-gradient(#fff); }");
         rejects("panel { background-color: radial-gradient(square, #fff, #000); }");
@@ -624,17 +455,19 @@ namespace tut
         rejects("panel { outline: 1px dashed solid #000; }");
         rejects("panel { effect: blur(4px); }");
         rejects("panel { effect: layer-blur(to bottom, 4px); }");
-        rejects("panel { effect: background-blur(to nowhere, 0px 4px); }");
+        rejects("panel { effect: background-blur(to nowhere, 0px 0%, 4px 100%); }");
+        rejects("panel { effect: background-blur(to bottom, 0px, 4px 100%); }");
+        rejects("panel { effect: background-blur(to bottom, 0px 75%, 4px 25%); }");
         rejects("panel { effect: layer-blur(-1px); }");
         rejects("panel { effect: layer-blur(2px), background-blur(4px); }");
         rejects("panel { effect: background-blur(2px) layer-blur(4px); }");
     }
 
     template<> template<>
-    void rduistyle_object::test<28>()
+    void rduistyle_object::test<16>()
     {
         rdui::StyleSheet stylesheet;
-        ensure("typed min-size declarations compile", stylesheet.loadCss(
+        ensure("typed min-size declarations compile", stylesheet.loadRadia(
             "panel.one { min-size: 24px; }"
             "panel.two { min-size: 30% 80px; }"
             "panel.longhand-after { min-size: 10px 20px; min-width: 40px; }"
@@ -660,7 +493,7 @@ namespace tut
 
         auto rejects = [&](const std::string& value)
         {
-            const rdui::StyleSheetLoadResult result = stylesheet.loadCss(
+            const rdui::StyleSheetLoadResult result = stylesheet.loadRadia(
                 "panel { min-size: " + value + "; }", "min-size.radia");
             ensure("invalid min-size rejects the candidate", !result.ok());
             ensure_equals("min-size value diagnostic is stable", result.errors.front().code,
@@ -675,14 +508,14 @@ namespace tut
     }
 
     template<> template<>
-    void rduistyle_object::test<29>()
+    void rduistyle_object::test<17>()
     {
         rdui::StyleSheet original;
-        ensure("original stylesheet loads", original.loadCss("panel { width: 10px; }", "original.radia").ok());
+        ensure("original stylesheet loads", original.loadRadia("panel { width: 10px; }", "original.radia").ok());
         const std::uint64_t copied_generation = original.generation();
 
         rdui::StyleSheet copy = original;
-        ensure("replacement stylesheet loads", original.loadCss("panel { width: 20px; }", "replacement.radia").ok());
+        ensure("replacement stylesheet loads", original.loadRadia("panel { width: 20px; }", "replacement.radia").ok());
         ensure_equals("copy preserves compiled rules", copy.resolve("panel", "", {}, 0).width.pixels(), 10.f);
         ensure_equals("copy preserves generation", copy.generation(), copied_generation);
         ensure_equals("original changes independently", original.resolve("panel", "", {}, 0).width.pixels(), 20.f);
@@ -696,10 +529,10 @@ namespace tut
     }
 
     template<> template<>
-    void rduistyle_object::test<30>()
+    void rduistyle_object::test<18>()
     {
         rdui::StyleSheet stylesheet;
-        ensure("style layers compile together", stylesheet.loadCssLayers({
+        ensure("style layers compile together", stylesheet.loadRadiaLayers({
             {"base/skin.radia", "panel { width: 10px; height: 30px; }"},
             {"derived/skin.radia", "panel { width: 20px; }"},
         }).ok());
@@ -707,7 +540,7 @@ namespace tut
         ensure_equals("derived source order wins", resolved.width.pixels(), 20.f);
         ensure_equals("base declarations remain", resolved.height.pixels(), 30.f);
 
-        const auto malformed = stylesheet.loadCssLayers({
+        const auto malformed = stylesheet.loadRadiaLayers({
             {"base/skin.radia", "panel { width: 10px; }"},
             {"derived/skin.radia", "not a rule"},
         });
@@ -719,7 +552,7 @@ namespace tut
     }
 
     template<> template<>
-    void rduistyle_object::test<31>()
+    void rduistyle_object::test<19>()
     {
         rdui::StyleSheet stylesheet;
         rdui::ResourceLayer layer{
@@ -737,7 +570,7 @@ namespace tut
              "panel { width: var(--panel-width); height: var(--panel-height); }"},
         };
 
-        ensure("recursive imports compile", stylesheet.loadCssLayers({layer}).ok());
+        ensure("recursive imports compile", stylesheet.loadRadiaLayers({layer}).ok());
         const rdui::Style resolved = stylesheet.resolve("panel", "", {}, 0);
         ensure_equals("later entrypoint rule retains source-order precedence", resolved.width.pixels(), 30.f);
         ensure_equals("nested imported token is available", resolved.height.pixels(), 18.f);
@@ -752,10 +585,10 @@ namespace tut
     }
 
     template<> template<>
-    void rduistyle_object::test<32>()
+    void rduistyle_object::test<20>()
     {
         rdui::StyleSheet stylesheet;
-        ensure("baseline compiles", stylesheet.loadCss("panel { width: 44px; }").ok());
+        ensure("baseline compiles", stylesheet.loadRadia("panel { width: 44px; }").ok());
 
         auto layer = [](std::string source)
         {
@@ -765,7 +598,7 @@ namespace tut
         };
 
         auto missing = layer("\n@import \"missing.radia\";");
-        const auto missing_result = stylesheet.loadCssLayers({missing});
+        const auto missing_result = stylesheet.loadRadiaLayers({missing});
         ensure("missing import rejects candidate", !missing_result.ok());
         ensure_equals("missing diagnostic code", missing_result.errors.front().code,
                       std::string("stylesheet.import.missing"));
@@ -773,19 +606,19 @@ namespace tut
 
         auto cycle = layer("@import \"cycle.radia\";");
         cycle.modules["cycle.radia"] = "@import \"main.radia\";";
-        const auto cycle_result = stylesheet.loadCssLayers({cycle});
+        const auto cycle_result = stylesheet.loadRadiaLayers({cycle});
         ensure("import cycle rejects candidate", !cycle_result.ok());
         ensure_equals("cycle diagnostic code", cycle_result.errors.front().code,
                       std::string("stylesheet.import.cycle"));
 
-        const auto traversal_result = stylesheet.loadCssLayers({layer("@import \"../outside.radia\";")});
+        const auto traversal_result = stylesheet.loadRadiaLayers({layer("@import \"../outside.radia\";")});
         ensure("escaping import rejects candidate", !traversal_result.ok());
         ensure_equals("path diagnostic code", traversal_result.errors.front().code,
                       std::string("stylesheet.import.path_invalid"));
 
         auto malformed = layer("@import \"broken.radia\";");
         malformed.modules["broken.radia"] = "panel { width: ; }";
-        const auto malformed_result = stylesheet.loadCssLayers({malformed});
+        const auto malformed_result = stylesheet.loadRadiaLayers({malformed});
         ensure("malformed imported module rejects candidate", !malformed_result.ok());
         ensure_equals("imported diagnostic source", malformed_result.errors.front().source,
                       std::string("theme/broken.radia"));
@@ -794,7 +627,7 @@ namespace tut
 
         auto late = layer("panel { width: 1px; } @import \"late.radia\";");
         late.modules["late.radia"] = "panel { height: 2px; }";
-        const auto late_result = stylesheet.loadCssLayers({late});
+        const auto late_result = stylesheet.loadRadiaLayers({late});
         ensure("late import rejects candidate", !late_result.ok());
         ensure_equals("late import diagnostic", late_result.errors.front().code,
                       std::string("stylesheet.import.order"));
@@ -804,22 +637,65 @@ namespace tut
     }
 
     template<> template<>
-    void rduistyle_object::test<33>()
+    void rduistyle_object::test<21>()
     {
         rdui::StyleSheet stylesheet;
         ensure("RSL type selector lookup is ASCII case-insensitive",
-               stylesheet.loadCss("BuTtOn { width: 23px; }").ok());
+               stylesheet.loadRadia("BuTtOn { width: 23px; }").ok());
         ensure_equals("RSL stores the canonical Widget spelling for matching",
                       stylesheet.resolve("button", "", {}, 0).width.pixels(), 23.f);
 
-        const auto invalid_id = stylesheet.loadCss("button#bad_id { width: 1px; }");
+        const auto invalid_id = stylesheet.loadRadia("button#bad_id { width: 1px; }");
         ensure("RSL rejects non-kebab Widget IDs", !invalid_id.ok());
         ensure_equals("RSL invalid identifier diagnostic is stable", invalid_id.errors.front().code,
                       std::string("stylesheet.selector.identifier_invalid"));
 
-        const auto invalid_part = stylesheet.loadCss("floater::Header { width: 1px; }");
+        const auto invalid_part = stylesheet.loadRadia("floater::Header { width: 1px; }");
         ensure("RSL rejects non-kebab Part names", !invalid_part.ok());
         ensure_equals("RSL invalid Part diagnostic is stable", invalid_part.errors.front().code,
                       std::string("stylesheet.selector.part_invalid"));
+    }
+
+    template<> template<>
+    void rduistyle_object::test<22>()
+    {
+        rdui::StyleSheet stylesheet;
+        ensure("Field invalid-state selector compiles",
+               stylesheet.loadRadia("field { opacity: 1; } field:invalid { opacity: .6; }").ok());
+        const uint8_t invalid = static_cast<uint8_t>(rdui::WidgetState::Invalid);
+        ensure_equals("Field invalid-state selector matches", stylesheet.resolve(
+            "field", "", {}, invalid).opacity, .6f);
+
+        const auto unsupported = stylesheet.loadRadia("button:invalid { opacity: .5; }");
+        ensure("invalid state remains target-specific", unsupported.ok());
+        ensure_equals("unsupported invalid state reports one warning", unsupported.warnings.size(), 1U);
+        ensure_equals("unsupported invalid-state diagnostic is stable", unsupported.warnings.front().code,
+                      std::string("stylesheet.selector.state_never_matches"));
+    }
+
+    template<> template<>
+    void rduistyle_object::test<23>()
+    {
+        rdui::StyleSheet stylesheet;
+        ensure("nested Kbd selectors compile", stylesheet.loadRadia(
+            "kbd { padding: 1px; border-radius: 4px; "
+            "  > kbd { padding: 2px; border-radius: 3px; } "
+            "} "
+            "text > kbd { gap: 5px; }").ok());
+
+        rdui::Text owner;
+        const rdui::Style chord = stylesheet.resolveInline(owner, "kbd");
+        const rdui::Style key = stylesheet.resolveInline(owner, "kbd", {"kbd"});
+        ensure_equals("Kbd styles the complete chord", chord.padding.left, 1.f);
+        ensure_equals("Text can contextually style its direct Kbd content", chord.gap.fixedPixels(), 5.f);
+        ensure_equals("nested Kbd styles each generated key", key.padding.left, 2.f);
+        ensure_equals("nested Kbd overrides the shared outer radius", key.border_radius, 3.f);
+        ensure("direct Text child selector does not leak through the generated Kbd parent",
+               key.gap.fixedPixels() != 5.f);
+
+        const auto rejected_part = stylesheet.loadRadia("kbd::key { padding: 1px; }");
+        ensure("Kbd does not expose a synthetic key Part", !rejected_part.ok());
+        ensure_equals("unknown Kbd Part diagnostic is stable", rejected_part.errors.front().code,
+                      std::string("stylesheet.selector.part_unknown"));
     }
 }

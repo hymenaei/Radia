@@ -48,6 +48,8 @@ namespace rdui
             bool minimized() const { return mMinimized; }
             bool dragging() const { return mInteraction == FloaterInteraction::Move; }
             const Rect& expandedRect() const { return mExpandedRect; }
+            Vec2 authoredSize() const;
+            Vec2 authoredContentSize() const { return mAuthoredContentSize; }
 
             Panel* header() { return mHeader.get(); }
             const Panel* header() const { return mHeader.get(); }
@@ -90,8 +92,7 @@ namespace rdui
             Vec2 clampedPosition(const Vec2& position) const;
             bool beginResizeInteraction(const PointerEvent& event, std::uint8_t edges,
                                         const Vec2& minimum, const std::optional<Rect>& bounds);
-            void setOriginalSize(const Vec2& size);
-            Vec2 originalSize() const;
+            void setAuthoredSize(const Vec2& size, const Vec2& content_size);
             void configureCompositeParts();
             Panel* claimCustomHeader();
             Floater& setResolvedTitle(std::string localization_key, std::string value);
@@ -106,7 +107,8 @@ namespace rdui
             Rect mMovementBounds;
             Rect mExpandedRect;
             Vec2 mDragOffset;
-            Vec2 mOriginalSize;
+            Vec2 mAuthoredSize;
+            Vec2 mAuthoredContentSize;
             ResizeInteraction mResizeInteraction;
             WidgetRef<Panel> mHeader;
             WidgetRef<Panel> mCustomHeader;
@@ -125,7 +127,7 @@ namespace rdui
             bool mClosed = false;
             bool mMinimized = false;
             FloaterInteraction mInteraction = FloaterInteraction::Idle;
-            bool mOriginalSizeCaptured = false;
+            bool mAuthoredSizeCaptured = false;
             bool mDetachRequested = false;
             bool mCustomHeaderClaimed = false;
             Visibility mCustomHeaderVisibility = Visibility::Visible;

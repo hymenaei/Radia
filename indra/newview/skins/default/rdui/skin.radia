@@ -10,14 +10,15 @@
     --accent-dark: #907e2fff;
     --text: #edf6ffff;
     --muted: #a7b8c6ff;
+    --error: #ff8d8dff;
     --focus: #ffffffcc;
     --radius-md: 6px;
     --radius-lg: 12px;
 }
 
 floater {
-    size: auto 292px;
-    min-size: 300px 292px;
+    size: auto 362px;
+    min-size: 300px 362px;
     flow: column;
     background-color: #1f1f1fe5;
     effect: background-blur(64px);
@@ -25,7 +26,6 @@ floater {
     border: 1px var(--panel-border);
 
     &:minimized::header { border-width: 0px; }
-    &:minimized { width: auto; }
 
     &::header {
         height: 48px;
@@ -50,7 +50,7 @@ floater {
         &::custom {
             height: 24px;
             flow: row;
-            grow: 1;
+            flex-grow: 1;
             gap: 6px;
         }
 
@@ -81,12 +81,47 @@ floater {
     }
 }
 
-label {
+label, text {
     text-color: var(--text);
     font-family: sans;
     font-size: 13px;
     line-height: 18px;
-    vertical-align: middle;
+}
+
+kbd {
+    gap: 2px;
+
+    > kbd {
+        padding: 1px 3px;
+        background-color: #ffffff10;
+        border: 1px #ffffff38;
+        border-radius: 3px;
+        font-family: sans;
+        font-size: 11px;
+        line-height: 14px;
+    }
+}
+
+field > hint, field > error {
+    font-size: 12px;
+    line-height: 18px;
+    flex-grow: 1;
+}
+
+field > hint { text-color: var(--muted); }
+field > error { text-color: var(--error); }
+
+fieldset {
+    gap: 10px;
+    padding: 3px 6px;
+    border: 1px #ffffff24;
+
+    > legend {
+        text-color: var(--muted);
+        font-weight: bold;
+        font-size: 13px;
+        line-height: 18px;
+    }
 }
 
 button {
@@ -95,14 +130,9 @@ button {
     background-color: var(--surface);
     border-radius: var(--radius-md);
     border: 1px #ffffff24;
-    flow: row;
-    justify-content: center;
     gap: 6px;
     padding: 9px;
     text-color: var(--text);
-    font-family: sans;
-    font-size: 13px;
-    line-height: 18px;
 
     &:hover { background-color: var(--surface-hover); }
     &:active { background-color: var(--surface-active); }
@@ -123,13 +153,13 @@ switch {
     border-radius: 14px;
     border: 1px #ffffff2f;
 
+    &:checked { background-color: var(--accent-dark); border-color: var(--accent); }
+    &:checked::thumb { background-color: #ffffffff; border-color: #dff9ffff; }
+    &:focus-visible { border-color: var(--focus); border-width: 2px; }
+
     &::thumb {
         background-color: #d8e6f2ff;
         border-radius: 10px;
         border: 1px #ffffffff;
     }
-
-    &:checked { background-color: var(--accent-dark); border-color: var(--accent); }
-    &:checked::thumb { background-color: #ffffffff; border-color: #dff9ffff; }
-    &:focus-visible { border-color: var(--focus); border-width: 2px; }
 }

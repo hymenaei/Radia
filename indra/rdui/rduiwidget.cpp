@@ -196,8 +196,6 @@ namespace rdui
             for (auto& child : widget.mChildren) self(self, *child);
         };
         invalidate(invalidate, *this);
-        // Descendant selectors can change the whole subtree, while this
-        // Widget's new measured size can change every ancestor's layout.
         if (mParent) mParent->invalidateMeasure();
         else if (mSurface) mSurface->requestLayout();
     }
@@ -227,6 +225,15 @@ namespace rdui
         emitAction(ClickActionEvent(*this));
     }
 
+    void Widget::activateFromLabel()
+    {
+        for (const Widget* current = this; current; current = current->parent())
+        {
+            if (current->disabled() || current->visibility() != Visibility::Visible) return;
+        }
+        onLabelActivate();
+    }
+
     void Widget::dispatchMouseAction(ActionEventKind kind, const PointerEvent& event)
     {
         if (disabled()) return;
@@ -245,6 +252,12 @@ namespace rdui
         mRect.y += delta.y;
         for (auto& child : mChildren) child->translate(delta);
         invalidatePaint();
+    }
+
+    void Widget::translateChild(Widget& child, const Vec2& delta)
+    {
+        llassert_always(child.parent() == this);
+        child.translate(delta);
     }
 
     Vec2 Widget::intrinsicSize(const StyleSheet&, const Style&, const TextMetrics&) const

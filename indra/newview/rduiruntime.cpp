@@ -6,6 +6,7 @@
 #include "llrendertarget.h"
 #include "llwindow.h"
 #include "llviewercontrol.h"
+#include "llviewerinput.h"
 #include "llviewerwindow.h"
 #include "llviewershadermgr.h"
 #include "rdfloater.h"
@@ -14,6 +15,7 @@
 #include "rduidetachedfloaterwindow.h"
 #include "rduifloaterdocumentmanager.h"
 #include "rduifloaterplacementstore.h"
+#include "rduifloaterresize.h"
 #include "rduifloaterstatestore.h"
 #include "rduiinputbridge.h"
 #include "rduinativewindow.h"
@@ -34,8 +36,6 @@
 
 namespace
 {
-    constexpr float MARGIN = 24.f;
-
     enum class InitializationState { Uninitialized, Ready, Failed };
     const rdui::viewer::RduiInputBridge INPUT_BRIDGE;
 
@@ -76,6 +76,13 @@ namespace rdui::viewer
                            mDocuments(mSystem, *this)
             {
                 mSurface->setFloaterDelegate(this);
+                mSystem.setKeybindingResolver([](const std::string& authored_id)
+                {
+                    std::string viewer_command = authored_id;
+                    std::replace(viewer_command.begin(), viewer_command.end(), '-', '_');
+                    return KeybindingPresentation{
+                        gViewerInput.getPrimaryKeyBinding({}, viewer_command)};
+                });
             }
 
             ~Impl()
@@ -253,6 +260,14 @@ namespace rdui::viewer
 
             void idle()
             {
+                const U64 binding_generation = gViewerInput.getBindingGeneration();
+                const EKeyboardMode binding_mode = gViewerInput.getMode();
+                if (mObservedBindingGeneration != binding_generation || mObservedBindingMode != binding_mode)
+                {
+                    mObservedBindingGeneration = binding_generation;
+                    mObservedBindingMode = binding_mode;
+                    mSystem.refreshKeybindings();
+                }
                 mDocuments.idle();
                 processReload();
                 mDetachedManager.update();
@@ -496,9 +511,12 @@ namespace rdui::viewer
                 if (!replacement) return nullptr;
                 const bool detached = mDetachedManager.contains(current);
                 const bool minimized = current.minimized();
-                const rdui::Rect authored_rect = mSurface->prepareFloater(*replacement, MARGIN);
+                const rdui::Rect authored_rect = mSurface->prepareFloater(*replacement);
                 rdui::Rect replacement_rect = minimized ? current.expandedRect() : current.rect();
-                const bool preserve_size = current.canResize() && replacement->canResize();
+                const bool preserve_size = rdui::detail::preserveUserResizeOnReload(
+                    current.canResize(), replacement->canResize(),
+                    {current.authoredSize(), current.authoredContentSize()},
+                    {{authored_rect.w, authored_rect.h}, replacement->authoredContentSize()});
                 std::optional<rdui::Vec2> replacement_size;
                 if (!preserve_size)
                 {
@@ -586,7 +604,7 @@ namespace rdui::viewer
                     if (!floater || isDetached(*floater)) continue;
                     const FloaterInstanceId* identity = mDocuments.identity(*floater);
                     if (identity && mPositionInitialized.insert(identity->value()).second)
-                        mSurface->placeFloater(*floater, mSurface->prepareFloater(*floater, MARGIN));
+                        mSurface->placeFloater(*floater, mSurface->prepareFloater(*floater));
                 }
                 mSurface->updateLayout();
                 for (rdui::Floater* floater : mDocuments.floaters())
@@ -614,6 +632,8 @@ namespace rdui::viewer
             bool mAttachedVisible = true;
             bool mDetachedVisible = true;
             bool mSessionRestored = false;
+            std::optional<U64> mObservedBindingGeneration;
+            std::optional<EKeyboardMode> mObservedBindingMode;
             std::optional<std::vector<FloaterDocumentId>> mPersistedOpenDocuments;
             std::unordered_set<std::string> mPositionInitialized;
             int mMagnetX = 0;

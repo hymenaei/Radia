@@ -3,16 +3,52 @@
 #include "llviewercontrol.h"
 #include "rdbutton.h"
 #include "rdfloater.h"
-#include "rdlabel.h"
 #include "rdswitch.h"
+#include "rdtext.h"
 #include "rduiruntime.h"
 #include "rduisystem.h"
 #include <algorithm>
 #include <iterator>
+#include <map>
 #include <utility>
 
 namespace rdui::viewer
 {
+    namespace
+    {
+        class DemoSwitchBinding final : public ValueBinding<bool>
+        {
+            public:
+                ValueState<bool> state() const override { return mState; }
+
+                void write(bool value) override
+                {
+                    mState.value = value;
+                    mState.validation = value ? ValueValidation::valid() : ValueValidation::invalid();
+                    const auto observers = mObservers;
+                    for (const auto& [id, observer] : observers)
+                        if (mObservers.find(id) != mObservers.end()) observer(mState);
+                }
+
+                ValueBindingSubscription observe(Observer observer) override
+                {
+                    const std::size_t id = mNextObserver++;
+                    mObservers.emplace(id, std::move(observer));
+                    std::weak_ptr<char> lifetime = mLifetime;
+                    return ValueBindingSubscription([this, lifetime, id]
+                    {
+                        if (!lifetime.expired()) mObservers.erase(id);
+                    });
+                }
+
+            private:
+                ValueState<bool> mState{true, true, ValueValidation::valid()};
+                std::map<std::size_t, Observer> mObservers;
+                std::size_t mNextObserver = 1;
+                std::shared_ptr<char> mLifetime = std::make_shared<char>(0);
+        };
+    }
+
     void registerFloaterDemo(Runtime& runtime)
     {
         runtime.registerFloater("floater-demo", [&runtime](System& system)
@@ -30,6 +66,7 @@ namespace rdui::viewer
                              std::function<bool()> authoring_mode_getter,
                              std::function<void(bool)> authoring_mode_setter)
                : mSystem(system),
+                 mDemoSwitchBinding(std::make_shared<DemoSwitchBinding>()),
                  mReloadHandler(std::move(reload_handler)),
                  mAuthoringModeGetter(std::move(authoring_mode_getter)),
                  mAuthoringModeSetter(std::move(authoring_mode_setter)) {}
@@ -37,18 +74,21 @@ namespace rdui::viewer
     PreparedBindingResult FloaterDemo::prepareBindings(Floater& floater)
     {
         Binder binder(floater);
-        binder.require("status", mStatus);
-        binder.require("active-language", mActiveLanguage);
-        binder.require("previous-language", mPreviousLanguage);
-        binder.require("next-language", mNextLanguage);
-        binder.require("authoring-mode", mAuthoringMode);
+        binder.bind("status", mStatus);
+        binder.bind("active-language", mActiveLanguage);
+        binder.bind("previous-language", mPreviousLanguage);
+        binder.bind("next-language", mNextLanguage);
+        binder.bind("authoring-mode", mAuthoringMode);
+        binder.provideValue("demo-switch-enabled", mDemoSwitchBinding);
         binder.onClick("press", [this]
         {
-            mStatus->setText(mSystem.localized("floater_demo.clicked"));
+            if (mStatus) mStatus->setText(mSystem.localized("floater_demo.clicked"));
         });
         binder.onChange("switch-changed", [this](const ChangeActionEvent& event)
         {
-            mStatus->setText(mSystem.localized(event.checked ? "floater_demo.switch_on" : "floater_demo.switch_off"));
+            if (mStatus)
+                mStatus->setText(mSystem.localized(
+                    event.checked ? "floater_demo.switch_on" : "floater_demo.switch_off"));
         });
         binder.onClick("previous-language", [this] { selectRelativeLanguage(-1); });
         binder.onClick("next-language", [this] { selectRelativeLanguage(1); });

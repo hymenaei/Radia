@@ -65,13 +65,13 @@ namespace rdui
             ValueBindingSubscription& operator=(const ValueBindingSubscription&) = delete;
 
             ValueBindingSubscription(ValueBindingSubscription&& other) noexcept
-                : mDisconnect(std::move(other.mDisconnect)) {}
+                : mDisconnect(std::exchange(other.mDisconnect, {})) {}
             ValueBindingSubscription& operator=(ValueBindingSubscription&& other) noexcept
             {
                 if (this != &other)
                 {
                     reset();
-                    mDisconnect = std::move(other.mDisconnect);
+                    mDisconnect = std::exchange(other.mDisconnect, {});
                 }
                 return *this;
             }

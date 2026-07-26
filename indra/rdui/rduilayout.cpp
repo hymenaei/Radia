@@ -448,7 +448,7 @@ namespace rdui
                     const float line_gap = parent_style.gap.fixedPixels();
                     std::vector<float> line_heights;
                     line_heights.reserve(lines.size());
-                    for (const auto [begin, end] : lines)
+                    for (const auto& [begin, end] : lines)
                     {
                         float height = 0.f;
                         for (std::size_t index = begin; index < end; ++index)

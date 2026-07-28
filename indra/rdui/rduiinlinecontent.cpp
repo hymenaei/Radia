@@ -4,7 +4,7 @@
 
 namespace rdui
 {
-    InlineContentNode InlineContentNode::text(TextValue value)
+    InlineContentNode InlineContentNode::text(std::string value)
     {
         InlineContentNode result(InlineContentKind::Text);
         result.mValue = std::move(value);
@@ -42,54 +42,41 @@ namespace rdui
 
     InlineContent InlineContent::text(std::string value)
     {
-        return text(TextValue::literal(std::move(value)));
-    }
-
-    InlineContent InlineContent::text(TextValue value)
-    {
-        std::vector<InlineContentNode> nodes;
-        nodes.push_back(InlineContentNode::text(std::move(value)));
-        return InlineContent(std::move(nodes));
+        return InlineContent({InlineContentNode::text(std::move(value))});
     }
 
     namespace
     {
-        InlineContentNode resolveNode(const InlineContentNode& node,
-                                      const std::function<std::string(const std::string&)>& resolve)
+        void appendPlainText(const InlineContentNode& node, std::string& result)
         {
-            TextValue value = node.value();
-            if (value.localized()) value.updateLocalizedValue(resolve(value.localizationKey()));
-
-            std::vector<InlineContentNode> children;
-            children.reserve(node.children().size());
-            for (const InlineContentNode& child : node.children()) children.push_back(resolveNode(child, resolve));
-
             switch (node.kind())
             {
-                case InlineContentKind::Text: return InlineContentNode::text(std::move(value));
+                case InlineContentKind::Text:
+                    result += node.value();
+                    return;
+                case InlineContentKind::Kbd:
+                    return;
+                case InlineContentKind::Br:
+                    result += '\n';
+                    return;
                 case InlineContentKind::B:
                 case InlineContentKind::I:
-                case InlineContentKind::S: return InlineContentNode::container(node.kind(), std::move(children));
-                case InlineContentKind::Kbd:
-                    return InlineContentNode::kbd(node.metadata(), node.keybindingPresentation());
-                case InlineContentKind::Br: return InlineContentNode::br();
-                case InlineContentKind::Link: return InlineContentNode::link(node.metadata(), std::move(children));
+                case InlineContentKind::S:
+                case InlineContentKind::Link:
+                    for (const InlineContentNode& child : node.children()) appendPlainText(child, result);
+                    return;
             }
-            llassert(false);
-            return InlineContentNode::br();
         }
     }
 
-    InlineContent InlineContent::resolveLocalized(const std::function<std::string(const std::string&)>& resolve) const
+    std::string InlineContent::plainText() const
     {
-        std::vector<InlineContentNode> nodes;
-        nodes.reserve(mNodes.size());
-        for (const InlineContentNode& node : mNodes) nodes.push_back(resolveNode(node, resolve));
-        return InlineContent(std::move(nodes));
+        std::string result;
+        for (const InlineContentNode& node : mNodes) appendPlainText(node, result);
+        return result;
     }
 
-    InlineContent InlineContent::resolveKeybindings(
-        const std::function<KeybindingPresentation(const std::string&)>& resolve) const
+    InlineContent InlineContent::resolveKeybindings(const std::function<KeybindingPresentation(const std::string&)>& resolve) const
     {
         const auto resolve_node = [&](auto&& self, const InlineContentNode& node) -> InlineContentNode
         {
@@ -99,15 +86,20 @@ namespace rdui
 
             switch (node.kind())
             {
-                case InlineContentKind::Text: return InlineContentNode::text(node.value());
+                case InlineContentKind::Text:
+                    return InlineContentNode::text(node.value());
                 case InlineContentKind::B:
                 case InlineContentKind::I:
-                case InlineContentKind::S: return InlineContentNode::container(node.kind(), std::move(children));
+                case InlineContentKind::S:
+                    return InlineContentNode::container(node.kind(), std::move(children));
                 case InlineContentKind::Kbd:
                     return InlineContentNode::kbd(node.metadata(), resolve(node.metadata()));
-                case InlineContentKind::Br: return InlineContentNode::br();
-                case InlineContentKind::Link: return InlineContentNode::link(node.metadata(), std::move(children));
+                case InlineContentKind::Br:
+                    return InlineContentNode::br();
+                case InlineContentKind::Link:
+                    return InlineContentNode::link(node.metadata(), std::move(children));
             }
+            llassert(false);
             return InlineContentNode::br();
         };
 
@@ -135,8 +127,9 @@ namespace rdui
     bool inlineContentKind(const std::string& element, InlineContentKind& kind)
     {
         const std::string lookup = schemaNameKey(element);
-        for (InlineContentKind candidate : {InlineContentKind::B, InlineContentKind::I, InlineContentKind::S,
-                                            InlineContentKind::Kbd, InlineContentKind::Br, InlineContentKind::Link})
+        for (InlineContentKind candidate : {InlineContentKind::B, InlineContentKind::I,
+                                            InlineContentKind::S, InlineContentKind::Kbd,
+                                            InlineContentKind::Br, InlineContentKind::Link,})
         {
             if (lookup != schemaNameKey(inlineContentElement(candidate))) continue;
             kind = candidate;
@@ -149,5 +142,4 @@ namespace rdui
     {
         return schemaNameKey(element) == schemaNameKey(inlineContentElement(InlineContentKind::Kbd));
     }
-
 }

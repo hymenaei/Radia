@@ -1,7 +1,6 @@
 #ifndef LL_RDUI_INLINE_CONTENT_H
 #define LL_RDUI_INLINE_CONTENT_H
 
-#include "rduilocalization.h"
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -30,14 +29,14 @@ namespace rdui
     class InlineContentNode
     {
         public:
-            static InlineContentNode text(TextValue value);
+            static InlineContentNode text(std::string value);
             static InlineContentNode container(InlineContentKind kind, std::vector<InlineContentNode> children);
             static InlineContentNode kbd(std::string binding, KeybindingPresentation presentation = {});
             static InlineContentNode br();
             static InlineContentNode link(std::string destination, std::vector<InlineContentNode> children);
 
             InlineContentKind kind() const { return mKind; }
-            const TextValue& value() const { return mValue; }
+            const std::string& value() const { return mValue; }
             const std::string& metadata() const { return mMetadata; }
             const KeybindingPresentation& keybindingPresentation() const { return mKeybindingPresentation; }
             const std::vector<InlineContentNode>& children() const { return mChildren; }
@@ -46,7 +45,7 @@ namespace rdui
             explicit InlineContentNode(InlineContentKind kind) : mKind(kind) {}
 
             InlineContentKind mKind;
-            TextValue mValue;
+            std::string mValue;
             std::string mMetadata;
             KeybindingPresentation mKeybindingPresentation;
             std::vector<InlineContentNode> mChildren;
@@ -59,13 +58,11 @@ namespace rdui
             explicit InlineContent(std::vector<InlineContentNode> nodes) : mNodes(std::move(nodes)) {}
 
             static InlineContent text(std::string value);
-            static InlineContent text(TextValue value);
 
             const std::vector<InlineContentNode>& nodes() const { return mNodes; }
             bool empty() const { return mNodes.empty(); }
-            InlineContent resolveLocalized(const std::function<std::string(const std::string&)>& resolve) const;
-            InlineContent resolveKeybindings(
-                const std::function<KeybindingPresentation(const std::string&)>& resolve) const;
+            std::string plainText() const;
+            InlineContent resolveKeybindings(const std::function<KeybindingPresentation(const std::string&)>& resolve) const;
 
         private:
             std::vector<InlineContentNode> mNodes;

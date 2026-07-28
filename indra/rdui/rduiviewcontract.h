@@ -5,6 +5,7 @@
 #include "rduilayoutdocument.h"
 #include "rduiinlinecontent.h"
 #include "rduilocalization.h"
+#include "rduitextsource.h"
 #include "rduischema.h"
 #include "rduiviewresult.h"
 #include <cstdint>
@@ -25,8 +26,7 @@ namespace rdui
     class ViewBuildContext
     {
         public:
-            ViewBuildContext(const LocalizationCatalog& localization, std::string locale)
-                : mLocalization(localization), mLocale(std::move(locale)) {}
+            ViewBuildContext(const LocalizationCatalog& localization, std::string locale) : mLocalization(localization), mLocale(std::move(locale)) {}
 
             bool hasLocalizationKey(const std::string& id) const
             {
@@ -38,10 +38,16 @@ namespace rdui
                 return mLocalization.get(mLocale, id);
             }
 
-            TextValue localized(std::string id) const
+            InlineContent resolveContent(const LocalizationRequest& request) const
             {
-                std::string value = resolveText(id);
-                return TextValue::fromLocalization(std::move(id), std::move(value));
+                return mLocalization.resolve(mLocale, request);
+            }
+
+            TextSource localizedContent(std::string id) const
+            {
+                LocalizationRequest request = LocalizationRequest::text(std::move(id));
+                InlineContent content = resolveContent(request);
+                return TextSource::localized(std::move(request), std::move(content));
             }
 
         private:
@@ -73,8 +79,7 @@ namespace rdui
     {
         std::string element;
         std::vector<InlineContentKind> accepted;
-        std::function<Widget*(InlineContent, Widget&, ViewBuildResult&, const std::string&,
-                              std::size_t, std::size_t)> apply;
+        std::function<Widget*(TextSource, Widget&, ViewBuildResult&, const std::string&, std::size_t, std::size_t)> apply;
     };
 
     namespace detail
@@ -174,8 +179,7 @@ namespace rdui
     }
 
     template<typename WidgetT>
-    WidgetAttributeContract stringAttribute(std::initializer_list<std::string> names,
-                                            WidgetT& (WidgetT::*setter)(std::string))
+    WidgetAttributeContract stringAttribute(std::initializer_list<std::string> names, WidgetT& (WidgetT::*setter)(std::string))
     {
         return stringAttribute<WidgetT, decltype(setter)>(names, setter);
     }
@@ -196,8 +200,7 @@ namespace rdui
                                                                  const ViewBuildContext*)
         {
             bool value = false;
-            if (readViewBoolean(element, name.c_str(), value, result, source))
-                (void)std::invoke(setter, static_cast<WidgetT&>(widget), value);
+            if (readViewBoolean(element, name.c_str(), value, result, source)) (void)std::invoke(setter, static_cast<WidgetT&>(widget), value);
         };
         return contract;
     }
@@ -219,22 +222,23 @@ namespace rdui
         {
             std::string key;
             if (!readViewAttribute(element, name.c_str(), key)) return;
-            std::string value = key;
+            TextSource value = TextSource::text(key);
             if (context)
             {
                 if (!context->hasLocalizationKey(key))
                     result.error("view.localization.missing", "Unknown localization key: " + key + ".",
                                  source, element.source().begin.line, element.source().begin.column);
-                value = context->resolveText(key);
+                value = context->localizedContent(key);
             }
-            (void)std::invoke(setter, static_cast<WidgetT&>(widget), std::move(key), std::move(value));
+            (void)std::invoke(
+                setter, static_cast<WidgetT&>(widget), std::move(value));
         };
         return contract;
     }
 
     template<typename WidgetT>
     WidgetAttributeContract localizedStringAttribute(
-        std::string name, WidgetT& (WidgetT::*setter)(std::string, std::string))
+        std::string name, WidgetT& (WidgetT::*setter)(TextSource))
     {
         return localizedStringAttribute<WidgetT, decltype(setter)>(std::move(name), setter);
     }
@@ -248,19 +252,17 @@ namespace rdui
         std::vector<std::string> attributes;
         std::unordered_map<std::string, std::vector<std::string>> part_attributes;
         std::function<void(const LayoutElement&, Widget&, ViewBuildResult&, const std::string&, const ViewBuildContext*)> apply_attributes;
-        std::function<void(const LayoutElement&, Widget&, const ViewScopeContext&,
-                           ViewBuildResult&, const std::string&)> validate_composition;
+        std::function<void(const LayoutElement&, Widget&, const ViewScopeContext&, ViewBuildResult&, const std::string&)> validate_composition;
         std::vector<ActionEventKind> supported_actions;
         std::function<std::optional<Widget*>(const LayoutElement&, Widget&, ViewBuildResult&, const std::string&)> child_container;
         std::vector<WidgetState> produced_states;
         std::vector<CompositePartContract> composite_parts;
         bool labelable = false;
         ViewTextContent text_content = ViewTextContent::Unsupported;
-        std::function<std::unique_ptr<Widget>(TextValue)> create_text_child;
-        std::function<void(std::string, Widget&, ViewBuildResult&, const std::string&,
-                           const ViewBuildContext*, std::size_t)> apply_text;
+        std::function<std::unique_ptr<Widget>(TextSource)> create_text_child;
+        std::function<void(std::string, Widget&, ViewBuildResult&, const std::string&, const ViewBuildContext*, std::size_t)> apply_text;
         std::vector<InlineContentKind> accepted_inline_content;
-        std::function<void(InlineContent, Widget&)> apply_inline_content;
+        std::function<void(TextSource, Widget&)> apply_inline_content;
         std::unordered_map<std::string, ScopedInlineContentContract> scoped_inline_content;
         bool scoped_only = false;
     };
@@ -325,8 +327,7 @@ namespace rdui
             }
 
             template<typename PartT, typename OwnerT, typename SlotT>
-            WidgetContractBuilder& part(std::string path, WidgetRef<SlotT> OwnerT::* slot,
-                                        bool eager = true)
+            WidgetContractBuilder& part(std::string path, WidgetRef<SlotT> OwnerT::* slot, bool eager = true)
             {
                 static_assert(std::is_same_v<OwnerT, WidgetT>);
                 CompositePartContract part = detail::makeWidgetPart<PartT>(std::move(path), slot);
@@ -336,8 +337,7 @@ namespace rdui
             }
 
             template<typename OwnerT, typename PartT>
-            WidgetContractBuilder& part(std::string path, WidgetRef<PartT> OwnerT::* slot,
-                                        bool eager = true)
+            WidgetContractBuilder& part(std::string path, WidgetRef<PartT> OwnerT::* slot, bool eager = true)
             {
                 return part<PartT>(std::move(path), slot, eager);
             }
@@ -352,9 +352,9 @@ namespace rdui
             WidgetContractBuilder& textChildren(CreateT create)
             {
                 mContract.text_content = ViewTextContent::Children;
-                mContract.create_text_child = [create = std::move(create)](TextValue text) -> std::unique_ptr<Widget>
+                mContract.create_text_child = [create = std::move(create)](TextSource content) -> std::unique_ptr<Widget>
                 {
-                    return create(std::move(text));
+                    return create(std::move(content));
                 };
                 return *this;
             }
@@ -377,7 +377,7 @@ namespace rdui
             {
                 mContract.text_content = ViewTextContent::Inline;
                 mContract.accepted_inline_content.assign(accepted.begin(), accepted.end());
-                mContract.apply_inline_content = [apply = std::move(apply)](InlineContent content, Widget& widget)
+                mContract.apply_inline_content = [apply = std::move(apply)](TextSource content, Widget& widget)
                 {
                     apply(std::move(content), static_cast<WidgetT&>(widget));
                 };
@@ -385,19 +385,16 @@ namespace rdui
             }
 
             template<typename ApplyT>
-            WidgetContractBuilder& scopedInlineContent(std::string element,
-                                                       std::initializer_list<InlineContentKind> accepted,
-                                                       ApplyT apply)
+            WidgetContractBuilder& scopedInlineContent(std::string element, std::initializer_list<InlineContentKind> accepted, ApplyT apply)
             {
                 ScopedInlineContentContract contract;
                 contract.element = std::move(element);
                 contract.accepted.assign(accepted.begin(), accepted.end());
-                contract.apply = [apply = std::move(apply)](InlineContent content, Widget& widget,
-                                                             ViewBuildResult& result, const std::string& source,
-                                                             std::size_t line, std::size_t column) -> Widget*
+                contract.apply = [apply = std::move(apply)](TextSource content, Widget& widget,
+                                                            ViewBuildResult& result, const std::string& source,
+                                                            std::size_t line, std::size_t column) -> Widget*
                 {
-                    return apply(std::move(content), static_cast<WidgetT&>(widget), result,
-                                 source, line, column);
+                    return apply(std::move(content), static_cast<WidgetT&>(widget), result, source, line, column);
                 };
                 mContract.scoped_inline_content.emplace(schemaNameKey(contract.element), std::move(contract));
                 return *this;
@@ -450,8 +447,7 @@ namespace rdui
             }
 
         private:
-            using Validator = std::function<void(const LayoutElement&, WidgetT&, ViewBuildResult&,
-                                                 const std::string&, const ViewBuildContext*)>;
+            using Validator = std::function<void(const LayoutElement&, WidgetT&, ViewBuildResult&, const std::string&, const ViewBuildContext*)>;
             struct ChildContainer
             {
                 std::string name;
@@ -472,8 +468,7 @@ namespace rdui
     }
 
     const WidgetContract* findWidgetContract(const std::string& element);
-    const CompositePartContract* findCompositePartContract(const WidgetContract& widget,
-                                                           const std::vector<std::string>& parts);
+    const CompositePartContract* findCompositePartContract(const WidgetContract& widget, const std::vector<std::string>& parts);
     bool producesState(const WidgetContract& widget, WidgetState state);
     bool producesState(const CompositePartContract& part, WidgetState state);
     const char* actionAttribute(ActionEventKind kind);
@@ -495,8 +490,10 @@ namespace rdui
         Widget* instantiateCompositePart(Widget& owner, const WidgetContract& contract, const std::string& path);
     }
 
-    TextValue localizedViewText(std::string value, ViewBuildResult& result, const std::string& source,
-                                const ViewBuildContext* context, std::size_t line = 0);
+    TextSource localizedViewText(std::string value, ViewBuildResult& result,
+                                 const std::string& source,
+                                 const ViewBuildContext* context,
+                                 std::size_t line = 0);
     void validateViewAttributes(const LayoutElement& element, const std::vector<std::string>& widget_attributes, ViewBuildResult& result, const std::string& source);
     void applyCommonViewAttributes(const LayoutElement& element, Widget& widget, ViewBuildResult& result,
                                    const std::string& source,

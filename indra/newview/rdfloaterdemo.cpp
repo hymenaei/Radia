@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <iterator>
 #include <map>
+#include <tuple>
 #include <utility>
 
 namespace rdui::viewer
@@ -26,8 +27,7 @@ namespace rdui::viewer
                     mState.value = value;
                     mState.validation = value ? ValueValidation::valid() : ValueValidation::invalid();
                     const auto observers = mObservers;
-                    for (const auto& [id, observer] : observers)
-                        if (mObservers.find(id) != mObservers.end()) observer(mState);
+                    for (const auto& [id, observer] : observers) if (mObservers.find(id) != mObservers.end()) observer(mState);
                 }
 
                 ValueBindingSubscription observe(Observer observer) override
@@ -53,11 +53,10 @@ namespace rdui::viewer
     {
         runtime.registerFloater("floater-demo", [&runtime](System& system)
         {
-            return std::make_unique<FloaterDemo>(
-                system,
-                [&runtime] { runtime.requestReload(); },
-                [] { return gSavedSettings.getBOOL("RduiAuthoringMode"); },
-                [](bool enabled) { gSavedSettings.setBOOL("RduiAuthoringMode", enabled); });
+            return std::make_unique<FloaterDemo>(system,
+                                                 [&runtime] { runtime.requestReload(); },
+                                                 [] { return gSavedSettings.getBOOL("RduiAuthoringMode"); },
+                                                 [](bool enabled) { gSavedSettings.setBOOL("RduiAuthoringMode", enabled); });
         });
     }
 
@@ -82,13 +81,11 @@ namespace rdui::viewer
         binder.provideValue("demo-switch-enabled", mDemoSwitchBinding);
         binder.onClick("press", [this]
         {
-            if (mStatus) mStatus->setText(mSystem.localized("floater_demo.clicked"));
+            if (mStatus) mStatus->setContent(mSystem.localized("demo.clicked"));
         });
         binder.onChange("switch-changed", [this](const ChangeActionEvent& event)
         {
-            if (mStatus)
-                mStatus->setText(mSystem.localized(
-                    event.checked ? "floater_demo.switch_on" : "floater_demo.switch_off"));
+            if (mStatus) mStatus->setContent(mSystem.localized(event.checked ? "demo.switchOn" : "demo.switchOff"));
         });
         binder.onClick("previous-language", [this] { selectRelativeLanguage(-1); });
         binder.onClick("next-language", [this] { selectRelativeLanguage(1); });
@@ -113,17 +110,20 @@ namespace rdui::viewer
 
     void FloaterDemo::selectRelativeLanguage(int direction)
     {
-        const std::vector<LanguageInfo>& languages = mSystem.languages();
-        if (languages.size() <= 1 || direction == 0) return;
-        const auto current = std::find_if(languages.begin(), languages.end(), [this](const LanguageInfo& language)
+        std::vector<LocaleInfo> locales = mSystem.locales();
+        std::sort(locales.begin(), locales.end(),
+                  [](const LocaleInfo& left, const LocaleInfo& right)
+                  {
+                      return std::tie(left.name, left.id) < std::tie(right.name, right.id);
+                  });
+        if (locales.size() <= 1 || direction == 0) return;
+        const auto current = std::find_if(locales.begin(), locales.end(), [this](const LocaleInfo& locale)
         {
-            return language.id == mSystem.activeLocale();
+            return locale.id == mSystem.activeLocale();
         });
-        const std::size_t index = current == languages.end() ? 0
-                                                             : static_cast<std::size_t>(std::distance(languages.begin(), current));
-        const std::size_t next = direction < 0 ? (index + languages.size() - 1) % languages.size()
-                                               : (index + 1) % languages.size();
-        if (!mSystem.setLocale(languages[next].id)) return;
+        const std::size_t index = current == locales.end() ? 0 : static_cast<std::size_t>(std::distance(locales.begin(), current));
+        const std::size_t next = direction < 0 ? (index + locales.size() - 1) % locales.size() : (index + 1) % locales.size();
+        if (!mSystem.setLocale(locales[next].id)) return;
         refreshLanguageControls();
     }
 
@@ -131,35 +131,33 @@ namespace rdui::viewer
     {
         if (mActiveLanguage)
         {
-            const LanguageInfo* active = mSystem.activeLanguage();
+            const LocaleInfo* active = mSystem.activeLocaleInfo();
             mActiveLanguage->setText(active ? active->name : std::string());
         }
-        const bool disabled = mSystem.languages().size() <= 1;
+        const bool disabled = mSystem.locales().size() <= 1;
         if (mPreviousLanguage) mPreviousLanguage->setDisabled(disabled);
         if (mNextLanguage) mNextLanguage->setDisabled(disabled);
     }
 
     void FloaterDemo::refreshAuthoringModeControl()
     {
-        if (mAuthoringMode && mAuthoringModeGetter)
-            mAuthoringMode->setChecked(mAuthoringModeGetter());
+        if (mAuthoringMode && mAuthoringModeGetter) mAuthoringMode->setChecked(mAuthoringModeGetter());
     }
 
     void FloaterDemo::reportReloadSucceeded()
     {
-        if (mStatus) mStatus->setText(mSystem.localized("floater_demo.reload_succeeded"));
+        if (mStatus) mStatus->setContent(mSystem.localized("demo.reloadSucceeded"));
     }
 
     void FloaterDemo::reportReloadFailed(const DiagnosticResult& diagnostics)
     {
         if (!mStatus) return;
-        std::string message = mSystem.resolveText("floater_demo.reload_failed");
+        std::string message = mSystem.resolveText("demo.reloadFailed");
         if (!diagnostics.errors.empty())
         {
             const Diagnostic& error = diagnostics.errors.front();
             message += ": " + error.code + ": " + error.formatted();
-            if (diagnostics.errors.size() > 1)
-                message += " (+" + std::to_string(diagnostics.errors.size() - 1) + ")";
+            if (diagnostics.errors.size() > 1) message += " (+" + std::to_string(diagnostics.errors.size() - 1) + ")";
         }
         mStatus->setText(std::move(message));
     }

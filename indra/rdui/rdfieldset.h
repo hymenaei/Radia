@@ -33,11 +33,10 @@ namespace rdui
             void onArranged(const Style& style) override;
             Rect paintBounds() const override;
             bool hasLayoutGapBetween(const Widget& previous, const Widget& next) const override;
-            float layoutOverlapBetween(const Widget& previous, const Widget& next,
-                                       const Style& style) const override;
+            float layoutOverlapBetween(const Widget& previous, const Widget& next, const Style& style) const override;
 
         private:
-            Text* setLegendContent(InlineContent content);
+            Text* setLegendContent(TextSource content);
             Rect borderRect() const;
 
             WidgetRef<Text> mLegend;

@@ -86,10 +86,12 @@ namespace tut
         static rdui::SkinGenerationPrepareResult prepareGeneration()
         {
             rdui::ResourceSnapshot resources;
-            resources.add("localization.xml",
-                          "<localizations default=\"en\">"
-                          "<localization id=\"en\" lang=\"English\" direction=\"ltr\"/>"
-                          "</localizations>");
+            resources.add("localization.yaml", R"YAML(defaultLocale: en
+locales:
+  en:
+    name: English
+    strings: {}
+)YAML");
             resources.add("skin.radia", "");
             resources.add("one.xml", "<floater/>");
             resources.add("two.xml", "<floater/>");

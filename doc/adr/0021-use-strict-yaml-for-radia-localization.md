@@ -1,0 +1,3 @@
+# Use strict YAML for Radia localization
+
+Radia localization will use `localization.yaml` as its sole canonical UTF-8 source format, replacing `localization.xml`, because comments and block scalars make large multilingual and rich-text catalogs easier to author than XML or JSON. The loader will accept a strict YAML 1.2 subset with duplicate keys rejected and anchors, aliases, custom tags, merge keys, and implicit non-string localization values forbidden, trading some YAML flexibility for predictable validation and safer future evolution. Catalog text must be NFC-normalized and contain no tabs, NUL, or other low-level control characters; validation rejects violations rather than silently rewriting authored text, while intentional decoded line breaks remain supported.

@@ -428,8 +428,8 @@ namespace rdui::viewer
         }
         if (!localization_layers.empty())
         {
-            result.snapshot.add("localization.xml", localization_layers.back().source);
-            result.snapshot.setLayers("localization.xml", std::move(localization_layers));
+            result.snapshot.add("localization.yaml", localization_layers.back().source);
+            result.snapshot.setLayers("localization.yaml", std::move(localization_layers));
         }
         return result;
     }

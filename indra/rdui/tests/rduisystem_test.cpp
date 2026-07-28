@@ -12,14 +12,27 @@ namespace tut
 {
     namespace
     {
+        const char* EMPTY_LOCALIZATION = R"YAML(defaultLocale: en
+locales:
+  en:
+    name: English
+    strings: {}
+)YAML";
+
+        std::string singleStringLocalization(const std::string& key,
+                                             const std::string& value)
+        {
+            return "defaultLocale: en\nlocales:\n  en:\n    name: English\n"
+                   "    strings:\n      " + key + ": \"" + value + "\"\n";
+        }
+
         rdui::ResourceSnapshot skinSnapshot(
-            std::string localization = "<localizations default=\"en\"><localization id=\"en\" lang=\"English\" direction=\"ltr\"/></localizations>",
+            std::string localization = EMPTY_LOCALIZATION,
             std::string style = {})
         {
-            if (localization.empty())
-                localization = "<localizations default=\"en\"><localization id=\"en\" lang=\"English\" direction=\"ltr\"/></localizations>";
+            if (localization.empty()) localization = EMPTY_LOCALIZATION;
             rdui::ResourceSnapshot snapshot;
-            snapshot.add("localization.xml", std::move(localization));
+            snapshot.add("localization.yaml", std::move(localization));
             snapshot.add("skin.radia", std::move(style));
             return snapshot;
         }
@@ -56,7 +69,7 @@ namespace tut
     void rduisystem_object::test<1>()
     {
         rdui::ResourceSnapshot snapshot = skinSnapshot(
-            "<localizations default=\"en\"><localization id=\"en\" lang=\"English\" direction=\"ltr\"><string id=\"message\">Ready</string></localization></localizations>",
+            singleStringLocalization("message", "Ready"),
             "label { width: 40px; }");
         snapshot.add("view.xml", "<text id=\"message\">message</text>");
         snapshot.add("resources/icons/search.svg", "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0 L10 10\"/></svg>");
@@ -90,13 +103,13 @@ namespace tut
     {
         rdui::System system;
         rdui::SkinGenerationPrepareResult live = rdui::SkinCompiler().prepare(skinSnapshot(
-            "<localizations default=\"en\"><localization id=\"en\" lang=\"English\" direction=\"ltr\"><string id=\"message\">Live</string></localization></localizations>",
+            singleStringLocalization("message", "Live"),
             "label { width: 40px; }"));
         ensure("live generation prepares", live.ok());
         system.publish(live.generation);
 
         const rdui::SkinGenerationPrepareResult rejected = rdui::SkinCompiler().prepare(skinSnapshot(
-            "<localizations>", "label { flow: sideways; width: 90px; }"));
+            "defaultLocale: [", "label { flow: sideways; width: 90px; }"));
         ensure("invalid candidate rejected", !rejected.ok());
         ensure_equals("failed preparation preserves generation", system.generation(), 1ULL);
         ensure_equals("failed preparation preserves localization", system.resolveText("message"), "Live");
@@ -133,7 +146,7 @@ namespace tut
         missing_localization.add("skin.radia", "label { width: 40px; }");
         const rdui::SkinGenerationPrepareResult rejected = rdui::SkinCompiler().prepare(std::move(missing_localization));
         ensure("missing required resource rejects candidate", !rejected.ok());
-        ensure_equals("diagnostic identifies missing resource", rejected.errors.front().source, "localization.xml");
+        ensure_equals("diagnostic identifies missing resource", rejected.errors.front().source, "localization.yaml");
     }
 
     template<> template<>
@@ -149,12 +162,22 @@ namespace tut
     template<> template<>
     void rduisystem_object::test<7>()
     {
-        const std::string multilingual =
-            "<localizations default=\"en\">"
-            "<localization id=\"en\" lang=\"English\" direction=\"ltr\"><string id=\"message\">Ready</string></localization>"
-            "<localization id=\"pt\" lang=\"Português\" direction=\"ltr\"><string id=\"message\">Pronto</string></localization>"
-            "<localization id=\"ar\" lang=\"العربية\" direction=\"rtl\"><string id=\"message\">جاهز</string></localization>"
-            "</localizations>";
+        const std::string multilingual = R"YAML(defaultLocale: en
+locales:
+  en:
+    name: English
+    strings:
+      message: Ready
+  pt:
+    name: Português
+    strings:
+      message: Pronto
+  ar:
+    name: العربية
+    direction: rtl
+    strings:
+      message: جاهز
+)YAML";
         rdui::SkinGenerationPrepareResult prepared = rdui::SkinCompiler().prepare(skinSnapshot(multilingual));
         ensure("multilingual generation prepares", prepared.ok());
 
@@ -163,7 +186,7 @@ namespace tut
         std::unique_ptr<rdui::Surface> surface = system.createSurface(rdui::fixedTextMetrics());
         auto localized = std::make_unique<rdui::Label>();
         rdui::Label* localized_ptr = localized.get();
-        localized->setText(system.localized("message"));
+        localized->setContent(system.localized("message"));
         surface->root().addChild(std::move(localized));
         auto probe = std::make_unique<LocaleProbe>();
         LocaleProbe* probe_ptr = probe.get();
@@ -178,7 +201,7 @@ namespace tut
         ensure_equals("selected locale survives publication", system.activeLocale(), "pt");
 
         rdui::SkinGenerationPrepareResult fallback = rdui::SkinCompiler().prepare(skinSnapshot(
-            "<localizations default=\"en\"><localization id=\"en\" lang=\"English\" direction=\"ltr\"><string id=\"message\">Ready again</string></localization></localizations>"));
+            singleStringLocalization("message", "Ready again")));
         system.publish(fallback.generation);
         ensure_equals("removed locale falls back to default", system.activeLocale(), "en");
         ensure_equals("fallback refreshes localized Widget", localized_ptr->text(), "Ready again");
@@ -189,7 +212,7 @@ namespace tut
     {
         rdui::System system;
         rdui::SkinGenerationPrepareResult live = rdui::SkinCompiler().prepare(skinSnapshot(
-            "<localizations default=\"en\"><localization id=\"en\" lang=\"English\" direction=\"ltr\"><string id=\"message\">Old</string></localization></localizations>",
+            singleStringLocalization("message", "Old"),
             "label { width: 40px; }"));
         system.publish(live.generation);
         std::unique_ptr<rdui::Surface> surface = system.createSurface(rdui::fixedTextMetrics());
@@ -201,7 +224,7 @@ namespace tut
         ensure_equals("existing Surface starts with live stylesheet", styled_ptr->rect().w, 40.f);
 
         rdui::ResourceSnapshot snapshot = skinSnapshot(
-            "<localizations default=\"en\"><localization id=\"en\" lang=\"English\" direction=\"ltr\"><string id=\"message\">New</string></localization></localizations>",
+            singleStringLocalization("message", "New"),
             "label { width: 90px; }");
         snapshot.add("view.xml", "<text>message</text>");
         rdui::SkinGenerationPrepareResult prepared = rdui::SkinCompiler().prepare(std::move(snapshot));
@@ -230,7 +253,7 @@ namespace tut
         system.publish(live.generation);
 
         const rdui::SkinGenerationPrepareResult rejected = rdui::SkinCompiler().prepare(skinSnapshot(
-            "<localizations>", "label { width: 90px; }"));
+            "defaultLocale: [", "label { width: 90px; }"));
         ensure("invalid prepared generation rejects", !rejected.ok());
         ensure_equals("rejected preparation preserves generation", system.generation(), 1ULL);
         ensure_equals("rejected preparation preserves stylesheet", resolvedLabelWidth(system), 40.f);
@@ -252,9 +275,14 @@ namespace tut
     void rduisystem_object::test<11>()
     {
         rdui::ResourceSnapshot snapshot = skinSnapshot(
-            "<localizations default=\"en\"><localization id=\"en\" lang=\"English\" direction=\"ltr\">"
-            "<string id=\"fly.label\">Fly</string></localization></localizations>");
-        snapshot.add("view.xml", "<text>fly.label <kbd binding=\"toggle-fly\"/></text>");
+            R"YAML(defaultLocale: en
+locales:
+  en:
+    name: English
+    strings:
+      fly.label: 'Fly <kbd binding="toggle-fly"/>'
+)YAML");
+        snapshot.add("view.xml", "<text>fly.label</text>");
         rdui::SkinGenerationPrepareResult prepared = rdui::SkinCompiler().prepare(std::move(snapshot));
         ensure("Kbd presentation fixture prepares", prepared.ok());
 

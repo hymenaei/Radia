@@ -13,9 +13,9 @@ namespace rdui
         class ButtonCaption final : public Label
         {
             public:
-                explicit ButtonCaption(TextValue text) : Label("button-caption", {})
+                explicit ButtonCaption(TextSource content) : Label("button-caption", {})
                 {
-                    setText(std::move(text));
+                    setContent(std::move(content));
                 }
         };
     }
@@ -37,28 +37,13 @@ namespace rdui
 
     Icon& Button::setIcon(std::string name)
     {
-        if (!mIcon)
-        {
-            addChild(std::make_unique<Icon>());
-        }
+        if (!mIcon) addChild(std::make_unique<Icon>());
         return mIcon->setName(std::move(name));
     }
 
     Label& Button::setLabel(std::string text)
     {
-        if (!mLabel)
-        {
-            addChild(std::make_unique<ButtonCaption>(TextValue::literal(std::string())));
-        }
-        return mLabel->setText(std::move(text));
-    }
-
-    Label& Button::setLabel(TextValue text)
-    {
-        if (!mLabel)
-        {
-            addChild(std::make_unique<ButtonCaption>(TextValue::literal(std::string())));
-        }
+        if (!mLabel) addChild(std::make_unique<ButtonCaption>(TextSource{}));
         return mLabel->setText(std::move(text));
     }
 
@@ -79,8 +64,10 @@ namespace rdui
                 ActionEventKind::MouseMove,
                 ActionEventKind::LongClick,
                 ActionEventKind::ContextMenu})
-            .textChildren([](TextValue text) { return std::make_unique<ButtonCaption>(std::move(text)); })
+            .textChildren([](TextSource content)
+            {
+                return std::make_unique<ButtonCaption>(std::move(content));
+            })
             .build();
     }
-
 }

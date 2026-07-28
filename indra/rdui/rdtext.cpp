@@ -18,29 +18,33 @@ namespace rdui
         return setContent(InlineContent::text(std::move(text)));
     }
 
-    Text& Text::setText(TextValue text)
-    {
-        return setContent(InlineContent::text(std::move(text)));
-    }
-
-    Text& Text::setContent(InlineContent content)
+    Text& Text::setContent(TextSource content)
     {
         mText.setContent(std::move(content));
+        if (const System* system = attachedSystem())
+            onLocaleChanged(*system);
         invalidateMeasure();
         return *this;
     }
 
+    Text& Text::setContent(InlineContent content)
+    {
+        return setContent(TextSource::literal(std::move(content)));
+    }
+
     void Text::onLocaleChanged(const System& system)
     {
-        mText.resolveLocalized([&system](const std::string& key) { return system.resolveText(key); });
+        mText.resolveLocalized([&system](const LocalizationRequest& request)
+        {
+            return system.resolveContent(request);
+        });
         mText.resolveKeybindings([&system](const std::string& key) { return system.resolveKeybinding(key); });
         invalidateMeasure();
     }
 
     bool Text::onKeybindingsChanged(const System& system)
     {
-        const bool changed = mText.resolveKeybindings(
-            [&system](const std::string& key) { return system.resolveKeybinding(key); });
+        const bool changed = mText.resolveKeybindings([&system](const std::string& key) { return system.resolveKeybinding(key); });
         if (changed) invalidateMeasure();
         return changed;
     }
@@ -59,9 +63,8 @@ namespace rdui
     WidgetContract detail::textContract()
     {
         return defineWidget<Text>(Text::ELEMENT)
-            .inlineContent({InlineContentKind::B, InlineContentKind::I, InlineContentKind::S,
-                            InlineContentKind::Kbd, InlineContentKind::Br},
-                [](InlineContent content, Text& text) { text.setContent(std::move(content)); })
+            .inlineContent({InlineContentKind::B, InlineContentKind::I, InlineContentKind::S, InlineContentKind::Kbd, InlineContentKind::Br},
+                           [](TextSource content, Text& text) { text.setContent(std::move(content)); })
             .build();
     }
 }

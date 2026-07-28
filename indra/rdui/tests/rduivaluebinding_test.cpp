@@ -62,12 +62,14 @@ namespace tut
         ensure("omitted validation has no message", clean.validationMessage() == nullptr);
 
         rdui::ValueState<int> invalid{
-            5, 4, rdui::ValueValidation::invalid(rdui::TextValue::literal("Not allowed"))};
+            5, 4, rdui::ValueValidation::invalid(
+                rdui::TextSource::text("Not allowed"))};
         ensure("changed value is dirty", invalid.dirty());
         ensure("invalid status is retained",
                invalid.validationStatus() == rdui::ValueValidationStatus::Invalid);
         ensure_equals("dynamic validation message is retained",
-                      invalid.validationMessage()->value(), std::string("Not allowed"));
+                      invalid.validationMessage()->materialize().plainText(),
+                      std::string("Not allowed"));
 
         invalid.validation = rdui::ValueValidation::pending();
         ensure("pending validation is distinct",

@@ -2,6 +2,7 @@
 #define LL_RDUI_VALUE_BINDING_H
 
 #include "rduilocalization.h"
+#include "rduitextsource.h"
 #include <functional>
 #include <memory>
 #include <optional>
@@ -22,14 +23,14 @@ namespace rdui
     struct ValueValidation
     {
         ValueValidationStatus status = ValueValidationStatus::Valid;
-        std::optional<TextValue> message;
+        std::optional<TextSource> message;
 
         static ValueValidation valid() { return {}; }
-        static ValueValidation invalid(std::optional<TextValue> message = std::nullopt)
+        static ValueValidation invalid(std::optional<TextSource> message = std::nullopt)
         {
             return {ValueValidationStatus::Invalid, std::move(message)};
         }
-        static ValueValidation pending(std::optional<TextValue> message = std::nullopt)
+        static ValueValidation pending(std::optional<TextSource> message = std::nullopt)
         {
             return {ValueValidationStatus::Pending, std::move(message)};
         }
@@ -47,7 +48,7 @@ namespace rdui
         {
             return validation ? validation->status : ValueValidationStatus::Valid;
         }
-        const TextValue* validationMessage() const
+        const TextSource* validationMessage() const
         {
             return validation && validation->message ? &*validation->message : nullptr;
         }
@@ -57,15 +58,13 @@ namespace rdui
     {
         public:
             ValueBindingSubscription() = default;
-            explicit ValueBindingSubscription(std::function<void()> disconnect)
-                : mDisconnect(std::move(disconnect)) {}
+            explicit ValueBindingSubscription(std::function<void()> disconnect) : mDisconnect(std::move(disconnect)) {}
             ~ValueBindingSubscription() { reset(); }
 
             ValueBindingSubscription(const ValueBindingSubscription&) = delete;
             ValueBindingSubscription& operator=(const ValueBindingSubscription&) = delete;
 
-            ValueBindingSubscription(ValueBindingSubscription&& other) noexcept
-                : mDisconnect(std::exchange(other.mDisconnect, {})) {}
+            ValueBindingSubscription(ValueBindingSubscription&& other) noexcept : mDisconnect(std::exchange(other.mDisconnect, {})) {}
             ValueBindingSubscription& operator=(ValueBindingSubscription&& other) noexcept
             {
                 if (this != &other)

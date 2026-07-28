@@ -15,7 +15,7 @@ namespace rdui
     {
         bool dirty = false;
         ValueValidationStatus validation = ValueValidationStatus::Valid;
-        std::optional<TextValue> message;
+        std::optional<TextSource> message;
     };
 
     class ValueControl : public Widget

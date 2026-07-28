@@ -31,6 +31,10 @@ target_sources(rdui
     rduilayoutresourcecompiler.cpp
     rduilayoutresourcecompiler.h
     rduilocalization.cpp
+    rduilocalizationcompiler.cpp
+    rduilocalizationinternal.h
+    rduilocalizationrichstring.cpp
+    rduilocalizationyaml.cpp
     rduiwidget.cpp
     rduipath.cpp
     rduiopenglpaintcontext.cpp
@@ -49,6 +53,7 @@ target_sources(rdui
     rduisystem.cpp
     rduitextmetrics.cpp
     rduitexthost.cpp
+    rduitextsource.cpp
     rduisvg.cpp
     rduitessellator.cpp
     rduiviewcontract.cpp
@@ -78,6 +83,7 @@ target_sources(rdui
     rduidiagnostic.h
     rduievent.h
     rduilocalization.h
+    rduilocalizationvalue.h
     rduipaintcontext.h
     rduiwidget.h
     rduiresourceprovider.h
@@ -90,6 +96,7 @@ target_sources(rdui
     rduisystem.h
     rduitextmetrics.h
     rduitexthost.h
+    rduitextsource.h
     rduitypes.h
     rduivaluebinding.h
     rduivaluecontrol.h
@@ -104,6 +111,8 @@ target_link_libraries(rdui
         llmath
         llrender
         llxml
+        ll::icu
+        ll::yaml-cpp
         )
 
 target_precompile_headers(rdui REUSE_FROM llprecompiled)

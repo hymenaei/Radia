@@ -63,7 +63,7 @@ namespace rdui
 
             if (node.kind() == InlineContentKind::Text)
             {
-                const std::string& value = node.value().value();
+                const std::string& value = node.value();
                 if (!value.empty()) lines.back().push_back({value, style, metrics.measureText(value, style)});
                 return;
             }
@@ -85,10 +85,8 @@ namespace rdui
                     key_run.value = key;
                     key_run.style = key_style;
                     key_run.text_size = metrics.measureText(key, key_style);
-                    key_run.box_size = {key_run.text_size.x + key_style.padding.horizontal(),
-                                        key_run.text_size.y + key_style.padding.vertical()};
-                    key_run.size = {key_run.box_size.x + key_style.margin.horizontal(),
-                                    key_run.box_size.y + key_style.margin.vertical()};
+                    key_run.box_size = {key_run.text_size.x + key_style.padding.horizontal(), key_run.text_size.y + key_style.padding.vertical()};
+                    key_run.size = {key_run.box_size.x + key_style.margin.horizontal(), key_run.box_size.y + key_style.margin.vertical()};
                     if (!run.keys.empty())
                     {
                         content_width += gap;
@@ -100,15 +98,12 @@ namespace rdui
                     run.keys.push_back(std::move(key_run));
                 }
                 if (run.keys.empty()) return;
-                run.box_size = {content_width + run.style.padding.horizontal(),
-                                content_height + run.style.padding.vertical()};
-                run.size = {run.box_size.x + run.style.margin.horizontal(),
-                            run.box_size.y + run.style.margin.vertical()};
+                run.box_size = {content_width + run.style.padding.horizontal(), content_height + run.style.padding.vertical()};
+                run.size = {run.box_size.x + run.style.margin.horizontal(), run.box_size.y + run.style.margin.vertical()};
                 lines.back().push_back(std::move(run));
                 return;
             }
-            for (const InlineContentNode& child : node.children())
-                appendNode(child, style, metrics, theme, owner, lines);
+            for (const InlineContentNode& child : node.children()) appendNode(child, style, metrics, theme, owner, lines);
         }
 
         std::vector<TextLine> layoutLines(const InlineContent& content, const Style& style,
@@ -116,8 +111,7 @@ namespace rdui
                                           const Widget& owner)
         {
             std::vector<TextLine> lines(1);
-            for (const InlineContentNode& node : content.nodes())
-                appendNode(node, style, metrics, theme, owner, lines);
+            for (const InlineContentNode& node : content.nodes()) appendNode(node, style, metrics, theme, owner, lines);
             return lines;
         }
 
@@ -132,8 +126,7 @@ namespace rdui
             return size;
         }
 
-        std::vector<TextRun> visualRuns(const TextLine& line, LayoutDirection direction,
-                                        const TextMetrics& metrics)
+        std::vector<TextRun> visualRuns(const TextLine& line, LayoutDirection direction, const TextMetrics& metrics)
         {
             if (line.size() < 2) return line;
 
@@ -151,9 +144,7 @@ namespace rdui
                 }
                 ranges.emplace_back(begin, logical.size());
             }
-            if (logical.empty()
-                || logical.size() > static_cast<std::size_t>(std::numeric_limits<FriBidiStrIndex>::max()))
-                return line;
+            if (logical.empty() || logical.size() > static_cast<std::size_t>(std::numeric_limits<FriBidiStrIndex>::max())) return line;
 
             std::vector<FriBidiStrIndex> logical_to_visual(logical.size());
             std::vector<FriBidiLevel> levels(logical.size());
@@ -193,8 +184,7 @@ namespace rdui
                         wide.push_back(static_cast<llwchar>(logical[offset]));
                     }
                     std::string value = wstring_to_utf8str(wide);
-                    segments.push_back({visual_start,
-                        {value, line[run_index].style, metrics.measureText(value, line[run_index].style)}});
+                    segments.push_back({visual_start, {value, line[run_index].style, metrics.measureText(value, line[run_index].style)}});
                     begin = end;
                 }
             }
@@ -220,7 +210,7 @@ namespace rdui
         {
             if (node.kind() == InlineContentKind::Text)
             {
-                text += node.value().value();
+                text += node.value();
                 return;
             }
             if (node.kind() == InlineContentKind::Kbd)
@@ -275,22 +265,24 @@ namespace rdui
         }
     }
 
-    void TextHost::setContent(InlineContent content)
+    void TextHost::setContent(TextSource content)
     {
-        mContent = std::move(content);
-        mHasKeybindings = std::any_of(mContent.nodes().begin(), mContent.nodes().end(),
-                                      [](const InlineContentNode& node) { return hasKeybinding(node); });
+        mSource = std::move(content);
+        mContent = mSource.materialize();
+        mHasKeybindings = std::any_of(mContent.nodes().begin(), mContent.nodes().end(), [](const InlineContentNode& node) { return hasKeybinding(node); });
         updatePlainText();
     }
 
-    void TextHost::resolveLocalized(const std::function<std::string(const std::string&)>& resolve)
+    void TextHost::resolveLocalized(const std::function<InlineContent(const LocalizationRequest&)>& resolve)
     {
-        mContent = mContent.resolveLocalized(resolve);
+        mContent = mSource.materialize(resolve);
+        mHasKeybindings = std::any_of(
+            mContent.nodes().begin(), mContent.nodes().end(),
+            [](const InlineContentNode& node) { return hasKeybinding(node); });
         updatePlainText();
     }
 
-    bool TextHost::resolveKeybindings(
-        const std::function<KeybindingPresentation(const std::string&)>& resolve)
+    bool TextHost::resolveKeybindings(const std::function<KeybindingPresentation(const std::string&)>& resolve)
     {
         if (!mHasKeybindings) return false;
         const std::string previous = keybindingSignature(mContent);
@@ -305,8 +297,7 @@ namespace rdui
         for (const InlineContentNode& node : mContent.nodes()) appendPlainText(node, mPlainText);
     }
 
-    Vec2 TextHost::measure(const TextMetrics& metrics, const Style& style,
-                           const StyleSheet& theme, const Widget& owner) const
+    Vec2 TextHost::measure(const TextMetrics& metrics, const Style& style, const StyleSheet& theme, const Widget& owner) const
     {
         const float fallback_height = metrics.measureText({}, style).y;
         Vec2 result;
@@ -319,8 +310,7 @@ namespace rdui
         return result;
     }
 
-    void TextHost::paint(PaintContext& context, const Rect& rect, const Style& style,
-                         const StyleSheet* theme, const Widget& owner) const
+    void TextHost::paint(PaintContext& context, const Rect& rect, const Style& style, const StyleSheet* theme, const Widget& owner) const
     {
         const std::vector<TextLine> lines = layoutLines(mContent, style, context, theme, owner);
         const float fallback_height = context.measureText({}, style).y;

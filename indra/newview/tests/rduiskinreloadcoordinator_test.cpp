@@ -22,10 +22,12 @@ namespace tut
                                             std::string style = {})
         {
             rdui::ResourceSnapshot snapshot;
-            snapshot.add("localization.xml",
-                         "<localizations default=\"en\">"
-                         "<localization id=\"en\" lang=\"English\" direction=\"ltr\"/>"
-                         "</localizations>");
+            snapshot.add("localization.yaml", R"YAML(defaultLocale: en
+locales:
+  en:
+    name: English
+    strings: {}
+)YAML");
             snapshot.add("skin.radia", std::move(style));
             snapshot.add("view.xml", std::move(view));
             return snapshot;
@@ -193,7 +195,7 @@ namespace tut
         const int commits = document.commits;
 
         snapshots.snapshot = skinSnapshot();
-        snapshots.snapshot.add("localization.xml", "<localizations>");
+        snapshots.snapshot.add("localization.yaml", "defaultLocale: [");
         coordinator.request();
         const auto rejected = update();
 

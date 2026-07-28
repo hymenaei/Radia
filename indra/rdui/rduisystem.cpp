@@ -9,8 +9,7 @@ namespace rdui
 {
     namespace
     {
-        bool equalReloadInputs(const ResourceSnapshot& left, const ResourceSnapshot& right,
-                               const ResourceDependencyMap& dependencies)
+        bool equalReloadInputs(const ResourceSnapshot& left, const ResourceSnapshot& right, const ResourceDependencyMap& dependencies)
         {
             if (left.resources() != right.resources()) return false;
             const auto& left_resources = left.layeredResources();
@@ -67,28 +66,25 @@ namespace rdui
 
     System::~System() = default;
 
-    void System::publish(std::shared_ptr<const SkinGeneration> generation,
-                         const std::function<void()>& commit_documents)
+    void System::publish(std::shared_ptr<const SkinGeneration> generation, const std::function<void()>& commit_documents)
     {
         if (!generation) return;
 
         const std::string previous_locale = mActiveLocale;
         mSkinGeneration = std::move(generation);
-        mActiveLocale = mSkinGeneration->containsLocale(previous_locale)
-            ? previous_locale : mSkinGeneration->defaultLocale();
+        mActiveLocale = mSkinGeneration->containsLocale(previous_locale) ? previous_locale : mSkinGeneration->defaultLocale();
         ++mGenerationNumber;
         ++mLocaleGeneration;
 
-        for (Surface* surface : mSurfaces)
-            if (surface) surface->generationChanged(styleSheet());
+        for (Surface* surface : mSurfaces) if (surface) surface->generationChanged(styleSheet());
 
         if (commit_documents) commit_documents();
         notifyLocaleChanged();
     }
 
-    const std::vector<LanguageInfo>& System::languages() const
+    std::vector<LocaleInfo> System::locales() const
     {
-        return mSkinGeneration->languages();
+        return mSkinGeneration->locales();
     }
 
     const std::string& System::defaultLocale() const
@@ -96,9 +92,9 @@ namespace rdui
         return mSkinGeneration->defaultLocale();
     }
 
-    const LanguageInfo* System::activeLanguage() const
+    const LocaleInfo* System::activeLocaleInfo() const
     {
-        return mSkinGeneration->language(mActiveLocale);
+        return mSkinGeneration->locale(mActiveLocale);
     }
 
     bool System::hasLocalizationKey(const std::string& id) const
@@ -108,13 +104,28 @@ namespace rdui
 
     std::string System::resolveText(const std::string& id) const
     {
-        return mSkinGeneration->resolveText(mActiveLocale, id);
+        return resolveText(LocalizationRequest::text(id));
     }
 
-    TextValue System::localized(std::string id) const
+    std::string System::resolveText(const LocalizationRequest& request) const
     {
-        std::string value = resolveText(id);
-        return TextValue::fromLocalization(std::move(id), std::move(value));
+        return mSkinGeneration->resolveText(mActiveLocale, request);
+    }
+
+    InlineContent System::resolveContent(const LocalizationRequest& request) const
+    {
+        return mSkinGeneration->resolveContent(mActiveLocale, request);
+    }
+
+    TextSource System::localized(std::string id) const
+    {
+        return localized(LocalizationRequest::text(std::move(id)));
+    }
+
+    TextSource System::localized(LocalizationRequest request) const
+    {
+        InlineContent content = resolveContent(request);
+        return TextSource::localized(std::move(request), std::move(content));
     }
 
     const StyleSheet& System::styleSheet() const
@@ -122,8 +133,7 @@ namespace rdui
         return mSkinGeneration->styleSheet();
     }
 
-    bool System::sameReloadInputs(const ResourceSnapshot& left,
-                                  const ResourceSnapshot& right) const
+    bool System::sameReloadInputs(const ResourceSnapshot& left, const ResourceSnapshot& right) const
     {
         return equalReloadInputs(left, right, styleSheet().dependencies());
     }
@@ -148,8 +158,7 @@ namespace rdui
         return true;
     }
 
-    void System::setKeybindingResolver(
-        std::function<KeybindingPresentation(const std::string&)> resolver)
+    void System::setKeybindingResolver(std::function<KeybindingPresentation(const std::string&)> resolver)
     {
         mKeybindingResolver = std::move(resolver);
         refreshKeybindings();
@@ -162,8 +171,7 @@ namespace rdui
 
     void System::refreshKeybindings()
     {
-        for (Surface* surface : mSurfaces)
-            if (surface) surface->keybindingsChanged();
+        for (Surface* surface : mSurfaces) if (surface) surface->keybindingsChanged();
     }
 
     void System::registerSurface(Surface& surface) const
@@ -178,8 +186,7 @@ namespace rdui
 
     void System::notifyLocaleChanged()
     {
-        for (Surface* surface : mSurfaces)
-            if (surface) surface->localeChanged();
+        for (Surface* surface : mSurfaces) if (surface) surface->localeChanged();
         if (mLocaleChangedHandler) mLocaleChangedHandler(mActiveLocale);
     }
 

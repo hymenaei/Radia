@@ -18,13 +18,12 @@ namespace rdui
             explicit Text(std::string text = {});
 
             Text& setText(std::string text);
-            Text& setText(TextValue text);
+            Text& setContent(TextSource content);
             Text& setContent(InlineContent content);
             const std::string& text() const { return mText.plainText(); }
             const InlineContent& content() const { return mText.content(); }
 
-            Vec2 intrinsicSize(const StyleSheet& theme, const Style& style,
-                               const TextMetrics& text_metrics) const override;
+            Vec2 intrinsicSize(const StyleSheet& theme, const Style& style, const TextMetrics& text_metrics) const override;
             void paint(PaintContext& context, const Style& style, float scale) const override;
 
         protected:

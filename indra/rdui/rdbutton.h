@@ -21,7 +21,6 @@ namespace rdui
 
             Icon& setIcon(std::string name);
             Label& setLabel(std::string text);
-            Label& setLabel(TextValue text);
             Icon* icon() { return mIcon.get(); }
             const Icon* icon() const { return mIcon.get(); }
             Label* label() { return mLabel.get(); }

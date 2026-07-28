@@ -1,0 +1,81 @@
+defaultLocale: en
+
+locales:
+  en:
+    name: English
+    strings:
+      demo.title: "RDUI Demo"
+      demo.status: "Ready"
+      demo.inlineHeading: "Inline content"
+      demo.inlineContent: 'Plain Text run <b>Bold B run</b><br/><i>Italic I run</i> <s>Strike S run</s><br/>Fly shortcut <kbd binding="toggle-fly"/>'
+      demo.press: "Press"
+      demo.clicked: "Button clicked; event consumed"
+      demo.switchOn: "Switch on"
+      demo.switchOff: "Switch off"
+      demo.switch: "Demo switch"
+      demo.settings: "Settings"
+      demo.switchHint: "This setting demonstrates a bound value."
+      demo.switchError: "The demo switch must remain enabled."
+      demo.disabled: "Disabled example"
+      demo.language: "Language"
+      demo.previous: "Previous"
+      demo.next: "Next"
+      demo.reloadNow: "Reload now"
+      demo.automaticWatching: "Automatic watching"
+      demo.automaticWatchingHint: "Reload resources automatically when files change."
+      demo.automaticWatchingError: "Automatic watching is unavailable."
+      demo.reloadSucceeded: "Reload complete"
+      demo.reloadFailed: "Reload failed; last valid UI kept"
+
+  pt:
+    name: Português
+    strings:
+      demo.title: "RDUI Demo"
+      demo.status: "Pronto"
+      demo.inlineHeading: "Conteúdo em linha"
+      demo.inlineContent: 'Trecho Text normal <b>Trecho B em negrito</b><br/><i>Trecho I em itálico</i> <s>Trecho S rasurado</s><br/>Atalho de voo <kbd binding="toggle-fly"/>'
+      demo.press: "Pressione"
+      demo.clicked: "Botão pressionado; evento consumido"
+      demo.switchOn: "Interruptor ligado"
+      demo.switchOff: "Interruptor desligado"
+      demo.switch: "Interruptor de demonstração"
+      demo.settings: "Definições"
+      demo.switchHint: "Esta definição demonstra um valor associado."
+      demo.switchError: "O interruptor de demonstração deve permanecer ligado."
+      demo.disabled: "Exemplo desativado"
+      demo.language: "Idioma"
+      demo.previous: "Anterior"
+      demo.next: "Seguinte"
+      demo.reloadNow: "Recarregar agora"
+      demo.automaticWatching: "Monitorização automática"
+      demo.automaticWatchingHint: "Recarrega os recursos automaticamente quando os ficheiros mudam."
+      demo.automaticWatchingError: "A monitorização automática não está disponível."
+      demo.reloadSucceeded: "Recarregamento concluído"
+      demo.reloadFailed: "Falha ao recarregar; a última interface válida foi mantida"
+
+  ar:
+    name: العربية
+    direction: rtl
+    strings:
+      demo.title: "عرض RDUI التجريبي"
+      demo.status: "جاهز"
+      demo.inlineHeading: "محتوى مضمّن"
+      demo.inlineContent: 'نص Text عادي <b>نص B عريض</b><br/><i>نص I مائل</i> <s>نص S مشطوب</s><br/>اختصار الطيران <kbd binding="toggle-fly"/>'
+      demo.press: "اضغط"
+      demo.clicked: "تم النقر على الزر؛ تمت معالجة الحدث"
+      demo.switchOn: "المفتاح مفعّل"
+      demo.switchOff: "المفتاح متوقف"
+      demo.switch: "مفتاح تجريبي"
+      demo.settings: "الإعدادات"
+      demo.switchHint: "يوضح هذا الإعداد قيمة مرتبطة."
+      demo.switchError: "يجب أن يظل المفتاح التجريبي مفعّلًا."
+      demo.disabled: "مثال معطّل"
+      demo.language: "اللغة"
+      demo.previous: "السابق"
+      demo.next: "التالي"
+      demo.reloadNow: "إعادة التحميل الآن"
+      demo.automaticWatching: "المراقبة التلقائية"
+      demo.automaticWatchingHint: "أعد تحميل الموارد تلقائيًا عند تغيّر الملفات."
+      demo.automaticWatchingError: "المراقبة التلقائية غير متاحة."
+      demo.reloadSucceeded: "اكتملت إعادة التحميل"
+      demo.reloadFailed: "فشلت إعادة التحميل؛ تم الاحتفاظ بآخر واجهة صالحة"

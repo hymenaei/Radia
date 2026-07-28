@@ -33,12 +33,13 @@ namespace tut
                    "}\n";
         }
 
-        const std::string LOCALIZATION =
-            "<localizations default=\"en\">"
-            "<localization id=\"en\" lang=\"English\" direction=\"ltr\">"
-            "<string id=\"title\">Base</string>"
-            "</localization>"
-            "</localizations>";
+        const std::string LOCALIZATION = R"YAML(defaultLocale: en
+locales:
+  en:
+    name: English
+    strings:
+      title: Base
+)YAML";
     }
 
     struct skin_resolver
@@ -63,10 +64,10 @@ namespace tut
             write(skin / "manifest.json", manifest(id, "null",
                 "\"stylesheet\": \"rdui/skin.radia\","
                 "\"layouts\": \"rdui/xui\","
-                "\"localization\": \"rdui/localization.xml\","
+                "\"localization\": \"rdui/localization.yaml\","
                 "\"assets\": \"rdui/resources\""));
             write(skin / "rdui/skin.radia", "floater { width: 300px; }");
-            write(skin / "rdui/localization.xml", LOCALIZATION);
+            write(skin / "rdui/localization.yaml", LOCALIZATION);
             write(skin / "rdui/xui/base.xml", "<floater/>");
             std::filesystem::create_directories(skin / "rdui/resources");
             return skin;
@@ -89,12 +90,15 @@ namespace tut
         write(derived / "manifest.json", manifest("test.derived", "\"test.base\"",
             "\"stylesheet\": \"rdui/derived.radia\","
             "\"layouts\": \"rdui/xui\","
-            "\"localization\": \"rdui/localization.xml\","
+            "\"localization\": \"rdui/localization.yaml\","
             "\"assets\": \"rdui/resources\""));
         write(derived / "rdui/derived.radia", "floater { height: 220px; }");
-        write(derived / "rdui/localization.xml",
-              "<localizations default=\"en\"><localization id=\"en\" lang=\"English\" direction=\"ltr\">"
-              "<string id=\"title\">Derived</string></localization></localizations>");
+        write(derived / "rdui/localization.yaml", R"YAML(
+locales:
+  en:
+    strings:
+      title: Derived
+)YAML");
         write(derived / "rdui/xui/derived.xml", "<floater title=\"title\"/>");
         const std::string derived_asset =
             "<svg viewBox=\"0 0 10 10\"><circle cx=\"5\" cy=\"5\" r=\"4\"/></svg>";
@@ -107,7 +111,7 @@ namespace tut
         ensure("base layout inherited", result.snapshot.load("base.xml").has_value());
         ensure("derived layout added", result.snapshot.load("derived.xml").has_value());
         ensure_equals("styles layered", result.snapshot.layers("skin.radia").size(), std::size_t(2));
-        ensure_equals("localizations layered", result.snapshot.layers("localization.xml").size(), std::size_t(2));
+        ensure_equals("localizations layered", result.snapshot.layers("localization.yaml").size(), std::size_t(2));
         ensure_equals("derived asset visible", *result.snapshot.load("resources/icons/shared.svg"), derived_asset);
 
         const auto compiled = rdui::SkinCompiler().prepare(result.snapshot);

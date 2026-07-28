@@ -1,0 +1,3 @@
+# Use explicit locale fallbacks
+
+Each non-default locale in `localization.yaml` may declare one explicit fallback Locale ID, forming an acyclic chain that ultimately reaches the catalog's default locale; a locale without an explicit fallback goes directly to that default. Fallback resolves an entire String Key atomically and never fills individual Plural Categories from another locale; a Plural String handles an omitted category with its own required `other` variant. Radia will not infer parents by truncating BCP 47 tags, because explicit relationships make regional and script-sensitive translation behavior predictable and validate malformed Plural Strings, unknown parents, or cycles before a Skin Generation is published.

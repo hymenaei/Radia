@@ -260,11 +260,22 @@ namespace tut
     {
         rdui::System system;
         rdui::ResourceSnapshot resources;
-        resources.add("localization.xml",
-            "<localizations default=\"en\">"
-            "<localization id=\"en\" lang=\"English\" direction=\"ltr\"><string id=\"title\">Title</string><string id=\"status\">Ready</string><string id=\"press\">Press</string></localization>"
-            "<localization id=\"pt\" lang=\"Português\" direction=\"ltr\"><string id=\"title\">Título</string><string id=\"status\">Pronto</string><string id=\"press\">Pressione</string></localization>"
-            "</localizations>");
+        resources.add("localization.yaml", R"YAML(
+defaultLocale: en
+locales:
+  en:
+    name: English
+    strings:
+      title: Title
+      status: Ready
+      press: Press
+  pt:
+    name: Português
+    strings:
+      title: Título
+      status: Pronto
+      press: Pressione
+)YAML");
         resources.add("skin.radia", "label { text-color: #ffffffff; }");
         resources.add("localized.xml",
             "<floater title=\"title\"><label id=\"status\" for=\"target\">status</label>"
@@ -298,7 +309,7 @@ namespace tut
         surface->mountFloater(std::move(programmatic));
         ensure_equals("programmatic title resolves when attached", programmatic_floater->title(), "Título");
 
-        status->setText(system.localized("status"));
+        status->setContent(system.localized("status"));
         ensure("default language restored", system.setLocale("en"));
         ensure_equals("programmatic title remains locale-bound", programmatic_floater->title(), "Title");
         ensure_equals("C++ localized assignment stays bound", status->text(), "Ready");

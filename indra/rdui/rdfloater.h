@@ -2,6 +2,7 @@
 #define LL_RDUI_FLOATER_H
 
 #include "rduilocalization.h"
+#include "rduitextsource.h"
 #include "rduiwidget.h"
 #include <cstdint>
 #include <optional>
@@ -35,7 +36,7 @@ namespace rdui
             Floater& setCanResize(bool value);
             Floater& setCanDetach(bool value);
 
-            const std::string& title() const { return mTitle.value(); }
+            const std::string& title() const;
             const std::string& icon() const { return mIcon; }
             const std::string& closeIcon() const { return mCloseIcon; }
             const std::string& minimizeIcon() const { return mMinimizeIcon; }
@@ -90,17 +91,16 @@ namespace rdui
 
             bool overChromeButton(const Vec2& point) const;
             Vec2 clampedPosition(const Vec2& position) const;
-            bool beginResizeInteraction(const PointerEvent& event, std::uint8_t edges,
-                                        const Vec2& minimum, const std::optional<Rect>& bounds);
+            bool beginResizeInteraction(const PointerEvent& event, std::uint8_t edges, const Vec2& minimum, const std::optional<Rect>& bounds);
             void setAuthoredSize(const Vec2& size, const Vec2& content_size);
             void configureCompositeParts();
             Panel* claimCustomHeader();
-            Floater& setResolvedTitle(std::string localization_key, std::string value);
+            Floater& setTitleContent(TextSource content);
             void setMovementBounds(const Rect& bounds);
             void clampToMovementBounds();
             void updateHeaderPresentation();
 
-            TextValue mTitle;
+            TextSource mTitle;
             std::string mIcon;
             std::string mCloseIcon;
             std::string mMinimizeIcon;

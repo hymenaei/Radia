@@ -1,303 +1,241 @@
 #include "linden_common.h"
 #include "rduilocalization.h"
-#include "llxmlnode.h"
-#include <initializer_list>
+#include "rduilocalizationinternal.h"
+
+#include <unicode/unistr.h>
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
 
 namespace rdui
 {
+    using namespace localization_detail;
+
     namespace
     {
-        std::string elementName(LLXMLNode* node)
-        {
-            return node && node->getName() && node->getName()->mString ? node->getName()->mString : std::string();
-        }
+        constexpr const char* FIRST_STRONG_ISOLATE = "\xE2\x81\xA8";
+        constexpr const char* POP_DIRECTIONAL_ISOLATE = "\xE2\x81\xA9";
 
-        std::size_t lineOf(LLXMLNode* node)
+        std::string unicodeToUtf8(const icu::UnicodeString& value)
         {
-            const S32 line = node ? node->getLineNumber() : -1;
-            return line > 0 ? static_cast<std::size_t>(line) : 0;
-        }
-
-        bool attribute(LLXMLNode* node, const char* name, std::string& value)
-        {
-            return node && node->getAttributeString(name, value);
-        }
-
-        bool allowedAttribute(const std::string& name, std::initializer_list<const char*> allowed)
-        {
-            for (const char* candidate : allowed) if (name == candidate) return true;
-            return false;
-        }
-
-        void validateAttributes(LLXMLNode* node, std::initializer_list<const char*> allowed, LocalizationLoadResult& result, const std::string& source)
-        {
-            if (!node) return;
-            for (const auto& entry : node->mAttributes)
-            {
-                const std::string name = elementName(entry.second.get());
-                if (!allowedAttribute(name, allowed))
-                    result.error("localization.attribute.unknown",
-                                 "Unknown attribute '" + name + "' on <" + elementName(node) + ">.",
-                                 source, lineOf(node));
-            }
-        }
-    }
-
-    bool LocalizationCatalog::validLanguageId(const std::string& id)
-    {
-        if (id.empty()) return false;
-        for (const unsigned char character : id)
-        {
-            const bool alphanumeric = (character >= 'a' && character <= 'z')
-                                   || (character >= 'A' && character <= 'Z')
-                                   || (character >= '0' && character <= '9');
-            if (!alphanumeric && character != '.' && character != '_' && character != '-') return false;
-        }
-        return true;
-    }
-
-    LocalizationLoadResult LocalizationCatalog::loadXml(const std::string& xml, const std::string& source_name)
-    {
-        return loadXmlDocument(xml, source_name, true);
-    }
-
-    LocalizationLoadResult LocalizationCatalog::loadXmlDocument(
-        const std::string& xml, const std::string& source_name, bool require_complete_default)
-    {
-        LocalizationLoadResult result;
-        LLXMLNodePtr root;
-        if (!LLXMLNode::parseBuffer(xml.data(), xml.size(), root, nullptr) || root.isNull())
-        {
-            result.error("localization.xml.invalid", "Could not parse Radia UI localization XML.", source_name);
+            std::string result;
+            value.toUTF8String(result);
             return result;
         }
-        if (elementName(root.get()) != "localizations")
+
+        InlineContent rawKey(const std::string& key)
         {
-            result.error("localization.root.invalid", "Localization root must be <localizations>.", source_name, lineOf(root.get()));
-            return result;
+            return InlineContent::text(key);
         }
-        validateAttributes(root.get(), {"default"}, result, source_name);
+    }
 
-        std::vector<LanguageInfo> languages;
-        std::unordered_map<std::string, std::size_t> language_indices;
-        std::unordered_map<std::string, StringMap> strings;
-        std::unordered_map<std::string, std::unordered_map<std::string, std::size_t>> string_lines;
-        std::string default_id;
-        if (!attribute(root.get(), "default", default_id) || !validLanguageId(default_id))
-            result.error("localization.default.invalid", "Localization XML requires a valid default language ID.", source_name, lineOf(root.get()));
+    double LocalizationArgument::number() const
+    {
+        if (const auto* integer =
+                std::get_if<std::int64_t>(&mValue))
+            return static_cast<double>(*integer);
+        if (const auto* real = std::get_if<double>(&mValue)) return *real;
+        return std::numeric_limits<double>::quiet_NaN();
+    }
 
-        for (LLXMLNodePtr language = root->getFirstChild(); language.notNull(); language = language->getNextSibling())
-        {
-            if (elementName(language.get()) != "localization")
-            {
-                result.error("localization.element.unknown",
-                             "Unsupported <" + elementName(language.get()) + "> in Radia UI localizations.",
-                             source_name, lineOf(language.get()));
-                continue;
-            }
-            validateAttributes(language.get(), {"id", "lang", "direction"}, result, source_name);
+    LocalizationCatalog::LocalizationCatalog() : mImpl(std::make_unique<Impl>())
+    {
+    }
 
-            std::string id;
-            std::string name;
-            std::string direction_name;
-            attribute(language.get(), "id", id);
-            attribute(language.get(), "lang", name);
-            attribute(language.get(), "direction", direction_name);
-            if (!validLanguageId(id))
-            {
-                result.error("localization.language.id_invalid", "Localization has a missing or invalid ID.", source_name, lineOf(language.get()));
-                continue;
-            }
-            if (name.empty())
-            {
-                result.error("localization.language.name_missing", "Localization has no display name: " + id + ".", source_name, lineOf(language.get()));
-                continue;
-            }
-            LayoutDirection direction = LayoutDirection::LeftToRight;
-            if (direction_name == "ltr") direction = LayoutDirection::LeftToRight;
-            else if (direction_name == "rtl") direction = LayoutDirection::RightToLeft;
-            else
-            {
-                result.error("localization.language.direction_invalid",
-                             "Localization direction must be exactly 'ltr' or 'rtl': " + id + ".",
-                             source_name, lineOf(language.get()));
-                continue;
-            }
-            if (language_indices.find(id) != language_indices.end())
-            {
-                result.error("localization.language.duplicate", "Duplicate localization language: " + id + ".", source_name, lineOf(language.get()));
-                continue;
-            }
+    LocalizationCatalog::~LocalizationCatalog() = default;
+    LocalizationCatalog::LocalizationCatalog(LocalizationCatalog&&) noexcept = default;
+    LocalizationCatalog& LocalizationCatalog::operator=(LocalizationCatalog&&) noexcept = default;
 
-            language_indices.emplace(id, languages.size());
-            languages.push_back({id, name, direction});
-            StringMap& language_strings = strings[id];
-            for (LLXMLNodePtr entry = language->getFirstChild(); entry.notNull(); entry = entry->getNextSibling())
-            {
-                if (elementName(entry.get()) != "string")
-                {
-                    result.error("localization.string.element_unknown",
-                                 "Unsupported <" + elementName(entry.get()) + "> in localization " + id + ".",
-                                 source_name, lineOf(entry.get()));
-                    continue;
-                }
-                validateAttributes(entry.get(), {"id"}, result, source_name);
-                std::string string_id;
-                attribute(entry.get(), "id", string_id);
-                if (string_id.empty())
-                {
-                    result.error("localization.string.id_missing", "Localization string has no ID in language " + id + ".", source_name, lineOf(entry.get()));
-                    continue;
-                }
-                if (!language_strings.emplace(string_id, entry->getTextContents()).second)
-                    result.error("localization.string.duplicate", "Duplicate localization string: " + id + "/" + string_id + ".",
-                                 source_name, lineOf(entry.get()));
-                else string_lines[id][string_id] = lineOf(entry.get());
-            }
-        }
+    LocalizationLoadResult LocalizationCatalog::loadYaml(const std::string& yaml, const std::string& source_name)
+    {
+        return loadYamlLayers({ResourceLayer{source_name, yaml}});
+    }
 
-        if (languages.empty())
-            result.error("localization.languages.empty", "Localization XML defines no languages.", source_name, lineOf(root.get()));
-        if (require_complete_default && !default_id.empty() && language_indices.find(default_id) == language_indices.end())
-            result.error("localization.default.missing", "Default localization is not defined: " + default_id + ".", source_name, lineOf(root.get()));
-
-        const auto default_strings = strings.find(default_id);
-        if (require_complete_default && default_strings != strings.end())
-        {
-            for (const auto& language : strings)
-            {
-                if (language.first == default_id) continue;
-                for (const auto& entry : language.second)
-                {
-                    if (default_strings->second.find(entry.first) == default_strings->second.end())
-                        result.error("localization.default.string_missing",
-                                     "String '" + entry.first + "' exists in " + language.first
-                                     + " but not in the default language " + default_id + ".",
-                                     source_name, string_lines[language.first][entry.first]);
-                }
-            }
-        }
-
-        if (result.hasErrors()) return result;
-        mLanguages = std::move(languages);
-        mLanguageIndices = std::move(language_indices);
-        mStrings = std::move(strings);
-        mDefaultLanguageId = std::move(default_id);
+    LocalizationLoadResult LocalizationCatalog::loadYamlLayers(const std::vector<ResourceLayer>& layers)
+    {
+        auto candidate = std::make_unique<Impl>();
+        LocalizationLoadResult result = candidate->load(layers);
+        if (!result.hasErrors()) mImpl = std::move(candidate);
         return result;
     }
 
-    LocalizationLoadResult LocalizationCatalog::loadXmlLayers(const std::vector<ResourceLayer>& layers)
+    std::vector<LocaleInfo> LocalizationCatalog::locales() const
     {
-        LocalizationLoadResult result;
-        LocalizationCatalog candidate;
-        bool initialized = false;
-
-        for (const ResourceLayer& layer : layers)
-        {
-            LocalizationCatalog parsed;
-            LocalizationLoadResult loaded = parsed.loadXmlDocument(layer.source, layer.source_name, false);
-            result.append(std::move(loaded));
-            if (loaded.hasErrors()) continue;
-
-            if (!initialized)
-            {
-                candidate = std::move(parsed);
-                initialized = true;
-                continue;
-            }
-            if (parsed.mDefaultLanguageId != candidate.mDefaultLanguageId)
-            {
-                result.error("localization.layer.default_mismatch",
-                             "Localization layer default language '" + parsed.mDefaultLanguageId
-                             + "' does not match base default language '" + candidate.mDefaultLanguageId + "'.",
-                             layer.source_name);
-                continue;
-            }
-
-            for (LanguageInfo& language : parsed.mLanguages)
-            {
-                const auto existing = candidate.mLanguageIndices.find(language.id);
-                if (existing == candidate.mLanguageIndices.end())
-                {
-                    candidate.mLanguageIndices.emplace(language.id, candidate.mLanguages.size());
-                    candidate.mLanguages.push_back(std::move(language));
-                }
-                else candidate.mLanguages[existing->second] = std::move(language);
-            }
-            for (auto& [language_id, strings] : parsed.mStrings)
-            {
-                StringMap& destination = candidate.mStrings[language_id];
-                for (auto& [string_id, value] : strings)
-                    destination.insert_or_assign(std::move(string_id), std::move(value));
-            }
-        }
-
-        if (!initialized && !result.hasErrors())
-            result.error("localization.layers.empty", "No localization layers were provided.");
-        if (result.hasErrors()) return result;
-
-        if (!candidate.containsLanguage(candidate.mDefaultLanguageId))
-        {
-            result.error("localization.default.missing",
-                         "Default localization is not defined: " + candidate.mDefaultLanguageId + ".");
-            return result;
-        }
-
-        const StringMap* defaults = candidate.stringsFor(candidate.mDefaultLanguageId);
-        for (const auto& [language_id, strings] : candidate.mStrings)
-        {
-            if (language_id == candidate.mDefaultLanguageId) continue;
-            for (const auto& [string_id, value] : strings)
-            {
-                (void)value;
-                if (!defaults || defaults->find(string_id) == defaults->end())
-                    result.error("localization.default.string_missing",
-                                 "String '" + string_id + "' exists in " + language_id
-                                 + " but not in the default language " + candidate.mDefaultLanguageId + ".");
-            }
-        }
-        if (!result.hasErrors()) *this = std::move(candidate);
+        std::vector<LocaleInfo> result;
+        result.reserve(mImpl->locales.size());
+        for (const LocaleRecord& locale : mImpl->locales)
+            result.push_back(locale.info);
         return result;
     }
 
-    const LanguageInfo* LocalizationCatalog::language(const std::string& id) const
+    const std::string& LocalizationCatalog::defaultLocaleId() const
     {
-        const auto found = mLanguageIndices.find(id);
-        return found == mLanguageIndices.end() ? nullptr : &mLanguages[found->second];
+        return mImpl->default_locale;
     }
 
-    bool LocalizationCatalog::containsLanguage(const std::string& id) const
+    const LocaleInfo* LocalizationCatalog::locale(const std::string& id) const
     {
-        return language(id) != nullptr;
+        const LocaleRecord* locale = mImpl->locale(id);
+        return locale ? &locale->info : nullptr;
     }
 
-    const LocalizationCatalog::StringMap* LocalizationCatalog::stringsFor(const std::string& language_id) const
+    bool LocalizationCatalog::containsLocale(const std::string& id) const
     {
-        const auto found = mStrings.find(language_id);
-        return found == mStrings.end() ? nullptr : &found->second;
+        return mImpl->locale(id) != nullptr;
     }
 
     bool LocalizationCatalog::containsDefaultString(const std::string& id) const
     {
-        const StringMap* strings = stringsFor(mDefaultLanguageId);
-        return strings && strings->find(id) != strings->end();
+        const LocaleRecord* locale = mImpl->locale(mImpl->default_locale);
+        return locale && mImpl->find(*locale, id);
     }
 
-    std::string LocalizationCatalog::get(const std::string& language_id, const std::string& string_id) const
+    bool LocalizationCatalog::pluralCapable(const std::string& id) const
     {
-        if (const StringMap* active = stringsFor(language_id))
+        const auto found = mImpl->contracts.find(id);
+        return found != mImpl->contracts.end() && found->second.plural;
+    }
+
+    InlineContent LocalizationCatalog::resolve(const std::string& locale_id, const LocalizationRequest& request) const
+    {
+        const LocaleRecord* active = mImpl->locale(locale_id);
+        if (!active) active = mImpl->locale(mImpl->default_locale);
+        if (!active) return rawKey(request.key());
+
+        const StringValue* value = nullptr;
+        for (const std::size_t locale_index : active->fallback_chain)
         {
-            const auto found = active->find(string_id);
-            if (found != active->end()) return found->second;
+            value = mImpl->find(mImpl->locales[locale_index], request.key());
+            if (value) break;
         }
-        if (language_id != mDefaultLanguageId)
+        if (!value)
         {
-            if (const StringMap* fallback = stringsFor(mDefaultLanguageId))
+            LL_WARNS("RadiaUI")
+                << "Unknown localization String Key: " << request.key()
+                << LL_ENDL;
+            return rawKey(request.key());
+        }
+
+        const auto contract_found = mImpl->contracts.find(request.key());
+        if (contract_found == mImpl->contracts.end()) return rawKey(request.key());
+        const StringContract& contract = contract_found->second;
+
+        const LocalizationArgument* plural_argument = nullptr;
+        if (contract.plural)
+        {
+            if (!request.selectsPlural())
             {
-                const auto found = fallback->find(string_id);
-                if (found != fallback->end()) return found->second;
+                LL_WARNS("RadiaUI")
+                    << "Plural-capable String Key requires a selector: "
+                    << request.key() << LL_ENDL;
+                return rawKey(request.key());
             }
+            const auto argument = request.arguments().find(request.pluralArgument());
+            if (argument == request.arguments().end()
+                || !argument->second.numeric()
+                || !std::isfinite(argument->second.number()))
+            {
+                LL_WARNS("RadiaUI")
+                    << "Plural selector must name a finite numeric argument for "
+                    << request.key() << LL_ENDL;
+                return rawKey(request.key());
+            }
+            if (!contract.required_plural_argument.empty() && contract.required_plural_argument != request.pluralArgument())
+            {
+                LL_WARNS("RadiaUI")
+                    << "Plural selector for " << request.key() << " must be '"
+                    << contract.required_plural_argument << "'." << LL_ENDL;
+                return rawKey(request.key());
+            }
+            plural_argument = &argument->second;
         }
-        return string_id;
+
+        const StringTemplate* selected = nullptr;
+        if (const StringTemplate* scalar = value->scalar()) selected = scalar;
+        else
+        {
+            if (!plural_argument || !active->plural_rules)
+            {
+                LL_WARNS("RadiaUI")
+                    << "Could not select plural form for " << request.key()
+                    << LL_ENDL;
+                return rawKey(request.key());
+            }
+            const std::string category = unicodeToUtf8(active->plural_rules->select(plural_argument->number()));
+            const PluralTemplates& plurals = *value->plurals();
+            const auto variant = plurals.find(category);
+            selected = variant == plurals.end() ? &plurals.at("other") : &variant->second;
+        }
+
+        const auto format_argument = [&](const LocalizationArgument& argument)
+        {
+            std::string formatted;
+            if (const auto* text = std::get_if<std::string>(&argument.value())) formatted = *text;
+            else if (active->number_format)
+            {
+                icu::UnicodeString output;
+                if (const auto* integer = std::get_if<std::int64_t>(&argument.value())) active->number_format->format(*integer, output);
+                else active->number_format->format(std::get<double>(argument.value()), output);
+                formatted = unicodeToUtf8(output);
+            }
+            return std::string(FIRST_STRONG_ISOLATE) + formatted + POP_DIRECTIONAL_ISOLATE;
+        };
+
+        const auto resolve_nodes = [&](auto&& self, const std::vector<TemplateNode>& nodes) -> std::vector<InlineContentNode>
+        {
+            std::vector<InlineContentNode> resolved;
+            resolved.reserve(nodes.size());
+            for (const TemplateNode& node : nodes)
+            {
+                switch (node.kind)
+                {
+                    case TemplateKind::Text: resolved.push_back(InlineContentNode::text(node.value));
+                        break;
+                    case TemplateKind::Argument:
+                    {
+                        const auto argument = request.arguments().find(node.value);
+                        if (argument == request.arguments().end())
+                        {
+                            LL_WARNS("RadiaUI")
+                                << "Missing localization argument '"
+                                << node.value << "' for " << request.key()
+                                << LL_ENDL;
+                            resolved.push_back(InlineContentNode::text("{" + node.value + "}"));
+                        }
+                        else resolved.push_back(InlineContentNode::text(format_argument(argument->second)));
+                        break;
+                    }
+                    case TemplateKind::B:
+                        resolved.push_back(InlineContentNode::container(InlineContentKind::B, self(self, node.children)));
+                        break;
+                    case TemplateKind::I:
+                        resolved.push_back(InlineContentNode::container(InlineContentKind::I, self(self, node.children)));
+                        break;
+                    case TemplateKind::S:
+                        resolved.push_back(InlineContentNode::container(InlineContentKind::S, self(self, node.children)));
+                        break;
+                    case TemplateKind::Kbd:
+                        resolved.push_back(InlineContentNode::kbd(node.value));
+                        break;
+                    case TemplateKind::Br:
+                        resolved.push_back(InlineContentNode::br());
+                        break;
+                }
+            }
+            return resolved;
+        };
+
+        return InlineContent(resolve_nodes(resolve_nodes, selected->nodes));
+    }
+
+    std::string LocalizationCatalog::get(const std::string& locale_id, const LocalizationRequest& request) const
+    {
+        return resolve(locale_id, request).plainText();
+    }
+
+    std::string LocalizationCatalog::get(const std::string& locale_id, const std::string& string_id) const
+    {
+        return get(locale_id, LocalizationRequest::text(string_id));
     }
 }

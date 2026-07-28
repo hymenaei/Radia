@@ -23,19 +23,19 @@ namespace rdui
         std::unordered_map<std::string, SvgIcon> icons;
         LayoutDocumentMap layout_documents;
 
-        const std::optional<std::string> localization_xml = resources.load("localization.xml");
+        const std::optional<std::string> localization_yaml = resources.load("localization.yaml");
         const std::optional<std::string> style_source = resources.load("skin.radia");
-        if (!localization_xml)
-            result.error("rdui.resource.missing", "Missing Radia UI resource: localization.xml.", "localization.xml");
+        if (!localization_yaml)
+            result.error("rdui.resource.missing", "Missing Radia UI resource: localization.yaml.", "localization.yaml");
         if (!style_source)
             result.error("rdui.resource.missing", "Missing Radia UI resource: skin.radia.", "skin.radia");
         if (result.hasErrors()) return result;
 
-        const std::vector<ResourceLayer>& localization_layers = resources.layers("localization.xml");
+        const std::vector<ResourceLayer>& localization_layers = resources.layers("localization.yaml");
         const std::vector<ResourceLayer>& style_layers = resources.layers("skin.radia");
         result.append(localization_layers.empty()
-            ? localization.loadXml(*localization_xml, "localization.xml")
-            : localization.loadXmlLayers(localization_layers));
+            ? localization.loadYaml(*localization_yaml, "localization.yaml")
+            : localization.loadYamlLayers(localization_layers));
         result.append(style_layers.empty()
             ? style_sheet.loadRadia(*style_source, "skin.radia")
             : style_sheet.loadRadiaLayers(style_layers));
@@ -76,7 +76,7 @@ namespace rdui
         {
             const std::string& resource_id = resource.first;
             const std::string& source_text = resource.second;
-            if (resource_id == "localization.xml" || resource_id == "skin.radia"
+            if (resource_id == "localization.yaml" || resource_id == "skin.radia"
                 || resource_id.rfind(RESOURCE_PREFIX, 0) == 0)
             {
                 continue;

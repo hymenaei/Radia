@@ -159,8 +159,7 @@ namespace rdui
         return widget == contracts.end() ? nullptr : &widget->second;
     }
 
-    const CompositePartContract* findCompositePartContract(const WidgetContract& widget,
-                                                           const std::vector<std::string>& parts)
+    const CompositePartContract* findCompositePartContract(const WidgetContract& widget, const std::vector<std::string>& parts)
     {
         if (parts.empty()) return nullptr;
         std::string path;
@@ -176,14 +175,12 @@ namespace rdui
 
     bool producesState(const WidgetContract& widget, WidgetState state)
     {
-        return std::find(widget.produced_states.begin(), widget.produced_states.end(), state)
-               != widget.produced_states.end();
+        return std::find(widget.produced_states.begin(), widget.produced_states.end(), state) != widget.produced_states.end();
     }
 
     bool producesState(const CompositePartContract& part, WidgetState state)
     {
-        return std::find(part.produced_states.begin(), part.produced_states.end(), state)
-               != part.produced_states.end();
+        return std::find(part.produced_states.begin(), part.produced_states.end(), state) != part.produced_states.end();
     }
 
     void detail::instantiateCompositeParts(Widget& owner, const WidgetContract& contract)
@@ -237,8 +234,7 @@ namespace rdui
 
     namespace
     {
-        bool readViewVisibility(const LayoutElement& element, Visibility& value,
-                                ViewBuildResult& result, const std::string& source)
+        bool readViewVisibility(const LayoutElement& element, Visibility& value, ViewBuildResult& result, const std::string& source)
         {
             std::string text;
             if (!readViewAttribute(element, "visibility", text)) return false;
@@ -256,13 +252,14 @@ namespace rdui
         }
     }
 
-    TextValue localizedViewText(std::string value, ViewBuildResult& result, const std::string& source,
-                                const ViewBuildContext* context, std::size_t line)
+    TextSource localizedViewText(std::string value, ViewBuildResult& result,
+                                 const std::string& source,
+                                 const ViewBuildContext* context,
+                                 std::size_t line)
     {
-        if (!context) return TextValue::literal(std::move(value));
-        if (!context->hasLocalizationKey(value))
-            result.error("view.localization.missing", "Unknown localization key: " + value + ".", source, line);
-        return context->localized(std::move(value));
+        if (!context) return TextSource::text(std::move(value));
+        if (!context->hasLocalizationKey(value)) result.error("view.localization.missing", "Unknown localization key: " + value + ".", source, line);
+        return context->localizedContent(std::move(value));
     }
 
     void validateViewAttributes(const LayoutElement& element, const std::vector<std::string>& widget_attributes, ViewBuildResult& result, const std::string& source)
@@ -290,9 +287,7 @@ namespace rdui
                                    const std::string& source,
                                    const std::vector<ActionEventKind>& supported_actions)
     {
-        static const char* unsupported[] = {
-            "x", "y", "width", "height", "interactive", "blocksPointer", "action",
-        };
+        static const char* unsupported[] = {"x", "y", "width", "height", "interactive", "blocksPointer", "action",};
         for (const char* name : unsupported)
         {
             std::string ignored;

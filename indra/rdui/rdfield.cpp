@@ -29,8 +29,7 @@ namespace rdui
 
                 void setControl(Widget* control) { mControl.set(control); }
 
-                Vec2 intrinsicSize(const StyleSheet& theme, const Style&,
-                                   const TextMetrics&) const override
+                Vec2 intrinsicSize(const StyleSheet& theme, const Style&, const TextMetrics&) const override
                 {
                     if (!mControl) return {};
                     const Style control_style = resolveWidgetStyle(theme, *mControl);
@@ -68,8 +67,7 @@ namespace rdui
         {
             mControl = control;
             refreshValueState(control->valueControlState());
-            mControlSubscription = control->observeValueControlState(
-                [this](const ValueControlState& state) { refreshValueState(state); });
+            mControlSubscription = control->observeValueControlState([this](const ValueControlState& state) { refreshValueState(state); });
         }
     }
 
@@ -109,7 +107,7 @@ namespace rdui
         return result;
     }
 
-    Widget* Field::setHintContent(InlineContent content)
+    Widget* Field::setHintContent(TextSource content)
     {
         if (!mHint)
         {
@@ -122,7 +120,7 @@ namespace rdui
         return mHintIndent ? mHintIndent.get() : mHint.get();
     }
 
-    Widget* Field::setErrorContent(InlineContent content)
+    Widget* Field::setErrorContent(TextSource content)
     {
         if (!mError)
         {
@@ -149,14 +147,7 @@ namespace rdui
             mError->setVisibility(Visibility::Collapsed);
             return;
         }
-        InlineContent content = state.message ? InlineContent::text(*state.message) : mAuthoredError;
-        if (const System* system = attachedSystem())
-        {
-            content = content.resolveLocalized(
-                [system](const std::string& key) { return system->resolveText(key); });
-            content = content.resolveKeybindings(
-                [system](const std::string& key) { return system->resolveKeybinding(key); });
-        }
+        TextSource content = state.message ? *state.message : mAuthoredError;
         mError->setContent(std::move(content));
         if (mErrorIndent) mErrorIndent->setVisibility(Visibility::Visible);
         mError->setVisibility(Visibility::Visible);
@@ -166,8 +157,7 @@ namespace rdui
     {
         return defineWidget<Field>(Field::ELEMENT)
             .state(WidgetState::Invalid)
-            .composition([](const LayoutElement& element, Field& field, const ViewScopeContext&,
-                            ViewBuildResult& result, const std::string& source)
+            .composition([](const LayoutElement& element, Field& field, const ViewScopeContext&, ViewBuildResult& result, const std::string& source)
             {
                 std::vector<Label*> labels;
                 std::vector<ValueControl*> controls;
@@ -189,36 +179,29 @@ namespace rdui
                                  source, element.source().begin.line, element.source().begin.column);
                 if (labels.size() == 1 && controls.size() == 1)
                 {
-                    const std::string& target_id =
-                        detail::WidgetCompilerAccess::labelTargetId(*labels.front());
+                    const std::string& target_id = detail::WidgetCompilerAccess::labelTargetId(*labels.front());
                     if (!target_id.empty() && target_id != controls.front()->id())
                         result.error("view.field.label_target_mismatch",
                                      "Field Label must target its direct Value Control.",
                                      source, element.source().begin.line, element.source().begin.column);
                 }
             })
-            .scopedInlineContent("hint", {InlineContentKind::B, InlineContentKind::I, InlineContentKind::S,
-                                           InlineContentKind::Kbd, InlineContentKind::Br},
-                [](InlineContent content, Field& field, ViewBuildResult& result,
-                   const std::string& source, std::size_t line, std::size_t column) -> Widget*
+            .scopedInlineContent("hint", {InlineContentKind::B, InlineContentKind::I, InlineContentKind::S, InlineContentKind::Kbd, InlineContentKind::Br},
+                [](TextSource content, Field& field, ViewBuildResult& result, const std::string& source, std::size_t line, std::size_t column) -> Widget*
                 {
                     if (field.hint())
                     {
-                        result.error("view.field.hint_duplicate", "Field accepts only one hint.",
-                                     source, line, column);
+                        result.error("view.field.hint_duplicate", "Field accepts only one hint.", source, line, column);
                         return field.hint();
                     }
                     return field.setHintContent(std::move(content));
                 })
-            .scopedInlineContent("error", {InlineContentKind::B, InlineContentKind::I, InlineContentKind::S,
-                                            InlineContentKind::Kbd, InlineContentKind::Br},
-                [](InlineContent content, Field& field, ViewBuildResult& result,
-                   const std::string& source, std::size_t line, std::size_t column) -> Widget*
+            .scopedInlineContent("error", {InlineContentKind::B, InlineContentKind::I, InlineContentKind::S, InlineContentKind::Kbd, InlineContentKind::Br},
+                [](TextSource content, Field& field, ViewBuildResult& result, const std::string& source, std::size_t line, std::size_t column) -> Widget*
                 {
                     if (field.error())
                     {
-                        result.error("view.field.error_duplicate", "Field accepts only one error.",
-                                     source, line, column);
+                        result.error("view.field.error_duplicate", "Field accepts only one error.", source, line, column);
                         return field.error();
                     }
                     return field.setErrorContent(std::move(content));
@@ -230,9 +213,8 @@ namespace rdui
     {
         return defineWidget<FieldHint>("hint")
             .scopedOnly()
-            .inlineContent({InlineContentKind::B, InlineContentKind::I, InlineContentKind::S,
-                            InlineContentKind::Kbd, InlineContentKind::Br},
-                [](InlineContent content, FieldHint& hint) { hint.setContent(std::move(content)); })
+            .inlineContent({InlineContentKind::B, InlineContentKind::I, InlineContentKind::S, InlineContentKind::Kbd, InlineContentKind::Br},
+                           [](TextSource content, FieldHint& hint) { hint.setContent(std::move(content)); })
             .build();
     }
 
@@ -240,9 +222,8 @@ namespace rdui
     {
         return defineWidget<FieldError>("error")
             .scopedOnly()
-            .inlineContent({InlineContentKind::B, InlineContentKind::I, InlineContentKind::S,
-                            InlineContentKind::Kbd, InlineContentKind::Br},
-                [](InlineContent content, FieldError& error) { error.setContent(std::move(content)); })
+            .inlineContent({InlineContentKind::B, InlineContentKind::I, InlineContentKind::S, InlineContentKind::Kbd, InlineContentKind::Br},
+                           [](TextSource content, FieldError& error) { error.setContent(std::move(content)); })
             .build();
     }
 

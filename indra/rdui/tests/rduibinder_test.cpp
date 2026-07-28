@@ -468,7 +468,7 @@ namespace tut
         ensure_equals("committed Switch owns one provider subscription", provider->observerCount(), 1U);
 
         provider->publish({true, false, rdui::ValueValidation::invalid(
-            rdui::TextValue::literal("Dynamic error"))});
+            rdui::TextSource::text("Dynamic error"))});
         ensure("external provider state updates Switch", control->checked());
         ensure("Field reflects dirty Value State", field->dirty());
         ensure("Field reflects invalid Value State", field->invalid());
@@ -554,24 +554,27 @@ namespace tut
     void rduibinder_object::test<19>()
     {
         rdui::ResourceSnapshot snapshot;
-        snapshot.add("localization.xml",
-            "<localizations default=\"en\">"
-            "<localization id=\"en\" lang=\"English\" direction=\"ltr\">"
-            "<string id=\"field.label\">Enabled</string>"
-            "<string id=\"field.fallback\">Fallback EN</string>"
-            "<string id=\"field.dynamic\">Dynamic EN</string>"
-            "</localization>"
-            "<localization id=\"pt\" lang=\"Portuguese\" direction=\"ltr\">"
-            "<string id=\"field.label\">Ativado</string>"
-            "<string id=\"field.fallback\">Fallback PT</string>"
-            "<string id=\"field.dynamic\">Dynamic PT</string>"
-            "</localization>"
-            "</localizations>");
+        snapshot.add("localization.yaml", R"YAML(
+defaultLocale: en
+locales:
+  en:
+    name: English
+    strings:
+      field.label: Enabled
+      field.fallback: 'Fallback EN <b>bold EN</b> <kbd binding="toggle-demo"/>'
+      field.dynamic: Dynamic EN
+  pt:
+    name: Portuguese
+    strings:
+      field.label: Ativado
+      field.fallback: 'Fallback PT <b>bold PT</b> <kbd binding="toggle-demo"/>'
+      field.dynamic: Dynamic PT
+)YAML");
         snapshot.add("skin.radia", "");
         snapshot.add("field.xml",
             "<field><label for=\"demo-switch\">field.label</label>"
             "<switch id=\"demo-switch\" bind=\"demo-enabled\"/><br/>"
-            "<error>field.fallback <kbd binding=\"toggle-demo\"/></error></field>");
+            "<error>field.fallback</error></field>");
 
         const rdui::SkinGenerationPrepareResult prepared =
             rdui::SkinCompiler().prepare(std::move(snapshot));
@@ -588,7 +591,8 @@ namespace tut
         auto* field = view.rootAs<rdui::Field>();
         ensure("localized Field View builds", view.ok() && field && field->error());
 
-        const rdui::TextValue stale_dynamic = system.localized("field.dynamic");
+        const rdui::TextSource stale_dynamic =
+            system.localized("field.dynamic");
         auto provider = std::make_shared<TestValueBinding<bool>>(false);
         rdui::Binder binder(*field);
         binder.provideValue("demo-enabled", provider);
@@ -599,11 +603,35 @@ namespace tut
         surface->mount(std::move(view.root));
         provider->publish({false, false, rdui::ValueValidation::invalid()});
         ensure_equals("authored Field error resolves after mounting", field->error()->text(),
-                      "Fallback EN F");
+                      "Fallback EN bold EN F");
+        const auto& english_nodes = field->error()->content().nodes();
+        ensure_equals("English rich error preserves its four inline nodes",
+                      english_nodes.size(), std::size_t(4));
+        ensure_equals("English rich error preserves bold structure",
+                      static_cast<int>(english_nodes[1].kind()),
+                      static_cast<int>(rdui::InlineContentKind::B));
+        ensure_equals("English rich error preserves bold text",
+                      english_nodes[1].children().front().value(),
+                      std::string("bold EN"));
+        ensure_equals("English rich error resolves keybinding presentation",
+                      english_nodes[3].keybindingPresentation().keys.front(),
+                      std::string("F"));
 
         ensure("Portuguese locale selected", system.setLocale("pt"));
         ensure_equals("visible authored Field error refreshes with locale", field->error()->text(),
-                      "Fallback PT F");
+                      "Fallback PT bold PT F");
+        const auto& portuguese_nodes = field->error()->content().nodes();
+        ensure_equals("Portuguese rich error preserves its four inline nodes",
+                      portuguese_nodes.size(), std::size_t(4));
+        ensure_equals("Portuguese rich error preserves bold structure",
+                      static_cast<int>(portuguese_nodes[1].kind()),
+                      static_cast<int>(rdui::InlineContentKind::B));
+        ensure_equals("Portuguese rich error refreshes bold text",
+                      portuguese_nodes[1].children().front().value(),
+                      std::string("bold PT"));
+        ensure_equals("Portuguese rich error retains keybinding presentation",
+                      portuguese_nodes[3].keybindingPresentation().keys.front(),
+                      std::string("F"));
 
         provider->publish({false, false, rdui::ValueValidation::invalid(stale_dynamic)});
         ensure_equals("late dynamic Field error resolves against the current locale",
@@ -611,13 +639,17 @@ namespace tut
         provider->publish({false, false, rdui::ValueValidation::valid()});
         provider->publish({false, false, rdui::ValueValidation::invalid()});
         ensure_equals("restored authored Field error retains the current locale",
-                      field->error()->text(), "Fallback PT F");
+                      field->error()->text(), "Fallback PT bold PT F");
 
         presentation = {{"Ctrl", "F"}};
         system.refreshKeybindings();
         provider->publish({false, false, rdui::ValueValidation::valid()});
         provider->publish({false, false, rdui::ValueValidation::invalid()});
         ensure_equals("restored authored Field error retains current keybindings",
-                      field->error()->text(), "Fallback PT Ctrl F");
+                      field->error()->text(), "Fallback PT bold PT Ctrl F");
+        ensure_equals("keybinding refresh preserves localized bold structure",
+                      static_cast<int>(
+                          field->error()->content().nodes()[1].kind()),
+                      static_cast<int>(rdui::InlineContentKind::B));
     }
 }

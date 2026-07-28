@@ -19,13 +19,12 @@ namespace rdui
             explicit Label(std::string text = {});
 
             Label& setText(std::string text);
-            Label& setText(TextValue text);
+            Label& setContent(TextSource content);
             Label& setContent(InlineContent content);
             const std::string& text() const { return mText.plainText(); }
             const InlineContent& content() const { return mText.content(); }
 
-            Vec2 intrinsicSize(const StyleSheet& theme, const Style& style,
-                               const TextMetrics& text_metrics) const override;
+            Vec2 intrinsicSize(const StyleSheet& theme, const Style& style, const TextMetrics& text_metrics) const override;
             void paint(PaintContext& context, const Style& style, float scale) const override;
             bool defaultPointerEvents() const override { return static_cast<bool>(mTarget); }
 

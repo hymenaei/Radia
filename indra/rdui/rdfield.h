@@ -41,8 +41,8 @@ namespace rdui
             void onChildrenCleared() override;
 
         private:
-            Widget* setHintContent(InlineContent content);
-            Widget* setErrorContent(InlineContent content);
+            Widget* setHintContent(TextSource content);
+            Widget* setErrorContent(TextSource content);
             Widget* createSupportIndent(WidgetRef<Widget>& slot, const char* part, bool collapsed);
             bool controlPrecedesLabel() const;
             void refreshValueState(const ValueControlState& state);
@@ -53,7 +53,7 @@ namespace rdui
             WidgetRef<Text> mError;
             WidgetRef<Widget> mHintIndent;
             WidgetRef<Widget> mErrorIndent;
-            InlineContent mAuthoredError;
+            TextSource mAuthoredError;
             ValueBindingSubscription mControlSubscription;
             bool mDirty = false;
     };

@@ -56,7 +56,8 @@ namespace rdui
         ValueControlState result;
         result.dirty = mValueState.dirty();
         result.validation = mValueState.validationStatus();
-        if (const TextValue* message = mValueState.validationMessage()) result.message = *message;
+        if (const TextSource* message = mValueState.validationMessage())
+            result.message = *message;
         return result;
     }
 
@@ -75,8 +76,7 @@ namespace rdui
     {
         const ValueControlState state = valueControlState();
         const auto observers = mValueObservers;
-        for (const auto& [id, observer] : observers)
-            if (mValueObservers.find(id) != mValueObservers.end()) observer(state);
+        for (const auto& [id, observer] : observers) if (mValueObservers.find(id) != mValueObservers.end()) observer(state);
     }
 
     void Switch::applyValueState(ValueState<bool> state)
@@ -97,8 +97,7 @@ namespace rdui
         applyValueState(mBinding->state());
         std::weak_ptr<char> lifetime = mValueObserverLifetime;
         std::shared_ptr<ValueBinding<bool>> provider = mBinding.shared();
-        auto provider_subscription = std::make_shared<ValueBindingSubscription>(provider->observe(
-            [this, lifetime](const ValueState<bool>& state)
+        auto provider_subscription = std::make_shared<ValueBindingSubscription>(provider->observe([this, lifetime](const ValueState<bool>& state)
             {
                 if (!lifetime.expired()) applyValueState(state);
             }));
@@ -143,10 +142,8 @@ namespace rdui
     WidgetContract detail::switchContract()
     {
         return defineWidget<Switch>(Switch::ELEMENT)
-            .attributes({booleanAttribute("checked", &Switch::setChecked),
-                         stringAttribute("bind", &Switch::setBindingId)})
-            .validate([](const LayoutElement& element, Switch&, ViewBuildResult& result,
-                         const std::string& source, const ViewBuildContext*)
+            .attributes({booleanAttribute("checked", &Switch::setChecked), stringAttribute("bind", &Switch::setBindingId)})
+            .validate([](const LayoutElement& element, Switch&, ViewBuildResult& result, const std::string& source, const ViewBuildContext*)
             {
                 const LayoutAttribute* bind = element.attribute("bind");
                 if (bind && !isLocalIdentifier(bind->value))

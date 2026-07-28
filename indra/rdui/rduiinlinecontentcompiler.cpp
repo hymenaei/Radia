@@ -13,34 +13,31 @@ namespace rdui
     {
         std::string contentKey(const std::string& text)
         {
-            const auto first = std::find_if_not(text.begin(), text.end(),
-                [](unsigned char character) { return std::isspace(character); });
+            const auto first = std::find_if_not(text.begin(), text.end(), [](unsigned char character) { return std::isspace(character); });
             if (first == text.end()) return {};
-            const auto last = std::find_if_not(text.rbegin(), text.rend(),
-                [](unsigned char character) { return std::isspace(character); }).base();
+            const auto last = std::find_if_not(text.rbegin(), text.rend(), [](unsigned char character) { return std::isspace(character); }).base();
             return std::string(first, last);
         }
 
         bool hasAuthoredContent(const LayoutNode& node)
         {
-            for (const LayoutContent& content : node.content)
-                if (content.element || !contentKey(content.text).empty()) return true;
+            for (const LayoutContent& content : node.content) if (content.element || !contentKey(content.text).empty()) return true;
             return false;
         }
     }
 
-    InlineContent compileInlineContent(const std::vector<LayoutContent>& content_items,
-                                       const std::string& host,
-                                       const std::vector<InlineContentKind>& accepted,
-                                       ViewBuildResult& result,
-                                       const std::string& source,
-                                       const ViewBuildContext* context)
+    TextSource compileInlineContent(const std::vector<LayoutContent>& content_items,
+                                    const std::string& host,
+                                    const std::vector<InlineContentKind>& accepted,
+                                    ViewBuildResult& result,
+                                    const std::string& source,
+                                    const ViewBuildContext* context)
     {
         bool emitted_literal_text = false;
         bool pending_literal_space = false;
         const auto inlineText = [&](const std::string& authored, std::size_t line)
         {
-            std::vector<InlineContentNode> nodes;
+            std::vector<TextSourceNode> nodes;
             if (context)
             {
                 const std::string key = contentKey(authored);
@@ -50,14 +47,13 @@ namespace rdui
                     && std::isspace(static_cast<unsigned char>(authored.back()));
                 if (key.empty())
                 {
-                    if (emitted_literal_text && (has_leading_space || has_trailing_space))
-                        pending_literal_space = true;
+                    if (emitted_literal_text && (has_leading_space || has_trailing_space)) pending_literal_space = true;
                     return nodes;
                 }
-                if (emitted_literal_text && (pending_literal_space || has_leading_space))
-                    nodes.push_back(InlineContentNode::text(TextValue::literal(" ")));
-                nodes.push_back(InlineContentNode::text(localizedViewText(
-                    key, result, source, context, line)));
+                if (emitted_literal_text && (pending_literal_space || has_leading_space)) nodes.push_back(TextSourceNode::text(" "));
+                if (!context->hasLocalizationKey(key)) result.error("view.localization.missing", "Unknown localization key: " + key + ".", source, line);
+                TextSource localized = context->localizedContent(key);
+                nodes.insert(nodes.end(), localized.nodes().begin(), localized.nodes().end());
                 emitted_literal_text = true;
                 pending_literal_space = has_trailing_space;
                 return nodes;
@@ -79,24 +75,23 @@ namespace rdui
                 value += static_cast<char>(character);
                 emitted_literal_text = true;
             }
-            if (!value.empty()) nodes.push_back(InlineContentNode::text(TextValue::literal(std::move(value))));
+            if (!value.empty()) nodes.push_back(TextSourceNode::text(std::move(value)));
             return nodes;
         };
         const auto accepts = [&accepted](InlineContentKind kind)
         {
             return std::find(accepted.begin(), accepted.end(), kind) != accepted.end();
         };
-        std::function<std::vector<InlineContentNode>(const std::vector<LayoutContent>&)> buildInline;
+        std::function<std::vector<TextSourceNode>(const std::vector<LayoutContent>&)> buildInline;
         buildInline = [&](const std::vector<LayoutContent>& content)
         {
-            std::vector<InlineContentNode> nodes;
+            std::vector<TextSourceNode> nodes;
             for (const LayoutContent& item : content)
             {
                 if (item.isText())
                 {
-                    std::vector<InlineContentNode> text_nodes = inlineText(item.text, item.source.begin.line);
-                    nodes.insert(nodes.end(), std::make_move_iterator(text_nodes.begin()),
-                                 std::make_move_iterator(text_nodes.end()));
+                    std::vector<TextSourceNode> text_nodes = inlineText(item.text, item.source.begin.line);
+                    nodes.insert(nodes.end(), std::make_move_iterator(text_nodes.begin()), std::make_move_iterator(text_nodes.end()));
                     continue;
                 }
 
@@ -148,9 +143,8 @@ namespace rdui
                                      inline_node.source.begin.line, inline_node.source.begin.column);
                     if (binding != inline_node.attributes.end() && isLocalIdentifier(binding->second.value))
                     {
-                        if (emitted_literal_text && pending_literal_space)
-                            nodes.push_back(InlineContentNode::text(TextValue::literal(" ")));
-                        nodes.push_back(InlineContentNode::kbd(binding->second.value));
+                        if (emitted_literal_text && pending_literal_space) nodes.push_back(TextSourceNode::text(" "));
+                        nodes.push_back(TextSourceNode::kbd(binding->second.value));
                         emitted_literal_text = true;
                         pending_literal_space = false;
                     }
@@ -168,7 +162,7 @@ namespace rdui
                         result.error("view.inline.children_unsupported",
                                      "Inline <br> cannot contain content.", source,
                                      inline_node.source.begin.line, inline_node.source.begin.column);
-                    nodes.push_back(InlineContentNode::br());
+                    nodes.push_back(TextSourceNode::br());
                     emitted_literal_text = false;
                     pending_literal_space = false;
                 }
@@ -176,14 +170,14 @@ namespace rdui
                 {
                     if (emitted_literal_text && pending_literal_space)
                     {
-                        nodes.push_back(InlineContentNode::text(TextValue::literal(" ")));
+                        nodes.push_back(TextSourceNode::text(" "));
                         pending_literal_space = false;
                     }
-                    nodes.push_back(InlineContentNode::container(kind, buildInline(inline_node.content)));
+                    nodes.push_back(TextSourceNode::container(kind, buildInline(inline_node.content)));
                 }
             }
             return nodes;
         };
-        return InlineContent(buildInline(content_items));
+        return TextSource(buildInline(content_items));
     }
 }

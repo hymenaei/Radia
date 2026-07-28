@@ -37,12 +37,12 @@ namespace rdui
     void Floater::configureCompositeParts()
     {
         mHeaderIcon->setName(mIcon);
-        mHeaderTitle->setText(mTitle.value());
+        mHeaderTitle->setContent(mTitle);
         mMinimizeButton->setVisibility(mCanMinimize ? Visibility::Visible : Visibility::Collapsed)
-                       .setOnActivate([this](Widget&) { toggleMinimized(); });
+                        .setOnActivate([this](Widget&) { toggleMinimized(); });
         mMinimizeButtonIcon->setName(mMinimizeIcon);
         mCloseButton->setVisibility(mCanClose ? Visibility::Visible : Visibility::Collapsed)
-                    .setOnActivate([this](Widget&) { close(); });
+                     .setOnActivate([this](Widget&) { close(); });
         mCloseButtonIcon->setName(mCloseIcon);
         updateHeaderPresentation();
     }
@@ -51,7 +51,7 @@ namespace rdui
     {
         return defineWidget<Floater>(Floater::ELEMENT)
             .attributes({
-                localizedStringAttribute("title", &Floater::setResolvedTitle),
+                localizedStringAttribute("title", &Floater::setTitleContent),
                 stringAttribute("icon", &Floater::setIcon),
                 stringAttribute("closeIcon", &Floater::setCloseIcon),
                 stringAttribute("minimizeIcon", &Floater::setMinimizeIcon),
@@ -90,26 +90,29 @@ namespace rdui
     Floater& Floater::setTitle(std::string localization_key)
     {
         const System* system = attachedSystem();
-        const std::string value = system ? system->resolveText(localization_key) : localization_key;
-        return setResolvedTitle(std::move(localization_key), value);
+        if (system) return setTitleContent(system->localized(std::move(localization_key)));
+        LocalizationRequest request = LocalizationRequest::text(localization_key);
+        return setTitleContent(TextSource::localized(std::move(request), InlineContent::text(std::move(localization_key))));
     }
 
-    Floater& Floater::setResolvedTitle(std::string localization_key, std::string value)
+    Floater& Floater::setTitleContent(TextSource content)
     {
-        mTitle = TextValue::fromLocalization(std::move(localization_key), std::move(value));
-        if (mHeaderTitle) mHeaderTitle->setText(mTitle.value());
+        mTitle = std::move(content);
+        if (mHeaderTitle) mHeaderTitle->setContent(mTitle);
         updateHeaderPresentation();
         return *this;
     }
 
-    void Floater::onLocaleChanged(const System& system)
+    const std::string& Floater::title() const
     {
-        if (mTitle.localized())
-        {
-            mTitle.updateLocalizedValue(system.resolveText(mTitle.localizationKey()));
-            if (mHeaderTitle) mHeaderTitle->setText(mTitle.value());
-            updateHeaderPresentation();
-        }
+        static const std::string empty;
+        return mHeaderTitle ? mHeaderTitle->text() : empty;
+    }
+
+    void Floater::onLocaleChanged(const System&)
+    {
+        if (mHeaderTitle) mHeaderTitle->setContent(mTitle);
+        updateHeaderPresentation();
     }
 
     Floater& Floater::setIcon(std::string icon)
@@ -191,7 +194,7 @@ namespace rdui
     {
         const bool show_identity = mMinimized || mShowHeaderIdentity;
         if (mHeaderIcon) mHeaderIcon->setVisibility(show_identity && !mIcon.empty() ? Visibility::Visible : Visibility::Collapsed);
-        if (mHeaderTitle) mHeaderTitle->setVisibility(show_identity && !mTitle.value().empty() ? Visibility::Visible : Visibility::Collapsed);
+        if (mHeaderTitle) mHeaderTitle->setVisibility(show_identity && !title().empty() ? Visibility::Visible : Visibility::Collapsed);
     }
 
     void Floater::open()
@@ -296,8 +299,7 @@ namespace rdui
         return mAuthoredSizeCaptured ? mAuthoredSize : Vec2{rect().w, rect().h};
     }
 
-    bool Floater::beginResizeInteraction(const PointerEvent& event, std::uint8_t edges,
-                                         const Vec2& minimum, const std::optional<Rect>& bounds)
+    bool Floater::beginResizeInteraction(const PointerEvent& event, std::uint8_t edges, const Vec2& minimum, const std::optional<Rect>& bounds)
     {
         if (event.button != PointerButton::Left || !mCanResize || mMinimized || edges == 0) return false;
         mInteraction = FloaterInteraction::Resize;
@@ -325,12 +327,10 @@ namespace rdui
     {
         if (mInteraction == FloaterInteraction::Resize)
         {
-            const Rect resized = detail::resizedRect(
-                mResizeInteraction.initialRect, mResizeInteraction.initialPointer, event.position,
-                static_cast<detail::ResizeEdges>(mResizeInteraction.edges),
-                {mResizeInteraction.minimum, mResizeInteraction.bounds});
-            if (resized.x != rect().x || resized.y != rect().y
-                || resized.w != rect().w || resized.h != rect().h)
+            const Rect resized = detail::resizedRect(mResizeInteraction.initialRect, mResizeInteraction.initialPointer, event.position,
+                                                     static_cast<detail::ResizeEdges>(mResizeInteraction.edges),
+                                                     {mResizeInteraction.minimum, mResizeInteraction.bounds});
+            if (resized.x != rect().x || resized.y != rect().y || resized.w != rect().w || resized.h != rect().h)
             {
                 setRect(resized);
                 if (Surface* surface = attachedSurface()) surface->floaterResized(*this, false);
@@ -371,10 +371,7 @@ namespace rdui
         const bool handled = interaction != FloaterInteraction::Idle;
         mInteraction = FloaterInteraction::Idle;
         mDetachRequested = false;
-        if (interaction == FloaterInteraction::Resize)
-        {
-            if (Surface* surface = attachedSurface()) surface->floaterResized(*this, true);
-        }
+        if (interaction == FloaterInteraction::Resize) if (Surface* surface = attachedSurface()) surface->floaterResized(*this, true);
         return handled;
     }
 

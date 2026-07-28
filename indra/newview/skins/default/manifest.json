@@ -8,7 +8,7 @@
   "radia": {
     "stylesheet": "rdui/skin.radia",
     "layouts": "rdui/xui",
-    "localization": "rdui/localization.xml",
+    "localization": "rdui/localization.yaml",
     "assets": "rdui/resources"
   }
 }

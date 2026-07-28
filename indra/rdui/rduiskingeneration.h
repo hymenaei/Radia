@@ -22,8 +22,7 @@ namespace rdui
             SkinGeneration(const SkinGeneration&) = delete;
             SkinGeneration& operator=(const SkinGeneration&) = delete;
 
-            ViewBuildResult createView(const std::string& resource_id,
-                                       const std::string& locale) const;
+            ViewBuildResult createView(const std::string& resource_id, const std::string& locale) const;
 
         private:
             struct Impl;
@@ -32,12 +31,13 @@ namespace rdui
             static std::shared_ptr<const SkinGeneration> empty();
             DiagnosticResult validateWidgetDefaults(const std::string& element) const;
             void validateIconReferences(Widget& widget, ViewBuildResult& result) const;
-            const std::vector<LanguageInfo>& languages() const;
+            std::vector<LocaleInfo> locales() const;
             const std::string& defaultLocale() const;
-            const LanguageInfo* language(const std::string& id) const;
+            const LocaleInfo* locale(const std::string& id) const;
             bool containsLocale(const std::string& id) const;
             bool hasLocalizationKey(const std::string& id) const;
-            std::string resolveText(const std::string& locale, const std::string& id) const;
+            InlineContent resolveContent(const std::string& locale, const LocalizationRequest& request) const;
+            std::string resolveText(const std::string& locale, const LocalizationRequest& request) const;
             const StyleSheet& styleSheet() const;
             const SvgIcon* icon(const std::string& name) const;
 

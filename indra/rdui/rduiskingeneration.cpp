@@ -5,21 +5,24 @@
 
 namespace rdui
 {
-    SkinGeneration::SkinGeneration(std::unique_ptr<Impl> implementation)
-        : mImpl(std::move(implementation))
+    SkinGeneration::SkinGeneration(std::unique_ptr<Impl> implementation) : mImpl(std::move(implementation))
     {
     }
 
     SkinGeneration::~SkinGeneration() = default;
 
-    const std::vector<LanguageInfo>& SkinGeneration::languages() const { return mImpl->localization.languages(); }
-    const std::string& SkinGeneration::defaultLocale() const { return mImpl->localization.defaultLanguageId(); }
-    const LanguageInfo* SkinGeneration::language(const std::string& id) const { return mImpl->localization.language(id); }
-    bool SkinGeneration::containsLocale(const std::string& id) const { return mImpl->localization.containsLanguage(id); }
+    std::vector<LocaleInfo> SkinGeneration::locales() const { return mImpl->localization.locales(); }
+    const std::string& SkinGeneration::defaultLocale() const { return mImpl->localization.defaultLocaleId(); }
+    const LocaleInfo* SkinGeneration::locale(const std::string& id) const { return mImpl->localization.locale(id); }
+    bool SkinGeneration::containsLocale(const std::string& id) const { return mImpl->localization.containsLocale(id); }
     bool SkinGeneration::hasLocalizationKey(const std::string& id) const { return mImpl->localization.containsDefaultString(id); }
-    std::string SkinGeneration::resolveText(const std::string& locale, const std::string& id) const
+    InlineContent SkinGeneration::resolveContent(const std::string& locale, const LocalizationRequest& request) const
     {
-        return mImpl->localization.get(locale, id);
+        return mImpl->localization.resolve(locale, request);
+    }
+    std::string SkinGeneration::resolveText(const std::string& locale, const LocalizationRequest& request) const
+    {
+        return mImpl->localization.get(locale, request);
     }
     const StyleSheet& SkinGeneration::styleSheet() const { return mImpl->style_sheet; }
 

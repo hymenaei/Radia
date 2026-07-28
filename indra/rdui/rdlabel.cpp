@@ -17,16 +17,18 @@ namespace rdui
         return setContent(InlineContent::text(std::move(text)));
     }
 
-    Label& Label::setText(TextValue text)
+    Label& Label::setContent(TextSource content)
     {
-        return setContent(InlineContent::text(std::move(text)));
+        mText.setContent(std::move(content));
+        if (const System* system = attachedSystem())
+            onLocaleChanged(*system);
+        invalidateMeasure();
+        return *this;
     }
 
     Label& Label::setContent(InlineContent content)
     {
-        mText.setContent(std::move(content));
-        invalidateMeasure();
-        return *this;
+        return setContent(TextSource::literal(std::move(content)));
     }
 
     Label& Label::setTargetId(std::string id)
@@ -43,15 +45,17 @@ namespace rdui
 
     void Label::onLocaleChanged(const System& system)
     {
-        mText.resolveLocalized([&system](const std::string& key) { return system.resolveText(key); });
+        mText.resolveLocalized([&system](const LocalizationRequest& request)
+        {
+            return system.resolveContent(request);
+        });
         mText.resolveKeybindings([&system](const std::string& key) { return system.resolveKeybinding(key); });
         invalidateMeasure();
     }
 
     bool Label::onKeybindingsChanged(const System& system)
     {
-        const bool changed = mText.resolveKeybindings(
-            [&system](const std::string& key) { return system.resolveKeybinding(key); });
+        const bool changed = mText.resolveKeybindings([&system](const std::string& key) { return system.resolveKeybinding(key); });
         if (changed) invalidateMeasure();
         return changed;
     }
@@ -71,8 +75,7 @@ namespace rdui
     {
         return defineWidget<Label>(Label::ELEMENT)
             .attributes({allowedAttribute("for")})
-            .validate([](const LayoutElement& element, Label& label, ViewBuildResult& result,
-                         const std::string& source, const ViewBuildContext*)
+            .validate([](const LayoutElement& element, Label& label, ViewBuildResult& result, const std::string& source, const ViewBuildContext*)
             {
                 std::string target_id;
                 if (!readViewAttribute(element, "for", target_id)) return;
@@ -86,15 +89,13 @@ namespace rdui
                 }
                 label.setTargetId(std::move(target_id));
             })
-            .composition([](const LayoutElement& element, Label& label, const ViewScopeContext& scope,
-                            ViewBuildResult& result, const std::string& source)
+            .composition([](const LayoutElement& element, Label& label, const ViewScopeContext& scope, ViewBuildResult& result, const std::string& source)
             {
                 const LayoutAttribute* attribute = element.attribute("for");
                 const SourceRange& source_range = attribute ? attribute->source : element.source();
                 if (!attribute)
                 {
-                    result.error("view.label.for_required", "Label requires a for widget id.",
-                                 source, source_range.begin.line, source_range.begin.column);
+                    result.error("view.label.for_required", "Label requires a for widget id.", source, source_range.begin.line, source_range.begin.column);
                     return;
                 }
 
@@ -117,9 +118,8 @@ namespace rdui
                 }
                 detail::WidgetCompilerAccess::setLabelTarget(label, target);
             })
-            .inlineContent({InlineContentKind::B, InlineContentKind::I, InlineContentKind::S,
-                            InlineContentKind::Kbd, InlineContentKind::Br},
-                [](InlineContent content, Label& label) { label.setContent(std::move(content)); })
+            .inlineContent({InlineContentKind::B, InlineContentKind::I, InlineContentKind::S, InlineContentKind::Kbd, InlineContentKind::Br},
+                           [](TextSource content, Label& label) { label.setContent(std::move(content)); })
             .build();
     }
 }

@@ -63,15 +63,11 @@ namespace rdui
 
         bool hasAuthoredContent(const LayoutNode& node)
         {
-            for (const LayoutContent& content : node.content)
-            {
-                if (content.element || !textKey(content.text).empty()) return true;
-            }
+            for (const LayoutContent& content : node.content) if (content.element || !textKey(content.text).empty()) return true;
             return false;
         }
 
-        void rejectLogicalAttributes(const LayoutElement& element, ViewBuildResult& result,
-                                     const std::string& source)
+        void rejectLogicalAttributes(const LayoutElement& element, ViewBuildResult& result, const std::string& source)
         {
             for (const auto& [name, attribute] : element.attributes())
                 result.error("view.attribute.unknown",
@@ -120,8 +116,7 @@ namespace rdui
         return result;
     }
 
-    ViewBuildResult LayoutResourceCompiler::createFromResource(const std::string& filename,
-                                                               const ViewBuildContext* context) const
+    ViewBuildResult LayoutResourceCompiler::createFromResource(const std::string& filename, const ViewBuildContext* context) const
     {
         BuildState state;
         state.context = context;
@@ -136,9 +131,7 @@ namespace rdui
         return std::move(state.result);
     }
 
-    ViewBuildResult LayoutResourceCompiler::createFromString(const std::string& xml,
-                                                             const std::string& source_name,
-                                                             const ViewBuildContext* context) const
+    ViewBuildResult LayoutResourceCompiler::createFromString(const std::string& xml, const std::string& source_name, const ViewBuildContext* context) const
     {
         ViewBuildResult result;
         const std::string source = normalizeResource(source_name);
@@ -159,8 +152,7 @@ namespace rdui
         return std::move(state.result);
     }
 
-    void LayoutResourceCompiler::validateViewScope(Widget& scope, BuildState& state,
-                                                   const std::string& source, bool count_root) const
+    void LayoutResourceCompiler::validateViewScope(Widget& scope, BuildState& state, const std::string& source, bool count_root) const
     {
         std::unordered_map<std::string, Widget*> ids;
         std::unordered_set<std::string> duplicates;
@@ -195,16 +187,13 @@ namespace rdui
         });
         for (const BuildState::AuthoredWidget* authored : authored_widgets)
         {
-            if (!authored->widget || !authored->node || !authored->contract
-                || !authored->contract->validate_composition) continue;
+            if (!authored->widget || !authored->node || !authored->contract || !authored->contract->validate_composition) continue;
             const LayoutElement element(*authored->node, authored->defaults);
-            authored->contract->validate_composition(
-                element, *authored->widget, context, state.result, authored->source);
+            authored->contract->validate_composition(element, *authored->widget, context, state.result, authored->source);
         }
     }
 
-    DiagnosticResult LayoutResourceCompiler::validateWidgetDefaults(const std::string& element,
-                                                                     const ViewBuildContext* context) const
+    DiagnosticResult LayoutResourceCompiler::validateWidgetDefaults(const std::string& element, const ViewBuildContext* context) const
     {
         BuildState state;
         state.context = context;
@@ -283,10 +272,8 @@ namespace rdui
                 if (default_root)
                 {
                     std::unique_ptr<Widget> probe = contract->second.create();
-                    applyCommonViewAttributes(defaults, *probe, state.result, default_resource,
-                                              contract->second.supported_actions);
-                    if (contract->second.apply_attributes)
-                        contract->second.apply_attributes(defaults, *probe, state.result, default_resource, state.context);
+                    applyCommonViewAttributes(defaults, *probe, state.result, default_resource, contract->second.supported_actions);
+                    if (contract->second.apply_attributes) contract->second.apply_attributes(defaults, *probe, state.result, default_resource, state.context);
                 }
             }
             if (state.result.errors.size() != errors_before) default_root = nullptr;
@@ -331,9 +318,7 @@ namespace rdui
         return root;
     }
 
-    std::unique_ptr<Widget> LayoutResourceCompiler::buildDocument(const LayoutDocument& document,
-                                                                 std::unique_ptr<Widget> root,
-                                                                 BuildState& state) const
+    std::unique_ptr<Widget> LayoutResourceCompiler::buildDocument(const LayoutDocument& document, std::unique_ptr<Widget> root, BuildState& state) const
     {
         if (!document.root)
         {
@@ -342,8 +327,7 @@ namespace rdui
         }
 
         std::function<std::unique_ptr<Widget>(const LayoutNode&, const std::string&, std::unique_ptr<Widget>)> buildNode;
-        buildNode = [&](const LayoutNode& layout_node, const std::string& current_source,
-                        std::unique_ptr<Widget> node) -> std::unique_ptr<Widget>
+        buildNode = [&](const LayoutNode& layout_node, const std::string& current_source, std::unique_ptr<Widget> node) -> std::unique_ptr<Widget>
         {
             const std::string lookup = schemaNameKey(layout_node.name);
             const auto contract = mWidgetContracts.find(lookup);
@@ -410,15 +394,13 @@ namespace rdui
             if (contract->second.apply_attributes)
                 contract->second.apply_attributes(element, *target, state.result, current_source, state.context);
             if (contract->second.validate_composition)
-                state.authored_widgets.emplace(target, BuildState::AuthoredWidget{
-                    target, &layout_node, defaults, &contract->second, current_source});
+                state.authored_widgets.emplace(target, BuildState::AuthoredWidget{target, &layout_node, defaults, &contract->second, current_source});
 
             if (contract->second.text_content == ViewTextContent::Inline)
             {
                 if (contract->second.apply_inline_content)
                     contract->second.apply_inline_content(
-                        compileInlineContent(element.content(), tag, contract->second.accepted_inline_content,
-                                             state.result, current_source, state.context),
+                        compileInlineContent(element.content(), tag, contract->second.accepted_inline_content, state.result, current_source, state.context),
                         *target);
                 return node;
             }
@@ -450,8 +432,9 @@ namespace rdui
                     }
                     else
                     {
-                        TextValue text = localizedViewText(std::move(value), state.result, current_source, state.context,
-                                                           content.source.begin.line);
+                        TextSource text = localizedViewText(
+                            std::move(value), state.result, current_source,
+                            state.context, content.source.begin.line);
                         if (contract->second.create_text_child)
                         {
                             if (auto child = contract->second.create_text_child(std::move(text)))
@@ -463,7 +446,7 @@ namespace rdui
                         else
                         {
                             auto label = std::make_unique<Label>();
-                            label->setText(std::move(text));
+                            label->setContent(std::move(text));
                             markLayoutChild(*label);
                             target->addChild(std::move(label));
                         }
@@ -507,8 +490,7 @@ namespace rdui
                 }
 
                 const auto part_contract = contract->second.part_attributes.find(schemaNameKey(child.name()));
-                if (part_contract != contract->second.part_attributes.end())
-                    validateViewAttributes(child, part_contract->second, state.result, current_source);
+                if (part_contract != contract->second.part_attributes.end()) validateViewAttributes(child, part_contract->second, state.result, current_source);
                 if (contract->second.child_container)
                 {
                     const std::optional<Widget*> container = contract->second.child_container(child, *target, state.result, current_source);
@@ -543,8 +525,7 @@ namespace rdui
                                    "Flow Break requires a following layout child.", current_source,
                                    element.source().end.line, element.source().end.column);
             if (contract->second.text_content == ViewTextContent::Widget && !widget_text.empty() && contract->second.apply_text)
-                contract->second.apply_text(std::move(widget_text), *target, state.result, current_source, state.context,
-                                            element.source().begin.line);
+                contract->second.apply_text(std::move(widget_text), *target, state.result, current_source, state.context, element.source().begin.line);
             return node;
         };
 

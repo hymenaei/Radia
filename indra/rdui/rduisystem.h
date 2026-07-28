@@ -5,6 +5,7 @@
 #include "rduiinlinecontent.h"
 #include "rduilocalization.h"
 #include "rduistylesheet.h"
+#include "rduitextsource.h"
 #include "rduiviewresult.h"
 #include <chrono>
 #include <cstdint>
@@ -28,8 +29,7 @@ namespace rdui
             System();
             ~System();
 
-            void publish(std::shared_ptr<const SkinGeneration> generation,
-                         const std::function<void()>& commit_documents = {});
+            void publish(std::shared_ptr<const SkinGeneration> generation, const std::function<void()>& commit_documents = {});
             ViewBuildResult createView(const std::string& resource_id) const;
             std::unique_ptr<Surface> createSurface(const TextMetrics& text_metrics) const;
             bool setLongClickDelay(std::chrono::milliseconds delay);
@@ -42,22 +42,24 @@ namespace rdui
                 std::function<KeybindingPresentation(const std::string&)> resolver);
             void refreshKeybindings();
 
-            const std::vector<LanguageInfo>& languages() const;
+            std::vector<LocaleInfo> locales() const;
             const std::string& activeLocale() const { return mActiveLocale; }
             const std::string& defaultLocale() const;
-            const LanguageInfo* activeLanguage() const;
+            const LocaleInfo* activeLocaleInfo() const;
             LayoutDirection layoutDirection() const
             {
-                const LanguageInfo* language = activeLanguage();
-                return language ? language->direction : LayoutDirection::LeftToRight;
+                const LocaleInfo* locale = activeLocaleInfo();
+                return locale ? locale->direction : LayoutDirection::LeftToRight;
             }
             bool hasLocalizationKey(const std::string& id) const;
             std::string resolveText(const std::string& id) const;
+            std::string resolveText(const LocalizationRequest& request) const;
+            InlineContent resolveContent(const LocalizationRequest& request) const;
             KeybindingPresentation resolveKeybinding(const std::string& id) const;
-            TextValue localized(std::string id) const;
+            TextSource localized(std::string id) const;
+            TextSource localized(LocalizationRequest request) const;
             bool hasIcon(const std::string& name) const;
-            bool sameReloadInputs(const ResourceSnapshot& left,
-                                  const ResourceSnapshot& right) const;
+            bool sameReloadInputs(const ResourceSnapshot& left, const ResourceSnapshot& right) const;
             std::uint64_t generation() const { return mGenerationNumber; }
             std::uint64_t localeGeneration() const { return mLocaleGeneration; }
             std::chrono::milliseconds longClickDelay() const { return mLongClickDelay; }

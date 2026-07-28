@@ -46,17 +46,14 @@ namespace rdui
         Widget* first_content = nullptr;
         for (const auto& child : children())
         {
-            if (child.get() == mLegend.get() || child->visibility() == Visibility::Collapsed)
-                continue;
-            if (!first_content || child->rect().top() > first_content->rect().top())
-                first_content = child.get();
+            if (child.get() == mLegend.get() || child->visibility() == Visibility::Collapsed) continue;
+            if (!first_content || child->rect().top() > first_content->rect().top()) first_content = child.get();
         }
         if (!first_content) return;
 
         const float content_top = borderRect().top() - style.border_width.top - style.padding.top;
         const float offset = content_top - first_content->rect().top();
-        for (const auto& child : children())
-            if (child.get() != mLegend.get()) translateChild(*child, {0.f, offset});
+        for (const auto& child : children()) if (child.get() != mLegend.get()) translateChild(*child, {0.f, offset});
     }
 
     bool Fieldset::hasLayoutGapBetween(const Widget& previous, const Widget&) const
@@ -70,7 +67,7 @@ namespace rdui
         return std::max(0.f, mLegend->desiredSize().y * .5f - style.border_width.top);
     }
 
-    Text* Fieldset::setLegendContent(InlineContent content)
+    Text* Fieldset::setLegendContent(TextSource content)
     {
         if (!mLegend)
         {
@@ -84,8 +81,7 @@ namespace rdui
 
     Rect Fieldset::borderRect() const
     {
-        if (!mLegend || mLegend->visibility() == Visibility::Collapsed || mLegend->rect().h <= 0.f)
-            return rect();
+        if (!mLegend || mLegend->visibility() == Visibility::Collapsed || mLegend->rect().h <= 0.f) return rect();
 
         const float border_top = mLegend->rect().y + mLegend->rect().h * .5f;
         return {rect().x, rect().y, rect().w, std::max(0.f, border_top - rect().y)};
@@ -116,8 +112,7 @@ namespace rdui
     WidgetContract detail::fieldsetContract()
     {
         return defineWidget<Fieldset>(Fieldset::ELEMENT)
-            .composition([](const LayoutElement& element, Fieldset& fieldset, const ViewScopeContext&,
-                            ViewBuildResult& result, const std::string& source)
+            .composition([](const LayoutElement& element, Fieldset& fieldset, const ViewScopeContext&, ViewBuildResult& result, const std::string& source)
             {
                 std::size_t field_count = 0;
                 bool has_flow_break = false;
@@ -143,10 +138,8 @@ namespace rdui
                                  "Fieldset does not accept Flow Break directives.",
                                  source, element.source().begin.line, element.source().begin.column);
             })
-            .scopedInlineContent("legend", {InlineContentKind::B, InlineContentKind::I, InlineContentKind::S,
-                                             InlineContentKind::Kbd, InlineContentKind::Br},
-                [](InlineContent content, Fieldset& fieldset, ViewBuildResult& result,
-                   const std::string& source, std::size_t line, std::size_t column) -> Widget*
+            .scopedInlineContent("legend", {InlineContentKind::B, InlineContentKind::I, InlineContentKind::S, InlineContentKind::Kbd, InlineContentKind::Br},
+                [](TextSource content, Fieldset& fieldset, ViewBuildResult& result, const std::string& source, std::size_t line, std::size_t column) -> Widget*
                 {
                     if (fieldset.legend())
                     {
@@ -164,9 +157,8 @@ namespace rdui
     {
         return defineWidget<FieldsetLegend>("legend")
             .scopedOnly()
-            .inlineContent({InlineContentKind::B, InlineContentKind::I, InlineContentKind::S,
-                            InlineContentKind::Kbd, InlineContentKind::Br},
-                [](InlineContent content, FieldsetLegend& legend) { legend.setContent(std::move(content)); })
+            .inlineContent({InlineContentKind::B, InlineContentKind::I, InlineContentKind::S, InlineContentKind::Kbd, InlineContentKind::Br},
+                           [](TextSource content, FieldsetLegend& legend) { legend.setContent(std::move(content)); })
             .build();
     }
 }

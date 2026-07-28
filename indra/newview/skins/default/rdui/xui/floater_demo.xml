@@ -1,46 +1,46 @@
 <?xml version="1.0" encoding="utf-8"?>
 <floater id="floater-demo"
-         title="floater_demo.title"
+         title="demo.title"
          icon="search"
          canMinimize="true"
          canResize="true">
 
-    <text id="status">floater_demo.status</text>
+    <text id="status">demo.status</text>
 
-    <text>floater_demo.inline_plain <b>floater_demo.inline_bold</b><br/><i>floater_demo.inline_italic</i> <s>floater_demo.inline_strike</s><br/>floater_demo.inline_keybinding <kbd binding="toggle-fly"/></text>
+    <text>demo.inlineContent</text>
 
     <button class="primary" onClick="press">
         <icon source="search"/>
-        floater_demo.press
+        demo.press
     </button>
 
     <fieldset class="demo-settings">
-        <legend>floater_demo.settings</legend>
+        <legend>demo.settings</legend>
 
         <field class="switch demo-setting">
-            <label for="demo-switch">floater_demo.switch</label>
+            <label for="demo-switch">demo.switch</label>
             <switch id="demo-switch" bind="demo-switch-enabled" onChange="switch-changed"/><br/>
-            <hint>floater_demo.switch_hint</hint><br/>
-            <error>floater_demo.switch_error</error>
+            <hint>demo.switchHint</hint><br/>
+            <error>demo.switchError</error>
         </field>
 
         <field class="switch control-first">
             <switch id="authoring-mode" onChange="authoring-mode-changed"/>
-            <label for="authoring-mode">floater_demo.automatic_watching</label><br/>
-            <hint>floater_demo.automatic_watching_hint</hint><br/>
-            <error>floater_demo.automatic_watching_error</error>
+            <label for="authoring-mode">demo.automaticWatching</label><br/>
+            <hint>demo.automaticWatchingHint</hint><br/>
+            <error>demo.automaticWatchingError</error>
         </field>
     </fieldset>
 
     <button class="compact" disabled="true"/>
 
-    <text id="language-heading">floater_demo.language</text>
+    <text id="language-heading">demo.language</text>
     <text id="active-language"/>
 
     <panel id="language-buttons">
-        <button id="previous-language" class="language previous" onClick="previous-language">floater_demo.previous</button>
-        <button id="next-language" class="language next" onClick="next-language">floater_demo.next</button>
+        <button id="previous-language" class="language previous" onClick="previous-language">demo.previous</button>
+        <button id="next-language" class="language next" onClick="next-language">demo.next</button>
     </panel>
 
-    <button class="reload" onClick="reload-resources">floater_demo.reload_now</button>
+    <button class="reload" onClick="reload-resources">demo.reloadNow</button>
 </floater>

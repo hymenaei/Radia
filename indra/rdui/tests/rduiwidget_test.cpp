@@ -90,11 +90,17 @@ namespace tut
     {
         rdui::System system;
         rdui::ResourceSnapshot resources;
-        resources.add("localization.xml",
-            "<localizations default=\"en\">"
-            "<localization id=\"en\" lang=\"English\" direction=\"ltr\"/>"
-            "<localization id=\"ar\" lang=\"العربية\" direction=\"rtl\"/>"
-            "</localizations>");
+        resources.add("localization.yaml", R"YAML(
+defaultLocale: en
+locales:
+  en:
+    name: English
+    strings: {}
+  ar:
+    name: العربية
+    direction: rtl
+    strings: {}
+)YAML");
         resources.add("skin.radia", "panel { opacity: .5; effect: background-blur(3px), layer-blur(to right, 0px 0%, 4px 100%); }"
                                     "label { opacity: .5; text-align: start; } icon { size: 16px; }");
         resources.add("resources/icons/search.svg", "<svg viewBox=\"0 0 24 24\"><path d=\"M2 2 L22 22\"/></svg>");
@@ -147,15 +153,15 @@ namespace tut
     void rduiwidget_object::test<6>()
     {
         std::vector<rdui::InlineContentNode> nodes;
-        nodes.push_back(rdui::InlineContentNode::text(rdui::TextValue::literal("alpha")));
+        nodes.push_back(rdui::InlineContentNode::text("alpha"));
         nodes.push_back(rdui::InlineContentNode::container(rdui::InlineContentKind::B,
-            {rdui::InlineContentNode::text(rdui::TextValue::literal("beta"))}));
+            {rdui::InlineContentNode::text("beta")}));
         nodes.push_back(rdui::InlineContentNode::br());
         nodes.push_back(rdui::InlineContentNode::container(rdui::InlineContentKind::I,
-            {rdui::InlineContentNode::text(rdui::TextValue::literal("gamma"))}));
+            {rdui::InlineContentNode::text("gamma")}));
 
         rdui::Text text("initial");
-        ensure_equals("Text accepts a string literal", text.content().nodes()[0].value().value(),
+        ensure_equals("Text accepts a string literal", text.content().nodes()[0].value(),
                       std::string("initial"));
         text.setContent(rdui::InlineContent(std::move(nodes)));
         text.setRect({0.f, 0.f, 100.f, 40.f});
@@ -188,9 +194,9 @@ namespace tut
         ensure_equals("text-align center positions the complete first line", centered.commands()[1].rect.x, 22.5f);
 
         std::vector<rdui::InlineContentNode> rtl_nodes;
-        rtl_nodes.push_back(rdui::InlineContentNode::text(rdui::TextValue::literal("الأول")));
+        rtl_nodes.push_back(rdui::InlineContentNode::text("الأول"));
         rtl_nodes.push_back(rdui::InlineContentNode::container(rdui::InlineContentKind::B,
-            {rdui::InlineContentNode::text(rdui::TextValue::literal("الثاني"))}));
+            {rdui::InlineContentNode::text("الثاني")}));
         rdui::Text rtl_text;
         rtl_text.setContent(rdui::InlineContent(std::move(rtl_nodes)));
         rtl_text.setRect({0.f, 0.f, 100.f, 20.f});
@@ -203,9 +209,9 @@ namespace tut
                       std::string("الأول"));
 
         std::vector<rdui::InlineContentNode> mixed_nodes;
-        mixed_nodes.push_back(rdui::InlineContentNode::text(rdui::TextValue::literal("الأول 123")));
+        mixed_nodes.push_back(rdui::InlineContentNode::text("الأول 123"));
         mixed_nodes.push_back(rdui::InlineContentNode::container(rdui::InlineContentKind::B,
-            {rdui::InlineContentNode::text(rdui::TextValue::literal(" الثاني"))}));
+            {rdui::InlineContentNode::text(" الثاني")}));
         rdui::Text mixed;
         mixed.setContent(rdui::InlineContent(std::move(mixed_nodes)));
         mixed.setRect({0.f, 0.f, 100.f, 20.f});
@@ -222,7 +228,7 @@ namespace tut
         rdui::Text struck;
         struck.setContent(rdui::InlineContent({rdui::InlineContentNode::container(
             rdui::InlineContentKind::S,
-            {rdui::InlineContentNode::text(rdui::TextValue::literal("obsolete"))})}));
+            {rdui::InlineContentNode::text("obsolete")})}));
         struck.setRect({0.f, 0.f, 100.f, 20.f});
         rdui::RecordingPaintContext struck_recording(metrics);
         struck.paint(struck_recording, style, 1.f);
@@ -242,7 +248,7 @@ namespace tut
 
         rdui::Text projected;
         projected.setContent(rdui::InlineContent({
-            rdui::InlineContentNode::text(rdui::TextValue::literal("Press")),
+            rdui::InlineContentNode::text("Press"),
             rdui::InlineContentNode::kbd(
                 "example", rdui::KeybindingPresentation{{"Ctrl", "Shift", "F"}}),
         }));

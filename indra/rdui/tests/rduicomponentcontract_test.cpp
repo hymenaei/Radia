@@ -212,7 +212,7 @@ namespace tut
         ensure_equals("plain content remains a text value", static_cast<int>(text->content().nodes()[0].kind()),
                       static_cast<int>(rdui::InlineContentKind::Text));
         ensure_equals("whitespace before a formatted span stays in the parent flow",
-                      text->content().nodes()[1].value().value(), std::string(" "));
+                      text->content().nodes()[1].value(), std::string(" "));
         ensure_equals("nested semantic content is retained", text->content().nodes()[2].children().size(), 2U);
         ensure_equals("explicit line break remains an inline value",
                       static_cast<int>(text->content().nodes()[3].kind()), static_cast<int>(rdui::InlineContentKind::Br));
@@ -227,26 +227,25 @@ namespace tut
                       std::string("name important\ndetail"));
 
         rdui::LocalizationCatalog localization;
-        ensure("inline localization fixture loads", localization.loadXml(
-            "<localizations default=\"en\"><localization id=\"en\" lang=\"English\" direction=\"ltr\">"
-            "<string id=\"first.key\">First</string><string id=\"second.key\">Second</string>"
-            "</localization></localizations>").ok());
+        ensure("inline localization fixture loads", localization.loadYaml(R"YAML(
+defaultLocale: en
+locales:
+  en:
+    name: English
+    strings:
+      inlineExample: "First <b>Second</b>"
+)YAML").ok());
         const rdui::ViewBuildContext context(localization, "en");
         rdui::ViewBuildResult localized_result = rdui::LayoutResourceCompiler().createFromString(
-            "<text>first.key <b>second.key</b></text>", "localized-inline.xml", &context);
+            "<text>inlineExample</text>", "localized-inline.xml", &context);
         auto* localized = localized_result.rootAs<rdui::Text>();
         ensure("localized inline content builds", localized_result.ok() && localized);
-        ensure_equals("localized inline structure is retained", localized->content().nodes().size(), 3U);
-        ensure_equals("first localized inline run resolves", localized->content().nodes()[0].value().value(),
-                      std::string("First"));
-        ensure_equals("localized separator is represented independently",
-                      localized->content().nodes()[1].value().value(), std::string(" "));
-        ensure_equals("authored separator survives between localized runs",
-                      localized->content().nodes()[1].value().value(), std::string(" "));
+        const auto& localized_nodes = localized->content().nodes();
+        ensure_equals("localized inline structure is retained", localized_nodes.size(), 2U);
+        ensure_equals("first localized inline run resolves", localized_nodes[0].value(),
+                      std::string("First "));
         ensure_equals("second localized inline run resolves",
-                      localized->content().nodes()[2].children()[0].value().value(), std::string("Second"));
-        ensure("structural separator is not a localization key",
-               !localized->content().nodes()[1].value().localized());
+                      localized_nodes[1].children()[0].value(), std::string("Second"));
 
         ensure("removed Heading element rejects the View",
                !factory.createFromString("<heading>Title</heading>", "heading.xml").ok());
@@ -265,10 +264,10 @@ namespace tut
             "<text>keep <s>remove</s></text>", "strike-spacing.xml");
         const auto* struck = strike_spacing.rootAs<rdui::Text>();
         ensure("strike-spacing fixture compiles", strike_spacing.ok() && struck);
-        ensure_equals("space before S remains a plain sibling", struck->content().nodes()[1].value().value(),
+        ensure_equals("space before S remains a plain sibling", struck->content().nodes()[1].value(),
                       std::string(" "));
         ensure_equals("S begins with its authored text rather than the preceding space",
-                      struck->content().nodes()[2].children()[0].value().value(), std::string("remove"));
+                      struck->content().nodes()[2].children()[0].value(), std::string("remove"));
 
         const rdui::ViewBuildResult missing_binding = factory.createFromString(
             "<text><kbd/></text>", "missing-kbd-binding.xml");

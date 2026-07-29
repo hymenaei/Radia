@@ -28,6 +28,7 @@
 
 #include "llstring.h"
 
+#include <utility>
 #include <vector>
 
 class LLFontFreetype;
@@ -45,8 +46,27 @@ struct LLShapedGlyph
     F32                   y_offset;
 };
 
+// Borrowed, slice-local view of one shaped line. Each range is [first, second)
+// within the caller's slice and glyphs[i] points into the shaping LRU. Glyph
+// clusters are relative to ranges[i].first. The pointers stay valid until the
+// shaping cache mutates; valid() turns that lifetime contract into an explicit
+// check for every consumer.
+struct LLFontShapeLayout
+{
+    std::vector<std::pair<size_t, size_t>>         ranges;
+    std::vector<const std::vector<LLShapedGlyph>*> glyphs;
+    size_t mutation_snapshot = 0;
+
+    bool valid() const;
+};
+
 namespace LLFontShaping
 {
+    // Shape a complete slice and return its borrowed run layout. This is the
+    // canonical layout entry point shared by measurement and both renderers.
+    LLFontShapeLayout layoutLine(const LLFontFreetype* root_face,
+                                 LLWStringView         slice);
+
     // Shape wstr[begin..end) using `root_face`'s fallback chain to pick a
     // single owning face for the whole run. Each script sub-run uses its
     // resolved embedding direction. FriBidi reorders those runs according to

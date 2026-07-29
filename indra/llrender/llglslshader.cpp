@@ -456,16 +456,13 @@ bool LLGLSLShader::createShader()
         vector< pair<string, GLenum> >::iterator fileIter = mShaderFiles.begin();
         for (; fileIter != mShaderFiles.end(); fileIter++)
         {
-            GLuint shaderhandle = LLShaderMgr::instance()->loadShaderFile((*fileIter).first, mShaderLevel, (*fileIter).second, &mDefines, mFeatures.mIndexedTextureChannels);
+            const std::string& extra_source = (fileIter->second == GL_VERTEX_SHADER) ? mExtraVertexSource : mExtraFragmentSource;
+            GLuint shaderhandle = LLShaderMgr::instance()->loadShaderFile(
+                (*fileIter).first, mShaderLevel, (*fileIter).second,
+                &mDefines, mFeatures.mIndexedTextureChannels, extra_source);
             LL_DEBUGS("ShaderLoading") << "SHADER FILE: " << (*fileIter).first << " mShaderLevel=" << mShaderLevel << LL_ENDL;
-            if (shaderhandle)
-            {
-                attachObject(shaderhandle);
-            }
-            else
-            {
-                success = false;
-            }
+            if (shaderhandle) attachObject(shaderhandle);
+            else success = false;
         }
     }
 
@@ -791,7 +788,10 @@ GLint LLGLSLShader::mapUniformTextureChannel(GLint location, GLenum type, GLint 
 
     if ((type >= GL_SAMPLER_1D && type <= GL_SAMPLER_2D_RECT_SHADOW) ||
         type == GL_SAMPLER_2D_MULTISAMPLE ||
-        type == GL_SAMPLER_CUBE_MAP_ARRAY)
+        type == GL_SAMPLER_CUBE_MAP_ARRAY ||
+        type == GL_SAMPLER_BUFFER ||
+        type == GL_INT_SAMPLER_BUFFER ||
+        type == GL_UNSIGNED_INT_SAMPLER_BUFFER)
     {   //this here is a texture
         GLint ret = mActiveTextureChannels;
         if (size == 1)
@@ -844,9 +844,8 @@ bool LLGLSLShader::mapUniforms()
     // sensitive to that order -- e.g. "diffuseMap" must win channel 0 so the
     // texture matrix is applied to the right unit. The GLSL compiler does not
     // guarantee any particular ordering of glGetActiveUniform() indices, so we
-    // The analytic font glyph buffer (isamplerBuffer) is now an auto-channeled
-    // diffuseMap still wins texture channel 0 if the compiler orders the buffer
-    // sampler first (it is declared earlier, in the injected lib).
+    // assign each active uniform a deterministic priority:
+    //   [0, mIndexedTextureChannels) -> indexed textures tex0..texN
     //   [mIndexedTextureChannels, ...) -> reserved uniforms, in mReservedUniforms order
     //   UINT_MAX                       -> everything else (order irrelevant; non-samplers)
     const auto& reservedUniforms = LLShaderMgr::instance()->mReservedUniforms;

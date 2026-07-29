@@ -8,6 +8,10 @@ set(llrender_SOURCE_FILES
     llfontface.cpp
     llfontfreetype.cpp
     llfontgl.cpp
+    llfontgpubatch.cpp
+    llfontgpuglyphcache.cpp
+    llfontgpurenderer.cpp
+    llfontgpushader.cpp
     llfontshaping.cpp
     llfontvertexbuffer.cpp
     llfontregistry.cpp
@@ -35,6 +39,11 @@ set(llrender_HEADER_FILES
     llfontvertexbuffer.h
     llfontface.h
     llfontfreetype.h
+    llfontgpubatch.h
+    llfontgpuglyphcache.h
+    llfontgpurenderer.h
+    llfontgpushader.h
+    llhbgpu.h
     llfontbitmapcache.h
     llfontcolrv1.h
     llfontregistry.h
@@ -139,6 +148,16 @@ if (BUILD_TESTING)
   LL_ADD_INTEGRATION_TEST(llfontbitmapcache "" "${registry_test_libs}" "${test_project}")
   LL_ADD_INTEGRATION_TEST(llfontshaping "" "${registry_test_libs}" "${test_project}")
   LL_ADD_INTEGRATION_TEST(llfontfreetype "" "${registry_test_libs}" "${test_project}")
+  LL_ADD_INTEGRATION_TEST(llfontgpu "" "${registry_test_libs}" "${test_project}")
+  LL_ADD_INTEGRATION_TEST(llfontgpuglyphcache "" "${registry_test_libs}" "${test_project}")
+  LL_ADD_INTEGRATION_TEST(llfontgpushader "" "${registry_test_libs}" "${test_project}")
+  LL_ADD_INTEGRATION_TEST(llfontgpubatch "" "${registry_test_libs}" "${test_project}")
+  foreach(font_gpu_test llfontgpu llfontgpuglyphcache llfontgpubatch)
+    if (TARGET INTEGRATION_TEST_${font_gpu_test})
+      target_compile_definitions(INTEGRATION_TEST_${font_gpu_test} PRIVATE
+          "LLFONT_TEST_DATA_DIR=\"${INDRA_SOURCE_DIR}/newview/fonts/\"")
+    endif()
+  endforeach()
   if (TARGET INTEGRATION_TEST_llfontcolrv1)
     # Hand the source-tree font directory to the test as a string literal.
     # Tests that need a real font file (Noto-COLRv1.ttf, InterVariable.woff2)
@@ -195,6 +214,13 @@ if (BUILD_TESTING)
       target_compile_definitions(INTEGRATION_TEST_llfontfreetype PRIVATE
           ${headless_test_compile_defs})
     endif()
+
+    foreach(font_gpu_test llfontgpu llfontgpuglyphcache llfontgpushader llfontgpubatch)
+      if (TARGET INTEGRATION_TEST_${font_gpu_test})
+        target_compile_definitions(INTEGRATION_TEST_${font_gpu_test} PRIVATE
+            ${headless_test_compile_defs})
+      endif()
+    endforeach()
 
     if (TARGET INTEGRATION_TEST_llfontcolrv1)
       # llfontcolrv1's GL-gated tests cover the integration of the

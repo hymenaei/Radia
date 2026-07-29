@@ -40,6 +40,10 @@ uniform int  shadowMode;           // 0 = passthrough, 1 = drop, 2 = soft
 in vec2 vary_texcoord0;
 in vec4 vertex_color;
 
+#ifdef HAS_FONT_GPU
+flat in uint vary_glyphLoc;
+#endif
+
 float sampleAtlasAlpha(vec2 uv)
 {
     // Both atlas types route alpha through .a in the shader: the grayscale
@@ -55,6 +59,31 @@ float sampleAtlasAlpha(vec2 uv)
 
 void main()
 {
+#ifdef HAS_FONT_GPU
+    if (vary_glyphLoc != 0xFFFFFFFFu)
+    {
+        if ((vary_glyphLoc & 0x80000000u) != 0u)
+        {
+            float coverage;
+            vec4 premul = hb_gpu_paint(
+                vary_texcoord0, vary_glyphLoc & 0x3FFFFFFFu,
+                vec4(vertex_color.rgb, 1.0), coverage);
+            if ((vary_glyphLoc & 0x40000000u) != 0u)
+            {
+                frag_color = vec4(vertex_color.rgb, premul.a * vertex_color.a);
+                return;
+            }
+            frag_color = vec4(premul.rgb / max(premul.a, 1e-5), premul.a * vertex_color.a);
+            return;
+        }
+
+        float coverage = hb_gpu_draw(vary_texcoord0, vary_glyphLoc);
+        float ppem = hb_gpu_ppem(vary_texcoord0, vary_glyphLoc);
+        coverage = alchemy_font_refine_coverage(coverage, vertex_color.rgb, ppem);
+        frag_color = vec4(vertex_color.rgb, vertex_color.a * coverage);
+        return;
+    }
+#endif
     if (shadowMode == 0)
     {
         // Default path. Byte-identical to pre-change uiF.glsl.

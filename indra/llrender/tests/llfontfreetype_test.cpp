@@ -96,8 +96,18 @@ namespace tut
     // share LLFontGL static caches across tests.
     struct llfontfreetype_data
     {
-        llfontfreetype_data()  { LLFontManager::initClass(); }
-        ~llfontfreetype_data() { LLFontManager::cleanupClass(); }
+        llfontfreetype_data() : mSavedFontGpu(LLFontGL::sEnableFontGpu)
+        {
+            LLFontGL::sEnableFontGpu = true;
+            LLFontManager::initClass();
+        }
+        ~llfontfreetype_data()
+        {
+            LLFontManager::cleanupClass();
+            LLFontGL::sEnableFontGpu = mSavedFontGpu;
+        }
+
+        bool mSavedFontGpu;
     };
 
     typedef test_group<llfontfreetype_data> llfontfreetype_test;
@@ -210,10 +220,10 @@ namespace tut
                nt->faceHasGlyph(0x200D));
     }
 
-    // useSubpixelPen depends on hinting and color/svg flags:
-    // FORCE_AUTOHINT on a non-color font => true; DEFAULT hinting => false;
-    // a color font (regardless of hinting) => false. Pins the rule at
-    // llfontface.cpp:99.
+    // useSubpixelPen depends on the render regime, hinting, and color format.
+    // Analytic outlines always preserve fractional placement; the legacy atlas
+    // keeps DEFAULT-hinted monochrome text snapped. Bitmap/SVG color remains
+    // snapped, while scalable COLRv1 is analytic.
     template<> template<>
     void llfontfreetype_object::test<7>()
     {
@@ -221,13 +231,23 @@ namespace tut
         if (!fileExists(path))
             skip("DejaVuSans.woff2 not present");
 
-        LLPointer<LLFontFreetype> a = loadFt(path, /*is_fallback=*/true,
-                                             14.f, -1, EFontHinting::DEFAULT);
-        LLPointer<LLFontFreetype> b = loadFt(path, /*is_fallback=*/true,
-                                             14.f, -1, EFontHinting::FORCE_AUTOHINT);
-        ensure("both loaded", a.notNull() && b.notNull());
-        ensure("DEFAULT hinting -> useSubpixelPen=false",
-               !a->useSubpixelPen());
+        LLFontGL::sEnableFontGpu = true;
+        LLPointer<LLFontFreetype> analytic = loadFt(
+            path, /*is_fallback=*/true, 14.f, -1, EFontHinting::DEFAULT);
+        LLPointer<LLFontFreetype> b = loadFt(
+            path, /*is_fallback=*/true, 14.f, -1, EFontHinting::FORCE_AUTOHINT);
+
+        LLFontGL::sEnableFontGpu = false;
+        LLPointer<LLFontFreetype> atlas = loadFt(
+            path, /*is_fallback=*/true, 14.f, -1, EFontHinting::DEFAULT);
+        LLFontGL::sEnableFontGpu = true;
+
+        ensure("all regimes loaded",
+               analytic.notNull() && b.notNull() && atlas.notNull());
+        ensure("analytic DEFAULT preserves fractional placement",
+               analytic->useSubpixelPen());
+        ensure("atlas DEFAULT remains pixel-snapped",
+               !atlas->useSubpixelPen());
         ensure("FORCE_AUTOHINT on non-color font -> useSubpixelPen=true",
                b->useSubpixelPen());
 
@@ -239,8 +259,8 @@ namespace tut
             LLPointer<LLFontFreetype> c = loadFt(colr, true, 14.f, -1,
                                                  EFontHinting::FORCE_AUTOHINT);
             ensure("Noto-COLRv1 loaded", c.notNull());
-            ensure("color font -> useSubpixelPen=false even with FORCE_AUTOHINT",
-                   !c->useSubpixelPen());
+            ensure("scalable COLRv1 preserves fractional placement",
+                   c->useSubpixelPen());
         }
     }
 

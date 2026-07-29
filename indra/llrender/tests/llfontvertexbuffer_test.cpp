@@ -613,4 +613,54 @@ namespace tut
         ensure_equals("full-fit render returns the entire string length",
                       n_full, (S32)s.length());
     }
+
+    // A mixed display list (standard underline + analytic glyphs) must replay
+    // each batch under its matching shader and then restore the caller. The
+    // headless UI shader deliberately has no hb-gpu branch, so the glyph batch
+    // uses the standalone analytic program.
+    template<> template<>
+    void llfontvertexbuffer_render_object::test<9>()
+    {
+#if !LL_HAS_HB_GPU
+        skip("analytic font renderer is not available in this build");
+#else
+        if (!fileExists(kFontsXml))
+            skip("fonts.xml not present in test data dir");
+        LLFontGL* font = LLFontGL::getFontSansSerif();
+        ensure("font available", font != nullptr);
+        LLWString s = utf8str_to_wstring("Replay");
+
+        LLFontVertexBuffer vb;
+        gl.clearFramebuffer();
+        const S32 first_count = vb.render(
+            font, s, 0, 80.f, 100.f, LLColor4::white,
+            LLFontGL::LEFT, LLFontGL::BASELINE,
+            LLFontGL::UNDERLINE, LLFontGL::NO_SHADOW,
+            static_cast<S32>(s.size()));
+        gGL.flush();
+
+        if (!ll_test::VertexBufferProbe::hasAnalyticGlyphs(vb))
+            skip("runtime analytic shader is unavailable");
+        const auto first_pixels = ll_test::readFramebufferRGBA(
+            ll_test::HeadlessGL::WIDTH, ll_test::HeadlessGL::HEIGHT);
+
+        LLGLSLShader* caller_shader = LLGLSLShader::sCurBoundShaderPtr;
+        gl.clearFramebuffer();
+        const S32 replay_count = vb.render(
+            font, s, 0, 80.f, 100.f, LLColor4::white,
+            LLFontGL::LEFT, LLFontGL::BASELINE,
+            LLFontGL::UNDERLINE, LLFontGL::NO_SHADOW,
+            static_cast<S32>(s.size()));
+        gGL.flush();
+        const auto replay_pixels = ll_test::readFramebufferRGBA(
+            ll_test::HeadlessGL::WIDTH, ll_test::HeadlessGL::HEIGHT);
+
+        ensure_equals("cached replay preserves character count",
+                      replay_count, first_count);
+        ensure_equals("cached replay restores the caller shader",
+                      LLGLSLShader::sCurBoundShaderPtr, caller_shader);
+        ensure("cached analytic replay matches initial analytic draw",
+               replay_pixels == first_pixels);
+#endif
+    }
 }

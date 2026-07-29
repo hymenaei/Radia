@@ -1133,12 +1133,11 @@ namespace tut
     // Keeping the gap so the audit's test numbering (23 + 25..31)
     // matches the plan file unchanged.)
 
-    // For an unligatured / unkerned ASCII run, HB's per-glyph
-    // x_advance must equal FT's slot->advance.x for the same glyph
-    // index loaded with the same flags. Catches divergence in HB↔FT
-    // outline scaling or load-flag plumbing. DejaVuSans has no GPOS
-    // kern between adjacent lowercase letters, so HB's GPOS pass is
-    // a no-op and per-glyph advances come straight from FT.
+    // For an unligatured / unkerned ASCII run, HB's per-glyph x_advance
+    // must equal FT's matching metric regime: linearHoriAdvance for the
+    // analytic renderer, grid-fitted slot->advance.x for the atlas renderer.
+    // DejaVuSans has no GPOS kern between adjacent lowercase letters, so HB's
+    // GPOS pass is a no-op and per-glyph advances come straight from FT.
     template<> template<>
     void llfontshaping_object::test<25>()
     {
@@ -1150,7 +1149,9 @@ namespace tut
 
         const LLFontFace* face = ft->getFontFace();
         FT_Face ftf = face->face();
-        const FT_Int32 load_flags = static_cast<FT_Int32>(face->hinting());
+        const FT_Int32 load_flags = face->useLinearMetrics()
+            ? FT_LOAD_NO_HINTING
+            : static_cast<FT_Int32>(face->hinting());
 
         LLWString s = wstr('a','b','c','d','e','f');
         std::vector<LLShapedGlyph> out;
@@ -1161,21 +1162,20 @@ namespace tut
         {
             ensure_equals("FT_Load_Glyph succeeded",
                           FT_Load_Glyph(ftf, out[i].glyph_id, load_flags), 0);
-            const F32 ft_advance = ftf->glyph->advance.x * (1.f / 64.f);
-            // 26.6 -> float; equality in float at this precision
-            // would be exact when no GPOS adjustment fired. Tolerate
-            // 1/64 px to cover HB's internal rounding paths.
+            const F32 ft_advance = face->useLinearMetrics()
+                ? ftf->glyph->linearHoriAdvance * (1.f / 65536.f)
+                : ftf->glyph->advance.x * (1.f / 64.f);
+            // Equality in float at this precision would be exact when no GPOS
+            // adjustment fired. Tolerate 1/64 px for HB's rounding paths.
             const F32 delta = std::fabs(out[i].x_advance - ft_advance);
             ensure("HB x_advance matches FT advance for unkerned glyph",
                    delta < (1.f / 64.f) + 1e-5f);
         }
     }
 
-    // HB's reported load flags after construction must equal what the
-    // FT renderGlyph path uses. Both are casts of mHinting; any
-    // refactor that splits the casts asymmetrically breaks shaped vs
-    // codepoint advance consistency. hb_ft_font_get_load_flags has
-    // existed since HB 1.7 — the codebase requires newer than that.
+    // HB's reported load flags after construction must match the selected
+    // metric regime. Analytic outlines shape unhinted; the compatibility atlas
+    // uses the configured FreeType hinting flags.
     template<> template<>
     void llfontshaping_object::test<26>()
     {
@@ -1190,14 +1190,11 @@ namespace tut
         ensure("hb_font accessible", hbf != nullptr);
 
         const int hb_flags = hb_ft_font_get_load_flags(hbf);
-        const int expected = static_cast<int>(face->hinting());
-        ensure_equals("HB load flags == (int)mHinting",
+        const int expected = face->useLinearMetrics()
+            ? FT_LOAD_NO_HINTING
+            : static_cast<int>(face->hinting());
+        ensure_equals("HB load flags match the active metric regime",
                       hb_flags, expected);
-        // And confirm the cast equivalence between the two surfaces
-        // (HB takes int, FT takes FT_Int32) hasn't drifted.
-        ensure_equals("(int)mHinting == (FT_Int32)mHinting",
-                      static_cast<int>(face->hinting()),
-                      (int)static_cast<FT_Int32>(face->hinting()));
     }
 
     // HB must see the same OT-VAR design coordinates that FT was

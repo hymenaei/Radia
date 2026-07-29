@@ -280,6 +280,8 @@ public:
     LLFontBitmapCache* getBitmapCache() const { return mFace ? mFace->getBitmapCache() : nullptr; }
 
     U8 getStyle() const;
+    F32 getPointSize() const { return mPointSize; }
+    const LLFontVarAxes& getVarAxes() const { return mVarAxes; }
 
     // Run a maintenance pass that releases bitmap atlas sheets which haven't
     // been read or written within the idle threshold, recovering their CPU

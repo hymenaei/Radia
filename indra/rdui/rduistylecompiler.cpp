@@ -57,7 +57,7 @@ namespace rdui
             {StyleProperty::FontFamily,       "font-family",      StyleCapability::Typography, StylePropagation::Inherited,  InheritedStyleProperty::FontFamily, StyleValueType::FontFamily},
             {StyleProperty::FontSize,         "font-size",        StyleCapability::Typography, StylePropagation::Inherited,  InheritedStyleProperty::FontSize,   StyleValueType::Number},
             {StyleProperty::FontStyle,        "font-style",       StyleCapability::Typography, StylePropagation::Inherited,  InheritedStyleProperty::FontStyle,  StyleValueType::Boolean},
-            {StyleProperty::FontWeight,       "font-weight",      StyleCapability::Typography, StylePropagation::Inherited,  InheritedStyleProperty::FontWeight, StyleValueType::Boolean},
+            {StyleProperty::FontWeight,       "font-weight",      StyleCapability::Typography, StylePropagation::Inherited,  InheritedStyleProperty::FontWeight, StyleValueType::Number},
             {StyleProperty::LineHeight,       "line-height",      StyleCapability::Typography, StylePropagation::Inherited,  InheritedStyleProperty::LineHeight, StyleValueType::Length},
             {StyleProperty::TextAlign,        "text-align",       StyleCapability::Typography, StylePropagation::Inherited,  InheritedStyleProperty::TextAlign,  StyleValueType::TextAlign},
             {StyleProperty::TextColor,        "text-color",       StyleCapability::Typography, StylePropagation::Inherited,  InheritedStyleProperty::TextColor,  StyleValueType::Color},
@@ -212,7 +212,7 @@ namespace rdui
             case StyleProperty::FontFamily: style.font_family = std::get<FontFamily>(declaration.value); break;
             case StyleProperty::FontSize: style.font_size = std::get<float>(declaration.value); break;
             case StyleProperty::FontStyle: style.font_italic = std::get<bool>(declaration.value); break;
-            case StyleProperty::FontWeight: style.font_bold = std::get<bool>(declaration.value); break;
+            case StyleProperty::FontWeight: style.font_weight = static_cast<U16>(std::get<float>(declaration.value)); break;
             case StyleProperty::LineHeight: style.line_height = std::get<Length>(declaration.value); break;
             case StyleProperty::TextAlign: style.text_align = std::get<TextAlign>(declaration.value); break;
             case StyleProperty::TextColor: style.text_color = std::get<Color>(declaration.value); break;
@@ -394,9 +394,11 @@ namespace rdui
             case StyleProperty::FontWeight:
             {
                 const std::string weight = lower(trim(value));
-                const bool bold = weight == "bold" || weight == "600" || weight == "700"
-                               || weight == "800" || weight == "900";
-                return (bold || weight == "normal" || weight == "400") ? compiled(bold) : invalid();
+                if (weight == "normal") return compiled(400.f);
+                if (weight == "bold") return compiled(700.f);
+                if (endsWith(weight, "px") || endsWith(weight, "%")) return invalid();
+                const auto parsed = number();
+                return parsed && *parsed >= 1.f && *parsed <= 1000.f && std::floor(*parsed) == *parsed ? compiled(*parsed) : invalid();
             }
             case StyleProperty::FontStyle:
             {

@@ -126,11 +126,8 @@ namespace rdui
 
         const LLFontGL& fontForStyle(const Style& style)
         {
-            LLFontGL* font = style.font_size <= 11.f ? LLFontGL::getFontSansSerifSmall()
-                           : style.font_size <= 15.f ? LLFontGL::getFontSansSerif()
-                           : style.font_size <= 19.f ? LLFontGL::getFontSansSerifMedium()
-                           : style.font_size <= 25.f ? LLFontGL::getFontSansSerifBig()
-                           : LLFontGL::getFontSansSerifHuge();
+            LLFontGL* font = LLFontGL::getFontAtPixelSize(
+                "SansSerif", style.font_size, style.font_weight, style.font_italic);
             if (!font) LL_ERRS("rdui") << "OpenGL text adapter used before viewer fonts were initialized." << LL_ENDL;
             return *font;
         }
@@ -138,16 +135,17 @@ namespace rdui
         float textLineHeight(const Style& style)
         {
             if (style.line_height) return std::ceil(style.line_height->pixels);
+            if (style.font_size <= 0.f) return 0.f;
             return static_cast<float>(fontForStyle(style).getLineHeight());
         }
 
         Vec2 measureOpenGLText(const std::string& text, const Style& style)
         {
+            if (style.font_size <= 0.f) return {0.f, textLineHeight(style)};
             if (text.empty()) return {0.f, textLineHeight(style)};
             const LLWString wide = utf8str_to_wstring(text);
             const LLFontGL& font = fontForStyle(style);
-            return {std::ceil(std::max(0.f, font.getWidthF32(wide.c_str(), 0, S32_MAX, true))),
-                    textLineHeight(style)};
+            return {std::ceil(std::max(0.f, font.getWidthF32(wide.c_str(), 0, S32_MAX, true))), textLineHeight(style)};
         }
 
         void drawTexturedQuad(const Rect& rect, float u0 = 0.f, float v0 = 0.f, float u1 = 1.f, float v1 = 1.f)
@@ -163,13 +161,6 @@ namespace rdui
             gGL.end();
         }
 
-        U8 fontFlagsForStyle(const Style& style)
-        {
-            U8 flags = LLFontGL::NORMAL;
-            if (style.font_bold) flags |= LLFontGL::BOLD;
-            if (style.font_italic) flags |= LLFontGL::ITALIC;
-            return flags;
-        }
     }
 
     struct OpenGLPaintContext::Impl
@@ -547,14 +538,14 @@ namespace rdui
 
     void OpenGLPaintContext::paintText(const std::string& text, const Rect& rect, const Style& style)
     {
-        if (text.empty() || style.text_color.a <= 0.f) return;
+        if (text.empty() || style.font_size <= 0.f || style.text_color.a <= 0.f) return;
         const LLFontGL& font = fontForStyle(style);
         prepareTextDraw();
         const LLFontGL::HAlign horizontal = horizontalAlignment(style);
         constexpr LLFontGL::VAlign vertical = LLFontGL::VCENTER;
         font.renderUTF8(text, 0, textX(rect, horizontal), textY(rect, vertical),
                         LLColor4(style.text_color.r, style.text_color.g, style.text_color.b, style.text_color.a),
-                        horizontal, vertical, fontFlagsForStyle(style), LLFontGL::NO_SHADOW);
+                        horizontal, vertical, LLFontGL::NORMAL, LLFontGL::NO_SHADOW);
         if (style.font_strike)
         {
             const float width = font.getWidthF32(text);

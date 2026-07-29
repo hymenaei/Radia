@@ -471,7 +471,9 @@ void LLShaderMgr::dumpObjectLog(GLuint ret, bool warns, const std::string& filen
     }
  }
 
-GLuint LLShaderMgr::loadShaderFile(const std::string& filename, S32 & shader_level, GLenum type, std::map<std::string, std::string>* defines, S32 texture_index_channels)
+GLuint LLShaderMgr::loadShaderFile(const std::string& filename, S32 & shader_level,
+                                   GLenum type, std::map<std::string, std::string>* defines,
+                                   S32 texture_index_channels, const std::string& extra_source)
 {
     GLenum error = GL_NO_ERROR;
 
@@ -753,6 +755,8 @@ GLuint LLShaderMgr::loadShaderFile(const std::string& filename, S32 & shader_lev
 
     // Master definition can be found in deferredUtil.glsl
     extra_code_text[extra_code_count++] = strdup("struct GBufferInfo { vec4 albedo; vec4 specular; vec3 normal; vec4 emissive; float gbufferFlag; float envIntensity; };\n");
+
+    if (!extra_source.empty()) extra_code_text[extra_code_count++] = strdup(extra_source.c_str());
 
     //copy file into memory
     enum {
@@ -1213,6 +1217,7 @@ void LLShaderMgr::initAttribsAndUniforms()
     mReservedAttribs.push_back("weight4");
     mReservedAttribs.push_back("clothing");
     mReservedAttribs.push_back("joint");
+    mReservedAttribs.push_back("glyph_loc");
     mReservedAttribs.push_back("texture_index");
 
     //matrix state
@@ -1671,6 +1676,9 @@ void LLShaderMgr::initAttribsAndUniforms()
 
     // End Alchemy Effects Stack
 
+    mReservedUniforms.push_back("shadowMode");
+    mReservedUniforms.push_back("hb_gpu_atlas");
+
     llassert(mReservedUniforms.size() == END_RESERVED_UNIFORMS);
 
     std::set<std::string> dupe_check;
@@ -1684,4 +1692,3 @@ void LLShaderMgr::initAttribsAndUniforms()
         dupe_check.insert(mReservedUniforms[i]);
     }
 }
-

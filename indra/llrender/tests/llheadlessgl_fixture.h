@@ -48,11 +48,14 @@ namespace ll_test
         static CaptureCounts count(const LLFontVertexBuffer& buf)
         {
             CaptureCounts c;
-            for (const LLVertexBufferData& e : buf.mShadowBufferList)
-                c.shadow_quads += e.mCount / 6;
-            for (const LLVertexBufferData& e : buf.mForegroundBufferList)
-                c.foreground_quads += e.mCount / 6;
+            for (const LLVertexBufferData& e : buf.mShadowBufferList) c.shadow_quads += e.mCount / 6;
+            for (const LLVertexBufferData& e : buf.mForegroundBufferList) c.foreground_quads += e.mCount / 6;
             return c;
+        }
+
+        static bool hasAnalyticGlyphs(const LLFontVertexBuffer& buf)
+        {
+            return buf.mHasAnalyticGlyphs;
         }
     };
 

@@ -399,7 +399,7 @@ locales:
         rdui::layoutTree(*fieldset, theme, text, rdui::LayoutDirection::LeftToRight);
         const rdui::Style legend_style = rdui::resolveWidgetStyle(theme, *fieldset->legend());
         ensure("direct-child selector styles Legend",
-               legend_style.font_bold && legend_style.font_size == 10.f);
+               legend_style.font_weight == 700 && legend_style.font_size == 10.f);
         ensure_equals("Legend stays intrinsic instead of stretching across Fieldset",
                       fieldset->legend()->rect().w, fieldset->legend()->desiredSize().x);
         ensure_equals("Legend begins at the Fieldset logical-start padding",

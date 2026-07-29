@@ -222,7 +222,7 @@ namespace tut
         const rdui::Style inherited_style = rdui::resolveWidgetStyle(stylesheet, *inherited_label);
         ensure_equals("font family inherits", static_cast<int>(inherited_style.font_family), static_cast<int>(rdui::FontFamily::Sans));
         ensure_equals("font size inherits", inherited_style.font_size, 19.f);
-        ensure("font weight inherits", inherited_style.font_bold);
+        ensure_equals("font weight inherits", inherited_style.font_weight, static_cast<U16>(700));
         ensure("font style inherits", inherited_style.font_italic);
         ensure("line height inherits as a set length", inherited_style.line_height.has_value());
         ensure_equals("line height inherits", inherited_style.line_height->pixels, 23.f);

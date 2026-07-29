@@ -268,7 +268,7 @@ namespace rdui
         Dimension flex_basis;
         int order = 0;
         FontFamily font_family = FontFamily::Sans;
-        bool font_bold = false;
+        U16 font_weight = 400;
         bool font_italic = false;
         bool font_strike = false;
         TextAlign text_align = TextAlign::Start;

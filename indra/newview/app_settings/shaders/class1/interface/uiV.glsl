@@ -33,10 +33,23 @@ in vec2 texcoord0;
 out vec4 vertex_color;
 out vec2 vary_texcoord0;
 
+#ifdef HAS_FONT_GPU
+in uint glyph_loc;
+flat out uint vary_glyphLoc;
+#endif
+
 void main()
 {
     gl_Position = modelview_projection_matrix * vec4(position, 1);
-    vary_texcoord0 =  (texture_matrix0 * vec4(texcoord0,0,1)).xy;
     vertex_color = diffuse_color;
+#ifdef HAS_FONT_GPU
+    vary_glyphLoc = glyph_loc;
+    if (glyph_loc != 0xFFFFFFFFu)
+    {
+        // Analytic glyphs carry design-space sample coordinates directly.
+        vary_texcoord0 = texcoord0;
+        return;
+    }
+#endif
+    vary_texcoord0 =  (texture_matrix0 * vec4(texcoord0,0,1)).xy;
 }
-

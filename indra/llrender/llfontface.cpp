@@ -32,6 +32,7 @@
 
 #include "llfontfreetype.h"   // for LLFontGlyphInfo, LLFontManager, ll::fonts::LoadedFont
 #include "llfontgl.h"         // for sUseDarkEmojiPalette
+#include "llfontgpuglyphcache.h"
 #include "llfontregistry.h"   // for EFontHinting full definition
 #include "llframetimer.h"     // collectGarbage throttle clock
 #include "llimage.h"          // LLImageRaw, LLImageDataLock
@@ -52,17 +53,14 @@
 
 extern FT_Library gFTLibrary;
 
-LLFontFace::LLFontFace()
-:   mHinting(static_cast<EFontHinting>(0)),
-    mFontBitmapCachep(new LLFontBitmapCache)
+LLFontFace::LLFontFace() : mHinting(static_cast<EFontHinting>(0)), mFontBitmapCachep(new LLFontBitmapCache)
 {
 }
 
 LLFontFace::~LLFontFace()
 {
     // Free LLFontGlyphInfo entries — owned by this face's cache.
-    for (auto& entry : mGlyphInfoMap)
-        delete entry.second;
+    for (auto& entry : mGlyphInfoMap) delete entry.second;
     mGlyphInfoMap.clear();
 
     if (mHbFont)
@@ -79,22 +77,67 @@ LLFontFace::~LLFontFace()
     }
     delete mFontBitmapCachep;
     mFontBitmapCachep = nullptr;
+#if LL_HAS_HB_GPU
+    delete mGpuGlyphCachep;
+    mGpuGlyphCachep = nullptr;
+    delete mGpuColorGlyphCachep;
+    mGpuColorGlyphCachep = nullptr;
+#endif
 }
+
+#if LL_HAS_HB_GPU
+LLFontGpuGlyphCache* LLFontFace::getGpuGlyphCache() const
+{
+    if (!mGpuGlyphCachep && isValid())
+    {
+        if (hb_font_t* hbf = getHbFont())
+        {
+            mGpuGlyphCachep = new LLFontGpuGlyphCache();
+            mGpuGlyphCachep->init(hbf);
+        }
+    }
+    return mGpuGlyphCachep;
+}
+
+LLFontGpuGlyphCache* LLFontFace::getGpuColorGlyphCache() const
+{
+    if (!mHasColrV1) return nullptr;
+    if (!mGpuColorGlyphCachep && isValid())
+    {
+        if (hb_font_t* hbf = getHbFont())
+        {
+            mGpuColorGlyphCachep = new LLFontGpuGlyphCache();
+            mGpuColorGlyphCachep->init(hbf, true, mPaletteIndex);
+        }
+    }
+    return mGpuColorGlyphCachep;
+}
+
+U64 LLFontFace::getGpuCacheGeneration() const
+{
+    return (mGpuGlyphCachep || mGpuColorGlyphCachep) ? (U64)(U32)LLFontGpuGlyphCache::getGeneration() : 0;
+}
+#else
+LLFontGpuGlyphCache* LLFontFace::getGpuGlyphCache() const { return nullptr; }
+LLFontGpuGlyphCache* LLFontFace::getGpuColorGlyphCache() const { return nullptr; }
+U64 LLFontFace::getGpuCacheGeneration() const { return 0; }
+#endif
 
 bool LLFontFace::load(const std::string& filename, S32 face_index,
                       F32 point_size, F32 vert_dpi, F32 horz_dpi,
                       EFontHinting hinting, S32 flags,
-                      const LLFontVarAxes& var_axes)
+                      const LLFontVarAxes& var_axes,
+                      bool gpu_linear)
 {
     llassert(!mFTFace); // load() is called once per LLFontFace instance.
 
     mHinting = hinting;
+    mGpuLinear = gpu_linear;
 
     FT_Open_Args openArgs;
     memset(&openArgs, 0, sizeof(openArgs));
     openArgs.memory_base = gFontManagerp->loadFont(filename, openArgs.memory_size);
-    if (!openArgs.memory_base)
-        return false;
+    if (!openArgs.memory_base) return false;
 
     openArgs.flags = FT_OPEN_MEMORY;
     int error = FT_Open_Face(gFTLibrary, &openArgs, face_index, &mFTFace);
@@ -115,7 +158,6 @@ bool LLFontFace::load(const std::string& filename, S32 face_index,
     mHasColor     = FT_HAS_COLOR(mFTFace);
     mHasSvg       = FT_HAS_SVG(mFTFace);
     mIsFixedWidth = (mFTFace->face_flags & FT_FACE_FLAG_FIXED_WIDTH) != 0;
-    mUseSubpixelPen = !mHasColor && !mHasSvg && (hinting != EFontHinting::DEFAULT);
 
     // COLRv1 probe: read the first 2 bytes of the COLR table and check the
     // version field. FreeType's FT_LOAD_COLOR + FT_Render_Glyph rasterize
@@ -132,6 +174,14 @@ bool LLFontFace::load(const std::string& filename, S32 face_index,
         }
     }
 
+    // Analytic outlines use fractional placement even when the configured
+    // atlas hinter would normally snap to the pixel grid. Scalable COLRv1 is
+    // also analytic; bitmap and SVG color strikes remain snapped.
+    const bool gpu_outline = gpu_linear && mFTFace->units_per_EM > 0;
+    const bool gpu_linear_outline = gpu_outline && !mHasColor && !mHasSvg;
+    const bool gpu_scalable_color = gpu_outline && mHasColrV1;
+    mUseSubpixelPen = (!mHasColor && !mHasSvg && (hinting != EFontHinting::DEFAULT || gpu_linear_outline)) || gpu_scalable_color;
+
     // CPAL palette pick. Default to palette 0 (the font's primary palette).
     // When EmojiUseDarkPalette is on and the face actually carries a palette
     // flagged for dark backgrounds, prefer the first such palette; otherwise
@@ -141,8 +191,7 @@ bool LLFontFace::load(const std::string& filename, S32 face_index,
     if (mHasColor && LLFontGL::sUseDarkEmojiPalette)
     {
         FT_Palette_Data palette_data = {};
-        if (FT_Palette_Data_Get(mFTFace, &palette_data) == 0
-            && palette_data.palette_flags != nullptr)
+        if (FT_Palette_Data_Get(mFTFace, &palette_data) == 0 && palette_data.palette_flags != nullptr)
         {
             for (FT_UShort i = 0; i < palette_data.num_palettes; ++i)
             {
@@ -165,28 +214,18 @@ bool LLFontFace::load(const std::string& filename, S32 face_index,
     // like Inter automatically pick up the design's optical adjustment
     // at small / large sizes. Registry callers that want to pin opsz
     // can supply font_optical_size in fonts.xml.
-    if (var_axes.wght_set)
-        mWghtAxisSet = setVariationAxis("wght", var_axes.wght);
-    if (var_axes.opsz_set)
-        mOpszAxisSet = setVariationAxis("opsz", var_axes.opsz);
-    else
-        mOpszAxisSet = setVariationAxis("opsz", point_size);
-    if (var_axes.ital_set)
-        mItalAxisSet = setVariationAxis("ital", var_axes.ital);
-    if (var_axes.wdth_set)
-        mWdthAxisSet = setVariationAxis("wdth", var_axes.wdth);
-    if (var_axes.slnt_set)
-        mSlntAxisSet = setVariationAxis("slnt", var_axes.slnt);
+    if (var_axes.wght_set) mWghtAxisSet = setVariationAxis("wght", var_axes.wght);
+    if (var_axes.opsz_set) mOpszAxisSet = setVariationAxis("opsz", var_axes.opsz);
+    else mOpszAxisSet = setVariationAxis("opsz", point_size);
+    if (var_axes.ital_set) mItalAxisSet = setVariationAxis("ital", var_axes.ital);
+    if (var_axes.wdth_set) mWdthAxisSet = setVariationAxis("wdth", var_axes.wdth);
+    if (var_axes.slnt_set) mSlntAxisSet = setVariationAxis("slnt", var_axes.slnt);
 
     // Round-to-nearest into 26.6: a plain (S32) cast truncates toward zero,
     // which loses up to ~1/64 pt of precision for non-integer point sizes
     // (e.g. LSmall=8.1 -> 8.1 * 64 = 518.4 -> would truncate to 518 instead
     // of rounding to 518).
-    error = FT_Set_Char_Size(mFTFace,
-                             0,                                  // char_width in 1/64 pt
-                             ll_round(point_size * 64.f),        // char_height in 1/64 pt
-                             (U32)horz_dpi,
-                             (U32)vert_dpi);
+    error = FT_Set_Char_Size(mFTFace, 0, ll_round(point_size * 64.f), (U32)horz_dpi, (U32)vert_dpi);
     if (error)
     {
         FT_Done_Face(mFTFace);
@@ -203,6 +242,9 @@ bool LLFontFace::load(const std::string& filename, S32 face_index,
     // LLFontFaceKey. Snapshot ppem so getHbFont can assert the invariant.
     mLoadedXPpem = mFTFace->size->metrics.x_ppem;
     mLoadedYPpem = mFTFace->size->metrics.y_ppem;
+    mUnitsPerEm = (U16)mFTFace->units_per_EM;
+    constexpr F32 FT_FIXED_TO_PIXELS = 1.f / (65536.f * 64.f);
+    mDesignToPixelScale = static_cast<F32>(mFTFace->size->metrics.y_scale) * FT_FIXED_TO_PIXELS;
 
     // Prefer Unicode cmap explicitly. FT's auto-pick prefers Unicode when
     // present, but a font whose first cmap is non-Unicode (Apple Roman,
@@ -215,10 +257,7 @@ bool LLFontFace::load(const std::string& filename, S32 face_index,
     {
         LL_WARNS("Font") << "No Unicode cmap in " << filename
             << "; non-ASCII glyph lookups may be wrong" << LL_ENDL;
-        if (!mFTFace->charmap && mFTFace->num_charmaps > 0)
-        {
-            FT_Set_Charmap(mFTFace, mFTFace->charmaps[0]);
-        }
+        if (!mFTFace->charmap && mFTFace->num_charmaps > 0) FT_Set_Charmap(mFTFace, mFTFace->charmaps[0]);
     }
 
     // Size the bitmap atlas from the just-set face metrics. Same calculation
@@ -242,8 +281,7 @@ LLFontGlyphInfo* LLFontFace::findGlyphInfo(U32 glyph_index, EFontGlyphType type)
 {
     auto range = mGlyphInfoMap.equal_range(glyph_index);
     auto iter = (type != EFontGlyphType::Unspecified)
-        ? std::find_if(range.first, range.second,
-            [type](const glyph_info_map_t::value_type& e) { return e.second->mGlyphType == type; })
+        ? std::find_if(range.first, range.second, [type](const glyph_info_map_t::value_type& e) { return e.second->mGlyphType == type; })
         : range.first;
     return (iter != range.second) ? iter->second : nullptr;
 }
@@ -252,8 +290,7 @@ LLFontGlyphInfo* LLFontFace::insertGlyphInfo(U32 glyph_index, LLFontGlyphInfo* g
 {
     llassert(gi->mGlyphType < EFontGlyphType::Count);
     auto range = mGlyphInfoMap.equal_range(glyph_index);
-    auto iter = std::find_if(range.first, range.second,
-        [gi](const glyph_info_map_t::value_type& e) { return e.second->mGlyphType == gi->mGlyphType; });
+    auto iter = std::find_if(range.first, range.second, [gi](const glyph_info_map_t::value_type& e) { return e.second->mGlyphType == gi->mGlyphType; });
     if (iter != range.second)
     {
         // Keep the already-published entry — pointers to it may be live up
@@ -271,17 +308,14 @@ LLFontGlyphInfo* LLFontFace::insertGlyphInfo(U32 glyph_index, LLFontGlyphInfo* g
 
 void LLFontFace::resetBitmapCache()
 {
-    for (auto& entry : mGlyphInfoMap)
-        delete entry.second;
+    for (auto& entry : mGlyphInfoMap) delete entry.second;
     mGlyphInfoMap.clear();
-    if (mFontBitmapCachep)
-        mFontBitmapCachep->reset();
+    if (mFontBitmapCachep) mFontBitmapCachep->reset();
 }
 
 void LLFontFace::collectGarbage() const
 {
-    if (!mFTFace || !mFontBitmapCachep)
-        return;
+    if (!mFTFace || !mFontBitmapCachep) return;
 
     // Sweep cadence: cheap enough to run at the top of every frame, with
     // GC_INTERVAL_SEC bounding actual work. Idle threshold sized for "real
@@ -293,8 +327,7 @@ void LLFontFace::collectGarbage() const
     constexpr F64 IDLE_THRESHOLD_SEC   = 60.0 * 15.0;
 
     const F64 now = LLFrameTimer::getTotalSeconds();
-    if (now < mNextGcTime)
-        return;
+    if (now < mNextGcTime) return;
     mNextGcTime = now + GC_INTERVAL_SEC;
 
     auto glyph_uses_sheet = [](const LLFontGlyphInfo* gi, EFontGlyphType type, U32 num) -> bool
@@ -302,8 +335,7 @@ void LLFontFace::collectGarbage() const
         for (U8 p = 0; p < gi->mPhaseCount; ++p)
         {
             const auto& entry = gi->mPhaseSlots[p].mBitmapEntry;
-            if (entry.first == type && entry.second >= 0 && static_cast<U32>(entry.second) == num)
-                return true;
+            if (entry.first == type && entry.second >= 0 && static_cast<U32>(entry.second) == num) return true;
         }
         return false;
     };
@@ -318,16 +350,13 @@ void LLFontFace::collectGarbage() const
         const U32 sheet_count = mFontBitmapCachep->getNumBitmaps(type);
         for (U32 num = 0; num < sheet_count; ++num)
         {
-            if (mFontBitmapCachep->isSheetReleased(type, num))
-                continue;
+            if (mFontBitmapCachep->isSheetReleased(type, num)) continue;
             const F64 last_used = mFontBitmapCachep->getSheetLastUsedTime(type, num);
             // last_used == 0 means the sheet was allocated but not yet drawn
             // from — skip it for one cycle so a brand-new sheet gets at least
             // a frame to be touched before it's a candidate.
-            if (last_used <= 0.0)
-                continue;
-            if ((now - last_used) <= IDLE_THRESHOLD_SEC)
-                continue;
+            if (last_used <= 0.0) continue;
+            if ((now - last_used) <= IDLE_THRESHOLD_SEC) continue;
 
             // Delete the glyph entries that reference this sheet, then
             // release the sheet itself. There is no head-side cache to
@@ -358,8 +387,7 @@ void LLFontFace::destroyGL()
     // point at atlas slots in zombie LLImageGLs (CPU object alive, GL
     // name 0), every bind() falls through to sDefaultGLTexture, and text
     // renders as solid colored rectangles.
-    if (mFontBitmapCachep)
-        mFontBitmapCachep->destroyGL();
+    if (mFontBitmapCachep) mFontBitmapCachep->destroyGL();
     resetBitmapCache();
 }
 
@@ -380,8 +408,7 @@ bool LLFontFace::setSubImageBGRA(U32 x, U32 y, U32 bitmap_num,
     // alias is strict-aliasing UB. Go through the byte cursor + memcpy
     // (folded to a single 32-bit store by both GCC and Clang).
     U8* const image_data = image_raw->getData();
-    if (!image_data)
-        return false;
+    if (!image_data) return false;
 
     // FreeType convention: `data` points to the first row in DRAW order
     // (top of the glyph). `stride` is the signed byte offset to the next
@@ -426,11 +453,9 @@ void LLFontFace::setSubImageLuminanceAlpha(U32 x, U32 y, U32 bitmap_num,
 
     U8* target = image_raw->getData();
     llassert(target);
-    if (!data || !target)
-        return;
+    if (!data || !target) return;
 
-    if (0 == stride)
-        stride = width;
+    if (0 == stride) stride = width;
 
     // Hard bounds check: nextOpenPos is supposed to guarantee that the
     // chosen (x, y, width, height) box fits inside the just-allocated
@@ -480,8 +505,7 @@ void LLFontFace::setSubImageLuminanceAlpha(U32 x, U32 y, U32 bitmap_num,
 
 U32 LLFontFace::getCharGlyphIndex(llwchar wch) const
 {
-    if (!mFTFace)
-        return 0;
+    if (!mFTFace) return 0;
 
     auto [it, inserted] = mCharIndexCache.try_emplace(wch, 0);
     if (inserted)
@@ -541,7 +565,10 @@ hb_font_t* LLFontFace::getHbFont() const
             // Drawing-time loads in renderGlyph build their own load_flags;
             // those override these. EFontHinting's bit pattern is laid out to
             // be a valid FT_LOAD_* flag composite (see EFontHinting comments).
-            hb_ft_font_set_load_flags(mHbFont, static_cast<int>(mHinting));
+            // The GPU rasterizer consumes unhinted outlines, so shaping must
+            // return matching linear advances rather than grid-fitted metrics.
+            const int load_flags = useLinearMetrics() ? FT_LOAD_NO_HINTING : static_cast<int>(mHinting);
+            hb_ft_font_set_load_flags(mHbFont, load_flags);
         }
     }
     return mHbFont;
@@ -549,8 +576,7 @@ hb_font_t* LLFontFace::getHbFont() const
 
 bool LLFontFace::setVariationAxis(const std::string& axis_tag, F32 value)
 {
-    if (!mFTFace || axis_tag.size() < 4)
-        return false;
+    if (!mFTFace || axis_tag.size() < 4) return false;
 
     FT_MM_Var* master = nullptr;
     if (FT_Get_MM_Var(mFTFace, &master) != 0)

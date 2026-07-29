@@ -11,9 +11,9 @@ namespace rdui
     {
         const float line_height = std::ceil(style.line_height ? style.line_height->pixels : style.font_size);
         if (text.empty()) return {0.f, line_height};
-        const bool bold = style.font_bold;
         const std::size_t characters = utf8str_to_wstring(text).size();
-        const float factor = bold ? mBoldWidthFactor : mRegularWidthFactor;
+        const float weight_mix = std::clamp((static_cast<float>(style.font_weight) - 400.f) / 300.f, 0.f, 1.f);
+        const float factor = mRegularWidthFactor + (mBoldWidthFactor - mRegularWidthFactor) * weight_mix;
         return {std::ceil(static_cast<float>(characters) * style.font_size * factor), line_height};
     }
 

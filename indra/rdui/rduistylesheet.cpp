@@ -17,7 +17,7 @@ namespace rdui
         };
         if (missing(InheritedStyleProperty::FontFamily)) style.font_family = parent.font_family;
         if (missing(InheritedStyleProperty::FontSize)) style.font_size = parent.font_size;
-        if (missing(InheritedStyleProperty::FontWeight)) style.font_bold = parent.font_bold;
+        if (missing(InheritedStyleProperty::FontWeight)) style.font_weight = parent.font_weight;
         if (missing(InheritedStyleProperty::FontStyle)) style.font_italic = parent.font_italic;
         if (missing(InheritedStyleProperty::LineHeight)) style.line_height = parent.line_height;
         if (missing(InheritedStyleProperty::TextColor)) style.text_color = parent.text_color;

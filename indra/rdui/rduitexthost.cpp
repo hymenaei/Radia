@@ -52,7 +52,7 @@ namespace rdui
             Style style = inherited;
             switch (node.kind())
             {
-                case InlineContentKind::B: style.font_bold = true; break;
+                case InlineContentKind::B: style.font_weight = 700; break;
                 case InlineContentKind::I: style.font_italic = true; break;
                 case InlineContentKind::S: style.font_strike = true; break;
                 case InlineContentKind::Br:

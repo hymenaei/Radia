@@ -2843,6 +2843,22 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>AlchemyFontRenderGPU</key>
+        <map>
+            <key>Comment</key>
+            <string>
+                Render scalable outline and COLRv1 text with HarfBuzz-GPU's
+                resolution-independent analytic renderer. Enabled by default.
+                Bitmap/SVG color fonts and unsupported graphics hardware use
+                the compatibility atlas renderer.
+            </string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
         <key>AlchemyFancyChatDivider</key>
         <map>
             <key>Comment</key>
@@ -3052,4 +3068,3 @@
         </map>
     </map>
 </llsd>
-

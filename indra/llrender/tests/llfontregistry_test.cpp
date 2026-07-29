@@ -237,15 +237,19 @@ namespace tut
     {
         LLFontDescriptor desc("SansSerif", "", 0);
         desc.addFontFile("Foo.ttf", EFontHinting::DEFAULT, 0, 0.f);
+        desc.setPointSize(9.75f);
+        desc.setWeight(525);
         LLFontDescriptor n = desc.normalize();
         ensure_equals("file count preserved", (S32)n.getFontFiles().size(), 1);
         ensure_equals("file name preserved",
                       n.getFontFiles()[0].FileName, std::string("Foo.ttf"));
+        ensure_equals("exact point size preserved", n.getPointSize(), 9.75f);
+        ensure_equals("variable weight preserved", n.getWeight(), static_cast<U16>(525));
     }
 
-    // operator== compares (name, style, size). Different files but same
-    // identity-tuple still compare equal — that's intentional, the file
-    // list is treated as data the descriptor carries, not part of identity.
+    // operator== compares the resolved face request, including exact size
+    // and weight. Different files but the same request still compare equal
+    // because the file list is descriptor data, not part of cache identity.
     template<> template<>
     void llfontregistry_object::test<8>()
     {
@@ -255,10 +259,18 @@ namespace tut
         b.addFontFile("b.ttf", EFontHinting::DEFAULT, 0, 0.f);
         ensure("equal regardless of files", a == b);
         ensure_equals("hash matches", hash_value(a), hash_value(b));
+
+        LLFontDescriptor other_size(a);
+        other_size.setPointSize(9.75f);
+        ensure("exact point size participates in identity", !(a == other_size));
+
+        LLFontDescriptor other_weight(a);
+        other_weight.setWeight(700);
+        ensure("variable weight participates in identity", !(a == other_weight));
     }
 
-    // operator< orders lexicographically by (name, style, size). Style
-    // comparisons happen ahead of size — verify by holding name fixed.
+    // operator< orders lexicographically by (name, style, named size,
+    // exact point size, weight). Style comparisons happen ahead of size.
     template<> template<>
     void llfontregistry_object::test<9>()
     {
@@ -2304,8 +2316,9 @@ namespace tut
                countFile("Target", "Target.woff2") == 1);
     }
 
-    // LLFontDescriptor equality and hash are keyed on (name, style, size)
-    // only — file lists are template *content*, not identity. Pinning this
+    // LLFontDescriptor equality and hash are keyed on the resolved request
+    // (name, style, named/exact size, weight) — file lists are template
+    // *content*, not identity. Pinning this
     // lets resolveFontReferences/applyFamilyOverrides mutate file lists by
     // erase + reinsert without rehashing collisions, and lets a request
     // descriptor (which carries no files) find the corresponding registry

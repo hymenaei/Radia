@@ -122,12 +122,23 @@ namespace tut
         const rdui::Style a = theme.resolve("label", "a", {}, 0);
         ensure_equals("font family", static_cast<int>(a.font_family), static_cast<int>(rdui::FontFamily::Sans));
         ensure_equals("font size", a.font_size, 19.f);
-        ensure("bold", a.font_bold);
+        ensure_equals("bold", a.font_weight, static_cast<U16>(700));
         ensure("italic", a.font_italic);
+
+        rdui::StyleSheet variable_weight;
+        ensure("numeric variable font weights compile",
+               variable_weight.loadRadia("label { font-weight: 525; }").ok());
+        ensure_equals("numeric weight is preserved",
+                      variable_weight.resolve("label", "", {}, 0).font_weight,
+                      static_cast<U16>(525));
 
         rdui::StyleSheet pseudo_family;
         ensure("weight is not accepted as a pseudo font family",
                !pseudo_family.loadRadia("label { font-family: sans-bold; }").ok());
+        ensure("fractional CSS weights are rejected",
+               !pseudo_family.loadRadia("label { font-weight: 525.5; }").ok());
+        ensure("CSS weights are unitless",
+               !pseudo_family.loadRadia("label { font-weight: 700px; }").ok());
     }
 
     template<> template<>

@@ -342,6 +342,9 @@ public:
     typedef std::map<std::string, std::string> defines_map_t; //NOTE: this must be an ordered map to maintain hash consistency
     defines_map_t mDefines;
     static defines_map_t sGlobalDefines;
+    std::string mExtraVertexSource;
+    std::string mExtraFragmentSource;
+    bool        mHasFontGpu = false;
     LLUUID mShaderHash;
     bool mUsingBinaryProgram = false;
 

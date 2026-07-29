@@ -126,7 +126,11 @@ public:
 
     bool operator==(const LLFontDescriptor& rhs) const
     {
-        return mName == rhs.mName && mStyle == rhs.mStyle && mSize == rhs.mSize;
+        return mName == rhs.mName
+            && mStyle == rhs.mStyle
+            && mSize == rhs.mSize
+            && mPointSize == rhs.mPointSize
+            && mWeight == rhs.mWeight;
     }
 
     friend std::size_t hash_value(LLFontDescriptor const& font)
@@ -135,6 +139,8 @@ public:
         boost::hash_combine(seed, font.mName);
         boost::hash_combine(seed, font.mStyle);
         boost::hash_combine(seed, font.mSize);
+        boost::hash_combine(seed, font.mPointSize);
+        boost::hash_combine(seed, font.mWeight);
         return seed;
     }
 
@@ -145,6 +151,14 @@ public:
     void setName(const std::string& name) { mName = name; }
     const std::string& getSize() const { return mSize; }
     void setSize(const std::string& size) { mSize = size; }
+    bool hasPointSize() const { return mPointSize > 0.f; }
+    F32 getPointSize() const { return mPointSize; }
+    // Exact sizes are canonicalized to FreeType's 26.6 point precision so
+    // equivalent CSS requests share one registry/face-cache entry.
+    void setPointSize(F32 point_size);
+    bool hasWeight() const { return mWeight != 0; }
+    U16 getWeight() const { return mWeight; }
+    void setWeight(U16 weight) { mWeight = weight; }
 
     void addFontFile(const std::string& file_name, EFontHinting hinting, S32 flags, F32 size_delta, const std::function<bool(llwchar)>& char_functor = nullptr, bool monospace_ligatures = false, bool load_collection = false, const LLFontVarAxes& var_axes = {});
     const font_file_info_vec_t & getFontFiles() const { return mFontFiles; }
@@ -159,8 +173,7 @@ public:
     {
         for (auto& f : mFontFiles)
         {
-            if (f.mSourceFamily.empty())
-                f.mSourceFamily = family;
+            if (f.mSourceFamily.empty()) f.mSourceFamily = family;
         }
     }
 
@@ -172,6 +185,10 @@ private:
     std::string mSize;
     font_file_info_vec_t mFontFiles;
     U8 mStyle;
+    F32 mPointSize = 0.f;
+    // CSS/OpenType weight (1..1000). Zero means use the selected template's
+    // configured weight, preserving legacy named-font behavior.
+    U16 mWeight = 0;
 };
 
 class LLFontRegistry
@@ -240,7 +257,10 @@ public:
     // GL cleanup
     void destroyGL();
 
-    LLFontGL *getFont(const LLFontDescriptor& desc);
+    // `prewarm_ascii` preserves the named-viewer-font startup behavior while
+    // allowing exact analytic RDUI instances to avoid building an unused
+    // bitmap atlas. Atlas fallback remains lazy and fully functional.
+    LLFontGL *getFont(const LLFontDescriptor& desc, bool prewarm_ascii = true);
     const LLFontDescriptor *getMatchingFontDesc(const LLFontDescriptor& desc);
     const LLFontDescriptor *getClosestFontTemplate(const LLFontDescriptor& desc);
 

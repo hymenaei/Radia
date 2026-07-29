@@ -184,7 +184,8 @@ locales:
                       static_cast<int>(commands[1].style.vertical_align),
                       static_cast<int>(rdui::VerticalAlign::Bottom));
         ensure_equals("bold run follows on the same line", commands[2].value, std::string("beta"));
-        ensure("B content strengthens the run style", commands[2].style.font_bold);
+        ensure_equals("B content strengthens the run style",
+                      commands[2].style.font_weight, static_cast<U16>(700));
         ensure_equals("Br advances the following run downward", commands[3].rect.y, 20.f);
         ensure("I content emphasizes the following run", commands[3].style.font_italic);
 
@@ -220,10 +221,11 @@ locales:
         ensure_equals("mixed bidi content splits at embedding and style boundaries",
                       mixed_rtl.count(rdui::PaintCommandKind::Text), 3U);
         ensure("rightmost logical style run is painted first in visual order",
-               mixed_rtl.commands()[1].style.font_bold);
+               mixed_rtl.commands()[1].style.font_weight == 700);
         ensure_equals("embedded LTR segment keeps its own visual run", mixed_rtl.commands()[2].value,
                       std::string("123"));
-        ensure("leading logical RTL segment is painted last", !mixed_rtl.commands()[3].style.font_bold);
+        ensure("leading logical RTL segment is painted last",
+               mixed_rtl.commands()[3].style.font_weight == 400);
 
         rdui::Text struck;
         struck.setContent(rdui::InlineContent({rdui::InlineContentNode::container(

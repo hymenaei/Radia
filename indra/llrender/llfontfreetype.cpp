@@ -343,7 +343,7 @@ bool LLFontFreetype::loadFace(const std::string& filename, F32 point_size, F32 v
     // Resolve the (file, sized + variable axis) state via the manager's
     // shared face cache. Heads and fallbacks alike consult the cache; same
     // params yield the same wrapper.
-    LLFontFaceKey key{filename, face_n, point_size, vert_dpi, horz_dpi, hinting, flags, var_axes};
+    LLFontFaceKey key{filename, face_n, point_size, vert_dpi, horz_dpi, hinting, flags, var_axes, LLFontGL::sEnableFontGpu};
     mFace = gFontManagerp->getOrCreateFace(key);
     if (!mFace || !mFace->isValid())
     {
@@ -366,9 +366,18 @@ bool LLFontFreetype::loadFace(const std::string& filename, F32 point_size, F32 v
     // sub-pixel due to FreeType's internal 16.16 y_scale rounding.
     constexpr F32 INV_64 = 1.f / 64.f;
     const FT_Size_Metrics& metrics = ft->size->metrics;
-    mAscender   =  metrics.ascender  * INV_64;
-    mDescender  = -metrics.descender * INV_64;  // FT descender is negative; flip to positive depth.
-    mLineHeight =  metrics.height    * INV_64;
+    if (mFace->useLinearMetrics())
+    {
+        mAscender   =  FT_MulFix(ft->ascender,  metrics.y_scale) * INV_64;
+        mDescender  = -FT_MulFix(ft->descender, metrics.y_scale) * INV_64;
+        mLineHeight =  FT_MulFix(ft->height,    metrics.y_scale) * INV_64;
+    }
+    else
+    {
+        mAscender   =  metrics.ascender  * INV_64;
+        mDescender  = -metrics.descender * INV_64;
+        mLineHeight =  metrics.height    * INV_64;
+    }
 
     // The atlas (LLFontBitmapCache) is owned by mFace and was initialized
     // inside LLFontFace::load; nothing to do here for atlas setup.
@@ -730,9 +739,16 @@ LLFontGlyphInfo* LLFontFreetype::renderAndCreateGlyph(const LLFontFreetype* font
             // Keep them so inter-glyph spacing can be corrected in getXKerning().
             gi->mLsbDelta = (S32)fontp->getFTFace()->glyph->lsb_delta;
             gi->mRsbDelta = (S32)fontp->getFTFace()->glyph->rsb_delta;
-            // Convert these from 26.6 units to float pixels.
-            gi->mXAdvance = fontp->getFTFace()->glyph->advance.x / 64.f;
-            gi->mYAdvance = fontp->getFTFace()->glyph->advance.y / 64.f;
+            if (fontp->mFace->useLinearMetrics())
+            {
+                gi->mXAdvance = fontp->getFTFace()->glyph->linearHoriAdvance / 65536.f;
+                gi->mYAdvance = fontp->getFTFace()->glyph->linearVertAdvance / 65536.f;
+            }
+            else
+            {
+                gi->mXAdvance = fontp->getFTFace()->glyph->advance.x / 64.f;
+                gi->mYAdvance = fontp->getFTFace()->glyph->advance.y / 64.f;
+            }
         }
 
         // Copy the rasterized bitmap into the per-phase atlas slot.
@@ -1291,7 +1307,7 @@ LLPointer<LLFontFace> LLFontManager::getOrCreateFace(const LLFontFaceKey& key)
     LLPointer<LLFontFace> face = new LLFontFace;
     if (!face->load(key.filename, key.face_index, key.point_size,
                     key.vert_dpi, key.horz_dpi, key.hinting, key.flags,
-                    key.var_axes))
+                    key.var_axes, key.gpu_linear))
     {
         // Don't cache failures — caller handles retry through search paths.
         return nullptr;

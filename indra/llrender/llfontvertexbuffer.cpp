@@ -30,41 +30,23 @@
 
 #include "llfontbitmapcache.h"
 #include "llfontfreetype.h"
+#include "llfontgpuglyphcache.h"
+#include "llfontgpushader.h"
+#include "llshadermgr.h"
 #include "llglslshader.h"
 #include "llimagegl.h"
 #include "llrender.h"
 #include "llvertexbuffer.h"
-
-#include "llmath.h"  // clamp_rescale
-
 
 bool LLFontVertexBuffer::sEnableBufferCollection = true;
 bool LLFontVertexBuffer::sEnableColorOnlyRegen = true;
 
 namespace
 {
-    // Mirrors the shadow-alpha derivation in LLFontGL::render preamble. Returns
-    // the alpha byte (0..255) for the shadow color given foreground color and
-    // the requested shadow type. Returns 0 (no shadow) when the foreground
-    // luminance falls below the dark-text gate, matching the gate at line ~196
-    // of llfontgl.cpp.
-    U8 derive_shadow_alpha(const LLColor4& fg, LLFontGL::ShadowType shadow)
+    bool containsAnalyticGeometry(const std::list<LLVertexBufferData>& buffers)
     {
-        if (shadow == LLFontGL::NO_SHADOW)
-        {
-            return 0;
-        }
-        F32 luminance;
-        fg.calcHSL(NULL, NULL, &luminance);
-        if (luminance < 0.35f)
-        {
-            return 0;
-        }
-        const F32 strength = clamp_rescale(luminance, 0.35f, 0.6f, 0.f, 1.f);
-        const F32 soft_scale = (shadow == LLFontGL::DROP_SHADOW_SOFT) ? 0.3f : 1.f; // DROP_SHADOW_SOFT_STRENGTH
-        const LLColor4U fg_u(fg);
-        const F32 alpha = (F32)fg_u.mV[VALPHA] * strength * soft_scale;
-        return (U8)alpha;
+        for (const LLVertexBufferData& buffer : buffers) if (buffer.mFontGpuGeometry) return true;
+        return false;
     }
 }
 
@@ -83,6 +65,8 @@ void LLFontVertexBuffer::reset()
     // Regenerating this list is expensive
     mShadowBufferList.clear();
     mForegroundBufferList.clear();
+    mHasColorGlyphs = false;
+    mHasAnalyticGlyphs = false;
 }
 
 S32 LLFontVertexBuffer::render(
@@ -153,10 +137,7 @@ S32 LLFontVertexBuffer::render(
     bool use_ellipses,
     bool use_color )
 {
-    if (!LLFontGL::sDisplayFont) //do not display texts
-    {
-        return static_cast<S32>(text.length());
-    }
+    if (!LLFontGL::sDisplayFont) return static_cast<S32>(text.length());
     if (!sEnableBufferCollection)
     {
         // For debug purposes and performance testing
@@ -187,18 +168,19 @@ S32 LLFontVertexBuffer::render(
     // cheap epsilon-free comparison: if either side is on a different side of
     // the gate, fall back to full regen.
     const bool gate_crossed = (shadow != LLFontGL::NO_SHADOW)
-        && ((derive_shadow_alpha(color, shadow) == 0) !=
-            (derive_shadow_alpha(mLastColor, mLastShadow) == 0));
+        && ((LLFontGL::deriveShadowParameters(color, shadow).alpha == 0) !=
+            (LLFontGL::deriveShadowParameters(mLastColor, mLastShadow).alpha == 0));
 
-    if (mShadowBufferList.empty() && mForegroundBufferList.empty())
+    const bool nothing_cached = mShadowBufferList.empty() && mForegroundBufferList.empty();
+    const bool analytic_invalid = (mLastEnableFontGpu != LLFontGL::sEnableFontGpu);
+
+    if (nothing_cached)
     {
-        genBuffers(fontp, text, begin_offset, x, y, color, halign, valign,
-            style, shadow, max_chars, max_pixels, right_x, use_ellipses, use_color);
+        genBuffers(fontp, text, begin_offset, x, y, color, halign, valign, style, shadow, max_chars, max_pixels, right_x, use_ellipses, use_color);
     }
-    else if (geometry_invalid || gate_crossed)
+    else if (geometry_invalid || gate_crossed || analytic_invalid)
     {
-        genBuffers(fontp, text, begin_offset, x, y, color, halign, valign,
-            style, shadow, max_chars, max_pixels, right_x, use_ellipses, use_color);
+        genBuffers(fontp, text, begin_offset, x, y, color, halign, valign, style, shadow, max_chars, max_pixels, right_x, use_ellipses, use_color);
     }
     else if (mLastColor != color)
     {
@@ -207,26 +189,26 @@ S32 LLFontVertexBuffer::render(
         // hot path during button hover/press fades. Falls back to genBuffers
         // for mixed text+emoji strings (mLastUsesColorAtlas) since emoji
         // glyphs need fixed (255,255,255) RGB even on color change.
-        if (sEnableColorOnlyRegen && !mLastUsesColorAtlas)
+        if (sEnableColorOnlyRegen && !mLastUsesColorAtlas && !mHasColorGlyphs)
         {
             recolorBuffers(color, shadow);
-            renderBuffers();
-            if (right_x)
+            if (renderBuffers())
             {
-                *right_x = mLastRightX;
+                if (right_x) *right_x = mLastRightX;
+                return mChars;
             }
-            return mChars;
         }
-        genBuffers(fontp, text, begin_offset, x, y, color, halign, valign,
-            style, shadow, max_chars, max_pixels, right_x, use_ellipses, use_color);
+        genBuffers(fontp, text, begin_offset, x, y, color, halign, valign, style, shadow, max_chars, max_pixels, right_x, use_ellipses, use_color);
     }
     else
     {
-        renderBuffers();
-
-        if (right_x)
+        if (renderBuffers())
         {
-            *right_x = mLastRightX;
+            if (right_x) *right_x = mLastRightX;
+        }
+        else
+        {
+            genBuffers(fontp, text, begin_offset, x, y, color, halign, valign, style, shadow, max_chars, max_pixels, right_x, use_ellipses, use_color);
         }
     }
     return mChars;
@@ -248,6 +230,7 @@ void LLFontVertexBuffer::genBuffers(
     // todo: add a debug build assert if this triggers too often for to long?
     mShadowBufferList.clear();
     mForegroundBufferList.clear();
+    mHasAnalyticGlyphs = false;
     // Save before rendreing, it can change mid-render,
     // so will need to rerender previous characters
     mLastFontCacheGen = fontp->getCacheGeneration();
@@ -276,13 +259,16 @@ void LLFontVertexBuffer::genBuffers(
             gGL.beginList(&mForegroundBufferList);
         };
     }
-    else
-    {
-        gGL.beginList(&mForegroundBufferList);
-    }
+    else gGL.beginList(&mForegroundBufferList);
+    mLastEnableFontGpu = LLFontGL::sEnableFontGpu;
+    LLFontGL::RenderMetadata metadata;
+
     mChars = fontp->render(text, begin_offset, x, y, color, halign, valign,
-        style, shadow, max_chars, max_pixels, right_x, use_ellipses, use_color, pass_boundary);
+        style, shadow, max_chars, max_pixels, right_x, use_ellipses, use_color,
+        pass_boundary, &metadata);
     gGL.endList();
+    mHasColorGlyphs = metadata.emitted_fixed_color_glyph;
+    mHasAnalyticGlyphs = containsAnalyticGeometry(mShadowBufferList) || containsAnalyticGeometry(mForegroundBufferList);
 
     // Detect whether any captured batch sampled the color (RGBA emoji) atlas.
     // Mixed strings can't be recolored cheaply because emoji glyphs use a
@@ -299,29 +285,19 @@ void LLFontVertexBuffer::genBuffers(
         // sampled from.
         std::vector<LLGLuint> color_texnames;
         auto collect_from_cache = [&color_texnames](const LLFontBitmapCache* cache) {
-            if (!cache)
-                return;
+            if (!cache) return;
             const U32 color_atlas_count = cache->getNumBitmaps(EFontGlyphType::Color);
             for (U32 i = 0; i < color_atlas_count; ++i)
             {
-                if (LLImageGL* img = cache->getImageGL(EFontGlyphType::Color, i))
-                    color_texnames.push_back(img->getTexName());
+                if (LLImageGL* img = cache->getImageGL(EFontGlyphType::Color, i)) color_texnames.push_back(img->getTexName());
             }
         };
         collect_from_cache(face->getBitmapCache());
-        for (const auto& fb : face->getFallbackFonts())
-        {
-            if (fb.first)
-                collect_from_cache(fb.first->getBitmapCache());
-        }
+        for (const auto& fb : face->getFallbackFonts()) if (fb.first) collect_from_cache(fb.first->getBitmapCache());
         if (!color_texnames.empty())
         {
             auto entry_uses_color = [&color_texnames](const LLVertexBufferData& entry) {
-                for (LLGLuint name : color_texnames)
-                {
-                    if (name && entry.mTexName == name)
-                        return true;
-                }
+                for (LLGLuint name : color_texnames) if (name && entry.mTexName == name) return true;
                 return false;
             };
             for (const LLVertexBufferData& entry : mForegroundBufferList)
@@ -354,15 +330,10 @@ void LLFontVertexBuffer::genBuffers(
     mLastOrigin = LLFontGL::sCurOrigin;
     mLastResGeneration = LLFontGL::sResolutionGeneration;
 
-    if (right_x)
-    {
-        mLastRightX = *right_x;
-    }
+    if (right_x) mLastRightX = *right_x;
 }
 
-void LLFontVertexBuffer::recolorBuffers(
-    const LLColor4& color,
-    LLFontGL::ShadowType shadow)
+void LLFontVertexBuffer::recolorBuffers(const LLColor4& color, LLFontGL::ShadowType shadow)
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_UI;
 
@@ -371,7 +342,7 @@ void LLFontVertexBuffer::recolorBuffers(
     // Foreground: rebroadcast the new color across every captured fg vertex.
     // Pure-text path only (caller has guarded mLastUsesColorAtlas == false).
     const LLColor4U fg_u(color);
-    const U8 shadow_alpha = derive_shadow_alpha(color, shadow);
+    const U8 shadow_alpha = LLFontGL::deriveShadowParameters(color, shadow).alpha;
     LLColor4U shadow_u = LLFontGL::sShadowColor;
     shadow_u.mV[VALPHA] = shadow_alpha;
 
@@ -387,15 +358,10 @@ void LLFontVertexBuffer::recolorBuffers(
     {
         for (LLVertexBufferData& entry : list)
         {
-            if (entry.mVB.isNull() || entry.mCount == 0)
-                continue;
+            if (entry.mVB.isNull() || entry.mCount == 0) continue;
             LLStrider<LLColor4U> colors;
-            if (!entry.mVB->getColorStrider(colors, 0, entry.mCount))
-                continue;
-            for (U32 i = 0; i < entry.mCount; ++i)
-            {
-                colors[i] = fill;
-            }
+            if (!entry.mVB->getColorStrider(colors, 0, entry.mCount)) continue;
+            for (U32 i = 0; i < entry.mCount; ++i) colors[i] = fill;
         }
     };
     recolor(mForegroundBufferList, fg_u);
@@ -408,9 +374,52 @@ void LLFontVertexBuffer::recolorBuffers(
     mLastColor = color;
 }
 
-void LLFontVertexBuffer::renderBuffers()
+bool LLFontVertexBuffer::renderBuffers()
 {
     gGL.flush(); // deliberately empty pending verts
+
+    LLGLSLShader* caller_shader = LLGLSLShader::sCurBoundShaderPtr;
+    LLGLSLShader* analytic_shader = caller_shader;
+    const auto restore_caller_shader = [caller_shader]()
+    {
+        if (caller_shader && LLGLSLShader::sCurBoundShaderPtr != caller_shader) caller_shader->bind();
+        else if (!caller_shader && LLGLSLShader::sCurBoundShaderPtr) LLGLSLShader::sCurBoundShaderPtr->unbind();
+    };
+    const auto replay_unavailable = [&restore_caller_shader]()
+    {
+        restore_caller_shader();
+        return false;
+    };
+#if LL_HAS_HB_GPU
+    if (mHasAnalyticGlyphs)
+    {
+        if (!analytic_shader || !analytic_shader->mHasFontGpu) analytic_shader = LLFontGpuShader::getBatchedProgram();
+        if (!analytic_shader) return replay_unavailable();
+
+        const S32 glyph_unit = analytic_shader->getTextureChannel(LLShaderMgr::FONT_GLYPH_BUFFER);
+        if (glyph_unit < 0) return replay_unavailable();
+
+        gGL.getTexUnit(glyph_unit)->activate();
+        const bool bound = LLFontGpuGlyphCache::bindBufferTexture();
+        gGL.getTexUnit(0)->activate();
+        if (!bound) return replay_unavailable();
+    }
+#else
+    // Analytic geometry cannot be produced in this build, but keep the state
+    // invariant explicit if a serialized/corrupt cache ever says otherwise.
+    if (mHasAnalyticGlyphs) return replay_unavailable();
+#endif
+
+    const auto contains_standard_geometry = [](const std::list<LLVertexBufferData>& buffers)
+    {
+        for (const LLVertexBufferData& buffer : buffers) if (!buffer.mFontGpuGeometry) return true;
+        return false;
+    };
+    if (!caller_shader && (contains_standard_geometry(mShadowBufferList) || contains_standard_geometry(mForegroundBufferList)))
+    {
+        return replay_unavailable();
+    }
+
     gGL.getTexUnit(0)->enable(LLTexUnit::TT_TEXTURE);
     gGL.pushUIMatrix();
 
@@ -427,26 +436,29 @@ void LLFontVertexBuffer::renderBuffers()
     // Shadow first (under), foreground second (over). Pass-boundary order matches
     // the original interleaved-per-glyph emission's net visual stacking — shadow
     // contributions sit beneath glyph foregrounds rather than between them.
-    static const LLStaticHashedString sShadowMode("shadowMode");
+    const auto draw_pass = [&](std::list<LLVertexBufferData>& buffers, S32 standard_shadow_mode)
+    {
+        for (LLVertexBufferData& buffer : buffers)
+        {
+            LLGLSLShader* target = buffer.mFontGpuGeometry ? analytic_shader : caller_shader;
+            if (LLGLSLShader::sCurBoundShaderPtr != target)
+            {
+                gGL.flush();
+                target->bind();
+            }
+            if (mLastUsedShaderShadow && !buffer.mFontGpuGeometry) target->uniform1i(LLShaderMgr::FONT_SHADOW_MODE, standard_shadow_mode);
+            buffer.draw();
+        }
+    };
 
-    if (mLastUsedShaderShadow && LLGLSLShader::sCurBoundShaderPtr)
-    {
-        const int mode = (mLastShadow == LLFontGL::DROP_SHADOW) ? 1 : 2; // SOFT
-        LLGLSLShader::sCurBoundShaderPtr->uniform1i(sShadowMode, mode);
-    }
-    for (LLVertexBufferData& buffer : mShadowBufferList)
-    {
-        buffer.draw();
-    }
-    if (mLastUsedShaderShadow && LLGLSLShader::sCurBoundShaderPtr)
-    {
-        LLGLSLShader::sCurBoundShaderPtr->uniform1i(sShadowMode, 0);
-    }
-    for (LLVertexBufferData& buffer : mForegroundBufferList)
-    {
-        buffer.draw();
-    }
+    const S32 shadow_mode = (mLastShadow == LLFontGL::DROP_SHADOW) ? 1 : 2; // SOFT
+    draw_pass(mShadowBufferList, shadow_mode);
+    draw_pass(mForegroundBufferList, 0);
     gGL.popUIMatrix();
+
+    restore_caller_shader();
+    if (caller_shader && mLastUsedShaderShadow) caller_shader->uniform1i(LLShaderMgr::FONT_SHADOW_MODE, 0);
+    return true;
 }
 
 // LLFontWidthBuffer
@@ -475,23 +487,12 @@ void LLFontWidthBuffer::reset()
     mLastFontCacheGen = 0;
 }
 
-F32 LLFontWidthBuffer::getWidth(
-    const LLFontGL* fontp,
-    const llwchar* wchars,
-    S32 begin_offset,
-    S32 max_chars,
-    bool no_padding)
+F32 LLFontWidthBuffer::getWidth(const LLFontGL* fontp, const llwchar* wchars, S32 begin_offset, S32 max_chars, bool no_padding)
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_UI;
-    if (!fontp || !wchars)
-    {
-        return 0.f;
-    }
+    if (!fontp || !wchars) return 0.f;
 
-    if (!sEnableBufferCollection)
-    {
-        return fontp->getWidthF32(wchars, begin_offset, max_chars, no_padding);
-    }
+    if (!sEnableBufferCollection) return fontp->getWidthF32(wchars, begin_offset, max_chars, no_padding);
 
     // Check if we can use cached width
     bool needs_recalc = (mWidth < 0.f)

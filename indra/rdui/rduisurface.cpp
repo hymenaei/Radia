@@ -31,10 +31,8 @@ namespace rdui
             style.icon_stroke_color.a *= opacity;
             style.outline.color.a *= opacity;
             for (BoxShadow& shadow : style.shadows) shadow.color.a *= opacity;
-            if (style.background_gradient)
-                for (GradientStop& stop : style.background_gradient->stops) stop.color.a *= opacity;
-            if (style.border_gradient)
-                for (GradientStop& stop : style.border_gradient->stops) stop.color.a *= opacity;
+            if (style.background_gradient) for (GradientStop& stop : style.background_gradient->stops) stop.color.a *= opacity;
+            if (style.border_gradient) for (GradientStop& stop : style.border_gradient->stops) stop.color.a *= opacity;
             style.opacity = 1.f;
             return style;
         }
@@ -76,8 +74,7 @@ namespace rdui
     Surface::~Surface()
     {
         if (mRoot) mRoot->setSurface(nullptr);
-        for (auto& root : mLayerRoots)
-            if (root) root->setSurface(nullptr);
+        for (auto& root : mLayerRoots) if (root) root->setSurface(nullptr);
         if (mSystem) mSystem->unregisterSurface(*this);
     }
 
@@ -245,8 +242,7 @@ namespace rdui
             const SurfaceLayer layer = static_cast<SurfaceLayer>(index + 1);
             if (layer == SurfaceLayer::Floater || layer == SurfaceLayer::Modal)
             {
-                for (const auto& child : root.children())
-                    layoutTree(*child, *mStyleSheet, mTextMetrics, layoutDirection());
+                for (const auto& child : root.children()) layoutTree(*child, *mStyleSheet, mTextMetrics, layoutDirection());
             }
             else layoutTree(root, *mStyleSheet, mTextMetrics, layoutDirection());
         }
@@ -271,9 +267,12 @@ namespace rdui
         const Style unresolved = resolveWidgetStyle(*mStyleSheet, widget);
         const float child_opacity = inherited_opacity * unresolved.opacity;
         const Style painted = withDirection(withOpacity(unresolved, inherited_opacity), layoutDirection());
-        const bool clips_children = unresolved.overflow == Overflow::Hidden;
+        const bool clips_x = unresolved.overflow_x == Overflow::Hidden;
+        const bool clips_y = unresolved.overflow_y == Overflow::Hidden;
+        const bool clips_children = clips_x || clips_y;
+        const ClipAxes clip_axes = (clips_x ? ClipAxes::X : ClipAxes::None) | (clips_y ? ClipAxes::Y : ClipAxes::None);
         if (!painted.effects.empty()) context.beginEffects(widget.paintBounds(), painted, scale);
-        if (clips_children) context.pushClip(widget.rect(), scale);
+        if (clips_children) context.pushClip(widget.rect(), scale, clip_axes);
         widget.paint(context, painted, scale);
         for (const auto& child : widget.children()) paintWidget(*child, context, scale, child_opacity);
         if (clips_children) context.popClip();

@@ -3,39 +3,18 @@
 #include "rduipaintcontext.h"
 #include "rduistyle.h"
 #include "rduistylesheet.h"
+#include "rduitextlayout.h"
 #include "rduitextmetrics.h"
 #include "rduiwidget.h"
-#include "llstring.h"
 #include <algorithm>
 #include <cmath>
-#include <fribidi.h>
-#include <limits>
 
 namespace rdui
 {
     namespace
     {
-        struct TextRun
-        {
-            struct Key
-            {
-                std::string value;
-                Style style;
-                Vec2 text_size;
-                Vec2 box_size;
-                Vec2 size;
-            };
-
-            std::string value;
-            Style style;
-            Vec2 size;
-            Vec2 box_size;
-            std::vector<Key> keys;
-
-            bool keybinding() const { return !keys.empty(); }
-        };
-
-        using TextLine = std::vector<TextRun>;
+        using detail::TextLine;
+        using detail::TextRun;
 
         Style inlineStyle(const StyleSheet* theme, const Widget& owner,
                           const std::vector<std::string>& inline_ancestors,
@@ -115,90 +94,6 @@ namespace rdui
             return lines;
         }
 
-        Vec2 lineSize(const TextLine& line, float fallback_height)
-        {
-            Vec2 size{0.f, fallback_height};
-            for (const TextRun& run : line)
-            {
-                size.x += run.size.x;
-                size.y = std::max(size.y, run.size.y);
-            }
-            return size;
-        }
-
-        std::vector<TextRun> visualRuns(const TextLine& line, LayoutDirection direction, const TextMetrics& metrics)
-        {
-            if (line.size() < 2) return line;
-
-            std::vector<FriBidiChar> logical;
-            std::vector<std::pair<std::size_t, std::size_t>> ranges;
-            ranges.reserve(line.size());
-            for (const TextRun& run : line)
-            {
-                const std::size_t begin = logical.size();
-                if (run.keybinding()) logical.push_back(0xfffc);
-                else
-                {
-                    const LLWString wide = utf8str_to_wstring(run.value);
-                    for (llwchar character : wide) logical.push_back(static_cast<FriBidiChar>(character));
-                }
-                ranges.emplace_back(begin, logical.size());
-            }
-            if (logical.empty() || logical.size() > static_cast<std::size_t>(std::numeric_limits<FriBidiStrIndex>::max())) return line;
-
-            std::vector<FriBidiStrIndex> logical_to_visual(logical.size());
-            std::vector<FriBidiLevel> levels(logical.size());
-            FriBidiParType base_direction = direction == LayoutDirection::RightToLeft
-                                          ? FRIBIDI_PAR_RTL : FRIBIDI_PAR_LTR;
-            if (!fribidi_log2vis(logical.data(), static_cast<FriBidiStrIndex>(logical.size()),
-                                 &base_direction, nullptr, logical_to_visual.data(), nullptr, levels.data()))
-                return line;
-
-            struct VisualRun
-            {
-                FriBidiStrIndex start = 0;
-                TextRun run;
-            };
-
-            std::vector<VisualRun> segments;
-            for (std::size_t run_index = 0; run_index < line.size(); ++run_index)
-            {
-                const auto [run_begin, run_end] = ranges[run_index];
-                if (line[run_index].keybinding())
-                {
-                    segments.push_back({logical_to_visual[run_begin], line[run_index]});
-                    continue;
-                }
-                std::size_t begin = run_begin;
-                while (begin < run_end)
-                {
-                    std::size_t end = begin + 1;
-                    while (end < run_end && levels[end] == levels[begin]) ++end;
-
-                    FriBidiStrIndex visual_start = logical_to_visual[begin];
-                    LLWString wide;
-                    wide.reserve(end - begin);
-                    for (std::size_t offset = begin; offset < end; ++offset)
-                    {
-                        visual_start = std::min(visual_start, logical_to_visual[offset]);
-                        wide.push_back(static_cast<llwchar>(logical[offset]));
-                    }
-                    std::string value = wstring_to_utf8str(wide);
-                    segments.push_back({visual_start, {value, line[run_index].style, metrics.measureText(value, line[run_index].style)}});
-                    begin = end;
-                }
-            }
-            std::stable_sort(segments.begin(), segments.end(), [](const VisualRun& left, const VisualRun& right)
-            {
-                return left.start < right.start;
-            });
-
-            std::vector<TextRun> result;
-            result.reserve(segments.size());
-            for (VisualRun& segment : segments) result.push_back(std::move(segment.run));
-            return result;
-        }
-
         float alignedOffset(float available, float occupied, TextAlign alignment)
         {
             if (alignment == TextAlign::Center) return (available - occupied) * .5f;
@@ -235,8 +130,7 @@ namespace rdui
         bool hasKeybinding(const InlineContentNode& node)
         {
             if (node.kind() == InlineContentKind::Kbd) return true;
-            return std::any_of(node.children().begin(), node.children().end(),
-                               [](const InlineContentNode& child) { return hasKeybinding(child); });
+            return std::any_of(node.children().begin(), node.children().end(), [](const InlineContentNode& child) { return hasKeybinding(child); });
         }
 
         void appendKeybindingSignature(const InlineContentNode& node, std::string& signature)
@@ -253,8 +147,7 @@ namespace rdui
                 signature += '\x1f';
                 return;
             }
-            for (const InlineContentNode& child : node.children())
-                appendKeybindingSignature(child, signature);
+            for (const InlineContentNode& child : node.children()) appendKeybindingSignature(child, signature);
         }
 
         std::string keybindingSignature(const InlineContent& content)
@@ -276,9 +169,8 @@ namespace rdui
     void TextHost::resolveLocalized(const std::function<InlineContent(const LocalizationRequest&)>& resolve)
     {
         mContent = mSource.materialize(resolve);
-        mHasKeybindings = std::any_of(
-            mContent.nodes().begin(), mContent.nodes().end(),
-            [](const InlineContentNode& node) { return hasKeybinding(node); });
+        mHasKeybindings = std::any_of(mContent.nodes().begin(), mContent.nodes().end(),
+                                      [](const InlineContentNode& node) { return hasKeybinding(node); });
         updatePlainText();
     }
 
@@ -299,36 +191,28 @@ namespace rdui
 
     Vec2 TextHost::measure(const TextMetrics& metrics, const Style& style, const StyleSheet& theme, const Widget& owner) const
     {
-        const float fallback_height = metrics.measureText({}, style).y;
-        Vec2 result;
-        for (const TextLine& line : layoutLines(mContent, style, metrics, &theme, owner))
-        {
-            const Vec2 size = lineSize(line, fallback_height);
-            result.x = std::max(result.x, size.x);
-            result.y += size.y;
-        }
-        return result;
+        std::optional<float> available_width;
+        if (!style.width.isAuto() && !style.width.isPercentage()) available_width = std::max(0.f, style.width.pixels() - style.padding.horizontal());
+        return detail::layoutText(layoutLines(mContent, style, metrics, &theme, owner), style, metrics, available_width, false, false).size;
     }
 
     void TextHost::paint(PaintContext& context, const Rect& rect, const Style& style, const StyleSheet* theme, const Widget& owner) const
     {
-        const std::vector<TextLine> lines = layoutLines(mContent, style, context, theme, owner);
-        const float fallback_height = context.measureText({}, style).y;
+        const detail::TextLayout layout = detail::layoutText(layoutLines(mContent, style, context, theme, owner), style, context, rect.w, true, true);
         float y = rect.top();
-        for (const TextLine& line : lines)
+        for (const detail::LaidOutTextLine& line : layout.lines)
         {
-            const TextLine visual_line = visualRuns(line, style.direction, context);
-            const Vec2 size = lineSize(visual_line, fallback_height);
-            y -= size.y;
-            float x = rect.x + alignedOffset(rect.w, size.x, style.text_align);
-            for (const TextRun& run : visual_line)
+            y -= line.size.y;
+            float x = rect.x + alignedOffset(rect.w, line.size.x, style.text_align);
+            for (std::size_t run_index = 0;
+                 run_index < line.runs.size();
+                 ++run_index)
             {
+                const TextRun& run = line.runs[run_index];
                 if (run.keybinding())
                 {
-                    const float run_bottom = y + (size.y - run.size.y) * .5f;
-                    const Rect box{x + run.style.margin.left.fixedPixels(),
-                                   run_bottom + run.style.margin.bottom.fixedPixels(),
-                                   run.box_size.x, run.box_size.y};
+                    const float run_bottom = y + (line.size.y - run.size.y) * .5f;
+                    const Rect box{x + run.style.margin.left.fixedPixels(), run_bottom + run.style.margin.bottom.fixedPixels(), run.box_size.x, run.box_size.y};
                     context.paintBox(box, run.style);
                     float key_x = box.x + run.style.padding.left;
                     const float content_height = std::max(0.f, box.h - run.style.padding.vertical());
@@ -336,9 +220,7 @@ namespace rdui
                     {
                         const TextRun::Key& key = run.keys[index];
                         key_x += key.style.margin.left.fixedPixels();
-                        const float key_y = box.y + run.style.padding.bottom
-                                          + (content_height - key.size.y) * .5f
-                                          + key.style.margin.bottom.fixedPixels();
+                        const float key_y = box.y + run.style.padding.bottom + (content_height - key.size.y) * .5f + key.style.margin.bottom.fixedPixels();
                         const Rect key_box{key_x, key_y, key.box_size.x, key.box_size.y};
                         context.paintBox(key_box, key.style);
                         Style text_style = key.style;
@@ -352,12 +234,18 @@ namespace rdui
                         if (index + 1 < run.keys.size()) key_x += run.style.gap.fixedPixels();
                     }
                     x += run.size.x;
+                    if (run_index + 1 < line.runs.size())
+                        x += interRunSpacing(
+                            run, line.runs[run_index + 1], context);
                     continue;
                 }
                 Style run_style = run.style;
                 run_style.text_align = TextAlign::Left;
-                context.paintText(run.value, {x, y, run.size.x, size.y}, run_style);
+                context.paintText(run.value, {x, y, run.size.x, line.size.y}, run_style);
                 x += run.size.x;
+                if (run_index + 1 < line.runs.size())
+                    x += interRunSpacing(
+                        run, line.runs[run_index + 1], context);
             }
         }
     }

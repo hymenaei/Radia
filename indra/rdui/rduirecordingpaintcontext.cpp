@@ -9,6 +9,11 @@ namespace rdui
         return mTextMetrics.measureText(text, style);
     }
 
+    float RecordingPaintContext::usedLetterSpacing(const Style& style) const
+    {
+        return mTextMetrics.usedLetterSpacing(style);
+    }
+
     void RecordingPaintContext::beginFrame()
     {
         mCommands.push_back({PaintCommandKind::BeginFrame});
@@ -19,9 +24,11 @@ namespace rdui
         mCommands.push_back({PaintCommandKind::EndFrame});
     }
 
-    void RecordingPaintContext::pushClip(const Rect& rect, float scale)
+    void RecordingPaintContext::pushClip(const Rect& rect, float scale, ClipAxes axes)
     {
-        mCommands.push_back({PaintCommandKind::PushClip, rect, {}, {}, scale});
+        PaintCommand command{PaintCommandKind::PushClip, rect, {}, {}, scale};
+        command.clip_axes = axes;
+        mCommands.push_back(std::move(command));
         ++mClipDepth;
         mMaxClipDepth = std::max(mMaxClipDepth, mClipDepth);
     }
@@ -42,8 +49,7 @@ namespace rdui
         mCommands.push_back({PaintCommandKind::EndEffects});
     }
 
-    void RecordingPaintContext::paintBox(const Rect& rect, const Style& style,
-                                         std::optional<TopBorderGap> top_border_gap)
+    void RecordingPaintContext::paintBox(const Rect& rect, const Style& style, std::optional<TopBorderGap> top_border_gap)
     {
         PaintCommand command{PaintCommandKind::Box, rect, style};
         command.top_border_gap = top_border_gap;
@@ -68,8 +74,7 @@ namespace rdui
 
     const PaintCommand* RecordingPaintContext::last(PaintCommandKind kind) const
     {
-        const auto found = std::find_if(mCommands.rbegin(), mCommands.rend(),
-                                        [kind](const PaintCommand& command) { return command.kind == kind; });
+        const auto found = std::find_if(mCommands.rbegin(), mCommands.rend(), [kind](const PaintCommand& command) { return command.kind == kind; });
         return found == mCommands.rend() ? nullptr : &*found;
     }
 

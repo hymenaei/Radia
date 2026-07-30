@@ -9,6 +9,35 @@
 
     <text>demo.inlineContent</text>
 
+    <panel class="demo-property-sections">
+        <panel class="demo-section demo-text-properties">
+            <text class="demo-section-heading">demo.textProperties</text>
+
+            <text class="demo-font">demo.fontShorthand</text>
+            <text class="demo-tracking">demo.letterSpacing</text>
+            <text class="demo-word-spacing">demo.wordSpacing</text>
+            <text class="demo-wrap">demo.wrapping</text>
+
+            <text class="demo-ellipsis-end">demo.ellipsisEndInventory</text>
+            <text class="demo-ellipsis-center">demo.ellipsisCenterInventory</text>
+        </panel>
+
+        <panel class="demo-section demo-box-properties">
+            <text class="demo-section-heading">demo.boxProperties</text>
+
+            <text class="demo-outline">demo.outline</text>
+
+            <panel class="demo-overflow-row">
+                <panel class="demo-overflow-x">
+                    <text>demo.overflowX</text>
+                </panel>
+                <panel class="demo-overflow-y">
+                    <text>demo.overflowY</text>
+                </panel>
+            </panel>
+        </panel>
+    </panel>
+
     <button class="primary" onClick="press">
         <icon source="search"/>
         demo.press

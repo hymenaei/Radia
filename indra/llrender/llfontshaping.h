@@ -26,121 +26,46 @@
 #ifndef LL_LLFONTSHAPING_H
 #define LL_LLFONTSHAPING_H
 
-#include "llstring.h"
-
 #include <utility>
 #include <vector>
 
+#include "llstring.h"
+
 class LLFontFreetype;
 
-// One glyph produced by HarfBuzz shaping. Metrics are in pixels (already
-// converted from HB's 26.6 fixed point).
-struct LLShapedGlyph
-{
-    const LLFontFreetype* face;       // Face that owns glyph_id; shared by every glyph in a run.
-    U32                   glyph_id;   // FT glyph index in `face`, *not* a Unicode codepoint.
-    S32                   cluster;    // Index into the original LLWString (not the slice).
+struct LLShapedGlyph {
+    const LLFontFreetype* face;
+    U32                   glyph_id;
+    S32                   cluster;
     F32                   x_advance;
     F32                   y_advance;
     F32                   x_offset;
     F32                   y_offset;
 };
 
-// Borrowed, slice-local view of one shaped line. Each range is [first, second)
-// within the caller's slice and glyphs[i] points into the shaping LRU. Glyph
-// clusters are relative to ranges[i].first. The pointers stay valid until the
-// shaping cache mutates; valid() turns that lifetime contract into an explicit
-// check for every consumer.
-struct LLFontShapeLayout
-{
+struct LLFontShapeLayout {
     std::vector<std::pair<size_t, size_t>>         ranges;
     std::vector<const std::vector<LLShapedGlyph>*> glyphs;
-    size_t mutation_snapshot = 0;
+    size_t                                         mutation_snapshot = 0;
 
     bool valid() const;
 };
 
-namespace LLFontShaping
-{
-    // Shape a complete slice and return its borrowed run layout. This is the
-    // canonical layout entry point shared by measurement and both renderers.
-    LLFontShapeLayout layoutLine(const LLFontFreetype* root_face,
-                                 LLWStringView         slice);
+namespace LLFontShaping {
+LLFontShapeLayout layoutLine(const LLFontFreetype* root_face, LLWStringView slice, bool disable_optional_ligatures = false);
 
-    // Shape wstr[begin..end) using `root_face`'s fallback chain to pick a
-    // single owning face for the whole run. Each script sub-run uses its
-    // resolved embedding direction. FriBidi reorders those runs according to
-    // the Unicode Bidirectional Algorithm, while HarfBuzz supplies contextual
-    // shaping and visual glyph order inside each run. Logical source clusters
-    // are preserved for hit-testing and measurement. This also handles ZWJ
-    // families, VS15/16, skin-tone modifiers, regional-indicator flag pairs,
-    // keycap sequences and tag subdivision flags. HarfBuzz pre/post-context
-    // is not populated at face/script split boundaries.
-    //
-    // Results are cached behind a bounded LRU keyed by (codepoints, face),
-    // so repeated render/width/hit-test calls on the same text do not pay
-    // HarfBuzz's cost every frame. The cache is global (shared across all
-    // LLFontGL instances backed by the same face) and invalidated via
-    // clearCacheForFace(face) whenever a face is reloaded or destroyed.
-    //
-    // On entry out_glyphs is cleared. On any failure (null face, bad range,
-    // HarfBuzz init failure) it remains empty — the caller should fall back
-    // to the 1:1 codepoint path for that run. Empty results are cached too
-    // so the failure isn't re-attempted on every frame.
-    void shapeRun(const LLFontFreetype* root_face,
-                  LLWStringView         wstr,
-                  size_t                begin,
-                  size_t                end,
-                  std::vector<LLShapedGlyph>& out_glyphs);
+void shapeRun(const LLFontFreetype* root_face, LLWStringView wstr, size_t begin, size_t end, std::vector<LLShapedGlyph>& out_glyphs);
 
-    // Like shapeRun, but returns a const reference into the LRU instead of
-    // copying out. Cluster values in the returned glyphs are SLICE-LOCAL —
-    // i.e. relative to `begin`, not original-wstr coords. Callers that need
-    // original-wstr clusters add `begin` once on consumption.
-    //
-    // The reference is invalidated by any subsequent shapeLine/shapeRun call
-    // or by clearCache/clearCacheForFace. Intended for renderer hot paths
-    // that shape once, iterate, and discard within a single function call.
-    // On failure or bad input returns a reference to a static empty vector.
-    const std::vector<LLShapedGlyph>& shapeLine(
-        const LLFontFreetype* root_face,
-        LLWStringView         wstr,
-        size_t                begin,
-        size_t                end);
+const std::vector<LLShapedGlyph>& shapeLine(const LLFontFreetype* root_face, LLWStringView wstr, size_t begin, size_t end,
+                                            bool disable_optional_ligatures = false);
 
-    // Drop every cached shaping result. Use this on a registry-wide
-    // reload (e.g. UI scale or skin change) where every face is being
-    // rebuilt anyway. For single-face teardown prefer clearCacheForFace.
-    // Single-threaded; the shape path is main-thread only.
-    void clearCache();
+void clearCache();
 
-    // Drop every entry that references `face` — keyed on it (root_face) OR
-    // holding glyphs sourced from it (LLShapedGlyph::face stores a raw
-    // pointer to whichever fallback owns each glyph_id, and those entries
-    // are keyed by the HEAD that shaped them, not the fallback). Called
-    // from ~LLFontFreetype and from loadFace() reload, so a face teardown
-    // can't leave sibling-rooted entries whose glyph runs dangle into the
-    // destroyed face. Today's lifecycle makes the glyph-run sweep
-    // defensive — fallbacks outlive their heads via LLPointer chains and
-    // registry reloads clear globally — but enforcing it here keeps a
-    // future runtime fallback-removal path correct by construction.
-    // No-op when `face` is null or unreferenced. Single-threaded.
-    void clearCacheForFace(const LLFontFreetype* face);
+void clearCacheForFace(const LLFontFreetype* face);
 
-    // Number of entries currently held in the LRU. Cheap (boost::
-    // unordered_map::size is O(1)). Exposed for tests that need to pin
-    // the cache contract — production callers shouldn't be branching
-    // on this. Use clearCache to get to a known-empty state.
-    size_t cacheSize();
+size_t cacheSize();
 
-    // Monotonic count of cache mutations that can invalidate references
-    // returned by shapeLine: miss-inserts (including their evictions),
-    // clearCache, and clearCacheForFace when they erased anything. Cache
-    // HITS don't bump it — an LRU splice moves list nodes without touching
-    // the index or any glyph vector. Holders snapshot this after shaping
-    // and llassert equality after their last dereference, turning a
-    // use-after-invalidation into a debug assert instead of silent garbage.
-    size_t cacheMutationCount();
-}
+size_t cacheMutationCount();
+} // namespace LLFontShaping
 
 #endif // LL_LLFONTSHAPING_H

@@ -70,6 +70,7 @@ namespace
         // therefore the shaped output for a given slice; per-codepoint face
         // selection is deterministic downstream.
         const LLFontFreetype* root_face;
+        bool disable_optional_ligatures;
     };
 
     // Borrowed counterpart used for cache lookup so hits don't allocate a
@@ -78,6 +79,7 @@ namespace
     {
         std::u32string_view   codepoints;
         const LLFontFreetype* root_face;
+        bool disable_optional_ligatures;
     };
 
     struct ShapeCacheKeyHash
@@ -88,21 +90,22 @@ namespace
 
         size_t operator()(const ShapeCacheKey& k) const noexcept
         {
-            return hash_impl(std::u32string_view(k.codepoints), k.root_face);
+            return hash_impl(std::u32string_view(k.codepoints), k.root_face, k.disable_optional_ligatures);
         }
         size_t operator()(const ShapeCacheKeyView& k) const noexcept
         {
-            return hash_impl(k.codepoints, k.root_face);
+            return hash_impl(k.codepoints, k.root_face, k.disable_optional_ligatures);
         }
     private:
         // Always hash through the string_view path so both overloads agree
         // bit-for-bit — std::hash<u32string> and std::hash<u32string_view>
         // are required to produce the same value, but routing both through
         // the view variant removes any platform doubt.
-        static size_t hash_impl(std::u32string_view sv, const LLFontFreetype* face) noexcept
+        static size_t hash_impl(std::u32string_view sv, const LLFontFreetype* face, bool disable_optional_ligatures) noexcept
         {
             size_t h = std::hash<std::u32string_view>{}(sv);
             boost::hash_combine(h, face);
+            boost::hash_combine(h, disable_optional_ligatures);
             return h;
         }
     };
@@ -113,15 +116,18 @@ namespace
 
         bool operator()(const ShapeCacheKey& a, const ShapeCacheKey& b) const noexcept
         {
-            return a.root_face == b.root_face && a.codepoints == b.codepoints;
+            return a.root_face == b.root_face && a.disable_optional_ligatures == b.disable_optional_ligatures
+                                              && a.codepoints == b.codepoints;
         }
         bool operator()(const ShapeCacheKey& a, const ShapeCacheKeyView& b) const noexcept
         {
-            return a.root_face == b.root_face && std::u32string_view(a.codepoints) == b.codepoints;
+            return a.root_face == b.root_face && a.disable_optional_ligatures == b.disable_optional_ligatures
+                                              && std::u32string_view(a.codepoints) == b.codepoints;
         }
         bool operator()(const ShapeCacheKeyView& a, const ShapeCacheKey& b) const noexcept
         {
-            return a.root_face == b.root_face && a.codepoints == std::u32string_view(b.codepoints);
+            return a.root_face == b.root_face && a.disable_optional_ligatures == b.disable_optional_ligatures
+                                              && a.codepoints == std::u32string_view(b.codepoints);
         }
     };
 
@@ -168,6 +174,7 @@ namespace
                        size_t                       sub_end_in_slice,
                        hb_script_t                  script,
                        hb_direction_t               direction,
+                       bool disable_optional_ligatures,
                        std::vector<LLShapedGlyph>&  out_glyphs)
     {
         if (!face || sub_begin_in_slice >= sub_end_in_slice) return;
@@ -236,9 +243,40 @@ namespace
         static const hb_feature_t kFixedWidthLigaturesOk[] = {
             { HB_TAG('k','e','r','n'), 0, 0, (unsigned)-1 },
         };
+        static const hb_feature_t kLetterSpaced[] = {
+            { HB_TAG('l','i','g','a'), 0, 0, (unsigned)-1 },
+            { HB_TAG('c','l','i','g'), 0, 0, (unsigned)-1 },
+            { HB_TAG('d','l','i','g'), 0, 0, (unsigned)-1 },
+            { HB_TAG('h','l','i','g'), 0, 0, (unsigned)-1 },
+            { HB_TAG('c','a','l','t'), 0, 0, (unsigned)-1 },
+        };
+        static const hb_feature_t kFixedWidthLetterSpaced[] = {
+            { HB_TAG('k','e','r','n'), 0, 0, (unsigned)-1 },
+            { HB_TAG('l','i','g','a'), 0, 0, (unsigned)-1 },
+            { HB_TAG('c','l','i','g'), 0, 0, (unsigned)-1 },
+            { HB_TAG('d','l','i','g'), 0, 0, (unsigned)-1 },
+            { HB_TAG('h','l','i','g'), 0, 0, (unsigned)-1 },
+            { HB_TAG('c','a','l','t'), 0, 0, (unsigned)-1 },
+        };
         const hb_feature_t* features = nullptr;
         unsigned int num_features = 0;
-        if (face->isFixedWidth())
+        if (disable_optional_ligatures)
+        {
+            if (face->isFixedWidth())
+            {
+                features = kFixedWidthLetterSpaced;
+                num_features = (unsigned int)(
+                    sizeof(kFixedWidthLetterSpaced)
+                    / sizeof(kFixedWidthLetterSpaced[0]));
+            }
+            else
+            {
+                features = kLetterSpaced;
+                num_features = (unsigned int)(
+                    sizeof(kLetterSpaced) / sizeof(kLetterSpaced[0]));
+            }
+        }
+        else if (face->isFixedWidth())
         {
             if (face->getAllowMonospaceLigatures())
             {
@@ -537,6 +575,7 @@ namespace
     // runs for painting; glyph clusters remain logical source indices.
     void shape_all_sub_runs(const LLFontFreetype* root_face,
                             std::u32string_view   slice,
+                            bool disable_optional_ligatures,
                             std::vector<LLShapedGlyph>& out_glyphs)
     {
         const size_t n = slice.size();
@@ -579,7 +618,10 @@ namespace
             ShapedVisualRun run;
             run.visual_start = bidi.logical_to_visual[cur_begin];
             for (size_t k = cur_begin + 1; k < end_excl; ++k) run.visual_start = std::min(run.visual_start, bidi.logical_to_visual[k]);
-            shape_sub_run(cur_face, root_face, slice, cur_begin, end_excl, script, direction, run.glyphs);
+            shape_sub_run(
+                cur_face, root_face, slice, cur_begin, end_excl,
+                script, direction, disable_optional_ligatures,
+                run.glyphs);
             if (!run.glyphs.empty()) shaped_runs.push_back(std::move(run));
         };
 
@@ -767,7 +809,8 @@ const std::vector<LLShapedGlyph>& LLFontShaping::shapeLine(
     const LLFontFreetype* root_face,
     LLWStringView         wstr,
     size_t                begin,
-    size_t                end)
+    size_t                end,
+    bool disable_optional_ligatures)
 {
     // The shape path mutates global LRU/index state with no synchronization;
     // a stray call from a worker thread would corrupt the cache silently.
@@ -781,7 +824,8 @@ const std::vector<LLShapedGlyph>& LLFontShaping::shapeLine(
     // deterministic given (slice, root_face), so no need to encode the
     // per-codepoint face chain explicitly.
     std::u32string_view slice(wstr.data() + begin, end - begin);
-    ShapeCacheKeyView lookup{slice, root_face};
+    ShapeCacheKeyView lookup{
+        slice, root_face, disable_optional_ligatures};
 
     if (auto it = sShapeIndex.find(lookup); it != sShapeIndex.end())
     {
@@ -793,11 +837,12 @@ const std::vector<LLShapedGlyph>& LLFontShaping::shapeLine(
     // owning face, and concatenate the glyph streams. Empty results are
     // cached so repeat misses don't re-shape on every frame.
     std::vector<LLShapedGlyph> shaped;
-    shape_all_sub_runs(root_face, slice, shaped);
+    shape_all_sub_runs(root_face, slice, disable_optional_ligatures, shaped);
 
     ShapeCacheKey key;
     key.codepoints.assign(slice.data(), slice.size());
     key.root_face = root_face;
+    key.disable_optional_ligatures = disable_optional_ligatures;
 
     // One bump covers the insert and any evictions below — either way,
     // previously returned references may now dangle.
@@ -819,7 +864,10 @@ const std::vector<LLShapedGlyph>& LLFontShaping::shapeLine(
     return ins->second.glyphs;
 }
 
-LLFontShapeLayout LLFontShaping::layoutLine(const LLFontFreetype* root_face, LLWStringView slice)
+LLFontShapeLayout LLFontShaping::layoutLine(
+    const LLFontFreetype* root_face,
+    LLWStringView slice,
+    bool disable_optional_ligatures)
 {
     LLFontShapeLayout out;
     out.mutation_snapshot = cacheMutationCount();
@@ -827,7 +875,7 @@ LLFontShapeLayout LLFontShaping::layoutLine(const LLFontFreetype* root_face, LLW
 
     out.ranges.emplace_back(size_t(0), slice.size());
     out.glyphs.reserve(out.ranges.size());
-    for (const auto& range : out.ranges) out.glyphs.push_back(&shapeLine(root_face, slice, range.first, range.second));
+    for (const auto& range : out.ranges) out.glyphs.push_back(&shapeLine(root_face, slice, range.first, range.second, disable_optional_ligatures));
     out.mutation_snapshot = cacheMutationCount();
     return out;
 }

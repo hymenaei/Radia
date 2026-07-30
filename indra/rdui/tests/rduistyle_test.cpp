@@ -245,13 +245,21 @@ namespace tut
     {
         rdui::StyleSheet stylesheet;
         ensure("overflow stylesheet compiles", stylesheet.loadRadia(
-            "panel { overflow: hidden; } #visible { overflow: visible; }").ok());
-        ensure_equals("hidden overflow is typed",
-                      static_cast<int>(stylesheet.resolve("panel", "", {}, 0).overflow),
+            "panel { overflow: hidden visible; } #visible { overflow: visible; overflow-y: hidden; }").ok());
+        const rdui::Style split = stylesheet.resolve("panel", "", {}, 0);
+        ensure_equals("overflow shorthand sets horizontal axis",
+                      static_cast<int>(split.overflow_x),
                       static_cast<int>(rdui::Overflow::Hidden));
-        ensure_equals("visible overflow is typed",
-                      static_cast<int>(stylesheet.resolve("panel", "visible", {}, 0).overflow),
+        ensure_equals("overflow shorthand accepts a distinct vertical axis",
+                      static_cast<int>(split.overflow_y),
                       static_cast<int>(rdui::Overflow::Visible));
+        const rdui::Style overridden = stylesheet.resolve("panel", "visible", {}, 0);
+        ensure_equals("overflow longhand overrides shorthand horizontal value",
+                      static_cast<int>(overridden.overflow_x),
+                      static_cast<int>(rdui::Overflow::Visible));
+        ensure_equals("overflow longhand overrides shorthand vertical value",
+                      static_cast<int>(overridden.overflow_y),
+                      static_cast<int>(rdui::Overflow::Hidden));
 
         const rdui::StyleSheetLoadResult invalid = stylesheet.loadRadia(
             "panel { overflow: scroll; }", "overflow.radia");

@@ -52,6 +52,8 @@ target_sources(rdui
     rduistylevalueparser.cpp
     rduisystem.cpp
     rduitextmetrics.cpp
+    rduitextlayout.cpp
+    rduitextlayout.h
     rduitexthost.cpp
     rduitextsource.cpp
     rduisvg.cpp

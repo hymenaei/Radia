@@ -225,7 +225,7 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, const LLRectf& rec
 
 S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, const LLColor4 &color, HAlign halign, VAlign valign, U8 style,
                      ShadowType shadow, S32 max_chars, S32 max_pixels, F32* right_x, bool use_ellipses, bool use_color,
-                     pass_boundary_cb_t on_pass_boundary, RenderMetadata* metadata) const
+                     pass_boundary_cb_t on_pass_boundary, RenderMetadata* metadata, TextSpacing spacing) const
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_UI;
 
@@ -328,11 +328,8 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
     // reuse — each call walks the string and (for non-mono fonts) does a
     // shape-cache lookup, so three calls on the worst-case path is real
     // measurement work paid for nothing.
-    const bool needs_string_width = (halign == RIGHT) || (halign == HCENTER)
-                                  || (style_to_add & UNDERLINE) || use_ellipses;
-    const F32 string_width_unscaled = needs_string_width
-        ? getWidthF32(wstr.c_str(), begin_offset, length)
-        : 0.f;
+    const bool needs_string_width = (halign == RIGHT) || (halign == HCENTER) || (style_to_add & UNDERLINE) || use_ellipses;
+    const F32 string_width_unscaled = needs_string_width ? getWidthF32(wstr.c_str(), begin_offset, length, false, spacing) : 0.f;
     const S32 scaled_string_width = ll_round(string_width_unscaled * sScaleX);
 
     switch (halign)
@@ -419,8 +416,7 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
     // differently-sized head and fallback atlases all shadow correctly.
     // Skipped when sEnableShaderShadow is off (legacy multi-quad emission
     // still drives shadow geometry — shader stays at shadowMode=0).
-    const bool push_shader_shadow_uniforms =
-        sEnableShaderShadow && (shadow != NO_SHADOW) && LLGLSLShader::sCurBoundShaderPtr;
+    const bool push_shader_shadow_uniforms = sEnableShaderShadow && (shadow != NO_SHADOW) && LLGLSLShader::sCurBoundShaderPtr;
     if (push_shader_shadow_uniforms)
     {
         const int mode = (shadow == DROP_SHADOW) ? 1 : 2; // SOFT
@@ -437,7 +433,7 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
         {
             // use four dots for ellipsis width to generate padding
             static const LLWString dots(U"....");
-            scaled_max_pixels = llmax(0, scaled_max_pixels - ll_round(getWidthF32(dots.c_str())));
+            scaled_max_pixels = llmax(0, scaled_max_pixels - ll_round(getWidthF32(dots.c_str(), 0, S32_MAX, false, spacing)));
             draw_ellipses = true;
         }
     }
@@ -526,11 +522,11 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
     // the whole slice. Layout's ranges are slice-local; we compare against
     // `i - begin_offset` in the loop.
     LLWStringView slice(wstr.data() + begin_offset, (size_t)length);
-    const LLFontShapeLayout layout = LLFontShaping::layoutLine(mFontFreetype, slice);
+    const LLFontShapeLayout layout = LLFontShaping::layoutLine(mFontFreetype, slice, spacing.letter != 0.f);
     size_t next_shape_run = 0;
 
 #if LL_HAS_HB_GPU
-    if (sEnableFontGpu)
+    if (sEnableFontGpu && !spacing.any())
     {
         const LLFontGpuRenderer::Request gpu_request{
             *mFontFreetype, wstr, layout, color, precomputed_shadow_color,
@@ -555,7 +551,7 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
                        (gpu_result.pen_x - origin.mV[VX]) / sScaleX, (F32)y,
                        color, LEFT, valign, style_to_add, NO_SHADOW,
                        S32_MAX, max_pixels, right_x, false, use_color,
-                       nullptr, metadata);
+                       nullptr, metadata, spacing);
             }
             if (push_shader_shadow_uniforms && LLGLSLShader::sCurBoundShaderPtr)
             {
@@ -566,6 +562,37 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
         }
     }
 #endif // LL_HAS_HB_GPU
+
+    const F32 letter_spacing = spacing.letter * sScaleX;
+    const F32 word_spacing = spacing.word * sScaleX;
+    bool has_cluster = false;
+    S32 previous_cluster = 0;
+    F32 current_cluster_spacing = 0.f;
+    bool current_cluster_advanced = false;
+    const auto is_word_separator = [&wstr, begin_offset](S32 cluster)
+    {
+        return LLStringOps::isWordSeparator(wstr[begin_offset + cluster]);
+    };
+    const auto begin_cluster = [&](S32 cluster)
+    {
+        current_cluster_spacing = 0.f;
+        if (has_cluster)
+        {
+            if (is_word_separator(previous_cluster)) current_cluster_spacing += word_spacing;
+            current_cluster_spacing += letter_spacing;
+            cur_x += current_cluster_spacing;
+        }
+        previous_cluster = cluster;
+        has_cluster = true;
+        current_cluster_advanced = false;
+        cur_render_x = cur_x;
+    };
+    const auto rollback_rejected_cluster_spacing = [&]()
+    {
+        if (current_cluster_advanced) return;
+        cur_x -= current_cluster_spacing;
+        cur_render_x = cur_x;
+    };
 
     for (i = begin_offset; i < begin_offset + length; i++)
     {
@@ -593,20 +620,23 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
                 // to callers that drive word-wrap / chunked draw off the
                 // return value.
                 S32 overflow_cluster_local = 0;
+                S32 current_cluster = -1;
                 for (const LLShapedGlyph& sg : run_glyphs)
                 {
+                    if (sg.cluster != current_cluster)
+                    {
+                        begin_cluster(sg.cluster);
+                        current_cluster = sg.cluster;
+                    }
                     // Cache lives on the root face and its bitmap atlas; the
                     // fallback face is only the *source* for the glyph. The
                     // codepoint path also routes through getGlyphInfoByIndex
                     // (after wch -> glyph_index resolution), so this lookup
                     // hits the same atlas slot regardless of which path
                     // produced the LLShapedGlyph.
-                    const LLFontGlyphInfo* sfgi = mFontFreetype->getGlyphInfoByIndex(
-                        sg.face, sg.glyph_id,
-                        (!use_color || LLFontGL::sForceMonochromeEmoji)
-                            ? EFontGlyphType::Grayscale : EFontGlyphType::Color);
-                    if (!sfgi)
-                        continue;
+                    const LLFontGlyphInfo* sfgi = mFontFreetype->getGlyphInfoByIndex(sg.face, sg.glyph_id,
+                        (!use_color || LLFontGL::sForceMonochromeEmoji) ? EFontGlyphType::Grayscale : EFontGlyphType::Color);
+                    if (!sfgi) continue;
 
                     // Quantize the pen x to 1/N px resolution and split into
                     // integer pixel + subpixel phase. Doing them together (not
@@ -673,6 +703,7 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
 
                     if ((start_x + scaled_max_pixels) < (glyph_x + (F32)slot.mWidth))
                     {
+                        rollback_rejected_cluster_spacing();
                         overflow = true;
                         overflow_cluster_local = sg.cluster;
                         break;
@@ -713,8 +744,8 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
 
                     cur_x += sg.x_advance;
                     cur_y += sg.y_advance;
-                    if (!subpixel_pen)
-                        cur_x = (F32)ll_round(cur_x);
+                    current_cluster_advanced = true;
+                    if (!subpixel_pen) cur_x = (F32)ll_round(cur_x);
                     cur_render_x = cur_x;
                     cur_render_y = cur_y;
                 }
@@ -737,6 +768,7 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
         }
 
         llwchar wch = wstr[i];
+        begin_cluster(i_slice);
 
         const LLFontGlyphInfo* fgi = next_glyph;
         next_glyph = NULL;
@@ -807,13 +839,14 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
             // case — emitting quads without a known binding would sample
             // whatever texture is currently bound.
             batch_image = font_bitmap_cache ? font_bitmap_cache->getImageGL(bitmap_entry.first, bitmap_entry.second) : nullptr;
-            if (batch_image)
-            {
-                gGL.getTexUnit(0)->bind(batch_image);
-            }
+            if (batch_image) gGL.getTexUnit(0)->bind(batch_image);
         }
 
-        if ((start_x + scaled_max_pixels) < (cur_x + cp_slot.mXBearing + cp_slot.mWidth)) break;
+        if ((start_x + scaled_max_pixels) < (cur_x + cp_slot.mXBearing + cp_slot.mWidth))
+        {
+            rollback_rejected_cluster_spacing();
+            break;
+        }
 
         if (batch_image)
         {
@@ -855,6 +888,7 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
         chars_drawn++;
         cur_x += fgi->mXAdvance;
         cur_y += fgi->mYAdvance;
+        current_cluster_advanced = true;
 
         llwchar next_char = wstr[i+1];
         if (next_char)
@@ -876,6 +910,13 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
 
         cur_render_x = cur_x;
         cur_render_y = cur_y;
+    }
+
+    if (has_cluster && current_cluster_advanced && is_word_separator(previous_cluster))
+    {
+        const F32 max_right = start_x + scaled_max_pixels;
+        if (word_spacing <= 0.f || cur_x + word_spacing <= max_right) cur_x += word_spacing;
+        cur_render_x = cur_x;
     }
 
     // The layout's glyph pointers reach into the shape LRU; nothing inside
@@ -958,7 +999,10 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
                 S32_MAX, max_pixels,
                 right_x,
                 false,
-                use_color);
+                use_color,
+                nullptr,
+                nullptr,
+                spacing);
     }
 
     gGL.popUIMatrix();
@@ -971,9 +1015,9 @@ S32 LLFontGL::render(const LLWString &text, S32 begin_offset, F32 x, F32 y, cons
     return render(text, begin_offset, x, y, color, LEFT, BASELINE, NORMAL, NO_SHADOW);
 }
 
-S32 LLFontGL::renderUTF8(const std::string &text, S32 begin_offset, F32 x, F32 y, const LLColor4 &color, HAlign halign, VAlign valign, U8 style, ShadowType shadow, S32 max_chars, S32 max_pixels, F32* right_x, bool use_ellipses, bool use_color) const
+S32 LLFontGL::renderUTF8(const std::string &text, S32 begin_offset, F32 x, F32 y, const LLColor4 &color, HAlign halign, VAlign valign, U8 style, ShadowType shadow, S32 max_chars, S32 max_pixels, F32* right_x, bool use_ellipses, bool use_color, TextSpacing spacing) const
 {
-    return render(utf8str_to_wstring(text), begin_offset, x, y, color, halign, valign, style, shadow, max_chars, max_pixels, right_x, use_ellipses, use_color);
+    return render(utf8str_to_wstring(text), begin_offset, x, y, color, halign, valign, style, shadow, max_chars, max_pixels, right_x, use_ellipses, use_color, nullptr, nullptr, spacing);
 }
 
 S32 LLFontGL::renderUTF8(const std::string &text, S32 begin_offset, S32 x, S32 y, const LLColor4 &color) const
@@ -1063,7 +1107,7 @@ F32 LLFontGL::getWidthF32(const std::string& utf8text, S32 begin_offset, S32 max
     return getWidthF32(wtext.c_str(), begin_offset, max_chars);
 }
 
-F32 LLFontGL::getWidthF32(const llwchar* wchars, S32 begin_offset, S32 max_chars, bool no_padding) const
+F32 LLFontGL::getWidthF32(const llwchar* wchars, S32 begin_offset, S32 max_chars, bool no_padding, TextSpacing spacing) const
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_UI;
 
@@ -1090,17 +1134,39 @@ F32 LLFontGL::getWidthF32(const llwchar* wchars, S32 begin_offset, S32 max_chars
     // ranges come back slice-local; we compare against `i - begin_offset`
     // in the loop rather than mutating ranges.
     LLWStringView slice(wchars + begin_offset, (size_t)measure_len);
-    const LLFontShapeLayout layout = LLFontShaping::layoutLine(mFontFreetype, slice);
+    const LLFontShapeLayout layout = LLFontShaping::layoutLine(mFontFreetype, slice, spacing.letter != 0.f);
     size_t next_shape_run = 0;
 
     const LLFontGlyphInfo* next_glyph = NULL;
 
     F32 width_padding = 0.f;
+    const F32 letter_spacing = spacing.letter * sScaleX;
+    const F32 word_spacing = spacing.word * sScaleX;
+    bool has_cluster = false;
+    S32 previous_cluster = 0;
+    const auto is_word_separator = [wchars, begin_offset](S32 cluster)
+    {
+        return LLStringOps::isWordSeparator(wchars[begin_offset + cluster]);
+    };
+    const auto advance_spacing = [&](F32 amount)
+    {
+        cur_x += amount;
+        if (!no_padding) width_padding = std::max(0.f, width_padding - amount);
+    };
+    const auto begin_cluster = [&](S32 cluster)
+    {
+        if (has_cluster)
+        {
+            if (is_word_separator(previous_cluster)) advance_spacing(word_spacing);
+            advance_spacing(letter_spacing);
+        }
+        previous_cluster = cluster;
+        has_cluster = true;
+    };
     for (S32 i = begin_offset; i < max_index && wchars[i] != 0; i++)
     {
         const S32 i_slice = i - begin_offset;
-        if (next_shape_run < layout.ranges.size()
-            && (S32)layout.ranges[next_shape_run].first == i_slice)
+        if (next_shape_run < layout.ranges.size() && (S32)layout.ranges[next_shape_run].first == i_slice)
         {
             const auto  run_range  = layout.ranges[next_shape_run];
             const auto& run_glyphs = *layout.glyphs[next_shape_run];
@@ -1109,17 +1175,22 @@ F32 LLFontGL::getWidthF32(const llwchar* wchars, S32 begin_offset, S32 max_chars
             if (!run_glyphs.empty())
             {
                 next_glyph = NULL;
-                F32 run_padding = 0.f;
+                S32 current_cluster = -1;
                 for (const LLShapedGlyph& sg : run_glyphs)
                 {
+                    if (sg.cluster != current_cluster)
+                    {
+                        begin_cluster(sg.cluster);
+                        current_cluster = sg.cluster;
+                    }
                     const LLFontGlyphInfo* sfgi = mFontFreetype->getGlyphInfoByIndex(
                         sg.face, sg.glyph_id, EFontGlyphType::Unspecified);
                     if (!sfgi)
                         continue;
                     if (!no_padding)
                     {
-                        run_padding = llmax(0.f,
-                            run_padding - sg.x_advance,
+                        width_padding = llmax(0.f,
+                            width_padding - sg.x_advance,
                             (F32)(sfgi->mWidth + sfgi->mXBearing) - sg.x_advance);
                     }
                     cur_x += sg.x_advance;
@@ -1128,7 +1199,6 @@ F32 LLFontGL::getWidthF32(const llwchar* wchars, S32 begin_offset, S32 max_chars
                     if (!subpixel_pen)
                         cur_x = (F32)ll_round(cur_x);
                 }
-                width_padding = run_padding;
                 i = begin_offset + (S32)run_range.second - 1;
                 continue;
             }
@@ -1136,6 +1206,7 @@ F32 LLFontGL::getWidthF32(const llwchar* wchars, S32 begin_offset, S32 max_chars
         }
 
         llwchar wch = wchars[i];
+        begin_cluster(i_slice);
 
         const LLFontGlyphInfo* fgi = next_glyph;
         next_glyph = NULL;
@@ -1173,6 +1244,8 @@ F32 LLFontGL::getWidthF32(const llwchar* wchars, S32 begin_offset, S32 max_chars
         if (!subpixel_pen)
             cur_x = (F32)ll_round(cur_x);
     }
+
+    if (has_cluster && is_word_separator(previous_cluster)) advance_spacing(word_spacing);
 
     // Layout pointers must have stayed valid for the whole measurement walk.
     llassert(layout.valid());

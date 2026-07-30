@@ -22,20 +22,21 @@ namespace rdui
         if (missing(InheritedStyleProperty::LineHeight)) style.line_height = parent.line_height;
         if (missing(InheritedStyleProperty::TextColor)) style.text_color = parent.text_color;
         if (missing(InheritedStyleProperty::TextAlign)) style.text_align = parent.text_align;
+        if (missing(InheritedStyleProperty::LetterSpacing)) style.letter_spacing = parent.letter_spacing;
+        if (missing(InheritedStyleProperty::WordSpacing)) style.word_spacing = parent.word_spacing;
+        if (missing(InheritedStyleProperty::TextWrap)) style.text_wrap = parent.text_wrap;
         if (missing(InheritedStyleProperty::Cursor)) style.cursor = parent.cursor;
         style.specified_inherited |= parent.specified_inherited;
     }
 
     StyleSheet::StyleSheet() : mImpl(std::make_unique<Impl>()) {}
     StyleSheet::~StyleSheet() = default;
-    StyleSheet::StyleSheet(const StyleSheet& other)
-        : mImpl(other.mImpl ? std::make_unique<Impl>(*other.mImpl) : std::make_unique<Impl>())
+    StyleSheet::StyleSheet(const StyleSheet& other) : mImpl(other.mImpl ? std::make_unique<Impl>(*other.mImpl) : std::make_unique<Impl>())
     {
     }
     StyleSheet& StyleSheet::operator=(const StyleSheet& other)
     {
-        if (this != &other)
-            mImpl = other.mImpl ? std::make_unique<Impl>(*other.mImpl) : std::make_unique<Impl>();
+        if (this != &other) mImpl = other.mImpl ? std::make_unique<Impl>(*other.mImpl) : std::make_unique<Impl>();
         return *this;
     }
     StyleSheet::StyleSheet(StyleSheet&& other) noexcept = default;

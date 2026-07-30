@@ -295,4 +295,53 @@ namespace tut
         ensure_equals("initial box fill is presentation-neutral", style.background_color.a, 0.f);
     }
 
+    template<> template<>
+    void rduistyleproperty_object::test<13>()
+    {
+        rdui::StyleSheet theme;
+        ensure("text presentation properties compile", theme.loadRadia(
+            "panel { letter-spacing: 50%; word-spacing: 25%; text-wrap: nowrap; }"
+            "text { text-overflow: ellipsis-center; }"
+            "label { font: italic 525 17px/21px sans; }"
+            "label.reset { font-style: italic; font-weight: bold; line-height: 30px;"
+            " font: 12px sans; }").ok());
+
+        auto parent = std::make_unique<rdui::Panel>();
+        auto text = std::make_unique<rdui::Text>("inventory item");
+        rdui::Text* child = text.get();
+        parent->addChild(std::move(text));
+        const rdui::Style inherited = rdui::resolveWidgetStyle(theme, *child);
+        ensure_equals("letter-spacing percentage is retained for used-value resolution",
+                      inherited.letter_spacing.percent, .5f);
+        ensure_equals("word-spacing percentage is retained for used-value resolution",
+                      inherited.word_spacing.percent, .25f);
+        ensure_equals("text-wrap inherits",
+                      static_cast<int>(inherited.text_wrap), static_cast<int>(rdui::TextWrap::NoWrap));
+        ensure_equals("text-overflow remains local",
+                      static_cast<int>(inherited.text_overflow),
+                      static_cast<int>(rdui::TextOverflow::EllipsisCenter));
+
+        const rdui::Style shorthand = theme.resolve("label", "", {}, 0);
+        ensure("font shorthand sets style", shorthand.font_italic);
+        ensure_equals("font shorthand sets variable weight", shorthand.font_weight, static_cast<U16>(525));
+        ensure_equals("font shorthand sets size", shorthand.font_size, 17.f);
+        ensure("font shorthand sets line-height", shorthand.line_height.has_value());
+        ensure_equals("font shorthand line-height value", shorthand.line_height->pixels, 21.f);
+
+        const rdui::Style reset = theme.resolve("label", "", {"reset"}, 0);
+        ensure("font shorthand resets omitted style", !reset.font_italic);
+        ensure_equals("font shorthand resets omitted weight", reset.font_weight, static_cast<U16>(400));
+        ensure("font shorthand resets omitted line-height", !reset.line_height.has_value());
+
+        rdui::StyleSheet invalid;
+        ensure("unknown center truncation spelling is rejected",
+               !invalid.loadRadia("text { text-overflow: middle; }").ok());
+        ensure("font shorthand requires a family",
+               !invalid.loadRadia("text { font: 13px; }").ok());
+        ensure("normal word spacing compiles",
+               invalid.loadRadia("text { word-spacing: normal; }").ok());
+        ensure_equals("normal word spacing resets to zero",
+                      invalid.resolve("text", "", {}, 0).word_spacing.pixels, 0.f);
+    }
+
 }

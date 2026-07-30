@@ -215,20 +215,25 @@ namespace rdui
         Cell,
     };
     enum class TextAlign { Left, Center, Right, Start, End };
+    enum class TextOverflow { Clip, Ellipsis, EllipsisCenter };
+    enum class TextWrap { Wrap, NoWrap };
     enum class VerticalAlign { Top, Middle, Bottom };
     enum class FontFamily { Sans };
 
     enum class InheritedStyleProperty : uint16_t
     {
-        NotInherited = 0,
-        FontFamily = 1 << 0,
-        FontSize   = 1 << 1,
-        FontWeight = 1 << 2,
-        FontStyle  = 1 << 3,
-        LineHeight = 1 << 4,
-        TextColor  = 1 << 5,
-        TextAlign  = 1 << 6,
-        Cursor     = 1 << 7,
+        NotInherited  = 0,
+        FontFamily    = 1 << 0,
+        FontSize      = 1 << 1,
+        FontWeight    = 1 << 2,
+        FontStyle     = 1 << 3,
+        LineHeight    = 1 << 4,
+        TextColor     = 1 << 5,
+        TextAlign     = 1 << 6,
+        Cursor        = 1 << 7,
+        LetterSpacing = 1 << 8,
+        WordSpacing   = 1 << 9,
+        TextWrap      = 1 << 10,
     };
 
     using InheritedStyleProperties = uint16_t;
@@ -251,6 +256,8 @@ namespace rdui
         bool svg_stroke_cap_set = false;
         float font_size = 13.f;
         std::optional<Length> line_height;
+        Length letter_spacing;
+        Length word_spacing;
         float opacity = 1.f;
         Dimension width;
         Dimension height;
@@ -272,6 +279,8 @@ namespace rdui
         bool font_italic = false;
         bool font_strike = false;
         TextAlign text_align = TextAlign::Start;
+        TextOverflow text_overflow = TextOverflow::Clip;
+        TextWrap text_wrap = TextWrap::Wrap;
         VerticalAlign vertical_align = VerticalAlign::Top;
         bool vertical_align_set = false;
         LayoutDirection direction = LayoutDirection::LeftToRight;
@@ -282,7 +291,8 @@ namespace rdui
         AlignItems align_items = AlignItems::Normal;
         AlignSelf align_self = AlignSelf::Auto;
         std::optional<float> aspect_ratio;
-        Overflow overflow = Overflow::Visible;
+        Overflow overflow_x = Overflow::Visible;
+        Overflow overflow_y = Overflow::Visible;
         PointerEvents pointer_events = PointerEvents::Default;
         CursorStyle cursor = CursorStyle::Auto;
         InheritedStyleProperties specified_inherited = 0;

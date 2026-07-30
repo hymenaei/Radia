@@ -803,9 +803,24 @@ namespace tut
                surface.pointerDown({{45.f, 15.f}, rdui::PointerButton::Left}));
         surface.pointerUp({{45.f, 15.f}, rdui::PointerButton::Left});
 
-        ensure("hidden overflow compiles", stylesheet.loadRadia(
-            "#parent { overflow: hidden; pointer-events: none; } #child { pointer-events: auto; }").ok());
-        ensure("hidden overflow clips descendant hit outside parent",
+        ensure("vertical overflow longhand compiles", stylesheet.loadRadia(
+            "#parent { overflow-x: visible; overflow-y: hidden; pointer-events: none; }"
+            " #child { pointer-events: auto; }").ok());
+        ensure("vertical clipping permits a horizontally overflowing descendant",
+               surface.pointerDown({{45.f, 15.f}, rdui::PointerButton::Left}));
+        surface.pointerUp({{45.f, 15.f}, rdui::PointerButton::Left});
+
+        rdui::RecordingPaintContext vertical_recording;
+        surface.paint(vertical_recording);
+        const rdui::PaintCommand* vertical_clip = vertical_recording.last(rdui::PaintCommandKind::PushClip);
+        ensure("vertical overflow clip recorded", vertical_clip != nullptr);
+        ensure("vertical overflow clip leaves x visible", !rdui::clipsAxis(vertical_clip->clip_axes, rdui::ClipAxes::X));
+        ensure("vertical overflow clip clips y", rdui::clipsAxis(vertical_clip->clip_axes, rdui::ClipAxes::Y));
+
+        ensure("horizontal overflow longhand compiles", stylesheet.loadRadia(
+            "#parent { overflow-x: hidden; overflow-y: visible; pointer-events: none; }"
+            " #child { pointer-events: auto; }").ok());
+        ensure("horizontal clipping rejects a horizontally overflowing descendant",
                !surface.pointerDown({{45.f, 15.f}, rdui::PointerButton::Left}));
 
         rdui::RecordingPaintContext recording;
@@ -815,6 +830,8 @@ namespace tut
         const rdui::PaintCommand* overflow_clip = recording.last(rdui::PaintCommandKind::PushClip);
         ensure("overflow clip recorded", overflow_clip != nullptr);
         ensure_equals("overflow clip uses parent width", overflow_clip->rect.w, 20.f);
+        ensure("horizontal overflow clip clips x", rdui::clipsAxis(overflow_clip->clip_axes, rdui::ClipAxes::X));
+        ensure("horizontal overflow clip leaves y visible", !rdui::clipsAxis(overflow_clip->clip_axes, rdui::ClipAxes::Y));
     }
 
     template<> template<>

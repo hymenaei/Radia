@@ -7,6 +7,7 @@
 #include "rdlabel.h"
 #include "rdpanel.h"
 #include "rdswitch.h"
+#include "rdtext.h"
 #include "rduilayout.h"
 #include "rduistylesheet.h"
 #include "rduitextmetrics.h"
@@ -612,5 +613,86 @@ namespace tut
             ensure_equals("an oversized header icon does not pull the row below center",
                           child_center, header_center);
         }
+    }
+
+    template<> template<>
+    void rduilayout_object::test<28>()
+    {
+        rdui::StyleSheet theme;
+        ensure("explicit wrapping stylesheet compiles", theme.loadRadia(
+            "panel { flow: column; } "
+            "text { font-size: 10px; line-height: 10px; text-wrap: wrap; }").ok());
+
+        rdui::Panel panel;
+        panel.setRect({0.f, 0.f, 30.f, 100.f});
+        panel.addChild(std::make_unique<rdui::Text>("alpha beta"));
+        panel.addChild(std::make_unique<rdui::Text>("after"));
+
+        rdui::layoutTree(panel, theme, text);
+        const rdui::Widget& wrapped = *panel.children()[0];
+        const rdui::Widget& following = *panel.children()[1];
+        ensure_equals("stretched auto-width text contributes both lines to layout height",
+                      wrapped.rect().h, 20.f);
+        ensure_equals("the following sibling starts after the wrapped text",
+                      following.rect().top(), wrapped.rect().bottom());
+    }
+
+    template<> template<>
+    void rduilayout_object::test<29>()
+    {
+        rdui::StyleSheet theme;
+        ensure("row wrapping stylesheet compiles", theme.loadRadia(
+            "panel { width: 45px; flow: row; align-items: start; } "
+            "text { min-width: 0px; flex: 1; font-size: 10px; "
+            "line-height: 10px; text-wrap: wrap; } "
+            "label { width: 10px; flex-shrink: 0; align-self: stretch; }").ok());
+
+        rdui::Panel panel;
+        panel.addChild(std::make_unique<rdui::Text>("alpha beta"));
+        panel.addChild(std::make_unique<rdui::Label>("x"));
+
+        const rdui::Vec2 measured = rdui::measureWidget(panel, theme, text);
+        ensure_equals("row measurement reflows text after flex shrink",
+                      measured.y, 20.f);
+
+        panel.setRect({0.f, 0.f, measured.x, measured.y});
+        rdui::layoutTree(panel, theme, text);
+        ensure_equals("row arrangement keeps the reflowed text height",
+                      panel.children()[0]->rect().h, 20.f);
+        ensure_equals("row sibling receives its non-shrinking width",
+                      panel.children()[1]->rect().w, 10.f);
+        ensure_equals("final row height is reapplied to stretched siblings",
+                      panel.children()[1]->rect().h, 20.f);
+    }
+
+    template<> template<>
+    void rduilayout_object::test<30>()
+    {
+        rdui::StyleSheet column_theme;
+        ensure("column basis stylesheet compiles", column_theme.loadRadia(
+            "panel { width: 30px; flow: column; } "
+            "text { flex-basis: 40px; font-size: 10px; "
+            "line-height: 10px; text-wrap: wrap; }").ok());
+        rdui::Panel column;
+        column.addChild(std::make_unique<rdui::Text>("alpha beta"));
+        ensure_equals(
+            "column measurement reapplies flex-basis after text reflow",
+            rdui::measureWidget(column, column_theme, text).y, 40.f);
+
+        rdui::StyleSheet row_theme;
+        ensure("row intrinsic minimum stylesheet compiles",
+               row_theme.loadRadia(
+                   "panel { width: 80px; flow: row; } "
+                   "text { flex: 0 1 100px; font-size: 10px; "
+                   "line-height: 10px; text-wrap: wrap; } "
+                   "label { width: 10px; flex-shrink: 0; }").ok());
+        rdui::Panel row;
+        row.addChild(std::make_unique<rdui::Text>("alpha beta"));
+        row.addChild(std::make_unique<rdui::Label>("x"));
+        row.setRect({0.f, 0.f, 80.f, 20.f});
+        rdui::layoutTree(row, row_theme, text);
+        ensure_equals(
+            "row flex-basis can shrink to its pre-basis intrinsic minimum",
+            row.children()[0]->rect().w, 70.f);
     }
 }

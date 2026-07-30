@@ -12,15 +12,6 @@ namespace rdui
 {
     namespace
     {
-        Rect intersectRects(const Rect& lhs, const Rect& rhs)
-        {
-            const float left = std::max(lhs.left(), rhs.left());
-            const float right = std::min(lhs.right(), rhs.right());
-            const float bottom = std::max(lhs.bottom(), rhs.bottom());
-            const float top = std::min(lhs.top(), rhs.top());
-            return {left, bottom, std::max(0.f, right - left), std::max(0.f, top - bottom)};
-        }
-
         bool acceptsPointerEvents(const Widget& widget, const StyleSheet& style_sheet)
         {
             const PointerEvents policy = resolveWidgetStyle(style_sheet, widget).pointer_events;
@@ -33,8 +24,10 @@ namespace rdui
         {
             if (node.visibility() != Visibility::Visible || !inherited_clip.contains(point)) return nullptr;
             const Style style = resolveWidgetStyle(style_sheet, node);
-            const Rect child_clip = style.overflow == Overflow::Hidden ? intersectRects(inherited_clip, node.rect())
-                                  : inherited_clip;
+            const bool clips_x = style.overflow_x == Overflow::Hidden;
+            const bool clips_y = style.overflow_y == Overflow::Hidden;
+            const ClipAxes clip_axes = (clips_x ? ClipAxes::X : ClipAxes::None) | (clips_y ? ClipAxes::Y : ClipAxes::None);
+            const Rect child_clip = clip_axes == ClipAxes::None ? inherited_clip : clipToAxes(inherited_clip, node.rect(), clip_axes);
             for (auto child = node.children().rbegin(); child != node.children().rend(); ++child)
             {
                 if (Widget* hit = hitTest(**child, point, style_sheet, child_clip)) return hit;
@@ -183,23 +176,19 @@ namespace rdui
         mPointerPosition = event.position;
         mPointerPositionKnown = true;
         std::uint8_t resize_edges = 0;
-        Floater* resize_floater = event.button == PointerButton::Left
-            ? resizeFloaterAt(event.position, resize_edges) : nullptr;
+        Floater* resize_floater = event.button == PointerButton::Left ? resizeFloaterAt(event.position, resize_edges) : nullptr;
         if (resize_floater)
         {
-            const SurfaceLayer layer = resize_floater->parent() == &layerRoot(SurfaceLayer::Modal)
-                ? SurfaceLayer::Modal : SurfaceLayer::Floater;
+            const SurfaceLayer layer = resize_floater->parent() == &layerRoot(SurfaceLayer::Modal) ? SurfaceLayer::Modal : SurfaceLayer::Floater;
             raiseWithinLayer(*resize_floater, layer);
             resetLongClick();
             mPressedClickCount = 0;
             clearKeyboardPress();
             if (Widget* pressed = mPressed.get()) pressed->setState(WidgetState::Active, false);
             mPressed.set(nullptr);
-            const bool native = mFloaterDelegate
-                && mFloaterDelegate->beginNativeFloaterResize(*this, *resize_floater);
+            const bool native = mFloaterDelegate && mFloaterDelegate->beginNativeFloaterResize(*this, *resize_floater);
             const std::optional<Rect> bounds = native ? std::nullopt : std::optional<Rect>(mViewport);
-            if (resize_floater->beginResizeInteraction(event, resize_edges,
-                                                       minimumFloaterSize(*resize_floater), bounds))
+            if (resize_floater->beginResizeInteraction(event, resize_edges, minimumFloaterSize(*resize_floater), bounds))
             {
                 mCaptured.set(resize_floater);
                 setHovered(resize_floater);

@@ -28,6 +28,7 @@ namespace rdui
         Style style;
         std::string value;
         float scale = 1.f;
+        ClipAxes clip_axes = ClipAxes::Both;
         std::optional<TopBorderGap> top_border_gap;
     };
 
@@ -37,14 +38,14 @@ namespace rdui
             explicit RecordingPaintContext(const TextMetrics& text_metrics = fixedTextMetrics()) : mTextMetrics(text_metrics) {}
 
             Vec2 measureText(const std::string& text, const Style& style) const override;
+            float usedLetterSpacing(const Style& style) const override;
             void beginFrame() override;
             void endFrame() override;
-            void pushClip(const Rect& rect, float scale) override;
+            void pushClip(const Rect& rect, float scale, ClipAxes axes = ClipAxes::Both) override;
             void popClip() override;
             void beginEffects(const Rect& rect, const Style& style, float scale) override;
             void endEffects() override;
-            void paintBox(const Rect& rect, const Style& style,
-                          std::optional<TopBorderGap> top_border_gap = std::nullopt) override;
+            void paintBox(const Rect& rect, const Style& style, std::optional<TopBorderGap> top_border_gap = std::nullopt) override;
             void paintText(const std::string& text, const Rect& rect, const Style& style) override;
             void paintIcon(const std::string& name, const Rect& rect, const Style& style, float scale) override;
 

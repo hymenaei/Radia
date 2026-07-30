@@ -27,6 +27,8 @@ namespace rdui
         Opacity,
         Outline,
         Overflow,
+        OverflowX,
+        OverflowY,
         Padding,
         PointerEvents,
         Right,
@@ -44,13 +46,18 @@ namespace rdui
         FlexGrow,
         FlexShrink,
         Order,
+        Font,
         FontFamily,
         FontSize,
         FontStyle,
         FontWeight,
         LineHeight,
+        LetterSpacing,
+        WordSpacing,
         TextAlign,
         TextColor,
+        TextOverflow,
+        TextWrap,
         VerticalAlign,
         IconStroke,
         IconStrokeColor,
@@ -92,6 +99,7 @@ namespace rdui
         MarginInsets,
         Dimension,
         Length,
+        std::optional<Length>,
         GapValue,
         std::vector<BoxShadow>,
         std::vector<Effect>,
@@ -101,6 +109,8 @@ namespace rdui
         bool,
         FontFamily,
         TextAlign,
+        TextOverflow,
+        TextWrap,
         VerticalAlign,
         Flow,
         JustifyContent,
@@ -159,6 +169,10 @@ namespace rdui
         std::optional<std::vector<BoxShadow>> parseShadows(const std::string& value) const;
         std::optional<std::vector<Effect>> parseEffects(const std::string& value) const;
         std::optional<Outline> parseOutline(const std::string& value) const;
+        std::optional<bool> parseFontStyleValue(const std::string& value) const;
+        std::optional<float> parseFontWeightValue(const std::string& value) const;
+        std::optional<Length> parseLineHeightValue(const std::string& value) const;
+        std::optional<std::vector<StyleDeclaration>> parseFontShorthand(const std::string& value) const;
         EdgeInsets parseEdgeInsets(const std::string& value, const EdgeInsets& fallback) const;
         std::optional<MarginInsets> parseMargin(const std::string& value) const;
         std::optional<std::vector<StyleDeclaration>> compileDeclaration(
@@ -234,6 +248,8 @@ namespace rdui::detail
         AlignSelf,
         Flex,
         Overflow,
+        TextOverflow,
+        TextWrap,
         PointerEvents,
         Cursor,
         StrokeCap,

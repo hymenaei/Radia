@@ -57,7 +57,7 @@ namespace rdui
     void Text::paint(PaintContext& context, const Style& style, float) const
     {
         context.paintBox(rect(), style);
-        mText.paint(context, rect(), style, attachedStyleSheet(), *this);
+        mText.paint(context, insetRect(rect(), style.padding), style, attachedStyleSheet(), *this);
     }
 
     WidgetContract detail::textContract()

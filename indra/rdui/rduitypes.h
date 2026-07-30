@@ -63,6 +63,44 @@ namespace rdui
 
     };
 
+    inline Rect intersectRects(const Rect& lhs, const Rect& rhs)
+    {
+        const float left = std::max(lhs.left(), rhs.left());
+        const float right = std::min(lhs.right(), rhs.right());
+        const float bottom = std::max(lhs.bottom(), rhs.bottom());
+        const float top = std::min(lhs.top(), rhs.top());
+        return {left, bottom, std::max(0.f, right - left), std::max(0.f, top - bottom)};
+    }
+
+    enum class ClipAxes : uint8_t
+    {
+        None = 0,
+        X = 1 << 0,
+        Y = 1 << 1,
+        Both = (1 << 0) | (1 << 1),
+    };
+
+    inline ClipAxes operator|(ClipAxes lhs, ClipAxes rhs)
+    {
+        return static_cast<ClipAxes>(static_cast<uint8_t>(lhs) | static_cast<uint8_t>(rhs));
+    }
+
+    inline bool clipsAxis(ClipAxes axes, ClipAxes axis)
+    {
+        return (static_cast<uint8_t>(axes) & static_cast<uint8_t>(axis)) != 0;
+    }
+
+    inline Rect clipToAxes(const Rect& inherited, const Rect& bounds, ClipAxes axes)
+    {
+        const Rect axis_bounds{
+            clipsAxis(axes, ClipAxes::X) ? bounds.x : inherited.x,
+            clipsAxis(axes, ClipAxes::Y) ? bounds.y : inherited.y,
+            clipsAxis(axes, ClipAxes::X) ? bounds.w : inherited.w,
+            clipsAxis(axes, ClipAxes::Y) ? bounds.h : inherited.h,
+        };
+        return intersectRects(inherited, axis_bounds);
+    }
+
     struct Color
     {
         float r = 1.f;
@@ -98,6 +136,16 @@ namespace rdui
 
         bool any() const { return max_value() > 0.f; }
     };
+
+    inline Rect insetRect(const Rect& rect, const EdgeInsets& insets)
+    {
+        return {
+            rect.x + insets.left,
+            rect.y + insets.bottom,
+            std::max(0.f, rect.w - insets.horizontal()),
+            std::max(0.f, rect.h - insets.vertical()),
+        };
+    }
 
     enum class StrokeCap { Butt, Round, Square };
 

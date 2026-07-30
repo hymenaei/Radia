@@ -20,6 +20,7 @@
 
 #include "../llfontgl.h"
 #include "../llfontfreetype.h"
+#include "../llfontshaping.h"
 #include "../llfontbitmapcache.h"
 #include "../llimagegl.h"
 
@@ -623,6 +624,116 @@ namespace tut
                medium_axes.wght_set && medium_axes.wght == 525.f);
         ensure("bold request reaches wght variation axis",
                bold_axes.wght_set && bold_axes.wght == 700.f);
+    }
+
+    template<> template<>
+    void llfontgl_object::test<20>()
+    {
+        if (!fileExists(kFontsXml))
+            skip("fonts.xml not found");
+        LLFontGL::initClass(96.f, 1.f, 1.f, kAppDir, kFontsXml,
+                            LLSD(), /*create_gl_textures=*/true);
+        LLFontGL* font = LLFontGL::getFontSansSerif();
+        ensure("font resolves", font != nullptr);
+
+        LLWString spaced = utf8str_to_wstring("a b");
+        const F32 base = font->getWidthF32(
+            spaced.c_str(), 0, S32_MAX, true);
+        const F32 adjusted = font->getWidthF32(
+            spaced.c_str(), 0, S32_MAX, true,
+            LLFontGL::TextSpacing{2.f, 3.f});
+        ensure_approximately_equals(
+            "letter spacing separates three clusters and word spacing follows one space",
+            adjusted - base, 7.f, 5);
+
+        const llwchar combining_chars[] = {U'a', 0x0301, U'b', 0};
+        LLWString combining(combining_chars, 3);
+        const F32 combining_base = font->getWidthF32(
+            combining.c_str(), 0, S32_MAX, true);
+        const F32 combining_spaced = font->getWidthF32(
+            combining.c_str(), 0, S32_MAX, true,
+            LLFontGL::TextSpacing{2.f, 0.f});
+        ensure_approximately_equals(
+            "letter spacing is inserted between shaped clusters, not combining code points",
+            combining_spaced - combining_base, 2.f, 5);
+
+        const LLWString ligature = utf8str_to_wstring("fi");
+        const auto& ligature_spaced_shape = LLFontShaping::shapeLine(
+            font->getFontFreetype(), ligature, 0, ligature.size(),
+            true);
+        ensure(
+            "letter-spaced shaping disables optional ligatures",
+            ligature_spaced_shape.size() >= 2);
+
+        const llwchar unicode_space_chars[] = {U'a', 0x2003, U'b', 0};
+        LLWString unicode_space(unicode_space_chars, 3);
+        const F32 unicode_space_base = font->getWidthF32(
+            unicode_space.c_str(), 0, S32_MAX, true);
+        const F32 unicode_space_adjusted = font->getWidthF32(
+            unicode_space.c_str(), 0, S32_MAX, true,
+            LLFontGL::TextSpacing{0.f, 3.f});
+        ensure_approximately_equals(
+            "word spacing recognizes Unicode space separators",
+            unicode_space_adjusted - unicode_space_base, 3.f, 5);
+
+        LLWString trailing_space = utf8str_to_wstring("a ");
+        const F32 trailing_base = font->getWidthF32(
+            trailing_space.c_str(), 0, S32_MAX, true);
+        const F32 start_x = 20.f;
+        const S32 max_pixels =
+            static_cast<S32>(std::ceil(trailing_base + 5.f));
+        F32 right_x = start_x;
+        font->render(
+            trailing_space, 0, start_x, 100.f, LLColor4::white,
+            LLFontGL::LEFT, LLFontGL::BASELINE,
+            LLFontGL::NORMAL, LLFontGL::NO_SHADOW,
+            static_cast<S32>(trailing_space.size()),
+            max_pixels, &right_x, false, true,
+            nullptr, nullptr, LLFontGL::TextSpacing{0.f, 10.f});
+        gGL.flush();
+        ensure(
+            "trailing word spacing respects the render pixel limit",
+            right_x <= start_x + max_pixels + 0.01f);
+
+        LLWString limited = utf8str_to_wstring("ab");
+        const F32 first_width = font->getWidthF32(
+            U"a", 0, S32_MAX, true);
+        const S32 letter_limit =
+            static_cast<S32>(std::ceil(first_width + 5.f));
+        right_x = start_x;
+        const S32 rendered = font->render(
+            limited, 0, start_x, 100.f, LLColor4::white,
+            LLFontGL::LEFT, LLFontGL::BASELINE,
+            LLFontGL::NORMAL, LLFontGL::NO_SHADOW,
+            static_cast<S32>(limited.size()),
+            letter_limit, &right_x, false, true,
+            nullptr, nullptr, LLFontGL::TextSpacing{10.f, 0.f});
+        gGL.flush();
+        ensure_equals(
+            "pixel limit rejects the cluster after a letter gap",
+            rendered, 1);
+        ensure(
+            "rejected-cluster letter spacing is rolled back",
+            right_x <= start_x + letter_limit + 0.01f);
+
+        LLWString rejected_separator = utf8str_to_wstring("a ");
+        right_x = start_x;
+        const S32 separator_rendered = font->render(
+            rejected_separator, 0, start_x, 100.f,
+            LLColor4::white, LLFontGL::LEFT,
+            LLFontGL::BASELINE, LLFontGL::NORMAL,
+            LLFontGL::NO_SHADOW,
+            static_cast<S32>(rejected_separator.size()),
+            letter_limit, &right_x, false, true,
+            nullptr, nullptr,
+            LLFontGL::TextSpacing{10.f, 3.f});
+        gGL.flush();
+        ensure_equals(
+            "pixel limit rejects a separator after an oversized gap",
+            separator_rendered, 1);
+        ensure(
+            "rejected separator does not add phantom word spacing",
+            right_x <= start_x + letter_limit + 0.01f);
     }
 
     // ===================================================================

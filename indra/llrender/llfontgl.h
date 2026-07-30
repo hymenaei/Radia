@@ -96,6 +96,14 @@ public:
         bool emitted_analytic_glyph = false;
     };
 
+    struct TextSpacing
+    {
+        F32 letter = 0.f;
+        F32 word = 0.f;
+
+        bool any() const { return letter != 0.f || word != 0.f; }
+    };
+
     LLFontGL();
     ~LLFontGL();
 
@@ -150,12 +158,13 @@ public:
                 bool use_ellipses = false,
                 bool use_color = true,
                 pass_boundary_cb_t on_pass_boundary = nullptr,
-                RenderMetadata* metadata = nullptr) const;
+                RenderMetadata* metadata = nullptr,
+                TextSpacing spacing = {}) const;
 
     S32 render(const LLWString &text, S32 begin_offset, F32 x, F32 y, const LLColor4 &color) const;
 
     // renderUTF8 does a conversion, so is slower!
-    S32 renderUTF8(const std::string &text, S32 begin_offset, F32 x, F32 y, const LLColor4 &color, HAlign halign,  VAlign valign, U8 style, ShadowType shadow, S32 max_chars = S32_MAX, S32 max_pixels = S32_MAX,  F32* right_x = NULL, bool use_ellipses = false, bool use_color = true) const;
+    S32 renderUTF8(const std::string &text, S32 begin_offset, F32 x, F32 y, const LLColor4 &color, HAlign halign,  VAlign valign, U8 style, ShadowType shadow, S32 max_chars = S32_MAX, S32 max_pixels = S32_MAX,  F32* right_x = NULL, bool use_ellipses = false, bool use_color = true, TextSpacing spacing = {}) const;
     S32 renderUTF8(const std::string &text, S32 begin_offset, S32 x, S32 y, const LLColor4 &color) const;
     S32 renderUTF8(const std::string &text, S32 begin_offset, S32 x, S32 y, const LLColor4 &color, HAlign halign, VAlign valign, U8 style = NORMAL, ShadowType shadow = NO_SHADOW) const;
 
@@ -173,7 +182,7 @@ public:
     F32 getWidthF32(const std::string& utf8text) const;
     F32 getWidthF32(const llwchar* wchars) const;
     F32 getWidthF32(const std::string& text, S32 offset, S32 max_chars) const;
-    F32 getWidthF32(const llwchar* wchars, S32 offset, S32 max_chars, bool no_padding = false) const;
+    F32 getWidthF32(const llwchar* wchars, S32 offset, S32 max_chars, bool no_padding = false, TextSpacing spacing = {}) const;
 
     // The following are called often, frequently with large buffers, so do not use a string interface
 

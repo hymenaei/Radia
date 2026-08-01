@@ -1728,11 +1728,11 @@ if (DARWIN)
   set(viewer_RESOURCE_FILES
     alchemy.icns
     # CMake doesn't seem to support Xcode language variants well just yet
-    English.lproj/InfoPlist.strings
-    English.lproj/language.txt
-    German.lproj/language.txt
-    Japanese.lproj/language.txt
-    Korean.lproj/language.txt
+    macos_resources/English.lproj/InfoPlist.strings
+    macos_resources/English.lproj/language.txt
+    macos_resources/German.lproj/language.txt
+    macos_resources/Japanese.lproj/language.txt
+    macos_resources/Korean.lproj/language.txt
     )
 
   LIST(APPEND viewer_SOURCE_FILES llappviewersdl.cpp)

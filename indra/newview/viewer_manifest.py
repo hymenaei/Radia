@@ -850,26 +850,27 @@ class DarwinManifest(ViewerManifest):
                     self.path("ca-bundle.crt")
 
                 # Translations
-                self.path("English.lproj/language.txt")
-                self.replace_in(src="English.lproj/InfoPlist.strings",
-                                dst="English.lproj/InfoPlist.strings",
-                                searchdict={'%%VERSION%%':'.'.join(self.args['version'])}
-                                )
-                self.path("German.lproj")
-                self.path("Japanese.lproj")
-                self.path("Korean.lproj")
-                self.path("da.lproj")
-                self.path("es.lproj")
-                self.path("fr.lproj")
-                self.path("hu.lproj")
-                self.path("it.lproj")
-                self.path("nl.lproj")
-                self.path("pl.lproj")
-                self.path("pt.lproj")
-                self.path("ru.lproj")
-                self.path("tr.lproj")
-                self.path("uk.lproj")
-                self.path("zh-Hans.lproj")
+                with self.prefix(src="macos_resources", dst=""):
+                    self.path("English.lproj/language.txt")
+                    self.replace_in(src="English.lproj/InfoPlist.strings",
+                                    dst="English.lproj/InfoPlist.strings",
+                                    searchdict={'%%VERSION%%':'.'.join(self.args['version'])}
+                                    )
+                    self.path("German.lproj")
+                    self.path("Japanese.lproj")
+                    self.path("Korean.lproj")
+                    self.path("da.lproj")
+                    self.path("es.lproj")
+                    self.path("fr.lproj")
+                    self.path("hu.lproj")
+                    self.path("it.lproj")
+                    self.path("nl.lproj")
+                    self.path("pl.lproj")
+                    self.path("pt.lproj")
+                    self.path("ru.lproj")
+                    self.path("tr.lproj")
+                    self.path("uk.lproj")
+                    self.path("zh-Hans.lproj")
 
                 def path_optional(src, dst):
                     """

@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_NATIVE_INPUT_H
-#define LL_RDUI_NATIVE_INPUT_H
+#ifndef RD_NATIVEINPUT_H
+#define RD_NATIVEINPUT_H
 
 #include <cstdint>
 #include <optional>
@@ -74,4 +74,4 @@ struct NativeInputDispatchResult {
     std::optional<ECursorType> cursor;
 };
 } // namespace rdui::viewer
-#endif // LL_RDUI_NATIVE_INPUT_H
+#endif // RD_NATIVEINPUT_H

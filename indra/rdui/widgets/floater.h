@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_FLOATER_H
-#define LL_RDUI_FLOATER_H
+#ifndef RD_WIDGETS_FLOATER_H
+#define RD_WIDGETS_FLOATER_H
 
 #include <cstdint>
 #include <optional>
@@ -157,4 +157,4 @@ private:
     Visibility mContentVisibility = Visibility::Visible;
 };
 } // namespace rdui
-#endif // LL_RDUI_FLOATER_H
+#endif // RD_WIDGETS_FLOATER_H

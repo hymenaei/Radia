@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_SKIN_RELOAD_COORDINATOR_H
-#define LL_RDUI_SKIN_RELOAD_COORDINATOR_H
+#ifndef RD_SKIN_RELOADCOORDINATOR_H
+#define RD_SKIN_RELOADCOORDINATOR_H
 
 #include <chrono>
 #include <cstdint>
@@ -65,4 +65,4 @@ private:
 };
 } // namespace viewer
 } // namespace rdui
-#endif // LL_RDUI_SKIN_RELOAD_COORDINATOR_H
+#endif // RD_SKIN_RELOADCOORDINATOR_H

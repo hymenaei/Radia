@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_LAYOUT_ENGINE_H
-#define LL_RDUI_LAYOUT_ENGINE_H
+#ifndef RD_LAYOUT_ENGINE_H
+#define RD_LAYOUT_ENGINE_H
 
 #include "types.h"
 
@@ -39,4 +39,4 @@ void measureTree(Widget& root, const StyleSheet& theme, const TextMetrics& text_
 void arrangeTree(Widget& root, const StyleSheet& theme, const TextMetrics& text_metrics, LayoutDirection direction = LayoutDirection::LeftToRight);
 void layoutTree(Widget& root, const StyleSheet& theme, const TextMetrics& text_metrics, LayoutDirection direction = LayoutDirection::LeftToRight);
 } // namespace rdui
-#endif // LL_RDUI_LAYOUT_ENGINE_H
+#endif // RD_LAYOUT_ENGINE_H

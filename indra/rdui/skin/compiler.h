@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_SKIN_COMPILER_H
-#define LL_RDUI_SKIN_COMPILER_H
+#ifndef RD_SKIN_COMPILER_H
+#define RD_SKIN_COMPILER_H
 
 #include <memory>
 #include "diagnostic.h"
@@ -41,4 +41,4 @@ public:
     SkinGenerationPrepareResult prepare(ResourceSnapshot resources) const;
 };
 } // namespace rdui
-#endif // LL_RDUI_SKIN_COMPILER_H
+#endif // RD_SKIN_COMPILER_H

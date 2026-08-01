@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_FIELDSET_H
-#define LL_RDUI_FIELDSET_H
+#ifndef RD_WIDGETS_FIELDSET_H
+#define RD_WIDGETS_FIELDSET_H
 
 #include "widgets/text.h"
 #include "widgets/widget.h"
@@ -62,4 +62,4 @@ private:
     WidgetRef<Text> mLegend;
 };
 } // namespace rdui
-#endif // LL_RDUI_FIELDSET_H
+#endif // RD_WIDGETS_FIELDSET_H

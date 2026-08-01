@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_TEXT_LAYOUT_H
-#define LL_RDUI_TEXT_LAYOUT_H
+#ifndef RD_TEXT_LAYOUT_H
+#define RD_TEXT_LAYOUT_H
 
 #include <optional>
 #include <string>
@@ -71,4 +71,4 @@ struct TextLayout {
 TextLayout layoutText(std::vector<TextLine> hard_lines, const Style& style, const TextMetrics& metrics, std::optional<float> available_width,
                       bool visual_order, bool apply_overflow);
 } // namespace rdui::detail
-#endif // LL_RDUI_TEXT_LAYOUT_H
+#endif // RD_TEXT_LAYOUT_H

@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_LOCALIZATION_INTERNAL_H
-#define LL_RDUI_LOCALIZATION_INTERNAL_H
+#ifndef RD_LOCALIZATION_INTERNAL_H
+#define RD_LOCALIZATION_INTERNAL_H
 
 #include <cstddef>
 #include <cstdint>
@@ -151,4 +151,4 @@ struct LocalizationCatalog::Impl {
     std::string default_locale;
 };
 } // namespace rdui
-#endif // LL_RDUI_LOCALIZATION_INTERNAL_H
+#endif // RD_LOCALIZATION_INTERNAL_H

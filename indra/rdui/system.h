@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_SYSTEM_H
-#define LL_RDUI_SYSTEM_H
+#ifndef RD_SYSTEM_H
+#define RD_SYSTEM_H
 
 #include <chrono>
 #include <cstdint>
@@ -100,4 +100,4 @@ private:
     friend class OpenGLPaintContext;
 };
 } // namespace rdui
-#endif // LL_RDUI_SYSTEM_H
+#endif // RD_SYSTEM_H

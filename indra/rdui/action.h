@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_ACTION_H
-#define LL_RDUI_ACTION_H
+#ifndef RD_ACTION_H
+#define RD_ACTION_H
 
 #include <chrono>
 #include <cstdint>
@@ -72,4 +72,4 @@ struct ActionHandler {
 };
 } // namespace detail
 } // namespace rdui
-#endif // LL_RDUI_ACTION_H
+#endif // RD_ACTION_H

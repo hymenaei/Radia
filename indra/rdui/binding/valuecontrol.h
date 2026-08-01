@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_VALUE_CONTROL_H
-#define LL_RDUI_VALUE_CONTROL_H
+#ifndef RD_BINDING_VALUECONTROL_H
+#define RD_BINDING_VALUECONTROL_H
 
 #include <functional>
 #include <optional>
@@ -59,4 +59,4 @@ private:
     virtual ValueBindingSubscription commitValueBinding() = 0;
 };
 } // namespace rdui
-#endif // LL_RDUI_VALUE_CONTROL_H
+#endif // RD_BINDING_VALUECONTROL_H

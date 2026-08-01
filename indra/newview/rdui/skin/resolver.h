@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_SKIN_RESOLVER_H
-#define LL_RDUI_SKIN_RESOLVER_H
+#ifndef RD_SKIN_RESOLVER_H
+#define RD_SKIN_RESOLVER_H
 
 #include <filesystem>
 #include <string>
@@ -50,4 +50,4 @@ public:
     SkinSnapshotResult resolve(const std::filesystem::path& selected_root, const std::vector<std::filesystem::path>& installed_roots) const;
 };
 } // namespace rdui::viewer
-#endif // LL_RDUI_SKIN_RESOLVER_H
+#endif // RD_SKIN_RESOLVER_H

@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_SURFACE_H
-#define LL_RDUI_SURFACE_H
+#ifndef RD_SURFACE_H
+#define RD_SURFACE_H
 
 #include <array>
 #include <chrono>
@@ -174,4 +174,4 @@ private:
     std::uint64_t mObservedStyleGeneration = 0;
 };
 } // namespace rdui
-#endif // LL_RDUI_SURFACE_H
+#endif // RD_SURFACE_H

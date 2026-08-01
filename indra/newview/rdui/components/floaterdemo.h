@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_FLOATER_DEMO_H
-#define LL_RDUI_FLOATER_DEMO_H
+#ifndef RD_COMPONENTS_FLOATERDEMO_H
+#define RD_COMPONENTS_FLOATERDEMO_H
 
 #include <functional>
 #include "binding/binder.h"
@@ -73,4 +73,4 @@ private:
 void registerFloaterDemo(Runtime& runtime);
 } // namespace viewer
 } // namespace rdui
-#endif // LL_RDUI_FLOATER_DEMO_H
+#endif // RD_COMPONENTS_FLOATERDEMO_H

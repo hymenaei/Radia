@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_PANEL_H
-#define LL_RDUI_PANEL_H
+#ifndef RD_WIDGETS_PANEL_H
+#define RD_WIDGETS_PANEL_H
 
 #include "widgets/widget.h"
 
@@ -41,4 +41,4 @@ public:
     Panel();
 };
 } // namespace rdui
-#endif // LL_RDUI_PANEL_H
+#endif // RD_WIDGETS_PANEL_H

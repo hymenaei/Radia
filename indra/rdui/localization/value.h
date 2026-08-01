@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_LOCALIZATION_VALUE_H
-#define LL_RDUI_LOCALIZATION_VALUE_H
+#ifndef RD_LOCALIZATION_VALUE_H
+#define RD_LOCALIZATION_VALUE_H
 
 #include <cstdint>
 #include <string>
@@ -86,4 +86,4 @@ private:
     std::string mPluralArgument;
 };
 } // namespace rdui
-#endif // LL_RDUI_LOCALIZATION_VALUE_H
+#endif // RD_LOCALIZATION_VALUE_H

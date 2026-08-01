@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_TEXT_METRICS_H
-#define LL_RDUI_TEXT_METRICS_H
+#ifndef RD_TEXT_METRICS_H
+#define RD_TEXT_METRICS_H
 
 #include <string>
 #include "types.h"
@@ -53,4 +53,4 @@ private:
 
 const TextMetrics& fixedTextMetrics();
 } // namespace rdui
-#endif // LL_RDUI_TEXT_METRICS_H
+#endif // RD_TEXT_METRICS_H

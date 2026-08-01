@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_FLOATER_RESIZE_H
-#define LL_RDUI_FLOATER_RESIZE_H
+#ifndef RD_SURFACE_FLOATERRESIZE_H
+#define RD_SURFACE_FLOATERRESIZE_H
 
 #include <cstdint>
 #include <optional>
@@ -61,4 +61,4 @@ bool preserveUserResizeOnReload(bool current_resizable, bool replacement_resizab
 Rect resizedRect(const Rect& initial, const Vec2& initial_pointer, const Vec2& pointer, ResizeEdges edges,
                  const FloaterResizeConstraints& constraints);
 } // namespace rdui::detail
-#endif // LL_RDUI_FLOATER_RESIZE_H
+#endif // RD_SURFACE_FLOATERRESIZE_H

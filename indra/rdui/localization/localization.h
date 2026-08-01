@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_LOCALIZATION_H
-#define LL_RDUI_LOCALIZATION_H
+#ifndef RD_LOCALIZATION_H
+#define RD_LOCALIZATION_H
 
 #include <memory>
 #include <string>
@@ -74,4 +74,4 @@ private:
     std::unique_ptr<Impl> mImpl;
 };
 } // namespace rdui
-#endif // LL_RDUI_LOCALIZATION_H
+#endif // RD_LOCALIZATION_H

@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_BINDER_H
-#define LL_RDUI_BINDER_H
+#ifndef RD_BINDING_BINDER_H
+#define RD_BINDING_BINDER_H
 
 #include <functional>
 #include <map>
@@ -244,4 +244,4 @@ private:
     friend class PreparedBinding;
 };
 } // namespace rdui
-#endif // LL_RDUI_BINDER_H
+#endif // RD_BINDING_BINDER_H

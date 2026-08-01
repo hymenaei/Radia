@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_INPUT_BRIDGE_H
-#define LL_RDUI_INPUT_BRIDGE_H
+#ifndef RD_INPUTBRIDGE_H
+#define RD_INPUTBRIDGE_H
 
 #include <cstdint>
 #include <variant>
@@ -54,4 +54,4 @@ public:
     ECursorType translateCursor(CursorStyle cursor) const;
 };
 } // namespace rdui::viewer
-#endif // LL_RDUI_INPUT_BRIDGE_H
+#endif // RD_INPUTBRIDGE_H

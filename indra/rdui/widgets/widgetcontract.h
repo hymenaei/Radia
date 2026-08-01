@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_WIDGET_CONTRACT_H
-#define LL_RDUI_WIDGET_CONTRACT_H
+#ifndef RD_WIDGETS_WIDGETCONTRACT_H
+#define RD_WIDGETS_WIDGETCONTRACT_H
 
 #include <cstdint>
 #include <functional>
@@ -417,4 +417,4 @@ void validateViewAttributes(const LayoutElement& element, const std::vector<std:
 void applyCommonViewAttributes(const LayoutElement& element, Widget& widget, ViewBuildResult& result, const std::string& source,
                                const std::vector<ActionEventKind>& supported_actions = {});
 } // namespace rdui
-#endif // LL_RDUI_WIDGET_CONTRACT_H
+#endif // RD_WIDGETS_WIDGETCONTRACT_H

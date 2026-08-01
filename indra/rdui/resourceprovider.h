@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_RESOURCE_PROVIDER_H
-#define LL_RDUI_RESOURCE_PROVIDER_H
+#ifndef RD_RESOURCEPROVIDER_H
+#define RD_RESOURCEPROVIDER_H
 
 #include <map>
 #include <optional>
@@ -100,4 +100,4 @@ private:
     std::map<std::string, std::vector<ResourceLayer>> mLayers;
 };
 } // namespace rdui
-#endif // LL_RDUI_RESOURCE_PROVIDER_H
+#endif // RD_RESOURCEPROVIDER_H

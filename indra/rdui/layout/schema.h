@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_SCHEMA_H
-#define LL_RDUI_SCHEMA_H
+#ifndef RD_LAYOUT_SCHEMA_H
+#define RD_LAYOUT_SCHEMA_H
 
 #include <string>
 #include <string_view>
@@ -32,4 +32,4 @@ namespace rdui {
 std::string schemaNameKey(std::string_view name);
 bool isLocalIdentifier(std::string_view value);
 } // namespace rdui
-#endif // LL_RDUI_SCHEMA_H
+#endif // RD_LAYOUT_SCHEMA_H

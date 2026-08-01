@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_DETACHED_FLOATER_WINDOW_H
-#define LL_RDUI_DETACHED_FLOATER_WINDOW_H
+#ifndef RD_DETACHEDFLOATERWINDOW_H
+#define RD_DETACHEDFLOATERWINDOW_H
 
 #include <memory>
 #include "detachedfloatermanager.h"
@@ -67,4 +67,4 @@ private:
     std::unique_ptr<Impl> mImpl;
 };
 } // namespace rdui::viewer
-#endif // LL_RDUI_DETACHED_FLOATER_WINDOW_H
+#endif // RD_DETACHEDFLOATERWINDOW_H

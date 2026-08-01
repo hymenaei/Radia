@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_SKIN_RESOURCES_H
-#define LL_RDUI_SKIN_RESOURCES_H
+#ifndef RD_SKIN_RESOURCES_H
+#define RD_SKIN_RESOURCES_H
 
 #include "skin/resolver.h"
 
@@ -35,4 +35,4 @@ public:
     bool selectedIsBundledDefault() const;
 };
 } // namespace rdui::viewer
-#endif // LL_RDUI_SKIN_RESOURCES_H
+#endif // RD_SKIN_RESOURCES_H

@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_VIEW_RESULT_H
-#define LL_RDUI_VIEW_RESULT_H
+#ifndef RD_LAYOUT_VIEWRESULT_H
+#define RD_LAYOUT_VIEWRESULT_H
 
 #include <memory>
 #include "diagnostic.h"
@@ -39,4 +39,4 @@ struct ViewBuildResult : DiagnosticResult {
     template<typename WidgetT> const WidgetT* rootAs() const { return dynamic_cast<const WidgetT*>(root.get()); }
 };
 } // namespace rdui
-#endif // LL_RDUI_VIEW_RESULT_H
+#endif // RD_LAYOUT_VIEWRESULT_H

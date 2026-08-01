@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_STYLE_H
-#define LL_RDUI_STYLE_H
+#ifndef RD_STYLE_H
+#define RD_STYLE_H
 
 #include <cstdint>
 #include <optional>
@@ -288,4 +288,4 @@ struct Style {
 
 void inheritStyle(Style& style, const Style& parent);
 } // namespace rdui
-#endif // LL_RDUI_STYLE_H
+#endif // RD_STYLE_H

@@ -22,10 +22,10 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_WIDGET_CATALOG_H
-#define LL_RDUI_WIDGET_CATALOG_H
+#ifndef RD_WIDGETS_WIDGETCATALOG_H
+#define RD_WIDGETS_WIDGETCATALOG_H
 
 #include "widgets/widgetcontract.h"
 
 namespace rdui { const std::unordered_map<std::string, WidgetContract>& builtInWidgetContracts(); }
-#endif // LL_RDUI_WIDGET_CATALOG_H
+#endif // RD_WIDGETS_WIDGETCATALOG_H

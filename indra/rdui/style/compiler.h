@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_STYLE_COMPILER_H
-#define LL_RDUI_STYLE_COMPILER_H
+#ifndef RD_STYLE_COMPILER_H
+#define RD_STYLE_COMPILER_H
 
 #include <map>
 #include <string_view>
@@ -228,4 +228,4 @@ void applyStyleDeclaration(Style& style, const StyleDeclaration& declaration);
 std::vector<std::string> splitPartPath(const std::string& part);
 StyleRule parseSelector(const std::string& selector);
 } // namespace rdui::detail
-#endif // LL_RDUI_STYLE_COMPILER_H
+#endif // RD_STYLE_COMPILER_H

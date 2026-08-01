@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_TEXT_HOST_H
-#define LL_RDUI_TEXT_HOST_H
+#ifndef RD_TEXT_HOST_H
+#define RD_TEXT_HOST_H
 
 #include "text/source.h"
 #include "types.h"
@@ -61,4 +61,4 @@ private:
     bool mHasKeybindings = false;
 };
 } // namespace rdui
-#endif // LL_RDUI_TEXT_HOST_H
+#endif // RD_TEXT_HOST_H

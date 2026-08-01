@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_FLOATER_DOCUMENT_MANAGER_H
-#define LL_RDUI_FLOATER_DOCUMENT_MANAGER_H
+#ifndef RD_FLOATERDOCUMENTMANAGER_H
+#define RD_FLOATERDOCUMENTMANAGER_H
 
 #include <functional>
 #include <memory>
@@ -109,4 +109,4 @@ private:
     std::unique_ptr<Impl> mImpl;
 };
 } // namespace rdui::viewer
-#endif // LL_RDUI_FLOATER_DOCUMENT_MANAGER_H
+#endif // RD_FLOATERDOCUMENTMANAGER_H

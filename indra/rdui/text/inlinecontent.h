@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_INLINE_CONTENT_H
-#define LL_RDUI_INLINE_CONTENT_H
+#ifndef RD_TEXT_INLINECONTENT_H
+#define RD_TEXT_INLINECONTENT_H
 
 #include <cstdint>
 #include <functional>
@@ -83,4 +83,4 @@ const char* inlineContentElement(InlineContentKind kind);
 bool inlineContentKind(const std::string& element, InlineContentKind& kind);
 bool isInlineStyleElement(const std::string& element);
 } // namespace rdui
-#endif // LL_RDUI_INLINE_CONTENT_H
+#endif // RD_TEXT_INLINECONTENT_H

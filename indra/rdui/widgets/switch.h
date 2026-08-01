@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_SWITCH_H
-#define LL_RDUI_SWITCH_H
+#ifndef RD_WIDGETS_SWITCH_H
+#define RD_WIDGETS_SWITCH_H
 
 #include <map>
 #include "binding/valuecontrol.h"
@@ -74,4 +74,4 @@ private:
     std::shared_ptr<char> mValueObserverLifetime = std::make_shared<char>(0);
 };
 } // namespace rdui
-#endif // LL_RDUI_SWITCH_H
+#endif // RD_WIDGETS_SWITCH_H

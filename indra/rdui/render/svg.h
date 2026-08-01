@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_SVG_H
-#define LL_RDUI_SVG_H
+#ifndef RD_RENDER_SVG_H
+#define RD_RENDER_SVG_H
 
 #include <optional>
 #include <string>
@@ -49,4 +49,4 @@ struct SvgCompileResult : DiagnosticResult {
 SvgCompileResult compileSvgIcon(const std::string& svg, const std::string& source = {});
 Path transformSvgPath(const Path& path, const Rect& view_box, const Rect& target);
 } // namespace rdui
-#endif // LL_RDUI_SVG_H
+#endif // RD_RENDER_SVG_H

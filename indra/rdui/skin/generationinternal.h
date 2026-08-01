@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_SKIN_GENERATION_INTERNAL_H
-#define LL_RDUI_SKIN_GENERATION_INTERNAL_H
+#ifndef RD_SKIN_GENERATIONINTERNAL_H
+#define RD_SKIN_GENERATIONINTERNAL_H
 
 #include <unordered_map>
 #include <utility>
@@ -49,4 +49,4 @@ struct SkinGeneration::Impl {
     LayoutResourceCompiler layout_compiler;
 };
 } // namespace rdui
-#endif // LL_RDUI_SKIN_GENERATION_INTERNAL_H
+#endif // RD_SKIN_GENERATIONINTERNAL_H

@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_TEXT_SOURCE_H
-#define LL_RDUI_TEXT_SOURCE_H
+#ifndef RD_TEXT_SOURCE_H
+#define RD_TEXT_SOURCE_H
 
 #include <functional>
 #include <string>
@@ -95,4 +95,4 @@ private:
     std::vector<TextSourceNode> mNodes;
 };
 } // namespace rdui
-#endif // LL_RDUI_TEXT_SOURCE_H
+#endif // RD_TEXT_SOURCE_H

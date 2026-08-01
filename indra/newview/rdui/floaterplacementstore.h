@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_FLOATER_PLACEMENT_STORE_H
-#define LL_RDUI_FLOATER_PLACEMENT_STORE_H
+#ifndef RD_FLOATERPLACEMENTSTORE_H
+#define RD_FLOATERPLACEMENTSTORE_H
 
 #include <optional>
 #include <string>
@@ -85,4 +85,4 @@ private:
     std::unordered_set<std::string> mRestoredIdentities;
 };
 } // namespace rdui::viewer
-#endif // LL_RDUI_FLOATER_PLACEMENT_STORE_H
+#endif // RD_FLOATERPLACEMENTSTORE_H

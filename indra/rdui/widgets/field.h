@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_FIELD_H
-#define LL_RDUI_FIELD_H
+#ifndef RD_WIDGETS_FIELD_H
+#define RD_WIDGETS_FIELD_H
 
 #include "binding/valuecontrol.h"
 #include "widgets/text.h"
@@ -80,4 +80,4 @@ private:
     bool mDirty = false;
 };
 } // namespace rdui
-#endif // LL_RDUI_FIELD_H
+#endif // RD_WIDGETS_FIELD_H

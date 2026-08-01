@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_STYLE_SHEET_H
-#define LL_RDUI_STYLE_SHEET_H
+#ifndef RD_STYLE_STYLESHEET_H
+#define RD_STYLE_STYLESHEET_H
 
 #include <cstdint>
 #include <map>
@@ -69,4 +69,4 @@ private:
     std::unique_ptr<Impl> mImpl;
 };
 } // namespace rdui
-#endif // LL_RDUI_STYLE_SHEET_H
+#endif // RD_STYLE_STYLESHEET_H

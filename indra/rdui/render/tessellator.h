@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_TESSELLATOR_H
-#define LL_RDUI_TESSELLATOR_H
+#ifndef RD_RENDER_TESSELLATOR_H
+#define RD_RENDER_TESSELLATOR_H
 
 #include <vector>
 #include "path.h"
@@ -40,4 +40,4 @@ struct Mesh {
 
 Mesh tessellateStroke(const Path& path, const Color& color, float width, float fringe_width, StrokeCap cap = StrokeCap::Butt);
 } // namespace rdui
-#endif // LL_RDUI_TESSELLATOR_H
+#endif // RD_RENDER_TESSELLATOR_H

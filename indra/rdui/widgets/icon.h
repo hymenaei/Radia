@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_ICON_H
-#define LL_RDUI_ICON_H
+#ifndef RD_WIDGETS_ICON_H
+#define RD_WIDGETS_ICON_H
 
 #include "widgets/widget.h"
 
@@ -47,4 +47,4 @@ private:
     std::string mName;
 };
 } // namespace rdui
-#endif // LL_RDUI_ICON_H
+#endif // RD_WIDGETS_ICON_H

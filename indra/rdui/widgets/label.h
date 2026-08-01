@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_LABEL_H
-#define LL_RDUI_LABEL_H
+#ifndef RD_WIDGETS_LABEL_H
+#define RD_WIDGETS_LABEL_H
 
 #include "text/host.h"
 #include "widgets/widget.h"
@@ -66,4 +66,4 @@ private:
     WidgetRef<Widget> mTarget;
 };
 } // namespace rdui
-#endif // LL_RDUI_LABEL_H
+#endif // RD_WIDGETS_LABEL_H

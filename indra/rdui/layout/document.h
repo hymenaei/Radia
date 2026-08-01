@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_LAYOUT_DOCUMENT_H
-#define LL_RDUI_LAYOUT_DOCUMENT_H
+#ifndef RD_LAYOUT_DOCUMENT_H
+#define RD_LAYOUT_DOCUMENT_H
 
 #include <cstddef>
 #include <memory>
@@ -100,4 +100,4 @@ public:
     LayoutDocumentParseResult parse(const std::string& xml, const std::string& source = {}) const;
 };
 } // namespace rdui
-#endif // LL_RDUI_LAYOUT_DOCUMENT_H
+#endif // RD_LAYOUT_DOCUMENT_H

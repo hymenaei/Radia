@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_OPENGL_PAINT_CONTEXT_H
-#define LL_RDUI_OPENGL_PAINT_CONTEXT_H
+#ifndef RD_RENDER_OPENGLPAINTCONTEXT_H
+#define RD_RENDER_OPENGLPAINTCONTEXT_H
 
 #include <memory>
 #include <string>
@@ -79,4 +79,4 @@ private:
     std::unique_ptr<Impl> mImpl;
 };
 } // namespace rdui
-#endif // LL_RDUI_OPENGL_PAINT_CONTEXT_H
+#endif // RD_RENDER_OPENGLPAINTCONTEXT_H

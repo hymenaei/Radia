@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_RUNTIME_H
-#define LL_RDUI_RUNTIME_H
+#ifndef RD_RUNTIME_H
+#define RD_RUNTIME_H
 
 #include <functional>
 #include <memory>
@@ -64,4 +64,4 @@ private:
     std::unique_ptr<Impl> mImpl;
 };
 } // namespace rdui::viewer
-#endif // LL_RDUI_RUNTIME_H
+#endif // RD_RUNTIME_H

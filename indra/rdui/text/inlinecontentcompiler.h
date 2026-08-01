@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_INLINE_CONTENT_COMPILER_H
-#define LL_RDUI_INLINE_CONTENT_COMPILER_H
+#ifndef RD_TEXT_INLINECONTENTCOMPILER_H
+#define RD_TEXT_INLINECONTENTCOMPILER_H
 
 #include <string>
 #include <vector>
@@ -37,4 +37,4 @@ class ViewBuildContext;
 TextSource compileInlineContent(const std::vector<LayoutContent>& content, const std::string& host, const std::vector<InlineContentKind>& accepted,
                                 ViewBuildResult& result, const std::string& source, const ViewBuildContext* context);
 } // namespace rdui
-#endif // LL_RDUI_INLINE_CONTENT_COMPILER_H
+#endif // RD_TEXT_INLINECONTENTCOMPILER_H

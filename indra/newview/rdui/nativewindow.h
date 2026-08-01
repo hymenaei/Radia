@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_NATIVE_WINDOW_H
-#define LL_RDUI_NATIVE_WINDOW_H
+#ifndef RD_NATIVEWINDOW_H
+#define RD_NATIVEWINDOW_H
 
 #include <algorithm>
 #include <cmath>
@@ -97,4 +97,4 @@ public:
 
 NativeWindowFactory& defaultNativeWindowFactory();
 } // namespace rdui::viewer
-#endif // LL_RDUI_NATIVE_WINDOW_H
+#endif // RD_NATIVEWINDOW_H

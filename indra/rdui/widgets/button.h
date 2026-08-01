@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_BUTTON_H
-#define LL_RDUI_BUTTON_H
+#ifndef RD_WIDGETS_BUTTON_H
+#define RD_WIDGETS_BUTTON_H
 
 #include "localization/localization.h"
 #include "widgets/widget.h"
@@ -61,4 +61,4 @@ private:
     WidgetRef<Label> mLabel;
 };
 } // namespace rdui
-#endif // LL_RDUI_BUTTON_H
+#endif // RD_WIDGETS_BUTTON_H

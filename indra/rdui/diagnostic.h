@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_DIAGNOSTIC_H
-#define LL_RDUI_DIAGNOSTIC_H
+#ifndef RD_DIAGNOSTIC_H
+#define RD_DIAGNOSTIC_H
 
 #include <cstddef>
 #include <iterator>
@@ -73,4 +73,4 @@ struct DiagnosticResult {
     }
 };
 } // namespace rdui
-#endif // LL_RDUI_DIAGNOSTIC_H
+#endif // RD_DIAGNOSTIC_H

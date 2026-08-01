@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_PATH_H
-#define LL_RDUI_PATH_H
+#ifndef RD_PATH_H
+#define RD_PATH_H
 
 #include <optional>
 #include <string>
@@ -66,4 +66,4 @@ struct PathCompileResult : DiagnosticResult {
 
 PathCompileResult compileSvgPathData(const std::string& data, const std::string& source = {}, std::size_t line = 0);
 } // namespace rdui
-#endif // LL_RDUI_PATH_H
+#endif // RD_PATH_H

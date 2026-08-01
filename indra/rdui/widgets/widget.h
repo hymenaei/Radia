@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_WIDGET_H
-#define LL_RDUI_WIDGET_H
+#ifndef RD_WIDGETS_WIDGET_H
+#define RD_WIDGETS_WIDGET_H
 
 #include <chrono>
 #include <functional>
@@ -196,4 +196,4 @@ private:
     bool mArrangeDirty = true;
 };
 } // namespace rdui
-#endif // LL_RDUI_WIDGET_H
+#endif // RD_WIDGETS_WIDGET_H

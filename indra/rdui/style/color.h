@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_COLOR_H
-#define LL_RDUI_COLOR_H
+#ifndef RD_STYLE_COLOR_H
+#define RD_STYLE_COLOR_H
 
 #include <optional>
 #include <string>
@@ -33,4 +33,4 @@ namespace rdui {
 std::optional<Color> parseColor(const std::string& value);
 bool isColorSyntax(const std::string& value);
 } // namespace rdui
-#endif // LL_RDUI_COLOR_H
+#endif // RD_STYLE_COLOR_H

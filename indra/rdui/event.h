@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_EVENT_H
-#define LL_RDUI_EVENT_H
+#ifndef RD_EVENT_H
+#define RD_EVENT_H
 
 #include <cstdint>
 #include "types.h"
@@ -133,4 +133,4 @@ inline bool isActivationKey(int key) {
     return key == KEY_RETURN || key == KEY_SPACE;
 }
 } // namespace rdui
-#endif // LL_RDUI_EVENT_H
+#endif // RD_EVENT_H

@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_RECORDING_PAINT_CONTEXT_H
-#define LL_RDUI_RECORDING_PAINT_CONTEXT_H
+#ifndef RD_RENDER_RECORDINGPAINTCONTEXT_H
+#define RD_RENDER_RECORDINGPAINTCONTEXT_H
 
 #include <cstddef>
 #include <string>
@@ -73,4 +73,4 @@ private:
     int mMaxClipDepth = 0;
 };
 } // namespace rdui
-#endif // LL_RDUI_RECORDING_PAINT_CONTEXT_H
+#endif // RD_RENDER_RECORDINGPAINTCONTEXT_H

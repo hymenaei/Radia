@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_FLOATER_CONTROLLER_H
-#define LL_RDUI_FLOATER_CONTROLLER_H
+#ifndef RD_FLOATERCONTROLLER_H
+#define RD_FLOATERCONTROLLER_H
 
 #include <string>
 #include "binding/binder.h"
@@ -46,4 +46,4 @@ public:
 };
 } // namespace viewer
 } // namespace rdui
-#endif // LL_RDUI_FLOATER_CONTROLLER_H
+#endif // RD_FLOATERCONTROLLER_H

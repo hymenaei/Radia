@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_TYPES_H
-#define LL_RDUI_TYPES_H
+#ifndef RD_TYPES_H
+#define RD_TYPES_H
 
 #include <algorithm>
 #include <cmath>
@@ -169,4 +169,4 @@ inline void set_state(uint8_t& states, WidgetState state, bool enabled) {
     states = enabled ? static_cast<uint8_t>(states | bit) : static_cast<uint8_t>(states & ~bit);
 }
 } // namespace rdui
-#endif // LL_RDUI_TYPES_H
+#endif // RD_TYPES_H

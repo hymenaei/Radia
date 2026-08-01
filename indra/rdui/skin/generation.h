@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_SKIN_GENERATION_H
-#define LL_RDUI_SKIN_GENERATION_H
+#ifndef RD_SKIN_GENERATION_H
+#define RD_SKIN_GENERATION_H
 
 #include <memory>
 #include <string>
@@ -69,4 +69,4 @@ private:
     friend class System;
 };
 } // namespace rdui
-#endif // LL_RDUI_SKIN_GENERATION_H
+#endif // RD_SKIN_GENERATION_H

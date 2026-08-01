@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_PAINT_CONTEXT_H
-#define LL_RDUI_PAINT_CONTEXT_H
+#ifndef RD_RENDER_PAINTCONTEXT_H
+#define RD_RENDER_PAINTCONTEXT_H
 
 #include <optional>
 #include <string>
@@ -53,4 +53,4 @@ public:
     virtual void paintIcon(const std::string& name, const Rect& rect, const Style& style, float scale) = 0;
 };
 } // namespace rdui
-#endif // LL_RDUI_PAINT_CONTEXT_H
+#endif // RD_RENDER_PAINTCONTEXT_H

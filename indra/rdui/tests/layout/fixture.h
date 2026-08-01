@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_TESTS_LAYOUT_FIXTURE_H
-#define LL_RDUI_TESTS_LAYOUT_FIXTURE_H
+#ifndef RD_TESTS_LAYOUT_FIXTURE_H
+#define RD_TESTS_LAYOUT_FIXTURE_H
 
 #include <map>
 #include <memory>
@@ -71,4 +71,4 @@ struct LayoutCompilerFixture {
 };
 } // namespace tut
 
-#endif // LL_RDUI_TESTS_LAYOUT_FIXTURE_H
+#endif // RD_TESTS_LAYOUT_FIXTURE_H

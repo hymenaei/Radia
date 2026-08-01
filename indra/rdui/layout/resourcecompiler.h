@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_LAYOUT_RESOURCE_COMPILER_H
-#define LL_RDUI_LAYOUT_RESOURCE_COMPILER_H
+#ifndef RD_LAYOUT_RESOURCECOMPILER_H
+#define RD_LAYOUT_RESOURCECOMPILER_H
 
 #include <string>
 #include <unordered_map>
@@ -51,4 +51,4 @@ private:
     std::unordered_map<std::string, WidgetContract> mWidgetContracts;
 };
 } // namespace rdui
-#endif // LL_RDUI_LAYOUT_RESOURCE_COMPILER_H
+#endif // RD_LAYOUT_RESOURCECOMPILER_H

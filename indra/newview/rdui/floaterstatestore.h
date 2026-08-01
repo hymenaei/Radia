@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef LL_RDUI_FLOATER_STATE_STORE_H
-#define LL_RDUI_FLOATER_STATE_STORE_H
+#ifndef RD_FLOATERSTATESTORE_H
+#define RD_FLOATERSTATESTORE_H
 
 #include <vector>
 #include "floaterdocumentmanager.h"
@@ -42,4 +42,4 @@ private:
     void write(const LLSD& placements) override;
 };
 } // namespace rdui::viewer
-#endif // LL_RDUI_FLOATER_STATE_STORE_H
+#endif // RD_FLOATERSTATESTORE_H

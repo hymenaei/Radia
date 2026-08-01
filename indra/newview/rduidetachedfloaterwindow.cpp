@@ -149,6 +149,7 @@ public:
             }
             const bool handled = [&] {
                 switch (pointer->phase) {
+                    case NativePointerPhase::Leave: return false;
                     case NativePointerPhase::Move: return mSurface->pointerMove(pointer->event);
                     case NativePointerPhase::Down: return mSurface->pointerDown(pointer->event);
                     case NativePointerPhase::Up: return mSurface->pointerUp(pointer->event);

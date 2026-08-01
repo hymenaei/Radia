@@ -38,18 +38,15 @@ in uint glyph_loc;
 flat out uint vary_glyphLoc;
 #endif
 
-void main()
-{
+void main() {
     gl_Position = modelview_projection_matrix * vec4(position, 1);
     vertex_color = diffuse_color;
 #ifdef HAS_FONT_GPU
     vary_glyphLoc = glyph_loc;
-    if (glyph_loc != 0xFFFFFFFFu)
-    {
-        // Analytic glyphs carry design-space sample coordinates directly.
+    if (glyph_loc != 0xFFFFFFFFu) {
         vary_texcoord0 = texcoord0;
         return;
     }
 #endif
-    vary_texcoord0 =  (texture_matrix0 * vec4(texcoord0,0,1)).xy;
+    vary_texcoord0 = (texture_matrix0 * vec4(texcoord0, 0, 1)).xy;
 }

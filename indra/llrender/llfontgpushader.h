@@ -1,6 +1,6 @@
 /**
  * @file llfontgpushader.h
- * @brief Builds the analytic (hb-gpu) UI text shader program.
+ * @brief Builds the analytic UI text shader program.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Alchemy Viewer Source Code
@@ -25,47 +25,25 @@
 #ifndef LL_LLFONTGPUSHADER_H
 #define LL_LLFONTGPUSHADER_H
 
+#include "llhbgpu.h"
 #include "stdtypes.h"
-#include "llhbgpu.h"   // LL_HAS_HB_GPU + hb-gpu shader-source API
-
 #if LL_HAS_HB_GPU
-
-#include <string>
+    #include <string>
 
 class LLGLSLShader;
 
-// Assembles and builds the analytic (hb-gpu) text program. HarfBuzz emits the
-// heavy fragment library at runtime; this class exposes the exact sources used
-// by the production batched fallback so headless tests compile what ships.
-//
-// The vertex shader uses the reserved attribute names (position, texcoord0,
-// diffuse_color, glyph_loc) so the program binds through LLVertexBuffer.
-//
-// Lives in llrender rather than LLViewerShaderMgr because the source is
-// assembled at runtime, not loaded from .glsl files on disk.
-class LLFontGpuShader
-{
+class LLFontGpuShader {
 public:
-    // Runtime gate shared by shader setup and the standalone fallback. The
-    // library may be present at build time while the active GL context lacks
-    // texture-buffer support.
     static bool isRuntimeSupported();
 
-    // HarfBuzz fragment library with no #version or main. The normal UI shader
-    // injects this exact source into uiF.glsl.
     static std::string fragmentLibSource();
 
-    // Exact production sources and builder used for HUD/world/debug fallback.
     static std::string batchedVertexSource();
     static std::string batchedFragmentSource();
     static bool buildBatchedProgram(LLGLSLShader& program);
 
-    // Shared mixed mono/COLRv1 program for text drawn outside the normal UI
-    // shader (HUD/world/debug overlays). Built lazily; callers must flush before
-    // binding and before restoring the previous program.
     static LLGLSLShader* getBatchedProgram();
     static void destroyBatchedProgram();
 };
-
 #endif // LL_HAS_HB_GPU
 #endif // LL_LLFONTGPUSHADER_H

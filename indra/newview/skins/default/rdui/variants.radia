@@ -81,7 +81,6 @@ text.demo-ellipsis-center {
 }
 
 text.demo-outline {
-    margin: 3px;
     padding: 4px;
     background-color: #ffffff0c;
     border: 1px #ffffff24;

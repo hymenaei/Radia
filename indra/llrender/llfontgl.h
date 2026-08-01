@@ -98,8 +98,11 @@ public:
 
     struct TextSpacing
     {
-        F32 letter = 0.f;
-        F32 word = 0.f;
+        constexpr TextSpacing() noexcept : letter(0.f), word(0.f) {}
+        constexpr TextSpacing(F32 letter_spacing, F32 word_spacing) noexcept : letter(letter_spacing), word(word_spacing) {}
+
+        F32 letter;
+        F32 word;
 
         bool any() const { return letter != 0.f || word != 0.f; }
     };

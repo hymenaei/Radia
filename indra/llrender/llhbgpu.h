@@ -1,15 +1,6 @@
 /**
  * @file llhbgpu.h
- * @brief Single source of truth for HarfBuzz-GPU (hb-gpu) availability.
- *
- * libharfbuzz-gpu is linked unconditionally (see indra/cmake/Harfbuzz.cmake).
- * This header keys the C++ capability macro off the HarfBuzz version rather
- * than a propagated -D, so it cannot desync the per-target define set against
- * the shared precompiled header (which would break PCH reuse). Include this
- * wherever hb-gpu is used and guard with `#if LL_HAS_HB_GPU`.
- *
- * 14.2.0 is the gate: it introduced the paint encoder and the stabilized draw
- * API, and is the version the project vendors.
+ * @brief Single source of truth for HarfBuzz-GPU availability.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Alchemy Viewer Source Code
@@ -35,12 +26,10 @@
 #define LL_LLHBGPU_H
 
 #include <hb.h>
-
 #if HB_VERSION_ATLEAST(14, 2, 0)
-#  define LL_HAS_HB_GPU 1
-#  include <hb-gpu.h>
+    #define LL_HAS_HB_GPU 1
+    #include <hb-gpu.h>
 #else
-#  define LL_HAS_HB_GPU 0
+    #define LL_HAS_HB_GPU 0
 #endif
-
 #endif // LL_LLHBGPU_H

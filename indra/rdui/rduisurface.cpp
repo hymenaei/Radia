@@ -252,7 +252,7 @@ void Surface::paintWidget(const Widget& widget, PaintContext& context, float sca
     const bool clips_x = unresolved.overflow_x == Overflow::Hidden;
     const bool clips_y = unresolved.overflow_y == Overflow::Hidden;
     const bool clips_children = clips_x || clips_y;
-    const ClipAxes clip_axes = (clips_x ? ClipAxes::X : ClipAxes::None) | (clips_y ? ClipAxes::Y : ClipAxes::None);
+    const ClipAxes clip_axes = (clips_x ? ClipAxes::X : ClipAxes::NoAxes) | (clips_y ? ClipAxes::Y : ClipAxes::NoAxes);
     if (!painted.effects.empty()) context.beginEffects(widget.paintBounds(), painted, scale);
     if (clips_children) context.pushClip(widget.rect(), scale, clip_axes);
     widget.paint(context, painted, scale);

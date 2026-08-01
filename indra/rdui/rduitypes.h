@@ -85,7 +85,7 @@ inline Rect intersectRects(const Rect& lhs, const Rect& rhs) {
     return {left, bottom, std::max(0.f, right - left), std::max(0.f, top - bottom)};
 }
 
-enum class ClipAxes : uint8_t { None = 0, X = 1 << 0, Y = 1 << 1, Both = (1 << 0) | (1 << 1) };
+enum class ClipAxes : uint8_t { NoAxes = 0, X = 1 << 0, Y = 1 << 1, Both = (1 << 0) | (1 << 1) };
 
 inline ClipAxes operator|(ClipAxes lhs, ClipAxes rhs) {
     return static_cast<ClipAxes>(static_cast<uint8_t>(lhs) | static_cast<uint8_t>(rhs));

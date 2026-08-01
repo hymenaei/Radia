@@ -46,8 +46,8 @@ Widget* hitTest(Widget& node, const Vec2& point, const StyleSheet& style_sheet, 
     const Style style = resolveWidgetStyle(style_sheet, node);
     const bool clips_x = style.overflow_x == Overflow::Hidden;
     const bool clips_y = style.overflow_y == Overflow::Hidden;
-    const ClipAxes clip_axes = (clips_x ? ClipAxes::X : ClipAxes::None) | (clips_y ? ClipAxes::Y : ClipAxes::None);
-    const Rect child_clip = clip_axes == ClipAxes::None ? inherited_clip : clipToAxes(inherited_clip, node.rect(), clip_axes);
+    const ClipAxes clip_axes = (clips_x ? ClipAxes::X : ClipAxes::NoAxes) | (clips_y ? ClipAxes::Y : ClipAxes::NoAxes);
+    const Rect child_clip = clip_axes == ClipAxes::NoAxes ? inherited_clip : clipToAxes(inherited_clip, node.rect(), clip_axes);
     for (auto child = node.children().rbegin(); child != node.children().rend(); ++child)
         if (Widget* hit = hitTest(**child, point, style_sheet, child_clip)) return hit;
     return node.rect().contains(point) && acceptsPointerEvents(node, style_sheet) ? &node : nullptr;

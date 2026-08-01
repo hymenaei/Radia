@@ -39,7 +39,7 @@
     </panel>
 
     <button class="primary" onClick="press">
-        <icon source="search"/>
+        <icon src="search"/>
         demo.press
     </button>
 

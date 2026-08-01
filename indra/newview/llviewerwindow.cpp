@@ -46,8 +46,8 @@
 #include "llsetkeybinddialog.h"
 #include "llviewerinput.h"
 #include "llviewermenu.h"
-#include "rdfloaterdemo.h"
-#include "rduiruntime.h"
+#include "floaterdemo.h"
+#include "runtime.h"
 
 #include "llviewquery.h"
 #include "llxmltree.h"

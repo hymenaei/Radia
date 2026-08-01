@@ -902,18 +902,18 @@ set(viewer_SOURCE_FILES
     lutcube.cpp
     noise.cpp
     pipeline.cpp
-    rduidetachedfloatermanager.cpp
-    rduidetachedfloaterwindow.cpp
-    rduifloaterdocumentmanager.cpp
-    rduifloaterplacementstore.cpp
-    rduifloaterstatestore.cpp
-    rduiinputbridge.cpp
-    rduinativewindow.cpp
-    rduiskinreloadcoordinator.cpp
-    rduiskinresolver.cpp
-    rduiskinresources.cpp
-    rduiruntime.cpp
-    rdfloaterdemo.cpp
+    rdui/components/floaterdemo.cpp
+    rdui/detachedfloatermanager.cpp
+    rdui/detachedfloaterwindow.cpp
+    rdui/floaterdocumentmanager.cpp
+    rdui/floaterplacementstore.cpp
+    rdui/floaterstatestore.cpp
+    rdui/inputbridge.cpp
+    rdui/nativewindow.cpp
+    rdui/runtime.cpp
+    rdui/skin/reloadcoordinator.cpp
+    rdui/skin/resolver.cpp
+    rdui/skin/resources.cpp
     rlvactions.cpp
     rlvenvironment.cpp
     rlvcommon.cpp
@@ -929,7 +929,6 @@ set(viewer_SOURCE_FILES
 
 set(viewer_HEADER_FILES
     ViewerInstall.cmake
-    rduinativewindow.h
     ao.h
     aoengine.h
     aoset.h
@@ -1680,19 +1679,20 @@ set(viewer_HEADER_FILES
     lutcube.h
     noise.h
     pipeline.h
-    rduidetachedfloatermanager.h
-    rduidetachedfloaterwindow.h
-    rduifloatercontroller.h
-    rduifloaterdocumentmanager.h
-    rduifloaterplacementstore.h
-    rduifloaterstatestore.h
-    rduiinputbridge.h
-    rduinativeinput.h
-    rduiskinreloadcoordinator.h
-    rduiskinresolver.h
-    rduiskinresources.h
-    rduiruntime.h
-    rdfloaterdemo.h
+    rdui/components/floaterdemo.h
+    rdui/detachedfloatermanager.h
+    rdui/detachedfloaterwindow.h
+    rdui/floatercontroller.h
+    rdui/floaterdocumentmanager.h
+    rdui/floaterplacementstore.h
+    rdui/floaterstatestore.h
+    rdui/inputbridge.h
+    rdui/nativeinput.h
+    rdui/nativewindow.h
+    rdui/runtime.h
+    rdui/skin/reloadcoordinator.h
+    rdui/skin/resolver.h
+    rdui/skin/resources.h
     rlvactions.h
     rlvcommon.h
     rlvdefines.h
@@ -1974,7 +1974,13 @@ endif ()
 
 check_message_template(${VIEWER_BINARY_NAME})
 
-target_include_directories(${VIEWER_BINARY_NAME} PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
+target_include_directories(${VIEWER_BINARY_NAME}
+    PUBLIC ${CMAKE_CURRENT_BINARY_DIR}
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/rdui
+    ${CMAKE_CURRENT_SOURCE_DIR}/rdui/components
+    )
 
 target_precompile_headers(${VIEWER_BINARY_NAME} PRIVATE llviewerprecompiledheaders.h)
 
@@ -2423,37 +2429,9 @@ if (BUILD_TESTING)
 #    llremoteparcelrequest.cpp
     llviewerhelputil.cpp
     llversioninfo.cpp
-    rduidetachedfloatermanager.cpp
-    rduifloaterdocumentmanager.cpp
-    rduifloaterplacementstore.cpp
-    rduiinputbridge.cpp
-    rduiskinreloadcoordinator.cpp
-    rduiskinresolver.cpp
 #    llvocache.cpp
     llworldmap.cpp
     llworldmipmap.cpp
-  )
-
-  set_source_files_properties(
-    rduidetachedfloatermanager.cpp
-    rduifloaterdocumentmanager.cpp
-    rduiinputbridge.cpp
-    rduiskinreloadcoordinator.cpp
-    rduiskinresolver.cpp
-    PROPERTIES
-    LL_TEST_ADDITIONAL_PROJECTS rdui
-  )
-
-  set_source_files_properties(
-    rduidetachedfloatermanager.cpp
-    PROPERTIES
-    LL_TEST_ADDITIONAL_SOURCE_FILES rduifloaterplacementstore.cpp
-  )
-
-  set_source_files_properties(
-    rduiskinreloadcoordinator.cpp
-    PROPERTIES
-    LL_TEST_ADDITIONAL_SOURCE_FILES rduifloaterdocumentmanager.cpp
   )
 
   set_source_files_properties(
@@ -2485,6 +2463,111 @@ if (BUILD_TESTING)
   )
 
   set(test_project ${VIEWER_BINARY_NAME})
+
+  function(newview_rdui_add_test logical_name source_path test_source_path)
+    cmake_parse_arguments(
+      TEST
+      ""
+      ""
+      "ADDITIONAL_SOURCE_FILES;ADDITIONAL_PROJECTS"
+      ${ARGN}
+    )
+
+    set(target PROJECT_${VIEWER_BINARY_NAME}_TEST_${logical_name})
+    add_executable(
+      ${target}
+      ${source_path}
+      ${test_source_path}
+      ${TEST_ADDITIONAL_SOURCE_FILES}
+    )
+
+    get_property(viewer_test_include_dirs TARGET ${VIEWER_BINARY_NAME} PROPERTY INTERFACE_INCLUDE_DIRECTORIES)
+    target_include_directories(
+      ${target}
+      PRIVATE
+      ${viewer_test_include_dirs}
+      ${CMAKE_CURRENT_SOURCE_DIR}
+      ${CMAKE_CURRENT_SOURCE_DIR}/rdui
+      ${CMAKE_CURRENT_SOURCE_DIR}/rdui/components
+      ${INDRA_SOURCE_DIR}/test
+      ${INDRA_SOURCE_DIR}/llmath
+      ${INDRA_SOURCE_DIR}/llui
+    )
+    target_link_libraries(
+      ${target}
+      PRIVATE
+      lltut_runner_lib
+      llcommon
+      llmath
+      ll::tut
+      ${TEST_ADDITIONAL_PROJECTS}
+      ${test_libs}
+    )
+    target_compile_definitions(${target} PRIVATE "LL_TEST=${logical_name}" "LL_TEST_${logical_name}")
+    set_target_properties(
+      ${target}
+      PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${EXE_STAGING_DIR}"
+      FOLDER "Tests/${VIEWER_BINARY_NAME}"
+    )
+
+    if (WINDOWS)
+      target_link_options(${target} PRIVATE $<$<CONFIG:Release>:/DEBUG:NONE>)
+    elseif (DARWIN)
+      set_target_properties(${target} PROPERTIES XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "-")
+    endif ()
+
+    set(test_output ${CMAKE_CURRENT_BINARY_DIR}/${target}_ok.txt)
+    set(test_command $<TARGET_FILE:${target}> --touch=${test_output} --sourcedir=${CMAKE_CURRENT_SOURCE_DIR})
+    SET_TEST_PATH(LD_LIBRARY_PATH)
+    LL_TEST_COMMAND(test_script "${LD_LIBRARY_PATH}" ${test_command})
+    add_test(NAME ${target} COMMAND ${test_script} WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    add_dependencies(BUILD_TESTS ${target})
+  endfunction()
+
+  newview_rdui_add_test(
+    rduidetachedfloatermanager
+    rdui/detachedfloatermanager.cpp
+    tests/rdui/detachedfloatermanager_test.cpp
+    ADDITIONAL_SOURCE_FILES rdui/floaterplacementstore.cpp
+    ADDITIONAL_PROJECTS rdui
+  )
+  newview_rdui_add_test(
+    rduifloaterdocumentmanager
+    rdui/floaterdocumentmanager.cpp
+    tests/rdui/floaterdocumentmanager_test.cpp
+    ADDITIONAL_PROJECTS rdui
+  )
+  newview_rdui_add_test(
+    rduifloaterplacementstore
+    rdui/floaterplacementstore.cpp
+    tests/rdui/floaterplacementstore_test.cpp
+  )
+  newview_rdui_add_test(
+    rduifloaterstatestore
+    rdui/floaterstatestore.cpp
+    tests/rdui/floaterstatestore_test.cpp
+    ADDITIONAL_PROJECTS rdui
+  )
+  newview_rdui_add_test(
+    rduiinputbridge
+    rdui/inputbridge.cpp
+    tests/rdui/inputbridge_test.cpp
+    ADDITIONAL_PROJECTS rdui
+  )
+  newview_rdui_add_test(
+    rduiskinreloadcoordinator
+    rdui/skin/reloadcoordinator.cpp
+    tests/rdui/skin/reloadcoordinator_test.cpp
+    ADDITIONAL_SOURCE_FILES rdui/floaterdocumentmanager.cpp
+    ADDITIONAL_PROJECTS rdui
+  )
+  newview_rdui_add_test(
+    rduiskinresolver
+    rdui/skin/resolver.cpp
+    tests/rdui/skin/resolver_test.cpp
+    ADDITIONAL_PROJECTS rdui
+  )
 
   set_property(SOURCE
     ${viewer_TEST_SOURCE_FILES}

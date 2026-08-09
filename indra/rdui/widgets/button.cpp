@@ -1,6 +1,6 @@
 /**
  * @file button.cpp
- * @brief
+ * @brief Implements the semantic Button Widget and its contract.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -28,7 +28,7 @@
 #include "style/style.h"
 #include "widgets/icon.h"
 #include "widgets/label.h"
-#include "widgets/widgetcontract.h"
+#include "widgets/widgetcontractbuilder.h"
 
 namespace rdui {
 namespace {

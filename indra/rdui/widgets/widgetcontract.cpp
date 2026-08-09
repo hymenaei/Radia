@@ -1,6 +1,6 @@
 /**
  * @file widgetcontract.cpp
- * @brief
+ * @brief Implements Widget Contract validation and composite topology.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -68,14 +68,10 @@ void detail::WidgetCompilerAccess::setFlowBreakBefore(Widget& widget, bool enabl
 
 const char* actionAttribute(ActionEventKind kind) {
     switch (kind) {
-        case ActionEventKind::Click: return "onClick";
-        case ActionEventKind::DoubleClick: return "onDoubleClick";
-        case ActionEventKind::Change: return "onChange";
-        case ActionEventKind::MouseDown: return "onMouseDown";
-        case ActionEventKind::MouseUp: return "onMouseUp";
-        case ActionEventKind::MouseMove: return "onMouseMove";
-        case ActionEventKind::LongClick: return "onLongClick";
-        case ActionEventKind::ContextMenu: return "onContextMenu";
+#define ACTION_EVENT_ENTRY(name, attribute)                                                                                                          \
+    case ActionEventKind::name: return attribute;
+#include "actionevents.def"
+#undef ACTION_EVENT_ENTRY
     }
     return "";
 }
@@ -96,20 +92,49 @@ std::optional<std::chrono::milliseconds> durationValue(const std::string& value)
 
 using CompositeInstances = std::unordered_map<std::string, Widget*>;
 
-void validateCompositeContract(const WidgetContract& contract) {
-    std::unordered_set<std::string> paths;
-    paths.reserve(contract.composite_parts.size());
-    for (const CompositePartContract& part : contract.composite_parts) {
-        llassert_always(!part.path.empty());
-        llassert_always(part.create);
-        llassert_always(paths.insert(part.path).second);
+CompositeTopology makeCompositeTopology(const WidgetContract& contract) {
+    CompositeTopology topology;
+    topology.indices.reserve(contract.composite_parts.size());
+    for (std::size_t index = 0; index < contract.composite_parts.size(); ++index) {
+        const CompositePartContract& part = contract.composite_parts[index];
+        if (part.path.empty() || !part.create || !topology.indices.emplace(part.path, index).second) topology.valid = false;
     }
-    for (const CompositePartContract& part : contract.composite_parts)
-        llassert_always(part.parent_path.empty() || paths.count(part.parent_path) == 1);
+    if (!topology.valid) return topology;
+
+    std::vector<uint8_t> state(contract.composite_parts.size(), 0);
+    std::function<void(std::size_t)> visit = [&](std::size_t index) {
+        if (!topology.valid || state[index] == 2) return;
+        if (state[index] == 1) {
+            topology.valid = false;
+            return;
+        }
+        state[index] = 1;
+        const CompositePartContract& part = contract.composite_parts[index];
+        if (!part.parent_path.empty()) {
+            const auto parent = topology.indices.find(part.parent_path);
+            if (parent == topology.indices.end()) {
+                topology.valid = false;
+                return;
+            }
+            visit(parent->second);
+        }
+        state[index] = 2;
+        topology.order.push_back(index);
+    };
+    for (std::size_t index = 0; index < contract.composite_parts.size() && topology.valid; ++index) visit(index);
+    if (!topology.valid) topology.order.clear();
+    return topology;
 }
 
-void collectCompositeInstances(Widget& owner, const WidgetContract& contract, CompositeInstances& instances) {
-    for (const CompositePartContract& part : contract.composite_parts) {
+const CompositeTopology* topologyFor(const WidgetContract& contract, CompositeTopology& fallback) {
+    if (contract.composite_topology) return contract.composite_topology.get();
+    fallback = makeCompositeTopology(contract);
+    return &fallback;
+}
+
+void collectCompositeInstances(Widget& owner, const WidgetContract& contract, const CompositeTopology& topology, CompositeInstances& instances) {
+    for (const std::size_t index : topology.order) {
+        const CompositePartContract& part = contract.composite_parts[index];
         Widget* parent = &owner;
         if (!part.parent_path.empty()) {
             const auto found = instances.find(part.parent_path);
@@ -124,24 +149,33 @@ void collectCompositeInstances(Widget& owner, const WidgetContract& contract, Co
     }
 }
 
-Widget* instantiateCompositePartImpl(Widget& owner, const WidgetContract& contract, const CompositePartContract& part, CompositeInstances& instances,
-                                     std::unordered_set<std::string>& constructing) {
+Widget* instantiateCompositePartImpl(Widget& owner, const WidgetContract& contract, const CompositeTopology& topology, std::size_t part_index,
+                                     CompositeInstances& instances, std::unordered_set<std::string>& constructing) {
+    if (!topology.valid || part_index >= contract.composite_parts.size()) return nullptr;
+    const CompositePartContract& part = contract.composite_parts[part_index];
     const auto existing = instances.find(part.path);
     if (existing != instances.end()) return existing->second;
-    llassert_always(constructing.insert(part.path).second);
-    llassert_always(!part.path.empty());
-    llassert_always(part.create);
+    if (!constructing.insert(part.path).second || part.path.empty() || !part.create) return nullptr;
 
     Widget* parent = &owner;
     if (!part.parent_path.empty()) {
-        const auto parent_contract = std::find_if(contract.composite_parts.begin(), contract.composite_parts.end(),
-                                                  [&part](const CompositePartContract& candidate) { return candidate.path == part.parent_path; });
-        llassert_always(parent_contract != contract.composite_parts.end());
-        parent = instantiateCompositePartImpl(owner, contract, *parent_contract, instances, constructing);
+        const auto parent_index = topology.indices.find(part.parent_path);
+        if (parent_index == topology.indices.end()) {
+            constructing.erase(part.path);
+            return nullptr;
+        }
+        parent = instantiateCompositePartImpl(owner, contract, topology, parent_index->second, instances, constructing);
+        if (!parent) {
+            constructing.erase(part.path);
+            return nullptr;
+        }
     }
 
     std::unique_ptr<Widget> child = part.create();
-    llassert_always(child != nullptr);
+    if (!child) {
+        constructing.erase(part.path);
+        return nullptr;
+    }
     detail::WidgetCompilerAccess::setStyleIdentity(*child, owner.styleElement(), part.path);
     Widget* instance = child.get();
     parent->Widget::addChild(std::move(child));
@@ -151,6 +185,10 @@ Widget* instantiateCompositePartImpl(Widget& owner, const WidgetContract& contra
     return instance;
 }
 } // namespace
+
+void detail::prepareCompositeTopology(WidgetContract& contract) {
+    contract.composite_topology = std::make_shared<const CompositeTopology>(makeCompositeTopology(contract));
+}
 
 const WidgetContract* findWidgetContract(const std::string& element) {
     const auto& contracts = builtInWidgetContracts();
@@ -164,6 +202,11 @@ const CompositePartContract* findCompositePartContract(const WidgetContract& wid
     for (const std::string& part : parts) {
         if (!path.empty()) path += "::";
         path += part;
+    }
+    if (widget.composite_topology) {
+        const auto index = widget.composite_topology->indices.find(path);
+        if (index != widget.composite_topology->indices.end() && index->second < widget.composite_parts.size())
+            return &widget.composite_parts[index->second];
     }
     const auto composite = std::find_if(widget.composite_parts.begin(), widget.composite_parts.end(),
                                         [&path](const CompositePartContract& part) { return part.path == path; });
@@ -179,25 +222,28 @@ bool producesState(const CompositePartContract& part, WidgetState state) {
 }
 
 void detail::instantiateCompositeParts(Widget& owner, const WidgetContract& contract) {
-    validateCompositeContract(contract);
+    CompositeTopology fallback;
+    const CompositeTopology& topology = *topologyFor(contract, fallback);
+    if (!topology.valid) return;
     CompositeInstances instances;
     instances.reserve(contract.composite_parts.size());
-    collectCompositeInstances(owner, contract, instances);
+    collectCompositeInstances(owner, contract, topology, instances);
     std::unordered_set<std::string> constructing;
-    for (const CompositePartContract& part : contract.composite_parts)
-        if (part.eager) instantiateCompositePartImpl(owner, contract, part, instances, constructing);
+    for (const std::size_t index : topology.order)
+        if (contract.composite_parts[index].eager) instantiateCompositePartImpl(owner, contract, topology, index, instances, constructing);
 }
 
 Widget* detail::instantiateCompositePart(Widget& owner, const WidgetContract& contract, const std::string& path) {
-    validateCompositeContract(contract);
-    const auto part = std::find_if(contract.composite_parts.begin(), contract.composite_parts.end(),
-                                   [&path](const CompositePartContract& candidate) { return candidate.path == path; });
-    llassert_always(part != contract.composite_parts.end());
+    CompositeTopology fallback;
+    const CompositeTopology& topology = *topologyFor(contract, fallback);
+    if (!topology.valid) return nullptr;
+    const auto part = topology.indices.find(path);
+    if (part == topology.indices.end()) return nullptr;
     CompositeInstances instances;
     instances.reserve(contract.composite_parts.size());
-    collectCompositeInstances(owner, contract, instances);
+    collectCompositeInstances(owner, contract, topology, instances);
     std::unordered_set<std::string> constructing;
-    return instantiateCompositePartImpl(owner, contract, *part, instances, constructing);
+    return instantiateCompositePartImpl(owner, contract, topology, part->second, instances, constructing);
 }
 
 bool readViewAttribute(const LayoutElement& element, const char* name, std::string& value) {

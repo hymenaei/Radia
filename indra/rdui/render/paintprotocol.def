@@ -1,0 +1,31 @@
+// CPU paint protocol values mirrored by uiF.glsl.
+// The numeric value is uploaded as a uniform ABI: append new operations and
+// update the corresponding shader constant; do not reorder existing values.
+
+// Direct restores ordinary textured/color drawing.
+PAINT_OP_ENTRY(Direct, 0)
+// Fill draws a solid rounded shape.
+PAINT_OP_ENTRY(Fill, 1)
+// Border draws a rounded border stroke.
+PAINT_OP_ENTRY(Border, 2)
+// Gradient draws a filled gradient shape.
+PAINT_OP_ENTRY(Gradient, 3)
+// OuterShadow draws a shadow outside the shape.
+PAINT_OP_ENTRY(OuterShadow, 4)
+// InsetShadow draws a shadow inside the shape.
+PAINT_OP_ENTRY(InsetShadow, 5)
+// GradientBorder draws a gradient border stroke.
+PAINT_OP_ENTRY(GradientBorder, 6)
+// Blur applies the captured effect texture's blur pass.
+PAINT_OP_ENTRY(Blur, 7)
+// Composite blends the captured effect texture back into the target.
+PAINT_OP_ENTRY(Composite, 8)
+
+// Gradient interpolation mode uploaded as the gradientKind uniform.
+GRADIENT_OP_ENTRY(Linear, 0)
+GRADIENT_OP_ENTRY(Radial, 1)
+GRADIENT_OP_ENTRY(Conic, 2)
+
+// Border stroke mode uploaded as the outlineStyle uniform.
+OUTLINE_OP_ENTRY(Solid, 0)
+OUTLINE_OP_ENTRY(Dashed, 1)

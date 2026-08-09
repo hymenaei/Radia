@@ -56,6 +56,11 @@ public:
     StyleSheetLoadResult loadRadiaLayers(const std::vector<ResourceLayer>& layers);
     std::uint64_t generation() const;
     const DependencyMap& dependencies() const;
+    bool stateAffectsLayout(WidgetState state) const;
+    bool stateAffectsLayout(const Widget& widget, WidgetState state) const;
+    bool stateAffectsHitTesting(WidgetState state) const;
+    bool stateAffectsHitTesting(const Widget& widget, WidgetState state) const;
+    bool stateAffectsDescendants(const Widget& widget, WidgetState state) const;
 
     Style resolve(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint8_t states) const;
     Style resolvePart(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint8_t owner_states,
@@ -66,7 +71,7 @@ public:
 
 private:
     struct Impl;
-    std::unique_ptr<Impl> mImpl;
+    std::shared_ptr<Impl> mImpl;
 };
 } // namespace rdui
 #endif // RD_STYLE_STYLESHEET_H

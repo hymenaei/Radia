@@ -1,6 +1,6 @@
 /**
- * @file property_test.cpp
- * @brief
+ * @file compiler_test.cpp
+ * @brief Tests RSL property compilation and shorthand expansion.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -25,7 +25,9 @@
 #include "linden_common.h"
 #include "../test/lltut.h"
 #include "layout/engine.h"
+#include "style/model.h"
 #include "style/stylesheet.h"
+#include "style/syntax.h"
 #include "widgets/button.h"
 #include "widgets/field.h"
 #include "widgets/floater.h"
@@ -36,10 +38,11 @@
 #include "widgets/widgetcontract.h"
 
 namespace tut {
-struct rduistyle_data {};
-typedef test_group<rduistyle_data> rduistyleproperty_test;
-typedef rduistyleproperty_test::object rduistyleproperty_object;
-rduistyleproperty_test rduistyleproperty_testcase("rduistyleproperty");
+struct styleproperties_data {};
+typedef test_group<styleproperties_data> styleproperties_test;
+typedef styleproperties_test::object styleproperties_object;
+using rduistyleproperty_object = styleproperties_object;
+styleproperties_test styleproperties_testcase("styleproperties");
 
 template<> template<> void rduistyleproperty_object::test<1>() {
     rdui::StyleSheet stylesheet;
@@ -316,5 +319,43 @@ template<> template<> void rduistyleproperty_object::test<13>() {
     ensure("font shorthand requires a family", !invalid.loadRadia("text { font: 13px; }").ok());
     ensure("normal word spacing compiles", invalid.loadRadia("text { word-spacing: normal; }").ok());
     ensure_equals("normal word spacing resets to zero", invalid.resolve("text", "", {}, 0).word_spacing.pixels, 0.f);
+}
+
+template<> template<> void rduistyleproperty_object::test<14>() {
+    const char* properties[] = {"padding", "border-width"};
+    const char* values[] = {"nan 2px 3px 4px",  "1px inf 3px 4px",  "1px 2px -inf 4px", "1px 2px 3px nan",
+                            "-nan 2px 3px 4px", "1px -inf 3px 4px", "1px 2px -nan 4px", "1px 2px 3px -inf"};
+    for (const char* property : properties)
+        for (const char* value : values) {
+            rdui::StyleSheet theme;
+            const std::string declaration = std::string("panel { ") + property + ": " + value + "; }";
+            ensure("non-finite edge values reject the declaration", !theme.loadRadia(declaration, "nonfinite-edge.radia").ok());
+        }
+}
+
+template<> template<> void rduistyleproperty_object::test<15>() {
+    const std::vector<std::string> tokens = rdui::detail::tokenizeTopLevel("italic 17px/21px sans", true);
+    ensure_equals("top-level scanner preserves slash tokens", tokens.size(), 5U);
+    ensure_equals("top-level scanner slash", tokens[2], "/");
+    ensure("top-level scanner rejects unclosed parentheses", rdui::detail::tokenizeTopLevel("var(--accent", true).empty());
+    ensure("top-level scanner rejects unmatched close", rdui::detail::splitTopLevel("rgb(1, 2)), blue", ',').empty());
+    const std::string source = "button { icon { width: 1px; } }";
+    const std::size_t open = source.find('{');
+    const std::optional<std::size_t> close = rdui::detail::matchingBlock(source, open);
+    ensure("block scanner finds nested close", close.has_value());
+    ensure_equals("block scanner closes outer block", *close, source.size() - 1);
+    ensure("block scanner rejects unclosed block", !rdui::detail::matchingBlock("button {", 7).has_value());
+}
+
+template<> template<> void rduistyleproperty_object::test<16>() {
+    const std::set<std::string_view> shorthand_names{"font", "flex", "min-size", "overflow"};
+    std::set<std::string_view> names;
+    for (const rdui::detail::StylePropertyDefinition* property = rdui::detail::stylePropertyBegin(); property != rdui::detail::stylePropertyEnd();
+         ++property) {
+        ensure("registry property names are unique", names.insert(property->name).second);
+        ensure("registry property has a compiler", property->compile != nullptr);
+        ensure_equals("shorthand apply is explicit", property->apply == nullptr, shorthand_names.count(property->name) != 0);
+    }
+    ensure_equals("registry contains all style properties", names.size(), 53U);
 }
 } // namespace tut

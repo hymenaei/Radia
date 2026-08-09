@@ -1,6 +1,6 @@
 /**
  * @file field.cpp
- * @brief
+ * @brief Implements the Field composite that relates labels and value controls.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -28,7 +28,7 @@
 #include "style/style.h"
 #include "system.h"
 #include "widgets/label.h"
-#include "widgets/widgetcontract.h"
+#include "widgets/widgetcontractbuilder.h"
 
 namespace rdui {
 namespace {
@@ -48,7 +48,7 @@ public:
 
     void setControl(Widget* control) { mControl.set(control); }
 
-    Vec2 intrinsicSize(const StyleSheet& theme, const Style&, const TextMetrics&) const override {
+    Vec2 intrinsicSize(const StyleSheet& theme, const Style&, const TextMetrics&, const IntrinsicSizeConstraints&) const override {
         if (!mControl) return {};
         const Style control_style = resolveWidgetStyle(theme, *mControl);
         return {mControl->desiredSize().x + control_style.margin.horizontal(), 0.f};

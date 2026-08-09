@@ -1,6 +1,6 @@
 /**
- * @file style_test.cpp
- * @brief
+ * @file stylesheet_test.cpp
+ * @brief Tests RSL stylesheet parsing, imports, selectors, and resolution.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -36,10 +36,11 @@
 #include "widgets/widgetcontract.h"
 
 namespace tut {
-struct rduistyle_data {};
-typedef test_group<rduistyle_data> rduistyle_test;
-typedef rduistyle_test::object rduistyle_object;
-rduistyle_test rduistyle_testcase("rduistyle");
+struct style_data {};
+typedef test_group<style_data> style_test;
+typedef style_test::object style_object;
+using rduistyle_object = style_object;
+style_test style_testcase("style");
 
 template<> template<> void rduistyle_object::test<1>() {
     rdui::StyleSheet theme;
@@ -453,6 +454,7 @@ template<> template<> void rduistyle_object::test<15>() {
     rejects("panel { effect: background-blur(to bottom, 0px, 4px 100%); }");
     rejects("panel { effect: background-blur(to bottom, 0px 75%, 4px 25%); }");
     rejects("panel { effect: layer-blur(-1px); }");
+    ensure("large blur radius remains authorable", stylesheet.loadRadia("panel { effect: layer-blur(64px); }", "large-effect.radia").ok());
     rejects("panel { effect: layer-blur(2px), background-blur(4px); }");
     rejects("panel { effect: background-blur(2px) layer-blur(4px); }");
 }
@@ -515,6 +517,8 @@ template<> template<> void rduistyle_object::test<17>() {
 
     rdui::StyleSheet moved = std::move(assigned);
     ensure_equals("move construction preserves compiled rules", moved.resolve("panel", "", {}, 0).width.pixels(), 10.f);
+    ensure("moved-from stylesheet remains an empty valid object", assigned.dependencies().empty());
+    ensure_equals("moved-from stylesheet exposes a generation", assigned.generation(), 0ULL);
 }
 
 template<> template<> void rduistyle_object::test<18>() {
@@ -661,5 +665,31 @@ template<> template<> void rduistyle_object::test<23>() {
     const auto rejected_part = stylesheet.loadRadia("kbd::key { padding: 1px; }");
     ensure("Kbd does not expose a synthetic key Part", !rejected_part.ok());
     ensure_equals("unknown Kbd Part diagnostic is stable", rejected_part.errors.front().code, std::string("stylesheet.selector.part_unknown"));
+}
+
+template<> template<> void rduistyle_object::test<24>() {
+    rdui::StyleSheet stylesheet;
+    rdui::ResourceLayer layer{
+        "theme/main.radia",
+        "@import \"branch-a.radia\"; @import \"branch-b.radia\";",
+    };
+    layer.entrypoint = "main.radia";
+    layer.modules = {
+        {"branch-a.radia", "@import \"shared.radia\"; panel { width: 10px; }"},
+        {"branch-b.radia", "@import \"shared.radia\"; panel { height: 20px; }"},
+        {"shared.radia", "panel { unknown-property: 1; }"},
+    };
+
+    const rdui::StyleSheetLoadResult result = stylesheet.loadRadiaLayers({layer});
+    ensure("shared imported module rejects the candidate", !result.ok());
+    ensure_equals("shared imported module emits one diagnostic per textual import", result.errors.size(), 2U);
+    ensure_equals("shared diagnostic identifies its source", result.errors.front().source, std::string("theme/shared.radia"));
+}
+
+template<> template<> void rduistyle_object::test<25>() {
+    rdui::StyleSheet stylesheet;
+    ensure("state border shorthand stylesheet compiles",
+           stylesheet.loadRadia("fieldset { border: 1px #ffffff; } fieldset:hover { border: 4px #ffffff; }").ok());
+    ensure("border shorthand remains layout-affecting", stylesheet.stateAffectsLayout(rdui::WidgetState::Hovered));
 }
 } // namespace tut

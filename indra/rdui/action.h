@@ -1,6 +1,6 @@
 /**
  * @file action.h
- * @brief
+ * @brief Cross-cutting action-event vocabulary and typed event declarations.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -34,7 +34,11 @@
 namespace rdui {
 class Widget;
 
-enum class ActionEventKind : uint8_t { Click, DoubleClick, Change, MouseDown, MouseUp, MouseMove, LongClick, ContextMenu };
+enum class ActionEventKind : uint8_t {
+#define ACTION_EVENT_ENTRY(name, attribute) name,
+#include "actionevents.def"
+#undef ACTION_EVENT_ENTRY
+};
 
 struct ActionEvent {
     ActionEvent(Widget& source, ActionEventKind kind) : source(source), kind(kind) {}

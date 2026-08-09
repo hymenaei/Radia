@@ -236,31 +236,98 @@ TextLine select(const std::vector<TextChunk>& clusters, std::size_t prefix_count
     return result;
 }
 
+class WrappedLine {
+public:
+    explicit WrappedLine(const TextMetrics& metrics) : mMetrics(metrics) {}
+
+    struct Snapshot {
+        std::size_t line_size = 0;
+        std::optional<TextRun> previous_last;
+        std::optional<std::size_t> previous_source;
+        std::size_t pending_size = 0;
+        float width = 0.f;
+    };
+
+    Snapshot snapshot() const {
+        return {mLine.size(), mLine.empty() ? std::optional<TextRun>() : std::optional<TextRun>(mLine.back()), mLastSource, mPending.size(), mWidth};
+    }
+
+    void restore(const Snapshot& snapshot) {
+        mLine.resize(snapshot.line_size);
+        if (snapshot.previous_last && !mLine.empty()) mLine.back() = *snapshot.previous_last;
+        mLastSource = snapshot.previous_source;
+        mPending.resize(snapshot.pending_size);
+        mWidth = snapshot.width;
+    }
+
+    void append(const TextChunk& chunk) {
+        for (const TextAtom& atom : chunk) append(atom);
+    }
+
+    bool empty() const { return mLine.empty(); }
+    float width() const { return mWidth; }
+
+    TextLine finish() {
+        TextLine result = std::move(mLine);
+        mLine.clear();
+        mPending.clear();
+        mLastSource.reset();
+        mWidth = 0.f;
+        return result;
+    }
+
+private:
+    void append(const TextAtom& atom) {
+        if (atom.whitespace) {
+            if (!mLine.empty()) mPending.push_back(atom);
+            return;
+        }
+
+        for (const TextAtom& pending : mPending) appendRun(pending.run, pending.source);
+        mPending.clear();
+        appendRun(atom.run, atom.source);
+    }
+
+    void appendRun(const TextRun& run, std::size_t source) {
+        if (!mLine.empty() && !run.keybinding() && !mLine.back().keybinding() && mLastSource == source) {
+            const float previous_spacing = mLine.size() > 1 ? interRunSpacing(mLine[mLine.size() - 2], mLine.back(), mMetrics) : 0.f;
+            mWidth -= mLine.back().size.x + previous_spacing;
+            mLine.back().value += run.value;
+            mLine.back().size = mMetrics.measureText(mLine.back().value, mLine.back().style);
+            const float spacing = mLine.size() > 1 ? interRunSpacing(mLine[mLine.size() - 2], mLine.back(), mMetrics) : 0.f;
+            mWidth += mLine.back().size.x + spacing;
+            return;
+        }
+
+        if (!mLine.empty()) mWidth += interRunSpacing(mLine.back(), run, mMetrics);
+        mLine.push_back(run);
+        mLastSource = source;
+        mWidth += run.size.x;
+    }
+
+    const TextMetrics& mMetrics;
+    TextLine mLine;
+    std::vector<TextAtom> mPending;
+    std::optional<std::size_t> mLastSource;
+    float mWidth = 0.f;
+};
+
 std::vector<TextLine> wrapLine(const TextLine& source, float available, float fallback_height, const TextMetrics& metrics) {
     if (source.empty() || lineSize(source, fallback_height, metrics).x <= available) return {source};
 
     const std::vector<TextChunk> chunks = lineBreakChunks(source, metrics);
     std::vector<TextLine> result;
-    std::vector<TextAtom> current;
+    WrappedLine current(metrics);
     for (const TextChunk& chunk : chunks) {
-        if (current.empty()) {
-            current = chunk;
-            while (!current.empty() && current.front().whitespace) current.erase(current.begin());
-            continue;
+        const WrappedLine::Snapshot before = current.snapshot();
+        current.append(chunk);
+        if (current.width() > available && before.line_size != 0) {
+            current.restore(before);
+            if (!current.empty()) result.push_back(current.finish());
+            current.append(chunk);
         }
-        std::vector<TextAtom> candidate = current;
-        candidate.insert(candidate.end(), chunk.begin(), chunk.end());
-        std::vector<TextAtom> sized_candidate = candidate;
-        while (!sized_candidate.empty() && sized_candidate.back().whitespace) sized_candidate.pop_back();
-        if (!current.empty() && lineSize(coalesce(sized_candidate, metrics), fallback_height, metrics).x > available) {
-            while (!current.empty() && current.back().whitespace) current.pop_back();
-            result.push_back(coalesce(current, metrics));
-            current = chunk;
-            while (!current.empty() && current.front().whitespace) current.erase(current.begin());
-        } else current = std::move(candidate);
     }
-    while (!current.empty() && current.back().whitespace) current.pop_back();
-    if (!current.empty() || result.empty()) result.push_back(coalesce(current, metrics));
+    if (!current.empty() || result.empty()) result.push_back(current.finish());
     return result;
 }
 
@@ -406,14 +473,14 @@ float interRunSpacing(const TextRun& left, const TextRun& right, const TextMetri
     return metrics.usedLetterSpacing(left.style);
 }
 
-TextLayout layoutText(std::vector<TextLine> hard_lines, const Style& style, const TextMetrics& metrics, std::optional<float> available_width,
+TextLayout layoutText(const std::vector<TextLine>& hard_lines, const Style& style, const TextMetrics& metrics, std::optional<float> available_width,
                       bool visual_order, bool apply_overflow) {
     TextLayout result;
     const float fallback_height = metrics.measureText({}, style).y;
-    for (TextLine& hard_line : hard_lines) {
+    for (const TextLine& hard_line : hard_lines) {
         std::vector<TextLine> visual_lines;
         if (available_width && style.text_wrap == TextWrap::Wrap) visual_lines = wrapLine(hard_line, *available_width, fallback_height, metrics);
-        else visual_lines.push_back(std::move(hard_line));
+        else visual_lines.push_back(hard_line);
 
         for (TextLine& line : visual_lines) {
             if (available_width && apply_overflow && style.text_wrap == TextWrap::NoWrap && style.overflow_x == Overflow::Hidden)

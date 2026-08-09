@@ -1,6 +1,6 @@
 /**
  * @file text.cpp
- * @brief
+ * @brief Implements the static Text Host Widget.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -26,7 +26,7 @@
 #include "widgets/text.h"
 #include "render/paintcontext.h"
 #include "system.h"
-#include "widgets/widgetcontract.h"
+#include "widgets/widgetcontractbuilder.h"
 
 namespace rdui {
 Text::Text(std::string text) : Text(ELEMENT, ElementTag{}) {
@@ -42,7 +42,7 @@ Text& Text::setText(std::string text) {
 Text& Text::setContent(TextSource content) {
     mText.setContent(std::move(content));
     if (const System* system = attachedSystem()) onLocaleChanged(*system);
-    invalidateMeasure();
+    else invalidateText();
     return *this;
 }
 
@@ -53,17 +53,18 @@ Text& Text::setContent(InlineContent content) {
 void Text::onLocaleChanged(const System& system) {
     mText.resolveLocalized([&system](const LocalizationRequest& request) { return system.resolveContent(request); });
     mText.resolveKeybindings([&system](const std::string& key) { return system.resolveKeybinding(key); });
-    invalidateMeasure();
+    invalidateText();
 }
 
 bool Text::onKeybindingsChanged(const System& system) {
     const bool changed = mText.resolveKeybindings([&system](const std::string& key) { return system.resolveKeybinding(key); });
-    if (changed) invalidateMeasure();
+    if (changed) invalidateText();
     return changed;
 }
 
-Vec2 Text::intrinsicSize(const StyleSheet& theme, const Style& style, const TextMetrics& text_metrics) const {
-    return mText.measure(text_metrics, style, theme, *this);
+Vec2 Text::intrinsicSize(const StyleSheet& theme, const Style& style, const TextMetrics& text_metrics,
+                         const IntrinsicSizeConstraints& constraints) const {
+    return mText.measure(text_metrics, style, theme, *this, constraints.width);
 }
 
 void Text::paint(PaintContext& context, const Style& style, float) const {

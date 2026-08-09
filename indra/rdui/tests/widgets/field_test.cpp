@@ -1,6 +1,6 @@
 /**
- * @file componentcontract_test.cpp
- * @brief
+ * @file field_test.cpp
+ * @brief Tests Field composition, labels, hints, errors, and value controls.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -27,10 +27,10 @@
 #include <fstream>
 #include <map>
 #include <sstream>
+#include "../layout/fixture.h"
 #include "../test/lltut.h"
 #include "../test/test.h"
 #include "binding/binder.h"
-#include "fixture.h"
 #include "layout/document.h"
 #include "layout/engine.h"
 #include "layout/resourcecompiler.h"
@@ -48,9 +48,10 @@
 #include "widgets/panel.h"
 #include "widgets/switch.h"
 #include "widgets/text.h"
+#include "widgets/widgetcontract.h"
 
 namespace tut {
-struct rduilayoutresourcecompiler_data {
+struct componentcontract_data {
     LayoutCompilerFixture factory;
     std::map<std::string, std::string>& resources = factory.resources;
 
@@ -63,9 +64,10 @@ struct rduilayoutresourcecompiler_data {
         return output;
     }
 };
-typedef test_group<rduilayoutresourcecompiler_data> rduicomponentcontract_test;
-typedef rduicomponentcontract_test::object rduicomponentcontract_object;
-rduicomponentcontract_test rduicomponentcontract_testcase("rduicomponentcontract");
+typedef test_group<componentcontract_data> componentcontract_test;
+typedef componentcontract_test::object componentcontract_object;
+using rduicomponentcontract_object = componentcontract_object;
+componentcontract_test componentcontract_testcase("componentcontract");
 
 template<> template<> void rduicomponentcontract_object::test<1>() {
     const rdui::ViewBuildResult result = factory.createFromString("<field id=\"example-field\"><label for=\"field-switch\">label.example</label>"
@@ -430,5 +432,33 @@ template<> template<> void rduicomponentcontract_object::test<5>() {
     const float content_top = fieldset->legend()->rect().y + fieldset->legend()->rect().h * .5f - 1.f - 3.f;
     ensure_equals("topmost ordered Field starts at the border-relative content inset", early->rect().top(), content_top);
     ensure_equals("Field order remains effective below the Legend", early->rect().bottom() - late->rect().top(), 10.f);
+}
+
+template<> template<> void rduicomponentcontract_object::test<6>() {
+    rdui::Panel owner;
+    auto existing_parent = std::make_unique<rdui::Panel>();
+    rdui::Panel* parent = existing_parent.get();
+    auto existing_child = std::make_unique<rdui::Panel>();
+    rdui::Panel* child = existing_child.get();
+    rdui::detail::WidgetCompilerAccess::setStyleIdentity(*parent, owner.styleElement(), "parent");
+    rdui::detail::WidgetCompilerAccess::setStyleIdentity(*child, owner.styleElement(), "parent::child");
+    parent->addChild(std::move(existing_child));
+    owner.addChild(std::move(existing_parent));
+
+    rdui::WidgetContract contract;
+    rdui::CompositePartContract nested;
+    nested.path = "parent::child";
+    nested.parent_path = "parent";
+    nested.create = [] { return std::make_unique<rdui::Panel>(); };
+    rdui::CompositePartContract root;
+    root.path = "parent";
+    root.create = [] { return std::make_unique<rdui::Panel>(); };
+    contract.composite_parts = {nested, root};
+
+    rdui::detail::instantiateCompositeParts(owner, contract);
+    ensure("child-before-parent declaration reuses the existing parent", owner.children().size() == 1U && owner.children().front().get() == parent);
+    ensure("child-before-parent declaration reuses the existing child", parent->children().size() == 1U && parent->children().front().get() == child);
+    rdui::detail::instantiateCompositePart(owner, contract, "parent::child");
+    ensure("explicit nested instantiation remains idempotent", parent->children().size() == 1U);
 }
 } // namespace tut

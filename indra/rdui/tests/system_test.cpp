@@ -1,6 +1,6 @@
 /**
  * @file system_test.cpp
- * @brief
+ * @brief Tests System generations, locale changes, and Surface notifications.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -74,10 +74,11 @@ private:
     int mNotifications = 0;
 };
 
-struct rduisystem_data {};
-typedef test_group<rduisystem_data> rduisystem_test;
-typedef rduisystem_test::object rduisystem_object;
-rduisystem_test rduisystem_testcase("rduisystem");
+struct system_data {};
+typedef test_group<system_data> system_test;
+typedef system_test::object system_object;
+using rduisystem_object = system_object;
+system_test system_testcase("system");
 
 template<> template<> void rduisystem_object::test<1>() {
     rdui::ResourceSnapshot snapshot = skinSnapshot(singleStringLocalization("message", "Ready"), "label { width: 40px; }");

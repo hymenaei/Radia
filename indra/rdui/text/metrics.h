@@ -1,6 +1,6 @@
 /**
  * @file metrics.h
- * @brief
+ * @brief Implements fixed and adapter-backed text measurement behavior.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -25,6 +25,7 @@
 #ifndef RD_TEXT_METRICS_H
 #define RD_TEXT_METRICS_H
 
+#include <cstdint>
 #include <string>
 #include "types.h"
 
@@ -36,6 +37,7 @@ public:
     virtual ~TextMetrics() = default;
     virtual Vec2 measureText(const std::string& text, const Style& style) const = 0;
     virtual float usedLetterSpacing(const Style& style) const;
+    virtual std::uint64_t generation() const { return 0; }
 };
 
 class FixedTextMetrics final : public TextMetrics {

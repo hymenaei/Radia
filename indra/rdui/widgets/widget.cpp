@@ -1,6 +1,6 @@
 /**
  * @file widget.cpp
- * @brief
+ * @brief Implements retained Widget state, ownership, and invalidation.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -34,6 +34,10 @@ namespace rdui {
 Widget::Widget(const char* element) : mElement(element) {}
 Widget::~Widget() = default;
 
+std::uint64_t Widget::styleContextRevision() const {
+    return mStyleRevision;
+}
+
 Widget& Widget::setId(std::string id) {
     mId = std::move(id);
     invalidateStyleTree();
@@ -59,21 +63,28 @@ Widget& Widget::setPart(std::string part) {
 }
 
 Widget& Widget::setRect(const Rect& rect) {
+    const bool changed = !mRectExplicit || mRect.x != rect.x || mRect.y != rect.y || mRect.w != rect.w || mRect.h != rect.h;
+    if (!changed) return *this;
     mRect = rect;
     mRectExplicit = true;
-    invalidateArrange();
+    invalidateMeasure();
     return *this;
 }
 
 Widget& Widget::setPointerEvents(bool pointer_events) {
+    if (mPointerEvents == pointer_events) return *this;
     mPointerEvents = pointer_events;
+    if (mSurface) mSurface->requestHitTestRefresh();
     return *this;
 }
 
 Widget& Widget::setDisabled(bool disabled) {
     const bool changed = disabled != this->disabled();
     setState(WidgetState::Disabled, disabled);
-    if (changed && disabled && mSurface) mSurface->widgetBecameUnavailable(*this);
+    if (changed && mSurface) {
+        mSurface->requestHitTestRefresh();
+        if (disabled) mSurface->widgetBecameUnavailable(*this);
+    }
     return *this;
 }
 
@@ -82,6 +93,12 @@ Widget& Widget::setVisibility(Visibility visibility) {
 
     const bool layout_participation_changed = (visibility == Visibility::Collapsed) != (mVisibility == Visibility::Collapsed);
     mVisibility = visibility;
+    if (layout_participation_changed) {
+        ++mChildSnapshotRevision;
+        if (mParent) ++mParent->mChildSnapshotRevision;
+    }
+    if (layout_participation_changed && mSurface) mSurface->invalidateOrderingCache();
+    if (mSurface) mSurface->requestHitTestRefresh();
     if (layout_participation_changed) invalidateMeasure();
     else invalidatePaint();
     if (visibility != Visibility::Visible && mSurface) mSurface->widgetBecameUnavailable(*this);
@@ -129,6 +146,8 @@ Widget& Widget::addChild(std::unique_ptr<Widget> child) {
     child->mParent = this;
     child->setSurface(mSurface);
     mChildren.push_back(std::move(child));
+    ++mChildSnapshotRevision;
+    if (mSurface) mSurface->invalidateOrderingCache();
     onChildAdded(*added);
     invalidateMeasure();
     return *this;
@@ -139,27 +158,50 @@ Widget& Widget::prependChild(std::unique_ptr<Widget> child) {
     child->mParent = this;
     child->setSurface(mSurface);
     mChildren.insert(mChildren.begin(), std::move(child));
+    ++mChildSnapshotRevision;
+    if (mSurface) mSurface->invalidateOrderingCache();
     onChildAdded(*added);
     invalidateMeasure();
     return *this;
 }
 
 void Widget::clearChildren() {
-    for (auto& child : mChildren) {
+    if (mSurface) mSurface->invalidateOrderingCache();
+    Surface* surface = mSurface;
+    std::vector<std::unique_ptr<Widget>> children = std::move(mChildren);
+    ++mChildSnapshotRevision;
+    for (auto& child : children) {
         child->mParent = nullptr;
         child->setSurface(nullptr);
+        if (surface) surface->widgetBecameUnavailable(*child);
     }
-    mChildren.clear();
     onChildrenCleared();
     invalidateMeasure();
 }
 
 void Widget::setSurface(Surface* surface) {
     if (mSurface == surface) return;
+    if (mSurface) mSurface->invalidateStyleCache();
+    mLayoutCache = {};
     mSurface = surface;
+    const Widget* expected_parent = mParent;
+    const WidgetRef<Widget> self(this);
+    std::vector<WidgetRef<Widget>> children;
+    children.reserve(mChildren.size());
+    for (const auto& child : mChildren) children.emplace_back(child.get());
     if (const System* system = attachedSystem()) onLocaleChanged(*system);
-    for (auto& child : mChildren) child->setSurface(surface);
-    if (mSurface) mSurface->requestLayout();
+    Widget* current = self.get();
+    if (!current || current->mSurface != surface || current->mParent != expected_parent) return;
+    for (const WidgetRef<Widget>& child_ref : children)
+        if (Widget* child = child_ref.get(); child && child->parent() == current) {
+            child->setSurface(surface);
+            current = self.get();
+            if (!current || current->mSurface != surface || current->mParent != expected_parent) return;
+        }
+    if (current->mSurface) {
+        current->mSurface->invalidateStyleCache();
+        current->mSurface->requestLayout();
+    }
 }
 
 const System* Widget::attachedSystem() const {
@@ -171,21 +213,41 @@ const TextMetrics& Widget::attachedTextMetrics() const {
 }
 
 void Widget::invalidateMeasure() {
-    mMeasureDirty = true;
-    mArrangeDirty = true;
+    ++mLayoutInvalidationRevision;
+    mInvalidationReasons.add(kArrangeInvalidationReasons);
+    if (mParent) mParent->invalidateMeasure();
+    else if (mSurface) mSurface->requestLayout();
+}
+
+void Widget::invalidateText() {
+    ++mLayoutInvalidationRevision;
+    mInvalidationReasons.add(kTextInvalidationReasons);
     if (mParent) mParent->invalidateMeasure();
     else if (mSurface) mSurface->requestLayout();
 }
 
 void Widget::invalidateArrange() {
-    mArrangeDirty = true;
-    if (mSurface) mSurface->requestLayout();
+    ++mLayoutInvalidationRevision;
+    mInvalidationReasons.add(LayoutInvalidationReason::Arrange);
+    if (mParent) mParent->invalidateArrange();
+    else if (mSurface) mSurface->requestLayout();
 }
 
-void Widget::invalidateStyleTree() {
+void Widget::invalidateArrangeTree() {
     const auto invalidate = [](auto&& self, Widget& widget) -> void {
-        widget.mMeasureDirty = true;
-        widget.mArrangeDirty = true;
+        ++widget.mLayoutInvalidationRevision;
+        widget.mInvalidationReasons.add(LayoutInvalidationReason::Arrange);
+        for (auto& child : widget.mChildren) self(self, *child);
+    };
+    invalidate(invalidate, *this);
+    if (mParent) mParent->invalidateArrange();
+    else if (mSurface) mSurface->requestLayout();
+}
+
+void Widget::invalidateTextTree() {
+    const auto invalidate = [](auto&& self, Widget& widget) -> void {
+        ++widget.mLayoutInvalidationRevision;
+        widget.mInvalidationReasons.add(kTextInvalidationReasons);
         for (auto& child : widget.mChildren) self(self, *child);
     };
     invalidate(invalidate, *this);
@@ -193,8 +255,36 @@ void Widget::invalidateStyleTree() {
     else if (mSurface) mSurface->requestLayout();
 }
 
+void Widget::invalidateStyleTree(bool layout_affecting, bool descendants) {
+    const auto invalidate = [layout_affecting, descendants](auto&& self, Widget& widget, bool propagate) -> void {
+        ++widget.mStyleRevision;
+        if (layout_affecting) ++widget.mLayoutInvalidationRevision;
+        widget.mInvalidationReasons.add(layout_affecting ? kLayoutStyleInvalidationReasons : kPaintStyleInvalidationReasons);
+        if (propagate)
+            for (auto& child : widget.mChildren) self(self, *child, true);
+    };
+    invalidate(invalidate, *this, descendants);
+    if (layout_affecting) {
+        ++mChildSnapshotRevision;
+        if (mParent) ++mParent->mChildSnapshotRevision;
+        if (mSurface) mSurface->invalidateOrderingCache();
+    }
+    if (!layout_affecting) {
+        if (mSurface) mSurface->requestPaint();
+        return;
+    }
+    if (mParent) mParent->invalidateMeasure();
+    else if (mSurface) mSurface->requestLayout();
+}
+
 void Widget::invalidatePaint() {
+    mInvalidationReasons.add(LayoutInvalidationReason::Paint);
     if (mSurface) mSurface->requestPaint();
+}
+
+void Widget::clearPaintInvalidationTree() {
+    mInvalidationReasons.remove(LayoutInvalidationReason::Paint);
+    for (auto& child : mChildren) child->clearPaintInvalidationTree();
 }
 
 const StyleSheet* Widget::attachedStyleSheet() const {
@@ -204,14 +294,22 @@ const StyleSheet* Widget::attachedStyleSheet() const {
 void Widget::setState(WidgetState state, bool enabled) {
     if (has_state(mStates, state) == enabled) return;
     set_state(mStates, state, enabled);
-    invalidateStyleTree();
+    const StyleSheet* style_sheet = attachedStyleSheet();
+    const bool layout_affecting = !style_sheet || style_sheet->stateAffectsLayout(*this, state);
+    const bool descendants = !style_sheet || style_sheet->stateAffectsDescendants(*this, state);
+    invalidateStyleTree(layout_affecting, descendants);
+    if (style_sheet && style_sheet->stateAffectsHitTesting(*this, state) && mSurface) mSurface->requestHitTestRefresh();
 }
 
 void Widget::activate() {
     if (disabled()) return;
+    WidgetRef<Widget> self(this);
     onActivate();
-    if (mOnActivate) mOnActivate(*this);
-    emitAction(ClickActionEvent(*this));
+    Widget* current = self.get();
+    if (!current) return;
+    if (current->mOnActivate) current->mOnActivate(*current);
+    current = self.get();
+    if (current) current->emitAction(ClickActionEvent(*current));
 }
 
 void Widget::activateFromLabel() {
@@ -231,10 +329,15 @@ void Widget::dispatchLongClickAction(std::chrono::milliseconds held_for) {
 }
 
 void Widget::translate(const Vec2& delta) {
+    translateSubtree(delta);
+    if (mSurface) mSurface->requestHitTestRefresh();
+}
+
+void Widget::translateSubtree(const Vec2& delta) {
     mRect.x += delta.x;
     mRect.y += delta.y;
-    for (auto& child : mChildren) child->translate(delta);
-    invalidatePaint();
+    for (auto& child : mChildren) child->translateSubtree(delta);
+    mInvalidationReasons.add(LayoutInvalidationReason::Paint);
 }
 
 void Widget::translateChild(Widget& child, const Vec2& delta) {
@@ -242,7 +345,7 @@ void Widget::translateChild(Widget& child, const Vec2& delta) {
     child.translate(delta);
 }
 
-Vec2 Widget::intrinsicSize(const StyleSheet&, const Style&, const TextMetrics&) const {
+Vec2 Widget::intrinsicSize(const StyleSheet&, const Style&, const TextMetrics&, const IntrinsicSizeConstraints&) const {
     return {};
 }
 

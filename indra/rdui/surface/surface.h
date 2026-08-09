@@ -1,6 +1,6 @@
 /**
  * @file surface.h
- * @brief
+ * @brief Owns a retained Widget surface, invalidation, input, and painting.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -39,6 +39,7 @@ class Floater;
 class System;
 class PaintContext;
 class Surface;
+class StylePass;
 class TextMetrics;
 
 class SurfaceFloaterDelegate {
@@ -107,34 +108,47 @@ public:
     float height() const { return mViewport.h; }
 
 private:
+    using WidgetSnapshot = WidgetVisit;
+
     Surface(const System& system, const TextMetrics& text_metrics);
     const StyleSheet& styleSheet() const { return *mStyleSheet; }
     void setHovered(Widget* node);
     void requestLayout();
     void requestPaint();
-    void didPaint();
+    void requestHitTestRefresh();
+    StylePass& stylePass() const;
+    void invalidateStyleCache();
+    void invalidateOrderingCache();
+    void didPaint(std::uint64_t painted_generation);
     void setFocused(Widget* node, bool focus_visible);
     void validateFocus();
+    bool isRootedInSurface(const Widget* node) const;
     bool isEnabledInTree(const Widget* node) const;
     bool isFocusableInTree(const Widget* node) const;
+    WidgetSnapshot snapshot(Widget& widget) const;
+    bool snapshotValid(const WidgetSnapshot& snapshot) const;
+    bool snapshotChildValid(const WidgetSnapshot& snapshot, const Widget& parent) const;
     void clearKeyboardPress();
+    void refreshHoverState();
     void updatePressedState();
     void widgetBecameUnavailable(Widget& widget);
     void resetLongClick();
     std::chrono::milliseconds defaultLongClickDelay() const;
     bool moveFocus(bool backwards);
     bool routeEvent(RoutedEvent& event);
-    void paintWidget(const Widget& widget, PaintContext& context, float scale, float inherited_opacity) const;
+    void paintWidget(const Widget& widget, PaintContext& context, float scale, float inherited_opacity, StylePass& styles) const;
     void initializeLayerRoots();
     Widget& layerRoot(SurfaceLayer layer);
     const Widget& layerRoot(SurfaceLayer layer) const;
     bool isSurfaceRoot(const Widget* widget) const;
     bool hasActiveModal() const;
     Widget* hitTestAt(const Vec2& point);
+    Widget* hitTestNode(Widget& node, const Vec2& point, const Rect& inherited_clip, StylePass& styles) const;
     Floater* resizeFloaterAt(const Vec2& point, std::uint8_t& edges) const;
     void updateResizeCursor(const Vec2& point);
     bool raiseWithinLayer(Widget& widget, SurfaceLayer layer);
     void constrainFloater(Floater& floater);
+    bool updateLayoutIfNeeded();
     bool managesFloater(const Floater& floater) const;
     bool canDetachFloater(const Floater& floater) const;
     void floaterClosed(Floater& floater);
@@ -150,10 +164,12 @@ private:
     std::array<std::unique_ptr<Widget>, static_cast<std::size_t>(SurfaceLayer::Modal)> mLayerRoots;
     std::vector<WidgetRef<Floater>> mFloaters;
     StyleSheet mDefaultStyleSheet;
-    const StyleSheet* mStyleSheet = &mDefaultStyleSheet;
+    mutable const StyleSheet* mStyleSheet = &mDefaultStyleSheet;
+    mutable const StyleSheet* mPendingStyleSheet = nullptr;
     const System* mSystem = nullptr;
     SurfaceFloaterDelegate* mFloaterDelegate = nullptr;
     const TextMetrics& mTextMetrics;
+    mutable std::unique_ptr<StylePass> mStylePass;
     Rect mViewport;
     WidgetRef<Widget> mHovered;
     WidgetRef<Widget> mPressed;
@@ -166,12 +182,16 @@ private:
     int mPressedKey = 0;
     uint8_t mPressedClickCount = 0;
     bool mPointerPositionKnown = false;
+    bool mHitTestDirty = false;
     bool mTabKeyHandled = false;
     bool mLongClickFired = false;
     bool mLayoutDirty = true;
     bool mPaintDirty = true;
+    std::uint64_t mPaintRequestGeneration = 0;
     CursorStyle mResizeCursor = CursorStyle::Auto;
     std::uint64_t mObservedStyleGeneration = 0;
+    std::uint64_t mObservedTextMetricsGeneration = 0;
+    LayoutDirection mObservedLayoutDirection = LayoutDirection::LeftToRight;
 };
 } // namespace rdui
 #endif // RD_SURFACE_H

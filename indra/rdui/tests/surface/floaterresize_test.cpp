@@ -1,6 +1,6 @@
 /**
  * @file floaterresize_test.cpp
- * @brief
+ * @brief Tests floater resize edge detection and constrained geometry.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -29,10 +29,11 @@
 #include "surface/floaterresize.h"
 
 namespace tut {
-struct rduifloaterresize_data {};
-typedef test_group<rduifloaterresize_data> rduifloaterresize_test;
-typedef rduifloaterresize_test::object rduifloaterresize_object;
-rduifloaterresize_test rduifloaterresize_testcase("rduifloaterresize");
+struct floaterresize_data {};
+typedef test_group<floaterresize_data> floaterresize_test;
+typedef floaterresize_test::object floaterresize_object;
+using rduifloaterresize_object = floaterresize_object;
+floaterresize_test floaterresize_testcase("floaterresize");
 
 template<> template<> void rduifloaterresize_object::test<1>() {
     const rdui::Rect bounds{20.f, 30.f, 100.f, 80.f};

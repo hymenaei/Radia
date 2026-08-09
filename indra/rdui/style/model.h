@@ -1,6 +1,6 @@
 /**
- * @file compiler.h
- * @brief
+ * @file model.h
+ * @brief Private stylesheet model shared by the style compiler, parser, and resolver.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -22,71 +22,24 @@
  * $/LicenseInfo$
  */
 
-#ifndef RD_STYLE_COMPILER_H
-#define RD_STYLE_COMPILER_H
+#ifndef RD_STYLE_MODEL_H
+#define RD_STYLE_MODEL_H
 
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <map>
+#include <optional>
+#include <set>
 #include <string_view>
+#include <unordered_map>
+#include <utility>
 #include <variant>
+#include <vector>
 #include "style/stylesheet.h"
 
 namespace rdui {
-enum class StyleProperty : uint8_t {
-    BackgroundColor,
-    Border,
-    BorderColor,
-    BorderRadius,
-    BorderWidth,
-    Bottom,
-    Cursor,
-    Effect,
-    Height,
-    Left,
-    Margin,
-    MinHeight,
-    MinSize,
-    MinWidth,
-    Opacity,
-    Outline,
-    Overflow,
-    OverflowX,
-    OverflowY,
-    Padding,
-    PointerEvents,
-    Right,
-    Shadow,
-    Size,
-    Top,
-    Width,
-    AlignItems,
-    Flow,
-    Gap,
-    JustifyContent,
-    AlignSelf,
-    Flex,
-    FlexBasis,
-    FlexGrow,
-    FlexShrink,
-    Order,
-    Font,
-    FontFamily,
-    FontSize,
-    FontStyle,
-    FontWeight,
-    LineHeight,
-    LetterSpacing,
-    WordSpacing,
-    TextAlign,
-    TextColor,
-    TextOverflow,
-    TextWrap,
-    VerticalAlign,
-    IconStroke,
-    IconStrokeColor,
-    IconStrokeLinecap,
-    IconStrokeWidth
-};
-
 struct StylePaint {
     Color color;
     std::optional<Gradient> gradient;
@@ -107,17 +60,63 @@ struct StyleIconStroke {
     Color color;
 };
 
+struct StyleModel;
+struct StyleRule;
+
+namespace detail { struct StylePropertyDefinition; }
+
 using StyleValue =
     std::variant<Color, StylePaint, StyleBorder, StyleSize, StyleIconStroke, EdgeInsets, MarginInsets, Dimension, Length, std::optional<Length>,
                  GapValue, std::vector<BoxShadow>, std::vector<Effect>, Outline, float, int, bool, FontFamily, TextAlign, TextOverflow, TextWrap,
                  VerticalAlign, Flow, JustifyContent, AlignItems, AlignSelf, Overflow, PointerEvents, CursorStyle, StrokeCap>;
 
 struct StyleDeclaration {
-    StyleProperty property;
+    std::reference_wrapper<const detail::StylePropertyDefinition> property;
     StyleValue value;
+
+    StyleDeclaration(const detail::StylePropertyDefinition& definition, StyleValue declaration_value)
+        : property(definition), value(std::move(declaration_value)) {}
 };
 
-void markSpecified(Style& style, InheritedStyleProperty property);
+namespace detail {
+struct StyleCompileContext;
+using StyleCompileResult = std::optional<std::vector<StyleDeclaration>>;
+using StyleCompileFunction = StyleCompileResult (*)(StyleCompileContext&);
+using StyleApplyFunction = void (*)(Style&, const StyleValue&);
+using StyleSpecifyFunction = void (*)(Style&);
+using StyleInheritFunction = void (*)(Style&, const Style&);
+
+enum class StylePropertyImpact : uint8_t { Layout = 1 << 0, Paint = 1 << 1, Inherited = 1 << 2, HitTest = 1 << 3 };
+
+inline constexpr StylePropertyImpact operator|(StylePropertyImpact left, StylePropertyImpact right) {
+    return static_cast<StylePropertyImpact>(static_cast<uint8_t>(left) | static_cast<uint8_t>(right));
+}
+
+inline constexpr bool hasImpact(StylePropertyImpact value, StylePropertyImpact flag) {
+    return (static_cast<uint8_t>(value) & static_cast<uint8_t>(flag)) != 0;
+}
+
+struct StylePropertyDefinition {
+    std::string_view name;
+    StyleCompileFunction compile = nullptr;
+    StyleApplyFunction apply = nullptr;
+    StyleSpecifyFunction specify = nullptr;
+    StyleInheritFunction inherit = nullptr;
+    StylePropertyImpact impact = StylePropertyImpact::Layout;
+
+    bool isPaintOnly() const { return hasImpact(impact, StylePropertyImpact::Paint) && !hasImpact(impact, StylePropertyImpact::Layout); }
+    bool isInherited() const { return hasImpact(impact, StylePropertyImpact::Inherited); }
+    bool affectsHitTesting() const { return hasImpact(impact, StylePropertyImpact::HitTest); }
+};
+
+const StylePropertyDefinition* findStyleProperty(std::string_view name);
+const StylePropertyDefinition* stylePropertyBegin();
+const StylePropertyDefinition* stylePropertyEnd();
+void applyStyleDeclaration(Style& style, const StyleDeclaration& declaration);
+
+std::vector<std::string> splitPartPath(const std::string& part);
+StyleRule parseSelector(const std::string& selector);
+} // namespace detail
 
 enum class SelectorCombinator { Descendant, Child };
 
@@ -138,10 +137,11 @@ struct StyleRule {
     int source_order = 0;
 };
 
-struct StyleSheet::Impl {
+struct StyleModel {
     void setColorToken(const std::string& name, const Color& color);
     void setNumberToken(const std::string& name, float value);
     void addRule(const StyleRule& rule);
+    void sortRules();
 
     Color colorToken(const std::string& name, const Color& fallback) const;
     float numberToken(const std::string& name, float fallback) const;
@@ -158,8 +158,9 @@ struct StyleSheet::Impl {
     std::optional<std::vector<StyleDeclaration>> parseFontShorthand(const std::string& value) const;
     EdgeInsets parseEdgeInsets(const std::string& value, const EdgeInsets& fallback) const;
     std::optional<MarginInsets> parseMargin(const std::string& value) const;
-    std::optional<std::vector<StyleDeclaration>> compileDeclaration(StyleProperty property, const std::string& value, const std::string& selector,
-                                                                    StyleSheetLoadResult& result, const std::string& source_name) const;
+    std::optional<std::vector<StyleDeclaration>> compileDeclaration(const detail::StylePropertyDefinition& property, const std::string& value,
+                                                                    const std::string& selector, StyleSheetLoadResult& result,
+                                                                    const std::string& source_name) const;
     Style resolveInternal(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint8_t owner_states,
                           const std::vector<std::string>& part_path, uint8_t part_states, const Widget* widget = nullptr,
                           const std::vector<std::string>* inline_ancestors = nullptr) const;
@@ -171,61 +172,27 @@ struct StyleSheet::Impl {
     StyleSheet::DependencyMap dependencies;
     std::vector<StyleRule> rules;
     std::uint64_t generation = 0;
+    mutable std::uint8_t layout_state_mask = 0;
+    mutable bool layout_state_mask_valid = false;
+    mutable std::array<std::vector<std::size_t>, 8> layout_state_rules;
+    mutable std::uint8_t hit_test_state_mask = 0;
+    mutable bool hit_test_state_mask_valid = false;
+    mutable std::array<std::vector<std::size_t>, 8> hit_test_state_rules;
+    mutable bool descendant_state_rules_valid = false;
+    mutable std::array<std::vector<std::size_t>, 8> descendant_state_rules;
+    mutable bool rule_index_valid = false;
+    mutable std::vector<std::size_t> universal_rule_indices;
+    mutable std::unordered_map<std::string, std::vector<std::size_t>> element_rule_indices;
+    mutable std::unordered_map<std::string, std::vector<std::size_t>> id_rule_indices;
+    mutable std::unordered_map<std::string, std::vector<std::size_t>> class_rule_indices;
+
+    bool stateAffectsLayout(WidgetState state) const;
+    bool stateAffectsLayout(const Widget& widget, WidgetState state) const;
+    bool stateAffectsHitTesting(WidgetState state) const;
+    bool stateAffectsHitTesting(const Widget& widget, WidgetState state) const;
+    bool stateAffectsDescendants(const Widget& widget, WidgetState state) const;
 };
+
+struct StyleSheet::Impl : StyleModel {};
 } // namespace rdui
-
-namespace rdui::detail {
-enum class StyleCapability : uint8_t { Box, Container, FlowItem, Typography, Icon };
-
-enum class StylePropagation : uint8_t { Local, Inherited, Composited };
-
-enum class StyleValueType : uint8_t {
-    Color,
-    Paint,
-    Border,
-    Size,
-    IconStroke,
-    Edges,
-    Margin,
-    Dimension,
-    Length,
-    Gap,
-    Shadows,
-    Effects,
-    Outline,
-    Number,
-    Integer,
-    Boolean,
-    FontFamily,
-    TextAlign,
-    VerticalAlign,
-    Flow,
-    JustifyContent,
-    AlignItems,
-    AlignSelf,
-    Flex,
-    Overflow,
-    TextOverflow,
-    TextWrap,
-    PointerEvents,
-    Cursor,
-    StrokeCap
-};
-
-struct StylePropertyDescriptor {
-    StyleProperty property;
-    std::string_view name;
-    StyleCapability capability;
-    StylePropagation propagation;
-    InheritedStyleProperty inherited_property;
-    StyleValueType value_type;
-};
-
-const StylePropertyDescriptor* findStyleProperty(std::string_view name);
-const StylePropertyDescriptor& styleProperty(StyleProperty property);
-void applyStyleDeclaration(Style& style, const StyleDeclaration& declaration);
-
-std::vector<std::string> splitPartPath(const std::string& part);
-StyleRule parseSelector(const std::string& selector);
-} // namespace rdui::detail
-#endif // RD_STYLE_COMPILER_H
+#endif // RD_STYLE_MODEL_H

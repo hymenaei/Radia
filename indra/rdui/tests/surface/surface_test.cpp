@@ -1,6 +1,6 @@
 /**
  * @file surface_test.cpp
- * @brief
+ * @brief Tests Surface layout, input routing, focus, and paint invalidation.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -88,6 +88,20 @@ public:
     mutable int paints = 0;
 };
 
+class OrderedPaintProbe final : public rdui::Widget {
+public:
+    OrderedPaintProbe(std::string name, std::vector<std::string>& paint_order)
+        : Widget("ordered_probe"), mName(std::move(name)), mPaintOrder(paint_order) {}
+
+    bool defaultPointerEvents() const override { return true; }
+    bool focusable() const override { return true; }
+    void paint(rdui::PaintContext&, const rdui::Style&, float) const override { mPaintOrder.push_back(mName); }
+
+private:
+    std::string mName;
+    std::vector<std::string>& mPaintOrder;
+};
+
 class RoutedProbe final : public rdui::Widget {
 public:
     RoutedProbe(std::string name, std::vector<std::string>& log) : Widget("routed_probe"), mName(std::move(name)), mLog(log) {}
@@ -114,10 +128,11 @@ private:
     std::vector<std::string>& mLog;
 };
 
-struct rduisurface_data {};
-typedef test_group<rduisurface_data> rduisurface_test;
-typedef rduisurface_test::object rduisurface_object;
-rduisurface_test rduisurface_testcase("rduisurface");
+struct surface_data {};
+typedef test_group<surface_data> surface_test;
+typedef surface_test::object surface_object;
+using rduisurface_object = surface_object;
+surface_test surface_testcase("surface");
 
 template<> template<> void rduisurface_object::test<1>() {
     rdui::Surface context;
@@ -867,5 +882,177 @@ template<> template<> void rduisurface_object::test<26>() {
     target->setChecked(true);
     surface.updateLayout();
     ensure_equals("RSL state change invalidates ancestor layout", after->rect().left(), 40.f);
+}
+
+template<> template<> void rduisurface_object::test<27>() {
+    rdui::StyleSheet style_sheet;
+    ensure("ordered overlap stylesheet compiles",
+           style_sheet
+               .loadRadia("panel { flow: row; width: 40px; height: 20px; }"
+                          "#early { order: -1; width: 20px; height: 20px; }"
+                          "#late { order: 2; width: 20px; height: 20px; margin: 0px 0px 0px -20px; }")
+               .ok());
+    rdui::Surface surface(style_sheet);
+    surface.setViewport(40.f, 20.f);
+    auto panel = std::make_unique<rdui::Panel>();
+    std::vector<std::string> paint_order;
+    auto early = std::make_unique<OrderedPaintProbe>("early", paint_order);
+    auto late = std::make_unique<OrderedPaintProbe>("late", paint_order);
+    early->setId("early");
+    late->setId("late");
+    OrderedPaintProbe* early_target = early.get();
+    OrderedPaintProbe* late_target = late.get();
+    panel->addChild(std::move(late));
+    panel->addChild(std::move(early));
+    surface.mount(std::move(panel));
+
+    rdui::RecordingPaintContext recording;
+    surface.paint(recording);
+    ensure("paint preserves source order", paint_order == std::vector<std::string>({"late", "early"}));
+    ensure("overlapping source-later child receives the hit", surface.pointerDown({{5.f, 5.f}, rdui::PointerButton::Left}));
+    ensure("hit testing follows source stacking order", early_target->hasState(rdui::WidgetState::Active));
+    surface.pointerUp({{5.f, 5.f}, rdui::PointerButton::Left});
+    surface.clearInteractionState();
+    ensure("Tab focus follows source order", surface.keyDown({rdui::KEY_TAB}));
+    ensure("first source child receives focus", late_target->hasState(rdui::WidgetState::Focused));
+
+    paint_order.clear();
+    early_target->setVisibility(rdui::Visibility::Collapsed);
+    surface.paint(recording);
+    ensure("visibility changes refresh ordered traversal", paint_order == std::vector<std::string>({"late"}));
+    paint_order.clear();
+    early_target->setVisibility(rdui::Visibility::Visible);
+    surface.paint(recording);
+    ensure("restoring visibility refreshes source traversal", paint_order == std::vector<std::string>({"late", "early"}));
+}
+
+template<> template<> void rduisurface_object::test<28>() {
+    rdui::Surface surface;
+    surface.setViewport(100.f, 100.f);
+    auto panel = std::make_unique<rdui::Panel>();
+    rdui::Panel* parent = panel.get();
+    panel->setRect({0.f, 0.f, 100.f, 100.f});
+    surface.root().addChild(std::move(panel));
+    surface.updateLayout();
+
+    auto button = std::make_unique<rdui::Button>();
+    rdui::Button* target = button.get();
+    button->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
+    parent->addChild(std::move(button));
+    ensure("adding a child after a traversal invalidates cached order", surface.pointerDown({{15.f, 15.f}, rdui::PointerButton::Left}));
+    ensure("new child receives focus after cached-order invalidation", target->hasState(rdui::WidgetState::Focused));
+
+    parent->clearChildren();
+    ensure("clearing children after a traversal removes the cached target", !surface.pointerDown({{15.f, 15.f}, rdui::PointerButton::Left}));
+}
+
+template<> template<> void rduisurface_object::test<29>() {
+    rdui::StyleSheet style_sheet;
+    ensure("state layout stylesheet compiles", style_sheet.loadRadia("button { width: 20px; height: 10px; } button:hover { width: 40px; }").ok());
+    ensure("state layout dependency is detected", style_sheet.stateAffectsLayout(rdui::WidgetState::Hovered));
+    rdui::Surface surface(style_sheet);
+    surface.setViewport(100.f, 100.f);
+    auto button = std::make_unique<rdui::Button>();
+    rdui::Button* target = button.get();
+    button->setRect({0.f, 0.f, 20.f, 10.f}).setPointerEvents(true);
+    surface.root().addChild(std::move(button));
+    surface.updateLayout();
+    ensure_equals("state layout starts with base width", target->rect().w, 20.f);
+    surface.pointerMove({{5.f, 5.f}});
+    ensure("hover state is applied", target->hasState(rdui::WidgetState::Hovered));
+    surface.updateLayout();
+    ensure_equals("state layout declarations trigger reflow", target->rect().w, 40.f);
+}
+
+template<> template<> void rduisurface_object::test<30>() {
+    rdui::StyleSheet style_sheet;
+    ensure("state hit-test stylesheet compiles",
+           style_sheet.loadRadia("button { pointer-events: auto; } button:hover { pointer-events: none; }").ok());
+    ensure("state hit-test dependency is detected", style_sheet.stateAffectsHitTesting(rdui::WidgetState::Hovered));
+    rdui::Surface surface(style_sheet);
+    surface.setViewport(100.f, 100.f);
+    auto button = std::make_unique<rdui::Button>();
+    rdui::Button* target = button.get();
+    button->setRect({0.f, 0.f, 20.f, 10.f}).setPointerEvents(true);
+    surface.root().addChild(std::move(button));
+
+    surface.pointerMove({{5.f, 5.f}});
+    ensure("pointer enters target before state policy changes", target->hasState(rdui::WidgetState::Hovered));
+    rdui::RecordingPaintContext recording;
+    surface.paint(recording);
+    ensure("stationary pointer refreshes state-driven hit policy", !target->hasState(rdui::WidgetState::Hovered));
+    surface.paint(recording);
+    ensure("state-driven hit policy settles without hover oscillation", !target->hasState(rdui::WidgetState::Hovered));
+}
+
+template<> template<> void rduisurface_object::test<31>() {
+    rdui::StyleSheet style_sheet;
+    ensure("descendant state stylesheet compiles",
+           style_sheet.loadRadia("panel { flow: row; } label { width: 20px; height: 10px; } panel:hover > label { width: 40px; }").ok());
+    rdui::Surface surface(style_sheet);
+    surface.setViewport(100.f, 100.f);
+    auto panel = std::make_unique<rdui::Panel>();
+    rdui::Panel* parent = panel.get();
+    panel->setRect({0.f, 0.f, 100.f, 20.f}).setPointerEvents(true);
+    auto label = std::make_unique<rdui::Label>("descendant");
+    rdui::Label* target = label.get();
+    panel->addChild(std::move(label));
+    surface.root().addChild(std::move(panel));
+
+    surface.updateLayout();
+    ensure_equals("descendant starts with base width", target->rect().w, 20.f);
+    surface.pointerMove({{5.f, 5.f}});
+    ensure("owner hover is applied", parent->hasState(rdui::WidgetState::Hovered));
+    surface.updateLayout();
+    ensure_equals("owner state invalidates descendant geometry", target->rect().w, 40.f);
+}
+
+template<> template<> void rduisurface_object::test<32>() {
+    rdui::Surface surface;
+    surface.setViewport(100.f, 100.f);
+    auto button = std::make_unique<rdui::Button>();
+    rdui::Button* target = button.get();
+    button->setRect({0.f, 0.f, 20.f, 10.f}).setPointerEvents(true);
+    surface.root().addChild(std::move(button));
+    surface.pointerMove({{5.f, 5.f}});
+    ensure("visibility test starts hovered", target->hasState(rdui::WidgetState::Hovered));
+
+    rdui::RecordingPaintContext recording;
+    target->setVisibility(rdui::Visibility::Hidden);
+    surface.paint(recording);
+    ensure("hidden target is removed from stationary hit testing", !target->hasState(rdui::WidgetState::Hovered));
+
+    target->setVisibility(rdui::Visibility::Visible);
+    surface.paint(recording);
+    ensure("restored target is found by stationary hit testing", target->hasState(rdui::WidgetState::Hovered));
+
+    target->setDisabled(true);
+    surface.paint(recording);
+    ensure("disabled target is removed from stationary hit testing", !target->hasState(rdui::WidgetState::Hovered));
+    target->setDisabled(false);
+    surface.paint(recording);
+    ensure("re-enabled target is found by stationary hit testing", target->hasState(rdui::WidgetState::Hovered));
+}
+
+template<> template<> void rduisurface_object::test<33>() {
+    rdui::StyleSheet style_sheet;
+    ensure("composite owner-state stylesheet compiles",
+           style_sheet
+               .loadRadia("floater { flow: column; width: 100px; height: 100px; "
+                          "&:minimized::header { height: 40px; } } "
+                          "floater::header { height: 20px; } floater::content { flex-grow: 1; }")
+               .ok());
+    rdui::Surface surface(style_sheet);
+    surface.setViewport(200.f, 200.f);
+    auto floater = std::make_unique<rdui::Floater>();
+    rdui::Floater* target = floater.get();
+    floater->setCanMinimize(true);
+    surface.mountFloater(std::move(floater));
+    surface.updateLayout();
+    ensure_equals("composite header starts with base height", target->header()->rect().h, 20.f);
+
+    target->setMinimized(true);
+    surface.updateLayout();
+    ensure_equals("owner state invalidates cached composite part style", target->header()->rect().h, 40.f);
 }
 } // namespace tut

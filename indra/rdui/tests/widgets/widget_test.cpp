@@ -1,6 +1,6 @@
 /**
  * @file widget_test.cpp
- * @brief
+ * @brief Tests Widget identity, state, tree ownership, and event behavior.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -36,10 +36,11 @@
 #include "widgets/text.h"
 
 namespace tut {
-struct rduiwidget_data {};
-typedef test_group<rduiwidget_data> rduiwidget_test;
-typedef rduiwidget_test::object rduiwidget_object;
-rduiwidget_test rduiwidget_testcase("rduiwidget");
+struct widget_data {};
+typedef test_group<widget_data> widget_test;
+typedef widget_test::object widget_object;
+using rduiwidget_object = widget_object;
+widget_test widget_testcase("widget");
 
 template<> template<> void rduiwidget_object::test<1>() {
     rdui::Panel root;
@@ -209,6 +210,10 @@ template<> template<> void rduiwidget_object::test<6>() {
     rdui::RecordingPaintContext tracked_recording(metrics);
     tracked.paint(tracked_recording, tracked_style, 1.f);
     ensure_equals("inline paint preserves the boundary letter spacing", tracked_recording.commands()[2].rect.x, 7.f);
+    tracked_style.text_color = rdui::Color(1.f, 0.f, 0.f);
+    rdui::RecordingPaintContext recolored(metrics);
+    tracked.paint(recolored, tracked_style, 1.f);
+    ensure_equals("cached inline runs refresh their text color", recolored.commands()[1].style.text_color.r, 1.f);
 
     rdui::Text tracked_combining;
     tracked_combining.setContent(rdui::InlineContent({

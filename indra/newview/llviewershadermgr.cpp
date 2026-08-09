@@ -3719,10 +3719,16 @@ bool LLViewerShaderMgr::loadShadersInterface()
 
     if (success)
     {
+        // The two programs intentionally compile variants of the same uiF/uiV
+        // source pair while legacy viewer UI migrates to retained painting.
+        // Once that migration is complete, remove the legacy shader branch,
+        // fold this setup into gUIProgram, and remove PAINT_SHADER.
         gRduiProgram.mName = "Radia UI Shape Shader";
         gRduiProgram.mShaderFiles.clear();
-        gRduiProgram.mShaderFiles.push_back(make_pair("interface/rduiV.glsl", GL_VERTEX_SHADER));
-        gRduiProgram.mShaderFiles.push_back(make_pair("interface/rduiF.glsl", GL_FRAGMENT_SHADER));
+        gRduiProgram.mShaderFiles.push_back(make_pair("interface/uiV.glsl", GL_VERTEX_SHADER));
+        gRduiProgram.mShaderFiles.push_back(make_pair("interface/uiF.glsl", GL_FRAGMENT_SHADER));
+        gRduiProgram.clearPermutations();
+        gRduiProgram.addPermutation("PAINT_SHADER", "1");
         gRduiProgram.mShaderLevel = mShaderLevel[SHADER_INTERFACE];
         success = gRduiProgram.createShader();
     }

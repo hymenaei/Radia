@@ -1,6 +1,6 @@
 /**
  * @file svg_test.cpp
- * @brief
+ * @brief Tests SVG path and icon rendering data conversion.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -28,10 +28,11 @@
 #include "render/tessellator.h"
 
 namespace tut {
-struct rduisvg_data {};
-typedef test_group<rduisvg_data> rduisvg_test;
-typedef rduisvg_test::object rduisvg_object;
-rduisvg_test rduisvg_testcase("rduisvg");
+struct svg_data {};
+typedef test_group<svg_data> svg_test;
+typedef svg_test::object svg_object;
+using rduisvg_object = svg_object;
+svg_test svg_testcase("svg");
 
 template<> template<> void rduisvg_object::test<1>() {
     const rdui::SvgCompileResult compiled = rdui::compileSvgIcon("<svg viewBox=\"0 0 24 24\" stroke-width=\"2\" stroke-linecap=\"round\">"

@@ -26,10 +26,11 @@
 #include "render/tessellator.h"
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 
 namespace rdui {
 namespace {
-constexpr float PI = 3.14159265358979323846f;
+constexpr float PI = std::numbers::pi_v<float>;
 
 bool samePoint(const Vec2& a, const Vec2& b) {
     return std::fabs(a.x - b.x) <= 0.0001f && std::fabs(a.y - b.y) <= 0.0001f;

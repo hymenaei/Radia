@@ -1,6 +1,6 @@
 /**
  * @file diagnostic.h
- * @brief
+ * @brief Structured source-aware diagnostics returned by UI compilers.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

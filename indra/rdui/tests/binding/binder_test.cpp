@@ -1,6 +1,6 @@
 /**
  * @file binder_test.cpp
- * @brief
+ * @brief Tests transactional Widget, Action, and Value Binding preparation.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -76,10 +76,11 @@ private:
 } // namespace
 
 namespace tut {
-struct rduibinder_data {};
-typedef test_group<rduibinder_data> rduibinder_test;
-typedef rduibinder_test::object rduibinder_object;
-rduibinder_test rduibinder_testcase("rduibinder");
+struct binder_data {};
+typedef test_group<binder_data> binder_test;
+typedef binder_test::object binder_object;
+using rduibinder_object = binder_object;
+binder_test binder_testcase("binder");
 
 template<> template<> void rduibinder_object::test<1>() {
     rdui::Panel root;
@@ -447,9 +448,14 @@ template<> template<> void rduibinder_object::test<17>() {
     ensure_equals("dynamic validation text overrides authored Error", field->error()->text(), "Dynamic error");
     ensure_equals("invalid Field reveals Error", static_cast<int>(field->error()->visibility()), static_cast<int>(rdui::Visibility::Visible));
 
+    int value_state_publications = 0;
+    rdui::ValueBindingSubscription value_state_subscription =
+        control->observeValueControlState([&](const rdui::ValueControlState&) { ++value_state_publications; });
     control->activate();
     ensure("Switch activation writes through the provider", !provider->state().value && !control->checked());
+    ensure_equals("synchronous bound activation publishes one value state", value_state_publications, 1);
     ensure_equals("bound Switch emits Change after writing the provider", changes, 1);
+    value_state_subscription.reset();
 
     provider->publish({false, false, rdui::ValueValidation::valid()});
     ensure("valid provider state clears Field invalid state", !field->invalid());

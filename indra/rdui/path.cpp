@@ -28,6 +28,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <numbers>
 
 namespace rdui {
 Path& Path::moveTo(float x, float y) {
@@ -153,7 +154,7 @@ std::vector<std::vector<Vec2>> Path::flatten(float flatness) const {
 Path Path::circle(const Vec2& center, float radius, int segments) {
     Path path;
     const int count = std::max(8, segments);
-    constexpr float TWO_PI = 6.2831853071795864769f;
+    constexpr float TWO_PI = 2.0f * std::numbers::pi_v<float>;
     path.moveTo(center.x + radius, center.y);
     for (int i = 1; i <= count; ++i) {
         const float angle = static_cast<float>(i) / static_cast<float>(count) * TWO_PI;

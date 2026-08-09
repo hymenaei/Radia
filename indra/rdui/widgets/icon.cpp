@@ -1,6 +1,6 @@
 /**
  * @file icon.cpp
- * @brief
+ * @brief Implements the asset-backed Icon Widget.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -25,7 +25,7 @@
 #include "linden_common.h"
 #include "widgets/icon.h"
 #include "render/paintcontext.h"
-#include "widgets/widgetcontract.h"
+#include "widgets/widgetcontractbuilder.h"
 
 namespace rdui {
 Icon::Icon(std::string name) : Widget(ELEMENT), mName(std::move(name)) {}

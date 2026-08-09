@@ -26,6 +26,8 @@
 #include "text/host.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <functional>
 #include "render/paintcontext.h"
 #include "style/style.h"
 #include "style/stylesheet.h"
@@ -154,6 +156,53 @@ std::string keybindingSignature(const InlineContent& content) {
     for (const InlineContentNode& node : content.nodes()) appendKeybindingSignature(node, signature);
     return signature;
 }
+
+void mixStyleValue(std::size_t& hash, std::size_t value) {
+    hash ^= value + static_cast<std::size_t>(0x9e3779b9) + (hash << 6) + (hash >> 2);
+}
+
+void mixStyleValue(std::size_t& hash, float value) {
+    mixStyleValue(hash, std::hash<float>{}(value));
+}
+
+void mixLength(std::size_t& hash, const Length& value) {
+    mixStyleValue(hash, value.pixels);
+    mixStyleValue(hash, value.percent);
+}
+
+void mixColor(std::size_t& hash, const Color& value) {
+    mixStyleValue(hash, value.r);
+    mixStyleValue(hash, value.g);
+    mixStyleValue(hash, value.b);
+    mixStyleValue(hash, value.a);
+}
+
+std::size_t textStyleFingerprint(const Style& style) {
+    std::size_t hash = 0;
+    mixStyleValue(hash, static_cast<std::size_t>(style.font_family));
+    mixStyleValue(hash, style.font_size);
+    mixStyleValue(hash, static_cast<std::size_t>(style.font_weight));
+    mixStyleValue(hash, static_cast<std::size_t>(style.font_italic));
+    mixStyleValue(hash, static_cast<std::size_t>(style.font_strike));
+    mixStyleValue(hash, static_cast<std::size_t>(style.line_height.has_value()));
+    if (style.line_height) mixLength(hash, *style.line_height);
+    mixLength(hash, style.letter_spacing);
+    mixLength(hash, style.word_spacing);
+    mixColor(hash, style.text_color);
+    return hash;
+}
+
+std::size_t textLayoutFingerprint(const Style& style, bool visual_order, bool apply_overflow) {
+    std::size_t hash = 0;
+    mixStyleValue(hash, static_cast<std::size_t>(style.text_wrap));
+    if (apply_overflow) {
+        mixStyleValue(hash, static_cast<std::size_t>(style.text_overflow));
+        mixStyleValue(hash, static_cast<std::size_t>(style.overflow_x));
+    }
+    if (visual_order) mixStyleValue(hash, static_cast<std::size_t>(style.direction));
+    return hash;
+}
+
 } // namespace
 
 void TextHost::setContent(TextSource content) {
@@ -161,6 +210,7 @@ void TextHost::setContent(TextSource content) {
     mContent = mSource.materialize();
     mHasKeybindings =
         std::any_of(mContent.nodes().begin(), mContent.nodes().end(), [](const InlineContentNode& node) { return hasKeybinding(node); });
+    ++mContentGeneration;
     updatePlainText();
 }
 
@@ -168,6 +218,7 @@ void TextHost::resolveLocalized(const std::function<InlineContent(const Localiza
     mContent = mSource.materialize(resolve);
     mHasKeybindings =
         std::any_of(mContent.nodes().begin(), mContent.nodes().end(), [](const InlineContentNode& node) { return hasKeybinding(node); });
+    ++mContentGeneration;
     updatePlainText();
 }
 
@@ -176,7 +227,9 @@ bool TextHost::resolveKeybindings(const std::function<KeybindingPresentation(con
     const std::string previous = keybindingSignature(mContent);
     mContent = mContent.resolveKeybindings(resolve);
     updatePlainText();
-    return keybindingSignature(mContent) != previous;
+    const bool changed = keybindingSignature(mContent) != previous;
+    if (changed) ++mContentGeneration;
+    return changed;
 }
 
 void TextHost::updatePlainText() {
@@ -184,14 +237,16 @@ void TextHost::updatePlainText() {
     for (const InlineContentNode& node : mContent.nodes()) appendPlainText(node, mPlainText);
 }
 
-Vec2 TextHost::measure(const TextMetrics& metrics, const Style& style, const StyleSheet& theme, const Widget& owner) const {
+Vec2 TextHost::measure(const TextMetrics& metrics, const Style& style, const StyleSheet& theme, const Widget& owner,
+                       std::optional<float> resolved_width) const {
     std::optional<float> available_width;
-    if (!style.width.isAuto() && !style.width.isPercentage()) available_width = std::max(0.f, style.width.pixels() - style.padding.horizontal());
-    return detail::layoutText(layoutLines(mContent, style, metrics, &theme, owner), style, metrics, available_width, false, false).size;
+    if (resolved_width) available_width = std::max(0.f, *resolved_width - style.padding.horizontal());
+    else if (!style.width.isAuto() && !style.width.isPercentage()) available_width = std::max(0.f, style.width.pixels() - style.padding.horizontal());
+    return cachedLayout(metrics, style, &theme, owner, available_width, false, false).size;
 }
 
 void TextHost::paint(PaintContext& context, const Rect& rect, const Style& style, const StyleSheet* theme, const Widget& owner) const {
-    const detail::TextLayout layout = detail::layoutText(layoutLines(mContent, style, context, theme, owner), style, context, rect.w, true, true);
+    const detail::TextLayout& layout = cachedLayout(context, style, theme, owner, rect.w, true, true);
     float y = rect.top();
     for (const detail::LaidOutTextLine& line : layout.lines) {
         y -= line.size.y;
@@ -231,5 +286,57 @@ void TextHost::paint(PaintContext& context, const Rect& rect, const Style& style
             if (run_index + 1 < line.runs.size()) x += interRunSpacing(run, line.runs[run_index + 1], context);
         }
     }
+}
+
+const std::vector<detail::TextLine>& TextHost::cachedLines(const TextMetrics& metrics, const Style& style, const StyleSheet* theme,
+                                                           const Widget& owner) const {
+    const std::size_t fingerprint = textStyleFingerprint(style);
+    const std::uint64_t theme_generation = theme ? theme->generation() : 0;
+    const std::uint64_t owner_style_revision = owner.styleContextRevision();
+    const Widget* owner_parent = owner.parent();
+    if (mCachedContentGeneration == mContentGeneration
+        && mCachedMetrics == &metrics
+        && mCachedMetricsGeneration == metrics.generation()
+        && mCachedTheme == theme
+        && mCachedThemeGeneration == theme_generation
+        && mCachedOwner == &owner
+        && mCachedOwnerParent == owner_parent
+        && mCachedOwnerStyleRevision == owner_style_revision
+        && mCachedStyleFingerprint == fingerprint)
+        return mCachedLines;
+
+    mCachedLines = layoutLines(mContent, style, metrics, theme, owner);
+    mCachedLayoutValid = false;
+    mCachedContentGeneration = mContentGeneration;
+    mCachedMetrics = &metrics;
+    mCachedMetricsGeneration = metrics.generation();
+    mCachedTheme = theme;
+    mCachedThemeGeneration = theme_generation;
+    mCachedOwner = &owner;
+    mCachedOwnerParent = owner_parent;
+    mCachedOwnerStyleRevision = owner_style_revision;
+    mCachedStyleFingerprint = fingerprint;
+    return mCachedLines;
+}
+
+const detail::TextLayout& TextHost::cachedLayout(const TextMetrics& metrics, const Style& style, const StyleSheet* theme, const Widget& owner,
+                                                 std::optional<float> available_width, bool visual_order, bool apply_overflow) const {
+    const std::vector<detail::TextLine>& lines = cachedLines(metrics, style, theme, owner);
+    const std::size_t layout_fingerprint = textLayoutFingerprint(style, visual_order, apply_overflow);
+    const bool width_matches = mCachedLayoutWidthSet == available_width.has_value() && (!available_width || mCachedLayoutWidth == *available_width);
+    if (!mCachedLayoutValid
+        || !width_matches
+        || mCachedLayoutVisualOrder != visual_order
+        || mCachedLayoutOverflow != apply_overflow
+        || mCachedLayoutStyleFingerprint != layout_fingerprint) {
+        mCachedLayout = detail::layoutText(lines, style, metrics, available_width, visual_order, apply_overflow);
+        mCachedLayoutWidthSet = available_width.has_value();
+        mCachedLayoutWidth = available_width.value_or(0.f);
+        mCachedLayoutVisualOrder = visual_order;
+        mCachedLayoutOverflow = apply_overflow;
+        mCachedLayoutStyleFingerprint = layout_fingerprint;
+        mCachedLayoutValid = true;
+    }
+    return mCachedLayout;
 }
 } // namespace rdui

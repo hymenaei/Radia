@@ -1,6 +1,6 @@
 /**
  * @file localization_test.cpp
- * @brief
+ * @brief Tests locale catalogs, fallback, plural, and localized text behavior.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -28,10 +28,11 @@
 #include "localization/localization.h"
 
 namespace tut {
-struct rduilocalization_data {};
-typedef test_group<rduilocalization_data> rduilocalization_test;
-typedef rduilocalization_test::object rduilocalization_object;
-rduilocalization_test rduilocalization_testcase("rduilocalization");
+struct localization_data {};
+typedef test_group<localization_data> localization_test;
+typedef localization_test::object localization_object;
+using rduilocalization_object = localization_object;
+localization_test localization_testcase("localization");
 
 template<> template<> void rduilocalization_object::test<1>() {
     rdui::LocalizationCatalog catalog;

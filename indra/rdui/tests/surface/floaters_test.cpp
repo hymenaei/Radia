@@ -1,6 +1,6 @@
 /**
  * @file floaters_test.cpp
- * @brief
+ * @brief Tests Surface floater mounting, ordering, and lifecycle behavior.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -43,8 +43,9 @@ public:
     void floaterClosed(rdui::Surface&, rdui::Floater&) override { ++closes; }
     void floaterMinimizedChanged(rdui::Surface&, rdui::Floater&, bool) override { ++minimizeChanges; }
     void floaterMoved(rdui::Surface&, rdui::Floater&) override { ++moves; }
-    bool beginNativeFloaterResize(rdui::Surface&, rdui::Floater&) override {
+    bool beginNativeFloaterResize(rdui::Surface& surface, rdui::Floater& floater) override {
         ++resizeStarts;
+        if (unmountOnNativeResize) unmountedFloater = surface.unmountFloater(floater);
         return nativeResize;
     }
     void floaterResized(rdui::Surface&, rdui::Floater&, bool complete) override {
@@ -65,13 +66,16 @@ public:
     int resizeChanges = 0;
     int resizeCompletions = 0;
     bool nativeResize = false;
+    bool unmountOnNativeResize = false;
+    std::unique_ptr<rdui::Floater> unmountedFloater;
     rdui::Vec2 requested;
 };
 
-struct rduisurfacefloater_data {};
-typedef test_group<rduisurfacefloater_data> rduisurfacefloater_test;
-typedef rduisurfacefloater_test::object rduisurfacefloater_object;
-rduisurfacefloater_test rduisurfacefloater_testcase("rduisurfacefloater");
+struct surfacefloaters_data {};
+typedef test_group<surfacefloaters_data> surfacefloaters_test;
+typedef surfacefloaters_test::object surfacefloaters_object;
+using rduisurfacefloater_object = surfacefloaters_object;
+surfacefloaters_test surfacefloaters_testcase("surfacefloaters");
 
 template<> template<> void rduisurfacefloater_object::test<1>() {
     rdui::StyleSheet style_sheet;
@@ -304,5 +308,91 @@ template<> template<> void rduisurfacefloater_object::test<10>() {
     ensure_equals("unpositioned Floater is centered vertically", first_outer.y, 50.f);
     ensure_equals("fixed outer height masks the content edit", first_outer.h, second_outer.h);
     ensure("authored content geometry still records the edit", second_content.y > first_content.y);
+}
+
+template<> template<> void rduisurfacefloater_object::test<11>() {
+    rdui::StyleSheet style_sheet;
+    ensure("viewport percentage Floater stylesheet compiles",
+           style_sheet.loadRadia("floater { width: 50%; height: 25%; left: 10%; bottom: 10%; }").ok());
+    rdui::Surface surface(style_sheet);
+    surface.setViewport(400.f, 300.f);
+    rdui::Floater floater;
+    const rdui::Rect rect = surface.prepareFloater(floater);
+    ensure_approximately_equals("percentage width resolves against viewport width", rect.w, 200.f, 6);
+    ensure_approximately_equals("percentage height resolves against viewport height", rect.h, 75.f, 6);
+    ensure_approximately_equals("percentage left resolves against viewport width", rect.x, 40.f, 6);
+    ensure_approximately_equals("percentage bottom resolves against viewport height", rect.y, 30.f, 6);
+}
+
+template<> template<> void rduisurfacefloater_object::test<12>() {
+    rdui::StyleSheet style_sheet;
+    ensure("pointer-pass-through Floater stylesheet compiles", style_sheet.loadRadia("floater.pass-through { pointer-events: none; }").ok());
+    rdui::Surface surface(style_sheet);
+    surface.setViewport(200.f, 160.f);
+    auto lower = std::make_unique<rdui::Floater>();
+    rdui::Floater* lower_target = lower.get();
+    lower->setCanResize(true).setRect({20.f, 20.f, 100.f, 80.f});
+    surface.mountFloater(std::move(lower));
+    auto upper = std::make_unique<rdui::Floater>();
+    rdui::Floater* upper_target = upper.get();
+    upper->setCanResize(false).setRect({70.f, 20.f, 100.f, 80.f});
+    surface.mountFloater(std::move(upper));
+    auto upper_child = std::make_unique<rdui::Button>();
+    upper_child->setRect({0.f, 0.f, 100.f, 80.f}).setPointerEvents(true);
+    upper_target->content()->addChild(std::move(upper_child));
+
+    const rdui::Vec2 lower_edge_under_upper{lower_target->rect().right() - 1.f, lower_target->rect().y + 40.f};
+    ensure("interactive child in pass-through upper Floater blocks lower resize hit testing",
+           surface.pointerDown({lower_edge_under_upper, rdui::PointerButton::Left}));
+    ensure("blocked lower resize does not capture the pointer", !surface.hasPointerCapture());
+    surface.pointerUp({lower_edge_under_upper, rdui::PointerButton::Left});
+
+    upper_target->addClass("pass-through");
+    ensure("pointer-transparent upper Floater allows lower resize", surface.pointerDown({lower_edge_under_upper, rdui::PointerButton::Left}));
+    ensure("lower resize captures through a pointer-transparent Floater", surface.hasPointerCapture());
+    surface.pointerUp({lower_edge_under_upper, rdui::PointerButton::Left});
+}
+
+template<> template<> void rduisurfacefloater_object::test<13>() {
+    rdui::Surface surface;
+    surface.setViewport(100.f, 80.f);
+    FloaterDelegateProbe delegate;
+    delegate.nativeResize = true;
+    delegate.unmountOnNativeResize = true;
+    surface.setFloaterDelegate(&delegate);
+    auto floater = std::make_unique<rdui::Floater>();
+    floater->setCanResize(true).setRect({0.f, 0.f, 100.f, 80.f});
+    surface.mountFloater(std::move(floater));
+
+    ensure("native resize rejects a floater detached by its delegate",
+           !surface.pointerDown({{99.f, 40.f}, rdui::PointerButton::Left}));
+    ensure("detached native resize does not capture the pointer", !surface.hasPointerCapture());
+    ensure("delegate retains the detached Floater for cleanup", delegate.unmountedFloater != nullptr);
+}
+
+template<> template<> void rduisurfacefloater_object::test<14>() {
+    rdui::StyleSheet style_sheet;
+    ensure("overflow-visible pass-through stylesheet compiles",
+           style_sheet.loadRadia("floater.pass-through { pointer-events: none; overflow: visible; }").ok());
+    rdui::Surface surface(style_sheet);
+    surface.setViewport(200.f, 160.f);
+
+    auto lower = std::make_unique<rdui::Floater>();
+    rdui::Floater* lower_target = lower.get();
+    lower->setCanResize(true).setRect({20.f, 20.f, 100.f, 80.f});
+    surface.mountFloater(std::move(lower));
+
+    auto upper = std::make_unique<rdui::Floater>();
+    rdui::Floater* upper_target = upper.get();
+    upper->addClass("pass-through").setRect({70.f, 20.f, 40.f, 80.f});
+    surface.mountFloater(std::move(upper));
+
+    auto overflow_child = std::make_unique<rdui::Button>();
+    overflow_child->setRect({110.f, 20.f, 40.f, 80.f}).setPointerEvents(true);
+    upper_target->content()->addChild(std::move(overflow_child));
+
+    const rdui::Vec2 point{lower_target->rect().right() - 1.f, lower_target->rect().y + 40.f};
+    ensure("overflow-visible descendant remains the pointer target", surface.pointerDown({point, rdui::PointerButton::Left}));
+    ensure("overflow-visible descendant does not capture resize", !surface.hasPointerCapture());
 }
 } // namespace tut

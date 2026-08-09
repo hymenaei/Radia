@@ -1,6 +1,6 @@
 /**
  * @file resourcecompiler.h
- * @brief
+ * @brief Builds validated Widget trees from Layout Resource documents.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -25,6 +25,7 @@
 #ifndef RD_LAYOUT_RESOURCECOMPILER_H
 #define RD_LAYOUT_RESOURCECOMPILER_H
 
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include "layout/document.h"
@@ -41,8 +42,23 @@ public:
 
 private:
     struct BuildState;
+    struct ChildBuildContext;
+    enum class ChildHandling : uint8_t { Unhandled, Handled };
+
     static std::string normalizeResource(std::string filename);
     std::unique_ptr<Widget> buildDocument(const LayoutDocument& document, std::unique_ptr<Widget> root, BuildState& state) const;
+    std::unique_ptr<Widget> buildNode(const LayoutNode& layout_node, const std::string& source, std::unique_ptr<Widget> node,
+                                      BuildState& state) const;
+    const WidgetContract* lookupWidgetContract(const LayoutNode& layout_node, const std::string& source, BuildState& state) const;
+    bool resolveWidgetResource(const LayoutElement& element, const WidgetContract& contract, const std::string& source, std::unique_ptr<Widget>& node,
+                               BuildState& state) const;
+    void buildChildren(Widget& target, const LayoutElement& element, const WidgetContract& contract, const std::string& source,
+                       BuildState& state) const;
+    ChildHandling appendTextContent(const LayoutContent& content, ChildBuildContext& context) const;
+    ChildHandling consumeFlowBreak(const LayoutNode& child_node, ChildBuildContext& context) const;
+    ChildHandling consumeScopedInline(const LayoutNode& child_node, ChildBuildContext& context) const;
+    ChildHandling consumeChildContainer(const LayoutNode& child_node, ChildBuildContext& context) const;
+    ChildHandling buildRegularChild(const LayoutNode& child_node, ChildBuildContext& context) const;
     std::unique_ptr<Widget> createResourceWidget(const std::string& filename, BuildState& state) const;
     void loadWidgetDefaults(const std::string& element, BuildState& state) const;
     void validateViewScope(Widget& scope, BuildState& state, const std::string& source, bool count_root = true) const;

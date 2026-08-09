@@ -1,6 +1,6 @@
 /**
  * @file metrics.cpp
- * @brief
+ * @brief Implements fixed and adapter-backed text measurement behavior.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

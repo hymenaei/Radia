@@ -1,6 +1,6 @@
 /**
  * @file widgetcatalog.cpp
- * @brief
+ * @brief Registers and validates the native Widget Contract catalog.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -25,6 +25,7 @@
 #include "linden_common.h"
 #include "widgets/widgetcatalog.h"
 #include "layout/schema.h"
+#include "widgets/widgetcontract.h"
 #include "widgets/button.h"
 #include "widgets/field.h"
 #include "widgets/fieldset.h"
@@ -40,6 +41,7 @@ const std::unordered_map<std::string, WidgetContract>& builtInWidgetContracts() 
     static const std::unordered_map<std::string, WidgetContract> contracts = [] {
         std::unordered_map<std::string, WidgetContract> result;
         auto add = [&result](WidgetContract contract) {
+            detail::prepareCompositeTopology(contract);
             const std::string key = schemaNameKey(contract.element);
             result.emplace(key, std::move(contract));
         };

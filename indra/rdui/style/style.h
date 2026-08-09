@@ -25,6 +25,7 @@
 #ifndef RD_STYLE_H
 #define RD_STYLE_H
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <vector>
@@ -168,6 +169,8 @@ struct Effect {
 
     bool progressive() const { return start_radius != end_radius; }
 };
+
+inline constexpr std::size_t max_effect_count = 8;
 
 enum class Flow { Free, Row, Column };
 enum class JustifyContent { Start, Center, End, Left, Right };

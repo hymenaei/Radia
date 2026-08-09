@@ -1,6 +1,6 @@
 /**
  * @file inlinecontent.cpp
- * @brief
+ * @brief Implements immutable inline-content values and semantic text nodes.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -111,31 +111,23 @@ InlineContent InlineContent::resolveKeybindings(const std::function<KeybindingPr
 
 const char* inlineContentElement(InlineContentKind kind) {
     switch (kind) {
-        case InlineContentKind::Text: return "";
-        case InlineContentKind::B: return "b";
-        case InlineContentKind::I: return "i";
-        case InlineContentKind::S: return "s";
-        case InlineContentKind::Kbd: return "kbd";
-        case InlineContentKind::Br: return "br";
-        case InlineContentKind::Link: return "link";
+#define INLINE_CONTENT_ENTRY(name, element, authored)                                                                                                \
+    case InlineContentKind::name: return element;
+#include "text/inlinecontent.def"
+#undef INLINE_CONTENT_ENTRY
     }
     return "";
 }
 
 bool inlineContentKind(const std::string& element, InlineContentKind& kind) {
     const std::string lookup = schemaNameKey(element);
-    for (InlineContentKind candidate : {
-             InlineContentKind::B,
-             InlineContentKind::I,
-             InlineContentKind::S,
-             InlineContentKind::Kbd,
-             InlineContentKind::Br,
-             InlineContentKind::Link,
-         }) {
-        if (lookup != schemaNameKey(inlineContentElement(candidate))) continue;
-        kind = candidate;
-        return true;
+#define INLINE_CONTENT_ENTRY(name, element, authored)                                                                                                \
+    if (authored && lookup == schemaNameKey(element)) {                                                                                              \
+        kind = InlineContentKind::name;                                                                                                              \
+        return true;                                                                                                                                 \
     }
+#include "text/inlinecontent.def"
+#undef INLINE_CONTENT_ENTRY
     return false;
 }
 

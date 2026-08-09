@@ -1,6 +1,6 @@
 /**
  * @file engine_test.cpp
- * @brief
+ * @brief Tests retained layout measurement, flex allocation, and arrangement.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -38,12 +38,13 @@
 #include "widgets/widgetcontract.h"
 
 namespace tut {
-struct rduilayout_data {
+struct layout_data {
     rdui::FixedTextMetrics text;
 };
-typedef test_group<rduilayout_data> rduilayout_test;
-typedef rduilayout_test::object rduilayout_object;
-rduilayout_test rduilayout_testcase("rduilayout");
+typedef test_group<layout_data> layout_test;
+typedef layout_test::object layout_object;
+using rduilayout_object = layout_object;
+layout_test layout_testcase("layout");
 
 template<> template<> void rduilayout_object::test<1>() {
     rdui::StyleSheet theme;
@@ -617,7 +618,8 @@ template<> template<> void rduilayout_object::test<29>() {
     ensure_equals("row measurement reflows text after flex shrink", measured.y, 20.f);
 
     panel.setRect({0.f, 0.f, measured.x, measured.y});
-    rdui::layoutTree(panel, theme, text);
+    const rdui::LayoutStatistics layout_stats = rdui::layoutTree(panel, theme, text);
+    ensure("row layout remeasures text after width allocation", layout_stats.constrained_remeasures > 0);
     ensure_equals("row arrangement keeps the reflowed text height", panel.children()[0]->rect().h, 20.f);
     ensure_equals("row sibling receives its non-shrinking width", panel.children()[1]->rect().w, 10.f);
     ensure_equals("final row height is reapplied to stretched siblings", panel.children()[1]->rect().h, 20.f);
@@ -649,5 +651,335 @@ template<> template<> void rduilayout_object::test<30>() {
     row.setRect({0.f, 0.f, 80.f, 20.f});
     rdui::layoutTree(row, row_theme, text);
     ensure_equals("row flex-basis can shrink to its pre-basis intrinsic minimum", row.children()[0]->rect().w, 70.f);
+}
+template<> template<> void rduilayout_object::test<31>() {
+    rdui::StyleSheet theme;
+    ensure("cache stylesheet compiles", theme.loadRadia("panel { flow: row; } label { size: 10px; }").ok());
+    rdui::Panel panel;
+    panel.setRect({0.f, 0.f, 100.f, 20.f});
+    panel.addChild(std::make_unique<rdui::Label>("first"));
+    panel.addChild(std::make_unique<rdui::Label>("second"));
+
+    const rdui::LayoutStatistics first = rdui::layoutTree(panel, theme, text);
+    const rdui::LayoutStatistics second = rdui::layoutTree(panel, theme, text);
+    ensure("initial layout measures nodes", first.measured_nodes > 0);
+    ensure("initial layout arranges nodes", first.arranged_nodes > 0);
+    ensure_equals("clean layout does not measure", second.measured_nodes, std::size_t(0));
+    ensure_equals("clean layout does not arrange", second.arranged_nodes, std::size_t(0));
+    ensure("clean layout records skipped work", second.skipped_nodes >= 2);
+}
+
+template<> template<> void rduilayout_object::test<32>() {
+    rdui::StyleSheet theme;
+    ensure("arrange-only stylesheet compiles", theme.loadRadia("panel { flow: row; } label { size: 10px; }").ok());
+    rdui::Panel panel;
+    panel.setRect({0.f, 0.f, 100.f, 20.f});
+    panel.addChild(std::make_unique<rdui::Label>("first"));
+    panel.addChild(std::make_unique<rdui::Label>("second"));
+    rdui::layoutTree(panel, theme, text);
+
+    panel.setRect({0.f, 0.f, 140.f, 20.f});
+    const rdui::LayoutStatistics resized = rdui::layoutTree(panel, theme, text);
+    ensure("viewport resize remeasures constrained sizing", resized.measured_nodes > 0);
+    ensure("viewport resize arranges the affected tree", resized.arranged_nodes > 0);
+
+    const rdui::LayoutStatistics direction_changed = rdui::layoutTree(panel, theme, text, rdui::LayoutDirection::RightToLeft);
+    ensure_equals("direction-only changes do not measure", direction_changed.measured_nodes, std::size_t(0));
+    ensure("direction-only changes arrange the tree", direction_changed.arranged_nodes > 0);
+}
+
+template<> template<> void rduilayout_object::test<33>() {
+    class GenerationTextMetrics final : public rdui::TextMetrics {
+    public:
+        rdui::Vec2 measureText(const std::string&, const rdui::Style&) const override { return {32.f, 12.f}; }
+        std::uint64_t generation() const override { return mGeneration; }
+        void advance() { ++mGeneration; }
+
+    private:
+        std::uint64_t mGeneration = 1;
+    } metrics;
+
+    rdui::StyleSheet theme;
+    rdui::Label label("generation");
+    const rdui::LayoutStatistics first = rdui::layoutTree(label, theme, metrics);
+    metrics.advance();
+    const rdui::LayoutStatistics second = rdui::layoutTree(label, theme, metrics);
+    ensure("initial metrics pass measures the label", first.measured_nodes > 0);
+    ensure("metrics generation invalidates the measurement cache", second.measured_nodes > 0);
+}
+
+template<> template<> void rduilayout_object::test<34>() {
+    rdui::StyleSheet theme;
+    ensure("column growth stylesheet compiles", theme.loadRadia("panel { flow: column; } label { height: 10px; flex-grow: 1; }").ok());
+    rdui::Panel panel;
+    panel.setRect({0.f, 0.f, 100.f, 100.f});
+    panel.addChild(std::make_unique<rdui::Label>("first"));
+    panel.addChild(std::make_unique<rdui::Label>("second"));
+
+    const rdui::LayoutStatistics stats = rdui::layoutTree(panel, theme, text);
+    ensure("column allocation remeasures flex children with height constraints", stats.constrained_remeasures >= 2);
+    ensure_equals("first flex child receives half the column", panel.children()[0]->rect().h, 50.f);
+    ensure_equals("second flex child receives half the column", panel.children()[1]->rect().h, 50.f);
+    ensure_equals("column children consume the allocated height", panel.children()[1]->rect().bottom(), 0.f);
+}
+
+template<> template<> void rduilayout_object::test<35>() {
+    rdui::StyleSheet theme;
+    ensure("column percentage-height stylesheet compiles",
+           theme.loadRadia("panel { flow: column; } #quarter { height: 25%; } #half { height: 50%; }").ok());
+    rdui::Panel panel;
+    panel.setRect({0.f, 0.f, 100.f, 100.f});
+    auto quarter = std::make_unique<rdui::Label>("quarter");
+    quarter->setId("quarter");
+    auto half = std::make_unique<rdui::Label>("half");
+    half->setId("half");
+    panel.addChild(std::move(quarter));
+    panel.addChild(std::move(half));
+
+    rdui::layoutTree(panel, theme, text);
+    ensure_approximately_equals("column percentage height resolves against panel", panel.children()[0]->rect().h, 25.f, 6);
+    ensure_approximately_equals("second percentage height resolves independently", panel.children()[1]->rect().h, 50.f, 6);
+    ensure_approximately_equals("percentage-height siblings retain their order", panel.children()[0]->rect().bottom(),
+                                panel.children()[1]->rect().top(), 6);
+}
+
+template<> template<> void rduilayout_object::test<36>() {
+    rdui::StyleSheet theme;
+    ensure("nested percentage-height stylesheet compiles",
+           theme.loadRadia("panel { flow: column; } #child { height: 50%; flow: column; } #grandchild { height: 50%; }").ok());
+    rdui::Panel panel;
+    panel.setRect({0.f, 0.f, 100.f, 100.f});
+    auto child = std::make_unique<rdui::Panel>();
+    child->setId("child");
+    auto grandchild = std::make_unique<rdui::Label>("nested");
+    grandchild->setId("grandchild");
+    child->addChild(std::move(grandchild));
+    panel.addChild(std::move(child));
+
+    rdui::layoutTree(panel, theme, text);
+    const rdui::Widget& nested_panel = *panel.children().front();
+    ensure_approximately_equals("nested panel receives its percentage height", nested_panel.rect().h, 50.f, 6);
+    ensure_approximately_equals("nested percentage resolves against allocated parent height", nested_panel.children().front()->rect().h, 25.f, 6);
+}
+
+template<> template<> void rduilayout_object::test<37>() {
+    rdui::StyleSheet theme;
+    ensure("column minimum-height stylesheet compiles", theme.loadRadia("panel { flow: column; } label { height: 30px; min-height: 25px; }").ok());
+    rdui::Panel panel;
+    panel.setRect({0.f, 0.f, 100.f, 40.f});
+    panel.addChild(std::make_unique<rdui::Label>("first"));
+    panel.addChild(std::make_unique<rdui::Label>("second"));
+
+    rdui::layoutTree(panel, theme, text);
+    ensure_equals("column shrink respects the first minimum height", panel.children()[0]->rect().h, 25.f);
+    ensure_equals("column shrink respects the second minimum height", panel.children()[1]->rect().h, 25.f);
+}
+
+template<> template<> void rduilayout_object::test<38>() {
+    rdui::StyleSheet theme;
+    ensure("column height cache stylesheet compiles", theme.loadRadia("panel { flow: column; } label { flex: 1; }").ok());
+    rdui::Panel panel;
+    panel.setRect({0.f, 0.f, 100.f, 100.f});
+    panel.addChild(std::make_unique<rdui::Label>("first"));
+    panel.addChild(std::make_unique<rdui::Label>("second"));
+
+    const rdui::LayoutStatistics first = rdui::layoutTree(panel, theme, text);
+    const rdui::LayoutStatistics clean = rdui::layoutTree(panel, theme, text);
+    ensure("initial column layout performs constrained measurement", first.constrained_remeasures > 0);
+    ensure_equals("clean column layout reuses height-constrained cache", clean.measured_nodes, std::size_t(0));
+    ensure_equals("clean column layout does not re-arrange", clean.arranged_nodes, std::size_t(0));
+
+    panel.setRect({0.f, 0.f, 100.f, 140.f});
+    const rdui::LayoutStatistics resized = rdui::layoutTree(panel, theme, text);
+    ensure("column height change invalidates constrained measurement", resized.constrained_remeasures > 0);
+}
+
+template<> template<> void rduilayout_object::test<39>() {
+    rdui::StyleSheet narrow;
+    rdui::StyleSheet wide;
+    ensure("first cache identity stylesheet compiles", narrow.loadRadia("label { width: 10px; height: 10px; }").ok());
+    ensure("second cache identity stylesheet compiles", wide.loadRadia("label { width: 30px; height: 10px; }").ok());
+
+    rdui::Label label("identity");
+    rdui::layoutTree(label, narrow, text);
+    rdui::layoutTree(label, wide, text);
+    ensure_equals("different stylesheet objects cannot reuse layout cache", label.desiredSize().x, 30.f);
+}
+
+template<> template<> void rduilayout_object::test<40>() {
+    class WidthMetrics final : public rdui::TextMetrics {
+    public:
+        explicit WidthMetrics(float width) : mWidth(width) {}
+        rdui::Vec2 measureText(const std::string&, const rdui::Style&) const override { return {mWidth, 12.f}; }
+
+    private:
+        float mWidth;
+    } narrow(12.f), wide(48.f);
+
+    rdui::StyleSheet theme;
+    rdui::Label label("identity");
+    rdui::layoutTree(label, theme, narrow);
+    rdui::layoutTree(label, theme, wide);
+    ensure_equals("different text metric objects cannot reuse layout cache", label.desiredSize().x, 48.f);
+}
+
+template<> template<> void rduilayout_object::test<41>() {
+    rdui::StyleSheet theme;
+    ensure("ordered-flow stylesheet compiles",
+           theme
+               .loadRadia("panel { flow: row; } #late { order: 2; width: 10px; height: 10px; } "
+                          "#early { order: -1; width: 10px; height: 10px; }")
+               .ok());
+    rdui::Panel panel;
+    panel.setRect({0.f, 0.f, 100.f, 20.f});
+    auto late = std::make_unique<rdui::Label>("late");
+    late->setId("late");
+    auto early = std::make_unique<rdui::Label>("early");
+    early->setId("early");
+    panel.addChild(std::move(late));
+    panel.addChild(std::move(early));
+
+    rdui::layoutTree(panel, theme, text);
+    ensure_equals("ordered row measures in visual order", panel.children()[1]->rect().x, 0.f);
+    ensure_equals("ordered row places the later source child after the early child", panel.children()[0]->rect().x, 10.f);
+}
+
+template<> template<> void rduilayout_object::test<42>() {
+    rdui::StyleSheet theme;
+    ensure("initial assigned stylesheet compiles", theme.loadRadia("label { width: 10px; height: 10px; }").ok());
+    rdui::Label label("assigned");
+    rdui::layoutTree(label, theme, text);
+
+    rdui::StyleSheet replacement;
+    ensure("replacement assigned stylesheet compiles", replacement.loadRadia("label { width: 30px; height: 10px; }").ok());
+    theme = replacement;
+    rdui::layoutTree(label, theme, text);
+    ensure_equals("stylesheet assignment advances the cache generation", label.desiredSize().x, 30.f);
+}
+
+template<> template<> void rduilayout_object::test<43>() {
+    rdui::StyleSheet theme;
+    ensure("free-flow percentage wrapping stylesheet compiles",
+           theme.loadRadia("panel { flow: free; } text { width: 50%; font-size: 10px; line-height: 10px; text-wrap: wrap; }").ok());
+    rdui::Panel panel;
+    panel.setRect({0.f, 0.f, 100.f, 100.f});
+    panel.addChild(std::make_unique<rdui::Text>("alpha beta"));
+
+    rdui::layoutTree(panel, theme, text);
+    ensure_equals("free-flow percentage text initially wraps", panel.children().front()->rect().h, 20.f);
+
+    panel.setRect({0.f, 0.f, 200.f, 100.f});
+    rdui::layoutTree(panel, theme, text);
+    ensure_equals("free-flow percentage text reflows after parent resize", panel.children().front()->rect().h, 10.f);
+}
+
+template<> template<> void rduilayout_object::test<44>() {
+    rdui::StyleSheet theme;
+    ensure("free-flow intrinsic offsets stylesheet compiles",
+           theme.loadRadia("panel { flow: free; } label { width: 20px; height: 10px; right: 5px; bottom: 7px; }").ok());
+    rdui::Panel panel;
+    panel.addChild(std::make_unique<rdui::Label>("positioned"));
+    rdui::layoutTree(panel, theme, text);
+    ensure_equals("free-flow right offset contributes to intrinsic width", panel.desiredSize().x, 25.f);
+    ensure_equals("free-flow bottom offset contributes to intrinsic height", panel.desiredSize().y, 17.f);
+}
+
+template<> template<> void rduilayout_object::test<45>() {
+    rdui::StyleSheet theme;
+    ensure("free-flow explicit geometry stylesheet compiles", theme.loadRadia("panel { flow: free; }").ok());
+    rdui::Panel panel;
+    auto child = std::make_unique<rdui::Panel>();
+    child->setRect({0.f, 0.f, 40.f, 30.f});
+    panel.addChild(std::move(child));
+    rdui::layoutTree(panel, theme, text);
+    ensure_equals("explicit free-flow child width contributes to intrinsic size", panel.desiredSize().x, 40.f);
+    ensure_equals("explicit free-flow child height contributes to intrinsic size", panel.desiredSize().y, 30.f);
+}
+
+template<> template<> void rduilayout_object::test<46>() {
+    rdui::StyleSheet theme;
+    ensure("free-flow explicit geometry cache stylesheet compiles", theme.loadRadia("panel { flow: free; }").ok());
+    rdui::Panel panel;
+    auto child = std::make_unique<rdui::Panel>();
+    child->setRect({0.f, 0.f, 20.f, 10.f});
+    rdui::Widget* child_ptr = child.get();
+    panel.addChild(std::move(child));
+    rdui::layoutTree(panel, theme, text);
+    ensure_equals("initial explicit free-flow width contributes to intrinsic size", panel.desiredSize().x, 20.f);
+
+    child_ptr->setRect({0.f, 0.f, 60.f, 10.f});
+    rdui::layoutTree(panel, theme, text);
+    ensure_equals("changing explicit free-flow geometry invalidates intrinsic size", panel.desiredSize().x, 60.f);
+}
+
+template<> template<> void rduilayout_object::test<47>() {
+    rdui::StyleSheet theme;
+    ensure("free-flow explicit position stylesheet compiles", theme.loadRadia("panel { flow: free; }").ok());
+    rdui::Panel panel;
+    auto child = std::make_unique<rdui::Panel>();
+    child->setRect({10.f, 12.f, 20.f, 8.f});
+    panel.addChild(std::move(child));
+    rdui::layoutTree(panel, theme, text);
+    ensure_equals("explicit free-flow x contributes to intrinsic size", panel.desiredSize().x, 30.f);
+    ensure_equals("explicit free-flow y contributes to intrinsic size", panel.desiredSize().y, 20.f);
+}
+
+template<> template<> void rduilayout_object::test<48>() {
+    rdui::StyleSheet theme;
+    ensure("free-flow intrinsic percentage height stylesheet compiles",
+           theme.loadRadia("panel { flow: free; width: 100px; } text { width: 50%; font-size: 10px; line-height: 10px; text-wrap: wrap; }").ok());
+    rdui::Panel panel;
+    panel.addChild(std::make_unique<rdui::Text>("alpha beta"));
+
+    rdui::layoutTree(panel, theme, text);
+    ensure_equals("auto-height free-flow parent includes wrapped percentage child", panel.desiredSize().y, 20.f);
+    ensure_equals("wrapped percentage child keeps intrinsic height", panel.children().front()->rect().h, 20.f);
+}
+
+template<> template<> void rduilayout_object::test<49>() {
+    rdui::StyleSheet theme;
+    ensure("free-flow percentage offsets stylesheet compiles",
+           theme.loadRadia("panel { flow: free; } label { width: 20px; height: 10px; left: 50%; top: 20%; }").ok());
+    rdui::Panel panel;
+    panel.setRect({0.f, 0.f, 100.f, 100.f});
+    panel.addChild(std::make_unique<rdui::Label>("positioned"));
+
+    rdui::layoutTree(panel, theme, text);
+    ensure_equals("percentage left contributes against parent width", panel.desiredSize().x, 70.f);
+    ensure_approximately_equals("percentage top contributes against parent height", panel.desiredSize().y, 30.f, 6);
+}
+
+template<> template<> void rduilayout_object::test<50>() {
+    rdui::StyleSheet theme;
+    ensure("free-flow percentage dimensions use explicit geometry stylesheet compiles",
+           theme.loadRadia("panel { flow: free; width: 50%; height: 50%; } label { width: 50%; height: 50%; }").ok());
+    rdui::Panel panel;
+    panel.setRect({0.f, 0.f, 100.f, 80.f});
+    panel.addChild(std::make_unique<rdui::Label>("sized"));
+
+    rdui::layoutTree(panel, theme, text);
+    ensure_approximately_equals("free-flow percentage child width uses explicit parent width", panel.children().front()->rect().w, 50.f, 6);
+    ensure_approximately_equals("free-flow percentage child height uses explicit parent height", panel.children().front()->rect().h, 40.f, 6);
+}
+
+template<> template<> void rduilayout_object::test<51>() {
+    rdui::StyleSheet theme;
+    ensure("nested percentage flex-basis stylesheet compiles",
+           theme
+               .loadRadia("#outer { flow: row; width: 100px; height: 20px; } #inner { flow: row; width: 50%; } "
+                          "label { flex-basis: 50%; height: 10px; }")
+               .ok());
+    rdui::Panel outer;
+    outer.setId("outer");
+    auto inner = std::make_unique<rdui::Panel>();
+    inner->setId("inner");
+    rdui::Widget* inner_ptr = inner.get();
+    inner->addChild(std::make_unique<rdui::Label>("basis"));
+    rdui::Widget* label = inner->children().front().get();
+    outer.addChild(std::move(inner));
+
+    rdui::layoutTree(outer, theme, text);
+    ensure_approximately_equals("percentage flex-basis uses the allocated nested width", inner_ptr->rect().w, 50.f, 6);
+    ensure_approximately_equals("nested percentage flex-basis resolves against its parent", label->rect().w, 25.f, 6);
 }
 } // namespace tut

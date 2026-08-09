@@ -1,6 +1,6 @@
 /**
  * @file panel.cpp
- * @brief
+ * @brief Implements the generic Panel container Widget.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -24,12 +24,12 @@
 
 #include "linden_common.h"
 #include "widgets/panel.h"
-#include "widgets/widgetcontract.h"
+#include "widgets/widgetcontractbuilder.h"
 
 namespace rdui {
 Panel::Panel() : Widget(ELEMENT) {}
 
 WidgetContract detail::panelContract() {
-    return defineWidget<Panel>(Panel::ELEMENT).attributes({allowedAttribute("filename")}).build();
+    return defineWidget<Panel>(Panel::ELEMENT).attributes({allowedAttribute("filename")}).resourceRoot().build();
 }
 } // namespace rdui

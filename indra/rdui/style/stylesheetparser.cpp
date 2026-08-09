@@ -1,6 +1,6 @@
 /**
  * @file stylesheetparser.cpp
- * @brief
+ * @brief Parses RSL modules, imports, selectors, declarations, and diagnostics.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -26,28 +26,50 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <functional>
 #include <iterator>
 #include <limits>
+#include <map>
 #include "layout/schema.h"
 #include "style/color.h"
-#include "style/compiler.h"
+#include "style/model.h"
 #include "style/stylesheet.h"
+#include "style/syntax.h"
 #include "text/inlinecontent.h"
 #include "widgets/widgetcontract.h"
 
 namespace rdui {
 namespace {
-std::string trim(const std::string& value) {
-    std::size_t begin = 0;
-    while (begin < value.size() && std::isspace(static_cast<unsigned char>(value[begin]))) ++begin;
-    std::size_t end = value.size();
-    while (end > begin && std::isspace(static_cast<unsigned char>(value[end - 1]))) --end;
-    return value.substr(begin, end - begin);
+using detail::startsWith;
+using detail::trim;
+
+struct TopLevelDelimiter {
+    std::size_t position = 0;
+    char value = 0;
+};
+
+std::optional<TopLevelDelimiter> nextTopLevelDelimiter(const std::string& value, std::size_t start) {
+    char quote = 0;
+    int parentheses = 0;
+    for (std::size_t index = start; index < value.size(); ++index) {
+        const char character = value[index];
+        if (quote) {
+            if (character == quote && (index == 0 || value[index - 1] != '\\')) quote = 0;
+            continue;
+        }
+        if (character == '\'' || character == '"') {
+            quote = character;
+            continue;
+        }
+        if (character == '(') ++parentheses;
+        else if (character == ')' && parentheses > 0) --parentheses;
+        else if (parentheses == 0 && (character == ';' || character == '{')) return TopLevelDelimiter{index, character};
+    }
+    return std::nullopt;
 }
 
-bool startsWith(const std::string& value, const std::string& prefix) {
-    return value.rfind(prefix, 0) == 0;
+std::optional<std::size_t> topLevelDelimiter(const std::string& value, std::size_t start, char delimiter) {
+    const auto found = nextTopLevelDelimiter(value, start);
+    return found && found->value == delimiter ? std::optional<std::size_t>(found->position) : std::nullopt;
 }
 
 bool isColorValue(const std::string& value) {
@@ -71,14 +93,6 @@ std::optional<WidgetState> targetSpecificState(const std::string& state) {
     if (state == "minimized") return WidgetState::Minimized;
     if (state == "invalid") return WidgetState::Invalid;
     return std::nullopt;
-}
-
-std::size_t matchingClose(const std::string& css, std::size_t open) {
-    int depth = 0;
-    for (std::size_t i = open; i < css.size(); ++i)
-        if (css[i] == '{') ++depth;
-        else if (css[i] == '}' && --depth == 0) return i;
-    return std::string::npos;
 }
 
 std::pair<std::size_t, std::size_t> sourcePosition(const std::string& source, std::size_t offset) {
@@ -233,6 +247,183 @@ StyleSelector parseSimpleSelector(const std::string& selector) {
     if (!rule.universal) rule.element = token;
     return rule;
 }
+
+struct ParsedRuleBlock {
+    std::string selector;
+    std::string body;
+};
+
+struct ParsedImport {
+    std::string resource_id;
+    std::string requested;
+    std::size_t line = 1;
+    std::size_t column = 1;
+};
+
+struct ParsedModule {
+    std::string resource_id;
+    std::string source_name;
+    std::vector<ParsedImport> imports;
+    std::vector<ParsedRuleBlock> rules;
+};
+
+class StylesheetModuleGraph {
+public:
+    StylesheetModuleGraph(const ResourceLayer& layer, StyleModel& model, StyleSheetLoadResult& result)
+        : mLayer(layer), mModel(model), mResult(result) {}
+
+    bool build(const std::string& entrypoint) {
+        std::vector<std::string> import_stack;
+        return ensureParsed(entrypoint, mLayer.source, mLayer.source_name, import_stack);
+    }
+
+    template<typename Callback> void visit(const std::string& resource_id, Callback& callback) const {
+        std::vector<std::string> active;
+        std::vector<VisitEntry> modules;
+        collectModules(resource_id, active, modules);
+
+        const auto emit = [&](const VisitEntry& entry, bool tokens) {
+            for (const ParsedRuleBlock& rule : entry.module->rules) {
+                if ((rule.selector == ":root") != tokens) continue;
+                const std::size_t first_error = mResult.errors.size();
+                callback(rule, entry.module->source_name);
+                if (entry.import_chain.size() > 1) {
+                    for (std::size_t index = first_error; index < mResult.errors.size(); ++index)
+                        if (mResult.errors[index].message.find("Import chain:") == std::string::npos
+                            && mResult.errors[index].code != "stylesheet.import.cycle")
+                            mResult.errors[index].message += " Import chain: " + importChain(entry.import_chain) + ".";
+                }
+            }
+        };
+        for (const VisitEntry& entry : modules) emit(entry, true);
+        for (const VisitEntry& entry : modules) emit(entry, false);
+    }
+
+private:
+    struct VisitEntry {
+        const ParsedModule* module = nullptr;
+        std::vector<std::string> import_chain;
+    };
+
+    std::optional<ParsedModule> parseSyntax(const std::string& source, const std::string& resource_id, const std::string& source_name) {
+        ParsedModule module{resource_id, source_name};
+        bool saw_rule = false;
+        std::size_t position = 0;
+        while (position < source.size() && !mResult.hasErrors()) {
+            while (position < source.size() && std::isspace(static_cast<unsigned char>(source[position]))) ++position;
+            if (position == source.size()) break;
+
+            if (source.compare(position, 7, "@import") == 0
+                && (position + 7 == source.size() || std::isspace(static_cast<unsigned char>(source[position + 7])))) {
+                const auto [line, column] = sourcePosition(source, position);
+                if (saw_rule) {
+                    mResult.error("stylesheet.import.order", "@import must precede all rules in its module.", source_name, line, column);
+                    return std::nullopt;
+                }
+                const std::optional<std::size_t> semicolon = topLevelDelimiter(source, position + 7, ';');
+                if (!semicolon) {
+                    mResult.error("stylesheet.import.syntax", "@import requires a quoted path followed by ';'.", source_name, line, column);
+                    return std::nullopt;
+                }
+                const std::string argument = trim(source.substr(position + 7, *semicolon - position - 7));
+                if (argument.size() < 2 || (argument.front() != '\"' && argument.front() != '\'') || argument.back() != argument.front()) {
+                    mResult.error("stylesheet.import.syntax", "@import requires exactly one quoted path.", source_name, line, column);
+                    return std::nullopt;
+                }
+                const std::string requested = argument.substr(1, argument.size() - 2);
+                const std::optional<std::string> imported_id = normalizeImportPath(resource_id, requested);
+                if (!imported_id) {
+                    mResult.error("stylesheet.import.path_invalid", "Invalid or escaping @import path: " + requested + ".", source_name, line,
+                                  column);
+                    return std::nullopt;
+                }
+                mModel.dependencies[source_name].insert(mLayer.sourceNameFor(*imported_id));
+                module.imports.push_back({*imported_id, requested, line, column});
+                position = *semicolon + 1;
+                continue;
+            }
+            if (source[position] == '@') {
+                const auto [line, column] = sourcePosition(source, position);
+                mResult.error("stylesheet.at_rule.unsupported", "Unsupported stylesheet at-rule.", source_name, line, column);
+                return std::nullopt;
+            }
+
+            saw_rule = true;
+            const std::optional<std::size_t> open = topLevelDelimiter(source, position, '{');
+            if (!open) {
+                mResult.error("stylesheet.syntax.trailing_content", "Unexpected content outside a rule: " + trim(source.substr(position)) + ".",
+                              source_name);
+                return std::nullopt;
+            }
+            const std::string selector = trim(source.substr(position, *open - position));
+            if (selector.empty()) {
+                mResult.error("stylesheet.selector.empty", "Rule selector is empty.", source_name);
+                return std::nullopt;
+            }
+            const std::optional<std::size_t> close = detail::matchingBlock(source, *open);
+            if (!close) {
+                mResult.error("stylesheet.syntax.unclosed_block", "Rule block is not closed: " + selector + ".", source_name);
+                return std::nullopt;
+            }
+            module.rules.push_back({selector, source.substr(*open + 1, *close - *open - 1)});
+            position = *close + 1;
+        }
+        return module;
+    }
+
+    bool ensureParsed(const std::string& resource_id, const std::string& source, const std::string& source_name,
+                      std::vector<std::string>& import_stack) {
+        if (mModules.find(resource_id) != mModules.end()) return true;
+        const std::optional<ParsedModule> parsed = parseSyntax(source, resource_id, source_name);
+        if (!parsed) return false;
+        mModules.emplace(resource_id, *parsed);
+        import_stack.push_back(resource_id);
+        for (const ParsedImport& imported : parsed->imports) {
+            if (std::find(import_stack.begin(), import_stack.end(), imported.resource_id) != import_stack.end()) {
+                mResult.error("stylesheet.import.cycle", "Cyclic @import: " + importChain(import_stack, imported.resource_id) + ".", source_name,
+                              imported.line, imported.column);
+                continue;
+            }
+            const std::string imported_name = mLayer.sourceNameFor(imported.resource_id);
+            const std::string* imported_source = nullptr;
+            if (imported.resource_id == mLayer.entrypoint) imported_source = &mLayer.source;
+            else if (const auto found = mLayer.modules.find(imported.resource_id); found != mLayer.modules.end()) imported_source = &found->second;
+            if (!imported_source) {
+                mResult.error("stylesheet.import.missing",
+                              "Imported stylesheet module is missing: "
+                                  + imported.requested
+                                  + ". Import chain: "
+                                  + importChain(import_stack, imported.resource_id)
+                                  + ".",
+                              source_name, imported.line, imported.column);
+                continue;
+            }
+            const std::size_t first_error = mResult.errors.size();
+            ensureParsed(imported.resource_id, *imported_source, imported_name, import_stack);
+            for (std::size_t index = first_error; index < mResult.errors.size(); ++index)
+                if (mResult.errors[index].message.find("Import chain:") == std::string::npos
+                    && mResult.errors[index].code != "stylesheet.import.cycle")
+                    mResult.errors[index].message += " Import chain: " + importChain(import_stack, imported.resource_id) + ".";
+        }
+        import_stack.pop_back();
+        return !mResult.hasErrors();
+    }
+
+    void collectModules(const std::string& resource_id, std::vector<std::string>& active, std::vector<VisitEntry>& modules) const {
+        if (std::find(active.begin(), active.end(), resource_id) != active.end()) return;
+        const auto module = mModules.find(resource_id);
+        if (module == mModules.end()) return;
+        active.push_back(resource_id);
+        for (const ParsedImport& imported : module->second.imports) collectModules(imported.resource_id, active, modules);
+        modules.push_back({&module->second, active});
+        active.pop_back();
+    }
+
+    const ResourceLayer& mLayer;
+    StyleModel& mModel;
+    StyleSheetLoadResult& mResult;
+    std::map<std::string, ParsedModule> mModules;
+};
 } // namespace
 
 std::vector<std::string> detail::splitPartPath(const std::string& part) {
@@ -285,153 +476,26 @@ StyleSheetLoadResult StyleSheet::loadRadiaLayers(const std::vector<ResourceLayer
         return result;
     }
     for (const ResourceLayer& layer : layers) {
-        std::vector<std::string> token_stack;
-        std::function<void(const std::string&, const std::string&, const std::string&)> collectTokens;
-        collectTokens = [&](const std::string& source, const std::string& resource_id, const std::string& source_name) {
-            if (std::find(token_stack.begin(), token_stack.end(), resource_id) != token_stack.end()) return;
-            token_stack.push_back(resource_id);
-
-            std::size_t position = 0;
-            while (position < source.size() && !result.hasErrors()) {
-                while (position < source.size() && std::isspace(static_cast<unsigned char>(source[position]))) ++position;
-                if (position == source.size()) break;
-                if (source.compare(position, 7, "@import") == 0
-                    && (position + 7 == source.size() || std::isspace(static_cast<unsigned char>(source[position + 7])))) {
-                    const std::size_t semicolon = source.find(';', position + 7);
-                    if (semicolon == std::string::npos) break;
-                    const std::string argument = trim(source.substr(position + 7, semicolon - position - 7));
-                    if (argument.size() < 2 || (argument.front() != '"' && argument.front() != '\'') || argument.back() != argument.front()) break;
-                    const std::optional<std::string> imported_id = normalizeImportPath(resource_id, argument.substr(1, argument.size() - 2));
-                    if (!imported_id) break;
-                    const std::string imported_name = layer.sourceNameFor(*imported_id);
-                    if (*imported_id == layer.entrypoint) collectTokens(layer.source, *imported_id, layer.source_name);
-                    else if (const auto imported = layer.modules.find(*imported_id); imported != layer.modules.end())
-                        collectTokens(imported->second, *imported_id, imported_name);
-                    position = semicolon + 1;
-                    continue;
-                }
-                if (source[position] == '@') break;
-
-                const std::size_t open = source.find('{', position);
-                if (open == std::string::npos) break;
-                const std::size_t close = matchingClose(source, open);
-                if (close == std::string::npos) break;
-                if (trim(source.substr(position, open - position)) == ":root")
-                    candidate.parseBlock(":root", source.substr(open + 1, close - open - 1), {}, result, source_name);
-                position = close + 1;
-            }
-            token_stack.pop_back();
-        };
-
         const std::string entrypoint = layer.entrypoint.empty() ? layer.source_name : layer.entrypoint;
-        collectTokens(layer.source, entrypoint, layer.source_name);
+        StylesheetModuleGraph graph(layer, candidate, result);
+        graph.build(entrypoint);
+        if (result.hasErrors()) continue;
 
-        std::vector<std::string> import_stack;
-        std::function<void(const std::string&, const std::string&, const std::string&)> parseModule;
-        parseModule = [&](const std::string& source, const std::string& resource_id, const std::string& source_name) {
-            if (std::find(import_stack.begin(), import_stack.end(), resource_id) != import_stack.end()) {
-                result.error("stylesheet.import.cycle", "Cyclic @import: " + importChain(import_stack, resource_id) + ".", source_name);
-                return;
-            }
-            const std::size_t first_error = result.errors.size();
-            import_stack.push_back(resource_id);
-
-            bool saw_rule = false;
-            std::size_t position = 0;
-            while (position < source.size() && !result.hasErrors()) {
-                while (position < source.size() && std::isspace(static_cast<unsigned char>(source[position]))) ++position;
-                if (position == source.size()) break;
-
-                if (source.compare(position, 7, "@import") == 0
-                    && (position + 7 == source.size() || std::isspace(static_cast<unsigned char>(source[position + 7])))) {
-                    const auto [line, column] = sourcePosition(source, position);
-                    if (saw_rule) {
-                        result.error("stylesheet.import.order", "@import must precede all rules in its module.", source_name, line, column);
-                        break;
-                    }
-                    const std::size_t semicolon = source.find(';', position + 7);
-                    if (semicolon == std::string::npos) {
-                        result.error("stylesheet.import.syntax", "@import requires a quoted path followed by ';'.", source_name, line, column);
-                        break;
-                    }
-                    const std::string argument = trim(source.substr(position + 7, semicolon - position - 7));
-                    if (argument.size() < 2 || (argument.front() != '"' && argument.front() != '\'') || argument.back() != argument.front()) {
-                        result.error("stylesheet.import.syntax", "@import requires exactly one quoted path.", source_name, line, column);
-                        break;
-                    }
-                    const std::string requested = argument.substr(1, argument.size() - 2);
-                    const std::optional<std::string> imported_id = normalizeImportPath(resource_id, requested);
-                    if (!imported_id) {
-                        result.error("stylesheet.import.path_invalid", "Invalid or escaping @import path: " + requested + ".", source_name, line,
-                                     column);
-                        break;
-                    }
-
-                    const std::string imported_name = layer.sourceNameFor(*imported_id);
-                    candidate.dependencies[source_name].insert(imported_name);
-                    if (std::find(import_stack.begin(), import_stack.end(), *imported_id) != import_stack.end())
-                        result.error("stylesheet.import.cycle", "Cyclic @import: " + importChain(import_stack, *imported_id) + ".", source_name, line,
-                                     column);
-                    else if (*imported_id == layer.entrypoint) parseModule(layer.source, *imported_id, layer.source_name);
-                    else if (const auto imported = layer.modules.find(*imported_id); imported != layer.modules.end())
-                        parseModule(imported->second, *imported_id, imported_name);
-                    else
-                        result.error("stylesheet.import.missing",
-                                     "Imported stylesheet module is missing: "
-                                         + requested
-                                         + ". Import chain: "
-                                         + importChain(import_stack, *imported_id)
-                                         + ".",
-                                     source_name, line, column);
-                    position = semicolon + 1;
-                    continue;
-                }
-                if (source[position] == '@') {
-                    const auto [line, column] = sourcePosition(source, position);
-                    result.error("stylesheet.at_rule.unsupported", "Unsupported stylesheet at-rule.", source_name, line, column);
-                    break;
-                }
-
-                saw_rule = true;
-                const std::size_t open = source.find('{', position);
-                if (open == std::string::npos) {
-                    result.error("stylesheet.syntax.trailing_content", "Unexpected content outside a rule: " + trim(source.substr(position)) + ".",
-                                 source_name);
-                    break;
-                }
-                const std::string selector = trim(source.substr(position, open - position));
-                if (selector.empty()) {
-                    result.error("stylesheet.selector.empty", "Rule selector is empty.", source_name);
-                    break;
-                }
-                const std::size_t close = matchingClose(source, open);
-                if (close == std::string::npos) {
-                    result.error("stylesheet.syntax.unclosed_block", "Rule block is not closed: " + selector + ".", source_name);
-                    break;
-                }
-                candidate.parseBlock(selector, source.substr(open + 1, close - open - 1), {}, result, source_name);
-                position = close + 1;
-            }
-            if (import_stack.size() > 1) {
-                for (std::size_t index = first_error; index < result.errors.size(); ++index)
-                    if (result.errors[index].message.find("Import chain:") == std::string::npos
-                        && result.errors[index].code != "stylesheet.import.cycle")
-                        result.errors[index].message += " Import chain: " + importChain(import_stack) + ".";
-            }
-            import_stack.pop_back();
+        auto compileModule = [&](const ParsedRuleBlock& rule, const std::string& source_name) {
+            candidate.parseBlock(rule.selector, rule.body, {}, result, source_name);
         };
-
-        parseModule(layer.source, entrypoint, layer.source_name);
+        graph.visit(entrypoint, compileModule);
     }
     if (result.ok()) {
+        candidate.sortRules();
         candidate.generation = mImpl->generation + 1;
-        *mImpl = std::move(candidate);
+        mImpl = std::make_shared<Impl>(std::move(candidate));
     }
     return result;
 }
 
-void StyleSheet::Impl::parseBlock(const std::string& selector_text, const std::string& body, const StyleRule& parent, StyleSheetLoadResult& result,
-                                  const std::string& source_name) {
+namespace {
+std::vector<std::string> splitSelectorList(const std::string& selector_text) {
     std::vector<std::string> selectors;
     std::size_t selector_start = 0;
     while (selector_start <= selector_text.size()) {
@@ -440,21 +504,10 @@ void StyleSheet::Impl::parseBlock(const std::string& selector_text, const std::s
         if (comma == std::string::npos) break;
         selector_start = comma + 1;
     }
-    if (selectors.size() > 1) {
-        for (const std::string& selector : selectors)
-            if (!selector.empty()) parseBlock(selector, body, parent, result, source_name);
-        return;
-    }
+    return selectors;
+}
 
-    const std::string selector = trim(selector_text);
-    const bool nested = !parent.selectors.empty();
-    StyleRule rule = nested ? expandNestedSelector(parent, selector) : detail::parseSelector(selector);
-    const bool root_rule = !nested && selector == ":root";
-    if (!root_rule && rule.selectors.empty()) {
-        result.error("stylesheet.selector.empty", "Rule selector is empty.", source_name);
-        return;
-    }
-
+bool validateSelector(StyleRule& rule, const std::string& selector, StyleSheetLoadResult& result, const std::string& source_name) {
     for (std::size_t index = 0; index < rule.selectors.size(); ++index) {
         StyleSelector& component = rule.selectors[index];
         const bool declaration_component = index + 1 == rule.selectors.size();
@@ -462,53 +515,48 @@ void StyleSheet::Impl::parseBlock(const std::string& selector_text, const std::s
             || (!component.class_name.empty() && !isLocalIdentifier(component.class_name))) {
             result.error("stylesheet.selector.identifier_invalid",
                          "Widget IDs and classes in selectors must use lowercase kebab-case: " + selector + ".", source_name);
-            return;
+            return false;
         }
         if (std::any_of(component.parts.begin(), component.parts.end(), [](const std::string& part) { return !isLocalIdentifier(part); })) {
             result.error("stylesheet.selector.part_invalid", "Widget parts in selectors must use lowercase kebab-case: " + selector + ".",
                          source_name);
-            return;
+            return false;
         }
-        if (!isSupportedState(component.state)) {
-            result.error("stylesheet.selector.state_unknown", "Unknown selector state: " + component.state + ".", source_name);
-            return;
-        }
-        if (!isSupportedState(component.part_state)) {
-            result.error("stylesheet.selector.state_unknown", "Unknown selector state: " + component.part_state + ".", source_name);
-            return;
+        if (!isSupportedState(component.state) || !isSupportedState(component.part_state)) {
+            const std::string& state = !isSupportedState(component.state) ? component.state : component.part_state;
+            result.error("stylesheet.selector.state_unknown", "Unknown selector state: " + state + ".", source_name);
+            return false;
         }
         if (!declaration_component && !component.parts.empty()) {
             result.error("stylesheet.selector.part_structural", "Widget parts cannot participate in structural combinators: " + selector + ".",
                          source_name);
-            return;
+            return false;
         }
         if (component.element.empty()) {
             if (!component.parts.empty() || !component.state.empty() || !component.part_state.empty()) {
                 result.error("stylesheet.selector.target_required", "Parts and states require an element-qualified selector: " + selector + ".",
                              source_name);
-                return;
+                return false;
             }
             continue;
         }
-
         if (isInlineStyleElement(component.element)) {
             if (!component.id.empty() || !component.class_name.empty()) {
                 result.error("stylesheet.selector.inline_identity_unsupported",
                              "Inline style elements do not have Widget IDs or classes: " + selector + ".", source_name);
-                return;
+                return false;
             }
             component.element = inlineContentElement(InlineContentKind::Kbd);
             if (!component.parts.empty()) {
                 result.error("stylesheet.selector.part_unknown", "Unknown style part for " + component.element + ".", source_name);
-                return;
+                return false;
             }
             continue;
         }
-
         const WidgetContract* component_owner = findWidgetContract(component.element);
         if (!component_owner) {
             result.error("stylesheet.selector.element_unknown", "Unknown widget element: " + component.element + ".", source_name);
-            return;
+            return false;
         }
         component.element = component_owner->element;
         const CompositePartContract* component_part =
@@ -520,20 +568,60 @@ void StyleSheet::Impl::parseBlock(const std::string& selector_text, const std::s
                 part += segment;
             }
             result.error("stylesheet.selector.part_unknown", "Unknown style part for " + component.element + ": " + part + ".", source_name);
-            return;
+            return false;
         }
-        if (const auto state = targetSpecificState(component.state); state && !producesState(*component_owner, *state)) {
+        if (const auto state = targetSpecificState(component.state); state && !producesState(*component_owner, *state))
             result.warning("stylesheet.selector.state_never_matches",
                            "State :" + component.state + " is never produced by " + component.element + ".", source_name);
-        }
-        if (const auto state = targetSpecificState(component.part_state); state && component_part && !producesState(*component_part, *state)) {
+        if (const auto state = targetSpecificState(component.part_state); state && component_part && !producesState(*component_part, *state))
             result.warning("stylesheet.selector.state_never_matches",
                            "State :" + component.part_state + " is never produced by the selected part of " + component.element + ".", source_name);
+    }
+    return true;
+}
+
+struct RuleBodyFragment {
+    std::size_t start = 0;
+    std::size_t end = 0;
+    std::optional<std::size_t> open;
+    std::optional<std::size_t> close;
+};
+
+class RuleBodyCursor {
+public:
+    explicit RuleBodyCursor(const std::string& body) : mBody(body) {}
+
+    std::optional<RuleBodyFragment> next() {
+        while (mPosition < mBody.size() && std::isspace(static_cast<unsigned char>(mBody[mPosition]))) ++mPosition;
+        if (mPosition >= mBody.size()) return std::nullopt;
+
+        const std::optional<TopLevelDelimiter> delimiter = nextTopLevelDelimiter(mBody, mPosition);
+        if (delimiter && delimiter->value == '{') {
+            const std::optional<std::size_t> close = detail::matchingBlock(mBody, delimiter->position);
+            if (!close) {
+                mPosition = mBody.size();
+                return RuleBodyFragment{mPosition, mPosition, delimiter->position, std::nullopt};
+            }
+            const RuleBodyFragment fragment{mPosition, *close + 1, delimiter->position, close};
+            mPosition = *close + 1;
+            return fragment;
         }
+
+        const std::size_t end = delimiter && delimiter->value == ';' ? delimiter->position : mBody.size();
+        const RuleBodyFragment fragment{mPosition, end, std::nullopt, std::nullopt};
+        mPosition = delimiter && delimiter->value == ';' ? delimiter->position + 1 : mBody.size();
+        return fragment;
     }
 
+private:
+    const std::string& mBody;
+    std::size_t mPosition = 0;
+};
+
+void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& selector, const std::string& body, bool root_rule,
+                   StyleSheetLoadResult& result, const std::string& source_name) {
     std::vector<StyleDeclaration> declarations;
-    auto addDeclaration = [&](const std::string& declaration) {
+    const auto addDeclaration = [&](const std::string& declaration) {
         const std::size_t colon = declaration.find(':');
         if (colon == std::string::npos) {
             result.error("stylesheet.declaration.invalid", "Declaration requires a property and value: " + trim(declaration) + ".", source_name);
@@ -552,19 +640,19 @@ void StyleSheet::Impl::parseBlock(const std::string& selector_text, const std::s
             }
             if (isColorValue(value)) {
                 const Color marker(-1.f, -1.f, -1.f, -1.f);
-                const Color parsed = parseColorValue(value, marker);
+                const Color parsed = model.parseColorValue(value, marker);
                 if (parsed.a < 0.f)
                     result.error("stylesheet.token.value_invalid", "Invalid color token value for " + name + ": " + value + ".", source_name);
-                else setColorToken(name, parsed);
+                else model.setColorToken(name, parsed);
             } else {
-                const float parsed = parseNumberValue(value, std::numeric_limits<float>::quiet_NaN());
+                const float parsed = model.parseNumberValue(value, std::numeric_limits<float>::quiet_NaN());
                 if (!std::isfinite(parsed))
                     result.error("stylesheet.token.value_invalid", "Invalid number token value for " + name + ": " + value + ".", source_name);
-                else setNumberToken(name, parsed);
+                else model.setNumberToken(name, parsed);
             }
             return;
         }
-        const detail::StylePropertyDescriptor* descriptor = detail::findStyleProperty(name);
+        const detail::StylePropertyDefinition* descriptor = detail::findStyleProperty(name);
         if (!descriptor) {
             result.error("stylesheet.property.unknown", "Unknown property: " + name + ".", source_name);
             return;
@@ -573,37 +661,50 @@ void StyleSheet::Impl::parseBlock(const std::string& selector_text, const std::s
             result.error("stylesheet.property.root_unsupported", "Ordinary properties are not allowed in :root: " + name + ".", source_name);
             return;
         }
-        if (auto compiled = compileDeclaration(descriptor->property, value, selector, result, source_name))
+        if (auto compiled = model.compileDeclaration(*descriptor, value, selector, result, source_name))
             declarations.insert(declarations.end(), std::make_move_iterator(compiled->begin()), std::make_move_iterator(compiled->end()));
     };
 
-    std::size_t position = 0;
-    while (position < body.size()) {
-        while (position < body.size() && std::isspace(static_cast<unsigned char>(body[position]))) ++position;
-        if (position >= body.size()) break;
-        const std::size_t semicolon = body.find(';', position);
-        const std::size_t brace = body.find('{', position);
-        if (brace != std::string::npos && (semicolon == std::string::npos || brace < semicolon)) {
-            const std::size_t close = matchingClose(body, brace);
-            if (close == std::string::npos) {
+    RuleBodyCursor cursor(body);
+    while (const std::optional<RuleBodyFragment> fragment = cursor.next()) {
+        if (fragment->open) {
+            if (!fragment->close) {
                 result.error("stylesheet.syntax.unclosed_block", "Nested rule block is not closed.", source_name);
                 break;
             }
-            parseBlock(trim(body.substr(position, brace - position)), body.substr(brace + 1, close - brace - 1), rule, result, source_name);
-            position = close + 1;
+            model.parseBlock(trim(body.substr(fragment->start, *fragment->open - fragment->start)),
+                             body.substr(*fragment->open + 1, *fragment->close - *fragment->open - 1), rule, result, source_name);
             continue;
         }
-        if (semicolon == std::string::npos) {
-            addDeclaration(body.substr(position));
-            break;
-        }
-        addDeclaration(body.substr(position, semicolon - position));
-        position = semicolon + 1;
+        addDeclaration(body.substr(fragment->start, fragment->end - fragment->start));
     }
-
     if (!declarations.empty()) {
         rule.declarations = std::move(declarations);
-        addRule(rule);
+        model.addRule(rule);
     }
+}
+} // namespace
+
+void StyleModel::parseBlock(const std::string& selector_text, const std::string& body, const StyleRule& parent, StyleSheetLoadResult& result,
+                            const std::string& source_name) {
+    const std::vector<std::string> selectors = splitSelectorList(selector_text);
+    if (selectors.size() > 1) {
+        for (const std::string& selector : selectors)
+            if (!selector.empty()) parseBlock(selector, body, parent, result, source_name);
+        return;
+    }
+
+    const std::string selector = trim(selector_text);
+    const bool nested = !parent.selectors.empty();
+    StyleRule rule = nested ? expandNestedSelector(parent, selector) : detail::parseSelector(selector);
+    const bool root_rule = !nested && selector == ":root";
+    if (!root_rule && rule.selectors.empty()) {
+        result.error("stylesheet.selector.empty", "Rule selector is empty.", source_name);
+        return;
+    }
+
+    if (!validateSelector(rule, selector, result, source_name)) return;
+
+    parseRuleBody(*this, rule, selector, body, root_rule, result, source_name);
 }
 } // namespace rdui

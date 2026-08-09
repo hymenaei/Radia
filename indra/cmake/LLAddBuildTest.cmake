@@ -17,7 +17,8 @@ MACRO(LL_ADD_PROJECT_UNIT_TESTS project sources)
   # ASSUMPTIONS:
   # * this macro is being executed in the project file that is passed in
   # * current working SOURCE dir is that project dir
-  # * there is a subfolder tests/ with test code corresponding to the filenames passed in
+  # * there is a subfolder tests/ with test code corresponding to the filenames passed in;
+  #   nested source paths mirror their directory below tests/
   # * properties for each sourcefile passed in indicate what libs to link that file with (MAKE NO ASSUMPTIONS ASIDE FROM TUT)
   #
   # More info and examples at: https://wiki.secondlife.com/wiki/How_to_add_unit_tests_to_indra_code
@@ -47,10 +48,34 @@ MACRO(LL_ADD_PROJECT_UNIT_TESTS project sources)
   # start the source test executable definitions
   set(${project}_TEST_OUTPUT "")
   foreach (source ${sources})
-    string( REGEX REPLACE "(.*)\\.[^.]+$" "\\1" name ${source} )
-    string( REGEX REPLACE ".*\\.([^.]+)$" "\\1" extension ${source} )
+    # Keep the source path for properties and compiler inputs, but derive the
+    # test path and logical name from its directory and basename separately.
+    # The original implementation used the complete path as the logical name,
+    # which made nested sources produce invalid target names and preprocessor
+    # definitions (for example, ``style/parser``).
+    file(TO_CMAKE_PATH "${source}" source_path)
+    get_filename_component(source_directory "${source_path}" DIRECTORY)
+    get_filename_component(source_basename "${source_path}" NAME_WE)
+    get_filename_component(extension "${source_path}" EXT)
+    string(REGEX REPLACE "^\\." "" extension "${extension}")
+
+    if (source_directory STREQUAL ".")
+      set(source_directory "")
+    endif ()
+
+    if (source_directory)
+      set(source_key "${source_directory}/${source_basename}")
+      set(name "${source_directory}_${source_basename}")
+      string(REPLACE "/" "_" name "${name}")
+      string(REGEX REPLACE "[^A-Za-z0-9_]" "_" name "${name}")
+    else ()
+      set(source_key "${source_basename}")
+      # Preserve the existing target and CTest names for flat sources.
+      set(name "${source_basename}")
+    endif ()
+
     if(LL_TEST_VERBOSE)
-      message("LL_ADD_PROJECT_UNIT_TESTS UNITTEST_PROJECT_${project} individual source: ${source} (${name}.${extension})")
+      message("LL_ADD_PROJECT_UNIT_TESTS UNITTEST_PROJECT_${project} individual source: ${source} (${source_key}.${extension}, test id ${name})")
     endif()
 
     #
@@ -60,7 +85,7 @@ MACRO(LL_ADD_PROJECT_UNIT_TESTS project sources)
     GET_OPT_SOURCE_FILE_PROPERTY(${name}_test_additional_SOURCE_FILES ${source} LL_TEST_ADDITIONAL_SOURCE_FILES)
     set(${name}_test_SOURCE_FILES
             ${source}
-            tests/${name}_test.${extension}
+            tests/${source_key}_test.${extension}
             ${alltest_SOURCE_FILES}
             ${${name}_test_additional_SOURCE_FILES} )
     if(LL_TEST_VERBOSE)
@@ -69,11 +94,23 @@ MACRO(LL_ADD_PROJECT_UNIT_TESTS project sources)
 
     # Headers
     GET_OPT_SOURCE_FILE_PROPERTY(${name}_test_additional_HEADER_FILES ${source} LL_TEST_ADDITIONAL_HEADER_FILES)
-    set(${name}_test_HEADER_FILES ${name}.h ${${name}_test_additional_HEADER_FILES})
+    set(${name}_test_HEADER_FILES)
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${source_key}.h")
+      list(APPEND ${name}_test_HEADER_FILES ${source_key}.h)
+    endif ()
+    list(APPEND ${name}_test_HEADER_FILES ${${name}_test_additional_HEADER_FILES})
     list(APPEND ${name}_test_SOURCE_FILES ${${name}_test_HEADER_FILES})
     if(LL_TEST_VERBOSE)
       message("LL_ADD_PROJECT_UNIT_TESTS ${name}_test_HEADER_FILES ${${name}_test_HEADER_FILES}")
     endif()
+
+    # Sanitization can collapse distinct nested paths (for example foo-bar.cpp and
+    # foo_bar.cpp) to the same target name.  Fail at configure time instead of
+    # silently reusing a target and registering the wrong test source.
+    if (TARGET PROJECT_${project}_TEST_${name})
+      message(FATAL_ERROR
+        "LL_ADD_PROJECT_UNIT_TESTS name collision for PROJECT_${project}_TEST_${name}: ${source} conflicts with an earlier source.")
+    endif ()
 
     # Setup target
     add_executable(PROJECT_${project}_TEST_${name} ${${name}_test_SOURCE_FILES})

@@ -1,6 +1,6 @@
 /**
- * @file valuebinding_test.cpp
- * @brief
+ * @file switch_test.cpp
+ * @brief Tests Switch state, interaction, and typed value binding behavior.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -63,10 +63,11 @@ private:
     std::size_t mNextObserver = 0;
 };
 
-struct rduivaluebinding_data {};
-using rduivaluebinding_test = test_group<rduivaluebinding_data>;
-using rduivaluebinding_object = rduivaluebinding_test::object;
-rduivaluebinding_test rduivaluebinding_testcase("rduivaluebinding");
+struct valuebinding_data {};
+using valuebinding_test = test_group<valuebinding_data>;
+using valuebinding_object = valuebinding_test::object;
+using rduivaluebinding_object = valuebinding_object;
+valuebinding_test valuebinding_testcase("valuebinding");
 
 template<> template<> void rduivaluebinding_object::test<1>() {
     rdui::ValueState<int> clean{4, 4, std::nullopt};

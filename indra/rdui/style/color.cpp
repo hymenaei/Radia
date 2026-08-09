@@ -25,28 +25,18 @@
 #include "linden_common.h"
 #include "style/color.h"
 #include <algorithm>
-#include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <numbers>
 #include <sstream>
 #include <vector>
+#include "style/syntax.h"
 
 namespace rdui {
 namespace {
-constexpr float PI = 3.14159265358979323846f;
-
-std::string trim(const std::string& value) {
-    std::size_t begin = 0;
-    while (begin < value.size() && std::isspace(static_cast<unsigned char>(value[begin]))) ++begin;
-    std::size_t end = value.size();
-    while (end > begin && std::isspace(static_cast<unsigned char>(value[end - 1]))) --end;
-    return value.substr(begin, end - begin);
-}
-
-std::string lower(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return value;
-}
+constexpr float PI = std::numbers::pi_v<float>;
+using detail::lower;
+using detail::trim;
 
 bool parseFloat(const std::string& token, float& result) {
     char* end = nullptr;

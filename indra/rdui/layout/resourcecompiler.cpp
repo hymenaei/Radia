@@ -1,6 +1,6 @@
 /**
  * @file resourcecompiler.cpp
- * @brief
+ * @brief Builds validated Widget trees from Layout Resource documents.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -33,7 +33,6 @@
 #include "widgets/floater.h"
 #include "widgets/icon.h"
 #include "widgets/label.h"
-#include "widgets/panel.h"
 #include "widgets/switch.h"
 #include "widgets/widgetcatalog.h"
 
@@ -52,6 +51,23 @@ struct LayoutResourceCompiler::BuildState {
     std::unordered_map<std::string, const LayoutNode*> widget_defaults;
     std::unordered_map<const Widget*, AuthoredWidget> authored_widgets;
     const ViewBuildContext* context = nullptr;
+};
+
+struct LayoutResourceCompiler::ChildBuildContext {
+    Widget& target;
+    const LayoutElement& element;
+    const WidgetContract& contract;
+    const std::string& source;
+    BuildState& state;
+    std::string widget_text;
+    bool pending_flow_break = false;
+    bool has_layout_child = false;
+
+    void markLayoutChild(Widget& child) {
+        detail::WidgetCompilerAccess::setFlowBreakBefore(child, pending_flow_break);
+        pending_flow_break = false;
+        has_layout_child = true;
+    }
 };
 
 namespace {
@@ -138,13 +154,15 @@ ViewBuildResult LayoutResourceCompiler::createFromString(const std::string& xml,
     ViewBuildResult result;
     const std::string source = normalizeResource(source_name);
     LayoutDocumentParseResult parsed = LayoutDocumentParser().parse(xml, source);
-    result.append(std::move(parsed));
-    if (!parsed.document) return result;
+    result.warnings = std::move(parsed.warnings);
+    result.errors = std::move(parsed.errors);
+    std::unique_ptr<LayoutDocument> document = std::move(parsed.document);
+    if (!document) return result;
 
     BuildState state;
     state.context = context;
     state.result = std::move(result);
-    std::unique_ptr<Widget> root = buildDocument(*parsed.document, nullptr, state);
+    std::unique_ptr<Widget> root = buildDocument(*document, nullptr, state);
     if (root && !state.result.hasErrors()) {
         detail::WidgetCompilerAccess::setIdScopeRoot(*root);
         validateViewScope(*root, state, source);
@@ -181,9 +199,9 @@ void LayoutResourceCompiler::validateViewScope(Widget& scope, BuildState& state,
         return contract != mWidgetContracts.end() && contract->second.labelable;
     });
     for (const BuildState::AuthoredWidget* authored : authored_widgets) {
-        if (!authored->widget || !authored->node || !authored->contract || !authored->contract->validate_composition) continue;
+        if (!authored->widget || !authored->node || !authored->contract || !authored->contract->composition_behavior.validate) continue;
         const LayoutElement element(*authored->node, authored->defaults);
-        authored->contract->validate_composition(element, *authored->widget, context, state.result, authored->source);
+        authored->contract->composition_behavior.validate(element, *authored->widget, context, state.result, authored->source);
     }
 }
 
@@ -251,8 +269,8 @@ void LayoutResourceCompiler::loadWidgetDefaults(const std::string& element, Buil
             if (default_root) {
                 std::unique_ptr<Widget> probe = contract->second.create();
                 applyCommonViewAttributes(defaults, *probe, state.result, default_resource, contract->second.supported_actions);
-                if (contract->second.apply_attributes)
-                    contract->second.apply_attributes(defaults, *probe, state.result, default_resource, state.context);
+                if (contract->second.attribute_behavior.apply)
+                    contract->second.attribute_behavior.apply(defaults, *probe, state.result, default_resource, state.context);
             }
         }
         if (state.result.errors.size() != errors_before) default_root = nullptr;
@@ -297,169 +315,201 @@ std::unique_ptr<Widget> LayoutResourceCompiler::buildDocument(const LayoutDocume
         return nullptr;
     }
 
-    std::function<std::unique_ptr<Widget>(const LayoutNode&, const std::string&, std::unique_ptr<Widget>)> buildNode;
-    buildNode = [&](const LayoutNode& layout_node, const std::string& current_source, std::unique_ptr<Widget> node) -> std::unique_ptr<Widget> {
-        const std::string lookup = schemaNameKey(layout_node.name);
-        const auto contract = mWidgetContracts.find(lookup);
-        if (contract == mWidgetContracts.end()) {
-            state.result.error("view.element.unknown", "Unsupported XML element: " + layout_node.name + ".", current_source,
-                               layout_node.source.begin.line, layout_node.source.begin.column);
-            return nullptr;
-        }
-        const std::string& tag = contract->second.element;
-        if (contract->second.scoped_only) {
-            state.result.error("view.element.scoped", "<" + tag + "> is valid only in its owning composite.", current_source,
-                               layout_node.source.begin.line, layout_node.source.begin.column);
-            return nullptr;
-        }
+    return buildNode(*document.root, document.source, std::move(root), state);
+}
 
-        loadWidgetDefaults(tag, state);
-        const LayoutNode* defaults = state.widget_defaults.find(lookup)->second;
-        const LayoutElement element(layout_node, defaults);
-        std::string filename;
-        if (tag != Panel::ELEMENT && readViewAttribute(element, "filename", filename)) {
-            state.result.error("view.filename.unsupported", "The filename attribute is only supported on <panel>.", current_source,
-                               element.source().begin.line, element.source().begin.column);
-            return nullptr;
-        }
+const WidgetContract* LayoutResourceCompiler::lookupWidgetContract(const LayoutNode& layout_node, const std::string& source,
+                                                                   BuildState& state) const {
+    const auto contract = mWidgetContracts.find(schemaNameKey(layout_node.name));
+    if (contract == mWidgetContracts.end()) {
+        state.result.error("view.element.unknown", "Unsupported XML element: " + layout_node.name + ".", source, layout_node.source.begin.line,
+                           layout_node.source.begin.column);
+        return nullptr;
+    }
+    if (contract->second.scoped_only) {
+        state.result.error("view.element.scoped", "<" + contract->second.element + "> is valid only in its owning composite.", source,
+                           layout_node.source.begin.line, layout_node.source.begin.column);
+        return nullptr;
+    }
+    return &contract->second;
+}
 
-        if (tag == Panel::ELEMENT && readViewAttribute(element, "filename", filename)) {
-            const bool rooted = filename.rfind("xui/", 0) == 0 || (!filename.empty() && (filename.front() == '/' || filename.front() == '\\'));
-            const std::string resource = normalizeResource(rooted ? filename : directoryOf(current_source) + filename);
-            if (resource.empty()) {
-                state.result.error("view.panel.path_invalid", "Invalid panel filename: " + filename + ".", current_source,
-                                   element.source().begin.line, element.source().begin.column);
-                return nullptr;
-            }
-            node = createResourceWidget(resource, state);
-            if (!node) return nullptr;
-            if (node->element() != Panel::ELEMENT) {
-                state.result.error("view.panel.root_invalid", "Referenced panel must have a <panel> root: " + resource + ".", current_source,
-                                   element.source().begin.line, element.source().begin.column);
-                return nullptr;
-            }
-        } else if (!node) {
-            node = contract->second.create();
-        }
+bool LayoutResourceCompiler::resolveWidgetResource(const LayoutElement& element, const WidgetContract& contract, const std::string& source,
+                                                   std::unique_ptr<Widget>& node, BuildState& state) const {
+    std::string filename;
+    if (!readViewAttribute(element, "filename", filename)) {
+        if (!node) node = contract.create();
+        return true;
+    }
 
-        Widget* target = node.get();
-        if (!target || target->element() != tag) {
-            state.result.error("view.builder.type_mismatch", "Registered builder does not create <" + tag + ">.", current_source,
-                               element.source().begin.line, element.source().begin.column);
-            return nullptr;
-        }
+    if (!contract.resource_root) {
+        state.result.error("view.filename.unsupported", "The filename attribute is not supported on <" + contract.element + ">.", source,
+                           element.source().begin.line, element.source().begin.column);
+        return false;
+    }
 
-        validateViewAttributes(element, contract->second.attributes, state.result, current_source);
-        applyCommonViewAttributes(element, *target, state.result, current_source, contract->second.supported_actions);
-        if (contract->second.apply_attributes) contract->second.apply_attributes(element, *target, state.result, current_source, state.context);
-        if (contract->second.validate_composition)
-            state.authored_widgets.emplace(target, BuildState::AuthoredWidget{target, &layout_node, defaults, &contract->second, current_source});
+    const bool rooted = filename.rfind("xui/", 0) == 0 || (!filename.empty() && (filename.front() == '/' || filename.front() == '\\'));
+    const std::string resource = normalizeResource(rooted ? filename : directoryOf(source) + filename);
+    if (resource.empty()) {
+        state.result.error("view.resource.path_invalid", "Invalid resource filename: " + filename + ".", source, element.source().begin.line,
+                           element.source().begin.column);
+        return false;
+    }
+    node = createResourceWidget(resource, state);
+    if (!node) return false;
+    if (schemaNameKey(node->element()) != schemaNameKey(contract.resource_root->expected_element)) {
+        state.result.error("view.resource.root_invalid",
+                           "Referenced resource must have a <" + contract.resource_root->expected_element + "> root: " + resource + ".", source,
+                           element.source().begin.line, element.source().begin.column);
+        return false;
+    }
+    return true;
+}
 
-        if (contract->second.text_content == ViewTextContent::Inline) {
-            if (contract->second.apply_inline_content)
-                contract->second.apply_inline_content(compileInlineContent(element.content(), tag, contract->second.accepted_inline_content,
-                                                                           state.result, current_source, state.context),
-                                                      *target);
-            return node;
-        }
+std::unique_ptr<Widget> LayoutResourceCompiler::buildNode(const LayoutNode& layout_node, const std::string& source, std::unique_ptr<Widget> node,
+                                                          BuildState& state) const {
+    const WidgetContract* contract = lookupWidgetContract(layout_node, source, state);
+    if (!contract) return nullptr;
 
-        std::string widget_text;
-        bool pending_flow_break = false;
-        bool has_layout_child = false;
-        const auto markLayoutChild = [&](Widget& child) {
-            detail::WidgetCompilerAccess::setFlowBreakBefore(child, pending_flow_break);
-            pending_flow_break = false;
-            has_layout_child = true;
-        };
-        for (const LayoutContent& content : element.content()) {
-            if (content.isText()) {
-                std::string value = textKey(content.text);
-                if (value.empty()) continue;
-                if (contract->second.text_content == ViewTextContent::Unsupported) {
-                    state.result.error("view.text.unsupported", "Text content is not supported in <" + tag + ">.", current_source,
-                                       content.source.begin.line, content.source.begin.column);
-                } else if (contract->second.text_content == ViewTextContent::Widget) {
-                    if (!widget_text.empty()) widget_text += value;
-                    else widget_text = std::move(value);
-                } else {
-                    TextSource text = localizedViewText(std::move(value), state.result, current_source, state.context, content.source.begin.line);
-                    if (contract->second.create_text_child) {
-                        if (auto child = contract->second.create_text_child(std::move(text))) {
-                            markLayoutChild(*child);
-                            target->addChild(std::move(child));
-                        }
-                    } else {
-                        auto label = std::make_unique<Label>();
-                        label->setContent(std::move(text));
-                        markLayoutChild(*label);
-                        target->addChild(std::move(label));
-                    }
-                }
-                continue;
-            }
+    loadWidgetDefaults(contract->element, state);
+    const LayoutNode* defaults = state.widget_defaults.find(schemaNameKey(layout_node.name))->second;
+    const LayoutElement element(layout_node, defaults);
+    if (!resolveWidgetResource(element, *contract, source, node, state)) return nullptr;
 
-            const LayoutNode& child_node = *content.element;
-            const LayoutElement child(child_node);
-            if (schemaNameKey(child.name()) == schemaNameKey("br")) {
-                rejectLogicalAttributes(child, state.result, current_source);
-                if (hasAuthoredContent(child_node))
-                    state.result.error("view.flow_break.children_unsupported", "Flow Break <br> cannot contain content.", current_source,
-                                       child_node.source.begin.line, child_node.source.begin.column);
-                if (!has_layout_child)
-                    state.result.error("view.flow_break.leading", "Flow Break requires a preceding layout child.", current_source,
-                                       child_node.source.begin.line, child_node.source.begin.column);
-                else if (pending_flow_break)
-                    state.result.error("view.flow_break.consecutive", "Consecutive Flow Break directives are not supported.", current_source,
-                                       child_node.source.begin.line, child_node.source.begin.column);
-                else pending_flow_break = true;
-                continue;
-            }
+    Widget* target = node.get();
+    if (!target || target->element() != contract->element) {
+        state.result.error("view.builder.type_mismatch", "Registered builder does not create <" + contract->element + ">.", source,
+                           element.source().begin.line, element.source().begin.column);
+        return nullptr;
+    }
 
-            const auto scoped_inline = contract->second.scoped_inline_content.find(schemaNameKey(child.name()));
-            if (scoped_inline != contract->second.scoped_inline_content.end()) {
-                rejectLogicalAttributes(child, state.result, current_source);
-                Widget* scoped_part =
-                    scoped_inline->second.apply(compileInlineContent(child.content(), scoped_inline->second.element, scoped_inline->second.accepted,
-                                                                     state.result, current_source, state.context),
-                                                *target, state.result, current_source, child.source().begin.line, child.source().begin.column);
-                if (scoped_part) markLayoutChild(*scoped_part);
-                continue;
-            }
+    validateViewAttributes(element, contract->attributes, state.result, source);
+    applyCommonViewAttributes(element, *target, state.result, source, contract->supported_actions);
+    if (contract->attribute_behavior.apply) contract->attribute_behavior.apply(element, *target, state.result, source, state.context);
+    if (contract->composition_behavior.validate)
+        state.authored_widgets.emplace(target, BuildState::AuthoredWidget{target, &layout_node, defaults, contract, source});
 
-            const auto part_contract = contract->second.part_attributes.find(schemaNameKey(child.name()));
-            if (part_contract != contract->second.part_attributes.end())
-                validateViewAttributes(child, part_contract->second, state.result, current_source);
-            if (contract->second.child_container) {
-                const std::optional<Widget*> container = contract->second.child_container(child, *target, state.result, current_source);
-                if (container) {
-                    if (*container) {
-                        for (const LayoutContent& nested_content : child.content()) {
-                            if (nested_content.isText()) {
-                                if (!textKey(nested_content.text).empty())
-                                    state.result.error("view.text.unsupported", "Text content is not supported in <" + child.name() + ">.",
-                                                       current_source, nested_content.source.begin.line, nested_content.source.begin.column);
-                                continue;
-                            }
-                            if (auto child_widget = buildNode(*nested_content.element, current_source, nullptr))
-                                (*container)->addChild(std::move(child_widget));
-                        }
-                    }
-                    continue;
-                }
-            }
-            if (auto child_widget = buildNode(child_node, current_source, nullptr)) {
-                markLayoutChild(*child_widget);
-                target->addChild(std::move(child_widget));
-            }
-        }
-        if (pending_flow_break)
-            state.result.error("view.flow_break.trailing", "Flow Break requires a following layout child.", current_source, element.source().end.line,
-                               element.source().end.column);
-        if (contract->second.text_content == ViewTextContent::Widget && !widget_text.empty() && contract->second.apply_text)
-            contract->second.apply_text(std::move(widget_text), *target, state.result, current_source, state.context, element.source().begin.line);
+    if (contract->content_behavior.mode == ViewTextContent::Inline) {
+        if (contract->content_behavior.apply_inline_content)
+            contract->content_behavior.apply_inline_content(compileInlineContent(element.content(), contract->element,
+                                                                                 contract->content_behavior.accepted_inline_content, state.result,
+                                                                                 source, state.context),
+                                                            *target);
         return node;
-    };
+    }
 
-    return buildNode(*document.root, document.source, std::move(root));
+    buildChildren(*target, element, *contract, source, state);
+    return node;
+}
+
+void LayoutResourceCompiler::buildChildren(Widget& target, const LayoutElement& element, const WidgetContract& contract, const std::string& source,
+                                           BuildState& state) const {
+    ChildBuildContext context{target, element, contract, source, state};
+    for (const LayoutContent& content : element.content()) {
+        if (content.isText()) {
+            appendTextContent(content, context);
+            continue;
+        }
+
+        const LayoutNode& child_node = *content.element;
+        if (consumeFlowBreak(child_node, context) == ChildHandling::Handled) continue;
+        if (consumeScopedInline(child_node, context) == ChildHandling::Handled) continue;
+        const LayoutElement child(child_node);
+        const auto part_contract = contract.children_behavior.part_attributes.find(schemaNameKey(child.name()));
+        if (part_contract != contract.children_behavior.part_attributes.end())
+            validateViewAttributes(child, part_contract->second, state.result, source);
+        if (consumeChildContainer(child_node, context) == ChildHandling::Handled) continue;
+        (void)buildRegularChild(child_node, context);
+    }
+    if (context.pending_flow_break)
+        state.result.error("view.flow_break.trailing", "Flow Break requires a following layout child.", source, element.source().end.line,
+                           element.source().end.column);
+    if (contract.content_behavior.mode == ViewTextContent::Widget && !context.widget_text.empty() && contract.content_behavior.apply_text)
+        contract.content_behavior.apply_text(std::move(context.widget_text), target, state.result, source, state.context,
+                                             element.source().begin.line);
+}
+
+LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::appendTextContent(const LayoutContent& content, ChildBuildContext& context) const {
+    std::string value = textKey(content.text);
+    if (value.empty()) return ChildHandling::Handled;
+    if (context.contract.content_behavior.mode == ViewTextContent::Unsupported) {
+        context.state.result.error("view.text.unsupported", "Text content is not supported in <" + context.contract.element + ">.", context.source,
+                                   content.source.begin.line, content.source.begin.column);
+    } else if (context.contract.content_behavior.mode == ViewTextContent::Widget) {
+        if (!context.widget_text.empty()) context.widget_text += value;
+        else context.widget_text = std::move(value);
+    } else {
+        TextSource text = localizedViewText(std::move(value), context.state.result, context.source, context.state.context, content.source.begin.line);
+        if (context.contract.content_behavior.create_text_child) {
+            if (auto child = context.contract.content_behavior.create_text_child(std::move(text))) {
+                context.markLayoutChild(*child);
+                context.target.addChild(std::move(child));
+            }
+        } else {
+            auto label = std::make_unique<Label>();
+            label->setContent(std::move(text));
+            context.markLayoutChild(*label);
+            context.target.addChild(std::move(label));
+        }
+    }
+    return ChildHandling::Handled;
+}
+
+LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::consumeFlowBreak(const LayoutNode& child_node, ChildBuildContext& context) const {
+    const LayoutElement child(child_node);
+    if (schemaNameKey(child.name()) != schemaNameKey("br")) return ChildHandling::Unhandled;
+    rejectLogicalAttributes(child, context.state.result, context.source);
+    if (hasAuthoredContent(child_node))
+        context.state.result.error("view.flow_break.children_unsupported", "Flow Break <br> cannot contain content.", context.source,
+                                   child_node.source.begin.line, child_node.source.begin.column);
+    if (!context.has_layout_child)
+        context.state.result.error("view.flow_break.leading", "Flow Break requires a preceding layout child.", context.source,
+                                   child_node.source.begin.line, child_node.source.begin.column);
+    else if (context.pending_flow_break)
+        context.state.result.error("view.flow_break.consecutive", "Consecutive Flow Break directives are not supported.", context.source,
+                                   child_node.source.begin.line, child_node.source.begin.column);
+    else context.pending_flow_break = true;
+    return ChildHandling::Handled;
+}
+
+LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::consumeScopedInline(const LayoutNode& child_node, ChildBuildContext& context) const {
+    const LayoutElement child(child_node);
+    const auto scoped_inline = context.contract.content_behavior.scoped_inline_content.find(schemaNameKey(child.name()));
+    if (scoped_inline == context.contract.content_behavior.scoped_inline_content.end()) return ChildHandling::Unhandled;
+    rejectLogicalAttributes(child, context.state.result, context.source);
+    Widget* scoped_part =
+        scoped_inline->second.apply(compileInlineContent(child.content(), scoped_inline->second.element, scoped_inline->second.accepted,
+                                                         context.state.result, context.source, context.state.context),
+                                    context.target, context.state.result, context.source, child.source().begin.line, child.source().begin.column);
+    if (scoped_part) context.markLayoutChild(*scoped_part);
+    return ChildHandling::Handled;
+}
+
+LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::consumeChildContainer(const LayoutNode& child_node, ChildBuildContext& context) const {
+    if (!context.contract.children_behavior.claim) return ChildHandling::Unhandled;
+    const LayoutElement child(child_node);
+    const ChildClaim claim = context.contract.children_behavior.claim(child, context.target, context.state.result, context.source);
+    if (claim.kind() == ChildClaim::Kind::NotHandled) return ChildHandling::Unhandled;
+    if (Widget* container = claim.container()) {
+        for (const LayoutContent& nested_content : child.content()) {
+            if (nested_content.isText()) {
+                if (!textKey(nested_content.text).empty())
+                    context.state.result.error("view.text.unsupported", "Text content is not supported in <" + child.name() + ">.", context.source,
+                                               nested_content.source.begin.line, nested_content.source.begin.column);
+                continue;
+            }
+            if (auto child_widget = buildNode(*nested_content.element, context.source, nullptr, context.state))
+                container->addChild(std::move(child_widget));
+        }
+    }
+    return ChildHandling::Handled;
+}
+
+LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::buildRegularChild(const LayoutNode& child_node, ChildBuildContext& context) const {
+    if (auto child_widget = buildNode(child_node, context.source, nullptr, context.state)) {
+        context.markLayoutChild(*child_widget);
+        context.target.addChild(std::move(child_widget));
+    }
+    return ChildHandling::Handled;
 }
 } // namespace rdui

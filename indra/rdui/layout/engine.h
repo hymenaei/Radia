@@ -1,6 +1,6 @@
 /**
  * @file engine.h
- * @brief
+ * @brief Public layout entry points and testable transaction statistics.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -25,6 +25,7 @@
 #ifndef RD_LAYOUT_ENGINE_H
 #define RD_LAYOUT_ENGINE_H
 
+#include <cstddef>
 #include "types.h"
 
 namespace rdui {
@@ -33,10 +34,18 @@ struct Style;
 class StyleSheet;
 class TextMetrics;
 
+struct LayoutStatistics {
+    std::size_t measured_nodes = 0;
+    std::size_t constrained_remeasures = 0;
+    std::size_t arranged_nodes = 0;
+    std::size_t skipped_nodes = 0;
+};
+
 Style resolveWidgetStyle(const StyleSheet& theme, const Widget& node);
 Vec2 measureWidget(const Widget& node, const StyleSheet& theme, const TextMetrics& text_metrics);
 void measureTree(Widget& root, const StyleSheet& theme, const TextMetrics& text_metrics);
 void arrangeTree(Widget& root, const StyleSheet& theme, const TextMetrics& text_metrics, LayoutDirection direction = LayoutDirection::LeftToRight);
-void layoutTree(Widget& root, const StyleSheet& theme, const TextMetrics& text_metrics, LayoutDirection direction = LayoutDirection::LeftToRight);
+LayoutStatistics layoutTree(Widget& root, const StyleSheet& theme, const TextMetrics& text_metrics,
+                            LayoutDirection direction = LayoutDirection::LeftToRight);
 } // namespace rdui
 #endif // RD_LAYOUT_ENGINE_H

@@ -1,6 +1,6 @@
 /**
  * @file resourcecompiler_test.cpp
- * @brief
+ * @brief Tests Layout Resource compilation and Widget Contract diagnostics.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -24,6 +24,7 @@
 
 #include "linden_common.h"
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -50,7 +51,7 @@
 #include "widgets/text.h"
 
 namespace tut {
-struct rduilayoutresourcecompiler_data {
+struct layoutresourcecompiler_data {
     LayoutCompilerFixture factory;
     std::map<std::string, std::string>& resources = factory.resources;
 
@@ -63,9 +64,10 @@ struct rduilayoutresourcecompiler_data {
         return output;
     }
 };
-typedef test_group<rduilayoutresourcecompiler_data> rduilayoutresourcecompiler_test;
-typedef rduilayoutresourcecompiler_test::object rduilayoutresourcecompiler_object;
-rduilayoutresourcecompiler_test rduilayoutresourcecompiler_testcase("rduilayoutresourcecompiler");
+typedef test_group<layoutresourcecompiler_data> layoutresourcecompiler_test;
+typedef layoutresourcecompiler_test::object layoutresourcecompiler_object;
+using rduilayoutresourcecompiler_object = layoutresourcecompiler_object;
+layoutresourcecompiler_test layoutresourcecompiler_testcase("layoutresourcecompiler");
 
 template<> template<> void rduilayoutresourcecompiler_object::test<1>() {
     const char* xml = "<floater title=\"title\" closeIcon=\"close\" minimizeIcon=\"minimize\" canMinimize=\"true\"><text "
@@ -182,35 +184,136 @@ template<> template<> void rduilayoutresourcecompiler_object::test<6>() {
 }
 
 template<> template<> void rduilayoutresourcecompiler_object::test<7>() {
-    std::ifstream vertex_file(tut::sSourceDir + "../newview/app_settings/shaders/class1/interface/rduiV.glsl");
-    std::ifstream fragment_file(tut::sSourceDir + "../newview/app_settings/shaders/class1/interface/rduiF.glsl");
-    std::ostringstream vertex, fragment;
+    std::ifstream vertex_file(tut::sSourceDir + "../newview/app_settings/shaders/class1/interface/uiV.glsl");
+    std::ifstream fragment_file(tut::sSourceDir + "../newview/app_settings/shaders/class1/interface/uiF.glsl");
+    std::ifstream paint_protocol_file(tut::sSourceDir + "render/paintprotocol.def");
+    ensure("paint protocol sources are readable", vertex_file.good() && fragment_file.good() && paint_protocol_file.good());
+    std::ostringstream vertex, fragment, paint_protocol;
     vertex << vertex_file.rdbuf();
     fragment << fragment_file.rdbuf();
-    ensure("vertex shader forwards shape coordinates", vertex.str().find("shape_coord = texcoord0") != std::string::npos);
-    ensure("fragment shader keeps passthrough mode", fragment.str().find("rduiShapeMode == 0") != std::string::npos);
+    paint_protocol << paint_protocol_file.rdbuf();
+    const std::string vertex_source = vertex.str();
+    const std::string fragment_source = fragment.str();
+    const std::string paint_protocol_source = paint_protocol.str();
+    const auto contains = [](const std::string& source, const char* text) { return source.find(text) != std::string::npos; };
+    const auto trim_token = [](std::string token) {
+        const std::size_t first = token.find_first_not_of(" \t\r\n");
+        const std::size_t last = token.find_last_not_of(" \t\r\n");
+        return first == std::string::npos ? std::string() : token.substr(first, last - first + 1);
+    };
+    const auto shader_name = [](const std::string& name) {
+        std::string result;
+        result.reserve(name.size() + 4);
+        for (std::size_t index = 0; index < name.size(); ++index) {
+            const unsigned char character = static_cast<unsigned char>(name[index]);
+            if (index != 0 && std::isupper(character)) result.push_back('_');
+            result.push_back(static_cast<char>(std::toupper(character)));
+        }
+        return result;
+    };
+    const auto parse_definition = [&](const char* macro) {
+        std::map<std::string, int> entries;
+        const std::string marker = std::string(macro) + "(";
+        std::size_t position = 0;
+        while ((position = paint_protocol_source.find(marker, position)) != std::string::npos) {
+            const std::size_t name_start = position + marker.size();
+            const std::size_t first_comma = paint_protocol_source.find(',', name_start);
+            const std::size_t close = paint_protocol_source.find(')', first_comma + 1);
+            if (first_comma == std::string::npos || close == std::string::npos) break;
+            entries.emplace(trim_token(paint_protocol_source.substr(name_start, first_comma - name_start)),
+                            std::stoi(trim_token(paint_protocol_source.substr(first_comma + 1, close - first_comma - 1))));
+            position = close + 1;
+        }
+        return entries;
+    };
+    const auto parse_shader_constants = [&](const char* prefix) {
+        std::map<std::string, int> entries;
+        const std::string marker = std::string("const int ") + prefix;
+        std::size_t position = 0;
+        while ((position = fragment_source.find(marker, position)) != std::string::npos) {
+            const std::size_t name_start = position + std::string("const int ").size();
+            const std::size_t equals = fragment_source.find('=', name_start);
+            const std::size_t semicolon = fragment_source.find(';', equals);
+            if (equals == std::string::npos || semicolon == std::string::npos) break;
+            const std::string name = trim_token(fragment_source.substr(name_start, equals - name_start));
+            entries.emplace(name.substr(std::string(prefix).size()),
+                            std::stoi(trim_token(fragment_source.substr(equals + 1, semicolon - equals - 1))));
+            position = semicolon + 1;
+        }
+        return entries;
+    };
+    const auto ensure_protocol = [&](const char* macro, const char* shader_prefix) {
+        const auto definitions = parse_definition(macro);
+        const auto constants = parse_shader_constants(shader_prefix);
+        ensure((std::string("shader protocol count matches ") + macro).c_str(), definitions.size() == constants.size());
+        for (const auto& [name, value] : definitions) {
+            const auto found = constants.find(shader_name(name));
+            ensure((std::string("shader protocol entry matches ") + name).c_str(),
+                   found != constants.end() && found->second == value);
+        }
+    };
+    ensure_protocol("PAINT_OP_ENTRY", "PAINT_OP_");
+    ensure_protocol("GRADIENT_OP_ENTRY", "GRADIENT_");
+    ensure_protocol("OUTLINE_OP_ENTRY", "OUTLINE_");
+
+    ensure("paint shader variant is guarded",
+           contains(vertex_source, "#ifdef PAINT_SHADER") && contains(fragment_source, "#ifdef PAINT_SHADER"));
+    ensure("vertex shader forwards shape coordinates", contains(vertex_source, "shape_coord = texcoord0"));
+    ensure("fragment shader names direct and fill modes",
+           contains(fragment_source, "PAINT_OP_DIRECT = 0")
+               && contains(fragment_source, "PAINT_OP_FILL = 1")
+               && contains(fragment_source, "paintOp == PAINT_OP_DIRECT"));
+    ensure("paint protocol list contains the shader operation values",
+           contains(paint_protocol_source, "PAINT_OP_ENTRY(Direct, 0)")
+               && contains(paint_protocol_source, "PAINT_OP_ENTRY(Fill, 1)")
+               && contains(paint_protocol_source, "PAINT_OP_ENTRY(Border, 2)")
+               && contains(paint_protocol_source, "PAINT_OP_ENTRY(Gradient, 3)")
+               && contains(paint_protocol_source, "PAINT_OP_ENTRY(OuterShadow, 4)")
+               && contains(paint_protocol_source, "PAINT_OP_ENTRY(InsetShadow, 5)")
+               && contains(paint_protocol_source, "PAINT_OP_ENTRY(GradientBorder, 6)")
+               && contains(paint_protocol_source, "PAINT_OP_ENTRY(Blur, 7)")
+               && contains(paint_protocol_source, "PAINT_OP_ENTRY(Composite, 8)"));
+    ensure("fragment shader declares the paint protocol",
+           contains(fragment_source, "uniform int paintOp;")
+               && contains(fragment_source, "uniform vec4 shapeRect;")
+               && contains(fragment_source, "uniform vec2 effectTextureSize;")
+               && contains(fragment_source, "uniform int gradientKind;")
+               && contains(fragment_source, "uniform int outlineStyle;")
+               && !contains(fragment_source, "rduiPaintOp"));
     ensure("fragment shader has analytic border mode",
-           fragment.str().find("rduiShapeMode == 2") != std::string::npos && fragment.str().find("fwidth") != std::string::npos);
-    ensure("fragment shader supports a Fieldset Legend border gap", fragment.str().find("rduiTopBorderGap") != std::string::npos);
+           contains(fragment_source, "PAINT_OP_BORDER = 2")
+               && contains(fragment_source, "paintOp == PAINT_OP_BORDER")
+               && contains(fragment_source, "fwidth"));
+    ensure("fragment shader names gradient and outline modes",
+           contains(fragment_source, "GRADIENT_LINEAR = 0")
+               && contains(fragment_source, "GRADIENT_RADIAL = 1")
+               && contains(fragment_source, "GRADIENT_CONIC = 2")
+               && contains(fragment_source, "OUTLINE_SOLID = 0")
+               && contains(fragment_source, "OUTLINE_DASHED = 1"));
+    ensure("fragment shader supports a Fieldset Legend border gap", contains(fragment_source, "topBorderGap"));
     ensure("fragment shader supports radial and conic gradients",
-           fragment.str().find("rduiGradientKind") != std::string::npos && fragment.str().find("atan(delta.x, delta.y)") != std::string::npos);
+           contains(fragment_source, "gradientKind") && contains(fragment_source, "atan(delta.x, delta.y)"));
     ensure("fragment shader supports repeating gradient paint",
-           fragment.str().find("rduiGradientRepeating") != std::string::npos
-               && fragment.str().find("underlyingGradientIntegral") != std::string::npos
-               && fragment.str().find("cycles * repeating_total") != std::string::npos);
+           contains(fragment_source, "gradientRepeating")
+               && contains(fragment_source, "underlyingGradientIntegral")
+               && contains(fragment_source, "cycles * repeating_total"));
     ensure("fragment shader antialiases gradient stops and repeating seams",
-           fragment.str().find("gradientPixelWidth") != std::string::npos
-               && fragment.str().find("filteredGradientColor") != std::string::npos
-               && fragment.str().find("gradientIntervalIntegral") != std::string::npos
-               && fragment.str().find("dFdx(delta)") != std::string::npos);
+           contains(fragment_source, "gradientPixelWidth")
+               && contains(fragment_source, "filteredGradientColor")
+               && contains(fragment_source, "gradientIntervalIntegral")
+               && contains(fragment_source, "dFdx(delta)"));
     ensure("fragment shader supports gradient borders",
-           fragment.str().find("rduiShapeMode == 6") != std::string::npos && fragment.str().find("rduiBorderWidths") != std::string::npos);
+           contains(fragment_source, "PAINT_OP_GRADIENT_BORDER = 6")
+               && contains(fragment_source, "paintOp == PAINT_OP_GRADIENT_BORDER")
+               && contains(fragment_source, "borderWidths"));
     ensure("fragment shader supports composited blur effects",
-           fragment.str().find("rduiShapeMode == 7") != std::string::npos
-               && fragment.str().find("rduiShapeMode == 8") != std::string::npos
-               && fragment.str().find("blurredEffectColor") != std::string::npos
-               && fragment.str().find("max_samples_per_side") != std::string::npos
-               && fragment.str().find("total_weight") != std::string::npos);
+           contains(fragment_source, "PAINT_OP_BLUR = 7")
+               && contains(fragment_source, "PAINT_OP_COMPOSITE = 8")
+               && contains(fragment_source, "paintOp == PAINT_OP_BLUR")
+               && contains(fragment_source, "paintOp == PAINT_OP_COMPOSITE")
+               && contains(fragment_source, "blurredEffectColor")
+               && contains(fragment_source, "max_samples_per_side")
+               && contains(fragment_source, "total_weight"));
 }
 
 template<> template<> void rduilayoutresourcecompiler_object::test<8>() {

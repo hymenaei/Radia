@@ -1,6 +1,6 @@
 /**
  * @file switch.cpp
- * @brief
+ * @brief Implements the two-state Switch Value Control.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -27,7 +27,7 @@
 #include "binding/binder.h"
 #include "layout/schema.h"
 #include "style/style.h"
-#include "widgets/widgetcontract.h"
+#include "widgets/widgetcontractbuilder.h"
 
 namespace rdui {
 namespace {
@@ -121,7 +121,6 @@ void Switch::onActivate() {
     const bool previous = checked();
     if (mBinding) {
         mBinding->write(!previous);
-        applyValueState(mBinding->state());
     } else {
         mValueState.value = !previous;
         setState(WidgetState::Checked, mValueState.value);

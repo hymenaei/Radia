@@ -1,6 +1,6 @@
 /**
  * @file inlinecontent.h
- * @brief
+ * @brief Immutable inline-content vocabulary shared by Text Hosts.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -37,7 +37,11 @@ struct KeybindingPresentation {
     bool operator==(const KeybindingPresentation& other) const { return keys == other.keys; }
 };
 
-enum class InlineContentKind : uint8_t { Text, B, I, S, Kbd, Br, Link };
+enum class InlineContentKind : uint8_t {
+#define INLINE_CONTENT_ENTRY(name, element, authored) name,
+#include "text/inlinecontent.def"
+#undef INLINE_CONTENT_ENTRY
+};
 
 class InlineContentNode {
 public:

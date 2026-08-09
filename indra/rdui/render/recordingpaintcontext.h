@@ -25,6 +25,7 @@
 #ifndef RD_RENDER_RECORDINGPAINTCONTEXT_H
 #define RD_RENDER_RECORDINGPAINTCONTEXT_H
 
+#include <cstdint>
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -49,6 +50,7 @@ public:
 
     Vec2 measureText(const std::string& text, const Style& style) const override;
     float usedLetterSpacing(const Style& style) const override;
+    std::uint64_t generation() const override { return mTextMetrics.generation(); }
     void beginFrame() override;
     void endFrame() override;
     void pushClip(const Rect& rect, float scale, ClipAxes axes = ClipAxes::Both) override;

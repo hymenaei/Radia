@@ -1,5 +1,6 @@
 /**
- * @file rduiV.glsl
+ * @file syntax.h
+ * @brief Private top-level stylesheet syntax scanners.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -21,17 +22,20 @@
  * $/LicenseInfo$
  */
 
-uniform mat4 modelview_projection_matrix;
+#ifndef RD_STYLE_SYNTAX_H
+#define RD_STYLE_SYNTAX_H
 
-in vec3 position;
-in vec4 diffuse_color;
-in vec2 texcoord0;
+#include <optional>
+#include <string>
+#include <vector>
 
-out vec4 vertex_color;
-out vec2 shape_coord;
-
-void main() {
-    gl_Position = modelview_projection_matrix * vec4(position, 1.0);
-    vertex_color = diffuse_color;
-    shape_coord = texcoord0;
-}
+namespace rdui::detail {
+std::string trim(const std::string& value);
+std::string lower(std::string value);
+bool startsWith(const std::string& value, const std::string& prefix);
+bool endsWith(const std::string& value, const std::string& suffix);
+std::vector<std::string> tokenizeTopLevel(const std::string& value, bool split_slash = false);
+std::vector<std::string> splitTopLevel(const std::string& value, char delimiter);
+std::optional<std::size_t> matchingBlock(const std::string& value, std::size_t open);
+} // namespace rdui::detail
+#endif // RD_STYLE_SYNTAX_H

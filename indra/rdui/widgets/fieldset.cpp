@@ -1,6 +1,6 @@
 /**
  * @file fieldset.cpp
- * @brief
+ * @brief Implements grouped Fieldset and Legend composition.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -29,7 +29,7 @@
 #include "render/paintcontext.h"
 #include "style/style.h"
 #include "widgets/field.h"
-#include "widgets/widgetcontract.h"
+#include "widgets/widgetcontractbuilder.h"
 
 namespace rdui {
 namespace {

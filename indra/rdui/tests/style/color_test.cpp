@@ -1,6 +1,6 @@
 /**
  * @file color_test.cpp
- * @brief
+ * @brief Tests RSL color syntax and typed color values.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -27,10 +27,11 @@
 #include "style/color.h"
 
 namespace tut {
-struct rduicolor_data {};
-typedef test_group<rduicolor_data> rduicolor_test;
-typedef rduicolor_test::object rduicolor_object;
-rduicolor_test rduicolor_testcase("rduicolor");
+struct color_data {};
+typedef test_group<color_data> color_test;
+typedef color_test::object color_object;
+using rduicolor_object = color_object;
+color_test color_testcase("color");
 
 void ensureColor(const std::string& message, const std::string& value, const rdui::Color& expected) {
     const std::optional<rdui::Color> color = rdui::parseColor(value);

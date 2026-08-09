@@ -1,5 +1,6 @@
 /**
  * @file uiV.glsl
+ * @brief Vertex stage for the viewer and retained UI paint shader variants.
  *
  * $LicenseInfo:firstyear=2007&license=viewerlgpl$
  * Second Life Viewer Source Code
@@ -23,6 +24,27 @@
  * $/LicenseInfo$
  */
 
+// Transitional source variants share one UI shader pair while the viewer
+// migrates from the legacy texture/font contract to retained painting. Once
+// every UI caller uses retained painting, remove the legacy #else branch and
+// make the retained path the default vertex program.
+#ifdef PAINT_SHADER
+uniform mat4 modelview_projection_matrix;
+
+in vec3 position;
+in vec4 diffuse_color;
+in vec2 texcoord0;
+
+out vec4 vertex_color;
+out vec2 shape_coord;
+
+void main() {
+    gl_Position = modelview_projection_matrix * vec4(position, 1.0);
+    vertex_color = diffuse_color;
+    shape_coord = texcoord0;
+}
+
+#else
 uniform mat4 texture_matrix0;
 uniform mat4 modelview_projection_matrix;
 
@@ -50,3 +72,4 @@ void main() {
 #endif
     vary_texcoord0 = (texture_matrix0 * vec4(texcoord0, 0, 1)).xy;
 }
+#endif

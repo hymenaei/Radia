@@ -1,6 +1,6 @@
 /**
  * @file valueparser.cpp
- * @brief
+ * @brief Parses authored RSL property values into typed style values.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -24,73 +24,20 @@
 
 #include "linden_common.h"
 #include <algorithm>
-#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
 #include <sstream>
 #include "style/color.h"
-#include "style/compiler.h"
+#include "style/model.h"
+#include "style/syntax.h"
 
 namespace rdui {
 namespace {
-std::string trim(const std::string& value) {
-    std::size_t begin = 0;
-    while (begin < value.size() && std::isspace(static_cast<unsigned char>(value[begin]))) ++begin;
-    std::size_t end = value.size();
-    while (end > begin && std::isspace(static_cast<unsigned char>(value[end - 1]))) --end;
-    return value.substr(begin, end - begin);
-}
-
-std::string lower(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return value;
-}
-
-bool startsWith(const std::string& value, const std::string& prefix) {
-    return value.rfind(prefix, 0) == 0;
-}
-bool endsWith(const std::string& value, const std::string& suffix) {
-    return value.size() >= suffix.size() && value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
-}
-
-std::vector<std::string> splitTopLevel(const std::string& value, char delimiter) {
-    std::vector<std::string> result;
-    std::size_t start = 0;
-    int depth = 0;
-    for (std::size_t index = 0; index < value.size(); ++index) {
-        if (value[index] == '(') ++depth;
-        else if (value[index] == ')') --depth;
-        else if (value[index] == delimiter && depth == 0) {
-            result.push_back(trim(value.substr(start, index - start)));
-            start = index + 1;
-        }
-        if (depth < 0) return {};
-    }
-    if (depth != 0) return {};
-    result.push_back(trim(value.substr(start)));
-    return result;
-}
-
-std::vector<std::string> tokenizeTopLevel(const std::string& value) {
-    std::vector<std::string> result;
-    std::size_t start = std::string::npos;
-    int depth = 0;
-    for (std::size_t index = 0; index <= value.size(); ++index) {
-        const bool at_end = index == value.size();
-        const char character = at_end ? ' ' : value[index];
-        if (!at_end && character == '(') ++depth;
-        else if (!at_end && character == ')') --depth;
-        const bool separator = at_end || (depth == 0 && std::isspace(static_cast<unsigned char>(character)));
-        if (!separator && start == std::string::npos) start = index;
-        if (separator && start != std::string::npos) {
-            result.push_back(value.substr(start, index - start));
-            start = std::string::npos;
-        }
-        if (depth < 0) return {};
-    }
-    return depth == 0 ? result : std::vector<std::string>();
-}
+using detail::endsWith;
+using detail::lower;
+using detail::startsWith;
+using detail::trim;
 
 bool parseFiniteFloat(const std::string& value, float& result) {
     char* end = nullptr;
@@ -99,7 +46,7 @@ bool parseFiniteFloat(const std::string& value, float& result) {
 }
 } // namespace
 
-Color StyleSheet::Impl::parseColorValue(const std::string& raw, const Color& fallback) const {
+Color StyleModel::parseColorValue(const std::string& raw, const Color& fallback) const {
     const std::string value = trim(raw);
     const std::string lowered = lower(value);
     if (startsWith(lowered, "var(") && value.size() > 5 && value.back() == ')') return colorToken(trim(value.substr(4, value.size() - 5)), fallback);
@@ -109,7 +56,7 @@ Color StyleSheet::Impl::parseColorValue(const std::string& raw, const Color& fal
     return colorToken(value, fallback);
 }
 
-float StyleSheet::Impl::parseNumberValue(const std::string& raw, float fallback) const {
+float StyleModel::parseNumberValue(const std::string& raw, float fallback) const {
     std::string value = trim(raw);
     const std::string lowered = lower(value);
     if (startsWith(lowered, "var(") && value.size() > 5 && value.back() == ')') return numberToken(trim(value.substr(4, value.size() - 5)), fallback);
@@ -121,7 +68,7 @@ float StyleSheet::Impl::parseNumberValue(const std::string& raw, float fallback)
     return end != value.c_str() && *end == '\0' ? parsed : numberToken(value, fallback);
 }
 
-std::optional<Length> StyleSheet::Impl::parseLengthValue(const std::string& raw) const {
+std::optional<Length> StyleModel::parseLengthValue(const std::string& raw) const {
     std::string value = trim(raw);
     const std::string lowered = lower(value);
     if (startsWith(lowered, "var(") && value.size() > 5 && value.back() == ')') {
@@ -145,7 +92,7 @@ std::optional<Length> StyleSheet::Impl::parseLengthValue(const std::string& raw)
     return percentage ? Length{0.f, parsed / 100.f} : Length{parsed};
 }
 
-std::optional<Gradient> StyleSheet::Impl::parseGradient(const std::string& raw) const {
+std::optional<Gradient> StyleModel::parseGradient(const std::string& raw) const {
     const std::string value = trim(raw);
     const std::string lowered = lower(value);
     std::string prefix;
@@ -173,7 +120,7 @@ std::optional<Gradient> StyleSheet::Impl::parseGradient(const std::string& raw) 
     } else return std::nullopt;
 
     if (value.size() <= prefix.size() || value.back() != ')') return std::nullopt;
-    std::vector<std::string> arguments = splitTopLevel(value.substr(prefix.size(), value.size() - prefix.size() - 1), ',');
+    std::vector<std::string> arguments = detail::splitTopLevel(value.substr(prefix.size(), value.size() - prefix.size() - 1), ',');
     if (arguments.size() < 2) return std::nullopt;
 
     auto parseAngle = [&](const std::string& token, float& degrees) {
@@ -239,7 +186,7 @@ std::optional<Gradient> StyleSheet::Impl::parseGradient(const std::string& raw) 
     };
 
     auto parsesAsColorStop = [&](const std::string& argument) {
-        const std::vector<std::string> tokens = tokenizeTopLevel(argument);
+        const std::vector<std::string> tokens = detail::tokenizeTopLevel(argument);
         if (tokens.empty()) return false;
         const Color marker(-1.f, -1.f, -1.f, -1.f);
         return parseColorValue(tokens.front(), marker).a >= 0.f;
@@ -248,7 +195,7 @@ std::optional<Gradient> StyleSheet::Impl::parseGradient(const std::string& raw) 
     std::size_t first_stop = 0;
     if (!parsesAsColorStop(arguments.front())) {
         const std::string prelude = lower(trim(arguments.front()));
-        const std::vector<std::string> tokens = tokenizeTopLevel(prelude);
+        const std::vector<std::string> tokens = detail::tokenizeTopLevel(prelude);
         if (gradient.kind == GradientKind::Linear) {
             if (prelude == "to top"
                 || prelude == "to right"
@@ -317,7 +264,7 @@ std::optional<Gradient> StyleSheet::Impl::parseGradient(const std::string& raw) 
         return position >= 0.f && position <= 1.f;
     };
     for (std::size_t index = first_stop; index < arguments.size(); ++index) {
-        const std::vector<std::string> tokens = tokenizeTopLevel(arguments[index]);
+        const std::vector<std::string> tokens = detail::tokenizeTopLevel(arguments[index]);
         if (tokens.empty() || tokens.size() > 3) return std::nullopt;
         const Color marker(-1.f, -1.f, -1.f, -1.f);
         const Color color = parseColorValue(tokens.front(), marker);
@@ -350,13 +297,13 @@ std::optional<Gradient> StyleSheet::Impl::parseGradient(const std::string& raw) 
     return gradient;
 }
 
-std::optional<std::vector<BoxShadow>> StyleSheet::Impl::parseShadows(const std::string& raw) const {
-    const std::vector<std::string> entries = splitTopLevel(raw, ',');
+std::optional<std::vector<BoxShadow>> StyleModel::parseShadows(const std::string& raw) const {
+    const std::vector<std::string> entries = detail::splitTopLevel(raw, ',');
     if (entries.empty()) return std::nullopt;
     std::vector<BoxShadow> shadows;
     shadows.reserve(entries.size());
     for (const std::string& entry : entries) {
-        std::vector<std::string> tokens = tokenizeTopLevel(entry);
+        std::vector<std::string> tokens = detail::tokenizeTopLevel(entry);
         if (tokens.size() < 3) return std::nullopt;
         BoxShadow shadow;
         const std::string modifier = lower(tokens.back());
@@ -389,11 +336,11 @@ std::optional<std::vector<BoxShadow>> StyleSheet::Impl::parseShadows(const std::
     return shadows;
 }
 
-std::optional<std::vector<Effect>> StyleSheet::Impl::parseEffects(const std::string& raw) const {
+std::optional<std::vector<Effect>> StyleModel::parseEffects(const std::string& raw) const {
     const std::string value = trim(raw);
     if (lower(value) == "none") return std::vector<Effect>();
-    const std::vector<std::string> functions = splitTopLevel(value, ',');
-    if (functions.empty() || functions.size() > 8) return std::nullopt;
+    const std::vector<std::string> functions = detail::splitTopLevel(value, ',');
+    if (functions.empty() || functions.size() > max_effect_count) return std::nullopt;
 
     auto parseDirection = [&](const std::string& raw_direction, float& degrees) {
         const std::string direction = lower(trim(raw_direction));
@@ -449,14 +396,14 @@ std::optional<std::vector<Effect>> StyleSheet::Impl::parseEffects(const std::str
         } else return std::nullopt;
         if (function.size() <= prefix.size() || function.back() != ')') return std::nullopt;
 
-        const std::vector<std::string> arguments = splitTopLevel(function.substr(prefix.size(), function.size() - prefix.size() - 1), ',');
+        const std::vector<std::string> arguments = detail::splitTopLevel(function.substr(prefix.size(), function.size() - prefix.size() - 1), ',');
         if (arguments.size() == 1) {
-            const std::vector<std::string> radii = tokenizeTopLevel(arguments.front());
+            const std::vector<std::string> radii = detail::tokenizeTopLevel(arguments.front());
             if (radii.size() != 1 || !fixedRadius(radii.front(), effect.start_radius)) return std::nullopt;
             effect.end_radius = effect.start_radius;
         } else if (arguments.size() == 3) {
-            const std::vector<std::string> start = tokenizeTopLevel(arguments[1]);
-            const std::vector<std::string> end = tokenizeTopLevel(arguments[2]);
+            const std::vector<std::string> start = detail::tokenizeTopLevel(arguments[1]);
+            const std::vector<std::string> end = detail::tokenizeTopLevel(arguments[2]);
             if (!parseDirection(arguments[0], effect.angle_degrees)
                 || start.size() != 2
                 || end.size() != 2
@@ -472,8 +419,8 @@ std::optional<std::vector<Effect>> StyleSheet::Impl::parseEffects(const std::str
     return effects;
 }
 
-std::optional<Outline> StyleSheet::Impl::parseOutline(const std::string& raw) const {
-    const std::vector<std::string> tokens = tokenizeTopLevel(raw);
+std::optional<Outline> StyleModel::parseOutline(const std::string& raw) const {
+    const std::vector<std::string> tokens = detail::tokenizeTopLevel(raw);
     if (tokens.size() < 2 || tokens.size() > 4) return std::nullopt;
     const std::optional<Length> width = parseLengthValue(tokens.front());
     if (!width || width->percent != 0.f || width->pixels < 0.f) return std::nullopt;
@@ -502,13 +449,13 @@ std::optional<Outline> StyleSheet::Impl::parseOutline(const std::string& raw) co
     return outline.color.a < 0.f ? std::nullopt : std::optional<Outline>(outline);
 }
 
-EdgeInsets StyleSheet::Impl::parseEdgeInsets(const std::string& raw, const EdgeInsets& fallback) const {
+EdgeInsets StyleModel::parseEdgeInsets(const std::string& raw, const EdgeInsets& fallback) const {
     std::stringstream stream(raw);
     std::vector<float> values;
     std::string token;
     while (stream >> token) {
         const float value = parseNumberValue(token, -1.f);
-        if (value < 0.f || values.size() == 4) return fallback;
+        if (!std::isfinite(value) || value < 0.f || values.size() == 4) return fallback;
         values.push_back(value);
     }
     if (values.empty()) return fallback;
@@ -520,7 +467,7 @@ EdgeInsets StyleSheet::Impl::parseEdgeInsets(const std::string& raw, const EdgeI
     return result;
 }
 
-std::optional<MarginInsets> StyleSheet::Impl::parseMargin(const std::string& raw) const {
+std::optional<MarginInsets> StyleModel::parseMargin(const std::string& raw) const {
     std::stringstream stream(raw);
     std::vector<MarginValue> values;
     std::string token;

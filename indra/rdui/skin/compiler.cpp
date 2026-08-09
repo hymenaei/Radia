@@ -1,6 +1,6 @@
 /**
  * @file compiler.cpp
- * @brief
+ * @brief Compiles layered skin resources into immutable runtime generations.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -102,8 +102,9 @@ SkinGenerationPrepareResult SkinCompiler::prepare(ResourceSnapshot resources) co
         }
 
         LayoutDocumentParseResult parsed = LayoutDocumentParser().parse(source_text, resource_id);
+        std::unique_ptr<LayoutDocument> document = std::move(parsed.document);
         result.append(std::move(parsed));
-        if (parsed.document) layout_documents.emplace(resource_id, std::shared_ptr<const LayoutDocument>(std::move(parsed.document)));
+        if (document) layout_documents.emplace(resource_id, std::shared_ptr<const LayoutDocument>(std::move(document)));
     }
     if (result.hasErrors()) return result;
 

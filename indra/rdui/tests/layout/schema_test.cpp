@@ -1,6 +1,6 @@
 /**
- * @file diagnostic_test.cpp
- * @brief
+ * @file schema_test.cpp
+ * @brief Tests Layout Resource schema validation and diagnostic reporting.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -27,10 +27,11 @@
 #include "diagnostic.h"
 
 namespace tut {
-struct rduidiagnostic_data {};
-typedef test_group<rduidiagnostic_data> rduidiagnostic_test;
-typedef rduidiagnostic_test::object rduidiagnostic_object;
-rduidiagnostic_test rduidiagnostic_testcase("rduidiagnostic");
+struct diagnostic_data {};
+typedef test_group<diagnostic_data> diagnostic_test;
+typedef diagnostic_test::object diagnostic_object;
+using rduidiagnostic_object = diagnostic_object;
+diagnostic_test diagnostic_testcase("diagnostic");
 
 template<> template<> void rduidiagnostic_object::test<1>() {
     rdui::DiagnosticResult destination;

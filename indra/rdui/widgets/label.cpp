@@ -1,6 +1,6 @@
 /**
  * @file label.cpp
- * @brief
+ * @brief Implements Label targeting and activation for named controls.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -28,7 +28,7 @@
 #include "render/paintcontext.h"
 #include "style/style.h"
 #include "system.h"
-#include "widgets/widgetcontract.h"
+#include "widgets/widgetcontractbuilder.h"
 
 namespace rdui {
 Label::Label(std::string text) : Label(ELEMENT, std::move(text)) {}
@@ -42,7 +42,7 @@ Label& Label::setText(std::string text) {
 Label& Label::setContent(TextSource content) {
     mText.setContent(std::move(content));
     if (const System* system = attachedSystem()) onLocaleChanged(*system);
-    invalidateMeasure();
+    else invalidateText();
     return *this;
 }
 
@@ -63,17 +63,18 @@ void Label::onActivate() {
 void Label::onLocaleChanged(const System& system) {
     mText.resolveLocalized([&system](const LocalizationRequest& request) { return system.resolveContent(request); });
     mText.resolveKeybindings([&system](const std::string& key) { return system.resolveKeybinding(key); });
-    invalidateMeasure();
+    invalidateText();
 }
 
 bool Label::onKeybindingsChanged(const System& system) {
     const bool changed = mText.resolveKeybindings([&system](const std::string& key) { return system.resolveKeybinding(key); });
-    if (changed) invalidateMeasure();
+    if (changed) invalidateText();
     return changed;
 }
 
-Vec2 Label::intrinsicSize(const StyleSheet& theme, const Style& style, const TextMetrics& text_metrics) const {
-    return mText.measure(text_metrics, style, theme, *this);
+Vec2 Label::intrinsicSize(const StyleSheet& theme, const Style& style, const TextMetrics& text_metrics,
+                          const IntrinsicSizeConstraints& constraints) const {
+    return mText.measure(text_metrics, style, theme, *this, constraints.width);
 }
 
 void Label::paint(PaintContext& context, const Style& style, float) const {

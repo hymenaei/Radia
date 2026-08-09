@@ -68,7 +68,7 @@ struct TextLayout {
     Vec2 size;
 };
 
-TextLayout layoutText(std::vector<TextLine> hard_lines, const Style& style, const TextMetrics& metrics, std::optional<float> available_width,
+TextLayout layoutText(const std::vector<TextLine>& hard_lines, const Style& style, const TextMetrics& metrics, std::optional<float> available_width,
                       bool visual_order, bool apply_overflow);
 } // namespace rdui::detail
 #endif // RD_TEXT_LAYOUT_H

@@ -1,6 +1,6 @@
 /**
  * @file tessellator_test.cpp
- * @brief
+ * @brief Tests vector tessellation geometry and winding behavior.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -30,10 +30,11 @@
 #include "render/tessellator.h"
 
 namespace tut {
-struct rduitessellator_data {};
-typedef test_group<rduitessellator_data> rduitessellator_test;
-typedef rduitessellator_test::object rduitessellator_object;
-rduitessellator_test rduitessellator_testcase("rduitessellator");
+struct tessellator_data {};
+typedef test_group<tessellator_data> tessellator_test;
+typedef tessellator_test::object tessellator_object;
+using rduitessellator_object = tessellator_object;
+tessellator_test tessellator_testcase("tessellator");
 
 namespace {
 rdui::Path line(float x0 = 0.f, float x1 = 10.f) {

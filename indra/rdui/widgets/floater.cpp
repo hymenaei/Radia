@@ -1,6 +1,6 @@
 /**
  * @file floater.cpp
- * @brief
+ * @brief Implements the movable, detachable Floater Widget.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -36,7 +36,7 @@
 #include "widgets/icon.h"
 #include "widgets/label.h"
 #include "widgets/panel.h"
-#include "widgets/widgetcontract.h"
+#include "widgets/widgetcontractbuilder.h"
 
 namespace rdui {
 namespace {
@@ -312,6 +312,7 @@ bool Floater::beginPointerInteraction(const PointerEvent& event) {
 }
 
 bool Floater::updatePointerInteraction(const PointerEvent& event) {
+    WidgetRef<Floater> self(this);
     if (mInteraction == FloaterInteraction::Resize) {
         const Rect resized =
             detail::resizedRect(mResizeInteraction.initialRect, mResizeInteraction.initialPointer, event.position,
@@ -331,7 +332,10 @@ bool Floater::updatePointerInteraction(const PointerEvent& event) {
     Surface* surface = attachedSurface();
     if (!mDetachRequested && !mMinimized && mCanDetach && surface && surface->canDetachFloater(*this) && pointer_overshoot >= BREAKAWAY_DISTANCE) {
         mDetachRequested = true;
+        const Widget* original_parent = parent();
         surface->floaterDetachRequested(*this, desired_position, mDragOffset);
+        Floater* current = self.get();
+        if (!current || current->attachedSurface() != surface || current->parent() != original_parent) return true;
     }
     const Vec2 delta = position - Vec2{rect().x, rect().y};
     if (delta.x != 0.f || delta.y != 0.f) {

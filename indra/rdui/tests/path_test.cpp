@@ -1,6 +1,6 @@
 /**
  * @file path_test.cpp
- * @brief
+ * @brief Tests normalized UI resource path parsing and resolution.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -27,10 +27,11 @@
 #include "path.h"
 
 namespace tut {
-struct rduipath_data {};
-typedef test_group<rduipath_data> rduipath_test;
-typedef rduipath_test::object rduipath_object;
-rduipath_test rduipath_testcase("rduipath");
+struct path_data {};
+typedef test_group<path_data> path_test;
+typedef path_test::object path_object;
+using rduipath_object = path_object;
+path_test path_testcase("path");
 
 template<> template<> void rduipath_object::test<1>() {
     rdui::PathCompileResult compiled = rdui::compileSvgPathData("M 0 0 L 10 0 h 5 v 10 l -5 0 Z");

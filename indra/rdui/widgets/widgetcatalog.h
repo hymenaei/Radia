@@ -1,6 +1,6 @@
 /**
  * @file widgetcatalog.h
- * @brief
+ * @brief Registers and validates the native Widget Contract catalog.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -25,7 +25,7 @@
 #ifndef RD_WIDGETS_WIDGETCATALOG_H
 #define RD_WIDGETS_WIDGETCATALOG_H
 
-#include "widgets/widgetcontract.h"
+#include "widgets/widgetcontractmodel.h"
 
 namespace rdui { const std::unordered_map<std::string, WidgetContract>& builtInWidgetContracts(); }
 #endif // RD_WIDGETS_WIDGETCATALOG_H

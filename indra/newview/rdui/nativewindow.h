@@ -1,6 +1,6 @@
 /**
  * @file nativewindow.h
- * @brief
+ * @brief Defines the native-window seam used to host detached UI Floaters.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

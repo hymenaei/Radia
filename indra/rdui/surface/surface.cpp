@@ -1,6 +1,6 @@
 /**
  * @file surface.cpp
- * @brief Implements retained Surface layout, input, and paint lifecycle.
+ * @brief Owns the retained Surface layout, input, invalidation, and painting lifecycle.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -325,10 +325,8 @@ bool Surface::updateLayoutIfNeeded() {
             std::vector<WidgetRef<Widget>> children;
             children.reserve(root.children().size());
             for (const auto& child : root.children()) children.emplace_back(child.get());
-            for (const WidgetRef<Widget>& child_ref : children) {
-                if (Widget* child = child_ref.get(); child && child->parent() == &root)
-                    layoutTreeUsingStylePass(*child, styles, direction);
-            }
+            for (const WidgetRef<Widget>& child_ref : children)
+                if (Widget* child = child_ref.get(); child && child->parent() == &root) layoutTreeUsingStylePass(*child, styles, direction);
         } else {
             layoutTreeUsingStylePass(root, styles, direction);
         }

@@ -1,6 +1,6 @@
 /**
  * @file path.cpp
- * @brief
+ * @brief Defines SVG-style vector paths, flattening, and path-data compilation.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

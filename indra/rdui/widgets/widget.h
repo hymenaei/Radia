@@ -1,6 +1,6 @@
 /**
  * @file widget.h
- * @brief Base retained Widget type, identity, state, and tree ownership.
+ * @brief Defines the retained Widget base type, state, ownership, and invalidation.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -119,7 +119,9 @@ struct LayoutContextKey {
     std::uint64_t text_metrics_generation = 0;
 
     constexpr bool operator==(const LayoutContextKey& other) const {
-        return style_sheet == other.style_sheet && text_metrics == other.text_metrics && style_generation == other.style_generation
+        return style_sheet == other.style_sheet
+            && text_metrics == other.text_metrics
+            && style_generation == other.style_generation
             && text_metrics_generation == other.text_metrics_generation;
     }
 };
@@ -314,8 +316,7 @@ private:
 };
 
 namespace detail {
-template<typename WidgetT>
-class WidgetVisit {
+template<typename WidgetT> class WidgetVisit {
 public:
     static_assert(std::is_same_v<WidgetT, rdui::Widget> || std::is_same_v<WidgetT, const rdui::Widget>);
 

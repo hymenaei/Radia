@@ -1,6 +1,6 @@
 /**
  * @file compiler.cpp
- * @brief
+ * @brief Compiles layered localization catalogs and validates locale and string contracts.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

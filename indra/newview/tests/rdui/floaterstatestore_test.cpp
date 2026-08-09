@@ -1,6 +1,6 @@
 /**
  * @file floaterstatestore_test.cpp
- * @brief
+ * @brief Tests persistence of open Floater documents and placement state.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

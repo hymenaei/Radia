@@ -1,6 +1,6 @@
 /**
  * @file binder.h
- * @brief
+ * @brief Validates and commits controller bindings to UI Widget trees.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

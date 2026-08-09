@@ -1,6 +1,6 @@
 /**
  * @file valuecontrol.h
- * @brief
+ * @brief Defines the Widget contract for controls backed by typed value bindings.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

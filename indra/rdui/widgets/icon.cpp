@@ -1,6 +1,6 @@
 /**
  * @file icon.cpp
- * @brief Implements the asset-backed Icon Widget.
+ * @brief Defines the asset-backed Icon Widget.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

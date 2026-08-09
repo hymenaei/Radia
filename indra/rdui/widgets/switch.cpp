@@ -1,6 +1,6 @@
 /**
  * @file switch.cpp
- * @brief Implements the two-state Switch Value Control.
+ * @brief Defines the two-state Switch Value Control.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

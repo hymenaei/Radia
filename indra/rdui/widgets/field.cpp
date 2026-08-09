@@ -1,6 +1,6 @@
 /**
  * @file field.cpp
- * @brief Implements the Field composite that relates labels and value controls.
+ * @brief Defines the Field composite that relates labels and value controls.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

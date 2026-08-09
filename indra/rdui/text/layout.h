@@ -1,6 +1,6 @@
 /**
  * @file layout.h
- * @brief
+ * @brief Wraps, truncates, orders, and measures styled text lines.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

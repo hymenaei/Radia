@@ -1,6 +1,6 @@
 /**
  * @file system.cpp
- * @brief
+ * @brief Owns UI skin generations, locale state, surfaces, and viewer-facing services.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

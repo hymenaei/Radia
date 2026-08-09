@@ -1,6 +1,6 @@
 /**
  * @file detachedfloatermanager_test.cpp
- * @brief
+ * @brief Tests detached Floater lifecycle, native presentation, placement, and interaction behavior.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

@@ -1,6 +1,6 @@
 /**
  * @file internal.h
- * @brief
+ * @brief Defines the private parsed localization model and catalog compilation state.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

@@ -1,6 +1,6 @@
 /**
  * @file engine.cpp
- * @brief Layout transaction orchestration and public entry points.
+ * @brief Coordinates layout transactions and exposes public layout statistics.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -23,8 +23,8 @@
  */
 
 #include "linden_common.h"
-#include "layout/layoutcontext.h"
 #include "layout/engineinternal.h"
+#include "layout/layoutcontext.h"
 #include "text/metrics.h"
 
 namespace rdui {

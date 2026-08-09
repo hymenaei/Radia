@@ -1,6 +1,6 @@
 /**
  * @file tessellator.h
- * @brief
+ * @brief Tessellates stroked paths into colored triangle meshes.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

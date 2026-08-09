@@ -1,6 +1,6 @@
 /**
  * @file schema.cpp
- * @brief
+ * @brief Provides Layout Resource identifier and attribute-name validation helpers.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

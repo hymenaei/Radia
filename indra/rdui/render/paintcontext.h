@@ -1,6 +1,6 @@
 /**
  * @file paintcontext.h
- * @brief
+ * @brief Defines the abstract painting and text-measurement interface for UI widgets.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

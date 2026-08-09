@@ -1,6 +1,6 @@
 /**
  * @file valuebinding.h
- * @brief
+ * @brief Defines typed value state, validation, observation, and controller binding interfaces.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

@@ -1,6 +1,6 @@
 /**
  * @file icon.h
- * @brief
+ * @brief Defines the asset-backed Icon Widget.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

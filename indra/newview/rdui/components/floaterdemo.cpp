@@ -1,6 +1,6 @@
 /**
  * @file floaterdemo.cpp
- * @brief
+ * @brief Provides the viewer demo Floater controller for UI bindings, localization, and reloads.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

@@ -1,6 +1,6 @@
 /**
  * @file reloadcoordinator.h
- * @brief
+ * @brief Coordinates debounced skin reloads and commits complete UI skin generations.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

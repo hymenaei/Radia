@@ -1,6 +1,6 @@
 /**
  * @file text.h
- * @brief
+ * @brief Defines the static Text Host Widget.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

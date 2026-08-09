@@ -1,6 +1,6 @@
 /**
  * @file button.h
- * @brief
+ * @brief Defines the semantic Button Widget and its contract.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

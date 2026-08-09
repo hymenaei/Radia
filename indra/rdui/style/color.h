@@ -1,6 +1,6 @@
 /**
  * @file color.h
- * @brief
+ * @brief Parses CSS-style colors into typed UI color values.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

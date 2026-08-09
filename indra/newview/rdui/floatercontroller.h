@@ -1,6 +1,6 @@
 /**
  * @file floatercontroller.h
- * @brief
+ * @brief Defines the viewer controller contract for binding and updating UI Floaters.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

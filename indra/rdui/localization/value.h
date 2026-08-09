@@ -1,6 +1,6 @@
 /**
  * @file value.h
- * @brief
+ * @brief Defines typed localization arguments and text and plural requests.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

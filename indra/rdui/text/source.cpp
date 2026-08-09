@@ -1,6 +1,6 @@
 /**
  * @file source.cpp
- * @brief
+ * @brief Defines lazy text sources and inline-content materialization.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

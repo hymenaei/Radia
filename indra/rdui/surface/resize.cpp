@@ -83,8 +83,11 @@ Floater* Surface::resizeFloaterAt(const Vec2& point, std::uint8_t& edges) const 
             if (!floater_blocks_pointer_events) {
                 const bool descendant_hit = hitTestNode(*floater, point, mViewport, styles) != nullptr;
                 floater = dynamic_cast<Floater*>(floater_state.lifetime.get());
-                if (!snapshotValid(floater_state) || !floater || !isRootedInSurface(floater)
-                    || floater->visibility() != Visibility::Visible || floater->closed())
+                if (!snapshotValid(floater_state)
+                    || !floater
+                    || !isRootedInSurface(floater)
+                    || floater->visibility() != Visibility::Visible
+                    || floater->closed())
                     continue;
                 if (descendant_hit) return nullptr;
                 if (!floater->rect().contains(point)) continue;

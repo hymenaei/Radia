@@ -1,6 +1,6 @@
 /**
  * @file floaterplacementstore.h
- * @brief
+ * @brief Persists attached and detached Floater placements keyed by instance identity.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

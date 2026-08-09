@@ -1,6 +1,6 @@
 /**
  * @file inlinecontent.cpp
- * @brief Implements immutable inline-content values and semantic text nodes.
+ * @brief Defines immutable inline-content values and semantic text nodes.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

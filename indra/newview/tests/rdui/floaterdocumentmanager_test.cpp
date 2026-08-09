@@ -1,6 +1,6 @@
 /**
  * @file floaterdocumentmanager_test.cpp
- * @brief
+ * @brief Tests Floater document registration, opening, binding, and skin replacement behavior.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

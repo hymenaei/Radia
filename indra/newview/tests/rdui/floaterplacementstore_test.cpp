@@ -1,6 +1,6 @@
 /**
  * @file floaterplacementstore_test.cpp
- * @brief
+ * @brief Tests persistent attached and detached Floater placement restoration and saving.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

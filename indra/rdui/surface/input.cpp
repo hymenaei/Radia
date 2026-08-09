@@ -1,6 +1,6 @@
 /**
  * @file input.cpp
- * @brief
+ * @brief Routes surface pointer, keyboard, scroll, focus, and interaction events.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -146,7 +146,10 @@ bool Surface::routeEvent(RoutedEvent& event) {
         for (std::size_t index = 1; index < route.size(); ++index) {
             Widget* bubble_target = route[index].get();
             Widget* child = route[index - 1].get();
-            if (!bubble_target || !child || bubble_target->parent() != route_parents[index] || child->parent() != bubble_target
+            if (!bubble_target
+                || !child
+                || bubble_target->parent() != route_parents[index]
+                || child->parent() != bubble_target
                 || !isRootedInSurface(bubble_target))
                 break;
             event.mCurrentTarget = bubble_target;

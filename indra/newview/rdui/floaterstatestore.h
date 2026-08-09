@@ -1,6 +1,6 @@
 /**
  * @file floaterstatestore.h
- * @brief
+ * @brief Persists open Floater documents and their placement state through viewer settings.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

@@ -31,9 +31,9 @@
 #include <memory>
 #include <unordered_map>
 #include <vector>
-#include "style/stylesheet.h"
 #include "layout/treecache.h"
 #include "style/style.h"
+#include "style/stylesheet.h"
 #include "widgets/widget.h"
 
 namespace rdui {

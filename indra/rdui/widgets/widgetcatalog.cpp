@@ -25,7 +25,6 @@
 #include "linden_common.h"
 #include "widgets/widgetcatalog.h"
 #include "layout/schema.h"
-#include "widgets/widgetcontract.h"
 #include "widgets/button.h"
 #include "widgets/field.h"
 #include "widgets/fieldset.h"
@@ -35,6 +34,7 @@
 #include "widgets/panel.h"
 #include "widgets/switch.h"
 #include "widgets/text.h"
+#include "widgets/widgetcontract.h"
 
 namespace rdui {
 const std::unordered_map<std::string, WidgetContract>& builtInWidgetContracts() {

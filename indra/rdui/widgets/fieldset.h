@@ -1,6 +1,6 @@
 /**
  * @file fieldset.h
- * @brief
+ * @brief Defines grouped Fieldset and Legend composition.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

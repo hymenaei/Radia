@@ -1,6 +1,6 @@
 /**
  * @file detachedfloatermanager.h
- * @brief
+ * @brief Manages detachment, native presentation, placement, and lifecycle of UI Floaters.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

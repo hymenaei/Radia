@@ -1,6 +1,6 @@
 /**
  * @file recordingpaintcontext.h
- * @brief
+ * @brief Records UI paint commands for inspection and tests.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -25,8 +25,8 @@
 #ifndef RD_RENDER_RECORDINGPAINTCONTEXT_H
 #define RD_RENDER_RECORDINGPAINTCONTEXT_H
 
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include "render/paintcontext.h"

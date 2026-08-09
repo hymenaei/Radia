@@ -1,6 +1,6 @@
 /**
  * @file surface.h
- * @brief Owns a retained Widget surface, invalidation, input, and painting.
+ * @brief Owns the retained Surface layout, input, invalidation, and painting lifecycle.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

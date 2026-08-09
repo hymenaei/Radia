@@ -85,9 +85,7 @@ const Style& StylePass::style(const Widget& widget) {
     }
     const auto found = mStyles.find(&widget);
     const auto lifetime = widget.lifetime().lock();
-    if (found != mStyles.end()
-        && found->second.lifetime.lock() == lifetime
-        && found->second.context_revision == widget.styleContextRevision())
+    if (found != mStyles.end() && found->second.lifetime.lock() == lifetime && found->second.context_revision == widget.styleContextRevision())
         return mStyleStorage[found->second.storage_index];
     if (found != mStyles.end()) mStyles.erase(found);
 
@@ -113,26 +111,23 @@ const Style& StylePass::style(const Widget& widget) {
         mStyleStorage.emplace_back(std::move(resolved));
         return mStyleStorage.back();
     };
-    if (!current || !widget_state.styleValid())
-        return transient();
+    if (!current || !widget_state.styleValid()) return transient();
     if (parent) {
         const ConstWidgetVisit parent_state(*parent);
         const Style& parent_style = style(*parent);
         current = styled_lifetime.get();
         const Widget* current_parent = parent_state.get();
-        if (!current || !current_parent || !widget_state.styleValid() || !parent_state.styleValid())
-            return transient();
+        if (!current || !current_parent || !widget_state.styleValid() || !parent_state.styleValid()) return transient();
         inheritStyle(resolved, parent_style);
     }
 
     current = styled_lifetime.get();
-    if (!current || !widget_state.styleValid())
-        return transient();
+    if (!current || !widget_state.styleValid()) return transient();
     const std::uint64_t final_context_revision = current->styleContextRevision();
     mStyleStorage.emplace_back(std::move(resolved));
     const std::size_t storage_index = mStyleStorage.size() - 1;
-    mStyles[&widget] = CachedStyle{
-        storage_index, widget_lifetime, final_context_revision == context_revision ? context_revision : final_context_revision};
+    mStyles[&widget] =
+        CachedStyle{storage_index, widget_lifetime, final_context_revision == context_revision ? context_revision : final_context_revision};
     return mStyleStorage[storage_index];
 }
 

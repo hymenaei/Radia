@@ -1,6 +1,6 @@
 /**
  * @file runtime.h
- * @brief
+ * @brief Owns the viewer-side UI runtime, Floater lifecycle, reloads, and input dispatch.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

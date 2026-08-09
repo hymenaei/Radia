@@ -1,6 +1,6 @@
 /**
  * @file floaterdocumentmanager.h
- * @brief
+ * @brief Manages viewer-owned Floater documents, controllers, bindings, and skin replacement.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

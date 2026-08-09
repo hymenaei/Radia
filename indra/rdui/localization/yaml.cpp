@@ -1,6 +1,6 @@
 /**
  * @file yaml.cpp
- * @brief
+ * @brief Parses and validates strict YAML localization catalogs.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

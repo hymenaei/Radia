@@ -1,6 +1,6 @@
 /**
  * @file inlinecontent.h
- * @brief Immutable inline-content vocabulary shared by Text Hosts.
+ * @brief Defines immutable inline-content values and semantic text nodes.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

@@ -1,6 +1,6 @@
 /**
  * @file inputbridge.cpp
- * @brief
+ * @brief Translates native viewer input and cursor styles into UI surface input.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

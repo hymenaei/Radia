@@ -1,6 +1,6 @@
 /**
  * @file style.h
- * @brief
+ * @brief Defines typed RSL style values, layout properties, states, and inheritance metadata.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

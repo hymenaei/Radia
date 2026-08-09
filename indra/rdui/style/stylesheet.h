@@ -1,6 +1,6 @@
 /**
  * @file stylesheet.h
- * @brief
+ * @brief Owns the public stylesheet lifecycle and immutable generation metadata.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

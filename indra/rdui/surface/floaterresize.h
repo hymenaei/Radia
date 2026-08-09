@@ -1,6 +1,6 @@
 /**
  * @file floaterresize.h
- * @brief
+ * @brief Provides floater resize-edge detection, cursor mapping, and constrained geometry.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

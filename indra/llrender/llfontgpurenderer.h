@@ -1,6 +1,6 @@
 /**
  * @file llfontgpurenderer.h
- * @brief
+ * @brief Coordinates shaped text, glyph caching, and GPU batches for analytic font rendering.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

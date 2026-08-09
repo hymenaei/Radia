@@ -1,6 +1,6 @@
 /**
  * @file nativeinput.h
- * @brief
+ * @brief Defines native window input events and dispatch results for the UI viewer bridge.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

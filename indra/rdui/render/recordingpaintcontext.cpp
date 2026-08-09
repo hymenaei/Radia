@@ -1,6 +1,6 @@
 /**
  * @file recordingpaintcontext.cpp
- * @brief
+ * @brief Records UI paint commands for inspection and tests.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

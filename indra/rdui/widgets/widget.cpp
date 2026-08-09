@@ -1,6 +1,6 @@
 /**
  * @file widget.cpp
- * @brief Implements retained Widget state, ownership, and invalidation.
+ * @brief Defines the retained Widget base type, state, ownership, and invalidation.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

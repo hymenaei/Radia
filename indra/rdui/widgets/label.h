@@ -1,6 +1,6 @@
 /**
  * @file label.h
- * @brief
+ * @brief Defines Label targeting and activation for named controls.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

@@ -1,6 +1,6 @@
 /**
  * @file panel.cpp
- * @brief Implements the generic Panel container Widget.
+ * @brief Defines the generic Panel container Widget.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

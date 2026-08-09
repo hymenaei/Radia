@@ -364,8 +364,7 @@ template<> template<> void rduisurfacefloater_object::test<13>() {
     floater->setCanResize(true).setRect({0.f, 0.f, 100.f, 80.f});
     surface.mountFloater(std::move(floater));
 
-    ensure("native resize rejects a floater detached by its delegate",
-           !surface.pointerDown({{99.f, 40.f}, rdui::PointerButton::Left}));
+    ensure("native resize rejects a floater detached by its delegate", !surface.pointerDown({{99.f, 40.f}, rdui::PointerButton::Left}));
     ensure("detached native resize does not capture the pointer", !surface.hasPointerCapture());
     ensure("delegate retains the detached Floater for cleanup", delegate.unmountedFloater != nullptr);
 }

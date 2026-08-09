@@ -1,6 +1,6 @@
 /**
  * @file viewresult.h
- * @brief
+ * @brief Defines diagnostics and output for building a Widget tree from a Layout Resource.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

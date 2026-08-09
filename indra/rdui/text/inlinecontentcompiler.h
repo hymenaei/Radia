@@ -1,6 +1,6 @@
 /**
  * @file inlinecontentcompiler.h
- * @brief
+ * @brief Compiles authored Layout Resource content into typed inline text sources.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

@@ -1,6 +1,6 @@
 /**
  * @file panel.h
- * @brief
+ * @brief Defines the generic Panel container Widget.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

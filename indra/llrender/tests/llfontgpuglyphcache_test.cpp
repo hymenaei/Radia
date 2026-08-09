@@ -1,6 +1,6 @@
 /**
  * @file llfontgpuglyphcache_test.cpp
- * @brief
+ * @brief Tests atlas-free glyph caching, metrics, color, and variable-font handling for the analytic font path.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

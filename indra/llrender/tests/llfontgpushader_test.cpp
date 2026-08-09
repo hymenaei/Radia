@@ -1,6 +1,6 @@
 /**
  * @file llfontgpushader_test.cpp
- * @brief
+ * @brief Tests generated HarfBuzz-GPU shader sources and their analytic text-rendering features.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

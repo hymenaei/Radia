@@ -1,6 +1,6 @@
 /**
  * @file engine.h
- * @brief Public layout entry points and testable transaction statistics.
+ * @brief Coordinates layout transactions and exposes public layout statistics.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

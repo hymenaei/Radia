@@ -1,6 +1,6 @@
 /**
  * @file svg.h
- * @brief
+ * @brief Parses validated SVG icons and transforms their paths into target rectangles.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

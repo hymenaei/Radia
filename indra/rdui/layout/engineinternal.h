@@ -30,7 +30,6 @@
 namespace rdui {
 class StylePass;
 
-LayoutStatistics layoutTreeUsingStylePass(Widget& root, StylePass& styles,
-                                          LayoutDirection direction = LayoutDirection::LeftToRight);
+LayoutStatistics layoutTreeUsingStylePass(Widget& root, StylePass& styles, LayoutDirection direction = LayoutDirection::LeftToRight);
 } // namespace rdui
 #endif // RD_LAYOUT_ENGINE_INTERNAL_H

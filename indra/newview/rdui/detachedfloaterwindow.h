@@ -1,6 +1,6 @@
 /**
  * @file detachedfloaterwindow.h
- * @brief
+ * @brief Presents a detached Floater in a native window and bridges its lifecycle and input.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

@@ -1,6 +1,6 @@
 /**
  * @file richstring.cpp
- * @brief
+ * @brief Parses bounded rich-string markup into typed inline-content templates.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

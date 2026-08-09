@@ -1,6 +1,6 @@
 /**
  * @file switch.h
- * @brief
+ * @brief Defines the two-state Switch Value Control.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

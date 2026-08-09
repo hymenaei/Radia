@@ -1,6 +1,6 @@
 /**
  * @file resolver.h
- * @brief
+ * @brief Resolves selected and installed skin roots into validated UI resource snapshots.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

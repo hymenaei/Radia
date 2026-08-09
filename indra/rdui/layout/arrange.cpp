@@ -167,9 +167,8 @@ std::vector<ChildLayout> LayoutEngine::flowChildren(Widget& parent, Flow flow, L
 
 void LayoutEngine::arrangeNode(Widget& node, LayoutDirection direction, LayoutPass& pass) {
     const LayoutContextKey context_key = pass.contextKey();
-    const bool cache_matches = node.mLayoutCache.arrange_valid
-        && node.mLayoutCache.layout_context == context_key
-        && node.mLayoutCache.direction == direction;
+    const bool cache_matches =
+        node.mLayoutCache.arrange_valid && node.mLayoutCache.layout_context == context_key && node.mLayoutCache.direction == direction;
     if (!node.mInvalidationReasons.intersects(kArrangeInvalidationReasons) && cache_matches) {
         pass.recordSkipped();
         return;

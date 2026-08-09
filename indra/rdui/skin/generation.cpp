@@ -1,6 +1,6 @@
 /**
  * @file generation.cpp
- * @brief
+ * @brief Exposes immutable compiled skin generations for views, localization, styles, and icons.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

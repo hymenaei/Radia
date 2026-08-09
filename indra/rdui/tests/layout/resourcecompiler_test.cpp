@@ -248,16 +248,14 @@ template<> template<> void rduilayoutresourcecompiler_object::test<7>() {
         ensure((std::string("shader protocol count matches ") + macro).c_str(), definitions.size() == constants.size());
         for (const auto& [name, value] : definitions) {
             const auto found = constants.find(shader_name(name));
-            ensure((std::string("shader protocol entry matches ") + name).c_str(),
-                   found != constants.end() && found->second == value);
+            ensure((std::string("shader protocol entry matches ") + name).c_str(), found != constants.end() && found->second == value);
         }
     };
     ensure_protocol("PAINT_OP_ENTRY", "PAINT_OP_");
     ensure_protocol("GRADIENT_OP_ENTRY", "GRADIENT_");
     ensure_protocol("OUTLINE_OP_ENTRY", "OUTLINE_");
 
-    ensure("paint shader variant is guarded",
-           contains(vertex_source, "#ifdef PAINT_SHADER") && contains(fragment_source, "#ifdef PAINT_SHADER"));
+    ensure("paint shader variant is guarded", contains(vertex_source, "#ifdef PAINT_SHADER") && contains(fragment_source, "#ifdef PAINT_SHADER"));
     ensure("vertex shader forwards shape coordinates", contains(vertex_source, "shape_coord = texcoord0"));
     ensure("fragment shader names direct and fill modes",
            contains(fragment_source, "PAINT_OP_DIRECT = 0")

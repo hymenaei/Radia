@@ -258,9 +258,8 @@ bool StyleModel::stateAffectsDescendants(const Widget& widget, WidgetState state
         for (auto& candidates : descendant_state_rules) candidates.clear();
         for (std::size_t rule_index = 0; rule_index < rules.size(); ++rule_index) {
             const StyleRule& rule = rules[rule_index];
-            const bool inherits = std::any_of(rule.declarations.begin(), rule.declarations.end(), [](const StyleDeclaration& declaration) {
-                return declaration.property.get().isInherited();
-            });
+            const bool inherits = std::any_of(rule.declarations.begin(), rule.declarations.end(),
+                                              [](const StyleDeclaration& declaration) { return declaration.property.get().isInherited(); });
             for (std::size_t selector_index = 0; selector_index < rule.selectors.size(); ++selector_index) {
                 const StyleSelector& selector = rule.selectors[selector_index];
                 const std::optional<WidgetState> selector_state = selectorState(selector.state);

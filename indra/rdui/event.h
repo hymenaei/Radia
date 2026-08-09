@@ -1,6 +1,6 @@
 /**
  * @file event.h
- * @brief
+ * @brief Defines routed pointer, scroll, keyboard, and character events for UI surfaces.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

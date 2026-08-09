@@ -1,6 +1,6 @@
 /**
  * @file generationinternal.h
- * @brief
+ * @brief Stores the private compiled data owned by an immutable SkinGeneration.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

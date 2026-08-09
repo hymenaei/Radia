@@ -37,8 +37,7 @@ using layout_detail::ChildLayout;
 
 class LayoutPass {
 public:
-    LayoutPass(const StyleSheet& theme, const TextMetrics& text_metrics)
-        : mOwnedStyles(std::in_place, theme, text_metrics), mStyles(*mOwnedStyles) {}
+    LayoutPass(const StyleSheet& theme, const TextMetrics& text_metrics) : mOwnedStyles(std::in_place, theme, text_metrics), mStyles(*mOwnedStyles) {}
     explicit LayoutPass(StylePass& styles) : mStyles(styles) {}
     LayoutPass(const LayoutPass&) = delete;
     LayoutPass& operator=(const LayoutPass&) = delete;

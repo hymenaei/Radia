@@ -1,6 +1,6 @@
 /**
  * @file resourceprovider.h
- * @brief
+ * @brief Defines resource layers, dependency snapshots, and the UI resource-provider interface.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

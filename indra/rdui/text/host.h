@@ -1,6 +1,6 @@
 /**
  * @file host.h
- * @brief
+ * @brief Measures and paints TextHost content with localization, inline styles, and keybindings.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

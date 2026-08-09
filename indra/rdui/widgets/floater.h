@@ -1,6 +1,6 @@
 /**
  * @file floater.h
- * @brief
+ * @brief Defines the movable, detachable Floater Widget.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

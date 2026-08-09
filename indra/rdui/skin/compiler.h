@@ -1,6 +1,6 @@
 /**
  * @file compiler.h
- * @brief
+ * @brief Compiles layered skin resources into immutable runtime generations.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

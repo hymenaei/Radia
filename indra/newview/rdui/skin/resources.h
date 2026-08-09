@@ -1,6 +1,6 @@
 /**
  * @file resources.h
- * @brief
+ * @brief Captures viewer skin resources and identifies the bundled default skin.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

@@ -1,6 +1,6 @@
 /**
  * @file localization.cpp
- * @brief
+ * @brief Provides locale catalog loading, fallback, plural resolution, and localized content.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

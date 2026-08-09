@@ -1,6 +1,6 @@
 /**
  * @file types.h
- * @brief
+ * @brief Defines shared UI geometry, color, inset, and widget-state types.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

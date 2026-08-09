@@ -1,6 +1,6 @@
 /**
  * @file label.cpp
- * @brief Implements Label targeting and activation for named controls.
+ * @brief Defines Label targeting and activation for named controls.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

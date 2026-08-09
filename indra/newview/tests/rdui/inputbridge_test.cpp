@@ -1,6 +1,6 @@
 /**
  * @file inputbridge_test.cpp
- * @brief
+ * @brief Tests translation of native input events and cursor styles to UI surface input.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

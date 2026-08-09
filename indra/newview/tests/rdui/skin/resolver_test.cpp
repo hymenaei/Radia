@@ -1,6 +1,6 @@
 /**
  * @file resolver_test.cpp
- * @brief
+ * @brief Tests skin manifest resolution, inheritance, resource layering, and diagnostics.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

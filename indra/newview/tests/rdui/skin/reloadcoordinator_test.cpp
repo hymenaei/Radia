@@ -1,6 +1,6 @@
 /**
  * @file reloadcoordinator_test.cpp
- * @brief
+ * @brief Tests debounced skin reload requests, diagnostics, and generation commits.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

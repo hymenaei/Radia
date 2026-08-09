@@ -1,6 +1,6 @@
 /**
  * @file llfontgpubatch_test.cpp
- * @brief
+ * @brief Tests glyph-quad batching and HarfBuzz glyph placement for the analytic font path.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

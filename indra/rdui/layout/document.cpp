@@ -1,6 +1,6 @@
 /**
  * @file document.cpp
- * @brief
+ * @brief Parses Layout Resource documents into validated node and attribute trees.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code

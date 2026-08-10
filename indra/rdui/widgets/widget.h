@@ -42,7 +42,7 @@
 namespace rdui {
 enum class Visibility : uint8_t { Visible, Hidden, Collapsed };
 
-enum class LayoutInvalidationReason : uint8_t { None = 0, Measure = 1 << 0, Arrange = 1 << 1, Style = 1 << 2, Text = 1 << 3, Paint = 1 << 4 };
+enum class LayoutInvalidationReason : uint8_t { NoInvalidation = 0, Measure = 1 << 0, Arrange = 1 << 1, Style = 1 << 2, Text = 1 << 3, Paint = 1 << 4 };
 
 class InvalidationFlags {
 public:

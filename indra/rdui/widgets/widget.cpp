@@ -256,7 +256,7 @@ void Widget::invalidateTextTree() {
 }
 
 void Widget::invalidateStyleTree(bool layout_affecting, bool descendants) {
-    const auto invalidate = [layout_affecting, descendants](auto&& self, Widget& widget, bool propagate) -> void {
+    const auto invalidate = [layout_affecting](auto&& self, Widget& widget, bool propagate) -> void {
         ++widget.mStyleRevision;
         if (layout_affecting) ++widget.mLayoutInvalidationRevision;
         widget.mInvalidationReasons.add(layout_affecting ? kLayoutStyleInvalidationReasons : kPaintStyleInvalidationReasons);

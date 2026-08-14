@@ -52,7 +52,7 @@ public:
     StyleSheet(StyleSheet&& other) noexcept;
     StyleSheet& operator=(StyleSheet&& other) noexcept;
 
-    StyleSheetLoadResult loadRadia(const std::string& radia, const std::string& source_name = {});
+    StyleSheetLoadResult loadRadia(const std::string& radia, const std::string& sourceName = {});
     StyleSheetLoadResult loadRadiaLayers(const std::vector<ResourceLayer>& layers);
     std::uint64_t generation() const;
     const DependencyMap& dependencies() const;
@@ -63,11 +63,11 @@ public:
     bool stateAffectsDescendants(const Widget& widget, WidgetState state) const;
 
     Style resolve(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint8_t states) const;
-    Style resolvePart(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint8_t owner_states,
-                      const std::string& part, uint8_t part_states = 0) const;
+    Style resolvePart(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint8_t ownerStates,
+                      const std::string& part, uint8_t partStates = 0) const;
     Style resolveWidget(const Widget& widget) const;
     Style resolveWidgetPart(const Widget& owner, const Widget& part) const;
-    Style resolveInline(const Widget& owner, const std::string& element, const std::vector<std::string>& inline_ancestors = {}) const;
+    Style resolveInline(const Widget& owner, const std::string& element, const std::vector<std::string>& inlineAncestors = {}) const;
 
 private:
     struct Impl;

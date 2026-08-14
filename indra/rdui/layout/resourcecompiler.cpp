@@ -46,11 +46,11 @@ struct LayoutResourceCompiler::BuildState {
         std::string source;
     };
 
-    ViewBuildResult result;
-    std::vector<std::string> resources;
-    std::unordered_map<std::string, const LayoutNode*> widget_defaults;
-    std::unordered_map<const Widget*, AuthoredWidget> authored_widgets;
-    const ViewBuildContext* context = nullptr;
+    LayoutBuildResult result;
+    std::vector<std::string> resourceStack;
+    std::unordered_map<std::string, const LayoutNode*> widgetDefaults;
+    std::unordered_map<const Widget*, AuthoredWidget> authoredWidgetRecords;
+    const LayoutBuildContext* context = nullptr;
 };
 
 struct LayoutResourceCompiler::ChildBuildContext {
@@ -59,49 +59,49 @@ struct LayoutResourceCompiler::ChildBuildContext {
     const WidgetContract& contract;
     const std::string& source;
     BuildState& state;
-    std::string widget_text;
-    bool pending_flow_break = false;
-    bool has_layout_child = false;
+    std::string widgetText;
+    bool pendingFlowBreak = false;
+    bool hasLayoutChild = false;
 
     void markLayoutChild(Widget& child) {
-        detail::WidgetCompilerAccess::setFlowBreakBefore(child, pending_flow_break);
-        pending_flow_break = false;
-        has_layout_child = true;
+        detail::WidgetCompilerAccess::setFlowBreakBefore(child, pendingFlowBreak);
+        pendingFlowBreak = false;
+        hasLayoutChild = true;
     }
 };
 
 namespace {
-std::string textKey(const std::string& text) {
+std::string trimmedText(const std::string& text) {
     const auto first = std::find_if_not(text.begin(), text.end(), [](unsigned char character) { return std::isspace(character); });
     if (first == text.end()) return {};
     const auto last = std::find_if_not(text.rbegin(), text.rend(), [](unsigned char character) { return std::isspace(character); }).base();
     return std::string(first, last);
 }
 
-std::string directoryOf(const std::string& filename) {
-    const std::size_t slash = filename.find_last_of('/');
-    return slash == std::string::npos ? std::string() : filename.substr(0, slash + 1);
+std::string directoryOf(const std::string& sourcePath) {
+    const std::size_t slash = sourcePath.find_last_of('/');
+    return slash == std::string::npos ? std::string() : sourcePath.substr(0, slash + 1);
 }
 
-std::string resourceChain(const std::vector<std::string>& resources, const std::string& filename) {
+std::string resourceChain(const std::vector<std::string>& resourceStack, const std::string& resourceId) {
     std::string result;
-    for (const std::string& resource : resources) {
+    for (const std::string& resource : resourceStack) {
         if (!result.empty()) result += " -> ";
         result += resource;
     }
     if (!result.empty()) result += " -> ";
-    return result + filename;
+    return result + resourceId;
 }
 
 bool hasAuthoredContent(const LayoutNode& node) {
     for (const LayoutContent& content : node.content)
-        if (content.element || !textKey(content.text).empty()) return true;
+        if (content.node || !trimmedText(content.text).empty()) return true;
     return false;
 }
 
-void rejectLogicalAttributes(const LayoutElement& element, ViewBuildResult& result, const std::string& source) {
+void rejectAuthoredAttributes(const LayoutElement& element, LayoutBuildResult& result, const std::string& source) {
     for (const auto& [name, attribute] : element.attributes())
-        result.error("view.attribute.unknown", "Unknown attribute on <" + element.name() + ">: " + attribute.authored_name + ".", source,
+        result.error("layout.attribute.unknown", "Unknown attribute on <" + element.name() + ">: " + attribute.authoredName + ".", source,
                      attribute.source.begin.line, attribute.source.begin.column);
 }
 } // namespace
@@ -109,17 +109,17 @@ void rejectLogicalAttributes(const LayoutElement& element, ViewBuildResult& resu
 LayoutResourceCompiler::LayoutResourceCompiler(const LayoutDocumentMap* documents)
     : mDocuments(documents), mWidgetContracts(builtInWidgetContracts()) {}
 
-std::string LayoutResourceCompiler::normalizeResource(std::string filename) {
-    std::replace(filename.begin(), filename.end(), '\\', '/');
-    while (filename.rfind("./", 0) == 0) filename.erase(0, 2);
-    if (filename.rfind("xui/", 0) == 0) filename.erase(0, 4);
-    if (filename.empty()) return {};
+std::string LayoutResourceCompiler::normalizeResource(std::string resourceId) {
+    std::replace(resourceId.begin(), resourceId.end(), '\\', '/');
+    while (resourceId.rfind("./", 0) == 0) resourceId.erase(0, 2);
+    if (resourceId.rfind("xui/", 0) == 0) resourceId.erase(0, 4);
+    if (resourceId.empty()) return {};
 
     std::vector<std::string> segments;
     std::size_t start = 0;
-    while (start <= filename.size()) {
-        const std::size_t slash = filename.find('/', start);
-        const std::string segment = filename.substr(start, slash == std::string::npos ? std::string::npos : slash - start);
+    while (start <= resourceId.size()) {
+        const std::size_t slash = resourceId.find('/', start);
+        const std::string segment = resourceId.substr(start, slash == std::string::npos ? std::string::npos : slash - start);
         if (segment == "..") {
             if (segments.empty()) return {};
             segments.pop_back();
@@ -136,23 +136,23 @@ std::string LayoutResourceCompiler::normalizeResource(std::string filename) {
     return result;
 }
 
-ViewBuildResult LayoutResourceCompiler::createFromResource(const std::string& filename, const ViewBuildContext* context) const {
+LayoutBuildResult LayoutResourceCompiler::buildWidgetTreeFromResource(const std::string& resourceId, const LayoutBuildContext* context) const {
     BuildState state;
     state.context = context;
-    const std::string resource = normalizeResource(filename);
+    const std::string resource = normalizeResource(resourceId);
     std::unique_ptr<Widget> root = createResourceWidget(resource, state);
     if (root && !state.result.hasErrors()) {
         detail::WidgetCompilerAccess::setIdScopeRoot(*root);
-        validateViewScope(*root, state, resource);
+        validateWidgetScope(*root, state, resource);
     }
     if (!state.result.hasErrors()) state.result.root = std::move(root);
     return std::move(state.result);
 }
 
-ViewBuildResult LayoutResourceCompiler::createFromString(const std::string& xml, const std::string& source_name,
-                                                         const ViewBuildContext* context) const {
-    ViewBuildResult result;
-    const std::string source = normalizeResource(source_name);
+LayoutBuildResult LayoutResourceCompiler::buildWidgetTreeFromString(const std::string& xml, const std::string& sourceName,
+                                                                    const LayoutBuildContext* context) const {
+    LayoutBuildResult result;
+    const std::string source = normalizeResource(sourceName);
     LayoutDocumentParseResult parsed = LayoutDocumentParser().parse(xml, source);
     result.warnings = std::move(parsed.warnings);
     result.errors = std::move(parsed.errors);
@@ -165,47 +165,47 @@ ViewBuildResult LayoutResourceCompiler::createFromString(const std::string& xml,
     std::unique_ptr<Widget> root = buildDocument(*document, nullptr, state);
     if (root && !state.result.hasErrors()) {
         detail::WidgetCompilerAccess::setIdScopeRoot(*root);
-        validateViewScope(*root, state, source);
+        validateWidgetScope(*root, state, source);
     }
     if (!state.result.hasErrors()) state.result.root = std::move(root);
     return std::move(state.result);
 }
 
-void LayoutResourceCompiler::validateViewScope(Widget& scope, BuildState& state, const std::string& source, bool count_root) const {
+void LayoutResourceCompiler::validateWidgetScope(Widget& scope, BuildState& state, const std::string& source, bool countRoot) const {
     std::unordered_map<std::string, Widget*> ids;
     std::unordered_set<std::string> duplicates;
-    std::vector<const BuildState::AuthoredWidget*> authored_widgets;
+    std::vector<const BuildState::AuthoredWidget*> authoredWidgetRecords;
     std::function<void(Widget&, bool)> visit = [&](Widget& widget, bool root) {
         if (!root && widget.idScopeRoot()) {
             if (!widget.id().empty() && !ids.emplace(widget.id(), &widget).second) {
                 duplicates.insert(widget.id());
-                state.result.error("view.id.duplicate", "Duplicate widget id: " + widget.id() + ".", source);
+                state.result.error("layout.id.duplicate", "Duplicate widget id: " + widget.id() + ".", source);
             }
-            validateViewScope(widget, state, source, false);
+            validateWidgetScope(widget, state, source, false);
             return;
         }
-        if ((!root || count_root) && !widget.id().empty() && !ids.emplace(widget.id(), &widget).second) {
+        if ((!root || countRoot) && !widget.id().empty() && !ids.emplace(widget.id(), &widget).second) {
             duplicates.insert(widget.id());
-            state.result.error("view.id.duplicate", "Duplicate widget id: " + widget.id() + ".", source);
+            state.result.error("layout.id.duplicate", "Duplicate widget id: " + widget.id() + ".", source);
         }
-        const auto authored = state.authored_widgets.find(&widget);
-        if (authored != state.authored_widgets.end()) authored_widgets.push_back(&authored->second);
+        const auto authored = state.authoredWidgetRecords.find(&widget);
+        if (authored != state.authoredWidgetRecords.end()) authoredWidgetRecords.push_back(&authored->second);
         for (const auto& child : widget.children()) visit(*child, false);
     };
     visit(scope, true);
 
-    const ViewScopeContext context(ids, duplicates, [this](const Widget& widget) {
-        const auto contract = mWidgetContracts.find(schemaNameKey(widget.element()));
+    const WidgetScopeContext context(ids, duplicates, [this](const Widget& widget) {
+        const auto contract = mWidgetContracts.find(schemaNameKey(widget.elementName()));
         return contract != mWidgetContracts.end() && contract->second.labelable;
     });
-    for (const BuildState::AuthoredWidget* authored : authored_widgets) {
-        if (!authored->widget || !authored->node || !authored->contract || !authored->contract->composition_behavior.validate) continue;
+    for (const BuildState::AuthoredWidget* authored : authoredWidgetRecords) {
+        if (!authored->widget || !authored->node || !authored->contract || !authored->contract->compositionBehavior.validate) continue;
         const LayoutElement element(*authored->node, authored->defaults);
-        authored->contract->composition_behavior.validate(element, *authored->widget, context, state.result, authored->source);
+        authored->contract->compositionBehavior.validate(element, *authored->widget, context, state.result, authored->source);
     }
 }
 
-DiagnosticResult LayoutResourceCompiler::validateWidgetDefaults(const std::string& element, const ViewBuildContext* context) const {
+DiagnosticResult LayoutResourceCompiler::validateWidgetDefaults(const std::string& element, const LayoutBuildContext* context) const {
     BuildState state;
     state.context = context;
     loadWidgetDefaults(element, state);
@@ -217,133 +217,134 @@ DiagnosticResult LayoutResourceCompiler::validateWidgetDefaults(const std::strin
 
 void LayoutResourceCompiler::loadWidgetDefaults(const std::string& element, BuildState& state) const {
     const std::string lookup = schemaNameKey(element);
-    if (state.widget_defaults.find(lookup) != state.widget_defaults.end()) return;
+    if (state.widgetDefaults.find(lookup) != state.widgetDefaults.end()) return;
     const auto contract = mWidgetContracts.find(lookup);
-    const std::string canonical = contract == mWidgetContracts.end() ? element : contract->second.element;
-    const std::string default_resource = "widgets/" + canonical + ".xml";
-    const LayoutNode* default_root = nullptr;
+    const std::string canonical = contract == mWidgetContracts.end() ? element : contract->second.elementName;
+    const std::string defaultResource = "widgets/" + canonical + ".xml";
+    const LayoutNode* defaultRoot = nullptr;
     if (contract == mWidgetContracts.end()) {
-        state.result.error("view.defaults.element_unknown", "Widget Defaults target an unsupported element: " + canonical + ".", default_resource);
-        state.widget_defaults.emplace(lookup, nullptr);
+        state.result.error("layout.defaults.element_unknown", "Widget Defaults target an unsupported element: " + canonical + ".", defaultResource);
+        state.widgetDefaults.emplace(lookup, nullptr);
         return;
     }
 
     if (mDocuments) {
-        const auto document = mDocuments->find(default_resource);
+        const auto document = mDocuments->find(defaultResource);
         if (document == mDocuments->end() || !document->second || !document->second->root) {
-            state.widget_defaults.emplace(lookup, nullptr);
+            state.widgetDefaults.emplace(lookup, nullptr);
             return;
         }
-        default_root = document->second->root.get();
-        const std::size_t errors_before = state.result.errors.size();
-        const LayoutElement defaults(*default_root);
-        if (schemaNameKey(default_root->name) != lookup) {
-            state.result.error("view.defaults.root_invalid", "Widget Defaults root must be <" + canonical + ">.", default_resource,
-                               default_root->source.begin.line, default_root->source.begin.column);
-            default_root = nullptr;
-        } else if (hasAuthoredContent(*default_root)) {
-            state.result.error("view.defaults.children_unsupported", "Widget Defaults may contain attributes only.", default_resource,
-                               default_root->source.begin.line, default_root->source.begin.column);
-            default_root = nullptr;
+        defaultRoot = document->second->root.get();
+        const std::size_t errorsBefore = state.result.errors.size();
+        const LayoutElement defaults(*defaultRoot);
+        if (schemaNameKey(defaultRoot->name) != lookup) {
+            state.result.error("layout.defaults.root_invalid", "Widget Defaults root must be <" + canonical + ">.", defaultResource,
+                               defaultRoot->source.begin.line, defaultRoot->source.begin.column);
+            defaultRoot = nullptr;
+        } else if (hasAuthoredContent(*defaultRoot)) {
+            state.result.error("layout.defaults.children_unsupported", "Widget Defaults may contain attributes only.", defaultResource,
+                               defaultRoot->source.begin.line, defaultRoot->source.begin.column);
+            defaultRoot = nullptr;
         } else {
-            validateViewAttributes(defaults, contract->second.attributes, state.result, default_resource);
+            validateWidgetAttributes(defaults, contract->second.attributes, state.result, defaultResource);
             std::string ignored;
-            if (readViewAttribute(defaults, "id", ignored)
-                || readViewAttribute(defaults, "filename", ignored)
-                || readViewAttribute(defaults, "for", ignored)
-                || readViewAttribute(defaults, "longClickDelay", ignored)) {
-                state.result.error("view.defaults.controller_attribute",
-                                   "Widget Defaults cannot declare IDs, relationships, includes, or controller behavior.", default_resource);
-                default_root = nullptr;
+            if (readLayoutAttribute(defaults, "id", ignored)
+                || readLayoutAttribute(defaults, "filename", ignored)
+                || readLayoutAttribute(defaults, "for", ignored)
+                || readLayoutAttribute(defaults, "longClickDelay", ignored)) {
+                state.result.error("layout.defaults.controller_attribute",
+                                   "Widget Defaults cannot declare IDs, relationships, includes, or controller behavior.", defaultResource);
+                defaultRoot = nullptr;
             }
-            for (ActionEventKind kind :
-                 {ActionEventKind::Click, ActionEventKind::DoubleClick, ActionEventKind::Change, ActionEventKind::MouseDown, ActionEventKind::MouseUp,
-                  ActionEventKind::MouseMove, ActionEventKind::LongClick, ActionEventKind::ContextMenu}) {
-                if (default_root && readViewAttribute(defaults, actionAttribute(kind), ignored)) {
-                    state.result.error("view.defaults.controller_attribute", "Widget Defaults cannot declare action handlers.", default_resource);
-                    default_root = nullptr;
+            for (WidgetEventKind kind : kAllWidgetEventKinds) {
+                if (defaultRoot && readLayoutAttribute(defaults, eventAttribute(kind), ignored)) {
+                    state.result.error("layout.defaults.controller_attribute", "Widget Defaults cannot declare Event Handler Calls.",
+                                       defaultResource);
+                    defaultRoot = nullptr;
                     break;
                 }
             }
 
-            if (default_root) {
+            if (defaultRoot) {
                 std::unique_ptr<Widget> probe = contract->second.create();
-                applyCommonViewAttributes(defaults, *probe, state.result, default_resource, contract->second.supported_actions);
-                if (contract->second.attribute_behavior.apply)
-                    contract->second.attribute_behavior.apply(defaults, *probe, state.result, default_resource, state.context);
+                applyCommonWidgetAttributes(defaults, *probe, state.result, defaultResource, contract->second.supportedEvents);
+                if (contract->second.attributeBehavior.apply)
+                    contract->second.attributeBehavior.apply(defaults, *probe, state.result, defaultResource, state.context);
             }
         }
-        if (state.result.errors.size() != errors_before) default_root = nullptr;
+        if (state.result.errors.size() != errorsBefore) defaultRoot = nullptr;
     }
-    state.widget_defaults.emplace(lookup, default_root);
+    state.widgetDefaults.emplace(lookup, defaultRoot);
 }
 
-std::unique_ptr<Widget> LayoutResourceCompiler::createResourceWidget(const std::string& filename, BuildState& state) const {
-    const std::string resource = normalizeResource(filename);
+std::unique_ptr<Widget> LayoutResourceCompiler::createResourceWidget(const std::string& resourceId, BuildState& state) const {
+    const std::string resource = normalizeResource(resourceId);
     if (resource.empty()) {
-        state.result.error("view.resource.path_invalid", "Invalid or empty resource path: " + filename + ".", filename);
+        state.result.error("layout.resource.path_invalid", "Invalid or empty resource path: " + resourceId + ".", resourceId);
         return nullptr;
     }
     if (resource.rfind("widgets/", 0) == 0) {
-        state.result.error("view.resource.reserved", "Widget default resources cannot be instantiated as Views: " + resource + ".", resource);
+        state.result.error("layout.resource.reserved", "Widget default resources cannot be instantiated as Layout Resources: " + resource + ".",
+                           resource);
         return nullptr;
     }
-    if (std::find(state.resources.begin(), state.resources.end(), resource) != state.resources.end()) {
-        state.result.error("view.resource.cycle", "Recursive panel resource reference: " + resourceChain(state.resources, resource) + ".", resource);
+    if (std::find(state.resourceStack.begin(), state.resourceStack.end(), resource) != state.resourceStack.end()) {
+        state.result.error("layout.resource.cycle", "Recursive layout resource reference: " + resourceChain(state.resourceStack, resource) + ".",
+                           resource);
         return nullptr;
     }
     if (!mDocuments) {
-        state.result.error("view.resource.provider_missing", "No Layout Resource collection is configured.", resource);
+        state.result.error("layout.resource.provider_missing", "No Layout Resource collection is configured.", resource);
         return nullptr;
     }
     const auto document = mDocuments->find(resource);
     if (document == mDocuments->end() || !document->second) {
-        state.result.error("view.resource.missing", "Could not load resource chain: " + resourceChain(state.resources, resource) + ".", resource);
+        state.result.error("layout.resource.missing", "Could not load resource chain: " + resourceChain(state.resourceStack, resource) + ".",
+                           resource);
         return nullptr;
     }
 
-    state.resources.push_back(resource);
+    state.resourceStack.push_back(resource);
     std::unique_ptr<Widget> root = buildDocument(*document->second, nullptr, state);
-    state.resources.pop_back();
+    state.resourceStack.pop_back();
     if (root) detail::WidgetCompilerAccess::setIdScopeRoot(*root);
     return root;
 }
 
 std::unique_ptr<Widget> LayoutResourceCompiler::buildDocument(const LayoutDocument& document, std::unique_ptr<Widget> root, BuildState& state) const {
     if (!document.root) {
-        state.result.error("view.xml.invalid", "Radia UI XML must contain one root element.", document.source);
+        state.result.error("layout.xml.invalid", "Radia UI XML must contain one root element.", document.source);
         return nullptr;
     }
 
     return buildNode(*document.root, document.source, std::move(root), state);
 }
 
-const WidgetContract* LayoutResourceCompiler::lookupWidgetContract(const LayoutNode& layout_node, const std::string& source,
-                                                                   BuildState& state) const {
-    const auto contract = mWidgetContracts.find(schemaNameKey(layout_node.name));
+const WidgetContract* LayoutResourceCompiler::lookupWidgetContract(const LayoutNode& layoutNode, const std::string& source, BuildState& state) const {
+    const auto contract = mWidgetContracts.find(schemaNameKey(layoutNode.name));
     if (contract == mWidgetContracts.end()) {
-        state.result.error("view.element.unknown", "Unsupported XML element: " + layout_node.name + ".", source, layout_node.source.begin.line,
-                           layout_node.source.begin.column);
+        state.result.error("layout.element.unknown", "Unsupported XML element: " + layoutNode.name + ".", source, layoutNode.source.begin.line,
+                           layoutNode.source.begin.column);
         return nullptr;
     }
-    if (contract->second.scoped_only) {
-        state.result.error("view.element.scoped", "<" + contract->second.element + "> is valid only in its owning composite.", source,
-                           layout_node.source.begin.line, layout_node.source.begin.column);
+    if (contract->second.scopedOnly) {
+        state.result.error("layout.element.scoped", "<" + contract->second.elementName + "> is valid only in its owning composite.", source,
+                           layoutNode.source.begin.line, layoutNode.source.begin.column);
         return nullptr;
     }
     return &contract->second;
 }
 
 bool LayoutResourceCompiler::resolveWidgetResource(const LayoutElement& element, const WidgetContract& contract, const std::string& source,
-                                                   std::unique_ptr<Widget>& node, BuildState& state) const {
+                                                   std::unique_ptr<Widget>& widget, BuildState& state) const {
     std::string filename;
-    if (!readViewAttribute(element, "filename", filename)) {
-        if (!node) node = contract.create();
+    if (!readLayoutAttribute(element, "filename", filename)) {
+        if (!widget) widget = contract.create();
         return true;
     }
 
-    if (!contract.resource_root) {
-        state.result.error("view.filename.unsupported", "The filename attribute is not supported on <" + contract.element + ">.", source,
+    if (!contract.resourceRoot) {
+        state.result.error("layout.filename.unsupported", "The filename attribute is not supported on <" + contract.elementName + ">.", source,
                            element.source().begin.line, element.source().begin.column);
         return false;
     }
@@ -351,55 +352,55 @@ bool LayoutResourceCompiler::resolveWidgetResource(const LayoutElement& element,
     const bool rooted = filename.rfind("xui/", 0) == 0 || (!filename.empty() && (filename.front() == '/' || filename.front() == '\\'));
     const std::string resource = normalizeResource(rooted ? filename : directoryOf(source) + filename);
     if (resource.empty()) {
-        state.result.error("view.resource.path_invalid", "Invalid resource filename: " + filename + ".", source, element.source().begin.line,
+        state.result.error("layout.resource.path_invalid", "Invalid resource filename: " + filename + ".", source, element.source().begin.line,
                            element.source().begin.column);
         return false;
     }
-    node = createResourceWidget(resource, state);
-    if (!node) return false;
-    if (schemaNameKey(node->element()) != schemaNameKey(contract.resource_root->expected_element)) {
-        state.result.error("view.resource.root_invalid",
-                           "Referenced resource must have a <" + contract.resource_root->expected_element + "> root: " + resource + ".", source,
+    widget = createResourceWidget(resource, state);
+    if (!widget) return false;
+    if (schemaNameKey(widget->elementName()) != schemaNameKey(contract.resourceRoot->expectedElementName)) {
+        state.result.error("layout.resource.root_invalid",
+                           "Referenced resource must have a <" + contract.resourceRoot->expectedElementName + "> root: " + resource + ".", source,
                            element.source().begin.line, element.source().begin.column);
         return false;
     }
     return true;
 }
 
-std::unique_ptr<Widget> LayoutResourceCompiler::buildNode(const LayoutNode& layout_node, const std::string& source, std::unique_ptr<Widget> node,
+std::unique_ptr<Widget> LayoutResourceCompiler::buildNode(const LayoutNode& layoutNode, const std::string& source, std::unique_ptr<Widget> widget,
                                                           BuildState& state) const {
-    const WidgetContract* contract = lookupWidgetContract(layout_node, source, state);
+    const WidgetContract* contract = lookupWidgetContract(layoutNode, source, state);
     if (!contract) return nullptr;
 
-    loadWidgetDefaults(contract->element, state);
-    const LayoutNode* defaults = state.widget_defaults.find(schemaNameKey(layout_node.name))->second;
-    const LayoutElement element(layout_node, defaults);
-    if (!resolveWidgetResource(element, *contract, source, node, state)) return nullptr;
+    loadWidgetDefaults(contract->elementName, state);
+    const LayoutNode* defaults = state.widgetDefaults.find(schemaNameKey(layoutNode.name))->second;
+    const LayoutElement element(layoutNode, defaults);
+    if (!resolveWidgetResource(element, *contract, source, widget, state)) return nullptr;
 
-    Widget* target = node.get();
-    if (!target || target->element() != contract->element) {
-        state.result.error("view.builder.type_mismatch", "Registered builder does not create <" + contract->element + ">.", source,
+    Widget* target = widget.get();
+    if (!target || target->elementName() != contract->elementName) {
+        state.result.error("layout.builder.type_mismatch", "Registered builder does not create <" + contract->elementName + ">.", source,
                            element.source().begin.line, element.source().begin.column);
         return nullptr;
     }
 
-    validateViewAttributes(element, contract->attributes, state.result, source);
-    applyCommonViewAttributes(element, *target, state.result, source, contract->supported_actions);
-    if (contract->attribute_behavior.apply) contract->attribute_behavior.apply(element, *target, state.result, source, state.context);
-    if (contract->composition_behavior.validate)
-        state.authored_widgets.emplace(target, BuildState::AuthoredWidget{target, &layout_node, defaults, contract, source});
+    validateWidgetAttributes(element, contract->attributes, state.result, source);
+    applyCommonWidgetAttributes(element, *target, state.result, source, contract->supportedEvents);
+    if (contract->attributeBehavior.apply) contract->attributeBehavior.apply(element, *target, state.result, source, state.context);
+    if (contract->compositionBehavior.validate)
+        state.authoredWidgetRecords.emplace(target, BuildState::AuthoredWidget{target, &layoutNode, defaults, contract, source});
 
-    if (contract->content_behavior.mode == ViewTextContent::Inline) {
-        if (contract->content_behavior.apply_inline_content)
-            contract->content_behavior.apply_inline_content(compileInlineContent(element.content(), contract->element,
-                                                                                 contract->content_behavior.accepted_inline_content, state.result,
-                                                                                 source, state.context),
-                                                            *target);
-        return node;
+    if (contract->contentBehavior.mode == WidgetTextContentMode::InlineContent) {
+        if (contract->contentBehavior.applyInlineContent)
+            contract->contentBehavior.applyInlineContent(compileInlineContent(element.content(), contract->elementName,
+                                                                              contract->contentBehavior.acceptedInlineContent, state.result, source,
+                                                                              state.context),
+                                                         *target);
+        return widget;
     }
 
     buildChildren(*target, element, *contract, source, state);
-    return node;
+    return widget;
 }
 
 void LayoutResourceCompiler::buildChildren(Widget& target, const LayoutElement& element, const WidgetContract& contract, const std::string& source,
@@ -411,37 +412,37 @@ void LayoutResourceCompiler::buildChildren(Widget& target, const LayoutElement& 
             continue;
         }
 
-        const LayoutNode& child_node = *content.element;
-        if (consumeFlowBreak(child_node, context) == ChildHandling::Handled) continue;
-        if (consumeScopedInline(child_node, context) == ChildHandling::Handled) continue;
-        const LayoutElement child(child_node);
-        const auto part_contract = contract.children_behavior.part_attributes.find(schemaNameKey(child.name()));
-        if (part_contract != contract.children_behavior.part_attributes.end())
-            validateViewAttributes(child, part_contract->second, state.result, source);
-        if (consumeChildContainer(child_node, context) == ChildHandling::Handled) continue;
-        (void)buildRegularChild(child_node, context);
+        const LayoutNode& childNode = *content.node;
+        if (consumeFlowBreak(childNode, context) == ChildHandling::Handled) continue;
+        if (consumeScopedInline(childNode, context) == ChildHandling::Handled) continue;
+        const LayoutElement child(childNode);
+        const auto part_contract = contract.childrenBehavior.partAttributes.find(schemaNameKey(child.name()));
+        if (part_contract != contract.childrenBehavior.partAttributes.end())
+            validateWidgetAttributes(child, part_contract->second, state.result, source);
+        if (consumeChildContainer(childNode, context) == ChildHandling::Handled) continue;
+        (void)buildRegularChild(childNode, context);
     }
-    if (context.pending_flow_break)
-        state.result.error("view.flow_break.trailing", "Flow Break requires a following layout child.", source, element.source().end.line,
+    if (context.pendingFlowBreak)
+        state.result.error("layout.flow_break.trailing", "Flow Break requires a following layout child.", source, element.source().end.line,
                            element.source().end.column);
-    if (contract.content_behavior.mode == ViewTextContent::Widget && !context.widget_text.empty() && contract.content_behavior.apply_text)
-        contract.content_behavior.apply_text(std::move(context.widget_text), target, state.result, source, state.context,
-                                             element.source().begin.line);
+    if (contract.contentBehavior.mode == WidgetTextContentMode::WidgetText && !context.widgetText.empty() && contract.contentBehavior.applyText)
+        contract.contentBehavior.applyText(std::move(context.widgetText), target, state.result, source, state.context, element.source().begin.line);
 }
 
 LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::appendTextContent(const LayoutContent& content, ChildBuildContext& context) const {
-    std::string value = textKey(content.text);
+    std::string value = trimmedText(content.text);
     if (value.empty()) return ChildHandling::Handled;
-    if (context.contract.content_behavior.mode == ViewTextContent::Unsupported) {
-        context.state.result.error("view.text.unsupported", "Text content is not supported in <" + context.contract.element + ">.", context.source,
-                                   content.source.begin.line, content.source.begin.column);
-    } else if (context.contract.content_behavior.mode == ViewTextContent::Widget) {
-        if (!context.widget_text.empty()) context.widget_text += value;
-        else context.widget_text = std::move(value);
+    if (context.contract.contentBehavior.mode == WidgetTextContentMode::Unsupported) {
+        context.state.result.error("layout.text.unsupported", "Text content is not supported in <" + context.contract.elementName + ">.",
+                                   context.source, content.source.begin.line, content.source.begin.column);
+    } else if (context.contract.contentBehavior.mode == WidgetTextContentMode::WidgetText) {
+        if (!context.widgetText.empty()) context.widgetText += value;
+        else context.widgetText = std::move(value);
     } else {
-        TextSource text = localizedViewText(std::move(value), context.state.result, context.source, context.state.context, content.source.begin.line);
-        if (context.contract.content_behavior.create_text_child) {
-            if (auto child = context.contract.content_behavior.create_text_child(std::move(text))) {
+        TextSource text =
+            localizedLayoutText(std::move(value), context.state.result, context.source, context.state.context, content.source.begin.line);
+        if (context.contract.contentBehavior.createTextChild) {
+            if (auto child = context.contract.contentBehavior.createTextChild(std::move(text))) {
                 context.markLayoutChild(*child);
                 context.target.addChild(std::move(child));
             }
@@ -455,58 +456,58 @@ LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::appendTextContent(
     return ChildHandling::Handled;
 }
 
-LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::consumeFlowBreak(const LayoutNode& child_node, ChildBuildContext& context) const {
-    const LayoutElement child(child_node);
+LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::consumeFlowBreak(const LayoutNode& childNode, ChildBuildContext& context) const {
+    const LayoutElement child(childNode);
     if (schemaNameKey(child.name()) != schemaNameKey("br")) return ChildHandling::Unhandled;
-    rejectLogicalAttributes(child, context.state.result, context.source);
-    if (hasAuthoredContent(child_node))
-        context.state.result.error("view.flow_break.children_unsupported", "Flow Break <br> cannot contain content.", context.source,
-                                   child_node.source.begin.line, child_node.source.begin.column);
-    if (!context.has_layout_child)
-        context.state.result.error("view.flow_break.leading", "Flow Break requires a preceding layout child.", context.source,
-                                   child_node.source.begin.line, child_node.source.begin.column);
-    else if (context.pending_flow_break)
-        context.state.result.error("view.flow_break.consecutive", "Consecutive Flow Break directives are not supported.", context.source,
-                                   child_node.source.begin.line, child_node.source.begin.column);
-    else context.pending_flow_break = true;
+    rejectAuthoredAttributes(child, context.state.result, context.source);
+    if (hasAuthoredContent(childNode))
+        context.state.result.error("layout.flow_break.children_unsupported", "Flow Break <br> cannot contain content.", context.source,
+                                   childNode.source.begin.line, childNode.source.begin.column);
+    if (!context.hasLayoutChild)
+        context.state.result.error("layout.flow_break.leading", "Flow Break requires a preceding layout child.", context.source,
+                                   childNode.source.begin.line, childNode.source.begin.column);
+    else if (context.pendingFlowBreak)
+        context.state.result.error("layout.flow_break.consecutive", "Consecutive Flow Break directives are not supported.", context.source,
+                                   childNode.source.begin.line, childNode.source.begin.column);
+    else context.pendingFlowBreak = true;
     return ChildHandling::Handled;
 }
 
-LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::consumeScopedInline(const LayoutNode& child_node, ChildBuildContext& context) const {
-    const LayoutElement child(child_node);
-    const auto scoped_inline = context.contract.content_behavior.scoped_inline_content.find(schemaNameKey(child.name()));
-    if (scoped_inline == context.contract.content_behavior.scoped_inline_content.end()) return ChildHandling::Unhandled;
-    rejectLogicalAttributes(child, context.state.result, context.source);
+LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::consumeScopedInline(const LayoutNode& childNode, ChildBuildContext& context) const {
+    const LayoutElement child(childNode);
+    const auto scoped_inline = context.contract.contentBehavior.scopedInlineContent.find(schemaNameKey(child.name()));
+    if (scoped_inline == context.contract.contentBehavior.scopedInlineContent.end()) return ChildHandling::Unhandled;
+    rejectAuthoredAttributes(child, context.state.result, context.source);
     Widget* scoped_part =
-        scoped_inline->second.apply(compileInlineContent(child.content(), scoped_inline->second.element, scoped_inline->second.accepted,
+        scoped_inline->second.apply(compileInlineContent(child.content(), scoped_inline->second.elementName, scoped_inline->second.accepted,
                                                          context.state.result, context.source, context.state.context),
                                     context.target, context.state.result, context.source, child.source().begin.line, child.source().begin.column);
     if (scoped_part) context.markLayoutChild(*scoped_part);
     return ChildHandling::Handled;
 }
 
-LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::consumeChildContainer(const LayoutNode& child_node, ChildBuildContext& context) const {
-    if (!context.contract.children_behavior.claim) return ChildHandling::Unhandled;
-    const LayoutElement child(child_node);
-    const ChildClaim claim = context.contract.children_behavior.claim(child, context.target, context.state.result, context.source);
+LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::consumeChildContainer(const LayoutNode& childNode, ChildBuildContext& context) const {
+    if (!context.contract.childrenBehavior.claim) return ChildHandling::Unhandled;
+    const LayoutElement child(childNode);
+    const ChildClaim claim = context.contract.childrenBehavior.claim(child, context.target, context.state.result, context.source);
     if (claim.kind() == ChildClaim::Kind::NotHandled) return ChildHandling::Unhandled;
     if (Widget* container = claim.container()) {
         for (const LayoutContent& nested_content : child.content()) {
             if (nested_content.isText()) {
-                if (!textKey(nested_content.text).empty())
-                    context.state.result.error("view.text.unsupported", "Text content is not supported in <" + child.name() + ">.", context.source,
+                if (!trimmedText(nested_content.text).empty())
+                    context.state.result.error("layout.text.unsupported", "Text content is not supported in <" + child.name() + ">.", context.source,
                                                nested_content.source.begin.line, nested_content.source.begin.column);
                 continue;
             }
-            if (auto child_widget = buildNode(*nested_content.element, context.source, nullptr, context.state))
+            if (auto child_widget = buildNode(*nested_content.node, context.source, nullptr, context.state))
                 container->addChild(std::move(child_widget));
         }
     }
     return ChildHandling::Handled;
 }
 
-LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::buildRegularChild(const LayoutNode& child_node, ChildBuildContext& context) const {
-    if (auto child_widget = buildNode(child_node, context.source, nullptr, context.state)) {
+LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::buildRegularChild(const LayoutNode& childNode, ChildBuildContext& context) const {
+    if (auto child_widget = buildNode(childNode, context.source, nullptr, context.state)) {
         context.markLayoutChild(*child_widget);
         context.target.addChild(std::move(child_widget));
     }

@@ -146,6 +146,26 @@ if (HAVOK)
    endif()
 endif ()
 
+set(viewer_RDUI_SOURCES
+    rdui/componentcontroller.cpp
+    rdui/componentmanager.cpp
+    rdui/componentpersistence.cpp
+    rdui/components/floaterdemo.cpp
+    rdui/detachedfloatermanager.cpp
+    rdui/detachedfloaterwindow.cpp
+    rdui/floaterhost.cpp
+    rdui/inputbridge.cpp
+    rdui/runtime.cpp
+    rdui/runtimewindowadapter.cpp
+    rdui/settingsadapter.cpp
+    rdui/skin/reloadcoordinator.cpp
+    rdui/skin/resolver.cpp
+    rdui/skin/resources.cpp
+    )
+
+set(viewer_RDUI_RUNTIME_TEST_SOURCES ${viewer_RDUI_SOURCES})
+list(REMOVE_ITEM viewer_RDUI_RUNTIME_TEST_SOURCES rdui/components/floaterdemo.cpp rdui/runtime.cpp)
+
 set(viewer_SOURCE_FILES
     ao.cpp
     aoengine.cpp
@@ -902,18 +922,6 @@ set(viewer_SOURCE_FILES
     lutcube.cpp
     noise.cpp
     pipeline.cpp
-    rdui/components/floaterdemo.cpp
-    rdui/detachedfloatermanager.cpp
-    rdui/detachedfloaterwindow.cpp
-    rdui/floaterdocumentmanager.cpp
-    rdui/floaterplacementstore.cpp
-    rdui/floaterstatestore.cpp
-    rdui/inputbridge.cpp
-    rdui/nativewindow.cpp
-    rdui/runtime.cpp
-    rdui/skin/reloadcoordinator.cpp
-    rdui/skin/resolver.cpp
-    rdui/skin/resources.cpp
     rlvactions.cpp
     rlvenvironment.cpp
     rlvcommon.cpp
@@ -925,6 +933,7 @@ set(viewer_SOURCE_FILES
     rlvinventory.cpp
     rlvlocks.cpp
     rlvui.cpp
+    ${viewer_RDUI_SOURCES}
     )
 
 set(viewer_HEADER_FILES
@@ -1679,17 +1688,22 @@ set(viewer_HEADER_FILES
     lutcube.h
     noise.h
     pipeline.h
+    rdui/componentcontroller.h
+    rdui/componentcontrollereventadapter.h
+    rdui/componentcontrollerevents.h
+    rdui/componentcontrollerregistration.h
+    rdui/componentidentity.h
+    rdui/componentmanager.h
+    rdui/componentpersistence.h
     rdui/components/floaterdemo.h
     rdui/detachedfloatermanager.h
     rdui/detachedfloaterwindow.h
-    rdui/floatercontroller.h
-    rdui/floaterdocumentmanager.h
-    rdui/floaterplacementstore.h
-    rdui/floaterstatestore.h
+    rdui/floaterhost.h
     rdui/inputbridge.h
     rdui/nativeinput.h
-    rdui/nativewindow.h
     rdui/runtime.h
+    rdui/runtimewindowadapter.h
+    rdui/settingsadapter.h
     rdui/skin/reloadcoordinator.h
     rdui/skin/resolver.h
     rdui/skin/resources.h
@@ -1898,6 +1912,7 @@ set(viewer_APPSETTINGS_FILES
     app_settings/settings_files.xml
     app_settings/settings_per_account.xml
     app_settings/settings_per_account_alchemy.xml
+    app_settings/settings_per_account_radia.xml
     app_settings/std_bump.ini
     app_settings/toolbars.xml
     app_settings/trees.xml
@@ -2464,7 +2479,7 @@ if (BUILD_TESTING)
 
   set(test_project ${VIEWER_BINARY_NAME})
 
-  function(newview_rdui_add_test logical_name source_path test_source_path)
+  function(newview_ui_add_test logical_name source_path test_source_path)
     cmake_parse_arguments(
       TEST
       ""
@@ -2525,45 +2540,60 @@ if (BUILD_TESTING)
     add_dependencies(BUILD_TESTS ${target})
   endfunction()
 
-  newview_rdui_add_test(
-    rduidetachedfloatermanager
+  newview_ui_add_test(
+    uicomponentmanager
+    rdui/componentmanager.cpp
+    tests/rdui/componentmanager_test.cpp
+    ADDITIONAL_SOURCE_FILES rdui/componentcontroller.cpp
+    ADDITIONAL_PROJECTS rdui
+  )
+  newview_ui_add_test(
+    uisettingsadapter
+    rdui/settingsadapter.cpp
+    tests/rdui/settingsadapter_test.cpp
+    ADDITIONAL_PROJECTS rdui
+  )
+  newview_ui_add_test(
+    uicomponentpersistence
+    rdui/componentpersistence.cpp
+    tests/rdui/componentpersistence_test.cpp
+    ADDITIONAL_PROJECTS rdui
+  )
+  newview_ui_add_test(
+    uidetachedfloatermanager
     rdui/detachedfloatermanager.cpp
     tests/rdui/detachedfloatermanager_test.cpp
-    ADDITIONAL_SOURCE_FILES rdui/floaterplacementstore.cpp
+    ADDITIONAL_SOURCE_FILES rdui/componentpersistence.cpp
     ADDITIONAL_PROJECTS rdui
   )
-  newview_rdui_add_test(
-    rduifloaterdocumentmanager
-    rdui/floaterdocumentmanager.cpp
-    tests/rdui/floaterdocumentmanager_test.cpp
-    ADDITIONAL_PROJECTS rdui
-  )
-  newview_rdui_add_test(
-    rduifloaterplacementstore
-    rdui/floaterplacementstore.cpp
-    tests/rdui/floaterplacementstore_test.cpp
-  )
-  newview_rdui_add_test(
-    rduifloaterstatestore
-    rdui/floaterstatestore.cpp
-    tests/rdui/floaterstatestore_test.cpp
-    ADDITIONAL_PROJECTS rdui
-  )
-  newview_rdui_add_test(
-    rduiinputbridge
+  newview_ui_add_test(
+    uiinputbridge
     rdui/inputbridge.cpp
     tests/rdui/inputbridge_test.cpp
     ADDITIONAL_PROJECTS rdui
   )
-  newview_rdui_add_test(
-    rduiskinreloadcoordinator
-    rdui/skin/reloadcoordinator.cpp
-    tests/rdui/skin/reloadcoordinator_test.cpp
-    ADDITIONAL_SOURCE_FILES rdui/floaterdocumentmanager.cpp
+  newview_ui_add_test(
+    uiruntimewindowadapter
+    rdui/runtimewindowadapter.cpp
+    tests/rdui/runtimewindowadapter_test.cpp
     ADDITIONAL_PROJECTS rdui
   )
-  newview_rdui_add_test(
-    rduiskinresolver
+  newview_ui_add_test(
+    uiruntime
+    rdui/runtime.cpp
+    tests/rdui/runtime_test.cpp
+    ADDITIONAL_SOURCE_FILES ${viewer_RDUI_RUNTIME_TEST_SOURCES}
+    ADDITIONAL_PROJECTS rdui llrender llwindow llxml
+  )
+  newview_ui_add_test(
+    uiskinreloadcoordinator
+    rdui/skin/reloadcoordinator.cpp
+    tests/rdui/skin/reloadcoordinator_test.cpp
+    ADDITIONAL_SOURCE_FILES rdui/componentcontroller.cpp rdui/componentmanager.cpp
+    ADDITIONAL_PROJECTS rdui
+  )
+  newview_ui_add_test(
+    uiskinresolver
     rdui/skin/resolver.cpp
     tests/rdui/skin/resolver_test.cpp
     ADDITIONAL_PROJECTS rdui

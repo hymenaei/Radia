@@ -43,12 +43,12 @@ namespace {
 class MiddleAlignedPanel final : public Panel {
 protected:
     void constrainResolvedStyle(Style& style) const override {
-        if (!style.vertical_align_set) style.vertical_align = VerticalAlign::Middle;
+        if (!style.verticalAlignSet) style.verticalAlign = VerticalAlign::Middle;
     }
 };
 } // namespace
 
-Floater::Floater() : Widget(ELEMENT) {
+Floater::Floater() : Widget(sElement) {
     detail::instantiateCompositeParts(*this, detail::floaterContract());
     configureCompositeParts();
 }
@@ -64,7 +64,7 @@ void Floater::configureCompositeParts() {
 }
 
 WidgetContract detail::floaterContract() {
-    return defineWidget<Floater>(Floater::ELEMENT)
+    return defineWidget<Floater>(Floater::sElement)
         .attributes({
             localizedStringAttribute("title", &Floater::setTitleContent),
             stringAttribute("icon", &Floater::setIcon),
@@ -76,15 +76,15 @@ WidgetContract detail::floaterContract() {
             booleanAttribute("canDetach", &Floater::setCanDetach),
             booleanAttribute("showHeaderIdentity", &Floater::setShowHeaderIdentity),
         })
-        .validate([](const LayoutElement&, Floater& floater, ViewBuildResult& result, const std::string& source, const ViewBuildContext*) {
+        .validate([](const LayoutElement&, Floater& floater, LayoutBuildResult& result, const std::string& source, const LayoutBuildContext*) {
             if (floater.canMinimize() && floater.title().empty())
-                result.error("view.floater.title_required", "A minimizable floater requires a non-empty title.", source);
+                result.error("layout.floater.title_required", "A minimizable floater requires a non-empty title.", source);
         })
         .childContainer("header", {},
-                        [](const LayoutElement& child, Floater& floater, ViewBuildResult& result, const std::string& source) -> Widget* {
+                        [](const LayoutElement& child, Floater& floater, LayoutBuildResult& result, const std::string& source) -> Widget* {
                             Panel* header = floater.claimCustomHeader();
-                            if (!header) result.error("view.part.duplicate", "A floater may declare only one <header>.", source);
-                            else applyCommonViewAttributes(child, *header, result, source);
+                            if (!header) result.error("layout.part.duplicate", "A floater may declare only one <header>.", source);
+                            else applyCommonWidgetAttributes(child, *header, result, source);
                             return header;
                         })
         .state(WidgetState::Minimized)
@@ -100,11 +100,11 @@ WidgetContract detail::floaterContract() {
         .build();
 }
 
-Floater& Floater::setTitle(std::string localization_key) {
+Floater& Floater::setTitle(std::string localizationKey) {
     const System* system = attachedSystem();
-    if (system) return setTitleContent(system->localized(std::move(localization_key)));
-    LocalizationRequest request = LocalizationRequest::text(localization_key);
-    return setTitleContent(TextSource::localized(std::move(request), InlineContent::text(std::move(localization_key))));
+    if (system) return setTitleContent(system->localize(std::move(localizationKey)));
+    LocalizationRequest request = LocalizationRequest::text(localizationKey);
+    return setTitleContent(TextSource::fromLocalization(std::move(request), InlineContent::text(std::move(localizationKey))));
 }
 
 Floater& Floater::setTitleContent(TextSource content) {
@@ -198,14 +198,22 @@ Panel* Floater::claimCustomHeader() {
 }
 
 void Floater::updateHeaderPresentation() {
-    const bool show_identity = mMinimized || mShowHeaderIdentity;
-    if (mHeaderIcon) mHeaderIcon->setVisibility(show_identity && !mIcon.empty() ? Visibility::Visible : Visibility::Collapsed);
-    if (mHeaderTitle) mHeaderTitle->setVisibility(show_identity && !title().empty() ? Visibility::Visible : Visibility::Collapsed);
+    const bool showIdentity = mMinimized || mShowHeaderIdentity;
+    if (mHeaderIcon) mHeaderIcon->setVisibility(showIdentity && !mIcon.empty() ? Visibility::Visible : Visibility::Collapsed);
+    if (mHeaderTitle) mHeaderTitle->setVisibility(showIdentity && !title().empty() ? Visibility::Visible : Visibility::Collapsed);
+}
+
+Floater& Floater::setLifecycleCallbacks(std::function<void()> onOpen, std::function<void()> onClose) {
+    mOnOpen = std::move(onOpen);
+    mOnClose = std::move(onClose);
+    return *this;
 }
 
 void Floater::open() {
+    const bool wasClosed = mClosed;
     mClosed = false;
     setVisibility(Visibility::Visible);
+    if (wasClosed && mOnOpen) mOnOpen();
 }
 
 void Floater::close() {
@@ -214,6 +222,7 @@ void Floater::close() {
     mInteraction = FloaterInteraction::Idle;
     setVisibility(Visibility::Collapsed);
     if (Surface* surface = attachedSurface()) surface->floaterClosed(*this);
+    if (mOnClose) mOnClose();
 }
 
 void Floater::setMinimized(bool minimized) {
@@ -231,12 +240,12 @@ void Floater::setMinimized(bool minimized) {
 
         float width = rect().w;
         float height = mHeader->rect().h;
-        if (const StyleSheet* style_sheet = attachedStyleSheet()) {
-            const Vec2 header_size = measureWidget(*mHeader, *style_sheet, attachedTextMetrics());
-            const Style floater_style = resolveWidgetStyle(*style_sheet, *this);
-            const Style header_style = resolveWidgetStyle(*style_sheet, *mHeader);
-            width = header_size.x + header_style.margin.horizontal() + floater_style.padding.horizontal();
-            height = header_size.y + header_style.margin.vertical() + floater_style.padding.vertical();
+        if (const StyleSheet* styleSheet = attachedStyleSheet()) {
+            const Vec2 headerSize = measureWidget(*mHeader, *styleSheet, attachedTextMetrics());
+            const Style floaterStyle = resolveWidgetStyle(*styleSheet, *this);
+            const Style headerStyle = resolveWidgetStyle(*styleSheet, *mHeader);
+            width = headerSize.x + headerStyle.margin.horizontal() + floaterStyle.padding.horizontal();
+            height = headerSize.y + headerStyle.margin.vertical() + floaterStyle.padding.vertical();
         }
         if (mMovementBounds.w > 0.f) width = std::min(width, mMovementBounds.w);
         setRect({rect().x, rect().top() - height, width, height});
@@ -279,9 +288,9 @@ Vec2 Floater::clampedPosition(const Vec2& position) const {
             std::clamp(position.y, mMovementBounds.bottom(), std::max(mMovementBounds.bottom(), mMovementBounds.top() - rect().h))};
 }
 
-void Floater::setAuthoredSize(const Vec2& size, const Vec2& content_size) {
+void Floater::setAuthoredSize(const Vec2& size, const Vec2& contentSize) {
     mAuthoredSize = {std::max(0.f, size.x), std::max(0.f, size.y)};
-    mAuthoredContentSize = {std::max(0.f, content_size.x), std::max(0.f, content_size.y)};
+    mAuthoredContentSize = {std::max(0.f, contentSize.x), std::max(0.f, contentSize.y)};
     mAuthoredSizeCaptured = true;
 }
 
@@ -324,18 +333,18 @@ bool Floater::updatePointerInteraction(const PointerEvent& event) {
         return true;
     }
     if (mInteraction != FloaterInteraction::Move) return false;
-    const Vec2 desired_position = event.position - mDragOffset;
-    const Vec2 position = clampedPosition(desired_position);
-    constexpr float BREAKAWAY_DISTANCE = 100.f;
-    const float pointer_overshoot = std::max({mMovementBounds.left() - event.position.x, event.position.x - mMovementBounds.right(),
-                                              mMovementBounds.bottom() - event.position.y, event.position.y - mMovementBounds.top(), 0.f});
+    const Vec2 desiredPosition = event.position - mDragOffset;
+    const Vec2 position = clampedPosition(desiredPosition);
+    constexpr float kBreakawayDistance = 100.f;
+    const float pointerOvershoot = std::max({mMovementBounds.left() - event.position.x, event.position.x - mMovementBounds.right(),
+                                             mMovementBounds.bottom() - event.position.y, event.position.y - mMovementBounds.top(), 0.f});
     Surface* surface = attachedSurface();
-    if (!mDetachRequested && !mMinimized && mCanDetach && surface && surface->canDetachFloater(*this) && pointer_overshoot >= BREAKAWAY_DISTANCE) {
+    if (!mDetachRequested && !mMinimized && mCanDetach && surface && surface->canDetachFloater(*this) && pointerOvershoot >= kBreakawayDistance) {
         mDetachRequested = true;
-        const Widget* original_parent = parent();
-        surface->floaterDetachRequested(*this, desired_position, mDragOffset);
+        const Widget* originalParent = parent();
+        surface->floaterDetachRequested(*this, desiredPosition, mDragOffset);
         Floater* current = self.get();
-        if (!current || current->attachedSurface() != surface || current->parent() != original_parent) return true;
+        if (!current || current->attachedSurface() != surface || current->parent() != originalParent) return true;
     }
     const Vec2 delta = position - Vec2{rect().x, rect().y};
     if (delta.x != 0.f || delta.y != 0.f) {
@@ -354,8 +363,10 @@ bool Floater::endPointerInteraction(const PointerEvent&) {
     const bool handled = interaction != FloaterInteraction::Idle;
     mInteraction = FloaterInteraction::Idle;
     mDetachRequested = false;
-    if (interaction == FloaterInteraction::Resize)
-        if (Surface* surface = attachedSurface()) surface->floaterResized(*this, true);
+    if (Surface* surface = attachedSurface()) {
+        if (interaction == FloaterInteraction::Move) surface->floaterMoveEnded(*this);
+        else if (interaction == FloaterInteraction::Resize) surface->floaterResized(*this, true);
+    }
     return handled;
 }
 

@@ -1,6 +1,6 @@
 /**
- * @file viewresult.h
- * @brief Defines diagnostics and output for building a Widget tree from a Layout Resource.
+ * @file settingresolver.h
+ * @brief Defines the internal seam for resolving named setting bindings.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -22,21 +22,27 @@
  * $/LicenseInfo$
  */
 
-#ifndef RD_LAYOUT_VIEWRESULT_H
-#define RD_LAYOUT_VIEWRESULT_H
+#ifndef RD_BINDING_SETTINGRESOLVER_H
+#define RD_BINDING_SETTINGRESOLVER_H
 
 #include <memory>
-#include "diagnostic.h"
-#include "widgets/widget.h"
+#include <string_view>
+#include <typeindex>
+#include "binding/valuebinding.h"
 
 namespace rdui {
-struct ViewBuildResult : DiagnosticResult {
-    std::unique_ptr<Widget> root;
-    bool ok() const { return !hasErrors() && root != nullptr; }
+struct SettingResolution {
+    enum class ResolutionStatus { Found, Missing, TypeMismatch, Invalid };
 
-    template<typename WidgetT> WidgetT* rootAs() { return dynamic_cast<WidgetT*>(root.get()); }
+    ResolutionStatus status = ResolutionStatus::Missing;
+    std::shared_ptr<ValueBindingBase> binding;
+};
 
-    template<typename WidgetT> const WidgetT* rootAs() const { return dynamic_cast<const WidgetT*>(root.get()); }
+class SettingResolver {
+public:
+    virtual ~SettingResolver() = default;
+
+    virtual SettingResolution resolve(std::string_view settingName, std::type_index requestedType) = 0;
 };
 } // namespace rdui
-#endif // RD_LAYOUT_VIEWRESULT_H
+#endif // RD_BINDING_SETTINGRESOLVER_H

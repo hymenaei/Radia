@@ -29,7 +29,7 @@
 // every UI caller uses retained painting, remove the legacy #else branch and
 // make the retained path the default fragment program.
 #ifdef PAINT_SHADER
-out vec4 frag_color;
+out vec4 fragColor;
 
 uniform int paintOp;
 uniform vec4 shapeRect;
@@ -64,42 +64,42 @@ uniform vec4 effectMaskRect;
 uniform float effectMaskRadius;
 uniform int effectRoundedMask;
 
-const int PAINT_OP_DIRECT = 0;
-const int PAINT_OP_FILL = 1;
-const int PAINT_OP_BORDER = 2;
-const int PAINT_OP_GRADIENT = 3;
-const int PAINT_OP_OUTER_SHADOW = 4;
-const int PAINT_OP_INSET_SHADOW = 5;
-const int PAINT_OP_GRADIENT_BORDER = 6;
-const int PAINT_OP_BLUR = 7;
-const int PAINT_OP_COMPOSITE = 8;
+const int kPaintOpDirect = 0;
+const int kPaintOpFill = 1;
+const int kPaintOpBorder = 2;
+const int kPaintOpGradient = 3;
+const int kPaintOpOuterShadow = 4;
+const int kPaintOpInsetShadow = 5;
+const int kPaintOpGradientBorder = 6;
+const int kPaintOpBlur = 7;
+const int kPaintOpComposite = 8;
 
-const int GRADIENT_LINEAR = 0;
-const int GRADIENT_RADIAL = 1;
-const int GRADIENT_CONIC = 2;
+const int kGradientLinear = 0;
+const int kGradientRadial = 1;
+const int kGradientConic = 2;
 
-const int OUTLINE_SOLID = 0;
-const int OUTLINE_DASHED = 1;
+const int kOutlineSolid = 0;
+const int kOutlineDashed = 1;
 
-in vec4 vertex_color;
-in vec2 shape_coord;
+in vec4 vertexColor;
+in vec2 shapeCoord;
 
 float roundedRectDistance(vec2 p, vec2 size, float radius) {
     float r = clamp(radius, 0.0, min(size.x, size.y) * 0.5);
-    vec2 half_size = size * 0.5;
-    vec2 q = abs(p - half_size) - (half_size - vec2(r));
+    vec2 halfSize = size * 0.5;
+    vec2 q = abs(p - halfSize) - (halfSize - vec2(r));
     return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
-float coverageFromDistance(float signed_distance) {
-    float aa = max(fwidth(signed_distance), 1.0e-4);
-    return 1.0 - smoothstep(-aa * 0.5, aa * 0.5, signed_distance);
+float coverageFromDistance(float signedDistance) {
+    float aa = max(fwidth(signedDistance), 1.0e-4);
+    return 1.0 - smoothstep(-aa * 0.5, aa * 0.5, signedDistance);
 }
 
 float roundedRectPerimeterCoordinate(vec2 p, vec2 size, float radius) {
-    const float half_pi = 1.57079632679;
-    const float pi = 3.14159265359;
-    const float two_pi = 6.28318530718;
+    const float kHalfPi = 1.57079632679;
+    const float kPi = 3.14159265359;
+    const float kTwoPi = 6.28318530718;
     float r = clamp(radius, 0.0, min(size.x, size.y) * 0.5);
     float horizontal = max(size.x - r * 2.0, 0.0);
     float vertical = max(size.y - r * 2.0, 0.0);
@@ -107,122 +107,122 @@ float roundedRectPerimeterCoordinate(vec2 p, vec2 size, float radius) {
 
     if (r > 0.0 && point.x > size.x - r && point.y < r) {
         float angle = atan(point.y - r, point.x - (size.x - r));
-        return horizontal + r * (angle + half_pi);
+        return horizontal + r * (angle + kHalfPi);
     }
 
     if (r > 0.0 && point.x > size.x - r && point.y > size.y - r) {
         float angle = atan(point.y - (size.y - r), point.x - (size.x - r));
-        return horizontal + r * half_pi + vertical + r * angle;
+        return horizontal + r * kHalfPi + vertical + r * angle;
     }
 
     if (r > 0.0 && point.x < r && point.y > size.y - r) {
         float angle = atan(point.y - (size.y - r), point.x - r);
-        return horizontal * 2.0 + r * 2.0 * half_pi + vertical + r * (angle - half_pi);
+        return horizontal * 2.0 + r * 2.0 * kHalfPi + vertical + r * (angle - kHalfPi);
     }
 
     if (r > 0.0 && point.x < r && point.y < r) {
         float angle = atan(point.y - r, point.x - r);
-        if (angle < 0.0) angle += two_pi;
-        return horizontal * 2.0 + r * 3.0 * half_pi + vertical * 2.0 + r * (angle - pi);
+        if (angle < 0.0) angle += kTwoPi;
+        return horizontal * 2.0 + r * 3.0 * kHalfPi + vertical * 2.0 + r * (angle - kPi);
     }
 
-    float bottom_distance = abs(point.y);
-    float right_distance = abs(size.x - point.x);
-    float top_distance = abs(size.y - point.y);
-    float left_distance = abs(point.x);
-    float nearest = min(min(bottom_distance, right_distance), min(top_distance, left_distance));
-    if (nearest == bottom_distance) return clamp(point.x - r, 0.0, horizontal);
-    if (nearest == right_distance) return horizontal + r * half_pi + clamp(point.y - r, 0.0, vertical);
-    if (nearest == top_distance) return horizontal + r * 2.0 * half_pi + vertical + clamp(size.x - r - point.x, 0.0, horizontal);
-    return horizontal * 2.0 + r * 3.0 * half_pi + vertical + clamp(size.y - r - point.y, 0.0, vertical);
+    float bottomDistance = abs(point.y);
+    float rightDistance = abs(size.x - point.x);
+    float topDistance = abs(size.y - point.y);
+    float leftDistance = abs(point.x);
+    float nearest = min(min(bottomDistance, rightDistance), min(topDistance, leftDistance));
+    if (nearest == bottomDistance) return clamp(point.x - r, 0.0, horizontal);
+    if (nearest == rightDistance) return horizontal + r * kHalfPi + clamp(point.y - r, 0.0, vertical);
+    if (nearest == topDistance) return horizontal + r * 2.0 * kHalfPi + vertical + clamp(size.x - r - point.x, 0.0, horizontal);
+    return horizontal * 2.0 + r * 3.0 * kHalfPi + vertical + clamp(size.y - r - point.y, 0.0, vertical);
 }
 
-float dashedOutlineCoverage(vec2 local_coord, vec2 size, float radius, float width) {
-    float center_offset = width * 0.5;
-    vec2 center_size = max(size - vec2(width), vec2(0.0));
-    float center_radius = max(radius - center_offset, 0.0);
-    float horizontal = max(center_size.x - center_radius * 2.0, 0.0);
-    float vertical = max(center_size.y - center_radius * 2.0, 0.0);
-    float perimeter = horizontal * 2.0 + vertical * 2.0 + center_radius * 6.28318530718;
+float dashedOutlineCoverage(vec2 localCoord, vec2 size, float radius, float width) {
+    float centerOffset = width * 0.5;
+    vec2 centerSize = max(size - vec2(width), vec2(0.0));
+    float centerRadius = max(radius - centerOffset, 0.0);
+    float horizontal = max(centerSize.x - centerRadius * 2.0, 0.0);
+    float vertical = max(centerSize.y - centerRadius * 2.0, 0.0);
+    float perimeter = horizontal * 2.0 + vertical * 2.0 + centerRadius * 6.28318530718;
     if (perimeter <= 1.0e-4) return 1.0;
-    float preferred_period = max(width * 5.0, 1.0);
-    float dash_count = max(floor(perimeter / preferred_period + 0.5), 1.0);
-    float period = perimeter / dash_count;
-    float dash_length = period * 0.6;
-    float coordinate = roundedRectPerimeterCoordinate(local_coord - vec2(center_offset), center_size, center_radius);
+    float preferredPeriod = max(width * 5.0, 1.0);
+    float dashCount = max(floor(perimeter / preferredPeriod + 0.5), 1.0);
+    float period = perimeter / dashCount;
+    float dashLength = period * 0.6;
+    float coordinate = roundedRectPerimeterCoordinate(localCoord - vec2(centerOffset), centerSize, centerRadius);
     float phase = mod(coordinate, period);
-    float dash_distance = abs(phase - dash_length * 0.5) - dash_length * 0.5;
+    float dashDistance = abs(phase - dashLength * 0.5) - dashLength * 0.5;
     float aa = max(fwidth(coordinate), 1.0e-4);
-    return 1.0 - smoothstep(-aa * 0.5, aa * 0.5, dash_distance);
+    return 1.0 - smoothstep(-aa * 0.5, aa * 0.5, dashDistance);
 }
 
-vec4 blurredEffectColor(vec2 texture_coord) {
-    vec2 pixel_coord = texture_coord * effectTextureSize;
-    vec2 gradient_axis = effectGradientEnd - effectGradientStart;
-    float amount = clamp(dot(pixel_coord - effectGradientStart, gradient_axis) / max(dot(gradient_axis, gradient_axis), 1.0e-6), 0.0, 1.0);
+vec4 blurredEffectColor(vec2 textureCoord) {
+    vec2 pixelCoord = textureCoord * effectTextureSize;
+    vec2 gradientAxis = effectGradientEnd - effectGradientStart;
+    float amount = clamp(dot(pixelCoord - effectGradientStart, gradientAxis) / max(dot(gradientAxis, gradientAxis), 1.0e-6), 0.0, 1.0);
     float radius = mix(effectBlurRadii.x, effectBlurRadii.y, amount);
-    if (radius <= 1.0e-4) return texture(diffuseMap, texture_coord);
+    if (radius <= 1.0e-4) return texture(diffuseMap, textureCoord);
 
-    const int max_samples_per_side = 32;
-    float samples_per_side = min(ceil(radius), float(max_samples_per_side));
-    float sample_step = radius / samples_per_side;
+    const int maxSamplesPerSide = 32;
+    float samplesPerSide = min(ceil(radius), float(maxSamplesPerSide));
+    float sampleStep = radius / samplesPerSide;
     float sigma = max(radius / 3.0, 0.5);
-    float inverse_two_sigma_squared = 0.5 / (sigma * sigma);
+    float inverseTwoSigmaSquared = 0.5 / (sigma * sigma);
     vec2 texel = effectBlurAxis / max(effectTextureSize, vec2(1.0));
     vec4 color = vec4(0.0);
-    float total_weight = 0.0;
-    for (int sample_index = -max_samples_per_side; sample_index <= max_samples_per_side; ++sample_index) {
-        float sample_offset = float(sample_index) * sample_step;
-        if (abs(sample_offset) > radius + 1.0e-4) continue;
-        float weight = exp(-sample_offset * sample_offset * inverse_two_sigma_squared);
-        color += texture(diffuseMap, texture_coord + texel * sample_offset) * weight;
-        total_weight += weight;
+    float totalWeight = 0.0;
+    for (int sampleIndex = -maxSamplesPerSide; sampleIndex <= maxSamplesPerSide; ++sampleIndex) {
+        float sampleOffset = float(sampleIndex) * sampleStep;
+        if (abs(sampleOffset) > radius + 1.0e-4) continue;
+        float weight = exp(-sampleOffset * sampleOffset * inverseTwoSigmaSquared);
+        color += texture(diffuseMap, textureCoord + texel * sampleOffset) * weight;
+        totalWeight += weight;
     }
-    return color / max(total_weight, 1.0e-6);
+    return color / max(totalWeight, 1.0e-6);
 }
 
-vec4 compositedEffectColor(vec2 texture_coord) {
-    vec4 color = texture(diffuseMap, texture_coord);
+vec4 compositedEffectColor(vec2 textureCoord) {
+    vec4 color = texture(diffuseMap, textureCoord);
     if (effectRoundedMask != 0) {
-        vec2 point = effectCaptureRect.xy + texture_coord * effectCaptureRect.zw;
+        vec2 point = effectCaptureRect.xy + textureCoord * effectCaptureRect.zw;
         float distance = roundedRectDistance(point - effectMaskRect.xy, effectMaskRect.zw, effectMaskRadius);
         float mask = coverageFromDistance(distance);
-        return vec4(color.rgb, color.a * mask);
+        return vec4(color.rgb, mask);
     }
 
     color.rgb = color.a > 1.0e-6 ? color.rgb / color.a : vec3(0.0);
     return color;
 }
 
-float gradientAmount(vec2 local_coord) {
+float gradientAmount(vec2 localCoord) {
     float amount = 0.0;
-    if (gradientKind == GRADIENT_LINEAR) {
+    if (gradientKind == kGradientLinear) {
         vec2 axis = gradientEnd - gradientStart;
-        amount = dot(local_coord - gradientStart, axis) / max(dot(axis, axis), 1.0e-6);
-    } else if (gradientKind == GRADIENT_RADIAL) amount = length((local_coord - gradientCenter) / max(gradientRadius, vec2(1.0e-4)));
+        amount = dot(localCoord - gradientStart, axis) / max(dot(axis, axis), 1.0e-6);
+    } else if (gradientKind == kGradientRadial) amount = length((localCoord - gradientCenter) / max(gradientRadius, vec2(1.0e-4)));
     else {
         const float tau = 6.28318530718;
-        vec2 delta = local_coord - gradientCenter;
+        vec2 delta = localCoord - gradientCenter;
         amount = atan(delta.x, delta.y) / tau - gradientAngle / 360.0;
     }
 
     return amount;
 }
 
-float gradientPixelWidth(vec2 local_coord, float amount) {
-    if (gradientKind != GRADIENT_CONIC) return fwidth(amount);
+float gradientPixelWidth(vec2 localCoord, float amount) {
+    if (gradientKind != kGradientConic) return fwidth(amount);
 
     const float tau = 6.28318530718;
-    vec2 delta = local_coord - gradientCenter;
-    vec2 delta_dx = dFdx(delta);
-    vec2 delta_dy = dFdy(delta);
-    float radius_squared = dot(delta, delta);
-    float footprint_squared = max(dot(delta_dx, delta_dx), dot(delta_dy, delta_dy));
-    if (radius_squared <= footprint_squared * 0.25) return 1.0;
-    radius_squared = max(radius_squared, 1.0e-6);
-    float turn_dx = (delta.y * delta_dx.x - delta.x * delta_dx.y) / (tau * radius_squared);
-    float turn_dy = (delta.y * delta_dy.x - delta.x * delta_dy.y) / (tau * radius_squared);
-    return abs(turn_dx) + abs(turn_dy);
+    vec2 delta = localCoord - gradientCenter;
+    vec2 deltaDx = dFdx(delta);
+    vec2 deltaDy = dFdy(delta);
+    float radiusSquared = dot(delta, delta);
+    float footprintSquared = max(dot(deltaDx, deltaDx), dot(deltaDy, deltaDy));
+    if (radiusSquared <= footprintSquared * 0.25) return 1.0;
+    radiusSquared = max(radiusSquared, 1.0e-6);
+    float turnDx = (delta.y * deltaDx.x - delta.x * deltaDx.y) / (tau * radiusSquared);
+    float turnDy = (delta.y * deltaDy.x - delta.x * deltaDy.y) / (tau * radiusSquared);
+    return abs(turnDx) + abs(turnDy);
 }
 
 vec4 gradientIntervalIntegral(float amount) {
@@ -255,120 +255,120 @@ vec4 clampedGradientIntegral(float amount) {
     return color;
 }
 
-vec4 underlyingGradientIntegral(float amount, vec4 repeating_total) {
+vec4 underlyingGradientIntegral(float amount, vec4 repeatingTotal) {
     if (gradientRepeating == 0) return clampedGradientIntegral(amount);
 
     float first = gradientStops[0];
     float period = gradientStops[gradientStopCount - 1] - first;
     float cycles = floor((amount - first) / period);
     float wrapped = amount - first - cycles * period;
-    return cycles * repeating_total + gradientIntervalIntegral(first + wrapped);
+    return cycles * repeatingTotal + gradientIntervalIntegral(first + wrapped);
 }
 
-vec4 filteredGradientColor(vec2 local_coord) {
-    float amount = gradientAmount(local_coord);
-    float pixel_width = max(gradientPixelWidth(local_coord, amount), 1.0e-6);
-    float start = amount - pixel_width * 0.5;
-    float end = amount + pixel_width * 0.5;
-    if (gradientKind == GRADIENT_RADIAL) start = max(start, 0.0);
+vec4 filteredGradientColor(vec2 localCoord) {
+    float amount = gradientAmount(localCoord);
+    float pixelWidth = max(gradientPixelWidth(localCoord, amount), 1.0e-6);
+    float start = amount - pixelWidth * 0.5;
+    float end = amount + pixelWidth * 0.5;
+    if (gradientKind == kGradientRadial) start = max(start, 0.0);
 
-    vec4 repeating_total = vec4(0.0);
-    if (gradientRepeating != 0) repeating_total = gradientIntervalIntegral(gradientStops[gradientStopCount - 1]);
+    vec4 repeatingTotal = vec4(0.0);
+    if (gradientRepeating != 0) repeatingTotal = gradientIntervalIntegral(gradientStops[gradientStopCount - 1]);
 
-    vec4 start_integral;
-    vec4 end_integral;
-    if (gradientKind == GRADIENT_CONIC) {
-        vec4 origin = underlyingGradientIntegral(0.0, repeating_total);
-        vec4 turn_total = underlyingGradientIntegral(1.0, repeating_total) - origin;
-        float start_turn = floor(start);
-        float end_turn = floor(end);
-        start_integral = start_turn * turn_total + underlyingGradientIntegral(start - start_turn, repeating_total) - origin;
-        end_integral = end_turn * turn_total + underlyingGradientIntegral(end - end_turn, repeating_total) - origin;
+    vec4 startIntegral;
+    vec4 endIntegral;
+    if (gradientKind == kGradientConic) {
+        vec4 origin = underlyingGradientIntegral(0.0, repeatingTotal);
+        vec4 turnTotal = underlyingGradientIntegral(1.0, repeatingTotal) - origin;
+        float startTurn = floor(start);
+        float endTurn = floor(end);
+        startIntegral = startTurn * turnTotal + underlyingGradientIntegral(start - startTurn, repeatingTotal) - origin;
+        endIntegral = endTurn * turnTotal + underlyingGradientIntegral(end - endTurn, repeatingTotal) - origin;
     } else {
-        start_integral = underlyingGradientIntegral(start, repeating_total);
-        end_integral = underlyingGradientIntegral(end, repeating_total);
+        startIntegral = underlyingGradientIntegral(start, repeatingTotal);
+        endIntegral = underlyingGradientIntegral(end, repeatingTotal);
     }
-    return (end_integral - start_integral) / max(end - start, 1.0e-6);
+    return (endIntegral - startIntegral) / max(end - start, 1.0e-6);
 }
 
 void main() {
-    if (paintOp == PAINT_OP_DIRECT) {
-        frag_color = vertex_color;
+    if (paintOp == kPaintOpDirect) {
+        fragColor = vertexColor;
         return;
     }
 
-    if (paintOp == PAINT_OP_BLUR) {
-        frag_color = blurredEffectColor(shape_coord);
+    if (paintOp == kPaintOpBlur) {
+        fragColor = blurredEffectColor(shapeCoord);
         return;
     }
 
-    if (paintOp == PAINT_OP_COMPOSITE) {
-        frag_color = compositedEffectColor(shape_coord);
+    if (paintOp == kPaintOpComposite) {
+        fragColor = compositedEffectColor(shapeCoord);
         return;
     }
 
     vec2 size = max(shapeRect.zw, vec2(0.0));
-    vec2 local_coord = shape_coord - shapeOffset;
-    float outer_distance = roundedRectDistance(local_coord, size, shapeRadius);
-    float alpha = coverageFromDistance(outer_distance);
+    vec2 localCoord = shapeCoord - shapeOffset;
+    float outerDistance = roundedRectDistance(localCoord, size, shapeRadius);
+    float alpha = coverageFromDistance(outerDistance);
 
-    if (paintOp == PAINT_OP_OUTER_SHADOW) {
-        float softness = max(shadowBlur, fwidth(outer_distance));
-        alpha = 1.0 - smoothstep(-softness, softness, outer_distance);
-        frag_color = vec4(shapeColor.rgb, shapeColor.a * alpha);
+    if (paintOp == kPaintOpOuterShadow) {
+        float softness = max(shadowBlur, fwidth(outerDistance));
+        alpha = 1.0 - smoothstep(-softness, softness, outerDistance);
+        fragColor = vec4(shapeColor.rgb, shapeColor.a * alpha);
         return;
     }
 
-    if (paintOp == PAINT_OP_INSET_SHADOW) {
-        vec2 hole_size = max(size - vec2(shadowSpread * 2.0), vec2(0.0));
-        vec2 hole_coord = local_coord - vec2(shadowSpread) - shadowOffset;
-        float hole_radius = max(shapeRadius - shadowSpread, 0.0);
-        float hole_distance = roundedRectDistance(hole_coord, hole_size, hole_radius);
-        float softness = max(shadowBlur, fwidth(hole_distance));
-        alpha *= smoothstep(-softness, softness, hole_distance);
-        frag_color = vec4(shapeColor.rgb, shapeColor.a * alpha);
+    if (paintOp == kPaintOpInsetShadow) {
+        vec2 holeSize = max(size - vec2(shadowSpread * 2.0), vec2(0.0));
+        vec2 holeCoord = localCoord - vec2(shadowSpread) - shadowOffset;
+        float holeRadius = max(shapeRadius - shadowSpread, 0.0);
+        float holeDistance = roundedRectDistance(holeCoord, holeSize, holeRadius);
+        float softness = max(shadowBlur, fwidth(holeDistance));
+        alpha *= smoothstep(-softness, softness, holeDistance);
+        fragColor = vec4(shapeColor.rgb, shapeColor.a * alpha);
         return;
     }
 
-    if (paintOp == PAINT_OP_BORDER || paintOp == PAINT_OP_GRADIENT_BORDER) {
-        vec4 widths = paintOp == PAINT_OP_BORDER ? vec4(shapeBorderWidth) : borderWidths;
+    if (paintOp == kPaintOpBorder || paintOp == kPaintOpGradientBorder) {
+        vec4 widths = paintOp == kPaintOpBorder ? vec4(shapeBorderWidth) : borderWidths;
         widths = max(widths, vec4(0.0));
-        vec2 inner_size = max(size - vec2(widths.w + widths.y, widths.z + widths.x), vec2(0.0));
-        vec2 inner_coord = local_coord - vec2(widths.w, widths.z);
-        float inner_radius = max(shapeRadius - max(max(widths.x, widths.y), max(widths.z, widths.w)), 0.0);
-        if (inner_size.x > 0.0 && inner_size.y > 0.0) {
-            float inner_distance = roundedRectDistance(inner_coord, inner_size, inner_radius);
-            alpha = coverageFromDistance(max(outer_distance, -inner_distance));
+        vec2 innerSize = max(size - vec2(widths.w + widths.y, widths.z + widths.x), vec2(0.0));
+        vec2 innerCoord = localCoord - vec2(widths.w, widths.z);
+        float innerRadius = max(shapeRadius - max(max(widths.x, widths.y), max(widths.z, widths.w)), 0.0);
+        if (innerSize.x > 0.0 && innerSize.y > 0.0) {
+            float innerDistance = roundedRectDistance(innerCoord, innerSize, innerRadius);
+            alpha = coverageFromDistance(max(outerDistance, -innerDistance));
         }
-        if (paintOp == PAINT_OP_BORDER && outlineStyle == OUTLINE_DASHED)
-            alpha *= dashedOutlineCoverage(local_coord, size, shapeRadius, shapeBorderWidth);
+        if (paintOp == kPaintOpBorder && outlineStyle == kOutlineDashed)
+            alpha *= dashedOutlineCoverage(localCoord, size, shapeRadius, shapeBorderWidth);
         if (topBorderGap.y > topBorderGap.x) {
-            float edge_aa = max(fwidth(local_coord.x), 1.0e-4);
-            float inside_gap = smoothstep(topBorderGap.x - edge_aa, topBorderGap.x + edge_aa, local_coord.x)
-                * (1.0 - smoothstep(topBorderGap.y - edge_aa, topBorderGap.y + edge_aa, local_coord.x));
-            float top_border = step(size.y - widths.x - max(fwidth(outer_distance), 1.0e-4), local_coord.y);
-            alpha *= 1.0 - inside_gap * top_border;
+            float edgeAA = max(fwidth(localCoord.x), 1.0e-4);
+            float insideGap = smoothstep(topBorderGap.x - edgeAA, topBorderGap.x + edgeAA, localCoord.x)
+                * (1.0 - smoothstep(topBorderGap.y - edgeAA, topBorderGap.y + edgeAA, localCoord.x));
+            float topBorder = step(size.y - widths.x - max(fwidth(outerDistance), 1.0e-4), localCoord.y);
+            alpha *= 1.0 - insideGap * topBorder;
         }
     }
 
-    if (paintOp == PAINT_OP_GRADIENT || paintOp == PAINT_OP_GRADIENT_BORDER) {
-        vec4 color = filteredGradientColor(local_coord);
-        frag_color = vec4(color.rgb, color.a * alpha);
+    if (paintOp == kPaintOpGradient || paintOp == kPaintOpGradientBorder) {
+        vec4 color = filteredGradientColor(localCoord);
+        fragColor = vec4(color.rgb, color.a * alpha);
         return;
     }
 
-    frag_color = vec4(shapeColor.rgb, shapeColor.a * alpha);
+    fragColor = vec4(shapeColor.rgb, shapeColor.a * alpha);
 }
 
 #else
-out vec4 frag_color;
+out vec4 fragColor;
 
 uniform sampler2D diffuseMap;
 
 uniform int shadowMode;
 
 in vec2 vary_texcoord0;
-in vec4 vertex_color;
+in vec4 vertexColor;
 
 #ifdef HAS_FONT_GPU
 flat in uint vary_glyphLoc;
@@ -383,39 +383,39 @@ void main() {
     if (vary_glyphLoc != 0xFFFFFFFFu) {
         if ((vary_glyphLoc & 0x80000000u) != 0u) {
             float coverage;
-            vec4 premul = hb_gpu_paint(vary_texcoord0, vary_glyphLoc & 0x3FFFFFFFu, vec4(vertex_color.rgb, 1.0), coverage);
+            vec4 premul = hb_gpu_paint(vary_texcoord0, vary_glyphLoc & 0x3FFFFFFFu, vec4(vertexColor.rgb, 1.0), coverage);
             if ((vary_glyphLoc & 0x40000000u) != 0u) {
-                frag_color = vec4(vertex_color.rgb, premul.a * vertex_color.a);
+                fragColor = vec4(vertexColor.rgb, premul.a * vertexColor.a);
                 return;
             }
-            frag_color = vec4(premul.rgb / max(premul.a, 1e-5), premul.a * vertex_color.a);
+            fragColor = vec4(premul.rgb / max(premul.a, 1e-5), premul.a * vertexColor.a);
             return;
         }
 
         float coverage = hb_gpu_draw(vary_texcoord0, vary_glyphLoc);
         float ppem = hb_gpu_ppem(vary_texcoord0, vary_glyphLoc);
-        coverage = alchemy_font_refine_coverage(coverage, vertex_color.rgb, ppem);
-        frag_color = vec4(vertex_color.rgb, vertex_color.a * coverage);
+        coverage = alchemy_font_refine_coverage(coverage, vertexColor.rgb, ppem);
+        fragColor = vec4(vertexColor.rgb, vertexColor.a * coverage);
         return;
     }
 #endif
     if (shadowMode == 0) {
-        frag_color = vertex_color * texture(diffuseMap, vary_texcoord0.xy);
+        fragColor = vertexColor * texture(diffuseMap, vary_texcoord0.xy);
         return;
     }
 
     vec2 atlasTexelSize = 1.0 / vec2(textureSize(diffuseMap, 0));
-    float vc_a = vertex_color.a;
+    float vertexColorAlpha = vertexColor.a;
     float p;
     if (shadowMode == 1) {
-        p = 1.0 - vc_a * sampleAtlasAlpha(vary_texcoord0 + atlasTexelSize * vec2(-1.0, 1.0));
+        p = 1.0 - vertexColorAlpha * sampleAtlasAlpha(vary_texcoord0 + atlasTexelSize * vec2(-1.0, 1.0));
     } else {
-        p = (1.0 - vc_a * sampleAtlasAlpha(vary_texcoord0 + atlasTexelSize * vec2(1.0, 1.0)));
-        p *= (1.0 - vc_a * sampleAtlasAlpha(vary_texcoord0 + atlasTexelSize * vec2(-1.0, 1.0)));
-        p *= (1.0 - vc_a * sampleAtlasAlpha(vary_texcoord0 + atlasTexelSize * vec2(-1.0, -1.0)));
-        p *= (1.0 - vc_a * sampleAtlasAlpha(vary_texcoord0 + atlasTexelSize * vec2(1.0, -1.0)));
-        p *= (1.0 - vc_a * sampleAtlasAlpha(vary_texcoord0 + atlasTexelSize * vec2(0.0, 2.0)));
+        p = (1.0 - vertexColorAlpha * sampleAtlasAlpha(vary_texcoord0 + atlasTexelSize * vec2(1.0, 1.0)));
+        p *= (1.0 - vertexColorAlpha * sampleAtlasAlpha(vary_texcoord0 + atlasTexelSize * vec2(-1.0, 1.0)));
+        p *= (1.0 - vertexColorAlpha * sampleAtlasAlpha(vary_texcoord0 + atlasTexelSize * vec2(-1.0, -1.0)));
+        p *= (1.0 - vertexColorAlpha * sampleAtlasAlpha(vary_texcoord0 + atlasTexelSize * vec2(1.0, -1.0)));
+        p *= (1.0 - vertexColorAlpha * sampleAtlasAlpha(vary_texcoord0 + atlasTexelSize * vec2(0.0, 2.0)));
     }
-    frag_color = vec4(vertex_color.rgb, 1.0 - p);
+    fragColor = vec4(vertexColor.rgb, 1.0 - p);
 }
 #endif

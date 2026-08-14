@@ -43,13 +43,13 @@ class Field : public Widget {
     friend WidgetContract detail::fieldContract();
 
 public:
-    static constexpr const char* ELEMENT = "field";
+    static constexpr const char* sElement = "field";
 
     Field();
     Label* label() { return mLabel.get(); }
     const Label* label() const { return mLabel.get(); }
-    Widget* control();
-    const Widget* control() const;
+    Widget* valueControl();
+    const Widget* valueControl() const;
     Text* hint() { return mHint.get(); }
     const Text* hint() const { return mHint.get(); }
     Text* error() { return mError.get(); }
@@ -67,7 +67,7 @@ private:
     Widget* setErrorContent(TextSource content);
     Widget* createSupportIndent(WidgetRef<Widget>& slot, const char* part, bool collapsed);
     bool controlPrecedesLabel() const;
-    void refreshValueState(const ValueControlState& state);
+    void refreshValueControlState(const ValueControlState& state);
 
     WidgetRef<Label> mLabel;
     ValueControl* mControl = nullptr;

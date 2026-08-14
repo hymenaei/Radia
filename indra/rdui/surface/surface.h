@@ -29,6 +29,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 #include "event.h"
 #include "style/stylesheet.h"
@@ -49,6 +50,7 @@ public:
     virtual void floaterClosed(Surface&, Floater&) {}
     virtual void floaterMinimizedChanged(Surface&, Floater&, bool) {}
     virtual void floaterMoved(Surface&, Floater&) {}
+    virtual void floaterMoveEnded(Surface&, Floater&) {}
     virtual void floaterDetachRequested(Surface&, Floater&, const Vec2&, const Vec2&) {}
     virtual bool beginNativeFloaterResize(Surface&, Floater&) { return false; }
     virtual void floaterResized(Surface&, Floater&, bool) {}
@@ -63,7 +65,7 @@ class Surface {
 
 public:
     Surface();
-    explicit Surface(const StyleSheet& style_sheet);
+    explicit Surface(const StyleSheet& styleSheet);
     ~Surface();
 
     Widget& root() { return *mRoot; }
@@ -73,15 +75,17 @@ public:
     void setFloaterDelegate(SurfaceFloaterDelegate* delegate) { mFloaterDelegate = delegate; }
     Widget& mount(std::unique_ptr<Widget> widget, SurfaceLayer layer = SurfaceLayer::Content);
     Floater& mountFloater(std::unique_ptr<Floater> floater, SurfaceLayer layer = SurfaceLayer::Floater);
+    std::unique_ptr<Floater> replaceFloater(Floater& current, std::unique_ptr<Floater> replacement);
     std::unique_ptr<Widget> unmount(Widget& widget);
     std::unique_ptr<Floater> unmountFloater(Floater& floater);
+    bool ownsFloater(const Floater& floater) const;
     void clearLayer(SurfaceLayer layer);
     bool raise(Widget& widget);
     void placeFloater(Floater& floater, const Rect& rect);
     Vec2 preferredFloaterSize(const Floater& floater) const;
     Vec2 minimumFloaterSize(const Floater& floater) const;
-    Rect initialFloaterRect(const Floater& floater) const;
-    Rect prepareFloater(Floater& floater) const;
+    std::optional<Rect> initialFloaterRect(const Floater& floater) const;
+    std::optional<Rect> prepareFloater(Floater& floater) const;
     void updateLayout();
     void paint(PaintContext& context, float scale = 1.f);
     void clearInteractionState();
@@ -110,7 +114,7 @@ public:
 private:
     using WidgetSnapshot = WidgetVisit;
 
-    Surface(const System& system, const TextMetrics& text_metrics);
+    Surface(const System& system, const TextMetrics& textMetrics);
     const StyleSheet& styleSheet() const { return *mStyleSheet; }
     void setHovered(Widget* node);
     void requestLayout();
@@ -120,7 +124,7 @@ private:
     void invalidateStyleCache();
     void invalidateOrderingCache();
     void didPaint(std::uint64_t painted_generation);
-    void setFocused(Widget* node, bool focus_visible);
+    void setFocused(Widget* node, bool focusVisible);
     void validateFocus();
     bool isRootedInSurface(const Widget* node) const;
     bool isEnabledInTree(const Widget* node) const;
@@ -136,14 +140,14 @@ private:
     std::chrono::milliseconds defaultLongClickDelay() const;
     bool moveFocus(bool backwards);
     bool routeEvent(RoutedEvent& event);
-    void paintWidget(const Widget& widget, PaintContext& context, float scale, float inherited_opacity, StylePass& styles) const;
+    void paintWidget(const Widget& widget, PaintContext& context, float scale, float inheritedOpacity, StylePass& styles) const;
     void initializeLayerRoots();
     Widget& layerRoot(SurfaceLayer layer);
     const Widget& layerRoot(SurfaceLayer layer) const;
     bool isSurfaceRoot(const Widget* widget) const;
     bool hasActiveModal() const;
     Widget* hitTestAt(const Vec2& point);
-    Widget* hitTestNode(Widget& node, const Vec2& point, const Rect& inherited_clip, StylePass& styles) const;
+    Widget* hitTestNode(Widget& node, const Vec2& point, const Rect& inheritedClip, StylePass& styles) const;
     Floater* resizeFloaterAt(const Vec2& point, std::uint8_t& edges) const;
     void updateResizeCursor(const Vec2& point);
     bool raiseWithinLayer(Widget& widget, SurfaceLayer layer);
@@ -154,9 +158,10 @@ private:
     void floaterClosed(Floater& floater);
     void floaterMinimizedChanged(Floater& floater, bool minimized);
     void floaterMoved(Floater& floater);
-    void floaterDetachRequested(Floater& floater, const Vec2& desired, const Vec2& drag_offset);
+    void floaterMoveEnded(Floater& floater);
+    void floaterDetachRequested(Floater& floater, const Vec2& desiredPosition, const Vec2& dragOffset);
     void floaterResized(Floater& floater, bool complete);
-    void generationChanged(const StyleSheet& style_sheet);
+    void generationChanged(const StyleSheet& styleSheet);
     void localeChanged();
     void keybindingsChanged();
 

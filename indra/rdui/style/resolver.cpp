@@ -33,14 +33,14 @@ namespace rdui {
 namespace {
 bool matchesState(const std::string& state, uint8_t states) {
     if (state.empty()) return true;
-    if (state == "hover") return has_state(states, WidgetState::Hovered);
-    if (state == "active") return has_state(states, WidgetState::Active);
-    if (state == "focus") return has_state(states, WidgetState::Focused);
-    if (state == "focus-visible") return has_state(states, WidgetState::Focused) && has_state(states, WidgetState::FocusVisible);
-    if (state == "disabled") return has_state(states, WidgetState::Disabled);
-    if (state == "checked") return has_state(states, WidgetState::Checked);
-    if (state == "minimized") return has_state(states, WidgetState::Minimized);
-    if (state == "invalid") return has_state(states, WidgetState::Invalid);
+    if (state == "hover") return hasState(states, WidgetState::Hovered);
+    if (state == "active") return hasState(states, WidgetState::Active);
+    if (state == "focus") return hasState(states, WidgetState::Focused);
+    if (state == "focus-visible") return hasState(states, WidgetState::Focused) && hasState(states, WidgetState::FocusVisible);
+    if (state == "disabled") return hasState(states, WidgetState::Disabled);
+    if (state == "checked") return hasState(states, WidgetState::Checked);
+    if (state == "minimized") return hasState(states, WidgetState::Minimized);
+    if (state == "invalid") return hasState(states, WidgetState::Invalid);
     return false;
 }
 
@@ -59,7 +59,7 @@ std::optional<WidgetState> selectorState(const std::string& state) {
 bool selectorCanBeOwnedBy(const StyleSelector& selector, const Widget& widget) {
     return (selector.element.empty() || selector.element == widget.styleElement())
         && (selector.id.empty() || selector.id == widget.id())
-        && (selector.class_name.empty() || widget.classes().find(selector.class_name) != widget.classes().end());
+        && (selector.className.empty() || widget.classes().find(selector.className) != widget.classes().end());
 }
 
 std::optional<std::size_t> stateIndex(WidgetState state) {
@@ -72,9 +72,9 @@ std::optional<std::size_t> stateIndex(WidgetState state) {
 
 int specificity(const StyleSelector& selector) {
     return (!selector.id.empty() ? 100 : 0)
-        + (!selector.class_name.empty() ? 10 : 0)
+        + (!selector.className.empty() ? 10 : 0)
         + (!selector.state.empty() ? 10 : 0)
-        + (!selector.part_state.empty() ? 10 : 0)
+        + (!selector.partState.empty() ? 10 : 0)
         + (!selector.element.empty() ? 1 : 0)
         + static_cast<int>(selector.parts.size());
 }
@@ -86,12 +86,12 @@ int specificity(const StyleRule& rule) {
 }
 
 bool matchesSelector(const StyleSelector& selector, const std::string& element, const std::string& id, const std::set<std::string>& classes,
-                     uint8_t owner_states, const std::vector<std::string>& parts, uint8_t part_states) {
+                     uint8_t ownerStates, const std::vector<std::string>& parts, uint8_t partStates) {
     return (selector.element.empty() || selector.element == element)
         && (selector.id.empty() || selector.id == id)
-        && (selector.class_name.empty() || classes.find(selector.class_name) != classes.end())
-        && matchesState(selector.state, owner_states)
-        && matchesState(selector.part_state, part_states)
+        && (selector.className.empty() || classes.find(selector.className) != classes.end())
+        && matchesState(selector.state, ownerStates)
+        && matchesState(selector.partState, partStates)
         && selector.parts == parts;
 }
 
@@ -103,24 +103,24 @@ const Widget* structuralParent(const Widget* widget) {
 }
 
 bool matchesStructuralSelector(const StyleSelector& selector, const Widget& widget) {
-    static const std::vector<std::string> no_parts;
-    return matchesSelector(selector, widget.styleElement(), widget.id(), widget.classes(), widget.states(), no_parts, 0);
+    static const std::vector<std::string> noParts;
+    return matchesSelector(selector, widget.styleElement(), widget.id(), widget.classes(), widget.states(), noParts, 0);
 }
 
-bool matchesRule(const StyleRule& rule, const std::string& element, const std::string& id, const std::set<std::string>& classes, uint8_t owner_states,
-                 const std::vector<std::string>& parts, uint8_t part_states, const Widget* widget, const std::vector<std::string>* inline_ancestors) {
-    if (rule.selectors.empty() || !matchesSelector(rule.selectors.back(), element, id, classes, owner_states, parts, part_states)) return false;
+bool matchesRule(const StyleRule& rule, const std::string& element, const std::string& id, const std::set<std::string>& classes, uint8_t ownerStates,
+                 const std::vector<std::string>& parts, uint8_t partStates, const Widget* widget, const std::vector<std::string>* inlineAncestors) {
+    if (rule.selectors.empty() || !matchesSelector(rule.selectors.back(), element, id, classes, ownerStates, parts, partStates)) return false;
     if (rule.selectors.size() == 1) return true;
     if (!widget || rule.combinators.size() + 1 != rule.selectors.size()) return false;
 
-    std::size_t inline_index = inline_ancestors ? inline_ancestors->size() : 0;
-    const Widget* ancestor = inline_ancestors ? widget : structuralParent(widget);
+    std::size_t inlineIndex = inlineAncestors ? inlineAncestors->size() : 0;
+    const Widget* ancestor = inlineAncestors ? widget : structuralParent(widget);
     const auto nextAncestorMatches = [&](const StyleSelector& selector) -> std::optional<bool> {
-        static const std::set<std::string> no_classes;
-        static const std::vector<std::string> no_parts;
-        if (inline_ancestors && inline_index) {
-            const std::string& inline_element = (*inline_ancestors)[--inline_index];
-            return matchesSelector(selector, inline_element, {}, no_classes, 0, no_parts, 0);
+        static const std::set<std::string> noClasses;
+        static const std::vector<std::string> noParts;
+        if (inlineAncestors && inlineIndex) {
+            const std::string& inlineElement = (*inlineAncestors)[--inlineIndex];
+            return matchesSelector(selector, inlineElement, {}, noClasses, 0, noParts, 0);
         }
         if (!ancestor) return std::nullopt;
         const Widget* candidate = ancestor;
@@ -145,107 +145,105 @@ bool matchesRule(const StyleRule& rule, const std::string& element, const std::s
 
 void StyleModel::addRule(const StyleRule& rule) {
     StyleRule copy = rule;
-    copy.source_order = static_cast<int>(rules.size());
+    copy.sourceOrder = static_cast<int>(rules.size());
     rules.push_back(std::move(copy));
-    layout_state_mask_valid = false;
-    hit_test_state_mask_valid = false;
-    descendant_state_rules_valid = false;
-    rule_index_valid = false;
+    layoutStateMaskValid = false;
+    hitTestStateMaskValid = false;
+    descendantStateRulesValid = false;
+    ruleIndexValid = false;
 }
 
 bool StyleModel::stateAffectsLayout(WidgetState state) const {
-    if (!layout_state_mask_valid) {
-        layout_state_mask = 0;
-        for (auto& candidates : layout_state_rules) candidates.clear();
-        for (std::size_t rule_index = 0; rule_index < rules.size(); ++rule_index) {
-            const StyleRule& rule = rules[rule_index];
-            bool layout_declaration = false;
+    if (!layoutStateMaskValid) {
+        layoutStateMask = 0;
+        for (auto& candidates : layoutStateRules) candidates.clear();
+        for (std::size_t ruleIndex = 0; ruleIndex < rules.size(); ++ruleIndex) {
+            const StyleRule& rule = rules[ruleIndex];
+            bool layoutDeclaration = false;
             for (const StyleDeclaration& declaration : rule.declarations)
                 if (!declaration.property.get().isPaintOnly()) {
-                    layout_declaration = true;
+                    layoutDeclaration = true;
                     break;
                 }
-            if (!layout_declaration) continue;
+            if (!layoutDeclaration) continue;
             for (const StyleSelector& selector : rule.selectors) {
-                const auto add_state = [&](const std::optional<WidgetState>& candidate) {
+                const auto addState = [&](const std::optional<WidgetState>& candidate) {
                     if (!candidate) return;
                     const std::optional<std::size_t> index = stateIndex(*candidate);
                     if (!index) return;
-                    layout_state_mask |= static_cast<std::uint8_t>(*candidate);
-                    auto& candidates = layout_state_rules[*index];
-                    if (std::find(candidates.begin(), candidates.end(), rule_index) == candidates.end()) candidates.push_back(rule_index);
+                    layoutStateMask |= static_cast<std::uint8_t>(*candidate);
+                    auto& candidates = layoutStateRules[*index];
+                    if (std::find(candidates.begin(), candidates.end(), ruleIndex) == candidates.end()) candidates.push_back(ruleIndex);
                 };
-                add_state(selectorState(selector.state));
-                add_state(selectorState(selector.part_state));
+                addState(selectorState(selector.state));
+                addState(selectorState(selector.partState));
             }
         }
-        layout_state_mask_valid = true;
+        layoutStateMaskValid = true;
     }
-    return (layout_state_mask & static_cast<std::uint8_t>(state)) != 0;
+    return (layoutStateMask & static_cast<std::uint8_t>(state)) != 0;
 }
 
 bool StyleModel::stateAffectsLayout(const Widget& widget, WidgetState state) const {
     if (!stateAffectsLayout(state)) return false;
     const std::optional<std::size_t> index = stateIndex(state);
     if (!index) return false;
-    const auto has_layout_declaration = [](const StyleRule& rule) {
+    const auto hasLayoutDeclaration = [](const StyleRule& rule) {
         return std::any_of(rule.declarations.begin(), rule.declarations.end(),
                            [](const StyleDeclaration& declaration) { return !declaration.property.get().isPaintOnly(); });
     };
-    for (const std::size_t rule_index : layout_state_rules[*index]) {
-        const StyleRule& rule = rules[rule_index];
-        if (!has_layout_declaration(rule)) continue;
+    for (const std::size_t ruleIndex : layoutStateRules[*index]) {
+        const StyleRule& rule = rules[ruleIndex];
+        if (!hasLayoutDeclaration(rule)) continue;
         for (const StyleSelector& selector : rule.selectors) {
-            const std::optional<WidgetState> owner_state = selectorState(selector.state);
-            if (owner_state && *owner_state == state && selectorCanBeOwnedBy(selector, widget)) return true;
-            // Part state belongs to the part widget itself, not its owner. A
-            // state transition on a normal widget cannot affect that selector.
-            const std::optional<WidgetState> part_state = selectorState(selector.part_state);
-            if (part_state && *part_state == state && !widget.part().empty() && selectorCanBeOwnedBy(selector, widget)) return true;
+            const std::optional<WidgetState> ownerState = selectorState(selector.state);
+            if (ownerState && *ownerState == state && selectorCanBeOwnedBy(selector, widget)) return true;
+            const std::optional<WidgetState> partState = selectorState(selector.partState);
+            if (partState && *partState == state && !widget.part().empty() && selectorCanBeOwnedBy(selector, widget)) return true;
         }
     }
     return false;
 }
 
 bool StyleModel::stateAffectsHitTesting(WidgetState state) const {
-    if (!hit_test_state_mask_valid) {
-        hit_test_state_mask = 0;
-        for (auto& candidates : hit_test_state_rules) candidates.clear();
-        for (std::size_t rule_index = 0; rule_index < rules.size(); ++rule_index) {
-            const StyleRule& rule = rules[rule_index];
-            const bool hit_test_declaration =
-                std::any_of(rule.declarations.begin(), rule.declarations.end(),
-                            [](const StyleDeclaration& declaration) { return declaration.property.get().affectsHitTesting(); });
-            if (!hit_test_declaration) continue;
+    if (!hitTestStateMaskValid) {
+        hitTestStateMask = 0;
+        for (auto& candidates : hitTestStateRules) candidates.clear();
+        for (std::size_t ruleIndex = 0; ruleIndex < rules.size(); ++ruleIndex) {
+            const StyleRule& rule = rules[ruleIndex];
+            const bool hitTestDeclaration = std::any_of(rule.declarations.begin(), rule.declarations.end(), [](const StyleDeclaration& declaration) {
+                return declaration.property.get().affectsHitTesting();
+            });
+            if (!hitTestDeclaration) continue;
             for (const StyleSelector& selector : rule.selectors) {
-                const auto add_state = [&](const std::optional<WidgetState>& candidate) {
+                const auto addState = [&](const std::optional<WidgetState>& candidate) {
                     if (!candidate) return;
                     const std::optional<std::size_t> index = stateIndex(*candidate);
                     if (!index) return;
-                    hit_test_state_mask |= static_cast<std::uint8_t>(*candidate);
-                    auto& candidates = hit_test_state_rules[*index];
-                    if (std::find(candidates.begin(), candidates.end(), rule_index) == candidates.end()) candidates.push_back(rule_index);
+                    hitTestStateMask |= static_cast<std::uint8_t>(*candidate);
+                    auto& candidates = hitTestStateRules[*index];
+                    if (std::find(candidates.begin(), candidates.end(), ruleIndex) == candidates.end()) candidates.push_back(ruleIndex);
                 };
-                add_state(selectorState(selector.state));
-                add_state(selectorState(selector.part_state));
+                addState(selectorState(selector.state));
+                addState(selectorState(selector.partState));
             }
         }
-        hit_test_state_mask_valid = true;
+        hitTestStateMaskValid = true;
     }
-    return (hit_test_state_mask & static_cast<std::uint8_t>(state)) != 0;
+    return (hitTestStateMask & static_cast<std::uint8_t>(state)) != 0;
 }
 
 bool StyleModel::stateAffectsHitTesting(const Widget& widget, WidgetState state) const {
     if (!stateAffectsHitTesting(state)) return false;
     const std::optional<std::size_t> index = stateIndex(state);
     if (!index) return false;
-    for (const std::size_t rule_index : hit_test_state_rules[*index]) {
-        const StyleRule& rule = rules[rule_index];
+    for (const std::size_t ruleIndex : hitTestStateRules[*index]) {
+        const StyleRule& rule = rules[ruleIndex];
         for (const StyleSelector& selector : rule.selectors) {
-            const std::optional<WidgetState> owner_state = selectorState(selector.state);
-            if (owner_state && *owner_state == state && selectorCanBeOwnedBy(selector, widget)) return true;
-            const std::optional<WidgetState> part_state = selectorState(selector.part_state);
-            if (part_state && *part_state == state && !widget.part().empty() && selectorCanBeOwnedBy(selector, widget)) return true;
+            const std::optional<WidgetState> ownerState = selectorState(selector.state);
+            if (ownerState && *ownerState == state && selectorCanBeOwnedBy(selector, widget)) return true;
+            const std::optional<WidgetState> partState = selectorState(selector.partState);
+            if (partState && *partState == state && !widget.part().empty() && selectorCanBeOwnedBy(selector, widget)) return true;
         }
     }
     return false;
@@ -254,51 +252,51 @@ bool StyleModel::stateAffectsHitTesting(const Widget& widget, WidgetState state)
 bool StyleModel::stateAffectsDescendants(const Widget& widget, WidgetState state) const {
     const std::optional<std::size_t> index = stateIndex(state);
     if (!index) return false;
-    if (!descendant_state_rules_valid) {
-        for (auto& candidates : descendant_state_rules) candidates.clear();
-        for (std::size_t rule_index = 0; rule_index < rules.size(); ++rule_index) {
-            const StyleRule& rule = rules[rule_index];
+    if (!descendantStateRulesValid) {
+        for (auto& candidates : descendantStateRules) candidates.clear();
+        for (std::size_t ruleIndex = 0; ruleIndex < rules.size(); ++ruleIndex) {
+            const StyleRule& rule = rules[ruleIndex];
             const bool inherits = std::any_of(rule.declarations.begin(), rule.declarations.end(),
                                               [](const StyleDeclaration& declaration) { return declaration.property.get().isInherited(); });
-            for (std::size_t selector_index = 0; selector_index < rule.selectors.size(); ++selector_index) {
-                const StyleSelector& selector = rule.selectors[selector_index];
-                const std::optional<WidgetState> selector_state = selectorState(selector.state);
-                const std::optional<WidgetState> part_state = selectorState(selector.part_state);
-                const auto add_candidate = [&](const std::optional<WidgetState>& candidate, bool part_owned) {
+            for (std::size_t selectorIndex = 0; selectorIndex < rule.selectors.size(); ++selectorIndex) {
+                const StyleSelector& selector = rule.selectors[selectorIndex];
+                const std::optional<WidgetState> selectorStateValue = selectorState(selector.state);
+                const std::optional<WidgetState> partState = selectorState(selector.partState);
+                const auto addCandidate = [&](const std::optional<WidgetState>& candidate, bool partOwned) {
                     if (!candidate) return;
-                    const std::optional<std::size_t> state_index = stateIndex(*candidate);
-                    if (!state_index) return;
-                    if (selector_index + 1 < rule.selectors.size() || (!part_owned && !selector.parts.empty()) || inherits)
-                        descendant_state_rules[*state_index].push_back(rule_index);
+                    const std::optional<std::size_t> candidateStateIndex = stateIndex(*candidate);
+                    if (!candidateStateIndex) return;
+                    if (selectorIndex + 1 < rule.selectors.size() || (!partOwned && !selector.parts.empty()) || inherits)
+                        descendantStateRules[*candidateStateIndex].push_back(ruleIndex);
                 };
-                add_candidate(selector_state, false);
-                add_candidate(part_state, true);
+                addCandidate(selectorStateValue, false);
+                addCandidate(partState, true);
             }
         }
-        for (auto& candidates : descendant_state_rules) {
+        for (auto& candidates : descendantStateRules) {
             std::sort(candidates.begin(), candidates.end());
             candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
         }
-        descendant_state_rules_valid = true;
+        descendantStateRulesValid = true;
     }
-    for (const std::size_t rule_index : descendant_state_rules[*index]) {
-        const StyleRule& rule = rules[rule_index];
+    for (const std::size_t ruleIndex : descendantStateRules[*index]) {
+        const StyleRule& rule = rules[ruleIndex];
         const bool inherits = std::any_of(rule.declarations.begin(), rule.declarations.end(),
                                           [](const StyleDeclaration& declaration) { return declaration.property.get().isInherited(); });
-        for (std::size_t selector_index = 0; selector_index < rule.selectors.size(); ++selector_index) {
-            const StyleSelector& selector = rule.selectors[selector_index];
-            const std::optional<WidgetState> owner_state = selectorState(selector.state);
-            if (owner_state
-                && *owner_state == state
+        for (std::size_t selectorIndex = 0; selectorIndex < rule.selectors.size(); ++selectorIndex) {
+            const StyleSelector& selector = rule.selectors[selectorIndex];
+            const std::optional<WidgetState> ownerState = selectorState(selector.state);
+            if (ownerState
+                && *ownerState == state
                 && selectorCanBeOwnedBy(selector, widget)
-                && (selector_index + 1 < rule.selectors.size() || !selector.parts.empty() || inherits))
+                && (selectorIndex + 1 < rule.selectors.size() || !selector.parts.empty() || inherits))
                 return true;
-            const std::optional<WidgetState> part_state = selectorState(selector.part_state);
-            if (part_state
-                && *part_state == state
+            const std::optional<WidgetState> partState = selectorState(selector.partState);
+            if (partState
+                && *partState == state
                 && !widget.part().empty()
                 && selectorCanBeOwnedBy(selector, widget)
-                && (selector_index + 1 < rule.selectors.size() || inherits))
+                && (selectorIndex + 1 < rule.selectors.size() || inherits))
                 return true;
         }
     }
@@ -309,21 +307,21 @@ void StyleModel::sortRules() {
     std::stable_sort(rules.begin(), rules.end(), [](const StyleRule& lhs, const StyleRule& rhs) {
         const int left = specificity(lhs);
         const int right = specificity(rhs);
-        return left == right ? lhs.source_order < rhs.source_order : left < right;
+        return left == right ? lhs.sourceOrder < rhs.sourceOrder : left < right;
     });
-    layout_state_mask_valid = false;
-    hit_test_state_mask_valid = false;
-    descendant_state_rules_valid = false;
-    rule_index_valid = false;
+    layoutStateMaskValid = false;
+    hitTestStateMaskValid = false;
+    descendantStateRulesValid = false;
+    ruleIndexValid = false;
 }
 
 Style StyleSheet::resolve(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint8_t states) const {
     return mImpl->resolveInternal(element, id, classes, states, {}, 0);
 }
 
-Style StyleSheet::resolvePart(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint8_t owner_states,
-                              const std::string& part, uint8_t part_states) const {
-    return mImpl->resolveInternal(element, id, classes, owner_states, detail::splitPartPath(part), part_states);
+Style StyleSheet::resolvePart(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint8_t ownerStates,
+                              const std::string& part, uint8_t partStates) const {
+    return mImpl->resolveInternal(element, id, classes, ownerStates, detail::splitPartPath(part), partStates);
 }
 
 Style StyleSheet::resolveWidget(const Widget& widget) const {
@@ -335,60 +333,60 @@ Style StyleSheet::resolveWidgetPart(const Widget& owner, const Widget& part) con
                                   part.states(), &owner);
 }
 
-Style StyleSheet::resolveInline(const Widget& owner, const std::string& element, const std::vector<std::string>& inline_ancestors) const {
-    static const std::set<std::string> no_classes;
-    static const std::vector<std::string> no_parts;
-    return mImpl->resolveInternal(element, {}, no_classes, 0, no_parts, 0, &owner, &inline_ancestors);
+Style StyleSheet::resolveInline(const Widget& owner, const std::string& element, const std::vector<std::string>& inlineAncestors) const {
+    static const std::set<std::string> noClasses;
+    static const std::vector<std::string> noParts;
+    return mImpl->resolveInternal(element, {}, noClasses, 0, noParts, 0, &owner, &inlineAncestors);
 }
 
-Style StyleModel::resolveInternal(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint8_t owner_states,
-                                  const std::vector<std::string>& parts, uint8_t part_states, const Widget* widget,
-                                  const std::vector<std::string>* inline_ancestors) const {
-    if (!rule_index_valid) {
-        universal_rule_indices.clear();
-        element_rule_indices.clear();
-        id_rule_indices.clear();
-        class_rule_indices.clear();
-        const auto add_index = [](auto& index, const std::string& key, std::size_t rule_index) {
-            if (!key.empty()) index[key].push_back(rule_index);
+Style StyleModel::resolveInternal(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint8_t ownerStates,
+                                  const std::vector<std::string>& parts, uint8_t partStates, const Widget* widget,
+                                  const std::vector<std::string>* inlineAncestors) const {
+    if (!ruleIndexValid) {
+        universalRuleIndices.clear();
+        elementRuleIndices.clear();
+        idRuleIndices.clear();
+        classRuleIndices.clear();
+        const auto addIndex = [](auto& index, const std::string& key, std::size_t ruleIndex) {
+            if (!key.empty()) index[key].push_back(ruleIndex);
         };
-        for (std::size_t rule_index = 0; rule_index < rules.size(); ++rule_index) {
-            if (rules[rule_index].selectors.empty()) continue;
-            const StyleSelector& selector = rules[rule_index].selectors.back();
-            if (selector.element.empty() && selector.id.empty() && selector.class_name.empty()) universal_rule_indices.push_back(rule_index);
-            add_index(element_rule_indices, selector.element, rule_index);
-            add_index(id_rule_indices, selector.id, rule_index);
-            add_index(class_rule_indices, selector.class_name, rule_index);
+        for (std::size_t ruleIndex = 0; ruleIndex < rules.size(); ++ruleIndex) {
+            if (rules[ruleIndex].selectors.empty()) continue;
+            const StyleSelector& selector = rules[ruleIndex].selectors.back();
+            if (selector.element.empty() && selector.id.empty() && selector.className.empty()) universalRuleIndices.push_back(ruleIndex);
+            addIndex(elementRuleIndices, selector.element, ruleIndex);
+            addIndex(idRuleIndices, selector.id, ruleIndex);
+            addIndex(classRuleIndices, selector.className, ruleIndex);
         }
-        const auto sort_unique = [](auto& index) {
+        const auto sortUnique = [](auto& index) {
             for (auto& [key, values] : index) {
                 std::sort(values.begin(), values.end());
                 values.erase(std::unique(values.begin(), values.end()), values.end());
             }
         };
-        std::sort(universal_rule_indices.begin(), universal_rule_indices.end());
-        sort_unique(element_rule_indices);
-        sort_unique(id_rule_indices);
-        sort_unique(class_rule_indices);
-        rule_index_valid = true;
+        std::sort(universalRuleIndices.begin(), universalRuleIndices.end());
+        sortUnique(elementRuleIndices);
+        sortUnique(idRuleIndices);
+        sortUnique(classRuleIndices);
+        ruleIndexValid = true;
     }
 
-    std::vector<std::size_t> candidates = universal_rule_indices;
-    if (const auto found = element_rule_indices.find(element); found != element_rule_indices.end())
+    std::vector<std::size_t> candidates = universalRuleIndices;
+    if (const auto found = elementRuleIndices.find(element); found != elementRuleIndices.end())
         candidates.insert(candidates.end(), found->second.begin(), found->second.end());
     if (!id.empty())
-        if (const auto found = id_rule_indices.find(id); found != id_rule_indices.end())
+        if (const auto found = idRuleIndices.find(id); found != idRuleIndices.end())
             candidates.insert(candidates.end(), found->second.begin(), found->second.end());
-    for (const std::string& class_name : classes)
-        if (const auto found = class_rule_indices.find(class_name); found != class_rule_indices.end())
+    for (const std::string& className : classes)
+        if (const auto found = classRuleIndices.find(className); found != classRuleIndices.end())
             candidates.insert(candidates.end(), found->second.begin(), found->second.end());
     std::sort(candidates.begin(), candidates.end());
     candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
 
     Style style;
-    for (const std::size_t rule_index : candidates) {
-        const StyleRule& rule = rules[rule_index];
-        if (!matchesRule(rule, element, id, classes, owner_states, parts, part_states, widget, inline_ancestors)) continue;
+    for (const std::size_t ruleIndex : candidates) {
+        const StyleRule& rule = rules[ruleIndex];
+        if (!matchesRule(rule, element, id, classes, ownerStates, parts, partStates, widget, inlineAncestors)) continue;
         for (const StyleDeclaration& declaration : rule.declarations) detail::applyStyleDeclaration(style, declaration);
     }
     return style;

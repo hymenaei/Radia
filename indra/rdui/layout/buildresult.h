@@ -1,6 +1,6 @@
 /**
- * @file floaterstatestore.h
- * @brief Persists open Floater documents and their placement state through viewer settings.
+ * @file buildresult.h
+ * @brief Defines diagnostics and output for building a Widget tree from a Layout Resource.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -22,24 +22,21 @@
  * $/LicenseInfo$
  */
 
-#ifndef RD_FLOATERSTATESTORE_H
-#define RD_FLOATERSTATESTORE_H
+#ifndef RD_LAYOUT_BUILDRESULT_H
+#define RD_LAYOUT_BUILDRESULT_H
 
-#include <vector>
-#include "floaterdocumentmanager.h"
-#include "floaterplacementstore.h"
+#include <memory>
+#include "diagnostic.h"
+#include "widgets/widget.h"
 
-namespace rdui::viewer {
-class FloaterStateStore final : private FloaterPlacementStore::Persistence {
-public:
-    std::vector<FloaterDocumentId> openDocuments() const;
-    void saveOpenDocuments(const std::vector<FloaterDocumentId>& documents);
+namespace rdui {
+struct LayoutBuildResult : DiagnosticResult {
+    std::unique_ptr<Widget> root;
+    bool ok() const { return !hasErrors() && root != nullptr; }
 
-    FloaterPlacementStore::Persistence& placementPersistence() { return *this; }
+    template<typename WidgetT> WidgetT* rootAs() { return dynamic_cast<WidgetT*>(root.get()); }
 
-private:
-    LLSD read() const override;
-    void write(const LLSD& placements) override;
+    template<typename WidgetT> const WidgetT* rootAs() const { return dynamic_cast<const WidgetT*>(root.get()); }
 };
-} // namespace rdui::viewer
-#endif // RD_FLOATERSTATESTORE_H
+} // namespace rdui
+#endif // RD_LAYOUT_BUILDRESULT_H

@@ -34,19 +34,14 @@
 
 namespace tut {
 namespace {
-const char* EMPTY_LOCALIZATION = R"YAML(defaultLocale: en
-locales:
-  en:
-    name: English
-    strings: {}
-)YAML";
+const char* kEmptyLocalization = "defaultLocale: en\nlocales: {en: {name: English, strings: {}}}\n";
 
 std::string singleStringLocalization(const std::string& key, const std::string& value) {
-    return "defaultLocale: en\nlocales:\n  en:\n    name: English\n    strings:\n      " + key + ": \"" + value + "\"\n";
+    return "defaultLocale: en\nlocales: {en: {name: English, strings: {" + key + ": \"" + value + "\"}}}\n";
 }
 
-rdui::ResourceSnapshot skinSnapshot(std::string localization = EMPTY_LOCALIZATION, std::string style = {}) {
-    if (localization.empty()) localization = EMPTY_LOCALIZATION;
+rdui::ResourceSnapshot skinSnapshot(std::string localization = kEmptyLocalization, std::string style = {}) {
+    if (localization.empty()) localization = kEmptyLocalization;
     rdui::ResourceSnapshot snapshot;
     snapshot.add("localization.yaml", std::move(localization));
     snapshot.add("skin.radia", std::move(style));
@@ -57,10 +52,10 @@ float resolvedLabelWidth(const rdui::System& system) {
     std::unique_ptr<rdui::Surface> surface = system.createSurface(rdui::fixedTextMetrics());
     surface->setViewport(200.f, 100.f);
     auto label = std::make_unique<rdui::Label>();
-    rdui::Label* label_ptr = label.get();
+    rdui::Label* labelPtr = label.get();
     surface->mount(std::move(label));
     surface->updateLayout();
-    return label_ptr->rect().w;
+    return labelPtr->rect().w;
 }
 } // namespace
 
@@ -74,13 +69,12 @@ private:
     int mNotifications = 0;
 };
 
-struct system_data {};
-typedef test_group<system_data> system_test;
-typedef system_test::object system_object;
-using rduisystem_object = system_object;
-system_test system_testcase("system");
+struct systemData {};
+using systemTest = test_group<systemData>;
+using systemObject = systemTest::object;
+systemTest systemTestCase("system");
 
-template<> template<> void rduisystem_object::test<1>() {
+template<> template<> void systemObject::test<1>() {
     rdui::ResourceSnapshot snapshot = skinSnapshot(singleStringLocalization("message", "Ready"), "label { width: 40px; }");
     snapshot.add("view.xml", "<text id=\"message\">message</text>");
     snapshot.add("resources/icons/search.svg", "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0 L10 10\"/></svg>");
@@ -95,21 +89,21 @@ template<> template<> void rduisystem_object::test<1>() {
     ensure_equals("stylesheet published", resolvedLabelWidth(system), 40.f);
     ensure("compiled icon published", system.hasIcon("search"));
 
-    rdui::ViewBuildResult view = system.createView("view.xml");
-    ensure("System creates localized View", view.ok());
-    ensure_equals("View uses published localization", view.rootAs<rdui::Text>()->text(), "Ready");
+    rdui::LayoutBuildResult buildResult = system.buildWidgetTree("view.xml");
+    ensure("System creates localized Widget tree", buildResult.ok());
+    ensure_equals("Widget tree uses published localization", buildResult.rootAs<rdui::Text>()->text(), "Ready");
 
     std::unique_ptr<rdui::Surface> surface = system.createSurface(rdui::fixedTextMetrics());
     ensure("System creates Surface", surface != nullptr);
     surface->setViewport(100.f, 100.f);
     auto styled = std::make_unique<rdui::Label>();
-    rdui::Label* styled_ptr = styled.get();
+    rdui::Label* styledPtr = styled.get();
     surface->mount(std::move(styled));
     surface->updateLayout();
-    ensure_equals("Surface shares published stylesheet", styled_ptr->rect().w, 40.f);
+    ensure_equals("Surface shares published stylesheet", styledPtr->rect().w, 40.f);
 }
 
-template<> template<> void rduisystem_object::test<2>() {
+template<> template<> void systemObject::test<2>() {
     rdui::System system;
     rdui::SkinGenerationPrepareResult live =
         rdui::SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Live"), "label { width: 40px; }"));
@@ -124,7 +118,7 @@ template<> template<> void rduisystem_object::test<2>() {
     ensure_equals("failed preparation preserves stylesheet", resolvedLabelWidth(system), 40.f);
 }
 
-template<> template<> void rduisystem_object::test<3>() {
+template<> template<> void systemObject::test<3>() {
     rdui::ResourceSnapshot snapshot = skinSnapshot({}, "icon { size: 16px; }");
     snapshot.add("resources/icons/search.svg", "");
     const rdui::SkinGenerationPrepareResult rejected = rdui::SkinCompiler().prepare(std::move(snapshot));
@@ -132,7 +126,7 @@ template<> template<> void rduisystem_object::test<3>() {
     ensure("rejected generation is not exposed", rejected.generation == nullptr);
 }
 
-template<> template<> void rduisystem_object::test<4>() {
+template<> template<> void systemObject::test<4>() {
     rdui::ResourceSnapshot snapshot = skinSnapshot({}, "icon { size: 16px; }");
     snapshot.add("known.xml", "<icon src=\"actions/search\"/>");
     snapshot.add("missing.xml", "<icon src=\"actions/missing\"/>");
@@ -143,15 +137,15 @@ template<> template<> void rduisystem_object::test<4>() {
     ensure("invalid complete generation is not exposed", rejected.generation == nullptr);
 }
 
-template<> template<> void rduisystem_object::test<5>() {
-    rdui::ResourceSnapshot missing_localization;
-    missing_localization.add("skin.radia", "label { width: 40px; }");
-    const rdui::SkinGenerationPrepareResult rejected = rdui::SkinCompiler().prepare(std::move(missing_localization));
+template<> template<> void systemObject::test<5>() {
+    rdui::ResourceSnapshot missingLocalization;
+    missingLocalization.add("skin.radia", "label { width: 40px; }");
+    const rdui::SkinGenerationPrepareResult rejected = rdui::SkinCompiler().prepare(std::move(missingLocalization));
     ensure("missing required resource rejects candidate", !rejected.ok());
     ensure_equals("diagnostic identifies missing resource", rejected.errors.front().source, "localization.yaml");
 }
 
-template<> template<> void rduisystem_object::test<6>() {
+template<> template<> void systemObject::test<6>() {
     rdui::ResourceSnapshot snapshot = skinSnapshot({}, "icon { size: 16px; }");
     snapshot.add("resources/icons/search.svg", "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0 L10\"/></svg>");
     const rdui::SkinGenerationPrepareResult rejected = rdui::SkinCompiler().prepare(std::move(snapshot));
@@ -159,52 +153,38 @@ template<> template<> void rduisystem_object::test<6>() {
     ensure_equals("icon diagnostic identifies resource", rejected.errors.front().source, "resources/icons/search.svg");
 }
 
-template<> template<> void rduisystem_object::test<7>() {
-    const std::string multilingual = R"YAML(defaultLocale: en
-locales:
-  en:
-    name: English
-    strings:
-      message: Ready
-  pt:
-    name: Português
-    strings:
-      message: Pronto
-  ar:
-    name: العربية
-    direction: rtl
-    strings:
-      message: جاهز
-)YAML";
-    rdui::SkinGenerationPrepareResult prepared = rdui::SkinCompiler().prepare(skinSnapshot(multilingual));
+template<> template<> void systemObject::test<7>() {
+    const std::string kMultilingual =
+        "defaultLocale: en\nlocales: {en: {name: English, strings: {message: Ready}}, pt: {name: Português, strings: {message: Pronto}}, ar: {name: العربية, direction: rtl, strings: {message: جاهز}}}\n";
+    rdui::SkinGenerationPrepareResult prepared = rdui::SkinCompiler().prepare(skinSnapshot(kMultilingual));
     ensure("multilingual generation prepares", prepared.ok());
 
     rdui::System system;
     system.publish(prepared.generation);
     std::unique_ptr<rdui::Surface> surface = system.createSurface(rdui::fixedTextMetrics());
     auto localized = std::make_unique<rdui::Label>();
-    rdui::Label* localized_ptr = localized.get();
-    localized->setContent(system.localized("message"));
+    rdui::Label* localizedPtr = localized.get();
+    localized->setContent(system.localize("message"));
     surface->root().addChild(std::move(localized));
     auto probe = std::make_unique<LocaleProbe>();
-    LocaleProbe* probe_ptr = probe.get();
+    LocaleProbe* probePtr = probe.get();
     surface->root().addChild(std::move(probe));
 
     ensure("Portuguese locale selected", system.setLocale("pt"));
-    ensure_equals("localized Widget updates reactively", localized_ptr->text(), "Pronto");
-    ensure_equals("Surface delivers locale change", probe_ptr->notifications(), 2);
+    ensure_equals("localized Widget updates reactively", localizedPtr->text(), "Pronto");
+    ensure_equals("Surface delivers locale change", probePtr->notifications(), 2);
 
-    rdui::SkinGenerationPrepareResult compatible = rdui::SkinCompiler().prepare(skinSnapshot(multilingual));
+    rdui::SkinGenerationPrepareResult compatible = rdui::SkinCompiler().prepare(skinSnapshot(kMultilingual));
     system.publish(compatible.generation);
     ensure_equals("selected locale survives publication", system.activeLocale(), "pt");
 
     rdui::SkinGenerationPrepareResult fallback = rdui::SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Ready again")));
     system.publish(fallback.generation);
     ensure_equals("removed locale falls back to default", system.activeLocale(), "en");
-    ensure_equals("fallback refreshes localized Widget", localized_ptr->text(), "Ready again");
+    ensure_equals("fallback refreshes localized Widget", localizedPtr->text(), "Ready again");
 }
 
-template<> template<> void rduisystem_object::test<8>() {
+template<> template<> void systemObject::test<8>() {
     rdui::System system;
     rdui::SkinGenerationPrepareResult live =
         rdui::SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Old"), "label { width: 40px; }"));
@@ -212,10 +192,10 @@ template<> template<> void rduisystem_object::test<8>() {
     std::unique_ptr<rdui::Surface> surface = system.createSurface(rdui::fixedTextMetrics());
     surface->setViewport(200.f, 100.f);
     auto styled = std::make_unique<rdui::Label>();
-    rdui::Label* styled_ptr = styled.get();
+    rdui::Label* styledPtr = styled.get();
     surface->mount(std::move(styled));
     surface->updateLayout();
-    ensure_equals("existing Surface starts with live stylesheet", styled_ptr->rect().w, 40.f);
+    ensure_equals("existing Surface starts with live stylesheet", styledPtr->rect().w, 40.f);
 
     rdui::ResourceSnapshot snapshot = skinSnapshot(singleStringLocalization("message", "New"), "label { width: 90px; }");
     snapshot.add("view.xml", "<text>message</text>");
@@ -223,21 +203,19 @@ template<> template<> void rduisystem_object::test<8>() {
     ensure("candidate generation prepares", prepared.ok());
     ensure_equals("preparation does not advance live generation", system.generation(), 1ULL);
     ensure_equals("preparation preserves live localization", system.resolveText("message"), "Old");
-    rdui::ViewBuildResult candidate_view = prepared.generation->createView("view.xml", system.activeLocale());
-    ensure("candidate View builds against candidate generation", candidate_view.ok());
-    ensure_equals("candidate View uses candidate localization", candidate_view.rootAs<rdui::Text>()->text(), "New");
+    rdui::LayoutBuildResult candidateBuildResult = prepared.generation->buildWidgetTree("view.xml", system.activeLocale());
+    ensure("candidate Widget tree builds against candidate generation", candidateBuildResult.ok());
+    ensure_equals("candidate Widget tree uses candidate localization", candidateBuildResult.rootAs<rdui::Text>()->text(), "New");
 
-    bool document_commit = false;
-    system.publish(prepared.generation, [&document_commit] { document_commit = true; });
-    ensure("document commit participates in publication", document_commit);
+    system.publish(prepared.generation);
     ensure_equals("publication advances generation once", system.generation(), 2ULL);
     ensure_equals("publication commits candidate localization", system.resolveText("message"), "New");
     surface->updateLayout();
-    ensure_equals("existing Surface observes published stylesheet", styled_ptr->rect().w, 90.f);
-    ensure("live View creation uses published snapshot", system.createView("view.xml").ok());
+    ensure_equals("existing Surface observes published stylesheet", styledPtr->rect().w, 90.f);
+    ensure("live Widget tree creation uses published snapshot", system.buildWidgetTree("view.xml").ok());
 }
 
-template<> template<> void rduisystem_object::test<9>() {
+template<> template<> void systemObject::test<9>() {
     rdui::System system;
     rdui::SkinGenerationPrepareResult live = rdui::SkinCompiler().prepare(skinSnapshot({}, "label { width: 40px; }"));
     system.publish(live.generation);
@@ -248,7 +226,7 @@ template<> template<> void rduisystem_object::test<9>() {
     ensure_equals("rejected preparation preserves stylesheet", resolvedLabelWidth(system), 40.f);
 }
 
-template<> template<> void rduisystem_object::test<10>() {
+template<> template<> void systemObject::test<10>() {
     rdui::ResourceSnapshot invalid = skinSnapshot({}, "label { width: 90px; }");
     invalid.add("valid.xml", "<text>Ready</text>");
     invalid.add("unused.xml", "<unsupported/>");
@@ -258,15 +236,9 @@ template<> template<> void rduisystem_object::test<10>() {
     ensure("rejected complete generation is not exposed", rejected.generation == nullptr);
 }
 
-template<> template<> void rduisystem_object::test<11>() {
-    rdui::ResourceSnapshot snapshot = skinSnapshot(
-        R"YAML(defaultLocale: en
-locales:
-  en:
-    name: English
-    strings:
-      fly.label: 'Fly <kbd binding="toggle-fly"/>'
-)YAML");
+template<> template<> void systemObject::test<11>() {
+    rdui::ResourceSnapshot snapshot =
+        skinSnapshot("defaultLocale: en\nlocales: {en: {name: English, strings: {fly.label: 'Fly <kbd shortcut=\"toggle-fly\"/>'}}}\n");
     snapshot.add("view.xml", "<text>fly.label</text>");
     rdui::SkinGenerationPrepareResult prepared = rdui::SkinCompiler().prepare(std::move(snapshot));
     ensure("Kbd presentation fixture prepares", prepared.ok());
@@ -276,21 +248,49 @@ locales:
     system.setKeybindingResolver(
         [&presentation](const std::string& binding) { return binding == "toggle-fly" ? presentation : rdui::KeybindingPresentation{}; });
     system.publish(prepared.generation);
-    rdui::ViewBuildResult view = system.createView("view.xml");
-    auto* text = view.rootAs<rdui::Text>();
-    ensure("Kbd View builds", view.ok() && text);
+    rdui::LayoutBuildResult buildResult = system.buildWidgetTree("view.xml");
+    auto* text = buildResult.rootAs<rdui::Text>();
+    ensure("Kbd Widget tree builds", buildResult.ok() && text);
 
     std::unique_ptr<rdui::Surface> surface = system.createSurface(rdui::fixedTextMetrics());
     surface->setViewport(200.f, 100.f);
-    surface->mount(std::move(view.root));
+    surface->mount(std::move(buildResult.root));
     surface->updateLayout();
     ensure_equals("Kbd resolves through the System presentation seam", text->text(), "Fly F");
-    const float initial_width = text->desiredSize().x;
+    const float initialWidth = text->desiredSize().x;
 
     presentation = {{"Ctrl", "F"}};
     system.refreshKeybindings();
     surface->updateLayout();
     ensure_equals("Kbd refreshes after a user keybinding change", text->text(), "Fly Ctrl F");
-    ensure("changed Kbd presentation invalidates intrinsic measurement", text->desiredSize().x > initial_width);
+    ensure("changed Kbd presentation invalidates intrinsic measurement", text->desiredSize().x > initialWidth);
+}
+
+template<> template<> void systemObject::test<12>() {
+    rdui::System system;
+    rdui::SkinGenerationPrepareResult live = rdui::SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Old")));
+    system.publish(live.generation);
+
+    rdui::SkinGenerationPrepareResult candidate = rdui::SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "New")));
+    bool callbackSawCandidate = false;
+    class RejectPublication final : public rdui::PublicationCommit {
+    public:
+        RejectPublication(rdui::System& system, bool& sawCandidate) : mSystem(system), mSawCandidate(sawCandidate) {}
+
+        bool commit() override {
+            mSawCandidate = mSystem.resolveText("message") == "New";
+            return false;
+        }
+
+    private:
+        rdui::System& mSystem;
+        bool& mSawCandidate;
+    } rejectPublication(system, callbackSawCandidate);
+    const bool committed = system.publish(std::move(candidate.generation), rejectPublication);
+
+    ensure("transactional publication reports callback rejection", !committed);
+    ensure("publication callback observes candidate generation", callbackSawCandidate);
+    ensure_equals("rejected transactional publication preserves generation", system.generation(), 1ULL);
+    ensure_equals("rejected transactional publication restores localization", system.resolveText("message"), "Old");
 }
 } // namespace tut

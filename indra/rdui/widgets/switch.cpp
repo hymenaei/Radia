@@ -36,13 +36,13 @@ public:
     SwitchThumb() : Widget("switch-thumb") { setPointerEvents(false); }
 
     void constrainResolvedStyle(Style& style) const override {
-        style.align_self = AlignSelf::Stretch;
-        style.aspect_ratio = 1.f;
+        style.alignSelf = AlignSelf::Stretch;
+        style.aspectRatio = 1.f;
     }
 };
 } // namespace
 
-Switch::Switch() : ValueControl(ELEMENT) {
+Switch::Switch() : ValueControl(sElement) {
     detail::instantiateCompositeParts(*this, detail::switchContract());
 }
 
@@ -52,23 +52,38 @@ void Switch::onChildrenCleared() {
 }
 
 Switch& Switch::setChecked(bool checked) {
-    const bool changed = checked != this->checked();
-    setState(WidgetState::Checked, checked);
+    const bool changed = updateCheckedState(checked);
     mValueState = {checked, checked, std::nullopt};
-    if (changed) notifyValueState();
+    if (changed) notifyValueControlState();
     return *this;
 }
 
-Switch& Switch::setBindingId(std::string id) {
-    mBindingId = std::move(id);
+bool Switch::setCheckedValue(bool checked) {
+    setChecked(checked);
+    return true;
+}
+
+std::optional<bool> Switch::checkedValue() const {
+    return checked();
+}
+
+bool Switch::updateCheckedState(bool checked) {
+    const bool changed = checked != this->checked();
+    setState(WidgetState::Checked, checked);
+    if (changed) invalidateArrange();
+    return changed;
+}
+
+Switch& Switch::setSettingName(std::string name) {
+    mValueBindingRequest = ValueBindingRequest{std::move(name)};
     return *this;
 }
 
 ValueControlState Switch::valueControlState() const {
     ValueControlState result;
     result.dirty = mValueState.dirty();
-    result.validation = mValueState.validationStatus();
-    if (const TextSource* message = mValueState.validationMessage()) result.message = *message;
+    result.validationStatus = mValueState.validationStatus();
+    if (const TextSource* message = mValueState.validationMessage()) result.validationMessage = *message;
     return result;
 }
 
@@ -81,7 +96,7 @@ ValueBindingSubscription Switch::observeValueControlState(Observer observer) {
     });
 }
 
-void Switch::notifyValueState() {
+void Switch::notifyValueControlState() {
     const ValueControlState state = valueControlState();
     const auto observers = mValueObservers;
     for (const auto& [id, observer] : observers)
@@ -90,12 +105,12 @@ void Switch::notifyValueState() {
 
 void Switch::applyValueState(ValueState<bool> state) {
     mValueState = std::move(state);
-    setState(WidgetState::Checked, mValueState.value);
-    notifyValueState();
+    updateCheckedState(mValueState.value);
+    notifyValueControlState();
 }
 
 void Switch::prepareValueBinding(Binder& binder) {
-    binder.requireValue(mBindingId, mBinding);
+    if (mValueBindingRequest) binder.requireValueBinding(*mValueBindingRequest, mBinding);
 }
 
 ValueBindingSubscription Switch::commitValueBinding() {
@@ -103,11 +118,11 @@ ValueBindingSubscription Switch::commitValueBinding() {
     applyValueState(mBinding->state());
     std::weak_ptr<char> lifetime = mValueObserverLifetime;
     std::shared_ptr<ValueBinding<bool>> provider = mBinding.shared();
-    auto provider_subscription = std::make_shared<ValueBindingSubscription>(provider->observe([this, lifetime](const ValueState<bool>& state) {
+    auto providerSubscription = std::make_shared<ValueBindingSubscription>(provider->observe([this, lifetime](const ValueState<bool>& state) {
         if (!lifetime.expired()) applyValueState(state);
     }));
-    return ValueBindingSubscription([this, lifetime, provider = std::move(provider), provider_subscription] {
-        provider_subscription->reset();
+    return ValueBindingSubscription([this, lifetime, provider = std::move(provider), providerSubscription] {
+        providerSubscription->reset();
         if (!lifetime.expired() && mBinding.shared() == provider) mBinding.reset();
     });
 }
@@ -123,33 +138,33 @@ void Switch::onActivate() {
         mBinding->write(!previous);
     } else {
         mValueState.value = !previous;
-        setState(WidgetState::Checked, mValueState.value);
-        notifyValueState();
+        updateCheckedState(mValueState.value);
+        notifyValueControlState();
     }
     if (checked() == previous) return;
     if (mOnCheckedChanged) mOnCheckedChanged(checked());
-    emitAction(ChangeActionEvent(*this, checked()));
+    emitEvent(ChangeEvent(*this, checked()));
 }
 
 void Switch::constrainResolvedStyle(Style& style) const {
     style.flow = Flow::Row;
-    style.justify_content = checked() ? JustifyContent::End : JustifyContent::Start;
+    style.justifyContent = checked() ? JustifyContent::End : JustifyContent::Start;
 }
 
 WidgetContract detail::switchContract() {
-    return defineWidget<Switch>(Switch::ELEMENT)
-        .attributes({booleanAttribute("checked", &Switch::setChecked), stringAttribute("bind", &Switch::setBindingId)})
-        .validate([](const LayoutElement& element, Switch&, ViewBuildResult& result, const std::string& source, const ViewBuildContext*) {
-            const LayoutAttribute* bind = element.attribute("bind");
-            if (bind && !isLocalIdentifier(bind->value))
-                result.error("view.value.bind_invalid", "Value Control bind must be a lowercase kebab-case identifier.", source,
-                             bind->source.begin.line, bind->source.begin.column);
-            if (bind && element.attribute("checked"))
-                result.error("view.value.multiple_sources", "Switch cannot declare both bind and checked.", source, bind->source.begin.line,
-                             bind->source.begin.column);
+    return defineWidget<Switch>(Switch::sElement)
+        .attributes({booleanAttribute("checked", &Switch::setChecked), stringAttribute("setting", &Switch::setSettingName)})
+        .validate([](const LayoutElement& element, Switch&, LayoutBuildResult& result, const std::string& source, const LayoutBuildContext*) {
+            const LayoutAttribute* setting = element.attribute("setting");
+            if (setting && setting->value.empty())
+                result.error("layout.value.setting_invalid", "Value Control setting must not be empty.", source, setting->source.begin.line,
+                             setting->source.begin.column);
+            if (setting && element.attribute("checked"))
+                result.error("layout.value.multiple_sources", "Switch cannot declare both setting and checked.", source, setting->source.begin.line,
+                             setting->source.begin.column);
         })
-        .actions({ActionEventKind::Change, ActionEventKind::DoubleClick, ActionEventKind::MouseDown, ActionEventKind::MouseUp,
-                  ActionEventKind::MouseMove, ActionEventKind::LongClick, ActionEventKind::ContextMenu})
+        .events({WidgetEventKind::Change, WidgetEventKind::DoubleClick, WidgetEventKind::MouseDown, WidgetEventKind::MouseUp,
+                 WidgetEventKind::MouseMove, WidgetEventKind::LongClick, WidgetEventKind::ContextMenu})
         .labelable()
         .state(WidgetState::Checked)
         .part<SwitchThumb>("thumb", &Switch::mThumb)

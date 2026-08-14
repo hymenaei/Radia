@@ -25,33 +25,14 @@
 #ifndef RD_INPUTBRIDGE_H
 #define RD_INPUTBRIDGE_H
 
-#include <cstdint>
-#include <variant>
 #include "event.h"
 #include "nativeinput.h"
 #include "style/style.h"
 
 namespace rdui::viewer {
-struct SurfacePointerInput {
-    NativePointerPhase phase = NativePointerPhase::Move;
-    PointerEvent event;
-};
-
-struct SurfaceKeyInput {
-    bool down = true;
-    KeyEvent event;
-};
-
-struct SurfaceCharacterInput {
-    std::uint32_t codepoint = 0;
-};
-
-using SurfaceInputEvent = std::variant<SurfacePointerInput, ScrollEvent, SurfaceKeyInput, SurfaceCharacterInput, NativeInteractionLoss>;
-
-class RduiInputBridge final {
-public:
-    SurfaceInputEvent translate(const NativeInputEvent& event) const;
-    ECursorType translateCursor(CursorStyle cursor) const;
-};
+PointerEvent translatePointerInput(const NativePointerInput& input);
+ScrollEvent translateScrollInput(const NativeScrollInput& input);
+KeyEvent translateKeyInput(const NativeKeyInput& input);
+ECursorType translateCursor(CursorStyle cursor);
 } // namespace rdui::viewer
 #endif // RD_INPUTBRIDGE_H

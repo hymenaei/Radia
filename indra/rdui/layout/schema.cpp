@@ -36,7 +36,15 @@ std::string schemaNameKey(std::string_view name) {
     return key;
 }
 
-bool isLocalIdentifier(std::string_view value) {
+bool isWidgetIdentifier(std::string_view value) {
+    if (value.empty()) return false;
+    for (char character : value)
+        if ((character < 'a' || character > 'z') && (character < 'A' || character > 'Z') && (character < '0' || character > '9') && character != '-')
+            return false;
+    return true;
+}
+
+bool isKebabCaseIdentifier(std::string_view value) {
     if (value.empty() || value.front() == '-' || value.back() == '-') return false;
     bool previous_hyphen = false;
     for (char character : value) {

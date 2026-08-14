@@ -47,13 +47,14 @@ class InlineContentNode {
 public:
     static InlineContentNode text(std::string value);
     static InlineContentNode container(InlineContentKind kind, std::vector<InlineContentNode> children);
-    static InlineContentNode kbd(std::string binding, KeybindingPresentation presentation = {});
+    static InlineContentNode kbd(std::string shortcutId, KeybindingPresentation presentation = {});
     static InlineContentNode br();
     static InlineContentNode link(std::string destination, std::vector<InlineContentNode> children);
 
     InlineContentKind kind() const { return mKind; }
     const std::string& value() const { return mValue; }
-    const std::string& metadata() const { return mMetadata; }
+    const std::string& shortcutId() const { return mShortcutId; }
+    const std::string& destination() const { return mDestination; }
     const KeybindingPresentation& keybindingPresentation() const { return mKeybindingPresentation; }
     const std::vector<InlineContentNode>& children() const { return mChildren; }
 
@@ -62,7 +63,8 @@ private:
 
     InlineContentKind mKind;
     std::string mValue;
-    std::string mMetadata;
+    std::string mShortcutId;
+    std::string mDestination;
     KeybindingPresentation mKeybindingPresentation;
     std::vector<InlineContentNode> mChildren;
 };
@@ -84,7 +86,7 @@ private:
 };
 
 const char* inlineContentElement(InlineContentKind kind);
-bool inlineContentKind(const std::string& element, InlineContentKind& kind);
+bool tryGetInlineContentKind(const std::string& element, InlineContentKind& kind);
 bool isInlineStyleElement(const std::string& element);
 } // namespace rdui
 #endif // RD_TEXT_INLINECONTENT_H

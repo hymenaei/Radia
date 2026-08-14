@@ -31,7 +31,7 @@ TextSourceNode TextSourceNode::text(std::string value) {
     return TextSourceNode(Literal{std::move(value)});
 }
 
-TextSourceNode TextSourceNode::localized(LocalizationRequest request, InlineContent fallback) {
+TextSourceNode TextSourceNode::fromLocalization(LocalizationRequest request, InlineContent fallback) {
     return TextSourceNode(Localized{std::move(request), std::move(fallback)});
 }
 
@@ -40,8 +40,8 @@ TextSourceNode TextSourceNode::container(InlineContentKind kind, std::vector<Tex
     return TextSourceNode(Container{kind, std::move(children)});
 }
 
-TextSourceNode TextSourceNode::kbd(std::string binding, KeybindingPresentation presentation) {
-    return TextSourceNode(Keybinding{std::move(binding), std::move(presentation)});
+TextSourceNode TextSourceNode::kbd(std::string shortcutId, KeybindingPresentation presentation) {
+    return TextSourceNode(Keybinding{std::move(shortcutId), std::move(presentation)});
 }
 
 TextSourceNode TextSourceNode::br() {
@@ -63,9 +63,9 @@ TextSourceNode sourceNode(const InlineContentNode& node) {
         case InlineContentKind::B:
         case InlineContentKind::I:
         case InlineContentKind::S: return TextSourceNode::container(node.kind(), std::move(children));
-        case InlineContentKind::Kbd: return TextSourceNode::kbd(node.metadata(), node.keybindingPresentation());
+        case InlineContentKind::Kbd: return TextSourceNode::kbd(node.shortcutId(), node.keybindingPresentation());
         case InlineContentKind::Br: return TextSourceNode::br();
-        case InlineContentKind::Link: return TextSourceNode::link(node.metadata(), std::move(children));
+        case InlineContentKind::Link: return TextSourceNode::link(node.destination(), std::move(children));
     }
     llassert(false);
     return TextSourceNode::br();
@@ -86,7 +86,7 @@ std::vector<InlineContentNode> materializeNodes(const std::vector<TextSourceNode
                 } else if constexpr (std::is_same_v<Value, TextSourceNode::Container>) {
                     result.push_back(InlineContentNode::container(value.kind, materializeNodes(value.children, resolve)));
                 } else if constexpr (std::is_same_v<Value, TextSourceNode::Keybinding>) {
-                    result.push_back(InlineContentNode::kbd(value.binding, value.presentation));
+                    result.push_back(InlineContentNode::kbd(value.shortcutId, value.presentation));
                 } else if constexpr (std::is_same_v<Value, TextSourceNode::Break>) {
                     result.push_back(InlineContentNode::br());
                 } else if constexpr (std::is_same_v<Value, TextSourceNode::Link>) {
@@ -110,8 +110,8 @@ TextSource TextSource::text(std::string value) {
     return TextSource({TextSourceNode::text(std::move(value))});
 }
 
-TextSource TextSource::localized(LocalizationRequest request, InlineContent fallback) {
-    return TextSource({TextSourceNode::localized(std::move(request), std::move(fallback))});
+TextSource TextSource::fromLocalization(LocalizationRequest request, InlineContent fallback) {
+    return TextSource({TextSourceNode::fromLocalization(std::move(request), std::move(fallback))});
 }
 
 InlineContent TextSource::materialize() const {

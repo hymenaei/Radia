@@ -39,7 +39,7 @@ public:
 
 protected:
     void constrainResolvedStyle(Style& style) const override {
-        if (style.align_self == AlignSelf::Auto) style.align_self = AlignSelf::Start;
+        if (style.alignSelf == AlignSelf::Auto) style.alignSelf = AlignSelf::Start;
         style.order = std::numeric_limits<int>::lowest();
     }
 };
@@ -60,15 +60,15 @@ void Fieldset::onArranged(const Style& style) {
 
     translateChild(*mLegend, {0.f, style.padding.top});
 
-    Widget* first_content = nullptr;
+    Widget* topmostContent = nullptr;
     for (const auto& child : children()) {
         if (child.get() == mLegend.get() || child->visibility() == Visibility::Collapsed) continue;
-        if (!first_content || child->rect().top() > first_content->rect().top()) first_content = child.get();
+        if (!topmostContent || child->rect().top() > topmostContent->rect().top()) topmostContent = child.get();
     }
-    if (!first_content) return;
+    if (!topmostContent) return;
 
-    const float content_top = borderRect().top() - style.border_width.top - style.padding.top;
-    const float offset = content_top - first_content->rect().top();
+    const float contentTop = borderRect().top() - style.borderWidth.top - style.padding.top;
+    const float offset = contentTop - topmostContent->rect().top();
     for (const auto& child : children())
         if (child.get() != mLegend.get()) translateChild(*child, {0.f, offset});
 }
@@ -79,7 +79,7 @@ bool Fieldset::hasLayoutGapBetween(const Widget& previous, const Widget&) const 
 
 float Fieldset::layoutOverlapBetween(const Widget& previous, const Widget&, const Style& style) const {
     if (&previous != mLegend.get()) return 0.f;
-    return std::max(0.f, mLegend->desiredSize().y * .5f - style.border_width.top);
+    return std::max(0.f, mLegend->desiredSize().y * .5f - style.borderWidth.top);
 }
 
 Text* Fieldset::setLegendContent(TextSource content) {
@@ -95,8 +95,8 @@ Text* Fieldset::setLegendContent(TextSource content) {
 Rect Fieldset::borderRect() const {
     if (!mLegend || mLegend->visibility() == Visibility::Collapsed || mLegend->rect().h <= 0.f) return rect();
 
-    const float border_top = mLegend->rect().y + mLegend->rect().h * .5f;
-    return {rect().x, rect().y, rect().w, std::max(0.f, border_top - rect().y)};
+    const float borderTop = mLegend->rect().y + mLegend->rect().h * .5f;
+    return {rect().x, rect().y, rect().w, std::max(0.f, borderTop - rect().y)};
 }
 
 Rect Fieldset::paintBounds() const {
@@ -110,10 +110,10 @@ void Fieldset::paint(PaintContext& context, const Style& style, float) const {
         return;
     }
 
-    constexpr float legend_clearance = 2.f;
+    constexpr float kLegendClearance = 2.f;
     const TopBorderGap gap{
-        std::max(box.left(), mLegend->rect().left() - legend_clearance),
-        std::min(box.right(), mLegend->rect().right() + legend_clearance),
+        std::max(box.left(), mLegend->rect().left() - kLegendClearance),
+        std::min(box.right(), mLegend->rect().right() + kLegendClearance),
     };
     context.paintBox(box, style, gap);
 }
@@ -121,33 +121,33 @@ void Fieldset::paint(PaintContext& context, const Style& style, float) const {
 WidgetContract detail::fieldsetContract() {
     return defineWidget<Fieldset>(Fieldset::ELEMENT)
         .composition(
-            [](const LayoutElement& element, Fieldset& fieldset, const ViewScopeContext&, ViewBuildResult& result, const std::string& source) {
-                std::size_t field_count = 0;
-                bool has_flow_break = false;
+            [](const LayoutElement& element, Fieldset& fieldset, const WidgetScopeContext&, LayoutBuildResult& result, const std::string& source) {
+                std::size_t fieldCount = 0;
+                bool hasFlowBreak = false;
                 for (const auto& child : fieldset.children()) {
-                    has_flow_break = has_flow_break || child->flowBreakBefore();
+                    hasFlowBreak = hasFlowBreak || child->flowBreakBefore();
                     if (child.get() == fieldset.legend() || !child->part().empty()) continue;
-                    if (dynamic_cast<Field*>(child.get())) ++field_count;
+                    if (dynamic_cast<Field*>(child.get())) ++fieldCount;
                     else
-                        result.error("view.fieldset.child_unsupported", "Fieldset accepts only one Legend and direct Fields.", source,
+                        result.error("layout.fieldset.child_unsupported", "Fieldset accepts only one Legend and direct Fields.", source,
                                      element.source().begin.line, element.source().begin.column);
                 }
                 if (!fieldset.legend())
-                    result.error("view.fieldset.legend_required", "Fieldset requires exactly one direct Legend.", source, element.source().begin.line,
-                                 element.source().begin.column);
-                if (field_count == 0)
-                    result.error("view.fieldset.field_required", "Fieldset requires one or more direct Fields.", source, element.source().begin.line,
-                                 element.source().begin.column);
-                if (has_flow_break)
-                    result.error("view.fieldset.flow_break_unsupported", "Fieldset does not accept Flow Break directives.", source,
+                    result.error("layout.fieldset.legend_required", "Fieldset requires exactly one direct Legend.", source,
+                                 element.source().begin.line, element.source().begin.column);
+                if (fieldCount == 0)
+                    result.error("layout.fieldset.field_required", "Fieldset requires one or more direct Fields.", source,
+                                 element.source().begin.line, element.source().begin.column);
+                if (hasFlowBreak)
+                    result.error("layout.fieldset.flow_break_unsupported", "Fieldset does not accept Flow Break directives.", source,
                                  element.source().begin.line, element.source().begin.column);
             })
         .scopedInlineContent("legend",
                              {InlineContentKind::B, InlineContentKind::I, InlineContentKind::S, InlineContentKind::Kbd, InlineContentKind::Br},
-                             [](TextSource content, Fieldset& fieldset, ViewBuildResult& result, const std::string& source, std::size_t line,
+                             [](TextSource content, Fieldset& fieldset, LayoutBuildResult& result, const std::string& source, std::size_t line,
                                 std::size_t column) -> Widget* {
                                  if (fieldset.legend()) {
-                                     result.error("view.fieldset.legend_duplicate", "Fieldset accepts only one Legend.", source, line, column);
+                                     result.error("layout.fieldset.legend_duplicate", "Fieldset accepts only one Legend.", source, line, column);
                                      return fieldset.legend();
                                  }
                                  return fieldset.setLegendContent(std::move(content));

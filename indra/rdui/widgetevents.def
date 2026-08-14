@@ -1,21 +1,21 @@
-// Shared action vocabulary consumed by action.h (enum values) and
+// Shared Widget Event vocabulary consumed by widgetevent.h (enum values) and
 // widgets/widgetcontract.cpp (layout-attribute dispatch). Keep the enum name
 // and authored attribute together so a new event cannot drift between the two.
 // Arguments: C++ event name, authored layout/resource attribute.
 
-// Click activates the widget's normal action target.
-ACTION_EVENT_ENTRY(Click, "onClick")
+// Click activates the Widget's normal Event target.
+WIDGET_EVENT_ENTRY(Click, "onClick")
 // DoubleClick is the second activation in a double-click gesture.
-ACTION_EVENT_ENTRY(DoubleClick, "onDoubleClick")
+WIDGET_EVENT_ENTRY(DoubleClick, "onDoubleClick")
 // Change reports a value/state change, including the checked payload.
-ACTION_EVENT_ENTRY(Change, "onChange")
+WIDGET_EVENT_ENTRY(Change, "onChange")
 // MouseDown starts a pointer-button interaction.
-ACTION_EVENT_ENTRY(MouseDown, "onMouseDown")
+WIDGET_EVENT_ENTRY(MouseDown, "onMouseDown")
 // MouseUp ends a pointer-button interaction.
-ACTION_EVENT_ENTRY(MouseUp, "onMouseUp")
+WIDGET_EVENT_ENTRY(MouseUp, "onMouseUp")
 // MouseMove reports pointer motion while routed to the widget.
-ACTION_EVENT_ENTRY(MouseMove, "onMouseMove")
+WIDGET_EVENT_ENTRY(MouseMove, "onMouseMove")
 // LongClick fires after the configured hold duration.
-ACTION_EVENT_ENTRY(LongClick, "onLongClick")
-// ContextMenu requests the widget's context-menu action.
-ACTION_EVENT_ENTRY(ContextMenu, "onContextMenu")
+WIDGET_EVENT_ENTRY(LongClick, "onLongClick")
+// ContextMenu requests the Widget's context-menu Event.
+WIDGET_EVENT_ENTRY(ContextMenu, "onContextMenu")

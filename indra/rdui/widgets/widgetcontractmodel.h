@@ -34,27 +34,27 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-#include "action.h"
-#include "layout/viewresult.h"
+#include "layout/buildresult.h"
 #include "text/inlinecontent.h"
 #include "text/source.h"
 #include "types.h"
+#include "widgetevent.h"
 
 namespace rdui {
 class LayoutElement;
-class ViewBuildContext;
-class ViewScopeContext;
+class LayoutBuildContext;
+class WidgetScopeContext;
 
-enum class ViewTextContent : uint8_t { Unsupported, Widget, Children, Inline };
+enum class WidgetTextContentMode : uint8_t { Unsupported, WidgetText, TextChildren, InlineContent };
 
 struct CompositePartContract {
     CompositePartContract() = default;
 
     std::string path;
-    std::string parent_path;
+    std::string parentPath;
     std::function<std::unique_ptr<Widget>()> create;
     std::function<void(Widget&, Widget&)> bind;
-    std::vector<WidgetState> produced_states;
+    std::vector<WidgetState> producedStates;
     bool eager = true;
 };
 
@@ -65,18 +65,18 @@ struct CompositeTopology {
 };
 
 struct ScopedInlineContentContract {
-    std::string element;
+    std::string elementName;
     std::vector<InlineContentKind> accepted;
-    std::function<Widget*(TextSource, Widget&, ViewBuildResult&, const std::string&, std::size_t, std::size_t)> apply;
+    std::function<Widget*(TextSource, Widget&, LayoutBuildResult&, const std::string&, std::size_t, std::size_t)> apply;
 };
 
 struct WidgetAttributeContract {
     std::vector<std::string> names;
-    std::function<void(const LayoutElement&, Widget&, ViewBuildResult&, const std::string&, const ViewBuildContext*)> apply;
+    std::function<void(const LayoutElement&, Widget&, LayoutBuildResult&, const std::string&, const LayoutBuildContext*)> apply;
 };
 
 struct ResourceRootContract {
-    std::string expected_element;
+    std::string expectedElementName;
 };
 
 struct ChildClaim {
@@ -97,34 +97,34 @@ private:
 };
 
 struct WidgetAttributeBehavior {
-    std::function<void(const LayoutElement&, Widget&, ViewBuildResult&, const std::string&, const ViewBuildContext*)> apply;
+    std::function<void(const LayoutElement&, Widget&, LayoutBuildResult&, const std::string&, const LayoutBuildContext*)> apply;
 };
 
 struct WidgetCompositionBehavior {
-    std::function<void(const LayoutElement&, Widget&, const ViewScopeContext&, ViewBuildResult&, const std::string&)> validate;
+    std::function<void(const LayoutElement&, Widget&, const WidgetScopeContext&, LayoutBuildResult&, const std::string&)> validate;
 };
 
 struct WidgetChildrenBehavior {
-    std::unordered_map<std::string, std::vector<std::string>> part_attributes;
-    std::function<ChildClaim(const LayoutElement&, Widget&, ViewBuildResult&, const std::string&)> claim;
+    std::unordered_map<std::string, std::vector<std::string>> partAttributes;
+    std::function<ChildClaim(const LayoutElement&, Widget&, LayoutBuildResult&, const std::string&)> claim;
 };
 
 struct WidgetContentBehavior {
-    ViewTextContent mode = ViewTextContent::Unsupported;
-    std::function<std::unique_ptr<Widget>(TextSource)> create_text_child;
-    std::function<void(std::string, Widget&, ViewBuildResult&, const std::string&, const ViewBuildContext*, std::size_t)> apply_text;
-    std::vector<InlineContentKind> accepted_inline_content;
-    std::function<void(TextSource, Widget&)> apply_inline_content;
-    std::unordered_map<std::string, ScopedInlineContentContract> scoped_inline_content;
+    WidgetTextContentMode mode = WidgetTextContentMode::Unsupported;
+    std::function<std::unique_ptr<Widget>(TextSource)> createTextChild;
+    std::function<void(std::string, Widget&, LayoutBuildResult&, const std::string&, const LayoutBuildContext*, std::size_t)> applyText;
+    std::vector<InlineContentKind> acceptedInlineContent;
+    std::function<void(TextSource, Widget&)> applyInlineContent;
+    std::unordered_map<std::string, ScopedInlineContentContract> scopedInlineContent;
 };
 
-class ViewScopeContext {
+class WidgetScopeContext {
 public:
     using LabelablePredicate = std::function<bool(const Widget&)>;
 
-    ViewScopeContext(const std::unordered_map<std::string, Widget*>& widgets, const std::unordered_set<std::string>& ambiguous_ids,
-                     LabelablePredicate is_labelable)
-        : mWidgets(widgets), mAmbiguousIds(ambiguous_ids), mIsLabelable(std::move(is_labelable)) {}
+    WidgetScopeContext(const std::unordered_map<std::string, Widget*>& widgets, const std::unordered_set<std::string>& ambiguousIds,
+                       LabelablePredicate isLabelable)
+        : mWidgets(widgets), mAmbiguousIds(ambiguousIds), mIsLabelable(std::move(isLabelable)) {}
 
     Widget* find(const std::string& id) const {
         if (id.empty() || ambiguous(id)) return nullptr;
@@ -145,20 +145,20 @@ private:
 struct WidgetContract {
     WidgetContract() = default;
 
-    std::string element;
+    std::string elementName;
     std::function<std::unique_ptr<Widget>()> create;
     std::vector<std::string> attributes;
-    WidgetAttributeBehavior attribute_behavior;
-    WidgetCompositionBehavior composition_behavior;
-    WidgetChildrenBehavior children_behavior;
-    WidgetContentBehavior content_behavior;
-    std::optional<ResourceRootContract> resource_root;
-    std::vector<ActionEventKind> supported_actions;
-    std::vector<WidgetState> produced_states;
-    std::vector<CompositePartContract> composite_parts;
-    std::shared_ptr<const CompositeTopology> composite_topology;
+    WidgetAttributeBehavior attributeBehavior;
+    WidgetCompositionBehavior compositionBehavior;
+    WidgetChildrenBehavior childrenBehavior;
+    WidgetContentBehavior contentBehavior;
+    std::optional<ResourceRootContract> resourceRoot;
+    std::vector<WidgetEventKind> supportedEvents;
+    std::vector<WidgetState> producedStates;
+    std::vector<CompositePartContract> compositeParts;
+    std::shared_ptr<const CompositeTopology> compositeTopology;
     bool labelable = false;
-    bool scoped_only = false;
+    bool scopedOnly = false;
 };
 } // namespace rdui
 #endif // RD_WIDGETS_WIDGETCONTRACTMODEL_H

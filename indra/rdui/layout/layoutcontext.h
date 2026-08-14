@@ -33,11 +33,10 @@
 #include "style/stylepass.h"
 
 namespace rdui {
-using layout_detail::ChildLayout;
-
 class LayoutPass {
 public:
-    LayoutPass(const StyleSheet& theme, const TextMetrics& text_metrics) : mOwnedStyles(std::in_place, theme, text_metrics), mStyles(*mOwnedStyles) {}
+    LayoutPass(const StyleSheet& styleSheet, const TextMetrics& textMetrics)
+        : mOwnedStyles(std::in_place, styleSheet, textMetrics), mStyles(*mOwnedStyles) {}
     explicit LayoutPass(StylePass& styles) : mStyles(styles) {}
     LayoutPass(const LayoutPass&) = delete;
     LayoutPass& operator=(const LayoutPass&) = delete;
@@ -45,7 +44,7 @@ public:
     LayoutPass& operator=(LayoutPass&&) = delete;
 
     LayoutContextKey contextKey() const { return mStyles.contextKey(); }
-    const StyleSheet& theme() const { return mStyles.styleSheet(); }
+    const StyleSheet& styleSheet() const { return mStyles.styleSheet(); }
     const TextMetrics& textMetrics() const { return mStyles.textMetrics(); }
     void recordMeasured(bool constrained) {
         ++mStatistics.measured_nodes;
@@ -66,52 +65,53 @@ private:
 
 class LayoutEngine {
 private:
+    using ChildLayout = layout_detail::ChildLayout;
+    using MainAxisAllocation = layout_detail::MainAxisAllocation;
     using NodeSnapshot = WidgetVisit;
 
     struct RowSizing {
         std::vector<std::pair<std::size_t, std::size_t>> lines;
-        std::vector<layout_detail::MainAxisAllocation> allocations;
-        std::vector<float> line_heights;
+        std::vector<MainAxisAllocation> allocations;
+        std::vector<float> lineHeights;
         bool valid = true;
     };
 
-    static ChildLayout measureChild(Widget& parent, Widget& child, const Style& parent_style, Flow flow, std::optional<float> resolved_width,
-                                    std::optional<float> resolved_height, LayoutPass& pass);
-    static Vec2 measureRow(Widget& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolved_width,
-                           std::optional<float> resolved_height, LayoutPass& pass);
-    static Vec2 measureColumn(Widget& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolved_width,
-                              std::optional<float> resolved_height, LayoutPass& pass);
-    static Vec2 measureFree(Widget& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolved_width,
-                            std::optional<float> resolved_height, LayoutPass& pass);
+    static ChildLayout measureChild(Widget& parent, Widget& child, const Style& parentStyle, Flow flow, std::optional<float> resolvedWidth,
+                                    std::optional<float> resolvedHeight, LayoutPass& pass);
+    static Vec2 measureRow(Widget& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
+                           std::optional<float> resolvedHeight, LayoutPass& pass);
+    static Vec2 measureColumn(Widget& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
+                              std::optional<float> resolvedHeight, LayoutPass& pass);
+    static Vec2 measureFree(Widget& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
+                            std::optional<float> resolvedHeight, LayoutPass& pass);
     static bool remeasureRowChildren(Widget& parent, std::vector<ChildLayout>& children, std::size_t begin, std::size_t end, LayoutPass& pass);
-    static bool remeasureColumnChildren(Widget& parent, std::vector<ChildLayout>& children, const std::vector<Vec2>& initial_sizes, LayoutPass& pass);
-    static RowSizing allocateRowLines(Widget& parent, std::vector<ChildLayout>& children, const Style& parent_style, float available_main,
+    static bool remeasureColumnChildren(Widget& parent, std::vector<ChildLayout>& children, const std::vector<Vec2>& initialSizes, LayoutPass& pass);
+    static RowSizing allocateRowLines(Widget& parent, std::vector<ChildLayout>& children, const Style& parentStyle, float availableMain,
                                       LayoutPass& pass);
-    static RowSizing resolveRowSizes(Widget& node, const Style& parent_style, const Rect& panel, std::vector<ChildLayout>& children,
-                                     LayoutPass& pass);
-    static layout_detail::MainAxisAllocation resolveColumnSizes(Widget& node, const Style& parent_style, const Rect& panel,
-                                                                std::vector<ChildLayout>& children, LayoutPass& pass);
+    static RowSizing resolveRowSizes(Widget& node, const Style& parentStyle, const Rect& panel, std::vector<ChildLayout>& children, LayoutPass& pass);
+    static MainAxisAllocation resolveColumnSizes(Widget& node, const Style& parentStyle, const Rect& panel, std::vector<ChildLayout>& children,
+                                                 LayoutPass& pass);
     static std::vector<ChildLayout> flowChildren(Widget& parent, Flow flow, LayoutPass& pass);
 
     static void arrangeNode(Widget& node, LayoutDirection direction, LayoutPass& pass);
-    static void arrangeRow(Widget& node, const Style& parent_style, const Rect& content, const Rect& panel, std::vector<ChildLayout>& children,
+    static void arrangeRow(Widget& node, const Style& parentStyle, const Rect& content, const Rect& panel, std::vector<ChildLayout>& children,
                            LayoutDirection direction, LayoutPass& pass);
-    static void arrangeColumn(Widget& node, const Style& parent_style, const Rect& content, const Rect& panel, std::vector<ChildLayout>& children,
+    static void arrangeColumn(Widget& node, const Style& parentStyle, const Rect& content, const Rect& panel, std::vector<ChildLayout>& children,
                               LayoutDirection direction, LayoutPass& pass);
-    static void arrangeFree(Widget& node, const Style& parent_style, const Rect& content, std::vector<ChildLayout>& children,
+    static void arrangeFree(Widget& node, const Style& parentStyle, const Rect& content, std::vector<ChildLayout>& children,
                             LayoutDirection direction, LayoutPass& pass);
 
 public:
-    static Vec2 measure(Widget& node, LayoutPass& pass, std::optional<float> outer_width = std::nullopt,
-                        std::optional<float> outer_height = std::nullopt);
-    static Vec2 measure(Widget& node, const StyleSheet& theme, const TextMetrics& text_metrics, std::optional<float> outer_width = std::nullopt,
-                        std::optional<float> outer_height = std::nullopt);
-    static LayoutStatistics arrange(Widget& node, const StyleSheet& theme, const TextMetrics& text_metrics, LayoutDirection direction);
-    static LayoutStatistics layout(Widget& node, const StyleSheet& theme, const TextMetrics& text_metrics, LayoutDirection direction);
+    static Vec2 measure(Widget& node, LayoutPass& pass, std::optional<float> outerWidth = std::nullopt,
+                        std::optional<float> outerHeight = std::nullopt);
+    static Vec2 measure(Widget& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics, std::optional<float> outerWidth = std::nullopt,
+                        std::optional<float> outerHeight = std::nullopt);
+    static LayoutStatistics arrange(Widget& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction);
+    static LayoutStatistics layout(Widget& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction);
     static LayoutStatistics layout(Widget& node, StylePass& styles, LayoutDirection direction);
 
 private:
-    static LayoutStatistics run(Widget& node, const StyleSheet& theme, const TextMetrics& text_metrics, LayoutDirection direction);
+    static LayoutStatistics run(Widget& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction);
     static LayoutStatistics run(Widget& node, StylePass& styles, LayoutDirection direction);
     static LayoutStatistics runWithPass(Widget& node, LayoutDirection direction, LayoutPass& pass);
     static StylePass::ChildSnapshot orderedChildren(const Widget& node, LayoutPass& pass) { return pass.orderedChildren(node); }

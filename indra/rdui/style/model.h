@@ -74,8 +74,8 @@ struct StyleDeclaration {
     std::reference_wrapper<const detail::StylePropertyDefinition> property;
     StyleValue value;
 
-    StyleDeclaration(const detail::StylePropertyDefinition& definition, StyleValue declaration_value)
-        : property(definition), value(std::move(declaration_value)) {}
+    StyleDeclaration(const detail::StylePropertyDefinition& definition, StyleValue declarationValue)
+        : property(definition), value(std::move(declarationValue)) {}
 };
 
 namespace detail {
@@ -124,9 +124,9 @@ struct StyleSelector {
     bool universal = false;
     std::string element;
     std::string id;
-    std::string class_name;
+    std::string className;
     std::string state;
-    std::string part_state;
+    std::string partState;
     std::vector<std::string> parts;
 };
 
@@ -134,7 +134,7 @@ struct StyleRule {
     std::vector<StyleSelector> selectors;
     std::vector<SelectorCombinator> combinators;
     std::vector<StyleDeclaration> declarations;
-    int source_order = 0;
+    int sourceOrder = 0;
 };
 
 struct StyleModel {
@@ -160,31 +160,31 @@ struct StyleModel {
     std::optional<MarginInsets> parseMargin(const std::string& value) const;
     std::optional<std::vector<StyleDeclaration>> compileDeclaration(const detail::StylePropertyDefinition& property, const std::string& value,
                                                                     const std::string& selector, StyleSheetLoadResult& result,
-                                                                    const std::string& source_name) const;
-    Style resolveInternal(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint8_t owner_states,
-                          const std::vector<std::string>& part_path, uint8_t part_states, const Widget* widget = nullptr,
-                          const std::vector<std::string>* inline_ancestors = nullptr) const;
+                                                                    const std::string& sourceName) const;
+    Style resolveInternal(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint8_t ownerStates,
+                          const std::vector<std::string>& partPath, uint8_t partStates, const Widget* widget = nullptr,
+                          const std::vector<std::string>* inlineAncestors = nullptr) const;
     void parseBlock(const std::string& selector, const std::string& body, const StyleRule& parent, StyleSheetLoadResult& result,
-                    const std::string& source_name);
+                    const std::string& sourceName);
 
-    std::map<std::string, Color> color_tokens;
-    std::map<std::string, float> number_tokens;
+    std::map<std::string, Color> colorTokens;
+    std::map<std::string, float> numberTokens;
     StyleSheet::DependencyMap dependencies;
     std::vector<StyleRule> rules;
     std::uint64_t generation = 0;
-    mutable std::uint8_t layout_state_mask = 0;
-    mutable bool layout_state_mask_valid = false;
-    mutable std::array<std::vector<std::size_t>, 8> layout_state_rules;
-    mutable std::uint8_t hit_test_state_mask = 0;
-    mutable bool hit_test_state_mask_valid = false;
-    mutable std::array<std::vector<std::size_t>, 8> hit_test_state_rules;
-    mutable bool descendant_state_rules_valid = false;
-    mutable std::array<std::vector<std::size_t>, 8> descendant_state_rules;
-    mutable bool rule_index_valid = false;
-    mutable std::vector<std::size_t> universal_rule_indices;
-    mutable std::unordered_map<std::string, std::vector<std::size_t>> element_rule_indices;
-    mutable std::unordered_map<std::string, std::vector<std::size_t>> id_rule_indices;
-    mutable std::unordered_map<std::string, std::vector<std::size_t>> class_rule_indices;
+    mutable std::uint8_t layoutStateMask = 0;
+    mutable bool layoutStateMaskValid = false;
+    mutable std::array<std::vector<std::size_t>, 8> layoutStateRules;
+    mutable std::uint8_t hitTestStateMask = 0;
+    mutable bool hitTestStateMaskValid = false;
+    mutable std::array<std::vector<std::size_t>, 8> hitTestStateRules;
+    mutable bool descendantStateRulesValid = false;
+    mutable std::array<std::vector<std::size_t>, 8> descendantStateRules;
+    mutable bool ruleIndexValid = false;
+    mutable std::vector<std::size_t> universalRuleIndices;
+    mutable std::unordered_map<std::string, std::vector<std::size_t>> elementRuleIndices;
+    mutable std::unordered_map<std::string, std::vector<std::size_t>> idRuleIndices;
+    mutable std::unordered_map<std::string, std::vector<std::size_t>> classRuleIndices;
 
     bool stateAffectsLayout(WidgetState state) const;
     bool stateAffectsLayout(const Widget& widget, WidgetState state) const;

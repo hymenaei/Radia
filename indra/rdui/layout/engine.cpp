@@ -34,26 +34,26 @@ Style resolveWidgetStyle(const StyleSheet& theme, const Widget& node) {
     return pass.style(node);
 }
 
-Vec2 LayoutEngine::measure(Widget& node, const StyleSheet& theme, const TextMetrics& text_metrics, std::optional<float> outer_width,
-                           std::optional<float> outer_height) {
-    LayoutPass pass(theme, text_metrics);
-    return measure(node, pass, outer_width, outer_height);
+Vec2 LayoutEngine::measure(Widget& node, const StyleSheet& theme, const TextMetrics& textMetrics, std::optional<float> outerWidth,
+                           std::optional<float> outerHeight) {
+    LayoutPass pass(theme, textMetrics);
+    return measure(node, pass, outerWidth, outerHeight);
 }
 
-LayoutStatistics LayoutEngine::arrange(Widget& node, const StyleSheet& theme, const TextMetrics& text_metrics, LayoutDirection direction) {
-    return run(node, theme, text_metrics, direction);
+LayoutStatistics LayoutEngine::arrange(Widget& node, const StyleSheet& theme, const TextMetrics& textMetrics, LayoutDirection direction) {
+    return run(node, theme, textMetrics, direction);
 }
 
-LayoutStatistics LayoutEngine::layout(Widget& node, const StyleSheet& theme, const TextMetrics& text_metrics, LayoutDirection direction) {
-    return run(node, theme, text_metrics, direction);
+LayoutStatistics LayoutEngine::layout(Widget& node, const StyleSheet& theme, const TextMetrics& textMetrics, LayoutDirection direction) {
+    return run(node, theme, textMetrics, direction);
 }
 
 LayoutStatistics LayoutEngine::layout(Widget& node, StylePass& styles, LayoutDirection direction) {
     return run(node, styles, direction);
 }
 
-LayoutStatistics LayoutEngine::run(Widget& node, const StyleSheet& theme, const TextMetrics& text_metrics, LayoutDirection direction) {
-    LayoutPass pass(theme, text_metrics);
+LayoutStatistics LayoutEngine::run(Widget& node, const StyleSheet& theme, const TextMetrics& textMetrics, LayoutDirection direction) {
+    LayoutPass pass(theme, textMetrics);
     return runWithPass(node, direction, pass);
 }
 
@@ -71,20 +71,20 @@ LayoutStatistics LayoutEngine::runWithPass(Widget& node, LayoutDirection directi
     return pass.statistics();
 }
 
-Vec2 measureWidget(const Widget& node, const StyleSheet& theme, const TextMetrics& text_metrics) {
-    return LayoutEngine::measure(const_cast<Widget&>(node), theme, text_metrics);
+Vec2 measureWidget(const Widget& node, const StyleSheet& theme, const TextMetrics& textMetrics) {
+    return LayoutEngine::measure(const_cast<Widget&>(node), theme, textMetrics);
 }
 
-void measureTree(Widget& root, const StyleSheet& theme, const TextMetrics& text_metrics) {
-    LayoutEngine::measure(root, theme, text_metrics);
+void measureTree(Widget& root, const StyleSheet& theme, const TextMetrics& textMetrics) {
+    LayoutEngine::measure(root, theme, textMetrics);
 }
 
-void arrangeTree(Widget& root, const StyleSheet& theme, const TextMetrics& text_metrics, LayoutDirection direction) {
-    LayoutEngine::arrange(root, theme, text_metrics, direction);
+void arrangeTree(Widget& root, const StyleSheet& theme, const TextMetrics& textMetrics, LayoutDirection direction) {
+    LayoutEngine::arrange(root, theme, textMetrics, direction);
 }
 
-LayoutStatistics layoutTree(Widget& root, const StyleSheet& theme, const TextMetrics& text_metrics, LayoutDirection direction) {
-    return LayoutEngine::layout(root, theme, text_metrics, direction);
+LayoutStatistics layoutTree(Widget& root, const StyleSheet& theme, const TextMetrics& textMetrics, LayoutDirection direction) {
+    return LayoutEngine::layout(root, theme, textMetrics, direction);
 }
 
 LayoutStatistics layoutTreeUsingStylePass(Widget& root, StylePass& styles, LayoutDirection direction) {

@@ -31,9 +31,9 @@
 #include "widgets/widgetcontractbuilder.h"
 
 namespace rdui {
-Label::Label(std::string text) : Label(ELEMENT, std::move(text)) {}
+Label::Label(std::string text) : Label(sElement, std::move(text)) {}
 
-Label::Label(const char* element, std::string text) : Widget(element), mText(InlineContent::text(std::move(text))) {}
+Label::Label(const char* elementName, std::string text) : Widget(elementName), mText(InlineContent::text(std::move(text))) {}
 
 Label& Label::setText(std::string text) {
     return setContent(InlineContent::text(std::move(text)));
@@ -48,6 +48,11 @@ Label& Label::setContent(TextSource content) {
 
 Label& Label::setContent(InlineContent content) {
     return setContent(TextSource::literal(std::move(content)));
+}
+
+bool Label::setTextContent(TextSource content) {
+    setContent(std::move(content));
+    return true;
 }
 
 Label& Label::setTargetId(std::string id) {
@@ -72,9 +77,9 @@ bool Label::onKeybindingsChanged(const System& system) {
     return changed;
 }
 
-Vec2 Label::intrinsicSize(const StyleSheet& theme, const Style& style, const TextMetrics& text_metrics,
+Vec2 Label::intrinsicSize(const StyleSheet& theme, const Style& style, const TextMetrics& textMetrics,
                           const IntrinsicSizeConstraints& constraints) const {
-    return mText.measure(text_metrics, style, theme, *this, constraints.width);
+    return mText.measure(textMetrics, style, theme, *this, constraints.width);
 }
 
 void Label::paint(PaintContext& context, const Style& style, float) const {
@@ -83,40 +88,40 @@ void Label::paint(PaintContext& context, const Style& style, float) const {
 }
 
 WidgetContract detail::labelContract() {
-    return defineWidget<Label>(Label::ELEMENT)
+    return defineWidget<Label>(Label::sElement)
         .attributes({allowedAttribute("for")})
-        .validate([](const LayoutElement& element, Label& label, ViewBuildResult& result, const std::string& source, const ViewBuildContext*) {
-            std::string target_id;
-            if (!readViewAttribute(element, "for", target_id)) return;
+        .validate([](const LayoutElement& element, Label& label, LayoutBuildResult& result, const std::string& source, const LayoutBuildContext*) {
+            std::string targetId;
+            if (!readLayoutAttribute(element, "for", targetId)) return;
             const LayoutAttribute* attribute = element.attribute("for");
-            if (!isLocalIdentifier(target_id)) {
-                result.error("view.label.for_invalid", "Label for must be a lowercase kebab-case widget id.", source, attribute->source.begin.line,
+            if (!isWidgetIdentifier(targetId)) {
+                result.error("layout.label.for_invalid", "Label for must be a valid widget id.", source, attribute->source.begin.line,
                              attribute->source.begin.column);
                 return;
             }
-            label.setTargetId(std::move(target_id));
+            label.setTargetId(std::move(targetId));
         })
         .composition(
-            [](const LayoutElement& element, Label& label, const ViewScopeContext& scope, ViewBuildResult& result, const std::string& source) {
+            [](const LayoutElement& element, Label& label, const WidgetScopeContext& scope, LayoutBuildResult& result, const std::string& source) {
                 const LayoutAttribute* attribute = element.attribute("for");
-                const SourceRange& source_range = attribute ? attribute->source : element.source();
+                const SourceRange& sourceRange = attribute ? attribute->source : element.source();
                 if (!attribute) {
-                    result.error("view.label.for_required", "Label requires a for widget id.", source, source_range.begin.line,
-                                 source_range.begin.column);
+                    result.error("layout.label.for_required", "Label requires a for widget id.", source, sourceRange.begin.line,
+                                 sourceRange.begin.column);
                     return;
                 }
 
-                const std::string& target_id = detail::WidgetCompilerAccess::labelTargetId(label);
-                if (target_id.empty() || scope.ambiguous(target_id)) return;
-                Widget* target = scope.find(target_id);
+                const std::string& targetId = detail::WidgetCompilerAccess::labelTargetId(label);
+                if (targetId.empty() || scope.ambiguous(targetId)) return;
+                Widget* target = scope.find(targetId);
                 if (!target) {
-                    result.error("view.label.target_missing", "Label target is missing from its Layout Resource scope: " + target_id + ".", source,
-                                 source_range.begin.line, source_range.begin.column);
+                    result.error("layout.label.target_missing", "Label target is missing from its Layout Resource scope: " + targetId + ".", source,
+                                 sourceRange.begin.line, sourceRange.begin.column);
                     return;
                 }
                 if (!scope.labelable(*target)) {
-                    result.error("view.label.target_not_labelable", "Label target is not labelable: " + target_id + ".", source,
-                                 source_range.begin.line, source_range.begin.column);
+                    result.error("layout.label.target_not_labelable", "Label target is not labelable: " + targetId + ".", source,
+                                 sourceRange.begin.line, sourceRange.begin.column);
                     return;
                 }
                 detail::WidgetCompilerAccess::setLabelTarget(label, target);

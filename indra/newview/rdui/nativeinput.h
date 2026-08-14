@@ -27,15 +27,12 @@
 
 #include <cstdint>
 #include <optional>
-#include <variant>
 #include "llcursortypes.h"
 
 namespace rdui::viewer {
 enum class NativePointerButton : std::uint8_t { NoButton, Left, Right, Middle, Auxiliary1, Auxiliary2 };
-enum class NativePointerPhase : std::uint8_t { Move, Leave, Down, Up };
 
 struct NativePointerInput {
-    NativePointerPhase phase = NativePointerPhase::Move;
     float x = 0.f;
     float y = 0.f;
     NativePointerButton button = NativePointerButton::NoButton;
@@ -59,15 +56,6 @@ struct NativeKeyInput {
     bool down = true;
     bool repeated = false;
 };
-
-struct NativeCharacterInput {
-    std::uint32_t codepoint = 0;
-    std::uint32_t modifiers = 0;
-};
-
-enum class NativeInteractionLoss : std::uint8_t { Focus, Capture };
-
-using NativeInputEvent = std::variant<NativePointerInput, NativeScrollInput, NativeKeyInput, NativeCharacterInput, NativeInteractionLoss>;
 
 struct NativeInputDispatchResult {
     bool handled = false;

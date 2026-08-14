@@ -33,6 +33,8 @@
 namespace rdui {
 enum class LayoutDirection { LeftToRight, RightToLeft };
 
+enum class Visibility : std::uint8_t { Visible, Hidden, Collapsed };
+
 struct Vec2 {
     float x = 0.f;
     float y = 0.f;
@@ -96,13 +98,13 @@ inline bool clipsAxis(ClipAxes axes, ClipAxes axis) {
 }
 
 inline Rect clipToAxes(const Rect& inherited, const Rect& bounds, ClipAxes axes) {
-    const Rect axis_bounds{
+    const Rect axisBounds{
         clipsAxis(axes, ClipAxes::X) ? bounds.x : inherited.x,
         clipsAxis(axes, ClipAxes::Y) ? bounds.y : inherited.y,
         clipsAxis(axes, ClipAxes::X) ? bounds.w : inherited.w,
         clipsAxis(axes, ClipAxes::Y) ? bounds.h : inherited.h,
     };
-    return intersectRects(inherited, axis_bounds);
+    return intersectRects(inherited, axisBounds);
 }
 
 struct Color {
@@ -123,14 +125,14 @@ struct EdgeInsets {
     float bottom = 0.f;
     float left = 0.f;
 
-    bool is_uniform() const { return top == right && right == bottom && bottom == left; }
+    bool isUniform() const { return top == right && right == bottom && bottom == left; }
 
     float horizontal() const { return left + right; }
     float vertical() const { return top + bottom; }
 
-    float max_value() const { return std::max(std::max(top, right), std::max(bottom, left)); }
+    float maxValue() const { return std::max(std::max(top, right), std::max(bottom, left)); }
 
-    bool any() const { return max_value() > 0.f; }
+    bool any() const { return maxValue() > 0.f; }
 };
 
 inline Rect insetRect(const Rect& rect, const EdgeInsets& insets) {
@@ -160,11 +162,11 @@ inline uint8_t operator|(WidgetState lhs, WidgetState rhs) {
     return static_cast<uint8_t>(lhs) | static_cast<uint8_t>(rhs);
 }
 
-inline bool has_state(uint8_t states, WidgetState state) {
+inline bool hasState(uint8_t states, WidgetState state) {
     return (states & static_cast<uint8_t>(state)) != 0;
 }
 
-inline void set_state(uint8_t& states, WidgetState state, bool enabled) {
+inline void setState(uint8_t& states, WidgetState state, bool enabled) {
     const uint8_t bit = static_cast<uint8_t>(state);
     states = enabled ? static_cast<uint8_t>(states | bit) : static_cast<uint8_t>(states & ~bit);
 }

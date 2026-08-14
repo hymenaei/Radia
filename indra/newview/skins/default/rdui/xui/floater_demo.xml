@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<floater id="floater-demo"
+<floater id="floaterDemo"
          title="demo.title"
          icon="search"
          canMinimize="true"
@@ -38,7 +38,7 @@
         </panel>
     </panel>
 
-    <button class="primary" onClick="press">
+    <button class="primary" onClick="press()">
         <icon src="search"/>
         demo.press
     </button>
@@ -47,15 +47,15 @@
         <legend>demo.settings</legend>
 
         <field class="switch demo-setting">
-            <label for="demo-switch">demo.switch</label>
-            <switch id="demo-switch" bind="demo-switch-enabled" onChange="switch-changed"/><br/>
+            <label for="demoSwitch">demo.switch</label>
+            <switch id="demoSwitch" setting="DemoSwitch" onChange="switchChanged(event)"/><br/>
             <hint>demo.switchHint</hint><br/>
             <error>demo.switchError</error>
         </field>
 
         <field class="switch control-first">
-            <switch id="authoring-mode" onChange="authoring-mode-changed"/>
-            <label for="authoring-mode">demo.automaticWatching</label><br/>
+            <switch id="skinAutoReloadToggle" setting="SkinAutoReload"/>
+            <label for="skinAutoReloadToggle">demo.automaticWatching</label><br/>
             <hint>demo.automaticWatchingHint</hint><br/>
             <error>demo.automaticWatchingError</error>
         </field>
@@ -63,13 +63,13 @@
 
     <button class="compact" disabled="true"/>
 
-    <text id="language-heading">demo.language</text>
-    <text id="active-language"/>
+    <text id="languageHeading">demo.language</text>
+    <text id="activeLocale"/>
 
-    <panel id="language-buttons">
-        <button id="previous-language" class="language previous" onClick="previous-language">demo.previous</button>
-        <button id="next-language" class="language next" onClick="next-language">demo.next</button>
+    <panel id="languageButtons">
+        <button id="previousLocale" class="language previous" onClick="selectLocale(-1)">demo.previous</button>
+        <button id="nextLocale" class="language next" onClick="selectLocale(+1)">demo.next</button>
     </panel>
 
-    <button class="reload" onClick="reload-resources">demo.reloadNow</button>
+    <button class="reload" onClick="requestSkinReload()">demo.reloadNow</button>
 </floater>

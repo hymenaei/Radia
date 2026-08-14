@@ -41,9 +41,9 @@ public:
 Button::Button() : Widget(ELEMENT) {}
 
 void Button::constrainResolvedStyle(Style& style) const {
-    if (!style.flow_set) style.flow = Flow::Row;
-    if (!style.justify_content_set) style.justify_content = JustifyContent::Center;
-    if (!style.vertical_align_set) style.vertical_align = VerticalAlign::Middle;
+    if (!style.flowSet) style.flow = Flow::Row;
+    if (!style.justifyContentSet) style.justifyContent = JustifyContent::Center;
+    if (!style.verticalAlignSet) style.verticalAlign = VerticalAlign::Middle;
 }
 
 void Button::onChildAdded(Widget& child) {
@@ -68,8 +68,8 @@ void Button::onChildrenCleared() {
 
 WidgetContract detail::buttonContract() {
     return defineWidget<Button>(Button::ELEMENT)
-        .actions({ActionEventKind::Click, ActionEventKind::DoubleClick, ActionEventKind::MouseDown, ActionEventKind::MouseUp,
-                  ActionEventKind::MouseMove, ActionEventKind::LongClick, ActionEventKind::ContextMenu})
+        .events({WidgetEventKind::Click, WidgetEventKind::DoubleClick, WidgetEventKind::MouseDown, WidgetEventKind::MouseUp,
+                 WidgetEventKind::MouseMove, WidgetEventKind::LongClick, WidgetEventKind::ContextMenu})
         .textChildren([](TextSource content) { return std::make_unique<ButtonCaption>(std::move(content)); })
         .build();
 }

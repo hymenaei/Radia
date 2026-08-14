@@ -2,10 +2,10 @@
 <llsd xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
     xsi:noNamespaceSchemaLocation="llsd.xsd">
     <map>
-        <key>RduiLanguage</key>
+        <key>Locale</key>
         <map>
             <key>Comment</key>
-            <string>Selected Radia UI language. Empty uses the localization catalog default.</string>
+            <string>Selected UI locale. Empty uses the localization catalog default.</string>
             <key>Persist</key>
             <integer>1</integer>
             <key>Type</key>
@@ -13,10 +13,21 @@
             <key>Value</key>
             <string></string>
         </map>
-        <key>RduiAuthoringMode</key>
+        <key>LongClickDelay</key>
         <map>
             <key>Comment</key>
-            <string>Enable automatic transactional reload of settled Radia skin resource changes.</string>
+            <string>Default held-click duration for Radia UI widgets, in milliseconds. Values below 1 are clamped.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>S32</string>
+            <key>Value</key>
+            <integer>500</integer>
+        </map>
+        <key>SkinAutoReload</key>
+        <map>
+            <key>Comment</key>
+            <string>Enable automatic transactional reload of settled Skin resource changes.</string>
             <key>Persist</key>
             <integer>1</integer>
             <key>Type</key>
@@ -24,34 +35,52 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
-        <key>RduiFloaterPlacements</key>
+        <key>SkinAutoReloadScanInterval</key>
         <map>
             <key>Comment</key>
-            <string>Radia UI Floater attachment state and logical or native monitor placement.</string>
+            <string>Time between automatic Radia Skin snapshot checks, in milliseconds. Values below 1 are clamped.</string>
             <key>Persist</key>
             <integer>1</integer>
             <key>Type</key>
-            <string>LLSD</string>
+            <string>S32</string>
             <key>Value</key>
-            <map />
+            <integer>250</integer>
         </map>
-        <key>RduiOpenFloaters</key>
+        <key>SkinAutoReloadSettleInterval</key>
         <map>
             <key>Comment</key>
-            <string>Radia UI Floater definitions and instance keys that reopen after login.</string>
+            <string>Time a changed Radia Skin snapshot must remain stable before reload, in milliseconds. Values below 1 are clamped.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>S32</string>
+            <key>Value</key>
+            <integer>150</integer>
+        </map>
+        <key>DemoSwitch</key>
+        <map>
+            <key>Comment</key>
+            <string>Demo value control used to exercise Radia setting bindings.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
+        <key>UILayout</key>
+        <map>
+            <key>Comment</key>
+            <string>Stores saved UI layout, including position, size, and detached state.</string>
             <key>Persist</key>
             <integer>1</integer>
             <key>Type</key>
             <string>LLSD</string>
             <key>Value</key>
-            <array>
-                <map>
-                    <key>definition</key>
-                    <string>floater-demo</string>
-                    <key>instance</key>
-                    <string></string>
-                </map>
-            </array>
+            <map>
+                <key>floaterDemo</key>
+                <map />
+            </map>
         </map>
     </map>
 </llsd>

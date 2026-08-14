@@ -375,7 +375,9 @@ public:
     void            sendShapeToSim();
 
     void            draw();
-    void            updateRdui();
+    void            idleUIRuntime();
+    void            restoreUIWorkspace();
+    void            endUIAccountSession();
     void            updateDebugText();
     void            drawDebugText();
 
@@ -482,7 +484,6 @@ public:
 
     F32             getWorldViewAspectRatio() const;
     const LLVector2& getDisplayScale() const { return mDisplayScale; }
-    rdui::viewer::Runtime* getRduiRuntime() const { return mRduiRuntime.get(); }
     void            calcDisplayScale();
     static LLRect   calcScaledRect(const LLRect & rect, const LLVector2& display_scale);
 
@@ -508,7 +509,7 @@ private:
 
 private:
     LLWindow*       mWindow;                        // graphical window object
-    std::unique_ptr<rdui::viewer::Runtime> mRduiRuntime;
+    std::unique_ptr<rdui::viewer::Runtime> mUIRuntime;
     bool            mActive;
     bool            mUIVisible;
 
@@ -533,7 +534,7 @@ private:
     LLCoordGL       mCurrentMousePoint;         // last mouse position in GL coords
     LLCoordGL       mLastMousePoint;        // Mouse point at last frame.
     LLCoordGL       mCurrentMouseDelta;     //amount mouse moved this frame
-    LLCoordGL       mCurrentRawMouseDelta;  //unsmoothed device motion for exact UI gestures
+    LLCoordGL       mCurrentRawMouseDelta;
     bool            mLeftMouseDown;
     bool            mMiddleMouseDown;
     bool            mRightMouseDown;

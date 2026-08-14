@@ -25,6 +25,7 @@
 #include "linden_common.h"
 #include "binding/binder.h"
 #include <map>
+#include <set>
 #include "binding/valuecontrol.h"
 #include "layout/schema.h"
 
@@ -36,40 +37,43 @@ PreparedBinding& PreparedBinding::operator=(PreparedBinding&&) noexcept = defaul
 
 Binding PreparedBinding::commit() {
     Binding binding;
-    if (!mBinder || !mBinder->mRoot) return binding;
+    if (!mBinder) return binding;
     mBinder->commit(*mBinder->mRoot, binding);
     mBinder.reset();
     return binding;
 }
 
-namespace {
-Widget* findInScope(Widget& widget, const std::string& id) {
-    if (widget.id() == id) return &widget;
-    for (const auto& child : widget.children()) {
-        if (child->id() == id) return child.get();
-        if (child->idScopeRoot()) continue;
-        if (Widget* found = findInScope(*child, id)) return found;
-    }
-    return nullptr;
+void Binder::event(EventHandlerRegistration&& registration) {
+    const bool valid = registration.valid();
+    auto handler = std::make_shared<detail::EventHandler>();
+    const std::optional<WidgetEventKind> kind = registration.kind();
+    handler->kind = kind;
+    handler->invoke = std::move(registration).takeInvoke();
+    mPendingEventHandlers.push_back(
+        {std::move(registration).takeName(), kind, std::move(handler), std::move(registration).takeArgumentError(), valid});
 }
 
-void collectActions(Widget& widget, std::map<std::string, ActionEventKind>& kinds, std::vector<std::pair<Widget*, ActionEventKind>>& declarations,
-                    DiagnosticResult& result) {
-    for (ActionEventKind kind : {ActionEventKind::Click, ActionEventKind::DoubleClick, ActionEventKind::Change, ActionEventKind::MouseDown,
-                                 ActionEventKind::MouseUp, ActionEventKind::MouseMove, ActionEventKind::LongClick, ActionEventKind::ContextMenu}) {
-        const std::string& name = widget.action(kind);
-        if (name.empty()) continue;
-        const auto inserted = kinds.emplace(name, kind);
-        if (!inserted.second && inserted.first->second != kind)
-            result.error("binding.action.kind_mismatch", "Action " + name + " is declared for multiple event kinds.");
-        declarations.emplace_back(&widget, kind);
+void Binder::event(const EventHandlerRegistration& registration) {
+    event(registration.copy());
+}
+
+namespace {
+void collectEventCalls(Widget& widget, std::map<std::string, std::vector<Binder::EventDeclaration>>& declarations, DiagnosticResult& result) {
+    for (WidgetEventKind kind : kAllWidgetEventKinds) {
+        const EventCall* eventCall = widget.eventCall(kind);
+        if (!eventCall) continue;
+        const std::string& name = eventCall->name();
+        auto& byName = declarations[name];
+        if (!byName.empty() && byName.front().kind != kind)
+            result.error("binding.event.kind_mismatch", "Event Handler " + name + " is declared for multiple Event kinds.");
+        byName.push_back({&widget, kind, eventCall});
     }
     for (const auto& child : widget.children())
-        if (!child->idScopeRoot()) collectActions(*child, kinds, declarations, result);
+        if (!child->idScopeRoot()) collectEventCalls(*child, declarations, result);
 }
 
 void collectValueControls(Widget& widget, std::vector<ValueControl*>& controls) {
-    if (auto* control = dynamic_cast<ValueControl*>(&widget); control && !control->bindingId().empty()) controls.push_back(control);
+    if (auto* control = dynamic_cast<ValueControl*>(&widget); control && control->valueBindingRequest()) controls.push_back(control);
     for (const auto& child : widget.children())
         if (!child->idScopeRoot()) collectValueControls(*child, controls);
 }
@@ -80,118 +84,102 @@ void Binder::validate(Widget& root, DiagnosticResult& result) {
     collectValueControls(root, mValueControls);
     for (ValueControl* control : mValueControls) control->prepareValueBinding(*this);
 
-    std::map<std::string, ActionEventKind> declared_kinds;
-    std::vector<std::pair<Widget*, ActionEventKind>> declarations;
-    collectActions(root, declared_kinds, declarations, result);
+    mEventDeclarations.clear();
+    collectEventCalls(root, mEventDeclarations, result);
 
-    std::map<std::string, ActionEventKind> registered_actions;
-    for (PendingAction& pending : mPendingActions) {
-        const auto inserted = registered_actions.emplace(pending.name, pending.kind);
-        if (!inserted.second) result.error("binding.action.duplicate", "Controller action is registered more than once: " + pending.name + ".");
-        const auto declared = declared_kinds.find(pending.name);
-        if (declared != declared_kinds.end() && declared->second != pending.kind)
-            result.error("binding.action.kind_mismatch", "Controller action kind does not match layout action: " + pending.name + ".");
+    std::map<std::string, std::optional<WidgetEventKind>> registeredHandlers;
+    for (PendingEventHandler& pending : mPendingEventHandlers) {
+        if (!pending.valid)
+            result.error("binding.event.registration_invalid", "Controller Event Handler registration is incomplete: " + pending.name + ".");
+        if (!isEventHandlerName(pending.name))
+            result.error("binding.event.name_invalid", "Controller Event Handler name must use lower-camel-case: " + pending.name + ".");
+        const auto inserted = registeredHandlers.emplace(pending.name, pending.kind);
+        if (!inserted.second) result.error("binding.event.duplicate", "Controller Event Handler is registered more than once: " + pending.name + ".");
+        const auto declared = mEventDeclarations.find(pending.name);
+        if (declared != mEventDeclarations.end() && pending.kind && !declared->second.empty() && declared->second.front().kind != *pending.kind)
+            result.error("binding.event.kind_mismatch", "Controller Event kind does not match Layout Resource call: " + pending.name + ".");
     }
 
-    for (const auto& declaration : declared_kinds) {
-        const std::string& name = declaration.first;
-        if (registered_actions.find(name) == registered_actions.end())
-            result.warning("binding.action.unhandled", "Layout action has no controller handler: " + name + ".");
+    for (const auto& entry : mEventDeclarations) {
+        const std::string& name = entry.first;
+        if (registeredHandlers.find(name) == registeredHandlers.end())
+            result.warning("binding.event.unhandled", "Event Handler Call has no Controller Handler: " + name + ".");
     }
 
-    for (Pending& pending : mPending) {
-        pending.resolved = findInScope(root, pending.id);
-        if (pending.resolved && !pending.accepts(pending.resolved))
-            result.error("binding.type.mismatch",
-                         "Widget " + pending.id + " must be <" + pending.expected_type + ">, found <" + pending.resolved->element() + ">.");
-    }
-
-    std::map<std::string, PendingValueProvider*> value_providers;
-    for (PendingValueProvider& pending : mPendingValueProviders) {
-        if (!isLocalIdentifier(pending.id)) {
-            result.error("binding.value.name_invalid", "Value binding name must be lowercase kebab-case: " + pending.id + ".");
-            continue;
+    for (PendingEventHandler& pending : mPendingEventHandlers) {
+        const auto found = mEventDeclarations.find(pending.name);
+        if (found == mEventDeclarations.end()) continue;
+        for (const EventDeclaration& declaration : found->second) {
+            if (pending.kind && *pending.kind != declaration.kind) continue;
+            if (pending.argumentError) {
+                if (const char* error = pending.argumentError(*declaration.call, declaration.kind))
+                    result.warning(error, "Event Handler Call " + pending.name + " does not match its registered Handler signature.");
+            }
         }
-        if (!pending.binding) {
-            result.error("binding.value.null", "Value binding provider is empty: " + pending.id + ".");
-            continue;
-        }
-        if (!value_providers.emplace(pending.id, &pending).second)
-            result.error("binding.value.duplicate", "Value binding is provided more than once: " + pending.id + ".");
     }
 
+    std::set<std::string> settingDiagnostics;
     for (PendingValueRequirement& pending : mPendingValueRequirements) {
-        if (!isLocalIdentifier(pending.id)) {
-            result.error("binding.value.name_invalid", "Value binding name must be lowercase kebab-case: " + pending.id + ".");
+        const auto reportSettingError = [&](const char* code, std::string message) {
+            std::string key = code;
+            key.push_back('\0');
+            key += pending.settingName;
+            key.push_back('\0');
+            key += pending.typeName;
+            if (settingDiagnostics.emplace(std::move(key)).second) result.error(code, std::move(message));
+        };
+        if (!mSettingResolver) {
+            reportSettingError("binding.setting.resolver_missing", "No SettingResolver was provided for setting: " + pending.settingName + ".");
             continue;
         }
-        const auto found = value_providers.find(pending.id);
-        if (found == value_providers.end()) {
-            result.error("binding.value.missing", "Required value binding is missing: " + pending.id + ".");
-            continue;
-        }
-        PendingValueProvider& provider = *found->second;
-        if (provider.type != pending.type) {
-            result.error("binding.value.type_mismatch",
-                         "Value binding " + pending.id + " must be " + pending.type_name + ", found " + provider.type_name + ".");
-            continue;
-        }
-        pending.resolved = provider.binding;
-    }
 
-    for (PendingScope& pending : mPendingScopes) {
-        pending.resolved = findInScope(root, pending.id);
-        if (!pending.resolved) {
-            result.error("binding.scope.missing", "Included resource scope is missing: " + pending.id + ".");
-            continue;
+        const SettingResolution resolution = mSettingResolver->resolve(pending.settingName, pending.type);
+        switch (resolution.status) {
+            case SettingResolution::ResolutionStatus::Found:
+                if (!resolution.binding || !pending.matches || !pending.matches(resolution.binding)) {
+                    reportSettingError("binding.setting.type_mismatch",
+                                       "Setting " + pending.settingName + " does not provide " + pending.typeName + ".");
+                    continue;
+                }
+                pending.resolved = resolution.binding;
+                break;
+            case SettingResolution::ResolutionStatus::Missing:
+                reportSettingError("binding.setting.missing", "Setting is not available in this viewer: " + pending.settingName + ".");
+                break;
+            case SettingResolution::ResolutionStatus::TypeMismatch:
+                reportSettingError("binding.setting.type_mismatch", "Setting " + pending.settingName + " is not a " + pending.typeName + ".");
+                break;
+            case SettingResolution::ResolutionStatus::Invalid:
+                reportSettingError("binding.setting.name_invalid", "Setting is not a valid setting name: " + pending.settingName + ".");
+                break;
         }
-        if (!pending.resolved->idScopeRoot()) {
-            result.error("binding.scope.not_root", "Widget " + pending.id + " is not an included resource scope root.");
-            continue;
-        }
-        pending.binder->validate(*pending.resolved, result);
     }
 }
 
-void Binder::commit(Widget& root, Binding& binding) {
+void Binder::commit(Widget&, Binding& binding) {
     binding.mCommitted = true;
-    std::map<std::string, ActionEventKind> declared_kinds;
-    std::vector<std::pair<Widget*, ActionEventKind>> declarations;
-    BindingResult unused;
-    collectActions(root, declared_kinds, declarations, unused);
 
-    for (Pending& pending : mPending) pending.commit(pending.resolved);
     for (PendingValueRequirement& pending : mPendingValueRequirements) pending.commit(pending.resolved);
     for (ValueControl* control : mValueControls) {
         ValueBindingSubscription subscription = control->commitValueBinding();
         if (subscription) binding.mValueSubscriptions.push_back(std::move(subscription));
     }
-    for (PendingAction& pending : mPendingActions) {
-        for (const auto& declaration : declarations) {
-            Widget* widget = declaration.first;
-            const ActionEventKind kind = declaration.second;
-            if (kind == pending.kind && widget->action(kind) == pending.name) widget->bindAction(kind, pending.handler);
-        }
-        binding.mHandlers.push_back(std::move(pending.handler));
+    std::map<std::string, PendingEventHandler*> handlers;
+    for (PendingEventHandler& pending : mPendingEventHandlers) handlers.emplace(pending.name, &pending);
+    for (const auto& [name, declarations] : mEventDeclarations) {
+        const auto found = handlers.find(name);
+        if (found == handlers.end()) continue;
+        PendingEventHandler& pending = *found->second;
+        for (const EventDeclaration& declaration : declarations)
+            if ((!pending.kind || declaration.kind == *pending.kind)
+                && (!pending.argumentError || !pending.argumentError(*declaration.call, declaration.kind)))
+                declaration.widget->bindEventHandler(declaration.kind, pending.handler);
     }
-    for (PendingScope& pending : mPendingScopes) pending.binder->commit(*pending.resolved, binding);
-}
-
-BindingResult Binder::finish() {
-    PreparedBindingResult prepared = prepare();
-    BindingResult result;
-    result.warnings = std::move(prepared.warnings);
-    result.errors = std::move(prepared.errors);
-    if (prepared.ok()) result.binding = prepared.binding.commit();
-    return result;
+    for (PendingEventHandler& pending : mPendingEventHandlers) binding.mHandlers.push_back(std::move(pending.handler));
 }
 
 PreparedBindingResult Binder::prepare() {
     PreparedBindingResult result;
-    if (!mRoot) {
-        result.error("binding.scope.finish", "Nested Binder scopes commit through their root Binder.");
-        return result;
-    }
     if (mFinished) {
         result.error("binding.already_finished", "Binder transaction was already finished.");
         return result;

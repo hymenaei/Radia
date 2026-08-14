@@ -40,53 +40,32 @@ void write(const std::filesystem::path& filename, const std::string& source) {
     output << source;
 }
 
-std::string manifest(const std::string& id, const std::string& base, const std::string& radia) {
-    return "{\n"
-           "  \"id\": \""
-        + id
-        + "\",\n"
-          "  \"name\": \"Test\",\n"
-          "  \"author\": \"Test\",\n"
-          "  \"base\": "
-        + base
-        + ",\n"
-          "  \"radia\": {"
-        + radia
-        + "}\n"
-          "}\n";
+std::string manifest(const std::string& id, const std::string& base, const std::string& radiaRules) {
+    return "{\"id\":\"" + id + "\",\"name\":\"Test\",\"author\":\"Test\",\"base\":" + base + ",\"radia\":{" + radiaRules + "}}\n";
 }
 
-const std::string LOCALIZATION = R"YAML(defaultLocale: en
-locales:
-  en:
-    name: English
-    strings:
-      title: Base
-)YAML";
+const std::string kLocalization = "defaultLocale: en\nlocales: {en: {name: English, strings: {title: Base}}}\n";
 } // namespace
 
-struct skin_resolver {
-    skin_resolver() {
+struct resolverData {
+    resolverData() {
         root = std::filesystem::temp_directory_path()
             / ("rdui-skin-resolver-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         std::filesystem::create_directories(root);
     }
 
-    ~skin_resolver() {
+    ~resolverData() {
         std::error_code error;
         std::filesystem::remove_all(root, error);
     }
 
     std::filesystem::path makeRoot(const std::string& directory, const std::string& id) {
         const std::filesystem::path skin = root / directory;
-        write(skin / "manifest.json",
-              manifest(id, "null",
-                       "\"stylesheet\": \"rdui/skin.radia\","
-                       "\"layouts\": \"rdui/xui\","
-                       "\"localization\": \"rdui/localization.yaml\","
-                       "\"assets\": \"rdui/resources\""));
+        const char* kResourcePaths =
+            "\"stylesheet\": \"rdui/skin.radia\",\"layouts\": \"rdui/xui\",\"localization\": \"rdui/localization.yaml\",\"assets\": \"rdui/resources\"";
+        write(skin / "manifest.json", manifest(id, "null", kResourcePaths));
         write(skin / "rdui/skin.radia", "floater { width: 300px; }");
-        write(skin / "rdui/localization.yaml", LOCALIZATION);
+        write(skin / "rdui/localization.yaml", kLocalization);
         write(skin / "rdui/xui/base.xml", "<floater/>");
         std::filesystem::create_directories(skin / "rdui/resources");
         return skin;
@@ -95,47 +74,38 @@ struct skin_resolver {
     std::filesystem::path root;
     rdui::viewer::SkinResolver resolver;
 };
+using resolverTest = test_group<resolverData>;
+using resolverObject = resolverTest::object;
+resolverTest resolverTestCase("RduiSkinResolver");
 
-using skin_resolver_group = test_group<skin_resolver>;
-using skin_resolver_object = skin_resolver_group::object;
-skin_resolver_group skin_resolver_tests("RduiSkinResolver");
-
-template<> template<> void skin_resolver_object::test<1>() {
+template<> template<> void resolverObject::test<1>() {
     set_test_name("explicit base chain layers each resource class base-first");
     makeRoot("base", "test.base");
     const std::filesystem::path derived = root / "derived";
-    write(derived / "manifest.json",
-          manifest("test.derived", "\"test.base\"",
-                   "\"stylesheet\": \"rdui/derived.radia\","
-                   "\"layouts\": \"rdui/xui\","
-                   "\"localization\": \"rdui/localization.yaml\","
-                   "\"assets\": \"rdui/resources\""));
+    const char* kDerivedResourcePaths =
+        "\"stylesheet\": \"rdui/derived.radia\",\"layouts\": \"rdui/xui\",\"localization\": \"rdui/localization.yaml\",\"assets\": \"rdui/resources\"";
+    write(derived / "manifest.json", manifest("test.derived", "\"test.base\"", kDerivedResourcePaths));
     write(derived / "rdui/derived.radia", "floater { height: 220px; }");
-    write(derived / "rdui/localization.yaml", R"YAML(
-locales:
-  en:
-    strings:
-      title: Derived
-)YAML");
+    write(derived / "rdui/localization.yaml", "locales: {en: {strings: {title: Derived}}}\n");
     write(derived / "rdui/xui/derived.xml", "<floater title=\"title\"/>");
-    const std::string derived_asset = "<svg viewBox=\"0 0 10 10\"><circle cx=\"5\" cy=\"5\" r=\"4\"/></svg>";
-    write(derived / "rdui/resources/icons/shared.svg", derived_asset);
+    const std::string kDerivedAsset = "<svg viewBox=\"0 0 10 10\"><circle cx=\"5\" cy=\"5\" r=\"4\"/></svg>";
+    write(derived / "rdui/resources/icons/shared.svg", kDerivedAsset);
 
     const auto result = resolver.resolve(derived, {root});
 
     ensure("resolved", result.ok());
-    ensure_equals("selected ID", result.skin_id, std::string("test.derived"));
+    ensure_equals("selected ID", result.skinId, std::string("test.derived"));
     ensure("base layout inherited", result.snapshot.load("base.xml").has_value());
     ensure("derived layout added", result.snapshot.load("derived.xml").has_value());
     ensure_equals("styles layered", result.snapshot.layers("skin.radia").size(), std::size_t(2));
     ensure_equals("localizations layered", result.snapshot.layers("localization.yaml").size(), std::size_t(2));
-    ensure_equals("derived asset visible", *result.snapshot.load("resources/icons/shared.svg"), derived_asset);
+    ensure_equals("derived asset visible", *result.snapshot.load("resources/icons/shared.svg"), kDerivedAsset);
 
     const auto compiled = rdui::SkinCompiler().prepare(result.snapshot);
     ensure("complete generation compiles", compiled.ok());
 }
 
-template<> template<> void skin_resolver_object::test<2>() {
+template<> template<> void resolverObject::test<2>() {
     set_test_name("a Skin without an explicit base receives no resources from another root");
     const std::filesystem::path unrelated = makeRoot("unrelated", "test.unrelated");
     write(unrelated / "rdui/xui/unrelated.xml", "<floater/>");
@@ -149,7 +119,7 @@ template<> template<> void skin_resolver_object::test<2>() {
     ensure_equals("only one style layer", result.snapshot.layers("skin.radia").size(), std::size_t(1));
 }
 
-template<> template<> void skin_resolver_object::test<3>() {
+template<> template<> void resolverObject::test<3>() {
     set_test_name("base cycles reject the complete candidate");
     const std::filesystem::path first = root / "first";
     const std::filesystem::path second = root / "second";
@@ -164,7 +134,7 @@ template<> template<> void skin_resolver_object::test<3>() {
     ensure_equals("cycle diagnostic", result.errors.back().code, std::string("skin.base.cycle"));
 }
 
-template<> template<> void skin_resolver_object::test<4>() {
+template<> template<> void resolverObject::test<4>() {
     set_test_name("malformed derived layout replaces base layout and rejects compilation");
     const std::filesystem::path base = makeRoot("base", "test.base");
     write(base / "rdui/xui/shared.xml", "<floater/>");
@@ -180,7 +150,7 @@ template<> template<> void skin_resolver_object::test<4>() {
     ensure("malformed override rejects generation", !compiled.ok());
 }
 
-template<> template<> void skin_resolver_object::test<5>() {
+template<> template<> void resolverObject::test<5>() {
     set_test_name("duplicate stable IDs reject base lookup");
     makeRoot("base-one", "test.base");
     makeRoot("base-two", "test.base");
@@ -194,7 +164,7 @@ template<> template<> void skin_resolver_object::test<5>() {
     ensure_equals("duplicate diagnostic", result.errors.back().code, std::string("skin.id.duplicate"));
 }
 
-template<> template<> void skin_resolver_object::test<6>() {
+template<> template<> void resolverObject::test<6>() {
     set_test_name("manifest resource traversal is rejected before discovery");
     const std::filesystem::path selected = root / "selected";
     std::filesystem::create_directories(root / "outside");
@@ -208,7 +178,7 @@ template<> template<> void skin_resolver_object::test<6>() {
            }));
 }
 
-template<> template<> void skin_resolver_object::test<7>() {
+template<> template<> void resolverObject::test<7>() {
     set_test_name("stylesheet modules are captured inside their owning Skin layer");
     const std::filesystem::path selected = makeRoot("selected", "test.selected");
     write(selected / "rdui/skin.radia", "@import \"styles/panel.radia\";\nfloater { height: 220px; }");
@@ -224,7 +194,7 @@ template<> template<> void skin_resolver_object::test<7>() {
     ensure("complete generation with import compiles", rdui::SkinCompiler().prepare(resolved.snapshot).ok());
 }
 
-template<> template<> void skin_resolver_object::test<8>() {
+template<> template<> void resolverObject::test<8>() {
     set_test_name("a derived stylesheet import never falls through to a Base Skin module");
     const std::filesystem::path base = makeRoot("base", "test.base");
     write(base / "rdui/skin.radia", "@import \"shared.radia\";");
@@ -243,7 +213,7 @@ template<> template<> void skin_resolver_object::test<8>() {
     ensure_equals("diagnostic identifies derived entrypoint", compiled.errors.front().source, std::string("test.derived/rdui/skin.radia"));
 }
 
-template<> template<> void skin_resolver_object::test<9>() {
+template<> template<> void resolverObject::test<9>() {
     set_test_name("bundled Skin compiles its real imported variant module");
     const std::filesystem::path bundled = std::filesystem::path(tut::sSourceDir) / "skins/default";
 
@@ -258,23 +228,23 @@ template<> template<> void skin_resolver_object::test<9>() {
     ensure("bundled Skin Generation compiles: " + failure, compiled.ok());
 }
 
-template<> template<> void skin_resolver_object::test<10>() {
+template<> template<> void resolverObject::test<10>() {
     set_test_name("bundled Skin keeps its stable Skin and logical resource identities");
     const std::filesystem::path bundled = std::filesystem::path(tut::sSourceDir) / "skins/default";
 
     const auto resolved = resolver.resolve(bundled, {bundled.parent_path()});
 
     ensure("bundled Skin resolves", resolved.ok());
-    ensure_equals("bundled stable Skin ID", resolved.skin_id, std::string("alchemy.default"));
+    ensure_equals("bundled stable Skin ID", resolved.skinId, std::string("alchemy.default"));
 
-    const auto& style_layers = resolved.snapshot.layers("skin.radia");
-    ensure_equals("bundled Skin has one stylesheet layer", style_layers.size(), std::size_t(1));
-    ensure_equals("stylesheet source identity", style_layers.front().source_name, std::string("alchemy.default/rdui/skin.radia"));
-    ensure_equals("stylesheet entrypoint identity", style_layers.front().entrypoint, std::string("rdui/skin.radia"));
+    const auto& styleLayers = resolved.snapshot.layers("skin.radia");
+    ensure_equals("bundled Skin has one stylesheet layer", styleLayers.size(), std::size_t(1));
+    ensure_equals("stylesheet source identity", styleLayers.front().sourceName, std::string("alchemy.default/rdui/skin.radia"));
+    ensure_equals("stylesheet entrypoint identity", styleLayers.front().entrypoint, std::string("rdui/skin.radia"));
 
-    const auto& localization_layers = resolved.snapshot.layers("localization.yaml");
-    ensure_equals("bundled Skin has one localization layer", localization_layers.size(), std::size_t(1));
-    ensure_equals("localization source identity", localization_layers.front().source_name, std::string("alchemy.default/rdui/localization.yaml"));
+    const auto& localizationLayers = resolved.snapshot.layers("localization.yaml");
+    ensure_equals("bundled Skin has one localization layer", localizationLayers.size(), std::size_t(1));
+    ensure_equals("localization source identity", localizationLayers.front().sourceName, std::string("alchemy.default/rdui/localization.yaml"));
 
     ensure("demo Floater keeps its logical layout identity", resolved.snapshot.load("floater_demo.xml").has_value());
     ensure("Floater defaults keep their logical layout identity", resolved.snapshot.load("widgets/floater.xml").has_value());

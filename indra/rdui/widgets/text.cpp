@@ -29,11 +29,11 @@
 #include "widgets/widgetcontractbuilder.h"
 
 namespace rdui {
-Text::Text(std::string text) : Text(ELEMENT, ElementTag{}) {
+Text::Text(std::string text) : Text(sElement, ElementTag{}) {
     setText(std::move(text));
 }
 
-Text::Text(const char* element, ElementTag) : Widget(element) {}
+Text::Text(const char* elementName, ElementTag) : Widget(elementName) {}
 
 Text& Text::setText(std::string text) {
     return setContent(InlineContent::text(std::move(text)));
@@ -50,6 +50,11 @@ Text& Text::setContent(InlineContent content) {
     return setContent(TextSource::literal(std::move(content)));
 }
 
+bool Text::setTextContent(TextSource content) {
+    setContent(std::move(content));
+    return true;
+}
+
 void Text::onLocaleChanged(const System& system) {
     mText.resolveLocalized([&system](const LocalizationRequest& request) { return system.resolveContent(request); });
     mText.resolveKeybindings([&system](const std::string& key) { return system.resolveKeybinding(key); });
@@ -62,9 +67,9 @@ bool Text::onKeybindingsChanged(const System& system) {
     return changed;
 }
 
-Vec2 Text::intrinsicSize(const StyleSheet& theme, const Style& style, const TextMetrics& text_metrics,
+Vec2 Text::intrinsicSize(const StyleSheet& theme, const Style& style, const TextMetrics& textMetrics,
                          const IntrinsicSizeConstraints& constraints) const {
-    return mText.measure(text_metrics, style, theme, *this, constraints.width);
+    return mText.measure(textMetrics, style, theme, *this, constraints.width);
 }
 
 void Text::paint(PaintContext& context, const Style& style, float) const {
@@ -73,7 +78,7 @@ void Text::paint(PaintContext& context, const Style& style, float) const {
 }
 
 WidgetContract detail::textContract() {
-    return defineWidget<Text>(Text::ELEMENT)
+    return defineWidget<Text>(Text::sElement)
         .inlineContent({InlineContentKind::B, InlineContentKind::I, InlineContentKind::S, InlineContentKind::Kbd, InlineContentKind::Br},
                        [](TextSource content, Text& text) { text.setContent(std::move(content)); })
         .build();

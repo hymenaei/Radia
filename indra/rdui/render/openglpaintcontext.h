@@ -36,7 +36,7 @@ class System;
 
 class OpenGLPaintContext final : public PaintContext {
 public:
-    OpenGLPaintContext(::LLGLSLShader& shape_program, const System& system);
+    OpenGLPaintContext(::LLGLSLShader& shapeProgram, const System& system);
     ~OpenGLPaintContext() override;
 
     void beginFrame() override;
@@ -48,7 +48,7 @@ public:
     void popClip() override;
     void beginEffects(const Rect& rect, const Style& style, float scale) override;
     void endEffects() override;
-    void paintBox(const Rect& rect, const Style& style, std::optional<TopBorderGap> top_border_gap = std::nullopt) override;
+    void paintBox(const Rect& rect, const Style& style, std::optional<TopBorderGap> topBorderGap = std::nullopt) override;
     void paintText(const std::string& text, const Rect& rect, const Style& style) override;
     void paintIcon(const std::string& name, const Rect& rect, const Style& style, float scale) override;
 

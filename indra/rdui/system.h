@@ -33,7 +33,7 @@
 #include <unordered_set>
 #include <utility>
 #include "diagnostic.h"
-#include "layout/viewresult.h"
+#include "layout/buildresult.h"
 #include "localization/localization.h"
 #include "style/stylesheet.h"
 #include "text/inlinecontent.h"
@@ -45,17 +45,27 @@ class Surface;
 class TextMetrics;
 class OpenGLPaintContext;
 struct SvgIcon;
+namespace viewer { class SkinReloadCoordinator; }
+
+class PublicationCommit {
+public:
+    virtual ~PublicationCommit() = default;
+    virtual bool commit() = 0;
+};
 
 class System {
 public:
+    static constexpr std::chrono::milliseconds defaultLongClickDelay() { return std::chrono::milliseconds{500}; }
+
     System();
     ~System();
 
-    void publish(std::shared_ptr<const SkinGeneration> generation, const std::function<void()>& commit_documents = {});
-    ViewBuildResult createView(const std::string& resource_id) const;
-    std::unique_ptr<Surface> createSurface(const TextMetrics& text_metrics) const;
+    bool publish(std::shared_ptr<const SkinGeneration> generation);
+    bool publish(std::shared_ptr<const SkinGeneration> generation, PublicationCommit& commit);
+    LayoutBuildResult buildWidgetTree(const std::string& resourceId) const;
+    std::unique_ptr<Surface> createSurface(const TextMetrics& textMetrics) const;
     bool setLongClickDelay(std::chrono::milliseconds delay);
-    bool setLocale(const std::string& id);
+    bool setLocale(const std::string& localeId);
     void setLocaleChangedHandler(std::function<void(const std::string&)> handler) { mLocaleChangedHandler = std::move(handler); }
     void setKeybindingResolver(std::function<KeybindingPresentation(const std::string&)> resolver);
     void refreshKeybindings();
@@ -73,10 +83,9 @@ public:
     std::string resolveText(const LocalizationRequest& request) const;
     InlineContent resolveContent(const LocalizationRequest& request) const;
     KeybindingPresentation resolveKeybinding(const std::string& id) const;
-    TextSource localized(std::string id) const;
-    TextSource localized(LocalizationRequest request) const;
+    TextSource localize(std::string id) const;
+    TextSource localize(LocalizationRequest request) const;
     bool hasIcon(const std::string& name) const;
-    bool sameReloadInputs(const ResourceSnapshot& left, const ResourceSnapshot& right) const;
     std::uint64_t generation() const { return mGenerationNumber; }
     std::uint64_t localeGeneration() const { return mLocaleGeneration; }
     std::chrono::milliseconds longClickDelay() const { return mLongClickDelay; }
@@ -86,7 +95,7 @@ private:
     std::string mActiveLocale;
     std::uint64_t mGenerationNumber = 0;
     std::uint64_t mLocaleGeneration = 0;
-    std::chrono::milliseconds mLongClickDelay{500};
+    std::chrono::milliseconds mLongClickDelay{defaultLongClickDelay()};
     mutable std::unordered_set<Surface*> mSurfaces;
     std::function<void(const std::string&)> mLocaleChangedHandler;
     std::function<KeybindingPresentation(const std::string&)> mKeybindingResolver;
@@ -96,6 +105,8 @@ private:
     void registerSurface(Surface& surface) const;
     void unregisterSurface(Surface& surface) const;
     void notifyLocaleChanged();
+    bool publishImpl(std::shared_ptr<const SkinGeneration> generation, PublicationCommit* commit);
+    friend class viewer::SkinReloadCoordinator;
     friend class Surface;
     friend class OpenGLPaintContext;
 };

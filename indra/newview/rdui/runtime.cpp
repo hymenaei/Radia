@@ -26,219 +26,360 @@
 #include "runtime.h"
 #include <algorithm>
 #include <chrono>
+#include <map>
 #include <memory>
 #include <optional>
-#include <unordered_set>
+#include <set>
 #include <utility>
 #include <vector>
+#include "auxiliarywindow.h"
+#include "componentmanager.h"
+#include "componentpersistence.h"
 #include "detachedfloatermanager.h"
 #include "detachedfloaterwindow.h"
-#include "floaterdocumentmanager.h"
-#include "floaterplacementstore.h"
-#include "floaterstatestore.h"
+#include "floaterhost.h"
 #include "inputbridge.h"
-#include "llcoord.h"
 #include "llgl.h"
 #include "llrender.h"
 #include "llrendertarget.h"
 #include "llviewercontrol.h"
-#include "llviewerinput.h"
 #include "llviewershadermgr.h"
-#include "llviewerwindow.h"
 #include "llwindow.h"
-#include "nativewindow.h"
 #include "render/openglpaintcontext.h"
+#include "render/paintcontext.h"
+#include "runtimewindowadapter.h"
+#include "settingsadapter.h"
 #include "skin/compiler.h"
 #include "skin/reloadcoordinator.h"
 #include "skin/resources.h"
-#include "surface/floaterresize.h"
 #include "surface/surface.h"
 #include "system.h"
 #include "widgets/button.h"
 #include "widgets/floater.h"
-#include "widgets/panel.h"
 
 namespace {
 enum class InitializationState { Uninitialized, Ready, Failed };
-const rdui::viewer::RduiInputBridge INPUT_BRIDGE;
 
-rdui::SkinGenerationPrepareResult prepareSkin(rdui::viewer::SkinSnapshotResult captured) {
+constexpr char kLongClickDelaySetting[] = "LongClickDelay";
+constexpr char kSkinReloadScanIntervalSetting[] = "SkinAutoReloadScanInterval";
+constexpr char kSkinReloadSettleIntervalSetting[] = "SkinAutoReloadSettleInterval";
+
+struct AttachedSurfaceState final {
+    using TimePoint = std::chrono::steady_clock::time_point;
+
+    AttachedSurfaceState(LLGLSLShader& uiShader, rdui::System& system, rdui::viewer::Runtime::PaintContextFactory paintContextFactory)
+        : paintContext(paintContextFactory ? paintContextFactory(uiShader, system) : std::make_unique<rdui::OpenGLPaintContext>(uiShader, system)),
+          surface(system.createSurface(*paintContext)) {}
+
+    std::unique_ptr<rdui::PaintContext> paintContext;
+    std::unique_ptr<rdui::Surface> surface;
+    int width = 0;
+    int height = 0;
+    bool visible = true;
+    int magnetX = 0;
+    int magnetY = 0;
+    rdui::Vec2 virtualPointer;
+    bool dragCursorClipping = false;
+    TimePoint lastFrameTime;
+};
+
+class RuntimeSkinSource final : public rdui::viewer::SkinSnapshotSource {
+public:
+    RuntimeSkinSource(const rdui::viewer::SkinResources& fallback, rdui::viewer::Runtime::SkinSnapshotProvider capture)
+        : mFallback(fallback), mCapture(std::move(capture)) {}
+
+    rdui::viewer::SkinSnapshotResult capture() const override { return mCapture ? mCapture() : mFallback.capture(); }
+
+private:
+    const rdui::viewer::SkinResources& mFallback;
+    rdui::viewer::Runtime::SkinSnapshotProvider mCapture;
+};
+
+rdui::SkinGenerationPrepareResult prepareSkinGeneration(rdui::viewer::SkinSnapshotResult captured) {
     rdui::SkinGenerationPrepareResult result;
+    rdui::ResourceSnapshot snapshot = std::move(captured.snapshot);
     result.append(std::move(captured));
     if (result.hasErrors()) return result;
 
-    rdui::SkinGenerationPrepareResult compiled = rdui::SkinCompiler().prepare(std::move(captured.snapshot));
+    rdui::SkinGenerationPrepareResult compiled = rdui::SkinCompiler().prepare(std::move(snapshot));
+    std::shared_ptr<const rdui::SkinGeneration> generation = std::move(compiled.generation);
     result.append(std::move(compiled));
-    result.generation = std::move(compiled.generation);
+    result.generation = std::move(generation);
     return result;
 }
+
 } // namespace
 
 namespace rdui::viewer {
-struct Runtime::Impl final : private rdui::SurfaceFloaterDelegate, private DetachedFloaterManager::Environment, private FloaterDocumentManager::Host {
+struct Runtime::Impl final : private rdui::SurfaceFloaterDelegate {
 public:
-    explicit Impl(NativeWindowFactory& native_windows = defaultNativeWindowFactory())
-        : mPlacementStore(mFloaterStateStore.placementPersistence()), mNativeWindows(native_windows), mReloadCoordinator(mSystem, mResources),
-          mPaintContext(gRduiProgram, mSystem), mSurface(mSystem.createSurface(mPaintContext)),
+    using KeybindingResolver = Runtime::KeybindingResolver;
+    using KeybindingStateProvider = Runtime::KeybindingStateProvider;
+    using Clock = Runtime::Clock;
+    using TimePoint = AttachedSurfaceState::TimePoint;
+
+    Impl(LLControlGroup& savedSettings, LLControlGroup& perAccountSettings, LLGLSLShader& uiShader, Runtime::WindowEnvironment window,
+         Runtime::IntegrationHooks hooks)
+        : mSavedSettings(savedSettings), mResolveKeybinding(std::move(hooks.resolveKeybinding)), mKeybindingState(std::move(hooks.keybindingState)),
+          mNow(std::move(hooks.now)), mComponentPersistence(savedSettings, perAccountSettings),
+          mAuxiliaryWindowFactory(window.auxiliaryWindowFactory), mUiShader(uiShader), mResources(),
+          mSnapshotSource(mResources, std::move(hooks.captureSkin)), mSystem(), mReloadCoordinator(mSystem, mSnapshotSource),
+          mAttachedSurface(uiShader, mSystem, std::move(hooks.paintContext)),
+          mWindowAdapter(
+              window.mainWindow, mAuxiliaryWindowFactory, std::move(window.displayScale),
+              [this] { return std::pair{mAttachedSurface.width, mAttachedSurface.height}; }, [this] { clearDragCursorState(); }),
           mDetachedManager(
-              *mSurface, mPlacementStore,
-              [this](std::unique_ptr<rdui::Floater>& floater) {
-                  return std::make_unique<DetachedFloaterWindow>(mNativeWindows, mSystem, mDetachedManager, std::move(floater));
+              *mAttachedSurface.surface,
+              [this](std::unique_ptr<rdui::Floater> floater) {
+                  return DetachedFloaterPresentationResult::success(std::make_unique<DetachedFloaterWindow>(
+                      mAuxiliaryWindowFactory, mUiShader, mSystem, mDetachedManager, std::move(floater), [this] { return currentTime(); }));
               },
-              *this),
-          mDocuments(mSystem, *this) {
-        mSurface->setFloaterDelegate(this);
-        mSystem.setKeybindingResolver([](const std::string& authored_id) {
+              mWindowAdapter,
+              [this](const ComponentKey& componentKey, FloaterPlacement placement, ComponentOpenState state) {
+                  mComponentPersistence.savePlacement(componentKey, std::move(placement), state);
+              }),
+          mFloaterHost(*mAttachedSurface.surface, mDetachedManager), mSettingsAdapter(savedSettings),
+          mComponents(mSystem, mFloaterHost, mSettingsAdapter) {
+        mAttachedSurface.surface->setFloaterDelegate(this);
+        mSystem.setKeybindingResolver([this](const std::string& authored_id) {
+            if (!mResolveKeybinding) return rdui::KeybindingPresentation{};
             std::string viewer_command = authored_id;
             std::replace(viewer_command.begin(), viewer_command.end(), '-', '_');
-            return KeybindingPresentation{gViewerInput.getPrimaryKeyBinding({}, viewer_command)};
+            return mResolveKeybinding(viewer_command);
         });
     }
 
-    ~Impl() {
-        persistOpenFloaters();
-        clearDragCursorState();
+    ~Impl() { shutdown(); }
+
+    NativeInputDispatchResult pointerMove(F32 x, F32 y, U32 modifiers, F32 deltaX, F32 deltaY) {
+        return pointerMove(translatePointerInput({x, y, NativePointerButton::NoButton, modifiers, 1, deltaX, deltaY}));
     }
+
+    NativeInputDispatchResult pointerDown(F32 x, F32 y, NativePointerButton button, U32 modifiers, U8 clickCount, F32 deltaX, F32 deltaY) {
+        return pointerDown(translatePointerInput({x, y, button, modifiers, clickCount, deltaX, deltaY}));
+    }
+
+    NativeInputDispatchResult pointerUp(F32 x, F32 y, NativePointerButton button, U32 modifiers, U8 clickCount, F32 deltaX, F32 deltaY) {
+        return pointerUp(translatePointerInput({x, y, button, modifiers, clickCount, deltaX, deltaY}));
+    }
+
+    NativeInputDispatchResult scroll(S32 x, S32 y, F32 horizontal, F32 vertical, U32 modifiers) {
+        return scroll(translateScrollInput({x, y, horizontal, vertical, modifiers}));
+    }
+
+    NativeInputDispatchResult keyDown(KEY key, U32 modifiers, bool repeated) { return keyDown(translateKeyInput({key, modifiers, true, repeated})); }
+
+    NativeInputDispatchResult keyUp(KEY key, U32 modifiers) { return keyUp(translateKeyInput({key, modifiers, false, false})); }
+
+    NativeInputDispatchResult character(U32 codepoint, U32) { return character(codepoint); }
+
+    void focusLost() { clearInteraction(); }
+
+    void mouseCaptureLost() { clearInteraction(); }
 
     bool initialize() {
         if (mInitialization != InitializationState::Uninitialized) return mInitialization == InitializationState::Ready;
         mInitialization = InitializationState::Failed;
 
-        rdui::SkinGenerationPrepareResult system_result = prepareSkin(mResources.capture());
-        if (!system_result.ok() && !mResources.selectedIsBundledDefault()) {
-            for (const rdui::Diagnostic& warning : system_result.warnings) LL_WARNS("rdui") << warning.formatted() << LL_ENDL;
-            for (const rdui::Diagnostic& error : system_result.errors) LL_WARNS("rdui") << error.formatted() << LL_ENDL;
+        rdui::SkinGenerationPrepareResult skinGenerationResult = prepareSkinGeneration(mSnapshotSource.capture());
+        if (!skinGenerationResult.ok() && !mResources.selectedIsBundledDefault()) {
+            for (const rdui::Diagnostic& warning : skinGenerationResult.warnings) LL_WARNS("rdui") << warning.formatted() << LL_ENDL;
+            for (const rdui::Diagnostic& error : skinGenerationResult.errors) LL_WARNS("rdui") << error.formatted() << LL_ENDL;
             LL_WARNS("rdui") << "Selected Radia Skin rejected; attempting bundled default Skin." << LL_ENDL;
-            system_result = prepareSkin(mResources.captureBundledDefault());
+            skinGenerationResult = prepareSkinGeneration(mResources.captureBundledDefault());
         }
-        for (const rdui::Diagnostic& warning : system_result.warnings) LL_WARNS("rdui") << warning.formatted() << LL_ENDL;
-        for (const rdui::Diagnostic& error : system_result.errors) LL_WARNS("rdui") << error.formatted() << LL_ENDL;
-        if (!system_result.ok()) return false;
-        mSystem.publish(std::move(system_result.generation));
+        for (const rdui::Diagnostic& warning : skinGenerationResult.warnings) LL_WARNS("rdui") << warning.formatted() << LL_ENDL;
+        for (const rdui::Diagnostic& error : skinGenerationResult.errors) LL_WARNS("rdui") << error.formatted() << LL_ENDL;
+        if (!skinGenerationResult.ok()) return false;
+        mSystem.publish(std::move(skinGenerationResult.generation));
+        applySettings();
 
-        const std::string saved_locale = gSavedSettings.getString("RduiLanguage");
+        const std::string saved_locale = mSavedSettings.getString("Locale");
         if (!saved_locale.empty()) mSystem.setLocale(saved_locale);
-        gSavedSettings.setString("RduiLanguage", mSystem.activeLocale());
-        mSystem.setLocaleChangedHandler([](const std::string& locale) { gSavedSettings.setString("RduiLanguage", locale); });
+        mSavedSettings.setString("Locale", mSystem.activeLocale());
+        mSystem.setLocaleChangedHandler([this](const std::string& locale) { mSavedSettings.setString("Locale", locale); });
 
         mInitialization = InitializationState::Ready;
         return true;
     }
 
-    bool registerFloater(std::string definition_id, Runtime::ControllerFactory factory) {
-        return mDocuments.registerDefinition(std::move(definition_id), std::move(factory));
+    void shutdown() {
+        if (mShuttingDown) return;
+        mShuttingDown = true;
+        clearInteraction();
+        attachedSurface().setFloaterDelegate(nullptr);
+        persistWorkspace();
+        mDetachedManager.reattachAll(DetachedFloaterManager::ReattachMode::PreservePlacement);
+        if (!mComponents.clearInstances()) LL_WARNS("rdui") << "Some Radia components could not be cleared during runtime shutdown." << LL_ENDL;
+        mSystem.setLocaleChangedHandler({});
+        mSystem.setKeybindingResolver({});
+        clearDragCursorState();
+        mLayoutInitialized.clear();
+        mWorkspaceRestored = false;
+        mPersistenceDirty = false;
+        mInitialization = InitializationState::Failed;
     }
 
-    rdui::Floater* openFloater(const std::string& definition_id, const std::string& instance_key) {
+    bool registerFloater(std::string definitionId, std::string resourceId, Runtime::ControllerFactory factory) {
+        return mComponents.registerDefinition(std::move(definitionId), std::move(resourceId), std::move(factory));
+    }
+
+    rdui::Floater* openFloater(const std::string& definitionId, const std::string& instanceKey) {
         if (mInitialization != InitializationState::Ready) return nullptr;
-        FloaterDocumentOpenResult result = mDocuments.open(definition_id, instance_key);
+        ComponentOpenResult result = mComponents.open(definitionId, instanceKey);
         logDiagnostics(result);
         if (!result.ok()) return nullptr;
-        if (mWidth > 0 && mHeight > 0) layout(mWidth, mHeight);
-        persistOpenFloaters();
+        if (mAttachedSurface.width > 0 && mAttachedSurface.height > 0) layout(mAttachedSurface.width, mAttachedSurface.height);
+        mUnrestoredWorkspace.erase({definitionId, instanceKey});
+        mPersistenceDirty = true;
+        persistWorkspace();
         return result.floater;
     }
 
-    void restoreOpenFloaters() {
-        if (mInitialization != InitializationState::Ready || mSessionRestored) return;
-        for (const FloaterDocumentId& document : mFloaterStateStore.openDocuments()) openFloater(document.definitionId, document.instanceKey);
-        mSessionRestored = true;
-        persistOpenFloaters();
+    void restoreWorkspace() {
+        if (mInitialization != InitializationState::Ready || mWorkspaceRestored) return;
+        mRestoringWorkspace = true;
+        mUnrestoredWorkspace.clear();
+        for (const ComponentKey& component : mComponentPersistence.openComponentKeys())
+            if (!openFloater(component.definitionId, component.instanceKey)) mUnrestoredWorkspace.insert(component);
+        mRestoringWorkspace = false;
+        mWorkspaceRestored = true;
+        mPersistenceDirty = true;
+        persistWorkspace();
     }
 
-    void requestReload() { mReloadCoordinator.request(); }
-
-    void setVisibility(bool attached_visible, bool detached_visible) {
-        if (mAttachedVisible != attached_visible) {
-            mAttachedVisible = attached_visible;
-            mLastFrameTime = {};
-            if (!mAttachedVisible) clearInteraction();
+    void endAccountSession() {
+        clearInteraction();
+        mAttachedSurface.lastFrameTime = {};
+        if (mWorkspaceRestored) persistWorkspace();
+        mDetachedManager.reattachAll(DetachedFloaterManager::ReattachMode::PreservePlacement);
+        if (!mComponents.clearInstances()) {
+            LL_WARNS("rdui") << "Some Radia components could not be cleared during account transition; retaining the current UI state." << LL_ENDL;
+            return;
         }
-        if (mDetachedVisible != detached_visible) {
-            mDetachedVisible = detached_visible;
-            mDetachedManager.setVisible(detached_visible);
+        mWorkspaceRestored = false;
+        mRestoringWorkspace = false;
+        mPersistenceDirty = false;
+        mUnrestoredWorkspace.clear();
+        mLayoutInitialized.clear();
+    }
+
+    void requestSkinReload() { mReloadCoordinator.request(); }
+
+    void setVisibility(bool attachedVisible, bool detachedVisible) {
+        if (mAttachedSurface.visible != attachedVisible) {
+            mAttachedSurface.visible = attachedVisible;
+            mAttachedSurface.lastFrameTime = {};
+            if (!mAttachedSurface.visible) clearInteraction();
+        }
+        if (mDetachedVisible != detachedVisible) {
+            mDetachedVisible = detachedVisible;
+            mDetachedManager.setVisible(detachedVisible);
         }
     }
 
-    void draw(int width, int height) {
+    void frame(int width, int height) {
         if (!isInteractive() || width <= 0 || height <= 0) return;
-        const auto now = std::chrono::steady_clock::now();
-        if (width != mWidth || height != mHeight) layout(width, height);
-        mSurface->refreshHover();
-        if (mLastFrameTime != std::chrono::steady_clock::time_point())
-            mSurface->update(std::chrono::duration_cast<std::chrono::milliseconds>(now - mLastFrameTime));
-        mLastFrameTime = now;
-        mSurface->paint(mPaintContext);
+        const auto now = currentTime();
+        if (width != mAttachedSurface.width || height != mAttachedSurface.height) layout(width, height);
+        attachedSurface().refreshHover();
+        if (mAttachedSurface.lastFrameTime != TimePoint())
+            attachedSurface().update(std::chrono::duration_cast<std::chrono::milliseconds>(now - mAttachedSurface.lastFrameTime));
+        mAttachedSurface.lastFrameTime = now;
+        attachedSurface().paint(*mAttachedSurface.paintContext);
     }
 
-    bool pointerMove(const rdui::PointerEvent& event) {
-        if (!isInteractive()) return false;
+    NativeInputDispatchResult pointerMove(const rdui::PointerEvent& event) {
+        if (!isInteractive()) return {};
         rdui::PointerEvent routed = event;
         if (cursorMagnetActive()) {
-            const float cursor_right = std::max(0.f, static_cast<float>(mWidth) - 1.f);
-            const float cursor_top = std::max(0.f, static_cast<float>(mHeight) - 1.f);
-            routed.position.x = magnetizedAxis(event.position.x, event.delta.x, 0.f, cursor_right, mMagnetX, mVirtualPointer.x);
-            routed.position.y = magnetizedAxis(event.position.y, event.delta.y, 0.f, cursor_top, mMagnetY, mVirtualPointer.y);
+            const float cursor_right = std::max(0.f, static_cast<float>(mAttachedSurface.width) - 1.f);
+            const float cursor_top = std::max(0.f, static_cast<float>(mAttachedSurface.height) - 1.f);
+            routed.position.x =
+                magnetizedAxis(event.position.x, event.delta.x, 0.f, cursor_right, mAttachedSurface.magnetX, mAttachedSurface.virtualPointer.x);
+            routed.position.y =
+                magnetizedAxis(event.position.y, event.delta.y, 0.f, cursor_top, mAttachedSurface.magnetY, mAttachedSurface.virtualPointer.y);
         } else {
             resetCursorMagnet();
         }
 
-        const bool handled = mSurface->pointerMove(routed);
-        mDetachedManager.processPendingDetach();
+        const bool handled = attachedSurface().pointerMove(routed);
+        mDetachedManager.processPendingDetachment();
         setDragCursorClipping(dragCursorClippingRequired());
-        return handled;
+        return {handled, handled ? std::optional<ECursorType>(translateCursor(attachedSurface().cursor())) : std::nullopt};
     }
 
     void pointerLeave() {
-        if (mInitialization == InitializationState::Ready) mSurface->pointerLeave();
+        if (mInitialization == InitializationState::Ready) attachedSurface().pointerLeave();
     }
 
     bool dispatchPointerButton(const rdui::PointerEvent& event, bool down) {
         if (!isInteractive()) return false;
-        if (down && event.button == rdui::PointerButton::Left) mLastFrameTime = std::chrono::steady_clock::now();
+        if (down && event.button == rdui::PointerButton::Left) mAttachedSurface.lastFrameTime = currentTime();
         bool handled = false;
-        if (!down && event.button == rdui::PointerButton::Left && mSurface->hasPointerCapture()) handled = pointerMove(event);
-        handled = (down ? mSurface->pointerDown(event) : mSurface->pointerUp(event)) || handled;
-        if (down && !handled) mSurface->clearFocus();
+        if (!down && event.button == rdui::PointerButton::Left && attachedSurface().hasPointerCapture()) handled = pointerMove(event).handled;
+        handled = (down ? attachedSurface().pointerDown(event) : attachedSurface().pointerUp(event)) || handled;
+        if (down && !handled) attachedSurface().clearFocus();
         if (down && draggingFloater()) {
-            mVirtualPointer = event.position;
+            mAttachedSurface.virtualPointer = event.position;
             setDragCursorClipping(dragCursorClippingRequired());
         }
         if (!down || !draggingFloater()) clearDragCursorState();
         return handled;
     }
 
-    bool scroll(const rdui::ScrollEvent& event) { return isInteractive() && mSurface->scroll(event); }
+    NativeInputDispatchResult pointerDown(const rdui::PointerEvent& event) { return {dispatchPointerButton(event, true), std::nullopt}; }
 
-    bool keyDown(const rdui::KeyEvent& event) { return isInteractive() && mSurface->keyDown(event); }
+    NativeInputDispatchResult pointerUp(const rdui::PointerEvent& event) { return {dispatchPointerButton(event, false), std::nullopt}; }
 
-    bool keyUp(const rdui::KeyEvent& event) { return isInteractive() && mSurface->keyUp(event); }
+    NativeInputDispatchResult scroll(const rdui::ScrollEvent& event) { return {isInteractive() && attachedSurface().scroll(event), std::nullopt}; }
 
-    bool charInput(U32 codepoint) { return isInteractive() && mSurface->charInput(codepoint); }
+    NativeInputDispatchResult keyDown(const rdui::KeyEvent& event) { return {isInteractive() && attachedSurface().keyDown(event), std::nullopt}; }
 
-    rdui::CursorStyle cursor() const { return mSurface->cursor(); }
-    bool hasPointerCapture() const { return mSurface->hasPointerCapture(); }
+    NativeInputDispatchResult keyUp(const rdui::KeyEvent& event) { return {isInteractive() && attachedSurface().keyUp(event), std::nullopt}; }
+
+    NativeInputDispatchResult character(U32 codepoint) { return {isInteractive() && attachedSurface().charInput(codepoint), std::nullopt}; }
+
+    bool hasPointerCapture() const { return attachedSurface().hasPointerCapture(); }
 
     void clearInteraction() {
-        if (mInitialization != InitializationState::Uninitialized) mSurface->clearInteractionState();
+        if (mInitialization != InitializationState::Uninitialized) attachedSurface().clearInteractionState();
         clearDragCursorState();
     }
 
     void idle() {
-        const U64 binding_generation = gViewerInput.getBindingGeneration();
-        const EKeyboardMode binding_mode = gViewerInput.getMode();
-        if (mObservedBindingGeneration != binding_generation || mObservedBindingMode != binding_mode) {
-            mObservedBindingGeneration = binding_generation;
-            mObservedBindingMode = binding_mode;
+        const RuntimeKeybindingState binding = mKeybindingState ? mKeybindingState() : RuntimeKeybindingState{};
+        if (mObservedBindingState != binding) {
+            mObservedBindingState = binding;
             mSystem.refreshKeybindings();
         }
-        mDocuments.idle();
-        processReload();
         mDetachedManager.update();
-        persistOpenFloaters();
+        mComponents.idle();
+        processReload();
+        persistWorkspace();
     }
 
 private:
+    rdui::Surface& attachedSurface() { return *mAttachedSurface.surface; }
+    const rdui::Surface& attachedSurface() const { return *mAttachedSurface.surface; }
+
+    TimePoint currentTime() const { return mNow ? mNow() : std::chrono::steady_clock::now(); }
+
+    S32 settingOrDefault(const char* name, S32 fallback) const { return mSavedSettings.getControl(name) ? mSavedSettings.getS32(name) : fallback; }
+
+    void applySettings() {
+        const S32 longClickDelay =
+            std::max<S32>(1, settingOrDefault(kLongClickDelaySetting, static_cast<S32>(rdui::System::defaultLongClickDelay().count())));
+        mSystem.setLongClickDelay(std::chrono::milliseconds{longClickDelay});
+
+        rdui::viewer::SkinReloadTiming timing;
+        timing.scanInterval = std::chrono::milliseconds{
+            std::max<S32>(1, settingOrDefault(kSkinReloadScanIntervalSetting, static_cast<S32>(timing.scanInterval.count())))};
+        timing.settleInterval = std::chrono::milliseconds{
+            std::max<S32>(1, settingOrDefault(kSkinReloadSettleIntervalSetting, static_cast<S32>(timing.settleInterval.count())))};
+        mReloadCoordinator.setAutoReloadTiming(timing);
+    }
+
     static void logDiagnostics(const rdui::DiagnosticResult& result) {
         for (const rdui::Diagnostic& warning : result.warnings) LL_WARNS("rdui") << warning.code << ": " << warning.formatted() << LL_ENDL;
         for (const rdui::Diagnostic& error : result.errors) LL_WARNS("rdui") << error.code << ": " << error.formatted() << LL_ENDL;
@@ -247,22 +388,27 @@ private:
     void rejectReload(const rdui::DiagnosticResult& result) {
         logDiagnostics(result);
         LL_WARNS("rdui") << "Candidate Skin Generation rejected; generation " << mSystem.generation() << " remains live." << LL_ENDL;
-        mDocuments.reportReloadFailed(result);
+        mComponents.reportReloadFailed(result);
     }
 
-    void persistOpenFloaters() {
-        if (!mSessionRestored) return;
-        const std::vector<FloaterDocumentId> documents = mDocuments.openDocuments();
-        if (mPersistedOpenDocuments && *mPersistedOpenDocuments == documents) return;
-        mFloaterStateStore.saveOpenDocuments(documents);
-        mPersistedOpenDocuments = documents;
+    void persistWorkspace() {
+        if (!mWorkspaceRestored || !mPersistenceDirty || mRestoringWorkspace) return;
+        std::vector<ComponentInstanceState> states;
+        mComponents.forEachOpen([&](const ComponentKey& componentKey, rdui::Floater& floater) {
+            states.push_back({componentKey, floater.minimized(), isDetached(floater)});
+        });
+
+        const std::vector<ComponentKey> preserved(mUnrestoredWorkspace.begin(), mUnrestoredWorkspace.end());
+        mComponentPersistence.saveWorkspace(states, preserved);
+        mPersistenceDirty = false;
     }
 
     void processReload() {
-        mReloadCoordinator.setAuthoringEnabled(gSavedSettings.getBOOL("RduiAuthoringMode"));
+        applySettings();
+        mReloadCoordinator.setSkinAutoReload(mSavedSettings.getBOOL("SkinAutoReload"));
         if (mInitialization != InitializationState::Ready) return;
 
-        std::optional<rdui::viewer::SkinReloadResult> result = mReloadCoordinator.update(std::chrono::steady_clock::now(), mDocuments);
+        std::optional<rdui::viewer::SkinReloadResult> result = mReloadCoordinator.update(currentTime(), mComponents);
         if (!result) return;
         if (!result->ok()) {
             rejectReload(*result);
@@ -270,15 +416,18 @@ private:
         }
 
         logDiagnostics(*result);
-        mDocuments.reportReloadSucceeded();
-        LL_INFOS("rdui") << "Committed Skin Generation " << result->generation << "." << LL_ENDL;
+        mComponents.reportReloadSucceeded();
+        saveAttachedPlacements();
+        LL_INFOS("rdui") << "Committed Skin Generation " << result->generationNumber << "." << LL_ENDL;
     }
 
     bool isInteractive() const {
-        if (mInitialization != InitializationState::Ready || !mAttachedVisible) return false;
-        for (const rdui::Floater* floater : mDocuments.floaters())
-            if (floater && !isDetached(*floater) && !floater->closed() && floater->visibility() == rdui::Visibility::Visible) return true;
-        return false;
+        if (mInitialization != InitializationState::Ready || !mAttachedSurface.visible) return false;
+        bool interactive = false;
+        mComponents.forEachOpen([&](const ComponentKey&, rdui::Floater& floater) {
+            if (!isDetached(floater) && floater.visibility() == rdui::Visibility::Visible) interactive = true;
+        });
+        return interactive;
     }
 
     static float magnetizedAxis(float position, float delta, float minimum, float maximum, int& direction, float& virtual_position) {
@@ -317,20 +466,22 @@ private:
     }
 
     rdui::Floater* draggingFloater() const {
-        for (rdui::Floater* floater : mDocuments.floaters())
-            if (floater && !isDetached(*floater) && floater->dragging()) return floater;
-        return nullptr;
+        rdui::Floater* result = nullptr;
+        mComponents.forEachOpen([&](const ComponentKey&, rdui::Floater& floater) {
+            if (!result && !isDetached(floater) && floater.dragging()) result = &floater;
+        });
+        return result;
     }
 
     void setDragCursorClipping(bool enabled) {
-        if (mDragCursorClipping == enabled) return;
-        mDragCursorClipping = enabled;
-        if (gWindowp) gWindowp->setMouseClipping(enabled);
+        if (mAttachedSurface.dragCursorClipping == enabled) return;
+        mAttachedSurface.dragCursorClipping = enabled;
+        mWindowAdapter.setMouseClipping(enabled);
     }
 
     void resetCursorMagnet() {
-        mMagnetX = 0;
-        mMagnetY = 0;
+        mAttachedSurface.magnetX = 0;
+        mAttachedSurface.magnetY = 0;
     }
 
     void clearDragCursorState() {
@@ -338,147 +489,68 @@ private:
         setDragCursorClipping(false);
     }
 
-    bool isDetached(const rdui::Floater& floater) const { return mDetachedManager.contains(floater); }
+    bool isDetached(const rdui::Floater& floater) const { return mDetachedManager.isDetached(floater); }
 
-    bool canDetachFloater(const rdui::Surface& surface, const rdui::Floater&) const override { return &surface == mSurface.get(); }
+    bool canDetachFloater(const rdui::Surface& surface, const rdui::Floater&) const override { return &surface == &attachedSurface(); }
 
     void floaterClosed(rdui::Surface& surface, rdui::Floater&) override {
-        if (&surface == mSurface.get()) clearInteraction();
+        if (&surface == &attachedSurface()) {
+            clearInteraction();
+            mPersistenceDirty = true;
+        }
     }
 
-    void floaterMoved(rdui::Surface& surface, rdui::Floater& floater) override {
-        if (&surface == mSurface.get() && !floater.minimized()) saveAttachedPlacement(floater);
+    void floaterMinimizedChanged(rdui::Surface& surface, rdui::Floater& floater, bool) override {
+        if (&surface == &attachedSurface()) {
+            saveAttachedPlacement(floater);
+            mPersistenceDirty = true;
+        }
+    }
+
+    void floaterMoveEnded(rdui::Surface& surface, rdui::Floater& floater) override {
+        if (&surface == &attachedSurface()) {
+            if (!floater.minimized()) saveAttachedPlacement(floater);
+            mPersistenceDirty = true;
+        }
     }
 
     void floaterResized(rdui::Surface& surface, rdui::Floater& floater, bool complete) override {
-        if (complete && &surface == mSurface.get()) saveAttachedPlacement(floater);
-    }
-
-    void floaterDetachRequested(rdui::Surface& surface, rdui::Floater& floater, const rdui::Vec2& desired, const rdui::Vec2& drag_offset) override {
-        if (&surface == mSurface.get())
-            if (const FloaterInstanceId* identity = mDocuments.identity(floater))
-                mDetachedManager.requestDetach(*identity, floater, desired, drag_offset);
-    }
-
-    NativeRect mainRectToNative(const rdui::Rect& rect) const override {
-        if (!gWindowp) return {};
-        LLCoordScreen top_left;
-        LLCoordScreen bottom_right;
-        gWindowp->convertCoords(LLCoordGL(ll_round(rect.left()), ll_round(rect.top())), &top_left);
-        gWindowp->convertCoords(LLCoordGL(ll_round(rect.right()), ll_round(rect.bottom())), &bottom_right);
-        return {std::min(top_left.mX, bottom_right.mX), std::min(top_left.mY, bottom_right.mY), std::abs(bottom_right.mX - top_left.mX),
-                std::abs(bottom_right.mY - top_left.mY)};
-    }
-
-    NativePoint mainPointToNative(const rdui::Vec2& point) const {
-        if (!gWindowp) return {};
-        const LLVector2 scale = gViewerWindow ? gViewerWindow->getDisplayScale() : LLVector2(1.f, 1.f);
-        LLCoordScreen screen;
-        gWindowp->convertCoords(LLCoordGL(ll_round(point.x * scale.mV[VX]), ll_round(point.y * scale.mV[VY])), &screen);
-        return {screen.mX, screen.mY};
-    }
-
-    float nativeScaleMultiplier() const override {
-        if (!gWindowp) return 1.f;
-        const NativeRect sample = mainRectToNative({0.f, 0.f, 100.f, 100.f});
-        const float effective_scale = sample.width > 0 ? static_cast<float>(sample.width) / 100.f : 1.f;
-        return effective_scale / std::max(0.25f, gWindowp->getSystemUISize());
-    }
-
-    rdui::Vec2 nativeBottomLeftInMain(const NativeRect& rect) const override {
-        if (!gWindowp) return {};
-        LLCoordGL bottom_left;
-        gWindowp->convertCoords(LLCoordScreen(rect.x, rect.y + rect.height), &bottom_left);
-        return {static_cast<float>(bottom_left.mX), static_cast<float>(bottom_left.mY)};
-    }
-
-    bool nativePointInsideMain(const rdui::Vec2& point) const override {
-        if (!gWindowp || mWidth <= 0 || mHeight <= 0) return false;
-        LLCoordScreen first;
-        LLCoordScreen second;
-        gWindowp->convertCoords(LLCoordGL(0, 0), &first);
-        gWindowp->convertCoords(LLCoordGL(mWidth, mHeight), &second);
-        return point.x >= std::min(first.mX, second.mX)
-            && point.x <= std::max(first.mX, second.mX)
-            && point.y >= std::min(first.mY, second.mY)
-            && point.y <= std::max(first.mY, second.mY);
-    }
-
-    bool placementVisible(const NativeRect& rect, const std::string& monitor_id) const override {
-        return mNativeWindows.placementVisible(rect, monitor_id);
-    }
-
-    std::optional<NativePoint> releasePointerForDetach(const rdui::Vec2& main_position) override {
-        const std::optional<NativePoint> cursor = gWindowp ? std::optional<NativePoint>(mainPointToNative(main_position)) : std::nullopt;
-        clearDragCursorState();
-        if (gWindowp) gWindowp->releaseMouse();
-        return cursor;
-    }
-
-    rdui::Floater* mount(const FloaterInstanceId& identity, std::unique_ptr<rdui::Floater> floater) override {
-        if (!floater) return nullptr;
-        mPositionInitialized.erase(identity.value());
-        return &mSurface->mountFloater(std::move(floater));
-    }
-
-    rdui::Floater* replace(const FloaterInstanceId& identity, rdui::Floater& current, std::unique_ptr<rdui::Floater> replacement) override {
-        if (!replacement) return nullptr;
-        const bool detached = mDetachedManager.contains(current);
-        const bool minimized = current.minimized();
-        const rdui::Rect authored_rect = mSurface->prepareFloater(*replacement);
-        rdui::Rect replacement_rect = minimized ? current.expandedRect() : current.rect();
-        const bool preserve_size = rdui::detail::preserveUserResizeOnReload(current.canResize(), replacement->canResize(),
-                                                                            {current.authoredSize(), current.authoredContentSize()},
-                                                                            {{authored_rect.w, authored_rect.h}, replacement->authoredContentSize()});
-        std::optional<rdui::Vec2> replacement_size;
-        if (!preserve_size) {
-            replacement_size = {authored_rect.w, authored_rect.h};
-            replacement_rect.w = replacement_size->x;
-            replacement_rect.h = replacement_size->y;
+        if (complete && &surface == &attachedSurface()) {
+            saveAttachedPlacement(floater);
+            mPersistenceDirty = true;
         }
-
-        if (detached) {
-            if (!replacement_size) replacement_size = mDetachedManager.logicalSize(current);
-            return mDetachedManager.replace(current, std::move(replacement), replacement_size);
-        }
-
-        std::unique_ptr<rdui::Floater> retired = mSurface->unmountFloater(current);
-        replacement->setRect(replacement_rect);
-        rdui::Floater& mounted = mSurface->mountFloater(std::move(replacement));
-        mSurface->placeFloater(mounted, replacement_rect);
-        if (minimized && mounted.canMinimize()) mounted.setMinimized(true);
-        mSurface->updateLayout();
-        saveAttachedPlacement(identity, mounted);
-        return &mounted;
     }
 
-    void show(rdui::Floater& floater) override {
-        floater.open();
-        if (!mDetachedManager.contains(floater)) mSurface->raise(floater);
+    void floaterDetachRequested(rdui::Surface& surface, rdui::Floater& floater, const rdui::Vec2& desired, const rdui::Vec2& dragOffset) override {
+        if (&surface == &attachedSurface())
+            if (const std::optional<ComponentKey> componentKey = mComponents.componentKeyFor(floater))
+                mDetachedManager.requestDetach(*componentKey, floater, desired, dragOffset);
     }
 
     void saveAttachedPlacement(const rdui::Floater& floater) {
-        const FloaterInstanceId* identity = mDocuments.identity(floater);
-        if (!identity) return;
-        saveAttachedPlacement(*identity, floater);
+        if (const std::optional<ComponentKey> componentKey = mComponents.componentKeyFor(floater)) saveAttachedPlacement(*componentKey, floater);
     }
 
-    void saveAttachedPlacement(const FloaterInstanceId& identity, const rdui::Floater& floater) {
-        std::optional<rdui::viewer::FloaterPlacementSize> size;
-        if (floater.canResize()) size = rdui::viewer::FloaterPlacementSize{floater.rect().w, floater.rect().h};
-        mPlacementStore.save(identity, rdui::viewer::AttachedFloaterPlacement{floater.rect().x, floater.rect().y, size});
+    void saveAttachedPlacement(const ComponentKey& componentKey, const rdui::Floater& floater) {
+        mComponentPersistence.saveAttachedPlacement(componentKey, floater);
     }
 
-    void restorePlacement(const FloaterInstanceId& identity, rdui::Floater& floater) {
-        const std::optional<rdui::viewer::FloaterPlacement> placement = mPlacementStore.restore(identity);
+    void saveAttachedPlacements() {
+        mComponents.forEachOpen([this](const ComponentKey& componentKey, rdui::Floater& floater) {
+            if (!isDetached(floater)) saveAttachedPlacement(componentKey, floater);
+        });
+    }
+
+    void restorePlacement(const ComponentKey& componentKey, rdui::Floater& floater) {
+        const std::optional<rdui::viewer::FloaterPlacement> placement = mComponentPersistence.restorePlacement(componentKey);
         if (!placement) return;
         if (const auto* detached_placement = std::get_if<rdui::viewer::DetachedFloaterPlacement>(&*placement)) {
             if (!floater.canDetach()) {
-                saveAttachedPlacement(identity, floater);
+                saveAttachedPlacement(componentKey, floater);
                 return;
             }
-            if (mDetachedManager.restore(identity, floater, *detached_placement)) return;
-            saveAttachedPlacement(identity, floater);
+            if (mDetachedManager.restoreDetachedPlacement(componentKey, floater, *detached_placement)) return;
+            saveAttachedPlacement(componentKey, floater);
             return;
         }
         const auto& attached = std::get<rdui::viewer::AttachedFloaterPlacement>(*placement);
@@ -487,87 +559,96 @@ private:
             saved.w = attached.size->width;
             saved.h = attached.size->height;
         }
-        mSurface->placeFloater(floater, saved);
-        mSurface->updateLayout();
-        saveAttachedPlacement(identity, floater);
+        attachedSurface().placeFloater(floater, saved);
+        attachedSurface().updateLayout();
+        if (attached.minimized && floater.canMinimize()) floater.setMinimized(true);
+        saveAttachedPlacement(componentKey, floater);
     }
 
     void layout(int width, int height) {
-        mWidth = width;
-        mHeight = height;
-        mSurface->setViewport(static_cast<float>(width), static_cast<float>(height));
-        for (rdui::Floater* floater : mDocuments.floaters()) {
-            if (!floater || isDetached(*floater)) continue;
-            const FloaterInstanceId* identity = mDocuments.identity(*floater);
-            if (identity && mPositionInitialized.insert(identity->value()).second)
-                mSurface->placeFloater(*floater, mSurface->prepareFloater(*floater));
-        }
-        mSurface->updateLayout();
-        for (rdui::Floater* floater : mDocuments.floaters()) {
-            if (!floater) continue;
-            if (const FloaterInstanceId* identity = mDocuments.identity(*floater)) restorePlacement(*identity, *floater);
-        }
-        mSurface->refreshHover();
+        mAttachedSurface.width = width;
+        mAttachedSurface.height = height;
+        attachedSurface().setViewport(static_cast<float>(width), static_cast<float>(height));
+        mComponents.forEachOpen([&](const ComponentKey& componentKey, rdui::Floater& floater) {
+            auto found = mLayoutInitialized.find(componentKey);
+            if (found != mLayoutInitialized.end() && found->second.get() == &floater) return;
+            mLayoutInitialized[componentKey].set(&floater);
+            if (isDetached(floater)) return;
+            if (const std::optional<rdui::Rect> prepared = attachedSurface().prepareFloater(floater))
+                attachedSurface().placeFloater(floater, *prepared);
+            restorePlacement(componentKey, floater);
+        });
+        attachedSurface().updateLayout();
+        attachedSurface().refreshHover();
     }
 
-    FloaterStateStore mFloaterStateStore;
-    rdui::viewer::FloaterPlacementStore mPlacementStore;
-    NativeWindowFactory& mNativeWindows;
+    LLControlGroup& mSavedSettings;
+    KeybindingResolver mResolveKeybinding;
+    KeybindingStateProvider mKeybindingState;
+    Clock mNow;
+    ComponentPersistence mComponentPersistence;
+    AuxiliaryWindowFactory& mAuxiliaryWindowFactory;
+    LLGLSLShader& mUiShader;
     rdui::viewer::SkinResources mResources;
+    RuntimeSkinSource mSnapshotSource;
     rdui::System mSystem;
     rdui::viewer::SkinReloadCoordinator mReloadCoordinator;
-    rdui::OpenGLPaintContext mPaintContext;
-    std::unique_ptr<rdui::Surface> mSurface;
+    AttachedSurfaceState mAttachedSurface;
+    RuntimeWindowAdapter mWindowAdapter;
     rdui::viewer::DetachedFloaterManager mDetachedManager;
-    rdui::viewer::FloaterDocumentManager mDocuments;
-    int mWidth = 0;
-    int mHeight = 0;
+    rdui::viewer::FloaterHost mFloaterHost;
+    rdui::viewer::SettingsAdapter mSettingsAdapter;
+    rdui::viewer::ComponentManager mComponents;
     InitializationState mInitialization = InitializationState::Uninitialized;
-    bool mAttachedVisible = true;
     bool mDetachedVisible = true;
-    bool mSessionRestored = false;
-    std::optional<U64> mObservedBindingGeneration;
-    std::optional<EKeyboardMode> mObservedBindingMode;
-    std::optional<std::vector<FloaterDocumentId>> mPersistedOpenDocuments;
-    std::unordered_set<std::string> mPositionInitialized;
-    int mMagnetX = 0;
-    int mMagnetY = 0;
-    rdui::Vec2 mVirtualPointer;
-    bool mDragCursorClipping = false;
-    std::chrono::steady_clock::time_point mLastFrameTime;
+    bool mWorkspaceRestored = false;
+    bool mRestoringWorkspace = false;
+    bool mPersistenceDirty = false;
+    std::set<ComponentKey> mUnrestoredWorkspace;
+    std::optional<RuntimeKeybindingState> mObservedBindingState;
+    std::map<ComponentKey, rdui::WidgetRef<rdui::Floater>> mLayoutInitialized;
+    bool mShuttingDown = false;
 };
-} // namespace rdui::viewer
 
-namespace rdui::viewer {
-Runtime::Runtime() : mImpl(std::make_unique<Impl>()) {}
+Runtime::Runtime(LLControlGroup& savedSettings, LLControlGroup& perAccountSettings, LLGLSLShader& uiShader, WindowEnvironment window,
+                 IntegrationHooks hooks)
+    : mImpl(std::make_unique<Impl>(savedSettings, perAccountSettings, uiShader, std::move(window), std::move(hooks))) {}
 Runtime::~Runtime() = default;
 
 bool Runtime::initialize() {
     return mImpl->initialize();
 }
 
-bool Runtime::registerFloater(std::string definition_id, ControllerFactory factory) {
-    return mImpl->registerFloater(std::move(definition_id), std::move(factory));
+void Runtime::shutdown() {
+    mImpl->shutdown();
 }
 
-rdui::Floater* Runtime::openFloater(const std::string& definition_id, const std::string& instance_key) {
-    return mImpl->openFloater(definition_id, instance_key);
+bool Runtime::registerFloater(std::string definitionId, std::string resourceId, ControllerFactory factory) {
+    return mImpl->registerFloater(std::move(definitionId), std::move(resourceId), std::move(factory));
 }
 
-void Runtime::restoreOpenFloaters() {
-    mImpl->restoreOpenFloaters();
+rdui::Floater* Runtime::openFloater(const std::string& definitionId, const std::string& instanceKey) {
+    return mImpl->openFloater(definitionId, instanceKey);
 }
 
-void Runtime::requestReload() {
-    mImpl->requestReload();
+void Runtime::restoreWorkspace() {
+    mImpl->restoreWorkspace();
 }
 
-void Runtime::setVisibility(bool attached_visible, bool detached_visible) {
-    mImpl->setVisibility(attached_visible, detached_visible);
+void Runtime::endAccountSession() {
+    mImpl->endAccountSession();
+}
+
+void Runtime::requestSkinReload() {
+    mImpl->requestSkinReload();
+}
+
+void Runtime::setVisibility(bool attachedVisible, bool detachedVisible) {
+    mImpl->setVisibility(attachedVisible, detachedVisible);
 }
 
 void Runtime::frame(S32 width, S32 height) {
-    mImpl->draw(width, height);
+    mImpl->frame(width, height);
 }
 
 void Runtime::idle() {
@@ -578,33 +659,43 @@ bool Runtime::hasPointerCapture() const {
     return mImpl->hasPointerCapture();
 }
 
-NativeInputDispatchResult Runtime::dispatch(const NativeInputEvent& event) {
-    const SurfaceInputEvent translated = INPUT_BRIDGE.translate(event);
-    if (const auto* pointer = std::get_if<SurfacePointerInput>(&translated)) {
-        if (pointer->phase == NativePointerPhase::Leave) {
-            mImpl->pointerLeave();
-            return {};
-        }
-        const bool handled = pointer->phase == NativePointerPhase::Move
-            ? mImpl->pointerMove(pointer->event)
-            : mImpl->dispatchPointerButton(pointer->event, pointer->phase == NativePointerPhase::Down);
-        return {handled,
-                handled && pointer->phase == NativePointerPhase::Move ? std::optional<ECursorType>(INPUT_BRIDGE.translateCursor(mImpl->cursor()))
-                                                                      : std::nullopt};
-    }
-    if (const auto* scroll = std::get_if<rdui::ScrollEvent>(&translated)) {
-        const bool handled = mImpl->scroll(*scroll);
-        return {handled, std::nullopt};
-    }
-    if (const auto* key = std::get_if<SurfaceKeyInput>(&translated)) {
-        const bool handled = key->down ? mImpl->keyDown(key->event) : mImpl->keyUp(key->event);
-        return {handled, std::nullopt};
-    }
-    if (const auto* character = std::get_if<SurfaceCharacterInput>(&translated)) {
-        const bool handled = mImpl->charInput(character->codepoint);
-        return {handled, std::nullopt};
-    }
-    if (std::holds_alternative<NativeInteractionLoss>(translated)) mImpl->clearInteraction();
-    return {};
+NativeInputDispatchResult Runtime::pointerMove(F32 x, F32 y, U32 modifiers, F32 deltaX, F32 deltaY) {
+    return mImpl->pointerMove(x, y, modifiers, deltaX, deltaY);
+}
+
+NativeInputDispatchResult Runtime::pointerDown(F32 x, F32 y, NativePointerButton button, U32 modifiers, U8 clickCount, F32 deltaX, F32 deltaY) {
+    return mImpl->pointerDown(x, y, button, modifiers, clickCount, deltaX, deltaY);
+}
+
+NativeInputDispatchResult Runtime::pointerUp(F32 x, F32 y, NativePointerButton button, U32 modifiers, U8 clickCount, F32 deltaX, F32 deltaY) {
+    return mImpl->pointerUp(x, y, button, modifiers, clickCount, deltaX, deltaY);
+}
+
+void Runtime::pointerLeave() {
+    mImpl->pointerLeave();
+}
+
+NativeInputDispatchResult Runtime::scroll(S32 x, S32 y, F32 horizontal, F32 vertical, U32 modifiers) {
+    return mImpl->scroll(x, y, horizontal, vertical, modifiers);
+}
+
+NativeInputDispatchResult Runtime::keyDown(KEY key, U32 modifiers, bool repeated) {
+    return mImpl->keyDown(key, modifiers, repeated);
+}
+
+NativeInputDispatchResult Runtime::keyUp(KEY key, U32 modifiers) {
+    return mImpl->keyUp(key, modifiers);
+}
+
+NativeInputDispatchResult Runtime::character(U32 codepoint, U32 modifiers) {
+    return mImpl->character(codepoint, modifiers);
+}
+
+void Runtime::focusLost() {
+    mImpl->focusLost();
+}
+
+void Runtime::mouseCaptureLost() {
+    mImpl->mouseCaptureLost();
 }
 } // namespace rdui::viewer

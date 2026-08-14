@@ -40,15 +40,15 @@ struct TextRun {
     struct Key {
         std::string value;
         Style style;
-        Vec2 text_size;
-        Vec2 box_size;
+        Vec2 textSize;
+        Vec2 boxSize;
         Vec2 size;
     };
 
     std::string value;
     Style style;
     Vec2 size;
-    Vec2 box_size;
+    Vec2 boxSize;
     std::vector<Key> keys;
 
     bool keybinding() const { return !keys.empty(); }
@@ -68,7 +68,7 @@ struct TextLayout {
     Vec2 size;
 };
 
-TextLayout layoutText(const std::vector<TextLine>& hard_lines, const Style& style, const TextMetrics& metrics, std::optional<float> available_width,
-                      bool visual_order, bool apply_overflow);
+TextLayout layoutText(const std::vector<TextLine>& hardLines, const Style& style, const TextMetrics& metrics, std::optional<float> availableWidth,
+                      bool visualOrder, bool applyOverflow);
 } // namespace rdui::detail
 #endif // RD_TEXT_LAYOUT_H

@@ -78,8 +78,8 @@ public:
     const std::string& pluralArgument() const { return mPluralArgument; }
 
 private:
-    LocalizationRequest(std::string key, LocalizationArguments arguments, std::string plural_argument)
-        : mKey(std::move(key)), mArguments(std::move(arguments)), mPluralArgument(std::move(plural_argument)) {}
+    LocalizationRequest(std::string key, LocalizationArguments arguments, std::string pluralArgument)
+        : mKey(std::move(key)), mArguments(std::move(arguments)), mPluralArgument(std::move(pluralArgument)) {}
 
     std::string mKey;
     LocalizationArguments mArguments;

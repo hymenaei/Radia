@@ -46,9 +46,40 @@ Floater& Surface::mountFloater(std::unique_ptr<Floater> floater, SurfaceLayer la
     return *mounted;
 }
 
+std::unique_ptr<Floater> Surface::replaceFloater(Floater& current, std::unique_ptr<Floater> replacement) {
+    if (!replacement || !managesFloater(current)) return nullptr;
+
+    Widget* parent = current.parent();
+    if (!parent) return nullptr;
+    auto found = std::find_if(parent->mChildren.begin(), parent->mChildren.end(), [&current](const auto& child) { return child.get() == &current; });
+    if (found == parent->mChildren.end()) return nullptr;
+
+    const auto managed = std::find_if(mFloaters.begin(), mFloaters.end(), [&current](const auto& floater) { return floater.get() == &current; });
+    if (managed == mFloaters.end()) return nullptr;
+
+    clearInteractionState();
+    std::unique_ptr<Widget> retired = std::move(*found);
+    replacement->mParent = parent;
+    replacement->setSurface(this);
+    *found = std::move(replacement);
+    ++parent->mChildSnapshotRevision;
+    invalidateOrderingCache();
+    managed->set(static_cast<Floater*>(found->get()));
+    requestLayout();
+    refreshHover();
+
+    retired->mParent = nullptr;
+    retired->setSurface(nullptr);
+    return std::unique_ptr<Floater>(static_cast<Floater*>(retired.release()));
+}
+
 std::unique_ptr<Floater> Surface::unmountFloater(Floater& floater) {
     std::unique_ptr<Widget> widget = unmount(floater);
     return std::unique_ptr<Floater>(static_cast<Floater*>(widget.release()));
+}
+
+bool Surface::ownsFloater(const Floater& floater) const {
+    return managesFloater(floater);
 }
 
 bool Surface::raise(Widget& widget) {
@@ -65,11 +96,11 @@ void Surface::constrainFloater(Floater& floater) {
 
 void Surface::placeFloater(Floater& floater, const Rect& rect) {
     if (!managesFloater(floater)) return;
-    const WidgetSnapshot floater_state = snapshot(floater);
+    const WidgetSnapshot floaterSnapshot = snapshot(floater);
     Rect placed = rect;
     if (floater.canResize()) {
         const Vec2 minimum = minimumFloaterSize(floater);
-        if (!snapshotValid(floater_state) || !isRootedInSurface(floater_state.lifetime.get())) return;
+        if (!snapshotValid(floaterSnapshot) || !isRootedInSurface(floaterSnapshot.lifetime.get())) return;
         placed.w = std::min(mViewport.w, std::max(placed.w, minimum.x));
         placed.h = std::min(mViewport.h, std::max(placed.h, minimum.y));
     }
@@ -78,46 +109,46 @@ void Surface::placeFloater(Floater& floater, const Rect& rect) {
 }
 
 Vec2 Surface::preferredFloaterSize(const Floater& floater) const {
-    const WidgetSnapshot floater_state = snapshot(const_cast<Floater&>(floater));
+    const WidgetSnapshot floaterSnapshot = snapshot(const_cast<Floater&>(floater));
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
     const Style& style = styles.style(floater);
-    if (!snapshotValid(floater_state)) return {};
+    if (!snapshotValid(floaterSnapshot)) return {};
     const Vec2 measured = measureWidget(floater, *mStyleSheet, mTextMetrics);
-    if (!snapshotValid(floater_state)) return {};
+    if (!snapshotValid(floaterSnapshot)) return {};
     const auto resolve = [](const Dimension& value, const std::optional<Length>& minimum, float fallback, float reference) {
         const float result = value.resolve(fallback, reference);
         return minimum ? std::max(result, minimum->resolve(result)) : result;
     };
-    return {resolve(style.width, style.min_width, measured.x, mViewport.w), resolve(style.height, style.min_height, measured.y, mViewport.h)};
+    return {resolve(style.width, style.minWidth, measured.x, mViewport.w), resolve(style.height, style.minHeight, measured.y, mViewport.h)};
 }
 
-Rect Surface::initialFloaterRect(const Floater& floater) const {
-    const WidgetSnapshot floater_state = snapshot(const_cast<Floater&>(floater));
+std::optional<Rect> Surface::initialFloaterRect(const Floater& floater) const {
+    const WidgetSnapshot floaterSnapshot = snapshot(const_cast<Floater&>(floater));
     const Vec2 size = preferredFloaterSize(floater);
-    if (!snapshotValid(floater_state)) return {};
+    if (!snapshotValid(floaterSnapshot)) return std::nullopt;
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
     const Style& style = styles.style(floater);
-    if (!snapshotValid(floater_state)) return {};
+    if (!snapshotValid(floaterSnapshot)) return std::nullopt;
     const float x = style.left ? style.left->resolve(mViewport.w)
         : style.right          ? mViewport.w - style.right->resolve(mViewport.w) - size.x
                                : std::max(0.f, (mViewport.w - size.x) * .5f);
     const float y = style.top ? mViewport.h - style.top->resolve(mViewport.h) - size.y
         : style.bottom        ? style.bottom->resolve(mViewport.h)
                               : std::max(0.f, (mViewport.h - size.y) * .5f);
-    return {x, y, size.x, size.y};
+    return Rect{x, y, size.x, size.y};
 }
 
-Rect Surface::prepareFloater(Floater& floater) const {
-    const WidgetSnapshot floater_state = snapshot(floater);
-    const Rect authored = initialFloaterRect(floater);
-    if (!snapshotValid(floater_state)) return {};
+std::optional<Rect> Surface::prepareFloater(Floater& floater) const {
+    const WidgetSnapshot floaterSnapshot = snapshot(floater);
+    const std::optional<Rect> authored = initialFloaterRect(floater);
+    if (!authored || !snapshotValid(floaterSnapshot)) return std::nullopt;
     Widget* content = floater.content();
-    const WidgetSnapshot content_state = content ? snapshot(*content) : WidgetSnapshot{};
+    const WidgetSnapshot contentSnapshot = content ? snapshot(*content) : WidgetSnapshot{};
     const Vec2 content_size = content ? measureWidget(*content, *mStyleSheet, mTextMetrics) : Vec2{};
-    if (!snapshotValid(floater_state) || (content && !snapshotChildValid(content_state, floater))) return {};
-    floater.setAuthoredSize({authored.w, authored.h}, content_size);
+    if (!snapshotValid(floaterSnapshot) || (content && !snapshotChildValid(contentSnapshot, floater))) return std::nullopt;
+    floater.setAuthoredSize({authored->w, authored->h}, content_size);
     return authored;
 }
 
@@ -161,8 +192,12 @@ void Surface::floaterMoved(Floater& floater) {
     if (managesFloater(floater) && mFloaterDelegate) mFloaterDelegate->floaterMoved(*this, floater);
 }
 
-void Surface::floaterDetachRequested(Floater& floater, const Vec2& desired, const Vec2& drag_offset) {
-    if (canDetachFloater(floater)) mFloaterDelegate->floaterDetachRequested(*this, floater, desired, drag_offset);
+void Surface::floaterMoveEnded(Floater& floater) {
+    if (managesFloater(floater) && mFloaterDelegate) mFloaterDelegate->floaterMoveEnded(*this, floater);
+}
+
+void Surface::floaterDetachRequested(Floater& floater, const Vec2& desiredPosition, const Vec2& dragOffset) {
+    if (canDetachFloater(floater)) mFloaterDelegate->floaterDetachRequested(*this, floater, desiredPosition, dragOffset);
 }
 
 void Surface::floaterResized(Floater& floater, bool complete) {

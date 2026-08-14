@@ -36,32 +36,33 @@ class LayoutResourceCompiler final {
 public:
     explicit LayoutResourceCompiler(const LayoutDocumentMap* documents = nullptr);
 
-    ViewBuildResult createFromResource(const std::string& filename, const ViewBuildContext* context = nullptr) const;
-    ViewBuildResult createFromString(const std::string& xml, const std::string& source_name = {}, const ViewBuildContext* context = nullptr) const;
-    DiagnosticResult validateWidgetDefaults(const std::string& element, const ViewBuildContext* context = nullptr) const;
+    LayoutBuildResult buildWidgetTreeFromResource(const std::string& resourceId, const LayoutBuildContext* context = nullptr) const;
+    LayoutBuildResult buildWidgetTreeFromString(const std::string& xml, const std::string& sourceName = {},
+                                                const LayoutBuildContext* context = nullptr) const;
+    DiagnosticResult validateWidgetDefaults(const std::string& element, const LayoutBuildContext* context = nullptr) const;
 
 private:
     struct BuildState;
     struct ChildBuildContext;
     enum class ChildHandling : uint8_t { Unhandled, Handled };
 
-    static std::string normalizeResource(std::string filename);
+    static std::string normalizeResource(std::string resourceId);
     std::unique_ptr<Widget> buildDocument(const LayoutDocument& document, std::unique_ptr<Widget> root, BuildState& state) const;
-    std::unique_ptr<Widget> buildNode(const LayoutNode& layout_node, const std::string& source, std::unique_ptr<Widget> node,
+    std::unique_ptr<Widget> buildNode(const LayoutNode& layoutNode, const std::string& source, std::unique_ptr<Widget> widget,
                                       BuildState& state) const;
-    const WidgetContract* lookupWidgetContract(const LayoutNode& layout_node, const std::string& source, BuildState& state) const;
-    bool resolveWidgetResource(const LayoutElement& element, const WidgetContract& contract, const std::string& source, std::unique_ptr<Widget>& node,
-                               BuildState& state) const;
+    const WidgetContract* lookupWidgetContract(const LayoutNode& layoutNode, const std::string& source, BuildState& state) const;
+    bool resolveWidgetResource(const LayoutElement& element, const WidgetContract& contract, const std::string& source,
+                               std::unique_ptr<Widget>& widget, BuildState& state) const;
     void buildChildren(Widget& target, const LayoutElement& element, const WidgetContract& contract, const std::string& source,
                        BuildState& state) const;
     ChildHandling appendTextContent(const LayoutContent& content, ChildBuildContext& context) const;
-    ChildHandling consumeFlowBreak(const LayoutNode& child_node, ChildBuildContext& context) const;
-    ChildHandling consumeScopedInline(const LayoutNode& child_node, ChildBuildContext& context) const;
-    ChildHandling consumeChildContainer(const LayoutNode& child_node, ChildBuildContext& context) const;
-    ChildHandling buildRegularChild(const LayoutNode& child_node, ChildBuildContext& context) const;
-    std::unique_ptr<Widget> createResourceWidget(const std::string& filename, BuildState& state) const;
+    ChildHandling consumeFlowBreak(const LayoutNode& childNode, ChildBuildContext& context) const;
+    ChildHandling consumeScopedInline(const LayoutNode& childNode, ChildBuildContext& context) const;
+    ChildHandling consumeChildContainer(const LayoutNode& childNode, ChildBuildContext& context) const;
+    ChildHandling buildRegularChild(const LayoutNode& childNode, ChildBuildContext& context) const;
+    std::unique_ptr<Widget> createResourceWidget(const std::string& resourceId, BuildState& state) const;
     void loadWidgetDefaults(const std::string& element, BuildState& state) const;
-    void validateViewScope(Widget& scope, BuildState& state, const std::string& source, bool count_root = true) const;
+    void validateWidgetScope(Widget& scope, BuildState& state, const std::string& source, bool countRoot = true) const;
 
     const LayoutDocumentMap* mDocuments = nullptr;
     std::unordered_map<std::string, WidgetContract> mWidgetContracts;

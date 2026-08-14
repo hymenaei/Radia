@@ -60,28 +60,23 @@ std::uint32_t translateModifiers(std::uint32_t modifiers) {
 }
 } // namespace
 
-SurfaceInputEvent RduiInputBridge::translate(const NativeInputEvent& event) const {
-    if (const auto* pointer = std::get_if<NativePointerInput>(&event)) {
-        return SurfacePointerInput{pointer->phase,
-                                   {{static_cast<float>(pointer->x), static_cast<float>(pointer->y)},
-                                    translateButton(pointer->button),
-                                    translateModifiers(pointer->modifiers),
-                                    pointer->clickCount,
-                                    {pointer->dx, pointer->dy}}};
-    }
-    if (const auto* scroll = std::get_if<NativeScrollInput>(&event)) {
-        return ScrollEvent{{static_cast<float>(scroll->x), static_cast<float>(scroll->y)},
-                           scroll->horizontal,
-                           scroll->vertical,
-                           translateModifiers(scroll->modifiers)};
-    }
-    if (const auto* key = std::get_if<NativeKeyInput>(&event))
-        return SurfaceKeyInput{key->down, {translateKey(key->key), translateModifiers(key->modifiers), key->repeated}};
-    if (const auto* character = std::get_if<NativeCharacterInput>(&event)) return SurfaceCharacterInput{character->codepoint};
-    return std::get<NativeInteractionLoss>(event);
+PointerEvent translatePointerInput(const NativePointerInput& input) {
+    return {{static_cast<float>(input.x), static_cast<float>(input.y)},
+            translateButton(input.button),
+            translateModifiers(input.modifiers),
+            input.clickCount,
+            {input.dx, input.dy}};
 }
 
-ECursorType RduiInputBridge::translateCursor(CursorStyle cursor) const {
+ScrollEvent translateScrollInput(const NativeScrollInput& input) {
+    return {{static_cast<float>(input.x), static_cast<float>(input.y)}, input.horizontal, input.vertical, translateModifiers(input.modifiers)};
+}
+
+KeyEvent translateKeyInput(const NativeKeyInput& input) {
+    return {translateKey(input.key), translateModifiers(input.modifiers), input.repeated};
+}
+
+ECursorType translateCursor(CursorStyle cursor) {
     switch (cursor) {
         case CursorStyle::Pointer: return UI_CURSOR_HAND;
         case CursorStyle::Progress: return UI_CURSOR_WORKING;

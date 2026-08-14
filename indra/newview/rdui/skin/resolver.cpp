@@ -63,17 +63,17 @@ std::optional<std::string> readFile(const std::filesystem::path& filename) {
 
 bool validSkinId(const std::string& id) {
     if (id.empty()) return false;
-    std::size_t segment_start = 0;
-    while (segment_start < id.size()) {
-        const std::size_t dot = id.find('.', segment_start);
-        const std::size_t segment_end = dot == std::string::npos ? id.size() : dot;
-        if (segment_end == segment_start || id[segment_start] == '-' || id[segment_end - 1] == '-') return false;
-        for (std::size_t index = segment_start; index < segment_end; ++index) {
+    std::size_t segmentStart = 0;
+    while (segmentStart < id.size()) {
+        const std::size_t dot = id.find('.', segmentStart);
+        const std::size_t segmentEnd = dot == std::string::npos ? id.size() : dot;
+        if (segmentEnd == segmentStart || id[segmentStart] == '-' || id[segmentEnd - 1] == '-') return false;
+        for (std::size_t index = segmentStart; index < segmentEnd; ++index) {
             const unsigned char character = static_cast<unsigned char>(id[index]);
             if (!((character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '-')) return false;
         }
         if (dot == std::string::npos) return true;
-        segment_start = dot + 1;
+        segmentStart = dot + 1;
     }
     return false;
 }
@@ -104,14 +104,14 @@ bool requireString(const LLSD& object, const char* key, std::string& value, Diag
 }
 
 bool inside(const std::filesystem::path& path, const std::filesystem::path& root) {
-    auto path_part = path.begin();
-    auto root_part = root.begin();
-    for (; root_part != root.end(); ++root_part, ++path_part)
-        if (path_part == path.end() || *path_part != *root_part) return false;
+    auto pathPart = path.begin();
+    auto rootPart = root.begin();
+    for (; rootPart != root.end(); ++rootPart, ++pathPart)
+        if (pathPart == path.end() || *pathPart != *rootPart) return false;
     return true;
 }
 
-std::optional<std::filesystem::path> resourcePath(const LLSD& radia, const char* key, const std::filesystem::path& skin_root, bool directory,
+std::optional<std::filesystem::path> resourcePath(const LLSD& radia, const char* key, const std::filesystem::path& skinRoot, bool directory,
                                                   DiagnosticResult& result, const std::string& source) {
     if (!radia.has(key)) return std::nullopt;
     if (!radia[key].isString() || radia[key].asString().empty()) {
@@ -133,18 +133,18 @@ std::optional<std::filesystem::path> resourcePath(const LLSD& radia, const char*
     }
 
     std::error_code error;
-    const std::filesystem::path canonical_root = std::filesystem::canonical(skin_root, error);
+    const std::filesystem::path canonicalRoot = std::filesystem::canonical(skinRoot, error);
     if (error) {
         result.error("skin.manifest.root.invalid", "Could not canonicalize Skin root.", source);
         return std::nullopt;
     }
-    const std::filesystem::path resolved = std::filesystem::canonical(skin_root / relative, error);
-    if (error || !inside(resolved, canonical_root)) {
+    const std::filesystem::path resolved = std::filesystem::canonical(skinRoot / relative, error);
+    if (error || !inside(resolved, canonicalRoot)) {
         result.error("skin.manifest.resource.missing", "Radia resource is missing or outside its Skin: " + value + ".", source);
         return std::nullopt;
     }
-    const bool correct_type = directory ? std::filesystem::is_directory(resolved, error) : std::filesystem::is_regular_file(resolved, error);
-    if (error || !correct_type) {
+    const bool correctType = directory ? std::filesystem::is_directory(resolved, error) : std::filesystem::is_regular_file(resolved, error);
+    if (error || !correctType) {
         result.error("skin.manifest.resource.type_invalid", "Radia resource has the wrong filesystem type: " + value + ".", source);
         return std::nullopt;
     }
@@ -153,13 +153,13 @@ std::optional<std::filesystem::path> resourcePath(const LLSD& radia, const char*
 
 ManifestResult parseManifest(const std::filesystem::path& root) {
     ManifestResult result;
-    std::error_code root_error;
-    const std::filesystem::path canonical_root = std::filesystem::canonical(root, root_error);
-    if (root_error || !std::filesystem::is_directory(canonical_root, root_error)) {
+    std::error_code rootError;
+    const std::filesystem::path canonicalRoot = std::filesystem::canonical(root, rootError);
+    if (rootError || !std::filesystem::is_directory(canonicalRoot, rootError)) {
         result.error("skin.manifest.root.invalid", "Skin root is missing or invalid.", root.generic_string());
         return result;
     }
-    const std::filesystem::path filename = canonical_root / "manifest.json";
+    const std::filesystem::path filename = canonicalRoot / "manifest.json";
     const std::string source = filename.generic_string();
     const std::optional<std::string> json = readFile(filename);
     if (!json) {
@@ -168,15 +168,15 @@ ManifestResult parseManifest(const std::filesystem::path& root) {
     }
 
     LLSD document;
-    std::string parse_error;
-    if (!LlsdFromJsonString(*json, document, &parse_error) || !document.isMap()) {
-        result.error("skin.manifest.json_invalid", "Invalid Skin manifest JSON: " + parse_error + ".", source);
+    std::string parseError;
+    if (!LlsdFromJsonString(*json, document, &parseError) || !document.isMap()) {
+        result.error("skin.manifest.json_invalid", "Invalid Skin manifest JSON: " + parseError + ".", source);
         return result;
     }
     validateKeys(document, {"id", "name", "author", "url", "notes", "preview", "base", "radia"}, result, source, "manifest");
 
     SkinManifest manifest;
-    manifest.root = canonical_root;
+    manifest.root = canonicalRoot;
     std::string ignored;
     requireString(document, "id", manifest.id, result, source);
     requireString(document, "name", ignored, result, source);
@@ -195,17 +195,17 @@ ManifestResult parseManifest(const std::filesystem::path& root) {
     else {
         const LLSD& radia = document["radia"];
         validateKeys(radia, {"stylesheet", "layouts", "localization", "assets"}, result, source, "radia");
-        const bool root_skin = document.has("base") && document["base"].isUndefined();
-        if (root_skin) {
+        const bool rootSkin = document.has("base") && document["base"].isUndefined();
+        if (rootSkin) {
             for (const char* key : {"stylesheet", "layouts", "localization", "assets"})
                 if (!radia.has(key))
                     result.error("skin.manifest.resource.required", "Root Skin must declare Radia resource: " + std::string(key) + ".", source);
         } else if (radia.size() == 0) result.error("skin.manifest.radia_empty", "Derived Skin must declare at least one Radia resource.", source);
 
-        manifest.resources.stylesheet = resourcePath(radia, "stylesheet", canonical_root, false, result, source);
-        manifest.resources.layouts = resourcePath(radia, "layouts", canonical_root, true, result, source);
-        manifest.resources.localization = resourcePath(radia, "localization", canonical_root, false, result, source);
-        manifest.resources.assets = resourcePath(radia, "assets", canonical_root, true, result, source);
+        manifest.resources.stylesheet = resourcePath(radia, "stylesheet", canonicalRoot, false, result, source);
+        manifest.resources.layouts = resourcePath(radia, "layouts", canonicalRoot, true, result, source);
+        manifest.resources.localization = resourcePath(radia, "localization", canonicalRoot, false, result, source);
+        manifest.resources.assets = resourcePath(radia, "assets", canonicalRoot, true, result, source);
     }
 
     for (const char* optional : {"url", "notes", "preview"})
@@ -239,23 +239,23 @@ void addStyleLayer(const SkinManifest& manifest, const std::filesystem::path& en
     }
 
     std::error_code error;
-    const std::filesystem::path relative_entrypoint = std::filesystem::relative(entrypoint, manifest.root, error);
+    const std::filesystem::path relativeEntrypoint = std::filesystem::relative(entrypoint, manifest.root, error);
     if (error) {
         result.error("skin.resource.path_invalid", "Could not identify the stylesheet entrypoint inside its Skin.", sourceName(manifest, entrypoint));
         return;
     }
 
     ResourceLayer layer{sourceName(manifest, entrypoint), *source};
-    layer.entrypoint = relative_entrypoint.generic_string();
+    layer.entrypoint = relativeEntrypoint.generic_string();
     for (std::filesystem::recursive_directory_iterator iterator(manifest.root, error), end; iterator != end && !error; iterator.increment(error)) {
-        std::error_code file_error;
-        if (!iterator->is_regular_file(file_error) || file_error || iterator->path().extension() != ".radia") continue;
-        const std::filesystem::path canonical_file = std::filesystem::canonical(iterator->path(), file_error);
-        if (file_error || !inside(canonical_file, manifest.root)) continue;
-        const std::filesystem::path relative = std::filesystem::relative(canonical_file, manifest.root, file_error);
-        if (file_error) continue;
-        if (relative == relative_entrypoint) continue;
-        const std::optional<std::string> module = readFile(canonical_file);
+        std::error_code fileError;
+        if (!iterator->is_regular_file(fileError) || fileError || iterator->path().extension() != ".radia") continue;
+        const std::filesystem::path canonicalFile = std::filesystem::canonical(iterator->path(), fileError);
+        if (fileError || !inside(canonicalFile, manifest.root)) continue;
+        const std::filesystem::path relative = std::filesystem::relative(canonicalFile, manifest.root, fileError);
+        if (fileError) continue;
+        if (relative == relativeEntrypoint) continue;
+        const std::optional<std::string> module = readFile(canonicalFile);
         if (module) layer.modules.insert_or_assign(relative.generic_string(), *module);
     }
     if (error) {
@@ -265,14 +265,14 @@ void addStyleLayer(const SkinManifest& manifest, const std::filesystem::path& en
     layers.push_back(std::move(layer));
 }
 
-void overlayDirectory(const SkinManifest& manifest, const std::filesystem::path& root, const std::string& logical_prefix, ResourceSnapshot& snapshot,
+void overlayDirectory(const SkinManifest& manifest, const std::filesystem::path& root, const std::string& logicalPrefix, ResourceSnapshot& snapshot,
                       SkinSnapshotResult& result) {
     std::error_code error;
     for (std::filesystem::recursive_directory_iterator iterator(root, error), end; iterator != end && !error; iterator.increment(error)) {
         if (!iterator->is_regular_file(error) || error) continue;
-        const std::filesystem::path canonical_file = std::filesystem::canonical(iterator->path(), error);
-        const std::filesystem::path canonical_skin = std::filesystem::canonical(manifest.root, error);
-        if (error || !inside(canonical_file, canonical_skin)) {
+        const std::filesystem::path canonicalFile = std::filesystem::canonical(iterator->path(), error);
+        const std::filesystem::path canonicalSkin = std::filesystem::canonical(manifest.root, error);
+        if (error || !inside(canonicalFile, canonicalSkin)) {
             result.error("skin.resource.path_invalid", "Discovered resource escapes its Skin.", iterator->path().generic_string());
             error.clear();
             continue;
@@ -284,40 +284,40 @@ void overlayDirectory(const SkinManifest& manifest, const std::filesystem::path&
             result.error("skin.resource.read_failed", "Could not read Skin resource.", sourceName(manifest, iterator->path()));
             continue;
         }
-        snapshot.add(logical_prefix + relative.generic_string(), *source);
+        snapshot.add(logicalPrefix + relative.generic_string(), *source);
     }
     if (error) result.error("skin.resource.discovery_failed", "Could not enumerate declared Skin resource directory.", root.generic_string());
 }
 } // namespace
 
-SkinSnapshotResult SkinResolver::resolve(const std::filesystem::path& selected_root,
-                                         const std::vector<std::filesystem::path>& installed_roots) const {
+SkinSnapshotResult SkinResolver::resolve(const std::filesystem::path& selectedRoot,
+                                         const std::vector<std::filesystem::path>& installedRoots) const {
     SkinSnapshotResult result;
-    ManifestResult selected_result = parseManifest(selected_root);
-    if (!selected_result.ok()) {
-        result.append(std::move(selected_result));
+    ManifestResult selectedResult = parseManifest(selectedRoot);
+    if (!selectedResult.ok()) {
+        result.append(std::move(selectedResult));
         return result;
     }
 
     std::map<std::string, std::vector<SkinManifest>> installed;
-    SkinManifest selected = std::move(*selected_result.manifest);
-    result.skin_id = selected.id;
+    SkinManifest selected = std::move(*selectedResult.manifest);
+    result.skinId = selected.id;
     installed[selected.id].push_back(selected);
 
     std::error_code error;
-    const std::filesystem::path canonical_selected = std::filesystem::canonical(selected_root, error);
-    for (const std::filesystem::path& catalog_root : installed_roots) {
+    const std::filesystem::path canonicalSelected = std::filesystem::canonical(selectedRoot, error);
+    for (const std::filesystem::path& catalogRoot : installedRoots) {
         error.clear();
-        if (!std::filesystem::is_directory(catalog_root, error) || error) continue;
-        const std::filesystem::path canonical_catalog = std::filesystem::canonical(catalog_root, error);
+        if (!std::filesystem::is_directory(catalogRoot, error) || error) continue;
+        const std::filesystem::path canonicalCatalog = std::filesystem::canonical(catalogRoot, error);
         if (error) continue;
-        for (std::filesystem::directory_iterator iterator(catalog_root, error), end; iterator != end && !error; iterator.increment(error)) {
+        for (std::filesystem::directory_iterator iterator(catalogRoot, error), end; iterator != end && !error; iterator.increment(error)) {
             if (!iterator->is_directory(error) || error) continue;
-            const std::filesystem::path candidate_root = std::filesystem::canonical(iterator->path(), error);
+            const std::filesystem::path candidateRoot = std::filesystem::canonical(iterator->path(), error);
             if (error) break;
-            if (!inside(candidate_root, canonical_catalog)) continue;
-            if (candidate_root == canonical_selected) continue;
-            ManifestResult candidate = parseManifest(candidate_root);
+            if (!inside(candidateRoot, canonicalCatalog)) continue;
+            if (candidateRoot == canonicalSelected) continue;
+            ManifestResult candidate = parseManifest(candidateRoot);
             if (candidate.ok()) installed[candidate.manifest->id].push_back(std::move(*candidate.manifest));
         }
     }
@@ -349,22 +349,22 @@ SkinSnapshotResult SkinResolver::resolve(const std::filesystem::path& selected_r
     }
     std::reverse(chain.begin(), chain.end());
 
-    std::vector<ResourceLayer> style_layers;
-    std::vector<ResourceLayer> localization_layers;
+    std::vector<ResourceLayer> styleLayers;
+    std::vector<ResourceLayer> localizationLayers;
     for (const SkinManifest* manifest : chain) {
-        if (manifest->resources.stylesheet) addStyleLayer(*manifest, *manifest->resources.stylesheet, style_layers, result);
-        if (manifest->resources.localization) addLayer(*manifest, *manifest->resources.localization, localization_layers, result);
+        if (manifest->resources.stylesheet) addStyleLayer(*manifest, *manifest->resources.stylesheet, styleLayers, result);
+        if (manifest->resources.localization) addLayer(*manifest, *manifest->resources.localization, localizationLayers, result);
         if (manifest->resources.layouts) overlayDirectory(*manifest, *manifest->resources.layouts, "", result.snapshot, result);
         if (manifest->resources.assets) overlayDirectory(*manifest, *manifest->resources.assets, "resources/", result.snapshot, result);
     }
 
-    if (!style_layers.empty()) {
-        result.snapshot.add("skin.radia", style_layers.back().source);
-        result.snapshot.setLayers("skin.radia", std::move(style_layers));
+    if (!styleLayers.empty()) {
+        result.snapshot.add("skin.radia", styleLayers.back().source);
+        result.snapshot.setLayers("skin.radia", std::move(styleLayers));
     }
-    if (!localization_layers.empty()) {
-        result.snapshot.add("localization.yaml", localization_layers.back().source);
-        result.snapshot.setLayers("localization.yaml", std::move(localization_layers));
+    if (!localizationLayers.empty()) {
+        result.snapshot.add("localization.yaml", localizationLayers.back().source);
+        result.snapshot.setLayers("localization.yaml", std::move(localizationLayers));
     }
     return result;
 }

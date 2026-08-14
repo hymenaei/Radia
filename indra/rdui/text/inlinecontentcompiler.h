@@ -27,14 +27,15 @@
 
 #include <string>
 #include <vector>
+#include "layout/buildresult.h"
 #include "layout/document.h"
-#include "layout/viewresult.h"
 #include "text/source.h"
 
 namespace rdui {
-class ViewBuildContext;
+class LayoutBuildContext;
 
-TextSource compileInlineContent(const std::vector<LayoutContent>& content, const std::string& host, const std::vector<InlineContentKind>& accepted,
-                                ViewBuildResult& result, const std::string& source, const ViewBuildContext* context);
+TextSource compileInlineContent(const std::vector<LayoutContent>& contentItems, const std::string& hostElementName,
+                                const std::vector<InlineContentKind>& accepted, LayoutBuildResult& result, const std::string& source,
+                                const LayoutBuildContext* context);
 } // namespace rdui
 #endif // RD_TEXT_INLINECONTENTCOMPILER_H

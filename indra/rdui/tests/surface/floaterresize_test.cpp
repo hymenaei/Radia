@@ -29,13 +29,12 @@
 #include "surface/floaterresize.h"
 
 namespace tut {
-struct floaterresize_data {};
-typedef test_group<floaterresize_data> floaterresize_test;
-typedef floaterresize_test::object floaterresize_object;
-using rduifloaterresize_object = floaterresize_object;
-floaterresize_test floaterresize_testcase("floaterresize");
+struct floaterResizeData {};
+using floaterResizeTest = test_group<floaterResizeData>;
+using floaterResizeObject = floaterResizeTest::object;
+floaterResizeTest floaterResizeTestCase("floaterresize");
 
-template<> template<> void rduifloaterresize_object::test<1>() {
+template<> template<> void floaterResizeObject::test<1>() {
     const rdui::Rect bounds{20.f, 30.f, 100.f, 80.f};
     using rdui::detail::ResizeEdges;
     const std::array<std::pair<rdui::Vec2, ResizeEdges>, 8> regions{{
@@ -54,7 +53,7 @@ template<> template<> void rduifloaterresize_object::test<1>() {
     ensure("outside is not resizeable", rdui::detail::resizeEdgesAt(bounds, {19.f, 70.f}) == ResizeEdges::NoEdges);
 }
 
-template<> template<> void rduifloaterresize_object::test<2>() {
+template<> template<> void floaterResizeObject::test<2>() {
     using rdui::detail::ResizeEdges;
     const rdui::Rect initial{20.f, 30.f, 100.f, 80.f};
     const rdui::detail::FloaterResizeConstraints constraints{{40.f, 35.f}, rdui::Rect{0.f, 0.f, 200.f, 160.f}};
@@ -70,7 +69,7 @@ template<> template<> void rduifloaterresize_object::test<2>() {
     ensure_equals("corner holds bottom edge", corner.bottom(), initial.bottom());
 }
 
-template<> template<> void rduifloaterresize_object::test<3>() {
+template<> template<> void floaterResizeObject::test<3>() {
     using rdui::detail::ResizeEdges;
     ensure("left-bottom cursor", rdui::detail::resizeCursor(ResizeEdges::Left | ResizeEdges::Bottom) == rdui::CursorStyle::NortheastSouthwestResize);
     ensure("left-top cursor", rdui::detail::resizeCursor(ResizeEdges::Left | ResizeEdges::Top) == rdui::CursorStyle::NorthwestSoutheastResize);
@@ -78,7 +77,7 @@ template<> template<> void rduifloaterresize_object::test<3>() {
     ensure("vertical cursor", rdui::detail::resizeCursor(ResizeEdges::Top) == rdui::CursorStyle::NorthSouthResize);
 }
 
-template<> template<> void rduifloaterresize_object::test<4>() {
+template<> template<> void floaterResizeObject::test<4>() {
     using rdui::detail::preserveUserResizeOnReload;
     ensure("user resize survives a reload with unchanged authored size",
            preserveUserResizeOnReload(true, true, {{300.f, 240.f}, {280.f, 200.f}}, {{300.f, 240.f}, {280.f, 200.f}}));

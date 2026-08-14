@@ -25,6 +25,8 @@
 #ifndef RD_DETACHEDFLOATERWINDOW_H
 #define RD_DETACHEDFLOATERWINDOW_H
 
+#include <chrono>
+#include <functional>
 #include <memory>
 #include "detachedfloatermanager.h"
 
@@ -33,34 +35,28 @@ class Floater;
 class System;
 } // namespace rdui
 
-namespace rdui::viewer {
-class NativeWindowFactory;
+class LLGLSLShader;
 
+namespace rdui::viewer {
 class DetachedFloaterWindow final : public DetachedFloaterPresentation {
 public:
-    DetachedFloaterWindow(NativeWindowFactory& native_windows, System& system, DetachedFloaterManager& manager, std::unique_ptr<Floater> floater);
+    using Clock = std::function<std::chrono::steady_clock::time_point()>;
+
+    DetachedFloaterWindow(::AuxiliaryWindowFactory& auxiliaryWindowFactory, LLGLSLShader& uiShader, System& system, DetachedFloaterManager& manager,
+                          std::unique_ptr<Floater> floater, Clock now = {});
     ~DetachedFloaterWindow() override;
 
     DetachedFloaterWindow(const DetachedFloaterWindow&) = delete;
     DetachedFloaterWindow& operator=(const DetachedFloaterWindow&) = delete;
 
-    bool open(const NativeRect& rect, float scale_multiplier, const std::optional<Vec2>& drag_offset,
-              const std::optional<Vec2>& logical_size = std::nullopt, const std::optional<NativePoint>& drag_cursor = std::nullopt) override;
+    std::optional<DetachedFloaterPresentationUpdate> open(const DetachedFloaterPresentationOpenRequest& request) override;
     bool beginResize() override;
-    void applyResize(const Rect& logical_rect) override;
-    void tick() override;
+    void applyResize(const Rect& logicalRect) override;
+    DetachedFloaterPresentationUpdate update() override;
     void setVisible(bool visible) override;
+    std::optional<Rect> prepareReplacement(Floater& replacement) override;
     std::unique_ptr<Floater> releaseFloater() override;
-    Floater& replaceFloater(std::unique_ptr<Floater> replacement, const std::optional<Vec2>& logical_size) override;
-    bool closeRequested() const override;
-    bool minimizeRequested() const override;
-    bool takeDragEnded() override;
-    bool takeResizeEnded() override;
-    Floater* floater() const override;
-    NativeRect nativeRect() const override;
-    std::string monitorId() const override;
-    Vec2 logicalSize() const override;
-    Vec2 headerCenterScreen() const override;
+    std::unique_ptr<Floater> replaceFloater(std::unique_ptr<Floater> replacement, const std::optional<Vec2>& logicalSize) override;
 
 private:
     class Impl;

@@ -136,8 +136,8 @@ bool parseStrokeCap(LLXMLNode* node, StrokeCap& cap, SvgCompileResult& result, c
     return true;
 }
 
-void appendPathDiagnostics(SvgCompileResult& result, PathCompileResult&& path_result) {
-    result.append(std::move(path_result));
+void appendPathDiagnostics(SvgCompileResult& result, PathCompileResult&& pathResult) {
+    result.append(std::move(pathResult));
 }
 } // namespace
 
@@ -166,7 +166,7 @@ SvgCompileResult compileSvgIcon(const std::string& svg, const std::string& sourc
     SvgIcon candidate;
     std::string raw;
     if (!attribute(root.get(), "viewBox", raw)) result.error("svg.view_box.missing", "SVG icon requires a viewBox.", source, lineOf(root.get()));
-    else if (!parseViewBox(raw, candidate.view_box))
+    else if (!parseViewBox(raw, candidate.viewBox))
         result.error("svg.view_box.invalid", "SVG viewBox must contain four finite numbers with positive width and height.", source,
                      lineOf(root.get()));
 
@@ -180,10 +180,10 @@ SvgCompileResult compileSvgIcon(const std::string& svg, const std::string& sourc
     }
 
     if (attribute(root.get(), "stroke-width", raw)) {
-        if (!parseSingleFloat(raw, candidate.stroke_width) || candidate.stroke_width <= 0.f)
+        if (!parseSingleFloat(raw, candidate.strokeWidth) || candidate.strokeWidth <= 0.f)
             result.error("svg.stroke_width.invalid", "SVG stroke-width must be a positive finite number.", source, lineOf(root.get()));
     }
-    parseStrokeCap(root.get(), candidate.stroke_cap, result, source);
+    parseStrokeCap(root.get(), candidate.strokeCap, result, source);
     validatePresentationValue(root.get(), "fill", "none", result, source);
     validatePresentationValue(root.get(), "stroke", "currentColor", result, source);
     validatePresentationValue(root.get(), "stroke-linejoin", "round", result, source);
@@ -198,9 +198,9 @@ SvgCompileResult compileSvgIcon(const std::string& svg, const std::string& sourc
                 result.error("svg.path.data_missing", "SVG <path> requires non-empty d data.", source, lineOf(child.get()));
                 continue;
             }
-            PathCompileResult path_result = compileSvgPathData(raw, source, lineOf(child.get()));
-            if (path_result.ok()) candidate.paths.push_back(std::move(*path_result.path));
-            appendPathDiagnostics(result, std::move(path_result));
+            PathCompileResult pathResult = compileSvgPathData(raw, source, lineOf(child.get()));
+            if (pathResult.ok()) candidate.paths.push_back(std::move(*pathResult.path));
+            appendPathDiagnostics(result, std::move(pathResult));
         } else if (name == "circle") {
             validateAttributes(child.get(), {"cx", "cy", "r"}, result, source);
             if (hasNonWhitespaceText(child.get()))
@@ -208,15 +208,15 @@ SvgCompileResult compileSvgIcon(const std::string& svg, const std::string& sourc
             float cx = 0.f;
             float cy = 0.f;
             float radius = 0.f;
-            std::string cx_raw;
-            std::string cy_raw;
-            std::string radius_raw;
-            if (!attribute(child.get(), "cx", cx_raw)
-                || !parseSingleFloat(cx_raw, cx)
-                || !attribute(child.get(), "cy", cy_raw)
-                || !parseSingleFloat(cy_raw, cy)
-                || !attribute(child.get(), "r", radius_raw)
-                || !parseSingleFloat(radius_raw, radius)
+            std::string cxRaw;
+            std::string cyRaw;
+            std::string radiusRaw;
+            if (!attribute(child.get(), "cx", cxRaw)
+                || !parseSingleFloat(cxRaw, cx)
+                || !attribute(child.get(), "cy", cyRaw)
+                || !parseSingleFloat(cyRaw, cy)
+                || !attribute(child.get(), "r", radiusRaw)
+                || !parseSingleFloat(radiusRaw, radius)
                 || radius <= 0.f) {
                 result.error("svg.circle.invalid", "SVG <circle> requires finite cx/cy and a positive finite radius.", source, lineOf(child.get()));
                 continue;
@@ -233,11 +233,11 @@ SvgCompileResult compileSvgIcon(const std::string& svg, const std::string& sourc
     return result;
 }
 
-Path transformSvgPath(const Path& path, const Rect& view_box, const Rect& target) {
+Path transformSvgPath(const Path& path, const Rect& viewBox, const Rect& target) {
     Path result;
-    const float sx = target.w / std::max(0.0001f, view_box.w);
-    const float sy = target.h / std::max(0.0001f, view_box.h);
-    auto map = [&](const Vec2& point) { return Vec2(target.x + (point.x - view_box.x) * sx, target.y + target.h - (point.y - view_box.y) * sy); };
+    const float sx = target.w / std::max(0.0001f, viewBox.w);
+    const float sy = target.h / std::max(0.0001f, viewBox.h);
+    auto map = [&](const Vec2& point) { return Vec2(target.x + (point.x - viewBox.x) * sx, target.y + target.h - (point.y - viewBox.y) * sy); };
 
     for (const PathCommand& command : path.commands()) {
         switch (command.verb) {

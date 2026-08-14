@@ -51,32 +51,22 @@
 #include "widgets/text.h"
 
 namespace tut {
-struct layoutresourcecompiler_data {
+struct resourceCompilerData {
     LayoutCompilerFixture factory;
     std::map<std::string, std::string>& resources = factory.resources;
 
     template<typename WidgetT> rdui::WidgetRef<WidgetT> requireWidget(rdui::Widget& root, const std::string& id) {
-        rdui::WidgetRef<WidgetT> output;
-        rdui::Binder binder(root);
-        binder.bind(id, output);
-        rdui::BindingResult result = binder.finish();
-        if (!result.ok()) output.set(nullptr);
-        return output;
+        return rdui::WidgetRef<WidgetT>(dynamic_cast<WidgetT*>(rdui::detail::findWidgetInScope(root, id)));
     }
 };
-typedef test_group<layoutresourcecompiler_data> layoutresourcecompiler_test;
-typedef layoutresourcecompiler_test::object layoutresourcecompiler_object;
-using rduilayoutresourcecompiler_object = layoutresourcecompiler_object;
-layoutresourcecompiler_test layoutresourcecompiler_testcase("layoutresourcecompiler");
+using resourceCompilerTest = test_group<resourceCompilerData>;
+using resourceCompilerObject = resourceCompilerTest::object;
+resourceCompilerTest resourceCompilerTestCase("resourcecompiler");
 
-template<> template<> void rduilayoutresourcecompiler_object::test<1>() {
-    const char* xml = "<floater title=\"title\" closeIcon=\"close\" minimizeIcon=\"minimize\" canMinimize=\"true\"><text "
-                      "id=\"status\">Ready</text>"
-                      "<button id=\"go\" onClick=\"demo-go\" onDoubleClick=\"demo-double\" onMouseDown=\"demo-press\" "
-                      "onLongClick=\"demo-hold\" "
-                      "onContextMenu=\"demo-menu\" longClickDelay=\"750ms\"><icon src=\"search\"/>Go</button>"
-                      "<switch id=\"toggle\" checked=\"true\" onChange=\"demo-changed\"/></floater>";
-    rdui::ViewBuildResult result = factory.createFromString(xml, "floater.xml");
+template<> template<> void resourceCompilerObject::test<1>() {
+    const char* kXml =
+        "<floater title=\"title\" closeIcon=\"close\" minimizeIcon=\"minimize\" canMinimize=\"true\"><text id=\"status\">Ready</text><button id=\"go\" onClick=\"demoGo()\" onDoubleClick=\"demoDouble()\" onMouseDown=\"demoPress()\" onLongClick=\"demoHold()\" onContextMenu=\"demoMenu()\" longClickDelay=\"750ms\"><icon src=\"search\"/>Go</button><switch id=\"toggle\" checked=\"true\" onChange=\"demoChanged()\"/></floater>";
+    rdui::LayoutBuildResult result = factory.buildWidgetTreeFromString(kXml, "floater.xml");
     auto* floater = result.rootAs<rdui::Floater>();
     ensure("arbitrary floater root parsed", result.ok() && floater);
     ensure_equals("title localization key retained without a System", floater->title(), "title");
@@ -85,37 +75,37 @@ template<> template<> void rduilayoutresourcecompiler_object::test<1>() {
     auto toggle = requireWidget<rdui::Switch>(*floater, "toggle");
     ensure("Binder resolves parsed controls", go && toggle);
     ensure("typed lookup", toggle->checked());
-    ensure_equals("click action parsed", go->action(rdui::ActionEventKind::Click), "demo-go");
-    ensure_equals("double click action parsed", go->action(rdui::ActionEventKind::DoubleClick), "demo-double");
-    ensure_equals("mouse action parsed", go->action(rdui::ActionEventKind::MouseDown), "demo-press");
-    ensure_equals("long click action parsed", go->action(rdui::ActionEventKind::LongClick), "demo-hold");
-    ensure_equals("context menu action parsed", go->action(rdui::ActionEventKind::ContextMenu), "demo-menu");
+    ensure_equals("click Handler Call parsed", go->eventCall(rdui::WidgetEventKind::Click)->name(), "demoGo");
+    ensure_equals("double-click Handler Call parsed", go->eventCall(rdui::WidgetEventKind::DoubleClick)->name(), "demoDouble");
+    ensure_equals("pointer Handler Call parsed", go->eventCall(rdui::WidgetEventKind::MouseDown)->name(), "demoPress");
+    ensure_equals("long-click Handler Call parsed", go->eventCall(rdui::WidgetEventKind::LongClick)->name(), "demoHold");
+    ensure_equals("context-menu Handler Call parsed", go->eventCall(rdui::WidgetEventKind::ContextMenu)->name(), "demoMenu");
     ensure_equals("long click delay parsed", go->longClickDelay()->count(), 750LL);
-    ensure_equals("switch action parsed", toggle->action(rdui::ActionEventKind::Change), "demo-changed");
+    ensure_equals("Switch Handler Call parsed", toggle->eventCall(rdui::WidgetEventKind::Change)->name(), "demoChanged");
 }
 
-template<> template<> void rduilayoutresourcecompiler_object::test<2>() {
-    resources["shared.xml"] = "<panel id=\"base\" class=\"shared\"><text id=\"resource-child\">base</text></panel>";
-    const char* xml = "<panel><panel filename=\"shared.xml\" id=\"one\" class=\"first\"><text id=\"inline-child\"/></panel>"
-                      "<panel filename=\"shared.xml\" id=\"two\"/></panel>";
-    rdui::ViewBuildResult result = factory.createFromString(xml, "outer.xml");
+template<> template<> void resourceCompilerObject::test<2>() {
+    resources["shared.xml"] = "<panel id=\"base\" class=\"shared\"><text id=\"resourceChild\">base</text></panel>";
+    const char* kXml =
+        "<panel><panel filename=\"shared.xml\" id=\"one\" class=\"first\"><text id=\"inlineChild\"/></panel><panel filename=\"shared.xml\" id=\"two\"/></panel>";
+    rdui::LayoutBuildResult result = factory.buildWidgetTreeFromString(kXml, "outer.xml");
     ensure("embedded panels parsed", result.ok());
     auto first = requireWidget<rdui::Panel>(*result.root, "one");
     auto second = requireWidget<rdui::Panel>(*result.root, "two");
     ensure("independent panel instances", first && second && first.get() != second.get());
     ensure("referenced class retained", first->classes().count("shared") == 1);
     ensure("inline class appended", first->classes().count("first") == 1);
-    ensure("referenced child first", first->children().front()->id() == "resource-child");
-    ensure("inline child appended", first->children().back()->id() == "inline-child");
+    ensure("referenced child first", first->children().front()->id() == "resourceChild");
+    ensure("inline child appended", first->children().back()->id() == "inlineChild");
     first->setVisibility(rdui::Visibility::Collapsed);
     ensure("second visibility independent", second->visibility() == rdui::Visibility::Visible);
 }
 
-template<> template<> void rduilayoutresourcecompiler_object::test<3>() {
+template<> template<> void resourceCompilerObject::test<3>() {
     resources["nested/inner.xml"] = "<panel id=\"inner\"/>";
     resources["nested/middle.xml"] = "<panel><panel filename=\"inner.xml\"/></panel>";
     resources["outer.xml"] = "<panel><panel filename=\"nested/middle.xml\"/></panel>";
-    const rdui::ViewBuildResult result = factory.createFromResource("outer.xml");
+    const rdui::LayoutBuildResult result = factory.buildWidgetTreeFromResource("outer.xml");
     ensure("nested relative panels load", result.ok());
     ensure("deep child present",
            result.root->children().size() == 1
@@ -123,28 +113,29 @@ template<> template<> void rduilayoutresourcecompiler_object::test<3>() {
                && result.root->children()[0]->children()[0]->id() == "inner");
 }
 
-template<> template<> void rduilayoutresourcecompiler_object::test<4>() {
+template<> template<> void resourceCompilerObject::test<4>() {
     resources["a.xml"] = "<panel><panel filename=\"b.xml\"/></panel>";
     resources["b.xml"] = "<panel><panel filename=\"a.xml\"/></panel>";
-    rdui::ViewBuildResult cycle = factory.createFromResource("a.xml");
+    rdui::LayoutBuildResult cycle = factory.buildWidgetTreeFromResource("a.xml");
     ensure("cycle rejected", !cycle.ok());
     ensure("failed build never exposes a partial tree", !cycle.root);
-    ensure_equals("cycle has stable diagnostic code", cycle.errors.front().code, "view.resource.cycle");
+    ensure_equals("cycle has stable diagnostic code", cycle.errors.front().code, "layout.resource.cycle");
     ensure_equals("cycle diagnostic identifies source", cycle.errors.front().source, "a.xml");
-    ensure("missing panel rejected", !factory.createFromString("<panel><panel filename=\"missing.xml\"/></panel>", "root.xml").ok());
+    ensure("missing panel rejected", !factory.buildWidgetTreeFromString("<panel><panel filename=\"missing.xml\"/></panel>", "root.xml").ok());
     resources["wrong.xml"] = "<text/>";
-    ensure("non-panel reference rejected", !factory.createFromString("<panel><panel filename=\"wrong.xml\"/></panel>", "root.xml").ok());
-    ensure("filename on non-panel rejected", !factory.createFromString("<button filename=\"x.xml\"/>").ok());
-    ensure("resource-root escape rejected", !factory.createFromString("<panel><panel filename=\"../outside.xml\"/></panel>", "root.xml").ok());
+    ensure("non-panel reference rejected", !factory.buildWidgetTreeFromString("<panel><panel filename=\"wrong.xml\"/></panel>", "root.xml").ok());
+    ensure("filename on non-panel rejected", !factory.buildWidgetTreeFromString("<button filename=\"x.xml\"/>").ok());
+    ensure("resource-root escape rejected",
+           !factory.buildWidgetTreeFromString("<panel><panel filename=\"../outside.xml\"/></panel>", "root.xml").ok());
 
     resources["empty.xml"] = "";
-    const rdui::ViewBuildResult empty = factory.createFromResource("empty.xml");
+    const rdui::LayoutBuildResult empty = factory.buildWidgetTreeFromResource("empty.xml");
     ensure("empty resource rejected as invalid XML", !empty.ok());
-    ensure_equals("empty resource differs from missing resource", empty.errors.front().code, "view.xml.invalid");
+    ensure_equals("empty resource differs from missing resource", empty.errors.front().code, "layout.xml.invalid");
 }
 
-template<> template<> void rduilayoutresourcecompiler_object::test<5>() {
-    const rdui::ViewBuildResult invalid = factory.createFromString("<panel>\n  <unknown/>\n</panel>", "source_ranges.xml");
+template<> template<> void resourceCompilerObject::test<5>() {
+    const rdui::LayoutBuildResult invalid = factory.buildWidgetTreeFromString("<panel>\n  <unknown/>\n</panel>", "source_ranges.xml");
     ensure("source-aware compiler rejects unknown child", !invalid.ok());
     ensure_equals("compiler diagnostic retains source line", invalid.errors.front().line, 2U);
     ensure_equals("compiler diagnostic retains source column", invalid.errors.front().column, 3U);
@@ -159,17 +150,17 @@ template<> template<> void rduilayoutresourcecompiler_object::test<5>() {
                && parsed.document->root->content[1].source.end.offset >= parsed.document->root->content[1].source.begin.offset);
 }
 
-template<> template<> void rduilayoutresourcecompiler_object::test<6>() {
-    rdui::ViewBuildResult result = factory.createFromString("<button>first<icon src=\"one\"/></button>");
+template<> template<> void resourceCompilerObject::test<6>() {
+    rdui::LayoutBuildResult result = factory.buildWidgetTreeFromString("<button>first<icon src=\"one\"/></button>");
     auto* button = result.rootAs<rdui::Button>();
     ensure("button parses", result.ok() && button);
     ensure_equals("inline icon retained", button->icon()->name(), "one");
     ensure_equals("inline label retained", button->label()->text(), "first");
-    ensure_equals("button caption is not a standalone label style target", button->label()->element(), std::string("button-caption"));
+    ensure_equals("button caption is not a standalone label style target", button->label()->elementName(), std::string("button-caption"));
     ensure("text before icon preserves authored order", button->children()[0].get() == button->label());
-    rdui::ViewBuildResult icon_first = factory.createFromString("<button><icon src=\"search\"/>second</button>");
-    auto* reversed = icon_first.rootAs<rdui::Button>();
-    ensure("icon before text preserves authored order", icon_first.ok() && reversed->children()[0].get() == reversed->icon());
+    rdui::LayoutBuildResult iconFirst = factory.buildWidgetTreeFromString("<button><icon src=\"search\"/>second</button>");
+    auto* reversed = iconFirst.rootAs<rdui::Button>();
+    ensure("icon before text preserves authored order", iconFirst.ok() && reversed->children()[0].get() == reversed->icon());
     button->setIcon("updated");
     button->setLabel("updated");
     ensure_equals("icon updated in place", button->children().size(), 2U);
@@ -177,197 +168,176 @@ template<> template<> void rduilayoutresourcecompiler_object::test<6>() {
     ensure("clearing Button children clears typed refs", !button->icon() && !button->label());
     button->setIcon("rebuilt");
     ensure_equals("programmatic icon child can be recreated", button->icon()->name(), "rebuilt");
-    ensure("button.label authoring syntax is removed", !factory.createFromString("<button><button.label value=\"old\"/></button>").ok());
-    ensure("button.icon authoring syntax is removed", !factory.createFromString("<button><button.icon name=\"old\"/></button>").ok());
-    ensure("switch.label authoring syntax is removed", !factory.createFromString("<switch><switch.label value=\"old\"/></switch>").ok());
-    ensure("label text is no longer authored through value", !factory.createFromString("<label value=\"old\"/>").ok());
+    ensure("button.label authoring syntax is removed", !factory.buildWidgetTreeFromString("<button><button.label value=\"old\"/></button>").ok());
+    ensure("button.icon authoring syntax is removed", !factory.buildWidgetTreeFromString("<button><button.icon name=\"old\"/></button>").ok());
+    ensure("switch.label authoring syntax is removed", !factory.buildWidgetTreeFromString("<switch><switch.label value=\"old\"/></switch>").ok());
+    ensure("label text is no longer authored through value", !factory.buildWidgetTreeFromString("<label value=\"old\"/>").ok());
 }
 
-template<> template<> void rduilayoutresourcecompiler_object::test<7>() {
-    std::ifstream vertex_file(tut::sSourceDir + "../newview/app_settings/shaders/class1/interface/uiV.glsl");
-    std::ifstream fragment_file(tut::sSourceDir + "../newview/app_settings/shaders/class1/interface/uiF.glsl");
-    std::ifstream paint_protocol_file(tut::sSourceDir + "render/paintprotocol.def");
-    ensure("paint protocol sources are readable", vertex_file.good() && fragment_file.good() && paint_protocol_file.good());
-    std::ostringstream vertex, fragment, paint_protocol;
-    vertex << vertex_file.rdbuf();
-    fragment << fragment_file.rdbuf();
-    paint_protocol << paint_protocol_file.rdbuf();
-    const std::string vertex_source = vertex.str();
-    const std::string fragment_source = fragment.str();
-    const std::string paint_protocol_source = paint_protocol.str();
+template<> template<> void resourceCompilerObject::test<7>() {
+    std::ifstream vertexFile(tut::sSourceDir + "../newview/app_settings/shaders/class1/interface/uiV.glsl");
+    std::ifstream fragmentFile(tut::sSourceDir + "../newview/app_settings/shaders/class1/interface/uiF.glsl");
+    std::ifstream paintProtocolFile(tut::sSourceDir + "render/paintprotocol.def");
+    ensure("paint protocol sources are readable", vertexFile.good() && fragmentFile.good() && paintProtocolFile.good());
+    std::ostringstream vertex, fragment, paintProtocol;
+    vertex << vertexFile.rdbuf();
+    fragment << fragmentFile.rdbuf();
+    paintProtocol << paintProtocolFile.rdbuf();
+    const std::string vertexSource = vertex.str();
+    const std::string fragmentSource = fragment.str();
+    const std::string paintProtocolSource = paintProtocol.str();
     const auto contains = [](const std::string& source, const char* text) { return source.find(text) != std::string::npos; };
-    const auto trim_token = [](std::string token) {
+    const auto trimToken = [](std::string token) {
         const std::size_t first = token.find_first_not_of(" \t\r\n");
         const std::size_t last = token.find_last_not_of(" \t\r\n");
         return first == std::string::npos ? std::string() : token.substr(first, last - first + 1);
     };
-    const auto shader_name = [](const std::string& name) {
-        std::string result;
-        result.reserve(name.size() + 4);
-        for (std::size_t index = 0; index < name.size(); ++index) {
-            const unsigned char character = static_cast<unsigned char>(name[index]);
-            if (index != 0 && std::isupper(character)) result.push_back('_');
-            result.push_back(static_cast<char>(std::toupper(character)));
-        }
-        return result;
-    };
-    const auto parse_definition = [&](const char* macro) {
+    const auto shaderName = [](const std::string& name) { return name; };
+    const auto parseDefinition = [&](const char* macro) {
         std::map<std::string, int> entries;
         const std::string marker = std::string(macro) + "(";
         std::size_t position = 0;
-        while ((position = paint_protocol_source.find(marker, position)) != std::string::npos) {
-            const std::size_t name_start = position + marker.size();
-            const std::size_t first_comma = paint_protocol_source.find(',', name_start);
-            const std::size_t close = paint_protocol_source.find(')', first_comma + 1);
-            if (first_comma == std::string::npos || close == std::string::npos) break;
-            entries.emplace(trim_token(paint_protocol_source.substr(name_start, first_comma - name_start)),
-                            std::stoi(trim_token(paint_protocol_source.substr(first_comma + 1, close - first_comma - 1))));
+        while ((position = paintProtocolSource.find(marker, position)) != std::string::npos) {
+            const std::size_t nameStart = position + marker.size();
+            const std::size_t firstComma = paintProtocolSource.find(',', nameStart);
+            const std::size_t close = paintProtocolSource.find(')', firstComma + 1);
+            if (firstComma == std::string::npos || close == std::string::npos) break;
+            entries.emplace(trimToken(paintProtocolSource.substr(nameStart, firstComma - nameStart)),
+                            std::stoi(trimToken(paintProtocolSource.substr(firstComma + 1, close - firstComma - 1))));
             position = close + 1;
         }
         return entries;
     };
-    const auto parse_shader_constants = [&](const char* prefix) {
+    const auto parseShaderConstants = [&](const char* prefix) {
         std::map<std::string, int> entries;
         const std::string marker = std::string("const int ") + prefix;
         std::size_t position = 0;
-        while ((position = fragment_source.find(marker, position)) != std::string::npos) {
-            const std::size_t name_start = position + std::string("const int ").size();
-            const std::size_t equals = fragment_source.find('=', name_start);
-            const std::size_t semicolon = fragment_source.find(';', equals);
+        while ((position = fragmentSource.find(marker, position)) != std::string::npos) {
+            const std::size_t nameStart = position + std::string("const int ").size();
+            const std::size_t equals = fragmentSource.find('=', nameStart);
+            const std::size_t semicolon = fragmentSource.find(';', equals);
             if (equals == std::string::npos || semicolon == std::string::npos) break;
-            const std::string name = trim_token(fragment_source.substr(name_start, equals - name_start));
-            entries.emplace(name.substr(std::string(prefix).size()),
-                            std::stoi(trim_token(fragment_source.substr(equals + 1, semicolon - equals - 1))));
+            const std::string name = trimToken(fragmentSource.substr(nameStart, equals - nameStart));
+            entries.emplace(name.substr(std::string(prefix).size()), std::stoi(trimToken(fragmentSource.substr(equals + 1, semicolon - equals - 1))));
             position = semicolon + 1;
         }
         return entries;
     };
-    const auto ensure_protocol = [&](const char* macro, const char* shader_prefix) {
-        const auto definitions = parse_definition(macro);
-        const auto constants = parse_shader_constants(shader_prefix);
+    const auto ensureProtocol = [&](const char* macro, const char* shaderPrefix) {
+        const auto definitions = parseDefinition(macro);
+        const auto constants = parseShaderConstants(shaderPrefix);
         ensure((std::string("shader protocol count matches ") + macro).c_str(), definitions.size() == constants.size());
         for (const auto& [name, value] : definitions) {
-            const auto found = constants.find(shader_name(name));
+            const auto found = constants.find(shaderName(name));
             ensure((std::string("shader protocol entry matches ") + name).c_str(), found != constants.end() && found->second == value);
         }
     };
-    ensure_protocol("PAINT_OP_ENTRY", "PAINT_OP_");
-    ensure_protocol("GRADIENT_OP_ENTRY", "GRADIENT_");
-    ensure_protocol("OUTLINE_OP_ENTRY", "OUTLINE_");
+    ensureProtocol("PAINT_OP_ENTRY", "kPaintOp");
+    ensureProtocol("GRADIENT_OP_ENTRY", "kGradient");
+    ensureProtocol("OUTLINE_OP_ENTRY", "kOutline");
 
-    ensure("paint shader variant is guarded", contains(vertex_source, "#ifdef PAINT_SHADER") && contains(fragment_source, "#ifdef PAINT_SHADER"));
-    ensure("vertex shader forwards shape coordinates", contains(vertex_source, "shape_coord = texcoord0"));
+    ensure("paint shader variant is guarded", contains(vertexSource, "#ifdef PAINT_SHADER") && contains(fragmentSource, "#ifdef PAINT_SHADER"));
+    ensure("vertex shader forwards shape coordinates", contains(vertexSource, "shapeCoord = texcoord0"));
     ensure("fragment shader names direct and fill modes",
-           contains(fragment_source, "PAINT_OP_DIRECT = 0")
-               && contains(fragment_source, "PAINT_OP_FILL = 1")
-               && contains(fragment_source, "paintOp == PAINT_OP_DIRECT"));
+           contains(fragmentSource, "kPaintOpDirect = 0")
+               && contains(fragmentSource, "kPaintOpFill = 1")
+               && contains(fragmentSource, "paintOp == kPaintOpDirect"));
     ensure("paint protocol list contains the shader operation values",
-           contains(paint_protocol_source, "PAINT_OP_ENTRY(Direct, 0)")
-               && contains(paint_protocol_source, "PAINT_OP_ENTRY(Fill, 1)")
-               && contains(paint_protocol_source, "PAINT_OP_ENTRY(Border, 2)")
-               && contains(paint_protocol_source, "PAINT_OP_ENTRY(Gradient, 3)")
-               && contains(paint_protocol_source, "PAINT_OP_ENTRY(OuterShadow, 4)")
-               && contains(paint_protocol_source, "PAINT_OP_ENTRY(InsetShadow, 5)")
-               && contains(paint_protocol_source, "PAINT_OP_ENTRY(GradientBorder, 6)")
-               && contains(paint_protocol_source, "PAINT_OP_ENTRY(Blur, 7)")
-               && contains(paint_protocol_source, "PAINT_OP_ENTRY(Composite, 8)"));
+           contains(paintProtocolSource, "PAINT_OP_ENTRY(Direct, 0)")
+               && contains(paintProtocolSource, "PAINT_OP_ENTRY(Fill, 1)")
+               && contains(paintProtocolSource, "PAINT_OP_ENTRY(Border, 2)")
+               && contains(paintProtocolSource, "PAINT_OP_ENTRY(Gradient, 3)")
+               && contains(paintProtocolSource, "PAINT_OP_ENTRY(OuterShadow, 4)")
+               && contains(paintProtocolSource, "PAINT_OP_ENTRY(InsetShadow, 5)")
+               && contains(paintProtocolSource, "PAINT_OP_ENTRY(GradientBorder, 6)")
+               && contains(paintProtocolSource, "PAINT_OP_ENTRY(Blur, 7)")
+               && contains(paintProtocolSource, "PAINT_OP_ENTRY(Composite, 8)"));
     ensure("fragment shader declares the paint protocol",
-           contains(fragment_source, "uniform int paintOp;")
-               && contains(fragment_source, "uniform vec4 shapeRect;")
-               && contains(fragment_source, "uniform vec2 effectTextureSize;")
-               && contains(fragment_source, "uniform int gradientKind;")
-               && contains(fragment_source, "uniform int outlineStyle;")
-               && !contains(fragment_source, "rduiPaintOp"));
+           contains(fragmentSource, "uniform int paintOp;")
+               && contains(fragmentSource, "uniform vec4 shapeRect;")
+               && contains(fragmentSource, "uniform vec2 effectTextureSize;")
+               && contains(fragmentSource, "uniform int gradientKind;")
+               && contains(fragmentSource, "uniform int outlineStyle;")
+               && !contains(fragmentSource, "rduiPaintOp"));
     ensure("fragment shader has analytic border mode",
-           contains(fragment_source, "PAINT_OP_BORDER = 2")
-               && contains(fragment_source, "paintOp == PAINT_OP_BORDER")
-               && contains(fragment_source, "fwidth"));
+           contains(fragmentSource, "kPaintOpBorder = 2")
+               && contains(fragmentSource, "paintOp == kPaintOpBorder")
+               && contains(fragmentSource, "fwidth"));
     ensure("fragment shader names gradient and outline modes",
-           contains(fragment_source, "GRADIENT_LINEAR = 0")
-               && contains(fragment_source, "GRADIENT_RADIAL = 1")
-               && contains(fragment_source, "GRADIENT_CONIC = 2")
-               && contains(fragment_source, "OUTLINE_SOLID = 0")
-               && contains(fragment_source, "OUTLINE_DASHED = 1"));
-    ensure("fragment shader supports a Fieldset Legend border gap", contains(fragment_source, "topBorderGap"));
+           contains(fragmentSource, "kGradientLinear = 0")
+               && contains(fragmentSource, "kGradientRadial = 1")
+               && contains(fragmentSource, "kGradientConic = 2")
+               && contains(fragmentSource, "kOutlineSolid = 0")
+               && contains(fragmentSource, "kOutlineDashed = 1"));
+    ensure("fragment shader supports a Fieldset Legend border gap", contains(fragmentSource, "topBorderGap"));
     ensure("fragment shader supports radial and conic gradients",
-           contains(fragment_source, "gradientKind") && contains(fragment_source, "atan(delta.x, delta.y)"));
+           contains(fragmentSource, "gradientKind") && contains(fragmentSource, "atan(delta.x, delta.y)"));
     ensure("fragment shader supports repeating gradient paint",
-           contains(fragment_source, "gradientRepeating")
-               && contains(fragment_source, "underlyingGradientIntegral")
-               && contains(fragment_source, "cycles * repeating_total"));
+           contains(fragmentSource, "gradientRepeating")
+               && contains(fragmentSource, "underlyingGradientIntegral")
+               && contains(fragmentSource, "cycles * repeatingTotal"));
     ensure("fragment shader antialiases gradient stops and repeating seams",
-           contains(fragment_source, "gradientPixelWidth")
-               && contains(fragment_source, "filteredGradientColor")
-               && contains(fragment_source, "gradientIntervalIntegral")
-               && contains(fragment_source, "dFdx(delta)"));
+           contains(fragmentSource, "gradientPixelWidth")
+               && contains(fragmentSource, "filteredGradientColor")
+               && contains(fragmentSource, "gradientIntervalIntegral")
+               && contains(fragmentSource, "dFdx(delta)"));
     ensure("fragment shader supports gradient borders",
-           contains(fragment_source, "PAINT_OP_GRADIENT_BORDER = 6")
-               && contains(fragment_source, "paintOp == PAINT_OP_GRADIENT_BORDER")
-               && contains(fragment_source, "borderWidths"));
+           contains(fragmentSource, "kPaintOpGradientBorder = 6")
+               && contains(fragmentSource, "paintOp == kPaintOpGradientBorder")
+               && contains(fragmentSource, "borderWidths"));
     ensure("fragment shader supports composited blur effects",
-           contains(fragment_source, "PAINT_OP_BLUR = 7")
-               && contains(fragment_source, "PAINT_OP_COMPOSITE = 8")
-               && contains(fragment_source, "paintOp == PAINT_OP_BLUR")
-               && contains(fragment_source, "paintOp == PAINT_OP_COMPOSITE")
-               && contains(fragment_source, "blurredEffectColor")
-               && contains(fragment_source, "max_samples_per_side")
-               && contains(fragment_source, "total_weight"));
+           contains(fragmentSource, "kPaintOpBlur = 7")
+               && contains(fragmentSource, "kPaintOpComposite = 8")
+               && contains(fragmentSource, "paintOp == kPaintOpBlur")
+               && contains(fragmentSource, "paintOp == kPaintOpComposite")
+               && contains(fragmentSource, "blurredEffectColor")
+               && contains(fragmentSource, "maxSamplesPerSide")
+               && contains(fragmentSource, "totalWeight"));
+    ensure("rounded background blur uses the shape mask for coverage",
+           contains(fragmentSource, "return vec4(color.rgb, mask);") && !contains(fragmentSource, "color.a * mask"));
 }
 
-template<> template<> void rduilayoutresourcecompiler_object::test<8>() {
+template<> template<> void resourceCompilerObject::test<8>() {
     rdui::System system;
     rdui::ResourceSnapshot resources;
-    resources.add("localization.yaml", R"YAML(
-defaultLocale: en
-locales:
-  en:
-    name: English
-    strings:
-      title: Title
-      status: Ready
-      press: Press
-  pt:
-    name: Português
-    strings:
-      title: Título
-      status: Pronto
-      press: Pressione
-)YAML");
+    const char* kLocalization =
+        "defaultLocale: en\nlocales: {en: {name: English, strings: {title: Title, status: Ready, press: Press}}, pt: {name: Português, strings: {title: Título, status: Pronto, press: Pressione}}}\n";
+    const char* kLocalizedLayout =
+        "<floater title=\"title\"><label id=\"status\" for=\"target\">status</label><switch id=\"target\"/><button id=\"press\">press</button></floater>";
+    resources.add("localization.yaml", kLocalization);
     resources.add("skin.radia", "label { text-color: #ffffffff; }");
-    resources.add("localized.xml",
-                  "<floater title=\"title\"><label id=\"status\" for=\"target\">status</label>"
-                  "<switch id=\"target\"/><button id=\"press\">press</button></floater>");
+    resources.add("localized.xml", kLocalizedLayout);
     rdui::SkinGenerationPrepareResult prepared = rdui::SkinCompiler().prepare(resources);
     ensure("localizations load", prepared.ok());
     system.publish(prepared.generation);
-    rdui::ViewBuildResult result = system.createView("localized.xml");
+    rdui::LayoutBuildResult result = system.buildWidgetTree("localized.xml");
     auto* floater = result.rootAs<rdui::Floater>();
     ensure("localized tree builds", result.ok() && floater);
     auto status = requireWidget<rdui::Label>(*floater, "status");
     auto press = requireWidget<rdui::Button>(*floater, "press");
     ensure("Binder resolves localized controls", status && press);
-    rdui::Label* button_label = press->label();
+    rdui::Label* buttonLabel = press->label();
     ensure_equals("initial title localized", floater->title(), "Title");
     ensure_equals("initial label localized", status->text(), "Ready");
-    ensure_equals("initial button localized", button_label->text(), "Press");
+    ensure_equals("initial button localized", buttonLabel->text(), "Press");
 
     std::unique_ptr<rdui::Surface> surface = system.createSurface(rdui::fixedTextMetrics());
-    auto localized_floater = std::unique_ptr<rdui::Floater>(static_cast<rdui::Floater*>(result.root.release()));
-    surface->mountFloater(std::move(localized_floater));
+    auto localizedFloater = std::unique_ptr<rdui::Floater>(static_cast<rdui::Floater*>(result.root.release()));
+    surface->mountFloater(std::move(localizedFloater));
     ensure("second language selected", system.setLocale("pt"));
     ensure_equals("visible title refreshed", floater->title(), "Título");
     ensure_equals("visible label refreshed", status->text(), "Pronto");
-    ensure_equals("visible button refreshed", button_label->text(), "Pressione");
+    ensure_equals("visible button refreshed", buttonLabel->text(), "Pressione");
 
     auto programmatic = std::make_unique<rdui::Floater>();
-    rdui::Floater* programmatic_floater = programmatic.get();
+    rdui::Floater* programmaticFloater = programmatic.get();
     programmatic->setTitle("title");
     surface->mountFloater(std::move(programmatic));
-    ensure_equals("programmatic title resolves when attached", programmatic_floater->title(), "Título");
+    ensure_equals("programmatic title resolves when attached", programmaticFloater->title(), "Título");
 
-    status->setContent(system.localized("status"));
+    status->setContent(system.localize("status"));
     ensure("default language restored", system.setLocale("en"));
-    ensure_equals("programmatic title remains locale-bound", programmatic_floater->title(), "Title");
+    ensure_equals("programmatic title remains locale-bound", programmaticFloater->title(), "Title");
     ensure_equals("C++ localized assignment stays bound", status->text(), "Ready");
     status->setText("Literal");
     ensure("Portuguese restored", system.setLocale("pt"));
@@ -378,58 +348,62 @@ locales:
     ensure("missing default-language key rejects generation", !missing.ok() && !missing.generation);
 }
 
-template<> template<> void rduilayoutresourcecompiler_object::test<9>() {
-    const rdui::ViewBuildResult unknown_element = factory.createFromString("<panel><unknown/></panel>", "unknown.xml");
-    ensure("unknown element rejects document", !unknown_element.ok() && !unknown_element.root);
-    ensure_equals("unknown element diagnostic code", unknown_element.errors.front().code, "view.element.unknown");
-    ensure_equals("unknown element diagnostic source", unknown_element.errors.front().source, "unknown.xml");
+template<> template<> void resourceCompilerObject::test<9>() {
+    const rdui::LayoutBuildResult unknownElement = factory.buildWidgetTreeFromString("<panel><unknown/></panel>", "unknown.xml");
+    ensure("unknown element rejects document", !unknownElement.ok() && !unknownElement.root);
+    ensure_equals("unknown element diagnostic code", unknownElement.errors.front().code, "layout.element.unknown");
+    ensure_equals("unknown element diagnostic source", unknownElement.errors.front().source, "unknown.xml");
 
-    const rdui::ViewBuildResult unsupported_attribute = factory.createFromString("<panel width=\"10\"/>", "attribute.xml");
-    ensure("unsupported attribute rejects document", !unsupported_attribute.ok() && !unsupported_attribute.root);
-    ensure_equals("unsupported attribute diagnostic code", unsupported_attribute.errors.front().code, "view.attribute.unsupported");
+    const rdui::LayoutBuildResult unsupportedAttribute = factory.buildWidgetTreeFromString("<panel width=\"10\"/>", "attribute.xml");
+    ensure("unsupported attribute rejects document", !unsupportedAttribute.ok() && !unsupportedAttribute.root);
+    ensure_equals("unsupported attribute diagnostic code", unsupportedAttribute.errors.front().code, "layout.attribute.unsupported");
 
-    const rdui::ViewBuildResult unknown_attribute = factory.createFromString("<floater invented=\"true\"/>", "unknown_attribute.xml");
-    ensure("unknown widget attribute rejects document", !unknown_attribute.ok() && !unknown_attribute.root);
-    ensure_equals("unknown attribute diagnostic code", unknown_attribute.errors.front().code, "view.attribute.unknown");
+    const rdui::LayoutBuildResult unknownAttribute = factory.buildWidgetTreeFromString("<floater invented=\"true\"/>", "unknown_attribute.xml");
+    ensure("unknown widget attribute rejects document", !unknownAttribute.ok() && !unknownAttribute.root);
+    ensure_equals("unknown attribute diagnostic code", unknownAttribute.errors.front().code, "layout.attribute.unknown");
 
-    const rdui::ViewBuildResult unsupported_action = factory.createFromString("<label onClick=\"click\"/>", "action.xml");
-    ensure("unsupported widget event rejects view", !unsupported_action.ok() && !unsupported_action.root);
-    ensure_equals("unsupported action diagnostic code", unsupported_action.errors.front().code, "view.action.unsupported");
+    const rdui::LayoutBuildResult unsupportedEvent = factory.buildWidgetTreeFromString("<text onClick=\"click()\">copy</text>", "event.xml");
+    ensure("unsupported Widget Event leaves the Widget tree usable", unsupportedEvent.ok() && unsupportedEvent.root);
+    ensure_equals("unsupported Event reports one warning", unsupportedEvent.warnings.size(), 1U);
+    ensure_equals("unsupported Event diagnostic code", unsupportedEvent.warnings.front().code, "layout.event.unsupported");
 
-    const rdui::ViewBuildResult expression_action = factory.createFromString("<button onClick=\"save(force=true)\"/>", "expression.xml");
-    ensure("action expressions reject view", !expression_action.ok() && !expression_action.root);
-    ensure_equals("invalid action name diagnostic code", expression_action.errors.front().code, "view.action.name_invalid");
+    const rdui::LayoutBuildResult expressionCall = factory.buildWidgetTreeFromString("<button onClick=\"save(force=true)\"/>", "expression.xml");
+    ensure("Event expressions leave the Widget tree usable with a no-op binding", expressionCall.ok() && expressionCall.root);
+    ensure_equals("expression reports one warning", expressionCall.warnings.size(), 1U);
+    ensure_equals("unsupported literal diagnostic code", expressionCall.warnings.front().code, "layout.event.literal_unsupported");
 }
 
-template<> template<> void rduilayoutresourcecompiler_object::test<10>() {
-    const rdui::ViewBuildResult duplicate =
-        factory.createFromString("<panel><text id=\"same\"/><button id=\"same\">Same</button></panel>", "duplicates.xml");
-    ensure("duplicate ids reject whole view", !duplicate.ok() && !duplicate.root);
-    ensure_equals("duplicate id diagnostic code", duplicate.errors.front().code, "view.id.duplicate");
+template<> template<> void resourceCompilerObject::test<10>() {
+    const rdui::LayoutBuildResult duplicate =
+        factory.buildWidgetTreeFromString("<panel><text id=\"same\"/><button id=\"same\">Same</button></panel>", "duplicates.xml");
+    ensure("duplicate ids reject whole widget tree", !duplicate.ok() && !duplicate.root);
+    ensure_equals("duplicate id diagnostic code", duplicate.errors.front().code, "layout.id.duplicate");
     ensure_equals("duplicate id diagnostic source", duplicate.errors.front().source, "duplicates.xml");
 }
 
-template<> template<> void rduilayoutresourcecompiler_object::test<11>() {
-    const rdui::ViewBuildResult invalid =
-        factory.createFromString("<floater canClose=\"sometimes\"><switch checked=\"yes\"/></floater>", "booleans.xml");
-    ensure("invalid booleans reject whole view", !invalid.ok() && !invalid.root);
+template<> template<> void resourceCompilerObject::test<11>() {
+    const rdui::LayoutBuildResult invalid =
+        factory.buildWidgetTreeFromString("<floater canClose=\"sometimes\"><switch checked=\"yes\"/></floater>", "booleans.xml");
+    ensure("invalid booleans reject whole widget tree", !invalid.ok() && !invalid.root);
     ensure_equals("both invalid booleans diagnosed", invalid.errors.size(), 2U);
-    ensure_equals("boolean diagnostic code", invalid.errors.front().code, "view.attribute.boolean_invalid");
+    ensure_equals("boolean diagnostic code", invalid.errors.front().code, "layout.attribute.boolean_invalid");
     ensure_equals("boolean diagnostic source", invalid.errors.front().source, "booleans.xml");
 }
 
-template<> template<> void rduilayoutresourcecompiler_object::test<12>() {
-    ensure("delay requires action", !factory.createFromString("<button longClickDelay=\"1s\"/>").ok());
-    ensure("duration requires unit", !factory.createFromString("<button onLongClick=\"hold\" longClickDelay=\"500\"/>").ok());
-    ensure("label rejects long click", !factory.createFromString("<label onLongClick=\"hold\"/>").ok());
+template<> template<> void resourceCompilerObject::test<12>() {
+    const rdui::LayoutBuildResult missingHandler = factory.buildWidgetTreeFromString("<button longClickDelay=\"1s\"/>");
+    ensure("delay without an Event Handler leaves the Widget tree usable", missingHandler.ok());
+    ensure_equals("missing long-click Handler warns", missingHandler.warnings.front().code, "layout.long_click.event_missing");
+    ensure("duration requires unit", !factory.buildWidgetTreeFromString("<button onLongClick=\"hold()\" longClickDelay=\"500\"/>").ok());
+    const rdui::LayoutBuildResult unsupported = factory.buildWidgetTreeFromString("<text onLongClick=\"hold()\">copy</text>");
+    ensure("Text ignores unsupported long click", unsupported.ok());
+    ensure_equals("unsupported long click warns", unsupported.warnings.front().code, "layout.event.unsupported");
 }
 
-template<> template<> void rduilayoutresourcecompiler_object::test<13>() {
-    rdui::ViewBuildResult result = factory.createFromString("<floater title=\"tools\" icon=\"search\" canMinimize=\"true\" "
-                                                            "showHeaderIdentity=\"false\">"
-                                                            "<header><button id=\"refresh\">Refresh</button></header><panel "
-                                                            "id=\"content\"/></floater>",
-                                                            "custom_header.xml");
+template<> template<> void resourceCompilerObject::test<13>() {
+    const char* kCustomHeaderLayout =
+        "<floater title=\"tools\" icon=\"search\" canMinimize=\"true\" showHeaderIdentity=\"false\"><header><button id=\"refresh\">Refresh</button></header><panel id=\"content\"/></floater>";
+    rdui::LayoutBuildResult result = factory.buildWidgetTreeFromString(kCustomHeaderLayout, "custom_header.xml");
     auto* floater = result.rootAs<rdui::Floater>();
     ensure("custom-header floater builds", result.ok() && floater);
     auto content = requireWidget<rdui::Panel>(*floater, "content");
@@ -460,113 +434,137 @@ template<> template<> void rduilayoutresourcecompiler_object::test<13>() {
     ensure("clearing authored children expires content reference", !content);
     ensure("clearing authored children expires custom header reference", !refresh);
 
-    const rdui::ViewBuildResult missing_title = factory.createFromString("<floater canMinimize=\"true\"/>", "missing_title.xml");
-    ensure("minimizable floater requires title", !missing_title.ok());
-    ensure_equals("title diagnostic is stable", missing_title.errors.front().code, "view.floater.title_required");
+    const rdui::LayoutBuildResult missingTitle = factory.buildWidgetTreeFromString("<floater canMinimize=\"true\"/>", "missing_title.xml");
+    ensure("minimizable floater requires title", !missingTitle.ok());
+    ensure_equals("title diagnostic is stable", missingTitle.errors.front().code, "layout.floater.title_required");
 
-    const rdui::ViewBuildResult duplicate_header = factory.createFromString("<floater><header/><header/></floater>", "duplicate_header.xml");
-    ensure("duplicate custom header rejects view", !duplicate_header.ok());
-    ensure_equals("duplicate header diagnostic is stable", duplicate_header.errors.front().code, "view.part.duplicate");
+    const rdui::LayoutBuildResult duplicateHeader =
+        factory.buildWidgetTreeFromString("<floater><header/><header/></floater>", "duplicate_header.xml");
+    ensure("duplicate custom header rejects widget tree", !duplicateHeader.ok());
+    ensure_equals("duplicate header diagnostic is stable", duplicateHeader.errors.front().code, "layout.part.duplicate");
 
-    const rdui::ViewBuildResult attached_only = factory.createFromString("<floater canDetach=\"false\"/>", "attached_only.xml");
-    ensure("floater accepts detach policy", attached_only.ok());
-    ensure("floater detach policy defaults on and can opt out", !attached_only.rootAs<rdui::Floater>()->canDetach());
+    const rdui::LayoutBuildResult attachedOnly = factory.buildWidgetTreeFromString("<floater canDetach=\"false\"/>", "attached_only.xml");
+    ensure("floater accepts detach policy", attachedOnly.ok());
+    ensure("floater detach policy defaults on and can opt out", !attachedOnly.rootAs<rdui::Floater>()->canDetach());
 }
 
-template<> template<> void rduilayoutresourcecompiler_object::test<14>() {
+template<> template<> void resourceCompilerObject::test<14>() {
     resources["widgets/floater.xml"] = "<floater closeIcon=\"close\" minimizeIcon=\"minimize\" canClose=\"false\"/>";
     resources["defaulted.xml"] = "<floater title=\"defaulted\" canClose=\"true\"/>";
 
     ensure("Widget Defaults validate independently with case-insensitive lookup", !factory.validateWidgetDefaults("FLOATER").hasErrors());
 
-    rdui::ViewBuildResult result = factory.createFromResource("defaulted.xml");
+    rdui::LayoutBuildResult result = factory.buildWidgetTreeFromResource("defaulted.xml");
     auto* floater = result.rootAs<rdui::Floater>();
     ensure("Widget Defaults apply", result.ok() && floater);
     ensure_equals("default close icon applied", floater->closeIcon(), std::string("close"));
     ensure_equals("default minimize icon applied", floater->minimizeIcon(), std::string("minimize"));
     ensure_equals("default close icon reaches declared part", floater->closeButton()->icon()->name(), std::string("close"));
     ensure_equals("default minimize icon reaches declared part", floater->minimizeButton()->icon()->name(), std::string("minimize"));
-    ensure("View attribute overrides Widget Default", floater->canClose());
+    ensure("Widget tree attribute overrides Widget Default", floater->canClose());
 
     resources["widgets/floater.xml"] = "<panel/>";
     ensure("Widget Defaults validation reports invalid root", factory.validateWidgetDefaults("floater").hasErrors());
-    const rdui::ViewBuildResult invalid = factory.createFromResource("defaulted.xml");
-    ensure("wrong Widget Defaults root rejects View", !invalid.ok());
+    const rdui::LayoutBuildResult invalid = factory.buildWidgetTreeFromResource("defaulted.xml");
+    ensure("wrong Widget Defaults root rejects Widget tree", !invalid.ok());
     ensure("invalid Widget Defaults expose no partial root", invalid.root == nullptr);
 }
 
-template<> template<> void rduilayoutresourcecompiler_object::test<15>() {
-    const rdui::ViewBuildResult result = factory.createFromString("<panel><text id=\"shown\" visibility=\"visible\"/>"
-                                                                  "<text id=\"hidden\" visibility=\"hidden\"/>"
-                                                                  "<text id=\"collapsed\" visibility=\"collapsed\"/></panel>",
-                                                                  "visibility.xml");
+template<> template<> void resourceCompilerObject::test<15>() {
+    const char* kVisibilityLayout =
+        "<panel><text id=\"shown\" visibility=\"visible\"/><text id=\"hidden\" visibility=\"hidden\"/><text id=\"collapsed\" visibility=\"collapsed\"/></panel>";
+    const rdui::LayoutBuildResult result = factory.buildWidgetTreeFromString(kVisibilityLayout, "visibility.xml");
     ensure("typed visibility values compile", result.ok());
     ensure_equals("Visible value is typed", static_cast<int>(result.root->children()[0]->visibility()), static_cast<int>(rdui::Visibility::Visible));
     ensure_equals("Hidden value is typed", static_cast<int>(result.root->children()[1]->visibility()), static_cast<int>(rdui::Visibility::Hidden));
     ensure_equals("Collapsed value is typed", static_cast<int>(result.root->children()[2]->visibility()),
                   static_cast<int>(rdui::Visibility::Collapsed));
 
-    const rdui::ViewBuildResult invalid = factory.createFromString("<text visibility=\"invisible\"/>", "invalid_visibility.xml");
+    const rdui::LayoutBuildResult invalid = factory.buildWidgetTreeFromString("<text visibility=\"invisible\"/>", "invalid_visibility.xml");
     ensure("invalid visibility is rejected", !invalid.ok());
-    ensure_equals("invalid visibility diagnostic is stable", invalid.errors.front().code, "view.attribute.visibility_invalid");
+    ensure_equals("invalid visibility diagnostic is stable", invalid.errors.front().code, "layout.attribute.visibility_invalid");
 
-    const rdui::ViewBuildResult legacy = factory.createFromString("<text visible=\"false\"/>", "legacy_visibility.xml");
+    const rdui::LayoutBuildResult legacy = factory.buildWidgetTreeFromString("<text visible=\"false\"/>", "legacy_visibility.xml");
     ensure("legacy boolean visibility is rejected", !legacy.ok());
-    ensure_equals("legacy visibility is an unknown attribute", legacy.errors.front().code, "view.attribute.unknown");
+    ensure_equals("legacy visibility is an unknown attribute", legacy.errors.front().code, "layout.attribute.unknown");
+
+    const rdui::LayoutBuildResult legacyBinding = factory.buildWidgetTreeFromString("<switch bind=\"old-setting\"/>", "legacy-bind.xml");
+    ensure("legacy provider binding syntax is rejected", !legacyBinding.ok());
+    ensure_equals("legacy provider binding is an unknown attribute", legacyBinding.errors.front().code, "layout.attribute.unknown");
 }
 
-template<> template<> void rduilayoutresourcecompiler_object::test<16>() {
+template<> template<> void resourceCompilerObject::test<16>() {
     resources["widgets/label.xml"] = "<label visibility=\"sometimes\"/>";
     const rdui::DiagnosticResult visibility = factory.validateWidgetDefaults("label");
     ensure("Widget Defaults validate typed visibility values", visibility.hasErrors());
-    ensure_equals("Widget Defaults preserve visibility diagnostics", visibility.errors.front().code, "view.attribute.visibility_invalid");
+    ensure_equals("Widget Defaults preserve visibility diagnostics", visibility.errors.front().code, "layout.attribute.visibility_invalid");
 
     resources["widgets/label.xml"] = "<label/>";
     resources["widgets/switch.xml"] = "<switch checked=\"sometimes\"/>";
     const rdui::DiagnosticResult widget_attribute = factory.validateWidgetDefaults("switch");
     ensure("Widget Defaults validate widget-specific typed values", widget_attribute.hasErrors());
-    ensure_equals("Widget Defaults preserve widget attribute diagnostics", widget_attribute.errors.front().code, "view.attribute.boolean_invalid");
+    ensure_equals("Widget Defaults preserve widget attribute diagnostics", widget_attribute.errors.front().code, "layout.attribute.boolean_invalid");
 }
 
-template<> template<> void rduilayoutresourcecompiler_object::test<17>() {
-    rdui::ViewBuildResult result = factory.createFromString("<FlOaTeR TiTlE=\"tools\" CaNMiNiMiZe=\"true\">"
-                                                            "<HeAdEr><BuTtOn ID=\"save-file\" ONCLICK=\"save-file\">"
-                                                            "<IcOn SrC=\"search\"/>Save</BuTtOn></HeAdEr></FlOaTeR>",
-                                                            "case-insensitive.xml");
+template<> template<> void resourceCompilerObject::test<17>() {
+    const char* kCaseInsensitiveLayout =
+        "<FlOaTeR TiTlE=\"tools\" CaNMiNiMiZe=\"true\"><HeAdEr><BuTtOn ID=\"saveFile\" ONCLICK=\"saveFile()\"><IcOn SrC=\"search\"/>Save</BuTtOn></HeAdEr></FlOaTeR>";
+    rdui::LayoutBuildResult result = factory.buildWidgetTreeFromString(kCaseInsensitiveLayout, "case-insensitive.xml");
     auto* floater = result.rootAs<rdui::Floater>();
     ensure("element and attribute lookup is ASCII case-insensitive", result.ok() && floater);
-    auto button = requireWidget<rdui::Button>(*floater, "save-file");
+    auto button = requireWidget<rdui::Button>(*floater, "saveFile");
     ensure("mixed-case schema names retain canonical widget behavior", button && button->icon());
-    ensure_equals("contract retains canonical element spelling", button->element(), std::string("button"));
-    ensure_equals("mixed-case action attribute resolves", button->action(rdui::ActionEventKind::Click), std::string("save-file"));
+    ensure_equals("contract retains canonical element spelling", button->elementName(), std::string("button"));
+    ensure_equals("mixed-case Event attribute resolves", button->eventCall(rdui::WidgetEventKind::Click)->name(), std::string("saveFile"));
 }
 
-template<> template<> void rduilayoutresourcecompiler_object::test<18>() {
-    const rdui::ViewBuildResult snake = factory.createFromString("<BuTtOn\n  on_click=\"save-file\"/>", "legacy-snake.xml");
+template<> template<> void resourceCompilerObject::test<18>() {
+    const rdui::LayoutBuildResult snake = factory.buildWidgetTreeFromString("<BuTtOn\n  on_click=\"saveFile()\"/>", "legacy-snake.xml");
     ensure("legacy snake_case attribute is rejected", !snake.ok());
-    ensure_equals("legacy attribute is not an alias", snake.errors.front().code, std::string("view.attribute.unknown"));
+    ensure_equals("legacy attribute is not an alias", snake.errors.front().code, std::string("layout.attribute.unknown"));
     ensure_equals("legacy attribute diagnostic retains source line", snake.errors.front().line, std::size_t(1));
     ensure("known element names use canonical spelling in diagnostics", snake.errors.front().message.find("<button>") != std::string::npos);
 
-    const rdui::ViewBuildResult duplicate = factory.createFromString("<button onClick=\"save-one\" ONCLICK=\"save-two\"/>", "duplicate-case.xml");
+    const rdui::LayoutBuildResult duplicate =
+        factory.buildWidgetTreeFromString("<button onClick=\"saveOne()\" ONCLICK=\"saveTwo()\"/>", "duplicate-case.xml");
     ensure("attributes colliding after case folding are rejected", !duplicate.ok());
-    ensure_equals("case-folded duplicate has a stable diagnostic", duplicate.errors.front().code, std::string("view.attribute.duplicate"));
+    ensure_equals("case-folded duplicate has a stable diagnostic", duplicate.errors.front().code, std::string("layout.attribute.duplicate"));
 
-    const rdui::ViewBuildResult invalid_id = factory.createFromString("<panel id=\"bad_id\"/>", "id.xml");
-    ensure("non-kebab Widget ID is rejected", !invalid_id.ok());
-    ensure_equals("invalid ID diagnostic is stable", invalid_id.errors.front().code, std::string("view.id.invalid"));
+    const rdui::LayoutBuildResult invalidId = factory.buildWidgetTreeFromString("<panel id=\"bad.id\"/>", "id.xml");
+    ensure("invalid Widget ID characters are rejected", !invalidId.ok());
+    ensure_equals("invalid ID diagnostic is stable", invalidId.errors.front().code, std::string("layout.id.invalid"));
 
-    const rdui::ViewBuildResult invalid_class = factory.createFromString("<panel class=\"BadClass\"/>", "class.xml");
-    ensure("non-kebab Widget class is rejected", !invalid_class.ok());
-    ensure_equals("invalid class diagnostic is stable", invalid_class.errors.front().code, std::string("view.class.invalid"));
+    const rdui::LayoutBuildResult invalidClass = factory.buildWidgetTreeFromString("<panel class=\"BadClass\"/>", "class.xml");
+    ensure("non-kebab Widget class is rejected", !invalidClass.ok());
+    ensure_equals("invalid class diagnostic is stable", invalidClass.errors.front().code, std::string("layout.class.invalid"));
 
-    const rdui::ViewBuildResult invalid_action = factory.createFromString("<button onClick=\"bad_action\"/>", "action-name.xml");
-    ensure("non-kebab Action is rejected", !invalid_action.ok());
-    ensure_equals("invalid Action diagnostic is stable", invalid_action.errors.front().code, std::string("view.action.name_invalid"));
+    const rdui::LayoutBuildResult invalidHandler = factory.buildWidgetTreeFromString("<button onClick=\"bad_action()\"/>", "handler-name.xml");
+    ensure("invalid Handler name leaves the Widget tree usable", invalidHandler.ok());
+    ensure_equals("invalid Handler name reports one warning", invalidHandler.warnings.size(), 1U);
+    ensure_equals("invalid Handler diagnostic is stable", invalidHandler.warnings.front().code, std::string("layout.event.name_invalid"));
 
-    ensure("Icon name alias is removed", !factory.createFromString("<icon name=\"search\"/>").ok());
-    ensure("Icon icon alias is removed", !factory.createFromString("<icon icon=\"search\"/>").ok());
-    ensure("Icon source alias is removed", !factory.createFromString("<icon source=\"search\"/>").ok());
-    ensure("legacy qualified header element is removed", !factory.createFromString("<floater><floater.header/></floater>").ok());
+    ensure("Icon name alias is removed", !factory.buildWidgetTreeFromString("<icon name=\"search\"/>").ok());
+    ensure("Icon icon alias is removed", !factory.buildWidgetTreeFromString("<icon icon=\"search\"/>").ok());
+    ensure("Icon source alias is removed", !factory.buildWidgetTreeFromString("<icon source=\"search\"/>").ok());
+    ensure("legacy qualified header element is removed", !factory.buildWidgetTreeFromString("<floater><floater.header/></floater>").ok());
+}
+
+template<> template<> void resourceCompilerObject::test<19>() {
+    const char* kEventCallLayout =
+        "<panel><button id=\"inspect\" onClick=\"inspect(4, 'settings', true, this, event)\"/><button id=\"bare\" onClick=\"press\"/><button id=\"lifecycle\" onClick=\"postBuild()\"/></panel>";
+    rdui::LayoutBuildResult result = factory.buildWidgetTreeFromString(kEventCallLayout, "event-calls.xml");
+    ensure("valid and invalid Event Handler Calls keep the Widget tree usable", result.ok());
+    ensure_equals("bare and lifecycle names each warn", result.warnings.size(), 2U);
+    ensure_equals("bare name requires call syntax", result.warnings[0].code, std::string("layout.event.call_required"));
+    ensure_equals("lifecycle Handler name is reserved", result.warnings[1].code, std::string("layout.event.handler_reserved"));
+
+    auto inspect = requireWidget<rdui::Button>(*result.root, "inspect");
+    auto bare = requireWidget<rdui::Button>(*result.root, "bare");
+    auto lifecycle = requireWidget<rdui::Button>(*result.root, "lifecycle");
+    ensure("parsed Event Handler Call is attached", inspect && inspect->eventCall(rdui::WidgetEventKind::Click));
+    ensure_equals("parsed Event Handler name retained", inspect->eventCall(rdui::WidgetEventKind::Click)->name(), std::string("inspect"));
+    ensure_equals("all parsed arguments retained", inspect->eventCall(rdui::WidgetEventKind::Click)->arguments().size(), 5U);
+    ensure("invalid and reserved calls attach no runtime binding",
+           bare && lifecycle && !bare->eventCall(rdui::WidgetEventKind::Click) && !lifecycle->eventCall(rdui::WidgetEventKind::Click));
 }
 } // namespace tut

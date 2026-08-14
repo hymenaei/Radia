@@ -63,13 +63,12 @@ private:
     std::size_t mNextObserver = 0;
 };
 
-struct valuebinding_data {};
-using valuebinding_test = test_group<valuebinding_data>;
-using valuebinding_object = valuebinding_test::object;
-using rduivaluebinding_object = valuebinding_object;
-valuebinding_test valuebinding_testcase("valuebinding");
+struct switchData {};
+using switchTest = test_group<switchData>;
+using switchObject = switchTest::object;
+switchTest switchTestCase("switch");
 
-template<> template<> void rduivaluebinding_object::test<1>() {
+template<> template<> void switchObject::test<1>() {
     rdui::ValueState<int> clean{4, 4, std::nullopt};
     ensure("equal value and baseline are clean", !clean.dirty());
     ensure("omitted validation is valid", clean.validationStatus() == rdui::ValueValidationStatus::Valid);
@@ -84,7 +83,7 @@ template<> template<> void rduivaluebinding_object::test<1>() {
     ensure("pending validation is distinct", invalid.validationStatus() == rdui::ValueValidationStatus::Pending);
 }
 
-template<> template<> void rduivaluebinding_object::test<2>() {
+template<> template<> void switchObject::test<2>() {
     auto binding = std::make_shared<MemoryValueBinding<bool>>(rdui::ValueState<bool>{false, false, std::nullopt});
     int publications = 0;
     bool observed = false;

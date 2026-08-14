@@ -1,6 +1,6 @@
 /**
  * @file generation.h
- * @brief Exposes immutable compiled skin generations for views, localization, styles, and icons.
+ * @brief Exposes immutable compiled skin generations for Widget trees, localization, styles, and icons.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -28,7 +28,7 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include "layout/viewresult.h"
+#include "layout/buildresult.h"
 #include "localization/localization.h"
 #include "style/stylesheet.h"
 
@@ -44,7 +44,7 @@ public:
     SkinGeneration(const SkinGeneration&) = delete;
     SkinGeneration& operator=(const SkinGeneration&) = delete;
 
-    ViewBuildResult createView(const std::string& resource_id, const std::string& locale) const;
+    LayoutBuildResult buildWidgetTree(const std::string& resourceId, const std::string& locale) const;
 
 private:
     struct Impl;
@@ -52,7 +52,7 @@ private:
 
     static std::shared_ptr<const SkinGeneration> empty();
     DiagnosticResult validateWidgetDefaults(const std::string& element) const;
-    void validateIconReferences(Widget& widget, ViewBuildResult& result) const;
+    void validateIconReferences(Widget& widget, LayoutBuildResult& result) const;
     std::vector<LocaleInfo> locales() const;
     const std::string& defaultLocale() const;
     const LocaleInfo* locale(const std::string& id) const;

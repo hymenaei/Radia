@@ -60,8 +60,8 @@ LocalizationCatalog::~LocalizationCatalog() = default;
 LocalizationCatalog::LocalizationCatalog(LocalizationCatalog&&) noexcept = default;
 LocalizationCatalog& LocalizationCatalog::operator=(LocalizationCatalog&&) noexcept = default;
 
-LocalizationLoadResult LocalizationCatalog::loadYaml(const std::string& yaml, const std::string& source_name) {
-    return loadYamlLayers({ResourceLayer{source_name, yaml}});
+LocalizationLoadResult LocalizationCatalog::loadYaml(const std::string& yaml, const std::string& sourceName) {
+    return loadYamlLayers({ResourceLayer{sourceName, yaml}});
 }
 
 LocalizationLoadResult LocalizationCatalog::loadYamlLayers(const std::vector<ResourceLayer>& layers) {
@@ -79,7 +79,7 @@ std::vector<LocaleInfo> LocalizationCatalog::locales() const {
 }
 
 const std::string& LocalizationCatalog::defaultLocaleId() const {
-    return mImpl->default_locale;
+    return mImpl->defaultLocale;
 }
 
 const LocaleInfo* LocalizationCatalog::locale(const std::string& id) const {
@@ -92,7 +92,7 @@ bool LocalizationCatalog::containsLocale(const std::string& id) const {
 }
 
 bool LocalizationCatalog::containsDefaultString(const std::string& id) const {
-    const LocaleRecord* locale = mImpl->locale(mImpl->default_locale);
+    const LocaleRecord* locale = mImpl->locale(mImpl->defaultLocale);
     return locale && mImpl->find(*locale, id);
 }
 
@@ -101,14 +101,14 @@ bool LocalizationCatalog::pluralCapable(const std::string& id) const {
     return found != mImpl->contracts.end() && found->second.plural;
 }
 
-InlineContent LocalizationCatalog::resolve(const std::string& locale_id, const LocalizationRequest& request) const {
-    const LocaleRecord* active = mImpl->locale(locale_id);
-    if (!active) active = mImpl->locale(mImpl->default_locale);
+InlineContent LocalizationCatalog::resolve(const std::string& localeId, const LocalizationRequest& request) const {
+    const LocaleRecord* active = mImpl->locale(localeId);
+    if (!active) active = mImpl->locale(mImpl->defaultLocale);
     if (!active) return rawKey(request.key());
 
     const StringValue* value = nullptr;
-    for (const std::size_t locale_index : active->fallback_chain) {
-        value = mImpl->find(mImpl->locales[locale_index], request.key());
+    for (const std::size_t localeIndex : active->fallbackChain) {
+        value = mImpl->find(mImpl->locales[localeIndex], request.key());
         if (value) break;
     }
     if (!value) {
@@ -116,11 +116,11 @@ InlineContent LocalizationCatalog::resolve(const std::string& locale_id, const L
         return rawKey(request.key());
     }
 
-    const auto contract_found = mImpl->contracts.find(request.key());
-    if (contract_found == mImpl->contracts.end()) return rawKey(request.key());
-    const StringContract& contract = contract_found->second;
+    const auto contractFound = mImpl->contracts.find(request.key());
+    if (contractFound == mImpl->contracts.end()) return rawKey(request.key());
+    const StringContract& contract = contractFound->second;
 
-    const LocalizationArgument* plural_argument = nullptr;
+    const LocalizationArgument* pluralArgument = nullptr;
     if (contract.plural) {
         if (!request.selectsPlural()) {
             LL_WARNS("RadiaUI") << "Plural-capable String Key requires a selector: " << request.key() << LL_ENDL;
@@ -131,39 +131,39 @@ InlineContent LocalizationCatalog::resolve(const std::string& locale_id, const L
             LL_WARNS("RadiaUI") << "Plural selector must name a finite numeric argument for " << request.key() << LL_ENDL;
             return rawKey(request.key());
         }
-        if (!contract.required_plural_argument.empty() && contract.required_plural_argument != request.pluralArgument()) {
-            LL_WARNS("RadiaUI") << "Plural selector for " << request.key() << " must be '" << contract.required_plural_argument << "'." << LL_ENDL;
+        if (!contract.requiredPluralArgument.empty() && contract.requiredPluralArgument != request.pluralArgument()) {
+            LL_WARNS("RadiaUI") << "Plural selector for " << request.key() << " must be '" << contract.requiredPluralArgument << "'." << LL_ENDL;
             return rawKey(request.key());
         }
-        plural_argument = &argument->second;
+        pluralArgument = &argument->second;
     }
 
     const StringTemplate* selected = nullptr;
     if (const StringTemplate* scalar = value->scalar()) selected = scalar;
     else {
-        if (!plural_argument || !active->plural_rules) {
+        if (!pluralArgument || !active->pluralRules) {
             LL_WARNS("RadiaUI") << "Could not select plural form for " << request.key() << LL_ENDL;
             return rawKey(request.key());
         }
-        const std::string category = unicodeToUtf8(active->plural_rules->select(plural_argument->number()));
+        const std::string category = unicodeToUtf8(active->pluralRules->select(pluralArgument->number()));
         const PluralTemplates& plurals = *value->plurals();
         const auto variant = plurals.find(category);
         selected = variant == plurals.end() ? &plurals.at("other") : &variant->second;
     }
 
-    const auto format_argument = [&](const LocalizationArgument& argument) {
+    const auto formatArgument = [&](const LocalizationArgument& argument) {
         std::string formatted;
         if (const auto* text = std::get_if<std::string>(&argument.value())) formatted = *text;
-        else if (active->number_format) {
+        else if (active->numberFormat) {
             icu::UnicodeString output;
-            if (const auto* integer = std::get_if<std::int64_t>(&argument.value())) active->number_format->format(*integer, output);
-            else active->number_format->format(std::get<double>(argument.value()), output);
+            if (const auto* integer = std::get_if<std::int64_t>(&argument.value())) active->numberFormat->format(*integer, output);
+            else active->numberFormat->format(std::get<double>(argument.value()), output);
             formatted = unicodeToUtf8(output);
         }
         return std::string(FIRST_STRONG_ISOLATE) + formatted + POP_DIRECTIONAL_ISOLATE;
     };
 
-    const auto resolve_nodes = [&](auto&& self, const std::vector<TemplateNode>& nodes) -> std::vector<InlineContentNode> {
+    const auto resolveNodes = [&](auto&& self, const std::vector<TemplateNode>& nodes) -> std::vector<InlineContentNode> {
         std::vector<InlineContentNode> resolved;
         resolved.reserve(nodes.size());
         for (const TemplateNode& node : nodes) {
@@ -174,7 +174,7 @@ InlineContent LocalizationCatalog::resolve(const std::string& locale_id, const L
                     if (argument == request.arguments().end()) {
                         LL_WARNS("RadiaUI") << "Missing localization argument '" << node.value << "' for " << request.key() << LL_ENDL;
                         resolved.push_back(InlineContentNode::text("{" + node.value + "}"));
-                    } else resolved.push_back(InlineContentNode::text(format_argument(argument->second)));
+                    } else resolved.push_back(InlineContentNode::text(formatArgument(argument->second)));
                     break;
                 }
                 case TemplateKind::B: resolved.push_back(InlineContentNode::container(InlineContentKind::B, self(self, node.children))); break;
@@ -187,14 +187,14 @@ InlineContent LocalizationCatalog::resolve(const std::string& locale_id, const L
         return resolved;
     };
 
-    return InlineContent(resolve_nodes(resolve_nodes, selected->nodes));
+    return InlineContent(resolveNodes(resolveNodes, selected->nodes));
 }
 
-std::string LocalizationCatalog::get(const std::string& locale_id, const LocalizationRequest& request) const {
-    return resolve(locale_id, request).plainText();
+std::string LocalizationCatalog::get(const std::string& localeId, const LocalizationRequest& request) const {
+    return resolve(localeId, request).plainText();
 }
 
-std::string LocalizationCatalog::get(const std::string& locale_id, const std::string& string_id) const {
-    return get(locale_id, LocalizationRequest::text(string_id));
+std::string LocalizationCatalog::get(const std::string& localeId, const std::string& stringId) const {
+    return get(localeId, LocalizationRequest::text(stringId));
 }
 } // namespace rdui

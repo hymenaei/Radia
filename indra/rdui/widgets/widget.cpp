@@ -31,7 +31,30 @@
 #include "text/metrics.h"
 
 namespace rdui {
-Widget::Widget(const char* element) : mElement(element) {}
+namespace detail {
+Widget* findWidgetInScope(Widget& widget, std::string_view id) {
+    if (widget.id() == id) return &widget;
+    for (const auto& child : widget.children()) {
+        if (child->id() == id) return child.get();
+        if (child->idScopeRoot()) continue;
+        if (Widget* found = findWidgetInScope(*child, id)) return found;
+    }
+    return nullptr;
+}
+
+void indexWidgetsInScope(Widget& widget, std::map<std::string, Widget*>& index) {
+    if (!widget.id().empty()) index.emplace(widget.id(), &widget);
+    for (const auto& child : widget.children()) {
+        if (child->idScopeRoot()) {
+            if (!child->id().empty()) index.emplace(child->id(), child.get());
+        } else {
+            indexWidgetsInScope(*child, index);
+        }
+    }
+}
+} // namespace detail
+
+Widget::Widget(const char* elementName) : mElementName(elementName) {}
 Widget::~Widget() = default;
 
 std::uint64_t Widget::styleContextRevision() const {
@@ -44,14 +67,14 @@ Widget& Widget::setId(std::string id) {
     return *this;
 }
 
-Widget& Widget::addClass(std::string class_name) {
-    mClasses.insert(std::move(class_name));
+Widget& Widget::addClass(std::string className) {
+    mClasses.insert(std::move(className));
     invalidateStyleTree();
     return *this;
 }
 
-Widget& Widget::setStyleElement(std::string style_element) {
-    mStyleElement = std::move(style_element);
+Widget& Widget::setStyleElement(std::string styleElement) {
+    mStyleElement = std::move(styleElement);
     invalidateStyleTree();
     return *this;
 }
@@ -71,9 +94,9 @@ Widget& Widget::setRect(const Rect& rect) {
     return *this;
 }
 
-Widget& Widget::setPointerEvents(bool pointer_events) {
-    if (mPointerEvents == pointer_events) return *this;
-    mPointerEvents = pointer_events;
+Widget& Widget::setPointerEvents(bool pointerEvents) {
+    if (mPointerEvents == pointerEvents) return *this;
+    mPointerEvents = pointerEvents;
     if (mSurface) mSurface->requestHitTestRefresh();
     return *this;
 }
@@ -91,18 +114,34 @@ Widget& Widget::setDisabled(bool disabled) {
 Widget& Widget::setVisibility(Visibility visibility) {
     if (visibility == mVisibility) return *this;
 
-    const bool layout_participation_changed = (visibility == Visibility::Collapsed) != (mVisibility == Visibility::Collapsed);
+    const bool layoutParticipationChanged = (visibility == Visibility::Collapsed) != (mVisibility == Visibility::Collapsed);
     mVisibility = visibility;
-    if (layout_participation_changed) {
+    if (layoutParticipationChanged) {
         ++mChildSnapshotRevision;
         if (mParent) ++mParent->mChildSnapshotRevision;
     }
-    if (layout_participation_changed && mSurface) mSurface->invalidateOrderingCache();
+    if (layoutParticipationChanged && mSurface) mSurface->invalidateOrderingCache();
     if (mSurface) mSurface->requestHitTestRefresh();
-    if (layout_participation_changed) invalidateMeasure();
+    if (layoutParticipationChanged) invalidateMeasure();
     else invalidatePaint();
     if (visibility != Visibility::Visible && mSurface) mSurface->widgetBecameUnavailable(*this);
     return *this;
+}
+
+Widget& Widget::setHidden(bool hidden) {
+    return setVisibility(hidden ? Visibility::Hidden : Visibility::Visible);
+}
+
+bool Widget::setTextContent(TextSource) {
+    return false;
+}
+
+bool Widget::setCheckedValue(bool) {
+    return false;
+}
+
+std::optional<bool> Widget::checkedValue() const {
+    return std::nullopt;
 }
 
 Widget& Widget::setOnActivate(std::function<void(Widget&)> callback) {
@@ -110,8 +149,8 @@ Widget& Widget::setOnActivate(std::function<void(Widget&)> callback) {
     return *this;
 }
 
-Widget& Widget::setAction(ActionEventKind kind, std::string action) {
-    mActions[kind].name = std::move(action);
+Widget& Widget::setEventCall(WidgetEventKind kind, EventCall call) {
+    mEventSlots[kind].call = std::move(call);
     return *this;
 }
 
@@ -120,25 +159,26 @@ Widget& Widget::setLongClickDelay(std::chrono::milliseconds delay) {
     return *this;
 }
 
-Widget& Widget::setIdScopeRoot(bool scope_root) {
-    mIdScopeRoot = scope_root;
+Widget& Widget::setIdScopeRoot(bool scopeRoot) {
+    mIdScopeRoot = scopeRoot;
     return *this;
 }
 
-const std::string& Widget::action(ActionEventKind kind) const {
-    static const std::string empty;
-    const auto found = mActions.find(kind);
-    return found == mActions.end() ? empty : found->second.name;
+const EventCall* Widget::eventCall(WidgetEventKind kind) const {
+    const auto found = mEventSlots.find(kind);
+    return found == mEventSlots.end() || !found->second.call ? nullptr : &*found->second.call;
 }
 
-void Widget::bindAction(ActionEventKind kind, const std::shared_ptr<detail::ActionHandler>& handler) {
-    mActions[kind].handler = handler;
+void Widget::bindEventHandler(WidgetEventKind kind, const std::shared_ptr<detail::EventHandler>& handler) {
+    mEventSlots[kind].handler = handler;
 }
 
-void Widget::emitAction(const ActionEvent& event) {
-    const auto found = mActions.find(event.kind);
-    if (found == mActions.end()) return;
-    if (const auto handler = found->second.handler.lock()) handler->invoke(event);
+void Widget::emitEvent(const WidgetEvent& event) {
+    const auto found = mEventSlots.find(event.kind);
+    if (found == mEventSlots.end()) return;
+    if (const auto handler = found->second.handler.lock()) {
+        if (found->second.call) handler->invoke(event, *found->second.call);
+    }
 }
 
 Widget& Widget::addChild(std::unique_ptr<Widget> child) {
@@ -184,19 +224,19 @@ void Widget::setSurface(Surface* surface) {
     if (mSurface) mSurface->invalidateStyleCache();
     mLayoutCache = {};
     mSurface = surface;
-    const Widget* expected_parent = mParent;
+    const Widget* expectedParent = mParent;
     const WidgetRef<Widget> self(this);
     std::vector<WidgetRef<Widget>> children;
     children.reserve(mChildren.size());
     for (const auto& child : mChildren) children.emplace_back(child.get());
     if (const System* system = attachedSystem()) onLocaleChanged(*system);
     Widget* current = self.get();
-    if (!current || current->mSurface != surface || current->mParent != expected_parent) return;
-    for (const WidgetRef<Widget>& child_ref : children)
-        if (Widget* child = child_ref.get(); child && child->parent() == current) {
+    if (!current || current->mSurface != surface || current->mParent != expectedParent) return;
+    for (const WidgetRef<Widget>& childRef : children)
+        if (Widget* child = childRef.get(); child && child->parent() == current) {
             child->setSurface(surface);
             current = self.get();
-            if (!current || current->mSurface != surface || current->mParent != expected_parent) return;
+            if (!current || current->mSurface != surface || current->mParent != expectedParent) return;
         }
     if (current->mSurface) {
         current->mSurface->invalidateStyleCache();
@@ -255,21 +295,21 @@ void Widget::invalidateTextTree() {
     else if (mSurface) mSurface->requestLayout();
 }
 
-void Widget::invalidateStyleTree(bool layout_affecting, bool descendants) {
-    const auto invalidate = [layout_affecting](auto&& self, Widget& widget, bool propagate) -> void {
+void Widget::invalidateStyleTree(bool layoutAffecting, bool propagateToDescendants) {
+    const auto invalidate = [layoutAffecting](auto&& self, Widget& widget, bool propagate) -> void {
         ++widget.mStyleRevision;
-        if (layout_affecting) ++widget.mLayoutInvalidationRevision;
-        widget.mInvalidationReasons.add(layout_affecting ? kLayoutStyleInvalidationReasons : kPaintStyleInvalidationReasons);
+        if (layoutAffecting) ++widget.mLayoutInvalidationRevision;
+        widget.mInvalidationReasons.add(layoutAffecting ? kLayoutStyleInvalidationReasons : kPaintStyleInvalidationReasons);
         if (propagate)
             for (auto& child : widget.mChildren) self(self, *child, true);
     };
-    invalidate(invalidate, *this, descendants);
-    if (layout_affecting) {
+    invalidate(invalidate, *this, propagateToDescendants);
+    if (layoutAffecting) {
         ++mChildSnapshotRevision;
         if (mParent) ++mParent->mChildSnapshotRevision;
         if (mSurface) mSurface->invalidateOrderingCache();
     }
-    if (!layout_affecting) {
+    if (!layoutAffecting) {
         if (mSurface) mSurface->requestPaint();
         return;
     }
@@ -292,13 +332,13 @@ const StyleSheet* Widget::attachedStyleSheet() const {
 }
 
 void Widget::setState(WidgetState state, bool enabled) {
-    if (has_state(mStates, state) == enabled) return;
-    set_state(mStates, state, enabled);
-    const StyleSheet* style_sheet = attachedStyleSheet();
-    const bool layout_affecting = !style_sheet || style_sheet->stateAffectsLayout(*this, state);
-    const bool descendants = !style_sheet || style_sheet->stateAffectsDescendants(*this, state);
-    invalidateStyleTree(layout_affecting, descendants);
-    if (style_sheet && style_sheet->stateAffectsHitTesting(*this, state) && mSurface) mSurface->requestHitTestRefresh();
+    if (rdui::hasState(mStates, state) == enabled) return;
+    rdui::setState(mStates, state, enabled);
+    const StyleSheet* styleSheet = attachedStyleSheet();
+    const bool layoutAffecting = !styleSheet || styleSheet->stateAffectsLayout(*this, state);
+    const bool propagateToDescendants = !styleSheet || styleSheet->stateAffectsDescendants(*this, state);
+    invalidateStyleTree(layoutAffecting, propagateToDescendants);
+    if (styleSheet && styleSheet->stateAffectsHitTesting(*this, state) && mSurface) mSurface->requestHitTestRefresh();
 }
 
 void Widget::activate() {
@@ -309,7 +349,7 @@ void Widget::activate() {
     if (!current) return;
     if (current->mOnActivate) current->mOnActivate(*current);
     current = self.get();
-    if (current) current->emitAction(ClickActionEvent(*current));
+    if (current) current->emitEvent(ClickEvent(*current));
 }
 
 void Widget::activateFromLabel() {
@@ -318,14 +358,14 @@ void Widget::activateFromLabel() {
     onLabelActivate();
 }
 
-void Widget::dispatchMouseAction(ActionEventKind kind, const PointerEvent& event) {
+void Widget::dispatchMouseEvent(WidgetEventKind kind, const PointerEvent& event) {
     if (disabled()) return;
-    emitAction(MouseActionEvent(*this, kind, event));
+    emitEvent(MouseWidgetEvent(*this, kind, event));
 }
 
-void Widget::dispatchLongClickAction(std::chrono::milliseconds held_for) {
+void Widget::dispatchLongClickEvent(std::chrono::milliseconds heldFor) {
     if (disabled()) return;
-    emitAction(LongClickActionEvent(*this, held_for));
+    emitEvent(LongClickEvent(*this, heldFor));
 }
 
 void Widget::translate(const Vec2& delta) {

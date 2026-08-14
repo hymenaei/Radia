@@ -30,6 +30,7 @@
 
 namespace rdui {
 std::string schemaNameKey(std::string_view name);
-bool isLocalIdentifier(std::string_view value);
+bool isWidgetIdentifier(std::string_view value);
+bool isKebabCaseIdentifier(std::string_view value);
 } // namespace rdui
 #endif // RD_LAYOUT_SCHEMA_H

@@ -27,12 +27,11 @@
 #include <algorithm>
 #include <chrono>
 #include <utility>
+#include "auxiliarywindow.h"
 #include "inputbridge.h"
 #include "llgl.h"
 #include "llrender.h"
 #include "llrendertarget.h"
-#include "llviewershadermgr.h"
-#include "nativewindow.h"
 #include "render/openglpaintcontext.h"
 #include "surface/surface.h"
 #include "system.h"
@@ -40,23 +39,24 @@
 #include "widgets/panel.h"
 
 namespace rdui::viewer {
-namespace { const RduiInputBridge INPUT_BRIDGE; }
-
-class DetachedFloaterWindow::Impl final : public DetachedFloaterPresentation, public NativeWindowClient, private SurfaceFloaterDelegate {
+class DetachedFloaterWindow::Impl final : public DetachedFloaterPresentation, public AuxiliaryWindowClient, private SurfaceFloaterDelegate {
 public:
-    Impl(NativeWindowFactory& native_windows, System& system, DetachedFloaterManager& manager, std::unique_ptr<Floater> floater)
-        : mNativeWindows(native_windows), mManager(manager), mPaintContext(gRduiProgram, system), mSurface(system.createSurface(mPaintContext)),
-          mFloater(floater.get()) {
+    using Clock = DetachedFloaterWindow::Clock;
+    using TimePoint = std::chrono::steady_clock::time_point;
+
+    Impl(AuxiliaryWindowFactory& auxiliaryWindowFactory, LLGLSLShader& uiShader, System& system, DetachedFloaterManager& manager,
+         std::unique_ptr<Floater> floater, Clock now)
+        : mAuxiliaryWindowFactory(auxiliaryWindowFactory), mManager(manager), mNow(std::move(now)), mPaintContext(uiShader, system),
+          mSurface(system.createSurface(mPaintContext)), mFloater(floater.get()) {
         mSurface->setFloaterDelegate(this);
         mSurface->mountFloater(std::move(floater));
     }
 
-    bool open(const NativeRect& rect, float scale_multiplier, const std::optional<Vec2>& drag_offset, const std::optional<Vec2>& logical_size,
-              const std::optional<NativePoint>& drag_cursor) override {
-        mWindow = mNativeWindows.create(rect, mFloater->title(), *this);
-        if (!mWindow) return false;
-        mWindow->setScaleMultiplier(scale_multiplier);
-        Vec2 size = logical_size.value_or(Vec2{mFloater->rect().w, mFloater->rect().h});
+    std::optional<DetachedFloaterPresentationUpdate> open(const DetachedFloaterPresentationOpenRequest& request) override {
+        mWindow = mAuxiliaryWindowFactory.create(request.rect, mFloater->title(), *this);
+        if (!mWindow) return std::nullopt;
+        mWindow->setScaleMultiplier(request.scaleMultiplier);
+        Vec2 size = request.logicalSize.value_or(Vec2{mFloater->rect().w, mFloater->rect().h});
         if (mFloater->canResize()) {
             const Vec2 minimum = mSurface->minimumFloaterSize(*mFloater);
             size.x = std::max(size.x, minimum.x);
@@ -64,18 +64,18 @@ public:
         }
         mLogicalSize = size;
         mWindow->setLogicalSize(size.x, size.y);
-        const NativeRect actual_rect = mWindow->rect();
+        const AuxiliaryWindowRect actualRect = mWindow->rect();
         const float scale = mWindow->scale();
-        const float width = static_cast<float>(actual_rect.width) / scale;
-        const float height = static_cast<float>(actual_rect.height) / scale;
+        const float width = static_cast<float>(actualRect.width) / scale;
+        const float height = static_cast<float>(actualRect.height) / scale;
         mSurface->setViewport(width, height);
         mSurface->placeFloater(*mFloater, {0.f, 0.f, width, height});
         mSurface->updateLayout();
         mNativeTitle = mFloater->title();
         mWindow->show(false);
         mWindow->render();
-        if (drag_offset) mWindow->beginDrag(drag_offset->x, drag_offset->y, drag_cursor);
-        return true;
+        if (request.dragOffset) mWindow->beginDrag(request.dragOffset->x, request.dragOffset->y, request.dragCursor);
+        return makeUpdate(false);
     }
 
     bool beginResize() override {
@@ -84,30 +84,33 @@ public:
         return true;
     }
 
-    void applyResize(const Rect& logical_rect) override {
+    void applyResize(const Rect& logicalRect) override {
         if (!mWindow) return;
-        mLogicalSize = {logical_rect.w, logical_rect.h};
-        mWindow->setLogicalRect(logical_rect);
+        mLogicalSize = {logicalRect.w, logicalRect.h};
+        mWindow->setLogicalRect({logicalRect.x, logicalRect.y, logicalRect.w, logicalRect.h});
     }
 
-    void tick() override {
-        if (!mWindow) return;
-        const auto now = std::chrono::steady_clock::now();
+    DetachedFloaterPresentationUpdate update() override {
+        if (!mWindow) return {};
+        const auto now = currentTime();
         mWindow->pump();
         if (mFloater && mFloater->title() != mNativeTitle) {
             mNativeTitle = mFloater->title();
             mWindow->setTitle(mNativeTitle);
         }
-        if (mLastTick != std::chrono::steady_clock::time_point())
-            mSurface->update(std::chrono::duration_cast<std::chrono::milliseconds>(now - mLastTick));
+        if (mLastTick != TimePoint()) mSurface->update(std::chrono::duration_cast<std::chrono::milliseconds>(now - mLastTick));
         mLastTick = now;
         if (!mCloseRequested && !mMinimizeRequested && (mSurface->needsPaint() || nativePresentationChanged())) mWindow->render();
+
+        return makeUpdate(true);
     }
 
     void setVisible(bool visible) override {
         if (mWindow) mWindow->setVisible(visible);
         if (!visible) mSurface->clearInteractionState();
     }
+
+    std::optional<Rect> prepareReplacement(Floater& replacement) override { return mSurface->prepareFloater(replacement); }
 
     std::unique_ptr<Floater> releaseFloater() override {
         if (!mFloater) return nullptr;
@@ -116,69 +119,79 @@ public:
         return floater;
     }
 
-    Floater& replaceFloater(std::unique_ptr<Floater> replacement, const std::optional<Vec2>& logical_size) override {
-        if (mFloater) mSurface->unmountFloater(*mFloater);
-        if (logical_size && mWindow) {
-            Vec2 size = *logical_size;
-            if (replacement->canResize()) {
-                const Vec2 minimum = mSurface->minimumFloaterSize(*replacement);
+    std::unique_ptr<Floater> replaceFloater(std::unique_ptr<Floater> replacement, const std::optional<Vec2>& logicalSize) override {
+        if (!mFloater || !replacement) return nullptr;
+        Floater* installed = replacement.get();
+        std::unique_ptr<Floater> retired;
+        retired = mSurface->replaceFloater(*mFloater, std::move(replacement));
+        if (!retired) return nullptr;
+        mFloater.set(installed);
+        if (logicalSize && mWindow) {
+            Vec2 size = *logicalSize;
+            if (installed->canResize()) {
+                const Vec2 minimum = mSurface->minimumFloaterSize(*installed);
                 size.x = std::max(size.x, minimum.x);
                 size.y = std::max(size.y, minimum.y);
             }
             mLogicalSize = size;
             mWindow->setLogicalSize(size.x, size.y);
-            const NativeRect native = mWindow->rect();
+            const AuxiliaryWindowRect native = mWindow->rect();
             const float scale = mWindow->scale();
             mSurface->setViewport(static_cast<float>(native.width) / scale, static_cast<float>(native.height) / scale);
         }
-        replacement->setRect({0.f, 0.f, mSurface->width(), mSurface->height()});
-        Floater& mounted = mSurface->mountFloater(std::move(replacement));
+        installed->setRect({0.f, 0.f, mSurface->width(), mSurface->height()});
+        Floater& mounted = *installed;
         mSurface->placeFloater(mounted, {0.f, 0.f, mSurface->width(), mSurface->height()});
         mSurface->updateLayout();
-        mFloater.set(&mounted);
         mNativeTitle.clear();
-        return mounted;
+        return retired;
     }
 
-    NativeInputDispatchResult dispatchNative(const NativeInputEvent& event) override {
-        const SurfaceInputEvent translated = INPUT_BRIDGE.translate(event);
-        if (const auto* pointer = std::get_if<SurfacePointerInput>(&translated)) {
-            if (pointer->phase == NativePointerPhase::Leave) {
-                mSurface->pointerLeave();
-                return {};
-            }
-            const bool handled = [&] {
-                switch (pointer->phase) {
-                    case NativePointerPhase::Leave: return false;
-                    case NativePointerPhase::Move: return mSurface->pointerMove(pointer->event);
-                    case NativePointerPhase::Down: return mSurface->pointerDown(pointer->event);
-                    case NativePointerPhase::Up: return mSurface->pointerUp(pointer->event);
-                }
+    AuxiliaryInputResult pointerMove(F32 x, F32 y, AuxiliaryPointerButton button, MASK modifiers, U8 clickCount, F32 deltaX, F32 deltaY) override {
+        const bool handled = mSurface->pointerMove(translatePointerInput({x, y, translateButton(button), modifiers, clickCount, deltaX, deltaY}));
+        return {handled, handled ? std::optional<ECursorType>(translateCursor(mSurface->cursor())) : std::nullopt};
+    }
 
-                return false;
-            }();
-            if (pointer->phase == NativePointerPhase::Down && pointer->event.button == PointerButton::Left && mFloater->dragging()) {
-                mSurface->clearInteractionState();
-                if (mWindow) mWindow->beginDrag(pointer->event.position.x, pointer->event.position.y);
-                return {true, UI_CURSOR_ARROW};
-            }
-            return {handled, handled ? std::optional<ECursorType>(INPUT_BRIDGE.translateCursor(mSurface->cursor())) : std::nullopt};
+    AuxiliaryInputResult pointerDown(F32 x, F32 y, AuxiliaryPointerButton button, MASK modifiers, U8 clickCount, F32 deltaX, F32 deltaY) override {
+        const PointerEvent event = translatePointerInput({x, y, translateButton(button), modifiers, clickCount, deltaX, deltaY});
+        const bool handled = mSurface->pointerDown(event);
+        if (event.button == PointerButton::Left && mFloater->dragging()) {
+            mSurface->clearInteractionState();
+            if (mWindow) mWindow->beginDrag(event.position.x, event.position.y);
+            return {true, UI_CURSOR_ARROW};
         }
-        if (const auto* scroll = std::get_if<ScrollEvent>(&translated)) return {mSurface->scroll(*scroll), std::nullopt};
-        if (const auto* key = std::get_if<SurfaceKeyInput>(&translated))
-            return {key->down ? mSurface->keyDown(key->event) : mSurface->keyUp(key->event), std::nullopt};
-        if (const auto* character = std::get_if<SurfaceCharacterInput>(&translated)) return {mSurface->charInput(character->codepoint), std::nullopt};
-        if (std::holds_alternative<NativeInteractionLoss>(translated)) mSurface->clearInteractionState();
-        return {};
+        return {handled, handled ? std::optional<ECursorType>(translateCursor(mSurface->cursor())) : std::nullopt};
     }
 
-    void paintNative(S32 pixel_width, S32 pixel_height, F32 scale) override {
-        if (!mFloater || pixel_width <= 0 || pixel_height <= 0) return;
-        mLastPaintWidth = pixel_width;
-        mLastPaintHeight = pixel_height;
+    AuxiliaryInputResult pointerUp(F32 x, F32 y, AuxiliaryPointerButton button, MASK modifiers, U8 clickCount, F32 deltaX, F32 deltaY) override {
+        return {mSurface->pointerUp(translatePointerInput({x, y, translateButton(button), modifiers, clickCount, deltaX, deltaY})), std::nullopt};
+    }
+
+    void pointerLeave() override { mSurface->pointerLeave(); }
+
+    AuxiliaryInputResult scroll(S32 x, S32 y, F32 horizontal, F32 vertical, MASK modifiers) override {
+        return {mSurface->scroll(translateScrollInput({x, y, horizontal, vertical, modifiers})), std::nullopt};
+    }
+
+    AuxiliaryInputResult keyDown(KEY key, MASK modifiers, bool repeated) override {
+        return {mSurface->keyDown(translateKeyInput({key, modifiers, true, repeated})), std::nullopt};
+    }
+
+    AuxiliaryInputResult keyUp(KEY key, MASK modifiers) override {
+        return {mSurface->keyUp(translateKeyInput({key, modifiers, false, false})), std::nullopt};
+    }
+
+    AuxiliaryInputResult character(U32 codepoint, MASK) override { return {mSurface->charInput(codepoint), std::nullopt}; }
+
+    void interactionLost(AuxiliaryInteractionLoss) override { mSurface->clearInteractionState(); }
+
+    void paint(S32 pixelWidth, S32 pixelHeight, F32 scale) override {
+        if (!mFloater || pixelWidth <= 0 || pixelHeight <= 0) return;
+        mLastPaintWidth = pixelWidth;
+        mLastPaintHeight = pixelHeight;
         mLastPaintScale = scale;
-        const float width = static_cast<float>(pixel_width) / scale;
-        const float height = static_cast<float>(pixel_height) / scale;
+        const float width = static_cast<float>(pixelWidth) / scale;
+        const float height = static_cast<float>(pixelHeight) / scale;
         if (mSurface->width() != width || mSurface->height() != height) {
             mSurface->setViewport(width, height);
             mSurface->placeFloater(*mFloater, {0.f, 0.f, width, height});
@@ -187,21 +200,21 @@ public:
 
         GLint framebuffer = 0;
         GLint viewport[4]{};
-        GLfloat clear_color[4]{};
-        GLboolean color_mask[4]{};
+        GLfloat clearColor[4]{};
+        GLboolean colorMask[4]{};
         glGetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
         glGetIntegerv(GL_VIEWPORT, viewport);
-        glGetFloatv(GL_COLOR_CLEAR_VALUE, clear_color);
-        glGetBooleanv(GL_COLOR_WRITEMASK, color_mask);
-        const GLboolean scissor_enabled = glIsEnabled(GL_SCISSOR_TEST);
-        glViewport(0, 0, pixel_width, pixel_height);
+        glGetFloatv(GL_COLOR_CLEAR_VALUE, clearColor);
+        glGetBooleanv(GL_COLOR_WRITEMASK, colorMask);
+        const GLboolean scissorEnabled = glIsEnabled(GL_SCISSOR_TEST);
+        glViewport(0, 0, pixelWidth, pixelHeight);
         glDisable(GL_SCISSOR_TEST);
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glClearColor(0.f, 0.f, 0.f, 0.f);
         glClear(GL_COLOR_BUFFER_BIT);
-        if (scissor_enabled) glEnable(GL_SCISSOR_TEST);
+        if (scissorEnabled) glEnable(GL_SCISSOR_TEST);
 
-        const LLRender::eMatrixMode previous_mode = gGL.getMatrixMode();
+        const LLRender::eMatrixMode previousMode = gGL.getMatrixMode();
         gGL.matrixMode(LLRender::MM_PROJECTION);
         gGL.pushMatrix();
         gGL.loadIdentity();
@@ -219,44 +232,51 @@ public:
         gGL.popMatrix();
         gGL.matrixMode(LLRender::MM_PROJECTION);
         gGL.popMatrix();
-        gGL.matrixMode(previous_mode);
+        gGL.matrixMode(previousMode);
         gGL.flush();
 
         glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
         glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
-        glColorMask(color_mask[0], color_mask[1], color_mask[2], color_mask[3]);
-        glClearColor(clear_color[0], clear_color[1], clear_color[2], clear_color[3]);
+        glColorMask(colorMask[0], colorMask[1], colorMask[2], colorMask[3]);
+        glClearColor(clearColor[0], clearColor[1], clearColor[2], clearColor[3]);
     }
 
-    void closeNative() override {
+    void closeRequested() override {
         if (mFloater) mFloater->close();
     }
 
-    void nativeDragEnded() override { mDragEnded = true; }
+    void dragEnded() override { mDragEnded = true; }
 
-    void nativeResizeEnded(F32 logical_width, F32 logical_height) override {
-        mLogicalSize = {logical_width, logical_height};
+    void resizeEnded(F32 logicalWidth, F32 logicalHeight) override {
+        mLogicalSize = {logicalWidth, logicalHeight};
         mResizeEnded = true;
     }
 
-    bool closeRequested() const override { return mCloseRequested; }
-    bool minimizeRequested() const override { return mMinimizeRequested; }
-    bool takeDragEnded() override { return std::exchange(mDragEnded, false); }
-    bool takeResizeEnded() override { return std::exchange(mResizeEnded, false); }
-    Floater* floater() const override { return mFloater.get(); }
-    NativeRect nativeRect() const override { return mWindow ? mWindow->rect() : NativeRect{}; }
-    std::string monitorId() const override { return mWindow ? mWindow->monitorId() : std::string(); }
-    Vec2 logicalSize() const override { return mLogicalSize; }
+    DetachedFloaterPresentationUpdate makeUpdate(bool consumeEvents) {
+        DetachedFloaterPresentationUpdate result;
+        result.closeRequested = mCloseRequested;
+        result.minimizeRequested = mMinimizeRequested;
+        result.dragEnded = consumeEvents ? std::exchange(mDragEnded, false) : false;
+        result.resizeEnded = consumeEvents ? std::exchange(mResizeEnded, false) : false;
+        result.nativeRect = nativeRect();
+        result.logicalSize = mLogicalSize;
+        result.headerCenterScreen = headerCenterScreen();
+        return result;
+    }
 
-    Vec2 headerCenterScreen() const override {
+    AuxiliaryWindowRect nativeRect() const { return mWindow ? mWindow->rect() : AuxiliaryWindowRect{}; }
+
+    Vec2 headerCenterScreen() const {
         if (!mWindow || !mFloater || !mFloater->header()) return {};
-        const NativeRect window_rect = mWindow->rect();
+        const AuxiliaryWindowRect windowRect = mWindow->rect();
         const Rect header = mFloater->header()->rect();
-        return {window_rect.x + (header.x + header.w * 0.5f) * mWindow->scale(),
-                window_rect.y + (mSurface->height() - header.y - header.h * 0.5f) * mWindow->scale()};
+        return {windowRect.x + (header.x + header.w * 0.5f) * mWindow->scale(),
+                windowRect.y + (mSurface->height() - header.y - header.h * 0.5f) * mWindow->scale()};
     }
 
 private:
+    TimePoint currentTime() const { return mNow ? mNow() : std::chrono::steady_clock::now(); }
+
     void floaterClosed(Surface&, Floater&) override { mCloseRequested = true; }
 
     void floaterMinimizedChanged(Surface&, Floater&, bool minimized) override {
@@ -269,16 +289,28 @@ private:
 
     bool nativePresentationChanged() const {
         if (!mWindow) return false;
-        const NativeRect native = mWindow->rect();
+        const AuxiliaryWindowRect native = mWindow->rect();
         return native.width != mLastPaintWidth || native.height != mLastPaintHeight || mWindow->scale() != mLastPaintScale;
     }
 
-    NativeWindowFactory& mNativeWindows;
+    static NativePointerButton translateButton(AuxiliaryPointerButton button) {
+        switch (button) {
+            case AuxiliaryPointerButton::Left: return NativePointerButton::Left;
+            case AuxiliaryPointerButton::Right: return NativePointerButton::Right;
+            case AuxiliaryPointerButton::Middle: return NativePointerButton::Middle;
+            case AuxiliaryPointerButton::Auxiliary1: return NativePointerButton::Auxiliary1;
+            case AuxiliaryPointerButton::Auxiliary2: return NativePointerButton::Auxiliary2;
+            default: return NativePointerButton::NoButton;
+        }
+    }
+
+    AuxiliaryWindowFactory& mAuxiliaryWindowFactory;
     DetachedFloaterManager& mManager;
+    Clock mNow;
     OpenGLPaintContext mPaintContext;
     std::unique_ptr<Surface> mSurface;
     WidgetRef<Floater> mFloater;
-    std::unique_ptr<NativeWindow> mWindow;
+    std::unique_ptr<AuxiliaryWindow> mWindow;
     bool mCloseRequested = false;
     bool mMinimizeRequested = false;
     bool mDragEnded = false;
@@ -288,63 +320,38 @@ private:
     F32 mLastPaintScale = 0.f;
     std::string mNativeTitle;
     Vec2 mLogicalSize;
-    std::chrono::steady_clock::time_point mLastTick;
+    TimePoint mLastTick;
 };
 
-DetachedFloaterWindow::DetachedFloaterWindow(NativeWindowFactory& native_windows, System& system, DetachedFloaterManager& manager,
-                                             std::unique_ptr<Floater> floater)
-    : mImpl(std::make_unique<Impl>(native_windows, system, manager, std::move(floater))) {}
+DetachedFloaterWindow::DetachedFloaterWindow(AuxiliaryWindowFactory& auxiliaryWindowFactory, LLGLSLShader& uiShader, System& system,
+                                             DetachedFloaterManager& manager, std::unique_ptr<Floater> floater, Clock now)
+    : mImpl(std::make_unique<Impl>(auxiliaryWindowFactory, uiShader, system, manager, std::move(floater), std::move(now))) {}
 
 DetachedFloaterWindow::~DetachedFloaterWindow() = default;
 
-bool DetachedFloaterWindow::open(const NativeRect& rect, float scale_multiplier, const std::optional<Vec2>& drag_offset,
-                                 const std::optional<Vec2>& logical_size, const std::optional<NativePoint>& drag_cursor) {
-    return mImpl->open(rect, scale_multiplier, drag_offset, logical_size, drag_cursor);
+std::optional<DetachedFloaterPresentationUpdate> DetachedFloaterWindow::open(const DetachedFloaterPresentationOpenRequest& request) {
+    return mImpl->open(request);
 }
 
 bool DetachedFloaterWindow::beginResize() {
     return mImpl->beginResize();
 }
-void DetachedFloaterWindow::applyResize(const Rect& logical_rect) {
-    mImpl->applyResize(logical_rect);
+void DetachedFloaterWindow::applyResize(const Rect& logicalRect) {
+    mImpl->applyResize(logicalRect);
 }
-void DetachedFloaterWindow::tick() {
-    mImpl->tick();
+DetachedFloaterPresentationUpdate DetachedFloaterWindow::update() {
+    return mImpl->update();
 }
 void DetachedFloaterWindow::setVisible(bool visible) {
     mImpl->setVisible(visible);
 }
+std::optional<Rect> DetachedFloaterWindow::prepareReplacement(Floater& replacement) {
+    return mImpl->prepareReplacement(replacement);
+}
 std::unique_ptr<Floater> DetachedFloaterWindow::releaseFloater() {
     return mImpl->releaseFloater();
 }
-Floater& DetachedFloaterWindow::replaceFloater(std::unique_ptr<Floater> replacement, const std::optional<Vec2>& logical_size) {
-    return mImpl->replaceFloater(std::move(replacement), logical_size);
-}
-bool DetachedFloaterWindow::closeRequested() const {
-    return mImpl->closeRequested();
-}
-bool DetachedFloaterWindow::minimizeRequested() const {
-    return mImpl->minimizeRequested();
-}
-bool DetachedFloaterWindow::takeDragEnded() {
-    return mImpl->takeDragEnded();
-}
-bool DetachedFloaterWindow::takeResizeEnded() {
-    return mImpl->takeResizeEnded();
-}
-Floater* DetachedFloaterWindow::floater() const {
-    return mImpl->floater();
-}
-NativeRect DetachedFloaterWindow::nativeRect() const {
-    return mImpl->nativeRect();
-}
-std::string DetachedFloaterWindow::monitorId() const {
-    return mImpl->monitorId();
-}
-Vec2 DetachedFloaterWindow::logicalSize() const {
-    return mImpl->logicalSize();
-}
-Vec2 DetachedFloaterWindow::headerCenterScreen() const {
-    return mImpl->headerCenterScreen();
+std::unique_ptr<Floater> DetachedFloaterWindow::replaceFloater(std::unique_ptr<Floater> replacement, const std::optional<Vec2>& logicalSize) {
+    return mImpl->replaceFloater(std::move(replacement), logicalSize);
 }
 } // namespace rdui::viewer

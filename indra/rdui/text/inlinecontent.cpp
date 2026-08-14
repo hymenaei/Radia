@@ -40,9 +40,9 @@ InlineContentNode InlineContentNode::container(InlineContentKind kind, std::vect
     return result;
 }
 
-InlineContentNode InlineContentNode::kbd(std::string binding, KeybindingPresentation presentation) {
+InlineContentNode InlineContentNode::kbd(std::string shortcutId, KeybindingPresentation presentation) {
     InlineContentNode result(InlineContentKind::Kbd);
-    result.mMetadata = std::move(binding);
+    result.mShortcutId = std::move(shortcutId);
     result.mKeybindingPresentation = std::move(presentation);
     return result;
 }
@@ -53,7 +53,7 @@ InlineContentNode InlineContentNode::br() {
 
 InlineContentNode InlineContentNode::link(std::string destination, std::vector<InlineContentNode> children) {
     InlineContentNode result(InlineContentKind::Link);
-    result.mMetadata = std::move(destination);
+    result.mDestination = std::move(destination);
     result.mChildren = std::move(children);
     return result;
 }
@@ -85,7 +85,7 @@ std::string InlineContent::plainText() const {
 }
 
 InlineContent InlineContent::resolveKeybindings(const std::function<KeybindingPresentation(const std::string&)>& resolve) const {
-    const auto resolve_node = [&](auto&& self, const InlineContentNode& node) -> InlineContentNode {
+    const auto resolveNode = [&](auto&& self, const InlineContentNode& node) -> InlineContentNode {
         std::vector<InlineContentNode> children;
         children.reserve(node.children().size());
         for (const InlineContentNode& child : node.children()) children.push_back(self(self, child));
@@ -95,9 +95,9 @@ InlineContent InlineContent::resolveKeybindings(const std::function<KeybindingPr
             case InlineContentKind::B:
             case InlineContentKind::I:
             case InlineContentKind::S: return InlineContentNode::container(node.kind(), std::move(children));
-            case InlineContentKind::Kbd: return InlineContentNode::kbd(node.metadata(), resolve(node.metadata()));
+            case InlineContentKind::Kbd: return InlineContentNode::kbd(node.shortcutId(), resolve(node.shortcutId()));
             case InlineContentKind::Br: return InlineContentNode::br();
-            case InlineContentKind::Link: return InlineContentNode::link(node.metadata(), std::move(children));
+            case InlineContentKind::Link: return InlineContentNode::link(node.destination(), std::move(children));
         }
         llassert(false);
         return InlineContentNode::br();
@@ -105,7 +105,7 @@ InlineContent InlineContent::resolveKeybindings(const std::function<KeybindingPr
 
     std::vector<InlineContentNode> nodes;
     nodes.reserve(mNodes.size());
-    for (const InlineContentNode& node : mNodes) nodes.push_back(resolve_node(resolve_node, node));
+    for (const InlineContentNode& node : mNodes) nodes.push_back(resolveNode(resolveNode, node));
     return InlineContent(std::move(nodes));
 }
 
@@ -119,7 +119,7 @@ const char* inlineContentElement(InlineContentKind kind) {
     return "";
 }
 
-bool inlineContentKind(const std::string& element, InlineContentKind& kind) {
+bool tryGetInlineContentKind(const std::string& element, InlineContentKind& kind) {
     const std::string lookup = schemaNameKey(element);
 #define INLINE_CONTENT_ENTRY(name, element, authored)                                                                                                \
     if (authored && lookup == schemaNameKey(element)) {                                                                                              \

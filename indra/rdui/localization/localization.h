@@ -55,7 +55,7 @@ public:
     LocalizationCatalog(const LocalizationCatalog&) = delete;
     LocalizationCatalog& operator=(const LocalizationCatalog&) = delete;
 
-    LocalizationLoadResult loadYaml(const std::string& yaml, const std::string& source_name = {});
+    LocalizationLoadResult loadYaml(const std::string& yaml, const std::string& sourceName = {});
     LocalizationLoadResult loadYamlLayers(const std::vector<ResourceLayer>& layers);
 
     std::vector<LocaleInfo> locales() const;
@@ -65,9 +65,9 @@ public:
     bool containsDefaultString(const std::string& id) const;
     bool pluralCapable(const std::string& id) const;
 
-    InlineContent resolve(const std::string& locale_id, const LocalizationRequest& request) const;
-    std::string get(const std::string& locale_id, const LocalizationRequest& request) const;
-    std::string get(const std::string& locale_id, const std::string& string_id) const;
+    InlineContent resolve(const std::string& localeId, const LocalizationRequest& request) const;
+    std::string get(const std::string& localeId, const LocalizationRequest& request) const;
+    std::string get(const std::string& localeId, const std::string& stringId) const;
 
 private:
     struct Impl;

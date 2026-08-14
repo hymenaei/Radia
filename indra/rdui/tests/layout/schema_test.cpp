@@ -27,13 +27,12 @@
 #include "diagnostic.h"
 
 namespace tut {
-struct diagnostic_data {};
-typedef test_group<diagnostic_data> diagnostic_test;
-typedef diagnostic_test::object diagnostic_object;
-using rduidiagnostic_object = diagnostic_object;
-diagnostic_test diagnostic_testcase("diagnostic");
+struct schemaData {};
+using schemaTest = test_group<schemaData>;
+using schemaObject = schemaTest::object;
+schemaTest schemaTestCase("schema");
 
-template<> template<> void rduidiagnostic_object::test<1>() {
+template<> template<> void schemaObject::test<1>() {
     rdui::DiagnosticResult destination;
     destination.warning("warning.first", "first warning");
     destination.error("error.first", "first error");
@@ -54,7 +53,7 @@ template<> template<> void rduidiagnostic_object::test<1>() {
     ensure_equals("source error follows", destination.errors[1].code, std::string("error.second"));
 }
 
-template<> template<> void rduidiagnostic_object::test<2>() {
+template<> template<> void schemaObject::test<2>() {
     rdui::DiagnosticResult destination;
     rdui::DiagnosticResult empty;
 

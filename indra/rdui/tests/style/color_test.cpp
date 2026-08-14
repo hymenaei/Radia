@@ -1,6 +1,6 @@
 /**
  * @file color_test.cpp
- * @brief Tests RSL color syntax and typed color values.
+ * @brief Tests Radia color syntax and typed color values.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -27,11 +27,10 @@
 #include "style/color.h"
 
 namespace tut {
-struct color_data {};
-typedef test_group<color_data> color_test;
-typedef color_test::object color_object;
-using rduicolor_object = color_object;
-color_test color_testcase("color");
+struct colorData {};
+using colorTest = test_group<colorData>;
+using colorObject = colorTest::object;
+colorTest colorTestCase("color");
 
 void ensureColor(const std::string& message, const std::string& value, const rdui::Color& expected) {
     const std::optional<rdui::Color> color = rdui::parseColor(value);
@@ -42,7 +41,7 @@ void ensureColor(const std::string& message, const std::string& value, const rdu
     ensure_approximately_equals((message + " alpha").c_str(), color->a, expected.a, 6);
 }
 
-template<> template<> void rduicolor_object::test<1>() {
+template<> template<> void colorObject::test<1>() {
     ensureColor("short rgb", "#f80", {1.f, 8.f / 15.f, 0.f, 1.f});
     ensureColor("short rgb with alpha", "#f808", {1.f, 8.f / 15.f, 0.f, 8.f / 15.f});
     ensureColor("long rgb", "#ff8800", {1.f, 136.f / 255.f, 0.f, 1.f});
@@ -50,7 +49,7 @@ template<> template<> void rduicolor_object::test<1>() {
     ensure("double hash rejected", !rdui::parseColor("##ff880080"));
 }
 
-template<> template<> void rduicolor_object::test<2>() {
+template<> template<> void colorObject::test<2>() {
     ensureColor("legacy rgb", "rgb(255, 128, 0)", {1.f, 128.f / 255.f, 0.f, 1.f});
     ensureColor("legacy rgb alpha", "RGB(100%, 50%, 0%, 25%)", {1.f, .5f, 0.f, .25f});
     ensureColor("modern rgb", "rgb(255 128 0 / 50%)", {1.f, 128.f / 255.f, 0.f, .5f});
@@ -58,7 +57,7 @@ template<> template<> void rduicolor_object::test<2>() {
     ensure("rgba function rejected", !rdui::parseColor("rgba(255 128 0 / 50%)"));
 }
 
-template<> template<> void rduicolor_object::test<3>() {
+template<> template<> void colorObject::test<3>() {
     ensureColor("hsl degrees", "hsl(120 100% 50%)", {0.f, 1.f, 0.f, 1.f});
     ensureColor("hsl turn", "hsl(.5turn 100% 50% / 25%)", {0.f, 1.f, 1.f, .25f});
     ensureColor("hsl radians", "hsl(3.14159265rad, 100%, 50%, .5)", {0.f, 1.f, 1.f, .5f});
@@ -67,7 +66,7 @@ template<> template<> void rduicolor_object::test<3>() {
     ensure("hsla function rejected", !rdui::parseColor("hsla(120 100% 50% / .5)"));
 }
 
-template<> template<> void rduicolor_object::test<4>() {
+template<> template<> void colorObject::test<4>() {
     ensure("bad hex rejected", !rdui::parseColor("#ggg"));
     ensure("mixed separators rejected", !rdui::parseColor("rgb(1, 2, 3 / .5)"));
     ensure("missing percent rejected", !rdui::parseColor("hsl(0 1 1)"));
@@ -75,7 +74,7 @@ template<> template<> void rduicolor_object::test<4>() {
     ensure("modern color commas rejected", !rdui::parseColor("lab(50%, 0, 0)"));
 }
 
-template<> template<> void rduicolor_object::test<5>() {
+template<> template<> void colorObject::test<5>() {
     ensureColor("hwb red", "hwb(0 0% 0%)", {1.f, 0.f, 0.f, 1.f});
     ensureColor("hwb normalized", "hwb(120 60% 60% / 50%)", {.5f, .5f, .5f, .5f});
     ensureColor("lab white", "lab(100% 0 0)", {1.f, 1.f, 1.f, 1.f});

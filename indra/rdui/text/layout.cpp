@@ -55,8 +55,8 @@ struct LogicalLine {
     std::vector<SourceRange> sources;
 };
 
-Vec2 lineSize(const TextLine& line, float fallback_height, const TextMetrics& metrics) {
-    Vec2 size{0.f, fallback_height};
+Vec2 lineSize(const TextLine& line, float fallbackHeight, const TextMetrics& metrics) {
+    Vec2 size{0.f, fallbackHeight};
     for (std::size_t index = 0; index < line.size(); ++index) {
         const TextRun& run = line[index];
         size.x += run.size.x;
@@ -89,10 +89,10 @@ LogicalLine logicalLine(const TextLine& line) {
 
 std::vector<std::size_t> unicodeBoundaries(const LLWString& wide, UBreakIteratorType type) {
     std::vector<UChar> utf16;
-    std::vector<int32_t> utf16_offsets;
+    std::vector<int32_t> codepointToUtf16Offsets;
     utf16.reserve(wide.size());
-    utf16_offsets.reserve(wide.size() + 1);
-    utf16_offsets.push_back(0);
+    codepointToUtf16Offsets.reserve(wide.size() + 1);
+    codepointToUtf16Offsets.push_back(0);
     for (llwchar character : wide) {
         const UChar32 codepoint = static_cast<UChar32>(character);
         if (codepoint <= 0xffff) utf16.push_back(static_cast<UChar>(codepoint));
@@ -100,7 +100,7 @@ std::vector<std::size_t> unicodeBoundaries(const LLWString& wide, UBreakIterator
             utf16.push_back(U16_LEAD(codepoint));
             utf16.push_back(U16_TRAIL(codepoint));
         }
-        utf16_offsets.push_back(static_cast<int32_t>(utf16.size()));
+        codepointToUtf16Offsets.push_back(static_cast<int32_t>(utf16.size()));
     }
 
     UErrorCode status = U_ZERO_ERROR;
@@ -110,8 +110,8 @@ std::vector<std::size_t> unicodeBoundaries(const LLWString& wide, UBreakIterator
 
     std::vector<std::size_t> result;
     for (int32_t boundary = ubrk_first(iterator.get()); boundary != UBRK_DONE; boundary = ubrk_next(iterator.get())) {
-        const auto found = std::lower_bound(utf16_offsets.begin(), utf16_offsets.end(), boundary);
-        if (found != utf16_offsets.end() && *found == boundary) result.push_back(static_cast<std::size_t>(found - utf16_offsets.begin()));
+        const auto found = std::lower_bound(codepointToUtf16Offsets.begin(), codepointToUtf16Offsets.end(), boundary);
+        if (found != codepointToUtf16Offsets.end() && *found == boundary) result.push_back(static_cast<std::size_t>(found - codepointToUtf16Offsets.begin()));
     }
     return result;
 }
@@ -125,13 +125,13 @@ namespace {
 void appendStyledAtoms(std::vector<TextAtom>& atoms, const LLWString& value, std::size_t source, const Style& style, const TextMetrics& metrics) {
     std::size_t begin = 0;
     while (begin < value.size()) {
-        const bool is_whitespace = std::iswspace(static_cast<wint_t>(value[begin])) != 0;
+        const bool isWhitespace = std::iswspace(static_cast<wint_t>(value[begin])) != 0;
         std::size_t end = begin + 1;
-        while (end < value.size() && (std::iswspace(static_cast<wint_t>(value[end])) != 0) == is_whitespace) ++end;
+        while (end < value.size() && (std::iswspace(static_cast<wint_t>(value[end])) != 0) == isWhitespace) ++end;
         atoms.push_back({
             makeRun(wstring_to_utf8str(value.substr(begin, end - begin)), style, metrics),
             source,
-            is_whitespace,
+            isWhitespace,
         });
         begin = end;
     }
@@ -144,9 +144,9 @@ std::vector<TextChunk> lineBreakChunks(const TextLine& line, const TextMetrics& 
     if (boundaries.size() < 2) {
         boundaries = {0};
         for (std::size_t index = 1; index < logical.value.size(); ++index) {
-            const bool previous_space = std::iswspace(static_cast<wint_t>(logical.value[index - 1])) != 0;
-            const bool current_space = std::iswspace(static_cast<wint_t>(logical.value[index])) != 0;
-            if (previous_space && !current_space) boundaries.push_back(index);
+            const bool previousWhitespace = std::iswspace(static_cast<wint_t>(logical.value[index - 1])) != 0;
+            const bool currentWhitespace = std::iswspace(static_cast<wint_t>(logical.value[index])) != 0;
+            if (previousWhitespace && !currentWhitespace) boundaries.push_back(index);
         }
         boundaries.push_back(logical.value.size());
     }
@@ -154,12 +154,12 @@ std::vector<TextChunk> lineBreakChunks(const TextLine& line, const TextMetrics& 
     std::vector<TextChunk> chunks;
     chunks.reserve(boundaries.size() - 1);
     for (std::size_t boundary = 1; boundary < boundaries.size(); ++boundary) {
-        const std::size_t chunk_begin = boundaries[boundary - 1];
-        const std::size_t chunk_end = boundaries[boundary];
+        const std::size_t chunkBegin = boundaries[boundary - 1];
+        const std::size_t chunkEnd = boundaries[boundary];
         TextChunk chunk;
         for (const SourceRange& range : logical.sources) {
-            const std::size_t begin = std::max(chunk_begin, range.begin);
-            const std::size_t end = std::min(chunk_end, range.end);
+            const std::size_t begin = std::max(chunkBegin, range.begin);
+            const std::size_t end = std::min(chunkEnd, range.end);
             if (begin >= end) continue;
             const TextRun& run = line[range.source];
             if (run.keybinding()) chunk.push_back({run, range.source, false});
@@ -181,12 +181,12 @@ std::vector<TextChunk> characterClusters(const TextLine& line, const TextMetrics
     std::vector<TextChunk> result;
     result.reserve(boundaries.size() - 1);
     for (std::size_t boundary = 1; boundary < boundaries.size(); ++boundary) {
-        const std::size_t cluster_begin = boundaries[boundary - 1];
-        const std::size_t cluster_end = boundaries[boundary];
+        const std::size_t clusterBegin = boundaries[boundary - 1];
+        const std::size_t clusterEnd = boundaries[boundary];
         TextChunk cluster;
         for (const SourceRange& range : logical.sources) {
-            const std::size_t begin = std::max(cluster_begin, range.begin);
-            const std::size_t end = std::min(cluster_end, range.end);
+            const std::size_t begin = std::max(clusterBegin, range.begin);
+            const std::size_t end = std::min(clusterEnd, range.end);
             if (begin >= end) continue;
             const TextRun& run = line[range.source];
             if (run.keybinding()) cluster.push_back({run, range.source, false});
@@ -204,10 +204,10 @@ std::vector<TextChunk> characterClusters(const TextLine& line, const TextMetrics
     return result;
 }
 
-void appendAtom(TextLine& line, const TextAtom& atom, std::size_t& previous_source) {
-    if (!atom.run.keybinding() && !line.empty() && atom.source == previous_source) line.back().value += atom.run.value;
+void appendAtom(TextLine& line, const TextAtom& atom, std::size_t& previousSourceIndex) {
+    if (!atom.run.keybinding() && !line.empty() && atom.source == previousSourceIndex) line.back().value += atom.run.value;
     else line.push_back(atom.run);
-    previous_source = atom.source;
+    previousSourceIndex = atom.source;
 }
 
 void measureRuns(TextLine& line, const TextMetrics& metrics) {
@@ -217,21 +217,21 @@ void measureRuns(TextLine& line, const TextMetrics& metrics) {
 
 TextLine coalesce(const std::vector<TextAtom>& atoms, const TextMetrics& metrics) {
     TextLine result;
-    std::size_t previous_source = std::numeric_limits<std::size_t>::max();
-    for (const TextAtom& atom : atoms) appendAtom(result, atom, previous_source);
+    std::size_t previousSourceIndex = std::numeric_limits<std::size_t>::max();
+    for (const TextAtom& atom : atoms) appendAtom(result, atom, previousSourceIndex);
     measureRuns(result, metrics);
     return result;
 }
 
-TextLine select(const std::vector<TextChunk>& clusters, std::size_t prefix_count, const TextAtom* separator, std::size_t suffix_begin,
+TextLine select(const std::vector<TextChunk>& clusters, std::size_t prefixCount, const TextAtom* separator, std::size_t suffixBegin,
                 const TextMetrics& metrics) {
     TextLine result;
-    std::size_t previous_source = std::numeric_limits<std::size_t>::max();
-    for (std::size_t index = 0; index < prefix_count; ++index)
-        for (const TextAtom& atom : clusters[index]) appendAtom(result, atom, previous_source);
-    if (separator) appendAtom(result, *separator, previous_source);
-    for (std::size_t index = suffix_begin; index < clusters.size(); ++index)
-        for (const TextAtom& atom : clusters[index]) appendAtom(result, atom, previous_source);
+    std::size_t previousSourceIndex = std::numeric_limits<std::size_t>::max();
+    for (std::size_t index = 0; index < prefixCount; ++index)
+        for (const TextAtom& atom : clusters[index]) appendAtom(result, atom, previousSourceIndex);
+    if (separator) appendAtom(result, *separator, previousSourceIndex);
+    for (std::size_t index = suffixBegin; index < clusters.size(); ++index)
+        for (const TextAtom& atom : clusters[index]) appendAtom(result, atom, previousSourceIndex);
     measureRuns(result, metrics);
     return result;
 }
@@ -241,10 +241,10 @@ public:
     explicit WrappedLine(const TextMetrics& metrics) : mMetrics(metrics) {}
 
     struct Snapshot {
-        std::size_t line_size = 0;
-        std::optional<TextRun> previous_last;
-        std::optional<std::size_t> previous_source;
-        std::size_t pending_size = 0;
+        std::size_t lineRunCount = 0;
+        std::optional<TextRun> previousLastRun;
+        std::optional<std::size_t> previousSourceIndex;
+        std::size_t pendingAtomCount = 0;
         float width = 0.f;
     };
 
@@ -253,10 +253,10 @@ public:
     }
 
     void restore(const Snapshot& snapshot) {
-        mLine.resize(snapshot.line_size);
-        if (snapshot.previous_last && !mLine.empty()) mLine.back() = *snapshot.previous_last;
-        mLastSource = snapshot.previous_source;
-        mPending.resize(snapshot.pending_size);
+        mLine.resize(snapshot.lineRunCount);
+        if (snapshot.previousLastRun && !mLine.empty()) mLine.back() = *snapshot.previousLastRun;
+        mLastSource = snapshot.previousSourceIndex;
+        mPending.resize(snapshot.pendingAtomCount);
         mWidth = snapshot.width;
     }
 
@@ -290,8 +290,8 @@ private:
 
     void appendRun(const TextRun& run, std::size_t source) {
         if (!mLine.empty() && !run.keybinding() && !mLine.back().keybinding() && mLastSource == source) {
-            const float previous_spacing = mLine.size() > 1 ? interRunSpacing(mLine[mLine.size() - 2], mLine.back(), mMetrics) : 0.f;
-            mWidth -= mLine.back().size.x + previous_spacing;
+            const float previousSpacing = mLine.size() > 1 ? interRunSpacing(mLine[mLine.size() - 2], mLine.back(), mMetrics) : 0.f;
+            mWidth -= mLine.back().size.x + previousSpacing;
             mLine.back().value += run.value;
             mLine.back().size = mMetrics.measureText(mLine.back().value, mLine.back().style);
             const float spacing = mLine.size() > 1 ? interRunSpacing(mLine[mLine.size() - 2], mLine.back(), mMetrics) : 0.f;
@@ -312,8 +312,8 @@ private:
     float mWidth = 0.f;
 };
 
-std::vector<TextLine> wrapLine(const TextLine& source, float available, float fallback_height, const TextMetrics& metrics) {
-    if (source.empty() || lineSize(source, fallback_height, metrics).x <= available) return {source};
+std::vector<TextLine> wrapLine(const TextLine& source, float available, float fallbackHeight, const TextMetrics& metrics) {
+    if (source.empty() || lineSize(source, fallbackHeight, metrics).x <= available) return {source};
 
     const std::vector<TextChunk> chunks = lineBreakChunks(source, metrics);
     std::vector<TextLine> result;
@@ -321,7 +321,7 @@ std::vector<TextLine> wrapLine(const TextLine& source, float available, float fa
     for (const TextChunk& chunk : chunks) {
         const WrappedLine::Snapshot before = current.snapshot();
         current.append(chunk);
-        if (current.width() > available && before.line_size != 0) {
+        if (current.width() > available && before.lineRunCount != 0) {
             current.restore(before);
             if (!current.empty()) result.push_back(current.finish());
             current.append(chunk);
@@ -348,10 +348,10 @@ TextLine visualRuns(const TextLine& line, LayoutDirection direction, const TextM
     }
     if (logical.empty() || logical.size() > static_cast<std::size_t>(std::numeric_limits<FriBidiStrIndex>::max())) return line;
 
-    std::vector<FriBidiStrIndex> logical_to_visual(logical.size());
+    std::vector<FriBidiStrIndex> logicalToVisual(logical.size());
     std::vector<FriBidiLevel> levels(logical.size());
-    FriBidiParType base_direction = direction == LayoutDirection::RightToLeft ? FRIBIDI_PAR_RTL : FRIBIDI_PAR_LTR;
-    if (!fribidi_log2vis(logical.data(), static_cast<FriBidiStrIndex>(logical.size()), &base_direction, nullptr, logical_to_visual.data(), nullptr,
+    FriBidiParType baseDirection = direction == LayoutDirection::RightToLeft ? FRIBIDI_PAR_RTL : FRIBIDI_PAR_LTR;
+    if (!fribidi_log2vis(logical.data(), static_cast<FriBidiStrIndex>(logical.size()), &baseDirection, nullptr, logicalToVisual.data(), nullptr,
                          levels.data()))
         return line;
 
@@ -361,10 +361,10 @@ TextLine visualRuns(const TextLine& line, LayoutDirection direction, const TextM
     };
 
     std::vector<VisualRun> segments;
-    for (std::size_t run_index = 0; run_index < line.size(); ++run_index) {
-        const auto [run_begin, run_end] = ranges[run_index];
-        if (line[run_index].keybinding()) {
-            segments.push_back({logical_to_visual[run_begin], line[run_index]});
+    for (std::size_t runIndex = 0; runIndex < line.size(); ++runIndex) {
+        const auto [run_begin, run_end] = ranges[runIndex];
+        if (line[runIndex].keybinding()) {
+            segments.push_back({logicalToVisual[run_begin], line[runIndex]});
             continue;
         }
         std::size_t begin = run_begin;
@@ -372,17 +372,17 @@ TextLine visualRuns(const TextLine& line, LayoutDirection direction, const TextM
             std::size_t end = begin + 1;
             while (end < run_end && levels[end] == levels[begin]) ++end;
 
-            FriBidiStrIndex visual_start = logical_to_visual[begin];
+            FriBidiStrIndex visualStart = logicalToVisual[begin];
             LLWString wide;
             wide.reserve(end - begin);
             for (std::size_t offset = begin; offset < end; ++offset) {
-                visual_start = std::min(visual_start, logical_to_visual[offset]);
+                visualStart = std::min(visualStart, logicalToVisual[offset]);
                 wide.push_back(static_cast<llwchar>(logical[offset]));
             }
             const std::string value = wstring_to_utf8str(wide);
             segments.push_back({
-                visual_start,
-                makeRun(value, line[run_index].style, metrics),
+                visualStart,
+                makeRun(value, line[runIndex].style, metrics),
             });
             begin = end;
         }
@@ -395,32 +395,32 @@ TextLine visualRuns(const TextLine& line, LayoutDirection direction, const TextM
     return result;
 }
 
-TextLine truncateLine(const TextLine& line, float available, float fallback_height, const Style& style, const TextMetrics& metrics) {
-    if (lineSize(line, fallback_height, metrics).x <= available) return line;
-    if (style.text_overflow == TextOverflow::Clip) return line;
+TextLine truncateLine(const TextLine& line, float available, float fallbackHeight, const Style& style, const TextMetrics& metrics) {
+    if (lineSize(line, fallbackHeight, metrics).x <= available) return line;
+    if (style.textOverflow == TextOverflow::Clip) return line;
     const std::vector<TextChunk> clusters = characterClusters(line, metrics);
     if (clusters.empty()) return {};
 
-    const auto fits = [&](std::size_t prefix_count, const TextAtom* separator, std::size_t suffix_begin) {
-        return lineSize(select(clusters, prefix_count, separator, suffix_begin, metrics), fallback_height, metrics).x <= available;
+    const auto fits = [&](std::size_t prefixCount, const TextAtom* separator, std::size_t suffixBegin) {
+        return lineSize(select(clusters, prefixCount, separator, suffixBegin, metrics), fallbackHeight, metrics).x <= available;
     };
 
-    constexpr std::size_t ELLIPSIS_SOURCE = std::numeric_limits<std::size_t>::max();
+    constexpr std::size_t kEllipsisSource = std::numeric_limits<std::size_t>::max();
     const TextAtom ellipsis{
         makeRun("\xE2\x80\xA6", style, metrics),
-        ELLIPSIS_SOURCE,
+        kEllipsisSource,
         false,
     };
     if (!fits(0, &ellipsis, clusters.size())) return {};
 
-    std::size_t prefix_count = 0;
-    std::size_t suffix_begin = clusters.size();
-    if (style.text_overflow == TextOverflow::Ellipsis) {
-        std::size_t first_failing = clusters.size() + 1;
-        while (prefix_count + 1 < first_failing) {
-            const std::size_t candidate = prefix_count + (first_failing - prefix_count) / 2;
-            if (fits(candidate, &ellipsis, clusters.size())) prefix_count = candidate;
-            else first_failing = candidate;
+    std::size_t prefixCount = 0;
+    std::size_t suffixBegin = clusters.size();
+    if (style.textOverflow == TextOverflow::Ellipsis) {
+        std::size_t firstFailing = clusters.size() + 1;
+        while (prefixCount + 1 < firstFailing) {
+            const std::size_t candidate = prefixCount + (firstFailing - prefixCount) / 2;
+            if (fits(candidate, &ellipsis, clusters.size())) prefixCount = candidate;
+            else firstFailing = candidate;
         }
     } else {
         struct CenterSelection {
@@ -429,65 +429,65 @@ TextLine truncateLine(const TextLine& line, float available, float fallback_heig
         };
         std::vector<CenterSelection> growth;
         growth.reserve(clusters.size() + 1);
-        growth.push_back({prefix_count, suffix_begin});
-        std::vector<float> cluster_widths;
-        cluster_widths.reserve(clusters.size());
-        for (const TextChunk& cluster : clusters) cluster_widths.push_back(lineSize(coalesce(cluster, metrics), fallback_height, metrics).x);
-        float prefix_advance = 0.f;
-        float suffix_advance = 0.f;
-        while (prefix_count < suffix_begin) {
-            const float next_prefix = prefix_advance + cluster_widths[prefix_count];
-            const float next_suffix = suffix_advance + cluster_widths[suffix_begin - 1];
-            if (next_prefix <= next_suffix) {
-                prefix_advance = next_prefix;
-                ++prefix_count;
+        growth.push_back({prefixCount, suffixBegin});
+        std::vector<float> clusterWidths;
+        clusterWidths.reserve(clusters.size());
+        for (const TextChunk& cluster : clusters) clusterWidths.push_back(lineSize(coalesce(cluster, metrics), fallbackHeight, metrics).x);
+        float prefixAdvance = 0.f;
+        float suffixAdvance = 0.f;
+        while (prefixCount < suffixBegin) {
+            const float nextPrefix = prefixAdvance + clusterWidths[prefixCount];
+            const float nextSuffix = suffixAdvance + clusterWidths[suffixBegin - 1];
+            if (nextPrefix <= nextSuffix) {
+                prefixAdvance = nextPrefix;
+                ++prefixCount;
             } else {
-                suffix_advance = next_suffix;
-                --suffix_begin;
+                suffixAdvance = nextSuffix;
+                --suffixBegin;
             }
-            growth.push_back({prefix_count, suffix_begin});
+            growth.push_back({prefixCount, suffixBegin});
         }
 
         std::size_t selected = 0;
-        std::size_t first_failing = growth.size();
-        while (selected + 1 < first_failing) {
-            const std::size_t candidate = selected + (first_failing - selected) / 2;
+        std::size_t firstFailing = growth.size();
+        while (selected + 1 < firstFailing) {
+            const std::size_t candidate = selected + (firstFailing - selected) / 2;
             const CenterSelection state = growth[candidate];
             if (fits(state.prefix, &ellipsis, state.suffix)) selected = candidate;
-            else first_failing = candidate;
+            else firstFailing = candidate;
         }
-        prefix_count = growth[selected].prefix;
-        suffix_begin = growth[selected].suffix;
+        prefixCount = growth[selected].prefix;
+        suffixBegin = growth[selected].suffix;
     }
-    return select(clusters, prefix_count, &ellipsis, suffix_begin, metrics);
+    return select(clusters, prefixCount, &ellipsis, suffixBegin, metrics);
 }
 } // namespace
 
 float interRunSpacing(const TextRun& left, const TextRun& right, const TextMetrics& metrics) {
     if (left.keybinding() || right.keybinding() || left.value.empty() || right.value.empty()) return 0.f;
-    const LLWString left_wide = utf8str_to_wstring(left.value);
-    LLWString joined = left_wide;
+    const LLWString leftWide = utf8str_to_wstring(left.value);
+    LLWString joined = leftWide;
     joined += utf8str_to_wstring(right.value);
     const std::vector<std::size_t> boundaries = graphemeBoundaries(joined);
-    if (std::find(boundaries.begin(), boundaries.end(), left_wide.size()) == boundaries.end()) return 0.f;
+    if (std::find(boundaries.begin(), boundaries.end(), leftWide.size()) == boundaries.end()) return 0.f;
     return metrics.usedLetterSpacing(left.style);
 }
 
-TextLayout layoutText(const std::vector<TextLine>& hard_lines, const Style& style, const TextMetrics& metrics, std::optional<float> available_width,
-                      bool visual_order, bool apply_overflow) {
+TextLayout layoutText(const std::vector<TextLine>& hardLines, const Style& style, const TextMetrics& metrics, std::optional<float> availableWidth,
+                      bool visualOrder, bool applyOverflow) {
     TextLayout result;
-    const float fallback_height = metrics.measureText({}, style).y;
-    for (const TextLine& hard_line : hard_lines) {
-        std::vector<TextLine> visual_lines;
-        if (available_width && style.text_wrap == TextWrap::Wrap) visual_lines = wrapLine(hard_line, *available_width, fallback_height, metrics);
-        else visual_lines.push_back(hard_line);
+    const float fallbackHeight = metrics.measureText({}, style).y;
+    for (const TextLine& hardLine : hardLines) {
+        std::vector<TextLine> visualLines;
+        if (availableWidth && style.textWrap == TextWrap::Wrap) visualLines = wrapLine(hardLine, *availableWidth, fallbackHeight, metrics);
+        else visualLines.push_back(hardLine);
 
-        for (TextLine& line : visual_lines) {
-            if (available_width && apply_overflow && style.text_wrap == TextWrap::NoWrap && style.overflow_x == Overflow::Hidden)
-                line = truncateLine(line, *available_width, fallback_height, style, metrics);
-            if (visual_order) line = visualRuns(line, style.direction, metrics);
+        for (TextLine& line : visualLines) {
+            if (availableWidth && applyOverflow && style.textWrap == TextWrap::NoWrap && style.overflowX == Overflow::Hidden)
+                line = truncateLine(line, *availableWidth, fallbackHeight, style, metrics);
+            if (visualOrder) line = visualRuns(line, style.direction, metrics);
 
-            const Vec2 size = lineSize(line, fallback_height, metrics);
+            const Vec2 size = lineSize(line, fallbackHeight, metrics);
             result.size.x = std::max(result.size.x, size.x);
             result.size.y += size.y;
             result.lines.push_back({std::move(line), size});

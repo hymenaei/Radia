@@ -24,6 +24,7 @@
 
 #include "linden_common.h"
 #include <algorithm>
+#include <optional>
 #include "../test/lltut.h"
 #include "binding/binder.h"
 #include "render/recordingpaintcontext.h"
@@ -35,6 +36,28 @@
 #include "widgets/label.h"
 #include "widgets/panel.h"
 #include "widgets/switch.h"
+
+namespace {
+const char* noEventArguments(const rdui::EventCall& call, rdui::WidgetEventKind) {
+    return call.arguments().empty() ? nullptr : "binding.event.arity_mismatch";
+}
+
+template<typename Callback> void bindAction(rdui::Binder& binder, std::string name, Callback callback) {
+    binder.event(rdui::detail::makeEventRegistration(
+        std::move(name), std::nullopt, [callback = std::move(callback)](const rdui::WidgetEvent&, const rdui::EventCall&) mutable { callback(); },
+        noEventArguments));
+}
+
+template<typename Event, typename Callback>
+void bindSemanticEvent(rdui::Binder& binder, std::string name, std::optional<rdui::WidgetEventKind> kind, Callback callback) {
+    binder.event(rdui::detail::makeEventRegistration(
+        std::move(name), kind,
+        [callback = std::move(callback)](const rdui::WidgetEvent& event, const rdui::EventCall&) mutable {
+            callback(static_cast<const Event&>(event));
+        },
+        noEventArguments));
+}
+} // namespace
 
 namespace tut {
 class InputProbe final : public rdui::Widget {
@@ -90,8 +113,8 @@ public:
 
 class OrderedPaintProbe final : public rdui::Widget {
 public:
-    OrderedPaintProbe(std::string name, std::vector<std::string>& paint_order)
-        : Widget("ordered_probe"), mName(std::move(name)), mPaintOrder(paint_order) {}
+    OrderedPaintProbe(std::string name, std::vector<std::string>& paintOrder)
+        : Widget("ordered_probe"), mName(std::move(name)), mPaintOrder(paintOrder) {}
 
     bool defaultPointerEvents() const override { return true; }
     bool focusable() const override { return true; }
@@ -128,13 +151,12 @@ private:
     std::vector<std::string>& mLog;
 };
 
-struct surface_data {};
-typedef test_group<surface_data> surface_test;
-typedef surface_test::object surface_object;
-using rduisurface_object = surface_object;
-surface_test surface_testcase("surface");
+struct surfaceData {};
+using surfaceTest = test_group<surfaceData>;
+using surfaceObject = surfaceTest::object;
+surfaceTest surfaceTestCase("surface");
 
-template<> template<> void rduisurface_object::test<1>() {
+template<> template<> void surfaceObject::test<1>() {
     rdui::Surface context;
     context.setViewport(100.f, 100.f);
     auto button = std::make_unique<rdui::Button>();
@@ -162,7 +184,7 @@ template<> template<> void rduisurface_object::test<1>() {
     ensure_equals("release outside does not activate", activations, 1);
 }
 
-template<> template<> void rduisurface_object::test<2>() {
+template<> template<> void surfaceObject::test<2>() {
     rdui::Surface context;
     context.setViewport(100.f, 100.f);
     auto control = std::make_unique<rdui::Switch>();
@@ -186,7 +208,7 @@ template<> template<> void rduisurface_object::test<2>() {
     ensure_equals("checked callback follows both activations", changes, 2);
 }
 
-template<> template<> void rduisurface_object::test<3>() {
+template<> template<> void surfaceObject::test<3>() {
     rdui::Surface context;
     context.setViewport(100.f, 100.f);
     auto button = std::make_unique<rdui::Button>();
@@ -200,7 +222,7 @@ template<> template<> void rduisurface_object::test<3>() {
     ensure("hover refresh after mutation is safe", !context.pointerMove({{15.f, 15.f}}));
 }
 
-template<> template<> void rduisurface_object::test<5>() {
+template<> template<> void surfaceObject::test<4>() {
     rdui::Surface context;
     context.setViewport(100.f, 100.f);
     auto button = std::make_unique<rdui::Button>();
@@ -210,18 +232,17 @@ template<> template<> void rduisurface_object::test<5>() {
     ensure("disabled control is not focused", !context.hasFocus());
 }
 
-template<> template<> void rduisurface_object::test<4>() {
-    rdui::StyleSheet style_sheet;
-    style_sheet.loadRadia("floater { flow: column; } floater::header { height: 30px; } floater::content { flex-grow: 1; } label { height: "
-                          "20px; }");
-    rdui::Surface context(style_sheet);
+template<> template<> void surfaceObject::test<5>() {
+    rdui::StyleSheet styleSheet;
+    styleSheet.loadRadia("floater { flow: column; } floater::header { height: 30px; } floater::content { flex-grow: 1; } label { height: 20px; }");
+    rdui::Surface context(styleSheet);
     context.setViewport(200.f, 200.f);
 
     auto floater = std::make_unique<rdui::Floater>();
-    rdui::Floater* window = floater.get();
+    rdui::Floater* floaterPtr = floater.get();
     floater->setTitle("title").setCanClose(false).setCanMinimize(true);
     auto content = std::make_unique<rdui::Label>("content");
-    rdui::Label* content_node = content.get();
+    rdui::Label* contentNode = content.get();
     floater->addChild(std::move(content));
     floater->setRect({20.f, 20.f, 100.f, 100.f});
     context.mountFloater(std::move(floater));
@@ -230,34 +251,34 @@ template<> template<> void rduisurface_object::test<4>() {
     ensure("header starts drag", context.pointerDown({{30.f, 110.f}, rdui::PointerButton::Left}));
     ensure("captured move handled", context.pointerMove({{50.f, 120.f}, rdui::PointerButton::Left}));
     context.pointerUp({{50.f, 120.f}, rdui::PointerButton::Left});
-    ensure_equals("drag moves x", window->rect().x, 40.f);
-    ensure_equals("drag moves y", window->rect().y, 30.f);
+    ensure_equals("drag moves x", floaterPtr->rect().x, 40.f);
+    ensure_equals("drag moves y", floaterPtr->rect().y, 30.f);
 
-    const float expanded_top = window->rect().top();
-    const float expanded_width = window->rect().w;
-    window->setMinimized(true);
-    ensure("minimized state is style-visible", window->hasState(rdui::WidgetState::Minimized));
-    ensure("content box collapsed while minimized", window->content()->visibility() == rdui::Visibility::Collapsed);
-    ensure("child visibility is preserved while content box collapses", content_node->visibility() == rdui::Visibility::Visible);
-    ensure_equals("minimize preserves top", window->rect().top(), expanded_top);
-    ensure_equals("minimize uses header height", window->rect().h, 30.f);
-    ensure("minimize shrinks width to header identity and controls", window->rect().w < expanded_width);
-    window->setMinimized(false);
-    ensure("expanded state clears minimized style", !window->hasState(rdui::WidgetState::Minimized));
-    ensure("content box visibility restored", window->content()->visibility() == rdui::Visibility::Visible);
-    ensure("child remains visible after expansion", content_node->visibility() == rdui::Visibility::Visible);
-    ensure_equals("expanded height restored", window->rect().h, 100.f);
-    ensure_equals("expanded width restored", window->rect().w, expanded_width);
+    const float expandedTop = floaterPtr->rect().top();
+    const float expandedWidth = floaterPtr->rect().w;
+    floaterPtr->setMinimized(true);
+    ensure("minimized state is style-visible", floaterPtr->hasState(rdui::WidgetState::Minimized));
+    ensure("content box collapsed while minimized", floaterPtr->content()->visibility() == rdui::Visibility::Collapsed);
+    ensure("child visibility is preserved while content box collapses", contentNode->visibility() == rdui::Visibility::Visible);
+    ensure_equals("minimize preserves top", floaterPtr->rect().top(), expandedTop);
+    ensure_equals("minimize uses header height", floaterPtr->rect().h, 30.f);
+    ensure("minimize shrinks width to header identity and controls", floaterPtr->rect().w < expandedWidth);
+    floaterPtr->setMinimized(false);
+    ensure("expanded state clears minimized style", !floaterPtr->hasState(rdui::WidgetState::Minimized));
+    ensure("content box visibility restored", floaterPtr->content()->visibility() == rdui::Visibility::Visible);
+    ensure("child remains visible after expansion", contentNode->visibility() == rdui::Visibility::Visible);
+    ensure_equals("expanded height restored", floaterPtr->rect().h, 100.f);
+    ensure_equals("expanded width restored", floaterPtr->rect().w, expandedWidth);
 
     ensure("header double-click is handled", context.pointerDown({{50.f, 120.f}, rdui::PointerButton::Left, 0, 2}));
-    ensure("header double-click minimizes", window->minimized());
+    ensure("header double-click minimizes", floaterPtr->minimized());
     context.pointerUp({{50.f, 120.f}, rdui::PointerButton::Left});
     ensure("second header double-click is handled", context.pointerDown({{50.f, 120.f}, rdui::PointerButton::Left, 0, 2}));
-    ensure("header double-click restores", !window->minimized());
+    ensure("header double-click restores", !floaterPtr->minimized());
     context.pointerUp({{50.f, 120.f}, rdui::PointerButton::Left});
 }
 
-template<> template<> void rduisurface_object::test<6>() {
+template<> template<> void surfaceObject::test<6>() {
     rdui::Surface context;
     context.setViewport(100.f, 100.f);
     auto button = std::make_unique<rdui::Button>();
@@ -266,10 +287,10 @@ template<> template<> void rduisurface_object::test<6>() {
     button->setRect({10.f, 10.f, 20.f, 20.f}).setOnActivate([&](rdui::Widget&) { ++activations; });
     context.root().addChild(std::move(button));
 
-    for (rdui::PointerButton pointer_button :
+    for (rdui::PointerButton pointerButton :
          {rdui::PointerButton::Right, rdui::PointerButton::Middle, rdui::PointerButton::Auxiliary1, rdui::PointerButton::Auxiliary2}) {
-        ensure("non-left down is consumed over control", context.pointerDown({{15.f, 15.f}, pointer_button}));
-        ensure("non-left up is consumed over control", context.pointerUp({{15.f, 15.f}, pointer_button}));
+        ensure("non-left down is consumed over control", context.pointerDown({{15.f, 15.f}, pointerButton}));
+        ensure("non-left up is consumed over control", context.pointerUp({{15.f, 15.f}, pointerButton}));
     }
     ensure_equals("non-left buttons do not activate", activations, 0);
     ensure("non-left buttons do not focus", !context.hasFocus());
@@ -280,7 +301,7 @@ template<> template<> void rduisurface_object::test<6>() {
     ensure_equals("left button still activates", activations, 1);
 }
 
-template<> template<> void rduisurface_object::test<7>() {
+template<> template<> void surfaceObject::test<7>() {
     rdui::Surface context;
     context.setViewport(100.f, 100.f);
     auto probe = std::make_unique<InputProbe>();
@@ -310,10 +331,10 @@ template<> template<> void rduisurface_object::test<7>() {
     ensure("mouse leave clears hover", !target->hasState(rdui::WidgetState::Hovered));
 }
 
-template<> template<> void rduisurface_object::test<8>() {
-    rdui::StyleSheet style_sheet;
-    style_sheet.loadRadia("floater { flow: column; } floater::header { height: 30px; } floater::content { flex-grow: 1; }");
-    rdui::Surface context(style_sheet);
+template<> template<> void surfaceObject::test<8>() {
+    rdui::StyleSheet styleSheet;
+    styleSheet.loadRadia("floater { flow: column; } floater::header { height: 30px; } floater::content { flex-grow: 1; }");
+    rdui::Surface context(styleSheet);
     context.setViewport(200.f, 200.f);
     auto floater = std::make_unique<rdui::Floater>();
     floater->setTitle("title").setCanClose(false).setCanMinimize(false);
@@ -332,64 +353,64 @@ template<> template<> void rduisurface_object::test<8>() {
     ensure("capture loss clears capture", !context.hasPointerCapture());
 }
 
-template<> template<> void rduisurface_object::test<9>() {
+template<> template<> void surfaceObject::test<9>() {
     rdui::Surface context;
     context.setViewport(200.f, 200.f);
 
     auto first = std::make_unique<rdui::Button>();
-    rdui::Button* first_target = first.get();
+    rdui::Button* firstTarget = first.get();
     first->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
     context.root().addChild(std::move(first));
 
     auto hidden = std::make_unique<rdui::Button>();
-    rdui::Button* hidden_target = hidden.get();
+    rdui::Button* hiddenTarget = hidden.get();
     hidden->setVisibility(rdui::Visibility::Hidden).setRect({40.f, 10.f, 20.f, 20.f});
     context.root().addChild(std::move(hidden));
 
     auto disabled = std::make_unique<rdui::Button>();
-    rdui::Button* disabled_target = disabled.get();
+    rdui::Button* disabledTarget = disabled.get();
     disabled->setDisabled(true).setRect({70.f, 10.f, 20.f, 20.f});
     context.root().addChild(std::move(disabled));
 
     auto last = std::make_unique<rdui::Switch>();
-    rdui::Switch* last_target = last.get();
+    rdui::Switch* lastTarget = last.get();
     last->setRect({100.f, 10.f, 40.f, 20.f});
     context.root().addChild(std::move(last));
 
     ensure("Tab focuses first control", context.keyDown({rdui::KEY_TAB}));
-    ensure("first is focused", first_target->hasState(rdui::WidgetState::Focused));
-    ensure("Tab focus is visible", first_target->hasState(rdui::WidgetState::FocusVisible));
+    ensure("first is focused", firstTarget->hasState(rdui::WidgetState::Focused));
+    ensure("Tab focus is visible", firstTarget->hasState(rdui::WidgetState::FocusVisible));
     ensure("Tab key-up consumed", context.keyUp({rdui::KEY_TAB}));
 
     context.keyDown({rdui::KEY_TAB});
-    ensure("Tab skips hidden and disabled controls", last_target->hasState(rdui::WidgetState::Focused));
-    ensure("hidden control not focused", !hidden_target->hasState(rdui::WidgetState::Focused));
-    ensure("disabled control not focused", !disabled_target->hasState(rdui::WidgetState::Focused));
+    ensure("Tab skips hidden and disabled controls", lastTarget->hasState(rdui::WidgetState::Focused));
+    ensure("hidden control not focused", !hiddenTarget->hasState(rdui::WidgetState::Focused));
+    ensure("disabled control not focused", !disabledTarget->hasState(rdui::WidgetState::Focused));
 
     context.keyDown({rdui::KEY_TAB});
-    ensure("forward traversal wraps", first_target->hasState(rdui::WidgetState::Focused));
+    ensure("forward traversal wraps", firstTarget->hasState(rdui::WidgetState::Focused));
     context.keyDown({rdui::KEY_TAB, rdui::MODIFIER_SHIFT});
-    ensure("Shift+Tab traverses backward and wraps", last_target->hasState(rdui::WidgetState::Focused));
+    ensure("Shift+Tab traverses backward and wraps", lastTarget->hasState(rdui::WidgetState::Focused));
 
     context.pointerDown({{15.f, 15.f}, rdui::PointerButton::Left});
-    ensure("mouse moves focus", first_target->hasState(rdui::WidgetState::Focused));
-    ensure("mouse focus clears focus-visible", !first_target->hasState(rdui::WidgetState::FocusVisible));
-    first_target->setVisibility(rdui::Visibility::Hidden);
+    ensure("mouse moves focus", firstTarget->hasState(rdui::WidgetState::Focused));
+    ensure("mouse focus clears focus-visible", !firstTarget->hasState(rdui::WidgetState::FocusVisible));
+    firstTarget->setVisibility(rdui::Visibility::Hidden);
     ensure("hidden focused node rejects keyboard input", !context.keyDown({rdui::KEY_SPACE}));
     ensure("hidden focused node clears focus", !context.hasFocus());
-    first_target->setVisibility(rdui::Visibility::Visible);
+    firstTarget->setVisibility(rdui::Visibility::Visible);
     context.pointerDown({{15.f, 15.f}, rdui::PointerButton::Left});
-    first_target->setDisabled(true);
+    firstTarget->setDisabled(true);
     ensure("disabled focused node rejects character input", !context.charInput('x'));
     ensure("disabled focused node clears focus", !context.hasFocus());
-    first_target->setDisabled(false);
+    firstTarget->setDisabled(false);
     context.pointerDown({{15.f, 15.f}, rdui::PointerButton::Left});
     context.clearInteractionState();
-    ensure("focus loss clears focused state", !first_target->hasState(rdui::WidgetState::Focused));
-    ensure("focus loss clears focus-visible state", !first_target->hasState(rdui::WidgetState::FocusVisible));
+    ensure("focus loss clears focused state", !firstTarget->hasState(rdui::WidgetState::Focused));
+    ensure("focus loss clears focus-visible state", !firstTarget->hasState(rdui::WidgetState::FocusVisible));
 }
 
-template<> template<> void rduisurface_object::test<10>() {
+template<> template<> void surfaceObject::test<10>() {
     rdui::Surface context;
     context.setViewport(100.f, 100.f);
     auto panel = std::make_unique<rdui::Panel>();
@@ -428,36 +449,38 @@ template<> template<> void rduisurface_object::test<10>() {
     ensure("disabled ancestor clears descendant focus", !context.hasFocus());
 }
 
-template<> template<> void rduisurface_object::test<11>() {
+template<> template<> void surfaceObject::test<11>() {
     rdui::Surface context;
     context.setViewport(100.f, 100.f);
     auto button = std::make_unique<rdui::Button>();
     button->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
-    button->setAction(rdui::ActionEventKind::MouseDown, "press");
-    button->setAction(rdui::ActionEventKind::MouseUp, "release");
-    button->setAction(rdui::ActionEventKind::Click, "click");
-    button->setAction(rdui::ActionEventKind::DoubleClick, "double_click");
-    button->setAction(rdui::ActionEventKind::ContextMenu, "context_menu");
+    button->setEventCall(rdui::WidgetEventKind::MouseDown, rdui::EventCall("press"));
+    button->setEventCall(rdui::WidgetEventKind::MouseUp, rdui::EventCall("release"));
+    button->setEventCall(rdui::WidgetEventKind::Click, rdui::EventCall("click"));
+    button->setEventCall(rdui::WidgetEventKind::DoubleClick, rdui::EventCall("doubleClick"));
+    button->setEventCall(rdui::WidgetEventKind::ContextMenu, rdui::EventCall("contextMenu"));
     context.root().addChild(std::move(button));
 
     std::vector<std::string> events;
     rdui::Binder binder(context.root());
-    binder.onMouseDown("press", [&](const rdui::MouseActionEvent& event) {
+    bindSemanticEvent<rdui::MouseWidgetEvent>(binder, "press", std::nullopt, [&](const rdui::MouseWidgetEvent& event) {
         ensure("mouse context reports button", event.mouse.button != rdui::PointerButton::NoButton);
         events.push_back("down");
     });
-    binder.onMouseUp("release", [&] { events.push_back("up"); });
-    binder.onClick("click", [&] { events.push_back("click"); });
-    binder.onDoubleClick("double_click", [&](const rdui::MouseActionEvent& event) {
+    bindAction(binder, "release", [&] { events.push_back("up"); });
+    bindAction(binder, "click", [&] { events.push_back("click"); });
+    bindSemanticEvent<rdui::MouseWidgetEvent>(binder, "doubleClick", std::nullopt, [&](const rdui::MouseWidgetEvent& event) {
         ensure_equals("double click preserves native count", event.mouse.clickCount, 2);
         events.push_back("double");
     });
-    binder.onContextMenu("context_menu", [&](const rdui::MouseActionEvent& event) {
+    bindSemanticEvent<rdui::MouseWidgetEvent>(binder, "contextMenu", std::nullopt, [&](const rdui::MouseWidgetEvent& event) {
         ensure("context menu reports right button", event.mouse.button == rdui::PointerButton::Right);
         events.push_back("context");
     });
-    rdui::BindingResult binding = binder.finish();
-    ensure("mouse actions bind", binding.ok());
+    rdui::PreparedBindingResult prepared = binder.prepare();
+    const bool bindingPrepared = prepared.ok();
+    rdui::Binding binding = bindingPrepared ? prepared.binding.commit() : rdui::Binding{};
+    ensure("mouse actions bind", bindingPrepared && binding);
 
     context.pointerDown({{15.f, 15.f}, rdui::PointerButton::Left});
     context.pointerUp({{15.f, 15.f}, rdui::PointerButton::Left});
@@ -483,7 +506,7 @@ template<> template<> void rduisurface_object::test<11>() {
     ensure_equals("double click is last", events[11], "double");
 }
 
-template<> template<> void rduisurface_object::test<12>() {
+template<> template<> void surfaceObject::test<12>() {
     rdui::Surface context;
     context.setViewport(100.f, 80.f);
     auto panel = std::make_unique<rdui::Panel>();
@@ -496,7 +519,7 @@ template<> template<> void rduisurface_object::test<12>() {
     ensure("input remains safe after unmount", !context.pointerDown({{10.f, 10.f}, rdui::PointerButton::Left}));
 }
 
-template<> template<> void rduisurface_object::test<13>() {
+template<> template<> void surfaceObject::test<13>() {
     rdui::Surface surface;
     surface.setViewport(100.f, 100.f);
     auto probe = std::make_unique<CaptureProbe>();
@@ -511,41 +534,43 @@ template<> template<> void rduisurface_object::test<13>() {
     ensure_equals("capture cancellation ends widget interaction", target->ends, 1);
 }
 
-template<> template<> void rduisurface_object::test<14>() {
+template<> template<> void surfaceObject::test<14>() {
     rdui::System system;
     ensure("global delay accepts positive duration", system.setLongClickDelay(std::chrono::milliseconds(600)));
-    std::unique_ptr<rdui::Surface> owned_surface = system.createSurface(rdui::fixedTextMetrics());
-    rdui::Surface& surface = *owned_surface;
+    std::unique_ptr<rdui::Surface> ownedSurface = system.createSurface(rdui::fixedTextMetrics());
+    rdui::Surface& surface = *ownedSurface;
     surface.setViewport(100.f, 100.f);
 
     auto button = std::make_unique<rdui::Button>();
     rdui::Button* target = button.get();
     button->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
-    button->setAction(rdui::ActionEventKind::LongClick, "hold");
-    button->setAction(rdui::ActionEventKind::Click, "tap");
-    button->setAction(rdui::ActionEventKind::MouseUp, "release");
+    button->setEventCall(rdui::WidgetEventKind::LongClick, rdui::EventCall("hold"));
+    button->setEventCall(rdui::WidgetEventKind::Click, rdui::EventCall("tap"));
+    button->setEventCall(rdui::WidgetEventKind::MouseUp, rdui::EventCall("release"));
     surface.root().addChild(std::move(button));
 
     int holds = 0;
     int taps = 0;
     int releases = 0;
-    std::chrono::milliseconds held_for{0};
+    std::chrono::milliseconds heldFor{0};
     rdui::Binder binder(surface.root());
-    binder.onLongClick("hold", [&](const rdui::LongClickActionEvent& event) {
-        held_for = event.heldFor;
+    bindSemanticEvent<rdui::LongClickEvent>(binder, "hold", rdui::WidgetEventKind::LongClick, [&](const rdui::LongClickEvent& event) {
+        heldFor = event.heldFor;
         ++holds;
     });
-    binder.onClick("tap", [&] { ++taps; });
-    binder.onMouseUp("release", [&] { ++releases; });
-    rdui::BindingResult binding = binder.finish();
-    ensure("long click actions bind", binding.ok());
+    bindAction(binder, "tap", [&] { ++taps; });
+    bindAction(binder, "release", [&] { ++releases; });
+    rdui::PreparedBindingResult prepared = binder.prepare();
+    const bool bindingPrepared = prepared.ok();
+    rdui::Binding binding = bindingPrepared ? prepared.binding.commit() : rdui::Binding{};
+    ensure("long click actions bind", bindingPrepared && binding);
 
     surface.pointerDown({{15.f, 15.f}, rdui::PointerButton::Left});
     surface.update(std::chrono::milliseconds(599));
     ensure_equals("global threshold not early", holds, 0);
     surface.update(std::chrono::milliseconds(1));
     ensure_equals("global threshold fires once", holds, 1);
-    ensure_equals("long click reports held duration", held_for.count(), 600LL);
+    ensure_equals("long click reports held duration", heldFor.count(), 600LL);
     surface.update(std::chrono::milliseconds(500));
     ensure_equals("held action does not repeat", holds, 1);
     surface.pointerUp({{15.f, 15.f}, rdui::PointerButton::Left});
@@ -556,16 +581,16 @@ template<> template<> void rduisurface_object::test<14>() {
     surface.pointerDown({{15.f, 15.f}, rdui::PointerButton::Left});
     surface.update(std::chrono::milliseconds(200));
     ensure_equals("widget delay overrides global threshold", holds, 2);
-    ensure_equals("override duration reaches typed event", held_for.count(), 200LL);
+    ensure_equals("override duration reaches typed event", heldFor.count(), 200LL);
     surface.pointerUp({{15.f, 15.f}, rdui::PointerButton::Left});
     ensure_equals("override release still fires", releases, 2);
     ensure_equals("override long click also suppresses click", taps, 0);
 }
 
-template<> template<> void rduisurface_object::test<15>() {
-    rdui::StyleSheet style_sheet;
-    ensure("pointer policy stylesheet compiles", style_sheet.loadRadia("button { pointer-events: none; } panel { pointer-events: auto; }").ok());
-    rdui::Surface surface(style_sheet);
+template<> template<> void surfaceObject::test<15>() {
+    rdui::StyleSheet styleSheet;
+    ensure("pointer policy stylesheet compiles", styleSheet.loadRadia("button { pointer-events: none; } panel { pointer-events: auto; }").ok());
+    rdui::Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
 
     auto button = std::make_unique<rdui::Button>();
@@ -579,10 +604,10 @@ template<> template<> void rduisurface_object::test<15>() {
     ensure("style can enable noninteractive widget without layout", surface.pointerDown({{45.f, 15.f}, rdui::PointerButton::Left}));
 }
 
-template<> template<> void rduisurface_object::test<16>() {
-    rdui::StyleSheet style_sheet;
-    ensure("automatic layout stylesheet compiles", style_sheet.loadRadia("panel { flow: row; } label { height: 10px; }").ok());
-    rdui::Surface surface(style_sheet);
+template<> template<> void surfaceObject::test<16>() {
+    rdui::StyleSheet styleSheet;
+    ensure("automatic layout stylesheet compiles", styleSheet.loadRadia("panel { flow: row; } label { height: 10px; }").ok());
+    rdui::Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
 
     auto panel = std::make_unique<rdui::Panel>();
@@ -593,16 +618,16 @@ template<> template<> void rduisurface_object::test<16>() {
     surface.root().addChild(std::move(panel));
 
     surface.updateLayout();
-    const float short_width = text->rect().w;
+    const float shortWidth = text->rect().w;
     text->setText("a much longer label");
     surface.updateLayout();
-    ensure("intrinsic mutation automatically remeasures Surface", text->rect().w > short_width);
+    ensure("intrinsic mutation automatically remeasures Surface", text->rect().w > shortWidth);
 }
 
-template<> template<> void rduisurface_object::test<17>() {
-    rdui::StyleSheet style_sheet;
-    ensure("initial generated stylesheet compiles", style_sheet.loadRadia("label { width: 10px; height: 10px; }").ok());
-    rdui::Surface surface(style_sheet);
+template<> template<> void surfaceObject::test<17>() {
+    rdui::StyleSheet styleSheet;
+    ensure("initial generated stylesheet compiles", styleSheet.loadRadia("label { width: 10px; height: 10px; }").ok());
+    rdui::Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
 
     auto panel = std::make_unique<rdui::Panel>();
@@ -614,12 +639,12 @@ template<> template<> void rduisurface_object::test<17>() {
     surface.updateLayout();
     ensure_equals("initial stylesheet generation arranged", text->rect().w, 10.f);
 
-    ensure("replacement stylesheet compiles", style_sheet.loadRadia("label { width: 30px; height: 10px; }").ok());
+    ensure("replacement stylesheet compiles", styleSheet.loadRadia("label { width: 30px; height: 10px; }").ok());
     surface.updateLayout();
     ensure_equals("stylesheet generation invalidates cached measurement", text->rect().w, 30.f);
 }
 
-template<> template<> void rduisurface_object::test<18>() {
+template<> template<> void surfaceObject::test<18>() {
     rdui::Surface surface;
     surface.setViewport(100.f, 100.f);
     std::vector<std::string> log;
@@ -638,7 +663,7 @@ template<> template<> void rduisurface_object::test<18>() {
     ensure_equals("ancestor bubbles last", log[2], std::string("parent:bubble"));
 }
 
-template<> template<> void rduisurface_object::test<19>() {
+template<> template<> void surfaceObject::test<19>() {
     rdui::Surface surface;
     surface.setViewport(100.f, 100.f);
     std::vector<std::string> log;
@@ -653,11 +678,11 @@ template<> template<> void rduisurface_object::test<19>() {
     ensure("preventDefault skips pointer capture", !surface.hasPointerCapture());
 }
 
-template<> template<> void rduisurface_object::test<20>() {
-    rdui::StyleSheet style_sheet;
+template<> template<> void surfaceObject::test<20>() {
+    rdui::StyleSheet styleSheet;
     ensure("cursor stylesheet compiles",
-           style_sheet.loadRadia("#parent { pointer-events: auto; cursor: grab; } #child { pointer-events: auto; }").ok());
-    rdui::Surface surface(style_sheet);
+           styleSheet.loadRadia("#parent { pointer-events: auto; cursor: grab; } #child { pointer-events: auto; }").ok());
+    rdui::Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
 
     auto parent = std::make_unique<rdui::Panel>();
@@ -671,85 +696,85 @@ template<> template<> void rduisurface_object::test<20>() {
     ensure_equals("auto cursor inherits nearest explicit ancestor", static_cast<int>(surface.cursor()), static_cast<int>(rdui::CursorStyle::Grab));
 
     ensure("explicit auto cursor compiles",
-           style_sheet.loadRadia("#parent { pointer-events: auto; cursor: grab; } #child { pointer-events: auto; cursor: auto; }").ok());
+           styleSheet.loadRadia("#parent { pointer-events: auto; cursor: grab; } #child { pointer-events: auto; cursor: auto; }").ok());
     ensure_equals("explicit auto cursor stops inheritance", static_cast<int>(surface.cursor()), static_cast<int>(rdui::CursorStyle::Default));
 
     ensure("cursor override compiles",
-           style_sheet.loadRadia("#parent { pointer-events: auto; cursor: grab; } #child { pointer-events: auto; cursor: text; }").ok());
+           styleSheet.loadRadia("#parent { pointer-events: auto; cursor: grab; } #child { pointer-events: auto; cursor: text; }").ok());
     ensure_equals("hovered widget overrides inherited cursor", static_cast<int>(surface.cursor()), static_cast<int>(rdui::CursorStyle::Text));
 }
 
-template<> template<> void rduisurface_object::test<21>() {
+template<> template<> void surfaceObject::test<21>() {
     rdui::Surface surface;
     surface.setViewport(100.f, 100.f);
-    int content_activations = 0;
-    int floater_activations = 0;
-    int popup_activations = 0;
-    int tooltip_activations = 0;
-    int drag_activations = 0;
-    int modal_activations = 0;
+    int contentActivations = 0;
+    int floaterActivations = 0;
+    int popupActivations = 0;
+    int tooltipActivations = 0;
+    int dragActivations = 0;
+    int modalActivations = 0;
 
-    auto mount_button = [&](rdui::SurfaceLayer layer, int& activations, const rdui::Rect& rect) {
+    auto mountButton = [&](rdui::SurfaceLayer layer, int& activations, const rdui::Rect& rect) {
         auto button = std::make_unique<rdui::Button>();
         button->setRect(rect).setOnActivate([&activations](rdui::Widget&) { ++activations; });
         surface.mount(std::move(button), layer);
     };
-    mount_button(rdui::SurfaceLayer::Content, content_activations, {0.f, 0.f, 100.f, 100.f});
-    mount_button(rdui::SurfaceLayer::Floater, floater_activations, {10.f, 10.f, 30.f, 30.f});
-    mount_button(rdui::SurfaceLayer::Popup, popup_activations, {10.f, 10.f, 30.f, 30.f});
-    mount_button(rdui::SurfaceLayer::Tooltip, tooltip_activations, {10.f, 10.f, 30.f, 30.f});
-    mount_button(rdui::SurfaceLayer::Drag, drag_activations, {10.f, 10.f, 30.f, 30.f});
+    mountButton(rdui::SurfaceLayer::Content, contentActivations, {0.f, 0.f, 100.f, 100.f});
+    mountButton(rdui::SurfaceLayer::Floater, floaterActivations, {10.f, 10.f, 30.f, 30.f});
+    mountButton(rdui::SurfaceLayer::Popup, popupActivations, {10.f, 10.f, 30.f, 30.f});
+    mountButton(rdui::SurfaceLayer::Tooltip, tooltipActivations, {10.f, 10.f, 30.f, 30.f});
+    mountButton(rdui::SurfaceLayer::Drag, dragActivations, {10.f, 10.f, 30.f, 30.f});
 
     surface.pointerDown({{15.f, 15.f}, rdui::PointerButton::Left});
     surface.pointerUp({{15.f, 15.f}, rdui::PointerButton::Left});
-    ensure_equals("popup precedes floater and content", popup_activations, 1);
-    ensure_equals("tooltip layer is input transparent", tooltip_activations, 0);
-    ensure_equals("drag adornment layer is input transparent", drag_activations, 0);
+    ensure_equals("popup precedes floater and content", popupActivations, 1);
+    ensure_equals("tooltip layer is input transparent", tooltipActivations, 0);
+    ensure_equals("drag adornment layer is input transparent", dragActivations, 0);
 
-    mount_button(rdui::SurfaceLayer::Modal, modal_activations, {10.f, 10.f, 30.f, 30.f});
+    mountButton(rdui::SurfaceLayer::Modal, modalActivations, {10.f, 10.f, 30.f, 30.f});
     surface.pointerDown({{15.f, 15.f}, rdui::PointerButton::Left});
     surface.pointerUp({{15.f, 15.f}, rdui::PointerButton::Left});
-    ensure_equals("modal precedes every lower layer", modal_activations, 1);
+    ensure_equals("modal precedes every lower layer", modalActivations, 1);
 
     ensure("modal backdrop consumes outside press", surface.pointerDown({{80.f, 80.f}, rdui::PointerButton::Left}));
     surface.pointerUp({{80.f, 80.f}, rdui::PointerButton::Left});
-    ensure_equals("modal backdrop blocks content activation", content_activations, 0);
+    ensure_equals("modal backdrop blocks content activation", contentActivations, 0);
 
     surface.clearLayer(rdui::SurfaceLayer::Modal);
     surface.pointerDown({{15.f, 15.f}, rdui::PointerButton::Left});
     surface.pointerUp({{15.f, 15.f}, rdui::PointerButton::Left});
-    ensure_equals("clearing modal restores popup precedence", popup_activations, 2);
+    ensure_equals("clearing modal restores popup precedence", popupActivations, 2);
 }
 
-template<> template<> void rduisurface_object::test<22>() {
+template<> template<> void surfaceObject::test<22>() {
     rdui::Surface surface;
     surface.setViewport(100.f, 100.f);
-    int first_activations = 0;
-    int second_activations = 0;
+    int firstActivations = 0;
+    int secondActivations = 0;
 
     auto first = std::make_unique<rdui::Panel>();
     first->setRect({0.f, 0.f, 50.f, 50.f});
-    auto first_button = std::make_unique<rdui::Button>();
-    first_button->setRect({0.f, 0.f, 50.f, 50.f}).setOnActivate([&first_activations](rdui::Widget&) { ++first_activations; });
-    first->addChild(std::move(first_button));
+    auto firstButton = std::make_unique<rdui::Button>();
+    firstButton->setRect({0.f, 0.f, 50.f, 50.f}).setOnActivate([&firstActivations](rdui::Widget&) { ++firstActivations; });
+    first->addChild(std::move(firstButton));
     surface.mount(std::move(first), rdui::SurfaceLayer::Floater);
 
     auto second = std::make_unique<rdui::Panel>();
     second->setRect({25.f, 0.f, 50.f, 50.f});
-    auto second_button = std::make_unique<rdui::Button>();
-    second_button->setRect({25.f, 0.f, 50.f, 50.f}).setOnActivate([&second_activations](rdui::Widget&) { ++second_activations; });
-    second->addChild(std::move(second_button));
+    auto secondButton = std::make_unique<rdui::Button>();
+    secondButton->setRect({25.f, 0.f, 50.f, 50.f}).setOnActivate([&secondActivations](rdui::Widget&) { ++secondActivations; });
+    second->addChild(std::move(secondButton));
     surface.mount(std::move(second), rdui::SurfaceLayer::Floater);
 
     surface.pointerDown({{10.f, 10.f}, rdui::PointerButton::Left});
     surface.pointerUp({{10.f, 10.f}, rdui::PointerButton::Left});
     surface.pointerDown({{30.f, 10.f}, rdui::PointerButton::Left});
     surface.pointerUp({{30.f, 10.f}, rdui::PointerButton::Left});
-    ensure_equals("press raises containing floater", first_activations, 2);
-    ensure_equals("previously top floater remains behind", second_activations, 0);
+    ensure_equals("press raises containing floater", firstActivations, 2);
+    ensure_equals("previously top floater remains behind", secondActivations, 0);
 }
 
-template<> template<> void rduisurface_object::test<23>() {
+template<> template<> void surfaceObject::test<23>() {
     rdui::StyleSheet stylesheet;
     ensure("visible overflow compiles",
            stylesheet.loadRadia("#parent { overflow: visible; pointer-events: none; } #child { pointer-events: auto; }").ok());
@@ -765,40 +790,34 @@ template<> template<> void rduisurface_object::test<23>() {
     ensure("visible overflow permits descendant hit outside parent", surface.pointerDown({{45.f, 15.f}, rdui::PointerButton::Left}));
     surface.pointerUp({{45.f, 15.f}, rdui::PointerButton::Left});
 
-    ensure("vertical overflow longhand compiles",
-           stylesheet
-               .loadRadia("#parent { overflow-x: visible; overflow-y: hidden; pointer-events: none; }"
-                          " #child { pointer-events: auto; }")
-               .ok());
+    const char* kVerticalOverflow = "#parent { overflow-x: visible; overflow-y: hidden; pointer-events: none; } #child { pointer-events: auto; }";
+    ensure("vertical overflow longhand compiles", stylesheet.loadRadia(kVerticalOverflow).ok());
     ensure("vertical clipping permits a horizontally overflowing descendant", surface.pointerDown({{45.f, 15.f}, rdui::PointerButton::Left}));
     surface.pointerUp({{45.f, 15.f}, rdui::PointerButton::Left});
 
-    rdui::RecordingPaintContext vertical_recording;
-    surface.paint(vertical_recording);
-    const rdui::PaintCommand* vertical_clip = vertical_recording.last(rdui::PaintCommandKind::PushClip);
-    ensure("vertical overflow clip recorded", vertical_clip != nullptr);
-    ensure("vertical overflow clip leaves x visible", !rdui::clipsAxis(vertical_clip->clip_axes, rdui::ClipAxes::X));
-    ensure("vertical overflow clip clips y", rdui::clipsAxis(vertical_clip->clip_axes, rdui::ClipAxes::Y));
+    rdui::RecordingPaintContext verticalRecording;
+    surface.paint(verticalRecording);
+    const rdui::PaintCommand* verticalClip = verticalRecording.last(rdui::PaintCommandKind::PushClip);
+    ensure("vertical overflow clip recorded", verticalClip != nullptr);
+    ensure("vertical overflow clip leaves x visible", !rdui::clipsAxis(verticalClip->clipAxes, rdui::ClipAxes::X));
+    ensure("vertical overflow clip clips y", rdui::clipsAxis(verticalClip->clipAxes, rdui::ClipAxes::Y));
 
-    ensure("horizontal overflow longhand compiles",
-           stylesheet
-               .loadRadia("#parent { overflow-x: hidden; overflow-y: visible; pointer-events: none; }"
-                          " #child { pointer-events: auto; }")
-               .ok());
+    const char* kHorizontalOverflow = "#parent { overflow-x: hidden; overflow-y: visible; pointer-events: none; } #child { pointer-events: auto; }";
+    ensure("horizontal overflow longhand compiles", stylesheet.loadRadia(kHorizontalOverflow).ok());
     ensure("horizontal clipping rejects a horizontally overflowing descendant", !surface.pointerDown({{45.f, 15.f}, rdui::PointerButton::Left}));
 
     rdui::RecordingPaintContext recording;
     surface.paint(recording);
     ensure_equals("paint clip stack balances", recording.clipDepth(), 0);
     ensure_equals("surface and overflow clips nest", recording.maxClipDepth(), 2);
-    const rdui::PaintCommand* overflow_clip = recording.last(rdui::PaintCommandKind::PushClip);
-    ensure("overflow clip recorded", overflow_clip != nullptr);
-    ensure_equals("overflow clip uses parent width", overflow_clip->rect.w, 20.f);
-    ensure("horizontal overflow clip clips x", rdui::clipsAxis(overflow_clip->clip_axes, rdui::ClipAxes::X));
-    ensure("horizontal overflow clip leaves y visible", !rdui::clipsAxis(overflow_clip->clip_axes, rdui::ClipAxes::Y));
+    const rdui::PaintCommand* overflowClip = recording.last(rdui::PaintCommandKind::PushClip);
+    ensure("overflow clip recorded", overflowClip != nullptr);
+    ensure_equals("overflow clip uses parent width", overflowClip->rect.w, 20.f);
+    ensure("horizontal overflow clip clips x", rdui::clipsAxis(overflowClip->clipAxes, rdui::ClipAxes::X));
+    ensure("horizontal overflow clip leaves y visible", !rdui::clipsAxis(overflowClip->clipAxes, rdui::ClipAxes::Y));
 }
 
-template<> template<> void rduisurface_object::test<24>() {
+template<> template<> void surfaceObject::test<24>() {
     rdui::Surface first;
     rdui::Surface second;
     first.setViewport(100.f, 100.f);
@@ -819,12 +838,12 @@ template<> template<> void rduisurface_object::test<24>() {
     ensure("unmount rejects nested or absent widget", !second.unmount(*transferred->parent()));
 }
 
-template<> template<> void rduisurface_object::test<25>() {
+template<> template<> void surfaceObject::test<25>() {
     rdui::Surface surface;
     surface.setViewport(100.f, 40.f);
-    int visible_activations = 0;
-    int hidden_activations = 0;
-    int collapsed_activations = 0;
+    int visibleActivations = 0;
+    int hiddenActivations = 0;
+    int collapsedActivations = 0;
 
     auto add = [&](float x, rdui::Visibility visibility, int& activations) -> PaintProbe* {
         auto probe = std::make_unique<PaintProbe>();
@@ -834,9 +853,9 @@ template<> template<> void rduisurface_object::test<25>() {
         return result;
     };
 
-    PaintProbe* visible = add(0.f, rdui::Visibility::Visible, visible_activations);
-    PaintProbe* hidden = add(30.f, rdui::Visibility::Hidden, hidden_activations);
-    PaintProbe* collapsed = add(60.f, rdui::Visibility::Collapsed, collapsed_activations);
+    PaintProbe* visible = add(0.f, rdui::Visibility::Visible, visibleActivations);
+    PaintProbe* hidden = add(30.f, rdui::Visibility::Hidden, hiddenActivations);
+    PaintProbe* collapsed = add(60.f, rdui::Visibility::Collapsed, collapsedActivations);
     rdui::RecordingPaintContext recording;
     surface.paint(recording);
     ensure_equals("Visible participates in paint", visible->paints, 1);
@@ -847,9 +866,9 @@ template<> template<> void rduisurface_object::test<25>() {
     surface.pointerUp({{10.f, 20.f}, rdui::PointerButton::Left});
     ensure("Hidden is absent from hit testing", !surface.pointerDown({{40.f, 20.f}, rdui::PointerButton::Left}));
     ensure("Collapsed is absent from hit testing", !surface.pointerDown({{70.f, 20.f}, rdui::PointerButton::Left}));
-    ensure_equals("only Visible activates", visible_activations, 1);
-    ensure_equals("Hidden never activates", hidden_activations, 0);
-    ensure_equals("Collapsed never activates", collapsed_activations, 0);
+    ensure_equals("only Visible activates", visibleActivations, 1);
+    ensure_equals("Hidden never activates", hiddenActivations, 0);
+    ensure_equals("Collapsed never activates", collapsedActivations, 0);
 
     surface.clearInteractionState();
     ensure("Tab finds a Visible focus target", surface.keyDown({rdui::KEY_TAB}));
@@ -858,14 +877,12 @@ template<> template<> void rduisurface_object::test<25>() {
     ensure("Collapsed does not receive focus", !collapsed->hasState(rdui::WidgetState::Focused));
 }
 
-template<> template<> void rduisurface_object::test<26>() {
-    rdui::StyleSheet style_sheet;
-    ensure("state layout stylesheet compiles",
-           style_sheet
-               .loadRadia("panel { flow: row; } switch { width: 20px; height: 10px; } "
-                          "switch:checked { width: 40px; } label { width: 10px; height: 10px; }")
-               .ok());
-    rdui::Surface surface(style_sheet);
+template<> template<> void surfaceObject::test<26>() {
+    rdui::StyleSheet styleSheet;
+    const char* kStateLayout =
+        "panel { flow: row; } switch { width: 20px; height: 10px; } switch:checked { width: 40px; } label { width: 10px; height: 10px; }";
+    ensure("state layout stylesheet compiles", styleSheet.loadRadia(kStateLayout).ok());
+    rdui::Surface surface(styleSheet);
     surface.setViewport(100.f, 20.f);
     auto panel = std::make_unique<rdui::Panel>();
     panel->setRect({0.f, 0.f, 100.f, 20.f});
@@ -884,49 +901,46 @@ template<> template<> void rduisurface_object::test<26>() {
     ensure_equals("RSL state change invalidates ancestor layout", after->rect().left(), 40.f);
 }
 
-template<> template<> void rduisurface_object::test<27>() {
-    rdui::StyleSheet style_sheet;
-    ensure("ordered overlap stylesheet compiles",
-           style_sheet
-               .loadRadia("panel { flow: row; width: 40px; height: 20px; }"
-                          "#early { order: -1; width: 20px; height: 20px; }"
-                          "#late { order: 2; width: 20px; height: 20px; margin: 0px 0px 0px -20px; }")
-               .ok());
-    rdui::Surface surface(style_sheet);
+template<> template<> void surfaceObject::test<27>() {
+    rdui::StyleSheet styleSheet;
+    const char* kOrderedOverlap =
+        "panel { flow: row; width: 40px; height: 20px; } #early { order: -1; width: 20px; height: 20px; } #late { order: 2; width: 20px; height: 20px; margin: 0px 0px 0px -20px; }";
+    ensure("ordered overlap stylesheet compiles", styleSheet.loadRadia(kOrderedOverlap).ok());
+    rdui::Surface surface(styleSheet);
     surface.setViewport(40.f, 20.f);
     auto panel = std::make_unique<rdui::Panel>();
-    std::vector<std::string> paint_order;
-    auto early = std::make_unique<OrderedPaintProbe>("early", paint_order);
-    auto late = std::make_unique<OrderedPaintProbe>("late", paint_order);
+    std::vector<std::string> paintOrder;
+    auto early = std::make_unique<OrderedPaintProbe>("early", paintOrder);
+    auto late = std::make_unique<OrderedPaintProbe>("late", paintOrder);
     early->setId("early");
     late->setId("late");
-    OrderedPaintProbe* early_target = early.get();
-    OrderedPaintProbe* late_target = late.get();
+    OrderedPaintProbe* earlyTarget = early.get();
+    OrderedPaintProbe* lateTarget = late.get();
     panel->addChild(std::move(late));
     panel->addChild(std::move(early));
     surface.mount(std::move(panel));
 
     rdui::RecordingPaintContext recording;
     surface.paint(recording);
-    ensure("paint preserves source order", paint_order == std::vector<std::string>({"late", "early"}));
+    ensure("paint preserves source order", paintOrder == std::vector<std::string>({"late", "early"}));
     ensure("overlapping source-later child receives the hit", surface.pointerDown({{5.f, 5.f}, rdui::PointerButton::Left}));
-    ensure("hit testing follows source stacking order", early_target->hasState(rdui::WidgetState::Active));
+    ensure("hit testing follows source stacking order", earlyTarget->hasState(rdui::WidgetState::Active));
     surface.pointerUp({{5.f, 5.f}, rdui::PointerButton::Left});
     surface.clearInteractionState();
     ensure("Tab focus follows source order", surface.keyDown({rdui::KEY_TAB}));
-    ensure("first source child receives focus", late_target->hasState(rdui::WidgetState::Focused));
+    ensure("first source child receives focus", lateTarget->hasState(rdui::WidgetState::Focused));
 
-    paint_order.clear();
-    early_target->setVisibility(rdui::Visibility::Collapsed);
+    paintOrder.clear();
+    earlyTarget->setVisibility(rdui::Visibility::Collapsed);
     surface.paint(recording);
-    ensure("visibility changes refresh ordered traversal", paint_order == std::vector<std::string>({"late"}));
-    paint_order.clear();
-    early_target->setVisibility(rdui::Visibility::Visible);
+    ensure("visibility changes refresh ordered traversal", paintOrder == std::vector<std::string>({"late"}));
+    paintOrder.clear();
+    earlyTarget->setVisibility(rdui::Visibility::Visible);
     surface.paint(recording);
-    ensure("restoring visibility refreshes source traversal", paint_order == std::vector<std::string>({"late", "early"}));
+    ensure("restoring visibility refreshes source traversal", paintOrder == std::vector<std::string>({"late", "early"}));
 }
 
-template<> template<> void rduisurface_object::test<28>() {
+template<> template<> void surfaceObject::test<28>() {
     rdui::Surface surface;
     surface.setViewport(100.f, 100.f);
     auto panel = std::make_unique<rdui::Panel>();
@@ -946,113 +960,4 @@ template<> template<> void rduisurface_object::test<28>() {
     ensure("clearing children after a traversal removes the cached target", !surface.pointerDown({{15.f, 15.f}, rdui::PointerButton::Left}));
 }
 
-template<> template<> void rduisurface_object::test<29>() {
-    rdui::StyleSheet style_sheet;
-    ensure("state layout stylesheet compiles", style_sheet.loadRadia("button { width: 20px; height: 10px; } button:hover { width: 40px; }").ok());
-    ensure("state layout dependency is detected", style_sheet.stateAffectsLayout(rdui::WidgetState::Hovered));
-    rdui::Surface surface(style_sheet);
-    surface.setViewport(100.f, 100.f);
-    auto button = std::make_unique<rdui::Button>();
-    rdui::Button* target = button.get();
-    button->setRect({0.f, 0.f, 20.f, 10.f}).setPointerEvents(true);
-    surface.root().addChild(std::move(button));
-    surface.updateLayout();
-    ensure_equals("state layout starts with base width", target->rect().w, 20.f);
-    surface.pointerMove({{5.f, 5.f}});
-    ensure("hover state is applied", target->hasState(rdui::WidgetState::Hovered));
-    surface.updateLayout();
-    ensure_equals("state layout declarations trigger reflow", target->rect().w, 40.f);
-}
-
-template<> template<> void rduisurface_object::test<30>() {
-    rdui::StyleSheet style_sheet;
-    ensure("state hit-test stylesheet compiles",
-           style_sheet.loadRadia("button { pointer-events: auto; } button:hover { pointer-events: none; }").ok());
-    ensure("state hit-test dependency is detected", style_sheet.stateAffectsHitTesting(rdui::WidgetState::Hovered));
-    rdui::Surface surface(style_sheet);
-    surface.setViewport(100.f, 100.f);
-    auto button = std::make_unique<rdui::Button>();
-    rdui::Button* target = button.get();
-    button->setRect({0.f, 0.f, 20.f, 10.f}).setPointerEvents(true);
-    surface.root().addChild(std::move(button));
-
-    surface.pointerMove({{5.f, 5.f}});
-    ensure("pointer enters target before state policy changes", target->hasState(rdui::WidgetState::Hovered));
-    rdui::RecordingPaintContext recording;
-    surface.paint(recording);
-    ensure("stationary pointer refreshes state-driven hit policy", !target->hasState(rdui::WidgetState::Hovered));
-    surface.paint(recording);
-    ensure("state-driven hit policy settles without hover oscillation", !target->hasState(rdui::WidgetState::Hovered));
-}
-
-template<> template<> void rduisurface_object::test<31>() {
-    rdui::StyleSheet style_sheet;
-    ensure("descendant state stylesheet compiles",
-           style_sheet.loadRadia("panel { flow: row; } label { width: 20px; height: 10px; } panel:hover > label { width: 40px; }").ok());
-    rdui::Surface surface(style_sheet);
-    surface.setViewport(100.f, 100.f);
-    auto panel = std::make_unique<rdui::Panel>();
-    rdui::Panel* parent = panel.get();
-    panel->setRect({0.f, 0.f, 100.f, 20.f}).setPointerEvents(true);
-    auto label = std::make_unique<rdui::Label>("descendant");
-    rdui::Label* target = label.get();
-    panel->addChild(std::move(label));
-    surface.root().addChild(std::move(panel));
-
-    surface.updateLayout();
-    ensure_equals("descendant starts with base width", target->rect().w, 20.f);
-    surface.pointerMove({{5.f, 5.f}});
-    ensure("owner hover is applied", parent->hasState(rdui::WidgetState::Hovered));
-    surface.updateLayout();
-    ensure_equals("owner state invalidates descendant geometry", target->rect().w, 40.f);
-}
-
-template<> template<> void rduisurface_object::test<32>() {
-    rdui::Surface surface;
-    surface.setViewport(100.f, 100.f);
-    auto button = std::make_unique<rdui::Button>();
-    rdui::Button* target = button.get();
-    button->setRect({0.f, 0.f, 20.f, 10.f}).setPointerEvents(true);
-    surface.root().addChild(std::move(button));
-    surface.pointerMove({{5.f, 5.f}});
-    ensure("visibility test starts hovered", target->hasState(rdui::WidgetState::Hovered));
-
-    rdui::RecordingPaintContext recording;
-    target->setVisibility(rdui::Visibility::Hidden);
-    surface.paint(recording);
-    ensure("hidden target is removed from stationary hit testing", !target->hasState(rdui::WidgetState::Hovered));
-
-    target->setVisibility(rdui::Visibility::Visible);
-    surface.paint(recording);
-    ensure("restored target is found by stationary hit testing", target->hasState(rdui::WidgetState::Hovered));
-
-    target->setDisabled(true);
-    surface.paint(recording);
-    ensure("disabled target is removed from stationary hit testing", !target->hasState(rdui::WidgetState::Hovered));
-    target->setDisabled(false);
-    surface.paint(recording);
-    ensure("re-enabled target is found by stationary hit testing", target->hasState(rdui::WidgetState::Hovered));
-}
-
-template<> template<> void rduisurface_object::test<33>() {
-    rdui::StyleSheet style_sheet;
-    ensure("composite owner-state stylesheet compiles",
-           style_sheet
-               .loadRadia("floater { flow: column; width: 100px; height: 100px; "
-                          "&:minimized::header { height: 40px; } } "
-                          "floater::header { height: 20px; } floater::content { flex-grow: 1; }")
-               .ok());
-    rdui::Surface surface(style_sheet);
-    surface.setViewport(200.f, 200.f);
-    auto floater = std::make_unique<rdui::Floater>();
-    rdui::Floater* target = floater.get();
-    floater->setCanMinimize(true);
-    surface.mountFloater(std::move(floater));
-    surface.updateLayout();
-    ensure_equals("composite header starts with base height", target->header()->rect().h, 20.f);
-
-    target->setMinimized(true);
-    surface.updateLayout();
-    ensure_equals("owner state invalidates cached composite part style", target->header()->rect().h, 40.f);
-}
 } // namespace tut

@@ -34,7 +34,7 @@
 namespace rdui {
 namespace {
 bool blocksPointerEvents(const Floater& floater, const Style& style) {
-    const PointerEvents policy = style.pointer_events;
+    const PointerEvents policy = style.pointerEvents;
     if (policy == PointerEvents::Auto) return true;
     if (policy == PointerEvents::PassThrough) return false;
     return floater.pointerEvents();
@@ -48,8 +48,8 @@ Vec2 Surface::minimumFloaterSize(const Floater& floater) const {
     const StylePass::TraversalScope traversal = styles.enterTraversal();
     const Style& floater_style = styles.style(floater);
     if (!snapshotValid(floater_state)) return {};
-    Vec2 minimum{floater_style.min_width ? floater_style.min_width->resolve(original.x) : 0.f,
-                 floater_style.min_height ? floater_style.min_height->resolve(original.y) : 0.f};
+    Vec2 minimum{floater_style.minWidth ? floater_style.minWidth->resolve(original.x) : 0.f,
+                 floater_style.minHeight ? floater_style.minHeight->resolve(original.y) : 0.f};
 
     if (const Panel* header = floater.header()) {
         const WidgetSnapshot header_state = snapshot(*const_cast<Panel*>(header));

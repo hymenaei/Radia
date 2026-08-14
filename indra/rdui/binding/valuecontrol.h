@@ -36,8 +36,8 @@ class Binder;
 
 struct ValueControlState {
     bool dirty = false;
-    ValueValidationStatus validation = ValueValidationStatus::Valid;
-    std::optional<TextSource> message;
+    ValueValidationStatus validationStatus = ValueValidationStatus::Valid;
+    std::optional<TextSource> validationMessage;
 };
 
 class ValueControl : public Widget {
@@ -47,12 +47,12 @@ public:
     using Observer = std::function<void(const ValueControlState&)>;
     virtual ~ValueControl() = default;
 
-    virtual const std::string& bindingId() const = 0;
+    virtual std::optional<ValueBindingRequest> valueBindingRequest() const = 0;
     virtual ValueControlState valueControlState() const = 0;
     virtual ValueBindingSubscription observeValueControlState(Observer observer) = 0;
 
 protected:
-    explicit ValueControl(const char* element) : Widget(element) {}
+    explicit ValueControl(const char* elementName) : Widget(elementName) {}
 
 private:
     virtual void prepareValueBinding(Binder& binder) = 0;

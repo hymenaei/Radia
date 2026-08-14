@@ -62,11 +62,11 @@ class StringValue {
 public:
     using Templates = std::variant<StringTemplate, PluralTemplates>;
 
-    StringValue(StringTemplate value, std::string source_name, std::size_t source_line)
-        : mTemplates(std::move(value)), source(std::move(source_name)), line(source_line) {}
+    StringValue(StringTemplate value, std::string sourceName, std::size_t sourceLine)
+        : mTemplates(std::move(value)), source(std::move(sourceName)), line(sourceLine) {}
 
-    StringValue(PluralTemplates value, std::string source_name, std::size_t source_line)
-        : mTemplates(std::move(value)), source(std::move(source_name)), line(source_line) {}
+    StringValue(PluralTemplates value, std::string sourceName, std::size_t sourceLine)
+        : mTemplates(std::move(value)), source(std::move(sourceName)), line(sourceLine) {}
 
     bool plural() const { return std::holds_alternative<PluralTemplates>(mTemplates); }
     const Templates& templates() const { return mTemplates; }
@@ -105,12 +105,12 @@ struct ParsedLocale {
     std::optional<std::string> name;
     std::optional<LayoutDirection> direction;
     std::optional<std::string> fallback;
-    bool strings_present = false;
+    bool stringsPresent = false;
     StringMap strings;
 };
 
 struct ParsedCatalog {
-    std::optional<std::string> default_locale;
+    std::optional<std::string> defaultLocale;
     std::vector<ParsedLocale> locales;
 };
 
@@ -118,22 +118,22 @@ struct StringContract {
     std::set<std::string> arguments;
     std::multiset<std::string> bindings;
     bool plural = false;
-    std::string required_plural_argument;
+    std::string requiredPluralArgument;
 };
 
 struct LocaleRecord {
     LocaleInfo info;
     StringMap strings;
-    std::vector<std::size_t> fallback_chain;
+    std::vector<std::size_t> fallbackChain;
     icu::Locale locale;
-    std::unique_ptr<icu::PluralRules> plural_rules;
-    std::unique_ptr<icu::NumberFormat> number_format;
+    std::unique_ptr<icu::PluralRules> pluralRules;
+    std::unique_ptr<icu::NumberFormat> numberFormat;
 };
 
 std::string localeIdentity(const std::string& id);
-bool parseRichString(const std::string& source, StringTemplate& parsed, LocalizationLoadResult& result, const std::string& source_name,
+bool parseRichString(const std::string& source, StringTemplate& parsed, LocalizationLoadResult& result, const std::string& sourceName,
                      std::size_t line);
-LocalizationLoadResult parseYamlCatalog(const std::string& yaml, const std::string& source_name, bool base, ParsedCatalog& catalog);
+LocalizationLoadResult parseYamlCatalog(const std::string& yaml, const std::string& sourceName, bool base, ParsedCatalog& catalog);
 } // namespace rdui::localization_detail
 
 namespace rdui {
@@ -146,9 +146,9 @@ struct LocalizationCatalog::Impl {
     const localization_detail::StringValue* find(const localization_detail::LocaleRecord& locale, const std::string& key) const;
 
     std::vector<localization_detail::LocaleRecord> locales;
-    std::unordered_map<std::string, std::size_t> locale_indices;
+    std::unordered_map<std::string, std::size_t> localeIndices;
     std::unordered_map<std::string, localization_detail::StringContract> contracts;
-    std::string default_locale;
+    std::string defaultLocale;
 };
 } // namespace rdui
 #endif // RD_LOCALIZATION_INTERNAL_H

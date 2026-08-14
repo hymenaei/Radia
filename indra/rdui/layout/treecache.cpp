@@ -72,7 +72,7 @@ TreeTraversalCache::ChildSnapshot TreeTraversalCache::build(const Widget& parent
         && cached_revision->second == revision)
         return found->second;
 
-    const ConstWidgetVisit parent_state(parent);
+    const ConstWidgetVisit parentState(parent);
     auto result = std::make_shared<std::vector<WidgetRef<Widget>>>();
     result->reserve(parent.children().size());
     for (const auto& child : parent.children())
@@ -92,11 +92,11 @@ TreeTraversalCache::ChildSnapshot TreeTraversalCache::build(const Widget& parent
         cache.revisions[&parent] = revision;
     };
 
-    if (!parent_state.valid()) return std::make_shared<std::vector<WidgetRef<Widget>>>();
+    if (!parentState.valid()) return std::make_shared<std::vector<WidgetRef<Widget>>>();
     if (ordered && resolve) {
-        const Style& parent_style = (*resolve)(parent);
-        if (!parent_state.styleValid()) return std::make_shared<std::vector<WidgetRef<Widget>>>();
-        if (parent_style.flow == Flow::Row || parent_style.flow == Flow::Column) {
+        const Style& parentStyle = (*resolve)(parent);
+        if (!parentState.styleValid()) return std::make_shared<std::vector<WidgetRef<Widget>>>();
+        if (parentStyle.flow == Flow::Row || parentStyle.flow == Flow::Column) {
             std::vector<std::pair<WidgetRef<Widget>, int>> ranked;
             ranked.reserve(result->size());
             for (const WidgetRef<Widget>& child_ref : *result) {
@@ -105,7 +105,7 @@ TreeTraversalCache::ChildSnapshot TreeTraversalCache::build(const Widget& parent
                 const WidgetVisit child_state(*child);
                 const Style& child_style = (*resolve)(*child);
                 child = child_state.get();
-                if (!parent_state.styleValid() || !child_state.styleValid() || !child || child->parent() != &parent)
+                if (!parentState.styleValid() || !child_state.styleValid() || !child || child->parent() != &parent)
                     return std::make_shared<std::vector<WidgetRef<Widget>>>();
                 ranked.emplace_back(child_ref, child_style.order);
             }
@@ -114,9 +114,9 @@ TreeTraversalCache::ChildSnapshot TreeTraversalCache::build(const Widget& parent
             result->reserve(ranked.size());
             for (auto& [child_ref, order] : ranked) result->push_back(std::move(child_ref));
         }
-        if (!parent_state.styleValid()) return std::make_shared<std::vector<WidgetRef<Widget>>>();
+        if (!parentState.styleValid()) return std::make_shared<std::vector<WidgetRef<Widget>>>();
     }
-    if (!parent_state.valid()) return std::make_shared<std::vector<WidgetRef<Widget>>>();
+    if (!parentState.valid()) return std::make_shared<std::vector<WidgetRef<Widget>>>();
     commit();
     return result;
 }

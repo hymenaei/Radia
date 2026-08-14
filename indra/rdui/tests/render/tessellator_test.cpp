@@ -30,11 +30,10 @@
 #include "render/tessellator.h"
 
 namespace tut {
-struct tessellator_data {};
-typedef test_group<tessellator_data> tessellator_test;
-typedef tessellator_test::object tessellator_object;
-using rduitessellator_object = tessellator_object;
-tessellator_test tessellator_testcase("tessellator");
+struct tessellatorData {};
+using tessellatorTest = test_group<tessellatorData>;
+using tessellatorObject = tessellatorTest::object;
+tessellatorTest tessellatorTestCase("tessellator");
 
 namespace {
 rdui::Path line(float x0 = 0.f, float x1 = 10.f) {
@@ -66,7 +65,7 @@ float opaqueYSpan(const rdui::Mesh& mesh) {
 }
 } // namespace
 
-template<> template<> void rduitessellator_object::test<1>() {
+template<> template<> void tessellatorObject::test<1>() {
     const rdui::Color white;
     const rdui::Mesh one = rdui::tessellateStroke(line(), white, 1.f, 0.f);
     const rdui::Mesh two = rdui::tessellateStroke(line(), white, 2.f, 0.f);
@@ -74,7 +73,7 @@ template<> template<> void rduitessellator_object::test<1>() {
     ensure_equals("two pixel opaque width", opaqueYSpan(two), 2.f);
 }
 
-template<> template<> void rduitessellator_object::test<2>() {
+template<> template<> void tessellatorObject::test<2>() {
     const rdui::Mesh mesh = rdui::tessellateStroke(line(), rdui::Color(), 2.f, 1.f);
     bool transparent = false;
     bool opaque = false;
@@ -86,7 +85,7 @@ template<> template<> void rduitessellator_object::test<2>() {
     ensure("stroke has transparent AA fringe", transparent);
 }
 
-template<> template<> void rduitessellator_object::test<3>() {
+template<> template<> void tessellatorObject::test<3>() {
     const rdui::Path path = line();
     const rdui::Mesh butt = rdui::tessellateStroke(path, rdui::Color(), 2.f, 0.f, rdui::StrokeCap::Butt);
     const rdui::Mesh square = rdui::tessellateStroke(path, rdui::Color(), 2.f, 0.f, rdui::StrokeCap::Square);
@@ -96,14 +95,14 @@ template<> template<> void rduitessellator_object::test<3>() {
     ensure("round extends end", maxX(round) > maxX(butt));
 }
 
-template<> template<> void rduitessellator_object::test<4>() {
+template<> template<> void tessellatorObject::test<4>() {
     rdui::Path curve;
     curve.moveTo(0.f, 0.f).cubicTo(0.f, 20.f, 20.f, 20.f, 20.f, 0.f);
     const rdui::Mesh mesh = rdui::tessellateStroke(curve, rdui::Color(), 1.f, 1.f, rdui::StrokeCap::Round);
     ensure("adaptive curve produces several segments", mesh.triangles.size() > 30U);
 }
 
-template<> template<> void rduitessellator_object::test<5>() {
+template<> template<> void tessellatorObject::test<5>() {
     const rdui::Mesh mesh = rdui::tessellateStroke(rdui::Path::circle({0.f, 0.f}, 10.f), rdui::Color(), 2.f, 1.f);
     ensure("closed circle tessellates", !mesh.empty());
     ensure("closed contour surrounds origin", minX(mesh) < -10.f && maxX(mesh) > 10.f);

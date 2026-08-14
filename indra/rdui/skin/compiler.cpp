@@ -39,7 +39,7 @@ bool endsWith(const std::string& value, const std::string& suffix) {
 SkinGenerationPrepareResult SkinCompiler::prepare(ResourceSnapshot resources) const {
     SkinGenerationPrepareResult result;
     LocalizationCatalog localization;
-    StyleSheet style_sheet;
+    StyleSheet styleSheet;
     std::unordered_map<std::string, SvgIcon> icons;
     LayoutDocumentMap layout_documents;
 
@@ -53,18 +53,18 @@ SkinGenerationPrepareResult SkinCompiler::prepare(ResourceSnapshot resources) co
     const std::vector<ResourceLayer>& style_layers = resources.layers("skin.radia");
     result.append(localization_layers.empty() ? localization.loadYaml(*localization_yaml, "localization.yaml")
                                               : localization.loadYamlLayers(localization_layers));
-    result.append(style_layers.empty() ? style_sheet.loadRadia(*style_source, "skin.radia") : style_sheet.loadRadiaLayers(style_layers));
+    result.append(style_layers.empty() ? styleSheet.loadRadia(*style_source, "skin.radia") : styleSheet.loadRadiaLayers(style_layers));
 
-    constexpr const char* RESOURCE_PREFIX = "resources/";
-    constexpr std::size_t RESOURCE_PREFIX_SIZE = sizeof("resources/") - 1;
+    constexpr const char* kResourcePrefix = "resources/";
+    constexpr std::size_t kResourcePrefixSize = sizeof("resources/") - 1;
     for (const auto& [resource_id, source_text] : resources.resources()) {
-        if (resource_id.rfind(RESOURCE_PREFIX, 0) != 0) continue;
-        if (resource_id.size() == RESOURCE_PREFIX_SIZE) {
+        if (resource_id.rfind(kResourcePrefix, 0) != 0) continue;
+        if (resource_id.size() == kResourcePrefixSize) {
             result.error("rdui.asset.path_invalid", "Invalid asset resource ID: " + resource_id + ".", resource_id);
             continue;
         }
 
-        const std::string asset_id = resource_id.substr(RESOURCE_PREFIX_SIZE);
+        const std::string asset_id = resource_id.substr(kResourcePrefixSize);
         if (asset_id.rfind("icons/", 0) != 0 || !endsWith(asset_id, ".svg")) {
             result.error("rdui.asset.unsupported", "Unsupported Radia UI asset: " + asset_id + ".", resource_id);
             continue;
@@ -86,7 +86,7 @@ SkinGenerationPrepareResult SkinCompiler::prepare(ResourceSnapshot resources) co
     for (const auto& resource : resources.resources()) {
         const std::string& resource_id = resource.first;
         const std::string& source_text = resource.second;
-        if (resource_id == "localization.yaml" || resource_id == "skin.radia" || resource_id.rfind(RESOURCE_PREFIX, 0) == 0) continue;
+        if (resource_id == "localization.yaml" || resource_id == "skin.radia" || resource_id.rfind(kResourcePrefix, 0) == 0) continue;
         if (!endsWith(resource_id, ".xml")) {
             result.error("rdui.layout.unsupported", "Unsupported Radia UI layout resource: " + resource_id + ".", resource_id);
             continue;
@@ -109,7 +109,7 @@ SkinGenerationPrepareResult SkinCompiler::prepare(ResourceSnapshot resources) co
     if (result.hasErrors()) return result;
 
     auto generation = std::shared_ptr<SkinGeneration>(new SkinGeneration(std::make_unique<SkinGeneration::Impl>(
-        std::move(resources), std::move(localization), std::move(style_sheet), std::move(icons), std::move(layout_documents))));
+        std::move(resources), std::move(localization), std::move(styleSheet), std::move(icons), std::move(layout_documents))));
 
     for (const auto& resource : generation->mImpl->resources->resources()) {
         const std::string& resource_id = resource.first;
@@ -118,7 +118,7 @@ SkinGenerationPrepareResult SkinCompiler::prepare(ResourceSnapshot resources) co
             const std::string element =
                 resource_id.substr(sizeof("widgets/") - 1, resource_id.size() - (sizeof("widgets/") - 1) - (sizeof(".xml") - 1));
             result.append(generation->validateWidgetDefaults(element));
-        } else result.append(generation->createView(resource_id, generation->defaultLocale()));
+        } else result.append(generation->buildWidgetTree(resource_id, generation->defaultLocale()));
     }
     if (result.hasErrors()) return result;
 

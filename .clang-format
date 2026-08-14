@@ -14,7 +14,7 @@ IndentAccessModifiers: false
 IndentCaseLabels: true
 IndentExportBlock: true
 IndentCaseBlocks: false
-IndentPPDirectives: BeforeHash
+IndentPPDirectives: None
 PPIndentWidth: 4
 NamespaceIndentation: None
 
@@ -37,7 +37,7 @@ BreakBeforeBinaryOperators: NonAssignment
 BreakBinaryOperations: RespectPrecedence
 BreakBeforeTernaryOperators: true
 BreakFunctionDefinitionParameters: false
-BreakStringLiterals: true
+BreakStringLiterals: false
 
 # Braces and short constructs
 BreakAfterOpenBracketBracedList: false

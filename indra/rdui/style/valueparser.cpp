@@ -111,11 +111,11 @@ std::optional<Gradient> StyleModel::parseGradient(const std::string& raw) const 
     } else if (startsWith(lowered, "conic-gradient(")) {
         prefix = "conic-gradient(";
         gradient.kind = GradientKind::Conic;
-        gradient.angle_degrees = 0.f;
+        gradient.angleDegrees = 0.f;
     } else if (startsWith(lowered, "repeating-conic-gradient(")) {
         prefix = "repeating-conic-gradient(";
         gradient.kind = GradientKind::Conic;
-        gradient.angle_degrees = 0.f;
+        gradient.angleDegrees = 0.f;
         gradient.repeating = true;
     } else return std::nullopt;
 
@@ -143,16 +143,16 @@ std::optional<Gradient> StyleModel::parseGradient(const std::string& raw) const 
             percentage /= 100.f;
             return true;
         };
-        auto horizontal = [&](const std::string& raw_token, float& result) {
-            const std::string token = lower(trim(raw_token));
+        auto horizontal = [&](const std::string& rawToken, float& result) {
+            const std::string token = lower(trim(rawToken));
             if (token == "left") result = 0.f;
             else if (token == "center") result = .5f;
             else if (token == "right") result = 1.f;
             else if (!parsePercentage(token, result)) return false;
             return true;
         };
-        auto vertical = [&](const std::string& raw_token, float& result) {
-            const std::string token = lower(trim(raw_token));
+        auto vertical = [&](const std::string& rawToken, float& result) {
+            const std::string token = lower(trim(rawToken));
             if (token == "bottom") result = 0.f;
             else if (token == "center") result = .5f;
             else if (token == "top") result = 1.f;
@@ -192,7 +192,7 @@ std::optional<Gradient> StyleModel::parseGradient(const std::string& raw) const 
         return parseColorValue(tokens.front(), marker).a >= 0.f;
     };
 
-    std::size_t first_stop = 0;
+    std::size_t firstStop = 0;
     if (!parsesAsColorStop(arguments.front())) {
         const std::string prelude = lower(trim(arguments.front()));
         const std::vector<std::string> tokens = detail::tokenizeTopLevel(prelude);
@@ -213,46 +213,46 @@ std::optional<Gradient> StyleModel::parseGradient(const std::string& raw) const 
                 const bool right = prelude.find("right") != std::string::npos;
                 const bool bottom = prelude.find("bottom") != std::string::npos;
                 const bool left = prelude.find("left") != std::string::npos;
-                if (top && right) gradient.angle_degrees = 45.f;
-                else if (bottom && right) gradient.angle_degrees = 135.f;
-                else if (bottom && left) gradient.angle_degrees = 225.f;
-                else if (top && left) gradient.angle_degrees = 315.f;
-                else if (top) gradient.angle_degrees = 0.f;
-                else if (right) gradient.angle_degrees = 90.f;
-                else if (bottom) gradient.angle_degrees = 180.f;
-                else if (left) gradient.angle_degrees = 270.f;
-            } else if (!parseAngle(prelude, gradient.angle_degrees)) return std::nullopt;
+                if (top && right) gradient.angleDegrees = 45.f;
+                else if (bottom && right) gradient.angleDegrees = 135.f;
+                else if (bottom && left) gradient.angleDegrees = 225.f;
+                else if (top && left) gradient.angleDegrees = 315.f;
+                else if (top) gradient.angleDegrees = 0.f;
+                else if (right) gradient.angleDegrees = 90.f;
+                else if (bottom) gradient.angleDegrees = 180.f;
+                else if (left) gradient.angleDegrees = 270.f;
+            } else if (!parseAngle(prelude, gradient.angleDegrees)) return std::nullopt;
         } else if (gradient.kind == GradientKind::Radial) {
             auto at = std::find(tokens.begin(), tokens.end(), "at");
-            const std::size_t descriptor_count = static_cast<std::size_t>(at - tokens.begin());
-            if (descriptor_count > 1) return std::nullopt;
-            if (descriptor_count == 1) {
-                if (tokens.front() == "circle") gradient.radial_shape = RadialGradientShape::Circle;
+            const std::size_t descriptorCount = static_cast<std::size_t>(at - tokens.begin());
+            if (descriptorCount > 1) return std::nullopt;
+            if (descriptorCount == 1) {
+                if (tokens.front() == "circle") gradient.radialShape = RadialGradientShape::Circle;
                 else if (tokens.front() != "ellipse") return std::nullopt;
             }
             if (at != tokens.end()) {
-                const std::vector<std::string> center_tokens(at + 1, tokens.end());
-                if (!parseCenter(center_tokens, gradient.center)) return std::nullopt;
+                const std::vector<std::string> centerTokens(at + 1, tokens.end());
+                if (!parseCenter(centerTokens, gradient.center)) return std::nullopt;
             }
         } else {
             std::size_t index = 0;
             if (index < tokens.size() && tokens[index] == "from") {
-                if (++index == tokens.size() || !parseAngle(tokens[index++], gradient.angle_degrees)) return std::nullopt;
+                if (++index == tokens.size() || !parseAngle(tokens[index++], gradient.angleDegrees)) return std::nullopt;
             }
             if (index < tokens.size() && tokens[index] == "at") {
-                const std::vector<std::string> center_tokens(tokens.begin() + index + 1, tokens.end());
-                if (!parseCenter(center_tokens, gradient.center)) return std::nullopt;
+                const std::vector<std::string> centerTokens(tokens.begin() + index + 1, tokens.end());
+                if (!parseCenter(centerTokens, gradient.center)) return std::nullopt;
                 index = tokens.size();
             }
             if (index != tokens.size()) return std::nullopt;
         }
-        first_stop = 1;
+        firstStop = 1;
     }
 
-    if (arguments.size() - first_stop < 2) return std::nullopt;
+    if (arguments.size() - firstStop < 2) return std::nullopt;
     const float unspecified = std::numeric_limits<float>::quiet_NaN();
-    auto parseStopPosition = [&](const std::string& raw_position, float& position) {
-        const std::string token = lower(trim(raw_position));
+    auto parseStopPosition = [&](const std::string& rawPosition, float& position) {
+        const std::string token = lower(trim(rawPosition));
         if (!token.empty() && token.back() == '%') {
             if (!parseFiniteFloat(token.substr(0, token.size() - 1), position)) return false;
             position /= 100.f;
@@ -263,7 +263,7 @@ std::optional<Gradient> StyleModel::parseGradient(const std::string& raw) const 
         }
         return position >= 0.f && position <= 1.f;
     };
-    for (std::size_t index = first_stop; index < arguments.size(); ++index) {
+    for (std::size_t index = firstStop; index < arguments.size(); ++index) {
         const std::vector<std::string> tokens = detail::tokenizeTopLevel(arguments[index]);
         if (tokens.empty() || tokens.size() > 3) return std::nullopt;
         const Color marker(-1.f, -1.f, -1.f, -1.f);
@@ -282,16 +282,16 @@ std::optional<Gradient> StyleModel::parseGradient(const std::string& raw) const 
     if (gradient.stops.size() < 2) return std::nullopt;
     if (!std::isfinite(gradient.stops.front().position)) gradient.stops.front().position = 0.f;
     if (!std::isfinite(gradient.stops.back().position)) gradient.stops.back().position = 1.f;
-    std::size_t run_start = 0;
-    while (run_start + 1 < gradient.stops.size()) {
-        std::size_t run_end = run_start + 1;
-        while (run_end < gradient.stops.size() && !std::isfinite(gradient.stops[run_end].position)) ++run_end;
-        if (run_end == gradient.stops.size()) return std::nullopt;
-        if (gradient.stops[run_end].position < gradient.stops[run_start].position) return std::nullopt;
-        const float step = (gradient.stops[run_end].position - gradient.stops[run_start].position) / static_cast<float>(run_end - run_start);
-        for (std::size_t index = run_start + 1; index < run_end; ++index)
-            gradient.stops[index].position = gradient.stops[run_start].position + step * static_cast<float>(index - run_start);
-        run_start = run_end;
+    std::size_t runStart = 0;
+    while (runStart + 1 < gradient.stops.size()) {
+        std::size_t runEnd = runStart + 1;
+        while (runEnd < gradient.stops.size() && !std::isfinite(gradient.stops[runEnd].position)) ++runEnd;
+        if (runEnd == gradient.stops.size()) return std::nullopt;
+        if (gradient.stops[runEnd].position < gradient.stops[runStart].position) return std::nullopt;
+        const float step = (gradient.stops[runEnd].position - gradient.stops[runStart].position) / static_cast<float>(runEnd - runStart);
+        for (std::size_t index = runStart + 1; index < runEnd; ++index)
+            gradient.stops[index].position = gradient.stops[runStart].position + step * static_cast<float>(index - runStart);
+        runStart = runEnd;
     }
     if (gradient.repeating && gradient.stops.back().position <= gradient.stops.front().position) return std::nullopt;
     return gradient;
@@ -319,17 +319,17 @@ std::optional<std::vector<BoxShadow>> StyleModel::parseShadows(const std::string
             return true;
         };
         if (!fixedLength(tokens[0], shadow.horizontal) || !fixedLength(tokens[1], shadow.vertical)) return std::nullopt;
-        std::size_t color_index = 2;
+        std::size_t colorIndex = 2;
         if (tokens.size() >= 4) {
             if (!fixedLength(tokens[2], shadow.blur) || shadow.blur < 0.f) return std::nullopt;
-            color_index = 3;
+            colorIndex = 3;
         }
         if (tokens.size() == 5) {
             if (!fixedLength(tokens[3], shadow.spread)) return std::nullopt;
-            color_index = 4;
+            colorIndex = 4;
         }
         const Color marker(-1.f, -1.f, -1.f, -1.f);
-        shadow.color = parseColorValue(tokens[color_index], marker);
+        shadow.color = parseColorValue(tokens[colorIndex], marker);
         if (shadow.color.a < 0.f) return std::nullopt;
         shadows.push_back(shadow);
     }
@@ -340,10 +340,10 @@ std::optional<std::vector<Effect>> StyleModel::parseEffects(const std::string& r
     const std::string value = trim(raw);
     if (lower(value) == "none") return std::vector<Effect>();
     const std::vector<std::string> functions = detail::splitTopLevel(value, ',');
-    if (functions.empty() || functions.size() > max_effect_count) return std::nullopt;
+    if (functions.empty() || functions.size() > maxEffectCount) return std::nullopt;
 
-    auto parseDirection = [&](const std::string& raw_direction, float& degrees) {
-        const std::string direction = lower(trim(raw_direction));
+    auto parseDirection = [&](const std::string& rawDirection, float& degrees) {
+        const std::string direction = lower(trim(rawDirection));
         if (direction == "to top") degrees = 0.f;
         else if (direction == "to top right" || direction == "to right top") degrees = 45.f;
         else if (direction == "to right") degrees = 90.f;
@@ -381,17 +381,17 @@ std::optional<std::vector<Effect>> StyleModel::parseEffects(const std::string& r
 
     std::vector<Effect> effects;
     effects.reserve(functions.size());
-    bool saw_layer_effect = false;
+    bool sawLayerEffect = false;
     for (const std::string& function : functions) {
         const std::string lowered = lower(function);
         Effect effect;
         std::string prefix;
         if (startsWith(lowered, "background-blur(")) {
-            if (saw_layer_effect) return std::nullopt;
+            if (sawLayerEffect) return std::nullopt;
             effect.kind = EffectKind::BackgroundBlur;
             prefix = "background-blur(";
         } else if (startsWith(lowered, "layer-blur(")) {
-            saw_layer_effect = true;
+            sawLayerEffect = true;
             prefix = "layer-blur(";
         } else return std::nullopt;
         if (function.size() <= prefix.size() || function.back() != ')') return std::nullopt;
@@ -399,19 +399,19 @@ std::optional<std::vector<Effect>> StyleModel::parseEffects(const std::string& r
         const std::vector<std::string> arguments = detail::splitTopLevel(function.substr(prefix.size(), function.size() - prefix.size() - 1), ',');
         if (arguments.size() == 1) {
             const std::vector<std::string> radii = detail::tokenizeTopLevel(arguments.front());
-            if (radii.size() != 1 || !fixedRadius(radii.front(), effect.start_radius)) return std::nullopt;
-            effect.end_radius = effect.start_radius;
+            if (radii.size() != 1 || !fixedRadius(radii.front(), effect.startRadius)) return std::nullopt;
+            effect.endRadius = effect.startRadius;
         } else if (arguments.size() == 3) {
             const std::vector<std::string> start = detail::tokenizeTopLevel(arguments[1]);
             const std::vector<std::string> end = detail::tokenizeTopLevel(arguments[2]);
-            if (!parseDirection(arguments[0], effect.angle_degrees)
+            if (!parseDirection(arguments[0], effect.angleDegrees)
                 || start.size() != 2
                 || end.size() != 2
-                || !fixedRadius(start[0], effect.start_radius)
-                || !percentagePosition(start[1], effect.start_position)
-                || !fixedRadius(end[0], effect.end_radius)
-                || !percentagePosition(end[1], effect.end_position)
-                || effect.start_position > effect.end_position)
+                || !fixedRadius(start[0], effect.startRadius)
+                || !percentagePosition(start[1], effect.startPosition)
+                || !fixedRadius(end[0], effect.endRadius)
+                || !percentagePosition(end[1], effect.endPosition)
+                || effect.startPosition > effect.endPosition)
                 return std::nullopt;
         } else return std::nullopt;
         effects.push_back(effect);
@@ -427,21 +427,21 @@ std::optional<Outline> StyleModel::parseOutline(const std::string& raw) const {
 
     Outline outline;
     outline.width = width->pixels;
-    bool has_offset = false;
-    bool has_style = false;
+    bool hasOffset = false;
+    bool hasStyle = false;
     for (std::size_t index = 1; index + 1 < tokens.size(); ++index) {
         const std::string token = lower(trim(tokens[index]));
         if (token == "solid" || token == "dashed") {
-            if (has_style) return std::nullopt;
+            if (hasStyle) return std::nullopt;
             outline.style = token == "dashed" ? OutlineStyle::Dashed : OutlineStyle::Solid;
-            has_style = true;
+            hasStyle = true;
             continue;
         }
-        if (has_offset) return std::nullopt;
-        const std::optional<Length> parsed_offset = parseLengthValue(tokens[index]);
-        if (!parsed_offset || parsed_offset->percent != 0.f) return std::nullopt;
-        outline.offset = parsed_offset->pixels;
-        has_offset = true;
+        if (hasOffset) return std::nullopt;
+        const std::optional<Length> parsedOffset = parseLengthValue(tokens[index]);
+        if (!parsedOffset || parsedOffset->percent != 0.f) return std::nullopt;
+        outline.offset = parsedOffset->pixels;
+        hasOffset = true;
     }
 
     const Color marker(-1.f, -1.f, -1.f, -1.f);

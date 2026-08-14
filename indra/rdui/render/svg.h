@@ -33,9 +33,9 @@
 
 namespace rdui {
 struct SvgIcon {
-    Rect view_box = Rect(0.f, 0.f, 24.f, 24.f);
-    float stroke_width = 2.f;
-    StrokeCap stroke_cap = StrokeCap::Butt;
+    Rect viewBox = Rect(0.f, 0.f, 24.f, 24.f);
+    float strokeWidth = 2.f;
+    StrokeCap strokeCap = StrokeCap::Butt;
     std::vector<Path> paths;
 
     bool empty() const { return paths.empty(); }
@@ -47,6 +47,6 @@ struct SvgCompileResult : DiagnosticResult {
 };
 
 SvgCompileResult compileSvgIcon(const std::string& svg, const std::string& source = {});
-Path transformSvgPath(const Path& path, const Rect& view_box, const Rect& target);
+Path transformSvgPath(const Path& path, const Rect& viewBox, const Rect& target);
 } // namespace rdui
 #endif // RD_RENDER_SVG_H

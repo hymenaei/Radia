@@ -1,6 +1,6 @@
 /**
  * @file generation.cpp
- * @brief Exposes immutable compiled skin generations for views, localization, styles, and icons.
+ * @brief Exposes immutable compiled skin generations for Widget trees, localization, styles, and icons.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -53,7 +53,7 @@ std::string SkinGeneration::resolveText(const std::string& locale, const Localiz
     return mImpl->localization.get(locale, request);
 }
 const StyleSheet& SkinGeneration::styleSheet() const {
-    return mImpl->style_sheet;
+    return mImpl->styleSheet;
 }
 
 std::shared_ptr<const SkinGeneration> SkinGeneration::empty() {
@@ -62,24 +62,24 @@ std::shared_ptr<const SkinGeneration> SkinGeneration::empty() {
     return generation;
 }
 
-ViewBuildResult SkinGeneration::createView(const std::string& resource_id, const std::string& locale) const {
+LayoutBuildResult SkinGeneration::buildWidgetTree(const std::string& resourceId, const std::string& locale) const {
     const std::string selected_locale = containsLocale(locale) ? locale : defaultLocale();
-    const ViewBuildContext context(mImpl->localization, selected_locale);
-    ViewBuildResult result = mImpl->layout_compiler.createFromResource(resource_id, &context);
+    const LayoutBuildContext context(mImpl->localization, selected_locale);
+    LayoutBuildResult result = mImpl->layoutCompiler.buildWidgetTreeFromResource(resourceId, &context);
     if (result.root) validateIconReferences(*result.root, result);
     if (result.hasErrors()) result.root.reset();
     return result;
 }
 
-void SkinGeneration::validateIconReferences(Widget& widget, ViewBuildResult& result) const {
+void SkinGeneration::validateIconReferences(Widget& widget, LayoutBuildResult& result) const {
     if (const auto* icon = dynamic_cast<const Icon*>(&widget); icon && !icon->name().empty() && !this->icon(icon->name()))
-        result.error("view.icon.missing", "Unknown icon resource: " + icon->name() + ".");
+        result.error("layout.icon.missing", "Unknown icon resource: " + icon->name() + ".");
     for (const auto& child : widget.children()) validateIconReferences(*child, result);
 }
 
 DiagnosticResult SkinGeneration::validateWidgetDefaults(const std::string& element) const {
-    const ViewBuildContext context(mImpl->localization, defaultLocale());
-    return mImpl->layout_compiler.validateWidgetDefaults(element, &context);
+    const LayoutBuildContext context(mImpl->localization, defaultLocale());
+    return mImpl->layoutCompiler.validateWidgetDefaults(element, &context);
 }
 
 const SvgIcon* SkinGeneration::icon(const std::string& name) const {

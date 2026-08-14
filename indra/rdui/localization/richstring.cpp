@@ -38,7 +38,7 @@ bool validArgumentName(const std::string& id) {
     return std::regex_match(id, pattern);
 }
 
-bool validBindingId(const std::string& value) {
+bool validShortcutId(const std::string& value) {
     static const std::regex pattern(R"(^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$)");
     return std::regex_match(value, pattern);
 }
@@ -51,7 +51,7 @@ struct ContainerTag {
     TemplateKind kind;
 };
 
-constexpr std::array CONTAINER_TAGS{
+constexpr std::array kContainerTags{
     ContainerTag{"<b>", "</b>", TemplateKind::B},
     ContainerTag{"<i>", "</i>", TemplateKind::I},
     ContainerTag{"<s>", "</s>", TemplateKind::S},
@@ -70,68 +70,68 @@ struct ScannedToken {
 };
 
 std::optional<ScannedToken> scanRecognizedTag(const std::string& source, std::size_t offset) {
-    for (const ContainerTag& tag : CONTAINER_TAGS) {
+    for (const ContainerTag& tag : kContainerTags) {
         if (source.compare(offset, tag.open.size(), tag.open) == 0)
             return ScannedToken{{RichTokenKind::ContainerOpen, std::string(tag.open), offset, &tag}, tag.open.size()};
         if (source.compare(offset, tag.close.size(), tag.close) == 0)
             return ScannedToken{{RichTokenKind::ContainerClose, std::string(tag.close), offset, &tag}, tag.close.size()};
     }
 
-    constexpr std::string_view BR = "<br/>";
-    if (source.compare(offset, BR.size(), BR) == 0) return ScannedToken{{RichTokenKind::Br, {}, offset, nullptr}, BR.size()};
+    constexpr std::string_view kBreakTag = "<br/>";
+    if (source.compare(offset, kBreakTag.size(), kBreakTag) == 0) return ScannedToken{{RichTokenKind::Br, {}, offset, nullptr}, kBreakTag.size()};
 
-    constexpr std::string_view KBD_PREFIX = "<kbd binding=\"";
-    if (source.compare(offset, KBD_PREFIX.size(), KBD_PREFIX) != 0) return std::nullopt;
+    constexpr std::string_view kKeyboardTagPrefix = "<kbd shortcut=\"";
+    if (source.compare(offset, kKeyboardTagPrefix.size(), kKeyboardTagPrefix) != 0) return std::nullopt;
 
-    const std::size_t binding_begin = offset + KBD_PREFIX.size();
-    const std::size_t end = source.find("\"/>", binding_begin);
+    const std::size_t shortcutBegin = offset + kKeyboardTagPrefix.size();
+    const std::size_t end = source.find("\"/>", shortcutBegin);
     if (end == std::string::npos) return std::nullopt;
 
-    std::string binding = source.substr(binding_begin, end - binding_begin);
-    if (!validBindingId(binding)) return std::nullopt;
-    return ScannedToken{{RichTokenKind::Kbd, std::move(binding), offset, nullptr}, end + 3 - offset};
+    std::string shortcutId = source.substr(shortcutBegin, end - shortcutBegin);
+    if (!validShortcutId(shortcutId)) return std::nullopt;
+    return ScannedToken{{RichTokenKind::Kbd, std::move(shortcutId), offset, nullptr}, end + 3 - offset};
 }
 
 class RichStringTokenizer {
 public:
-    RichStringTokenizer(const std::string& source, LocalizationLoadResult& result, const std::string& source_name, std::size_t line)
-        : mSource(source), mResult(result), mSourceName(source_name), mFirstLine(line) {}
+    RichStringTokenizer(const std::string& source, LocalizationLoadResult& result, const std::string& sourceName, std::size_t line)
+        : mSource(source), mResult(result), mSourceName(sourceName), mFirstLine(line) {}
 
     bool tokenize(std::vector<RichToken>& tokens) {
         std::string text;
-        std::size_t text_offset = 0;
+        std::size_t textOffset = 0;
         const auto flush = [&]() {
             if (!text.empty()) {
-                tokens.push_back({RichTokenKind::Text, std::move(text), text_offset, nullptr});
+                tokens.push_back({RichTokenKind::Text, std::move(text), textOffset, nullptr});
                 text.clear();
             }
         };
         const auto append = [&](std::string value, std::size_t offset) {
-            if (text.empty()) text_offset = offset;
+            if (text.empty()) textOffset = offset;
             text += value;
         };
 
         std::size_t offset = 0;
         while (offset < mSource.size()) {
-            const std::size_t token_offset = offset;
+            const std::size_t tokenOffset = offset;
             if (mSource[offset] == '\\') {
                 std::optional<ScannedToken> escaped;
                 if (offset + 1 < mSource.size() && mSource[offset + 1] == '<') escaped = scanRecognizedTag(mSource, offset + 1);
 
                 if (offset + 1 < mSource.size() && mSource[offset + 1] == '\\') {
-                    append("\\", token_offset);
+                    append("\\", tokenOffset);
                     offset += 2;
                     continue;
                 }
                 if (escaped) {
-                    append(mSource.substr(offset + 1, escaped->length), token_offset);
+                    append(mSource.substr(offset + 1, escaped->length), tokenOffset);
                     offset += escaped->length + 1;
                     continue;
                 }
                 const std::size_t placeholder_end =
                     offset + 1 < mSource.size() && mSource[offset + 1] == '{' ? mSource.find('}', offset + 2) : std::string::npos;
                 if (placeholder_end != std::string::npos && validArgumentName(mSource.substr(offset + 2, placeholder_end - offset - 2))) {
-                    append(mSource.substr(offset + 1, placeholder_end - offset), token_offset);
+                    append(mSource.substr(offset + 1, placeholder_end - offset), tokenOffset);
                     offset = placeholder_end + 1;
                     continue;
                 }
@@ -139,7 +139,7 @@ public:
                 mResult.error("localization.string.escape_invalid",
                               offset + 1 >= mSource.size() ? "A trailing backslash is not a valid Rich String escape."
                                                            : "Backslash may escape only a backslash, recognized tag, or valid placeholder.",
-                              mSourceName, tokenLine(token_offset));
+                              mSourceName, tokenLine(tokenOffset));
                 return false;
             }
 
@@ -180,12 +180,12 @@ public:
                 if (tag_shaped && end != std::string::npos) {
                     mResult.error("localization.string.tag_invalid",
                                   "Unknown, malformed, or misplaced Rich String tag: " + mSource.substr(offset, end - offset + 1) + ".", mSourceName,
-                                  tokenLine(token_offset));
+                                  tokenLine(tokenOffset));
                     return false;
                 }
             }
 
-            append(std::string(1, mSource[offset]), token_offset);
+            append(std::string(1, mSource[offset]), tokenOffset);
             ++offset;
         }
         flush();
@@ -206,8 +206,8 @@ private:
 class RichStringParser {
 public:
     RichStringParser(const std::vector<RichToken>& tokens, const std::string& source, StringTemplate& parsed, LocalizationLoadResult& result,
-                     const std::string& source_name, std::size_t first_line, std::size_t end_line)
-        : mTokens(tokens), mSource(source), mParsed(parsed), mResult(result), mSourceName(source_name), mFirstLine(first_line), mEndLine(end_line) {}
+                     const std::string& sourceName, std::size_t firstLine, std::size_t endLine)
+        : mTokens(tokens), mSource(source), mParsed(parsed), mResult(result), mSourceName(sourceName), mFirstLine(firstLine), mEndLine(endLine) {}
 
     bool parse() { return parseNodes(mParsed.nodes, nullptr); }
 
@@ -274,13 +274,13 @@ private:
 };
 } // namespace
 
-bool parseRichString(const std::string& source, StringTemplate& parsed, LocalizationLoadResult& result, const std::string& source_name,
+bool parseRichString(const std::string& source, StringTemplate& parsed, LocalizationLoadResult& result, const std::string& sourceName,
                      std::size_t line) {
     parsed = {};
     std::vector<RichToken> tokens;
-    RichStringTokenizer tokenizer(source, result, source_name, line);
+    RichStringTokenizer tokenizer(source, result, sourceName, line);
     if (!tokenizer.tokenize(tokens)) return false;
-    const std::size_t end_line = tokenizer.tokenLine(source.size());
-    return RichStringParser(tokens, source, parsed, result, source_name, line, end_line).parse();
+    const std::size_t endLine = tokenizer.tokenLine(source.size());
+    return RichStringParser(tokens, source, parsed, result, sourceName, line, endLine).parse();
 }
 } // namespace rdui::localization_detail

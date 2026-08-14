@@ -31,7 +31,7 @@ namespace rdui {
 void inheritStyle(Style& style, const Style& parent) {
     for (const detail::StylePropertyDefinition* property = detail::stylePropertyBegin(); property != detail::stylePropertyEnd(); ++property)
         if (property->inherit) property->inherit(style, parent);
-    style.specified_inherited |= parent.specified_inherited;
+    style.specifiedInheritedProperties |= parent.specifiedInheritedProperties;
 }
 
 StyleSheet::StyleSheet() : mImpl(std::make_shared<Impl>()) {}
@@ -40,8 +40,8 @@ StyleSheet::StyleSheet(const StyleSheet& other) : mImpl(other.mImpl ? other.mImp
 StyleSheet& StyleSheet::operator=(const StyleSheet& other) {
     if (this != &other) {
         auto replacement = other.mImpl ? std::make_shared<Impl>(*other.mImpl) : std::make_shared<Impl>();
-        const std::uint64_t current_generation = mImpl ? mImpl->generation : std::uint64_t{0};
-        replacement->generation = std::max(current_generation, replacement->generation) + std::uint64_t{1};
+        const std::uint64_t currentGeneration = mImpl ? mImpl->generation : std::uint64_t{0};
+        replacement->generation = std::max(currentGeneration, replacement->generation) + std::uint64_t{1};
         mImpl = std::move(replacement);
     }
     return *this;
@@ -54,8 +54,8 @@ StyleSheet& StyleSheet::operator=(StyleSheet&& other) noexcept {
     if (this != &other) {
         auto replacement = std::move(other.mImpl);
         if (!replacement) replacement = std::make_shared<Impl>();
-        const std::uint64_t current_generation = mImpl ? mImpl->generation : std::uint64_t{0};
-        replacement->generation = std::max(current_generation, replacement->generation) + std::uint64_t{1};
+        const std::uint64_t currentGeneration = mImpl ? mImpl->generation : std::uint64_t{0};
+        replacement->generation = std::max(currentGeneration, replacement->generation) + std::uint64_t{1};
         mImpl = std::move(replacement);
         other.mImpl = std::make_shared<Impl>();
     }
@@ -90,19 +90,19 @@ bool StyleSheet::stateAffectsDescendants(const Widget& widget, WidgetState state
 }
 
 void StyleModel::setColorToken(const std::string& name, const Color& color) {
-    color_tokens[name] = color;
+    colorTokens[name] = color;
 }
 void StyleModel::setNumberToken(const std::string& name, float value) {
-    number_tokens[name] = value;
+    numberTokens[name] = value;
 }
 
 Color StyleModel::colorToken(const std::string& name, const Color& fallback) const {
-    const auto found = color_tokens.find(name);
-    return found == color_tokens.end() ? fallback : found->second;
+    const auto found = colorTokens.find(name);
+    return found == colorTokens.end() ? fallback : found->second;
 }
 
 float StyleModel::numberToken(const std::string& name, float fallback) const {
-    const auto found = number_tokens.find(name);
-    return found == number_tokens.end() ? fallback : found->second;
+    const auto found = numberTokens.find(name);
+    return found == numberTokens.end() ? fallback : found->second;
 }
 } // namespace rdui

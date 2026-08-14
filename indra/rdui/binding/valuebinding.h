@@ -29,7 +29,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <typeindex>
 #include <typeinfo>
 #include <utility>
 #include "localization/localization.h"
@@ -89,6 +88,10 @@ private:
 class ValueBindingBase {
 public:
     virtual ~ValueBindingBase() = default;
+};
+
+struct ValueBindingRequest {
+    std::string settingName;
 };
 
 template<typename T> class ValueBinding : public ValueBindingBase {

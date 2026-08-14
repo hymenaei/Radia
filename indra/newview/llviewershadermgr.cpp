@@ -121,7 +121,7 @@ LLGLSLShader        gUnderWaterProgram;
 
 //interface shaders
 LLGLSLShader        gHighlightProgram;
-LLGLSLShader        gRduiProgram;
+LLGLSLShader        gRadiaUIProgram;
 LLGLSLShader        gSkinnedHighlightProgram;
 LLGLSLShader        gHighlightNormalProgram;
 LLGLSLShader        gHighlightSpecularProgram;
@@ -3723,14 +3723,14 @@ bool LLViewerShaderMgr::loadShadersInterface()
         // source pair while legacy viewer UI migrates to retained painting.
         // Once that migration is complete, remove the legacy shader branch,
         // fold this setup into gUIProgram, and remove PAINT_SHADER.
-        gRduiProgram.mName = "Radia UI Shape Shader";
-        gRduiProgram.mShaderFiles.clear();
-        gRduiProgram.mShaderFiles.push_back(make_pair("interface/uiV.glsl", GL_VERTEX_SHADER));
-        gRduiProgram.mShaderFiles.push_back(make_pair("interface/uiF.glsl", GL_FRAGMENT_SHADER));
-        gRduiProgram.clearPermutations();
-        gRduiProgram.addPermutation("PAINT_SHADER", "1");
-        gRduiProgram.mShaderLevel = mShaderLevel[SHADER_INTERFACE];
-        success = gRduiProgram.createShader();
+        gRadiaUIProgram.mName = "Radia UI Shape Shader";
+        gRadiaUIProgram.mShaderFiles.clear();
+        gRadiaUIProgram.mShaderFiles.push_back(make_pair("interface/uiV.glsl", GL_VERTEX_SHADER));
+        gRadiaUIProgram.mShaderFiles.push_back(make_pair("interface/uiF.glsl", GL_FRAGMENT_SHADER));
+        gRadiaUIProgram.clearPermutations();
+        gRadiaUIProgram.addPermutation("PAINT_SHADER", "1");
+        gRadiaUIProgram.mShaderLevel = mShaderLevel[SHADER_INTERFACE];
+        success = gRadiaUIProgram.createShader();
     }
 
     if (success)

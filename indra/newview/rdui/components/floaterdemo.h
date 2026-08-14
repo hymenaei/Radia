@@ -26,48 +26,35 @@
 #define RD_COMPONENTS_FLOATERDEMO_H
 
 #include <functional>
-#include "binding/binder.h"
-#include "floatercontroller.h"
+#include "componentcontroller.h"
 
 namespace rdui {
-class Button;
-class Floater;
-class Switch;
 class System;
-class Text;
 
 namespace viewer {
+class ChangeEvent;
 class Runtime;
 
-class FloaterDemo final : public FloaterController {
+class FloaterDemo final : public ComponentController {
 public:
-    static constexpr const char* RESOURCE_ID = "floater_demo.xml";
-    explicit FloaterDemo(System& system, std::function<void()> reload_handler = {}, std::function<bool()> authoring_mode_getter = {},
-                         std::function<void(bool)> authoring_mode_setter = {});
+    explicit FloaterDemo(System& system, std::function<void()> reloadHandler = {});
 
-    std::string resourceId() const override { return RESOURCE_ID; }
-    PreparedBindingResult prepareBindings(Floater& floater) override;
-    void commitBindings(PreparedBinding&& binding) override;
-    void idle() override { refreshAuthoringModeControl(); }
-    void refreshLanguageControls();
-    void refreshAuthoringModeControl();
-    void reportReloadSucceeded() override;
-    void reportReloadFailed(const DiagnosticResult& diagnostics) override;
+    void postBuild() override;
+    void refreshLocaleControls();
+    void onReloadSucceeded() override;
+    void onReloadFailed(const DiagnosticResult& diagnostics) override;
 
 private:
-    void selectRelativeLanguage(int direction);
+    void press();
+    void switchChanged(const ChangeEvent& event);
+    void selectLocale(int step);
 
     System& mSystem;
-    WidgetRef<Text> mStatus;
-    WidgetRef<Text> mActiveLanguage;
-    WidgetRef<Button> mPreviousLanguage;
-    WidgetRef<Button> mNextLanguage;
-    WidgetRef<Switch> mAuthoringMode;
-    std::shared_ptr<ValueBinding<bool>> mDemoSwitchBinding;
-    Binding mBinding;
+    Widget& mStatus = getWidgetById("status");
+    Widget& mActiveLocale = getWidgetById("activeLocale");
+    Widget& mPreviousLocale = getWidgetById("previousLocale");
+    Widget& mNextLocale = getWidgetById("nextLocale");
     std::function<void()> mReloadHandler;
-    std::function<bool()> mAuthoringModeGetter;
-    std::function<void(bool)> mAuthoringModeSetter;
 };
 
 void registerFloaterDemo(Runtime& runtime);

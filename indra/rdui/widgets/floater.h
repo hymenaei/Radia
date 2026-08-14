@@ -45,11 +45,11 @@ class Floater : public Widget {
     friend WidgetContract detail::floaterContract();
 
 public:
-    static constexpr const char* ELEMENT = "floater";
+    static constexpr const char* sElement = "floater";
 
     Floater();
 
-    Floater& setTitle(std::string localization_key);
+    Floater& setTitle(std::string localizationKey);
     Floater& setIcon(std::string icon);
     Floater& setCloseIcon(std::string icon);
     Floater& setMinimizeIcon(std::string icon);
@@ -87,6 +87,7 @@ public:
     Floater& addChild(std::unique_ptr<Widget> child) override;
     Floater& prependChild(std::unique_ptr<Widget> child) override;
     void clearChildren() override;
+    Floater& setLifecycleCallbacks(std::function<void()> onOpen, std::function<void()> onClose);
     void open();
     void close();
     void setMinimized(bool minimized);
@@ -115,7 +116,7 @@ private:
     bool overChromeButton(const Vec2& point) const;
     Vec2 clampedPosition(const Vec2& position) const;
     bool beginResizeInteraction(const PointerEvent& event, std::uint8_t edges, const Vec2& minimum, const std::optional<Rect>& bounds);
-    void setAuthoredSize(const Vec2& size, const Vec2& content_size);
+    void setAuthoredSize(const Vec2& size, const Vec2& contentSize);
     void configureCompositeParts();
     Panel* claimCustomHeader();
     Floater& setTitleContent(TextSource content);
@@ -155,6 +156,8 @@ private:
     bool mCustomHeaderClaimed = false;
     Visibility mCustomHeaderVisibility = Visibility::Visible;
     Visibility mContentVisibility = Visibility::Visible;
+    std::function<void()> mOnOpen;
+    std::function<void()> mOnClose;
 };
 } // namespace rdui
 #endif // RD_WIDGETS_FLOATER_H

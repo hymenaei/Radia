@@ -38,23 +38,24 @@ class Label : public Widget {
     friend class detail::WidgetCompilerAccess;
 
 public:
-    static constexpr const char* ELEMENT = "label";
+    static constexpr const char* sElement = "label";
 
     explicit Label(std::string text = {});
 
     Label& setText(std::string text);
     Label& setContent(TextSource content);
     Label& setContent(InlineContent content);
+    bool setTextContent(TextSource content) override;
     const std::string& text() const { return mText.plainText(); }
     const InlineContent& content() const { return mText.content(); }
 
-    Vec2 intrinsicSize(const StyleSheet& theme, const Style& style, const TextMetrics& text_metrics,
+    Vec2 intrinsicSize(const StyleSheet& theme, const Style& style, const TextMetrics& textMetrics,
                        const IntrinsicSizeConstraints& constraints = IntrinsicSizeConstraints()) const override;
     void paint(PaintContext& context, const Style& style, float scale) const override;
     bool defaultPointerEvents() const override { return static_cast<bool>(mTarget); }
 
 protected:
-    Label(const char* element, std::string text);
+    Label(const char* elementName, std::string text);
 
 private:
     Label& setTargetId(std::string id);

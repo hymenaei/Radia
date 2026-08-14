@@ -2,9 +2,16 @@
 
 add_library(rdui STATIC)
 
+set(rdui_event_sources
+    binding/eventdescriptor.h
+    binding/eventregistration.h
+    eventcall.cpp
+    widgetevents.def
+    )
+
 set(rdui_binding_sources
-    actionevents.def
     binding/binder.cpp
+    binding/settingresolver.h
     )
 
 set(rdui_layout_sources
@@ -109,6 +116,7 @@ target_sources(rdui
     path.cpp
     path.h
     system.cpp
+    ${rdui_event_sources}
     ${rdui_binding_sources}
     ${rdui_layout_sources}
     ${rdui_localization_sources}
@@ -123,14 +131,13 @@ target_sources(rdui
     FILE_SET HEADERS
     BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
     FILES
-    action.h
-    actionevents.def
-    binding/binder.h
     binding/valuebinding.h
     binding/valuecontrol.h
+    binding/eventdescriptor.h
     diagnostic.h
     event.h
-    layout/viewresult.h
+    eventcall.h
+    layout/buildresult.h
     localization/localization.h
     localization/value.h
     render/openglpaintcontext.h
@@ -151,6 +158,8 @@ target_sources(rdui
     text/metrics.h
     text/source.h
     types.h
+    widgetevent.h
+    widgetevents.def
     widgets/button.h
     widgets/field.h
     widgets/fieldset.h
@@ -180,6 +189,7 @@ target_precompile_headers(rdui REUSE_FROM llprecompiled)
 if (BUILD_TESTING)
   set(rdui_test_sources
     binding/binder.cpp
+    eventcall.cpp
     widgets/switch.cpp
     style/color.cpp
     widgets/field.cpp
@@ -206,4 +216,5 @@ if (BUILD_TESTING)
   )
 
   LL_ADD_PROJECT_UNIT_TESTS(rdui "${rdui_test_sources}")
+  LL_ADD_INTEGRATION_TEST(surfacestate "" "rdui" "rdui")
 endif ()

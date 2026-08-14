@@ -39,7 +39,7 @@ namespace rdui {
 namespace {
 class SurfaceRoot final : public Widget {
 public:
-    explicit SurfaceRoot(const char* element = "surface-root", bool blocks_pointer = false) : Widget(element), mBlocksPointer(blocks_pointer) {}
+    explicit SurfaceRoot(const char* elementName = "surface-root", bool blocksPointer = false) : Widget(elementName), mBlocksPointer(blocksPointer) {}
     bool defaultPointerEvents() const override { return mBlocksPointer; }
     void paint(PaintContext&, const Style&, float) const override {}
 
@@ -47,25 +47,25 @@ private:
     bool mBlocksPointer = false;
 };
 
-void applyOpacity(Style& style, float inherited_opacity) {
-    const float opacity = inherited_opacity * style.opacity;
-    style.background_color.a *= opacity;
-    style.border_color.a *= opacity;
-    style.text_color.a *= opacity;
-    style.icon_stroke_color.a *= opacity;
+void applyOpacity(Style& style, float inheritedOpacity) {
+    const float opacity = inheritedOpacity * style.opacity;
+    style.backgroundColor.a *= opacity;
+    style.borderColor.a *= opacity;
+    style.textColor.a *= opacity;
+    style.iconStrokeColor.a *= opacity;
     style.outline.color.a *= opacity;
     for (BoxShadow& shadow : style.shadows) shadow.color.a *= opacity;
-    if (style.background_gradient)
-        for (GradientStop& stop : style.background_gradient->stops) stop.color.a *= opacity;
-    if (style.border_gradient)
-        for (GradientStop& stop : style.border_gradient->stops) stop.color.a *= opacity;
+    if (style.backgroundGradient)
+        for (GradientStop& stop : style.backgroundGradient->stops) stop.color.a *= opacity;
+    if (style.borderGradient)
+        for (GradientStop& stop : style.borderGradient->stops) stop.color.a *= opacity;
     style.opacity = 1.f;
 }
 
 void applyDirection(Style& style, LayoutDirection direction) {
     style.direction = direction;
-    if (style.text_align == TextAlign::Start) style.text_align = direction == LayoutDirection::RightToLeft ? TextAlign::Right : TextAlign::Left;
-    else if (style.text_align == TextAlign::End) style.text_align = direction == LayoutDirection::RightToLeft ? TextAlign::Left : TextAlign::Right;
+    if (style.textAlign == TextAlign::Start) style.textAlign = direction == LayoutDirection::RightToLeft ? TextAlign::Right : TextAlign::Left;
+    else if (style.textAlign == TextAlign::End) style.textAlign = direction == LayoutDirection::RightToLeft ? TextAlign::Left : TextAlign::Right;
 }
 } // namespace
 
@@ -87,15 +87,15 @@ Surface::Surface()
     mRoot->setSurface(this);
 }
 
-Surface::Surface(const StyleSheet& style_sheet)
-    : mRoot(std::make_unique<SurfaceRoot>()), mStyleSheet(&style_sheet), mTextMetrics(fixedTextMetrics()),
-      mObservedStyleGeneration(style_sheet.generation()), mObservedTextMetricsGeneration(mTextMetrics.generation()) {
+Surface::Surface(const StyleSheet& styleSheet)
+    : mRoot(std::make_unique<SurfaceRoot>()), mStyleSheet(&styleSheet), mTextMetrics(fixedTextMetrics()),
+      mObservedStyleGeneration(styleSheet.generation()), mObservedTextMetricsGeneration(mTextMetrics.generation()) {
     initializeLayerRoots();
     mRoot->setSurface(this);
 }
 
-Surface::Surface(const System& system, const TextMetrics& text_metrics)
-    : mRoot(std::make_unique<SurfaceRoot>()), mStyleSheet(&system.styleSheet()), mSystem(&system), mTextMetrics(text_metrics),
+Surface::Surface(const System& system, const TextMetrics& textMetrics)
+    : mRoot(std::make_unique<SurfaceRoot>()), mStyleSheet(&system.styleSheet()), mSystem(&system), mTextMetrics(textMetrics),
       mObservedStyleGeneration(system.generation()), mObservedTextMetricsGeneration(mTextMetrics.generation()) {
     system.registerSurface(*this);
     initializeLayerRoots();
@@ -113,10 +113,10 @@ LayoutDirection Surface::layoutDirection() const {
     return mSystem ? mSystem->layoutDirection() : LayoutDirection::LeftToRight;
 }
 
-void Surface::generationChanged(const StyleSheet& style_sheet) {
-    if (mStylePass && mStylePass->active()) mPendingStyleSheet = &style_sheet;
+void Surface::generationChanged(const StyleSheet& styleSheet) {
+    if (mStylePass && mStylePass->active()) mPendingStyleSheet = &styleSheet;
     else {
-        mStyleSheet = &style_sheet;
+        mStyleSheet = &styleSheet;
         mPendingStyleSheet = nullptr;
         mStylePass.reset();
     }
@@ -301,9 +301,9 @@ bool Surface::updateLayoutIfNeeded() {
         mRoot->invalidateStyleTree();
         for (auto& root : mLayerRoots) root->invalidateStyleTree();
     }
-    const std::uint64_t text_metrics_generation = mTextMetrics.generation();
-    if (text_metrics_generation != mObservedTextMetricsGeneration) {
-        mObservedTextMetricsGeneration = text_metrics_generation;
+    const std::uint64_t textMetricsGeneration = mTextMetrics.generation();
+    if (textMetricsGeneration != mObservedTextMetricsGeneration) {
+        mObservedTextMetricsGeneration = textMetricsGeneration;
         mRoot->invalidateTextTree();
         for (auto& root : mLayerRoots) root->invalidateTextTree();
     }
@@ -349,55 +349,55 @@ void Surface::paint(PaintContext& context, float scale) {
     didPaint(painted_generation);
 }
 
-void Surface::paintWidget(const Widget& widget, PaintContext& context, float scale, float inherited_opacity, StylePass& styles) const {
+void Surface::paintWidget(const Widget& widget, PaintContext& context, float scale, float inheritedOpacity, StylePass& styles) const {
     if (widget.visibility() != Visibility::Visible) return;
     const WidgetRef<const Widget> lifetime(&widget);
     const Surface* original_surface = widget.attachedSurface();
-    const Widget* original_parent = widget.parent();
-    const std::uint64_t original_style_revision = widget.mStyleRevision;
-    const std::uint64_t original_layout_revision = widget.mLayoutInvalidationRevision;
+    const Widget* originalParent = widget.parent();
+    const std::uint64_t originalStyleRevision = widget.mStyleRevision;
+    const std::uint64_t originalLayoutRevision = widget.mLayoutInvalidationRevision;
     const Style& unresolved = styles.style(widget);
     const Widget* styled_widget = lifetime.get();
     if (!styled_widget
         || styled_widget->attachedSurface() != original_surface
-        || styled_widget->parent() != original_parent
-        || styled_widget->mStyleRevision != original_style_revision
-        || styled_widget->mLayoutInvalidationRevision != original_layout_revision)
+        || styled_widget->parent() != originalParent
+        || styled_widget->mStyleRevision != originalStyleRevision
+        || styled_widget->mLayoutInvalidationRevision != originalLayoutRevision)
         return;
-    const float child_opacity = inherited_opacity * unresolved.opacity;
+    const float child_opacity = inheritedOpacity * unresolved.opacity;
     const LayoutDirection direction = layoutDirection();
-    const bool needs_opacity = inherited_opacity != 1.f || unresolved.opacity != 1.f;
+    const bool needs_opacity = inheritedOpacity != 1.f || unresolved.opacity != 1.f;
     const bool needs_direction =
-        unresolved.direction != direction || unresolved.text_align == TextAlign::Start || unresolved.text_align == TextAlign::End;
+        unresolved.direction != direction || unresolved.textAlign == TextAlign::Start || unresolved.textAlign == TextAlign::End;
     std::optional<Style> painted_storage;
     const Style* painted = &unresolved;
     if (needs_opacity || needs_direction) {
         painted_storage.emplace(unresolved);
-        if (needs_opacity) applyOpacity(*painted_storage, inherited_opacity);
+        if (needs_opacity) applyOpacity(*painted_storage, inheritedOpacity);
         if (needs_direction) applyDirection(*painted_storage, direction);
         painted = &*painted_storage;
     }
-    const bool clips_x = unresolved.overflow_x == Overflow::Hidden;
-    const bool clips_y = unresolved.overflow_y == Overflow::Hidden;
+    const bool clips_x = unresolved.overflowX == Overflow::Hidden;
+    const bool clips_y = unresolved.overflowY == Overflow::Hidden;
     const bool clips_children = clips_x || clips_y;
     const ClipAxes clip_axes = (clips_x ? ClipAxes::X : ClipAxes::NoAxes) | (clips_y ? ClipAxes::Y : ClipAxes::NoAxes);
     if (!painted->effects.empty()) context.beginEffects(widget.paintBounds(), *painted, scale);
     if (clips_children) context.pushClip(widget.rect(), scale, clip_axes);
     widget.paint(context, *painted, scale);
-    const auto parent_still_valid = [&] {
+    const auto isParentStillValid = [&] {
         const Widget* current_widget = lifetime.get();
         return current_widget
             && current_widget->attachedSurface() == original_surface
-            && current_widget->mStyleRevision == original_style_revision
-            && current_widget->mLayoutInvalidationRevision == original_layout_revision
+            && current_widget->mStyleRevision == originalStyleRevision
+            && current_widget->mLayoutInvalidationRevision == originalLayoutRevision
             && current_widget->visibility() == Visibility::Visible
             && isRootedInSurface(current_widget)
-            && (current_widget->parent() == original_parent || (!original_parent && isSurfaceRoot(current_widget)));
+            && (current_widget->parent() == originalParent || (!originalParent && isSurfaceRoot(current_widget)));
     };
-    if (parent_still_valid()) {
+    if (isParentStillValid()) {
         const StylePass::ChildSnapshot children = sourceChildren(widget, styles);
         for (const WidgetRef<Widget>& child_ref : *children) {
-            if (!parent_still_valid()) break;
+            if (!isParentStillValid()) break;
             if (Widget* child = child_ref.get(); child && child->parent() == &widget && isRootedInSurface(child))
                 paintWidget(*child, context, scale, child_opacity, styles);
         }

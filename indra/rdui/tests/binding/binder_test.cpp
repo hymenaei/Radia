@@ -1,6 +1,6 @@
 /**
  * @file binder_test.cpp
- * @brief Tests transactional Widget, Action, and Value Binding preparation.
+ * @brief Tests transactional Widget, Event Handler, and Value Binding preparation.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -24,8 +24,10 @@
 
 #include "linden_common.h"
 #include <map>
+#include <optional>
 #include "../test/lltut.h"
 #include "binding/binder.h"
+#include "binding/settingresolver.h"
 #include "binding/valuebinding.h"
 #include "layout/resourcecompiler.h"
 #include "skin/compiler.h"
@@ -40,6 +42,31 @@
 #include "widgets/widgetcontract.h"
 
 namespace {
+const char* noEventArguments(const rdui::EventCall& call, rdui::WidgetEventKind) {
+    return call.arguments().empty() ? nullptr : "binding.event.arity_mismatch";
+}
+
+const char* currentEventArgument(const rdui::EventCall& call, rdui::WidgetEventKind) {
+    if (call.arguments().size() != 1) return "binding.event.arity_mismatch";
+    return std::holds_alternative<rdui::CurrentEventArgument>(call.arguments().front()) ? nullptr : "binding.event.argument_type_mismatch";
+}
+
+template<typename T> const char* singleEventArgument(const rdui::EventCall& call, rdui::WidgetEventKind) {
+    if (call.arguments().size() != 1) return "binding.event.arity_mismatch";
+    return std::holds_alternative<T>(call.arguments().front()) ? nullptr : "binding.event.argument_type_mismatch";
+}
+
+void bindEvent(rdui::Binder& binder, std::string settingName, std::optional<rdui::WidgetEventKind> kind,
+               rdui::EventHandlerRegistration::Invoke invoke, rdui::EventHandlerRegistration::ArgumentError argumentError) {
+    binder.event(rdui::detail::makeEventRegistration(std::move(settingName), kind, std::move(invoke), std::move(argumentError)));
+}
+
+template<typename Callback> void bindEvent(rdui::Binder& binder, std::string settingName, Callback callback) {
+    bindEvent(
+        binder, std::move(settingName), std::nullopt,
+        [callback = std::move(callback)](const rdui::WidgetEvent&, const rdui::EventCall&) mutable { callback(); }, noEventArguments);
+}
+
 template<typename T> class TestValueBinding final : public rdui::ValueBinding<T> {
 public:
     explicit TestValueBinding(T value) : mState{value, value, std::nullopt} {}
@@ -73,37 +100,89 @@ private:
     std::map<std::size_t, typename rdui::ValueBinding<T>::Observer> mObservers;
     std::size_t mNextObserver = 1;
 };
+
+class TestSettingResolver final : public rdui::SettingResolver {
+public:
+    template<typename T> void add(std::string settingName, std::shared_ptr<TestValueBinding<T>> binding) {
+        mBindings.emplace(std::move(settingName), Entry{std::move(binding), typeid(T)});
+    }
+
+    rdui::SettingResolution resolve(std::string_view settingName, std::type_index requestedType) override {
+        const auto found = mBindings.find(std::string(settingName));
+        if (found == mBindings.end()) return {rdui::SettingResolution::ResolutionStatus::Missing, {}};
+        if (found->second.type != requestedType) return {rdui::SettingResolution::ResolutionStatus::TypeMismatch, {}};
+        return {rdui::SettingResolution::ResolutionStatus::Found, found->second.binding};
+    }
+
+    void clear() { mBindings.clear(); }
+
+private:
+    struct Entry {
+        std::shared_ptr<rdui::ValueBindingBase> binding;
+        std::type_index type{typeid(void)};
+    };
+
+    std::map<std::string, Entry> mBindings;
+};
+
+class MisreportingSettingResolver final : public rdui::SettingResolver {
+public:
+    MisreportingSettingResolver() : binding(std::make_shared<TestValueBinding<std::string>>("wrong type")) {}
+
+    rdui::SettingResolution resolve(std::string_view, std::type_index) override {
+        return {rdui::SettingResolution::ResolutionStatus::Found, binding};
+    }
+
+    std::shared_ptr<TestValueBinding<std::string>> binding;
+};
+
+template<typename WidgetT> rdui::WidgetRef<WidgetT> lookupWidget(rdui::Widget& root, std::string_view id) {
+    return rdui::WidgetRef<WidgetT>(dynamic_cast<WidgetT*>(rdui::detail::findWidgetInScope(root, id)));
+}
+
+struct TestBindingResult : rdui::DiagnosticResult {
+    bool ok() const { return !hasErrors(); }
+    rdui::Binding binding;
+};
+
+TestBindingResult finishBinding(rdui::Binder& binder) {
+    rdui::PreparedBindingResult prepared = binder.prepare();
+    TestBindingResult result;
+    result.warnings = std::move(prepared.warnings);
+    result.errors = std::move(prepared.errors);
+    if (prepared.ok()) result.binding = prepared.binding.commit();
+    return result;
+}
 } // namespace
 
 namespace tut {
-struct binder_data {};
-typedef test_group<binder_data> binder_test;
-typedef binder_test::object binder_object;
-using rduibinder_object = binder_object;
-binder_test binder_testcase("binder");
+struct binderData {};
+using binderTest = test_group<binderData>;
+using binderObject = binderTest::object;
+binderTest binderTestCase("binder");
 
-template<> template<> void rduibinder_object::test<1>() {
+template<> template<> void binderObject::test<1>() {
     rdui::Panel root;
     auto button = std::make_unique<rdui::Button>();
-    button->setId("save").setAction(rdui::ActionEventKind::Click, "save");
+    button->setId("save").setEventCall(rdui::WidgetEventKind::Click, rdui::EventCall("save"));
     root.addChild(std::move(button));
 
     int activations = 0;
     rdui::WidgetRef<rdui::Button> save;
     rdui::Binder binder(root);
-    binder.bind("save", save);
-    binder.onClick("save", [&] { ++activations; });
-    rdui::BindingResult result = binder.finish();
-    ensure("valid binding transaction commits", result.ok());
-    ensure("typed ref committed", !!save);
+    save = lookupWidget<rdui::Button>(root, "save");
+    bindEvent(binder, "save", [&] { ++activations; });
+    TestBindingResult result = finishBinding(binder);
+    ensure("Event binding transaction commits", result.ok());
+    ensure("typed lookup resolves", !!save);
     save->activate();
     ensure_equals("handler attached", activations, 1);
 }
 
-template<> template<> void rduibinder_object::test<2>() {
+template<> template<> void binderObject::test<2>() {
     rdui::Panel root;
     auto button = std::make_unique<rdui::Button>();
-    button->setId("save").setAction(rdui::ActionEventKind::Click, "save");
+    button->setId("save").setEventCall(rdui::WidgetEventKind::Click, rdui::EventCall("save"));
     rdui::Button* source = button.get();
     root.addChild(std::move(button));
     auto label = std::make_unique<rdui::Label>();
@@ -112,83 +191,85 @@ template<> template<> void rduibinder_object::test<2>() {
 
     int activations = 0;
     rdui::WidgetRef<rdui::Button> save;
-    rdui::WidgetRef<rdui::Button> wrong_type;
+    rdui::WidgetRef<rdui::Button> wrongType;
     rdui::WidgetRef<rdui::Label> missing;
     rdui::Binder binder(root);
-    binder.bind("save", save);
-    binder.onClick("save", [&] { ++activations; });
-    binder.bind("status", wrong_type);
-    binder.bind("missing", missing);
-    const rdui::BindingResult result = binder.finish();
-    ensure("invalid transaction fails", !result.ok());
-    ensure_equals("only the existing wrong-typed widget is an error", result.errors.size(), 1U);
-    ensure("no refs commit", !save && !wrong_type && !missing);
+    save = lookupWidget<rdui::Button>(root, "save");
+    bindEvent(binder, "save", [&] { ++activations; });
+    wrongType = lookupWidget<rdui::Button>(root, "status");
+    missing = lookupWidget<rdui::Label>(root, "missing");
+    const TestBindingResult result = finishBinding(binder);
+    ensure("Event transaction remains valid", result.ok());
+    ensure("typed lookup distinguishes wrong and missing Widgets", save && !wrongType && !missing);
     source->activate();
-    ensure_equals("no handler attaches", activations, 0);
+    ensure_equals("handler attaches to the resolved source", activations, 1);
 }
 
-template<> template<> void rduibinder_object::test<3>() {
+template<> template<> void binderObject::test<3>() {
     rdui::Panel root;
     auto button = std::make_unique<rdui::Button>();
     button->setId("temporary");
     root.addChild(std::move(button));
     rdui::WidgetRef<rdui::Button> reference;
     rdui::Binder binder(root);
-    binder.bind("temporary", reference);
-    ensure("reference binds", binder.finish().ok() && reference);
+    reference = lookupWidget<rdui::Button>(root, "temporary");
+    ensure("reference resolves", finishBinding(binder).ok() && reference);
     root.clearChildren();
     ensure("destroyed widget invalidates reference", !reference);
 }
 
-template<> template<> void rduibinder_object::test<4>() {
+template<> template<> void binderObject::test<4>() {
     rdui::Panel root;
     auto button = std::make_unique<rdui::Button>();
     rdui::Button* source = button.get();
-    button->setAction(rdui::ActionEventKind::Click, "optional");
+    button->setEventCall(rdui::WidgetEventKind::Click, rdui::EventCall("optional"));
     root.addChild(std::move(button));
 
     source->activate();
     int activations = 0;
     rdui::Binder binder(root);
-    binder.onClick("optional", [&] { ++activations; });
-    rdui::BindingResult result = binder.finish();
-    ensure("declared action binds", result.ok() && result.binding);
+    bindEvent(binder, "optional", [&] { ++activations; });
+    TestBindingResult result = finishBinding(binder);
+    ensure("declared Event Handler binds", result.ok() && result.binding);
     source->activate();
-    ensure_equals("bound action runs", activations, 1);
-    result.binding.reset();
+    ensure_equals("bound Event Handler runs", activations, 1);
+    result.binding = rdui::Binding{};
     source->activate();
     ensure_equals("destroyed binding detaches handler", activations, 1);
 }
 
-template<> template<> void rduibinder_object::test<5>() {
+template<> template<> void binderObject::test<5>() {
     rdui::Panel root;
     auto button = std::make_unique<rdui::Button>();
-    button->setAction(rdui::ActionEventKind::Click, "shared");
+    button->setEventCall(rdui::WidgetEventKind::Click, rdui::EventCall("shared"));
     root.addChild(std::move(button));
     auto control = std::make_unique<rdui::Switch>();
-    control->setAction(rdui::ActionEventKind::Change, "shared");
+    control->setEventCall(rdui::WidgetEventKind::Change, rdui::EventCall("shared"));
     root.addChild(std::move(control));
 
     rdui::Binder binder(root);
-    const rdui::BindingResult result = binder.finish();
-    ensure("one action name cannot span event kinds", !result.ok());
-    ensure_equals("kind conflict diagnostic", result.errors.front().code, "binding.action.kind_mismatch");
+    const TestBindingResult result = finishBinding(binder);
+    ensure("one Handler settingName cannot span Event kinds", !result.ok());
+    ensure_equals("kind conflict diagnostic", result.errors.front().code, "binding.event.kind_mismatch");
 }
 
-template<> template<> void rduibinder_object::test<6>() {
+template<> template<> void binderObject::test<6>() {
     rdui::Panel root;
     auto control = std::make_unique<rdui::Switch>();
     rdui::Switch* source = control.get();
-    control->setAction(rdui::ActionEventKind::Change, "changed");
+    control->setEventCall(rdui::WidgetEventKind::Change, rdui::EventCall("changed", {rdui::CurrentEventArgument{}}));
     root.addChild(std::move(control));
 
     int changes = 0;
     rdui::Binder binder(root);
-    binder.onChange("changed", [&](const rdui::ChangeActionEvent& event) {
-        ensure("change context contains completed value", event.checked);
-        ++changes;
-    });
-    rdui::BindingResult result = binder.finish();
+    bindEvent(
+        binder, "changed", rdui::WidgetEventKind::Change,
+        [&](const rdui::WidgetEvent& event, const rdui::EventCall&) {
+            ensure("change context contains completed value", static_cast<const rdui::ChangeEvent&>(event).checked);
+            ++changes;
+        },
+        currentEventArgument);
+    TestBindingResult result = finishBinding(binder);
     ensure("change binding commits", result.ok());
     source->setChecked(false);
     ensure_equals("programmatic setter stays silent", changes, 0);
@@ -196,187 +277,137 @@ template<> template<> void rduibinder_object::test<6>() {
     ensure_equals("user activation emits change", changes, 1);
 }
 
-template<> template<> void rduibinder_object::test<7>() {
+template<> template<> void binderObject::test<7>() {
     rdui::Panel root;
     auto left = std::make_unique<rdui::Panel>();
     left->setId("left");
     rdui::detail::WidgetCompilerAccess::setIdScopeRoot(*left);
-    auto left_item = std::make_unique<rdui::Label>();
-    left_item->setId("item");
-    left->addChild(std::move(left_item));
+    auto leftItem = std::make_unique<rdui::Label>();
+    leftItem->setId("item");
+    left->addChild(std::move(leftItem));
     root.addChild(std::move(left));
 
     auto right = std::make_unique<rdui::Panel>();
     right->setId("right");
     rdui::detail::WidgetCompilerAccess::setIdScopeRoot(*right);
-    auto right_item = std::make_unique<rdui::Label>();
-    right_item->setId("item");
-    right->addChild(std::move(right_item));
+    auto rightItem = std::make_unique<rdui::Label>();
+    rightItem->setId("item");
+    right->addChild(std::move(rightItem));
     root.addChild(std::move(right));
 
-    rdui::WidgetRef<rdui::Panel> left_scope;
-    rdui::WidgetRef<rdui::Panel> right_scope;
+    rdui::WidgetRef<rdui::Panel> leftScope;
+    rdui::WidgetRef<rdui::Panel> rightScope;
     rdui::Binder parent(root);
-    parent.bind("left", left_scope);
-    parent.bind("right", right_scope);
-    ensure("parent binds resource instances", parent.finish().ok() && left_scope && right_scope);
+    leftScope = lookupWidget<rdui::Panel>(root, "left");
+    rightScope = lookupWidget<rdui::Panel>(root, "right");
+    ensure("parent resolves resource instances", finishBinding(parent).ok() && leftScope && rightScope);
 
-    rdui::WidgetRef<rdui::Label> left_bound;
-    rdui::WidgetRef<rdui::Label> right_bound;
-    rdui::Binder left_binder(*left_scope);
-    left_binder.bind("item", left_bound);
-    rdui::Binder right_binder(*right_scope);
-    right_binder.bind("item", right_bound);
-    ensure("left local id binds", left_binder.finish().ok() && left_bound);
-    ensure("right duplicate local id binds independently", right_binder.finish().ok() && right_bound);
-    ensure("resource instances remain distinct", left_bound.get() != right_bound.get());
+    rdui::WidgetRef<rdui::Label> leftBound;
+    rdui::WidgetRef<rdui::Label> rightBound;
+    rdui::Binder leftBinder(*leftScope);
+    leftBound = lookupWidget<rdui::Label>(*leftScope, "item");
+    rdui::Binder rightBinder(*rightScope);
+    rightBound = lookupWidget<rdui::Label>(*rightScope, "item");
+    ensure("left local id binds", finishBinding(leftBinder).ok() && leftBound);
+    ensure("right duplicate local id binds independently", finishBinding(rightBinder).ok() && rightBound);
+    ensure("resource instances remain distinct", leftBound.get() != rightBound.get());
 }
 
-template<> template<> void rduibinder_object::test<8>() {
-    rdui::Panel root;
-    auto included = std::make_unique<rdui::Panel>();
-    included->setId("profile");
-    rdui::detail::WidgetCompilerAccess::setIdScopeRoot(*included);
-    auto save = std::make_unique<rdui::Button>();
-    rdui::Button* source = save.get();
-    save->setId("save").setAction(rdui::ActionEventKind::Click, "save");
-    included->addChild(std::move(save));
-    root.addChild(std::move(included));
-
-    int activations = 0;
-    rdui::WidgetRef<rdui::Button> save_ref;
-    rdui::WidgetRef<rdui::Label> missing;
-    rdui::Binder binder(root);
-    binder.scope("profile", [&](rdui::Binder& profile) {
-        profile.bind("save", save_ref);
-        profile.onClick("save", [&] { ++activations; });
-        profile.bind("missing", missing);
-    });
-
-    rdui::BindingResult result = binder.finish();
-    ensure("missing nested widget is an optional binding", result.ok() && result.binding);
-    ensure("present nested ref commits while missing ref remains empty", save_ref && !missing);
-    source->activate();
-    ensure_equals("nested handler still attaches", activations, 1);
-}
-
-template<> template<> void rduibinder_object::test<9>() {
-    rdui::Panel root;
-    auto included = std::make_unique<rdui::Panel>();
-    included->setId("profile");
-    rdui::detail::WidgetCompilerAccess::setIdScopeRoot(*included);
-    auto save = std::make_unique<rdui::Button>();
-    rdui::Button* source = save.get();
-    save->setId("save").setAction(rdui::ActionEventKind::Click, "save");
-    included->addChild(std::move(save));
-    root.addChild(std::move(included));
-
-    int activations = 0;
-    rdui::WidgetRef<rdui::Button> save_ref;
-    rdui::Binder binder(root);
-    binder.scope("profile", [&](rdui::Binder& profile) {
-        profile.bind("save", save_ref);
-        profile.onClick("save", [&] { ++activations; });
-    });
-
-    rdui::BindingResult result = binder.finish();
-    ensure("nested transaction commits", result.ok() && result.binding && save_ref);
-    source->activate();
-    ensure_equals("nested action binds inside local scope", activations, 1);
-}
-
-template<> template<> void rduibinder_object::test<10>() {
+template<> template<> void binderObject::test<8>() {
     rdui::Panel live;
-    auto live_button = std::make_unique<rdui::Button>();
-    rdui::Button* live_button_ptr = live_button.get();
-    live_button->setId("reload").setAction(rdui::ActionEventKind::Click, "reload");
-    live.addChild(std::move(live_button));
+    auto liveButton = std::make_unique<rdui::Button>();
+    rdui::Button* liveButtonPtr = liveButton.get();
+    liveButton->setId("reload").setEventCall(rdui::WidgetEventKind::Click, rdui::EventCall("reload"));
+    live.addChild(std::move(liveButton));
 
     rdui::WidgetRef<rdui::Button> reference;
-    rdui::Binder live_binder(live);
-    live_binder.bind("reload", reference);
-    live_binder.onClick("reload", [] {});
-    rdui::BindingResult live_binding = live_binder.finish();
-    ensure("initial binding commits", live_binding.ok() && reference.get() == live_button_ptr);
+    rdui::Binder liveBinder(live);
+    reference = lookupWidget<rdui::Button>(live, "reload");
+    bindEvent(liveBinder, "reload", [] {});
+    TestBindingResult liveBinding = finishBinding(liveBinder);
+    ensure("initial binding commits", liveBinding.ok() && reference.get() == liveButtonPtr);
 
     rdui::Panel candidate;
-    auto candidate_button = std::make_unique<rdui::Button>();
-    rdui::Button* candidate_button_ptr = candidate_button.get();
-    candidate_button->setId("reload").setAction(rdui::ActionEventKind::Click, "reload");
-    candidate.addChild(std::move(candidate_button));
+    auto candidateButton = std::make_unique<rdui::Button>();
+    rdui::Button* candidateButtonPtr = candidateButton.get();
+    candidateButton->setId("reload").setEventCall(rdui::WidgetEventKind::Click, rdui::EventCall("reload"));
+    candidate.addChild(std::move(candidateButton));
 
-    rdui::Binder candidate_binder(candidate);
-    candidate_binder.bind("reload", reference);
-    candidate_binder.onClick("reload", [] {});
-    rdui::PreparedBindingResult prepared = candidate_binder.prepare();
+    rdui::Binder candidateBinder(candidate);
+    auto candidateReference = lookupWidget<rdui::Button>(candidate, "reload");
+    bindEvent(candidateBinder, "reload", [] {});
+    rdui::PreparedBindingResult prepared = candidateBinder.prepare();
     ensure("replacement binding prepares", prepared.ok());
-    ensure("preparation leaves live reference untouched", reference.get() == live_button_ptr);
+    ensure("preparation leaves live reference untouched", reference.get() == liveButtonPtr && candidateReference);
 
     rdui::Binding replacement = prepared.binding.commit();
-    ensure("commit switches reference to candidate", reference.get() == candidate_button_ptr);
+    ensure("candidate Event binding commits independently", candidateReference.get() == candidateButtonPtr);
     ensure("prepared commit returns attached handlers", !!replacement);
 
-    rdui::Panel removed_candidate;
-    rdui::Binder removed_binder(removed_candidate);
-    removed_binder.bind("reload", reference);
-    rdui::PreparedBindingResult removed = removed_binder.prepare();
-    ensure("removing a bound widget prepares successfully", removed.ok());
-    ensure("removal preparation leaves the live reference untouched", reference.get() == candidate_button_ptr);
-    rdui::Binding removed_binding = removed.binding.commit();
-    ensure("committing widget removal clears its optional reference", !reference);
-    ensure("widget removal still returns a valid binding", !!removed_binding);
+    rdui::Panel removedCandidate;
+    rdui::Binder removedBinder(removedCandidate);
+    auto removedReference = lookupWidget<rdui::Button>(removedCandidate, "reload");
+    rdui::PreparedBindingResult removed = removedBinder.prepare();
+    ensure("removing a widget keeps the reference model independent", removed.ok() && !removedReference);
+    ensure("removal preparation leaves the live reference untouched", reference.get() == liveButtonPtr);
+    rdui::Binding removedBinding = removed.binding.commit();
+    ensure("committing widget removal leaves controller-owned references unchanged", reference.get() == liveButtonPtr);
+    ensure("widget removal still returns a valid binding", !!removedBinding);
 }
 
-template<> template<> void rduibinder_object::test<11>() {
+template<> template<> void binderObject::test<9>() {
     rdui::Panel root;
     rdui::Binder binder(root);
-    binder.onClick("missing", [] {});
+    bindEvent(binder, "missing", [] {});
     rdui::PreparedBindingResult result = binder.prepare();
-    ensure("controller action may be absent from this layout", result.ok());
-    ensure("optional action still produces a valid binding", !!result.binding.commit());
+    ensure("Controller Event Handler may be absent from this layout", result.ok());
+    ensure("optional Event Handler still produces a valid binding", !!result.binding.commit());
 }
 
-template<> template<> void rduibinder_object::test<12>() {
+template<> template<> void binderObject::test<10>() {
     rdui::Panel root;
     auto button = std::make_unique<rdui::Button>();
-    button->setAction(rdui::ActionEventKind::Click, "unhandled");
+    button->setEventCall(rdui::WidgetEventKind::Click, rdui::EventCall("unhandled"));
     root.addChild(std::move(button));
 
     rdui::Binder binder(root);
-    const rdui::BindingResult result = binder.finish();
-    ensure("unhandled layout action does not reject binding", result.ok());
-    ensure_equals("unhandled action reports one warning", result.warnings.size(), 1U);
-    ensure_equals("unhandled action diagnostic", result.warnings.front().code, "binding.action.unhandled");
+    const TestBindingResult result = finishBinding(binder);
+    ensure("unhandled Layout Resource call does not reject binding", result.ok());
+    ensure_equals("unhandled call reports one warning", result.warnings.size(), 1U);
+    ensure_equals("unhandled call diagnostic", result.warnings.front().code, "binding.event.unhandled");
 }
 
-template<> template<> void rduibinder_object::test<13>() {
-    rdui::Panel live_root;
+template<> template<> void binderObject::test<11>() {
+    rdui::Panel liveRoot;
     auto live = std::make_shared<TestValueBinding<bool>>(false);
+    TestSettingResolver liveResolver;
+    liveResolver.add("demo-enabled", live);
     rdui::ValueBindingRef<bool> reference;
-    rdui::Binder live_binder(live_root);
-    live_binder.provideValue("demo-enabled", live);
-    live_binder.requireValue("demo-enabled", reference);
-    rdui::BindingResult live_result = live_binder.finish();
-    ensure("typed value binding commits", live_result.ok() && live_result.binding);
+    rdui::Binder liveBinder(liveRoot, &liveResolver);
+    liveBinder.requireValueBinding({"demo-enabled"}, reference);
+    TestBindingResult liveResult = finishBinding(liveBinder);
+    ensure("typed value binding commits", liveResult.ok() && liveResult.binding);
     ensure("committed reference points at the live provider", reference.get() == live.get());
 
-    rdui::Panel candidate_root;
+    rdui::Panel candidateRoot;
     auto candidate = std::make_shared<TestValueBinding<bool>>(true);
-    rdui::Binder candidate_binder(candidate_root);
-    candidate_binder.provideValue("demo-enabled", candidate);
-    candidate_binder.requireValue("demo-enabled", reference);
-    rdui::PreparedBindingResult prepared = candidate_binder.prepare();
+    TestSettingResolver candidateResolver;
+    candidateResolver.add("demo-enabled", candidate);
+    rdui::Binder candidateBinder(candidateRoot, &candidateResolver);
+    candidateBinder.requireValueBinding({"demo-enabled"}, reference);
+    rdui::PreparedBindingResult prepared = candidateBinder.prepare();
     ensure("replacement value binding prepares", prepared.ok());
     ensure("preparation does not replace the live provider", reference.get() == live.get());
 
     {
-        rdui::Panel abandoned_root;
+        rdui::Panel abandonedRoot;
         auto abandoned = std::make_shared<TestValueBinding<bool>>(true);
-        rdui::Binder abandoned_binder(abandoned_root);
-        abandoned_binder.provideValue("demo-enabled", abandoned);
-        abandoned_binder.requireValue("demo-enabled", reference);
-        rdui::PreparedBindingResult abandoned_result = abandoned_binder.prepare();
-        ensure("a second replacement value binding prepares", abandoned_result.ok());
+        TestSettingResolver abandonedResolver;
+        abandonedResolver.add("demo-enabled", abandoned);
+        rdui::Binder abandonedBinder(abandonedRoot, &abandonedResolver);
+        abandonedBinder.requireValueBinding({"demo-enabled"}, reference);
+        rdui::PreparedBindingResult abandonedResult = abandonedBinder.prepare();
+        ensure("a second replacement value binding prepares", abandonedResult.ok());
     }
     ensure("discarding a prepared transaction preserves the live provider", reference.get() == live.get());
 
@@ -385,60 +416,68 @@ template<> template<> void rduibinder_object::test<13>() {
     ensure("candidate state is available through the typed reference", reference->state().value);
 }
 
-template<> template<> void rduibinder_object::test<14>() {
+template<> template<> void binderObject::test<12>() {
     rdui::Panel root;
     rdui::ValueBindingRef<bool> reference;
-    rdui::Binder binder(root);
-    binder.requireValue("missing-value", reference);
-    const rdui::PreparedBindingResult result = binder.prepare();
-    ensure("missing value provider rejects the transaction", !result.ok() && !reference);
-    ensure_equals("missing provider diagnostic", result.errors.front().code, std::string("binding.value.missing"));
+    TestSettingResolver resolver;
+    rdui::Binder binder(root, &resolver);
+    binder.requireValueBinding({"missing-value"}, reference);
+    rdui::PreparedBindingResult result = binder.prepare();
+    ensure("missing setting rejects the transaction", !result.ok() && !reference);
+    ensure_equals("missing setting diagnostic", result.errors.front().code, std::string("binding.setting.missing"));
 }
 
-template<> template<> void rduibinder_object::test<15>() {
+template<> template<> void binderObject::test<13>() {
     rdui::Panel root;
-    auto provider = std::make_shared<TestValueBinding<std::string>>("enabled");
+    auto setting = std::make_shared<TestValueBinding<std::string>>("enabled");
+    TestSettingResolver resolver;
+    resolver.add("demo-enabled", setting);
     rdui::ValueBindingRef<bool> reference;
-    rdui::Binder binder(root);
-    binder.provideValue("demo-enabled", provider);
-    binder.requireValue("demo-enabled", reference);
+    rdui::Binder binder(root, &resolver);
+    binder.requireValueBinding({"demo-enabled"}, reference);
     const rdui::PreparedBindingResult result = binder.prepare();
-    ensure("value type mismatch rejects the transaction", !result.ok() && !reference);
-    ensure_equals("value type mismatch diagnostic", result.errors.front().code, std::string("binding.value.type_mismatch"));
+    ensure("setting type mismatch rejects the transaction", !result.ok() && !reference);
+    ensure_equals("setting type mismatch diagnostic", result.errors.front().code, std::string("binding.setting.type_mismatch"));
 }
 
-template<> template<> void rduibinder_object::test<16>() {
+template<> template<> void binderObject::test<14>() {
     rdui::Panel root;
-    auto first = std::make_shared<TestValueBinding<bool>>(false);
-    auto second = std::make_shared<TestValueBinding<bool>>(true);
-    rdui::Binder binder(root);
-    binder.provideValue("demo-enabled", first);
-    binder.provideValue("demo-enabled", second);
-    const rdui::PreparedBindingResult result = binder.prepare();
-    ensure("duplicate value providers reject the transaction", !result.ok());
-    ensure_equals("duplicate provider diagnostic", result.errors.front().code, std::string("binding.value.duplicate"));
+    auto setting = std::make_shared<TestValueBinding<bool>>(false);
+    TestSettingResolver resolver;
+    resolver.add("demo-enabled", setting);
+    rdui::ValueBindingRef<bool> first;
+    rdui::ValueBindingRef<bool> second;
+    rdui::Binder binder(root, &resolver);
+    binder.requireValueBinding({"demo-enabled"}, first);
+    binder.requireValueBinding({"demo-enabled"}, second);
+    rdui::PreparedBindingResult result = binder.prepare();
+    ensure("repeated setting requirements prepare", result.ok());
+    rdui::Binding binding = result.binding.commit();
+    ensure("repeated setting requirements resolve independently", binding && first.get() == setting.get() && second.get() == setting.get());
 }
 
-template<> template<> void rduibinder_object::test<17>() {
-    rdui::ViewBuildResult view =
-        rdui::LayoutResourceCompiler().createFromString("<field><label for=\"demo-switch\">Enabled</label>"
-                                                        "<switch id=\"demo-switch\" bind=\"demo-enabled\" onChange=\"demo-changed\"/><br/>"
-                                                        "<hint>Persistent hint</hint><br/><error>Fallback error</error></field>",
-                                                        "bound-field.xml");
-    auto* field = view.rootAs<rdui::Field>();
-    auto* control = field ? dynamic_cast<rdui::Switch*>(field->control()) : nullptr;
-    ensure("bound standalone Field compiles", view.ok() && field && control);
+template<> template<> void binderObject::test<15>() {
+    const char* kFieldLayout =
+        "<field><label for=\"demoSwitch\">Enabled</label><switch id=\"demoSwitch\" setting=\"demo-enabled\" onChange=\"demoChanged()\"/><br/><hint>Persistent hint</hint><br/><error>Fallback error</error></field>";
+    rdui::LayoutBuildResult buildResult = rdui::LayoutResourceCompiler().buildWidgetTreeFromString(kFieldLayout, "bound-field.xml");
+    auto* field = buildResult.rootAs<rdui::Field>();
+    auto* control = field ? dynamic_cast<rdui::Switch*>(field->valueControl()) : nullptr;
+    ensure("bound standalone Field compiles", buildResult.ok() && field && control);
 
     auto provider = std::make_shared<TestValueBinding<bool>>(false);
+    TestSettingResolver resolver;
+    resolver.add("demo-enabled", provider);
     int changes = 0;
-    rdui::Binder binder(*field);
-    binder.provideValue("demo-enabled", provider);
-    binder.onChange("demo-changed", [&](const rdui::ChangeActionEvent& event) {
-        ensure("bound Change action observes the provider value", !event.checked);
-        ++changes;
-    });
-    rdui::BindingResult result = binder.finish();
-    ensure("Switch bind resolves automatically through Binder", result.ok() && result.binding);
+    rdui::Binder binder(*field, &resolver);
+    bindEvent(
+        binder, "demoChanged", rdui::WidgetEventKind::Change,
+        [&](const rdui::WidgetEvent& event, const rdui::EventCall&) {
+            ensure("bound Change Event observes the provider value", !static_cast<const rdui::ChangeEvent&>(event).checked);
+            ++changes;
+        },
+        noEventArguments);
+    TestBindingResult result = finishBinding(binder);
+    ensure("Switch setting resolves through Binder", result.ok() && result.binding);
     ensure_equals("committed Switch owns one provider subscription", provider->observerCount(), 1U);
 
     provider->publish({true, false, rdui::ValueValidation::invalid(rdui::TextSource::text("Dynamic error"))});
@@ -448,96 +487,92 @@ template<> template<> void rduibinder_object::test<17>() {
     ensure_equals("dynamic validation text overrides authored Error", field->error()->text(), "Dynamic error");
     ensure_equals("invalid Field reveals Error", static_cast<int>(field->error()->visibility()), static_cast<int>(rdui::Visibility::Visible));
 
-    int value_state_publications = 0;
-    rdui::ValueBindingSubscription value_state_subscription =
-        control->observeValueControlState([&](const rdui::ValueControlState&) { ++value_state_publications; });
+    int valueStatePublications = 0;
+    rdui::ValueBindingSubscription valueStateSubscription =
+        control->observeValueControlState([&](const rdui::ValueControlState&) { ++valueStatePublications; });
     control->activate();
     ensure("Switch activation writes through the provider", !provider->state().value && !control->checked());
-    ensure_equals("synchronous bound activation publishes one value state", value_state_publications, 1);
+    ensure_equals("synchronous bound activation publishes one value state", valueStatePublications, 1);
     ensure_equals("bound Switch emits Change after writing the provider", changes, 1);
-    value_state_subscription.reset();
+    valueStateSubscription.reset();
 
     provider->publish({false, false, rdui::ValueValidation::valid()});
     ensure("valid provider state clears Field invalid state", !field->invalid());
     ensure_equals("valid Field collapses Error", static_cast<int>(field->error()->visibility()), static_cast<int>(rdui::Visibility::Collapsed));
 
-    result.binding.reset();
+    result.binding = rdui::Binding{};
     ensure_equals("reset Binding disconnects automatic Value Control observation", provider->observerCount(), 0U);
     provider->publish({true, false, rdui::ValueValidation::valid()});
     ensure("disconnected provider no longer updates Switch", !control->checked());
 
-    rdui::ViewBuildResult missing_view = rdui::LayoutResourceCompiler().createFromString("<switch bind=\"missing-value\"/>", "missing-value.xml");
-    rdui::Binder missing_binder(*missing_view.root);
-    rdui::BindingResult missing = missing_binder.finish();
-    ensure("authored bind requires a matching controller provider", !missing.ok());
-    ensure_equals("automatic missing provider diagnostic is stable", missing.errors.front().code, std::string("binding.value.missing"));
+    rdui::LayoutBuildResult missingBuildResult =
+        rdui::LayoutResourceCompiler().buildWidgetTreeFromString("<switch setting=\"missing-value\"/>", "missing-value.xml");
+    TestSettingResolver missingResolver;
+    rdui::Binder missingBinder(*missingBuildResult.root, &missingResolver);
+    TestBindingResult missing = finishBinding(missingBinder);
+    ensure("authored setting requires a matching setting", !missing.ok());
+    ensure_equals("automatic missing setting diagnostic is stable", missing.errors.front().code, std::string("binding.setting.missing"));
 
-    rdui::ViewBuildResult typed_view = rdui::LayoutResourceCompiler().createFromString("<switch bind=\"typed-value\"/>", "typed-value.xml");
-    auto wrong_type = std::make_shared<TestValueBinding<std::string>>("false");
-    rdui::Binder typed_binder(*typed_view.root);
-    typed_binder.provideValue("typed-value", wrong_type);
-    rdui::BindingResult typed = typed_binder.finish();
-    ensure("authored bind enforces the Value Control type", !typed.ok());
-    ensure_equals("automatic type mismatch diagnostic is stable", typed.errors.front().code, std::string("binding.value.type_mismatch"));
+    rdui::LayoutBuildResult typedBuildResult =
+        rdui::LayoutResourceCompiler().buildWidgetTreeFromString("<switch setting=\"typed-value\"/>", "typed-value.xml");
+    auto wrongType = std::make_shared<TestValueBinding<std::string>>("false");
+    TestSettingResolver typedResolver;
+    typedResolver.add("typed-value", wrongType);
+    rdui::Binder typedBinder(*typedBuildResult.root, &typedResolver);
+    TestBindingResult typed = finishBinding(typedBinder);
+    ensure("authored setting enforces the Value Control type", !typed.ok());
+    ensure_equals("automatic type mismatch diagnostic is stable", typed.errors.front().code, std::string("binding.setting.type_mismatch"));
 
-    rdui::ViewBuildResult lifetime_view = rdui::LayoutResourceCompiler().createFromString("<switch bind=\"retained-value\"/>", "retained-value.xml");
-    auto retained_provider = std::make_shared<TestValueBinding<bool>>(false);
-    std::weak_ptr<TestValueBinding<bool>> provider_lifetime = retained_provider;
-    rdui::Binder lifetime_binder(*lifetime_view.root);
-    lifetime_binder.provideValue("retained-value", retained_provider);
-    rdui::BindingResult lifetime_binding = lifetime_binder.finish();
-    ensure("provider lifetime binding commits", lifetime_binding.ok());
-    retained_provider.reset();
-    lifetime_view.root.reset();
-    ensure("Binding retains provider until its subscription disconnects", !provider_lifetime.expired());
-    lifetime_binding.binding.reset();
-    ensure("provider is released after Binding disconnects", provider_lifetime.expired());
+    rdui::LayoutBuildResult lifetimeBuildResult =
+        rdui::LayoutResourceCompiler().buildWidgetTreeFromString("<switch setting=\"retained-value\"/>", "retained-value.xml");
+    auto retainedProvider = std::make_shared<TestValueBinding<bool>>(false);
+    std::weak_ptr<TestValueBinding<bool>> providerLifetime = retainedProvider;
+    TestSettingResolver lifetimeResolver;
+    lifetimeResolver.add("retained-value", retainedProvider);
+    rdui::Binder lifetimeBinder(*lifetimeBuildResult.root, &lifetimeResolver);
+    TestBindingResult lifetimeBinding = finishBinding(lifetimeBinder);
+    ensure("provider lifetime binding commits", lifetimeBinding.ok());
+    lifetimeResolver.clear();
+    retainedProvider.reset();
+    lifetimeBuildResult.root.reset();
+    ensure("Binding retains provider until its subscription disconnects", !providerLifetime.expired());
+    lifetimeBinding.binding = rdui::Binding{};
+    ensure("provider is released after Binding disconnects", providerLifetime.expired());
 }
 
-template<> template<> void rduibinder_object::test<18>() {
-    rdui::ViewBuildResult view = rdui::LayoutResourceCompiler().createFromString("<switch bind=\"replaceable-value\"/>", "replaceable-value.xml");
-    auto* control = view.rootAs<rdui::Switch>();
-    auto first_provider = std::make_shared<TestValueBinding<bool>>(false);
-    rdui::Binder first_binder(*control);
-    first_binder.provideValue("replaceable-value", first_provider);
-    rdui::BindingResult first_result = first_binder.finish();
-    ensure("first live binding commits", first_result.ok());
+template<> template<> void binderObject::test<16>() {
+    rdui::LayoutBuildResult buildResult =
+        rdui::LayoutResourceCompiler().buildWidgetTreeFromString("<switch setting=\"replaceable-value\"/>", "replaceable-value.xml");
+    auto* control = buildResult.rootAs<rdui::Switch>();
+    auto firstProvider = std::make_shared<TestValueBinding<bool>>(false);
+    TestSettingResolver firstResolver;
+    firstResolver.add("replaceable-value", firstProvider);
+    rdui::Binder firstBinder(*control, &firstResolver);
+    TestBindingResult firstResult = finishBinding(firstBinder);
+    ensure("first live binding commits", firstResult.ok());
 
-    auto second_provider = std::make_shared<TestValueBinding<bool>>(true);
-    rdui::Binder second_binder(*control);
-    second_binder.provideValue("replaceable-value", second_provider);
-    rdui::BindingResult second_result = second_binder.finish();
-    ensure("replacement binding commits on the same Value Control", second_result.ok() && control->checked());
+    auto secondProvider = std::make_shared<TestValueBinding<bool>>(true);
+    TestSettingResolver secondResolver;
+    secondResolver.add("replaceable-value", secondProvider);
+    rdui::Binder secondBinder(*control, &secondResolver);
+    TestBindingResult secondResult = finishBinding(secondBinder);
+    ensure("replacement binding commits on the same Value Control", secondResult.ok() && control->checked());
 
-    first_result.binding = std::move(second_result.binding);
+    firstResult.binding = std::move(secondResult.binding);
     control->activate();
-    ensure("old Binding teardown preserves the replacement provider", !second_provider->state().value && !control->checked());
-    ensure("replaced provider is no longer written", !first_provider->state().value);
+    ensure("old Binding teardown preserves the replacement provider", !secondProvider->state().value && !control->checked());
+    ensure("replaced provider is no longer written", !firstProvider->state().value);
 }
 
-template<> template<> void rduibinder_object::test<19>() {
+template<> template<> void binderObject::test<17>() {
     rdui::ResourceSnapshot snapshot;
-    snapshot.add("localization.yaml", R"YAML(
-defaultLocale: en
-locales:
-  en:
-    name: English
-    strings:
-      field.label: Enabled
-      field.fallback: 'Fallback EN <b>bold EN</b> <kbd binding="toggle-demo"/>'
-      field.dynamic: Dynamic EN
-  pt:
-    name: Portuguese
-    strings:
-      field.label: Ativado
-      field.fallback: 'Fallback PT <b>bold PT</b> <kbd binding="toggle-demo"/>'
-      field.dynamic: Dynamic PT
-)YAML");
+    const char* kLocalization =
+        "defaultLocale: en\nlocales: {en: {name: English, strings: {field.label: Enabled, field.fallback: 'Fallback EN <b>bold EN</b> <kbd shortcut=\"toggle-demo\"/>', field.dynamic: Dynamic EN}}, pt: {name: Portuguese, strings: {field.label: Ativado, field.fallback: 'Fallback PT <b>bold PT</b> <kbd shortcut=\"toggle-demo\"/>', field.dynamic: Dynamic PT}}}\n";
+    const char* kFieldLayout =
+        "<field><label for=\"demoSwitch\">field.label</label><switch id=\"demoSwitch\" setting=\"demo-enabled\"/><br/><error>field.fallback</error></field>";
+    snapshot.add("localization.yaml", kLocalization);
     snapshot.add("skin.radia", "");
-    snapshot.add("field.xml",
-                 "<field><label for=\"demo-switch\">field.label</label>"
-                 "<switch id=\"demo-switch\" bind=\"demo-enabled\"/><br/>"
-                 "<error>field.fallback</error></field>");
+    snapshot.add("field.xml", kFieldLayout);
 
     const rdui::SkinGenerationPrepareResult prepared = rdui::SkinCompiler().prepare(std::move(snapshot));
     ensure("localized Field fixture prepares", prepared.ok());
@@ -547,39 +582,40 @@ locales:
     system.setKeybindingResolver(
         [&presentation](const std::string& binding) { return binding == "toggle-demo" ? presentation : rdui::KeybindingPresentation{}; });
     system.publish(prepared.generation);
-    rdui::ViewBuildResult view = system.createView("field.xml");
-    auto* field = view.rootAs<rdui::Field>();
-    ensure("localized Field View builds", view.ok() && field && field->error());
+    rdui::LayoutBuildResult buildResult = system.buildWidgetTree("field.xml");
+    auto* field = buildResult.rootAs<rdui::Field>();
+    ensure("localized Field View builds", buildResult.ok() && field && field->error());
 
-    const rdui::TextSource stale_dynamic = system.localized("field.dynamic");
+    const rdui::TextSource staleDynamic = system.localize("field.dynamic");
     auto provider = std::make_shared<TestValueBinding<bool>>(false);
-    rdui::Binder binder(*field);
-    binder.provideValue("demo-enabled", provider);
-    rdui::BindingResult binding = binder.finish();
+    TestSettingResolver resolver;
+    resolver.add("demo-enabled", provider);
+    rdui::Binder binder(*field, &resolver);
+    TestBindingResult binding = finishBinding(binder);
     ensure("localized Field binding commits", binding.ok());
 
     std::unique_ptr<rdui::Surface> surface = system.createSurface(rdui::fixedTextMetrics());
-    surface->mount(std::move(view.root));
+    surface->mount(std::move(buildResult.root));
     provider->publish({false, false, rdui::ValueValidation::invalid()});
     ensure_equals("authored Field error resolves after mounting", field->error()->text(), "Fallback EN bold EN F");
-    const auto& english_nodes = field->error()->content().nodes();
-    ensure_equals("English rich error preserves its four inline nodes", english_nodes.size(), std::size_t(4));
-    ensure_equals("English rich error preserves bold structure", static_cast<int>(english_nodes[1].kind()),
+    const auto& englishNodes = field->error()->content().nodes();
+    ensure_equals("English rich error preserves its four inline nodes", englishNodes.size(), std::size_t(4));
+    ensure_equals("English rich error preserves bold structure", static_cast<int>(englishNodes[1].kind()),
                   static_cast<int>(rdui::InlineContentKind::B));
-    ensure_equals("English rich error preserves bold text", english_nodes[1].children().front().value(), std::string("bold EN"));
-    ensure_equals("English rich error resolves keybinding presentation", english_nodes[3].keybindingPresentation().keys.front(), std::string("F"));
+    ensure_equals("English rich error preserves bold text", englishNodes[1].children().front().value(), std::string("bold EN"));
+    ensure_equals("English rich error resolves keybinding presentation", englishNodes[3].keybindingPresentation().keys.front(), std::string("F"));
 
     ensure("Portuguese locale selected", system.setLocale("pt"));
     ensure_equals("visible authored Field error refreshes with locale", field->error()->text(), "Fallback PT bold PT F");
-    const auto& portuguese_nodes = field->error()->content().nodes();
-    ensure_equals("Portuguese rich error preserves its four inline nodes", portuguese_nodes.size(), std::size_t(4));
-    ensure_equals("Portuguese rich error preserves bold structure", static_cast<int>(portuguese_nodes[1].kind()),
+    const auto& portugueseNodes = field->error()->content().nodes();
+    ensure_equals("Portuguese rich error preserves its four inline nodes", portugueseNodes.size(), std::size_t(4));
+    ensure_equals("Portuguese rich error preserves bold structure", static_cast<int>(portugueseNodes[1].kind()),
                   static_cast<int>(rdui::InlineContentKind::B));
-    ensure_equals("Portuguese rich error refreshes bold text", portuguese_nodes[1].children().front().value(), std::string("bold PT"));
-    ensure_equals("Portuguese rich error retains keybinding presentation", portuguese_nodes[3].keybindingPresentation().keys.front(),
+    ensure_equals("Portuguese rich error refreshes bold text", portugueseNodes[1].children().front().value(), std::string("bold PT"));
+    ensure_equals("Portuguese rich error retains keybinding presentation", portugueseNodes[3].keybindingPresentation().keys.front(),
                   std::string("F"));
 
-    provider->publish({false, false, rdui::ValueValidation::invalid(stale_dynamic)});
+    provider->publish({false, false, rdui::ValueValidation::invalid(staleDynamic)});
     ensure_equals("late dynamic Field error resolves against the current locale", field->error()->text(), "Dynamic PT");
     provider->publish({false, false, rdui::ValueValidation::valid()});
     provider->publish({false, false, rdui::ValueValidation::invalid()});
@@ -592,5 +628,208 @@ locales:
     ensure_equals("restored authored Field error retains current keybindings", field->error()->text(), "Fallback PT bold PT Ctrl F");
     ensure_equals("keybinding refresh preserves localized bold structure", static_cast<int>(field->error()->content().nodes()[1].kind()),
                   static_cast<int>(rdui::InlineContentKind::B));
+}
+
+template<> template<> void binderObject::test<18>() {
+    rdui::Panel root;
+    auto button = std::make_unique<rdui::Button>();
+    rdui::Button* target = button.get();
+    button->setEventCall(rdui::WidgetEventKind::Click, rdui::EventCall("inspect", {rdui::EventArgument(std::int64_t(4))}));
+    root.addChild(std::move(button));
+
+    int invocations = 0;
+    rdui::Binder binder(root);
+    bindEvent(binder, "inspect", [&] { ++invocations; });
+    TestBindingResult result = finishBinding(binder);
+    ensure("parsed arguments do not reject the transitional Binder", result.ok() && result.binding);
+    ensure_equals("pending typed invocation reports one warning", result.warnings.size(), 1U);
+    ensure_equals("invalid zero-argument Handler signature diagnostic is stable", result.warnings.front().code,
+                  std::string("binding.event.arity_mismatch"));
+    target->activate();
+    ensure_equals("transitional Binder never discards arguments by invoking a zero-argument Handler", invocations, 0);
+}
+
+template<> template<> void binderObject::test<19>() {
+    rdui::Panel root;
+    auto button = std::make_unique<rdui::Button>();
+    rdui::Button* target = button.get();
+    button->setEventCall(rdui::WidgetEventKind::Click, rdui::EventCall("press"));
+    root.addChild(std::move(button));
+
+    int invocations = 0;
+    rdui::Binder binder(root);
+    bindEvent(binder, "press", [&] { ++invocations; });
+    TestBindingResult result = finishBinding(binder);
+    ensure("generic Event Handler registration commits", result.ok() && result.binding);
+    ensure("generic Event Handler registration has no warning", result.warnings.empty());
+    target->activate();
+    ensure_equals("generic Event Handler registration dispatches", invocations, 1);
+}
+
+template<> template<> void binderObject::test<20>() {
+    rdui::Panel root;
+    auto select = std::make_unique<rdui::Button>();
+    rdui::Button* selectTarget = select.get();
+    select->setEventCall(rdui::WidgetEventKind::Click, rdui::EventCall("select", {rdui::EventArgument(std::int64_t(4))}));
+    root.addChild(std::move(select));
+    auto open = std::make_unique<rdui::Button>();
+    rdui::Button* openTarget = open.get();
+    open->setEventCall(rdui::WidgetEventKind::Click, rdui::EventCall("open", {rdui::EventArgument(std::string("settings"))}));
+    root.addChild(std::move(open));
+    auto enabled = std::make_unique<rdui::Button>();
+    rdui::Button* enabledTarget = enabled.get();
+    enabled->setEventCall(rdui::WidgetEventKind::Click, rdui::EventCall("updateAdvanced", {rdui::EventArgument(true)}));
+    root.addChild(std::move(enabled));
+    auto inspect = std::make_unique<rdui::Button>();
+    rdui::Button* inspectTarget = inspect.get();
+    inspect->setEventCall(rdui::WidgetEventKind::Click, rdui::EventCall("inspectEventSource", {rdui::EventArgument(rdui::CurrentEventArgument{})}));
+    root.addChild(std::move(inspect));
+
+    int selected = 0;
+    std::string destination;
+    bool advanced = false;
+    rdui::Widget* source = nullptr;
+    rdui::Binder binder(root);
+    bindEvent(
+        binder, "select", rdui::WidgetEventKind::Click,
+        [&](const rdui::WidgetEvent&, const rdui::EventCall& call) { selected = static_cast<int>(std::get<std::int64_t>(call.arguments().front())); },
+        singleEventArgument<std::int64_t>);
+    bindEvent(
+        binder, "open", rdui::WidgetEventKind::Click,
+        [&](const rdui::WidgetEvent&, const rdui::EventCall& call) { destination = std::get<std::string>(call.arguments().front()); },
+        singleEventArgument<std::string>);
+    bindEvent(
+        binder, "updateAdvanced", rdui::WidgetEventKind::Click,
+        [&](const rdui::WidgetEvent&, const rdui::EventCall& call) { advanced = std::get<bool>(call.arguments().front()); },
+        singleEventArgument<bool>);
+    bindEvent(
+        binder, "inspectEventSource", rdui::WidgetEventKind::Click,
+        [&](const rdui::WidgetEvent& event, const rdui::EventCall&) { source = &event.source; }, currentEventArgument);
+    TestBindingResult result = finishBinding(binder);
+    ensure("Event Handlers with arguments commit", result.ok() && result.binding);
+    ensure("Event Handlers with arguments have no warnings", result.warnings.empty());
+    selectTarget->activate();
+    openTarget->activate();
+    enabledTarget->activate();
+    inspectTarget->activate();
+    ensure_equals("integer argument arrives", selected, 4);
+    ensure_equals("string argument arrives", destination, std::string("settings"));
+    ensure("boolean argument arrives", advanced);
+    ensure("Event supplies the source Widget", source == inspectTarget);
+}
+
+template<> template<> void binderObject::test<21>() {
+    rdui::Panel root;
+    auto button = std::make_unique<rdui::Button>();
+    button->setEventCall(rdui::WidgetEventKind::Click, rdui::EventCall("bad_action"));
+    root.addChild(std::move(button));
+
+    rdui::Binder binder(root);
+    bindEvent(binder, "bad_action", [] {});
+    const TestBindingResult result = finishBinding(binder);
+    ensure("invalid registered Handler settingName rejects preparation", !result.ok());
+    ensure_equals("invalid registered Handler settingName diagnostic", result.errors.front().code, "binding.event.name_invalid");
+}
+
+template<> template<> void binderObject::test<22>() {
+    rdui::Panel root;
+    auto button = std::make_unique<rdui::Button>();
+    rdui::Button* target = button.get();
+    button->setEventCall(rdui::WidgetEventKind::Click, rdui::EventCall("observe"));
+    root.addChild(std::move(button));
+
+    rdui::Widget* source = nullptr;
+    rdui::WidgetEventKind kind = rdui::WidgetEventKind::Change;
+    rdui::Binder binder(root);
+    bindEvent(
+        binder, "observe", std::nullopt,
+        [&](const rdui::WidgetEvent& event, const rdui::EventCall&) {
+            source = &event.source;
+            kind = event.kind;
+        },
+        noEventArguments);
+    const TestBindingResult result = finishBinding(binder);
+    ensure("common Widget Event Handler commits", result.ok() && result.binding);
+    target->activate();
+    ensure("common Widget Event receives source", source == target);
+    ensure("common Widget Event receives kind", kind == rdui::WidgetEventKind::Click);
+}
+
+template<> template<> void binderObject::test<23>() {
+    rdui::LayoutBuildResult buildResult =
+        rdui::LayoutResourceCompiler().buildWidgetTreeFromString("<switch setting=\"demo-enabled\"/>", "setting.xml");
+    auto* control = buildResult.rootAs<rdui::Switch>();
+    auto provider = std::make_shared<TestValueBinding<bool>>(false);
+    TestSettingResolver resolver;
+    resolver.add("demo-enabled", provider);
+
+    rdui::Binder binder(*control, &resolver);
+    const TestBindingResult result = finishBinding(binder);
+    ensure("setting binding commits", buildResult.ok() && control && result.ok() && result.binding);
+    ensure("setting applies initial state", !control->checked());
+    provider->publish({true, false, rdui::ValueValidation::valid()});
+    ensure("setting receives external updates", control->checked());
+    control->activate();
+    ensure("setting writes user changes", !provider->state().value);
+}
+
+template<> template<> void binderObject::test<24>() {
+    rdui::LayoutBuildResult buildResult =
+        rdui::LayoutResourceCompiler().buildWidgetTreeFromString("<switch setting=\"missing-setting\"/>", "missing-setting.xml");
+    TestSettingResolver resolver;
+    rdui::Binder binder(*buildResult.root, &resolver);
+    const TestBindingResult result = finishBinding(binder);
+    ensure("missing setting rejects the candidate", buildResult.ok() && !result.ok());
+    ensure_equals("missing setting is an error", result.errors.size(), 1U);
+    ensure_equals("missing setting diagnostic", result.errors.front().code, std::string("binding.setting.missing"));
+}
+
+template<> template<> void binderObject::test<25>() {
+    rdui::LayoutBuildResult buildResult =
+        rdui::LayoutResourceCompiler().buildWidgetTreeFromString("<switch setting=\"string-setting\"/>", "typed-setting.xml");
+    TestSettingResolver resolver;
+    resolver.add("string-setting", std::make_shared<TestValueBinding<std::string>>("not a boolean"));
+    rdui::Binder binder(*buildResult.root, &resolver);
+    const TestBindingResult result = finishBinding(binder);
+    ensure("mismatched setting rejects the candidate", buildResult.ok() && !result.ok());
+    ensure_equals("mismatched setting is an error", result.errors.size(), 1U);
+    ensure_equals("mismatched setting diagnostic", result.errors.front().code, std::string("binding.setting.type_mismatch"));
+}
+
+template<> template<> void binderObject::test<26>() {
+    const char* kSharedSettingLayout =
+        "<panel><switch id=\"first\" setting=\"shared-enabled\"/><switch id=\"second\" setting=\"shared-enabled\"/></panel>";
+    rdui::LayoutBuildResult buildResult = rdui::LayoutResourceCompiler().buildWidgetTreeFromString(kSharedSettingLayout, "shared-setting.xml");
+    auto* root = buildResult.rootAs<rdui::Panel>();
+    auto* firstControl = root ? dynamic_cast<rdui::Switch*>(rdui::detail::findWidgetInScope(*root, "first")) : nullptr;
+    auto* secondControl = root ? dynamic_cast<rdui::Switch*>(rdui::detail::findWidgetInScope(*root, "second")) : nullptr;
+    ensure("shared setting fixture compiles", buildResult.ok() && root && firstControl && secondControl);
+
+    auto provider = std::make_shared<TestValueBinding<bool>>(false);
+    TestSettingResolver resolver;
+    resolver.add("shared-enabled", provider);
+
+    rdui::Binder binder(*root, &resolver);
+    TestBindingResult result = finishBinding(binder);
+    ensure("two controls share one setting", result.ok() && result.binding);
+    ensure_equals("shared binding subscribes both controls", provider->observerCount(), std::size_t(2));
+    provider->publish({true, false, rdui::ValueValidation::valid()});
+    ensure("first shared control updates", firstControl->checked());
+    ensure("second shared control updates", secondControl->checked());
+    firstControl->activate();
+    ensure("shared control writes through one provider", !provider->state().value);
+    result.binding = rdui::Binding{};
+    ensure_equals("shared control teardown disconnects both", provider->observerCount(), std::size_t(0));
+}
+
+template<> template<> void binderObject::test<27>() {
+    rdui::LayoutBuildResult buildResult =
+        rdui::LayoutResourceCompiler().buildWidgetTreeFromString("<switch setting=\"misreported-setting\"/>", "misreported-setting.xml");
+    MisreportingSettingResolver resolver;
+    rdui::Binder binder(*buildResult.root, &resolver);
+    const TestBindingResult result = finishBinding(binder);
+    ensure("misreported binding is rejected safely", buildResult.ok() && !result.ok());
+    ensure_equals("misreported binding diagnostic", result.errors.size(), 1U);
+    ensure_equals("misreported binding is a type error", result.errors.front().code, std::string("binding.setting.type_mismatch"));
 }
 } // namespace tut

@@ -45,7 +45,7 @@ struct SourceRange {
 };
 
 struct LayoutAttribute {
-    std::string authored_name;
+    std::string authoredName;
     std::string value;
     SourceRange source;
 };
@@ -55,9 +55,9 @@ struct LayoutNode;
 struct LayoutContent {
     SourceRange source;
     std::string text;
-    std::unique_ptr<LayoutNode> element;
+    std::unique_ptr<LayoutNode> node;
 
-    bool isText() const { return !element; }
+    bool isText() const { return !node; }
 };
 
 struct LayoutNode {

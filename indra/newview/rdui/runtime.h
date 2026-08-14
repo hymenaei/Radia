@@ -25,39 +25,91 @@
 #ifndef RD_RUNTIME_H
 #define RD_RUNTIME_H
 
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 #include "nativeinput.h"
+#include "skin/resolver.h"
 #include "stdtypes.h"
+#include "text/inlinecontent.h"
+#include "types.h"
+
+class LLControlGroup;
+class LLGLSLShader;
+class LLWindow;
+class AuxiliaryWindowFactory;
 
 namespace rdui {
 class Floater;
+class PaintContext;
 class System;
 } // namespace rdui
 
 namespace rdui::viewer {
-class FloaterController;
+class ComponentController;
+
+struct RuntimeKeybindingState {
+    U64 generation = 0;
+    U32 mode = 0;
+
+    bool operator==(const RuntimeKeybindingState& other) const { return generation == other.generation && mode == other.mode; }
+};
 
 class Runtime final {
 public:
-    using ControllerFactory = std::function<std::unique_ptr<FloaterController>(System& system)>;
+    using ControllerFactory = std::function<std::unique_ptr<ComponentController>(System& system)>;
+    using DisplayScaleProvider = std::function<rdui::Vec2()>;
+    using KeybindingResolver = std::function<rdui::KeybindingPresentation(const std::string&)>;
+    using KeybindingStateProvider = std::function<RuntimeKeybindingState()>;
+    using SkinSnapshotProvider = std::function<SkinSnapshotResult()>;
+    using Clock = std::function<std::chrono::steady_clock::time_point()>;
+    using PaintContextFactory = std::function<std::unique_ptr<rdui::PaintContext>(LLGLSLShader&, rdui::System&)>;
 
-    Runtime();
+    struct WindowEnvironment {
+        LLWindow*& mainWindow;
+        DisplayScaleProvider displayScale;
+        AuxiliaryWindowFactory& auxiliaryWindowFactory;
+    };
+
+    struct IntegrationHooks {
+        KeybindingResolver resolveKeybinding;
+        KeybindingStateProvider keybindingState;
+        SkinSnapshotProvider captureSkin = {};
+        Clock now = {};
+        PaintContextFactory paintContext = {};
+    };
+
+    Runtime(LLControlGroup& savedSettings, LLControlGroup& perAccountSettings, LLGLSLShader& uiShader, WindowEnvironment window,
+            IntegrationHooks hooks);
     ~Runtime();
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;
 
     bool initialize();
-    bool registerFloater(std::string definition_id, ControllerFactory factory);
-    Floater* openFloater(const std::string& definition_id, const std::string& instance_key = {});
-    void restoreOpenFloaters();
-    void requestReload();
-    void setVisibility(bool attached_visible, bool detached_visible);
+    void shutdown();
+    bool registerFloater(std::string definitionId, std::string resourceId, ControllerFactory factory);
+    Floater* openFloater(const std::string& definitionId, const std::string& instanceKey = {});
+    void restoreWorkspace();
+    void endAccountSession();
+    void requestSkinReload();
+    void setVisibility(bool attachedVisible, bool detachedVisible);
     void frame(S32 width, S32 height);
     void idle();
     bool hasPointerCapture() const;
-    NativeInputDispatchResult dispatch(const NativeInputEvent& event);
+    NativeInputDispatchResult pointerMove(F32 x, F32 y, U32 modifiers, F32 deltaX = 0.f, F32 deltaY = 0.f);
+    NativeInputDispatchResult pointerDown(F32 x, F32 y, NativePointerButton button, U32 modifiers, U8 clickCount = 1, F32 deltaX = 0.f,
+                                          F32 deltaY = 0.f);
+    NativeInputDispatchResult pointerUp(F32 x, F32 y, NativePointerButton button, U32 modifiers, U8 clickCount = 1, F32 deltaX = 0.f,
+                                        F32 deltaY = 0.f);
+    void pointerLeave();
+    NativeInputDispatchResult scroll(S32 x, S32 y, F32 horizontal, F32 vertical, U32 modifiers);
+    NativeInputDispatchResult keyDown(KEY key, U32 modifiers, bool repeated = false);
+    NativeInputDispatchResult keyUp(KEY key, U32 modifiers);
+    NativeInputDispatchResult character(U32 codepoint, U32 modifiers);
+    void focusLost();
+    void mouseCaptureLost();
 
 private:
     struct Impl;

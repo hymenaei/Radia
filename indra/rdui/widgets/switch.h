@@ -37,10 +37,12 @@ class Switch : public ValueControl {
     friend WidgetContract detail::switchContract();
 
 public:
-    static constexpr const char* ELEMENT = "switch";
+    static constexpr const char* sElement = "switch";
 
     Switch();
     Switch& setChecked(bool checked);
+    bool setCheckedValue(bool checked) override;
+    std::optional<bool> checkedValue() const override;
     Switch& setOnCheckedChanged(std::function<void(bool)> callback);
     bool checked() const { return hasState(WidgetState::Checked); }
     Widget* thumb() { return mThumb.get(); }
@@ -48,7 +50,7 @@ public:
     bool defaultPointerEvents() const override { return true; }
     bool focusable() const override { return true; }
 
-    const std::string& bindingId() const override { return mBindingId; }
+    std::optional<ValueBindingRequest> valueBindingRequest() const override { return mValueBindingRequest; }
     ValueControlState valueControlState() const override;
     ValueBindingSubscription observeValueControlState(Observer observer) override;
 
@@ -58,15 +60,16 @@ protected:
     void onChildrenCleared() override;
 
 private:
-    Switch& setBindingId(std::string id);
+    Switch& setSettingName(std::string name);
     void prepareValueBinding(Binder& binder) override;
     ValueBindingSubscription commitValueBinding() override;
+    bool updateCheckedState(bool checked);
     void applyValueState(ValueState<bool> state);
-    void notifyValueState();
+    void notifyValueControlState();
 
     WidgetRef<Widget> mThumb;
     std::function<void(bool)> mOnCheckedChanged;
-    std::string mBindingId;
+    std::optional<ValueBindingRequest> mValueBindingRequest;
     ValueBindingRef<bool> mBinding;
     ValueState<bool> mValueState{false, false, std::nullopt};
     std::map<std::size_t, Observer> mValueObservers;

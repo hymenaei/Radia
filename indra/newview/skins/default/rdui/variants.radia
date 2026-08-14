@@ -9,15 +9,15 @@ field.switch {
     > label { flex-grow: 1; }
 }
 
-text#language-heading {
+text#languageHeading {
     text-color: var(--muted);
 }
 
-text#active-language {
+text#activeLocale {
     font-weight: bold;
 }
 
-panel#language-buttons {
+panel#languageButtons {
     flow: row;
     gap: 8px;
 }

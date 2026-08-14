@@ -37,22 +37,23 @@ class Text : public Widget {
     friend WidgetContract detail::textContract();
 
 public:
-    static constexpr const char* ELEMENT = "text";
+    static constexpr const char* sElement = "text";
 
     explicit Text(std::string text = {});
     Text& setText(std::string text);
     Text& setContent(TextSource content);
     Text& setContent(InlineContent content);
+    bool setTextContent(TextSource content) override;
     const std::string& text() const { return mText.plainText(); }
     const InlineContent& content() const { return mText.content(); }
 
-    Vec2 intrinsicSize(const StyleSheet& theme, const Style& style, const TextMetrics& text_metrics,
+    Vec2 intrinsicSize(const StyleSheet& theme, const Style& style, const TextMetrics& textMetrics,
                        const IntrinsicSizeConstraints& constraints = IntrinsicSizeConstraints()) const override;
     void paint(PaintContext& context, const Style& style, float scale) const override;
 
 protected:
     struct ElementTag {};
-    Text(const char* element, ElementTag);
+    Text(const char* elementName, ElementTag);
 
 private:
     void onLocaleChanged(const System& system) override;

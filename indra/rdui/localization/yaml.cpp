@@ -95,9 +95,9 @@ std::size_t columnOf(const YAML::Node& node) {
 
 bool implicitNonString(const YAML::Node& node, const std::string& value) {
     if (node.Tag() != "?") return false;
-    static const std::regex core_value(
+    static const std::regex coreValue(
         R"(^(?:~|null|Null|NULL|true|True|TRUE|false|False|FALSE|[-+]?(?:(?:0|[1-9][0-9_]*)(?:\.[0-9_]*)?(?:[eE][-+]?[0-9]+)?|0o[0-7_]+|0x[0-9a-fA-F_]+|\.(?:inf|Inf|INF|nan|NaN|NAN)))$)");
-    return std::regex_match(value, core_value);
+    return std::regex_match(value, coreValue);
 }
 
 bool validCatalogText(const std::string& value) {
@@ -140,13 +140,13 @@ bool validPluralCategory(const std::string& value) {
 
 struct MappingEntry {
     std::string key;
-    YAML::Node key_node;
+    YAML::Node keyNode;
     YAML::Node value;
 };
 
 class YamlCatalogParser {
 public:
-    YamlCatalogParser(const std::string& yaml, const std::string& source_name, bool base) : mYaml(yaml), mSourceName(source_name), mBase(base) {}
+    YamlCatalogParser(const std::string& yaml, const std::string& sourceName, bool base) : mYaml(yaml), mSourceName(sourceName), mBase(base) {}
 
     LocalizationLoadResult parse(ParsedCatalog& catalog) {
         catalog = {};
@@ -166,11 +166,11 @@ private:
         try {
             std::istringstream input(mYaml);
             YAML::Parser parser(input);
-            StrictYamlEventHandler event_handler;
-            while (parser.HandleNextDocument(event_handler)) {}
-            if (!event_handler.valid()) {
-                const YAML::Mark& mark = event_handler.mark();
-                mResult.error("localization.yaml.feature_forbidden", event_handler.reason(), mSourceName,
+            StrictYamlEventHandler eventHandler;
+            while (parser.HandleNextDocument(eventHandler)) {}
+            if (!eventHandler.valid()) {
+                const YAML::Mark& mark = eventHandler.mark();
+                mResult.error("localization.yaml.feature_forbidden", eventHandler.reason(), mSourceName,
                               mark.is_null() ? 0 : static_cast<std::size_t>(mark.line + 1),
                               mark.is_null() ? 0 : static_cast<std::size_t>(mark.column + 1));
                 return std::nullopt;
@@ -240,20 +240,20 @@ private:
 
     void parseRoot(const YAML::Node& root, ParsedCatalog& catalog) {
         YAML::Node locales;
-        bool default_seen = false;
-        bool locales_seen = false;
+        bool defaultSeen = false;
+        bool localesSeen = false;
         for (const MappingEntry& entry : mapping(root, "localization root", {"defaultLocale", "locales"})) {
             if (entry.key == "defaultLocale") {
-                default_seen = true;
+                defaultSeen = true;
                 parseDefaultLocale(entry.value, catalog);
             } else {
-                locales_seen = true;
+                localesSeen = true;
                 locales = entry.value;
             }
         }
 
-        if (mBase && !default_seen) mResult.error("localization.default.missing", "Base localization YAML requires defaultLocale.", mSourceName);
-        if (!locales_seen) {
+        if (mBase && !defaultSeen) mResult.error("localization.default.missing", "Base localization YAML requires defaultLocale.", mSourceName);
+        if (!localesSeen) {
             mResult.error("localization.locales.missing", "Localization YAML requires a locales mapping.", mSourceName);
             return;
         }
@@ -273,7 +273,7 @@ private:
         if (!canonical || *canonical != *id)
             mResult.error("localization.default.invalid", "defaultLocale must be a canonical BCP 47 Locale ID: " + *id + ".", mSourceName,
                           lineOf(node), columnOf(node));
-        else catalog.default_locale = *canonical;
+        else catalog.defaultLocale = *canonical;
     }
 
     void parseLocales(const YAML::Node& node, ParsedCatalog& catalog) {
@@ -284,11 +284,11 @@ private:
 
         std::unordered_set<std::string> identities;
         for (const auto& entry : node) {
-            const std::optional<std::string> authored_id = scalar(entry.first, "Locale ID");
-            if (!authored_id) continue;
-            const std::optional<std::string> canonical = canonicalLanguageTag(*authored_id);
-            if (!canonical || *canonical != *authored_id) {
-                mResult.error("localization.locale.id_invalid", "Locale ID must be a canonical BCP 47 tag: " + *authored_id + ".", mSourceName,
+            const std::optional<std::string> authoredId = scalar(entry.first, "Locale ID");
+            if (!authoredId) continue;
+            const std::optional<std::string> canonical = canonicalLanguageTag(*authoredId);
+            if (!canonical || *canonical != *authoredId) {
+                mResult.error("localization.locale.id_invalid", "Locale ID must be a canonical BCP 47 tag: " + *authoredId + ".", mSourceName,
                               lineOf(entry.first), columnOf(entry.first));
                 continue;
             }
@@ -307,11 +307,11 @@ private:
         if (mBase && catalog.locales.empty()) mResult.error("localization.locales.empty", "Base localization YAML defines no locales.", mSourceName);
     }
 
-    ParsedLocale parseLocale(const std::string& id, const YAML::Node& id_node, const YAML::Node& node) {
+    ParsedLocale parseLocale(const std::string& id, const YAML::Node& idNode, const YAML::Node& node) {
         ParsedLocale locale;
         locale.id = id;
         locale.source = mSourceName;
-        locale.line = lineOf(id_node);
+        locale.line = lineOf(idNode);
 
         for (const MappingEntry& entry : mapping(node, "locale " + locale.id, {"name", "direction", "fallback", "strings"}))
             if (entry.key == "name") parseLocaleName(entry.value, locale);
@@ -319,7 +319,7 @@ private:
             else if (entry.key == "fallback") parseLocaleFallback(entry.value, locale);
             else parseStrings(entry.value, locale);
 
-        if (!locale.strings_present)
+        if (!locale.stringsPresent)
             mResult.error("localization.locale.strings_missing", "Every locale entry requires a strings mapping: " + locale.id + ".", mSourceName,
                           locale.line);
         if (mBase && !locale.name)
@@ -332,12 +332,12 @@ private:
         if (!name) return;
 
         StringTemplate parsed;
-        LocalizationLoadResult parsed_result;
-        parseRichString(*name, parsed, parsed_result, mSourceName, lineOf(node));
+        LocalizationLoadResult parsedResult;
+        parseRichString(*name, parsed, parsedResult, mSourceName, lineOf(node));
         const bool rich = name->find('\n') != std::string::npos
             || !parsed.arguments.empty()
             || std::any_of(parsed.nodes.begin(), parsed.nodes.end(), [](const TemplateNode& value) { return value.kind != TemplateKind::Text; });
-        if (rich || parsed_result.hasErrors())
+        if (rich || parsedResult.hasErrors())
             mResult.error("localization.locale.name_invalid", "Locale name must be a single-line plain string without markup or placeholders.",
                           mSourceName, lineOf(node), columnOf(node));
         else locale.name = *name;
@@ -364,7 +364,7 @@ private:
     }
 
     void parseStrings(const YAML::Node& node, ParsedLocale& locale) {
-        locale.strings_present = true;
+        locale.stringsPresent = true;
         if (!node.IsMap()) {
             mResult.error("localization.strings.invalid", "Locale strings must be a flat YAML mapping.", mSourceName, lineOf(node), columnOf(node));
             return;
@@ -390,18 +390,18 @@ private:
         }
     }
 
-    std::optional<StringValue> parseStringValue(const std::string& key, const YAML::Node& key_node, const YAML::Node& node) {
+    std::optional<StringValue> parseStringValue(const std::string& key, const YAML::Node& keyNode, const YAML::Node& node) {
         if (node.IsScalar()) {
             const std::optional<std::string> text = scalar(node, "Localized String " + key);
             if (!text) return std::nullopt;
             StringTemplate parsed;
             if (!parseRichString(*text, parsed, mResult, mSourceName, lineOf(node))) return std::nullopt;
-            return StringValue(std::move(parsed), mSourceName, lineOf(key_node));
+            return StringValue(std::move(parsed), mSourceName, lineOf(keyNode));
         }
         if (node.IsMap()) {
             PluralTemplates plurals = parsePluralVariants(key, node);
             if (plurals.empty()) return std::nullopt;
-            return StringValue(std::move(plurals), mSourceName, lineOf(key_node));
+            return StringValue(std::move(plurals), mSourceName, lineOf(keyNode));
         }
 
         mResult.error("localization.string.value_invalid", "Localized value must be a non-empty YAML string or Plural Category map.", mSourceName,
@@ -451,7 +451,7 @@ std::string localeIdentity(const std::string& id) {
     return result;
 }
 
-LocalizationLoadResult parseYamlCatalog(const std::string& yaml, const std::string& source_name, bool base, ParsedCatalog& catalog) {
-    return YamlCatalogParser(yaml, source_name, base).parse(catalog);
+LocalizationLoadResult parseYamlCatalog(const std::string& yaml, const std::string& sourceName, bool base, ParsedCatalog& catalog) {
+    return YamlCatalogParser(yaml, sourceName, base).parse(catalog);
 }
 } // namespace rdui::localization_detail

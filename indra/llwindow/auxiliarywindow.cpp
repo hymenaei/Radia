@@ -1,6 +1,6 @@
 /**
- * @file nativewindow.cpp
- * @brief Defines the native-window seam used to host detached UI Floaters.
+ * @file auxiliarywindow.cpp
+ * @brief Implements the platform seam for non-primary viewer windows.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -22,24 +22,26 @@
  * $/LicenseInfo$
  */
 
-#include "llviewerprecompiledheaders.h"
-#include "nativewindow.h"
+#include "linden_common.h"
+#include "auxiliarywindow.h"
+
 #if LL_WINDOWS
-    #include <algorithm>
-    #include <cmath>
-    #include <windowsx.h>
-    #include "indra_constants.h"
-    #include "llkeyboardwin32.h"
-    #include "llrender.h"
-    #include "llrendertarget.h"
-    #include "llwin32headers.h"
+#include <algorithm>
+#include <cmath>
+#include <windowsx.h>
+#include "indra_constants.h"
+#if !LL_SDL_WINDOW
+#include "llkeyboardwin32.h"
+#endif
+#include "llrender.h"
+#include "llrendertarget.h"
+#include "llwin32headers.h"
 #endif
 
-namespace rdui::viewer {
 #if LL_WINDOWS
 namespace {
-constexpr wchar_t WINDOW_CLASS[] = L"RadiaDetachedFloater";
-constexpr wchar_t RENDER_WINDOW_CLASS[] = L"RadiaDetachedFloaterRenderTarget";
+constexpr wchar_t kWindowClassName[] = L"RadiaDetachedFloater";
+constexpr wchar_t kRenderWindowClassName[] = L"RadiaDetachedFloaterRenderTarget";
 
 MASK currentModifiers() {
     MASK result = MASK_NONE;
@@ -50,11 +52,15 @@ MASK currentModifiers() {
 }
 
 KEY translatedKey(WPARAM key, LPARAM data) {
+#if LL_SDL_WINDOW
+    return static_cast<KEY>(key);
+#else
     static LLKeyboardWin32 keyboard;
     KEY translated = static_cast<KEY>(key);
     const MASK extended = (data & (1LL << 24)) ? MASK_EXTENDED : MASK_NONE;
     keyboard.translateExtendedKey(static_cast<U16>(key), extended, &translated);
     return translated;
+#endif
 }
 
 std::wstring wide(const std::string& value) {
@@ -62,19 +68,6 @@ std::wstring wide(const std::string& value) {
     const int count = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), nullptr, 0);
     std::wstring result(std::max(0, count), L'\0');
     if (count > 0) MultiByteToWideChar(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), result.data(), count);
-    return result;
-}
-
-std::string monitorName(HMONITOR monitor) {
-    MONITORINFOEXW info{};
-    info.cbSize = sizeof(info);
-    if (!monitor || !GetMonitorInfoW(monitor, &info)) return {};
-    const int count = WideCharToMultiByte(CP_UTF8, 0, info.szDevice, -1, nullptr, 0, nullptr, nullptr);
-    std::string result(count > 0 ? count : 0, '\0');
-    if (count > 1) {
-        WideCharToMultiByte(CP_UTF8, 0, info.szDevice, -1, result.data(), count, nullptr, nullptr);
-        result.pop_back();
-    }
     return result;
 }
 
@@ -95,26 +88,33 @@ HCURSOR nativeCursor(ECursorType cursor) {
     }
 }
 
-class Win32NativeWindow final : public NativeWindow {
+struct PointerInput {
+    F32 x = 0.f;
+    F32 y = 0.f;
+    AuxiliaryPointerButton button = AuxiliaryPointerButton::NoButton;
+    U8 clickCount = 1;
+};
+
+class Win32AuxiliaryWindow final : public AuxiliaryWindow {
 public:
-    Win32NativeWindow(const NativeRect& rect, const std::string& title, NativeWindowClient& client) : mClient(client) {
+    Win32AuxiliaryWindow(const AuxiliaryWindowRect& rect, const std::string& title, AuxiliaryWindowClient& client) : mClient(client) {
         registerClass();
-        const std::wstring window_title = wide(title);
+        const std::wstring windowTitle = wide(title);
         mWindow =
-            CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_LAYERED, WINDOW_CLASS, window_title.c_str(), WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+            CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_LAYERED, kWindowClassName, windowTitle.c_str(), WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
                             rect.x, rect.y, std::max(1, rect.width), std::max(1, rect.height), nullptr, nullptr, GetModuleHandle(nullptr), this);
         if (!mWindow) return;
 
-        mRenderWindow = CreateWindowExW(0, RENDER_WINDOW_CLASS, L"", WS_POPUP, 0, 0, std::max(1, rect.width), std::max(1, rect.height), nullptr,
+        mRenderWindow = CreateWindowExW(0, kRenderWindowClassName, L"", WS_POPUP, 0, 0, std::max(1, rect.width), std::max(1, rect.height), nullptr,
                                         nullptr, GetModuleHandle(nullptr), nullptr);
         mDC = mRenderWindow ? GetDC(mRenderWindow) : nullptr;
-        HDC source_dc = wglGetCurrentDC();
-        const int pixel_format = source_dc ? GetPixelFormat(source_dc) : 0;
+        HDC sourceDC = wglGetCurrentDC();
+        const int pixelFormat = sourceDC ? GetPixelFormat(sourceDC) : 0;
         PIXELFORMATDESCRIPTOR descriptor{};
         if (!mDC
-            || pixel_format <= 0
-            || !DescribePixelFormat(source_dc, pixel_format, sizeof(descriptor), &descriptor)
-            || !SetPixelFormat(mDC, pixel_format, &descriptor)) {
+            || pixelFormat <= 0
+            || !DescribePixelFormat(sourceDC, pixelFormat, sizeof(descriptor), &descriptor)
+            || !SetPixelFormat(mDC, pixelFormat, &descriptor)) {
             if (mDC) ReleaseDC(mRenderWindow, mDC);
             mDC = nullptr;
             if (mRenderWindow) DestroyWindow(mRenderWindow);
@@ -126,7 +126,7 @@ public:
         updateScale();
     }
 
-    ~Win32NativeWindow() override {
+    ~Win32AuxiliaryWindow() override {
         if (mWindow && GetCapture() == mWindow) ReleaseCapture();
         releaseLayerBuffer();
         releaseRenderTargetWithCurrentContext();
@@ -161,16 +161,16 @@ public:
             else endDrag();
         }
         if (mResizing && !(GetAsyncKeyState(VK_LBUTTON) & 0x8000)) {
-            mClient.dispatchNative({rdui::viewer::NativeInteractionLoss::Capture});
+            mClient.interactionLost(AuxiliaryInteractionLoss::Capture);
             endResize();
         }
     }
 
     void render() override {
         if (!mWindow || !mDC || !IsWindowVisible(mWindow)) return;
-        HDC previous_dc = wglGetCurrentDC();
+        HDC previousDC = wglGetCurrentDC();
         HGLRC context = wglGetCurrentContext();
-        if (!previous_dc || !context) return;
+        if (!previousDC || !context) return;
         gGL.flush();
         if (!wglMakeCurrent(mDC, context)) return;
         RECT client{};
@@ -178,24 +178,24 @@ public:
         const int width = client.right - client.left;
         const int height = client.bottom - client.top;
         if (width <= 0 || height <= 0 || !ensureLayerBuffer(width, height) || !ensureRenderTarget(width, height)) {
-            wglMakeCurrent(previous_dc, context);
+            wglMakeCurrent(previousDC, context);
             return;
         }
         SetWindowPos(mRenderWindow, nullptr, 0, 0, width, height, SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER);
         mRenderTarget.bindTarget();
-        mClient.paintNative(width, height, scale());
-        GLint read_buffer = GL_COLOR_ATTACHMENT0;
-        glGetIntegerv(GL_READ_BUFFER, &read_buffer);
+        mClient.paint(width, height, scale());
+        GLint readBuffer = GL_COLOR_ATTACHMENT0;
+        glGetIntegerv(GL_READ_BUFFER, &readBuffer);
         glReadBuffer(GL_COLOR_ATTACHMENT0);
-        GLint pack_alignment = 4;
-        glGetIntegerv(GL_PACK_ALIGNMENT, &pack_alignment);
+        GLint packAlignment = 4;
+        glGetIntegerv(GL_PACK_ALIGNMENT, &packAlignment);
         glPixelStorei(GL_PACK_ALIGNMENT, 4);
         glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, mLayerBits);
-        glPixelStorei(GL_PACK_ALIGNMENT, pack_alignment);
-        glReadBuffer(read_buffer);
+        glPixelStorei(GL_PACK_ALIGNMENT, packAlignment);
+        glReadBuffer(readBuffer);
         mRenderTarget.flush();
         publishLayer(width, height);
-        wglMakeCurrent(previous_dc, context);
+        wglMakeCurrent(previousDC, context);
     }
 
     void setScaleMultiplier(F32 multiplier) override { mScaleMultiplier = std::max(0.25f, multiplier); }
@@ -208,26 +208,26 @@ public:
                      std::max(1, static_cast<int>(std::round(mLogicalHeight * scale()))), SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER);
     }
 
-    void setLogicalRect(const rdui::Rect& logical) override {
+    void setLogicalRect(const AuxiliaryLogicalRect& logical) override {
         if (!mWindow) return;
-        mLogicalWidth = std::max(1.f, logical.w);
-        mLogicalHeight = std::max(1.f, logical.h);
+        mLogicalWidth = std::max(1.f, logical.width);
+        mLogicalHeight = std::max(1.f, logical.height);
         if (!mResizing) {
             setLogicalSize(mLogicalWidth, mLogicalHeight);
             return;
         }
 
-        const NativeRect native = nativeRectForLogicalResize(mResizeInitialRect, logical, scale());
+        const AuxiliaryWindowRect native = auxiliaryWindowRectForLogicalResize(mResizeInitialRect, logical, scale());
         SetWindowPos(mWindow, nullptr, native.x, native.y, native.width, native.height, SWP_NOACTIVATE | SWP_NOZORDER);
     }
 
-    void beginDrag(F32 logical_x, F32 logical_y, const std::optional<NativePoint>& requested_cursor) override {
+    void beginDrag(F32 logicalX, F32 logicalY, const std::optional<AuxiliaryWindowPoint>& requestedCursor) override {
         if (!mWindow) return;
-        mLogicalDragOffset = {logical_x, logical_y};
+        mLogicalDragOffset = {logicalX, logicalY};
         updateDragOffset();
 
         POINT cursor{};
-        if (requested_cursor) SetCursorPos(requested_cursor->x, requested_cursor->y);
+        if (requestedCursor) SetCursorPos(requestedCursor->x, requestedCursor->y);
         if (GetCursorPos(&cursor))
             SetWindowPos(mWindow, nullptr, cursor.x - mDragOffset.x, cursor.y - mDragOffset.y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
 
@@ -244,13 +244,11 @@ public:
         SetCapture(mWindow);
     }
 
-    NativeRect rect() const override {
+    AuxiliaryWindowRect rect() const override {
         RECT value{};
         if (mWindow) GetWindowRect(mWindow, &value);
         return {value.left, value.top, value.right - value.left, value.bottom - value.top};
     }
-
-    std::string monitorId() const override { return mWindow ? monitorName(MonitorFromWindow(mWindow, MONITOR_DEFAULTTONEAREST)) : std::string(); }
 
     F32 scale() const override { return mDpiScale * mScaleMultiplier; }
 
@@ -263,17 +261,17 @@ private:
             type.lpfnWndProc = windowProc;
             type.hInstance = GetModuleHandle(nullptr);
             type.hCursor = LoadCursor(nullptr, IDC_ARROW);
-            type.lpszClassName = WINDOW_CLASS;
-            const bool input_registered = RegisterClassExW(&type) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+            type.lpszClassName = kWindowClassName;
+            const bool inputRegistered = RegisterClassExW(&type) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
 
-            WNDCLASSEXW render_type{};
-            render_type.cbSize = sizeof(render_type);
-            render_type.style = CS_OWNDC;
-            render_type.lpfnWndProc = DefWindowProcW;
-            render_type.hInstance = GetModuleHandle(nullptr);
-            render_type.lpszClassName = RENDER_WINDOW_CLASS;
-            const bool render_registered = RegisterClassExW(&render_type) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
-            return input_registered && render_registered;
+            WNDCLASSEXW renderType{};
+            renderType.cbSize = sizeof(renderType);
+            renderType.style = CS_OWNDC;
+            renderType.lpfnWndProc = DefWindowProcW;
+            renderType.hInstance = GetModuleHandle(nullptr);
+            renderType.lpszClassName = kRenderWindowClassName;
+            const bool renderRegistered = RegisterClassExW(&renderType) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+            return inputRegistered && renderRegistered;
         }();
         (void)registered;
     }
@@ -317,15 +315,13 @@ private:
         return mRenderTarget.allocate(static_cast<U32>(width), static_cast<U32>(height), GL_RGBA8);
     }
 
-    void releaseRenderTarget() { mRenderTarget.release(); }
-
     void releaseRenderTargetWithCurrentContext() {
         if (!mRenderTarget.isComplete()) return;
-        HDC previous_dc = wglGetCurrentDC();
+        HDC previousDC = wglGetCurrentDC();
         HGLRC context = wglGetCurrentContext();
         if (!context || !mDC || !wglMakeCurrent(mDC, context)) return;
-        releaseRenderTarget();
-        wglMakeCurrent(previous_dc, context);
+        mRenderTarget.release();
+        wglMakeCurrent(previousDC, context);
     }
 
     void releaseLayerBuffer() {
@@ -341,9 +337,9 @@ private:
     }
 
     void publishLayer(int width, int height) {
-        RECT window_rect{};
-        GetWindowRect(mWindow, &window_rect);
-        POINT destination{window_rect.left, window_rect.top};
+        RECT windowRect{};
+        GetWindowRect(mWindow, &windowRect);
+        POINT destination{windowRect.left, windowRect.top};
         POINT source{0, 0};
         SIZE size{width, height};
         BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
@@ -359,8 +355,7 @@ private:
         mDragOffset.y = static_cast<LONG>(std::round((client.bottom - client.top) - mLogicalDragOffset.y * scale()));
     }
 
-    rdui::viewer::NativePointerInput pointerInput(rdui::viewer::NativePointerPhase phase, rdui::viewer::NativePointerButton button, LPARAM data,
-                                                  U8 click_count = 1) const {
+    PointerInput pointerInput(AuxiliaryPointerButton button, LPARAM data, U8 clickCount = 1) const {
         RECT client{};
         GetClientRect(mWindow, &client);
         F32 x = static_cast<F32>(GET_X_LPARAM(data)) / scale();
@@ -372,13 +367,24 @@ private:
                 y = static_cast<F32>(mResizeInitialRect.y + mResizeInitialRect.height - cursor.y) / scale();
             }
         }
-        return {phase, x, y, button, static_cast<U32>(currentModifiers()), click_count};
+        return {x, y, button, clickCount};
     }
 
-    void dispatchPointer(rdui::viewer::NativePointerPhase phase, rdui::viewer::NativePointerButton button, LPARAM data, U8 click_count = 1) {
-        const rdui::viewer::NativeInputDispatchResult result = mClient.dispatchNative({pointerInput(phase, button, data, click_count)});
+    void applyCursor(const AuxiliaryInputResult& result) {
         if (result.cursor) mCursor = nativeCursor(*result.cursor);
         SetCursor(mCursor);
+    }
+
+    void dispatchPointer(bool down, AuxiliaryPointerButton button, LPARAM data, U8 clickCount = 1) {
+        const PointerInput input = pointerInput(button, data, clickCount);
+        const AuxiliaryInputResult result = down ? mClient.pointerDown(input.x, input.y, input.button, currentModifiers(), input.clickCount, 0.f, 0.f)
+                                                 : mClient.pointerUp(input.x, input.y, input.button, currentModifiers(), input.clickCount, 0.f, 0.f);
+        applyCursor(result);
+    }
+
+    void dispatchPointerMove(LPARAM data) {
+        const PointerInput input = pointerInput(AuxiliaryPointerButton::NoButton, data);
+        applyCursor(mClient.pointerMove(input.x, input.y, input.button, currentModifiers(), input.clickCount, 0.f, 0.f));
     }
 
     void updateDragPosition() {
@@ -391,19 +397,19 @@ private:
         if (!mDragging) return;
         mDragging = false;
         if (GetCapture() == mWindow) ReleaseCapture();
-        mClient.nativeDragEnded();
+        mClient.dragEnded();
     }
 
     void endResize() {
         if (!mResizing) return;
         mResizing = false;
         if (GetCapture() == mWindow) ReleaseCapture();
-        mClient.nativeResizeEnded(mLogicalWidth, mLogicalHeight);
+        mClient.resizeEnded(mLogicalWidth, mLogicalHeight);
     }
 
     LRESULT handleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
         switch (message) {
-            case WM_CLOSE: mClient.closeNative(); return 0;
+            case WM_CLOSE: mClient.closeRequested(); return 0;
             case WM_ERASEBKGND: return 1;
             case WM_SETCURSOR: SetCursor(mCursor); return TRUE;
             case WM_PAINT: {
@@ -419,31 +425,31 @@ private:
                     mTrackingMouse = true;
                 }
                 if (mDragging) updateDragPosition();
-                else dispatchPointer(rdui::viewer::NativePointerPhase::Move, rdui::viewer::NativePointerButton::NoButton, lparam);
+                else dispatchPointerMove(lparam);
                 return 0;
             case WM_MOUSELEAVE:
                 mTrackingMouse = false;
-                mClient.dispatchNative({rdui::viewer::NativePointerInput{rdui::viewer::NativePointerPhase::Leave}});
+                mClient.pointerLeave();
                 return 0;
             case WM_LBUTTONDOWN:
                 SetFocus(mWindow);
-                dispatchPointer(rdui::viewer::NativePointerPhase::Down, rdui::viewer::NativePointerButton::Left, lparam);
+                dispatchPointer(true, AuxiliaryPointerButton::Left, lparam);
                 return 0;
             case WM_LBUTTONDBLCLK:
                 SetFocus(mWindow);
-                dispatchPointer(rdui::viewer::NativePointerPhase::Down, rdui::viewer::NativePointerButton::Left, lparam, 2);
+                dispatchPointer(true, AuxiliaryPointerButton::Left, lparam, 2);
                 return 0;
             case WM_LBUTTONUP:
                 if (mDragging) endDrag();
                 else {
-                    dispatchPointer(rdui::viewer::NativePointerPhase::Up, rdui::viewer::NativePointerButton::Left, lparam);
+                    dispatchPointer(false, AuxiliaryPointerButton::Left, lparam);
                     if (mResizing) endResize();
                 }
                 return 0;
-            case WM_RBUTTONDOWN: dispatchPointer(rdui::viewer::NativePointerPhase::Down, rdui::viewer::NativePointerButton::Right, lparam); return 0;
-            case WM_RBUTTONUP: dispatchPointer(rdui::viewer::NativePointerPhase::Up, rdui::viewer::NativePointerButton::Right, lparam); return 0;
-            case WM_MBUTTONDOWN: dispatchPointer(rdui::viewer::NativePointerPhase::Down, rdui::viewer::NativePointerButton::Middle, lparam); return 0;
-            case WM_MBUTTONUP: dispatchPointer(rdui::viewer::NativePointerPhase::Up, rdui::viewer::NativePointerButton::Middle, lparam); return 0;
+            case WM_RBUTTONDOWN: dispatchPointer(true, AuxiliaryPointerButton::Right, lparam); return 0;
+            case WM_RBUTTONUP: dispatchPointer(false, AuxiliaryPointerButton::Right, lparam); return 0;
+            case WM_MBUTTONDOWN: dispatchPointer(true, AuxiliaryPointerButton::Middle, lparam); return 0;
+            case WM_MBUTTONUP: dispatchPointer(false, AuxiliaryPointerButton::Middle, lparam); return 0;
             case WM_MOUSEWHEEL:
             case WM_MOUSEHWHEEL: {
                 POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
@@ -451,21 +457,18 @@ private:
                 RECT client{};
                 GetClientRect(mWindow, &client);
                 const F32 delta = static_cast<F32>(GET_WHEEL_DELTA_WPARAM(wparam)) / WHEEL_DELTA;
-                mClient.dispatchNative({rdui::viewer::NativeScrollInput{
-                    static_cast<S32>(std::round(point.x / scale())), static_cast<S32>(std::round((client.bottom - point.y) / scale())),
-                    message == WM_MOUSEHWHEEL ? delta : 0.f, message == WM_MOUSEWHEEL ? delta : 0.f, static_cast<U32>(currentModifiers())}});
+                const AuxiliaryInputResult result =
+                    mClient.scroll(static_cast<S32>(std::round(point.x / scale())), static_cast<S32>(std::round((client.bottom - point.y) / scale())),
+                                   message == WM_MOUSEHWHEEL ? delta : 0.f, message == WM_MOUSEWHEEL ? delta : 0.f, currentModifiers());
+                applyCursor(result);
                 return 0;
             }
             case WM_KEYDOWN:
             case WM_SYSKEYDOWN:
-                mClient.dispatchNative({rdui::viewer::NativeKeyInput{translatedKey(wparam, lparam), static_cast<U32>(currentModifiers()), true,
-                                                                     (lparam & (1LL << 30)) != 0}});
+                applyCursor(mClient.keyDown(translatedKey(wparam, lparam), currentModifiers(), (lparam & (1LL << 30)) != 0));
                 return 0;
             case WM_KEYUP:
-            case WM_SYSKEYUP:
-                mClient.dispatchNative(
-                    {rdui::viewer::NativeKeyInput{translatedKey(wparam, lparam), static_cast<U32>(currentModifiers()), false, false}});
-                return 0;
+            case WM_SYSKEYUP: applyCursor(mClient.keyUp(translatedKey(wparam, lparam), currentModifiers())); return 0;
             case WM_CHAR: {
                 const U16 unit = static_cast<U16>(wparam);
                 if (unit >= 0xD800 && unit <= 0xDBFF) {
@@ -476,15 +479,15 @@ private:
                 if (unit >= 0xDC00 && unit <= 0xDFFF && mHighSurrogate)
                     codepoint = 0x10000u + ((static_cast<U32>(mHighSurrogate) - 0xD800u) << 10) + (static_cast<U32>(unit) - 0xDC00u);
                 mHighSurrogate = 0;
-                mClient.dispatchNative({rdui::viewer::NativeCharacterInput{codepoint, static_cast<U32>(currentModifiers())}});
+                applyCursor(mClient.character(codepoint, currentModifiers()));
                 return 0;
             }
-            case WM_KILLFOCUS: mClient.dispatchNative({rdui::viewer::NativeInteractionLoss::Focus}); return 0;
+            case WM_KILLFOCUS: mClient.interactionLost(AuxiliaryInteractionLoss::Focus); return 0;
             case WM_CAPTURECHANGED:
                 if (mDragging && reinterpret_cast<HWND>(lparam) != mWindow) {
                     if (!(GetAsyncKeyState(VK_LBUTTON) & 0x8000)) endDrag();
                 } else {
-                    mClient.dispatchNative({rdui::viewer::NativeInteractionLoss::Capture});
+                    mClient.interactionLost(AuxiliaryInteractionLoss::Capture);
                     if (mResizing && reinterpret_cast<HWND>(lparam) != mWindow) endResize();
                 }
                 return 0;
@@ -505,16 +508,16 @@ private:
     }
 
     static LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
-        Win32NativeWindow* self = reinterpret_cast<Win32NativeWindow*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+        Win32AuxiliaryWindow* self = reinterpret_cast<Win32AuxiliaryWindow*>(GetWindowLongPtrW(window, GWLP_USERDATA));
         if (message == WM_NCCREATE) {
-            self = static_cast<Win32NativeWindow*>(reinterpret_cast<CREATESTRUCTW*>(lparam)->lpCreateParams);
+            self = static_cast<Win32AuxiliaryWindow*>(reinterpret_cast<CREATESTRUCTW*>(lparam)->lpCreateParams);
             self->mWindow = window;
             SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
         }
         return self ? self->handleMessage(message, wparam, lparam) : DefWindowProcW(window, message, wparam, lparam);
     }
 
-    NativeWindowClient& mClient;
+    AuxiliaryWindowClient& mClient;
     HWND mWindow = nullptr;
     HWND mRenderWindow = nullptr;
     HDC mDC = nullptr;
@@ -526,7 +529,7 @@ private:
     int mLayerHeight = 0;
     LLRenderTarget mRenderTarget;
     POINT mDragOffset{};
-    NativeRect mResizeInitialRect;
+    AuxiliaryWindowRect mResizeInitialRect;
     struct {
         F32 x = 0.f;
         F32 y = 0.f;
@@ -542,43 +545,32 @@ private:
     U16 mHighSurrogate = 0;
 };
 } // namespace
-
-std::unique_ptr<NativeWindow> NativeWindow::create(const NativeRect& rect, const std::string& title, NativeWindowClient& client) {
-    auto window = std::make_unique<Win32NativeWindow>(rect, title, client);
-    return window->valid() ? std::move(window) : nullptr;
-}
-
-bool NativeWindow::placementVisible(const NativeRect& rect, const std::string& monitor_id) {
-    RECT native{rect.x, rect.y, rect.x + rect.width, rect.y + rect.height};
-    HMONITOR monitor = MonitorFromRect(&native, MONITOR_DEFAULTTONULL);
-    return monitor && (monitor_id.empty() || monitorName(monitor) == monitor_id);
-}
-
-#else
-std::unique_ptr<NativeWindow> NativeWindow::create(const NativeRect&, const std::string&, NativeWindowClient&) {
-    return nullptr;
-}
-
-bool NativeWindow::placementVisible(const NativeRect&, const std::string&) {
-    return false;
-}
 #endif
 
 namespace {
-class DefaultNativeWindowFactory final : public NativeWindowFactory {
+class DefaultAuxiliaryWindowFactory final : public AuxiliaryWindowFactory {
 public:
-    std::unique_ptr<NativeWindow> create(const NativeRect& rect, const std::string& title, NativeWindowClient& client) override {
-        return NativeWindow::create(rect, title, client);
+    std::unique_ptr<AuxiliaryWindow> create(const AuxiliaryWindowRect& rect, const std::string& title, AuxiliaryWindowClient& client) override {
+#if LL_WINDOWS
+        auto window = std::make_unique<Win32AuxiliaryWindow>(rect, title, client);
+        return window->valid() ? std::move(window) : nullptr;
+#else
+        return nullptr;
+#endif
     }
 
-    bool placementVisible(const NativeRect& rect, const std::string& monitor_id) const override {
-        return NativeWindow::placementVisible(rect, monitor_id);
+    bool placementVisible(const AuxiliaryWindowRect& rect) const override {
+#if LL_WINDOWS
+        RECT native{rect.x, rect.y, rect.x + rect.width, rect.y + rect.height};
+        return MonitorFromRect(&native, MONITOR_DEFAULTTONULL) != nullptr;
+#else
+        return false;
+#endif
     }
 };
 } // namespace
 
-NativeWindowFactory& defaultNativeWindowFactory() {
-    static DefaultNativeWindowFactory factory;
+AuxiliaryWindowFactory& defaultAuxiliaryWindowFactory() {
+    static DefaultAuxiliaryWindowFactory factory;
     return factory;
 }
-} // namespace rdui::viewer

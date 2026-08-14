@@ -42,10 +42,10 @@ struct LayoutStatistics {
 };
 
 Style resolveWidgetStyle(const StyleSheet& theme, const Widget& node);
-Vec2 measureWidget(const Widget& node, const StyleSheet& theme, const TextMetrics& text_metrics);
-void measureTree(Widget& root, const StyleSheet& theme, const TextMetrics& text_metrics);
-void arrangeTree(Widget& root, const StyleSheet& theme, const TextMetrics& text_metrics, LayoutDirection direction = LayoutDirection::LeftToRight);
-LayoutStatistics layoutTree(Widget& root, const StyleSheet& theme, const TextMetrics& text_metrics,
+Vec2 measureWidget(const Widget& node, const StyleSheet& theme, const TextMetrics& textMetrics);
+void measureTree(Widget& root, const StyleSheet& theme, const TextMetrics& textMetrics);
+void arrangeTree(Widget& root, const StyleSheet& theme, const TextMetrics& textMetrics, LayoutDirection direction = LayoutDirection::LeftToRight);
+LayoutStatistics layoutTree(Widget& root, const StyleSheet& theme, const TextMetrics& textMetrics,
                             LayoutDirection direction = LayoutDirection::LeftToRight);
 } // namespace rdui
 #endif // RD_LAYOUT_ENGINE_H

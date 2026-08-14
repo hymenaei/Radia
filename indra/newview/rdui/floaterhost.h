@@ -1,6 +1,6 @@
 /**
- * @file floatercontroller.h
- * @brief Defines the viewer controller contract for binding and updating UI Floaters.
+ * @file floaterhost.h
+ * @brief Hosts viewer-owned Floaters for the component manager.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -22,28 +22,32 @@
  * $/LicenseInfo$
  */
 
-#ifndef RD_FLOATERCONTROLLER_H
-#define RD_FLOATERCONTROLLER_H
+#ifndef RD_FLOATERHOST_H
+#define RD_FLOATERHOST_H
 
-#include <string>
-#include "binding/binder.h"
-#include "diagnostic.h"
+#include "componentmanager.h"
 
 namespace rdui {
 class Floater;
-
-namespace viewer {
-class FloaterController {
-public:
-    virtual ~FloaterController() = default;
-
-    virtual std::string resourceId() const = 0;
-    virtual PreparedBindingResult prepareBindings(Floater& floater) = 0;
-    virtual void commitBindings(PreparedBinding&& binding) = 0;
-    virtual void idle() {}
-    virtual void reportReloadSucceeded() {}
-    virtual void reportReloadFailed(const DiagnosticResult&) {}
-};
-} // namespace viewer
+class Surface;
 } // namespace rdui
-#endif // RD_FLOATERCONTROLLER_H
+
+namespace rdui::viewer {
+class DetachedFloaterManager;
+
+class FloaterHost final : public ComponentManager::Host {
+public:
+    FloaterHost(rdui::Surface& attachedSurface, DetachedFloaterManager& detachedManager);
+
+    void mount(std::unique_ptr<rdui::Floater> root) override;
+    std::unique_ptr<rdui::Floater> unmount(rdui::Floater& root) override;
+    bool replaceAll(std::vector<ReplacementRequest> replacements) override;
+    bool clearAll(std::vector<rdui::Floater*> roots) override;
+    void present(rdui::Floater& root) override;
+
+private:
+    rdui::Surface& mAttachedSurface;
+    DetachedFloaterManager& mDetachedManager;
+};
+} // namespace rdui::viewer
+#endif // RD_FLOATERHOST_H

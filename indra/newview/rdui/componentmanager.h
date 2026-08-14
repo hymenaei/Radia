@@ -1,6 +1,6 @@
 /**
- * @file floaterdocumentmanager.h
- * @brief Manages viewer-owned Floater documents, controllers, bindings, and skin replacement.
+ * @file componentmanager.h
+ * @brief Manages viewer-owned component instances, bindings, and skin replacement.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -22,39 +22,35 @@
  * $/LicenseInfo$
  */
 
-#ifndef RD_FLOATERDOCUMENTMANAGER_H
-#define RD_FLOATERDOCUMENTMANAGER_H
+#ifndef RD_COMPONENTMANAGER_H
+#define RD_COMPONENTMANAGER_H
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
+#include "componentidentity.h"
 #include "diagnostic.h"
-#include "floatercontroller.h"
-#include "floaterplacementstore.h"
+#include "system.h"
 
 namespace rdui {
 class Floater;
+class SettingResolver;
 class SkinGeneration;
-class System;
 } // namespace rdui
 
 namespace rdui::viewer {
-struct FloaterDocumentId {
-    std::string definitionId;
-    std::string instanceKey;
+class ComponentController;
 
-    bool operator==(const FloaterDocumentId&) const = default;
-};
-
-struct FloaterDocumentOpenResult : DiagnosticResult {
+struct ComponentOpenResult : DiagnosticResult {
     Floater* floater = nullptr;
     bool ok() const { return !hasErrors() && floater; }
 };
 
-class FloaterDocumentManager final {
+class ComponentManager final {
 public:
-    class PreparedReplacement final {
+    class PreparedReplacement final : public PublicationCommit {
     public:
         PreparedReplacement() = default;
         ~PreparedReplacement();
@@ -63,13 +59,14 @@ public:
         PreparedReplacement(const PreparedReplacement&) = delete;
         PreparedReplacement& operator=(const PreparedReplacement&) = delete;
 
-        explicit operator bool() const { return static_cast<bool>(mCommit); }
-        bool commit();
+        explicit operator bool() const { return static_cast<bool>(mState); }
+        bool commit() override;
 
     private:
-        friend class FloaterDocumentManager;
-        explicit PreparedReplacement(std::function<void()> commit);
-        std::function<void()> mCommit;
+        friend class ComponentManager;
+        struct State;
+        explicit PreparedReplacement(std::unique_ptr<State> state);
+        std::unique_ptr<State> mState;
     };
 
     struct ReplacementResult : DiagnosticResult {
@@ -79,34 +76,41 @@ public:
 
     class Host {
     public:
+        struct ReplacementRequest {
+            Floater* current = nullptr;
+            std::unique_ptr<Floater> replacement;
+        };
+
         virtual ~Host() = default;
-        virtual Floater* mount(const FloaterInstanceId& identity, std::unique_ptr<Floater> floater) = 0;
-        virtual Floater* replace(const FloaterInstanceId& identity, Floater& current, std::unique_ptr<Floater> replacement) = 0;
-        virtual void show(Floater& floater) = 0;
+        virtual void mount(std::unique_ptr<Floater> root) = 0;
+        virtual std::unique_ptr<Floater> unmount(Floater& root) = 0;
+        virtual bool replaceAll(std::vector<ReplacementRequest> replacements) = 0;
+        virtual bool clearAll(std::vector<Floater*> roots) = 0;
+        virtual void present(Floater& root) = 0;
     };
 
-    using ControllerFactory = std::function<std::unique_ptr<FloaterController>(System& system)>;
+    using ControllerFactory = std::function<std::unique_ptr<ComponentController>(System& system)>;
 
-    FloaterDocumentManager(System& system, Host& host);
-    ~FloaterDocumentManager();
-    FloaterDocumentManager(const FloaterDocumentManager&) = delete;
-    FloaterDocumentManager& operator=(const FloaterDocumentManager&) = delete;
+    ComponentManager(System& system, Host& host, SettingResolver& settingResolver);
+    ~ComponentManager();
+    ComponentManager(const ComponentManager&) = delete;
+    ComponentManager& operator=(const ComponentManager&) = delete;
 
-    bool registerDefinition(std::string definition_id, ControllerFactory factory);
-    FloaterDocumentOpenResult open(const std::string& definition_id, const std::string& instance_key = {});
+    bool registerDefinition(std::string definitionId, std::string resourceId, ControllerFactory factory);
+    ComponentOpenResult open(const std::string& definitionId, const std::string& instanceKey = {});
 
-    const FloaterInstanceId* identity(const Floater& floater) const;
-    std::vector<Floater*> floaters() const;
-    std::vector<FloaterDocumentId> openDocuments() const;
+    using OpenComponentCallback = std::function<void(const ComponentKey&, Floater&)>;
+    void forEachOpen(const OpenComponentCallback& callback) const;
+    std::optional<ComponentKey> componentKeyFor(const Floater& floater) const;
     ReplacementResult prepareReplacement(const SkinGeneration& generation, const std::string& locale);
+    bool clearInstances();
     void idle();
     void reportReloadSucceeded();
     void reportReloadFailed(const DiagnosticResult& diagnostics);
-    std::size_t size() const;
 
 private:
     struct Impl;
-    std::unique_ptr<Impl> mImpl;
+    std::shared_ptr<Impl> mImpl;
 };
 } // namespace rdui::viewer
-#endif // RD_FLOATERDOCUMENTMANAGER_H
+#endif // RD_COMPONENTMANAGER_H

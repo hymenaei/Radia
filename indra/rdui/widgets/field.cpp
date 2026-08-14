@@ -50,8 +50,8 @@ public:
 
     Vec2 intrinsicSize(const StyleSheet& theme, const Style&, const TextMetrics&, const IntrinsicSizeConstraints&) const override {
         if (!mControl) return {};
-        const Style control_style = resolveWidgetStyle(theme, *mControl);
-        return {mControl->desiredSize().x + control_style.margin.horizontal(), 0.f};
+        const Style controlStyle = resolveWidgetStyle(theme, *mControl);
+        return {mControl->desiredSize().x + controlStyle.margin.horizontal(), 0.f};
     }
 
 private:
@@ -59,18 +59,18 @@ private:
 };
 } // namespace
 
-Field::Field() : Widget(ELEMENT) {}
+Field::Field() : Widget(sElement) {}
 
 void Field::constrainResolvedStyle(Style& style) const {
     style.flow = Flow::Row;
-    if (!style.vertical_align_set) style.vertical_align = VerticalAlign::Middle;
+    if (!style.verticalAlignSet) style.verticalAlign = VerticalAlign::Middle;
 }
 
-Widget* Field::control() {
+Widget* Field::valueControl() {
     return mControl;
 }
 
-const Widget* Field::control() const {
+const Widget* Field::valueControl() const {
     return mControl;
 }
 
@@ -79,8 +79,8 @@ void Field::onChildAdded(Widget& child) {
     if (auto* label = dynamic_cast<Label*>(&child); label && !mLabel) mLabel.set(label);
     if (auto* control = dynamic_cast<ValueControl*>(&child); control && !mControl) {
         mControl = control;
-        refreshValueState(control->valueControlState());
-        mControlSubscription = control->observeValueControlState([this](const ValueControlState& state) { refreshValueState(state); });
+        refreshValueControlState(control->valueControlState());
+        mControlSubscription = control->observeValueControlState([this](const ValueControlState& state) { refreshValueControlState(state); });
     }
 }
 
@@ -99,7 +99,7 @@ void Field::onChildrenCleared() {
 
 bool Field::controlPrecedesLabel() const {
     for (const auto& child : children()) {
-        if (child.get() == control()) return true;
+        if (child.get() == valueControl()) return true;
         if (child.get() == label()) return false;
     }
     return false;
@@ -107,7 +107,7 @@ bool Field::controlPrecedesLabel() const {
 
 Widget* Field::createSupportIndent(WidgetRef<Widget>& slot, const char* part, bool collapsed) {
     auto indent = std::make_unique<FieldSupportIndent>();
-    indent->setControl(control());
+    indent->setControl(valueControl());
     if (collapsed) indent->setVisibility(Visibility::Collapsed);
     detail::WidgetCompilerAccess::setStyleIdentity(*indent, styleElement(), part);
     Widget* result = indent.get();
@@ -136,13 +136,13 @@ Widget* Field::setErrorContent(TextSource content) {
     }
     mAuthoredError = std::move(content);
     mError->setContent(mAuthoredError);
-    refreshValueState(mControl ? mControl->valueControlState() : ValueControlState{});
+    refreshValueControlState(mControl ? mControl->valueControlState() : ValueControlState{});
     return mErrorIndent ? mErrorIndent.get() : mError.get();
 }
 
-void Field::refreshValueState(const ValueControlState& state) {
+void Field::refreshValueControlState(const ValueControlState& state) {
     mDirty = state.dirty;
-    const bool invalid = state.validation == ValueValidationStatus::Invalid;
+    const bool invalid = state.validationStatus == ValueValidationStatus::Invalid;
     setState(WidgetState::Invalid, invalid);
     if (!mError) return;
     if (!invalid) {
@@ -150,16 +150,16 @@ void Field::refreshValueState(const ValueControlState& state) {
         mError->setVisibility(Visibility::Collapsed);
         return;
     }
-    TextSource content = state.message ? *state.message : mAuthoredError;
+    TextSource content = state.validationMessage ? *state.validationMessage : mAuthoredError;
     mError->setContent(std::move(content));
     if (mErrorIndent) mErrorIndent->setVisibility(Visibility::Visible);
     mError->setVisibility(Visibility::Visible);
 }
 
 WidgetContract detail::fieldContract() {
-    return defineWidget<Field>(Field::ELEMENT)
+    return defineWidget<Field>(Field::sElement)
         .state(WidgetState::Invalid)
-        .composition([](const LayoutElement& element, Field& field, const ViewScopeContext&, ViewBuildResult& result, const std::string& source) {
+        .composition([](const LayoutElement& element, Field& field, const WidgetScopeContext&, LayoutBuildResult& result, const std::string& source) {
             std::vector<Label*> labels;
             std::vector<ValueControl*> controls;
             for (const auto& child : field.children()) {
@@ -168,38 +168,38 @@ WidgetContract detail::fieldContract() {
                 if (auto* label = dynamic_cast<Label*>(child.get())) labels.push_back(label);
                 else if (auto* control = dynamic_cast<ValueControl*>(child.get())) controls.push_back(control);
                 else
-                    result.error("view.field.child_unsupported", "Field accepts only Label, one Value Control, Hint, Error, and Flow Break.", source,
-                                 element.source().begin.line, element.source().begin.column);
+                    result.error("layout.field.child_unsupported", "Field accepts only Label, one Value Control, Hint, Error, and Flow Break.",
+                                 source, element.source().begin.line, element.source().begin.column);
             }
             if (labels.size() != 1)
-                result.error("view.field.label_required", "Field requires exactly one direct Label.", source, element.source().begin.line,
+                result.error("layout.field.label_required", "Field requires exactly one direct Label.", source, element.source().begin.line,
                              element.source().begin.column);
             if (controls.size() != 1)
-                result.error("view.field.control_required", "Field requires exactly one direct Value Control.", source, element.source().begin.line,
+                result.error("layout.field.control_required", "Field requires exactly one direct Value Control.", source, element.source().begin.line,
                              element.source().begin.column);
             if (labels.size() == 1 && controls.size() == 1) {
-                const std::string& target_id = detail::WidgetCompilerAccess::labelTargetId(*labels.front());
-                if (!target_id.empty() && target_id != controls.front()->id())
-                    result.error("view.field.label_target_mismatch", "Field Label must target its direct Value Control.", source,
+                const std::string& targetId = detail::WidgetCompilerAccess::labelTargetId(*labels.front());
+                if (!targetId.empty() && targetId != controls.front()->id())
+                    result.error("layout.field.label_target_mismatch", "Field Label must target its direct Value Control.", source,
                                  element.source().begin.line, element.source().begin.column);
             }
         })
         .scopedInlineContent("hint",
                              {InlineContentKind::B, InlineContentKind::I, InlineContentKind::S, InlineContentKind::Kbd, InlineContentKind::Br},
-                             [](TextSource content, Field& field, ViewBuildResult& result, const std::string& source, std::size_t line,
+                             [](TextSource content, Field& field, LayoutBuildResult& result, const std::string& source, std::size_t line,
                                 std::size_t column) -> Widget* {
                                  if (field.hint()) {
-                                     result.error("view.field.hint_duplicate", "Field accepts only one hint.", source, line, column);
+                                     result.error("layout.field.hint_duplicate", "Field accepts only one hint.", source, line, column);
                                      return field.hint();
                                  }
                                  return field.setHintContent(std::move(content));
                              })
         .scopedInlineContent("error",
                              {InlineContentKind::B, InlineContentKind::I, InlineContentKind::S, InlineContentKind::Kbd, InlineContentKind::Br},
-                             [](TextSource content, Field& field, ViewBuildResult& result, const std::string& source, std::size_t line,
+                             [](TextSource content, Field& field, LayoutBuildResult& result, const std::string& source, std::size_t line,
                                 std::size_t column) -> Widget* {
                                  if (field.error()) {
-                                     result.error("view.field.error_duplicate", "Field accepts only one error.", source, line, column);
+                                     result.error("layout.field.error_duplicate", "Field accepts only one error.", source, line, column);
                                      return field.error();
                                  }
                                  return field.setErrorContent(std::move(content));

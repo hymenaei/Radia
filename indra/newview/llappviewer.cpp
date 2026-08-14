@@ -1512,7 +1512,7 @@ bool LLAppViewer::doFrame()
                 gGLActive = true;
 
                 display();
-                gViewerWindow->updateRdui();
+                gViewerWindow->idleUIRuntime();
 
                 {
                     LLPerfStats::RecordSceneTime T(LLPerfStats::StatType_t::RENDER_IDLE);

@@ -43,7 +43,7 @@ struct ParserState {
     XML_Parser parser = nullptr;
     DiagnosticResult* result = nullptr;
     std::unique_ptr<LayoutDocument> document;
-    std::vector<LayoutNode*> elements;
+    std::vector<LayoutNode*> nodeStack;
 };
 
 SourceLocation currentLocation(XML_Parser parser) {
@@ -72,41 +72,41 @@ void XMLCALL startElement(void* user_data, const XML_Char* name, const XML_Char*
     node->source.begin = currentLocation(state.parser);
     for (const XML_Char** attribute = attributes; attribute && *attribute; attribute += 2) {
         LayoutAttribute value;
-        value.authored_name = attribute[0];
+        value.authoredName = attribute[0];
         value.value = attribute[1] ? attribute[1] : "";
         value.source.begin = node->source.begin;
         value.source.end = node->source.begin;
-        const std::string key = schemaNameKey(value.authored_name);
+        const std::string key = schemaNameKey(value.authoredName);
         if (!node->attributes.emplace(key, std::move(value)).second && state.result) {
-            state.result->error("view.attribute.duplicate", "Attributes differing only by ASCII case are duplicate declarations.",
+            state.result->error("layout.attribute.duplicate", "Attributes differing only by ASCII case are duplicate declarations.",
                                 state.document->source, node->source.begin.line, node->source.begin.column);
         }
     }
 
     LayoutNode* next = node.get();
-    if (state.elements.empty()) state.document->root = std::move(node);
+    if (state.nodeStack.empty()) state.document->root = std::move(node);
     else {
         LayoutContent content;
         content.source.begin = next->source.begin;
-        content.element = std::move(node);
-        state.elements.back()->content.push_back(std::move(content));
+        content.node = std::move(node);
+        state.nodeStack.back()->content.push_back(std::move(content));
     }
-    state.elements.push_back(next);
+    state.nodeStack.push_back(next);
 }
 
 void XMLCALL endElement(void* user_data, const XML_Char*) {
     auto& state = *static_cast<ParserState*>(user_data);
-    if (state.elements.empty()) return;
-    LayoutNode* node = state.elements.back();
+    if (state.nodeStack.empty()) return;
+    LayoutNode* node = state.nodeStack.back();
     node->source.end = currentLocation(state.parser);
-    state.elements.pop_back();
-    if (!state.elements.empty() && !state.elements.back()->content.empty()) state.elements.back()->content.back().source.end = node->source.end;
+    state.nodeStack.pop_back();
+    if (!state.nodeStack.empty() && !state.nodeStack.back()->content.empty()) state.nodeStack.back()->content.back().source.end = node->source.end;
 }
 
 void XMLCALL appendText(void* user_data, const XML_Char* text, int length) {
     auto& state = *static_cast<ParserState*>(user_data);
-    if (state.elements.empty() || length <= 0) return;
-    LayoutNode& parent = *state.elements.back();
+    if (state.nodeStack.empty() || length <= 0) return;
+    LayoutNode& parent = *state.nodeStack.back();
     const SourceLocation begin = currentLocation(state.parser);
     if (!parent.content.empty() && parent.content.back().isText()) {
         parent.content.back().text.append(text, static_cast<std::size_t>(length));
@@ -124,7 +124,7 @@ void XMLCALL appendText(void* user_data, const XML_Char* text, int length) {
 LayoutDocumentParseResult LayoutDocumentParser::parse(const std::string& xml, const std::string& source) const {
     LayoutDocumentParseResult result;
     if (xml.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-        result.error("view.xml.invalid", "Radia UI XML is too large to parse.", source);
+        result.error("layout.xml.invalid", "Radia UI XML is too large to parse.", source);
         return result;
     }
 
@@ -134,7 +134,7 @@ LayoutDocumentParseResult LayoutDocumentParser::parse(const std::string& xml, co
     state.result = &result;
     state.parser = XML_ParserCreate(nullptr);
     if (!state.parser) {
-        result.error("view.xml.invalid", "Could not create the Radia UI XML parser.", source);
+        result.error("layout.xml.invalid", "Could not create the Radia UI XML parser.", source);
         return result;
     }
 
@@ -144,14 +144,14 @@ LayoutDocumentParseResult LayoutDocumentParser::parse(const std::string& xml, co
     const bool parsed = XML_Parse(state.parser, xml.data(), static_cast<int>(xml.size()), XML_TRUE) == XML_STATUS_OK;
     if (!parsed) {
         const XML_Error error = XML_GetErrorCode(state.parser);
-        result.error("view.xml.invalid", "Could not parse Radia UI XML: " + std::string(XML_ErrorString(error)) + ".", source,
+        result.error("layout.xml.invalid", "Could not parse Radia UI XML: " + std::string(XML_ErrorString(error)) + ".", source,
                      static_cast<std::size_t>(XML_GetCurrentLineNumber(state.parser)),
                      static_cast<std::size_t>(XML_GetCurrentColumnNumber(state.parser)) + 1);
     }
     XML_ParserFree(state.parser);
 
     if (parsed && state.document->root) result.document = std::move(state.document);
-    else if (parsed) result.error("view.xml.invalid", "Radia UI XML must contain one root element.", source);
+    else if (parsed) result.error("layout.xml.invalid", "Radia UI XML must contain one root element.", source);
     return result;
 }
 } // namespace rdui

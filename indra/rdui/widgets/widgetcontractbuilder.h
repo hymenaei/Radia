@@ -41,13 +41,13 @@ template<typename PartT, typename OwnerT, typename SlotT> CompositePartContract 
 
     CompositePartContract contract;
     const std::size_t separator = path.rfind("::");
-    if (separator != std::string::npos) contract.parent_path = path.substr(0, separator);
+    if (separator != std::string::npos) contract.parentPath = path.substr(0, separator);
     contract.path = std::move(path);
     contract.create = [] { return std::make_unique<PartT>(); };
     contract.bind = [slot](Widget& owner, Widget& part) {
-        OwnerT& typed_owner = static_cast<OwnerT&>(owner);
-        PartT& typed_part = static_cast<PartT&>(part);
-        (typed_owner.*slot).set(&typed_part);
+        OwnerT& typedOwner = static_cast<OwnerT&>(owner);
+        PartT& typedPart = static_cast<PartT&>(part);
+        (typedOwner.*slot).set(&typedPart);
     };
     return contract;
 }
@@ -62,11 +62,11 @@ inline WidgetAttributeContract allowedAttribute(std::string name) {
 template<typename WidgetT, typename SetterT> WidgetAttributeContract stringAttribute(std::initializer_list<std::string> names, SetterT setter) {
     WidgetAttributeContract contract;
     contract.names.assign(names.begin(), names.end());
-    contract.apply = [names = contract.names, setter](const LayoutElement& element, Widget& widget, ViewBuildResult&, const std::string&,
-                                                      const ViewBuildContext*) {
+    contract.apply = [names = contract.names, setter](const LayoutElement& element, Widget& widget, LayoutBuildResult&, const std::string&,
+                                                      const LayoutBuildContext*) {
         std::string value;
         for (const std::string& name : names) {
-            if (!readViewAttribute(element, name.c_str(), value)) continue;
+            if (!readLayoutAttribute(element, name.c_str(), value)) continue;
             (void)std::invoke(setter, static_cast<WidgetT&>(widget), std::move(value));
             return;
         }
@@ -90,10 +90,10 @@ template<typename WidgetT> WidgetAttributeContract stringAttribute(std::string n
 template<typename WidgetT, typename SetterT> WidgetAttributeContract booleanAttribute(std::string name, SetterT setter) {
     WidgetAttributeContract contract;
     contract.names.push_back(std::move(name));
-    contract.apply = [name = contract.names.front(), setter](const LayoutElement& element, Widget& widget, ViewBuildResult& result,
-                                                             const std::string& source, const ViewBuildContext*) {
+    contract.apply = [name = contract.names.front(), setter](const LayoutElement& element, Widget& widget, LayoutBuildResult& result,
+                                                             const std::string& source, const LayoutBuildContext*) {
         bool value = false;
-        if (readViewBoolean(element, name.c_str(), value, result, source)) (void)std::invoke(setter, static_cast<WidgetT&>(widget), value);
+        if (readLayoutBoolean(element, name.c_str(), value, result, source)) (void)std::invoke(setter, static_cast<WidgetT&>(widget), value);
     };
     return contract;
 }
@@ -105,16 +105,16 @@ template<typename WidgetT> WidgetAttributeContract booleanAttribute(std::string 
 template<typename WidgetT, typename SetterT> WidgetAttributeContract localizedStringAttribute(std::string name, SetterT setter) {
     WidgetAttributeContract contract;
     contract.names.push_back(std::move(name));
-    contract.apply = [name = contract.names.front(), setter](const LayoutElement& element, Widget& widget, ViewBuildResult& result,
-                                                             const std::string& source, const ViewBuildContext* context) {
+    contract.apply = [name = contract.names.front(), setter](const LayoutElement& element, Widget& widget, LayoutBuildResult& result,
+                                                             const std::string& source, const LayoutBuildContext* context) {
         std::string key;
-        if (!readViewAttribute(element, name.c_str(), key)) return;
+        if (!readLayoutAttribute(element, name.c_str(), key)) return;
         TextSource value = TextSource::text(key);
         if (context) {
             if (!context->hasLocalizationKey(key))
-                result.error("view.localization.missing", "Unknown localization key: " + key + ".", source, element.source().begin.line,
+                result.error("layout.localization.missing", "Unknown localization key: " + key + ".", source, element.source().begin.line,
                              element.source().begin.column);
-            value = context->localizedContent(key);
+            value = context->localizeContent(key);
         }
         (void)std::invoke(setter, static_cast<WidgetT&>(widget), std::move(value));
     };
@@ -127,8 +127,8 @@ template<typename WidgetT> WidgetAttributeContract localizedStringAttribute(std:
 
 template<typename WidgetT> class WidgetContractBuilder final {
 public:
-    explicit WidgetContractBuilder(std::string element) {
-        mContract.element = std::move(element);
+    explicit WidgetContractBuilder(std::string elementName) {
+        mContract.elementName = std::move(elementName);
         mContract.create = [] { return std::make_unique<WidgetT>(); };
     }
     WidgetContractBuilder(const WidgetContractBuilder&) = delete;
@@ -147,21 +147,21 @@ public:
     }
 
     template<typename ValidatorT> WidgetContractBuilder&& composition(ValidatorT validator) {
-        mContract.composition_behavior.validate = [validator = std::move(validator)](const LayoutElement& element, Widget& widget,
-                                                                                     const ViewScopeContext& scope, ViewBuildResult& result,
-                                                                                     const std::string& source) {
+        mContract.compositionBehavior.validate = [validator = std::move(validator)](const LayoutElement& element, Widget& widget,
+                                                                                    const WidgetScopeContext& scope, LayoutBuildResult& result,
+                                                                                    const std::string& source) {
             validator(element, static_cast<WidgetT&>(widget), scope, result, source);
         };
         return std::move(*this);
     }
 
-    WidgetContractBuilder&& actions(std::initializer_list<ActionEventKind> actions) {
-        mContract.supported_actions.assign(actions.begin(), actions.end());
+    WidgetContractBuilder&& events(std::initializer_list<WidgetEventKind> eventKinds) {
+        mContract.supportedEvents.assign(eventKinds.begin(), eventKinds.end());
         return std::move(*this);
     }
 
     WidgetContractBuilder&& state(WidgetState state) {
-        mContract.produced_states.push_back(state);
+        mContract.producedStates.push_back(state);
         return std::move(*this);
     }
 
@@ -171,13 +171,13 @@ public:
     }
 
     WidgetContractBuilder&& scopedOnly() {
-        mContract.scoped_only = true;
+        mContract.scopedOnly = true;
         return std::move(*this);
     }
 
-    WidgetContractBuilder&& resourceRoot(std::string expected_element = {}) {
-        if (expected_element.empty()) expected_element = mContract.element;
-        mContract.resource_root = ResourceRootContract{std::move(expected_element)};
+    WidgetContractBuilder&& resourceRoot(std::string expectedElementName = {}) {
+        if (expectedElementName.empty()) expectedElementName = mContract.elementName;
+        mContract.resourceRoot = ResourceRootContract{std::move(expectedElementName)};
         return std::move(*this);
     }
 
@@ -186,7 +186,7 @@ public:
         static_assert(std::is_same_v<OwnerT, WidgetT>);
         CompositePartContract part = detail::makeWidgetPart<PartT>(std::move(path), slot);
         part.eager = eager;
-        mContract.composite_parts.push_back(std::move(part));
+        mContract.compositeParts.push_back(std::move(part));
         return std::move(*this);
     }
 
@@ -195,47 +195,47 @@ public:
     }
 
     WidgetContractBuilder&& textChildren() {
-        mContract.content_behavior.mode = ViewTextContent::Children;
+        mContract.contentBehavior.mode = WidgetTextContentMode::TextChildren;
         return std::move(*this);
     }
 
     template<typename CreateT> WidgetContractBuilder&& textChildren(CreateT create) {
-        mContract.content_behavior.mode = ViewTextContent::Children;
-        mContract.content_behavior.create_text_child = [create = std::move(create)](TextSource content) -> std::unique_ptr<Widget> {
+        mContract.contentBehavior.mode = WidgetTextContentMode::TextChildren;
+        mContract.contentBehavior.createTextChild = [create = std::move(create)](TextSource content) -> std::unique_ptr<Widget> {
             return create(std::move(content));
         };
         return std::move(*this);
     }
 
     template<typename ApplyT> WidgetContractBuilder&& widgetText(ApplyT apply) {
-        mContract.content_behavior.mode = ViewTextContent::Widget;
-        mContract.content_behavior.apply_text = [apply = std::move(apply)](std::string value, Widget& widget, ViewBuildResult& result,
-                                                                           const std::string& source, const ViewBuildContext* context,
-                                                                           std::size_t line) {
+        mContract.contentBehavior.mode = WidgetTextContentMode::WidgetText;
+        mContract.contentBehavior.applyText = [apply = std::move(apply)](std::string value, Widget& widget, LayoutBuildResult& result,
+                                                                         const std::string& source, const LayoutBuildContext* context,
+                                                                         std::size_t line) {
             apply(std::move(value), static_cast<WidgetT&>(widget), result, source, context, line);
         };
         return std::move(*this);
     }
 
     template<typename ApplyT> WidgetContractBuilder&& inlineContent(std::initializer_list<InlineContentKind> accepted, ApplyT apply) {
-        mContract.content_behavior.mode = ViewTextContent::Inline;
-        mContract.content_behavior.accepted_inline_content.assign(accepted.begin(), accepted.end());
-        mContract.content_behavior.apply_inline_content = [apply = std::move(apply)](TextSource content, Widget& widget) {
+        mContract.contentBehavior.mode = WidgetTextContentMode::InlineContent;
+        mContract.contentBehavior.acceptedInlineContent.assign(accepted.begin(), accepted.end());
+        mContract.contentBehavior.applyInlineContent = [apply = std::move(apply)](TextSource content, Widget& widget) {
             apply(std::move(content), static_cast<WidgetT&>(widget));
         };
         return std::move(*this);
     }
 
     template<typename ApplyT>
-    WidgetContractBuilder&& scopedInlineContent(std::string element, std::initializer_list<InlineContentKind> accepted, ApplyT apply) {
+    WidgetContractBuilder&& scopedInlineContent(std::string elementName, std::initializer_list<InlineContentKind> accepted, ApplyT apply) {
         ScopedInlineContentContract contract;
-        contract.element = std::move(element);
+        contract.elementName = std::move(elementName);
         contract.accepted.assign(accepted.begin(), accepted.end());
-        contract.apply = [apply = std::move(apply)](TextSource content, Widget& widget, ViewBuildResult& result, const std::string& source,
+        contract.apply = [apply = std::move(apply)](TextSource content, Widget& widget, LayoutBuildResult& result, const std::string& source,
                                                     std::size_t line, std::size_t column) -> Widget* {
             return apply(std::move(content), static_cast<WidgetT&>(widget), result, source, line, column);
         };
-        mContract.content_behavior.scoped_inline_content.emplace(schemaNameKey(contract.element), std::move(contract));
+        mContract.contentBehavior.scopedInlineContent.emplace(schemaNameKey(contract.elementName), std::move(contract));
         return std::move(*this);
     }
 
@@ -255,20 +255,20 @@ public:
         for (const WidgetAttributeContract& attribute : mAttributes)
             mContract.attributes.insert(mContract.attributes.end(), attribute.names.begin(), attribute.names.end());
         if (!mAttributes.empty() || !mValidators.empty()) {
-            mContract.attribute_behavior.apply = [attributes = std::move(mAttributes), validators = std::move(mValidators)](
-                                                     const LayoutElement& element, Widget& widget, ViewBuildResult& result, const std::string& source,
-                                                     const ViewBuildContext* context) {
+            mContract.attributeBehavior.apply = [attributes = std::move(mAttributes), validators = std::move(mValidators)](
+                                                    const LayoutElement& element, Widget& widget, LayoutBuildResult& result,
+                                                    const std::string& source, const LayoutBuildContext* context) {
                 for (const WidgetAttributeContract& attribute : attributes)
                     if (attribute.apply) attribute.apply(element, widget, result, source, context);
                 for (const Validator& validator : validators) validator(element, static_cast<WidgetT&>(widget), result, source, context);
             };
         }
         for (const ChildContainer& container : mChildContainers)
-            mContract.children_behavior.part_attributes.emplace(schemaNameKey(container.name), container.attributes);
+            mContract.childrenBehavior.partAttributes.emplace(schemaNameKey(container.name), container.attributes);
         if (!mChildContainers.empty()) {
-            mContract.children_behavior.claim = [containers = std::move(mChildContainers)](const LayoutElement& child, Widget& widget,
-                                                                                           ViewBuildResult& result,
-                                                                                           const std::string& source) -> ChildClaim {
+            mContract.childrenBehavior.claim = [containers = std::move(mChildContainers)](const LayoutElement& child, Widget& widget,
+                                                                                          LayoutBuildResult& result,
+                                                                                          const std::string& source) -> ChildClaim {
                 for (const ChildContainer& container : containers) {
                     if (schemaNameKey(container.name) != schemaNameKey(child.name())) continue;
                     Widget* target = container.claim(child, static_cast<WidgetT&>(widget), result, source);
@@ -281,11 +281,11 @@ public:
     }
 
 private:
-    using Validator = std::function<void(const LayoutElement&, WidgetT&, ViewBuildResult&, const std::string&, const ViewBuildContext*)>;
+    using Validator = std::function<void(const LayoutElement&, WidgetT&, LayoutBuildResult&, const std::string&, const LayoutBuildContext*)>;
     struct ChildContainer {
         std::string name;
         std::vector<std::string> attributes;
-        std::function<Widget*(const LayoutElement&, WidgetT&, ViewBuildResult&, const std::string&)> claim;
+        std::function<Widget*(const LayoutElement&, WidgetT&, LayoutBuildResult&, const std::string&)> claim;
     };
 
     WidgetContract mContract;
@@ -295,8 +295,8 @@ private:
     bool mBuilt = false;
 };
 
-template<typename WidgetT> WidgetContractBuilder<WidgetT> defineWidget(std::string element) {
-    return WidgetContractBuilder<WidgetT>(std::move(element));
+template<typename WidgetT> WidgetContractBuilder<WidgetT> defineWidget(std::string elementName) {
+    return WidgetContractBuilder<WidgetT>(std::move(elementName));
 }
 } // namespace rdui
 #endif // RD_WIDGETS_WIDGETCONTRACTBUILDER_H

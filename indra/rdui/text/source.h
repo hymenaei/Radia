@@ -50,7 +50,7 @@ public:
     };
 
     struct Keybinding {
-        std::string binding;
+        std::string shortcutId;
         KeybindingPresentation presentation;
     };
 
@@ -64,9 +64,9 @@ public:
     using Value = std::variant<Literal, Localized, Container, Keybinding, Break, Link>;
 
     static TextSourceNode text(std::string value);
-    static TextSourceNode localized(LocalizationRequest request, InlineContent fallback);
+    static TextSourceNode fromLocalization(LocalizationRequest request, InlineContent fallback);
     static TextSourceNode container(InlineContentKind kind, std::vector<TextSourceNode> children);
-    static TextSourceNode kbd(std::string binding, KeybindingPresentation presentation = {});
+    static TextSourceNode kbd(std::string shortcutId, KeybindingPresentation presentation = {});
     static TextSourceNode br();
     static TextSourceNode link(std::string destination, std::vector<TextSourceNode> children);
 
@@ -85,7 +85,7 @@ public:
 
     static TextSource literal(InlineContent content);
     static TextSource text(std::string value);
-    static TextSource localized(LocalizationRequest request, InlineContent fallback);
+    static TextSource fromLocalization(LocalizationRequest request, InlineContent fallback);
 
     const std::vector<TextSourceNode>& nodes() const { return mNodes; }
     InlineContent materialize() const;

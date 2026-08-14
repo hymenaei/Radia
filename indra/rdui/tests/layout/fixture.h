@@ -37,34 +37,34 @@ namespace tut {
 struct LayoutCompilerFixture {
     std::map<std::string, std::string> resources;
 
-    rdui::LayoutDocumentMap documents(rdui::DiagnosticResult& diagnostics) const {
+    rdui::LayoutDocumentMap parseDocuments(rdui::DiagnosticResult& diagnostics) const {
         rdui::LayoutDocumentMap result;
-        for (const auto& [resource_id, source] : resources) {
-            rdui::LayoutDocumentParseResult parsed = rdui::LayoutDocumentParser().parse(source, resource_id);
+        for (const auto& [resourceId, sourceXml] : resources) {
+            rdui::LayoutDocumentParseResult parsed = rdui::LayoutDocumentParser().parse(sourceXml, resourceId);
             diagnostics.warnings.insert(diagnostics.warnings.end(), parsed.warnings.begin(), parsed.warnings.end());
             diagnostics.errors.insert(diagnostics.errors.end(), parsed.errors.begin(), parsed.errors.end());
-            if (parsed.document) result.emplace(resource_id, std::shared_ptr<const rdui::LayoutDocument>(std::move(parsed.document)));
+            if (parsed.document) result.emplace(resourceId, std::shared_ptr<const rdui::LayoutDocument>(std::move(parsed.document)));
         }
         return result;
     }
 
-    rdui::ViewBuildResult createFromResource(const std::string& resource_id) const {
-        rdui::ViewBuildResult result;
-        rdui::LayoutDocumentMap parsed = documents(result);
+    rdui::LayoutBuildResult buildWidgetTreeFromResource(const std::string& resourceId) const {
+        rdui::LayoutBuildResult result;
+        rdui::LayoutDocumentMap parsed = parseDocuments(result);
         if (result.hasErrors()) return result;
-        return rdui::LayoutResourceCompiler(&parsed).createFromResource(resource_id);
+        return rdui::LayoutResourceCompiler(&parsed).buildWidgetTreeFromResource(resourceId);
     }
 
-    rdui::ViewBuildResult createFromString(const std::string& xml, const std::string& source = {}) const {
-        rdui::ViewBuildResult result;
-        rdui::LayoutDocumentMap parsed = documents(result);
+    rdui::LayoutBuildResult buildWidgetTreeFromString(const std::string& xml, const std::string& sourceName = {}) const {
+        rdui::LayoutBuildResult result;
+        rdui::LayoutDocumentMap parsed = parseDocuments(result);
         if (result.hasErrors()) return result;
-        return rdui::LayoutResourceCompiler(&parsed).createFromString(xml, source);
+        return rdui::LayoutResourceCompiler(&parsed).buildWidgetTreeFromString(xml, sourceName);
     }
 
     rdui::DiagnosticResult validateWidgetDefaults(const std::string& element) const {
         rdui::DiagnosticResult result;
-        rdui::LayoutDocumentMap parsed = documents(result);
+        rdui::LayoutDocumentMap parsed = parseDocuments(result);
         if (result.hasErrors()) return result;
         return rdui::LayoutResourceCompiler(&parsed).validateWidgetDefaults(element);
     }

@@ -105,46 +105,46 @@ std::optional<std::vector<StyleDeclaration>> StyleModel::parseFontShorthand(cons
     if (tokens.size() < 2 || lower(tokens.back()) != "sans") return std::nullopt;
     tokens.pop_back();
 
-    std::optional<Length> line_height;
-    std::size_t size_index = tokens.size() - 1;
+    std::optional<Length> lineHeight;
+    std::size_t sizeIndex = tokens.size() - 1;
     const auto slash = std::find(tokens.begin(), tokens.end(), "/");
     if (slash != tokens.end()) {
-        const std::size_t slash_index = static_cast<std::size_t>(slash - tokens.begin());
-        if (slash_index == 0 || slash_index + 2 != tokens.size() || std::find(slash + 1, tokens.end(), "/") != tokens.end()) return std::nullopt;
-        size_index = slash_index - 1;
-        line_height = parseLineHeightValue(tokens.back());
-        if (!line_height) return std::nullopt;
+        const std::size_t slashIndex = static_cast<std::size_t>(slash - tokens.begin());
+        if (slashIndex == 0 || slashIndex + 2 != tokens.size() || std::find(slash + 1, tokens.end(), "/") != tokens.end()) return std::nullopt;
+        sizeIndex = slashIndex - 1;
+        lineHeight = parseLineHeightValue(tokens.back());
+        if (!lineHeight) return std::nullopt;
     }
 
-    const std::string size = lower(tokens[size_index]);
-    const float parsed_size = parseNumberValue(size, std::numeric_limits<float>::quiet_NaN());
-    if (!std::isfinite(parsed_size) || parsed_size < 0.f || endsWith(size, "%")) return std::nullopt;
+    const std::string size = lower(tokens[sizeIndex]);
+    const float parsedSize = parseNumberValue(size, std::numeric_limits<float>::quiet_NaN());
+    if (!std::isfinite(parsedSize) || parsedSize < 0.f || endsWith(size, "%")) return std::nullopt;
 
     bool italic = false;
     float weight = 400.f;
-    bool saw_style = false;
-    bool saw_weight = false;
-    for (std::size_t index = 0; index < size_index; ++index) {
+    bool sawStyle = false;
+    bool sawWeight = false;
+    for (std::size_t index = 0; index < sizeIndex; ++index) {
         const std::string token = lower(tokens[index]);
         if (token == "normal") {
-            if (!saw_style) saw_style = true;
-            else if (!saw_weight) saw_weight = true;
+            if (!sawStyle) sawStyle = true;
+            else if (!sawWeight) sawWeight = true;
             else return std::nullopt;
             continue;
         }
-        if (!saw_style) {
-            const std::optional<bool> parsed_style = parseFontStyleValue(token);
-            if (parsed_style) {
-                italic = *parsed_style;
-                saw_style = true;
+        if (!sawStyle) {
+            const std::optional<bool> parsedStyle = parseFontStyleValue(token);
+            if (parsedStyle) {
+                italic = *parsedStyle;
+                sawStyle = true;
                 continue;
             }
         }
-        if (!saw_weight) {
-            const std::optional<float> parsed_weight = parseFontWeightValue(token);
-            if (parsed_weight) {
-                weight = *parsed_weight;
-                saw_weight = true;
+        if (!sawWeight) {
+            const std::optional<float> parsedWeight = parseFontWeightValue(token);
+            if (parsedWeight) {
+                weight = *parsedWeight;
+                sawWeight = true;
                 continue;
             }
         }
@@ -154,8 +154,8 @@ std::optional<std::vector<StyleDeclaration>> StyleModel::parseFontShorthand(cons
     return makeDeclarations({
         {"font-style", italic},
         {"font-weight", weight},
-        {"font-size", parsed_size},
-        {"line-height", line_height},
+        {"font-size", parsedSize},
+        {"line-height", lineHeight},
         {"font-family", FontFamily::Sans},
     });
 }
@@ -168,10 +168,10 @@ struct detail::StyleCompileContext {
     const std::string& value;
     const std::string& selector;
     StyleSheetLoadResult& result;
-    const std::string& source_name;
+    const std::string& sourceName;
 
     CompileResult invalid() const {
-        result.error("stylesheet.property.value_invalid", "Invalid value for " + std::string(property.name) + ": " + value + ".", source_name);
+        result.error("stylesheet.property.value_invalid", "Invalid value for " + std::string(property.name) + ": " + value + ".", sourceName);
         return std::nullopt;
     }
 
@@ -196,43 +196,43 @@ struct detail::StyleCompileContext {
         return parsed;
     }
 
-    std::vector<std::string> tokens(bool split_slash = true) const { return detail::tokenizeTopLevel(value, split_slash); }
+    std::vector<std::string> tokens(bool splitSlash = true) const { return detail::tokenizeTopLevel(value, splitSlash); }
 };
 
 namespace {
 CompileResult compileShadow(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const auto parsed = model.parseShadows(value);
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileEffect(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const auto parsed = model.parseEffects(value);
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileOutline(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const auto parsed = model.parseOutline(value);
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compilePaint(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     if (const std::optional<Gradient> gradient = model.parseGradient(value)) return context.compiled(StylePaint{Color(), *gradient});
     const auto parsed = context.color();
     return parsed ? context.compiled(StylePaint{*parsed, std::nullopt}) : context.invalid();
 }
 
 CompileResult compileColor(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const auto parsed = context.color();
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileBorder(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const std::vector<std::string> tokens = context.tokens();
     if (tokens.size() != 2) return context.invalid();
     const auto width = context.number(tokens[0]);
@@ -244,7 +244,7 @@ CompileResult compileBorder(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileStroke(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const std::vector<std::string> tokens = context.tokens();
     if (tokens.size() != 2) return context.invalid();
     const auto width = context.number(tokens[0]);
@@ -254,27 +254,27 @@ CompileResult compileStroke(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileEdges(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const float nan = std::numeric_limits<float>::quiet_NaN();
     const EdgeInsets parsed = model.parseEdgeInsets(value, {nan, nan, nan, nan});
     return std::isfinite(parsed.top) ? context.compiled(parsed) : context.invalid();
 }
 
 CompileResult compileMargin(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const auto parsed = model.parseMargin(value);
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileGap(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     if (lower(trim(value)) == "auto") return context.compiled(GapValue::automatic());
     const auto parsed = context.number();
     return parsed && *parsed >= 0.f ? context.compiled(GapValue::fromPixels(*parsed)) : context.invalid();
 }
 
 CompileResult compileSize(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const std::vector<std::string> tokens = context.tokens();
     if (tokens.empty() || tokens.size() > 2) return context.invalid();
     const auto dimension = [&context](const std::string& raw) -> std::optional<Dimension> {
@@ -288,7 +288,7 @@ CompileResult compileSize(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileMinSize(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const std::vector<std::string> tokens = context.tokens();
     if (tokens.empty() || tokens.size() > 2) return context.invalid();
     const auto height = context.nonnegativeLength(tokens[0]);
@@ -298,36 +298,36 @@ CompileResult compileMinSize(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileStrokeLinecap(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     StrokeCap cap;
     return parseStrokeCap(value, cap) ? context.compiled(cap) : context.invalid();
 }
 
 CompileResult compileFontFamily(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     return lower(trim(value)) == "sans" ? context.compiled(FontFamily::Sans) : context.invalid();
 }
 
 CompileResult compileFont(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const auto parsed = model.parseFontShorthand(value);
     return parsed ? parsed : context.invalid();
 }
 
 CompileResult compileFontWeight(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const auto parsed = model.parseFontWeightValue(value);
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileFontStyle(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const auto parsed = model.parseFontStyleValue(value);
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileTextAlign(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const std::string alignment = lower(trim(value));
     std::optional<TextAlign> parsed;
     if (alignment == "left") parsed = TextAlign::Left;
@@ -339,7 +339,7 @@ CompileResult compileTextAlign(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileTextOverflow(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const std::string overflow = lower(trim(value));
     if (overflow == "clip") return context.compiled(TextOverflow::Clip);
     if (overflow == "ellipsis") return context.compiled(TextOverflow::Ellipsis);
@@ -348,7 +348,7 @@ CompileResult compileTextOverflow(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileTextWrap(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const std::string wrap = lower(trim(value));
     if (wrap == "wrap") return context.compiled(TextWrap::Wrap);
     if (wrap == "nowrap") return context.compiled(TextWrap::NoWrap);
@@ -356,7 +356,7 @@ CompileResult compileTextWrap(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileVerticalAlign(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const std::string alignment = lower(trim(value));
     std::optional<VerticalAlign> parsed;
     if (alignment == "top") parsed = VerticalAlign::Top;
@@ -366,7 +366,7 @@ CompileResult compileVerticalAlign(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileFlow(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const std::string flow = lower(trim(value));
     if (flow == "row") return context.compiled(Flow::Row);
     if (flow == "column") return context.compiled(Flow::Column);
@@ -374,11 +374,11 @@ CompileResult compileFlow(detail::StyleCompileContext& context) {
     const std::string target = selector.empty() ? std::string("*") : selector;
     if (flow == "grid") {
         result.warning("stylesheet.flow.unsupported", "flow: grid is not yet implemented (selector \"" + target + "\"); falling back to flow: free.",
-                       source_name);
+                       sourceName);
         return context.compiled(Flow::Free);
     }
     result.error("stylesheet.flow.unknown",
-                 "Unknown flow value \"" + value + "\" (selector \"" + target + "\"); expected free, row, column, or grid.", source_name);
+                 "Unknown flow value \"" + value + "\" (selector \"" + target + "\"); expected free, row, column, or grid.", sourceName);
     return std::nullopt;
 }
 
@@ -390,7 +390,7 @@ template<typename Enum, std::size_t Size> CompileResult compileAlignment(const d
 }
 
 CompileResult compileJustifyContent(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     static constexpr std::array<std::pair<std::string_view, JustifyContent>, 5> values{{
         {"start", JustifyContent::Start},
         {"left", JustifyContent::Left},
@@ -402,7 +402,7 @@ CompileResult compileJustifyContent(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileAlignItems(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     static constexpr std::array<std::pair<std::string_view, AlignItems>, 5> values{{
         {"normal", AlignItems::Normal},
         {"start", AlignItems::Start},
@@ -414,7 +414,7 @@ CompileResult compileAlignItems(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileAlignSelf(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     static constexpr std::array<std::pair<std::string_view, AlignSelf>, 5> values{{
         {"auto", AlignSelf::Auto},
         {"start", AlignSelf::Start},
@@ -426,7 +426,7 @@ CompileResult compileAlignSelf(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileFlex(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const std::vector<std::string> tokens = context.tokens();
     if (tokens.empty() || tokens.size() > 3) return context.invalid();
     const std::string keyword = lower(trim(value));
@@ -447,32 +447,32 @@ CompileResult compileFlex(detail::StyleCompileContext& context) {
 
     float grow = 1.f;
     float shrink = 1.f;
-    Dimension flex_basis = Dimension::fromLength(Length{});
+    Dimension flexBasis = Dimension::fromLength(Length{});
     if (tokens.size() == 1) {
         if (const auto parsed = nonnegativeNumber(tokens[0])) grow = *parsed;
-        else if (const auto parsed = basis(tokens[0])) flex_basis = *parsed;
+        else if (const auto parsed = basis(tokens[0])) flexBasis = *parsed;
         else return context.invalid();
     } else if (tokens.size() == 2) {
-        const auto parsed_grow = nonnegativeNumber(tokens[0]);
-        if (!parsed_grow) return context.invalid();
-        grow = *parsed_grow;
-        if (const auto parsed_shrink = nonnegativeNumber(tokens[1])) shrink = *parsed_shrink;
-        else if (const auto parsed_basis = basis(tokens[1])) flex_basis = *parsed_basis;
+        const auto parsedGrow = nonnegativeNumber(tokens[0]);
+        if (!parsedGrow) return context.invalid();
+        grow = *parsedGrow;
+        if (const auto parsedShrink = nonnegativeNumber(tokens[1])) shrink = *parsedShrink;
+        else if (const auto parsedBasis = basis(tokens[1])) flexBasis = *parsedBasis;
         else return context.invalid();
     } else {
-        const auto parsed_grow = nonnegativeNumber(tokens[0]);
-        const auto parsed_shrink = nonnegativeNumber(tokens[1]);
-        const auto parsed_basis = basis(tokens[2]);
-        if (!parsed_grow || !parsed_shrink || !parsed_basis) return context.invalid();
-        grow = *parsed_grow;
-        shrink = *parsed_shrink;
-        flex_basis = *parsed_basis;
+        const auto parsedGrow = nonnegativeNumber(tokens[0]);
+        const auto parsedShrink = nonnegativeNumber(tokens[1]);
+        const auto parsedBasis = basis(tokens[2]);
+        if (!parsedGrow || !parsedShrink || !parsedBasis) return context.invalid();
+        grow = *parsedGrow;
+        shrink = *parsedShrink;
+        flexBasis = *parsedBasis;
     }
-    return makeDeclarations({{"flex-grow", grow}, {"flex-shrink", shrink}, {"flex-basis", flex_basis}});
+    return makeDeclarations({{"flex-grow", grow}, {"flex-shrink", shrink}, {"flex-basis", flexBasis}});
 }
 
 CompileResult compilePointerEvents(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     static constexpr std::array<std::pair<std::string_view, PointerEvents>, 3> values{{
         {"auto", PointerEvents::Auto},
         {"none", PointerEvents::PassThrough},
@@ -489,7 +489,7 @@ std::optional<Overflow> parseOverflow(const std::string& raw) {
 }
 
 CompileResult compileOverflow(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const std::vector<std::string> tokens = context.tokens();
     if (tokens.empty() || tokens.size() > 2) return context.invalid();
     const auto horizontal = parseOverflow(tokens[0]);
@@ -499,27 +499,27 @@ CompileResult compileOverflow(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileOverflowAxis(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const auto parsed = parseOverflow(value);
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileOrder(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const std::string raw = lower(trim(value));
     const auto parsed = context.number();
-    const double numeric_order = parsed ? static_cast<double>(*parsed) : 0.0;
+    const double numericOrder = parsed ? static_cast<double>(*parsed) : 0.0;
     if (!parsed
         || endsWith(raw, "px")
         || std::trunc(*parsed) != *parsed
-        || numeric_order < static_cast<double>(std::numeric_limits<int>::min())
-        || numeric_order > static_cast<double>(std::numeric_limits<int>::max()))
+        || numericOrder < static_cast<double>(std::numeric_limits<int>::min())
+        || numericOrder > static_cast<double>(std::numeric_limits<int>::max()))
         return context.invalid();
     return context.compiled(static_cast<int>(*parsed));
 }
 
 CompileResult compileCursor(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     static constexpr std::array<std::pair<std::string_view, CursorStyle>, 35> values{{
         {"auto", CursorStyle::Auto},
         {"default", CursorStyle::Default},
@@ -561,7 +561,7 @@ CompileResult compileCursor(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileDimension(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     if (lower(trim(value)) == "auto") return context.compiled(Dimension());
     const auto parsed = context.length();
     if (!parsed || parsed->pixels < 0.f || parsed->percent < 0.f) return context.invalid();
@@ -569,25 +569,25 @@ CompileResult compileDimension(detail::StyleCompileContext& context) {
 }
 
 CompileResult compilePosition(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const auto parsed = context.length();
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileNonnegativeLength(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const auto parsed = context.nonnegativeLength(value);
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileNonnegativeNumber(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const auto parsed = context.number();
     return parsed && *parsed >= 0.f ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileUnitlessNonnegativeNumber(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const std::string raw = lower(trim(value));
     if (endsWith(raw, "px") || endsWith(raw, "%")) return context.invalid();
     const auto parsed = context.number();
@@ -595,25 +595,25 @@ CompileResult compileUnitlessNonnegativeNumber(detail::StyleCompileContext& cont
 }
 
 CompileResult compileOpacity(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const auto parsed = context.number();
     return parsed && *parsed >= 0.f && *parsed <= 1.f ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileStrokeWidth(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const auto parsed = context.number();
     return parsed && *parsed >= 0.f ? context.compiled(Length{*parsed}) : context.invalid();
 }
 
 CompileResult compileLineHeight(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     const auto parsed = model.parseLineHeightValue(value);
     return parsed ? context.compiled(std::optional<Length>(*parsed)) : context.invalid();
 }
 
 CompileResult compileSpacing(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, source_name] = context;
+    auto& [model, property, value, selector, result, sourceName] = context;
     if (lower(trim(value)) == "normal") return context.compiled(Length{});
     const auto parsed = context.length();
     return parsed ? context.compiled(*parsed) : context.invalid();
@@ -623,12 +623,12 @@ CompileResult compileSpacing(detail::StyleCompileContext& context) {
 
 std::optional<std::vector<StyleDeclaration>> StyleModel::compileDeclaration(const detail::StylePropertyDefinition& property, const std::string& value,
                                                                             const std::string& selector, StyleSheetLoadResult& result,
-                                                                            const std::string& source_name) const {
+                                                                            const std::string& sourceName) const {
     if (!property.compile) {
-        result.error("stylesheet.property.value_invalid", "Property has no compiler: " + std::string(property.name) + ".", source_name);
+        result.error("stylesheet.property.value_invalid", "Property has no compiler: " + std::string(property.name) + ".", sourceName);
         return std::nullopt;
     }
-    detail::StyleCompileContext context{*this, property, value, selector, result, source_name};
+    detail::StyleCompileContext context{*this, property, value, selector, result, sourceName};
     return property.compile(context);
 }
 
@@ -645,11 +645,11 @@ template<auto Member> void applyLengthToOptional(Style& style, const StyleValue&
 
 template<InheritedStyleProperty Property, auto Member> void inheritMember(Style& style, const Style& parent) {
     const auto flag = static_cast<InheritedStyleProperties>(Property);
-    if ((style.specified_inherited & flag) == 0) style.*Member = parent.*Member;
+    if ((style.specifiedInheritedProperties & flag) == 0) style.*Member = parent.*Member;
 }
 
 template<InheritedStyleProperty Property> void specifyInherited(Style& style) {
-    style.specified_inherited |= static_cast<InheritedStyleProperties>(Property);
+    style.specifiedInheritedProperties |= static_cast<InheritedStyleProperties>(Property);
 }
 
 void applyPaint(Color& color, std::optional<Gradient>& gradient, const StyleValue& value) {
@@ -659,13 +659,13 @@ void applyPaint(Color& color, std::optional<Gradient>& gradient, const StyleValu
 }
 
 void applyBackground(Style& style, const StyleValue& value) {
-    applyPaint(style.background_color, style.background_gradient, value);
+    applyPaint(style.backgroundColor, style.backgroundGradient, value);
 }
 void applyBorder(Style& style, const StyleValue& value) {
     const StyleBorder& border = std::get<StyleBorder>(value);
-    style.border_width = {border.width, border.width, border.width, border.width};
-    style.border_color = border.paint.gradient ? Color(0.f, 0.f, 0.f, 0.f) : border.paint.color;
-    style.border_gradient = border.paint.gradient;
+    style.borderWidth = {border.width, border.width, border.width, border.width};
+    style.borderColor = border.paint.gradient ? Color(0.f, 0.f, 0.f, 0.f) : border.paint.color;
+    style.borderGradient = border.paint.gradient;
 }
 void applySize(Style& style, const StyleValue& value) {
     const StyleSize& size = std::get<StyleSize>(value);
@@ -674,39 +674,39 @@ void applySize(Style& style, const StyleValue& value) {
 }
 void applyFlow(Style& style, const StyleValue& value) {
     style.flow = std::get<Flow>(value);
-    style.flow_set = true;
+    style.flowSet = true;
 }
 void applyJustifyContent(Style& style, const StyleValue& value) {
-    style.justify_content = std::get<JustifyContent>(value);
-    style.justify_content_set = true;
+    style.justifyContent = std::get<JustifyContent>(value);
+    style.justifyContentSet = true;
 }
 void applyVerticalAlign(Style& style, const StyleValue& value) {
-    style.vertical_align = std::get<VerticalAlign>(value);
-    style.vertical_align_set = true;
+    style.verticalAlign = std::get<VerticalAlign>(value);
+    style.verticalAlignSet = true;
 }
 void applyFontWeight(Style& style, const StyleValue& value) {
-    style.font_weight = static_cast<U16>(std::get<float>(value));
+    style.fontWeight = static_cast<U16>(std::get<float>(value));
 }
 void applyIconStroke(Style& style, const StyleValue& value) {
     const StyleIconStroke& stroke = std::get<StyleIconStroke>(value);
-    style.svg_stroke_width = Length{stroke.width};
-    style.icon_stroke_color = stroke.color;
+    style.svgStrokeWidth = Length{stroke.width};
+    style.iconStrokeColor = stroke.color;
 }
 void applyIconStrokeLinecap(Style& style, const StyleValue& value) {
-    style.svg_stroke_cap = std::get<StrokeCap>(value);
-    style.svg_stroke_cap_set = true;
+    style.svgStrokeCap = std::get<StrokeCap>(value);
+    style.svgStrokeCapSet = true;
 }
 void applyIconStrokeWidth(Style& style, const StyleValue& value) {
-    style.svg_stroke_width = std::get<Length>(value);
+    style.svgStrokeWidth = std::get<Length>(value);
 }
 
 const detail::StylePropertyDefinition PROPERTY_DEFINITIONS[] = {
     {"background-color", compilePaint, applyBackground, nullptr, nullptr, StylePropertyImpact::Paint},
     {"border", compileBorder, applyBorder, nullptr, nullptr, StylePropertyImpact::Layout | StylePropertyImpact::Paint},
-    {"border-color", compilePaint, [](Style& style, const StyleValue& value) { applyPaint(style.border_color, style.border_gradient, value); },
-     nullptr, nullptr, StylePropertyImpact::Paint},
-    {"border-radius", compileNonnegativeNumber, applyMember<&Style::border_radius>, nullptr, nullptr, StylePropertyImpact::Paint},
-    {"border-width", compileEdges, applyMember<&Style::border_width>, nullptr, nullptr, StylePropertyImpact::Layout | StylePropertyImpact::Paint},
+    {"border-color", compilePaint, [](Style& style, const StyleValue& value) { applyPaint(style.borderColor, style.borderGradient, value); }, nullptr,
+     nullptr, StylePropertyImpact::Paint},
+    {"border-radius", compileNonnegativeNumber, applyMember<&Style::borderRadius>, nullptr, nullptr, StylePropertyImpact::Paint},
+    {"border-width", compileEdges, applyMember<&Style::borderWidth>, nullptr, nullptr, StylePropertyImpact::Layout | StylePropertyImpact::Paint},
     {"bottom", compilePosition, applyLengthToOptional<&Style::bottom>},
     {"cursor", compileCursor, applyMember<&Style::cursor>, specifyInherited<InheritedStyleProperty::Cursor>,
      inheritMember<InheritedStyleProperty::Cursor, &Style::cursor>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited},
@@ -714,57 +714,57 @@ const detail::StylePropertyDefinition PROPERTY_DEFINITIONS[] = {
     {"height", compileDimension, applyMember<&Style::height>},
     {"left", compilePosition, applyLengthToOptional<&Style::left>},
     {"margin", compileMargin, applyMember<&Style::margin>},
-    {"min-height", compileNonnegativeLength, applyLengthToOptional<&Style::min_height>},
+    {"min-height", compileNonnegativeLength, applyLengthToOptional<&Style::minHeight>},
     {"min-size", compileMinSize},
-    {"min-width", compileNonnegativeLength, applyLengthToOptional<&Style::min_width>},
+    {"min-width", compileNonnegativeLength, applyLengthToOptional<&Style::minWidth>},
     {"opacity", compileOpacity, applyMember<&Style::opacity>, nullptr, nullptr, StylePropertyImpact::Paint},
     {"outline", compileOutline, applyMember<&Style::outline>, nullptr, nullptr, StylePropertyImpact::Paint},
     {"overflow", compileOverflow, nullptr, nullptr, nullptr, StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"overflow-x", compileOverflowAxis, applyMember<&Style::overflow_x>, nullptr, nullptr, StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"overflow-y", compileOverflowAxis, applyMember<&Style::overflow_y>, nullptr, nullptr, StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"overflow-x", compileOverflowAxis, applyMember<&Style::overflowX>, nullptr, nullptr, StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"overflow-y", compileOverflowAxis, applyMember<&Style::overflowY>, nullptr, nullptr, StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"padding", compileEdges, applyMember<&Style::padding>},
-    {"pointer-events", compilePointerEvents, applyMember<&Style::pointer_events>, nullptr, nullptr,
+    {"pointer-events", compilePointerEvents, applyMember<&Style::pointerEvents>, nullptr, nullptr,
      StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"right", compilePosition, applyLengthToOptional<&Style::right>},
     {"shadow", compileShadow, applyMember<&Style::shadows>, nullptr, nullptr, StylePropertyImpact::Paint},
     {"size", compileSize, applySize},
     {"top", compilePosition, applyLengthToOptional<&Style::top>},
     {"width", compileDimension, applyMember<&Style::width>},
-    {"align-items", compileAlignItems, applyMember<&Style::align_items>},
+    {"align-items", compileAlignItems, applyMember<&Style::alignItems>},
     {"flow", compileFlow, applyFlow},
     {"gap", compileGap, applyMember<&Style::gap>},
     {"justify-content", compileJustifyContent, applyJustifyContent},
-    {"align-self", compileAlignSelf, applyMember<&Style::align_self>},
+    {"align-self", compileAlignSelf, applyMember<&Style::alignSelf>},
     {"flex", compileFlex},
-    {"flex-basis", compileDimension, applyMember<&Style::flex_basis>},
-    {"flex-grow", compileUnitlessNonnegativeNumber, applyMember<&Style::flex_grow>},
-    {"flex-shrink", compileUnitlessNonnegativeNumber, applyMember<&Style::flex_shrink>},
+    {"flex-basis", compileDimension, applyMember<&Style::flexBasis>},
+    {"flex-grow", compileUnitlessNonnegativeNumber, applyMember<&Style::flexGrow>},
+    {"flex-shrink", compileUnitlessNonnegativeNumber, applyMember<&Style::flexShrink>},
     {"order", compileOrder, applyMember<&Style::order>},
     {"font", compileFont},
-    {"font-family", compileFontFamily, applyMember<&Style::font_family>, specifyInherited<InheritedStyleProperty::FontFamily>,
-     inheritMember<InheritedStyleProperty::FontFamily, &Style::font_family>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
-    {"font-size", compileNonnegativeNumber, applyMember<&Style::font_size>, specifyInherited<InheritedStyleProperty::FontSize>,
-     inheritMember<InheritedStyleProperty::FontSize, &Style::font_size>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
-    {"font-style", compileFontStyle, applyMember<&Style::font_italic>, specifyInherited<InheritedStyleProperty::FontStyle>,
-     inheritMember<InheritedStyleProperty::FontStyle, &Style::font_italic>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
+    {"font-family", compileFontFamily, applyMember<&Style::fontFamily>, specifyInherited<InheritedStyleProperty::FontFamily>,
+     inheritMember<InheritedStyleProperty::FontFamily, &Style::fontFamily>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
+    {"font-size", compileNonnegativeNumber, applyMember<&Style::fontSize>, specifyInherited<InheritedStyleProperty::FontSize>,
+     inheritMember<InheritedStyleProperty::FontSize, &Style::fontSize>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
+    {"font-style", compileFontStyle, applyMember<&Style::fontItalic>, specifyInherited<InheritedStyleProperty::FontStyle>,
+     inheritMember<InheritedStyleProperty::FontStyle, &Style::fontItalic>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
     {"font-weight", compileFontWeight, applyFontWeight, specifyInherited<InheritedStyleProperty::FontWeight>,
-     inheritMember<InheritedStyleProperty::FontWeight, &Style::font_weight>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
-    {"line-height", compileLineHeight, applyMember<&Style::line_height>, specifyInherited<InheritedStyleProperty::LineHeight>,
-     inheritMember<InheritedStyleProperty::LineHeight, &Style::line_height>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
-    {"letter-spacing", compileSpacing, applyMember<&Style::letter_spacing>, specifyInherited<InheritedStyleProperty::LetterSpacing>,
-     inheritMember<InheritedStyleProperty::LetterSpacing, &Style::letter_spacing>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
-    {"word-spacing", compileSpacing, applyMember<&Style::word_spacing>, specifyInherited<InheritedStyleProperty::WordSpacing>,
-     inheritMember<InheritedStyleProperty::WordSpacing, &Style::word_spacing>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
-    {"text-align", compileTextAlign, applyMember<&Style::text_align>, specifyInherited<InheritedStyleProperty::TextAlign>,
-     inheritMember<InheritedStyleProperty::TextAlign, &Style::text_align>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited},
-    {"text-color", compileColor, applyMember<&Style::text_color>, specifyInherited<InheritedStyleProperty::TextColor>,
-     inheritMember<InheritedStyleProperty::TextColor, &Style::text_color>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited},
-    {"text-overflow", compileTextOverflow, applyMember<&Style::text_overflow>, nullptr, nullptr, StylePropertyImpact::Paint},
-    {"text-wrap", compileTextWrap, applyMember<&Style::text_wrap>, specifyInherited<InheritedStyleProperty::TextWrap>,
-     inheritMember<InheritedStyleProperty::TextWrap, &Style::text_wrap>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
+     inheritMember<InheritedStyleProperty::FontWeight, &Style::fontWeight>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
+    {"line-height", compileLineHeight, applyMember<&Style::lineHeight>, specifyInherited<InheritedStyleProperty::LineHeight>,
+     inheritMember<InheritedStyleProperty::LineHeight, &Style::lineHeight>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
+    {"letter-spacing", compileSpacing, applyMember<&Style::letterSpacing>, specifyInherited<InheritedStyleProperty::LetterSpacing>,
+     inheritMember<InheritedStyleProperty::LetterSpacing, &Style::letterSpacing>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
+    {"word-spacing", compileSpacing, applyMember<&Style::wordSpacing>, specifyInherited<InheritedStyleProperty::WordSpacing>,
+     inheritMember<InheritedStyleProperty::WordSpacing, &Style::wordSpacing>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
+    {"text-align", compileTextAlign, applyMember<&Style::textAlign>, specifyInherited<InheritedStyleProperty::TextAlign>,
+     inheritMember<InheritedStyleProperty::TextAlign, &Style::textAlign>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited},
+    {"text-color", compileColor, applyMember<&Style::textColor>, specifyInherited<InheritedStyleProperty::TextColor>,
+     inheritMember<InheritedStyleProperty::TextColor, &Style::textColor>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited},
+    {"text-overflow", compileTextOverflow, applyMember<&Style::textOverflow>, nullptr, nullptr, StylePropertyImpact::Paint},
+    {"text-wrap", compileTextWrap, applyMember<&Style::textWrap>, specifyInherited<InheritedStyleProperty::TextWrap>,
+     inheritMember<InheritedStyleProperty::TextWrap, &Style::textWrap>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
     {"vertical-align", compileVerticalAlign, applyVerticalAlign},
     {"stroke", compileStroke, applyIconStroke, nullptr, nullptr, StylePropertyImpact::Paint},
-    {"stroke-color", compileColor, applyMember<&Style::icon_stroke_color>, nullptr, nullptr, StylePropertyImpact::Paint},
+    {"stroke-color", compileColor, applyMember<&Style::iconStrokeColor>, nullptr, nullptr, StylePropertyImpact::Paint},
     {"stroke-linecap", compileStrokeLinecap, applyIconStrokeLinecap, nullptr, nullptr, StylePropertyImpact::Paint},
     {"stroke-width", compileStrokeWidth, applyIconStrokeWidth, nullptr, nullptr, StylePropertyImpact::Paint},
 };

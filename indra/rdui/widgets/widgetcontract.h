@@ -34,9 +34,9 @@
 #include <utility>
 #include <vector>
 #include "diagnostic.h"
+#include "layout/buildresult.h"
 #include "layout/document.h"
 #include "layout/schema.h"
-#include "layout/viewresult.h"
 #include "localization/localization.h"
 #include "text/inlinecontent.h"
 #include "text/source.h"
@@ -45,20 +45,20 @@
 namespace rdui {
 class Label;
 
-class ViewBuildContext {
+class LayoutBuildContext {
 public:
-    ViewBuildContext(const LocalizationCatalog& localization, std::string locale) : mLocalization(localization), mLocale(std::move(locale)) {}
+    LayoutBuildContext(const LocalizationCatalog& localization, std::string locale) : mLocalization(localization), mLocale(std::move(locale)) {}
 
-    bool hasLocalizationKey(const std::string& id) const { return mLocalization.containsDefaultString(id); }
+    bool hasLocalizationKey(const std::string& key) const { return mLocalization.containsDefaultString(key); }
 
-    std::string resolveText(const std::string& id) const { return mLocalization.get(mLocale, id); }
+    std::string resolveText(const std::string& key) const { return mLocalization.get(mLocale, key); }
 
     InlineContent resolveContent(const LocalizationRequest& request) const { return mLocalization.resolve(mLocale, request); }
 
-    TextSource localizedContent(std::string id) const {
-        LocalizationRequest request = LocalizationRequest::text(std::move(id));
+    TextSource localizeContent(std::string key) const {
+        LocalizationRequest request = LocalizationRequest::text(std::move(key));
         InlineContent content = resolveContent(request);
-        return TextSource::localized(std::move(request), std::move(content));
+        return TextSource::fromLocalization(std::move(request), std::move(content));
     }
 
 private:
@@ -66,17 +66,17 @@ private:
     std::string mLocale;
 };
 
-bool readViewAttribute(const LayoutElement& element, const char* name, std::string& value);
-bool readViewBoolean(const LayoutElement& element, const char* name, bool& value, ViewBuildResult& result, const std::string& source);
-const WidgetContract* findWidgetContract(const std::string& element);
+bool readLayoutAttribute(const LayoutElement& element, const char* name, std::string& value);
+bool readLayoutBoolean(const LayoutElement& element, const char* name, bool& value, LayoutBuildResult& result, const std::string& source);
+const WidgetContract* findWidgetContract(const std::string& elementName);
 const CompositePartContract* findCompositePartContract(const WidgetContract& widget, const std::vector<std::string>& parts);
 bool producesState(const WidgetContract& widget, WidgetState state);
 bool producesState(const CompositePartContract& part, WidgetState state);
-const char* actionAttribute(ActionEventKind kind);
+const char* eventAttribute(WidgetEventKind kind);
 namespace detail {
 class WidgetCompilerAccess {
 public:
-    static void setStyleIdentity(Widget& widget, std::string element, std::string part);
+    static void setStyleIdentity(Widget& widget, std::string elementName, std::string part);
     static void setIdScopeRoot(Widget& widget);
     static void setState(Widget& widget, WidgetState state, bool enabled);
     static const std::string& labelTargetId(const Label& label);
@@ -90,11 +90,11 @@ void instantiateCompositeParts(Widget& owner, const WidgetContract& contract);
 Widget* instantiateCompositePart(Widget& owner, const WidgetContract& contract, const std::string& path);
 } // namespace detail
 
-TextSource localizedViewText(std::string value, ViewBuildResult& result, const std::string& source, const ViewBuildContext* context,
-                             std::size_t line = 0);
-void validateViewAttributes(const LayoutElement& element, const std::vector<std::string>& widget_attributes, ViewBuildResult& result,
-                            const std::string& source);
-void applyCommonViewAttributes(const LayoutElement& element, Widget& widget, ViewBuildResult& result, const std::string& source,
-                               const std::vector<ActionEventKind>& supported_actions = {});
+TextSource localizedLayoutText(std::string value, LayoutBuildResult& result, const std::string& source, const LayoutBuildContext* context,
+                               std::size_t line = 0);
+void validateWidgetAttributes(const LayoutElement& element, const std::vector<std::string>& widgetAttributes, LayoutBuildResult& result,
+                              const std::string& source);
+void applyCommonWidgetAttributes(const LayoutElement& element, Widget& widget, LayoutBuildResult& result, const std::string& source,
+                                 const std::vector<WidgetEventKind>& supportedEvents = {});
 } // namespace rdui
 #endif // RD_WIDGETS_WIDGETCONTRACT_H

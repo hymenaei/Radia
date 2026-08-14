@@ -36,7 +36,7 @@ struct SkinSnapshotResult : DiagnosticResult {
     bool ok() const { return !hasErrors(); }
 
     ResourceSnapshot snapshot;
-    std::string skin_id;
+    std::string skinId;
 };
 
 class SkinSnapshotSource {
@@ -47,7 +47,7 @@ public:
 
 class SkinResolver final {
 public:
-    SkinSnapshotResult resolve(const std::filesystem::path& selected_root, const std::vector<std::filesystem::path>& installed_roots) const;
+    SkinSnapshotResult resolve(const std::filesystem::path& selectedRoot, const std::vector<std::filesystem::path>& installedRoots) const;
 };
 } // namespace rdui::viewer
 #endif // RD_SKIN_RESOLVER_H

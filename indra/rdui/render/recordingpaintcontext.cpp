@@ -45,7 +45,7 @@ void RecordingPaintContext::endFrame() {
 
 void RecordingPaintContext::pushClip(const Rect& rect, float scale, ClipAxes axes) {
     PaintCommand command{PaintCommandKind::PushClip, rect, {}, {}, scale};
-    command.clip_axes = axes;
+    command.clipAxes = axes;
     mCommands.push_back(std::move(command));
     ++mClipDepth;
     mMaxClipDepth = std::max(mMaxClipDepth, mClipDepth);
@@ -64,9 +64,9 @@ void RecordingPaintContext::endEffects() {
     mCommands.push_back({PaintCommandKind::EndEffects});
 }
 
-void RecordingPaintContext::paintBox(const Rect& rect, const Style& style, std::optional<TopBorderGap> top_border_gap) {
+void RecordingPaintContext::paintBox(const Rect& rect, const Style& style, std::optional<TopBorderGap> topBorderGap) {
     PaintCommand command{PaintCommandKind::Box, rect, style};
-    command.top_border_gap = top_border_gap;
+    command.topBorderGap = topBorderGap;
     mCommands.push_back(std::move(command));
 }
 

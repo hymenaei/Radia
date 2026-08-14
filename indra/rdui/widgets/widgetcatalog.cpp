@@ -42,7 +42,7 @@ const std::unordered_map<std::string, WidgetContract>& builtInWidgetContracts() 
         std::unordered_map<std::string, WidgetContract> result;
         auto add = [&result](WidgetContract contract) {
             detail::prepareCompositeTopology(contract);
-            const std::string key = schemaNameKey(contract.element);
+            const std::string key = schemaNameKey(contract.elementName);
             result.emplace(key, std::move(contract));
         };
         add(detail::buttonContract());

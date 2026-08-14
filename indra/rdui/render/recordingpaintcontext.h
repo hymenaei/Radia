@@ -40,13 +40,13 @@ struct PaintCommand {
     Style style;
     std::string value;
     float scale = 1.f;
-    ClipAxes clip_axes = ClipAxes::Both;
-    std::optional<TopBorderGap> top_border_gap;
+    ClipAxes clipAxes = ClipAxes::Both;
+    std::optional<TopBorderGap> topBorderGap;
 };
 
 class RecordingPaintContext final : public PaintContext {
 public:
-    explicit RecordingPaintContext(const TextMetrics& text_metrics = fixedTextMetrics()) : mTextMetrics(text_metrics) {}
+    explicit RecordingPaintContext(const TextMetrics& textMetrics = fixedTextMetrics()) : mTextMetrics(textMetrics) {}
 
     Vec2 measureText(const std::string& text, const Style& style) const override;
     float usedLetterSpacing(const Style& style) const override;
@@ -57,7 +57,7 @@ public:
     void popClip() override;
     void beginEffects(const Rect& rect, const Style& style, float scale) override;
     void endEffects() override;
-    void paintBox(const Rect& rect, const Style& style, std::optional<TopBorderGap> top_border_gap = std::nullopt) override;
+    void paintBox(const Rect& rect, const Style& style, std::optional<TopBorderGap> topBorderGap = std::nullopt) override;
     void paintText(const std::string& text, const Rect& rect, const Style& style) override;
     void paintIcon(const std::string& name, const Rect& rect, const Style& style, float scale) override;
 

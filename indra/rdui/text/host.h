@@ -54,7 +54,7 @@ public:
     bool resolveKeybindings(const std::function<KeybindingPresentation(const std::string&)>& resolve);
 
     Vec2 measure(const TextMetrics& metrics, const Style& style, const StyleSheet& theme, const Widget& owner,
-                 std::optional<float> resolved_width = std::nullopt) const;
+                 std::optional<float> resolvedWidth = std::nullopt) const;
     void paint(PaintContext& context, const Rect& rect, const Style& style, const StyleSheet* theme, const Widget& owner) const;
 
 private:
@@ -62,7 +62,7 @@ private:
     const std::vector<detail::TextLine>& cachedLines(const TextMetrics& metrics, const Style& style, const StyleSheet* theme,
                                                      const Widget& owner) const;
     const detail::TextLayout& cachedLayout(const TextMetrics& metrics, const Style& style, const StyleSheet* theme, const Widget& owner,
-                                           std::optional<float> available_width, bool visual_order, bool apply_overflow) const;
+                                           std::optional<float> availableWidth, bool visualOrder, bool applyOverflow) const;
 
     TextSource mSource;
     InlineContent mContent;

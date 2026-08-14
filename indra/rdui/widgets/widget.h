@@ -33,16 +33,24 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <vector>
-#include "action.h"
 #include "event.h"
+#include "eventcall.h"
+#include "text/source.h"
 #include "types.h"
+#include "widgetevent.h"
 
 namespace rdui {
-enum class Visibility : uint8_t { Visible, Hidden, Collapsed };
-
-enum class LayoutInvalidationReason : uint8_t { NoInvalidation = 0, Measure = 1 << 0, Arrange = 1 << 1, Style = 1 << 2, Text = 1 << 3, Paint = 1 << 4 };
+enum class LayoutInvalidationReason : uint8_t {
+    NoInvalidation = 0,
+    Measure = 1 << 0,
+    Arrange = 1 << 1,
+    Style = 1 << 2,
+    Text = 1 << 3,
+    Paint = 1 << 4
+};
 
 class InvalidationFlags {
 public:
@@ -66,8 +74,8 @@ struct IntrinsicSizeConstraints {
     std::optional<float> height;
 
     IntrinsicSizeConstraints() = default;
-    IntrinsicSizeConstraints(std::optional<float> constrained_width, std::optional<float> constrained_height)
-        : width(constrained_width), height(constrained_height) {}
+    IntrinsicSizeConstraints(std::optional<float> constrainedWidth, std::optional<float> constrainedHeight)
+        : width(constrainedWidth), height(constrainedHeight) {}
 };
 
 inline constexpr InvalidationFlags layoutInvalidationMask(LayoutInvalidationReason reason) {
@@ -113,16 +121,16 @@ class TextMetrics;
 enum class VerticalAlign;
 
 struct LayoutContextKey {
-    const StyleSheet* style_sheet = nullptr;
-    const TextMetrics* text_metrics = nullptr;
-    std::uint64_t style_generation = 0;
-    std::uint64_t text_metrics_generation = 0;
+    const StyleSheet* styleSheet = nullptr;
+    const TextMetrics* textMetrics = nullptr;
+    std::uint64_t styleGeneration = 0;
+    std::uint64_t textMetricsGeneration = 0;
 
     constexpr bool operator==(const LayoutContextKey& other) const {
-        return style_sheet == other.style_sheet
-            && text_metrics == other.text_metrics
-            && style_generation == other.style_generation
-            && text_metrics_generation == other.text_metrics_generation;
+        return styleSheet == other.styleSheet
+            && textMetrics == other.textMetrics
+            && styleGeneration == other.styleGeneration
+            && textMetricsGeneration == other.textMetricsGeneration;
     }
 };
 
@@ -130,7 +138,7 @@ namespace detail { class WidgetCompilerAccess; }
 namespace layout_detail {
 class WidgetLayoutAccess;
 struct ChildLayout;
-Rect positionedRect(const ChildLayout& child, const Rect& parent, VerticalAlign vertical_alignment);
+Rect positionedRect(const ChildLayout& child, const Rect& parent, VerticalAlign verticalAlignment);
 void setArrangedRect(Widget& node, const Rect& rect);
 }
 
@@ -172,21 +180,25 @@ public:
     virtual ~Widget();
 
     Widget& setId(std::string id);
-    Widget& addClass(std::string class_name);
+    Widget& addClass(std::string className);
     Widget& setRect(const Rect& rect);
-    Widget& setPointerEvents(bool pointer_events);
+    Widget& setPointerEvents(bool pointerEvents);
     Widget& setDisabled(bool disabled);
     Widget& setVisibility(Visibility visibility);
+    Widget& setHidden(bool hidden);
+    virtual bool setTextContent(TextSource content);
+    virtual bool setCheckedValue(bool checked);
+    virtual std::optional<bool> checkedValue() const;
     Widget& setOnActivate(std::function<void(Widget&)> callback);
-    Widget& setAction(ActionEventKind kind, std::string action);
+    Widget& setEventCall(WidgetEventKind kind, EventCall call);
     Widget& setLongClickDelay(std::chrono::milliseconds delay);
 
     virtual Widget& addChild(std::unique_ptr<Widget> child);
     virtual Widget& prependChild(std::unique_ptr<Widget> child);
     virtual void clearChildren();
 
-    const std::string& element() const { return mElement; }
-    const std::string& styleElement() const { return mStyleElement.empty() ? mElement : mStyleElement; }
+    const std::string& elementName() const { return mElementName; }
+    const std::string& styleElement() const { return mStyleElement.empty() ? mElementName : mStyleElement; }
     const std::string& part() const { return mPart; }
     const std::string& id() const { return mId; }
     const std::set<std::string>& classes() const { return mClasses; }
@@ -199,24 +211,24 @@ public:
     std::uint64_t styleContextRevision() const;
     bool pointerEvents() const { return mPointerEvents.value_or(defaultPointerEvents()); }
     Visibility visibility() const { return mVisibility; }
-    bool disabled() const { return has_state(mStates, WidgetState::Disabled); }
+    bool disabled() const { return rdui::hasState(mStates, WidgetState::Disabled); }
     bool idScopeRoot() const { return mIdScopeRoot; }
     bool flowBreakBefore() const { return mFlowBreakBefore; }
-    const std::string& action(ActionEventKind kind) const;
+    const EventCall* eventCall(WidgetEventKind kind) const;
     const std::optional<std::chrono::milliseconds>& longClickDelay() const { return mLongClickDelay; }
 
-    bool hasState(WidgetState state) const { return has_state(mStates, state); }
+    bool hasState(WidgetState state) const { return rdui::hasState(mStates, state); }
     void activate();
     void activateFromLabel();
 
-    virtual Vec2 intrinsicSize(const StyleSheet& theme, const Style& style, const TextMetrics& text_metrics,
+    virtual Vec2 intrinsicSize(const StyleSheet& theme, const Style& style, const TextMetrics& textMetrics,
                                const IntrinsicSizeConstraints& constraints = IntrinsicSizeConstraints()) const;
     virtual bool defaultPointerEvents() const { return false; }
     virtual bool focusable() const { return false; }
     virtual void paint(PaintContext& context, const Style& style, float scale) const;
 
 protected:
-    explicit Widget(const char* element);
+    explicit Widget(const char* elementName);
     virtual void onEvent(RoutedEvent&) {}
     virtual bool defaultKeyDown(const KeyEvent& event);
     virtual bool defaultKeyUp(const KeyEvent& event);
@@ -226,9 +238,10 @@ protected:
     virtual bool updatePointerInteraction(const PointerEvent& event);
     virtual bool endPointerInteraction(const PointerEvent& event);
     virtual void constrainResolvedStyle(Style& style) const {}
-    void emitAction(const ActionEvent& event);
+    void emitEvent(const WidgetEvent& event);
     void translate(const Vec2& delta);
     void invalidateMeasure();
+    void invalidateArrange();
     void invalidateText();
     void invalidatePaint();
     const StyleSheet* attachedStyleSheet() const;
@@ -249,45 +262,44 @@ protected:
     void setState(WidgetState state, bool enabled);
 
 private:
-    struct ActionSlot {
-        std::string name;
-        std::weak_ptr<detail::ActionHandler> handler;
+    struct EventSlot {
+        std::optional<EventCall> call;
+        std::weak_ptr<detail::EventHandler> handler;
     };
 
-    void bindAction(ActionEventKind kind, const std::shared_ptr<detail::ActionHandler>& handler);
-    void dispatchMouseAction(ActionEventKind kind, const PointerEvent& event);
-    void dispatchLongClickAction(std::chrono::milliseconds held_for);
+    void bindEventHandler(WidgetEventKind kind, const std::shared_ptr<detail::EventHandler>& handler);
+    void dispatchMouseEvent(WidgetEventKind kind, const PointerEvent& event);
+    void dispatchLongClickEvent(std::chrono::milliseconds heldFor);
     void translateSubtree(const Vec2& delta);
-    void invalidateArrange();
     void invalidateArrangeTree();
     void invalidateTextTree();
-    void invalidateStyleTree(bool layout_affecting = true, bool descendants = true);
+    void invalidateStyleTree(bool layoutAffecting = true, bool propagateToDescendants = true);
     void clearPaintInvalidationTree();
     void setSurface(Surface* surface);
-    Widget& setStyleElement(std::string style_element);
+    Widget& setStyleElement(std::string styleElement);
     Widget& setPart(std::string part);
-    Widget& setIdScopeRoot(bool scope_root);
+    Widget& setIdScopeRoot(bool scopeRoot);
     std::weak_ptr<char> lifetime() const { return mLifetime; }
 
     struct LayoutCache {
-        Vec2 measured_size;
-        Vec2 intrinsic_size;
-        float measured_width = 0.f;
-        float measured_height = 0.f;
-        LayoutContextKey layout_context;
+        Vec2 measuredSize;
+        Vec2 intrinsicSize;
+        float measuredWidth = 0.f;
+        float measuredHeight = 0.f;
+        LayoutContextKey layoutContext;
         LayoutDirection direction = LayoutDirection::LeftToRight;
-        bool measured_width_set = false;
-        bool measured_height_set = false;
-        bool measured_rect_explicit = false;
-        bool measured_rect_constraint_set = false;
-        float measured_rect_width = 0.f;
-        float measured_rect_height = 0.f;
-        bool measure_valid = false;
-        bool intrinsic_valid = false;
-        bool arrange_valid = false;
+        bool measuredWidthSet = false;
+        bool measuredHeightSet = false;
+        bool measuredRectExplicit = false;
+        bool measuredRectConstraintSet = false;
+        float measuredRectWidth = 0.f;
+        float measuredRectHeight = 0.f;
+        bool measureValid = false;
+        bool intrinsicValid = false;
+        bool arrangeValid = false;
     };
 
-    std::string mElement;
+    std::string mElementName;
     std::string mStyleElement;
     std::string mPart;
     std::string mId;
@@ -297,7 +309,7 @@ private:
     std::vector<std::unique_ptr<Widget>> mChildren;
     std::uint64_t mChildSnapshotRevision = 1;
     std::function<void(Widget&)> mOnActivate;
-    std::map<ActionEventKind, ActionSlot> mActions;
+    std::map<WidgetEventKind, EventSlot> mEventSlots;
     std::optional<std::chrono::milliseconds> mLongClickDelay;
     std::shared_ptr<char> mLifetime = std::make_shared<char>(0);
     Widget* mParent = nullptr;
@@ -316,34 +328,37 @@ private:
 };
 
 namespace detail {
+Widget* findWidgetInScope(Widget& widget, std::string_view id);
+void indexWidgetsInScope(Widget& widget, std::map<std::string, Widget*>& index);
+
 template<typename WidgetT> class WidgetVisit {
 public:
     static_assert(std::is_same_v<WidgetT, rdui::Widget> || std::is_same_v<WidgetT, const rdui::Widget>);
 
     WidgetVisit() = default;
     explicit WidgetVisit(WidgetT& widget)
-        : lifetime(&widget), surface(widget.mSurface), parent(widget.mParent), layout_revision(widget.mLayoutInvalidationRevision),
-          style_revision(widget.mStyleRevision) {}
+        : lifetime(&widget), surface(widget.mSurface), parent(widget.mParent), layoutRevision(widget.mLayoutInvalidationRevision),
+          styleRevision(widget.mStyleRevision) {}
 
     WidgetT* get() const { return lifetime.get(); }
     bool valid() const {
         const WidgetT* widget = lifetime.get();
-        return widget && widget->mSurface == surface && widget->mParent == parent && widget->mLayoutInvalidationRevision == layout_revision;
+        return widget && widget->mSurface == surface && widget->mParent == parent && widget->mLayoutInvalidationRevision == layoutRevision;
     }
-    bool validChildOf(const Widget& expected_parent) const {
+    bool validChildOf(const Widget& expectedParent) const {
         const WidgetT* widget = lifetime.get();
-        return valid() && widget->mParent == &expected_parent;
+        return valid() && widget->mParent == &expectedParent;
     }
     bool styleValid() const {
         const WidgetT* widget = lifetime.get();
-        return valid() && widget->mStyleRevision == style_revision;
+        return valid() && widget->mStyleRevision == styleRevision;
     }
 
     WidgetRef<WidgetT> lifetime;
     const Surface* surface = nullptr;
     const Widget* parent = nullptr;
-    std::uint64_t layout_revision = 0;
-    std::uint64_t style_revision = 0;
+    std::uint64_t layoutRevision = 0;
+    std::uint64_t styleRevision = 0;
 };
 } // namespace detail
 } // namespace rdui

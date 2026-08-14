@@ -133,9 +133,9 @@ enum class RadialGradientShape { Ellipse, Circle };
 struct Gradient {
     GradientKind kind = GradientKind::Linear;
     bool repeating = false;
-    float angle_degrees = 180.f;
+    float angleDegrees = 180.f;
     Vec2 center = {.5f, .5f};
-    RadialGradientShape radial_shape = RadialGradientShape::Ellipse;
+    RadialGradientShape radialShape = RadialGradientShape::Ellipse;
     std::vector<GradientStop> stops;
 };
 
@@ -161,16 +161,16 @@ enum class EffectKind { BackgroundBlur, LayerBlur };
 
 struct Effect {
     EffectKind kind = EffectKind::LayerBlur;
-    float start_radius = 0.f;
-    float end_radius = 0.f;
-    float start_position = 0.f;
-    float end_position = 1.f;
-    float angle_degrees = 180.f;
+    float startRadius = 0.f;
+    float endRadius = 0.f;
+    float startPosition = 0.f;
+    float endPosition = 1.f;
+    float angleDegrees = 180.f;
 
-    bool progressive() const { return start_radius != end_radius; }
+    bool progressive() const { return startRadius != endRadius; }
 };
 
-inline constexpr std::size_t max_effect_count = 8;
+inline constexpr std::size_t maxEffectCount = 8;
 
 enum class Flow { Free, Row, Column };
 enum class JustifyContent { Start, Center, End, Left, Right };
@@ -231,29 +231,29 @@ enum class InheritedStyleProperty : uint16_t {
 using InheritedStyleProperties = uint16_t;
 
 struct Style {
-    Color background_color = Color(0.f, 0.f, 0.f, 0.f);
-    Color border_color = Color(0.f, 0.f, 0.f, 1.f);
-    Color text_color = Color(0.f, 0.f, 0.f, 1.f);
-    Color icon_stroke_color = Color(0.f, 0.f, 0.f, 1.f);
-    std::optional<Gradient> background_gradient;
-    std::optional<Gradient> border_gradient;
+    Color backgroundColor = Color(0.f, 0.f, 0.f, 0.f);
+    Color borderColor = Color(0.f, 0.f, 0.f, 1.f);
+    Color textColor = Color(0.f, 0.f, 0.f, 1.f);
+    Color iconStrokeColor = Color(0.f, 0.f, 0.f, 1.f);
+    std::optional<Gradient> backgroundGradient;
+    std::optional<Gradient> borderGradient;
     std::vector<BoxShadow> shadows;
     std::vector<Effect> effects;
     Outline outline;
-    float border_radius = 0.f;
-    EdgeInsets border_width;
-    std::optional<Length> svg_stroke_width;
-    StrokeCap svg_stroke_cap = StrokeCap::Butt;
-    bool svg_stroke_cap_set = false;
-    float font_size = 13.f;
-    std::optional<Length> line_height;
-    Length letter_spacing;
-    Length word_spacing;
+    float borderRadius = 0.f;
+    EdgeInsets borderWidth;
+    std::optional<Length> svgStrokeWidth;
+    StrokeCap svgStrokeCap = StrokeCap::Butt;
+    bool svgStrokeCapSet = false;
+    float fontSize = 13.f;
+    std::optional<Length> lineHeight;
+    Length letterSpacing;
+    Length wordSpacing;
     float opacity = 1.f;
     Dimension width;
     Dimension height;
-    std::optional<Length> min_width;
-    std::optional<Length> min_height;
+    std::optional<Length> minWidth;
+    std::optional<Length> minHeight;
     std::optional<Length> left;
     std::optional<Length> right;
     std::optional<Length> top;
@@ -261,32 +261,32 @@ struct Style {
     MarginInsets margin;
     EdgeInsets padding;
     GapValue gap;
-    float flex_grow = 0.f;
-    float flex_shrink = 1.f;
-    Dimension flex_basis;
+    float flexGrow = 0.f;
+    float flexShrink = 1.f;
+    Dimension flexBasis;
     int order = 0;
-    FontFamily font_family = FontFamily::Sans;
-    U16 font_weight = 400;
-    bool font_italic = false;
-    bool font_strike = false;
-    TextAlign text_align = TextAlign::Start;
-    TextOverflow text_overflow = TextOverflow::Clip;
-    TextWrap text_wrap = TextWrap::Wrap;
-    VerticalAlign vertical_align = VerticalAlign::Top;
-    bool vertical_align_set = false;
+    FontFamily fontFamily = FontFamily::Sans;
+    U16 fontWeight = 400;
+    bool fontItalic = false;
+    bool fontStrike = false;
+    TextAlign textAlign = TextAlign::Start;
+    TextOverflow textOverflow = TextOverflow::Clip;
+    TextWrap textWrap = TextWrap::Wrap;
+    VerticalAlign verticalAlign = VerticalAlign::Top;
+    bool verticalAlignSet = false;
     LayoutDirection direction = LayoutDirection::LeftToRight;
     Flow flow = Flow::Free;
-    bool flow_set = false;
-    JustifyContent justify_content = JustifyContent::Start;
-    bool justify_content_set = false;
-    AlignItems align_items = AlignItems::Normal;
-    AlignSelf align_self = AlignSelf::Auto;
-    std::optional<float> aspect_ratio;
-    Overflow overflow_x = Overflow::Visible;
-    Overflow overflow_y = Overflow::Visible;
-    PointerEvents pointer_events = PointerEvents::Default;
+    bool flowSet = false;
+    JustifyContent justifyContent = JustifyContent::Start;
+    bool justifyContentSet = false;
+    AlignItems alignItems = AlignItems::Normal;
+    AlignSelf alignSelf = AlignSelf::Auto;
+    std::optional<float> aspectRatio;
+    Overflow overflowX = Overflow::Visible;
+    Overflow overflowY = Overflow::Visible;
+    PointerEvents pointerEvents = PointerEvents::Default;
     CursorStyle cursor = CursorStyle::Auto;
-    InheritedStyleProperties specified_inherited = 0;
+    InheritedStyleProperties specifiedInheritedProperties = 0;
 };
 
 void inheritStyle(Style& style, const Style& parent);

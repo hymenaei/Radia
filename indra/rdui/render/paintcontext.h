@@ -48,7 +48,7 @@ public:
     virtual void popClip() = 0;
     virtual void beginEffects(const Rect& rect, const Style& style, float scale) = 0;
     virtual void endEffects() = 0;
-    virtual void paintBox(const Rect& rect, const Style& style, std::optional<TopBorderGap> top_border_gap = std::nullopt) = 0;
+    virtual void paintBox(const Rect& rect, const Style& style, std::optional<TopBorderGap> topBorderGap = std::nullopt) = 0;
     virtual void paintText(const std::string& text, const Rect& rect, const Style& style) = 0;
     virtual void paintIcon(const std::string& name, const Rect& rect, const Style& style, float scale) = 0;
 };

@@ -43,22 +43,22 @@ public:
 struct ChildLayout {
     WidgetRef<Widget> node;
     const Style& style;
-    Vec2 fit_size;
+    Vec2 fitSize;
     Vec2 measured;
 };
 
 enum class CrossAlignment { Start, Center, End, Stretch };
 
 struct AdjacentLayout {
-    bool has_gap = false;
+    bool hasGap = false;
     float overlap = 0.f;
 };
 
 struct MainAxisAllocation {
     float gap = 0.f;
-    float free_space = 0.f;
-    float auto_margin = 0.f;
-    bool has_auto_margins = false;
+    float freeSpace = 0.f;
+    float autoMargin = 0.f;
+    bool hasAutoMargins = false;
     bool valid = true;
 };
 
@@ -66,23 +66,23 @@ float styledDimension(const Dimension& value, const std::optional<Length>& minim
 void warnIgnoredPosition(const Widget& child, const Style& style, Flow flow);
 const Style& emptyChildStyle();
 ChildLayout invalidChildLayout();
-void removeDetachedChildren(Widget& parent, std::vector<ChildLayout>& children);
+void removeChildrenExcludedFromLayout(Widget& parent, std::vector<ChildLayout>& children);
 float& mainSize(ChildLayout& child, Flow flow);
 float mainSize(const ChildLayout& child, Flow flow);
-float mainMinimum(const ChildLayout& child, Flow flow, float available_main, float flex_base);
-void applyFlexBasis(ChildLayout& child, Flow flow, float available_main);
-void distributeFlexSpace(std::vector<ChildLayout>& children, std::size_t begin, std::size_t end, Flow flow, float available_main, bool allow_growth,
+float mainMinimum(const ChildLayout& child, Flow flow, float availableMain, float flexBase);
+void applyFlexBasis(ChildLayout& child, Flow flow, float availableMain);
+void distributeFlexSpace(std::vector<ChildLayout>& children, std::size_t begin, std::size_t end, Flow flow, float availableMain, bool allowGrowth,
                          float& total);
-float verticalAlignmentOffset(VerticalAlign alignment, float free_space);
+float verticalAlignmentOffset(VerticalAlign alignment, float freeSpace);
 CrossAlignment crossAlignment(const Style& parent, const Style& child, Flow flow);
-void applyCrossAxisSizing(Vec2& size, const Style& style, Flow flow, float available_cross, CrossAlignment alignment);
-float rowAlignmentOffset(JustifyContent alignment, LayoutDirection direction, float free_space);
-Rect positionedRect(const ChildLayout& child, const Rect& parent, VerticalAlign vertical_alignment);
+void applyCrossAxisSizing(Vec2& size, const Style& style, Flow flow, float availableCross, CrossAlignment alignment);
+float rowAlignmentOffset(JustifyContent alignment, LayoutDirection direction, float freeSpace);
+Rect positionedRect(const ChildLayout& child, const Rect& parent, VerticalAlign verticalAlignment);
 void setArrangedRect(Widget& node, const Rect& rect);
-std::optional<AdjacentLayout> adjacentLayout(const WidgetVisit& parent_state, Widget* first, Widget* second, const Style& parent_style);
+std::optional<AdjacentLayout> adjacentLayout(const WidgetVisit& parentState, Widget* first, Widget* second, const Style& parentStyle);
 std::vector<std::pair<std::size_t, std::size_t>> rowLines(const std::vector<ChildLayout>& children);
-MainAxisAllocation allocateMainAxis(Widget& parent, std::vector<ChildLayout>& children, std::size_t begin, std::size_t end, const Style& parent_style,
-                                    Flow flow, float available_main);
-void prepareMainAxis(std::vector<ChildLayout>& children, Flow flow, float available_main);
+MainAxisAllocation allocateMainAxis(Widget& parent, std::vector<ChildLayout>& children, std::size_t begin, std::size_t end, const Style& parentStyle,
+                                    Flow flow, float availableMain);
+void prepareMainAxis(std::vector<ChildLayout>& children, Flow flow, float availableMain);
 } // namespace rdui::layout_detail
 #endif // RD_LAYOUT_PRIMITIVES_H

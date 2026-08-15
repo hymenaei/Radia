@@ -29,42 +29,46 @@
 #include <optional>
 #include <utility>
 #include "detachedfloatermanager.h"
+#include "types.h"
 #include "widgets/floater.h"
 
 class LLWindow;
 
 namespace radia::viewer::ui {
+using radia::ui::Rect;
+using radia::ui::Vec2;
+
 namespace detail {
-inline radia::ui::Vec2 scaleLogicalPoint(const radia::ui::Vec2& point, const radia::ui::Vec2& scale) {
+inline Vec2 scaleLogicalPoint(const Vec2& point, const Vec2& scale) {
     return {point.x * scale.x, point.y * scale.y};
 }
 
-inline radia::ui::Vec2 unscaleNativePoint(const radia::ui::Vec2& point, const radia::ui::Vec2& scale) {
+inline Vec2 unscaleNativePoint(const Vec2& point, const Vec2& scale) {
     return {scale.x != 0.f ? point.x / scale.x : point.x, scale.y != 0.f ? point.y / scale.y : point.y};
 }
 } // namespace detail
 
 class RuntimeWindowAdapter final : public DetachedFloaterManager::DetachedFloaterEnvironment {
 public:
-    using DisplayScale = std::function<radia::ui::Vec2()>;
+    using DisplayScale = std::function<Vec2()>;
     using MainSize = std::function<std::pair<int, int>()>;
     using ClearDragState = std::function<void()>;
 
     RuntimeWindowAdapter(LLWindow*& window, AuxiliaryWindowFactory& auxiliaryWindows, DisplayScale displayScale, MainSize mainSize,
                          ClearDragState clearDragState);
 
-    AuxiliaryWindowRect mainRectToNative(const radia::ui::Rect& rect) const override;
+    AuxiliaryWindowRect mainRectToNative(const Rect& rect) const override;
     float nativeScaleMultiplier() const override;
-    radia::ui::Vec2 nativeBottomLeftInMain(const AuxiliaryWindowRect& rect) const override;
-    bool nativePointInsideMain(const radia::ui::Vec2& point) const override;
-    bool hasDisplaySpaceBeyondEdge(const radia::ui::Vec2& position, const radia::ui::Vec2& delta) const;
+    Vec2 nativeBottomLeftInMain(const AuxiliaryWindowRect& rect) const override;
+    bool nativePointInsideMain(const Vec2& point) const override;
+    bool hasDisplaySpaceBeyondEdge(const Vec2& position, const Vec2& delta) const;
     bool placementVisible(const AuxiliaryWindowRect& rect) const override;
-    std::optional<AuxiliaryScreenPoint> releasePointerForDetach(const radia::ui::Vec2& mainPosition) override;
+    std::optional<AuxiliaryScreenPoint> releasePointerForDetach(const Vec2& mainPosition) override;
 
     void setMouseClipping(bool enabled);
 
 private:
-    AuxiliaryScreenPoint mainPointToNative(const radia::ui::Vec2& point) const;
+    AuxiliaryScreenPoint mainPointToNative(const Vec2& point) const;
 
     LLWindow*& mWindow;
     AuxiliaryWindowFactory& mAuxiliaryWindows;

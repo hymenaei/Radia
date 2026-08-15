@@ -30,9 +30,6 @@
 #include "llwindow.h"
 
 namespace radia::viewer::ui {
-using radia::ui::Rect;
-using radia::ui::Vec2;
-
 RuntimeWindowAdapter::RuntimeWindowAdapter(LLWindow*& window, AuxiliaryWindowFactory& auxiliaryWindows, DisplayScale displayScale, MainSize mainSize,
                                            ClearDragState clearDragState)
     : mWindow(window), mAuxiliaryWindows(auxiliaryWindows), mDisplayScale(std::move(displayScale)), mMainSize(std::move(mainSize)),

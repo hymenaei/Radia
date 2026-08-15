@@ -77,7 +77,7 @@ class ViewerManifest(LLManifest):
             self.path("*.yml")
 
         with self.prefix(src_dst="skins"):
-            self.path("*/rdui")
+            self.path("*/radia")
 
         if self.is_packaging_viewer():
             with self.prefix(src_dst="app_settings"):

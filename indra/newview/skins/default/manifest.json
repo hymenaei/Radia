@@ -6,9 +6,9 @@
   "notes": "The classic skin from the Second Life Viewer",
   "base": null,
   "radia": {
-    "stylesheet": "rdui/skin.radia",
-    "layouts": "rdui/xui",
-    "localization": "rdui/localization.yaml",
-    "assets": "rdui/resources"
+    "stylesheet": "radia/skin.radia",
+    "layouts": "radia/xui",
+    "localization": "radia/localization.yaml",
+    "assets": "radia/resources"
   }
 }

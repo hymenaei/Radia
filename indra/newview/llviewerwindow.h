@@ -53,8 +53,7 @@
 #include <functional>
 #include <memory>
 
-namespace rdui::viewer
-{
+namespace radia::viewer::ui {
     class Runtime;
 }
 
@@ -509,7 +508,7 @@ private:
 
 private:
     LLWindow*       mWindow;                        // graphical window object
-    std::unique_ptr<rdui::viewer::Runtime> mUIRuntime;
+    std::unique_ptr<radia::viewer::ui::Runtime> mUIRuntime;
     bool            mActive;
     bool            mUIVisible;
 

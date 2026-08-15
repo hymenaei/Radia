@@ -350,7 +350,7 @@ add_subdirectory(llwebrtc)
 add_subdirectory(llwindow)
 add_subdirectory(llxml)
 add_subdirectory(llplugin)
-add_subdirectory(rdui)
+add_subdirectory(ui)
 add_subdirectory(llui)
 add_subdirectory(viewer_components)
 

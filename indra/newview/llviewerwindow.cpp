@@ -1106,37 +1106,21 @@ bool LLViewerWindow::handleAnyMouseClick(LLWindow *window, LLCoordGL pos, MASK m
         // Indicate mouse was active
         LLUI::getInstance()->resetMouseIdleTimer();
 
-        rdui::viewer::NativePointerButton pointerButton = rdui::viewer::NativePointerButton::NoButton;
+        radia::viewer::ui::NativePointerButton pointerButton = radia::viewer::ui::NativePointerButton::NoButton;
         U8 clickCount = 1;
-        switch (clicktype)
-        {
-            case CLICK_LEFT:
-                pointerButton = rdui::viewer::NativePointerButton::Left;
-                break;
-            case CLICK_DOUBLELEFT:
-                pointerButton = rdui::viewer::NativePointerButton::Left;
-                clickCount = down ? 2 : 1;
-                break;
-            case CLICK_RIGHT:
-                pointerButton = rdui::viewer::NativePointerButton::Right;
-                break;
-            case CLICK_MIDDLE:
-                pointerButton = rdui::viewer::NativePointerButton::Middle;
-                break;
-            case CLICK_BUTTON4:
-                pointerButton = rdui::viewer::NativePointerButton::Auxiliary1;
-                break;
-            case CLICK_BUTTON5:
-                pointerButton = rdui::viewer::NativePointerButton::Auxiliary2;
-                break;
-            default:
-                break;
+        switch (clicktype) {
+            case CLICK_LEFT: pointerButton = radia::viewer::ui::NativePointerButton::Left; break;
+            case CLICK_DOUBLELEFT: pointerButton = radia::viewer::ui::NativePointerButton::Left; clickCount = down ? 2 : 1; break;
+            case CLICK_RIGHT: pointerButton = radia::viewer::ui::NativePointerButton::Right; break;
+            case CLICK_MIDDLE: pointerButton = radia::viewer::ui::NativePointerButton::Middle; break;
+            case CLICK_BUTTON4: pointerButton = radia::viewer::ui::NativePointerButton::Auxiliary1; break;
+            case CLICK_BUTTON5: pointerButton = radia::viewer::ui::NativePointerButton::Auxiliary2; break;
+            default: break;
         }
         F32 pointerDeltaX = 0.f;
         F32 pointerDeltaY = 0.f;
 #if (LL_WINDOWS || LL_SDL_WINDOW) && !LL_MESA_HEADLESS
-        if (!down && mUIRuntime && mUIRuntime->hasPointerCapture())
-        {
+        if (!down && mUIRuntime && mUIRuntime->hasPointerCapture()) {
             LLCoordCommon delta{0, 0};
             mWindow->getCursorDelta(&delta);
             pointerDeltaX = static_cast<F32>(delta.mX) / mDisplayScale.mV[VX];
@@ -1144,15 +1128,13 @@ bool LLViewerWindow::handleAnyMouseClick(LLWindow *window, LLCoordGL pos, MASK m
         }
 #endif
         const bool inputHandled = mUIRuntime
-            && pointerButton != rdui::viewer::NativePointerButton::NoButton
-            && (down ? mUIRuntime->pointerDown(static_cast<F32>(x), static_cast<F32>(y), pointerButton, mask, clickCount, pointerDeltaX, pointerDeltaY)
-                     : mUIRuntime->pointerUp(static_cast<F32>(x), static_cast<F32>(y), pointerButton, mask, clickCount, pointerDeltaX, pointerDeltaY))
+            && pointerButton != radia::viewer::ui::NativePointerButton::NoButton
+            && (down
+                    ? mUIRuntime->pointerDown(static_cast<F32>(x), static_cast<F32>(y), pointerButton, mask, clickCount, pointerDeltaX, pointerDeltaY)
+                    : mUIRuntime->pointerUp(static_cast<F32>(x), static_cast<F32>(y), pointerButton, mask, clickCount, pointerDeltaX, pointerDeltaY))
                    .handled;
         if (!down) mWindow->releaseMouse();
-        if (inputHandled)
-        {
-            return true;
-        }
+        if (inputHandled) return true;
 
         if (LLToolMgr::getInstance()->getCurrentTool()->clipMouseWhenDown())
         {
@@ -2553,22 +2535,24 @@ void LLViewerWindow::initBase()
     gMenuHolder = getRootView()->getChild<LLViewerMenuHolderGL>("Menu Holder");
     LLMenuGL::sMenuContainer = gMenuHolder;
 
-    mUIRuntime = std::make_unique<rdui::viewer::Runtime>(
+    mUIRuntime = std::make_unique<radia::viewer::ui::Runtime>(
         gSavedSettings, gSavedPerAccountSettings, gRadiaUIProgram,
-        rdui::viewer::Runtime::WindowEnvironment{.mainWindow = gWindowp,
-                                                 .displayScale =
-                                                     [] {
-                                                         const LLVector2 scale =
-                                                             gViewerWindow ? gViewerWindow->getDisplayScale() : LLVector2(1.f, 1.f);
-                                                         return rdui::Vec2{scale.mV[VX], scale.mV[VY]};
-                                                     },
-                                                 .auxiliaryWindowFactory = defaultAuxiliaryWindowFactory()},
-        rdui::viewer::Runtime::IntegrationHooks{
+        radia::viewer::ui::Runtime::WindowEnvironment{.mainWindow = gWindowp,
+                                                      .displayScale =
+                                                          [] {
+                                                              const LLVector2 scale =
+                                                                  gViewerWindow ? gViewerWindow->getDisplayScale() : LLVector2(1.f, 1.f);
+                                                              return radia::ui::Vec2{scale.mV[VX], scale.mV[VY]};
+                                                          },
+                                                      .auxiliaryWindowFactory = defaultAuxiliaryWindowFactory()},
+        radia::viewer::ui::Runtime::IntegrationHooks{
             .resolveKeybinding =
-                [](const std::string& command) { return rdui::KeybindingPresentation{gViewerInput.getPrimaryKeyBinding({}, command)}; },
+                [](const std::string& command) { return radia::ui::KeybindingPresentation{gViewerInput.getPrimaryKeyBinding({}, command)}; },
             .keybindingState =
-                [] { return rdui::viewer::RuntimeKeybindingState{gViewerInput.getBindingGeneration(), static_cast<U32>(gViewerInput.getMode())}; }});
-    rdui::viewer::registerFloaterDemo(*mUIRuntime);
+                [] {
+                    return radia::viewer::ui::RuntimeKeybindingState{gViewerInput.getBindingGeneration(), static_cast<U32>(gViewerInput.getMode())};
+                }});
+    radia::viewer::ui::registerFloaterDemo(*mUIRuntime);
     mUIRuntime->initialize();
     mUIRuntime->setVisibility(shouldShowAttachedUI(), shouldShowDetachedUI());
 }
@@ -3924,19 +3908,13 @@ void LLViewerWindow::updateUI()
 
     bool handled = false;
     bool hoverHandled = false;
-    if (mUIRuntime && attachedUIVisible
-        && (mMouseInWindow || mUIRuntime->hasPointerCapture()))
-    {
-        const rdui::viewer::NativeInputDispatchResult result = mUIRuntime->pointerMove(
-            static_cast<F32>(x), static_cast<F32>(y), mask,
-            static_cast<F32>(mCurrentRawMouseDelta.mX) / mDisplayScale.mV[VX],
-            static_cast<F32>(mCurrentRawMouseDelta.mY) / mDisplayScale.mV[VY]);
+    if (mUIRuntime && attachedUIVisible && (mMouseInWindow || mUIRuntime->hasPointerCapture())) {
+        const radia::viewer::ui::NativeInputDispatchResult result =
+            mUIRuntime->pointerMove(static_cast<F32>(x), static_cast<F32>(y), mask, static_cast<F32>(mCurrentRawMouseDelta.mX) / mDisplayScale.mV[VX],
+                                    static_cast<F32>(mCurrentRawMouseDelta.mY) / mDisplayScale.mV[VY]);
         handled = result.handled;
         hoverHandled = result.handled;
-        if (result.cursor)
-        {
-            mWindow->setCursor(*result.cursor);
-        }
+        if (result.cursor) mWindow->setCursor(*result.cursor);
     }
 
     LLUICtrl* top_ctrl = gFocusMgr.getTopCtrl();

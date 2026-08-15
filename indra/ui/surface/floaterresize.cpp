@@ -32,20 +32,20 @@ namespace radia::ui::detail {
 ResizeEdges resizeEdgesAt(const Rect& bounds, const Vec2& point) {
     if (!bounds.contains(point)) return ResizeEdges::NoEdges;
 
-    const bool corner_left = point.x <= bounds.left() + FLOATER_RESIZE_CORNER_SPAN;
-    const bool corner_right = point.x >= bounds.right() - FLOATER_RESIZE_CORNER_SPAN;
-    const bool corner_bottom = point.y <= bounds.bottom() + FLOATER_RESIZE_CORNER_SPAN;
-    const bool corner_top = point.y >= bounds.top() - FLOATER_RESIZE_CORNER_SPAN;
+    const bool cornerLeft = point.x <= bounds.left() + kFloaterResizeCornerSpan;
+    const bool cornerRight = point.x >= bounds.right() - kFloaterResizeCornerSpan;
+    const bool cornerBottom = point.y <= bounds.bottom() + kFloaterResizeCornerSpan;
+    const bool cornerTop = point.y >= bounds.top() - kFloaterResizeCornerSpan;
 
-    if (corner_left && corner_bottom) return ResizeEdges::Left | ResizeEdges::Bottom;
-    if (corner_left && corner_top) return ResizeEdges::Left | ResizeEdges::Top;
-    if (corner_right && corner_bottom) return ResizeEdges::Right | ResizeEdges::Bottom;
-    if (corner_right && corner_top) return ResizeEdges::Right | ResizeEdges::Top;
+    if (cornerLeft && cornerBottom) return ResizeEdges::Left | ResizeEdges::Bottom;
+    if (cornerLeft && cornerTop) return ResizeEdges::Left | ResizeEdges::Top;
+    if (cornerRight && cornerBottom) return ResizeEdges::Right | ResizeEdges::Bottom;
+    if (cornerRight && cornerTop) return ResizeEdges::Right | ResizeEdges::Top;
 
-    if (point.x <= bounds.left() + FLOATER_RESIZE_BORDER) return ResizeEdges::Left;
-    if (point.x >= bounds.right() - FLOATER_RESIZE_BORDER) return ResizeEdges::Right;
-    if (point.y <= bounds.bottom() + FLOATER_RESIZE_BORDER) return ResizeEdges::Bottom;
-    if (point.y >= bounds.top() - FLOATER_RESIZE_BORDER) return ResizeEdges::Top;
+    if (point.x <= bounds.left() + kFloaterResizeBorder) return ResizeEdges::Left;
+    if (point.x >= bounds.right() - kFloaterResizeBorder) return ResizeEdges::Right;
+    if (point.y <= bounds.bottom() + kFloaterResizeBorder) return ResizeEdges::Bottom;
+    if (point.y >= bounds.top() - kFloaterResizeBorder) return ResizeEdges::Top;
     return ResizeEdges::NoEdges;
 }
 
@@ -61,24 +61,24 @@ CursorStyle resizeCursor(ResizeEdges edges) {
     return CursorStyle::Auto;
 }
 
-bool preserveUserResizeOnReload(bool current_resizable, bool replacement_resizable, const FloaterAuthoredGeometry& current,
+bool preserveUserResizeOnReload(bool currentResizable, bool replacementResizable, const FloaterAuthoredGeometry& current,
                                 const FloaterAuthoredGeometry& replacement) {
-    constexpr float SIZE_EPSILON = .5f;
+    constexpr float kSizeEpsilon = .5f;
     const auto unchanged = [=](const Vec2& left, const Vec2& right) {
-        return std::abs(left.x - right.x) < SIZE_EPSILON && std::abs(left.y - right.y) < SIZE_EPSILON;
+        return std::abs(left.x - right.x) < kSizeEpsilon && std::abs(left.y - right.y) < kSizeEpsilon;
     };
-    return current_resizable
-        && replacement_resizable
+    return currentResizable
+        && replacementResizable
         && unchanged(current.outer, replacement.outer)
         && unchanged(current.content, replacement.content);
 }
 
-Rect resizedRect(const Rect& initial, const Vec2& initial_pointer, const Vec2& pointer, ResizeEdges edges,
+Rect resizedRect(const Rect& initial, const Vec2& initialPointer, const Vec2& pointer, ResizeEdges edges,
                  const FloaterResizeConstraints& constraints) {
-    const Vec2 delta = pointer - initial_pointer;
-    const float minimum_width =
+    const Vec2 delta = pointer - initialPointer;
+    const float minimumWidth =
         constraints.bounds ? std::min(std::max(0.f, constraints.minimum.x), constraints.bounds->w) : std::max(0.f, constraints.minimum.x);
-    const float minimum_height =
+    const float minimumHeight =
         constraints.bounds ? std::min(std::max(0.f, constraints.minimum.y), constraints.bounds->h) : std::max(0.f, constraints.minimum.y);
 
     float left = initial.left();
@@ -88,21 +88,21 @@ Rect resizedRect(const Rect& initial, const Vec2& initial_pointer, const Vec2& p
 
     if (hasResizeEdge(edges, ResizeEdges::Left)) {
         const float lower = constraints.bounds ? constraints.bounds->left() : -std::numeric_limits<float>::max();
-        const float upper = std::max(lower, initial.right() - minimum_width);
+        const float upper = std::max(lower, initial.right() - minimumWidth);
         left = std::clamp(initial.left() + delta.x, lower, upper);
     } else if (hasResizeEdge(edges, ResizeEdges::Right)) {
         const float upper = constraints.bounds ? constraints.bounds->right() : std::numeric_limits<float>::max();
-        const float lower = std::min(upper, initial.left() + minimum_width);
+        const float lower = std::min(upper, initial.left() + minimumWidth);
         right = std::clamp(initial.right() + delta.x, lower, upper);
     }
 
     if (hasResizeEdge(edges, ResizeEdges::Bottom)) {
         const float lower = constraints.bounds ? constraints.bounds->bottom() : -std::numeric_limits<float>::max();
-        const float upper = std::max(lower, initial.top() - minimum_height);
+        const float upper = std::max(lower, initial.top() - minimumHeight);
         bottom = std::clamp(initial.bottom() + delta.y, lower, upper);
     } else if (hasResizeEdge(edges, ResizeEdges::Top)) {
         const float upper = constraints.bounds ? constraints.bounds->top() : std::numeric_limits<float>::max();
-        const float lower = std::min(upper, initial.bottom() + minimum_height);
+        const float lower = std::min(upper, initial.bottom() + minimumHeight);
         top = std::clamp(initial.top() + delta.y, lower, upper);
     }
 

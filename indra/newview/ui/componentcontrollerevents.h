@@ -36,7 +36,6 @@
 #include "widgetevent.h"
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
 namespace detail {
 struct ControllerWidgetSlot;
 template<typename T> struct ControllerEventArgumentAdapter;

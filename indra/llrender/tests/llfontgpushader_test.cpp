@@ -67,9 +67,9 @@ template<> template<> void llfontgpushader_object::test<1>() {
     ensure("coverage refinement is production library code", contains(library, "alchemy_font_refine_coverage"));
     ensure("coverage refinement keeps stem darkening", contains(library, "coverage = hb_gpu_stem_darken"));
 
-    const bool has_smoothstep = contains(library, "smoothstep(0.03, 0.97, coverage)");
-    const bool has_small_text = contains(library, "0.20 * small_text");
-    ensure("coverage refinement remains mild", has_smoothstep && has_small_text);
+    const bool hasSmoothstep = contains(library, "smoothstep(0.03, 0.97, coverage)");
+    const bool hasSmallText = contains(library, "0.20 * small_text");
+    ensure("coverage refinement remains mild", hasSmoothstep && hasSmallText);
 
     const auto slug = library.find("_hb_gpu_slug");
     const auto draw = library.find("float hb_gpu_draw");
@@ -85,8 +85,8 @@ template<> template<> void llfontgpushader_object::test<1>() {
 
     #if LL_MESA_HEADLESS
 inline ll_test::HeadlessGL& getSharedHeadlessGL() {
-    static ll_test::HeadlessGL gl(true, true, true, true);
-    return gl;
+    static ll_test::HeadlessGL sHeadlessGl(true, true, true, true);
+    return sHeadlessGl;
 }
 
 template<> template<> void llfontgpushader_object::test<2>() {

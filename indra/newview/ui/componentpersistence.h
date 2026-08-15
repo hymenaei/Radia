@@ -35,7 +35,8 @@ class LLControlGroup;
 namespace radia::ui { class Floater; }
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
+using radia::ui::Floater;
+
 enum class ComponentOpenState { Closed, Open };
 
 struct FloaterLogicalSize {

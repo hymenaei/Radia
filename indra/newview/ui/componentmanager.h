@@ -41,7 +41,13 @@ class SkinGeneration;
 } // namespace radia::ui
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
+using radia::ui::DiagnosticResult;
+using radia::ui::Floater;
+using radia::ui::PublicationCommit;
+using radia::ui::SettingResolver;
+using radia::ui::SkinGeneration;
+using radia::ui::System;
+
 class ComponentController;
 
 struct ComponentOpenResult : DiagnosticResult {

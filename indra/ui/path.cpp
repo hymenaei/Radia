@@ -55,8 +55,8 @@ Path& Path::close() {
 namespace {
 float distanceToLine(const Vec2& point, const Vec2& start, const Vec2& end) {
     const Vec2 edge = end - start;
-    const float edge_length = length(edge);
-    return edge_length <= 0.0001f ? length(point - start) : std::fabs(edge.x * (start.y - point.y) - (start.x - point.x) * edge.y) / edge_length;
+    const float edgeLength = length(edge);
+    return edgeLength <= 0.0001f ? length(point - start) : std::fabs(edge.x * (start.y - point.y) - (start.x - point.x) * edge.y) / edgeLength;
 }
 
 void flattenQuad(std::vector<Vec2>& out, const Vec2& a, const Vec2& b, const Vec2& c, float tolerance, int depth) {
@@ -95,10 +95,10 @@ void skipWhitespace(const char*& cursor) {
     while (*cursor && std::isspace(static_cast<unsigned char>(*cursor))) ++cursor;
 }
 
-bool number(const char*& cursor, float& value, bool allow_comma) {
+bool parseNumber(const char*& cursor, float& value, bool allowComma) {
     skipWhitespace(cursor);
     if (*cursor == ',') {
-        if (!allow_comma) return false;
+        if (!allowComma) return false;
         ++cursor;
         skipWhitespace(cursor);
         if (!*cursor || *cursor == ',') return false;
@@ -154,10 +154,10 @@ std::vector<std::vector<Vec2>> Path::flatten(float flatness) const {
 Path Path::circle(const Vec2& center, float radius, int segments) {
     Path path;
     const int count = std::max(8, segments);
-    constexpr float TWO_PI = 2.0f * std::numbers::pi_v<float>;
+    constexpr float kTwoPi = 2.0f * std::numbers::pi_v<float>;
     path.moveTo(center.x + radius, center.y);
     for (int i = 1; i <= count; ++i) {
-        const float angle = static_cast<float>(i) / static_cast<float>(count) * TWO_PI;
+        const float angle = static_cast<float>(i) / static_cast<float>(count) * kTwoPi;
         path.lineTo(center.x + std::cos(angle) * radius, center.y + std::sin(angle) * radius);
     }
     return path.close();
@@ -170,7 +170,7 @@ PathCompileResult compileSvgPathData(const std::string& data, const std::string&
     char command = 0;
     Vec2 current;
     Vec2 start;
-    bool has_subpath = false;
+    bool hasSubpath = false;
 
     auto fail = [&](const std::string& code, const std::string& message) {
         const std::size_t column = static_cast<std::size_t>(cursor - data.c_str()) + 1;
@@ -180,10 +180,10 @@ PathCompileResult compileSvgPathData(const std::string& data, const std::string&
     while (*cursor) {
         skipWhitespace(cursor);
         if (!*cursor) break;
-        bool command_was_read = false;
+        bool commandWasRead = false;
         if (std::isalpha(static_cast<unsigned char>(*cursor))) {
             command = *cursor++;
-            command_was_read = true;
+            commandWasRead = true;
             const char normalized = static_cast<char>(std::toupper(static_cast<unsigned char>(command)));
             if (normalized != 'M'
                 && normalized != 'L'
@@ -203,7 +203,7 @@ PathCompileResult compileSvgPathData(const std::string& data, const std::string&
         const bool relative = std::islower(static_cast<unsigned char>(command)) != 0;
         const char op = static_cast<char>(std::toupper(static_cast<unsigned char>(command)));
         if (op == 'Z') {
-            if (!has_subpath) {
+            if (!hasSubpath) {
                 fail("svg.path.close_without_subpath", "SVG path cannot close before a move command.");
                 return result;
             }
@@ -212,28 +212,28 @@ PathCompileResult compileSvgPathData(const std::string& data, const std::string&
             command = 0;
             continue;
         }
-        if (!has_subpath && op != 'M') {
+        if (!hasSubpath && op != 'M') {
             fail("svg.path.move_missing", "SVG path must begin with a move command.");
             return result;
         }
 
         float x = 0.f, y = 0.f;
         if (op == 'H') {
-            if (!number(cursor, x, !command_was_read)) {
+            if (!parseNumber(cursor, x, !commandWasRead)) {
                 fail("svg.path.arguments_invalid", "Horizontal line command requires one finite coordinate.");
                 return result;
             }
             current.x = relative ? current.x + x : x;
             path.lineTo(current.x, current.y);
         } else if (op == 'V') {
-            if (!number(cursor, y, !command_was_read)) {
+            if (!parseNumber(cursor, y, !commandWasRead)) {
                 fail("svg.path.arguments_invalid", "Vertical line command requires one finite coordinate.");
                 return result;
             }
             current.y = relative ? current.y + y : y;
             path.lineTo(current.x, current.y);
         } else if (op == 'M' || op == 'L') {
-            if (!number(cursor, x, !command_was_read) || !number(cursor, y, true)) {
+            if (!parseNumber(cursor, x, !commandWasRead) || !parseNumber(cursor, y, true)) {
                 fail("svg.path.arguments_invalid", "Move and line commands require two finite coordinates.");
                 return result;
             }
@@ -241,12 +241,12 @@ PathCompileResult compileSvgPathData(const std::string& data, const std::string&
             if (op == 'M') {
                 path.moveTo(current.x, current.y);
                 start = current;
-                has_subpath = true;
+                hasSubpath = true;
                 command = relative ? 'l' : 'L';
             } else path.lineTo(current.x, current.y);
         } else if (op == 'Q') {
             float cx = 0.f, cy = 0.f;
-            if (!number(cursor, cx, !command_was_read) || !number(cursor, cy, true) || !number(cursor, x, true) || !number(cursor, y, true)) {
+            if (!parseNumber(cursor, cx, !commandWasRead) || !parseNumber(cursor, cy, true) || !parseNumber(cursor, x, true) || !parseNumber(cursor, y, true)) {
                 fail("svg.path.arguments_invalid", "Quadratic curve command requires four finite coordinates.");
                 return result;
             }
@@ -256,12 +256,12 @@ PathCompileResult compileSvgPathData(const std::string& data, const std::string&
             current = next;
         } else if (op == 'C') {
             float c0x = 0.f, c0y = 0.f, c1x = 0.f, c1y = 0.f;
-            if (!number(cursor, c0x, !command_was_read)
-                || !number(cursor, c0y, true)
-                || !number(cursor, c1x, true)
-                || !number(cursor, c1y, true)
-                || !number(cursor, x, true)
-                || !number(cursor, y, true)) {
+            if (!parseNumber(cursor, c0x, !commandWasRead)
+                || !parseNumber(cursor, c0y, true)
+                || !parseNumber(cursor, c1x, true)
+                || !parseNumber(cursor, c1y, true)
+                || !parseNumber(cursor, x, true)
+                || !parseNumber(cursor, y, true)) {
                 fail("svg.path.arguments_invalid", "Cubic curve command requires six finite coordinates.");
                 return result;
             }

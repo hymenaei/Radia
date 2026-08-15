@@ -38,7 +38,7 @@ struct PaintCommand {
     PaintCommandKind kind;
     Rect rect;
     Style style;
-    std::string value;
+    std::string textOrIconName;
     float scale = 1.f;
     ClipAxes clipAxes = ClipAxes::Both;
     std::optional<TopBorderGap> topBorderGap;

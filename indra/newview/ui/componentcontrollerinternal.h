@@ -32,7 +32,8 @@
 #include "componentcontroller.h"
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
+using radia::ui::DiagnosticResult;
+
 class ComponentController::PreparedWidgets final {
 public:
     PreparedWidgets() = default;
@@ -55,7 +56,7 @@ private:
 
     ComponentController* mController = nullptr;
     radia::ui::Widget* mRoot = nullptr;
-    std::map<std::string, radia::ui::Widget*> index;
+    std::map<std::string, radia::ui::Widget*> mIndex;
     std::vector<Target> mTargets;
 };
 

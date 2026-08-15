@@ -39,7 +39,10 @@ class Surface;
 } // namespace radia::ui
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
+using radia::ui::Floater;
+using radia::ui::Rect;
+using radia::ui::Surface;
+using radia::ui::Vec2;
 struct DetachedFloaterPresentationUpdate {
     bool closeRequested = false;
     bool minimizeRequested = false;
@@ -55,7 +58,7 @@ struct DetachedFloaterPresentationOpenRequest {
     float scaleMultiplier = 1.f;
     std::optional<Vec2> dragOffset;
     std::optional<Vec2> logicalSize;
-    std::optional<AuxiliaryWindowPoint> dragCursor;
+    std::optional<AuxiliaryScreenPoint> dragScreenPoint;
 };
 
 class DetachedFloaterPresentation {
@@ -126,7 +129,7 @@ public:
         virtual Vec2 nativeBottomLeftInMain(const AuxiliaryWindowRect& rect) const = 0;
         virtual bool nativePointInsideMain(const Vec2& point) const = 0;
         virtual bool placementVisible(const AuxiliaryWindowRect& rect) const = 0;
-        virtual std::optional<AuxiliaryWindowPoint> releasePointerForDetach(const Vec2& mainPosition) = 0;
+        virtual std::optional<AuxiliaryScreenPoint> releasePointerForDetach(const Vec2& mainPosition) = 0;
     };
 
     using PresentationFactory = std::function<DetachedFloaterPresentationResult(std::unique_ptr<Floater>)>;

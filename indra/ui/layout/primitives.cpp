@@ -49,8 +49,8 @@ void warnIgnoredPosition(const Widget& child, const Style& style, Flow flow) {
 }
 
 const Style& emptyChildStyle() {
-    static const Style empty;
-    return empty;
+    static const Style sEmpty;
+    return sEmpty;
 }
 
 ChildLayout invalidChildLayout() {
@@ -118,12 +118,12 @@ void distributeFlexSpace(std::vector<ChildLayout>& children, std::size_t begin, 
         active.push_back(child.style.flexShrink > 0.f && base > mainMinimum(child, flow, availableMain, base));
     }
 
-    constexpr float epsilon = 1.0e-4f;
-    while (deficit > epsilon) {
+    constexpr float kFlexEpsilon = 1.0e-4f;
+    while (deficit > kFlexEpsilon) {
         float totalWeight = 0.f;
         for (std::size_t offset = 0; offset < active.size(); ++offset)
             if (active[offset]) totalWeight += children[begin + offset].style.flexShrink * baseSizes[offset];
-        if (totalWeight <= epsilon) break;
+        if (totalWeight <= kFlexEpsilon) break;
 
         const float roundDeficit = deficit;
         float reduced = 0.f;
@@ -136,9 +136,9 @@ void distributeFlexSpace(std::vector<ChildLayout>& children, std::size_t begin, 
             const float reduction = std::min(share, size - minimum);
             size -= reduction;
             reduced += reduction;
-            if (size <= minimum + epsilon) active[offset] = false;
+        if (size <= minimum + kFlexEpsilon) active[offset] = false;
         }
-        if (reduced <= epsilon) break;
+        if (reduced <= kFlexEpsilon) break;
         deficit -= reduced;
         total -= reduced;
     }

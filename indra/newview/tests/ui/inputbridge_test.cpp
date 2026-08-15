@@ -44,7 +44,7 @@ template<> template<> void inputBridgeObject::test<1>() {
     ensure_equals("fractional x remains canonical", translated.position.x, 12.5f);
     ensure_equals("fractional y remains canonical", translated.position.y, 34.25f);
     ensure("button translated", translated.button == radia::ui::PointerButton::Auxiliary1);
-    ensure_equals("modifiers translated", translated.modifiers, radia::ui::MODIFIER_SHIFT | radia::ui::MODIFIER_ALT);
+    ensure_equals("modifiers translated", translated.modifiers, radia::ui::kModifierShift | radia::ui::kModifierAlt);
     ensure_equals("click count preserved", translated.clickCount, std::uint8_t{2});
     ensure_equals("x delta preserved", translated.delta.x, 3.5f);
     ensure_equals("y delta preserved", translated.delta.y, -4.f);
@@ -60,8 +60,8 @@ template<> template<> void inputBridgeObject::test<2>() {
     };
 
     const radia::ui::KeyEvent translated = radia::viewer::ui::translateKeyInput(input);
-    ensure_equals("key translated", translated.key, radia::ui::KEY_RETURN);
-    ensure_equals("modifiers translated", translated.modifiers, radia::ui::MODIFIER_CONTROL | radia::ui::MODIFIER_PLATFORM_CONTROL);
+    ensure_equals("key translated", translated.key, radia::ui::kKeyReturn);
+    ensure_equals("modifiers translated", translated.modifiers, radia::ui::kModifierControl | radia::ui::kModifierPlatformControl);
     ensure("repeat preserved", translated.repeated);
 }
 
@@ -70,7 +70,7 @@ template<> template<> void inputBridgeObject::test<3>() {
     const auto scroll = radia::viewer::ui::translateScrollInput({8, 9, -1.f, 2.f, MASK_CONTROL});
     ensure_equals("horizontal delta preserved", scroll.dx, -1.f);
     ensure_equals("vertical delta preserved", scroll.dy, 2.f);
-    ensure_equals("scroll modifiers translated", scroll.modifiers, radia::ui::MODIFIER_CONTROL);
+    ensure_equals("scroll modifiers translated", scroll.modifiers, radia::ui::kModifierControl);
 }
 
 template<> template<> void inputBridgeObject::test<4>() {

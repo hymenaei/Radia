@@ -153,8 +153,6 @@ public:
     void setSize(const std::string& size) { mSize = size; }
     bool hasPointSize() const { return mPointSize > 0.f; }
     F32 getPointSize() const { return mPointSize; }
-    // Exact sizes are canonicalized to FreeType's 26.6 point precision so
-    // equivalent CSS requests share one registry/face-cache entry.
     void setPointSize(F32 point_size);
     bool hasWeight() const { return mWeight != 0; }
     U16 getWeight() const { return mWeight; }
@@ -186,8 +184,6 @@ private:
     font_file_info_vec_t mFontFiles;
     U8 mStyle;
     F32 mPointSize = 0.f;
-    // CSS/OpenType weight (1..1000). Zero means use the selected template's
-    // configured weight, preserving legacy named-font behavior.
     U16 mWeight = 0;
 };
 
@@ -257,9 +253,6 @@ public:
     // GL cleanup
     void destroyGL();
 
-    // `prewarm_ascii` preserves the named-viewer-font startup behavior while
-    // allowing exact analytic RDUI instances to avoid building an unused
-    // bitmap atlas. Atlas fallback remains lazy and fully functional.
     LLFontGL *getFont(const LLFontDescriptor& desc, bool prewarm_ascii = true);
     const LLFontDescriptor *getMatchingFontDesc(const LLFontDescriptor& desc);
     const LLFontDescriptor *getClosestFontTemplate(const LLFontDescriptor& desc);

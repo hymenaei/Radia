@@ -31,11 +31,17 @@
 #include "localization/internal.h"
 
 namespace radia::ui {
-using namespace localization_detail;
+using localization_detail::LocaleRecord;
+using localization_detail::PluralTemplates;
+using localization_detail::StringContract;
+using localization_detail::StringTemplate;
+using localization_detail::StringValue;
+using localization_detail::TemplateKind;
+using localization_detail::TemplateNode;
 
 namespace {
-constexpr const char* FIRST_STRONG_ISOLATE = "\xE2\x81\xA8";
-constexpr const char* POP_DIRECTIONAL_ISOLATE = "\xE2\x81\xA9";
+constexpr const char* kFirstStrongIsolate = "\xE2\x81\xA8";
+constexpr const char* kPopDirectionalIsolate = "\xE2\x81\xA9";
 
 std::string unicodeToUtf8(const icu::UnicodeString& value) {
     std::string result;
@@ -82,23 +88,23 @@ const std::string& LocalizationCatalog::defaultLocaleId() const {
     return mImpl->defaultLocale;
 }
 
-const LocaleInfo* LocalizationCatalog::locale(const std::string& id) const {
-    const LocaleRecord* locale = mImpl->locale(id);
+const LocaleInfo* LocalizationCatalog::locale(const std::string& localeId) const {
+    const LocaleRecord* locale = mImpl->locale(localeId);
     return locale ? &locale->info : nullptr;
 }
 
-bool LocalizationCatalog::containsLocale(const std::string& id) const {
-    return mImpl->locale(id) != nullptr;
+bool LocalizationCatalog::containsLocale(const std::string& localeId) const {
+    return mImpl->locale(localeId) != nullptr;
 }
 
-bool LocalizationCatalog::containsDefaultString(const std::string& id) const {
+bool LocalizationCatalog::containsDefaultString(const std::string& stringKey) const {
     const LocaleRecord* locale = mImpl->locale(mImpl->defaultLocale);
-    return locale && mImpl->find(*locale, id);
+    return locale && mImpl->find(*locale, stringKey);
 }
 
-bool LocalizationCatalog::pluralCapable(const std::string& id) const {
-    const auto found = mImpl->contracts.find(id);
-    return found != mImpl->contracts.end() && found->second.plural;
+bool LocalizationCatalog::pluralCapable(const std::string& stringKey) const {
+    const auto found = mImpl->contracts.find(stringKey);
+    return found != mImpl->contracts.end() && found->second.pluralCapable;
 }
 
 InlineContent LocalizationCatalog::resolve(const std::string& localeId, const LocalizationRequest& request) const {
@@ -112,7 +118,7 @@ InlineContent LocalizationCatalog::resolve(const std::string& localeId, const Lo
         if (value) break;
     }
     if (!value) {
-        LL_WARNS("RadiaUI") << "Unknown localization String Key: " << request.key() << LL_ENDL;
+        LL_WARNS("UI") << "Unknown localization String Key: " << request.key() << LL_ENDL;
         return rawKey(request.key());
     }
 
@@ -121,18 +127,18 @@ InlineContent LocalizationCatalog::resolve(const std::string& localeId, const Lo
     const StringContract& contract = contractFound->second;
 
     const LocalizationArgument* pluralArgument = nullptr;
-    if (contract.plural) {
+    if (contract.pluralCapable) {
         if (!request.selectsPlural()) {
-            LL_WARNS("RadiaUI") << "Plural-capable String Key requires a selector: " << request.key() << LL_ENDL;
+            LL_WARNS("UI") << "Plural-capable String Key requires a selector: " << request.key() << LL_ENDL;
             return rawKey(request.key());
         }
         const auto argument = request.arguments().find(request.pluralArgument());
         if (argument == request.arguments().end() || !argument->second.numeric() || !std::isfinite(argument->second.number())) {
-            LL_WARNS("RadiaUI") << "Plural selector must name a finite numeric argument for " << request.key() << LL_ENDL;
+            LL_WARNS("UI") << "Plural selector must name a finite numeric argument for " << request.key() << LL_ENDL;
             return rawKey(request.key());
         }
         if (!contract.requiredPluralArgument.empty() && contract.requiredPluralArgument != request.pluralArgument()) {
-            LL_WARNS("RadiaUI") << "Plural selector for " << request.key() << " must be '" << contract.requiredPluralArgument << "'." << LL_ENDL;
+            LL_WARNS("UI") << "Plural selector for " << request.key() << " must be '" << contract.requiredPluralArgument << "'." << LL_ENDL;
             return rawKey(request.key());
         }
         pluralArgument = &argument->second;
@@ -142,7 +148,7 @@ InlineContent LocalizationCatalog::resolve(const std::string& localeId, const Lo
     if (const StringTemplate* scalar = value->scalar()) selected = scalar;
     else {
         if (!pluralArgument || !active->pluralRules) {
-            LL_WARNS("RadiaUI") << "Could not select plural form for " << request.key() << LL_ENDL;
+            LL_WARNS("UI") << "Could not select plural form for " << request.key() << LL_ENDL;
             return rawKey(request.key());
         }
         const std::string category = unicodeToUtf8(active->pluralRules->select(pluralArgument->number()));
@@ -160,7 +166,7 @@ InlineContent LocalizationCatalog::resolve(const std::string& localeId, const Lo
             else active->numberFormat->format(std::get<double>(argument.value()), output);
             formatted = unicodeToUtf8(output);
         }
-        return std::string(FIRST_STRONG_ISOLATE) + formatted + POP_DIRECTIONAL_ISOLATE;
+        return std::string(kFirstStrongIsolate) + formatted + kPopDirectionalIsolate;
     };
 
     const auto resolveNodes = [&](auto&& self, const std::vector<TemplateNode>& nodes) -> std::vector<InlineContentNode> {
@@ -172,7 +178,7 @@ InlineContent LocalizationCatalog::resolve(const std::string& localeId, const Lo
                 case TemplateKind::Argument: {
                     const auto argument = request.arguments().find(node.value);
                     if (argument == request.arguments().end()) {
-                        LL_WARNS("RadiaUI") << "Missing localization argument '" << node.value << "' for " << request.key() << LL_ENDL;
+                        LL_WARNS("UI") << "Missing localization argument '" << node.value << "' for " << request.key() << LL_ENDL;
                         resolved.push_back(InlineContentNode::text("{" + node.value + "}"));
                     } else resolved.push_back(InlineContentNode::text(formatArgument(argument->second)));
                     break;
@@ -194,7 +200,7 @@ std::string LocalizationCatalog::get(const std::string& localeId, const Localiza
     return resolve(localeId, request).plainText();
 }
 
-std::string LocalizationCatalog::get(const std::string& localeId, const std::string& stringId) const {
-    return get(localeId, LocalizationRequest::text(stringId));
+std::string LocalizationCatalog::get(const std::string& localeId, const std::string& stringKey) const {
+    return get(localeId, LocalizationRequest::text(stringKey));
 }
 } // namespace radia::ui

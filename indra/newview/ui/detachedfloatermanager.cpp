@@ -32,7 +32,11 @@
 #include "widgets/floater.h"
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
+using radia::ui::Floater;
+using radia::ui::Rect;
+using radia::ui::Surface;
+using radia::ui::Vec2;
+
 DetachedFloaterPresentationResult::DetachedFloaterPresentationResult(std::unique_ptr<DetachedFloaterPresentation> value) : mValue(std::move(value)) {}
 
 DetachedFloaterPresentationResult::DetachedFloaterPresentationResult(std::unique_ptr<Floater> value) : mValue(std::move(value)) {}
@@ -140,7 +144,7 @@ struct DetachedFloaterManager::Impl {
         Floater& floater = *pending->floater;
         const Rect desired{pending->desired.x, pending->desired.y, floater.rect().w, floater.rect().h};
         const Rect attachedRect = floater.rect();
-        const std::optional<AuxiliaryWindowPoint> dragCursor = environment.releasePointerForDetach(pending->desired + pending->dragOffset);
+        const std::optional<AuxiliaryScreenPoint> dragScreenPoint = environment.releasePointerForDetach(pending->desired + pending->dragOffset);
         std::unique_ptr<Floater> transferred = surface.unmountFloater(floater);
         if (!transferred) {
             pending.reset();
@@ -156,7 +160,7 @@ struct DetachedFloaterManager::Impl {
         } else {
             std::unique_ptr<DetachedFloaterPresentation> presentation = std::move(creation).takePresentation();
             const std::optional<DetachedFloaterPresentationUpdate> initial = presentation->open(
-                {environment.mainRectToNative(desired), environment.nativeScaleMultiplier(), pending->dragOffset, std::nullopt, dragCursor});
+                {environment.mainRectToNative(desired), environment.nativeScaleMultiplier(), pending->dragOffset, std::nullopt, dragScreenPoint});
             if (!initial) {
                 std::unique_ptr<Floater> restored = presentation->releaseFloater();
                 restoreAttached(std::move(restored), attachedRect);
@@ -305,8 +309,7 @@ bool DetachedFloaterManager::restoreDetachedPlacement(const ComponentKey& compon
     DetachedFloaterPresentationResult creation = mImpl->makePresentation(std::move(transferred));
     if (!creation) {
         std::unique_ptr<Floater> returnedFloater = std::move(creation).takeReturnedFloater();
-        if (!returnedFloater)
-            LL_ERRS("UI") << "Detached Floater presentation factory consumed a Floater without returning it on failure." << LL_ENDL;
+        if (!returnedFloater) LL_ERRS("UI") << "Detached Floater presentation factory consumed a Floater without returning it on failure." << LL_ENDL;
         mImpl->restoreAttached(std::move(returnedFloater), attachedRect);
         return false;
     }

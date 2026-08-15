@@ -28,7 +28,16 @@
 #include "localization/internal.h"
 
 namespace radia::ui {
-using namespace localization_detail;
+using localization_detail::forEachTemplate;
+using localization_detail::localeIdentity;
+using localization_detail::LocaleRecord;
+using localization_detail::ParsedCatalog;
+using localization_detail::ParsedLocale;
+using localization_detail::parseYamlCatalog;
+using localization_detail::StringContract;
+using localization_detail::StringMap;
+using localization_detail::StringTemplate;
+using localization_detail::StringValue;
 
 LocalizationLoadResult LocalizationCatalog::Impl::load(const std::vector<ResourceLayer>& layers) {
     LocalizationLoadResult result;
@@ -45,17 +54,17 @@ LocalizationLoadResult LocalizationCatalog::Impl::load(const std::vector<Resourc
     const std::string defaultIdentity = localeIdentity(defaultLocale);
     for (ParsedLocale& parsed : base.locales) {
         LocaleRecord locale;
-        locale.info.id = parsed.id;
+        locale.info.localeId = parsed.localeId;
         locale.info.name = parsed.name.value_or(std::string());
         locale.info.direction = parsed.direction.value_or(LayoutDirection::LeftToRight);
         if (parsed.fallback) locale.info.fallback = *parsed.fallback;
-        else if (localeIdentity(parsed.id) != defaultIdentity) locale.info.fallback = defaultLocale;
+        else if (localeIdentity(parsed.localeId) != defaultIdentity) locale.info.fallback = defaultLocale;
 
-        if (localeIdentity(parsed.id) == defaultIdentity && parsed.fallback)
+        if (localeIdentity(parsed.localeId) == defaultIdentity && parsed.fallback)
             result.error("localization.default.fallback_forbidden", "The default locale cannot declare a fallback.", parsed.source, parsed.line);
 
         locale.strings = std::move(parsed.strings);
-        localeIndices.emplace(localeIdentity(locale.info.id), locales.size());
+        localeIndices.emplace(localeIdentity(locale.info.localeId), locales.size());
         locales.push_back(std::move(locale));
     }
     if (result.hasErrors()) return result;
@@ -67,7 +76,7 @@ LocalizationLoadResult LocalizationCatalog::Impl::load(const std::vector<Resourc
         if (result.hasErrors()) return result;
 
         for (ParsedLocale& parsed : patch.locales) {
-            const std::string identity = localeIdentity(parsed.id);
+            const std::string identity = localeIdentity(parsed.localeId);
             if (identity == defaultIdentity && parsed.fallback) {
                 result.error("localization.default.fallback_forbidden", "The default locale cannot declare a fallback.", parsed.source, parsed.line);
                 continue;
@@ -76,13 +85,13 @@ LocalizationLoadResult LocalizationCatalog::Impl::load(const std::vector<Resourc
             const auto existing = localeIndices.find(identity);
             if (existing == localeIndices.end()) {
                 if (!parsed.name) {
-                    result.error("localization.layer.locale.name_missing", "A locale introduced by a layer requires name: " + parsed.id + ".",
+                    result.error("localization.layer.locale.name_missing", "A locale introduced by a layer requires name: " + parsed.localeId + ".",
                                  parsed.source, parsed.line);
                     continue;
                 }
 
                 LocaleRecord locale;
-                locale.info.id = parsed.id;
+                locale.info.localeId = parsed.localeId;
                 locale.info.name = *parsed.name;
                 locale.info.direction = parsed.direction.value_or(LayoutDirection::LeftToRight);
                 locale.info.fallback = parsed.fallback.value_or(defaultLocale);
@@ -109,11 +118,12 @@ void LocalizationCatalog::Impl::compile(LocalizationLoadResult& result) {
     contracts.clear();
     localeIndices.clear();
 
-    std::sort(locales.begin(), locales.end(),
-              [](const LocaleRecord& left, const LocaleRecord& right) { return localeIdentity(left.info.id) < localeIdentity(right.info.id); });
+    std::sort(locales.begin(), locales.end(), [](const LocaleRecord& left, const LocaleRecord& right) {
+        return localeIdentity(left.info.localeId) < localeIdentity(right.info.localeId);
+    });
     for (std::size_t index = 0; index < locales.size(); ++index) {
         locales[index].fallbackChain.clear();
-        localeIndices.emplace(localeIdentity(locales[index].info.id), index);
+        localeIndices.emplace(localeIdentity(locales[index].info.localeId), index);
     }
 
     const auto defaultFound = localeIndices.find(localeIdentity(defaultLocale));
@@ -129,7 +139,7 @@ void LocalizationCatalog::Impl::compile(LocalizationLoadResult& result) {
         std::size_t current = start;
         while (true) {
             if (!seen.insert(current).second) {
-                result.error("localization.locale.fallback_cycle", "Locale fallback cycle contains " + locales[current].info.id + ".");
+                result.error("localization.locale.fallback_cycle", "Locale fallback cycle contains " + locales[current].info.localeId + ".");
                 break;
             }
             locale.fallbackChain.push_back(current);
@@ -138,18 +148,18 @@ void LocalizationCatalog::Impl::compile(LocalizationLoadResult& result) {
             const auto fallback = localeIndices.find(localeIdentity(locales[current].info.fallback));
             if (fallback == localeIndices.end()) {
                 result.error("localization.locale.fallback_unknown",
-                             "Unknown fallback locale " + locales[current].info.fallback + " for " + locales[current].info.id + ".");
+                             "Unknown fallback locale " + locales[current].info.fallback + " for " + locales[current].info.localeId + ".");
                 break;
             }
             current = fallback->second;
         }
 
         UErrorCode status = U_ZERO_ERROR;
-        locale.locale = icu::Locale::forLanguageTag(locale.info.id, status);
+        locale.locale = icu::Locale::forLanguageTag(locale.info.localeId, status);
         locale.pluralRules.reset(U_SUCCESS(status) ? icu::PluralRules::forLocale(locale.locale, status) : nullptr);
         locale.numberFormat.reset(U_SUCCESS(status) ? icu::NumberFormat::createInstance(locale.locale, status) : nullptr);
         if (U_FAILURE(status) || !locale.pluralRules || !locale.numberFormat)
-            result.error("localization.locale.runtime_invalid", "Could not initialize locale services for " + locale.info.id + ".");
+            result.error("localization.locale.runtime_invalid", "Could not initialize locale services for " + locale.info.localeId + ".");
     }
     if (result.hasErrors()) return;
 
@@ -167,26 +177,26 @@ void LocalizationCatalog::Impl::compile(LocalizationLoadResult& result) {
         const auto inspectDefault = [&](const StringTemplate& value) {
             contract.arguments.insert(value.arguments.begin(), value.arguments.end());
             if (!bindingSignatureSet) {
-                contract.bindings = value.bindings;
+                contract.shortcutIds = value.shortcutIds;
                 bindingSignatureSet = true;
-            } else if (value.bindings != contract.bindings)
+            } else if (value.shortcutIds != contract.shortcutIds)
                 result.error("localization.string.bindings_mismatch", "All default variants must use the same kbd bindings: " + key + ".",
                              defaultValue.source, defaultValue.line);
         };
         forEachTemplate(defaultValue, inspectDefault);
 
-        contract.plural = defaultValue.plural();
+        contract.pluralCapable = defaultValue.pluralCapable();
         std::set<std::string> introducedArguments;
         for (const LocaleRecord& locale : locales) {
             const auto found = locale.strings.find(key);
             if (found == locale.strings.end()) continue;
             const StringValue& localized = found->second;
-            contract.plural = contract.plural || localized.plural();
+            contract.pluralCapable = contract.pluralCapable || localized.pluralCapable();
             const auto inspectTranslation = [&](const StringTemplate& value) {
-                if (value.bindings != contract.bindings)
+                if (value.shortcutIds != contract.shortcutIds)
                     result.error("localization.string.bindings_mismatch", "Translation must preserve the default kbd bindings: " + key + ".",
                                  localized.source, localized.line);
-                if (localeIdentity(locale.info.id) == localeIdentity(defaultLocale)) return;
+                if (localeIdentity(locale.info.localeId) == localeIdentity(defaultLocale)) return;
                 for (const std::string& argument : value.arguments)
                     if (!contract.arguments.contains(argument)) introducedArguments.insert(argument);
             };
@@ -194,7 +204,7 @@ void LocalizationCatalog::Impl::compile(LocalizationLoadResult& result) {
         }
 
         if (!introducedArguments.empty()) {
-            if (!contract.plural || introducedArguments.size() != 1)
+            if (!contract.pluralCapable || introducedArguments.size() != 1)
                 result.error("localization.string.argument_unknown", "Translations introduce arguments absent from the default String: " + key + ".",
                              defaultValue.source, defaultValue.line);
             else contract.requiredPluralArgument = *introducedArguments.begin();
@@ -203,13 +213,13 @@ void LocalizationCatalog::Impl::compile(LocalizationLoadResult& result) {
     }
 }
 
-const LocaleRecord* LocalizationCatalog::Impl::locale(const std::string& id) const {
-    const auto found = localeIndices.find(localeIdentity(id));
+const LocaleRecord* LocalizationCatalog::Impl::locale(const std::string& localeId) const {
+    const auto found = localeIndices.find(localeIdentity(localeId));
     return found == localeIndices.end() ? nullptr : &locales[found->second];
 }
 
-LocaleRecord* LocalizationCatalog::Impl::locale(const std::string& id) {
-    const auto found = localeIndices.find(localeIdentity(id));
+LocaleRecord* LocalizationCatalog::Impl::locale(const std::string& localeId) {
+    const auto found = localeIndices.find(localeIdentity(localeId));
     return found == localeIndices.end() ? nullptr : &locales[found->second];
 }
 

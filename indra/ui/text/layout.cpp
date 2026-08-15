@@ -362,15 +362,15 @@ TextLine visualRuns(const TextLine& line, LayoutDirection direction, const TextM
 
     std::vector<VisualRun> segments;
     for (std::size_t runIndex = 0; runIndex < line.size(); ++runIndex) {
-        const auto [run_begin, run_end] = ranges[runIndex];
+        const auto [runBegin, runEnd] = ranges[runIndex];
         if (line[runIndex].keybinding()) {
-            segments.push_back({logicalToVisual[run_begin], line[runIndex]});
+            segments.push_back({logicalToVisual[runBegin], line[runIndex]});
             continue;
         }
-        std::size_t begin = run_begin;
-        while (begin < run_end) {
+        std::size_t begin = runBegin;
+        while (begin < runEnd) {
             std::size_t end = begin + 1;
-            while (end < run_end && levels[end] == levels[begin]) ++end;
+            while (end < runEnd && levels[end] == levels[begin]) ++end;
 
             FriBidiStrIndex visualStart = logicalToVisual[begin];
             LLWString wide;

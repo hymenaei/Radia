@@ -119,8 +119,8 @@ float textLineHeight(const Style& style) {
 }
 
 LLFontGL::TextSpacing usedTextSpacing(const Style& style, const LLFontGL& font) {
-    static const LLWString space(U" ");
-    const float spaceAdvance = std::max(0.f, font.getWidthF32(space.c_str(), 0, 1, true));
+    static const LLWString sSpace(U" ");
+    const float spaceAdvance = std::max(0.f, font.getWidthF32(sSpace.c_str(), 0, 1, true));
     return {
         style.letterSpacing.resolve(spaceAdvance),
         style.wordSpacing.resolve(style.fontSize),
@@ -220,8 +220,8 @@ struct PaintShaderUniforms {
 };
 
 const PaintShaderUniforms& shaderUniforms() {
-    static const PaintShaderUniforms uniforms;
-    return uniforms;
+    static const PaintShaderUniforms sUniforms;
+    return sUniforms;
 }
 
 GLint gradientOpValue(GradientKind kind) {
@@ -628,7 +628,7 @@ void GeometryPainter::drawMesh(const Mesh& mesh) {
     if (mesh.empty() || !program.mProgramObject) return;
     prepareVectorDraw();
     gGL.begin(LLRender::TRIANGLES);
-    for (const Vertex& vertex : mesh.triangles) {
+    for (const Vertex& vertex : mesh.vertices) {
         gGL.color4f(vertex.color.r, vertex.color.g, vertex.color.b, vertex.color.a);
         gGL.vertex2f(vertex.position.x, vertex.position.y);
     }

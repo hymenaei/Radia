@@ -174,7 +174,7 @@ class Widget {
     friend void layout_detail::setArrangedRect(Widget&, const Rect&);
     friend class layout_detail::WidgetLayoutAccess;
     friend class detail::WidgetCompilerAccess;
-    friend Style resolveWidgetStyle(const StyleSheet& theme, const Widget& node);
+    friend Style resolveWidgetStyle(const StyleSheet& styleSheet, const Widget& node);
 
 public:
     virtual ~Widget();
@@ -221,7 +221,7 @@ public:
     void activate();
     void activateFromLabel();
 
-    virtual Vec2 intrinsicSize(const StyleSheet& theme, const Style& style, const TextMetrics& textMetrics,
+    virtual Vec2 intrinsicSize(const StyleSheet& styleSheet, const Style& style, const TextMetrics& textMetrics,
                                const IntrinsicSizeConstraints& constraints = IntrinsicSizeConstraints()) const;
     virtual bool defaultPointerEvents() const { return false; }
     virtual bool focusable() const { return false; }

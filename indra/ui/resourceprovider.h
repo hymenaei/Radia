@@ -89,9 +89,9 @@ public:
 
     const std::map<std::string, std::string>& resources() const { return mResources; }
     const std::vector<ResourceLayer>& layers(const std::string& resourceId) const {
-        static const std::vector<ResourceLayer> empty;
+        static const std::vector<ResourceLayer> sEmpty;
         const auto found = mLayers.find(resourceId);
-        return found == mLayers.end() ? empty : found->second;
+        return found == mLayers.end() ? sEmpty : found->second;
     }
     const std::map<std::string, std::vector<ResourceLayer>>& layeredResources() const { return mLayers; }
 

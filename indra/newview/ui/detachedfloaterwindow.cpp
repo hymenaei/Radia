@@ -39,7 +39,17 @@
 #include "widgets/panel.h"
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
+using radia::ui::Floater;
+using radia::ui::OpenGLPaintContext;
+using radia::ui::PointerButton;
+using radia::ui::PointerEvent;
+using radia::ui::Rect;
+using radia::ui::Surface;
+using radia::ui::SurfaceFloaterDelegate;
+using radia::ui::System;
+using radia::ui::Vec2;
+using radia::ui::WidgetRef;
+
 class DetachedFloaterWindow::Impl final : public DetachedFloaterPresentation, public AuxiliaryWindowClient, private SurfaceFloaterDelegate {
 public:
     using Clock = DetachedFloaterWindow::Clock;
@@ -75,7 +85,7 @@ public:
         mNativeTitle = mFloater->title();
         mWindow->show(false);
         mWindow->render();
-        if (request.dragOffset) mWindow->beginDrag(request.dragOffset->x, request.dragOffset->y, request.dragCursor);
+        if (request.dragOffset) mWindow->beginDrag(request.dragOffset->x, request.dragOffset->y, request.dragScreenPoint);
         return makeUpdate(false);
     }
 

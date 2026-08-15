@@ -291,14 +291,14 @@ TextSource localizedLayoutText(std::string value, LayoutBuildResult& result, con
 
 void validateWidgetAttributes(const LayoutElement& element, const std::vector<std::string>& widgetAttributes, LayoutBuildResult& result,
                               const std::string& source) {
-    static const std::unordered_set<std::string> common = {
+    static const std::unordered_set<std::string> sCommonAttributes = {
         "id",       "class",       "visibility", "disabled",    "longClickDelay", "onClick",       "onDoubleClick",
         "onChange", "onMouseDown", "onMouseUp",  "onMouseMove", "onLongClick",    "onContextMenu", "x",
         "y",        "width",       "height",     "interactive", "blocksPointer",
     };
     std::unordered_set<std::string> allowed;
     for (const std::string& name : widgetAttributes) allowed.insert(schemaNameKey(name));
-    for (const std::string& name : common) allowed.insert(schemaNameKey(name));
+    for (const std::string& name : sCommonAttributes) allowed.insert(schemaNameKey(name));
     const WidgetContract* widgetContract = findWidgetContract(element.name());
     const std::string elementName = widgetContract ? widgetContract->elementName : schemaNameKey(element.name());
     for (const auto& [attributeName, attribute] : element.attributes())
@@ -309,10 +309,10 @@ void validateWidgetAttributes(const LayoutElement& element, const std::vector<st
 
 void applyCommonWidgetAttributes(const LayoutElement& element, Widget& widget, LayoutBuildResult& result, const std::string& source,
                                  const std::vector<WidgetEventKind>& supportedEvents) {
-    static const char* unsupported[] = {
+    static const char* sUnsupportedAttributes[] = {
         "x", "y", "width", "height", "interactive", "blocksPointer",
     };
-    for (const char* name : unsupported) {
+    for (const char* name : sUnsupportedAttributes) {
         std::string ignored;
         if (readLayoutAttribute(element, name, ignored))
             result.error("layout.attribute.unsupported", std::string("Unsupported XML attribute: ") + name + ".", source, element.source().begin.line,

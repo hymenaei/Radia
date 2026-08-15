@@ -37,7 +37,6 @@ class ResourceSnapshot;
 } // namespace radia::ui
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
 class SkinSnapshotSource;
 class ComponentManager;
 
@@ -68,9 +67,6 @@ public:
     std::optional<SkinReloadResult> update(TimePoint now, ComponentManager& components);
 
 private:
-    static bool sameReloadInputs(const radia::ui::System& system, const radia::ui::ResourceSnapshot& left,
-                                 const radia::ui::ResourceSnapshot& right);
-
     class Impl;
     std::unique_ptr<Impl> mImpl;
 };

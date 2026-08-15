@@ -58,6 +58,19 @@
 #include "widgets/floater.h"
 
 namespace {
+using radia::ui::OpenGLPaintContext;
+using radia::ui::PaintContext;
+using radia::ui::ResourceSnapshot;
+using radia::ui::SkinCompiler;
+using radia::ui::SkinGeneration;
+using radia::ui::SkinGenerationPrepareResult;
+using radia::ui::Surface;
+using radia::ui::System;
+using radia::ui::Vec2;
+using radia::viewer::ui::Runtime;
+using radia::viewer::ui::SkinSnapshotResult;
+using radia::viewer::ui::SkinSnapshotSource;
+
 enum class InitializationState { Uninitialized, Ready, Failed };
 
 constexpr char kLongClickDelaySetting[] = "LongClickDelay";
@@ -67,52 +80,67 @@ constexpr char kSkinReloadSettleIntervalSetting[] = "SkinAutoReloadSettleInterva
 struct AttachedSurfaceState final {
     using TimePoint = std::chrono::steady_clock::time_point;
 
-    AttachedSurfaceState(LLGLSLShader& uiShader, radia::ui::System& system, radia::viewer::ui::Runtime::PaintContextFactory paintContextFactory)
-        : paintContext(paintContextFactory ? paintContextFactory(uiShader, system) : std::make_unique<radia::ui::OpenGLPaintContext>(uiShader, system)),
+    AttachedSurfaceState(LLGLSLShader& uiShader, System& system, Runtime::PaintContextFactory paintContextFactory)
+        : paintContext(paintContextFactory ? paintContextFactory(uiShader, system) : std::make_unique<OpenGLPaintContext>(uiShader, system)),
           surface(system.createSurface(*paintContext)) {}
 
-    std::unique_ptr<radia::ui::PaintContext> paintContext;
-    std::unique_ptr<radia::ui::Surface> surface;
+    std::unique_ptr<PaintContext> paintContext;
+    std::unique_ptr<Surface> surface;
     int width = 0;
     int height = 0;
     bool visible = true;
     int magnetX = 0;
     int magnetY = 0;
-    radia::ui::Vec2 virtualPointer;
+    Vec2 virtualPointer;
     bool dragCursorClipping = false;
     TimePoint lastFrameTime;
 };
 
-class RuntimeSkinSource final : public radia::viewer::ui::SkinSnapshotSource {
+class RuntimeSkinSource final : public SkinSnapshotSource {
 public:
-    RuntimeSkinSource(const radia::viewer::ui::SkinResources& fallback, radia::viewer::ui::Runtime::SkinSnapshotProvider capture)
+    RuntimeSkinSource(const radia::viewer::ui::SkinResources& fallback, Runtime::SkinSnapshotProvider capture)
         : mFallback(fallback), mCapture(std::move(capture)) {}
 
-    radia::viewer::ui::SkinSnapshotResult capture() const override { return mCapture ? mCapture() : mFallback.capture(); }
+    SkinSnapshotResult capture() const override { return mCapture ? mCapture() : mFallback.capture(); }
 
 private:
     const radia::viewer::ui::SkinResources& mFallback;
-    radia::viewer::ui::Runtime::SkinSnapshotProvider mCapture;
+    Runtime::SkinSnapshotProvider mCapture;
 };
 
-radia::ui::SkinGenerationPrepareResult prepareSkinGeneration(radia::viewer::ui::SkinSnapshotResult captured) {
-    radia::ui::SkinGenerationPrepareResult result;
-    radia::ui::ResourceSnapshot snapshot = std::move(captured.snapshot);
+SkinGenerationPrepareResult prepareSkinGeneration(SkinSnapshotResult captured) {
+    SkinGenerationPrepareResult result;
+    ResourceSnapshot snapshot = std::move(captured.snapshot);
     result.append(std::move(captured));
     if (result.hasErrors()) return result;
 
-    radia::ui::SkinGenerationPrepareResult compiled = radia::ui::SkinCompiler().prepare(std::move(snapshot));
-    std::shared_ptr<const radia::ui::SkinGeneration> generation = std::move(compiled.generation);
+    SkinGenerationPrepareResult compiled = SkinCompiler().prepare(std::move(snapshot));
+    std::shared_ptr<const SkinGeneration> generation = std::move(compiled.generation);
     result.append(std::move(compiled));
     result.generation = std::move(generation);
     return result;
 }
-
 } // namespace
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
-struct Runtime::Impl final : private radia::ui::SurfaceFloaterDelegate {
+using radia::ui::Diagnostic;
+using radia::ui::DiagnosticResult;
+using radia::ui::Floater;
+using radia::ui::KeybindingPresentation;
+using radia::ui::KeyEvent;
+using radia::ui::PointerButton;
+using radia::ui::PointerEvent;
+using radia::ui::Rect;
+using radia::ui::ScrollEvent;
+using radia::ui::SkinGenerationPrepareResult;
+using radia::ui::Surface;
+using radia::ui::SurfaceFloaterDelegate;
+using radia::ui::System;
+using radia::ui::Vec2;
+using radia::ui::Visibility;
+using radia::ui::WidgetRef;
+
+struct Runtime::Impl final : private SurfaceFloaterDelegate {
 public:
     using KeybindingResolver = Runtime::KeybindingResolver;
     using KeybindingStateProvider = Runtime::KeybindingStateProvider;
@@ -131,7 +159,7 @@ public:
               [this] { return std::pair{mAttachedSurface.width, mAttachedSurface.height}; }, [this] { clearDragCursorState(); }),
           mDetachedManager(
               *mAttachedSurface.surface,
-              [this](std::unique_ptr<radia::ui::Floater> floater) {
+              [this](std::unique_ptr<Floater> floater) {
                   return DetachedFloaterPresentationResult::success(std::make_unique<DetachedFloaterWindow>(
                       mAuxiliaryWindowFactory, mUiShader, mSystem, mDetachedManager, std::move(floater), [this] { return currentTime(); }));
               },
@@ -142,11 +170,11 @@ public:
           mFloaterHost(*mAttachedSurface.surface, mDetachedManager), mSettingsAdapter(savedSettings),
           mComponents(mSystem, mFloaterHost, mSettingsAdapter) {
         mAttachedSurface.surface->setFloaterDelegate(this);
-        mSystem.setKeybindingResolver([this](const std::string& authored_id) {
-            if (!mResolveKeybinding) return radia::ui::KeybindingPresentation{};
-            std::string viewer_command = authored_id;
-            std::replace(viewer_command.begin(), viewer_command.end(), '-', '_');
-            return mResolveKeybinding(viewer_command);
+        mSystem.setKeybindingResolver([this](const std::string& authoredId) {
+            if (!mResolveKeybinding) return KeybindingPresentation{};
+            std::string viewerCommand = authoredId;
+            std::replace(viewerCommand.begin(), viewerCommand.end(), '-', '_');
+            return mResolveKeybinding(viewerCommand);
         });
     }
 
@@ -182,21 +210,21 @@ public:
         if (mInitialization != InitializationState::Uninitialized) return mInitialization == InitializationState::Ready;
         mInitialization = InitializationState::Failed;
 
-        radia::ui::SkinGenerationPrepareResult skinGenerationResult = prepareSkinGeneration(mSnapshotSource.capture());
+        SkinGenerationPrepareResult skinGenerationResult = prepareSkinGeneration(mSnapshotSource.capture());
         if (!skinGenerationResult.ok() && !mResources.selectedIsBundledDefault()) {
-            for (const radia::ui::Diagnostic& warning : skinGenerationResult.warnings) LL_WARNS("UI") << warning.formatted() << LL_ENDL;
-            for (const radia::ui::Diagnostic& error : skinGenerationResult.errors) LL_WARNS("UI") << error.formatted() << LL_ENDL;
+            for (const Diagnostic& warning : skinGenerationResult.warnings) LL_WARNS("UI") << warning.formatted() << LL_ENDL;
+            for (const Diagnostic& error : skinGenerationResult.errors) LL_WARNS("UI") << error.formatted() << LL_ENDL;
             LL_WARNS("UI") << "Selected Radia Skin rejected; attempting bundled default Skin." << LL_ENDL;
             skinGenerationResult = prepareSkinGeneration(mResources.captureBundledDefault());
         }
-        for (const radia::ui::Diagnostic& warning : skinGenerationResult.warnings) LL_WARNS("UI") << warning.formatted() << LL_ENDL;
-        for (const radia::ui::Diagnostic& error : skinGenerationResult.errors) LL_WARNS("UI") << error.formatted() << LL_ENDL;
+        for (const Diagnostic& warning : skinGenerationResult.warnings) LL_WARNS("UI") << warning.formatted() << LL_ENDL;
+        for (const Diagnostic& error : skinGenerationResult.errors) LL_WARNS("UI") << error.formatted() << LL_ENDL;
         if (!skinGenerationResult.ok()) return false;
         mSystem.publish(std::move(skinGenerationResult.generation));
         applySettings();
 
-        const std::string saved_locale = mSavedSettings.getString("Locale");
-        if (!saved_locale.empty()) mSystem.setLocale(saved_locale);
+        const std::string savedLocale = mSavedSettings.getString("Locale");
+        if (!savedLocale.empty()) mSystem.setLocale(savedLocale);
         mSavedSettings.setString("Locale", mSystem.activeLocale());
         mSystem.setLocaleChangedHandler([this](const std::string& locale) { mSavedSettings.setString("Locale", locale); });
 
@@ -225,7 +253,7 @@ public:
         return mComponents.registerDefinition(std::move(definitionId), std::move(resourceId), std::move(factory));
     }
 
-    radia::ui::Floater* openFloater(const std::string& definitionId, const std::string& instanceKey) {
+    Floater* openFloater(const std::string& definitionId, const std::string& instanceKey) {
         if (mInitialization != InitializationState::Ready) return nullptr;
         ComponentOpenResult result = mComponents.open(definitionId, instanceKey);
         logDiagnostics(result);
@@ -290,16 +318,16 @@ public:
         attachedSurface().paint(*mAttachedSurface.paintContext);
     }
 
-    NativeInputDispatchResult pointerMove(const radia::ui::PointerEvent& event) {
+    NativeInputDispatchResult pointerMove(const PointerEvent& event) {
         if (!isInteractive()) return {};
-        radia::ui::PointerEvent routed = event;
+        PointerEvent routed = event;
         if (cursorMagnetActive()) {
-            const float cursor_right = std::max(0.f, static_cast<float>(mAttachedSurface.width) - 1.f);
-            const float cursor_top = std::max(0.f, static_cast<float>(mAttachedSurface.height) - 1.f);
+            const float cursorRight = std::max(0.f, static_cast<float>(mAttachedSurface.width) - 1.f);
+            const float cursorTop = std::max(0.f, static_cast<float>(mAttachedSurface.height) - 1.f);
             routed.position.x =
-                magnetizedAxis(event.position.x, event.delta.x, 0.f, cursor_right, mAttachedSurface.magnetX, mAttachedSurface.virtualPointer.x);
+                magnetizedAxis(event.position.x, event.delta.x, 0.f, cursorRight, mAttachedSurface.magnetX, mAttachedSurface.virtualPointer.x);
             routed.position.y =
-                magnetizedAxis(event.position.y, event.delta.y, 0.f, cursor_top, mAttachedSurface.magnetY, mAttachedSurface.virtualPointer.y);
+                magnetizedAxis(event.position.y, event.delta.y, 0.f, cursorTop, mAttachedSurface.magnetY, mAttachedSurface.virtualPointer.y);
         } else {
             resetCursorMagnet();
         }
@@ -314,11 +342,11 @@ public:
         if (mInitialization == InitializationState::Ready) attachedSurface().pointerLeave();
     }
 
-    bool dispatchPointerButton(const radia::ui::PointerEvent& event, bool down) {
+    bool dispatchPointerButton(const PointerEvent& event, bool down) {
         if (!isInteractive()) return false;
-        if (down && event.button == radia::ui::PointerButton::Left) mAttachedSurface.lastFrameTime = currentTime();
+        if (down && event.button == PointerButton::Left) mAttachedSurface.lastFrameTime = currentTime();
         bool handled = false;
-        if (!down && event.button == radia::ui::PointerButton::Left && attachedSurface().hasPointerCapture()) handled = pointerMove(event).handled;
+        if (!down && event.button == PointerButton::Left && attachedSurface().hasPointerCapture()) handled = pointerMove(event).handled;
         handled = (down ? attachedSurface().pointerDown(event) : attachedSurface().pointerUp(event)) || handled;
         if (down && !handled) attachedSurface().clearFocus();
         if (down && draggingFloater()) {
@@ -329,15 +357,15 @@ public:
         return handled;
     }
 
-    NativeInputDispatchResult pointerDown(const radia::ui::PointerEvent& event) { return {dispatchPointerButton(event, true), std::nullopt}; }
+    NativeInputDispatchResult pointerDown(const PointerEvent& event) { return {dispatchPointerButton(event, true), std::nullopt}; }
 
-    NativeInputDispatchResult pointerUp(const radia::ui::PointerEvent& event) { return {dispatchPointerButton(event, false), std::nullopt}; }
+    NativeInputDispatchResult pointerUp(const PointerEvent& event) { return {dispatchPointerButton(event, false), std::nullopt}; }
 
-    NativeInputDispatchResult scroll(const radia::ui::ScrollEvent& event) { return {isInteractive() && attachedSurface().scroll(event), std::nullopt}; }
+    NativeInputDispatchResult scroll(const ScrollEvent& event) { return {isInteractive() && attachedSurface().scroll(event), std::nullopt}; }
 
-    NativeInputDispatchResult keyDown(const radia::ui::KeyEvent& event) { return {isInteractive() && attachedSurface().keyDown(event), std::nullopt}; }
+    NativeInputDispatchResult keyDown(const KeyEvent& event) { return {isInteractive() && attachedSurface().keyDown(event), std::nullopt}; }
 
-    NativeInputDispatchResult keyUp(const radia::ui::KeyEvent& event) { return {isInteractive() && attachedSurface().keyUp(event), std::nullopt}; }
+    NativeInputDispatchResult keyUp(const KeyEvent& event) { return {isInteractive() && attachedSurface().keyUp(event), std::nullopt}; }
 
     NativeInputDispatchResult character(U32 codepoint) { return {isInteractive() && attachedSurface().charInput(codepoint), std::nullopt}; }
 
@@ -361,8 +389,8 @@ public:
     }
 
 private:
-    radia::ui::Surface& attachedSurface() { return *mAttachedSurface.surface; }
-    const radia::ui::Surface& attachedSurface() const { return *mAttachedSurface.surface; }
+    Surface& attachedSurface() { return *mAttachedSurface.surface; }
+    const Surface& attachedSurface() const { return *mAttachedSurface.surface; }
 
     TimePoint currentTime() const { return mNow ? mNow() : std::chrono::steady_clock::now(); }
 
@@ -370,7 +398,7 @@ private:
 
     void applySettings() {
         const S32 longClickDelay =
-            std::max<S32>(1, settingOrDefault(kLongClickDelaySetting, static_cast<S32>(radia::ui::System::defaultLongClickDelay().count())));
+            std::max<S32>(1, settingOrDefault(kLongClickDelaySetting, static_cast<S32>(System::defaultLongClickDelay().count())));
         mSystem.setLongClickDelay(std::chrono::milliseconds{longClickDelay});
 
         radia::viewer::ui::SkinReloadTiming timing;
@@ -381,12 +409,12 @@ private:
         mReloadCoordinator.setAutoReloadTiming(timing);
     }
 
-    static void logDiagnostics(const radia::ui::DiagnosticResult& result) {
-        for (const radia::ui::Diagnostic& warning : result.warnings) LL_WARNS("UI") << warning.code << ": " << warning.formatted() << LL_ENDL;
-        for (const radia::ui::Diagnostic& error : result.errors) LL_WARNS("UI") << error.code << ": " << error.formatted() << LL_ENDL;
+    static void logDiagnostics(const DiagnosticResult& result) {
+        for (const Diagnostic& warning : result.warnings) LL_WARNS("UI") << warning.code << ": " << warning.formatted() << LL_ENDL;
+        for (const Diagnostic& error : result.errors) LL_WARNS("UI") << error.code << ": " << error.formatted() << LL_ENDL;
     }
 
-    void rejectReload(const radia::ui::DiagnosticResult& result) {
+    void rejectReload(const DiagnosticResult& result) {
         logDiagnostics(result);
         LL_WARNS("UI") << "Candidate Skin Generation rejected; generation " << mSystem.generation() << " remains live." << LL_ENDL;
         mComponents.reportReloadFailed(result);
@@ -395,9 +423,8 @@ private:
     void persistWorkspace() {
         if (!mWorkspaceRestored || !mPersistenceDirty || mRestoringWorkspace) return;
         std::vector<ComponentInstanceState> states;
-        mComponents.forEachOpen([&](const ComponentKey& componentKey, radia::ui::Floater& floater) {
-            states.push_back({componentKey, floater.minimized(), isDetached(floater)});
-        });
+        mComponents.forEachOpen(
+            [&](const ComponentKey& componentKey, Floater& floater) { states.push_back({componentKey, floater.minimized(), isDetached(floater)}); });
 
         const std::vector<ComponentKey> preserved(mUnrestoredWorkspace.begin(), mUnrestoredWorkspace.end());
         mComponentPersistence.saveWorkspace(states, preserved);
@@ -425,50 +452,50 @@ private:
     bool isInteractive() const {
         if (mInitialization != InitializationState::Ready || !mAttachedSurface.visible) return false;
         bool interactive = false;
-        mComponents.forEachOpen([&](const ComponentKey&, radia::ui::Floater& floater) {
-            if (!isDetached(floater) && floater.visibility() == radia::ui::Visibility::Visible) interactive = true;
+        mComponents.forEachOpen([&](const ComponentKey&, Floater& floater) {
+            if (!isDetached(floater) && floater.visibility() == Visibility::Visible) interactive = true;
         });
         return interactive;
     }
 
-    static float magnetizedAxis(float position, float delta, float minimum, float maximum, int& direction, float& virtual_position) {
+    static float magnetizedAxis(float position, float delta, float minimum, float maximum, int& direction, float& virtualPosition) {
         if (direction == 0) {
             if (position <= minimum && delta < 0.f) {
                 direction = -1;
-                virtual_position += delta;
-                return virtual_position;
+                virtualPosition += delta;
+                return virtualPosition;
             } else if (position >= maximum && delta > 0.f) {
                 direction = 1;
-                virtual_position += delta;
-                return virtual_position;
+                virtualPosition += delta;
+                return virtualPosition;
             }
-            virtual_position = position;
+            virtualPosition = position;
             return position;
         }
 
         if ((direction < 0 && position > minimum) || (direction > 0 && position < maximum)) {
             direction = 0;
-            virtual_position = position;
+            virtualPosition = position;
             return position;
         }
 
-        virtual_position += delta;
-        return virtual_position;
+        virtualPosition += delta;
+        return virtualPosition;
     }
 
     bool cursorMagnetActive() const {
-        const radia::ui::Floater* floater = draggingFloater();
+        const Floater* floater = draggingFloater();
         return floater && floater->canDetach() && !floater->minimized();
     }
 
     bool dragCursorClippingRequired() const {
-        const radia::ui::Floater* floater = draggingFloater();
+        const Floater* floater = draggingFloater();
         return floater && (floater->canDetach() || floater->minimized());
     }
 
-    radia::ui::Floater* draggingFloater() const {
-        radia::ui::Floater* result = nullptr;
-        mComponents.forEachOpen([&](const ComponentKey&, radia::ui::Floater& floater) {
+    Floater* draggingFloater() const {
+        Floater* result = nullptr;
+        mComponents.forEachOpen([&](const ComponentKey&, Floater& floater) {
             if (!result && !isDetached(floater) && floater.dragging()) result = &floater;
         });
         return result;
@@ -490,72 +517,72 @@ private:
         setDragCursorClipping(false);
     }
 
-    bool isDetached(const radia::ui::Floater& floater) const { return mDetachedManager.isDetached(floater); }
+    bool isDetached(const Floater& floater) const { return mDetachedManager.isDetached(floater); }
 
-    bool canDetachFloater(const radia::ui::Surface& surface, const radia::ui::Floater&) const override { return &surface == &attachedSurface(); }
+    bool canDetachFloater(const Surface& surface, const Floater&) const override { return &surface == &attachedSurface(); }
 
-    void floaterClosed(radia::ui::Surface& surface, radia::ui::Floater&) override {
+    void floaterClosed(Surface& surface, Floater&) override {
         if (&surface == &attachedSurface()) {
             clearInteraction();
             mPersistenceDirty = true;
         }
     }
 
-    void floaterMinimizedChanged(radia::ui::Surface& surface, radia::ui::Floater& floater, bool) override {
+    void floaterMinimizedChanged(Surface& surface, Floater& floater, bool) override {
         if (&surface == &attachedSurface()) {
             saveAttachedPlacement(floater);
             mPersistenceDirty = true;
         }
     }
 
-    void floaterMoveEnded(radia::ui::Surface& surface, radia::ui::Floater& floater) override {
+    void floaterMoveEnded(Surface& surface, Floater& floater) override {
         if (&surface == &attachedSurface()) {
             if (!floater.minimized()) saveAttachedPlacement(floater);
             mPersistenceDirty = true;
         }
     }
 
-    void floaterResized(radia::ui::Surface& surface, radia::ui::Floater& floater, bool complete) override {
+    void floaterResized(Surface& surface, Floater& floater, bool complete) override {
         if (complete && &surface == &attachedSurface()) {
             saveAttachedPlacement(floater);
             mPersistenceDirty = true;
         }
     }
 
-    void floaterDetachRequested(radia::ui::Surface& surface, radia::ui::Floater& floater, const radia::ui::Vec2& desired, const radia::ui::Vec2& dragOffset) override {
+    void floaterDetachRequested(Surface& surface, Floater& floater, const Vec2& desired, const Vec2& dragOffset) override {
         if (&surface == &attachedSurface())
             if (const std::optional<ComponentKey> componentKey = mComponents.componentKeyFor(floater))
                 mDetachedManager.requestDetach(*componentKey, floater, desired, dragOffset);
     }
 
-    void saveAttachedPlacement(const radia::ui::Floater& floater) {
+    void saveAttachedPlacement(const Floater& floater) {
         if (const std::optional<ComponentKey> componentKey = mComponents.componentKeyFor(floater)) saveAttachedPlacement(*componentKey, floater);
     }
 
-    void saveAttachedPlacement(const ComponentKey& componentKey, const radia::ui::Floater& floater) {
+    void saveAttachedPlacement(const ComponentKey& componentKey, const Floater& floater) {
         mComponentPersistence.saveAttachedPlacement(componentKey, floater);
     }
 
     void saveAttachedPlacements() {
-        mComponents.forEachOpen([this](const ComponentKey& componentKey, radia::ui::Floater& floater) {
+        mComponents.forEachOpen([this](const ComponentKey& componentKey, Floater& floater) {
             if (!isDetached(floater)) saveAttachedPlacement(componentKey, floater);
         });
     }
 
-    void restorePlacement(const ComponentKey& componentKey, radia::ui::Floater& floater) {
+    void restorePlacement(const ComponentKey& componentKey, Floater& floater) {
         const std::optional<radia::viewer::ui::FloaterPlacement> placement = mComponentPersistence.restorePlacement(componentKey);
         if (!placement) return;
-        if (const auto* detached_placement = std::get_if<radia::viewer::ui::DetachedFloaterPlacement>(&*placement)) {
+        if (const auto* detachedPlacement = std::get_if<radia::viewer::ui::DetachedFloaterPlacement>(&*placement)) {
             if (!floater.canDetach()) {
                 saveAttachedPlacement(componentKey, floater);
                 return;
             }
-            if (mDetachedManager.restoreDetachedPlacement(componentKey, floater, *detached_placement)) return;
+            if (mDetachedManager.restoreDetachedPlacement(componentKey, floater, *detachedPlacement)) return;
             saveAttachedPlacement(componentKey, floater);
             return;
         }
         const auto& attached = std::get<radia::viewer::ui::AttachedFloaterPlacement>(*placement);
-        radia::ui::Rect saved{attached.x, attached.y, floater.rect().w, floater.rect().h};
+        Rect saved{attached.x, attached.y, floater.rect().w, floater.rect().h};
         if (floater.canResize() && attached.size) {
             saved.w = attached.size->width;
             saved.h = attached.size->height;
@@ -570,13 +597,12 @@ private:
         mAttachedSurface.width = width;
         mAttachedSurface.height = height;
         attachedSurface().setViewport(static_cast<float>(width), static_cast<float>(height));
-        mComponents.forEachOpen([&](const ComponentKey& componentKey, radia::ui::Floater& floater) {
+        mComponents.forEachOpen([&](const ComponentKey& componentKey, Floater& floater) {
             auto found = mLayoutInitialized.find(componentKey);
             if (found != mLayoutInitialized.end() && found->second.get() == &floater) return;
             mLayoutInitialized[componentKey].set(&floater);
             if (isDetached(floater)) return;
-            if (const std::optional<radia::ui::Rect> prepared = attachedSurface().prepareFloater(floater))
-                attachedSurface().placeFloater(floater, *prepared);
+            if (const std::optional<Rect> prepared = attachedSurface().prepareFloater(floater)) attachedSurface().placeFloater(floater, *prepared);
             restorePlacement(componentKey, floater);
         });
         attachedSurface().updateLayout();
@@ -592,7 +618,7 @@ private:
     LLGLSLShader& mUiShader;
     radia::viewer::ui::SkinResources mResources;
     RuntimeSkinSource mSnapshotSource;
-    radia::ui::System mSystem;
+    System mSystem;
     radia::viewer::ui::SkinReloadCoordinator mReloadCoordinator;
     AttachedSurfaceState mAttachedSurface;
     RuntimeWindowAdapter mWindowAdapter;
@@ -607,7 +633,7 @@ private:
     bool mPersistenceDirty = false;
     std::set<ComponentKey> mUnrestoredWorkspace;
     std::optional<RuntimeKeybindingState> mObservedBindingState;
-    std::map<ComponentKey, radia::ui::WidgetRef<radia::ui::Floater>> mLayoutInitialized;
+    std::map<ComponentKey, WidgetRef<Floater>> mLayoutInitialized;
     bool mShuttingDown = false;
 };
 
@@ -628,7 +654,7 @@ bool Runtime::registerFloater(std::string definitionId, std::string resourceId, 
     return mImpl->registerFloater(std::move(definitionId), std::move(resourceId), std::move(factory));
 }
 
-radia::ui::Floater* Runtime::openFloater(const std::string& definitionId, const std::string& instanceKey) {
+Floater* Runtime::openFloater(const std::string& definitionId, const std::string& instanceKey) {
     return mImpl->openFloater(definitionId, instanceKey);
 }
 

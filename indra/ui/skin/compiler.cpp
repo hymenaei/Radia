@@ -41,84 +41,84 @@ SkinGenerationPrepareResult SkinCompiler::prepare(ResourceSnapshot resources) co
     LocalizationCatalog localization;
     StyleSheet styleSheet;
     std::unordered_map<std::string, SvgIcon> icons;
-    LayoutDocumentMap layout_documents;
+    LayoutDocumentMap layoutDocuments;
 
-    const std::optional<std::string> localization_yaml = resources.load("localization.yaml");
-    const std::optional<std::string> style_source = resources.load("skin.radia");
-    if (!localization_yaml) result.error("rdui.resource.missing", "Missing Radia UI resource: localization.yaml.", "localization.yaml");
-    if (!style_source) result.error("rdui.resource.missing", "Missing Radia UI resource: skin.radia.", "skin.radia");
+    const std::optional<std::string> localizationYaml = resources.load("localization.yaml");
+    const std::optional<std::string> styleSource = resources.load("skin.radia");
+    if (!localizationYaml) result.error("rdui.resource.missing", "Missing Radia UI resource: localization.yaml.", "localization.yaml");
+    if (!styleSource) result.error("rdui.resource.missing", "Missing Radia UI resource: skin.radia.", "skin.radia");
     if (result.hasErrors()) return result;
 
-    const std::vector<ResourceLayer>& localization_layers = resources.layers("localization.yaml");
-    const std::vector<ResourceLayer>& style_layers = resources.layers("skin.radia");
-    result.append(localization_layers.empty() ? localization.loadYaml(*localization_yaml, "localization.yaml")
-                                              : localization.loadYamlLayers(localization_layers));
-    result.append(style_layers.empty() ? styleSheet.loadRadia(*style_source, "skin.radia") : styleSheet.loadRadiaLayers(style_layers));
+    const std::vector<ResourceLayer>& localizationLayers = resources.layers("localization.yaml");
+    const std::vector<ResourceLayer>& styleLayers = resources.layers("skin.radia");
+    result.append(localizationLayers.empty() ? localization.loadYaml(*localizationYaml, "localization.yaml")
+                                              : localization.loadYamlLayers(localizationLayers));
+    result.append(styleLayers.empty() ? styleSheet.loadRadia(*styleSource, "skin.radia") : styleSheet.loadRadiaLayers(styleLayers));
 
     constexpr const char* kResourcePrefix = "resources/";
     constexpr std::size_t kResourcePrefixSize = sizeof("resources/") - 1;
-    for (const auto& [resource_id, source_text] : resources.resources()) {
-        if (resource_id.rfind(kResourcePrefix, 0) != 0) continue;
-        if (resource_id.size() == kResourcePrefixSize) {
-            result.error("rdui.asset.path_invalid", "Invalid asset resource ID: " + resource_id + ".", resource_id);
+    for (const auto& [resourceId, sourceText] : resources.resources()) {
+        if (resourceId.rfind(kResourcePrefix, 0) != 0) continue;
+        if (resourceId.size() == kResourcePrefixSize) {
+            result.error("rdui.asset.path_invalid", "Invalid asset resource ID: " + resourceId + ".", resourceId);
             continue;
         }
 
-        const std::string asset_id = resource_id.substr(kResourcePrefixSize);
-        if (asset_id.rfind("icons/", 0) != 0 || !endsWith(asset_id, ".svg")) {
-            result.error("rdui.asset.unsupported", "Unsupported Radia UI asset: " + asset_id + ".", resource_id);
+        const std::string assetId = resourceId.substr(kResourcePrefixSize);
+        if (assetId.rfind("icons/", 0) != 0 || !endsWith(assetId, ".svg")) {
+            result.error("rdui.asset.unsupported", "Unsupported Radia UI asset: " + assetId + ".", resourceId);
             continue;
         }
 
-        const std::string name = asset_id.substr(sizeof("icons/") - 1, asset_id.size() - (sizeof("icons/") - 1) - (sizeof(".svg") - 1));
+        const std::string name = assetId.substr(sizeof("icons/") - 1, assetId.size() - (sizeof("icons/") - 1) - (sizeof(".svg") - 1));
         if (name.empty() || name.front() == '/' || name.find("..") != std::string::npos) {
-            result.error("rdui.asset.name_invalid", "Invalid icon resource name: " + asset_id + ".", resource_id);
+            result.error("rdui.asset.name_invalid", "Invalid icon resource name: " + assetId + ".", resourceId);
             continue;
         }
 
-        SvgCompileResult icon_result = compileSvgIcon(source_text, resource_id);
+        SvgCompileResult icon_result = compileSvgIcon(sourceText, resourceId);
         if (icon_result.ok() && !icons.emplace(name, std::move(*icon_result.icon)).second)
-            result.error("rdui.icon.duplicate", "Duplicate icon resource: " + name + ".", resource_id);
+            result.error("rdui.icon.duplicate", "Duplicate icon resource: " + name + ".", resourceId);
         result.append(std::move(icon_result));
     }
     if (result.hasErrors()) return result;
 
     for (const auto& resource : resources.resources()) {
-        const std::string& resource_id = resource.first;
-        const std::string& source_text = resource.second;
-        if (resource_id == "localization.yaml" || resource_id == "skin.radia" || resource_id.rfind(kResourcePrefix, 0) == 0) continue;
-        if (!endsWith(resource_id, ".xml")) {
-            result.error("rdui.layout.unsupported", "Unsupported Radia UI layout resource: " + resource_id + ".", resource_id);
+        const std::string& resourceId = resource.first;
+        const std::string& sourceText = resource.second;
+        if (resourceId == "localization.yaml" || resourceId == "skin.radia" || resourceId.rfind(kResourcePrefix, 0) == 0) continue;
+        if (!endsWith(resourceId, ".xml")) {
+            result.error("rdui.layout.unsupported", "Unsupported Radia UI layout resource: " + resourceId + ".", resourceId);
             continue;
         }
-        if (resource_id.rfind("widgets/", 0) == 0) {
+        if (resourceId.rfind("widgets/", 0) == 0) {
             const std::string element =
-                resource_id.substr(sizeof("widgets/") - 1, resource_id.size() - (sizeof("widgets/") - 1) - (sizeof(".xml") - 1));
+                resourceId.substr(sizeof("widgets/") - 1, resourceId.size() - (sizeof("widgets/") - 1) - (sizeof(".xml") - 1));
             if (element.empty() || element.find('/') != std::string::npos) {
-                result.error("rdui.layout.defaults_path_invalid", "Widget Defaults must use widgets/<element>.xml: " + resource_id + ".",
-                             resource_id);
+                result.error("rdui.layout.defaults_path_invalid", "Widget Defaults must use widgets/<element>.xml: " + resourceId + ".",
+                             resourceId);
                 continue;
             }
         }
 
-        LayoutDocumentParseResult parsed = LayoutDocumentParser().parse(source_text, resource_id);
+        LayoutDocumentParseResult parsed = LayoutDocumentParser().parse(sourceText, resourceId);
         std::unique_ptr<LayoutDocument> document = std::move(parsed.document);
         result.append(std::move(parsed));
-        if (document) layout_documents.emplace(resource_id, std::shared_ptr<const LayoutDocument>(std::move(document)));
+        if (document) layoutDocuments.emplace(resourceId, std::shared_ptr<const LayoutDocument>(std::move(document)));
     }
     if (result.hasErrors()) return result;
 
     auto generation = std::shared_ptr<SkinGeneration>(new SkinGeneration(std::make_unique<SkinGeneration::Impl>(
-        std::move(resources), std::move(localization), std::move(styleSheet), std::move(icons), std::move(layout_documents))));
+        std::move(resources), std::move(localization), std::move(styleSheet), std::move(icons), std::move(layoutDocuments))));
 
     for (const auto& resource : generation->mImpl->resources->resources()) {
-        const std::string& resource_id = resource.first;
-        if (generation->mImpl->layout_documents.find(resource_id) == generation->mImpl->layout_documents.end()) continue;
-        if (resource_id.rfind("widgets/", 0) == 0) {
+        const std::string& resourceId = resource.first;
+        if (generation->mImpl->layoutDocuments.find(resourceId) == generation->mImpl->layoutDocuments.end()) continue;
+        if (resourceId.rfind("widgets/", 0) == 0) {
             const std::string element =
-                resource_id.substr(sizeof("widgets/") - 1, resource_id.size() - (sizeof("widgets/") - 1) - (sizeof(".xml") - 1));
+                resourceId.substr(sizeof("widgets/") - 1, resourceId.size() - (sizeof("widgets/") - 1) - (sizeof(".xml") - 1));
             result.append(generation->validateWidgetDefaults(element));
-        } else result.append(generation->buildWidgetTree(resource_id, generation->defaultLocale()));
+        } else result.append(generation->buildWidgetTree(resourceId, generation->defaultLocale()));
     }
     if (result.hasErrors()) return result;
 

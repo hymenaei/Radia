@@ -33,7 +33,6 @@ class Surface;
 } // namespace radia::ui
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
 class DetachedFloaterManager;
 
 class FloaterHost final : public ComponentManager::Host {

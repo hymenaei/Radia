@@ -49,7 +49,7 @@ public:
     const std::string& text() const { return mText.plainText(); }
     const InlineContent& content() const { return mText.content(); }
 
-    Vec2 intrinsicSize(const StyleSheet& theme, const Style& style, const TextMetrics& textMetrics,
+    Vec2 intrinsicSize(const StyleSheet& styleSheet, const Style& style, const TextMetrics& textMetrics,
                        const IntrinsicSizeConstraints& constraints = IntrinsicSizeConstraints()) const override;
     void paint(PaintContext& context, const Style& style, float scale) const override;
     bool defaultPointerEvents() const override { return static_cast<bool>(mTarget); }

@@ -37,12 +37,12 @@
 #include "eventcall.h"
 
 namespace radia::viewer::ui::detail {
-using ::radia::ui::CurrentEventArgument;
-using ::radia::ui::EventArgument;
-using ::radia::ui::EventCall;
-using ::radia::ui::SourceWidgetArgument;
-using ::radia::ui::WidgetEvent;
-using ::radia::ui::WidgetEventKind;
+using radia::ui::CurrentEventArgument;
+using radia::ui::EventArgument;
+using radia::ui::EventCall;
+using radia::ui::SourceWidgetArgument;
+using radia::ui::WidgetEvent;
+using radia::ui::WidgetEventKind;
 
 template<typename T> using ControllerEventParameterBase = std::remove_cv_t<std::remove_reference_t<T>>;
 
@@ -201,11 +201,11 @@ void invokeControllerEvent(Controller* object, Method method, const WidgetEvent&
     std::invoke(method, object, controllerEventArgumentValue<Args>(call.arguments()[Indices], event)...);
 }
 
-template<typename Callback> radia::viewer::ui::ComponentControllerEventRegistration makeControllerEventRegistration(std::string name, Callback callback) {
+template<typename Callback> radia::viewer::ui::ComponentControllerEventRegistration makeControllerEventRegistration(std::string handlerName, Callback callback) {
     using CallbackT = std::decay_t<Callback>;
     static_assert(std::is_invocable_v<CallbackT>,
                   "ComponentController callbacks must be callable without arguments; use the member Event overload for typed arguments.");
-    return {std::move(name), std::nullopt, [callback = CallbackT(std::move(callback))](const WidgetEvent&, const EventCall&) mutable { callback(); },
+    return {std::move(handlerName), std::nullopt, [callback = CallbackT(std::move(callback))](const WidgetEvent&, const EventCall&) mutable { callback(); },
             controllerEventCallArgumentError<>};
 }
 
@@ -213,15 +213,15 @@ template<typename T> inline constexpr bool kIsControllerEventParameter =
     !std::is_base_of_v<WidgetEvent, ControllerEventParameterBase<T>> || ControllerEventArgumentAdapter<ControllerEventParameterBase<T>>::sSupported;
 
 template<typename Controller, typename... Args>
-radia::viewer::ui::ComponentControllerEventRegistration makeControllerEventRegistration(std::string name, Controller* object,
+radia::viewer::ui::ComponentControllerEventRegistration makeControllerEventRegistration(std::string handlerName, Controller* object,
                                                                              void (Controller::*method)(Args...)) {
     static_assert((kIsControllerEventParameter<Args> && ...),
                   "ComponentController Event parameters must use the viewer Event facades, not core UI Events.");
     static_assert((kIsSupportedControllerEventParameter<Args> && ...), "Unsupported ComponentController Event parameter.");
     static_assert(!controllerEventKindsConflict<Args...>(), "ComponentController Event Handler parameters must use one typed Event kind.");
     const std::optional<WidgetEventKind> kind = controllerEventKindForParameters<Args...>();
-    if (!object) return {std::move(name), kind, {}, controllerEventCallArgumentError<Args...>};
-    return {std::move(name), kind,
+    if (!object) return {std::move(handlerName), kind, {}, controllerEventCallArgumentError<Args...>};
+    return {std::move(handlerName), kind,
             [object, method](const WidgetEvent& event, const EventCall& call) {
                 invokeControllerEvent<Controller, decltype(method), Args...>(object, method, event, call, std::index_sequence_for<Args...>());
             },
@@ -229,15 +229,15 @@ radia::viewer::ui::ComponentControllerEventRegistration makeControllerEventRegis
 }
 
 template<typename Controller, typename... Args>
-radia::viewer::ui::ComponentControllerEventRegistration makeControllerEventRegistration(std::string name, Controller* object,
+radia::viewer::ui::ComponentControllerEventRegistration makeControllerEventRegistration(std::string handlerName, Controller* object,
                                                                              void (Controller::*method)(Args...) const) {
     static_assert((kIsControllerEventParameter<Args> && ...),
                   "ComponentController Event parameters must use the viewer Event facades, not core UI Events.");
     static_assert((kIsSupportedControllerEventParameter<Args> && ...), "Unsupported ComponentController Event parameter.");
     static_assert(!controllerEventKindsConflict<Args...>(), "ComponentController Event Handler parameters must use one typed Event kind.");
     const std::optional<WidgetEventKind> kind = controllerEventKindForParameters<Args...>();
-    if (!object) return {std::move(name), kind, {}, controllerEventCallArgumentError<Args...>};
-    return {std::move(name), kind,
+    if (!object) return {std::move(handlerName), kind, {}, controllerEventCallArgumentError<Args...>};
+    return {std::move(handlerName), kind,
             [object, method](const WidgetEvent& event, const EventCall& call) {
                 invokeControllerEvent<Controller, decltype(method), Args...>(object, method, event, call, std::index_sequence_for<Args...>());
             },

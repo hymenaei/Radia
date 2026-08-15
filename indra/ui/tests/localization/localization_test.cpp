@@ -41,7 +41,7 @@ template<> template<> void localizationObject::test<1>() {
 
     ensure("valid localization loads", result.ok());
     ensure_equals("locale count retained", catalog.locales().size(), 3U);
-    ensure_equals("locale enumeration ignores YAML authoring order", catalog.locales().front().id, "ar");
+    ensure_equals("locale enumeration ignores YAML authoring order", catalog.locales().front().localeId, "ar");
     ensure_equals("native UTF-8 name preserved", catalog.locale("PT")->name, "Português");
     ensure_equals("omitted direction is ltr", static_cast<int>(catalog.locale("pt")->direction),
                   static_cast<int>(radia::ui::LayoutDirection::LeftToRight));

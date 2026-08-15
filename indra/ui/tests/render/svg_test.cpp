@@ -62,7 +62,7 @@ template<> template<> void svgObject::test<3>() {
     const radia::ui::Path transformed = radia::ui::transformSvgPath(icon.paths[0], icon.viewBox, {10.f, 20.f, 16.f, 16.f});
     const radia::ui::Mesh mesh = radia::ui::tessellateStroke(transformed, {1.f, 1.f, 1.f, 1.f}, 2.f, 1.f);
     ensure("transformed icon tessellates", !mesh.empty());
-    for (const radia::ui::Vertex& vertex : mesh.triangles) {
+    for (const radia::ui::Vertex& vertex : mesh.vertices) {
         ensure("x inside target", vertex.position.x >= 9.f && vertex.position.x <= 27.f);
         ensure("y inside target", vertex.position.y >= 19.f && vertex.position.y <= 37.f);
     }

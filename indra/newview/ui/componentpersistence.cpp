@@ -33,7 +33,8 @@
 #include "widgets/floater.h"
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
+using radia::ui::Floater;
+
 namespace {
 constexpr std::string_view kUILayout = "UILayout";
 constexpr std::string_view kUIWorkspace = "UIWorkspace";

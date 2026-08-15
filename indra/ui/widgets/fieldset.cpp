@@ -45,7 +45,7 @@ protected:
 };
 } // namespace
 
-Fieldset::Fieldset() : Widget(ELEMENT) {}
+Fieldset::Fieldset() : Widget(sElement) {}
 
 void Fieldset::constrainResolvedStyle(Style& style) const {
     style.flow = Flow::Column;
@@ -119,7 +119,7 @@ void Fieldset::paint(PaintContext& context, const Style& style, float) const {
 }
 
 WidgetContract detail::fieldsetContract() {
-    return defineWidget<Fieldset>(Fieldset::ELEMENT)
+    return defineWidget<Fieldset>(Fieldset::sElement)
         .composition(
             [](const LayoutElement& element, Fieldset& fieldset, const WidgetScopeContext&, LayoutBuildResult& result, const std::string& source) {
                 std::size_t fieldCount = 0;

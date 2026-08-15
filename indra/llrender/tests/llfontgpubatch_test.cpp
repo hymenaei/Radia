@@ -97,38 +97,38 @@ template<> template<> void llfontgpubatch_object::test<1>() {
     cache.init(tf.font);
     auto batch = LLFontGpuGlyphCache::beginBatch();
 
-    const U32 gid_A = gidFor(tf.face, (hb_codepoint_t)'A');
-    const LLFontGpuGlyphCache::GlyphLoc loc = cache.getGlyph(batch, gid_A);
+    const U32 glyphIdA = gidFor(tf.face, (hb_codepoint_t)'A');
+    const LLFontGpuGlyphCache::GlyphLoc loc = cache.getOrEncodeGlyph(batch, glyphIdA);
     ensure("'A' drawable", loc.drawable());
 
     const F32 scale = 0.05f;
-    const F32 pen_x = 100.f, pen_y = 80.f;
+    const F32 penX = 100.f, penY = 80.f;
     const LLColor4U color(10, 20, 30, 255);
-    const U32 glyph_loc = loc.mTexelOffset;
+    const U32 glyphLocation = loc.mTexelOffset;
 
-    LLVector4a pos[6];
-    LLVector2 uv[6];
-    LLColor4U col[6];
-    U32 gl[6];
-    LLFontGpuBatch::buildGlyphQuad(pos, uv, col, gl, loc, pen_x, pen_y, scale, 0.f, color, glyph_loc);
+    LLVector4a positions[6];
+    LLVector2 texcoords[6];
+    LLColor4U colors[6];
+    U32 glyphLocations[6];
+    LLFontGpuBatch::buildGlyphQuad(positions, texcoords, colors, glyphLocations, loc, penX, penY, scale, 0.f, color, glyphLocation);
 
-    F32 min_u = 1e9f, max_u = -1e9f, min_v = 1e9f, max_v = -1e9f;
+    F32 minU = 1e9f, maxU = -1e9f, minV = 1e9f, maxV = -1e9f;
     for (S32 i = 0; i < 6; ++i) {
-        const F32* p = pos[i].getF32ptr();
+        const F32* p = positions[i].getF32ptr();
 
-        ensure("pos.x uses uniform scale", approx(p[0], pen_x + uv[i].mV[0] * scale));
-        ensure("pos.y uses uniform scale", approx(p[1], pen_y + uv[i].mV[1] * scale));
-        ensure_equals("glyph_loc matches", gl[i], glyph_loc);
-        ensure("color preserved", col[i].mV[0] == 10 && col[i].mV[1] == 20 && col[i].mV[2] == 30 && col[i].mV[3] == 255);
+        ensure("pos.x uses uniform scale", approx(p[0], penX + texcoords[i].mV[0] * scale));
+        ensure("pos.y uses uniform scale", approx(p[1], penY + texcoords[i].mV[1] * scale));
+        ensure_equals("glyphLocation matches", glyphLocations[i], glyphLocation);
+        ensure("color preserved", colors[i].mV[0] == 10 && colors[i].mV[1] == 20 && colors[i].mV[2] == 30 && colors[i].mV[3] == 255);
 
-        min_u = std::min(min_u, uv[i].mV[0]);
-        max_u = std::max(max_u, uv[i].mV[0]);
-        min_v = std::min(min_v, uv[i].mV[1]);
-        max_v = std::max(max_v, uv[i].mV[1]);
+        minU = std::min(minU, texcoords[i].mV[0]);
+        maxU = std::max(maxU, texcoords[i].mV[0]);
+        minV = std::min(minV, texcoords[i].mV[1]);
+        maxV = std::max(maxV, texcoords[i].mV[1]);
     }
 
-    ensure("tc x-span >= width", (max_u - min_u) >= (F32)std::abs(loc.mWidth));
-    ensure("tc y-span >= |height|", (max_v - min_v) >= (F32)std::abs(loc.mHeight));
+    ensure("tc x-span >= width", (maxU - minU) >= (F32)std::abs(loc.mWidth));
+    ensure("tc y-span >= |height|", (maxV - minV) >= (F32)std::abs(loc.mHeight));
 }
 
 template<> template<> void llfontgpubatch_object::test<2>() {
@@ -138,20 +138,20 @@ template<> template<> void llfontgpubatch_object::test<2>() {
     LLFontGpuGlyphCache cache;
     cache.init(tf.font);
     auto batch = LLFontGpuGlyphCache::beginBatch();
-    const LLFontGpuGlyphCache::GlyphLoc loc = cache.getGlyph(batch, gidFor(tf.face, (hb_codepoint_t)'A'));
+    const LLFontGpuGlyphCache::GlyphLoc loc = cache.getOrEncodeGlyph(batch, gidFor(tf.face, (hb_codepoint_t)'A'));
     ensure("'A' drawable", loc.drawable());
 
-    const U32 glyph_loc =
+    const U32 glyphLocation =
         (loc.mTexelOffset & LLVertexBuffer::GLYPH_LOC_OFFSET_MASK) | LLVertexBuffer::GLYPH_LOC_COLOR | LLVertexBuffer::GLYPH_LOC_COLOR_AS_MASK;
-    LLVector4a pos[6];
-    LLVector2 uv[6];
-    LLColor4U col[6];
-    U32 gl[6];
-    LLFontGpuBatch::buildGlyphQuad(pos, uv, col, gl, loc, 0.f, 0.f, 0.05f, 0.f, LLColor4U::white, glyph_loc);
+    LLVector4a positions[6];
+    LLVector2 texcoords[6];
+    LLColor4U colors[6];
+    U32 glyphLocations[6];
+    LLFontGpuBatch::buildGlyphQuad(positions, texcoords, colors, glyphLocations, loc, 0.f, 0.f, 0.05f, 0.f, LLColor4U::white, glyphLocation);
     for (S32 i = 0; i < 6; ++i) {
-        ensure("COLOR bit set", (gl[i] & LLVertexBuffer::GLYPH_LOC_COLOR) != 0u);
-        ensure("color mask bit set", (gl[i] & LLVertexBuffer::GLYPH_LOC_COLOR_AS_MASK) != 0u);
-        ensure_equals("offset recoverable", gl[i] & LLVertexBuffer::GLYPH_LOC_OFFSET_MASK, loc.mTexelOffset & LLVertexBuffer::GLYPH_LOC_OFFSET_MASK);
+        ensure("COLOR bit set", (glyphLocations[i] & LLVertexBuffer::GLYPH_LOC_COLOR) != 0u);
+        ensure("color mask bit set", (glyphLocations[i] & LLVertexBuffer::GLYPH_LOC_COLOR_AS_MASK) != 0u);
+        ensure_equals("offset recoverable", glyphLocations[i] & LLVertexBuffer::GLYPH_LOC_OFFSET_MASK, loc.mTexelOffset & LLVertexBuffer::GLYPH_LOC_OFFSET_MASK);
     }
 }
 } // namespace tut

@@ -39,7 +39,6 @@ struct EventRegistrationDescriptor;
 } // namespace radia::ui
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
 class ComponentManager;
 class Widget;
 namespace detail { struct ControllerWidgetSlot; }
@@ -57,11 +56,11 @@ public:
 
 protected:
     Widget& getWidgetById(std::string_view id);
-    radia::ui::TextSource localize(std::string id) const;
+    radia::ui::TextSource localize(std::string localizationKey) const;
 
-    template<typename Callback> void event(std::string name, Callback callback);
-    template<typename ControllerT, typename... Args> void event(std::string name, void (ControllerT::*method)(Args...));
-    template<typename ControllerT, typename... Args> void event(std::string name, void (ControllerT::*method)(Args...) const);
+    template<typename Callback> void event(std::string handlerName, Callback callback);
+    template<typename ControllerT, typename... Args> void event(std::string handlerName, void (ControllerT::*method)(Args...));
+    template<typename ControllerT, typename... Args> void event(std::string handlerName, void (ControllerT::*method)(Args...) const);
 
 private:
     class PreparedWidgets;

@@ -30,7 +30,11 @@
 #include "style/style.h"
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
+using radia::ui::CursorStyle;
+using radia::ui::KeyEvent;
+using radia::ui::PointerEvent;
+using radia::ui::ScrollEvent;
+
 PointerEvent translatePointerInput(const NativePointerInput& input);
 ScrollEvent translateScrollInput(const NativeScrollInput& input);
 KeyEvent translateKeyInput(const NativeKeyInput& input);

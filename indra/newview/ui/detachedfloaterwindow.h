@@ -38,7 +38,11 @@ class System;
 class LLGLSLShader;
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
+using radia::ui::Floater;
+using radia::ui::Rect;
+using radia::ui::System;
+using radia::ui::Vec2;
+
 class DetachedFloaterWindow final : public DetachedFloaterPresentation {
 public:
     using Clock = std::function<std::chrono::steady_clock::time_point()>;

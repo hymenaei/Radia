@@ -50,13 +50,35 @@
 #include "widgets/switch.h"
 #include "widgets/text.h"
 
+namespace {
+using radia::ui::Button;
+using radia::ui::DiagnosticResult;
+using radia::ui::FixedTextMetrics;
+using radia::ui::fixedTextMetrics;
+using radia::ui::Floater;
+using radia::ui::Label;
+using radia::ui::LayoutBuildResult;
+using radia::ui::LayoutDocumentParser;
+using radia::ui::LayoutDocumentParseResult;
+using radia::ui::ResourceSnapshot;
+using radia::ui::SkinCompiler;
+using radia::ui::SkinGenerationPrepareResult;
+using radia::ui::Surface;
+using radia::ui::Switch;
+using radia::ui::System;
+using radia::ui::Widget;
+using radia::ui::WidgetEventKind;
+using radia::ui::WidgetRef;
+using radia::ui::detail::findWidgetInScope;
+} // namespace
+
 namespace tut {
 struct resourceCompilerData {
     LayoutCompilerFixture factory;
     std::map<std::string, std::string>& resources = factory.resources;
 
-    template<typename WidgetT> radia::ui::WidgetRef<WidgetT> requireWidget(radia::ui::Widget& root, const std::string& id) {
-        return radia::ui::WidgetRef<WidgetT>(dynamic_cast<WidgetT*>(radia::ui::detail::findWidgetInScope(root, id)));
+    template<typename WidgetT> WidgetRef<WidgetT> requireWidget(Widget& root, const std::string& id) {
+        return WidgetRef<WidgetT>(dynamic_cast<WidgetT*>(findWidgetInScope(root, id)));
     }
 };
 using resourceCompilerTest = test_group<resourceCompilerData>;
@@ -66,29 +88,29 @@ resourceCompilerTest resourceCompilerTestCase("resourcecompiler");
 template<> template<> void resourceCompilerObject::test<1>() {
     const char* kXml =
         "<floater title=\"title\" closeIcon=\"close\" minimizeIcon=\"minimize\" canMinimize=\"true\"><text id=\"status\">Ready</text><button id=\"go\" onClick=\"demoGo()\" onDoubleClick=\"demoDouble()\" onMouseDown=\"demoPress()\" onLongClick=\"demoHold()\" onContextMenu=\"demoMenu()\" longClickDelay=\"750ms\"><icon src=\"search\"/>Go</button><switch id=\"toggle\" checked=\"true\" onChange=\"demoChanged()\"/></floater>";
-    radia::ui::LayoutBuildResult result = factory.buildWidgetTreeFromString(kXml, "floater.xml");
-    auto* floater = result.rootAs<radia::ui::Floater>();
+    LayoutBuildResult result = factory.buildWidgetTreeFromString(kXml, "floater.xml");
+    auto* floater = result.rootAs<Floater>();
     ensure("arbitrary floater root parsed", result.ok() && floater);
     ensure_equals("title localization key retained without a System", floater->title(), "title");
     ensure("declared chrome composed", floater->header() && floater->minimizeButton());
-    auto go = requireWidget<radia::ui::Button>(*floater, "go");
-    auto toggle = requireWidget<radia::ui::Switch>(*floater, "toggle");
+    auto go = requireWidget<Button>(*floater, "go");
+    auto toggle = requireWidget<Switch>(*floater, "toggle");
     ensure("Binder resolves parsed controls", go && toggle);
     ensure("typed lookup", toggle->checked());
-    ensure_equals("click Handler Call parsed", go->eventCall(radia::ui::WidgetEventKind::Click)->name(), "demoGo");
-    ensure_equals("double-click Handler Call parsed", go->eventCall(radia::ui::WidgetEventKind::DoubleClick)->name(), "demoDouble");
-    ensure_equals("pointer Handler Call parsed", go->eventCall(radia::ui::WidgetEventKind::MouseDown)->name(), "demoPress");
-    ensure_equals("long-click Handler Call parsed", go->eventCall(radia::ui::WidgetEventKind::LongClick)->name(), "demoHold");
-    ensure_equals("context-menu Handler Call parsed", go->eventCall(radia::ui::WidgetEventKind::ContextMenu)->name(), "demoMenu");
+    ensure_equals("click Handler Call parsed", go->eventCall(WidgetEventKind::Click)->name(), "demoGo");
+    ensure_equals("double-click Handler Call parsed", go->eventCall(WidgetEventKind::DoubleClick)->name(), "demoDouble");
+    ensure_equals("pointer Handler Call parsed", go->eventCall(WidgetEventKind::MouseDown)->name(), "demoPress");
+    ensure_equals("long-click Handler Call parsed", go->eventCall(WidgetEventKind::LongClick)->name(), "demoHold");
+    ensure_equals("context-menu Handler Call parsed", go->eventCall(WidgetEventKind::ContextMenu)->name(), "demoMenu");
     ensure_equals("long click delay parsed", go->longClickDelay()->count(), 750LL);
-    ensure_equals("Switch Handler Call parsed", toggle->eventCall(radia::ui::WidgetEventKind::Change)->name(), "demoChanged");
+    ensure_equals("Switch Handler Call parsed", toggle->eventCall(WidgetEventKind::Change)->name(), "demoChanged");
 }
 
 template<> template<> void resourceCompilerObject::test<2>() {
     resources["shared.xml"] = "<panel id=\"base\" class=\"shared\"><text id=\"resourceChild\">base</text></panel>";
     const char* kXml =
         "<panel><panel filename=\"shared.xml\" id=\"one\" class=\"first\"><text id=\"inlineChild\"/></panel><panel filename=\"shared.xml\" id=\"two\"/></panel>";
-    radia::ui::LayoutBuildResult result = factory.buildWidgetTreeFromString(kXml, "outer.xml");
+    LayoutBuildResult result = factory.buildWidgetTreeFromString(kXml, "outer.xml");
     ensure("embedded panels parsed", result.ok());
     auto first = requireWidget<radia::ui::Panel>(*result.root, "one");
     auto second = requireWidget<radia::ui::Panel>(*result.root, "two");
@@ -105,7 +127,7 @@ template<> template<> void resourceCompilerObject::test<3>() {
     resources["nested/inner.xml"] = "<panel id=\"inner\"/>";
     resources["nested/middle.xml"] = "<panel><panel filename=\"inner.xml\"/></panel>";
     resources["outer.xml"] = "<panel><panel filename=\"nested/middle.xml\"/></panel>";
-    const radia::ui::LayoutBuildResult result = factory.buildWidgetTreeFromResource("outer.xml");
+    const LayoutBuildResult result = factory.buildWidgetTreeFromResource("outer.xml");
     ensure("nested relative panels load", result.ok());
     ensure("deep child present",
            result.root->children().size() == 1
@@ -116,7 +138,7 @@ template<> template<> void resourceCompilerObject::test<3>() {
 template<> template<> void resourceCompilerObject::test<4>() {
     resources["a.xml"] = "<panel><panel filename=\"b.xml\"/></panel>";
     resources["b.xml"] = "<panel><panel filename=\"a.xml\"/></panel>";
-    radia::ui::LayoutBuildResult cycle = factory.buildWidgetTreeFromResource("a.xml");
+    LayoutBuildResult cycle = factory.buildWidgetTreeFromResource("a.xml");
     ensure("cycle rejected", !cycle.ok());
     ensure("failed build never exposes a partial tree", !cycle.root);
     ensure_equals("cycle has stable diagnostic code", cycle.errors.front().code, "layout.resource.cycle");
@@ -129,18 +151,18 @@ template<> template<> void resourceCompilerObject::test<4>() {
            !factory.buildWidgetTreeFromString("<panel><panel filename=\"../outside.xml\"/></panel>", "root.xml").ok());
 
     resources["empty.xml"] = "";
-    const radia::ui::LayoutBuildResult empty = factory.buildWidgetTreeFromResource("empty.xml");
+    const LayoutBuildResult empty = factory.buildWidgetTreeFromResource("empty.xml");
     ensure("empty resource rejected as invalid XML", !empty.ok());
     ensure_equals("empty resource differs from missing resource", empty.errors.front().code, "layout.xml.invalid");
 }
 
 template<> template<> void resourceCompilerObject::test<5>() {
-    const radia::ui::LayoutBuildResult invalid = factory.buildWidgetTreeFromString("<panel>\n  <unknown/>\n</panel>", "source_ranges.xml");
+    const LayoutBuildResult invalid = factory.buildWidgetTreeFromString("<panel>\n  <unknown/>\n</panel>", "source_ranges.xml");
     ensure("source-aware compiler rejects unknown child", !invalid.ok());
     ensure_equals("compiler diagnostic retains source line", invalid.errors.front().line, 2U);
     ensure_equals("compiler diagnostic retains source column", invalid.errors.front().column, 3U);
 
-    radia::ui::LayoutDocumentParseResult parsed = radia::ui::LayoutDocumentParser().parse("<panel>before<label>middle</label>after</panel>", "mixed.xml");
+    LayoutDocumentParseResult parsed = LayoutDocumentParser().parse("<panel>before<label>middle</label>after</panel>", "mixed.xml");
     ensure("one document tree parses", parsed.ok());
     ensure_equals("mixed content order is represented once", parsed.document->root->content.size(), 3U);
     ensure("text-child-text order retained",
@@ -151,15 +173,15 @@ template<> template<> void resourceCompilerObject::test<5>() {
 }
 
 template<> template<> void resourceCompilerObject::test<6>() {
-    radia::ui::LayoutBuildResult result = factory.buildWidgetTreeFromString("<button>first<icon src=\"one\"/></button>");
-    auto* button = result.rootAs<radia::ui::Button>();
+    LayoutBuildResult result = factory.buildWidgetTreeFromString("<button>first<icon src=\"one\"/></button>");
+    auto* button = result.rootAs<Button>();
     ensure("button parses", result.ok() && button);
     ensure_equals("inline icon retained", button->icon()->name(), "one");
     ensure_equals("inline label retained", button->label()->text(), "first");
     ensure_equals("button caption is not a standalone label style target", button->label()->elementName(), std::string("button-caption"));
     ensure("text before icon preserves authored order", button->children()[0].get() == button->label());
-    radia::ui::LayoutBuildResult iconFirst = factory.buildWidgetTreeFromString("<button><icon src=\"search\"/>second</button>");
-    auto* reversed = iconFirst.rootAs<radia::ui::Button>();
+    LayoutBuildResult iconFirst = factory.buildWidgetTreeFromString("<button><icon src=\"search\"/>second</button>");
+    auto* reversed = iconFirst.rootAs<Button>();
     ensure("icon before text preserves authored order", iconFirst.ok() && reversed->children()[0].get() == reversed->icon());
     button->setIcon("updated");
     button->setLabel("updated");
@@ -298,8 +320,8 @@ template<> template<> void resourceCompilerObject::test<7>() {
 }
 
 template<> template<> void resourceCompilerObject::test<8>() {
-    radia::ui::System system;
-    radia::ui::ResourceSnapshot resources;
+    System system;
+    ResourceSnapshot resources;
     const char* kLocalization =
         "defaultLocale: en\nlocales: {en: {name: English, strings: {title: Title, status: Ready, press: Press}}, pt: {name: Português, strings: {title: Título, status: Pronto, press: Pressione}}}\n";
     const char* kLocalizedLayout =
@@ -307,30 +329,30 @@ template<> template<> void resourceCompilerObject::test<8>() {
     resources.add("localization.yaml", kLocalization);
     resources.add("skin.radia", "label { text-color: #ffffffff; }");
     resources.add("localized.xml", kLocalizedLayout);
-    radia::ui::SkinGenerationPrepareResult prepared = radia::ui::SkinCompiler().prepare(resources);
+    SkinGenerationPrepareResult prepared = SkinCompiler().prepare(resources);
     ensure("localizations load", prepared.ok());
     system.publish(prepared.generation);
-    radia::ui::LayoutBuildResult result = system.buildWidgetTree("localized.xml");
-    auto* floater = result.rootAs<radia::ui::Floater>();
+    LayoutBuildResult result = system.buildWidgetTree("localized.xml");
+    auto* floater = result.rootAs<Floater>();
     ensure("localized tree builds", result.ok() && floater);
-    auto status = requireWidget<radia::ui::Label>(*floater, "status");
-    auto press = requireWidget<radia::ui::Button>(*floater, "press");
+    auto status = requireWidget<Label>(*floater, "status");
+    auto press = requireWidget<Button>(*floater, "press");
     ensure("Binder resolves localized controls", status && press);
-    radia::ui::Label* buttonLabel = press->label();
+    Label* buttonLabel = press->label();
     ensure_equals("initial title localized", floater->title(), "Title");
     ensure_equals("initial label localized", status->text(), "Ready");
     ensure_equals("initial button localized", buttonLabel->text(), "Press");
 
-    std::unique_ptr<radia::ui::Surface> surface = system.createSurface(radia::ui::fixedTextMetrics());
-    auto localizedFloater = std::unique_ptr<radia::ui::Floater>(static_cast<radia::ui::Floater*>(result.root.release()));
+    std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
+    auto localizedFloater = std::unique_ptr<Floater>(static_cast<Floater*>(result.root.release()));
     surface->mountFloater(std::move(localizedFloater));
     ensure("second language selected", system.setLocale("pt"));
     ensure_equals("visible title refreshed", floater->title(), "Título");
     ensure_equals("visible label refreshed", status->text(), "Pronto");
     ensure_equals("visible button refreshed", buttonLabel->text(), "Pressione");
 
-    auto programmatic = std::make_unique<radia::ui::Floater>();
-    radia::ui::Floater* programmaticFloater = programmatic.get();
+    auto programmatic = std::make_unique<Floater>();
+    Floater* programmaticFloater = programmatic.get();
     programmatic->setTitle("title");
     surface->mountFloater(std::move(programmatic));
     ensure_equals("programmatic title resolves when attached", programmaticFloater->title(), "Título");
@@ -344,37 +366,37 @@ template<> template<> void resourceCompilerObject::test<8>() {
     ensure_equals("literal assignment clears binding", status->text(), "Literal");
 
     resources.add("missing.xml", "<text>missing</text>");
-    const radia::ui::SkinGenerationPrepareResult missing = radia::ui::SkinCompiler().prepare(std::move(resources));
+    const SkinGenerationPrepareResult missing = SkinCompiler().prepare(std::move(resources));
     ensure("missing default-language key rejects generation", !missing.ok() && !missing.generation);
 }
 
 template<> template<> void resourceCompilerObject::test<9>() {
-    const radia::ui::LayoutBuildResult unknownElement = factory.buildWidgetTreeFromString("<panel><unknown/></panel>", "unknown.xml");
+    const LayoutBuildResult unknownElement = factory.buildWidgetTreeFromString("<panel><unknown/></panel>", "unknown.xml");
     ensure("unknown element rejects document", !unknownElement.ok() && !unknownElement.root);
     ensure_equals("unknown element diagnostic code", unknownElement.errors.front().code, "layout.element.unknown");
     ensure_equals("unknown element diagnostic source", unknownElement.errors.front().source, "unknown.xml");
 
-    const radia::ui::LayoutBuildResult unsupportedAttribute = factory.buildWidgetTreeFromString("<panel width=\"10\"/>", "attribute.xml");
+    const LayoutBuildResult unsupportedAttribute = factory.buildWidgetTreeFromString("<panel width=\"10\"/>", "attribute.xml");
     ensure("unsupported attribute rejects document", !unsupportedAttribute.ok() && !unsupportedAttribute.root);
     ensure_equals("unsupported attribute diagnostic code", unsupportedAttribute.errors.front().code, "layout.attribute.unsupported");
 
-    const radia::ui::LayoutBuildResult unknownAttribute = factory.buildWidgetTreeFromString("<floater invented=\"true\"/>", "unknown_attribute.xml");
+    const LayoutBuildResult unknownAttribute = factory.buildWidgetTreeFromString("<floater invented=\"true\"/>", "unknown_attribute.xml");
     ensure("unknown widget attribute rejects document", !unknownAttribute.ok() && !unknownAttribute.root);
     ensure_equals("unknown attribute diagnostic code", unknownAttribute.errors.front().code, "layout.attribute.unknown");
 
-    const radia::ui::LayoutBuildResult unsupportedEvent = factory.buildWidgetTreeFromString("<text onClick=\"click()\">copy</text>", "event.xml");
+    const LayoutBuildResult unsupportedEvent = factory.buildWidgetTreeFromString("<text onClick=\"click()\">copy</text>", "event.xml");
     ensure("unsupported Widget Event leaves the Widget tree usable", unsupportedEvent.ok() && unsupportedEvent.root);
     ensure_equals("unsupported Event reports one warning", unsupportedEvent.warnings.size(), 1U);
     ensure_equals("unsupported Event diagnostic code", unsupportedEvent.warnings.front().code, "layout.event.unsupported");
 
-    const radia::ui::LayoutBuildResult expressionCall = factory.buildWidgetTreeFromString("<button onClick=\"save(force=true)\"/>", "expression.xml");
+    const LayoutBuildResult expressionCall = factory.buildWidgetTreeFromString("<button onClick=\"save(force=true)\"/>", "expression.xml");
     ensure("Event expressions leave the Widget tree usable with a no-op binding", expressionCall.ok() && expressionCall.root);
     ensure_equals("expression reports one warning", expressionCall.warnings.size(), 1U);
     ensure_equals("unsupported literal diagnostic code", expressionCall.warnings.front().code, "layout.event.literal_unsupported");
 }
 
 template<> template<> void resourceCompilerObject::test<10>() {
-    const radia::ui::LayoutBuildResult duplicate =
+    const LayoutBuildResult duplicate =
         factory.buildWidgetTreeFromString("<panel><text id=\"same\"/><button id=\"same\">Same</button></panel>", "duplicates.xml");
     ensure("duplicate ids reject whole widget tree", !duplicate.ok() && !duplicate.root);
     ensure_equals("duplicate id diagnostic code", duplicate.errors.front().code, "layout.id.duplicate");
@@ -382,7 +404,7 @@ template<> template<> void resourceCompilerObject::test<10>() {
 }
 
 template<> template<> void resourceCompilerObject::test<11>() {
-    const radia::ui::LayoutBuildResult invalid =
+    const LayoutBuildResult invalid =
         factory.buildWidgetTreeFromString("<floater canClose=\"sometimes\"><switch checked=\"yes\"/></floater>", "booleans.xml");
     ensure("invalid booleans reject whole widget tree", !invalid.ok() && !invalid.root);
     ensure_equals("both invalid booleans diagnosed", invalid.errors.size(), 2U);
@@ -391,11 +413,11 @@ template<> template<> void resourceCompilerObject::test<11>() {
 }
 
 template<> template<> void resourceCompilerObject::test<12>() {
-    const radia::ui::LayoutBuildResult missingHandler = factory.buildWidgetTreeFromString("<button longClickDelay=\"1s\"/>");
+    const LayoutBuildResult missingHandler = factory.buildWidgetTreeFromString("<button longClickDelay=\"1s\"/>");
     ensure("delay without an Event Handler leaves the Widget tree usable", missingHandler.ok());
     ensure_equals("missing long-click Handler warns", missingHandler.warnings.front().code, "layout.long_click.event_missing");
     ensure("duration requires unit", !factory.buildWidgetTreeFromString("<button onLongClick=\"hold()\" longClickDelay=\"500\"/>").ok());
-    const radia::ui::LayoutBuildResult unsupported = factory.buildWidgetTreeFromString("<text onLongClick=\"hold()\">copy</text>");
+    const LayoutBuildResult unsupported = factory.buildWidgetTreeFromString("<text onLongClick=\"hold()\">copy</text>");
     ensure("Text ignores unsupported long click", unsupported.ok());
     ensure_equals("unsupported long click warns", unsupported.warnings.front().code, "layout.event.unsupported");
 }
@@ -403,11 +425,11 @@ template<> template<> void resourceCompilerObject::test<12>() {
 template<> template<> void resourceCompilerObject::test<13>() {
     const char* kCustomHeaderLayout =
         "<floater title=\"tools\" icon=\"search\" canMinimize=\"true\" showHeaderIdentity=\"false\"><header><button id=\"refresh\">Refresh</button></header><panel id=\"content\"/></floater>";
-    radia::ui::LayoutBuildResult result = factory.buildWidgetTreeFromString(kCustomHeaderLayout, "custom_header.xml");
-    auto* floater = result.rootAs<radia::ui::Floater>();
+    LayoutBuildResult result = factory.buildWidgetTreeFromString(kCustomHeaderLayout, "custom_header.xml");
+    auto* floater = result.rootAs<Floater>();
     ensure("custom-header floater builds", result.ok() && floater);
     auto content = requireWidget<radia::ui::Panel>(*floater, "content");
-    auto refresh = requireWidget<radia::ui::Button>(*floater, "refresh");
+    auto refresh = requireWidget<Button>(*floater, "refresh");
     ensure("Binder resolves authored Floater children", content && refresh);
     ensure("direct children route into content box", content->parent() == floater->content());
     ensure_equals("custom header widget remains findable", refresh->parent()->part(), "header::custom");
@@ -434,18 +456,17 @@ template<> template<> void resourceCompilerObject::test<13>() {
     ensure("clearing authored children expires content reference", !content);
     ensure("clearing authored children expires custom header reference", !refresh);
 
-    const radia::ui::LayoutBuildResult missingTitle = factory.buildWidgetTreeFromString("<floater canMinimize=\"true\"/>", "missing_title.xml");
+    const LayoutBuildResult missingTitle = factory.buildWidgetTreeFromString("<floater canMinimize=\"true\"/>", "missing_title.xml");
     ensure("minimizable floater requires title", !missingTitle.ok());
     ensure_equals("title diagnostic is stable", missingTitle.errors.front().code, "layout.floater.title_required");
 
-    const radia::ui::LayoutBuildResult duplicateHeader =
-        factory.buildWidgetTreeFromString("<floater><header/><header/></floater>", "duplicate_header.xml");
+    const LayoutBuildResult duplicateHeader = factory.buildWidgetTreeFromString("<floater><header/><header/></floater>", "duplicate_header.xml");
     ensure("duplicate custom header rejects widget tree", !duplicateHeader.ok());
     ensure_equals("duplicate header diagnostic is stable", duplicateHeader.errors.front().code, "layout.part.duplicate");
 
-    const radia::ui::LayoutBuildResult attachedOnly = factory.buildWidgetTreeFromString("<floater canDetach=\"false\"/>", "attached_only.xml");
+    const LayoutBuildResult attachedOnly = factory.buildWidgetTreeFromString("<floater canDetach=\"false\"/>", "attached_only.xml");
     ensure("floater accepts detach policy", attachedOnly.ok());
-    ensure("floater detach policy defaults on and can opt out", !attachedOnly.rootAs<radia::ui::Floater>()->canDetach());
+    ensure("floater detach policy defaults on and can opt out", !attachedOnly.rootAs<Floater>()->canDetach());
 }
 
 template<> template<> void resourceCompilerObject::test<14>() {
@@ -454,8 +475,8 @@ template<> template<> void resourceCompilerObject::test<14>() {
 
     ensure("Widget Defaults validate independently with case-insensitive lookup", !factory.validateWidgetDefaults("FLOATER").hasErrors());
 
-    radia::ui::LayoutBuildResult result = factory.buildWidgetTreeFromResource("defaulted.xml");
-    auto* floater = result.rootAs<radia::ui::Floater>();
+    LayoutBuildResult result = factory.buildWidgetTreeFromResource("defaulted.xml");
+    auto* floater = result.rootAs<Floater>();
     ensure("Widget Defaults apply", result.ok() && floater);
     ensure_equals("default close icon applied", floater->closeIcon(), std::string("close"));
     ensure_equals("default minimize icon applied", floater->minimizeIcon(), std::string("minimize"));
@@ -465,7 +486,7 @@ template<> template<> void resourceCompilerObject::test<14>() {
 
     resources["widgets/floater.xml"] = "<panel/>";
     ensure("Widget Defaults validation reports invalid root", factory.validateWidgetDefaults("floater").hasErrors());
-    const radia::ui::LayoutBuildResult invalid = factory.buildWidgetTreeFromResource("defaulted.xml");
+    const LayoutBuildResult invalid = factory.buildWidgetTreeFromResource("defaulted.xml");
     ensure("wrong Widget Defaults root rejects Widget tree", !invalid.ok());
     ensure("invalid Widget Defaults expose no partial root", invalid.root == nullptr);
 }
@@ -473,35 +494,37 @@ template<> template<> void resourceCompilerObject::test<14>() {
 template<> template<> void resourceCompilerObject::test<15>() {
     const char* kVisibilityLayout =
         "<panel><text id=\"shown\" visibility=\"visible\"/><text id=\"hidden\" visibility=\"hidden\"/><text id=\"collapsed\" visibility=\"collapsed\"/></panel>";
-    const radia::ui::LayoutBuildResult result = factory.buildWidgetTreeFromString(kVisibilityLayout, "visibility.xml");
+    const LayoutBuildResult result = factory.buildWidgetTreeFromString(kVisibilityLayout, "visibility.xml");
     ensure("typed visibility values compile", result.ok());
-    ensure_equals("Visible value is typed", static_cast<int>(result.root->children()[0]->visibility()), static_cast<int>(radia::ui::Visibility::Visible));
-    ensure_equals("Hidden value is typed", static_cast<int>(result.root->children()[1]->visibility()), static_cast<int>(radia::ui::Visibility::Hidden));
+    ensure_equals("Visible value is typed", static_cast<int>(result.root->children()[0]->visibility()),
+                  static_cast<int>(radia::ui::Visibility::Visible));
+    ensure_equals("Hidden value is typed", static_cast<int>(result.root->children()[1]->visibility()),
+                  static_cast<int>(radia::ui::Visibility::Hidden));
     ensure_equals("Collapsed value is typed", static_cast<int>(result.root->children()[2]->visibility()),
                   static_cast<int>(radia::ui::Visibility::Collapsed));
 
-    const radia::ui::LayoutBuildResult invalid = factory.buildWidgetTreeFromString("<text visibility=\"invisible\"/>", "invalid_visibility.xml");
+    const LayoutBuildResult invalid = factory.buildWidgetTreeFromString("<text visibility=\"invisible\"/>", "invalid_visibility.xml");
     ensure("invalid visibility is rejected", !invalid.ok());
     ensure_equals("invalid visibility diagnostic is stable", invalid.errors.front().code, "layout.attribute.visibility_invalid");
 
-    const radia::ui::LayoutBuildResult legacy = factory.buildWidgetTreeFromString("<text visible=\"false\"/>", "legacy_visibility.xml");
+    const LayoutBuildResult legacy = factory.buildWidgetTreeFromString("<text visible=\"false\"/>", "legacy_visibility.xml");
     ensure("legacy boolean visibility is rejected", !legacy.ok());
     ensure_equals("legacy visibility is an unknown attribute", legacy.errors.front().code, "layout.attribute.unknown");
 
-    const radia::ui::LayoutBuildResult legacyBinding = factory.buildWidgetTreeFromString("<switch bind=\"old-setting\"/>", "legacy-bind.xml");
+    const LayoutBuildResult legacyBinding = factory.buildWidgetTreeFromString("<switch bind=\"old-setting\"/>", "legacy-bind.xml");
     ensure("legacy provider binding syntax is rejected", !legacyBinding.ok());
     ensure_equals("legacy provider binding is an unknown attribute", legacyBinding.errors.front().code, "layout.attribute.unknown");
 }
 
 template<> template<> void resourceCompilerObject::test<16>() {
     resources["widgets/label.xml"] = "<label visibility=\"sometimes\"/>";
-    const radia::ui::DiagnosticResult visibility = factory.validateWidgetDefaults("label");
+    const DiagnosticResult visibility = factory.validateWidgetDefaults("label");
     ensure("Widget Defaults validate typed visibility values", visibility.hasErrors());
     ensure_equals("Widget Defaults preserve visibility diagnostics", visibility.errors.front().code, "layout.attribute.visibility_invalid");
 
     resources["widgets/label.xml"] = "<label/>";
     resources["widgets/switch.xml"] = "<switch checked=\"sometimes\"/>";
-    const radia::ui::DiagnosticResult widget_attribute = factory.validateWidgetDefaults("switch");
+    const DiagnosticResult widget_attribute = factory.validateWidgetDefaults("switch");
     ensure("Widget Defaults validate widget-specific typed values", widget_attribute.hasErrors());
     ensure_equals("Widget Defaults preserve widget attribute diagnostics", widget_attribute.errors.front().code, "layout.attribute.boolean_invalid");
 }
@@ -509,36 +532,36 @@ template<> template<> void resourceCompilerObject::test<16>() {
 template<> template<> void resourceCompilerObject::test<17>() {
     const char* kCaseInsensitiveLayout =
         "<FlOaTeR TiTlE=\"tools\" CaNMiNiMiZe=\"true\"><HeAdEr><BuTtOn ID=\"saveFile\" ONCLICK=\"saveFile()\"><IcOn SrC=\"search\"/>Save</BuTtOn></HeAdEr></FlOaTeR>";
-    radia::ui::LayoutBuildResult result = factory.buildWidgetTreeFromString(kCaseInsensitiveLayout, "case-insensitive.xml");
-    auto* floater = result.rootAs<radia::ui::Floater>();
+    LayoutBuildResult result = factory.buildWidgetTreeFromString(kCaseInsensitiveLayout, "case-insensitive.xml");
+    auto* floater = result.rootAs<Floater>();
     ensure("element and attribute lookup is ASCII case-insensitive", result.ok() && floater);
-    auto button = requireWidget<radia::ui::Button>(*floater, "saveFile");
+    auto button = requireWidget<Button>(*floater, "saveFile");
     ensure("mixed-case schema names retain canonical widget behavior", button && button->icon());
     ensure_equals("contract retains canonical element spelling", button->elementName(), std::string("button"));
-    ensure_equals("mixed-case Event attribute resolves", button->eventCall(radia::ui::WidgetEventKind::Click)->name(), std::string("saveFile"));
+    ensure_equals("mixed-case Event attribute resolves", button->eventCall(WidgetEventKind::Click)->name(), std::string("saveFile"));
 }
 
 template<> template<> void resourceCompilerObject::test<18>() {
-    const radia::ui::LayoutBuildResult snake = factory.buildWidgetTreeFromString("<BuTtOn\n  on_click=\"saveFile()\"/>", "legacy-snake.xml");
+    const LayoutBuildResult snake = factory.buildWidgetTreeFromString("<BuTtOn\n  on_click=\"saveFile()\"/>", "legacy-snake.xml");
     ensure("legacy snake_case attribute is rejected", !snake.ok());
     ensure_equals("legacy attribute is not an alias", snake.errors.front().code, std::string("layout.attribute.unknown"));
     ensure_equals("legacy attribute diagnostic retains source line", snake.errors.front().line, std::size_t(1));
     ensure("known element names use canonical spelling in diagnostics", snake.errors.front().message.find("<button>") != std::string::npos);
 
-    const radia::ui::LayoutBuildResult duplicate =
+    const LayoutBuildResult duplicate =
         factory.buildWidgetTreeFromString("<button onClick=\"saveOne()\" ONCLICK=\"saveTwo()\"/>", "duplicate-case.xml");
     ensure("attributes colliding after case folding are rejected", !duplicate.ok());
     ensure_equals("case-folded duplicate has a stable diagnostic", duplicate.errors.front().code, std::string("layout.attribute.duplicate"));
 
-    const radia::ui::LayoutBuildResult invalidId = factory.buildWidgetTreeFromString("<panel id=\"bad.id\"/>", "id.xml");
+    const LayoutBuildResult invalidId = factory.buildWidgetTreeFromString("<panel id=\"bad.id\"/>", "id.xml");
     ensure("invalid Widget ID characters are rejected", !invalidId.ok());
     ensure_equals("invalid ID diagnostic is stable", invalidId.errors.front().code, std::string("layout.id.invalid"));
 
-    const radia::ui::LayoutBuildResult invalidClass = factory.buildWidgetTreeFromString("<panel class=\"BadClass\"/>", "class.xml");
+    const LayoutBuildResult invalidClass = factory.buildWidgetTreeFromString("<panel class=\"BadClass\"/>", "class.xml");
     ensure("non-kebab Widget class is rejected", !invalidClass.ok());
     ensure_equals("invalid class diagnostic is stable", invalidClass.errors.front().code, std::string("layout.class.invalid"));
 
-    const radia::ui::LayoutBuildResult invalidHandler = factory.buildWidgetTreeFromString("<button onClick=\"bad_action()\"/>", "handler-name.xml");
+    const LayoutBuildResult invalidHandler = factory.buildWidgetTreeFromString("<button onClick=\"bad_action()\"/>", "handler-name.xml");
     ensure("invalid Handler name leaves the Widget tree usable", invalidHandler.ok());
     ensure_equals("invalid Handler name reports one warning", invalidHandler.warnings.size(), 1U);
     ensure_equals("invalid Handler diagnostic is stable", invalidHandler.warnings.front().code, std::string("layout.event.name_invalid"));
@@ -552,19 +575,19 @@ template<> template<> void resourceCompilerObject::test<18>() {
 template<> template<> void resourceCompilerObject::test<19>() {
     const char* kEventCallLayout =
         "<panel><button id=\"inspect\" onClick=\"inspect(4, 'settings', true, this, event)\"/><button id=\"bare\" onClick=\"press\"/><button id=\"lifecycle\" onClick=\"postBuild()\"/></panel>";
-    radia::ui::LayoutBuildResult result = factory.buildWidgetTreeFromString(kEventCallLayout, "event-calls.xml");
+    LayoutBuildResult result = factory.buildWidgetTreeFromString(kEventCallLayout, "event-calls.xml");
     ensure("valid and invalid Event Handler Calls keep the Widget tree usable", result.ok());
     ensure_equals("bare and lifecycle names each warn", result.warnings.size(), 2U);
     ensure_equals("bare name requires call syntax", result.warnings[0].code, std::string("layout.event.call_required"));
     ensure_equals("lifecycle Handler name is reserved", result.warnings[1].code, std::string("layout.event.handler_reserved"));
 
-    auto inspect = requireWidget<radia::ui::Button>(*result.root, "inspect");
-    auto bare = requireWidget<radia::ui::Button>(*result.root, "bare");
-    auto lifecycle = requireWidget<radia::ui::Button>(*result.root, "lifecycle");
-    ensure("parsed Event Handler Call is attached", inspect && inspect->eventCall(radia::ui::WidgetEventKind::Click));
-    ensure_equals("parsed Event Handler name retained", inspect->eventCall(radia::ui::WidgetEventKind::Click)->name(), std::string("inspect"));
-    ensure_equals("all parsed arguments retained", inspect->eventCall(radia::ui::WidgetEventKind::Click)->arguments().size(), 5U);
+    auto inspect = requireWidget<Button>(*result.root, "inspect");
+    auto bare = requireWidget<Button>(*result.root, "bare");
+    auto lifecycle = requireWidget<Button>(*result.root, "lifecycle");
+    ensure("parsed Event Handler Call is attached", inspect && inspect->eventCall(WidgetEventKind::Click));
+    ensure_equals("parsed Event Handler name retained", inspect->eventCall(WidgetEventKind::Click)->name(), std::string("inspect"));
+    ensure_equals("all parsed arguments retained", inspect->eventCall(WidgetEventKind::Click)->arguments().size(), 5U);
     ensure("invalid and reserved calls attach no runtime binding",
-           bare && lifecycle && !bare->eventCall(radia::ui::WidgetEventKind::Click) && !lifecycle->eventCall(radia::ui::WidgetEventKind::Click));
+           bare && lifecycle && !bare->eventCall(WidgetEventKind::Click) && !lifecycle->eventCall(WidgetEventKind::Click));
 }
 } // namespace tut

@@ -67,7 +67,7 @@ float FixedTextMetrics::usedLetterSpacing(const Style& style) const {
 }
 
 const TextMetrics& fixedTextMetrics() {
-    static const FixedTextMetrics metrics;
-    return metrics;
+    static const FixedTextMetrics sMetrics;
+    return sMetrics;
 }
 } // namespace radia::ui

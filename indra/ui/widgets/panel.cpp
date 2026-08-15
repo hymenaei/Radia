@@ -27,9 +27,9 @@
 #include "widgets/widgetcontractbuilder.h"
 
 namespace radia::ui {
-Panel::Panel() : Widget(ELEMENT) {}
+Panel::Panel() : Widget(sElement) {}
 
 WidgetContract detail::panelContract() {
-    return defineWidget<Panel>(Panel::ELEMENT).attributes({allowedAttribute("filename")}).resourceRoot().build();
+    return defineWidget<Panel>(Panel::sElement).attributes({allowedAttribute("filename")}).resourceRoot().build();
 }
 } // namespace radia::ui

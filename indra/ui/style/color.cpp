@@ -34,7 +34,7 @@
 
 namespace radia::ui {
 namespace {
-constexpr float PI = std::numbers::pi_v<float>;
+constexpr float kPi = std::numbers::pi_v<float>;
 using detail::lower;
 using detail::trim;
 
@@ -51,10 +51,10 @@ bool parsePercent(const std::string& token, float& result) {
     return true;
 }
 
-bool parseNumberOrPercent(const std::string& token, float percent_scale, float& result) {
+bool parseNumberOrPercent(const std::string& token, float percentScale, float& result) {
     if (!token.empty() && token.back() == '%') {
         if (!parseFloat(token.substr(0, token.size() - 1), result)) return false;
-        result *= percent_scale / 100.f;
+        result *= percentScale / 100.f;
         return true;
     }
     return parseFloat(token, result);
@@ -85,7 +85,7 @@ bool parseHue(std::string token, float& degrees) {
     } else if (token.size() >= 3 && token.compare(token.size() - 3, 3, "deg") == 0) token.erase(token.size() - 3);
     else if (token.size() >= 3 && token.compare(token.size() - 3, 3, "rad") == 0) {
         token.erase(token.size() - 3);
-        scale = 180.f / PI;
+        scale = 180.f / kPi;
     }
     if (!parseFloat(token, degrees)) return false;
     degrees = std::fmod(degrees * scale, 360.f);
@@ -187,18 +187,18 @@ Color lab(float lightness, float a, float b, float alpha) {
 }
 
 Color oklab(float lightness, float a, float b, float alpha) {
-    const float l_root = lightness + .3963377774f * a + .2158037573f * b;
-    const float m_root = lightness - .1055613458f * a - .0638541728f * b;
-    const float s_root = lightness - .0894841775f * a - 1.2914855480f * b;
-    const float l = l_root * l_root * l_root;
-    const float m = m_root * m_root * m_root;
-    const float s = s_root * s_root * s_root;
+    const float lRoot = lightness + .3963377774f * a + .2158037573f * b;
+    const float mRoot = lightness - .1055613458f * a - .0638541728f * b;
+    const float sRoot = lightness - .0894841775f * a - 1.2914855480f * b;
+    const float l = lRoot * lRoot * lRoot;
+    const float m = mRoot * mRoot * mRoot;
+    const float s = sRoot * sRoot * sRoot;
     return linearSrgb(4.0767416621f * l - 3.3077115913f * m + .2309699292f * s, -1.2684380046f * l + 2.6097574011f * m - .3413193965f * s,
                       -.0041960863f * l - .7034186147f * m + 1.7076147010f * s, alpha);
 }
 
 void polarCoordinates(float chroma, float hue, float& a, float& b) {
-    const float radians = hue * PI / 180.f;
+    const float radians = hue * kPi / 180.f;
     a = chroma * std::cos(radians);
     b = chroma * std::sin(radians);
 }
@@ -249,10 +249,10 @@ std::optional<Color> parseColor(const std::string& raw) {
     if (name != "rgb" && name != "hsl" && body.find(',') != std::string::npos) return std::nullopt;
 
     std::vector<std::string> channels;
-    std::string alpha_token;
-    if (!functionArguments(body, channels, alpha_token)) return std::nullopt;
+    std::string alphaToken;
+    if (!functionArguments(body, channels, alphaToken)) return std::nullopt;
     float alpha = 1.f;
-    if (!alpha_token.empty() && !parseAlpha(alpha_token, alpha)) return std::nullopt;
+    if (!alphaToken.empty() && !parseAlpha(alphaToken, alpha)) return std::nullopt;
 
     if (name == "rgb") {
         Color result;
@@ -269,18 +269,18 @@ std::optional<Color> parseColor(const std::string& raw) {
     }
 
     float lightness = 0.f, first = 0.f, second = 0.f;
-    const bool ok_space = name == "oklab" || name == "oklch";
-    if (!parseNumberOrPercent(channels[0], ok_space ? 1.f : 100.f, lightness)) return std::nullopt;
-    lightness = std::clamp(lightness, 0.f, ok_space ? 1.f : 100.f);
+    const bool okSpace = name == "oklab" || name == "oklch";
+    if (!parseNumberOrPercent(channels[0], okSpace ? 1.f : 100.f, lightness)) return std::nullopt;
+    lightness = std::clamp(lightness, 0.f, okSpace ? 1.f : 100.f);
 
     const bool cylindrical = name == "lch" || name == "oklch";
-    if (!parseNumberOrPercent(channels[1], ok_space ? .4f : (cylindrical ? 150.f : 125.f), first)) return std::nullopt;
+    if (!parseNumberOrPercent(channels[1], okSpace ? .4f : (cylindrical ? 150.f : 125.f), first)) return std::nullopt;
     if (cylindrical) {
         float hue = 0.f;
         if (!parseHue(channels[2], hue)) return std::nullopt;
         polarCoordinates(std::max(0.f, first), hue, first, second);
-    } else if (!parseNumberOrPercent(channels[2], ok_space ? .4f : 125.f, second)) return std::nullopt;
+    } else if (!parseNumberOrPercent(channels[2], okSpace ? .4f : 125.f, second)) return std::nullopt;
 
-    return ok_space ? oklab(lightness, first, second, alpha) : lab(lightness, first, second, alpha);
+    return okSpace ? oklab(lightness, first, second, alpha) : lab(lightness, first, second, alpha);
 }
 } // namespace radia::ui

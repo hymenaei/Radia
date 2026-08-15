@@ -41,7 +41,7 @@ struct AuxiliaryWindowRect {
     S32 height = 0;
 };
 
-struct AuxiliaryWindowPoint {
+struct AuxiliaryScreenPoint {
     S32 x = 0;
     S32 y = 0;
 };
@@ -102,7 +102,7 @@ public:
     virtual void setScaleMultiplier(F32 multiplier) = 0;
     virtual void setLogicalSize(F32 width, F32 height) = 0;
     virtual void setLogicalRect(const AuxiliaryLogicalRect& rect) = 0;
-    virtual void beginDrag(F32 logicalX, F32 logicalY, const std::optional<AuxiliaryWindowPoint>& cursor = std::nullopt) = 0;
+    virtual void beginDrag(F32 logicalX, F32 logicalY, const std::optional<AuxiliaryScreenPoint>& screenCursor = std::nullopt) = 0;
     virtual void beginResize() = 0;
     virtual AuxiliaryWindowRect rect() const = 0;
     virtual F32 scale() const = 0;

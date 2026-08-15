@@ -40,26 +40,26 @@ public:
         const LLWString& text;
         const LLFontShapeLayout& layout;
         const LLColor4& color;
-        const LLColor4U& shadow_color;
-        LLFontGL::pass_boundary_cb_t pass_boundary;
-        S32 begin_offset;
-        S32 length;
-        F32 pen_x;
-        F32 pen_y;
-        F32 start_x;
-        S32 scaled_max_pixels;
-        F32 italic_slant;
+        const LLColor4U& shadowColor;
+        LLFontGL::pass_boundary_cb_t passBoundary;
+        S32 beginOffset;
+        S32 textLength;
+        F32 penX;
+        F32 penY;
+        F32 startX;
+        S32 scaledMaxPixels;
+        F32 italicSlant;
         U8 style;
         LLFontGL::ShadowType shadow;
-        bool subpixel_pen;
-        bool use_color;
+        bool useSubpixelPen;
+        bool useColor;
     };
 
     struct Result {
         bool rendered = false;
-        S32 chars_drawn = 0;
-        F32 pen_x = 0.f;
-        bool emitted_fixed_color_glyph = false;
+        S32 charsDrawn = 0;
+        F32 penX = 0.f;
+        bool emittedFixedColorGlyph = false;
     };
 
     static Result tryRender(const Request& request);

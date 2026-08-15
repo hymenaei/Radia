@@ -95,9 +95,9 @@ std::size_t columnOf(const YAML::Node& node) {
 
 bool implicitNonString(const YAML::Node& node, const std::string& value) {
     if (node.Tag() != "?") return false;
-    static const std::regex coreValue(
+    static const std::regex sYamlCoreScalarPattern(
         R"(^(?:~|null|Null|NULL|true|True|TRUE|false|False|FALSE|[-+]?(?:(?:0|[1-9][0-9_]*)(?:\.[0-9_]*)?(?:[eE][-+]?[0-9]+)?|0o[0-7_]+|0x[0-9a-fA-F_]+|\.(?:inf|Inf|INF|nan|NaN|NAN)))$)");
-    return std::regex_match(value, coreValue);
+    return std::regex_match(value, sYamlCoreScalarPattern);
 }
 
 bool validCatalogText(const std::string& value) {
@@ -126,16 +126,16 @@ std::optional<std::string> canonicalLanguageTag(const std::string& value) {
     return canonical;
 }
 
-bool validStringKey(const std::string& id) {
-    static const std::regex pattern(R"(^[a-z][A-Za-z0-9]*(?:\.[a-z][A-Za-z0-9]*)*$)");
-    return std::regex_match(id, pattern);
+bool validStringKey(const std::string& stringKey) {
+    static const std::regex sStringKeyPattern(R"(^[a-z][A-Za-z0-9]*(?:\.[a-z][A-Za-z0-9]*)*$)");
+    return std::regex_match(stringKey, sStringKeyPattern);
 }
 
 bool validPluralCategory(const std::string& value) {
-    static const std::unordered_set<std::string> categories = {
+    static const std::unordered_set<std::string> sPluralCategories = {
         "zero", "one", "two", "few", "many", "other",
     };
-    return categories.contains(value);
+    return sPluralCategories.contains(value);
 }
 
 struct MappingEntry {
@@ -267,12 +267,12 @@ private:
             return;
         }
 
-        const std::optional<std::string> id = scalar(node, "defaultLocale");
-        if (!id) return;
-        const std::optional<std::string> canonical = canonicalLanguageTag(*id);
-        if (!canonical || *canonical != *id)
-            mResult.error("localization.default.invalid", "defaultLocale must be a canonical BCP 47 Locale ID: " + *id + ".", mSourceName,
-                          lineOf(node), columnOf(node));
+        const std::optional<std::string> defaultLocaleId = scalar(node, "defaultLocale");
+        if (!defaultLocaleId) return;
+        const std::optional<std::string> canonical = canonicalLanguageTag(*defaultLocaleId);
+        if (!canonical || *canonical != *defaultLocaleId)
+            mResult.error("localization.default.invalid", "defaultLocale must be a canonical BCP 47 Locale ID: " + *defaultLocaleId + ".",
+                          mSourceName, lineOf(node), columnOf(node));
         else catalog.defaultLocale = *canonical;
     }
 
@@ -307,23 +307,23 @@ private:
         if (mBase && catalog.locales.empty()) mResult.error("localization.locales.empty", "Base localization YAML defines no locales.", mSourceName);
     }
 
-    ParsedLocale parseLocale(const std::string& id, const YAML::Node& idNode, const YAML::Node& node) {
+    ParsedLocale parseLocale(const std::string& localeId, const YAML::Node& localeIdNode, const YAML::Node& node) {
         ParsedLocale locale;
-        locale.id = id;
+        locale.localeId = localeId;
         locale.source = mSourceName;
-        locale.line = lineOf(idNode);
+        locale.line = lineOf(localeIdNode);
 
-        for (const MappingEntry& entry : mapping(node, "locale " + locale.id, {"name", "direction", "fallback", "strings"}))
+        for (const MappingEntry& entry : mapping(node, "locale " + locale.localeId, {"name", "direction", "fallback", "strings"}))
             if (entry.key == "name") parseLocaleName(entry.value, locale);
             else if (entry.key == "direction") parseLocaleDirection(entry.value, locale);
             else if (entry.key == "fallback") parseLocaleFallback(entry.value, locale);
             else parseStrings(entry.value, locale);
 
         if (!locale.stringsPresent)
-            mResult.error("localization.locale.strings_missing", "Every locale entry requires a strings mapping: " + locale.id + ".", mSourceName,
-                          locale.line);
+            mResult.error("localization.locale.strings_missing", "Every locale entry requires a strings mapping: " + locale.localeId + ".",
+                          mSourceName, locale.line);
         if (mBase && !locale.name)
-            mResult.error("localization.locale.name_missing", "Base locale has no display name: " + locale.id + ".", mSourceName, locale.line);
+            mResult.error("localization.locale.name_missing", "Base locale has no display name: " + locale.localeId + ".", mSourceName, locale.line);
         return locale;
     }
 
@@ -380,7 +380,7 @@ private:
                 continue;
             }
             if (!keys.insert(*key).second) {
-                mResult.error("localization.string.duplicate", "Duplicate String Key in locale " + locale.id + ": " + *key + ".", mSourceName,
+                mResult.error("localization.string.duplicate", "Duplicate String Key in locale " + locale.localeId + ": " + *key + ".", mSourceName,
                               lineOf(entry.first), columnOf(entry.first));
                 continue;
             }
@@ -445,8 +445,8 @@ private:
 };
 } // namespace
 
-std::string localeIdentity(const std::string& id) {
-    std::string result = id;
+std::string localeIdentity(const std::string& localeId) {
+    std::string result = localeId;
     std::transform(result.begin(), result.end(), result.begin(), [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
     return result;
 }

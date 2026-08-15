@@ -35,13 +35,13 @@
 namespace radia::ui {
 Floater& Surface::mountFloater(std::unique_ptr<Floater> floater, SurfaceLayer layer) {
     if (layer != SurfaceLayer::Floater && layer != SurfaceLayer::Modal) layer = SurfaceLayer::Floater;
-    WidgetRef<Floater> mounted_ref(floater.get());
+    WidgetRef<Floater> mountedRef(floater.get());
     mount(std::move(floater), layer);
-    Floater* mounted = mounted_ref.get();
+    Floater* mounted = mountedRef.get();
     llassert_always(mounted && mounted->parent() == &layerRoot(layer));
     mFloaters.emplace_back(mounted);
     constrainFloater(*mounted);
-    mounted = mounted_ref.get();
+    mounted = mountedRef.get();
     llassert_always(mounted && mounted->parent() == &layerRoot(layer));
     return *mounted;
 }
@@ -146,20 +146,20 @@ std::optional<Rect> Surface::prepareFloater(Floater& floater) const {
     if (!authored || !snapshotValid(floaterSnapshot)) return std::nullopt;
     Widget* content = floater.content();
     const WidgetSnapshot contentSnapshot = content ? snapshot(*content) : WidgetSnapshot{};
-    const Vec2 content_size = content ? measureWidget(*content, *mStyleSheet, mTextMetrics) : Vec2{};
+    const Vec2 contentSize = content ? measureWidget(*content, *mStyleSheet, mTextMetrics) : Vec2{};
     if (!snapshotValid(floaterSnapshot) || (content && !snapshotChildValid(contentSnapshot, floater))) return std::nullopt;
-    floater.setAuthoredSize({authored->w, authored->h}, content_size);
+    floater.setAuthoredSize({authored->w, authored->h}, contentSize);
     return authored;
 }
 
 bool Surface::raiseWithinLayer(Widget& widget, SurfaceLayer layer) {
     Widget& root = layerRoot(layer);
-    Widget* direct_child = &widget;
-    while (direct_child->parent() && direct_child->parent() != &root) direct_child = direct_child->parent();
-    if (direct_child->parent() != &root) return false;
+    Widget* directChild = &widget;
+    while (directChild->parent() && directChild->parent() != &root) directChild = directChild->parent();
+    if (directChild->parent() != &root) return false;
 
     auto found =
-        std::find_if(root.mChildren.begin(), root.mChildren.end(), [direct_child](const auto& child) { return child.get() == direct_child; });
+        std::find_if(root.mChildren.begin(), root.mChildren.end(), [directChild](const auto& child) { return child.get() == directChild; });
     if (found == root.mChildren.end()) return false;
     if (std::next(found) != root.mChildren.end()) {
         std::rotate(found, std::next(found), root.mChildren.end());

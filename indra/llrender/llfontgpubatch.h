@@ -28,15 +28,16 @@
 #include "llhbgpu.h"
 #include "stdtypes.h"
 #if LL_HAS_HB_GPU
-    #include "llfontgpuglyphcache.h"
+#include "llfontgpuglyphcache.h"
 
 class LLVector4a;
 class LLVector2;
 class LLColor4U;
 
 namespace LLFontGpuBatch {
-void buildGlyphQuad(LLVector4a* pos, LLVector2* uv, LLColor4U* col, U32* gloc, const LLFontGpuGlyphCache::GlyphLoc& loc, F32 pen_x, F32 pen_y,
-                    F32 scale, F32 slant, const LLColor4U& color, U32 glyph_loc);
+void buildGlyphQuad(LLVector4a* positions, LLVector2* texcoords, LLColor4U* colors, U32* glyphLocations,
+                    const LLFontGpuGlyphCache::GlyphLoc& location, F32 penX, F32 penY, F32 scale, F32 slant, const LLColor4U& color,
+                    U32 glyphLocation);
 } // namespace LLFontGpuBatch
 #endif // LL_HAS_HB_GPU
 #endif // LL_LLFONTGPUBATCH_H

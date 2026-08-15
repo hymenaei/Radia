@@ -36,7 +36,7 @@
     #include "llvertexbuffer.h"
 
 namespace {
-constexpr F32 BOLD_OFFSET = 1.f;
+constexpr F32 kBoldOffset = 1.f;
 
 class ScopedFontShader {
 public:
@@ -73,22 +73,22 @@ private:
 
 struct GlyphQuad {
     LLFontGpuGlyphCache::GlyphLoc loc;
-    F32 pen_x;
-    F32 pen_y;
+    F32 penX;
+    F32 penY;
     F32 scale;
     LLColor4U color;
-    bool is_color;
-    bool color_as_mask;
+    bool isColor;
+    bool colorAsMask;
 };
 
 class GlyphBatchBuilder {
 public:
-    GlyphBatchBuilder(const LLFontGpuRenderer::Request& request, const LLFontGpuGlyphCache::Batch& cache_batch)
-        : mRequest(request), mCacheBatch(cache_batch), mPenX(request.pen_x), mPenY(request.pen_y),
-          mWantColor(request.use_color && !LLFontGL::sForceMonochromeEmoji), mEmitBold((request.style & LLFontGL::BOLD) != 0),
+    GlyphBatchBuilder(const LLFontGpuRenderer::Request& request, const LLFontGpuGlyphCache::Batch& cacheBatch)
+        : mRequest(request), mCacheBatch(cacheBatch), mPenX(request.penX), mPenY(request.penY),
+          mWantColor(request.useColor && !LLFontGL::sForceMonochromeEmoji), mEmitBold((request.style & LLFontGL::BOLD) != 0),
           mEmitShadow(request.shadow != LLFontGL::NO_SHADOW && !mEmitBold), mForegroundColor(request.color) {
-        mForeground.reserve(request.length);
-        if (mEmitShadow) mShadow.reserve(request.length);
+        mForeground.reserve(request.textLength);
+        if (mEmitShadow) mShadow.reserve(request.textLength);
     }
 
     bool build() {
@@ -97,7 +97,7 @@ public:
         size_t covered = 0;
         for (size_t run = 0; run < mRequest.layout.ranges.size() && !mOverflow; ++run) {
             const auto range = mRequest.layout.ranges[run];
-            if (range.first != covered || range.second > size_t(mRequest.length)) return false;
+            if (range.first != covered || range.second > size_t(mRequest.textLength)) return false;
 
             const auto& glyphs = *mRequest.layout.glyphs[run];
             if (glyphs.empty()) {
@@ -112,12 +112,12 @@ public:
             covered = range.second;
         }
 
-        return mOverflow || covered == size_t(mRequest.length);
+        return mOverflow || covered == size_t(mRequest.textLength);
     }
 
     void emit() const {
         emitPass(mShadow);
-        if (mRequest.pass_boundary) mRequest.pass_boundary();
+        if (mRequest.passBoundary) mRequest.passBoundary();
         emitPass(mForeground);
     }
 
@@ -131,7 +131,7 @@ private:
     }
 
     bool wouldOverflow(F32 right, S32 cluster) {
-        if ((mRequest.start_x + mRequest.scaled_max_pixels) >= right) return false;
+        if ((mRequest.startX + mRequest.scaledMaxPixels) >= right) return false;
 
         mOverflow = true;
         mOverflowCluster = cluster;
@@ -139,33 +139,33 @@ private:
     }
 
     bool buildCodepoints(size_t begin, size_t end) {
-        const EFontGlyphType glyph_type = mWantColor ? EFontGlyphType::Color : EFontGlyphType::Grayscale;
+        const EFontGlyphType glyphType = mWantColor ? EFontGlyphType::Color : EFontGlyphType::Grayscale;
 
         for (size_t cp = begin; cp < end; ++cp) {
-            const LLFontGlyphInfo* glyph = mRequest.font.getGlyphInfo(mRequest.text[mRequest.begin_offset + cp], glyph_type);
+            const LLFontGlyphInfo* glyph = mRequest.font.getGlyphInfo(mRequest.text[mRequest.beginOffset + cp], glyphType);
             if (!glyph || !faceEligible(glyph->mSourceFace)) return false;
 
             const LLFontGlyphInfo* next =
-                (cp + 1 < size_t(mRequest.length)) ? mRequest.font.getGlyphInfo(mRequest.text[mRequest.begin_offset + cp + 1], glyph_type) : nullptr;
+                (cp + 1 < size_t(mRequest.textLength)) ? mRequest.font.getGlyphInfo(mRequest.text[mRequest.beginOffset + cp + 1], glyphType) : nullptr;
 
             const LLFontFace* face = glyph->mSourceFace;
-            const bool color_glyph = mWantColor && face->hasColrV1();
-            LLFontGpuGlyphCache* cache = color_glyph ? face->getGpuColorGlyphCache() : face->getGpuGlyphCache();
+            const bool colorGlyph = mWantColor && face->hasColrV1();
+            LLFontGpuGlyphCache* cache = colorGlyph ? face->getGpuColorGlyphCache() : face->getGpuGlyphCache();
             if (!cache) return false;
 
-            const LLFontGpuGlyphCache::GlyphLoc loc = cache->getGlyph(mCacheBatch, glyph->mGlyphIndex);
-            F32 next_pen_x = mPenX + glyph->mXAdvance;
-            if (next && cp + 1 < end) next_pen_x += mRequest.font.getXKerning(glyph, next);
-            if (!mRequest.subpixel_pen) next_pen_x = F32(ll_round(next_pen_x));
+            const LLFontGpuGlyphCache::GlyphLoc loc = cache->getOrEncodeGlyph(mCacheBatch, glyph->mGlyphIndex);
+            F32 nextPenX = mPenX + glyph->mXAdvance;
+            if (next && cp + 1 < end) nextPenX += mRequest.font.getXKerning(glyph, next);
+            if (!mRequest.useSubpixelPen) nextPenX = F32(ll_round(nextPenX));
 
             if (loc.drawable()) {
                 const F32 scale = face->designToPixelScale();
                 const F32 right = mPenX + F32(loc.mXBearing + loc.mWidth) * scale;
                 if (wouldOverflow(right, S32(cp - begin))) return true;
-                placeGlyph(loc, scale, color_glyph, mPenX, mPenY);
-            } else if (wouldOverflow(next_pen_x, S32(cp - begin))) return true;
+                placeGlyph(loc, scale, colorGlyph, mPenX, mPenY);
+            } else if (wouldOverflow(nextPenX, S32(cp - begin))) return true;
 
-            mPenX = next_pen_x;
+            mPenX = nextPenX;
         }
         return true;
     }
@@ -175,77 +175,77 @@ private:
             const LLFontFace* face = glyph.face ? glyph.face->getFontFace() : nullptr;
             if (!faceEligible(face)) return false;
 
-            const bool color_glyph = mWantColor && face->hasColrV1();
-            LLFontGpuGlyphCache* cache = color_glyph ? face->getGpuColorGlyphCache() : face->getGpuGlyphCache();
+            const bool colorGlyph = mWantColor && face->hasColrV1();
+            LLFontGpuGlyphCache* cache = colorGlyph ? face->getGpuColorGlyphCache() : face->getGpuGlyphCache();
             if (!cache) return false;
 
-            const F32 glyph_x = mPenX + glyph.x_offset;
-            const F32 glyph_y = mPenY + glyph.y_offset;
-            const LLFontGpuGlyphCache::GlyphLoc loc = cache->getGlyph(mCacheBatch, glyph.glyph_id);
-            F32 next_pen_x = mPenX + glyph.x_advance;
-            const F32 next_pen_y = mPenY + glyph.y_advance;
-            if (!mRequest.subpixel_pen) next_pen_x = F32(ll_round(next_pen_x));
+            const F32 glyphX = mPenX + glyph.x_offset;
+            const F32 glyphY = mPenY + glyph.y_offset;
+            const LLFontGpuGlyphCache::GlyphLoc loc = cache->getOrEncodeGlyph(mCacheBatch, glyph.glyph_id);
+            F32 nextPenX = mPenX + glyph.x_advance;
+            const F32 nextPenY = mPenY + glyph.y_advance;
+            if (!mRequest.useSubpixelPen) nextPenX = F32(ll_round(nextPenX));
 
             if (loc.drawable()) {
                 const F32 scale = face->designToPixelScale();
-                const F32 right = glyph_x + F32(loc.mXBearing + loc.mWidth) * scale;
+                const F32 right = glyphX + F32(loc.mXBearing + loc.mWidth) * scale;
                 if (wouldOverflow(right, glyph.cluster)) return true;
-                placeGlyph(loc, scale, color_glyph, glyph_x, glyph_y);
-            } else if (wouldOverflow(next_pen_x, glyph.cluster)) return true;
+                placeGlyph(loc, scale, colorGlyph, glyphX, glyphY);
+            } else if (wouldOverflow(nextPenX, glyph.cluster)) return true;
 
-            mPenX = next_pen_x;
-            mPenY = next_pen_y;
+            mPenX = nextPenX;
+            mPenY = nextPenY;
         }
         return true;
     }
 
-    void placeGlyph(const LLFontGpuGlyphCache::GlyphLoc& loc, F32 scale, bool color_glyph, F32 pen_x, F32 pen_y) {
-        if (color_glyph) {
+    void placeGlyph(const LLFontGpuGlyphCache::GlyphLoc& loc, F32 scale, bool colorGlyph, F32 penX, F32 penY) {
+        if (colorGlyph) {
             if (mEmitShadow) {
-                auto add_shadow = [&](F32 dx, F32 dy) { mShadow.push_back({loc, pen_x + dx, pen_y + dy, scale, mRequest.shadow_color, true, true}); };
+                auto addShadow = [&](F32 dx, F32 dy) { mShadow.push_back({loc, penX + dx, penY + dy, scale, mRequest.shadowColor, true, true}); };
                 if (mRequest.shadow == LLFontGL::DROP_SHADOW_SOFT) {
-                    add_shadow(-1.f, -1.f);
-                    add_shadow(1.f, -1.f);
-                    add_shadow(1.f, 1.f);
-                    add_shadow(-1.f, 1.f);
-                    add_shadow(0.f, -2.f);
-                } else add_shadow(1.f, -1.f);
+                    addShadow(-1.f, -1.f);
+                    addShadow(1.f, -1.f);
+                    addShadow(1.f, 1.f);
+                    addShadow(-1.f, 1.f);
+                    addShadow(0.f, -2.f);
+                } else addShadow(1.f, -1.f);
             }
 
-            mForeground.push_back({loc, pen_x, pen_y, scale, mForegroundColor, true, false});
-            if (mEmitBold) mForeground.push_back({loc, pen_x + BOLD_OFFSET, pen_y, scale, mForegroundColor, true, false});
+            mForeground.push_back({loc, penX, penY, scale, mForegroundColor, true, false});
+            if (mEmitBold) mForeground.push_back({loc, penX + kBoldOffset, penY, scale, mForegroundColor, true, false});
             mEmittedFixedColorGlyph = true;
             return;
         }
 
         if (mEmitShadow) {
-            auto add_shadow = [&](F32 dx, F32 dy) { mShadow.push_back({loc, pen_x + dx, pen_y + dy, scale, mRequest.shadow_color, false, false}); };
+            auto addShadow = [&](F32 dx, F32 dy) { mShadow.push_back({loc, penX + dx, penY + dy, scale, mRequest.shadowColor, false, false}); };
             if (mRequest.shadow == LLFontGL::DROP_SHADOW_SOFT) {
-                add_shadow(-1.f, -1.f);
-                add_shadow(1.f, -1.f);
-                add_shadow(1.f, 1.f);
-                add_shadow(-1.f, 1.f);
-                add_shadow(0.f, -2.f);
-            } else add_shadow(1.f, -1.f);
+                addShadow(-1.f, -1.f);
+                addShadow(1.f, -1.f);
+                addShadow(1.f, 1.f);
+                addShadow(-1.f, 1.f);
+                addShadow(0.f, -2.f);
+            } else addShadow(1.f, -1.f);
         }
 
-        mForeground.push_back({loc, pen_x, pen_y, scale, mForegroundColor, false, false});
-        if (mEmitBold) mForeground.push_back({loc, pen_x + BOLD_OFFSET, pen_y, scale, mForegroundColor, false, false});
+        mForeground.push_back({loc, penX, penY, scale, mForegroundColor, false, false});
+        if (mEmitBold) mForeground.push_back({loc, penX + kBoldOffset, penY, scale, mForegroundColor, false, false});
     }
 
     void emitPass(const std::vector<GlyphQuad>& pass) const {
         for (const GlyphQuad& quad : pass) {
-            const U32 glyph_loc = (quad.loc.mTexelOffset & LLVertexBuffer::GLYPH_LOC_OFFSET_MASK)
-                | (quad.is_color ? LLVertexBuffer::GLYPH_LOC_COLOR : 0u)
-                | (quad.color_as_mask ? LLVertexBuffer::GLYPH_LOC_COLOR_AS_MASK : 0u);
+            const U32 glyphLocation = (quad.loc.mTexelOffset & LLVertexBuffer::GLYPH_LOC_OFFSET_MASK)
+                | (quad.isColor ? LLVertexBuffer::GLYPH_LOC_COLOR : 0u)
+                | (quad.colorAsMask ? LLVertexBuffer::GLYPH_LOC_COLOR_AS_MASK : 0u);
             LLVector4a positions[6];
             LLVector2 texcoords[6];
             LLColor4U colors[6];
-            U32 glyph_locs[6];
-            LLFontGpuBatch::buildGlyphQuad(positions, texcoords, colors, glyph_locs, quad.loc, quad.pen_x, quad.pen_y, quad.scale,
-                                           mRequest.italic_slant, quad.color, glyph_loc);
+            U32 glyphLocations[6];
+            LLFontGpuBatch::buildGlyphQuad(positions, texcoords, colors, glyphLocations, quad.loc, quad.penX, quad.penY, quad.scale,
+                                           mRequest.italicSlant, quad.color, glyphLocation);
             gGL.begin(LLRender::TRIANGLES);
-            gGL.vertexBatchPreTransformed(positions, texcoords, colors, glyph_locs, 6);
+            gGL.vertexBatchPreTransformed(positions, texcoords, colors, glyphLocations, 6);
             gGL.end();
         }
     }
@@ -274,23 +274,23 @@ LLFontGpuRenderer::Result LLFontGpuRenderer::tryRender(const Request& request) {
     ScopedFontShader shader;
     if (!shader.ready() || !LLGLSLShader::sCurBoundShaderPtr) return result;
 
-    const S32 glyph_unit = LLGLSLShader::sCurBoundShaderPtr->getTextureChannel(LLShaderMgr::FONT_GLYPH_BUFFER);
-    if (glyph_unit < 0) return result;
+    const S32 glyphUnit = LLGLSLShader::sCurBoundShaderPtr->getTextureChannel(LLShaderMgr::FONT_GLYPH_BUFFER);
+    if (glyphUnit < 0) return result;
 
-    LLFontGpuGlyphCache::Batch cache_batch = LLFontGpuGlyphCache::beginBatch();
-    GlyphBatchBuilder builder(request, cache_batch);
+    LLFontGpuGlyphCache::Batch cacheBatch = LLFontGpuGlyphCache::beginBatch();
+    GlyphBatchBuilder builder(request, cacheBatch);
     if (!builder.build()) return result;
 
-    gGL.getTexUnit(glyph_unit)->activate();
+    gGL.getTexUnit(glyphUnit)->activate();
     const bool bound = LLFontGpuGlyphCache::bindBufferTexture();
     gGL.getTexUnit(0)->activate();
     if (!bound) return result;
 
     builder.emit();
     result.rendered = true;
-    result.chars_drawn = builder.charsDrawn();
-    result.pen_x = builder.penX();
-    result.emitted_fixed_color_glyph = builder.emittedFixedColorGlyph();
+    result.charsDrawn = builder.charsDrawn();
+    result.penX = builder.penX();
+    result.emittedFixedColorGlyph = builder.emittedFixedColorGlyph();
     return result;
 }
 

@@ -69,13 +69,13 @@ public:
     LLFontGpuGlyphCache(const LLFontGpuGlyphCache&) = delete;
     LLFontGpuGlyphCache& operator=(const LLFontGpuGlyphCache&) = delete;
 
-    void init(hb_font_t* src_font, bool color = false, unsigned palette = 0);
+    void init(hb_font_t* sourceFont, bool color = false, unsigned palette = 0);
 
     bool isColor() const { return mColor; }
 
     static Batch beginBatch();
 
-    const GlyphLoc& getGlyph(const Batch& batch, U32 glyph_id);
+    const GlyphLoc& getOrEncodeGlyph(const Batch& batch, U32 glyphId);
 
     static bool bindBufferTexture();
 
@@ -88,16 +88,16 @@ public:
     U32 getGlyphCount() const { return static_cast<U32>(mCache.size()); }
     static U32 getArenaTexels() { return static_cast<U32>(sArena.size()) / kBytesPerTexel; }
 
-    static void setMaxTexels(U32 max_texels) { sMaxTexels = max_texels; }
+    static void setMaxTexels(U32 maxTexels) { sMaxTexels = maxTexels; }
 
 private:
     static void reset();
 
     void ensureEncoder();
     static bool ensureGLBuffer();
-    GlyphLoc encodeGlyph(U32 glyph_id);
-    GlyphLoc encodeDrawGlyph(U32 glyph_id);
-    GlyphLoc encodePaintGlyph(U32 glyph_id);
+    GlyphLoc encodeGlyph(U32 glyphId);
+    GlyphLoc encodeDrawGlyph(U32 glyphId);
+    GlyphLoc encodePaintGlyph(U32 glyphId);
 
     static constexpr U32 kDefaultMaxTexels = 1u << 20;
 

@@ -30,11 +30,11 @@
 
 namespace radia::ui::paint {
 namespace {
-void applyScissor(const Rect& rect, float scale, const Vec2& render_origin, const Vec2& pixel_origin) {
-    const S32 left = llfloor(pixel_origin.x + (rect.left() - render_origin.x) * scale);
-    const S32 right = llceil(pixel_origin.x + (rect.right() - render_origin.x) * scale);
-    const S32 bottom = llfloor(pixel_origin.y + (rect.bottom() - render_origin.y) * scale);
-    const S32 top = llceil(pixel_origin.y + (rect.top() - render_origin.y) * scale);
+void applyScissor(const Rect& rect, float scale, const Vec2& renderOrigin, const Vec2& pixelOrigin) {
+    const S32 left = llfloor(pixelOrigin.x + (rect.left() - renderOrigin.x) * scale);
+    const S32 right = llceil(pixelOrigin.x + (rect.right() - renderOrigin.x) * scale);
+    const S32 bottom = llfloor(pixelOrigin.y + (rect.bottom() - renderOrigin.y) * scale);
+    const S32 top = llceil(pixelOrigin.y + (rect.top() - renderOrigin.y) * scale);
     glScissor(left, bottom, llmax(0, right - left), llmax(0, top - bottom));
 }
 } // namespace
@@ -96,7 +96,7 @@ void ClipStack::beginFrame() {
 }
 
 void ClipStack::push(const Rect& rect, float scale, ClipAxes axes) {
-    const float resolved_scale = std::max(0.f, scale);
+    const float resolvedScale = std::max(0.f, scale);
     const Rect inherited = mClips.empty() ? mState.bounds : mClips.back().first;
     const Rect clipped = clipToAxes(inherited, rect, axes);
     if (mClips.empty()) {
@@ -104,9 +104,9 @@ void ClipStack::push(const Rect& rect, float scale, ClipAxes axes) {
         glGetIntegerv(GL_SCISSOR_BOX, mPreviousScissor);
         mScissorState = std::make_unique<LLGLState>(GL_SCISSOR_TEST, LLGLState::ENABLED_STATE);
     }
-    mClips.emplace_back(clipped, resolved_scale);
+    mClips.emplace_back(clipped, resolvedScale);
     gGL.flush();
-    applyScissor(intersectRects(clipped, mState.bounds), resolved_scale, mState.origin, mState.pixelOrigin);
+    applyScissor(intersectRects(clipped, mState.bounds), resolvedScale, mState.origin, mState.pixelOrigin);
 }
 
 void ClipStack::pop() {
@@ -153,8 +153,8 @@ void ClipStack::restoreCapture(PaintState previous) {
 
 EffectCaptureGuard::EffectCaptureGuard(ClipStack& clips, LLRenderTarget& target, const Rect& capture) : mClips(clips), mTarget(target) {
     {
-        LLGLDisable disable_scissor(GL_SCISSOR_TEST);
-        ClearColorGuard clear_color;
+        LLGLDisable disableScissor(GL_SCISSOR_TEST);
+        ClearColorGuard clearColor;
         glClearColor(0.f, 0.f, 0.f, 0.f);
         mTarget.clear(GL_COLOR_BUFFER_BIT);
     }

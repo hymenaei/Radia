@@ -62,7 +62,7 @@ private:
     ChildHandling buildRegularChild(const LayoutNode& childNode, ChildBuildContext& context) const;
     std::unique_ptr<Widget> createResourceWidget(const std::string& resourceId, BuildState& state) const;
     void loadWidgetDefaults(const std::string& element, BuildState& state) const;
-    void validateWidgetScope(Widget& scope, BuildState& state, const std::string& source, bool countRoot = true) const;
+    void validateWidgetScope(Widget& scope, BuildState& state, const std::string& source, bool includeRootInIdScope = true) const;
 
     const LayoutDocumentMap* mDocuments = nullptr;
     std::unordered_map<std::string, WidgetContract> mWidgetContracts;

@@ -37,16 +37,15 @@ std::vector<std::filesystem::path> installedRoots() {
 }
 
 bool samePath(const std::filesystem::path& left, const std::filesystem::path& right) {
-    std::error_code left_error;
-    std::error_code right_error;
-    const std::filesystem::path canonical_left = std::filesystem::canonical(left, left_error);
-    const std::filesystem::path canonical_right = std::filesystem::canonical(right, right_error);
-    return !left_error && !right_error && canonical_left == canonical_right;
+    std::error_code leftError;
+    std::error_code rightError;
+    const std::filesystem::path canonicalLeft = std::filesystem::canonical(left, leftError);
+    const std::filesystem::path canonicalRight = std::filesystem::canonical(right, rightError);
+    return !leftError && !rightError && canonicalLeft == canonicalRight;
 }
 } // namespace
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
 SkinSnapshotResult SkinResources::capture() const {
     if (!gDirUtilp) {
         SkinSnapshotResult result;

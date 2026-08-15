@@ -577,9 +577,6 @@ namespace tut
                       LLFontGL::BOLD | LLFontGL::ITALIC);
     }
 
-    // Exact CSS sizing and variable weights must resolve to distinct,
-    // cached faces. This is the path RDUI uses instead of legacy
-    // Small/Medium/Large buckets and faux-bold render passes.
     template<> template<>
     void llfontgl_object::test<19>()
     {
@@ -1016,9 +1013,6 @@ namespace tut
         }
     }
 
-    // Outline-less glyphs still consume horizontal advance. The analytic path
-    // must stop a whitespace-only run at max_pixels even though it has no
-    // drawable glyph quads.
     template<> template<>
     void llfontgl_render_object::test<7>()
     {

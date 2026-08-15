@@ -34,8 +34,6 @@
 class LLWindow;
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
-
 namespace detail {
 inline radia::ui::Vec2 scaleLogicalPoint(const radia::ui::Vec2& point, const radia::ui::Vec2& scale) {
     return {point.x * scale.x, point.y * scale.y};
@@ -60,12 +58,12 @@ public:
     radia::ui::Vec2 nativeBottomLeftInMain(const AuxiliaryWindowRect& rect) const override;
     bool nativePointInsideMain(const radia::ui::Vec2& point) const override;
     bool placementVisible(const AuxiliaryWindowRect& rect) const override;
-    std::optional<AuxiliaryWindowPoint> releasePointerForDetach(const radia::ui::Vec2& mainPosition) override;
+    std::optional<AuxiliaryScreenPoint> releasePointerForDetach(const radia::ui::Vec2& mainPosition) override;
 
     void setMouseClipping(bool enabled);
 
 private:
-    AuxiliaryWindowPoint mainPointToNative(const radia::ui::Vec2& point) const;
+    AuxiliaryScreenPoint mainPointToNative(const radia::ui::Vec2& point) const;
 
     LLWindow*& mWindow;
     AuxiliaryWindowFactory& mAuxiliaryWindows;

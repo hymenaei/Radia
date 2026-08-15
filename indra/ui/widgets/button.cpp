@@ -38,7 +38,7 @@ public:
 };
 } // namespace
 
-Button::Button() : Widget(ELEMENT) {}
+Button::Button() : Widget(sElement) {}
 
 void Button::constrainResolvedStyle(Style& style) const {
     if (!style.flowSet) style.flow = Flow::Row;
@@ -67,7 +67,7 @@ void Button::onChildrenCleared() {
 }
 
 WidgetContract detail::buttonContract() {
-    return defineWidget<Button>(Button::ELEMENT)
+    return defineWidget<Button>(Button::sElement)
         .events({WidgetEventKind::Click, WidgetEventKind::DoubleClick, WidgetEventKind::MouseDown, WidgetEventKind::MouseUp,
                  WidgetEventKind::MouseMove, WidgetEventKind::LongClick, WidgetEventKind::ContextMenu})
         .textChildren([](TextSource content) { return std::make_unique<ButtonCaption>(std::move(content)); })

@@ -34,8 +34,8 @@ const LayoutAttribute* LayoutElement::attribute(const std::string& name) const {
     const auto found = mNode.attributes.find(key);
     if (found != mNode.attributes.end()) return &found->second;
     if (!mDefaults) return nullptr;
-    const auto default_value = mDefaults->attributes.find(key);
-    return default_value == mDefaults->attributes.end() ? nullptr : &default_value->second;
+    const auto defaultValue = mDefaults->attributes.find(key);
+    return defaultValue == mDefaults->attributes.end() ? nullptr : &defaultValue->second;
 }
 
 namespace {
@@ -65,8 +65,8 @@ SourceLocation afterText(SourceLocation location, const XML_Char* text, int leng
     return location;
 }
 
-void XMLCALL startElement(void* user_data, const XML_Char* name, const XML_Char** attributes) {
-    auto& state = *static_cast<ParserState*>(user_data);
+void XMLCALL startElement(void* userData, const XML_Char* name, const XML_Char** attributes) {
+    auto& state = *static_cast<ParserState*>(userData);
     auto node = std::make_unique<LayoutNode>();
     node->name = name;
     node->source.begin = currentLocation(state.parser);
@@ -94,8 +94,8 @@ void XMLCALL startElement(void* user_data, const XML_Char* name, const XML_Char*
     state.nodeStack.push_back(next);
 }
 
-void XMLCALL endElement(void* user_data, const XML_Char*) {
-    auto& state = *static_cast<ParserState*>(user_data);
+void XMLCALL endElement(void* userData, const XML_Char*) {
+    auto& state = *static_cast<ParserState*>(userData);
     if (state.nodeStack.empty()) return;
     LayoutNode* node = state.nodeStack.back();
     node->source.end = currentLocation(state.parser);
@@ -103,8 +103,8 @@ void XMLCALL endElement(void* user_data, const XML_Char*) {
     if (!state.nodeStack.empty() && !state.nodeStack.back()->content.empty()) state.nodeStack.back()->content.back().source.end = node->source.end;
 }
 
-void XMLCALL appendText(void* user_data, const XML_Char* text, int length) {
-    auto& state = *static_cast<ParserState*>(user_data);
+void XMLCALL appendText(void* userData, const XML_Char* text, int length) {
+    auto& state = *static_cast<ParserState*>(userData);
     if (state.nodeStack.empty() || length <= 0) return;
     LayoutNode& parent = *state.nodeStack.back();
     const SourceLocation begin = currentLocation(state.parser);

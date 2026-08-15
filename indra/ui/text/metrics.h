@@ -42,8 +42,8 @@ public:
 
 class FixedTextMetrics final : public TextMetrics {
 public:
-    explicit FixedTextMetrics(float regular_width_factor = .58f, float bold_width_factor = .62f)
-        : mRegularWidthFactor(regular_width_factor), mBoldWidthFactor(bold_width_factor) {}
+    explicit FixedTextMetrics(float regularWidthFactor = .58f, float boldWidthFactor = .62f)
+        : mRegularWidthFactor(regularWidthFactor), mBoldWidthFactor(boldWidthFactor) {}
 
     Vec2 measureText(const std::string& text, const Style& style) const override;
     float usedLetterSpacing(const Style& style) const override;

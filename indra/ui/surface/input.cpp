@@ -52,8 +52,8 @@ void collectFocusable(Widget& node, std::vector<WidgetRef<Widget>>& result, Styl
     if (!current || current->parent() != parent || current->visibility() != Visibility::Visible || current->disabled()) return;
     if (focusable) result.emplace_back(current);
     const StylePass::ChildSnapshot children = sourceChildren(*current, styles);
-    for (const WidgetRef<Widget>& child_ref : *children)
-        if (Widget* child = child_ref.get(); child && child->parent() == current) collectFocusable(*child, result, styles);
+    for (const WidgetRef<Widget>& childRef : *children)
+        if (Widget* child = childRef.get(); child && child->parent() == current) collectFocusable(*child, result, styles);
 }
 } // namespace
 
@@ -64,25 +64,25 @@ Widget* Surface::hitTestNode(Widget& node, const Vec2& point, const Rect& inheri
     const std::uint64_t originalStyleRevision = node.mStyleRevision;
     const std::uint64_t originalLayoutRevision = node.mLayoutInvalidationRevision;
     const Style& style = styles.style(node);
-    Widget* styled_node = lifetime.get();
-    if (!styled_node
-        || !isRootedInSurface(styled_node)
-        || styled_node->visibility() != Visibility::Visible
-        || styled_node->parent() != originalParent
-        || styled_node->mStyleRevision != originalStyleRevision
-        || styled_node->mLayoutInvalidationRevision != originalLayoutRevision)
+    Widget* styledNode = lifetime.get();
+    if (!styledNode
+        || !isRootedInSurface(styledNode)
+        || styledNode->visibility() != Visibility::Visible
+        || styledNode->parent() != originalParent
+        || styledNode->mStyleRevision != originalStyleRevision
+        || styledNode->mLayoutInvalidationRevision != originalLayoutRevision)
         return nullptr;
-    const bool clips_x = style.overflowX == Overflow::Hidden;
-    const bool clips_y = style.overflowY == Overflow::Hidden;
-    const ClipAxes clip_axes = (clips_x ? ClipAxes::X : ClipAxes::NoAxes) | (clips_y ? ClipAxes::Y : ClipAxes::NoAxes);
-    const Rect child_clip = clip_axes == ClipAxes::NoAxes ? inheritedClip : clipToAxes(inheritedClip, node.rect(), clip_axes);
+    const bool clipsX = style.overflowX == Overflow::Hidden;
+    const bool clipsY = style.overflowY == Overflow::Hidden;
+    const ClipAxes clipAxes = (clipsX ? ClipAxes::X : ClipAxes::NoAxes) | (clipsY ? ClipAxes::Y : ClipAxes::NoAxes);
+    const Rect childClip = clipAxes == ClipAxes::NoAxes ? inheritedClip : clipToAxes(inheritedClip, node.rect(), clipAxes);
     const StylePass::ChildSnapshot children = sourceChildren(node, styles);
-    Widget* hit_result = nullptr;
+    Widget* hitResult = nullptr;
     for (auto child = children->rbegin(); child != children->rend(); ++child)
-        if (Widget* child_widget = child->get())
-            if (child_widget->parent() == &node)
-                if (Widget* hit = hitTestNode(*child_widget, point, child_clip, styles)) {
-                    hit_result = hit;
+        if (Widget* childWidget = child->get())
+            if (childWidget->parent() == &node)
+                if (Widget* hit = hitTestNode(*childWidget, point, childClip, styles)) {
+                    hitResult = hit;
                     break;
                 }
     Widget* current = lifetime.get();
@@ -93,7 +93,7 @@ Widget* Surface::hitTestNode(Widget& node, const Vec2& point, const Rect& inheri
         || current->mStyleRevision != originalStyleRevision
         || current->mLayoutInvalidationRevision != originalLayoutRevision)
         return nullptr;
-    if (hit_result) return hit_result;
+    if (hitResult) return hitResult;
     if (!current->rect().contains(point) || !acceptsPointerEvents(*current, style)) return nullptr;
     current = lifetime.get();
     if (!current
@@ -108,10 +108,10 @@ Widget* Surface::hitTestNode(Widget& node, const Vec2& point, const Rect& inheri
 
 bool Surface::routeEvent(RoutedEvent& event) {
     std::vector<WidgetRef<Widget>> route;
-    std::vector<const Widget*> route_parents;
+    std::vector<const Widget*> routeParents;
     for (Widget* current = &event.target(); current; current = current->parent()) {
         route.emplace_back(current);
-        route_parents.push_back(current->parent());
+        routeParents.push_back(current->parent());
         if (isSurfaceRoot(current)) break;
     }
     if (route.empty() || !route.back() || !isSurfaceRoot(route.back().get()) || !isRootedInSurface(route.front().get())) return false;
@@ -120,7 +120,7 @@ bool Surface::routeEvent(RoutedEvent& event) {
     for (std::size_t index = route.size() - 1; index > 0; --index) {
         Widget* target = route[index].get();
         Widget* child = route[index - 1].get();
-        if (!target || !child || target->parent() != route_parents[index] || child->parent() != target || !isRootedInSurface(target)) break;
+        if (!target || !child || target->parent() != routeParents[index] || child->parent() != target || !isRootedInSurface(target)) break;
         event.mCurrentTarget = target;
         target->onEvent(event);
         if (event.propagationStopped()) {
@@ -135,7 +135,7 @@ bool Surface::routeEvent(RoutedEvent& event) {
         event.mCurrentTarget = nullptr;
         return event.handled() || event.defaultPrevented();
     }
-    if (target->parent() != route_parents.front() || (route.size() > 1 && target->parent() != route[1].get())) {
+    if (target->parent() != routeParents.front() || (route.size() > 1 && target->parent() != route[1].get())) {
         event.mCurrentTarget = nullptr;
         return event.handled() || event.defaultPrevented();
     }
@@ -144,16 +144,16 @@ bool Surface::routeEvent(RoutedEvent& event) {
     if (!event.propagationStopped()) {
         event.mPhase = EventPhase::Bubble;
         for (std::size_t index = 1; index < route.size(); ++index) {
-            Widget* bubble_target = route[index].get();
+            Widget* bubbleTarget = route[index].get();
             Widget* child = route[index - 1].get();
-            if (!bubble_target
+            if (!bubbleTarget
                 || !child
-                || bubble_target->parent() != route_parents[index]
-                || child->parent() != bubble_target
-                || !isRootedInSurface(bubble_target))
+                || bubbleTarget->parent() != routeParents[index]
+                || child->parent() != bubbleTarget
+                || !isRootedInSurface(bubbleTarget))
                 break;
-            event.mCurrentTarget = bubble_target;
-            bubble_target->onEvent(event);
+            event.mCurrentTarget = bubbleTarget;
+            bubbleTarget->onEvent(event);
             if (event.propagationStopped()) break;
         }
     }
@@ -225,27 +225,27 @@ CursorStyle Surface::cursor() const {
 bool Surface::pointerMove(const PointerEvent& event) {
     mPointerPosition = event.position;
     mPointerPositionKnown = true;
-    WidgetRef<Widget> captured_ref(mCaptured.get());
-    if (Widget* captured = captured_ref.get()) {
-        const Widget* captured_parent = captured->parent();
+    WidgetRef<Widget> capturedRef(mCaptured.get());
+    if (Widget* captured = capturedRef.get()) {
+        const Widget* capturedParent = captured->parent();
         RoutedPointerEvent routed(EventKind::PointerMove, *captured, event);
-        const bool routed_handled = routeEvent(routed);
-        captured = captured_ref.get();
-        if (!captured || captured->parent() != captured_parent || !isRootedInSurface(captured) || !isEnabledInTree(captured)) return routed_handled;
+        const bool routedHandled = routeEvent(routed);
+        captured = capturedRef.get();
+        if (!captured || captured->parent() != capturedParent || !isRootedInSurface(captured) || !isEnabledInTree(captured)) return routedHandled;
         const bool handled = !routed.defaultPrevented() && captured->updatePointerInteraction(event);
-        if (captured = captured_ref.get(); captured && isRootedInSurface(captured) && isEnabledInTree(captured))
+        if (captured = capturedRef.get(); captured && isRootedInSurface(captured) && isEnabledInTree(captured))
             captured->dispatchMouseEvent(WidgetEventKind::MouseMove, event);
-        return routed_handled || handled;
+        return routedHandled || handled;
     }
     updateResizeCursor(event.position);
     refreshHover();
     if (!mLongClickFired && mLongClickTarget && mHovered.get() != mLongClickTarget.get()) resetLongClick();
-    WidgetRef<Widget> hovered_ref(mHovered.get());
-    if (Widget* hovered = hovered_ref.get()) {
+    WidgetRef<Widget> hoveredRef(mHovered.get());
+    if (Widget* hovered = hoveredRef.get()) {
         if (isEnabledInTree(hovered)) {
             RoutedPointerEvent routed(EventKind::PointerMove, *hovered, event);
             routeEvent(routed);
-            if (hovered = hovered_ref.get(); hovered && isRootedInSurface(hovered) && isEnabledInTree(hovered))
+            if (hovered = hoveredRef.get(); hovered && isRootedInSurface(hovered) && isEnabledInTree(hovered))
                 hovered->dispatchMouseEvent(WidgetEventKind::MouseMove, event);
         }
     }
@@ -264,77 +264,77 @@ bool Surface::pointerDown(const PointerEvent& event) {
     updateLayout();
     mPointerPosition = event.position;
     mPointerPositionKnown = true;
-    std::uint8_t resize_edges = 0;
-    Floater* resize_floater = event.button == PointerButton::Left ? resizeFloaterAt(event.position, resize_edges) : nullptr;
-    if (resize_floater) {
-        WidgetRef<Floater> resize_ref(resize_floater);
-        const SurfaceLayer layer = resize_floater->parent() == &layerRoot(SurfaceLayer::Modal) ? SurfaceLayer::Modal : SurfaceLayer::Floater;
-        raiseWithinLayer(*resize_floater, layer);
-        const Surface* resize_surface = resize_floater->attachedSurface();
-        const Widget* resize_parent = resize_floater->parent();
+    std::uint8_t resizeEdges = 0;
+    Floater* resizeFloater = event.button == PointerButton::Left ? resizeFloaterAt(event.position, resizeEdges) : nullptr;
+    if (resizeFloater) {
+        WidgetRef<Floater> resizeRef(resizeFloater);
+        const SurfaceLayer layer = resizeFloater->parent() == &layerRoot(SurfaceLayer::Modal) ? SurfaceLayer::Modal : SurfaceLayer::Floater;
+        raiseWithinLayer(*resizeFloater, layer);
+        const Surface* resizeSurface = resizeFloater->attachedSurface();
+        const Widget* resizeParent = resizeFloater->parent();
         const auto isResizeFloaterStillAttached = [&]() {
-            Floater* current = resize_ref.get();
-            return current && current->attachedSurface() == resize_surface && current->parent() == resize_parent && isRootedInSurface(current);
+            Floater* current = resizeRef.get();
+            return current && current->attachedSurface() == resizeSurface && current->parent() == resizeParent && isRootedInSurface(current);
         };
         resetLongClick();
         mPressedClickCount = 0;
         clearKeyboardPress();
         if (Widget* pressed = mPressed.get()) pressed->setState(WidgetState::Active, false);
         mPressed.set(nullptr);
-        const bool native = mFloaterDelegate && mFloaterDelegate->beginNativeFloaterResize(*this, *resize_floater);
-        resize_floater = resize_ref.get();
+        const bool native = mFloaterDelegate && mFloaterDelegate->beginNativeFloaterResize(*this, *resizeFloater);
+        resizeFloater = resizeRef.get();
         if (!isResizeFloaterStillAttached()) return false;
         const std::optional<Rect> bounds = native ? std::nullopt : std::optional<Rect>(mViewport);
-        const Vec2 minimum = minimumFloaterSize(*resize_floater);
-        resize_floater = resize_ref.get();
+        const Vec2 minimum = minimumFloaterSize(*resizeFloater);
+        resizeFloater = resizeRef.get();
         if (!isResizeFloaterStillAttached()) return false;
-        const bool began = resize_floater->beginResizeInteraction(event, resize_edges, minimum, bounds);
-        resize_floater = resize_ref.get();
+        const bool began = resizeFloater->beginResizeInteraction(event, resizeEdges, minimum, bounds);
+        resizeFloater = resizeRef.get();
         if (began && isResizeFloaterStillAttached()) {
-            mCaptured.set(resize_floater);
-            setHovered(resize_floater);
+            mCaptured.set(resizeFloater);
+            setHovered(resizeFloater);
             setFocused(nullptr, false);
-            mResizeCursor = detail::resizeCursor(static_cast<detail::ResizeEdges>(resize_edges));
+            mResizeCursor = detail::resizeCursor(static_cast<detail::ResizeEdges>(resizeEdges));
             return true;
         }
     }
-    WidgetRef<Widget> hit_ref(hitTestAt(event.position));
-    Widget* hit = hit_ref.get();
+    WidgetRef<Widget> hitRef(hitTestAt(event.position));
+    Widget* hit = hitRef.get();
     if (hit) raiseWithinLayer(*hit, SurfaceLayer::Floater);
     setHovered(hit);
-    bool default_prevented = false;
+    bool defaultPrevented = false;
     if (isEnabledInTree(hit)) {
         RoutedPointerEvent routed(EventKind::PointerDown, *hit, event);
         routeEvent(routed);
-        default_prevented = routed.defaultPrevented();
-        hit = hit_ref.get();
+        defaultPrevented = routed.defaultPrevented();
+        hit = hitRef.get();
     }
     if (event.button != PointerButton::Left) {
         if (hit && isRootedInSurface(hit) && isEnabledInTree(hit)) hit->dispatchMouseEvent(WidgetEventKind::MouseDown, event);
-        return hit_ref.get() && isRootedInSurface(hit_ref.get());
+        return hitRef.get() && isRootedInSurface(hitRef.get());
     }
     resetLongClick();
     mPressedClickCount = 0;
     clearKeyboardPress();
     if (Widget* pressed = mPressed.get()) pressed->setState(WidgetState::Active, false);
     mPressed.set(nullptr);
-    hit = hit_ref.get();
+    hit = hitRef.get();
     const bool hitEnabledBeforeInteraction = isEnabledInTree(hit);
-    for (Widget* candidate = hitEnabledBeforeInteraction && !default_prevented ? hit : nullptr; candidate;) {
-        const WidgetSnapshot candidate_state = snapshot(*candidate);
-        WidgetRef<Widget> parent_ref(candidate->parent());
+    for (Widget* candidate = hitEnabledBeforeInteraction && !defaultPrevented ? hit : nullptr; candidate;) {
+        const WidgetSnapshot candidateSnapshot = snapshot(*candidate);
+        WidgetRef<Widget> parentRef(candidate->parent());
         if (!isEnabledInTree(candidate)) {
-            candidate = parent_ref.get();
+            candidate = parentRef.get();
             continue;
         }
         if (!candidate->beginPointerInteraction(event)) {
-            candidate = parent_ref.get();
+            candidate = parentRef.get();
             continue;
         }
-        candidate = candidate_state.lifetime.get();
+        candidate = candidateSnapshot.lifetime.get();
         if (!candidate
-            || !snapshotValid(candidate_state)
-            || candidate->parent() != parent_ref.get()
+            || !snapshotValid(candidateSnapshot)
+            || candidate->parent() != parentRef.get()
             || !isEnabledInTree(candidate)
             || !isRootedInSurface(candidate))
             return true;
@@ -343,19 +343,19 @@ bool Surface::pointerDown(const PointerEvent& event) {
         candidate->dispatchMouseEvent(WidgetEventKind::MouseDown, event);
         return true;
     }
-    hit = hit_ref.get();
+    hit = hitRef.get();
     const bool hitEnabledAfterInteraction = isEnabledInTree(hit);
-    const WidgetSnapshot hit_state = hit ? snapshot(*hit) : WidgetSnapshot{};
-    const bool focusable = hitEnabledAfterInteraction && !default_prevented && hit->focusable();
-    hit = hit_state.lifetime.get();
-    if (hit && (!snapshotValid(hit_state) || !isRootedInSurface(hit))) return true;
+    const WidgetSnapshot hitSnapshot = hit ? snapshot(*hit) : WidgetSnapshot{};
+    const bool focusable = hitEnabledAfterInteraction && !defaultPrevented && hit->focusable();
+    hit = hitSnapshot.lifetime.get();
+    if (hit && (!snapshotValid(hitSnapshot) || !isRootedInSurface(hit))) return true;
     setFocused(focusable ? hit : nullptr, false);
-    mPressed.set(hitEnabledAfterInteraction && !default_prevented ? hit : nullptr);
+    mPressed.set(hitEnabledAfterInteraction && !defaultPrevented ? hit : nullptr);
     mPressedClickCount = mPressed ? event.clickCount : 0;
     updatePressedState();
-    if (hitEnabledAfterInteraction && !default_prevented && hit && hit->eventCall(WidgetEventKind::LongClick)) mLongClickTarget.set(hit);
+    if (hitEnabledAfterInteraction && !defaultPrevented && hit && hit->eventCall(WidgetEventKind::LongClick)) mLongClickTarget.set(hit);
     if (hitEnabledAfterInteraction && hit && isRootedInSurface(hit)) hit->dispatchMouseEvent(WidgetEventKind::MouseDown, event);
-    return hit_ref.get() && isRootedInSurface(hit_ref.get());
+    return hitRef.get() && isRootedInSurface(hitRef.get());
 }
 
 bool Surface::pointerUp(const PointerEvent& event) {
@@ -364,7 +364,7 @@ bool Surface::pointerUp(const PointerEvent& event) {
     mPointerPositionKnown = true;
     if (event.button != PointerButton::Left) {
         WidgetRef<Widget> hit(hitTestAt(event.position));
-        const bool had_hit = !!hit;
+        const bool hadHit = !!hit;
         if (isEnabledInTree(hit.get())) {
             RoutedPointerEvent routed(EventKind::PointerUp, *hit, event);
             routeEvent(routed);
@@ -372,37 +372,37 @@ bool Surface::pointerUp(const PointerEvent& event) {
             if (hit && event.button == PointerButton::Right && isRootedInSurface(hit.get()) && isEnabledInTree(hit.get()))
                 hit->dispatchMouseEvent(WidgetEventKind::ContextMenu, event);
         }
-        return had_hit;
+        return hadHit;
     }
-    WidgetRef<Widget> captured_ref(mCaptured.get());
-    if (Widget* captured = captured_ref.get()) {
-        const Widget* captured_parent = captured->parent();
+    WidgetRef<Widget> capturedRef(mCaptured.get());
+    if (Widget* captured = capturedRef.get()) {
+        const Widget* capturedParent = captured->parent();
         resetLongClick();
         mPressedClickCount = 0;
         mCaptured.set(nullptr);
         RoutedPointerEvent routed(EventKind::PointerUp, *captured, event);
-        const bool routed_handled = routeEvent(routed);
-        captured = captured_ref.get();
-        if (!captured || captured->parent() != captured_parent || !isRootedInSurface(captured) || !isEnabledInTree(captured)) {
+        const bool routedHandled = routeEvent(routed);
+        captured = capturedRef.get();
+        if (!captured || captured->parent() != capturedParent || !isRootedInSurface(captured) || !isEnabledInTree(captured)) {
             refreshHover();
-            return routed_handled;
+            return routedHandled;
         }
         const bool handled = !routed.defaultPrevented() && captured->endPointerInteraction(event);
-        if (captured = captured_ref.get(); captured && isRootedInSurface(captured) && isEnabledInTree(captured))
+        if (captured = capturedRef.get(); captured && isRootedInSurface(captured) && isEnabledInTree(captured))
             captured->dispatchMouseEvent(WidgetEventKind::MouseUp, event);
         refreshHover();
-        return routed_handled || handled;
+        return routedHandled || handled;
     }
     WidgetRef<Widget> released(mPressed.get());
     WidgetRef<Widget> hit(hitTestAt(event.position));
-    bool default_prevented = false;
+    bool defaultPrevented = false;
     if (Widget* target = released ? released.get() : hit.get()) {
         RoutedPointerEvent routed(EventKind::PointerUp, *target, event);
         routeEvent(routed);
-        default_prevented = routed.defaultPrevented();
+        defaultPrevented = routed.defaultPrevented();
     }
-    const bool suppress_click = mLongClickFired;
-    const uint8_t click_count = mPressedClickCount;
+    const bool suppressClick = mLongClickFired;
+    const uint8_t clickCount = mPressedClickCount;
     if (Widget* pressed = mPressed.get()) pressed->setState(WidgetState::Active, false);
     mPressed.set(nullptr);
     setHovered(hit.get());
@@ -410,18 +410,18 @@ bool Surface::pointerUp(const PointerEvent& event) {
         released->dispatchMouseEvent(WidgetEventKind::MouseUp, event);
     resetLongClick();
     mPressedClickCount = 0;
-    const bool clicked = !suppress_click
+    const bool clicked = !suppressClick
         && released
         && released.get() == hit.get()
-        && !default_prevented
+        && !defaultPrevented
         && isEnabledInTree(released.get())
         && isRootedInSurface(released.get());
     if (clicked) {
         released->activate();
-        if (Widget* activated = released.get(); activated && click_count >= 2 && isEnabledInTree(activated) && isRootedInSurface(activated)) {
-            PointerEvent double_click = event;
-            double_click.clickCount = click_count;
-            activated->dispatchMouseEvent(WidgetEventKind::DoubleClick, double_click);
+        if (Widget* activated = released.get(); activated && clickCount >= 2 && isEnabledInTree(activated) && isRootedInSurface(activated)) {
+            PointerEvent doubleClick = event;
+            doubleClick.clickCount = clickCount;
+            activated->dispatchMouseEvent(WidgetEventKind::DoubleClick, doubleClick);
         }
         refreshHover();
         return true;
@@ -433,74 +433,74 @@ bool Surface::scroll(const ScrollEvent& event) {
     updateLayout();
     mPointerPosition = event.position;
     mPointerPositionKnown = true;
-    WidgetRef<Widget> hit_ref(hitTestAt(event.position));
-    Widget* hit = hit_ref.get();
-    bool routed_handled = false;
-    bool default_prevented = false;
+    WidgetRef<Widget> hitRef(hitTestAt(event.position));
+    Widget* hit = hitRef.get();
+    bool routedHandled = false;
+    bool defaultPrevented = false;
     if (isEnabledInTree(hit)) {
         RoutedScrollEvent routed(*hit, event);
-        routed_handled = routeEvent(routed);
-        default_prevented = routed.defaultPrevented();
-        hit = hit_ref.get();
+        routedHandled = routeEvent(routed);
+        defaultPrevented = routed.defaultPrevented();
+        hit = hitRef.get();
     }
-    for (Widget* candidate = default_prevented ? nullptr : hit; candidate;) {
-        WidgetRef<Widget> candidate_ref(candidate);
-        WidgetRef<Widget> parent_ref(candidate ? candidate->parent() : nullptr);
-        const WidgetSnapshot candidate_state = candidate ? snapshot(*candidate) : WidgetSnapshot{};
-        if (!candidate_ref || !isEnabledInTree(candidate) || !isRootedInSurface(candidate)) break;
+    for (Widget* candidate = defaultPrevented ? nullptr : hit; candidate;) {
+        WidgetRef<Widget> candidateRef(candidate);
+        WidgetRef<Widget> parentRef(candidate ? candidate->parent() : nullptr);
+        const WidgetSnapshot candidateSnapshot = candidate ? snapshot(*candidate) : WidgetSnapshot{};
+        if (!candidateRef || !isEnabledInTree(candidate) || !isRootedInSurface(candidate)) break;
         if (candidate->defaultScroll(event)) return true;
-        candidate = candidate_ref.get();
-        if (!candidate || !snapshotValid(candidate_state) || !isEnabledInTree(candidate) || !isRootedInSurface(candidate)) break;
-        candidate = parent_ref.get();
+        candidate = candidateRef.get();
+        if (!candidate || !snapshotValid(candidateSnapshot) || !isEnabledInTree(candidate) || !isRootedInSurface(candidate)) break;
+        candidate = parentRef.get();
     }
-    return routed_handled || hit_ref.get() != nullptr;
+    return routedHandled || hitRef.get() != nullptr;
 }
 
 bool Surface::keyDown(const KeyEvent& event) {
     validateFocus();
-    if (event.key == KEY_TAB && (event.modifiers & ~MODIFIER_SHIFT) == 0) {
-        mTabKeyHandled = moveFocus((event.modifiers & MODIFIER_SHIFT) != 0);
+    if (event.key == kKeyTab && (event.modifiers & ~kModifierShift) == 0) {
+        mTabKeyHandled = moveFocus((event.modifiers & kModifierShift) != 0);
         return mTabKeyHandled;
     }
-    WidgetRef<Widget> focused_ref(mFocused.get());
-    Widget* focused = focused_ref.get();
+    WidgetRef<Widget> focusedRef(mFocused.get());
+    Widget* focused = focusedRef.get();
     if (!focused) return false;
-    const Widget* focused_parent = focused->parent();
+    const Widget* focusedParent = focused->parent();
     RoutedKeyEvent routed(EventKind::KeyDown, *focused, event);
-    const bool routed_handled = routeEvent(routed);
-    focused = focused_ref.get();
-    if (!focused || focused->parent() != focused_parent || !isRootedInSurface(focused) || !isEnabledInTree(focused)) return routed_handled;
-    if (routed.defaultPrevented()) return routed_handled;
+    const bool routedHandled = routeEvent(routed);
+    focused = focusedRef.get();
+    if (!focused || focused->parent() != focusedParent || !isRootedInSurface(focused) || !isEnabledInTree(focused)) return routedHandled;
+    if (routed.defaultPrevented()) return routedHandled;
     if (isActivationKey(event.key)) {
         if (mKeyPressed.get() && (mKeyPressed.get() != focused || mPressedKey != event.key)) clearKeyboardPress();
-        if (!focused->defaultKeyDown(event)) return routed_handled;
-        focused = focused_ref.get();
+        if (!focused->defaultKeyDown(event)) return routedHandled;
+        focused = focusedRef.get();
         if (!focused || !isRootedInSurface(focused) || !isEnabledInTree(focused)) return true;
         mKeyPressed.set(focused);
         mPressedKey = event.key;
         return true;
     }
-    return focused->defaultKeyDown(event) || routed_handled;
+    return focused->defaultKeyDown(event) || routedHandled;
 }
 
 bool Surface::keyUp(const KeyEvent& event) {
-    if (event.key == KEY_TAB) {
+    if (event.key == kKeyTab) {
         const bool handled = mTabKeyHandled;
         mTabKeyHandled = false;
         return handled;
     }
     validateFocus();
-    WidgetRef<Widget> focused_ref(mFocused.get());
-    Widget* focused = focused_ref.get();
+    WidgetRef<Widget> focusedRef(mFocused.get());
+    Widget* focused = focusedRef.get();
     if (!focused) return false;
-    const Widget* focused_parent = focused->parent();
+    const Widget* focusedParent = focused->parent();
     RoutedKeyEvent routed(EventKind::KeyUp, *focused, event);
-    const bool routed_handled = routeEvent(routed);
-    focused = focused_ref.get();
-    if (!focused || focused->parent() != focused_parent || !isRootedInSurface(focused) || !isEnabledInTree(focused)) return routed_handled;
+    const bool routedHandled = routeEvent(routed);
+    focused = focusedRef.get();
+    if (!focused || focused->parent() != focusedParent || !isRootedInSurface(focused) || !isEnabledInTree(focused)) return routedHandled;
     if (routed.defaultPrevented()) {
         if (isActivationKey(event.key)) clearKeyboardPress();
-        return routed_handled;
+        return routedHandled;
     }
     if (isActivationKey(event.key)) {
         if (mKeyPressed.get() != focused || mPressedKey != event.key) return false;
@@ -509,19 +509,19 @@ bool Surface::keyUp(const KeyEvent& event) {
     }
     const bool handled = focused->defaultKeyUp(event);
     if (handled) refreshHover();
-    return handled || routed_handled;
+    return handled || routedHandled;
 }
 
 bool Surface::charInput(unsigned int codepoint) {
     validateFocus();
-    WidgetRef<Widget> focused_ref(mFocused.get());
-    Widget* focused = focused_ref.get();
+    WidgetRef<Widget> focusedRef(mFocused.get());
+    Widget* focused = focusedRef.get();
     if (!focused) return false;
     RoutedCharacterEvent routed(*focused, codepoint);
-    const bool routed_handled = routeEvent(routed);
-    focused = focused_ref.get();
-    if (!focused || !isRootedInSurface(focused) || !isEnabledInTree(focused)) return routed_handled;
-    return routed_handled || (!routed.defaultPrevented() && focused->defaultCharacterInput(codepoint));
+    const bool routedHandled = routeEvent(routed);
+    focused = focusedRef.get();
+    if (!focused || !isRootedInSurface(focused) || !isEnabledInTree(focused)) return routedHandled;
+    return routedHandled || (!routed.defaultPrevented() && focused->defaultCharacterInput(codepoint));
 }
 
 void Surface::refreshHover() {
@@ -531,13 +531,13 @@ void Surface::refreshHover() {
 
 void Surface::refreshHoverState() {
     if (!mPointerPositionKnown || !mRoot) return;
-    const bool refresh_was_requested = mHitTestDirty;
+    const bool refreshWasRequested = mHitTestDirty;
     mHitTestDirty = false;
     updateResizeCursor(mPointerPosition);
     Widget* hit = hitTestAt(mPointerPosition);
     setHovered(hit && isEnabledInTree(hit) ? hit : nullptr);
     updatePressedState();
-    if (refresh_was_requested) mHitTestDirty = false;
+    if (refreshWasRequested) mHitTestDirty = false;
 }
 
 void Surface::update(std::chrono::milliseconds elapsed) {
@@ -601,9 +601,9 @@ void Surface::validateFocus() {
     Widget* focused = mFocused.get();
     if (focused && hasActiveModal()) {
         const Widget* current = focused;
-        const Widget* modal_root = &layerRoot(SurfaceLayer::Modal);
-        while (current && current != modal_root) current = current->parent();
-        if (current != modal_root) {
+        const Widget* modalRoot = &layerRoot(SurfaceLayer::Modal);
+        while (current && current != modalRoot) current = current->parent();
+        if (current != modalRoot) {
             setFocused(nullptr, false);
             return;
         }
@@ -632,7 +632,7 @@ void Surface::widgetBecameUnavailable(Widget&) {
         mPressed.set(nullptr);
     }
     if (Widget* hovered = mHovered.get(); hovered && !isEnabledInTree(hovered)) setHovered(nullptr);
-    if (Widget* key_pressed = mKeyPressed.get(); key_pressed && !isEnabledInTree(key_pressed)) clearKeyboardPress();
+    if (Widget* keyPressed = mKeyPressed.get(); keyPressed && !isEnabledInTree(keyPressed)) clearKeyboardPress();
     if (Widget* target = mLongClickTarget.get(); target && !isEnabledInTree(target)) resetLongClick();
     validateFocus();
 }

@@ -55,10 +55,10 @@ KEY translatedKey(WPARAM key, LPARAM data) {
 #if LL_SDL_WINDOW
     return static_cast<KEY>(key);
 #else
-    static LLKeyboardWin32 keyboard;
+    static LLKeyboardWin32 sKeyboard;
     KEY translated = static_cast<KEY>(key);
     const MASK extended = (data & (1LL << 24)) ? MASK_EXTENDED : MASK_NONE;
-    keyboard.translateExtendedKey(static_cast<U16>(key), extended, &translated);
+    sKeyboard.translateExtendedKey(static_cast<U16>(key), extended, &translated);
     return translated;
 #endif
 }
@@ -221,13 +221,13 @@ public:
         SetWindowPos(mWindow, nullptr, native.x, native.y, native.width, native.height, SWP_NOACTIVATE | SWP_NOZORDER);
     }
 
-    void beginDrag(F32 logicalX, F32 logicalY, const std::optional<AuxiliaryWindowPoint>& requestedCursor) override {
+    void beginDrag(F32 logicalX, F32 logicalY, const std::optional<AuxiliaryScreenPoint>& requestedScreenCursor) override {
         if (!mWindow) return;
         mLogicalDragOffset = {logicalX, logicalY};
         updateDragOffset();
 
         POINT cursor{};
-        if (requestedCursor) SetCursorPos(requestedCursor->x, requestedCursor->y);
+        if (requestedScreenCursor) SetCursorPos(requestedScreenCursor->x, requestedScreenCursor->y);
         if (GetCursorPos(&cursor))
             SetWindowPos(mWindow, nullptr, cursor.x - mDragOffset.x, cursor.y - mDragOffset.y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
 
@@ -254,7 +254,7 @@ public:
 
 private:
     static void registerClass() {
-        static const bool registered = [] {
+        static const bool sRegistered = [] {
             WNDCLASSEXW type{};
             type.cbSize = sizeof(type);
             type.style = CS_DBLCLKS;
@@ -273,7 +273,7 @@ private:
             const bool renderRegistered = RegisterClassExW(&renderType) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
             return inputRegistered && renderRegistered;
         }();
-        (void)registered;
+        (void)sRegistered;
     }
 
     void updateScale() {
@@ -571,6 +571,6 @@ public:
 } // namespace
 
 AuxiliaryWindowFactory& defaultAuxiliaryWindowFactory() {
-    static DefaultAuxiliaryWindowFactory factory;
-    return factory;
+    static DefaultAuxiliaryWindowFactory sFactory;
+    return sFactory;
 }

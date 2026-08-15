@@ -32,7 +32,11 @@
 #include "widgets/floater.h"
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
+using radia::ui::Floater;
+using radia::ui::Rect;
+using radia::ui::Surface;
+using radia::ui::Vec2;
+
 namespace {
 class FloaterReplacement final {
 public:
@@ -58,8 +62,8 @@ public:
             const Vec2 authoredSize{authoredRect->w, authoredRect->h};
             Rect replacementRect = wasMinimized ? current->expandedRect() : current->rect();
             const bool preserveSize = radia::ui::detail::preserveUserResizeOnReload(current->canResize(), candidate->canResize(),
-                                                                               {current->authoredSize(), current->authoredContentSize()},
-                                                                               {authoredSize, candidate->authoredContentSize()});
+                                                                                    {current->authoredSize(), current->authoredContentSize()},
+                                                                                    {authoredSize, candidate->authoredContentSize()});
             std::optional<Vec2> replacementLogicalSize;
             if (!preserveSize) {
                 replacementLogicalSize = authoredSize;
@@ -179,14 +183,14 @@ private:
 };
 } // namespace
 
-FloaterHost::FloaterHost(radia::ui::Surface& attachedSurface, DetachedFloaterManager& detachedManager)
+FloaterHost::FloaterHost(Surface& attachedSurface, DetachedFloaterManager& detachedManager)
     : mAttachedSurface(attachedSurface), mDetachedManager(detachedManager) {}
 
-void FloaterHost::mount(std::unique_ptr<radia::ui::Floater> root) {
+void FloaterHost::mount(std::unique_ptr<Floater> root) {
     mAttachedSurface.mountFloater(std::move(root));
 }
 
-std::unique_ptr<radia::ui::Floater> FloaterHost::unmount(radia::ui::Floater& root) {
+std::unique_ptr<Floater> FloaterHost::unmount(Floater& root) {
     if (mDetachedManager.isDetached(root)) return {};
     return mAttachedSurface.unmountFloater(root);
 }
@@ -196,18 +200,18 @@ bool FloaterHost::replaceAll(std::vector<ReplacementRequest> replacements) {
     return transaction.commit();
 }
 
-bool FloaterHost::clearAll(std::vector<radia::ui::Floater*> roots) {
-    for (radia::ui::Floater* root : roots)
+bool FloaterHost::clearAll(std::vector<Floater*> roots) {
+    for (Floater* root : roots)
         if (!root || mDetachedManager.isDetached(*root) || !mAttachedSurface.ownsFloater(*root)) return false;
-    for (radia::ui::Floater* root : roots) {
+    for (Floater* root : roots) {
         if (!root->closed()) root->close();
-        std::unique_ptr<radia::ui::Floater> retired = mAttachedSurface.unmountFloater(*root);
+        std::unique_ptr<Floater> retired = mAttachedSurface.unmountFloater(*root);
         if (!retired || retired.get() != root) LL_ERRS("UI") << "Component host lost a Floater during account teardown." << LL_ENDL;
     }
     return true;
 }
 
-void FloaterHost::present(radia::ui::Floater& root) {
+void FloaterHost::present(Floater& root) {
     root.open();
     if (!mDetachedManager.isDetached(root)) mAttachedSurface.raise(root);
 }

@@ -340,7 +340,7 @@ std::optional<std::vector<Effect>> StyleModel::parseEffects(const std::string& r
     const std::string value = trim(raw);
     if (lower(value) == "none") return std::vector<Effect>();
     const std::vector<std::string> functions = detail::splitTopLevel(value, ',');
-    if (functions.empty() || functions.size() > maxEffectCount) return std::nullopt;
+    if (functions.empty() || functions.size() > kMaxEffectCount) return std::nullopt;
 
     auto parseDirection = [&](const std::string& rawDirection, float& degrees) {
         const std::string direction = lower(trim(rawDirection));

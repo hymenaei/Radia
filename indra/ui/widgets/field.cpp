@@ -48,9 +48,9 @@ public:
 
     void setControl(Widget* control) { mControl.set(control); }
 
-    Vec2 intrinsicSize(const StyleSheet& theme, const Style&, const TextMetrics&, const IntrinsicSizeConstraints&) const override {
+    Vec2 intrinsicSize(const StyleSheet& styleSheet, const Style&, const TextMetrics&, const IntrinsicSizeConstraints&) const override {
         if (!mControl) return {};
-        const Style controlStyle = resolveWidgetStyle(theme, *mControl);
+        const Style controlStyle = resolveWidgetStyle(styleSheet, *mControl);
         return {mControl->desiredSize().x + controlStyle.margin.horizontal(), 0.f};
     }
 

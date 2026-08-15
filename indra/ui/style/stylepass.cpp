@@ -32,16 +32,16 @@
 
 namespace radia::ui {
 namespace {
-LayoutContextKey makeContextKey(const StyleSheet& style_sheet, const TextMetrics& text_metrics) {
-    return {&style_sheet, &text_metrics, style_sheet.generation(), text_metrics.generation()};
+LayoutContextKey makeContextKey(const StyleSheet& styleSheet, const TextMetrics& textMetrics) {
+    return {&styleSheet, &textMetrics, styleSheet.generation(), textMetrics.generation()};
 }
 } // namespace
 
-StylePass::StylePass(const StyleSheet& style_sheet, const TextMetrics& text_metrics)
-    : mStyleSheet(style_sheet), mTextMetrics(text_metrics), mContext(makeContextKey(style_sheet, text_metrics)) {}
+StylePass::StylePass(const StyleSheet& styleSheet, const TextMetrics& textMetrics)
+    : mStyleSheet(styleSheet), mTextMetrics(textMetrics), mContext(makeContextKey(styleSheet, textMetrics)) {}
 
-bool StylePass::matches(const StyleSheet& style_sheet, const TextMetrics& text_metrics) const {
-    return mContext == makeContextKey(style_sheet, text_metrics);
+bool StylePass::matches(const StyleSheet& styleSheet, const TextMetrics& textMetrics) const {
+    return mContext == makeContextKey(styleSheet, textMetrics);
 }
 
 void StylePass::beginTraversal() {
@@ -58,15 +58,15 @@ void StylePass::beginTraversal() {
 }
 
 void StylePass::compactStyles() {
-    constexpr std::size_t storage_slack = 32;
-    if (mStyleStorage.size() <= mStyles.size() * 2 + storage_slack) return;
+    constexpr std::size_t kStorageSlack = 32;
+    if (mStyleStorage.size() <= mStyles.size() * 2 + kStorageSlack) return;
 
     std::deque<Style> compacted;
     std::unordered_map<const Widget*, CachedStyle> styles;
     styles.reserve(mStyles.size());
     for (const auto& [widget, cached] : mStyles) {
-        compacted.push_back(mStyleStorage[cached.storage_index]);
-        styles.emplace(widget, CachedStyle{compacted.size() - 1, cached.lifetime, cached.context_revision});
+        compacted.push_back(mStyleStorage[cached.storageIndex]);
+        styles.emplace(widget, CachedStyle{compacted.size() - 1, cached.lifetime, cached.contextRevision});
     }
     mStyleStorage.swap(compacted);
     mStyles.swap(styles);
@@ -85,15 +85,15 @@ const Style& StylePass::style(const Widget& widget) {
     }
     const auto found = mStyles.find(&widget);
     const auto lifetime = widget.lifetime().lock();
-    if (found != mStyles.end() && found->second.lifetime.lock() == lifetime && found->second.context_revision == widget.styleContextRevision())
-        return mStyleStorage[found->second.storage_index];
+    if (found != mStyles.end() && found->second.lifetime.lock() == lifetime && found->second.contextRevision == widget.styleContextRevision())
+        return mStyleStorage[found->second.storageIndex];
     if (found != mStyles.end()) mStyles.erase(found);
 
-    const ConstWidgetVisit widget_state(widget);
-    const std::weak_ptr<char> widget_lifetime = widget.lifetime();
-    const WidgetRef<const Widget> styled_lifetime(&widget);
-    const Widget* parent = widget_state.parent;
-    const std::uint64_t context_revision = widget.styleContextRevision();
+    const ConstWidgetVisit widgetSnapshot(widget);
+    const std::weak_ptr<char> widgetLifetime = widget.lifetime();
+    const WidgetRef<const Widget> styledRef(&widget);
+    const Widget* parent = widgetSnapshot.parent;
+    const std::uint64_t contextRevision = widget.styleContextRevision();
     const Widget* owner = &widget;
     Style resolved;
     if (widget.part().empty()) resolved = mStyleSheet.resolveWidget(widget);
@@ -106,29 +106,29 @@ const Style& StylePass::style(const Widget& widget) {
         resolved = mStyleSheet.resolveWidgetPart(*owner, widget);
     }
     widget.constrainResolvedStyle(resolved);
-    const Widget* current = styled_lifetime.get();
+    const Widget* current = styledRef.get();
     const auto transient = [&]() -> const Style& {
         mStyleStorage.emplace_back(std::move(resolved));
         return mStyleStorage.back();
     };
-    if (!current || !widget_state.styleValid()) return transient();
+    if (!current || !widgetSnapshot.styleValid()) return transient();
     if (parent) {
-        const ConstWidgetVisit parent_state(*parent);
-        const Style& parent_style = style(*parent);
-        current = styled_lifetime.get();
-        const Widget* current_parent = parent_state.get();
-        if (!current || !current_parent || !widget_state.styleValid() || !parent_state.styleValid()) return transient();
-        inheritStyle(resolved, parent_style);
+        const ConstWidgetVisit parentSnapshot(*parent);
+        const Style& parentStyle = style(*parent);
+        current = styledRef.get();
+        const Widget* currentParent = parentSnapshot.get();
+        if (!current || !currentParent || !widgetSnapshot.styleValid() || !parentSnapshot.styleValid()) return transient();
+        inheritStyle(resolved, parentStyle);
     }
 
-    current = styled_lifetime.get();
-    if (!current || !widget_state.styleValid()) return transient();
-    const std::uint64_t final_context_revision = current->styleContextRevision();
+    current = styledRef.get();
+    if (!current || !widgetSnapshot.styleValid()) return transient();
+    const std::uint64_t finalContextRevision = current->styleContextRevision();
     mStyleStorage.emplace_back(std::move(resolved));
-    const std::size_t storage_index = mStyleStorage.size() - 1;
+    const std::size_t storageIndex = mStyleStorage.size() - 1;
     mStyles[&widget] =
-        CachedStyle{storage_index, widget_lifetime, final_context_revision == context_revision ? context_revision : final_context_revision};
-    return mStyleStorage[storage_index];
+        CachedStyle{storageIndex, widgetLifetime, finalContextRevision == contextRevision ? contextRevision : finalContextRevision};
+    return mStyleStorage[storageIndex];
 }
 
 StylePass::ChildSnapshot StylePass::orderedChildren(const Widget& parent) {

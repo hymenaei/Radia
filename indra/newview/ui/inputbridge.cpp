@@ -28,7 +28,16 @@
 #include "llkeyboard.h"
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
+using radia::ui::CursorStyle;
+using radia::ui::KeyEvent;
+using radia::ui::kModifierAlt;
+using radia::ui::kModifierControl;
+using radia::ui::kModifierPlatformControl;
+using radia::ui::kModifierShift;
+using radia::ui::PointerButton;
+using radia::ui::PointerEvent;
+using radia::ui::ScrollEvent;
+
 namespace {
 PointerButton translateButton(NativePointerButton button) {
     switch (button) {
@@ -44,19 +53,19 @@ PointerButton translateButton(NativePointerButton button) {
 int translateKey(std::int32_t key) {
     switch (key) {
         case KEY_RETURN:
-        case KEY_PAD_RETURN: return radia::ui::KEY_RETURN;
-        case ' ': return radia::ui::KEY_SPACE;
-        case KEY_TAB: return radia::ui::KEY_TAB;
+        case KEY_PAD_RETURN: return radia::ui::kKeyReturn;
+        case ' ': return radia::ui::kKeySpace;
+        case KEY_TAB: return radia::ui::kKeyTab;
         default: return key;
     }
 }
 
 std::uint32_t translateModifiers(std::uint32_t modifiers) {
     std::uint32_t result = 0;
-    if (modifiers & MASK_SHIFT) result |= MODIFIER_SHIFT;
-    if (modifiers & MASK_CONTROL) result |= MODIFIER_CONTROL;
-    if (modifiers & MASK_ALT) result |= MODIFIER_ALT;
-    if (modifiers & MASK_MAC_CONTROL) result |= MODIFIER_PLATFORM_CONTROL;
+    if (modifiers & MASK_SHIFT) result |= kModifierShift;
+    if (modifiers & MASK_CONTROL) result |= kModifierControl;
+    if (modifiers & MASK_ALT) result |= kModifierAlt;
+    if (modifiers & MASK_MAC_CONTROL) result |= kModifierPlatformControl;
     return result;
 }
 } // namespace

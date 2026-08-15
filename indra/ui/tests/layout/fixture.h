@@ -34,41 +34,48 @@
 #include "layout/resourcecompiler.h"
 
 namespace tut {
+using radia::ui::DiagnosticResult;
+using radia::ui::LayoutBuildResult;
+using radia::ui::LayoutDocument;
+using radia::ui::LayoutDocumentMap;
+using radia::ui::LayoutDocumentParser;
+using radia::ui::LayoutDocumentParseResult;
+using radia::ui::LayoutResourceCompiler;
+
 struct LayoutCompilerFixture {
     std::map<std::string, std::string> resources;
 
-    radia::ui::LayoutDocumentMap parseDocuments(radia::ui::DiagnosticResult& diagnostics) const {
-        radia::ui::LayoutDocumentMap result;
+    LayoutDocumentMap parseDocuments(DiagnosticResult& diagnostics) const {
+        LayoutDocumentMap result;
         for (const auto& [resourceId, sourceXml] : resources) {
-            radia::ui::LayoutDocumentParseResult parsed = radia::ui::LayoutDocumentParser().parse(sourceXml, resourceId);
+            LayoutDocumentParseResult parsed = LayoutDocumentParser().parse(sourceXml, resourceId);
             diagnostics.warnings.insert(diagnostics.warnings.end(), parsed.warnings.begin(), parsed.warnings.end());
             diagnostics.errors.insert(diagnostics.errors.end(), parsed.errors.begin(), parsed.errors.end());
-            if (parsed.document) result.emplace(resourceId, std::shared_ptr<const radia::ui::LayoutDocument>(std::move(parsed.document)));
+            if (parsed.document) result.emplace(resourceId, std::shared_ptr<const LayoutDocument>(std::move(parsed.document)));
         }
         return result;
     }
 
-    radia::ui::LayoutBuildResult buildWidgetTreeFromResource(const std::string& resourceId) const {
-        radia::ui::LayoutBuildResult result;
-        radia::ui::LayoutDocumentMap parsed = parseDocuments(result);
+    LayoutBuildResult buildWidgetTreeFromResource(const std::string& resourceId) const {
+        LayoutBuildResult result;
+        LayoutDocumentMap parsed = parseDocuments(result);
         if (result.hasErrors()) return result;
-        return radia::ui::LayoutResourceCompiler(&parsed).buildWidgetTreeFromResource(resourceId);
+        return LayoutResourceCompiler(&parsed).buildWidgetTreeFromResource(resourceId);
     }
 
-    radia::ui::LayoutBuildResult buildWidgetTreeFromString(const std::string& xml, const std::string& sourceName = {}) const {
-        radia::ui::LayoutBuildResult result;
-        radia::ui::LayoutDocumentMap parsed = parseDocuments(result);
+    LayoutBuildResult buildWidgetTreeFromString(const std::string& xml, const std::string& sourceName = {}) const {
+        LayoutBuildResult result;
+        LayoutDocumentMap parsed = parseDocuments(result);
         if (result.hasErrors()) return result;
-        return radia::ui::LayoutResourceCompiler(&parsed).buildWidgetTreeFromString(xml, sourceName);
+        return LayoutResourceCompiler(&parsed).buildWidgetTreeFromString(xml, sourceName);
     }
 
-    radia::ui::DiagnosticResult validateWidgetDefaults(const std::string& element) const {
-        radia::ui::DiagnosticResult result;
-        radia::ui::LayoutDocumentMap parsed = parseDocuments(result);
+    DiagnosticResult validateWidgetDefaults(const std::string& element) const {
+        DiagnosticResult result;
+        LayoutDocumentMap parsed = parseDocuments(result);
         if (result.hasErrors()) return result;
-        return radia::ui::LayoutResourceCompiler(&parsed).validateWidgetDefaults(element);
+        return LayoutResourceCompiler(&parsed).validateWidgetDefaults(element);
     }
 };
 } // namespace tut
-
 #endif // RD_TESTS_LAYOUT_FIXTURE_H

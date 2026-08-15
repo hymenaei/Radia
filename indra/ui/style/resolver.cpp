@@ -103,8 +103,8 @@ const Widget* structuralParent(const Widget* widget) {
 }
 
 bool matchesStructuralSelector(const StyleSelector& selector, const Widget& widget) {
-    static const std::vector<std::string> noParts;
-    return matchesSelector(selector, widget.styleElement(), widget.id(), widget.classes(), widget.states(), noParts, 0);
+    static const std::vector<std::string> sNoParts;
+    return matchesSelector(selector, widget.styleElement(), widget.id(), widget.classes(), widget.states(), sNoParts, 0);
 }
 
 bool matchesRule(const StyleRule& rule, const std::string& element, const std::string& id, const std::set<std::string>& classes, uint8_t ownerStates,
@@ -116,11 +116,11 @@ bool matchesRule(const StyleRule& rule, const std::string& element, const std::s
     std::size_t inlineIndex = inlineAncestors ? inlineAncestors->size() : 0;
     const Widget* ancestor = inlineAncestors ? widget : structuralParent(widget);
     const auto nextAncestorMatches = [&](const StyleSelector& selector) -> std::optional<bool> {
-        static const std::set<std::string> noClasses;
-        static const std::vector<std::string> noParts;
+        static const std::set<std::string> sNoClasses;
+        static const std::vector<std::string> sNoParts;
         if (inlineAncestors && inlineIndex) {
             const std::string& inlineElement = (*inlineAncestors)[--inlineIndex];
-            return matchesSelector(selector, inlineElement, {}, noClasses, 0, noParts, 0);
+            return matchesSelector(selector, inlineElement, {}, sNoClasses, 0, sNoParts, 0);
         }
         if (!ancestor) return std::nullopt;
         const Widget* candidate = ancestor;
@@ -334,9 +334,9 @@ Style StyleSheet::resolveWidgetPart(const Widget& owner, const Widget& part) con
 }
 
 Style StyleSheet::resolveInline(const Widget& owner, const std::string& element, const std::vector<std::string>& inlineAncestors) const {
-    static const std::set<std::string> noClasses;
-    static const std::vector<std::string> noParts;
-    return mImpl->resolveInternal(element, {}, noClasses, 0, noParts, 0, &owner, &inlineAncestors);
+    static const std::set<std::string> sNoClasses;
+    static const std::vector<std::string> sNoParts;
+    return mImpl->resolveInternal(element, {}, sNoClasses, 0, sNoParts, 0, &owner, &inlineAncestors);
 }
 
 Style StyleModel::resolveInternal(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint8_t ownerStates,

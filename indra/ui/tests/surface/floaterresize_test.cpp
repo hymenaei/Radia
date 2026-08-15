@@ -28,6 +28,18 @@
 #include "../test/lltut.h"
 #include "surface/floaterresize.h"
 
+namespace {
+using radia::ui::CursorStyle;
+using radia::ui::Rect;
+using radia::ui::Vec2;
+using radia::ui::detail::FloaterResizeConstraints;
+using radia::ui::detail::preserveUserResizeOnReload;
+using radia::ui::detail::resizeCursor;
+using radia::ui::detail::resizedRect;
+using radia::ui::detail::ResizeEdges;
+using radia::ui::detail::resizeEdgesAt;
+} // namespace
+
 namespace tut {
 struct floaterResizeData {};
 using floaterResizeTest = test_group<floaterResizeData>;
@@ -35,9 +47,8 @@ using floaterResizeObject = floaterResizeTest::object;
 floaterResizeTest floaterResizeTestCase("floaterresize");
 
 template<> template<> void floaterResizeObject::test<1>() {
-    const radia::ui::Rect bounds{20.f, 30.f, 100.f, 80.f};
-    using radia::ui::detail::ResizeEdges;
-    const std::array<std::pair<radia::ui::Vec2, ResizeEdges>, 8> regions{{
+    const Rect bounds{20.f, 30.f, 100.f, 80.f};
+    const std::array<std::pair<Vec2, ResizeEdges>, 8> regions{{
         {{21.f, 70.f}, ResizeEdges::Left},
         {{119.f, 70.f}, ResizeEdges::Right},
         {{70.f, 31.f}, ResizeEdges::Bottom},
@@ -47,22 +58,20 @@ template<> template<> void floaterResizeObject::test<1>() {
         {{118.f, 32.f}, ResizeEdges::Right | ResizeEdges::Bottom},
         {{118.f, 108.f}, ResizeEdges::Right | ResizeEdges::Top},
     }};
-    for (const auto& [point, expected] : regions)
-        ensure("all edge and corner regions classify", radia::ui::detail::resizeEdgesAt(bounds, point) == expected);
-    ensure("interior is not resizeable", radia::ui::detail::resizeEdgesAt(bounds, {70.f, 70.f}) == ResizeEdges::NoEdges);
-    ensure("outside is not resizeable", radia::ui::detail::resizeEdgesAt(bounds, {19.f, 70.f}) == ResizeEdges::NoEdges);
+    for (const auto& [point, expected] : regions) ensure("all edge and corner regions classify", resizeEdgesAt(bounds, point) == expected);
+    ensure("interior is not resizeable", resizeEdgesAt(bounds, {70.f, 70.f}) == ResizeEdges::NoEdges);
+    ensure("outside is not resizeable", resizeEdgesAt(bounds, {19.f, 70.f}) == ResizeEdges::NoEdges);
 }
 
 template<> template<> void floaterResizeObject::test<2>() {
-    using radia::ui::detail::ResizeEdges;
-    const radia::ui::Rect initial{20.f, 30.f, 100.f, 80.f};
-    const radia::ui::detail::FloaterResizeConstraints constraints{{40.f, 35.f}, radia::ui::Rect{0.f, 0.f, 200.f, 160.f}};
+    const Rect initial{20.f, 30.f, 100.f, 80.f};
+    const FloaterResizeConstraints constraints{{40.f, 35.f}, Rect{0.f, 0.f, 200.f, 160.f}};
 
-    const radia::ui::Rect left = radia::ui::detail::resizedRect(initial, {20.f, 70.f}, {115.f, 70.f}, ResizeEdges::Left, constraints);
+    const Rect left = resizedRect(initial, {20.f, 70.f}, {115.f, 70.f}, ResizeEdges::Left, constraints);
     ensure_equals("left resize holds right edge", left.right(), initial.right());
     ensure_equals("left resize respects minimum", left.w, 40.f);
 
-    const radia::ui::Rect corner = radia::ui::detail::resizedRect(initial, {120.f, 110.f}, {250.f, 250.f}, ResizeEdges::Right | ResizeEdges::Top, constraints);
+    const Rect corner = resizedRect(initial, {120.f, 110.f}, {250.f, 250.f}, ResizeEdges::Right | ResizeEdges::Top, constraints);
     ensure_equals("right resize respects Surface", corner.right(), 200.f);
     ensure_equals("top resize respects Surface", corner.top(), 160.f);
     ensure_equals("corner holds left edge", corner.left(), initial.left());
@@ -70,15 +79,13 @@ template<> template<> void floaterResizeObject::test<2>() {
 }
 
 template<> template<> void floaterResizeObject::test<3>() {
-    using radia::ui::detail::ResizeEdges;
-    ensure("left-bottom cursor", radia::ui::detail::resizeCursor(ResizeEdges::Left | ResizeEdges::Bottom) == radia::ui::CursorStyle::NortheastSouthwestResize);
-    ensure("left-top cursor", radia::ui::detail::resizeCursor(ResizeEdges::Left | ResizeEdges::Top) == radia::ui::CursorStyle::NorthwestSoutheastResize);
-    ensure("horizontal cursor", radia::ui::detail::resizeCursor(ResizeEdges::Right) == radia::ui::CursorStyle::EastWestResize);
-    ensure("vertical cursor", radia::ui::detail::resizeCursor(ResizeEdges::Top) == radia::ui::CursorStyle::NorthSouthResize);
+    ensure("left-bottom cursor", resizeCursor(ResizeEdges::Left | ResizeEdges::Bottom) == CursorStyle::NortheastSouthwestResize);
+    ensure("left-top cursor", resizeCursor(ResizeEdges::Left | ResizeEdges::Top) == CursorStyle::NorthwestSoutheastResize);
+    ensure("horizontal cursor", resizeCursor(ResizeEdges::Right) == CursorStyle::EastWestResize);
+    ensure("vertical cursor", resizeCursor(ResizeEdges::Top) == CursorStyle::NorthSouthResize);
 }
 
 template<> template<> void floaterResizeObject::test<4>() {
-    using radia::ui::detail::preserveUserResizeOnReload;
     ensure("user resize survives a reload with unchanged authored size",
            preserveUserResizeOnReload(true, true, {{300.f, 240.f}, {280.f, 200.f}}, {{300.f, 240.f}, {280.f, 200.f}}));
     ensure("authored width change discards the user resize",

@@ -28,7 +28,6 @@
 #include "skin/resolver.h"
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
 class SkinResources final : public SkinSnapshotSource {
 public:
     SkinSnapshotResult capture() const override;

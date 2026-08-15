@@ -24,8 +24,56 @@
 
 #include "linden_common.h"
 #include "system.h"
+#include <set>
 #include "skin/generation.h"
 #include "surface/surface.h"
+
+namespace {
+bool equalStyleInputs(const radia::ui::ResourceSnapshot& left, const radia::ui::ResourceSnapshot& right,
+                      const radia::ui::ResourceDependencyMap& dependencies) {
+    if (left.resources() != right.resources()) return false;
+    const auto& leftResources = left.layeredResources();
+    const auto& rightResources = right.layeredResources();
+    if (leftResources.size() != rightResources.size()) return false;
+
+    std::set<std::string> relevantSources;
+    for (const auto& [source, imports] : dependencies) {
+        relevantSources.insert(source);
+        relevantSources.insert(imports.begin(), imports.end());
+    }
+
+    for (const auto& [resourceId, leftLayers] : leftResources) {
+        const auto rightResource = rightResources.find(resourceId);
+        if (rightResource == rightResources.end()) return false;
+        const auto& rightLayers = rightResource->second;
+        if (resourceId != "skin.radia") {
+            if (leftLayers != rightLayers) return false;
+            continue;
+        }
+        if (leftLayers.size() != rightLayers.size()) return false;
+        for (std::size_t index = 0; index < leftLayers.size(); ++index) {
+            const radia::ui::ResourceLayer& leftLayer = leftLayers[index];
+            const radia::ui::ResourceLayer& rightLayer = rightLayers[index];
+            if (leftLayer.sourceName != rightLayer.sourceName
+                || leftLayer.source != rightLayer.source
+                || leftLayer.entrypoint != rightLayer.entrypoint)
+                return false;
+
+            for (const auto& [moduleId, source] : leftLayer.modules) {
+                if (!relevantSources.contains(leftLayer.sourceNameFor(moduleId))) continue;
+                const auto rightModule = rightLayer.modules.find(moduleId);
+                if (rightModule == rightLayer.modules.end() || rightModule->second != source) return false;
+            }
+            for (const auto& [moduleId, source] : rightLayer.modules) {
+                if (!relevantSources.contains(rightLayer.sourceNameFor(moduleId))) continue;
+                const auto leftModule = leftLayer.modules.find(moduleId);
+                if (leftModule == leftLayer.modules.end() || leftModule->second != source) return false;
+            }
+        }
+    }
+    return true;
+}
+} // namespace
 
 namespace radia::ui {
 System::System() : mSkinGeneration(SkinGeneration::empty()) {}
@@ -38,6 +86,10 @@ bool System::publish(std::shared_ptr<const SkinGeneration> generation) {
 
 bool System::publish(std::shared_ptr<const SkinGeneration> generation, PublicationCommit& commit) {
     return publishImpl(std::move(generation), &commit);
+}
+
+bool System::hasRelevantStyleChange(const ResourceSnapshot& current, const ResourceSnapshot& previous) const {
+    return !equalStyleInputs(current, previous, styleSheet().dependencies());
 }
 
 bool System::publishImpl(std::shared_ptr<const SkinGeneration> generation, PublicationCommit* commit) {

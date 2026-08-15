@@ -106,10 +106,10 @@ struct detachedFloaterManagerData {
         radia::ui::Vec2 nativeBottomLeftInMain(const AuxiliaryWindowRect&) const override { return {15.f, 25.f}; }
         bool nativePointInsideMain(const radia::ui::Vec2&) const override { return pointInside; }
         bool placementVisible(const AuxiliaryWindowRect&) const override { return visiblePlacement; }
-        std::optional<AuxiliaryWindowPoint> releasePointerForDetach(const radia::ui::Vec2& position) override {
+        std::optional<AuxiliaryScreenPoint> releasePointerForDetach(const radia::ui::Vec2& position) override {
             releasedPointer = true;
             releasedAt = position;
-            return AuxiliaryWindowPoint{77, 88};
+            return AuxiliaryScreenPoint{77, 88};
         }
 
         bool pointInside = false;

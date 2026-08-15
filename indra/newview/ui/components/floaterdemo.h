@@ -29,7 +29,6 @@
 #include "componentcontroller.h"
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
 class ChangeEvent;
 class Runtime;
 

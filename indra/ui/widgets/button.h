@@ -39,7 +39,7 @@ class Button : public Widget {
     friend WidgetContract detail::buttonContract();
 
 public:
-    static constexpr const char* ELEMENT = "button";
+    static constexpr const char* sElement = "button";
 
     Button();
     Icon& setIcon(std::string name);

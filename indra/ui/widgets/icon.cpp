@@ -28,7 +28,7 @@
 #include "widgets/widgetcontractbuilder.h"
 
 namespace radia::ui {
-Icon::Icon(std::string name) : Widget(ELEMENT), mName(std::move(name)) {}
+Icon::Icon(std::string name) : Widget(sElement), mName(std::move(name)) {}
 
 Icon& Icon::setName(std::string name) {
     mName = std::move(name);
@@ -42,6 +42,6 @@ void Icon::paint(PaintContext& context, const Style& style, float scale) const {
 }
 
 WidgetContract detail::iconContract() {
-    return defineWidget<Icon>(Icon::ELEMENT).attributes({stringAttribute("src", &Icon::setName)}).build();
+    return defineWidget<Icon>(Icon::sElement).attributes({stringAttribute("src", &Icon::setName)}).build();
 }
 } // namespace radia::ui

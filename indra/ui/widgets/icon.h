@@ -36,7 +36,7 @@ class Icon : public Widget {
     friend WidgetContract detail::iconContract();
 
 public:
-    static constexpr const char* ELEMENT = "icon";
+    static constexpr const char* sElement = "icon";
 
     explicit Icon(std::string name = {});
     Icon& setName(std::string name);

@@ -34,10 +34,10 @@ struct Vertex {
     Color color;
 };
 struct Mesh {
-    std::vector<Vertex> triangles;
-    bool empty() const { return triangles.empty(); }
+    std::vector<Vertex> vertices;
+    bool empty() const { return vertices.empty(); }
 };
 
-Mesh tessellateStroke(const Path& path, const Color& color, float width, float fringe_width, StrokeCap cap = StrokeCap::Butt);
+Mesh tessellateStroke(const Path& path, const Color& color, float width, float fringeWidth, StrokeCap cap = StrokeCap::Butt);
 } // namespace radia::ui
 #endif // RD_RENDER_TESSELLATOR_H

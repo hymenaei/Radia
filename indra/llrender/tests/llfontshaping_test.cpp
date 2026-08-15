@@ -1133,11 +1133,6 @@ namespace tut
     // Keeping the gap so the audit's test numbering (23 + 25..31)
     // matches the plan file unchanged.)
 
-    // For an unligatured / unkerned ASCII run, HB's per-glyph x_advance
-    // must equal FT's matching metric regime: linearHoriAdvance for the
-    // analytic renderer, grid-fitted slot->advance.x for the atlas renderer.
-    // DejaVuSans has no GPOS kern between adjacent lowercase letters, so HB's
-    // GPOS pass is a no-op and per-glyph advances come straight from FT.
     template<> template<>
     void llfontshaping_object::test<25>()
     {
@@ -1165,17 +1160,12 @@ namespace tut
             const F32 ft_advance = face->useLinearMetrics()
                 ? ftf->glyph->linearHoriAdvance * (1.f / 65536.f)
                 : ftf->glyph->advance.x * (1.f / 64.f);
-            // Equality in float at this precision would be exact when no GPOS
-            // adjustment fired. Tolerate 1/64 px for HB's rounding paths.
             const F32 delta = std::fabs(out[i].x_advance - ft_advance);
             ensure("HB x_advance matches FT advance for unkerned glyph",
                    delta < (1.f / 64.f) + 1e-5f);
         }
     }
 
-    // HB's reported load flags after construction must match the selected
-    // metric regime. Analytic outlines shape unhinted; the compatibility atlas
-    // uses the configured FreeType hinting flags.
     template<> template<>
     void llfontshaping_object::test<26>()
     {
@@ -1522,10 +1512,6 @@ namespace tut
                           post[0].glyph_id, 0u);
     }
 
-    // Arabic is stored in logical order but must be shaped right-to-left.
-    // HarfBuzz returns a visual glyph stream for RTL runs, reflected by
-    // descending source clusters. This pins both contextual Arabic shaping
-    // and the ordering contract consumed by LLFontGL::render.
     template<> template<>
     void llfontshaping_object::test<35>()
     {
@@ -1535,7 +1521,7 @@ namespace tut
         LLPointer<LLFontFreetype> ft = loadFt(path);
         ensure("DejaVuSans loaded", ft.notNull());
 
-        // U+0627 U+0636 U+063A U+0637: اضغط ("press").
+         // "اضغط"
         LLWString text = wstr(0x0627, 0x0636, 0x063A, 0x0637);
         std::vector<LLShapedGlyph> out;
         LLFontShaping::shapeRun(ft, text, 0, text.size(), out);
@@ -1562,10 +1548,6 @@ namespace tut
                           joined_ghain->glyph_id, isolated.front().glyph_id);
     }
 
-    // Mixed Arabic/Latin title from the RDUI demo. The paragraph begins RTL,
-    // so its visual runs must be: Arabic suffix, Latin acronym, Arabic prefix.
-    // HarfBuzz alone shapes those runs but does not reorder them; FriBidi owns
-    // the paragraph order while clusters remain logical source positions.
     template<> template<>
     void llfontshaping_object::test<36>()
     {
@@ -1575,7 +1557,7 @@ namespace tut
         LLPointer<LLFontFreetype> ft = loadFt(path);
         ensure("DejaVuSans loaded", ft.notNull());
 
-        // "عرض RDUI التجريبي"
+         //"عرض Radia UI التجريبي"
         LLWString text = wstr(0x0639, 0x0631, 0x0636, ' ',
                               'R', 'D', 'U', 'I', ' ',
                               0x0627, 0x0644, 0x062A, 0x062C,
@@ -1592,8 +1574,6 @@ namespace tut
             return static_cast<size_t>(std::distance(out.begin(), found));
         };
 
-        // Left-to-right screen order. The Arabic reader consumes it from the
-        // right edge, yielding the original logical phrase.
         ensure("Arabic suffix is visually before embedded Latin",
                visual_position(16) < visual_position(4));
         ensure("embedded Latin is visually before Arabic prefix",

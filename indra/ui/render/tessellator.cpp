@@ -30,16 +30,16 @@
 
 namespace radia::ui {
 namespace {
-constexpr float PI = std::numbers::pi_v<float>;
+constexpr float kPi = std::numbers::pi_v<float>;
 
 bool samePoint(const Vec2& a, const Vec2& b) {
     return std::fabs(a.x - b.x) <= 0.0001f && std::fabs(a.y - b.y) <= 0.0001f;
 }
 
 void triangle(Mesh& mesh, const Vec2& a, const Vec2& b, const Vec2& c, const Color& color) {
-    mesh.triangles.push_back({a, color});
-    mesh.triangles.push_back({b, color});
-    mesh.triangles.push_back({c, color});
+    mesh.vertices.push_back({a, color});
+    mesh.vertices.push_back({b, color});
+    mesh.vertices.push_back({c, color});
 }
 
 void quad(Mesh& mesh, const Vec2& a, const Vec2& b, const Vec2& c, const Vec2& d, const Color& color) {
@@ -48,7 +48,7 @@ void quad(Mesh& mesh, const Vec2& a, const Vec2& b, const Vec2& c, const Vec2& d
 }
 
 void gradientQuad(Mesh& mesh, const Vec2& a, const Vec2& b, const Vec2& c, const Vec2& d, const Color& inner, const Color& outer) {
-    mesh.triangles.insert(mesh.triangles.end(), {{a, inner}, {b, inner}, {c, outer}, {a, inner}, {c, outer}, {d, outer}});
+    mesh.vertices.insert(mesh.vertices.end(), {{a, inner}, {b, inner}, {c, outer}, {a, inner}, {c, outer}, {d, outer}});
 }
 
 Vec2 normal(const Vec2& a, const Vec2& b) {
@@ -63,8 +63,8 @@ Vec2 offsetJoin(const Vec2& point, const Vec2& previous, const Vec2& next, float
     miter = normalize(miter);
     const float denominator = dot(miter, next);
     if (std::fabs(denominator) <= 0.1f) return point + next * distance;
-    const float miter_length = distance / denominator;
-    return std::fabs(miter_length) > std::fabs(distance) * 4.f ? point + next * distance : point + miter * miter_length;
+    const float miterLength = distance / denominator;
+    return std::fabs(miterLength) > std::fabs(distance) * 4.f ? point + next * distance : point + miter * miterLength;
 }
 
 std::vector<Vec2> offsetContour(const std::vector<Vec2>& contour, bool closed, float distance) {
@@ -86,12 +86,12 @@ void roundCap(Mesh& mesh, const Vec2& center, const Vec2& tangent, float radius,
     if (radius < 0.f || (radius == 0.f && fringe == 0.f)) return;
     const Vec2 perpendicular(-tangent.y, tangent.x);
     const int steps = std::max(6, static_cast<int>(std::ceil((radius + fringe) * 3.f)));
-    const float first = start ? PI : 0.f;
+    const float first = start ? kPi : 0.f;
     auto point = [&](float r, float angle) { return center + perpendicular * (std::cos(angle) * r) + tangent * (std::sin(angle) * r); };
     std::vector<Vec2> inner;
     std::vector<Vec2> outer;
     for (int i = 0; i <= steps; ++i) {
-        const float angle = first + PI * static_cast<float>(i) / static_cast<float>(steps);
+        const float angle = first + kPi * static_cast<float>(i) / static_cast<float>(steps);
         inner.push_back(point(radius, angle));
         if (fringe > 0.f) outer.push_back(point(radius + fringe, angle));
     }
@@ -102,13 +102,13 @@ void roundCap(Mesh& mesh, const Vec2& center, const Vec2& tangent, float radius,
 }
 } // namespace
 
-Mesh tessellateStroke(const Path& path, const Color& color, float width, float fringe_width, StrokeCap cap) {
+Mesh tessellateStroke(const Path& path, const Color& color, float width, float fringeWidth, StrokeCap cap) {
     Mesh mesh;
     if (color.a <= 0.f || width <= 0.f) return mesh;
-    const float half_width = width * 0.5f;
-    const float aa_half = std::min(std::max(0.f, fringe_width) * 0.5f, half_width);
-    const float core = half_width - aa_half;
-    const float fringe = aa_half * 2.f;
+    const float halfWidth = width * 0.5f;
+    const float aaHalf = std::min(std::max(0.f, fringeWidth) * 0.5f, halfWidth);
+    const float core = halfWidth - aaHalf;
+    const float fringe = aaHalf * 2.f;
 
     for (std::vector<Vec2> contour : path.flatten()) {
         if (contour.size() < 2) continue;
@@ -117,17 +117,17 @@ Mesh tessellateStroke(const Path& path, const Color& color, float width, float f
         if (contour.size() < (closed ? 3U : 2U)) continue;
 
         std::vector<Vec2> stroke = contour;
-        Vec2 start_tangent;
-        Vec2 end_tangent;
+        Vec2 startTangent;
+        Vec2 endTangent;
         if (!closed) {
-            start_tangent = normalize(contour[1] - contour[0]);
-            end_tangent = normalize(contour.back() - contour[contour.size() - 2]);
+            startTangent = normalize(contour[1] - contour[0]);
+            endTangent = normalize(contour.back() - contour[contour.size() - 2]);
             if (cap == StrokeCap::Square) {
-                stroke.front() = stroke.front() - start_tangent * core;
-                stroke.back() = stroke.back() + end_tangent * core;
-            } else if (cap == StrokeCap::Butt && aa_half > 0.f) {
-                stroke.front() = stroke.front() + start_tangent * aa_half;
-                stroke.back() = stroke.back() - end_tangent * aa_half;
+                stroke.front() = stroke.front() - startTangent * core;
+                stroke.back() = stroke.back() + endTangent * core;
+            } else if (cap == StrokeCap::Butt && aaHalf > 0.f) {
+                stroke.front() = stroke.front() + startTangent * aaHalf;
+                stroke.back() = stroke.back() - endTangent * aaHalf;
             }
         }
 
@@ -140,23 +140,23 @@ Mesh tessellateStroke(const Path& path, const Color& color, float width, float f
         }
 
         if (!closed && cap == StrokeCap::Round) {
-            roundCap(mesh, contour.front(), start_tangent, core, fringe, true, color);
-            roundCap(mesh, contour.back(), end_tangent, core, fringe, false, color);
+            roundCap(mesh, contour.front(), startTangent, core, fringe, true, color);
+            roundCap(mesh, contour.back(), endTangent, core, fringe, false, color);
         }
         if (fringe <= 0.f) continue;
 
         const Color transparent = color.withAlpha(0.f);
-        const std::vector<Vec2> left_outer = offsetContour(stroke, closed, core + fringe);
-        const std::vector<Vec2> right_outer = offsetContour(stroke, closed, -core - fringe);
+        const std::vector<Vec2> leftOuter = offsetContour(stroke, closed, core + fringe);
+        const std::vector<Vec2> rightOuter = offsetContour(stroke, closed, -core - fringe);
         for (std::size_t i = 0; i < segments; ++i) {
             const std::size_t next = (i + 1) % stroke.size();
-            gradientQuad(mesh, left[i], left[next], left_outer[next], left_outer[i], color, transparent);
-            gradientQuad(mesh, right[next], right[i], right_outer[i], right_outer[next], color, transparent);
+            gradientQuad(mesh, left[i], left[next], leftOuter[next], leftOuter[i], color, transparent);
+            gradientQuad(mesh, right[next], right[i], rightOuter[i], rightOuter[next], color, transparent);
         }
         if (!closed && cap != StrokeCap::Round) {
             const std::size_t last = stroke.size() - 1;
-            gradientQuad(mesh, right[0], left[0], left[0] - start_tangent * fringe, right[0] - start_tangent * fringe, color, transparent);
-            gradientQuad(mesh, left[last], right[last], right[last] + end_tangent * fringe, left[last] + end_tangent * fringe, color, transparent);
+            gradientQuad(mesh, right[0], left[0], left[0] - startTangent * fringe, right[0] - startTangent * fringe, color, transparent);
+            gradientQuad(mesh, left[last], right[last], right[last] + endTangent * fringe, left[last] + endTangent * fringe, color, transparent);
         }
     }
     return mesh;

@@ -53,7 +53,7 @@ public:
         StylePass* mPass;
     };
 
-    StylePass(const StyleSheet& style_sheet, const TextMetrics& text_metrics);
+    StylePass(const StyleSheet& styleSheet, const TextMetrics& textMetrics);
     StylePass(const StylePass&) = delete;
     StylePass& operator=(const StylePass&) = delete;
     StylePass(StylePass&&) = delete;
@@ -73,15 +73,15 @@ public:
     ChildSnapshot orderedChildren(const Widget& parent);
     ChildSnapshot sourceChildren(const Widget& parent);
     const LayoutContextKey& contextKey() const { return mContext; }
-    bool matches(const StyleSheet& style_sheet, const TextMetrics& text_metrics) const;
+    bool matches(const StyleSheet& styleSheet, const TextMetrics& textMetrics) const;
     const StyleSheet& styleSheet() const { return mStyleSheet; }
     const TextMetrics& textMetrics() const { return mTextMetrics; }
 
 private:
     struct CachedStyle {
-        std::size_t storage_index = 0;
+        std::size_t storageIndex = 0;
         std::weak_ptr<char> lifetime;
-        std::uint64_t context_revision = 0;
+        std::uint64_t contextRevision = 0;
     };
 
     void compactStyles();

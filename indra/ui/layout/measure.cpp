@@ -31,19 +31,19 @@
 
 namespace radia::ui {
 using layout_detail::AdjacentLayout;
-using layout_detail::ChildLayout;
-using layout_detail::MainAxisAllocation;
 using layout_detail::adjacentLayout;
 using layout_detail::allocateMainAxis;
 using layout_detail::applyCrossAxisSizing;
+using layout_detail::ChildLayout;
 using layout_detail::crossAlignment;
 using layout_detail::invalidChildLayout;
+using layout_detail::MainAxisAllocation;
 using layout_detail::prepareMainAxis;
 using layout_detail::rowLines;
 using layout_detail::styledDimension;
 
 Vec2 LayoutEngine::measure(Widget& node, LayoutPass& pass, std::optional<float> outerWidth, std::optional<float> outerHeight) {
-    const LayoutContextKey context_key = pass.contextKey();
+    const LayoutContextKey contextKey = pass.contextKey();
     const StyleSheet& styleSheet = pass.styleSheet();
     const TextMetrics& textMetrics = pass.textMetrics();
     if (node.mVisibility == Visibility::Collapsed) {
@@ -56,30 +56,30 @@ Vec2 LayoutEngine::measure(Widget& node, LayoutPass& pass, std::optional<float> 
         node.mLayoutCache.measuredRectConstraintSet = node.mRectExplicit;
         node.mLayoutCache.measuredRectWidth = node.mRect.w;
         node.mLayoutCache.measuredRectHeight = node.mRect.h;
-        node.mLayoutCache.layoutContext = context_key;
+        node.mLayoutCache.layoutContext = contextKey;
         node.mLayoutCache.measureValid = true;
         if (!outerWidth && !outerHeight) node.mDesiredSize = {};
         node.mInvalidationReasons.remove(kMeasureInvalidationReasons);
         return {};
     }
 
-    const bool width_matches =
+    const bool widthMatches =
         node.mLayoutCache.measuredWidthSet == outerWidth.has_value() && (!outerWidth || node.mLayoutCache.measuredWidth == *outerWidth);
-    const bool height_matches =
+    const bool heightMatches =
         node.mLayoutCache.measuredHeightSet == outerHeight.has_value() && (!outerHeight || node.mLayoutCache.measuredHeight == *outerHeight);
-    const bool rect_mode_matches = node.mLayoutCache.measuredRectExplicit == node.mRectExplicit;
-    const bool rect_constraint_matches = !node.mLayoutCache.measuredRectConstraintSet
+    const bool rectModeMatches = node.mLayoutCache.measuredRectExplicit == node.mRectExplicit;
+    const bool rectConstraintMatches = !node.mLayoutCache.measuredRectConstraintSet
         || (node.mRectExplicit && node.mLayoutCache.measuredRectWidth == node.mRect.w && node.mLayoutCache.measuredRectHeight == node.mRect.h);
-    const bool cache_matches = node.mLayoutCache.measureValid
-        && width_matches
-        && height_matches
-        && rect_mode_matches
-        && rect_constraint_matches
-        && node.mLayoutCache.layoutContext == context_key;
-    const bool cache_context_matches = node.mLayoutCache.layoutContext == context_key;
-    if (node.mInvalidationReasons.intersects(kMeasureInvalidationReasons) || !cache_context_matches || !rect_mode_matches || !rect_constraint_matches)
+    const bool cacheMatches = node.mLayoutCache.measureValid
+        && widthMatches
+        && heightMatches
+        && rectModeMatches
+        && rectConstraintMatches
+        && node.mLayoutCache.layoutContext == contextKey;
+    const bool cacheContextMatches = node.mLayoutCache.layoutContext == contextKey;
+    if (node.mInvalidationReasons.intersects(kMeasureInvalidationReasons) || !cacheContextMatches || !rectModeMatches || !rectConstraintMatches)
         node.mLayoutCache.intrinsicValid = false;
-    if (!node.mInvalidationReasons.intersects(kMeasureInvalidationReasons) && cache_matches) {
+    if (!node.mInvalidationReasons.intersects(kMeasureInvalidationReasons) && cacheMatches) {
         pass.recordSkipped();
         return node.mLayoutCache.measuredSize;
     }
@@ -87,9 +87,9 @@ Vec2 LayoutEngine::measure(Widget& node, LayoutPass& pass, std::optional<float> 
     pass.recordMeasured(outerWidth.has_value() || outerHeight.has_value());
     node.mLayoutCache.arrangeValid = false;
 
-    const NodeSnapshot styled_state(node);
+    const NodeSnapshot styledState(node);
     const Style& style = pass.style(node);
-    if (!styled_state.valid()) return {};
+    if (!styledState.valid()) return {};
     const Flow flow = style.flow;
     std::optional<float> resolvedWidth = outerWidth;
     if (!resolvedWidth && !style.width.isAuto() && !style.width.isPercentage()) resolvedWidth = styledDimension(style.width, style.minWidth, 0.f);
@@ -104,32 +104,32 @@ Vec2 LayoutEngine::measure(Widget& node, LayoutPass& pass, std::optional<float> 
     const WidgetRef<Widget> lifetime(&node);
     const Surface* surface = node.mSurface;
     const Widget* parent = node.mParent;
-    const std::uint64_t layout_revision = node.mLayoutInvalidationRevision;
+    const std::uint64_t layoutRevision = node.mLayoutInvalidationRevision;
     const Vec2 intrinsic = node.intrinsicSize(styleSheet, style, textMetrics, constraints);
     Widget* current = lifetime.get();
-    if (!current || current->mSurface != surface || current->mParent != parent || current->mLayoutInvalidationRevision != layout_revision) return {};
+    if (!current || current->mSurface != surface || current->mParent != parent || current->mLayoutInvalidationRevision != layoutRevision) return {};
     Vec2 content;
     if (flow == Flow::Row) content = measureRow(node, style, intrinsic, resolvedWidth, resolvedHeight, pass);
     else if (flow == Flow::Column) content = measureColumn(node, style, intrinsic, resolvedWidth, resolvedHeight, pass);
     else content = measureFree(node, style, intrinsic, resolvedWidth, resolvedHeight, pass);
     current = lifetime.get();
-    if (!current || current->mSurface != surface || current->mParent != parent || current->mLayoutInvalidationRevision != layout_revision)
+    if (!current || current->mSurface != surface || current->mParent != parent || current->mLayoutInvalidationRevision != layoutRevision)
         return content;
 
     const Vec2 natural(content.x + style.padding.horizontal(), content.y + style.padding.vertical());
-    const bool authored_width = !style.width.isAuto() && !style.width.isPercentage();
-    const bool authored_height = !style.height.isAuto() && !style.height.isPercentage();
-    const bool explicit_free_width = node.mRectExplicit && flow == Flow::Free && style.width.isPercentage();
-    const bool explicit_free_height = node.mRectExplicit && flow == Flow::Free && style.height.isPercentage();
-    float desired_width = styledDimension(style.width, style.minWidth, natural.x, resolvedWidth.value_or(0.f));
-    if (explicit_free_width) desired_width = styledDimension(style.width, style.minWidth, natural.x, *resolvedWidth);
-    else if (resolvedWidth && (outerWidth || authored_width))
-        desired_width = styledDimension(Dimension::fromPixels(*resolvedWidth), style.minWidth, natural.x);
-    float desired_height = styledDimension(style.height, style.minHeight, natural.y, resolvedHeight.value_or(0.f));
-    if (explicit_free_height) desired_height = styledDimension(style.height, style.minHeight, natural.y, *resolvedHeight);
-    else if (resolvedHeight && (outerHeight || authored_height))
-        desired_height = styledDimension(Dimension::fromPixels(*resolvedHeight), style.minHeight, natural.y);
-    const Vec2 desired = {desired_width, desired_height};
+    const bool authoredWidth = !style.width.isAuto() && !style.width.isPercentage();
+    const bool authoredHeight = !style.height.isAuto() && !style.height.isPercentage();
+    const bool explicitFreeWidth = node.mRectExplicit && flow == Flow::Free && style.width.isPercentage();
+    const bool explicitFreeHeight = node.mRectExplicit && flow == Flow::Free && style.height.isPercentage();
+    float desiredWidth = styledDimension(style.width, style.minWidth, natural.x, resolvedWidth.value_or(0.f));
+    if (explicitFreeWidth) desiredWidth = styledDimension(style.width, style.minWidth, natural.x, *resolvedWidth);
+    else if (resolvedWidth && (outerWidth || authoredWidth))
+        desiredWidth = styledDimension(Dimension::fromPixels(*resolvedWidth), style.minWidth, natural.x);
+    float desiredHeight = styledDimension(style.height, style.minHeight, natural.y, resolvedHeight.value_or(0.f));
+    if (explicitFreeHeight) desiredHeight = styledDimension(style.height, style.minHeight, natural.y, *resolvedHeight);
+    else if (resolvedHeight && (outerHeight || authoredHeight))
+        desiredHeight = styledDimension(Dimension::fromPixels(*resolvedHeight), style.minHeight, natural.y);
+    const Vec2 desired = {desiredWidth, desiredHeight};
     node.mLayoutCache.measuredSize = desired;
     node.mLayoutCache.measuredWidth = outerWidth.value_or(0.f);
     node.mLayoutCache.measuredHeight = outerHeight.value_or(0.f);
@@ -139,7 +139,7 @@ Vec2 LayoutEngine::measure(Widget& node, LayoutPass& pass, std::optional<float> 
     node.mLayoutCache.measuredRectConstraintSet = node.mRectExplicit;
     node.mLayoutCache.measuredRectWidth = node.mRect.w;
     node.mLayoutCache.measuredRectHeight = node.mRect.h;
-    node.mLayoutCache.layoutContext = context_key;
+    node.mLayoutCache.layoutContext = contextKey;
     node.mLayoutCache.measureValid = true;
     if (!outerWidth && !outerHeight) {
         node.mLayoutCache.intrinsicSize = desired;
@@ -153,148 +153,146 @@ Vec2 LayoutEngine::measure(Widget& node, LayoutPass& pass, std::optional<float> 
 ChildLayout LayoutEngine::measureChild(Widget& parent, Widget& child, const Style& parentStyle, Flow flow, std::optional<float> resolvedWidth,
                                        std::optional<float> resolvedHeight, LayoutPass& pass) {
     const NodeSnapshot parentState(parent);
-    const NodeSnapshot child_state(child);
+    const NodeSnapshot childState(child);
     const auto valid = [&]() {
-        Widget* current_parent = parentState.get();
-        Widget* current_child = child_state.get();
+        Widget* currentParent = parentState.get();
+        Widget* currentChild = childState.get();
         return parentState.valid()
-            && child_state.valid()
-            && current_parent
-            && current_child
-            && current_child->parent() == current_parent
-            && current_child->mSurface == parentState.surface;
+            && childState.valid()
+            && currentParent
+            && currentChild
+            && currentChild->parent() == currentParent
+            && currentChild->mSurface == parentState.surface;
     };
 
-    const Style& child_style = pass.style(child);
+    const Style& childStyle = pass.style(child);
     if (!valid()) return invalidChildLayout();
-    std::optional<float> child_width;
-    std::optional<float> child_height;
-    if (resolvedWidth && child_style.width.isPercentage())
-        child_width =
-            styledDimension(child_style.width, child_style.minWidth, 0.f, std::max(0.f, *resolvedWidth - parentStyle.padding.horizontal()));
-    if (resolvedHeight && child_style.height.isPercentage())
-        child_height =
-            styledDimension(child_style.height, child_style.minHeight, 0.f, std::max(0.f, *resolvedHeight - parentStyle.padding.vertical()));
-    Vec2 child_size = measure(*child_state.get(), pass, child_width, child_height);
+    std::optional<float> childWidth;
+    std::optional<float> childHeight;
+    if (resolvedWidth && childStyle.width.isPercentage())
+        childWidth = styledDimension(childStyle.width, childStyle.minWidth, 0.f, std::max(0.f, *resolvedWidth - parentStyle.padding.horizontal()));
+    if (resolvedHeight && childStyle.height.isPercentage())
+        childHeight = styledDimension(childStyle.height, childStyle.minHeight, 0.f, std::max(0.f, *resolvedHeight - parentStyle.padding.vertical()));
+    Vec2 childSize = measure(*childState.get(), pass, childWidth, childHeight);
     if (!valid()) return invalidChildLayout();
-    Widget* current_child = child_state.get();
-    Widget* current_parent = parentState.get();
-    if (current_child->mRectExplicit) {
-        if (child_style.width.isAuto()) child_size.x = current_child->mRect.w;
-        if (child_style.height.isAuto()) child_size.y = current_child->mRect.h;
+    Widget* currentChild = childState.get();
+    Widget* currentParent = parentState.get();
+    if (currentChild->mRectExplicit) {
+        if (childStyle.width.isAuto()) childSize.x = currentChild->mRect.w;
+        if (childStyle.height.isAuto()) childSize.y = currentChild->mRect.h;
     }
-    if ((flow == Flow::Row || flow == Flow::Column) && child_style.aspectRatio) {
-        std::optional<float> cross_size;
+    if ((flow == Flow::Row || flow == Flow::Column) && childStyle.aspectRatio) {
+        std::optional<float> crossSize;
         if (flow == Flow::Row) {
-            if (resolvedHeight) cross_size = resolvedHeight;
-            else if (!parentStyle.height.isAuto()) cross_size = parentStyle.height.resolve(0.f, current_parent->mRect.h);
-            else if (current_parent->mRectExplicit) cross_size = current_parent->mRect.h;
+            if (resolvedHeight) crossSize = resolvedHeight;
+            else if (!parentStyle.height.isAuto()) crossSize = parentStyle.height.resolve(0.f, currentParent->mRect.h);
+            else if (currentParent->mRectExplicit) crossSize = currentParent->mRect.h;
         } else {
-            if (resolvedWidth) cross_size = resolvedWidth;
-            else if (!parentStyle.width.isAuto()) cross_size = parentStyle.width.resolve(0.f, current_parent->mRect.w);
-            else if (current_parent->mRectExplicit) cross_size = current_parent->mRect.w;
+            if (resolvedWidth) crossSize = resolvedWidth;
+            else if (!parentStyle.width.isAuto()) crossSize = parentStyle.width.resolve(0.f, currentParent->mRect.w);
+            else if (currentParent->mRectExplicit) crossSize = currentParent->mRect.w;
         }
-        if (cross_size) {
+        if (crossSize) {
             const float padding = flow == Flow::Row ? parentStyle.padding.vertical() : parentStyle.padding.horizontal();
-            applyCrossAxisSizing(child_size, child_style, flow, std::max(0.f, *cross_size - padding), crossAlignment(parentStyle, child_style, flow));
+            applyCrossAxisSizing(childSize, childStyle, flow, std::max(0.f, *crossSize - padding), crossAlignment(parentStyle, childStyle, flow));
         }
     }
 
-    Vec2 child_automatic_minimum = child_size;
+    Vec2 childAutomaticMinimum = childSize;
     if (flow == Flow::Column && resolvedWidth) {
         const float availableCross = std::max(0.f, *resolvedWidth - parentStyle.padding.horizontal());
-        child_size.x = styledDimension(child_style.width, child_style.minWidth, child_size.x, availableCross);
-        applyCrossAxisSizing(child_size, child_style, flow, availableCross, crossAlignment(parentStyle, child_style, flow));
-        if (child_style.height.isAuto() && !child_style.aspectRatio) {
-            child_size.y = measure(*child_state.get(), pass, child_size.x).y;
+        childSize.x = styledDimension(childStyle.width, childStyle.minWidth, childSize.x, availableCross);
+        applyCrossAxisSizing(childSize, childStyle, flow, availableCross, crossAlignment(parentStyle, childStyle, flow));
+        if (childStyle.height.isAuto() && !childStyle.aspectRatio) {
+            childSize.y = measure(*childState.get(), pass, childSize.x).y;
             if (!valid()) return invalidChildLayout();
         }
-        child_automatic_minimum = child_size;
+        childAutomaticMinimum = childSize;
     }
 
-    if ((flow == Flow::Row || flow == Flow::Column) && !child_style.flexBasis.isAuto()) {
-        const Dimension& parent_dimension = flow == Flow::Row ? parentStyle.width : parentStyle.height;
-        const std::optional<float> resolved_parent = flow == Flow::Row ? resolvedWidth : resolvedHeight;
-        const float rect_size = flow == Flow::Row ? current_parent->mRect.w : current_parent->mRect.h;
+    if ((flow == Flow::Row || flow == Flow::Column) && !childStyle.flexBasis.isAuto()) {
+        const Dimension& parentDimension = flow == Flow::Row ? parentStyle.width : parentStyle.height;
+        const std::optional<float> resolvedParent = flow == Flow::Row ? resolvedWidth : resolvedHeight;
+        const float rectSize = flow == Flow::Row ? currentParent->mRect.w : currentParent->mRect.h;
         const float padding = flow == Flow::Row ? parentStyle.padding.horizontal() : parentStyle.padding.vertical();
-        const bool definite_parent = resolved_parent || !parent_dimension.isAuto() || parent.mRectExplicit;
-        const bool percentage_is_auto = child_style.flexBasis.isPercentage() && !definite_parent;
-        if (!percentage_is_auto) {
-            const float parent_size = resolved_parent.value_or(parent_dimension.isAuto() ? rect_size : parent_dimension.resolve(0.f, rect_size));
-            const float reference = std::max(0.f, parent_size - padding);
-            const float basis = child_style.flexBasis.resolve(0.f, reference);
-            const std::optional<Length>& authored_minimum = flow == Flow::Row ? child_style.minWidth : child_style.minHeight;
-            const float automatic_minimum = flow == Flow::Row ? child_automatic_minimum.x : child_automatic_minimum.y;
-            const float minimum = authored_minimum ? authored_minimum->resolve(reference) : std::min(automatic_minimum, basis);
-            if (flow == Flow::Row) child_size.x = std::max(basis, minimum);
-            else child_size.y = std::max(basis, minimum);
+        const bool definiteParent = resolvedParent || !parentDimension.isAuto() || parent.mRectExplicit;
+        const bool percentageIsAuto = childStyle.flexBasis.isPercentage() && !definiteParent;
+        if (!percentageIsAuto) {
+            const float parentSize = resolvedParent.value_or(parentDimension.isAuto() ? rectSize : parentDimension.resolve(0.f, rectSize));
+            const float reference = std::max(0.f, parentSize - padding);
+            const float basis = childStyle.flexBasis.resolve(0.f, reference);
+            const std::optional<Length>& authoredMinimum = flow == Flow::Row ? childStyle.minWidth : childStyle.minHeight;
+            const float automaticMinimum = flow == Flow::Row ? childAutomaticMinimum.x : childAutomaticMinimum.y;
+            const float minimum = authoredMinimum ? authoredMinimum->resolve(reference) : std::min(automaticMinimum, basis);
+            if (flow == Flow::Row) childSize.x = std::max(basis, minimum);
+            else childSize.y = std::max(basis, minimum);
         }
     }
-    current_child = child_state.get();
-    if (!valid() || !current_child) return invalidChildLayout();
-    return {child_state.lifetime, child_style, child_automatic_minimum, child_size};
+    currentChild = childState.get();
+    if (!valid() || !currentChild) return invalidChildLayout();
+    return {childState.lifetime, childStyle, childAutomaticMinimum, childSize};
 }
 
 Vec2 LayoutEngine::measureRow(Widget& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
                               std::optional<float> resolvedHeight, LayoutPass& pass) {
-    const NodeSnapshot node_state(node);
+    const NodeSnapshot nodeState(node);
     Vec2 content;
-    float row_width = intrinsic.x;
-    float row_height = intrinsic.y;
-    std::size_t row_children = 0;
-    std::size_t row_lines = 0;
-    std::vector<ChildLayout> row_layouts;
-    WidgetRef<Widget> previous_child;
-    const float fixed_gap = style.gap.fixedPixels();
+    float rowWidth = intrinsic.x;
+    float rowHeight = intrinsic.y;
+    std::size_t rowChildren = 0;
+    std::size_t rowLines = 0;
+    std::vector<ChildLayout> rowLayouts;
+    WidgetRef<Widget> previousChild;
+    const float fixedGap = style.gap.fixedPixels();
     const auto finishRow = [&] {
-        if (!row_children && intrinsic.x == 0.f && intrinsic.y == 0.f) return;
-        content.x = std::max(content.x, row_width);
-        if (row_lines) content.y += fixed_gap;
-        content.y += row_height;
-        ++row_lines;
-        row_width = 0.f;
-        row_height = 0.f;
-        row_children = 0;
-        previous_child.set(nullptr);
+        if (!rowChildren && intrinsic.x == 0.f && intrinsic.y == 0.f) return;
+        content.x = std::max(content.x, rowWidth);
+        if (rowLines) content.y += fixedGap;
+        content.y += rowHeight;
+        ++rowLines;
+        rowWidth = 0.f;
+        rowHeight = 0.f;
+        rowChildren = 0;
+        previousChild.set(nullptr);
     };
 
     const StylePass::ChildSnapshot children = orderedChildren(node, pass);
-    for (const WidgetRef<Widget>& child_ref : *children) {
-        Widget* child_ptr = child_ref.get();
-        if (!child_ptr || child_ptr->parent() != &node || child_ptr->visibility() == Visibility::Collapsed) continue;
-        ChildLayout measured = measureChild(node, *child_ptr, style, Flow::Row, resolvedWidth, resolvedHeight, pass);
-        Widget* current_node = node_state.get();
-        Widget* measured_child = measured.node.get();
-        if (!node_state.valid()) return content;
-        if (!measured_child || measured_child->parent() != current_node || measured_child->visibility() == Visibility::Collapsed) continue;
-        const float child_outer_width = measured.measured.x + measured.style.margin.horizontal();
+    for (const WidgetRef<Widget>& childRef : *children) {
+        Widget* childPtr = childRef.get();
+        if (!childPtr || childPtr->parent() != &node || childPtr->visibility() == Visibility::Collapsed) continue;
+        ChildLayout measured = measureChild(node, *childPtr, style, Flow::Row, resolvedWidth, resolvedHeight, pass);
+        Widget* currentNode = nodeState.get();
+        Widget* measuredChild = measured.node.get();
+        if (!nodeState.valid()) return content;
+        if (!measuredChild || measuredChild->parent() != currentNode || measuredChild->visibility() == Visibility::Collapsed) continue;
+        const float childOuterWidth = measured.measured.x + measured.style.margin.horizontal();
         const float outerHeight = measured.measured.y + measured.style.margin.vertical();
-        row_layouts.push_back(measured);
-        if (measured_child->flowBreakBefore() && row_children) finishRow();
-        if (Widget* previous = previous_child.get(); previous && previous->parent() == current_node) {
-            const std::optional<AdjacentLayout> adjacent = adjacentLayout(node_state, previous, measured_child, style);
+        rowLayouts.push_back(measured);
+        if (measuredChild->flowBreakBefore() && rowChildren) finishRow();
+        if (Widget* previous = previousChild.get(); previous && previous->parent() == currentNode) {
+            const std::optional<AdjacentLayout> adjacent = adjacentLayout(nodeState, previous, measuredChild, style);
             if (!adjacent) return content;
-            if (adjacent->hasGap) row_width += fixed_gap;
-            row_width -= adjacent->overlap;
+            if (adjacent->hasGap) rowWidth += fixedGap;
+            rowWidth -= adjacent->overlap;
         }
-        row_width += child_outer_width;
-        row_height = std::max(row_height, outerHeight);
-        ++row_children;
-        previous_child.set(measured_child);
+        rowWidth += childOuterWidth;
+        rowHeight = std::max(rowHeight, outerHeight);
+        ++rowChildren;
+        previousChild.set(measuredChild);
     }
 
-    if (row_children || !row_lines) finishRow();
-    if (resolvedWidth && !row_layouts.empty()) {
+    if (rowChildren || !rowLines) finishRow();
+    if (resolvedWidth && !rowLayouts.empty()) {
         const float availableMain = std::max(0.f, *resolvedWidth - style.padding.horizontal());
-        prepareMainAxis(row_layouts, Flow::Row, availableMain);
-        const RowSizing sizing = allocateRowLines(node, row_layouts, style, availableMain, pass);
+        prepareMainAxis(rowLayouts, Flow::Row, availableMain);
+        const RowSizing sizing = allocateRowLines(node, rowLayouts, style, availableMain, pass);
         content.y = 0.f;
         for (std::size_t line = 0; line < sizing.lines.size(); ++line) {
-            if (line) content.y += fixed_gap;
+            if (line) content.y += fixedGap;
             float height = line == 0 ? intrinsic.y : 0.f;
             const auto [begin, end] = sizing.lines[line];
             for (std::size_t index = begin; index < end; ++index)
-                height = std::max(height, row_layouts[index].measured.y + row_layouts[index].style.margin.vertical());
+                height = std::max(height, rowLayouts[index].measured.y + rowLayouts[index].style.margin.vertical());
             content.y += height;
         }
     }
@@ -303,90 +301,90 @@ Vec2 LayoutEngine::measureRow(Widget& node, const Style& style, const Vec2& intr
 
 Vec2 LayoutEngine::measureColumn(Widget& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
                                  std::optional<float> resolvedHeight, LayoutPass& pass) {
-    const NodeSnapshot node_state(node);
+    const NodeSnapshot nodeState(node);
     Vec2 content = intrinsic;
-    WidgetRef<Widget> previous_child;
-    const float fixed_gap = style.gap.fixedPixels();
+    WidgetRef<Widget> previousChild;
+    const float fixedGap = style.gap.fixedPixels();
     const StylePass::ChildSnapshot children = orderedChildren(node, pass);
-    for (const WidgetRef<Widget>& child_ref : *children) {
-        Widget* child_ptr = child_ref.get();
-        if (!child_ptr || child_ptr->parent() != &node || child_ptr->visibility() == Visibility::Collapsed) continue;
-        ChildLayout measured = measureChild(node, *child_ptr, style, Flow::Column, resolvedWidth, resolvedHeight, pass);
-        Widget* current_node = node_state.get();
-        Widget* measured_child = measured.node.get();
-        if (!node_state.valid()) return content;
-        if (!measured_child || measured_child->parent() != current_node || measured_child->visibility() == Visibility::Collapsed) continue;
-        const float child_outer_width = measured.measured.x + measured.style.margin.horizontal();
+    for (const WidgetRef<Widget>& childRef : *children) {
+        Widget* childPtr = childRef.get();
+        if (!childPtr || childPtr->parent() != &node || childPtr->visibility() == Visibility::Collapsed) continue;
+        ChildLayout measured = measureChild(node, *childPtr, style, Flow::Column, resolvedWidth, resolvedHeight, pass);
+        Widget* currentNode = nodeState.get();
+        Widget* measuredChild = measured.node.get();
+        if (!nodeState.valid()) return content;
+        if (!measuredChild || measuredChild->parent() != currentNode || measuredChild->visibility() == Visibility::Collapsed) continue;
+        const float childOuterWidth = measured.measured.x + measured.style.margin.horizontal();
         const float outerHeight = measured.measured.y + measured.style.margin.vertical();
-        if (Widget* previous = previous_child.get(); previous && previous->parent() == current_node) {
-            const std::optional<AdjacentLayout> adjacent = adjacentLayout(node_state, previous, measured_child, style);
+        if (Widget* previous = previousChild.get(); previous && previous->parent() == currentNode) {
+            const std::optional<AdjacentLayout> adjacent = adjacentLayout(nodeState, previous, measuredChild, style);
             if (!adjacent) return content;
-            if (adjacent->hasGap) content.y += fixed_gap;
+            if (adjacent->hasGap) content.y += fixedGap;
             content.y -= adjacent->overlap;
         }
-        content.x = std::max(content.x, child_outer_width);
+        content.x = std::max(content.x, childOuterWidth);
         content.y += outerHeight;
-        previous_child.set(measured_child);
+        previousChild.set(measuredChild);
     }
     return content;
 }
 
 Vec2 LayoutEngine::measureFree(Widget& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
                                std::optional<float> resolvedHeight, LayoutPass& pass) {
-    const NodeSnapshot node_state(node);
+    const NodeSnapshot nodeState(node);
     Vec2 content = intrinsic;
     std::vector<WidgetRef<Widget>> children;
     children.reserve(node.mChildren.size());
-    for (const auto& child_ptr : node.mChildren) children.emplace_back(child_ptr.get());
-    const std::optional<float> content_width =
+    for (const auto& childPtr : node.mChildren) children.emplace_back(childPtr.get());
+    const std::optional<float> contentWidth =
         resolvedWidth ? std::optional<float>(std::max(0.f, *resolvedWidth - style.padding.horizontal())) : std::nullopt;
-    const std::optional<float> content_height =
+    const std::optional<float> contentHeight =
         resolvedHeight ? std::optional<float>(std::max(0.f, *resolvedHeight - style.padding.vertical())) : std::nullopt;
-    for (const WidgetRef<Widget>& child_ref : children) {
-        Widget* child_ptr = child_ref.get();
-        if (!child_ptr || child_ptr->parent() != &node) continue;
-        if (child_ptr->visibility() == Visibility::Collapsed) continue;
-        const WidgetRef<Widget> child_lifetime(child_ptr);
-        const std::uint64_t child_revision = child_ptr->mLayoutInvalidationRevision;
-        const Style& child_style = pass.style(*child_ptr);
-        if (!node_state.valid()
-            || !child_lifetime
-            || child_lifetime.get()->parent() != node_state.get()
-            || child_lifetime.get()->mLayoutInvalidationRevision != child_revision)
+    for (const WidgetRef<Widget>& childRef : children) {
+        Widget* childPtr = childRef.get();
+        if (!childPtr || childPtr->parent() != &node) continue;
+        if (childPtr->visibility() == Visibility::Collapsed) continue;
+        const WidgetRef<Widget> childLifetime(childPtr);
+        const std::uint64_t childRevision = childPtr->mLayoutInvalidationRevision;
+        const Style& childStyle = pass.style(*childPtr);
+        if (!nodeState.valid()
+            || !childLifetime
+            || childLifetime.get()->parent() != nodeState.get()
+            || childLifetime.get()->mLayoutInvalidationRevision != childRevision)
             return content;
-        const std::optional<float> child_width = content_width && child_style.width.isPercentage()
-            ? std::optional<float>(styledDimension(child_style.width, child_style.minWidth, 0.f, *content_width))
+        const std::optional<float> childWidth = contentWidth && childStyle.width.isPercentage()
+            ? std::optional<float>(styledDimension(childStyle.width, childStyle.minWidth, 0.f, *contentWidth))
             : std::nullopt;
-        const std::optional<float> child_height = content_height && child_style.height.isPercentage()
-            ? std::optional<float>(styledDimension(child_style.height, child_style.minHeight, 0.f, *content_height))
+        const std::optional<float> childHeight = contentHeight && childStyle.height.isPercentage()
+            ? std::optional<float>(styledDimension(childStyle.height, childStyle.minHeight, 0.f, *contentHeight))
             : std::nullopt;
-        Vec2 child_size = measure(*child_lifetime.get(), pass, child_width, child_height);
-        Widget* current_node = node_state.get();
-        Widget* current_child = child_lifetime.get();
-        if (!node_state.valid()
-            || !current_node
-            || !current_child
-            || current_child->parent() != current_node
-            || current_child->mLayoutInvalidationRevision != child_revision)
+        Vec2 childSize = measure(*childLifetime.get(), pass, childWidth, childHeight);
+        Widget* currentNode = nodeState.get();
+        Widget* currentChild = childLifetime.get();
+        if (!nodeState.valid()
+            || !currentNode
+            || !currentChild
+            || currentChild->parent() != currentNode
+            || currentChild->mLayoutInvalidationRevision != childRevision)
             return content;
-        if (current_child->mRectExplicit) {
-            if (child_style.width.isAuto()) child_size.x = current_child->mRect.w;
-            if (child_style.height.isAuto()) child_size.y = current_child->mRect.h;
+        if (currentChild->mRectExplicit) {
+            if (childStyle.width.isAuto()) childSize.x = currentChild->mRect.w;
+            if (childStyle.height.isAuto()) childSize.y = currentChild->mRect.h;
         }
-        const float child_outer_width = child_size.x + child_style.margin.horizontal();
-        const float outerHeight = child_size.y + child_style.margin.vertical();
-        const float horizontal_reference = content_width.value_or(0.f);
-        const float vertical_reference = content_height.value_or(0.f);
-        const float horizontal_offset = child_style.left ? child_style.left->resolve(horizontal_reference)
-            : child_style.right                          ? child_style.right->resolve(horizontal_reference)
-            : current_child->mRectExplicit               ? current_child->mRect.x
-                                                         : child_style.margin.left.fixedPixels();
-        const float vertical_offset = child_style.top ? child_style.top->resolve(vertical_reference)
-            : child_style.bottom                      ? child_style.bottom->resolve(vertical_reference)
-            : current_child->mRectExplicit            ? current_child->mRect.y
-                                                      : child_style.margin.top.fixedPixels();
-        content.x = std::max(content.x, horizontal_offset + child_outer_width);
-        content.y = std::max(content.y, vertical_offset + outerHeight);
+        const float childOuterWidth = childSize.x + childStyle.margin.horizontal();
+        const float outerHeight = childSize.y + childStyle.margin.vertical();
+        const float horizontalReference = contentWidth.value_or(0.f);
+        const float verticalReference = contentHeight.value_or(0.f);
+        const float horizontalOffset = childStyle.left ? childStyle.left->resolve(horizontalReference)
+            : childStyle.right                         ? childStyle.right->resolve(horizontalReference)
+            : currentChild->mRectExplicit              ? currentChild->mRect.x
+                                                       : childStyle.margin.left.fixedPixels();
+        const float verticalOffset = childStyle.top ? childStyle.top->resolve(verticalReference)
+            : childStyle.bottom                     ? childStyle.bottom->resolve(verticalReference)
+            : currentChild->mRectExplicit           ? currentChild->mRect.y
+                                                    : childStyle.margin.top.fixedPixels();
+        content.x = std::max(content.x, horizontalOffset + childOuterWidth);
+        content.y = std::max(content.y, verticalOffset + outerHeight);
     }
     return content;
 }
@@ -398,17 +396,17 @@ bool LayoutEngine::remeasureRowChildren(Widget& parent, std::vector<ChildLayout>
         if (!child.style.height.isAuto() || child.style.aspectRatio) continue;
         Widget* node = child.node.get();
         if (!node || node->parent() != &parent) continue;
-        const WidgetRef<Widget> node_lifetime(node);
-        const std::uint64_t node_revision = node->mLayoutInvalidationRevision;
-        child.measured.y = measure(*node_lifetime.get(), pass, child.measured.x).y;
-        Widget* current_parent = parentState.get();
-        node = node_lifetime.get();
+        const WidgetRef<Widget> nodeLifetime(node);
+        const std::uint64_t nodeRevision = node->mLayoutInvalidationRevision;
+        child.measured.y = measure(*nodeLifetime.get(), pass, child.measured.x).y;
+        Widget* currentParent = parentState.get();
+        node = nodeLifetime.get();
         if (!parentState.valid()
             || !node
-            || !current_parent
-            || node->parent() != current_parent
+            || !currentParent
+            || node->parent() != currentParent
             || node->mSurface != parentState.surface
-            || node->mLayoutInvalidationRevision != node_revision)
+            || node->mLayoutInvalidationRevision != nodeRevision)
             return false;
         child.fitSize.y = child.measured.y;
     }
@@ -423,17 +421,17 @@ bool LayoutEngine::remeasureColumnChildren(Widget& parent, std::vector<ChildLayo
         if (std::abs(child.measured.x - initialSizes[index].x) <= 1.0e-4f && std::abs(child.measured.y - initialSizes[index].y) <= 1.0e-4f) continue;
         Widget* node = child.node.get();
         if (!node || node->parent() != &parent) continue;
-        const WidgetRef<Widget> node_lifetime(node);
-        const std::uint64_t node_revision = node->mLayoutInvalidationRevision;
-        const Vec2 constrained = measure(*node_lifetime.get(), pass, child.measured.x, child.measured.y);
-        Widget* current_parent = parentState.get();
-        node = node_lifetime.get();
+        const WidgetRef<Widget> nodeLifetime(node);
+        const std::uint64_t nodeRevision = node->mLayoutInvalidationRevision;
+        const Vec2 constrained = measure(*nodeLifetime.get(), pass, child.measured.x, child.measured.y);
+        Widget* currentParent = parentState.get();
+        node = nodeLifetime.get();
         if (!parentState.valid()
             || !node
-            || !current_parent
-            || node->parent() != current_parent
+            || !currentParent
+            || node->parent() != currentParent
             || node->mSurface != parentState.surface
-            || node->mLayoutInvalidationRevision != node_revision)
+            || node->mLayoutInvalidationRevision != nodeRevision)
             return false;
         child.measured = constrained;
     }

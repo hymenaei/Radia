@@ -39,10 +39,6 @@
 #include "text/inlinecontent.h"
 #include "text/source.h"
 
-namespace radia::viewer::ui {
-class SkinReloadCoordinator;
-} // namespace radia::viewer::ui
-
 namespace radia::ui {
 class SkinGeneration;
 class Surface;
@@ -65,6 +61,7 @@ public:
 
     bool publish(std::shared_ptr<const SkinGeneration> generation);
     bool publish(std::shared_ptr<const SkinGeneration> generation, PublicationCommit& commit);
+    bool hasRelevantStyleChange(const ResourceSnapshot& current, const ResourceSnapshot& previous) const;
     LayoutBuildResult buildWidgetTree(const std::string& resourceId) const;
     std::unique_ptr<Surface> createSurface(const TextMetrics& textMetrics) const;
     bool setLongClickDelay(std::chrono::milliseconds delay);
@@ -109,7 +106,6 @@ private:
     void unregisterSurface(Surface& surface) const;
     void notifyLocaleChanged();
     bool publishImpl(std::shared_ptr<const SkinGeneration> generation, PublicationCommit* commit);
-    friend class ::radia::viewer::ui::SkinReloadCoordinator;
     friend class Surface;
     friend class OpenGLPaintContext;
 };

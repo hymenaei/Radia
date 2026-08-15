@@ -35,17 +35,18 @@ class StyleSheet;
 class TextMetrics;
 
 struct LayoutStatistics {
-    std::size_t measured_nodes = 0;
-    std::size_t constrained_remeasures = 0;
-    std::size_t arranged_nodes = 0;
-    std::size_t skipped_nodes = 0;
+    std::size_t measuredNodes = 0;
+    std::size_t constrainedRemeasures = 0;
+    std::size_t arrangedNodes = 0;
+    std::size_t skippedNodes = 0;
 };
 
-Style resolveWidgetStyle(const StyleSheet& theme, const Widget& node);
-Vec2 measureWidget(const Widget& node, const StyleSheet& theme, const TextMetrics& textMetrics);
-void measureTree(Widget& root, const StyleSheet& theme, const TextMetrics& textMetrics);
-void arrangeTree(Widget& root, const StyleSheet& theme, const TextMetrics& textMetrics, LayoutDirection direction = LayoutDirection::LeftToRight);
-LayoutStatistics layoutTree(Widget& root, const StyleSheet& theme, const TextMetrics& textMetrics,
+Style resolveWidgetStyle(const StyleSheet& styleSheet, const Widget& node);
+Vec2 measureWidget(const Widget& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics);
+void measureTree(Widget& root, const StyleSheet& styleSheet, const TextMetrics& textMetrics);
+void arrangeTree(Widget& root, const StyleSheet& styleSheet, const TextMetrics& textMetrics,
+                 LayoutDirection direction = LayoutDirection::LeftToRight);
+LayoutStatistics layoutTree(Widget& root, const StyleSheet& styleSheet, const TextMetrics& textMetrics,
                             LayoutDirection direction = LayoutDirection::LeftToRight);
 } // namespace radia::ui
 #endif // RD_LAYOUT_ENGINE_H

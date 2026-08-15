@@ -76,7 +76,7 @@ struct resolverData {
 };
 using resolverTest = test_group<resolverData>;
 using resolverObject = resolverTest::object;
-resolverTest resolverTestCase("RduiSkinResolver");
+resolverTest resolverTestCase("UISkinResolver");
 
 template<> template<> void resolverObject::test<1>() {
     set_test_name("explicit base chain layers each resource class base-first");

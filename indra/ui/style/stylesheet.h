@@ -52,7 +52,7 @@ public:
     StyleSheet(StyleSheet&& other) noexcept;
     StyleSheet& operator=(StyleSheet&& other) noexcept;
 
-    StyleSheetLoadResult loadRadia(const std::string& radia, const std::string& sourceName = {});
+    StyleSheetLoadResult loadRadia(const std::string& stylesheetSource, const std::string& sourceName = {});
     StyleSheetLoadResult loadRadiaLayers(const std::vector<ResourceLayer>& layers);
     std::uint64_t generation() const;
     const DependencyMap& dependencies() const;

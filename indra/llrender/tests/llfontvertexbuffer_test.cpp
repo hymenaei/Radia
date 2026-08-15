@@ -614,10 +614,6 @@ namespace tut
                       n_full, (S32)s.length());
     }
 
-    // A mixed display list (standard underline + analytic glyphs) must replay
-    // each batch under its matching shader and then restore the caller. The
-    // headless UI shader deliberately has no hb-gpu branch, so the glyph batch
-    // uses the standalone analytic program.
     template<> template<>
     void llfontvertexbuffer_render_object::test<9>()
     {

@@ -34,7 +34,15 @@
 #include "widgets/floater.h"
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
+using radia::ui::DiagnosticResult;
+using radia::ui::Floater;
+using radia::ui::LayoutBuildResult;
+using radia::ui::SettingResolver;
+using radia::ui::SkinGeneration;
+using radia::ui::System;
+using radia::ui::WidgetRef;
+using CoreWidget = radia::ui::Widget;
+
 namespace {
 void attachRootLifecycle(Floater& root, ComponentController& controller, std::function<void()> onClose = {}) {
     root.setLifecycleCallbacks({}, [&controller, onClose = std::move(onClose)] {
@@ -49,7 +57,7 @@ bool isClosed(const Floater& root) {
 
 std::unique_ptr<Floater> takeFloaterRoot(LayoutBuildResult layout, const std::string& rootError, const std::string& source,
                                          DiagnosticResult& result) {
-    radia::ui::Widget* root = layout.root.get();
+    CoreWidget* root = layout.root.get();
     Floater* candidate = root ? dynamic_cast<Floater*>(root) : nullptr;
     if (layout.ok() && !candidate) layout.error("component.root.type_mismatch", rootError, source);
     const bool layoutOk = layout.ok() && candidate;

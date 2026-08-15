@@ -33,15 +33,30 @@
 #include "system.h"
 
 namespace radia::viewer::ui::detail {
+using radia::ui::Widget;
+using radia::ui::WidgetRef;
+
 struct ControllerWidgetSlot {
     std::string id;
-    radia::ui::WidgetRef<radia::ui::Widget> current;
+    WidgetRef<Widget> current;
     std::set<std::string> warnedOperations;
 };
 } // namespace radia::viewer::ui::detail
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
+using radia::ui::Binder;
+using radia::ui::Binding;
+using radia::ui::DiagnosticResult;
+using radia::ui::EventRegistrationDescriptor;
+using radia::ui::isWidgetIdentifier;
+using radia::ui::PreparedBinding;
+using radia::ui::PreparedBindingResult;
+using radia::ui::SettingResolver;
+using radia::ui::System;
+using radia::ui::TextSource;
+using radia::ui::WidgetRef;
+using radia::ui::detail::indexWidgetsInScope;
+using radia::ui::detail::makeEventRegistration;
 using RuntimeWidget = radia::ui::Widget;
 
 struct ComponentController::PreparedMount::State {
@@ -59,13 +74,13 @@ struct ComponentController::Impl {
         Widget facade;
     };
 
-    std::vector<radia::ui::EventRegistrationDescriptor> registrations;
+    std::vector<EventRegistrationDescriptor> registrations;
     bool registrationsSealed = false;
     std::map<std::string, WidgetEntry> widgets;
     Binding binding;
 };
 
-ComponentController::ComponentController(radia::ui::System& system) : mSystem(system), mImpl(std::make_unique<Impl>()) {}
+ComponentController::ComponentController(System& system) : mSystem(system), mImpl(std::make_unique<Impl>()) {}
 
 ComponentController::PreparedMount::PreparedMount() = default;
 ComponentController::PreparedMount::~PreparedMount() = default;
@@ -153,15 +168,15 @@ Widget& ComponentController::getWidgetById(std::string_view id) {
     return found->second.facade;
 }
 
-TextSource ComponentController::localize(std::string id) const {
-    return mSystem.localize(std::move(id));
+TextSource ComponentController::localize(std::string localizationKey) const {
+    return mSystem.localize(std::move(localizationKey));
 }
 
 ComponentController::PreparedWidgets ComponentController::prepareWidgets(RuntimeWidget& root, DiagnosticResult& result) {
     PreparedWidgets prepared;
     prepared.mController = this;
     prepared.mRoot = &root;
-    radia::ui::detail::indexWidgetsInScope(root, prepared.index);
+    indexWidgetsInScope(root, prepared.mIndex);
     prepared.mTargets.reserve(mImpl->widgets.size());
     for (const auto& [id, entry] : mImpl->widgets) {
         if (!isWidgetIdentifier(id)) {
@@ -169,8 +184,8 @@ ComponentController::PreparedWidgets ComponentController::prepareWidgets(Runtime
             prepared.mTargets.push_back({entry.slot, nullptr});
             continue;
         }
-        const auto indexed = prepared.index.find(id);
-        RuntimeWidget* widget = indexed == prepared.index.end() ? nullptr : indexed->second;
+        const auto indexed = prepared.mIndex.find(id);
+        RuntimeWidget* widget = indexed == prepared.mIndex.end() ? nullptr : indexed->second;
         if (!widget) result.warning("controller.widget.missing", "Controller Widget ID is not present in this skin: " + id + ".");
         prepared.mTargets.push_back({entry.slot, widget});
     }
@@ -192,8 +207,7 @@ ComponentController::PreparedMountResult ComponentController::prepare(RuntimeWid
     PreparedMountResult result;
     mImpl->registrationsSealed = true;
     Binder binder(root, &settingResolver);
-    for (const radia::ui::EventRegistrationDescriptor& registration : mImpl->registrations)
-        binder.event(radia::ui::detail::makeEventRegistration(registration));
+    for (const EventRegistrationDescriptor& registration : mImpl->registrations) binder.event(makeEventRegistration(registration));
 
     PreparedBindingResult binding = binder.prepare();
     const bool bindingOk = binding.ok();
@@ -225,7 +239,7 @@ void ComponentController::commit(PreparedMount&& prepared) {
     postBuild();
 }
 
-void ComponentController::addEventRegistration(radia::ui::EventRegistrationDescriptor registration) {
+void ComponentController::addEventRegistration(EventRegistrationDescriptor registration) {
     if (mImpl->registrationsSealed) {
         LL_WARNS("UI") << "Controller Event Handler registration was attempted after preparation began." << LL_ENDL;
         return;

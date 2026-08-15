@@ -24,7 +24,6 @@
 
 #include "llviewerprecompiledheaders.h"
 #include "skin/reloadcoordinator.h"
-#include <set>
 #include <utility>
 #include "componentmanager.h"
 #include "skin/compiler.h"
@@ -33,60 +32,17 @@
 #include "system.h"
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
+using radia::ui::ResourceSnapshot;
+using radia::ui::SkinCompiler;
+using radia::ui::SkinGeneration;
+using radia::ui::SkinGenerationPrepareResult;
+using radia::ui::System;
+
 namespace {
 bool equalSnapshots(const ResourceSnapshot& left, const ResourceSnapshot& right) {
     return left.resources() == right.resources() && left.layeredResources() == right.layeredResources();
 }
-
-bool equalReloadInputs(const ResourceSnapshot& left, const ResourceSnapshot& right, const ResourceDependencyMap& dependencies) {
-    if (left.resources() != right.resources()) return false;
-    const auto& leftResources = left.layeredResources();
-    const auto& rightResources = right.layeredResources();
-    if (leftResources.size() != rightResources.size()) return false;
-
-    std::set<std::string> relevantSources;
-    for (const auto& [source, imports] : dependencies) {
-        relevantSources.insert(source);
-        relevantSources.insert(imports.begin(), imports.end());
-    }
-
-    for (const auto& [resourceId, leftLayers] : leftResources) {
-        const auto rightResource = rightResources.find(resourceId);
-        if (rightResource == rightResources.end()) return false;
-        const auto& rightLayers = rightResource->second;
-        if (resourceId != "skin.radia") {
-            if (leftLayers != rightLayers) return false;
-            continue;
-        }
-        if (leftLayers.size() != rightLayers.size()) return false;
-        for (std::size_t index = 0; index < leftLayers.size(); ++index) {
-            const ResourceLayer& leftLayer = leftLayers[index];
-            const ResourceLayer& rightLayer = rightLayers[index];
-            if (leftLayer.sourceName != rightLayer.sourceName
-                || leftLayer.source != rightLayer.source
-                || leftLayer.entrypoint != rightLayer.entrypoint)
-                return false;
-
-            for (const auto& [moduleId, source] : leftLayer.modules) {
-                if (!relevantSources.contains(leftLayer.sourceNameFor(moduleId))) continue;
-                const auto rightModule = rightLayer.modules.find(moduleId);
-                if (rightModule == rightLayer.modules.end() || rightModule->second != source) return false;
-            }
-            for (const auto& [moduleId, source] : rightLayer.modules) {
-                if (!relevantSources.contains(rightLayer.sourceNameFor(moduleId))) continue;
-                const auto leftModule = leftLayer.modules.find(moduleId);
-                if (leftModule == leftLayer.modules.end() || leftModule->second != source) return false;
-            }
-        }
-    }
-    return true;
-}
 } // namespace
-
-bool SkinReloadCoordinator::sameReloadInputs(const System& system, const ResourceSnapshot& left, const ResourceSnapshot& right) {
-    return equalReloadInputs(left, right, system.styleSheet().dependencies());
-}
 
 class SkinReloadCoordinator::Impl {
 public:
@@ -148,7 +104,7 @@ private:
         if (!mSettling) {
             const bool unchanged = mAcknowledgedSnapshot
                 && (mRetryAfterAnyChange ? equalSnapshots(current, *mAcknowledgedSnapshot)
-                                         : SkinReloadCoordinator::sameReloadInputs(mSystem, current, *mAcknowledgedSnapshot));
+                                         : !mSystem.hasRelevantStyleChange(current, *mAcknowledgedSnapshot));
             if (unchanged) {
                 mObservedSnapshot = current;
                 mAcknowledgedSnapshot = current;

@@ -35,7 +35,10 @@
 #include "llsdjson.h"
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
+using radia::ui::DiagnosticResult;
+using radia::ui::ResourceLayer;
+using radia::ui::ResourceSnapshot;
+
 namespace {
 struct ManifestResources {
     std::optional<std::filesystem::path> stylesheet;
@@ -112,15 +115,15 @@ bool inside(const std::filesystem::path& path, const std::filesystem::path& root
     return true;
 }
 
-std::optional<std::filesystem::path> resourcePath(const LLSD& radia, const char* key, const std::filesystem::path& skinRoot, bool directory,
+std::optional<std::filesystem::path> resourcePath(const LLSD& radiaResources, const char* key, const std::filesystem::path& skinRoot, bool directory,
                                                   DiagnosticResult& result, const std::string& source) {
-    if (!radia.has(key)) return std::nullopt;
-    if (!radia[key].isString() || radia[key].asString().empty()) {
+    if (!radiaResources.has(key)) return std::nullopt;
+    if (!radiaResources[key].isString() || radiaResources[key].asString().empty()) {
         result.error("skin.manifest.resource.invalid", "Radia resource '" + std::string(key) + "' must be a non-empty relative path.", source);
         return std::nullopt;
     }
 
-    const std::string value = radia[key].asString();
+    const std::string value = radiaResources[key].asString();
     const std::filesystem::path relative(value);
     if (relative.is_absolute() || relative.has_root_name() || value.find("://") != std::string::npos) {
         result.error("skin.manifest.path.invalid", "Radia resource path must be Skin-relative: " + value + ".", source);
@@ -194,19 +197,19 @@ ManifestResult parseManifest(const std::filesystem::path& root) {
     if (!document.has("radia")) result.error("skin.manifest.field_missing", "Missing required manifest field: radia.", source);
     else if (!document["radia"].isMap()) result.error("skin.manifest.radia_invalid", "Manifest radia field must be an object.", source);
     else {
-        const LLSD& radia = document["radia"];
-        validateKeys(radia, {"stylesheet", "layouts", "localization", "assets"}, result, source, "radia");
+        const LLSD& radiaResources = document["radia"];
+        validateKeys(radiaResources, {"stylesheet", "layouts", "localization", "assets"}, result, source, "radia");
         const bool rootSkin = document.has("base") && document["base"].isUndefined();
         if (rootSkin) {
             for (const char* key : {"stylesheet", "layouts", "localization", "assets"})
-                if (!radia.has(key))
+                if (!radiaResources.has(key))
                     result.error("skin.manifest.resource.required", "Root Skin must declare Radia resource: " + std::string(key) + ".", source);
-        } else if (radia.size() == 0) result.error("skin.manifest.radia_empty", "Derived Skin must declare at least one Radia resource.", source);
+        } else if (radiaResources.size() == 0) result.error("skin.manifest.radia_empty", "Derived Skin must declare at least one Radia resource.", source);
 
-        manifest.resources.stylesheet = resourcePath(radia, "stylesheet", canonicalRoot, false, result, source);
-        manifest.resources.layouts = resourcePath(radia, "layouts", canonicalRoot, true, result, source);
-        manifest.resources.localization = resourcePath(radia, "localization", canonicalRoot, false, result, source);
-        manifest.resources.assets = resourcePath(radia, "assets", canonicalRoot, true, result, source);
+        manifest.resources.stylesheet = resourcePath(radiaResources, "stylesheet", canonicalRoot, false, result, source);
+        manifest.resources.layouts = resourcePath(radiaResources, "layouts", canonicalRoot, true, result, source);
+        manifest.resources.localization = resourcePath(radiaResources, "localization", canonicalRoot, false, result, source);
+        manifest.resources.assets = resourcePath(radiaResources, "assets", canonicalRoot, true, result, source);
     }
 
     for (const char* optional : {"url", "notes", "preview"})
@@ -291,8 +294,7 @@ void overlayDirectory(const SkinManifest& manifest, const std::filesystem::path&
 }
 } // namespace
 
-SkinSnapshotResult SkinResolver::resolve(const std::filesystem::path& selectedRoot,
-                                         const std::vector<std::filesystem::path>& installedRoots) const {
+SkinSnapshotResult SkinResolver::resolve(const std::filesystem::path& selectedRoot, const std::vector<std::filesystem::path>& installedRoots) const {
     SkinSnapshotResult result;
     ManifestResult selectedResult = parseManifest(selectedRoot);
     if (!selectedResult.ok()) {

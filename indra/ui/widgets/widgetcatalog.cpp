@@ -38,7 +38,7 @@
 
 namespace radia::ui {
 const std::unordered_map<std::string, WidgetContract>& builtInWidgetContracts() {
-    static const std::unordered_map<std::string, WidgetContract> contracts = [] {
+    static const std::unordered_map<std::string, WidgetContract> sContracts = [] {
         std::unordered_map<std::string, WidgetContract> result;
         auto add = [&result](WidgetContract contract) {
             detail::prepareCompositeTopology(contract);
@@ -59,6 +59,6 @@ const std::unordered_map<std::string, WidgetContract>& builtInWidgetContracts() 
         add(detail::textContract());
         return result;
     }();
-    return contracts;
+    return sContracts;
 }
 } // namespace radia::ui

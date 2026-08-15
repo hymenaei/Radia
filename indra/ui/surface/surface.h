@@ -123,7 +123,7 @@ private:
     StylePass& stylePass() const;
     void invalidateStyleCache();
     void invalidateOrderingCache();
-    void didPaint(std::uint64_t painted_generation);
+    void didPaint(std::uint64_t paintedGeneration);
     void setFocused(Widget* node, bool focusVisible);
     void validateFocus();
     bool isRootedInSurface(const Widget* node) const;

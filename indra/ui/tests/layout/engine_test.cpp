@@ -37,179 +37,208 @@
 #include "widgets/text.h"
 #include "widgets/widgetcontract.h"
 
+namespace {
+using radia::ui::Button;
+using radia::ui::Field;
+using radia::ui::FixedTextMetrics;
+using radia::ui::Floater;
+using radia::ui::Flow;
+using radia::ui::JustifyContent;
+using radia::ui::Label;
+using radia::ui::LayoutDirection;
+using radia::ui::LayoutStatistics;
+using radia::ui::Panel;
+using radia::ui::Rect;
+using radia::ui::Style;
+using radia::ui::StyleSheet;
+using radia::ui::StyleSheetLoadResult;
+using radia::ui::Switch;
+using radia::ui::Text;
+using radia::ui::TextMetrics;
+using radia::ui::Vec2;
+using radia::ui::Visibility;
+using radia::ui::Widget;
+using radia::ui::fixedTextMetrics;
+using radia::ui::layoutTree;
+using radia::ui::measureTree;
+using radia::ui::measureWidget;
+using radia::ui::resolveWidgetStyle;
+
+} // namespace
+
 namespace tut {
 struct engineData {
-    radia::ui::FixedTextMetrics text;
+    FixedTextMetrics text;
 };
 using engineTest = test_group<engineData>;
 using engineObject = engineTest::object;
 engineTest engineTestCase("engine");
 
 template<> template<> void engineObject::test<1>() {
-    radia::ui::StyleSheet theme;
+    StyleSheet styleSheet;
     const char* kButtonLayout =
         "button { left: 10px; top: 10px; padding: 7px; gap: 6px; flow: row; font-size: 13px; line-height: 18px; } button > icon { size: 14px; }";
-    theme.loadRadia(kButtonLayout);
-    radia::ui::Panel root;
+    styleSheet.loadRadia(kButtonLayout);
+    Panel root;
     root.setRect({0.f, 0.f, 300.f, 200.f});
-    auto button = std::make_unique<radia::ui::Button>();
+    auto button = std::make_unique<Button>();
     button->setIcon("search");
     button->setLabel("Apply");
     root.addChild(std::move(button));
-    radia::ui::layoutTree(root, theme, text);
-    const radia::ui::Widget& result = *root.children().front();
+    layoutTree(root, styleSheet, text);
+    const Widget& result = *root.children().front();
     ensure_equals("button auto width", result.rect().w, 72.f);
     ensure_equals("button auto height", result.rect().h, 32.f);
     ensure_equals("button child gap", result.children()[1]->rect().x - result.children()[0]->rect().right(), 6.f);
 }
 
 template<> template<> void engineObject::test<2>() {
-    radia::ui::StyleSheet theme;
+    StyleSheet styleSheet;
     const char* kCenteredButtonLayout =
         "button { width: 128px; height: 32px; padding: 7px; gap: 6px; flow: row; justify-content: center; line-height: 18px; } button > icon { size: 14px; }";
-    theme.loadRadia(kCenteredButtonLayout);
-    radia::ui::Panel root;
+    styleSheet.loadRadia(kCenteredButtonLayout);
+    Panel root;
     root.setRect({0.f, 0.f, 300.f, 200.f});
-    auto button = std::make_unique<radia::ui::Button>();
+    auto button = std::make_unique<Button>();
     button->setIcon("search");
     button->setLabel("Apply");
     root.addChild(std::move(button));
-    radia::ui::layoutTree(root, theme, text);
-    const radia::ui::Widget& result = *root.children().front();
+    layoutTree(root, styleSheet, text);
+    const Widget& result = *root.children().front();
     const float contentWidth = result.children()[1]->rect().right() - result.children()[0]->rect().left();
     ensure_equals("row content centered", result.children()[0]->rect().x - result.rect().x, (result.rect().w - contentWidth) * 0.5f);
 }
 
 template<> template<> void engineObject::test<3>() {
-    radia::ui::StyleSheet theme;
-    theme.loadRadia("panel { padding: 10px; flow: column; gap: 5px; } label { height: 20px; }");
-    radia::ui::Panel root;
+    StyleSheet styleSheet;
+    styleSheet.loadRadia("panel { padding: 10px; flow: column; gap: 5px; } label { height: 20px; }");
+    Panel root;
     root.setRect({0.f, 0.f, 100.f, 100.f});
-    root.addChild(std::make_unique<radia::ui::Label>("one"));
-    root.addChild(std::make_unique<radia::ui::Label>("two"));
-    radia::ui::layoutTree(root, theme, text);
+    root.addChild(std::make_unique<Label>("one"));
+    root.addChild(std::make_unique<Label>("two"));
+    layoutTree(root, styleSheet, text);
     ensure_equals("column fills content width", root.children()[0]->rect().w, 80.f);
     ensure_equals("column gap", root.children()[0]->rect().bottom() - root.children()[1]->rect().top(), 5.f);
 }
 
 template<> template<> void engineObject::test<4>() {
-    radia::ui::StyleSheet theme;
-    theme.loadRadia("panel { width: 40px; height: 30px; right: 5px; bottom: 7px; }");
-    radia::ui::Panel root;
+    StyleSheet styleSheet;
+    styleSheet.loadRadia("panel { width: 40px; height: 30px; right: 5px; bottom: 7px; }");
+    Panel root;
     root.setRect({0.f, 0.f, 100.f, 100.f});
-    root.addChild(std::make_unique<radia::ui::Panel>());
-    radia::ui::layoutTree(root, theme, text);
+    root.addChild(std::make_unique<Panel>());
+    layoutTree(root, styleSheet, text);
     ensure_equals("free-flow right positioning", root.children()[0]->rect().right(), 95.f);
     ensure_equals("free-flow bottom positioning", root.children()[0]->rect().bottom(), 7.f);
 }
 
 template<> template<> void engineObject::test<5>() {
-    radia::ui::StyleSheet theme;
+    StyleSheet styleSheet;
     const char* kFloaterLayout =
         "floater { padding: 10px; flow: column; } floater::header { height: 30px; } floater::content { flex-grow: 1; } floater::header::title { left: 5px; top: 5px; height: 15px; } label { height: 20px; }";
-    theme.loadRadia(kFloaterLayout);
-    radia::ui::Floater floater;
+    styleSheet.loadRadia(kFloaterLayout);
+    Floater floater;
     floater.setTitle("title").setRect({0.f, 0.f, 100.f, 100.f});
-    floater.addChild(std::make_unique<radia::ui::Label>("content"));
-    radia::ui::layoutTree(floater, theme, text);
+    floater.addChild(std::make_unique<Label>("content"));
+    layoutTree(floater, styleSheet, text);
     ensure_equals("header respects floater padding", floater.header()->rect().top(), 90.f);
     ensure_equals("content starts below header and padding", floater.children()[1]->rect().top(), 60.f);
 }
 
 template<> template<> void engineObject::test<6>() {
-    radia::ui::StyleSheet theme;
-    theme.loadRadia("floater { flow: column; } floater::header { height: 30px; } floater::content { flex-grow: 1; } label { height: 20px; }");
-    radia::ui::Floater floater;
+    StyleSheet styleSheet;
+    styleSheet.loadRadia("floater { flow: column; } floater::header { height: 30px; } floater::content { flex-grow: 1; } label { height: 20px; }");
+    Floater floater;
     floater.setTitle("title").setRect({0.f, 0.f, 100.f, 100.f});
-    floater.addChild(std::make_unique<radia::ui::Label>("content"));
-    floater.header()->setVisibility(radia::ui::Visibility::Collapsed);
-    radia::ui::layoutTree(floater, theme, text);
+    floater.addChild(std::make_unique<Label>("content"));
+    floater.header()->setVisibility(Visibility::Collapsed);
+    layoutTree(floater, styleSheet, text);
     ensure_equals("hidden header does not reserve space", floater.children()[1]->rect().top(), 100.f);
 }
 
 template<> template<> void engineObject::test<7>() {
-    radia::ui::StyleSheet theme;
-    theme.loadRadia("panel { flow: row; } label { width: 10px; height: 10px; } #first { margin: 0px auto 0px 0px; }");
-    radia::ui::Panel panel;
+    StyleSheet styleSheet;
+    styleSheet.loadRadia("panel { flow: row; } label { width: 10px; height: 10px; } #first { margin: 0px auto 0px 0px; }");
+    Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 20.f});
-    auto first = std::make_unique<radia::ui::Label>("first");
+    auto first = std::make_unique<Label>("first");
     first->setId("first");
     panel.addChild(std::move(first));
-    panel.addChild(std::make_unique<radia::ui::Label>("second"));
-    radia::ui::layoutTree(panel, theme, text);
+    panel.addChild(std::make_unique<Label>("second"));
+    layoutTree(panel, styleSheet, text);
     ensure_equals("auto right margin keeps first left", panel.children()[0]->rect().x, 0.f);
     ensure_equals("auto right margin pushes following sibling", panel.children()[1]->rect().x, 90.f);
 }
 
 template<> template<> void engineObject::test<8>() {
-    radia::ui::StyleSheet theme;
-    theme.loadRadia("panel { flow: column; } label { width: 20px; height: 10px; margin: 0px auto; }");
-    radia::ui::Panel panel;
+    StyleSheet styleSheet;
+    styleSheet.loadRadia("panel { flow: column; } label { width: 20px; height: 10px; margin: 0px auto; }");
+    Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 40.f});
-    panel.addChild(std::make_unique<radia::ui::Label>("center"));
-    radia::ui::layoutTree(panel, theme, text);
+    panel.addChild(std::make_unique<Label>("center"));
+    layoutTree(panel, styleSheet, text);
     ensure_equals("paired auto margins center column child", panel.children()[0]->rect().x, 40.f);
 }
 
 template<> template<> void engineObject::test<9>() {
-    radia::ui::StyleSheet theme;
-    theme.loadRadia("button { size: 24px; padding: 20px; flow: row; justify-content: center; } button > icon { size: 16px; }");
-    radia::ui::Button button;
+    StyleSheet styleSheet;
+    styleSheet.loadRadia("button { size: 24px; padding: 20px; flow: row; justify-content: center; } button > icon { size: 16px; }");
+    Button button;
     button.setRect({0.f, 0.f, 24.f, 24.f});
     button.setIcon("search");
-    radia::ui::layoutTree(button, theme, text);
+    layoutTree(button, styleSheet, text);
     ensure_equals("oversized padding keeps icon centered horizontally", button.icon()->rect().x, 4.f);
     ensure_equals("oversized padding keeps icon centered vertically", button.icon()->rect().y, 4.f);
 }
 
 template<> template<> void engineObject::test<10>() {
-    radia::ui::StyleSheet theme;
-    theme.loadRadia("panel { flow: column; justify-content: end; } label { height: 10px; }");
-    radia::ui::Panel panel;
+    StyleSheet styleSheet;
+    styleSheet.loadRadia("panel { flow: column; justify-content: end; } label { height: 10px; }");
+    Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 40.f});
-    panel.addChild(std::make_unique<radia::ui::Label>("bottom"));
-    radia::ui::layoutTree(panel, theme, text);
+    panel.addChild(std::make_unique<Label>("bottom"));
+    layoutTree(panel, styleSheet, text);
     ensure_equals("column end alignment", panel.children().front()->rect().bottom(), 0.f);
 }
 
 template<> template<> void engineObject::test<11>() {
-    radia::ui::StyleSheet theme;
-    ensure("flex stylesheet compiles", theme.loadRadia("panel { flow: row; } label { width: 10px; height: 10px; flex: 1; }").ok());
-    radia::ui::Panel panel;
+    StyleSheet styleSheet;
+    ensure("flex stylesheet compiles", styleSheet.loadRadia("panel { flow: row; } label { width: 10px; height: 10px; flex: 1; }").ok());
+    Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 20.f});
-    panel.addChild(std::make_unique<radia::ui::Label>("first"));
-    panel.addChild(std::make_unique<radia::ui::Label>("second"));
-    radia::ui::layoutTree(panel, theme, text);
+    panel.addChild(std::make_unique<Label>("first"));
+    panel.addChild(std::make_unique<Label>("second"));
+    layoutTree(panel, styleSheet, text);
     ensure_equals("flex children share remaining width", panel.children()[0]->rect().w, 50.f);
     ensure_equals("second flex child fills row", panel.children()[1]->rect().right(), 100.f);
 }
 
 template<> template<> void engineObject::test<12>() {
-    radia::ui::StyleSheet theme;
-    ensure("measure stylesheet compiles", theme.loadRadia("panel { flow: row; gap: 3px; padding: 2px; } label { width: 10px; height: 8px; }").ok());
-    radia::ui::Panel panel;
-    panel.addChild(std::make_unique<radia::ui::Label>("first"));
-    panel.addChild(std::make_unique<radia::ui::Label>("second"));
+    StyleSheet styleSheet;
+    ensure("measure stylesheet compiles", styleSheet.loadRadia("panel { flow: row; gap: 3px; padding: 2px; } label { width: 10px; height: 8px; }").ok());
+    Panel panel;
+    panel.addChild(std::make_unique<Label>("first"));
+    panel.addChild(std::make_unique<Label>("second"));
 
-    radia::ui::measureTree(panel, theme, text);
+    measureTree(panel, styleSheet, text);
     ensure_equals("measure computes row width", panel.desiredSize().x, 27.f);
     ensure_equals("measure computes row height", panel.desiredSize().y, 12.f);
 
     panel.setRect({0.f, 0.f, 40.f, 20.f});
-    radia::ui::arrangeTree(panel, theme, text);
+    radia::ui::arrangeTree(panel, styleSheet, text);
     ensure_equals("arrange consumes measured child width", panel.children()[1]->rect().right(), 25.f);
 }
 
 template<> template<> void engineObject::test<13>() {
-    radia::ui::StyleSheet theme;
-    radia::ui::Panel panel;
+    StyleSheet styleSheet;
+    Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 100.f});
-    auto button = std::make_unique<radia::ui::Button>();
+    auto button = std::make_unique<Button>();
     button->setRect({10.f, 10.f, 20.f, 20.f});
     panel.addChild(std::move(button));
 
-    radia::ui::layoutTree(panel, theme, text);
-    const radia::ui::Rect& rect = panel.children().front()->rect();
+    layoutTree(panel, styleSheet, text);
+    const Rect& rect = panel.children().front()->rect();
     ensure_equals("free layout preserves explicit x", rect.x, 10.f);
     ensure_equals("free layout preserves explicit y", rect.y, 10.f);
     ensure_equals("free layout preserves explicit width", rect.w, 20.f);
@@ -217,28 +246,28 @@ template<> template<> void engineObject::test<13>() {
 }
 
 template<> template<> void engineObject::test<14>() {
-    radia::ui::StyleSheet theme;
-    const radia::ui::StyleSheetLoadResult intrinsic = theme.loadRadia("switch { flow: column; justify-content: center; }", "switch.radia");
+    StyleSheet styleSheet;
+    const StyleSheetLoadResult intrinsic = styleSheet.loadRadia("switch { flow: column; justify-content: center; }", "switch.radia");
     ensure("switch accepts valid authored layout properties", intrinsic.ok());
     const char* kSwitch =
         "switch { width: 64px; height: 32px; padding: 3px 5px; flow: column; justify-content: center; } switch::thumb { border-radius: 7px; }";
-    ensure("switch part layout compiles", theme.loadRadia(kSwitch).ok());
-    radia::ui::Switch control;
+    ensure("switch part layout compiles", styleSheet.loadRadia(kSwitch).ok());
+    Switch control;
     control.setRect({10.f, 20.f, 64.f, 32.f});
 
-    radia::ui::layoutTree(control, theme, text);
-    ensure_equals("widget fixes switch flow to row", static_cast<int>(radia::ui::resolveWidgetStyle(theme, control).flow),
-                  static_cast<int>(radia::ui::Flow::Row));
+    layoutTree(control, styleSheet, text);
+    ensure_equals("widget fixes switch flow to row", static_cast<int>(resolveWidgetStyle(styleSheet, control).flow),
+                  static_cast<int>(Flow::Row));
     ensure_equals("widget start alignment positions thumb", control.thumb()->rect().left(), 15.f);
     ensure_equals("widget row flow positions thumb", control.thumb()->rect().bottom(), 23.f);
     ensure_equals("unsized thumb fills content height", control.thumb()->rect().h, 26.f);
     ensure_equals("unsized thumb automatically stays square", control.thumb()->rect().w, 26.f);
-    ensure_equals("thumb radius comes from part style", radia::ui::resolveWidgetStyle(theme, *control.thumb()).borderRadius, 7.f);
+    ensure_equals("thumb radius comes from part style", resolveWidgetStyle(styleSheet, *control.thumb()).borderRadius, 7.f);
 
     control.setChecked(true);
-    radia::ui::layoutTree(control, theme, text);
-    ensure_equals("checked widget fixes alignment to end", static_cast<int>(radia::ui::resolveWidgetStyle(theme, control).justifyContent),
-                  static_cast<int>(radia::ui::JustifyContent::End));
+    layoutTree(control, styleSheet, text);
+    ensure_equals("checked widget fixes alignment to end", static_cast<int>(resolveWidgetStyle(styleSheet, control).justifyContent),
+                  static_cast<int>(JustifyContent::End));
     ensure_equals("checked widget moves thumb to end", control.thumb()->rect().right(), 69.f);
 
     control.clearChildren();
@@ -248,69 +277,69 @@ template<> template<> void engineObject::test<14>() {
 }
 
 template<> template<> void engineObject::test<15>() {
-    class ExactTextMetrics final : public radia::ui::TextMetrics {
+    class ExactTextMetrics final : public TextMetrics {
     public:
-        radia::ui::Vec2 measureText(const std::string&, const radia::ui::Style&) const override { return {47.f, 19.f}; }
+        Vec2 measureText(const std::string&, const Style&) const override { return {47.f, 19.f}; }
     } exact;
 
-    radia::ui::StyleSheet theme;
-    radia::ui::Label label("adapter-owned");
-    radia::ui::measureTree(label, theme, exact);
+    StyleSheet styleSheet;
+    Label label("adapter-owned");
+    measureTree(label, styleSheet, exact);
     ensure_equals("layout uses injected text width", label.desiredSize().x, 47.f);
     ensure_equals("layout uses injected text height", label.desiredSize().y, 19.f);
 }
 
 template<> template<> void engineObject::test<16>() {
-    radia::ui::StyleSheet theme;
+    StyleSheet styleSheet;
     const char* kDirection =
         "panel { flow: row; justify-content: start; gap: 5px; } label { width: 10px; height: 10px; } #physical { margin: 0px 7px 0px 0px; }";
-    ensure("direction stylesheet compiles", theme.loadRadia(kDirection).ok());
-    radia::ui::Panel panel;
+    ensure("direction stylesheet compiles", styleSheet.loadRadia(kDirection).ok());
+    Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 20.f});
-    panel.addChild(std::make_unique<radia::ui::Label>("first"));
-    auto physical = std::make_unique<radia::ui::Label>("second");
+    panel.addChild(std::make_unique<Label>("first"));
+    auto physical = std::make_unique<Label>("second");
     physical->setId("physical");
     panel.addChild(std::move(physical));
 
-    radia::ui::layoutTree(panel, theme, text, radia::ui::LayoutDirection::RightToLeft);
+    layoutTree(panel, styleSheet, text, LayoutDirection::RightToLeft);
     ensure_equals("rtl start begins at physical right", panel.children()[0]->rect().right(), 100.f);
     ensure_equals("rtl row preserves document order from the right", panel.children()[1]->rect().right(), 78.f);
 }
 
 template<> template<> void engineObject::test<17>() {
-    radia::ui::StyleSheet theme;
-    ensure("negative position stylesheet compiles", theme.loadRadia("label { width: 10px; height: 10px; left: -8px; bottom: -3px; }").ok());
-    radia::ui::Panel panel;
+    StyleSheet styleSheet;
+    ensure("negative position stylesheet compiles", styleSheet.loadRadia("label { width: 10px; height: 10px; left: -8px; bottom: -3px; }").ok());
+    Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 100.f});
-    panel.addChild(std::make_unique<radia::ui::Label>("offset"));
+    panel.addChild(std::make_unique<Label>("offset"));
 
-    radia::ui::layoutTree(panel, theme, text);
+    layoutTree(panel, styleSheet, text);
     ensure_equals("negative left remains an explicit offset", panel.children()[0]->rect().left(), -8.f);
     ensure_equals("negative bottom remains an explicit offset", panel.children()[0]->rect().bottom(), -3.f);
 }
 
 template<> template<> void engineObject::test<18>() {
-    radia::ui::StyleSheet theme;
+    StyleSheet styleSheet;
     const char* kField = "field { flow: column; } switch { width: 20px; height: 10px; } label { width: 30px; height: 10px; }";
-    ensure("field container stylesheet compiles", theme.loadRadia(kField).ok());
+    ensure("field container stylesheet compiles", styleSheet.loadRadia(kField).ok());
 
-    radia::ui::Field field;
+    Field field;
     field.setRect({0.f, 0.f, 50.f, 10.f});
-    field.addChild(std::make_unique<radia::ui::Label>("Label"));
-    field.addChild(std::make_unique<radia::ui::Switch>());
-    radia::ui::layoutTree(field, theme, text);
+    field.addChild(std::make_unique<Label>("Label"));
+    field.addChild(std::make_unique<Switch>());
+    layoutTree(field, styleSheet, text);
     ensure_equals("field keeps its default row flow", field.children()[1]->rect().left(), 30.f);
 }
 
 template<> template<> void engineObject::test<19>() {
-    radia::ui::StyleSheet theme;
-    ensure("percentage geometry compiles", theme.loadRadia("label { width: 50%; height: 25%; left: 10%; top: 20%; }").ok());
-    radia::ui::Panel panel;
+    StyleSheet styleSheet;
+    ensure("percentage geometry compiles", styleSheet.loadRadia("label { width: 50%; height: 25%; left: 10%; top: 20%; }").ok());
+    Panel panel;
     panel.setRect({0.f, 0.f, 200.f, 100.f});
-    panel.addChild(std::make_unique<radia::ui::Label>("percentage"));
+    panel.addChild(std::make_unique<Label>("percentage"));
 
-    radia::ui::layoutTree(panel, theme, text);
-    const radia::ui::Rect& rect = panel.children().front()->rect();
+    layoutTree(panel, styleSheet, text);
+    const Rect& rect = panel.children().front()->rect();
     ensure_approximately_equals("percentage width resolves against containing width", rect.w, 100.f, 6);
     ensure_approximately_equals("percentage height resolves against containing height", rect.h, 25.f, 6);
     ensure_approximately_equals("percentage left resolves against containing width", rect.left(), 20.f, 6);
@@ -318,56 +347,56 @@ template<> template<> void engineObject::test<19>() {
 }
 
 template<> template<> void engineObject::test<20>() {
-    radia::ui::StyleSheet theme;
-    ensure("automatic gap stylesheet compiles", theme.loadRadia("panel { flow: row; gap: auto; } label { width: 10px; height: 10px; }").ok());
-    radia::ui::Panel panel;
+    StyleSheet styleSheet;
+    ensure("automatic gap stylesheet compiles", styleSheet.loadRadia("panel { flow: row; gap: auto; } label { width: 10px; height: 10px; }").ok());
+    Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 20.f});
-    panel.addChild(std::make_unique<radia::ui::Label>("first"));
-    panel.addChild(std::make_unique<radia::ui::Label>("second"));
-    panel.addChild(std::make_unique<radia::ui::Label>("third"));
+    panel.addChild(std::make_unique<Label>("first"));
+    panel.addChild(std::make_unique<Label>("second"));
+    panel.addChild(std::make_unique<Label>("third"));
 
-    radia::ui::layoutTree(panel, theme, text);
+    layoutTree(panel, styleSheet, text);
     ensure_equals("automatic row gap distributes remaining space", panel.children()[1]->rect().left(), 45.f);
     ensure_equals("automatic row gap places final child at the edge", panel.children()[2]->rect().right(), 100.f);
     ensure_equals("automatic gap contributes zero to intrinsic size", panel.desiredSize().x, 30.f);
 
     ensure("automatic column gap stylesheet compiles",
-           theme.loadRadia("panel { flow: column; gap: auto; } label { width: 10px; height: 10px; }").ok());
+           styleSheet.loadRadia("panel { flow: column; gap: auto; } label { width: 10px; height: 10px; }").ok());
     panel.setRect({0.f, 0.f, 20.f, 100.f});
-    radia::ui::layoutTree(panel, theme, text);
+    layoutTree(panel, styleSheet, text);
     ensure_equals("automatic column gap distributes remaining space", panel.children()[1]->rect().top(), 55.f);
     ensure_equals("automatic column gap places final child at the edge", panel.children()[2]->rect().bottom(), 0.f);
 }
 
 template<> template<> void engineObject::test<21>() {
-    radia::ui::StyleSheet theme;
+    StyleSheet styleSheet;
     const char* kFloater =
         "floater { size: auto 100px; flow: column; } floater::header { height: 30px; } floater::content { flow: column; gap: 5px; } label { height: 20px; }";
-    ensure("automatic floater size stylesheet compiles", theme.loadRadia(kFloater).ok());
-    radia::ui::Floater floater;
+    ensure("automatic floater size stylesheet compiles", styleSheet.loadRadia(kFloater).ok());
+    Floater floater;
     floater.setCanClose(false);
-    floater.addChild(std::make_unique<radia::ui::Label>("first"));
-    floater.addChild(std::make_unique<radia::ui::Label>("second"));
+    floater.addChild(std::make_unique<Label>("first"));
+    floater.addChild(std::make_unique<Label>("second"));
 
-    const radia::ui::Vec2 measured = radia::ui::measureWidget(floater, theme, text);
+    const Vec2 measured = measureWidget(floater, styleSheet, text);
     ensure_equals("fixed floater width remains fixed", measured.x, 100.f);
     ensure_equals("automatic floater height fits header and content", measured.y, 75.f);
 }
 
 template<> template<> void engineObject::test<22>() {
-    radia::ui::StyleSheet theme;
+    StyleSheet styleSheet;
     const char* kRowAlignment =
         "panel { flow: row; align-items: start; } label { width: 10px; height: 10px; } label#center { align-self: center; } label#end { align-self: end; } label#stretch { height: auto; align-self: stretch; }";
-    ensure("row alignment stylesheet compiles", theme.loadRadia(kRowAlignment).ok());
-    radia::ui::Panel panel;
+    ensure("row alignment stylesheet compiles", styleSheet.loadRadia(kRowAlignment).ok());
+    Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 40.f});
     for (const char* id : {"start", "center", "end", "stretch"}) {
-        auto label = std::make_unique<radia::ui::Label>(id);
+        auto label = std::make_unique<Label>(id);
         label->setId(id);
         panel.addChild(std::move(label));
     }
 
-    radia::ui::layoutTree(panel, theme, text);
+    layoutTree(panel, styleSheet, text);
     ensure_equals("row start aligns to cross-start", panel.children()[0]->rect().top(), 40.f);
     ensure_equals("row align-self center overrides its container", panel.children()[1]->rect().bottom(), 15.f);
     ensure_equals("row align-self end reaches cross-end", panel.children()[2]->rect().bottom(), 0.f);
@@ -375,278 +404,278 @@ template<> template<> void engineObject::test<22>() {
 
     const char* kColumnAlignment =
         "panel { flow: column; align-items: start; } label { width: 10px; height: 10px; } label#center { align-self: center; } label#end { align-self: end; } label#stretch { width: auto; align-self: stretch; }";
-    ensure("column alignment stylesheet compiles", theme.loadRadia(kColumnAlignment).ok());
+    ensure("column alignment stylesheet compiles", styleSheet.loadRadia(kColumnAlignment).ok());
     panel.setRect({0.f, 0.f, 100.f, 40.f});
-    radia::ui::layoutTree(panel, theme, text);
+    layoutTree(panel, styleSheet, text);
     ensure_equals("column start aligns to logical left in LTR", panel.children()[0]->rect().left(), 0.f);
     ensure_equals("column align-self center overrides its container", panel.children()[1]->rect().left(), 45.f);
     ensure_equals("column align-self end reaches logical right in LTR", panel.children()[2]->rect().right(), 100.f);
     ensure_equals("column stretch fills an automatic cross size", panel.children()[3]->rect().w, 100.f);
 
-    radia::ui::layoutTree(panel, theme, text, radia::ui::LayoutDirection::RightToLeft);
+    layoutTree(panel, styleSheet, text, LayoutDirection::RightToLeft);
     ensure_equals("column logical start follows RTL", panel.children()[0]->rect().right(), 100.f);
     ensure_equals("column logical end follows RTL", panel.children()[2]->rect().left(), 0.f);
 }
 
 template<> template<> void engineObject::test<23>() {
-    radia::ui::StyleSheet theme;
-    ensure("visibility layout stylesheet compiles", theme.loadRadia("panel { flow: row; } label { width: 10px; height: 10px; }").ok());
-    radia::ui::Panel panel;
-    panel.addChild(std::make_unique<radia::ui::Label>("visible"));
-    auto hidden = std::make_unique<radia::ui::Label>("hidden");
-    hidden->setVisibility(radia::ui::Visibility::Hidden);
+    StyleSheet styleSheet;
+    ensure("visibility layout stylesheet compiles", styleSheet.loadRadia("panel { flow: row; } label { width: 10px; height: 10px; }").ok());
+    Panel panel;
+    panel.addChild(std::make_unique<Label>("visible"));
+    auto hidden = std::make_unique<Label>("hidden");
+    hidden->setVisibility(Visibility::Hidden);
     panel.addChild(std::move(hidden));
-    auto collapsed = std::make_unique<radia::ui::Label>("collapsed");
-    collapsed->setVisibility(radia::ui::Visibility::Collapsed);
+    auto collapsed = std::make_unique<Label>("collapsed");
+    collapsed->setVisibility(Visibility::Collapsed);
     panel.addChild(std::move(collapsed));
 
-    radia::ui::layoutTree(panel, theme, text);
+    layoutTree(panel, styleSheet, text);
     ensure_equals("Hidden participates in measurement", panel.desiredSize().x, 20.f);
     ensure_equals("Hidden receives an arranged layout slot", panel.children()[1]->rect().left(), 10.f);
-    ensure_equals("Collapsed has zero measured size", radia::ui::measureWidget(*panel.children()[2], theme, text).x, 0.f);
+    ensure_equals("Collapsed has zero measured size", measureWidget(*panel.children()[2], styleSheet, text).x, 0.f);
 
-    panel.children()[1]->setVisibility(radia::ui::Visibility::Collapsed);
-    radia::ui::layoutTree(panel, theme, text);
+    panel.children()[1]->setVisibility(Visibility::Collapsed);
+    layoutTree(panel, styleSheet, text);
     ensure_equals("collapsing Hidden invalidates parent measurement", panel.desiredSize().x, 10.f);
 
-    panel.children()[2]->setVisibility(radia::ui::Visibility::Visible);
-    radia::ui::layoutTree(panel, theme, text);
+    panel.children()[2]->setVisibility(Visibility::Visible);
+    layoutTree(panel, styleSheet, text);
     ensure_equals("showing Collapsed invalidates parent measurement", panel.desiredSize().x, 20.f);
     ensure_equals("newly Visible child takes the second layout slot", panel.children()[2]->rect().left(), 10.f);
 }
 
 template<> template<> void engineObject::test<24>() {
-    radia::ui::StyleSheet theme;
+    StyleSheet styleSheet;
     const char* kVerticalAlignment =
         "panel { size: 40px 100px; flow: row; } label { size: 10px; } panel.middle { vertical-align: middle; } panel.bottom { vertical-align: bottom; } panel.column { flow: column; vertical-align: bottom; } panel.free-bottom { flow: free; vertical-align: bottom; } button { size: 40px 100px; } button > * { size: 10px; } button.top { vertical-align: top; }";
-    ensure("vertical container alignment stylesheet compiles", theme.loadRadia(kVerticalAlignment).ok());
+    ensure("vertical container alignment stylesheet compiles", styleSheet.loadRadia(kVerticalAlignment).ok());
 
-    auto addLabel = [](radia::ui::Widget& container) { container.addChild(std::make_unique<radia::ui::Label>("child")); };
+    auto addLabel = [](Widget& container) { container.addChild(std::make_unique<Label>("child")); };
 
-    radia::ui::Panel top;
+    Panel top;
     top.setRect({0.f, 0.f, 100.f, 40.f});
     addLabel(top);
-    radia::ui::layoutTree(top, theme, text);
+    layoutTree(top, styleSheet, text);
     ensure_equals("row content defaults to the top", top.children()[0]->rect().top(), 40.f);
 
-    radia::ui::Panel middle;
+    Panel middle;
     middle.setRect({0.f, 0.f, 100.f, 40.f});
     middle.addClass("middle");
     addLabel(middle);
-    radia::ui::layoutTree(middle, theme, text);
+    layoutTree(middle, styleSheet, text);
     ensure_equals("row content supports middle alignment", middle.children()[0]->rect().bottom(), 15.f);
 
-    radia::ui::Panel bottom;
+    Panel bottom;
     bottom.setRect({0.f, 0.f, 100.f, 40.f});
     bottom.addClass("bottom");
     addLabel(bottom);
-    radia::ui::layoutTree(bottom, theme, text);
+    layoutTree(bottom, styleSheet, text);
     ensure_equals("row content supports bottom alignment", bottom.children()[0]->rect().bottom(), 0.f);
 
-    radia::ui::Panel column;
+    Panel column;
     column.setRect({0.f, 0.f, 100.f, 40.f});
     column.addClass("column");
     addLabel(column);
     addLabel(column);
-    radia::ui::layoutTree(column, theme, text);
+    layoutTree(column, styleSheet, text);
     ensure_equals("column vertical alignment moves the complete stack", column.children()[0]->rect().top(), 20.f);
     ensure_equals("column stack reaches the bottom", column.children()[1]->rect().bottom(), 0.f);
 
-    radia::ui::Panel freeBottom;
+    Panel freeBottom;
     freeBottom.setRect({0.f, 0.f, 100.f, 40.f});
     freeBottom.addClass("free-bottom");
     addLabel(freeBottom);
-    radia::ui::layoutTree(freeBottom, theme, text);
+    layoutTree(freeBottom, styleSheet, text);
     ensure_equals("free-flow unpositioned content follows vertical alignment", freeBottom.children()[0]->rect().bottom(), 0.f);
 
-    radia::ui::Button button;
+    Button button;
     button.setRect({0.f, 0.f, 100.f, 40.f});
     button.setLabel("button");
-    radia::ui::layoutTree(button, theme, text);
+    layoutTree(button, styleSheet, text);
     ensure_equals("Button content intrinsically defaults to middle", button.children()[0]->rect().bottom(), 15.f);
     ensure_equals("Button content is horizontally centered by its intrinsic defaults", button.children()[0]->rect().left(), 45.f);
 
-    radia::ui::Button topButton;
+    Button topButton;
     topButton.setRect({0.f, 0.f, 100.f, 40.f});
     topButton.addClass("top");
     topButton.setLabel("button");
-    radia::ui::layoutTree(topButton, theme, text);
+    layoutTree(topButton, styleSheet, text);
     ensure_equals("authored Button vertical alignment overrides its intrinsic default", topButton.children()[0]->rect().top(), 40.f);
 }
 
 template<> template<> void engineObject::test<25>() {
-    radia::ui::StyleSheet theme;
-    ensure("row Flow Break stylesheet compiles", theme.loadRadia("panel { flow: row; gap: 2px; } label { size: 10px; }").ok());
+    StyleSheet styleSheet;
+    ensure("row Flow Break stylesheet compiles", styleSheet.loadRadia("panel { flow: row; gap: 2px; } label { size: 10px; }").ok());
 
-    radia::ui::Panel panel;
-    auto first = std::make_unique<radia::ui::Label>("first");
-    auto second = std::make_unique<radia::ui::Label>("second");
-    auto third = std::make_unique<radia::ui::Label>("third");
+    Panel panel;
+    auto first = std::make_unique<Label>("first");
+    auto second = std::make_unique<Label>("second");
+    auto third = std::make_unique<Label>("third");
     radia::ui::detail::WidgetCompilerAccess::setFlowBreakBefore(*second, true);
     panel.addChild(std::move(first));
     panel.addChild(std::move(second));
     panel.addChild(std::move(third));
 
-    radia::ui::measureTree(panel, theme, text);
+    measureTree(panel, styleSheet, text);
     ensure_equals("Flow Break measures the widest explicit row", panel.desiredSize().x, 22.f);
     ensure_equals("Flow Break measures both rows and their gap", panel.desiredSize().y, 22.f);
 
     panel.setRect({0.f, 0.f, 40.f, 40.f});
-    radia::ui::layoutTree(panel, theme, text);
+    layoutTree(panel, styleSheet, text);
     ensure_equals("first explicit row starts at the container top", panel.children()[0]->rect().top(), 40.f);
     ensure_equals("Flow Break starts its child on the next row", panel.children()[1]->rect().top(), 28.f);
     ensure_equals("following children remain in the new row", panel.children()[2]->rect().left(), 12.f);
 }
 
 template<> template<> void engineObject::test<26>() {
-    radia::ui::StyleSheet theme;
+    StyleSheet styleSheet;
     ensure("flex basis and shrink stylesheet compiles",
-           theme.loadRadia("panel { flow: row; } label { height: 10px; flex: 0 1 80px; } label.second { flex-basis: 40px; }").ok());
+           styleSheet.loadRadia("panel { flow: row; } label { height: 10px; flex: 0 1 80px; } label.second { flex-basis: 40px; }").ok());
 
-    radia::ui::Panel intrinsic;
-    intrinsic.addChild(std::make_unique<radia::ui::Label>());
-    auto intrinsicSecond = std::make_unique<radia::ui::Label>();
+    Panel intrinsic;
+    intrinsic.addChild(std::make_unique<Label>());
+    auto intrinsicSecond = std::make_unique<Label>();
     intrinsicSecond->addClass("second");
     intrinsic.addChild(std::move(intrinsicSecond));
-    radia::ui::measureTree(intrinsic, theme, text);
+    measureTree(intrinsic, styleSheet, text);
     ensure_equals("flex basis contributes to intrinsic width", intrinsic.desiredSize().x, 120.f);
 
-    radia::ui::StyleSheet percentageTheme;
+    StyleSheet percentageTheme;
     ensure("percentage flex basis stylesheet compiles",
            percentageTheme.loadRadia("panel { flow: row; } label { width: 30px; flex-basis: 50%; }").ok());
-    radia::ui::Panel indefinite;
-    indefinite.addChild(std::make_unique<radia::ui::Label>());
-    radia::ui::measureTree(indefinite, percentageTheme, text);
+    Panel indefinite;
+    indefinite.addChild(std::make_unique<Label>());
+    measureTree(indefinite, percentageTheme, text);
     ensure_equals("percentage flex basis is auto in an indefinite container", indefinite.desiredSize().x, 30.f);
 
-    radia::ui::Panel panel;
+    Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 20.f});
-    panel.addChild(std::make_unique<radia::ui::Label>());
-    auto second = std::make_unique<radia::ui::Label>();
+    panel.addChild(std::make_unique<Label>());
+    auto second = std::make_unique<Label>();
     second->addClass("second");
     panel.addChild(std::move(second));
-    radia::ui::layoutTree(panel, theme, text);
+    layoutTree(panel, styleSheet, text);
     ensure_approximately_equals("scaled flex shrink reduces the larger basis proportionally", panel.children()[0]->rect().w, 200.f / 3.f, 5);
     ensure_approximately_equals("scaled flex shrink reduces the smaller basis proportionally", panel.children()[1]->rect().w, 100.f / 3.f, 5);
     ensure_approximately_equals("shrunk items fill the row", panel.children()[1]->rect().right(), 100.f, 5);
 }
 
 template<> template<> void engineObject::test<27>() {
-    radia::ui::StyleSheet theme;
+    StyleSheet styleSheet;
     const char* kFloaterHeader =
         "floater::header { height: 48px; flow: row; padding: 12px; } floater::header::icon { size: 28px; } floater::header::title { line-height: 18px; } floater::header::custom { height: 24px; flex-grow: 1; } floater::header::close { size: 24px; }";
-    ensure("floater header stylesheet compiles", theme.loadRadia(kFloaterHeader).ok());
+    ensure("floater header stylesheet compiles", styleSheet.loadRadia(kFloaterHeader).ok());
 
-    radia::ui::Floater floater;
+    Floater floater;
     floater.setIcon("search").setTitle("title");
     floater.header()->setRect({0.f, 0.f, 200.f, 48.f});
-    radia::ui::layoutTree(*floater.header(), theme, text);
+    layoutTree(*floater.header(), styleSheet, text);
 
     const float headerCenter = floater.header()->rect().y + floater.header()->rect().h * .5f;
     for (const auto& child : floater.header()->children()) {
-        if (child->visibility() != radia::ui::Visibility::Visible) continue;
+        if (child->visibility() != Visibility::Visible) continue;
         const float childCenter = child->rect().y + child->rect().h * .5f;
         ensure_equals("an oversized header icon does not pull the row below center", childCenter, headerCenter);
     }
 }
 
 template<> template<> void engineObject::test<28>() {
-    radia::ui::StyleSheet theme;
+    StyleSheet styleSheet;
     const char* kWrapping = "panel { flow: column; } text { font-size: 10px; line-height: 10px; text-wrap: wrap; }";
-    ensure("explicit wrapping stylesheet compiles", theme.loadRadia(kWrapping).ok());
+    ensure("explicit wrapping stylesheet compiles", styleSheet.loadRadia(kWrapping).ok());
 
-    radia::ui::Panel panel;
+    Panel panel;
     panel.setRect({0.f, 0.f, 30.f, 100.f});
-    panel.addChild(std::make_unique<radia::ui::Text>("alpha beta"));
-    panel.addChild(std::make_unique<radia::ui::Text>("after"));
+    panel.addChild(std::make_unique<Text>("alpha beta"));
+    panel.addChild(std::make_unique<Text>("after"));
 
-    radia::ui::layoutTree(panel, theme, text);
-    const radia::ui::Widget& wrapped = *panel.children()[0];
-    const radia::ui::Widget& following = *panel.children()[1];
+    layoutTree(panel, styleSheet, text);
+    const Widget& wrapped = *panel.children()[0];
+    const Widget& following = *panel.children()[1];
     ensure_equals("stretched auto-width text contributes both lines to layout height", wrapped.rect().h, 20.f);
     ensure_equals("the following sibling starts after the wrapped text", following.rect().top(), wrapped.rect().bottom());
 }
 
 template<> template<> void engineObject::test<29>() {
-    radia::ui::StyleSheet theme;
+    StyleSheet styleSheet;
     const char* kRowWrapping =
         "panel { width: 45px; flow: row; align-items: start; } text { min-width: 0px; flex: 1; font-size: 10px; line-height: 10px; text-wrap: wrap; } label { width: 10px; flex-shrink: 0; align-self: stretch; }";
-    ensure("row wrapping stylesheet compiles", theme.loadRadia(kRowWrapping).ok());
+    ensure("row wrapping stylesheet compiles", styleSheet.loadRadia(kRowWrapping).ok());
 
-    radia::ui::Panel panel;
-    panel.addChild(std::make_unique<radia::ui::Text>("alpha beta"));
-    panel.addChild(std::make_unique<radia::ui::Label>("x"));
+    Panel panel;
+    panel.addChild(std::make_unique<Text>("alpha beta"));
+    panel.addChild(std::make_unique<Label>("x"));
 
-    const radia::ui::Vec2 measured = radia::ui::measureWidget(panel, theme, text);
+    const Vec2 measured = measureWidget(panel, styleSheet, text);
     ensure_equals("row measurement reflows text after flex shrink", measured.y, 20.f);
 
     panel.setRect({0.f, 0.f, measured.x, measured.y});
-    const radia::ui::LayoutStatistics layoutStats = radia::ui::layoutTree(panel, theme, text);
-    ensure("row layout remeasures text after width allocation", layoutStats.constrained_remeasures > 0);
+    const LayoutStatistics layoutStats = layoutTree(panel, styleSheet, text);
+    ensure("row layout remeasures text after width allocation", layoutStats.constrainedRemeasures > 0);
     ensure_equals("row arrangement keeps the reflowed text height", panel.children()[0]->rect().h, 20.f);
     ensure_equals("row sibling receives its non-shrinking width", panel.children()[1]->rect().w, 10.f);
     ensure_equals("final row height is reapplied to stretched siblings", panel.children()[1]->rect().h, 20.f);
 }
 
 template<> template<> void engineObject::test<30>() {
-    radia::ui::StyleSheet columnTheme;
+    StyleSheet columnTheme;
     const char* kColumnBasis = "panel { width: 30px; flow: column; } text { flex-basis: 40px; font-size: 10px; line-height: 10px; text-wrap: wrap; }";
     ensure("column basis stylesheet compiles", columnTheme.loadRadia(kColumnBasis).ok());
-    radia::ui::Panel column;
-    column.addChild(std::make_unique<radia::ui::Text>("alpha beta"));
-    ensure_equals("column measurement reapplies flex-basis after text reflow", radia::ui::measureWidget(column, columnTheme, text).y, 40.f);
+    Panel column;
+    column.addChild(std::make_unique<Text>("alpha beta"));
+    ensure_equals("column measurement reapplies flex-basis after text reflow", measureWidget(column, columnTheme, text).y, 40.f);
 
-    radia::ui::StyleSheet rowTheme;
+    StyleSheet rowTheme;
     const char* kRowMinimum =
         "panel { width: 80px; flow: row; } text { flex: 0 1 100px; font-size: 10px; line-height: 10px; text-wrap: wrap; } label { width: 10px; flex-shrink: 0; }";
     ensure("row intrinsic minimum stylesheet compiles", rowTheme.loadRadia(kRowMinimum).ok());
-    radia::ui::Panel row;
-    row.addChild(std::make_unique<radia::ui::Text>("alpha beta"));
-    row.addChild(std::make_unique<radia::ui::Label>("x"));
+    Panel row;
+    row.addChild(std::make_unique<Text>("alpha beta"));
+    row.addChild(std::make_unique<Label>("x"));
     row.setRect({0.f, 0.f, 80.f, 20.f});
-    radia::ui::layoutTree(row, rowTheme, text);
+    layoutTree(row, rowTheme, text);
     ensure_equals("row flex-basis can shrink to its pre-basis intrinsic minimum", row.children()[0]->rect().w, 70.f);
 }
 template<> template<> void engineObject::test<31>() {
-    radia::ui::StyleSheet theme;
-    ensure("cache stylesheet compiles", theme.loadRadia("panel { flow: row; } label { size: 10px; }").ok());
-    radia::ui::Panel panel;
+    StyleSheet styleSheet;
+    ensure("cache stylesheet compiles", styleSheet.loadRadia("panel { flow: row; } label { size: 10px; }").ok());
+    Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 20.f});
-    panel.addChild(std::make_unique<radia::ui::Label>("first"));
-    panel.addChild(std::make_unique<radia::ui::Label>("second"));
+    panel.addChild(std::make_unique<Label>("first"));
+    panel.addChild(std::make_unique<Label>("second"));
 
-    const radia::ui::LayoutStatistics first = radia::ui::layoutTree(panel, theme, text);
-    const radia::ui::LayoutStatistics second = radia::ui::layoutTree(panel, theme, text);
-    ensure("initial layout measures nodes", first.measured_nodes > 0);
-    ensure("initial layout arranges nodes", first.arranged_nodes > 0);
-    ensure_equals("clean layout does not measure", second.measured_nodes, std::size_t(0));
-    ensure_equals("clean layout does not arrange", second.arranged_nodes, std::size_t(0));
-    ensure("clean layout records skipped work", second.skipped_nodes >= 2);
+    const LayoutStatistics first = layoutTree(panel, styleSheet, text);
+    const LayoutStatistics second = layoutTree(panel, styleSheet, text);
+    ensure("initial layout measures nodes", first.measuredNodes > 0);
+    ensure("initial layout arranges nodes", first.arrangedNodes > 0);
+    ensure_equals("clean layout does not measure", second.measuredNodes, std::size_t(0));
+    ensure_equals("clean layout does not arrange", second.arrangedNodes, std::size_t(0));
+    ensure("clean layout records skipped work", second.skippedNodes >= 2);
 }
 
 template<> template<> void engineObject::test<32>() {
-    radia::ui::StyleSheet theme;
-    ensure("arrange-only stylesheet compiles", theme.loadRadia("panel { flow: row; } label { size: 10px; }").ok());
-    radia::ui::Panel panel;
+    StyleSheet styleSheet;
+    ensure("arrange-only stylesheet compiles", styleSheet.loadRadia("panel { flow: row; } label { size: 10px; }").ok());
+    Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 20.f});
-    panel.addChild(std::make_unique<radia::ui::Label>("first"));
-    panel.addChild(std::make_unique<radia::ui::Label>("second"));
-    radia::ui::layoutTree(panel, theme, text);
+    panel.addChild(std::make_unique<Label>("first"));
+    panel.addChild(std::make_unique<Label>("second"));
+    layoutTree(panel, styleSheet, text);
 
     panel.setRect({0.f, 0.f, 140.f, 20.f});
-    const radia::ui::LayoutStatistics resized = radia::ui::layoutTree(panel, theme, text);
-    ensure("viewport resize remeasures constrained sizing", resized.measured_nodes > 0);
-    ensure("viewport resize arranges the affected tree", resized.arranged_nodes > 0);
+    const LayoutStatistics resized = layoutTree(panel, styleSheet, text);
+    ensure("viewport resize remeasures constrained sizing", resized.measuredNodes > 0);
+    ensure("viewport resize arranges the affected tree", resized.arrangedNodes > 0);
 
-    const radia::ui::LayoutStatistics directionChanged = radia::ui::layoutTree(panel, theme, text, radia::ui::LayoutDirection::RightToLeft);
-    ensure_equals("direction-only changes do not measure", directionChanged.measured_nodes, std::size_t(0));
-    ensure("direction-only changes arrange the tree", directionChanged.arranged_nodes > 0);
+    const LayoutStatistics directionChanged = layoutTree(panel, styleSheet, text, LayoutDirection::RightToLeft);
+    ensure_equals("direction-only changes do not measure", directionChanged.measuredNodes, std::size_t(0));
+    ensure("direction-only changes arrange the tree", directionChanged.arrangedNodes > 0);
 }
 
 template<> template<> void engineObject::test<33>() {
-    class GenerationTextMetrics final : public radia::ui::TextMetrics {
+    class GenerationTextMetrics final : public TextMetrics {
     public:
-        radia::ui::Vec2 measureText(const std::string&, const radia::ui::Style&) const override { return {32.f, 12.f}; }
+        Vec2 measureText(const std::string&, const Style&) const override { return {32.f, 12.f}; }
         std::uint64_t generation() const override { return mGeneration; }
         void advance() { ++mGeneration; }
 
@@ -654,44 +683,44 @@ template<> template<> void engineObject::test<33>() {
         std::uint64_t mGeneration = 1;
     } metrics;
 
-    radia::ui::StyleSheet theme;
-    radia::ui::Label label("generation");
-    const radia::ui::LayoutStatistics first = radia::ui::layoutTree(label, theme, metrics);
+    StyleSheet styleSheet;
+    Label label("generation");
+    const LayoutStatistics first = layoutTree(label, styleSheet, metrics);
     metrics.advance();
-    const radia::ui::LayoutStatistics second = radia::ui::layoutTree(label, theme, metrics);
-    ensure("initial metrics pass measures the label", first.measured_nodes > 0);
-    ensure("metrics generation invalidates the measurement cache", second.measured_nodes > 0);
+    const LayoutStatistics second = layoutTree(label, styleSheet, metrics);
+    ensure("initial metrics pass measures the label", first.measuredNodes > 0);
+    ensure("metrics generation invalidates the measurement cache", second.measuredNodes > 0);
 }
 
 template<> template<> void engineObject::test<34>() {
-    radia::ui::StyleSheet theme;
-    ensure("column growth stylesheet compiles", theme.loadRadia("panel { flow: column; } label { height: 10px; flex-grow: 1; }").ok());
-    radia::ui::Panel panel;
+    StyleSheet styleSheet;
+    ensure("column growth stylesheet compiles", styleSheet.loadRadia("panel { flow: column; } label { height: 10px; flex-grow: 1; }").ok());
+    Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 100.f});
-    panel.addChild(std::make_unique<radia::ui::Label>("first"));
-    panel.addChild(std::make_unique<radia::ui::Label>("second"));
+    panel.addChild(std::make_unique<Label>("first"));
+    panel.addChild(std::make_unique<Label>("second"));
 
-    const radia::ui::LayoutStatistics stats = radia::ui::layoutTree(panel, theme, text);
-    ensure("column allocation remeasures flex children with height constraints", stats.constrained_remeasures >= 2);
+    const LayoutStatistics stats = layoutTree(panel, styleSheet, text);
+    ensure("column allocation remeasures flex children with height constraints", stats.constrainedRemeasures >= 2);
     ensure_equals("first flex child receives half the column", panel.children()[0]->rect().h, 50.f);
     ensure_equals("second flex child receives half the column", panel.children()[1]->rect().h, 50.f);
     ensure_equals("column children consume the allocated height", panel.children()[1]->rect().bottom(), 0.f);
 }
 
 template<> template<> void engineObject::test<35>() {
-    radia::ui::StyleSheet theme;
+    StyleSheet styleSheet;
     ensure("column percentage-height stylesheet compiles",
-           theme.loadRadia("panel { flow: column; } #quarter { height: 25%; } #half { height: 50%; }").ok());
-    radia::ui::Panel panel;
+           styleSheet.loadRadia("panel { flow: column; } #quarter { height: 25%; } #half { height: 50%; }").ok());
+    Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 100.f});
-    auto quarter = std::make_unique<radia::ui::Label>("quarter");
+    auto quarter = std::make_unique<Label>("quarter");
     quarter->setId("quarter");
-    auto half = std::make_unique<radia::ui::Label>("half");
+    auto half = std::make_unique<Label>("half");
     half->setId("half");
     panel.addChild(std::move(quarter));
     panel.addChild(std::move(half));
 
-    radia::ui::layoutTree(panel, theme, text);
+    layoutTree(panel, styleSheet, text);
     ensure_approximately_equals("column percentage height resolves against panel", panel.children()[0]->rect().h, 25.f, 6);
     ensure_approximately_equals("second percentage height resolves independently", panel.children()[1]->rect().h, 50.f, 6);
     ensure_approximately_equals("percentage-height siblings retain their order", panel.children()[0]->rect().bottom(),
@@ -699,236 +728,236 @@ template<> template<> void engineObject::test<35>() {
 }
 
 template<> template<> void engineObject::test<36>() {
-    radia::ui::StyleSheet theme;
+    StyleSheet styleSheet;
     ensure("nested percentage-height stylesheet compiles",
-           theme.loadRadia("panel { flow: column; } #child { height: 50%; flow: column; } #grandchild { height: 50%; }").ok());
-    radia::ui::Panel panel;
+           styleSheet.loadRadia("panel { flow: column; } #child { height: 50%; flow: column; } #grandchild { height: 50%; }").ok());
+    Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 100.f});
-    auto child = std::make_unique<radia::ui::Panel>();
+    auto child = std::make_unique<Panel>();
     child->setId("child");
-    auto grandchild = std::make_unique<radia::ui::Label>("nested");
+    auto grandchild = std::make_unique<Label>("nested");
     grandchild->setId("grandchild");
     child->addChild(std::move(grandchild));
     panel.addChild(std::move(child));
 
-    radia::ui::layoutTree(panel, theme, text);
-    const radia::ui::Widget& nestedPanel = *panel.children().front();
+    layoutTree(panel, styleSheet, text);
+    const Widget& nestedPanel = *panel.children().front();
     ensure_approximately_equals("nested panel receives its percentage height", nestedPanel.rect().h, 50.f, 6);
     ensure_approximately_equals("nested percentage resolves against allocated parent height", nestedPanel.children().front()->rect().h, 25.f, 6);
 }
 
 template<> template<> void engineObject::test<37>() {
-    radia::ui::StyleSheet theme;
-    ensure("column minimum-height stylesheet compiles", theme.loadRadia("panel { flow: column; } label { height: 30px; min-height: 25px; }").ok());
-    radia::ui::Panel panel;
+    StyleSheet styleSheet;
+    ensure("column minimum-height stylesheet compiles", styleSheet.loadRadia("panel { flow: column; } label { height: 30px; min-height: 25px; }").ok());
+    Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 40.f});
-    panel.addChild(std::make_unique<radia::ui::Label>("first"));
-    panel.addChild(std::make_unique<radia::ui::Label>("second"));
+    panel.addChild(std::make_unique<Label>("first"));
+    panel.addChild(std::make_unique<Label>("second"));
 
-    radia::ui::layoutTree(panel, theme, text);
+    layoutTree(panel, styleSheet, text);
     ensure_equals("column shrink respects the first minimum height", panel.children()[0]->rect().h, 25.f);
     ensure_equals("column shrink respects the second minimum height", panel.children()[1]->rect().h, 25.f);
 }
 
 template<> template<> void engineObject::test<38>() {
-    radia::ui::StyleSheet theme;
-    ensure("column height cache stylesheet compiles", theme.loadRadia("panel { flow: column; } label { flex: 1; }").ok());
-    radia::ui::Panel panel;
+    StyleSheet styleSheet;
+    ensure("column height cache stylesheet compiles", styleSheet.loadRadia("panel { flow: column; } label { flex: 1; }").ok());
+    Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 100.f});
-    panel.addChild(std::make_unique<radia::ui::Label>("first"));
-    panel.addChild(std::make_unique<radia::ui::Label>("second"));
+    panel.addChild(std::make_unique<Label>("first"));
+    panel.addChild(std::make_unique<Label>("second"));
 
-    const radia::ui::LayoutStatistics first = radia::ui::layoutTree(panel, theme, text);
-    const radia::ui::LayoutStatistics clean = radia::ui::layoutTree(panel, theme, text);
-    ensure("initial column layout performs constrained measurement", first.constrained_remeasures > 0);
-    ensure_equals("clean column layout reuses height-constrained cache", clean.measured_nodes, std::size_t(0));
-    ensure_equals("clean column layout does not re-arrange", clean.arranged_nodes, std::size_t(0));
+    const LayoutStatistics first = layoutTree(panel, styleSheet, text);
+    const LayoutStatistics clean = layoutTree(panel, styleSheet, text);
+    ensure("initial column layout performs constrained measurement", first.constrainedRemeasures > 0);
+    ensure_equals("clean column layout reuses height-constrained cache", clean.measuredNodes, std::size_t(0));
+    ensure_equals("clean column layout does not re-arrange", clean.arrangedNodes, std::size_t(0));
 
     panel.setRect({0.f, 0.f, 100.f, 140.f});
-    const radia::ui::LayoutStatistics resized = radia::ui::layoutTree(panel, theme, text);
-    ensure("column height change invalidates constrained measurement", resized.constrained_remeasures > 0);
+    const LayoutStatistics resized = layoutTree(panel, styleSheet, text);
+    ensure("column height change invalidates constrained measurement", resized.constrainedRemeasures > 0);
 }
 
 template<> template<> void engineObject::test<39>() {
-    radia::ui::StyleSheet narrow;
-    radia::ui::StyleSheet wide;
+    StyleSheet narrow;
+    StyleSheet wide;
     ensure("first cache identity stylesheet compiles", narrow.loadRadia("label { width: 10px; height: 10px; }").ok());
     ensure("second cache identity stylesheet compiles", wide.loadRadia("label { width: 30px; height: 10px; }").ok());
 
-    radia::ui::Label label("identity");
-    radia::ui::layoutTree(label, narrow, text);
-    radia::ui::layoutTree(label, wide, text);
+    Label label("identity");
+    layoutTree(label, narrow, text);
+    layoutTree(label, wide, text);
     ensure_equals("different stylesheet objects cannot reuse layout cache", label.desiredSize().x, 30.f);
 }
 
 template<> template<> void engineObject::test<40>() {
-    class WidthMetrics final : public radia::ui::TextMetrics {
+    class WidthMetrics final : public TextMetrics {
     public:
         explicit WidthMetrics(float width) : mWidth(width) {}
-        radia::ui::Vec2 measureText(const std::string&, const radia::ui::Style&) const override { return {mWidth, 12.f}; }
+        Vec2 measureText(const std::string&, const Style&) const override { return {mWidth, 12.f}; }
 
     private:
         float mWidth;
     } narrow(12.f), wide(48.f);
 
-    radia::ui::StyleSheet theme;
-    radia::ui::Label label("identity");
-    radia::ui::layoutTree(label, theme, narrow);
-    radia::ui::layoutTree(label, theme, wide);
+    StyleSheet styleSheet;
+    Label label("identity");
+    layoutTree(label, styleSheet, narrow);
+    layoutTree(label, styleSheet, wide);
     ensure_equals("different text metric objects cannot reuse layout cache", label.desiredSize().x, 48.f);
 }
 
 template<> template<> void engineObject::test<41>() {
-    radia::ui::StyleSheet theme;
+    StyleSheet styleSheet;
     const char* kOrderedFlow = "panel { flow: row; } #late { order: 2; width: 10px; height: 10px; } #early { order: -1; width: 10px; height: 10px; }";
-    ensure("ordered-flow stylesheet compiles", theme.loadRadia(kOrderedFlow).ok());
-    radia::ui::Panel panel;
+    ensure("ordered-flow stylesheet compiles", styleSheet.loadRadia(kOrderedFlow).ok());
+    Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 20.f});
-    auto late = std::make_unique<radia::ui::Label>("late");
+    auto late = std::make_unique<Label>("late");
     late->setId("late");
-    auto early = std::make_unique<radia::ui::Label>("early");
+    auto early = std::make_unique<Label>("early");
     early->setId("early");
     panel.addChild(std::move(late));
     panel.addChild(std::move(early));
 
-    radia::ui::layoutTree(panel, theme, text);
+    layoutTree(panel, styleSheet, text);
     ensure_equals("ordered row measures in visual order", panel.children()[1]->rect().x, 0.f);
     ensure_equals("ordered row places the later source child after the early child", panel.children()[0]->rect().x, 10.f);
 }
 
 template<> template<> void engineObject::test<42>() {
-    radia::ui::StyleSheet theme;
-    ensure("initial assigned stylesheet compiles", theme.loadRadia("label { width: 10px; height: 10px; }").ok());
-    radia::ui::Label label("assigned");
-    radia::ui::layoutTree(label, theme, text);
+    StyleSheet styleSheet;
+    ensure("initial assigned stylesheet compiles", styleSheet.loadRadia("label { width: 10px; height: 10px; }").ok());
+    Label label("assigned");
+    layoutTree(label, styleSheet, text);
 
-    radia::ui::StyleSheet replacement;
+    StyleSheet replacement;
     ensure("replacement assigned stylesheet compiles", replacement.loadRadia("label { width: 30px; height: 10px; }").ok());
-    theme = replacement;
-    radia::ui::layoutTree(label, theme, text);
+    styleSheet = replacement;
+    layoutTree(label, styleSheet, text);
     ensure_equals("stylesheet assignment advances the cache generation", label.desiredSize().x, 30.f);
 }
 
 template<> template<> void engineObject::test<43>() {
-    radia::ui::StyleSheet theme;
+    StyleSheet styleSheet;
     ensure("free-flow percentage wrapping stylesheet compiles",
-           theme.loadRadia("panel { flow: free; } text { width: 50%; font-size: 10px; line-height: 10px; text-wrap: wrap; }").ok());
-    radia::ui::Panel panel;
+           styleSheet.loadRadia("panel { flow: free; } text { width: 50%; font-size: 10px; line-height: 10px; text-wrap: wrap; }").ok());
+    Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 100.f});
-    panel.addChild(std::make_unique<radia::ui::Text>("alpha beta"));
+    panel.addChild(std::make_unique<Text>("alpha beta"));
 
-    radia::ui::layoutTree(panel, theme, text);
+    layoutTree(panel, styleSheet, text);
     ensure_equals("free-flow percentage text initially wraps", panel.children().front()->rect().h, 20.f);
 
     panel.setRect({0.f, 0.f, 200.f, 100.f});
-    radia::ui::layoutTree(panel, theme, text);
+    layoutTree(panel, styleSheet, text);
     ensure_equals("free-flow percentage text reflows after parent resize", panel.children().front()->rect().h, 10.f);
 }
 
 template<> template<> void engineObject::test<44>() {
-    radia::ui::StyleSheet theme;
+    StyleSheet styleSheet;
     ensure("free-flow intrinsic offsets stylesheet compiles",
-           theme.loadRadia("panel { flow: free; } label { width: 20px; height: 10px; right: 5px; bottom: 7px; }").ok());
-    radia::ui::Panel panel;
-    panel.addChild(std::make_unique<radia::ui::Label>("positioned"));
-    radia::ui::layoutTree(panel, theme, text);
+           styleSheet.loadRadia("panel { flow: free; } label { width: 20px; height: 10px; right: 5px; bottom: 7px; }").ok());
+    Panel panel;
+    panel.addChild(std::make_unique<Label>("positioned"));
+    layoutTree(panel, styleSheet, text);
     ensure_equals("free-flow right offset contributes to intrinsic width", panel.desiredSize().x, 25.f);
     ensure_equals("free-flow bottom offset contributes to intrinsic height", panel.desiredSize().y, 17.f);
 }
 
 template<> template<> void engineObject::test<45>() {
-    radia::ui::StyleSheet theme;
-    ensure("free-flow explicit geometry stylesheet compiles", theme.loadRadia("panel { flow: free; }").ok());
-    radia::ui::Panel panel;
-    auto child = std::make_unique<radia::ui::Panel>();
+    StyleSheet styleSheet;
+    ensure("free-flow explicit geometry stylesheet compiles", styleSheet.loadRadia("panel { flow: free; }").ok());
+    Panel panel;
+    auto child = std::make_unique<Panel>();
     child->setRect({0.f, 0.f, 40.f, 30.f});
     panel.addChild(std::move(child));
-    radia::ui::layoutTree(panel, theme, text);
+    layoutTree(panel, styleSheet, text);
     ensure_equals("explicit free-flow child width contributes to intrinsic size", panel.desiredSize().x, 40.f);
     ensure_equals("explicit free-flow child height contributes to intrinsic size", panel.desiredSize().y, 30.f);
 }
 
 template<> template<> void engineObject::test<46>() {
-    radia::ui::StyleSheet theme;
-    ensure("free-flow explicit geometry cache stylesheet compiles", theme.loadRadia("panel { flow: free; }").ok());
-    radia::ui::Panel panel;
-    auto child = std::make_unique<radia::ui::Panel>();
+    StyleSheet styleSheet;
+    ensure("free-flow explicit geometry cache stylesheet compiles", styleSheet.loadRadia("panel { flow: free; }").ok());
+    Panel panel;
+    auto child = std::make_unique<Panel>();
     child->setRect({0.f, 0.f, 20.f, 10.f});
-    radia::ui::Widget* childPtr = child.get();
+    Widget* childPtr = child.get();
     panel.addChild(std::move(child));
-    radia::ui::layoutTree(panel, theme, text);
+    layoutTree(panel, styleSheet, text);
     ensure_equals("initial explicit free-flow width contributes to intrinsic size", panel.desiredSize().x, 20.f);
 
     childPtr->setRect({0.f, 0.f, 60.f, 10.f});
-    radia::ui::layoutTree(panel, theme, text);
+    layoutTree(panel, styleSheet, text);
     ensure_equals("changing explicit free-flow geometry invalidates intrinsic size", panel.desiredSize().x, 60.f);
 }
 
 template<> template<> void engineObject::test<47>() {
-    radia::ui::StyleSheet theme;
-    ensure("free-flow explicit position stylesheet compiles", theme.loadRadia("panel { flow: free; }").ok());
-    radia::ui::Panel panel;
-    auto child = std::make_unique<radia::ui::Panel>();
+    StyleSheet styleSheet;
+    ensure("free-flow explicit position stylesheet compiles", styleSheet.loadRadia("panel { flow: free; }").ok());
+    Panel panel;
+    auto child = std::make_unique<Panel>();
     child->setRect({10.f, 12.f, 20.f, 8.f});
     panel.addChild(std::move(child));
-    radia::ui::layoutTree(panel, theme, text);
+    layoutTree(panel, styleSheet, text);
     ensure_equals("explicit free-flow x contributes to intrinsic size", panel.desiredSize().x, 30.f);
     ensure_equals("explicit free-flow y contributes to intrinsic size", panel.desiredSize().y, 20.f);
 }
 
 template<> template<> void engineObject::test<48>() {
-    radia::ui::StyleSheet theme;
+    StyleSheet styleSheet;
     ensure("free-flow intrinsic percentage height stylesheet compiles",
-           theme.loadRadia("panel { flow: free; width: 100px; } text { width: 50%; font-size: 10px; line-height: 10px; text-wrap: wrap; }").ok());
-    radia::ui::Panel panel;
-    panel.addChild(std::make_unique<radia::ui::Text>("alpha beta"));
+           styleSheet.loadRadia("panel { flow: free; width: 100px; } text { width: 50%; font-size: 10px; line-height: 10px; text-wrap: wrap; }").ok());
+    Panel panel;
+    panel.addChild(std::make_unique<Text>("alpha beta"));
 
-    radia::ui::layoutTree(panel, theme, text);
+    layoutTree(panel, styleSheet, text);
     ensure_equals("auto-height free-flow parent includes wrapped percentage child", panel.desiredSize().y, 20.f);
     ensure_equals("wrapped percentage child keeps intrinsic height", panel.children().front()->rect().h, 20.f);
 }
 
 template<> template<> void engineObject::test<49>() {
-    radia::ui::StyleSheet theme;
+    StyleSheet styleSheet;
     ensure("free-flow percentage offsets stylesheet compiles",
-           theme.loadRadia("panel { flow: free; } label { width: 20px; height: 10px; left: 50%; top: 20%; }").ok());
-    radia::ui::Panel panel;
+           styleSheet.loadRadia("panel { flow: free; } label { width: 20px; height: 10px; left: 50%; top: 20%; }").ok());
+    Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 100.f});
-    panel.addChild(std::make_unique<radia::ui::Label>("positioned"));
+    panel.addChild(std::make_unique<Label>("positioned"));
 
-    radia::ui::layoutTree(panel, theme, text);
+    layoutTree(panel, styleSheet, text);
     ensure_equals("percentage left contributes against parent width", panel.desiredSize().x, 70.f);
     ensure_approximately_equals("percentage top contributes against parent height", panel.desiredSize().y, 30.f, 6);
 }
 
 template<> template<> void engineObject::test<50>() {
-    radia::ui::StyleSheet theme;
+    StyleSheet styleSheet;
     ensure("free-flow percentage dimensions use explicit geometry stylesheet compiles",
-           theme.loadRadia("panel { flow: free; width: 50%; height: 50%; } label { width: 50%; height: 50%; }").ok());
-    radia::ui::Panel panel;
+           styleSheet.loadRadia("panel { flow: free; width: 50%; height: 50%; } label { width: 50%; height: 50%; }").ok());
+    Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 80.f});
-    panel.addChild(std::make_unique<radia::ui::Label>("sized"));
+    panel.addChild(std::make_unique<Label>("sized"));
 
-    radia::ui::layoutTree(panel, theme, text);
+    layoutTree(panel, styleSheet, text);
     ensure_approximately_equals("free-flow percentage child width uses explicit parent width", panel.children().front()->rect().w, 50.f, 6);
     ensure_approximately_equals("free-flow percentage child height uses explicit parent height", panel.children().front()->rect().h, 40.f, 6);
 }
 
 template<> template<> void engineObject::test<51>() {
-    radia::ui::StyleSheet theme;
+    StyleSheet styleSheet;
     const char* kNestedFlexBasis =
         "#outer { flow: row; width: 100px; height: 20px; } #inner { flow: row; width: 50%; } label { flex-basis: 50%; height: 10px; }";
-    ensure("nested percentage flex-basis stylesheet compiles", theme.loadRadia(kNestedFlexBasis).ok());
-    radia::ui::Panel outer;
+    ensure("nested percentage flex-basis stylesheet compiles", styleSheet.loadRadia(kNestedFlexBasis).ok());
+    Panel outer;
     outer.setId("outer");
-    auto inner = std::make_unique<radia::ui::Panel>();
+    auto inner = std::make_unique<Panel>();
     inner->setId("inner");
-    radia::ui::Widget* innerPtr = inner.get();
-    inner->addChild(std::make_unique<radia::ui::Label>("basis"));
-    radia::ui::Widget* label = inner->children().front().get();
+    Widget* innerPtr = inner.get();
+    inner->addChild(std::make_unique<Label>("basis"));
+    Widget* label = inner->children().front().get();
     outer.addChild(std::move(inner));
 
-    radia::ui::layoutTree(outer, theme, text);
+    layoutTree(outer, styleSheet, text);
     ensure_approximately_equals("percentage flex-basis uses the allocated nested width", innerPtr->rect().w, 50.f, 6);
     ensure_approximately_equals("nested percentage flex-basis resolves against its parent", label->rect().w, 25.f, 6);
 }

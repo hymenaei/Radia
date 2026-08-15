@@ -31,8 +31,8 @@
 #include "types.h"
 
 namespace radia::ui::detail {
-inline constexpr float FLOATER_RESIZE_BORDER = 6.f;
-inline constexpr float FLOATER_RESIZE_CORNER_SPAN = 9.f;
+inline constexpr float kFloaterResizeBorder = 6.f;
+inline constexpr float kFloaterResizeCornerSpan = 9.f;
 
 enum class ResizeEdges : std::uint8_t { NoEdges = 0, Left = 1, Right = 2, Bottom = 4, Top = 8 };
 
@@ -56,9 +56,9 @@ struct FloaterAuthoredGeometry {
 
 ResizeEdges resizeEdgesAt(const Rect& bounds, const Vec2& point);
 CursorStyle resizeCursor(ResizeEdges edges);
-bool preserveUserResizeOnReload(bool current_resizable, bool replacement_resizable, const FloaterAuthoredGeometry& current,
+bool preserveUserResizeOnReload(bool currentResizable, bool replacementResizable, const FloaterAuthoredGeometry& current,
                                 const FloaterAuthoredGeometry& replacement);
-Rect resizedRect(const Rect& initial, const Vec2& initial_pointer, const Vec2& pointer, ResizeEdges edges,
+Rect resizedRect(const Rect& initial, const Vec2& initialPointer, const Vec2& pointer, ResizeEdges edges,
                  const FloaterResizeConstraints& constraints);
 } // namespace radia::ui::detail
 #endif // RD_SURFACE_FLOATERRESIZE_H

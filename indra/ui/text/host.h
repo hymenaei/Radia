@@ -53,15 +53,15 @@ public:
     void resolveLocalized(const std::function<InlineContent(const LocalizationRequest&)>& resolve);
     bool resolveKeybindings(const std::function<KeybindingPresentation(const std::string&)>& resolve);
 
-    Vec2 measure(const TextMetrics& metrics, const Style& style, const StyleSheet& theme, const Widget& owner,
+    Vec2 measure(const TextMetrics& metrics, const Style& style, const StyleSheet& styleSheet, const Widget& owner,
                  std::optional<float> resolvedWidth = std::nullopt) const;
-    void paint(PaintContext& context, const Rect& rect, const Style& style, const StyleSheet* theme, const Widget& owner) const;
+    void paint(PaintContext& context, const Rect& rect, const Style& style, const StyleSheet* styleSheet, const Widget& owner) const;
 
 private:
     void updatePlainText();
-    const std::vector<detail::TextLine>& cachedLines(const TextMetrics& metrics, const Style& style, const StyleSheet* theme,
+    const std::vector<detail::TextLine>& cachedLines(const TextMetrics& metrics, const Style& style, const StyleSheet* styleSheet,
                                                      const Widget& owner) const;
-    const detail::TextLayout& cachedLayout(const TextMetrics& metrics, const Style& style, const StyleSheet* theme, const Widget& owner,
+    const detail::TextLayout& cachedLayout(const TextMetrics& metrics, const Style& style, const StyleSheet* styleSheet, const Widget& owner,
                                            std::optional<float> availableWidth, bool visualOrder, bool applyOverflow) const;
 
     TextSource mSource;
@@ -72,8 +72,8 @@ private:
     mutable std::uint64_t mCachedContentGeneration = 0;
     mutable const TextMetrics* mCachedMetrics = nullptr;
     mutable std::uint64_t mCachedMetricsGeneration = 0;
-    mutable const StyleSheet* mCachedTheme = nullptr;
-    mutable std::uint64_t mCachedThemeGeneration = 0;
+    mutable const StyleSheet* mCachedStyleSheet = nullptr;
+    mutable std::uint64_t mCachedStyleSheetGeneration = 0;
     mutable const Widget* mCachedOwner = nullptr;
     mutable const Widget* mCachedOwnerParent = nullptr;
     mutable std::uint64_t mCachedOwnerStyleRevision = 0;

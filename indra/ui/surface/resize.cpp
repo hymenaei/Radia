@@ -42,23 +42,23 @@ bool blocksPointerEvents(const Floater& floater, const Style& style) {
 } // namespace
 
 Vec2 Surface::minimumFloaterSize(const Floater& floater) const {
-    const Vec2 original = floater.authoredSize();
-    const WidgetSnapshot floater_state = snapshot(const_cast<Floater&>(floater));
+    const Vec2 authoredSize = floater.authoredSize();
+    const WidgetSnapshot floaterSnapshot = snapshot(const_cast<Floater&>(floater));
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
-    const Style& floater_style = styles.style(floater);
-    if (!snapshotValid(floater_state)) return {};
-    Vec2 minimum{floater_style.minWidth ? floater_style.minWidth->resolve(original.x) : 0.f,
-                 floater_style.minHeight ? floater_style.minHeight->resolve(original.y) : 0.f};
+    const Style& floaterStyle = styles.style(floater);
+    if (!snapshotValid(floaterSnapshot)) return {};
+    Vec2 minimum{floaterStyle.minWidth ? floaterStyle.minWidth->resolve(authoredSize.x) : 0.f,
+                 floaterStyle.minHeight ? floaterStyle.minHeight->resolve(authoredSize.y) : 0.f};
 
     if (const Panel* header = floater.header()) {
-        const WidgetSnapshot header_state = snapshot(*const_cast<Panel*>(header));
+        const WidgetSnapshot headerSnapshot = snapshot(*const_cast<Panel*>(header));
         const Vec2 measured = measureWidget(*header, *mStyleSheet, mTextMetrics);
-        if (!snapshotValid(floater_state) || !snapshotChildValid(header_state, floater)) return {};
-        const Style& header_style = styles.style(*header);
-        if (!snapshotValid(floater_state) || !snapshotChildValid(header_state, floater)) return {};
-        minimum.x = std::max(minimum.x, measured.x + header_style.margin.horizontal() + floater_style.padding.horizontal());
-        minimum.y = std::max(minimum.y, measured.y + header_style.margin.vertical() + floater_style.padding.vertical());
+        if (!snapshotValid(floaterSnapshot) || !snapshotChildValid(headerSnapshot, floater)) return {};
+        const Style& headerStyle = styles.style(*header);
+        if (!snapshotValid(floaterSnapshot) || !snapshotChildValid(headerSnapshot, floater)) return {};
+        minimum.x = std::max(minimum.x, measured.x + headerStyle.margin.horizontal() + floaterStyle.padding.horizontal());
+        minimum.y = std::max(minimum.y, measured.y + headerStyle.margin.vertical() + floaterStyle.padding.vertical());
     }
     return minimum;
 }
@@ -68,28 +68,28 @@ Floater* Surface::resizeFloaterAt(const Vec2& point, std::uint8_t& edges) const 
     if (!mViewport.contains(point)) return nullptr;
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
-    const auto find_in_layer = [&](SurfaceLayer layer) -> Floater* {
+    const auto findInLayer = [&](SurfaceLayer layer) -> Floater* {
         const StylePass::ChildSnapshot children = styles.sourceChildren(layerRoot(layer));
         for (auto child = children->rbegin(); child != children->rend(); ++child) {
             auto* floater = dynamic_cast<Floater*>(child->get());
             if (!floater || floater->visibility() != Visibility::Visible || floater->closed()) continue;
-            const WidgetSnapshot floater_state = snapshot(*floater);
-            const Style& floater_style = styles.style(*floater);
-            if (!snapshotValid(floater_state) || !isRootedInSurface(floater_state.lifetime.get())) continue;
-            const bool floater_blocks_pointer_events = blocksPointerEvents(*floater, floater_style);
-            if (!snapshotValid(floater_state) || !isRootedInSurface(floater_state.lifetime.get())) continue;
-            floater = dynamic_cast<Floater*>(floater_state.lifetime.get());
+            const WidgetSnapshot floaterSnapshot = snapshot(*floater);
+            const Style& floaterStyle = styles.style(*floater);
+            if (!snapshotValid(floaterSnapshot) || !isRootedInSurface(floaterSnapshot.lifetime.get())) continue;
+            const bool floaterBlocksPointerEvents = blocksPointerEvents(*floater, floaterStyle);
+            if (!snapshotValid(floaterSnapshot) || !isRootedInSurface(floaterSnapshot.lifetime.get())) continue;
+            floater = dynamic_cast<Floater*>(floaterSnapshot.lifetime.get());
             if (!floater || floater->visibility() != Visibility::Visible || floater->closed()) continue;
-            if (!floater_blocks_pointer_events) {
-                const bool descendant_hit = hitTestNode(*floater, point, mViewport, styles) != nullptr;
-                floater = dynamic_cast<Floater*>(floater_state.lifetime.get());
-                if (!snapshotValid(floater_state)
+            if (!floaterBlocksPointerEvents) {
+                const bool descendantHit = hitTestNode(*floater, point, mViewport, styles) != nullptr;
+                floater = dynamic_cast<Floater*>(floaterSnapshot.lifetime.get());
+                if (!snapshotValid(floaterSnapshot)
                     || !floater
                     || !isRootedInSurface(floater)
                     || floater->visibility() != Visibility::Visible
                     || floater->closed())
                     continue;
-                if (descendant_hit) return nullptr;
+                if (descendantHit) return nullptr;
                 if (!floater->rect().contains(point)) continue;
                 continue;
             }
@@ -103,8 +103,8 @@ Floater* Surface::resizeFloaterAt(const Vec2& point, std::uint8_t& edges) const 
         return nullptr;
     };
 
-    if (hasActiveModal()) return find_in_layer(SurfaceLayer::Modal);
-    return find_in_layer(SurfaceLayer::Floater);
+    if (hasActiveModal()) return findInLayer(SurfaceLayer::Modal);
+    return findInLayer(SurfaceLayer::Floater);
 }
 
 void Surface::updateResizeCursor(const Vec2& point) {

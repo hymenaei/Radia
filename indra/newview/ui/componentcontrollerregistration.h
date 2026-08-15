@@ -31,21 +31,20 @@
 #include "componentcontrollereventadapter.h"
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
-template<typename Callback> void ComponentController::event(std::string name, Callback callback) {
+template<typename Callback> void ComponentController::event(std::string handlerName, Callback callback) {
     static_assert(std::is_invocable_v<Callback>,
                   "ComponentController callbacks must be zero-argument; use event(name, &Controller::method) for typed Event handlers.");
-    addEventRegistration(detail::makeControllerEventRegistration(std::move(name), std::move(callback)));
+    addEventRegistration(detail::makeControllerEventRegistration(std::move(handlerName), std::move(callback)));
 }
 
-template<typename ControllerT, typename... Args> void ComponentController::event(std::string name, void (ControllerT::*method)(Args...)) {
+template<typename ControllerT, typename... Args> void ComponentController::event(std::string handlerName, void (ControllerT::*method)(Args...)) {
     static_assert(std::is_base_of_v<ComponentController, ControllerT>, "Event Handler member must belong to the component controller.");
-    addEventRegistration(detail::makeControllerEventRegistration(std::move(name), dynamic_cast<ControllerT*>(this), method));
+    addEventRegistration(detail::makeControllerEventRegistration(std::move(handlerName), dynamic_cast<ControllerT*>(this), method));
 }
 
-template<typename ControllerT, typename... Args> void ComponentController::event(std::string name, void (ControllerT::*method)(Args...) const) {
+template<typename ControllerT, typename... Args> void ComponentController::event(std::string handlerName, void (ControllerT::*method)(Args...) const) {
     static_assert(std::is_base_of_v<ComponentController, ControllerT>, "Event Handler member must belong to the component controller.");
-    addEventRegistration(detail::makeControllerEventRegistration(std::move(name), dynamic_cast<ControllerT*>(this), method));
+    addEventRegistration(detail::makeControllerEventRegistration(std::move(handlerName), dynamic_cast<ControllerT*>(this), method));
 }
 } // namespace radia::viewer::ui
 #endif // RD_COMPONENTCONTROLLER_REGISTRATION_H

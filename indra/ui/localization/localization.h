@@ -36,7 +36,7 @@
 
 namespace radia::ui {
 struct LocaleInfo {
-    std::string id;
+    std::string localeId;
     std::string name;
     LayoutDirection direction = LayoutDirection::LeftToRight;
     std::string fallback;
@@ -60,14 +60,14 @@ public:
 
     std::vector<LocaleInfo> locales() const;
     const std::string& defaultLocaleId() const;
-    const LocaleInfo* locale(const std::string& id) const;
-    bool containsLocale(const std::string& id) const;
-    bool containsDefaultString(const std::string& id) const;
-    bool pluralCapable(const std::string& id) const;
+    const LocaleInfo* locale(const std::string& localeId) const;
+    bool containsLocale(const std::string& localeId) const;
+    bool containsDefaultString(const std::string& stringKey) const;
+    bool pluralCapable(const std::string& stringKey) const;
 
     InlineContent resolve(const std::string& localeId, const LocalizationRequest& request) const;
     std::string get(const std::string& localeId, const LocalizationRequest& request) const;
-    std::string get(const std::string& localeId, const std::string& stringId) const;
+    std::string get(const std::string& localeId, const std::string& stringKey) const;
 
 private:
     struct Impl;

@@ -53,7 +53,7 @@ struct TemplateNode {
 struct StringTemplate {
     std::vector<TemplateNode> nodes;
     std::set<std::string> arguments;
-    std::multiset<std::string> bindings;
+    std::multiset<std::string> shortcutIds;
 };
 
 using PluralTemplates = std::unordered_map<std::string, StringTemplate>;
@@ -68,7 +68,7 @@ public:
     StringValue(PluralTemplates value, std::string sourceName, std::size_t sourceLine)
         : mTemplates(std::move(value)), source(std::move(sourceName)), line(sourceLine) {}
 
-    bool plural() const { return std::holds_alternative<PluralTemplates>(mTemplates); }
+    bool pluralCapable() const { return std::holds_alternative<PluralTemplates>(mTemplates); }
     const Templates& templates() const { return mTemplates; }
     const StringTemplate* scalar() const { return std::get_if<StringTemplate>(&mTemplates); }
     const PluralTemplates* plurals() const { return std::get_if<PluralTemplates>(&mTemplates); }
@@ -99,7 +99,7 @@ template<typename Visitor> void forEachTemplate(const StringValue& value, Visito
 using StringMap = std::unordered_map<std::string, StringValue>;
 
 struct ParsedLocale {
-    std::string id;
+    std::string localeId;
     std::string source;
     std::size_t line = 0;
     std::optional<std::string> name;
@@ -116,8 +116,8 @@ struct ParsedCatalog {
 
 struct StringContract {
     std::set<std::string> arguments;
-    std::multiset<std::string> bindings;
-    bool plural = false;
+    std::multiset<std::string> shortcutIds;
+    bool pluralCapable = false;
     std::string requiredPluralArgument;
 };
 
@@ -130,7 +130,7 @@ struct LocaleRecord {
     std::unique_ptr<icu::NumberFormat> numberFormat;
 };
 
-std::string localeIdentity(const std::string& id);
+std::string localeIdentity(const std::string& localeId);
 bool parseRichString(const std::string& source, StringTemplate& parsed, LocalizationLoadResult& result, const std::string& sourceName,
                      std::size_t line);
 LocalizationLoadResult parseYamlCatalog(const std::string& yaml, const std::string& sourceName, bool base, ParsedCatalog& catalog);
@@ -141,8 +141,8 @@ struct LocalizationCatalog::Impl {
     LocalizationLoadResult load(const std::vector<ResourceLayer>& layers);
     void compile(LocalizationLoadResult& result);
 
-    const localization_detail::LocaleRecord* locale(const std::string& id) const;
-    localization_detail::LocaleRecord* locale(const std::string& id);
+    const localization_detail::LocaleRecord* locale(const std::string& localeId) const;
+    localization_detail::LocaleRecord* locale(const std::string& localeId);
     const localization_detail::StringValue* find(const localization_detail::LocaleRecord& locale, const std::string& key) const;
 
     std::vector<localization_detail::LocaleRecord> locales;

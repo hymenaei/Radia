@@ -32,7 +32,9 @@
 #include "resourceprovider.h"
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
+using radia::ui::DiagnosticResult;
+using radia::ui::ResourceSnapshot;
+
 struct SkinSnapshotResult : DiagnosticResult {
     bool ok() const { return !hasErrors(); }
 

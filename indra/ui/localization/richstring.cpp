@@ -34,13 +34,13 @@
 namespace radia::ui::localization_detail {
 namespace {
 bool validArgumentName(const std::string& id) {
-    static const std::regex pattern(R"(^[a-z][A-Za-z0-9]*$)");
-    return std::regex_match(id, pattern);
+    static const std::regex sArgumentNamePattern(R"(^[a-z][A-Za-z0-9]*$)");
+    return std::regex_match(id, sArgumentNamePattern);
 }
 
 bool validShortcutId(const std::string& value) {
-    static const std::regex pattern(R"(^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$)");
-    return std::regex_match(value, pattern);
+    static const std::regex sShortcutIdPattern(R"(^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$)");
+    return std::regex_match(value, sShortcutIdPattern);
 }
 
 enum class RichTokenKind : std::uint8_t { Text, Argument, ContainerOpen, ContainerClose, Kbd, Br };
@@ -128,11 +128,11 @@ public:
                     offset += escaped->length + 1;
                     continue;
                 }
-                const std::size_t placeholder_end =
+                const std::size_t placeholderEnd =
                     offset + 1 < mSource.size() && mSource[offset + 1] == '{' ? mSource.find('}', offset + 2) : std::string::npos;
-                if (placeholder_end != std::string::npos && validArgumentName(mSource.substr(offset + 2, placeholder_end - offset - 2))) {
-                    append(mSource.substr(offset + 1, placeholder_end - offset), tokenOffset);
-                    offset = placeholder_end + 1;
+                if (placeholderEnd != std::string::npos && validArgumentName(mSource.substr(offset + 2, placeholderEnd - offset - 2))) {
+                    append(mSource.substr(offset + 1, placeholderEnd - offset), tokenOffset);
+                    offset = placeholderEnd + 1;
                     continue;
                 }
 
@@ -172,12 +172,12 @@ public:
                 }
 
                 const std::size_t end = mSource.find('>', offset + 1);
-                const bool tag_shaped = offset + 1 < mSource.size()
+                const bool tagShaped = offset + 1 < mSource.size()
                     && (std::isalpha(static_cast<unsigned char>(mSource[offset + 1]))
                         || (mSource[offset + 1] == '/'
                             && offset + 2 < mSource.size()
                             && std::isalpha(static_cast<unsigned char>(mSource[offset + 2]))));
-                if (tag_shaped && end != std::string::npos) {
+                if (tagShaped && end != std::string::npos) {
                     mResult.error("localization.string.tag_invalid",
                                   "Unknown, malformed, or misplaced Rich String tag: " + mSource.substr(offset, end - offset + 1) + ".", mSourceName,
                                   tokenLine(tokenOffset));
@@ -239,7 +239,7 @@ private:
                     break;
                 }
                 case RichTokenKind::Kbd:
-                    mParsed.bindings.insert(current.value);
+                    mParsed.shortcutIds.insert(current.value);
                     nodes.push_back({TemplateKind::Kbd, current.value, {}});
                     break;
                 case RichTokenKind::Br: nodes.push_back({TemplateKind::Br, {}, {}}); break;

@@ -54,10 +54,10 @@ std::string assembleDrawGlsl(hb_gpu_shader_stage_t stage) {
     const char* common = hb_gpu_shader_source(stage, HB_GPU_SHADER_LANG_GLSL);
     const char* draw = hb_gpu_draw_shader_source(stage, HB_GPU_SHADER_LANG_GLSL);
 
-    const bool has_version = (common && std::strstr(common, "#version")) || (draw && std::strstr(draw, "#version"));
+    const bool hasVersion = (common && std::strstr(common, "#version")) || (draw && std::strstr(draw, "#version"));
 
     std::string src;
-    if (!has_version) src += "#version 330\n";
+    if (!hasVersion) src += "#version 330\n";
     if (common) {
         src += common;
         src += '\n';
@@ -106,10 +106,10 @@ template<> template<> void llfontgpu_object::test<2>() {
             << LL_ENDL;
     }
 
-    const char* draw_frag = hb_gpu_draw_shader_source(HB_GPU_SHADER_STAGE_FRAGMENT, HB_GPU_SHADER_LANG_GLSL);
-    const char* draw_vert = hb_gpu_draw_shader_source(HB_GPU_SHADER_STAGE_VERTEX, HB_GPU_SHADER_LANG_GLSL);
-    ensure("draw fragment source provides the rasterizer", draw_frag && draw_frag[0] != '\0');
-    ensure("draw vertex source is empty (fragment-only by design)", draw_vert && draw_vert[0] == '\0');
+    const char* drawFragmentSource = hb_gpu_draw_shader_source(HB_GPU_SHADER_STAGE_FRAGMENT, HB_GPU_SHADER_LANG_GLSL);
+    const char* drawVertexSource = hb_gpu_draw_shader_source(HB_GPU_SHADER_STAGE_VERTEX, HB_GPU_SHADER_LANG_GLSL);
+    ensure("draw fragment source provides the rasterizer", drawFragmentSource && drawFragmentSource[0] != '\0');
+    ensure("draw vertex source is empty (fragment-only by design)", drawVertexSource && drawVertexSource[0] == '\0');
 }
 
 template<> template<> void llfontgpu_object::test<3>() {
@@ -169,24 +169,24 @@ template<> template<> void llfontgpu_object::test<3>() {
 
 #if LL_MESA_HEADLESS
 inline ll_test::HeadlessGL& getSharedHeadlessGL() {
-    static ll_test::HeadlessGL gl(false, false, false, false);
-    return gl;
+    static ll_test::HeadlessGL sHeadlessGl(false, false, false, false);
+    return sHeadlessGl;
 }
 
 template<> template<> void llfontgpu_object::test<4>() {
     getSharedHeadlessGL();
 
-    const std::string vsrc = assembleDrawGlsl(HB_GPU_SHADER_STAGE_VERTEX);
-    const std::string fsrc = assembleDrawGlsl(HB_GPU_SHADER_STAGE_FRAGMENT);
+    const std::string vertexSource = assembleDrawGlsl(HB_GPU_SHADER_STAGE_VERTEX);
+    const std::string fragmentSource = assembleDrawGlsl(HB_GPU_SHADER_STAGE_FRAGMENT);
 
-    LL_INFOS("FontGpuSpike") << "assembled VERTEX GLSL:\n" << vsrc << LL_ENDL;
-    LL_INFOS("FontGpuSpike") << "assembled FRAGMENT GLSL:\n" << fsrc << LL_ENDL;
+    LL_INFOS("FontGpuSpike") << "assembled VERTEX GLSL:\n" << vertexSource << LL_ENDL;
+    LL_INFOS("FontGpuSpike") << "assembled FRAGMENT GLSL:\n" << fragmentSource << LL_ENDL;
 
-    GLuint vs = ll_test::compileTestShader(GL_VERTEX_SHADER, vsrc.c_str());
+    GLuint vs = ll_test::compileTestShader(GL_VERTEX_SHADER, vertexSource.c_str());
     ensure("hb-gpu vertex GLSL compiled under GL 3.3 core", vs != 0);
     if (vs) glDeleteShader(vs);
 
-    GLuint fs = ll_test::compileTestShader(GL_FRAGMENT_SHADER, fsrc.c_str());
+    GLuint fs = ll_test::compileTestShader(GL_FRAGMENT_SHADER, fragmentSource.c_str());
     ensure("hb-gpu fragment GLSL compiled under GL 3.3 core", fs != 0);
     if (fs) glDeleteShader(fs);
 }

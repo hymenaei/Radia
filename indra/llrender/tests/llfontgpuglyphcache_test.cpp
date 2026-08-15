@@ -60,11 +60,11 @@ struct TestFace {
     hb_face_t* face = nullptr;
     hb_font_t* font = nullptr;
 
-    explicit TestFace(const char* font_name = kOutlineFont) {
+    explicit TestFace(const char* fontName = kOutlineFont) {
         LLFontGpuGlyphCache::resetForTesting();
         LLFontGpuGlyphCache::setMaxTexels(1u << 18);
 
-        const std::string path = std::string(kFontDir) + font_name;
+        const std::string path = std::string(kFontDir) + fontName;
         if (!fileExists(path)) return;
         blob = hb_blob_create_from_file(path.c_str());
         if (hb_blob_get_length(blob) > 0) {
@@ -100,25 +100,25 @@ template<> template<> void llfontgpuglyphcache_object::test<1>() {
     TestFace tf;
     if (!tf.valid()) skip("outline test font not present in test data dir");
 
-    const U32 gid_A = gidFor(tf.face, (hb_codepoint_t)'A');
-    ensure("cmap maps 'A'", gid_A != 0);
+    const U32 glyphIdA = gidFor(tf.face, (hb_codepoint_t)'A');
+    ensure("cmap maps 'A'", glyphIdA != 0);
 
     LLFontGpuGlyphCache cache;
     cache.init(tf.font);
     auto batch = LLFontGpuGlyphCache::beginBatch();
 
-    const LLFontGpuGlyphCache::GlyphLoc loc = cache.getGlyph(batch, gid_A);
+    const LLFontGpuGlyphCache::GlyphLoc loc = cache.getOrEncodeGlyph(batch, glyphIdA);
     ensure("'A' is drawable", loc.drawable());
     ensure("'A' has texels", loc.mTexelCount > 0);
     ensure("first glyph lands at offset 0", loc.mTexelOffset == 0);
     ensure("'A' has non-zero extents", loc.mWidth != 0 && loc.mHeight != 0);
     ensure_equals("one glyph cached", cache.getGlyphCount(), 1U);
 
-    const U32 texels_after_first = cache.getArenaTexels();
-    const LLFontGpuGlyphCache::GlyphLoc loc2 = cache.getGlyph(batch, gid_A);
+    const U32 texelsAfterFirst = cache.getArenaTexels();
+    const LLFontGpuGlyphCache::GlyphLoc loc2 = cache.getOrEncodeGlyph(batch, glyphIdA);
     ensure_equals("cache hit: same offset", loc2.mTexelOffset, loc.mTexelOffset);
     ensure_equals("cache hit: same count", loc2.mTexelCount, loc.mTexelCount);
-    ensure_equals("cache hit: no arena growth", cache.getArenaTexels(), texels_after_first);
+    ensure_equals("cache hit: no arena growth", cache.getArenaTexels(), texelsAfterFirst);
     ensure_equals("cache hit: still one glyph", cache.getGlyphCount(), 1U);
 }
 
@@ -126,20 +126,20 @@ template<> template<> void llfontgpuglyphcache_object::test<2>() {
     TestFace tf;
     if (!tf.valid()) skip("outline test font not present in test data dir");
 
-    const U32 gid_sp = gidFor(tf.face, (hb_codepoint_t)' ');
-    ensure("cmap maps space", gid_sp != 0);
+    const U32 glyphIdSpace = gidFor(tf.face, (hb_codepoint_t)' ');
+    ensure("cmap maps space", glyphIdSpace != 0);
 
     LLFontGpuGlyphCache cache;
     cache.init(tf.font);
     auto batch = LLFontGpuGlyphCache::beginBatch();
 
-    const LLFontGpuGlyphCache::GlyphLoc loc = cache.getGlyph(batch, gid_sp);
-    const U32 texels_after_first = cache.getArenaTexels();
+    const LLFontGpuGlyphCache::GlyphLoc loc = cache.getOrEncodeGlyph(batch, glyphIdSpace);
+    const U32 texelsAfterFirst = cache.getArenaTexels();
 
-    const LLFontGpuGlyphCache::GlyphLoc loc2 = cache.getGlyph(batch, gid_sp);
+    const LLFontGpuGlyphCache::GlyphLoc loc2 = cache.getOrEncodeGlyph(batch, glyphIdSpace);
     ensure_equals("space cached: same offset", loc2.mTexelOffset, loc.mTexelOffset);
     ensure_equals("space cached: same count", loc2.mTexelCount, loc.mTexelCount);
-    ensure_equals("space cached: no arena growth", cache.getArenaTexels(), texels_after_first);
+    ensure_equals("space cached: no arena growth", cache.getArenaTexels(), texelsAfterFirst);
     ensure_equals("space counts as one cache entry", cache.getGlyphCount(), 1U);
 }
 
@@ -147,31 +147,31 @@ template<> template<> void llfontgpuglyphcache_object::test<3>() {
     TestFace tf;
     if (!tf.valid()) skip("outline test font not present in test data dir");
 
-    const U32 gid_A = gidFor(tf.face, (hb_codepoint_t)'A');
-    const U32 gid_B = gidFor(tf.face, (hb_codepoint_t)'B');
-    ensure("cmap maps 'A' and 'B'", gid_A != 0 && gid_B != 0 && gid_A != gid_B);
+    const U32 glyphIdA = gidFor(tf.face, (hb_codepoint_t)'A');
+    const U32 glyphIdB = gidFor(tf.face, (hb_codepoint_t)'B');
+    ensure("cmap maps 'A' and 'B'", glyphIdA != 0 && glyphIdB != 0 && glyphIdA != glyphIdB);
 
     LLFontGpuGlyphCache cache;
     cache.init(tf.font);
 
-    const S32 gen_before = cache.getGeneration();
+    const S32 generationBefore = cache.getGeneration();
     {
         auto batch = LLFontGpuGlyphCache::beginBatch();
-        const LLFontGpuGlyphCache::GlyphLoc a = cache.getGlyph(batch, gid_A);
+        const LLFontGpuGlyphCache::GlyphLoc a = cache.getOrEncodeGlyph(batch, glyphIdA);
         ensure("'A' drawable", a.drawable());
 
         cache.setMaxTexels(a.mTexelCount);
-        const LLFontGpuGlyphCache::GlyphLoc b = cache.getGlyph(batch, gid_B);
+        const LLFontGpuGlyphCache::GlyphLoc b = cache.getOrEncodeGlyph(batch, glyphIdB);
         ensure("'B' drawable", b.drawable());
-        ensure_equals("generation pinned for the complete batch", cache.getGeneration(), gen_before);
+        ensure_equals("generation pinned for the complete batch", cache.getGeneration(), generationBefore);
         ensure_equals("both current-batch offsets remain cached", cache.getGlyphCount(), 2U);
         ensure("second glyph follows the first in the live arena", b.mTexelOffset >= a.mTexelOffset + a.mTexelCount);
     }
 
-    auto next_batch = LLFontGpuGlyphCache::beginBatch();
-    ensure("next batch reset bumped generation", cache.getGeneration() > gen_before);
-    const LLFontGpuGlyphCache::GlyphLoc b_after = cache.getGlyph(next_batch, gid_B);
-    ensure_equals("survivor re-encodes at offset 0", b_after.mTexelOffset, 0U);
+    auto nextBatch = LLFontGpuGlyphCache::beginBatch();
+    ensure("next batch reset bumped generation", cache.getGeneration() > generationBefore);
+    const LLFontGpuGlyphCache::GlyphLoc bAfter = cache.getOrEncodeGlyph(nextBatch, glyphIdB);
+    ensure_equals("survivor re-encodes at offset 0", bAfter.mTexelOffset, 0U);
     ensure_equals("stale per-face map was cleared lazily", cache.getGlyphCount(), 1U);
 }
 
@@ -192,7 +192,7 @@ template<> template<> void llfontgpuglyphcache_object::test<5>() {
         hb_codepoint_t gid = 0;
         ensure("cmap maps 'A'", hb_font_get_nominal_glyph(face->getHbFont(), (hb_codepoint_t)'A', &gid) && gid != 0);
         auto batch = LLFontGpuGlyphCache::beginBatch();
-        ensure("face cache encodes 'A'", cache->getGlyph(batch, (U32)gid).drawable());
+        ensure("face cache encodes 'A'", cache->getOrEncodeGlyph(batch, (U32)gid).drawable());
     }
     LLFontManager::cleanupClass();
 }
@@ -209,7 +209,7 @@ template<> template<> void llfontgpuglyphcache_object::test<6>() {
     ensure("cache reports color mode", cache.isColor());
     auto batch = LLFontGpuGlyphCache::beginBatch();
 
-    const LLFontGpuGlyphCache::GlyphLoc loc = cache.getGlyph(batch, gid);
+    const LLFontGpuGlyphCache::GlyphLoc loc = cache.getOrEncodeGlyph(batch, gid);
     ensure("color glyph is drawable", loc.drawable());
     ensure("color glyph has texels", loc.mTexelCount > 0);
     ensure("first glyph lands at offset 0", loc.mTexelOffset == 0);
@@ -217,7 +217,7 @@ template<> template<> void llfontgpuglyphcache_object::test<6>() {
     ensure_equals("one glyph cached", cache.getGlyphCount(), 1U);
 
     const U32 texels = cache.getArenaTexels();
-    const LLFontGpuGlyphCache::GlyphLoc loc2 = cache.getGlyph(batch, gid);
+    const LLFontGpuGlyphCache::GlyphLoc loc2 = cache.getOrEncodeGlyph(batch, gid);
     ensure_equals("cache hit: same offset", loc2.mTexelOffset, loc.mTexelOffset);
     ensure_equals("cache hit: no growth", cache.getArenaTexels(), texels);
 }
@@ -227,30 +227,30 @@ template<> template<> void llfontgpuglyphcache_object::test<7>() {
     if (!tf.valid()) skip("variable test font not present in test data dir");
     if (hb_ot_var_get_axis_count(tf.face) == 0) skip("test font is not variable");
 
-    const U32 gid_I = gidFor(tf.face, (hb_codepoint_t)'I');
-    ensure("cmap maps 'I'", gid_I != 0);
+    const U32 glyphIdI = gidFor(tf.face, (hb_codepoint_t)'I');
+    ensure("cmap maps 'I'", glyphIdI != 0);
 
     LLFontGpuGlyphCache reg;
     reg.init(tf.font);
     auto batch = LLFontGpuGlyphCache::beginBatch();
-    const LLFontGpuGlyphCache::GlyphLoc loc_reg = reg.getGlyph(batch, gid_I);
-    ensure("regular 'I' drawable", loc_reg.drawable());
+    const LLFontGpuGlyphCache::GlyphLoc regularLocation = reg.getOrEncodeGlyph(batch, glyphIdI);
+    ensure("regular 'I' drawable", regularLocation.drawable());
 
-    hb_font_t* bold_font = hb_font_create(tf.face);
-    hb_font_set_variation(bold_font, HB_TAG('w', 'g', 'h', 't'), 700.f);
+    hb_font_t* boldFont = hb_font_create(tf.face);
+    hb_font_set_variation(boldFont, HB_TAG('w', 'g', 'h', 't'), 700.f);
     LLFontGpuGlyphCache bold;
-    bold.init(bold_font);
-    const LLFontGpuGlyphCache::GlyphLoc loc_bold = bold.getGlyph(batch, gid_I);
-    hb_font_destroy(bold_font);
-    ensure("bold 'I' drawable", loc_bold.drawable());
+    bold.init(boldFont);
+    const LLFontGpuGlyphCache::GlyphLoc boldLocation = bold.getOrEncodeGlyph(batch, glyphIdI);
+    hb_font_destroy(boldFont);
+    ensure("bold 'I' drawable", boldLocation.drawable());
 
-    ensure("bold 'I' stem wider than regular master", loc_bold.mWidth > loc_reg.mWidth);
+    ensure("bold 'I' stem wider than regular master", boldLocation.mWidth > regularLocation.mWidth);
 }
 
     #if LL_MESA_HEADLESS
 inline ll_test::HeadlessGL& getSharedHeadlessGL() {
-    static ll_test::HeadlessGL gl(true, true, true, false);
-    return gl;
+    static ll_test::HeadlessGL sHeadlessGl(true, true, true, false);
+    return sHeadlessGl;
 }
 
 template<> template<> void llfontgpuglyphcache_object::test<4>() {
@@ -260,9 +260,9 @@ template<> template<> void llfontgpuglyphcache_object::test<4>() {
 
     LLFontGpuGlyphCache cache;
     cache.init(tf.font);
-    const U32 gid_A = gidFor(tf.face, (hb_codepoint_t)'A');
+    const U32 glyphIdA = gidFor(tf.face, (hb_codepoint_t)'A');
     auto batch = LLFontGpuGlyphCache::beginBatch();
-    const LLFontGpuGlyphCache::GlyphLoc loc = cache.getGlyph(batch, gid_A);
+    const LLFontGpuGlyphCache::GlyphLoc loc = cache.getOrEncodeGlyph(batch, glyphIdA);
     ensure("'A' drawable", loc.drawable());
 
     while (glGetError() != GL_NO_ERROR) {}

@@ -25,15 +25,16 @@
 #include "linden_common.h"
 #include "llfontgpubatch.h"
 #if LL_HAS_HB_GPU
-    #include "llvertexbuffer.h"
+#include "llvertexbuffer.h"
 
 namespace LLFontGpuBatch {
-void buildGlyphQuad(LLVector4a* pos, LLVector2* uv, LLColor4U* col, U32* gloc, const LLFontGpuGlyphCache::GlyphLoc& loc, F32 pen_x, F32 pen_y,
-                    F32 scale, F32 slant, const LLColor4U& color, U32 glyph_loc) {
-    const F32 lu = (F32)loc.mXBearing;
-    const F32 ru = (F32)(loc.mXBearing + loc.mWidth);
-    const F32 tu = (F32)loc.mYBearing;
-    const F32 bu = (F32)(loc.mYBearing + loc.mHeight);
+void buildGlyphQuad(LLVector4a* positions, LLVector2* texcoords, LLColor4U* colors, U32* glyphLocations,
+                    const LLFontGpuGlyphCache::GlyphLoc& location, F32 penX, F32 penY, F32 scale, F32 slant, const LLColor4U& color,
+                    U32 glyphLocation) {
+    const F32 lu = (F32)location.mXBearing;
+    const F32 ru = (F32)(location.mXBearing + location.mWidth);
+    const F32 tu = (F32)location.mYBearing;
+    const F32 bu = (F32)(location.mYBearing + location.mHeight);
 
     constexpr F32 D = 0.5f;
     const F32 dEm = (scale != 0.f) ? (D / scale) : 0.f;
@@ -52,10 +53,10 @@ void buildGlyphQuad(LLVector4a* pos, LLVector2* uv, LLColor4U* col, U32* gloc, c
 
     for (S32 i = 0; i < 6; ++i) {
         const Corner& c = corners[i];
-        pos[i].set(pen_x + c.u * scale + c.shear + c.nx * D, pen_y + c.v * scale + c.ny * D, 0.f);
-        uv[i].set(c.u + c.nx * dEm, c.v + c.ny * dEm);
-        col[i] = color;
-        gloc[i] = glyph_loc;
+        positions[i].set(penX + c.u * scale + c.shear + c.nx * D, penY + c.v * scale + c.ny * D, 0.f);
+        texcoords[i].set(c.u + c.nx * dEm, c.v + c.ny * dEm);
+        colors[i] = color;
+        glyphLocations[i] = glyphLocation;
     }
 }
 } // namespace LLFontGpuBatch

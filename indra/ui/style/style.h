@@ -170,7 +170,7 @@ struct Effect {
     bool progressive() const { return startRadius != endRadius; }
 };
 
-inline constexpr std::size_t maxEffectCount = 8;
+inline constexpr std::size_t kMaxEffectCount = 8;
 
 enum class Flow { Free, Row, Column };
 enum class JustifyContent { Start, Center, End, Left, Right };

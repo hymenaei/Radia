@@ -41,49 +41,64 @@
 #include "widgets/floater.h"
 
 namespace tut {
+using radia::ui::Floater;
+using radia::ui::ResourceLayer;
+using radia::ui::ResourceSnapshot;
+using radia::ui::SettingResolution;
+using radia::ui::SettingResolver;
+using radia::ui::SkinCompiler;
+using radia::ui::SkinGenerationPrepareResult;
+using radia::ui::System;
+using radia::viewer::ui::ComponentController;
+using radia::viewer::ui::ComponentKey;
+using radia::viewer::ui::ComponentManager;
+using radia::viewer::ui::SkinReloadCoordinator;
+using radia::viewer::ui::SkinReloadResult;
+using radia::viewer::ui::SkinSnapshotResult;
+using radia::viewer::ui::SkinSnapshotSource;
+using radia::viewer::ui::test::TestFloaterHost;
+using std::chrono_literals::operator""ms;
+using std::chrono_literals::operator""s;
 namespace {
-
-radia::ui::SettingResolver& missingSettingResolver() {
-    class MissingSettingResolver final : public radia::ui::SettingResolver {
+SettingResolver& missingSettingResolver() {
+    class MissingSettingResolver final : public SettingResolver {
     public:
-        radia::ui::SettingResolution resolve(std::string_view, std::type_index) override {
-            return {radia::ui::SettingResolution::ResolutionStatus::Missing, {}};
-        }
+        SettingResolution resolve(std::string_view, std::type_index) override { return {SettingResolution::ResolutionStatus::Missing, {}}; }
     };
     static MissingSettingResolver resolver;
     return resolver;
 }
 
-radia::ui::ResourceSnapshot skinSnapshot(std::string view = "<floater/>", std::string style = {}) {
-    radia::ui::ResourceSnapshot snapshot;
+ResourceSnapshot skinSnapshot(std::string view = "<floater/>", std::string style = {}) {
+    ResourceSnapshot snapshot;
     snapshot.add("localization.yaml", "defaultLocale: en\nlocales: {en: {name: English, strings: {}}}\n");
     snapshot.add("skin.radia", std::move(style));
     snapshot.add("view.xml", std::move(view));
     return snapshot;
 }
 
-radia::ui::ResourceSnapshot importedStyleSnapshot(std::string entrypoint, std::map<std::string, std::string> modules) {
-    radia::ui::ResourceSnapshot snapshot = skinSnapshot("<floater/>", entrypoint);
-    snapshot.setLayers("skin.radia", {radia::ui::ResourceLayer{"test/skin.radia", std::move(entrypoint), "skin.radia", std::move(modules)}});
+ResourceSnapshot importedStyleSnapshot(std::string entrypoint, std::map<std::string, std::string> modules) {
+    ResourceSnapshot snapshot = skinSnapshot("<floater/>", entrypoint);
+    snapshot.setLayers("skin.radia", {ResourceLayer{"test/skin.radia", std::move(entrypoint), "skin.radia", std::move(modules)}});
     return snapshot;
 }
 
-radia::ui::ResourceSnapshot conflictingEventSnapshot() {
+ResourceSnapshot conflictingEventSnapshot() {
     return skinSnapshot(R"XML(<floater><button onClick="shared()"/><switch onChange="shared()"/></floater>)XML");
 }
 } // namespace
 
 struct reloadCoordinatorData {
-    struct SnapshotSource final : radia::viewer::ui::SkinSnapshotSource {
-        radia::viewer::ui::SkinSnapshotResult capture() const override {
+    struct SnapshotSource final : SkinSnapshotSource {
+        SkinSnapshotResult capture() const override {
             ++captures;
-            radia::viewer::ui::SkinSnapshotResult result;
+            SkinSnapshotResult result;
             result.snapshot = snapshot;
             if (rejectCapture) result.error("skin.test.rejected", "Test manifest rejected.");
             return result;
         }
 
-        radia::ui::ResourceSnapshot snapshot = skinSnapshot();
+        ResourceSnapshot snapshot = skinSnapshot();
         bool rejectCapture = false;
         mutable int captures = 0;
     };
@@ -92,10 +107,8 @@ struct reloadCoordinatorData {
         int commits = 0;
     };
 
-    struct Controller final : radia::viewer::ui::ComponentController {
-        Controller(radia::ui::System& system, ControllerState& state) : radia::viewer::ui::ComponentController(system), mState(state) {
-            event("shared", &Controller::shared);
-        }
+    struct Controller final : ComponentController {
+        Controller(System& system, ControllerState& state) : ComponentController(system), mState(state) { event("shared", &Controller::shared); }
 
         void postBuild() override { ++mState.commits; }
 
@@ -105,34 +118,32 @@ struct reloadCoordinatorData {
         void shared() {}
     };
 
-    using Host = radia::viewer::ui::test::TestFloaterHost;
+    using Host = TestFloaterHost;
 
     SnapshotSource snapshotSource;
-    radia::ui::System system;
+    System system;
     Host host;
     ControllerState componentState;
-    radia::viewer::ui::ComponentManager components{system, host, missingSettingResolver()};
-    radia::viewer::ui::SkinReloadCoordinator coordinator{system, snapshotSource};
+    ComponentManager components{system, host, missingSettingResolver()};
+    SkinReloadCoordinator coordinator{system, snapshotSource};
 
     reloadCoordinatorData() {
-        radia::ui::SkinGenerationPrepareResult prepared = radia::ui::SkinCompiler().prepare(skinSnapshot());
+        SkinGenerationPrepareResult prepared = SkinCompiler().prepare(skinSnapshot());
         if (prepared.ok()) system.publish(std::move(prepared.generation));
         components.registerDefinition("component", "view.xml",
-                                      [this](radia::ui::System& system) { return std::make_unique<Controller>(system, componentState); });
+                                      [this](System& system) { return std::make_unique<Controller>(system, componentState); });
         components.open("component");
         componentState.commits = 0;
         host.replacements = 0;
     }
 
-    radia::ui::Floater* installed(const std::string& definitionId = "component") const {
+    Floater* installed(const std::string& definitionId = "component") const {
         for (const auto& [root, floater] : host.mounted)
-            if (floater && components.componentKeyFor(*floater) == radia::viewer::ui::ComponentKey{definitionId, {}}) return floater.get();
+            if (floater && components.componentKeyFor(*floater) == ComponentKey{definitionId, {}}) return floater.get();
         return nullptr;
     }
 
-    std::optional<radia::viewer::ui::SkinReloadResult> update(radia::viewer::ui::SkinReloadCoordinator::TimePoint now = {}) {
-        return coordinator.update(now, components);
-    }
+    std::optional<SkinReloadResult> update(SkinReloadCoordinator::TimePoint now = {}) { return coordinator.update(now, components); }
 };
 using reloadCoordinatorTest = test_group<reloadCoordinatorData>;
 using reloadCoordinatorObject = reloadCoordinatorTest::object;
@@ -158,7 +169,7 @@ template<> template<> void reloadCoordinatorObject::test<2>() {
     set_test_name("invalid candidate preserves the live generation and component");
     coordinator.request();
     ensure("baseline committed", update()->ok());
-    radia::ui::Floater* live = installed();
+    Floater* live = installed();
     const int commits = componentState.commits;
 
     snapshotSource.snapshot = skinSnapshot();
@@ -177,7 +188,7 @@ template<> template<> void reloadCoordinatorObject::test<2>() {
 template<> template<> void reloadCoordinatorObject::test<3>() {
     set_test_name("controller preparation rejection prevents publication and installation");
     snapshotSource.snapshot = conflictingEventSnapshot();
-    radia::ui::Floater* live = installed();
+    Floater* live = installed();
     coordinator.request();
     const auto rejected = update();
 
@@ -191,8 +202,7 @@ template<> template<> void reloadCoordinatorObject::test<3>() {
 
 template<> template<> void reloadCoordinatorObject::test<4>() {
     set_test_name("authoring changes debounce into one coherent snapshot reload");
-    using namespace std::chrono_literals;
-    const auto start = radia::viewer::ui::SkinReloadCoordinator::TimePoint{} + 1s;
+    const auto start = SkinReloadCoordinator::TimePoint{} + 1s;
     coordinator.setSkinAutoReload(true);
     ensure("first poll establishes baseline", !update(start).has_value());
 
@@ -222,8 +232,7 @@ template<> template<> void reloadCoordinatorObject::test<5>() {
 
 template<> template<> void reloadCoordinatorObject::test<6>() {
     set_test_name("authoring reload invalidates only imported stylesheet modules");
-    using namespace std::chrono_literals;
-    const auto start = radia::viewer::ui::SkinReloadCoordinator::TimePoint{} + 1s;
+    const auto start = SkinReloadCoordinator::TimePoint{} + 1s;
     snapshotSource.snapshot = importedStyleSnapshot("@import \"used.radia\";",
                                                     {{"used.radia", "floater { width: 300px; }"}, {"unused.radia", "floater { width: 500px; }"}});
     coordinator.request();
@@ -247,8 +256,7 @@ template<> template<> void reloadCoordinatorObject::test<6>() {
 
 template<> template<> void reloadCoordinatorObject::test<7>() {
     set_test_name("rejected candidate retries when its new dependency changes");
-    using namespace std::chrono_literals;
-    const auto start = radia::viewer::ui::SkinReloadCoordinator::TimePoint{} + 1s;
+    const auto start = SkinReloadCoordinator::TimePoint{} + 1s;
     snapshotSource.snapshot =
         importedStyleSnapshot("@import \"used.radia\";", {{"used.radia", "floater { width: 300px; }"}, {"new.radia", "floater { width: invalid; }"}});
     coordinator.request();
@@ -275,13 +283,13 @@ template<> template<> void reloadCoordinatorObject::test<7>() {
 template<> template<> void reloadCoordinatorObject::test<8>() {
     set_test_name("one generation atomically replaces every open component");
     ControllerState secondComponentState;
-    ensure("second definition registered", components.registerDefinition("second", "view.xml", [&secondComponentState](radia::ui::System& system) {
+    ensure("second definition registered", components.registerDefinition("second", "view.xml", [&secondComponentState](System& system) {
         return std::make_unique<reloadCoordinatorData::Controller>(system, secondComponentState);
     }));
     ensure("second component opened", components.open("second").ok());
     secondComponentState.commits = 0;
-    radia::ui::Floater* firstLive = installed();
-    radia::ui::Floater* secondLive = installed("second");
+    Floater* firstLive = installed();
+    Floater* secondLive = installed("second");
     coordinator.request();
 
     const auto result = coordinator.update({}, components);
@@ -297,14 +305,14 @@ template<> template<> void reloadCoordinatorObject::test<8>() {
 template<> template<> void reloadCoordinatorObject::test<9>() {
     set_test_name("one rejected controller preparation rolls back every open component");
     ControllerState rejectedComponentState;
-    ensure("second definition registered", components.registerDefinition("second", "view.xml", [&rejectedComponentState](radia::ui::System& system) {
+    ensure("second definition registered", components.registerDefinition("second", "view.xml", [&rejectedComponentState](System& system) {
         return std::make_unique<reloadCoordinatorData::Controller>(system, rejectedComponentState);
     }));
     ensure("second component opened", components.open("second").ok());
     componentState.commits = 0;
     rejectedComponentState.commits = 0;
-    radia::ui::Floater* firstLive = installed();
-    radia::ui::Floater* secondLive = installed("second");
+    Floater* firstLive = installed();
+    Floater* secondLive = installed("second");
     snapshotSource.snapshot = conflictingEventSnapshot();
     coordinator.request();
 
@@ -320,7 +328,7 @@ template<> template<> void reloadCoordinatorObject::test<9>() {
 
 template<> template<> void reloadCoordinatorObject::test<10>() {
     set_test_name("host rejection preserves the live generation");
-    radia::ui::Floater* live = installed();
+    Floater* live = installed();
     host.rejectReplacements = true;
     coordinator.request();
 
@@ -336,14 +344,14 @@ template<> template<> void reloadCoordinatorObject::test<10>() {
 template<> template<> void reloadCoordinatorObject::test<11>() {
     set_test_name("host publication failure rolls back every swapped root");
     ControllerState secondComponentState;
-    ensure("second definition registered", components.registerDefinition("second", "view.xml", [&secondComponentState](radia::ui::System& system) {
+    ensure("second definition registered", components.registerDefinition("second", "view.xml", [&secondComponentState](System& system) {
         return std::make_unique<reloadCoordinatorData::Controller>(system, secondComponentState);
     }));
     ensure("second component opened", components.open("second").ok());
     componentState.commits = 0;
     secondComponentState.commits = 0;
-    radia::ui::Floater* firstLive = installed();
-    radia::ui::Floater* secondLive = installed("second");
+    Floater* firstLive = installed();
+    Floater* secondLive = installed("second");
     host.failAfterFirst = true;
     coordinator.request();
 
@@ -361,8 +369,7 @@ template<> template<> void reloadCoordinatorObject::test<11>() {
 
 template<> template<> void reloadCoordinatorObject::test<12>() {
     set_test_name("automatic reload uses configured scan and settle intervals");
-    using namespace std::chrono_literals;
-    const auto start = radia::viewer::ui::SkinReloadCoordinator::TimePoint{} + 1s;
+    const auto start = SkinReloadCoordinator::TimePoint{} + 1s;
     ensure("custom timing is accepted", coordinator.setAutoReloadTiming({40ms, 80ms}));
     coordinator.setSkinAutoReload(true);
     ensure("first poll establishes baseline", !update(start).has_value());

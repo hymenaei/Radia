@@ -47,11 +47,11 @@ public:
     const StyleSheet& styleSheet() const { return mStyles.styleSheet(); }
     const TextMetrics& textMetrics() const { return mStyles.textMetrics(); }
     void recordMeasured(bool constrained) {
-        ++mStatistics.measured_nodes;
-        if (constrained) ++mStatistics.constrained_remeasures;
+        ++mStatistics.measuredNodes;
+        if (constrained) ++mStatistics.constrainedRemeasures;
     }
-    void recordArranged() { ++mStatistics.arranged_nodes; }
-    void recordSkipped() { ++mStatistics.skipped_nodes; }
+    void recordArranged() { ++mStatistics.arrangedNodes; }
+    void recordSkipped() { ++mStatistics.skippedNodes; }
     const LayoutStatistics& statistics() const { return mStatistics; }
 
     const Style& style(const Widget& node) { return mStyles.style(node); }

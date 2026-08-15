@@ -115,8 +115,8 @@ Floater& Floater::setTitleContent(TextSource content) {
 }
 
 const std::string& Floater::title() const {
-    static const std::string empty;
-    return mHeaderTitle ? mHeaderTitle->text() : empty;
+    static const std::string sEmpty;
+    return mHeaderTitle ? mHeaderTitle->text() : sEmpty;
 }
 
 void Floater::onLocaleChanged(const System&) {

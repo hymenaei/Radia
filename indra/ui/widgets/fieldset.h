@@ -40,7 +40,7 @@ class Fieldset : public Widget {
     friend WidgetContract detail::fieldsetContract();
 
 public:
-    static constexpr const char* ELEMENT = "fieldset";
+    static constexpr const char* sElement = "fieldset";
 
     Fieldset();
     Text* legend() { return mLegend.get(); }

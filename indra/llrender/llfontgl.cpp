@@ -540,15 +540,15 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
             if (metadata)
             {
                 metadata->emitted_analytic_glyph = true;
-                if (gpu_result.emitted_fixed_color_glyph) metadata->emitted_fixed_color_glyph = true;
+                if (gpu_result.emittedFixedColorGlyph) metadata->emitted_fixed_color_glyph = true;
             }
-            if (right_x) *right_x = (gpu_result.pen_x - origin.mV[VX]) / sScaleX;
+            if (right_x) *right_x = (gpu_result.penX - origin.mV[VX]) / sScaleX;
             if (draw_ellipses)
             {
                 gGL.flush();
                 static const LLWString s_ellipsis(U"...");
                 render(s_ellipsis, 0,
-                       (gpu_result.pen_x - origin.mV[VX]) / sScaleX, (F32)y,
+                       (gpu_result.penX - origin.mV[VX]) / sScaleX, (F32)y,
                        color, LEFT, valign, style_to_add, NO_SHADOW,
                        S32_MAX, max_pixels, right_x, false, use_color,
                        nullptr, metadata, spacing);
@@ -558,7 +558,7 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
                 LLGLSLShader::sCurBoundShaderPtr->uniform1i(LLShaderMgr::FONT_SHADOW_MODE, 0);
             }
             gGL.popUIMatrix();
-            return gpu_result.chars_drawn;
+            return gpu_result.charsDrawn;
         }
     }
 #endif // LL_HAS_HB_GPU

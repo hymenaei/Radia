@@ -38,21 +38,50 @@
 #include "widgets/switch.h"
 
 namespace {
-const char* noEventArguments(const radia::ui::EventCall& call, radia::ui::WidgetEventKind) {
+using radia::ui::Binder;
+using radia::ui::Button;
+using radia::ui::ClipAxes;
+using radia::ui::CursorStyle;
+using radia::ui::EventCall;
+using radia::ui::EventPhase;
+using radia::ui::Floater;
+using radia::ui::Label;
+using radia::ui::MouseWidgetEvent;
+using radia::ui::Panel;
+using radia::ui::PointerButton;
+using radia::ui::PointerEvent;
+using radia::ui::RecordingPaintContext;
+using radia::ui::ScrollEvent;
+using radia::ui::StyleSheet;
+using radia::ui::Surface;
+using radia::ui::SurfaceLayer;
+using radia::ui::Switch;
+using radia::ui::Visibility;
+using radia::ui::Widget;
+using radia::ui::WidgetEvent;
+using radia::ui::WidgetEventKind;
+using radia::ui::WidgetState;
+using radia::ui::kKeySpace;
+using radia::ui::kKeyTab;
+using radia::ui::fixedTextMetrics;
+using radia::ui::clipsAxis;
+using radia::ui::detail::makeEventRegistration;
+
+const char* noEventArguments(const EventCall& call, WidgetEventKind) {
     return call.arguments().empty() ? nullptr : "binding.event.arity_mismatch";
 }
 
-template<typename Callback> void bindAction(radia::ui::Binder& binder, std::string name, Callback callback) {
-    binder.event(radia::ui::detail::makeEventRegistration(
-        std::move(name), std::nullopt, [callback = std::move(callback)](const radia::ui::WidgetEvent&, const radia::ui::EventCall&) mutable { callback(); },
+template<typename Callback> void bindAction(Binder& binder, std::string name, Callback callback) {
+    binder.event(makeEventRegistration(
+        std::move(name), std::nullopt, [callback = std::move(callback)](const WidgetEvent&, const EventCall&) mutable { callback(); },
         noEventArguments));
 }
 
 template<typename Event, typename Callback>
-void bindSemanticEvent(radia::ui::Binder& binder, std::string name, std::optional<radia::ui::WidgetEventKind> kind, Callback callback) {
-    binder.event(radia::ui::detail::makeEventRegistration(
+void bindSemanticEvent(Binder& binder, std::string name, std::optional<WidgetEventKind> kind, Callback callback) {
+    binder.event(makeEventRegistration(
         std::move(name), kind,
-        [callback = std::move(callback)](const radia::ui::WidgetEvent& event, const radia::ui::EventCall&) mutable {
+        [callback = std::move(callback)](const WidgetEvent& event, const EventCall&) mutable {
             callback(static_cast<const Event&>(event));
         },
         noEventArguments));
@@ -60,13 +89,13 @@ void bindSemanticEvent(radia::ui::Binder& binder, std::string name, std::optiona
 } // namespace
 
 namespace tut {
-class InputProbe final : public radia::ui::Widget {
+class InputProbe final : public Widget {
 public:
     InputProbe() : Widget("input_probe") {}
 
     bool defaultPointerEvents() const override { return true; }
     bool focusable() const override { return true; }
-    bool beginPointerInteraction(const radia::ui::PointerEvent& event) override {
+    bool beginPointerInteraction(const PointerEvent& event) override {
         lastClickCount = event.clickCount;
         return false;
     }
@@ -74,7 +103,7 @@ public:
         lastCodepoint = codepoint;
         return true;
     }
-    bool defaultScroll(const radia::ui::ScrollEvent& event) override {
+    bool defaultScroll(const ScrollEvent& event) override {
         lastScrollX = event.dx;
         lastScrollY = event.dy;
         return true;
@@ -86,13 +115,13 @@ public:
     float lastScrollY = 0.f;
 };
 
-class CaptureProbe final : public radia::ui::Widget {
+class CaptureProbe final : public Widget {
 public:
     CaptureProbe() : Widget("capture_probe") {}
 
     bool defaultPointerEvents() const override { return true; }
-    bool beginPointerInteraction(const radia::ui::PointerEvent&) override { return true; }
-    bool endPointerInteraction(const radia::ui::PointerEvent&) override {
+    bool beginPointerInteraction(const PointerEvent&) override { return true; }
+    bool endPointerInteraction(const PointerEvent&) override {
         ++ends;
         return true;
     }
@@ -100,7 +129,7 @@ public:
     int ends = 0;
 };
 
-class PaintProbe final : public radia::ui::Widget {
+class PaintProbe final : public Widget {
 public:
     PaintProbe() : Widget("paint_probe") {}
 
@@ -111,7 +140,7 @@ public:
     mutable int paints = 0;
 };
 
-class OrderedPaintProbe final : public radia::ui::Widget {
+class OrderedPaintProbe final : public Widget {
 public:
     OrderedPaintProbe(std::string name, std::vector<std::string>& paintOrder)
         : Widget("ordered_probe"), mName(std::move(name)), mPaintOrder(paintOrder) {}
@@ -125,12 +154,12 @@ private:
     std::vector<std::string>& mPaintOrder;
 };
 
-class RoutedProbe final : public radia::ui::Widget {
+class RoutedProbe final : public Widget {
 public:
     RoutedProbe(std::string name, std::vector<std::string>& log) : Widget("routed_probe"), mName(std::move(name)), mLog(log) {}
 
     bool defaultPointerEvents() const override { return true; }
-    bool beginPointerInteraction(const radia::ui::PointerEvent&) override {
+    bool beginPointerInteraction(const PointerEvent&) override {
         ++begins;
         return true;
     }
@@ -141,9 +170,9 @@ public:
 protected:
     void onEvent(radia::ui::RoutedEvent& event) override {
         if (event.kind() != radia::ui::EventKind::PointerDown) return;
-        const char* phase = event.phase() == radia::ui::EventPhase::Capture ? "capture" : event.phase() == radia::ui::EventPhase::Target ? "target" : "bubble";
+        const char* phase = event.phase() == EventPhase::Capture ? "capture" : event.phase() == EventPhase::Target ? "target" : "bubble";
         mLog.push_back(mName + ":" + phase);
-        if (preventDefault && event.phase() == radia::ui::EventPhase::Target) event.preventDefault();
+        if (preventDefault && event.phase() == EventPhase::Target) event.preventDefault();
     }
 
 private:
@@ -157,65 +186,65 @@ using surfaceObject = surfaceTest::object;
 surfaceTest surfaceTestCase("surface");
 
 template<> template<> void surfaceObject::test<1>() {
-    radia::ui::Surface context;
+    Surface context;
     context.setViewport(100.f, 100.f);
-    auto button = std::make_unique<radia::ui::Button>();
-    radia::ui::Button* target = button.get();
+    auto button = std::make_unique<Button>();
+    Button* target = button.get();
     int activations = 0;
-    button->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true).setOnActivate([&](radia::ui::Widget&) { ++activations; });
+    button->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true).setOnActivate([&](Widget&) { ++activations; });
     context.root().addChild(std::move(button));
     ensure("move consumed", context.pointerMove({{15.f, 15.f}}));
-    ensure("hover set", target->hasState(radia::ui::WidgetState::Hovered));
-    context.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left});
-    ensure("pressed control active", target->hasState(radia::ui::WidgetState::Active));
+    ensure("hover set", target->hasState(WidgetState::Hovered));
+    context.pointerDown({{15.f, 15.f}, PointerButton::Left});
+    ensure("pressed control active", target->hasState(WidgetState::Active));
     context.pointerMove({{50.f, 50.f}});
-    ensure("leaving pressed control clears active", !target->hasState(radia::ui::WidgetState::Active));
+    ensure("leaving pressed control clears active", !target->hasState(WidgetState::Active));
     context.pointerMove({{15.f, 15.f}});
-    ensure("re-entering pressed control restores active", target->hasState(radia::ui::WidgetState::Active));
-    context.pointerUp({{15.f, 15.f}, radia::ui::PointerButton::Left});
+    ensure("re-entering pressed control restores active", target->hasState(WidgetState::Active));
+    context.pointerUp({{15.f, 15.f}, PointerButton::Left});
     ensure_equals("pointer activates", activations, 1);
     ensure("control focused", context.hasFocus());
-    ensure("mouse focus is not focus-visible", !target->hasState(radia::ui::WidgetState::FocusVisible));
+    ensure("mouse focus is not focus-visible", !target->hasState(WidgetState::FocusVisible));
 
-    context.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left});
+    context.pointerDown({{15.f, 15.f}, PointerButton::Left});
     context.pointerLeave();
-    ensure("mouse leave clears pressed active", !target->hasState(radia::ui::WidgetState::Active));
-    context.pointerUp({{50.f, 50.f}, radia::ui::PointerButton::Left});
+    ensure("mouse leave clears pressed active", !target->hasState(WidgetState::Active));
+    context.pointerUp({{50.f, 50.f}, PointerButton::Left});
     ensure_equals("release outside does not activate", activations, 1);
 }
 
 template<> template<> void surfaceObject::test<2>() {
-    radia::ui::Surface context;
+    Surface context;
     context.setViewport(100.f, 100.f);
-    auto control = std::make_unique<radia::ui::Switch>();
-    radia::ui::Switch* target = control.get();
+    auto control = std::make_unique<Switch>();
+    Switch* target = control.get();
     int changes = 0;
     control->setOnCheckedChanged([&](bool) { ++changes; });
     control->setRect({10.f, 10.f, 40.f, 20.f}).setPointerEvents(true);
     context.root().addChild(std::move(control));
-    context.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left});
-    context.pointerUp({{15.f, 15.f}, radia::ui::PointerButton::Left});
+    context.pointerDown({{15.f, 15.f}, PointerButton::Left});
+    context.pointerUp({{15.f, 15.f}, PointerButton::Left});
     ensure("switch toggles itself", target->checked());
-    ensure("unmatched activation key-up is ignored", !context.keyUp({radia::ui::KEY_SPACE}));
+    ensure("unmatched activation key-up is ignored", !context.keyUp({kKeySpace}));
     ensure("unmatched key-up does not toggle switch", target->checked());
-    context.keyDown({radia::ui::KEY_SPACE});
-    ensure("keyboard active state set", target->hasState(radia::ui::WidgetState::Active));
-    ensure("mismatched activation key-up is ignored", !context.keyUp({radia::ui::KEY_RETURN}));
-    ensure("mismatched key-up preserves held active state", target->hasState(radia::ui::WidgetState::Active));
-    context.keyUp({radia::ui::KEY_SPACE});
+    context.keyDown({kKeySpace});
+    ensure("keyboard active state set", target->hasState(WidgetState::Active));
+    ensure("mismatched activation key-up is ignored", !context.keyUp({radia::ui::kKeyReturn}));
+    ensure("mismatched key-up preserves held active state", target->hasState(WidgetState::Active));
+    context.keyUp({kKeySpace});
     ensure("keyboard toggles switch", !target->checked());
-    ensure("duplicate activation key-up is ignored", !context.keyUp({radia::ui::KEY_SPACE}));
+    ensure("duplicate activation key-up is ignored", !context.keyUp({kKeySpace}));
     ensure_equals("checked callback follows both activations", changes, 2);
 }
 
 template<> template<> void surfaceObject::test<3>() {
-    radia::ui::Surface context;
+    Surface context;
     context.setViewport(100.f, 100.f);
-    auto button = std::make_unique<radia::ui::Button>();
+    auto button = std::make_unique<Button>();
     button->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
     context.root().addChild(std::move(button));
     context.pointerMove({{15.f, 15.f}});
-    context.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left});
+    context.pointerDown({{15.f, 15.f}, PointerButton::Left});
     ensure("control focused before mutation", context.hasFocus());
     context.root().clearChildren();
     ensure("tree mutation invalidates interaction references", !context.hasFocus());
@@ -223,96 +252,96 @@ template<> template<> void surfaceObject::test<3>() {
 }
 
 template<> template<> void surfaceObject::test<4>() {
-    radia::ui::Surface context;
+    Surface context;
     context.setViewport(100.f, 100.f);
-    auto button = std::make_unique<radia::ui::Button>();
+    auto button = std::make_unique<Button>();
     button->setDisabled(true).setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
     context.root().addChild(std::move(button));
-    ensure("disabled control still blocks pointer", context.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left}));
+    ensure("disabled control still blocks pointer", context.pointerDown({{15.f, 15.f}, PointerButton::Left}));
     ensure("disabled control is not focused", !context.hasFocus());
 }
 
 template<> template<> void surfaceObject::test<5>() {
-    radia::ui::StyleSheet styleSheet;
+    StyleSheet styleSheet;
     styleSheet.loadRadia("floater { flow: column; } floater::header { height: 30px; } floater::content { flex-grow: 1; } label { height: 20px; }");
-    radia::ui::Surface context(styleSheet);
+    Surface context(styleSheet);
     context.setViewport(200.f, 200.f);
 
-    auto floater = std::make_unique<radia::ui::Floater>();
-    radia::ui::Floater* floaterPtr = floater.get();
+    auto floater = std::make_unique<Floater>();
+    Floater* floaterPtr = floater.get();
     floater->setTitle("title").setCanClose(false).setCanMinimize(true);
-    auto content = std::make_unique<radia::ui::Label>("content");
-    radia::ui::Label* contentNode = content.get();
+    auto content = std::make_unique<Label>("content");
+    Label* contentNode = content.get();
     floater->addChild(std::move(content));
     floater->setRect({20.f, 20.f, 100.f, 100.f});
     context.mountFloater(std::move(floater));
     context.updateLayout();
 
-    ensure("header starts drag", context.pointerDown({{30.f, 110.f}, radia::ui::PointerButton::Left}));
-    ensure("captured move handled", context.pointerMove({{50.f, 120.f}, radia::ui::PointerButton::Left}));
-    context.pointerUp({{50.f, 120.f}, radia::ui::PointerButton::Left});
+    ensure("header starts drag", context.pointerDown({{30.f, 110.f}, PointerButton::Left}));
+    ensure("captured move handled", context.pointerMove({{50.f, 120.f}, PointerButton::Left}));
+    context.pointerUp({{50.f, 120.f}, PointerButton::Left});
     ensure_equals("drag moves x", floaterPtr->rect().x, 40.f);
     ensure_equals("drag moves y", floaterPtr->rect().y, 30.f);
 
     const float expandedTop = floaterPtr->rect().top();
     const float expandedWidth = floaterPtr->rect().w;
     floaterPtr->setMinimized(true);
-    ensure("minimized state is style-visible", floaterPtr->hasState(radia::ui::WidgetState::Minimized));
-    ensure("content box collapsed while minimized", floaterPtr->content()->visibility() == radia::ui::Visibility::Collapsed);
-    ensure("child visibility is preserved while content box collapses", contentNode->visibility() == radia::ui::Visibility::Visible);
+    ensure("minimized state is style-visible", floaterPtr->hasState(WidgetState::Minimized));
+    ensure("content box collapsed while minimized", floaterPtr->content()->visibility() == Visibility::Collapsed);
+    ensure("child visibility is preserved while content box collapses", contentNode->visibility() == Visibility::Visible);
     ensure_equals("minimize preserves top", floaterPtr->rect().top(), expandedTop);
     ensure_equals("minimize uses header height", floaterPtr->rect().h, 30.f);
     ensure("minimize shrinks width to header identity and controls", floaterPtr->rect().w < expandedWidth);
     floaterPtr->setMinimized(false);
-    ensure("expanded state clears minimized style", !floaterPtr->hasState(radia::ui::WidgetState::Minimized));
-    ensure("content box visibility restored", floaterPtr->content()->visibility() == radia::ui::Visibility::Visible);
-    ensure("child remains visible after expansion", contentNode->visibility() == radia::ui::Visibility::Visible);
+    ensure("expanded state clears minimized style", !floaterPtr->hasState(WidgetState::Minimized));
+    ensure("content box visibility restored", floaterPtr->content()->visibility() == Visibility::Visible);
+    ensure("child remains visible after expansion", contentNode->visibility() == Visibility::Visible);
     ensure_equals("expanded height restored", floaterPtr->rect().h, 100.f);
     ensure_equals("expanded width restored", floaterPtr->rect().w, expandedWidth);
 
-    ensure("header double-click is handled", context.pointerDown({{50.f, 120.f}, radia::ui::PointerButton::Left, 0, 2}));
+    ensure("header double-click is handled", context.pointerDown({{50.f, 120.f}, PointerButton::Left, 0, 2}));
     ensure("header double-click minimizes", floaterPtr->minimized());
-    context.pointerUp({{50.f, 120.f}, radia::ui::PointerButton::Left});
-    ensure("second header double-click is handled", context.pointerDown({{50.f, 120.f}, radia::ui::PointerButton::Left, 0, 2}));
+    context.pointerUp({{50.f, 120.f}, PointerButton::Left});
+    ensure("second header double-click is handled", context.pointerDown({{50.f, 120.f}, PointerButton::Left, 0, 2}));
     ensure("header double-click restores", !floaterPtr->minimized());
-    context.pointerUp({{50.f, 120.f}, radia::ui::PointerButton::Left});
+    context.pointerUp({{50.f, 120.f}, PointerButton::Left});
 }
 
 template<> template<> void surfaceObject::test<6>() {
-    radia::ui::Surface context;
+    Surface context;
     context.setViewport(100.f, 100.f);
-    auto button = std::make_unique<radia::ui::Button>();
-    radia::ui::Button* target = button.get();
+    auto button = std::make_unique<Button>();
+    Button* target = button.get();
     int activations = 0;
-    button->setRect({10.f, 10.f, 20.f, 20.f}).setOnActivate([&](radia::ui::Widget&) { ++activations; });
+    button->setRect({10.f, 10.f, 20.f, 20.f}).setOnActivate([&](Widget&) { ++activations; });
     context.root().addChild(std::move(button));
 
-    for (radia::ui::PointerButton pointerButton :
-         {radia::ui::PointerButton::Right, radia::ui::PointerButton::Middle, radia::ui::PointerButton::Auxiliary1, radia::ui::PointerButton::Auxiliary2}) {
+    for (PointerButton pointerButton :
+         {PointerButton::Right, PointerButton::Middle, PointerButton::Auxiliary1, PointerButton::Auxiliary2}) {
         ensure("non-left down is consumed over control", context.pointerDown({{15.f, 15.f}, pointerButton}));
         ensure("non-left up is consumed over control", context.pointerUp({{15.f, 15.f}, pointerButton}));
     }
     ensure_equals("non-left buttons do not activate", activations, 0);
     ensure("non-left buttons do not focus", !context.hasFocus());
-    ensure("non-left buttons do not set active state", !target->hasState(radia::ui::WidgetState::Active));
+    ensure("non-left buttons do not set active state", !target->hasState(WidgetState::Active));
 
-    context.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left});
-    context.pointerUp({{15.f, 15.f}, radia::ui::PointerButton::Left});
+    context.pointerDown({{15.f, 15.f}, PointerButton::Left});
+    context.pointerUp({{15.f, 15.f}, PointerButton::Left});
     ensure_equals("left button still activates", activations, 1);
 }
 
 template<> template<> void surfaceObject::test<7>() {
-    radia::ui::Surface context;
+    Surface context;
     context.setViewport(100.f, 100.f);
     auto probe = std::make_unique<InputProbe>();
     InputProbe* target = probe.get();
     probe->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
     context.root().addChild(std::move(probe));
 
-    ensure("double click down handled", context.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left, 0, 2}));
+    ensure("double click down handled", context.pointerDown({{15.f, 15.f}, PointerButton::Left, 0, 2}));
     ensure_equals("double click count reaches node", target->lastClickCount, static_cast<uint8_t>(2));
-    ensure("double click release handled", context.pointerUp({{15.f, 15.f}, radia::ui::PointerButton::Left}));
-    ensure("double click release clears active", !target->hasState(radia::ui::WidgetState::Active));
+    ensure("double click release handled", context.pointerUp({{15.f, 15.f}, PointerButton::Left}));
+    ensure("double click release clears active", !target->hasState(WidgetState::Active));
     ensure("probe receives focus", context.hasFocus());
     ensure("character input handled by focus", context.charInput(0x03A9));
     ensure_equals("Unicode codepoint reaches focus", target->lastCodepoint, 0x03A9u);
@@ -328,153 +357,153 @@ template<> template<> void surfaceObject::test<7>() {
 
     ensure("hover restored", context.pointerMove({{15.f, 15.f}}));
     context.pointerLeave();
-    ensure("mouse leave clears hover", !target->hasState(radia::ui::WidgetState::Hovered));
+    ensure("mouse leave clears hover", !target->hasState(WidgetState::Hovered));
 }
 
 template<> template<> void surfaceObject::test<8>() {
-    radia::ui::StyleSheet styleSheet;
+    StyleSheet styleSheet;
     styleSheet.loadRadia("floater { flow: column; } floater::header { height: 30px; } floater::content { flex-grow: 1; }");
-    radia::ui::Surface context(styleSheet);
+    Surface context(styleSheet);
     context.setViewport(200.f, 200.f);
-    auto floater = std::make_unique<radia::ui::Floater>();
+    auto floater = std::make_unique<Floater>();
     floater->setTitle("title").setCanClose(false).setCanMinimize(false);
     floater->setRect({20.f, 20.f, 100.f, 100.f});
     context.mountFloater(std::move(floater));
     context.updateLayout();
 
-    ensure("header starts capture", context.pointerDown({{30.f, 110.f}, radia::ui::PointerButton::Left}));
+    ensure("header starts capture", context.pointerDown({{30.f, 110.f}, PointerButton::Left}));
     ensure("context owns capture", context.hasPointerCapture());
-    ensure("captured move outside viewport handled", context.pointerMove({{-50.f, -50.f}, radia::ui::PointerButton::Left}));
-    ensure("captured release outside viewport handled", context.pointerUp({{-50.f, -50.f}, radia::ui::PointerButton::Left}));
+    ensure("captured move outside viewport handled", context.pointerMove({{-50.f, -50.f}, PointerButton::Left}));
+    ensure("captured release outside viewport handled", context.pointerUp({{-50.f, -50.f}, PointerButton::Left}));
     ensure("release ends capture", !context.hasPointerCapture());
 
-    ensure("second header press starts capture", context.pointerDown({{10.f, 90.f}, radia::ui::PointerButton::Left}));
+    ensure("second header press starts capture", context.pointerDown({{10.f, 90.f}, PointerButton::Left}));
     context.clearInteractionState();
     ensure("capture loss clears capture", !context.hasPointerCapture());
 }
 
 template<> template<> void surfaceObject::test<9>() {
-    radia::ui::Surface context;
+    Surface context;
     context.setViewport(200.f, 200.f);
 
-    auto first = std::make_unique<radia::ui::Button>();
-    radia::ui::Button* firstTarget = first.get();
+    auto first = std::make_unique<Button>();
+    Button* firstTarget = first.get();
     first->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
     context.root().addChild(std::move(first));
 
-    auto hidden = std::make_unique<radia::ui::Button>();
-    radia::ui::Button* hiddenTarget = hidden.get();
-    hidden->setVisibility(radia::ui::Visibility::Hidden).setRect({40.f, 10.f, 20.f, 20.f});
+    auto hidden = std::make_unique<Button>();
+    Button* hiddenTarget = hidden.get();
+    hidden->setVisibility(Visibility::Hidden).setRect({40.f, 10.f, 20.f, 20.f});
     context.root().addChild(std::move(hidden));
 
-    auto disabled = std::make_unique<radia::ui::Button>();
-    radia::ui::Button* disabledTarget = disabled.get();
+    auto disabled = std::make_unique<Button>();
+    Button* disabledTarget = disabled.get();
     disabled->setDisabled(true).setRect({70.f, 10.f, 20.f, 20.f});
     context.root().addChild(std::move(disabled));
 
-    auto last = std::make_unique<radia::ui::Switch>();
-    radia::ui::Switch* lastTarget = last.get();
+    auto last = std::make_unique<Switch>();
+    Switch* lastTarget = last.get();
     last->setRect({100.f, 10.f, 40.f, 20.f});
     context.root().addChild(std::move(last));
 
-    ensure("Tab focuses first control", context.keyDown({radia::ui::KEY_TAB}));
-    ensure("first is focused", firstTarget->hasState(radia::ui::WidgetState::Focused));
-    ensure("Tab focus is visible", firstTarget->hasState(radia::ui::WidgetState::FocusVisible));
-    ensure("Tab key-up consumed", context.keyUp({radia::ui::KEY_TAB}));
+    ensure("Tab focuses first control", context.keyDown({kKeyTab}));
+    ensure("first is focused", firstTarget->hasState(WidgetState::Focused));
+    ensure("Tab focus is visible", firstTarget->hasState(WidgetState::FocusVisible));
+    ensure("Tab key-up consumed", context.keyUp({kKeyTab}));
 
-    context.keyDown({radia::ui::KEY_TAB});
-    ensure("Tab skips hidden and disabled controls", lastTarget->hasState(radia::ui::WidgetState::Focused));
-    ensure("hidden control not focused", !hiddenTarget->hasState(radia::ui::WidgetState::Focused));
-    ensure("disabled control not focused", !disabledTarget->hasState(radia::ui::WidgetState::Focused));
+    context.keyDown({kKeyTab});
+    ensure("Tab skips hidden and disabled controls", lastTarget->hasState(WidgetState::Focused));
+    ensure("hidden control not focused", !hiddenTarget->hasState(WidgetState::Focused));
+    ensure("disabled control not focused", !disabledTarget->hasState(WidgetState::Focused));
 
-    context.keyDown({radia::ui::KEY_TAB});
-    ensure("forward traversal wraps", firstTarget->hasState(radia::ui::WidgetState::Focused));
-    context.keyDown({radia::ui::KEY_TAB, radia::ui::MODIFIER_SHIFT});
-    ensure("Shift+Tab traverses backward and wraps", lastTarget->hasState(radia::ui::WidgetState::Focused));
+    context.keyDown({kKeyTab});
+    ensure("forward traversal wraps", firstTarget->hasState(WidgetState::Focused));
+    context.keyDown({kKeyTab, radia::ui::kModifierShift});
+    ensure("Shift+Tab traverses backward and wraps", lastTarget->hasState(WidgetState::Focused));
 
-    context.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left});
-    ensure("mouse moves focus", firstTarget->hasState(radia::ui::WidgetState::Focused));
-    ensure("mouse focus clears focus-visible", !firstTarget->hasState(radia::ui::WidgetState::FocusVisible));
-    firstTarget->setVisibility(radia::ui::Visibility::Hidden);
-    ensure("hidden focused node rejects keyboard input", !context.keyDown({radia::ui::KEY_SPACE}));
+    context.pointerDown({{15.f, 15.f}, PointerButton::Left});
+    ensure("mouse moves focus", firstTarget->hasState(WidgetState::Focused));
+    ensure("mouse focus clears focus-visible", !firstTarget->hasState(WidgetState::FocusVisible));
+    firstTarget->setVisibility(Visibility::Hidden);
+    ensure("hidden focused node rejects keyboard input", !context.keyDown({kKeySpace}));
     ensure("hidden focused node clears focus", !context.hasFocus());
-    firstTarget->setVisibility(radia::ui::Visibility::Visible);
-    context.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left});
+    firstTarget->setVisibility(Visibility::Visible);
+    context.pointerDown({{15.f, 15.f}, PointerButton::Left});
     firstTarget->setDisabled(true);
     ensure("disabled focused node rejects character input", !context.charInput('x'));
     ensure("disabled focused node clears focus", !context.hasFocus());
     firstTarget->setDisabled(false);
-    context.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left});
+    context.pointerDown({{15.f, 15.f}, PointerButton::Left});
     context.clearInteractionState();
-    ensure("focus loss clears focused state", !firstTarget->hasState(radia::ui::WidgetState::Focused));
-    ensure("focus loss clears focus-visible state", !firstTarget->hasState(radia::ui::WidgetState::FocusVisible));
+    ensure("focus loss clears focused state", !firstTarget->hasState(WidgetState::Focused));
+    ensure("focus loss clears focus-visible state", !firstTarget->hasState(WidgetState::FocusVisible));
 }
 
 template<> template<> void surfaceObject::test<10>() {
-    radia::ui::Surface context;
+    Surface context;
     context.setViewport(100.f, 100.f);
-    auto panel = std::make_unique<radia::ui::Panel>();
-    radia::ui::Panel* parent = panel.get();
+    auto panel = std::make_unique<Panel>();
+    Panel* parent = panel.get();
     panel->setRect({0.f, 0.f, 100.f, 100.f});
-    auto button = std::make_unique<radia::ui::Button>();
-    radia::ui::Button* target = button.get();
+    auto button = std::make_unique<Button>();
+    Button* target = button.get();
     button->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
     panel->addChild(std::move(button));
     context.root().addChild(std::move(panel));
 
     context.pointerMove({{15.f, 15.f}});
-    context.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left});
-    context.pointerUp({{15.f, 15.f}, radia::ui::PointerButton::Left});
-    context.keyDown({radia::ui::KEY_SPACE});
-    ensure("keyboard press active before capture loss", target->hasState(radia::ui::WidgetState::Active));
+    context.pointerDown({{15.f, 15.f}, PointerButton::Left});
+    context.pointerUp({{15.f, 15.f}, PointerButton::Left});
+    context.keyDown({kKeySpace});
+    ensure("keyboard press active before capture loss", target->hasState(WidgetState::Active));
     context.clearInteractionState();
-    ensure("capture loss clears hover", !target->hasState(radia::ui::WidgetState::Hovered));
-    ensure("capture loss clears keyboard active", !target->hasState(radia::ui::WidgetState::Active));
+    ensure("capture loss clears hover", !target->hasState(WidgetState::Hovered));
+    ensure("capture loss clears keyboard active", !target->hasState(WidgetState::Active));
     ensure("capture loss clears focus", !context.hasFocus());
 
     context.pointerMove({{15.f, 15.f}});
-    context.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left});
-    ensure("pointer press active before capture loss", target->hasState(radia::ui::WidgetState::Active));
+    context.pointerDown({{15.f, 15.f}, PointerButton::Left});
+    ensure("pointer press active before capture loss", target->hasState(WidgetState::Active));
     context.clearInteractionState();
-    ensure("capture loss clears pointer active", !target->hasState(radia::ui::WidgetState::Active));
+    ensure("capture loss clears pointer active", !target->hasState(WidgetState::Active));
 
-    context.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left});
-    parent->setVisibility(radia::ui::Visibility::Hidden);
-    ensure("hidden ancestor rejects keyboard input", !context.keyDown({radia::ui::KEY_SPACE}));
+    context.pointerDown({{15.f, 15.f}, PointerButton::Left});
+    parent->setVisibility(Visibility::Hidden);
+    ensure("hidden ancestor rejects keyboard input", !context.keyDown({kKeySpace}));
     ensure("hidden ancestor clears descendant focus", !context.hasFocus());
-    parent->setVisibility(radia::ui::Visibility::Visible);
-    context.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left});
+    parent->setVisibility(Visibility::Visible);
+    context.pointerDown({{15.f, 15.f}, PointerButton::Left});
     parent->setDisabled(true);
-    ensure("disabled ancestor rejects keyboard input", !context.keyDown({radia::ui::KEY_SPACE}));
+    ensure("disabled ancestor rejects keyboard input", !context.keyDown({kKeySpace}));
     ensure("disabled ancestor clears descendant focus", !context.hasFocus());
 }
 
 template<> template<> void surfaceObject::test<11>() {
-    radia::ui::Surface context;
+    Surface context;
     context.setViewport(100.f, 100.f);
-    auto button = std::make_unique<radia::ui::Button>();
+    auto button = std::make_unique<Button>();
     button->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
-    button->setEventCall(radia::ui::WidgetEventKind::MouseDown, radia::ui::EventCall("press"));
-    button->setEventCall(radia::ui::WidgetEventKind::MouseUp, radia::ui::EventCall("release"));
-    button->setEventCall(radia::ui::WidgetEventKind::Click, radia::ui::EventCall("click"));
-    button->setEventCall(radia::ui::WidgetEventKind::DoubleClick, radia::ui::EventCall("doubleClick"));
-    button->setEventCall(radia::ui::WidgetEventKind::ContextMenu, radia::ui::EventCall("contextMenu"));
+    button->setEventCall(WidgetEventKind::MouseDown, EventCall("press"));
+    button->setEventCall(WidgetEventKind::MouseUp, EventCall("release"));
+    button->setEventCall(WidgetEventKind::Click, EventCall("click"));
+    button->setEventCall(WidgetEventKind::DoubleClick, EventCall("doubleClick"));
+    button->setEventCall(WidgetEventKind::ContextMenu, EventCall("contextMenu"));
     context.root().addChild(std::move(button));
 
     std::vector<std::string> events;
-    radia::ui::Binder binder(context.root());
-    bindSemanticEvent<radia::ui::MouseWidgetEvent>(binder, "press", std::nullopt, [&](const radia::ui::MouseWidgetEvent& event) {
-        ensure("mouse context reports button", event.mouse.button != radia::ui::PointerButton::NoButton);
+    Binder binder(context.root());
+    bindSemanticEvent<MouseWidgetEvent>(binder, "press", std::nullopt, [&](const MouseWidgetEvent& event) {
+        ensure("mouse context reports button", event.mouse.button != PointerButton::NoButton);
         events.push_back("down");
     });
     bindAction(binder, "release", [&] { events.push_back("up"); });
     bindAction(binder, "click", [&] { events.push_back("click"); });
-    bindSemanticEvent<radia::ui::MouseWidgetEvent>(binder, "doubleClick", std::nullopt, [&](const radia::ui::MouseWidgetEvent& event) {
+    bindSemanticEvent<MouseWidgetEvent>(binder, "doubleClick", std::nullopt, [&](const MouseWidgetEvent& event) {
         ensure_equals("double click preserves native count", event.mouse.clickCount, 2);
         events.push_back("double");
     });
-    bindSemanticEvent<radia::ui::MouseWidgetEvent>(binder, "contextMenu", std::nullopt, [&](const radia::ui::MouseWidgetEvent& event) {
-        ensure("context menu reports right button", event.mouse.button == radia::ui::PointerButton::Right);
+    bindSemanticEvent<MouseWidgetEvent>(binder, "contextMenu", std::nullopt, [&](const MouseWidgetEvent& event) {
+        ensure("context menu reports right button", event.mouse.button == PointerButton::Right);
         events.push_back("context");
     });
     radia::ui::PreparedBindingResult prepared = binder.prepare();
@@ -482,52 +511,52 @@ template<> template<> void surfaceObject::test<11>() {
     radia::ui::Binding binding = bindingPrepared ? prepared.binding.commit() : radia::ui::Binding{};
     ensure("mouse actions bind", bindingPrepared && binding);
 
-    context.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left});
-    context.pointerUp({{15.f, 15.f}, radia::ui::PointerButton::Left});
+    context.pointerDown({{15.f, 15.f}, PointerButton::Left});
+    context.pointerUp({{15.f, 15.f}, PointerButton::Left});
     ensure_equals("down up click order", events.size(), 3U);
     ensure_equals("down first", events[0], "down");
     ensure_equals("up second", events[1], "up");
     ensure_equals("click last", events[2], "click");
 
-    context.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left});
-    context.pointerUp({{50.f, 50.f}, radia::ui::PointerButton::Left});
+    context.pointerDown({{15.f, 15.f}, PointerButton::Left});
+    context.pointerUp({{50.f, 50.f}, PointerButton::Left});
     ensure_equals("release outside still emits up without click", events.size(), 5U);
     ensure_equals("outside release ends pair", events.back(), "up");
 
-    context.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Right});
-    context.pointerUp({{15.f, 15.f}, radia::ui::PointerButton::Right});
+    context.pointerDown({{15.f, 15.f}, PointerButton::Right});
+    context.pointerUp({{15.f, 15.f}, PointerButton::Right});
     ensure_equals("context menu follows right mouse up", events.size(), 8U);
     ensure_equals("context menu is last", events.back(), "context");
 
-    context.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left, 0, 2});
-    context.pointerUp({{15.f, 15.f}, radia::ui::PointerButton::Left});
+    context.pointerDown({{15.f, 15.f}, PointerButton::Left, 0, 2});
+    context.pointerUp({{15.f, 15.f}, PointerButton::Left});
     ensure_equals("second click emits click then double click", events.size(), 12U);
     ensure_equals("second click precedes double click", events[10], "click");
     ensure_equals("double click is last", events[11], "double");
 }
 
 template<> template<> void surfaceObject::test<12>() {
-    radia::ui::Surface context;
+    Surface context;
     context.setViewport(100.f, 80.f);
-    auto panel = std::make_unique<radia::ui::Panel>();
-    radia::ui::Panel* mounted = panel.get();
+    auto panel = std::make_unique<Panel>();
+    Panel* mounted = panel.get();
     context.mount(std::move(panel));
     ensure("mounted widget unmounts", context.unmount(*mounted) != nullptr);
 
     ensure_equals("unmount leaves valid root width", context.root().rect().w, 100.f);
     ensure_equals("unmount leaves valid root height", context.root().rect().h, 80.f);
-    ensure("input remains safe after unmount", !context.pointerDown({{10.f, 10.f}, radia::ui::PointerButton::Left}));
+    ensure("input remains safe after unmount", !context.pointerDown({{10.f, 10.f}, PointerButton::Left}));
 }
 
 template<> template<> void surfaceObject::test<13>() {
-    radia::ui::Surface surface;
+    Surface surface;
     surface.setViewport(100.f, 100.f);
     auto probe = std::make_unique<CaptureProbe>();
     CaptureProbe* target = probe.get();
     probe->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
     surface.root().addChild(std::move(probe));
 
-    ensure("probe captures pointer", surface.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left}));
+    ensure("probe captures pointer", surface.pointerDown({{15.f, 15.f}, PointerButton::Left}));
     ensure("surface records capture", surface.hasPointerCapture());
     target->setDisabled(true);
     ensure("disabling widget immediately clears capture", !surface.hasPointerCapture());
@@ -537,24 +566,24 @@ template<> template<> void surfaceObject::test<13>() {
 template<> template<> void surfaceObject::test<14>() {
     radia::ui::System system;
     ensure("global delay accepts positive duration", system.setLongClickDelay(std::chrono::milliseconds(600)));
-    std::unique_ptr<radia::ui::Surface> ownedSurface = system.createSurface(radia::ui::fixedTextMetrics());
-    radia::ui::Surface& surface = *ownedSurface;
+    std::unique_ptr<Surface> ownedSurface = system.createSurface(radia::ui::fixedTextMetrics());
+    Surface& surface = *ownedSurface;
     surface.setViewport(100.f, 100.f);
 
-    auto button = std::make_unique<radia::ui::Button>();
-    radia::ui::Button* target = button.get();
+    auto button = std::make_unique<Button>();
+    Button* target = button.get();
     button->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
-    button->setEventCall(radia::ui::WidgetEventKind::LongClick, radia::ui::EventCall("hold"));
-    button->setEventCall(radia::ui::WidgetEventKind::Click, radia::ui::EventCall("tap"));
-    button->setEventCall(radia::ui::WidgetEventKind::MouseUp, radia::ui::EventCall("release"));
+    button->setEventCall(WidgetEventKind::LongClick, EventCall("hold"));
+    button->setEventCall(WidgetEventKind::Click, EventCall("tap"));
+    button->setEventCall(WidgetEventKind::MouseUp, EventCall("release"));
     surface.root().addChild(std::move(button));
 
     int holds = 0;
     int taps = 0;
     int releases = 0;
     std::chrono::milliseconds heldFor{0};
-    radia::ui::Binder binder(surface.root());
-    bindSemanticEvent<radia::ui::LongClickEvent>(binder, "hold", radia::ui::WidgetEventKind::LongClick, [&](const radia::ui::LongClickEvent& event) {
+    Binder binder(surface.root());
+    bindSemanticEvent<radia::ui::LongClickEvent>(binder, "hold", WidgetEventKind::LongClick, [&](const radia::ui::LongClickEvent& event) {
         heldFor = event.heldFor;
         ++holds;
     });
@@ -565,7 +594,7 @@ template<> template<> void surfaceObject::test<14>() {
     radia::ui::Binding binding = bindingPrepared ? prepared.binding.commit() : radia::ui::Binding{};
     ensure("long click actions bind", bindingPrepared && binding);
 
-    surface.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left});
+    surface.pointerDown({{15.f, 15.f}, PointerButton::Left});
     surface.update(std::chrono::milliseconds(599));
     ensure_equals("global threshold not early", holds, 0);
     surface.update(std::chrono::milliseconds(1));
@@ -573,47 +602,47 @@ template<> template<> void surfaceObject::test<14>() {
     ensure_equals("long click reports held duration", heldFor.count(), 600LL);
     surface.update(std::chrono::milliseconds(500));
     ensure_equals("held action does not repeat", holds, 1);
-    surface.pointerUp({{15.f, 15.f}, radia::ui::PointerButton::Left});
+    surface.pointerUp({{15.f, 15.f}, PointerButton::Left});
     ensure_equals("release still fires after long click", releases, 1);
     ensure_equals("long click suppresses click", taps, 0);
 
     target->setLongClickDelay(std::chrono::milliseconds(200));
-    surface.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left});
+    surface.pointerDown({{15.f, 15.f}, PointerButton::Left});
     surface.update(std::chrono::milliseconds(200));
     ensure_equals("widget delay overrides global threshold", holds, 2);
     ensure_equals("override duration reaches typed event", heldFor.count(), 200LL);
-    surface.pointerUp({{15.f, 15.f}, radia::ui::PointerButton::Left});
+    surface.pointerUp({{15.f, 15.f}, PointerButton::Left});
     ensure_equals("override release still fires", releases, 2);
     ensure_equals("override long click also suppresses click", taps, 0);
 }
 
 template<> template<> void surfaceObject::test<15>() {
-    radia::ui::StyleSheet styleSheet;
+    StyleSheet styleSheet;
     ensure("pointer policy stylesheet compiles", styleSheet.loadRadia("button { pointer-events: none; } panel { pointer-events: auto; }").ok());
-    radia::ui::Surface surface(styleSheet);
+    Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
 
-    auto button = std::make_unique<radia::ui::Button>();
+    auto button = std::make_unique<Button>();
     button->setRect({10.f, 10.f, 20.f, 20.f});
     surface.root().addChild(std::move(button));
-    auto panel = std::make_unique<radia::ui::Panel>();
+    auto panel = std::make_unique<Panel>();
     panel->setRect({40.f, 10.f, 20.f, 20.f});
     surface.root().addChild(std::move(panel));
 
-    ensure("style can disable interactive widget without layout", !surface.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left}));
-    ensure("style can enable noninteractive widget without layout", surface.pointerDown({{45.f, 15.f}, radia::ui::PointerButton::Left}));
+    ensure("style can disable interactive widget without layout", !surface.pointerDown({{15.f, 15.f}, PointerButton::Left}));
+    ensure("style can enable noninteractive widget without layout", surface.pointerDown({{45.f, 15.f}, PointerButton::Left}));
 }
 
 template<> template<> void surfaceObject::test<16>() {
-    radia::ui::StyleSheet styleSheet;
+    StyleSheet styleSheet;
     ensure("automatic layout stylesheet compiles", styleSheet.loadRadia("panel { flow: row; } label { height: 10px; }").ok());
-    radia::ui::Surface surface(styleSheet);
+    Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
 
-    auto panel = std::make_unique<radia::ui::Panel>();
+    auto panel = std::make_unique<Panel>();
     panel->setRect({0.f, 0.f, 100.f, 20.f});
-    auto label = std::make_unique<radia::ui::Label>("a");
-    radia::ui::Label* text = label.get();
+    auto label = std::make_unique<Label>("a");
+    Label* text = label.get();
     panel->addChild(std::move(label));
     surface.root().addChild(std::move(panel));
 
@@ -625,15 +654,15 @@ template<> template<> void surfaceObject::test<16>() {
 }
 
 template<> template<> void surfaceObject::test<17>() {
-    radia::ui::StyleSheet styleSheet;
+    StyleSheet styleSheet;
     ensure("initial generated stylesheet compiles", styleSheet.loadRadia("label { width: 10px; height: 10px; }").ok());
-    radia::ui::Surface surface(styleSheet);
+    Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
 
-    auto panel = std::make_unique<radia::ui::Panel>();
+    auto panel = std::make_unique<Panel>();
     panel->setRect({0.f, 0.f, 100.f, 20.f});
-    auto label = std::make_unique<radia::ui::Label>("text");
-    radia::ui::Label* text = label.get();
+    auto label = std::make_unique<Label>("text");
+    Label* text = label.get();
     panel->addChild(std::move(label));
     surface.root().addChild(std::move(panel));
     surface.updateLayout();
@@ -645,7 +674,7 @@ template<> template<> void surfaceObject::test<17>() {
 }
 
 template<> template<> void surfaceObject::test<18>() {
-    radia::ui::Surface surface;
+    Surface surface;
     surface.setViewport(100.f, 100.f);
     std::vector<std::string> log;
 
@@ -656,7 +685,7 @@ template<> template<> void surfaceObject::test<18>() {
     parent->addChild(std::move(child));
     surface.root().addChild(std::move(parent));
 
-    ensure("routed press handled", surface.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left}));
+    ensure("routed press handled", surface.pointerDown({{15.f, 15.f}, PointerButton::Left}));
     ensure_equals("capture, target, bubble each run once", log.size(), std::size_t(3));
     ensure_equals("ancestor captures first", log[0], std::string("parent:capture"));
     ensure_equals("target runs second", log[1], std::string("child:target"));
@@ -664,7 +693,7 @@ template<> template<> void surfaceObject::test<18>() {
 }
 
 template<> template<> void surfaceObject::test<19>() {
-    radia::ui::Surface surface;
+    Surface surface;
     surface.setViewport(100.f, 100.f);
     std::vector<std::string> log;
     auto probe = std::make_unique<RoutedProbe>("target", log);
@@ -673,39 +702,39 @@ template<> template<> void surfaceObject::test<19>() {
     target->setRect({10.f, 10.f, 20.f, 20.f});
     surface.root().addChild(std::move(probe));
 
-    ensure("prevented routed press still consumed", surface.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left}));
+    ensure("prevented routed press still consumed", surface.pointerDown({{15.f, 15.f}, PointerButton::Left}));
     ensure_equals("preventDefault skips widget default behavior", target->begins, 0);
     ensure("preventDefault skips pointer capture", !surface.hasPointerCapture());
 }
 
 template<> template<> void surfaceObject::test<20>() {
-    radia::ui::StyleSheet styleSheet;
+    StyleSheet styleSheet;
     ensure("cursor stylesheet compiles",
            styleSheet.loadRadia("#parent { pointer-events: auto; cursor: grab; } #child { pointer-events: auto; }").ok());
-    radia::ui::Surface surface(styleSheet);
+    Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
 
-    auto parent = std::make_unique<radia::ui::Panel>();
+    auto parent = std::make_unique<Panel>();
     parent->setId("parent").setRect({0.f, 0.f, 100.f, 100.f});
-    auto child = std::make_unique<radia::ui::Panel>();
+    auto child = std::make_unique<Panel>();
     child->setId("child").setRect({10.f, 10.f, 20.f, 20.f});
     parent->addChild(std::move(child));
     surface.root().addChild(std::move(parent));
 
     ensure("child receives hover", surface.pointerMove({{15.f, 15.f}}));
-    ensure_equals("auto cursor inherits nearest explicit ancestor", static_cast<int>(surface.cursor()), static_cast<int>(radia::ui::CursorStyle::Grab));
+    ensure_equals("auto cursor inherits nearest explicit ancestor", static_cast<int>(surface.cursor()), static_cast<int>(CursorStyle::Grab));
 
     ensure("explicit auto cursor compiles",
            styleSheet.loadRadia("#parent { pointer-events: auto; cursor: grab; } #child { pointer-events: auto; cursor: auto; }").ok());
-    ensure_equals("explicit auto cursor stops inheritance", static_cast<int>(surface.cursor()), static_cast<int>(radia::ui::CursorStyle::Default));
+    ensure_equals("explicit auto cursor stops inheritance", static_cast<int>(surface.cursor()), static_cast<int>(CursorStyle::Default));
 
     ensure("cursor override compiles",
            styleSheet.loadRadia("#parent { pointer-events: auto; cursor: grab; } #child { pointer-events: auto; cursor: text; }").ok());
-    ensure_equals("hovered widget overrides inherited cursor", static_cast<int>(surface.cursor()), static_cast<int>(radia::ui::CursorStyle::Text));
+    ensure_equals("hovered widget overrides inherited cursor", static_cast<int>(surface.cursor()), static_cast<int>(CursorStyle::Text));
 }
 
 template<> template<> void surfaceObject::test<21>() {
-    radia::ui::Surface surface;
+    Surface surface;
     surface.setViewport(100.f, 100.f);
     int contentActivations = 0;
     int floaterActivations = 0;
@@ -714,183 +743,183 @@ template<> template<> void surfaceObject::test<21>() {
     int dragActivations = 0;
     int modalActivations = 0;
 
-    auto mountButton = [&](radia::ui::SurfaceLayer layer, int& activations, const radia::ui::Rect& rect) {
-        auto button = std::make_unique<radia::ui::Button>();
-        button->setRect(rect).setOnActivate([&activations](radia::ui::Widget&) { ++activations; });
+    auto mountButton = [&](SurfaceLayer layer, int& activations, const radia::ui::Rect& rect) {
+        auto button = std::make_unique<Button>();
+        button->setRect(rect).setOnActivate([&activations](Widget&) { ++activations; });
         surface.mount(std::move(button), layer);
     };
-    mountButton(radia::ui::SurfaceLayer::Content, contentActivations, {0.f, 0.f, 100.f, 100.f});
-    mountButton(radia::ui::SurfaceLayer::Floater, floaterActivations, {10.f, 10.f, 30.f, 30.f});
-    mountButton(radia::ui::SurfaceLayer::Popup, popupActivations, {10.f, 10.f, 30.f, 30.f});
-    mountButton(radia::ui::SurfaceLayer::Tooltip, tooltipActivations, {10.f, 10.f, 30.f, 30.f});
-    mountButton(radia::ui::SurfaceLayer::Drag, dragActivations, {10.f, 10.f, 30.f, 30.f});
+    mountButton(SurfaceLayer::Content, contentActivations, {0.f, 0.f, 100.f, 100.f});
+    mountButton(SurfaceLayer::Floater, floaterActivations, {10.f, 10.f, 30.f, 30.f});
+    mountButton(SurfaceLayer::Popup, popupActivations, {10.f, 10.f, 30.f, 30.f});
+    mountButton(SurfaceLayer::Tooltip, tooltipActivations, {10.f, 10.f, 30.f, 30.f});
+    mountButton(SurfaceLayer::Drag, dragActivations, {10.f, 10.f, 30.f, 30.f});
 
-    surface.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left});
-    surface.pointerUp({{15.f, 15.f}, radia::ui::PointerButton::Left});
+    surface.pointerDown({{15.f, 15.f}, PointerButton::Left});
+    surface.pointerUp({{15.f, 15.f}, PointerButton::Left});
     ensure_equals("popup precedes floater and content", popupActivations, 1);
     ensure_equals("tooltip layer is input transparent", tooltipActivations, 0);
     ensure_equals("drag adornment layer is input transparent", dragActivations, 0);
 
-    mountButton(radia::ui::SurfaceLayer::Modal, modalActivations, {10.f, 10.f, 30.f, 30.f});
-    surface.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left});
-    surface.pointerUp({{15.f, 15.f}, radia::ui::PointerButton::Left});
+    mountButton(SurfaceLayer::Modal, modalActivations, {10.f, 10.f, 30.f, 30.f});
+    surface.pointerDown({{15.f, 15.f}, PointerButton::Left});
+    surface.pointerUp({{15.f, 15.f}, PointerButton::Left});
     ensure_equals("modal precedes every lower layer", modalActivations, 1);
 
-    ensure("modal backdrop consumes outside press", surface.pointerDown({{80.f, 80.f}, radia::ui::PointerButton::Left}));
-    surface.pointerUp({{80.f, 80.f}, radia::ui::PointerButton::Left});
+    ensure("modal backdrop consumes outside press", surface.pointerDown({{80.f, 80.f}, PointerButton::Left}));
+    surface.pointerUp({{80.f, 80.f}, PointerButton::Left});
     ensure_equals("modal backdrop blocks content activation", contentActivations, 0);
 
-    surface.clearLayer(radia::ui::SurfaceLayer::Modal);
-    surface.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left});
-    surface.pointerUp({{15.f, 15.f}, radia::ui::PointerButton::Left});
+    surface.clearLayer(SurfaceLayer::Modal);
+    surface.pointerDown({{15.f, 15.f}, PointerButton::Left});
+    surface.pointerUp({{15.f, 15.f}, PointerButton::Left});
     ensure_equals("clearing modal restores popup precedence", popupActivations, 2);
 }
 
 template<> template<> void surfaceObject::test<22>() {
-    radia::ui::Surface surface;
+    Surface surface;
     surface.setViewport(100.f, 100.f);
     int firstActivations = 0;
     int secondActivations = 0;
 
-    auto first = std::make_unique<radia::ui::Panel>();
+    auto first = std::make_unique<Panel>();
     first->setRect({0.f, 0.f, 50.f, 50.f});
-    auto firstButton = std::make_unique<radia::ui::Button>();
-    firstButton->setRect({0.f, 0.f, 50.f, 50.f}).setOnActivate([&firstActivations](radia::ui::Widget&) { ++firstActivations; });
+    auto firstButton = std::make_unique<Button>();
+    firstButton->setRect({0.f, 0.f, 50.f, 50.f}).setOnActivate([&firstActivations](Widget&) { ++firstActivations; });
     first->addChild(std::move(firstButton));
-    surface.mount(std::move(first), radia::ui::SurfaceLayer::Floater);
+    surface.mount(std::move(first), SurfaceLayer::Floater);
 
-    auto second = std::make_unique<radia::ui::Panel>();
+    auto second = std::make_unique<Panel>();
     second->setRect({25.f, 0.f, 50.f, 50.f});
-    auto secondButton = std::make_unique<radia::ui::Button>();
-    secondButton->setRect({25.f, 0.f, 50.f, 50.f}).setOnActivate([&secondActivations](radia::ui::Widget&) { ++secondActivations; });
+    auto secondButton = std::make_unique<Button>();
+    secondButton->setRect({25.f, 0.f, 50.f, 50.f}).setOnActivate([&secondActivations](Widget&) { ++secondActivations; });
     second->addChild(std::move(secondButton));
-    surface.mount(std::move(second), radia::ui::SurfaceLayer::Floater);
+    surface.mount(std::move(second), SurfaceLayer::Floater);
 
-    surface.pointerDown({{10.f, 10.f}, radia::ui::PointerButton::Left});
-    surface.pointerUp({{10.f, 10.f}, radia::ui::PointerButton::Left});
-    surface.pointerDown({{30.f, 10.f}, radia::ui::PointerButton::Left});
-    surface.pointerUp({{30.f, 10.f}, radia::ui::PointerButton::Left});
+    surface.pointerDown({{10.f, 10.f}, PointerButton::Left});
+    surface.pointerUp({{10.f, 10.f}, PointerButton::Left});
+    surface.pointerDown({{30.f, 10.f}, PointerButton::Left});
+    surface.pointerUp({{30.f, 10.f}, PointerButton::Left});
     ensure_equals("press raises containing floater", firstActivations, 2);
     ensure_equals("previously top floater remains behind", secondActivations, 0);
 }
 
 template<> template<> void surfaceObject::test<23>() {
-    radia::ui::StyleSheet stylesheet;
+    StyleSheet stylesheet;
     ensure("visible overflow compiles",
            stylesheet.loadRadia("#parent { overflow: visible; pointer-events: none; } #child { pointer-events: auto; }").ok());
-    radia::ui::Surface surface(stylesheet);
+    Surface surface(stylesheet);
     surface.setViewport(100.f, 100.f);
-    auto parent = std::make_unique<radia::ui::Panel>();
+    auto parent = std::make_unique<Panel>();
     parent->setId("parent").setRect({10.f, 10.f, 20.f, 20.f});
-    auto child = std::make_unique<radia::ui::Panel>();
+    auto child = std::make_unique<Panel>();
     child->setId("child").setRect({40.f, 10.f, 10.f, 10.f});
     parent->addChild(std::move(child));
     surface.root().addChild(std::move(parent));
 
-    ensure("visible overflow permits descendant hit outside parent", surface.pointerDown({{45.f, 15.f}, radia::ui::PointerButton::Left}));
-    surface.pointerUp({{45.f, 15.f}, radia::ui::PointerButton::Left});
+    ensure("visible overflow permits descendant hit outside parent", surface.pointerDown({{45.f, 15.f}, PointerButton::Left}));
+    surface.pointerUp({{45.f, 15.f}, PointerButton::Left});
 
     const char* kVerticalOverflow = "#parent { overflow-x: visible; overflow-y: hidden; pointer-events: none; } #child { pointer-events: auto; }";
     ensure("vertical overflow longhand compiles", stylesheet.loadRadia(kVerticalOverflow).ok());
-    ensure("vertical clipping permits a horizontally overflowing descendant", surface.pointerDown({{45.f, 15.f}, radia::ui::PointerButton::Left}));
-    surface.pointerUp({{45.f, 15.f}, radia::ui::PointerButton::Left});
+    ensure("vertical clipping permits a horizontally overflowing descendant", surface.pointerDown({{45.f, 15.f}, PointerButton::Left}));
+    surface.pointerUp({{45.f, 15.f}, PointerButton::Left});
 
-    radia::ui::RecordingPaintContext verticalRecording;
+    RecordingPaintContext verticalRecording;
     surface.paint(verticalRecording);
     const radia::ui::PaintCommand* verticalClip = verticalRecording.last(radia::ui::PaintCommandKind::PushClip);
     ensure("vertical overflow clip recorded", verticalClip != nullptr);
-    ensure("vertical overflow clip leaves x visible", !radia::ui::clipsAxis(verticalClip->clipAxes, radia::ui::ClipAxes::X));
-    ensure("vertical overflow clip clips y", radia::ui::clipsAxis(verticalClip->clipAxes, radia::ui::ClipAxes::Y));
+    ensure("vertical overflow clip leaves x visible", !radia::ui::clipsAxis(verticalClip->clipAxes, ClipAxes::X));
+    ensure("vertical overflow clip clips y", radia::ui::clipsAxis(verticalClip->clipAxes, ClipAxes::Y));
 
     const char* kHorizontalOverflow = "#parent { overflow-x: hidden; overflow-y: visible; pointer-events: none; } #child { pointer-events: auto; }";
     ensure("horizontal overflow longhand compiles", stylesheet.loadRadia(kHorizontalOverflow).ok());
-    ensure("horizontal clipping rejects a horizontally overflowing descendant", !surface.pointerDown({{45.f, 15.f}, radia::ui::PointerButton::Left}));
+    ensure("horizontal clipping rejects a horizontally overflowing descendant", !surface.pointerDown({{45.f, 15.f}, PointerButton::Left}));
 
-    radia::ui::RecordingPaintContext recording;
+    RecordingPaintContext recording;
     surface.paint(recording);
     ensure_equals("paint clip stack balances", recording.clipDepth(), 0);
     ensure_equals("surface and overflow clips nest", recording.maxClipDepth(), 2);
     const radia::ui::PaintCommand* overflowClip = recording.last(radia::ui::PaintCommandKind::PushClip);
     ensure("overflow clip recorded", overflowClip != nullptr);
     ensure_equals("overflow clip uses parent width", overflowClip->rect.w, 20.f);
-    ensure("horizontal overflow clip clips x", radia::ui::clipsAxis(overflowClip->clipAxes, radia::ui::ClipAxes::X));
-    ensure("horizontal overflow clip leaves y visible", !radia::ui::clipsAxis(overflowClip->clipAxes, radia::ui::ClipAxes::Y));
+    ensure("horizontal overflow clip clips x", radia::ui::clipsAxis(overflowClip->clipAxes, ClipAxes::X));
+    ensure("horizontal overflow clip leaves y visible", !radia::ui::clipsAxis(overflowClip->clipAxes, ClipAxes::Y));
 }
 
 template<> template<> void surfaceObject::test<24>() {
-    radia::ui::Surface first;
-    radia::ui::Surface second;
+    Surface first;
+    Surface second;
     first.setViewport(100.f, 100.f);
     second.setViewport(80.f, 60.f);
 
-    auto button = std::make_unique<radia::ui::Button>();
-    radia::ui::Button* transferred = button.get();
+    auto button = std::make_unique<Button>();
+    Button* transferred = button.get();
     button->setRect({10.f, 10.f, 20.f, 20.f});
-    first.mount(std::move(button), radia::ui::SurfaceLayer::Floater);
-    first.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left});
+    first.mount(std::move(button), SurfaceLayer::Floater);
+    first.pointerDown({{15.f, 15.f}, PointerButton::Left});
 
-    std::unique_ptr<radia::ui::Widget> detached = first.unmount(*transferred);
+    std::unique_ptr<Widget> detached = first.unmount(*transferred);
     ensure("mounted root can be transferred", detached && detached.get() == transferred);
     ensure("unmount clears source interaction", !first.hasPointerCapture());
     ensure("unmounted widget leaves source hierarchy", transferred->parent() == nullptr);
-    second.mount(std::move(detached), radia::ui::SurfaceLayer::Floater);
+    second.mount(std::move(detached), SurfaceLayer::Floater);
     ensure("transferred widget enters destination hierarchy", transferred->parent() != nullptr);
     ensure("unmount rejects nested or absent widget", !second.unmount(*transferred->parent()));
 }
 
 template<> template<> void surfaceObject::test<25>() {
-    radia::ui::Surface surface;
+    Surface surface;
     surface.setViewport(100.f, 40.f);
     int visibleActivations = 0;
     int hiddenActivations = 0;
     int collapsedActivations = 0;
 
-    auto add = [&](float x, radia::ui::Visibility visibility, int& activations) -> PaintProbe* {
+    auto add = [&](float x, Visibility visibility, int& activations) -> PaintProbe* {
         auto probe = std::make_unique<PaintProbe>();
         PaintProbe* result = probe.get();
-        probe->setRect({x, 10.f, 20.f, 20.f}).setVisibility(visibility).setOnActivate([&activations](radia::ui::Widget&) { ++activations; });
+        probe->setRect({x, 10.f, 20.f, 20.f}).setVisibility(visibility).setOnActivate([&activations](Widget&) { ++activations; });
         surface.mount(std::move(probe));
         return result;
     };
 
-    PaintProbe* visible = add(0.f, radia::ui::Visibility::Visible, visibleActivations);
-    PaintProbe* hidden = add(30.f, radia::ui::Visibility::Hidden, hiddenActivations);
-    PaintProbe* collapsed = add(60.f, radia::ui::Visibility::Collapsed, collapsedActivations);
-    radia::ui::RecordingPaintContext recording;
+    PaintProbe* visible = add(0.f, Visibility::Visible, visibleActivations);
+    PaintProbe* hidden = add(30.f, Visibility::Hidden, hiddenActivations);
+    PaintProbe* collapsed = add(60.f, Visibility::Collapsed, collapsedActivations);
+    RecordingPaintContext recording;
     surface.paint(recording);
     ensure_equals("Visible participates in paint", visible->paints, 1);
     ensure_equals("Hidden does not paint", hidden->paints, 0);
     ensure_equals("Collapsed does not paint", collapsed->paints, 0);
 
-    ensure("Visible participates in hit testing", surface.pointerDown({{10.f, 20.f}, radia::ui::PointerButton::Left}));
-    surface.pointerUp({{10.f, 20.f}, radia::ui::PointerButton::Left});
-    ensure("Hidden is absent from hit testing", !surface.pointerDown({{40.f, 20.f}, radia::ui::PointerButton::Left}));
-    ensure("Collapsed is absent from hit testing", !surface.pointerDown({{70.f, 20.f}, radia::ui::PointerButton::Left}));
+    ensure("Visible participates in hit testing", surface.pointerDown({{10.f, 20.f}, PointerButton::Left}));
+    surface.pointerUp({{10.f, 20.f}, PointerButton::Left});
+    ensure("Hidden is absent from hit testing", !surface.pointerDown({{40.f, 20.f}, PointerButton::Left}));
+    ensure("Collapsed is absent from hit testing", !surface.pointerDown({{70.f, 20.f}, PointerButton::Left}));
     ensure_equals("only Visible activates", visibleActivations, 1);
     ensure_equals("Hidden never activates", hiddenActivations, 0);
     ensure_equals("Collapsed never activates", collapsedActivations, 0);
 
     surface.clearInteractionState();
-    ensure("Tab finds a Visible focus target", surface.keyDown({radia::ui::KEY_TAB}));
-    ensure("Visible receives focus", visible->hasState(radia::ui::WidgetState::Focused));
-    ensure("Hidden does not receive focus", !hidden->hasState(radia::ui::WidgetState::Focused));
-    ensure("Collapsed does not receive focus", !collapsed->hasState(radia::ui::WidgetState::Focused));
+    ensure("Tab finds a Visible focus target", surface.keyDown({kKeyTab}));
+    ensure("Visible receives focus", visible->hasState(WidgetState::Focused));
+    ensure("Hidden does not receive focus", !hidden->hasState(WidgetState::Focused));
+    ensure("Collapsed does not receive focus", !collapsed->hasState(WidgetState::Focused));
 }
 
 template<> template<> void surfaceObject::test<26>() {
-    radia::ui::StyleSheet styleSheet;
+    StyleSheet styleSheet;
     const char* kStateLayout =
         "panel { flow: row; } switch { width: 20px; height: 10px; } switch:checked { width: 40px; } label { width: 10px; height: 10px; }";
     ensure("state layout stylesheet compiles", styleSheet.loadRadia(kStateLayout).ok());
-    radia::ui::Surface surface(styleSheet);
+    Surface surface(styleSheet);
     surface.setViewport(100.f, 20.f);
-    auto panel = std::make_unique<radia::ui::Panel>();
+    auto panel = std::make_unique<Panel>();
     panel->setRect({0.f, 0.f, 100.f, 20.f});
-    auto control = std::make_unique<radia::ui::Switch>();
-    radia::ui::Switch* target = control.get();
+    auto control = std::make_unique<Switch>();
+    Switch* target = control.get();
     panel->addChild(std::move(control));
-    auto label = std::make_unique<radia::ui::Label>("after");
-    radia::ui::Label* after = label.get();
+    auto label = std::make_unique<Label>("after");
+    Label* after = label.get();
     panel->addChild(std::move(label));
     surface.mount(std::move(panel));
 
@@ -902,13 +931,13 @@ template<> template<> void surfaceObject::test<26>() {
 }
 
 template<> template<> void surfaceObject::test<27>() {
-    radia::ui::StyleSheet styleSheet;
+    StyleSheet styleSheet;
     const char* kOrderedOverlap =
         "panel { flow: row; width: 40px; height: 20px; } #early { order: -1; width: 20px; height: 20px; } #late { order: 2; width: 20px; height: 20px; margin: 0px 0px 0px -20px; }";
     ensure("ordered overlap stylesheet compiles", styleSheet.loadRadia(kOrderedOverlap).ok());
-    radia::ui::Surface surface(styleSheet);
+    Surface surface(styleSheet);
     surface.setViewport(40.f, 20.f);
-    auto panel = std::make_unique<radia::ui::Panel>();
+    auto panel = std::make_unique<Panel>();
     std::vector<std::string> paintOrder;
     auto early = std::make_unique<OrderedPaintProbe>("early", paintOrder);
     auto late = std::make_unique<OrderedPaintProbe>("late", paintOrder);
@@ -920,44 +949,44 @@ template<> template<> void surfaceObject::test<27>() {
     panel->addChild(std::move(early));
     surface.mount(std::move(panel));
 
-    radia::ui::RecordingPaintContext recording;
+    RecordingPaintContext recording;
     surface.paint(recording);
     ensure("paint preserves source order", paintOrder == std::vector<std::string>({"late", "early"}));
-    ensure("overlapping source-later child receives the hit", surface.pointerDown({{5.f, 5.f}, radia::ui::PointerButton::Left}));
-    ensure("hit testing follows source stacking order", earlyTarget->hasState(radia::ui::WidgetState::Active));
-    surface.pointerUp({{5.f, 5.f}, radia::ui::PointerButton::Left});
+    ensure("overlapping source-later child receives the hit", surface.pointerDown({{5.f, 5.f}, PointerButton::Left}));
+    ensure("hit testing follows source stacking order", earlyTarget->hasState(WidgetState::Active));
+    surface.pointerUp({{5.f, 5.f}, PointerButton::Left});
     surface.clearInteractionState();
-    ensure("Tab focus follows source order", surface.keyDown({radia::ui::KEY_TAB}));
-    ensure("first source child receives focus", lateTarget->hasState(radia::ui::WidgetState::Focused));
+    ensure("Tab focus follows source order", surface.keyDown({kKeyTab}));
+    ensure("first source child receives focus", lateTarget->hasState(WidgetState::Focused));
 
     paintOrder.clear();
-    earlyTarget->setVisibility(radia::ui::Visibility::Collapsed);
+    earlyTarget->setVisibility(Visibility::Collapsed);
     surface.paint(recording);
     ensure("visibility changes refresh ordered traversal", paintOrder == std::vector<std::string>({"late"}));
     paintOrder.clear();
-    earlyTarget->setVisibility(radia::ui::Visibility::Visible);
+    earlyTarget->setVisibility(Visibility::Visible);
     surface.paint(recording);
     ensure("restoring visibility refreshes source traversal", paintOrder == std::vector<std::string>({"late", "early"}));
 }
 
 template<> template<> void surfaceObject::test<28>() {
-    radia::ui::Surface surface;
+    Surface surface;
     surface.setViewport(100.f, 100.f);
-    auto panel = std::make_unique<radia::ui::Panel>();
-    radia::ui::Panel* parent = panel.get();
+    auto panel = std::make_unique<Panel>();
+    Panel* parent = panel.get();
     panel->setRect({0.f, 0.f, 100.f, 100.f});
     surface.root().addChild(std::move(panel));
     surface.updateLayout();
 
-    auto button = std::make_unique<radia::ui::Button>();
-    radia::ui::Button* target = button.get();
+    auto button = std::make_unique<Button>();
+    Button* target = button.get();
     button->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
     parent->addChild(std::move(button));
-    ensure("adding a child after a traversal invalidates cached order", surface.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left}));
-    ensure("new child receives focus after cached-order invalidation", target->hasState(radia::ui::WidgetState::Focused));
+    ensure("adding a child after a traversal invalidates cached order", surface.pointerDown({{15.f, 15.f}, PointerButton::Left}));
+    ensure("new child receives focus after cached-order invalidation", target->hasState(WidgetState::Focused));
 
     parent->clearChildren();
-    ensure("clearing children after a traversal removes the cached target", !surface.pointerDown({{15.f, 15.f}, radia::ui::PointerButton::Left}));
+    ensure("clearing children after a traversal removes the cached target", !surface.pointerDown({{15.f, 15.f}, PointerButton::Left}));
 }
 
 } // namespace tut

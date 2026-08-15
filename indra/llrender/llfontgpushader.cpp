@@ -25,12 +25,12 @@
 #include "linden_common.h"
 #include "llfontgpushader.h"
 #if LL_HAS_HB_GPU
-    #include "llgl.h"
-    #include "llglheaders.h"
-    #include "llglslshader.h"
+#include "llgl.h"
+#include "llglheaders.h"
+#include "llglslshader.h"
 
 namespace {
-const char* COVERAGE_REFINEMENT = R"GLSL(
+const char* kCoverageRefinement = R"GLSL(
 float alchemy_font_refine_coverage(float coverage, vec3 foreground, float ppem) {
     float brightness = dot(foreground, vec3(0.299, 0.587, 0.114));
     coverage = hb_gpu_stem_darken(coverage, brightness, ppem);
@@ -40,7 +40,7 @@ float alchemy_font_refine_coverage(float coverage, vec3 foreground, float ppem) 
     return mix(coverage, crisp, 0.20 * small_text);
 })GLSL";
 
-const char* BATCHED_VERTEX_MAIN = R"GLSL(
+const char* kBatchedVertexMain = R"GLSL(
 uniform mat4 modelview_projection_matrix;
 
 in vec3 position;
@@ -59,7 +59,7 @@ void main() {
     vary_color       = diffuse_color;
 })GLSL";
 
-const char* BATCHED_FRAGMENT_MAIN = R"GLSL(
+const char* kBatchedFragmentMain = R"GLSL(
 in vec2 vary_renderCoord;
 flat in uint vary_glyphLoc;
 in vec4 vary_color;
@@ -103,13 +103,13 @@ GLuint compileStage(GLenum type, const std::string& src) {
 }
 
 LLGLSLShader& batchedProgram() {
-    static LLGLSLShader program;
-    return program;
+    static LLGLSLShader sBatchedProgram;
+    return sBatchedProgram;
 }
 
 bool& batchedProgramAttempted() {
-    static bool attempted = false;
-    return attempted;
+    static bool sBatchedProgramAttempted = false;
+    return sBatchedProgramAttempted;
 }
 } // namespace
 
@@ -125,29 +125,29 @@ std::string LLFontGpuShader::fragmentLibSource() {
     src += '\n';
     if (const char* paint = hb_gpu_paint_shader_source(HB_GPU_SHADER_STAGE_FRAGMENT, HB_GPU_SHADER_LANG_GLSL)) src += paint;
     src += '\n';
-    src += COVERAGE_REFINEMENT;
+    src += kCoverageRefinement;
     return src;
 }
 
 std::string LLFontGpuShader::batchedVertexSource() {
     std::string src = "#version 330\n";
-    src += BATCHED_VERTEX_MAIN;
+    src += kBatchedVertexMain;
     return src;
 }
 
 std::string LLFontGpuShader::batchedFragmentSource() {
     std::string src = "#version 330\n";
     src += fragmentLibSource();
-    src += BATCHED_FRAGMENT_MAIN;
+    src += kBatchedFragmentMain;
     return src;
 }
 
 namespace {
-bool buildFromSources(LLGLSLShader& program, const std::string& vs_src, const std::string& fs_src, const char* name) {
+bool buildFromSources(LLGLSLShader& program, const std::string& vertexSource, const std::string& fragmentSource, const char* name) {
     program.unload();
 
-    GLuint vs = compileStage(GL_VERTEX_SHADER, vs_src);
-    GLuint fs = compileStage(GL_FRAGMENT_SHADER, fs_src);
+    GLuint vs = compileStage(GL_VERTEX_SHADER, vertexSource);
+    GLuint fs = compileStage(GL_FRAGMENT_SHADER, fragmentSource);
     if (!vs || !fs) {
         if (vs) glDeleteShader(vs);
         if (fs) glDeleteShader(fs);

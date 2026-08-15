@@ -50,26 +50,26 @@ void TreeTraversalCache::invalidateOrdering() {
 
 TreeTraversalCache::ChildSnapshot TreeTraversalCache::build(const Widget& parent, bool ordered, const StyleResolver* resolve) {
     SnapshotCache& cache = ordered ? mOrdered : mSource;
-    SnapshotCache& active_cache = ordered ? mActiveOrdered : mActiveSource;
+    SnapshotCache& activeCache = ordered ? mActiveOrdered : mActiveSource;
     const auto lifetime = parent.lifetime().lock();
     const std::uint64_t revision = parent.mChildSnapshotRevision;
     const auto found = cache.snapshots.find(&parent);
-    const auto cached_lifetime = cache.lifetimes.find(&parent);
-    const auto active_found = active_cache.snapshots.find(&parent);
-    const auto active_lifetime = active_cache.lifetimes.find(&parent);
-    const auto cached_revision = cache.revisions.find(&parent);
+    const auto cachedLifetime = cache.lifetimes.find(&parent);
+    const auto activeFound = activeCache.snapshots.find(&parent);
+    const auto activeLifetime = activeCache.lifetimes.find(&parent);
+    const auto cachedRevision = cache.revisions.find(&parent);
     if (mResetAtBoundary
         && active()
-        && active_found != active_cache.snapshots.end()
-        && active_lifetime != active_cache.lifetimes.end()
-        && active_lifetime->second.lock() == lifetime)
-        return active_found->second;
+        && activeFound != activeCache.snapshots.end()
+        && activeLifetime != activeCache.lifetimes.end()
+        && activeLifetime->second.lock() == lifetime)
+        return activeFound->second;
     if (!mResetAtBoundary
         && found != cache.snapshots.end()
-        && cached_lifetime != cache.lifetimes.end()
-        && cached_revision != cache.revisions.end()
-        && cached_lifetime->second.lock() == lifetime
-        && cached_revision->second == revision)
+        && cachedLifetime != cache.lifetimes.end()
+        && cachedRevision != cache.revisions.end()
+        && cachedLifetime->second.lock() == lifetime
+        && cachedRevision->second == revision)
         return found->second;
 
     const ConstWidgetVisit parentState(parent);
@@ -81,9 +81,9 @@ TreeTraversalCache::ChildSnapshot TreeTraversalCache::build(const Widget& parent
     const auto commit = [&] {
         if (mResetAtBoundary) {
             if (active()) {
-                active_cache.snapshots[&parent] = result;
-                active_cache.lifetimes[&parent] = parent.lifetime();
-                active_cache.revisions[&parent] = revision;
+                activeCache.snapshots[&parent] = result;
+                activeCache.lifetimes[&parent] = parent.lifetime();
+                activeCache.revisions[&parent] = revision;
             }
             return;
         }
@@ -99,20 +99,20 @@ TreeTraversalCache::ChildSnapshot TreeTraversalCache::build(const Widget& parent
         if (parentStyle.flow == Flow::Row || parentStyle.flow == Flow::Column) {
             std::vector<std::pair<WidgetRef<Widget>, int>> ranked;
             ranked.reserve(result->size());
-            for (const WidgetRef<Widget>& child_ref : *result) {
-                Widget* child = child_ref.get();
+            for (const WidgetRef<Widget>& childRef : *result) {
+                Widget* child = childRef.get();
                 if (!child || child->parent() != &parent) continue;
-                const WidgetVisit child_state(*child);
-                const Style& child_style = (*resolve)(*child);
-                child = child_state.get();
-                if (!parentState.styleValid() || !child_state.styleValid() || !child || child->parent() != &parent)
+                const WidgetVisit childState(*child);
+                const Style& childStyle = (*resolve)(*child);
+                child = childState.get();
+                if (!parentState.styleValid() || !childState.styleValid() || !child || child->parent() != &parent)
                     return std::make_shared<std::vector<WidgetRef<Widget>>>();
-                ranked.emplace_back(child_ref, child_style.order);
+                ranked.emplace_back(childRef, childStyle.order);
             }
             std::stable_sort(ranked.begin(), ranked.end(), [](const auto& left, const auto& right) { return left.second < right.second; });
             result->clear();
             result->reserve(ranked.size());
-            for (auto& [child_ref, order] : ranked) result->push_back(std::move(child_ref));
+            for (auto& [childRef, order] : ranked) result->push_back(std::move(childRef));
         }
         if (!parentState.styleValid()) return std::make_shared<std::vector<WidgetRef<Widget>>>();
     }

@@ -77,9 +77,9 @@ bool Label::onKeybindingsChanged(const System& system) {
     return changed;
 }
 
-Vec2 Label::intrinsicSize(const StyleSheet& theme, const Style& style, const TextMetrics& textMetrics,
+Vec2 Label::intrinsicSize(const StyleSheet& styleSheet, const Style& style, const TextMetrics& textMetrics,
                           const IntrinsicSizeConstraints& constraints) const {
-    return mText.measure(textMetrics, style, theme, *this, constraints.width);
+    return mText.measure(textMetrics, style, styleSheet, *this, constraints.width);
 }
 
 void Label::paint(PaintContext& context, const Style& style, float) const {

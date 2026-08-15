@@ -46,14 +46,14 @@ bool isWidgetIdentifier(std::string_view value) {
 
 bool isKebabCaseIdentifier(std::string_view value) {
     if (value.empty() || value.front() == '-' || value.back() == '-') return false;
-    bool previous_hyphen = false;
+    bool previousHyphen = false;
     for (char character : value) {
         if (character == '-') {
-            if (previous_hyphen) return false;
-            previous_hyphen = true;
+            if (previousHyphen) return false;
+            previousHyphen = true;
             continue;
         }
-        previous_hyphen = false;
+        previousHyphen = false;
         if ((character < 'a' || character > 'z') && (character < '0' || character > '9')) return false;
     }
     return true;

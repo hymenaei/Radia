@@ -33,7 +33,12 @@
 #include "system.h"
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
+using radia::ui::Diagnostic;
+using radia::ui::DiagnosticResult;
+using radia::ui::LocaleInfo;
+using radia::ui::System;
+using radia::ui::TextSource;
+
 void registerFloaterDemo(Runtime& runtime) {
     runtime.registerFloater("floaterDemo", "floater_demo.xml", [&runtime](System& system) {
         return std::make_unique<FloaterDemo>(system, [&runtime] { runtime.requestSkinReload(); });
@@ -64,14 +69,15 @@ void FloaterDemo::switchChanged(const ChangeEvent& event) {
 
 void FloaterDemo::selectLocale(int step) {
     std::vector<LocaleInfo> locales = mSystem.locales();
-    std::sort(locales.begin(), locales.end(),
-              [](const LocaleInfo& left, const LocaleInfo& right) { return std::tie(left.name, left.id) < std::tie(right.name, right.id); });
+    std::sort(locales.begin(), locales.end(), [](const LocaleInfo& left, const LocaleInfo& right) {
+        return std::tie(left.name, left.localeId) < std::tie(right.name, right.localeId);
+    });
     if (locales.size() <= 1 || step == 0) return;
     const auto current =
-        std::find_if(locales.begin(), locales.end(), [this](const LocaleInfo& locale) { return locale.id == mSystem.activeLocale(); });
+        std::find_if(locales.begin(), locales.end(), [this](const LocaleInfo& locale) { return locale.localeId == mSystem.activeLocale(); });
     const std::size_t index = current == locales.end() ? 0 : static_cast<std::size_t>(std::distance(locales.begin(), current));
     const std::size_t next = step < 0 ? (index + locales.size() - 1) % locales.size() : (index + 1) % locales.size();
-    if (!mSystem.setLocale(locales[next].id)) return;
+    if (!mSystem.setLocale(locales[next].localeId)) return;
     refreshLocaleControls();
 }
 

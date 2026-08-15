@@ -391,38 +391,38 @@ template<typename Enum, std::size_t Size> CompileResult compileAlignment(const d
 
 CompileResult compileJustifyContent(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    static constexpr std::array<std::pair<std::string_view, JustifyContent>, 5> values{{
+    static constexpr std::array<std::pair<std::string_view, JustifyContent>, 5> sJustifyContentValues{{
         {"start", JustifyContent::Start},
         {"left", JustifyContent::Left},
         {"center", JustifyContent::Center},
         {"end", JustifyContent::End},
         {"right", JustifyContent::Right},
     }};
-    return compileAlignment(context, value, values);
+    return compileAlignment(context, value, sJustifyContentValues);
 }
 
 CompileResult compileAlignItems(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    static constexpr std::array<std::pair<std::string_view, AlignItems>, 5> values{{
+    static constexpr std::array<std::pair<std::string_view, AlignItems>, 5> sAlignItemsValues{{
         {"normal", AlignItems::Normal},
         {"start", AlignItems::Start},
         {"center", AlignItems::Center},
         {"end", AlignItems::End},
         {"stretch", AlignItems::Stretch},
     }};
-    return compileAlignment(context, value, values);
+    return compileAlignment(context, value, sAlignItemsValues);
 }
 
 CompileResult compileAlignSelf(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    static constexpr std::array<std::pair<std::string_view, AlignSelf>, 5> values{{
+    static constexpr std::array<std::pair<std::string_view, AlignSelf>, 5> sAlignSelfValues{{
         {"auto", AlignSelf::Auto},
         {"start", AlignSelf::Start},
         {"center", AlignSelf::Center},
         {"end", AlignSelf::End},
         {"stretch", AlignSelf::Stretch},
     }};
-    return compileAlignment(context, value, values);
+    return compileAlignment(context, value, sAlignSelfValues);
 }
 
 CompileResult compileFlex(detail::StyleCompileContext& context) {
@@ -473,12 +473,12 @@ CompileResult compileFlex(detail::StyleCompileContext& context) {
 
 CompileResult compilePointerEvents(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    static constexpr std::array<std::pair<std::string_view, PointerEvents>, 3> values{{
+    static constexpr std::array<std::pair<std::string_view, PointerEvents>, 3> sPointerEventsValues{{
         {"auto", PointerEvents::Auto},
         {"none", PointerEvents::PassThrough},
         {"default", PointerEvents::Default},
     }};
-    return compileAlignment(context, value, values);
+    return compileAlignment(context, value, sPointerEventsValues);
 }
 
 std::optional<Overflow> parseOverflow(const std::string& raw) {
@@ -520,7 +520,7 @@ CompileResult compileOrder(detail::StyleCompileContext& context) {
 
 CompileResult compileCursor(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    static constexpr std::array<std::pair<std::string_view, CursorStyle>, 35> values{{
+    static constexpr std::array<std::pair<std::string_view, CursorStyle>, 35> sCursorValues{{
         {"auto", CursorStyle::Auto},
         {"default", CursorStyle::Default},
         {"pointer", CursorStyle::Pointer},
@@ -557,7 +557,7 @@ CompileResult compileCursor(detail::StyleCompileContext& context) {
         {"context-menu", CursorStyle::ContextMenu},
         {"cell", CursorStyle::Cell},
     }};
-    return compileAlignment(context, value, values);
+    return compileAlignment(context, value, sCursorValues);
 }
 
 CompileResult compileDimension(detail::StyleCompileContext& context) {
@@ -700,7 +700,7 @@ void applyIconStrokeWidth(Style& style, const StyleValue& value) {
     style.svgStrokeWidth = std::get<Length>(value);
 }
 
-const detail::StylePropertyDefinition PROPERTY_DEFINITIONS[] = {
+const detail::StylePropertyDefinition kPropertyDefinitions[] = {
     {"background-color", compilePaint, applyBackground, nullptr, nullptr, StylePropertyImpact::Paint},
     {"border", compileBorder, applyBorder, nullptr, nullptr, StylePropertyImpact::Layout | StylePropertyImpact::Paint},
     {"border-color", compilePaint, [](Style& style, const StyleValue& value) { applyPaint(style.borderColor, style.borderGradient, value); }, nullptr,
@@ -772,16 +772,16 @@ const detail::StylePropertyDefinition PROPERTY_DEFINITIONS[] = {
 
 namespace detail {
 const StylePropertyDefinition* findStyleProperty(std::string_view name) {
-    const auto found = std::find_if(std::begin(PROPERTY_DEFINITIONS), std::end(PROPERTY_DEFINITIONS),
+    const auto found = std::find_if(std::begin(kPropertyDefinitions), std::end(kPropertyDefinitions),
                                     [name](const StylePropertyDefinition& property) { return property.name == name; });
-    return found == std::end(PROPERTY_DEFINITIONS) ? nullptr : found;
+    return found == std::end(kPropertyDefinitions) ? nullptr : found;
 }
 
 const StylePropertyDefinition* stylePropertyBegin() {
-    return std::begin(PROPERTY_DEFINITIONS);
+    return std::begin(kPropertyDefinitions);
 }
 const StylePropertyDefinition* stylePropertyEnd() {
-    return std::end(PROPERTY_DEFINITIONS);
+    return std::end(kPropertyDefinitions);
 }
 } // namespace detail
 } // namespace radia::ui

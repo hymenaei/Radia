@@ -40,13 +40,13 @@ namespace {
 using detail::TextLine;
 using detail::TextRun;
 
-Style inlineStyle(const StyleSheet* theme, const Widget& owner, const std::vector<std::string>& inlineAncestors, const Style& inherited) {
-    Style style = theme ? theme->resolveInline(owner, "kbd", inlineAncestors) : Style{};
+Style inlineStyle(const StyleSheet* styleSheet, const Widget& owner, const std::vector<std::string>& inlineAncestors, const Style& inherited) {
+    Style style = styleSheet ? styleSheet->resolveInline(owner, "kbd", inlineAncestors) : Style{};
     inheritStyle(style, inherited);
     return style;
 }
 
-void appendNode(const InlineContentNode& node, const Style& inherited, const TextMetrics& metrics, const StyleSheet* theme, const Widget& owner,
+void appendNode(const InlineContentNode& node, const Style& inherited, const TextMetrics& metrics, const StyleSheet* styleSheet, const Widget& owner,
                 std::vector<TextLine>& lines) {
     Style style = inherited;
     switch (node.kind()) {
@@ -67,8 +67,8 @@ void appendNode(const InlineContentNode& node, const Style& inherited, const Tex
         if (presentation.keys.empty()) return;
 
         TextRun run;
-        run.style = inlineStyle(theme, owner, {}, style);
-        const Style keyStyle = inlineStyle(theme, owner, {"kbd"}, run.style);
+        run.style = inlineStyle(styleSheet, owner, {}, style);
+        const Style keyStyle = inlineStyle(styleSheet, owner, {"kbd"}, run.style);
         const float gap = run.style.gap.fixedPixels();
         float contentWidth = 0.f;
         float contentHeight = 0.f;
@@ -95,13 +95,13 @@ void appendNode(const InlineContentNode& node, const Style& inherited, const Tex
         lines.back().push_back(std::move(run));
         return;
     }
-    for (const InlineContentNode& child : node.children()) appendNode(child, style, metrics, theme, owner, lines);
+    for (const InlineContentNode& child : node.children()) appendNode(child, style, metrics, styleSheet, owner, lines);
 }
 
-std::vector<TextLine> layoutLines(const InlineContent& content, const Style& style, const TextMetrics& metrics, const StyleSheet* theme,
+std::vector<TextLine> layoutLines(const InlineContent& content, const Style& style, const TextMetrics& metrics, const StyleSheet* styleSheet,
                                   const Widget& owner) {
     std::vector<TextLine> lines(1);
-    for (const InlineContentNode& node : content.nodes()) appendNode(node, style, metrics, theme, owner, lines);
+    for (const InlineContentNode& node : content.nodes()) appendNode(node, style, metrics, styleSheet, owner, lines);
     return lines;
 }
 
@@ -237,16 +237,16 @@ void TextHost::updatePlainText() {
     for (const InlineContentNode& node : mContent.nodes()) appendPlainText(node, mPlainText);
 }
 
-Vec2 TextHost::measure(const TextMetrics& metrics, const Style& style, const StyleSheet& theme, const Widget& owner,
+Vec2 TextHost::measure(const TextMetrics& metrics, const Style& style, const StyleSheet& styleSheet, const Widget& owner,
                        std::optional<float> resolvedWidth) const {
     std::optional<float> availableWidth;
     if (resolvedWidth) availableWidth = std::max(0.f, *resolvedWidth - style.padding.horizontal());
     else if (!style.width.isAuto() && !style.width.isPercentage()) availableWidth = std::max(0.f, style.width.pixels() - style.padding.horizontal());
-    return cachedLayout(metrics, style, &theme, owner, availableWidth, false, false).size;
+    return cachedLayout(metrics, style, &styleSheet, owner, availableWidth, false, false).size;
 }
 
-void TextHost::paint(PaintContext& context, const Rect& rect, const Style& style, const StyleSheet* theme, const Widget& owner) const {
-    const detail::TextLayout& layout = cachedLayout(context, style, theme, owner, rect.w, true, true);
+void TextHost::paint(PaintContext& context, const Rect& rect, const Style& style, const StyleSheet* styleSheet, const Widget& owner) const {
+    const detail::TextLayout& layout = cachedLayout(context, style, styleSheet, owner, rect.w, true, true);
     float y = rect.top();
     for (const detail::LaidOutTextLine& line : layout.lines) {
         y -= line.size.y;
@@ -288,30 +288,30 @@ void TextHost::paint(PaintContext& context, const Rect& rect, const Style& style
     }
 }
 
-const std::vector<detail::TextLine>& TextHost::cachedLines(const TextMetrics& metrics, const Style& style, const StyleSheet* theme,
+const std::vector<detail::TextLine>& TextHost::cachedLines(const TextMetrics& metrics, const Style& style, const StyleSheet* styleSheet,
                                                            const Widget& owner) const {
     const std::size_t fingerprint = textStyleFingerprint(style);
-    const std::uint64_t themeGeneration = theme ? theme->generation() : 0;
+    const std::uint64_t styleSheetGeneration = styleSheet ? styleSheet->generation() : 0;
     const std::uint64_t ownerStyleRevision = owner.styleContextRevision();
     const Widget* ownerParent = owner.parent();
     if (mCachedContentGeneration == mContentGeneration
         && mCachedMetrics == &metrics
         && mCachedMetricsGeneration == metrics.generation()
-        && mCachedTheme == theme
-        && mCachedThemeGeneration == themeGeneration
+        && mCachedStyleSheet == styleSheet
+        && mCachedStyleSheetGeneration == styleSheetGeneration
         && mCachedOwner == &owner
         && mCachedOwnerParent == ownerParent
         && mCachedOwnerStyleRevision == ownerStyleRevision
         && mCachedStyleFingerprint == fingerprint)
         return mCachedLines;
 
-    mCachedLines = layoutLines(mContent, style, metrics, theme, owner);
+    mCachedLines = layoutLines(mContent, style, metrics, styleSheet, owner);
     mCachedLayoutValid = false;
     mCachedContentGeneration = mContentGeneration;
     mCachedMetrics = &metrics;
     mCachedMetricsGeneration = metrics.generation();
-    mCachedTheme = theme;
-    mCachedThemeGeneration = themeGeneration;
+    mCachedStyleSheet = styleSheet;
+    mCachedStyleSheetGeneration = styleSheetGeneration;
     mCachedOwner = &owner;
     mCachedOwnerParent = ownerParent;
     mCachedOwnerStyleRevision = ownerStyleRevision;
@@ -319,9 +319,9 @@ const std::vector<detail::TextLine>& TextHost::cachedLines(const TextMetrics& me
     return mCachedLines;
 }
 
-const detail::TextLayout& TextHost::cachedLayout(const TextMetrics& metrics, const Style& style, const StyleSheet* theme, const Widget& owner,
+const detail::TextLayout& TextHost::cachedLayout(const TextMetrics& metrics, const Style& style, const StyleSheet* styleSheet, const Widget& owner,
                                                  std::optional<float> availableWidth, bool visualOrder, bool applyOverflow) const {
-    const std::vector<detail::TextLine>& lines = cachedLines(metrics, style, theme, owner);
+    const std::vector<detail::TextLine>& lines = cachedLines(metrics, style, styleSheet, owner);
     const std::size_t layoutFingerprint = textLayoutFingerprint(style, visualOrder, applyOverflow);
     const bool widthMatches = mCachedLayoutWidthSet == availableWidth.has_value() && (!availableWidth || mCachedLayoutWidth == *availableWidth);
     if (!mCachedLayoutValid

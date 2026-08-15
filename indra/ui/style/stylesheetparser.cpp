@@ -217,35 +217,35 @@ StyleRule expandNestedSelector(const StyleRule& parent, const std::string& rawSe
     return result;
 }
 
-StyleSelector parseSimpleSelector(const std::string& selector) {
-    StyleSelector rule;
-    std::string token = trim(selector);
+StyleSelector parseSimpleSelector(const std::string& selectorText) {
+    StyleSelector result;
+    std::string token = trim(selectorText);
 
     if (const std::size_t separator = token.find("::"); separator != std::string::npos) {
         std::string partToken = token.substr(separator + 2);
         if (const std::size_t stateSeparator = partToken.rfind(':');
             stateSeparator != std::string::npos && (stateSeparator == 0 || partToken[stateSeparator - 1] != ':')) {
-            rule.partState = partToken.substr(stateSeparator + 1);
+            result.partState = partToken.substr(stateSeparator + 1);
             partToken.erase(stateSeparator);
         }
-        rule.parts = detail::splitPartPath(partToken);
+        result.parts = detail::splitPartPath(partToken);
         token.erase(separator);
     }
     if (const std::size_t separator = token.find(':'); separator != std::string::npos) {
-        rule.state = token.substr(separator + 1);
+        result.state = token.substr(separator + 1);
         token.erase(separator);
     }
     if (const std::size_t separator = token.find('#'); separator != std::string::npos) {
-        rule.id = token.substr(separator + 1);
+        result.id = token.substr(separator + 1);
         token.erase(separator);
     }
     if (const std::size_t separator = token.find('.'); separator != std::string::npos) {
-        rule.className = token.substr(separator + 1);
+        result.className = token.substr(separator + 1);
         token.erase(separator);
     }
-    rule.universal = token == "*";
-    if (!rule.universal) rule.element = token;
-    return rule;
+    result.universal = token == "*";
+    if (!result.universal) result.element = token;
+    return result;
 }
 
 struct ParsedRuleBlock {
@@ -267,9 +267,9 @@ struct ParsedModule {
     std::vector<ParsedRuleBlock> rules;
 };
 
-class StylesheetModuleGraph {
+class StyleSheetModuleGraph {
 public:
-    StylesheetModuleGraph(const ResourceLayer& layer, StyleModel& model, StyleSheetLoadResult& result)
+    StyleSheetModuleGraph(const ResourceLayer& layer, StyleModel& model, StyleSheetLoadResult& result)
         : mLayer(layer), mModel(model), mResult(result) {}
 
     bool build(const std::string& entrypoint) {
@@ -278,9 +278,9 @@ public:
     }
 
     template<typename Callback> void visit(const std::string& resourceId, Callback& callback) const {
-        std::vector<std::string> active;
-        std::vector<VisitEntry> modules;
-        collectModules(resourceId, active, modules);
+        std::vector<std::string> importStack;
+        std::vector<VisitEntry> moduleVisits;
+        collectModules(resourceId, importStack, moduleVisits);
 
         const auto emit = [&](const VisitEntry& entry, bool emitTokenRules) {
             for (const ParsedRuleBlock& rule : entry.module->rules) {
@@ -295,8 +295,8 @@ public:
                 }
             }
         };
-        for (const VisitEntry& entry : modules) emit(entry, true);
-        for (const VisitEntry& entry : modules) emit(entry, false);
+        for (const VisitEntry& entry : moduleVisits) emit(entry, true);
+        for (const VisitEntry& entry : moduleVisits) emit(entry, false);
     }
 
 private:
@@ -409,14 +409,14 @@ private:
         return !mResult.hasErrors();
     }
 
-    void collectModules(const std::string& resourceId, std::vector<std::string>& active, std::vector<VisitEntry>& modules) const {
-        if (std::find(active.begin(), active.end(), resourceId) != active.end()) return;
+    void collectModules(const std::string& resourceId, std::vector<std::string>& importStack, std::vector<VisitEntry>& moduleVisits) const {
+        if (std::find(importStack.begin(), importStack.end(), resourceId) != importStack.end()) return;
         const auto module = mModules.find(resourceId);
         if (module == mModules.end()) return;
-        active.push_back(resourceId);
-        for (const ParsedImport& imported : module->second.imports) collectModules(imported.resourceId, active, modules);
-        modules.push_back({&module->second, active});
-        active.pop_back();
+        importStack.push_back(resourceId);
+        for (const ParsedImport& imported : module->second.imports) collectModules(imported.resourceId, importStack, moduleVisits);
+        moduleVisits.push_back({&module->second, importStack});
+        importStack.pop_back();
     }
 
     const ResourceLayer& mLayer;
@@ -464,8 +464,8 @@ StyleRule detail::parseSelector(const std::string& selector) {
     return rule;
 }
 
-StyleSheetLoadResult StyleSheet::loadRadia(const std::string& radia, const std::string& sourceName) {
-    return loadRadiaLayers({ResourceLayer{sourceName, radia}});
+StyleSheetLoadResult StyleSheet::loadRadia(const std::string& stylesheetSource, const std::string& sourceName) {
+    return loadRadiaLayers({ResourceLayer{sourceName, stylesheetSource}});
 }
 
 StyleSheetLoadResult StyleSheet::loadRadiaLayers(const std::vector<ResourceLayer>& layers) {
@@ -477,7 +477,7 @@ StyleSheetLoadResult StyleSheet::loadRadiaLayers(const std::vector<ResourceLayer
     }
     for (const ResourceLayer& layer : layers) {
         const std::string entrypoint = layer.entrypoint.empty() ? layer.sourceName : layer.entrypoint;
-        StylesheetModuleGraph graph(layer, candidate, result);
+        StyleSheetModuleGraph graph(layer, candidate, result);
         graph.build(entrypoint);
         if (result.hasErrors()) continue;
 

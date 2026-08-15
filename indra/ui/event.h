@@ -120,17 +120,17 @@ public:
     unsigned int codepoint;
 };
 
-constexpr int KEY_RETURN = 13;
-constexpr int KEY_SPACE = 32;
-constexpr int KEY_TAB = 9;
+constexpr int kKeyReturn = 13;
+constexpr int kKeySpace = 32;
+constexpr int kKeyTab = 9;
 
-constexpr uint32_t MODIFIER_SHIFT = 1 << 0;
-constexpr uint32_t MODIFIER_CONTROL = 1 << 1;
-constexpr uint32_t MODIFIER_ALT = 1 << 2;
-constexpr uint32_t MODIFIER_PLATFORM_CONTROL = 1 << 3;
+constexpr uint32_t kModifierShift = 1 << 0;
+constexpr uint32_t kModifierControl = 1 << 1;
+constexpr uint32_t kModifierAlt = 1 << 2;
+constexpr uint32_t kModifierPlatformControl = 1 << 3;
 
 inline bool isActivationKey(int key) {
-    return key == KEY_RETURN || key == KEY_SPACE;
+    return key == kKeyReturn || key == kKeySpace;
 }
 } // namespace radia::ui
 #endif // RD_EVENT_H

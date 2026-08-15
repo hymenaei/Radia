@@ -35,17 +35,17 @@
 
 namespace radia::ui {
 struct SkinGeneration::Impl {
-    Impl(ResourceSnapshot resources_value, LocalizationCatalog localization_value, StyleSheet style_sheet_value,
-         std::unordered_map<std::string, SvgIcon> icons_value, LayoutDocumentMap layout_documents_value)
-        : resources(std::make_shared<const ResourceSnapshot>(std::move(resources_value))), localization(std::move(localization_value)),
-          styleSheet(std::move(style_sheet_value)), icons(std::move(icons_value)), layout_documents(std::move(layout_documents_value)),
-          layoutCompiler(&layout_documents) {}
+    Impl(ResourceSnapshot resourcesValue, LocalizationCatalog localizationValue, StyleSheet styleSheetValue,
+         std::unordered_map<std::string, SvgIcon> iconsValue, LayoutDocumentMap layoutDocumentsValue)
+        : resources(std::make_shared<const ResourceSnapshot>(std::move(resourcesValue))), localization(std::move(localizationValue)),
+          styleSheet(std::move(styleSheetValue)), icons(std::move(iconsValue)), layoutDocuments(std::move(layoutDocumentsValue)),
+          layoutCompiler(&layoutDocuments) {}
 
     std::shared_ptr<const ResourceSnapshot> resources;
     LocalizationCatalog localization;
     StyleSheet styleSheet;
     std::unordered_map<std::string, SvgIcon> icons;
-    LayoutDocumentMap layout_documents;
+    LayoutDocumentMap layoutDocuments;
     LayoutResourceCompiler layoutCompiler;
 };
 } // namespace radia::ui

@@ -48,7 +48,9 @@ class System;
 } // namespace radia::ui
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
+using radia::ui::Floater;
+using radia::ui::System;
+
 class ComponentController;
 
 struct RuntimeKeybindingState {

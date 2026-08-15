@@ -36,7 +36,7 @@ class Panel : public Widget {
     friend WidgetContract detail::panelContract();
 
 public:
-    static constexpr const char* ELEMENT = "panel";
+    static constexpr const char* sElement = "panel";
 
     Panel();
 };

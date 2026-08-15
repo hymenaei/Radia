@@ -28,7 +28,11 @@
 #include "llcontrol.h"
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
+using radia::ui::SettingResolution;
+using radia::ui::ValueBinding;
+using radia::ui::ValueBindingSubscription;
+using radia::ui::ValueState;
+
 namespace {
 template<typename T> struct SavedSettingTraits;
 

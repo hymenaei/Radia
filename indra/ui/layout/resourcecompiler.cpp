@@ -171,7 +171,7 @@ LayoutBuildResult LayoutResourceCompiler::buildWidgetTreeFromString(const std::s
     return std::move(state.result);
 }
 
-void LayoutResourceCompiler::validateWidgetScope(Widget& scope, BuildState& state, const std::string& source, bool countRoot) const {
+void LayoutResourceCompiler::validateWidgetScope(Widget& scope, BuildState& state, const std::string& source, bool includeRootInIdScope) const {
     std::unordered_map<std::string, Widget*> ids;
     std::unordered_set<std::string> duplicates;
     std::vector<const BuildState::AuthoredWidget*> authoredWidgetRecords;
@@ -184,7 +184,7 @@ void LayoutResourceCompiler::validateWidgetScope(Widget& scope, BuildState& stat
             validateWidgetScope(widget, state, source, false);
             return;
         }
-        if ((!root || countRoot) && !widget.id().empty() && !ids.emplace(widget.id(), &widget).second) {
+        if ((!root || includeRootInIdScope) && !widget.id().empty() && !ids.emplace(widget.id(), &widget).second) {
             duplicates.insert(widget.id());
             state.result.error("layout.id.duplicate", "Duplicate widget id: " + widget.id() + ".", source);
         }
@@ -416,9 +416,9 @@ void LayoutResourceCompiler::buildChildren(Widget& target, const LayoutElement& 
         if (consumeFlowBreak(childNode, context) == ChildHandling::Handled) continue;
         if (consumeScopedInline(childNode, context) == ChildHandling::Handled) continue;
         const LayoutElement child(childNode);
-        const auto part_contract = contract.childrenBehavior.partAttributes.find(schemaNameKey(child.name()));
-        if (part_contract != contract.childrenBehavior.partAttributes.end())
-            validateWidgetAttributes(child, part_contract->second, state.result, source);
+        const auto partContract = contract.childrenBehavior.partAttributes.find(schemaNameKey(child.name()));
+        if (partContract != contract.childrenBehavior.partAttributes.end())
+            validateWidgetAttributes(child, partContract->second, state.result, source);
         if (consumeChildContainer(childNode, context) == ChildHandling::Handled) continue;
         (void)buildRegularChild(childNode, context);
     }
@@ -475,14 +475,14 @@ LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::consumeFlowBreak(c
 
 LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::consumeScopedInline(const LayoutNode& childNode, ChildBuildContext& context) const {
     const LayoutElement child(childNode);
-    const auto scoped_inline = context.contract.contentBehavior.scopedInlineContent.find(schemaNameKey(child.name()));
-    if (scoped_inline == context.contract.contentBehavior.scopedInlineContent.end()) return ChildHandling::Unhandled;
+    const auto scopedInline = context.contract.contentBehavior.scopedInlineContent.find(schemaNameKey(child.name()));
+    if (scopedInline == context.contract.contentBehavior.scopedInlineContent.end()) return ChildHandling::Unhandled;
     rejectAuthoredAttributes(child, context.state.result, context.source);
-    Widget* scoped_part =
-        scoped_inline->second.apply(compileInlineContent(child.content(), scoped_inline->second.elementName, scoped_inline->second.accepted,
+    Widget* scopedPart =
+        scopedInline->second.apply(compileInlineContent(child.content(), scopedInline->second.elementName, scopedInline->second.accepted,
                                                          context.state.result, context.source, context.state.context),
                                     context.target, context.state.result, context.source, child.source().begin.line, child.source().begin.column);
-    if (scoped_part) context.markLayoutChild(*scoped_part);
+    if (scopedPart) context.markLayoutChild(*scopedPart);
     return ChildHandling::Handled;
 }
 
@@ -492,24 +492,24 @@ LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::consumeChildContai
     const ChildClaim claim = context.contract.childrenBehavior.claim(child, context.target, context.state.result, context.source);
     if (claim.kind() == ChildClaim::Kind::NotHandled) return ChildHandling::Unhandled;
     if (Widget* container = claim.container()) {
-        for (const LayoutContent& nested_content : child.content()) {
-            if (nested_content.isText()) {
-                if (!trimmedText(nested_content.text).empty())
+        for (const LayoutContent& nestedContent : child.content()) {
+            if (nestedContent.isText()) {
+                if (!trimmedText(nestedContent.text).empty())
                     context.state.result.error("layout.text.unsupported", "Text content is not supported in <" + child.name() + ">.", context.source,
-                                               nested_content.source.begin.line, nested_content.source.begin.column);
+                                               nestedContent.source.begin.line, nestedContent.source.begin.column);
                 continue;
             }
-            if (auto child_widget = buildNode(*nested_content.node, context.source, nullptr, context.state))
-                container->addChild(std::move(child_widget));
+            if (auto childWidget = buildNode(*nestedContent.node, context.source, nullptr, context.state))
+                container->addChild(std::move(childWidget));
         }
     }
     return ChildHandling::Handled;
 }
 
 LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::buildRegularChild(const LayoutNode& childNode, ChildBuildContext& context) const {
-    if (auto child_widget = buildNode(childNode, context.source, nullptr, context.state)) {
-        context.markLayoutChild(*child_widget);
-        context.target.addChild(std::move(child_widget));
+    if (auto childWidget = buildNode(childNode, context.source, nullptr, context.state)) {
+        context.markLayoutChild(*childWidget);
+        context.target.addChild(std::move(childWidget));
     }
     return ChildHandling::Handled;
 }

@@ -71,7 +71,7 @@ LLFontGpuGlyphCache::~LLFontGpuGlyphCache() {
     }
 }
 
-void LLFontGpuGlyphCache::init(hb_font_t* src_font, bool color, unsigned palette) {
+void LLFontGpuGlyphCache::init(hb_font_t* sourceFont, bool color, unsigned palette) {
     mCache.clear();
     mLastArenaGen = sGeneration;
 
@@ -83,15 +83,15 @@ void LLFontGpuGlyphCache::init(hb_font_t* src_font, bool color, unsigned palette
         mEncodeFont = nullptr;
     }
 
-    hb_face_t* face = src_font ? hb_font_get_face(src_font) : nullptr;
+    hb_face_t* face = sourceFont ? hb_font_get_face(sourceFont) : nullptr;
     if (face) {
         unsigned upem = hb_face_get_upem(face);
         mEncodeFont = hb_font_create(face);
         hb_font_set_scale(mEncodeFont, static_cast<int>(upem), static_cast<int>(upem));
 
-        unsigned num_coords = 0;
-        const int* coords = hb_font_get_var_coords_normalized(src_font, &num_coords);
-        if (coords && num_coords) hb_font_set_var_coords_normalized(mEncodeFont, coords, num_coords);
+        unsigned numCoords = 0;
+        const int* coords = hb_font_get_var_coords_normalized(sourceFont, &numCoords);
+        if (coords && numCoords) hb_font_set_var_coords_normalized(mEncodeFont, coords, numCoords);
     }
 }
 
@@ -104,56 +104,56 @@ void LLFontGpuGlyphCache::ensureEncoder() {
     } else if (!mEncoder) mEncoder = hb_gpu_draw_create_or_fail();
 }
 
-LLFontGpuGlyphCache::GlyphLoc LLFontGpuGlyphCache::encodeGlyph(U32 glyph_id) {
+LLFontGpuGlyphCache::GlyphLoc LLFontGpuGlyphCache::encodeGlyph(U32 glyphId) {
     GlyphLoc loc;
     if (!mEncodeFont) return loc;
 
     ensureEncoder();
-    return mColor ? encodePaintGlyph(glyph_id) : encodeDrawGlyph(glyph_id);
+    return mColor ? encodePaintGlyph(glyphId) : encodeDrawGlyph(glyphId);
 }
 
 namespace {
-void store_blob(std::vector<U8>& arena, hb_blob_t* blob, const hb_glyph_extents_t& ext, LLFontGpuGlyphCache::GlyphLoc& loc) {
+void storeBlob(std::vector<U8>& arena, hb_blob_t* blob, const hb_glyph_extents_t& ext, LLFontGpuGlyphCache::GlyphLoc& location) {
     unsigned len = blob ? hb_blob_get_length(blob) : 0;
     len -= len % LLFontGpuGlyphCache::kBytesPerTexel;
     if (blob && len >= LLFontGpuGlyphCache::kBytesPerTexel) {
         const char* data = hb_blob_get_data(blob, nullptr);
-        U32 byte_off = static_cast<U32>(arena.size());
+        U32 byteOffset = static_cast<U32>(arena.size());
         arena.insert(arena.end(), data, data + len);
 
-        loc.mTexelOffset = byte_off / LLFontGpuGlyphCache::kBytesPerTexel;
-        loc.mTexelCount = len / LLFontGpuGlyphCache::kBytesPerTexel;
-        loc.mXBearing = ext.x_bearing;
-        loc.mYBearing = ext.y_bearing;
-        loc.mWidth = ext.width;
-        loc.mHeight = ext.height;
+        location.mTexelOffset = byteOffset / LLFontGpuGlyphCache::kBytesPerTexel;
+        location.mTexelCount = len / LLFontGpuGlyphCache::kBytesPerTexel;
+        location.mXBearing = ext.x_bearing;
+        location.mYBearing = ext.y_bearing;
+        location.mWidth = ext.width;
+        location.mHeight = ext.height;
     }
 }
 } // namespace
 
-LLFontGpuGlyphCache::GlyphLoc LLFontGpuGlyphCache::encodeDrawGlyph(U32 glyph_id) {
+LLFontGpuGlyphCache::GlyphLoc LLFontGpuGlyphCache::encodeDrawGlyph(U32 glyphId) {
     GlyphLoc loc;
     if (!mEncoder) return loc;
 
-    hb_gpu_draw_glyph(mEncoder, mEncodeFont, static_cast<hb_codepoint_t>(glyph_id));
+    hb_gpu_draw_glyph(mEncoder, mEncodeFont, static_cast<hb_codepoint_t>(glyphId));
 
     hb_glyph_extents_t ext = {0, 0, 0, 0};
     hb_blob_t* blob = hb_gpu_draw_encode(mEncoder, &ext);
-    store_blob(sArena, blob, ext, loc);
+    storeBlob(sArena, blob, ext, loc);
 
     if (blob) hb_gpu_draw_recycle_blob(mEncoder, blob);
     return loc;
 }
 
-LLFontGpuGlyphCache::GlyphLoc LLFontGpuGlyphCache::encodePaintGlyph(U32 glyph_id) {
+LLFontGpuGlyphCache::GlyphLoc LLFontGpuGlyphCache::encodePaintGlyph(U32 glyphId) {
     GlyphLoc loc;
     if (!mPaintEncoder) return loc;
 
-    hb_gpu_paint_glyph(mPaintEncoder, mEncodeFont, static_cast<hb_codepoint_t>(glyph_id));
+    hb_gpu_paint_glyph(mPaintEncoder, mEncodeFont, static_cast<hb_codepoint_t>(glyphId));
 
     hb_glyph_extents_t ext = {0, 0, 0, 0};
     hb_blob_t* blob = hb_gpu_paint_encode(mPaintEncoder, &ext);
-    store_blob(sArena, blob, ext, loc);
+    storeBlob(sArena, blob, ext, loc);
 
     if (blob) hb_gpu_paint_recycle_blob(mPaintEncoder, blob);
     return loc;
@@ -168,7 +168,7 @@ LLFontGpuGlyphCache::Batch LLFontGpuGlyphCache::beginBatch() {
     return Batch(sGeneration);
 }
 
-const LLFontGpuGlyphCache::GlyphLoc& LLFontGpuGlyphCache::getGlyph(const Batch& batch, U32 glyph_id) {
+const LLFontGpuGlyphCache::GlyphLoc& LLFontGpuGlyphCache::getOrEncodeGlyph(const Batch& batch, U32 glyphId) {
     static const GlyphLoc sEmpty;
     llassert(batch.mGeneration != 0);
     llassert(batch.mGeneration == sGeneration);
@@ -179,14 +179,14 @@ const LLFontGpuGlyphCache::GlyphLoc& LLFontGpuGlyphCache::getGlyph(const Batch& 
         mLastArenaGen = sGeneration;
     }
 
-    if (auto it = mCache.find(glyph_id); it != mCache.end()) return it->second;
+    if (auto it = mCache.find(glyphId); it != mCache.end()) return it->second;
 
-    const bool had_prior = !sArena.empty();
-    GlyphLoc loc = encodeGlyph(glyph_id);
+    const bool hadPrior = !sArena.empty();
+    GlyphLoc loc = encodeGlyph(glyphId);
 
-    if (loc.drawable() && getArenaTexels() > sMaxTexels && had_prior) sResetPending = true;
+    if (loc.drawable() && getArenaTexels() > sMaxTexels && hadPrior) sResetPending = true;
 
-    auto [it, ok] = mCache.emplace(glyph_id, loc);
+    auto [it, ok] = mCache.emplace(glyphId, loc);
     return it->second;
 }
 

@@ -63,8 +63,8 @@ std::shared_ptr<const SkinGeneration> SkinGeneration::empty() {
 }
 
 LayoutBuildResult SkinGeneration::buildWidgetTree(const std::string& resourceId, const std::string& locale) const {
-    const std::string selected_locale = containsLocale(locale) ? locale : defaultLocale();
-    const LayoutBuildContext context(mImpl->localization, selected_locale);
+    const std::string selectedLocale = containsLocale(locale) ? locale : defaultLocale();
+    const LayoutBuildContext context(mImpl->localization, selectedLocale);
     LayoutBuildResult result = mImpl->layoutCompiler.buildWidgetTreeFromResource(resourceId, &context);
     if (result.root) validateIconReferences(*result.root, result);
     if (result.hasErrors()) result.root.reset();

@@ -30,7 +30,9 @@
 class LLControlGroup;
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
+using radia::ui::SettingResolution;
+using radia::ui::SettingResolver;
+
 class SettingsAdapter final : public SettingResolver {
 public:
     explicit SettingsAdapter(LLControlGroup& settings) : mSettings(settings) {}

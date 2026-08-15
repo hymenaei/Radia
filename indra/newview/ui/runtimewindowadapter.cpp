@@ -30,25 +30,26 @@
 #include "llwindow.h"
 
 namespace radia::viewer::ui {
-using namespace ::radia::ui;
+using radia::ui::Rect;
+using radia::ui::Vec2;
 
 RuntimeWindowAdapter::RuntimeWindowAdapter(LLWindow*& window, AuxiliaryWindowFactory& auxiliaryWindows, DisplayScale displayScale, MainSize mainSize,
                                            ClearDragState clearDragState)
     : mWindow(window), mAuxiliaryWindows(auxiliaryWindows), mDisplayScale(std::move(displayScale)), mMainSize(std::move(mainSize)),
       mClearDragState(std::move(clearDragState)) {}
 
-AuxiliaryWindowRect RuntimeWindowAdapter::mainRectToNative(const radia::ui::Rect& rect) const {
+AuxiliaryWindowRect RuntimeWindowAdapter::mainRectToNative(const Rect& rect) const {
     if (!mWindow) return {};
-    const AuxiliaryWindowPoint topLeft = mainPointToNative({rect.left(), rect.top()});
-    const AuxiliaryWindowPoint bottomRight = mainPointToNative({rect.right(), rect.bottom()});
+    const AuxiliaryScreenPoint topLeft = mainPointToNative({rect.left(), rect.top()});
+    const AuxiliaryScreenPoint bottomRight = mainPointToNative({rect.right(), rect.bottom()});
     return {std::min(topLeft.x, bottomRight.x), std::min(topLeft.y, bottomRight.y), std::abs(bottomRight.x - topLeft.x),
             std::abs(bottomRight.y - topLeft.y)};
 }
 
-AuxiliaryWindowPoint RuntimeWindowAdapter::mainPointToNative(const radia::ui::Vec2& point) const {
+AuxiliaryScreenPoint RuntimeWindowAdapter::mainPointToNative(const Vec2& point) const {
     if (!mWindow) return {};
-    const radia::ui::Vec2 scale = mDisplayScale ? mDisplayScale() : radia::ui::Vec2{1.f, 1.f};
-    const radia::ui::Vec2 scaled = detail::scaleLogicalPoint(point, scale);
+    const Vec2 scale = mDisplayScale ? mDisplayScale() : Vec2{1.f, 1.f};
+    const Vec2 scaled = detail::scaleLogicalPoint(point, scale);
     LLCoordScreen screen;
     mWindow->convertCoords(LLCoordGL(ll_round(scaled.x), ll_round(scaled.y)), &screen);
     return {screen.mX, screen.mY};
@@ -61,15 +62,15 @@ float RuntimeWindowAdapter::nativeScaleMultiplier() const {
     return effectiveScale / std::max(0.25f, mWindow->getSystemUISize());
 }
 
-radia::ui::Vec2 RuntimeWindowAdapter::nativeBottomLeftInMain(const AuxiliaryWindowRect& rect) const {
+Vec2 RuntimeWindowAdapter::nativeBottomLeftInMain(const AuxiliaryWindowRect& rect) const {
     if (!mWindow) return {};
-    const radia::ui::Vec2 scale = mDisplayScale ? mDisplayScale() : radia::ui::Vec2{1.f, 1.f};
+    const Vec2 scale = mDisplayScale ? mDisplayScale() : Vec2{1.f, 1.f};
     LLCoordGL bottomLeft;
     mWindow->convertCoords(LLCoordScreen(rect.x, rect.y + rect.height), &bottomLeft);
     return detail::unscaleNativePoint({static_cast<float>(bottomLeft.mX), static_cast<float>(bottomLeft.mY)}, scale);
 }
 
-bool RuntimeWindowAdapter::nativePointInsideMain(const radia::ui::Vec2& point) const {
+bool RuntimeWindowAdapter::nativePointInsideMain(const Vec2& point) const {
     if (!mWindow || !mMainSize) return false;
     const auto [width, height] = mMainSize();
     if (width <= 0 || height <= 0) return false;
@@ -81,11 +82,11 @@ bool RuntimeWindowAdapter::placementVisible(const AuxiliaryWindowRect& rect) con
     return mAuxiliaryWindows.placementVisible(rect);
 }
 
-std::optional<AuxiliaryWindowPoint> RuntimeWindowAdapter::releasePointerForDetach(const radia::ui::Vec2& mainPosition) {
-    const std::optional<AuxiliaryWindowPoint> cursor = mWindow ? std::optional<AuxiliaryWindowPoint>(mainPointToNative(mainPosition)) : std::nullopt;
+std::optional<AuxiliaryScreenPoint> RuntimeWindowAdapter::releasePointerForDetach(const Vec2& mainPosition) {
+    const std::optional<AuxiliaryScreenPoint> screenCursor = mWindow ? std::optional<AuxiliaryScreenPoint>(mainPointToNative(mainPosition)) : std::nullopt;
     if (mClearDragState) mClearDragState();
     if (mWindow) mWindow->releaseMouse();
-    return cursor;
+    return screenCursor;
 }
 
 void RuntimeWindowAdapter::setMouseClipping(bool enabled) {

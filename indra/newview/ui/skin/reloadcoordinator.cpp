@@ -57,6 +57,7 @@ public:
         mLastChange = {};
         mSettling = false;
         mRetryAfterAnyChange = false;
+        if (enabled) mRequested = true;
     }
 
     bool setAutoReloadTiming(SkinReloadTiming timing) {
@@ -73,9 +74,11 @@ public:
     }
 
     std::optional<SkinReloadResult> update(TimePoint now, ComponentManager& components) {
-        if (std::optional<SkinSnapshotResult> settled = poll(now)) {
-            mRequestedSnapshot = std::move(settled);
-            mRequested = true;
+        if (!mRequested) {
+            if (std::optional<SkinSnapshotResult> settled = poll(now)) {
+                mRequestedSnapshot = std::move(settled);
+                mRequested = true;
+            }
         }
         if (!mRequested) return std::nullopt;
 
@@ -134,6 +137,7 @@ private:
         mAcknowledgedSnapshot = snapshot;
         mLastChange = now;
         mSettling = false;
+        if (mNextScan == TimePoint() || now >= mNextScan) mNextScan = now + mTiming.scanInterval;
     }
 
     SkinReloadResult reload(SkinSnapshotResult captured, ComponentManager& components) {

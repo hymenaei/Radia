@@ -562,7 +562,13 @@ public:
     bool placementVisible(const AuxiliaryWindowRect& rect) const override {
 #if LL_WINDOWS
         RECT native{rect.x, rect.y, rect.x + rect.width, rect.y + rect.height};
-        return MonitorFromRect(&native, MONITOR_DEFAULTTONULL) != nullptr;
+        const HMONITOR monitor = MonitorFromRect(&native, MONITOR_DEFAULTTONULL);
+        MONITORINFO info{sizeof(info)};
+        if (!monitor || !GetMonitorInfo(monitor, &info)) return false;
+        return native.left >= info.rcWork.left
+            && native.top >= info.rcWork.top
+            && native.right <= info.rcWork.right
+            && native.bottom <= info.rcWork.bottom;
 #else
         return false;
 #endif

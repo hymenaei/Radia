@@ -78,6 +78,35 @@ bool RuntimeWindowAdapter::nativePointInsideMain(const Vec2& point) const {
     return point.x >= main.x && point.x <= main.x + main.width && point.y >= main.y && point.y <= main.y + main.height;
 }
 
+bool RuntimeWindowAdapter::hasDisplaySpaceBeyondEdge(const Vec2& position, const Vec2& delta) const {
+    if (!mMainSize) return false;
+    const auto [width, height] = mMainSize();
+    if (width <= 0 || height <= 0) return false;
+
+    const AuxiliaryWindowRect main =
+        mWindow ? mainRectToNative({0.f, 0.f, static_cast<float>(width), static_cast<float>(height)}) : AuxiliaryWindowRect{0, 0, width, height};
+    if (main.width <= 0 || main.height <= 0) return false;
+
+    AuxiliaryWindowRect edge = main;
+    if (mWindow) {
+        LLCoordScreen windowPosition;
+        LLCoordScreen windowSize;
+        if (mWindow->getPosition(&windowPosition) && mWindow->getSize(&windowSize) && windowSize.mX > 0 && windowSize.mY > 0)
+            edge = {windowPosition.mX, windowPosition.mY, windowSize.mX, windowSize.mY};
+    }
+
+    const Vec2 clamped{std::clamp(position.x, 0.f, static_cast<float>(width - 1)), std::clamp(position.y, 0.f, static_cast<float>(height - 1))};
+    const AuxiliaryScreenPoint native =
+        mWindow ? mainPointToNative(clamped) : AuxiliaryScreenPoint{ll_round(clamped.x), ll_round(static_cast<float>(height) - clamped.y)};
+    const auto hasSpaceAt = [this](S32 x, S32 y) { return mAuxiliaryWindows.placementVisible({x, y, 1, 1}); };
+
+    if (position.x <= 0.f && delta.x < 0.f) return hasSpaceAt(edge.x - 1, native.y);
+    if (position.x >= static_cast<float>(width - 1) && delta.x > 0.f) return hasSpaceAt(edge.x + edge.width, native.y);
+    if (position.y <= 0.f && delta.y < 0.f) return hasSpaceAt(native.x, edge.y + edge.height);
+    if (position.y >= static_cast<float>(height - 1) && delta.y > 0.f) return hasSpaceAt(native.x, edge.y - 1);
+    return true;
+}
+
 bool RuntimeWindowAdapter::placementVisible(const AuxiliaryWindowRect& rect) const {
     return mAuxiliaryWindows.placementVisible(rect);
 }

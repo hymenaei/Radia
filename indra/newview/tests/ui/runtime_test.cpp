@@ -38,9 +38,23 @@
 #include "widgets/widget.h"
 
 namespace tut {
+using radia::ui::Button;
+using radia::ui::Floater;
+using radia::ui::KeybindingPresentation;
+using radia::ui::PaintCommandKind;
+using radia::ui::RecordingPaintContext;
+using radia::ui::Rect;
+using radia::ui::System;
+using radia::ui::Vec2;
+using radia::ui::Widget;
+using radia::viewer::ui::ComponentController;
+using radia::viewer::ui::NativePointerButton;
+using radia::viewer::ui::Runtime;
+using radia::viewer::ui::RuntimeKeybindingState;
+using radia::viewer::ui::SkinSnapshotResult;
 namespace {
-radia::viewer::ui::SkinSnapshotResult runtimeSkinSnapshot() {
-    radia::viewer::ui::SkinSnapshotResult result;
+SkinSnapshotResult runtimeSkinSnapshot() {
+    SkinSnapshotResult result;
     result.snapshot.add("localization.yaml", "defaultLocale: en\nlocales: {en: {name: English, strings: {}}}\n");
     result.snapshot.add("skin.radia", "floater { flow: column; } button { size: 128px 32px; }");
     result.snapshot.add("view.xml", "<floater><button id=\"press\" onClick=\"press()\"/></floater>");
@@ -54,16 +68,16 @@ struct RuntimeControllerState {
     int presses = 0;
 };
 
-radia::ui::Widget* findWidget(radia::ui::Widget& root, const std::string& id) {
+Widget* findWidget(Widget& root, const std::string& id) {
     if (root.id() == id) return &root;
     for (const auto& child : root.children())
-        if (radia::ui::Widget* found = findWidget(*child, id)) return found;
+        if (Widget* found = findWidget(*child, id)) return found;
     return nullptr;
 }
 
-class RuntimeController final : public radia::viewer::ui::ComponentController {
+class RuntimeController final : public ComponentController {
 public:
-    RuntimeController(radia::ui::System& system, RuntimeControllerState& state) : ComponentController(system), mState(state) {
+    RuntimeController(System& system, RuntimeControllerState& state) : ComponentController(system), mState(state) {
         event("press", &RuntimeController::press);
     }
 
@@ -89,36 +103,36 @@ struct runtimeData {
     LLControlGroup accountSettings{"RuntimeAccount"};
     LLGLSLShader uiShader;
     LLWindow* mainWindow = nullptr;
-    radia::viewer::ui::SkinSnapshotResult snapshot = runtimeSkinSnapshot();
+    SkinSnapshotResult snapshot = runtimeSkinSnapshot();
     int captures = 0;
     int nowCalls = 0;
     std::chrono::steady_clock::time_point now;
     RuntimeControllerState controllerState;
-    radia::ui::RecordingPaintContext* paintContext = nullptr;
-    radia::viewer::ui::Runtime runtime;
+    RecordingPaintContext* paintContext = nullptr;
+    Runtime runtime;
 
     runtimeData()
         : runtime(savedSettings, accountSettings, uiShader,
-                  radia::viewer::ui::Runtime::WindowEnvironment{
-                      .mainWindow = mainWindow, .displayScale = [] { return radia::ui::Vec2{1.f, 1.f}; }, .auxiliaryWindowFactory = auxiliaryWindows},
-                  radia::viewer::ui::Runtime::IntegrationHooks{.resolveKeybinding = [](const std::string&) { return radia::ui::KeybindingPresentation{}; },
-                                                          .keybindingState = [] { return radia::viewer::ui::RuntimeKeybindingState{}; },
-                                                          .captureSkin =
-                                                              [this] {
-                                                                  ++captures;
-                                                                  return snapshot;
-                                                              },
-                                                          .now =
-                                                              [this] {
-                                                                  ++nowCalls;
-                                                                  return now;
-                                                              },
-                                                          .paintContext =
-                                                              [this](LLGLSLShader&, radia::ui::System&) {
-                                                                  auto context = std::make_unique<radia::ui::RecordingPaintContext>();
-                                                                  paintContext = context.get();
-                                                                  return context;
-                                                              }}) {
+                  Runtime::WindowEnvironment{
+                      .mainWindow = mainWindow, .displayScale = [] { return Vec2{1.f, 1.f}; }, .auxiliaryWindowFactory = auxiliaryWindows},
+                  Runtime::IntegrationHooks{.resolveKeybinding = [](const std::string&) { return KeybindingPresentation{}; },
+                                            .keybindingState = [] { return RuntimeKeybindingState{}; },
+                                            .captureSkin =
+                                                [this] {
+                                                    ++captures;
+                                                    return snapshot;
+                                                },
+                                            .now =
+                                                [this] {
+                                                    ++nowCalls;
+                                                    return now;
+                                                },
+                                            .paintContext =
+                                                [this](LLGLSLShader&, System&) {
+                                                    auto context = std::make_unique<RecordingPaintContext>();
+                                                    paintContext = context.get();
+                                                    return context;
+                                                }}) {
         savedSettings.declareString("Locale", "", "test locale");
         savedSettings.declareBOOL("SkinAutoReload", false, "test skin reload");
         savedSettings.declareS32("LongClickDelay", 500, "test long click delay");
@@ -128,7 +142,7 @@ struct runtimeData {
 
     bool registerTestFloater() {
         return runtime.registerFloater("runtimeTest", "view.xml",
-                                       [this](radia::ui::System& system) { return std::make_unique<RuntimeController>(system, controllerState); });
+                                       [this](System& system) { return std::make_unique<RuntimeController>(system, controllerState); });
     }
 };
 using runtimeTest = test_group<runtimeData>;
@@ -138,8 +152,8 @@ runtimeTest runtimeTestCase("UIRuntime");
 template<> template<> void runtimeObject::test<1>() {
     set_test_name("Runtime keeps named input operations inert before initialization");
     ensure("pointer move is not handled before initialization", !runtime.pointerMove(10.f, 20.f, 0).handled);
-    ensure("pointer down is not handled before initialization", !runtime.pointerDown(10.f, 20.f, radia::viewer::ui::NativePointerButton::Left, 0).handled);
-    ensure("pointer up is not handled before initialization", !runtime.pointerUp(10.f, 20.f, radia::viewer::ui::NativePointerButton::Left, 0).handled);
+    ensure("pointer down is not handled before initialization", !runtime.pointerDown(10.f, 20.f, NativePointerButton::Left, 0).handled);
+    ensure("pointer up is not handled before initialization", !runtime.pointerUp(10.f, 20.f, NativePointerButton::Left, 0).handled);
     ensure("scroll is not handled before initialization", !runtime.scroll(10, 20, 0.f, 1.f, 0).handled);
     ensure("key down is not handled before initialization", !runtime.keyDown(KEY_NONE, 0).handled);
     ensure("key up is not handled before initialization", !runtime.keyUp(KEY_NONE, 0).handled);
@@ -179,11 +193,11 @@ template<> template<> void runtimeObject::test<4>() {
     set_test_name("Runtime routes visible attached input through a bound component");
     ensure("Runtime initializes", runtime.initialize());
     ensure("test component registers", registerTestFloater());
-    radia::ui::Floater* floater = runtime.openFloater("runtimeTest");
+    Floater* floater = runtime.openFloater("runtimeTest");
     ensure("test component opens", floater != nullptr);
     if (!floater) return;
 
-    auto* press = dynamic_cast<radia::ui::Button*>(findWidget(*floater, "press"));
+    auto* press = dynamic_cast<Button*>(findWidget(*floater, "press"));
     ensure("bound Button exists", press != nullptr);
     if (!press) return;
 
@@ -191,38 +205,39 @@ template<> template<> void runtimeObject::test<4>() {
     runtime.frame(800, 600);
     ensure("visible frame observes the injected clock", nowCalls > 0);
     ensure("visible frame paints through the Runtime seam",
-           paintContext != nullptr
-               && paintContext->count(radia::ui::PaintCommandKind::BeginFrame) == 1
-               && paintContext->count(radia::ui::PaintCommandKind::EndFrame) == 1);
-    const radia::ui::Rect pressRect = press->rect();
+           paintContext != nullptr && paintContext->count(PaintCommandKind::BeginFrame) == 1 && paintContext->count(PaintCommandKind::EndFrame) == 1);
+    const Rect pressRect = press->rect();
     const F32 x = pressRect.x + pressRect.w * 0.5f;
     const F32 y = pressRect.y + pressRect.h * 0.5f;
     ensure("bound Button has a hit-testable rectangle", pressRect.w > 0.f && pressRect.h > 0.f);
     ensure("pointer move reaches the visible component", runtime.pointerMove(x, y, 0).handled);
-    ensure("pointer down reaches the visible component", runtime.pointerDown(x, y, radia::viewer::ui::NativePointerButton::Left, 0).handled);
-    ensure("pointer up reaches the pressed component", runtime.pointerUp(x, y, radia::viewer::ui::NativePointerButton::Left, 0).handled);
+    ensure("pointer down reaches the visible component", runtime.pointerDown(x, y, NativePointerButton::Left, 0).handled);
+    ensure("pointer up reaches the pressed component", runtime.pointerUp(x, y, NativePointerButton::Left, 0).handled);
     ensure_equals("pointer activation reaches the controller", controllerState.presses, 1);
+    ensure("Tab reaches Radia focus traversal", runtime.keyDown(KEY_TAB, 0).handled);
+    ensure("Tab release remains owned by Radia", runtime.keyUp(KEY_TAB, 0).handled);
+    ensure("an unmatched modified Tab release is not reported as handled", !runtime.keyUp(KEY_TAB, MASK_CONTROL).handled);
 }
 
 template<> template<> void runtimeObject::test<5>() {
     set_test_name("Runtime clears attached interaction across visibility and account transitions");
     ensure("Runtime initializes", runtime.initialize());
     ensure("test component registers", registerTestFloater());
-    radia::ui::Floater* floater = runtime.openFloater("runtimeTest");
+    Floater* floater = runtime.openFloater("runtimeTest");
     ensure("test component opens", floater != nullptr);
     if (!floater) return;
-    auto* press = dynamic_cast<radia::ui::Button*>(findWidget(*floater, "press"));
+    auto* press = dynamic_cast<Button*>(findWidget(*floater, "press"));
     ensure("bound Button exists", press != nullptr);
     if (!press) return;
 
     runtime.frame(800, 600);
-    const radia::ui::Rect pressRect = press->rect();
+    const Rect pressRect = press->rect();
     const F32 x = pressRect.x + pressRect.w * 0.5f;
     const F32 y = pressRect.y + pressRect.h * 0.5f;
-    ensure("pointer down starts a visible interaction", runtime.pointerDown(x, y, radia::viewer::ui::NativePointerButton::Left, 0).handled);
+    ensure("pointer down starts a visible interaction", runtime.pointerDown(x, y, NativePointerButton::Left, 0).handled);
 
     runtime.setVisibility(false, true);
-    ensure("hidden attached UI rejects pointer input", !runtime.pointerUp(x, y, radia::viewer::ui::NativePointerButton::Left, 0).handled);
+    ensure("hidden attached UI rejects pointer input", !runtime.pointerUp(x, y, NativePointerButton::Left, 0).handled);
     ensure_equals("hiding attached UI cancels the pending activation", controllerState.presses, 0);
     nowCalls = 0;
     runtime.frame(800, 600);
@@ -234,5 +249,13 @@ template<> template<> void runtimeObject::test<5>() {
     runtime.endAccountSession();
     ensure("account transition leaves pointer capture clear", !runtime.hasPointerCapture());
     ensure_equals("account transition closes the component", controllerState.closed, 1);
+}
+
+template<> template<> void runtimeObject::test<6>() {
+    set_test_name("Visible Radia UI owns unmodified Tab instead of leaking to LLUI");
+    ensure("Runtime initializes", runtime.initialize());
+    runtime.setVisibility(true, true);
+    ensure("visible Radia UI consumes Tab", runtime.keyDown(KEY_TAB, 0).handled);
+    ensure("visible Radia UI consumes Tab release", runtime.keyUp(KEY_TAB, 0).handled);
 }
 } // namespace tut

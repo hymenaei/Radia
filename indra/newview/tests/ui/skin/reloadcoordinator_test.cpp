@@ -152,6 +152,7 @@ reloadCoordinatorTest reloadCoordinatorTestCase("UISkinReloadCoordinator");
 template<> template<> void reloadCoordinatorObject::test<1>() {
     set_test_name("requested reload publishes and installs one complete transaction");
     ensure("idle update has no transaction", !update().has_value());
+    ensure_equals("disabled automatic watching does not capture snapshots", snapshotSource.captures, 0);
 
     coordinator.request();
     const auto result = update();
@@ -201,18 +202,21 @@ template<> template<> void reloadCoordinatorObject::test<3>() {
 }
 
 template<> template<> void reloadCoordinatorObject::test<4>() {
-    set_test_name("authoring changes debounce into one coherent snapshot reload");
+    set_test_name("enabling automatic watching reloads an edit made while it was off");
     const auto start = SkinReloadCoordinator::TimePoint{} + 1s;
-    coordinator.setSkinAutoReload(true);
-    ensure("first poll establishes baseline", !update(start).has_value());
-
     snapshotSource.snapshot = skinSnapshot("<floater/>", "floater { width: 420px; }");
+    coordinator.setSkinAutoReload(true);
+    const auto enabled = update(start);
+    ensure("enabling watching immediately reloads the current snapshot", enabled && enabled->ok());
+    ensure_equals("enabling watching publishes one candidate generation", system.generation(), 2ULL);
+
+    snapshotSource.snapshot = skinSnapshot("<floater/>", "floater { width: 460px; }");
     ensure("changed snapshot waits to settle", !update(start + 250ms).has_value());
     const auto settled = update(start + 500ms);
 
     ensure("settled snapshot committed", settled && settled->ok());
-    ensure_equals("one candidate generation published", system.generation(), 2ULL);
-    ensure_equals("one controller committed", componentState.commits, 1);
+    ensure_equals("settled snapshot publishes one more generation", system.generation(), 3ULL);
+    ensure_equals("two candidates committed", componentState.commits, 2);
     ensure("acknowledged snapshot does not repeat", !update(start + 750ms).has_value());
 }
 
@@ -238,7 +242,8 @@ template<> template<> void reloadCoordinatorObject::test<6>() {
     coordinator.request();
     ensure("dependency baseline publishes", update()->ok());
     coordinator.setSkinAutoReload(true);
-    ensure("first poll establishes authoring baseline", !update(start).has_value());
+    ensure("enabling watching reloads the current dependency snapshot", update(start)->ok());
+    ensure_equals("enabling watching publishes one more generation", system.generation(), 3ULL);
 
     snapshotSource.snapshot = importedStyleSnapshot("@import \"used.radia\";",
                                                     {{"used.radia", "floater { width: 300px; }"}, {"unused.radia", "floater { width: 600px; }"}});
@@ -251,7 +256,7 @@ template<> template<> void reloadCoordinatorObject::test<6>() {
     const auto settled = update(start + 1s);
 
     ensure("imported module edit reloads", settled && settled->ok());
-    ensure_equals("only dependency edit publishes again", system.generation(), 3ULL);
+    ensure_equals("only dependency edit publishes again", system.generation(), 4ULL);
 }
 
 template<> template<> void reloadCoordinatorObject::test<7>() {
@@ -262,14 +267,15 @@ template<> template<> void reloadCoordinatorObject::test<7>() {
     coordinator.request();
     ensure("live dependency baseline publishes", update()->ok());
     coordinator.setSkinAutoReload(true);
-    ensure("first poll establishes authoring baseline", !update(start).has_value());
+    ensure("enabling watching reloads the current dependency snapshot", update(start)->ok());
+    ensure_equals("enabling watching publishes one more generation", system.generation(), 3ULL);
 
     snapshotSource.snapshot =
         importedStyleSnapshot("@import \"new.radia\";", {{"used.radia", "floater { width: 300px; }"}, {"new.radia", "floater { width: invalid; }"}});
     ensure("new import waits to settle", !update(start + 250ms).has_value());
     const auto rejected = update(start + 500ms);
     ensure("invalid new dependency is rejected", rejected && !rejected->ok());
-    ensure_equals("rejection preserves live generation", system.generation(), 2ULL);
+    ensure_equals("rejection preserves live generation", system.generation(), 3ULL);
 
     snapshotSource.snapshot =
         importedStyleSnapshot("@import \"new.radia\";", {{"used.radia", "floater { width: 300px; }"}, {"new.radia", "floater { width: 440px; }"}});
@@ -277,7 +283,7 @@ template<> template<> void reloadCoordinatorObject::test<7>() {
     const auto recovered = update(start + 1s);
 
     ensure("fixed rejected dependency retries", recovered && recovered->ok());
-    ensure_equals("fixed candidate publishes", system.generation(), 3ULL);
+    ensure_equals("fixed candidate publishes", system.generation(), 4ULL);
 }
 
 template<> template<> void reloadCoordinatorObject::test<8>() {
@@ -372,7 +378,7 @@ template<> template<> void reloadCoordinatorObject::test<12>() {
     const auto start = SkinReloadCoordinator::TimePoint{} + 1s;
     ensure("custom timing is accepted", coordinator.setAutoReloadTiming({40ms, 80ms}));
     coordinator.setSkinAutoReload(true);
-    ensure("first poll establishes baseline", !update(start).has_value());
+    ensure("enabling watching reloads immediately", update(start) && system.generation() == 2ULL);
 
     snapshotSource.snapshot = skinSnapshot("<floater/>", "floater { width: 420px; }");
     ensure("changed snapshot waits for the configured scan interval", !update(start + 40ms).has_value());
@@ -380,5 +386,6 @@ template<> template<> void reloadCoordinatorObject::test<12>() {
     const auto settled = update(start + 159ms);
 
     ensure("configured intervals trigger one reload", settled && settled->ok());
+    ensure_equals("configured interval reload publishes the changed generation", system.generation(), 3ULL);
 }
 } // namespace tut

@@ -128,6 +128,8 @@ using radia::ui::DiagnosticResult;
 using radia::ui::Floater;
 using radia::ui::KeybindingPresentation;
 using radia::ui::KeyEvent;
+using radia::ui::kKeyTab;
+using radia::ui::kModifierShift;
 using radia::ui::PointerButton;
 using radia::ui::PointerEvent;
 using radia::ui::Rect;
@@ -324,10 +326,26 @@ public:
         if (cursorMagnetActive()) {
             const float cursorRight = std::max(0.f, static_cast<float>(mAttachedSurface.width) - 1.f);
             const float cursorTop = std::max(0.f, static_cast<float>(mAttachedSurface.height) - 1.f);
-            routed.position.x =
-                magnetizedAxis(event.position.x, event.delta.x, 0.f, cursorRight, mAttachedSurface.magnetX, mAttachedSurface.virtualPointer.x);
-            routed.position.y =
-                magnetizedAxis(event.position.y, event.delta.y, 0.f, cursorTop, mAttachedSurface.magnetY, mAttachedSurface.virtualPointer.y);
+            const bool canMagnetizeX =
+                mAttachedSurface.magnetX != 0 || mWindowAdapter.hasDisplaySpaceBeyondEdge(event.position, {event.delta.x, 0.f});
+            const bool canMagnetizeY =
+                mAttachedSurface.magnetY != 0 || mWindowAdapter.hasDisplaySpaceBeyondEdge(event.position, {0.f, event.delta.y});
+            if (canMagnetizeX) {
+                routed.position.x =
+                    magnetizedAxis(event.position.x, event.delta.x, 0.f, cursorRight, mAttachedSurface.magnetX, mAttachedSurface.virtualPointer.x);
+            } else {
+                mAttachedSurface.magnetX = 0;
+                mAttachedSurface.virtualPointer.x = event.position.x;
+                routed.position.x = event.position.x;
+            }
+            if (canMagnetizeY) {
+                routed.position.y =
+                    magnetizedAxis(event.position.y, event.delta.y, 0.f, cursorTop, mAttachedSurface.magnetY, mAttachedSurface.virtualPointer.y);
+            } else {
+                mAttachedSurface.magnetY = 0;
+                mAttachedSurface.virtualPointer.y = event.position.y;
+                routed.position.y = event.position.y;
+            }
         } else {
             resetCursorMagnet();
         }
@@ -363,9 +381,20 @@ public:
 
     NativeInputDispatchResult scroll(const ScrollEvent& event) { return {isInteractive() && attachedSurface().scroll(event), std::nullopt}; }
 
-    NativeInputDispatchResult keyDown(const KeyEvent& event) { return {isInteractive() && attachedSurface().keyDown(event), std::nullopt}; }
+    NativeInputDispatchResult keyDown(const KeyEvent& event) {
+        const bool ownsTab = mInitialization == InitializationState::Ready && mAttachedSurface.visible && isSurfaceTab(event);
+        const bool handled = (isInteractive() || ownsTab) && attachedSurface().keyDown(event);
+        if (isSurfaceTab(event)) mTabKeyOwned = ownsTab;
+        return {handled || ownsTab, std::nullopt};
+    }
 
-    NativeInputDispatchResult keyUp(const KeyEvent& event) { return {isInteractive() && attachedSurface().keyUp(event), std::nullopt}; }
+    NativeInputDispatchResult keyUp(const KeyEvent& event) {
+        const bool tabKey = event.key == kKeyTab;
+        const bool owned = tabKey && mTabKeyOwned;
+        if (tabKey) mTabKeyOwned = false;
+        const bool handled = (isInteractive() || owned) && attachedSurface().keyUp(event);
+        return {owned || handled, std::nullopt};
+    }
 
     NativeInputDispatchResult character(U32 codepoint) { return {isInteractive() && attachedSurface().charInput(codepoint), std::nullopt}; }
 
@@ -373,6 +402,7 @@ public:
 
     void clearInteraction() {
         if (mInitialization != InitializationState::Uninitialized) attachedSurface().clearInteractionState();
+        mTabKeyOwned = false;
         clearDragCursorState();
     }
 
@@ -457,6 +487,8 @@ private:
         });
         return interactive;
     }
+
+    static bool isSurfaceTab(const KeyEvent& event) { return event.key == kKeyTab && (event.modifiers & ~kModifierShift) == 0; }
 
     static float magnetizedAxis(float position, float delta, float minimum, float maximum, int& direction, float& virtualPosition) {
         if (direction == 0) {
@@ -635,6 +667,7 @@ private:
     std::optional<RuntimeKeybindingState> mObservedBindingState;
     std::map<ComponentKey, WidgetRef<Floater>> mLayoutInitialized;
     bool mShuttingDown = false;
+    bool mTabKeyOwned = false;
 };
 
 Runtime::Runtime(LLControlGroup& savedSettings, LLControlGroup& perAccountSettings, LLGLSLShader& uiShader, WindowEnvironment window,

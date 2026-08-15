@@ -43,28 +43,54 @@
 #include "widgets/text.h"
 
 namespace tut {
+using radia::ui::Button;
+using radia::ui::DiagnosticResult;
+using radia::ui::Floater;
+using radia::ui::ResourceSnapshot;
+using radia::ui::SettingResolution;
+using radia::ui::SettingResolver;
+using radia::ui::SkinCompiler;
+using radia::ui::SkinGenerationPrepareResult;
+using radia::ui::Switch;
+using radia::ui::System;
+using radia::ui::Text;
+using radia::ui::ValueBinding;
+using radia::ui::ValueBindingSubscription;
+using radia::ui::ValueState;
+using radia::ui::WidgetEventKind;
+using radia::ui::WidgetRef;
+using radia::viewer::ui::ChangeEvent;
+using radia::viewer::ui::ClickEvent;
+using radia::viewer::ui::ComponentController;
+using radia::viewer::ui::ComponentKey;
+using radia::viewer::ui::ComponentManager;
+using radia::viewer::ui::LongClickEvent;
+using radia::viewer::ui::MouseWidgetEvent;
+using radia::viewer::ui::test::TestFloaterHost;
+using ControllerWidget = radia::viewer::ui::Widget;
+using CoreWidget = radia::ui::Widget;
 namespace {
 
-radia::ui::Widget* findWidget(radia::ui::Widget& root, const std::string& id) {
+CoreWidget* findWidget(CoreWidget& root, const std::string& id) {
     if (root.id() == id) return &root;
     for (const auto& child : root.children())
-        if (radia::ui::Widget* found = findWidget(*child, id)) return found;
+        if (CoreWidget* found = findWidget(*child, id)) return found;
     return nullptr;
 }
 
-class TestBooleanBinding final : public radia::ui::ValueBinding<bool> {
+class TestBooleanBinding final : public ValueBinding<bool> {
 public:
     explicit TestBooleanBinding(bool value) : mState{value, value, std::nullopt} {}
 
-    radia::ui::ValueState<bool> state() const override { return mState; }
+    ValueState<bool> state() const override { return mState; }
     void write(bool value) override {
         mState.value = value;
         notify();
     }
-    radia::ui::ValueBindingSubscription observe(Observer observer) override {
+    ValueBindingSubscription observe(Observer observer) override {
         const std::size_t id = mNextObserver++;
         mObservers.emplace(id, std::move(observer));
-        return radia::ui::ValueBindingSubscription([this, id] { mObservers.erase(id); });
+        return ValueBindingSubscription([this, id] { mObservers.erase(id); });
     }
 
 private:
@@ -74,19 +100,19 @@ private:
             if (mObservers.find(id) != mObservers.end()) observer(mState);
     }
 
-    radia::ui::ValueState<bool> mState;
+    ValueState<bool> mState;
     std::map<std::size_t, Observer> mObservers;
     std::size_t mNextObserver = 1;
 };
 
-class TestSettingResolver final : public radia::ui::SettingResolver {
+class TestSettingResolver final : public SettingResolver {
 public:
     TestSettingResolver() : binding(std::make_shared<TestBooleanBinding>(true)) {}
 
-    radia::ui::SettingResolution resolve(std::string_view settingName, std::type_index requestedType) override {
-        if (settingName != "test-enabled") return {radia::ui::SettingResolution::ResolutionStatus::Missing, {}};
-        if (requestedType != typeid(bool)) return {radia::ui::SettingResolution::ResolutionStatus::TypeMismatch, {}};
-        return {radia::ui::SettingResolution::ResolutionStatus::Found, binding};
+    SettingResolution resolve(std::string_view settingName, std::type_index requestedType) override {
+        if (settingName != "test-enabled") return {SettingResolution::ResolutionStatus::Missing, {}};
+        if (requestedType != typeid(bool)) return {SettingResolution::ResolutionStatus::TypeMismatch, {}};
+        return {SettingResolution::ResolutionStatus::Found, binding};
     }
 
     std::shared_ptr<TestBooleanBinding> binding;
@@ -113,9 +139,9 @@ struct componentManagerData {
         bool contextMenuObserved = false;
     };
 
-    class Controller final : public radia::viewer::ui::ComponentController {
+    class Controller final : public ComponentController {
     public:
-        Controller(radia::ui::System& system, ControllerState& state) : radia::viewer::ui::ComponentController(system), mState(state) {
+        Controller(System& system, ControllerState& state) : ComponentController(system), mState(state) {
             event("press", &Controller::press);
             event("inspect", &Controller::inspect);
             event("changed", &Controller::changed);
@@ -135,7 +161,7 @@ struct componentManagerData {
         void onOpen() override { ++mState.opened; }
         void onClose() override { ++mState.closed; }
         void onReloadSucceeded() override { ++mState.succeeded; }
-        void onReloadFailed(const radia::ui::DiagnosticResult&) override { ++mState.failed; }
+        void onReloadFailed(const DiagnosticResult&) override { ++mState.failed; }
 
     private:
         void press() {
@@ -143,45 +169,43 @@ struct componentManagerData {
             mStatus.setContent(localize("controller.ready"));
         }
 
-        void inspect(int index, std::string destination, bool enabled, radia::viewer::ui::Widget source, const radia::viewer::ui::ClickEvent& event) {
+        void inspect(int index, std::string destination, bool enabled, ControllerWidget source, const ClickEvent& event) {
             mState.multipleArguments =
                 index == 4 && destination == "settings" && enabled && source.id() == "inspect" && event.source().id() == source.id();
         }
 
-        void changed(const radia::viewer::ui::ChangeEvent& event) { mState.changeObserved = event.checked; }
-        void doubleClick(const radia::viewer::ui::MouseWidgetEvent&) { mState.doubleClickObserved = true; }
-        void mouseDown(const radia::viewer::ui::MouseWidgetEvent&) { mState.mouseDownObserved = true; }
-        void mouseUp(const radia::viewer::ui::MouseWidgetEvent&) { mState.mouseUpObserved = true; }
-        void mouseMove(const radia::viewer::ui::MouseWidgetEvent&) { mState.mouseMoveObserved = true; }
-        void longClick(const radia::viewer::ui::LongClickEvent&) { mState.longClickObserved = true; }
-        void contextMenu(const radia::viewer::ui::MouseWidgetEvent&) { mState.contextMenuObserved = true; }
+        void changed(const ChangeEvent& event) { mState.changeObserved = event.checked; }
+        void doubleClick(const MouseWidgetEvent&) { mState.doubleClickObserved = true; }
+        void mouseDown(const MouseWidgetEvent&) { mState.mouseDownObserved = true; }
+        void mouseUp(const MouseWidgetEvent&) { mState.mouseUpObserved = true; }
+        void mouseMove(const MouseWidgetEvent&) { mState.mouseMoveObserved = true; }
+        void longClick(const LongClickEvent&) { mState.longClickObserved = true; }
+        void contextMenu(const MouseWidgetEvent&) { mState.contextMenuObserved = true; }
 
         ControllerState& mState;
-        radia::viewer::ui::Widget& mStatus = getWidgetById("status");
+        ControllerWidget& mStatus = getWidgetById("status");
     };
 
-    class ForeignController final : public radia::viewer::ui::ComponentController {
+    class ForeignController final : public ComponentController {
     public:
-        explicit ForeignController(radia::ui::System& system) : radia::viewer::ui::ComponentController(system) {}
+        explicit ForeignController(System& system) : ComponentController(system) {}
         void wrongTarget() {}
     };
 
-    class MismatchedController final : public radia::viewer::ui::ComponentController {
+    class MismatchedController final : public ComponentController {
     public:
-        explicit MismatchedController(radia::ui::System& system) : radia::viewer::ui::ComponentController(system) {
-            event("wrongTarget", &ForeignController::wrongTarget);
-        }
+        explicit MismatchedController(System& system) : ComponentController(system) { event("wrongTarget", &ForeignController::wrongTarget); }
     };
 
-    using Host = radia::viewer::ui::test::TestFloaterHost;
+    using Host = TestFloaterHost;
 
     componentManagerData() : manager(system, host, resolver) {
-        radia::ui::SkinGenerationPrepareResult prepared = prepareGeneration();
+        SkinGenerationPrepareResult prepared = prepareGeneration();
         if (prepared.ok()) system.publish(std::move(prepared.generation));
     }
 
-    static radia::ui::SkinGenerationPrepareResult prepareGeneration(bool includeStatus = true) {
-        radia::ui::ResourceSnapshot resources;
+    static SkinGenerationPrepareResult prepareGeneration(bool includeStatus = true) {
+        ResourceSnapshot resources;
         resources.add("localization.yaml", "defaultLocale: en\nlocales: {en: {name: English, strings: {controller.ready: Ready}}}\n");
         resources.add("skin.radia", "");
         const std::string kStatus = includeStatus ? "<text id=\"status\"/>" : "";
@@ -195,19 +219,19 @@ struct componentManagerData {
             + kStatus
             + "<button id=\"press\" onClick=\"press()\"/><switch id=\"changed\" checked=\"false\" onChange=\"changed(event)\"/></panel>";
         resources.add("panel.xml", kPanel);
-        return radia::ui::SkinCompiler().prepare(std::move(resources));
+        return SkinCompiler().prepare(std::move(resources));
     }
 
     bool registerOne(const std::string& definition = "one") {
         return manager.registerDefinition(definition, "one.xml",
-                                          [this](radia::ui::System& system) { return std::make_unique<Controller>(system, controllerState); });
+                                          [this](System& system) { return std::make_unique<Controller>(system, controllerState); });
     }
 
     bool registerEmpty() {
-        return manager.registerDefinition("empty", "empty.xml", [this](radia::ui::System& system) {
-            class EmptyController final : public radia::viewer::ui::ComponentController {
+        return manager.registerDefinition("empty", "empty.xml", [](System& system) {
+            class EmptyController final : public ComponentController {
             public:
-                explicit EmptyController(radia::ui::System& system) : radia::viewer::ui::ComponentController(system) {}
+                explicit EmptyController(System& system) : ComponentController(system) {}
             };
             return std::make_unique<EmptyController>(system);
         });
@@ -215,34 +239,33 @@ struct componentManagerData {
 
     bool registerPanel() {
         return manager.registerDefinition("panel", "panel.xml",
-                                          [this](radia::ui::System& system) { return std::make_unique<Controller>(system, controllerState); });
+                                          [this](System& system) { return std::make_unique<Controller>(system, controllerState); });
     }
 
     bool registerMismatched() {
-        return manager.registerDefinition("mismatched", "empty.xml",
-                                          [this](radia::ui::System& system) { return std::make_unique<MismatchedController>(system); });
+        return manager.registerDefinition("mismatched", "empty.xml", [](System& system) { return std::make_unique<MismatchedController>(system); });
     }
 
-    std::vector<radia::ui::Floater*> liveFloaters() const {
-        std::vector<radia::ui::Floater*> result;
+    std::vector<Floater*> liveFloaters() const {
+        std::vector<Floater*> result;
         for (const auto& [root, floater] : host.mounted)
             if (floater && !floater->closed()) result.push_back(floater.get());
         return result;
     }
 
-    std::optional<radia::viewer::ui::ComponentKey> keyFor(const radia::ui::Floater& floater) const { return manager.componentKeyFor(floater); }
+    std::optional<ComponentKey> keyFor(const Floater& floater) const { return manager.componentKeyFor(floater); }
 
-    radia::ui::Floater* mountedFor(const radia::viewer::ui::ComponentKey& key) const {
+    Floater* mountedFor(const ComponentKey& key) const {
         for (const auto& [root, floater] : host.mounted)
             if (floater && manager.componentKeyFor(*floater) == key) return floater.get();
         return nullptr;
     }
 
-    radia::ui::System system;
+    System system;
     Host host;
     TestSettingResolver resolver;
     ControllerState controllerState;
-    radia::viewer::ui::ComponentManager manager;
+    ComponentManager manager;
 };
 using componentManagerTest = test_group<componentManagerData>;
 using componentManagerObject = componentManagerTest::object;
@@ -265,8 +288,8 @@ template<> template<> void componentManagerObject::test<2>() {
     ensure("first instance opened", first.ok());
     ensure("second instance opened", second.ok());
     ensure("instances are distinct", first.floater != second.floater);
-    ensure("first stable identity mounted", manager.componentKeyFor(*first.floater) == radia::viewer::ui::ComponentKey{"profile", "alice"});
-    ensure("second stable identity mounted", manager.componentKeyFor(*second.floater) == radia::viewer::ui::ComponentKey{"profile", "bob"});
+    ensure("first stable identity mounted", manager.componentKeyFor(*first.floater) == ComponentKey{"profile", "alice"});
+    ensure("second stable identity mounted", manager.componentKeyFor(*second.floater) == ComponentKey{"profile", "bob"});
     ensure_equals("two live instances", liveFloaters().size(), std::size_t(2));
 }
 
@@ -290,21 +313,21 @@ template<> template<> void componentManagerObject::test<4>() {
     ensure_equals("post-build ran after initial commit", controllerState.postBuild, 1);
     ensure_equals("open hook ran after initial commit", controllerState.opened, 1);
     ensure_equals("controller Widget handle resolved", controllerState.widgetsAvailable, 1);
-    auto* press = dynamic_cast<radia::ui::Button*>(findWidget(*opened.floater, "press"));
-    auto* inspect = dynamic_cast<radia::ui::Button*>(findWidget(*opened.floater, "inspect"));
-    auto* status = dynamic_cast<radia::ui::Text*>(findWidget(*opened.floater, "status"));
+    auto* press = dynamic_cast<Button*>(findWidget(*opened.floater, "press"));
+    auto* inspect = dynamic_cast<Button*>(findWidget(*opened.floater, "inspect"));
+    auto* status = dynamic_cast<Text*>(findWidget(*opened.floater, "status"));
     ensure("zero-argument Event source exists", press != nullptr);
     ensure("multi-argument Event source exists", inspect != nullptr);
-    auto* events = dynamic_cast<radia::ui::Button*>(findWidget(*opened.floater, "events"));
-    auto* changed = dynamic_cast<radia::ui::Switch*>(findWidget(*opened.floater, "changed"));
+    auto* events = dynamic_cast<Button*>(findWidget(*opened.floater, "events"));
+    auto* changed = dynamic_cast<Switch*>(findWidget(*opened.floater, "changed"));
     ensure("typed Event source exists", events != nullptr);
     ensure("typed Change source exists", changed != nullptr);
-    ensure("double-click Event Call is bound", events && events->eventCall(radia::ui::WidgetEventKind::DoubleClick));
-    ensure("mouse-down Event Call is bound", events && events->eventCall(radia::ui::WidgetEventKind::MouseDown));
-    ensure("mouse-up Event Call is bound", events && events->eventCall(radia::ui::WidgetEventKind::MouseUp));
-    ensure("mouse-move Event Call is bound", events && events->eventCall(radia::ui::WidgetEventKind::MouseMove));
-    ensure("long-click Event Call is bound", events && events->eventCall(radia::ui::WidgetEventKind::LongClick));
-    ensure("context-menu Event Call is bound", events && events->eventCall(radia::ui::WidgetEventKind::ContextMenu));
+    ensure("double-click Event Call is bound", events && events->eventCall(WidgetEventKind::DoubleClick));
+    ensure("mouse-down Event Call is bound", events && events->eventCall(WidgetEventKind::MouseDown));
+    ensure("mouse-up Event Call is bound", events && events->eventCall(WidgetEventKind::MouseUp));
+    ensure("mouse-move Event Call is bound", events && events->eventCall(WidgetEventKind::MouseMove));
+    ensure("long-click Event Call is bound", events && events->eventCall(WidgetEventKind::LongClick));
+    ensure("context-menu Event Call is bound", events && events->eventCall(WidgetEventKind::ContextMenu));
     press->activate();
     inspect->activate();
     changed->activate();
@@ -317,17 +340,17 @@ template<> template<> void componentManagerObject::test<4>() {
     ensure_equals("close hook ran", controllerState.closed, 1);
     ensure("closed instance reopened", manager.open("one").ok());
     ensure_equals("reopen hook ran", controllerState.opened, 2);
-    radia::ui::Floater* original = opened.floater;
-    radia::ui::SkinGenerationPrepareResult generation = prepareGeneration();
+    Floater* original = opened.floater;
+    SkinGenerationPrepareResult generation = prepareGeneration();
     ensure("candidate generation prepared", generation.ok());
     auto prepared = manager.prepareReplacement(*generation.generation, "en");
     ensure("replacement prepared", prepared.ok());
     ensure("replacement not installed before commit", liveFloaters().front() == original);
     ensure("replacement committed", prepared.replacement.commit());
-    radia::ui::Floater* replacement = liveFloaters().front();
+    Floater* replacement = liveFloaters().front();
     manager.idle();
     manager.reportReloadSucceeded();
-    radia::ui::DiagnosticResult diagnostics;
+    DiagnosticResult diagnostics;
     manager.reportReloadFailed(diagnostics);
 
     ensure("replacement installed", replacement != original);
@@ -347,13 +370,13 @@ template<> template<> void componentManagerObject::test<5>() {
     ensure("instances opened", first.ok() && second.ok());
 
     auto openComponents = [&] {
-        std::vector<radia::viewer::ui::ComponentKey> result;
-        manager.forEachOpen([&](const radia::viewer::ui::ComponentKey& key, radia::ui::Floater&) { result.push_back(key); });
+        std::vector<ComponentKey> result;
+        manager.forEachOpen([&](const ComponentKey& key, Floater&) { result.push_back(key); });
         return result;
     };
 
     second.floater->close();
-    const std::vector<radia::viewer::ui::ComponentKey> closed = openComponents();
+    const std::vector<ComponentKey> closed = openComponents();
     ensure_equals("only open instance retained", closed.size(), std::size_t(1));
     ensure_equals("definition retained", closed.front().definitionId, std::string("profile"));
     ensure_equals("instance key retained", closed.front().instanceKey, std::string("alice"));
@@ -368,7 +391,7 @@ template<> template<> void componentManagerObject::test<6>() {
     ensure("instance opened", manager.open("one").ok());
     ensure_equals("initial Widget available", controllerState.widgetsAvailable, 1);
 
-    radia::ui::SkinGenerationPrepareResult generation = prepareGeneration(false);
+    SkinGenerationPrepareResult generation = prepareGeneration(false);
     ensure("candidate generation prepared", generation.ok());
     auto prepared = manager.prepareReplacement(*generation.generation, "en");
     ensure("replacement with missing Widget remains valid", prepared.ok());
@@ -378,7 +401,7 @@ template<> template<> void componentManagerObject::test<6>() {
     ensure("missing Widget is explicitly unavailable", !controllerState.statusAvailable);
     ensure_equals("missing Widget is unavailable after commit", controllerState.widgetsAvailable, 1);
 
-    auto* press = dynamic_cast<radia::ui::Button*>(findWidget(*liveFloaters().front(), "press"));
+    auto* press = dynamic_cast<Button*>(findWidget(*liveFloaters().front(), "press"));
     ensure("remaining Event source exists", press != nullptr);
     press->activate();
     ensure_equals("Event remains live with missing optional Widget", controllerState.presses, 1);
@@ -389,9 +412,9 @@ template<> template<> void componentManagerObject::test<7>() {
     ensure("definition registered", registerOne());
     const auto opened = manager.open("one");
     ensure("instance opened", opened.ok());
-    radia::ui::Floater* original = opened.floater;
+    Floater* original = opened.floater;
 
-    radia::ui::SkinGenerationPrepareResult generation = prepareGeneration();
+    SkinGenerationPrepareResult generation = prepareGeneration();
     ensure("candidate generation prepared", generation.ok());
     auto prepared = manager.prepareReplacement(*generation.generation, "en");
     ensure("replacement prepared", prepared.ok());
@@ -408,7 +431,7 @@ template<> template<> void componentManagerObject::test<8>() {
     ensure("definition registered", registerOne());
     const auto opened = manager.open("one");
     ensure("instance opened", opened.ok());
-    radia::ui::WidgetRef<radia::ui::Floater> evictedRoot(opened.floater);
+    WidgetRef<Floater> evictedRoot(opened.floater);
     opened.floater->close();
     ensure("instance is closed before reload", opened.floater->closed());
     const int openedCount = controllerState.opened;
@@ -419,7 +442,7 @@ template<> template<> void componentManagerObject::test<8>() {
     ensure("closed root is omitted from live Floaters", liveFloaters().empty());
     ensure("evicted root lifetime ended", !evictedRoot);
 
-    radia::ui::SkinGenerationPrepareResult generation = prepareGeneration();
+    SkinGenerationPrepareResult generation = prepareGeneration();
     ensure("candidate generation prepared", generation.ok());
     auto prepared = manager.prepareReplacement(*generation.generation, "en");
     ensure("replacement prepared", prepared.ok());
@@ -436,14 +459,14 @@ template<> template<> void componentManagerObject::test<8>() {
 template<> template<> void componentManagerObject::test<9>() {
     set_test_name("prepared replacement cannot outlive its component manager");
     Host temporaryHost;
-    std::optional<radia::viewer::ui::ComponentManager::PreparedReplacement> orphan;
+    std::optional<ComponentManager::PreparedReplacement> orphan;
     {
-        radia::viewer::ui::ComponentManager temporary(system, temporaryHost, resolver);
-        ensure("definition registered", temporary.registerDefinition("one", "one.xml", [this](radia::ui::System& system) {
+        ComponentManager temporary(system, temporaryHost, resolver);
+        ensure("definition registered", temporary.registerDefinition("one", "one.xml", [this](System& system) {
             return std::make_unique<componentManagerData::Controller>(system, controllerState);
         }));
         ensure("instance opened", temporary.open("one").ok());
-        radia::ui::SkinGenerationPrepareResult generation = prepareGeneration();
+        SkinGenerationPrepareResult generation = prepareGeneration();
         ensure("candidate generation prepared", generation.ok());
         auto prepared = temporary.prepareReplacement(*generation.generation, "en");
         ensure("replacement prepared", prepared.ok());
@@ -457,9 +480,9 @@ template<> template<> void componentManagerObject::test<10>() {
     ensure("definition registered", registerOne());
     const auto opened = manager.open("one");
     ensure("instance opened", opened.ok());
-    radia::ui::Floater* original = opened.floater;
+    Floater* original = opened.floater;
 
-    radia::ui::SkinGenerationPrepareResult generation = prepareGeneration();
+    SkinGenerationPrepareResult generation = prepareGeneration();
     ensure("candidate generation prepared", generation.ok());
     auto prepared = manager.prepareReplacement(*generation.generation, "en");
     ensure("replacement prepared", prepared.ok());
@@ -478,10 +501,10 @@ template<> template<> void componentManagerObject::test<11>() {
     const auto first = manager.open("one", "first");
     const auto second = manager.open("two", "second");
     ensure("both instances opened", first.ok() && second.ok());
-    radia::ui::Floater* originalFirst = first.floater;
-    radia::ui::Floater* originalSecond = second.floater;
+    Floater* originalFirst = first.floater;
+    Floater* originalSecond = second.floater;
 
-    radia::ui::SkinGenerationPrepareResult generation = prepareGeneration();
+    SkinGenerationPrepareResult generation = prepareGeneration();
     ensure("candidate generation prepared", generation.ok());
     auto prepared = manager.prepareReplacement(*generation.generation, "en");
     ensure("multi-root replacement prepared", prepared.ok());
@@ -500,7 +523,7 @@ template<> template<> void componentManagerObject::test<12>() {
     ensure("definition registered", registerEmpty());
     const auto opened = manager.open("empty");
     ensure("empty controller opened", opened.ok());
-    ensure("empty root mounted", opened.floater != nullptr && manager.componentKeyFor(*opened.floater) == radia::viewer::ui::ComponentKey{"empty", {}});
+    ensure("empty root mounted", opened.floater != nullptr && manager.componentKeyFor(*opened.floater) == ComponentKey{"empty", {}});
 }
 
 template<> template<> void componentManagerObject::test<13>() {
@@ -527,7 +550,7 @@ template<> template<> void componentManagerObject::test<15>() {
     ensure("definition registered", registerOne());
     const auto opened = manager.open("one");
     ensure("instance opened", opened.ok());
-    auto* setting = dynamic_cast<radia::ui::Switch*>(findWidget(*opened.floater, "setting"));
+    auto* setting = dynamic_cast<Switch*>(findWidget(*opened.floater, "setting"));
     ensure("setting control exists", setting != nullptr);
     ensure("resolver state commits during mount", setting && setting->checked());
     resolver.binding->write(false);
@@ -551,7 +574,7 @@ template<> template<> void componentManagerObject::test<17>() {
     ensure("definition registered", registerOne());
     ensure("component opened", manager.open("one").ok());
 
-    radia::ui::SkinGenerationPrepareResult generation = prepareGeneration();
+    SkinGenerationPrepareResult generation = prepareGeneration();
     ensure("candidate generation prepared", generation.ok());
     auto prepared = manager.prepareReplacement(*generation.generation, "en");
     ensure("replacement prepared", prepared.ok());
@@ -565,7 +588,7 @@ template<> template<> void componentManagerObject::test<18>() {
     const auto opened = manager.open("one");
     ensure("component opened", opened.ok());
 
-    radia::ui::SkinGenerationPrepareResult generation = prepareGeneration();
+    SkinGenerationPrepareResult generation = prepareGeneration();
     ensure("candidate generation prepared", generation.ok());
     auto prepared = manager.prepareReplacement(*generation.generation, "en");
     ensure("replacement prepared", prepared.ok());
@@ -585,8 +608,8 @@ template<> template<> void componentManagerObject::test<19>() {
     host.rejectClears = true;
     ensure("clear failure is reported", !manager.clearInstances());
     ensure_equals("both host roots remain mounted", host.mounted.size(), std::size_t(2));
-    ensure("first root remains mapped", manager.componentKeyFor(*first.floater) == radia::viewer::ui::ComponentKey{"one", {}});
-    ensure("second root remains mapped", manager.componentKeyFor(*second.floater) == radia::viewer::ui::ComponentKey{"two", {}});
+    ensure("first root remains mapped", manager.componentKeyFor(*first.floater) == ComponentKey{"one", {}});
+    ensure("second root remains mapped", manager.componentKeyFor(*second.floater) == ComponentKey{"two", {}});
     ensure("first root remains open", !first.floater->closed());
     ensure("second root remains open", !second.floater->closed());
     ensure_equals("clear preparation does not close controllers", controllerState.closed, 0);

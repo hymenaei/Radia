@@ -57,6 +57,7 @@ public:
     float nativeScaleMultiplier() const override;
     radia::ui::Vec2 nativeBottomLeftInMain(const AuxiliaryWindowRect& rect) const override;
     bool nativePointInsideMain(const radia::ui::Vec2& point) const override;
+    bool hasDisplaySpaceBeyondEdge(const radia::ui::Vec2& position, const radia::ui::Vec2& delta) const;
     bool placementVisible(const AuxiliaryWindowRect& rect) const override;
     std::optional<AuxiliaryScreenPoint> releasePointerForDetach(const radia::ui::Vec2& mainPosition) override;
 

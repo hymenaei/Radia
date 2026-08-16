@@ -48,6 +48,8 @@
 #include "llwindowcallbacks.h"
 #include "llwindowmesaheadless.h"
 
+#include <optional>
+
 namespace ll_test
 {
     // Test-only accessor for LLFontVertexBuffer's private capture lists.
@@ -100,31 +102,33 @@ namespace ll_test
         FontStateScope& operator=(const FontStateScope&) = delete;
     };
 
-    // Concrete LLShaderMgr for render-output tests. The tests never load real
-    // shaders from disk and don't pump the per-frame uniform updates the viewer
-    // does, so getShaderDirPrefix returns empty and updateShaderUniforms is a
-    // no-op. LLRender::syncMatrices still pushes matrix uniforms directly each
-    // draw — that path lives in llrender.cpp and doesn't go through the mgr.
+    // Concrete LLShaderMgr for render-output tests. The tests don't pump the
+    // per-frame uniform updates the viewer does, so updateShaderUniforms is a
+    // no-op. The headless analytic-font shader test also needs the canonical
+    // Matrices block source, so expose the source-tree shader directory when
+    // that test configuration provides it.
     class TestShaderMgr : public LLShaderMgr
     {
     public:
         TestShaderMgr() { sInstance = this; initAttribsAndUniforms(); }
         ~TestShaderMgr() override { if (sInstance == this) sInstance = nullptr; }
 
-        std::string getShaderDirPrefix() override { return std::string(); }
+        std::string getShaderDirPrefix() override
+        {
+#ifdef LLFONT_TEST_APP_DIR
+            return std::string(LLFONT_TEST_APP_DIR) + "/app_settings/shaders/class";
+#else
+            return std::string();
+#endif
+        }
         void updateShaderUniforms(LLGLSLShader* /*shader*/) override {}
     };
 
-    // GL 3.3 core pass-through UI vertex shader. Same uniform / attribute
-    // shape as indra/newview/app_settings/shaders/class1/interface/uiV.glsl;
-    // LLRender::syncMatrices recognises modelview_projection_matrix and
-    // texture_matrix0 by reserved-name lookup.
-    inline const char* kTestUIVertexShader()
+    inline const char* kTestUIVertexTemplate()
     {
         return
             "#version 330\n"
-            "uniform mat4 texture_matrix0;\n"
-            "uniform mat4 modelview_projection_matrix;\n"
+            "//[ENGINE_BLOCK Matrices]\n"
             "in vec3 position;\n"
             "in vec4 diffuse_color;\n"
             "in vec2 texcoord0;\n"
@@ -181,9 +185,21 @@ namespace ll_test
     // mapUniforms reads back uniform locations against the LLShaderMgr's
     // reserved-name table. The TestShaderMgr ctor already populated that
     // table via initAttribsAndUniforms.
-    inline bool setupTestUIProgram(LLShaderMgr* /*mgr*/)
+    inline bool setupTestUIProgram(LLShaderMgr* mgr)
     {
-        GLuint vs = compileTestShader(GL_VERTEX_SHADER, kTestUIVertexShader());
+        if (!mgr)
+        {
+            return false;
+        }
+
+        const std::optional<std::string> vertex_source =
+            mgr->expandEngineBlocks(kTestUIVertexTemplate(), "headless UI test vertex shader");
+        if (!vertex_source)
+        {
+            return false;
+        }
+
+        GLuint vs = compileTestShader(GL_VERTEX_SHADER, vertex_source->c_str());
         GLuint fs = compileTestShader(GL_FRAGMENT_SHADER, kTestUIFragmentShader());
         if (!vs || !fs)
         {

@@ -33,6 +33,8 @@
 #include "llgl.h"
 #include "llglslshader.h"
 
+#include <optional>
+
 class LLShaderMgr
 {
 public:
@@ -541,6 +543,8 @@ public:
                           const std::string& cache_key = std::string(),
                           const std::string& extra_source = std::string());
 
+    std::optional<std::string> expandEngineBlocks(const std::string& source, const std::string& source_name = std::string());
+
     // Suffixes marking the axis copies of a shared object. Not legal path character sequences,
     // so they cannot collide with a real file.
     static constexpr const char* CLASSIC_OBJECT_SUFFIX = "|CLASSIC_MODE";
@@ -598,6 +602,7 @@ public:
     std::string mShaderCacheDir;
 
 protected:
+    std::string getEngineBlockSource(const std::string& block_name);
 
     // our parameter manager singleton instance
     static LLShaderMgr * sInstance;

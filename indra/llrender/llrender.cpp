@@ -715,54 +715,6 @@ void LLRender::syncMatrices()
             mMatricesUBO.ensureCurrent(LLGLSLShader::UB_MATRICES);
         }
 
-        if (shader->hasUniform(LLShaderMgr::MODELVIEW_MATRIX))
-        {
-            shader->uniformMatrix4fv(LLShaderMgr::MODELVIEW_MATRIX, 1, GL_FALSE,
-                                     glm::value_ptr(mMatrix[MM_MODELVIEW][mMatIdx[MM_MODELVIEW]]));
-        }
-        if (shader->hasUniform(LLShaderMgr::PROJECTION_MATRIX))
-        {
-            shader->uniformMatrix4fv(LLShaderMgr::PROJECTION_MATRIX, 1, GL_FALSE,
-                                     glm::value_ptr(mMatrix[MM_PROJECTION][mMatIdx[MM_PROJECTION]]));
-        }
-        if (shader->hasUniform(LLShaderMgr::MODELVIEW_PROJECTION_MATRIX))
-        {
-            shader->uniformMatrix4fv(LLShaderMgr::MODELVIEW_PROJECTION_MATRIX, 1, GL_FALSE,
-                                     glm::value_ptr(mCachedMVP));
-        }
-        if (shader->hasUniform(LLShaderMgr::INVERSE_PROJECTION_MATRIX))
-        {
-            shader->uniformMatrix4fv(LLShaderMgr::INVERSE_PROJECTION_MATRIX, 1, GL_FALSE,
-                                     glm::value_ptr(mCachedInvProj));
-        }
-        if (shader->hasUniform(LLShaderMgr::INVERSE_MODELVIEW_MATRIX))
-        {
-            shader->uniformMatrix4fv(LLShaderMgr::INVERSE_MODELVIEW_MATRIX, 1, GL_FALSE,
-                                     glm::value_ptr(mCachedInvMdv));
-        }
-        if (shader->hasUniform(LLShaderMgr::IDENTITY_MATRIX))
-        {
-            const glm::mat4 identity = glm::identity<glm::mat4>();
-            shader->uniformMatrix4fv(LLShaderMgr::IDENTITY_MATRIX, 1, GL_FALSE,
-                                     glm::value_ptr(identity));
-        }
-        if (shader->hasUniform(LLShaderMgr::NORMAL_MATRIX))
-        {
-            const glm::mat4 normal = glm::transpose(mCachedInvMdv);
-            const F32 normal_matrix[] =
-            {
-                normal[0][0], normal[0][1], normal[0][2],
-                normal[1][0], normal[1][1], normal[1][2],
-                normal[2][0], normal[2][1], normal[2][2]
-            };
-            shader->uniformMatrix3fv(LLShaderMgr::NORMAL_MATRIX, 1, GL_FALSE, normal_matrix);
-        }
-        if (shader->hasUniform(LLShaderMgr::TEXTURE_MATRIX0))
-        {
-            shader->uniformMatrix4fv(LLShaderMgr::TEXTURE_MATRIX0, 1, GL_FALSE,
-                                     glm::value_ptr(mMatrix[MM_TEXTURE0][mMatIdx[MM_TEXTURE0]]));
-        }
-
         if (shader->mFeatures.hasLighting || shader->mFeatures.calculatesLighting || shader->mFeatures.calculatesAtmospherics)
         { //also sync light state
             syncLightState();

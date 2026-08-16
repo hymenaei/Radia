@@ -25,9 +25,11 @@
 #include "linden_common.h"
 #include "llfontgpushader.h"
 #if LL_HAS_HB_GPU
+#include <optional>
 #include "llgl.h"
 #include "llglheaders.h"
 #include "llglslshader.h"
+#include "llshadermgr.h"
 
 namespace {
 const char* kCoverageRefinement = R"GLSL(
@@ -41,7 +43,7 @@ float alchemy_font_refine_coverage(float coverage, vec3 foreground, float ppem) 
 })GLSL";
 
 const char* kBatchedVertexMain = R"GLSL(
-uniform mat4 modelview_projection_matrix;
+//[ENGINE_BLOCK Matrices]
 
 in vec3 position;
 in vec2 texcoord0;
@@ -129,20 +131,14 @@ std::string LLFontGpuShader::fragmentLibSource() {
     return src;
 }
 
-std::string LLFontGpuShader::batchedVertexSource() {
+namespace {
+std::string batchedFragmentSource() {
     std::string src = "#version 330\n";
-    src += kBatchedVertexMain;
-    return src;
-}
-
-std::string LLFontGpuShader::batchedFragmentSource() {
-    std::string src = "#version 330\n";
-    src += fragmentLibSource();
+    src += LLFontGpuShader::fragmentLibSource();
     src += kBatchedFragmentMain;
     return src;
 }
 
-namespace {
 bool buildFromSources(LLGLSLShader& program, const std::string& vertexSource, const std::string& fragmentSource, const char* name) {
     program.unload();
 
@@ -178,11 +174,20 @@ bool buildFromSources(LLGLSLShader& program, const std::string& vertexSource, co
 
     return program.isComplete();
 }
-} // namespace
 
-bool LLFontGpuShader::buildBatchedProgram(LLGLSLShader& program) {
-    return buildFromSources(program, batchedVertexSource(), batchedFragmentSource(), "font gpu batched fallback");
+bool buildBatchedProgram(LLGLSLShader& program, LLShaderMgr& shader_mgr) {
+    std::string vertex_template = "#version 330\n";
+    vertex_template += kBatchedVertexMain;
+
+    const std::optional<std::string> vertex_source = shader_mgr.expandEngineBlocks(vertex_template, "analytic font vertex shader");
+    if (!vertex_source) {
+        program.unload();
+        return false;
+    }
+
+    return buildFromSources(program, *vertex_source, batchedFragmentSource(), "font gpu batched fallback");
 }
+} // namespace
 
 LLGLSLShader* LLFontGpuShader::getBatchedProgram() {
     if (!isRuntimeSupported()) return nullptr;
@@ -191,7 +196,7 @@ LLGLSLShader* LLFontGpuShader::getBatchedProgram() {
     bool& attempted = batchedProgramAttempted();
     if (!program.isComplete() && !attempted) {
         attempted = true;
-        if (buildBatchedProgram(program)) program.mHasFontGpu = true;
+        if (buildBatchedProgram(program, *LLShaderMgr::instance())) program.mHasFontGpu = true;
     }
     return program.isComplete() ? &program : nullptr;
 }

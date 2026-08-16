@@ -38,10 +38,6 @@ public:
 
     static std::string fragmentLibSource();
 
-    static std::string batchedVertexSource();
-    static std::string batchedFragmentSource();
-    static bool buildBatchedProgram(LLGLSLShader& program);
-
     static LLGLSLShader* getBatchedProgram();
     static void destroyBatchedProgram();
 };

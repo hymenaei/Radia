@@ -28,9 +28,11 @@
 // migrates from the legacy texture/font contract to retained painting. Once
 // every UI caller uses retained painting, remove the legacy #else branch and
 // make the retained path the default vertex program.
-#ifdef PAINT_SHADER
-uniform mat4 modelview_projection_matrix;
+// Shared matrix stack + derived matrices, spliced from
+// class1/deferred/matricesBlock.glsl and bound at UB_MATRICES.
+//[ENGINE_BLOCK Matrices]
 
+#ifdef PAINT_SHADER
 in vec3 position;
 in vec4 diffuse_color;
 in vec2 texcoord0;
@@ -45,10 +47,6 @@ void main() {
 }
 
 #else
-// Shared matrix stack + derived matrices, spliced from
-// class1/deferred/matricesBlock.glsl and bound at UB_MATRICES.
-//[ENGINE_BLOCK Matrices]
-
 in vec3 position;
 in vec4 diffuse_color;
 in vec2 texcoord0;

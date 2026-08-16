@@ -28,7 +28,7 @@
 #if LL_HAS_HB_GPU
     #include <hb-ot.h>
     #include <hb.h>
-    #include "../llfontface.h"
+    #include "../alfontface.h"
     #include "../llfontfreetype.h"
     #include "../llfontregistry.h"
     #if LL_MESA_HEADLESS
@@ -181,8 +181,8 @@ template<> template<> void llfontgpuglyphcache_object::test<5>() {
 
     LLFontManager::initClass();
     {
-        LLFontFaceKey key{path, 0, 14.f, 96.f, 96.f, EFontHinting::DEFAULT, 0};
-        LLPointer<LLFontFace> face = gFontManagerp->getOrCreateFace(key);
+        ALFontFaceKey key{path, 0, 14.f, 96.f, 96.f, EFontHinting::DEFAULT, 0};
+        LLPointer<ALFontFace> face = gFontManagerp->getOrCreateFace(key);
         ensure("face loaded", face.notNull() && face->isValid());
 
         LLFontGpuGlyphCache* cache = face->getGpuGlyphCache();
@@ -266,15 +266,27 @@ template<> template<> void llfontgpuglyphcache_object::test<4>() {
     ensure("'A' drawable", loc.drawable());
 
     while (glGetError() != GL_NO_ERROR) {}
-}
 
-if (!cache.bindBufferTexture()) skip("GL texture buffer unsupported in this context");
-ensure_equals("no GL error after buffer upload + bind", (int)glGetError(), (int)GL_NO_ERROR);
+    GLint max_texture_units = 0;
+    glGetIntegerv(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &max_texture_units);
+    if (max_texture_units < 2) skip("headless context has no second texture unit");
 
-ensure("second bind succeeds", cache.bindBufferTexture());
-ensure_equals("no GL error on idempotent bind", (int)glGetError(), (int)GL_NO_ERROR);
+    gGL.activateTextureUnit(0);
+    ensure("texture unit 0 active before glyph bind", gGL.verifyTexUnitActive(0));
 
-cache.destroyGL();
+    if (!cache.bindBufferTexture(1)) skip("GL texture buffer unsupported in this context");
+    GLint active_texture = 0;
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &active_texture);
+    ensure_equals("glyph bind restores the caller's active texture unit", active_texture, static_cast<GLint>(GL_TEXTURE0));
+    ensure_equals("renderer texture-unit cache stays synchronized", gGL.getCurrentTexUnitIndex(), 0U);
+
+    if (!cache.bindBufferTexture()) skip("GL texture buffer unsupported in this context");
+    ensure_equals("no GL error after buffer upload + bind", (int)glGetError(), (int)GL_NO_ERROR);
+
+    ensure("second bind succeeds", cache.bindBufferTexture());
+    ensure_equals("no GL error on idempotent bind", (int)glGetError(), (int)GL_NO_ERROR);
+
+    cache.destroyGL();
 }
     #endif // LL_MESA_HEADLESS
 } // namespace tut

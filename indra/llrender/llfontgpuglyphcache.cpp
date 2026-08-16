@@ -212,8 +212,14 @@ bool LLFontGpuGlyphCache::ensureGLBuffer() {
     return true;
 }
 
-bool LLFontGpuGlyphCache::bindBufferTexture() {
-    if (!ensureGLBuffer()) return false;
+bool LLFontGpuGlyphCache::bindBufferTexture(U32 texture_unit) {
+    const U32 previous_unit = gGL.getCurrentTexUnitIndex();
+    gGL.activateTextureUnit(texture_unit);
+
+    if (!ensureGLBuffer()) {
+        gGL.activateTextureUnit(previous_unit);
+        return false;
+    }
 
     if (sUploadedBytes < sArena.size()) {
         glBindBuffer(GL_TEXTURE_BUFFER, sGLBuffer);
@@ -222,6 +228,7 @@ bool LLFontGpuGlyphCache::bindBufferTexture() {
     }
 
     glBindTexture(GL_TEXTURE_BUFFER, sGLTexture);
+    gGL.activateTextureUnit(previous_unit);
     return true;
 }
 

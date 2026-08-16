@@ -35,10 +35,10 @@
 #include "llfasttimer.h"
 #include "llfontfreetype.h"
 #include "llfontbitmapcache.h"
-#include "llfontface.h"
+#include "alfontface.h"
 #include "llfontgpurenderer.h"
 #include "llfontregistry.h"
-#include "llfontshaping.h"
+#include "alfontshaping.h"
 #include "llgl.h"
 #include "llglslshader.h"
 #include "llimagegl.h"
@@ -50,6 +50,7 @@
 #include "lltexture.h"
 #include "lldir.h"
 #include "llstring.h"
+#include "llshadermgr.h"
 
 // Third party library includes
 #include <boost/tokenizer.hpp>
@@ -121,7 +122,7 @@ void LLFontGL::destroyGL()
     mFontFreetype->destroyGL();
 }
 
-bool LLFontGL::loadFace(const std::string& filename, F32 point_size, const F32 vert_dpi, const F32 horz_dpi, bool is_fallback, S32 face_n, EFontHinting hinting, S32 flags, const LLFontVarAxes& var_axes)
+bool LLFontGL::loadFace(const std::string& filename, F32 point_size, const F32 vert_dpi, const F32 horz_dpi, bool is_fallback, S32 face_n, EFontHinting hinting, S32 flags, const ALFontVarAxes& var_axes)
 {
     if(mFontFreetype == reinterpret_cast<LLFontFreetype*>(NULL))
     {
@@ -172,7 +173,7 @@ U64 LLFontGL::getCacheGeneration() const
     if (const LLFontBitmapCache* cache = ft->getFontBitmapCache())
         gen += (U64)cache->getCacheGeneration();
 #if LL_HAS_HB_GPU
-    if (const LLFontFace* face = ft->getFontFace())
+    if (const ALFontFace* face = ft->getFontFace())
         gen += face->getGpuCacheGeneration();
 #endif
     for (const auto& fb : ft->getFallbackFonts())
@@ -182,7 +183,7 @@ U64 LLFontGL::getCacheGeneration() const
             if (const LLFontBitmapCache* cache = fb.first->getFontBitmapCache())
                 gen += (U64)cache->getCacheGeneration();
 #if LL_HAS_HB_GPU
-            if (const LLFontFace* face = fb.first->getFontFace())
+            if (const ALFontFace* face = fb.first->getFontFace())
                 gen += face->getGpuCacheGeneration();
 #endif
         }
@@ -245,7 +246,6 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
     // pay the throttle-check overhead and risked racing eviction with
     // glyph pointers active inside the same render call.
 
-    gGL.getTexUnit(0)->enable(LLTexUnit::TT_TEXTURE);
 
     S32 scaled_max_pixels = max_pixels == S32_MAX ? S32_MAX : llceil((F32)max_pixels * sScaleX);
 
@@ -383,7 +383,7 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
         const F32 y_top = y_bot + mFontFreetype->getUnderlineThickness();
 
         LLColor4U col(color);
-        gGL.getTexUnit(0)->bindManual(LLTexUnit::TT_TEXTURE, LLTexUnit::sWhiteTexture);
+        gGL.getTextureSlot(0)->bindManual(ALTextureSlot::TT_TEXTURE, ALTextureSlot::sWhiteTexture);
         gGL.color4ubv(col.mV);
         gGL.begin(LLRender::TRIANGLES);
         gGL.vertex2f(start_x, y_bot);
@@ -395,17 +395,17 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
         gGL.end();
     }
 
-    // After the LLFontFace move, atlas ownership is per source face — heads
+    // After the ALFontFace move, atlas ownership is per source face — heads
     // bind the atlas of whichever face produced each glyph. Track the current
     // (face, atlas) pair as we walk glyphs and flip on transitions. The
     // initial (face, cache, inv_width, inv_height) captures are deferred to
     // the first glyph.
-    const LLFontFace*        current_face = nullptr;
+    const ALFontFace*        current_face = nullptr;
     const LLFontBitmapCache* font_bitmap_cache = mFontFreetype->getBitmapCache();
     F32 inv_width  = font_bitmap_cache ? 1.f / font_bitmap_cache->getBitmapWidth()  : 0.f;
     F32 inv_height = font_bitmap_cache ? 1.f / font_bitmap_cache->getBitmapHeight() : 0.f;
 
-    // shadowMode is pushed once before pass A starts and reset to
+    // textShadowMode is pushed once before pass A starts and reset to
     // passthrough (0) before pass B's foreground emission. It is the only
     // shadow uniform by design: per-pass constant, so the captured-buffer
     // replay (LLFontVertexBuffer::renderBuffers re-pushes it; LLVertexBufferData
@@ -415,12 +415,13 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
     // (textureSize + the RG-swizzle/.a sampling), so glyphs from
     // differently-sized head and fallback atlases all shadow correctly.
     // Skipped when sEnableShaderShadow is off (legacy multi-quad emission
-    // still drives shadow geometry — shader stays at shadowMode=0).
-    const bool push_shader_shadow_uniforms = sEnableShaderShadow && (shadow != NO_SHADOW) && LLGLSLShader::sCurBoundShaderPtr;
+    // still drives shadow geometry — shader stays at textShadowMode=0).
+    const bool push_shader_shadow_uniforms =
+        sEnableShaderShadow && (shadow != NO_SHADOW) && LLGLSLShader::sCurBoundShaderPtr;
     if (push_shader_shadow_uniforms)
     {
         const int mode = (shadow == DROP_SHADOW) ? 1 : 2; // SOFT
-        LLGLSLShader::sCurBoundShaderPtr->uniform1i(LLShaderMgr::FONT_SHADOW_MODE, mode);
+        LLGLSLShader::sCurBoundShaderPtr->uniform1i(LLShaderMgr::TEXT_SHADOW_MODE, mode);
     }
 
     bool draw_ellipses = false;
@@ -472,7 +473,7 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
         LLRectf screen_rect;
         LLRectf uv_rect;
         std::pair<EFontGlyphType, S32> bitmap_entry;
-        const LLFontFace* face;
+        const ALFontFace* face;
         LLColor4U color;
     };
     std::vector<DeferredGlyph> deferred;
@@ -507,7 +508,10 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
     {
         if (glyph_count > 0)
         {
-            if (batch_image) gGL.getTexUnit(0)->bind(batch_image);
+            if (batch_image)
+            {
+                gGL.getTextureSlot(0)->bindSampled(batch_image, ALSamplers::PointWrap);
+            }
             gGL.begin(LLRender::TRIANGLES);
             gGL.vertexBatchPreTransformed(vertices, uvs, colors, glyph_count * 6);
             gGL.end();
@@ -522,7 +526,7 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
     // the whole slice. Layout's ranges are slice-local; we compare against
     // `i - begin_offset` in the loop.
     LLWStringView slice(wstr.data() + begin_offset, (size_t)length);
-    const LLFontShapeLayout layout = LLFontShaping::layoutLine(mFontFreetype, slice, spacing.letter != 0.f);
+    const ALFontShapeLayout layout = ALFontShaping::layoutLine(mFontFreetype, slice, spacing.letter != 0.f);
     size_t next_shape_run = 0;
 
 #if LL_HAS_HB_GPU
@@ -555,7 +559,7 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
             }
             if (push_shader_shadow_uniforms && LLGLSLShader::sCurBoundShaderPtr)
             {
-                LLGLSLShader::sCurBoundShaderPtr->uniform1i(LLShaderMgr::FONT_SHADOW_MODE, 0);
+                LLGLSLShader::sCurBoundShaderPtr->uniform1i(LLShaderMgr::TEXT_SHADOW_MODE, 0);
             }
             gGL.popUIMatrix();
             return gpu_result.charsDrawn;
@@ -621,7 +625,7 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
                 // return value.
                 S32 overflow_cluster_local = 0;
                 S32 current_cluster = -1;
-                for (const LLShapedGlyph& sg : run_glyphs)
+                for (const ALShapedGlyph& sg : run_glyphs)
                 {
                     if (sg.cluster != current_cluster)
                     {
@@ -633,10 +637,13 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
                     // codepoint path also routes through getGlyphInfoByIndex
                     // (after wch -> glyph_index resolution), so this lookup
                     // hits the same atlas slot regardless of which path
-                    // produced the LLShapedGlyph.
-                    const LLFontGlyphInfo* sfgi = mFontFreetype->getGlyphInfoByIndex(sg.face, sg.glyph_id,
-                        (!use_color || LLFontGL::sForceMonochromeEmoji) ? EFontGlyphType::Grayscale : EFontGlyphType::Color);
-                    if (!sfgi) continue;
+                    // produced the ALShapedGlyph.
+                    const LLFontGlyphInfo* sfgi = mFontFreetype->getGlyphInfoByIndex(
+                        sg.face, sg.glyph_id,
+                        (!use_color || LLFontGL::sForceMonochromeEmoji)
+                             ? EFontGlyphType::Grayscale : EFontGlyphType::Color);
+                    if (!sfgi)
+                        continue;
 
                     // Quantize the pen x to 1/N px resolution and split into
                     // integer pixel + subpixel phase. Doing them together (not
@@ -671,7 +678,7 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
                     }
                     const auto& slot = sfgi->mPhaseSlots[phase];
 
-                    const LLFontFace* glyph_face = sfgi->mSourceFace;
+                    const ALFontFace* glyph_face = sfgi->mSourceFace;
                     std::pair<EFontGlyphType, S32> next_bitmap_entry = slot.mBitmapEntry;
                     if (glyph_face != current_face || next_bitmap_entry != bitmap_entry)
                     {
@@ -694,8 +701,13 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
                         // frame boundary and purges glyph entries first). The
                         // emission guard below skips the quad rather than
                         // sampling whatever texture happens to be bound.
-                        batch_image = font_bitmap_cache ? font_bitmap_cache->getImageGL(bitmap_entry.first, bitmap_entry.second) : nullptr;
-                        if (batch_image) gGL.getTexUnit(0)->bind(batch_image);
+                        batch_image = font_bitmap_cache
+                            ? font_bitmap_cache->getImageGL(bitmap_entry.first, bitmap_entry.second)
+                            : nullptr;
+                        if (batch_image)
+                        {
+                            gGL.getTextureSlot(0)->bindSampled(batch_image, ALSamplers::PointWrap);
+                        }
                     }
 
                     const F32 glyph_x = (F32)(dest_int_x + slot.mXBearing);
@@ -814,7 +826,7 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
         // `last_char != wch` clause forced a per-codepoint flush as a
         // band-aid over exactly that misdirection; Latin text now batches
         // up to GLYPH_BATCH_SIZE glyphs per draw the way it should.
-        const LLFontFace* cp_glyph_face = fgi->mSourceFace;
+        const ALFontFace* cp_glyph_face = fgi->mSourceFace;
         std::pair<EFontGlyphType, S32> next_bitmap_entry = cp_slot.mBitmapEntry;
         if (cp_glyph_face != current_face || next_bitmap_entry != bitmap_entry)
         {
@@ -838,8 +850,13 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
             // of range. The emission guard below skips the glyph in that
             // case — emitting quads without a known binding would sample
             // whatever texture is currently bound.
-            batch_image = font_bitmap_cache ? font_bitmap_cache->getImageGL(bitmap_entry.first, bitmap_entry.second) : nullptr;
-            if (batch_image) gGL.getTexUnit(0)->bind(batch_image);
+            batch_image = font_bitmap_cache
+                ? font_bitmap_cache->getImageGL(bitmap_entry.first, bitmap_entry.second)
+                : nullptr;
+            if (batch_image)
+            {
+                gGL.getTextureSlot(0)->bindSampled(batch_image, ALSamplers::PointWrap);
+            }
         }
 
         if ((start_x + scaled_max_pixels) < (cur_x + cp_slot.mXBearing + cp_slot.mWidth))
@@ -935,10 +952,13 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
         // callback this is a no-op (direct callers don't need separate lists).
         if (on_pass_boundary) on_pass_boundary();
 
-        // Reset shadowMode for foreground emission. Pass B's flushes (and any
+        // Reset textShadowMode for foreground emission. Pass B's flushes (and any
         // subsequent UI rendering) take the shader's default-passthrough
         // branch.
-        if (push_shader_shadow_uniforms) LLGLSLShader::sCurBoundShaderPtr->uniform1i(LLShaderMgr::FONT_SHADOW_MODE, 0);
+        if (push_shader_shadow_uniforms)
+        {
+            LLGLSLShader::sCurBoundShaderPtr->uniform1i(LLShaderMgr::TEXT_SHADOW_MODE, 0);
+        }
 
         // Pass B: emit foreground geometry from deferred metadata. Reset the
         // atlas-binding tracker; the first deferred glyph forces a (possibly
@@ -961,8 +981,13 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
                     current_face = dg.face;
                     font_bitmap_cache = current_face ? current_face->getBitmapCache() : nullptr;
                 }
-                batch_image = font_bitmap_cache ? font_bitmap_cache->getImageGL(bitmap_entry.first, bitmap_entry.second) : nullptr;
-                if (batch_image) gGL.getTexUnit(0)->bind(batch_image);
+                batch_image = font_bitmap_cache
+                    ? font_bitmap_cache->getImageGL(bitmap_entry.first, bitmap_entry.second)
+                    : nullptr;
+                if (batch_image)
+                {
+                    gGL.getTextureSlot(0)->bindSampled(batch_image, ALSamplers::PointWrap);
+                }
             }
 
             if (!batch_image) continue;
@@ -1134,7 +1159,7 @@ F32 LLFontGL::getWidthF32(const llwchar* wchars, S32 begin_offset, S32 max_chars
     // ranges come back slice-local; we compare against `i - begin_offset`
     // in the loop rather than mutating ranges.
     LLWStringView slice(wchars + begin_offset, (size_t)measure_len);
-    const LLFontShapeLayout layout = LLFontShaping::layoutLine(mFontFreetype, slice, spacing.letter != 0.f);
+    const ALFontShapeLayout layout = ALFontShaping::layoutLine(mFontFreetype, slice, spacing.letter != 0.f);
     size_t next_shape_run = 0;
 
     const LLFontGlyphInfo* next_glyph = NULL;
@@ -1176,7 +1201,7 @@ F32 LLFontGL::getWidthF32(const llwchar* wchars, S32 begin_offset, S32 max_chars
             {
                 next_glyph = NULL;
                 S32 current_cluster = -1;
-                for (const LLShapedGlyph& sg : run_glyphs)
+                for (const ALShapedGlyph& sg : run_glyphs)
                 {
                     if (sg.cluster != current_cluster)
                     {
@@ -1303,8 +1328,8 @@ S32 LLFontGL::maxDrawableChars(const llwchar* wchars, F32 max_pixels, S32 max_ch
     // slice-local (relative to begin=0), which equals 0..measure_end here.
     // Keep the ref bound for the lifetime of the loop — no other shape*
     // calls fire below, so the LRU entry can't be evicted underneath us.
-    static const std::vector<LLShapedGlyph> sEmptyShape;
-    const std::vector<LLShapedGlyph>* shape_glyphs = &sEmptyShape;
+    static const std::vector<ALShapedGlyph> sEmptyShape;
+    const std::vector<ALShapedGlyph>* shape_glyphs = &sEmptyShape;
     std::vector<F32> per_cp_advance;
     std::vector<F32> per_cp_extent;
     if (max_chars > 0 && wchars[0])
@@ -1315,12 +1340,12 @@ S32 LLFontGL::maxDrawableChars(const llwchar* wchars, F32 max_pixels, S32 max_ch
         if (measure_end > 0)
         {
             LLWStringView slice(wchars, (size_t)measure_end);
-            shape_glyphs = &LLFontShaping::shapeLine(mFontFreetype, slice, 0, (size_t)measure_end);
+            shape_glyphs = &ALFontShaping::shapeLine(mFontFreetype, slice, 0, (size_t)measure_end);
             if (!shape_glyphs->empty())
             {
                 per_cp_advance.assign((size_t)measure_end, 0.f);
                 per_cp_extent.assign((size_t)measure_end, 0.f);
-                for (const LLShapedGlyph& sg : *shape_glyphs)
+                for (const ALShapedGlyph& sg : *shape_glyphs)
                 {
                     if (sg.cluster < 0 || sg.cluster >= measure_end)
                         continue;
@@ -1339,7 +1364,7 @@ S32 LLFontGL::maxDrawableChars(const llwchar* wchars, F32 max_pixels, S32 max_ch
     }
     const bool use_shaped = !per_cp_advance.empty();
     // shape_glyphs points into the shape LRU until the loop's last use.
-    const size_t shape_gen = LLFontShaping::cacheMutationCount();
+    const size_t shape_gen = ALFontShaping::cacheMutationCount();
     (void)shape_gen;
 
     S32 i;
@@ -1444,7 +1469,7 @@ S32 LLFontGL::maxDrawableChars(const llwchar* wchars, F32 max_pixels, S32 max_ch
 
     // No shape* call may fire while shape_glyphs is held (see the comment
     // at the shapeLine call above).
-    llassert(shape_gen == LLFontShaping::cacheMutationCount());
+    llassert(shape_gen == ALFontShaping::cacheMutationCount());
 
     if( clip )
     {
@@ -1496,8 +1521,8 @@ S32 LLFontGL::firstDrawableChar(const llwchar* wchars, F32 max_pixels, S32 text_
         // no other shape* calls run in between. Clusters are slice-local
         // (begin=0), which equals 0..start here.
         LLWStringView slice(wchars, (size_t)(start + 1));
-        const auto& shape_glyphs = LLFontShaping::shapeLine(mFontFreetype, slice, 0, (size_t)(start + 1));
-        const size_t shape_gen = LLFontShaping::cacheMutationCount();
+        const auto& shape_glyphs = ALFontShaping::shapeLine(mFontFreetype, slice, 0, (size_t)(start + 1));
+        const size_t shape_gen = ALFontShaping::cacheMutationCount();
         (void)shape_gen;
         if (!shape_glyphs.empty())
         {
@@ -1520,7 +1545,7 @@ S32 LLFontGL::firstDrawableChar(const llwchar* wchars, F32 max_pixels, S32 text_
         }
         // The fill above is shape_glyphs' last dereference — it must not
         // have been invalidated by a shape-cache mutation mid-hold.
-        llassert(shape_gen == LLFontShaping::cacheMutationCount());
+        llassert(shape_gen == ALFontShaping::cacheMutationCount());
     }
     const bool use_shaped = !per_cp_advance.empty();
 
@@ -1617,7 +1642,7 @@ S32 LLFontGL::charFromPixelOffset(const llwchar* wchars, S32 begin_offset, F32 t
     const S32 slice_len = slice_end - begin_offset;
 
     LLWStringView slice(wchars + begin_offset, (size_t)slice_len);
-    const LLFontShapeLayout layout = LLFontShaping::layoutLine(mFontFreetype, slice);
+    const ALFontShapeLayout layout = ALFontShaping::layoutLine(mFontFreetype, slice);
     size_t next_shape_run = 0;
 
     const LLFontGlyphInfo* next_glyph = NULL;
@@ -1652,7 +1677,7 @@ S32 LLFontGL::charFromPixelOffset(const llwchar* wchars, S32 begin_offset, F32 t
                 // run_range.first to get back into slice coords.
                 const S32 cluster_base = (S32)run_range.first;
                 F32 run_x = cur_x;
-                for (const LLShapedGlyph& sg : run_glyphs)
+                for (const ALShapedGlyph& sg : run_glyphs)
                 {
                     const F32 glyph_start = run_x;
                     run_x += sg.x_advance;
@@ -2326,7 +2351,7 @@ void LLFontGL::drawGlyphShadow(S32& glyph_count, LLVector4a* vertex_out, LLVecto
     if (sEnableShaderShadow)
     {
         // Shader-based shadow: emit a single dilated quad. uiF.glsl with
-        // shadowMode > 0 takes 2 (DROP) or 5 (SOFT) atlas taps and accumulates
+        // textShadowMode > 0 takes 2 (DROP) or 5 (SOFT) atlas taps and accumulates
         // alpha as max() to reproduce the multi-quad coverage profile. The
         // dilated screen rect grows by 2px on each side to host the ±2px tap
         // pattern; the dilated UV rect grows by 2 atlas texels (callers fill

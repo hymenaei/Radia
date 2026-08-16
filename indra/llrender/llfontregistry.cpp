@@ -33,7 +33,7 @@
 #include "llfontfreetype.h"
 #include "llfontgl.h"
 #include "llfontregistry.h"
-#include "llfontshaping.h"
+#include "alfontshaping.h"
 #include <algorithm>
 #include <set>
 #include <boost/tokenizer.hpp>
@@ -64,7 +64,7 @@ namespace
         // matching attribute; child <file> entries inherit the value
         // when they don't override. font_weight is parsed as S32 from
         // XML and stored as F32 here so all five axes share one shape.
-        LLFontVarAxes var_axes;
+        ALFontVarAxes var_axes;
     };
 
     typedef boost::unordered_map<std::string, F32> family_size_overrides_t;
@@ -285,7 +285,7 @@ void LLFontDescriptor::setPointSize(F32 point_size)
         : 0.f;
 }
 
-void LLFontDescriptor::addFontFile(const std::string& file_name, EFontHinting hinting, S32 flags, F32 size_delta, const std::function<bool(llwchar)>& char_functor, bool monospace_ligatures, bool load_collection, const LLFontVarAxes& var_axes)
+void LLFontDescriptor::addFontFile(const std::string& file_name, EFontHinting hinting, S32 flags, F32 size_delta, const std::function<bool(llwchar)>& char_functor, bool monospace_ligatures, bool load_collection, const ALFontVarAxes& var_axes)
 {
     mFontFiles.push_back(LLFontFileInfo(file_name, hinting, flags, size_delta, char_functor, monospace_ligatures, load_collection, var_axes));
 }
@@ -920,7 +920,7 @@ void LLFontRegistry::applyFamilyOverrides(const LLSD& overrides)
                 // replacement (e.g. a monospace family's ligatures
                 // setting carries to the user-supplied file).
                 EFontHinting hinting = EFontHinting::FORCE_AUTOHINT;
-                LLFontVarAxes var_axes;
+                ALFontVarAxes var_axes;
                 S32 flags = 0;
                 bool monospace_lig = false;
                 const auto& orig_files = target_it->first.getFontFiles();
@@ -1154,7 +1154,7 @@ bool font_desc_init_from_xml(LLXMLNodePtr node,
             // and allow per-file override. All five axes share the same
             // shape (cascade + override). font_weight is parsed as S32
             // (CSS-weight idiom) and stored as F32; the rest are F32.
-            LLFontVarAxes var_axes = defaults.var_axes;
+            ALFontVarAxes var_axes = defaults.var_axes;
             if (child->hasAttribute("font_weight"))
             {
                 S32 v = -1;
@@ -1736,11 +1736,11 @@ LLFontGL *LLFontRegistry::createFont(const LLFontDescriptor& desc)
         }
         F32 point_size_scale = extra_scale * effective_point_size;
         F32 actual_point_size = point_size_scale + font_file_it->mSizeDelta;
-        LLFontVarAxes effective_var_axes = font_file_it->mVarAxes;
+        ALFontVarAxes effective_var_axes = font_file_it->mVarAxes;
         // Only override files that declared a weight axis in fonts.xml.
         // This is both capability metadata and a cache guard: stamping wght
         // onto static emoji/OS fallback files would create one duplicate
-        // LLFontFace per CSS weight even though FreeType ignores the axis.
+        // ALFontFace per CSS weight even though FreeType ignores the axis.
         if (norm_desc.hasWeight() && effective_var_axes.wght_set)
         {
             effective_var_axes.wght = static_cast<F32>(norm_desc.getWeight());
@@ -1890,7 +1890,7 @@ void LLFontRegistry::clear()
     mFontMap.clear();
     // After heads are gone, the cache holds the only refs to shared
     // fallback instances. Clearing it triggers FT_Done_Face for those
-    // wrappers (via LLFontFace's destructor when the LLPointer refcount
+    // wrappers (via ALFontFace's destructor when the LLPointer refcount
     // hits zero through LLFontFreetype's release).
     mFallbackInstanceCache.clear();
 }
@@ -2026,7 +2026,7 @@ bool LLFontRegistry::reload(const LLSD& font_overrides)
     // cheaper than O(faces × entries) per-face sweeps and avoids racing
     // the destructor against new entries the loop below would otherwise
     // produce.
-    LLFontShaping::clearCache();
+    ALFontShaping::clearCache();
 
     for (auto& [desc, head] : heads)
     {
@@ -2061,7 +2061,7 @@ bool LLFontRegistry::reload(const LLSD& font_overrides)
 
     // pinned_old_fallbacks goes out of scope here. Any shared fallback
     // instance no longer referenced by a (rebuilt) head's mFontFreetype
-    // chain hits refcount 0; ~LLFontFace fires on its LLFontFace and
+    // chain hits refcount 0; ~ALFontFace fires on its ALFontFace and
     // releases the FT_Face + atlas LLImageGL.
     return true;
 }

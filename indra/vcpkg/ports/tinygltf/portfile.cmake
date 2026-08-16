@@ -1,13 +1,14 @@
-# The v3.0.0 tag was moved upstream after vcpkg recorded its archive hash.
-# Pin the current release commit so future tag changes cannot break CI again.
+# Header-only library
 vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
-    REPO syoyo/tinygltf
-    REF cfcadfa8d14eb489d97b6324838ae100410edcc7
-    SHA512 48334f758860a1a7b16e625dcad8b784d3361cf61f8c166f36af57fd33b7823986e0500f0782674733433a92f02fef67be135823d753098a3ea3582612796665
+    REPO AlchemyViewer/tinygltf
+    REF "v${VERSION}"
+    SHA512 b9a689f25284206969f31ba382abd06cd4ed69ee6a118af3484aaa17b68aebefddc97a4e722e3bde8fa39b737677cb09cbd3d3e6f2a573ac4ba1fb718478b79a
     HEAD_REF master
 )
 
+# Put the licence file where vcpkg expects it
+# Copy the tinygltf header files and fix the path to json
 vcpkg_replace_string("${SOURCE_PATH}/tiny_gltf.h" "#include \"json.hpp\"" "#include <nlohmann/json.hpp>")
 file(INSTALL
         "${SOURCE_PATH}/tiny_gltf.h"

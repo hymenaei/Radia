@@ -13,6 +13,21 @@
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Alchemy Viewer Source Code
+ * Copyright (C) 2026, Rye <rye@alchemyviewer.org>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation;
+ * version 2.1 of the License only.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  * $/LicenseInfo$
  */
 
@@ -20,7 +35,7 @@
 
 #include "../llfontgl.h"
 #include "../llfontfreetype.h"
-#include "../llfontshaping.h"
+#include "../alfontshaping.h"
 #include "../llfontbitmapcache.h"
 #include "../llimagegl.h"
 
@@ -604,19 +619,19 @@ namespace tut
         ensure("13px metrics exceed 12px metrics",
                regular13->getAscenderHeight() > regular12->getAscenderHeight());
 
-        const LLFontFace* regular_face = regular13->getFontFreetype()->getFontFace();
+        const ALFontFace* regular_face = regular13->getFontFreetype()->getFontFace();
         const U32 glyph_A = regular_face->getCharGlyphIndex(U'A');
         ensure("analytic exact font does not prewarm the bitmap ASCII atlas",
                regular_face->findGlyphInfo(glyph_A, EFontGlyphType::Grayscale) == nullptr);
 
-        const LLFontFace* fractional_face = regular13_5->getFontFreetype()->getFontFace();
+        const ALFontFace* fractional_face = regular13_5->getFontFreetype()->getFontFace();
         const F32 fractional_em_pixels =
             fractional_face->designToPixelScale() * fractional_face->unitsPerEm();
         ensure("uniform analytic scale preserves fractional CSS pixels",
                std::fabs(fractional_em_pixels - 13.5f) < 0.02f);
 
-        const LLFontVarAxes& medium_axes = medium13->getFontFreetype()->getVarAxes();
-        const LLFontVarAxes& bold_axes = bold13->getFontFreetype()->getVarAxes();
+        const ALFontVarAxes& medium_axes = medium13->getFontFreetype()->getVarAxes();
+        const ALFontVarAxes& bold_axes = bold13->getFontFreetype()->getVarAxes();
         ensure("medium request reaches wght variation axis",
                medium_axes.wght_set && medium_axes.wght == 525.f);
         ensure("bold request reaches wght variation axis",
@@ -655,7 +670,7 @@ namespace tut
             combining_spaced - combining_base, 2.f, 5);
 
         const LLWString ligature = utf8str_to_wstring("fi");
-        const auto& ligature_spaced_shape = LLFontShaping::shapeLine(
+        const auto& ligature_spaced_shape = ALFontShaping::shapeLine(
             font->getFontFreetype(), ligature, 0, ligature.size(),
             true);
         ensure(

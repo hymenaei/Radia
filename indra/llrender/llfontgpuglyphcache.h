@@ -77,7 +77,8 @@ public:
 
     const GlyphLoc& getOrEncodeGlyph(const Batch& batch, U32 glyphId);
 
-    static bool bindBufferTexture();
+    static bool bindBufferTexture(U32 texture_unit);
+    static bool bindBufferTexture() { return bindBufferTexture(0); }
 
     static void destroyGL();
 

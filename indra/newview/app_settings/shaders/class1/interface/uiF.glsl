@@ -28,6 +28,11 @@
 // migrates from the legacy texture/font contract to retained painting. Once
 // every UI caller uses retained painting, remove the legacy #else branch and
 // make the retained path the default fragment program.
+
+// The text shadow uniform is shared by the legacy font path and captured
+// buffer replay; retained paint operations simply leave it unused.
+uniform int textShadowMode = 0; // 0 = passthrough, 1 = drop, 2 = soft
+
 #ifdef PAINT_SHADER
 out vec4 fragColor;
 
@@ -73,7 +78,6 @@ const int kPaintOpInsetShadow = 5;
 const int kPaintOpGradientBorder = 6;
 const int kPaintOpBlur = 7;
 const int kPaintOpComposite = 8;
-
 const int kGradientLinear = 0;
 const int kGradientRadial = 1;
 const int kGradientConic = 2;
@@ -365,8 +369,6 @@ out vec4 fragColor;
 
 uniform sampler2D diffuseMap;
 
-uniform int shadowMode;
-
 in vec2 vary_texcoord0;
 in vec4 vertexColor;
 
@@ -399,7 +401,7 @@ void main() {
         return;
     }
 #endif
-    if (shadowMode == 0) {
+    if (textShadowMode == 0) {
         fragColor = vertexColor * texture(diffuseMap, vary_texcoord0.xy);
         return;
     }
@@ -407,7 +409,7 @@ void main() {
     vec2 atlasTexelSize = 1.0 / vec2(textureSize(diffuseMap, 0));
     float vertexColorAlpha = vertexColor.a;
     float p;
-    if (shadowMode == 1) {
+    if (textShadowMode == 1) {
         p = 1.0 - vertexColorAlpha * sampleAtlasAlpha(vary_texcoord0 + atlasTexelSize * vec2(-1.0, 1.0));
     } else {
         p = (1.0 - vertexColorAlpha * sampleAtlasAlpha(vary_texcoord0 + atlasTexelSize * vec2(1.0, 1.0)));

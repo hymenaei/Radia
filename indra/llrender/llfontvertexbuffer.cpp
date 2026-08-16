@@ -6,6 +6,9 @@
  * Second Life Viewer Source Code
  * Copyright (C) 2024, Linden Research, Inc.
  *
+ * Alchemy Viewer Source Code
+ * Copyright (C) 2026, Rye <rye@alchemyviewer.org>
+ *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation;
@@ -36,6 +39,7 @@
 #include "llglslshader.h"
 #include "llimagegl.h"
 #include "llrender.h"
+#include "llshadermgr.h"
 #include "llvertexbuffer.h"
 
 bool LLFontVertexBuffer::sEnableBufferCollection = true;
@@ -279,7 +283,7 @@ void LLFontVertexBuffer::genBuffers(
     mLastUsesColorAtlas = false;
     if (const LLFontFreetype* face = fontp->getFontFreetype())
     {
-        // After the LLFontFace move, color atlases live on individual face
+        // After the ALFontFace move, color atlases live on individual face
         // wrappers — head primary, each fallback's face. Walk all of them
         // to gather the set of color atlas textures this batch might have
         // sampled from.
@@ -377,7 +381,6 @@ void LLFontVertexBuffer::recolorBuffers(const LLColor4& color, LLFontGL::ShadowT
 bool LLFontVertexBuffer::renderBuffers()
 {
     gGL.flush(); // deliberately empty pending verts
-
     LLGLSLShader* caller_shader = LLGLSLShader::sCurBoundShaderPtr;
     LLGLSLShader* analytic_shader = caller_shader;
     const auto restore_caller_shader = [caller_shader]()
@@ -399,9 +402,7 @@ bool LLFontVertexBuffer::renderBuffers()
         const S32 glyph_unit = analytic_shader->getTextureChannel(LLShaderMgr::FONT_GLYPH_BUFFER);
         if (glyph_unit < 0) return replay_unavailable();
 
-        gGL.getTexUnit(glyph_unit)->activate();
-        const bool bound = LLFontGpuGlyphCache::bindBufferTexture();
-        gGL.getTexUnit(0)->activate();
+        const bool bound = LLFontGpuGlyphCache::bindBufferTexture(glyph_unit);
         if (!bound) return replay_unavailable();
     }
 #else
@@ -420,7 +421,6 @@ bool LLFontVertexBuffer::renderBuffers()
         return replay_unavailable();
     }
 
-    gGL.getTexUnit(0)->enable(LLTexUnit::TT_TEXTURE);
     gGL.pushUIMatrix();
 
     gGL.loadUIIdentity();
@@ -446,7 +446,8 @@ bool LLFontVertexBuffer::renderBuffers()
                 gGL.flush();
                 target->bind();
             }
-            if (mLastUsedShaderShadow && !buffer.mFontGpuGeometry) target->uniform1i(LLShaderMgr::FONT_SHADOW_MODE, standard_shadow_mode);
+            if (mLastUsedShaderShadow && !buffer.mFontGpuGeometry)
+                target->uniform1i(LLShaderMgr::TEXT_SHADOW_MODE, standard_shadow_mode);
             buffer.draw();
         }
     };
@@ -457,7 +458,7 @@ bool LLFontVertexBuffer::renderBuffers()
     gGL.popUIMatrix();
 
     restore_caller_shader();
-    if (caller_shader && mLastUsedShaderShadow) caller_shader->uniform1i(LLShaderMgr::FONT_SHADOW_MODE, 0);
+    if (caller_shader && mLastUsedShaderShadow) caller_shader->uniform1i(LLShaderMgr::TEXT_SHADOW_MODE, 0);
     return true;
 }
 

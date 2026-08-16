@@ -54,6 +54,7 @@
 #include "llxmltree.h"
 #include "llslurl.h"
 #include "llrender.h"
+#include "aluniformbuffer.h"
 
 #include "stringize.h"
 
@@ -214,6 +215,7 @@
 
 #include "llwindowlistener.h"
 #include "llviewerwindowlistener.h"
+#include "llstatslistener.h"
 #include "llcleanup.h"
 
 // [RLVa:KB] - Checked: 2010-03-31 (RLVa-1.2.0c)
@@ -695,6 +697,20 @@ public:
             addText(xpos, ypos, llformat("%d Unique Textures", LLImageGL::sUniqueCount));
             ypos += y_inc;
 
+            // Sampler traffic. The ratio is the point: sampler objects cost a glBindSampler
+            // that baked texture state did not, but only when the sampler actually changes.
+            {
+                const U32 sampler_binds = ALTextureSlot::sSamplerBinds;
+                const U32 tex_binds     = ALTextureSlot::sTextureBinds;
+                addText(xpos, ypos, llformat("%d Sampler Binds (%d flushed, %d SPLIT BATCH, %d shadow-cycle, %d skipped, %.2f per tex bind)",
+                                             sampler_binds, ALTextureSlot::sSamplerBindsFlushed,
+                                             ALTextureSlot::sSamplerBindsSplitBatch,
+                                             ALTextureSlot::sSamplerBindsShadowCycle,
+                                             ALTextureSlot::sSamplerSkips,
+                                             tex_binds ? (F32)sampler_binds / (F32)tex_binds : 0.f));
+                ypos += y_inc;
+            }
+
             addText(xpos, ypos, llformat("%d Render Calls", (U32)last_frame_recording.getSampleCount(LLPipeline::sStatBatchSize)));
             ypos += y_inc;
 
@@ -704,10 +720,15 @@ public:
             addText(xpos, ypos, llformat("%d Matrix Ops", gPipeline.mMatrixOpCount));
             ypos += y_inc;
 
-            addText(xpos, ypos, llformat("%d Texture Matrix Ops", gPipeline.mTextureMatrixOps));
+            addText(xpos, ypos, llformat("%d Texture Matrix Ops (%d shadow, %d probe, %d identity)",
+                gPipeline.mTextureMatrixOps, gPipeline.mTextureMatrixOpsShadow,
+                gPipeline.mTextureMatrixOpsProbe, gPipeline.mTextureMatrixOpsIdentity));
             ypos += y_inc;
 
             gPipeline.mTextureMatrixOps = 0;
+            gPipeline.mTextureMatrixOpsShadow = 0;
+            gPipeline.mTextureMatrixOpsProbe = 0;
+            gPipeline.mTextureMatrixOpsIdentity = 0;
             gPipeline.mMatrixOpCount = 0;
 
             if (last_frame_recording.getSampleCount(LLPipeline::sStatBatchSize) > 0)
@@ -745,11 +766,11 @@ public:
 
                 ypos += y_inc;
 
-                addText(xpos, ypos, llformat("%d/%d Mesh HTTP Requests/Retries", LLMeshRepository::sHTTPRequestCount,
-                    LLMeshRepository::sHTTPRetryCount));
+                addText(xpos, ypos, llformat("%d/%d Mesh HTTP Requests/Retries", LLMeshRepository::sHTTPRequestCount.load(),
+                    LLMeshRepository::sHTTPRetryCount.load()));
                 ypos += y_inc;
 
-                addText(xpos, ypos, llformat("%d/%d Mesh LOD Pending/Processing", LLMeshRepository::sLODPending, LLMeshRepository::sLODProcessing));
+                addText(xpos, ypos, llformat("%d/%d Mesh LOD Pending/Processing", LLMeshRepository::sLODPending, LLMeshRepository::sLODProcessing.load()));
                 ypos += y_inc;
 
                 addText(xpos, ypos, llformat("%.3f/%.3f MB Mesh Cache Read/Write ", LLMeshRepository::sCacheBytesRead/(1024.f*1024.f), LLMeshRepository::sCacheBytesWritten/(1024.f*1024.f)));
@@ -2119,13 +2140,17 @@ bool LLViewerWindow::handleTimerEvent(LLWindow *window)
     return false;
 }
 
-bool LLViewerWindow::handleDeviceChange(LLWindow *window)
+bool LLViewerWindow::handleDeviceChange(LLWindow *window, const std::string& change_type)
 {
     // give a chance to use a joystick after startup (hot-plugging)
     if (!LLViewerJoystick::getInstance()->isJoystickInitialized() )
     {
         LLViewerJoystick::getInstance()->init(true);
         return true;
+    }
+    else
+    {
+        LL_INFOS("Window") << "Device change event: " << change_type << LL_ENDL;
     }
     return false;
 }
@@ -2148,6 +2173,7 @@ bool LLViewerWindow::handleDPIChanged(LLWindow *window, F32 ui_scale_factor, S32
 
 bool LLViewerWindow::handleDisplayChanged()
 {
+    LL_INFOS("Window") << "Display change event" << LL_ENDL;
     LLFontGL::sResolutionGeneration++;
     return false;
 }
@@ -2229,6 +2255,7 @@ LLViewerWindow::LLViewerWindow(const Params& p)
     LLWindowListener::KeyboardGetter getter = [](){ return gKeyboard; };
     mWindowListener = std::make_unique<LLWindowListener>(this, getter);
     mViewerWindowListener = std::make_unique<LLViewerWindowListener>(this);
+    mStatsListener = std::make_unique<LLStatsListener>();
 
     mSystemChannel.reset(new LLNotificationChannel("System", "Visible", LLNotificationFilters::includeEverything));
     mCommunicationChannel.reset(new LLCommunicationChannel("Communication", "Visible"));
@@ -2833,6 +2860,7 @@ void LLViewerWindow::shutdownGL()
     gGL.shutdown();
 
     SUBSYSTEM_CLEANUP(LLVertexBuffer);
+    ALUniformBuffer::cleanupClass();
 
     LL_INFOS() << "LLVertexBuffer cleaned." << LL_ENDL ;
 }
@@ -4656,7 +4684,7 @@ void LLViewerWindow::renderSelections( bool for_gl_pick, bool pick_parcel_walls,
         // Render light for editing
         if (LLSelectMgr::sRenderLightRadius && LLToolMgr::getInstance()->inEdit())
         {
-            gGL.getTexUnit(0)->unbind(LLTexUnit::TT_TEXTURE);
+            gGL.getTextureSlot(0)->unbind();
             LLGLEnable gls_blend(GL_BLEND);
             LLGLEnable gls_cull(GL_CULL_FACE);
             LLGLDepthTest gls_depth(GL_TRUE, GL_FALSE);
@@ -5032,7 +5060,7 @@ LLViewerObject* LLViewerWindow::cursorIntersect(S32 mouse_x, S32 mouse_y, F32 de
         {
             found = gPipeline.lineSegmentIntersectInWorld(mw_start, mw_end, pick_transparent, pick_rigged, pick_unselectable, pick_reflection_probe,
                                                           face_hit, intersection, uv, normal, tangent);
-            if (found && !pick_transparent)
+            if (found && !pick_transparent && intersection)
             {
                 gDebugRaycastIntersection = *intersection;
             }
@@ -5704,8 +5732,25 @@ bool LLViewerWindow::rawSnapshot(LLImageRaw *raw, S32 image_width, S32 image_hei
 
     S32 output_buffer_offset_y = 0;
 
-    F32 depth_conversion_factor_1 = (LLViewerCamera::getInstance()->getFar() + LLViewerCamera::getInstance()->getNear()) / (2.f * LLViewerCamera::getInstance()->getFar() * LLViewerCamera::getInstance()->getNear());
-    F32 depth_conversion_factor_2 = (LLViewerCamera::getInstance()->getFar() - LLViewerCamera::getInstance()->getNear()) / (2.f * LLViewerCamera::getInstance()->getFar() * LLViewerCamera::getInstance()->getNear());
+    // Depth-buffer sample -> linear eye distance.
+    //
+    // glReadPixels(GL_DEPTH_COMPONENT) yields WINDOW depth in [0,1], not NDC. Inverting a
+    // perspective projection from a forward window depth W gives
+    //
+    //     d_eye = f*n / (f - W*(f - n))            (W=0 -> near, W=1 -> far)
+    //
+    // Reverse-Z stores 1-W, so normalising the sample to a forward window depth first lets
+    // both conventions share the one expression. near/far are hoisted out of the per-pixel
+    // body; the subtraction is exact at both ends and the denominator cannot cancel, since
+    // W*(f-n) <= f-n < f for any W in range.
+    const bool reverse_z_snapshot = LLRender::sReverseZ;
+    const F32 snap_near = LLViewerCamera::getInstance()->getNear();
+    const F32 snap_far  = LLViewerCamera::getInstance()->getFar();
+    auto linearize_snapshot_depth = [&](F32 d) -> F32
+    {
+        const F32 window_depth = reverse_z_snapshot ? (1.f - d) : d;
+        return (snap_far * snap_near) / (snap_far - window_depth * (snap_far - snap_near));
+    };
 
     // Subimages are in fact partial rendering of the final view. This happens when the final view is bigger than the screen.
     // In most common cases, scale_factor is 1 and there's no more than 1 iteration on x and y
@@ -5782,7 +5827,7 @@ bool LLViewerWindow::rawSnapshot(LLImageRaw *raw, S32 image_width, S32 image_hei
                             {
                                 F32 depth_float = *(F32*)(depth_line_buffer->getData() + (i * sizeof(F32)));
 
-                                F32 linear_depth_float = 1.f / (depth_conversion_factor_1 - (depth_float * depth_conversion_factor_2));
+                                F32 linear_depth_float = linearize_snapshot_depth(depth_float);
                                 U32 RGB24 = F32_to_U32(linear_depth_float, LLViewerCamera::instance().getNear(), LLViewerCamera::instance().getFar());
                                 //A max value of 16777215 for RGB24 evaluates to black when it shold be white.  The clamp assures that the divisions do not somehow become >=256.
                                 U8 depth_byteR = (U8)(llclamp(llfloor(RGB24 / 65536.f), 0, 255));
@@ -5812,7 +5857,7 @@ bool LLViewerWindow::rawSnapshot(LLImageRaw *raw, S32 image_width, S32 image_hei
                             {
                                 F32 depth_float = *(F32*)(depth_line_buffer->getData() + (i * sizeof(F32)));
 
-                                F32 linear_depth_float = 1.f / (depth_conversion_factor_1 - (depth_float * depth_conversion_factor_2));
+                                F32 linear_depth_float = linearize_snapshot_depth(depth_float);
                                 U8 depth_byte = F32_to_U8(linear_depth_float, LLViewerCamera::getInstance()->getNear(), LLViewerCamera::getInstance()->getFar());
                                 // write converted scanline out to result image
                                 for (S32 j = 0; j < raw->getComponents(); j++)
@@ -6559,10 +6604,6 @@ void LLViewerWindow::initFonts(F32 zoom_factor)
     // the fast DPI-only reload, which keeps the existing GL atlases
     // alive — so we no longer destroyAllGL unconditionally here.
     LLFontManager::initClass();
-
-    // fonts use an GL_UNSIGNED_BYTE image format,
-    // so they need convertion, init buffers if needed
-    LLImageGL::allocateConversionBuffer();
 
     // Seed dark-palette flag before initClass so the freshly-loaded faces
     // pick the right CPAL palette. The setting listener keeps it in sync

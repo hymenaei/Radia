@@ -65,11 +65,12 @@ public:
         , mCount(0)
         , mTexName(0)
         , mFontGpuGeometry(false)
+        , mTexSampler(0)
         , mProjection(glm::identity<glm::mat4>())
         , mModelView(glm::identity<glm::mat4>())
         , mTexture0(glm::identity<glm::mat4>())
     {}
-    LLVertexBufferData(LLVertexBuffer* buffer, U8 mode, U32 count, U32 tex_name,
+    LLVertexBufferData(LLVertexBuffer* buffer, U8 mode, U32 count, U32 tex_name, U32 tex_sampler,
                        const glm::mat4& model_view, const glm::mat4& projection,
                        const glm::mat4& texture0, bool font_gpu_geometry)
         : mVB(buffer)
@@ -77,6 +78,7 @@ public:
         , mCount(count)
         , mTexName(tex_name)
         , mFontGpuGeometry(font_gpu_geometry)
+        , mTexSampler(tex_sampler)
         , mProjection(projection)
         , mModelView(model_view)
         , mTexture0(texture0)
@@ -88,6 +90,10 @@ public:
     U32 mCount;
     U32 mTexName;
     bool mFontGpuGeometry;
+    // The sampler bound with mTexName when the draw was recorded. Textures carry no
+    // sampling state of their own any more, so replaying the bind without the sampler
+    // would read the atlas through GL defaults instead of what the live draw used.
+    U32 mTexSampler;
     glm::mat4 mProjection;
     glm::mat4 mModelView;
     glm::mat4 mTexture0;

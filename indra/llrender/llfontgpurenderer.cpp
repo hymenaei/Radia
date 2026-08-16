@@ -25,7 +25,7 @@
 #include "linden_common.h"
 #include "llfontgpurenderer.h"
 #if LL_HAS_HB_GPU
-    #include "llfontface.h"
+    #include "alfontface.h"
     #include "llfontfreetype.h"
     #include "llfontgpubatch.h"
     #include "llfontgpuglyphcache.h"
@@ -126,7 +126,7 @@ public:
     bool emittedFixedColorGlyph() const { return mEmittedFixedColorGlyph; }
 
 private:
-    bool faceEligible(const LLFontFace* face) const {
+    bool faceEligible(const ALFontFace* face) const {
         return face && face->unitsPerEm() != 0 && face->designToPixelScale() > 0.f && !(mWantColor && face->hasColor() && !face->hasColrV1());
     }
 
@@ -148,7 +148,7 @@ private:
             const LLFontGlyphInfo* next =
                 (cp + 1 < size_t(mRequest.textLength)) ? mRequest.font.getGlyphInfo(mRequest.text[mRequest.beginOffset + cp + 1], glyphType) : nullptr;
 
-            const LLFontFace* face = glyph->mSourceFace;
+            const ALFontFace* face = glyph->mSourceFace;
             const bool colorGlyph = mWantColor && face->hasColrV1();
             LLFontGpuGlyphCache* cache = colorGlyph ? face->getGpuColorGlyphCache() : face->getGpuGlyphCache();
             if (!cache) return false;
@@ -170,9 +170,9 @@ private:
         return true;
     }
 
-    bool buildShapedGlyphs(const std::vector<LLShapedGlyph>& glyphs) {
-        for (const LLShapedGlyph& glyph : glyphs) {
-            const LLFontFace* face = glyph.face ? glyph.face->getFontFace() : nullptr;
+    bool buildShapedGlyphs(const std::vector<ALShapedGlyph>& glyphs) {
+        for (const ALShapedGlyph& glyph : glyphs) {
+            const ALFontFace* face = glyph.face ? glyph.face->getFontFace() : nullptr;
             if (!faceEligible(face)) return false;
 
             const bool colorGlyph = mWantColor && face->hasColrV1();
@@ -281,9 +281,7 @@ LLFontGpuRenderer::Result LLFontGpuRenderer::tryRender(const Request& request) {
     GlyphBatchBuilder builder(request, cacheBatch);
     if (!builder.build()) return result;
 
-    gGL.getTexUnit(glyphUnit)->activate();
-    const bool bound = LLFontGpuGlyphCache::bindBufferTexture();
-    gGL.getTexUnit(0)->activate();
+    const bool bound = LLFontGpuGlyphCache::bindBufferTexture(glyphUnit);
     if (!bound) return result;
 
     builder.emit();

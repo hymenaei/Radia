@@ -26,7 +26,7 @@
 #define LL_LLFONTGPURENDERER_H
 
 #include "llfontgl.h"
-#include "llfontshaping.h"
+#include "alfontshaping.h"
 #include "llhbgpu.h"
 #if LL_HAS_HB_GPU
 
@@ -38,7 +38,7 @@ public:
     struct Request {
         const LLFontFreetype& font;
         const LLWString& text;
-        const LLFontShapeLayout& layout;
+        const ALFontShapeLayout& layout;
         const LLColor4& color;
         const LLColor4U& shadowColor;
         LLFontGL::pass_boundary_cb_t passBoundary;

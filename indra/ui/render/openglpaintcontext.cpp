@@ -469,8 +469,7 @@ bool EffectRenderer::captureFramebuffer(const Rect& capture, float scale, LLRend
     const S32 sourceX = ll_round(state.pixelOrigin.x + (capture.x - state.origin.x) * scale);
     const S32 sourceY = ll_round(state.pixelOrigin.y + (capture.y - state.origin.y) * scale);
     gGL.flush();
-    target.bindTexture(0, 0, LLTexUnit::TFO_BILINEAR);
-    gGL.getTexUnit(0)->setTextureAddressMode(LLTexUnit::TAM_CLAMP);
+    target.bindTexture(0, 0, ALSamplers::BilinearClamp);
     glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, sourceX, sourceY, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
     return true;
 }
@@ -510,8 +509,7 @@ LLRenderTarget* EffectRenderer::applyBlur(LLRenderTarget& source, LLRenderTarget
                            std::min(effect.endRadius * scale, maximumRadius));
         mProgram.uniform2f(uniforms.effectGradientStart, gradientStart.x, gradientStart.y);
         mProgram.uniform2f(uniforms.effectGradientEnd, gradientEnd.x, gradientEnd.y);
-        const S32 textureChannel = mProgram.bindTexture(LLShaderMgr::DIFFUSE_MAP, &input, false, LLTexUnit::TFO_BILINEAR);
-        if (textureChannel >= 0) gGL.getTexUnit(textureChannel)->setTextureAddressMode(LLTexUnit::TAM_CLAMP);
+        mProgram.bindTexture(LLShaderMgr::DIFFUSE_MAP, &input, ALSamplers::BilinearClamp);
         drawTexturedQuad({0.f, 0.f, capture.w, capture.h});
         gGL.flush();
         mProgram.unbindTexture(LLShaderMgr::DIFFUSE_MAP);
@@ -539,8 +537,7 @@ void EffectRenderer::compositeEffect(LLRenderTarget& source, const Rect& capture
     mProgram.uniform4f(uniforms.effectMaskRect, destination.x, destination.y, destination.w, destination.h);
     mProgram.uniform1f(uniforms.effectMaskRadius, std::max(0.f, radius));
     mProgram.uniform1i(uniforms.effectRoundedMask, roundedMask ? 1 : 0);
-    const S32 textureChannel = mProgram.bindTexture(LLShaderMgr::DIFFUSE_MAP, &source, false, LLTexUnit::TFO_BILINEAR);
-    if (textureChannel >= 0) gGL.getTexUnit(textureChannel)->setTextureAddressMode(LLTexUnit::TAM_CLAMP);
+    mProgram.bindTexture(LLShaderMgr::DIFFUSE_MAP, &source, ALSamplers::BilinearClamp);
     drawTexturedQuad(visible, u0, v0, u1, v1);
     gGL.flush();
     mProgram.unbindTexture(LLShaderMgr::DIFFUSE_MAP);
@@ -613,7 +610,7 @@ void EffectRenderer::end() {
 }
 
 void GeometryPainter::prepareVectorDraw() {
-    gGL.getTexUnit(0)->unbind(LLTexUnit::TT_TEXTURE);
+    gGL.getTextureSlot(0)->unbind();
     if (program.mProgramObject) {
         program.bind();
         setPaintOp(program, PaintOp::Direct);

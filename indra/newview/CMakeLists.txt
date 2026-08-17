@@ -12,6 +12,26 @@ set(VIEWER_BINARY_NAME "alchemy-bin" CACHE STRING
 # Generate version vars header
 configure_file(llversioninfovars.h.in llversioninfovars.h @ONLY)
 
+set(viewer_UI_SOURCES
+    ui/componentcontroller.cpp
+    ui/componentmanager.cpp
+    ui/componentpersistence.cpp
+    ui/components/floaterdemo.cpp
+    ui/detachedfloatermanager.cpp
+    ui/detachedfloaterwindow.cpp
+    ui/floaterhost.cpp
+    ui/inputbridge.cpp
+    ui/runtime.cpp
+    ui/runtimewindowadapter.cpp
+    ui/settingsadapter.cpp
+    ui/skin/reloadcoordinator.cpp
+    ui/skin/resolver.cpp
+    ui/skin/resources.cpp
+    )
+
+set(viewer_UI_RUNTIME_TEST_SOURCES ${viewer_UI_SOURCES})
+list(REMOVE_ITEM viewer_UI_RUNTIME_TEST_SOURCES ui/components/floaterdemo.cpp ui/runtime.cpp)
+
 if (BUILD_VIEWER)
 
 # Javascript files for 3D snapshot functionality
@@ -145,26 +165,6 @@ if (HAVOK)
       endif (DARWIN)
    endif()
 endif ()
-
-set(viewer_UI_SOURCES
-    ui/componentcontroller.cpp
-    ui/componentmanager.cpp
-    ui/componentpersistence.cpp
-    ui/components/floaterdemo.cpp
-    ui/detachedfloatermanager.cpp
-    ui/detachedfloaterwindow.cpp
-    ui/floaterhost.cpp
-    ui/inputbridge.cpp
-    ui/runtime.cpp
-    ui/runtimewindowadapter.cpp
-    ui/settingsadapter.cpp
-    ui/skin/reloadcoordinator.cpp
-    ui/skin/resolver.cpp
-    ui/skin/resources.cpp
-    )
-
-set(viewer_UI_RUNTIME_TEST_SOURCES ${viewer_UI_SOURCES})
-list(REMOVE_ITEM viewer_UI_RUNTIME_TEST_SOURCES ui/components/floaterdemo.cpp ui/runtime.cpp)
 
 set(viewer_SOURCE_FILES
     ao.cpp

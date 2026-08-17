@@ -191,7 +191,7 @@ MACRO(LL_ADD_PROJECT_UNIT_TESTS project sources)
       message(STATUS "LL_ADD_PROJECT_UNIT_TESTS ${name} test_cmd  = ${TEST_CMD}")
     endif()
 
-    SET_TEST_PATH(LD_LIBRARY_PATH)
+    LL_TEST_LIBRARY_PATH(LD_LIBRARY_PATH)
     LL_TEST_COMMAND(TEST_SCRIPT_CMD "${LD_LIBRARY_PATH}" ${TEST_CMD})
     if(LL_TEST_VERBOSE)
       message(STATUS "LL_ADD_PROJECT_UNIT_TESTS ${name} test_script  = ${TEST_SCRIPT_CMD}")
@@ -303,7 +303,7 @@ FUNCTION(LL_ADD_INTEGRATION_TEST
     list(INSERT test_command test_exe_pos "${TEST_EXE}")
   endif()
 
-  SET_TEST_PATH(LD_LIBRARY_PATH)
+  LL_TEST_LIBRARY_PATH(LD_LIBRARY_PATH)
   LL_TEST_COMMAND(TEST_SCRIPT_CMD "${LD_LIBRARY_PATH}" ${test_command})
 
   if(TEST_DEBUG)
@@ -315,23 +315,3 @@ FUNCTION(LL_ADD_INTEGRATION_TEST
   add_dependencies(BUILD_TESTS INTEGRATION_TEST_${testname})
 
 ENDFUNCTION(LL_ADD_INTEGRATION_TEST)
-
-#*****************************************************************************
-#   SET_TEST_PATH
-#*****************************************************************************
-MACRO(SET_TEST_PATH LISTVAR)
-  IF(WINDOWS)
-    # We typically build/package only Release variants of third-party
-    # libraries, so append the Release staging dir in case the library being
-    # sought doesn't have a debug variant.
-    set(${LISTVAR} ${SHARED_LIB_STAGING_DIR} ${SHARED_LIB_STAGING_DIR}/Release)
-  ELSEIF(DARWIN)
-    # We typically build/package only Release variants of third-party
-    # libraries, so append the Release staging dir in case the library being
-    # sought doesn't have a debug variant.
-    set(${LISTVAR} ${SHARED_LIB_STAGING_DIR} ${SHARED_LIB_STAGING_DIR}/Release/Frameworks /usr/lib)
-  ELSE(WINDOWS)
-    # Linux uses a single staging directory anyway.
-    set(${LISTVAR} ${SHARED_LIB_STAGING_DIR} /usr/lib)
-  ENDIF(WINDOWS)
-ENDMACRO(SET_TEST_PATH)

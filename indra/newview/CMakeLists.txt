@@ -2536,7 +2536,7 @@ if (BUILD_TESTING)
 
     set(test_output ${CMAKE_CURRENT_BINARY_DIR}/${target}_ok.txt)
     set(test_command $<TARGET_FILE:${target}> --touch=${test_output} --sourcedir=${CMAKE_CURRENT_SOURCE_DIR})
-    SET_TEST_PATH(LD_LIBRARY_PATH)
+    LL_TEST_LIBRARY_PATH(LD_LIBRARY_PATH)
     LL_TEST_COMMAND(test_script "${LD_LIBRARY_PATH}" ${test_command})
     add_test(NAME ${target} COMMAND ${test_script} WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
     add_dependencies(BUILD_TESTS ${target})

@@ -119,6 +119,7 @@ function(_RD_ADD_GOOGLETEST_TARGET target sources link_targets)
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
     PROPERTIES
     ENVIRONMENT_MODIFICATION "${runtime_environment_modification}"
+    ENVIRONMENT "GTEST_BRIEF=1"
   )
 endfunction()
 

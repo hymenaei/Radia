@@ -25,8 +25,8 @@
 #include "linden_common.h"
 #include <algorithm>
 #include <cmath>
+#include <gtest/gtest.h>
 #include <limits>
-#include "../test/lltut.h"
 #include "render/tessellator.h"
 
 namespace {
@@ -36,12 +36,6 @@ using radia::ui::Path;
 using radia::ui::StrokeCap;
 using radia::ui::tessellateStroke;
 } // namespace
-
-namespace tut {
-struct tessellatorData {};
-using tessellatorTest = test_group<tessellatorData>;
-using tessellatorObject = tessellatorTest::object;
-tessellatorTest tessellatorTestCase("tessellator");
 
 namespace {
 Path line(float x0 = 0.f, float x1 = 10.f) {
@@ -73,46 +67,52 @@ float opaqueYSpan(const Mesh& mesh) {
 }
 } // namespace
 
-template<> template<> void tessellatorObject::test<1>() {
+TEST(TessellatorTest, ScalesOpaqueStrokeWidth) {
     const Color white;
     const Mesh one = tessellateStroke(line(), white, 1.f, 0.f);
     const Mesh two = tessellateStroke(line(), white, 2.f, 0.f);
-    ensure_equals("one pixel opaque width", opaqueYSpan(one), 1.f);
-    ensure_equals("two pixel opaque width", opaqueYSpan(two), 2.f);
+    ASSERT_FALSE(one.empty());
+    ASSERT_FALSE(two.empty());
+    EXPECT_NEAR(opaqueYSpan(one), 1.f, 0.001f);
+    EXPECT_NEAR(opaqueYSpan(two), 2.f, 0.001f);
 }
 
-template<> template<> void tessellatorObject::test<2>() {
+TEST(TessellatorTest, AddsAntiAliasedFringeAroundStroke) {
     const Mesh mesh = tessellateStroke(line(), Color(), 2.f, 1.f);
+    ASSERT_FALSE(mesh.empty());
     bool transparent = false;
     bool opaque = false;
     for (const auto& vertex : mesh.vertices) {
         transparent |= vertex.color.a == 0.f;
         opaque |= vertex.color.a == 1.f;
     }
-    ensure("stroke has opaque core", opaque);
-    ensure("stroke has transparent AA fringe", transparent);
+    EXPECT_TRUE(opaque);
+    EXPECT_TRUE(transparent);
 }
 
-template<> template<> void tessellatorObject::test<3>() {
+TEST(TessellatorTest, ExpandsOpenStrokeAccordingToCapStyle) {
     const Path path = line();
     const Mesh butt = tessellateStroke(path, Color(), 2.f, 0.f, StrokeCap::Butt);
     const Mesh square = tessellateStroke(path, Color(), 2.f, 0.f, StrokeCap::Square);
     const Mesh round = tessellateStroke(path, Color(), 2.f, 0.f, StrokeCap::Round);
-    ensure_equals("butt starts at endpoint", minX(butt), 0.f);
-    ensure("square extends start", minX(square) < minX(butt));
-    ensure("round extends end", maxX(round) > maxX(butt));
+    ASSERT_FALSE(butt.empty());
+    ASSERT_FALSE(square.empty());
+    ASSERT_FALSE(round.empty());
+    EXPECT_NEAR(minX(butt), 0.f, 0.001f);
+    EXPECT_LT(minX(square), minX(butt));
+    EXPECT_GT(maxX(round), maxX(butt));
 }
 
-template<> template<> void tessellatorObject::test<4>() {
+TEST(TessellatorTest, AdaptivelyTessellatesCubicCurve) {
     Path curve;
     curve.moveTo(0.f, 0.f).cubicTo(0.f, 20.f, 20.f, 20.f, 20.f, 0.f);
     const Mesh mesh = tessellateStroke(curve, Color(), 1.f, 1.f, StrokeCap::Round);
-    ensure("adaptive curve produces several segments", mesh.vertices.size() > 30U);
+    EXPECT_GT(mesh.vertices.size(), 30U);
 }
 
-template<> template<> void tessellatorObject::test<5>() {
+TEST(TessellatorTest, TessellatesClosedCircleContour) {
     const Mesh mesh = tessellateStroke(Path::circle({0.f, 0.f}, 10.f), Color(), 2.f, 1.f);
-    ensure("closed circle tessellates", !mesh.empty());
-    ensure("closed contour surrounds origin", minX(mesh) < -10.f && maxX(mesh) > 10.f);
+    ASSERT_FALSE(mesh.empty());
+    EXPECT_LT(minX(mesh), -10.f);
+    EXPECT_GT(maxX(mesh), 10.f);
 }
-} // namespace tut

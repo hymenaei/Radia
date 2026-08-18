@@ -24,8 +24,9 @@
 
 #include "linden_common.h"
 #include <algorithm>
+#include <gtest/gtest.h>
+#include <memory>
 #include <optional>
-#include "../test/lltut.h"
 #include "binding/binder.h"
 #include "render/recordingpaintcontext.h"
 #include "surface/surface.h"
@@ -51,7 +52,7 @@ using radia::ui::SurfaceLayer;
 using radia::ui::Vec2;
 } // namespace
 
-namespace tut {
+namespace {
 class FloaterDelegateProbe final : public SurfaceFloaterDelegate {
 public:
     bool canDetachFloater(const Surface&, const Floater&) const override { return allowDetach; }
@@ -88,15 +89,12 @@ public:
     Vec2 requestedPosition;
 };
 
-struct floatersData {};
-using floatersTest = test_group<floatersData>;
-using floatersObject = floatersTest::object;
-floatersTest floatersTestCase("floaters");
-
-template<> template<> void floatersObject::test<1>() {
+TEST(FloatersTest, RequestsDetachmentWhenDragExceedsBoundary) {
     StyleSheet styleSheet;
-    ensure("floater drag style compiles",
-           styleSheet.loadRadia("floater { flow: column; } floater::header { height: 30px; } floater::content { flex-grow: 1; }").ok());
+    constexpr char kDragFloaterLayout[] = "floater { flow: column; } "
+                                          "floater::header { height: 30px; } "
+                                          "floater::content { flex-grow: 1; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kDragFloaterLayout).ok());
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
     FloaterDelegateProbe delegate;
@@ -110,27 +108,29 @@ template<> template<> void floatersObject::test<1>() {
 
     surface.pointerDown({{30.f, 110.f}, PointerButton::Left});
     surface.pointerMove({{-99.f, 110.f}, PointerButton::Left});
-    ensure_equals("99 logical pixels beyond the Surface remain attached", delegate.detachRequests, 0);
+    EXPECT_EQ(delegate.detachRequests, 0);
     surface.pointerMove({{-100.f, 110.f}, PointerButton::Left});
-    ensure_equals("100 logical pixels beyond the Surface request live detachment", delegate.detachRequests, 1);
-    ensure_equals("request preserves desired unclamped x", delegate.requestedPosition.x, -110.f);
+    EXPECT_EQ(delegate.detachRequests, 1);
+    EXPECT_EQ(delegate.requestedPosition.x, -110.f);
     surface.pointerMove({{-80.f, 110.f}, PointerButton::Left});
-    ensure_equals("one drag emits one detach request", delegate.detachRequests, 1);
+    EXPECT_EQ(delegate.detachRequests, 1);
     surface.pointerUp({{-80.f, 110.f}, PointerButton::Left});
-    ensure_equals("attached move publishes one completion", delegate.moveCompletions, 1);
+    EXPECT_EQ(delegate.moveCompletions, 1);
 
     target->setCanDetach(false);
     surface.pointerDown({{10.f, 110.f}, PointerButton::Left});
     surface.pointerMove({{-80.f, 110.f}, PointerButton::Left});
-    ensure_equals("attached-only Floater resists every overshoot", delegate.detachRequests, 1);
+    EXPECT_EQ(delegate.detachRequests, 1);
     surface.pointerUp({{-80.f, 110.f}, PointerButton::Left});
-    ensure_equals("second attached move publishes one completion", delegate.moveCompletions, 2);
+    EXPECT_EQ(delegate.moveCompletions, 2);
 }
 
-template<> template<> void floatersObject::test<2>() {
+TEST(FloatersTest, RestoresFloaterWithinViewportAfterMinimization) {
     StyleSheet styleSheet;
-    ensure("minimized restore style compiles",
-           styleSheet.loadRadia("floater { flow: column; } floater::header { height: 30px; flow: row; } floater::content { flex-grow: 1; }").ok());
+    constexpr char kMinimizedFloaterStyle[] = "floater { flow: column; } "
+                                              "floater::header { height: 30px; flow: row; } "
+                                              "floater::content { flex-grow: 1; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kMinimizedFloaterStyle).ok());
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
     auto floater = std::make_unique<Floater>();
@@ -143,18 +143,18 @@ template<> template<> void floatersObject::test<2>() {
     target->setMinimized(true);
     surface.updateLayout();
     const Vec2 dragStart{target->rect().left() + 2.f, target->rect().top() - 15.f};
-    ensure("minimized header starts drag", surface.pointerDown({dragStart, PointerButton::Left}));
+    EXPECT_TRUE(surface.pointerDown({dragStart, PointerButton::Left}));
     surface.pointerMove({{199.f, dragStart.y}, PointerButton::Left});
     surface.pointerUp({{199.f, dragStart.y}, PointerButton::Left});
     const float minimizedLeft = target->rect().left();
 
     target->setMinimized(false);
-    ensure_equals("restored width is preserved", target->rect().w, 100.f);
-    ensure_equals("restored Floater is moved inside right bound", target->rect().right(), 200.f);
-    ensure("restoring a wider Floater moves it left", target->rect().left() < minimizedLeft);
+    EXPECT_EQ(target->rect().w, 100.f);
+    EXPECT_EQ(target->rect().right(), 200.f);
+    EXPECT_TRUE(target->rect().left() < minimizedLeft);
 }
 
-template<> template<> void floatersObject::test<3>() {
+TEST(FloatersTest, TransfersFloaterBetweenSurfacesAndReportsLifecycle) {
     Surface first;
     Surface second;
     FloaterDelegateProbe firstDelegate;
@@ -169,30 +169,32 @@ template<> template<> void floatersObject::test<3>() {
     floater->setTitle("title").setCanMinimize(true);
     floater->setRect({90.f, 90.f, 30.f, 30.f});
     first.mountFloater(std::move(floater));
-    ensure_equals("mount clamps to first Surface right edge", target->rect().right(), 100.f);
-    ensure_equals("mount clamps to first Surface top edge", target->rect().top(), 100.f);
-    ensure_equals("first Surface observes its placement change", firstDelegate.moves, 1);
+    EXPECT_EQ(target->rect().right(), 100.f);
+    EXPECT_EQ(target->rect().top(), 100.f);
+    EXPECT_EQ(firstDelegate.moves, 1);
 
     std::unique_ptr<Floater> transferred = first.unmountFloater(*target);
-    ensure("typed Floater transfer returns ownership", transferred && transferred.get() == target);
+    ASSERT_TRUE(transferred);
+    EXPECT_EQ(transferred.get(), target);
     second.mountFloater(std::move(transferred));
-    ensure_equals("transfer applies destination right edge", target->rect().right(), 80.f);
-    ensure_equals("transfer applies destination top edge", target->rect().top(), 60.f);
-    ensure_equals("destination Surface observes transferred placement", secondDelegate.moves, 1);
+    EXPECT_EQ(target->rect().right(), 80.f);
+    EXPECT_EQ(target->rect().top(), 60.f);
+    EXPECT_EQ(secondDelegate.moves, 1);
 
     target->setMinimized(true);
-    ensure_equals("destination Surface observes minimization", secondDelegate.minimizeChanges, 1);
-    ensure_equals("source Surface no longer observes transferred Floater", firstDelegate.minimizeChanges, 0);
+    EXPECT_EQ(secondDelegate.minimizeChanges, 1);
+    EXPECT_EQ(firstDelegate.minimizeChanges, 0);
     target->setMinimized(false);
     target->close();
-    ensure_equals("destination Surface observes close", secondDelegate.closes, 1);
-    ensure_equals("source Surface does not observe close", firstDelegate.closes, 0);
+    EXPECT_EQ(secondDelegate.closes, 1);
+    EXPECT_EQ(firstDelegate.closes, 0);
 }
 
-template<> template<> void floatersObject::test<4>() {
+TEST(FloatersTest, AvoidsSyntheticMoveBeforeViewportInitialization) {
     StyleSheet styleSheet;
-    ensure("startup Floater stylesheet compiles",
-           styleSheet.loadRadia("floater { width: 100px; flow: column; } floater::header { height: 30px; }").ok());
+    constexpr char kStartupFloaterLayout[] = "floater { width: 100px; flow: column; } "
+                                             "floater::header { height: 30px; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kStartupFloaterLayout).ok());
     Surface surface(styleSheet);
     FloaterDelegateProbe delegate;
     surface.setFloaterDelegate(&delegate);
@@ -202,16 +204,17 @@ template<> template<> void floatersObject::test<4>() {
     surface.mountFloater(std::move(floater));
 
     surface.updateLayout();
-    ensure_equals("zero-viewport layout does not place managed Floater x", target->rect().x, 0.f);
-    ensure_equals("zero-viewport layout does not place managed Floater y", target->rect().y, 0.f);
+    EXPECT_EQ(target->rect().x, 0.f);
+    EXPECT_EQ(target->rect().y, 0.f);
     surface.setViewport(200.f, 100.f);
-    ensure_equals("viewport initialization does not report a synthetic Floater move", delegate.moves, 0);
+    EXPECT_EQ(delegate.moves, 0);
 }
 
-template<> template<> void floatersObject::test<5>() {
+TEST(FloatersTest, ResizesAttachedFloaterWithinSurfaceBounds) {
     StyleSheet styleSheet;
-    const char* kResize = "floater { size: 80px 100px; min-size: 40px 50px; flow: column; } floater::header { height: 20px; }";
-    ensure("resize stylesheet compiles", styleSheet.loadRadia(kResize).ok());
+    constexpr char kResize[] = "floater { size: 80px 100px; min-size: 40px 50px; flow: column; } "
+                               "floater::header { height: 20px; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kResize).ok());
     Surface surface(styleSheet);
     surface.setViewport(200.f, 160.f);
     FloaterDelegateProbe delegate;
@@ -221,21 +224,21 @@ template<> template<> void floatersObject::test<5>() {
     floater->setCanResize(true).setCanClose(false);
     surface.mountFloater(std::move(floater));
     const std::optional<Rect> prepared = surface.prepareFloater(*target);
-    ensure("resize Floater preparation succeeds", prepared.has_value());
-    if (prepared) surface.placeFloater(*target, *prepared);
+    ASSERT_TRUE(prepared.has_value());
+    surface.placeFloater(*target, *prepared);
     surface.updateLayout();
 
     surface.pointerMove({{target->rect().right() - 1.f, target->rect().bottom() + 30.f}});
-    ensure("right border has intrinsic cursor", surface.cursor() == CursorStyle::EastWestResize);
-    ensure("right border starts capture", surface.pointerDown({{target->rect().right() - 1.f, target->rect().bottom() + 30.f}, PointerButton::Left}));
+    EXPECT_EQ(surface.cursor(), CursorStyle::EastWestResize);
+    EXPECT_TRUE(surface.pointerDown({{target->rect().right() - 1.f, target->rect().bottom() + 30.f}, PointerButton::Left}));
     surface.pointerMove({{250.f, target->rect().bottom() + 30.f}, PointerButton::Left});
-    ensure_equals("attached resize remains in Surface", target->rect().right(), 200.f);
-    ensure_equals("resize never enters detach path", delegate.detachRequests, 0);
+    EXPECT_EQ(target->rect().right(), 200.f);
+    EXPECT_EQ(delegate.detachRequests, 0);
     surface.pointerUp({{250.f, target->rect().bottom() + 30.f}, PointerButton::Left});
-    ensure_equals("resize completes once", delegate.resizeCompletions, 1);
+    EXPECT_EQ(delegate.resizeCompletions, 1);
 }
 
-template<> template<> void floatersObject::test<6>() {
+TEST(FloatersTest, HidesResizeCursorWhenResizingIsUnavailable) {
     Surface surface;
     surface.setViewport(200.f, 160.f);
     auto floater = std::make_unique<Floater>();
@@ -244,15 +247,16 @@ template<> template<> void floatersObject::test<6>() {
     surface.mountFloater(std::move(floater));
 
     surface.pointerMove({{119.f, 60.f}});
-    ensure("disabled resizing exposes no intrinsic cursor", surface.cursor() == CursorStyle::Default);
+    EXPECT_EQ(surface.cursor(), CursorStyle::Default);
     target->setCanResize(true).setCanMinimize(true).setMinimized(true);
     surface.pointerMove({{target->rect().right() - 1.f, target->rect().bottom() + 2.f}});
-    ensure("minimized Floater exposes no resize cursor", surface.cursor() == CursorStyle::Default);
+    EXPECT_EQ(surface.cursor(), CursorStyle::Default);
 }
 
-template<> template<> void floatersObject::test<7>() {
+TEST(FloatersTest, UsesFrozenWidthForPercentageMinimumSize) {
     StyleSheet styleSheet;
-    ensure("percentage minimum compiles", styleSheet.loadRadia("floater { size: 80px 100px; min-size: 50%; }").ok());
+    constexpr char kPercentageMinimumLayout[] = "floater { size: 80px 100px; min-size: 50%; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kPercentageMinimumLayout).ok());
     Surface surface(styleSheet);
     surface.setViewport(400.f, 300.f);
     auto floater = std::make_unique<Floater>();
@@ -260,17 +264,17 @@ template<> template<> void floatersObject::test<7>() {
     floater->setCanResize(true).setCanClose(false);
     surface.mountFloater(std::move(floater));
     const std::optional<Rect> prepared = surface.prepareFloater(*target);
-    ensure("percentage minimum Floater preparation succeeds", prepared.has_value());
-    if (prepared) surface.placeFloater(*target, *prepared);
+    ASSERT_TRUE(prepared.has_value());
+    surface.placeFloater(*target, *prepared);
 
     const Vec2 leftEdge{target->rect().left() + 1.f, target->rect().bottom() + 30.f};
     surface.pointerDown({leftEdge, PointerButton::Left});
     surface.pointerMove({{target->rect().right() + 500.f, leftEdge.y}, PointerButton::Left});
     surface.pointerUp({{target->rect().right() + 500.f, leftEdge.y}, PointerButton::Left});
-    ensure_equals("percentage minimum uses frozen original width", target->rect().w, 50.f);
+    EXPECT_EQ(target->rect().w, 50.f);
 }
 
-template<> template<> void floatersObject::test<8>() {
+TEST(FloatersTest, AllowsNativeResizeBeyondViewportBounds) {
     Surface surface;
     surface.setViewport(100.f, 80.f);
     FloaterDelegateProbe delegate;
@@ -281,15 +285,15 @@ template<> template<> void floatersObject::test<8>() {
     floater->setCanResize(true).setRect({0.f, 0.f, 100.f, 80.f});
     surface.mountFloater(std::move(floater));
 
-    ensure("native-hosted resize starts", surface.pointerDown({{99.f, 40.f}, PointerButton::Left}));
+    EXPECT_TRUE(surface.pointerDown({{99.f, 40.f}, PointerButton::Left}));
     surface.pointerMove({{139.f, 40.f}, PointerButton::Left});
-    ensure_equals("native-hosted logical geometry may grow beyond its old viewport", target->rect().w, 140.f);
+    EXPECT_EQ(target->rect().w, 140.f);
     surface.pointerUp({{139.f, 40.f}, PointerButton::Left});
-    ensure_equals("native resize seam entered once", delegate.resizeStarts, 1);
-    ensure_equals("native resize publishes completion", delegate.resizeCompletions, 1);
+    EXPECT_EQ(delegate.resizeStarts, 1);
+    EXPECT_EQ(delegate.resizeCompletions, 1);
 }
 
-template<> template<> void floatersObject::test<9>() {
+TEST(FloatersTest, ResizesFloatersMountedInModalLayer) {
     Surface surface;
     surface.setViewport(200.f, 160.f);
     auto floater = std::make_unique<Floater>();
@@ -297,50 +301,58 @@ template<> template<> void floatersObject::test<9>() {
     floater->setCanResize(true).setRect({20.f, 20.f, 100.f, 80.f});
     surface.mountFloater(std::move(floater), SurfaceLayer::Modal);
 
-    ensure("modal resize starts before modal child routing", surface.pointerDown({{119.f, 60.f}, PointerButton::Left}));
+    EXPECT_TRUE(surface.pointerDown({{119.f, 60.f}, PointerButton::Left}));
     surface.pointerMove({{159.f, 60.f}, PointerButton::Left});
     surface.pointerUp({{159.f, 60.f}, PointerButton::Left});
-    ensure_equals("expanded modal Floater resizes", target->rect().w, 140.f);
+    EXPECT_EQ(target->rect().w, 140.f);
 }
 
-template<> template<> void floatersObject::test<10>() {
+TEST(FloatersTest, KeepsFixedOuterSizeWhileTrackingContentGeometry) {
     StyleSheet styleSheet;
-    const char* kFixedOuter = "floater { size: 300px; flow: column; } floater::header { height: 20px; } floater::content { flow: column; }";
-    ensure("fixed outer floater stylesheet compiles", styleSheet.loadRadia(kFixedOuter).ok());
+    constexpr char kFixedOuter[] = "floater { size: 300px; flow: column; } "
+                                   "floater::header { height: 20px; } floater::content { flow: column; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kFixedOuter).ok());
     Surface surface(styleSheet);
     surface.setViewport(500.f, 400.f);
     auto floater = std::make_unique<Floater>();
     floater->addChild(std::make_unique<Label>("first"));
 
-    const Rect firstOuter = surface.prepareFloater(*floater).value();
+    const std::optional<Rect> firstPrepared = surface.prepareFloater(*floater);
+    ASSERT_TRUE(firstPrepared.has_value());
+    const Rect firstOuter = *firstPrepared;
     const Vec2 firstContent = floater->authoredContentSize();
     floater->addChild(std::make_unique<Label>("second"));
-    const Rect secondOuter = surface.prepareFloater(*floater).value();
+    const std::optional<Rect> secondPrepared = surface.prepareFloater(*floater);
+    ASSERT_TRUE(secondPrepared.has_value());
+    const Rect secondOuter = *secondPrepared;
     const Vec2 secondContent = floater->authoredContentSize();
 
-    ensure_equals("unpositioned Floater is centered horizontally", firstOuter.x, 100.f);
-    ensure_equals("unpositioned Floater is centered vertically", firstOuter.y, 50.f);
-    ensure_equals("fixed outer height masks the content edit", firstOuter.h, secondOuter.h);
-    ensure("authored content geometry still records the edit", secondContent.y > firstContent.y);
+    EXPECT_EQ(firstOuter.x, 100.f);
+    EXPECT_EQ(firstOuter.y, 50.f);
+    EXPECT_EQ(firstOuter.h, secondOuter.h);
+    EXPECT_TRUE(secondContent.y > firstContent.y);
 }
 
-template<> template<> void floatersObject::test<11>() {
+TEST(FloatersTest, ResolvesPercentageGeometryAgainstViewport) {
     StyleSheet styleSheet;
-    ensure("viewport percentage Floater stylesheet compiles",
-           styleSheet.loadRadia("floater { width: 50%; height: 25%; left: 10%; bottom: 10%; }").ok());
+    constexpr char kPercentageGeometryLayout[] = "floater { width: 50%; height: 25%; left: 10%; bottom: 10%; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kPercentageGeometryLayout).ok());
     Surface surface(styleSheet);
     surface.setViewport(400.f, 300.f);
     Floater floater;
-    const Rect rect = surface.prepareFloater(floater).value();
-    ensure_approximately_equals("percentage width resolves against viewport width", rect.w, 200.f, 6);
-    ensure_approximately_equals("percentage height resolves against viewport height", rect.h, 75.f, 6);
-    ensure_approximately_equals("percentage left resolves against viewport width", rect.x, 40.f, 6);
-    ensure_approximately_equals("percentage bottom resolves against viewport height", rect.y, 30.f, 6);
+    const std::optional<Rect> prepared = surface.prepareFloater(floater);
+    ASSERT_TRUE(prepared.has_value());
+    const Rect rect = *prepared;
+    EXPECT_NEAR(rect.w, 200.f, 6);
+    EXPECT_NEAR(rect.h, 75.f, 6);
+    EXPECT_NEAR(rect.x, 40.f, 6);
+    EXPECT_NEAR(rect.y, 30.f, 6);
 }
 
-template<> template<> void floatersObject::test<12>() {
+TEST(FloatersTest, RoutesResizeThroughPointerTransparentFloater) {
     StyleSheet styleSheet;
-    ensure("pointer-pass-through Floater stylesheet compiles", styleSheet.loadRadia("floater.pass-through { pointer-events: none; }").ok());
+    constexpr char kPointerTransparentLayout[] = "floater.pass-through { pointer-events: none; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kPointerTransparentLayout).ok());
     Surface surface(styleSheet);
     surface.setViewport(200.f, 160.f);
     auto lower = std::make_unique<Floater>();
@@ -356,18 +368,17 @@ template<> template<> void floatersObject::test<12>() {
     upperTarget->content()->addChild(std::move(upperChild));
 
     const Vec2 lowerEdgeUnderUpper{lowerTarget->rect().right() - 1.f, lowerTarget->rect().y + 40.f};
-    ensure("interactive child in pass-through upper Floater blocks lower resize hit testing",
-           surface.pointerDown({lowerEdgeUnderUpper, PointerButton::Left}));
-    ensure("blocked lower resize does not capture the pointer", !surface.hasPointerCapture());
+    EXPECT_TRUE(surface.pointerDown({lowerEdgeUnderUpper, PointerButton::Left}));
+    EXPECT_FALSE(surface.hasPointerCapture());
     surface.pointerUp({lowerEdgeUnderUpper, PointerButton::Left});
 
     upperTarget->addClass("pass-through");
-    ensure("pointer-transparent upper Floater allows lower resize", surface.pointerDown({lowerEdgeUnderUpper, PointerButton::Left}));
-    ensure("lower resize captures through a pointer-transparent Floater", surface.hasPointerCapture());
+    EXPECT_TRUE(surface.pointerDown({lowerEdgeUnderUpper, PointerButton::Left}));
+    EXPECT_TRUE(surface.hasPointerCapture());
     surface.pointerUp({lowerEdgeUnderUpper, PointerButton::Left});
 }
 
-template<> template<> void floatersObject::test<13>() {
+TEST(FloatersTest, RejectsNativeResizeWhenDelegateUnmountsFloater) {
     Surface surface;
     surface.setViewport(100.f, 80.f);
     FloaterDelegateProbe delegate;
@@ -378,15 +389,16 @@ template<> template<> void floatersObject::test<13>() {
     floater->setCanResize(true).setRect({0.f, 0.f, 100.f, 80.f});
     surface.mountFloater(std::move(floater));
 
-    ensure("native resize rejects a floater detached by its delegate", !surface.pointerDown({{99.f, 40.f}, PointerButton::Left}));
-    ensure("detached native resize does not capture the pointer", !surface.hasPointerCapture());
-    ensure("delegate retains the detached Floater for cleanup", delegate.unmountedFloater != nullptr);
+    EXPECT_FALSE(surface.pointerDown({{99.f, 40.f}, PointerButton::Left}));
+    EXPECT_FALSE(surface.hasPointerCapture());
+    EXPECT_NE(delegate.unmountedFloater, nullptr);
 }
 
-template<> template<> void floatersObject::test<14>() {
+TEST(FloatersTest, KeepsOverflowVisibleDescendantAsPointerTarget) {
     StyleSheet styleSheet;
-    ensure("overflow-visible pass-through stylesheet compiles",
-           styleSheet.loadRadia("floater.pass-through { pointer-events: none; overflow: visible; }").ok());
+    constexpr char kOverflowVisiblePassThroughStyle[] = "floater.pass-through { pointer-events: none; "
+                                                        "overflow: visible; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kOverflowVisiblePassThroughStyle).ok());
     Surface surface(styleSheet);
     surface.setViewport(200.f, 160.f);
 
@@ -405,12 +417,11 @@ template<> template<> void floatersObject::test<14>() {
     upperTarget->content()->addChild(std::move(overflowChild));
 
     const Vec2 point{lowerTarget->rect().right() - 1.f, lowerTarget->rect().y + 40.f};
-    ensure("overflow-visible descendant remains the pointer target", surface.pointerDown({point, PointerButton::Left}));
-    ensure("overflow-visible descendant does not capture resize", !surface.hasPointerCapture());
+    EXPECT_TRUE(surface.pointerDown({point, PointerButton::Left}));
+    EXPECT_FALSE(surface.hasPointerCapture());
 }
 
-template<> template<> void floatersObject::test<15>() {
-    set_test_name("Floater replacement swaps roots and returns the retired root");
+TEST(FloatersTest, ReplacesFloaterAndReturnsRetiredRoot) {
     Surface surface;
     surface.setViewport(240.f, 180.f);
     auto original = std::make_unique<Floater>();
@@ -423,9 +434,10 @@ template<> template<> void floatersObject::test<15>() {
     replacement->setRect({30.f, 35.f, 120.f, 90.f});
     std::unique_ptr<Floater> retired = surface.replaceFloater(*originalPointer, std::move(replacement));
 
-    ensure("replacement returns the retired root", retired && retired.get() == originalPointer);
-    ensure("replacement is owned by the Surface", surface.ownsFloater(*replacementPointer));
-    ensure("retired root is detached", retired->parent() == nullptr);
-    ensure("replacement keeps the Surface layer parent", replacementPointer->parent() != nullptr);
+    ASSERT_TRUE(retired);
+    EXPECT_EQ(retired.get(), originalPointer);
+    EXPECT_TRUE(surface.ownsFloater(*replacementPointer));
+    EXPECT_EQ(retired->parent(), nullptr);
+    EXPECT_NE(replacementPointer->parent(), nullptr);
 }
-} // namespace tut
+} // namespace

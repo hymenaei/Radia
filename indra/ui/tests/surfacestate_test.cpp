@@ -23,8 +23,8 @@
  */
 
 #include "linden_common.h"
+#include <gtest/gtest.h>
 #include <memory>
-#include "../test/lltut.h"
 #include "render/recordingpaintcontext.h"
 #include "style/stylesheet.h"
 #include "surface/surface.h"
@@ -33,117 +33,130 @@
 #include "widgets/label.h"
 #include "widgets/panel.h"
 
-namespace tut {
-struct surfaceStateData {};
-using surfaceStateTest = test_group<surfaceStateData>;
-using surfaceStateObject = surfaceStateTest::object;
-surfaceStateTest surfaceStateTestCase("surface state");
+namespace {
+using radia::ui::Button;
+using radia::ui::Floater;
+using radia::ui::Label;
+using radia::ui::Panel;
+using radia::ui::RecordingPaintContext;
+using radia::ui::StyleSheet;
+using radia::ui::Surface;
+using radia::ui::Visibility;
+using radia::ui::WidgetState;
+} // namespace
 
-template<> template<> void surfaceStateObject::test<1>() {
-    radia::ui::StyleSheet styleSheet;
-    const char* kStateLayout = "button { width: 20px; height: 10px; } button:hover { width: 40px; }";
-    ensure("state layout stylesheet compiles", styleSheet.loadRadia(kStateLayout).ok());
-    ensure("state layout dependency is detected", styleSheet.stateAffectsLayout(radia::ui::WidgetState::Hovered));
-    radia::ui::Surface surface(styleSheet);
+TEST(SurfaceStateTest, ReflowsWhenHoveredStateChangesLayout) {
+    StyleSheet styleSheet;
+    constexpr char kStateLayout[] = "button { width: 20px; height: 10px; } button:hover { width: 40px; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kStateLayout).ok());
+    EXPECT_TRUE(styleSheet.stateAffectsLayout(WidgetState::Hovered));
+    Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
-    auto button = std::make_unique<radia::ui::Button>();
-    radia::ui::Button* target = button.get();
+    auto button = std::make_unique<Button>();
+    Button* target = button.get();
+    ASSERT_NE(target, nullptr);
     button->setRect({0.f, 0.f, 20.f, 10.f}).setPointerEvents(true);
     surface.root().addChild(std::move(button));
     surface.updateLayout();
-    ensure_equals("state layout starts with base width", target->rect().w, 20.f);
+    EXPECT_FLOAT_EQ(target->rect().w, 20.f);
     surface.pointerMove({{5.f, 5.f}});
-    ensure("hover state is applied", target->hasState(radia::ui::WidgetState::Hovered));
+    ASSERT_TRUE(target->hasState(WidgetState::Hovered));
     surface.updateLayout();
-    ensure_equals("state layout declarations trigger reflow", target->rect().w, 40.f);
+    EXPECT_FLOAT_EQ(target->rect().w, 40.f);
 }
 
-template<> template<> void surfaceStateObject::test<2>() {
-    radia::ui::StyleSheet styleSheet;
-    const char* kStateHitTest = "button { pointer-events: auto; } button:hover { pointer-events: none; }";
-    ensure("state hit-test stylesheet compiles", styleSheet.loadRadia(kStateHitTest).ok());
-    ensure("state hit-test dependency is detected", styleSheet.stateAffectsHitTesting(radia::ui::WidgetState::Hovered));
-    radia::ui::Surface surface(styleSheet);
+TEST(SurfaceStateTest, RefreshesHitTestingWhenHoveredPolicyChanges) {
+    StyleSheet styleSheet;
+    constexpr char kStateHitTest[] = "button { pointer-events: auto; } button:hover { pointer-events: none; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kStateHitTest).ok());
+    EXPECT_TRUE(styleSheet.stateAffectsHitTesting(WidgetState::Hovered));
+    Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
-    auto button = std::make_unique<radia::ui::Button>();
-    radia::ui::Button* target = button.get();
+    auto button = std::make_unique<Button>();
+    Button* target = button.get();
+    ASSERT_NE(target, nullptr);
     button->setRect({0.f, 0.f, 20.f, 10.f}).setPointerEvents(true);
     surface.root().addChild(std::move(button));
 
     surface.pointerMove({{5.f, 5.f}});
-    ensure("pointer enters target before state policy changes", target->hasState(radia::ui::WidgetState::Hovered));
-    radia::ui::RecordingPaintContext recording;
+    ASSERT_TRUE(target->hasState(WidgetState::Hovered));
+    RecordingPaintContext recording;
     surface.paint(recording);
-    ensure("stationary pointer refreshes state-driven hit policy", !target->hasState(radia::ui::WidgetState::Hovered));
+    EXPECT_FALSE(target->hasState(WidgetState::Hovered));
     surface.paint(recording);
-    ensure("state-driven hit policy settles without hover oscillation", !target->hasState(radia::ui::WidgetState::Hovered));
+    EXPECT_FALSE(target->hasState(WidgetState::Hovered));
 }
 
-template<> template<> void surfaceStateObject::test<3>() {
-    radia::ui::StyleSheet styleSheet;
-    const char* kDescendantState = "panel { flow: row; } label { width: 20px; height: 10px; } panel:hover > label { width: 40px; }";
-    ensure("descendant state stylesheet compiles", styleSheet.loadRadia(kDescendantState).ok());
-    radia::ui::Surface surface(styleSheet);
+TEST(SurfaceStateTest, InvalidatesDescendantLayoutForOwnerState) {
+    StyleSheet styleSheet;
+    constexpr char kDescendantState[] = "panel { flow: row; } label { width: 20px; height: 10px; } "
+                                        "panel:hover > label { width: 40px; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kDescendantState).ok());
+    Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
-    auto panel = std::make_unique<radia::ui::Panel>();
-    radia::ui::Panel* parent = panel.get();
+    auto panel = std::make_unique<Panel>();
+    Panel* parent = panel.get();
+    ASSERT_NE(parent, nullptr);
     panel->setRect({0.f, 0.f, 100.f, 20.f}).setPointerEvents(true);
-    auto label = std::make_unique<radia::ui::Label>("descendant");
-    radia::ui::Label* target = label.get();
+    auto label = std::make_unique<Label>("descendant");
+    Label* target = label.get();
+    ASSERT_NE(target, nullptr);
     panel->addChild(std::move(label));
     surface.root().addChild(std::move(panel));
 
     surface.updateLayout();
-    ensure_equals("descendant starts with base width", target->rect().w, 20.f);
+    EXPECT_FLOAT_EQ(target->rect().w, 20.f);
     surface.pointerMove({{5.f, 5.f}});
-    ensure("owner hover is applied", parent->hasState(radia::ui::WidgetState::Hovered));
+    ASSERT_TRUE(parent->hasState(WidgetState::Hovered));
     surface.updateLayout();
-    ensure_equals("owner state invalidates descendant geometry", target->rect().w, 40.f);
+    EXPECT_FLOAT_EQ(target->rect().w, 40.f);
 }
 
-template<> template<> void surfaceStateObject::test<4>() {
-    radia::ui::Surface surface;
+TEST(SurfaceStateTest, RemovesUnavailableWidgetsFromStationaryHitTesting) {
+    Surface surface;
     surface.setViewport(100.f, 100.f);
-    auto button = std::make_unique<radia::ui::Button>();
-    radia::ui::Button* target = button.get();
+    auto button = std::make_unique<Button>();
+    Button* target = button.get();
+    ASSERT_NE(target, nullptr);
     button->setRect({0.f, 0.f, 20.f, 10.f}).setPointerEvents(true);
     surface.root().addChild(std::move(button));
     surface.pointerMove({{5.f, 5.f}});
-    ensure("visibility test starts hovered", target->hasState(radia::ui::WidgetState::Hovered));
+    ASSERT_TRUE(target->hasState(WidgetState::Hovered));
 
-    radia::ui::RecordingPaintContext recording;
-    target->setVisibility(radia::ui::Visibility::Hidden);
+    RecordingPaintContext recording;
+    target->setVisibility(Visibility::Hidden);
     surface.paint(recording);
-    ensure("hidden target is removed from stationary hit testing", !target->hasState(radia::ui::WidgetState::Hovered));
+    EXPECT_FALSE(target->hasState(WidgetState::Hovered));
 
-    target->setVisibility(radia::ui::Visibility::Visible);
+    target->setVisibility(Visibility::Visible);
     surface.paint(recording);
-    ensure("restored target is found by stationary hit testing", target->hasState(radia::ui::WidgetState::Hovered));
+    EXPECT_TRUE(target->hasState(WidgetState::Hovered));
 
     target->setDisabled(true);
     surface.paint(recording);
-    ensure("disabled target is removed from stationary hit testing", !target->hasState(radia::ui::WidgetState::Hovered));
+    EXPECT_FALSE(target->hasState(WidgetState::Hovered));
     target->setDisabled(false);
     surface.paint(recording);
-    ensure("re-enabled target is found by stationary hit testing", target->hasState(radia::ui::WidgetState::Hovered));
+    EXPECT_TRUE(target->hasState(WidgetState::Hovered));
 }
 
-template<> template<> void surfaceStateObject::test<5>() {
-    radia::ui::StyleSheet styleSheet;
-    const char* kCompositeOwnerState =
-        "floater { flow: column; width: 100px; height: 100px; &:minimized::header { height: 40px; } } floater::header { height: 20px; } floater::content { flex-grow: 1; }";
-    ensure("composite owner-state stylesheet compiles", styleSheet.loadRadia(kCompositeOwnerState).ok());
-    radia::ui::Surface surface(styleSheet);
+TEST(SurfaceStateTest, RestylesCompositePartsWhenOwnerStateChanges) {
+    StyleSheet styleSheet;
+    constexpr char kCompositeOwnerState[] = "floater { flow: column; width: 100px; height: 100px; "
+                                            "&:minimized::header { height: 40px; } } "
+                                            "floater::header { height: 20px; } floater::content { flex-grow: 1; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kCompositeOwnerState).ok());
+    Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
-    auto floater = std::make_unique<radia::ui::Floater>();
-    radia::ui::Floater* target = floater.get();
+    auto floater = std::make_unique<Floater>();
+    Floater* target = floater.get();
+    ASSERT_NE(target, nullptr);
     floater->setCanMinimize(true);
     surface.mountFloater(std::move(floater));
     surface.updateLayout();
-    ensure_equals("composite header starts with base height", target->header()->rect().h, 20.f);
+    EXPECT_FLOAT_EQ(target->header()->rect().h, 20.f);
 
     target->setMinimized(true);
     surface.updateLayout();
-    ensure_equals("owner state invalidates cached composite part style", target->header()->rect().h, 40.f);
+    EXPECT_FLOAT_EQ(target->header()->rect().h, 40.f);
 }
-} // namespace tut

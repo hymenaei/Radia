@@ -23,85 +23,110 @@
  */
 
 #include "linden_common.h"
-#include "../test/lltut.h"
+#include <cstddef>
+#include <cstdint>
+#include <gtest/gtest.h>
+#include <string>
+#include <variant>
 #include "eventcall.h"
 
-namespace tut {
-struct eventCallData {};
-using eventCallTest = test_group<eventCallData>;
-using eventCallObject = eventCallTest::object;
-eventCallTest eventCallTestCase("eventcall");
-
-template<> template<> void eventCallObject::test<1>() {
-    const radia::ui::EventCallParseResult parsed = radia::ui::parseEventCall("press()");
-    ensure("zero-argument call parses", parsed.ok());
-    ensure_equals("handler name retained", parsed.call->name(), std::string("press"));
-    ensure("zero arguments retained", parsed.call->arguments().empty());
+namespace {
+using radia::ui::CurrentEventArgument;
+using radia::ui::EventCallParseError;
+using radia::ui::EventCallParseResult;
+using radia::ui::parseEventCall;
+using radia::ui::SourceWidgetArgument;
+using ::testing::Message;
 }
 
-template<> template<> void eventCallObject::test<2>() {
-    const radia::ui::EventCallParseResult parsed = radia::ui::parseEventCall("selectLocale(+1)");
-    ensure("one-argument call parses", parsed.ok());
-    ensure_equals("one argument retained", parsed.call->arguments().size(), 1U);
-    ensure_equals("positive sign parsed", std::get<std::int64_t>(parsed.call->arguments()[0]), std::int64_t(1));
+TEST(EventCallTest, ParsesCallWithoutArguments) {
+    const EventCallParseResult parsed = parseEventCall("press()");
+    ASSERT_TRUE(parsed.ok());
+    EXPECT_EQ(parsed.call->name(), "press");
+    EXPECT_TRUE(parsed.call->arguments().empty());
 }
 
-template<> template<> void eventCallObject::test<3>() {
-    const radia::ui::EventCallParseResult parsed = radia::ui::parseEventCall("inspect('settings', true, false, this, event)");
-    ensure("all closed literal kinds parse", parsed.ok());
+TEST(EventCallTest, ParsesSignedIntegerArguments) {
+    struct IntegerCase {
+        const char* source;
+        std::int64_t expected;
+    };
+
+    for (const IntegerCase& test : {IntegerCase{"selectLocale(+1)", std::int64_t{1}}, IntegerCase{"selectLocale(-1)", std::int64_t{-1}}}) {
+        SCOPED_TRACE(Message() << "signed integer call: " << test.source);
+        const EventCallParseResult parsed = parseEventCall(test.source);
+        ASSERT_TRUE(parsed.ok());
+        ASSERT_EQ(parsed.call->arguments().size(), std::size_t{1});
+
+        const auto& argument = parsed.call->arguments().front();
+        ASSERT_TRUE(std::holds_alternative<std::int64_t>(argument));
+        EXPECT_EQ(std::get<std::int64_t>(argument), test.expected);
+    }
+}
+
+TEST(EventCallTest, ParsesSupportedArgumentKinds) {
+    const EventCallParseResult parsed = parseEventCall("inspect('settings', true, false, this, event)");
+    ASSERT_TRUE(parsed.ok());
     const auto& arguments = parsed.call->arguments();
-    ensure_equals("five arguments retained", arguments.size(), 5U);
-    ensure_equals("string retained", std::get<std::string>(arguments[0]), std::string("settings"));
-    ensure("true retained", std::get<bool>(arguments[1]));
-    ensure("false retained", !std::get<bool>(arguments[2]));
-    ensure("this has a distinct type", std::holds_alternative<radia::ui::SourceWidgetArgument>(arguments[3]));
-    ensure("event has a distinct type", std::holds_alternative<radia::ui::CurrentEventArgument>(arguments[4]));
+    ASSERT_EQ(arguments.size(), std::size_t{5});
+    EXPECT_EQ(std::get<std::string>(arguments[0]), "settings");
+    EXPECT_TRUE(std::get<bool>(arguments[1]));
+    EXPECT_FALSE(std::get<bool>(arguments[2]));
+    EXPECT_TRUE(std::holds_alternative<SourceWidgetArgument>(arguments[3]));
+    EXPECT_TRUE(std::holds_alternative<CurrentEventArgument>(arguments[4]));
 }
 
-template<> template<> void eventCallObject::test<4>() {
-    const radia::ui::EventCallParseResult parsed = radia::ui::parseEventCall("  open ( 'settings' , true )  ");
-    ensure("surrounding argument whitespace parses", parsed.ok());
-    ensure_equals("whitespace does not alter the name", parsed.call->name(), std::string("open"));
+TEST(EventCallTest, ParsesWhitespaceAroundCallAndArguments) {
+    const EventCallParseResult parsed = parseEventCall("  open ( 'settings' , true )  ");
+    ASSERT_TRUE(parsed.ok());
+    EXPECT_EQ(parsed.call->name(), "open");
+    ASSERT_EQ(parsed.call->arguments().size(), std::size_t{2});
+    EXPECT_EQ(std::get<std::string>(parsed.call->arguments()[0]), "settings");
+    EXPECT_TRUE(std::get<bool>(parsed.call->arguments()[1]));
 }
 
-template<> template<> void eventCallObject::test<5>() {
-    const radia::ui::EventCallParseResult parsed = radia::ui::parseEventCall("press");
-    ensure("bare Handler name is rejected", !parsed.ok());
-    ensure_equals("bare Handler reports required call", static_cast<int>(parsed.error), static_cast<int>(radia::ui::EventCallParseError::CallRequired));
+TEST(EventCallTest, RejectsBareHandlerName) {
+    const EventCallParseResult parsed = parseEventCall("press");
+    EXPECT_FALSE(parsed.ok());
+    EXPECT_EQ(parsed.error, EventCallParseError::CallRequired);
 }
 
-template<> template<> void eventCallObject::test<6>() {
-    for (const char* source : {"Save()", "save-profile()", "save_profile()", "save.profile()"}) {
-        const radia::ui::EventCallParseResult parsed = radia::ui::parseEventCall(source);
-        ensure(std::string("invalid Handler name is rejected: ") + source, !parsed.ok());
-        ensure_equals("invalid Handler name has a stable error", static_cast<int>(parsed.error),
-                      static_cast<int>(radia::ui::EventCallParseError::NameInvalid));
+TEST(EventCallTest, RejectsNamesOutsideLowerCamelCase) {
+    struct RejectionCase {
+        const char* source;
+        std::size_t errorOffset;
+    };
+
+    for (const RejectionCase& test :
+         {RejectionCase{"Save()", 0}, RejectionCase{"save-profile()", 4}, RejectionCase{"save_profile()", 4}, RejectionCase{"save.profile()", 4}}) {
+        SCOPED_TRACE(Message() << "invalid handler call: " << test.source);
+        const EventCallParseResult parsed = parseEventCall(test.source);
+        EXPECT_FALSE(parsed.ok());
+        EXPECT_EQ(parsed.error, EventCallParseError::NameInvalid);
+        EXPECT_EQ(parsed.errorOffset, test.errorOffset);
     }
 }
 
-template<> template<> void eventCallObject::test<7>() {
-    for (const char* source : {"press(,)", "press(true,)", "press(true false)", "press() close()", "press('open)"}) {
-        const radia::ui::EventCallParseResult parsed = radia::ui::parseEventCall(source);
-        ensure(std::string("invalid call syntax is rejected: ") + source, !parsed.ok());
+TEST(EventCallTest, RejectsMalformedCallSyntax) {
+    for (const char* source : {"press(true,)", "press(true false)", "press() close()", "press('open)", "press(1 + 2)"}) {
+        SCOPED_TRACE(Message() << "malformed call: " << source);
+        const EventCallParseResult parsed = parseEventCall(source);
+        EXPECT_FALSE(parsed.ok());
+        EXPECT_EQ(parsed.error, EventCallParseError::SyntaxInvalid);
     }
 }
 
-template<> template<> void eventCallObject::test<8>() {
-    for (const char* source : {"press(other)", "press(this.id)", "press(select(1))", "press(1 + 2)", "press(\"settings\")", "press('a\\'b')"}) {
-        const radia::ui::EventCallParseResult parsed = radia::ui::parseEventCall(source);
-        ensure(std::string("expression or unsupported literal is rejected: ") + source, !parsed.ok());
+TEST(EventCallTest, RejectsUnsupportedArgumentForms) {
+    for (const char* source : {"press(,)", "press(other)", "press(this.id)", "press(select(1))", "press(\"settings\")", "press('a\\'b')"}) {
+        SCOPED_TRACE(Message() << "unsupported argument call: " << source);
+        const EventCallParseResult parsed = parseEventCall(source);
+        EXPECT_FALSE(parsed.ok());
+        EXPECT_EQ(parsed.error, EventCallParseError::LiteralUnsupported);
     }
 }
 
-template<> template<> void eventCallObject::test<9>() {
-    const radia::ui::EventCallParseResult parsed = radia::ui::parseEventCall("select(9223372036854775808)");
-    ensure("out-of-range integer is rejected", !parsed.ok());
-    ensure_equals("integer range has a stable error", static_cast<int>(parsed.error), static_cast<int>(radia::ui::EventCallParseError::IntegerOutOfRange));
+TEST(EventCallTest, RejectsOutOfRangeIntegerArguments) {
+    const EventCallParseResult parsed = parseEventCall("select(9223372036854775808)");
+    EXPECT_FALSE(parsed.ok());
+    EXPECT_EQ(parsed.error, EventCallParseError::IntegerOutOfRange);
 }
-
-template<> template<> void eventCallObject::test<10>() {
-    const radia::ui::EventCallParseResult parsed = radia::ui::parseEventCall("selectLocale(-1)");
-    ensure("negative integer parses", parsed.ok());
-    ensure_equals("negative integer retained", std::get<std::int64_t>(parsed.call->arguments()[0]), std::int64_t(-1));
-}
-} // namespace tut

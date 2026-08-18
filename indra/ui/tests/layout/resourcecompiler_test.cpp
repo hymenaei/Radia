@@ -23,198 +23,291 @@
  */
 
 #include "linden_common.h"
-#include <algorithm>
-#include <cctype>
+#include <filesystem>
 #include <fstream>
+#include <gtest/gtest.h>
 #include <map>
+#include <memory>
 #include <sstream>
-#include "../test/lltut.h"
-#include "../test/test.h"
-#include "binding/binder.h"
-#include "fixture.h"
+#include <string>
+#include "test_layout_helpers.h"
 #include "layout/document.h"
-#include "layout/engine.h"
 #include "layout/resourcecompiler.h"
-#include "render/recordingpaintcontext.h"
 #include "skin/compiler.h"
 #include "surface/surface.h"
 #include "system.h"
 #include "text/metrics.h"
 #include "widgets/button.h"
-#include "widgets/field.h"
-#include "widgets/fieldset.h"
 #include "widgets/floater.h"
 #include "widgets/icon.h"
 #include "widgets/label.h"
 #include "widgets/panel.h"
 #include "widgets/switch.h"
-#include "widgets/text.h"
 
 namespace {
 using radia::ui::Button;
 using radia::ui::DiagnosticResult;
-using radia::ui::FixedTextMetrics;
 using radia::ui::fixedTextMetrics;
 using radia::ui::Floater;
 using radia::ui::Label;
 using radia::ui::LayoutBuildResult;
 using radia::ui::LayoutDocumentParser;
 using radia::ui::LayoutDocumentParseResult;
+using radia::ui::Panel;
 using radia::ui::ResourceSnapshot;
 using radia::ui::SkinCompiler;
 using radia::ui::SkinGenerationPrepareResult;
 using radia::ui::Surface;
 using radia::ui::Switch;
 using radia::ui::System;
+using radia::ui::Visibility;
 using radia::ui::Widget;
 using radia::ui::WidgetEventKind;
 using radia::ui::WidgetRef;
 using radia::ui::detail::findWidgetInScope;
-} // namespace
+using radia::ui::test::LayoutCompilerTestHelper;
+using ::testing::Message;
 
-namespace tut {
-struct resourceCompilerData {
-    LayoutCompilerFixture factory;
-    std::map<std::string, std::string>& resources = factory.resources;
-
-    template<typename WidgetT> WidgetRef<WidgetT> requireWidget(Widget& root, const std::string& id) {
+class LayoutResourceCompilerTest : public ::testing::Test {
+protected:
+    template<typename WidgetT> WidgetRef<WidgetT> requireWidget(Widget& root, const std::string& id) const {
         return WidgetRef<WidgetT>(dynamic_cast<WidgetT*>(findWidgetInScope(root, id)));
     }
+
+    LayoutCompilerTestHelper factory;
+    std::map<std::string, std::string>& resources = factory.resources;
 };
-using resourceCompilerTest = test_group<resourceCompilerData>;
-using resourceCompilerObject = resourceCompilerTest::object;
-resourceCompilerTest resourceCompilerTestCase("resourcecompiler");
+} // namespace
 
-template<> template<> void resourceCompilerObject::test<1>() {
-    const char* kXml =
-        "<floater title=\"title\" closeIcon=\"close\" minimizeIcon=\"minimize\" canMinimize=\"true\"><text id=\"status\">Ready</text><button id=\"go\" onClick=\"demoGo()\" onDoubleClick=\"demoDouble()\" onMouseDown=\"demoPress()\" onLongClick=\"demoHold()\" onContextMenu=\"demoMenu()\" longClickDelay=\"750ms\"><icon src=\"search\"/>Go</button><switch id=\"toggle\" checked=\"true\" onChange=\"demoChanged()\"/></floater>";
-    LayoutBuildResult result = factory.buildWidgetTreeFromString(kXml, "floater.xml");
-    auto* floater = result.rootAs<Floater>();
-    ensure("arbitrary floater root parsed", result.ok() && floater);
-    ensure_equals("title localization key retained without a System", floater->title(), "title");
-    ensure("declared chrome composed", floater->header() && floater->minimizeButton());
-    auto go = requireWidget<Button>(*floater, "go");
-    auto toggle = requireWidget<Switch>(*floater, "toggle");
-    ensure("Binder resolves parsed controls", go && toggle);
-    ensure("typed lookup", toggle->checked());
-    ensure_equals("click Handler Call parsed", go->eventCall(WidgetEventKind::Click)->name(), "demoGo");
-    ensure_equals("double-click Handler Call parsed", go->eventCall(WidgetEventKind::DoubleClick)->name(), "demoDouble");
-    ensure_equals("pointer Handler Call parsed", go->eventCall(WidgetEventKind::MouseDown)->name(), "demoPress");
-    ensure_equals("long-click Handler Call parsed", go->eventCall(WidgetEventKind::LongClick)->name(), "demoHold");
-    ensure_equals("context-menu Handler Call parsed", go->eventCall(WidgetEventKind::ContextMenu)->name(), "demoMenu");
-    ensure_equals("long click delay parsed", go->longClickDelay()->count(), 750LL);
-    ensure_equals("Switch Handler Call parsed", toggle->eventCall(WidgetEventKind::Change)->name(), "demoChanged");
+TEST_F(LayoutResourceCompilerTest, BuildsFloaterWithControlsAndEventCalls) {
+    constexpr char kFloaterLayout[] = "<floater title=\"title\" closeIcon=\"close\" minimizeIcon=\"minimize\" canMinimize=\"true\">"
+                                      "<text id=\"status\">Ready</text>"
+                                      "<button id=\"go\" onClick=\"demoGo()\" onDoubleClick=\"demoDouble()\" "
+                                      "onMouseDown=\"demoPress()\" onLongClick=\"demoHold()\" "
+                                      "onContextMenu=\"demoMenu()\" longClickDelay=\"750ms\">"
+                                      "<icon src=\"search\"/>Go</button><switch id=\"toggle\" checked=\"true\" "
+                                      "onChange=\"demoChanged()\"/></floater>";
+    LayoutBuildResult result = factory.buildWidgetTreeFromString(kFloaterLayout, "floater.xml");
+    ASSERT_TRUE(result.ok());
+
+    Floater* floater = result.rootAs<Floater>();
+    ASSERT_NE(floater, nullptr);
+    EXPECT_EQ(floater->title(), "title");
+    ASSERT_NE(floater->header(), nullptr);
+    ASSERT_NE(floater->minimizeButton(), nullptr);
+
+    const WidgetRef<Button> go = requireWidget<Button>(*floater, "go");
+    const WidgetRef<Switch> toggle = requireWidget<Switch>(*floater, "toggle");
+    ASSERT_TRUE(go);
+    ASSERT_TRUE(toggle);
+    EXPECT_TRUE(toggle->checked());
+
+    ASSERT_NE(go->eventCall(WidgetEventKind::Click), nullptr);
+    ASSERT_NE(go->eventCall(WidgetEventKind::DoubleClick), nullptr);
+    ASSERT_NE(go->eventCall(WidgetEventKind::MouseDown), nullptr);
+    ASSERT_NE(go->eventCall(WidgetEventKind::LongClick), nullptr);
+    ASSERT_NE(go->eventCall(WidgetEventKind::ContextMenu), nullptr);
+    EXPECT_EQ(go->eventCall(WidgetEventKind::Click)->name(), "demoGo");
+    EXPECT_EQ(go->eventCall(WidgetEventKind::DoubleClick)->name(), "demoDouble");
+    EXPECT_EQ(go->eventCall(WidgetEventKind::MouseDown)->name(), "demoPress");
+    EXPECT_EQ(go->eventCall(WidgetEventKind::LongClick)->name(), "demoHold");
+    EXPECT_EQ(go->eventCall(WidgetEventKind::ContextMenu)->name(), "demoMenu");
+    ASSERT_TRUE(go->longClickDelay().has_value());
+    EXPECT_EQ(go->longClickDelay()->count(), 750LL);
+
+    ASSERT_NE(toggle->eventCall(WidgetEventKind::Change), nullptr);
+    EXPECT_EQ(toggle->eventCall(WidgetEventKind::Change)->name(), "demoChanged");
 }
 
-template<> template<> void resourceCompilerObject::test<2>() {
-    resources["shared.xml"] = "<panel id=\"base\" class=\"shared\"><text id=\"resourceChild\">base</text></panel>";
-    const char* kXml =
-        "<panel><panel filename=\"shared.xml\" id=\"one\" class=\"first\"><text id=\"inlineChild\"/></panel><panel filename=\"shared.xml\" id=\"two\"/></panel>";
-    LayoutBuildResult result = factory.buildWidgetTreeFromString(kXml, "outer.xml");
-    ensure("embedded panels parsed", result.ok());
-    auto first = requireWidget<radia::ui::Panel>(*result.root, "one");
-    auto second = requireWidget<radia::ui::Panel>(*result.root, "two");
-    ensure("independent panel instances", first && second && first.get() != second.get());
-    ensure("referenced class retained", first->classes().count("shared") == 1);
-    ensure("inline class appended", first->classes().count("first") == 1);
-    ensure("referenced child first", first->children().front()->id() == "resourceChild");
-    ensure("inline child appended", first->children().back()->id() == "inlineChild");
-    first->setVisibility(radia::ui::Visibility::Collapsed);
-    ensure("second visibility independent", second->visibility() == radia::ui::Visibility::Visible);
+TEST_F(LayoutResourceCompilerTest, InstantiatesIndependentEmbeddedResourcePanels) {
+    constexpr char kSharedResourceLayout[] = "<panel id=\"base\" class=\"shared\"><text id=\"resourceChild\">base</text></panel>";
+    constexpr char kEmbeddedPanelsLayout[] = "<panel><panel filename=\"shared.xml\" id=\"one\" class=\"first\">"
+                                             "<text id=\"inlineChild\"/></panel>"
+                                             "<panel filename=\"shared.xml\" id=\"two\"/></panel>";
+    resources["shared.xml"] = kSharedResourceLayout;
+    LayoutBuildResult result = factory.buildWidgetTreeFromString(kEmbeddedPanelsLayout, "outer.xml");
+    ASSERT_TRUE(result.ok());
+
+    const WidgetRef<Panel> first = requireWidget<Panel>(*result.root, "one");
+    const WidgetRef<Panel> second = requireWidget<Panel>(*result.root, "two");
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(second);
+    EXPECT_NE(first.get(), second.get());
+    EXPECT_EQ(first->classes().count("shared"), 1U);
+    EXPECT_EQ(first->classes().count("first"), 1U);
+    ASSERT_FALSE(first->children().empty());
+    ASSERT_FALSE(second->children().empty());
+    EXPECT_EQ(first->children().front()->id(), "resourceChild");
+    EXPECT_EQ(first->children().back()->id(), "inlineChild");
+
+    first->setVisibility(Visibility::Collapsed);
+    EXPECT_EQ(second->visibility(), Visibility::Visible);
 }
 
-template<> template<> void resourceCompilerObject::test<3>() {
-    resources["nested/inner.xml"] = "<panel id=\"inner\"/>";
-    resources["nested/middle.xml"] = "<panel><panel filename=\"inner.xml\"/></panel>";
-    resources["outer.xml"] = "<panel><panel filename=\"nested/middle.xml\"/></panel>";
+TEST_F(LayoutResourceCompilerTest, ResolvesNestedResourceReferences) {
+    constexpr char kInnerResourceLayout[] = "<panel id=\"inner\"/>";
+    constexpr char kMiddleResourceLayout[] = "<panel><panel filename=\"inner.xml\"/></panel>";
+    constexpr char kOuterResourceLayout[] = "<panel><panel filename=\"nested/middle.xml\"/></panel>";
+    resources["nested/inner.xml"] = kInnerResourceLayout;
+    resources["nested/middle.xml"] = kMiddleResourceLayout;
+    resources["outer.xml"] = kOuterResourceLayout;
+
     const LayoutBuildResult result = factory.buildWidgetTreeFromResource("outer.xml");
-    ensure("nested relative panels load", result.ok());
-    ensure("deep child present",
-           result.root->children().size() == 1
-               && result.root->children()[0]->children().size() == 1
-               && result.root->children()[0]->children()[0]->id() == "inner");
+    ASSERT_TRUE(result.ok());
+    ASSERT_TRUE(result.root);
+    ASSERT_EQ(result.root->children().size(), 1U);
+    ASSERT_EQ(result.root->children()[0]->children().size(), 1U);
+    EXPECT_EQ(result.root->children()[0]->children()[0]->id(), "inner");
 }
 
-template<> template<> void resourceCompilerObject::test<4>() {
-    resources["a.xml"] = "<panel><panel filename=\"b.xml\"/></panel>";
-    resources["b.xml"] = "<panel><panel filename=\"a.xml\"/></panel>";
-    LayoutBuildResult cycle = factory.buildWidgetTreeFromResource("a.xml");
-    ensure("cycle rejected", !cycle.ok());
-    ensure("failed build never exposes a partial tree", !cycle.root);
-    ensure_equals("cycle has stable diagnostic code", cycle.errors.front().code, "layout.resource.cycle");
-    ensure_equals("cycle diagnostic identifies source", cycle.errors.front().source, "a.xml");
-    ensure("missing panel rejected", !factory.buildWidgetTreeFromString("<panel><panel filename=\"missing.xml\"/></panel>", "root.xml").ok());
-    resources["wrong.xml"] = "<text/>";
-    ensure("non-panel reference rejected", !factory.buildWidgetTreeFromString("<panel><panel filename=\"wrong.xml\"/></panel>", "root.xml").ok());
-    ensure("filename on non-panel rejected", !factory.buildWidgetTreeFromString("<button filename=\"x.xml\"/>").ok());
-    ensure("resource-root escape rejected",
-           !factory.buildWidgetTreeFromString("<panel><panel filename=\"../outside.xml\"/></panel>", "root.xml").ok());
+TEST_F(LayoutResourceCompilerTest, RejectsResourceCycles) {
+    constexpr char kFirstCycleLayout[] = "<panel><panel filename=\"b.xml\"/></panel>";
+    constexpr char kSecondCycleLayout[] = "<panel><panel filename=\"a.xml\"/></panel>";
+    resources["a.xml"] = kFirstCycleLayout;
+    resources["b.xml"] = kSecondCycleLayout;
+
+    const LayoutBuildResult result = factory.buildWidgetTreeFromResource("a.xml");
+    ASSERT_FALSE(result.ok());
+    EXPECT_FALSE(result.root);
+    ASSERT_FALSE(result.errors.empty());
+    EXPECT_EQ(result.errors.front().code, "layout.resource.cycle");
+    EXPECT_EQ(result.errors.front().source, "a.xml");
+}
+
+TEST_F(LayoutResourceCompilerTest, RejectsInvalidResourceReferences) {
+    struct InvalidReferenceCase {
+        const char* name;
+        const char* markup;
+        const char* resourceId;
+        const char* resourceMarkup;
+    };
+
+    const InvalidReferenceCase cases[] = {
+        {"missing resource", "<panel><panel filename=\"missing.xml\"/></panel>", nullptr, nullptr},
+        {"non-panel resource", "<panel><panel filename=\"wrong.xml\"/></panel>", "wrong.xml", "<text/>"},
+        {"filename on non-panel", "<button filename=\"x.xml\"/>", nullptr, nullptr},
+        {"resource root escape", "<panel><panel filename=\"../outside.xml\"/></panel>", nullptr, nullptr},
+    };
+
+    for (const auto& test : cases) {
+        resources.clear();
+        if (test.resourceId != nullptr) resources[test.resourceId] = test.resourceMarkup;
+
+        SCOPED_TRACE(Message() << "invalid resource reference: " << test.name);
+        const LayoutBuildResult result = factory.buildWidgetTreeFromString(test.markup, "root.xml");
+        ASSERT_FALSE(result.ok());
+        EXPECT_FALSE(result.root);
+    }
 
     resources["empty.xml"] = "";
     const LayoutBuildResult empty = factory.buildWidgetTreeFromResource("empty.xml");
-    ensure("empty resource rejected as invalid XML", !empty.ok());
-    ensure_equals("empty resource differs from missing resource", empty.errors.front().code, "layout.xml.invalid");
+    ASSERT_FALSE(empty.ok());
+    ASSERT_FALSE(empty.errors.empty());
+    EXPECT_EQ(empty.errors.front().code, "layout.xml.invalid");
 }
 
-template<> template<> void resourceCompilerObject::test<5>() {
-    const LayoutBuildResult invalid = factory.buildWidgetTreeFromString("<panel>\n  <unknown/>\n</panel>", "source_ranges.xml");
-    ensure("source-aware compiler rejects unknown child", !invalid.ok());
-    ensure_equals("compiler diagnostic retains source line", invalid.errors.front().line, 2U);
-    ensure_equals("compiler diagnostic retains source column", invalid.errors.front().column, 3U);
-
-    LayoutDocumentParseResult parsed = LayoutDocumentParser().parse("<panel>before<label>middle</label>after</panel>", "mixed.xml");
-    ensure("one document tree parses", parsed.ok());
-    ensure_equals("mixed content order is represented once", parsed.document->root->content.size(), 3U);
-    ensure("text-child-text order retained",
-           parsed.document->root->content[0].isText() && !parsed.document->root->content[1].isText() && parsed.document->root->content[2].isText());
-    ensure("element source range retained",
-           parsed.document->root->content[1].source.begin.line == 1
-               && parsed.document->root->content[1].source.end.offset >= parsed.document->root->content[1].source.begin.offset);
+TEST_F(LayoutResourceCompilerTest, PreservesCompilerSourceLocations) {
+    constexpr char kSourceLocationLayout[] = "<panel>\n"
+                                             "  <unknown/>\n"
+                                             "</panel>";
+    const LayoutBuildResult result = factory.buildWidgetTreeFromString(kSourceLocationLayout, "source_ranges.xml");
+    ASSERT_FALSE(result.ok());
+    ASSERT_FALSE(result.errors.empty());
+    EXPECT_EQ(result.errors.front().line, 2U);
+    EXPECT_EQ(result.errors.front().column, 3U);
 }
 
-template<> template<> void resourceCompilerObject::test<6>() {
-    LayoutBuildResult result = factory.buildWidgetTreeFromString("<button>first<icon src=\"one\"/></button>");
-    auto* button = result.rootAs<Button>();
-    ensure("button parses", result.ok() && button);
-    ensure_equals("inline icon retained", button->icon()->name(), "one");
-    ensure_equals("inline label retained", button->label()->text(), "first");
-    ensure_equals("button caption is not a standalone label style target", button->label()->elementName(), std::string("button-caption"));
-    ensure("text before icon preserves authored order", button->children()[0].get() == button->label());
-    LayoutBuildResult iconFirst = factory.buildWidgetTreeFromString("<button><icon src=\"search\"/>second</button>");
-    auto* reversed = iconFirst.rootAs<Button>();
-    ensure("icon before text preserves authored order", iconFirst.ok() && reversed->children()[0].get() == reversed->icon());
+TEST_F(LayoutResourceCompilerTest, PreservesMixedContentOrderAndSourceRanges) {
+    constexpr char kMixedContentLayout[] = "<panel>before"
+                                           "<label>middle</label>"
+                                           "after</panel>";
+    const LayoutDocumentParseResult parsed = LayoutDocumentParser().parse(kMixedContentLayout, "mixed.xml");
+    ASSERT_TRUE(parsed.ok());
+    ASSERT_NE(parsed.document, nullptr);
+    ASSERT_EQ(parsed.document->root->content.size(), 3U);
+    EXPECT_TRUE(parsed.document->root->content[0].isText());
+    EXPECT_FALSE(parsed.document->root->content[1].isText());
+    EXPECT_TRUE(parsed.document->root->content[2].isText());
+    EXPECT_EQ(parsed.document->root->content[1].source.begin.line, 1U);
+    EXPECT_GE(parsed.document->root->content[1].source.end.offset, parsed.document->root->content[1].source.begin.offset);
+}
+
+TEST_F(LayoutResourceCompilerTest, ComposesButtonInlineChildrenAndRejectsLegacyPartMarkup) {
+    constexpr char kButtonLayout[] = "<button>first"
+                                     "<icon src=\"one\"/></button>";
+    LayoutBuildResult result = factory.buildWidgetTreeFromString(kButtonLayout);
+    ASSERT_TRUE(result.ok());
+    Button* button = result.rootAs<Button>();
+    ASSERT_NE(button, nullptr);
+    ASSERT_NE(button->icon(), nullptr);
+    ASSERT_NE(button->label(), nullptr);
+    EXPECT_EQ(button->icon()->name(), "one");
+    EXPECT_EQ(button->label()->text(), "first");
+    EXPECT_EQ(button->label()->elementName(), "button-caption");
+    ASSERT_GE(button->children().size(), 2U);
+    EXPECT_EQ(button->children()[0].get(), button->label());
+
+    constexpr char kIconFirstLayout[] = "<button><icon src=\"search\"/>"
+                                        "second</button>";
+    LayoutBuildResult iconFirst = factory.buildWidgetTreeFromString(kIconFirstLayout);
+    ASSERT_TRUE(iconFirst.ok());
+    Button* reversed = iconFirst.rootAs<Button>();
+    ASSERT_NE(reversed, nullptr);
+    ASSERT_FALSE(reversed->children().empty());
+    EXPECT_EQ(reversed->children()[0].get(), reversed->icon());
+
     button->setIcon("updated");
     button->setLabel("updated");
-    ensure_equals("icon updated in place", button->children().size(), 2U);
+    EXPECT_EQ(button->children().size(), 2U);
     button->clearChildren();
-    ensure("clearing Button children clears typed refs", !button->icon() && !button->label());
+    EXPECT_EQ(button->icon(), nullptr);
+    EXPECT_EQ(button->label(), nullptr);
     button->setIcon("rebuilt");
-    ensure_equals("programmatic icon child can be recreated", button->icon()->name(), "rebuilt");
-    ensure("button.label authoring syntax is removed", !factory.buildWidgetTreeFromString("<button><button.label value=\"old\"/></button>").ok());
-    ensure("button.icon authoring syntax is removed", !factory.buildWidgetTreeFromString("<button><button.icon name=\"old\"/></button>").ok());
-    ensure("switch.label authoring syntax is removed", !factory.buildWidgetTreeFromString("<switch><switch.label value=\"old\"/></switch>").ok());
-    ensure("label text is no longer authored through value", !factory.buildWidgetTreeFromString("<label value=\"old\"/>").ok());
+    ASSERT_NE(button->icon(), nullptr);
+    EXPECT_EQ(button->icon()->name(), "rebuilt");
+
+    struct LegacyMarkupCase {
+        const char* name;
+        const char* markup;
+    };
+    const LegacyMarkupCase cases[] = {
+        {"button label part", "<button><button.label value=\"old\"/></button>"},
+        {"button icon part", "<button><button.icon name=\"old\"/></button>"},
+        {"switch label part", "<switch><switch.label value=\"old\"/></switch>"},
+        {"label value attribute", "<label value=\"old\"/>"},
+    };
+    for (const auto& test : cases) {
+        SCOPED_TRACE(Message() << "removed inline markup: " << test.name);
+        EXPECT_FALSE(factory.buildWidgetTreeFromString(test.markup).ok());
+    }
 }
 
-template<> template<> void resourceCompilerObject::test<7>() {
-    std::ifstream vertexFile(tut::sSourceDir + "../newview/app_settings/shaders/class1/interface/uiV.glsl");
-    std::ifstream fragmentFile(tut::sSourceDir + "../newview/app_settings/shaders/class1/interface/uiF.glsl");
-    std::ifstream paintProtocolFile(tut::sSourceDir + "render/paintprotocol.def");
-    ensure("paint protocol sources are readable", vertexFile.good() && fragmentFile.good() && paintProtocolFile.good());
-    std::ostringstream vertex, fragment, paintProtocol;
+TEST_F(LayoutResourceCompilerTest, MatchesPaintProtocolWithShaderConstants) {
+    const std::filesystem::path uiSourceRoot = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
+    const std::filesystem::path newviewSourceRoot = uiSourceRoot.parent_path() / "newview";
+    std::ifstream vertexFile(newviewSourceRoot / "app_settings/shaders/class1/interface/uiV.glsl");
+    std::ifstream fragmentFile(newviewSourceRoot / "app_settings/shaders/class1/interface/uiF.glsl");
+    std::ifstream paintProtocolFile(uiSourceRoot / "render/paintprotocol.def");
+    ASSERT_TRUE(vertexFile.good());
+    ASSERT_TRUE(fragmentFile.good());
+    ASSERT_TRUE(paintProtocolFile.good());
+
+    std::ostringstream vertex;
+    std::ostringstream fragment;
+    std::ostringstream paintProtocol;
     vertex << vertexFile.rdbuf();
     fragment << fragmentFile.rdbuf();
     paintProtocol << paintProtocolFile.rdbuf();
     const std::string vertexSource = vertex.str();
     const std::string fragmentSource = fragment.str();
     const std::string paintProtocolSource = paintProtocol.str();
+
     const auto contains = [](const std::string& source, const char* text) { return source.find(text) != std::string::npos; };
     const auto trimToken = [](std::string token) {
         const std::size_t first = token.find_first_not_of(" \t\r\n");
         const std::size_t last = token.find_last_not_of(" \t\r\n");
         return first == std::string::npos ? std::string() : token.substr(first, last - first + 1);
     };
-    const auto shaderName = [](const std::string& name) { return name; };
     const auto parseDefinition = [&](const char* macro) {
         std::map<std::string, int> entries;
         const std::string marker = std::string(macro) + "(";
@@ -245,349 +338,436 @@ template<> template<> void resourceCompilerObject::test<7>() {
         }
         return entries;
     };
-    const auto ensureProtocol = [&](const char* macro, const char* shaderPrefix) {
+    const auto expectProtocol = [&](const char* macro, const char* shaderPrefix) {
         const auto definitions = parseDefinition(macro);
         const auto constants = parseShaderConstants(shaderPrefix);
-        ensure((std::string("shader protocol count matches ") + macro).c_str(), definitions.size() == constants.size());
+        EXPECT_EQ(definitions.size(), constants.size()) << macro;
         for (const auto& [name, value] : definitions) {
-            const auto found = constants.find(shaderName(name));
-            ensure((std::string("shader protocol entry matches ") + name).c_str(), found != constants.end() && found->second == value);
+            SCOPED_TRACE(Message() << "paint protocol entry: " << name);
+            const auto found = constants.find(name);
+            ASSERT_NE(found, constants.end());
+            EXPECT_EQ(found->second, value);
         }
     };
-    ensureProtocol("PAINT_OP_ENTRY", "kPaintOp");
-    ensureProtocol("GRADIENT_OP_ENTRY", "kGradient");
-    ensureProtocol("OUTLINE_OP_ENTRY", "kOutline");
 
-    ensure("paint shader variant is guarded", contains(vertexSource, "#ifdef PAINT_SHADER") && contains(fragmentSource, "#ifdef PAINT_SHADER"));
-    ensure("vertex shader forwards shape coordinates", contains(vertexSource, "shapeCoord = texcoord0"));
-    ensure("fragment shader names direct and fill modes",
-           contains(fragmentSource, "kPaintOpDirect = 0")
-               && contains(fragmentSource, "kPaintOpFill = 1")
-               && contains(fragmentSource, "paintOp == kPaintOpDirect"));
-    ensure("paint protocol list contains the shader operation values",
-           contains(paintProtocolSource, "PAINT_OP_ENTRY(Direct, 0)")
-               && contains(paintProtocolSource, "PAINT_OP_ENTRY(Fill, 1)")
-               && contains(paintProtocolSource, "PAINT_OP_ENTRY(Border, 2)")
-               && contains(paintProtocolSource, "PAINT_OP_ENTRY(Gradient, 3)")
-               && contains(paintProtocolSource, "PAINT_OP_ENTRY(OuterShadow, 4)")
-               && contains(paintProtocolSource, "PAINT_OP_ENTRY(InsetShadow, 5)")
-               && contains(paintProtocolSource, "PAINT_OP_ENTRY(GradientBorder, 6)")
-               && contains(paintProtocolSource, "PAINT_OP_ENTRY(Blur, 7)")
-               && contains(paintProtocolSource, "PAINT_OP_ENTRY(Composite, 8)"));
-    ensure("fragment shader declares the paint protocol",
-           contains(fragmentSource, "uniform int paintOp;")
-               && contains(fragmentSource, "uniform vec4 shapeRect;")
-               && contains(fragmentSource, "uniform vec2 effectTextureSize;")
-               && contains(fragmentSource, "uniform int gradientKind;")
-               && contains(fragmentSource, "uniform int outlineStyle;")
-               && !contains(fragmentSource, "rduiPaintOp"));
-    ensure("fragment shader has analytic border mode",
-           contains(fragmentSource, "kPaintOpBorder = 2")
-               && contains(fragmentSource, "paintOp == kPaintOpBorder")
-               && contains(fragmentSource, "fwidth"));
-    ensure("fragment shader names gradient and outline modes",
-           contains(fragmentSource, "kGradientLinear = 0")
-               && contains(fragmentSource, "kGradientRadial = 1")
-               && contains(fragmentSource, "kGradientConic = 2")
-               && contains(fragmentSource, "kOutlineSolid = 0")
-               && contains(fragmentSource, "kOutlineDashed = 1"));
-    ensure("fragment shader supports a Fieldset Legend border gap", contains(fragmentSource, "topBorderGap"));
-    ensure("fragment shader supports radial and conic gradients",
-           contains(fragmentSource, "gradientKind") && contains(fragmentSource, "atan(delta.x, delta.y)"));
-    ensure("fragment shader supports repeating gradient paint",
-           contains(fragmentSource, "gradientRepeating")
-               && contains(fragmentSource, "underlyingGradientIntegral")
-               && contains(fragmentSource, "cycles * repeatingTotal"));
-    ensure("fragment shader antialiases gradient stops and repeating seams",
-           contains(fragmentSource, "gradientPixelWidth")
-               && contains(fragmentSource, "filteredGradientColor")
-               && contains(fragmentSource, "gradientIntervalIntegral")
-               && contains(fragmentSource, "dFdx(delta)"));
-    ensure("fragment shader supports gradient borders",
-           contains(fragmentSource, "kPaintOpGradientBorder = 6")
-               && contains(fragmentSource, "paintOp == kPaintOpGradientBorder")
-               && contains(fragmentSource, "borderWidths"));
-    ensure("fragment shader supports composited blur effects",
-           contains(fragmentSource, "kPaintOpBlur = 7")
-               && contains(fragmentSource, "kPaintOpComposite = 8")
-               && contains(fragmentSource, "paintOp == kPaintOpBlur")
-               && contains(fragmentSource, "paintOp == kPaintOpComposite")
-               && contains(fragmentSource, "blurredEffectColor")
-               && contains(fragmentSource, "maxSamplesPerSide")
-               && contains(fragmentSource, "totalWeight"));
-    ensure("rounded background blur uses the shape mask for coverage",
-           contains(fragmentSource, "return vec4(color.rgb, mask);") && !contains(fragmentSource, "color.a * mask"));
+    expectProtocol("PAINT_OP_ENTRY", "kPaintOp");
+    expectProtocol("GRADIENT_OP_ENTRY", "kGradient");
+    expectProtocol("OUTLINE_OP_ENTRY", "kOutline");
+
+    EXPECT_TRUE(contains(vertexSource, "#ifdef PAINT_SHADER"));
+    EXPECT_TRUE(contains(fragmentSource, "#ifdef PAINT_SHADER"));
+    EXPECT_TRUE(contains(vertexSource, "shapeCoord = texcoord0"));
+    EXPECT_TRUE(contains(fragmentSource, "kPaintOpDirect = 0")
+                && contains(fragmentSource, "kPaintOpFill = 1")
+                && contains(fragmentSource, "paintOp == kPaintOpDirect"));
+    EXPECT_TRUE(contains(paintProtocolSource, "PAINT_OP_ENTRY(Direct, 0)")
+                && contains(paintProtocolSource, "PAINT_OP_ENTRY(Fill, 1)")
+                && contains(paintProtocolSource, "PAINT_OP_ENTRY(Border, 2)")
+                && contains(paintProtocolSource, "PAINT_OP_ENTRY(Gradient, 3)")
+                && contains(paintProtocolSource, "PAINT_OP_ENTRY(OuterShadow, 4)")
+                && contains(paintProtocolSource, "PAINT_OP_ENTRY(InsetShadow, 5)")
+                && contains(paintProtocolSource, "PAINT_OP_ENTRY(GradientBorder, 6)")
+                && contains(paintProtocolSource, "PAINT_OP_ENTRY(Blur, 7)")
+                && contains(paintProtocolSource, "PAINT_OP_ENTRY(Composite, 8)"));
+    EXPECT_TRUE(contains(fragmentSource, "uniform int paintOp;")
+                && contains(fragmentSource, "uniform vec4 shapeRect;")
+                && contains(fragmentSource, "uniform vec2 effectTextureSize;")
+                && contains(fragmentSource, "uniform int gradientKind;")
+                && contains(fragmentSource, "uniform int outlineStyle;")
+                && !contains(fragmentSource, "rduiPaintOp"));
+    EXPECT_TRUE(contains(fragmentSource, "kPaintOpBorder = 2")
+                && contains(fragmentSource, "paintOp == kPaintOpBorder")
+                && contains(fragmentSource, "fwidth"));
+    EXPECT_TRUE(contains(fragmentSource, "kGradientLinear = 0")
+                && contains(fragmentSource, "kGradientRadial = 1")
+                && contains(fragmentSource, "kGradientConic = 2")
+                && contains(fragmentSource, "kOutlineSolid = 0")
+                && contains(fragmentSource, "kOutlineDashed = 1"));
+    EXPECT_TRUE(contains(fragmentSource, "topBorderGap"));
+    EXPECT_TRUE(contains(fragmentSource, "gradientKind") && contains(fragmentSource, "atan(delta.x, delta.y)"));
+    EXPECT_TRUE(contains(fragmentSource, "gradientRepeating")
+                && contains(fragmentSource, "underlyingGradientIntegral")
+                && contains(fragmentSource, "cycles * repeatingTotal"));
+    EXPECT_TRUE(contains(fragmentSource, "gradientPixelWidth")
+                && contains(fragmentSource, "filteredGradientColor")
+                && contains(fragmentSource, "gradientIntervalIntegral")
+                && contains(fragmentSource, "dFdx(delta)"));
+    EXPECT_TRUE(contains(fragmentSource, "kPaintOpGradientBorder = 6")
+                && contains(fragmentSource, "paintOp == kPaintOpGradientBorder")
+                && contains(fragmentSource, "borderWidths"));
+    EXPECT_TRUE(contains(fragmentSource, "kPaintOpBlur = 7")
+                && contains(fragmentSource, "kPaintOpComposite = 8")
+                && contains(fragmentSource, "paintOp == kPaintOpBlur")
+                && contains(fragmentSource, "paintOp == kPaintOpComposite")
+                && contains(fragmentSource, "blurredEffectColor")
+                && contains(fragmentSource, "maxSamplesPerSide")
+                && contains(fragmentSource, "totalWeight"));
+    EXPECT_TRUE(contains(fragmentSource, "return vec4(color.rgb, mask);") && !contains(fragmentSource, "color.a * mask"));
 }
 
-template<> template<> void resourceCompilerObject::test<8>() {
+TEST_F(LayoutResourceCompilerTest, RefreshesLocalizedWidgetsAcrossLocaleChanges) {
     System system;
     ResourceSnapshot resources;
-    const char* kLocalization =
-        "defaultLocale: en\nlocales: {en: {name: English, strings: {title: Title, status: Ready, press: Press}}, pt: {name: Português, strings: {title: Título, status: Pronto, press: Pressione}}}\n";
-    const char* kLocalizedLayout =
-        "<floater title=\"title\"><label id=\"status\" for=\"target\">status</label><switch id=\"target\"/><button id=\"press\">press</button></floater>";
-    resources.add("localization.yaml", kLocalization);
-    resources.add("skin.radia", "label { text-color: #ffffffff; }");
+    constexpr char kLocalizationYaml[] = "defaultLocale: en\n"
+                                         "locales: {en: {name: English, strings: {title: Title, status: Ready, press: Press}}, "
+                                         "pt: {name: Português, strings: {title: Título, status: Pronto, press: Pressione}}}\n";
+    constexpr char kStyles[] = "label { text-color: #ffffffff; }";
+    constexpr char kLocalizedLayout[] = "<floater title=\"title\"><label id=\"status\" for=\"target\">status</label>"
+                                        "<switch id=\"target\"/>"
+                                        "<button id=\"press\">press</button></floater>";
+    resources.add("localization.yaml", kLocalizationYaml);
+    resources.add("skin.radia", kStyles);
     resources.add("localized.xml", kLocalizedLayout);
-    SkinGenerationPrepareResult prepared = SkinCompiler().prepare(resources);
-    ensure("localizations load", prepared.ok());
-    system.publish(prepared.generation);
-    LayoutBuildResult result = system.buildWidgetTree("localized.xml");
-    auto* floater = result.rootAs<Floater>();
-    ensure("localized tree builds", result.ok() && floater);
-    auto status = requireWidget<Label>(*floater, "status");
-    auto press = requireWidget<Button>(*floater, "press");
-    ensure("Binder resolves localized controls", status && press);
-    Label* buttonLabel = press->label();
-    ensure_equals("initial title localized", floater->title(), "Title");
-    ensure_equals("initial label localized", status->text(), "Ready");
-    ensure_equals("initial button localized", buttonLabel->text(), "Press");
 
-    std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
+    const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(resources);
+    ASSERT_TRUE(prepared.ok());
+    system.publish(prepared.generation);
+
+    LayoutBuildResult result = system.buildWidgetTree("localized.xml");
+    ASSERT_TRUE(result.ok());
+    Floater* floater = result.rootAs<Floater>();
+    ASSERT_NE(floater, nullptr);
+    const WidgetRef<Label> status = requireWidget<Label>(*floater, "status");
+    const WidgetRef<Button> press = requireWidget<Button>(*floater, "press");
+    ASSERT_TRUE(status);
+    ASSERT_TRUE(press);
+    ASSERT_NE(press->label(), nullptr);
+    EXPECT_EQ(floater->title(), "Title");
+    EXPECT_EQ(status->text(), "Ready");
+    EXPECT_EQ(press->label()->text(), "Press");
+
+    std::unique_ptr<Surface> surface = system.createSurface(radia::ui::fixedTextMetrics());
     auto localizedFloater = std::unique_ptr<Floater>(static_cast<Floater*>(result.root.release()));
+    ASSERT_NE(localizedFloater, nullptr);
     surface->mountFloater(std::move(localizedFloater));
-    ensure("second language selected", system.setLocale("pt"));
-    ensure_equals("visible title refreshed", floater->title(), "Título");
-    ensure_equals("visible label refreshed", status->text(), "Pronto");
-    ensure_equals("visible button refreshed", buttonLabel->text(), "Pressione");
+    ASSERT_TRUE(system.setLocale("pt"));
+    EXPECT_EQ(floater->title(), "Título");
+    EXPECT_EQ(status->text(), "Pronto");
+    EXPECT_EQ(press->label()->text(), "Pressione");
 
     auto programmatic = std::make_unique<Floater>();
     Floater* programmaticFloater = programmatic.get();
     programmatic->setTitle("title");
     surface->mountFloater(std::move(programmatic));
-    ensure_equals("programmatic title resolves when attached", programmaticFloater->title(), "Título");
+    EXPECT_EQ(programmaticFloater->title(), "Título");
 
     status->setContent(system.localize("status"));
-    ensure("default language restored", system.setLocale("en"));
-    ensure_equals("programmatic title remains locale-bound", programmaticFloater->title(), "Title");
-    ensure_equals("C++ localized assignment stays bound", status->text(), "Ready");
+    ASSERT_TRUE(system.setLocale("en"));
+    EXPECT_EQ(programmaticFloater->title(), "Title");
+    EXPECT_EQ(status->text(), "Ready");
     status->setText("Literal");
-    ensure("Portuguese restored", system.setLocale("pt"));
-    ensure_equals("literal assignment clears binding", status->text(), "Literal");
+    ASSERT_TRUE(system.setLocale("pt"));
+    EXPECT_EQ(status->text(), "Literal");
 
-    resources.add("missing.xml", "<text>missing</text>");
+    constexpr char kMissingLayout[] = "<text>missing</text>";
+    resources.add("missing.xml", kMissingLayout);
     const SkinGenerationPrepareResult missing = SkinCompiler().prepare(std::move(resources));
-    ensure("missing default-language key rejects generation", !missing.ok() && !missing.generation);
+    EXPECT_FALSE(missing.ok());
+    EXPECT_FALSE(missing.generation);
 }
 
-template<> template<> void resourceCompilerObject::test<9>() {
-    const LayoutBuildResult unknownElement = factory.buildWidgetTreeFromString("<panel><unknown/></panel>", "unknown.xml");
-    ensure("unknown element rejects document", !unknownElement.ok() && !unknownElement.root);
-    ensure_equals("unknown element diagnostic code", unknownElement.errors.front().code, "layout.element.unknown");
-    ensure_equals("unknown element diagnostic source", unknownElement.errors.front().source, "unknown.xml");
+TEST_F(LayoutResourceCompilerTest, RejectsUnknownElementsAndAttributes) {
+    constexpr char kUnknownElementLayout[] = "<panel>"
+                                             "<unknown/></panel>";
+    constexpr char kUnsupportedAttributeLayout[] = "<panel width=\"10\"/>";
+    constexpr char kUnknownAttributeLayout[] = "<floater invented=\"true\"/>";
+    const LayoutBuildResult unknownElement = factory.buildWidgetTreeFromString(kUnknownElementLayout, "unknown.xml");
+    ASSERT_FALSE(unknownElement.ok());
+    EXPECT_FALSE(unknownElement.root);
+    ASSERT_FALSE(unknownElement.errors.empty());
+    EXPECT_EQ(unknownElement.errors.front().code, "layout.element.unknown");
+    EXPECT_EQ(unknownElement.errors.front().source, "unknown.xml");
 
-    const LayoutBuildResult unsupportedAttribute = factory.buildWidgetTreeFromString("<panel width=\"10\"/>", "attribute.xml");
-    ensure("unsupported attribute rejects document", !unsupportedAttribute.ok() && !unsupportedAttribute.root);
-    ensure_equals("unsupported attribute diagnostic code", unsupportedAttribute.errors.front().code, "layout.attribute.unsupported");
+    const LayoutBuildResult unsupportedAttribute = factory.buildWidgetTreeFromString(kUnsupportedAttributeLayout, "attribute.xml");
+    ASSERT_FALSE(unsupportedAttribute.ok());
+    EXPECT_FALSE(unsupportedAttribute.root);
+    ASSERT_FALSE(unsupportedAttribute.errors.empty());
+    EXPECT_EQ(unsupportedAttribute.errors.front().code, "layout.attribute.unsupported");
 
-    const LayoutBuildResult unknownAttribute = factory.buildWidgetTreeFromString("<floater invented=\"true\"/>", "unknown_attribute.xml");
-    ensure("unknown widget attribute rejects document", !unknownAttribute.ok() && !unknownAttribute.root);
-    ensure_equals("unknown attribute diagnostic code", unknownAttribute.errors.front().code, "layout.attribute.unknown");
-
-    const LayoutBuildResult unsupportedEvent = factory.buildWidgetTreeFromString("<text onClick=\"click()\">copy</text>", "event.xml");
-    ensure("unsupported Widget Event leaves the Widget tree usable", unsupportedEvent.ok() && unsupportedEvent.root);
-    ensure_equals("unsupported Event reports one warning", unsupportedEvent.warnings.size(), 1U);
-    ensure_equals("unsupported Event diagnostic code", unsupportedEvent.warnings.front().code, "layout.event.unsupported");
-
-    const LayoutBuildResult expressionCall = factory.buildWidgetTreeFromString("<button onClick=\"save(force=true)\"/>", "expression.xml");
-    ensure("Event expressions leave the Widget tree usable with a no-op binding", expressionCall.ok() && expressionCall.root);
-    ensure_equals("expression reports one warning", expressionCall.warnings.size(), 1U);
-    ensure_equals("unsupported literal diagnostic code", expressionCall.warnings.front().code, "layout.event.literal_unsupported");
+    const LayoutBuildResult unknownAttribute = factory.buildWidgetTreeFromString(kUnknownAttributeLayout, "unknown_attribute.xml");
+    ASSERT_FALSE(unknownAttribute.ok());
+    EXPECT_FALSE(unknownAttribute.root);
+    ASSERT_FALSE(unknownAttribute.errors.empty());
+    EXPECT_EQ(unknownAttribute.errors.front().code, "layout.attribute.unknown");
 }
 
-template<> template<> void resourceCompilerObject::test<10>() {
-    const LayoutBuildResult duplicate =
-        factory.buildWidgetTreeFromString("<panel><text id=\"same\"/><button id=\"same\">Same</button></panel>", "duplicates.xml");
-    ensure("duplicate ids reject whole widget tree", !duplicate.ok() && !duplicate.root);
-    ensure_equals("duplicate id diagnostic code", duplicate.errors.front().code, "layout.id.duplicate");
-    ensure_equals("duplicate id diagnostic source", duplicate.errors.front().source, "duplicates.xml");
+TEST_F(LayoutResourceCompilerTest, WarnsForUnsupportedEventsAndExpressions) {
+    constexpr char kUnsupportedEventLayout[] = "<text onClick=\"click()\">copy</text>";
+    constexpr char kExpressionCallLayout[] = "<button onClick=\"save(force=true)\"/>";
+    const LayoutBuildResult unsupportedEvent = factory.buildWidgetTreeFromString(kUnsupportedEventLayout, "event.xml");
+    ASSERT_TRUE(unsupportedEvent.ok());
+    ASSERT_TRUE(unsupportedEvent.root);
+    ASSERT_EQ(unsupportedEvent.warnings.size(), 1U);
+    EXPECT_EQ(unsupportedEvent.warnings.front().code, "layout.event.unsupported");
+
+    const LayoutBuildResult expressionCall = factory.buildWidgetTreeFromString(kExpressionCallLayout, "expression.xml");
+    ASSERT_TRUE(expressionCall.ok());
+    ASSERT_TRUE(expressionCall.root);
+    ASSERT_EQ(expressionCall.warnings.size(), 1U);
+    EXPECT_EQ(expressionCall.warnings.front().code, "layout.event.literal_unsupported");
 }
 
-template<> template<> void resourceCompilerObject::test<11>() {
-    const LayoutBuildResult invalid =
-        factory.buildWidgetTreeFromString("<floater canClose=\"sometimes\"><switch checked=\"yes\"/></floater>", "booleans.xml");
-    ensure("invalid booleans reject whole widget tree", !invalid.ok() && !invalid.root);
-    ensure_equals("both invalid booleans diagnosed", invalid.errors.size(), 2U);
-    ensure_equals("boolean diagnostic code", invalid.errors.front().code, "layout.attribute.boolean_invalid");
-    ensure_equals("boolean diagnostic source", invalid.errors.front().source, "booleans.xml");
+TEST_F(LayoutResourceCompilerTest, RejectsDuplicateWidgetIds) {
+    constexpr char kDuplicateIdLayout[] = "<panel><text id=\"same\"/>"
+                                          "<button id=\"same\">Same</button></panel>";
+    const LayoutBuildResult result = factory.buildWidgetTreeFromString(kDuplicateIdLayout, "duplicates.xml");
+    ASSERT_FALSE(result.ok());
+    EXPECT_FALSE(result.root);
+    ASSERT_FALSE(result.errors.empty());
+    EXPECT_EQ(result.errors.front().code, "layout.id.duplicate");
+    EXPECT_EQ(result.errors.front().source, "duplicates.xml");
 }
 
-template<> template<> void resourceCompilerObject::test<12>() {
-    const LayoutBuildResult missingHandler = factory.buildWidgetTreeFromString("<button longClickDelay=\"1s\"/>");
-    ensure("delay without an Event Handler leaves the Widget tree usable", missingHandler.ok());
-    ensure_equals("missing long-click Handler warns", missingHandler.warnings.front().code, "layout.long_click.event_missing");
-    ensure("duration requires unit", !factory.buildWidgetTreeFromString("<button onLongClick=\"hold()\" longClickDelay=\"500\"/>").ok());
-    const LayoutBuildResult unsupported = factory.buildWidgetTreeFromString("<text onLongClick=\"hold()\">copy</text>");
-    ensure("Text ignores unsupported long click", unsupported.ok());
-    ensure_equals("unsupported long click warns", unsupported.warnings.front().code, "layout.event.unsupported");
+TEST_F(LayoutResourceCompilerTest, RejectsInvalidBooleanAttributes) {
+    constexpr char kInvalidBooleanLayout[] = "<floater canClose=\"sometimes\">"
+                                             "<switch checked=\"yes\"/></floater>";
+    const LayoutBuildResult result = factory.buildWidgetTreeFromString(kInvalidBooleanLayout, "booleans.xml");
+    ASSERT_FALSE(result.ok());
+    EXPECT_FALSE(result.root);
+    ASSERT_EQ(result.errors.size(), 2U);
+    EXPECT_EQ(result.errors.front().code, "layout.attribute.boolean_invalid");
+    EXPECT_EQ(result.errors.front().source, "booleans.xml");
 }
 
-template<> template<> void resourceCompilerObject::test<13>() {
-    const char* kCustomHeaderLayout =
-        "<floater title=\"tools\" icon=\"search\" canMinimize=\"true\" showHeaderIdentity=\"false\"><header><button id=\"refresh\">Refresh</button></header><panel id=\"content\"/></floater>";
+TEST_F(LayoutResourceCompilerTest, ValidatesLongClickDelayAndUnsupportedEvents) {
+    constexpr char kMissingHandlerLayout[] = "<button longClickDelay=\"1s\"/>";
+    constexpr char kInvalidLongClickLayout[] = "<button onLongClick=\"hold()\" "
+                                               "longClickDelay=\"500\"/>";
+    constexpr char kUnsupportedLongClickLayout[] = "<text onLongClick=\"hold()\">"
+                                                   "copy</text>";
+    const LayoutBuildResult missingHandler = factory.buildWidgetTreeFromString(kMissingHandlerLayout);
+    ASSERT_TRUE(missingHandler.ok());
+    ASSERT_FALSE(missingHandler.warnings.empty());
+    EXPECT_EQ(missingHandler.warnings.front().code, "layout.long_click.event_missing");
+
+    EXPECT_FALSE(factory.buildWidgetTreeFromString(kInvalidLongClickLayout).ok());
+
+    const LayoutBuildResult unsupported = factory.buildWidgetTreeFromString(kUnsupportedLongClickLayout);
+    ASSERT_TRUE(unsupported.ok());
+    ASSERT_FALSE(unsupported.warnings.empty());
+    EXPECT_EQ(unsupported.warnings.front().code, "layout.event.unsupported");
+}
+
+TEST_F(LayoutResourceCompilerTest, ManagesCustomFloaterHeaderLifecycle) {
+    constexpr char kCustomHeaderLayout[] = "<floater title=\"tools\" icon=\"search\" canMinimize=\"true\" showHeaderIdentity=\"false\">"
+                                           "<header><button id=\"refresh\">Refresh</button></header>"
+                                           "<panel id=\"content\"/></floater>";
     LayoutBuildResult result = factory.buildWidgetTreeFromString(kCustomHeaderLayout, "custom_header.xml");
-    auto* floater = result.rootAs<Floater>();
-    ensure("custom-header floater builds", result.ok() && floater);
-    auto content = requireWidget<radia::ui::Panel>(*floater, "content");
-    auto refresh = requireWidget<Button>(*floater, "refresh");
-    ensure("Binder resolves authored Floater children", content && refresh);
-    ensure("direct children route into content box", content->parent() == floater->content());
-    ensure_equals("custom header widget remains findable", refresh->parent()->part(), "header::custom");
-    ensure("custom header precedes minimize control", refresh->parent() == floater->header()->children()[2].get());
-    ensure("built-in controls follow custom header", floater->header()->children()[3].get() == floater->minimizeButton());
-    ensure_equals("minimize icon keeps the Floater part path", floater->minimizeButton()->children()[0]->part(), "header::minimize::icon");
-    ensure("nested Floater icon also fulfills the Button icon role",
-           floater->minimizeButton()->icon() == floater->minimizeButton()->children()[0].get());
-    ensure("expanded identity icon collapsed", floater->header()->children()[0]->visibility() == radia::ui::Visibility::Collapsed);
-    ensure("expanded identity title collapsed", floater->header()->children()[1]->visibility() == radia::ui::Visibility::Collapsed);
+    ASSERT_TRUE(result.ok());
+    Floater* floater = result.rootAs<Floater>();
+    ASSERT_NE(floater, nullptr);
+
+    WidgetRef<Panel> content = requireWidget<Panel>(*floater, "content");
+    WidgetRef<Button> refresh = requireWidget<Button>(*floater, "refresh");
+    ASSERT_TRUE(content);
+    ASSERT_TRUE(refresh);
+    ASSERT_NE(floater->header(), nullptr);
+    ASSERT_NE(floater->content(), nullptr);
+    EXPECT_EQ(content->parent(), floater->content());
+    EXPECT_EQ(refresh->parent()->part(), "header::custom");
+    EXPECT_EQ(refresh->parent(), floater->header()->children()[2].get());
+    EXPECT_EQ(floater->header()->children()[3].get(), floater->minimizeButton());
+    EXPECT_EQ(floater->minimizeButton()->children()[0]->part(), "header::minimize::icon");
+    EXPECT_EQ(floater->minimizeButton()->icon(), floater->minimizeButton()->children()[0].get());
+    EXPECT_EQ(floater->header()->children()[0]->visibility(), Visibility::Collapsed);
+    EXPECT_EQ(floater->header()->children()[1]->visibility(), Visibility::Collapsed);
 
     floater->setMinimized(true);
-    ensure("minimized identity icon shown", floater->header()->children()[0]->visibility() == radia::ui::Visibility::Visible);
-    ensure("minimized identity title shown", floater->header()->children()[1]->visibility() == radia::ui::Visibility::Visible);
-    ensure("custom header box collapsed while minimized", refresh->parent()->visibility() == radia::ui::Visibility::Collapsed);
-    ensure("content box collapsed while minimized", floater->content()->visibility() == radia::ui::Visibility::Collapsed);
+    EXPECT_EQ(floater->header()->children()[0]->visibility(), Visibility::Visible);
+    EXPECT_EQ(floater->header()->children()[1]->visibility(), Visibility::Visible);
+    EXPECT_EQ(refresh->parent()->visibility(), Visibility::Collapsed);
+    EXPECT_EQ(floater->content()->visibility(), Visibility::Collapsed);
+
     floater->setMinimized(false);
-    ensure("custom header box restored on expansion", refresh->parent()->visibility() == radia::ui::Visibility::Visible);
-    ensure("expanded identity returns collapsed", floater->header()->children()[1]->visibility() == radia::ui::Visibility::Collapsed);
+    EXPECT_EQ(refresh->parent()->visibility(), Visibility::Visible);
+    EXPECT_EQ(floater->header()->children()[1]->visibility(), Visibility::Collapsed);
 
     floater->clearChildren();
-    ensure("clearing authored children preserves owned header", floater->header() != nullptr);
-    ensure("clearing authored children preserves owned content box", floater->content() != nullptr);
-    ensure("clearing authored children expires content reference", !content);
-    ensure("clearing authored children expires custom header reference", !refresh);
-
-    const LayoutBuildResult missingTitle = factory.buildWidgetTreeFromString("<floater canMinimize=\"true\"/>", "missing_title.xml");
-    ensure("minimizable floater requires title", !missingTitle.ok());
-    ensure_equals("title diagnostic is stable", missingTitle.errors.front().code, "layout.floater.title_required");
-
-    const LayoutBuildResult duplicateHeader = factory.buildWidgetTreeFromString("<floater><header/><header/></floater>", "duplicate_header.xml");
-    ensure("duplicate custom header rejects widget tree", !duplicateHeader.ok());
-    ensure_equals("duplicate header diagnostic is stable", duplicateHeader.errors.front().code, "layout.part.duplicate");
-
-    const LayoutBuildResult attachedOnly = factory.buildWidgetTreeFromString("<floater canDetach=\"false\"/>", "attached_only.xml");
-    ensure("floater accepts detach policy", attachedOnly.ok());
-    ensure("floater detach policy defaults on and can opt out", !attachedOnly.rootAs<Floater>()->canDetach());
+    EXPECT_NE(floater->header(), nullptr);
+    EXPECT_NE(floater->content(), nullptr);
+    EXPECT_FALSE(content);
+    EXPECT_FALSE(refresh);
 }
 
-template<> template<> void resourceCompilerObject::test<14>() {
-    resources["widgets/floater.xml"] = "<floater closeIcon=\"close\" minimizeIcon=\"minimize\" canClose=\"false\"/>";
-    resources["defaulted.xml"] = "<floater title=\"defaulted\" canClose=\"true\"/>";
+TEST_F(LayoutResourceCompilerTest, RejectsInvalidFloaterHeaderAndDetachConfiguration) {
+    constexpr char kMissingTitleLayout[] = "<floater canMinimize=\"true\"/>";
+    constexpr char kDuplicateHeaderLayout[] = "<floater>"
+                                              "<header/><header/></floater>";
+    constexpr char kAttachedOnlyLayout[] = "<floater canDetach=\"false\"/>";
+    const LayoutBuildResult missingTitle = factory.buildWidgetTreeFromString(kMissingTitleLayout, "missing_title.xml");
+    ASSERT_FALSE(missingTitle.ok());
+    ASSERT_FALSE(missingTitle.errors.empty());
+    EXPECT_EQ(missingTitle.errors.front().code, "layout.floater.title_required");
 
-    ensure("Widget Defaults validate independently with case-insensitive lookup", !factory.validateWidgetDefaults("FLOATER").hasErrors());
+    const LayoutBuildResult duplicateHeader = factory.buildWidgetTreeFromString(kDuplicateHeaderLayout, "duplicate_header.xml");
+    ASSERT_FALSE(duplicateHeader.ok());
+    ASSERT_FALSE(duplicateHeader.errors.empty());
+    EXPECT_EQ(duplicateHeader.errors.front().code, "layout.part.duplicate");
 
+    LayoutBuildResult attachedOnly = factory.buildWidgetTreeFromString(kAttachedOnlyLayout, "attached_only.xml");
+    ASSERT_TRUE(attachedOnly.ok());
+    Floater* floater = attachedOnly.rootAs<Floater>();
+    ASSERT_NE(floater, nullptr);
+    EXPECT_FALSE(floater->canDetach());
+}
+
+TEST_F(LayoutResourceCompilerTest, AppliesWidgetDefaultsToFloater) {
+    constexpr char kFloaterDefaultsLayout[] = "<floater closeIcon=\"close\" minimizeIcon=\"minimize\" canClose=\"false\"/>";
+    constexpr char kDefaultedFloaterLayout[] = "<floater title=\"defaulted\" canClose=\"true\"/>";
+    resources["widgets/floater.xml"] = kFloaterDefaultsLayout;
+    resources["defaulted.xml"] = kDefaultedFloaterLayout;
+
+    EXPECT_FALSE(factory.validateWidgetDefaults("FLOATER").hasErrors());
     LayoutBuildResult result = factory.buildWidgetTreeFromResource("defaulted.xml");
-    auto* floater = result.rootAs<Floater>();
-    ensure("Widget Defaults apply", result.ok() && floater);
-    ensure_equals("default close icon applied", floater->closeIcon(), std::string("close"));
-    ensure_equals("default minimize icon applied", floater->minimizeIcon(), std::string("minimize"));
-    ensure_equals("default close icon reaches declared part", floater->closeButton()->icon()->name(), std::string("close"));
-    ensure_equals("default minimize icon reaches declared part", floater->minimizeButton()->icon()->name(), std::string("minimize"));
-    ensure("Widget tree attribute overrides Widget Default", floater->canClose());
-
-    resources["widgets/floater.xml"] = "<panel/>";
-    ensure("Widget Defaults validation reports invalid root", factory.validateWidgetDefaults("floater").hasErrors());
-    const LayoutBuildResult invalid = factory.buildWidgetTreeFromResource("defaulted.xml");
-    ensure("wrong Widget Defaults root rejects Widget tree", !invalid.ok());
-    ensure("invalid Widget Defaults expose no partial root", invalid.root == nullptr);
+    ASSERT_TRUE(result.ok());
+    Floater* floater = result.rootAs<Floater>();
+    ASSERT_NE(floater, nullptr);
+    EXPECT_EQ(floater->closeIcon(), "close");
+    EXPECT_EQ(floater->minimizeIcon(), "minimize");
+    ASSERT_NE(floater->closeButton(), nullptr);
+    ASSERT_NE(floater->minimizeButton(), nullptr);
+    ASSERT_NE(floater->closeButton()->icon(), nullptr);
+    ASSERT_NE(floater->minimizeButton()->icon(), nullptr);
+    EXPECT_EQ(floater->closeButton()->icon()->name(), "close");
+    EXPECT_EQ(floater->minimizeButton()->icon()->name(), "minimize");
+    EXPECT_TRUE(floater->canClose());
 }
 
-template<> template<> void resourceCompilerObject::test<15>() {
-    const char* kVisibilityLayout =
-        "<panel><text id=\"shown\" visibility=\"visible\"/><text id=\"hidden\" visibility=\"hidden\"/><text id=\"collapsed\" visibility=\"collapsed\"/></panel>";
+TEST_F(LayoutResourceCompilerTest, RejectsInvalidWidgetDefaults) {
+    constexpr char kInvalidFloaterDefaultsLayout[] = "<panel/>";
+    constexpr char kDefaultedLayout[] = "<floater title=\"defaulted\"/>";
+    resources["widgets/floater.xml"] = kInvalidFloaterDefaultsLayout;
+    resources["defaulted.xml"] = kDefaultedLayout;
+
+    EXPECT_TRUE(factory.validateWidgetDefaults("floater").hasErrors());
+    const LayoutBuildResult result = factory.buildWidgetTreeFromResource("defaulted.xml");
+    ASSERT_FALSE(result.ok());
+    EXPECT_FALSE(result.root);
+}
+
+TEST_F(LayoutResourceCompilerTest, CompilesTypedVisibilityValues) {
+    constexpr char kVisibilityLayout[] = "<panel><text id=\"shown\" visibility=\"visible\"/>"
+                                         "<text id=\"hidden\" visibility=\"hidden\"/>"
+                                         "<text id=\"collapsed\" visibility=\"collapsed\"/></panel>";
     const LayoutBuildResult result = factory.buildWidgetTreeFromString(kVisibilityLayout, "visibility.xml");
-    ensure("typed visibility values compile", result.ok());
-    ensure_equals("Visible value is typed", static_cast<int>(result.root->children()[0]->visibility()),
-                  static_cast<int>(radia::ui::Visibility::Visible));
-    ensure_equals("Hidden value is typed", static_cast<int>(result.root->children()[1]->visibility()),
-                  static_cast<int>(radia::ui::Visibility::Hidden));
-    ensure_equals("Collapsed value is typed", static_cast<int>(result.root->children()[2]->visibility()),
-                  static_cast<int>(radia::ui::Visibility::Collapsed));
-
-    const LayoutBuildResult invalid = factory.buildWidgetTreeFromString("<text visibility=\"invisible\"/>", "invalid_visibility.xml");
-    ensure("invalid visibility is rejected", !invalid.ok());
-    ensure_equals("invalid visibility diagnostic is stable", invalid.errors.front().code, "layout.attribute.visibility_invalid");
-
-    const LayoutBuildResult legacy = factory.buildWidgetTreeFromString("<text visible=\"false\"/>", "legacy_visibility.xml");
-    ensure("legacy boolean visibility is rejected", !legacy.ok());
-    ensure_equals("legacy visibility is an unknown attribute", legacy.errors.front().code, "layout.attribute.unknown");
-
-    const LayoutBuildResult legacyBinding = factory.buildWidgetTreeFromString("<switch bind=\"old-setting\"/>", "legacy-bind.xml");
-    ensure("legacy provider binding syntax is rejected", !legacyBinding.ok());
-    ensure_equals("legacy provider binding is an unknown attribute", legacyBinding.errors.front().code, "layout.attribute.unknown");
+    ASSERT_TRUE(result.ok());
+    ASSERT_TRUE(result.root);
+    ASSERT_EQ(result.root->children().size(), 3U);
+    EXPECT_EQ(result.root->children()[0]->visibility(), Visibility::Visible);
+    EXPECT_EQ(result.root->children()[1]->visibility(), Visibility::Hidden);
+    EXPECT_EQ(result.root->children()[2]->visibility(), Visibility::Collapsed);
 }
 
-template<> template<> void resourceCompilerObject::test<16>() {
-    resources["widgets/label.xml"] = "<label visibility=\"sometimes\"/>";
+TEST_F(LayoutResourceCompilerTest, RejectsInvalidAndLegacyVisibilitySyntax) {
+    struct InvalidVisibilityCase {
+        const char* name;
+        const char* markup;
+        const char* diagnostic;
+    };
+    const InvalidVisibilityCase cases[] = {
+        {"invalid enum value", "<text visibility=\"invisible\"/>", "layout.attribute.visibility_invalid"},
+        {"legacy boolean visibility", "<text visible=\"false\"/>", "layout.attribute.unknown"},
+        {"legacy provider binding", "<switch bind=\"old-setting\"/>", "layout.attribute.unknown"},
+    };
+    for (const auto& test : cases) {
+        SCOPED_TRACE(Message() << "visibility markup: " << test.name);
+        const LayoutBuildResult result = factory.buildWidgetTreeFromString(test.markup, test.name);
+        ASSERT_FALSE(result.ok());
+        ASSERT_FALSE(result.errors.empty());
+        EXPECT_EQ(result.errors.front().code, test.diagnostic);
+    }
+}
+
+TEST_F(LayoutResourceCompilerTest, ValidatesWidgetDefaultDiagnostics) {
+    constexpr char kInvalidVisibilityDefaultsLayout[] = "<label visibility=\"sometimes\"/>";
+    constexpr char kLabelDefaultsLayout[] = "<label/>";
+    constexpr char kInvalidSwitchDefaultsLayout[] = "<switch checked=\"sometimes\"/>";
+    resources["widgets/label.xml"] = kInvalidVisibilityDefaultsLayout;
     const DiagnosticResult visibility = factory.validateWidgetDefaults("label");
-    ensure("Widget Defaults validate typed visibility values", visibility.hasErrors());
-    ensure_equals("Widget Defaults preserve visibility diagnostics", visibility.errors.front().code, "layout.attribute.visibility_invalid");
+    ASSERT_TRUE(visibility.hasErrors());
+    EXPECT_EQ(visibility.errors.front().code, "layout.attribute.visibility_invalid");
 
-    resources["widgets/label.xml"] = "<label/>";
-    resources["widgets/switch.xml"] = "<switch checked=\"sometimes\"/>";
-    const DiagnosticResult widget_attribute = factory.validateWidgetDefaults("switch");
-    ensure("Widget Defaults validate widget-specific typed values", widget_attribute.hasErrors());
-    ensure_equals("Widget Defaults preserve widget attribute diagnostics", widget_attribute.errors.front().code, "layout.attribute.boolean_invalid");
+    resources["widgets/label.xml"] = kLabelDefaultsLayout;
+    resources["widgets/switch.xml"] = kInvalidSwitchDefaultsLayout;
+    const DiagnosticResult widgetAttribute = factory.validateWidgetDefaults("switch");
+    ASSERT_TRUE(widgetAttribute.hasErrors());
+    EXPECT_EQ(widgetAttribute.errors.front().code, "layout.attribute.boolean_invalid");
 }
 
-template<> template<> void resourceCompilerObject::test<17>() {
-    const char* kCaseInsensitiveLayout =
-        "<FlOaTeR TiTlE=\"tools\" CaNMiNiMiZe=\"true\"><HeAdEr><BuTtOn ID=\"saveFile\" ONCLICK=\"saveFile()\"><IcOn SrC=\"search\"/>Save</BuTtOn></HeAdEr></FlOaTeR>";
+TEST_F(LayoutResourceCompilerTest, AcceptsCaseInsensitiveMarkupNames) {
+    constexpr char kCaseInsensitiveLayout[] = "<FlOaTeR TiTlE=\"tools\" CaNMiNiMiZe=\"true\"><HeAdEr>"
+                                              "<BuTtOn ID=\"saveFile\" ONCLICK=\"saveFile()\">"
+                                              "<IcOn SrC=\"search\"/>Save</BuTtOn></HeAdEr></FlOaTeR>";
     LayoutBuildResult result = factory.buildWidgetTreeFromString(kCaseInsensitiveLayout, "case-insensitive.xml");
-    auto* floater = result.rootAs<Floater>();
-    ensure("element and attribute lookup is ASCII case-insensitive", result.ok() && floater);
-    auto button = requireWidget<Button>(*floater, "saveFile");
-    ensure("mixed-case schema names retain canonical widget behavior", button && button->icon());
-    ensure_equals("contract retains canonical element spelling", button->elementName(), std::string("button"));
-    ensure_equals("mixed-case Event attribute resolves", button->eventCall(WidgetEventKind::Click)->name(), std::string("saveFile"));
+    ASSERT_TRUE(result.ok());
+    Floater* floater = result.rootAs<Floater>();
+    ASSERT_NE(floater, nullptr);
+    const WidgetRef<Button> button = requireWidget<Button>(*floater, "saveFile");
+    ASSERT_TRUE(button);
+    ASSERT_NE(button->icon(), nullptr);
+    EXPECT_EQ(button->elementName(), "button");
+    ASSERT_NE(button->eventCall(WidgetEventKind::Click), nullptr);
+    EXPECT_EQ(button->eventCall(WidgetEventKind::Click)->name(), "saveFile");
 }
 
-template<> template<> void resourceCompilerObject::test<18>() {
-    const LayoutBuildResult snake = factory.buildWidgetTreeFromString("<BuTtOn\n  on_click=\"saveFile()\"/>", "legacy-snake.xml");
-    ensure("legacy snake_case attribute is rejected", !snake.ok());
-    ensure_equals("legacy attribute is not an alias", snake.errors.front().code, std::string("layout.attribute.unknown"));
-    ensure_equals("legacy attribute diagnostic retains source line", snake.errors.front().line, std::size_t(1));
-    ensure("known element names use canonical spelling in diagnostics", snake.errors.front().message.find("<button>") != std::string::npos);
+TEST_F(LayoutResourceCompilerTest, RejectsLegacyNamesAndCaseFoldedConflicts) {
+    struct InvalidMarkupCase {
+        const char* name;
+        const char* markup;
+        const char* diagnostic;
+    };
+    const InvalidMarkupCase cases[] = {
+        {"snake-case event attribute", "<BuTtOn\n  on_click=\"saveFile()\"/>", "layout.attribute.unknown"},
+        {"case-folded duplicate attribute", "<button onClick=\"saveOne()\" ONCLICK=\"saveTwo()\"/>", "layout.attribute.duplicate"},
+        {"invalid widget id", "<panel id=\"bad.id\"/>", "layout.id.invalid"},
+        {"invalid widget class", "<panel class=\"BadClass\"/>", "layout.class.invalid"},
+    };
+    for (const auto& test : cases) {
+        SCOPED_TRACE(Message() << "invalid markup: " << test.name);
+        const LayoutBuildResult result = factory.buildWidgetTreeFromString(test.markup, test.name);
+        ASSERT_FALSE(result.ok());
+        ASSERT_FALSE(result.errors.empty());
+        EXPECT_EQ(result.errors.front().code, test.diagnostic);
+    }
 
-    const LayoutBuildResult duplicate =
-        factory.buildWidgetTreeFromString("<button onClick=\"saveOne()\" ONCLICK=\"saveTwo()\"/>", "duplicate-case.xml");
-    ensure("attributes colliding after case folding are rejected", !duplicate.ok());
-    ensure_equals("case-folded duplicate has a stable diagnostic", duplicate.errors.front().code, std::string("layout.attribute.duplicate"));
+    constexpr char kInvalidHandlerLayout[] = "<button onClick=\"bad_action()\"/>";
+    const LayoutBuildResult invalidHandler = factory.buildWidgetTreeFromString(kInvalidHandlerLayout, "handler-name.xml");
+    ASSERT_TRUE(invalidHandler.ok());
+    ASSERT_EQ(invalidHandler.warnings.size(), 1U);
+    EXPECT_EQ(invalidHandler.warnings.front().code, "layout.event.name_invalid");
 
-    const LayoutBuildResult invalidId = factory.buildWidgetTreeFromString("<panel id=\"bad.id\"/>", "id.xml");
-    ensure("invalid Widget ID characters are rejected", !invalidId.ok());
-    ensure_equals("invalid ID diagnostic is stable", invalidId.errors.front().code, std::string("layout.id.invalid"));
-
-    const LayoutBuildResult invalidClass = factory.buildWidgetTreeFromString("<panel class=\"BadClass\"/>", "class.xml");
-    ensure("non-kebab Widget class is rejected", !invalidClass.ok());
-    ensure_equals("invalid class diagnostic is stable", invalidClass.errors.front().code, std::string("layout.class.invalid"));
-
-    const LayoutBuildResult invalidHandler = factory.buildWidgetTreeFromString("<button onClick=\"bad_action()\"/>", "handler-name.xml");
-    ensure("invalid Handler name leaves the Widget tree usable", invalidHandler.ok());
-    ensure_equals("invalid Handler name reports one warning", invalidHandler.warnings.size(), 1U);
-    ensure_equals("invalid Handler diagnostic is stable", invalidHandler.warnings.front().code, std::string("layout.event.name_invalid"));
-
-    ensure("Icon name alias is removed", !factory.buildWidgetTreeFromString("<icon name=\"search\"/>").ok());
-    ensure("Icon icon alias is removed", !factory.buildWidgetTreeFromString("<icon icon=\"search\"/>").ok());
-    ensure("Icon source alias is removed", !factory.buildWidgetTreeFromString("<icon source=\"search\"/>").ok());
-    ensure("legacy qualified header element is removed", !factory.buildWidgetTreeFromString("<floater><floater.header/></floater>").ok());
+    const char* removedMarkup[] = {
+        "<icon name=\"search\"/>",
+        "<icon icon=\"search\"/>",
+        "<icon source=\"search\"/>",
+        "<floater><floater.header/></floater>",
+    };
+    for (const char* markup : removedMarkup) {
+        SCOPED_TRACE(Message() << "removed legacy markup: " << markup);
+        EXPECT_FALSE(factory.buildWidgetTreeFromString(markup).ok());
+    }
 }
 
-template<> template<> void resourceCompilerObject::test<19>() {
-    const char* kEventCallLayout =
-        "<panel><button id=\"inspect\" onClick=\"inspect(4, 'settings', true, this, event)\"/><button id=\"bare\" onClick=\"press\"/><button id=\"lifecycle\" onClick=\"postBuild()\"/></panel>";
-    LayoutBuildResult result = factory.buildWidgetTreeFromString(kEventCallLayout, "event-calls.xml");
-    ensure("valid and invalid Event Handler Calls keep the Widget tree usable", result.ok());
-    ensure_equals("bare and lifecycle names each warn", result.warnings.size(), 2U);
-    ensure_equals("bare name requires call syntax", result.warnings[0].code, std::string("layout.event.call_required"));
-    ensure_equals("lifecycle Handler name is reserved", result.warnings[1].code, std::string("layout.event.handler_reserved"));
+TEST_F(LayoutResourceCompilerTest, PreservesValidEventCallsAndWarnsForInvalidCalls) {
+    constexpr char kEventCallsLayout[] = "<panel><button id=\"inspect\" "
+                                         "onClick=\"inspect(4, 'settings', true, this, event)\"/>"
+                                         "<button id=\"bare\" onClick=\"press\"/>"
+                                         "<button id=\"lifecycle\" onClick=\"postBuild()\"/></panel>";
+    LayoutBuildResult result = factory.buildWidgetTreeFromString(kEventCallsLayout, "event-calls.xml");
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.warnings.size(), 2U);
+    EXPECT_EQ(result.warnings[0].code, "layout.event.call_required");
+    EXPECT_EQ(result.warnings[1].code, "layout.event.handler_reserved");
 
-    auto inspect = requireWidget<Button>(*result.root, "inspect");
-    auto bare = requireWidget<Button>(*result.root, "bare");
-    auto lifecycle = requireWidget<Button>(*result.root, "lifecycle");
-    ensure("parsed Event Handler Call is attached", inspect && inspect->eventCall(WidgetEventKind::Click));
-    ensure_equals("parsed Event Handler name retained", inspect->eventCall(WidgetEventKind::Click)->name(), std::string("inspect"));
-    ensure_equals("all parsed arguments retained", inspect->eventCall(WidgetEventKind::Click)->arguments().size(), 5U);
-    ensure("invalid and reserved calls attach no runtime binding",
-           bare && lifecycle && !bare->eventCall(WidgetEventKind::Click) && !lifecycle->eventCall(WidgetEventKind::Click));
+    const WidgetRef<Button> inspect = requireWidget<Button>(*result.root, "inspect");
+    const WidgetRef<Button> bare = requireWidget<Button>(*result.root, "bare");
+    const WidgetRef<Button> lifecycle = requireWidget<Button>(*result.root, "lifecycle");
+    ASSERT_TRUE(inspect);
+    ASSERT_TRUE(bare);
+    ASSERT_TRUE(lifecycle);
+    ASSERT_NE(inspect->eventCall(WidgetEventKind::Click), nullptr);
+    EXPECT_EQ(inspect->eventCall(WidgetEventKind::Click)->name(), "inspect");
+    EXPECT_EQ(inspect->eventCall(WidgetEventKind::Click)->arguments().size(), 5U);
+    EXPECT_EQ(bare->eventCall(WidgetEventKind::Click), nullptr);
+    EXPECT_EQ(lifecycle->eventCall(WidgetEventKind::Click), nullptr);
 }
-} // namespace tut

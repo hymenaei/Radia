@@ -188,33 +188,27 @@ target_precompile_headers(ui REUSE_FROM llprecompiled)
 
 if (BUILD_TESTING)
   set(ui_test_sources
+    localization/localization.cpp
     binding/binder.cpp
     eventcall.cpp
+    path.cpp
     widgets/switch.cpp
-    style/color.cpp
     widgets/field.cpp
-    surface/floaterresize.cpp
-    surface/surface.cpp
-    surface/floaters.cpp
-    layout/engine.cpp
-    layout/schema.cpp
-    localization/localization.cpp
-    style/stylesheet.cpp
+    style/color.cpp
     style/compiler.cpp
+    style/stylesheet.cpp
     system.cpp
     render/svg.cpp
-    widgets/widget.cpp
     render/tessellator.cpp
+    surface/floaters.cpp
+    surface/floaterresize.cpp
+    surface/surface.cpp
+    layout/engine.cpp
+    layout/schema.cpp
     layout/resourcecompiler.cpp
-    path.cpp
+    widgets/widget.cpp
   )
 
-  set_source_files_properties(
-    ${ui_test_sources}
-    PROPERTIES
-    LL_TEST_ADDITIONAL_PROJECTS ui
-  )
-
-  LL_ADD_PROJECT_UNIT_TESTS(ui "${ui_test_sources}")
-  LL_ADD_INTEGRATION_TEST(surfacestate "" "ui" "ui")
+  RD_ADD_UNIT_TESTS(ui "${ui_test_sources}")
+  RD_ADD_INTEGRATION_TEST(surfacestate "" "ui" "ui")
 endif ()

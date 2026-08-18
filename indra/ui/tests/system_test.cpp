@@ -23,8 +23,10 @@
  */
 
 #include "linden_common.h"
+#include <gtest/gtest.h>
+#include <memory>
+#include <string>
 #include <utility>
-#include "../test/lltut.h"
 #include "skin/compiler.h"
 #include "surface/surface.h"
 #include "system.h"
@@ -32,7 +34,8 @@
 #include "widgets/label.h"
 #include "widgets/text.h"
 
-namespace tut {
+namespace {
+using radia::ui::fixedTextMetrics;
 using radia::ui::KeybindingPresentation;
 using radia::ui::Label;
 using radia::ui::LayoutBuildResult;
@@ -44,10 +47,8 @@ using radia::ui::Surface;
 using radia::ui::System;
 using radia::ui::Text;
 using radia::ui::Widget;
-using radia::ui::fixedTextMetrics;
 
-namespace {
-const char* kEmptyLocalization = "defaultLocale: en\nlocales: {en: {name: English, strings: {}}}\n";
+constexpr char kEmptyLocalization[] = "defaultLocale: en\nlocales: {en: {name: English, strings: {}}}\n";
 
 std::string singleStringLocalization(const std::string& key, const std::string& value) {
     return "defaultLocale: en\nlocales: {en: {name: English, strings: {" + key + ": \"" + value + "\"}}}\n";
@@ -82,99 +83,124 @@ private:
     int mNotifications = 0;
 };
 
-struct systemData {};
-using systemTest = test_group<systemData>;
-using systemObject = systemTest::object;
-systemTest systemTestCase("system");
+TEST(SystemTest, PublishesLocalizationStylesIconsAndWidgetResources) {
+    constexpr char kPublishedStyles[] = "label { width: 40px; }";
+    constexpr char kViewMarkup[] = "<text id=\"message\">message</text>";
+    constexpr char kSearchIcon[] = "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0 L10 10\"/></svg>";
 
-template<> template<> void systemObject::test<1>() {
-    ResourceSnapshot snapshot = skinSnapshot(singleStringLocalization("message", "Ready"), "label { width: 40px; }");
-    snapshot.add("view.xml", "<text id=\"message\">message</text>");
-    snapshot.add("resources/icons/search.svg", "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0 L10 10\"/></svg>");
+    ResourceSnapshot snapshot = skinSnapshot(singleStringLocalization("message", "Ready"), kPublishedStyles);
+    snapshot.add("view.xml", kViewMarkup);
+    snapshot.add("resources/icons/search.svg", kSearchIcon);
 
     const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(std::move(snapshot));
-    ensure("complete generation prepares", prepared.ok());
+    ASSERT_TRUE(prepared.ok());
 
     System system;
-    system.publish(prepared.generation);
-    ensure_equals("publication advances generation", system.generation(), 1ULL);
-    ensure_equals("localization published", system.resolveText("message"), "Ready");
-    ensure_equals("stylesheet published", resolvedLabelWidth(system), 40.f);
-    ensure("compiled icon published", system.hasIcon("search"));
+    ASSERT_TRUE(system.publish(prepared.generation));
+    EXPECT_EQ(system.generation(), 1ULL);
+    EXPECT_EQ(system.resolveText("message"), "Ready");
+    EXPECT_EQ(resolvedLabelWidth(system), 40.f);
+    EXPECT_TRUE(system.hasIcon("search"));
 
-    LayoutBuildResult buildResult = system.buildWidgetTree("view.xml");
-    ensure("System creates localized Widget tree", buildResult.ok());
-    ensure_equals("Widget tree uses published localization", buildResult.rootAs<Text>()->text(), "Ready");
+    const LayoutBuildResult buildResult = system.buildWidgetTree("view.xml");
+    ASSERT_TRUE(buildResult.ok());
+    const Text* text = buildResult.rootAs<Text>();
+    ASSERT_NE(text, nullptr);
+    EXPECT_EQ(text->text(), "Ready");
 
     std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
-    ensure("System creates Surface", surface != nullptr);
+    ASSERT_NE(surface, nullptr);
     surface->setViewport(100.f, 100.f);
     auto styled = std::make_unique<Label>();
     Label* styledPtr = styled.get();
     surface->mount(std::move(styled));
     surface->updateLayout();
-    ensure_equals("Surface shares published stylesheet", styledPtr->rect().w, 40.f);
+    EXPECT_EQ(styledPtr->rect().w, 40.f);
 }
 
-template<> template<> void systemObject::test<2>() {
+TEST(SystemTest, RejectsInvalidCandidatesWithoutReplacingLiveGeneration) {
+    constexpr char kLiveStyles[] = "label { width: 40px; }";
+    constexpr char kInvalidLocalization[] = "defaultLocale: [";
+    constexpr char kInvalidStyles[] = "label { flow: sideways; width: 90px; }";
+
     System system;
-    SkinGenerationPrepareResult live =
-        SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Live"), "label { width: 40px; }"));
-    ensure("live generation prepares", live.ok());
-    system.publish(live.generation);
+    const SkinGenerationPrepareResult live = SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Live"), kLiveStyles));
+    ASSERT_TRUE(live.ok());
+    ASSERT_TRUE(system.publish(live.generation));
 
-    const SkinGenerationPrepareResult rejected =
-        SkinCompiler().prepare(skinSnapshot("defaultLocale: [", "label { flow: sideways; width: 90px; }"));
-    ensure("invalid candidate rejected", !rejected.ok());
-    ensure_equals("failed preparation preserves generation", system.generation(), 1ULL);
-    ensure_equals("failed preparation preserves localization", system.resolveText("message"), "Live");
-    ensure_equals("failed preparation preserves stylesheet", resolvedLabelWidth(system), 40.f);
+    const SkinGenerationPrepareResult rejected = SkinCompiler().prepare(skinSnapshot(kInvalidLocalization, kInvalidStyles));
+    ASSERT_FALSE(rejected.ok());
+    EXPECT_FALSE(rejected.generation);
+    EXPECT_EQ(system.generation(), 1ULL);
+    EXPECT_EQ(system.resolveText("message"), "Live");
+    EXPECT_EQ(resolvedLabelWidth(system), 40.f);
 }
 
-template<> template<> void systemObject::test<3>() {
-    ResourceSnapshot snapshot = skinSnapshot({}, "icon { size: 16px; }");
+TEST(SystemTest, RejectsEmptyReferencedIcons) {
+    constexpr char kIconStyles[] = "icon { size: 16px; }";
+
+    ResourceSnapshot snapshot = skinSnapshot({}, kIconStyles);
     snapshot.add("resources/icons/search.svg", "");
     const SkinGenerationPrepareResult rejected = SkinCompiler().prepare(std::move(snapshot));
-    ensure("empty icon rejects complete generation", !rejected.ok());
-    ensure("rejected generation is not exposed", rejected.generation == nullptr);
+
+    ASSERT_FALSE(rejected.ok());
+    EXPECT_FALSE(rejected.generation);
 }
 
-template<> template<> void systemObject::test<4>() {
-    ResourceSnapshot snapshot = skinSnapshot({}, "icon { size: 16px; }");
-    snapshot.add("known.xml", "<icon src=\"actions/search\"/>");
-    snapshot.add("missing.xml", "<icon src=\"actions/missing\"/>");
-    snapshot.add("resources/icons/actions/search.svg", "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0 L10 10\"/></svg>");
+TEST(SystemTest, RejectsUnknownIconsInLayoutResources) {
+    constexpr char kIconStyles[] = "icon { size: 16px; }";
+    constexpr char kKnownIconMarkup[] = "<icon src=\"actions/search\"/>";
+    constexpr char kMissingIconMarkup[] = "<icon src=\"actions/missing\"/>";
+    constexpr char kSearchIcon[] = "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0 L10 10\"/></svg>";
 
+    ResourceSnapshot snapshot = skinSnapshot({}, kIconStyles);
+    snapshot.add("known.xml", kKnownIconMarkup);
+    snapshot.add("missing.xml", kMissingIconMarkup);
+    snapshot.add("resources/icons/actions/search.svg", kSearchIcon);
     const SkinGenerationPrepareResult rejected = SkinCompiler().prepare(std::move(snapshot));
-    ensure("unknown icon in any Layout Resource rejects generation", !rejected.ok());
-    ensure("invalid complete generation is not exposed", rejected.generation == nullptr);
+
+    ASSERT_FALSE(rejected.ok());
+    EXPECT_FALSE(rejected.generation);
 }
 
-template<> template<> void systemObject::test<5>() {
-    ResourceSnapshot missingLocalization;
-    missingLocalization.add("skin.radia", "label { width: 40px; }");
-    const SkinGenerationPrepareResult rejected = SkinCompiler().prepare(std::move(missingLocalization));
-    ensure("missing required resource rejects candidate", !rejected.ok());
-    ensure_equals("diagnostic identifies missing resource", rejected.errors.front().source, "localization.yaml");
-}
+TEST(SystemTest, RejectsSnapshotsWithoutLocalization) {
+    constexpr char kStylesWithoutLocalization[] = "label { width: 40px; }";
 
-template<> template<> void systemObject::test<6>() {
-    ResourceSnapshot snapshot = skinSnapshot({}, "icon { size: 16px; }");
-    snapshot.add("resources/icons/search.svg", "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0 L10\"/></svg>");
+    ResourceSnapshot snapshot;
+    snapshot.add("skin.radia", kStylesWithoutLocalization);
     const SkinGenerationPrepareResult rejected = SkinCompiler().prepare(std::move(snapshot));
-    ensure("malformed SVG rejects complete generation", !rejected.ok());
-    ensure_equals("icon diagnostic identifies resource", rejected.errors.front().source, "resources/icons/search.svg");
+
+    ASSERT_FALSE(rejected.ok());
+    ASSERT_FALSE(rejected.errors.empty());
+    EXPECT_EQ(rejected.errors.front().source, "localization.yaml");
 }
 
-template<> template<> void systemObject::test<7>() {
-    const std::string kMultilingual =
-        "defaultLocale: en\nlocales: {en: {name: English, strings: {message: Ready}}, pt: {name: Português, strings: {message: Pronto}}, ar: {name: العربية, direction: rtl, strings: {message: جاهز}}}\n";
-    SkinGenerationPrepareResult prepared = SkinCompiler().prepare(skinSnapshot(kMultilingual));
-    ensure("multilingual generation prepares", prepared.ok());
+TEST(SystemTest, RejectsMalformedIcons) {
+    constexpr char kIconStyles[] = "icon { size: 16px; }";
+    constexpr char kMalformedIcon[] = "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0 L10\"/></svg>";
+
+    ResourceSnapshot snapshot = skinSnapshot({}, kIconStyles);
+    snapshot.add("resources/icons/search.svg", kMalformedIcon);
+    const SkinGenerationPrepareResult rejected = SkinCompiler().prepare(std::move(snapshot));
+
+    ASSERT_FALSE(rejected.ok());
+    ASSERT_FALSE(rejected.errors.empty());
+    EXPECT_EQ(rejected.errors.front().source, "resources/icons/search.svg");
+}
+
+TEST(SystemTest, UpdatesMountedWidgetsWhenLocaleChanges) {
+    constexpr char kMultilingualLocalization[] = "defaultLocale: en\nlocales: {en: {name: English, strings: {message: Ready}}, "
+                                                 "pt: {name: Português, strings: {message: Pronto}}, "
+                                                 "ar: {name: العربية, direction: rtl, strings: {message: جاهز}}}\n";
+
+    const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(skinSnapshot(kMultilingualLocalization));
+    ASSERT_TRUE(prepared.ok());
 
     System system;
-    system.publish(prepared.generation);
+    ASSERT_TRUE(system.publish(prepared.generation));
     std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
+    ASSERT_NE(surface, nullptr);
+    surface->setViewport(200.f, 100.f);
     auto localized = std::make_unique<Label>();
     Label* localizedPtr = localized.get();
     localized->setContent(system.localize("message"));
@@ -183,112 +209,142 @@ template<> template<> void systemObject::test<7>() {
     LocaleProbe* probePtr = probe.get();
     surface->root().addChild(std::move(probe));
 
-    ensure("Portuguese locale selected", system.setLocale("pt"));
-    ensure_equals("localized Widget updates reactively", localizedPtr->text(), "Pronto");
-    ensure_equals("Surface delivers locale change", probePtr->notifications(), 2);
-
-    SkinGenerationPrepareResult compatible = SkinCompiler().prepare(skinSnapshot(kMultilingual));
-    system.publish(compatible.generation);
-    ensure_equals("selected locale survives publication", system.activeLocale(), "pt");
-
-    SkinGenerationPrepareResult fallback = SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Ready again")));
-    system.publish(fallback.generation);
-    ensure_equals("removed locale falls back to default", system.activeLocale(), "en");
-    ensure_equals("fallback refreshes localized Widget", localizedPtr->text(), "Ready again");
+    ASSERT_TRUE(system.setLocale("pt"));
+    EXPECT_EQ(localizedPtr->text(), "Pronto");
+    EXPECT_EQ(probePtr->notifications(), 2);
 }
 
-template<> template<> void systemObject::test<8>() {
+TEST(SystemTest, PreservesLocaleAcrossPublicationAndFallsBackWhenRemoved) {
+    constexpr char kMultilingualLocalization[] = "defaultLocale: en\nlocales: {en: {name: English, strings: {message: Ready}}, "
+                                                 "pt: {name: Português, strings: {message: Pronto}}, "
+                                                 "ar: {name: العربية, direction: rtl, strings: {message: جاهز}}}\n";
+
     System system;
-    SkinGenerationPrepareResult live =
-        SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Old"), "label { width: 40px; }"));
-    system.publish(live.generation);
+    const SkinGenerationPrepareResult initial = SkinCompiler().prepare(skinSnapshot(kMultilingualLocalization));
+    ASSERT_TRUE(initial.ok());
+    ASSERT_TRUE(system.publish(initial.generation));
+    ASSERT_TRUE(system.setLocale("pt"));
+
+    const SkinGenerationPrepareResult compatible = SkinCompiler().prepare(skinSnapshot(kMultilingualLocalization));
+    ASSERT_TRUE(compatible.ok());
+    ASSERT_TRUE(system.publish(compatible.generation));
+    EXPECT_EQ(system.activeLocale(), "pt");
+
+    const SkinGenerationPrepareResult fallback = SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Ready again")));
+    ASSERT_TRUE(fallback.ok());
+    ASSERT_TRUE(system.publish(fallback.generation));
+    EXPECT_EQ(system.activeLocale(), "en");
+    EXPECT_EQ(system.resolveText("message"), "Ready again");
+}
+
+TEST(SystemTest, PublishesGenerationUpdatesToExistingSurfacesAndNewTrees) {
+    constexpr char kLiveStyles[] = "label { width: 40px; }";
+    constexpr char kCandidateStyles[] = "label { width: 90px; }";
+    constexpr char kViewMarkup[] = "<text>message</text>";
+
+    System system;
+    const SkinGenerationPrepareResult live = SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Old"), kLiveStyles));
+    ASSERT_TRUE(live.ok());
+    ASSERT_TRUE(system.publish(live.generation));
+
     std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
+    ASSERT_NE(surface, nullptr);
     surface->setViewport(200.f, 100.f);
     auto styled = std::make_unique<Label>();
     Label* styledPtr = styled.get();
     surface->mount(std::move(styled));
     surface->updateLayout();
-    ensure_equals("existing Surface starts with live stylesheet", styledPtr->rect().w, 40.f);
+    EXPECT_EQ(styledPtr->rect().w, 40.f);
 
-    ResourceSnapshot snapshot = skinSnapshot(singleStringLocalization("message", "New"), "label { width: 90px; }");
-    snapshot.add("view.xml", "<text>message</text>");
-    SkinGenerationPrepareResult prepared = SkinCompiler().prepare(std::move(snapshot));
-    ensure("candidate generation prepares", prepared.ok());
-    ensure_equals("preparation does not advance live generation", system.generation(), 1ULL);
-    ensure_equals("preparation preserves live localization", system.resolveText("message"), "Old");
-    LayoutBuildResult candidateBuildResult = prepared.generation->buildWidgetTree("view.xml", system.activeLocale());
-    ensure("candidate Widget tree builds against candidate generation", candidateBuildResult.ok());
-    ensure_equals("candidate Widget tree uses candidate localization", candidateBuildResult.rootAs<Text>()->text(), "New");
+    ResourceSnapshot snapshot = skinSnapshot(singleStringLocalization("message", "New"), kCandidateStyles);
+    snapshot.add("view.xml", kViewMarkup);
+    const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(std::move(snapshot));
+    ASSERT_TRUE(prepared.ok());
+    EXPECT_EQ(system.generation(), 1ULL);
+    EXPECT_EQ(system.resolveText("message"), "Old");
 
-    system.publish(prepared.generation);
-    ensure_equals("publication advances generation once", system.generation(), 2ULL);
-    ensure_equals("publication commits candidate localization", system.resolveText("message"), "New");
+    const LayoutBuildResult candidateBuild = prepared.generation->buildWidgetTree("view.xml", system.activeLocale());
+    ASSERT_TRUE(candidateBuild.ok());
+    const Text* candidateText = candidateBuild.rootAs<Text>();
+    ASSERT_NE(candidateText, nullptr);
+    EXPECT_EQ(candidateText->text(), "New");
+
+    ASSERT_TRUE(system.publish(prepared.generation));
+    EXPECT_EQ(system.generation(), 2ULL);
+    EXPECT_EQ(system.resolveText("message"), "New");
     surface->updateLayout();
-    ensure_equals("existing Surface observes published stylesheet", styledPtr->rect().w, 90.f);
-    ensure("live Widget tree creation uses published snapshot", system.buildWidgetTree("view.xml").ok());
+    EXPECT_EQ(styledPtr->rect().w, 90.f);
+
+    const LayoutBuildResult liveBuild = system.buildWidgetTree("view.xml");
+    ASSERT_TRUE(liveBuild.ok());
+    const Text* liveText = liveBuild.rootAs<Text>();
+    ASSERT_NE(liveText, nullptr);
+    EXPECT_EQ(liveText->text(), "New");
 }
 
-template<> template<> void systemObject::test<9>() {
-    System system;
-    SkinGenerationPrepareResult live = SkinCompiler().prepare(skinSnapshot({}, "label { width: 40px; }"));
-    system.publish(live.generation);
+TEST(SystemTest, RejectsInvalidUnmountedLayoutResources) {
+    constexpr char kStyles[] = "label { width: 90px; }";
+    constexpr char kValidMarkup[] = "<text>Ready</text>";
+    constexpr char kUnsupportedMarkup[] = "<unsupported/>";
 
-    const SkinGenerationPrepareResult rejected = SkinCompiler().prepare(skinSnapshot("defaultLocale: [", "label { width: 90px; }"));
-    ensure("invalid prepared generation rejects", !rejected.ok());
-    ensure_equals("rejected preparation preserves generation", system.generation(), 1ULL);
-    ensure_equals("rejected preparation preserves stylesheet", resolvedLabelWidth(system), 40.f);
+    ResourceSnapshot snapshot = skinSnapshot({}, kStyles);
+    snapshot.add("valid.xml", kValidMarkup);
+    snapshot.add("unused.xml", kUnsupportedMarkup);
+    const SkinGenerationPrepareResult rejected = SkinCompiler().prepare(std::move(snapshot));
+
+    ASSERT_FALSE(rejected.ok());
+    EXPECT_FALSE(rejected.generation);
 }
 
-template<> template<> void systemObject::test<10>() {
-    ResourceSnapshot invalid = skinSnapshot({}, "label { width: 90px; }");
-    invalid.add("valid.xml", "<text>Ready</text>");
-    invalid.add("unused.xml", "<unsupported/>");
+TEST(SystemTest, RefreshesKbdPresentationWhenKeybindingsChange) {
+    constexpr char kKeybindingLocalization[] = "defaultLocale: en\nlocales: {en: {name: English, strings: "
+                                               "{fly.label: 'Fly <kbd shortcut=\"toggle-fly\"/>'}}}\n";
+    constexpr char kViewMarkup[] = "<text>fly.label</text>";
 
-    const SkinGenerationPrepareResult rejected = SkinCompiler().prepare(std::move(invalid));
-    ensure("invalid unmounted Layout Resource rejects complete generation", !rejected.ok());
-    ensure("rejected complete generation is not exposed", rejected.generation == nullptr);
-}
-
-template<> template<> void systemObject::test<11>() {
-    ResourceSnapshot snapshot =
-        skinSnapshot("defaultLocale: en\nlocales: {en: {name: English, strings: {fly.label: 'Fly <kbd shortcut=\"toggle-fly\"/>'}}}\n");
-    snapshot.add("view.xml", "<text>fly.label</text>");
-    SkinGenerationPrepareResult prepared = SkinCompiler().prepare(std::move(snapshot));
-    ensure("Kbd presentation fixture prepares", prepared.ok());
+    ResourceSnapshot snapshot = skinSnapshot(kKeybindingLocalization);
+    snapshot.add("view.xml", kViewMarkup);
+    const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(std::move(snapshot));
+    ASSERT_TRUE(prepared.ok());
 
     KeybindingPresentation presentation{{"F"}};
     System system;
     system.setKeybindingResolver(
         [&presentation](const std::string& binding) { return binding == "toggle-fly" ? presentation : KeybindingPresentation{}; });
-    system.publish(prepared.generation);
+    ASSERT_TRUE(system.publish(prepared.generation));
+
     LayoutBuildResult buildResult = system.buildWidgetTree("view.xml");
-    auto* text = buildResult.rootAs<Text>();
-    ensure("Kbd Widget tree builds", buildResult.ok() && text);
+    ASSERT_TRUE(buildResult.ok());
+    const Text* text = buildResult.rootAs<Text>();
+    ASSERT_NE(text, nullptr);
 
     std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
+    ASSERT_NE(surface, nullptr);
     surface->setViewport(200.f, 100.f);
     surface->mount(std::move(buildResult.root));
     surface->updateLayout();
-    ensure_equals("Kbd resolves through the System presentation seam", text->text(), "Fly F");
+    EXPECT_EQ(text->text(), "Fly F");
     const float initialWidth = text->desiredSize().x;
 
     presentation = {{"Ctrl", "F"}};
     system.refreshKeybindings();
     surface->updateLayout();
-    ensure_equals("Kbd refreshes after a user keybinding change", text->text(), "Fly Ctrl F");
-    ensure("changed Kbd presentation invalidates intrinsic measurement", text->desiredSize().x > initialWidth);
+    EXPECT_EQ(text->text(), "Fly Ctrl F");
+    EXPECT_GT(text->desiredSize().x, initialWidth);
 }
 
-template<> template<> void systemObject::test<12>() {
+TEST(SystemTest, RollsBackPublicationWhenCommitRejectsCandidate) {
     System system;
-    SkinGenerationPrepareResult live = SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Old")));
-    system.publish(live.generation);
+    const SkinGenerationPrepareResult live = SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Old")));
+    ASSERT_TRUE(live.ok());
+    ASSERT_TRUE(system.publish(live.generation));
 
-    SkinGenerationPrepareResult candidate = SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "New")));
+    const SkinGenerationPrepareResult candidate = SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "New")));
+    ASSERT_TRUE(candidate.ok());
+
     bool callbackSawCandidate = false;
-    class RejectPublication final : public PublicationCommit {
+    class RejectingCommit final : public PublicationCommit {
     public:
-        RejectPublication(System& system, bool& sawCandidate) : mSystem(system), mSawCandidate(sawCandidate) {}
+        RejectingCommit(System& system, bool& sawCandidate) : mSystem(system), mSawCandidate(sawCandidate) {}
 
         bool commit() override {
             mSawCandidate = mSystem.resolveText("message") == "New";
@@ -298,12 +354,10 @@ template<> template<> void systemObject::test<12>() {
     private:
         System& mSystem;
         bool& mSawCandidate;
-    } rejectPublication(system, callbackSawCandidate);
-    const bool committed = system.publish(std::move(candidate.generation), rejectPublication);
+    } rejectingCommit(system, callbackSawCandidate);
 
-    ensure("transactional publication reports callback rejection", !committed);
-    ensure("publication callback observes candidate generation", callbackSawCandidate);
-    ensure_equals("rejected transactional publication preserves generation", system.generation(), 1ULL);
-    ensure_equals("rejected transactional publication restores localization", system.resolveText("message"), "Old");
+    EXPECT_FALSE(system.publish(candidate.generation, rejectingCommit));
+    EXPECT_TRUE(callbackSawCandidate);
+    EXPECT_EQ(system.generation(), 1ULL);
+    EXPECT_EQ(system.resolveText("message"), "Old");
 }
-} // namespace tut

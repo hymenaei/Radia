@@ -1,6 +1,6 @@
 /**
- * @file fixture.h
- * @brief Shared Layout Resource compiler test fixture.
+ * @file test_layout_helpers.h
+ * @brief Shared Layout Resource compiler test helper.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -22,8 +22,8 @@
  * $/LicenseInfo$
  */
 
-#ifndef RD_TESTS_LAYOUT_FIXTURE_H
-#define RD_TESTS_LAYOUT_FIXTURE_H
+#ifndef RD_TESTS_LAYOUT_TEST_HELPERS_H
+#define RD_TESTS_LAYOUT_TEST_HELPERS_H
 
 #include <map>
 #include <memory>
@@ -33,7 +33,7 @@
 #include "layout/document.h"
 #include "layout/resourcecompiler.h"
 
-namespace tut {
+namespace radia::ui::test {
 using radia::ui::DiagnosticResult;
 using radia::ui::LayoutBuildResult;
 using radia::ui::LayoutDocument;
@@ -42,7 +42,7 @@ using radia::ui::LayoutDocumentParser;
 using radia::ui::LayoutDocumentParseResult;
 using radia::ui::LayoutResourceCompiler;
 
-struct LayoutCompilerFixture {
+struct LayoutCompilerTestHelper {
     std::map<std::string, std::string> resources;
 
     LayoutDocumentMap parseDocuments(DiagnosticResult& diagnostics) const {
@@ -77,5 +77,5 @@ struct LayoutCompilerFixture {
         return LayoutResourceCompiler(&parsed).validateWidgetDefaults(element);
     }
 };
-} // namespace tut
-#endif // RD_TESTS_LAYOUT_FIXTURE_H
+} // namespace radia::ui::test
+#endif // RD_TESTS_LAYOUT_TEST_HELPERS_H

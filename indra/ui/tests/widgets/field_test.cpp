@@ -24,13 +24,13 @@
 
 #include "linden_common.h"
 #include <algorithm>
-#include <fstream>
 #include <functional>
+#include <gtest/gtest.h>
 #include <map>
-#include <sstream>
-#include "../layout/fixture.h"
-#include "../test/lltut.h"
-#include "../test/test.h"
+#include <memory>
+#include <string>
+#include <utility>
+#include "../layout/test_layout_helpers.h"
 #include "binding/binder.h"
 #include "layout/document.h"
 #include "layout/engine.h"
@@ -56,14 +56,23 @@ using radia::ui::Binder;
 using radia::ui::Binding;
 using radia::ui::ChangeEvent;
 using radia::ui::CompositePartContract;
+using radia::ui::EventCall;
 using radia::ui::Field;
 using radia::ui::Fieldset;
 using radia::ui::FixedTextMetrics;
 using radia::ui::InlineContentKind;
 using radia::ui::Label;
+using radia::ui::LayoutBuildContext;
 using radia::ui::LayoutBuildResult;
 using radia::ui::LayoutDirection;
+using radia::ui::LayoutResourceCompiler;
+using radia::ui::layoutTree;
+using radia::ui::LocalizationCatalog;
+using radia::ui::PaintCommand;
+using radia::ui::PaintCommandKind;
 using radia::ui::Panel;
+using radia::ui::PreparedBindingResult;
+using radia::ui::resolveWidgetStyle;
 using radia::ui::Style;
 using radia::ui::StyleSheet;
 using radia::ui::StyleSheetLoadResult;
@@ -71,387 +80,459 @@ using radia::ui::Switch;
 using radia::ui::Text;
 using radia::ui::Visibility;
 using radia::ui::Widget;
+using radia::ui::WidgetContract;
 using radia::ui::WidgetEvent;
 using radia::ui::WidgetEventKind;
 using radia::ui::WidgetRef;
-using radia::ui::WidgetContract;
 using radia::ui::detail::findWidgetInScope;
+using radia::ui::detail::instantiateCompositePart;
+using radia::ui::detail::instantiateCompositeParts;
 using radia::ui::detail::makeEventRegistration;
-using radia::ui::layoutTree;
-using radia::ui::resolveWidgetStyle;
+using radia::ui::detail::WidgetCompilerAccess;
+using radia::ui::test::LayoutCompilerTestHelper;
+using ::testing::Message;
 
 void bindChangeEvent(Binder& binder, std::string name, std::function<void(const ChangeEvent&)> callback) {
     binder.event(makeEventRegistration(
         std::move(name), WidgetEventKind::Change,
-        [callback = std::move(callback)](const WidgetEvent& event, const radia::ui::EventCall&) {
-            callback(static_cast<const ChangeEvent&>(event));
-        },
-        [](const radia::ui::EventCall& call, WidgetEventKind) { return call.arguments().empty() ? nullptr : "binding.event.arity_mismatch"; }));
+        [callback = std::move(callback)](const WidgetEvent& event, const EventCall&) { callback(static_cast<const ChangeEvent&>(event)); },
+        [](const EventCall& call, WidgetEventKind) { return call.arguments().empty() ? nullptr : "binding.event.arity_mismatch"; }));
 }
-} // namespace
 
-namespace tut {
-struct fieldData {
-    LayoutCompilerFixture factory;
-    std::map<std::string, std::string>& resources = factory.resources;
-
-    template<typename WidgetT> WidgetRef<WidgetT> requireWidget(Widget& root, const std::string& id) {
+class FieldTest : public ::testing::Test {
+protected:
+    template<typename WidgetT> WidgetRef<WidgetT> requireWidget(Widget& root, const std::string& id) const {
         return WidgetRef<WidgetT>(dynamic_cast<WidgetT*>(findWidgetInScope(root, id)));
     }
+
+    LayoutCompilerTestHelper factory;
+    std::map<std::string, std::string>& resources = factory.resources;
 };
-using fieldTest = test_group<fieldData>;
-using fieldObject = fieldTest::object;
-fieldTest fieldTestCase("field");
+} // namespace
 
-template<> template<> void fieldObject::test<1>() {
-    const char* kFieldLayout =
-        "<field id=\"exampleField\"><label for=\"fieldSwitch\">label.example</label><switch id=\"fieldSwitch\" checked=\"true\" onChange=\"switchChanged()\"/><br/><hint>Helpful <b>detail</b></hint><br/><error>Fallback error</error></field>";
+TEST_F(FieldTest, BuildsFieldWithLabelValueAndSupportContent) {
+    constexpr char kFieldLayout[] = "<field id=\"exampleField\"><label for=\"fieldSwitch\">label.example</label>"
+                                    "<switch id=\"fieldSwitch\" checked=\"true\" "
+                                    "onChange=\"switchChanged()\"/><br/>"
+                                    "<hint>Helpful <b>detail</b></hint><br/><error>Fallback error</error></field>";
     const LayoutBuildResult result = factory.buildWidgetTreeFromString(kFieldLayout, "field.xml");
-    auto* field = result.rootAs<Field>();
-    ensure("field markup builds", result.ok() && field);
-    ensure("Field exposes its direct Label and Value Control", field->label() && field->valueControl());
-    ensure("Field exposes scoped Hint and Error Text Hosts", field->hint() && field->error());
-    ensure("authored Hint and Error remain ordinary direct children",
-           field->hint()->parent() == field && field->hint()->part().empty() && field->error()->parent() == field && field->error()->part().empty());
-    ensure_equals("Hint preserves shared Inline Content", field->hint()->text(), "Helpful detail");
-    ensure_equals("authored Error is retained as fallback", field->error()->text(), "Fallback error");
-    ensure_equals("Error starts collapsed while the Value Control is valid", static_cast<int>(field->error()->visibility()),
-                  static_cast<int>(Visibility::Collapsed));
-    ensure("Flow Break marks Hint for a new row", field->hint()->flowBreakBefore());
-    ensure("Flow Break marks Error for a new row", field->error()->flowBreakBefore());
+    ASSERT_TRUE(result.ok());
 
-    const char* kLinkLayout =
-        "<field><label for=\"fieldSwitch\">Label</label><switch id=\"fieldSwitch\"/><hint><link href=\"https://example.com\">link</link></hint></field>";
-    const LayoutBuildResult linkResult = factory.buildWidgetTreeFromString(kLinkLayout, "link.xml");
-    ensure("Hint rejects interactive Inline Content", !linkResult.ok());
-    ensure_equals("unsupported Hint inline node diagnostic is stable", linkResult.errors.front().code, "layout.inline.unsupported");
+    const Field* field = result.rootAs<Field>();
+    ASSERT_NE(field, nullptr);
+    ASSERT_NE(field->label(), nullptr);
+    ASSERT_NE(field->valueControl(), nullptr);
+    ASSERT_NE(field->hint(), nullptr);
+    ASSERT_NE(field->error(), nullptr);
 
-    const LayoutBuildResult standaloneHint = factory.buildWidgetTreeFromString("<hint>orphan</hint>", "hint.xml");
-    ensure("Hint is not a standalone Widget", !standaloneHint.ok());
-    ensure_equals("standalone Hint reports its Field-scoped grammar", standaloneHint.errors.front().code, "layout.element.scoped");
-
-    const LayoutBuildResult standaloneError = factory.buildWidgetTreeFromString("<error>orphan</error>", "error.xml");
-    ensure("Error is not a standalone Widget", !standaloneError.ok());
-    ensure_equals("standalone Error reports its Field-scoped grammar", standaloneError.errors.front().code, "layout.element.scoped");
-
-    const char* kDuplicateHintLayout = "<field><label for=\"toggle\">Label</label><switch id=\"toggle\"/><hint>one</hint><hint>two</hint></field>";
-    const LayoutBuildResult duplicateHint = factory.buildWidgetTreeFromString(kDuplicateHintLayout, "duplicate-hint.xml");
-    ensure("Field rejects duplicate Hint content", !duplicateHint.ok());
-    ensure_equals("duplicate Hint diagnostic is stable", duplicateHint.errors.front().code, "layout.field.hint_duplicate");
-
-    const LayoutBuildResult missing = factory.buildWidgetTreeFromString("<field/>", "field-missing.xml");
-    ensure("Field requires its direct Label and Value Control", !missing.ok());
-    ensure_equals("missing Field Label diagnostic is stable", missing.errors.front().code, "layout.field.label_required");
-
-    const LayoutBuildResult unsupported =
-        factory.buildWidgetTreeFromString("<field><label for=\"button\">Label</label><button id=\"button\"/></field>", "field-child.xml");
-    ensure("Field rejects a non-Value-Control child", !unsupported.ok());
-    ensure("unsupported Field child diagnostic is reported",
-           std::any_of(unsupported.errors.begin(), unsupported.errors.end(),
-                       [](const radia::ui::Diagnostic& diagnostic) { return diagnostic.code == "layout.field.child_unsupported"; }));
-
-    const char* kMismatchLayout = "<panel><switch id=\"other\"/><field><label for=\"other\">Label</label><switch id=\"direct\"/></field></panel>";
-    const LayoutBuildResult mismatch = factory.buildWidgetTreeFromString(kMismatchLayout, "field-target.xml");
-    ensure("Field Label must target its direct Value Control", !mismatch.ok());
-    ensure("Field target mismatch diagnostic is reported",
-           std::any_of(mismatch.errors.begin(), mismatch.errors.end(),
-                       [](const radia::ui::Diagnostic& diagnostic) { return diagnostic.code == "layout.field.label_target_mismatch"; }));
-
-    ensure("Switch rejects setting with authored checked value",
-           !factory.buildWidgetTreeFromString("<switch setting=\"demo-enabled\" checked=\"true\"/>", "switch-sources.xml").ok());
-    ensure("Switch rejects an empty setting name", !factory.buildWidgetTreeFromString("<switch setting=\"\"/>", "switch-setting.xml").ok());
-
-    const LayoutBuildResult leadingBreak = factory.buildWidgetTreeFromString("<panel><br/><button/></panel>", "leading-break.xml");
-    ensure("Flow Break rejects a leading directive", !leadingBreak.ok());
-    ensure_equals("leading Flow Break diagnostic is stable", leadingBreak.errors.front().code, "layout.flow_break.leading");
-    const LayoutBuildResult trailingBreak = factory.buildWidgetTreeFromString("<panel><button/><br/></panel>", "trailing-break.xml");
-    ensure("Flow Break rejects a trailing directive", !trailingBreak.ok());
-    ensure_equals("trailing Flow Break diagnostic is stable", trailingBreak.errors.front().code, "layout.flow_break.trailing");
-    const LayoutBuildResult consecutiveBreak =
-        factory.buildWidgetTreeFromString("<panel><button/><br/><br/><button/></panel>", "consecutive-break.xml");
-    ensure("Flow Break rejects consecutive directives", !consecutiveBreak.ok());
-    ensure_equals("consecutive Flow Break diagnostic is stable", consecutiveBreak.errors.front().code, "layout.flow_break.consecutive");
-    const LayoutBuildResult attributedBreak =
-        factory.buildWidgetTreeFromString("<panel><button/><br class=\"invalid\"/><button/></panel>", "attributed-break.xml");
-    ensure("Flow Break rejects Widget attributes", !attributedBreak.ok());
-    ensure_equals("Flow Break attribute diagnostic is stable", attributedBreak.errors.front().code, "layout.attribute.unknown");
-
-    const char* kAttributedHintLayout =
-        "<field><label for=\"toggle\">Label</label><switch id=\"toggle\"/><hint visibility=\"hidden\">Hint</hint></field>";
-    const LayoutBuildResult attributedHint = factory.buildWidgetTreeFromString(kAttributedHintLayout, "attributed-hint.xml");
-    ensure("Field-scoped Inline Content rejects Widget attributes", !attributedHint.ok());
-    ensure_equals("Hint attribute diagnostic is stable", attributedHint.errors.front().code, "layout.attribute.unknown");
-
-    const LayoutBuildResult chromeBreak =
-        factory.buildWidgetTreeFromString("<floater title=\"title\"><header/><br/><text>content</text></floater>", "chrome-break.xml");
-    ensure("non-layout composite slots do not satisfy Flow Break", !chromeBreak.ok());
-    ensure_equals("chrome before Flow Break remains a leading directive", chromeBreak.errors.front().code, "layout.flow_break.leading");
+    EXPECT_EQ(field->hint()->parent(), field);
+    EXPECT_TRUE(field->hint()->part().empty());
+    EXPECT_EQ(field->error()->parent(), field);
+    EXPECT_TRUE(field->error()->part().empty());
+    EXPECT_EQ(field->hint()->text(), "Helpful detail");
+    EXPECT_EQ(field->error()->text(), "Fallback error");
+    EXPECT_EQ(field->error()->visibility(), Visibility::Collapsed);
+    EXPECT_TRUE(field->hint()->flowBreakBefore());
+    EXPECT_TRUE(field->error()->flowBreakBefore());
 }
 
-template<> template<> void fieldObject::test<2>() {
-    const char* kInlineLayout =
-        "<panel><text id=\"copy\">before <b>bold<i>both</i></b><br/><i>after</i></text><text id=\"title\">Title</text></panel>";
-    LayoutBuildResult result = factory.buildWidgetTreeFromString(kInlineLayout, "inline.xml");
-    auto text = result.root ? requireWidget<Text>(*result.root, "copy") : WidgetRef<Text>();
-    auto title = result.root ? requireWidget<Text>(*result.root, "title") : WidgetRef<Text>();
-    ensure("multiple Text inline-content hosts build", result.ok() && text && title);
-    ensure("inline formatting does not create child Widgets", text->children().empty());
-    ensure_equals("mixed inline order is retained", text->content().nodes().size(), 5U);
-    ensure_equals("plain content remains a text value", static_cast<int>(text->content().nodes()[0].kind()),
-                  static_cast<int>(InlineContentKind::Text));
-    ensure_equals("whitespace before a formatted span stays in the parent flow", text->content().nodes()[1].value(), std::string(" "));
-    ensure_equals("nested semantic content is retained", text->content().nodes()[2].children().size(), 2U);
-    ensure_equals("explicit line break remains an inline value", static_cast<int>(text->content().nodes()[3].kind()),
-                  static_cast<int>(InlineContentKind::Br));
-    const char* kLabelLayout =
-        "<panel><label id=\"label\" for=\"target\">name <b>important</b><br/><i>detail</i></label><switch id=\"target\"/></panel>";
-    LayoutBuildResult labelResult = factory.buildWidgetTreeFromString(kLabelLayout, "label-inline.xml");
-    auto label = labelResult.root ? requireWidget<Label>(*labelResult.root, "label") : WidgetRef<Label>();
-    ensure("Label reuses Inline Content without child Widgets", labelResult.ok() && label && label->children().empty());
-    ensure_equals("Label exposes flattened semantic text", label->text(), std::string("name important\ndetail"));
+TEST_F(FieldTest, RejectsInvalidFieldStructureAndSupportContent) {
+    struct InvalidFieldCase {
+        const char* name;
+        const char* source;
+        const char* diagnostic;
+    };
 
-    radia::ui::LocalizationCatalog localization;
-    ensure("inline localization fixture loads",
-           localization.loadYaml("defaultLocale: en\nlocales: {en: {name: English, strings: {inlineExample: \"First <b>Second</b>\"}}}\n").ok());
-    const radia::ui::LayoutBuildContext context(localization, "en");
-    LayoutBuildResult localizedResult =
-        radia::ui::LayoutResourceCompiler().buildWidgetTreeFromString("<text>inlineExample</text>", "localized-inline.xml", &context);
-    auto* localized = localizedResult.rootAs<Text>();
-    ensure("localized inline content builds", localizedResult.ok() && localized);
-    const auto& localizedNodes = localized->content().nodes();
-    ensure_equals("localized inline structure is retained", localizedNodes.size(), 2U);
-    ensure_equals("first localized inline run resolves", localizedNodes[0].value(), std::string("First "));
-    ensure_equals("second localized inline run resolves", localizedNodes[1].children()[0].value(), std::string("Second"));
+    const InvalidFieldCase cases[] = {
+        {"interactive hint",
+         "<field><label for=\"fieldSwitch\">Label</label><switch id=\"fieldSwitch\"/>"
+         "<hint><link href=\"https://example.com\">link</link></hint></field>",
+         "layout.inline.unsupported"},
+        {"standalone hint", "<hint>orphan</hint>", "layout.element.scoped"},
+        {"standalone error", "<error>orphan</error>", "layout.element.scoped"},
+        {"duplicate hint",
+         "<field><label for=\"toggle\">Label</label><switch id=\"toggle\"/>"
+         "<hint>one</hint><hint>two</hint></field>",
+         "layout.field.hint_duplicate"},
+        {"missing label and value control", "<field/>", "layout.field.label_required"},
+    };
 
-    ensure("removed Heading element rejects the Widget tree", !factory.buildWidgetTreeFromString("<heading>Title</heading>", "heading.xml").ok());
+    for (const auto& test : cases) {
+        SCOPED_TRACE(Message() << "invalid field case: " << test.name);
+        const LayoutBuildResult result = factory.buildWidgetTreeFromString(test.source, test.name);
+        ASSERT_FALSE(result.ok());
+        ASSERT_FALSE(result.errors.empty());
+        EXPECT_EQ(result.errors.front().code, test.diagnostic);
+    }
 
-    const LayoutBuildResult decoration =
-        factory.buildWidgetTreeFromString("<text><s>outdated</s> <kbd shortcut=\"toggle-fly\"/></text>", "decoration.xml");
-    const auto* decorated = decoration.rootAs<Text>();
-    ensure("strike and keybinding Inline Content compile", decoration.ok() && decorated);
-    ensure_equals("strike remains a semantic inline node", static_cast<int>(decorated->content().nodes()[0].kind()),
-                  static_cast<int>(InlineContentKind::S));
-    ensure_equals("keybinding command id remains a shortcut id", decorated->content().nodes()[2].shortcutId(), std::string("toggle-fly"));
+    {
+        SCOPED_TRACE("unsupported field child");
+        constexpr char kUnsupportedChildLayout[] = "<field><label for=\"button\">Label</label>"
+                                                   "<button id=\"button\"/></field>";
+        const LayoutBuildResult result = factory.buildWidgetTreeFromString(kUnsupportedChildLayout, "field-child.xml");
+        ASSERT_FALSE(result.ok());
+        EXPECT_TRUE(std::any_of(result.errors.begin(), result.errors.end(),
+                                [](const auto& diagnostic) { return diagnostic.code == "layout.field.child_unsupported"; }));
+    }
 
-    const LayoutBuildResult strikeSpacing = factory.buildWidgetTreeFromString("<text>keep <s>remove</s></text>", "strike-spacing.xml");
-    const auto* struck = strikeSpacing.rootAs<Text>();
-    ensure("strike-spacing fixture compiles", strikeSpacing.ok() && struck);
-    ensure_equals("space before S remains a plain sibling", struck->content().nodes()[1].value(), std::string(" "));
-    ensure_equals("S begins with its authored text rather than the preceding space", struck->content().nodes()[2].children()[0].value(),
-                  std::string("remove"));
-
-    const LayoutBuildResult missingShortcut = factory.buildWidgetTreeFromString("<text><kbd/></text>", "missing-kbd-shortcut.xml");
-    ensure("Kbd requires a shortcut", !missingShortcut.ok());
-    ensure_equals("missing Kbd shortcut diagnostic is stable", missingShortcut.errors.front().code,
-                  std::string("layout.inline.kbd.shortcut_required"));
-
-    const LayoutBuildResult invalidShortcut =
-        factory.buildWidgetTreeFromString("<text><kbd shortcut=\"toggle_fly\"/></text>", "invalid-kbd-shortcut.xml");
-    ensure("Kbd requires a canonical command id", !invalidShortcut.ok());
-    ensure_equals("invalid Kbd shortcut diagnostic is stable", invalidShortcut.errors.front().code,
-                  std::string("layout.inline.kbd.shortcut_invalid"));
-
-    const LayoutBuildResult widgetChild = factory.buildWidgetTreeFromString("<text><label>not-inline</label></text>", "widget-child.xml");
-    ensure("Text rejects Widget children", !widgetChild.ok());
-    ensure_equals("inline vocabulary diagnostic is stable", widgetChild.errors.front().code, std::string("layout.inline.element_unknown"));
+    {
+        SCOPED_TRACE("mismatched field label target");
+        constexpr char kMismatchedTargetLayout[] = "<panel><switch id=\"other\"/>"
+                                                   "<field><label for=\"other\">Label</label><switch id=\"direct\"/></field></panel>";
+        const LayoutBuildResult result = factory.buildWidgetTreeFromString(kMismatchedTargetLayout, "field-target.xml");
+        ASSERT_FALSE(result.ok());
+        EXPECT_TRUE(std::any_of(result.errors.begin(), result.errors.end(),
+                                [](const auto& diagnostic) { return diagnostic.code == "layout.field.label_target_mismatch"; }));
+    }
 }
 
-template<> template<> void fieldObject::test<3>() {
-    const char* kLabelTargetLayout =
-        "<panel><label id=\"toggleLabel\" for=\"toggle\">Enable</label><switch id=\"toggle\" onChange=\"toggleChanged()\"/></panel>";
-    LayoutBuildResult result = factory.buildWidgetTreeFromString(kLabelTargetLayout, "label-target.xml");
-    auto label = result.root ? requireWidget<Label>(*result.root, "toggleLabel") : WidgetRef<Label>();
-    auto target = result.root ? requireWidget<Switch>(*result.root, "toggle") : WidgetRef<Switch>();
-    ensure("same-scope Label target resolves", result.ok() && label && target);
-    ensure("resolved Label accepts pointer activation", label->defaultPointerEvents());
+TEST_F(FieldTest, RejectsInvalidFlowBreakPlacementAndAttributes) {
+    struct InvalidBreakCase {
+        const char* name;
+        const char* source;
+        const char* diagnostic;
+    };
+
+    const InvalidBreakCase cases[] = {
+        {"leading break", "<panel><br/><button/></panel>", "layout.flow_break.leading"},
+        {"trailing break", "<panel><button/><br/></panel>", "layout.flow_break.trailing"},
+        {"consecutive breaks", "<panel><button/><br/><br/><button/></panel>", "layout.flow_break.consecutive"},
+        {"attributed break", "<panel><button/><br class=\"invalid\"/><button/></panel>", "layout.attribute.unknown"},
+        {"attributed hint",
+         "<field><label for=\"toggle\">Label</label><switch id=\"toggle\"/>"
+         "<hint visibility=\"hidden\">Hint</hint></field>",
+         "layout.attribute.unknown"},
+        {"composite chrome before break", "<floater title=\"title\"><header/><br/><text>content</text></floater>", "layout.flow_break.leading"},
+    };
+
+    for (const auto& test : cases) {
+        SCOPED_TRACE(Message() << "invalid flow-break case: " << test.name);
+        const LayoutBuildResult result = factory.buildWidgetTreeFromString(test.source, test.name);
+        ASSERT_FALSE(result.ok());
+        ASSERT_FALSE(result.errors.empty());
+        EXPECT_EQ(result.errors.front().code, test.diagnostic);
+    }
+}
+
+TEST_F(FieldTest, PreservesInlineContentStructureAcrossTextAndLabels) {
+    constexpr char kInlineLayout[] = "<panel><text id=\"copy\">before <b>bold<i>both</i></b><br/>"
+                                     "<i>after</i></text><text id=\"title\">Title</text></panel>";
+    constexpr char kLabelInlineLayout[] = "<panel><label id=\"label\" for=\"target\">name <b>important</b>"
+                                          "<br/><i>detail</i></label><switch id=\"target\"/></panel>";
+    const LayoutBuildResult result = factory.buildWidgetTreeFromString(kInlineLayout, "inline.xml");
+    ASSERT_TRUE(result.ok());
+
+    const WidgetRef<Text> text = requireWidget<Text>(*result.root, "copy");
+    const WidgetRef<Text> title = requireWidget<Text>(*result.root, "title");
+    ASSERT_TRUE(text);
+    ASSERT_TRUE(title);
+    EXPECT_TRUE(text->children().empty());
+    ASSERT_EQ(text->content().nodes().size(), 5U);
+    EXPECT_EQ(text->content().nodes()[0].kind(), InlineContentKind::Text);
+    EXPECT_EQ(text->content().nodes()[1].value(), " ");
+    EXPECT_EQ(text->content().nodes()[2].children().size(), 2U);
+    EXPECT_EQ(text->content().nodes()[3].kind(), InlineContentKind::Br);
+
+    const LayoutBuildResult labelResult = factory.buildWidgetTreeFromString(kLabelInlineLayout, "label-inline.xml");
+    ASSERT_TRUE(labelResult.ok());
+    const WidgetRef<Label> label = requireWidget<Label>(*labelResult.root, "label");
+    ASSERT_TRUE(label);
+    EXPECT_TRUE(label->children().empty());
+    EXPECT_EQ(label->text(), "name important\ndetail");
+}
+
+TEST_F(FieldTest, LocalizesAndDecoratesInlineContent) {
+    LocalizationCatalog localization;
+    constexpr char kInlineLocalization[] = "defaultLocale: en\n"
+                                           "locales: {en: {name: English, strings: "
+                                           "{inlineExample: \"First <b>Second</b>\"}}}\n";
+    ASSERT_TRUE(localization.loadYaml(kInlineLocalization).ok());
+    const LayoutBuildContext context(localization, "en");
+    constexpr char kLocalizedTextLayout[] = "<text>inlineExample</text>";
+    constexpr char kDecorationLayout[] = "<text><s>outdated</s> "
+                                         "<kbd shortcut=\"toggle-fly\"/></text>";
+    constexpr char kUnsupportedHeadingLayout[] = "<heading>Title</heading>";
+    const LayoutBuildResult localizedResult =
+        LayoutResourceCompiler().buildWidgetTreeFromString(kLocalizedTextLayout, "localized-inline.xml", &context);
+    ASSERT_TRUE(localizedResult.ok());
+
+    const Text* localized = localizedResult.rootAs<Text>();
+    ASSERT_NE(localized, nullptr);
+    ASSERT_EQ(localized->content().nodes().size(), 2U);
+    EXPECT_EQ(localized->content().nodes()[0].value(), "First ");
+    EXPECT_EQ(localized->content().nodes()[1].children()[0].value(), "Second");
+
+    const LayoutBuildResult decoration = factory.buildWidgetTreeFromString(kDecorationLayout, "decoration.xml");
+    ASSERT_TRUE(decoration.ok());
+    const Text* decorated = decoration.rootAs<Text>();
+    ASSERT_NE(decorated, nullptr);
+    ASSERT_GE(decorated->content().nodes().size(), 3U);
+    EXPECT_EQ(decorated->content().nodes()[0].kind(), InlineContentKind::S);
+    EXPECT_EQ(decorated->content().nodes()[2].shortcutId(), "toggle-fly");
+    EXPECT_FALSE(factory.buildWidgetTreeFromString(kUnsupportedHeadingLayout, "heading.xml").ok());
+}
+
+TEST_F(FieldTest, RejectsUnsupportedInlineContent) {
+    struct InvalidInlineCase {
+        const char* name;
+        const char* source;
+        const char* diagnostic;
+    };
+
+    const InvalidInlineCase cases[] = {
+        {"missing shortcut", "<text><kbd/></text>", "layout.inline.kbd.shortcut_required"},
+        {"invalid shortcut", "<text><kbd shortcut=\"toggle_fly\"/></text>", "layout.inline.kbd.shortcut_invalid"},
+        {"widget child", "<text><label>not-inline</label></text>", "layout.inline.element_unknown"},
+    };
+
+    for (const auto& test : cases) {
+        SCOPED_TRACE(Message() << "unsupported inline case: " << test.name);
+        const LayoutBuildResult result = factory.buildWidgetTreeFromString(test.source, test.name);
+        ASSERT_FALSE(result.ok());
+        ASSERT_FALSE(result.errors.empty());
+        EXPECT_EQ(result.errors.front().code, test.diagnostic);
+    }
+}
+
+TEST_F(FieldTest, ActivatesLabelTargetOnlyWhenInteractive) {
+    constexpr char kLabelTargetLayout[] = "<panel><label id=\"toggleLabel\" for=\"toggle\">Enable</label>"
+                                          "<switch id=\"toggle\" onChange=\"toggleChanged()\"/></panel>";
+    const LayoutBuildResult result = factory.buildWidgetTreeFromString(kLabelTargetLayout, "label-target.xml");
+    ASSERT_TRUE(result.ok());
+
+    const WidgetRef<Label> label = requireWidget<Label>(*result.root, "toggleLabel");
+    const WidgetRef<Switch> target = requireWidget<Switch>(*result.root, "toggle");
+    ASSERT_TRUE(label);
+    ASSERT_TRUE(target);
+    EXPECT_TRUE(label->defaultPointerEvents());
 
     int changes = 0;
     Binder binder(*result.root);
     bindChangeEvent(binder, "toggleChanged", [&](const ChangeEvent& event) {
-        ensure("Label activation reports the completed Switch value", event.checked);
+        EXPECT_TRUE(event.checked);
         ++changes;
     });
-    radia::ui::PreparedBindingResult prepared = binder.prepare();
-    const bool bindingPrepared = prepared.ok();
-    Binding binding = bindingPrepared ? prepared.binding.commit() : Binding{};
-    ensure("Label activation action binding commits", bindingPrepared && binding);
+    PreparedBindingResult prepared = binder.prepare();
+    ASSERT_TRUE(prepared.ok());
+    const Binding binding = prepared.binding.commit();
+    ASSERT_TRUE(binding);
+
     label->activate();
-    ensure("Label activation toggles its Switch target", target->checked());
-    ensure_equals("Label activation emits the target semantic action", changes, 1);
+    EXPECT_TRUE(target->checked());
+    EXPECT_EQ(changes, 1);
+
     target->setDisabled(true);
     label->activate();
-    ensure("disabled target ignores Label activation", target->checked());
-    ensure_equals("disabled target emits no additional action", changes, 1);
+    EXPECT_TRUE(target->checked());
+    EXPECT_EQ(changes, 1);
+
     target->setDisabled(false);
     result.root->setDisabled(true);
     label->activate();
-    ensure("disabled target ancestor blocks Label activation", target->checked());
-    ensure_equals("disabled target ancestor emits no additional action", changes, 1);
+    EXPECT_TRUE(target->checked());
+    EXPECT_EQ(changes, 1);
+
     result.root->setDisabled(false);
     result.root->setVisibility(Visibility::Hidden);
     label->activate();
-    ensure("hidden target ancestor blocks Label activation", target->checked());
-    ensure_equals("hidden target ancestor emits no additional action", changes, 1);
-
-    const LayoutBuildResult required =
-        factory.buildWidgetTreeFromString("<panel><label>Missing relationship</label><switch id=\"toggle\"/></panel>", "label-required.xml");
-    ensure("Label without for rejects the Widget tree", !required.ok());
-    ensure_equals("required Label relationship diagnostic is stable", required.errors.front().code, std::string("layout.label.for_required"));
-
-    const char* kInvalidLabelTargetLayout = "<panel><label for=\"Bad_Target\">Invalid relationship</label><switch id=\"toggle\"/></panel>";
-    const LayoutBuildResult invalid = factory.buildWidgetTreeFromString(kInvalidLabelTargetLayout, "label-invalid.xml");
-    ensure("invalid Label target id rejects the Widget tree", !invalid.ok());
-    ensure_equals("invalid Label relationship diagnostic is stable", invalid.errors.front().code, std::string("layout.label.for_invalid"));
-
-    const LayoutBuildResult missing =
-        factory.buildWidgetTreeFromString("<panel><label for=\"missing\">Missing target</label></panel>", "label-missing.xml");
-    ensure("missing same-scope Label target rejects the Widget tree", !missing.ok());
-    ensure_equals("missing Label target diagnostic is stable", missing.errors.front().code, std::string("layout.label.target_missing"));
-
-    const LayoutBuildResult wrongType =
-        factory.buildWidgetTreeFromString("<panel><label for=\"copy\">Wrong target</label><text id=\"copy\">Copy</text></panel>", "label-type.xml");
-    ensure("non-labelable Label target rejects the Widget tree", !wrongType.ok());
-    ensure_equals("non-labelable target diagnostic is stable", wrongType.errors.front().code, std::string("layout.label.target_not_labelable"));
-
-    resources["nested-target.xml"] = "<panel><switch id=\"nestedTarget\"/></panel>";
-    const char* kCrossScopeLabelLayout = "<panel><label for=\"nestedTarget\">Cross scope</label><panel filename=\"nested-target.xml\"/></panel>";
-    const LayoutBuildResult crossScope = factory.buildWidgetTreeFromString(kCrossScopeLabelLayout, "label-scope.xml");
-    ensure("cross-scope Label target rejects the Widget tree", !crossScope.ok());
-    ensure_equals("cross-scope target is unavailable in the Label scope", crossScope.errors.front().code, std::string("layout.label.target_missing"));
-
-    resources["nested-valid.xml"] = "<panel><label for=\"nestedSwitch\">Nested</label><switch id=\"nestedSwitch\"/></panel>";
-    const LayoutBuildResult nested =
-        factory.buildWidgetTreeFromString("<panel><panel filename=\"nested-valid.xml\"/></panel>", "label-nested.xml");
-    ensure("Label resolves a target inside its own included-resource scope", nested.ok());
+    EXPECT_TRUE(target->checked());
+    EXPECT_EQ(changes, 1);
 }
 
-template<> template<> void fieldObject::test<4>() {
-    const char* kFieldsetLayout =
-        "<fieldset id=\"settings\"><legend>Settings <b>demo</b></legend><field><label for=\"first\">First</label><switch id=\"first\"/></field><field><switch id=\"second\"/><label for=\"second\">Second</label><br/><hint>Second hint</hint></field></fieldset>";
-    LayoutBuildResult result = factory.buildWidgetTreeFromString(kFieldsetLayout, "fieldset.xml");
-    auto* fieldset = result.rootAs<Fieldset>();
-    ensure("Fieldset with Legend and direct Fields compiles", result.ok() && fieldset);
-    ensure("Fieldset exposes its scoped Legend", fieldset->legend());
-    ensure_equals("Legend preserves Inline Content", fieldset->legend()->text(), "Settings demo");
-    ensure_equals("Fieldset contains one direct Legend and two direct Fields", fieldset->children().size(), 3U);
-    ensure("Legend is an ordinary direct child rather than a Part",
-           fieldset->legend()->elementName() == "legend" && fieldset->legend()->part().empty());
+TEST_F(FieldTest, RejectsInvalidLabelRelationships) {
+    struct InvalidLabelCase {
+        const char* name;
+        const char* source;
+        const char* diagnostic;
+    };
 
-    auto* controlFirst = dynamic_cast<Field*>(fieldset->children()[2].get());
-    ensure("second direct child is the control-first Field", controlFirst && controlFirst->hint());
+    constexpr char kNestedTargetLayout[] = "<panel>"
+                                           "<switch id=\"nestedTarget\"/></panel>";
+    resources["nested-target.xml"] = kNestedTargetLayout;
+    const InvalidLabelCase cases[] = {
+        {"missing for", "<panel><label>Missing relationship</label><switch id=\"toggle\"/></panel>", "layout.label.for_required"},
+        {"invalid target id",
+         "<panel><label for=\"Bad_Target\">Invalid relationship</label>"
+         "<switch id=\"toggle\"/></panel>",
+         "layout.label.for_invalid"},
+        {"missing target", "<panel><label for=\"missing\">Missing target</label></panel>", "layout.label.target_missing"},
+        {"non-labelable target",
+         "<panel><label for=\"copy\">Wrong target</label>"
+         "<text id=\"copy\">Copy</text></panel>",
+         "layout.label.target_not_labelable"},
+        {"cross-scope target",
+         "<panel><label for=\"nestedTarget\">Cross scope</label>"
+         "<panel filename=\"nested-target.xml\"/></panel>",
+         "layout.label.target_missing"},
+    };
+
+    for (const auto& test : cases) {
+        SCOPED_TRACE(Message() << "invalid label relationship: " << test.name);
+        const LayoutBuildResult result = factory.buildWidgetTreeFromString(test.source, test.name);
+        ASSERT_FALSE(result.ok());
+        ASSERT_FALSE(result.errors.empty());
+        EXPECT_EQ(result.errors.front().code, test.diagnostic);
+    }
+}
+
+TEST_F(FieldTest, ResolvesLabelTargetsInsideIncludedResources) {
+    constexpr char kNestedValidLayout[] = "<panel><label for=\"nestedSwitch\">Nested</label>"
+                                          "<switch id=\"nestedSwitch\"/></panel>";
+    constexpr char kNestedLabelLayout[] = "<panel><panel filename=\"nested-valid.xml\"/></panel>";
+    resources["nested-valid.xml"] = kNestedValidLayout;
+    const LayoutBuildResult result = factory.buildWidgetTreeFromString(kNestedLabelLayout, "label-nested.xml");
+    EXPECT_TRUE(result.ok());
+}
+
+TEST_F(FieldTest, LaysOutAndPaintsFieldsetAroundItsLegend) {
+    constexpr char kFieldsetLayout[] = "<fieldset id=\"settings\"><legend>Settings <b>demo</b></legend>"
+                                       "<field><label for=\"first\">First</label><switch id=\"first\"/></field>"
+                                       "<field><switch id=\"second\"/><label for=\"second\">Second</label>"
+                                       "<br/><hint>Second hint</hint></field></fieldset>";
+    LayoutBuildResult result = factory.buildWidgetTreeFromString(kFieldsetLayout, "fieldset.xml");
+    ASSERT_TRUE(result.ok());
+
+    Fieldset* fieldset = result.rootAs<Fieldset>();
+    ASSERT_NE(fieldset, nullptr);
+    ASSERT_NE(fieldset->legend(), nullptr);
+    ASSERT_EQ(fieldset->children().size(), 3U);
+    EXPECT_EQ(fieldset->legend()->text(), "Settings demo");
+    EXPECT_EQ(fieldset->legend()->elementName(), "legend");
+    EXPECT_TRUE(fieldset->legend()->part().empty());
+
+    Field* controlFirst = dynamic_cast<Field*>(fieldset->children()[2].get());
+    ASSERT_NE(controlFirst, nullptr);
+    ASSERT_NE(controlFirst->hint(), nullptr);
+
     StyleSheet stylesheet;
-    const char* kFieldset =
-        "fieldset { width: 120px; height: 90px; padding: 3px 6px; border: 1px #ffffff24; gap: 10px; & > legend { font-weight: bold; font-size: 10px; line-height: 10px; } } field { width: 100px; height: 30px; gap: 2px; } switch { size: 10px; } label, field > hint { width: 20px; height: 10px; }";
-    ensure("Fieldset and control-first Field test style compiles", stylesheet.loadRadia(kFieldset).ok());
+    constexpr char kFieldsetStyles[] = "fieldset { width: 120px; height: 90px; padding: 3px 6px; border: 1px #ffffff24; gap: 10px; "
+                                       "& > legend { font-weight: bold; font-size: 10px; line-height: 10px; } } "
+                                       "field { width: 100px; height: 30px; gap: 2px; } switch { size: 10px; } "
+                                       "label, field > hint { width: 20px; height: 10px; }";
+    ASSERT_TRUE(stylesheet.loadRadia(kFieldsetStyles).ok());
+
     FixedTextMetrics text;
     fieldset->setRect({0.f, 0.f, 120.f, 90.f});
     layoutTree(*fieldset, stylesheet, text, LayoutDirection::LeftToRight);
     const Style legendStyle = resolveWidgetStyle(stylesheet, *fieldset->legend());
-    ensure("direct-child selector styles Legend", legendStyle.fontWeight == 700 && legendStyle.fontSize == 10.f);
-    ensure_equals("Legend stays intrinsic instead of stretching across Fieldset", fieldset->legend()->rect().w, fieldset->legend()->desiredSize().x);
-    ensure_equals("Legend begins at the Fieldset logical-start padding", fieldset->legend()->rect().left(), 6.f);
-    ensure_equals("Fieldset top padding separates content without pushing Legend inward", fieldset->legend()->rect().top(), fieldset->rect().top());
+    EXPECT_EQ(legendStyle.fontWeight, 700);
+    EXPECT_FLOAT_EQ(legendStyle.fontSize, 10.f);
+    EXPECT_FLOAT_EQ(fieldset->legend()->rect().w, fieldset->legend()->desiredSize().x);
+    EXPECT_FLOAT_EQ(fieldset->legend()->rect().left(), 6.f);
+    EXPECT_FLOAT_EQ(fieldset->legend()->rect().top(), fieldset->rect().top());
+
     const Widget& firstField = *fieldset->children()[1];
     const Widget& secondField = *fieldset->children()[2];
-    ensure_equals("Fieldset gap separates adjacent Fields", firstField.rect().bottom() - secondField.rect().top(), 10.f);
+    EXPECT_FLOAT_EQ(firstField.rect().bottom() - secondField.rect().top(), 10.f);
 
     radia::ui::RecordingPaintContext recording(text);
     const Style fieldsetStyle = resolveWidgetStyle(stylesheet, *fieldset);
     fieldset->paint(recording, fieldsetStyle, 1.f);
-    const radia::ui::PaintCommand* fieldsetBox = recording.last(radia::ui::PaintCommandKind::Box);
-    ensure("Fieldset emits one box with a top-border Legend gap", fieldsetBox && fieldsetBox->topBorderGap.has_value());
-    ensure_equals("Fieldset top padding starts at the painted border's inner edge",
-                  fieldsetBox->rect.top() - fieldsetStyle.borderWidth.top - firstField.rect().top(), 3.f);
-    ensure_equals("Fieldset border crosses the Legend vertical center", fieldsetBox->rect.top(),
-                  fieldset->legend()->rect().y + fieldset->legend()->rect().h * .5f);
-    ensure("Legend gap clears both text edges",
-           fieldsetBox->topBorderGap->left < fieldset->legend()->rect().left()
-               && fieldsetBox->topBorderGap->right > fieldset->legend()->rect().right());
-
-    StyleSheet obsoletePartStylesheet;
-    const StyleSheetLoadResult obsoletePart = obsoletePartStylesheet.loadRadia("fieldset::legend { font-size: 10px; }");
-    ensure("removed Fieldset Legend Part selector is rejected", !obsoletePart.ok());
-    ensure_equals("removed Legend Part diagnostic is stable", obsoletePart.errors.front().code, std::string("stylesheet.selector.part_unknown"));
-
-    StyleSheet obsoleteFieldPartStylesheet;
-    const StyleSheetLoadResult obsoleteFieldPart = obsoleteFieldPartStylesheet.loadRadia("field::hint { font-size: 10px; }");
-    ensure("authored Field Hint is not exposed as a Part", !obsoleteFieldPart.ok());
-    ensure_equals("removed Field Hint Part diagnostic is stable", obsoleteFieldPart.errors.front().code,
-                  std::string("stylesheet.selector.part_unknown"));
+    const PaintCommand* fieldsetBox = recording.last(PaintCommandKind::Box);
+    ASSERT_NE(fieldsetBox, nullptr);
+    ASSERT_TRUE(fieldsetBox->topBorderGap.has_value());
+    EXPECT_FLOAT_EQ(fieldsetBox->rect.top() - fieldsetStyle.borderWidth.top - firstField.rect().top(), 3.f);
+    EXPECT_FLOAT_EQ(fieldsetBox->rect.top(), fieldset->legend()->rect().y + fieldset->legend()->rect().h * .5f);
+    EXPECT_LT(fieldsetBox->topBorderGap->left, fieldset->legend()->rect().left());
+    EXPECT_GT(fieldsetBox->topBorderGap->right, fieldset->legend()->rect().right());
 
     layoutTree(*fieldset, stylesheet, text, LayoutDirection::RightToLeft);
-    ensure_equals("Legend follows logical start in RTL", fieldset->legend()->rect().right(), fieldset->rect().right() - 6.f);
+    EXPECT_FLOAT_EQ(fieldset->legend()->rect().right(), fieldset->rect().right() - 6.f);
 
     controlFirst->setRect({0.f, 0.f, 100.f, 30.f});
     layoutTree(*controlFirst, stylesheet, text, LayoutDirection::LeftToRight);
-    ensure_equals("control-first Hint aligns with Label in LTR", controlFirst->hint()->rect().left(), controlFirst->label()->rect().left());
+    EXPECT_FLOAT_EQ(controlFirst->hint()->rect().left(), controlFirst->label()->rect().left());
     layoutTree(*controlFirst, stylesheet, text, LayoutDirection::RightToLeft);
-    ensure_equals("control-first Hint aligns with Label in RTL", controlFirst->hint()->rect().right(), controlFirst->label()->rect().right());
-
-    const char* kMissingLegendLayout = "<fieldset><field><label for=\"toggle\">Label</label><switch id=\"toggle\"/></field></fieldset>";
-    const LayoutBuildResult missingLegend = factory.buildWidgetTreeFromString(kMissingLegendLayout, "missing-legend.xml");
-    ensure("Fieldset requires Legend", !missingLegend.ok());
-    ensure_equals("missing Legend diagnostic is stable", missingLegend.errors.front().code, "layout.fieldset.legend_required");
-
-    const LayoutBuildResult missingField =
-        factory.buildWidgetTreeFromString("<fieldset><legend>Empty</legend></fieldset>", "missing-field.xml");
-    ensure("Fieldset requires at least one direct Field", !missingField.ok());
-    ensure_equals("missing Field diagnostic is stable", missingField.errors.front().code, "layout.fieldset.field_required");
-
-    const char* kDuplicateLegendLayout =
-        "<fieldset><legend>One</legend><legend>Two</legend><field><label for=\"toggle\">Label</label><switch id=\"toggle\"/></field></fieldset>";
-    const LayoutBuildResult duplicateLegend = factory.buildWidgetTreeFromString(kDuplicateLegendLayout, "duplicate-legend.xml");
-    ensure("Fieldset rejects duplicate Legend", !duplicateLegend.ok());
-    ensure_equals("duplicate Legend diagnostic is stable", duplicateLegend.errors.front().code, "layout.fieldset.legend_duplicate");
-
-    const LayoutBuildResult unsupportedChild =
-        factory.buildWidgetTreeFromString("<fieldset><legend>Settings</legend><panel/></fieldset>", "fieldset-child.xml");
-    ensure("Fieldset rejects non-Field children", !unsupportedChild.ok());
-    ensure_equals("Fieldset child diagnostic is stable", unsupportedChild.errors.front().code, "layout.fieldset.child_unsupported");
-
-    const char* kFieldsetBreakLayout =
-        "<fieldset><legend>Settings</legend><br/><field><label for=\"toggle\">Label</label><switch id=\"toggle\"/></field></fieldset>";
-    const LayoutBuildResult flowBreak = factory.buildWidgetTreeFromString(kFieldsetBreakLayout, "fieldset-break.xml");
-    ensure("Fieldset rejects Flow Break", !flowBreak.ok());
-    ensure_equals("Fieldset Flow Break diagnostic is stable", flowBreak.errors.front().code, "layout.fieldset.flow_break_unsupported");
-
-    const LayoutBuildResult standaloneLegend = factory.buildWidgetTreeFromString("<legend>Orphan</legend>", "legend.xml");
-    ensure("Legend is not a standalone Widget", !standaloneLegend.ok());
-    ensure_equals("standalone Legend reports its scoped grammar", standaloneLegend.errors.front().code, "layout.element.scoped");
+    EXPECT_FLOAT_EQ(controlFirst->hint()->rect().right(), controlFirst->label()->rect().right());
 }
 
-template<> template<> void fieldObject::test<5>() {
-    const char* kReorderedFieldsetLayout =
-        "<fieldset><field class=\"late\"><label for=\"late\">Late</label><switch id=\"late\"/></field><legend>Settings</legend><field class=\"early\"><label for=\"early\">Early</label><switch id=\"early\"/></field></fieldset>";
+TEST_F(FieldTest, RejectsInvalidFieldsetStructureAndRemovedPartSelectors) {
+    struct InvalidFieldsetCase {
+        const char* name;
+        const char* source;
+        const char* diagnostic;
+    };
+
+    const InvalidFieldsetCase cases[] = {
+        {"missing legend",
+         "<fieldset><field><label for=\"toggle\">Label</label>"
+         "<switch id=\"toggle\"/></field></fieldset>",
+         "layout.fieldset.legend_required"},
+        {"missing field", "<fieldset><legend>Empty</legend></fieldset>", "layout.fieldset.field_required"},
+        {"duplicate legend",
+         "<fieldset><legend>One</legend><legend>Two</legend>"
+         "<field><label for=\"toggle\">Label</label><switch id=\"toggle\"/></field></fieldset>",
+         "layout.fieldset.legend_duplicate"},
+        {"unsupported child", "<fieldset><legend>Settings</legend><panel/></fieldset>", "layout.fieldset.child_unsupported"},
+        {"unsupported flow break",
+         "<fieldset><legend>Settings</legend><br/>"
+         "<field><label for=\"toggle\">Label</label><switch id=\"toggle\"/></field></fieldset>",
+         "layout.fieldset.flow_break_unsupported"},
+        {"standalone legend", "<legend>Orphan</legend>", "layout.element.scoped"},
+    };
+
+    for (const auto& test : cases) {
+        SCOPED_TRACE(Message() << "invalid fieldset case: " << test.name);
+        const LayoutBuildResult result = factory.buildWidgetTreeFromString(test.source, test.name);
+        ASSERT_FALSE(result.ok());
+        ASSERT_FALSE(result.errors.empty());
+        EXPECT_EQ(result.errors.front().code, test.diagnostic);
+    }
+
+    constexpr char kRemovedLegendSelector[] = "fieldset::legend { font-size: 10px; }";
+    constexpr char kRemovedHintSelector[] = "field::hint { font-size: 10px; }";
+    StyleSheet legendPartStylesheet;
+    const StyleSheetLoadResult legendPart = legendPartStylesheet.loadRadia(kRemovedLegendSelector);
+    ASSERT_FALSE(legendPart.ok());
+    ASSERT_FALSE(legendPart.errors.empty());
+    EXPECT_EQ(legendPart.errors.front().code, "stylesheet.selector.part_unknown");
+
+    StyleSheet fieldPartStylesheet;
+    const StyleSheetLoadResult fieldPart = fieldPartStylesheet.loadRadia(kRemovedHintSelector);
+    ASSERT_FALSE(fieldPart.ok());
+    ASSERT_FALSE(fieldPart.errors.empty());
+    EXPECT_EQ(fieldPart.errors.front().code, "stylesheet.selector.part_unknown");
+}
+
+TEST_F(FieldTest, OrdersFieldsAroundTheLegendDuringLayout) {
+    constexpr char kReorderedFieldsetLayout[] = "<fieldset><field class=\"late\"><label for=\"late\">Late</label>"
+                                                "<switch id=\"late\"/></field><legend>Settings</legend>"
+                                                "<field class=\"early\"><label for=\"early\">Early</label>"
+                                                "<switch id=\"early\"/></field></fieldset>";
     LayoutBuildResult result = factory.buildWidgetTreeFromString(kReorderedFieldsetLayout, "reordered-fieldset.xml");
-    auto* fieldset = result.rootAs<Fieldset>();
-    ensure("reordered Fieldset compiles", result.ok() && fieldset && fieldset->legend());
-    auto* late = dynamic_cast<Field*>(fieldset->children()[0].get());
-    auto* early = dynamic_cast<Field*>(fieldset->children()[2].get());
-    ensure("reordered Fieldset fixture retains source order", late && early);
+    ASSERT_TRUE(result.ok());
+
+    Fieldset* fieldset = result.rootAs<Fieldset>();
+    ASSERT_NE(fieldset, nullptr);
+    Field* late = dynamic_cast<Field*>(fieldset->children()[0].get());
+    Field* early = dynamic_cast<Field*>(fieldset->children()[2].get());
+    ASSERT_NE(late, nullptr);
+    ASSERT_NE(early, nullptr);
 
     StyleSheet stylesheet;
-    const char* kReorderedFieldset =
-        "fieldset { width: 120px; height: 90px; padding: 3px 6px; border: 1px #ffffff24; gap: 10px; & > legend { order: 100; font-size: 10px; line-height: 10px; } } field { width: 100px; height: 20px; } .early { order: -1; } .late { order: 2; }";
-    ensure("reordered Fieldset style compiles", stylesheet.loadRadia(kReorderedFieldset).ok());
+    constexpr char kFieldsetStyles[] = "fieldset { width: 120px; height: 90px; padding: 3px 6px; border: 1px #ffffff24; "
+                                       "gap: 10px; & > legend { order: 100; font-size: 10px; line-height: 10px; } } "
+                                       "field { width: 100px; height: 20px; } .early { order: -1; } .late { order: 2; }";
+    ASSERT_TRUE(stylesheet.loadRadia(kFieldsetStyles).ok());
 
     FixedTextMetrics text;
     fieldset->setRect({0.f, 0.f, 120.f, 90.f});
     layoutTree(*fieldset, stylesheet, text, LayoutDirection::LeftToRight);
-    ensure_equals("Legend remains the intrinsic first Fieldset item", fieldset->legend()->rect().top(), fieldset->rect().top());
+    EXPECT_FLOAT_EQ(fieldset->legend()->rect().top(), fieldset->rect().top());
+
     const float contentTop = fieldset->legend()->rect().y + fieldset->legend()->rect().h * .5f - 1.f - 3.f;
-    ensure_equals("topmost ordered Field starts at the border-relative content inset", early->rect().top(), contentTop);
-    ensure_equals("Field order remains effective below the Legend", early->rect().bottom() - late->rect().top(), 10.f);
+    EXPECT_FLOAT_EQ(early->rect().top(), contentTop);
+    EXPECT_FLOAT_EQ(early->rect().bottom() - late->rect().top(), 10.f);
 }
 
-template<> template<> void fieldObject::test<6>() {
+TEST_F(FieldTest, ReusesExistingCompositePartsAndInstantiatesThemIdempotently) {
     Panel owner;
     auto existingParent = std::make_unique<Panel>();
     Panel* parent = existingParent.get();
     auto existingChild = std::make_unique<Panel>();
     Panel* child = existingChild.get();
-    radia::ui::detail::WidgetCompilerAccess::setStyleIdentity(*parent, owner.styleElement(), "parent");
-    radia::ui::detail::WidgetCompilerAccess::setStyleIdentity(*child, owner.styleElement(), "parent::child");
+    WidgetCompilerAccess::setStyleIdentity(*parent, owner.styleElement(), "parent");
+    WidgetCompilerAccess::setStyleIdentity(*child, owner.styleElement(), "parent::child");
     parent->addChild(std::move(existingChild));
     owner.addChild(std::move(existingParent));
 
@@ -465,10 +546,12 @@ template<> template<> void fieldObject::test<6>() {
     root.create = [] { return std::make_unique<Panel>(); };
     contract.compositeParts = {nested, root};
 
-    radia::ui::detail::instantiateCompositeParts(owner, contract);
-    ensure("child-before-parent declaration reuses the existing parent", owner.children().size() == 1U && owner.children().front().get() == parent);
-    ensure("child-before-parent declaration reuses the existing child", parent->children().size() == 1U && parent->children().front().get() == child);
-    radia::ui::detail::instantiateCompositePart(owner, contract, "parent::child");
-    ensure("explicit nested instantiation remains idempotent", parent->children().size() == 1U);
+    instantiateCompositeParts(owner, contract);
+    ASSERT_EQ(owner.children().size(), 1U);
+    ASSERT_EQ(parent->children().size(), 1U);
+    EXPECT_EQ(owner.children().front().get(), parent);
+    EXPECT_EQ(parent->children().front().get(), child);
+
+    instantiateCompositePart(owner, contract, "parent::child");
+    EXPECT_EQ(parent->children().size(), 1U);
 }
-} // namespace tut

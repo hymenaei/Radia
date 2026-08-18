@@ -24,179 +24,372 @@
 
 #include "linden_common.h"
 #include <algorithm>
-#include "../test/lltut.h"
+#include <gtest/gtest.h>
 #include "localization/localization.h"
 
-namespace tut {
-struct localizationData {};
-using localizationTest = test_group<localizationData>;
-using localizationObject = localizationTest::object;
-localizationTest localizationTestCase("localization");
+namespace {
+using radia::ui::InlineContentKind;
+using radia::ui::LayoutDirection;
+using radia::ui::LocalizationArguments;
+using radia::ui::LocalizationCatalog;
+using radia::ui::LocalizationRequest;
+using radia::ui::ResourceLayer;
+using ::testing::Message;
 
-template<> template<> void localizationObject::test<1>() {
-    radia::ui::LocalizationCatalog catalog;
-    const char* kLocalization =
-        "defaultLocale: en\nlocales: {en: {name: English, strings: {title: Title, fallback: Fallback}}, pt: {name: Português, strings: {title: Título}}, ar: {name: العربية, direction: rtl, fallback: pt, strings: {}}}\n";
-    const auto result = catalog.loadYaml(kLocalization, "localization.yaml");
+constexpr char kCatalogWithFallbacks[] = "defaultLocale: en\n"
+                                         "locales: {en: {name: English, strings: {title: Title, fallback: Fallback}}, "
+                                         "pt: {name: Português, strings: {title: Título}}, "
+                                         "ar: {name: العربية, direction: rtl, fallback: pt, strings: {}}}\n";
 
-    ensure("valid localization loads", result.ok());
-    ensure_equals("locale count retained", catalog.locales().size(), 3U);
-    ensure_equals("locale enumeration ignores YAML authoring order", catalog.locales().front().localeId, "ar");
-    ensure_equals("native UTF-8 name preserved", catalog.locale("PT")->name, "Português");
-    ensure_equals("omitted direction is ltr", static_cast<int>(catalog.locale("pt")->direction),
-                  static_cast<int>(radia::ui::LayoutDirection::LeftToRight));
-    ensure_equals("rtl direction retained", static_cast<int>(catalog.locale("ar")->direction), static_cast<int>(radia::ui::LayoutDirection::RightToLeft));
-    ensure_equals("declared default retained", catalog.defaultLocaleId(), "en");
-    ensure_equals("explicit locale translation resolved", catalog.get("pt", "title"), "Título");
-    ensure_equals("direct default fallback resolved", catalog.get("pt", "fallback"), "Fallback");
-    ensure_equals("explicit fallback chain resolved", catalog.get("ar", "title"), "Título");
-    ensure_equals("globally missing string shows key", catalog.get("pt", "missingKey"), "missingKey");
-    ensure("locale identity is case-insensitive", catalog.containsLocale("AR"));
+constexpr char kPluralCatalog[] = "defaultLocale: en\n"
+                                  "locales: {en: {name: English, strings: {"
+                                  "itemCount: {one: \"You have {count} item\", other: \"You have {count} items\"}, "
+                                  "sheepCount: \"You have {count} sheep\"}}, "
+                                  "ar: {name: العربية, direction: rtl, strings: {"
+                                  "itemCount: {zero: \"لديك {count} عناصر\", one: \"لديك عنصر واحد\", "
+                                  "two: \"لديك عنصران\", few: \"لديك {count} عناصر\", "
+                                  "many: \"لديك {count} عنصرًا\", other: \"لديك {count} عنصر\"}, "
+                                  "sheepCount: {one: \"{count} خروف\", other: \"{count} خراف\"}}}}\n";
+
+constexpr char kRichTextCatalog[] = "defaultLocale: en\n"
+                                    "locales: {en: {name: English, strings: {"
+                                    "rich: 'Text <b>{userName}</b><br/><kbd shortcut=\"toggle-fly\"/>', "
+                                    "escaped: 'Write \\{count} and \\<b>'}}}\n";
+} // namespace
+
+TEST(LocalizationCatalogTest, LoadsLocaleMetadataAndSupportsCaseInsensitiveLookup) {
+    LocalizationCatalog catalog;
+    ASSERT_TRUE(catalog.loadYaml(kCatalogWithFallbacks, "localization.yaml").ok());
+
+    const auto locales = catalog.locales();
+    ASSERT_EQ(locales.size(), std::size_t(3));
+    EXPECT_EQ(locales.front().localeId, "ar");
+    EXPECT_EQ(catalog.defaultLocaleId(), "en");
+    EXPECT_TRUE(catalog.containsLocale("AR"));
+
+    const auto* portuguese = catalog.locale("PT");
+    ASSERT_NE(portuguese, nullptr);
+    EXPECT_EQ(portuguese->name, "Português");
+    EXPECT_EQ(portuguese->direction, LayoutDirection::LeftToRight);
+
+    const auto* arabic = catalog.locale("ar");
+    ASSERT_NE(arabic, nullptr);
+    EXPECT_EQ(arabic->direction, LayoutDirection::RightToLeft);
 }
 
-template<> template<> void localizationObject::test<2>() {
-    radia::ui::LocalizationCatalog catalog;
-    ensure("initial catalog loads", catalog.loadYaml("defaultLocale: en\nlocales: {en: {name: English, strings: {value: live}}}\n").ok());
+TEST(LocalizationCatalogTest, ResolvesTranslationsThroughDefaultAndExplicitFallbacks) {
+    LocalizationCatalog catalog;
+    ASSERT_TRUE(catalog.loadYaml(kCatalogWithFallbacks).ok());
 
-    const auto duplicate = catalog.loadYaml("defaultLocale: en\nlocales: {en: {name: English, strings: {value: first, value: second}}}\n");
-    ensure("duplicate entries reject catalog", !duplicate.ok());
-    ensure_equals("failed candidate preserves live catalog", catalog.get("en", "value"), "live");
+    EXPECT_TRUE(catalog.containsDefaultString("title"));
+    EXPECT_FALSE(catalog.containsDefaultString("missingKey"));
+    EXPECT_EQ(catalog.get("pt", "title"), "Título");
+    EXPECT_EQ(catalog.get("pt", "fallback"), "Fallback");
+    EXPECT_EQ(catalog.get("ar", "title"), "Título");
+    EXPECT_EQ(catalog.get("pt", "missingKey"), "missingKey");
 }
 
-template<> template<> void localizationObject::test<3>() {
-    radia::ui::LocalizationCatalog catalog;
-    const auto malformed = catalog.loadYaml("defaultLocale: [", "broken.yaml");
-    ensure("malformed YAML rejected", !malformed.ok());
-    ensure_equals("diagnostic has stable code", malformed.errors.front().code, "localization.yaml.invalid");
-    ensure_equals("diagnostic identifies source", malformed.errors.front().source, "broken.yaml");
-    ensure("wrong root rejected", !catalog.loadYaml("- en").ok());
-    ensure("missing default rejected", !catalog.loadYaml("locales: {en: {name: English, strings: {}}}\n").ok());
-    ensure("empty catalog rejected", !catalog.loadYaml("defaultLocale: en\nlocales: {}\n").ok());
-    ensure("implicit numeric value rejected", !catalog.loadYaml("defaultLocale: en\nlocales: {en: {name: English, strings: {version: 1}}}\n").ok());
-    ensure("quoted numeric value accepted", catalog.loadYaml("defaultLocale: en\nlocales: {en: {name: English, strings: {version: \"1\"}}}\n").ok());
+TEST(LocalizationCatalogTest, PreservesCommittedCatalogWhenReplacementFails) {
+    constexpr char kCommittedCatalog[] = "defaultLocale: en\n"
+                                         "locales: {en: {name: English, strings: {value: live}}}\n";
+
+    LocalizationCatalog catalog;
+    ASSERT_TRUE(catalog.loadYaml(kCommittedCatalog).ok());
+
+    constexpr char kDuplicateValueCatalog[] = "defaultLocale: en\n"
+                                              "locales: {en: {name: English, strings: "
+                                              "{value: first, value: second}}}\n";
+    const auto duplicate = catalog.loadYaml(kDuplicateValueCatalog);
+
+    EXPECT_FALSE(duplicate.ok());
+    EXPECT_EQ(catalog.get("en", "value"), "live");
 }
 
-template<> template<> void localizationObject::test<4>() {
-    radia::ui::LocalizationCatalog catalog;
-    const char* kMissingDefaultLocalization =
-        "defaultLocale: en\nlocales: {en: {name: English, strings: {}}, pt: {name: Português, strings: {onlyPt: Só}}}\n";
-    const auto missingDefaultKey = catalog.loadYaml(kMissingDefaultLocalization, "localization.yaml");
-    ensure("translation absent from default locale rejects catalog", !missingDefaultKey.ok());
-    ensure("missing default key diagnostic is stable",
-           std::any_of(missingDefaultKey.errors.begin(), missingDefaultKey.errors.end(),
-                       [](const radia::ui::Diagnostic& diagnostic) { return diagnostic.code == "localization.default.string_missing"; }));
+TEST(LocalizationCatalogTest, ReportsMalformedYamlWithSourceDiagnostic) {
+    LocalizationCatalog catalog;
+    constexpr char kMalformedCatalog[] = "defaultLocale: [";
+    const auto result = catalog.loadYaml(kMalformedCatalog, "broken.yaml");
 
-    ensure("snake-case String Key rejected",
-           !catalog.loadYaml("defaultLocale: en\nlocales: {en: {name: English, strings: {invalid_key: Value}}}\n").ok());
-    ensure("single lowerCamelCase segment accepted",
-           catalog.loadYaml("defaultLocale: en\nlocales: {en: {name: English, strings: {commonReady: Ready, runtimeUi.level: Level}}}\n").ok());
+    ASSERT_FALSE(result.ok());
+    ASSERT_FALSE(result.errors.empty());
+    EXPECT_EQ(result.errors.front().code, "localization.yaml.invalid");
+    EXPECT_EQ(result.errors.front().source, "broken.yaml");
 }
 
-template<> template<> void localizationObject::test<5>() {
-    radia::ui::LocalizationCatalog catalog;
-    const char* kCyclicFallbackLocalization =
-        "defaultLocale: en\nlocales: {en: {name: English, strings: {}}, pt: {name: Português, fallback: es, strings: {}}, es: {name: Español, fallback: pt, strings: {}}}\n";
-    ensure("fallback cycles reject catalog", !catalog.loadYaml(kCyclicFallbackLocalization).ok());
-    ensure("unknown fallback rejects catalog",
-           !catalog.loadYaml("defaultLocale: en\nlocales: {en: {name: English, strings: {}}, pt-BR: {name: Português, fallback: pt, strings: {}}}\n")
-                .ok());
-    ensure("noncanonical Locale ID rejected",
-           !catalog.loadYaml("defaultLocale: en\nlocales: {en: {name: English, strings: {}}, pt-br: {name: Português, strings: {}}}\n").ok());
+TEST(LocalizationCatalogTest, RejectsInvalidCatalogShapes) {
+    struct InvalidCatalogCase {
+        const char* name;
+        const char* yaml;
+    };
+
+    const InvalidCatalogCase cases[] = {
+        {"sequence root", "- en"},
+        {"missing default locale", "locales: {en: {name: English, strings: {}}}\n"},
+        {"empty locale map", "defaultLocale: en\nlocales: {}\n"},
+        {"implicit numeric value", "defaultLocale: en\nlocales: {en: {name: English, strings: {version: 1}}}\n"},
+    };
+
+    for (const auto& test : cases) {
+        SCOPED_TRACE(Message() << "invalid catalog shape: " << test.name);
+        LocalizationCatalog catalog;
+        EXPECT_FALSE(catalog.loadYaml(test.yaml).ok());
+    }
 }
 
-template<> template<> void localizationObject::test<6>() {
-    radia::ui::LocalizationCatalog catalog;
-    const char* kDerivedLocalization =
-        "locales: {en: {strings: {title: Derived, addedByLayer: Added}}, ar: {name: العربية, direction: rtl, strings: {title: مشتق}}}\n";
+TEST(LocalizationCatalogTest, AcceptsQuotedNumericTextValues) {
+    constexpr char kQuotedNumericCatalog[] = "defaultLocale: en\n"
+                                             "locales: {en: {name: English, strings: {version: \"1\"}}}\n";
+
+    LocalizationCatalog catalog;
+    ASSERT_TRUE(catalog.loadYaml(kQuotedNumericCatalog).ok());
+
+    EXPECT_EQ(catalog.get("en", "version"), "1");
+}
+
+TEST(LocalizationCatalogTest, RejectsLocalesMissingDefaultTranslations) {
+    constexpr char kMissingDefaultTranslationCatalog[] = "defaultLocale: en\n"
+                                                         "locales: {en: {name: English, strings: {}}, "
+                                                         "pt: {name: Português, strings: "
+                                                         "{onlyPt: Só}}}\n";
+
+    LocalizationCatalog catalog;
+    const auto result = catalog.loadYaml(kMissingDefaultTranslationCatalog, "localization.yaml");
+
+    ASSERT_FALSE(result.ok());
+    EXPECT_TRUE(std::any_of(result.errors.begin(), result.errors.end(),
+                            [](const radia::ui::Diagnostic& diagnostic) { return diagnostic.code == "localization.default.string_missing"; }));
+}
+
+TEST(LocalizationCatalogTest, RejectsSnakeCaseStringKeys) {
+    constexpr char kSnakeCaseKeyCatalog[] = "defaultLocale: en\n"
+                                            "locales: {en: {name: English, strings: {invalid_key: Value}}}\n";
+
+    LocalizationCatalog catalog;
+
+    EXPECT_FALSE(catalog.loadYaml(kSnakeCaseKeyCatalog).ok());
+}
+
+TEST(LocalizationCatalogTest, AcceptsLowerCamelCaseKeysWithDottedSegments) {
+    constexpr char kDottedKeyCatalog[] = "defaultLocale: en\n"
+                                         "locales: {en: {name: English, strings: "
+                                         "{commonReady: Ready, runtimeUi.level: Level}}}\n";
+
+    LocalizationCatalog catalog;
+
+    ASSERT_TRUE(catalog.loadYaml(kDottedKeyCatalog).ok());
+
+    EXPECT_EQ(catalog.get("en", "commonReady"), "Ready");
+    EXPECT_EQ(catalog.get("en", "runtimeUi.level"), "Level");
+}
+
+TEST(LocalizationCatalogTest, RejectsInvalidFallbackReferencesAndLocaleIds) {
+    struct InvalidFallbackCase {
+        const char* name;
+        const char* yaml;
+    };
+
+    const InvalidFallbackCase cases[] = {
+        {"fallback cycle",
+         "defaultLocale: en\n"
+         "locales: {en: {name: English, strings: {}}, "
+         "pt: {name: Português, fallback: es, strings: {}}, "
+         "es: {name: Español, fallback: pt, strings: {}}}\n"},
+        {"unknown fallback",
+         "defaultLocale: en\n"
+         "locales: {en: {name: English, strings: {}}, "
+         "pt-BR: {name: Português, fallback: pt, strings: {}}}\n"},
+        {"noncanonical locale id",
+         "defaultLocale: en\n"
+         "locales: {en: {name: English, strings: {}}, "
+         "pt-br: {name: Português, strings: {}}}\n"},
+    };
+
+    for (const auto& test : cases) {
+        SCOPED_TRACE(Message() << "invalid fallback case: " << test.name);
+        LocalizationCatalog catalog;
+        EXPECT_FALSE(catalog.loadYaml(test.yaml).ok());
+    }
+}
+
+TEST(LocalizationCatalogTest, MergesLayersAndPreservesInheritedDefaultStrings) {
+    constexpr char kBaseLayerCatalog[] = "defaultLocale: en\n"
+                                         "locales: {en: {name: English, strings: {title: Base}}}\n";
+    constexpr char kDerivedLayerCatalog[] = "locales: {en: {strings: {title: Derived, addedByLayer: Added}}, "
+                                            "ar: {name: العربية, direction: rtl, strings: {title: مشتق}}}\n";
+
+    LocalizationCatalog catalog;
     const auto result = catalog.loadYamlLayers({
-        {"base/localization.yaml", "defaultLocale: en\nlocales: {en: {name: English, strings: {title: Base}}}\n"},
-        {"derived/localization.yaml", kDerivedLocalization},
+        ResourceLayer{"base/localization.yaml", kBaseLayerCatalog},
+        ResourceLayer{"derived/localization.yaml", kDerivedLayerCatalog},
     });
 
-    ensure("localization layers merge", result.ok());
-    ensure_equals("derived default String replaces base", catalog.get("en", "title"), "Derived");
-    ensure_equals("derived default locale may add a key", catalog.get("en", "addedByLayer"), "Added");
-    ensure_equals("new locale inherits new default key", catalog.get("ar", "addedByLayer"), "Added");
-    ensure_equals("new locale value resolves", catalog.get("ar", "title"), "مشتق");
-
-    ensure("override defaultLocale rejected",
-           !catalog
-                .loadYamlLayers({
-                    {"base/localization.yaml", "defaultLocale: en\nlocales: {en: {name: English, strings: {}}}\n"},
-                    {"derived/localization.yaml", "defaultLocale: en\nlocales: {}\n"},
-                })
-                .ok());
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(catalog.get("en", "title"), "Derived");
+    EXPECT_EQ(catalog.get("en", "addedByLayer"), "Added");
+    EXPECT_EQ(catalog.get("ar", "addedByLayer"), "Added");
+    EXPECT_EQ(catalog.get("ar", "title"), "مشتق");
 }
 
-template<> template<> void localizationObject::test<7>() {
-    radia::ui::LocalizationCatalog catalog;
-    const char* kPluralLocalization =
-        "defaultLocale: en\nlocales: {en: {name: English, strings: {itemCount: {one: \"You have {count} item\", other: \"You have {count} items\"}, sheepCount: \"You have {count} sheep\"}}, ar: {name: العربية, direction: rtl, strings: {itemCount: {zero: \"لديك {count} عناصر\", one: \"لديك عنصر واحد\", two: \"لديك عنصران\", few: \"لديك {count} عناصر\", many: \"لديك {count} عنصرًا\", other: \"لديك {count} عنصر\"}, sheepCount: {one: \"{count} خروف\", other: \"{count} خراف\"}}}}\n";
-    ensure("plural catalog loads", catalog.loadYaml(kPluralLocalization).ok());
+TEST(LocalizationCatalogTest, RejectsLayersThatRedefineTheDefaultLocale) {
+    constexpr char kBaseLayerCatalog[] = "defaultLocale: en\n"
+                                         "locales: {en: {name: English, strings: {}}}\n";
+    constexpr char kDefaultLocaleOverrideLayer[] = "defaultLocale: en\n"
+                                                   "locales: {}\n";
 
-    const radia::ui::LocalizationRequest items = radia::ui::LocalizationRequest::plural("itemCount", "count", 2);
-    const std::string english = catalog.get("en", items);
-    ensure("English other category selected", english.find("items") != std::string::npos);
-    const std::string arabic = catalog.get("ar", items);
-    ensure("Arabic two category selected", arabic.find("عنصران") != std::string::npos);
+    LocalizationCatalog catalog;
+    const auto result = catalog.loadYamlLayers({
+        ResourceLayer{"base/localization.yaml", kBaseLayerCatalog},
+        ResourceLayer{"derived/localization.yaml", kDefaultLocaleOverrideLayer},
+    });
 
-    const radia::ui::LocalizationRequest sheep = radia::ui::LocalizationRequest::plural("sheepCount", "count", 2);
-    ensure("scalar acts as universal plural form", catalog.get("en", sheep).find("sheep") != std::string::npos);
-
-    ensure_equals("missing plural selector displays raw key", catalog.get("en", "itemCount"), "itemCount");
-    ensure("missing other category rejected",
-           !catalog.loadYaml("defaultLocale: en\nlocales: {en: {name: English, strings: {itemCount: {one: One}}}}\n").ok());
-    ensure("exact plural selector rejected",
-           !catalog.loadYaml("defaultLocale: en\nlocales: {en: {name: English, strings: {itemCount: {\"=0\": None, other: Other}}}}\n").ok());
+    EXPECT_FALSE(result.ok());
 }
 
-template<> template<> void localizationObject::test<8>() {
-    radia::ui::LocalizationCatalog catalog;
-    const char* kRichLocalization =
-        "defaultLocale: en\nlocales: {en: {name: English, strings: {rich: 'Text <b>{userName}</b><br/><kbd shortcut=\"toggle-fly\"/>', escaped: 'Write \\{count} and \\<b>'}}}\n";
-    ensure("Rich Strings load", catalog.loadYaml(kRichLocalization).ok());
+TEST(LocalizationCatalogTest, SelectsPluralFormsForEachLocale) {
+    LocalizationCatalog catalog;
+    ASSERT_TRUE(catalog.loadYaml(kPluralCatalog).ok());
+    EXPECT_TRUE(catalog.pluralCapable("itemCount"));
 
-    radia::ui::LocalizationArguments arguments;
+    const auto request = LocalizationRequest::plural("itemCount", "count", 2);
+    const std::string english = catalog.get("en", request);
+    const std::string arabic = catalog.get("ar", request);
+
+    EXPECT_NE(english.find("items"), std::string::npos);
+    EXPECT_NE(arabic.find("عنصران"), std::string::npos);
+}
+
+TEST(LocalizationCatalogTest, UsesScalarTranslationsForPluralRequests) {
+    LocalizationCatalog catalog;
+    ASSERT_TRUE(catalog.loadYaml(kPluralCatalog).ok());
+
+    const auto request = LocalizationRequest::plural("sheepCount", "count", 2);
+
+    EXPECT_NE(catalog.get("en", request).find("sheep"), std::string::npos);
+}
+
+TEST(LocalizationCatalogTest, ReturnsRawKeyWhenPluralSelectionIsMissing) {
+    LocalizationCatalog catalog;
+    ASSERT_TRUE(catalog.loadYaml(kPluralCatalog).ok());
+
+    EXPECT_EQ(catalog.get("en", "itemCount"), "itemCount");
+}
+
+TEST(LocalizationCatalogTest, RejectsIncompletePluralDefinitions) {
+    struct InvalidPluralCase {
+        const char* name;
+        const char* yaml;
+    };
+
+    const InvalidPluralCase cases[] = {
+        {"missing other category",
+         "defaultLocale: en\n"
+         "locales: {en: {name: English, strings: {itemCount: {one: One}}}}\n"},
+        {"exact selector",
+         "defaultLocale: en\n"
+         "locales: {en: {name: English, strings: {itemCount: {\"=0\": None, other: Other}}}}\n"},
+    };
+
+    for (const auto& test : cases) {
+        SCOPED_TRACE(Message() << "invalid plural definition: " << test.name);
+        LocalizationCatalog catalog;
+        EXPECT_FALSE(catalog.loadYaml(test.yaml).ok());
+    }
+}
+
+TEST(LocalizationCatalogTest, ResolvesRichTextAndEscapedSyntax) {
+    LocalizationCatalog catalog;
+    ASSERT_TRUE(catalog.loadYaml(kRichTextCatalog).ok());
+
+    LocalizationArguments arguments;
     arguments.emplace("userName", "<b>Bruno</b>");
-    const radia::ui::LocalizationRequest rich = radia::ui::LocalizationRequest::text("rich", std::move(arguments));
-    const radia::ui::InlineContent resolved = catalog.resolve("en", rich);
-    ensure_equals("Rich String has four root nodes", resolved.nodes().size(), 4U);
-    ensure_equals("bold node retained", static_cast<int>(resolved.nodes()[1].kind()), static_cast<int>(radia::ui::InlineContentKind::B));
-    ensure("inserted argument remains text", resolved.nodes()[1].children().front().value().find("<b>Bruno</b>") != std::string::npos);
-    ensure_equals("escaped syntax renders literally", catalog.get("en", "escaped"), "Write {count} and <b>");
+    const auto resolved = catalog.resolve("en", LocalizationRequest::text("rich", std::move(arguments)));
+    const auto& nodes = resolved.nodes();
 
-    ensure("unknown tag rejected",
-           !catalog.loadYaml("defaultLocale: en\nlocales: {en: {name: English, strings: {value: \"<script>bad</script>\"}}}\n").ok());
-    const char* kMismatchedKbdLocalization =
-        "defaultLocale: en\nlocales: {en: {name: English, strings: {shortcut: '<kbd shortcut=\"toggle-fly\"/>'}}, pt: {name: Português, strings: {shortcut: '<kbd shortcut=\"open-map\"/>'}}}\n";
-    ensure("mismatched kbd binding rejected", !catalog.loadYaml(kMismatchedKbdLocalization).ok());
+    ASSERT_EQ(nodes.size(), std::size_t(4));
+    EXPECT_EQ(nodes[0].kind(), InlineContentKind::Text);
+    EXPECT_EQ(nodes[0].value(), "Text ");
+    ASSERT_EQ(nodes[1].kind(), InlineContentKind::B);
+    ASSERT_EQ(nodes[1].children().size(), std::size_t(1));
+    EXPECT_EQ(nodes[1].children()[0].kind(), InlineContentKind::Text);
+    EXPECT_NE(nodes[1].children()[0].value().find("<b>Bruno</b>"), std::string::npos);
+    EXPECT_EQ(nodes[2].kind(), InlineContentKind::Br);
+    EXPECT_EQ(nodes[3].kind(), InlineContentKind::Kbd);
+    EXPECT_EQ(nodes[3].shortcutId(), "toggle-fly");
+    EXPECT_EQ(catalog.get("en", "escaped"), "Write {count} and <b>");
 }
 
-template<> template<> void localizationObject::test<9>() {
-    radia::ui::LocalizationCatalog catalog;
-    std::string decomposed = "defaultLocale: en\nlocales: {en: {name: English, strings: {value: \"Cafe";
-    decomposed += "\xCC\x81";
-    decomposed += "\"\n";
-    ensure("non-NFC text rejected", !catalog.loadYaml(decomposed).ok());
+TEST(LocalizationCatalogTest, RejectsUnsupportedRichTextMarkup) {
+    struct InvalidMarkupCase {
+        const char* name;
+        const char* yaml;
+    };
 
-    ensure("tab in localized text rejected",
-           !catalog.loadYaml("defaultLocale: en\nlocales: {en: {name: English, strings: {value: \"a\\tb\"}}}\n").ok());
+    const InvalidMarkupCase cases[] = {
+        {"unknown tag",
+         "defaultLocale: en\n"
+         "locales: {en: {name: English, strings: {value: \"<script>bad</script>\"}}}\n"},
+        {"mismatched key binding",
+         "defaultLocale: en\n"
+         "locales: {en: {name: English, strings: {shortcut: '<kbd shortcut=\"toggle-fly\"/>'}}, "
+         "pt: {name: Português, strings: {shortcut: '<kbd shortcut=\"open-map\"/>'}}}\n"},
+    };
 
-    ensure("anchors and aliases rejected",
-           !catalog.loadYaml("defaultLocale: en\nlocales: {en: {name: English, strings: {first: &shared Shared, second: *shared}}}\n").ok());
-    ensure("custom tags rejected", !catalog.loadYaml("defaultLocale: en\nlocales: {en: {name: English, strings: {value: !custom Text}}}\n").ok());
-    ensure("merge keys rejected", !catalog.loadYaml("defaultLocale: en\nlocales: {en: {name: English, strings: {<<: {value: Text}}}}\n").ok());
+    for (const auto& test : cases) {
+        SCOPED_TRACE(Message() << "invalid rich text case: " << test.name);
+        LocalizationCatalog catalog;
+        EXPECT_FALSE(catalog.loadYaml(test.yaml).ok());
+    }
 }
 
-template<> template<> void localizationObject::test<10>() {
-    radia::ui::LocalizationCatalog catalog;
-    const char* kPluralTranslation =
-        "defaultLocale: en\nlocales: {en: {name: English, strings: {onlineFriends: \"Friends online\"}}, ru: {name: Русский, strings: {onlineFriends: {one: \"{count} друг в сети\", few: \"{count} друга в сети\", many: \"{count} друзей в сети\", other: \"{count} друга в сети\"}}}}\n";
-    ensure("translation may use plural selector omitted by default", catalog.loadYaml(kPluralTranslation).ok());
+TEST(LocalizationCatalogTest, RejectsNonNfcTextAndUnsafeYamlFeatures) {
+    LocalizationCatalog catalog;
+    std::string nonNfc = "defaultLocale: en\nlocales: {en: {name: English, strings: {value: \"Cafe";
+    nonNfc += "\xCC\x81";
+    nonNfc += "\"\n";
+    EXPECT_FALSE(catalog.loadYaml(nonNfc).ok());
 
-    const radia::ui::LocalizationRequest request = radia::ui::LocalizationRequest::plural("onlineFriends", "count", 2);
-    ensure("implicit selector argument formats", catalog.get("ru", request).find("друга") != std::string::npos);
-    const radia::ui::LocalizationRequest wrongRequest = radia::ui::LocalizationRequest::plural("onlineFriends", "otherCount", 2);
-    ensure_equals("wrong selector name displays raw key", catalog.get("ru", wrongRequest), "onlineFriends");
+    struct UnsafeYamlCase {
+        const char* name;
+        const char* yaml;
+    };
+
+    const UnsafeYamlCase cases[] = {
+        {"tab in localized text",
+         "defaultLocale: en\n"
+         "locales: {en: {name: English, strings: {value: \"a\\tb\"}}}\n"},
+        {"anchors and aliases",
+         "defaultLocale: en\n"
+         "locales: {en: {name: English, strings: {first: &shared Shared, second: *shared}}}\n"},
+        {"custom tag",
+         "defaultLocale: en\n"
+         "locales: {en: {name: English, strings: {value: !custom Text}}}\n"},
+        {"merge key",
+         "defaultLocale: en\n"
+         "locales: {en: {name: English, strings: {<<: {value: Text}}}}\n"},
+    };
+
+    for (const auto& test : cases) {
+        SCOPED_TRACE(Message() << "unsafe YAML feature: " << test.name);
+        LocalizationCatalog unsafeCatalog;
+        EXPECT_FALSE(unsafeCatalog.loadYaml(test.yaml).ok());
+    }
 }
-} // namespace tut
+
+TEST(LocalizationCatalogTest, UsesTranslationPluralArgumentsForLocaleSpecificForms) {
+    constexpr char kLocaleSpecificPluralCatalog[] = "defaultLocale: en\n"
+                                                    "locales: {en: {name: English, strings: "
+                                                    "{onlineFriends: \"Friends online\"}}, "
+                                                    "ru: {name: Русский, strings: {onlineFriends: "
+                                                    "{one: \"{count} друг в сети\", "
+                                                    "few: \"{count} друга в сети\", many: \"{count} друзей в сети\", "
+                                                    "other: \"{count} друга в сети\"}}}}\n";
+
+    LocalizationCatalog catalog;
+    ASSERT_TRUE(catalog.loadYaml(kLocaleSpecificPluralCatalog).ok());
+
+    const auto request = LocalizationRequest::plural("onlineFriends", "count", 2);
+    const auto wrongRequest = LocalizationRequest::plural("onlineFriends", "otherCount", 2);
+
+    EXPECT_NE(catalog.get("ru", request).find("друга"), std::string::npos);
+    EXPECT_EQ(catalog.get("ru", wrongRequest), "onlineFriends");
+}

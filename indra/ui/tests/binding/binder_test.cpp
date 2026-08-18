@@ -23,9 +23,17 @@
  */
 
 #include "linden_common.h"
+#include <cstdint>
+#include <functional>
+#include <gtest/gtest.h>
 #include <map>
+#include <memory>
 #include <optional>
-#include "../test/lltut.h"
+#include <string>
+#include <string_view>
+#include <typeindex>
+#include <utility>
+#include <vector>
 #include "binding/binder.h"
 #include "binding/settingresolver.h"
 #include "binding/valuebinding.h"
@@ -46,29 +54,40 @@ using radia::ui::Binder;
 using radia::ui::Binding;
 using radia::ui::Button;
 using radia::ui::CurrentEventArgument;
+using radia::ui::DiagnosticResult;
 using radia::ui::EventArgument;
 using radia::ui::EventCall;
 using radia::ui::EventHandlerRegistration;
+using radia::ui::Field;
 using radia::ui::InlineContentKind;
+using radia::ui::KeybindingPresentation;
 using radia::ui::LayoutBuildResult;
 using radia::ui::LayoutResourceCompiler;
 using radia::ui::Panel;
 using radia::ui::PreparedBindingResult;
+using radia::ui::ResourceSnapshot;
 using radia::ui::SettingResolution;
 using radia::ui::SettingResolver;
+using radia::ui::SkinGenerationPrepareResult;
+using radia::ui::Surface;
 using radia::ui::Switch;
+using radia::ui::System;
+using radia::ui::TextSource;
 using radia::ui::ValueBinding;
 using radia::ui::ValueBindingBase;
 using radia::ui::ValueBindingRef;
 using radia::ui::ValueBindingSubscription;
+using radia::ui::ValueControlState;
 using radia::ui::ValueState;
 using radia::ui::ValueValidation;
+using radia::ui::Visibility;
 using radia::ui::Widget;
 using radia::ui::WidgetEvent;
 using radia::ui::WidgetEventKind;
 using radia::ui::WidgetRef;
 using radia::ui::detail::findWidgetInScope;
 using radia::ui::detail::makeEventRegistration;
+using radia::ui::detail::WidgetCompilerAccess;
 
 const char* noEventArguments(const EventCall& call, WidgetEventKind) {
     return call.arguments().empty() ? nullptr : "binding.event.arity_mismatch";
@@ -84,15 +103,15 @@ template<typename T> const char* singleEventArgument(const EventCall& call, Widg
     return std::holds_alternative<T>(call.arguments().front()) ? nullptr : "binding.event.argument_type_mismatch";
 }
 
-void bindEvent(Binder& binder, std::string settingName, std::optional<WidgetEventKind> kind,
-               EventHandlerRegistration::Invoke invoke, EventHandlerRegistration::ArgumentError argumentError) {
+void bindEvent(Binder& binder, std::string settingName, std::optional<WidgetEventKind> kind, EventHandlerRegistration::Invoke invoke,
+               EventHandlerRegistration::ArgumentError argumentError) {
     binder.event(makeEventRegistration(std::move(settingName), kind, std::move(invoke), std::move(argumentError)));
 }
 
 template<typename Callback> void bindEvent(Binder& binder, std::string settingName, Callback callback) {
     bindEvent(
-        binder, std::move(settingName), std::nullopt,
-        [callback = std::move(callback)](const WidgetEvent&, const EventCall&) mutable { callback(); }, noEventArguments);
+        binder, std::move(settingName), std::nullopt, [callback = std::move(callback)](const WidgetEvent&, const EventCall&) mutable { callback(); },
+        noEventArguments);
 }
 
 template<typename T> class TestValueBinding final : public ValueBinding<T> {
@@ -157,9 +176,7 @@ class MisreportingSettingResolver final : public SettingResolver {
 public:
     MisreportingSettingResolver() : binding(std::make_shared<TestValueBinding<std::string>>("wrong type")) {}
 
-    SettingResolution resolve(std::string_view, std::type_index) override {
-        return {SettingResolution::ResolutionStatus::Found, binding};
-    }
+    SettingResolution resolve(std::string_view, std::type_index) override { return {SettingResolution::ResolutionStatus::Found, binding}; }
 
     std::shared_ptr<TestValueBinding<std::string>> binding;
 };
@@ -168,8 +185,8 @@ template<typename WidgetT> WidgetRef<WidgetT> lookupWidget(Widget& root, std::st
     return WidgetRef<WidgetT>(dynamic_cast<WidgetT*>(findWidgetInScope(root, id)));
 }
 
-struct TestBindingResult : radia::ui::DiagnosticResult {
-    bool ok() const { return !hasErrors(); }
+struct TestBindingResult : DiagnosticResult {
+    bool ok() const { return !hasErrors() && static_cast<bool>(binding); }
     Binding binding;
 };
 
@@ -183,13 +200,7 @@ TestBindingResult finishBinding(Binder& binder) {
 }
 } // namespace
 
-namespace tut {
-struct binderData {};
-using binderTest = test_group<binderData>;
-using binderObject = binderTest::object;
-binderTest binderTestCase("binder");
-
-template<> template<> void binderObject::test<1>() {
+TEST(BinderTest, CommitsEventBindingAndResolvesTypedWidget) {
     Panel root;
     auto button = std::make_unique<Button>();
     button->setId("save").setEventCall(WidgetEventKind::Click, EventCall("save"));
@@ -201,13 +212,13 @@ template<> template<> void binderObject::test<1>() {
     save = lookupWidget<Button>(root, "save");
     bindEvent(binder, "save", [&] { ++activations; });
     TestBindingResult result = finishBinding(binder);
-    ensure("Event binding transaction commits", result.ok());
-    ensure("typed lookup resolves", !!save);
+    ASSERT_TRUE(result.ok());
+    ASSERT_TRUE(static_cast<bool>(save));
     save->activate();
-    ensure_equals("handler attached", activations, 1);
+    EXPECT_EQ(activations, 1);
 }
 
-template<> template<> void binderObject::test<2>() {
+TEST(BinderTest, DistinguishesTypedAndMissingWidgetLookups) {
     Panel root;
     auto button = std::make_unique<Button>();
     button->setId("save").setEventCall(WidgetEventKind::Click, EventCall("save"));
@@ -227,13 +238,15 @@ template<> template<> void binderObject::test<2>() {
     wrongType = lookupWidget<Button>(root, "status");
     missing = lookupWidget<radia::ui::Label>(root, "missing");
     const TestBindingResult result = finishBinding(binder);
-    ensure("Event transaction remains valid", result.ok());
-    ensure("typed lookup distinguishes wrong and missing Widgets", save && !wrongType && !missing);
+    ASSERT_TRUE(result.ok());
+    ASSERT_TRUE(static_cast<bool>(save));
+    EXPECT_FALSE(static_cast<bool>(wrongType));
+    EXPECT_FALSE(static_cast<bool>(missing));
     source->activate();
-    ensure_equals("handler attaches to the resolved source", activations, 1);
+    EXPECT_EQ(activations, 1);
 }
 
-template<> template<> void binderObject::test<3>() {
+TEST(BinderTest, InvalidatesWidgetReferenceAfterWidgetRemoval) {
     Panel root;
     auto button = std::make_unique<Button>();
     button->setId("temporary");
@@ -241,12 +254,14 @@ template<> template<> void binderObject::test<3>() {
     WidgetRef<Button> reference;
     Binder binder(root);
     reference = lookupWidget<Button>(root, "temporary");
-    ensure("reference resolves", finishBinding(binder).ok() && reference);
+    const TestBindingResult result = finishBinding(binder);
+    ASSERT_TRUE(result.ok());
+    ASSERT_TRUE(static_cast<bool>(reference));
     root.clearChildren();
-    ensure("destroyed widget invalidates reference", !reference);
+    EXPECT_FALSE(static_cast<bool>(reference));
 }
 
-template<> template<> void binderObject::test<4>() {
+TEST(BinderTest, DetachesEventHandlerWhenBindingIsDestroyed) {
     Panel root;
     auto button = std::make_unique<Button>();
     Button* source = button.get();
@@ -258,15 +273,15 @@ template<> template<> void binderObject::test<4>() {
     Binder binder(root);
     bindEvent(binder, "optional", [&] { ++activations; });
     TestBindingResult result = finishBinding(binder);
-    ensure("declared Event Handler binds", result.ok() && result.binding);
+    ASSERT_TRUE(result.ok());
     source->activate();
-    ensure_equals("bound Event Handler runs", activations, 1);
+    EXPECT_EQ(activations, 1);
     result.binding = Binding{};
     source->activate();
-    ensure_equals("destroyed binding detaches handler", activations, 1);
+    EXPECT_EQ(activations, 1);
 }
 
-template<> template<> void binderObject::test<5>() {
+TEST(BinderTest, RejectsOneHandlerAcrossMultipleEventKinds) {
     Panel root;
     auto button = std::make_unique<Button>();
     button->setEventCall(WidgetEventKind::Click, EventCall("shared"));
@@ -277,11 +292,12 @@ template<> template<> void binderObject::test<5>() {
 
     Binder binder(root);
     const TestBindingResult result = finishBinding(binder);
-    ensure("one Handler settingName cannot span Event kinds", !result.ok());
-    ensure_equals("kind conflict diagnostic", result.errors.front().code, "binding.event.kind_mismatch");
+    ASSERT_FALSE(result.ok());
+    ASSERT_FALSE(result.errors.empty());
+    EXPECT_EQ(result.errors.front().code, "binding.event.kind_mismatch");
 }
 
-template<> template<> void binderObject::test<6>() {
+TEST(BinderTest, BindsChangeEventsWithCurrentState) {
     Panel root;
     auto control = std::make_unique<Switch>();
     Switch* source = control.get();
@@ -293,19 +309,19 @@ template<> template<> void binderObject::test<6>() {
     bindEvent(
         binder, "changed", WidgetEventKind::Change,
         [&](const WidgetEvent& event, const EventCall&) {
-            ensure("change context contains completed value", static_cast<const radia::ui::ChangeEvent&>(event).checked);
+            EXPECT_TRUE(static_cast<const radia::ui::ChangeEvent&>(event).checked);
             ++changes;
         },
         currentEventArgument);
     TestBindingResult result = finishBinding(binder);
-    ensure("change binding commits", result.ok());
+    ASSERT_TRUE(result.ok());
     source->setChecked(false);
-    ensure_equals("programmatic setter stays silent", changes, 0);
+    EXPECT_EQ(changes, 0);
     source->activate();
-    ensure_equals("user activation emits change", changes, 1);
+    EXPECT_EQ(changes, 1);
 }
 
-template<> template<> void binderObject::test<7>() {
+TEST(BinderTest, ResolvesIdsWithinIndependentResourceScopes) {
     Panel root;
     auto left = std::make_unique<Panel>();
     left->setId("left");
@@ -328,7 +344,10 @@ template<> template<> void binderObject::test<7>() {
     Binder parent(root);
     leftScope = lookupWidget<Panel>(root, "left");
     rightScope = lookupWidget<Panel>(root, "right");
-    ensure("parent resolves resource instances", finishBinding(parent).ok() && leftScope && rightScope);
+    const TestBindingResult parentResult = finishBinding(parent);
+    ASSERT_TRUE(parentResult.ok());
+    ASSERT_TRUE(static_cast<bool>(leftScope));
+    ASSERT_TRUE(static_cast<bool>(rightScope));
 
     WidgetRef<radia::ui::Label> leftBound;
     WidgetRef<radia::ui::Label> rightBound;
@@ -336,12 +355,16 @@ template<> template<> void binderObject::test<7>() {
     leftBound = lookupWidget<radia::ui::Label>(*leftScope, "item");
     Binder rightBinder(*rightScope);
     rightBound = lookupWidget<radia::ui::Label>(*rightScope, "item");
-    ensure("left local id binds", finishBinding(leftBinder).ok() && leftBound);
-    ensure("right duplicate local id binds independently", finishBinding(rightBinder).ok() && rightBound);
-    ensure("resource instances remain distinct", leftBound.get() != rightBound.get());
+    const TestBindingResult leftResult = finishBinding(leftBinder);
+    ASSERT_TRUE(leftResult.ok());
+    ASSERT_TRUE(static_cast<bool>(leftBound));
+    const TestBindingResult rightResult = finishBinding(rightBinder);
+    ASSERT_TRUE(rightResult.ok());
+    ASSERT_TRUE(static_cast<bool>(rightBound));
+    EXPECT_NE(leftBound.get(), rightBound.get());
 }
 
-template<> template<> void binderObject::test<8>() {
+TEST(BinderTest, PreparesReplacementWithoutMutatingLiveBinding) {
     Panel live;
     auto liveButton = std::make_unique<Button>();
     Button* liveButtonPtr = liveButton.get();
@@ -353,7 +376,8 @@ template<> template<> void binderObject::test<8>() {
     reference = lookupWidget<Button>(live, "reload");
     bindEvent(liveBinder, "reload", [] {});
     TestBindingResult liveBinding = finishBinding(liveBinder);
-    ensure("initial binding commits", liveBinding.ok() && reference.get() == liveButtonPtr);
+    ASSERT_TRUE(liveBinding.ok());
+    EXPECT_EQ(reference.get(), liveButtonPtr);
 
     Panel candidate;
     auto candidateButton = std::make_unique<Button>();
@@ -365,34 +389,37 @@ template<> template<> void binderObject::test<8>() {
     auto candidateReference = lookupWidget<Button>(candidate, "reload");
     bindEvent(candidateBinder, "reload", [] {});
     PreparedBindingResult prepared = candidateBinder.prepare();
-    ensure("replacement binding prepares", prepared.ok());
-    ensure("preparation leaves live reference untouched", reference.get() == liveButtonPtr && candidateReference);
+    ASSERT_TRUE(prepared.ok());
+    EXPECT_EQ(reference.get(), liveButtonPtr);
+    ASSERT_TRUE(static_cast<bool>(candidateReference));
 
     Binding replacement = prepared.binding.commit();
-    ensure("candidate Event binding commits independently", candidateReference.get() == candidateButtonPtr);
-    ensure("prepared commit returns attached handlers", !!replacement);
+    EXPECT_EQ(candidateReference.get(), candidateButtonPtr);
+    EXPECT_TRUE(static_cast<bool>(replacement));
 
     Panel removedCandidate;
     Binder removedBinder(removedCandidate);
     auto removedReference = lookupWidget<Button>(removedCandidate, "reload");
     PreparedBindingResult removed = removedBinder.prepare();
-    ensure("removing a widget keeps the reference model independent", removed.ok() && !removedReference);
-    ensure("removal preparation leaves the live reference untouched", reference.get() == liveButtonPtr);
+    ASSERT_TRUE(removed.ok());
+    EXPECT_FALSE(static_cast<bool>(removedReference));
+    EXPECT_EQ(reference.get(), liveButtonPtr);
     Binding removedBinding = removed.binding.commit();
-    ensure("committing widget removal leaves controller-owned references unchanged", reference.get() == liveButtonPtr);
-    ensure("widget removal still returns a valid binding", !!removedBinding);
+    EXPECT_EQ(reference.get(), liveButtonPtr);
+    EXPECT_TRUE(static_cast<bool>(removedBinding));
 }
 
-template<> template<> void binderObject::test<9>() {
+TEST(BinderTest, AllowsUnmatchedOptionalEventHandler) {
     Panel root;
     Binder binder(root);
     bindEvent(binder, "missing", [] {});
     PreparedBindingResult result = binder.prepare();
-    ensure("Controller Event Handler may be absent from this layout", result.ok());
-    ensure("optional Event Handler still produces a valid binding", !!result.binding.commit());
+    ASSERT_TRUE(result.ok());
+    Binding binding = result.binding.commit();
+    EXPECT_TRUE(static_cast<bool>(binding));
 }
 
-template<> template<> void binderObject::test<10>() {
+TEST(BinderTest, WarnsForUnhandledLayoutEvent) {
     Panel root;
     auto button = std::make_unique<Button>();
     button->setEventCall(WidgetEventKind::Click, EventCall("unhandled"));
@@ -400,12 +427,12 @@ template<> template<> void binderObject::test<10>() {
 
     Binder binder(root);
     const TestBindingResult result = finishBinding(binder);
-    ensure("unhandled Layout Resource call does not reject binding", result.ok());
-    ensure_equals("unhandled call reports one warning", result.warnings.size(), 1U);
-    ensure_equals("unhandled call diagnostic", result.warnings.front().code, "binding.event.unhandled");
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.warnings.size(), std::size_t{1});
+    EXPECT_EQ(result.warnings.front().code, "binding.event.unhandled");
 }
 
-template<> template<> void binderObject::test<11>() {
+TEST(BinderTest, PreservesLiveValueBindingUntilReplacementCommits) {
     Panel liveRoot;
     auto live = std::make_shared<TestValueBinding<bool>>(false);
     TestSettingResolver liveResolver;
@@ -414,8 +441,8 @@ template<> template<> void binderObject::test<11>() {
     Binder liveBinder(liveRoot, &liveResolver);
     liveBinder.requireValueBinding({"demo-enabled"}, reference);
     TestBindingResult liveResult = finishBinding(liveBinder);
-    ensure("typed value binding commits", liveResult.ok() && liveResult.binding);
-    ensure("committed reference points at the live provider", reference.get() == live.get());
+    ASSERT_TRUE(liveResult.ok());
+    EXPECT_EQ(reference.get(), live.get());
 
     Panel candidateRoot;
     auto candidate = std::make_shared<TestValueBinding<bool>>(true);
@@ -424,8 +451,8 @@ template<> template<> void binderObject::test<11>() {
     Binder candidateBinder(candidateRoot, &candidateResolver);
     candidateBinder.requireValueBinding({"demo-enabled"}, reference);
     PreparedBindingResult prepared = candidateBinder.prepare();
-    ensure("replacement value binding prepares", prepared.ok());
-    ensure("preparation does not replace the live provider", reference.get() == live.get());
+    ASSERT_TRUE(prepared.ok());
+    EXPECT_EQ(reference.get(), live.get());
 
     {
         Panel abandonedRoot;
@@ -435,27 +462,31 @@ template<> template<> void binderObject::test<11>() {
         Binder abandonedBinder(abandonedRoot, &abandonedResolver);
         abandonedBinder.requireValueBinding({"demo-enabled"}, reference);
         PreparedBindingResult abandonedResult = abandonedBinder.prepare();
-        ensure("a second replacement value binding prepares", abandonedResult.ok());
+        EXPECT_TRUE(abandonedResult.ok());
     }
-    ensure("discarding a prepared transaction preserves the live provider", reference.get() == live.get());
+    EXPECT_EQ(reference.get(), live.get());
 
     Binding replacement = prepared.binding.commit();
-    ensure("commit switches to the candidate provider", replacement && reference.get() == candidate.get());
-    ensure("candidate state is available through the typed reference", reference->state().value);
+    ASSERT_TRUE(static_cast<bool>(replacement));
+    EXPECT_EQ(reference.get(), candidate.get());
+    ASSERT_TRUE(static_cast<bool>(reference));
+    EXPECT_TRUE(reference->state().value);
 }
 
-template<> template<> void binderObject::test<12>() {
+TEST(BinderTest, RejectsMissingSetting) {
     Panel root;
     ValueBindingRef<bool> reference;
     TestSettingResolver resolver;
     Binder binder(root, &resolver);
     binder.requireValueBinding({"missing-value"}, reference);
     PreparedBindingResult result = binder.prepare();
-    ensure("missing setting rejects the transaction", !result.ok() && !reference);
-    ensure_equals("missing setting diagnostic", result.errors.front().code, std::string("binding.setting.missing"));
+    ASSERT_FALSE(result.ok());
+    EXPECT_FALSE(static_cast<bool>(reference));
+    ASSERT_EQ(result.errors.size(), std::size_t{1});
+    EXPECT_EQ(result.errors.front().code, "binding.setting.missing");
 }
 
-template<> template<> void binderObject::test<13>() {
+TEST(BinderTest, RejectsSettingTypeMismatch) {
     Panel root;
     auto setting = std::make_shared<TestValueBinding<std::string>>("enabled");
     TestSettingResolver resolver;
@@ -464,11 +495,13 @@ template<> template<> void binderObject::test<13>() {
     Binder binder(root, &resolver);
     binder.requireValueBinding({"demo-enabled"}, reference);
     const PreparedBindingResult result = binder.prepare();
-    ensure("setting type mismatch rejects the transaction", !result.ok() && !reference);
-    ensure_equals("setting type mismatch diagnostic", result.errors.front().code, std::string("binding.setting.type_mismatch"));
+    ASSERT_FALSE(result.ok());
+    EXPECT_FALSE(static_cast<bool>(reference));
+    ASSERT_EQ(result.errors.size(), std::size_t{1});
+    EXPECT_EQ(result.errors.front().code, "binding.setting.type_mismatch");
 }
 
-template<> template<> void binderObject::test<14>() {
+TEST(BinderTest, ResolvesRepeatedValueRequirementsIndependently) {
     Panel root;
     auto setting = std::make_shared<TestValueBinding<bool>>(false);
     TestSettingResolver resolver;
@@ -479,18 +512,26 @@ template<> template<> void binderObject::test<14>() {
     binder.requireValueBinding({"demo-enabled"}, first);
     binder.requireValueBinding({"demo-enabled"}, second);
     PreparedBindingResult result = binder.prepare();
-    ensure("repeated setting requirements prepare", result.ok());
+    ASSERT_TRUE(result.ok());
     Binding binding = result.binding.commit();
-    ensure("repeated setting requirements resolve independently", binding && first.get() == setting.get() && second.get() == setting.get());
+    ASSERT_TRUE(static_cast<bool>(binding));
+    EXPECT_EQ(first.get(), setting.get());
+    EXPECT_EQ(second.get(), setting.get());
 }
 
-template<> template<> void binderObject::test<15>() {
-    const char* kFieldLayout =
-        "<field><label for=\"demoSwitch\">Enabled</label><switch id=\"demoSwitch\" setting=\"demo-enabled\" onChange=\"demoChanged()\"/><br/><hint>Persistent hint</hint><br/><error>Fallback error</error></field>";
+TEST(BinderTest, BindsFieldSwitchAndPropagatesValidation) {
+    constexpr char kFieldLayout[] = "<field><label for=\"demoSwitch\">Enabled</label>"
+                                    "<switch id=\"demoSwitch\" setting=\"demo-enabled\" onChange=\"demoChanged()\"/>"
+                                    "<br/><hint>Persistent hint</hint><br/><error>Fallback error</error></field>";
+    constexpr char kMissingValueLayout[] = "<switch setting=\"missing-value\"/>";
+    constexpr char kTypedValueLayout[] = "<switch setting=\"typed-value\"/>";
+    constexpr char kRetainedValueLayout[] = "<switch setting=\"retained-value\"/>";
     LayoutBuildResult buildResult = LayoutResourceCompiler().buildWidgetTreeFromString(kFieldLayout, "bound-field.xml");
-    auto* field = buildResult.rootAs<radia::ui::Field>();
-    auto* control = field ? dynamic_cast<Switch*>(field->valueControl()) : nullptr;
-    ensure("bound standalone Field compiles", buildResult.ok() && field && control);
+    ASSERT_TRUE(buildResult.ok());
+    auto* field = buildResult.rootAs<Field>();
+    ASSERT_NE(field, nullptr);
+    auto* control = dynamic_cast<Switch*>(field->valueControl());
+    ASSERT_NE(control, nullptr);
 
     auto provider = std::make_shared<TestValueBinding<bool>>(false);
     TestSettingResolver resolver;
@@ -500,165 +541,187 @@ template<> template<> void binderObject::test<15>() {
     bindEvent(
         binder, "demoChanged", WidgetEventKind::Change,
         [&](const WidgetEvent& event, const EventCall&) {
-            ensure("bound Change Event observes the provider value", !static_cast<const radia::ui::ChangeEvent&>(event).checked);
+            EXPECT_FALSE(static_cast<const radia::ui::ChangeEvent&>(event).checked);
             ++changes;
         },
         noEventArguments);
     TestBindingResult result = finishBinding(binder);
-    ensure("Switch setting resolves through Binder", result.ok() && result.binding);
-    ensure_equals("committed Switch owns one provider subscription", provider->observerCount(), 1U);
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(provider->observerCount(), std::size_t{1});
 
-    provider->publish({true, false, ValueValidation::invalid(radia::ui::TextSource::text("Dynamic error"))});
-    ensure("external provider state updates Switch", control->checked());
-    ensure("Field reflects dirty Value State", field->dirty());
-    ensure("Field reflects invalid Value State", field->invalid());
-    ensure_equals("dynamic validation text overrides authored Error", field->error()->text(), "Dynamic error");
-    ensure_equals("invalid Field reveals Error", static_cast<int>(field->error()->visibility()), static_cast<int>(radia::ui::Visibility::Visible));
+    provider->publish({true, false, ValueValidation::invalid(TextSource::text("Dynamic error"))});
+    EXPECT_TRUE(control->checked());
+    EXPECT_TRUE(field->dirty());
+    EXPECT_TRUE(field->invalid());
+    ASSERT_NE(field->error(), nullptr);
+    EXPECT_EQ(field->error()->text(), "Dynamic error");
+    EXPECT_EQ(field->error()->visibility(), Visibility::Visible);
 
     int valueStatePublications = 0;
-    ValueBindingSubscription valueStateSubscription =
-        control->observeValueControlState([&](const radia::ui::ValueControlState&) { ++valueStatePublications; });
+    ValueBindingSubscription valueStateSubscription = control->observeValueControlState([&](const ValueControlState&) { ++valueStatePublications; });
     control->activate();
-    ensure("Switch activation writes through the provider", !provider->state().value && !control->checked());
-    ensure_equals("synchronous bound activation publishes one value state", valueStatePublications, 1);
-    ensure_equals("bound Switch emits Change after writing the provider", changes, 1);
+    EXPECT_FALSE(provider->state().value);
+    EXPECT_FALSE(control->checked());
+    EXPECT_EQ(valueStatePublications, 1);
+    EXPECT_EQ(changes, 1);
     valueStateSubscription.reset();
 
     provider->publish({false, false, ValueValidation::valid()});
-    ensure("valid provider state clears Field invalid state", !field->invalid());
-    ensure_equals("valid Field collapses Error", static_cast<int>(field->error()->visibility()), static_cast<int>(radia::ui::Visibility::Collapsed));
+    EXPECT_FALSE(field->invalid());
+    ASSERT_NE(field->error(), nullptr);
+    EXPECT_EQ(field->error()->visibility(), Visibility::Collapsed);
 
     result.binding = Binding{};
-    ensure_equals("reset Binding disconnects automatic Value Control observation", provider->observerCount(), 0U);
+    EXPECT_EQ(provider->observerCount(), std::size_t{0});
     provider->publish({true, false, ValueValidation::valid()});
-    ensure("disconnected provider no longer updates Switch", !control->checked());
+    EXPECT_FALSE(control->checked());
 
-    LayoutBuildResult missingBuildResult =
-        LayoutResourceCompiler().buildWidgetTreeFromString("<switch setting=\"missing-value\"/>", "missing-value.xml");
+    LayoutBuildResult missingBuildResult = LayoutResourceCompiler().buildWidgetTreeFromString(kMissingValueLayout, "missing-value.xml");
+    ASSERT_TRUE(missingBuildResult.ok());
+    ASSERT_NE(missingBuildResult.root, nullptr);
     TestSettingResolver missingResolver;
     Binder missingBinder(*missingBuildResult.root, &missingResolver);
     TestBindingResult missing = finishBinding(missingBinder);
-    ensure("authored setting requires a matching setting", !missing.ok());
-    ensure_equals("automatic missing setting diagnostic is stable", missing.errors.front().code, std::string("binding.setting.missing"));
+    ASSERT_FALSE(missing.ok());
+    ASSERT_EQ(missing.errors.size(), std::size_t{1});
+    EXPECT_EQ(missing.errors.front().code, "binding.setting.missing");
 
-    LayoutBuildResult typedBuildResult =
-        LayoutResourceCompiler().buildWidgetTreeFromString("<switch setting=\"typed-value\"/>", "typed-value.xml");
+    LayoutBuildResult typedBuildResult = LayoutResourceCompiler().buildWidgetTreeFromString(kTypedValueLayout, "typed-value.xml");
+    ASSERT_TRUE(typedBuildResult.ok());
+    ASSERT_NE(typedBuildResult.root, nullptr);
     auto wrongType = std::make_shared<TestValueBinding<std::string>>("false");
     TestSettingResolver typedResolver;
     typedResolver.add("typed-value", wrongType);
     Binder typedBinder(*typedBuildResult.root, &typedResolver);
     TestBindingResult typed = finishBinding(typedBinder);
-    ensure("authored setting enforces the Value Control type", !typed.ok());
-    ensure_equals("automatic type mismatch diagnostic is stable", typed.errors.front().code, std::string("binding.setting.type_mismatch"));
+    ASSERT_FALSE(typed.ok());
+    ASSERT_EQ(typed.errors.size(), std::size_t{1});
+    EXPECT_EQ(typed.errors.front().code, "binding.setting.type_mismatch");
 
-    LayoutBuildResult lifetimeBuildResult =
-        LayoutResourceCompiler().buildWidgetTreeFromString("<switch setting=\"retained-value\"/>", "retained-value.xml");
+    LayoutBuildResult lifetimeBuildResult = LayoutResourceCompiler().buildWidgetTreeFromString(kRetainedValueLayout, "retained-value.xml");
+    ASSERT_TRUE(lifetimeBuildResult.ok());
+    ASSERT_NE(lifetimeBuildResult.root, nullptr);
     auto retainedProvider = std::make_shared<TestValueBinding<bool>>(false);
     std::weak_ptr<TestValueBinding<bool>> providerLifetime = retainedProvider;
     TestSettingResolver lifetimeResolver;
     lifetimeResolver.add("retained-value", retainedProvider);
     Binder lifetimeBinder(*lifetimeBuildResult.root, &lifetimeResolver);
     TestBindingResult lifetimeBinding = finishBinding(lifetimeBinder);
-    ensure("provider lifetime binding commits", lifetimeBinding.ok());
+    ASSERT_TRUE(lifetimeBinding.ok());
     lifetimeResolver.clear();
     retainedProvider.reset();
     lifetimeBuildResult.root.reset();
-    ensure("Binding retains provider until its subscription disconnects", !providerLifetime.expired());
+    EXPECT_FALSE(providerLifetime.expired());
     lifetimeBinding.binding = Binding{};
-    ensure("provider is released after Binding disconnects", providerLifetime.expired());
+    EXPECT_TRUE(providerLifetime.expired());
 }
 
-template<> template<> void binderObject::test<16>() {
-    LayoutBuildResult buildResult =
-        LayoutResourceCompiler().buildWidgetTreeFromString("<switch setting=\"replaceable-value\"/>", "replaceable-value.xml");
+TEST(BinderTest, ReplacesValueBindingOnTheSameControl) {
+    constexpr char kReplaceableValueLayout[] = "<switch setting=\"replaceable-value\"/>";
+    LayoutBuildResult buildResult = LayoutResourceCompiler().buildWidgetTreeFromString(kReplaceableValueLayout, "replaceable-value.xml");
+    ASSERT_TRUE(buildResult.ok());
     auto* control = buildResult.rootAs<Switch>();
+    ASSERT_NE(control, nullptr);
     auto firstProvider = std::make_shared<TestValueBinding<bool>>(false);
     TestSettingResolver firstResolver;
     firstResolver.add("replaceable-value", firstProvider);
     Binder firstBinder(*control, &firstResolver);
     TestBindingResult firstResult = finishBinding(firstBinder);
-    ensure("first live binding commits", firstResult.ok());
+    ASSERT_TRUE(firstResult.ok());
 
     auto secondProvider = std::make_shared<TestValueBinding<bool>>(true);
     TestSettingResolver secondResolver;
     secondResolver.add("replaceable-value", secondProvider);
     Binder secondBinder(*control, &secondResolver);
     TestBindingResult secondResult = finishBinding(secondBinder);
-    ensure("replacement binding commits on the same Value Control", secondResult.ok() && control->checked());
+    ASSERT_TRUE(secondResult.ok());
+    EXPECT_TRUE(control->checked());
 
     firstResult.binding = std::move(secondResult.binding);
     control->activate();
-    ensure("old Binding teardown preserves the replacement provider", !secondProvider->state().value && !control->checked());
-    ensure("replaced provider is no longer written", !firstProvider->state().value);
+    EXPECT_FALSE(secondProvider->state().value);
+    EXPECT_FALSE(control->checked());
+    EXPECT_FALSE(firstProvider->state().value);
 }
 
-template<> template<> void binderObject::test<17>() {
-    radia::ui::ResourceSnapshot snapshot;
-    const char* kLocalization =
-        "defaultLocale: en\nlocales: {en: {name: English, strings: {field.label: Enabled, field.fallback: 'Fallback EN <b>bold EN</b> <kbd shortcut=\"toggle-demo\"/>', field.dynamic: Dynamic EN}}, pt: {name: Portuguese, strings: {field.label: Ativado, field.fallback: 'Fallback PT <b>bold PT</b> <kbd shortcut=\"toggle-demo\"/>', field.dynamic: Dynamic PT}}}\n";
-    const char* kFieldLayout =
-        "<field><label for=\"demoSwitch\">field.label</label><switch id=\"demoSwitch\" setting=\"demo-enabled\"/><br/><error>field.fallback</error></field>";
+TEST(BinderTest, LocalizesFieldValidationAndRefreshesKeybindings) {
+    ResourceSnapshot snapshot;
+    constexpr char kLocalization[] = "defaultLocale: en\n"
+                                     "locales: {en: {name: English, strings: {field.label: Enabled, "
+                                     "field.fallback: 'Fallback EN <b>bold EN</b> <kbd shortcut=\"toggle-demo\"/>', "
+                                     "field.dynamic: Dynamic EN}}, "
+                                     "pt: {name: Portuguese, strings: {field.label: Ativado, "
+                                     "field.fallback: 'Fallback PT <b>bold PT</b> <kbd shortcut=\"toggle-demo\"/>', "
+                                     "field.dynamic: Dynamic PT}}}\n";
+    constexpr char kFieldLayout[] = "<field><label for=\"demoSwitch\">field.label</label>"
+                                    "<switch id=\"demoSwitch\" setting=\"demo-enabled\"/>"
+                                    "<br/><error>field.fallback</error></field>";
     snapshot.add("localization.yaml", kLocalization);
     snapshot.add("skin.radia", "");
     snapshot.add("field.xml", kFieldLayout);
 
-    const radia::ui::SkinGenerationPrepareResult prepared = radia::ui::SkinCompiler().prepare(std::move(snapshot));
-    ensure("localized Field fixture prepares", prepared.ok());
+    const SkinGenerationPrepareResult prepared = radia::ui::SkinCompiler().prepare(std::move(snapshot));
+    ASSERT_TRUE(prepared.ok());
 
-    radia::ui::KeybindingPresentation presentation{{"F"}};
-    radia::ui::System system;
+    KeybindingPresentation presentation{{"F"}};
+    System system;
     system.setKeybindingResolver(
-        [&presentation](const std::string& binding) { return binding == "toggle-demo" ? presentation : radia::ui::KeybindingPresentation{}; });
+        [&presentation](const std::string& binding) { return binding == "toggle-demo" ? presentation : KeybindingPresentation{}; });
     system.publish(prepared.generation);
     LayoutBuildResult buildResult = system.buildWidgetTree("field.xml");
-    auto* field = buildResult.rootAs<radia::ui::Field>();
-    ensure("localized Field View builds", buildResult.ok() && field && field->error());
+    ASSERT_TRUE(buildResult.ok());
+    auto* field = buildResult.rootAs<Field>();
+    ASSERT_NE(field, nullptr);
+    ASSERT_NE(field->error(), nullptr);
 
-    const radia::ui::TextSource staleDynamic = system.localize("field.dynamic");
+    const TextSource staleDynamic = system.localize("field.dynamic");
     auto provider = std::make_shared<TestValueBinding<bool>>(false);
     TestSettingResolver resolver;
     resolver.add("demo-enabled", provider);
     Binder binder(*field, &resolver);
     TestBindingResult binding = finishBinding(binder);
-    ensure("localized Field binding commits", binding.ok());
+    ASSERT_TRUE(binding.ok());
 
-    std::unique_ptr<radia::ui::Surface> surface = system.createSurface(radia::ui::fixedTextMetrics());
+    std::unique_ptr<Surface> surface = system.createSurface(radia::ui::fixedTextMetrics());
     surface->mount(std::move(buildResult.root));
     provider->publish({false, false, ValueValidation::invalid()});
-    ensure_equals("authored Field error resolves after mounting", field->error()->text(), "Fallback EN bold EN F");
+    ASSERT_NE(field->error(), nullptr);
+    EXPECT_EQ(field->error()->text(), "Fallback EN bold EN F");
     const auto& englishNodes = field->error()->content().nodes();
-    ensure_equals("English rich error preserves its four inline nodes", englishNodes.size(), std::size_t(4));
-    ensure_equals("English rich error preserves bold structure", static_cast<int>(englishNodes[1].kind()),
-                  static_cast<int>(InlineContentKind::B));
-    ensure_equals("English rich error preserves bold text", englishNodes[1].children().front().value(), std::string("bold EN"));
-    ensure_equals("English rich error resolves keybinding presentation", englishNodes[3].keybindingPresentation().keys.front(), std::string("F"));
+    ASSERT_EQ(englishNodes.size(), std::size_t{4});
+    EXPECT_EQ(englishNodes[1].kind(), InlineContentKind::B);
+    ASSERT_FALSE(englishNodes[1].children().empty());
+    EXPECT_EQ(englishNodes[1].children().front().value(), "bold EN");
+    ASSERT_FALSE(englishNodes[3].keybindingPresentation().keys.empty());
+    EXPECT_EQ(englishNodes[3].keybindingPresentation().keys.front(), "F");
 
-    ensure("Portuguese locale selected", system.setLocale("pt"));
-    ensure_equals("visible authored Field error refreshes with locale", field->error()->text(), "Fallback PT bold PT F");
+    ASSERT_TRUE(system.setLocale("pt"));
+    EXPECT_EQ(field->error()->text(), "Fallback PT bold PT F");
     const auto& portugueseNodes = field->error()->content().nodes();
-    ensure_equals("Portuguese rich error preserves its four inline nodes", portugueseNodes.size(), std::size_t(4));
-    ensure_equals("Portuguese rich error preserves bold structure", static_cast<int>(portugueseNodes[1].kind()),
-                  static_cast<int>(InlineContentKind::B));
-    ensure_equals("Portuguese rich error refreshes bold text", portugueseNodes[1].children().front().value(), std::string("bold PT"));
-    ensure_equals("Portuguese rich error retains keybinding presentation", portugueseNodes[3].keybindingPresentation().keys.front(),
-                  std::string("F"));
+    ASSERT_EQ(portugueseNodes.size(), std::size_t{4});
+    EXPECT_EQ(portugueseNodes[1].kind(), InlineContentKind::B);
+    ASSERT_FALSE(portugueseNodes[1].children().empty());
+    EXPECT_EQ(portugueseNodes[1].children().front().value(), "bold PT");
+    ASSERT_FALSE(portugueseNodes[3].keybindingPresentation().keys.empty());
+    EXPECT_EQ(portugueseNodes[3].keybindingPresentation().keys.front(), "F");
 
     provider->publish({false, false, ValueValidation::invalid(staleDynamic)});
-    ensure_equals("late dynamic Field error resolves against the current locale", field->error()->text(), "Dynamic PT");
+    EXPECT_EQ(field->error()->text(), "Dynamic PT");
     provider->publish({false, false, ValueValidation::valid()});
     provider->publish({false, false, ValueValidation::invalid()});
-    ensure_equals("restored authored Field error retains the current locale", field->error()->text(), "Fallback PT bold PT F");
+    EXPECT_EQ(field->error()->text(), "Fallback PT bold PT F");
 
     presentation = {{"Ctrl", "F"}};
     system.refreshKeybindings();
     provider->publish({false, false, ValueValidation::valid()});
     provider->publish({false, false, ValueValidation::invalid()});
-    ensure_equals("restored authored Field error retains current keybindings", field->error()->text(), "Fallback PT bold PT Ctrl F");
-    ensure_equals("keybinding refresh preserves localized bold structure", static_cast<int>(field->error()->content().nodes()[1].kind()),
-                  static_cast<int>(InlineContentKind::B));
+    EXPECT_EQ(field->error()->text(), "Fallback PT bold PT Ctrl F");
+    const auto& refreshedNodes = field->error()->content().nodes();
+    ASSERT_EQ(refreshedNodes.size(), std::size_t{4});
+    EXPECT_EQ(refreshedNodes[1].kind(), InlineContentKind::B);
 }
 
-template<> template<> void binderObject::test<18>() {
+TEST(BinderTest, WarnsWhenEventArgumentsDoNotMatchHandler) {
     Panel root;
     auto button = std::make_unique<Button>();
     Button* target = button.get();
@@ -669,15 +732,14 @@ template<> template<> void binderObject::test<18>() {
     Binder binder(root);
     bindEvent(binder, "inspect", [&] { ++invocations; });
     TestBindingResult result = finishBinding(binder);
-    ensure("parsed arguments do not reject the transitional Binder", result.ok() && result.binding);
-    ensure_equals("pending typed invocation reports one warning", result.warnings.size(), 1U);
-    ensure_equals("invalid zero-argument Handler signature diagnostic is stable", result.warnings.front().code,
-                  std::string("binding.event.arity_mismatch"));
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.warnings.size(), std::size_t{1});
+    EXPECT_EQ(result.warnings.front().code, "binding.event.arity_mismatch");
     target->activate();
-    ensure_equals("transitional Binder never discards arguments by invoking a zero-argument Handler", invocations, 0);
+    EXPECT_EQ(invocations, 0);
 }
 
-template<> template<> void binderObject::test<19>() {
+TEST(BinderTest, DispatchesGenericEventHandler) {
     Panel root;
     auto button = std::make_unique<Button>();
     Button* target = button.get();
@@ -688,13 +750,13 @@ template<> template<> void binderObject::test<19>() {
     Binder binder(root);
     bindEvent(binder, "press", [&] { ++invocations; });
     TestBindingResult result = finishBinding(binder);
-    ensure("generic Event Handler registration commits", result.ok() && result.binding);
-    ensure("generic Event Handler registration has no warning", result.warnings.empty());
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result.warnings.empty());
     target->activate();
-    ensure_equals("generic Event Handler registration dispatches", invocations, 1);
+    EXPECT_EQ(invocations, 1);
 }
 
-template<> template<> void binderObject::test<20>() {
+TEST(BinderTest, DispatchesTypedEventArguments) {
     Panel root;
     auto select = std::make_unique<Button>();
     Button* selectTarget = select.get();
@@ -728,25 +790,24 @@ template<> template<> void binderObject::test<20>() {
         singleEventArgument<std::string>);
     bindEvent(
         binder, "updateAdvanced", WidgetEventKind::Click,
-        [&](const WidgetEvent&, const EventCall& call) { advanced = std::get<bool>(call.arguments().front()); },
-        singleEventArgument<bool>);
+        [&](const WidgetEvent&, const EventCall& call) { advanced = std::get<bool>(call.arguments().front()); }, singleEventArgument<bool>);
     bindEvent(
-        binder, "inspectEventSource", WidgetEventKind::Click,
-        [&](const WidgetEvent& event, const EventCall&) { source = &event.source; }, currentEventArgument);
+        binder, "inspectEventSource", WidgetEventKind::Click, [&](const WidgetEvent& event, const EventCall&) { source = &event.source; },
+        currentEventArgument);
     TestBindingResult result = finishBinding(binder);
-    ensure("Event Handlers with arguments commit", result.ok() && result.binding);
-    ensure("Event Handlers with arguments have no warnings", result.warnings.empty());
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result.warnings.empty());
     selectTarget->activate();
     openTarget->activate();
     enabledTarget->activate();
     inspectTarget->activate();
-    ensure_equals("integer argument arrives", selected, 4);
-    ensure_equals("string argument arrives", destination, std::string("settings"));
-    ensure("boolean argument arrives", advanced);
-    ensure("Event supplies the source Widget", source == inspectTarget);
+    EXPECT_EQ(selected, 4);
+    EXPECT_EQ(destination, "settings");
+    EXPECT_TRUE(advanced);
+    EXPECT_EQ(source, inspectTarget);
 }
 
-template<> template<> void binderObject::test<21>() {
+TEST(BinderTest, RejectsInvalidRegisteredHandlerName) {
     Panel root;
     auto button = std::make_unique<Button>();
     button->setEventCall(WidgetEventKind::Click, EventCall("bad_action"));
@@ -755,11 +816,12 @@ template<> template<> void binderObject::test<21>() {
     Binder binder(root);
     bindEvent(binder, "bad_action", [] {});
     const TestBindingResult result = finishBinding(binder);
-    ensure("invalid registered Handler settingName rejects preparation", !result.ok());
-    ensure_equals("invalid registered Handler settingName diagnostic", result.errors.front().code, "binding.event.name_invalid");
+    ASSERT_FALSE(result.ok());
+    ASSERT_EQ(result.errors.size(), std::size_t{1});
+    EXPECT_EQ(result.errors.front().code, "binding.event.name_invalid");
 }
 
-template<> template<> void binderObject::test<22>() {
+TEST(BinderTest, DispatchesCommonWidgetEventContext) {
     Panel root;
     auto button = std::make_unique<Button>();
     Button* target = button.get();
@@ -777,61 +839,72 @@ template<> template<> void binderObject::test<22>() {
         },
         noEventArguments);
     const TestBindingResult result = finishBinding(binder);
-    ensure("common Widget Event Handler commits", result.ok() && result.binding);
+    ASSERT_TRUE(result.ok());
     target->activate();
-    ensure("common Widget Event receives source", source == target);
-    ensure("common Widget Event receives kind", kind == WidgetEventKind::Click);
+    EXPECT_EQ(source, target);
+    EXPECT_EQ(kind, WidgetEventKind::Click);
 }
 
-template<> template<> void binderObject::test<23>() {
-    LayoutBuildResult buildResult =
-        LayoutResourceCompiler().buildWidgetTreeFromString("<switch setting=\"demo-enabled\"/>", "setting.xml");
+TEST(BinderTest, BindsSwitchSettingAndPropagatesUpdates) {
+    constexpr char kDemoSettingLayout[] = "<switch setting=\"demo-enabled\"/>";
+    LayoutBuildResult buildResult = LayoutResourceCompiler().buildWidgetTreeFromString(kDemoSettingLayout, "setting.xml");
+    ASSERT_TRUE(buildResult.ok());
     auto* control = buildResult.rootAs<Switch>();
+    ASSERT_NE(control, nullptr);
     auto provider = std::make_shared<TestValueBinding<bool>>(false);
     TestSettingResolver resolver;
     resolver.add("demo-enabled", provider);
 
     Binder binder(*control, &resolver);
     const TestBindingResult result = finishBinding(binder);
-    ensure("setting binding commits", buildResult.ok() && control && result.ok() && result.binding);
-    ensure("setting applies initial state", !control->checked());
+    ASSERT_TRUE(result.ok());
+    EXPECT_FALSE(control->checked());
     provider->publish({true, false, ValueValidation::valid()});
-    ensure("setting receives external updates", control->checked());
+    EXPECT_TRUE(control->checked());
     control->activate();
-    ensure("setting writes user changes", !provider->state().value);
+    EXPECT_FALSE(provider->state().value);
 }
 
-template<> template<> void binderObject::test<24>() {
-    LayoutBuildResult buildResult =
-        LayoutResourceCompiler().buildWidgetTreeFromString("<switch setting=\"missing-setting\"/>", "missing-setting.xml");
+TEST(BinderTest, RejectsMissingLayoutSetting) {
+    constexpr char kMissingSettingLayout[] = "<switch setting=\"missing-setting\"/>";
+    LayoutBuildResult buildResult = LayoutResourceCompiler().buildWidgetTreeFromString(kMissingSettingLayout, "missing-setting.xml");
+    ASSERT_TRUE(buildResult.ok());
+    ASSERT_NE(buildResult.root, nullptr);
     TestSettingResolver resolver;
     Binder binder(*buildResult.root, &resolver);
     const TestBindingResult result = finishBinding(binder);
-    ensure("missing setting rejects the candidate", buildResult.ok() && !result.ok());
-    ensure_equals("missing setting is an error", result.errors.size(), 1U);
-    ensure_equals("missing setting diagnostic", result.errors.front().code, std::string("binding.setting.missing"));
+    ASSERT_FALSE(result.ok());
+    ASSERT_EQ(result.errors.size(), std::size_t{1});
+    EXPECT_EQ(result.errors.front().code, "binding.setting.missing");
 }
 
-template<> template<> void binderObject::test<25>() {
-    LayoutBuildResult buildResult =
-        LayoutResourceCompiler().buildWidgetTreeFromString("<switch setting=\"string-setting\"/>", "typed-setting.xml");
+TEST(BinderTest, RejectsMismatchedLayoutSetting) {
+    constexpr char kStringSettingLayout[] = "<switch setting=\"string-setting\"/>";
+    LayoutBuildResult buildResult = LayoutResourceCompiler().buildWidgetTreeFromString(kStringSettingLayout, "typed-setting.xml");
+    ASSERT_TRUE(buildResult.ok());
+    ASSERT_NE(buildResult.root, nullptr);
     TestSettingResolver resolver;
     resolver.add("string-setting", std::make_shared<TestValueBinding<std::string>>("not a boolean"));
     Binder binder(*buildResult.root, &resolver);
     const TestBindingResult result = finishBinding(binder);
-    ensure("mismatched setting rejects the candidate", buildResult.ok() && !result.ok());
-    ensure_equals("mismatched setting is an error", result.errors.size(), 1U);
-    ensure_equals("mismatched setting diagnostic", result.errors.front().code, std::string("binding.setting.type_mismatch"));
+    ASSERT_FALSE(result.ok());
+    ASSERT_EQ(result.errors.size(), std::size_t{1});
+    EXPECT_EQ(result.errors.front().code, "binding.setting.type_mismatch");
 }
 
-template<> template<> void binderObject::test<26>() {
-    const char* kSharedSettingLayout =
-        "<panel><switch id=\"first\" setting=\"shared-enabled\"/><switch id=\"second\" setting=\"shared-enabled\"/></panel>";
+TEST(BinderTest, SharesOneSettingAcrossMultipleControls) {
+    constexpr char kSharedSettingLayout[] = "<panel>"
+                                            "<switch id=\"first\" setting=\"shared-enabled\"/>"
+                                            "<switch id=\"second\" setting=\"shared-enabled\"/>"
+                                            "</panel>";
     LayoutBuildResult buildResult = LayoutResourceCompiler().buildWidgetTreeFromString(kSharedSettingLayout, "shared-setting.xml");
+    ASSERT_TRUE(buildResult.ok());
     auto* root = buildResult.rootAs<Panel>();
-    auto* firstControl = root ? dynamic_cast<Switch*>(findWidgetInScope(*root, "first")) : nullptr;
-    auto* secondControl = root ? dynamic_cast<Switch*>(findWidgetInScope(*root, "second")) : nullptr;
-    ensure("shared setting fixture compiles", buildResult.ok() && root && firstControl && secondControl);
+    ASSERT_NE(root, nullptr);
+    auto* firstControl = dynamic_cast<Switch*>(findWidgetInScope(*root, "first"));
+    auto* secondControl = dynamic_cast<Switch*>(findWidgetInScope(*root, "second"));
+    ASSERT_NE(firstControl, nullptr);
+    ASSERT_NE(secondControl, nullptr);
 
     auto provider = std::make_shared<TestValueBinding<bool>>(false);
     TestSettingResolver resolver;
@@ -839,25 +912,26 @@ template<> template<> void binderObject::test<26>() {
 
     Binder binder(*root, &resolver);
     TestBindingResult result = finishBinding(binder);
-    ensure("two controls share one setting", result.ok() && result.binding);
-    ensure_equals("shared binding subscribes both controls", provider->observerCount(), std::size_t(2));
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(provider->observerCount(), std::size_t{2});
     provider->publish({true, false, ValueValidation::valid()});
-    ensure("first shared control updates", firstControl->checked());
-    ensure("second shared control updates", secondControl->checked());
+    EXPECT_TRUE(firstControl->checked());
+    EXPECT_TRUE(secondControl->checked());
     firstControl->activate();
-    ensure("shared control writes through one provider", !provider->state().value);
+    EXPECT_FALSE(provider->state().value);
     result.binding = Binding{};
-    ensure_equals("shared control teardown disconnects both", provider->observerCount(), std::size_t(0));
+    EXPECT_EQ(provider->observerCount(), std::size_t{0});
 }
 
-template<> template<> void binderObject::test<27>() {
-    LayoutBuildResult buildResult =
-        LayoutResourceCompiler().buildWidgetTreeFromString("<switch setting=\"misreported-setting\"/>", "misreported-setting.xml");
+TEST(BinderTest, RejectsMisreportedSettingTypeSafely) {
+    constexpr char kMisreportedSettingLayout[] = "<switch setting=\"misreported-setting\"/>";
+    LayoutBuildResult buildResult = LayoutResourceCompiler().buildWidgetTreeFromString(kMisreportedSettingLayout, "misreported-setting.xml");
+    ASSERT_TRUE(buildResult.ok());
+    ASSERT_NE(buildResult.root, nullptr);
     MisreportingSettingResolver resolver;
     Binder binder(*buildResult.root, &resolver);
     const TestBindingResult result = finishBinding(binder);
-    ensure("misreported binding is rejected safely", buildResult.ok() && !result.ok());
-    ensure_equals("misreported binding diagnostic", result.errors.size(), 1U);
-    ensure_equals("misreported binding is a type error", result.errors.front().code, std::string("binding.setting.type_mismatch"));
+    ASSERT_FALSE(result.ok());
+    ASSERT_EQ(result.errors.size(), std::size_t{1});
+    EXPECT_EQ(result.errors.front().code, "binding.setting.type_mismatch");
 }
-} // namespace tut

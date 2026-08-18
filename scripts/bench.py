@@ -156,6 +156,12 @@ def _benchmark_color_arguments(arguments: list[str], enabled: bool) -> list[str]
     return [*arguments, f"--benchmark_color={value}"]
 
 
+def _benchmark_counters_tabular_arguments(arguments: list[str]) -> list[str]:
+    if _has_option(arguments, "--benchmark_counters_tabular"):
+        return list(arguments)
+    return [*arguments, "--benchmark_counters_tabular=true"]
+
+
 def _read_json(path: Path):
     with path.open(encoding="utf-8") as report_file:
         return json.load(report_file)
@@ -192,7 +198,9 @@ def _run_benchmark(
 
     command = [
         str(executable),
-        *_benchmark_color_arguments(benchmark_args, color_enabled),
+        *_benchmark_color_arguments(
+            _benchmark_counters_tabular_arguments(benchmark_args), color_enabled
+        ),
         f"--benchmark_out={output_path}",
         "--benchmark_out_format=json",
     ]
@@ -232,8 +240,11 @@ def _benchmark_records(report: dict) -> dict[str, dict]:
     for benchmark in report["benchmarks"]:
         if "cpu_time" not in benchmark or "real_time" not in benchmark:
             continue
+        aggregate_name = benchmark.get("aggregate_name")
+        if aggregate_name not in (None, "mean"):
+            continue
         name = benchmark.get("run_name", benchmark.get("name"))
-        if name:
+        if name and (name not in records or aggregate_name == "mean"):
             records[name] = benchmark
     return records
 

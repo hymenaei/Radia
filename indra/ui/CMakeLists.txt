@@ -212,3 +212,7 @@ if (BUILD_TESTING)
   RD_ADD_UNIT_TESTS(ui "${ui_test_sources}")
   RD_ADD_INTEGRATION_TEST(surfacestate "" "ui" "ui")
 endif ()
+
+if (BUILD_BENCHMARKS)
+  RD_ADD_BENCHMARKS(ui "layout/engine.cpp")
+endif ()

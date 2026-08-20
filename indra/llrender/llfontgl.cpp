@@ -533,10 +533,23 @@ S32 LLFontGL::render(const LLWString &wstr, S32 begin_offset, F32 x, F32 y, cons
     if (sEnableFontGpu && !spacing.any())
     {
         const LLFontGpuRenderer::Request gpu_request{
-            *mFontFreetype, wstr, layout, color, precomputed_shadow_color,
-            on_pass_boundary, begin_offset, length, cur_render_x, cur_render_y,
-            start_x, scaled_max_pixels, slant_offset, style_to_add, shadow,
-            subpixel_pen, use_color
+            .font = *mFontFreetype,
+            .text = wstr,
+            .layout = layout,
+            .color = color,
+            .shadowColor = precomputed_shadow_color,
+            .passBoundary = on_pass_boundary,
+            .beginOffset = begin_offset,
+            .textLength = length,
+            .penX = cur_render_x,
+            .penY = cur_render_y,
+            .startX = start_x,
+            .scaledMaxPixels = scaled_max_pixels,
+            .italicSlant = slant_offset,
+            .style = style_to_add,
+            .shadow = shadow,
+            .useSubpixelPen = subpixel_pen,
+            .useColor = use_color,
         };
         const LLFontGpuRenderer::Result gpu_result = LLFontGpuRenderer::tryRender(gpu_request);
         if (gpu_result.rendered)

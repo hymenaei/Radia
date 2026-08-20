@@ -25,15 +25,15 @@
 #include "linden_common.h"
 #include "llfontgpurenderer.h"
 #if LL_HAS_HB_GPU
-    #include "alfontface.h"
-    #include "llfontfreetype.h"
-    #include "llfontgpubatch.h"
-    #include "llfontgpuglyphcache.h"
-    #include "llfontgpushader.h"
-    #include "llglslshader.h"
-    #include "llrender.h"
-    #include "llshadermgr.h"
-    #include "llvertexbuffer.h"
+#include "alfontface.h"
+#include "llfontfreetype.h"
+#include "llfontgpubatch.h"
+#include "llfontgpuglyphcache.h"
+#include "llfontgpushader.h"
+#include "llglslshader.h"
+#include "llrender.h"
+#include "llshadermgr.h"
+#include "llvertexbuffer.h"
 
 namespace {
 constexpr F32 kBoldOffset = 1.f;
@@ -145,8 +145,9 @@ private:
             const LLFontGlyphInfo* glyph = mRequest.font.getGlyphInfo(mRequest.text[mRequest.beginOffset + cp], glyphType);
             if (!glyph || !faceEligible(glyph->mSourceFace)) return false;
 
-            const LLFontGlyphInfo* next =
-                (cp + 1 < size_t(mRequest.textLength)) ? mRequest.font.getGlyphInfo(mRequest.text[mRequest.beginOffset + cp + 1], glyphType) : nullptr;
+            const LLFontGlyphInfo* next = (cp + 1 < size_t(mRequest.textLength))
+                ? mRequest.font.getGlyphInfo(mRequest.text[mRequest.beginOffset + cp + 1], glyphType)
+                : nullptr;
 
             const ALFontFace* face = glyph->mSourceFace;
             const bool colorGlyph = mWantColor && face->hasColrV1();
@@ -199,18 +200,24 @@ private:
         return true;
     }
 
+    void emitShadow(const LLFontGpuGlyphCache::GlyphLoc& loc, F32 scale, bool colorGlyph, F32 penX, F32 penY) {
+        if (!mEmitShadow) return;
+
+        auto addShadow = [&](F32 dx, F32 dy) { mShadow.push_back({loc, penX + dx, penY + dy, scale, mRequest.shadowColor, colorGlyph, colorGlyph}); };
+        if (mRequest.shadow == LLFontGL::DROP_SHADOW_SOFT) {
+            addShadow(-1.f, -1.f);
+            addShadow(1.f, -1.f);
+            addShadow(1.f, 1.f);
+            addShadow(-1.f, 1.f);
+            addShadow(0.f, -2.f);
+        } else {
+            addShadow(1.f, -1.f);
+        }
+    }
+
     void placeGlyph(const LLFontGpuGlyphCache::GlyphLoc& loc, F32 scale, bool colorGlyph, F32 penX, F32 penY) {
         if (colorGlyph) {
-            if (mEmitShadow) {
-                auto addShadow = [&](F32 dx, F32 dy) { mShadow.push_back({loc, penX + dx, penY + dy, scale, mRequest.shadowColor, true, true}); };
-                if (mRequest.shadow == LLFontGL::DROP_SHADOW_SOFT) {
-                    addShadow(-1.f, -1.f);
-                    addShadow(1.f, -1.f);
-                    addShadow(1.f, 1.f);
-                    addShadow(-1.f, 1.f);
-                    addShadow(0.f, -2.f);
-                } else addShadow(1.f, -1.f);
-            }
+            emitShadow(loc, scale, colorGlyph, penX, penY);
 
             mForeground.push_back({loc, penX, penY, scale, mForegroundColor, true, false});
             if (mEmitBold) mForeground.push_back({loc, penX + kBoldOffset, penY, scale, mForegroundColor, true, false});
@@ -218,16 +225,7 @@ private:
             return;
         }
 
-        if (mEmitShadow) {
-            auto addShadow = [&](F32 dx, F32 dy) { mShadow.push_back({loc, penX + dx, penY + dy, scale, mRequest.shadowColor, false, false}); };
-            if (mRequest.shadow == LLFontGL::DROP_SHADOW_SOFT) {
-                addShadow(-1.f, -1.f);
-                addShadow(1.f, -1.f);
-                addShadow(1.f, 1.f);
-                addShadow(-1.f, 1.f);
-                addShadow(0.f, -2.f);
-            } else addShadow(1.f, -1.f);
-        }
+        emitShadow(loc, scale, colorGlyph, penX, penY);
 
         mForeground.push_back({loc, penX, penY, scale, mForegroundColor, false, false});
         if (mEmitBold) mForeground.push_back({loc, penX + kBoldOffset, penY, scale, mForegroundColor, false, false});

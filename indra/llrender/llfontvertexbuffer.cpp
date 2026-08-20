@@ -52,7 +52,42 @@ namespace
         for (const LLVertexBufferData& buffer : buffers) if (buffer.mFontGpuGeometry) return true;
         return false;
     }
-}
+
+    bool containsStandardGeometry(const std::list<LLVertexBufferData>& buffers)
+    {
+        for (const LLVertexBufferData& buffer : buffers) if (!buffer.mFontGpuGeometry) return true;
+        return false;
+    }
+
+    class FontReplayStateGuard
+    {
+    public:
+        FontReplayStateGuard(LLGLSLShader* caller_shader, bool reset_shadow_uniform)
+            : mCallerShader(caller_shader), mResetShadowUniform(caller_shader && reset_shadow_uniform)
+        {
+            gGL.pushUIMatrix();
+        }
+
+        ~FontReplayStateGuard()
+        {
+            gGL.popUIMatrix();
+
+            if (mCallerShader && LLGLSLShader::sCurBoundShaderPtr != mCallerShader)
+                mCallerShader->bind();
+            else if (!mCallerShader && LLGLSLShader::sCurBoundShaderPtr)
+                LLGLSLShader::sCurBoundShaderPtr->unbind();
+
+            if (mResetShadowUniform) mCallerShader->uniform1i(LLShaderMgr::TEXT_SHADOW_MODE, 0);
+        }
+
+        FontReplayStateGuard(const FontReplayStateGuard&) = delete;
+        FontReplayStateGuard& operator=(const FontReplayStateGuard&) = delete;
+
+    private:
+        LLGLSLShader* mCallerShader;
+        bool mResetShadowUniform;
+    };
+} // namespace
 
 LLFontVertexBuffer::LLFontVertexBuffer()
 {
@@ -380,49 +415,29 @@ void LLFontVertexBuffer::recolorBuffers(const LLColor4& color, LLFontGL::ShadowT
 
 bool LLFontVertexBuffer::renderBuffers()
 {
-    gGL.flush(); // deliberately empty pending verts
+    gGL.flush();
     LLGLSLShader* caller_shader = LLGLSLShader::sCurBoundShaderPtr;
     LLGLSLShader* analytic_shader = caller_shader;
-    const auto restore_caller_shader = [caller_shader]()
-    {
-        if (caller_shader && LLGLSLShader::sCurBoundShaderPtr != caller_shader) caller_shader->bind();
-        else if (!caller_shader && LLGLSLShader::sCurBoundShaderPtr) LLGLSLShader::sCurBoundShaderPtr->unbind();
-    };
-    const auto replay_unavailable = [&restore_caller_shader]()
-    {
-        restore_caller_shader();
-        return false;
-    };
 #if LL_HAS_HB_GPU
     if (mHasAnalyticGlyphs)
     {
         if (!analytic_shader || !analytic_shader->mHasFontGpu) analytic_shader = LLFontGpuShader::getBatchedProgram();
-        if (!analytic_shader) return replay_unavailable();
+        if (!analytic_shader) return false;
 
         const S32 glyph_unit = analytic_shader->getTextureChannel(LLShaderMgr::FONT_GLYPH_BUFFER);
-        if (glyph_unit < 0) return replay_unavailable();
+        if (glyph_unit < 0) return false;
 
-        const bool bound = LLFontGpuGlyphCache::bindBufferTexture(glyph_unit);
-        if (!bound) return replay_unavailable();
+        if (!LLFontGpuGlyphCache::bindBufferTexture(glyph_unit)) return false;
     }
 #else
     // Analytic geometry cannot be produced in this build, but keep the state
     // invariant explicit if a serialized/corrupt cache ever says otherwise.
-    if (mHasAnalyticGlyphs) return replay_unavailable();
+    if (mHasAnalyticGlyphs) return false;
 #endif
-
-    const auto contains_standard_geometry = [](const std::list<LLVertexBufferData>& buffers)
-    {
-        for (const LLVertexBufferData& buffer : buffers) if (!buffer.mFontGpuGeometry) return true;
+    if (!caller_shader && (containsStandardGeometry(mShadowBufferList) || containsStandardGeometry(mForegroundBufferList)))
         return false;
-    };
-    if (!caller_shader && (contains_standard_geometry(mShadowBufferList) || contains_standard_geometry(mForegroundBufferList)))
-    {
-        return replay_unavailable();
-    }
 
-    gGL.pushUIMatrix();
-
+    FontReplayStateGuard replay_guard(caller_shader, mLastUsedShaderShadow);
     gGL.loadUIIdentity();
 
     // Depth translation, so that floating text appears 'in-world'
@@ -455,10 +470,6 @@ bool LLFontVertexBuffer::renderBuffers()
     const S32 shadow_mode = (mLastShadow == LLFontGL::DROP_SHADOW) ? 1 : 2; // SOFT
     draw_pass(mShadowBufferList, shadow_mode);
     draw_pass(mForegroundBufferList, 0);
-    gGL.popUIMatrix();
-
-    restore_caller_shader();
-    if (caller_shader && mLastUsedShaderShadow) caller_shader->uniform1i(LLShaderMgr::TEXT_SHADOW_MODE, 0);
     return true;
 }
 

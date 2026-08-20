@@ -22,7 +22,7 @@
  * $/LicenseInfo$
  */
 
-#include "llviewerprecompiledheaders.h"
+#include "linden_common.h"
 #include "skin/resolver.h"
 #include <algorithm>
 #include <fstream>
@@ -204,7 +204,8 @@ ManifestResult parseManifest(const std::filesystem::path& root) {
             for (const char* key : {"stylesheet", "layouts", "localization", "assets"})
                 if (!radiaResources.has(key))
                     result.error("skin.manifest.resource.required", "Root Skin must declare Radia resource: " + std::string(key) + ".", source);
-        } else if (radiaResources.size() == 0) result.error("skin.manifest.radia_empty", "Derived Skin must declare at least one Radia resource.", source);
+        } else if (radiaResources.size() == 0)
+            result.error("skin.manifest.radia_empty", "Derived Skin must declare at least one Radia resource.", source);
 
         manifest.resources.stylesheet = resourcePath(radiaResources, "stylesheet", canonicalRoot, false, result, source);
         manifest.resources.layouts = resourcePath(radiaResources, "layouts", canonicalRoot, true, result, source);

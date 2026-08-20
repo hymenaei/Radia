@@ -22,7 +22,7 @@
  * $/LicenseInfo$
  */
 
-#include "llviewerprecompiledheaders.h"
+#include "linden_common.h"
 #include "runtimewindowadapter.h"
 #include <algorithm>
 #include <cmath>
@@ -109,7 +109,8 @@ bool RuntimeWindowAdapter::placementVisible(const AuxiliaryWindowRect& rect) con
 }
 
 std::optional<AuxiliaryScreenPoint> RuntimeWindowAdapter::releasePointerForDetach(const Vec2& mainPosition) {
-    const std::optional<AuxiliaryScreenPoint> screenCursor = mWindow ? std::optional<AuxiliaryScreenPoint>(mainPointToNative(mainPosition)) : std::nullopt;
+    const std::optional<AuxiliaryScreenPoint> screenCursor =
+        mWindow ? std::optional<AuxiliaryScreenPoint>(mainPointToNative(mainPosition)) : std::nullopt;
     if (mClearDragState) mClearDragState();
     if (mWindow) mWindow->releaseMouse();
     return screenCursor;

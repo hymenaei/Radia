@@ -22,7 +22,7 @@
  * $/LicenseInfo$
  */
 
-#include "llviewerprecompiledheaders.h"
+#include "linden_common.h"
 #include "detachedfloatermanager.h"
 #include <algorithm>
 #include <cmath>

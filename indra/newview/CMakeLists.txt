@@ -9,28 +9,10 @@ include(TemplateCheck)
 set(VIEWER_BINARY_NAME "alchemy-bin" CACHE STRING
     "The name of the viewer executable to create.")
 
+add_subdirectory(ui)
+
 # Generate version vars header
 configure_file(llversioninfovars.h.in llversioninfovars.h @ONLY)
-
-set(viewer_UI_SOURCES
-    ui/componentcontroller.cpp
-    ui/componentmanager.cpp
-    ui/componentpersistence.cpp
-    ui/components/floaterdemo.cpp
-    ui/detachedfloatermanager.cpp
-    ui/detachedfloaterwindow.cpp
-    ui/floaterhost.cpp
-    ui/inputbridge.cpp
-    ui/runtime.cpp
-    ui/runtimewindowadapter.cpp
-    ui/settingsadapter.cpp
-    ui/skin/reloadcoordinator.cpp
-    ui/skin/resolver.cpp
-    ui/skin/resources.cpp
-    )
-
-set(viewer_UI_RUNTIME_TEST_SOURCES ${viewer_UI_SOURCES})
-list(REMOVE_ITEM viewer_UI_RUNTIME_TEST_SOURCES ui/components/floaterdemo.cpp ui/runtime.cpp)
 
 if (BUILD_VIEWER)
 
@@ -934,7 +916,6 @@ set(viewer_SOURCE_FILES
     rlvinventory.cpp
     rlvlocks.cpp
     rlvui.cpp
-    ${viewer_UI_SOURCES}
     )
 
 set(viewer_HEADER_FILES
@@ -1690,25 +1671,6 @@ set(viewer_HEADER_FILES
     lutcube.h
     noise.h
     pipeline.h
-    ui/componentcontroller.h
-    ui/componentcontrollereventadapter.h
-    ui/componentcontrollerevents.h
-    ui/componentcontrollerregistration.h
-    ui/componentidentity.h
-    ui/componentmanager.h
-    ui/componentpersistence.h
-    ui/components/floaterdemo.h
-    ui/detachedfloatermanager.h
-    ui/detachedfloaterwindow.h
-    ui/floaterhost.h
-    ui/inputbridge.h
-    ui/nativeinput.h
-    ui/runtime.h
-    ui/runtimewindowadapter.h
-    ui/settingsadapter.h
-    ui/skin/reloadcoordinator.h
-    ui/skin/resolver.h
-    ui/skin/resources.h
     rlvactions.h
     rlvcommon.h
     rlvdefines.h
@@ -1993,10 +1955,7 @@ check_message_template(${VIEWER_BINARY_NAME})
 
 target_include_directories(${VIEWER_BINARY_NAME}
     PUBLIC ${CMAKE_CURRENT_BINARY_DIR}
-    PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/ui
-    ${CMAKE_CURRENT_SOURCE_DIR}/ui/components
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
     )
 
 target_precompile_headers(${VIEWER_BINARY_NAME} PRIVATE llviewerprecompiledheaders.h)
@@ -2059,6 +2018,7 @@ target_link_libraries(${VIEWER_BINARY_NAME}
         ll::tinyexr
         ll::minizip
         ui
+        viewer_ui
         )
 
 if (TARGET ll::velopack)
@@ -2480,126 +2440,6 @@ if (BUILD_TESTING)
   )
 
   set(test_project ${VIEWER_BINARY_NAME})
-
-  function(newview_ui_add_test logical_name source_path test_source_path)
-    cmake_parse_arguments(
-      TEST
-      ""
-      ""
-      "ADDITIONAL_SOURCE_FILES;ADDITIONAL_PROJECTS"
-      ${ARGN}
-    )
-
-    set(target PROJECT_${VIEWER_BINARY_NAME}_TEST_${logical_name})
-    add_executable(
-      ${target}
-      ${source_path}
-      ${test_source_path}
-      ${TEST_ADDITIONAL_SOURCE_FILES}
-    )
-
-    get_property(viewer_test_include_dirs TARGET ${VIEWER_BINARY_NAME} PROPERTY INTERFACE_INCLUDE_DIRECTORIES)
-    target_include_directories(
-      ${target}
-      PRIVATE
-      ${viewer_test_include_dirs}
-      ${CMAKE_CURRENT_SOURCE_DIR}
-      ${CMAKE_CURRENT_SOURCE_DIR}/ui
-      ${CMAKE_CURRENT_SOURCE_DIR}/ui/components
-      ${INDRA_SOURCE_DIR}/test
-      ${INDRA_SOURCE_DIR}/llmath
-      ${INDRA_SOURCE_DIR}/llui
-    )
-    target_link_libraries(
-      ${target}
-      PRIVATE
-      lltut_runner_lib
-      llcommon
-      llmath
-      ll::tut
-      ${TEST_ADDITIONAL_PROJECTS}
-      ${test_libs}
-    )
-    target_compile_definitions(${target} PRIVATE "LL_TEST=${logical_name}" "LL_TEST_${logical_name}")
-    set_target_properties(
-      ${target}
-      PROPERTIES
-      RUNTIME_OUTPUT_DIRECTORY "${EXE_STAGING_DIR}"
-      FOLDER "Tests/${VIEWER_BINARY_NAME}"
-    )
-
-    if (WINDOWS)
-      target_link_options(${target} PRIVATE $<$<CONFIG:Release>:/DEBUG:NONE>)
-    elseif (DARWIN)
-      set_target_properties(${target} PROPERTIES XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "-")
-    endif ()
-
-    set(test_output ${CMAKE_CURRENT_BINARY_DIR}/${target}_ok.txt)
-    set(test_command $<TARGET_FILE:${target}> --touch=${test_output} --sourcedir=${CMAKE_CURRENT_SOURCE_DIR})
-    LL_TEST_LIBRARY_PATH(LD_LIBRARY_PATH)
-    LL_TEST_COMMAND(test_script "${LD_LIBRARY_PATH}" ${test_command})
-    add_test(NAME ${target} COMMAND ${test_script} WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
-    add_dependencies(BUILD_TESTS ${target})
-  endfunction()
-
-  newview_ui_add_test(
-    uicomponentmanager
-    ui/componentmanager.cpp
-    tests/ui/componentmanager_test.cpp
-    ADDITIONAL_SOURCE_FILES ui/componentcontroller.cpp
-    ADDITIONAL_PROJECTS ui
-  )
-  newview_ui_add_test(
-    uisettingsadapter
-    ui/settingsadapter.cpp
-    tests/ui/settingsadapter_test.cpp
-    ADDITIONAL_PROJECTS ui
-  )
-  newview_ui_add_test(
-    uicomponentpersistence
-    ui/componentpersistence.cpp
-    tests/ui/componentpersistence_test.cpp
-    ADDITIONAL_PROJECTS ui
-  )
-  newview_ui_add_test(
-    uidetachedfloatermanager
-    ui/detachedfloatermanager.cpp
-    tests/ui/detachedfloatermanager_test.cpp
-    ADDITIONAL_SOURCE_FILES ui/componentpersistence.cpp
-    ADDITIONAL_PROJECTS ui
-  )
-  newview_ui_add_test(
-    uiinputbridge
-    ui/inputbridge.cpp
-    tests/ui/inputbridge_test.cpp
-    ADDITIONAL_PROJECTS ui
-  )
-  newview_ui_add_test(
-    uiruntimewindowadapter
-    ui/runtimewindowadapter.cpp
-    tests/ui/runtimewindowadapter_test.cpp
-    ADDITIONAL_PROJECTS ui
-  )
-  newview_ui_add_test(
-    uiruntime
-    ui/runtime.cpp
-    tests/ui/runtime_test.cpp
-    ADDITIONAL_SOURCE_FILES ${viewer_UI_RUNTIME_TEST_SOURCES}
-    ADDITIONAL_PROJECTS ui llrender llwindow llxml
-  )
-  newview_ui_add_test(
-    uiskinreloadcoordinator
-    ui/skin/reloadcoordinator.cpp
-    tests/ui/skin/reloadcoordinator_test.cpp
-    ADDITIONAL_SOURCE_FILES ui/componentcontroller.cpp ui/componentmanager.cpp
-    ADDITIONAL_PROJECTS ui
-  )
-  newview_ui_add_test(
-    uiskinresolver
-    ui/skin/resolver.cpp
-    tests/ui/skin/resolver_test.cpp
-    ADDITIONAL_PROJECTS ui
-  )
 
   set_property(SOURCE
     ${viewer_TEST_SOURCE_FILES}

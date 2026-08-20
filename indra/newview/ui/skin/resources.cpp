@@ -22,7 +22,7 @@
  * $/LicenseInfo$
  */
 
-#include "llviewerprecompiledheaders.h"
+#include "linden_common.h"
 #include "skin/resources.h"
 #include <filesystem>
 #include "lldir.h"

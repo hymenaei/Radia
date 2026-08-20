@@ -7,12 +7,12 @@ set(ui_event_sources
     binding/eventregistration.h
     eventcall.cpp
     widgetevents.def
-    )
+)
 
 set(ui_binding_sources
     binding/binder.cpp
     binding/settingresolver.h
-    )
+)
 
 set(ui_layout_sources
     layout/document.cpp
@@ -31,7 +31,7 @@ set(ui_layout_sources
     layout/resourcecompiler.h
     layout/schema.cpp
     layout/schema.h
-    )
+)
 
 set(ui_localization_sources
     localization/compiler.cpp
@@ -39,7 +39,7 @@ set(ui_localization_sources
     localization/localization.cpp
     localization/richstring.cpp
     localization/yaml.cpp
-    )
+)
 
 set(ui_render_sources
     render/openglpaintcontext.cpp
@@ -49,13 +49,13 @@ set(ui_render_sources
     render/recordingpaintcontext.cpp
     render/svg.cpp
     render/tessellator.cpp
-    )
+)
 
 set(ui_skin_sources
     skin/compiler.cpp
     skin/generation.cpp
     skin/generationinternal.h
-    )
+)
 
 set(ui_style_sources
     style/color.cpp
@@ -69,7 +69,7 @@ set(ui_style_sources
     style/syntax.cpp
     style/syntax.h
     style/valueparser.cpp
-    )
+)
 
 set(ui_surface_sources
     surface/floaterresize.cpp
@@ -78,7 +78,7 @@ set(ui_surface_sources
     surface/resize.cpp
     surface/surface.cpp
     surface/ordering.h
-    )
+)
 
 set(ui_text_sources
     text/host.cpp
@@ -90,7 +90,7 @@ set(ui_text_sources
     text/layout.h
     text/metrics.cpp
     text/source.cpp
-    )
+)
 
 set(ui_widget_sources
     widgets/button.cpp
@@ -109,7 +109,7 @@ set(ui_widget_sources
     widgets/widgetcontract.h
     widgets/widgetcontractbuilder.h
     widgets/widgetcontractmodel.h
-    )
+)
 
 target_sources(ui
     PRIVATE
@@ -126,10 +126,11 @@ target_sources(ui
     ${ui_surface_sources}
     ${ui_text_sources}
     ${ui_widget_sources}
-
     PUBLIC
-    FILE_SET HEADERS
-    BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+    FILE_SET
+    HEADERS
+    BASE_DIRS
+    ${CMAKE_CURRENT_SOURCE_DIR}
     FILES
     binding/valuebinding.h
     binding/valuecontrol.h
@@ -170,49 +171,47 @@ target_sources(ui
     widgets/switch.h
     widgets/text.h
     widgets/widget.h
-    )
-
-target_include_directories(ui INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
+)
 
 target_link_libraries(ui
-        PUBLIC
-        llcommon
-        llmath
-        llrender
-        llxml
-        ll::icu
-        ll::yaml-cpp
-        )
+    PUBLIC
+    llcommon
+    llmath
+    llrender
+    llxml
+    ll::icu
+    ll::yaml-cpp
+)
 
 target_precompile_headers(ui REUSE_FROM llprecompiled)
 
-if (BUILD_TESTING)
-  set(ui_test_sources
-    localization/localization.cpp
-    binding/binder.cpp
-    eventcall.cpp
-    path.cpp
-    widgets/switch.cpp
-    widgets/field.cpp
-    style/color.cpp
-    style/compiler.cpp
-    style/stylesheet.cpp
-    system.cpp
-    render/svg.cpp
-    render/tessellator.cpp
-    surface/floaters.cpp
-    surface/floaterresize.cpp
-    surface/surface.cpp
-    layout/engine.cpp
-    layout/schema.cpp
-    layout/resourcecompiler.cpp
-    widgets/widget.cpp
-  )
+if(BUILD_TESTING)
+    set(ui_test_sources
+        localization/localization.cpp
+        binding/binder.cpp
+        eventcall.cpp
+        path.cpp
+        widgets/switch.cpp
+        widgets/field.cpp
+        style/color.cpp
+        style/compiler.cpp
+        style/stylesheet.cpp
+        system.cpp
+        render/svg.cpp
+        render/tessellator.cpp
+        surface/floaters.cpp
+        surface/floaterresize.cpp
+        surface/surface.cpp
+        layout/engine.cpp
+        layout/schema.cpp
+        layout/resourcecompiler.cpp
+        widgets/widget.cpp
+    )
 
-  RD_ADD_UNIT_TESTS(ui "${ui_test_sources}")
-  RD_ADD_INTEGRATION_TEST(surfacestate "" "ui" "ui")
-endif ()
+    rd_add_unit_tests(ui "${ui_test_sources}")
+    rd_add_integration_test(surfacestate "" "ui" "ui")
+endif()
 
-if (BUILD_BENCHMARKS)
-  RD_ADD_BENCHMARKS(ui "layout/engine.cpp")
-endif ()
+if(BUILD_BENCHMARKS)
+    rd_add_benchmarks(ui "layout/engine.cpp")
+endif()

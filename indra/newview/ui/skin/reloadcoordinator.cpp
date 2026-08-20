@@ -22,7 +22,7 @@
  * $/LicenseInfo$
  */
 
-#include "llviewerprecompiledheaders.h"
+#include "linden_common.h"
 #include "skin/reloadcoordinator.h"
 #include <utility>
 #include "componentmanager.h"

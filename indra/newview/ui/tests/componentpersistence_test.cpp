@@ -110,7 +110,7 @@ TEST_F(ComponentPersistenceTest, EncodesAndDecodesComponentIdentityThroughOneCod
     EXPECT_FALSE(ComponentKey::fromPersistenceKey("alice@profile@extra").has_value());
 }
 
-TEST_F(ComponentPersistenceTest, SavesOnlyCurrentWorkspaceStateAndClearsLegacyFlags) {
+TEST_F(ComponentPersistenceTest, SavesOnlyCurrentWorkspaceState) {
     ComponentPersistence persistence(layout, workspace);
     const std::vector<ComponentInstanceState> components{{{"profile", "alice"}, true}, {{"demo", {}}, false}};
     LLSD previous = LLSD::emptyMap();
@@ -121,8 +121,6 @@ TEST_F(ComponentPersistenceTest, SavesOnlyCurrentWorkspaceStateAndClearsLegacyFl
 
     const LLSD saved = workspace.getLLSD("UIWorkspace");
     EXPECT_TRUE(saved["alice@profile"]["minimized"].asBoolean());
-    EXPECT_FALSE(saved["alice@profile"].has("detached"));
-    EXPECT_FALSE(saved["demo"].has("detached"));
     EXPECT_FALSE(saved.has("stale@orphan"));
 }
 
@@ -135,7 +133,7 @@ TEST_F(ComponentPersistenceTest, RestoresKeylessPlacementFromUserWideLayout) {
     layout.setLLSD("UILayout", saved);
 
     ComponentPersistence persistence(layout, workspace);
-    const auto placement = persistence.restorePlacement({"demo", {}}, FloaterPlacement{});
+    const auto placement = persistence.restorePlacement({"demo", {}});
     ASSERT_TRUE(placement.has_value());
     const auto& restored = *placement;
     EXPECT_FLOAT_EQ(restored.x, 31.f);
@@ -161,7 +159,7 @@ TEST_F(ComponentPersistenceTest, LetsKeyedPlacementOverrideDefaultsWithoutChangi
     workspace.setLLSD("UIWorkspace", workspaceValue);
 
     ComponentPersistence persistence(layout, workspace);
-    const auto placement = persistence.restorePlacement({"profile", "alice"}, FloaterPlacement{});
+    const auto placement = persistence.restorePlacement({"profile", "alice"});
     ASSERT_TRUE(placement.has_value());
     const auto& restored = *placement;
     EXPECT_FLOAT_EQ(restored.x, 100.f);
@@ -170,41 +168,6 @@ TEST_F(ComponentPersistenceTest, LetsKeyedPlacementOverrideDefaultsWithoutChangi
 
     persistence.savePlacement({"profile", "alice"}, restored, ComponentOpenState::Open);
     EXPECT_DOUBLE_EQ(layout.getLLSD("UILayout")["profile"]["position"][0].asReal(), 10.0);
-}
-
-TEST_F(ComponentPersistenceTest, RestoresLegacyDetachedPlacementUsingAttachedFallback) {
-    ComponentPersistence persistence(layout, workspace);
-    const ComponentKey identity{"profile", "alice"};
-    const FloaterPlacement fallback{12.f, 24.f, std::nullopt, false};
-    LLSD legacy = LLSD::emptyMap();
-    legacy["position"].append(100);
-    legacy["position"].append(200);
-    legacy["size"].append(640.f);
-    legacy["size"].append(480.f);
-    legacy["detached"] = true;
-    legacy["minimized"] = true;
-    LLSD saved = LLSD::emptyMap();
-    saved[identity.persistenceKey()] = legacy;
-    workspace.setLLSD("UIWorkspace", saved);
-
-    const LLSD encoded = workspace.getLLSD("UIWorkspace")["alice@profile"];
-    EXPECT_TRUE(encoded["detached"].asBoolean());
-    EXPECT_TRUE(encoded["position"].isArray());
-    EXPECT_TRUE(encoded["size"].isArray());
-    EXPECT_TRUE(encoded["minimized"].asBoolean());
-
-    const auto restored = persistence.restorePlacement(identity, fallback);
-    ASSERT_TRUE(restored.has_value());
-    EXPECT_FLOAT_EQ(restored->x, fallback.x);
-    EXPECT_FLOAT_EQ(restored->y, fallback.y);
-    ASSERT_TRUE(restored->size.has_value());
-    EXPECT_FLOAT_EQ(restored->size->width, 640.f);
-    EXPECT_TRUE(restored->minimized);
-
-    persistence.savePlacement(identity, *restored, ComponentOpenState::Open);
-    EXPECT_FALSE(workspace.getLLSD("UIWorkspace")["alice@profile"].has("detached"));
-    EXPECT_DOUBLE_EQ(workspace.getLLSD("UIWorkspace")["alice@profile"]["position"][0].asReal(), static_cast<double>(fallback.x));
-    EXPECT_DOUBLE_EQ(workspace.getLLSD("UIWorkspace")["alice@profile"]["position"][1].asReal(), static_cast<double>(fallback.y));
 }
 
 TEST_F(ComponentPersistenceTest, CombinesWorkspaceFlagsWithDefaultLayout) {
@@ -218,7 +181,7 @@ TEST_F(ComponentPersistenceTest, CombinesWorkspaceFlagsWithDefaultLayout) {
     workspace.setLLSD("UIWorkspace", workspaceValue);
 
     ComponentPersistence persistence(layout, workspace);
-    const auto placement = persistence.restorePlacement({"demo", {}}, FloaterPlacement{});
+    const auto placement = persistence.restorePlacement({"demo", {}});
     ASSERT_TRUE(placement.has_value());
     EXPECT_TRUE(placement->minimized);
 }
@@ -228,11 +191,9 @@ TEST_F(ComponentPersistenceTest, StoresKeylessFloaterGeometryInLayoutAndOpenStat
     const ComponentKey identity{"demo", {}};
     persistence.savePlacement(identity, FloaterPlacement{760.f, 120.f, FloaterLogicalSize{540.f, 680.f}, true}, ComponentOpenState::Open);
 
-    EXPECT_FALSE(layout.getLLSD("UILayout")["demo"].has("detached"));
     EXPECT_TRUE(workspace.getLLSD("UIWorkspace").has("demo"));
-    EXPECT_FALSE(workspace.getLLSD("UIWorkspace")["demo"].has("detached"));
 
-    const auto restored = persistence.restorePlacement(identity, FloaterPlacement{});
+    const auto restored = persistence.restorePlacement(identity);
     ASSERT_TRUE(restored.has_value());
     EXPECT_FLOAT_EQ(restored->x, 760.f);
 }
@@ -243,7 +204,6 @@ TEST_F(ComponentPersistenceTest, ClearsStaleKeylessWorkspaceGeometryWhileKeeping
     saved["demo"]["position"].append(700.f);
     saved["demo"]["size"].append(640.f);
     saved["demo"]["size"].append(480.f);
-    saved["demo"]["detached"] = true;
     workspace.setLLSD("UIWorkspace", saved);
 
     ComponentPersistence persistence(layout, workspace);
@@ -253,7 +213,6 @@ TEST_F(ComponentPersistenceTest, ClearsStaleKeylessWorkspaceGeometryWhileKeeping
     EXPECT_TRUE(updated.has("demo"));
     EXPECT_FALSE(updated["demo"].has("position"));
     EXPECT_FALSE(updated["demo"].has("size"));
-    EXPECT_FALSE(updated["demo"].has("detached"));
     EXPECT_TRUE(updated["demo"]["minimized"].asBoolean());
 }
 

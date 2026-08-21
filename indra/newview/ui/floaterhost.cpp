@@ -40,17 +40,17 @@ namespace {
 class FloaterReplacement final {
 public:
     using ReplacementRequest = ComponentManager::Host::ReplacementRequest;
-    FloaterReplacement(Surface& attachedSurface, std::vector<ReplacementRequest> replacements) : mAttachedSurface(attachedSurface) {
+    FloaterReplacement(Surface& surface, std::vector<ReplacementRequest> replacements) : mSurface(surface) {
         mPlanned.reserve(replacements.size());
         for (auto& request : replacements) {
             Floater* current = request.current;
             Floater* candidate = request.replacement.get();
             if (!current || !candidate) return;
 
-            if (!mAttachedSurface.ownsFloater(*current)) return;
+            if (!mSurface.ownsFloater(*current)) return;
 
             const bool wasMinimized = current->minimized();
-            const std::optional<Rect> authoredRect = mAttachedSurface.prepareFloater(*candidate);
+            const std::optional<Rect> authoredRect = mSurface.prepareFloater(*candidate);
             if (!authoredRect) return;
             const Vec2 authoredSize{authoredRect->w, authoredRect->h};
             Rect replacementRect = wasMinimized ? current->expandedRect() : current->rect();
@@ -108,12 +108,12 @@ private:
         if (!current || !candidate) return false;
         candidate->setRect(replacement.replacementRect);
         Floater* mounted = candidate;
-        std::unique_ptr<Floater> retired = mAttachedSurface.replaceFloater(*current, std::move(request.replacement));
+        std::unique_ptr<Floater> retired = mSurface.replaceFloater(*current, std::move(request.replacement));
         if (!retired) return false;
 
-        mAttachedSurface.placeFloater(*mounted, replacement.replacementRect);
+        mSurface.placeFloater(*mounted, replacement.replacementRect);
         if (replacement.wasMinimized && mounted->canMinimize()) mounted->setMinimized(true);
-        mAttachedSurface.updateLayout();
+        mSurface.updateLayout();
         applied = {index, mounted, std::move(retired)};
         return true;
     }
@@ -125,13 +125,13 @@ private:
                 mFinalized = true;
                 return false;
             }
-            std::unique_ptr<Floater> restored = mAttachedSurface.replaceFloater(*current->installed, std::move(current->retired));
+            std::unique_ptr<Floater> restored = mSurface.replaceFloater(*current->installed, std::move(current->retired));
             if (!restored || restored.get() != current->installed || !replacement.request.current) {
                 mFinalized = true;
                 return false;
             }
         }
-        mAttachedSurface.updateLayout();
+        mSurface.updateLayout();
         mFinalized = true;
         return true;
     }
@@ -140,7 +140,7 @@ private:
         if (!rollback()) LL_ERRS("UI") << "Component Floater replacement could not be rolled back." << LL_ENDL;
     }
 
-    Surface& mAttachedSurface;
+    Surface& mSurface;
     std::vector<PlannedReplacement> mPlanned;
     std::vector<AppliedReplacement> mApplied;
     bool mValid = false;
@@ -148,27 +148,27 @@ private:
 };
 } // namespace
 
-FloaterHost::FloaterHost(Surface& attachedSurface) : mAttachedSurface(attachedSurface) {}
+FloaterHost::FloaterHost(Surface& surface) : mSurface(surface) {}
 
 void FloaterHost::mount(std::unique_ptr<Floater> root) {
-    mAttachedSurface.mountFloater(std::move(root));
+    mSurface.mountFloater(std::move(root));
 }
 
 std::unique_ptr<Floater> FloaterHost::unmount(Floater& root) {
-    return mAttachedSurface.unmountFloater(root);
+    return mSurface.unmountFloater(root);
 }
 
 bool FloaterHost::replaceAll(std::vector<ReplacementRequest> replacements) {
-    FloaterReplacement transaction(mAttachedSurface, std::move(replacements));
+    FloaterReplacement transaction(mSurface, std::move(replacements));
     return transaction.commit();
 }
 
 bool FloaterHost::clearAll(std::vector<Floater*> roots) {
     for (Floater* root : roots)
-        if (!root || !mAttachedSurface.ownsFloater(*root)) return false;
+        if (!root || !mSurface.ownsFloater(*root)) return false;
     for (Floater* root : roots) {
         if (!root->closed()) root->close();
-        std::unique_ptr<Floater> retired = mAttachedSurface.unmountFloater(*root);
+        std::unique_ptr<Floater> retired = mSurface.unmountFloater(*root);
         if (!retired || retired.get() != root) LL_ERRS("UI") << "Component host lost a Floater during account teardown." << LL_ENDL;
     }
     return true;
@@ -176,6 +176,6 @@ bool FloaterHost::clearAll(std::vector<Floater*> roots) {
 
 void FloaterHost::present(Floater& root) {
     root.open();
-    mAttachedSurface.raise(root);
+    mSurface.raise(root);
 }
 } // namespace radia::viewer::ui

@@ -47,10 +47,9 @@ class SurfaceFloaterDelegate {
 public:
     virtual ~SurfaceFloaterDelegate() = default;
     virtual void floaterClosed(Surface&, Floater&) {}
-    virtual void floaterMinimizedChanged(Surface&, Floater&, bool) {}
-    virtual void floaterMoved(Surface&, Floater&) {}
+    virtual void floaterMinimizedChanged(Surface&, Floater&) {}
     virtual void floaterMoveEnded(Surface&, Floater&) {}
-    virtual void floaterResized(Surface&, Floater&, bool) {}
+    virtual void floaterResizeEnded(Surface&, Floater&) {}
 };
 
 enum class SurfaceLayer : uint8_t { Content, Floater, Popup, Tooltip, Drag, Modal };
@@ -153,10 +152,9 @@ private:
     bool updateLayoutIfNeeded();
     bool managesFloater(const Floater& floater) const;
     void floaterClosed(Floater& floater);
-    void floaterMinimizedChanged(Floater& floater, bool minimized);
-    void floaterMoved(Floater& floater);
+    void floaterMinimizedChanged(Floater& floater);
     void floaterMoveEnded(Floater& floater);
-    void floaterResized(Floater& floater, bool complete);
+    void floaterResizeEnded(Floater& floater);
     void generationChanged(const StyleSheet& styleSheet);
     void localeChanged();
     void keybindingsChanged();

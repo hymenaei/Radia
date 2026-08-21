@@ -61,7 +61,7 @@ public:
 
     std::vector<ComponentKey> openComponentKeys() const;
     void saveWorkspace(const std::vector<ComponentInstanceState>& states, const std::vector<ComponentKey>& preserved = {});
-    std::optional<FloaterPlacement> restorePlacement(const ComponentKey& componentKey, const FloaterPlacement& fallback) const;
+    std::optional<FloaterPlacement> restorePlacement(const ComponentKey& componentKey) const;
     void saveFloaterPlacement(const ComponentKey& componentKey, const Floater& floater);
     void savePlacement(const ComponentKey& componentKey, FloaterPlacement placement, ComponentOpenState state);
 

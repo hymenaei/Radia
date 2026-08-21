@@ -308,6 +308,44 @@ TEST_F(RuntimeTest, HeaderDragRetainsCaptureUntilRelease) {
     floater->setCanClose(true);
 }
 
+TEST_F(RuntimeTest, PersistsMinimizedFloaterMove) {
+    ASSERT_TRUE(runtime.initialize());
+    ASSERT_TRUE(registerTestFloater());
+    Floater* floater = runtime.openFloater("runtimeTest");
+    ASSERT_NE(floater, nullptr);
+    ASSERT_NE(floater->header(), nullptr);
+    floater->setCanClose(false).setCanMinimize(true).setCanResize(true);
+
+    runtime.frame(800, 600);
+    floater->setMinimized(true);
+    runtime.frame(800, 600);
+
+    const Rect initialExpandedRect = floater->expandedRect();
+    const LLSD initialPlacement = savedSettings.getLLSD("UILayout")["runtimeTest"];
+    ASSERT_TRUE(initialPlacement.isMap());
+    ASSERT_TRUE(initialPlacement["position"].isArray());
+    ASSERT_TRUE(initialPlacement["size"].isArray());
+    EXPECT_FLOAT_EQ(static_cast<float>(initialPlacement["position"][0].asReal()), initialExpandedRect.x);
+    EXPECT_FLOAT_EQ(static_cast<float>(initialPlacement["position"][1].asReal()), initialExpandedRect.y);
+    EXPECT_FLOAT_EQ(static_cast<float>(initialPlacement["size"][0].asReal()), initialExpandedRect.w);
+    EXPECT_FLOAT_EQ(static_cast<float>(initialPlacement["size"][1].asReal()), initialExpandedRect.h);
+
+    const Rect headerRect = floater->header()->rect();
+    const float startX = headerRect.x + headerRect.w * 0.2f;
+    const float startY = headerRect.y + headerRect.h * 0.5f;
+    ASSERT_TRUE(runtime.pointerDown(makePointerEvent(startX, startY, PointerButton::Left)).handled);
+    ASSERT_TRUE(runtime.pointerMove(makePointerEvent(startX + 40.f, startY)).handled);
+    ASSERT_GT(floater->expandedRect().x, initialExpandedRect.x);
+    ASSERT_TRUE(runtime.pointerUp(makePointerEvent(startX + 40.f, startY, PointerButton::Left)).handled);
+
+    const LLSD savedPlacement = savedSettings.getLLSD("UILayout")["runtimeTest"];
+    ASSERT_TRUE(savedPlacement.isMap());
+    EXPECT_FLOAT_EQ(static_cast<float>(savedPlacement["position"][0].asReal()), floater->expandedRect().x);
+    EXPECT_FLOAT_EQ(static_cast<float>(savedPlacement["position"][1].asReal()), floater->expandedRect().y);
+    EXPECT_FLOAT_EQ(static_cast<float>(savedPlacement["size"][0].asReal()), floater->expandedRect().w);
+    EXPECT_FLOAT_EQ(static_cast<float>(savedPlacement["size"][1].asReal()), floater->expandedRect().h);
+}
+
 TEST_F(RuntimeTest, CapturedPointerContinuesOutsideViewportUntilRelease) {
     ASSERT_TRUE(runtime.initialize());
     ASSERT_TRUE(registerTestFloater());

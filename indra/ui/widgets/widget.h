@@ -250,10 +250,10 @@ protected:
     void invalidateArrange();
     void invalidateText();
     void invalidatePaint();
-    const StyleSheet* attachedStyleSheet() const;
-    const System* attachedSystem() const;
-    Surface* attachedSurface() const { return mSurface; }
-    const TextMetrics& attachedTextMetrics() const;
+    const StyleSheet* styleSheet() const;
+    const System* system() const;
+    Surface* surface() const { return mSurface; }
+    const TextMetrics& textMetrics() const;
     virtual void onActivate() {}
     virtual void onLabelActivate() { activate(); }
     virtual void onChildAdded(Widget&) {}

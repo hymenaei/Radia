@@ -58,7 +58,7 @@ void Fieldset::onChildrenCleared() {
 }
 
 void Fieldset::onArranged(const Style& style) {
-    const StyleSheet* styleSheet = attachedStyleSheet();
+    const StyleSheet* styleSheet = this->styleSheet();
     const auto displayed = [styleSheet](const Widget* widget) {
         return widget && (styleSheet ? widget->isDisplayed(resolveWidgetStyle(*styleSheet, *widget)) : widget->isDisplayed(Style{}));
     };
@@ -99,7 +99,7 @@ Text* Fieldset::setLegendContent(TextSource content) {
 }
 
 Rect Fieldset::borderRect() const {
-    const StyleSheet* styleSheet = attachedStyleSheet();
+    const StyleSheet* styleSheet = this->styleSheet();
     if (!mLegend
         || !(styleSheet ? mLegend->isDisplayed(resolveWidgetStyle(*styleSheet, *mLegend)) : mLegend->isDisplayed(Style{}))
         || mLegend->rect().h <= 0.f)

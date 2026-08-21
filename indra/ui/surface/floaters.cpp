@@ -158,8 +158,7 @@ bool Surface::raiseWithinLayer(Widget& widget, SurfaceLayer layer) {
     while (directChild->parent() && directChild->parent() != &root) directChild = directChild->parent();
     if (directChild->parent() != &root) return false;
 
-    auto found =
-        std::find_if(root.mChildren.begin(), root.mChildren.end(), [directChild](const auto& child) { return child.get() == directChild; });
+    auto found = std::find_if(root.mChildren.begin(), root.mChildren.end(), [directChild](const auto& child) { return child.get() == directChild; });
     if (found == root.mChildren.end()) return false;
     if (std::next(found) != root.mChildren.end()) {
         std::rotate(found, std::next(found), root.mChildren.end());
@@ -180,21 +179,16 @@ void Surface::floaterClosed(Floater& floater) {
     if (managesFloater(floater) && mFloaterDelegate) mFloaterDelegate->floaterClosed(*this, floater);
 }
 
-void Surface::floaterMinimizedChanged(Floater& floater, bool minimized) {
-    if (managesFloater(floater) && mFloaterDelegate) mFloaterDelegate->floaterMinimizedChanged(*this, floater, minimized);
-}
-
-void Surface::floaterMoved(Floater& floater) {
-    if (managesFloater(floater) && mFloaterDelegate) mFloaterDelegate->floaterMoved(*this, floater);
+void Surface::floaterMinimizedChanged(Floater& floater) {
+    if (managesFloater(floater) && mFloaterDelegate) mFloaterDelegate->floaterMinimizedChanged(*this, floater);
 }
 
 void Surface::floaterMoveEnded(Floater& floater) {
     if (managesFloater(floater) && mFloaterDelegate) mFloaterDelegate->floaterMoveEnded(*this, floater);
 }
 
-void Surface::floaterResized(Floater& floater, bool complete) {
+void Surface::floaterResizeEnded(Floater& floater) {
     if (!managesFloater(floater)) return;
-    requestLayout();
-    if (mFloaterDelegate) mFloaterDelegate->floaterResized(*this, floater, complete);
+    if (mFloaterDelegate) mFloaterDelegate->floaterResizeEnded(*this, floater);
 }
 } // namespace radia::ui

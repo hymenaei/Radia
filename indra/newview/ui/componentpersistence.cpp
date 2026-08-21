@@ -73,7 +73,6 @@ void writeGeometry(LLSD& entry, const FloaterPlacement& placement) {
     entry["position"] = makePair(placement.x, placement.y);
     if (placement.size) entry["size"] = makePair(placement.size->width, placement.size->height);
     else entry.erase("size");
-    entry.erase("detached");
 }
 
 void writePlacement(LLSD& entry, const FloaterPlacement& placement) {
@@ -86,7 +85,7 @@ void writeLayoutPlacement(LLSD& entry, const FloaterPlacement& placement) {
     entry.erase("minimized");
 }
 
-std::optional<FloaterPlacement> decodePlacement(const LLSD& value, const FloaterPlacement& fallback) {
+std::optional<FloaterPlacement> decodePlacement(const LLSD& value) {
     if (!value.isMap()) return std::nullopt;
 
     float width = 0.f;
@@ -97,14 +96,6 @@ std::optional<FloaterPlacement> decodePlacement(const LLSD& value, const Floater
     std::optional<FloaterLogicalSize> size;
     if (hasSize) size = FloaterLogicalSize{width, height};
 
-    // Detached records stored native screen coordinates, which are not valid on the main Surface.
-    if (readFlag(value, "detached")) {
-        FloaterPlacement migrated = fallback;
-        if (size) migrated.size = size;
-        migrated.minimized = minimized;
-        return migrated;
-    }
-
     float x = 0.f;
     float y = 0.f;
     if (!readPair(value["position"], x, y)) return std::nullopt;
@@ -114,7 +105,7 @@ std::optional<FloaterPlacement> decodePlacement(const LLSD& value, const Floater
 LLSD mergedPlacement(const LLSD& layout, const LLSD& workspaceEntry) {
     LLSD merged = layout.isMap() ? layout : LLSD::emptyMap();
     if (!workspaceEntry.isMap()) return merged;
-    for (const char* field : {"position", "size", "detached", "minimized"})
+    for (const char* field : {"position", "size", "minimized"})
         if (workspaceEntry.has(field)) merged[field] = workspaceEntry[field];
     return merged;
 }
@@ -152,24 +143,24 @@ void ComponentPersistence::saveWorkspace(const std::vector<ComponentInstanceStat
         if (!entry.isMap()) entry = LLSD::emptyMap();
         if (state.minimized) entry["minimized"] = true;
         else entry.erase("minimized");
-        entry.erase("detached");
     }
 
     if (workspace == previousWorkspace) return;
     writeWorkspace(workspace);
 }
 
-std::optional<FloaterPlacement> ComponentPersistence::restorePlacement(const ComponentKey& componentKey, const FloaterPlacement& fallback) const {
+std::optional<FloaterPlacement> ComponentPersistence::restorePlacement(const ComponentKey& componentKey) const {
     if (!componentKey.valid()) return std::nullopt;
     const LLSD layout = readLayout();
     const LLSD workspace = readWorkspace();
-    return decodePlacement(mergedPlacement(layout[componentKey.definitionId], workspace[componentKey.persistenceKey()]), fallback);
+    return decodePlacement(mergedPlacement(layout[componentKey.definitionId], workspace[componentKey.persistenceKey()]));
 }
 
 void ComponentPersistence::saveFloaterPlacement(const ComponentKey& componentKey, const Floater& floater) {
+    const auto& placementRect = floater.minimized() ? floater.expandedRect() : floater.rect();
     std::optional<FloaterLogicalSize> size;
-    if (floater.canResize()) size = FloaterLogicalSize{floater.rect().w, floater.rect().h};
-    savePlacement(componentKey, FloaterPlacement{floater.rect().x, floater.rect().y, size, floater.minimized()},
+    if (floater.canResize()) size = FloaterLogicalSize{placementRect.w, placementRect.h};
+    savePlacement(componentKey, FloaterPlacement{placementRect.x, placementRect.y, size, floater.minimized()},
                   floater.closed() ? ComponentOpenState::Closed : ComponentOpenState::Open);
 }
 
@@ -198,7 +189,6 @@ void ComponentPersistence::savePlacement(const ComponentKey& componentKey, Float
         if (!workspaceEntry.isMap()) workspaceEntry = LLSD::emptyMap();
         workspaceEntry.erase("position");
         workspaceEntry.erase("size");
-        workspaceEntry.erase("detached");
         setOptionalFlag(workspaceEntry, "minimized", placement.minimized);
     } else {
         LLSD& workspaceEntry = workspace[key];

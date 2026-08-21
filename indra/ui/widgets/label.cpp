@@ -41,7 +41,7 @@ Label& Label::setText(std::string text) {
 
 Label& Label::setContent(TextSource content) {
     mText.setContent(std::move(content));
-    if (const System* system = attachedSystem()) onLocaleChanged(*system);
+    if (const System* system = this->system()) onLocaleChanged(*system);
     else invalidateText();
     return *this;
 }
@@ -84,7 +84,7 @@ Vec2 Label::intrinsicSize(const StyleSheet& styleSheet, const Style& style, cons
 
 void Label::paint(PaintContext& context, const Style& style, float) const {
     context.paintBox(rect(), style);
-    mText.paint(context, insetRect(rect(), style.padding), style, attachedStyleSheet(), *this);
+    mText.paint(context, insetRect(rect(), style.padding), style, this->styleSheet(), *this);
 }
 
 WidgetContract detail::labelContract() {

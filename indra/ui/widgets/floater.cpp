@@ -100,7 +100,7 @@ WidgetContract detail::floaterContract() {
 }
 
 Floater& Floater::setTitle(std::string localizationKey) {
-    const System* system = attachedSystem();
+    const System* system = this->system();
     if (system) return setTitleContent(system->localize(std::move(localizationKey)));
     LocalizationRequest request = LocalizationRequest::text(localizationKey);
     return setTitleContent(TextSource::fromLocalization(std::move(request), InlineContent::text(std::move(localizationKey))));
@@ -218,7 +218,7 @@ void Floater::close() {
     mInteraction = FloaterInteraction::Idle;
     setVisibility(Visibility::Hidden);
     setDisplayNone(true);
-    if (Surface* surface = attachedSurface()) surface->floaterClosed(*this);
+    if (Surface* surface = this->surface()) surface->floaterClosed(*this);
     if (mOnClose) mOnClose();
 }
 
@@ -235,8 +235,8 @@ void Floater::setMinimized(bool minimized) {
 
         float width = rect().w;
         float height = mHeader->rect().h;
-        if (const StyleSheet* styleSheet = attachedStyleSheet()) {
-            const Vec2 headerSize = measureWidget(*mHeader, *styleSheet, attachedTextMetrics());
+        if (const StyleSheet* styleSheet = this->styleSheet()) {
+            const Vec2 headerSize = measureWidget(*mHeader, *styleSheet, textMetrics());
             const Style floaterStyle = resolveWidgetStyle(*styleSheet, *this);
             const Style headerStyle = resolveWidgetStyle(*styleSheet, *mHeader);
             width = headerSize.x + headerStyle.margin.horizontal() + floaterStyle.padding.horizontal();
@@ -253,7 +253,7 @@ void Floater::setMinimized(bool minimized) {
         updateHeaderPresentation();
         clampToMovementBounds();
     }
-    if (Surface* surface = attachedSurface()) surface->floaterMinimizedChanged(*this, minimized);
+    if (Surface* surface = this->surface()) surface->floaterMinimizedChanged(*this);
 }
 
 void Floater::toggleMinimized() {
@@ -269,11 +269,10 @@ void Floater::clampToMovementBounds() {
         mExpandedRect.x += delta.x;
         mExpandedRect.y += delta.y;
     }
-    if (Surface* surface = attachedSurface()) surface->floaterMoved(*this);
 }
 
 bool Floater::overChromeButton(const Vec2& point) const {
-    const StyleSheet* styleSheet = attachedStyleSheet();
+    const StyleSheet* styleSheet = this->styleSheet();
     const auto visible = [styleSheet](const Widget* widget) {
         return widget && (styleSheet ? widget->isVisible(resolveWidgetStyle(*styleSheet, *widget)) : widget->isVisible(Style{}));
     };
@@ -324,13 +323,12 @@ bool Floater::updatePointerInteraction(const PointerEvent& event) {
                                 static_cast<detail::ResizeEdges>(mResizeInteraction.edges), {mResizeInteraction.minimum, mResizeInteraction.bounds});
         if (resized.x != rect().x || resized.y != rect().y || resized.w != rect().w || resized.h != rect().h) {
             setRect(resized);
-            if (Surface* surface = attachedSurface()) surface->floaterResized(*this, false);
+            if (Surface* surface = this->surface()) surface->requestLayout();
         }
         return true;
     }
     if (mInteraction != FloaterInteraction::Move) return false;
     const Vec2 position = clampedPosition(event.position - mDragOffset);
-    Surface* surface = attachedSurface();
     const Vec2 delta = position - Vec2{rect().x, rect().y};
     if (delta.x != 0.f || delta.y != 0.f) {
         translate(delta);
@@ -338,7 +336,6 @@ bool Floater::updatePointerInteraction(const PointerEvent& event) {
             mExpandedRect.x += delta.x;
             mExpandedRect.y += delta.y;
         }
-        if (surface) surface->floaterMoved(*this);
     }
     return true;
 }
@@ -347,9 +344,9 @@ bool Floater::endPointerInteraction(const PointerEvent&) {
     const FloaterInteraction interaction = mInteraction;
     const bool handled = interaction != FloaterInteraction::Idle;
     mInteraction = FloaterInteraction::Idle;
-    if (Surface* surface = attachedSurface()) {
+    if (Surface* surface = this->surface()) {
         if (interaction == FloaterInteraction::Move) surface->floaterMoveEnded(*this);
-        else if (interaction == FloaterInteraction::Resize) surface->floaterResized(*this, true);
+        else if (interaction == FloaterInteraction::Resize) surface->floaterResizeEnded(*this);
     }
     return handled;
 }

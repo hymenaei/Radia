@@ -249,7 +249,7 @@ void Widget::setSurface(Surface* surface) {
     std::vector<WidgetRef<Widget>> children;
     children.reserve(mChildren.size());
     for (const auto& child : mChildren) children.emplace_back(child.get());
-    if (const System* system = attachedSystem()) onLocaleChanged(*system);
+    if (const System* system = this->system()) onLocaleChanged(*system);
     Widget* current = self.get();
     if (!current || current->mSurface != surface || current->mParent != expectedParent) return;
     for (const WidgetRef<Widget>& childRef : children)
@@ -264,11 +264,11 @@ void Widget::setSurface(Surface* surface) {
     }
 }
 
-const System* Widget::attachedSystem() const {
+const System* Widget::system() const {
     return mSurface ? mSurface->mSystem : nullptr;
 }
 
-const TextMetrics& Widget::attachedTextMetrics() const {
+const TextMetrics& Widget::textMetrics() const {
     return mSurface ? mSurface->textMetrics() : fixedTextMetrics();
 }
 
@@ -347,14 +347,14 @@ void Widget::clearPaintInvalidationTree() {
     for (auto& child : mChildren) child->clearPaintInvalidationTree();
 }
 
-const StyleSheet* Widget::attachedStyleSheet() const {
+const StyleSheet* Widget::styleSheet() const {
     return mSurface ? &mSurface->styleSheet() : nullptr;
 }
 
 void Widget::setState(WidgetState state, bool enabled) {
     if (radia::ui::hasState(mStates, state) == enabled) return;
     radia::ui::setState(mStates, state, enabled);
-    const StyleSheet* styleSheet = attachedStyleSheet();
+    const StyleSheet* styleSheet = this->styleSheet();
     const bool layoutAffecting = !styleSheet || styleSheet->stateAffectsLayout(*this, state);
     const bool propagateToDescendants = !styleSheet || styleSheet->stateAffectsDescendants(*this, state);
     invalidateStyleTree(layoutAffecting, propagateToDescendants);
@@ -373,7 +373,7 @@ void Widget::activate() {
 }
 
 void Widget::activateFromLabel() {
-    const StyleSheet* styleSheet = attachedStyleSheet();
+    const StyleSheet* styleSheet = this->styleSheet();
     for (const Widget* current = this; current; current = current->parent()) {
         if (current->disabled()) return;
         if (styleSheet) {

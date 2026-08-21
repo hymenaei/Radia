@@ -274,11 +274,11 @@ bool Surface::pointerDown(const PointerEvent& event) {
         WidgetRef<Floater> resizeRef(resizeFloater);
         const SurfaceLayer layer = resizeFloater->parent() == &layerRoot(SurfaceLayer::Modal) ? SurfaceLayer::Modal : SurfaceLayer::Floater;
         raiseWithinLayer(*resizeFloater, layer);
-        const Surface* resizeSurface = resizeFloater->attachedSurface();
+        const Surface* resizeSurface = resizeFloater->surface();
         const Widget* resizeParent = resizeFloater->parent();
         const auto isResizeFloaterStillAttached = [&]() {
             Floater* current = resizeRef.get();
-            return current && current->attachedSurface() == resizeSurface && current->parent() == resizeParent && isRootedInSurface(current);
+            return current && current->surface() == resizeSurface && current->parent() == resizeParent && isRootedInSurface(current);
         };
         resetLongClick();
         mPressedClickCount = 0;

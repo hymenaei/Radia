@@ -56,19 +56,13 @@ namespace {
 class FloaterDelegateProbe final : public SurfaceFloaterDelegate {
 public:
     void floaterClosed(Surface&, Floater&) override { ++closes; }
-    void floaterMinimizedChanged(Surface&, Floater&, bool) override { ++minimizeChanges; }
-    void floaterMoved(Surface&, Floater&) override { ++moves; }
+    void floaterMinimizedChanged(Surface&, Floater&) override { ++minimizeChanges; }
     void floaterMoveEnded(Surface&, Floater&) override { ++moveCompletions; }
-    void floaterResized(Surface&, Floater&, bool complete) override {
-        ++resizeChanges;
-        if (complete) ++resizeCompletions;
-    }
+    void floaterResizeEnded(Surface&, Floater&) override { ++resizeCompletions; }
 
     int closes = 0;
     int minimizeChanges = 0;
-    int moves = 0;
     int moveCompletions = 0;
-    int resizeChanges = 0;
     int resizeCompletions = 0;
 };
 
@@ -141,16 +135,12 @@ TEST(FloatersTest, TransfersFloaterBetweenSurfacesAndReportsLifecycle) {
     first.mountFloater(std::move(floater));
     EXPECT_EQ(target->rect().right(), 100.f);
     EXPECT_EQ(target->rect().top(), 100.f);
-    EXPECT_EQ(firstDelegate.moves, 1);
-
     std::unique_ptr<Floater> transferred = first.unmountFloater(*target);
     ASSERT_TRUE(transferred);
     EXPECT_EQ(transferred.get(), target);
     second.mountFloater(std::move(transferred));
     EXPECT_EQ(target->rect().right(), 80.f);
     EXPECT_EQ(target->rect().top(), 60.f);
-    EXPECT_EQ(secondDelegate.moves, 1);
-
     target->setMinimized(true);
     EXPECT_EQ(secondDelegate.minimizeChanges, 1);
     EXPECT_EQ(firstDelegate.minimizeChanges, 0);
@@ -160,27 +150,37 @@ TEST(FloatersTest, TransfersFloaterBetweenSurfacesAndReportsLifecycle) {
     EXPECT_EQ(firstDelegate.closes, 0);
 }
 
-TEST(FloatersTest, AvoidsSyntheticMoveBeforeViewportInitialization) {
+TEST(FloatersTest, ReportsMoveCompletionAfterPointerUp) {
     StyleSheet styleSheet;
-    constexpr char kStartupFloaterLayout[] = "floater { width: 100px; display: flex; flex-direction: column; } "
-                                             "floater::header { height: 30px; }";
-    ASSERT_TRUE(styleSheet.loadRadia(kStartupFloaterLayout).ok());
+    constexpr char kMove[] = "floater { display: flex; flex-direction: column; } "
+                             "floater::header { height: 30px; display: flex; flex-direction: row; } "
+                             "floater::content { flex-grow: 1; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kMove).ok());
     Surface surface(styleSheet);
-    FloaterDelegateProbe delegate;
-    surface.setFloaterDelegate(&delegate);
+    surface.setViewport(200.f, 200.f);
     auto floater = std::make_unique<Floater>();
     Floater* target = floater.get();
-    floater->setCanClose(false);
+    floater->setTitle("title").setCanClose(false).setCanMinimize(true);
+    floater->setRect({20.f, 20.f, 100.f, 100.f});
     surface.mountFloater(std::move(floater));
-
     surface.updateLayout();
-    EXPECT_EQ(target->rect().x, 0.f);
-    EXPECT_EQ(target->rect().y, 0.f);
-    surface.setViewport(200.f, 100.f);
-    EXPECT_EQ(delegate.moves, 0);
+    target->setMinimized(true);
+    surface.updateLayout();
+    FloaterDelegateProbe delegate;
+    surface.setFloaterDelegate(&delegate);
+
+    const Vec2 dragStart{target->rect().left() + 2.f, target->rect().top() - 15.f};
+    EXPECT_TRUE(surface.pointerDown({dragStart, PointerButton::Left}));
+    EXPECT_EQ(delegate.moveCompletions, 0);
+    const float initialLeft = target->rect().left();
+    surface.pointerMove({{199.f, dragStart.y}, PointerButton::Left});
+    EXPECT_GT(target->rect().left(), initialLeft);
+    EXPECT_EQ(delegate.moveCompletions, 0);
+    surface.pointerUp({{199.f, dragStart.y}, PointerButton::Left});
+    EXPECT_EQ(delegate.moveCompletions, 1);
 }
 
-TEST(FloatersTest, ResizesAttachedFloaterWithinSurfaceBounds) {
+TEST(FloatersTest, ResizesFloaterWithinSurfaceBounds) {
     StyleSheet styleSheet;
     constexpr char kResize[] = "floater { size: 80px 100px; min-size: 40px 50px; display: flex; flex-direction: column; } "
                                "floater::header { height: 20px; }";

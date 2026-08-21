@@ -293,17 +293,13 @@ static const F32 MIN_DISPLAY_SCALE = 0.5f;
 
 static const char KEY_MOUSELOOK = 'M';
 
-static bool shouldShowRadiaUI()
+static bool shouldShowUI()
 {
     return LLStartUp::getStartupState() == STATE_STARTED
         && !LLAppViewer::instance()->quitRequested()
         && !gDisconnected
-        && gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI);
-}
-
-static bool shouldShowAttachedUI()
-{
-    return shouldShowRadiaUI() && !gAgentCamera.cameraMouselook();
+        && gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI)
+        && !gAgentCamera.cameraMouselook();
 }
 
 LLTrace::SampleStatHandle<> LLViewerWindow::sMouseVelocityStat("Mouse Velocity");
@@ -2581,14 +2577,13 @@ void LLViewerWindow::initBase()
     LLMenuGL::sMenuContainer = gMenuHolder;
 
     mUIRuntime = std::make_unique<Runtime>(
-        gSavedSettings, gSavedPerAccountSettings, gRadiaUIProgram,
-        gWindowp,
+        gSavedSettings, gSavedPerAccountSettings, gRadiaUIProgram, gWindowp,
         Runtime::IntegrationHooks{
             .resolveKeybinding = [](const std::string& command) { return KeybindingPresentation{gViewerInput.getPrimaryKeyBinding({}, command)}; },
             .keybindingState = [] { return RuntimeKeybindingState{gViewerInput.getBindingGeneration(), static_cast<U32>(gViewerInput.getMode())}; }});
     registerFloaterDemo(*mUIRuntime);
     mUIRuntime->initialize();
-    mUIRuntime->setVisibility(shouldShowAttachedUI());
+    mUIRuntime->setVisibility(shouldShowUI());
 }
 
 void LLViewerWindow::initWorldUI()
@@ -3908,9 +3903,9 @@ void LLViewerWindow::updateUI()
     }
 
     // use full window for world view when not rendering UI
-    const bool attachedUIVisible = shouldShowAttachedUI();
-    if (mUIRuntime) mUIRuntime->setVisibility(attachedUIVisible);
-    bool world_view_uses_full_window = gAgentCamera.cameraMouselook() || !attachedUIVisible;
+    const bool uiVisible = shouldShowUI();
+    if (mUIRuntime) mUIRuntime->setVisibility(uiVisible);
+    const bool world_view_uses_full_window = !uiVisible;
     updateWorldViewRect(world_view_uses_full_window);
 
     LLView::sMouseHandlerMessage.clear();
@@ -3940,12 +3935,10 @@ void LLViewerWindow::updateUI()
 
     bool handled = false;
     bool hoverHandled = false;
-    if (mUIRuntime && attachedUIVisible && (mMouseInWindow || mUIRuntime->hasPointerCapture())) {
-        const InputDispatchResult result =
-            mUIRuntime->pointerMove(
-                translatePointerInput(NativePointerInput{static_cast<F32>(x), static_cast<F32>(y), NativePointerButton::NoButton, static_cast<U32>(mask), 1,
-                                                         static_cast<F32>(mCurrentRawMouseDelta.mX) / mDisplayScale.mV[VX],
-                                                         static_cast<F32>(mCurrentRawMouseDelta.mY) / mDisplayScale.mV[VY]}));
+    if (mUIRuntime && uiVisible && (mMouseInWindow || mUIRuntime->hasPointerCapture())) {
+        const InputDispatchResult result = mUIRuntime->pointerMove(translatePointerInput(NativePointerInput{
+            static_cast<F32>(x), static_cast<F32>(y), NativePointerButton::NoButton, static_cast<U32>(mask), 1,
+            static_cast<F32>(mCurrentRawMouseDelta.mX) / mDisplayScale.mV[VX], static_cast<F32>(mCurrentRawMouseDelta.mY) / mDisplayScale.mV[VY]}));
         handled = result.handled;
         hoverHandled = result.handled;
         if (result.cursor) mWindow->setCursor(translateCursor(*result.cursor));

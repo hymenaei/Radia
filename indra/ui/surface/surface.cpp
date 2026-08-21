@@ -361,14 +361,14 @@ void Surface::paint(PaintContext& context, float scale) {
 
 void Surface::paintWidget(const Widget& widget, PaintContext& context, float scale, float inheritedOpacity, StylePass& styles) const {
     const WidgetRef<const Widget> lifetime(&widget);
-    const Surface* originalSurface = widget.attachedSurface();
+    const Surface* originalSurface = widget.surface();
     const Widget* originalParent = widget.parent();
     const std::uint64_t originalStyleRevision = widget.mStyleRevision;
     const std::uint64_t originalLayoutRevision = widget.mLayoutInvalidationRevision;
     const Style& unresolved = styles.style(widget);
     const Widget* styledWidget = lifetime.get();
     if (!styledWidget
-        || styledWidget->attachedSurface() != originalSurface
+        || styledWidget->surface() != originalSurface
         || styledWidget->parent() != originalParent
         || styledWidget->mStyleRevision != originalStyleRevision
         || styledWidget->mLayoutInvalidationRevision != originalLayoutRevision)
@@ -397,7 +397,7 @@ void Surface::paintWidget(const Widget& widget, PaintContext& context, float sca
     const auto isParentStillValid = [&] {
         const Widget* currentWidget = lifetime.get();
         return currentWidget
-            && currentWidget->attachedSurface() == originalSurface
+            && currentWidget->surface() == originalSurface
             && currentWidget->mStyleRevision == originalStyleRevision
             && currentWidget->mLayoutInvalidationRevision == originalLayoutRevision
             && currentWidget->isVisible(unresolved)

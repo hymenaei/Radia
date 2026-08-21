@@ -35,7 +35,7 @@ class Surface;
 namespace radia::viewer::ui {
 class FloaterHost final : public ComponentManager::Host {
 public:
-    explicit FloaterHost(radia::ui::Surface& attachedSurface);
+    explicit FloaterHost(radia::ui::Surface& surface);
 
     void mount(std::unique_ptr<radia::ui::Floater> root) override;
     std::unique_ptr<radia::ui::Floater> unmount(radia::ui::Floater& root) override;
@@ -44,7 +44,7 @@ public:
     void present(radia::ui::Floater& root) override;
 
 private:
-    radia::ui::Surface& mAttachedSurface;
+    radia::ui::Surface& mSurface;
 };
 } // namespace radia::viewer::ui
 #endif // RD_FLOATERHOST_H

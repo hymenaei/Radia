@@ -71,10 +71,10 @@ constexpr char kLongClickDelaySetting[] = "LongClickDelay";
 constexpr char kSkinReloadScanIntervalSetting[] = "SkinAutoReloadScanInterval";
 constexpr char kSkinReloadSettleIntervalSetting[] = "SkinAutoReloadSettleInterval";
 
-struct AttachedSurfaceState final {
+struct SurfaceState final {
     using TimePoint = std::chrono::steady_clock::time_point;
 
-    AttachedSurfaceState(LLGLSLShader& uiShader, System& system, Runtime::PaintContextFactory paintContextFactory)
+    SurfaceState(LLGLSLShader& uiShader, System& system, Runtime::PaintContextFactory paintContextFactory)
         : paintContext(paintContextFactory ? paintContextFactory(uiShader, system) : std::make_unique<OpenGLPaintContext>(uiShader, system)),
           surface(system.createSurface(*paintContext)) {}
 
@@ -137,18 +137,16 @@ public:
     using KeybindingResolver = Runtime::KeybindingResolver;
     using KeybindingStateProvider = Runtime::KeybindingStateProvider;
     using Clock = Runtime::Clock;
-    using TimePoint = AttachedSurfaceState::TimePoint;
+    using TimePoint = SurfaceState::TimePoint;
 
     Impl(LLControlGroup& savedSettings, LLControlGroup& perAccountSettings, LLGLSLShader& uiShader, LLWindow* mainWindow,
          Runtime::IntegrationHooks hooks)
         : mSavedSettings(savedSettings), mResolveKeybinding(std::move(hooks.resolveKeybinding)), mKeybindingState(std::move(hooks.keybindingState)),
-          mNow(std::move(hooks.now)), mComponentPersistence(savedSettings, perAccountSettings),
-          mMainWindow(mainWindow), mResources(),
+          mNow(std::move(hooks.now)), mComponentPersistence(savedSettings, perAccountSettings), mMainWindow(mainWindow), mResources(),
           mSnapshotSource(mResources, std::move(hooks.captureSkin)), mSystem(), mReloadCoordinator(mSystem, mSnapshotSource),
-          mAttachedSurface(uiShader, mSystem, std::move(hooks.paintContext)),
-          mFloaterHost(*mAttachedSurface.surface), mSettingsAdapter(savedSettings),
+          mSurfaceState(uiShader, mSystem, std::move(hooks.paintContext)), mFloaterHost(*mSurfaceState.surface), mSettingsAdapter(savedSettings),
           mComponents(mSystem, mFloaterHost, mSettingsAdapter) {
-        mAttachedSurface.surface->setFloaterDelegate(this);
+        mSurfaceState.surface->setFloaterDelegate(this);
         mSystem.setKeybindingResolver([this](const std::string& authoredId) {
             if (!mResolveKeybinding) return KeybindingPresentation{};
             std::string viewerCommand = authoredId;
@@ -193,7 +191,7 @@ public:
         if (mShuttingDown) return;
         mShuttingDown = true;
         clearInteraction();
-        attachedSurface().setFloaterDelegate(nullptr);
+        surface().setFloaterDelegate(nullptr);
         persistWorkspace();
         if (!mComponents.clearInstances()) LL_WARNS("UI") << "Some Radia components could not be cleared during runtime shutdown." << LL_ENDL;
         mSystem.setLocaleChangedHandler({});
@@ -214,7 +212,7 @@ public:
         ComponentOpenResult result = mComponents.open(definitionId, instanceKey);
         logDiagnostics(result);
         if (!result.ok()) return nullptr;
-        if (mAttachedSurface.width > 0 && mAttachedSurface.height > 0) layout(mAttachedSurface.width, mAttachedSurface.height);
+        if (mSurfaceState.width > 0 && mSurfaceState.height > 0) layout(mSurfaceState.width, mSurfaceState.height);
         mUnrestoredWorkspace.erase({definitionId, instanceKey});
         mPersistenceDirty = true;
         persistWorkspace();
@@ -235,7 +233,7 @@ public:
 
     void endAccountSession() {
         clearInteraction();
-        mAttachedSurface.lastFrameTime = {};
+        mSurfaceState.lastFrameTime = {};
         if (mWorkspaceRestored) persistWorkspace();
         if (!mComponents.clearInstances()) {
             LL_WARNS("UI") << "Some Radia components could not be cleared during account transition; retaining the current UI state." << LL_ENDL;
@@ -251,42 +249,42 @@ public:
     void requestSkinReload() { mReloadCoordinator.request(); }
 
     void setVisibility(bool visible) {
-        if (mAttachedSurface.visible != visible) {
-            mAttachedSurface.visible = visible;
-            mAttachedSurface.lastFrameTime = {};
-            if (!mAttachedSurface.visible) clearInteraction();
+        if (mSurfaceState.visible != visible) {
+            mSurfaceState.visible = visible;
+            mSurfaceState.lastFrameTime = {};
+            if (!mSurfaceState.visible) clearInteraction();
         }
     }
 
     void frame(int width, int height) {
         if (!isInteractive() || width <= 0 || height <= 0) return;
         const auto now = currentTime();
-        if (width != mAttachedSurface.width || height != mAttachedSurface.height) layout(width, height);
-        attachedSurface().refreshHover();
-        if (mAttachedSurface.lastFrameTime != TimePoint())
-            attachedSurface().update(std::chrono::duration_cast<std::chrono::milliseconds>(now - mAttachedSurface.lastFrameTime));
-        mAttachedSurface.lastFrameTime = now;
-        attachedSurface().paint(*mAttachedSurface.paintContext);
+        if (width != mSurfaceState.width || height != mSurfaceState.height) layout(width, height);
+        surface().refreshHover();
+        if (mSurfaceState.lastFrameTime != TimePoint())
+            surface().update(std::chrono::duration_cast<std::chrono::milliseconds>(now - mSurfaceState.lastFrameTime));
+        mSurfaceState.lastFrameTime = now;
+        surface().paint(*mSurfaceState.paintContext);
     }
 
     InputDispatchResult pointerMove(const PointerEvent& event) {
         if (!isInteractive()) return {};
-        const bool handled = attachedSurface().pointerMove(event);
+        const bool handled = surface().pointerMove(event);
         setDragCursorClipping(dragCursorClippingRequired());
-        return {handled, handled ? std::optional<CursorStyle>(attachedSurface().cursor()) : std::nullopt};
+        return {handled, handled ? std::optional<CursorStyle>(surface().cursor()) : std::nullopt};
     }
 
     void pointerLeave() {
-        if (mInitialization == InitializationState::Ready) attachedSurface().pointerLeave();
+        if (mInitialization == InitializationState::Ready) surface().pointerLeave();
     }
 
     bool dispatchPointerButton(const PointerEvent& event, bool down) {
         if (!isInteractive()) return false;
-        if (down && event.button == PointerButton::Left) mAttachedSurface.lastFrameTime = currentTime();
+        if (down && event.button == PointerButton::Left) mSurfaceState.lastFrameTime = currentTime();
         bool handled = false;
-        if (!down && event.button == PointerButton::Left && attachedSurface().hasPointerCapture()) handled = pointerMove(event).handled;
-        handled = (down ? attachedSurface().pointerDown(event) : attachedSurface().pointerUp(event)) || handled;
-        if (down && !handled) attachedSurface().clearFocus();
+        if (!down && event.button == PointerButton::Left && surface().hasPointerCapture()) handled = pointerMove(event).handled;
+        handled = (down ? surface().pointerDown(event) : surface().pointerUp(event)) || handled;
+        if (down && !handled) surface().clearFocus();
         if (down && draggingFloater()) setDragCursorClipping(dragCursorClippingRequired());
         if (!down || !draggingFloater()) clearDragCursorState();
         return handled;
@@ -296,11 +294,11 @@ public:
 
     InputDispatchResult pointerUp(const PointerEvent& event) { return {dispatchPointerButton(event, false), std::nullopt}; }
 
-    InputDispatchResult scroll(const ScrollEvent& event) { return {isInteractive() && attachedSurface().scroll(event), std::nullopt}; }
+    InputDispatchResult scroll(const ScrollEvent& event) { return {isInteractive() && surface().scroll(event), std::nullopt}; }
 
     InputDispatchResult keyDown(const KeyEvent& event) {
-        const bool ownsTab = mInitialization == InitializationState::Ready && mAttachedSurface.visible && isSurfaceTab(event);
-        const bool handled = (isInteractive() || ownsTab) && attachedSurface().keyDown(event);
+        const bool ownsTab = mInitialization == InitializationState::Ready && mSurfaceState.visible && isSurfaceTab(event);
+        const bool handled = (isInteractive() || ownsTab) && surface().keyDown(event);
         if (isSurfaceTab(event)) mTabKeyOwned = ownsTab;
         return {handled || ownsTab, std::nullopt};
     }
@@ -309,16 +307,16 @@ public:
         const bool tabKey = event.key == kKeyTab;
         const bool owned = tabKey && mTabKeyOwned;
         if (tabKey) mTabKeyOwned = false;
-        const bool handled = (isInteractive() || owned) && attachedSurface().keyUp(event);
+        const bool handled = (isInteractive() || owned) && surface().keyUp(event);
         return {owned || handled, std::nullopt};
     }
 
-    InputDispatchResult character(std::uint32_t codepoint) { return {isInteractive() && attachedSurface().charInput(codepoint), std::nullopt}; }
+    InputDispatchResult character(std::uint32_t codepoint) { return {isInteractive() && surface().charInput(codepoint), std::nullopt}; }
 
-    bool hasPointerCapture() const { return attachedSurface().hasPointerCapture(); }
+    bool hasPointerCapture() const { return surface().hasPointerCapture(); }
 
     void clearInteraction() {
-        if (mInitialization != InitializationState::Uninitialized) attachedSurface().clearInteractionState();
+        if (mInitialization != InitializationState::Uninitialized) surface().clearInteractionState();
         mTabKeyOwned = false;
         clearDragCursorState();
     }
@@ -336,8 +334,8 @@ public:
     }
 
 private:
-    Surface& attachedSurface() { return *mAttachedSurface.surface; }
-    const Surface& attachedSurface() const { return *mAttachedSurface.surface; }
+    Surface& surface() { return *mSurfaceState.surface; }
+    const Surface& surface() const { return *mSurfaceState.surface; }
 
     TimePoint currentTime() const { return mNow ? mNow() : std::chrono::steady_clock::now(); }
 
@@ -370,8 +368,7 @@ private:
     void persistWorkspace() {
         if (!mWorkspaceRestored || !mPersistenceDirty || mRestoringWorkspace) return;
         std::vector<ComponentInstanceState> states;
-        mComponents.forEachOpen(
-            [&](const ComponentKey& componentKey, Floater& floater) { states.push_back({componentKey, floater.minimized()}); });
+        mComponents.forEachOpen([&](const ComponentKey& componentKey, Floater& floater) { states.push_back({componentKey, floater.minimized()}); });
 
         const std::vector<ComponentKey> preserved(mUnrestoredWorkspace.begin(), mUnrestoredWorkspace.end());
         mComponentPersistence.saveWorkspace(states, preserved);
@@ -397,7 +394,7 @@ private:
     }
 
     bool isInteractive() const {
-        return mInitialization == InitializationState::Ready && mAttachedSurface.visible && mAttachedSurface.surface->hasVisibleFloater();
+        return mInitialization == InitializationState::Ready && mSurfaceState.visible && mSurfaceState.surface->hasVisibleFloater();
     }
 
     static bool isSurfaceTab(const KeyEvent& event) { return event.key == kKeyTab && (event.modifiers & ~kModifierShift) == 0; }
@@ -416,39 +413,31 @@ private:
     }
 
     void setDragCursorClipping(bool enabled) {
-        if (mAttachedSurface.dragCursorClipping == enabled) return;
-        mAttachedSurface.dragCursorClipping = enabled;
+        if (mSurfaceState.dragCursorClipping == enabled) return;
+        mSurfaceState.dragCursorClipping = enabled;
         if (mMainWindow) mMainWindow->setMouseClipping(enabled);
     }
 
     void clearDragCursorState() { setDragCursorClipping(false); }
 
-    void floaterClosed(Surface& surface, Floater&) override {
-        if (&surface == &attachedSurface()) {
-            clearInteraction();
-            mPersistenceDirty = true;
-        }
+    void floaterClosed(Surface&, Floater&) override {
+        clearInteraction();
+        mPersistenceDirty = true;
     }
 
-    void floaterMinimizedChanged(Surface& surface, Floater& floater, bool) override {
-        if (&surface == &attachedSurface()) {
-            saveFloaterPlacement(floater);
-            mPersistenceDirty = true;
-        }
+    void floaterMinimizedChanged(Surface&, Floater& floater) override {
+        saveFloaterPlacement(floater);
+        mPersistenceDirty = true;
     }
 
-    void floaterMoveEnded(Surface& surface, Floater& floater) override {
-        if (&surface == &attachedSurface()) {
-            if (!floater.minimized()) saveFloaterPlacement(floater);
-            mPersistenceDirty = true;
-        }
+    void floaterMoveEnded(Surface&, Floater& floater) override {
+        saveFloaterPlacement(floater);
+        mPersistenceDirty = true;
     }
 
-    void floaterResized(Surface& surface, Floater& floater, bool complete) override {
-        if (complete && &surface == &attachedSurface()) {
-            saveFloaterPlacement(floater);
-            mPersistenceDirty = true;
-        }
+    void floaterResizeEnded(Surface&, Floater& floater) override {
+        saveFloaterPlacement(floater);
+        mPersistenceDirty = true;
     }
 
     void saveFloaterPlacement(const Floater& floater) {
@@ -464,8 +453,7 @@ private:
     }
 
     void restorePlacement(const ComponentKey& componentKey, Floater& floater) {
-        const radia::viewer::ui::FloaterPlacement fallback{floater.rect().x, floater.rect().y, std::nullopt, floater.minimized()};
-        const std::optional<radia::viewer::ui::FloaterPlacement> placement = mComponentPersistence.restorePlacement(componentKey, fallback);
+        const std::optional<radia::viewer::ui::FloaterPlacement> placement = mComponentPersistence.restorePlacement(componentKey);
         if (!placement) return;
         const auto& restored = *placement;
         Rect saved{restored.x, restored.y, floater.rect().w, floater.rect().h};
@@ -473,25 +461,25 @@ private:
             saved.w = restored.size->width;
             saved.h = restored.size->height;
         }
-        attachedSurface().placeFloater(floater, saved);
-        attachedSurface().updateLayout();
+        surface().placeFloater(floater, saved);
+        surface().updateLayout();
         if (restored.minimized && floater.canMinimize()) floater.setMinimized(true);
         saveFloaterPlacement(componentKey, floater);
     }
 
     void layout(int width, int height) {
-        mAttachedSurface.width = width;
-        mAttachedSurface.height = height;
-        attachedSurface().setViewport(static_cast<float>(width), static_cast<float>(height));
+        mSurfaceState.width = width;
+        mSurfaceState.height = height;
+        surface().setViewport(static_cast<float>(width), static_cast<float>(height));
         mComponents.forEachOpen([&](const ComponentKey& componentKey, Floater& floater) {
             auto found = mLayoutInitialized.find(componentKey);
             if (found != mLayoutInitialized.end() && found->second.get() == &floater) return;
             mLayoutInitialized[componentKey].set(&floater);
-            if (const std::optional<Rect> prepared = attachedSurface().prepareFloater(floater)) attachedSurface().placeFloater(floater, *prepared);
+            if (const std::optional<Rect> prepared = surface().prepareFloater(floater)) surface().placeFloater(floater, *prepared);
             restorePlacement(componentKey, floater);
         });
-        attachedSurface().updateLayout();
-        attachedSurface().refreshHover();
+        surface().updateLayout();
+        surface().refreshHover();
     }
 
     LLControlGroup& mSavedSettings;
@@ -504,7 +492,7 @@ private:
     RuntimeSkinSource mSnapshotSource;
     System mSystem;
     radia::viewer::ui::SkinReloadCoordinator mReloadCoordinator;
-    AttachedSurfaceState mAttachedSurface;
+    SurfaceState mSurfaceState;
     radia::viewer::ui::FloaterHost mFloaterHost;
     radia::viewer::ui::SettingsAdapter mSettingsAdapter;
     radia::viewer::ui::ComponentManager mComponents;

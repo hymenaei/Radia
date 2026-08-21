@@ -1,6 +1,6 @@
 /**
  * @file nativeinput.h
- * @brief Defines native window input events and dispatch results for the UI viewer bridge.
+ * @brief Defines native window input events for the UI viewer bridge.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -26,8 +26,6 @@
 #define RD_NATIVEINPUT_H
 
 #include <cstdint>
-#include <optional>
-#include "llcursortypes.h"
 
 namespace radia::viewer::ui {
 enum class NativePointerButton : std::uint8_t { NoButton, Left, Right, Middle, Auxiliary1, Auxiliary2 };
@@ -53,13 +51,7 @@ struct NativeScrollInput {
 struct NativeKeyInput {
     std::int32_t key = 0;
     std::uint32_t modifiers = 0;
-    bool down = true;
     bool repeated = false;
-};
-
-struct NativeInputDispatchResult {
-    bool handled = false;
-    std::optional<ECursorType> cursor;
 };
 } // namespace radia::viewer::ui
 #endif // RD_NATIVEINPUT_H

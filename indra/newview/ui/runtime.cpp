@@ -38,7 +38,6 @@
 #include "detachedfloatermanager.h"
 #include "detachedfloaterwindow.h"
 #include "floaterhost.h"
-#include "inputbridge.h"
 #include "llgl.h"
 #include "llrender.h"
 #include "llrendertarget.h"
@@ -123,6 +122,7 @@ SkinGenerationPrepareResult prepareSkinGeneration(SkinSnapshotResult captured) {
 } // namespace
 
 namespace radia::viewer::ui {
+using radia::ui::CursorStyle;
 using radia::ui::Diagnostic;
 using radia::ui::DiagnosticResult;
 using radia::ui::Floater;
@@ -181,28 +181,6 @@ public:
     }
 
     ~Impl() { shutdown(); }
-
-    NativeInputDispatchResult pointerMove(F32 x, F32 y, U32 modifiers, F32 deltaX, F32 deltaY) {
-        return pointerMove(translatePointerInput({x, y, NativePointerButton::NoButton, modifiers, 1, deltaX, deltaY}));
-    }
-
-    NativeInputDispatchResult pointerDown(F32 x, F32 y, NativePointerButton button, U32 modifiers, U8 clickCount, F32 deltaX, F32 deltaY) {
-        return pointerDown(translatePointerInput({x, y, button, modifiers, clickCount, deltaX, deltaY}));
-    }
-
-    NativeInputDispatchResult pointerUp(F32 x, F32 y, NativePointerButton button, U32 modifiers, U8 clickCount, F32 deltaX, F32 deltaY) {
-        return pointerUp(translatePointerInput({x, y, button, modifiers, clickCount, deltaX, deltaY}));
-    }
-
-    NativeInputDispatchResult scroll(S32 x, S32 y, F32 horizontal, F32 vertical, U32 modifiers) {
-        return scroll(translateScrollInput({x, y, horizontal, vertical, modifiers}));
-    }
-
-    NativeInputDispatchResult keyDown(KEY key, U32 modifiers, bool repeated) { return keyDown(translateKeyInput({key, modifiers, true, repeated})); }
-
-    NativeInputDispatchResult keyUp(KEY key, U32 modifiers) { return keyUp(translateKeyInput({key, modifiers, false, false})); }
-
-    NativeInputDispatchResult character(U32 codepoint, U32) { return character(codepoint); }
 
     void focusLost() { clearInteraction(); }
 
@@ -320,7 +298,7 @@ public:
         attachedSurface().paint(*mAttachedSurface.paintContext);
     }
 
-    NativeInputDispatchResult pointerMove(const PointerEvent& event) {
+    InputDispatchResult pointerMove(const PointerEvent& event) {
         if (!isInteractive()) return {};
         PointerEvent routed = event;
         if (cursorMagnetActive()) {
@@ -353,7 +331,7 @@ public:
         const bool handled = attachedSurface().pointerMove(routed);
         mDetachedManager.processPendingDetachment();
         setDragCursorClipping(dragCursorClippingRequired());
-        return {handled, handled ? std::optional<ECursorType>(translateCursor(attachedSurface().cursor())) : std::nullopt};
+        return {handled, handled ? std::optional<CursorStyle>(attachedSurface().cursor()) : std::nullopt};
     }
 
     void pointerLeave() {
@@ -375,20 +353,20 @@ public:
         return handled;
     }
 
-    NativeInputDispatchResult pointerDown(const PointerEvent& event) { return {dispatchPointerButton(event, true), std::nullopt}; }
+    InputDispatchResult pointerDown(const PointerEvent& event) { return {dispatchPointerButton(event, true), std::nullopt}; }
 
-    NativeInputDispatchResult pointerUp(const PointerEvent& event) { return {dispatchPointerButton(event, false), std::nullopt}; }
+    InputDispatchResult pointerUp(const PointerEvent& event) { return {dispatchPointerButton(event, false), std::nullopt}; }
 
-    NativeInputDispatchResult scroll(const ScrollEvent& event) { return {isInteractive() && attachedSurface().scroll(event), std::nullopt}; }
+    InputDispatchResult scroll(const ScrollEvent& event) { return {isInteractive() && attachedSurface().scroll(event), std::nullopt}; }
 
-    NativeInputDispatchResult keyDown(const KeyEvent& event) {
+    InputDispatchResult keyDown(const KeyEvent& event) {
         const bool ownsTab = mInitialization == InitializationState::Ready && mAttachedSurface.visible && isSurfaceTab(event);
         const bool handled = (isInteractive() || ownsTab) && attachedSurface().keyDown(event);
         if (isSurfaceTab(event)) mTabKeyOwned = ownsTab;
         return {handled || ownsTab, std::nullopt};
     }
 
-    NativeInputDispatchResult keyUp(const KeyEvent& event) {
+    InputDispatchResult keyUp(const KeyEvent& event) {
         const bool tabKey = event.key == kKeyTab;
         const bool owned = tabKey && mTabKeyOwned;
         if (tabKey) mTabKeyOwned = false;
@@ -396,7 +374,7 @@ public:
         return {owned || handled, std::nullopt};
     }
 
-    NativeInputDispatchResult character(U32 codepoint) { return {isInteractive() && attachedSurface().charInput(codepoint), std::nullopt}; }
+    InputDispatchResult character(std::uint32_t codepoint) { return {isInteractive() && attachedSurface().charInput(codepoint), std::nullopt}; }
 
     bool hasPointerCapture() const { return attachedSurface().hasPointerCapture(); }
 
@@ -407,6 +385,7 @@ public:
     }
 
     void idle() {
+        if (mShuttingDown || mInitialization != InitializationState::Ready) return;
         const RuntimeKeybindingState binding = mKeybindingState ? mKeybindingState() : RuntimeKeybindingState{};
         if (mObservedBindingState != binding) {
             mObservedBindingState = binding;
@@ -719,36 +698,36 @@ bool Runtime::hasPointerCapture() const {
     return mImpl->hasPointerCapture();
 }
 
-NativeInputDispatchResult Runtime::pointerMove(F32 x, F32 y, U32 modifiers, F32 deltaX, F32 deltaY) {
-    return mImpl->pointerMove(x, y, modifiers, deltaX, deltaY);
+InputDispatchResult Runtime::pointerMove(const PointerEvent& event) {
+    return mImpl->pointerMove(event);
 }
 
-NativeInputDispatchResult Runtime::pointerDown(F32 x, F32 y, NativePointerButton button, U32 modifiers, U8 clickCount, F32 deltaX, F32 deltaY) {
-    return mImpl->pointerDown(x, y, button, modifiers, clickCount, deltaX, deltaY);
+InputDispatchResult Runtime::pointerDown(const PointerEvent& event) {
+    return mImpl->pointerDown(event);
 }
 
-NativeInputDispatchResult Runtime::pointerUp(F32 x, F32 y, NativePointerButton button, U32 modifiers, U8 clickCount, F32 deltaX, F32 deltaY) {
-    return mImpl->pointerUp(x, y, button, modifiers, clickCount, deltaX, deltaY);
+InputDispatchResult Runtime::pointerUp(const PointerEvent& event) {
+    return mImpl->pointerUp(event);
 }
 
 void Runtime::pointerLeave() {
     mImpl->pointerLeave();
 }
 
-NativeInputDispatchResult Runtime::scroll(S32 x, S32 y, F32 horizontal, F32 vertical, U32 modifiers) {
-    return mImpl->scroll(x, y, horizontal, vertical, modifiers);
+InputDispatchResult Runtime::scroll(const ScrollEvent& event) {
+    return mImpl->scroll(event);
 }
 
-NativeInputDispatchResult Runtime::keyDown(KEY key, U32 modifiers, bool repeated) {
-    return mImpl->keyDown(key, modifiers, repeated);
+InputDispatchResult Runtime::keyDown(const KeyEvent& event) {
+    return mImpl->keyDown(event);
 }
 
-NativeInputDispatchResult Runtime::keyUp(KEY key, U32 modifiers) {
-    return mImpl->keyUp(key, modifiers);
+InputDispatchResult Runtime::keyUp(const KeyEvent& event) {
+    return mImpl->keyUp(event);
 }
 
-NativeInputDispatchResult Runtime::character(U32 codepoint, U32 modifiers) {
-    return mImpl->character(codepoint, modifiers);
+InputDispatchResult Runtime::character(std::uint32_t codepoint) {
+    return mImpl->character(codepoint);
 }
 
 void Runtime::focusLost() {

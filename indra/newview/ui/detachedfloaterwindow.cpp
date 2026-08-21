@@ -185,11 +185,11 @@ public:
     }
 
     AuxiliaryInputResult keyDown(KEY key, MASK modifiers, bool repeated) override {
-        return {mSurface->keyDown(translateKeyInput({key, modifiers, true, repeated})), std::nullopt};
+        return {mSurface->keyDown(translateKeyInput({key, modifiers, repeated})), std::nullopt};
     }
 
     AuxiliaryInputResult keyUp(KEY key, MASK modifiers) override {
-        return {mSurface->keyUp(translateKeyInput({key, modifiers, false, false})), std::nullopt};
+        return {mSurface->keyUp(translateKeyInput({key, modifiers, false})), std::nullopt};
     }
 
     AuxiliaryInputResult character(U32 codepoint, MASK) override { return {mSurface->charInput(codepoint), std::nullopt}; }

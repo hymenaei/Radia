@@ -48,6 +48,7 @@
 #include "llviewerinput.h"
 #include "llviewermenu.h"
 #include "ui/components/floaterdemo.h"
+#include "ui/inputbridge.h"
 #include "ui/runtime.h"
 
 #include "llviewquery.h"
@@ -228,6 +229,21 @@
 #include <tchar.h> // For Unicode conversion methods
 #include "llwindowwin32.h" // For AltGr handling
 #endif
+
+using radia::ui::KeybindingPresentation;
+using radia::ui::Vec2;
+using radia::viewer::ui::InputDispatchResult;
+using radia::viewer::ui::NativeKeyInput;
+using radia::viewer::ui::NativePointerButton;
+using radia::viewer::ui::NativePointerInput;
+using radia::viewer::ui::NativeScrollInput;
+using radia::viewer::ui::registerFloaterDemo;
+using radia::viewer::ui::Runtime;
+using radia::viewer::ui::RuntimeKeybindingState;
+using radia::viewer::ui::translateKeyInput;
+using radia::viewer::ui::translatePointerInput;
+using radia::viewer::ui::translateScrollInput;
+using radia::viewer::ui::translateCursor;
 
 //
 // Globals
@@ -1127,15 +1143,15 @@ bool LLViewerWindow::handleAnyMouseClick(LLWindow *window, LLCoordGL pos, MASK m
         // Indicate mouse was active
         LLUI::getInstance()->resetMouseIdleTimer();
 
-        radia::viewer::ui::NativePointerButton pointerButton = radia::viewer::ui::NativePointerButton::NoButton;
+        NativePointerButton pointerButton = NativePointerButton::NoButton;
         U8 clickCount = 1;
         switch (clicktype) {
-            case CLICK_LEFT: pointerButton = radia::viewer::ui::NativePointerButton::Left; break;
-            case CLICK_DOUBLELEFT: pointerButton = radia::viewer::ui::NativePointerButton::Left; clickCount = down ? 2 : 1; break;
-            case CLICK_RIGHT: pointerButton = radia::viewer::ui::NativePointerButton::Right; break;
-            case CLICK_MIDDLE: pointerButton = radia::viewer::ui::NativePointerButton::Middle; break;
-            case CLICK_BUTTON4: pointerButton = radia::viewer::ui::NativePointerButton::Auxiliary1; break;
-            case CLICK_BUTTON5: pointerButton = radia::viewer::ui::NativePointerButton::Auxiliary2; break;
+            case CLICK_LEFT: pointerButton = NativePointerButton::Left; break;
+            case CLICK_DOUBLELEFT: pointerButton = NativePointerButton::Left; clickCount = down ? 2 : 1; break;
+            case CLICK_RIGHT: pointerButton = NativePointerButton::Right; break;
+            case CLICK_MIDDLE: pointerButton = NativePointerButton::Middle; break;
+            case CLICK_BUTTON4: pointerButton = NativePointerButton::Auxiliary1; break;
+            case CLICK_BUTTON5: pointerButton = NativePointerButton::Auxiliary2; break;
             default: break;
         }
         F32 pointerDeltaX = 0.f;
@@ -1148,14 +1164,13 @@ bool LLViewerWindow::handleAnyMouseClick(LLWindow *window, LLCoordGL pos, MASK m
             pointerDeltaY = static_cast<F32>(delta.mY) / mDisplayScale.mV[VY];
         }
 #endif
-        const bool inputHandled = mUIRuntime
-            && pointerButton != radia::viewer::ui::NativePointerButton::NoButton
-            && (down
-                    ? mUIRuntime->pointerDown(static_cast<F32>(x), static_cast<F32>(y), pointerButton, mask, clickCount, pointerDeltaX, pointerDeltaY)
-                    : mUIRuntime->pointerUp(static_cast<F32>(x), static_cast<F32>(y), pointerButton, mask, clickCount, pointerDeltaX, pointerDeltaY))
-                   .handled;
+        const NativePointerInput pointerInput{
+            static_cast<F32>(x), static_cast<F32>(y), pointerButton, static_cast<U32>(mask), clickCount, pointerDeltaX, pointerDeltaY};
+        const InputDispatchResult inputResult = mUIRuntime && pointerButton != NativePointerButton::NoButton
+            ? (down ? mUIRuntime->pointerDown(translatePointerInput(pointerInput)) : mUIRuntime->pointerUp(translatePointerInput(pointerInput)))
+            : InputDispatchResult{};
         if (!down) mWindow->releaseMouse();
-        if (inputHandled) return true;
+        if (inputResult.handled) return true;
 
         if (LLToolMgr::getInstance()->getCurrentTool()->clipMouseWhenDown())
         {
@@ -1762,7 +1777,11 @@ void LLViewerWindow::handleMouseMove(LLWindow *window,  LLCoordGL pos, MASK mask
         && (x < 0 || y < 0 || x > getWindowWidthScaled() || y > getWindowHeightScaled())
         && gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI))
     {
-        if (mUIRuntime) mUIRuntime->pointerMove(static_cast<F32>(x), static_cast<F32>(y), mask);
+        if (mUIRuntime) {
+            mUIRuntime->pointerMove(
+                translatePointerInput(
+                    NativePointerInput{static_cast<F32>(x), static_cast<F32>(y), NativePointerButton::NoButton, static_cast<U32>(mask), 1, 0.f, 0.f}));
+        }
     }
 
     mWindow->showCursorFromMouseMove();
@@ -1942,10 +1961,12 @@ bool LLViewerWindow::handleTranslatedKeyDown(KEY key,  MASK mask, bool repeated)
         gAwayTriggerTimer.reset();
     }
 
-    if (gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI))
-    {
-        if (mUIRuntime && mUIRuntime->keyDown(key, mask, repeated).handled) return true;
-    }
+    const InputDispatchResult inputResult =
+        gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI) && mUIRuntime
+            ? mUIRuntime->keyDown(translateKeyInput(NativeKeyInput{key, static_cast<U32>(mask), repeated}))
+            : InputDispatchResult{};
+
+    if (inputResult.handled) return true;
 
     // *NOTE: We want to interpret KEY_RETURN later when it arrives as
     // a Unicode char, not as a keydown.  Otherwise when client frame
@@ -1956,8 +1977,7 @@ bool LLViewerWindow::handleTranslatedKeyDown(KEY key,  MASK mask, bool repeated)
         // RIDER: although, at times some of the controlls (in particular the CEF viewer
         // would like to know about the KEYDOWN for an enter key... so ask and pass it along.
         LLFocusableElement* keyboard_focus = gFocusMgr.getKeyboardFocus();
-        if (keyboard_focus && !keyboard_focus->wantsReturnKey())
-            return false;
+        if (keyboard_focus && !keyboard_focus->wantsReturnKey()) return false;
     }
 
     // remaps, handles ignored cases and returns back to viewer window.
@@ -1970,17 +1990,16 @@ bool LLViewerWindow::handleTranslatedKeyUp(KEY key,  MASK mask)
     // Never affects event processing.
     gViewerInput.handleGlobalBindsKeyUp(key, mask);
 
-    if (gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI))
-    {
-        if (mUIRuntime && mUIRuntime->keyUp(key, mask).handled) return true;
-    }
+    const InputDispatchResult inputResult =
+        gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI) && mUIRuntime
+            ? mUIRuntime->keyUp(translateKeyInput(NativeKeyInput{key, static_cast<U32>(mask), false}))
+            : InputDispatchResult{};
+
+    if (inputResult.handled) return true;
 
     // Let the inspect tool code check for ALT key to set LLToolSelectRect active instead LLToolCamera
-    LLToolCompInspect * tool_inspectp = LLToolCompInspect::getInstance();
-    if (LLToolMgr::getInstance()->getCurrentTool() == tool_inspectp)
-    {
-        tool_inspectp->keyUp(key, mask);
-    }
+    LLToolCompInspect* tool_inspectp = LLToolCompInspect::getInstance();
+    if (LLToolMgr::getInstance()->getCurrentTool() == tool_inspectp) tool_inspectp->keyUp(key, mask);
 
     return gViewerInput.handleKeyUp(key, mask);
 }
@@ -2562,24 +2581,19 @@ void LLViewerWindow::initBase()
     gMenuHolder = getRootView()->getChild<LLViewerMenuHolderGL>("Menu Holder");
     LLMenuGL::sMenuContainer = gMenuHolder;
 
-    mUIRuntime = std::make_unique<radia::viewer::ui::Runtime>(
+    mUIRuntime = std::make_unique<Runtime>(
         gSavedSettings, gSavedPerAccountSettings, gRadiaUIProgram,
-        radia::viewer::ui::Runtime::WindowEnvironment{.mainWindow = gWindowp,
-                                                      .displayScale =
-                                                          [] {
-                                                              const LLVector2 scale =
-                                                                  gViewerWindow ? gViewerWindow->getDisplayScale() : LLVector2(1.f, 1.f);
-                                                              return radia::ui::Vec2{scale.mV[VX], scale.mV[VY]};
-                                                          },
-                                                      .auxiliaryWindowFactory = defaultAuxiliaryWindowFactory()},
-        radia::viewer::ui::Runtime::IntegrationHooks{
-            .resolveKeybinding =
-                [](const std::string& command) { return radia::ui::KeybindingPresentation{gViewerInput.getPrimaryKeyBinding({}, command)}; },
-            .keybindingState =
-                [] {
-                    return radia::viewer::ui::RuntimeKeybindingState{gViewerInput.getBindingGeneration(), static_cast<U32>(gViewerInput.getMode())};
-                }});
-    radia::viewer::ui::registerFloaterDemo(*mUIRuntime);
+        Runtime::WindowEnvironment{.mainWindow = gWindowp,
+                                   .displayScale =
+                                       [] {
+                                           const LLVector2 scale = gViewerWindow ? gViewerWindow->getDisplayScale() : LLVector2(1.f, 1.f);
+                                           return Vec2{scale.mV[VX], scale.mV[VY]};
+                                       },
+                                   .auxiliaryWindowFactory = defaultAuxiliaryWindowFactory()},
+        Runtime::IntegrationHooks{
+            .resolveKeybinding = [](const std::string& command) { return KeybindingPresentation{gViewerInput.getPrimaryKeyBinding({}, command)}; },
+            .keybindingState = [] { return RuntimeKeybindingState{gViewerInput.getBindingGeneration(), static_cast<U32>(gViewerInput.getMode())}; }});
+    registerFloaterDemo(*mUIRuntime);
     mUIRuntime->initialize();
     mUIRuntime->setVisibility(shouldShowAttachedUI(), shouldShowDetachedUI());
 }
@@ -3604,10 +3618,12 @@ bool LLViewerWindow::handleKey(KEY key, MASK mask)
 
 bool LLViewerWindow::handleUnicodeChar(llwchar uni_char, MASK mask)
 {
-    if (gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI))
-    {
-        if (mUIRuntime && mUIRuntime->character(static_cast<U32>(uni_char), mask).handled) return true;
-    }
+    const InputDispatchResult inputResult =
+        gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI) && mUIRuntime
+            ? mUIRuntime->character(static_cast<U32>(uni_char))
+            : InputDispatchResult{};
+
+    if (inputResult.handled) return true;
 
     // HACK:  We delay processing of return keys until they arrive as a Unicode char,
     // so that if you're typing chat text at low frame rate, we don't send the chat
@@ -3615,7 +3631,7 @@ bool LLViewerWindow::handleUnicodeChar(llwchar uni_char, MASK mask)
     // HACK: Numeric keypad <enter> on Mac is Unicode 3
     // HACK: Control-M on Windows is Unicode 13
     if ((uni_char == 13 && mask != MASK_CONTROL && mask != MASK_SHIFT)
-        || (uni_char == 3 && mask == MASK_NONE) )
+        || (uni_char == 3 && mask == MASK_NONE))
     {
         if (mask != MASK_ALT)
         {
@@ -3625,19 +3641,13 @@ bool LLViewerWindow::handleUnicodeChar(llwchar uni_char, MASK mask)
     }
 
     // let menus handle navigation (jump) keys
-    if (gMenuBarView && gMenuBarView->handleUnicodeChar(uni_char, true))
-    {
-        return true;
-    }
+    if (gMenuBarView && gMenuBarView->handleUnicodeChar(uni_char, true)) return true;
 
     // Traverses up the hierarchy
     LLFocusableElement* keyboard_focus = gFocusMgr.getKeyboardFocus();
-    if( keyboard_focus )
+    if (keyboard_focus)
     {
-        if (keyboard_focus->handleUnicodeChar(uni_char, false))
-        {
-            return true;
-        }
+        if (keyboard_focus->handleUnicodeChar(uni_char, false)) return true;
 
         return true;
     }
@@ -3657,8 +3667,9 @@ void LLViewerWindow::handleScrollWheel(LLScrollDelta delta)
 
     if (gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI))
     {
-        if (mUIRuntime && mUIRuntime->scroll(mCurrentMousePoint.mX, mCurrentMousePoint.mY, 0.f, delta.mPrecise,
-                                             gKeyboard ? gKeyboard->currentMask(false) : MASK_NONE).handled)
+        const NativeScrollInput input{mCurrentMousePoint.mX, mCurrentMousePoint.mY, 0.f, delta.mPrecise,
+                                      static_cast<U32>(gKeyboard ? gKeyboard->currentMask(false) : MASK_NONE)};
+        if (mUIRuntime && mUIRuntime->scroll(translateScrollInput(input)).handled)
         {
             return;
         }
@@ -3724,8 +3735,9 @@ void LLViewerWindow::handleScrollHWheel(LLScrollDelta delta)
 
     if (gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI))
     {
-        if (mUIRuntime && mUIRuntime->scroll(mCurrentMousePoint.mX, mCurrentMousePoint.mY, delta.mPrecise, 0.f,
-                                             gKeyboard ? gKeyboard->currentMask(false) : MASK_NONE).handled)
+        const NativeScrollInput input{mCurrentMousePoint.mX, mCurrentMousePoint.mY, delta.mPrecise, 0.f,
+                                      static_cast<U32>(gKeyboard ? gKeyboard->currentMask(false) : MASK_NONE)};
+        if (mUIRuntime && mUIRuntime->scroll(translateScrollInput(input)).handled)
         {
             return;
         }
@@ -3904,8 +3916,7 @@ void LLViewerWindow::updateUI()
 
     // use full window for world view when not rendering UI
     const bool attachedUIVisible = shouldShowAttachedUI();
-    if (mUIRuntime)
-        mUIRuntime->setVisibility(attachedUIVisible, shouldShowDetachedUI());
+    if (mUIRuntime) mUIRuntime->setVisibility(attachedUIVisible, shouldShowDetachedUI());
     bool world_view_uses_full_window = gAgentCamera.cameraMouselook() || !attachedUIVisible;
     updateWorldViewRect(world_view_uses_full_window);
 
@@ -3937,12 +3948,14 @@ void LLViewerWindow::updateUI()
     bool handled = false;
     bool hoverHandled = false;
     if (mUIRuntime && attachedUIVisible && (mMouseInWindow || mUIRuntime->hasPointerCapture())) {
-        const radia::viewer::ui::NativeInputDispatchResult result =
-            mUIRuntime->pointerMove(static_cast<F32>(x), static_cast<F32>(y), mask, static_cast<F32>(mCurrentRawMouseDelta.mX) / mDisplayScale.mV[VX],
-                                    static_cast<F32>(mCurrentRawMouseDelta.mY) / mDisplayScale.mV[VY]);
+        const InputDispatchResult result =
+            mUIRuntime->pointerMove(
+                translatePointerInput(NativePointerInput{static_cast<F32>(x), static_cast<F32>(y), NativePointerButton::NoButton, static_cast<U32>(mask), 1,
+                                                         static_cast<F32>(mCurrentRawMouseDelta.mX) / mDisplayScale.mV[VX],
+                                                         static_cast<F32>(mCurrentRawMouseDelta.mY) / mDisplayScale.mV[VY]}));
         handled = result.handled;
         hoverHandled = result.handled;
-        if (result.cursor) mWindow->setCursor(*result.cursor);
+        if (result.cursor) mWindow->setCursor(translateCursor(*result.cursor));
     }
 
     LLUICtrl* top_ctrl = gFocusMgr.getTopCtrl();

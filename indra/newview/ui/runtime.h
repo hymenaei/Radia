@@ -26,13 +26,16 @@
 #define RD_RUNTIME_H
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
-#include "nativeinput.h"
+#include "event.h"
 #include "skin/resolver.h"
 #include "stdtypes.h"
+#include "style/style.h"
 #include "text/inlinecontent.h"
 #include "types.h"
 
@@ -48,8 +51,20 @@ class System;
 } // namespace radia::ui
 
 namespace radia::viewer::ui {
+using radia::ui::CursorStyle;
 using radia::ui::Floater;
+using radia::ui::KeybindingPresentation;
+using radia::ui::KeyEvent;
+using radia::ui::PaintContext;
+using radia::ui::PointerEvent;
+using radia::ui::ScrollEvent;
 using radia::ui::System;
+using radia::ui::Vec2;
+
+struct InputDispatchResult {
+    bool handled = false;
+    std::optional<CursorStyle> cursor;
+};
 
 class ComponentController;
 
@@ -63,12 +78,12 @@ struct RuntimeKeybindingState {
 class Runtime final {
 public:
     using ControllerFactory = std::function<std::unique_ptr<ComponentController>(System& system)>;
-    using DisplayScaleProvider = std::function<radia::ui::Vec2()>;
-    using KeybindingResolver = std::function<radia::ui::KeybindingPresentation(const std::string&)>;
+    using DisplayScaleProvider = std::function<Vec2()>;
+    using KeybindingResolver = std::function<KeybindingPresentation(const std::string&)>;
     using KeybindingStateProvider = std::function<RuntimeKeybindingState()>;
     using SkinSnapshotProvider = std::function<SkinSnapshotResult()>;
     using Clock = std::function<std::chrono::steady_clock::time_point()>;
-    using PaintContextFactory = std::function<std::unique_ptr<radia::ui::PaintContext>(LLGLSLShader&, radia::ui::System&)>;
+    using PaintContextFactory = std::function<std::unique_ptr<PaintContext>(LLGLSLShader&, System&)>;
 
     struct WindowEnvironment {
         LLWindow*& mainWindow;
@@ -101,16 +116,14 @@ public:
     void frame(S32 width, S32 height);
     void idle();
     bool hasPointerCapture() const;
-    NativeInputDispatchResult pointerMove(F32 x, F32 y, U32 modifiers, F32 deltaX = 0.f, F32 deltaY = 0.f);
-    NativeInputDispatchResult pointerDown(F32 x, F32 y, NativePointerButton button, U32 modifiers, U8 clickCount = 1, F32 deltaX = 0.f,
-                                          F32 deltaY = 0.f);
-    NativeInputDispatchResult pointerUp(F32 x, F32 y, NativePointerButton button, U32 modifiers, U8 clickCount = 1, F32 deltaX = 0.f,
-                                        F32 deltaY = 0.f);
+    InputDispatchResult pointerMove(const PointerEvent& event);
+    InputDispatchResult pointerDown(const PointerEvent& event);
+    InputDispatchResult pointerUp(const PointerEvent& event);
     void pointerLeave();
-    NativeInputDispatchResult scroll(S32 x, S32 y, F32 horizontal, F32 vertical, U32 modifiers);
-    NativeInputDispatchResult keyDown(KEY key, U32 modifiers, bool repeated = false);
-    NativeInputDispatchResult keyUp(KEY key, U32 modifiers);
-    NativeInputDispatchResult character(U32 codepoint, U32 modifiers);
+    InputDispatchResult scroll(const ScrollEvent& event);
+    InputDispatchResult keyDown(const KeyEvent& event);
+    InputDispatchResult keyUp(const KeyEvent& event);
+    InputDispatchResult character(std::uint32_t codepoint);
     void focusLost();
     void mouseCaptureLost();
 

@@ -26,6 +26,7 @@
 #define RD_INPUTBRIDGE_H
 
 #include "event.h"
+#include "llcursortypes.h"
 #include "nativeinput.h"
 #include "style/style.h"
 

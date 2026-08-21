@@ -23,44 +23,71 @@
  */
 
 #include "linden_common.h"
+#include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cstdint>
 #include <gtest/gtest.h>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 #include "auxiliarywindow.h"
 #include "componentcontroller.h"
 #include "componentcontrollerregistration.h"
-#include "indra_constants.h"
 #include "llcontrol.h"
 #include "llglslshader.h"
+#include "llsd.h"
+#include "llwindowheadless.h"
 #include "render/recordingpaintcontext.h"
 #include "runtime.h"
 #include "widgets/button.h"
 #include "widgets/floater.h"
+#include "widgets/panel.h"
 #include "widgets/widget.h"
 
 namespace {
 using radia::ui::Button;
 using radia::ui::Floater;
 using radia::ui::KeybindingPresentation;
+using radia::ui::KeyEvent;
+using radia::ui::kKeyReturn;
+using radia::ui::kKeyTab;
+using radia::ui::kModifierControl;
 using radia::ui::PaintCommandKind;
+using radia::ui::PointerButton;
+using radia::ui::PointerEvent;
 using radia::ui::RecordingPaintContext;
 using radia::ui::Rect;
+using radia::ui::ScrollEvent;
 using radia::ui::System;
 using radia::ui::Vec2;
 using radia::ui::Widget;
 using radia::viewer::ui::ComponentController;
-using radia::viewer::ui::NativePointerButton;
 using radia::viewer::ui::Runtime;
 using radia::viewer::ui::RuntimeKeybindingState;
 using radia::viewer::ui::SkinSnapshotResult;
+using ::testing::Test;
+
+PointerEvent makePointerEvent(float x, float y, PointerButton button = PointerButton::NoButton, std::uint32_t modifiers = 0,
+                              std::uint8_t clickCount = 1, float deltaX = 0.f, float deltaY = 0.f) {
+    return {{x, y}, button, modifiers, clickCount, {deltaX, deltaY}};
+}
+
+ScrollEvent makeScrollEvent(int x, int y, float deltaX, float deltaY, std::uint32_t modifiers = 0) {
+    return {{static_cast<float>(x), static_cast<float>(y)}, deltaX, deltaY, modifiers};
+}
+
+KeyEvent makeKeyEvent(int key, std::uint32_t modifiers = 0, bool repeated = false) {
+    return {key, modifiers, repeated};
+}
 
 SkinSnapshotResult runtimeSkinSnapshot() {
     constexpr char kLocalization[] = "defaultLocale: en\n"
-                                     "locales: {en: {name: English, strings: {}}}\n";
-    constexpr char kSkin[] = "floater { flow: column; } button { size: 128px 32px; }";
-    constexpr char kView[] = "<floater><button id=\"press\" onClick=\"press()\"/></floater>";
+                                     "locales: {en: {name: English, strings: {runtime: Runtime}}}\n";
+    constexpr char kSkin[] = "floater { flow: column; } floater::header { height: 30px; } button { size: 128px 32px; }";
+    constexpr char kView[] = "<floater title=\"runtime\"><button id=\"press\" onClick=\"press()\"/></floater>";
 
     SkinSnapshotResult result;
     result.snapshot.add("localization.yaml", kLocalization);
@@ -69,11 +96,27 @@ SkinSnapshotResult runtimeSkinSnapshot() {
     return result;
 }
 
+SkinSnapshotResult runtimeDetachedSkinSnapshot() {
+    constexpr char kLocalization[] = "defaultLocale: en\n"
+                                     "locales: {en: {name: English, strings: {}}}\n";
+    constexpr char kSkin[] = "floater { flow: column; } floater::header { height: 30px; }";
+    constexpr char kView[] = "<floater/>";
+
+    SkinSnapshotResult result;
+    result.snapshot.add("localization.yaml", kLocalization);
+    result.snapshot.add("skin.radia", kSkin);
+    result.snapshot.add("view.xml", kView);
+    return result;
+}
+
+enum class RuntimeLifecycleEvent { FrameClock, IdleKeybindingState, ControllerClose };
+
 struct RuntimeControllerState {
     int postBuild = 0;
     int opened = 0;
     int closed = 0;
     int presses = 0;
+    std::vector<RuntimeLifecycleEvent> lifecycleEvents;
 };
 
 Widget* findWidget(Widget& root, std::string_view id) {
@@ -91,7 +134,10 @@ public:
 
     void postBuild() override { ++mState.postBuild; }
     void onOpen() override { ++mState.opened; }
-    void onClose() override { ++mState.closed; }
+    void onClose() override {
+        ++mState.closed;
+        mState.lifecycleEvents.emplace_back(RuntimeLifecycleEvent::ControllerClose);
+    }
 
 private:
     void press() { ++mState.presses; }
@@ -99,12 +145,76 @@ private:
     RuntimeControllerState& mState;
 };
 
-class RuntimeTest : public ::testing::Test {
+class RuntimeTest : public Test {
 protected:
     struct AuxiliaryWindows final : AuxiliaryWindowFactory {
-        std::unique_ptr<AuxiliaryWindow> create(const AuxiliaryWindowRect&, const std::string&, AuxiliaryWindowClient&) override { return {}; }
+        struct State {
+            AuxiliaryWindowRect rect;
+            std::string title;
+            F32 scale = 1.f;
+            bool visible = false;
+            int created = 0;
+            int destroyed = 0;
+            int pumpCalls = 0;
+            int renderCalls = 0;
+            int showCalls = 0;
+            int visibilityChanges = 0;
+        } state;
 
-        bool placementVisible(const AuxiliaryWindowRect&) const override { return false; }
+        class FakeWindow final : public AuxiliaryWindow {
+        public:
+            FakeWindow(State& state, const AuxiliaryWindowRect& rect, std::string title) : mState(state) {
+                mState.rect = rect;
+                mState.title = std::move(title);
+                ++mState.created;
+            }
+
+            ~FakeWindow() override { ++mState.destroyed; }
+
+            void show(bool) override {
+                mState.visible = true;
+                ++mState.showCalls;
+            }
+
+            void setVisible(bool visible) override {
+                mState.visible = visible;
+                ++mState.visibilityChanges;
+            }
+
+            void setTitle(const std::string& title) override { mState.title = title; }
+            void pump() override { ++mState.pumpCalls; }
+            void render() override { ++mState.renderCalls; }
+            void setScaleMultiplier(F32 multiplier) override { mState.scale = std::max(0.25f, multiplier); }
+
+            void setLogicalSize(F32 width, F32 height) override {
+                mState.rect.width = std::max<S32>(1, static_cast<S32>(std::lround(width * mState.scale)));
+                mState.rect.height = std::max<S32>(1, static_cast<S32>(std::lround(height * mState.scale)));
+            }
+
+            void setLogicalRect(const AuxiliaryLogicalRect& rect) override {
+                mState.rect.x = static_cast<S32>(std::lround(rect.x * mState.scale));
+                mState.rect.y = static_cast<S32>(std::lround(rect.y * mState.scale));
+                setLogicalSize(rect.width, rect.height);
+            }
+
+            void beginDrag(F32, F32, const std::optional<AuxiliaryScreenPoint>& = std::nullopt) override {}
+            void beginResize() override {}
+            AuxiliaryWindowRect rect() const override { return mState.rect; }
+            F32 scale() const override { return mState.scale; }
+
+        private:
+            State& mState;
+        };
+
+        std::unique_ptr<AuxiliaryWindow> create(const AuxiliaryWindowRect& rect, const std::string& title, AuxiliaryWindowClient&) override {
+            if (!createWindows) return {};
+            return std::make_unique<FakeWindow>(state, rect, title);
+        }
+
+        bool placementVisible(const AuxiliaryWindowRect&) const override { return placementsVisible; }
+
+        bool createWindows = false;
+        bool placementsVisible = false;
     } auxiliaryWindows;
 
     RuntimeTest()
@@ -112,7 +222,12 @@ protected:
                   Runtime::WindowEnvironment{
                       .mainWindow = mainWindow, .displayScale = [] { return Vec2{1.f, 1.f}; }, .auxiliaryWindowFactory = auxiliaryWindows},
                   Runtime::IntegrationHooks{.resolveKeybinding = [](const std::string&) { return KeybindingPresentation{}; },
-                                            .keybindingState = [] { return RuntimeKeybindingState{}; },
+                                            .keybindingState =
+                                                [this] {
+                                                    controllerState.lifecycleEvents.emplace_back(RuntimeLifecycleEvent::IdleKeybindingState);
+                                                    ++keybindingStateCalls;
+                                                    return RuntimeKeybindingState{};
+                                                },
                                             .captureSkin =
                                                 [this] {
                                                     ++captures;
@@ -120,6 +235,7 @@ protected:
                                                 },
                                             .now =
                                                 [this] {
+                                                    controllerState.lifecycleEvents.emplace_back(RuntimeLifecycleEvent::FrameClock);
                                                     ++nowCalls;
                                                     return now;
                                                 },
@@ -130,15 +246,36 @@ protected:
                                                     return context;
                                                 }}) {
         savedSettings.declareString("Locale", "", "test locale");
+        savedSettings.declareLLSD("UILayout", LLSD::emptyMap(), "test layout", LLControlVariable::PERSIST_NO);
         savedSettings.declareBOOL("SkinAutoReload", false, "test skin reload");
         savedSettings.declareS32("LongClickDelay", 500, "test long click delay");
         savedSettings.declareS32("SkinAutoReloadScanInterval", 250, "test scan interval");
         savedSettings.declareS32("SkinAutoReloadSettleInterval", 150, "test settle interval");
+        accountSettings.declareLLSD("UIWorkspace", LLSD::emptyMap(), "test workspace", LLControlVariable::PERSIST_NO);
     }
 
     bool registerTestFloater() {
         return runtime.registerFloater("runtimeTest", "view.xml",
                                        [this](System& system) { return std::make_unique<RuntimeController>(system, controllerState); });
+    }
+
+    void configureDetachedWorkspace(LLWindowHeadless& mainWindowInstance) {
+        mainWindow = &mainWindowInstance;
+        snapshot = runtimeDetachedSkinSnapshot();
+
+        LLSD layout = LLSD::emptyMap();
+        layout["runtimeTest"]["position"].append(100);
+        layout["runtimeTest"]["position"].append(200);
+        layout["runtimeTest"]["size"].append(320);
+        layout["runtimeTest"]["size"].append(240);
+        layout["runtimeTest"]["detached"] = true;
+        savedSettings.setLLSD("UILayout", layout);
+
+        LLSD workspace = LLSD::emptyMap();
+        workspace["runtimeTest"] = LLSD::emptyMap();
+        accountSettings.setLLSD("UIWorkspace", workspace);
+        auxiliaryWindows.createWindows = true;
+        auxiliaryWindows.placementsVisible = true;
     }
 
     LLControlGroup savedSettings{"RuntimeSaved"};
@@ -147,6 +284,7 @@ protected:
     LLWindow* mainWindow = nullptr;
     SkinSnapshotResult snapshot = runtimeSkinSnapshot();
     int captures = 0;
+    int keybindingStateCalls = 0;
     int nowCalls = 0;
     std::chrono::steady_clock::time_point now;
     RuntimeControllerState controllerState;
@@ -155,13 +293,13 @@ protected:
 };
 
 TEST_F(RuntimeTest, IgnoresInputBeforeInitialization) {
-    EXPECT_FALSE(runtime.pointerMove(10.f, 20.f, 0).handled);
-    EXPECT_FALSE(runtime.pointerDown(10.f, 20.f, NativePointerButton::Left, 0).handled);
-    EXPECT_FALSE(runtime.pointerUp(10.f, 20.f, NativePointerButton::Left, 0).handled);
-    EXPECT_FALSE(runtime.scroll(10, 20, 0.f, 1.f, 0).handled);
-    EXPECT_FALSE(runtime.keyDown(KEY_NONE, 0).handled);
-    EXPECT_FALSE(runtime.keyUp(KEY_NONE, 0).handled);
-    EXPECT_FALSE(runtime.character('a', 0).handled);
+    EXPECT_FALSE(runtime.pointerMove(makePointerEvent(10.f, 20.f)).handled);
+    EXPECT_FALSE(runtime.pointerDown(makePointerEvent(10.f, 20.f, PointerButton::Left)).handled);
+    EXPECT_FALSE(runtime.pointerUp(makePointerEvent(10.f, 20.f, PointerButton::Left)).handled);
+    EXPECT_FALSE(runtime.scroll(makeScrollEvent(10, 20, 0.f, 1.f)).handled);
+    EXPECT_FALSE(runtime.keyDown(makeKeyEvent(0)).handled);
+    EXPECT_FALSE(runtime.keyUp(makeKeyEvent(0)).handled);
+    EXPECT_FALSE(runtime.character('a').handled);
     EXPECT_FALSE(runtime.hasPointerCapture());
 
     runtime.pointerLeave();
@@ -172,11 +310,27 @@ TEST_F(RuntimeTest, IgnoresInputBeforeInitialization) {
 TEST_F(RuntimeTest, LifecycleOperationsAreSafeBeforeInitialization) {
     runtime.setVisibility(false, false);
     runtime.frame(800, 600);
+    runtime.idle();
     runtime.restoreWorkspace();
     runtime.requestSkinReload();
     runtime.endAccountSession();
 
+    EXPECT_EQ(keybindingStateCalls, 0);
     EXPECT_FALSE(runtime.hasPointerCapture());
+}
+
+TEST_F(RuntimeTest, InitializationIsIdempotent) {
+    ASSERT_TRUE(runtime.initialize());
+
+    EXPECT_TRUE(runtime.initialize());
+    EXPECT_EQ(captures, 1);
+}
+
+TEST_F(RuntimeTest, ShutdownPreventsReinitialization) {
+    runtime.shutdown();
+
+    EXPECT_FALSE(runtime.initialize());
+    EXPECT_EQ(captures, 0);
 }
 
 TEST_F(RuntimeTest, InitializesFromInjectedSkinAndShutsDownCleanly) {
@@ -213,13 +367,225 @@ TEST_F(RuntimeTest, RoutesAttachedInputToBoundComponent) {
     ASSERT_GT(pressRect.h, 0.f);
     const F32 x = pressRect.x + pressRect.w * 0.5f;
     const F32 y = pressRect.y + pressRect.h * 0.5f;
-    EXPECT_TRUE(runtime.pointerMove(x, y, 0).handled);
-    EXPECT_TRUE(runtime.pointerDown(x, y, NativePointerButton::Left, 0).handled);
-    EXPECT_TRUE(runtime.pointerUp(x, y, NativePointerButton::Left, 0).handled);
+    EXPECT_TRUE(runtime.pointerMove(makePointerEvent(x, y)).handled);
+    EXPECT_TRUE(runtime.pointerDown(makePointerEvent(x, y, PointerButton::Left)).handled);
+    EXPECT_TRUE(runtime.pointerUp(makePointerEvent(x, y, PointerButton::Left)).handled);
     EXPECT_EQ(controllerState.presses, 1);
-    EXPECT_TRUE(runtime.keyDown(KEY_TAB, 0).handled);
-    EXPECT_TRUE(runtime.keyUp(KEY_TAB, 0).handled);
-    EXPECT_FALSE(runtime.keyUp(KEY_TAB, MASK_CONTROL).handled);
+    EXPECT_TRUE(runtime.keyDown(makeKeyEvent(kKeyTab)).handled);
+    EXPECT_TRUE(runtime.keyUp(makeKeyEvent(kKeyTab)).handled);
+    EXPECT_FALSE(runtime.keyUp(makeKeyEvent(kKeyTab, kModifierControl)).handled);
+}
+
+TEST_F(RuntimeTest, LeavesUnclaimedInputForViewerFallback) {
+    ASSERT_TRUE(runtime.initialize());
+    ASSERT_TRUE(registerTestFloater());
+    ASSERT_NE(runtime.openFloater("runtimeTest"), nullptr);
+    runtime.frame(800, 600);
+
+    EXPECT_FALSE(runtime.pointerDown(makePointerEvent(-10.f, -10.f, PointerButton::Left)).handled);
+}
+
+TEST_F(RuntimeTest, HeaderDragRetainsCaptureUntilRelease) {
+    ASSERT_TRUE(runtime.initialize());
+    ASSERT_TRUE(registerTestFloater());
+    Floater* floater = runtime.openFloater("runtimeTest");
+    ASSERT_NE(floater, nullptr);
+    Button* press = dynamic_cast<Button*>(findWidget(*floater, "press"));
+    ASSERT_NE(press, nullptr);
+    ASSERT_NE(floater->header(), nullptr);
+    floater->setCanClose(false);
+
+    runtime.frame(800, 600);
+    const Rect headerRect = floater->header()->rect();
+    const Rect pressRect = press->rect();
+    ASSERT_GT(headerRect.w, 0.f);
+    ASSERT_GT(headerRect.h, 0.f);
+    ASSERT_GT(pressRect.w, 0.f);
+    ASSERT_GT(pressRect.h, 0.f);
+
+    const F32 headerX = headerRect.x + headerRect.w * 0.2f;
+    const F32 headerY = headerRect.y + headerRect.h * 0.5f;
+    const F32 pressX = pressRect.x + pressRect.w * 0.5f;
+    const F32 pressY = pressRect.y + pressRect.h * 0.5f;
+    EXPECT_TRUE(runtime.pointerDown(makePointerEvent(headerX, headerY, PointerButton::Left)).handled);
+    EXPECT_TRUE(runtime.hasPointerCapture());
+
+    EXPECT_TRUE(runtime.pointerMove(makePointerEvent(pressX, pressY)).handled);
+    EXPECT_TRUE(runtime.hasPointerCapture());
+    EXPECT_TRUE(runtime.pointerUp(makePointerEvent(pressX, pressY, PointerButton::Left)).handled);
+    EXPECT_FALSE(runtime.hasPointerCapture());
+    EXPECT_FALSE(floater->dragging());
+    floater->setCanClose(true);
+}
+
+TEST_F(RuntimeTest, CapturedPointerContinuesOutsideViewportUntilRelease) {
+    ASSERT_TRUE(runtime.initialize());
+    ASSERT_TRUE(registerTestFloater());
+    Floater* floater = runtime.openFloater("runtimeTest");
+    ASSERT_NE(floater, nullptr);
+    ASSERT_NE(floater->header(), nullptr);
+    floater->setCanClose(false);
+    floater->setCanDetach(false);
+
+    runtime.frame(800, 600);
+    const Rect headerRect = floater->header()->rect();
+    ASSERT_GT(headerRect.w, 0.f);
+    ASSERT_GT(headerRect.h, 0.f);
+    const F32 x = headerRect.x + headerRect.w * 0.2f;
+    const F32 y = headerRect.y + headerRect.h * 0.5f;
+
+    ASSERT_TRUE(runtime.pointerDown(makePointerEvent(x, y, PointerButton::Left)).handled);
+    ASSERT_TRUE(runtime.hasPointerCapture());
+
+    EXPECT_TRUE(runtime.pointerMove(makePointerEvent(-10.f, 900.f)).handled);
+    EXPECT_TRUE(runtime.hasPointerCapture());
+    EXPECT_TRUE(floater->dragging());
+
+    EXPECT_TRUE(runtime.pointerUp(makePointerEvent(-10.f, 900.f, PointerButton::Left)).handled);
+    EXPECT_FALSE(runtime.hasPointerCapture());
+    EXPECT_FALSE(floater->dragging());
+    floater->setCanClose(true);
+}
+
+TEST_F(RuntimeTest, FocusLossCancelsHeaderDrag) {
+    ASSERT_TRUE(runtime.initialize());
+    ASSERT_TRUE(registerTestFloater());
+    Floater* floater = runtime.openFloater("runtimeTest");
+    ASSERT_NE(floater, nullptr);
+    ASSERT_NE(floater->header(), nullptr);
+    floater->setCanClose(false);
+
+    runtime.frame(800, 600);
+    const Rect headerRect = floater->header()->rect();
+    ASSERT_GT(headerRect.w, 0.f);
+    ASSERT_GT(headerRect.h, 0.f);
+    const F32 x = headerRect.x + headerRect.w * 0.2f;
+    const F32 y = headerRect.y + headerRect.h * 0.5f;
+
+    EXPECT_TRUE(runtime.pointerDown(makePointerEvent(x, y, PointerButton::Left)).handled);
+    EXPECT_TRUE(runtime.hasPointerCapture());
+
+    runtime.focusLost();
+
+    EXPECT_FALSE(runtime.hasPointerCapture());
+    EXPECT_FALSE(floater->dragging());
+    floater->setCanClose(true);
+}
+
+TEST_F(RuntimeTest, MouseCaptureLossCancelsHeaderDrag) {
+    ASSERT_TRUE(runtime.initialize());
+    ASSERT_TRUE(registerTestFloater());
+    Floater* floater = runtime.openFloater("runtimeTest");
+    ASSERT_NE(floater, nullptr);
+    ASSERT_NE(floater->header(), nullptr);
+    floater->setCanClose(false);
+
+    runtime.frame(800, 600);
+    const Rect headerRect = floater->header()->rect();
+    ASSERT_GT(headerRect.w, 0.f);
+    ASSERT_GT(headerRect.h, 0.f);
+    const F32 x = headerRect.x + headerRect.w * 0.2f;
+    const F32 y = headerRect.y + headerRect.h * 0.5f;
+
+    EXPECT_TRUE(runtime.pointerDown(makePointerEvent(x, y, PointerButton::Left)).handled);
+    EXPECT_TRUE(runtime.hasPointerCapture());
+
+    runtime.mouseCaptureLost();
+
+    EXPECT_FALSE(runtime.hasPointerCapture());
+    EXPECT_FALSE(floater->dragging());
+    floater->setCanClose(true);
+}
+
+TEST_F(RuntimeTest, ShutdownIsIdempotentAndStopsFurtherInput) {
+    ASSERT_TRUE(runtime.initialize());
+    ASSERT_TRUE(registerTestFloater());
+    ASSERT_NE(runtime.openFloater("runtimeTest"), nullptr);
+
+    runtime.shutdown();
+    runtime.shutdown();
+
+    EXPECT_EQ(controllerState.closed, 1);
+    EXPECT_FALSE(runtime.hasPointerCapture());
+    EXPECT_FALSE(runtime.pointerMove(makePointerEvent(10.f, 20.f)).handled);
+    EXPECT_FALSE(runtime.keyDown(makeKeyEvent(kKeyReturn)).handled);
+}
+
+TEST_F(RuntimeTest, ShutdownStopsFrameAndIdleWork) {
+    ASSERT_TRUE(runtime.initialize());
+    ASSERT_TRUE(registerTestFloater());
+    ASSERT_NE(runtime.openFloater("runtimeTest"), nullptr);
+
+    controllerState.lifecycleEvents.clear();
+    runtime.frame(800, 600);
+    ASSERT_NE(paintContext, nullptr);
+    const auto paintedFrames = paintContext->count(PaintCommandKind::BeginFrame);
+    keybindingStateCalls = 0;
+    runtime.idle();
+    EXPECT_EQ(keybindingStateCalls, 1);
+    ASSERT_GE(controllerState.lifecycleEvents.size(), 2u);
+    EXPECT_EQ(controllerState.lifecycleEvents[0], RuntimeLifecycleEvent::FrameClock);
+    EXPECT_EQ(controllerState.lifecycleEvents[1], RuntimeLifecycleEvent::IdleKeybindingState);
+
+    runtime.shutdown();
+    ASSERT_FALSE(controllerState.lifecycleEvents.empty());
+    EXPECT_EQ(controllerState.lifecycleEvents.back(), RuntimeLifecycleEvent::ControllerClose);
+    const auto lifecycleEventsAfterShutdown = controllerState.lifecycleEvents.size();
+    runtime.frame(800, 600);
+    runtime.idle();
+
+    EXPECT_EQ(paintContext->count(PaintCommandKind::BeginFrame), paintedFrames);
+    EXPECT_EQ(keybindingStateCalls, 1);
+    EXPECT_EQ(controllerState.lifecycleEvents.size(), lifecycleEventsAfterShutdown);
+}
+
+TEST_F(RuntimeTest, RestoresDetachedFloaterAndReattachesOnAccountSessionEnd) {
+    LLWindowHeadless mainWindowInstance{nullptr, "", "", 0, 0, 800, 600, 0, false, false, false, false, false};
+    configureDetachedWorkspace(mainWindowInstance);
+
+    ASSERT_TRUE(runtime.initialize());
+    ASSERT_TRUE(registerTestFloater());
+
+    runtime.restoreWorkspace();
+    runtime.frame(800, 600);
+
+    EXPECT_EQ(auxiliaryWindows.state.created, 1);
+    EXPECT_EQ(auxiliaryWindows.state.rect.x, 100);
+    EXPECT_EQ(auxiliaryWindows.state.rect.y, 200);
+    EXPECT_GT(auxiliaryWindows.state.renderCalls, 0);
+    EXPECT_EQ(auxiliaryWindows.state.showCalls, 1);
+    EXPECT_TRUE(auxiliaryWindows.state.visible);
+
+    runtime.idle();
+    EXPECT_GT(auxiliaryWindows.state.pumpCalls, 0);
+
+    runtime.setVisibility(true, false);
+    EXPECT_FALSE(auxiliaryWindows.state.visible);
+    runtime.setVisibility(true, true);
+    EXPECT_TRUE(auxiliaryWindows.state.visible);
+
+    runtime.endAccountSession();
+
+    EXPECT_EQ(auxiliaryWindows.state.destroyed, 1);
+    EXPECT_EQ(controllerState.closed, 1);
+    mainWindow = nullptr;
+}
+
+TEST_F(RuntimeTest, ShutdownClosesDetachedFloaterWindow) {
+    LLWindowHeadless mainWindowInstance{nullptr, "", "", 0, 0, 800, 600, 0, false, false, false, false, false};
+    configureDetachedWorkspace(mainWindowInstance);
+
+    ASSERT_TRUE(runtime.initialize());
+    ASSERT_TRUE(registerTestFloater());
+
+    runtime.restoreWorkspace();
+    runtime.frame(800, 600);
+    ASSERT_EQ(auxiliaryWindows.state.created, 1);
+
+    runtime.shutdown();
+
+    EXPECT_EQ(auxiliaryWindows.state.destroyed, 1);
+    mainWindow = nullptr;
 }
 
 TEST_F(RuntimeTest, VisibilityAndAccountTransitionsClearInteraction) {
@@ -234,16 +600,16 @@ TEST_F(RuntimeTest, VisibilityAndAccountTransitionsClearInteraction) {
     const Rect pressRect = press->rect();
     const F32 x = pressRect.x + pressRect.w * 0.5f;
     const F32 y = pressRect.y + pressRect.h * 0.5f;
-    EXPECT_TRUE(runtime.pointerDown(x, y, NativePointerButton::Left, 0).handled);
+    EXPECT_TRUE(runtime.pointerDown(makePointerEvent(x, y, PointerButton::Left)).handled);
 
     runtime.setVisibility(false, true);
-    EXPECT_FALSE(runtime.pointerUp(x, y, NativePointerButton::Left, 0).handled);
+    EXPECT_FALSE(runtime.pointerUp(makePointerEvent(x, y, PointerButton::Left)).handled);
     EXPECT_EQ(controllerState.presses, 0);
     nowCalls = 0;
     runtime.frame(800, 600);
     EXPECT_EQ(nowCalls, 0);
-    EXPECT_FALSE(runtime.pointerMove(10.f, 20.f, 0).handled);
-    EXPECT_FALSE(runtime.keyDown(KEY_RETURN, 0).handled);
+    EXPECT_FALSE(runtime.pointerMove(makePointerEvent(10.f, 20.f)).handled);
+    EXPECT_FALSE(runtime.keyDown(makeKeyEvent(kKeyReturn)).handled);
     EXPECT_FALSE(runtime.hasPointerCapture());
 
     runtime.endAccountSession();
@@ -255,7 +621,7 @@ TEST_F(RuntimeTest, ConsumesUnmodifiedTabWhenVisible) {
     ASSERT_TRUE(runtime.initialize());
     runtime.setVisibility(true, true);
 
-    EXPECT_TRUE(runtime.keyDown(KEY_TAB, 0).handled);
-    EXPECT_TRUE(runtime.keyUp(KEY_TAB, 0).handled);
+    EXPECT_TRUE(runtime.keyDown(makeKeyEvent(kKeyTab)).handled);
+    EXPECT_TRUE(runtime.keyUp(makeKeyEvent(kKeyTab)).handled);
 }
 } // namespace

@@ -55,75 +55,22 @@ using radia::ui::Vec2;
 namespace {
 class FloaterDelegateProbe final : public SurfaceFloaterDelegate {
 public:
-    bool canDetachFloater(const Surface&, const Floater&) const override { return allowDetach; }
     void floaterClosed(Surface&, Floater&) override { ++closes; }
     void floaterMinimizedChanged(Surface&, Floater&, bool) override { ++minimizeChanges; }
     void floaterMoved(Surface&, Floater&) override { ++moves; }
     void floaterMoveEnded(Surface&, Floater&) override { ++moveCompletions; }
-    bool beginNativeFloaterResize(Surface& surface, Floater& floater) override {
-        ++resizeStarts;
-        if (unmountOnNativeResize) unmountedFloater = surface.unmountFloater(floater);
-        return nativeResize;
-    }
     void floaterResized(Surface&, Floater&, bool complete) override {
         ++resizeChanges;
         if (complete) ++resizeCompletions;
     }
-    void floaterDetachRequested(Surface&, Floater&, const Vec2& desiredPosition, const Vec2&) override {
-        ++detachRequests;
-        requestedPosition = desiredPosition;
-    }
 
-    bool allowDetach = true;
     int closes = 0;
     int minimizeChanges = 0;
     int moves = 0;
-    int detachRequests = 0;
     int moveCompletions = 0;
-    int resizeStarts = 0;
     int resizeChanges = 0;
     int resizeCompletions = 0;
-    bool nativeResize = false;
-    bool unmountOnNativeResize = false;
-    std::unique_ptr<Floater> unmountedFloater;
-    Vec2 requestedPosition;
 };
-
-TEST(FloatersTest, RequestsDetachmentWhenDragExceedsBoundary) {
-    StyleSheet styleSheet;
-    constexpr char kDragFloaterLayout[] = "floater { display: flex; flex-direction: column; } "
-                                          "floater::header { height: 30px; } "
-                                          "floater::content { flex-grow: 1; }";
-    ASSERT_TRUE(styleSheet.loadRadia(kDragFloaterLayout).ok());
-    Surface surface(styleSheet);
-    surface.setViewport(200.f, 200.f);
-    FloaterDelegateProbe delegate;
-    surface.setFloaterDelegate(&delegate);
-    auto floater = std::make_unique<Floater>();
-    Floater* target = floater.get();
-    floater->setCanClose(false);
-    floater->setRect({20.f, 20.f, 100.f, 100.f});
-    surface.mountFloater(std::move(floater));
-    surface.updateLayout();
-
-    surface.pointerDown({{30.f, 110.f}, PointerButton::Left});
-    surface.pointerMove({{-99.f, 110.f}, PointerButton::Left});
-    EXPECT_EQ(delegate.detachRequests, 0);
-    surface.pointerMove({{-100.f, 110.f}, PointerButton::Left});
-    EXPECT_EQ(delegate.detachRequests, 1);
-    EXPECT_EQ(delegate.requestedPosition.x, -110.f);
-    surface.pointerMove({{-80.f, 110.f}, PointerButton::Left});
-    EXPECT_EQ(delegate.detachRequests, 1);
-    surface.pointerUp({{-80.f, 110.f}, PointerButton::Left});
-    EXPECT_EQ(delegate.moveCompletions, 1);
-
-    target->setCanDetach(false);
-    surface.pointerDown({{10.f, 110.f}, PointerButton::Left});
-    surface.pointerMove({{-80.f, 110.f}, PointerButton::Left});
-    EXPECT_EQ(delegate.detachRequests, 1);
-    surface.pointerUp({{-80.f, 110.f}, PointerButton::Left});
-    EXPECT_EQ(delegate.moveCompletions, 2);
-}
 
 TEST(FloatersTest, ReportsFloaterVisibilityFromResolvedDisplayAndVisibility) {
     StyleSheet styleSheet;
@@ -256,7 +203,6 @@ TEST(FloatersTest, ResizesAttachedFloaterWithinSurfaceBounds) {
     EXPECT_TRUE(surface.pointerDown({{target->rect().right() - 1.f, target->rect().bottom() + 30.f}, PointerButton::Left}));
     surface.pointerMove({{250.f, target->rect().bottom() + 30.f}, PointerButton::Left});
     EXPECT_EQ(target->rect().right(), 200.f);
-    EXPECT_EQ(delegate.detachRequests, 0);
     surface.pointerUp({{250.f, target->rect().bottom() + 30.f}, PointerButton::Left});
     EXPECT_EQ(delegate.resizeCompletions, 1);
 }
@@ -295,25 +241,6 @@ TEST(FloatersTest, UsesFrozenWidthForPercentageMinimumSize) {
     surface.pointerMove({{target->rect().right() + 500.f, leftEdge.y}, PointerButton::Left});
     surface.pointerUp({{target->rect().right() + 500.f, leftEdge.y}, PointerButton::Left});
     EXPECT_EQ(target->rect().w, 50.f);
-}
-
-TEST(FloatersTest, AllowsNativeResizeBeyondViewportBounds) {
-    Surface surface;
-    surface.setViewport(100.f, 80.f);
-    FloaterDelegateProbe delegate;
-    delegate.nativeResize = true;
-    surface.setFloaterDelegate(&delegate);
-    auto floater = std::make_unique<Floater>();
-    Floater* target = floater.get();
-    floater->setCanResize(true).setRect({0.f, 0.f, 100.f, 80.f});
-    surface.mountFloater(std::move(floater));
-
-    EXPECT_TRUE(surface.pointerDown({{99.f, 40.f}, PointerButton::Left}));
-    surface.pointerMove({{139.f, 40.f}, PointerButton::Left});
-    EXPECT_EQ(target->rect().w, 140.f);
-    surface.pointerUp({{139.f, 40.f}, PointerButton::Left});
-    EXPECT_EQ(delegate.resizeStarts, 1);
-    EXPECT_EQ(delegate.resizeCompletions, 1);
 }
 
 TEST(FloatersTest, ResizesFloatersMountedInModalLayer) {
@@ -399,22 +326,6 @@ TEST(FloatersTest, RoutesResizeThroughPointerTransparentFloater) {
     EXPECT_TRUE(surface.pointerDown({lowerEdgeUnderUpper, PointerButton::Left}));
     EXPECT_TRUE(surface.hasPointerCapture());
     surface.pointerUp({lowerEdgeUnderUpper, PointerButton::Left});
-}
-
-TEST(FloatersTest, RejectsNativeResizeWhenDelegateUnmountsFloater) {
-    Surface surface;
-    surface.setViewport(100.f, 80.f);
-    FloaterDelegateProbe delegate;
-    delegate.nativeResize = true;
-    delegate.unmountOnNativeResize = true;
-    surface.setFloaterDelegate(&delegate);
-    auto floater = std::make_unique<Floater>();
-    floater->setCanResize(true).setRect({0.f, 0.f, 100.f, 80.f});
-    surface.mountFloater(std::move(floater));
-
-    EXPECT_FALSE(surface.pointerDown({{99.f, 40.f}, PointerButton::Left}));
-    EXPECT_FALSE(surface.hasPointerCapture());
-    EXPECT_NE(delegate.unmountedFloater, nullptr);
 }
 
 TEST(FloatersTest, KeepsOverflowVisibleDescendantAsPointerTarget) {

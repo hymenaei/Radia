@@ -32,12 +32,11 @@
 #include "llcontrol.h"
 
 namespace {
-using radia::viewer::ui::AttachedFloaterPlacement;
 using radia::viewer::ui::ComponentInstanceState;
 using radia::viewer::ui::ComponentKey;
 using radia::viewer::ui::ComponentOpenState;
 using radia::viewer::ui::ComponentPersistence;
-using radia::viewer::ui::DetachedFloaterPlacement;
+using radia::viewer::ui::FloaterPlacement;
 using radia::viewer::ui::FloaterLogicalSize;
 
 class ComponentPersistenceTest : public ::testing::Test {
@@ -95,7 +94,7 @@ TEST_F(ComponentPersistenceTest, IgnoresMalformedWorkspaceIdentities) {
 
 TEST_F(ComponentPersistenceTest, WritesLayoutAndWorkspaceToTheirOwningSettings) {
     ComponentPersistence persistence(layout, workspace);
-    persistence.savePlacement(ComponentKey{"settings", {}}, AttachedFloaterPlacement{96.f, 64.f, FloaterLogicalSize{480.f, 320.f}, false},
+    persistence.savePlacement(ComponentKey{"settings", {}}, FloaterPlacement{96.f, 64.f, FloaterLogicalSize{480.f, 320.f}, false},
                               ComponentOpenState::Open);
 
     EXPECT_TRUE(layout.getLLSD("UILayout")["settings"].isMap());
@@ -111,9 +110,9 @@ TEST_F(ComponentPersistenceTest, EncodesAndDecodesComponentIdentityThroughOneCod
     EXPECT_FALSE(ComponentKey::fromPersistenceKey("alice@profile@extra").has_value());
 }
 
-TEST_F(ComponentPersistenceTest, SavesOnlyCurrentWorkspaceStateAndPreservesFlags) {
+TEST_F(ComponentPersistenceTest, SavesOnlyCurrentWorkspaceStateAndClearsLegacyFlags) {
     ComponentPersistence persistence(layout, workspace);
-    const std::vector<ComponentInstanceState> components{{{"profile", "alice"}, true, true}, {{"demo", {}}, false, true}};
+    const std::vector<ComponentInstanceState> components{{{"profile", "alice"}, true}, {{"demo", {}}, false}};
     LLSD previous = LLSD::emptyMap();
     previous["stale@orphan"] = LLSD::emptyMap();
     workspace.setLLSD("UIWorkspace", previous);
@@ -122,7 +121,7 @@ TEST_F(ComponentPersistenceTest, SavesOnlyCurrentWorkspaceStateAndPreservesFlags
 
     const LLSD saved = workspace.getLLSD("UIWorkspace");
     EXPECT_TRUE(saved["alice@profile"]["minimized"].asBoolean());
-    EXPECT_TRUE(saved["alice@profile"]["detached"].asBoolean());
+    EXPECT_FALSE(saved["alice@profile"].has("detached"));
     EXPECT_FALSE(saved["demo"].has("detached"));
     EXPECT_FALSE(saved.has("stale@orphan"));
 }
@@ -136,15 +135,14 @@ TEST_F(ComponentPersistenceTest, RestoresKeylessPlacementFromUserWideLayout) {
     layout.setLLSD("UILayout", saved);
 
     ComponentPersistence persistence(layout, workspace);
-    const auto placement = persistence.restorePlacement({"demo", {}});
+    const auto placement = persistence.restorePlacement({"demo", {}}, FloaterPlacement{});
     ASSERT_TRUE(placement.has_value());
-    const auto* attached = std::get_if<AttachedFloaterPlacement>(&*placement);
-    ASSERT_NE(attached, nullptr);
-    EXPECT_FLOAT_EQ(attached->x, 31.f);
-    EXPECT_FLOAT_EQ(attached->y, 42.f);
-    ASSERT_TRUE(attached->size.has_value());
-    EXPECT_FLOAT_EQ(attached->size->width, 320.f);
-    EXPECT_FLOAT_EQ(attached->size->height, 240.f);
+    const auto& restored = *placement;
+    EXPECT_FLOAT_EQ(restored.x, 31.f);
+    EXPECT_FLOAT_EQ(restored.y, 42.f);
+    ASSERT_TRUE(restored.size.has_value());
+    EXPECT_FLOAT_EQ(restored.size->width, 320.f);
+    EXPECT_FLOAT_EQ(restored.size->height, 240.f);
 }
 
 TEST_F(ComponentPersistenceTest, LetsKeyedPlacementOverrideDefaultsWithoutChangingThem) {
@@ -163,22 +161,31 @@ TEST_F(ComponentPersistenceTest, LetsKeyedPlacementOverrideDefaultsWithoutChangi
     workspace.setLLSD("UIWorkspace", workspaceValue);
 
     ComponentPersistence persistence(layout, workspace);
-    const auto placement = persistence.restorePlacement({"profile", "alice"});
+    const auto placement = persistence.restorePlacement({"profile", "alice"}, FloaterPlacement{});
     ASSERT_TRUE(placement.has_value());
-    const auto* attached = std::get_if<AttachedFloaterPlacement>(&*placement);
-    ASSERT_NE(attached, nullptr);
-    EXPECT_FLOAT_EQ(attached->x, 100.f);
-    ASSERT_TRUE(attached->size.has_value());
-    EXPECT_FLOAT_EQ(attached->size->width, 500.f);
+    const auto& restored = *placement;
+    EXPECT_FLOAT_EQ(restored.x, 100.f);
+    ASSERT_TRUE(restored.size.has_value());
+    EXPECT_FLOAT_EQ(restored.size->width, 500.f);
 
-    persistence.savePlacement({"profile", "alice"}, *attached, ComponentOpenState::Open);
+    persistence.savePlacement({"profile", "alice"}, restored, ComponentOpenState::Open);
     EXPECT_DOUBLE_EQ(layout.getLLSD("UILayout")["profile"]["position"][0].asReal(), 10.0);
 }
 
-TEST_F(ComponentPersistenceTest, RoundTripsDetachedPlacementAndWindowState) {
+TEST_F(ComponentPersistenceTest, RestoresLegacyDetachedPlacementUsingAttachedFallback) {
     ComponentPersistence persistence(layout, workspace);
     const ComponentKey identity{"profile", "alice"};
-    persistence.savePlacement(identity, DetachedFloaterPlacement{100, 200, FloaterLogicalSize{640.f, 480.f}, true}, ComponentOpenState::Open);
+    const FloaterPlacement fallback{12.f, 24.f, std::nullopt, false};
+    LLSD legacy = LLSD::emptyMap();
+    legacy["position"].append(100);
+    legacy["position"].append(200);
+    legacy["size"].append(640.f);
+    legacy["size"].append(480.f);
+    legacy["detached"] = true;
+    legacy["minimized"] = true;
+    LLSD saved = LLSD::emptyMap();
+    saved[identity.persistenceKey()] = legacy;
+    workspace.setLLSD("UIWorkspace", saved);
 
     const LLSD encoded = workspace.getLLSD("UIWorkspace")["alice@profile"];
     EXPECT_TRUE(encoded["detached"].asBoolean());
@@ -186,15 +193,18 @@ TEST_F(ComponentPersistenceTest, RoundTripsDetachedPlacementAndWindowState) {
     EXPECT_TRUE(encoded["size"].isArray());
     EXPECT_TRUE(encoded["minimized"].asBoolean());
 
-    const auto restored = persistence.restorePlacement(identity);
+    const auto restored = persistence.restorePlacement(identity, fallback);
     ASSERT_TRUE(restored.has_value());
-    const auto* detached = std::get_if<DetachedFloaterPlacement>(&*restored);
-    ASSERT_NE(detached, nullptr);
-    EXPECT_EQ(detached->x, 100);
-    EXPECT_EQ(detached->y, 200);
-    ASSERT_TRUE(detached->size.has_value());
-    EXPECT_FLOAT_EQ(detached->size->width, 640.f);
-    EXPECT_TRUE(detached->minimized);
+    EXPECT_FLOAT_EQ(restored->x, fallback.x);
+    EXPECT_FLOAT_EQ(restored->y, fallback.y);
+    ASSERT_TRUE(restored->size.has_value());
+    EXPECT_FLOAT_EQ(restored->size->width, 640.f);
+    EXPECT_TRUE(restored->minimized);
+
+    persistence.savePlacement(identity, *restored, ComponentOpenState::Open);
+    EXPECT_FALSE(workspace.getLLSD("UIWorkspace")["alice@profile"].has("detached"));
+    EXPECT_DOUBLE_EQ(workspace.getLLSD("UIWorkspace")["alice@profile"]["position"][0].asReal(), static_cast<double>(fallback.x));
+    EXPECT_DOUBLE_EQ(workspace.getLLSD("UIWorkspace")["alice@profile"]["position"][1].asReal(), static_cast<double>(fallback.y));
 }
 
 TEST_F(ComponentPersistenceTest, CombinesWorkspaceFlagsWithDefaultLayout) {
@@ -208,27 +218,23 @@ TEST_F(ComponentPersistenceTest, CombinesWorkspaceFlagsWithDefaultLayout) {
     workspace.setLLSD("UIWorkspace", workspaceValue);
 
     ComponentPersistence persistence(layout, workspace);
-    const auto placement = persistence.restorePlacement({"demo", {}});
+    const auto placement = persistence.restorePlacement({"demo", {}}, FloaterPlacement{});
     ASSERT_TRUE(placement.has_value());
-    const auto* attached = std::get_if<AttachedFloaterPlacement>(&*placement);
-    ASSERT_NE(attached, nullptr);
-    EXPECT_TRUE(attached->minimized);
+    EXPECT_TRUE(placement->minimized);
 }
 
-TEST_F(ComponentPersistenceTest, StoresKeylessDetachedGeometryInLayoutAndOpenStateInWorkspace) {
+TEST_F(ComponentPersistenceTest, StoresKeylessFloaterGeometryInLayoutAndOpenStateInWorkspace) {
     ComponentPersistence persistence(layout, workspace);
     const ComponentKey identity{"demo", {}};
-    persistence.savePlacement(identity, DetachedFloaterPlacement{760, 120, FloaterLogicalSize{540.f, 680.f}, true}, ComponentOpenState::Open);
+    persistence.savePlacement(identity, FloaterPlacement{760.f, 120.f, FloaterLogicalSize{540.f, 680.f}, true}, ComponentOpenState::Open);
 
-    EXPECT_TRUE(layout.getLLSD("UILayout")["demo"]["detached"].asBoolean());
+    EXPECT_FALSE(layout.getLLSD("UILayout")["demo"].has("detached"));
     EXPECT_TRUE(workspace.getLLSD("UIWorkspace").has("demo"));
     EXPECT_FALSE(workspace.getLLSD("UIWorkspace")["demo"].has("detached"));
 
-    const auto restored = persistence.restorePlacement(identity);
+    const auto restored = persistence.restorePlacement(identity, FloaterPlacement{});
     ASSERT_TRUE(restored.has_value());
-    const auto* detached = std::get_if<DetachedFloaterPlacement>(&*restored);
-    ASSERT_NE(detached, nullptr);
-    EXPECT_EQ(detached->x, 760);
+    EXPECT_FLOAT_EQ(restored->x, 760.f);
 }
 
 TEST_F(ComponentPersistenceTest, ClearsStaleKeylessWorkspaceGeometryWhileKeepingMinimizedState) {
@@ -241,7 +247,7 @@ TEST_F(ComponentPersistenceTest, ClearsStaleKeylessWorkspaceGeometryWhileKeeping
     workspace.setLLSD("UIWorkspace", saved);
 
     ComponentPersistence persistence(layout, workspace);
-    persistence.savePlacement({"demo", {}}, AttachedFloaterPlacement{12.f, 24.f, std::nullopt, true}, ComponentOpenState::Open);
+    persistence.savePlacement({"demo", {}}, FloaterPlacement{12.f, 24.f, std::nullopt, true}, ComponentOpenState::Open);
 
     const LLSD updated = workspace.getLLSD("UIWorkspace");
     EXPECT_TRUE(updated.has("demo"));
@@ -254,10 +260,10 @@ TEST_F(ComponentPersistenceTest, ClearsStaleKeylessWorkspaceGeometryWhileKeeping
 TEST_F(ComponentPersistenceTest, RemovesClosedKeyedPlacementFromWorkspace) {
     ComponentPersistence persistence(layout, workspace);
     const ComponentKey identity{"profile", "alice"};
-    persistence.savePlacement(identity, AttachedFloaterPlacement{10.f, 20.f, std::nullopt, false}, ComponentOpenState::Open);
+    persistence.savePlacement(identity, FloaterPlacement{10.f, 20.f, std::nullopt, false}, ComponentOpenState::Open);
     EXPECT_TRUE(workspace.getLLSD("UIWorkspace").has("alice@profile"));
 
-    persistence.savePlacement(identity, AttachedFloaterPlacement{30.f, 40.f, std::nullopt, false}, ComponentOpenState::Closed);
+    persistence.savePlacement(identity, FloaterPlacement{30.f, 40.f, std::nullopt, false}, ComponentOpenState::Closed);
     EXPECT_FALSE(workspace.getLLSD("UIWorkspace").has("alice@profile"));
 }
 

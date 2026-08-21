@@ -1,6 +1,6 @@
 /**
  * @file floater.h
- * @brief Defines the movable, detachable Floater Widget.
+ * @brief Defines the movable Floater Widget.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -57,7 +57,6 @@ public:
     Floater& setCanClose(bool value);
     Floater& setCanMinimize(bool value);
     Floater& setCanResize(bool value);
-    Floater& setCanDetach(bool value);
 
     const std::string& title() const;
     const std::string& icon() const { return mIcon; }
@@ -66,7 +65,6 @@ public:
     bool canClose() const { return mCanClose; }
     bool canMinimize() const { return mCanMinimize; }
     bool canResize() const { return mCanResize; }
-    bool canDetach() const { return mCanDetach; }
     bool showHeaderIdentity() const { return mShowHeaderIdentity; }
     bool closed() const { return mClosed; }
     bool minimized() const { return mMinimized; }
@@ -146,13 +144,11 @@ private:
     bool mCanClose = true;
     bool mCanMinimize = false;
     bool mCanResize = false;
-    bool mCanDetach = true;
     bool mShowHeaderIdentity = true;
     bool mClosed = false;
     bool mMinimized = false;
     FloaterInteraction mInteraction = FloaterInteraction::Idle;
     bool mAuthoredSizeCaptured = false;
-    bool mDetachRequested = false;
     bool mCustomHeaderClaimed = false;
     std::function<void()> mOnOpen;
     std::function<void()> mOnClose;

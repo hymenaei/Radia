@@ -620,11 +620,10 @@ TEST_F(LayoutResourceCompilerTest, ManagesCustomFloaterHeaderLifecycle) {
     EXPECT_FALSE(refresh);
 }
 
-TEST_F(LayoutResourceCompilerTest, RejectsInvalidFloaterHeaderAndDetachConfiguration) {
+TEST_F(LayoutResourceCompilerTest, RejectsInvalidFloaterHeaderConfiguration) {
     constexpr char kMissingTitleLayout[] = "<floater canMinimize=\"true\"/>";
     constexpr char kDuplicateHeaderLayout[] = "<floater>"
                                               "<header/><header/></floater>";
-    constexpr char kAttachedOnlyLayout[] = "<floater canDetach=\"false\"/>";
     const LayoutBuildResult missingTitle = factory.buildWidgetTreeFromString(kMissingTitleLayout, "missing_title.xml");
     ASSERT_FALSE(missingTitle.ok());
     ASSERT_FALSE(missingTitle.errors.empty());
@@ -634,12 +633,6 @@ TEST_F(LayoutResourceCompilerTest, RejectsInvalidFloaterHeaderAndDetachConfigura
     ASSERT_FALSE(duplicateHeader.ok());
     ASSERT_FALSE(duplicateHeader.errors.empty());
     EXPECT_EQ(duplicateHeader.errors.front().code, "layout.part.duplicate");
-
-    LayoutBuildResult attachedOnly = factory.buildWidgetTreeFromString(kAttachedOnlyLayout, "attached_only.xml");
-    ASSERT_TRUE(attachedOnly.ok());
-    Floater* floater = attachedOnly.rootAs<Floater>();
-    ASSERT_NE(floater, nullptr);
-    EXPECT_FALSE(floater->canDetach());
 }
 
 TEST_F(LayoutResourceCompilerTest, AppliesWidgetDefaultsToFloater) {

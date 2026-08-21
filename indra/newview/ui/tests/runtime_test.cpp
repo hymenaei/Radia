@@ -23,23 +23,18 @@
  */
 
 #include "linden_common.h"
-#include <algorithm>
 #include <chrono>
-#include <cmath>
 #include <cstdint>
 #include <gtest/gtest.h>
 #include <memory>
 #include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
-#include "auxiliarywindow.h"
 #include "componentcontroller.h"
 #include "componentcontrollerregistration.h"
 #include "llcontrol.h"
 #include "llglslshader.h"
 #include "llsd.h"
-#include "llwindowheadless.h"
 #include "render/recordingpaintcontext.h"
 #include "runtime.h"
 #include "widgets/button.h"
@@ -62,7 +57,6 @@ using radia::ui::RecordingPaintContext;
 using radia::ui::Rect;
 using radia::ui::ScrollEvent;
 using radia::ui::System;
-using radia::ui::Vec2;
 using radia::ui::Widget;
 using radia::viewer::ui::ComponentController;
 using radia::viewer::ui::Runtime;
@@ -88,19 +82,6 @@ SkinSnapshotResult runtimeSkinSnapshot() {
                                      "locales: {en: {name: English, strings: {runtime: Runtime}}}\n";
     constexpr char kSkin[] = "floater { display: flex; flex-direction: column; } floater::header { height: 30px; } button { size: 128px 32px; }";
     constexpr char kView[] = "<floater title=\"runtime\"><button id=\"press\" onClick=\"press()\"/></floater>";
-
-    SkinSnapshotResult result;
-    result.snapshot.add("localization.yaml", kLocalization);
-    result.snapshot.add("skin.radia", kSkin);
-    result.snapshot.add("view.xml", kView);
-    return result;
-}
-
-SkinSnapshotResult runtimeDetachedSkinSnapshot() {
-    constexpr char kLocalization[] = "defaultLocale: en\n"
-                                     "locales: {en: {name: English, strings: {}}}\n";
-    constexpr char kSkin[] = "floater { display: flex; flex-direction: column; } floater::header { height: 30px; }";
-    constexpr char kView[] = "<floater/>";
 
     SkinSnapshotResult result;
     result.snapshot.add("localization.yaml", kLocalization);
@@ -147,80 +128,8 @@ private:
 
 class RuntimeTest : public Test {
 protected:
-    struct AuxiliaryWindows final : AuxiliaryWindowFactory {
-        struct State {
-            AuxiliaryWindowRect rect;
-            std::string title;
-            F32 scale = 1.f;
-            bool visible = false;
-            int created = 0;
-            int destroyed = 0;
-            int pumpCalls = 0;
-            int renderCalls = 0;
-            int showCalls = 0;
-            int visibilityChanges = 0;
-        } state;
-
-        class FakeWindow final : public AuxiliaryWindow {
-        public:
-            FakeWindow(State& state, const AuxiliaryWindowRect& rect, std::string title) : mState(state) {
-                mState.rect = rect;
-                mState.title = std::move(title);
-                ++mState.created;
-            }
-
-            ~FakeWindow() override { ++mState.destroyed; }
-
-            void show(bool) override {
-                mState.visible = true;
-                ++mState.showCalls;
-            }
-
-            void setVisible(bool visible) override {
-                mState.visible = visible;
-                ++mState.visibilityChanges;
-            }
-
-            void setTitle(const std::string& title) override { mState.title = title; }
-            void pump() override { ++mState.pumpCalls; }
-            void render() override { ++mState.renderCalls; }
-            void setScaleMultiplier(F32 multiplier) override { mState.scale = std::max(0.25f, multiplier); }
-
-            void setLogicalSize(F32 width, F32 height) override {
-                mState.rect.width = std::max<S32>(1, static_cast<S32>(std::lround(width * mState.scale)));
-                mState.rect.height = std::max<S32>(1, static_cast<S32>(std::lround(height * mState.scale)));
-            }
-
-            void setLogicalRect(const AuxiliaryLogicalRect& rect) override {
-                mState.rect.x = static_cast<S32>(std::lround(rect.x * mState.scale));
-                mState.rect.y = static_cast<S32>(std::lround(rect.y * mState.scale));
-                setLogicalSize(rect.width, rect.height);
-            }
-
-            void beginDrag(F32, F32, const std::optional<AuxiliaryScreenPoint>& = std::nullopt) override {}
-            void beginResize() override {}
-            AuxiliaryWindowRect rect() const override { return mState.rect; }
-            F32 scale() const override { return mState.scale; }
-
-        private:
-            State& mState;
-        };
-
-        std::unique_ptr<AuxiliaryWindow> create(const AuxiliaryWindowRect& rect, const std::string& title, AuxiliaryWindowClient&) override {
-            if (!createWindows) return {};
-            return std::make_unique<FakeWindow>(state, rect, title);
-        }
-
-        bool placementVisible(const AuxiliaryWindowRect&) const override { return placementsVisible; }
-
-        bool createWindows = false;
-        bool placementsVisible = false;
-    } auxiliaryWindows;
-
     RuntimeTest()
-        : runtime(savedSettings, accountSettings, uiShader,
-                  Runtime::WindowEnvironment{
-                      .mainWindow = mainWindow, .displayScale = [] { return Vec2{1.f, 1.f}; }, .auxiliaryWindowFactory = auxiliaryWindows},
+        : runtime(savedSettings, accountSettings, uiShader, mainWindow,
                   Runtime::IntegrationHooks{.resolveKeybinding = [](const std::string&) { return KeybindingPresentation{}; },
                                             .keybindingState =
                                                 [this] {
@@ -259,25 +168,6 @@ protected:
                                        [this](System& system) { return std::make_unique<RuntimeController>(system, controllerState); });
     }
 
-    void configureDetachedWorkspace(LLWindowHeadless& mainWindowInstance) {
-        mainWindow = &mainWindowInstance;
-        snapshot = runtimeDetachedSkinSnapshot();
-
-        LLSD layout = LLSD::emptyMap();
-        layout["runtimeTest"]["position"].append(100);
-        layout["runtimeTest"]["position"].append(200);
-        layout["runtimeTest"]["size"].append(320);
-        layout["runtimeTest"]["size"].append(240);
-        layout["runtimeTest"]["detached"] = true;
-        savedSettings.setLLSD("UILayout", layout);
-
-        LLSD workspace = LLSD::emptyMap();
-        workspace["runtimeTest"] = LLSD::emptyMap();
-        accountSettings.setLLSD("UIWorkspace", workspace);
-        auxiliaryWindows.createWindows = true;
-        auxiliaryWindows.placementsVisible = true;
-    }
-
     LLControlGroup savedSettings{"RuntimeSaved"};
     LLControlGroup accountSettings{"RuntimeAccount"};
     LLGLSLShader uiShader;
@@ -308,7 +198,7 @@ TEST_F(RuntimeTest, IgnoresInputBeforeInitialization) {
 }
 
 TEST_F(RuntimeTest, LifecycleOperationsAreSafeBeforeInitialization) {
-    runtime.setVisibility(false, false);
+    runtime.setVisibility(false);
     runtime.frame(800, 600);
     runtime.idle();
     runtime.restoreWorkspace();
@@ -425,8 +315,6 @@ TEST_F(RuntimeTest, CapturedPointerContinuesOutsideViewportUntilRelease) {
     ASSERT_NE(floater, nullptr);
     ASSERT_NE(floater->header(), nullptr);
     floater->setCanClose(false);
-    floater->setCanDetach(false);
-
     runtime.frame(800, 600);
     const Rect headerRect = floater->header()->rect();
     ASSERT_GT(headerRect.w, 0.f);
@@ -539,55 +427,6 @@ TEST_F(RuntimeTest, ShutdownStopsFrameAndIdleWork) {
     EXPECT_EQ(controllerState.lifecycleEvents.size(), lifecycleEventsAfterShutdown);
 }
 
-TEST_F(RuntimeTest, RestoresDetachedFloaterAndReattachesOnAccountSessionEnd) {
-    LLWindowHeadless mainWindowInstance{nullptr, "", "", 0, 0, 800, 600, 0, false, false, false, false, false};
-    configureDetachedWorkspace(mainWindowInstance);
-
-    ASSERT_TRUE(runtime.initialize());
-    ASSERT_TRUE(registerTestFloater());
-
-    runtime.restoreWorkspace();
-    runtime.frame(800, 600);
-
-    EXPECT_EQ(auxiliaryWindows.state.created, 1);
-    EXPECT_EQ(auxiliaryWindows.state.rect.x, 100);
-    EXPECT_EQ(auxiliaryWindows.state.rect.y, 200);
-    EXPECT_GT(auxiliaryWindows.state.renderCalls, 0);
-    EXPECT_EQ(auxiliaryWindows.state.showCalls, 1);
-    EXPECT_TRUE(auxiliaryWindows.state.visible);
-
-    runtime.idle();
-    EXPECT_GT(auxiliaryWindows.state.pumpCalls, 0);
-
-    runtime.setVisibility(true, false);
-    EXPECT_FALSE(auxiliaryWindows.state.visible);
-    runtime.setVisibility(true, true);
-    EXPECT_TRUE(auxiliaryWindows.state.visible);
-
-    runtime.endAccountSession();
-
-    EXPECT_EQ(auxiliaryWindows.state.destroyed, 1);
-    EXPECT_EQ(controllerState.closed, 1);
-    mainWindow = nullptr;
-}
-
-TEST_F(RuntimeTest, ShutdownClosesDetachedFloaterWindow) {
-    LLWindowHeadless mainWindowInstance{nullptr, "", "", 0, 0, 800, 600, 0, false, false, false, false, false};
-    configureDetachedWorkspace(mainWindowInstance);
-
-    ASSERT_TRUE(runtime.initialize());
-    ASSERT_TRUE(registerTestFloater());
-
-    runtime.restoreWorkspace();
-    runtime.frame(800, 600);
-    ASSERT_EQ(auxiliaryWindows.state.created, 1);
-
-    runtime.shutdown();
-
-    EXPECT_EQ(auxiliaryWindows.state.destroyed, 1);
-    mainWindow = nullptr;
-}
-
 TEST_F(RuntimeTest, VisibilityAndAccountTransitionsClearInteraction) {
     ASSERT_TRUE(runtime.initialize());
     ASSERT_TRUE(registerTestFloater());
@@ -602,7 +441,7 @@ TEST_F(RuntimeTest, VisibilityAndAccountTransitionsClearInteraction) {
     const F32 y = pressRect.y + pressRect.h * 0.5f;
     EXPECT_TRUE(runtime.pointerDown(makePointerEvent(x, y, PointerButton::Left)).handled);
 
-    runtime.setVisibility(false, true);
+    runtime.setVisibility(false);
     EXPECT_FALSE(runtime.pointerUp(makePointerEvent(x, y, PointerButton::Left)).handled);
     EXPECT_EQ(controllerState.presses, 0);
     nowCalls = 0;
@@ -619,7 +458,7 @@ TEST_F(RuntimeTest, VisibilityAndAccountTransitionsClearInteraction) {
 
 TEST_F(RuntimeTest, ConsumesUnmodifiedTabWhenVisible) {
     ASSERT_TRUE(runtime.initialize());
-    runtime.setVisibility(true, true);
+    runtime.setVisibility(true);
 
     EXPECT_TRUE(runtime.keyDown(makeKeyEvent(kKeyTab)).handled);
     EXPECT_TRUE(runtime.keyUp(makeKeyEvent(kKeyTab)).handled);

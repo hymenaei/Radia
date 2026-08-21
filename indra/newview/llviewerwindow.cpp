@@ -34,7 +34,6 @@
 #include <fstream>
 #include <algorithm>
 
-#include "auxiliarywindow.h"
 #include "llagent.h"
 #include "llagentcamera.h"
 #include "llcommandhandler.h"
@@ -294,7 +293,7 @@ static const F32 MIN_DISPLAY_SCALE = 0.5f;
 
 static const char KEY_MOUSELOOK = 'M';
 
-static bool shouldShowDetachedUI()
+static bool shouldShowRadiaUI()
 {
     return LLStartUp::getStartupState() == STATE_STARTED
         && !LLAppViewer::instance()->quitRequested()
@@ -304,7 +303,7 @@ static bool shouldShowDetachedUI()
 
 static bool shouldShowAttachedUI()
 {
-    return shouldShowDetachedUI() && !gAgentCamera.cameraMouselook();
+    return shouldShowRadiaUI() && !gAgentCamera.cameraMouselook();
 }
 
 LLTrace::SampleStatHandle<> LLViewerWindow::sMouseVelocityStat("Mouse Velocity");
@@ -2583,19 +2582,13 @@ void LLViewerWindow::initBase()
 
     mUIRuntime = std::make_unique<Runtime>(
         gSavedSettings, gSavedPerAccountSettings, gRadiaUIProgram,
-        Runtime::WindowEnvironment{.mainWindow = gWindowp,
-                                   .displayScale =
-                                       [] {
-                                           const LLVector2 scale = gViewerWindow ? gViewerWindow->getDisplayScale() : LLVector2(1.f, 1.f);
-                                           return Vec2{scale.mV[VX], scale.mV[VY]};
-                                       },
-                                   .auxiliaryWindowFactory = defaultAuxiliaryWindowFactory()},
+        gWindowp,
         Runtime::IntegrationHooks{
             .resolveKeybinding = [](const std::string& command) { return KeybindingPresentation{gViewerInput.getPrimaryKeyBinding({}, command)}; },
             .keybindingState = [] { return RuntimeKeybindingState{gViewerInput.getBindingGeneration(), static_cast<U32>(gViewerInput.getMode())}; }});
     registerFloaterDemo(*mUIRuntime);
     mUIRuntime->initialize();
-    mUIRuntime->setVisibility(shouldShowAttachedUI(), shouldShowDetachedUI());
+    mUIRuntime->setVisibility(shouldShowAttachedUI());
 }
 
 void LLViewerWindow::initWorldUI()
@@ -3916,7 +3909,7 @@ void LLViewerWindow::updateUI()
 
     // use full window for world view when not rendering UI
     const bool attachedUIVisible = shouldShowAttachedUI();
-    if (mUIRuntime) mUIRuntime->setVisibility(attachedUIVisible, shouldShowDetachedUI());
+    if (mUIRuntime) mUIRuntime->setVisibility(attachedUIVisible);
     bool world_view_uses_full_window = gAgentCamera.cameraMouselook() || !attachedUIVisible;
     updateWorldViewRect(world_view_uses_full_window);
 

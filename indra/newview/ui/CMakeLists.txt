@@ -28,10 +28,6 @@ target_sources(viewer_ui
   componentmanager.h
   componentpersistence.cpp
   componentpersistence.h
-  detachedfloatermanager.cpp
-  detachedfloatermanager.h
-  detachedfloaterwindow.cpp
-  detachedfloaterwindow.h
   floaterhost.cpp
   floaterhost.h
   inputbridge.cpp
@@ -39,8 +35,6 @@ target_sources(viewer_ui
   nativeinput.h
   runtime.cpp
   runtime.h
-  runtimewindowadapter.cpp
-  runtimewindowadapter.h
   settingsadapter.cpp
   settingsadapter.h
   ${viewer_ui_skin_sources}
@@ -72,10 +66,8 @@ if(BUILD_TESTING)
   set(viewer_ui_test_sources
     componentmanager.cpp
     componentpersistence.cpp
-    detachedfloatermanager.cpp
     inputbridge.cpp
     runtime.cpp
-    runtimewindowadapter.cpp
     settingsadapter.cpp
     skin/reloadcoordinator.cpp
     skin/resolver.cpp

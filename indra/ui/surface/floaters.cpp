@@ -176,10 +176,6 @@ bool Surface::managesFloater(const Floater& floater) const {
         && std::any_of(mFloaters.begin(), mFloaters.end(), [&floater](const auto& managed) { return managed.get() == &floater; });
 }
 
-bool Surface::canDetachFloater(const Floater& floater) const {
-    return managesFloater(floater) && mFloaterDelegate && mFloaterDelegate->canDetachFloater(*this, floater);
-}
-
 void Surface::floaterClosed(Floater& floater) {
     if (managesFloater(floater) && mFloaterDelegate) mFloaterDelegate->floaterClosed(*this, floater);
 }
@@ -194,10 +190,6 @@ void Surface::floaterMoved(Floater& floater) {
 
 void Surface::floaterMoveEnded(Floater& floater) {
     if (managesFloater(floater) && mFloaterDelegate) mFloaterDelegate->floaterMoveEnded(*this, floater);
-}
-
-void Surface::floaterDetachRequested(Floater& floater, const Vec2& desiredPosition, const Vec2& dragOffset) {
-    if (canDetachFloater(floater)) mFloaterDelegate->floaterDetachRequested(*this, floater, desiredPosition, dragOffset);
 }
 
 void Surface::floaterResized(Floater& floater, bool complete) {

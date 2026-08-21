@@ -1,6 +1,6 @@
 /**
  * @file floater.cpp
- * @brief Defines the movable, detachable Floater Widget.
+ * @brief Defines the movable Floater Widget.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -73,7 +73,6 @@ WidgetContract detail::floaterContract() {
             booleanAttribute("canClose", &Floater::setCanClose),
             booleanAttribute("canMinimize", &Floater::setCanMinimize),
             booleanAttribute("canResize", &Floater::setCanResize),
-            booleanAttribute("canDetach", &Floater::setCanDetach),
             booleanAttribute("showHeaderIdentity", &Floater::setShowHeaderIdentity),
         })
         .validate([](const LayoutElement&, Floater& floater, LayoutBuildResult& result, const std::string& source, const LayoutBuildContext*) {
@@ -163,10 +162,6 @@ Floater& Floater::setCanMinimize(bool value) {
 }
 Floater& Floater::setCanResize(bool value) {
     mCanResize = value;
-    return *this;
-}
-Floater& Floater::setCanDetach(bool value) {
-    mCanDetach = value;
     return *this;
 }
 void Floater::setMovementBounds(const Rect& bounds) {
@@ -305,7 +300,6 @@ Vec2 Floater::authoredSize() const {
 bool Floater::beginResizeInteraction(const PointerEvent& event, std::uint8_t edges, const Vec2& minimum, const std::optional<Rect>& bounds) {
     if (event.button != PointerButton::Left || !mCanResize || mMinimized || edges == 0) return false;
     mInteraction = FloaterInteraction::Resize;
-    mDetachRequested = false;
     mResizeInteraction = {edges, event.position, rect(), minimum, bounds};
     return true;
 }
@@ -319,13 +313,11 @@ bool Floater::beginPointerInteraction(const PointerEvent& event) {
         return true;
     }
     mInteraction = FloaterInteraction::Move;
-    mDetachRequested = false;
     mDragOffset = event.position - Vec2{rect().x, rect().y};
     return true;
 }
 
 bool Floater::updatePointerInteraction(const PointerEvent& event) {
-    WidgetRef<Floater> self(this);
     if (mInteraction == FloaterInteraction::Resize) {
         const Rect resized =
             detail::resizedRect(mResizeInteraction.initialRect, mResizeInteraction.initialPointer, event.position,
@@ -337,19 +329,8 @@ bool Floater::updatePointerInteraction(const PointerEvent& event) {
         return true;
     }
     if (mInteraction != FloaterInteraction::Move) return false;
-    const Vec2 desiredPosition = event.position - mDragOffset;
-    const Vec2 position = clampedPosition(desiredPosition);
-    constexpr float kBreakawayDistance = 100.f;
-    const float pointerOvershoot = std::max({mMovementBounds.left() - event.position.x, event.position.x - mMovementBounds.right(),
-                                             mMovementBounds.bottom() - event.position.y, event.position.y - mMovementBounds.top(), 0.f});
+    const Vec2 position = clampedPosition(event.position - mDragOffset);
     Surface* surface = attachedSurface();
-    if (!mDetachRequested && !mMinimized && mCanDetach && surface && surface->canDetachFloater(*this) && pointerOvershoot >= kBreakawayDistance) {
-        mDetachRequested = true;
-        const Widget* originalParent = parent();
-        surface->floaterDetachRequested(*this, desiredPosition, mDragOffset);
-        Floater* current = self.get();
-        if (!current || current->attachedSurface() != surface || current->parent() != originalParent) return true;
-    }
     const Vec2 delta = position - Vec2{rect().x, rect().y};
     if (delta.x != 0.f || delta.y != 0.f) {
         translate(delta);
@@ -366,7 +347,6 @@ bool Floater::endPointerInteraction(const PointerEvent&) {
     const FloaterInteraction interaction = mInteraction;
     const bool handled = interaction != FloaterInteraction::Idle;
     mInteraction = FloaterInteraction::Idle;
-    mDetachRequested = false;
     if (Surface* surface = attachedSurface()) {
         if (interaction == FloaterInteraction::Move) surface->floaterMoveEnded(*this);
         else if (interaction == FloaterInteraction::Resize) surface->floaterResized(*this, true);
@@ -386,7 +366,6 @@ void Floater::onChildrenCleared() {
     mMinimizeButtonIcon.set(nullptr);
     mCustomHeaderClaimed = false;
     mInteraction = FloaterInteraction::Idle;
-    mDetachRequested = false;
     mMinimized = false;
     setState(WidgetState::Minimized, false);
     detail::instantiateCompositeParts(*this, detail::floaterContract());

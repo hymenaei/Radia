@@ -26,7 +26,6 @@
 #include "componentpersistence.h"
 #include <cmath>
 #include <string_view>
-#include <type_traits>
 #include <utility>
 #include "llcontrol.h"
 #include "llsdutil.h"
@@ -70,21 +69,16 @@ void setOptionalFlag(LLSD& entry, const char* name, bool value) {
     else entry.erase(name);
 }
 
-template<typename Placement> void writeGeometry(LLSD& entry, const Placement& placement) {
-    entry["position"] = makePair(static_cast<float>(placement.x), static_cast<float>(placement.y));
+void writeGeometry(LLSD& entry, const FloaterPlacement& placement) {
+    entry["position"] = makePair(placement.x, placement.y);
     if (placement.size) entry["size"] = makePair(placement.size->width, placement.size->height);
     else entry.erase("size");
-    if constexpr (std::is_same_v<Placement, DetachedFloaterPlacement>) entry["detached"] = true;
-    else entry.erase("detached");
+    entry.erase("detached");
 }
 
 void writePlacement(LLSD& entry, const FloaterPlacement& placement) {
-    std::visit(
-        [&entry](const auto& value) {
-            writeGeometry(entry, value);
-            setOptionalFlag(entry, "minimized", value.minimized);
-        },
-        placement);
+    writeGeometry(entry, placement);
+    setOptionalFlag(entry, "minimized", placement.minimized);
 }
 
 void writeLayoutPlacement(LLSD& entry, const FloaterPlacement& placement) {
@@ -92,26 +86,29 @@ void writeLayoutPlacement(LLSD& entry, const FloaterPlacement& placement) {
     entry.erase("minimized");
 }
 
-std::optional<FloaterPlacement> decodePlacement(const LLSD& value) {
+std::optional<FloaterPlacement> decodePlacement(const LLSD& value, const FloaterPlacement& fallback) {
     if (!value.isMap()) return std::nullopt;
-
-    float x = 0.f;
-    float y = 0.f;
-    if (!readPair(value["position"], x, y)) return std::nullopt;
 
     float width = 0.f;
     float height = 0.f;
     const bool hasSize = readPair(value["size"], width, height) && width > 0.f && height > 0.f;
     const bool minimized = readFlag(value, "minimized");
-    if (value["detached"].asBoolean()) {
-        std::optional<FloaterLogicalSize> size;
-        if (hasSize) size = FloaterLogicalSize{width, height};
-        return DetachedFloaterPlacement{static_cast<int>(std::lround(x)), static_cast<int>(std::lround(y)), size, minimized};
-    }
 
     std::optional<FloaterLogicalSize> size;
     if (hasSize) size = FloaterLogicalSize{width, height};
-    return AttachedFloaterPlacement{x, y, size, minimized};
+
+    // Detached records stored native screen coordinates, which are not valid on the main Surface.
+    if (readFlag(value, "detached")) {
+        FloaterPlacement migrated = fallback;
+        if (size) migrated.size = size;
+        migrated.minimized = minimized;
+        return migrated;
+    }
+
+    float x = 0.f;
+    float y = 0.f;
+    if (!readPair(value["position"], x, y)) return std::nullopt;
+    return FloaterPlacement{x, y, size, minimized};
 }
 
 LLSD mergedPlacement(const LLSD& layout, const LLSD& workspaceEntry) {
@@ -155,25 +152,24 @@ void ComponentPersistence::saveWorkspace(const std::vector<ComponentInstanceStat
         if (!entry.isMap()) entry = LLSD::emptyMap();
         if (state.minimized) entry["minimized"] = true;
         else entry.erase("minimized");
-        if (!state.componentKey.instanceKey.empty() && state.detached) entry["detached"] = true;
-        else entry.erase("detached");
+        entry.erase("detached");
     }
 
     if (workspace == previousWorkspace) return;
     writeWorkspace(workspace);
 }
 
-std::optional<FloaterPlacement> ComponentPersistence::restorePlacement(const ComponentKey& componentKey) const {
+std::optional<FloaterPlacement> ComponentPersistence::restorePlacement(const ComponentKey& componentKey, const FloaterPlacement& fallback) const {
     if (!componentKey.valid()) return std::nullopt;
     const LLSD layout = readLayout();
     const LLSD workspace = readWorkspace();
-    return decodePlacement(mergedPlacement(layout[componentKey.definitionId], workspace[componentKey.persistenceKey()]));
+    return decodePlacement(mergedPlacement(layout[componentKey.definitionId], workspace[componentKey.persistenceKey()]), fallback);
 }
 
-void ComponentPersistence::saveAttachedPlacement(const ComponentKey& componentKey, const Floater& floater) {
+void ComponentPersistence::saveFloaterPlacement(const ComponentKey& componentKey, const Floater& floater) {
     std::optional<FloaterLogicalSize> size;
     if (floater.canResize()) size = FloaterLogicalSize{floater.rect().w, floater.rect().h};
-    savePlacement(componentKey, AttachedFloaterPlacement{floater.rect().x, floater.rect().y, size, floater.minimized()},
+    savePlacement(componentKey, FloaterPlacement{floater.rect().x, floater.rect().y, size, floater.minimized()},
                   floater.closed() ? ComponentOpenState::Closed : ComponentOpenState::Open);
 }
 
@@ -203,8 +199,7 @@ void ComponentPersistence::savePlacement(const ComponentKey& componentKey, Float
         workspaceEntry.erase("position");
         workspaceEntry.erase("size");
         workspaceEntry.erase("detached");
-        const bool minimized = std::visit([](const auto& value) { return value.minimized; }, placement);
-        setOptionalFlag(workspaceEntry, "minimized", minimized);
+        setOptionalFlag(workspaceEntry, "minimized", placement.minimized);
     } else {
         LLSD& workspaceEntry = workspace[key];
         if (!workspaceEntry.isMap()) workspaceEntry = LLSD::emptyMap();

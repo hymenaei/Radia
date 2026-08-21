@@ -71,7 +71,7 @@
         <key>UILayout</key>
         <map>
             <key>Comment</key>
-            <string>Stores saved UI layout, including position, size, and detached state.</string>
+            <string>Stores saved UI layout, including position and size.</string>
             <key>Persist</key>
             <integer>1</integer>
             <key>Type</key>

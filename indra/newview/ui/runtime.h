@@ -42,7 +42,6 @@
 class LLControlGroup;
 class LLGLSLShader;
 class LLWindow;
-class AuxiliaryWindowFactory;
 
 namespace radia::ui {
 class Floater;
@@ -59,7 +58,6 @@ using radia::ui::PaintContext;
 using radia::ui::PointerEvent;
 using radia::ui::ScrollEvent;
 using radia::ui::System;
-using radia::ui::Vec2;
 
 struct InputDispatchResult {
     bool handled = false;
@@ -78,18 +76,11 @@ struct RuntimeKeybindingState {
 class Runtime final {
 public:
     using ControllerFactory = std::function<std::unique_ptr<ComponentController>(System& system)>;
-    using DisplayScaleProvider = std::function<Vec2()>;
     using KeybindingResolver = std::function<KeybindingPresentation(const std::string&)>;
     using KeybindingStateProvider = std::function<RuntimeKeybindingState()>;
     using SkinSnapshotProvider = std::function<SkinSnapshotResult()>;
     using Clock = std::function<std::chrono::steady_clock::time_point()>;
     using PaintContextFactory = std::function<std::unique_ptr<PaintContext>(LLGLSLShader&, System&)>;
-
-    struct WindowEnvironment {
-        LLWindow*& mainWindow;
-        DisplayScaleProvider displayScale;
-        AuxiliaryWindowFactory& auxiliaryWindowFactory;
-    };
 
     struct IntegrationHooks {
         KeybindingResolver resolveKeybinding;
@@ -99,7 +90,7 @@ public:
         PaintContextFactory paintContext = {};
     };
 
-    Runtime(LLControlGroup& savedSettings, LLControlGroup& perAccountSettings, LLGLSLShader& uiShader, WindowEnvironment window,
+    Runtime(LLControlGroup& savedSettings, LLControlGroup& perAccountSettings, LLGLSLShader& uiShader, LLWindow* mainWindow,
             IntegrationHooks hooks);
     ~Runtime();
     Runtime(const Runtime&) = delete;
@@ -112,7 +103,7 @@ public:
     void restoreWorkspace();
     void endAccountSession();
     void requestSkinReload();
-    void setVisibility(bool attachedVisible, bool detachedVisible);
+    void setVisibility(bool visible);
     void frame(S32 width, S32 height);
     void idle();
     bool hasPointerCapture() const;

@@ -26,7 +26,6 @@
 #define RD_COMPONENTPERSISTENCE_H
 
 #include <optional>
-#include <variant>
 #include <vector>
 #include "componentidentity.h"
 #include "llsd.h"
@@ -44,26 +43,16 @@ struct FloaterLogicalSize {
     float height = 0.f;
 };
 
-struct AttachedFloaterPlacement {
+struct FloaterPlacement {
     float x = 0.f;
     float y = 0.f;
     std::optional<FloaterLogicalSize> size;
     bool minimized = false;
 };
 
-struct DetachedFloaterPlacement {
-    int x = 0;
-    int y = 0;
-    std::optional<FloaterLogicalSize> size;
-    bool minimized = false;
-};
-
-using FloaterPlacement = std::variant<AttachedFloaterPlacement, DetachedFloaterPlacement>;
-
 struct ComponentInstanceState {
     ComponentKey componentKey;
     bool minimized = false;
-    bool detached = false;
 };
 
 class ComponentPersistence final {
@@ -72,8 +61,8 @@ public:
 
     std::vector<ComponentKey> openComponentKeys() const;
     void saveWorkspace(const std::vector<ComponentInstanceState>& states, const std::vector<ComponentKey>& preserved = {});
-    std::optional<FloaterPlacement> restorePlacement(const ComponentKey& componentKey) const;
-    void saveAttachedPlacement(const ComponentKey& componentKey, const Floater& floater);
+    std::optional<FloaterPlacement> restorePlacement(const ComponentKey& componentKey, const FloaterPlacement& fallback) const;
+    void saveFloaterPlacement(const ComponentKey& componentKey, const Floater& floater);
     void savePlacement(const ComponentKey& componentKey, FloaterPlacement placement, ComponentOpenState state);
 
 private:

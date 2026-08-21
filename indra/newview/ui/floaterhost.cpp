@@ -26,7 +26,6 @@
 #include "floaterhost.h"
 #include <optional>
 #include <utility>
-#include "detachedfloatermanager.h"
 #include "surface/floaterresize.h"
 #include "surface/surface.h"
 #include "widgets/floater.h"
@@ -41,38 +40,28 @@ namespace {
 class FloaterReplacement final {
 public:
     using ReplacementRequest = ComponentManager::Host::ReplacementRequest;
-    FloaterReplacement(Surface& attachedSurface, DetachedFloaterManager& detachedManager, std::vector<ReplacementRequest> replacements)
-        : mAttachedSurface(attachedSurface), mDetachedManager(detachedManager) {
+    FloaterReplacement(Surface& attachedSurface, std::vector<ReplacementRequest> replacements) : mAttachedSurface(attachedSurface) {
         mPlanned.reserve(replacements.size());
         for (auto& request : replacements) {
             Floater* current = request.current;
             Floater* candidate = request.replacement.get();
             if (!current || !candidate) return;
 
-            const bool wasDetached = mDetachedManager.isDetached(*current);
-            if (!wasDetached && !mAttachedSurface.ownsFloater(*current)) return;
+            if (!mAttachedSurface.ownsFloater(*current)) return;
 
             const bool wasMinimized = current->minimized();
-            std::optional<Vec2> previousDetachedLogicalSize;
-            if (wasDetached) previousDetachedLogicalSize = mDetachedManager.logicalSize(*current);
-            std::optional<Rect> authoredRect;
-            if (wasDetached) authoredRect = mDetachedManager.prepareReplacement(*current, *candidate);
-            else authoredRect = mAttachedSurface.prepareFloater(*candidate);
+            const std::optional<Rect> authoredRect = mAttachedSurface.prepareFloater(*candidate);
             if (!authoredRect) return;
             const Vec2 authoredSize{authoredRect->w, authoredRect->h};
             Rect replacementRect = wasMinimized ? current->expandedRect() : current->rect();
             const bool preserveSize = radia::ui::detail::preserveUserResizeOnReload(current->canResize(), candidate->canResize(),
                                                                                     {current->authoredSize(), current->authoredContentSize()},
                                                                                     {authoredSize, candidate->authoredContentSize()});
-            std::optional<Vec2> replacementLogicalSize;
             if (!preserveSize) {
-                replacementLogicalSize = authoredSize;
-                replacementRect.w = replacementLogicalSize->x;
-                replacementRect.h = replacementLogicalSize->y;
-            } else if (wasDetached) {
-                replacementLogicalSize = previousDetachedLogicalSize;
+                replacementRect.w = authoredSize.x;
+                replacementRect.h = authoredSize.y;
             }
-            mPlanned.push_back({std::move(request), wasDetached, wasMinimized, replacementRect, replacementLogicalSize, previousDetachedLogicalSize});
+            mPlanned.push_back({std::move(request), wasMinimized, replacementRect});
         }
 
         mValid = true;
@@ -101,33 +90,19 @@ public:
 private:
     struct PlannedReplacement {
         ReplacementRequest request;
-        bool wasDetached = false;
         bool wasMinimized = false;
         Rect replacementRect;
-        std::optional<Vec2> replacementLogicalSize;
-        std::optional<Vec2> previousDetachedLogicalSize;
     };
 
     struct AppliedReplacement {
         std::size_t index = 0;
         Floater* installed = nullptr;
         std::unique_ptr<Floater> retired;
-        bool wasDetached = false;
     };
 
     bool replaceOne(std::size_t index, AppliedReplacement& applied) {
         PlannedReplacement& replacement = mPlanned[index];
         ReplacementRequest& request = replacement.request;
-        if (replacement.wasDetached) {
-            if (!request.current || !request.replacement) return false;
-            Floater* candidate = request.replacement.get();
-            DetachedFloaterManager::Replacement detachedReplacement =
-                mDetachedManager.replace(*request.current, std::move(request.replacement), replacement.replacementLogicalSize);
-            if (!detachedReplacement || detachedReplacement.installed() != candidate) return false;
-            applied = {index, detachedReplacement.installed(), std::move(detachedReplacement).takeRetired(), true};
-            return true;
-        }
-
         Floater* current = request.current;
         Floater* candidate = request.replacement.get();
         if (!current || !candidate) return false;
@@ -139,30 +114,21 @@ private:
         mAttachedSurface.placeFloater(*mounted, replacement.replacementRect);
         if (replacement.wasMinimized && mounted->canMinimize()) mounted->setMinimized(true);
         mAttachedSurface.updateLayout();
-        applied = {index, mounted, std::move(retired), false};
+        applied = {index, mounted, std::move(retired)};
         return true;
     }
 
     bool rollback() {
         for (auto current = mApplied.rbegin(); current != mApplied.rend(); ++current) {
             const PlannedReplacement& replacement = mPlanned[current->index];
-            if (current->wasDetached) {
-                DetachedFloaterManager::Replacement restored =
-                    mDetachedManager.replace(*current->installed, std::move(current->retired), replacement.previousDetachedLogicalSize);
-                if (!restored || restored.installed() != replacement.request.current || restored.retired() != current->installed) {
-                    mFinalized = true;
-                    return false;
-                }
-            } else {
-                if (!current->installed) {
-                    mFinalized = true;
-                    return false;
-                }
-                std::unique_ptr<Floater> restored = mAttachedSurface.replaceFloater(*current->installed, std::move(current->retired));
-                if (!restored || restored.get() != current->installed || !replacement.request.current) {
-                    mFinalized = true;
-                    return false;
-                }
+            if (!current->installed) {
+                mFinalized = true;
+                return false;
+            }
+            std::unique_ptr<Floater> restored = mAttachedSurface.replaceFloater(*current->installed, std::move(current->retired));
+            if (!restored || restored.get() != current->installed || !replacement.request.current) {
+                mFinalized = true;
+                return false;
             }
         }
         mAttachedSurface.updateLayout();
@@ -175,7 +141,6 @@ private:
     }
 
     Surface& mAttachedSurface;
-    DetachedFloaterManager& mDetachedManager;
     std::vector<PlannedReplacement> mPlanned;
     std::vector<AppliedReplacement> mApplied;
     bool mValid = false;
@@ -183,26 +148,24 @@ private:
 };
 } // namespace
 
-FloaterHost::FloaterHost(Surface& attachedSurface, DetachedFloaterManager& detachedManager)
-    : mAttachedSurface(attachedSurface), mDetachedManager(detachedManager) {}
+FloaterHost::FloaterHost(Surface& attachedSurface) : mAttachedSurface(attachedSurface) {}
 
 void FloaterHost::mount(std::unique_ptr<Floater> root) {
     mAttachedSurface.mountFloater(std::move(root));
 }
 
 std::unique_ptr<Floater> FloaterHost::unmount(Floater& root) {
-    if (mDetachedManager.isDetached(root)) return {};
     return mAttachedSurface.unmountFloater(root);
 }
 
 bool FloaterHost::replaceAll(std::vector<ReplacementRequest> replacements) {
-    FloaterReplacement transaction(mAttachedSurface, mDetachedManager, std::move(replacements));
+    FloaterReplacement transaction(mAttachedSurface, std::move(replacements));
     return transaction.commit();
 }
 
 bool FloaterHost::clearAll(std::vector<Floater*> roots) {
     for (Floater* root : roots)
-        if (!root || mDetachedManager.isDetached(*root) || !mAttachedSurface.ownsFloater(*root)) return false;
+        if (!root || !mAttachedSurface.ownsFloater(*root)) return false;
     for (Floater* root : roots) {
         if (!root->closed()) root->close();
         std::unique_ptr<Floater> retired = mAttachedSurface.unmountFloater(*root);
@@ -213,6 +176,6 @@ bool FloaterHost::clearAll(std::vector<Floater*> roots) {
 
 void FloaterHost::present(Floater& root) {
     root.open();
-    if (!mDetachedManager.isDetached(root)) mAttachedSurface.raise(root);
+    mAttachedSurface.raise(root);
 }
 } // namespace radia::viewer::ui

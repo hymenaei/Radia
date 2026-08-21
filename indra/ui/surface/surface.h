@@ -46,13 +46,10 @@ class TextMetrics;
 class SurfaceFloaterDelegate {
 public:
     virtual ~SurfaceFloaterDelegate() = default;
-    virtual bool canDetachFloater(const Surface&, const Floater&) const { return false; }
     virtual void floaterClosed(Surface&, Floater&) {}
     virtual void floaterMinimizedChanged(Surface&, Floater&, bool) {}
     virtual void floaterMoved(Surface&, Floater&) {}
     virtual void floaterMoveEnded(Surface&, Floater&) {}
-    virtual void floaterDetachRequested(Surface&, Floater&, const Vec2&, const Vec2&) {}
-    virtual bool beginNativeFloaterResize(Surface&, Floater&) { return false; }
     virtual void floaterResized(Surface&, Floater&, bool) {}
 };
 
@@ -155,12 +152,10 @@ private:
     void constrainFloater(Floater& floater);
     bool updateLayoutIfNeeded();
     bool managesFloater(const Floater& floater) const;
-    bool canDetachFloater(const Floater& floater) const;
     void floaterClosed(Floater& floater);
     void floaterMinimizedChanged(Floater& floater, bool minimized);
     void floaterMoved(Floater& floater);
     void floaterMoveEnded(Floater& floater);
-    void floaterDetachRequested(Floater& floater, const Vec2& desiredPosition, const Vec2& dragOffset);
     void floaterResized(Floater& floater, bool complete);
     void generationChanged(const StyleSheet& styleSheet);
     void localeChanged();

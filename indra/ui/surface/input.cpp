@@ -285,10 +285,9 @@ bool Surface::pointerDown(const PointerEvent& event) {
         clearKeyboardPress();
         if (Widget* pressed = mPressed.get()) pressed->setState(WidgetState::Active, false);
         mPressed.set(nullptr);
-        const bool native = mFloaterDelegate && mFloaterDelegate->beginNativeFloaterResize(*this, *resizeFloater);
         resizeFloater = resizeRef.get();
         if (!isResizeFloaterStillAttached()) return false;
-        const std::optional<Rect> bounds = native ? std::nullopt : std::optional<Rect>(mViewport);
+        const std::optional<Rect> bounds = mViewport;
         const Vec2 minimum = minimumFloaterSize(*resizeFloater);
         resizeFloater = resizeRef.get();
         if (!isResizeFloaterStillAttached()) return false;

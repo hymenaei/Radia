@@ -11,7 +11,6 @@
 include(UI)
 
 set(llwindow_BASE_SOURCE_FILES
-  auxiliarywindow.cpp
   llcursortypes.cpp
   llkeyboard.cpp
   llkeyboardheadless.cpp
@@ -22,7 +21,6 @@ set(llwindow_BASE_SOURCE_FILES
 )
 
 set(llwindow_BASE_HEADER_FILES
-  auxiliarywindow.h
   llcursortypes.h
   llkeyboard.h
   llkeyboardheadless.h

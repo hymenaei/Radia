@@ -51,6 +51,11 @@
 #include <boost/signals2.hpp>
 
 #include <functional>
+#include <memory>
+
+namespace radia::viewer::ui {
+    class Runtime;
+}
 
 class LLView;
 class LLViewerObject;
@@ -228,6 +233,7 @@ public:
     /*virtual*/ void handleResize(LLWindow *window,  S32 x,  S32 y);
     /*virtual*/ void handleFocus(LLWindow *window);
     /*virtual*/ void handleFocusLost(LLWindow *window);
+    /*virtual*/ void handleMouseCaptureLost(LLWindow *window);
     /*virtual*/ bool handleActivate(LLWindow *window, bool activated);
     /*virtual*/ bool handleActivateApp(LLWindow *window, bool activating);
     /*virtual*/ void handleMenuSelect(LLWindow *window,  S32 menu_item);
@@ -369,6 +375,9 @@ public:
     void            sendShapeToSim();
 
     void            draw();
+    void            idleUIRuntime();
+    void            restoreUIWorkspace();
+    void            endUIAccountSession();
     void            updateDebugText();
     void            drawDebugText();
 
@@ -500,6 +509,7 @@ private:
 
 private:
     LLWindow*       mWindow;                        // graphical window object
+    std::unique_ptr<radia::viewer::ui::Runtime> mUIRuntime;
     bool            mActive;
     bool            mUIVisible;
 
@@ -524,6 +534,7 @@ private:
     LLCoordGL       mCurrentMousePoint;         // last mouse position in GL coords
     LLCoordGL       mLastMousePoint;        // Mouse point at last frame.
     LLCoordGL       mCurrentMouseDelta;     //amount mouse moved this frame
+    LLCoordGL       mCurrentRawMouseDelta;
     bool            mLeftMouseDown;
     bool            mMiddleMouseDown;
     bool            mRightMouseDown;

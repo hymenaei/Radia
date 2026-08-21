@@ -1,0 +1,19 @@
+// Inline content vocabulary consumed by inlinecontent.h/cpp for enum values,
+// authored-element lookup, and style-element classification.
+// Arguments: C++ kind, authored element name (empty for plain text), whether
+// the entry is an authored inline container/style element.
+
+// Text is the leaf/plain-text kind; it has no authored element name.
+INLINE_CONTENT_ENTRY(Text, "", false)
+// B applies bold text styling to its child content.
+INLINE_CONTENT_ENTRY(B, "b", true)
+// I applies italic text styling to its child content.
+INLINE_CONTENT_ENTRY(I, "i", true)
+// S applies strike-through text styling to its child content.
+INLINE_CONTENT_ENTRY(S, "s", true)
+// Kbd renders a keybinding presentation as inline content.
+INLINE_CONTENT_ENTRY(Kbd, "kbd", true)
+// Br terminates the current inline line and starts the next one.
+INLINE_CONTENT_ENTRY(Br, "br", true)
+// Link carries a destination plus inline child content.
+INLINE_CONTENT_ENTRY(Link, "link", true)

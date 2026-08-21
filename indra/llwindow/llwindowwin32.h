@@ -261,6 +261,7 @@ protected:
     U32             mRawLParam;
 
     bool            mMouseVanish;
+    bool            mOwnsMouseCapture = false;
 
     static HMODULE sGLDLLHandle;
 

@@ -82,26 +82,20 @@ namespace
     {
         size_t start = 0;
         size_t end = s.size();
-        while (start < end && (s[start] == ' ' || s[start] == '\t' || s[start] == '\n' || s[start] == '\r'))
-            ++start;
-        while (end > start && (s[end-1] == ' ' || s[end-1] == '\t' || s[end-1] == '\n' || s[end-1] == '\r'))
-            --end;
+        while (start < end && (s[start] == ' ' || s[start] == '\t' || s[start] == '\n' || s[start] == '\r')) ++start;
+        while (end > start && (s[end-1] == ' ' || s[end-1] == '\t' || s[end-1] == '\n' || s[end-1] == '\r')) --end;
         return s.substr(start, end - start);
     }
 
     bool parseHexCodepoint(const std::string& token, llwchar& out)
     {
         std::string s = trimSpaces(token);
-        if (s.size() >= 2 && (s[0] == 'U' || s[0] == 'u') && s[1] == '+')
-            s = s.substr(2);
-        else if (s.size() >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
-            s = s.substr(2);
-        if (s.empty())
-            return false;
+        if (s.size() >= 2 && (s[0] == 'U' || s[0] == 'u') && s[1] == '+') s = s.substr(2);
+        else if (s.size() >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s = s.substr(2);
+        if (s.empty()) return false;
         char* end = nullptr;
         unsigned long v = std::strtoul(s.c_str(), &end, 16);
-        if (!end || *end != '\0')
-            return false;
+        if (!end || *end != '\0') return false;
         out = static_cast<llwchar>(v);
         return true;
     }
@@ -120,8 +114,7 @@ namespace
             std::string item = spec.substr(pos, (comma == std::string::npos) ? std::string::npos : comma - pos);
             pos = (comma == std::string::npos) ? spec.size() + 1 : comma + 1;
             item = trimSpaces(item);
-            if (item.empty())
-                continue;
+            if (item.empty()) continue;
             size_t dash = item.find('-');
             llwchar lo = 0, hi = 0;
             if (dash == std::string::npos)
@@ -135,26 +128,22 @@ namespace
             }
             else
             {
-                if (!parseHexCodepoint(item.substr(0, dash), lo) ||
-                    !parseHexCodepoint(item.substr(dash + 1), hi))
+                if (!parseHexCodepoint(item.substr(0, dash), lo) || !parseHexCodepoint(item.substr(dash + 1), hi))
                 {
                     LL_WARNS() << "fonts.xml: bad unicode_ranges range '" << item << "'" << LL_ENDL;
                     continue;
                 }
-                if (hi < lo)
-                    std::swap(lo, hi);
+                if (hi < lo) std::swap(lo, hi);
             }
             ranges.emplace_back(lo, hi);
         }
-        if (ranges.empty())
-            return nullptr;
+        if (ranges.empty()) return nullptr;
         std::sort(ranges.begin(), ranges.end());
         auto shared = std::make_shared<std::vector<std::pair<llwchar, llwchar>>>(std::move(ranges));
         return [shared](llwchar cp) -> bool {
             auto it = std::upper_bound(shared->begin(), shared->end(), cp,
                 [](llwchar c, const std::pair<llwchar, llwchar>& r) { return c < r.first; });
-            if (it == shared->begin())
-                return false;
+            if (it == shared->begin()) return false;
             --it;
             return cp >= it->first && cp <= it->second;
         };
@@ -171,8 +160,7 @@ bool init_from_xml(LLFontRegistry* registry, LLXMLNodePtr node);
 const std::string MACOSX_FONT_PATH_LIBRARY = "/Library/Fonts/";
 const std::string MACOSX_FONT_SUPPLEMENTAL = "Supplemental/";
 
-LLFontDescriptor::LLFontDescriptor():
-    mStyle(0)
+LLFontDescriptor::LLFontDescriptor(): mStyle(0)
 {
 }
 
@@ -198,20 +186,19 @@ LLFontDescriptor::LLFontDescriptor(const std::string& name,
 
 bool LLFontDescriptor::operator<(const LLFontDescriptor& b) const
 {
-    if (mName < b.mName)
-        return true;
-    else if (mName > b.mName)
-        return false;
+    if (mName < b.mName) return true;
+    else if (mName > b.mName) return false;
 
-    if (mStyle < b.mStyle)
-        return true;
-    else if (mStyle > b.mStyle)
-        return false;
+    if (mStyle < b.mStyle) return true;
+    else if (mStyle > b.mStyle)  return false;
 
-    if (mSize < b.mSize)
-        return true;
-    else
-        return false;
+    if (mSize < b.mSize) return true;
+    if (mSize > b.mSize) return false;
+
+    if (mPointSize < b.mPointSize) return true;
+    if (mPointSize > b.mPointSize) return false;
+
+    return mWeight < b.mWeight;
 }
 
 static const std::string s_template_string("TEMPLATE");
@@ -237,10 +224,7 @@ bool removeSubString(std::string& str, const std::string& substr)
 bool findSubString(std::string& str, const std::string& substr)
 {
     size_t pos = str.find(substr);
-    if (pos != string::npos)
-    {
-        return true;
-    }
+    if (pos != string::npos) return true;
     return false;
 }
 
@@ -288,7 +272,17 @@ LLFontDescriptor LLFontDescriptor::normalize() const
     if (removeSubString(new_name,"Italic"))
         new_style |= LLFontGL::ITALIC;
 
-    return LLFontDescriptor(new_name,new_size,new_style, getFontFiles());
+    LLFontDescriptor normalized(new_name,new_size,new_style, getFontFiles());
+    normalized.mPointSize = mPointSize;
+    normalized.mWeight = mWeight;
+    return normalized;
+}
+
+void LLFontDescriptor::setPointSize(F32 point_size)
+{
+    mPointSize = point_size > 0.f
+        ? static_cast<F32>(ll_round(point_size * 64.f)) / 64.f
+        : 0.f;
 }
 
 void LLFontDescriptor::addFontFile(const std::string& file_name, EFontHinting hinting, S32 flags, F32 size_delta, const std::function<bool(llwchar)>& char_functor, bool monospace_ligatures, bool load_collection, const ALFontVarAxes& var_axes)
@@ -1621,8 +1615,9 @@ LLFontGL *LLFontRegistry::createFont(const LLFontDescriptor& desc)
 
     // First decipher the requested size.
     LLFontDescriptor norm_desc = desc.normalize();
-    F32 point_size;
-    bool found_size = nameToSize(norm_desc.getName(), norm_desc.getSize(), point_size);
+    F32 point_size = norm_desc.getPointSize();
+    bool found_size = norm_desc.hasPointSize()
+        || nameToSize(norm_desc.getName(), norm_desc.getSize(), point_size);
     if (!found_size)
     {
         LL_WARNS() << "createFont unrecognized size " << norm_desc.getSize() << LL_ENDL;
@@ -1634,6 +1629,8 @@ LLFontGL *LLFontRegistry::createFont(const LLFontDescriptor& desc)
     // Find corresponding font template (based on same descriptor with no size specified)
     LLFontDescriptor template_desc(norm_desc);
     template_desc.setSize(s_template_string);
+    template_desc.setPointSize(0.f);
+    template_desc.setWeight(0);
     const LLFontDescriptor *match_desc = getClosestFontTemplate(template_desc);
     if (!match_desc)
     {
@@ -1645,6 +1642,8 @@ LLFontGL *LLFontRegistry::createFont(const LLFontDescriptor& desc)
     // See whether this best-match font has already been instantiated in the requested size.
     LLFontDescriptor nearest_exact_desc = *match_desc;
     nearest_exact_desc.setSize(norm_desc.getSize());
+    nearest_exact_desc.setPointSize(norm_desc.getPointSize());
+    nearest_exact_desc.setWeight(norm_desc.getWeight());
     font_reg_map_t::iterator it = mFontMap.find(nearest_exact_desc);
     // If we fail to find a font in the fonts directory, it->second might be NULL.
     // We shouldn't construcnt a font with a NULL mFontFreetype.
@@ -1721,7 +1720,7 @@ LLFontGL *LLFontRegistry::createFont(const LLFontDescriptor& desc)
         // (e.g. the ultimate-fallback list synthesized in createFont, or
         // bare-filename overrides) — those fall through to the chain pt.
         F32 effective_point_size = point_size;
-        if (!font_file_it->mSourceFamily.empty())
+        if (!norm_desc.hasPointSize() && !font_file_it->mSourceFamily.empty())
         {
             family_size_map_t::const_iterator fam_it =
                 mFamilySizes.find(font_file_it->mSourceFamily);
@@ -1737,6 +1736,15 @@ LLFontGL *LLFontRegistry::createFont(const LLFontDescriptor& desc)
         }
         F32 point_size_scale = extra_scale * effective_point_size;
         F32 actual_point_size = point_size_scale + font_file_it->mSizeDelta;
+        ALFontVarAxes effective_var_axes = font_file_it->mVarAxes;
+        // Only override files that declared a weight axis in fonts.xml.
+        // This is both capability metadata and a cache guard: stamping wght
+        // onto static emoji/OS fallback files would create one duplicate
+        // ALFontFace per CSS weight even though FreeType ignores the axis.
+        if (norm_desc.hasWeight() && effective_var_axes.wght_set)
+        {
+            effective_var_axes.wght = static_cast<F32>(norm_desc.getWeight());
+        }
         bool is_font_loaded = false;
         for(string_vec_t::iterator font_search_path_it = font_search_paths.begin();
             font_search_path_it != font_search_paths.end();
@@ -1762,7 +1770,7 @@ LLFontGL *LLFontRegistry::createFont(const LLFontDescriptor& desc)
                         {font_file_it->FileName, i, actual_point_size,
                          LLFontGL::sVertDPI, LLFontGL::sHorizDPI,
                          font_file_it->mHinting, font_file_it->mFlags,
-                         font_file_it->mVarAxes},
+                         effective_var_axes, LLFontGL::sEnableFontGpu},
                         font_file_it->mMonospaceLigatures
                     };
                     auto cache_it = mFallbackInstanceCache.find(key);
@@ -1779,7 +1787,7 @@ LLFontGL *LLFontRegistry::createFont(const LLFontDescriptor& desc)
                     fontp = new LLFontGL;
                 }
                 if (fontp->loadFace(font_path, actual_point_size,
-                                 LLFontGL::sVertDPI, LLFontGL::sHorizDPI, is_fallback, i, font_file_it->mHinting, font_file_it->mFlags, font_file_it->mVarAxes))
+                                 LLFontGL::sVertDPI, LLFontGL::sHorizDPI, is_fallback, i, font_file_it->mHinting, font_file_it->mFlags, effective_var_axes))
                 {
                     is_font_loaded = true;
                     fontp->mFontFreetype->setAllowMonospaceLigatures(font_file_it->mMonospaceLigatures);
@@ -1803,7 +1811,7 @@ LLFontGL *LLFontRegistry::createFont(const LLFontDescriptor& desc)
                             {font_file_it->FileName, i, actual_point_size,
                              LLFontGL::sVertDPI, LLFontGL::sHorizDPI,
                              font_file_it->mHinting, font_file_it->mFlags,
-                             font_file_it->mVarAxes},
+                             effective_var_axes, LLFontGL::sEnableFontGpu},
                             font_file_it->mMonospaceLigatures
                         };
                         mFallbackInstanceCache.emplace(key, fontp->mFontFreetype);
@@ -2036,7 +2044,7 @@ bool LLFontRegistry::reload(const LLSD& font_overrides)
             head->mFontFreetype = fresh->mFontFreetype;
             head->mFontDescriptor = desc;
             storeFont(desc, head);
-            head->generateASCIIglyphs();
+            if (!desc.hasPointSize() || !LLFontGL::sEnableFontGpu) head->generateASCIIglyphs();
         }
         else
         {
@@ -2141,7 +2149,7 @@ void LLFontRegistry::destroyGL()
     }
 }
 
-LLFontGL *LLFontRegistry::getFont(const LLFontDescriptor& desc)
+LLFontGL *LLFontRegistry::getFont(const LLFontDescriptor& desc, bool prewarm_ascii)
 {
     font_reg_map_t::iterator it = mFontMap.find(desc);
     if (it != mFontMap.end())
@@ -2155,7 +2163,7 @@ LLFontGL *LLFontRegistry::getFont(const LLFontDescriptor& desc)
                     <<" style=[" << ((S32) desc.getStyle()) << "]"
                     << " size=[" << desc.getSize() << "]" << LL_ENDL;
         }
-        else
+        else if (prewarm_ascii)
         {
             //generate glyphs for ASCII chars to avoid stalls later
             fontp->generateASCIIglyphs();

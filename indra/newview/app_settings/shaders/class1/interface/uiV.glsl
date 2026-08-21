@@ -1,5 +1,6 @@
 /**
  * @file uiV.glsl
+ * @brief Vertex stage for the viewer and retained UI paint shader variants.
  *
  * $LicenseInfo:firstyear=2007&license=viewerlgpl$
  * Second Life Viewer Source Code
@@ -23,21 +24,51 @@
  * $/LicenseInfo$
  */
 
+// Transitional source variants share one UI shader pair while the viewer
+// migrates from the legacy texture/font contract to retained painting. Once
+// every UI caller uses retained painting, remove the legacy #else branch and
+// make the retained path the default vertex program.
 // Shared matrix stack + derived matrices, spliced from
 // class1/deferred/matricesBlock.glsl and bound at UB_MATRICES.
 //[ENGINE_BLOCK Matrices]
 
+#ifdef PAINT_SHADER
 in vec3 position;
 in vec4 diffuse_color;
 in vec2 texcoord0;
 
-out vec4 vertex_color;
-out vec2 vary_texcoord0;
+out vec4 vertexColor;
+out vec2 shapeCoord;
 
-void main()
-{
-    gl_Position = modelview_projection_matrix * vec4(position, 1);
-    vary_texcoord0 =  (texture_matrix0 * vec4(texcoord0,0,1)).xy;
-    vertex_color = diffuse_color;
+void main() {
+    gl_Position = modelview_projection_matrix * vec4(position, 1.0);
+    vertexColor = diffuse_color;
+    shapeCoord = texcoord0;
 }
 
+#else
+in vec3 position;
+in vec4 diffuse_color;
+in vec2 texcoord0;
+
+out vec4 vertexColor;
+out vec2 vary_texcoord0;
+
+#ifdef HAS_FONT_GPU
+in uint glyph_loc;
+flat out uint vary_glyphLoc;
+#endif
+
+void main() {
+    gl_Position = modelview_projection_matrix * vec4(position, 1);
+    vertexColor = diffuse_color;
+#ifdef HAS_FONT_GPU
+    vary_glyphLoc = glyph_loc;
+    if (glyph_loc != 0xFFFFFFFFu) {
+        vary_texcoord0 = texcoord0;
+        return;
+    }
+#endif
+    vary_texcoord0 = (texture_matrix0 * vec4(texcoord0, 0, 1)).xy;
+}
+#endif

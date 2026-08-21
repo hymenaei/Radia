@@ -1,0 +1,170 @@
+@import "variants.radia";
+
+:root {
+    --panel: #151922e8;
+    --panel-border: #333333;
+    --surface: #242c38f2;
+    --surface-hover: #2e3a49f8;
+    --surface-active: #18202df8;
+    --accent: #efff62e8;
+    --accent-dark: #907e2fff;
+    --text: #edf6ffff;
+    --muted: #a7b8c6ff;
+    --error: #ff8d8dff;
+    --focus: #ffffffcc;
+    --radius-md: 6px;
+    --radius-lg: 12px;
+}
+
+floater {
+    size: auto 362px;
+    min-size: 300px 362px;
+    display: flex;
+    flex-direction: column;
+    background-color: #1f1f1fe5;
+    effect: background-blur(64px);
+    border-radius: var(--radius-lg);
+    border: 1px var(--panel-border);
+
+    &:minimized::header { border-width: 0px; }
+
+    &::header {
+        height: 48px;
+        border-color: var(--panel-border);
+        border-width: 0px 0px 1px;
+        display: flex;
+        flex-direction: row;
+        gap: 6px;
+        padding: 12px;
+
+        &::icon {
+            size: 28px;
+            stroke: 2px var(--accent);
+        }
+
+        &::title {
+            text-color: var(--text);
+            font-family: sans;
+            font-size: 13px;
+            line-height: 18px;
+        }
+
+        &::custom {
+            height: 24px;
+            display: flex;
+            flex-direction: row;
+            flex-grow: 1;
+            gap: 6px;
+        }
+
+        &::close, &::minimize {
+            cursor: pointer;
+            size: 24px;
+            background-color: #ffffff14;
+            border-radius: 6px;
+            border: 1px #ffffff24;
+            display: flex;
+            flex-direction: row;
+            justify-content: center;
+
+            &:hover { background-color: #ffffff28; border-color: #ffffff40; }
+            &:active { background-color: #0000003c; border-color: #ffffff18; }
+            &:focus-visible { border-color: var(--focus); border-width: 2px; }
+
+            &::icon {
+                size: 16px;
+                stroke: 1px var(--text);
+            }
+        }
+    }
+
+    &::content {
+        display: flex;
+        flex-direction: column;
+        margin: 8px;
+        gap: 8px;
+    }
+}
+
+label, p {
+    text-color: var(--text);
+    font-family: sans;
+    font-size: 13px;
+    line-height: 18px;
+}
+
+kbd {
+    gap: 2px;
+
+    > kbd {
+        padding: 1px 3px;
+        background-color: #ffffff10;
+        border: 1px #ffffff38;
+        border-radius: 3px;
+        font-family: sans;
+        font-size: 11px;
+        line-height: 14px;
+    }
+}
+
+field > hint, field > error {
+    font-size: 12px;
+    line-height: 18px;
+    flex-grow: 1;
+}
+
+field > hint { text-color: var(--muted); }
+field > error { text-color: var(--error); }
+
+fieldset {
+    gap: 10px;
+    padding: 3px 6px;
+    border: 1px #ffffff24;
+
+    > legend {
+        text-color: var(--muted);
+        font-weight: bold;
+        font-size: 13px;
+        line-height: 18px;
+    }
+}
+
+button {
+    cursor: pointer;
+    height: 32px;
+    background-color: var(--surface);
+    border-radius: var(--radius-md);
+    border: 1px #ffffff24;
+    gap: 6px;
+    padding: 9px;
+    text-color: var(--text);
+
+    &:hover { background-color: var(--surface-hover); }
+    &:active { background-color: var(--surface-active); }
+    &:focus-visible { border-color: var(--focus); border-width: 2px; }
+    &:disabled { opacity: 0.55; cursor: default; }
+
+    > icon {
+        size: 16px;
+        stroke: 1px var(--accent);
+    }
+}
+
+switch {
+    cursor: pointer;
+    size: 32px 64px;
+    padding: 4px;
+    background-color: #1a2230ff;
+    border-radius: 14px;
+    border: 1px #ffffff2f;
+
+    &:checked { background-color: var(--accent-dark); border-color: var(--accent); }
+    &:checked::thumb { background-color: #ffffffff; border-color: #dff9ffff; }
+    &:focus-visible { border-color: var(--focus); border-width: 2px; }
+
+    &::thumb {
+        background-color: #d8e6f2ff;
+        border-radius: 10px;
+        border: 1px #ffffffff;
+    }
+}

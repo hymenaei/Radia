@@ -9,6 +9,8 @@ include(TemplateCheck)
 set(VIEWER_BINARY_NAME "alchemy-bin" CACHE STRING
     "The name of the viewer executable to create.")
 
+add_subdirectory(ui)
+
 # Generate version vars header
 configure_file(llversioninfovars.h.in llversioninfovars.h @ONLY)
 
@@ -1704,11 +1706,11 @@ if (DARWIN)
   set(viewer_RESOURCE_FILES
     alchemy.icns
     # CMake doesn't seem to support Xcode language variants well just yet
-    English.lproj/InfoPlist.strings
-    English.lproj/language.txt
-    German.lproj/language.txt
-    Japanese.lproj/language.txt
-    Korean.lproj/language.txt
+    macos_resources/English.lproj/InfoPlist.strings
+    macos_resources/English.lproj/language.txt
+    macos_resources/German.lproj/language.txt
+    macos_resources/Japanese.lproj/language.txt
+    macos_resources/Korean.lproj/language.txt
     )
 
   LIST(APPEND viewer_SOURCE_FILES llappviewersdl.cpp)
@@ -1869,10 +1871,12 @@ set(viewer_APPSETTINGS_FILES
     app_settings/logcontrol.xml
     app_settings/settings.xml
     app_settings/settings_alchemy.xml
+    app_settings/settings_radia.xml
     app_settings/settings_crash_behavior.xml
     app_settings/settings_files.xml
     app_settings/settings_per_account.xml
     app_settings/settings_per_account_alchemy.xml
+    app_settings/settings_per_account_radia.xml
     app_settings/std_bump.ini
     app_settings/toolbars.xml
     app_settings/trees.xml
@@ -1933,9 +1937,26 @@ add_executable(${VIEWER_BINARY_NAME}
     ${viewer_SOURCE_FILES}
     )
 
+# Development viewers load shaders from the configuration staging directory.
+# Keep that runtime copy current even when only a HEADER_FILE_ONLY shader source
+# changes and the viewer binary itself does not need to relink.
+if (WINDOWS)
+  add_custom_target(copy_viewer_shaders ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
+      "${CMAKE_CURRENT_SOURCE_DIR}/app_settings/shaders"
+      "${VIEWER_STAGING_DIR}/app_settings/shaders"
+    DEPENDS ${viewer_SHADER_FILES}
+    COMMENT "Staging viewer shaders"
+    )
+  add_dependencies(${VIEWER_BINARY_NAME} copy_viewer_shaders)
+endif ()
+
 check_message_template(${VIEWER_BINARY_NAME})
 
-target_include_directories(${VIEWER_BINARY_NAME} PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
+target_include_directories(${VIEWER_BINARY_NAME}
+    PUBLIC ${CMAKE_CURRENT_BINARY_DIR}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    )
 
 target_precompile_headers(${VIEWER_BINARY_NAME} PRIVATE llviewerprecompiledheaders.h)
 
@@ -1996,6 +2017,8 @@ target_link_libraries(${VIEWER_BINARY_NAME}
         ll::tinygltf
         ll::tinyexr
         ll::minizip
+        ui
+        viewer_ui
         )
 
 if (TARGET ll::velopack)

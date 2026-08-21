@@ -72,21 +72,21 @@ Floater* Surface::resizeFloaterAt(const Vec2& point, std::uint8_t& edges) const 
         const StylePass::ChildSnapshot children = styles.sourceChildren(layerRoot(layer));
         for (auto child = children->rbegin(); child != children->rend(); ++child) {
             auto* floater = dynamic_cast<Floater*>(child->get());
-            if (!floater || floater->visibility() != Visibility::Visible || floater->closed()) continue;
+            if (!floater || floater->closed()) continue;
             const WidgetSnapshot floaterSnapshot = snapshot(*floater);
             const Style& floaterStyle = styles.style(*floater);
-            if (!snapshotValid(floaterSnapshot) || !isRootedInSurface(floaterSnapshot.lifetime.get())) continue;
+            if (!snapshotValid(floaterSnapshot) || !isRootedInSurface(floaterSnapshot.lifetime.get()) || !floater->isVisible(floaterStyle)) continue;
             const bool floaterBlocksPointerEvents = blocksPointerEvents(*floater, floaterStyle);
             if (!snapshotValid(floaterSnapshot) || !isRootedInSurface(floaterSnapshot.lifetime.get())) continue;
             floater = dynamic_cast<Floater*>(floaterSnapshot.lifetime.get());
-            if (!floater || floater->visibility() != Visibility::Visible || floater->closed()) continue;
+            if (!floater || floater->closed() || !floater->isVisible(floaterStyle)) continue;
             if (!floaterBlocksPointerEvents) {
                 const bool descendantHit = hitTestNode(*floater, point, mViewport, styles) != nullptr;
                 floater = dynamic_cast<Floater*>(floaterSnapshot.lifetime.get());
                 if (!snapshotValid(floaterSnapshot)
                     || !floater
                     || !isRootedInSurface(floater)
-                    || floater->visibility() != Visibility::Visible
+                    || !floater->isVisible(floaterStyle)
                     || floater->closed())
                     continue;
                 if (descendantHit) return nullptr;

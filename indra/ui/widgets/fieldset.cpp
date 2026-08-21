@@ -26,6 +26,7 @@
 #include "widgets/fieldset.h"
 #include <algorithm>
 #include <limits>
+#include "layout/engine.h"
 #include "render/paintcontext.h"
 #include "style/style.h"
 #include "widgets/field.h"
@@ -48,7 +49,8 @@ protected:
 Fieldset::Fieldset() : Widget(sElement) {}
 
 void Fieldset::constrainResolvedStyle(Style& style) const {
-    style.flow = Flow::Column;
+    if (!style.displaySet) style.display = DisplayMode::Flex;
+    if (!style.flexDirectionSet) style.flexDirection = FlexDirection::Column;
 }
 
 void Fieldset::onChildrenCleared() {
@@ -56,13 +58,17 @@ void Fieldset::onChildrenCleared() {
 }
 
 void Fieldset::onArranged(const Style& style) {
-    if (!mLegend || mLegend->visibility() == Visibility::Collapsed) return;
+    const StyleSheet* styleSheet = attachedStyleSheet();
+    const auto displayed = [styleSheet](const Widget* widget) {
+        return widget && (styleSheet ? widget->isDisplayed(resolveWidgetStyle(*styleSheet, *widget)) : widget->isDisplayed(Style{}));
+    };
+    if (!displayed(mLegend.get())) return;
 
     translateChild(*mLegend, {0.f, style.padding.top});
 
     Widget* topmostContent = nullptr;
     for (const auto& child : children()) {
-        if (child.get() == mLegend.get() || child->visibility() == Visibility::Collapsed) continue;
+        if (child.get() == mLegend.get() || !displayed(child.get())) continue;
         if (!topmostContent || child->rect().top() > topmostContent->rect().top()) topmostContent = child.get();
     }
     if (!topmostContent) return;
@@ -93,7 +99,11 @@ Text* Fieldset::setLegendContent(TextSource content) {
 }
 
 Rect Fieldset::borderRect() const {
-    if (!mLegend || mLegend->visibility() == Visibility::Collapsed || mLegend->rect().h <= 0.f) return rect();
+    const StyleSheet* styleSheet = attachedStyleSheet();
+    if (!mLegend
+        || !(styleSheet ? mLegend->isDisplayed(resolveWidgetStyle(*styleSheet, *mLegend)) : mLegend->isDisplayed(Style{}))
+        || mLegend->rect().h <= 0.f)
+        return rect();
 
     const float borderTop = mLegend->rect().y + mLegend->rect().h * .5f;
     return {rect().x, rect().y, rect().w, std::max(0.f, borderTop - rect().y)};

@@ -23,6 +23,7 @@
  */
 
 #include "linden_common.h"
+#include "layout/engine.h"
 #include "widgets/widget.h"
 #include "render/paintcontext.h"
 #include "style/style.h"
@@ -112,24 +113,43 @@ Widget& Widget::setDisabled(bool disabled) {
 }
 
 Widget& Widget::setVisibility(Visibility visibility) {
-    if (visibility == mVisibility) return *this;
-
-    const bool layoutParticipationChanged = (visibility == Visibility::Collapsed) != (mVisibility == Visibility::Collapsed);
-    mVisibility = visibility;
-    if (layoutParticipationChanged) {
-        ++mChildSnapshotRevision;
-        if (mParent) ++mParent->mChildSnapshotRevision;
-    }
-    if (layoutParticipationChanged && mSurface) mSurface->invalidateOrderingCache();
+    if (mVisibilityOverride && *mVisibilityOverride == visibility) return *this;
+    mVisibilityOverride = visibility;
     if (mSurface) mSurface->requestHitTestRefresh();
-    if (layoutParticipationChanged) invalidateMeasure();
-    else invalidatePaint();
+    invalidatePaint();
     if (visibility != Visibility::Visible && mSurface) mSurface->widgetBecameUnavailable(*this);
     return *this;
 }
 
 Widget& Widget::setHidden(bool hidden) {
     return setVisibility(hidden ? Visibility::Hidden : Visibility::Visible);
+}
+
+bool Widget::isDisplayed(const Style& style) const {
+    return style.display != DisplayMode::NoneValue && !mDisplayNoneOverride.value_or(false);
+}
+
+bool Widget::isVisible(const Style& style) const {
+    return isDisplayed(style) && mVisibilityOverride.value_or(style.visibility) == Visibility::Visible;
+}
+
+Widget& Widget::setDisplayNone(bool displayNone) {
+    if (displayNone) {
+        if (mDisplayNoneOverride && *mDisplayNoneOverride) return *this;
+        mDisplayNoneOverride = true;
+    } else {
+        if (!mDisplayNoneOverride) return *this;
+        mDisplayNoneOverride.reset();
+    }
+    ++mChildSnapshotRevision;
+    if (mParent) ++mParent->mChildSnapshotRevision;
+    if (mSurface) {
+        mSurface->invalidateOrderingCache();
+        mSurface->requestHitTestRefresh();
+    }
+    invalidateMeasure();
+    if (displayNone && mSurface) mSurface->widgetBecameUnavailable(*this);
+    return *this;
 }
 
 bool Widget::setTextContent(TextSource) {
@@ -353,8 +373,15 @@ void Widget::activate() {
 }
 
 void Widget::activateFromLabel() {
-    for (const Widget* current = this; current; current = current->parent())
-        if (current->disabled() || current->visibility() != Visibility::Visible) return;
+    const StyleSheet* styleSheet = attachedStyleSheet();
+    for (const Widget* current = this; current; current = current->parent()) {
+        if (current->disabled()) return;
+        if (styleSheet) {
+            if (!current->isVisible(resolveWidgetStyle(*styleSheet, *current))) return;
+        } else if (!current->isVisible(Style{})) {
+            return;
+        }
+    }
     onLabelActivate();
 }
 

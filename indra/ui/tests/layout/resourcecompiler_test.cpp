@@ -30,14 +30,16 @@
 #include <memory>
 #include <sstream>
 #include <string>
-#include "test_layout_helpers.h"
 #include "layout/document.h"
 #include "layout/resourcecompiler.h"
 #include "skin/compiler.h"
+#include "style/style.h"
 #include "surface/surface.h"
 #include "system.h"
+#include "test_layout_helpers.h"
 #include "text/metrics.h"
 #include "widgets/button.h"
+#include "widgets/div.h"
 #include "widgets/floater.h"
 #include "widgets/icon.h"
 #include "widgets/label.h"
@@ -47,6 +49,7 @@
 namespace {
 using radia::ui::Button;
 using radia::ui::DiagnosticResult;
+using radia::ui::Div;
 using radia::ui::fixedTextMetrics;
 using radia::ui::Floater;
 using radia::ui::Label;
@@ -59,6 +62,7 @@ using radia::ui::SkinCompiler;
 using radia::ui::SkinGenerationPrepareResult;
 using radia::ui::Surface;
 using radia::ui::Switch;
+using radia::ui::Style;
 using radia::ui::System;
 using radia::ui::Visibility;
 using radia::ui::Widget;
@@ -81,7 +85,7 @@ protected:
 
 TEST_F(LayoutResourceCompilerTest, BuildsFloaterWithControlsAndEventCalls) {
     constexpr char kFloaterLayout[] = "<floater title=\"title\" closeIcon=\"close\" minimizeIcon=\"minimize\" canMinimize=\"true\">"
-                                      "<text id=\"status\">Ready</text>"
+                                      "<p id=\"status\">Ready</p>"
                                       "<button id=\"go\" onClick=\"demoGo()\" onDoubleClick=\"demoDouble()\" "
                                       "onMouseDown=\"demoPress()\" onLongClick=\"demoHold()\" "
                                       "onContextMenu=\"demoMenu()\" longClickDelay=\"750ms\">"
@@ -119,10 +123,27 @@ TEST_F(LayoutResourceCompilerTest, BuildsFloaterWithControlsAndEventCalls) {
     EXPECT_EQ(toggle->eventCall(WidgetEventKind::Change)->name(), "demoChanged");
 }
 
+TEST_F(LayoutResourceCompilerTest, BuildsStructuralDivs) {
+    constexpr char kDivLayout[] = "<div id=\"root\" class=\"stack\"><div id=\"group\"><p id=\"child\">content</p></div></div>";
+    const LayoutBuildResult result = factory.buildWidgetTreeFromString(kDivLayout, "div.xml");
+    ASSERT_TRUE(result.ok());
+
+    const Div* root = result.rootAs<Div>();
+    ASSERT_NE(root, nullptr);
+    EXPECT_EQ(root->elementName(), "div");
+    EXPECT_EQ(root->classes().count("stack"), 1U);
+    ASSERT_EQ(root->children().size(), 1U);
+
+    const Div* group = dynamic_cast<const Div*>(root->children().front().get());
+    ASSERT_NE(group, nullptr);
+    ASSERT_EQ(group->children().size(), 1U);
+    EXPECT_EQ(group->children().front()->id(), "child");
+}
+
 TEST_F(LayoutResourceCompilerTest, InstantiatesIndependentEmbeddedResourcePanels) {
-    constexpr char kSharedResourceLayout[] = "<panel id=\"base\" class=\"shared\"><text id=\"resourceChild\">base</text></panel>";
+    constexpr char kSharedResourceLayout[] = "<panel id=\"base\" class=\"shared\"><p id=\"resourceChild\">base</p></panel>";
     constexpr char kEmbeddedPanelsLayout[] = "<panel><panel filename=\"shared.xml\" id=\"one\" class=\"first\">"
-                                             "<text id=\"inlineChild\"/></panel>"
+                                             "<p id=\"inlineChild\"/></panel>"
                                              "<panel filename=\"shared.xml\" id=\"two\"/></panel>";
     resources["shared.xml"] = kSharedResourceLayout;
     LayoutBuildResult result = factory.buildWidgetTreeFromString(kEmbeddedPanelsLayout, "outer.xml");
@@ -140,7 +161,7 @@ TEST_F(LayoutResourceCompilerTest, InstantiatesIndependentEmbeddedResourcePanels
     EXPECT_EQ(first->children().front()->id(), "resourceChild");
     EXPECT_EQ(first->children().back()->id(), "inlineChild");
 
-    first->setVisibility(Visibility::Collapsed);
+    first->setVisibility(Visibility::Collapse);
     EXPECT_EQ(second->visibility(), Visibility::Visible);
 }
 
@@ -184,7 +205,7 @@ TEST_F(LayoutResourceCompilerTest, RejectsInvalidResourceReferences) {
 
     const InvalidReferenceCase cases[] = {
         {"missing resource", "<panel><panel filename=\"missing.xml\"/></panel>", nullptr, nullptr},
-        {"non-panel resource", "<panel><panel filename=\"wrong.xml\"/></panel>", "wrong.xml", "<text/>"},
+        {"non-panel resource", "<panel><panel filename=\"wrong.xml\"/></panel>", "wrong.xml", "<p/>"},
         {"filename on non-panel", "<button filename=\"x.xml\"/>", nullptr, nullptr},
         {"resource root escape", "<panel><panel filename=\"../outside.xml\"/></panel>", nullptr, nullptr},
     };
@@ -459,7 +480,7 @@ TEST_F(LayoutResourceCompilerTest, RefreshesLocalizedWidgetsAcrossLocaleChanges)
     ASSERT_TRUE(system.setLocale("pt"));
     EXPECT_EQ(status->text(), "Literal");
 
-    constexpr char kMissingLayout[] = "<text>missing</text>";
+    constexpr char kMissingLayout[] = "<p>missing</p>";
     resources.add("missing.xml", kMissingLayout);
     const SkinGenerationPrepareResult missing = SkinCompiler().prepare(std::move(resources));
     EXPECT_FALSE(missing.ok());
@@ -469,6 +490,7 @@ TEST_F(LayoutResourceCompilerTest, RefreshesLocalizedWidgetsAcrossLocaleChanges)
 TEST_F(LayoutResourceCompilerTest, RejectsUnknownElementsAndAttributes) {
     constexpr char kUnknownElementLayout[] = "<panel>"
                                              "<unknown/></panel>";
+    constexpr char kLegacyTextElementLayout[] = "<text>legacy</text>";
     constexpr char kUnsupportedAttributeLayout[] = "<panel width=\"10\"/>";
     constexpr char kUnknownAttributeLayout[] = "<floater invented=\"true\"/>";
     const LayoutBuildResult unknownElement = factory.buildWidgetTreeFromString(kUnknownElementLayout, "unknown.xml");
@@ -477,6 +499,11 @@ TEST_F(LayoutResourceCompilerTest, RejectsUnknownElementsAndAttributes) {
     ASSERT_FALSE(unknownElement.errors.empty());
     EXPECT_EQ(unknownElement.errors.front().code, "layout.element.unknown");
     EXPECT_EQ(unknownElement.errors.front().source, "unknown.xml");
+
+    const LayoutBuildResult legacyTextElement = factory.buildWidgetTreeFromString(kLegacyTextElementLayout, "legacy-text.xml");
+    ASSERT_FALSE(legacyTextElement.ok());
+    ASSERT_FALSE(legacyTextElement.errors.empty());
+    EXPECT_EQ(legacyTextElement.errors.front().code, "layout.element.unknown");
 
     const LayoutBuildResult unsupportedAttribute = factory.buildWidgetTreeFromString(kUnsupportedAttributeLayout, "attribute.xml");
     ASSERT_FALSE(unsupportedAttribute.ok());
@@ -492,7 +519,7 @@ TEST_F(LayoutResourceCompilerTest, RejectsUnknownElementsAndAttributes) {
 }
 
 TEST_F(LayoutResourceCompilerTest, WarnsForUnsupportedEventsAndExpressions) {
-    constexpr char kUnsupportedEventLayout[] = "<text onClick=\"click()\">copy</text>";
+    constexpr char kUnsupportedEventLayout[] = "<p onClick=\"click()\">copy</p>";
     constexpr char kExpressionCallLayout[] = "<button onClick=\"save(force=true)\"/>";
     const LayoutBuildResult unsupportedEvent = factory.buildWidgetTreeFromString(kUnsupportedEventLayout, "event.xml");
     ASSERT_TRUE(unsupportedEvent.ok());
@@ -508,7 +535,7 @@ TEST_F(LayoutResourceCompilerTest, WarnsForUnsupportedEventsAndExpressions) {
 }
 
 TEST_F(LayoutResourceCompilerTest, RejectsDuplicateWidgetIds) {
-    constexpr char kDuplicateIdLayout[] = "<panel><text id=\"same\"/>"
+    constexpr char kDuplicateIdLayout[] = "<panel><p id=\"same\"/>"
                                           "<button id=\"same\">Same</button></panel>";
     const LayoutBuildResult result = factory.buildWidgetTreeFromString(kDuplicateIdLayout, "duplicates.xml");
     ASSERT_FALSE(result.ok());
@@ -533,8 +560,8 @@ TEST_F(LayoutResourceCompilerTest, ValidatesLongClickDelayAndUnsupportedEvents) 
     constexpr char kMissingHandlerLayout[] = "<button longClickDelay=\"1s\"/>";
     constexpr char kInvalidLongClickLayout[] = "<button onLongClick=\"hold()\" "
                                                "longClickDelay=\"500\"/>";
-    constexpr char kUnsupportedLongClickLayout[] = "<text onLongClick=\"hold()\">"
-                                                   "copy</text>";
+    constexpr char kUnsupportedLongClickLayout[] = "<p onLongClick=\"hold()\">"
+                                                   "copy</p>";
     const LayoutBuildResult missingHandler = factory.buildWidgetTreeFromString(kMissingHandlerLayout);
     ASSERT_TRUE(missingHandler.ok());
     ASSERT_FALSE(missingHandler.warnings.empty());
@@ -569,18 +596,22 @@ TEST_F(LayoutResourceCompilerTest, ManagesCustomFloaterHeaderLifecycle) {
     EXPECT_EQ(floater->header()->children()[3].get(), floater->minimizeButton());
     EXPECT_EQ(floater->minimizeButton()->children()[0]->part(), "header::minimize::icon");
     EXPECT_EQ(floater->minimizeButton()->icon(), floater->minimizeButton()->children()[0].get());
-    EXPECT_EQ(floater->header()->children()[0]->visibility(), Visibility::Collapsed);
-    EXPECT_EQ(floater->header()->children()[1]->visibility(), Visibility::Collapsed);
+    EXPECT_EQ(floater->header()->children()[0]->visibility(), Visibility::Visible);
+    EXPECT_EQ(floater->header()->children()[1]->visibility(), Visibility::Visible);
 
     floater->setMinimized(true);
     EXPECT_EQ(floater->header()->children()[0]->visibility(), Visibility::Visible);
     EXPECT_EQ(floater->header()->children()[1]->visibility(), Visibility::Visible);
-    EXPECT_EQ(refresh->parent()->visibility(), Visibility::Collapsed);
-    EXPECT_EQ(floater->content()->visibility(), Visibility::Collapsed);
+    EXPECT_EQ(refresh->parent()->visibility(), Visibility::Visible);
+    EXPECT_EQ(floater->content()->visibility(), Visibility::Visible);
+    EXPECT_FALSE(refresh->parent()->isDisplayed(Style{}));
+    EXPECT_FALSE(floater->content()->isDisplayed(Style{}));
 
     floater->setMinimized(false);
     EXPECT_EQ(refresh->parent()->visibility(), Visibility::Visible);
-    EXPECT_EQ(floater->header()->children()[1]->visibility(), Visibility::Collapsed);
+    EXPECT_EQ(floater->header()->children()[1]->visibility(), Visibility::Visible);
+    EXPECT_TRUE(refresh->parent()->isDisplayed(Style{}));
+    EXPECT_TRUE(floater->content()->isDisplayed(Style{}));
 
     floater->clearChildren();
     EXPECT_NE(floater->header(), nullptr);
@@ -646,16 +677,16 @@ TEST_F(LayoutResourceCompilerTest, RejectsInvalidWidgetDefaults) {
 }
 
 TEST_F(LayoutResourceCompilerTest, CompilesTypedVisibilityValues) {
-    constexpr char kVisibilityLayout[] = "<panel><text id=\"shown\" visibility=\"visible\"/>"
-                                         "<text id=\"hidden\" visibility=\"hidden\"/>"
-                                         "<text id=\"collapsed\" visibility=\"collapsed\"/></panel>";
+    constexpr char kVisibilityLayout[] = "<panel><p id=\"shown\" visibility=\"visible\"/>"
+                                         "<p id=\"hidden\" visibility=\"hidden\"/>"
+                                         "<p id=\"collapsed\" visibility=\"collapse\"/></panel>";
     const LayoutBuildResult result = factory.buildWidgetTreeFromString(kVisibilityLayout, "visibility.xml");
     ASSERT_TRUE(result.ok());
     ASSERT_TRUE(result.root);
     ASSERT_EQ(result.root->children().size(), 3U);
     EXPECT_EQ(result.root->children()[0]->visibility(), Visibility::Visible);
     EXPECT_EQ(result.root->children()[1]->visibility(), Visibility::Hidden);
-    EXPECT_EQ(result.root->children()[2]->visibility(), Visibility::Collapsed);
+    EXPECT_EQ(result.root->children()[2]->visibility(), Visibility::Collapse);
 }
 
 TEST_F(LayoutResourceCompilerTest, RejectsInvalidAndLegacyVisibilitySyntax) {
@@ -665,8 +696,9 @@ TEST_F(LayoutResourceCompilerTest, RejectsInvalidAndLegacyVisibilitySyntax) {
         const char* diagnostic;
     };
     const InvalidVisibilityCase cases[] = {
-        {"invalid enum value", "<text visibility=\"invisible\"/>", "layout.attribute.visibility_invalid"},
-        {"legacy boolean visibility", "<text visible=\"false\"/>", "layout.attribute.unknown"},
+        {"invalid enum value", "<p visibility=\"invisible\"/>", "layout.attribute.visibility_invalid"},
+        {"legacy collapsed spelling", "<p visibility=\"collapsed\"/>", "layout.attribute.visibility_invalid"},
+        {"legacy boolean visibility", "<p visible=\"false\"/>", "layout.attribute.unknown"},
         {"legacy provider binding", "<switch bind=\"old-setting\"/>", "layout.attribute.unknown"},
     };
     for (const auto& test : cases) {

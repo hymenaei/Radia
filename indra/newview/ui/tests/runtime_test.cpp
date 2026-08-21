@@ -86,7 +86,7 @@ KeyEvent makeKeyEvent(int key, std::uint32_t modifiers = 0, bool repeated = fals
 SkinSnapshotResult runtimeSkinSnapshot() {
     constexpr char kLocalization[] = "defaultLocale: en\n"
                                      "locales: {en: {name: English, strings: {runtime: Runtime}}}\n";
-    constexpr char kSkin[] = "floater { flow: column; } floater::header { height: 30px; } button { size: 128px 32px; }";
+    constexpr char kSkin[] = "floater { display: flex; flex-direction: column; } floater::header { height: 30px; } button { size: 128px 32px; }";
     constexpr char kView[] = "<floater title=\"runtime\"><button id=\"press\" onClick=\"press()\"/></floater>";
 
     SkinSnapshotResult result;
@@ -99,7 +99,7 @@ SkinSnapshotResult runtimeSkinSnapshot() {
 SkinSnapshotResult runtimeDetachedSkinSnapshot() {
     constexpr char kLocalization[] = "defaultLocale: en\n"
                                      "locales: {en: {name: English, strings: {}}}\n";
-    constexpr char kSkin[] = "floater { flow: column; } floater::header { height: 30px; }";
+    constexpr char kSkin[] = "floater { display: flex; flex-direction: column; } floater::header { height: 30px; }";
     constexpr char kView[] = "<floater/>";
 
     SkinSnapshotResult result;

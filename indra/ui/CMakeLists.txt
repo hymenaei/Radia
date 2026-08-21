@@ -94,6 +94,7 @@ set(ui_text_sources
 
 set(ui_widget_sources
     widgets/button.cpp
+    widgets/div.cpp
     widgets/field.cpp
     widgets/fieldset.cpp
     widgets/floater.cpp
@@ -162,6 +163,7 @@ target_sources(ui
     widgetevent.h
     widgetevents.def
     widgets/button.h
+    widgets/div.h
     widgets/field.h
     widgets/fieldset.h
     widgets/floater.h

@@ -85,7 +85,7 @@ private:
 
 TEST(SystemTest, PublishesLocalizationStylesIconsAndWidgetResources) {
     constexpr char kPublishedStyles[] = "label { width: 40px; }";
-    constexpr char kViewMarkup[] = "<text id=\"message\">message</text>";
+    constexpr char kViewMarkup[] = "<p id=\"message\">message</p>";
     constexpr char kSearchIcon[] = "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0 L10 10\"/></svg>";
 
     ResourceSnapshot snapshot = skinSnapshot(singleStringLocalization("message", "Ready"), kPublishedStyles);
@@ -121,7 +121,7 @@ TEST(SystemTest, PublishesLocalizationStylesIconsAndWidgetResources) {
 TEST(SystemTest, RejectsInvalidCandidatesWithoutReplacingLiveGeneration) {
     constexpr char kLiveStyles[] = "label { width: 40px; }";
     constexpr char kInvalidLocalization[] = "defaultLocale: [";
-    constexpr char kInvalidStyles[] = "label { flow: sideways; width: 90px; }";
+    constexpr char kInvalidStyles[] = "label { display: sideways; width: 90px; }";
 
     System system;
     const SkinGenerationPrepareResult live = SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Live"), kLiveStyles));
@@ -240,7 +240,7 @@ TEST(SystemTest, PreservesLocaleAcrossPublicationAndFallsBackWhenRemoved) {
 TEST(SystemTest, PublishesGenerationUpdatesToExistingSurfacesAndNewTrees) {
     constexpr char kLiveStyles[] = "label { width: 40px; }";
     constexpr char kCandidateStyles[] = "label { width: 90px; }";
-    constexpr char kViewMarkup[] = "<text>message</text>";
+    constexpr char kViewMarkup[] = "<p>message</p>";
 
     System system;
     const SkinGenerationPrepareResult live = SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Old"), kLiveStyles));
@@ -284,7 +284,7 @@ TEST(SystemTest, PublishesGenerationUpdatesToExistingSurfacesAndNewTrees) {
 
 TEST(SystemTest, RejectsInvalidUnmountedLayoutResources) {
     constexpr char kStyles[] = "label { width: 90px; }";
-    constexpr char kValidMarkup[] = "<text>Ready</text>";
+    constexpr char kValidMarkup[] = "<p>Ready</p>";
     constexpr char kUnsupportedMarkup[] = "<unsupported/>";
 
     ResourceSnapshot snapshot = skinSnapshot({}, kStyles);
@@ -299,7 +299,7 @@ TEST(SystemTest, RejectsInvalidUnmountedLayoutResources) {
 TEST(SystemTest, RefreshesKbdPresentationWhenKeybindingsChange) {
     constexpr char kKeybindingLocalization[] = "defaultLocale: en\nlocales: {en: {name: English, strings: "
                                                "{fly.label: 'Fly <kbd shortcut=\"toggle-fly\"/>'}}}\n";
-    constexpr char kViewMarkup[] = "<text>fly.label</text>";
+    constexpr char kViewMarkup[] = "<p>fly.label</p>";
 
     ResourceSnapshot snapshot = skinSnapshot(kKeybindingLocalization);
     snapshot.add("view.xml", kViewMarkup);

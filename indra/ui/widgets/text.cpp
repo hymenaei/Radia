@@ -25,6 +25,7 @@
 #include "linden_common.h"
 #include "widgets/text.h"
 #include "render/paintcontext.h"
+#include "style/style.h"
 #include "system.h"
 #include "widgets/widgetcontractbuilder.h"
 
@@ -34,6 +35,10 @@ Text::Text(std::string text) : Text(sElement, ElementTag{}) {
 }
 
 Text::Text(const char* elementName, ElementTag) : Widget(elementName) {}
+
+void Text::constrainResolvedStyle(Style& style) const {
+    if (!style.displaySet) style.display = DisplayMode::Block;
+}
 
 Text& Text::setText(std::string text) {
     return setContent(InlineContent::text(std::move(text)));

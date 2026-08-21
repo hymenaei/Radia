@@ -327,7 +327,7 @@ TEST(TextWidgetTest, AppliesStrikeThroughOnlyToStruckRuns) {
 
 TEST(KbdWidgetTest, PaintsKeybindingAsStyledKeys) {
     StyleSheet stylesheet;
-    constexpr char kKbd[] = "text { font-size: 10px; line-height: 10px; } "
+    constexpr char kKbd[] = "p { font-size: 10px; line-height: 10px; } "
                             "kbd { gap: 2px; padding: 1px; background-color: #111111ff; "
                             "> kbd { padding: 1px 2px; background-color: #222222ff; } }";
     ASSERT_TRUE(stylesheet.loadRadia(kKbd).ok());
@@ -580,7 +580,7 @@ TEST(WidgetTest, UpdatesDisabledAndVisibilityState) {
 
 TEST(SwitchWidgetTest, PointerActivationUpdatesStateAndThumb) {
     StyleSheet styleSheet;
-    constexpr char kSwitchLayout[] = "panel { flow: row; } "
+    constexpr char kSwitchLayout[] = "panel { display: flex; flex-direction: row; } "
                                      "switch { width: 40px; height: 20px; background-color: #000000ff; }";
     ASSERT_TRUE(styleSheet.loadRadia(kSwitchLayout).ok());
     Surface surface(styleSheet);

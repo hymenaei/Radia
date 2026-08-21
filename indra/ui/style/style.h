@@ -172,7 +172,8 @@ struct Effect {
 
 inline constexpr std::size_t kMaxEffectCount = 8;
 
-enum class Flow { Free, Row, Column };
+enum class DisplayMode { Inline, Block, Flex, NoneValue };
+enum class FlexDirection { Row, Column };
 enum class JustifyContent { Start, Center, End, Left, Right };
 enum class AlignItems { Normal, Start, Center, End, Stretch };
 enum class AlignSelf { Auto, Start, Center, End, Stretch };
@@ -225,12 +226,17 @@ enum class InheritedStyleProperty : uint16_t {
     Cursor = 1 << 7,
     LetterSpacing = 1 << 8,
     WordSpacing = 1 << 9,
-    TextWrap = 1 << 10
+    TextWrap = 1 << 10,
+    Visibility = 1 << 11
 };
 
 using InheritedStyleProperties = uint16_t;
 
 struct Style {
+    DisplayMode display = DisplayMode::Inline;
+    bool displaySet = false;
+    FlexDirection flexDirection = FlexDirection::Row;
+    Visibility visibility = Visibility::Visible;
     Color backgroundColor = Color(0.f, 0.f, 0.f, 0.f);
     Color borderColor = Color(0.f, 0.f, 0.f, 1.f);
     Color textColor = Color(0.f, 0.f, 0.f, 1.f);
@@ -275,8 +281,7 @@ struct Style {
     VerticalAlign verticalAlign = VerticalAlign::Top;
     bool verticalAlignSet = false;
     LayoutDirection direction = LayoutDirection::LeftToRight;
-    Flow flow = Flow::Free;
-    bool flowSet = false;
+    bool flexDirectionSet = false;
     JustifyContent justifyContent = JustifyContent::Start;
     bool justifyContentSet = false;
     AlignItems alignItems = AlignItems::Normal;

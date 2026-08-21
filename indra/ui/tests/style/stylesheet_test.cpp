@@ -220,7 +220,7 @@ TEST(StyleSheetTest, CompilesTargetSpecificRulesWithoutWarnings) {
     constexpr char kRelevantAndIrrelevantStyles[] = "switch { padding: 4px; "
                                                     "&:checked::thumb { background-color: #ffffffff; } } "
                                                     "switch::thumb { border-radius: 10px; } label { font-size: 13px; } "
-                                                    "panel { flow: row; font-size: 14px; } switch { flow: row; } "
+                                                    "panel { display: flex; flex-direction: row; font-size: 14px; } switch { display: flex; flex-direction: row; } "
                                                     "label { gap: 2px; align-items: center; } "
                                                     "icon { font-size: 13px; } "
                                                     "button > label { stroke-width: 2px; } "
@@ -785,7 +785,7 @@ TEST(StyleSheetTest, WarnsForTargetSpecificUnsupportedStates) {
 
 TEST(StyleSheetTest, ResolvesNestedInlineKbdSelectors) {
     constexpr char kKbdStyles[] = "kbd { padding: 1px; border-radius: 4px; > kbd { padding: 2px; "
-                                  "border-radius: 3px; } } text > kbd { gap: 5px; }";
+                                  "border-radius: 3px; } } p > kbd { gap: 5px; }";
     constexpr char kRejectedKbdPart[] = "kbd::key { padding: 1px; }";
 
     StyleSheet stylesheet;

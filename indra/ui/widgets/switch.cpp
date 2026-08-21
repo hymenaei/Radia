@@ -147,7 +147,8 @@ void Switch::onActivate() {
 }
 
 void Switch::constrainResolvedStyle(Style& style) const {
-    style.flow = Flow::Row;
+    if (!style.displaySet) style.display = DisplayMode::Flex;
+    if (!style.flexDirectionSet) style.flexDirection = FlexDirection::Row;
     style.justifyContent = checked() ? JustifyContent::End : JustifyContent::Start;
 }
 

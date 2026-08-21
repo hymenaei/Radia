@@ -272,9 +272,9 @@ bool readLayoutVisibility(const LayoutElement& element, Visibility& value, Layou
     if (!readLayoutAttribute(element, "visibility", text)) return false;
     if (text == "visible") value = Visibility::Visible;
     else if (text == "hidden") value = Visibility::Hidden;
-    else if (text == "collapsed") value = Visibility::Collapsed;
+    else if (text == "collapse") value = Visibility::Collapse;
     else {
-        result.error("layout.attribute.visibility_invalid", "Invalid visibility value: " + text + ". Expected visible, hidden, or collapsed.", source,
+        result.error("layout.attribute.visibility_invalid", "Invalid visibility value: " + text + ". Expected visible, hidden, or collapse.", source,
                      element.source().begin.line, element.source().begin.column);
         return false;
     }

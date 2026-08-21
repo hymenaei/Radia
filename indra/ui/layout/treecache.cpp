@@ -75,8 +75,7 @@ TreeTraversalCache::ChildSnapshot TreeTraversalCache::build(const Widget& parent
     const ConstWidgetVisit parentState(parent);
     auto result = std::make_shared<std::vector<WidgetRef<Widget>>>();
     result->reserve(parent.children().size());
-    for (const auto& child : parent.children())
-        if (!ordered || child->visibility() != Visibility::Collapsed) result->emplace_back(child.get());
+    for (const auto& child : parent.children()) result->emplace_back(child.get());
 
     const auto commit = [&] {
         if (mResetAtBoundary) {
@@ -96,7 +95,7 @@ TreeTraversalCache::ChildSnapshot TreeTraversalCache::build(const Widget& parent
     if (ordered && resolve) {
         const Style& parentStyle = (*resolve)(parent);
         if (!parentState.styleValid()) return std::make_shared<std::vector<WidgetRef<Widget>>>();
-        if (parentStyle.flow == Flow::Row || parentStyle.flow == Flow::Column) {
+        if (parentStyle.display == DisplayMode::Flex) {
             std::vector<std::pair<WidgetRef<Widget>, int>> ranked;
             ranked.reserve(result->size());
             for (const WidgetRef<Widget>& childRef : *result) {

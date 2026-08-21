@@ -32,8 +32,7 @@ float styledDimension(const Dimension& value, const std::optional<Length>& minim
     return minimum ? std::max(resolved, minimum->resolve(reference)) : resolved;
 }
 
-void warnIgnoredPosition(const Widget& child, const Style& style, Flow flow) {
-    if (flow == Flow::Free) return;
+void warnIgnoredPosition(const Widget& child, const Style& style, FlexDirection flexDirection) {
     const char* property = style.left ? "left" : style.right ? "right" : style.top ? "top" : style.bottom ? "bottom" : nullptr;
     if (!property) return;
     LL_WARNS("UI")
@@ -42,8 +41,8 @@ void warnIgnoredPosition(const Widget& child, const Style& style, Flow flow) {
         << "' on <"
         << child.elementName()
         << (child.id().empty() ? "" : " id=\"" + child.id() + "\"")
-        << ">: parent flow is '"
-        << (flow == Flow::Row ? "row" : "column")
+        << ">: parent flex direction is '"
+        << (flexDirection == FlexDirection::Row ? "row" : "column")
         << "'."
         << LL_ENDL;
 }
@@ -60,39 +59,39 @@ ChildLayout invalidChildLayout() {
 void removeChildrenExcludedFromLayout(Widget& parent, std::vector<ChildLayout>& children) {
     if (std::all_of(children.begin(), children.end(), [&parent](const ChildLayout& child) {
             const Widget* node = child.node.get();
-            return node && node->parent() == &parent && node->visibility() != Visibility::Collapsed;
+            return node && node->parent() == &parent && node->isDisplayed(child.style);
         }))
         return;
     std::vector<ChildLayout> attached;
     attached.reserve(children.size());
     for (const ChildLayout& child : children) {
         const Widget* node = child.node.get();
-        if (node && node->parent() == &parent && node->visibility() != Visibility::Collapsed) attached.push_back(child);
+        if (node && node->parent() == &parent && node->isDisplayed(child.style)) attached.push_back(child);
     }
     children.swap(attached);
 }
 
-float& mainSize(ChildLayout& child, Flow flow) {
-    return flow == Flow::Row ? child.measured.x : child.measured.y;
+float& mainSize(ChildLayout& child, FlexDirection flexDirection) {
+    return flexDirection == FlexDirection::Row ? child.measured.x : child.measured.y;
 }
-float mainSize(const ChildLayout& child, Flow flow) {
-    return flow == Flow::Row ? child.measured.x : child.measured.y;
+float mainSize(const ChildLayout& child, FlexDirection flexDirection) {
+    return flexDirection == FlexDirection::Row ? child.measured.x : child.measured.y;
 }
 
-float mainMinimum(const ChildLayout& child, Flow flow, float availableMain, float flexBase) {
-    const std::optional<Length>& minimum = flow == Flow::Row ? child.style.minWidth : child.style.minHeight;
+float mainMinimum(const ChildLayout& child, FlexDirection flexDirection, float availableMain, float flexBase) {
+    const std::optional<Length>& minimum = flexDirection == FlexDirection::Row ? child.style.minWidth : child.style.minHeight;
     if (minimum) return minimum->resolve(availableMain);
-    const float automatic = flow == Flow::Row ? child.fitSize.x : child.fitSize.y;
+    const float automatic = flexDirection == FlexDirection::Row ? child.fitSize.x : child.fitSize.y;
     return std::min(automatic, flexBase);
 }
 
-void applyFlexBasis(ChildLayout& child, Flow flow, float availableMain) {
+void applyFlexBasis(ChildLayout& child, FlexDirection flexDirection, float availableMain) {
     if (child.style.flexBasis.isAuto()) return;
     const float basis = child.style.flexBasis.resolve(0.f, availableMain);
-    mainSize(child, flow) = std::max(basis, mainMinimum(child, flow, availableMain, basis));
+    mainSize(child, flexDirection) = std::max(basis, mainMinimum(child, flexDirection, availableMain, basis));
 }
 
-void distributeFlexSpace(std::vector<ChildLayout>& children, std::size_t begin, std::size_t end, Flow flow, float availableMain, bool allowGrowth,
+void distributeFlexSpace(std::vector<ChildLayout>& children, std::size_t begin, std::size_t end, FlexDirection flexDirection, float availableMain, bool allowGrowth,
                          float& total) {
     const float freeSpace = availableMain - total;
     if (freeSpace > 0.f && allowGrowth) {
@@ -100,7 +99,7 @@ void distributeFlexSpace(std::vector<ChildLayout>& children, std::size_t begin, 
         for (std::size_t index = begin; index < end; ++index) totalGrow += children[index].style.flexGrow;
         if (totalGrow <= 0.f) return;
         for (std::size_t index = begin; index < end; ++index)
-            mainSize(children[index], flow) += freeSpace * children[index].style.flexGrow / totalGrow;
+            mainSize(children[index], flexDirection) += freeSpace * children[index].style.flexGrow / totalGrow;
         total += freeSpace;
         return;
     }
@@ -113,9 +112,9 @@ void distributeFlexSpace(std::vector<ChildLayout>& children, std::size_t begin, 
     active.reserve(end - begin);
     for (std::size_t index = begin; index < end; ++index) {
         const ChildLayout& child = children[index];
-        const float base = mainSize(child, flow);
+        const float base = mainSize(child, flexDirection);
         baseSizes.push_back(base);
-        active.push_back(child.style.flexShrink > 0.f && base > mainMinimum(child, flow, availableMain, base));
+        active.push_back(child.style.flexShrink > 0.f && base > mainMinimum(child, flexDirection, availableMain, base));
     }
 
     constexpr float kFlexEpsilon = 1.0e-4f;
@@ -130,8 +129,8 @@ void distributeFlexSpace(std::vector<ChildLayout>& children, std::size_t begin, 
         for (std::size_t offset = 0; offset < active.size(); ++offset) {
             if (!active[offset]) continue;
             ChildLayout& child = children[begin + offset];
-            float& size = mainSize(child, flow);
-            const float minimum = mainMinimum(child, flow, availableMain, baseSizes[offset]);
+            float& size = mainSize(child, flexDirection);
+            const float minimum = mainMinimum(child, flexDirection, availableMain, baseSizes[offset]);
             const float share = roundDeficit * child.style.flexShrink * baseSizes[offset] / totalWeight;
             const float reduction = std::min(share, size - minimum);
             size -= reduction;
@@ -150,7 +149,7 @@ float verticalAlignmentOffset(VerticalAlign alignment, float freeSpace) {
     return 0.f;
 }
 
-CrossAlignment crossAlignment(const Style& parent, const Style& child, Flow flow) {
+CrossAlignment crossAlignment(const Style& parent, const Style& child, FlexDirection flexDirection) {
     if (child.alignSelf != AlignSelf::Auto) {
         if (child.alignSelf == AlignSelf::Start) return CrossAlignment::Start;
         if (child.alignSelf == AlignSelf::Center) return CrossAlignment::Center;
@@ -161,20 +160,20 @@ CrossAlignment crossAlignment(const Style& parent, const Style& child, Flow flow
     if (parent.alignItems == AlignItems::Center) return CrossAlignment::Center;
     if (parent.alignItems == AlignItems::End) return CrossAlignment::End;
     if (parent.alignItems == AlignItems::Stretch) return CrossAlignment::Stretch;
-    if (flow == Flow::Column) return CrossAlignment::Stretch;
+    if (flexDirection == FlexDirection::Column) return CrossAlignment::Stretch;
     if (parent.verticalAlign == VerticalAlign::Middle) return CrossAlignment::Center;
     if (parent.verticalAlign == VerticalAlign::Bottom) return CrossAlignment::End;
     return CrossAlignment::Start;
 }
 
-void applyCrossAxisSizing(Vec2& size, const Style& style, Flow flow, float availableCross, CrossAlignment alignment) {
+void applyCrossAxisSizing(Vec2& size, const Style& style, FlexDirection flexDirection, float availableCross, CrossAlignment alignment) {
     if (alignment != CrossAlignment::Stretch) return;
-    if (flow == Flow::Row) {
+    if (flexDirection == FlexDirection::Row) {
         if (!style.height.isAuto() || style.margin.verticalAutoCount()) return;
         const float height = std::max(0.f, availableCross - style.margin.vertical());
         size.y = styledDimension(style.height, style.minHeight, height, availableCross);
         if (style.aspectRatio && style.width.isAuto() && *style.aspectRatio > 0.f) size.x = size.y * *style.aspectRatio;
-    } else if (flow == Flow::Column) {
+    } else if (flexDirection == FlexDirection::Column) {
         if (!style.width.isAuto() || style.margin.horizontalAutoCount()) return;
         const float width = std::max(0.f, availableCross - style.margin.horizontal());
         size.x = styledDimension(style.width, style.minWidth, width, availableCross);
@@ -256,8 +255,41 @@ std::vector<std::pair<std::size_t, std::size_t>> rowLines(const std::vector<Chil
     return lines;
 }
 
+std::vector<NormalLine> normalLines(const std::vector<ChildLayout>& children, std::optional<float> availableWidth) {
+    std::vector<NormalLine> lines;
+    std::optional<NormalLine> current;
+    const auto finish = [&] {
+        if (current) lines.push_back(*current);
+        current.reset();
+    };
+
+    for (std::size_t index = 0; index < children.size(); ++index) {
+        const ChildLayout& child = children[index];
+        const Widget* node = child.node.get();
+        if (!node) continue;
+        const float width = child.measured.x + child.style.margin.horizontal();
+        const float height = child.measured.y + child.style.margin.vertical();
+        const bool block = child.style.display != DisplayMode::Inline;
+        if (block) {
+            finish();
+            lines.push_back({index, index + 1, width, height, true});
+            continue;
+        }
+        if (node->flowBreakBefore() && current) finish();
+        if (availableWidth && current && current->width > 0.f && current->width + width > *availableWidth) finish();
+        if (!current) current = NormalLine{index, index + 1, width, height, false};
+        else {
+            current->end = index + 1;
+            current->width += width;
+            current->height = std::max(current->height, height);
+        }
+    }
+    finish();
+    return lines;
+}
+
 MainAxisAllocation allocateMainAxis(Widget& parent, std::vector<ChildLayout>& children, std::size_t begin, std::size_t end, const Style& parentStyle,
-                                    Flow flow, float availableMain) {
+                                    FlexDirection flexDirection, float availableMain) {
     const WidgetVisit parentState(parent);
     const auto invalidAllocation = [] {
         MainAxisAllocation invalid;
@@ -268,8 +300,9 @@ MainAxisAllocation allocateMainAxis(Widget& parent, std::vector<ChildLayout>& ch
     int autoMargins = 0;
     for (std::size_t index = begin; index < end; ++index) {
         const ChildLayout& child = children[index];
-        total += mainSize(child, flow) + (flow == Flow::Row ? child.style.margin.horizontal() : child.style.margin.vertical());
-        autoMargins += flow == Flow::Row ? child.style.margin.horizontalAutoCount() : child.style.margin.verticalAutoCount();
+        total += mainSize(child, flexDirection)
+            + (flexDirection == FlexDirection::Row ? child.style.margin.horizontal() : child.style.margin.vertical());
+        autoMargins += flexDirection == FlexDirection::Row ? child.style.margin.horizontalAutoCount() : child.style.margin.verticalAutoCount();
     }
     std::size_t gapCount = 0;
     float overlap = 0.f;
@@ -285,7 +318,7 @@ MainAxisAllocation allocateMainAxis(Widget& parent, std::vector<ChildLayout>& ch
     MainAxisAllocation allocation;
     allocation.gap = parentStyle.gap.fixedPixels();
     total += allocation.gap * static_cast<float>(gapCount) - overlap;
-    distributeFlexSpace(children, begin, end, flow, availableMain, !autoMargins && !parentStyle.gap.isAuto(), total);
+    distributeFlexSpace(children, begin, end, flexDirection, availableMain, !autoMargins && !parentStyle.gap.isAuto(), total);
     allocation.freeSpace = availableMain - total;
     if (!autoMargins && parentStyle.gap.isAuto() && gapCount) {
         allocation.gap = std::max(0.f, allocation.freeSpace) / static_cast<float>(gapCount);
@@ -297,11 +330,12 @@ MainAxisAllocation allocateMainAxis(Widget& parent, std::vector<ChildLayout>& ch
     return allocation;
 }
 
-void prepareMainAxis(std::vector<ChildLayout>& children, Flow flow, float availableMain) {
+void prepareMainAxis(std::vector<ChildLayout>& children, FlexDirection flexDirection, float availableMain) {
     for (ChildLayout& child : children) {
-        if (flow == Flow::Row) child.measured.x = styledDimension(child.style.width, child.style.minWidth, child.measured.x, availableMain);
+        if (flexDirection == FlexDirection::Row)
+            child.measured.x = styledDimension(child.style.width, child.style.minWidth, child.measured.x, availableMain);
         else child.measured.y = styledDimension(child.style.height, child.style.minHeight, child.measured.y, availableMain);
-        applyFlexBasis(child, flow, availableMain);
+        applyFlexBasis(child, flexDirection, availableMain);
     }
 }
 } // namespace radia::ui::layout_detail

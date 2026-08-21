@@ -68,7 +68,8 @@ namespace detail { struct StylePropertyDefinition; }
 using StyleValue =
     std::variant<Color, StylePaint, StyleBorder, StyleSize, StyleIconStroke, EdgeInsets, MarginInsets, Dimension, Length, std::optional<Length>,
                  GapValue, std::vector<BoxShadow>, std::vector<Effect>, Outline, float, int, bool, FontFamily, TextAlign, TextOverflow, TextWrap,
-                 VerticalAlign, Flow, JustifyContent, AlignItems, AlignSelf, Overflow, PointerEvents, CursorStyle, StrokeCap>;
+                 VerticalAlign, DisplayMode, FlexDirection, JustifyContent, AlignItems, AlignSelf, Overflow, PointerEvents, CursorStyle,
+                 StrokeCap, Visibility>;
 
 struct StyleDeclaration {
     std::reference_wrapper<const detail::StylePropertyDefinition> property;

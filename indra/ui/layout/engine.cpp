@@ -66,7 +66,7 @@ LayoutStatistics LayoutEngine::runWithPass(Widget& node, LayoutDirection directi
     measure(node, pass);
     Widget* current = state.get();
     if (!state.valid()) return pass.statistics();
-    if (current->mVisibility != Visibility::Collapsed) arrangeNode(*current, direction, pass);
+    if (current->isDisplayed(pass.style(*current))) arrangeNode(*current, direction, pass);
     return pass.statistics();
 }
 

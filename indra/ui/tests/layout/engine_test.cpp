@@ -43,7 +43,6 @@ using radia::ui::Button;
 using radia::ui::Field;
 using radia::ui::FixedTextMetrics;
 using radia::ui::Floater;
-using radia::ui::Flow;
 using radia::ui::JustifyContent;
 using radia::ui::Label;
 using radia::ui::LayoutDirection;
@@ -75,7 +74,7 @@ protected:
 
 TEST_F(LayoutEngineTest, MeasuresButtonWithIconAndLabel) {
     StyleSheet styleSheet;
-    constexpr char kButtonLayout[] = "button { left: 10px; top: 10px; padding: 7px; gap: 6px; flow: row; "
+    constexpr char kButtonLayout[] = "button { left: 10px; top: 10px; padding: 7px; gap: 6px; display: flex; flex-direction: row; "
                                      "font-size: 13px; line-height: 18px; } button > icon { size: 14px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kButtonLayout).ok());
     Panel root;
@@ -86,14 +85,65 @@ TEST_F(LayoutEngineTest, MeasuresButtonWithIconAndLabel) {
     root.addChild(std::move(button));
     layoutTree(root, styleSheet, text);
     const Widget& result = *root.children().front();
-    EXPECT_EQ(result.rect().w, 72.f);
+    EXPECT_EQ(result.rect().w, 300.f);
     EXPECT_EQ(result.rect().h, 32.f);
     EXPECT_EQ(result.children()[1]->rect().x - result.children()[0]->rect().right(), 6.f);
 }
 
+TEST_F(LayoutEngineTest, LaysOutInlineSiblingsAndBlockChildrenInNormalFlow) {
+    StyleSheet styleSheet;
+    constexpr char kNormalLayout[] = "panel { display: block; } .inline { display: inline; width: 30px; height: 10px; } .block { display: block; width: 50px; height: 10px; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kNormalLayout).ok());
+
+    Panel panel;
+    panel.setRect({0.f, 0.f, 100.f, 60.f});
+    auto first = std::make_unique<Label>("first");
+    first->addClass("inline");
+    panel.addChild(std::move(first));
+    auto second = std::make_unique<Label>("second");
+    second->addClass("inline");
+    panel.addChild(std::move(second));
+    auto block = std::make_unique<Label>("block");
+    block->addClass("block");
+    panel.addChild(std::move(block));
+    auto after = std::make_unique<Label>("after");
+    after->addClass("inline");
+    panel.addChild(std::move(after));
+
+    layoutTree(panel, styleSheet, text);
+
+    EXPECT_EQ(panel.children()[0]->rect().left(), 0.f);
+    EXPECT_EQ(panel.children()[1]->rect().left(), 30.f);
+    EXPECT_EQ(panel.children()[0]->rect().top(), 60.f);
+    EXPECT_EQ(panel.children()[2]->rect().top(), 50.f);
+    EXPECT_EQ(panel.children()[3]->rect().top(), 40.f);
+}
+
+TEST_F(LayoutEngineTest, WrapsInlineSiblingsAtTheContainingBlockWidth) {
+    StyleSheet styleSheet;
+    constexpr char kNormalLayout[] = "panel { display: block; } .inline { display: inline; width: 30px; height: 10px; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kNormalLayout).ok());
+
+    Panel panel;
+    panel.setRect({0.f, 0.f, 50.f, 40.f});
+    auto first = std::make_unique<Label>("first");
+    first->addClass("inline");
+    panel.addChild(std::move(first));
+    auto second = std::make_unique<Label>("second");
+    second->addClass("inline");
+    panel.addChild(std::move(second));
+
+    layoutTree(panel, styleSheet, text);
+
+    EXPECT_EQ(panel.children()[0]->rect().left(), 0.f);
+    EXPECT_EQ(panel.children()[1]->rect().left(), 0.f);
+    EXPECT_EQ(panel.children()[0]->rect().top(), 40.f);
+    EXPECT_EQ(panel.children()[1]->rect().top(), 30.f);
+}
+
 TEST_F(LayoutEngineTest, CentersButtonContentWithinExplicitWidth) {
     StyleSheet styleSheet;
-    constexpr char kCenteredButtonLayout[] = "button { width: 128px; height: 32px; padding: 7px; gap: 6px; flow: row; "
+    constexpr char kCenteredButtonLayout[] = "button { width: 128px; height: 32px; padding: 7px; gap: 6px; display: flex; flex-direction: row; "
                                              "justify-content: center; line-height: 18px; } button > icon { size: 14px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kCenteredButtonLayout).ok());
     Panel root;
@@ -110,7 +160,7 @@ TEST_F(LayoutEngineTest, CentersButtonContentWithinExplicitWidth) {
 
 TEST_F(LayoutEngineTest, LaysOutColumnChildrenWithPaddingAndGap) {
     StyleSheet styleSheet;
-    constexpr char kColumnLayout[] = "panel { padding: 10px; flow: column; gap: 5px; } "
+    constexpr char kColumnLayout[] = "panel { padding: 10px; display: flex; flex-direction: column; gap: 5px; } "
                                      "label { height: 20px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kColumnLayout).ok());
     Panel root;
@@ -122,7 +172,7 @@ TEST_F(LayoutEngineTest, LaysOutColumnChildrenWithPaddingAndGap) {
     EXPECT_EQ(root.children()[0]->rect().bottom() - root.children()[1]->rect().top(), 5.f);
 }
 
-TEST_F(LayoutEngineTest, PositionsFreeFlowChildByRightAndBottom) {
+TEST_F(LayoutEngineTest, PositionsNormalChildByRightAndBottom) {
     StyleSheet styleSheet;
     constexpr char kRightBottomLayout[] = "panel { width: 40px; height: 30px; right: 5px; bottom: 7px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kRightBottomLayout).ok());
@@ -136,7 +186,7 @@ TEST_F(LayoutEngineTest, PositionsFreeFlowChildByRightAndBottom) {
 
 TEST_F(LayoutEngineTest, LaysOutFloaterHeaderAndContentWithinPadding) {
     StyleSheet styleSheet;
-    constexpr char kFloaterLayout[] = "floater { padding: 10px; flow: column; } floater::header { height: 30px; } "
+    constexpr char kFloaterLayout[] = "floater { padding: 10px; display: flex; flex-direction: column; } floater::header { height: 30px; } "
                                       "floater::content { flex-grow: 1; } floater::header::title { left: 5px; top: 5px; height: 15px; } "
                                       "label { height: 20px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kFloaterLayout).ok());
@@ -148,22 +198,21 @@ TEST_F(LayoutEngineTest, LaysOutFloaterHeaderAndContentWithinPadding) {
     EXPECT_EQ(floater.children()[1]->rect().top(), 60.f);
 }
 
-TEST_F(LayoutEngineTest, CollapsedFloaterHeaderDoesNotReserveSpace) {
+TEST_F(LayoutEngineTest, DisplayNoneFloaterHeaderDoesNotReserveSpace) {
     StyleSheet styleSheet;
-    constexpr char kCollapsedFloaterLayout[] = "floater { flow: column; } floater::header { height: 30px; } "
+    constexpr char kCollapsedFloaterLayout[] = "floater { display: flex; flex-direction: column; } floater::header { display: none; height: 30px; } "
                                                "floater::content { flex-grow: 1; } label { height: 20px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kCollapsedFloaterLayout).ok());
     Floater floater;
     floater.setTitle("title").setRect({0.f, 0.f, 100.f, 100.f});
     floater.addChild(std::make_unique<Label>("content"));
-    floater.header()->setVisibility(Visibility::Collapsed);
     layoutTree(floater, styleSheet, text);
     EXPECT_EQ(floater.children()[1]->rect().top(), 100.f);
 }
 
 TEST_F(LayoutEngineTest, DistributesAutoMarginAlongRow) {
     StyleSheet styleSheet;
-    constexpr char kAutoMarginLayout[] = "panel { flow: row; } label { width: 10px; height: 10px; } "
+    constexpr char kAutoMarginLayout[] = "panel { display: flex; flex-direction: row; } label { width: 10px; height: 10px; } "
                                          "#first { margin: 0px auto 0px 0px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kAutoMarginLayout).ok());
     Panel panel;
@@ -179,7 +228,7 @@ TEST_F(LayoutEngineTest, DistributesAutoMarginAlongRow) {
 
 TEST_F(LayoutEngineTest, CentersColumnChildWithAutoMargins) {
     StyleSheet styleSheet;
-    constexpr char kCenteredColumnLayout[] = "panel { flow: column; } "
+    constexpr char kCenteredColumnLayout[] = "panel { display: flex; flex-direction: column; } "
                                              "label { width: 20px; height: 10px; margin: 0px auto; }";
     ASSERT_TRUE(styleSheet.loadRadia(kCenteredColumnLayout).ok());
     Panel panel;
@@ -191,7 +240,7 @@ TEST_F(LayoutEngineTest, CentersColumnChildWithAutoMargins) {
 
 TEST_F(LayoutEngineTest, CentersIconInsideOversizedButtonPadding) {
     StyleSheet styleSheet;
-    constexpr char kButtonLayout[] = "button { size: 24px; padding: 20px; flow: row; justify-content: center; } "
+    constexpr char kButtonLayout[] = "button { size: 24px; padding: 20px; display: flex; flex-direction: row; justify-content: center; } "
                                      "button > icon { size: 16px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kButtonLayout).ok());
     Button button;
@@ -204,7 +253,7 @@ TEST_F(LayoutEngineTest, CentersIconInsideOversizedButtonPadding) {
 
 TEST_F(LayoutEngineTest, AlignsColumnContentToEnd) {
     StyleSheet styleSheet;
-    constexpr char kColumnContentLayout[] = "panel { flow: column; justify-content: end; } "
+    constexpr char kColumnContentLayout[] = "panel { display: flex; flex-direction: column; justify-content: end; } "
                                             "label { height: 10px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kColumnContentLayout).ok());
     Panel panel;
@@ -216,7 +265,7 @@ TEST_F(LayoutEngineTest, AlignsColumnContentToEnd) {
 
 TEST_F(LayoutEngineTest, DistributesRemainingWidthAcrossFlexChildren) {
     StyleSheet styleSheet;
-    constexpr char kFlexDistributionLayout[] = "panel { flow: row; } "
+    constexpr char kFlexDistributionLayout[] = "panel { display: flex; flex-direction: row; } "
                                                "label { width: 10px; height: 10px; flex: 1; }";
     ASSERT_TRUE(styleSheet.loadRadia(kFlexDistributionLayout).ok());
     Panel panel;
@@ -230,7 +279,7 @@ TEST_F(LayoutEngineTest, DistributesRemainingWidthAcrossFlexChildren) {
 
 TEST_F(LayoutEngineTest, MeasuresAndArrangesRowChildren) {
     StyleSheet styleSheet;
-    constexpr char kRowLayout[] = "panel { flow: row; gap: 3px; padding: 2px; } "
+    constexpr char kRowLayout[] = "panel { display: flex; flex-direction: row; gap: 3px; padding: 2px; } "
                                   "label { width: 10px; height: 8px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kRowLayout).ok());
     Panel panel;
@@ -246,7 +295,7 @@ TEST_F(LayoutEngineTest, MeasuresAndArrangesRowChildren) {
     EXPECT_EQ(panel.children()[1]->rect().right(), 25.f);
 }
 
-TEST_F(LayoutEngineTest, PreservesExplicitGeometryInFreeFlow) {
+TEST_F(LayoutEngineTest, PreservesExplicitGeometryInNormalLayout) {
     StyleSheet styleSheet;
     Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 100.f});
@@ -262,23 +311,42 @@ TEST_F(LayoutEngineTest, PreservesExplicitGeometryInFreeFlow) {
     EXPECT_EQ(rect.h, 20.f);
 }
 
+TEST_F(LayoutEngineTest, PreservesExplicitHeightWhenNormalWidthIsPercentage) {
+    StyleSheet styleSheet;
+    constexpr char kNormalLayout[] = "panel { display: block; } label { display: block; } label#sized { width: 50%; height: auto; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kNormalLayout).ok());
+
+    Panel panel;
+    panel.setRect({0.f, 0.f, 100.f, 100.f});
+    auto label = std::make_unique<Label>("sized");
+    label->setId("sized");
+    label->setRect({0.f, 0.f, 40.f, 30.f});
+    panel.addChild(std::move(label));
+
+    layoutTree(panel, styleSheet, text);
+
+    const Rect& rect = panel.children().front()->rect();
+    EXPECT_EQ(rect.w, 50.f);
+    EXPECT_EQ(rect.h, 30.f);
+}
+
 TEST_F(LayoutEngineTest, AppliesSwitchIntrinsicAndPartLayout) {
     StyleSheet styleSheet;
-    constexpr char kIntrinsicSwitchLayout[] = "switch { flow: column; justify-content: center; }";
+    constexpr char kIntrinsicSwitchLayout[] = "switch { display: flex; flex-direction: column; justify-content: center; }";
     const StyleSheetLoadResult intrinsic = styleSheet.loadRadia(kIntrinsicSwitchLayout, "switch.radia");
     ASSERT_TRUE(intrinsic.ok());
-    constexpr char kSwitch[] = "switch { width: 64px; height: 32px; padding: 3px 5px; flow: column; justify-content: center; } "
+    constexpr char kSwitch[] = "switch { width: 64px; height: 32px; padding: 3px 5px; display: flex; flex-direction: column; justify-content: center; } "
                                "switch::thumb { border-radius: 7px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kSwitch).ok());
     Switch control;
     control.setRect({10.f, 20.f, 64.f, 32.f});
 
     layoutTree(control, styleSheet, text);
-    EXPECT_EQ(resolveWidgetStyle(styleSheet, control).flow, Flow::Row);
+    EXPECT_EQ(resolveWidgetStyle(styleSheet, control).display, radia::ui::DisplayMode::Flex);
     EXPECT_EQ(control.thumb()->rect().left(), 15.f);
     EXPECT_EQ(control.thumb()->rect().bottom(), 23.f);
     EXPECT_EQ(control.thumb()->rect().h, 26.f);
-    EXPECT_EQ(control.thumb()->rect().w, 26.f);
+    EXPECT_EQ(control.thumb()->rect().w, 54.f);
     EXPECT_EQ(resolveWidgetStyle(styleSheet, *control.thumb()).borderRadius, 7.f);
 
     control.setChecked(true);
@@ -307,7 +375,7 @@ TEST_F(LayoutEngineTest, UsesInjectedTextMetricsForMeasurement) {
 
 TEST_F(LayoutEngineTest, AppliesRightToLeftRowDirection) {
     StyleSheet styleSheet;
-    constexpr char kDirection[] = "panel { flow: row; justify-content: start; gap: 5px; } label { width: 10px; height: 10px; } "
+    constexpr char kDirection[] = "panel { display: flex; flex-direction: row; justify-content: start; gap: 5px; } label { width: 10px; height: 10px; } "
                                   "#physical { margin: 0px 7px 0px 0px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kDirection).ok());
     Panel panel;
@@ -322,7 +390,7 @@ TEST_F(LayoutEngineTest, AppliesRightToLeftRowDirection) {
     EXPECT_EQ(panel.children()[1]->rect().right(), 78.f);
 }
 
-TEST_F(LayoutEngineTest, PreservesNegativeFreeFlowOffsets) {
+TEST_F(LayoutEngineTest, PreservesNegativeNormalOffsets) {
     StyleSheet styleSheet;
     constexpr char kNegativeOffsetLayout[] = "label { width: 10px; height: 10px; left: -8px; bottom: -3px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kNegativeOffsetLayout).ok());
@@ -335,9 +403,9 @@ TEST_F(LayoutEngineTest, PreservesNegativeFreeFlowOffsets) {
     EXPECT_EQ(panel.children()[0]->rect().bottom(), -3.f);
 }
 
-TEST_F(LayoutEngineTest, PreservesFieldDefaultRowFlow) {
+TEST_F(LayoutEngineTest, PreservesFieldDefaultRowLayout) {
     StyleSheet styleSheet;
-    constexpr char kField[] = "field { flow: column; } switch { width: 20px; height: 10px; } "
+    constexpr char kField[] = "field { display: flex; } switch { width: 20px; height: 10px; } "
                               "label { width: 30px; height: 10px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kField).ok());
 
@@ -367,7 +435,7 @@ TEST_F(LayoutEngineTest, ResolvesPercentageGeometryAgainstContainingBlock) {
 
 TEST_F(LayoutEngineTest, DistributesAutomaticRowAndColumnGaps) {
     StyleSheet styleSheet;
-    constexpr char kRowGapLayout[] = "panel { flow: row; gap: auto; } "
+    constexpr char kRowGapLayout[] = "panel { display: flex; flex-direction: row; gap: auto; } "
                                      "label { width: 10px; height: 10px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kRowGapLayout).ok());
     Panel panel;
@@ -381,7 +449,7 @@ TEST_F(LayoutEngineTest, DistributesAutomaticRowAndColumnGaps) {
     EXPECT_EQ(panel.children()[2]->rect().right(), 100.f);
     EXPECT_EQ(panel.desiredSize().x, 30.f);
 
-    constexpr char kColumnGapLayout[] = "panel { flow: column; gap: auto; } "
+    constexpr char kColumnGapLayout[] = "panel { display: flex; flex-direction: column; gap: auto; } "
                                         "label { width: 10px; height: 10px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kColumnGapLayout).ok());
     panel.setRect({0.f, 0.f, 20.f, 100.f});
@@ -392,8 +460,8 @@ TEST_F(LayoutEngineTest, DistributesAutomaticRowAndColumnGaps) {
 
 TEST_F(LayoutEngineTest, MeasuresFloaterWithFixedHeightAndAutomaticWidth) {
     StyleSheet styleSheet;
-    constexpr char kFloater[] = "floater { size: auto 100px; flow: column; } floater::header { height: 30px; } "
-                                "floater::content { flow: column; gap: 5px; } label { height: 20px; }";
+    constexpr char kFloater[] = "floater { size: auto 100px; display: flex; flex-direction: column; } floater::header { height: 30px; } "
+                                "floater::content { display: flex; flex-direction: column; gap: 5px; } label { height: 20px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kFloater).ok());
     Floater floater;
     floater.setCanClose(false);
@@ -407,7 +475,7 @@ TEST_F(LayoutEngineTest, MeasuresFloaterWithFixedHeightAndAutomaticWidth) {
 
 TEST_F(LayoutEngineTest, AppliesCrossAxisAlignmentAndDirection) {
     StyleSheet styleSheet;
-    constexpr char kRowAlignment[] = "panel { flow: row; align-items: start; } label { width: 10px; height: 10px; } "
+    constexpr char kRowAlignment[] = "panel { display: flex; flex-direction: row; align-items: start; } label { width: 10px; height: 10px; } "
                                      "label#center { align-self: center; } label#end { align-self: end; } "
                                      "label#stretch { height: auto; align-self: stretch; }";
     ASSERT_TRUE(styleSheet.loadRadia(kRowAlignment).ok());
@@ -425,7 +493,7 @@ TEST_F(LayoutEngineTest, AppliesCrossAxisAlignmentAndDirection) {
     EXPECT_EQ(panel.children()[2]->rect().bottom(), 0.f);
     EXPECT_EQ(panel.children()[3]->rect().h, 40.f);
 
-    constexpr char kColumnAlignment[] = "panel { flow: column; align-items: start; } label { width: 10px; height: 10px; } "
+    constexpr char kColumnAlignment[] = "panel { display: flex; flex-direction: column; align-items: start; } label { width: 10px; height: 10px; } "
                                         "label#center { align-self: center; } label#end { align-self: end; } "
                                         "label#stretch { width: auto; align-self: stretch; }";
     ASSERT_TRUE(styleSheet.loadRadia(kColumnAlignment).ok());
@@ -441,10 +509,10 @@ TEST_F(LayoutEngineTest, AppliesCrossAxisAlignmentAndDirection) {
     EXPECT_EQ(panel.children()[2]->rect().left(), 0.f);
 }
 
-TEST_F(LayoutEngineTest, DistinguishesHiddenFromCollapsedLayout) {
+TEST_F(LayoutEngineTest, DistinguishesVisibilityFromDisplayLayout) {
     StyleSheet styleSheet;
-    constexpr char kVisibilityLayout[] = "panel { flow: row; } "
-                                         "label { width: 10px; height: 10px; }";
+    constexpr char kVisibilityLayout[] = "panel { display: flex; flex-direction: row; } "
+                                         "label { width: 10px; height: 10px; } label.none { display: none; }";
     ASSERT_TRUE(styleSheet.loadRadia(kVisibilityLayout).ok());
     Panel panel;
     panel.addChild(std::make_unique<Label>("visible"));
@@ -452,30 +520,35 @@ TEST_F(LayoutEngineTest, DistinguishesHiddenFromCollapsedLayout) {
     hidden->setVisibility(Visibility::Hidden);
     panel.addChild(std::move(hidden));
     auto collapsed = std::make_unique<Label>("collapsed");
-    collapsed->setVisibility(Visibility::Collapsed);
+    collapsed->setVisibility(Visibility::Collapse);
     panel.addChild(std::move(collapsed));
+    auto displayNone = std::make_unique<Label>("display-none");
+    displayNone->addClass("none");
+    panel.addChild(std::move(displayNone));
 
     layoutTree(panel, styleSheet, text);
-    EXPECT_EQ(panel.desiredSize().x, 20.f);
+    EXPECT_EQ(panel.desiredSize().x, 30.f);
     EXPECT_EQ(panel.children()[1]->rect().left(), 10.f);
-    EXPECT_EQ(measureWidget(*panel.children()[2], styleSheet, text).x, 0.f);
+    EXPECT_EQ(panel.children()[2]->rect().left(), 20.f);
+    EXPECT_EQ(measureWidget(*panel.children()[2], styleSheet, text).x, 10.f);
+    EXPECT_EQ(panel.children()[3]->desiredSize().x, 0.f);
 
-    panel.children()[1]->setVisibility(Visibility::Collapsed);
+    panel.children()[1]->setVisibility(Visibility::Collapse);
     layoutTree(panel, styleSheet, text);
-    EXPECT_EQ(panel.desiredSize().x, 10.f);
+    EXPECT_EQ(panel.desiredSize().x, 30.f);
 
     panel.children()[2]->setVisibility(Visibility::Visible);
     layoutTree(panel, styleSheet, text);
-    EXPECT_EQ(panel.desiredSize().x, 20.f);
-    EXPECT_EQ(panel.children()[2]->rect().left(), 10.f);
+    EXPECT_EQ(panel.desiredSize().x, 30.f);
+    EXPECT_EQ(panel.children()[2]->rect().left(), 20.f);
 }
 
 TEST_F(LayoutEngineTest, AppliesContainerVerticalAlignmentToContent) {
     StyleSheet styleSheet;
-    constexpr char kVerticalAlignment[] = "panel { size: 40px 100px; flow: row; } label { size: 10px; } "
+    constexpr char kVerticalAlignment[] = "panel { size: 40px 100px; display: flex; flex-direction: row; } label { size: 10px; } "
                                           "panel.middle { vertical-align: middle; } panel.bottom { vertical-align: bottom; } "
-                                          "panel.column { flow: column; vertical-align: bottom; } "
-                                          "panel.free-bottom { flow: free; vertical-align: bottom; } "
+                                          "panel.column { display: flex; flex-direction: column; vertical-align: bottom; } "
+                                          "panel.free-bottom { display: block; vertical-align: bottom; } "
                                           "button { size: 40px 100px; } button > * { size: 10px; } "
                                           "button.top { vertical-align: top; }";
     ASSERT_TRUE(styleSheet.loadRadia(kVerticalAlignment).ok());
@@ -516,7 +589,7 @@ TEST_F(LayoutEngineTest, AppliesContainerVerticalAlignmentToContent) {
     freeBottom.addClass("free-bottom");
     addLabel(freeBottom);
     layoutTree(freeBottom, styleSheet, text);
-    EXPECT_EQ(freeBottom.children()[0]->rect().bottom(), 0.f);
+    EXPECT_EQ(freeBottom.children()[0]->rect().bottom(), 30.f);
 
     Button button;
     button.setRect({0.f, 0.f, 100.f, 40.f});
@@ -535,7 +608,7 @@ TEST_F(LayoutEngineTest, AppliesContainerVerticalAlignmentToContent) {
 
 TEST_F(LayoutEngineTest, WrapsChildrenAcrossFlowBreaks) {
     StyleSheet styleSheet;
-    constexpr char kFlowBreakLayout[] = "panel { flow: row; gap: 2px; } "
+    constexpr char kFlowBreakLayout[] = "panel { display: flex; flex-direction: row; gap: 2px; } "
                                         "label { size: 10px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kFlowBreakLayout).ok());
 
@@ -561,7 +634,7 @@ TEST_F(LayoutEngineTest, WrapsChildrenAcrossFlowBreaks) {
 
 TEST_F(LayoutEngineTest, AppliesFlexBasisAndScaledShrink) {
     StyleSheet styleSheet;
-    constexpr char kFlexBasisLayout[] = "panel { flow: row; } label { height: 10px; flex: 0 1 80px; } "
+    constexpr char kFlexBasisLayout[] = "panel { display: flex; flex-direction: row; } label { height: 10px; flex: 0 1 80px; } "
                                         "label.second { flex-basis: 40px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kFlexBasisLayout).ok());
 
@@ -574,7 +647,7 @@ TEST_F(LayoutEngineTest, AppliesFlexBasisAndScaledShrink) {
     EXPECT_EQ(intrinsic.desiredSize().x, 120.f);
 
     StyleSheet percentageTheme;
-    constexpr char kPercentageFlexBasisLayout[] = "panel { flow: row; } "
+    constexpr char kPercentageFlexBasisLayout[] = "panel { display: flex; flex-direction: row; } "
                                                   "label { width: 30px; flex-basis: 50%; }";
     ASSERT_TRUE(percentageTheme.loadRadia(kPercentageFlexBasisLayout).ok());
     Panel indefinite;
@@ -596,7 +669,7 @@ TEST_F(LayoutEngineTest, AppliesFlexBasisAndScaledShrink) {
 
 TEST_F(LayoutEngineTest, CentersOversizedFloaterHeaderChildren) {
     StyleSheet styleSheet;
-    constexpr char kFloaterHeader[] = "floater::header { height: 48px; flow: row; padding: 12px; } "
+    constexpr char kFloaterHeader[] = "floater::header { height: 48px; display: flex; flex-direction: row; padding: 12px; } "
                                       "floater::header::icon { size: 28px; } floater::header::title { line-height: 18px; } "
                                       "floater::header::custom { height: 24px; flex-grow: 1; } "
                                       "floater::header::close { size: 24px; }";
@@ -609,7 +682,7 @@ TEST_F(LayoutEngineTest, CentersOversizedFloaterHeaderChildren) {
 
     const float headerCenter = floater.header()->rect().y + floater.header()->rect().h * .5f;
     for (const auto& child : floater.header()->children()) {
-        if (child->visibility() != Visibility::Visible) continue;
+        if (!child->isVisible(resolveWidgetStyle(styleSheet, *child))) continue;
         const float childCenter = child->rect().y + child->rect().h * .5f;
         SCOPED_TRACE(Message() << "header part: " << child->part());
         EXPECT_FLOAT_EQ(childCenter, headerCenter);
@@ -618,8 +691,8 @@ TEST_F(LayoutEngineTest, CentersOversizedFloaterHeaderChildren) {
 
 TEST_F(LayoutEngineTest, ReflowsWrappedTextInColumnLayout) {
     StyleSheet styleSheet;
-    constexpr char kWrapping[] = "panel { flow: column; } "
-                                 "text { font-size: 10px; line-height: 10px; text-wrap: wrap; }";
+    constexpr char kWrapping[] = "panel { display: flex; flex-direction: column; } "
+                                 "p { font-size: 10px; line-height: 10px; text-wrap: wrap; }";
     ASSERT_TRUE(styleSheet.loadRadia(kWrapping).ok());
 
     Panel panel;
@@ -636,8 +709,8 @@ TEST_F(LayoutEngineTest, ReflowsWrappedTextInColumnLayout) {
 
 TEST_F(LayoutEngineTest, RemeasuresWrappedTextAfterRowFlexShrink) {
     StyleSheet styleSheet;
-    constexpr char kRowWrapping[] = "panel { width: 45px; flow: row; align-items: start; } "
-                                    "text { min-width: 0px; flex: 1; font-size: 10px; line-height: 10px; text-wrap: wrap; } "
+    constexpr char kRowWrapping[] = "panel { width: 45px; display: flex; flex-direction: row; align-items: start; } "
+                                    "p { min-width: 0px; flex: 1; font-size: 10px; line-height: 10px; text-wrap: wrap; } "
                                     "label { width: 10px; flex-shrink: 0; align-self: stretch; }";
     ASSERT_TRUE(styleSheet.loadRadia(kRowWrapping).ok());
 
@@ -658,15 +731,15 @@ TEST_F(LayoutEngineTest, RemeasuresWrappedTextAfterRowFlexShrink) {
 
 TEST_F(LayoutEngineTest, ReappliesFlexBasisAfterTextReflow) {
     StyleSheet columnTheme;
-    constexpr char kColumnBasis[] = "panel { width: 30px; flow: column; } "
-                                    "text { flex-basis: 40px; font-size: 10px; line-height: 10px; text-wrap: wrap; }";
+    constexpr char kColumnBasis[] = "panel { width: 30px; display: flex; flex-direction: column; } "
+                                    "p { flex-basis: 40px; font-size: 10px; line-height: 10px; text-wrap: wrap; }";
     ASSERT_TRUE(columnTheme.loadRadia(kColumnBasis).ok());
     Panel column;
     column.addChild(std::make_unique<Text>("alpha beta"));
     EXPECT_EQ(measureWidget(column, columnTheme, text).y, 40.f);
 
     StyleSheet rowTheme;
-    constexpr char kRowMinimum[] = "panel { width: 80px; flow: row; } text { flex: 0 1 100px; font-size: 10px; "
+    constexpr char kRowMinimum[] = "panel { width: 80px; display: flex; flex-direction: row; } p { flex: 0 1 100px; font-size: 10px; "
                                    "line-height: 10px; text-wrap: wrap; } label { width: 10px; flex-shrink: 0; }";
     ASSERT_TRUE(rowTheme.loadRadia(kRowMinimum).ok());
     Panel row;
@@ -678,7 +751,7 @@ TEST_F(LayoutEngineTest, ReappliesFlexBasisAfterTextReflow) {
 }
 TEST_F(LayoutEngineTest, ReusesCleanLayoutCache) {
     StyleSheet styleSheet;
-    constexpr char kRowLayout[] = "panel { flow: row; } "
+    constexpr char kRowLayout[] = "panel { display: flex; flex-direction: row; } "
                                   "label { size: 10px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kRowLayout).ok());
     Panel panel;
@@ -697,7 +770,7 @@ TEST_F(LayoutEngineTest, ReusesCleanLayoutCache) {
 
 TEST_F(LayoutEngineTest, InvalidatesLayoutCacheForResizeAndDirection) {
     StyleSheet styleSheet;
-    constexpr char kRowLayout[] = "panel { flow: row; } "
+    constexpr char kRowLayout[] = "panel { display: flex; flex-direction: row; } "
                                   "label { size: 10px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kRowLayout).ok());
     Panel panel;
@@ -738,7 +811,7 @@ TEST_F(LayoutEngineTest, InvalidatesTextMeasurementCacheWhenMetricsGenerationCha
 
 TEST_F(LayoutEngineTest, ReallocatesColumnFlexChildrenUnderHeightConstraint) {
     StyleSheet styleSheet;
-    constexpr char kColumnFlexLayout[] = "panel { flow: column; } "
+    constexpr char kColumnFlexLayout[] = "panel { display: flex; flex-direction: column; } "
                                          "label { height: 10px; flex-grow: 1; }";
     ASSERT_TRUE(styleSheet.loadRadia(kColumnFlexLayout).ok());
     Panel panel;
@@ -755,7 +828,7 @@ TEST_F(LayoutEngineTest, ReallocatesColumnFlexChildrenUnderHeightConstraint) {
 
 TEST_F(LayoutEngineTest, ResolvesSiblingColumnPercentages) {
     StyleSheet styleSheet;
-    constexpr char kSiblingColumnLayout[] = "panel { flow: column; } "
+    constexpr char kSiblingColumnLayout[] = "panel { display: flex; flex-direction: column; } "
                                             "#quarter { height: 25%; } #half { height: 50%; }";
     ASSERT_TRUE(styleSheet.loadRadia(kSiblingColumnLayout).ok());
     Panel panel;
@@ -775,7 +848,7 @@ TEST_F(LayoutEngineTest, ResolvesSiblingColumnPercentages) {
 
 TEST_F(LayoutEngineTest, ResolvesNestedColumnPercentages) {
     StyleSheet styleSheet;
-    constexpr char kNestedColumnLayout[] = "panel { flow: column; } #child { height: 50%; flow: column; } "
+    constexpr char kNestedColumnLayout[] = "panel { display: flex; flex-direction: column; } #child { height: 50%; display: flex; flex-direction: column; } "
                                            "#grandchild { height: 50%; }";
     ASSERT_TRUE(styleSheet.loadRadia(kNestedColumnLayout).ok());
     Panel panel;
@@ -795,7 +868,7 @@ TEST_F(LayoutEngineTest, ResolvesNestedColumnPercentages) {
 
 TEST_F(LayoutEngineTest, RespectsColumnMinimumHeightsDuringShrink) {
     StyleSheet styleSheet;
-    constexpr char kColumnMinimumLayout[] = "panel { flow: column; } "
+    constexpr char kColumnMinimumLayout[] = "panel { display: flex; flex-direction: column; } "
                                             "label { height: 30px; min-height: 25px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kColumnMinimumLayout).ok());
     Panel panel;
@@ -810,7 +883,7 @@ TEST_F(LayoutEngineTest, RespectsColumnMinimumHeightsDuringShrink) {
 
 TEST_F(LayoutEngineTest, ReusesHeightConstrainedColumnCache) {
     StyleSheet styleSheet;
-    constexpr char kFlexLayout[] = "panel { flow: column; } "
+    constexpr char kFlexLayout[] = "panel { display: flex; flex-direction: column; } "
                                    "label { flex: 1; }";
     ASSERT_TRUE(styleSheet.loadRadia(kFlexLayout).ok());
     Panel panel;
@@ -862,7 +935,7 @@ TEST_F(LayoutEngineTest, SeparatesLayoutCachesByTextMetricsIdentity) {
 
 TEST_F(LayoutEngineTest, OrdersChildrenBeforeRowLayout) {
     StyleSheet styleSheet;
-    constexpr char kOrderedFlow[] = "panel { flow: row; } #late { order: 2; width: 10px; height: 10px; } "
+    constexpr char kOrderedFlow[] = "panel { display: flex; flex-direction: row; } #late { order: 2; width: 10px; height: 10px; } "
                                     "#early { order: -1; width: 10px; height: 10px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kOrderedFlow).ok());
     Panel panel;
@@ -894,11 +967,11 @@ TEST_F(LayoutEngineTest, InvalidatesLayoutCacheWhenStylesheetIsAssigned) {
     EXPECT_EQ(label.desiredSize().x, 30.f);
 }
 
-TEST_F(LayoutEngineTest, RemeasuresFreeFlowPercentageTextAfterResize) {
+TEST_F(LayoutEngineTest, RemeasuresNormalPercentageTextAfterResize) {
     StyleSheet styleSheet;
-    constexpr char kFreeFlowTextLayout[] = "panel { flow: free; } "
-                                           "text { width: 50%; font-size: 10px; line-height: 10px; text-wrap: wrap; }";
-    ASSERT_TRUE(styleSheet.loadRadia(kFreeFlowTextLayout).ok());
+    constexpr char kNormalTextLayout[] = "panel { display: block; } "
+                                           "p { width: 50%; font-size: 10px; line-height: 10px; text-wrap: wrap; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kNormalTextLayout).ok());
     Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 100.f});
     panel.addChild(std::make_unique<Text>("alpha beta"));
@@ -911,11 +984,11 @@ TEST_F(LayoutEngineTest, RemeasuresFreeFlowPercentageTextAfterResize) {
     EXPECT_EQ(panel.children().front()->rect().h, 10.f);
 }
 
-TEST_F(LayoutEngineTest, IncludesFreeFlowOffsetsInIntrinsicSize) {
+TEST_F(LayoutEngineTest, IncludesNormalOffsetsInIntrinsicSize) {
     StyleSheet styleSheet;
-    constexpr char kFreeFlowOffsetLayout[] = "panel { flow: free; } "
+    constexpr char kNormalOffsetLayout[] = "panel { display: block; } "
                                              "label { width: 20px; height: 10px; right: 5px; bottom: 7px; }";
-    ASSERT_TRUE(styleSheet.loadRadia(kFreeFlowOffsetLayout).ok());
+    ASSERT_TRUE(styleSheet.loadRadia(kNormalOffsetLayout).ok());
     Panel panel;
     panel.addChild(std::make_unique<Label>("positioned"));
     layoutTree(panel, styleSheet, text);
@@ -923,10 +996,10 @@ TEST_F(LayoutEngineTest, IncludesFreeFlowOffsetsInIntrinsicSize) {
     EXPECT_EQ(panel.desiredSize().y, 17.f);
 }
 
-TEST_F(LayoutEngineTest, IncludesExplicitFreeFlowGeometryInIntrinsicSize) {
+TEST_F(LayoutEngineTest, IncludesExplicitNormalGeometryInIntrinsicSize) {
     StyleSheet styleSheet;
-    constexpr char kFreeFlowLayout[] = "panel { flow: free; }";
-    ASSERT_TRUE(styleSheet.loadRadia(kFreeFlowLayout).ok());
+    constexpr char kNormalLayout[] = "panel { display: block; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kNormalLayout).ok());
     Panel panel;
     auto child = std::make_unique<Panel>();
     child->setRect({0.f, 0.f, 40.f, 30.f});
@@ -938,8 +1011,8 @@ TEST_F(LayoutEngineTest, IncludesExplicitFreeFlowGeometryInIntrinsicSize) {
 
 TEST_F(LayoutEngineTest, InvalidatesIntrinsicSizeAfterExplicitGeometryChange) {
     StyleSheet styleSheet;
-    constexpr char kFreeFlowLayout[] = "panel { flow: free; }";
-    ASSERT_TRUE(styleSheet.loadRadia(kFreeFlowLayout).ok());
+    constexpr char kNormalLayout[] = "panel { display: block; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kNormalLayout).ok());
     Panel panel;
     auto child = std::make_unique<Panel>();
     child->setRect({0.f, 0.f, 20.f, 10.f});
@@ -953,10 +1026,10 @@ TEST_F(LayoutEngineTest, InvalidatesIntrinsicSizeAfterExplicitGeometryChange) {
     EXPECT_EQ(panel.desiredSize().x, 60.f);
 }
 
-TEST_F(LayoutEngineTest, IncludesExplicitFreeFlowPositionInIntrinsicSize) {
+TEST_F(LayoutEngineTest, IncludesExplicitNormalPositionInIntrinsicSize) {
     StyleSheet styleSheet;
-    constexpr char kFreeFlowLayout[] = "panel { flow: free; }";
-    ASSERT_TRUE(styleSheet.loadRadia(kFreeFlowLayout).ok());
+    constexpr char kNormalLayout[] = "panel { display: block; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kNormalLayout).ok());
     Panel panel;
     auto child = std::make_unique<Panel>();
     child->setRect({10.f, 12.f, 20.f, 8.f});
@@ -966,10 +1039,10 @@ TEST_F(LayoutEngineTest, IncludesExplicitFreeFlowPositionInIntrinsicSize) {
     EXPECT_EQ(panel.desiredSize().y, 20.f);
 }
 
-TEST_F(LayoutEngineTest, IncludesWrappedPercentageChildInFreeFlowIntrinsicHeight) {
+TEST_F(LayoutEngineTest, IncludesWrappedPercentageChildInNormalIntrinsicHeight) {
     StyleSheet styleSheet;
-    constexpr char kWrappedTextLayout[] = "panel { flow: free; width: 100px; } "
-                                          "text { width: 50%; font-size: 10px; line-height: 10px; text-wrap: wrap; }";
+    constexpr char kWrappedTextLayout[] = "panel { display: block; width: 100px; } "
+                                          "p { width: 50%; font-size: 10px; line-height: 10px; text-wrap: wrap; }";
     ASSERT_TRUE(styleSheet.loadRadia(kWrappedTextLayout).ok());
     Panel panel;
     panel.addChild(std::make_unique<Text>("alpha beta"));
@@ -979,11 +1052,11 @@ TEST_F(LayoutEngineTest, IncludesWrappedPercentageChildInFreeFlowIntrinsicHeight
     EXPECT_EQ(panel.children().front()->rect().h, 20.f);
 }
 
-TEST_F(LayoutEngineTest, IncludesFreeFlowPercentageOffsetsInIntrinsicSize) {
+TEST_F(LayoutEngineTest, IncludesNormalPercentageOffsetsInIntrinsicSize) {
     StyleSheet styleSheet;
-    constexpr char kFreeFlowPercentageOffsetLayout[] = "panel { flow: free; } "
+    constexpr char kNormalPercentageOffsetLayout[] = "panel { display: block; } "
                                                        "label { width: 20px; height: 10px; left: 50%; top: 20%; }";
-    ASSERT_TRUE(styleSheet.loadRadia(kFreeFlowPercentageOffsetLayout).ok());
+    ASSERT_TRUE(styleSheet.loadRadia(kNormalPercentageOffsetLayout).ok());
     Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 100.f});
     panel.addChild(std::make_unique<Label>("positioned"));
@@ -993,11 +1066,11 @@ TEST_F(LayoutEngineTest, IncludesFreeFlowPercentageOffsetsInIntrinsicSize) {
     EXPECT_NEAR(panel.desiredSize().y, 30.f, 6);
 }
 
-TEST_F(LayoutEngineTest, ResolvesFreeFlowPercentageDimensionsAgainstExplicitParent) {
+TEST_F(LayoutEngineTest, ResolvesNormalPercentageDimensionsAgainstExplicitParent) {
     StyleSheet styleSheet;
-    constexpr char kFreeFlowPercentageLayout[] = "panel { flow: free; width: 50%; height: 50%; } "
+    constexpr char kNormalPercentageLayout[] = "panel { display: block; width: 50%; height: 50%; } "
                                                  "label { width: 50%; height: 50%; }";
-    ASSERT_TRUE(styleSheet.loadRadia(kFreeFlowPercentageLayout).ok());
+    ASSERT_TRUE(styleSheet.loadRadia(kNormalPercentageLayout).ok());
     Panel panel;
     panel.setRect({0.f, 0.f, 100.f, 80.f});
     panel.addChild(std::make_unique<Label>("sized"));
@@ -1009,8 +1082,8 @@ TEST_F(LayoutEngineTest, ResolvesFreeFlowPercentageDimensionsAgainstExplicitPare
 
 TEST_F(LayoutEngineTest, ResolvesNestedPercentageFlexBasis) {
     StyleSheet styleSheet;
-    constexpr char kNestedFlexBasis[] = "#outer { flow: row; width: 100px; height: 20px; } "
-                                        "#inner { flow: row; width: 50%; } label { flex-basis: 50%; height: 10px; }";
+    constexpr char kNestedFlexBasis[] = "#outer { display: flex; flex-direction: row; width: 100px; height: 20px; } "
+                                        "#inner { display: flex; flex-direction: row; width: 50%; } label { flex-basis: 50%; height: 10px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kNestedFlexBasis).ok());
     Panel outer;
     outer.setRect({0.f, 0.f, 100.f, 20.f});

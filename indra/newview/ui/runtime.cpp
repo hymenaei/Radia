@@ -459,12 +459,7 @@ private:
     }
 
     bool isInteractive() const {
-        if (mInitialization != InitializationState::Ready || !mAttachedSurface.visible) return false;
-        bool interactive = false;
-        mComponents.forEachOpen([&](const ComponentKey&, Floater& floater) {
-            if (!isDetached(floater) && floater.visibility() == Visibility::Visible) interactive = true;
-        });
-        return interactive;
+        return mInitialization == InitializationState::Ready && mAttachedSurface.visible && mAttachedSurface.surface->hasVisibleFloater();
     }
 
     static bool isSurfaceTab(const KeyEvent& event) { return event.key == kKeyTab && (event.modifiers & ~kModifierShift) == 0; }

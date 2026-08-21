@@ -37,7 +37,7 @@ class Text : public Widget {
     friend WidgetContract detail::textContract();
 
 public:
-    static constexpr const char* sElement = "text";
+    static constexpr const char* sElement = "p";
 
     explicit Text(std::string text = {});
     Text& setText(std::string text);
@@ -54,6 +54,7 @@ public:
 protected:
     struct ElementTag {};
     Text(const char* elementName, ElementTag);
+    void constrainResolvedStyle(Style& style) const override;
 
 private:
     void onLocaleChanged(const System& system) override;

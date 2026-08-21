@@ -87,7 +87,7 @@ using radia::ui::WidgetState;
 using radia::ui::detail::makeEventRegistration;
 using ::testing::Message;
 
-constexpr char kFloaterInteractionLayout[] = "floater { flow: column; } "
+constexpr char kFloaterInteractionLayout[] = "floater { display: flex; flex-direction: column; } "
                                              "floater::header { height: 30px; } "
                                              "floater::content { flex-grow: 1; } "
                                              "label { height: 20px; }";
@@ -305,7 +305,7 @@ TEST(SurfaceTest, DragsMinimizesAndRestoresFloaters) {
     const float expandedWidth = floaterPtr->rect().w;
     floaterPtr->setMinimized(true);
     EXPECT_TRUE(floaterPtr->hasState(WidgetState::Minimized));
-    EXPECT_EQ(floaterPtr->content()->visibility(), Visibility::Collapsed);
+    EXPECT_EQ(floaterPtr->content()->visibility(), Visibility::Visible);
     EXPECT_EQ(contentNode->visibility(), Visibility::Visible);
     EXPECT_EQ(floaterPtr->rect().top(), expandedTop);
     EXPECT_EQ(floaterPtr->rect().h, 30.f);
@@ -656,7 +656,7 @@ TEST(SurfaceTest, AppliesPointerPolicyStylesWithoutLayout) {
 
 TEST(SurfaceTest, RemeasuresAfterIntrinsicContentChanges) {
     StyleSheet styleSheet;
-    constexpr char kRowLayout[] = "panel { flow: row; } "
+    constexpr char kRowLayout[] = "panel { display: flex; flex-direction: row; } "
                                   "label { height: 10px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kRowLayout).ok());
     Surface surface(styleSheet);
@@ -916,7 +916,7 @@ TEST(SurfaceTest, HonorsVisibilityForPaintingHitTestingAndFocus) {
 
     PaintProbe* visible = add(0.f, Visibility::Visible, visibleActivations);
     PaintProbe* hidden = add(30.f, Visibility::Hidden, hiddenActivations);
-    PaintProbe* collapsed = add(60.f, Visibility::Collapsed, collapsedActivations);
+    PaintProbe* collapsed = add(60.f, Visibility::Collapse, collapsedActivations);
     RecordingPaintContext recording;
     surface.paint(recording);
     EXPECT_EQ(visible->paints, 1);
@@ -938,9 +938,50 @@ TEST(SurfaceTest, HonorsVisibilityForPaintingHitTestingAndFocus) {
     EXPECT_FALSE(collapsed->hasState(WidgetState::Focused));
 }
 
+TEST(SurfaceTest, HonorsStylesheetDisplayAndVisibility) {
+    StyleSheet styleSheet;
+    constexpr char kVisibilityStyles[] = ".hidden { visibility: hidden; } .collapse { visibility: collapse; } .none { display: none; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kVisibilityStyles).ok());
+    Surface surface(styleSheet);
+    surface.setViewport(100.f, 40.f);
+
+    auto add = [&](float x, const char* className) {
+        auto probe = std::make_unique<PaintProbe>();
+        PaintProbe* result = probe.get();
+        probe->setRect({x, 10.f, 20.f, 20.f}).addClass(className);
+        surface.mount(std::move(probe));
+        return result;
+    };
+
+    PaintProbe* visible = add(0.f, "visible");
+    PaintProbe* hidden = add(30.f, "hidden");
+    PaintProbe* collapse = add(60.f, "collapse");
+    PaintProbe* none = add(80.f, "none");
+
+    RecordingPaintContext recording;
+    surface.paint(recording);
+    EXPECT_EQ(visible->paints, 1);
+    EXPECT_EQ(hidden->paints, 0);
+    EXPECT_EQ(collapse->paints, 0);
+    EXPECT_EQ(none->paints, 0);
+
+    EXPECT_TRUE(surface.pointerDown({{10.f, 20.f}, PointerButton::Left}));
+    surface.pointerUp({{10.f, 20.f}, PointerButton::Left});
+    EXPECT_FALSE(surface.pointerDown({{40.f, 20.f}, PointerButton::Left}));
+    EXPECT_FALSE(surface.pointerDown({{70.f, 20.f}, PointerButton::Left}));
+    EXPECT_FALSE(surface.pointerDown({{90.f, 20.f}, PointerButton::Left}));
+
+    surface.clearInteractionState();
+    EXPECT_TRUE(surface.keyDown({kKeyTab}));
+    EXPECT_TRUE(visible->hasState(WidgetState::Focused));
+    EXPECT_FALSE(hidden->hasState(WidgetState::Focused));
+    EXPECT_FALSE(collapse->hasState(WidgetState::Focused));
+    EXPECT_FALSE(none->hasState(WidgetState::Focused));
+}
+
 TEST(SurfaceTest, InvalidatesAncestorLayoutAfterStateChanges) {
     StyleSheet styleSheet;
-    constexpr char kStateLayout[] = "panel { flow: row; } switch { width: 20px; height: 10px; } "
+    constexpr char kStateLayout[] = "panel { display: flex; flex-direction: row; } switch { width: 20px; height: 10px; } "
                                     "switch:checked { width: 40px; } label { width: 10px; height: 10px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kStateLayout).ok());
     Surface surface(styleSheet);
@@ -964,7 +1005,7 @@ TEST(SurfaceTest, InvalidatesAncestorLayoutAfterStateChanges) {
 
 TEST(SurfaceTest, PreservesOrderedPaintingHitTestingAndFocus) {
     StyleSheet styleSheet;
-    constexpr char kOrderedOverlap[] = "panel { flow: row; width: 40px; height: 20px; } "
+    constexpr char kOrderedOverlap[] = "panel { display: flex; flex-direction: row; width: 40px; height: 20px; } "
                                        "#early { order: -1; width: 20px; height: 20px; } "
                                        "#late { order: 2; width: 20px; height: 20px; margin: 0px 0px 0px -20px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kOrderedOverlap).ok());
@@ -993,7 +1034,7 @@ TEST(SurfaceTest, PreservesOrderedPaintingHitTestingAndFocus) {
     EXPECT_TRUE(lateTarget->hasState(WidgetState::Focused));
 
     paintOrder.clear();
-    earlyTarget->setVisibility(Visibility::Collapsed);
+    earlyTarget->setVisibility(Visibility::Collapse);
     surface.paint(recording);
     EXPECT_EQ(paintOrder, std::vector<std::string>({"late"}));
     paintOrder.clear();

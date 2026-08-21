@@ -5,38 +5,38 @@
          canMinimize="true"
          canResize="true">
 
-    <text id="status">demo.status</text>
+    <p id="status">demo.status</p>
 
-    <text>demo.inlineContent</text>
+    <p>demo.inlineContent</p>
 
-    <panel class="demo-property-sections">
-        <panel class="demo-section demo-text-properties">
-            <text class="demo-section-heading">demo.textProperties</text>
+    <div class="demo-property-sections">
+        <div class="demo-section demo-text-properties">
+            <p class="demo-section-heading">demo.textProperties</p>
 
-            <text class="demo-font">demo.fontShorthand</text>
-            <text class="demo-tracking">demo.letterSpacing</text>
-            <text class="demo-word-spacing">demo.wordSpacing</text>
-            <text class="demo-wrap">demo.wrapping</text>
+            <p class="demo-font">demo.fontShorthand</p>
+            <p class="demo-tracking">demo.letterSpacing</p>
+            <p class="demo-word-spacing">demo.wordSpacing</p>
+            <p class="demo-wrap">demo.wrapping</p>
 
-            <text class="demo-ellipsis-end">demo.ellipsisEndInventory</text>
-            <text class="demo-ellipsis-center">demo.ellipsisCenterInventory</text>
-        </panel>
+            <p class="demo-ellipsis-end">demo.ellipsisEndInventory</p>
+            <p class="demo-ellipsis-center">demo.ellipsisCenterInventory</p>
+        </div>
 
-        <panel class="demo-section demo-box-properties">
-            <text class="demo-section-heading">demo.boxProperties</text>
+        <div class="demo-section demo-box-properties">
+            <p class="demo-section-heading">demo.boxProperties</p>
 
-            <text class="demo-outline">demo.outline</text>
+            <p class="demo-outline">demo.outline</p>
 
-            <panel class="demo-overflow-row">
-                <panel class="demo-overflow-x">
-                    <text>demo.overflowX</text>
-                </panel>
-                <panel class="demo-overflow-y">
-                    <text>demo.overflowY</text>
-                </panel>
-            </panel>
-        </panel>
-    </panel>
+            <div class="demo-overflow-row">
+                <div class="demo-overflow-x">
+                    <p>demo.overflowX</p>
+                </div>
+                <div class="demo-overflow-y">
+                    <p>demo.overflowY</p>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <button class="primary" onClick="press()">
         <icon src="search"/>
@@ -63,13 +63,13 @@
 
     <button class="compact" disabled="true"/>
 
-    <text id="languageHeading">demo.language</text>
-    <text id="activeLocale"/>
+    <p id="languageHeading">demo.language</p>
+    <p id="activeLocale"/>
 
-    <panel id="languageButtons">
+    <div id="languageButtons">
         <button id="previousLocale" class="language previous" onClick="selectLocale(-1)">demo.previous</button>
         <button id="nextLocale" class="language next" onClick="selectLocale(+1)">demo.next</button>
-    </panel>
+    </div>
 
     <button class="reload" onClick="requestSkinReload()">demo.reloadNow</button>
 </floater>

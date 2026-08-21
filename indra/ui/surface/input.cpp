@@ -44,12 +44,13 @@ bool acceptsPointerEvents(const Widget& widget, const Style& style) {
 }
 
 void collectFocusable(Widget& node, std::vector<WidgetRef<Widget>>& result, StylePass& styles) {
-    if (node.visibility() != Visibility::Visible || node.disabled()) return;
+    const Style& style = styles.style(node);
+    if (!node.isVisible(style) || node.disabled()) return;
     const WidgetRef<Widget> lifetime(&node);
     const Widget* parent = node.parent();
     const bool focusable = node.focusable();
     Widget* current = lifetime.get();
-    if (!current || current->parent() != parent || current->visibility() != Visibility::Visible || current->disabled()) return;
+    if (!current || current->parent() != parent || !current->isVisible(style) || current->disabled()) return;
     if (focusable) result.emplace_back(current);
     const StylePass::ChildSnapshot children = sourceChildren(*current, styles);
     for (const WidgetRef<Widget>& childRef : *children)
@@ -58,16 +59,17 @@ void collectFocusable(Widget& node, std::vector<WidgetRef<Widget>>& result, Styl
 } // namespace
 
 Widget* Surface::hitTestNode(Widget& node, const Vec2& point, const Rect& inheritedClip, StylePass& styles) const {
-    if (node.visibility() != Visibility::Visible || !inheritedClip.contains(point) || !isRootedInSurface(&node)) return nullptr;
+    if (!inheritedClip.contains(point) || !isRootedInSurface(&node)) return nullptr;
     const WidgetRef<Widget> lifetime(&node);
     const Widget* originalParent = node.parent();
     const std::uint64_t originalStyleRevision = node.mStyleRevision;
     const std::uint64_t originalLayoutRevision = node.mLayoutInvalidationRevision;
     const Style& style = styles.style(node);
+    if (!node.isVisible(style)) return nullptr;
     Widget* styledNode = lifetime.get();
     if (!styledNode
         || !isRootedInSurface(styledNode)
-        || styledNode->visibility() != Visibility::Visible
+        || !styledNode->isVisible(style)
         || styledNode->parent() != originalParent
         || styledNode->mStyleRevision != originalStyleRevision
         || styledNode->mLayoutInvalidationRevision != originalLayoutRevision)
@@ -88,7 +90,7 @@ Widget* Surface::hitTestNode(Widget& node, const Vec2& point, const Rect& inheri
     Widget* current = lifetime.get();
     if (!current
         || !isRootedInSurface(current)
-        || current->visibility() != Visibility::Visible
+        || !current->isVisible(style)
         || current->parent() != originalParent
         || current->mStyleRevision != originalStyleRevision
         || current->mLayoutInvalidationRevision != originalLayoutRevision)
@@ -98,7 +100,7 @@ Widget* Surface::hitTestNode(Widget& node, const Vec2& point, const Rect& inheri
     current = lifetime.get();
     if (!current
         || !isRootedInSurface(current)
-        || current->visibility() != Visibility::Visible
+        || !current->isVisible(style)
         || current->parent() != originalParent
         || current->mStyleRevision != originalStyleRevision
         || current->mLayoutInvalidationRevision != originalLayoutRevision)
@@ -162,9 +164,11 @@ bool Surface::routeEvent(RoutedEvent& event) {
 }
 
 bool Surface::hasActiveModal() const {
+    StylePass& styles = stylePass();
+    const StylePass::TraversalScope traversal = styles.enterTraversal();
     const Widget& modal = layerRoot(SurfaceLayer::Modal);
     return std::any_of(modal.children().begin(), modal.children().end(),
-                       [](const auto& child) { return child->visibility() == Visibility::Visible; });
+                       [&styles](const auto& child) { return child->isVisible(styles.style(*child)); });
 }
 
 Widget* Surface::hitTestAt(const Vec2& point) {
@@ -580,8 +584,10 @@ void Surface::setFocused(Widget* node, bool focusVisible) {
 
 bool Surface::isEnabledInTree(const Widget* node) const {
     if (!node) return false;
+    StylePass& styles = stylePass();
+    const StylePass::TraversalScope traversal = styles.enterTraversal();
     for (const Widget* current = node; current; current = current->parent()) {
-        if (current->visibility() != Visibility::Visible || current->disabled()) return false;
+        if (!current->isVisible(styles.style(*current)) || current->disabled()) return false;
         if (isSurfaceRoot(current)) return true;
     }
     return false;

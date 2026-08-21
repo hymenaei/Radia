@@ -107,6 +107,8 @@ inline constexpr InvalidationFlags kPaintStyleInvalidationReasons = layoutInvali
 inline constexpr InvalidationFlags kLayoutStyleInvalidationReasons = kArrangeInvalidationReasons | LayoutInvalidationReason::Paint;
 
 class Widget;
+class Field;
+class Floater;
 namespace detail { template<typename WidgetT> class WidgetVisit; }
 using WidgetVisit = detail::WidgetVisit<Widget>;
 using ConstWidgetVisit = detail::WidgetVisit<const Widget>;
@@ -167,6 +169,8 @@ class Widget {
     template<typename> friend class detail::WidgetVisit;
     friend class TreeTraversalCache;
     friend class Binder;
+    friend class Field;
+    friend class Floater;
     friend class LayoutEngine;
     friend class StylePass;
     friend class Surface;
@@ -210,7 +214,9 @@ public:
     uint8_t states() const { return mStates; }
     std::uint64_t styleContextRevision() const;
     bool pointerEvents() const { return mPointerEvents.value_or(defaultPointerEvents()); }
-    Visibility visibility() const { return mVisibility; }
+    Visibility visibility() const { return mVisibilityOverride.value_or(Visibility::Visible); }
+    bool isDisplayed(const Style& style) const;
+    bool isVisible(const Style& style) const;
     bool disabled() const { return radia::ui::hasState(mStates, WidgetState::Disabled); }
     bool idScopeRoot() const { return mIdScopeRoot; }
     bool flowBreakBefore() const { return mFlowBreakBefore; }
@@ -260,6 +266,7 @@ protected:
     virtual float layoutOverlapBetween(const Widget&, const Widget&, const Style&) const { return 0.f; }
     void translateChild(Widget& child, const Vec2& delta);
     void setState(WidgetState state, bool enabled);
+    Widget& setDisplayNone(bool displayNone);
 
 private:
     struct EventSlot {
@@ -316,7 +323,8 @@ private:
     Surface* mSurface = nullptr;
     uint8_t mStates = 0;
     std::optional<bool> mPointerEvents;
-    Visibility mVisibility = Visibility::Visible;
+    std::optional<Visibility> mVisibilityOverride;
+    std::optional<bool> mDisplayNoneOverride;
     bool mIdScopeRoot = false;
     bool mFlowBreakBefore = false;
     bool mRectExplicit = false;

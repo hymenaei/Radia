@@ -154,8 +154,6 @@ private:
     bool mAuthoredSizeCaptured = false;
     bool mDetachRequested = false;
     bool mCustomHeaderClaimed = false;
-    Visibility mCustomHeaderVisibility = Visibility::Visible;
-    Visibility mContentVisibility = Visibility::Visible;
     std::function<void()> mOnOpen;
     std::function<void()> mOnClose;
 };

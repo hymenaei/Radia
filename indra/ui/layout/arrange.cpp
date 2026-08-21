@@ -1,6 +1,6 @@
 /**
  * @file arrange.cpp
- * @brief Flow arrangement and post-measure geometry.
+ * @brief Normal and flex arrangement and post-measure geometry.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Radia Viewer Source Code
@@ -25,6 +25,7 @@
 #include "linden_common.h"
 #include <algorithm>
 #include <cmath>
+#include <utility>
 #include "layout/layoutcontext.h"
 #include "style/stylesheet.h"
 #include "widgets/widget.h"
@@ -38,6 +39,7 @@ using layout_detail::ChildLayout;
 using layout_detail::CrossAlignment;
 using layout_detail::crossAlignment;
 using layout_detail::MainAxisAllocation;
+using layout_detail::normalLines;
 using layout_detail::positionedRect;
 using layout_detail::prepareMainAxis;
 using layout_detail::removeChildrenExcludedFromLayout;
@@ -54,7 +56,7 @@ LayoutEngine::RowSizing LayoutEngine::resolveRowSizes(Widget& node, const Style&
     const auto nodeValid = [&] { return nodeState.valid(); };
     const float availableMain = panel.w - parentStyle.padding.horizontal();
     const float availableCross = panel.h - parentStyle.padding.vertical();
-    prepareMainAxis(children, Flow::Row, availableMain);
+    prepareMainAxis(children, FlexDirection::Row, availableMain);
     for (ChildLayout& child : children)
         child.measured.y = styledDimension(child.style.height, child.style.minHeight, child.measured.y, availableCross);
 
@@ -67,8 +69,8 @@ LayoutEngine::RowSizing LayoutEngine::resolveRowSizes(Widget& node, const Style&
             preliminaryHeight = std::max(preliminaryHeight, children[index].measured.y + children[index].style.margin.vertical());
         if (lines.size() == 1 && availableCross >= 0.f) preliminaryHeight = availableCross;
         for (std::size_t index = begin; index < end; ++index)
-            applyCrossAxisSizing(children[index].measured, children[index].style, Flow::Row, preliminaryHeight,
-                                 crossAlignment(parentStyle, children[index].style, Flow::Row));
+            applyCrossAxisSizing(children[index].measured, children[index].style, FlexDirection::Row, preliminaryHeight,
+                                 crossAlignment(parentStyle, children[index].style, FlexDirection::Row));
     }
 
     sizing.allocations.reserve(lines.size());
@@ -77,7 +79,7 @@ LayoutEngine::RowSizing LayoutEngine::resolveRowSizes(Widget& node, const Style&
             sizing.valid = false;
             return sizing;
         }
-        const MainAxisAllocation allocation = allocateMainAxis(node, children, begin, end, parentStyle, Flow::Row, availableMain);
+        const MainAxisAllocation allocation = allocateMainAxis(node, children, begin, end, parentStyle, FlexDirection::Row, availableMain);
         sizing.allocations.push_back(allocation);
         if (!allocation.valid || !remeasureRowChildren(node, children, begin, end, pass)) {
             sizing.valid = false;
@@ -99,8 +101,8 @@ LayoutEngine::RowSizing LayoutEngine::resolveRowSizes(Widget& node, const Style&
     for (std::size_t line = 0; line < lines.size(); ++line) {
         const auto [begin, end] = lines[line];
         for (std::size_t index = begin; index < end; ++index)
-            applyCrossAxisSizing(children[index].measured, children[index].style, Flow::Row, sizing.lineHeights[line],
-                                 crossAlignment(parentStyle, children[index].style, Flow::Row));
+            applyCrossAxisSizing(children[index].measured, children[index].style, FlexDirection::Row, sizing.lineHeights[line],
+                                 crossAlignment(parentStyle, children[index].style, FlexDirection::Row));
     }
     return sizing;
 }
@@ -121,7 +123,8 @@ MainAxisAllocation LayoutEngine::resolveColumnSizes(Widget& node, const Style& p
             return allocation;
         }
         child.measured.x = styledDimension(child.style.width, child.style.minWidth, child.measured.x, availableCross);
-        applyCrossAxisSizing(child.measured, child.style, Flow::Column, availableCross, crossAlignment(parentStyle, child.style, Flow::Column));
+        applyCrossAxisSizing(child.measured, child.style, FlexDirection::Column, availableCross,
+                             crossAlignment(parentStyle, child.style, FlexDirection::Column));
         if (child.style.height.isAuto() && !child.style.aspectRatio) {
             Widget* childNode = child.node.get();
             if (!childNode || childNode->parent() != &node) continue;
@@ -139,17 +142,25 @@ MainAxisAllocation LayoutEngine::resolveColumnSizes(Widget& node, const Style& p
             child.fitSize.y = child.measured.y;
         }
     }
-    prepareMainAxis(children, Flow::Column, availableMain);
+    prepareMainAxis(children, FlexDirection::Column, availableMain);
     if (!nodeValid()) {
         allocation.valid = false;
         return allocation;
     }
-    allocation = allocateMainAxis(node, children, 0, children.size(), parentStyle, Flow::Column, availableMain);
+    allocation = allocateMainAxis(node, children, 0, children.size(), parentStyle, FlexDirection::Column, availableMain);
     if (!allocation.valid || !remeasureColumnChildren(node, children, initialSizes, pass)) allocation.valid = false;
     return allocation;
 }
 
-std::vector<ChildLayout> LayoutEngine::flowChildren(Widget& parent, Flow flow, LayoutPass& pass) {
+std::optional<std::vector<ChildLayout>> LayoutEngine::layoutChildren(Widget& parent, bool flexParent, const Rect& content, LayoutPass& pass) {
+    if (!flexParent) {
+        const std::optional<float> contentWidth = content.w >= 0.f ? std::optional<float>(content.w) : std::nullopt;
+        const std::optional<float> contentHeight = content.h >= 0.f ? std::optional<float>(content.h) : std::nullopt;
+        std::optional<std::vector<ChildLayout>> children = measureNormalChildren(parent, contentWidth, contentHeight, pass);
+        if (!children) return std::nullopt;
+        return std::move(*children);
+    }
+
     const LayoutContextKey contextKey = pass.contextKey();
     const NodeSnapshot parentState(parent);
     std::vector<ChildLayout> result;
@@ -157,9 +168,10 @@ std::vector<ChildLayout> LayoutEngine::flowChildren(Widget& parent, Flow flow, L
     const StylePass::ChildSnapshot children = orderedChildren(parent, pass);
     for (const WidgetRef<Widget>& childRef : *children) {
         Widget* child = childRef.get();
-        if (!child || child->parent() != &parent || child->visibility() == Visibility::Collapsed) continue;
+        if (!child || child->parent() != &parent) continue;
         const std::uint64_t childRevision = child->mLayoutInvalidationRevision;
         const Style& style = pass.style(*child);
+        if (!child->isDisplayed(style)) continue;
         Widget* currentParent = parentState.get();
         child = childRef.get();
         if (!parentState.valid()
@@ -168,11 +180,11 @@ std::vector<ChildLayout> LayoutEngine::flowChildren(Widget& parent, Flow flow, L
             || child->parent() != currentParent
             || child->mLayoutInvalidationRevision != childRevision)
             continue;
-        warnIgnoredPosition(*child, style, flow);
+        warnIgnoredPosition(*child, style, pass.style(parent).flexDirection);
         const bool cacheMatches = child->mLayoutCache.intrinsicValid
             && !child->mInvalidationReasons.intersects(kMeasureInvalidationReasons)
             && child->mLayoutCache.layoutContext == contextKey;
-        const Vec2 measured = cacheMatches ? child->mLayoutCache.intrinsicSize : LayoutEngine::measure(*child, pass);
+        Vec2 measured = cacheMatches ? child->mLayoutCache.intrinsicSize : LayoutEngine::measure(*child, pass);
         currentParent = parentState.get();
         child = childRef.get();
         if (!parentState.valid() || !currentParent || !child || child->parent() != currentParent) continue;
@@ -197,19 +209,21 @@ void LayoutEngine::arrangeNode(Widget& node, LayoutDirection direction, LayoutPa
     const std::uint64_t layoutRevision = node.mLayoutInvalidationRevision;
     const Style& parentStyle = pass.style(node);
     Widget* styledNode = lifetime.get();
-    if (!styledNode
-        || styledNode->mSurface != surface
-        || styledNode->mParent != parent
-        || styledNode->mLayoutInvalidationRevision != layoutRevision)
+    if (!styledNode || styledNode->mSurface != surface || styledNode->mParent != parent || styledNode->mLayoutInvalidationRevision != layoutRevision)
         return;
     const Rect panel = node.mRect;
     const Rect content(panel.x + parentStyle.padding.left, panel.y + parentStyle.padding.bottom,
                        std::max(0.f, panel.w - parentStyle.padding.horizontal()), std::max(0.f, panel.h - parentStyle.padding.vertical()));
-    const Flow flow = parentStyle.flow;
-    std::vector<ChildLayout> children = flowChildren(node, flow, pass);
-    if (flow == Flow::Row) arrangeRow(node, parentStyle, content, panel, children, direction, pass);
-    else if (flow == Flow::Column) arrangeColumn(node, parentStyle, content, panel, children, direction, pass);
-    else arrangeFree(node, parentStyle, content, children, direction, pass);
+    const bool flexParent = parentStyle.display == DisplayMode::Flex;
+    std::optional<std::vector<ChildLayout>> childrenResult = layoutChildren(node, flexParent, content, pass);
+    if (!childrenResult) return;
+    std::vector<ChildLayout> children = std::move(*childrenResult);
+    if (flexParent && parentStyle.flexDirection == FlexDirection::Row)
+        arrangeRow(node, parentStyle, content, panel, children, direction, pass);
+    else if (flexParent)
+        arrangeColumn(node, parentStyle, content, panel, children, direction, pass);
+    else
+        arrangeNormal(node, parentStyle, content, children, direction, pass);
 
     Widget* arrangedNode = lifetime.get();
     if (!arrangedNode
@@ -260,9 +274,9 @@ void LayoutEngine::arrangeRow(Widget& node, const Style& parentStyle, const Rect
             Widget* current = child.node.get();
             Widget* currentNode = nodeState.get();
             if (!nodeState.valid()) return;
-            if (!current || current->parent() != currentNode || current->visibility() == Visibility::Collapsed) continue;
+            if (!current || current->parent() != currentNode || !current->isDisplayed(child.style)) continue;
             Widget* next = index + 1 < end ? children[index + 1].node.get() : nullptr;
-            if (next && (next->parent() != currentNode || next->visibility() == Visibility::Collapsed)) next = nullptr;
+            if (next && (next->parent() != currentNode || !next->isDisplayed(children[index + 1].style))) next = nullptr;
             float adjacencyGap = 0.f;
             float adjacencyOverlap = 0.f;
             if (next) {
@@ -279,7 +293,7 @@ void LayoutEngine::arrangeRow(Widget& node, const Style& parentStyle, const Rect
             float y = lineBottom + margin.bottom.fixedPixels();
             if (crossAutoCount) y += margin.bottom.isAuto() ? crossAuto : 0.f;
             else {
-                const CrossAlignment alignment = crossAlignment(parentStyle, child.style, Flow::Row);
+                const CrossAlignment alignment = crossAlignment(parentStyle, child.style, FlexDirection::Row);
                 if (alignment == CrossAlignment::Start || alignment == CrossAlignment::Stretch)
                     y = lineTop - margin.top.fixedPixels() - child.measured.y;
                 else if (alignment == CrossAlignment::Center) y += availableCrossSpace * .5f;
@@ -330,9 +344,9 @@ void LayoutEngine::arrangeColumn(Widget& node, const Style& parentStyle, const R
         Widget* current = child.node.get();
         Widget* currentNode = nodeState.get();
         if (!nodeState.valid()) return;
-        if (!current || current->parent() != currentNode || current->visibility() == Visibility::Collapsed) continue;
+        if (!current || current->parent() != currentNode || !current->isDisplayed(child.style)) continue;
         Widget* previous = i ? children[i - 1].node.get() : nullptr;
-        if (previous && (previous->parent() != currentNode || previous->visibility() == Visibility::Collapsed)) previous = nullptr;
+        if (previous && (previous->parent() != currentNode || !previous->isDisplayed(children[i - 1].style))) previous = nullptr;
         float adjacencyGap = 0.f;
         float adjacencyOverlap = 0.f;
         if (previous) {
@@ -354,7 +368,7 @@ void LayoutEngine::arrangeColumn(Widget& node, const Style& parentStyle, const R
         float x = content.left() + margin.left.fixedPixels();
         if (horizontalAutoCount) x += margin.left.isAuto() ? horizontalAuto : 0.f;
         else {
-            const CrossAlignment alignment = crossAlignment(parentStyle, child.style, Flow::Column);
+            const CrossAlignment alignment = crossAlignment(parentStyle, child.style, FlexDirection::Column);
             if (alignment == CrossAlignment::Center) x += horizontalSpace * .5f;
             else {
                 const bool logicalStart = alignment == CrossAlignment::Start || alignment == CrossAlignment::Stretch;
@@ -371,37 +385,68 @@ void LayoutEngine::arrangeColumn(Widget& node, const Style& parentStyle, const R
     }
 }
 
-void LayoutEngine::arrangeFree(Widget& node, const Style& parentStyle, const Rect& content, std::vector<ChildLayout>& children,
-                               LayoutDirection direction, LayoutPass& pass) {
+void LayoutEngine::arrangeNormal(Widget& node, const Style& parentStyle, const Rect& content, std::vector<ChildLayout>& children,
+                                 LayoutDirection direction, LayoutPass& pass) {
     const NodeSnapshot nodeState(node);
     removeChildrenExcludedFromLayout(node, children);
-    for (ChildLayout& child : children) {
-        Widget* childNode = child.node.get();
-        Widget* currentNode = nodeState.get();
-        if (!nodeState.valid()) return;
-        if (!childNode || childNode->parent() != currentNode || childNode->visibility() == Visibility::Collapsed) continue;
-        std::optional<float> width;
-        std::optional<float> height;
-        if (child.style.width.isPercentage()) width = styledDimension(child.style.width, child.style.minWidth, child.measured.x, content.w);
-        if (child.style.height.isPercentage()) height = styledDimension(child.style.height, child.style.minHeight, child.measured.y, content.h);
-        if (width || height) {
-            const NodeSnapshot childState(*childNode);
-            const std::uint64_t childRevision = childNode->mLayoutInvalidationRevision;
-            child.measured = measure(*childState.get(), pass, width, height);
-            childNode = childState.get();
+    const std::optional<float> availableWidth = content.w >= 0.f ? std::optional<float>(content.w) : std::nullopt;
+    const std::vector<layout_detail::NormalLine> lines = normalLines(children, availableWidth);
+    float lineTop = content.top();
+    const bool rtl = direction == LayoutDirection::RightToLeft;
+
+    for (const layout_detail::NormalLine& line : lines) {
+        const float lineBottom = lineTop - line.height;
+        float x = rtl ? content.right() : content.left();
+        for (std::size_t index = line.begin; index < line.end; ++index) {
+            ChildLayout& child = children[index];
+            Widget* childNode = child.node.get();
+            Widget* currentNode = nodeState.get();
+            if (!nodeState.valid()) return;
+            if (!childNode || childNode->parent() != currentNode || !childNode->isDisplayed(child.style)) continue;
+
+            const MarginInsets& margin = child.style.margin;
+            const float width = child.measured.x;
+            const float height = child.measured.y;
+            const float horizontalSpace = std::max(0.f, content.w - width - margin.horizontal());
+            float childX;
+            if (rtl) {
+                x -= margin.right.fixedPixels() + (margin.right.isAuto() ? horizontalSpace : 0.f);
+                childX = x - width;
+                x = childX - margin.left.fixedPixels();
+            } else {
+                x += margin.left.fixedPixels() + (margin.left.isAuto() ? horizontalSpace : 0.f);
+                childX = x;
+                x += width + margin.right.fixedPixels();
+            }
+            const bool positioned = child.style.left || child.style.right || child.style.top || child.style.bottom;
+            if (positioned) {
+                setArrangedRect(*childNode, positionedRect(child, content, parentStyle.verticalAlign));
+                arrangeNode(*childNode, direction, pass);
+                currentNode = nodeState.get();
+                if (!nodeState.valid()) return;
+                continue;
+            }
+
+            float childY = lineBottom + margin.bottom.fixedPixels();
+            if (line.block || child.style.verticalAlign == VerticalAlign::Top) {
+                childY = lineTop - margin.top.fixedPixels() - height;
+            } else {
+                const float freeSpace = std::max(0.f, line.height - height - margin.vertical());
+                childY = lineBottom + margin.bottom.fixedPixels() + verticalAlignmentOffset(child.style.verticalAlign, freeSpace);
+            }
+            if (child.style.top) childY -= child.style.top->resolve(content.h);
+            else if (child.style.bottom) childY += child.style.bottom->resolve(content.h);
+
+            if (childNode->mRectExplicit) {
+                setArrangedRect(*childNode, positionedRect(child, content, parentStyle.verticalAlign));
+            } else {
+                setArrangedRect(*childNode, {childX, childY, width, height});
+            }
+            arrangeNode(*childNode, direction, pass);
             currentNode = nodeState.get();
-            if (!nodeState.valid()
-                || !childState.valid()
-                || !childNode
-                || !currentNode
-                || childNode->parent() != currentNode
-                || childNode->mLayoutInvalidationRevision != childRevision)
-                return;
+            if (!nodeState.valid()) return;
         }
-        setArrangedRect(*childNode, positionedRect(child, content, parentStyle.verticalAlign));
-        arrangeNode(*childNode, direction, pass);
-        currentNode = nodeState.get();
-        if (!nodeState.valid()) return;
+        lineTop = lineBottom;
     }
 }
 } // namespace radia::ui

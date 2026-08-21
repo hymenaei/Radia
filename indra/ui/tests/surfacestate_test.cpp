@@ -89,7 +89,7 @@ TEST(SurfaceStateTest, RefreshesHitTestingWhenHoveredPolicyChanges) {
 
 TEST(SurfaceStateTest, InvalidatesDescendantLayoutForOwnerState) {
     StyleSheet styleSheet;
-    constexpr char kDescendantState[] = "panel { flow: row; } label { width: 20px; height: 10px; } "
+    constexpr char kDescendantState[] = "panel { display: flex; flex-direction: row; } label { width: 20px; height: 10px; } "
                                         "panel:hover > label { width: 40px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kDescendantState).ok());
     Surface surface(styleSheet);
@@ -142,7 +142,7 @@ TEST(SurfaceStateTest, RemovesUnavailableWidgetsFromStationaryHitTesting) {
 
 TEST(SurfaceStateTest, RestylesCompositePartsWhenOwnerStateChanges) {
     StyleSheet styleSheet;
-    constexpr char kCompositeOwnerState[] = "floater { flow: column; width: 100px; height: 100px; "
+    constexpr char kCompositeOwnerState[] = "floater { display: flex; flex-direction: column; width: 100px; height: 100px; "
                                             "&:minimized::header { height: 40px; } } "
                                             "floater::header { height: 20px; } floater::content { flex-grow: 1; }";
     ASSERT_TRUE(styleSheet.loadRadia(kCompositeOwnerState).ok());

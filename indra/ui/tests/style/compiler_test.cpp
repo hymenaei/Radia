@@ -37,6 +37,7 @@
 #include "style/stylesheet.h"
 #include "style/syntax.h"
 #include "widgets/button.h"
+#include "widgets/div.h"
 #include "widgets/field.h"
 #include "widgets/floater.h"
 #include "widgets/icon.h"
@@ -49,9 +50,11 @@ namespace {
 using radia::ui::AlignItems;
 using radia::ui::AlignSelf;
 using radia::ui::Button;
+using radia::ui::Div;
+using radia::ui::DisplayMode;
 using radia::ui::Field;
 using radia::ui::Floater;
-using radia::ui::Flow;
+using radia::ui::FlexDirection;
 using radia::ui::FontFamily;
 using radia::ui::Icon;
 using radia::ui::JustifyContent;
@@ -67,6 +70,7 @@ using radia::ui::TextAlign;
 using radia::ui::TextOverflow;
 using radia::ui::TextWrap;
 using radia::ui::VerticalAlign;
+using radia::ui::Visibility;
 using radia::ui::WidgetState;
 using radia::ui::detail::matchingBlock;
 using radia::ui::detail::splitTopLevel;
@@ -90,6 +94,76 @@ TEST(StyleCompilerTest, ResolvesSelectorsByElementClassStateAndChild) {
     Icon& icon = button.setIcon("search");
 
     EXPECT_EQ(resolveWidgetStyle(stylesheet, icon).width.pixels(), 17.f);
+}
+
+TEST(StyleCompilerTest, ResolvesStructuralDivStyles) {
+    constexpr char kDivStyles[] = "div.stack { display: flex; flex-direction: row; gap: 8px; padding: 2px; }";
+
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia(kDivStyles).ok());
+
+    Div div;
+    div.addClass("stack");
+    const Style style = resolveWidgetStyle(stylesheet, div);
+    EXPECT_EQ(style.display, DisplayMode::Flex);
+    EXPECT_TRUE(style.displaySet);
+    EXPECT_EQ(style.flexDirection, FlexDirection::Row);
+    EXPECT_EQ(style.gap.fixedPixels(), 8.f);
+    EXPECT_EQ(style.padding.top, 2.f);
+}
+
+TEST(StyleCompilerTest, ResolvesDisplayAndInheritedVisibility) {
+    constexpr char kDisplayStyles[] = "panel.flex { display: flex; flex-direction: column; } "
+                                      "panel.inline { display: inline; } panel.none { display: none; } "
+                                      "panel.hidden { visibility: hidden; }";
+
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia(kDisplayStyles).ok());
+
+    Panel flex;
+    flex.addClass("flex");
+    const Style flexStyle = resolveWidgetStyle(stylesheet, flex);
+    EXPECT_EQ(flexStyle.display, DisplayMode::Flex);
+    EXPECT_EQ(flexStyle.flexDirection, FlexDirection::Column);
+
+    Panel inlinePanel;
+    inlinePanel.addClass("inline");
+    const Style inlineStyle = resolveWidgetStyle(stylesheet, inlinePanel);
+    EXPECT_EQ(inlineStyle.display, DisplayMode::Inline);
+
+    Panel none;
+    none.addClass("none");
+    EXPECT_EQ(resolveWidgetStyle(stylesheet, none).display, DisplayMode::NoneValue);
+
+    Panel hidden;
+    hidden.addClass("hidden");
+    auto child = std::make_unique<Label>("child");
+    Label* childPtr = child.get();
+    hidden.addChild(std::move(child));
+    EXPECT_EQ(resolveWidgetStyle(stylesheet, *childPtr).visibility, Visibility::Hidden);
+}
+
+TEST(StyleCompilerTest, UsesCssInitialAndDivDisplayDefaults) {
+    StyleSheet stylesheet;
+    Panel panel;
+    Div div;
+    Text paragraph;
+
+    const Style panelStyle = resolveWidgetStyle(stylesheet, panel);
+    const Style divStyle = resolveWidgetStyle(stylesheet, div);
+    const Style paragraphStyle = resolveWidgetStyle(stylesheet, paragraph);
+    EXPECT_EQ(panelStyle.display, DisplayMode::Inline);
+    EXPECT_FALSE(panelStyle.displaySet);
+    EXPECT_EQ(divStyle.display, DisplayMode::Block);
+    EXPECT_FALSE(divStyle.displaySet);
+    EXPECT_EQ(paragraphStyle.display, DisplayMode::Block);
+    EXPECT_FALSE(paragraphStyle.displaySet);
+
+    ASSERT_TRUE(stylesheet.loadRadia("div.inline { display: inline; }").ok());
+    div.addClass("inline");
+    const Style authoredDivStyle = resolveWidgetStyle(stylesheet, div);
+    EXPECT_EQ(authoredDivStyle.display, DisplayMode::Inline);
+    EXPECT_TRUE(authoredDivStyle.displaySet);
 }
 
 TEST(StyleCompilerTest, ResolvesColorAndLengthTokens) {
@@ -147,7 +221,7 @@ TEST(StyleCompilerTest, ResolvesNestedStateAndChildSelectors) {
 }
 
 TEST(StyleCompilerTest, ParsesContainerAndTextAlignmentEnums) {
-    constexpr char kAlignmentStyles[] = "panel { flow: row; vertical-align: middle; pointer-events: none; } "
+    constexpr char kAlignmentStyles[] = "panel { display: flex; flex-direction: row; vertical-align: middle; pointer-events: none; } "
                                         "label { text-align: right; pointer-events: auto; }";
 
     StyleSheet stylesheet;
@@ -155,7 +229,7 @@ TEST(StyleCompilerTest, ParsesContainerAndTextAlignmentEnums) {
     const Style panel = stylesheet.resolve("panel", "", {}, 0);
     const Style label = stylesheet.resolve("label", "", {}, 0);
 
-    EXPECT_EQ(panel.flow, Flow::Row);
+    EXPECT_EQ(panel.display, DisplayMode::Flex);
     EXPECT_EQ(panel.pointerEvents, PointerEvents::PassThrough);
     EXPECT_EQ(label.textAlign, TextAlign::Right);
     EXPECT_EQ(panel.verticalAlign, VerticalAlign::Middle);
@@ -233,17 +307,17 @@ TEST(StyleCompilerTest, ParsesBordersAndSvgStrokeProperties) {
     EXPECT_EQ(iconStyle.svgStrokeCap, StrokeCap::Square);
 }
 
-TEST(StyleCompilerTest, RejectsUnsupportedFlowValuesWithoutCommittingThem) {
-    constexpr char kUnsupportedFlowStyles[] = "panel { flow: grid; } panel#bad { flow: sideways; }";
+TEST(StyleCompilerTest, RejectsUnsupportedDisplayValuesWithoutCommittingThem) {
+    constexpr char kUnsupportedDisplayStyles[] = "panel { display: grid; } panel#bad { display: sideways; }";
 
     StyleSheet stylesheet;
-    const auto result = stylesheet.loadRadia(kUnsupportedFlowStyles, "test.radia");
+    const auto result = stylesheet.loadRadia(kUnsupportedDisplayStyles, "test.radia");
 
     ASSERT_FALSE(result.ok());
-    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).flow, Flow::Free);
-    EXPECT_EQ(stylesheet.resolve("panel", "bad", {}, 0).flow, Flow::Free);
-    EXPECT_EQ(result.warnings.size(), std::size_t(1));
-    ASSERT_EQ(result.errors.size(), std::size_t(1));
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).display, DisplayMode::Inline);
+    EXPECT_EQ(stylesheet.resolve("panel", "bad", {}, 0).display, DisplayMode::Inline);
+    EXPECT_TRUE(result.warnings.empty());
+    ASSERT_EQ(result.errors.size(), std::size_t(2));
     EXPECT_EQ(result.errors.front().source, "test.radia");
 }
 
@@ -262,14 +336,14 @@ TEST(StyleCompilerTest, AppliesSelectorListsChildRulesAndStates) {
     EXPECT_EQ(stylesheet.resolve("button", "", {}, disabled).opacity, .5f);
 }
 
-TEST(StyleCompilerTest, ParsesFlowItemShorthands) {
-    constexpr char kFlowItemStyles[] = "panel { padding: 1px 2px 3px 4px; min-width: 20px; min-height: 10px; gap: 7px; "
+TEST(StyleCompilerTest, ParsesFlexItemShorthands) {
+    constexpr char kFlexItemStyles[] = "panel { padding: 1px 2px 3px 4px; min-width: 20px; min-height: 10px; gap: 7px; "
                                        "flex: 2 3 40%; order: -2; } "
                                        "panel.auto { flex: auto; } panel.none { flex: none; } "
                                        "panel.one { flex: 4; } panel.two { flex: 5 6; } panel.basis { flex: 10px; }";
 
     StyleSheet stylesheet;
-    ASSERT_TRUE(stylesheet.loadRadia(kFlowItemStyles).ok());
+    ASSERT_TRUE(stylesheet.loadRadia(kFlexItemStyles).ok());
     const Style style = stylesheet.resolve("panel", "", {}, 0);
     EXPECT_EQ(style.padding.top, 1.f);
     EXPECT_EQ(style.padding.right, 2.f);
@@ -317,7 +391,7 @@ TEST(StyleCompilerTest, RejectsLegacyAndUnitBearingFlexProperties) {
     };
 
     for (const auto& test : cases) {
-        SCOPED_TRACE(Message() << "invalid flow property case: " << test.name);
+        SCOPED_TRACE(Message() << "invalid layout property case: " << test.name);
         StyleSheet stylesheet;
         EXPECT_FALSE(stylesheet.loadRadia(test.styles).ok());
     }
@@ -326,7 +400,8 @@ TEST(StyleCompilerTest, RejectsLegacyAndUnitBearingFlexProperties) {
 TEST(StyleCompilerTest, ProvidesStableStyleDefaults) {
     const Style style;
 
-    EXPECT_EQ(style.flow, Flow::Free);
+    EXPECT_EQ(style.display, DisplayMode::Inline);
+    EXPECT_FALSE(style.displaySet);
     EXPECT_EQ(style.justifyContent, JustifyContent::Start);
     EXPECT_EQ(style.alignItems, AlignItems::Normal);
     EXPECT_EQ(style.alignSelf, AlignSelf::Auto);
@@ -343,18 +418,20 @@ TEST(StyleCompilerTest, ProvidesStableStyleDefaults) {
 }
 
 TEST(StyleCompilerTest, AppliesIntrinsicButtonLayoutAndAuthoredOverrides) {
-    constexpr char kButtonOverrideStyles[] = "button { flow: column; justify-content: end; vertical-align: top; }";
+    constexpr char kButtonOverrideStyles[] = "button { display: flex; flex-direction: column; justify-content: end; vertical-align: top; }";
 
     StyleSheet stylesheet;
     Button button;
     const Style defaults = resolveWidgetStyle(stylesheet, button);
-    EXPECT_EQ(defaults.flow, Flow::Row);
+    EXPECT_EQ(defaults.display, DisplayMode::Flex);
+    EXPECT_EQ(defaults.flexDirection, FlexDirection::Row);
     EXPECT_EQ(defaults.justifyContent, JustifyContent::Center);
     EXPECT_EQ(defaults.verticalAlign, VerticalAlign::Middle);
 
     ASSERT_TRUE(stylesheet.loadRadia(kButtonOverrideStyles).ok());
     const Style authored = resolveWidgetStyle(stylesheet, button);
-    EXPECT_EQ(authored.flow, Flow::Column);
+    EXPECT_EQ(authored.display, DisplayMode::Flex);
+    EXPECT_EQ(authored.flexDirection, FlexDirection::Column);
     EXPECT_EQ(authored.justifyContent, JustifyContent::End);
     EXPECT_EQ(authored.verticalAlign, VerticalAlign::Top);
 }
@@ -379,7 +456,7 @@ TEST(StyleCompilerTest, AppliesIntrinsicFloaterAndFieldAlignment) {
 
 TEST(StyleCompilerTest, ParsesTextPresentationAndFontShorthands) {
     constexpr char kTextPresentationStyles[] = "panel { letter-spacing: 50%; word-spacing: 25%; text-wrap: nowrap; } "
-                                               "text { text-overflow: ellipsis-center; } "
+                                               "p { text-overflow: ellipsis-center; } "
                                                "label { font: italic 525 17px/21px sans; } "
                                                "label.reset { font-style: italic; font-weight: bold; "
                                                "line-height: 30px; font: 12px sans; }";
@@ -416,8 +493,8 @@ TEST(StyleCompilerTest, RejectsInvalidFontAndTextOverflowValues) {
         const char* styles;
     };
     const InvalidTextStyleCase cases[] = {
-        {"unsupported text overflow", "text { text-overflow: middle; }"},
-        {"font shorthand without family", "text { font: 13px; }"},
+        {"unsupported text overflow", "p { text-overflow: middle; }"},
+        {"font shorthand without family", "p { font: 13px; }"},
     };
 
     for (const auto& test : cases) {
@@ -428,11 +505,11 @@ TEST(StyleCompilerTest, RejectsInvalidFontAndTextOverflowValues) {
 }
 
 TEST(StyleCompilerTest, TreatsNormalWordSpacingAsZero) {
-    constexpr char kNormalWordSpacingStyles[] = "text { word-spacing: normal; }";
+    constexpr char kNormalWordSpacingStyles[] = "p { word-spacing: normal; }";
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kNormalWordSpacingStyles).ok());
-    EXPECT_EQ(stylesheet.resolve("text", "", {}, 0).wordSpacing.pixels, 0.f);
+    EXPECT_EQ(stylesheet.resolve("p", "", {}, 0).wordSpacing.pixels, 0.f);
 }
 
 TEST(StyleCompilerTest, RejectsNonFiniteEdgeValues) {
@@ -498,5 +575,5 @@ TEST(StyleCompilerTest, KeepsStylePropertyRegistryCompleteAndConsistent) {
         EXPECT_EQ(property->apply == nullptr, shorthandNames.count(property->name) != 0);
     }
 
-    EXPECT_EQ(names.size(), std::size_t(53));
+    EXPECT_EQ(names.size(), std::size_t(55));
 }

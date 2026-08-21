@@ -56,9 +56,9 @@ Floater::Floater() : Widget(sElement) {
 void Floater::configureCompositeParts() {
     mHeaderIcon->setName(mIcon);
     mHeaderTitle->setContent(mTitle);
-    mMinimizeButton->setVisibility(mCanMinimize ? Visibility::Visible : Visibility::Collapsed).setOnActivate([this](Widget&) { toggleMinimized(); });
+    mMinimizeButton->setDisplayNone(!mCanMinimize).setOnActivate([this](Widget&) { toggleMinimized(); });
     mMinimizeButtonIcon->setName(mMinimizeIcon);
-    mCloseButton->setVisibility(mCanClose ? Visibility::Visible : Visibility::Collapsed).setOnActivate([this](Widget&) { close(); });
+    mCloseButton->setDisplayNone(!mCanClose).setOnActivate([this](Widget&) { close(); });
     mCloseButtonIcon->setName(mCloseIcon);
     updateHeaderPresentation();
 }
@@ -151,14 +151,14 @@ Floater& Floater::setShowHeaderIdentity(bool value) {
 
 Floater& Floater::setCanClose(bool value) {
     mCanClose = value;
-    if (mCloseButton) mCloseButton->setVisibility(value ? Visibility::Visible : Visibility::Collapsed);
+    if (mCloseButton) mCloseButton->setDisplayNone(!value);
     return *this;
 }
 
 Floater& Floater::setCanMinimize(bool value) {
     if (!value && mMinimized) setMinimized(false);
     mCanMinimize = value;
-    if (mMinimizeButton) mMinimizeButton->setVisibility(value ? Visibility::Visible : Visibility::Collapsed);
+    if (mMinimizeButton) mMinimizeButton->setDisplayNone(!value);
     return *this;
 }
 Floater& Floater::setCanResize(bool value) {
@@ -199,8 +199,8 @@ Panel* Floater::claimCustomHeader() {
 
 void Floater::updateHeaderPresentation() {
     const bool showIdentity = mMinimized || mShowHeaderIdentity;
-    if (mHeaderIcon) mHeaderIcon->setVisibility(showIdentity && !mIcon.empty() ? Visibility::Visible : Visibility::Collapsed);
-    if (mHeaderTitle) mHeaderTitle->setVisibility(showIdentity && !title().empty() ? Visibility::Visible : Visibility::Collapsed);
+    if (mHeaderIcon) mHeaderIcon->setDisplayNone(!(showIdentity && !mIcon.empty()));
+    if (mHeaderTitle) mHeaderTitle->setDisplayNone(!(showIdentity && !title().empty()));
 }
 
 Floater& Floater::setLifecycleCallbacks(std::function<void()> onOpen, std::function<void()> onClose) {
@@ -213,6 +213,7 @@ void Floater::open() {
     const bool wasClosed = mClosed;
     mClosed = false;
     setVisibility(Visibility::Visible);
+    setDisplayNone(false);
     if (wasClosed && mOnOpen) mOnOpen();
 }
 
@@ -220,7 +221,8 @@ void Floater::close() {
     if (mClosed || !mCanClose) return;
     mClosed = true;
     mInteraction = FloaterInteraction::Idle;
-    setVisibility(Visibility::Collapsed);
+    setVisibility(Visibility::Hidden);
+    setDisplayNone(true);
     if (Surface* surface = attachedSurface()) surface->floaterClosed(*this);
     if (mOnClose) mOnClose();
 }
@@ -230,12 +232,10 @@ void Floater::setMinimized(bool minimized) {
 
     if (minimized) {
         mExpandedRect = rect();
-        if (mContent) mContentVisibility = mContent->visibility();
-        if (mCustomHeader) mCustomHeaderVisibility = mCustomHeader->visibility();
         mMinimized = true;
         setState(WidgetState::Minimized, true);
-        if (mContent) mContent->setVisibility(Visibility::Collapsed);
-        if (mCustomHeader) mCustomHeader->setVisibility(Visibility::Collapsed);
+        if (mContent) mContent->setDisplayNone(true);
+        if (mCustomHeader) mCustomHeader->setDisplayNone(true);
         updateHeaderPresentation();
 
         float width = rect().w;
@@ -253,8 +253,8 @@ void Floater::setMinimized(bool minimized) {
         mMinimized = false;
         setState(WidgetState::Minimized, false);
         setRect(mExpandedRect);
-        if (mContent) mContent->setVisibility(mContentVisibility);
-        if (mCustomHeader) mCustomHeader->setVisibility(mCustomHeaderVisibility);
+        if (mContent) mContent->setDisplayNone(false);
+        if (mCustomHeader) mCustomHeader->setDisplayNone(false);
         updateHeaderPresentation();
         clampToMovementBounds();
     }
@@ -278,8 +278,12 @@ void Floater::clampToMovementBounds() {
 }
 
 bool Floater::overChromeButton(const Vec2& point) const {
-    return (mCloseButton && mCloseButton->visibility() == Visibility::Visible && mCloseButton->rect().contains(point))
-        || (mMinimizeButton && mMinimizeButton->visibility() == Visibility::Visible && mMinimizeButton->rect().contains(point));
+    const StyleSheet* styleSheet = attachedStyleSheet();
+    const auto visible = [styleSheet](const Widget* widget) {
+        return widget && (styleSheet ? widget->isVisible(resolveWidgetStyle(*styleSheet, *widget)) : widget->isVisible(Style{}));
+    };
+    return (visible(mCloseButton.get()) && mCloseButton->rect().contains(point))
+        || (visible(mMinimizeButton.get()) && mMinimizeButton->rect().contains(point));
 }
 
 Vec2 Floater::clampedPosition(const Vec2& position) const {

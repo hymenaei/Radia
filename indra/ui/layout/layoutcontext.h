@@ -76,14 +76,18 @@ private:
         bool valid = true;
     };
 
-    static ChildLayout measureChild(Widget& parent, Widget& child, const Style& parentStyle, Flow flow, std::optional<float> resolvedWidth,
+    static ChildLayout measureChild(Widget& parent, Widget& child, const Style& parentStyle, FlexDirection flexDirection,
+                                    std::optional<float> resolvedWidth,
                                     std::optional<float> resolvedHeight, LayoutPass& pass);
+    // Returns no result when child measurement mutates the parent or a child.
+    static std::optional<std::vector<ChildLayout>> measureNormalChildren(Widget& parent, std::optional<float> contentWidth,
+                                                                         std::optional<float> contentHeight, LayoutPass& pass);
     static Vec2 measureRow(Widget& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
                            std::optional<float> resolvedHeight, LayoutPass& pass);
     static Vec2 measureColumn(Widget& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
                               std::optional<float> resolvedHeight, LayoutPass& pass);
-    static Vec2 measureFree(Widget& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
-                            std::optional<float> resolvedHeight, LayoutPass& pass);
+    static Vec2 measureNormal(Widget& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
+                              std::optional<float> resolvedHeight, LayoutPass& pass);
     static bool remeasureRowChildren(Widget& parent, std::vector<ChildLayout>& children, std::size_t begin, std::size_t end, LayoutPass& pass);
     static bool remeasureColumnChildren(Widget& parent, std::vector<ChildLayout>& children, const std::vector<Vec2>& initialSizes, LayoutPass& pass);
     static RowSizing allocateRowLines(Widget& parent, std::vector<ChildLayout>& children, const Style& parentStyle, float availableMain,
@@ -91,15 +95,15 @@ private:
     static RowSizing resolveRowSizes(Widget& node, const Style& parentStyle, const Rect& panel, std::vector<ChildLayout>& children, LayoutPass& pass);
     static MainAxisAllocation resolveColumnSizes(Widget& node, const Style& parentStyle, const Rect& panel, std::vector<ChildLayout>& children,
                                                  LayoutPass& pass);
-    static std::vector<ChildLayout> flowChildren(Widget& parent, Flow flow, LayoutPass& pass);
+    static std::optional<std::vector<ChildLayout>> layoutChildren(Widget& parent, bool flexParent, const Rect& content, LayoutPass& pass);
 
     static void arrangeNode(Widget& node, LayoutDirection direction, LayoutPass& pass);
     static void arrangeRow(Widget& node, const Style& parentStyle, const Rect& content, const Rect& panel, std::vector<ChildLayout>& children,
                            LayoutDirection direction, LayoutPass& pass);
     static void arrangeColumn(Widget& node, const Style& parentStyle, const Rect& content, const Rect& panel, std::vector<ChildLayout>& children,
                               LayoutDirection direction, LayoutPass& pass);
-    static void arrangeFree(Widget& node, const Style& parentStyle, const Rect& content, std::vector<ChildLayout>& children,
-                            LayoutDirection direction, LayoutPass& pass);
+    static void arrangeNormal(Widget& node, const Style& parentStyle, const Rect& content, std::vector<ChildLayout>& children,
+                              LayoutDirection direction, LayoutPass& pass);
 
 public:
     static Vec2 measure(Widget& node, LayoutPass& pass, std::optional<float> outerWidth = std::nullopt,

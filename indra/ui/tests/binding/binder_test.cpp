@@ -569,7 +569,7 @@ TEST(BinderTest, BindsFieldSwitchAndPropagatesValidation) {
     provider->publish({false, false, ValueValidation::valid()});
     EXPECT_FALSE(field->invalid());
     ASSERT_NE(field->error(), nullptr);
-    EXPECT_EQ(field->error()->visibility(), Visibility::Collapsed);
+    EXPECT_EQ(field->error()->visibility(), Visibility::Visible);
 
     result.binding = Binding{};
     EXPECT_EQ(provider->observerCount(), std::size_t{0});

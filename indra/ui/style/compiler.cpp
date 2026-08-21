@@ -365,21 +365,11 @@ CompileResult compileVerticalAlign(detail::StyleCompileContext& context) {
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
-CompileResult compileFlow(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
-    const std::string flow = lower(trim(value));
-    if (flow == "row") return context.compiled(Flow::Row);
-    if (flow == "column") return context.compiled(Flow::Column);
-    if (flow == "free") return context.compiled(Flow::Free);
-    const std::string target = selector.empty() ? std::string("*") : selector;
-    if (flow == "grid") {
-        result.warning("stylesheet.flow.unsupported", "flow: grid is not yet implemented (selector \"" + target + "\"); falling back to flow: free.",
-                       sourceName);
-        return context.compiled(Flow::Free);
-    }
-    result.error("stylesheet.flow.unknown",
-                 "Unknown flow value \"" + value + "\" (selector \"" + target + "\"); expected free, row, column, or grid.", sourceName);
-    return std::nullopt;
+CompileResult compileFlexDirection(detail::StyleCompileContext& context) {
+    const std::string direction = lower(trim(context.value));
+    if (direction == "row") return context.compiled(FlexDirection::Row);
+    if (direction == "column") return context.compiled(FlexDirection::Column);
+    return context.invalid();
 }
 
 template<typename Enum, std::size_t Size> CompileResult compileAlignment(const detail::StyleCompileContext& context, const std::string& value,
@@ -479,6 +469,23 @@ CompileResult compilePointerEvents(detail::StyleCompileContext& context) {
         {"default", PointerEvents::Default},
     }};
     return compileAlignment(context, value, sPointerEventsValues);
+}
+
+CompileResult compileDisplay(detail::StyleCompileContext& context) {
+    const std::string display = lower(trim(context.value));
+    if (display == "none") return context.compiled(DisplayMode::NoneValue);
+    if (display == "flex") return context.compiled(DisplayMode::Flex);
+    if (display == "block") return context.compiled(DisplayMode::Block);
+    if (display == "inline") return context.compiled(DisplayMode::Inline);
+    return context.invalid();
+}
+
+CompileResult compileVisibility(detail::StyleCompileContext& context) {
+    const std::string visibility = lower(trim(context.value));
+    if (visibility == "visible") return context.compiled(Visibility::Visible);
+    if (visibility == "hidden") return context.compiled(Visibility::Hidden);
+    if (visibility == "collapse") return context.compiled(Visibility::Collapse);
+    return context.invalid();
 }
 
 std::optional<Overflow> parseOverflow(const std::string& raw) {
@@ -672,9 +679,13 @@ void applySize(Style& style, const StyleValue& value) {
     style.height = size.height;
     style.width = size.width;
 }
-void applyFlow(Style& style, const StyleValue& value) {
-    style.flow = std::get<Flow>(value);
-    style.flowSet = true;
+void applyDisplay(Style& style, const StyleValue& value) {
+    style.display = std::get<DisplayMode>(value);
+    style.displaySet = true;
+}
+void applyFlexDirection(Style& style, const StyleValue& value) {
+    style.flexDirection = std::get<FlexDirection>(value);
+    style.flexDirectionSet = true;
 }
 void applyJustifyContent(Style& style, const StyleValue& value) {
     style.justifyContent = std::get<JustifyContent>(value);
@@ -710,6 +721,8 @@ const detail::StylePropertyDefinition kPropertyDefinitions[] = {
     {"bottom", compilePosition, applyLengthToOptional<&Style::bottom>},
     {"cursor", compileCursor, applyMember<&Style::cursor>, specifyInherited<InheritedStyleProperty::Cursor>,
      inheritMember<InheritedStyleProperty::Cursor, &Style::cursor>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited},
+    {"display", compileDisplay, applyDisplay, nullptr, nullptr,
+     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"effect", compileEffect, applyMember<&Style::effects>, nullptr, nullptr, StylePropertyImpact::Paint},
     {"height", compileDimension, applyMember<&Style::height>},
     {"left", compilePosition, applyLengthToOptional<&Style::left>},
@@ -731,7 +744,7 @@ const detail::StylePropertyDefinition kPropertyDefinitions[] = {
     {"top", compilePosition, applyLengthToOptional<&Style::top>},
     {"width", compileDimension, applyMember<&Style::width>},
     {"align-items", compileAlignItems, applyMember<&Style::alignItems>},
-    {"flow", compileFlow, applyFlow},
+    {"flex-direction", compileFlexDirection, applyFlexDirection},
     {"gap", compileGap, applyMember<&Style::gap>},
     {"justify-content", compileJustifyContent, applyJustifyContent},
     {"align-self", compileAlignSelf, applyMember<&Style::alignSelf>},
@@ -763,6 +776,9 @@ const detail::StylePropertyDefinition kPropertyDefinitions[] = {
     {"text-wrap", compileTextWrap, applyMember<&Style::textWrap>, specifyInherited<InheritedStyleProperty::TextWrap>,
      inheritMember<InheritedStyleProperty::TextWrap, &Style::textWrap>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
     {"vertical-align", compileVerticalAlign, applyVerticalAlign},
+    {"visibility", compileVisibility, applyMember<&Style::visibility>, specifyInherited<InheritedStyleProperty::Visibility>,
+     inheritMember<InheritedStyleProperty::Visibility, &Style::visibility>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited
+         | StylePropertyImpact::HitTest},
     {"stroke", compileStroke, applyIconStroke, nullptr, nullptr, StylePropertyImpact::Paint},
     {"stroke-color", compileColor, applyMember<&Style::iconStrokeColor>, nullptr, nullptr, StylePropertyImpact::Paint},
     {"stroke-linecap", compileStrokeLinecap, applyIconStrokeLinecap, nullptr, nullptr, StylePropertyImpact::Paint},

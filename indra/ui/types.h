@@ -33,7 +33,7 @@
 namespace radia::ui {
 enum class LayoutDirection { LeftToRight, RightToLeft };
 
-enum class Visibility : std::uint8_t { Visible, Hidden, Collapsed };
+enum class Visibility : std::uint8_t { Visible, Hidden, Collapse };
 
 struct Vec2 {
     float x = 0.f;

@@ -268,6 +268,16 @@ void Surface::invalidateOrderingCache() {
     if (mStylePass) mStylePass->invalidateOrdering();
 }
 
+bool Surface::hasVisibleFloater() const {
+    StylePass& styles = stylePass();
+    const StylePass::TraversalScope traversal = styles.enterTraversal();
+    return std::any_of(mFloaters.begin(), mFloaters.end(), [this, &styles](const WidgetRef<Floater>& floaterRef) {
+        Floater* floater = floaterRef.get();
+        if (!floater || !isRootedInSurface(floater)) return false;
+        return floater->isVisible(styles.style(*floater));
+    });
+}
+
 StylePass& Surface::stylePass() const {
     if (mPendingStyleSheet && (!mStylePass || !mStylePass->active())) {
         mStyleSheet = mPendingStyleSheet;
@@ -350,7 +360,6 @@ void Surface::paint(PaintContext& context, float scale) {
 }
 
 void Surface::paintWidget(const Widget& widget, PaintContext& context, float scale, float inheritedOpacity, StylePass& styles) const {
-    if (widget.visibility() != Visibility::Visible) return;
     const WidgetRef<const Widget> lifetime(&widget);
     const Surface* originalSurface = widget.attachedSurface();
     const Widget* originalParent = widget.parent();
@@ -364,6 +373,7 @@ void Surface::paintWidget(const Widget& widget, PaintContext& context, float sca
         || styledWidget->mStyleRevision != originalStyleRevision
         || styledWidget->mLayoutInvalidationRevision != originalLayoutRevision)
         return;
+    if (!widget.isVisible(unresolved)) return;
     const float childOpacity = inheritedOpacity * unresolved.opacity;
     const LayoutDirection direction = layoutDirection();
     const bool needsOpacity = inheritedOpacity != 1.f || unresolved.opacity != 1.f;
@@ -390,7 +400,7 @@ void Surface::paintWidget(const Widget& widget, PaintContext& context, float sca
             && currentWidget->attachedSurface() == originalSurface
             && currentWidget->mStyleRevision == originalStyleRevision
             && currentWidget->mLayoutInvalidationRevision == originalLayoutRevision
-            && currentWidget->visibility() == Visibility::Visible
+            && currentWidget->isVisible(unresolved)
             && isRootedInSurface(currentWidget)
             && (currentWidget->parent() == originalParent || (!originalParent && isSurfaceRoot(currentWidget)));
     };

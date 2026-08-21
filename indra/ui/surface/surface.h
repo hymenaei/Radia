@@ -79,6 +79,7 @@ public:
     std::unique_ptr<Widget> unmount(Widget& widget);
     std::unique_ptr<Floater> unmountFloater(Floater& floater);
     bool ownsFloater(const Floater& floater) const;
+    bool hasVisibleFloater() const;
     void clearLayer(SurfaceLayer layer);
     bool raise(Widget& widget);
     void placeFloater(Floater& floater, const Rect& rect);

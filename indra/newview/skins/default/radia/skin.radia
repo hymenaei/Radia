@@ -19,7 +19,8 @@
 floater {
     size: auto 362px;
     min-size: 300px 362px;
-    flow: column;
+    display: flex;
+    flex-direction: column;
     background-color: #1f1f1fe5;
     effect: background-blur(64px);
     border-radius: var(--radius-lg);
@@ -31,7 +32,8 @@ floater {
         height: 48px;
         border-color: var(--panel-border);
         border-width: 0px 0px 1px;
-        flow: row;
+        display: flex;
+        flex-direction: row;
         gap: 6px;
         padding: 12px;
 
@@ -49,7 +51,8 @@ floater {
 
         &::custom {
             height: 24px;
-            flow: row;
+            display: flex;
+            flex-direction: row;
             flex-grow: 1;
             gap: 6px;
         }
@@ -60,7 +63,8 @@ floater {
             background-color: #ffffff14;
             border-radius: 6px;
             border: 1px #ffffff24;
-            flow: row;
+            display: flex;
+            flex-direction: row;
             justify-content: center;
 
             &:hover { background-color: #ffffff28; border-color: #ffffff40; }
@@ -75,13 +79,14 @@ floater {
     }
 
     &::content {
-        flow: column;
+        display: flex;
+        flex-direction: column;
         margin: 8px;
         gap: 8px;
     }
 }
 
-label, text {
+label, p {
     text-color: var(--text);
     font-family: sans;
     font-size: 13px;

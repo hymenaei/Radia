@@ -131,7 +131,8 @@ TEST_F(FieldTest, BuildsFieldWithLabelValueAndSupportContent) {
     EXPECT_TRUE(field->error()->part().empty());
     EXPECT_EQ(field->hint()->text(), "Helpful detail");
     EXPECT_EQ(field->error()->text(), "Fallback error");
-    EXPECT_EQ(field->error()->visibility(), Visibility::Collapsed);
+    EXPECT_EQ(field->error()->visibility(), Visibility::Visible);
+    EXPECT_FALSE(field->error()->isDisplayed(Style{}));
     EXPECT_TRUE(field->hint()->flowBreakBefore());
     EXPECT_TRUE(field->error()->flowBreakBefore());
 }
@@ -202,7 +203,7 @@ TEST_F(FieldTest, RejectsInvalidFlowBreakPlacementAndAttributes) {
          "<field><label for=\"toggle\">Label</label><switch id=\"toggle\"/>"
          "<hint visibility=\"hidden\">Hint</hint></field>",
          "layout.attribute.unknown"},
-        {"composite chrome before break", "<floater title=\"title\"><header/><br/><text>content</text></floater>", "layout.flow_break.leading"},
+        {"composite chrome before break", "<floater title=\"title\"><header/><br/><p>content</p></floater>", "layout.flow_break.leading"},
     };
 
     for (const auto& test : cases) {
@@ -215,8 +216,8 @@ TEST_F(FieldTest, RejectsInvalidFlowBreakPlacementAndAttributes) {
 }
 
 TEST_F(FieldTest, PreservesInlineContentStructureAcrossTextAndLabels) {
-    constexpr char kInlineLayout[] = "<panel><text id=\"copy\">before <b>bold<i>both</i></b><br/>"
-                                     "<i>after</i></text><text id=\"title\">Title</text></panel>";
+    constexpr char kInlineLayout[] = "<panel><p id=\"copy\">before <b>bold<i>both</i></b><br/>"
+                                     "<i>after</i></p><p id=\"title\">Title</p></panel>";
     constexpr char kLabelInlineLayout[] = "<panel><label id=\"label\" for=\"target\">name <b>important</b>"
                                           "<br/><i>detail</i></label><switch id=\"target\"/></panel>";
     const LayoutBuildResult result = factory.buildWidgetTreeFromString(kInlineLayout, "inline.xml");
@@ -248,9 +249,9 @@ TEST_F(FieldTest, LocalizesAndDecoratesInlineContent) {
                                            "{inlineExample: \"First <b>Second</b>\"}}}\n";
     ASSERT_TRUE(localization.loadYaml(kInlineLocalization).ok());
     const LayoutBuildContext context(localization, "en");
-    constexpr char kLocalizedTextLayout[] = "<text>inlineExample</text>";
-    constexpr char kDecorationLayout[] = "<text><s>outdated</s> "
-                                         "<kbd shortcut=\"toggle-fly\"/></text>";
+    constexpr char kLocalizedTextLayout[] = "<p>inlineExample</p>";
+    constexpr char kDecorationLayout[] = "<p><s>outdated</s> "
+                                         "<kbd shortcut=\"toggle-fly\"/></p>";
     constexpr char kUnsupportedHeadingLayout[] = "<heading>Title</heading>";
     const LayoutBuildResult localizedResult =
         LayoutResourceCompiler().buildWidgetTreeFromString(kLocalizedTextLayout, "localized-inline.xml", &context);
@@ -280,9 +281,9 @@ TEST_F(FieldTest, RejectsUnsupportedInlineContent) {
     };
 
     const InvalidInlineCase cases[] = {
-        {"missing shortcut", "<text><kbd/></text>", "layout.inline.kbd.shortcut_required"},
-        {"invalid shortcut", "<text><kbd shortcut=\"toggle_fly\"/></text>", "layout.inline.kbd.shortcut_invalid"},
-        {"widget child", "<text><label>not-inline</label></text>", "layout.inline.element_unknown"},
+        {"missing shortcut", "<p><kbd/></p>", "layout.inline.kbd.shortcut_required"},
+        {"invalid shortcut", "<p><kbd shortcut=\"toggle_fly\"/></p>", "layout.inline.kbd.shortcut_invalid"},
+        {"widget child", "<p><label>not-inline</label></p>", "layout.inline.element_unknown"},
     };
 
     for (const auto& test : cases) {
@@ -358,7 +359,7 @@ TEST_F(FieldTest, RejectsInvalidLabelRelationships) {
         {"missing target", "<panel><label for=\"missing\">Missing target</label></panel>", "layout.label.target_missing"},
         {"non-labelable target",
          "<panel><label for=\"copy\">Wrong target</label>"
-         "<text id=\"copy\">Copy</text></panel>",
+         "<p id=\"copy\">Copy</p></panel>",
          "layout.label.target_not_labelable"},
         {"cross-scope target",
          "<panel><label for=\"nestedTarget\">Cross scope</label>"

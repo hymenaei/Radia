@@ -39,7 +39,7 @@ public:
 
 class FieldError final : public Text {
 public:
-    FieldError() : Text("error", ElementTag{}) { setVisibility(Visibility::Collapsed); }
+    FieldError() : Text("error", ElementTag{}) { setDisplayNone(true); }
 };
 
 class FieldSupportIndent final : public Widget {
@@ -62,7 +62,8 @@ private:
 Field::Field() : Widget(sElement) {}
 
 void Field::constrainResolvedStyle(Style& style) const {
-    style.flow = Flow::Row;
+    if (!style.displaySet) style.display = DisplayMode::Flex;
+    if (!style.flexDirectionSet) style.flexDirection = FlexDirection::Row;
     if (!style.verticalAlignSet) style.verticalAlign = VerticalAlign::Middle;
 }
 
@@ -108,7 +109,7 @@ bool Field::controlPrecedesLabel() const {
 Widget* Field::createSupportIndent(WidgetRef<Widget>& slot, const char* part, bool collapsed) {
     auto indent = std::make_unique<FieldSupportIndent>();
     indent->setControl(valueControl());
-    if (collapsed) indent->setVisibility(Visibility::Collapsed);
+    if (collapsed) indent->setDisplayNone(true);
     detail::WidgetCompilerAccess::setStyleIdentity(*indent, styleElement(), part);
     Widget* result = indent.get();
     Widget::addChild(std::move(indent));
@@ -146,14 +147,14 @@ void Field::refreshValueControlState(const ValueControlState& state) {
     setState(WidgetState::Invalid, invalid);
     if (!mError) return;
     if (!invalid) {
-        if (mErrorIndent) mErrorIndent->setVisibility(Visibility::Collapsed);
-        mError->setVisibility(Visibility::Collapsed);
+        if (mErrorIndent) mErrorIndent->setDisplayNone(true);
+        mError->setDisplayNone(true);
         return;
     }
     TextSource content = state.validationMessage ? *state.validationMessage : mAuthoredError;
     mError->setContent(std::move(content));
-    if (mErrorIndent) mErrorIndent->setVisibility(Visibility::Visible);
-    mError->setVisibility(Visibility::Visible);
+    if (mErrorIndent) mErrorIndent->setDisplayNone(false);
+    mError->setDisplayNone(false);
 }
 
 WidgetContract detail::fieldContract() {

@@ -41,7 +41,8 @@ public:
 Button::Button() : Widget(sElement) {}
 
 void Button::constrainResolvedStyle(Style& style) const {
-    if (!style.flowSet) style.flow = Flow::Row;
+    if (!style.displaySet) style.display = DisplayMode::Flex;
+    if (!style.flexDirectionSet) style.flexDirection = FlexDirection::Row;
     if (!style.justifyContentSet) style.justifyContent = JustifyContent::Center;
     if (!style.verticalAlignSet) style.verticalAlign = VerticalAlign::Middle;
 }

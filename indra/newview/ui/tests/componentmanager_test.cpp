@@ -214,7 +214,7 @@ protected:
         constexpr char kLocalization[] = "defaultLocale: en\n"
                                          "locales: {en: {name: English, strings: {controller.ready: Ready}}}\n";
         constexpr char kViewWithStatus[] = "<floater>"
-                                           "<text id=\"status\"/>"
+                                           "<p id=\"status\"/>"
                                            "<button id=\"press\" onClick=\"press()\"/>"
                                            "<button id=\"inspect\" onClick=\"inspect(4, 'settings', true, this, event)\"/>"
                                            "<button id=\"events\" onDoubleClick=\"doubleClick(event)\" onMouseDown=\"mouseDown(event)\" "
@@ -233,7 +233,7 @@ protected:
                                               "<switch id=\"setting\" setting=\"test-enabled\"/>"
                                               "</floater>";
         constexpr char kPanelWithStatus[] = "<panel>"
-                                            "<text id=\"status\"/>"
+                                            "<p id=\"status\"/>"
                                             "<button id=\"press\" onClick=\"press()\"/>"
                                             "<switch id=\"changed\" checked=\"false\" onChange=\"changed(event)\"/>"
                                             "</panel>";

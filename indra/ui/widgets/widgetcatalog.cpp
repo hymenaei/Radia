@@ -26,6 +26,7 @@
 #include "widgets/widgetcatalog.h"
 #include "layout/schema.h"
 #include "widgets/button.h"
+#include "widgets/div.h"
 #include "widgets/field.h"
 #include "widgets/fieldset.h"
 #include "widgets/floater.h"
@@ -46,6 +47,7 @@ const std::unordered_map<std::string, WidgetContract>& builtInWidgetContracts() 
             result.emplace(key, std::move(contract));
         };
         add(detail::buttonContract());
+        add(detail::divContract());
         add(detail::fieldContract());
         add(detail::hintContract());
         add(detail::errorContract());

@@ -58,7 +58,7 @@ enum class LayoutCase {
     FlatRow,
     BalancedTree,
     FlexRow,
-    FreeFlow,
+    Normal,
     ShortLabels,
     WrappedText,
     CompositeControls,
@@ -105,7 +105,7 @@ void addBalancedChildren(Panel& parent, std::size_t& remaining, std::size_t dept
     }
 }
 
-void addFreeFlowLabels(Panel& root, std::size_t nodeCount) {
+void addExplicitLabels(Panel& root, std::size_t nodeCount) {
     for (std::size_t index = 0; index < nodeCount; ++index) {
         auto label = std::make_unique<Label>();
         const float x = static_cast<float>(index % 32) * 18.f;
@@ -144,62 +144,62 @@ LayoutFixture makeFixture(LayoutCase layoutCase, std::size_t nodeCount) {
     Rect rootRect;
     switch (layoutCase) {
         case LayoutCase::FlatColumn:
-            styleSource = "panel { flow: column; gap: 2px; } label { width: 120px; height: 10px; }";
+            styleSource = "panel { display: flex; flex-direction: column; gap: 2px; } label { width: 120px; height: 10px; }";
             addFlatLabels(*fixture.root, nodeCount, false);
             rootRect = {0.f, 0.f, 320.f, std::max(120.f, static_cast<float>(nodeCount) * 12.f)};
             break;
         case LayoutCase::FlatRow:
-            styleSource = "panel { flow: row; gap: 1px; } label { width: 10px; height: 10px; }";
+            styleSource = "panel { display: flex; flex-direction: row; gap: 1px; } label { width: 10px; height: 10px; }";
             addFlatLabels(*fixture.root, nodeCount, false);
             rootRect = {0.f, 0.f, std::max(120.f, static_cast<float>(nodeCount) * 12.f), 24.f};
             break;
         case LayoutCase::BalancedTree: {
-            styleSource = "panel { flow: row; gap: 1px; } label { width: 10px; height: 10px; }";
+            styleSource = "panel { display: flex; flex-direction: row; gap: 1px; } label { width: 10px; height: 10px; }";
             std::size_t remaining = nodeCount;
             addBalancedChildren(*fixture.root, remaining, 0);
             rootRect = {0.f, 0.f, 800.f, 600.f};
             break;
         }
         case LayoutCase::FlexRow:
-            styleSource = "panel { flow: row; gap: 2px; } label { flex: 1; min-width: 0px; height: 10px; }";
+            styleSource = "panel { display: flex; flex-direction: row; gap: 2px; } label { flex: 1; min-width: 0px; height: 10px; }";
             addFlatLabels(*fixture.root, nodeCount, false);
             rootRect = {0.f, 0.f, 1200.f, 24.f};
             break;
-        case LayoutCase::FreeFlow:
-            styleSource = "panel { flow: free; } label { width: 14px; height: 10px; }";
-            addFreeFlowLabels(*fixture.root, nodeCount);
+        case LayoutCase::Normal:
+            styleSource = "panel { display: block; } label { width: 14px; height: 10px; }";
+            addExplicitLabels(*fixture.root, nodeCount);
             rootRect = {0.f, 0.f, 600.f, std::max(200.f, static_cast<float>((nodeCount + 31) / 32) * 14.f + 20.f)};
             break;
         case LayoutCase::ShortLabels:
-            styleSource = "panel { flow: column; gap: 2px; } label { width: 180px; height: 18px; font-size: 12px; line-height: 18px; }";
+            styleSource = "panel { display: flex; flex-direction: column; gap: 2px; } label { width: 180px; height: 18px; font-size: 12px; line-height: 18px; }";
             addFlatLabels(*fixture.root, nodeCount, true);
             rootRect = {0.f, 0.f, 240.f, std::max(120.f, static_cast<float>(nodeCount) * 20.f)};
             break;
         case LayoutCase::WrappedText:
-            styleSource = "panel { flow: column; gap: 2px; } text { width: 48px; font-size: 10px; line-height: 10px; text-wrap: wrap; }";
+            styleSource = "panel { display: flex; flex-direction: column; gap: 2px; } p { width: 48px; font-size: 10px; line-height: 10px; text-wrap: wrap; }";
             for (std::size_t index = 0; index < nodeCount; ++index) fixture.root->addChild(std::make_unique<Text>("alpha beta gamma delta"));
             rootRect = {0.f, 0.f, 240.f, std::max(120.f, static_cast<float>(nodeCount) * 42.f)};
             break;
         case LayoutCase::CompositeControls:
-            styleSource = "panel { flow: column; gap: 2px; } "
-                          "button { width: 160px; height: 24px; padding: 4px; gap: 4px; flow: row; } "
+            styleSource = "panel { display: flex; flex-direction: column; gap: 2px; } "
+                          "button { width: 160px; height: 24px; padding: 4px; gap: 4px; display: flex; flex-direction: row; } "
                           "button > icon { size: 16px; } switch { width: 64px; height: 24px; } "
                           "switch::thumb { size: 18px; } label { width: 160px; height: 18px; }";
             addCompositeControls(*fixture.root, nodeCount);
             rootRect = {0.f, 0.f, 240.f, std::max(120.f, static_cast<float>(nodeCount) * 28.f)};
             break;
         case LayoutCase::HiddenLabels:
-            styleSource = "panel { flow: column; gap: 2px; } label { width: 120px; height: 10px; }";
+            styleSource = "panel { display: flex; flex-direction: column; gap: 2px; } label { width: 120px; height: 10px; }";
             addFlatLabels(*fixture.root, nodeCount, false, Visibility::Hidden);
             rootRect = {0.f, 0.f, 320.f, std::max(120.f, static_cast<float>(nodeCount) * 12.f)};
             break;
         case LayoutCase::CollapsedLabels:
-            styleSource = "panel { flow: column; gap: 2px; } label { width: 120px; height: 10px; }";
-            addFlatLabels(*fixture.root, nodeCount, false, Visibility::Collapsed);
+            styleSource = "panel { display: flex; flex-direction: column; gap: 2px; } label { width: 120px; height: 10px; }";
+            addFlatLabels(*fixture.root, nodeCount, false, Visibility::Collapse);
             rootRect = {0.f, 0.f, 320.f, std::max(120.f, static_cast<float>(nodeCount) * 12.f)};
             break;
         case LayoutCase::RightToLeftRow:
-            styleSource = "panel { flow: row; gap: 1px; } label { width: 10px; height: 10px; }";
+            styleSource = "panel { display: flex; flex-direction: row; gap: 1px; } label { width: 10px; height: 10px; }";
             addFlatLabels(*fixture.root, nodeCount, false);
             fixture.direction = LayoutDirection::RightToLeft;
             rootRect = {0.f, 0.f, std::max(120.f, static_cast<float>(nodeCount) * 12.f), 24.f};
@@ -316,7 +316,7 @@ BENCHMARK_CAPTURE(BM_Layout_RelayoutAfterResize, FlatRow, LayoutCase::FlatRow)->
 BENCHMARK_CAPTURE(BM_Layout_RelayoutAfterResize, BalancedTree, LayoutCase::BalancedTree)->Apply(addScaleCases);
 BENCHMARK_CAPTURE(BM_Layout_RelayoutAfterResize, FlexRow, LayoutCase::FlexRow)->Apply(addScaleCases);
 
-BENCHMARK_CAPTURE(BM_Layout_RelayoutAfterResize, FreeFlow, LayoutCase::FreeFlow)->Apply(addRepresentativeCases);
+BENCHMARK_CAPTURE(BM_Layout_RelayoutAfterResize, Normal, LayoutCase::Normal)->Apply(addRepresentativeCases);
 BENCHMARK_CAPTURE(BM_Layout_RelayoutAfterResize, ShortLabels, LayoutCase::ShortLabels)->Apply(addRepresentativeCases);
 BENCHMARK_CAPTURE(BM_Layout_RelayoutAfterResize, WrappedText, LayoutCase::WrappedText)->Apply(addRepresentativeCases);
 BENCHMARK_CAPTURE(BM_Layout_RelayoutAfterResize, CompositeControls, LayoutCase::CompositeControls)->Apply(addRepresentativeCases);

@@ -91,7 +91,7 @@ public:
 
 TEST(FloatersTest, RequestsDetachmentWhenDragExceedsBoundary) {
     StyleSheet styleSheet;
-    constexpr char kDragFloaterLayout[] = "floater { flow: column; } "
+    constexpr char kDragFloaterLayout[] = "floater { display: flex; flex-direction: column; } "
                                           "floater::header { height: 30px; } "
                                           "floater::content { flex-grow: 1; }";
     ASSERT_TRUE(styleSheet.loadRadia(kDragFloaterLayout).ok());
@@ -125,10 +125,33 @@ TEST(FloatersTest, RequestsDetachmentWhenDragExceedsBoundary) {
     EXPECT_EQ(delegate.moveCompletions, 2);
 }
 
+TEST(FloatersTest, ReportsFloaterVisibilityFromResolvedDisplayAndVisibility) {
+    StyleSheet styleSheet;
+    constexpr char kVisibility[] = ".hidden { visibility: hidden; } .none { display: none; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kVisibility).ok());
+    Surface surface(styleSheet);
+    surface.setViewport(200.f, 100.f);
+
+    auto visible = std::make_unique<Floater>();
+    surface.mountFloater(std::move(visible));
+    EXPECT_TRUE(surface.hasVisibleFloater());
+
+    auto hidden = std::make_unique<Floater>();
+    hidden->addClass("hidden");
+    surface.mountFloater(std::move(hidden));
+    auto none = std::make_unique<Floater>();
+    none->addClass("none");
+    surface.mountFloater(std::move(none));
+    EXPECT_TRUE(surface.hasVisibleFloater());
+
+    surface.clearLayer(SurfaceLayer::Floater);
+    EXPECT_FALSE(surface.hasVisibleFloater());
+}
+
 TEST(FloatersTest, RestoresFloaterWithinViewportAfterMinimization) {
     StyleSheet styleSheet;
-    constexpr char kMinimizedFloaterStyle[] = "floater { flow: column; } "
-                                              "floater::header { height: 30px; flow: row; } "
+    constexpr char kMinimizedFloaterStyle[] = "floater { display: flex; flex-direction: column; } "
+                                              "floater::header { height: 30px; display: flex; flex-direction: row; } "
                                               "floater::content { flex-grow: 1; }";
     ASSERT_TRUE(styleSheet.loadRadia(kMinimizedFloaterStyle).ok());
     Surface surface(styleSheet);
@@ -192,7 +215,7 @@ TEST(FloatersTest, TransfersFloaterBetweenSurfacesAndReportsLifecycle) {
 
 TEST(FloatersTest, AvoidsSyntheticMoveBeforeViewportInitialization) {
     StyleSheet styleSheet;
-    constexpr char kStartupFloaterLayout[] = "floater { width: 100px; flow: column; } "
+    constexpr char kStartupFloaterLayout[] = "floater { width: 100px; display: flex; flex-direction: column; } "
                                              "floater::header { height: 30px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kStartupFloaterLayout).ok());
     Surface surface(styleSheet);
@@ -212,7 +235,7 @@ TEST(FloatersTest, AvoidsSyntheticMoveBeforeViewportInitialization) {
 
 TEST(FloatersTest, ResizesAttachedFloaterWithinSurfaceBounds) {
     StyleSheet styleSheet;
-    constexpr char kResize[] = "floater { size: 80px 100px; min-size: 40px 50px; flow: column; } "
+    constexpr char kResize[] = "floater { size: 80px 100px; min-size: 40px 50px; display: flex; flex-direction: column; } "
                                "floater::header { height: 20px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kResize).ok());
     Surface surface(styleSheet);
@@ -309,8 +332,8 @@ TEST(FloatersTest, ResizesFloatersMountedInModalLayer) {
 
 TEST(FloatersTest, KeepsFixedOuterSizeWhileTrackingContentGeometry) {
     StyleSheet styleSheet;
-    constexpr char kFixedOuter[] = "floater { size: 300px; flow: column; } "
-                                   "floater::header { height: 20px; } floater::content { flow: column; }";
+    constexpr char kFixedOuter[] = "floater { size: 300px; display: flex; flex-direction: column; } "
+                                   "floater::header { height: 20px; } floater::content { display: flex; flex-direction: column; }";
     ASSERT_TRUE(styleSheet.loadRadia(kFixedOuter).ok());
     Surface surface(styleSheet);
     surface.setViewport(500.f, 400.f);

@@ -20,13 +20,6 @@
 
 namespace radia::ui {
 namespace {
-std::string trimmedText(const std::string& text) {
-    const auto first = std::find_if_not(text.begin(), text.end(), [](unsigned char character) { return std::isspace(character); });
-    if (first == text.end()) return {};
-    const auto last = std::find_if_not(text.rbegin(), text.rend(), [](unsigned char character) { return std::isspace(character); }).base();
-    return std::string(first, last);
-}
-
 ElementDefinition genericElementDefinition(Tag tag) {
     ElementDefinition result;
     result.elementName = sourceTagName(tag);

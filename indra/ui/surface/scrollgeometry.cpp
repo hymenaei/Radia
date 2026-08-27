@@ -23,11 +23,6 @@ float axisEnd(const Rect& rect, ScrollbarAxis axis) {
     return axis == ScrollbarAxis::Horizontal ? rect.right() : rect.top();
 }
 
-Rect axisRect(const Rect& bounds, ScrollbarAxis axis, float start, float length) {
-    if (axis == ScrollbarAxis::Horizontal) return {start, bounds.y, length, bounds.h};
-    return {bounds.x, start, bounds.w, length};
-}
-
 ScrollbarAxisGeometry makeAxisGeometry(const Rect& bounds, const ScrollbarAxisInput& input, ScrollbarAxis axis, bool reversed, bool showArrows,
                                        float arrowLength, float minimumThumbLength, float thumbPadding) {
     ScrollbarAxisGeometry result;

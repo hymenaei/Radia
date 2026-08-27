@@ -1,29 +1,9 @@
 /**
- * @file recordingpaintcontext.h
- * @brief Records UI paint commands for inspection and tests.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
-#ifndef RD_RENDER_RECORDINGPAINTCONTEXT_H
-#define RD_RENDER_RECORDINGPAINTCONTEXT_H
+#pragma once
 
 #include <cstddef>
 #include <cstdint>
@@ -32,7 +12,20 @@
 #include "render/paintcontext.h"
 
 namespace radia::ui {
-enum class PaintCommandKind { BeginFrame, EndFrame, PushClip, PopClip, BeginEffects, EndEffects, Box, Text, Icon };
+enum class PaintCommandKind {
+    BeginFrame,
+    EndFrame,
+    PushClip,
+    PopClip,
+    PushTranslation,
+    PopTranslation,
+    BeginEffects,
+    EndEffects,
+    Scrollbar,
+    Box,
+    Text,
+    Icon
+};
 
 struct PaintCommand {
     PaintCommandKind kind;
@@ -42,6 +35,8 @@ struct PaintCommand {
     float scale = 1.f;
     ClipAxes clipAxes = ClipAxes::Both;
     std::optional<TopBorderGap> topBorderGap;
+    Vec2 translation;
+    std::optional<NativeScrollbarPaintRequest> scrollbar;
 };
 
 class RecordingPaintContext final : public PaintContext {
@@ -55,8 +50,11 @@ public:
     void endFrame() override;
     void pushClip(const Rect& rect, float scale, ClipAxes axes = ClipAxes::Both) override;
     void popClip() override;
+    void pushTranslation(const Vec2& translation) override;
+    void popTranslation() override;
     void beginEffects(const Rect& rect, const Style& style, float scale) override;
     void endEffects() override;
+    void paintNativeScrollbar(const NativeScrollbarPaintRequest& request) override;
     void paintBox(const Rect& rect, const Style& style, std::optional<TopBorderGap> topBorderGap = std::nullopt) override;
     void paintText(const std::string& text, const Rect& rect, const Style& style) override;
     void paintIcon(const std::string& name, const Rect& rect, const Style& style, float scale) override;
@@ -66,6 +64,8 @@ public:
     const PaintCommand* last(PaintCommandKind kind) const;
     int clipDepth() const { return mClipDepth; }
     int maxClipDepth() const { return mMaxClipDepth; }
+    int translationDepth() const { return mTranslationDepth; }
+    int maxTranslationDepth() const { return mMaxTranslationDepth; }
     void clear();
 
 private:
@@ -73,6 +73,7 @@ private:
     std::vector<PaintCommand> mCommands;
     int mClipDepth = 0;
     int mMaxClipDepth = 0;
+    int mTranslationDepth = 0;
+    int mMaxTranslationDepth = 0;
 };
 } // namespace radia::ui
-#endif // RD_RENDER_RECORDINGPAINTCONTEXT_H

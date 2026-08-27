@@ -1,35 +1,15 @@
 /**
- * @file generation.h
- * @brief Exposes immutable compiled skin generations for Widget trees, localization, styles, and icons.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
-#ifndef RD_SKIN_GENERATION_H
-#define RD_SKIN_GENERATION_H
+#pragma once
 
 #include <memory>
 #include <string>
 #include <vector>
 #include "layout/buildresult.h"
-#include "localization/localization.h"
+#include "localization.h"
 #include "style/stylesheet.h"
 
 namespace radia::ui {
@@ -44,22 +24,22 @@ public:
     SkinGeneration(const SkinGeneration&) = delete;
     SkinGeneration& operator=(const SkinGeneration&) = delete;
 
-    LayoutBuildResult buildWidgetTree(const std::string& resourceId, const std::string& locale) const;
+    LayoutBuildResult buildElementTree(const std::string& resourceId, const std::string& locale) const;
 
 private:
     struct Impl;
     explicit SkinGeneration(std::unique_ptr<Impl> implementation);
 
     static std::shared_ptr<const SkinGeneration> empty();
-    DiagnosticResult validateWidgetDefaults(const std::string& element) const;
-    void validateIconReferences(Widget& widget, LayoutBuildResult& result) const;
+    DiagnosticResult validateElementDefaults(const std::string& element) const;
+    void validateIconReferences(Element& element, LayoutBuildResult& result) const;
     std::vector<LocaleInfo> locales() const;
     const std::string& defaultLocale() const;
     const LocaleInfo* locale(const std::string& id) const;
     bool containsLocale(const std::string& id) const;
     bool hasLocalizationKey(const std::string& id) const;
-    InlineContent resolveContent(const std::string& locale, const LocalizationRequest& request) const;
-    std::string resolveText(const std::string& locale, const LocalizationRequest& request) const;
+    std::string resolveMarkup(const std::string& locale, const LocalizedText& text) const;
+    std::string resolveText(const std::string& locale, const LocalizedText& text) const;
     const StyleSheet& styleSheet() const;
     const SvgIcon* icon(const std::string& name) const;
 
@@ -69,4 +49,3 @@ private:
     friend class System;
 };
 } // namespace radia::ui
-#endif // RD_SKIN_GENERATION_H

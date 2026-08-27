@@ -1,25 +1,6 @@
 /**
- * @file compiler.cpp
- * @brief Compiles RSL declarations through the private property registry.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
 #include "linden_common.h"
@@ -57,7 +38,7 @@ namespace {
 StyleDeclaration makeDeclaration(std::string_view name, StyleValue value) {
     const detail::StylePropertyDefinition* property = detail::findStyleProperty(name);
     llassert_always(property != nullptr);
-    llassert_always(property->apply != nullptr);
+    llassert_always(property->apply != nullptr || std::holds_alternative<InitialStyleValue>(value));
     return {*property, std::move(value)};
 }
 
@@ -71,6 +52,97 @@ std::vector<StyleDeclaration> makeDeclarations(std::initializer_list<std::pair<s
 
 void detail::applyStyleDeclaration(Style& style, const StyleDeclaration& declaration) {
     const detail::StylePropertyDefinition& property = declaration.property.get();
+    if (std::holds_alternative<InitialStyleValue>(declaration.value)) {
+        const Style initial;
+        if (property.name == "appearance") style.appearance = initial.appearance;
+        else if (property.name == "background-color") {
+            style.backgroundColor = initial.backgroundColor;
+            style.backgroundGradient = initial.backgroundGradient;
+        } else if (property.name == "border") {
+            style.borderWidth = initial.borderWidth;
+            style.borderColor = initial.borderColor;
+            style.borderGradient = initial.borderGradient;
+        } else if (property.name == "border-color") {
+            style.borderColor = initial.borderColor;
+            style.borderGradient = initial.borderGradient;
+        } else if (property.name == "border-radius") style.borderRadius = initial.borderRadius;
+        else if (property.name == "border-width") style.borderWidth = initial.borderWidth;
+        else if (property.name == "bottom") style.bottom = initial.bottom;
+        else if (property.name == "cursor") style.cursor = initial.cursor;
+        else if (property.name == "display") {
+            style.display = initial.display;
+            style.displaySet = true;
+        } else if (property.name == "effect") style.effects = initial.effects;
+        else if (property.name == "height") style.height = initial.height;
+        else if (property.name == "left") style.left = initial.left;
+        else if (property.name == "margin") style.margin = initial.margin;
+        else if (property.name == "min-height") style.minHeight = initial.minHeight;
+        else if (property.name == "min-width") style.minWidth = initial.minWidth;
+        else if (property.name == "opacity") style.opacity = initial.opacity;
+        else if (property.name == "outline") style.outline = initial.outline;
+        else if (property.name == "outline-offset") style.outline.offset = initial.outline.offset;
+        else if (property.name == "overflow-x") style.overflowX = initial.overflowX;
+        else if (property.name == "overflow-y") style.overflowY = initial.overflowY;
+        else if (property.name == "padding") style.padding = initial.padding;
+        else if (property.name == "pointer-events") style.pointerEvents = initial.pointerEvents;
+        else if (property.name == "position") style.position = initial.position;
+        else if (property.name == "right") style.right = initial.right;
+        else if (property.name == "box-shadow") style.shadows = initial.shadows;
+        else if (property.name == "size") {
+            style.height = initial.height;
+            style.width = initial.width;
+        } else if (property.name == "top") style.top = initial.top;
+        else if (property.name == "translate") style.translate = initial.translate;
+        else if (property.name == "width") style.width = initial.width;
+        else if (property.name == "align-items") style.alignItems = initial.alignItems;
+        else if (property.name == "flex-direction") {
+            style.flexDirection = initial.flexDirection;
+            style.flexDirectionSet = true;
+        } else if (property.name == "gap") style.gap = initial.gap;
+        else if (property.name == "grid-area") style.gridArea = initial.gridArea;
+        else if (property.name == "justify-content") {
+            style.justifyContent = initial.justifyContent;
+            style.justifyContentSet = true;
+        } else if (property.name == "justify-self") style.justifySelf = initial.justifySelf;
+        else if (property.name == "align-self") style.alignSelf = initial.alignSelf;
+        else if (property.name == "flex-basis") style.flexBasis = initial.flexBasis;
+        else if (property.name == "flex-grow") style.flexGrow = initial.flexGrow;
+        else if (property.name == "flex-shrink") style.flexShrink = initial.flexShrink;
+        else if (property.name == "order") style.order = initial.order;
+        else if (property.name == "font-family") style.fontFamily = initial.fontFamily;
+        else if (property.name == "font-size") style.fontSize = initial.fontSize;
+        else if (property.name == "font-style") style.fontItalic = initial.fontItalic;
+        else if (property.name == "text-decoration") style.textDecoration = initial.textDecoration;
+        else if (property.name == "font-weight") style.fontWeight = initial.fontWeight;
+        else if (property.name == "line-height") style.lineHeight = initial.lineHeight;
+        else if (property.name == "letter-spacing") style.letterSpacing = initial.letterSpacing;
+        else if (property.name == "word-spacing") style.wordSpacing = initial.wordSpacing;
+        else if (property.name == "text-align") style.textAlign = initial.textAlign;
+        else if (property.name == "text-color") style.textColor = initial.textColor;
+        else if (property.name == "text-overflow") style.textOverflow = initial.textOverflow;
+        else if (property.name == "text-wrap") style.textWrap = initial.textWrap;
+        else if (property.name == "vertical-align") {
+            style.verticalAlign = initial.verticalAlign;
+            style.verticalAlignSet = true;
+        } else if (property.name == "visibility") style.visibility = initial.visibility;
+        else if (property.name == "scrollbar-mode") {
+            style.scrollbarMode = initial.scrollbarMode;
+            style.scrollbarModeSet = true;
+        } else if (property.name == "scrollbar-width") style.scrollbarWidth = initial.scrollbarWidth;
+        else if (property.name == "scrollbar-gutter") style.scrollbarGutter = initial.scrollbarGutter;
+        else if (property.name == "scrollbar-color") style.scrollbarColor = initial.scrollbarColor;
+        else if (property.name == "stroke") {
+            style.svgStrokeWidth = initial.svgStrokeWidth;
+            style.iconStrokeColor = initial.iconStrokeColor;
+        } else if (property.name == "stroke-color") style.iconStrokeColor = initial.iconStrokeColor;
+        else if (property.name == "stroke-linecap") {
+            style.svgStrokeCap = initial.svgStrokeCap;
+            style.svgStrokeCapSet = true;
+        } else if (property.name == "stroke-width") style.svgStrokeWidth = initial.svgStrokeWidth;
+        else LL_ERRS("UI") << "Attempted to reset an unknown initial style property: " << property.name << LL_ENDL;
+        if (property.specify) property.specify(style);
+        return;
+    }
     if (!property.apply) {
         LL_ERRS("UI") << "Attempted to apply a stylesheet declaration without an applicable property definition." << LL_ENDL;
         return;
@@ -218,6 +290,18 @@ CompileResult compileOutline(detail::StyleCompileContext& context) {
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
+CompileResult compileBorderRadius(detail::StyleCompileContext& context) {
+    auto& [model, property, value, selector, result, sourceName] = context;
+    const auto parsed = model.parseBorderRadius(value);
+    return parsed ? context.compiled(*parsed) : context.invalid();
+}
+
+CompileResult compileOutlineOffset(detail::StyleCompileContext& context) {
+    if (endsWith(lower(trim(context.value)), "%")) return context.invalid();
+    const auto parsed = context.length();
+    return parsed && parsed->percent == 0.f ? context.compiled(*parsed) : context.invalid();
+}
+
 CompileResult compilePaint(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
     if (const std::optional<Gradient> gradient = model.parseGradient(value)) return context.compiled(StylePaint{Color(), *gradient});
@@ -326,6 +410,14 @@ CompileResult compileFontStyle(detail::StyleCompileContext& context) {
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
+CompileResult compileTextDecoration(detail::StyleCompileContext& context) {
+    const std::string decoration = lower(trim(context.value));
+    if (decoration == "none") return context.compiled(TextDecoration::NoneValue);
+    if (decoration == "underline") return context.compiled(TextDecoration::Underline);
+    if (decoration == "line-through") return context.compiled(TextDecoration::LineThrough);
+    return context.invalid();
+}
+
 CompileResult compileTextAlign(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
     const std::string alignment = lower(trim(value));
@@ -415,6 +507,18 @@ CompileResult compileAlignSelf(detail::StyleCompileContext& context) {
     return compileAlignment(context, value, sAlignSelfValues);
 }
 
+CompileResult compileJustifySelf(detail::StyleCompileContext& context) {
+    auto& [model, property, value, selector, result, sourceName] = context;
+    static constexpr std::array<std::pair<std::string_view, JustifySelf>, 5> sJustifySelfValues{{
+        {"auto", JustifySelf::Auto},
+        {"start", JustifySelf::Start},
+        {"center", JustifySelf::Center},
+        {"end", JustifySelf::End},
+        {"stretch", JustifySelf::Stretch},
+    }};
+    return compileAlignment(context, value, sJustifySelfValues);
+}
+
 CompileResult compileFlex(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
     const std::vector<std::string> tokens = context.tokens();
@@ -475,9 +579,54 @@ CompileResult compileDisplay(detail::StyleCompileContext& context) {
     const std::string display = lower(trim(context.value));
     if (display == "none") return context.compiled(DisplayMode::NoneValue);
     if (display == "flex") return context.compiled(DisplayMode::Flex);
+    if (display == "grid") return context.compiled(DisplayMode::Grid);
+    if (display == "inline-grid") return context.compiled(DisplayMode::InlineGrid);
     if (display == "block") return context.compiled(DisplayMode::Block);
+    if (display == "inline-block") return context.compiled(DisplayMode::InlineBlock);
     if (display == "inline") return context.compiled(DisplayMode::Inline);
     return context.invalid();
+}
+
+CompileResult compileAppearance(detail::StyleCompileContext& context) {
+    const std::string appearance = lower(trim(context.value));
+    if (appearance == "auto") return context.compiled(AppearanceMode::Auto);
+    if (appearance == "none") return context.compiled(AppearanceMode::Unstyled);
+    return context.invalid();
+}
+
+CompileResult compileGridArea(detail::StyleCompileContext& context) {
+    const std::vector<std::string> tokens = context.tokens(true);
+    if (tokens.size() != 3 || tokens[1] != "/") return context.invalid();
+    const auto line = [&context](const std::string& raw) -> std::optional<int> {
+        const std::string token = lower(trim(raw));
+        if (endsWith(token, "px") || endsWith(token, "%")) return std::nullopt;
+        const auto parsed = context.number(raw);
+        if (!parsed || *parsed < 1.f || std::floor(*parsed) != *parsed || *parsed > static_cast<float>(std::numeric_limits<int>::max()))
+            return std::nullopt;
+        return static_cast<int>(*parsed);
+    };
+    const auto row = line(tokens[0]);
+    const auto column = line(tokens[2]);
+    return row && column ? context.compiled(GridArea{*row, *column}) : context.invalid();
+}
+
+CompileResult compilePositionMode(detail::StyleCompileContext& context) {
+    const std::string position = lower(trim(context.value));
+    if (position == "static") return context.compiled(PositionMode::Static);
+    if (position == "relative") return context.compiled(PositionMode::Relative);
+    return context.invalid();
+}
+
+CompileResult compileTranslate(detail::StyleCompileContext& context) {
+    const std::vector<std::string> tokens = context.tokens();
+    if (tokens.empty() || tokens.size() > 2) return context.invalid();
+    const auto fixedLength = [&context](const std::string& raw) -> std::optional<float> {
+        const auto parsed = context.length(raw);
+        return parsed && parsed->percent == 0.f ? std::optional<float>(parsed->pixels) : std::nullopt;
+    };
+    const auto x = fixedLength(tokens[0]);
+    const auto y = fixedLength(tokens.size() == 1 ? std::string("0") : tokens[1]);
+    return x && y ? context.compiled(Translate{*x, *y}) : context.invalid();
 }
 
 CompileResult compileVisibility(detail::StyleCompileContext& context) {
@@ -492,6 +641,8 @@ std::optional<Overflow> parseOverflow(const std::string& raw) {
     const std::string token = lower(trim(raw));
     if (token == "visible") return Overflow::Visible;
     if (token == "hidden") return Overflow::Hidden;
+    if (token == "scroll") return Overflow::Scroll;
+    if (token == "auto") return Overflow::Auto;
     return std::nullopt;
 }
 
@@ -509,6 +660,42 @@ CompileResult compileOverflowAxis(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
     const auto parsed = parseOverflow(value);
     return parsed ? context.compiled(*parsed) : context.invalid();
+}
+
+CompileResult compileScrollbarMode(detail::StyleCompileContext& context) {
+    const std::string mode = lower(trim(context.value));
+    if (mode == "classic") return context.compiled(ScrollbarMode::Classic);
+    if (mode == "overlay") return context.compiled(ScrollbarMode::Overlay);
+    return context.invalid();
+}
+
+CompileResult compileScrollbarWidth(detail::StyleCompileContext& context) {
+    const std::string width = lower(trim(context.value));
+    if (width == "auto") return context.compiled(ScrollbarWidth::Auto);
+    if (width == "thin") return context.compiled(ScrollbarWidth::Thin);
+    if (width == "none") return context.compiled(ScrollbarWidth::NoneValue);
+    return context.invalid();
+}
+
+CompileResult compileScrollbarGutter(detail::StyleCompileContext& context) {
+    const std::vector<std::string> tokens = context.tokens();
+    if (tokens.size() == 1) {
+        const std::string gutter = lower(trim(tokens[0]));
+        if (gutter == "auto") return context.compiled(ScrollbarGutter::Auto);
+        if (gutter == "stable") return context.compiled(ScrollbarGutter::Stable);
+    } else if (tokens.size() == 2 && lower(trim(tokens[0])) == "stable" && lower(trim(tokens[1])) == "both-edges")
+        return context.compiled(ScrollbarGutter::StableBothEdges);
+    return context.invalid();
+}
+
+CompileResult compileScrollbarColor(detail::StyleCompileContext& context) {
+    const std::string value = lower(trim(context.value));
+    if (value == "auto") return context.compiled(ScrollbarColors{});
+    const std::vector<std::string> tokens = context.tokens();
+    if (tokens.size() != 2) return context.invalid();
+    const std::optional<Color> thumb = context.color(tokens[0]);
+    const std::optional<Color> track = context.color(tokens[1]);
+    return thumb && track ? context.compiled(ScrollbarColors{false, *thumb, *track}) : context.invalid();
 }
 
 CompileResult compileOrder(detail::StyleCompileContext& context) {
@@ -625,12 +812,24 @@ CompileResult compileSpacing(detail::StyleCompileContext& context) {
     const auto parsed = context.length();
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
-
 } // namespace
 
 std::optional<std::vector<StyleDeclaration>> StyleModel::compileDeclaration(const detail::StylePropertyDefinition& property, const std::string& value,
                                                                             const std::string& selector, StyleSheetLoadResult& result,
                                                                             const std::string& sourceName) const {
+    if (detail::lower(detail::trim(value)) == "initial") {
+        if (property.name == "overflow") return makeDeclarations({{"overflow-x", InitialStyleValue{}}, {"overflow-y", InitialStyleValue{}}});
+        if (property.name == "min-size") return makeDeclarations({{"min-height", InitialStyleValue{}}, {"min-width", InitialStyleValue{}}});
+        if (property.name == "flex")
+            return makeDeclarations({{"flex-grow", InitialStyleValue{}}, {"flex-shrink", InitialStyleValue{}}, {"flex-basis", InitialStyleValue{}}});
+        if (property.name == "font")
+            return makeDeclarations({{"font-style", InitialStyleValue{}},
+                                     {"font-weight", InitialStyleValue{}},
+                                     {"font-size", InitialStyleValue{}},
+                                     {"line-height", InitialStyleValue{}},
+                                     {"font-family", InitialStyleValue{}}});
+        return std::vector<StyleDeclaration>{makeDeclaration(property.name, InitialStyleValue{})};
+    }
     if (!property.compile) {
         result.error("stylesheet.property.value_invalid", "Property has no compiler: " + std::string(property.name) + ".", sourceName);
         return std::nullopt;
@@ -674,6 +873,15 @@ void applyBorder(Style& style, const StyleValue& value) {
     style.borderColor = border.paint.gradient ? Color(0.f, 0.f, 0.f, 0.f) : border.paint.color;
     style.borderGradient = border.paint.gradient;
 }
+void applyOutline(Style& style, const StyleValue& value) {
+    const Outline& outline = std::get<Outline>(value);
+    style.outline.width = outline.width;
+    style.outline.color = outline.color;
+    style.outline.style = outline.style;
+}
+void applyOutlineOffset(Style& style, const StyleValue& value) {
+    style.outline.offset = std::get<Length>(value).pixels;
+}
 void applySize(Style& style, const StyleValue& value) {
     const StyleSize& size = std::get<StyleSize>(value);
     style.height = size.height;
@@ -682,6 +890,10 @@ void applySize(Style& style, const StyleValue& value) {
 void applyDisplay(Style& style, const StyleValue& value) {
     style.display = std::get<DisplayMode>(value);
     style.displaySet = true;
+}
+void applyScrollbarMode(Style& style, const StyleValue& value) {
+    style.scrollbarMode = std::get<ScrollbarMode>(value);
+    style.scrollbarModeSet = true;
 }
 void applyFlexDirection(Style& style, const StyleValue& value) {
     style.flexDirection = std::get<FlexDirection>(value);
@@ -712,41 +924,65 @@ void applyIconStrokeWidth(Style& style, const StyleValue& value) {
 }
 
 const detail::StylePropertyDefinition kPropertyDefinitions[] = {
+    {"appearance", compileAppearance, applyMember<&Style::appearance>, nullptr, nullptr, StylePropertyImpact::Paint},
     {"background-color", compilePaint, applyBackground, nullptr, nullptr, StylePropertyImpact::Paint},
     {"border", compileBorder, applyBorder, nullptr, nullptr, StylePropertyImpact::Layout | StylePropertyImpact::Paint},
     {"border-color", compilePaint, [](Style& style, const StyleValue& value) { applyPaint(style.borderColor, style.borderGradient, value); }, nullptr,
      nullptr, StylePropertyImpact::Paint},
-    {"border-radius", compileNonnegativeNumber, applyMember<&Style::borderRadius>, nullptr, nullptr, StylePropertyImpact::Paint},
+    {"border-radius", compileBorderRadius, applyMember<&Style::borderRadius>, nullptr, nullptr, StylePropertyImpact::Paint},
     {"border-width", compileEdges, applyMember<&Style::borderWidth>, nullptr, nullptr, StylePropertyImpact::Layout | StylePropertyImpact::Paint},
-    {"bottom", compilePosition, applyLengthToOptional<&Style::bottom>},
+    {"bottom", compilePosition, applyLengthToOptional<&Style::bottom>, nullptr, nullptr,
+     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"cursor", compileCursor, applyMember<&Style::cursor>, specifyInherited<InheritedStyleProperty::Cursor>,
      inheritMember<InheritedStyleProperty::Cursor, &Style::cursor>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited},
     {"display", compileDisplay, applyDisplay, nullptr, nullptr,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"effect", compileEffect, applyMember<&Style::effects>, nullptr, nullptr, StylePropertyImpact::Paint},
     {"height", compileDimension, applyMember<&Style::height>},
-    {"left", compilePosition, applyLengthToOptional<&Style::left>},
+    {"left", compilePosition, applyLengthToOptional<&Style::left>, nullptr, nullptr,
+     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"margin", compileMargin, applyMember<&Style::margin>},
     {"min-height", compileNonnegativeLength, applyLengthToOptional<&Style::minHeight>},
     {"min-size", compileMinSize},
     {"min-width", compileNonnegativeLength, applyLengthToOptional<&Style::minWidth>},
     {"opacity", compileOpacity, applyMember<&Style::opacity>, nullptr, nullptr, StylePropertyImpact::Paint},
-    {"outline", compileOutline, applyMember<&Style::outline>, nullptr, nullptr, StylePropertyImpact::Paint},
-    {"overflow", compileOverflow, nullptr, nullptr, nullptr, StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"overflow-x", compileOverflowAxis, applyMember<&Style::overflowX>, nullptr, nullptr, StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"overflow-y", compileOverflowAxis, applyMember<&Style::overflowY>, nullptr, nullptr, StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"outline", compileOutline, applyOutline, nullptr, nullptr, StylePropertyImpact::Paint},
+    {"outline-offset", compileOutlineOffset, applyOutlineOffset, nullptr, nullptr, StylePropertyImpact::Paint},
+    {"overflow", compileOverflow, nullptr, nullptr, nullptr, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"overflow-x", compileOverflowAxis, applyMember<&Style::overflowX>, nullptr, nullptr,
+     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"overflow-y", compileOverflowAxis, applyMember<&Style::overflowY>, nullptr, nullptr,
+     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"padding", compileEdges, applyMember<&Style::padding>},
     {"pointer-events", compilePointerEvents, applyMember<&Style::pointerEvents>, nullptr, nullptr,
      StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"right", compilePosition, applyLengthToOptional<&Style::right>},
-    {"shadow", compileShadow, applyMember<&Style::shadows>, nullptr, nullptr, StylePropertyImpact::Paint},
+    {"position", compilePositionMode, applyMember<&Style::position>, nullptr, nullptr,
+     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"right", compilePosition, applyLengthToOptional<&Style::right>, nullptr, nullptr,
+     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"scrollbar-gutter", compileScrollbarGutter, applyMember<&Style::scrollbarGutter>, nullptr, nullptr,
+     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"scrollbar-mode", compileScrollbarMode, applyScrollbarMode, nullptr, nullptr,
+     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"scrollbar-width", compileScrollbarWidth, applyMember<&Style::scrollbarWidth>, nullptr, nullptr,
+     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"scrollbar-color", compileScrollbarColor, applyMember<&Style::scrollbarColor>, specifyInherited<InheritedStyleProperty::ScrollbarColor>,
+     inheritMember<InheritedStyleProperty::ScrollbarColor, &Style::scrollbarColor>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited},
+    {"box-shadow", compileShadow, applyMember<&Style::shadows>, nullptr, nullptr, StylePropertyImpact::Paint},
     {"size", compileSize, applySize},
-    {"top", compilePosition, applyLengthToOptional<&Style::top>},
+    {"top", compilePosition, applyLengthToOptional<&Style::top>, nullptr, nullptr,
+     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"translate", compileTranslate, applyMember<&Style::translate>, nullptr, nullptr,
+     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"width", compileDimension, applyMember<&Style::width>},
     {"align-items", compileAlignItems, applyMember<&Style::alignItems>},
     {"flex-direction", compileFlexDirection, applyFlexDirection},
     {"gap", compileGap, applyMember<&Style::gap>},
+    {"grid-area", compileGridArea, [](Style& style, const StyleValue& value) { style.gridArea = std::get<GridArea>(value); }, nullptr, nullptr,
+     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"justify-content", compileJustifyContent, applyJustifyContent},
+    {"justify-self", compileJustifySelf, applyMember<&Style::justifySelf>, nullptr, nullptr,
+     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"align-self", compileAlignSelf, applyMember<&Style::alignSelf>},
     {"flex", compileFlex},
     {"flex-basis", compileDimension, applyMember<&Style::flexBasis>},
@@ -760,6 +996,8 @@ const detail::StylePropertyDefinition kPropertyDefinitions[] = {
      inheritMember<InheritedStyleProperty::FontSize, &Style::fontSize>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
     {"font-style", compileFontStyle, applyMember<&Style::fontItalic>, specifyInherited<InheritedStyleProperty::FontStyle>,
      inheritMember<InheritedStyleProperty::FontStyle, &Style::fontItalic>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
+    {"text-decoration", compileTextDecoration, applyMember<&Style::textDecoration>, specifyInherited<InheritedStyleProperty::TextDecoration>,
+     inheritMember<InheritedStyleProperty::TextDecoration, &Style::textDecoration>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited},
     {"font-weight", compileFontWeight, applyFontWeight, specifyInherited<InheritedStyleProperty::FontWeight>,
      inheritMember<InheritedStyleProperty::FontWeight, &Style::fontWeight>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
     {"line-height", compileLineHeight, applyMember<&Style::lineHeight>, specifyInherited<InheritedStyleProperty::LineHeight>,
@@ -777,8 +1015,8 @@ const detail::StylePropertyDefinition kPropertyDefinitions[] = {
      inheritMember<InheritedStyleProperty::TextWrap, &Style::textWrap>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
     {"vertical-align", compileVerticalAlign, applyVerticalAlign},
     {"visibility", compileVisibility, applyMember<&Style::visibility>, specifyInherited<InheritedStyleProperty::Visibility>,
-     inheritMember<InheritedStyleProperty::Visibility, &Style::visibility>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited
-         | StylePropertyImpact::HitTest},
+     inheritMember<InheritedStyleProperty::Visibility, &Style::visibility>,
+     StylePropertyImpact::Paint | StylePropertyImpact::Inherited | StylePropertyImpact::HitTest},
     {"stroke", compileStroke, applyIconStroke, nullptr, nullptr, StylePropertyImpact::Paint},
     {"stroke-color", compileColor, applyMember<&Style::iconStrokeColor>, nullptr, nullptr, StylePropertyImpact::Paint},
     {"stroke-linecap", compileStrokeLinecap, applyIconStrokeLinecap, nullptr, nullptr, StylePropertyImpact::Paint},

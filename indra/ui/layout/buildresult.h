@@ -1,42 +1,23 @@
 /**
- * @file buildresult.h
- * @brief Defines diagnostics and output for building a Widget tree from a Layout Resource.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
-#ifndef RD_LAYOUT_BUILDRESULT_H
-#define RD_LAYOUT_BUILDRESULT_H
+#pragma once
 
 #include <memory>
 #include "diagnostic.h"
-#include "widgets/widget.h"
+#include "elements/document.h"
 
 namespace radia::ui {
 struct LayoutBuildResult : DiagnosticResult {
-    std::unique_ptr<Widget> root;
-    bool ok() const { return !hasErrors() && root != nullptr; }
+    std::unique_ptr<Document> document;
+    bool ok() const { return !hasErrors() && document != nullptr; }
 
-    template<typename WidgetT> WidgetT* rootAs() { return dynamic_cast<WidgetT*>(root.get()); }
+    template<typename ElementT> ElementT* rootAs() { return document ? dynamic_cast<ElementT*>(document->documentElement()) : nullptr; }
 
-    template<typename WidgetT> const WidgetT* rootAs() const { return dynamic_cast<const WidgetT*>(root.get()); }
+    template<typename ElementT> const ElementT* rootAs() const {
+        return document ? dynamic_cast<const ElementT*>(document->documentElement()) : nullptr;
+    }
 };
 } // namespace radia::ui
-#endif // RD_LAYOUT_BUILDRESULT_H

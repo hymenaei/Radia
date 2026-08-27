@@ -1,81 +1,74 @@
 /**
- * @file system_test.cpp
- * @brief Tests System generations, locale changes, and Surface notifications.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
 #include "linden_common.h"
+#include <cstdint>
 #include <gtest/gtest.h>
 #include <memory>
 #include <string>
 #include <utility>
+#include "elements/elementtext.h"
+#include "elements/input.h"
+#include "elements/label.h"
+#include "elements/panel.h"
+#include "nativeappearance.h"
+#include "render/recordingpaintcontext.h"
 #include "skin/compiler.h"
 #include "surface/surface.h"
 #include "system.h"
 #include "text/metrics.h"
-#include "widgets/label.h"
-#include "widgets/text.h"
 
 namespace {
+using radia::ui::Element;
 using radia::ui::fixedTextMetrics;
+using radia::ui::InputElement;
 using radia::ui::KeybindingPresentation;
-using radia::ui::Label;
+using radia::ui::LabelElement;
 using radia::ui::LayoutBuildResult;
+using radia::ui::NativeAppearance;
+using radia::ui::NativeScrollbarMetrics;
+using radia::ui::NodeList;
+using radia::ui::PaintCommand;
+using radia::ui::PaintCommandKind;
 using radia::ui::PublicationCommit;
+using radia::ui::RecordingPaintContext;
 using radia::ui::ResourceSnapshot;
+using radia::ui::ScrollbarMode;
 using radia::ui::SkinCompiler;
 using radia::ui::SkinGenerationPrepareResult;
 using radia::ui::Surface;
 using radia::ui::System;
-using radia::ui::Text;
-using radia::ui::Widget;
 
-constexpr char kEmptyLocalization[] = "defaultLocale: en\nlocales: {en: {name: English, strings: {}}}\n";
+constexpr char kEmptyLocalization[] = "defaultLocale: en\nlocales: {en: {strings: {}}}\n";
 
 std::string singleStringLocalization(const std::string& key, const std::string& value) {
-    return "defaultLocale: en\nlocales: {en: {name: English, strings: {" + key + ": \"" + value + "\"}}}\n";
+    return "defaultLocale: en\nlocales: {en: {strings: {" + key + ": \"" + value + "\"}}}\n";
 }
 
 ResourceSnapshot skinSnapshot(std::string localization = kEmptyLocalization, std::string style = {}) {
     if (localization.empty()) localization = kEmptyLocalization;
     ResourceSnapshot snapshot;
     snapshot.add("localization.yaml", std::move(localization));
-    snapshot.add("skin.radia", std::move(style));
+    snapshot.add("skin.css", std::move(style));
     return snapshot;
 }
 
 float resolvedLabelWidth(const System& system) {
     std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
     surface->setViewport(200.f, 100.f);
-    auto label = std::make_unique<Label>();
-    Label* labelPtr = label.get();
+    auto label = std::make_unique<LabelElement>();
+    LabelElement* labelPtr = label.get();
     surface->mount(std::move(label));
     surface->updateLayout();
     return labelPtr->rect().w;
 }
 } // namespace
 
-class LocaleProbe final : public Widget {
+class LocaleProbe final : public Element {
 public:
-    LocaleProbe() : Widget("locale-probe") {}
+    LocaleProbe() : Element("locale-probe") {}
     int notifications() const { return mNotifications; }
 
 private:
@@ -83,13 +76,25 @@ private:
     int mNotifications = 0;
 };
 
-TEST(SystemTest, PublishesLocalizationStylesIconsAndWidgetResources) {
+class TestNativeAppearance final : public NativeAppearance {
+public:
+    TestNativeAppearance(NativeScrollbarMetrics metrics, std::uint64_t revision) : mMetrics(metrics), mRevision(revision) {}
+
+    NativeScrollbarMetrics scrollbarMetrics(ScrollbarMode) const override { return mMetrics; }
+    std::uint64_t revision() const noexcept override { return mRevision; }
+
+private:
+    NativeScrollbarMetrics mMetrics;
+    std::uint64_t mRevision;
+};
+
+TEST(SystemTest, PublishesLocalizationStylesIconsAndElementResources) {
     constexpr char kPublishedStyles[] = "label { width: 40px; }";
-    constexpr char kViewMarkup[] = "<p id=\"message\">message</p>";
+    constexpr char kViewMarkup[] = "<p id=\"message\">{{message}}</p>";
     constexpr char kSearchIcon[] = "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0 L10 10\"/></svg>";
 
     ResourceSnapshot snapshot = skinSnapshot(singleStringLocalization("message", "Ready"), kPublishedStyles);
-    snapshot.add("view.xml", kViewMarkup);
+    snapshot.add("view.html", kViewMarkup);
     snapshot.add("resources/icons/search.svg", kSearchIcon);
 
     const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(std::move(snapshot));
@@ -102,20 +107,65 @@ TEST(SystemTest, PublishesLocalizationStylesIconsAndWidgetResources) {
     EXPECT_EQ(resolvedLabelWidth(system), 40.f);
     EXPECT_TRUE(system.hasIcon("search"));
 
-    const LayoutBuildResult buildResult = system.buildWidgetTree("view.xml");
+    const LayoutBuildResult buildResult = system.buildElementTree("view.html");
     ASSERT_TRUE(buildResult.ok());
-    const Text* text = buildResult.rootAs<Text>();
+    const Element* text = buildResult.rootAs<Element>();
     ASSERT_NE(text, nullptr);
-    EXPECT_EQ(text->text(), "Ready");
+    EXPECT_EQ(text->textContent(), "Ready");
 
     std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
     ASSERT_NE(surface, nullptr);
     surface->setViewport(100.f, 100.f);
-    auto styled = std::make_unique<Label>();
-    Label* styledPtr = styled.get();
+    auto styled = std::make_unique<LabelElement>();
+    LabelElement* styledPtr = styled.get();
     surface->mount(std::move(styled));
     surface->updateLayout();
     EXPECT_EQ(styledPtr->rect().w, 40.f);
+}
+
+TEST(SystemTest, NativeAppearanceMetricsDriveLayoutAndPaintRevision) {
+    constexpr char kScrollStyles[] = "#viewport { display: block; overflow: scroll; scrollbar-mode: classic; }";
+    const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(skinSnapshot({}, kScrollStyles));
+    ASSERT_TRUE(prepared.ok());
+
+    System system;
+    ASSERT_TRUE(system.publish(prepared.generation));
+    system.setNativeAppearance(std::make_shared<TestNativeAppearance>(NativeScrollbarMetrics{20.f, 24.f, 20.f}, 42));
+
+    std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
+    surface->setViewport(200.f, 200.f);
+    auto viewport = std::make_unique<radia::ui::PanelElement>();
+    viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
+    auto content = std::make_unique<radia::ui::PanelElement>();
+    content->setRect({0.f, 0.f, 180.f, 180.f});
+    viewport->append(std::move(content));
+    radia::ui::PanelElement* viewportPtr = viewport.get();
+    surface->mount(std::move(viewport));
+    surface->updateLayout();
+    EXPECT_FLOAT_EQ(viewportPtr->clientWidth(), 80.f);
+    EXPECT_FLOAT_EQ(viewportPtr->clientHeight(), 80.f);
+
+    RecordingPaintContext initialPaint;
+    surface->paint(initialPaint);
+    const PaintCommand* initialScrollbar = initialPaint.last(PaintCommandKind::Scrollbar);
+    ASSERT_NE(initialScrollbar, nullptr);
+    ASSERT_TRUE(initialScrollbar->scrollbar.has_value());
+    EXPECT_FLOAT_EQ(initialScrollbar->scrollbar->metrics.thickness, 20.f);
+    EXPECT_EQ(initialScrollbar->scrollbar->appearanceRevision, 42u);
+
+    system.setNativeAppearance(std::make_shared<TestNativeAppearance>(NativeScrollbarMetrics{24.f, 28.f, 24.f}, 43));
+    EXPECT_TRUE(surface->needsPaint());
+    surface->updateLayout();
+    EXPECT_FLOAT_EQ(viewportPtr->clientWidth(), 76.f);
+    EXPECT_FLOAT_EQ(viewportPtr->clientHeight(), 76.f);
+
+    RecordingPaintContext updatedPaint;
+    surface->paint(updatedPaint);
+    const PaintCommand* updatedScrollbar = updatedPaint.last(PaintCommandKind::Scrollbar);
+    ASSERT_NE(updatedScrollbar, nullptr);
+    ASSERT_TRUE(updatedScrollbar->scrollbar.has_value());
+    EXPECT_FLOAT_EQ(updatedScrollbar->scrollbar->metrics.thickness, 24.f);
+    EXPECT_EQ(updatedScrollbar->scrollbar->appearanceRevision, 43u);
 }
 
 TEST(SystemTest, RejectsInvalidCandidatesWithoutReplacingLiveGeneration) {
@@ -124,7 +174,8 @@ TEST(SystemTest, RejectsInvalidCandidatesWithoutReplacingLiveGeneration) {
     constexpr char kInvalidStyles[] = "label { display: sideways; width: 90px; }";
 
     System system;
-    const SkinGenerationPrepareResult live = SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Live"), kLiveStyles));
+    const SkinGenerationPrepareResult live =
+        SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Live"), kLiveStyles));
     ASSERT_TRUE(live.ok());
     ASSERT_TRUE(system.publish(live.generation));
 
@@ -154,8 +205,8 @@ TEST(SystemTest, RejectsUnknownIconsInLayoutResources) {
     constexpr char kSearchIcon[] = "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0 L10 10\"/></svg>";
 
     ResourceSnapshot snapshot = skinSnapshot({}, kIconStyles);
-    snapshot.add("known.xml", kKnownIconMarkup);
-    snapshot.add("missing.xml", kMissingIconMarkup);
+    snapshot.add("known.html", kKnownIconMarkup);
+    snapshot.add("missing.html", kMissingIconMarkup);
     snapshot.add("resources/icons/actions/search.svg", kSearchIcon);
     const SkinGenerationPrepareResult rejected = SkinCompiler().prepare(std::move(snapshot));
 
@@ -167,7 +218,7 @@ TEST(SystemTest, RejectsSnapshotsWithoutLocalization) {
     constexpr char kStylesWithoutLocalization[] = "label { width: 40px; }";
 
     ResourceSnapshot snapshot;
-    snapshot.add("skin.radia", kStylesWithoutLocalization);
+    snapshot.add("skin.css", kStylesWithoutLocalization);
     const SkinGenerationPrepareResult rejected = SkinCompiler().prepare(std::move(snapshot));
 
     ASSERT_FALSE(rejected.ok());
@@ -188,10 +239,10 @@ TEST(SystemTest, RejectsMalformedIcons) {
     EXPECT_EQ(rejected.errors.front().source, "resources/icons/search.svg");
 }
 
-TEST(SystemTest, UpdatesMountedWidgetsWhenLocaleChanges) {
-    constexpr char kMultilingualLocalization[] = "defaultLocale: en\nlocales: {en: {name: English, strings: {message: Ready}}, "
-                                                 "pt: {name: Português, strings: {message: Pronto}}, "
-                                                 "ar: {name: العربية, direction: rtl, strings: {message: جاهز}}}\n";
+TEST(SystemTest, UpdatesMountedElementsWhenLocaleChanges) {
+    constexpr char kMultilingualLocalization[] = "defaultLocale: en\nlocales: {en: {strings: {message: Ready}}, "
+                                                 "pt: {strings: {message: Pronto}}, "
+                                                 "ar: {strings: {message: جاهز}}}\n";
 
     const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(skinSnapshot(kMultilingualLocalization));
     ASSERT_TRUE(prepared.ok());
@@ -201,23 +252,117 @@ TEST(SystemTest, UpdatesMountedWidgetsWhenLocaleChanges) {
     std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
     ASSERT_NE(surface, nullptr);
     surface->setViewport(200.f, 100.f);
-    auto localized = std::make_unique<Label>();
-    Label* localizedPtr = localized.get();
-    localized->setContent(system.localize("message"));
-    surface->root().addChild(std::move(localized));
+    auto localized = std::make_unique<LabelElement>();
+    LabelElement* localizedPtr = localized.get();
+    localized->content(system.t("message"));
+    surface->mount(std::move(localized));
     auto probe = std::make_unique<LocaleProbe>();
     LocaleProbe* probePtr = probe.get();
-    surface->root().addChild(std::move(probe));
+    surface->mount(std::move(probe));
 
     ASSERT_TRUE(system.setLocale("pt"));
-    EXPECT_EQ(localizedPtr->text(), "Pronto");
+    EXPECT_EQ(localizedPtr->textContent(), "Pronto");
     EXPECT_EQ(probePtr->notifications(), 2);
 }
 
+TEST(SystemTest, ResolvesDirectionSelectorsWhenLocaleChanges) {
+    constexpr char kDirectionStyles[] =
+        "input[switch] { appearance: none; display: inline-grid; width: 44px; height: 20px; } "
+        "input[switch]::track { grid-area: 1 / 1; width: 100%; } "
+        "input[switch]::thumb { grid-area: 1 / 1; width: 24px; height: 24px; margin: -2px -1px; } "
+        "input[switch]:checked::thumb { translate: 22px 0; } "
+        "input[switch]:dir(rtl):checked::thumb { translate: -22px 0; }";
+
+    const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(skinSnapshot(
+        "defaultLocale: en\nlocales: {en: {strings: {}}, ar: {strings: {}}}\n", kDirectionStyles));
+    ASSERT_TRUE(prepared.ok());
+
+    System system;
+    ASSERT_TRUE(system.publish(prepared.generation));
+    ASSERT_TRUE(system.setLocale("ar"));
+
+    std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
+    surface->setViewport(100.f, 20.f);
+    auto control = std::make_unique<InputElement>();
+    InputElement* controlPtr = control.get();
+    control->type("checkbox").switchMode(true).checked(true);
+    control->setRect({10.f, 0.f, 44.f, 20.f});
+    surface->mount(std::move(control));
+    surface->updateLayout();
+
+    ASSERT_NE(controlPtr->thumb(), nullptr);
+    EXPECT_EQ(controlPtr->thumb()->rect().x, -13.f);
+
+    ASSERT_TRUE(system.setLocale("en"));
+    surface->updateLayout();
+    EXPECT_EQ(controlPtr->thumb()->rect().x, 31.f);
+}
+
+TEST(SystemTest, SeparatesPlainTextAndLocalizedContent) {
+    constexpr char kLocalization[] = "defaultLocale: en\n"
+                                     "locales: {en: {strings: {plain: 'hello plain', hello: 'hello <b>world</b>'}}}\n";
+
+    System system;
+    const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(skinSnapshot(kLocalization));
+    ASSERT_TRUE(prepared.ok());
+    ASSERT_TRUE(system.publish(prepared.generation));
+
+    std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
+    ASSERT_NE(surface, nullptr);
+    surface->setViewport(200.f, 100.f);
+
+    auto plain = std::make_unique<Element>("p");
+    Element* plainPtr = plain.get();
+    plain->textContent(system.t("hello"));
+    surface->mount(std::move(plain));
+
+    ASSERT_EQ(plainPtr->childNodes().size(), 1U);
+    ASSERT_NE(plainPtr->childNodes()[0]->asText(), nullptr);
+    EXPECT_EQ(plainPtr->textContent(), "hello <b>world</b>");
+
+    auto plainContent = std::make_unique<Element>("p");
+    Element* plainContentPtr = plainContent.get();
+    plainContent->content(system.t("plain"));
+    surface->mount(std::move(plainContent));
+
+    ASSERT_EQ(plainContentPtr->childNodes().size(), 1U);
+    ASSERT_NE(plainContentPtr->childNodes()[0]->asText(), nullptr);
+    EXPECT_EQ(plainContentPtr->textContent(), "hello plain");
+
+    auto rich = std::make_unique<Element>("p");
+    Element* richPtr = rich.get();
+    rich->content(system.t("hello"));
+    surface->mount(std::move(rich));
+
+    const NodeList richNodes = richPtr->childNodes();
+    ASSERT_EQ(richNodes.size(), 2U);
+    ASSERT_NE(richNodes[0]->asText(), nullptr);
+    ASSERT_NE(richNodes[1]->asElement(), nullptr);
+    EXPECT_EQ(richNodes[0]->asText()->getData(), "hello ");
+    EXPECT_EQ(richNodes[1]->asElement()->elementName(), "b");
+    ASSERT_EQ(richNodes[1]->asElement()->childNodes().size(), 1U);
+    ASSERT_NE(richNodes[1]->asElement()->childNodes()[0]->asText(), nullptr);
+    EXPECT_EQ(richNodes[1]->asElement()->childNodes()[0]->asText()->getData(), "world");
+    EXPECT_EQ(richPtr->textContent(), "hello world");
+
+    auto rawContent = std::make_unique<Element>("p");
+    Element* rawContentPtr = rawContent.get();
+    rawContent->content("hello <b>world</b>");
+    surface->mount(std::move(rawContent));
+
+    const NodeList rawNodes = rawContentPtr->childNodes();
+    ASSERT_EQ(rawNodes.size(), 2U);
+    ASSERT_NE(rawNodes[0]->asText(), nullptr);
+    ASSERT_NE(rawNodes[1]->asElement(), nullptr);
+    EXPECT_EQ(rawNodes[0]->asText()->getData(), "hello ");
+    EXPECT_EQ(rawNodes[1]->asElement()->elementName(), "b");
+    EXPECT_EQ(rawContentPtr->textContent(), "hello world");
+}
+
 TEST(SystemTest, PreservesLocaleAcrossPublicationAndFallsBackWhenRemoved) {
-    constexpr char kMultilingualLocalization[] = "defaultLocale: en\nlocales: {en: {name: English, strings: {message: Ready}}, "
-                                                 "pt: {name: Português, strings: {message: Pronto}}, "
-                                                 "ar: {name: العربية, direction: rtl, strings: {message: جاهز}}}\n";
+    constexpr char kMultilingualLocalization[] = "defaultLocale: en\nlocales: {en: {strings: {message: Ready}}, "
+                                                 "pt: {strings: {message: Pronto}}, "
+                                                 "ar: {strings: {message: جاهز}}}\n";
 
     System system;
     const SkinGenerationPrepareResult initial = SkinCompiler().prepare(skinSnapshot(kMultilingualLocalization));
@@ -230,7 +375,8 @@ TEST(SystemTest, PreservesLocaleAcrossPublicationAndFallsBackWhenRemoved) {
     ASSERT_TRUE(system.publish(compatible.generation));
     EXPECT_EQ(system.activeLocale(), "pt");
 
-    const SkinGenerationPrepareResult fallback = SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Ready again")));
+    const SkinGenerationPrepareResult fallback =
+        SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Ready again")));
     ASSERT_TRUE(fallback.ok());
     ASSERT_TRUE(system.publish(fallback.generation));
     EXPECT_EQ(system.activeLocale(), "en");
@@ -240,34 +386,35 @@ TEST(SystemTest, PreservesLocaleAcrossPublicationAndFallsBackWhenRemoved) {
 TEST(SystemTest, PublishesGenerationUpdatesToExistingSurfacesAndNewTrees) {
     constexpr char kLiveStyles[] = "label { width: 40px; }";
     constexpr char kCandidateStyles[] = "label { width: 90px; }";
-    constexpr char kViewMarkup[] = "<p>message</p>";
+    constexpr char kViewMarkup[] = "<p>{{message}}</p>";
 
     System system;
-    const SkinGenerationPrepareResult live = SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Old"), kLiveStyles));
+    const SkinGenerationPrepareResult live =
+        SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Old"), kLiveStyles));
     ASSERT_TRUE(live.ok());
     ASSERT_TRUE(system.publish(live.generation));
 
     std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
     ASSERT_NE(surface, nullptr);
     surface->setViewport(200.f, 100.f);
-    auto styled = std::make_unique<Label>();
-    Label* styledPtr = styled.get();
+    auto styled = std::make_unique<LabelElement>();
+    LabelElement* styledPtr = styled.get();
     surface->mount(std::move(styled));
     surface->updateLayout();
     EXPECT_EQ(styledPtr->rect().w, 40.f);
 
     ResourceSnapshot snapshot = skinSnapshot(singleStringLocalization("message", "New"), kCandidateStyles);
-    snapshot.add("view.xml", kViewMarkup);
+    snapshot.add("view.html", kViewMarkup);
     const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(std::move(snapshot));
     ASSERT_TRUE(prepared.ok());
     EXPECT_EQ(system.generation(), 1ULL);
     EXPECT_EQ(system.resolveText("message"), "Old");
 
-    const LayoutBuildResult candidateBuild = prepared.generation->buildWidgetTree("view.xml", system.activeLocale());
+    const LayoutBuildResult candidateBuild = prepared.generation->buildElementTree("view.html", system.activeLocale());
     ASSERT_TRUE(candidateBuild.ok());
-    const Text* candidateText = candidateBuild.rootAs<Text>();
+    const Element* candidateText = candidateBuild.rootAs<Element>();
     ASSERT_NE(candidateText, nullptr);
-    EXPECT_EQ(candidateText->text(), "New");
+    EXPECT_EQ(candidateText->textContent(), "New");
 
     ASSERT_TRUE(system.publish(prepared.generation));
     EXPECT_EQ(system.generation(), 2ULL);
@@ -275,11 +422,11 @@ TEST(SystemTest, PublishesGenerationUpdatesToExistingSurfacesAndNewTrees) {
     surface->updateLayout();
     EXPECT_EQ(styledPtr->rect().w, 90.f);
 
-    const LayoutBuildResult liveBuild = system.buildWidgetTree("view.xml");
+    const LayoutBuildResult liveBuild = system.buildElementTree("view.html");
     ASSERT_TRUE(liveBuild.ok());
-    const Text* liveText = liveBuild.rootAs<Text>();
+    const Element* liveText = liveBuild.rootAs<Element>();
     ASSERT_NE(liveText, nullptr);
-    EXPECT_EQ(liveText->text(), "New");
+    EXPECT_EQ(liveText->textContent(), "New");
 }
 
 TEST(SystemTest, RejectsInvalidUnmountedLayoutResources) {
@@ -288,8 +435,8 @@ TEST(SystemTest, RejectsInvalidUnmountedLayoutResources) {
     constexpr char kUnsupportedMarkup[] = "<unsupported/>";
 
     ResourceSnapshot snapshot = skinSnapshot({}, kStyles);
-    snapshot.add("valid.xml", kValidMarkup);
-    snapshot.add("unused.xml", kUnsupportedMarkup);
+    snapshot.add("valid.html", kValidMarkup);
+    snapshot.add("unused.html", kUnsupportedMarkup);
     const SkinGenerationPrepareResult rejected = SkinCompiler().prepare(std::move(snapshot));
 
     ASSERT_FALSE(rejected.ok());
@@ -297,12 +444,12 @@ TEST(SystemTest, RejectsInvalidUnmountedLayoutResources) {
 }
 
 TEST(SystemTest, RefreshesKbdPresentationWhenKeybindingsChange) {
-    constexpr char kKeybindingLocalization[] = "defaultLocale: en\nlocales: {en: {name: English, strings: "
+    constexpr char kKeybindingLocalization[] = "defaultLocale: en\nlocales: {en: {strings: "
                                                "{fly.label: 'Fly <kbd shortcut=\"toggle-fly\"/>'}}}\n";
-    constexpr char kViewMarkup[] = "<p>fly.label</p>";
+    constexpr char kViewMarkup[] = "<p>{{fly.label}}</p>";
 
     ResourceSnapshot snapshot = skinSnapshot(kKeybindingLocalization);
-    snapshot.add("view.xml", kViewMarkup);
+    snapshot.add("view.html", kViewMarkup);
     const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(std::move(snapshot));
     ASSERT_TRUE(prepared.ok());
 
@@ -312,23 +459,23 @@ TEST(SystemTest, RefreshesKbdPresentationWhenKeybindingsChange) {
         [&presentation](const std::string& binding) { return binding == "toggle-fly" ? presentation : KeybindingPresentation{}; });
     ASSERT_TRUE(system.publish(prepared.generation));
 
-    LayoutBuildResult buildResult = system.buildWidgetTree("view.xml");
+    LayoutBuildResult buildResult = system.buildElementTree("view.html");
     ASSERT_TRUE(buildResult.ok());
-    const Text* text = buildResult.rootAs<Text>();
+    const Element* text = buildResult.rootAs<Element>();
     ASSERT_NE(text, nullptr);
 
     std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
     ASSERT_NE(surface, nullptr);
     surface->setViewport(200.f, 100.f);
-    surface->mount(std::move(buildResult.root));
+    surface->mount(*buildResult.document);
     surface->updateLayout();
-    EXPECT_EQ(text->text(), "Fly F");
+    EXPECT_EQ(text->textContent(), "Fly F");
     const float initialWidth = text->desiredSize().x;
 
     presentation = {{"Ctrl", "F"}};
     system.refreshKeybindings();
     surface->updateLayout();
-    EXPECT_EQ(text->text(), "Fly Ctrl F");
+    EXPECT_EQ(text->textContent(), "Fly Ctrl F");
     EXPECT_GT(text->desiredSize().x, initialWidth);
 }
 

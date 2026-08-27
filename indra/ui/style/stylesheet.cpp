@@ -1,31 +1,13 @@
 /**
- * @file stylesheet.cpp
- * @brief Owns the public stylesheet lifecycle and immutable generation metadata.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
 #include "linden_common.h"
 #include "style/stylesheet.h"
 #include <algorithm>
 #include "style/model.h"
+#include "style/defaults.inc"
 
 namespace radia::ui {
 void inheritStyle(Style& style, const Style& parent) {
@@ -34,12 +16,16 @@ void inheritStyle(Style& style, const Style& parent) {
     style.specifiedInheritedProperties |= parent.specifiedInheritedProperties;
 }
 
-StyleSheet::StyleSheet() : mImpl(std::make_shared<Impl>()) {}
+std::shared_ptr<StyleSheet::Impl> StyleSheet::makeEmptyImpl() {
+    return std::make_shared<Impl>();
+}
+
+StyleSheet::StyleSheet() : mImpl(makeEmptyImpl()) {}
 StyleSheet::~StyleSheet() = default;
-StyleSheet::StyleSheet(const StyleSheet& other) : mImpl(other.mImpl ? other.mImpl : std::make_shared<Impl>()) {}
+StyleSheet::StyleSheet(const StyleSheet& other) : mImpl(other.mImpl ? other.mImpl : makeEmptyImpl()) {}
 StyleSheet& StyleSheet::operator=(const StyleSheet& other) {
     if (this != &other) {
-        auto replacement = other.mImpl ? std::make_shared<Impl>(*other.mImpl) : std::make_shared<Impl>();
+        auto replacement = other.mImpl ? std::make_shared<Impl>(*other.mImpl) : makeEmptyImpl();
         const std::uint64_t currentGeneration = mImpl ? mImpl->generation : std::uint64_t{0};
         replacement->generation = std::max(currentGeneration, replacement->generation) + std::uint64_t{1};
         mImpl = std::move(replacement);
@@ -47,17 +33,17 @@ StyleSheet& StyleSheet::operator=(const StyleSheet& other) {
     return *this;
 }
 StyleSheet::StyleSheet(StyleSheet&& other) noexcept : mImpl(std::move(other.mImpl)) {
-    if (!mImpl) mImpl = std::make_shared<Impl>();
-    other.mImpl = std::make_shared<Impl>();
+    if (!mImpl) mImpl = makeEmptyImpl();
+    other.mImpl = makeEmptyImpl();
 }
 StyleSheet& StyleSheet::operator=(StyleSheet&& other) noexcept {
     if (this != &other) {
         auto replacement = std::move(other.mImpl);
-        if (!replacement) replacement = std::make_shared<Impl>();
+        if (!replacement) replacement = makeEmptyImpl();
         const std::uint64_t currentGeneration = mImpl ? mImpl->generation : std::uint64_t{0};
         replacement->generation = std::max(currentGeneration, replacement->generation) + std::uint64_t{1};
         mImpl = std::move(replacement);
-        other.mImpl = std::make_shared<Impl>();
+        other.mImpl = makeEmptyImpl();
     }
     return *this;
 }
@@ -69,24 +55,24 @@ const StyleSheet::DependencyMap& StyleSheet::dependencies() const {
     return mImpl->dependencies;
 }
 
-bool StyleSheet::stateAffectsLayout(WidgetState state) const {
+bool StyleSheet::stateAffectsLayout(ElementState state) const {
     return mImpl->stateAffectsLayout(state);
 }
 
-bool StyleSheet::stateAffectsLayout(const Widget& widget, WidgetState state) const {
-    return mImpl->stateAffectsLayout(widget, state);
+bool StyleSheet::stateAffectsLayout(const Element& element, ElementState state) const {
+    return mImpl->stateAffectsLayout(element, state);
 }
 
-bool StyleSheet::stateAffectsHitTesting(WidgetState state) const {
+bool StyleSheet::stateAffectsHitTesting(ElementState state) const {
     return mImpl->stateAffectsHitTesting(state);
 }
 
-bool StyleSheet::stateAffectsHitTesting(const Widget& widget, WidgetState state) const {
-    return mImpl->stateAffectsHitTesting(widget, state);
+bool StyleSheet::stateAffectsHitTesting(const Element& element, ElementState state) const {
+    return mImpl->stateAffectsHitTesting(element, state);
 }
 
-bool StyleSheet::stateAffectsDescendants(const Widget& widget, WidgetState state) const {
-    return mImpl->stateAffectsDescendants(widget, state);
+bool StyleSheet::stateAffectsDescendants(const Element& element, ElementState state) const {
+    return mImpl->stateAffectsDescendants(element, state);
 }
 
 void StyleModel::setColorToken(const std::string& name, const Color& color) {

@@ -1,25 +1,6 @@
 /**
- * @file openglpaintstate.cpp
- * @brief Private OpenGL paint-state guards and clip/capture state.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
 #include "linden_common.h"
@@ -82,6 +63,7 @@ ClearColorGuard::~ClearColorGuard() {
 }
 
 void ClipStack::beginFrame() {
+    popAllTranslations();
     if (!mClips.empty()) popAll();
     else if (mScissorState) {
         gGL.flush();
@@ -93,12 +75,14 @@ void ClipStack::beginFrame() {
     mState = {{0.f, 0.f},
               {static_cast<float>(viewport[0]), static_cast<float>(viewport[1])},
               {0.f, 0.f, static_cast<float>(viewport[2]), static_cast<float>(viewport[3])}};
+    mTranslation = {};
 }
 
 void ClipStack::push(const Rect& rect, float scale, ClipAxes axes) {
     const float resolvedScale = std::max(0.f, scale);
     const Rect inherited = mClips.empty() ? mState.bounds : mClips.back().first;
-    const Rect clipped = clipToAxes(inherited, rect, axes);
+    const Rect translated = {rect.x + mTranslation.x, rect.y + mTranslation.y, rect.w, rect.h};
+    const Rect clipped = clipToAxes(inherited, translated, axes);
     if (mClips.empty()) {
         gGL.flush();
         glGetIntegerv(GL_SCISSOR_BOX, mPreviousScissor);
@@ -125,6 +109,26 @@ void ClipStack::pop() {
 
 void ClipStack::popAll() {
     while (!mClips.empty()) pop();
+}
+
+void ClipStack::pushTranslation(const Vec2& translation) {
+    gGL.flush();
+    gGL.pushUIMatrix();
+    gGL.translateUI(translation.x, translation.y, 0.f);
+    mTranslations.push_back(translation);
+    mTranslation = mTranslation + translation;
+}
+
+void ClipStack::popTranslation() {
+    if (mTranslations.empty()) return;
+    gGL.flush();
+    gGL.popUIMatrix();
+    mTranslation = mTranslation - mTranslations.back();
+    mTranslations.pop_back();
+}
+
+void ClipStack::popAllTranslations() {
+    while (!mTranslations.empty()) popTranslation();
 }
 
 void ClipStack::reapply() {

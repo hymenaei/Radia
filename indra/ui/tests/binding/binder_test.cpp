@@ -1,25 +1,6 @@
 /**
- * @file binder_test.cpp
- * @brief Tests transactional Widget, Event Handler, and Value Binding preparation.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
 #include "linden_common.h"
@@ -37,81 +18,69 @@
 #include "binding/binder.h"
 #include "binding/settingresolver.h"
 #include "binding/valuebinding.h"
+#include "elements/button.h"
+#include "elements/elementdefinition.h"
+#include "elements/elementinternal.h"
+#include "elements/input.h"
+#include "elements/label.h"
+#include "elements/panel.h"
+#include "event.h"
 #include "layout/resourcecompiler.h"
-#include "skin/compiler.h"
-#include "surface/surface.h"
-#include "system.h"
 #include "text/metrics.h"
-#include "widgets/button.h"
-#include "widgets/field.h"
-#include "widgets/label.h"
-#include "widgets/panel.h"
-#include "widgets/switch.h"
-#include "widgets/widgetcontract.h"
 
 namespace {
 using radia::ui::Binder;
 using radia::ui::Binding;
-using radia::ui::Button;
+using radia::ui::ButtonElement;
 using radia::ui::CurrentEventArgument;
 using radia::ui::DiagnosticResult;
+using radia::ui::Element;
+using radia::ui::ElementRef;
+using radia::ui::Event;
 using radia::ui::EventArgument;
 using radia::ui::EventCall;
 using radia::ui::EventHandlerRegistration;
-using radia::ui::Field;
-using radia::ui::InlineContentKind;
-using radia::ui::KeybindingPresentation;
+using radia::ui::InputElement;
+using radia::ui::kChangeEvent;
+using radia::ui::kClickEvent;
 using radia::ui::LayoutBuildResult;
 using radia::ui::LayoutResourceCompiler;
-using radia::ui::Panel;
+using radia::ui::PanelElement;
 using radia::ui::PreparedBindingResult;
-using radia::ui::ResourceSnapshot;
 using radia::ui::SettingResolution;
 using radia::ui::SettingResolver;
-using radia::ui::SkinGenerationPrepareResult;
-using radia::ui::Surface;
-using radia::ui::Switch;
-using radia::ui::System;
-using radia::ui::TextSource;
 using radia::ui::ValueBinding;
 using radia::ui::ValueBindingBase;
 using radia::ui::ValueBindingRef;
 using radia::ui::ValueBindingSubscription;
-using radia::ui::ValueControlState;
 using radia::ui::ValueState;
 using radia::ui::ValueValidation;
 using radia::ui::Visibility;
-using radia::ui::Widget;
-using radia::ui::WidgetEvent;
-using radia::ui::WidgetEventKind;
-using radia::ui::WidgetRef;
-using radia::ui::detail::findWidgetInScope;
+using radia::ui::detail::ElementCompilerAccess;
+using radia::ui::detail::findElementInScope;
 using radia::ui::detail::makeEventRegistration;
-using radia::ui::detail::WidgetCompilerAccess;
 
-const char* noEventArguments(const EventCall& call, WidgetEventKind) {
+const char* noEventArguments(const EventCall& call) {
     return call.arguments().empty() ? nullptr : "binding.event.arity_mismatch";
 }
 
-const char* currentEventArgument(const EventCall& call, WidgetEventKind) {
+const char* currentEventArgument(const EventCall& call) {
     if (call.arguments().size() != 1) return "binding.event.arity_mismatch";
     return std::holds_alternative<CurrentEventArgument>(call.arguments().front()) ? nullptr : "binding.event.argument_type_mismatch";
 }
 
-template<typename T> const char* singleEventArgument(const EventCall& call, WidgetEventKind) {
+template<typename T> const char* singleEventArgument(const EventCall& call) {
     if (call.arguments().size() != 1) return "binding.event.arity_mismatch";
     return std::holds_alternative<T>(call.arguments().front()) ? nullptr : "binding.event.argument_type_mismatch";
 }
 
-void bindEvent(Binder& binder, std::string settingName, std::optional<WidgetEventKind> kind, EventHandlerRegistration::Invoke invoke,
+void bindEvent(Binder& binder, std::string settingName, EventHandlerRegistration::Invoke invoke,
                EventHandlerRegistration::ArgumentError argumentError) {
-    binder.event(makeEventRegistration(std::move(settingName), kind, std::move(invoke), std::move(argumentError)));
+    binder.event(makeEventRegistration(std::move(settingName), std::move(invoke), std::move(argumentError)));
 }
 
 template<typename Callback> void bindEvent(Binder& binder, std::string settingName, Callback callback) {
-    bindEvent(
-        binder, std::move(settingName), std::nullopt, [callback = std::move(callback)](const WidgetEvent&, const EventCall&) mutable { callback(); },
-        noEventArguments);
+    bindEvent(binder, std::move(settingName), [callback = std::move(callback)](Event&, const EventCall&) mutable { callback(); }, noEventArguments);
 }
 
 template<typename T> class TestValueBinding final : public ValueBinding<T> {
@@ -181,8 +150,8 @@ public:
     std::shared_ptr<TestValueBinding<std::string>> binding;
 };
 
-template<typename WidgetT> WidgetRef<WidgetT> lookupWidget(Widget& root, std::string_view id) {
-    return WidgetRef<WidgetT>(dynamic_cast<WidgetT*>(findWidgetInScope(root, id)));
+template<typename ElementT> ElementRef<ElementT> lookupElement(Element& root, std::string_view id) {
+    return ElementRef<ElementT>(dynamic_cast<ElementT*>(findElementInScope(root, id)));
 }
 
 struct TestBindingResult : DiagnosticResult {
@@ -200,16 +169,16 @@ TestBindingResult finishBinding(Binder& binder) {
 }
 } // namespace
 
-TEST(BinderTest, CommitsEventBindingAndResolvesTypedWidget) {
-    Panel root;
-    auto button = std::make_unique<Button>();
-    button->setId("save").setEventCall(WidgetEventKind::Click, EventCall("save"));
-    root.addChild(std::move(button));
+TEST(BinderTest, CommitsEventBindingAndResolvesTypedElement) {
+    PanelElement root;
+    auto button = std::make_unique<ButtonElement>();
+    button->setId("save").setEventCall(kClickEvent, EventCall("save"));
+    root.append(std::move(button));
 
     int activations = 0;
-    WidgetRef<Button> save;
+    ElementRef<ButtonElement> save;
     Binder binder(root);
-    save = lookupWidget<Button>(root, "save");
+    save = lookupElement<ButtonElement>(root, "save");
     bindEvent(binder, "save", [&] { ++activations; });
     TestBindingResult result = finishBinding(binder);
     ASSERT_TRUE(result.ok());
@@ -218,25 +187,25 @@ TEST(BinderTest, CommitsEventBindingAndResolvesTypedWidget) {
     EXPECT_EQ(activations, 1);
 }
 
-TEST(BinderTest, DistinguishesTypedAndMissingWidgetLookups) {
-    Panel root;
-    auto button = std::make_unique<Button>();
-    button->setId("save").setEventCall(WidgetEventKind::Click, EventCall("save"));
-    Button* source = button.get();
-    root.addChild(std::move(button));
-    auto label = std::make_unique<radia::ui::Label>();
+TEST(BinderTest, DistinguishesTypedAndMissingElementLookups) {
+    PanelElement root;
+    auto button = std::make_unique<ButtonElement>();
+    button->setId("save").setEventCall(kClickEvent, EventCall("save"));
+    ButtonElement* source = button.get();
+    root.append(std::move(button));
+    auto label = std::make_unique<radia::ui::LabelElement>();
     label->setId("status");
-    root.addChild(std::move(label));
+    root.append(std::move(label));
 
     int activations = 0;
-    WidgetRef<Button> save;
-    WidgetRef<Button> wrongType;
-    WidgetRef<radia::ui::Label> missing;
+    ElementRef<ButtonElement> save;
+    ElementRef<ButtonElement> wrongType;
+    ElementRef<radia::ui::LabelElement> missing;
     Binder binder(root);
-    save = lookupWidget<Button>(root, "save");
+    save = lookupElement<ButtonElement>(root, "save");
     bindEvent(binder, "save", [&] { ++activations; });
-    wrongType = lookupWidget<Button>(root, "status");
-    missing = lookupWidget<radia::ui::Label>(root, "missing");
+    wrongType = lookupElement<ButtonElement>(root, "status");
+    missing = lookupElement<radia::ui::LabelElement>(root, "missing");
     const TestBindingResult result = finishBinding(binder);
     ASSERT_TRUE(result.ok());
     ASSERT_TRUE(static_cast<bool>(save));
@@ -246,27 +215,27 @@ TEST(BinderTest, DistinguishesTypedAndMissingWidgetLookups) {
     EXPECT_EQ(activations, 1);
 }
 
-TEST(BinderTest, InvalidatesWidgetReferenceAfterWidgetRemoval) {
-    Panel root;
-    auto button = std::make_unique<Button>();
+TEST(BinderTest, InvalidatesElementReferenceAfterElementRemoval) {
+    PanelElement root;
+    auto button = std::make_unique<ButtonElement>();
     button->setId("temporary");
-    root.addChild(std::move(button));
-    WidgetRef<Button> reference;
+    root.append(std::move(button));
+    ElementRef<ButtonElement> reference;
     Binder binder(root);
-    reference = lookupWidget<Button>(root, "temporary");
+    reference = lookupElement<ButtonElement>(root, "temporary");
     const TestBindingResult result = finishBinding(binder);
     ASSERT_TRUE(result.ok());
     ASSERT_TRUE(static_cast<bool>(reference));
-    root.clearChildren();
+    root.replaceChildren();
     EXPECT_FALSE(static_cast<bool>(reference));
 }
 
 TEST(BinderTest, DetachesEventHandlerWhenBindingIsDestroyed) {
-    Panel root;
-    auto button = std::make_unique<Button>();
-    Button* source = button.get();
-    button->setEventCall(WidgetEventKind::Click, EventCall("optional"));
-    root.addChild(std::move(button));
+    PanelElement root;
+    auto button = std::make_unique<ButtonElement>();
+    ButtonElement* source = button.get();
+    button->setEventCall(kClickEvent, EventCall("optional"));
+    root.append(std::move(button));
 
     source->activate();
     int activations = 0;
@@ -281,80 +250,80 @@ TEST(BinderTest, DetachesEventHandlerWhenBindingIsDestroyed) {
     EXPECT_EQ(activations, 1);
 }
 
-TEST(BinderTest, RejectsOneHandlerAcrossMultipleEventKinds) {
-    Panel root;
-    auto button = std::make_unique<Button>();
-    button->setEventCall(WidgetEventKind::Click, EventCall("shared"));
-    root.addChild(std::move(button));
-    auto control = std::make_unique<Switch>();
-    control->setEventCall(WidgetEventKind::Change, EventCall("shared"));
-    root.addChild(std::move(control));
+TEST(BinderTest, AllowsOneHandlerAcrossMultipleEventTypes) {
+    PanelElement root;
+    auto button = std::make_unique<ButtonElement>();
+    button->setEventCall(kClickEvent, EventCall("shared"));
+    root.append(std::move(button));
+    auto control = std::make_unique<InputElement>();
+    control->type("checkbox").switchMode(true);
+    control->setEventCall(kChangeEvent, EventCall("shared"));
+    root.append(std::move(control));
 
     Binder binder(root);
     const TestBindingResult result = finishBinding(binder);
-    ASSERT_FALSE(result.ok());
-    ASSERT_FALSE(result.errors.empty());
-    EXPECT_EQ(result.errors.front().code, "binding.event.kind_mismatch");
+    ASSERT_TRUE(result.ok());
 }
 
 TEST(BinderTest, BindsChangeEventsWithCurrentState) {
-    Panel root;
-    auto control = std::make_unique<Switch>();
-    Switch* source = control.get();
-    control->setEventCall(WidgetEventKind::Change, EventCall("changed", {CurrentEventArgument{}}));
-    root.addChild(std::move(control));
+    PanelElement root;
+    auto control = std::make_unique<InputElement>();
+    control->type("checkbox").switchMode(true);
+    InputElement* source = control.get();
+    control->setEventCall(kChangeEvent, EventCall("changed", {CurrentEventArgument{}}));
+    root.append(std::move(control));
 
     int changes = 0;
     Binder binder(root);
     bindEvent(
-        binder, "changed", WidgetEventKind::Change,
-        [&](const WidgetEvent& event, const EventCall&) {
-            EXPECT_TRUE(static_cast<const radia::ui::ChangeEvent&>(event).checked);
+        binder, "changed",
+        [&](Event& event, const EventCall&) {
+            EXPECT_TRUE(event.checked());
             ++changes;
         },
         currentEventArgument);
     TestBindingResult result = finishBinding(binder);
     ASSERT_TRUE(result.ok());
-    source->setChecked(false);
+    source->checked(false);
     EXPECT_EQ(changes, 0);
     source->activate();
     EXPECT_EQ(changes, 1);
 }
 
 TEST(BinderTest, ResolvesIdsWithinIndependentResourceScopes) {
-    Panel root;
-    auto left = std::make_unique<Panel>();
+    PanelElement root;
+    auto left = std::make_unique<PanelElement>();
     left->setId("left");
-    radia::ui::detail::WidgetCompilerAccess::setIdScopeRoot(*left);
-    auto leftItem = std::make_unique<radia::ui::Label>();
+    radia::ui::detail::ElementCompilerAccess::setIdScopeRoot(*left);
+    auto leftItem = std::make_unique<radia::ui::LabelElement>();
     leftItem->setId("item");
-    left->addChild(std::move(leftItem));
-    root.addChild(std::move(left));
+    left->append(std::move(leftItem));
+    root.append(std::move(left));
 
-    auto right = std::make_unique<Panel>();
+    auto right = std::make_unique<PanelElement>();
     right->setId("right");
-    radia::ui::detail::WidgetCompilerAccess::setIdScopeRoot(*right);
-    auto rightItem = std::make_unique<radia::ui::Label>();
+    radia::ui::detail::ElementCompilerAccess::setIdScopeRoot(*right);
+    auto rightItem = std::make_unique<radia::ui::LabelElement>();
     rightItem->setId("item");
-    right->addChild(std::move(rightItem));
-    root.addChild(std::move(right));
+    right->append(std::move(rightItem));
+    root.append(std::move(right));
 
-    WidgetRef<Panel> leftScope;
-    WidgetRef<Panel> rightScope;
+    ElementRef<PanelElement> leftScope;
+    ElementRef<PanelElement> rightScope;
     Binder parent(root);
-    leftScope = lookupWidget<Panel>(root, "left");
-    rightScope = lookupWidget<Panel>(root, "right");
+    leftScope = lookupElement<PanelElement>(root, "left");
+    rightScope = lookupElement<PanelElement>(root, "right");
     const TestBindingResult parentResult = finishBinding(parent);
     ASSERT_TRUE(parentResult.ok());
     ASSERT_TRUE(static_cast<bool>(leftScope));
     ASSERT_TRUE(static_cast<bool>(rightScope));
 
-    WidgetRef<radia::ui::Label> leftBound;
-    WidgetRef<radia::ui::Label> rightBound;
+    ElementRef<radia::ui::LabelElement> leftBound;
+    ElementRef<radia::ui::LabelElement> rightBound;
     Binder leftBinder(*leftScope);
-    leftBound = lookupWidget<radia::ui::Label>(*leftScope, "item");
+    leftBound = lookupElement<radia::ui::LabelElement>(*leftScope, "item");
     Binder rightBinder(*rightScope);
-    rightBound = lookupWidget<radia::ui::Label>(*rightScope, "item");
+    rightBound = lookupElement<radia::ui::LabelElement>(*rightScope, "item");
     const TestBindingResult leftResult = finishBinding(leftBinder);
     ASSERT_TRUE(leftResult.ok());
     ASSERT_TRUE(static_cast<bool>(leftBound));
@@ -365,28 +334,28 @@ TEST(BinderTest, ResolvesIdsWithinIndependentResourceScopes) {
 }
 
 TEST(BinderTest, PreparesReplacementWithoutMutatingLiveBinding) {
-    Panel live;
-    auto liveButton = std::make_unique<Button>();
-    Button* liveButtonPtr = liveButton.get();
-    liveButton->setId("reload").setEventCall(WidgetEventKind::Click, EventCall("reload"));
-    live.addChild(std::move(liveButton));
+    PanelElement live;
+    auto liveButton = std::make_unique<ButtonElement>();
+    ButtonElement* liveButtonPtr = liveButton.get();
+    liveButton->setId("reload").setEventCall(kClickEvent, EventCall("reload"));
+    live.append(std::move(liveButton));
 
-    WidgetRef<Button> reference;
+    ElementRef<ButtonElement> reference;
     Binder liveBinder(live);
-    reference = lookupWidget<Button>(live, "reload");
+    reference = lookupElement<ButtonElement>(live, "reload");
     bindEvent(liveBinder, "reload", [] {});
     TestBindingResult liveBinding = finishBinding(liveBinder);
     ASSERT_TRUE(liveBinding.ok());
     EXPECT_EQ(reference.get(), liveButtonPtr);
 
-    Panel candidate;
-    auto candidateButton = std::make_unique<Button>();
-    Button* candidateButtonPtr = candidateButton.get();
-    candidateButton->setId("reload").setEventCall(WidgetEventKind::Click, EventCall("reload"));
-    candidate.addChild(std::move(candidateButton));
+    PanelElement candidate;
+    auto candidateButton = std::make_unique<ButtonElement>();
+    ButtonElement* candidateButtonPtr = candidateButton.get();
+    candidateButton->setId("reload").setEventCall(kClickEvent, EventCall("reload"));
+    candidate.append(std::move(candidateButton));
 
     Binder candidateBinder(candidate);
-    auto candidateReference = lookupWidget<Button>(candidate, "reload");
+    auto candidateReference = lookupElement<ButtonElement>(candidate, "reload");
     bindEvent(candidateBinder, "reload", [] {});
     PreparedBindingResult prepared = candidateBinder.prepare();
     ASSERT_TRUE(prepared.ok());
@@ -397,9 +366,9 @@ TEST(BinderTest, PreparesReplacementWithoutMutatingLiveBinding) {
     EXPECT_EQ(candidateReference.get(), candidateButtonPtr);
     EXPECT_TRUE(static_cast<bool>(replacement));
 
-    Panel removedCandidate;
+    PanelElement removedCandidate;
     Binder removedBinder(removedCandidate);
-    auto removedReference = lookupWidget<Button>(removedCandidate, "reload");
+    auto removedReference = lookupElement<ButtonElement>(removedCandidate, "reload");
     PreparedBindingResult removed = removedBinder.prepare();
     ASSERT_TRUE(removed.ok());
     EXPECT_FALSE(static_cast<bool>(removedReference));
@@ -410,7 +379,7 @@ TEST(BinderTest, PreparesReplacementWithoutMutatingLiveBinding) {
 }
 
 TEST(BinderTest, AllowsUnmatchedOptionalEventHandler) {
-    Panel root;
+    PanelElement root;
     Binder binder(root);
     bindEvent(binder, "missing", [] {});
     PreparedBindingResult result = binder.prepare();
@@ -420,10 +389,10 @@ TEST(BinderTest, AllowsUnmatchedOptionalEventHandler) {
 }
 
 TEST(BinderTest, WarnsForUnhandledLayoutEvent) {
-    Panel root;
-    auto button = std::make_unique<Button>();
-    button->setEventCall(WidgetEventKind::Click, EventCall("unhandled"));
-    root.addChild(std::move(button));
+    PanelElement root;
+    auto button = std::make_unique<ButtonElement>();
+    button->setEventCall(kClickEvent, EventCall("unhandled"));
+    root.append(std::move(button));
 
     Binder binder(root);
     const TestBindingResult result = finishBinding(binder);
@@ -433,7 +402,7 @@ TEST(BinderTest, WarnsForUnhandledLayoutEvent) {
 }
 
 TEST(BinderTest, PreservesLiveValueBindingUntilReplacementCommits) {
-    Panel liveRoot;
+    PanelElement liveRoot;
     auto live = std::make_shared<TestValueBinding<bool>>(false);
     TestSettingResolver liveResolver;
     liveResolver.add("demo-enabled", live);
@@ -444,7 +413,7 @@ TEST(BinderTest, PreservesLiveValueBindingUntilReplacementCommits) {
     ASSERT_TRUE(liveResult.ok());
     EXPECT_EQ(reference.get(), live.get());
 
-    Panel candidateRoot;
+    PanelElement candidateRoot;
     auto candidate = std::make_shared<TestValueBinding<bool>>(true);
     TestSettingResolver candidateResolver;
     candidateResolver.add("demo-enabled", candidate);
@@ -455,7 +424,7 @@ TEST(BinderTest, PreservesLiveValueBindingUntilReplacementCommits) {
     EXPECT_EQ(reference.get(), live.get());
 
     {
-        Panel abandonedRoot;
+        PanelElement abandonedRoot;
         auto abandoned = std::make_shared<TestValueBinding<bool>>(true);
         TestSettingResolver abandonedResolver;
         abandonedResolver.add("demo-enabled", abandoned);
@@ -474,7 +443,7 @@ TEST(BinderTest, PreservesLiveValueBindingUntilReplacementCommits) {
 }
 
 TEST(BinderTest, RejectsMissingSetting) {
-    Panel root;
+    PanelElement root;
     ValueBindingRef<bool> reference;
     TestSettingResolver resolver;
     Binder binder(root, &resolver);
@@ -487,7 +456,7 @@ TEST(BinderTest, RejectsMissingSetting) {
 }
 
 TEST(BinderTest, RejectsSettingTypeMismatch) {
-    Panel root;
+    PanelElement root;
     auto setting = std::make_shared<TestValueBinding<std::string>>("enabled");
     TestSettingResolver resolver;
     resolver.add("demo-enabled", setting);
@@ -502,7 +471,7 @@ TEST(BinderTest, RejectsSettingTypeMismatch) {
 }
 
 TEST(BinderTest, ResolvesRepeatedValueRequirementsIndependently) {
-    Panel root;
+    PanelElement root;
     auto setting = std::make_shared<TestValueBinding<bool>>(false);
     TestSettingResolver resolver;
     resolver.add("demo-enabled", setting);
@@ -519,108 +488,11 @@ TEST(BinderTest, ResolvesRepeatedValueRequirementsIndependently) {
     EXPECT_EQ(second.get(), setting.get());
 }
 
-TEST(BinderTest, BindsFieldSwitchAndPropagatesValidation) {
-    constexpr char kFieldLayout[] = "<field><label for=\"demoSwitch\">Enabled</label>"
-                                    "<switch id=\"demoSwitch\" setting=\"demo-enabled\" onChange=\"demoChanged()\"/>"
-                                    "<br/><hint>Persistent hint</hint><br/><error>Fallback error</error></field>";
-    constexpr char kMissingValueLayout[] = "<switch setting=\"missing-value\"/>";
-    constexpr char kTypedValueLayout[] = "<switch setting=\"typed-value\"/>";
-    constexpr char kRetainedValueLayout[] = "<switch setting=\"retained-value\"/>";
-    LayoutBuildResult buildResult = LayoutResourceCompiler().buildWidgetTreeFromString(kFieldLayout, "bound-field.xml");
-    ASSERT_TRUE(buildResult.ok());
-    auto* field = buildResult.rootAs<Field>();
-    ASSERT_NE(field, nullptr);
-    auto* control = dynamic_cast<Switch*>(field->valueControl());
-    ASSERT_NE(control, nullptr);
-
-    auto provider = std::make_shared<TestValueBinding<bool>>(false);
-    TestSettingResolver resolver;
-    resolver.add("demo-enabled", provider);
-    int changes = 0;
-    Binder binder(*field, &resolver);
-    bindEvent(
-        binder, "demoChanged", WidgetEventKind::Change,
-        [&](const WidgetEvent& event, const EventCall&) {
-            EXPECT_FALSE(static_cast<const radia::ui::ChangeEvent&>(event).checked);
-            ++changes;
-        },
-        noEventArguments);
-    TestBindingResult result = finishBinding(binder);
-    ASSERT_TRUE(result.ok());
-    EXPECT_EQ(provider->observerCount(), std::size_t{1});
-
-    provider->publish({true, false, ValueValidation::invalid(TextSource::text("Dynamic error"))});
-    EXPECT_TRUE(control->checked());
-    EXPECT_TRUE(field->dirty());
-    EXPECT_TRUE(field->invalid());
-    ASSERT_NE(field->error(), nullptr);
-    EXPECT_EQ(field->error()->text(), "Dynamic error");
-    EXPECT_EQ(field->error()->visibility(), Visibility::Visible);
-
-    int valueStatePublications = 0;
-    ValueBindingSubscription valueStateSubscription = control->observeValueControlState([&](const ValueControlState&) { ++valueStatePublications; });
-    control->activate();
-    EXPECT_FALSE(provider->state().value);
-    EXPECT_FALSE(control->checked());
-    EXPECT_EQ(valueStatePublications, 1);
-    EXPECT_EQ(changes, 1);
-    valueStateSubscription.reset();
-
-    provider->publish({false, false, ValueValidation::valid()});
-    EXPECT_FALSE(field->invalid());
-    ASSERT_NE(field->error(), nullptr);
-    EXPECT_EQ(field->error()->visibility(), Visibility::Visible);
-
-    result.binding = Binding{};
-    EXPECT_EQ(provider->observerCount(), std::size_t{0});
-    provider->publish({true, false, ValueValidation::valid()});
-    EXPECT_FALSE(control->checked());
-
-    LayoutBuildResult missingBuildResult = LayoutResourceCompiler().buildWidgetTreeFromString(kMissingValueLayout, "missing-value.xml");
-    ASSERT_TRUE(missingBuildResult.ok());
-    ASSERT_NE(missingBuildResult.root, nullptr);
-    TestSettingResolver missingResolver;
-    Binder missingBinder(*missingBuildResult.root, &missingResolver);
-    TestBindingResult missing = finishBinding(missingBinder);
-    ASSERT_FALSE(missing.ok());
-    ASSERT_EQ(missing.errors.size(), std::size_t{1});
-    EXPECT_EQ(missing.errors.front().code, "binding.setting.missing");
-
-    LayoutBuildResult typedBuildResult = LayoutResourceCompiler().buildWidgetTreeFromString(kTypedValueLayout, "typed-value.xml");
-    ASSERT_TRUE(typedBuildResult.ok());
-    ASSERT_NE(typedBuildResult.root, nullptr);
-    auto wrongType = std::make_shared<TestValueBinding<std::string>>("false");
-    TestSettingResolver typedResolver;
-    typedResolver.add("typed-value", wrongType);
-    Binder typedBinder(*typedBuildResult.root, &typedResolver);
-    TestBindingResult typed = finishBinding(typedBinder);
-    ASSERT_FALSE(typed.ok());
-    ASSERT_EQ(typed.errors.size(), std::size_t{1});
-    EXPECT_EQ(typed.errors.front().code, "binding.setting.type_mismatch");
-
-    LayoutBuildResult lifetimeBuildResult = LayoutResourceCompiler().buildWidgetTreeFromString(kRetainedValueLayout, "retained-value.xml");
-    ASSERT_TRUE(lifetimeBuildResult.ok());
-    ASSERT_NE(lifetimeBuildResult.root, nullptr);
-    auto retainedProvider = std::make_shared<TestValueBinding<bool>>(false);
-    std::weak_ptr<TestValueBinding<bool>> providerLifetime = retainedProvider;
-    TestSettingResolver lifetimeResolver;
-    lifetimeResolver.add("retained-value", retainedProvider);
-    Binder lifetimeBinder(*lifetimeBuildResult.root, &lifetimeResolver);
-    TestBindingResult lifetimeBinding = finishBinding(lifetimeBinder);
-    ASSERT_TRUE(lifetimeBinding.ok());
-    lifetimeResolver.clear();
-    retainedProvider.reset();
-    lifetimeBuildResult.root.reset();
-    EXPECT_FALSE(providerLifetime.expired());
-    lifetimeBinding.binding = Binding{};
-    EXPECT_TRUE(providerLifetime.expired());
-}
-
 TEST(BinderTest, ReplacesValueBindingOnTheSameControl) {
-    constexpr char kReplaceableValueLayout[] = "<switch setting=\"replaceable-value\"/>";
-    LayoutBuildResult buildResult = LayoutResourceCompiler().buildWidgetTreeFromString(kReplaceableValueLayout, "replaceable-value.xml");
+    constexpr char kReplaceableValueLayout[] = "<input type=\"checkbox\" switch=\"true\" setting=\"replaceable-value\"/>";
+    LayoutBuildResult buildResult = LayoutResourceCompiler().buildElementTreeFromString(kReplaceableValueLayout, "replaceable-value.xml");
     ASSERT_TRUE(buildResult.ok());
-    auto* control = buildResult.rootAs<Switch>();
+    auto* control = buildResult.rootAs<InputElement>();
     ASSERT_NE(control, nullptr);
     auto firstProvider = std::make_shared<TestValueBinding<bool>>(false);
     TestSettingResolver firstResolver;
@@ -644,89 +516,12 @@ TEST(BinderTest, ReplacesValueBindingOnTheSameControl) {
     EXPECT_FALSE(firstProvider->state().value);
 }
 
-TEST(BinderTest, LocalizesFieldValidationAndRefreshesKeybindings) {
-    ResourceSnapshot snapshot;
-    constexpr char kLocalization[] = "defaultLocale: en\n"
-                                     "locales: {en: {name: English, strings: {field.label: Enabled, "
-                                     "field.fallback: 'Fallback EN <b>bold EN</b> <kbd shortcut=\"toggle-demo\"/>', "
-                                     "field.dynamic: Dynamic EN}}, "
-                                     "pt: {name: Portuguese, strings: {field.label: Ativado, "
-                                     "field.fallback: 'Fallback PT <b>bold PT</b> <kbd shortcut=\"toggle-demo\"/>', "
-                                     "field.dynamic: Dynamic PT}}}\n";
-    constexpr char kFieldLayout[] = "<field><label for=\"demoSwitch\">field.label</label>"
-                                    "<switch id=\"demoSwitch\" setting=\"demo-enabled\"/>"
-                                    "<br/><error>field.fallback</error></field>";
-    snapshot.add("localization.yaml", kLocalization);
-    snapshot.add("skin.radia", "");
-    snapshot.add("field.xml", kFieldLayout);
-
-    const SkinGenerationPrepareResult prepared = radia::ui::SkinCompiler().prepare(std::move(snapshot));
-    ASSERT_TRUE(prepared.ok());
-
-    KeybindingPresentation presentation{{"F"}};
-    System system;
-    system.setKeybindingResolver(
-        [&presentation](const std::string& binding) { return binding == "toggle-demo" ? presentation : KeybindingPresentation{}; });
-    system.publish(prepared.generation);
-    LayoutBuildResult buildResult = system.buildWidgetTree("field.xml");
-    ASSERT_TRUE(buildResult.ok());
-    auto* field = buildResult.rootAs<Field>();
-    ASSERT_NE(field, nullptr);
-    ASSERT_NE(field->error(), nullptr);
-
-    const TextSource staleDynamic = system.localize("field.dynamic");
-    auto provider = std::make_shared<TestValueBinding<bool>>(false);
-    TestSettingResolver resolver;
-    resolver.add("demo-enabled", provider);
-    Binder binder(*field, &resolver);
-    TestBindingResult binding = finishBinding(binder);
-    ASSERT_TRUE(binding.ok());
-
-    std::unique_ptr<Surface> surface = system.createSurface(radia::ui::fixedTextMetrics());
-    surface->mount(std::move(buildResult.root));
-    provider->publish({false, false, ValueValidation::invalid()});
-    ASSERT_NE(field->error(), nullptr);
-    EXPECT_EQ(field->error()->text(), "Fallback EN bold EN F");
-    const auto& englishNodes = field->error()->content().nodes();
-    ASSERT_EQ(englishNodes.size(), std::size_t{4});
-    EXPECT_EQ(englishNodes[1].kind(), InlineContentKind::B);
-    ASSERT_FALSE(englishNodes[1].children().empty());
-    EXPECT_EQ(englishNodes[1].children().front().value(), "bold EN");
-    ASSERT_FALSE(englishNodes[3].keybindingPresentation().keys.empty());
-    EXPECT_EQ(englishNodes[3].keybindingPresentation().keys.front(), "F");
-
-    ASSERT_TRUE(system.setLocale("pt"));
-    EXPECT_EQ(field->error()->text(), "Fallback PT bold PT F");
-    const auto& portugueseNodes = field->error()->content().nodes();
-    ASSERT_EQ(portugueseNodes.size(), std::size_t{4});
-    EXPECT_EQ(portugueseNodes[1].kind(), InlineContentKind::B);
-    ASSERT_FALSE(portugueseNodes[1].children().empty());
-    EXPECT_EQ(portugueseNodes[1].children().front().value(), "bold PT");
-    ASSERT_FALSE(portugueseNodes[3].keybindingPresentation().keys.empty());
-    EXPECT_EQ(portugueseNodes[3].keybindingPresentation().keys.front(), "F");
-
-    provider->publish({false, false, ValueValidation::invalid(staleDynamic)});
-    EXPECT_EQ(field->error()->text(), "Dynamic PT");
-    provider->publish({false, false, ValueValidation::valid()});
-    provider->publish({false, false, ValueValidation::invalid()});
-    EXPECT_EQ(field->error()->text(), "Fallback PT bold PT F");
-
-    presentation = {{"Ctrl", "F"}};
-    system.refreshKeybindings();
-    provider->publish({false, false, ValueValidation::valid()});
-    provider->publish({false, false, ValueValidation::invalid()});
-    EXPECT_EQ(field->error()->text(), "Fallback PT bold PT Ctrl F");
-    const auto& refreshedNodes = field->error()->content().nodes();
-    ASSERT_EQ(refreshedNodes.size(), std::size_t{4});
-    EXPECT_EQ(refreshedNodes[1].kind(), InlineContentKind::B);
-}
-
 TEST(BinderTest, WarnsWhenEventArgumentsDoNotMatchHandler) {
-    Panel root;
-    auto button = std::make_unique<Button>();
-    Button* target = button.get();
-    button->setEventCall(WidgetEventKind::Click, EventCall("inspect", {EventArgument(std::int64_t(4))}));
-    root.addChild(std::move(button));
+    PanelElement root;
+    auto button = std::make_unique<ButtonElement>();
+    ButtonElement* target = button.get();
+    button->setEventCall(kClickEvent, EventCall("inspect", {EventArgument(std::int64_t(4))}));
+    root.append(std::move(button));
 
     int invocations = 0;
     Binder binder(root);
@@ -740,11 +535,11 @@ TEST(BinderTest, WarnsWhenEventArgumentsDoNotMatchHandler) {
 }
 
 TEST(BinderTest, DispatchesGenericEventHandler) {
-    Panel root;
-    auto button = std::make_unique<Button>();
-    Button* target = button.get();
-    button->setEventCall(WidgetEventKind::Click, EventCall("press"));
-    root.addChild(std::move(button));
+    PanelElement root;
+    auto button = std::make_unique<ButtonElement>();
+    ButtonElement* target = button.get();
+    button->setEventCall(kClickEvent, EventCall("press"));
+    root.append(std::move(button));
 
     int invocations = 0;
     Binder binder(root);
@@ -757,43 +552,39 @@ TEST(BinderTest, DispatchesGenericEventHandler) {
 }
 
 TEST(BinderTest, DispatchesTypedEventArguments) {
-    Panel root;
-    auto select = std::make_unique<Button>();
-    Button* selectTarget = select.get();
-    select->setEventCall(WidgetEventKind::Click, EventCall("select", {EventArgument(std::int64_t(4))}));
-    root.addChild(std::move(select));
-    auto open = std::make_unique<Button>();
-    Button* openTarget = open.get();
-    open->setEventCall(WidgetEventKind::Click, EventCall("open", {EventArgument(std::string("settings"))}));
-    root.addChild(std::move(open));
-    auto enabled = std::make_unique<Button>();
-    Button* enabledTarget = enabled.get();
-    enabled->setEventCall(WidgetEventKind::Click, EventCall("updateAdvanced", {EventArgument(true)}));
-    root.addChild(std::move(enabled));
-    auto inspect = std::make_unique<Button>();
-    Button* inspectTarget = inspect.get();
-    inspect->setEventCall(WidgetEventKind::Click, EventCall("inspectEventSource", {EventArgument(CurrentEventArgument{})}));
-    root.addChild(std::move(inspect));
+    PanelElement root;
+    auto select = std::make_unique<ButtonElement>();
+    ButtonElement* selectTarget = select.get();
+    select->setEventCall(kClickEvent, EventCall("select", {EventArgument(std::int64_t(4))}));
+    root.append(std::move(select));
+    auto open = std::make_unique<ButtonElement>();
+    ButtonElement* openTarget = open.get();
+    open->setEventCall(kClickEvent, EventCall("open", {EventArgument(std::string("settings"))}));
+    root.append(std::move(open));
+    auto enabled = std::make_unique<ButtonElement>();
+    ButtonElement* enabledTarget = enabled.get();
+    enabled->setEventCall(kClickEvent, EventCall("updateAdvanced", {EventArgument(true)}));
+    root.append(std::move(enabled));
+    auto inspect = std::make_unique<ButtonElement>();
+    ButtonElement* inspectTarget = inspect.get();
+    inspect->setEventCall(kClickEvent, EventCall("inspectEventSource", {EventArgument(CurrentEventArgument{})}));
+    root.append(std::move(inspect));
 
     int selected = 0;
     std::string destination;
     bool advanced = false;
-    Widget* source = nullptr;
+    Element* source = nullptr;
     Binder binder(root);
     bindEvent(
-        binder, "select", WidgetEventKind::Click,
-        [&](const WidgetEvent&, const EventCall& call) { selected = static_cast<int>(std::get<std::int64_t>(call.arguments().front())); },
+        binder, "select", [&](Event&, const EventCall& call) { selected = static_cast<int>(std::get<std::int64_t>(call.arguments().front())); },
         singleEventArgument<std::int64_t>);
     bindEvent(
-        binder, "open", WidgetEventKind::Click,
-        [&](const WidgetEvent&, const EventCall& call) { destination = std::get<std::string>(call.arguments().front()); },
+        binder, "open", [&](Event&, const EventCall& call) { destination = std::get<std::string>(call.arguments().front()); },
         singleEventArgument<std::string>);
     bindEvent(
-        binder, "updateAdvanced", WidgetEventKind::Click,
-        [&](const WidgetEvent&, const EventCall& call) { advanced = std::get<bool>(call.arguments().front()); }, singleEventArgument<bool>);
-    bindEvent(
-        binder, "inspectEventSource", WidgetEventKind::Click, [&](const WidgetEvent& event, const EventCall&) { source = &event.source; },
-        currentEventArgument);
+        binder, "updateAdvanced", [&](Event&, const EventCall& call) { advanced = std::get<bool>(call.arguments().front()); },
+        singleEventArgument<bool>);
+    bindEvent(binder, "inspectEventSource", [&](Event& event, const EventCall&) { source = &event.target(); }, currentEventArgument);
     TestBindingResult result = finishBinding(binder);
     ASSERT_TRUE(result.ok());
     EXPECT_TRUE(result.warnings.empty());
@@ -808,10 +599,10 @@ TEST(BinderTest, DispatchesTypedEventArguments) {
 }
 
 TEST(BinderTest, RejectsInvalidRegisteredHandlerName) {
-    Panel root;
-    auto button = std::make_unique<Button>();
-    button->setEventCall(WidgetEventKind::Click, EventCall("bad_action"));
-    root.addChild(std::move(button));
+    PanelElement root;
+    auto button = std::make_unique<ButtonElement>();
+    button->setEventCall(kClickEvent, EventCall("bad_action"));
+    root.append(std::move(button));
 
     Binder binder(root);
     bindEvent(binder, "bad_action", [] {});
@@ -821,35 +612,35 @@ TEST(BinderTest, RejectsInvalidRegisteredHandlerName) {
     EXPECT_EQ(result.errors.front().code, "binding.event.name_invalid");
 }
 
-TEST(BinderTest, DispatchesCommonWidgetEventContext) {
-    Panel root;
-    auto button = std::make_unique<Button>();
-    Button* target = button.get();
-    button->setEventCall(WidgetEventKind::Click, EventCall("observe"));
-    root.addChild(std::move(button));
+TEST(BinderTest, DispatchesCommonElementEventContext) {
+    PanelElement root;
+    auto button = std::make_unique<ButtonElement>();
+    ButtonElement* target = button.get();
+    button->setEventCall(kClickEvent, EventCall("observe"));
+    root.append(std::move(button));
 
-    Widget* source = nullptr;
-    WidgetEventKind kind = WidgetEventKind::Change;
+    Element* source = nullptr;
+    std::string type;
     Binder binder(root);
     bindEvent(
-        binder, "observe", std::nullopt,
-        [&](const WidgetEvent& event, const EventCall&) {
-            source = &event.source;
-            kind = event.kind;
+        binder, "observe",
+        [&](Event& event, const EventCall&) {
+            source = &event.target();
+            type = std::string(event.type());
         },
         noEventArguments);
     const TestBindingResult result = finishBinding(binder);
     ASSERT_TRUE(result.ok());
     target->activate();
     EXPECT_EQ(source, target);
-    EXPECT_EQ(kind, WidgetEventKind::Click);
+    EXPECT_EQ(type, "click");
 }
 
 TEST(BinderTest, BindsSwitchSettingAndPropagatesUpdates) {
-    constexpr char kDemoSettingLayout[] = "<switch setting=\"demo-enabled\"/>";
-    LayoutBuildResult buildResult = LayoutResourceCompiler().buildWidgetTreeFromString(kDemoSettingLayout, "setting.xml");
+    constexpr char kDemoSettingLayout[] = "<input type=\"checkbox\" switch=\"true\" setting=\"demo-enabled\"/>";
+    LayoutBuildResult buildResult = LayoutResourceCompiler().buildElementTreeFromString(kDemoSettingLayout, "setting.xml");
     ASSERT_TRUE(buildResult.ok());
-    auto* control = buildResult.rootAs<Switch>();
+    auto* control = buildResult.rootAs<InputElement>();
     ASSERT_NE(control, nullptr);
     auto provider = std::make_shared<TestValueBinding<bool>>(false);
     TestSettingResolver resolver;
@@ -866,12 +657,12 @@ TEST(BinderTest, BindsSwitchSettingAndPropagatesUpdates) {
 }
 
 TEST(BinderTest, RejectsMissingLayoutSetting) {
-    constexpr char kMissingSettingLayout[] = "<switch setting=\"missing-setting\"/>";
-    LayoutBuildResult buildResult = LayoutResourceCompiler().buildWidgetTreeFromString(kMissingSettingLayout, "missing-setting.xml");
+    constexpr char kMissingSettingLayout[] = "<input type=\"checkbox\" switch=\"true\" setting=\"missing-setting\"/>";
+    LayoutBuildResult buildResult = LayoutResourceCompiler().buildElementTreeFromString(kMissingSettingLayout, "missing-setting.xml");
     ASSERT_TRUE(buildResult.ok());
-    ASSERT_NE(buildResult.root, nullptr);
+    ASSERT_TRUE(buildResult.document);
     TestSettingResolver resolver;
-    Binder binder(*buildResult.root, &resolver);
+    Binder binder(*buildResult.document->documentElement(), &resolver);
     const TestBindingResult result = finishBinding(binder);
     ASSERT_FALSE(result.ok());
     ASSERT_EQ(result.errors.size(), std::size_t{1});
@@ -879,13 +670,13 @@ TEST(BinderTest, RejectsMissingLayoutSetting) {
 }
 
 TEST(BinderTest, RejectsMismatchedLayoutSetting) {
-    constexpr char kStringSettingLayout[] = "<switch setting=\"string-setting\"/>";
-    LayoutBuildResult buildResult = LayoutResourceCompiler().buildWidgetTreeFromString(kStringSettingLayout, "typed-setting.xml");
+    constexpr char kStringSettingLayout[] = "<input type=\"checkbox\" switch=\"true\" setting=\"string-setting\"/>";
+    LayoutBuildResult buildResult = LayoutResourceCompiler().buildElementTreeFromString(kStringSettingLayout, "typed-setting.xml");
     ASSERT_TRUE(buildResult.ok());
-    ASSERT_NE(buildResult.root, nullptr);
+    ASSERT_TRUE(buildResult.document);
     TestSettingResolver resolver;
     resolver.add("string-setting", std::make_shared<TestValueBinding<std::string>>("not a boolean"));
-    Binder binder(*buildResult.root, &resolver);
+    Binder binder(*buildResult.document->documentElement(), &resolver);
     const TestBindingResult result = finishBinding(binder);
     ASSERT_FALSE(result.ok());
     ASSERT_EQ(result.errors.size(), std::size_t{1});
@@ -894,15 +685,15 @@ TEST(BinderTest, RejectsMismatchedLayoutSetting) {
 
 TEST(BinderTest, SharesOneSettingAcrossMultipleControls) {
     constexpr char kSharedSettingLayout[] = "<panel>"
-                                            "<switch id=\"first\" setting=\"shared-enabled\"/>"
-                                            "<switch id=\"second\" setting=\"shared-enabled\"/>"
+                                            "<input type=\"checkbox\" switch=\"true\" id=\"first\" setting=\"shared-enabled\"/>"
+                                            "<input type=\"checkbox\" switch=\"true\" id=\"second\" setting=\"shared-enabled\"/>"
                                             "</panel>";
-    LayoutBuildResult buildResult = LayoutResourceCompiler().buildWidgetTreeFromString(kSharedSettingLayout, "shared-setting.xml");
+    LayoutBuildResult buildResult = LayoutResourceCompiler().buildElementTreeFromString(kSharedSettingLayout, "shared-setting.xml");
     ASSERT_TRUE(buildResult.ok());
-    auto* root = buildResult.rootAs<Panel>();
+    auto* root = buildResult.rootAs<PanelElement>();
     ASSERT_NE(root, nullptr);
-    auto* firstControl = dynamic_cast<Switch*>(findWidgetInScope(*root, "first"));
-    auto* secondControl = dynamic_cast<Switch*>(findWidgetInScope(*root, "second"));
+    auto* firstControl = dynamic_cast<InputElement*>(findElementInScope(*root, "first"));
+    auto* secondControl = dynamic_cast<InputElement*>(findElementInScope(*root, "second"));
     ASSERT_NE(firstControl, nullptr);
     ASSERT_NE(secondControl, nullptr);
 
@@ -924,12 +715,12 @@ TEST(BinderTest, SharesOneSettingAcrossMultipleControls) {
 }
 
 TEST(BinderTest, RejectsMisreportedSettingTypeSafely) {
-    constexpr char kMisreportedSettingLayout[] = "<switch setting=\"misreported-setting\"/>";
-    LayoutBuildResult buildResult = LayoutResourceCompiler().buildWidgetTreeFromString(kMisreportedSettingLayout, "misreported-setting.xml");
+    constexpr char kMisreportedSettingLayout[] = "<input type=\"checkbox\" switch=\"true\" setting=\"misreported-setting\"/>";
+    LayoutBuildResult buildResult = LayoutResourceCompiler().buildElementTreeFromString(kMisreportedSettingLayout, "misreported-setting.xml");
     ASSERT_TRUE(buildResult.ok());
-    ASSERT_NE(buildResult.root, nullptr);
+    ASSERT_TRUE(buildResult.document);
     MisreportingSettingResolver resolver;
-    Binder binder(*buildResult.root, &resolver);
+    Binder binder(*buildResult.document->documentElement(), &resolver);
     const TestBindingResult result = finishBinding(binder);
     ASSERT_FALSE(result.ok());
     ASSERT_EQ(result.errors.size(), std::size_t{1});

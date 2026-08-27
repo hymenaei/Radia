@@ -1,25 +1,6 @@
 /**
- * @file floaters_test.cpp
- * @brief Tests Surface floater mounting, ordering, and lifecycle behavior.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
 #include "linden_common.h"
@@ -27,38 +8,47 @@
 #include <gtest/gtest.h>
 #include <memory>
 #include <optional>
+#include "../floater_test_helpers.h"
 #include "binding/binder.h"
+#include "elements/button.h"
+#include "elements/elementinternal.h"
+#include "elements/elementtext.h"
+#include "elements/floater.h"
+#include "elements/input.h"
+#include "elements/label.h"
+#include "elements/panel.h"
 #include "render/recordingpaintcontext.h"
 #include "surface/surface.h"
 #include "system.h"
 #include "text/metrics.h"
-#include "widgets/button.h"
-#include "widgets/floater.h"
-#include "widgets/label.h"
-#include "widgets/panel.h"
-#include "widgets/switch.h"
 
 namespace {
-using radia::ui::Button;
+using radia::ui::ButtonElement;
 using radia::ui::CursorStyle;
-using radia::ui::Floater;
-using radia::ui::Label;
+using radia::ui::FloaterElement;
+using radia::ui::LabelElement;
+using radia::ui::Node;
+using radia::ui::PaintCommandKind;
+using radia::ui::PanelElement;
 using radia::ui::PointerButton;
+using radia::ui::RecordingPaintContext;
 using radia::ui::Rect;
 using radia::ui::StyleSheet;
 using radia::ui::Surface;
 using radia::ui::SurfaceFloaterDelegate;
 using radia::ui::SurfaceLayer;
+using radia::ui::Text;
 using radia::ui::Vec2;
+using radia::ui::detail::nodes;
 } // namespace
 
 namespace {
 class FloaterDelegateProbe final : public SurfaceFloaterDelegate {
 public:
-    void floaterClosed(Surface&, Floater&) override { ++closes; }
-    void floaterMinimizedChanged(Surface&, Floater&) override { ++minimizeChanges; }
-    void floaterMoveEnded(Surface&, Floater&) override { ++moveCompletions; }
-    void floaterResizeEnded(Surface&, Floater&) override { ++resizeCompletions; }
+    void floaterClosed(Surface&, FloaterElement&) override { ++closes; }
+    void floaterMinimizedChanged(Surface&, FloaterElement&) override { ++minimizeChanges; }
+    void floaterMoveEnded(Surface&, FloaterElement&) override { ++moveCompletions; }
+    void floaterResizeEnded(Surface&, FloaterElement&) override { ++resizeCompletions; }
 
     int closes = 0;
     int minimizeChanges = 0;
@@ -73,14 +63,14 @@ TEST(FloatersTest, ReportsFloaterVisibilityFromResolvedDisplayAndVisibility) {
     Surface surface(styleSheet);
     surface.setViewport(200.f, 100.f);
 
-    auto visible = std::make_unique<Floater>();
+    auto visible = std::make_unique<FloaterElement>();
     surface.mountFloater(std::move(visible));
     EXPECT_TRUE(surface.hasVisibleFloater());
 
-    auto hidden = std::make_unique<Floater>();
+    auto hidden = std::make_unique<FloaterElement>();
     hidden->addClass("hidden");
     surface.mountFloater(std::move(hidden));
-    auto none = std::make_unique<Floater>();
+    auto none = std::make_unique<FloaterElement>();
     none->addClass("none");
     surface.mountFloater(std::move(none));
     EXPECT_TRUE(surface.hasVisibleFloater());
@@ -92,14 +82,13 @@ TEST(FloatersTest, ReportsFloaterVisibilityFromResolvedDisplayAndVisibility) {
 TEST(FloatersTest, RestoresFloaterWithinViewportAfterMinimization) {
     StyleSheet styleSheet;
     constexpr char kMinimizedFloaterStyle[] = "floater { display: flex; flex-direction: column; } "
-                                              "floater::header { height: 30px; display: flex; flex-direction: row; } "
-                                              "floater::content { flex-grow: 1; }";
+                                              "floater > head { height: 30px; display: flex; flex-direction: row; } "
+                                              "floater > body { flex-grow: 1; }";
     ASSERT_TRUE(styleSheet.loadRadia(kMinimizedFloaterStyle).ok());
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
-    auto floater = std::make_unique<Floater>();
-    Floater* target = floater.get();
-    floater->setTitle("title").setCanClose(false).setCanMinimize(true);
+    auto floater = radia::ui::test::makeFloater(false, true);
+    FloaterElement* target = floater.get();
     floater->setRect({20.f, 20.f, 100.f, 100.f});
     surface.mountFloater(std::move(floater));
     surface.updateLayout();
@@ -128,14 +117,13 @@ TEST(FloatersTest, TransfersFloaterBetweenSurfacesAndReportsLifecycle) {
     first.setViewport(100.f, 100.f);
     second.setViewport(80.f, 60.f);
 
-    auto floater = std::make_unique<Floater>();
-    Floater* target = floater.get();
-    floater->setTitle("title").setCanMinimize(true);
+    auto floater = radia::ui::test::makeFloater(true, true);
+    FloaterElement* target = floater.get();
     floater->setRect({90.f, 90.f, 30.f, 30.f});
     first.mountFloater(std::move(floater));
     EXPECT_EQ(target->rect().right(), 100.f);
     EXPECT_EQ(target->rect().top(), 100.f);
-    std::unique_ptr<Floater> transferred = first.unmountFloater(*target);
+    std::unique_ptr<FloaterElement> transferred = first.unmountFloater(*target);
     ASSERT_TRUE(transferred);
     EXPECT_EQ(transferred.get(), target);
     second.mountFloater(std::move(transferred));
@@ -153,14 +141,13 @@ TEST(FloatersTest, TransfersFloaterBetweenSurfacesAndReportsLifecycle) {
 TEST(FloatersTest, ReportsMoveCompletionAfterPointerUp) {
     StyleSheet styleSheet;
     constexpr char kMove[] = "floater { display: flex; flex-direction: column; } "
-                             "floater::header { height: 30px; display: flex; flex-direction: row; } "
-                             "floater::content { flex-grow: 1; }";
+                             "floater > head { height: 30px; display: flex; flex-direction: row; } "
+                             "floater > body { flex-grow: 1; }";
     ASSERT_TRUE(styleSheet.loadRadia(kMove).ok());
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
-    auto floater = std::make_unique<Floater>();
-    Floater* target = floater.get();
-    floater->setTitle("title").setCanClose(false).setCanMinimize(true);
+    auto floater = radia::ui::test::makeFloater(false, true);
+    FloaterElement* target = floater.get();
     floater->setRect({20.f, 20.f, 100.f, 100.f});
     surface.mountFloater(std::move(floater));
     surface.updateLayout();
@@ -180,18 +167,256 @@ TEST(FloatersTest, ReportsMoveCompletionAfterPointerUp) {
     EXPECT_EQ(delegate.moveCompletions, 1);
 }
 
+TEST(FloatersTest, MovesRetainedTextWithFloater) {
+    StyleSheet styleSheet;
+    constexpr char kMove[] = "floater { display: flex; flex-direction: column; } "
+                             "floater > head { height: 30px; display: flex; flex-direction: row; } "
+                             "floater > body { flex-grow: 1; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kMove).ok());
+    Surface surface(styleSheet);
+    surface.setViewport(200.f, 200.f);
+    auto floater = radia::ui::test::makeFloater();
+    FloaterElement* target = floater.get();
+    floater->setRect({20.f, 20.f, 100.f, 100.f});
+    surface.mountFloater(std::move(floater));
+    target->body()->textContent("body");
+    surface.updateLayout();
+
+    Text* text = nullptr;
+    for (Node& child : nodes(*target->body()))
+        if ((text = child.asText())) break;
+    ASSERT_NE(text, nullptr);
+    const Rect initialFloaterRect = target->rect();
+    const Rect initialTextRect = text->rect();
+
+    const Vec2 dragStart{target->rect().left() + 2.f, target->rect().top() - 15.f};
+    ASSERT_TRUE(surface.pointerDown({dragStart, PointerButton::Left}));
+    const Vec2 dragEnd{dragStart.x + 20.f, dragStart.y + 10.f};
+    ASSERT_TRUE(surface.pointerMove({dragEnd, PointerButton::Left}));
+
+    EXPECT_FLOAT_EQ(target->rect().x - initialFloaterRect.x, 20.f);
+    EXPECT_FLOAT_EQ(target->rect().y - initialFloaterRect.y, 10.f);
+    EXPECT_FLOAT_EQ(text->rect().x - initialTextRect.x, 20.f);
+    EXPECT_FLOAT_EQ(text->rect().y - initialTextRect.y, 10.f);
+}
+
+TEST(FloatersTest, MovesScrollableBodyClipWithFloater) {
+    StyleSheet styleSheet;
+    constexpr char kMove[] = "floater { display: flex; flex-direction: column; } "
+                             "floater > head { height: 30px; display: flex; flex-direction: row; } "
+                             "floater > body { flex-grow: 1; overflow: auto; scrollbar-mode: overlay; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kMove).ok());
+    Surface surface(styleSheet);
+    surface.setViewport(200.f, 200.f);
+    auto floater = radia::ui::test::makeFloater();
+    FloaterElement* target = floater.get();
+    floater->setRect({20.f, 20.f, 100.f, 100.f});
+    surface.mountFloater(std::move(floater));
+    target->body()->textContent("body");
+    surface.updateLayout();
+
+    const Rect initialBodyRect = target->body()->rect();
+    RecordingPaintContext initialRecording;
+    surface.paint(initialRecording);
+    const auto* initialClip = initialRecording.last(PaintCommandKind::PushClip);
+    ASSERT_NE(initialClip, nullptr);
+    EXPECT_FLOAT_EQ(initialClip->rect.x, initialBodyRect.x);
+    EXPECT_FLOAT_EQ(initialClip->rect.y, initialBodyRect.y);
+
+    const Vec2 dragStart{target->rect().left() + 2.f, target->rect().top() - 15.f};
+    ASSERT_TRUE(surface.pointerDown({dragStart, PointerButton::Left}));
+    const Vec2 dragEnd{dragStart.x + 20.f, dragStart.y + 10.f};
+    ASSERT_TRUE(surface.pointerMove({dragEnd, PointerButton::Left}));
+
+    RecordingPaintContext movedRecording;
+    surface.paint(movedRecording);
+    const auto* movedClip = movedRecording.last(PaintCommandKind::PushClip);
+    ASSERT_NE(movedClip, nullptr);
+    EXPECT_FLOAT_EQ(movedClip->rect.x - initialClip->rect.x, 20.f);
+    EXPECT_FLOAT_EQ(movedClip->rect.y - initialClip->rect.y, 10.f);
+    EXPECT_FLOAT_EQ(movedClip->rect.w, initialClip->rect.w);
+    EXPECT_FLOAT_EQ(movedClip->rect.h, initialClip->rect.h);
+}
+
+TEST(FloatersTest, KeepsWrappedBodyContentInsideFloaterWidth) {
+    StyleSheet styleSheet;
+    constexpr char kScrollableBody[] = "floater { display: flex; flex-direction: column; } "
+                                       "floater > head { height: 30px; display: flex; flex-direction: row; } "
+                                       "floater > body { display: flex; flex-direction: column; flex-grow: 1; min-size: 0px; margin: 8px; gap: 8px; "
+                                       "overflow: auto; scrollbar-mode: classic; scrollbar-gutter: stable; } "
+                                       "#sections { display: flex; flex-direction: column; width: 100%; } "
+                                       "#section { display: flex; flex-direction: column; width: 100%; padding: 8px; } "
+                                       "#copy { text-wrap: wrap; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kScrollableBody).ok());
+
+    Surface surface(styleSheet);
+    surface.setViewport(400.f, 300.f);
+    auto floater = radia::ui::test::makeFloater();
+    FloaterElement* target = floater.get();
+    target->setRect({40.f, 40.f, 160.f, 140.f});
+    auto sections = std::make_unique<PanelElement>();
+    sections->setId("sections");
+    auto section = std::make_unique<PanelElement>();
+    section->setId("section");
+    auto copy = std::make_unique<LabelElement>(
+        "This wrapped text is deliberately long enough to exercise the flex column's cross-axis sizing without creating horizontal overflow.");
+    copy->setId("copy");
+    section->append(std::move(copy));
+    sections->append(std::move(section));
+    target->body()->append(std::move(sections));
+    surface.mountFloater(std::move(floater));
+    surface.updateLayout();
+
+    ASSERT_GT(target->body()->clientHeight(), 0.f);
+    EXPECT_FLOAT_EQ(target->body()->scrollWidth(), target->body()->clientWidth());
+
+    RecordingPaintContext recording;
+    surface.paint(recording);
+    const auto* scrollbar = recording.last(PaintCommandKind::Scrollbar);
+    ASSERT_NE(scrollbar, nullptr);
+    ASSERT_TRUE(scrollbar->scrollbar.has_value());
+    EXPECT_FALSE(scrollbar->scrollbar->geometry.horizontal.visible);
+    ASSERT_TRUE(scrollbar->scrollbar->geometry.vertical.visible);
+    EXPECT_GE(scrollbar->scrollbar->geometry.vertical.bounds.left(), target->body()->rect().left());
+    EXPECT_LE(scrollbar->scrollbar->geometry.vertical.bounds.right(), target->body()->rect().right());
+}
+
+TEST(FloatersTest, KeepsHorizontalScrollbarLocalToFloaterBody) {
+    StyleSheet styleSheet;
+    constexpr char kScrollableBody[] =
+        "floater { display: flex; flex-direction: column; } "
+        "floater > head { height: 30px; display: flex; flex-direction: row; } "
+        "floater > body { display: flex; flex-direction: column; flex-grow: 1; min-size: 0px; margin: 8px; overflow: auto; "
+        "scrollbar-mode: classic; } #wide { display: block; width: 500px; height: 20px; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kScrollableBody).ok());
+
+    Surface surface(styleSheet);
+    surface.setViewport(400.f, 300.f);
+    auto floater = radia::ui::test::makeFloater();
+    FloaterElement* target = floater.get();
+    target->setRect({40.f, 40.f, 160.f, 140.f});
+    auto wide = std::make_unique<PanelElement>();
+    wide->setId("wide");
+    target->body()->append(std::move(wide));
+    surface.mountFloater(std::move(floater));
+    surface.updateLayout();
+
+    EXPECT_GT(target->body()->scrollWidth(), target->body()->clientWidth());
+    RecordingPaintContext recording;
+    surface.paint(recording);
+    const auto* scrollbar = recording.last(PaintCommandKind::Scrollbar);
+    ASSERT_NE(scrollbar, nullptr);
+    ASSERT_TRUE(scrollbar->scrollbar.has_value());
+    ASSERT_TRUE(scrollbar->scrollbar->geometry.horizontal.visible);
+    EXPECT_GE(scrollbar->scrollbar->geometry.horizontal.bounds.left(), target->body()->rect().left());
+    EXPECT_LE(scrollbar->scrollbar->geometry.horizontal.bounds.right(), target->body()->rect().right());
+}
+
+TEST(FloatersTest, KeepsScrollbarsInsideFloaterBorder) {
+    StyleSheet styleSheet;
+    constexpr char kBorderedScrollableFloater[] = "floater { display: flex; flex-direction: column; border: 2px #ffffff; border-radius: 12px; } "
+                                                  "floater > head { height: 30px; display: flex; flex-direction: row; } "
+                                                  "floater > body { flex-grow: 1; min-size: 0px; overflow: auto; "
+                                                  "scrollbar-mode: classic; } #tall { display: block; height: 500px; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kBorderedScrollableFloater).ok());
+
+    Surface surface(styleSheet);
+    surface.setViewport(400.f, 300.f);
+    auto floater = radia::ui::test::makeFloater();
+    FloaterElement* target = floater.get();
+    target->setRect({40.f, 40.f, 160.f, 140.f});
+    auto tall = std::make_unique<PanelElement>();
+    tall->setId("tall");
+    target->body()->append(std::move(tall));
+    surface.mountFloater(std::move(floater));
+    surface.updateLayout();
+
+    RecordingPaintContext recording;
+    surface.paint(recording);
+    const auto* scrollbar = recording.last(PaintCommandKind::Scrollbar);
+    ASSERT_NE(scrollbar, nullptr);
+    ASSERT_TRUE(scrollbar->scrollbar.has_value());
+    ASSERT_TRUE(scrollbar->scrollbar->geometry.vertical.visible);
+    EXPECT_GE(scrollbar->scrollbar->geometry.vertical.bounds.left(), target->rect().left() + 2.f);
+    EXPECT_LE(scrollbar->scrollbar->geometry.vertical.bounds.right(), target->rect().right() - 2.f);
+    ASSERT_TRUE(scrollbar->scrollbar->clip.enabled);
+    EXPECT_FLOAT_EQ(scrollbar->scrollbar->clip.borderBox.x, target->rect().x);
+    EXPECT_FLOAT_EQ(scrollbar->scrollbar->clip.borderBox.y, target->rect().y);
+    EXPECT_FLOAT_EQ(scrollbar->scrollbar->clip.borderBox.w, target->rect().w);
+    EXPECT_FLOAT_EQ(scrollbar->scrollbar->clip.borderBox.h, target->rect().h);
+    EXPECT_FLOAT_EQ(scrollbar->scrollbar->clip.borderWidth.left, 2.f);
+    EXPECT_FLOAT_EQ(scrollbar->scrollbar->clip.borderWidth.right, 2.f);
+    EXPECT_FLOAT_EQ(scrollbar->scrollbar->clip.borderRadius.bottomLeft.horizontal.pixels, 12.f);
+    EXPECT_FLOAT_EQ(scrollbar->scrollbar->clip.borderRadius.bottomRight.vertical.pixels, 12.f);
+
+    const auto& commands = recording.commands();
+    const auto scrollbarIndex = std::distance(commands.begin(), std::find_if(commands.begin(), commands.end(), [](const auto& command) {
+                                                  return command.kind == PaintCommandKind::Scrollbar;
+                                              }));
+    ASSERT_LT(scrollbarIndex, commands.size());
+    ASSERT_GT(scrollbarIndex, 0u);
+    ASSERT_LT(scrollbarIndex + 1, commands.size());
+    EXPECT_EQ(commands[scrollbarIndex - 1].kind, PaintCommandKind::PushClip);
+    EXPECT_EQ(commands[scrollbarIndex + 1].kind, PaintCommandKind::PopClip);
+    EXPECT_FLOAT_EQ(commands[scrollbarIndex - 1].rect.x, target->body()->rect().x);
+    EXPECT_FLOAT_EQ(commands[scrollbarIndex - 1].rect.y, target->body()->rect().y);
+    EXPECT_FLOAT_EQ(commands[scrollbarIndex - 1].rect.w, target->body()->rect().w);
+    EXPECT_FLOAT_EQ(commands[scrollbarIndex - 1].rect.h, target->body()->rect().h);
+}
+
+TEST(FloatersTest, KeepsFloaterResizeCursorOverBorderedScrollbar) {
+    StyleSheet styleSheet;
+    constexpr char kBorderedScrollableFloater[] = "floater { display: flex; flex-direction: column; border: 2px #ffffff; border-radius: 12px; } "
+                                                  "floater > head { height: 30px; display: flex; flex-direction: row; } "
+                                                  "floater > body { flex-grow: 1; min-size: 0px; overflow: auto; "
+                                                  "scrollbar-mode: classic; } #tall { display: block; height: 500px; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kBorderedScrollableFloater).ok());
+
+    Surface surface(styleSheet);
+    surface.setViewport(400.f, 300.f);
+    auto floater = radia::ui::test::makeFloater();
+    FloaterElement* target = floater.get();
+    target->setResizeable(true).setRect({40.f, 40.f, 160.f, 140.f});
+    auto tall = std::make_unique<PanelElement>();
+    tall->setId("tall");
+    target->body()->append(std::move(tall));
+    surface.mountFloater(std::move(floater));
+    surface.updateLayout();
+
+    RecordingPaintContext recording;
+    surface.paint(recording);
+    const auto* scrollbar = recording.last(PaintCommandKind::Scrollbar);
+    ASSERT_NE(scrollbar, nullptr);
+    ASSERT_TRUE(scrollbar->scrollbar.has_value());
+    const Rect verticalBounds = scrollbar->scrollbar->geometry.vertical.bounds;
+    const Vec2 point{verticalBounds.right() - 1.f, verticalBounds.y + verticalBounds.h * .5f};
+    ASSERT_TRUE(verticalBounds.contains(point));
+
+    ASSERT_TRUE(surface.pointerMove({point}));
+    EXPECT_EQ(surface.cursor(), CursorStyle::EastWestResize);
+
+    const Rect initialFloaterRect = target->rect();
+    ASSERT_TRUE(surface.pointerDown({point, PointerButton::Left}));
+    ASSERT_TRUE(surface.hasPointerCapture());
+    const Vec2 dragPoint{point.x + 20.f, point.y};
+    ASSERT_TRUE(surface.pointerMove({dragPoint, PointerButton::Left}));
+    EXPECT_GT(target->rect().w, initialFloaterRect.w);
+    EXPECT_FLOAT_EQ(target->body()->scrollTop(), 0.f);
+    EXPECT_TRUE(surface.pointerUp({dragPoint, PointerButton::Left}));
+}
+
 TEST(FloatersTest, ResizesFloaterWithinSurfaceBounds) {
     StyleSheet styleSheet;
     constexpr char kResize[] = "floater { size: 80px 100px; min-size: 40px 50px; display: flex; flex-direction: column; } "
-                               "floater::header { height: 20px; }";
+                               "floater > head { height: 20px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kResize).ok());
     Surface surface(styleSheet);
     surface.setViewport(200.f, 160.f);
     FloaterDelegateProbe delegate;
     surface.setFloaterDelegate(&delegate);
-    auto floater = std::make_unique<Floater>();
-    Floater* target = floater.get();
-    floater->setCanResize(true).setCanClose(false);
+    auto floater = std::make_unique<FloaterElement>();
+    FloaterElement* target = floater.get();
+    floater->setResizeable(true);
     surface.mountFloater(std::move(floater));
     const std::optional<Rect> prepared = surface.prepareFloater(*target);
     ASSERT_TRUE(prepared.has_value());
@@ -210,14 +435,14 @@ TEST(FloatersTest, ResizesFloaterWithinSurfaceBounds) {
 TEST(FloatersTest, HidesResizeCursorWhenResizingIsUnavailable) {
     Surface surface;
     surface.setViewport(200.f, 160.f);
-    auto floater = std::make_unique<Floater>();
-    Floater* target = floater.get();
-    floater->setCanResize(false).setRect({20.f, 20.f, 100.f, 80.f});
+    auto floater = radia::ui::test::makeFloater(false, true);
+    FloaterElement* target = floater.get();
+    floater->setResizeable(false).setRect({20.f, 20.f, 100.f, 80.f});
     surface.mountFloater(std::move(floater));
 
     surface.pointerMove({{119.f, 60.f}});
     EXPECT_EQ(surface.cursor(), CursorStyle::Default);
-    target->setCanResize(true).setCanMinimize(true).setMinimized(true);
+    target->setResizeable(true).setMinimized(true);
     surface.pointerMove({{target->rect().right() - 1.f, target->rect().bottom() + 2.f}});
     EXPECT_EQ(surface.cursor(), CursorStyle::Default);
 }
@@ -228,9 +453,9 @@ TEST(FloatersTest, UsesFrozenWidthForPercentageMinimumSize) {
     ASSERT_TRUE(styleSheet.loadRadia(kPercentageMinimumLayout).ok());
     Surface surface(styleSheet);
     surface.setViewport(400.f, 300.f);
-    auto floater = std::make_unique<Floater>();
-    Floater* target = floater.get();
-    floater->setCanResize(true).setCanClose(false);
+    auto floater = std::make_unique<FloaterElement>();
+    FloaterElement* target = floater.get();
+    floater->setResizeable(true);
     surface.mountFloater(std::move(floater));
     const std::optional<Rect> prepared = surface.prepareFloater(*target);
     ASSERT_TRUE(prepared.has_value());
@@ -246,9 +471,9 @@ TEST(FloatersTest, UsesFrozenWidthForPercentageMinimumSize) {
 TEST(FloatersTest, ResizesFloatersMountedInModalLayer) {
     Surface surface;
     surface.setViewport(200.f, 160.f);
-    auto floater = std::make_unique<Floater>();
-    Floater* target = floater.get();
-    floater->setCanResize(true).setRect({20.f, 20.f, 100.f, 80.f});
+    auto floater = std::make_unique<FloaterElement>();
+    FloaterElement* target = floater.get();
+    floater->setResizeable(true).setRect({20.f, 20.f, 100.f, 80.f});
     surface.mountFloater(std::move(floater), SurfaceLayer::Modal);
 
     EXPECT_TRUE(surface.pointerDown({{119.f, 60.f}, PointerButton::Left}));
@@ -260,18 +485,18 @@ TEST(FloatersTest, ResizesFloatersMountedInModalLayer) {
 TEST(FloatersTest, KeepsFixedOuterSizeWhileTrackingContentGeometry) {
     StyleSheet styleSheet;
     constexpr char kFixedOuter[] = "floater { size: 300px; display: flex; flex-direction: column; } "
-                                   "floater::header { height: 20px; } floater::content { display: flex; flex-direction: column; }";
+                                   "floater > head { height: 20px; } floater > body { display: flex; flex-direction: column; }";
     ASSERT_TRUE(styleSheet.loadRadia(kFixedOuter).ok());
     Surface surface(styleSheet);
     surface.setViewport(500.f, 400.f);
-    auto floater = std::make_unique<Floater>();
-    floater->addChild(std::make_unique<Label>("first"));
+    auto floater = radia::ui::test::makeFloater();
+    floater->body()->append(std::make_unique<LabelElement>("first"));
 
     const std::optional<Rect> firstPrepared = surface.prepareFloater(*floater);
     ASSERT_TRUE(firstPrepared.has_value());
     const Rect firstOuter = *firstPrepared;
     const Vec2 firstContent = floater->authoredContentSize();
-    floater->addChild(std::make_unique<Label>("second"));
+    floater->body()->append(std::make_unique<LabelElement>("second"));
     const std::optional<Rect> secondPrepared = surface.prepareFloater(*floater);
     ASSERT_TRUE(secondPrepared.has_value());
     const Rect secondOuter = *secondPrepared;
@@ -289,7 +514,7 @@ TEST(FloatersTest, ResolvesPercentageGeometryAgainstViewport) {
     ASSERT_TRUE(styleSheet.loadRadia(kPercentageGeometryLayout).ok());
     Surface surface(styleSheet);
     surface.setViewport(400.f, 300.f);
-    Floater floater;
+    FloaterElement floater;
     const std::optional<Rect> prepared = surface.prepareFloater(floater);
     ASSERT_TRUE(prepared.has_value());
     const Rect rect = *prepared;
@@ -305,17 +530,17 @@ TEST(FloatersTest, RoutesResizeThroughPointerTransparentFloater) {
     ASSERT_TRUE(styleSheet.loadRadia(kPointerTransparentLayout).ok());
     Surface surface(styleSheet);
     surface.setViewport(200.f, 160.f);
-    auto lower = std::make_unique<Floater>();
-    Floater* lowerTarget = lower.get();
-    lower->setCanResize(true).setRect({20.f, 20.f, 100.f, 80.f});
+    auto lower = std::make_unique<FloaterElement>();
+    FloaterElement* lowerTarget = lower.get();
+    lower->setResizeable(true).setRect({20.f, 20.f, 100.f, 80.f});
     surface.mountFloater(std::move(lower));
-    auto upper = std::make_unique<Floater>();
-    Floater* upperTarget = upper.get();
-    upper->setCanResize(false).setRect({70.f, 20.f, 100.f, 80.f});
+    auto upper = radia::ui::test::makeFloater();
+    FloaterElement* upperTarget = upper.get();
+    upper->setResizeable(false).setRect({70.f, 20.f, 100.f, 80.f});
     surface.mountFloater(std::move(upper));
-    auto upperChild = std::make_unique<Button>();
+    auto upperChild = std::make_unique<ButtonElement>();
     upperChild->setRect({0.f, 0.f, 100.f, 80.f}).setPointerEvents(true);
-    upperTarget->content()->addChild(std::move(upperChild));
+    upperTarget->body()->append(std::move(upperChild));
 
     const Vec2 lowerEdgeUnderUpper{lowerTarget->rect().right() - 1.f, lowerTarget->rect().y + 40.f};
     EXPECT_TRUE(surface.pointerDown({lowerEdgeUnderUpper, PointerButton::Left}));
@@ -336,19 +561,19 @@ TEST(FloatersTest, KeepsOverflowVisibleDescendantAsPointerTarget) {
     Surface surface(styleSheet);
     surface.setViewport(200.f, 160.f);
 
-    auto lower = std::make_unique<Floater>();
-    Floater* lowerTarget = lower.get();
-    lower->setCanResize(true).setRect({20.f, 20.f, 100.f, 80.f});
+    auto lower = std::make_unique<FloaterElement>();
+    FloaterElement* lowerTarget = lower.get();
+    lower->setResizeable(true).setRect({20.f, 20.f, 100.f, 80.f});
     surface.mountFloater(std::move(lower));
 
-    auto upper = std::make_unique<Floater>();
-    Floater* upperTarget = upper.get();
+    auto upper = radia::ui::test::makeFloater();
+    FloaterElement* upperTarget = upper.get();
     upper->addClass("pass-through").setRect({70.f, 20.f, 40.f, 80.f});
     surface.mountFloater(std::move(upper));
 
-    auto overflowChild = std::make_unique<Button>();
+    auto overflowChild = std::make_unique<ButtonElement>();
     overflowChild->setRect({110.f, 20.f, 40.f, 80.f}).setPointerEvents(true);
-    upperTarget->content()->addChild(std::move(overflowChild));
+    upperTarget->body()->append(std::move(overflowChild));
 
     const Vec2 point{lowerTarget->rect().right() - 1.f, lowerTarget->rect().y + 40.f};
     EXPECT_TRUE(surface.pointerDown({point, PointerButton::Left}));
@@ -358,20 +583,25 @@ TEST(FloatersTest, KeepsOverflowVisibleDescendantAsPointerTarget) {
 TEST(FloatersTest, ReplacesFloaterAndReturnsRetiredRoot) {
     Surface surface;
     surface.setViewport(240.f, 180.f);
-    auto original = std::make_unique<Floater>();
-    Floater* originalPointer = original.get();
+    auto original = std::make_unique<FloaterElement>();
+    FloaterElement* originalPointer = original.get();
     original->setRect({20.f, 25.f, 100.f, 80.f});
     surface.mountFloater(std::move(original));
+    radia::ui::ElementRef<FloaterElement> originalHandle(originalPointer);
 
-    auto replacement = std::make_unique<Floater>();
-    Floater* replacementPointer = replacement.get();
+    auto replacement = std::make_unique<FloaterElement>();
+    FloaterElement* replacementPointer = replacement.get();
     replacement->setRect({30.f, 35.f, 120.f, 90.f});
-    std::unique_ptr<Floater> retired = surface.replaceFloater(*originalPointer, std::move(replacement));
+    std::unique_ptr<FloaterElement> retired = surface.replaceFloater(*originalPointer, std::move(replacement));
+    radia::ui::ElementRef<FloaterElement> replacementHandle(replacementPointer);
 
     ASSERT_TRUE(retired);
     EXPECT_EQ(retired.get(), originalPointer);
     EXPECT_TRUE(surface.ownsFloater(*replacementPointer));
-    EXPECT_EQ(retired->parent(), nullptr);
-    EXPECT_NE(replacementPointer->parent(), nullptr);
+    EXPECT_EQ(retired->parentElement(), nullptr);
+    EXPECT_EQ(replacementPointer->parentElement(), nullptr);
+    EXPECT_EQ(originalHandle.get(), originalPointer);
+    EXPECT_EQ(originalHandle.getMounted(), nullptr);
+    EXPECT_EQ(replacementHandle.getMounted(), replacementPointer);
 }
 } // namespace

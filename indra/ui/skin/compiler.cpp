@@ -1,36 +1,20 @@
 /**
- * @file compiler.cpp
- * @brief Compiles layered skin resources into immutable runtime generations.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
 #include "linden_common.h"
 #include "skin/compiler.h"
 #include <unordered_map>
-#include "layout/document.h"
 #include "skin/generation.h"
 #include "skin/generationinternal.h"
 
 namespace radia::ui {
 namespace {
+constexpr const char* kStylesheetResourceId = "skin.css";
+constexpr const char* kLayoutExtension = ".html";
+constexpr std::size_t kLayoutExtensionSize = sizeof(".html") - 1;
+
 bool endsWith(const std::string& value, const std::string& suffix) {
     return value.size() >= suffix.size() && value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
@@ -41,19 +25,25 @@ SkinGenerationPrepareResult SkinCompiler::prepare(ResourceSnapshot resources) co
     LocalizationCatalog localization;
     StyleSheet styleSheet;
     std::unordered_map<std::string, SvgIcon> icons;
-    LayoutDocumentMap layoutDocuments;
 
     const std::optional<std::string> localizationYaml = resources.load("localization.yaml");
-    const std::optional<std::string> styleSource = resources.load("skin.radia");
+    const std::optional<std::string> styleSource = resources.load(kStylesheetResourceId);
+    const std::string defaultStylesheetResourceId(kDefaultStylesheetResourceId);
     if (!localizationYaml) result.error("rdui.resource.missing", "Missing Radia UI resource: localization.yaml.", "localization.yaml");
-    if (!styleSource) result.error("rdui.resource.missing", "Missing Radia UI resource: skin.radia.", "skin.radia");
+    if (!styleSource) result.error("rdui.resource.missing", "Missing Radia UI resource: skin.css.", kStylesheetResourceId);
     if (result.hasErrors()) return result;
 
     const std::vector<ResourceLayer>& localizationLayers = resources.layers("localization.yaml");
-    const std::vector<ResourceLayer>& styleLayers = resources.layers("skin.radia");
+    const std::vector<ResourceLayer>& styleLayers = resources.layers(kStylesheetResourceId);
     result.append(localizationLayers.empty() ? localization.loadYaml(*localizationYaml, "localization.yaml")
-                                              : localization.loadYamlLayers(localizationLayers));
-    result.append(styleLayers.empty() ? styleSheet.loadRadia(*styleSource, "skin.radia") : styleSheet.loadRadiaLayers(styleLayers));
+                                             : localization.loadYamlLayers(localizationLayers));
+    std::vector<StyleLayer> styleInputs;
+    styleInputs.reserve(styleLayers.empty() ? 2 : styleLayers.size() + 1);
+    styleInputs.push_back(StyleLayer{StyleOrigin::Default, ResourceLayer{defaultStylesheetResourceId, std::string(defaultStylesheetSource())}});
+    if (styleLayers.empty()) styleInputs.push_back(StyleLayer{StyleOrigin::Skin, ResourceLayer{kStylesheetResourceId, *styleSource}});
+    else
+        for (const ResourceLayer& layer : styleLayers) styleInputs.push_back(StyleLayer{StyleOrigin::Skin, layer});
+    result.append(styleSheet.loadRadiaLayers(styleInputs));
 
     constexpr const char* kResourcePrefix = "resources/";
     constexpr std::size_t kResourcePrefixSize = sizeof("resources/") - 1;
@@ -85,40 +75,34 @@ SkinGenerationPrepareResult SkinCompiler::prepare(ResourceSnapshot resources) co
 
     for (const auto& resource : resources.resources()) {
         const std::string& resourceId = resource.first;
-        const std::string& sourceText = resource.second;
-        if (resourceId == "localization.yaml" || resourceId == "skin.radia" || resourceId.rfind(kResourcePrefix, 0) == 0) continue;
-        if (!endsWith(resourceId, ".xml")) {
+        if (resourceId == "localization.yaml" || resourceId == kStylesheetResourceId || resourceId.rfind(kResourcePrefix, 0) == 0) continue;
+        if (!endsWith(resourceId, kLayoutExtension)) {
             result.error("rdui.layout.unsupported", "Unsupported Radia UI layout resource: " + resourceId + ".", resourceId);
             continue;
         }
-        if (resourceId.rfind("widgets/", 0) == 0) {
+        if (resourceId.rfind("elements/", 0) == 0) {
             const std::string element =
-                resourceId.substr(sizeof("widgets/") - 1, resourceId.size() - (sizeof("widgets/") - 1) - (sizeof(".xml") - 1));
+                resourceId.substr(sizeof("elements/") - 1, resourceId.size() - (sizeof("elements/") - 1) - kLayoutExtensionSize);
             if (element.empty() || element.find('/') != std::string::npos) {
-                result.error("rdui.layout.defaults_path_invalid", "Widget Defaults must use widgets/<element>.xml: " + resourceId + ".",
+                result.error("rdui.layout.defaults_path_invalid", "Element Defaults must use elements/<element>.html: " + resourceId + ".",
                              resourceId);
                 continue;
             }
         }
-
-        LayoutDocumentParseResult parsed = LayoutDocumentParser().parse(sourceText, resourceId);
-        std::unique_ptr<LayoutDocument> document = std::move(parsed.document);
-        result.append(std::move(parsed));
-        if (document) layoutDocuments.emplace(resourceId, std::shared_ptr<const LayoutDocument>(std::move(document)));
     }
     if (result.hasErrors()) return result;
 
-    auto generation = std::shared_ptr<SkinGeneration>(new SkinGeneration(std::make_unique<SkinGeneration::Impl>(
-        std::move(resources), std::move(localization), std::move(styleSheet), std::move(icons), std::move(layoutDocuments))));
+    auto generation = std::shared_ptr<SkinGeneration>(new SkinGeneration(
+        std::make_unique<SkinGeneration::Impl>(std::move(resources), std::move(localization), std::move(styleSheet), std::move(icons))));
 
     for (const auto& resource : generation->mImpl->resources->resources()) {
         const std::string& resourceId = resource.first;
-        if (generation->mImpl->layoutDocuments.find(resourceId) == generation->mImpl->layoutDocuments.end()) continue;
-        if (resourceId.rfind("widgets/", 0) == 0) {
+        if (resourceId.rfind(kResourcePrefix, 0) == 0 || resourceId == "localization.yaml" || resourceId == kStylesheetResourceId) continue;
+        if (resourceId.rfind("elements/", 0) == 0) {
             const std::string element =
-                resourceId.substr(sizeof("widgets/") - 1, resourceId.size() - (sizeof("widgets/") - 1) - (sizeof(".xml") - 1));
-            result.append(generation->validateWidgetDefaults(element));
-        } else result.append(generation->buildWidgetTree(resourceId, generation->defaultLocale()));
+                resourceId.substr(sizeof("elements/") - 1, resourceId.size() - (sizeof("elements/") - 1) - kLayoutExtensionSize);
+            result.append(generation->validateElementDefaults(element));
+        } else result.append(generation->buildElementTree(resourceId, generation->defaultLocale()));
     }
     if (result.hasErrors()) return result;
 

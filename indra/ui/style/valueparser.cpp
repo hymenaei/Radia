@@ -1,29 +1,11 @@
 /**
- * @file valueparser.cpp
- * @brief Parses authored RSL property values into typed style values.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
 #include "linden_common.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
@@ -50,8 +32,6 @@ Color StyleModel::parseColorValue(const std::string& raw, const Color& fallback)
     const std::string value = trim(raw);
     const std::string lowered = lower(value);
     if (startsWith(lowered, "var(") && value.size() > 5 && value.back() == ')') return colorToken(trim(value.substr(4, value.size() - 5)), fallback);
-    if (startsWith(lowered, "token(") && value.size() > 7 && value.back() == ')')
-        return colorToken(trim(value.substr(6, value.size() - 7)), fallback);
     if (const std::optional<Color> parsed = parseColor(value)) return *parsed;
     return colorToken(value, fallback);
 }
@@ -60,8 +40,6 @@ float StyleModel::parseNumberValue(const std::string& raw, float fallback) const
     std::string value = trim(raw);
     const std::string lowered = lower(value);
     if (startsWith(lowered, "var(") && value.size() > 5 && value.back() == ')') return numberToken(trim(value.substr(4, value.size() - 5)), fallback);
-    if (startsWith(lowered, "token(") && value.size() > 7 && value.back() == ')')
-        return numberToken(trim(value.substr(6, value.size() - 7)), fallback);
     if (endsWith(lowered, "px")) value = trim(value.substr(0, value.size() - 2));
     char* end = nullptr;
     const float parsed = std::strtof(value.c_str(), &end);
@@ -75,11 +53,6 @@ std::optional<Length> StyleModel::parseLengthValue(const std::string& raw) const
         const float parsed = numberToken(trim(value.substr(4, value.size() - 5)), std::numeric_limits<float>::quiet_NaN());
         return std::isfinite(parsed) ? std::optional<Length>(Length{parsed}) : std::nullopt;
     }
-    if (startsWith(lowered, "token(") && value.size() > 7 && value.back() == ')') {
-        const float parsed = numberToken(trim(value.substr(6, value.size() - 7)), std::numeric_limits<float>::quiet_NaN());
-        return std::isfinite(parsed) ? std::optional<Length>(Length{parsed}) : std::nullopt;
-    }
-
     bool percentage = false;
     if (!value.empty() && value.back() == '%') {
         percentage = true;
@@ -90,6 +63,54 @@ std::optional<Length> StyleModel::parseLengthValue(const std::string& raw) const
     const float parsed = std::strtof(value.c_str(), &end);
     if (end == value.c_str() || *end != '\0' || !std::isfinite(parsed)) return std::nullopt;
     return percentage ? Length{0.f, parsed / 100.f} : Length{parsed};
+}
+
+std::optional<BorderRadii> StyleModel::parseBorderRadius(const std::string& raw) const {
+    const std::vector<std::string> tokens = detail::tokenizeTopLevel(trim(raw), true);
+    if (tokens.empty()) return std::nullopt;
+
+    std::vector<std::string> horizontalTokens;
+    std::vector<std::string> verticalTokens;
+    bool sawSlash = false;
+    for (const std::string& token : tokens) {
+        if (token == "/") {
+            if (sawSlash || horizontalTokens.empty()) return std::nullopt;
+            sawSlash = true;
+        } else if (sawSlash) verticalTokens.push_back(token);
+        else horizontalTokens.push_back(token);
+    }
+    if (horizontalTokens.empty() || horizontalTokens.size() > 4 || (sawSlash && (verticalTokens.empty() || verticalTokens.size() > 4)))
+        return std::nullopt;
+
+    const auto expand = [this](const std::vector<std::string>& values) -> std::optional<std::array<Length, 4>> {
+        std::array<Length, 4> expanded;
+        std::vector<Length> parsed;
+        parsed.reserve(values.size());
+        for (const std::string& value : values) {
+            const std::optional<Length> length = parseLengthValue(value);
+            if (!length || length->pixels < 0.f || length->percent < 0.f) return std::nullopt;
+            parsed.push_back(*length);
+        }
+        switch (parsed.size()) {
+            case 1: expanded = {parsed[0], parsed[0], parsed[0], parsed[0]}; break;
+            case 2: expanded = {parsed[0], parsed[1], parsed[0], parsed[1]}; break;
+            case 3: expanded = {parsed[0], parsed[1], parsed[2], parsed[1]}; break;
+            case 4: expanded = {parsed[0], parsed[1], parsed[2], parsed[3]}; break;
+            default: return std::nullopt;
+        }
+        return expanded;
+    };
+
+    const std::optional<std::array<Length, 4>> horizontal = expand(horizontalTokens);
+    const std::optional<std::array<Length, 4>> vertical = sawSlash ? expand(verticalTokens) : horizontal;
+    if (!horizontal || !vertical) return std::nullopt;
+
+    return BorderRadii{
+        {horizontal->at(0), vertical->at(0)},
+        {horizontal->at(1), vertical->at(1)},
+        {horizontal->at(2), vertical->at(2)},
+        {horizontal->at(3), vertical->at(3)},
+    };
 }
 
 std::optional<Gradient> StyleModel::parseGradient(const std::string& raw) const {
@@ -421,13 +442,12 @@ std::optional<std::vector<Effect>> StyleModel::parseEffects(const std::string& r
 
 std::optional<Outline> StyleModel::parseOutline(const std::string& raw) const {
     const std::vector<std::string> tokens = detail::tokenizeTopLevel(raw);
-    if (tokens.size() < 2 || tokens.size() > 4) return std::nullopt;
+    if (tokens.size() < 2 || tokens.size() > 3) return std::nullopt;
     const std::optional<Length> width = parseLengthValue(tokens.front());
     if (!width || width->percent != 0.f || width->pixels < 0.f) return std::nullopt;
 
     Outline outline;
     outline.width = width->pixels;
-    bool hasOffset = false;
     bool hasStyle = false;
     for (std::size_t index = 1; index + 1 < tokens.size(); ++index) {
         const std::string token = lower(trim(tokens[index]));
@@ -437,11 +457,7 @@ std::optional<Outline> StyleModel::parseOutline(const std::string& raw) const {
             hasStyle = true;
             continue;
         }
-        if (hasOffset) return std::nullopt;
-        const std::optional<Length> parsedOffset = parseLengthValue(tokens[index]);
-        if (!parsedOffset || parsedOffset->percent != 0.f) return std::nullopt;
-        outline.offset = parsedOffset->pixels;
-        hasOffset = true;
+        return std::nullopt;
     }
 
     const Color marker(-1.f, -1.f, -1.f, -1.f);

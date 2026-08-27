@@ -1,27 +1,7 @@
 /**
- * @file uiF.glsl
- * @brief Fragment stage for the viewer and retained UI paint shader variants.
- *
- * $LicenseInfo:firstyear=2007&license=viewerlgpl$
- * Second Life Viewer Source Code
- * Copyright (C) 2007, Linden Research, Inc.
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- *
- * Linden Research, Inc., 945 Battery Street, San Francisco, CA  94111  USA
- * $/LicenseInfo$
+ * Copyright (C) 2007 Linden Research, Inc.
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
 // Transitional source variants share one UI shader pair while the viewer
@@ -38,10 +18,18 @@ out vec4 fragColor;
 
 uniform int paintOp;
 uniform vec4 shapeRect;
-uniform float shapeRadius;
+uniform vec4 shapeRadiusX;
+uniform vec4 shapeRadiusY;
+uniform vec4 innerRadiusX;
+uniform vec4 innerRadiusY;
+uniform vec4 scrollbarClipRect;
+uniform vec4 scrollbarClipRadiusX;
+uniform vec4 scrollbarClipRadiusY;
+uniform int scrollbarClipEnabled;
 uniform float shapeBorderWidth;
 uniform vec4 shapeColor;
 uniform vec2 shapeOffset;
+uniform int arrowDirection;
 uniform int outlineStyle;
 uniform vec4 borderWidths;
 uniform vec2 topBorderGap;
@@ -66,7 +54,8 @@ uniform vec2 effectGradientStart;
 uniform vec2 effectGradientEnd;
 uniform vec4 effectCaptureRect;
 uniform vec4 effectMaskRect;
-uniform float effectMaskRadius;
+uniform vec4 effectMaskRadiusX;
+uniform vec4 effectMaskRadiusY;
 uniform int effectRoundedMask;
 
 const int kPaintOpDirect = 0;
@@ -78,6 +67,7 @@ const int kPaintOpInsetShadow = 5;
 const int kPaintOpGradientBorder = 6;
 const int kPaintOpBlur = 7;
 const int kPaintOpComposite = 8;
+const int kPaintOpArrow = 9;
 const int kGradientLinear = 0;
 const int kGradientRadial = 1;
 const int kGradientConic = 2;
@@ -88,11 +78,25 @@ const int kOutlineDashed = 1;
 in vec4 vertexColor;
 in vec2 shapeCoord;
 
-float roundedRectDistance(vec2 p, vec2 size, float radius) {
-    float r = clamp(radius, 0.0, min(size.x, size.y) * 0.5);
-    vec2 halfSize = size * 0.5;
-    vec2 q = abs(p - halfSize) - (halfSize - vec2(r));
-    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - r;
+vec2 roundedRectCornerRadii(vec2 p, vec2 size, vec4 radiusX, vec4 radiusY) {
+    if (p.x < radiusX.x && p.y > size.y - radiusY.x) return vec2(radiusX.x, radiusY.x);
+    if (p.x > size.x - radiusX.y && p.y > size.y - radiusY.y) return vec2(radiusX.y, radiusY.y);
+    if (p.x > size.x - radiusX.z && p.y < radiusY.z) return vec2(radiusX.z, radiusY.z);
+    if (p.x < radiusX.w && p.y < radiusY.w) return vec2(radiusX.w, radiusY.w);
+    return vec2(0.0);
+}
+
+float roundedRectDistance(vec2 p, vec2 size, vec4 radiusX, vec4 radiusY) {
+    vec2 radius = max(roundedRectCornerRadii(p, size, radiusX, radiusY), vec2(0.0));
+    vec2 q = abs(p - size * 0.5) - size * 0.5 + radius;
+    if (radius.x <= 0.0 || radius.y <= 0.0) {
+        vec2 boxQ = abs(p - size * 0.5) - size * 0.5;
+        return length(max(boxQ, vec2(0.0))) + min(max(boxQ.x, boxQ.y), 0.0);
+    }
+    if (q.x > 0.0 && q.y > 0.0) return (length(q / radius) - 1.0) * min(radius.x, radius.y);
+    if (q.x > 0.0) return q.x - radius.x;
+    if (q.y > 0.0) return q.y - radius.y;
+    return max(q.x, q.y);
 }
 
 float coverageFromDistance(float signedDistance) {
@@ -100,34 +104,69 @@ float coverageFromDistance(float signedDistance) {
     return 1.0 - smoothstep(-aa * 0.5, aa * 0.5, signedDistance);
 }
 
-float roundedRectPerimeterCoordinate(vec2 p, vec2 size, float radius) {
+float quarterEllipseArc(vec2 radius) {
+    if (radius.x <= 0.0 || radius.y <= 0.0) return 0.0;
+    float a = max(radius.x, radius.y);
+    float b = min(radius.x, radius.y);
+    return 0.25 * 3.14159265359 * (3.0 * (a + b) - sqrt(max((3.0 * a + b) * (a + 3.0 * b), 0.0)));
+}
+
+float roundedRectPerimeter(vec2 size, vec4 radiusX, vec4 radiusY) {
+    vec2 topLeft = vec2(radiusX.x, radiusY.x);
+    vec2 topRight = vec2(radiusX.y, radiusY.y);
+    vec2 bottomRight = vec2(radiusX.z, radiusY.z);
+    vec2 bottomLeft = vec2(radiusX.w, radiusY.w);
+    float horizontal = max(size.x - topLeft.x - topRight.x, 0.0) + max(size.x - bottomLeft.x - bottomRight.x, 0.0);
+    float vertical = max(size.y - topLeft.y - bottomLeft.y, 0.0) + max(size.y - topRight.y - bottomRight.y, 0.0);
+    return horizontal
+        + vertical
+        + quarterEllipseArc(topLeft)
+        + quarterEllipseArc(topRight)
+        + quarterEllipseArc(bottomRight)
+        + quarterEllipseArc(bottomLeft);
+}
+
+float roundedRectPerimeterCoordinate(vec2 p, vec2 size, vec4 radiusX, vec4 radiusY) {
     const float kHalfPi = 1.57079632679;
     const float kPi = 3.14159265359;
     const float kTwoPi = 6.28318530718;
-    float r = clamp(radius, 0.0, min(size.x, size.y) * 0.5);
-    float horizontal = max(size.x - r * 2.0, 0.0);
-    float vertical = max(size.y - r * 2.0, 0.0);
+    vec2 topLeft = vec2(radiusX.x, radiusY.x);
+    vec2 topRight = vec2(radiusX.y, radiusY.y);
+    vec2 bottomRight = vec2(radiusX.z, radiusY.z);
+    vec2 bottomLeft = vec2(radiusX.w, radiusY.w);
+    float bottom = max(size.x - bottomLeft.x - bottomRight.x, 0.0);
+    float right = max(size.y - bottomRight.y - topRight.y, 0.0);
+    float top = max(size.x - topLeft.x - topRight.x, 0.0);
+    float left = max(size.y - bottomLeft.y - topLeft.y, 0.0);
+    float bottomRightArc = quarterEllipseArc(bottomRight);
+    float topRightArc = quarterEllipseArc(topRight);
+    float topLeftArc = quarterEllipseArc(topLeft);
+    float bottomLeftArc = quarterEllipseArc(bottomLeft);
     vec2 point = clamp(p, vec2(0.0), size);
 
-    if (r > 0.0 && point.x > size.x - r && point.y < r) {
-        float angle = atan(point.y - r, point.x - (size.x - r));
-        return horizontal + r * (angle + kHalfPi);
+    if (bottomRight.x > 0.0 && bottomRight.y > 0.0 && point.x > size.x - bottomRight.x && point.y < bottomRight.y) {
+        vec2 delta = point - vec2(size.x - bottomRight.x, bottomRight.y);
+        float angle = atan(delta.y / bottomRight.y, delta.x / bottomRight.x);
+        return bottom + bottomRightArc * clamp((angle + kHalfPi) / kHalfPi, 0.0, 1.0);
     }
 
-    if (r > 0.0 && point.x > size.x - r && point.y > size.y - r) {
-        float angle = atan(point.y - (size.y - r), point.x - (size.x - r));
-        return horizontal + r * kHalfPi + vertical + r * angle;
+    if (topRight.x > 0.0 && topRight.y > 0.0 && point.x > size.x - topRight.x && point.y > size.y - topRight.y) {
+        vec2 delta = point - vec2(size.x - topRight.x, size.y - topRight.y);
+        float angle = atan(delta.y / topRight.y, delta.x / topRight.x);
+        return bottom + bottomRightArc + right + topRightArc * clamp(angle / kHalfPi, 0.0, 1.0);
     }
 
-    if (r > 0.0 && point.x < r && point.y > size.y - r) {
-        float angle = atan(point.y - (size.y - r), point.x - r);
-        return horizontal * 2.0 + r * 2.0 * kHalfPi + vertical + r * (angle - kHalfPi);
+    if (topLeft.x > 0.0 && topLeft.y > 0.0 && point.x < topLeft.x && point.y > size.y - topLeft.y) {
+        vec2 delta = point - vec2(topLeft.x, size.y - topLeft.y);
+        float angle = atan(delta.y / topLeft.y, delta.x / topLeft.x);
+        return bottom + bottomRightArc + right + topRightArc + top + topLeftArc * clamp((angle - kHalfPi) / kHalfPi, 0.0, 1.0);
     }
 
-    if (r > 0.0 && point.x < r && point.y < r) {
-        float angle = atan(point.y - r, point.x - r);
+    if (bottomLeft.x > 0.0 && bottomLeft.y > 0.0 && point.x < bottomLeft.x && point.y < bottomLeft.y) {
+        vec2 delta = point - vec2(bottomLeft.x, bottomLeft.y);
+        float angle = atan(delta.y / bottomLeft.y, delta.x / bottomLeft.x);
         if (angle < 0.0) angle += kTwoPi;
-        return horizontal * 2.0 + r * 3.0 * kHalfPi + vertical * 2.0 + r * (angle - kPi);
+        return bottom + bottomRightArc + right + topRightArc + top + topLeftArc + left + bottomLeftArc * clamp((angle - kPi) / kHalfPi, 0.0, 1.0);
     }
 
     float bottomDistance = abs(point.y);
@@ -135,25 +174,24 @@ float roundedRectPerimeterCoordinate(vec2 p, vec2 size, float radius) {
     float topDistance = abs(size.y - point.y);
     float leftDistance = abs(point.x);
     float nearest = min(min(bottomDistance, rightDistance), min(topDistance, leftDistance));
-    if (nearest == bottomDistance) return clamp(point.x - r, 0.0, horizontal);
-    if (nearest == rightDistance) return horizontal + r * kHalfPi + clamp(point.y - r, 0.0, vertical);
-    if (nearest == topDistance) return horizontal + r * 2.0 * kHalfPi + vertical + clamp(size.x - r - point.x, 0.0, horizontal);
-    return horizontal * 2.0 + r * 3.0 * kHalfPi + vertical + clamp(size.y - r - point.y, 0.0, vertical);
+    if (nearest == bottomDistance) return clamp(point.x - bottomLeft.x, 0.0, bottom);
+    if (nearest == rightDistance) return bottom + bottomRightArc + clamp(point.y - bottomRight.y, 0.0, right);
+    if (nearest == topDistance) return bottom + bottomRightArc + right + topRightArc + clamp(size.x - topRight.x - point.x, 0.0, top);
+    return bottom + bottomRightArc + right + topRightArc + top + topLeftArc + clamp(size.y - topLeft.y - point.y, 0.0, left);
 }
 
-float dashedOutlineCoverage(vec2 localCoord, vec2 size, float radius, float width) {
+float dashedOutlineCoverage(vec2 localCoord, vec2 size, vec4 radiusX, vec4 radiusY, float width) {
     float centerOffset = width * 0.5;
     vec2 centerSize = max(size - vec2(width), vec2(0.0));
-    float centerRadius = max(radius - centerOffset, 0.0);
-    float horizontal = max(centerSize.x - centerRadius * 2.0, 0.0);
-    float vertical = max(centerSize.y - centerRadius * 2.0, 0.0);
-    float perimeter = horizontal * 2.0 + vertical * 2.0 + centerRadius * 6.28318530718;
+    vec4 centerRadiusX = max(radiusX - vec4(centerOffset), vec4(0.0));
+    vec4 centerRadiusY = max(radiusY - vec4(centerOffset), vec4(0.0));
+    float perimeter = roundedRectPerimeter(centerSize, centerRadiusX, centerRadiusY);
     if (perimeter <= 1.0e-4) return 1.0;
     float preferredPeriod = max(width * 5.0, 1.0);
     float dashCount = max(floor(perimeter / preferredPeriod + 0.5), 1.0);
     float period = perimeter / dashCount;
     float dashLength = period * 0.6;
-    float coordinate = roundedRectPerimeterCoordinate(localCoord - vec2(centerOffset), centerSize, centerRadius);
+    float coordinate = roundedRectPerimeterCoordinate(localCoord - vec2(centerOffset), centerSize, centerRadiusX, centerRadiusY);
     float phase = mod(coordinate, period);
     float dashDistance = abs(phase - dashLength * 0.5) - dashLength * 0.5;
     float aa = max(fwidth(coordinate), 1.0e-4);
@@ -189,13 +227,52 @@ vec4 compositedEffectColor(vec2 textureCoord) {
     vec4 color = texture(diffuseMap, textureCoord);
     if (effectRoundedMask != 0) {
         vec2 point = effectCaptureRect.xy + textureCoord * effectCaptureRect.zw;
-        float distance = roundedRectDistance(point - effectMaskRect.xy, effectMaskRect.zw, effectMaskRadius);
+        float distance = roundedRectDistance(point - effectMaskRect.xy, effectMaskRect.zw, effectMaskRadiusX, effectMaskRadiusY);
         float mask = coverageFromDistance(distance);
         return vec4(color.rgb, mask);
     }
 
     color.rgb = color.a > 1.0e-6 ? color.rgb / color.a : vec3(0.0);
     return color;
+}
+
+float triangleEdge(vec2 a, vec2 b, vec2 p) {
+    return (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+}
+
+float roundedTriangleCornerDistance(vec2 p, vec2 vertex, vec2 incomingNormal, vec2 outgoingNormal, float radius) {
+    vec2 bisector = normalize(incomingNormal + outgoingNormal);
+    float sinHalfAngle = max(dot(outgoingNormal, bisector), 1.0e-4);
+    vec2 center = vertex + bisector * (radius / sinHalfAngle);
+    return radius - length(p - center);
+}
+
+float roundedTriangleCoverage(vec2 p, vec2 a, vec2 b, vec2 c, float radius) {
+    float winding = triangleEdge(a, b, c) >= 0.0 ? 1.0 : -1.0;
+    vec2 edgeAB = b - a;
+    vec2 edgeBC = c - b;
+    vec2 edgeCA = a - c;
+    vec2 normalAB = winding * vec2(-edgeAB.y, edgeAB.x) / max(length(edgeAB), 1.0e-4);
+    vec2 normalBC = winding * vec2(-edgeBC.y, edgeBC.x) / max(length(edgeBC), 1.0e-4);
+    vec2 normalCA = winding * vec2(-edgeCA.y, edgeCA.x) / max(length(edgeCA), 1.0e-4);
+    float edgeA = dot(p - a, normalAB);
+    float edgeB = dot(p - b, normalBC);
+    float edgeC = dot(p - c, normalCA);
+    float edgeDistance = min(min(edgeA, edgeB), edgeC);
+    float cornerAIncoming = dot(p - a, normalCA);
+    float cornerAOutgoing = dot(p - a, normalAB);
+    float cornerBIncoming = dot(p - b, normalAB);
+    float cornerBOutgoing = dot(p - b, normalBC);
+    float cornerCIncoming = dot(p - c, normalBC);
+    float cornerCOutgoing = dot(p - c, normalCA);
+    if (cornerAIncoming < radius && cornerAOutgoing < radius)
+        edgeDistance = roundedTriangleCornerDistance(p, a, normalCA, normalAB, radius);
+    else if (cornerBIncoming < radius && cornerBOutgoing < radius)
+        edgeDistance = roundedTriangleCornerDistance(p, b, normalAB, normalBC, radius);
+    else if (cornerCIncoming < radius && cornerCOutgoing < radius)
+        edgeDistance = roundedTriangleCornerDistance(p, c, normalBC, normalCA, radius);
+    float aa = max(fwidth(edgeDistance), 1.0e-4);
+    return smoothstep(-aa * 0.5, aa * 0.5, edgeDistance);
 }
 
 float gradientAmount(vec2 localCoord) {
@@ -311,10 +388,51 @@ void main() {
         return;
     }
 
+    if (paintOp == kPaintOpArrow) {
+        vec2 size = max(shapeRect.zw, vec2(0.0));
+        vec2 center = size * 0.5;
+        float arrowLength = min(size.x, size.y) * 0.30;
+        float arrowWidth = min(size.x, size.y) * 0.35;
+        float arrowRadius = min(size.x, size.y) * 0.10;
+        vec2 a;
+        vec2 b;
+        vec2 c;
+        if (arrowDirection == 0) {
+            a = center + vec2(arrowLength, -arrowWidth);
+            b = center + vec2(arrowLength, arrowWidth);
+            c = center + vec2(-arrowLength, 0.0);
+        } else if (arrowDirection == 1) {
+            a = center + vec2(-arrowLength, -arrowWidth);
+            b = center + vec2(-arrowLength, arrowWidth);
+            c = center + vec2(arrowLength, 0.0);
+        } else if (arrowDirection == 2) {
+            a = center + vec2(-arrowWidth, arrowLength);
+            b = center + vec2(arrowWidth, arrowLength);
+            c = center + vec2(0.0, -arrowLength);
+        } else {
+            a = center + vec2(-arrowWidth, -arrowLength);
+            b = center + vec2(arrowWidth, -arrowLength);
+            c = center + vec2(0.0, arrowLength);
+        }
+        float alpha = roundedTriangleCoverage(shapeCoord, a, b, c, arrowRadius);
+        if (scrollbarClipEnabled != 0) {
+            vec2 clipCoord = shapeCoord - scrollbarClipRect.xy;
+            float clipDistance = roundedRectDistance(clipCoord, scrollbarClipRect.zw, scrollbarClipRadiusX, scrollbarClipRadiusY);
+            alpha *= coverageFromDistance(clipDistance);
+        }
+        fragColor = vec4(shapeColor.rgb, shapeColor.a * alpha);
+        return;
+    }
+
     vec2 size = max(shapeRect.zw, vec2(0.0));
     vec2 localCoord = shapeCoord - shapeOffset;
-    float outerDistance = roundedRectDistance(localCoord, size, shapeRadius);
+    float outerDistance = roundedRectDistance(localCoord, size, shapeRadiusX, shapeRadiusY);
     float alpha = coverageFromDistance(outerDistance);
+    if (scrollbarClipEnabled != 0) {
+        vec2 clipCoord = localCoord - scrollbarClipRect.xy;
+        float clipDistance = roundedRectDistance(clipCoord, scrollbarClipRect.zw, scrollbarClipRadiusX, scrollbarClipRadiusY);
+        alpha *= coverageFromDistance(clipDistance);
+    }
 
     if (paintOp == kPaintOpOuterShadow) {
         float softness = max(shadowBlur, fwidth(outerDistance));
@@ -326,8 +444,7 @@ void main() {
     if (paintOp == kPaintOpInsetShadow) {
         vec2 holeSize = max(size - vec2(shadowSpread * 2.0), vec2(0.0));
         vec2 holeCoord = localCoord - vec2(shadowSpread) - shadowOffset;
-        float holeRadius = max(shapeRadius - shadowSpread, 0.0);
-        float holeDistance = roundedRectDistance(holeCoord, holeSize, holeRadius);
+        float holeDistance = roundedRectDistance(holeCoord, holeSize, innerRadiusX, innerRadiusY);
         float softness = max(shadowBlur, fwidth(holeDistance));
         alpha *= smoothstep(-softness, softness, holeDistance);
         fragColor = vec4(shapeColor.rgb, shapeColor.a * alpha);
@@ -339,13 +456,12 @@ void main() {
         widths = max(widths, vec4(0.0));
         vec2 innerSize = max(size - vec2(widths.w + widths.y, widths.z + widths.x), vec2(0.0));
         vec2 innerCoord = localCoord - vec2(widths.w, widths.z);
-        float innerRadius = max(shapeRadius - max(max(widths.x, widths.y), max(widths.z, widths.w)), 0.0);
         if (innerSize.x > 0.0 && innerSize.y > 0.0) {
-            float innerDistance = roundedRectDistance(innerCoord, innerSize, innerRadius);
+            float innerDistance = roundedRectDistance(innerCoord, innerSize, innerRadiusX, innerRadiusY);
             alpha = coverageFromDistance(max(outerDistance, -innerDistance));
         }
         if (paintOp == kPaintOpBorder && outlineStyle == kOutlineDashed)
-            alpha *= dashedOutlineCoverage(localCoord, size, shapeRadius, shapeBorderWidth);
+            alpha *= dashedOutlineCoverage(localCoord, size, shapeRadiusX, shapeRadiusY, shapeBorderWidth);
         if (topBorderGap.y > topBorderGap.x) {
             float edgeAA = max(fwidth(localCoord.x), 1.0e-4);
             float insideGap = smoothstep(topBorderGap.x - edgeAA, topBorderGap.x + edgeAA, localCoord.x)

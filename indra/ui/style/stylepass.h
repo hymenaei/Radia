@@ -1,29 +1,9 @@
 /**
- * @file stylepass.h
- * @brief Implements cached retained-tree style resolution.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
-#ifndef RD_STYLE_STYLEPASS_H
-#define RD_STYLE_STYLEPASS_H
+#pragma once
 
 #include <cstddef>
 #include <cstdint>
@@ -31,10 +11,11 @@
 #include <memory>
 #include <unordered_map>
 #include <vector>
+#include "elements/element.h"
+#include "elements/elementinternal.h"
 #include "layout/treecache.h"
 #include "style/style.h"
 #include "style/stylesheet.h"
-#include "widgets/widget.h"
 
 namespace radia::ui {
 class TextMetrics;
@@ -53,7 +34,8 @@ public:
         StylePass* mPass;
     };
 
-    StylePass(const StyleSheet& styleSheet, const TextMetrics& textMetrics);
+    StylePass(const StyleSheet& styleSheet, const TextMetrics& textMetrics,
+              LayoutDirection direction = LayoutDirection::LeftToRight);
     StylePass(const StylePass&) = delete;
     StylePass& operator=(const StylePass&) = delete;
     StylePass(StylePass&&) = delete;
@@ -69,13 +51,15 @@ public:
     void endTraversal();
     TraversalScope enterTraversal() { return TraversalScope(*this); }
     bool active() const { return mTraversalDepth != 0; }
-    const Style& style(const Widget& widget);
-    ChildSnapshot orderedChildren(const Widget& parent);
-    ChildSnapshot sourceChildren(const Widget& parent);
+    const Style& style(const Element& element);
+    ChildSnapshot orderedChildren(Element& parent);
+    ChildSnapshot sourceChildren(Element& parent);
     const LayoutContextKey& contextKey() const { return mContext; }
-    bool matches(const StyleSheet& styleSheet, const TextMetrics& textMetrics) const;
+    bool matches(const StyleSheet& styleSheet, const TextMetrics& textMetrics,
+                 LayoutDirection direction = LayoutDirection::LeftToRight) const;
     const StyleSheet& styleSheet() const { return mStyleSheet; }
     const TextMetrics& textMetrics() const { return mTextMetrics; }
+    LayoutDirection direction() const { return mDirection; }
 
 private:
     struct CachedStyle {
@@ -88,13 +72,13 @@ private:
 
     StyleSheet mStyleSheet;
     const TextMetrics& mTextMetrics;
+    LayoutDirection mDirection = LayoutDirection::LeftToRight;
     LayoutContextKey mContext;
     bool mInvalidated = false;
     bool mResetStorageAtBoundary = false;
     std::size_t mTraversalDepth = 0;
     std::deque<Style> mStyleStorage;
-    std::unordered_map<const Widget*, CachedStyle> mStyles;
+    std::unordered_map<const Element*, CachedStyle> mStyles;
     TreeTraversalCache mTree;
 };
 } // namespace radia::ui
-#endif // RD_STYLE_STYLEPASS_H

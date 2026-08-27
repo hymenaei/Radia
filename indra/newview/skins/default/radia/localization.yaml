@@ -2,7 +2,6 @@ defaultLocale: en
 
 locales:
   en:
-    name: English
     strings:
       demo.title: "Radia UI Demo"
       demo.status: "Ready"
@@ -25,6 +24,9 @@ locales:
       demo.switchOff: "Switch off"
       demo.switch: "Demo switch"
       demo.settings: "Settings"
+      demo.checkbox: "Checkbox"
+      demo.radioOne: "Radio one"
+      demo.radioTwo: "Radio two"
       demo.switchHint: "This setting demonstrates a bound value."
       demo.switchError: "The demo switch must remain enabled."
       demo.disabled: "Disabled example"
@@ -39,7 +41,6 @@ locales:
       demo.reloadFailed: "Reload failed; last valid UI kept"
 
   pt:
-    name: Português
     strings:
       demo.title: "Radia UI Demo"
       demo.status: "Pronto"
@@ -62,6 +63,9 @@ locales:
       demo.switchOff: "Interruptor desligado"
       demo.switch: "Interruptor de demonstração"
       demo.settings: "Definições"
+      demo.checkbox: "Caixa de seleção"
+      demo.radioOne: "Opção de rádio um"
+      demo.radioTwo: "Opção de rádio dois"
       demo.switchHint: "Esta definição demonstra um valor associado."
       demo.switchError: "O interruptor de demonstração deve permanecer ligado."
       demo.disabled: "Exemplo desativado"
@@ -76,8 +80,6 @@ locales:
       demo.reloadFailed: "Falha ao recarregar; a última interface válida foi mantida"
 
   ar:
-    name: العربية
-    direction: rtl
     strings:
       demo.title: "عرض Radia UI التجريبي"
       demo.status: "جاهز"
@@ -100,6 +102,9 @@ locales:
       demo.switchOff: "المفتاح متوقف"
       demo.switch: "مفتاح تجريبي"
       demo.settings: "الإعدادات"
+      demo.checkbox: "خانة اختيار"
+      demo.radioOne: "خيار راديو واحد"
+      demo.radioTwo: "خيار راديو اثنان"
       demo.switchHint: "يوضح هذا الإعداد قيمة مرتبطة."
       demo.switchError: "يجب أن يظل المفتاح التجريبي مفعّلًا."
       demo.disabled: "مثال معطّل"

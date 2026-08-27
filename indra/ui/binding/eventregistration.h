@@ -1,45 +1,33 @@
 /**
- * @file eventregistration.h
- * @brief Defines the type-erased Event Handler registration boundary.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
-#ifndef RD_BINDING_EVENTREGISTRATION_H
-#define RD_BINDING_EVENTREGISTRATION_H
+#pragma once
 
 #include <functional>
-#include <optional>
 #include <string>
 #include <utility>
-#include "eventdescriptor.h"
+#include "event.h"
+#include "eventcall.h"
 
 namespace radia::ui {
+struct EventRegistrationDescriptor {
+    using Invoke = std::function<void(Event&, const EventCall&)>;
+    using ArgumentError = std::function<const char*(const EventCall&)>;
+
+    std::string name;
+    Invoke invoke;
+    ArgumentError argumentError;
+};
+
 class Binder;
 class EventHandlerRegistration;
 
 namespace detail {
 EventHandlerRegistration makeEventRegistration(EventRegistrationDescriptor descriptor);
-EventHandlerRegistration makeEventRegistration(std::string name, std::optional<WidgetEventKind> kind,
-                                               std::function<void(const WidgetEvent&, const EventCall&)> invoke,
-                                               std::function<const char*(const EventCall&, WidgetEventKind)> argumentError);
+EventHandlerRegistration makeEventRegistration(std::string name, EventRegistrationDescriptor::Invoke invoke,
+                                               EventRegistrationDescriptor::ArgumentError argumentError);
 } // namespace detail
 
 class EventHandlerRegistration final {
@@ -50,8 +38,7 @@ public:
 private:
     friend class Binder;
     friend EventHandlerRegistration detail::makeEventRegistration(EventRegistrationDescriptor descriptor);
-    friend EventHandlerRegistration detail::makeEventRegistration(std::string name, std::optional<WidgetEventKind> kind, Invoke invoke,
-                                                                  ArgumentError argumentError);
+    friend EventHandlerRegistration detail::makeEventRegistration(std::string name, Invoke invoke, ArgumentError argumentError);
 
     explicit EventHandlerRegistration(EventRegistrationDescriptor descriptor) : mDescriptor(std::move(descriptor)) {}
 
@@ -59,9 +46,7 @@ private:
         return !mDescriptor.name.empty() && static_cast<bool>(mDescriptor.invoke) && static_cast<bool>(mDescriptor.argumentError);
     }
     const std::string& name() const noexcept { return mDescriptor.name; }
-    std::optional<WidgetEventKind> kind() const noexcept { return mDescriptor.kind; }
     std::string takeName() && { return std::move(mDescriptor.name); }
-    std::optional<WidgetEventKind> takeKind() && { return mDescriptor.kind; }
     Invoke takeInvoke() && { return std::move(mDescriptor.invoke); }
     ArgumentError takeArgumentError() && { return std::move(mDescriptor.argumentError); }
     EventHandlerRegistration copy() const { return EventHandlerRegistration(mDescriptor); }
@@ -74,10 +59,9 @@ inline EventHandlerRegistration makeEventRegistration(EventRegistrationDescripto
     return EventHandlerRegistration(std::move(descriptor));
 }
 
-inline EventHandlerRegistration makeEventRegistration(std::string name, std::optional<WidgetEventKind> kind, EventHandlerRegistration::Invoke invoke,
+inline EventHandlerRegistration makeEventRegistration(std::string name, EventHandlerRegistration::Invoke invoke,
                                                       EventHandlerRegistration::ArgumentError argumentError) {
-    return makeEventRegistration({std::move(name), kind, std::move(invoke), std::move(argumentError)});
+    return makeEventRegistration({std::move(name), std::move(invoke), std::move(argumentError)});
 }
 } // namespace detail
 } // namespace radia::ui
-#endif // RD_BINDING_EVENTREGISTRATION_H

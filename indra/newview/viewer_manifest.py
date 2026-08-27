@@ -76,9 +76,6 @@ class ViewerManifest(LLManifest):
             self.path("*.luau")
             self.path("*.yml")
 
-        with self.prefix(src_dst="skins"):
-            self.path("*/radia")
-
         if self.is_packaging_viewer():
             with self.prefix(src_dst="app_settings"):
                 self.exclude("logcontrol.xml")
@@ -185,6 +182,7 @@ class ViewerManifest(LLManifest):
                 self.path("*/xui/*/widgets/*.xml")
                 self.path("*/*.xml")
                 self.path("*/*.json")
+                self.path("*/radia")
 
                 # Update: 2017-11-01 CP Now we store app code in the html folder
                 #         Initially the HTML/JS code to render equirectangular

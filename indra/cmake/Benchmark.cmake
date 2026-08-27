@@ -2,7 +2,7 @@
 
 include_guard()
 
-if(NOT BUILD_BENCHMARKS)
+if(NOT BUILD_BENCHMARKING)
   return()
 endif()
 
@@ -14,7 +14,7 @@ target_link_libraries(ll::benchmark INTERFACE benchmark::benchmark)
 add_library(ll::benchmark_main INTERFACE IMPORTED)
 target_link_libraries(ll::benchmark_main INTERFACE benchmark::benchmark_main)
 
-function(_RD_BENCHMARK_SOURCE_FILES OUTVAR)
+function(_BENCHMARK_SOURCE_FILES OUTVAR)
   set(benchmark_sources)
 
   foreach(source IN LISTS ARGN)
@@ -32,7 +32,7 @@ function(_RD_BENCHMARK_SOURCE_FILES OUTVAR)
 
     if(NOT EXISTS "${benchmark_source}")
       message(FATAL_ERROR
-        "RD_ADD_BENCHMARKS expected benchmark source ${benchmark_source} for ${source}")
+        "ADD_BENCHMARKS expected benchmark source ${benchmark_source} for ${source}")
     endif()
 
     list(APPEND benchmark_sources "${benchmark_source}")
@@ -41,13 +41,13 @@ function(_RD_BENCHMARK_SOURCE_FILES OUTVAR)
   set(${OUTVAR} "${benchmark_sources}" PARENT_SCOPE)
 endfunction()
 
-function(RD_ADD_BENCHMARKS project sources)
+function(ADD_BENCHMARKS project sources)
   if(ARGC LESS 2)
-    message(FATAL_ERROR "RD_ADD_BENCHMARKS requires a project and source list")
+    message(FATAL_ERROR "ADD_BENCHMARKS requires a project and source list")
   endif()
 
   if(NOT project)
-    message(FATAL_ERROR "RD_ADD_BENCHMARKS requires a project")
+    message(FATAL_ERROR "ADD_BENCHMARKS requires a project")
   endif()
 
   # An empty source list is a valid no-op while a module is being migrated.
@@ -55,7 +55,7 @@ function(RD_ADD_BENCHMARKS project sources)
     return()
   endif()
 
-  _RD_BENCHMARK_SOURCE_FILES(benchmark_sources ${sources})
+  _BENCHMARK_SOURCE_FILES(benchmark_sources ${sources})
 
   set(benchmark_target "${project}_benchmarks")
   add_executable(${benchmark_target} ${benchmark_sources})

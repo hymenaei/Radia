@@ -1,25 +1,6 @@
 /**
- * @file input.cpp
- * @brief Routes surface pointer, keyboard, scroll, focus, and interaction events.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
 #include "linden_common.h"
@@ -27,71 +8,97 @@
 #include <iterator>
 #include <optional>
 #include <vector>
+#include "elements/elementinternal.h"
+#include "elements/floater.h"
 #include "style/stylepass.h"
 #include "surface/floaterresize.h"
-#include "surface/ordering.h"
 #include "surface/surface.h"
+#include "surface/surfaceinternal.h"
 #include "system.h"
-#include "widgets/floater.h"
 
 namespace radia::ui {
 namespace {
-bool acceptsPointerEvents(const Widget& widget, const Style& style) {
+constexpr float kScrollbarLineStep = 40.f;
+
+bool acceptsPointerEvents(const Element& element, const Style& style) {
     const PointerEvents policy = style.pointerEvents;
     if (policy == PointerEvents::Auto) return true;
     if (policy == PointerEvents::PassThrough) return false;
-    return widget.pointerEvents();
+    return element.pointerEvents();
 }
 
-void collectFocusable(Widget& node, std::vector<WidgetRef<Widget>>& result, StylePass& styles) {
+Rect offsetRect(const Rect& rect, const Vec2& offset) {
+    return {rect.x + offset.x, rect.y + offset.y, rect.w, rect.h};
+}
+
+bool acceptsWheelScrolling(Overflow overflow) {
+    return overflow == Overflow::Auto || overflow == Overflow::Scroll;
+}
+
+Vec2 consumeWheelDelta(Element& element, const Style& style, const Vec2& delta) {
+    const float currentLeft = element.scrollLeft();
+    const float currentTop = element.scrollTop();
+    const float nextLeft =
+        acceptsWheelScrolling(style.overflowX) ? std::clamp(currentLeft + delta.x, 0.f, element.scrollMetrics().maxScrollLeft) : currentLeft;
+    const float nextTop =
+        acceptsWheelScrolling(style.overflowY) ? std::clamp(currentTop + delta.y, 0.f, element.scrollMetrics().maxScrollTop) : currentTop;
+    if (nextLeft != currentLeft || nextTop != currentTop) element.scrollTo(nextLeft, nextTop);
+    return {nextLeft - currentLeft, nextTop - currentTop};
+}
+
+void collectFocusable(Element& node, std::vector<ElementRef<Element>>& result, StylePass& styles) {
     const Style& style = styles.style(node);
     if (!node.isVisible(style) || node.disabled()) return;
-    const WidgetRef<Widget> lifetime(&node);
-    const Widget* parent = node.parent();
+    const ElementRef<Element> lifetime(&node);
+    const Element* parent = node.parentElement();
     const bool focusable = node.focusable();
-    Widget* current = lifetime.get();
-    if (!current || current->parent() != parent || !current->isVisible(style) || current->disabled()) return;
+    Element* current = lifetime.get();
+    if (!current || current->parentElement() != parent || !current->isVisible(style) || current->disabled()) return;
     if (focusable) result.emplace_back(current);
-    const StylePass::ChildSnapshot children = sourceChildren(*current, styles);
-    for (const WidgetRef<Widget>& childRef : *children)
-        if (Widget* child = childRef.get(); child && child->parent() == current) collectFocusable(*child, result, styles);
+    const StylePass::ChildSnapshot children = styles.sourceChildren(*current);
+    for (const ElementRef<Element>& childRef : *children)
+        if (Element* child = childRef.get(); child && child->parentElement() == current) collectFocusable(*child, result, styles);
 }
 } // namespace
 
-Widget* Surface::hitTestNode(Widget& node, const Vec2& point, const Rect& inheritedClip, StylePass& styles) const {
+Element* Surface::hitTestNode(Element& node, const Vec2& point, const Rect& inheritedClip, StylePass& styles) const {
     if (!inheritedClip.contains(point) || !isRootedInSurface(&node)) return nullptr;
-    const WidgetRef<Widget> lifetime(&node);
-    const Widget* originalParent = node.parent();
+    const ElementRef<Element> lifetime(&node);
+    const Element* originalParent = node.parentElement();
     const std::uint64_t originalStyleRevision = node.mStyleRevision;
     const std::uint64_t originalLayoutRevision = node.mLayoutInvalidationRevision;
     const Style& style = styles.style(node);
     if (!node.isVisible(style)) return nullptr;
-    Widget* styledNode = lifetime.get();
+    Element* styledNode = lifetime.get();
     if (!styledNode
         || !isRootedInSurface(styledNode)
         || !styledNode->isVisible(style)
-        || styledNode->parent() != originalParent
+        || styledNode->parentElement() != originalParent
         || styledNode->mStyleRevision != originalStyleRevision
         || styledNode->mLayoutInvalidationRevision != originalLayoutRevision)
         return nullptr;
-    const bool clipsX = style.overflowX == Overflow::Hidden;
-    const bool clipsY = style.overflowY == Overflow::Hidden;
+    const bool clipsX = style.overflowX != Overflow::Visible;
+    const bool clipsY = style.overflowY != Overflow::Visible;
     const ClipAxes clipAxes = (clipsX ? ClipAxes::X : ClipAxes::NoAxes) | (clipsY ? ClipAxes::Y : ClipAxes::NoAxes);
-    const Rect childClip = clipAxes == ClipAxes::NoAxes ? inheritedClip : clipToAxes(inheritedClip, node.rect(), clipAxes);
-    const StylePass::ChildSnapshot children = sourceChildren(node, styles);
-    Widget* hitResult = nullptr;
+    const bool clipsChildren = clipAxes != ClipAxes::NoAxes;
+    const Vec2 scrollOffset = clipsChildren ? Vec2{node.scrollLeft(), -node.scrollTop()} : Vec2{};
+    Rect childClip = clipsChildren ? clipToAxes(inheritedClip, detail::ElementInternalAccess::scrollport(node), clipAxes) : inheritedClip;
+    if (clipsChildren) childClip = offsetRect(childClip, scrollOffset);
+    const Vec2 childPoint = point + scrollOffset;
+    const StylePass::ChildSnapshot children = styles.sourceChildren(node);
+    Element* hitResult = nullptr;
     for (auto child = children->rbegin(); child != children->rend(); ++child)
-        if (Widget* childWidget = child->get())
-            if (childWidget->parent() == &node)
-                if (Widget* hit = hitTestNode(*childWidget, point, childClip, styles)) {
+        if (Element* childElement = child->get())
+            if (childElement->parentElement() == &node)
+                if (Element* hit = hitTestNode(*childElement, childPoint, childClip, styles)) {
                     hitResult = hit;
                     break;
                 }
-    Widget* current = lifetime.get();
+    Element* current = lifetime.get();
     if (!current
         || !isRootedInSurface(current)
         || !current->isVisible(style)
-        || current->parent() != originalParent
+        || current->parentElement() != originalParent
         || current->mStyleRevision != originalStyleRevision
         || current->mLayoutInvalidationRevision != originalLayoutRevision)
         return nullptr;
@@ -101,124 +108,404 @@ Widget* Surface::hitTestNode(Widget& node, const Vec2& point, const Rect& inheri
     if (!current
         || !isRootedInSurface(current)
         || !current->isVisible(style)
-        || current->parent() != originalParent
+        || current->parentElement() != originalParent
         || current->mStyleRevision != originalStyleRevision
         || current->mLayoutInvalidationRevision != originalLayoutRevision)
         return nullptr;
     return current;
 }
 
-bool Surface::routeEvent(RoutedEvent& event) {
-    std::vector<WidgetRef<Widget>> route;
-    std::vector<const Widget*> routeParents;
-    for (Widget* current = &event.target(); current; current = current->parent()) {
+bool Surface::routeEvent(Event& event) {
+    std::vector<ElementRef<Element>> route;
+    std::vector<const Element*> routeParents;
+    for (Element* current = &event.target(); current; current = current->parentElement()) {
         route.emplace_back(current);
-        routeParents.push_back(current->parent());
+        routeParents.push_back(current->parentElement());
         if (isSurfaceRoot(current)) break;
     }
     if (route.empty() || !route.back() || !isSurfaceRoot(route.back().get()) || !isRootedInSurface(route.front().get())) return false;
 
-    event.mPhase = EventPhase::Capture;
+    event.setPhase(EventPhase::Capture);
     for (std::size_t index = route.size() - 1; index > 0; --index) {
-        Widget* target = route[index].get();
-        Widget* child = route[index - 1].get();
-        if (!target || !child || target->parent() != routeParents[index] || child->parent() != target || !isRootedInSurface(target)) break;
-        event.mCurrentTarget = target;
-        target->onEvent(event);
+        Element* target = route[index].get();
+        Element* child = route[index - 1].get();
+        if (!target || !child || target->parentElement() != routeParents[index] || child->parentElement() != target || !isRootedInSurface(target))
+            break;
+        event.setCurrentTarget(target);
+        target->dispatchListeners(event, true);
         if (event.propagationStopped()) {
-            event.mCurrentTarget = nullptr;
+            event.setCurrentTarget(nullptr);
             return event.handled() || event.defaultPrevented();
         }
     }
 
-    event.mPhase = EventPhase::Target;
-    Widget* target = route.front().get();
+    event.setPhase(EventPhase::Target);
+    Element* target = route.front().get();
     if (!target || !isRootedInSurface(target)) {
-        event.mCurrentTarget = nullptr;
+        event.setCurrentTarget(nullptr);
         return event.handled() || event.defaultPrevented();
     }
-    if (target->parent() != routeParents.front() || (route.size() > 1 && target->parent() != route[1].get())) {
-        event.mCurrentTarget = nullptr;
+    if (target->parentElement() != routeParents.front() || (route.size() > 1 && target->parentElement() != route[1].get())) {
+        event.setCurrentTarget(nullptr);
         return event.handled() || event.defaultPrevented();
     }
-    event.mCurrentTarget = target;
-    target->onEvent(event);
+    event.setCurrentTarget(target);
+    target->dispatchListeners(event, true);
+    if (!event.immediatePropagationStopped()) target->dispatchListeners(event, false);
     if (!event.propagationStopped()) {
-        event.mPhase = EventPhase::Bubble;
+        event.setPhase(EventPhase::Bubble);
         for (std::size_t index = 1; index < route.size(); ++index) {
-            Widget* bubbleTarget = route[index].get();
-            Widget* child = route[index - 1].get();
+            Element* bubbleTarget = route[index].get();
+            Element* child = route[index - 1].get();
             if (!bubbleTarget
                 || !child
-                || bubbleTarget->parent() != routeParents[index]
-                || child->parent() != bubbleTarget
+                || bubbleTarget->parentElement() != routeParents[index]
+                || child->parentElement() != bubbleTarget
                 || !isRootedInSurface(bubbleTarget))
                 break;
-            event.mCurrentTarget = bubbleTarget;
-            bubbleTarget->onEvent(event);
+            event.setCurrentTarget(bubbleTarget);
+            bubbleTarget->dispatchListeners(event, false);
             if (event.propagationStopped()) break;
         }
     }
-    event.mCurrentTarget = nullptr;
+    event.setCurrentTarget(nullptr);
     return event.handled() || event.defaultPrevented();
 }
 
 bool Surface::hasActiveModal() const {
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
-    const Widget& modal = layerRoot(SurfaceLayer::Modal);
-    return std::any_of(modal.children().begin(), modal.children().end(),
-                       [&styles](const auto& child) { return child->isVisible(styles.style(*child)); });
+    const RootList& modalRoots = roots(SurfaceLayer::Modal);
+    return std::any_of(modalRoots.begin(), modalRoots.end(), [&styles](const auto& root) { return root->isVisible(styles.style(*root)); });
 }
 
-Widget* Surface::hitTestAt(const Vec2& point) {
+Element* Surface::hitTestAt(const Vec2& point) {
     if (!mViewport.contains(point)) return nullptr;
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
-    if (hasActiveModal()) return hitTestNode(layerRoot(SurfaceLayer::Modal), point, mViewport, styles);
+    const auto hitInLayer = [&](SurfaceLayer layer) -> Element* {
+        const RootList& layerRoots = roots(layer);
+        for (auto current = layerRoots.rbegin(); current != layerRoots.rend(); ++current)
+            if (Element* hit = hitTestNode(**current, point, mViewport, styles)) return hit;
+        return nullptr;
+    };
+    if (hasActiveModal()) return hitInLayer(SurfaceLayer::Modal);
 
     for (std::size_t index = static_cast<std::size_t>(SurfaceLayer::Modal); index > static_cast<std::size_t>(SurfaceLayer::Content); --index) {
         const SurfaceLayer layer = static_cast<SurfaceLayer>(index);
         if (layer == SurfaceLayer::Tooltip || layer == SurfaceLayer::Drag || layer == SurfaceLayer::Modal) continue;
-        if (Widget* hit = hitTestNode(layerRoot(layer), point, mViewport, styles)) return hit;
+        if (Element* hit = hitInLayer(layer)) return hit;
     }
-    return hitTestNode(*mRoot, point, mViewport, styles);
+    return hitInLayer(SurfaceLayer::Content);
+}
+
+std::optional<Surface::ScrollbarTarget> Surface::hitTestScrollbarNode(Element& node, const Vec2& point, const Rect& inheritedClip,
+                                                                      StylePass& styles) const {
+    if (!inheritedClip.contains(point) || !isRootedInSurface(&node)) return std::nullopt;
+    const ElementRef<Element> lifetime(&node);
+    const Element* originalParent = node.parentElement();
+    const std::uint64_t originalStyleRevision = node.mStyleRevision;
+    const std::uint64_t originalLayoutRevision = node.mLayoutInvalidationRevision;
+    const Style& style = styles.style(node);
+    if (!node.isVisible(style)) return std::nullopt;
+    Element* styledNode = lifetime.get();
+    if (!styledNode
+        || !isRootedInSurface(styledNode)
+        || !styledNode->isVisible(style)
+        || styledNode->parentElement() != originalParent
+        || styledNode->mStyleRevision != originalStyleRevision
+        || styledNode->mLayoutInvalidationRevision != originalLayoutRevision)
+        return std::nullopt;
+
+    if (style.pointerEvents != PointerEvents::PassThrough) {
+        const ScrollGeometry geometry = scrollbarGeometry(*styledNode, style);
+        const ScrollbarHit hit = hitTestScrollbar(geometry, point);
+        if (hit.valid()) return ScrollbarTarget{styledNode, geometry, hit};
+    }
+
+    const bool clipsX = style.overflowX != Overflow::Visible;
+    const bool clipsY = style.overflowY != Overflow::Visible;
+    const ClipAxes clipAxes = (clipsX ? ClipAxes::X : ClipAxes::NoAxes) | (clipsY ? ClipAxes::Y : ClipAxes::NoAxes);
+    const bool clipsChildren = clipAxes != ClipAxes::NoAxes;
+    const Vec2 scrollOffset = clipsChildren ? Vec2{node.scrollLeft(), -node.scrollTop()} : Vec2{};
+    Rect childClip = clipsChildren ? clipToAxes(inheritedClip, detail::ElementInternalAccess::scrollport(node), clipAxes) : inheritedClip;
+    if (clipsChildren) childClip = offsetRect(childClip, scrollOffset);
+    const Vec2 childPoint = point + scrollOffset;
+    const StylePass::ChildSnapshot children = styles.sourceChildren(node);
+    for (auto child = children->rbegin(); child != children->rend(); ++child)
+        if (Element* childElement = child->get())
+            if (childElement->parentElement() == &node)
+                if (std::optional<ScrollbarTarget> hit = hitTestScrollbarNode(*childElement, childPoint, childClip, styles)) return hit;
+
+    Element* current = lifetime.get();
+    if (!current
+        || !isRootedInSurface(current)
+        || !current->isVisible(style)
+        || current->parentElement() != originalParent
+        || current->mStyleRevision != originalStyleRevision
+        || current->mLayoutInvalidationRevision != originalLayoutRevision)
+        return std::nullopt;
+    return std::nullopt;
+}
+
+std::optional<Surface::ScrollbarTarget> Surface::hitTestScrollbarAt(const Vec2& point) {
+    if (!mViewport.contains(point)) return std::nullopt;
+    StylePass& styles = stylePass();
+    const StylePass::TraversalScope traversal = styles.enterTraversal();
+    const auto hitInLayer = [&](SurfaceLayer layer) -> std::optional<ScrollbarTarget> {
+        const RootList& layerRoots = roots(layer);
+        for (auto current = layerRoots.rbegin(); current != layerRoots.rend(); ++current)
+            if (std::optional<ScrollbarTarget> hit = hitTestScrollbarNode(**current, point, mViewport, styles)) return hit;
+        return std::nullopt;
+    };
+    if (hasActiveModal()) return hitInLayer(SurfaceLayer::Modal);
+
+    for (std::size_t index = static_cast<std::size_t>(SurfaceLayer::Modal); index > static_cast<std::size_t>(SurfaceLayer::Content); --index) {
+        const SurfaceLayer layer = static_cast<SurfaceLayer>(index);
+        if (layer == SurfaceLayer::Tooltip || layer == SurfaceLayer::Drag || layer == SurfaceLayer::Modal) continue;
+        if (std::optional<ScrollbarTarget> hit = hitInLayer(layer)) return hit;
+    }
+    return hitInLayer(SurfaceLayer::Content);
+}
+
+namespace {
+const ScrollbarAxisGeometry* scrollbarAxisGeometry(const ScrollGeometry& geometry, ScrollbarAxis axis) {
+    if (axis == ScrollbarAxis::Horizontal) return &geometry.horizontal;
+    if (axis == ScrollbarAxis::Vertical) return &geometry.vertical;
+    return nullptr;
+}
+} // namespace
+
+void Surface::setScrollbarHover(std::optional<ScrollbarTarget> target) {
+    const bool unchanged = !mScrollbarHover ? !target
+                                            : target
+            && mScrollbarHover->element == target->element
+            && mScrollbarHover->hit.axis == target->hit.axis
+            && mScrollbarHover->hit.part == target->hit.part;
+    if (unchanged) return;
+    mScrollbarHover = std::move(target);
+    requestPaint();
+}
+
+bool Surface::beginScrollbarInteraction(const ScrollbarTarget& target, const Vec2& point) {
+    Element* element = target.element;
+    if (!element || !target.hit.valid() || !isRootedInSurface(element) || !isEnabledInTree(element)) return false;
+
+    ScrollbarInteraction interaction;
+    {
+        StylePass& styles = stylePass();
+        const StylePass::TraversalScope traversal = styles.enterTraversal();
+        const Style& style = styles.style(*element);
+        const ScrollGeometry geometry = scrollbarGeometry(*element, style);
+        const ScrollbarAxisGeometry* axis = scrollbarAxisGeometry(geometry, target.hit.axis);
+        if (!axis || !axis->visible) return false;
+
+        interaction.element = element;
+        interaction.geometry = geometry;
+        interaction.hit = target.hit;
+        if (target.hit.part == ScrollbarPart::Thumb) {
+            if (axis->thumb.empty()) return false;
+            const float thumbStart = target.hit.axis == ScrollbarAxis::Horizontal ? axis->thumb.left() : axis->thumb.bottom();
+            interaction.grabOffset = scrollbarAxisPosition(target.hit.axis, point) - thumbStart;
+        } else {
+            float delta = 0.f;
+            if (target.hit.part == ScrollbarPart::StartArrow) delta = -kScrollbarLineStep;
+            else if (target.hit.part == ScrollbarPart::EndArrow) delta = kScrollbarLineStep;
+            else if (target.hit.part == ScrollbarPart::Track) {
+                const float thumbStart = target.hit.axis == ScrollbarAxis::Horizontal ? axis->thumb.left() : axis->thumb.bottom();
+                bool beforeThumb;
+                if (target.hit.axis == ScrollbarAxis::Horizontal) beforeThumb = scrollbarAxisPosition(target.hit.axis, point) < thumbStart;
+                else beforeThumb = scrollbarAxisPosition(target.hit.axis, point) > axis->thumb.top();
+                if (axis->reversed) beforeThumb = !beforeThumb;
+                const float viewport = target.hit.axis == ScrollbarAxis::Horizontal ? element->clientWidth() : element->clientHeight();
+                const float page = std::max(1.f, viewport - kScrollbarLineStep);
+                delta = beforeThumb ? -page : page;
+            }
+            if (target.hit.axis == ScrollbarAxis::Horizontal) element->scrollBy(delta, 0.f);
+            else element->scrollBy(0.f, delta);
+            interaction.geometry = scrollbarGeometry(*element, style);
+            if (target.hit.part == ScrollbarPart::Track) {
+                const ScrollbarAxisGeometry* updatedAxis = scrollbarAxisGeometry(interaction.geometry, target.hit.axis);
+                if (updatedAxis && !updatedAxis->thumb.empty()) {
+                    interaction.hit.part = ScrollbarPart::Thumb;
+                    const float pointerPosition = scrollbarAxisPosition(target.hit.axis, point);
+                    const float thumbStart = target.hit.axis == ScrollbarAxis::Horizontal ? updatedAxis->thumb.left() : updatedAxis->thumb.bottom();
+                    const float thumbLength = target.hit.axis == ScrollbarAxis::Horizontal ? updatedAxis->thumb.w : updatedAxis->thumb.h;
+                    interaction.grabOffset = updatedAxis->thumb.contains(point) ? pointerPosition - thumbStart : thumbLength * .5f;
+                }
+            }
+        }
+    }
+
+    clearKeyboardPress();
+    if (Element* pressed = mPressed) pressed->setState(ElementState::Active, false);
+    mPressed = nullptr;
+    mPressedClickCount = 0;
+    mCaptured = nullptr;
+    setHovered(nullptr);
+    setFocused(nullptr, false);
+    mResizeCursor = CursorStyle::Auto;
+    mScrollbarCapture = std::move(interaction);
+    setScrollbarHover(ScrollbarTarget{element, mScrollbarCapture->geometry, mScrollbarCapture->hit});
+    flushScrollNotifications();
+    requestPaint();
+    return true;
+}
+
+bool Surface::updateScrollbarInteraction(const Vec2& point) {
+    if (!mScrollbarCapture) return false;
+    Element* element = mScrollbarCapture->element;
+    ElementRef<Element> elementRef(element);
+    if (!element || !elementRef || !isRootedInSurface(element) || !isEnabledInTree(element)) {
+        mScrollbarCapture.reset();
+        setScrollbarHover(std::nullopt);
+        requestPaint();
+        return true;
+    }
+
+    std::optional<ScrollbarTarget> updatedTarget;
+    bool unavailable = false;
+    {
+        StylePass& styles = stylePass();
+        const StylePass::TraversalScope traversal = styles.enterTraversal();
+        const Style& style = styles.style(*element);
+        const ScrollGeometry geometry = scrollbarGeometry(*element, style);
+        const ScrollbarAxis axis = mScrollbarCapture->hit.axis;
+        const ScrollbarAxisGeometry* axisGeometry = scrollbarAxisGeometry(geometry, axis);
+        if (!axisGeometry || !axisGeometry->visible) return true;
+        if (mScrollbarCapture->hit.part == ScrollbarPart::Thumb) {
+            const float offset = scrollOffsetForThumbPosition(*axisGeometry, scrollbarAxisPosition(axis, point), mScrollbarCapture->grabOffset);
+            if (axis == ScrollbarAxis::Horizontal) element->scrollTo(offset, element->scrollTop());
+            else element->scrollTo(element->scrollLeft(), offset);
+        }
+
+        element = elementRef.get();
+        if (!element || !isRootedInSurface(element) || !isEnabledInTree(element)) unavailable = true;
+        else {
+            const ScrollGeometry updatedGeometry = scrollbarGeometry(*element, style);
+            mScrollbarCapture->element = element;
+            mScrollbarCapture->geometry = updatedGeometry;
+            updatedTarget = ScrollbarTarget{element, updatedGeometry, mScrollbarCapture->hit};
+        }
+    }
+    if (unavailable) {
+        mScrollbarCapture.reset();
+        setScrollbarHover(std::nullopt);
+        requestPaint();
+        return true;
+    }
+    setScrollbarHover(std::move(updatedTarget));
+    flushScrollNotifications();
+    return true;
+}
+
+bool Surface::scrollFocusedElement(const KeyEvent& event, Element& focused) {
+    if (event.modifiers & (kModifierControl | kModifierAlt | kModifierPlatformControl)) return false;
+
+    enum class ScrollAction { NoneValue, LineBackward, LineForward, PageBackward, PageForward, Home, End };
+    ScrollAction action = ScrollAction::NoneValue;
+    if (event.key == kKeyUp || event.key == kKeyLeft) action = ScrollAction::LineBackward;
+    else if (event.key == kKeyDown || event.key == kKeyRight) action = ScrollAction::LineForward;
+    else if (event.key == kKeyPageUp) action = ScrollAction::PageBackward;
+    else if (event.key == kKeyPageDown) action = ScrollAction::PageForward;
+    else if (event.key == kKeyHome) action = ScrollAction::Home;
+    else if (event.key == kKeyEnd) action = ScrollAction::End;
+    else if (event.key == kKeySpace) action = (event.modifiers & kModifierShift) ? ScrollAction::PageBackward : ScrollAction::PageForward;
+    else return false;
+
+    const bool horizontalKey = event.key == kKeyLeft || event.key == kKeyRight;
+    bool handled = false;
+    {
+        StylePass& styles = stylePass();
+        const StylePass::TraversalScope traversal = styles.enterTraversal();
+        const auto tryAxis = [&](Element& element, const Style& style, ScrollbarAxis axis) {
+            const Overflow overflow = axis == ScrollbarAxis::Horizontal ? style.overflowX : style.overflowY;
+            if (!acceptsWheelScrolling(overflow)) return false;
+            const float current = axis == ScrollbarAxis::Horizontal ? element.scrollLeft() : element.scrollTop();
+            const float maximum = axis == ScrollbarAxis::Horizontal ? element.scrollMetrics().maxScrollLeft : element.scrollMetrics().maxScrollTop;
+            const float viewport = axis == ScrollbarAxis::Horizontal ? element.clientWidth() : element.clientHeight();
+            const float page = std::max(1.f, viewport - kScrollbarLineStep);
+            float next = current;
+            switch (action) {
+                case ScrollAction::LineBackward: next = current - kScrollbarLineStep; break;
+                case ScrollAction::LineForward: next = current + kScrollbarLineStep; break;
+                case ScrollAction::PageBackward: next = current - page; break;
+                case ScrollAction::PageForward: next = current + page; break;
+                case ScrollAction::Home: next = 0.f; break;
+                case ScrollAction::End: next = maximum; break;
+                case ScrollAction::NoneValue: return false;
+            }
+            next = std::clamp(next, 0.f, maximum);
+            if (next == current) return false;
+            if (axis == ScrollbarAxis::Horizontal) element.scrollTo(next, element.scrollTop());
+            else element.scrollTo(element.scrollLeft(), next);
+            return true;
+        };
+
+        for (Element* candidate = &focused; candidate;) {
+            ElementRef<Element> candidateRef(candidate);
+            const Style& style = styles.style(*candidate);
+            candidate = candidateRef.get();
+            if (!candidate || !isRootedInSurface(candidate) || !isEnabledInTree(candidate)) break;
+            if (horizontalKey) {
+                if (tryAxis(*candidate, style, ScrollbarAxis::Horizontal)) {
+                    handled = true;
+                    break;
+                }
+            } else {
+                if (tryAxis(*candidate, style, ScrollbarAxis::Vertical)) {
+                    handled = true;
+                    break;
+                }
+                if ((event.key == kKeyHome || event.key == kKeyEnd) && tryAxis(*candidate, style, ScrollbarAxis::Horizontal)) {
+                    handled = true;
+                    break;
+                }
+            }
+            candidate = candidate->parentElement();
+        }
+    }
+    if (handled) flushScrollNotifications();
+    return handled;
 }
 
 void Surface::clearInteractionState() {
-    if (Widget* hovered = mHovered.get()) hovered->setState(WidgetState::Hovered, false);
-    if (Widget* pressed = mPressed.get()) pressed->setState(WidgetState::Active, false);
+    if (Element* hovered = mHovered) hovered->setState(ElementState::Hovered, false);
+    if (Element* pressed = mPressed) pressed->setState(ElementState::Active, false);
     clearKeyboardPress();
-    if (Widget* focused = mFocused.get()) {
-        focused->setState(WidgetState::Focused, false);
-        focused->setState(WidgetState::FocusVisible, false);
+    if (Element* focused = mFocused) {
+        focused->setState(ElementState::Focused, false);
+        focused->setState(ElementState::FocusVisible, false);
     }
-    if (Widget* captured = mCaptured.get()) captured->endPointerInteraction({mPointerPosition});
-    mHovered.set(nullptr);
-    mPressed.set(nullptr);
-    mFocused.set(nullptr);
-    mCaptured.set(nullptr);
+    if (Element* captured = mCaptured) captured->endPointerInteraction({mPointerPosition});
+    mHovered = nullptr;
+    mPressed = nullptr;
+    mFocused = nullptr;
+    mCaptured = nullptr;
     mResizeCursor = CursorStyle::Auto;
-    resetLongClick();
+    mScrollbarHover.reset();
+    mScrollbarCapture.reset();
     mPressedClickCount = 0;
     mTabKeyHandled = false;
 }
 
 CursorStyle Surface::cursor() const {
+    const ScrollbarTarget* scrollbar = mScrollbarCapture ? &*mScrollbarCapture : (mScrollbarHover ? &*mScrollbarHover : nullptr);
     if (mResizeCursor != CursorStyle::Auto) return mResizeCursor;
-    const Widget* widget = mCaptured ? mCaptured.get() : mHovered.get();
-    if (!widget) return CursorStyle::Default;
-    const WidgetRef<const Widget> lifetime(widget);
-    const Widget* originalParent = widget->parent();
-    const std::uint64_t originalStyleRevision = widget->mStyleRevision;
-    const std::uint64_t originalLayoutRevision = widget->mLayoutInvalidationRevision;
+    if (scrollbar) return CursorStyle::Default;
+    const Element* element = mCaptured ? mCaptured : mHovered;
+    if (!element) return CursorStyle::Default;
+    const ElementRef<const Element> lifetime(element);
+    const Element* originalParent = element->parentElement();
+    const std::uint64_t originalStyleRevision = element->mStyleRevision;
+    const std::uint64_t originalLayoutRevision = element->mLayoutInvalidationRevision;
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
-    const Style& style = styles.style(*widget);
-    const Widget* current = lifetime.get();
+    const Style& style = styles.style(*element);
+    const Element* current = lifetime.get();
     if (!current
         || !isRootedInSurface(current)
-        || current->parent() != originalParent
+        || current->parentElement() != originalParent
         || current->mStyleRevision != originalStyleRevision
         || current->mLayoutInvalidationRevision != originalLayoutRevision)
         return CursorStyle::Default;
@@ -229,39 +516,38 @@ CursorStyle Surface::cursor() const {
 bool Surface::pointerMove(const PointerEvent& event) {
     mPointerPosition = event.position;
     mPointerPositionKnown = true;
-    WidgetRef<Widget> capturedRef(mCaptured.get());
-    if (Widget* captured = capturedRef.get()) {
-        const Widget* capturedParent = captured->parent();
-        RoutedPointerEvent routed(EventKind::PointerMove, *captured, event);
+    if (mScrollbarCapture) return updateScrollbarInteraction(event.position);
+    ElementRef<Element> capturedRef(mCaptured);
+    if (Element* captured = capturedRef.get()) {
+        const Element* capturedParent = captured->parentElement();
+        Event routed(kPointerMoveEvent, *captured, event);
         const bool routedHandled = routeEvent(routed);
         captured = capturedRef.get();
-        if (!captured || captured->parent() != capturedParent || !isRootedInSurface(captured) || !isEnabledInTree(captured)) return routedHandled;
+        if (!captured || captured->parentElement() != capturedParent || !isRootedInSurface(captured) || !isEnabledInTree(captured))
+            return routedHandled;
         const bool handled = !routed.defaultPrevented() && captured->updatePointerInteraction(event);
-        if (captured = capturedRef.get(); captured && isRootedInSurface(captured) && isEnabledInTree(captured))
-            captured->dispatchMouseEvent(WidgetEventKind::MouseMove, event);
         return routedHandled || handled;
     }
     updateResizeCursor(event.position);
     refreshHover();
-    if (!mLongClickFired && mLongClickTarget && mHovered.get() != mLongClickTarget.get()) resetLongClick();
-    WidgetRef<Widget> hoveredRef(mHovered.get());
-    if (Widget* hovered = hoveredRef.get()) {
+    ElementRef<Element> hoveredRef(mHovered);
+    if (Element* hovered = hoveredRef.get()) {
         if (isEnabledInTree(hovered)) {
-            RoutedPointerEvent routed(EventKind::PointerMove, *hovered, event);
+            Event routed(kPointerMoveEvent, *hovered, event);
             routeEvent(routed);
-            if (hovered = hoveredRef.get(); hovered && isRootedInSurface(hovered) && isEnabledInTree(hovered))
-                hovered->dispatchMouseEvent(WidgetEventKind::MouseMove, event);
         }
     }
-    return mHovered.get() != nullptr || mPressed.get() != nullptr;
+    return mHovered != nullptr || mPressed != nullptr || mScrollbarHover.has_value() || mResizeCursor != CursorStyle::Auto;
 }
 
 void Surface::pointerLeave() {
     mPointerPositionKnown = false;
-    if (!mCaptured) mResizeCursor = CursorStyle::Auto;
-    setHovered(nullptr);
+    if (!mCaptured && !mScrollbarCapture) {
+        mResizeCursor = CursorStyle::Auto;
+        setScrollbarHover(std::nullopt);
+        setHovered(nullptr);
+    }
     updatePressedState();
-    if (!mLongClickFired) resetLongClick();
 }
 
 bool Surface::pointerDown(const PointerEvent& event) {
@@ -269,22 +555,23 @@ bool Surface::pointerDown(const PointerEvent& event) {
     mPointerPosition = event.position;
     mPointerPositionKnown = true;
     std::uint8_t resizeEdges = 0;
-    Floater* resizeFloater = event.button == PointerButton::Left ? resizeFloaterAt(event.position, resizeEdges) : nullptr;
+    FloaterElement* resizeFloater = event.button == PointerButton::Left ? resizeFloaterAt(event.position, resizeEdges) : nullptr;
     if (resizeFloater) {
-        WidgetRef<Floater> resizeRef(resizeFloater);
-        const SurfaceLayer layer = resizeFloater->parent() == &layerRoot(SurfaceLayer::Modal) ? SurfaceLayer::Modal : SurfaceLayer::Floater;
+        ElementRef<FloaterElement> resizeRef(resizeFloater);
+        const std::optional<SurfaceLayer> resolvedLayer = layerOf(resizeFloater);
+        if (!resolvedLayer) return false;
+        const SurfaceLayer layer = *resolvedLayer;
         raiseWithinLayer(*resizeFloater, layer);
         const Surface* resizeSurface = resizeFloater->surface();
-        const Widget* resizeParent = resizeFloater->parent();
+        const Element* resizeParent = resizeFloater->parentElement();
         const auto isResizeFloaterStillAttached = [&]() {
-            Floater* current = resizeRef.get();
-            return current && current->surface() == resizeSurface && current->parent() == resizeParent && isRootedInSurface(current);
+            FloaterElement* current = resizeRef.get();
+            return current && current->surface() == resizeSurface && current->parentElement() == resizeParent && isRootedInSurface(current);
         };
-        resetLongClick();
         mPressedClickCount = 0;
         clearKeyboardPress();
-        if (Widget* pressed = mPressed.get()) pressed->setState(WidgetState::Active, false);
-        mPressed.set(nullptr);
+        if (Element* pressed = mPressed) pressed->setState(ElementState::Active, false);
+        mPressed = nullptr;
         resizeFloater = resizeRef.get();
         if (!isResizeFloaterStillAttached()) return false;
         const std::optional<Rect> bounds = mViewport;
@@ -294,38 +581,49 @@ bool Surface::pointerDown(const PointerEvent& event) {
         const bool began = resizeFloater->beginResizeInteraction(event, resizeEdges, minimum, bounds);
         resizeFloater = resizeRef.get();
         if (began && isResizeFloaterStillAttached()) {
-            mCaptured.set(resizeFloater);
+            mCaptured = resizeFloater;
             setHovered(resizeFloater);
             setFocused(nullptr, false);
             mResizeCursor = detail::resizeCursor(static_cast<detail::ResizeEdges>(resizeEdges));
             return true;
         }
     }
-    WidgetRef<Widget> hitRef(hitTestAt(event.position));
-    Widget* hit = hitRef.get();
+    if (event.button == PointerButton::Left) {
+        if (std::optional<ScrollbarTarget> scrollbar = hitTestScrollbarAt(event.position)) {
+            if (const std::optional<SurfaceLayer> layer = layerOf(scrollbar->element); layer && *layer == SurfaceLayer::Floater)
+                raiseWithinLayer(*scrollbar->element, *layer);
+            if (beginScrollbarInteraction(*scrollbar, event.position)) return true;
+        }
+    }
+    ElementRef<Element> hitRef(hitTestAt(event.position));
+    Element* hit = hitRef.get();
+    if (!hit && hasActiveModal()) {
+        clearKeyboardPress();
+        if (Element* pressed = mPressed) pressed->setState(ElementState::Active, false);
+        mPressed = nullptr;
+        setFocused(nullptr, false);
+        setHovered(nullptr);
+        return true;
+    }
     if (hit) raiseWithinLayer(*hit, SurfaceLayer::Floater);
     setHovered(hit);
     bool defaultPrevented = false;
     if (isEnabledInTree(hit)) {
-        RoutedPointerEvent routed(EventKind::PointerDown, *hit, event);
+        Event routed(kPointerDownEvent, *hit, event);
         routeEvent(routed);
         defaultPrevented = routed.defaultPrevented();
         hit = hitRef.get();
     }
-    if (event.button != PointerButton::Left) {
-        if (hit && isRootedInSurface(hit) && isEnabledInTree(hit)) hit->dispatchMouseEvent(WidgetEventKind::MouseDown, event);
-        return hitRef.get() && isRootedInSurface(hitRef.get());
-    }
-    resetLongClick();
+    if (event.button != PointerButton::Left) return hitRef.get() && isRootedInSurface(hitRef.get());
     mPressedClickCount = 0;
     clearKeyboardPress();
-    if (Widget* pressed = mPressed.get()) pressed->setState(WidgetState::Active, false);
-    mPressed.set(nullptr);
+    if (Element* pressed = mPressed) pressed->setState(ElementState::Active, false);
+    mPressed = nullptr;
     hit = hitRef.get();
     const bool hitEnabledBeforeInteraction = isEnabledInTree(hit);
-    for (Widget* candidate = hitEnabledBeforeInteraction && !defaultPrevented ? hit : nullptr; candidate;) {
-        const WidgetSnapshot candidateSnapshot = snapshot(*candidate);
-        WidgetRef<Widget> parentRef(candidate->parent());
+    for (Element* candidate = hitEnabledBeforeInteraction && !defaultPrevented ? hit : nullptr; candidate;) {
+        const ElementSnapshot candidateSnapshot = snapshot(*candidate);
+        ElementRef<Element> parentRef(candidate->parentElement());
         if (!isEnabledInTree(candidate)) {
             candidate = parentRef.get();
             continue;
@@ -337,27 +635,24 @@ bool Surface::pointerDown(const PointerEvent& event) {
         candidate = candidateSnapshot.lifetime.get();
         if (!candidate
             || !snapshotValid(candidateSnapshot)
-            || candidate->parent() != parentRef.get()
+            || candidate->parentElement() != parentRef.get()
             || !isEnabledInTree(candidate)
             || !isRootedInSurface(candidate))
             return true;
-        mCaptured.set(candidate);
+        mCaptured = candidate;
         setFocused(nullptr, false);
-        candidate->dispatchMouseEvent(WidgetEventKind::MouseDown, event);
         return true;
     }
     hit = hitRef.get();
     const bool hitEnabledAfterInteraction = isEnabledInTree(hit);
-    const WidgetSnapshot hitSnapshot = hit ? snapshot(*hit) : WidgetSnapshot{};
+    const ElementSnapshot hitSnapshot = hit ? snapshot(*hit) : ElementSnapshot{};
     const bool focusable = hitEnabledAfterInteraction && !defaultPrevented && hit->focusable();
     hit = hitSnapshot.lifetime.get();
     if (hit && (!snapshotValid(hitSnapshot) || !isRootedInSurface(hit))) return true;
     setFocused(focusable ? hit : nullptr, false);
-    mPressed.set(hitEnabledAfterInteraction && !defaultPrevented ? hit : nullptr);
+    mPressed = hitEnabledAfterInteraction && !defaultPrevented ? hit : nullptr;
     mPressedClickCount = mPressed ? event.clickCount : 0;
     updatePressedState();
-    if (hitEnabledAfterInteraction && !defaultPrevented && hit && hit->eventCall(WidgetEventKind::LongClick)) mLongClickTarget.set(hit);
-    if (hitEnabledAfterInteraction && hit && isRootedInSurface(hit)) hit->dispatchMouseEvent(WidgetEventKind::MouseDown, event);
     return hitRef.get() && isRootedInSurface(hitRef.get());
 }
 
@@ -366,97 +661,113 @@ bool Surface::pointerUp(const PointerEvent& event) {
     mPointerPosition = event.position;
     mPointerPositionKnown = true;
     if (event.button != PointerButton::Left) {
-        WidgetRef<Widget> hit(hitTestAt(event.position));
+        ElementRef<Element> hit(hitTestAt(event.position));
         const bool hadHit = !!hit;
         if (isEnabledInTree(hit.get())) {
-            RoutedPointerEvent routed(EventKind::PointerUp, *hit, event);
+            Event routed(kPointerUpEvent, *hit, event);
             routeEvent(routed);
-            if (hit && isRootedInSurface(hit.get()) && isEnabledInTree(hit.get())) hit->dispatchMouseEvent(WidgetEventKind::MouseUp, event);
-            if (hit && event.button == PointerButton::Right && isRootedInSurface(hit.get()) && isEnabledInTree(hit.get()))
-                hit->dispatchMouseEvent(WidgetEventKind::ContextMenu, event);
+            if (hit && event.button == PointerButton::Right && isRootedInSurface(hit.get()) && isEnabledInTree(hit.get())) {
+                Event contextMenu(kContextMenuEvent, *hit, event);
+                routeEvent(contextMenu);
+            }
         }
-        return hadHit;
+        return hadHit || hasActiveModal();
     }
-    WidgetRef<Widget> capturedRef(mCaptured.get());
-    if (Widget* captured = capturedRef.get()) {
-        const Widget* capturedParent = captured->parent();
-        resetLongClick();
+    if (mScrollbarCapture) {
+        mScrollbarCapture.reset();
+        refreshHover();
+        return true;
+    }
+    ElementRef<Element> capturedRef(mCaptured);
+    if (Element* captured = capturedRef.get()) {
+        const Element* capturedParent = captured->parentElement();
         mPressedClickCount = 0;
-        mCaptured.set(nullptr);
-        RoutedPointerEvent routed(EventKind::PointerUp, *captured, event);
+        mCaptured = nullptr;
+        Event routed(kPointerUpEvent, *captured, event);
         const bool routedHandled = routeEvent(routed);
         captured = capturedRef.get();
-        if (!captured || captured->parent() != capturedParent || !isRootedInSurface(captured) || !isEnabledInTree(captured)) {
+        if (!captured || captured->parentElement() != capturedParent || !isRootedInSurface(captured) || !isEnabledInTree(captured)) {
             refreshHover();
             return routedHandled;
         }
         const bool handled = !routed.defaultPrevented() && captured->endPointerInteraction(event);
-        if (captured = capturedRef.get(); captured && isRootedInSurface(captured) && isEnabledInTree(captured))
-            captured->dispatchMouseEvent(WidgetEventKind::MouseUp, event);
         refreshHover();
         return routedHandled || handled;
     }
-    WidgetRef<Widget> released(mPressed.get());
-    WidgetRef<Widget> hit(hitTestAt(event.position));
+    ElementRef<Element> released(mPressed);
+    ElementRef<Element> hit(hitTestAt(event.position));
     bool defaultPrevented = false;
-    if (Widget* target = released ? released.get() : hit.get()) {
-        RoutedPointerEvent routed(EventKind::PointerUp, *target, event);
+    if (Element* target = released ? released.get() : hit.get()) {
+        Event routed(kPointerUpEvent, *target, event);
         routeEvent(routed);
         defaultPrevented = routed.defaultPrevented();
     }
-    const bool suppressClick = mLongClickFired;
     const uint8_t clickCount = mPressedClickCount;
-    if (Widget* pressed = mPressed.get()) pressed->setState(WidgetState::Active, false);
-    mPressed.set(nullptr);
+    if (Element* pressed = mPressed) pressed->setState(ElementState::Active, false);
+    mPressed = nullptr;
     setHovered(hit.get());
-    if (released && isRootedInSurface(released.get()) && isEnabledInTree(released.get()))
-        released->dispatchMouseEvent(WidgetEventKind::MouseUp, event);
-    resetLongClick();
     mPressedClickCount = 0;
-    const bool clicked = !suppressClick
-        && released
-        && released.get() == hit.get()
-        && !defaultPrevented
-        && isEnabledInTree(released.get())
-        && isRootedInSurface(released.get());
+    const bool clicked =
+        released && released.get() == hit.get() && !defaultPrevented && isEnabledInTree(released.get()) && isRootedInSurface(released.get());
     if (clicked) {
         released->activate();
-        if (Widget* activated = released.get(); activated && clickCount >= 2 && isEnabledInTree(activated) && isRootedInSurface(activated)) {
+        if (Element* activated = released.get(); activated && clickCount >= 2 && isEnabledInTree(activated) && isRootedInSurface(activated)) {
             PointerEvent doubleClick = event;
             doubleClick.clickCount = clickCount;
-            activated->dispatchMouseEvent(WidgetEventKind::DoubleClick, doubleClick);
+            Event doubleClickEvent(kDoubleClickEvent, *activated, doubleClick);
+            routeEvent(doubleClickEvent);
         }
         refreshHover();
         return true;
     }
-    return released || hit;
+    return released || hit || hasActiveModal();
 }
 
-bool Surface::scroll(const ScrollEvent& event) {
+bool Surface::scroll(const WheelEvent& event) {
     updateLayout();
     mPointerPosition = event.position;
     mPointerPositionKnown = true;
-    WidgetRef<Widget> hitRef(hitTestAt(event.position));
-    Widget* hit = hitRef.get();
+    ElementRef<Element> hitRef(hitTestAt(event.position));
+    Element* hit = hitRef.get();
     bool routedHandled = false;
     bool defaultPrevented = false;
     if (isEnabledInTree(hit)) {
-        RoutedScrollEvent routed(*hit, event);
+        Event routed(kWheelEvent, *hit, event);
         routedHandled = routeEvent(routed);
         defaultPrevented = routed.defaultPrevented();
         hit = hitRef.get();
     }
-    for (Widget* candidate = defaultPrevented ? nullptr : hit; candidate;) {
-        WidgetRef<Widget> candidateRef(candidate);
-        WidgetRef<Widget> parentRef(candidate ? candidate->parent() : nullptr);
-        const WidgetSnapshot candidateSnapshot = candidate ? snapshot(*candidate) : WidgetSnapshot{};
-        if (!candidateRef || !isEnabledInTree(candidate) || !isRootedInSurface(candidate)) break;
-        if (candidate->defaultScroll(event)) return true;
-        candidate = candidateRef.get();
-        if (!candidate || !snapshotValid(candidateSnapshot) || !isEnabledInTree(candidate) || !isRootedInSurface(candidate)) break;
-        candidate = parentRef.get();
+    bool scrollHandled = false;
+    if (!defaultPrevented) {
+        StylePass& styles = stylePass();
+        const StylePass::TraversalScope traversal = styles.enterTraversal();
+        Vec2 remaining{event.dx, event.dy};
+        for (Element* candidate = hit; candidate;) {
+            ElementRef<Element> candidateRef(candidate);
+            ElementRef<Element> parentRef(candidate ? candidate->parentElement() : nullptr);
+            const ElementSnapshot candidateSnapshot = candidate ? snapshot(*candidate) : ElementSnapshot{};
+            if (!candidateRef || !isEnabledInTree(candidate) || !isRootedInSurface(candidate)) break;
+
+            WheelEvent defaultEvent = event;
+            defaultEvent.dx = remaining.x;
+            defaultEvent.dy = remaining.y;
+            if ((remaining.x != 0.f || remaining.y != 0.f) && candidate->defaultScroll(defaultEvent)) {
+                scrollHandled = true;
+                break;
+            }
+            candidate = candidateRef.get();
+            if (!candidate || !snapshotValid(candidateSnapshot) || !isEnabledInTree(candidate) || !isRootedInSurface(candidate)) break;
+
+            const Style style = styles.style(*candidate);
+            const Vec2 consumed = consumeWheelDelta(*candidate, style, remaining);
+            remaining = remaining - consumed;
+            if (consumed.x != 0.f || consumed.y != 0.f) scrollHandled = true;
+            if (remaining.x == 0.f && remaining.y == 0.f) break;
+            candidate = parentRef.get();
+        }
     }
-    return routedHandled || hitRef.get() != nullptr;
+    flushScrollNotifications();
+    return routedHandled || scrollHandled || hitRef.get() != nullptr;
 }
 
 bool Surface::keyDown(const KeyEvent& event) {
@@ -465,21 +776,22 @@ bool Surface::keyDown(const KeyEvent& event) {
         mTabKeyHandled = moveFocus((event.modifiers & kModifierShift) != 0);
         return mTabKeyHandled;
     }
-    WidgetRef<Widget> focusedRef(mFocused.get());
-    Widget* focused = focusedRef.get();
+    ElementRef<Element> focusedRef(mFocused);
+    Element* focused = focusedRef.get();
     if (!focused) return false;
-    const Widget* focusedParent = focused->parent();
-    RoutedKeyEvent routed(EventKind::KeyDown, *focused, event);
+    const Element* focusedParent = focused->parentElement();
+    Event routed(kKeyDownEvent, *focused, event);
     const bool routedHandled = routeEvent(routed);
     focused = focusedRef.get();
-    if (!focused || focused->parent() != focusedParent || !isRootedInSurface(focused) || !isEnabledInTree(focused)) return routedHandled;
+    if (!focused || focused->parentElement() != focusedParent || !isRootedInSurface(focused) || !isEnabledInTree(focused)) return routedHandled;
     if (routed.defaultPrevented()) return routedHandled;
+    if (scrollFocusedElement(event, *focused)) return true;
     if (isActivationKey(event.key)) {
-        if (mKeyPressed.get() && (mKeyPressed.get() != focused || mPressedKey != event.key)) clearKeyboardPress();
+        if (mKeyPressed && (mKeyPressed != focused || mPressedKey != event.key)) clearKeyboardPress();
         if (!focused->defaultKeyDown(event)) return routedHandled;
         focused = focusedRef.get();
         if (!focused || !isRootedInSurface(focused) || !isEnabledInTree(focused)) return true;
-        mKeyPressed.set(focused);
+        mKeyPressed = focused;
         mPressedKey = event.key;
         return true;
     }
@@ -493,21 +805,21 @@ bool Surface::keyUp(const KeyEvent& event) {
         return handled;
     }
     validateFocus();
-    WidgetRef<Widget> focusedRef(mFocused.get());
-    Widget* focused = focusedRef.get();
+    ElementRef<Element> focusedRef(mFocused);
+    Element* focused = focusedRef.get();
     if (!focused) return false;
-    const Widget* focusedParent = focused->parent();
-    RoutedKeyEvent routed(EventKind::KeyUp, *focused, event);
+    const Element* focusedParent = focused->parentElement();
+    Event routed(kKeyUpEvent, *focused, event);
     const bool routedHandled = routeEvent(routed);
     focused = focusedRef.get();
-    if (!focused || focused->parent() != focusedParent || !isRootedInSurface(focused) || !isEnabledInTree(focused)) return routedHandled;
+    if (!focused || focused->parentElement() != focusedParent || !isRootedInSurface(focused) || !isEnabledInTree(focused)) return routedHandled;
     if (routed.defaultPrevented()) {
         if (isActivationKey(event.key)) clearKeyboardPress();
         return routedHandled;
     }
     if (isActivationKey(event.key)) {
-        if (mKeyPressed.get() != focused || mPressedKey != event.key) return false;
-        mKeyPressed.set(nullptr);
+        if (mKeyPressed != focused || mPressedKey != event.key) return false;
+        mKeyPressed = nullptr;
         mPressedKey = 0;
     }
     const bool handled = focused->defaultKeyUp(event);
@@ -517,10 +829,10 @@ bool Surface::keyUp(const KeyEvent& event) {
 
 bool Surface::charInput(unsigned int codepoint) {
     validateFocus();
-    WidgetRef<Widget> focusedRef(mFocused.get());
-    Widget* focused = focusedRef.get();
+    ElementRef<Element> focusedRef(mFocused);
+    Element* focused = focusedRef.get();
     if (!focused) return false;
-    RoutedCharacterEvent routed(*focused, codepoint);
+    Event routed(kCharacterInputEvent, *focused, Event::Payload(codepoint));
     const bool routedHandled = routeEvent(routed);
     focused = focusedRef.get();
     if (!focused || !isRootedInSurface(focused) || !isEnabledInTree(focused)) return routedHandled;
@@ -533,150 +845,130 @@ void Surface::refreshHover() {
 }
 
 void Surface::refreshHoverState() {
-    if (!mPointerPositionKnown || !mRoot) return;
+    if (!mPointerPositionKnown) return;
     const bool refreshWasRequested = mHitTestDirty;
     mHitTestDirty = false;
     updateResizeCursor(mPointerPosition);
-    Widget* hit = hitTestAt(mPointerPosition);
+    std::optional<ScrollbarTarget> scrollbar = mScrollbarCapture
+        ? std::optional<ScrollbarTarget>(ScrollbarTarget{mScrollbarCapture->element, mScrollbarCapture->geometry, mScrollbarCapture->hit})
+        : hitTestScrollbarAt(mPointerPosition);
+    setScrollbarHover(std::move(scrollbar));
+    Element* hit = mScrollbarHover ? nullptr : hitTestAt(mPointerPosition);
     setHovered(hit && isEnabledInTree(hit) ? hit : nullptr);
     updatePressedState();
     if (refreshWasRequested) mHitTestDirty = false;
 }
 
-void Surface::update(std::chrono::milliseconds elapsed) {
-    if (elapsed.count() <= 0 || mLongClickFired) return;
-    WidgetRef<Widget> target(mLongClickTarget.get());
-    if (!target || mPressed.get() != target.get() || mHovered.get() != target.get() || !isEnabledInTree(target.get())) {
-        resetLongClick();
-        return;
-    }
-    mLongClickElapsed += elapsed;
-    const std::chrono::milliseconds delay = target->longClickDelay().value_or(defaultLongClickDelay());
-    if (mLongClickElapsed < delay) return;
-    mLongClickFired = true;
-    target->dispatchLongClickEvent(mLongClickElapsed);
+void Surface::setHovered(Element* node) {
+    if (mHovered == node) return;
+    if (Element* hovered = mHovered) hovered->setState(ElementState::Hovered, false);
+    mHovered = node;
+    if (Element* hovered = mHovered) hovered->setState(ElementState::Hovered, true);
 }
 
-void Surface::setHovered(Widget* node) {
-    if (mHovered.get() == node) return;
-    if (Widget* hovered = mHovered.get()) hovered->setState(WidgetState::Hovered, false);
-    mHovered.set(node);
-    if (Widget* hovered = mHovered.get()) hovered->setState(WidgetState::Hovered, true);
-}
-
-void Surface::setFocused(Widget* node, bool focusVisible) {
-    if (mFocused.get() == node) {
-        if (node) node->setState(WidgetState::FocusVisible, focusVisible);
+void Surface::setFocused(Element* node, bool focusVisible) {
+    if (mFocused == node) {
+        if (node) node->setState(ElementState::FocusVisible, focusVisible);
         return;
     }
-    if (Widget* focused = mFocused.get()) {
+    if (Element* focused = mFocused) {
         clearKeyboardPress();
-        focused->setState(WidgetState::Focused, false);
-        focused->setState(WidgetState::FocusVisible, false);
+        focused->setState(ElementState::Focused, false);
+        focused->setState(ElementState::FocusVisible, false);
     }
-    mFocused.set(node);
-    if (Widget* focused = mFocused.get()) {
-        focused->setState(WidgetState::Focused, true);
-        focused->setState(WidgetState::FocusVisible, focusVisible);
+    mFocused = node;
+    if (Element* focused = mFocused) {
+        focused->setState(ElementState::Focused, true);
+        focused->setState(ElementState::FocusVisible, focusVisible);
     }
 }
 
-bool Surface::isEnabledInTree(const Widget* node) const {
-    if (!node) return false;
+bool Surface::isEnabledInTree(const Element* node) const {
+    if (!node || node->mSurface != this) return false;
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
-    for (const Widget* current = node; current; current = current->parent()) {
+    for (const Element* current = node; current; current = current->parentElement()) {
         if (!current->isVisible(styles.style(*current)) || current->disabled()) return false;
         if (isSurfaceRoot(current)) return true;
     }
     return false;
 }
 
-bool Surface::isRootedInSurface(const Widget* node) const {
-    for (const Widget* current = node; current; current = current->parent())
-        if (isSurfaceRoot(current)) return true;
-    return false;
+bool Surface::isRootedInSurface(const Element* node) const {
+    if (!node || node->mSurface != this) return false;
+    const Element* root = mountedRoot(node);
+    return root && root->mSurface == this;
 }
 
-bool Surface::isFocusableInTree(const Widget* node) const {
+bool Surface::isFocusableInTree(const Element* node) const {
     return node && node->focusable() && isEnabledInTree(node);
 }
 
 void Surface::validateFocus() {
-    Widget* focused = mFocused.get();
-    if (focused && hasActiveModal()) {
-        const Widget* current = focused;
-        const Widget* modalRoot = &layerRoot(SurfaceLayer::Modal);
-        while (current && current != modalRoot) current = current->parent();
-        if (current != modalRoot) {
-            setFocused(nullptr, false);
-            return;
-        }
+    Element* focused = mFocused;
+    if (focused && hasActiveModal() && layerOf(focused) != SurfaceLayer::Modal) {
+        setFocused(nullptr, false);
+        return;
     }
     if (focused && !isFocusableInTree(focused)) setFocused(nullptr, false);
 }
 
 void Surface::clearKeyboardPress() {
-    if (Widget* pressed = mKeyPressed.get()) pressed->setState(WidgetState::Active, false);
-    mKeyPressed.set(nullptr);
+    if (Element* pressed = mKeyPressed) pressed->setState(ElementState::Active, false);
+    mKeyPressed = nullptr;
     mPressedKey = 0;
 }
 
 void Surface::updatePressedState() {
-    if (Widget* pressed = mPressed.get()) pressed->setState(WidgetState::Active, mHovered.get() == pressed);
+    if (Element* pressed = mPressed) pressed->setState(ElementState::Active, mHovered == pressed);
 }
 
-void Surface::widgetBecameUnavailable(Widget&) {
-    if (Widget* captured = mCaptured.get(); captured && !isEnabledInTree(captured)) {
-        mCaptured.set(nullptr);
+void Surface::elementBecameUnavailable(Element&) {
+    if (mScrollbarCapture && (!mScrollbarCapture->element || !isEnabledInTree(mScrollbarCapture->element))) {
+        mScrollbarCapture.reset();
+        requestPaint();
+    }
+    if (mScrollbarHover && (!mScrollbarHover->element || !isEnabledInTree(mScrollbarHover->element))) setScrollbarHover(std::nullopt);
+    if (Element* captured = mCaptured; captured && !isEnabledInTree(captured)) {
+        mCaptured = nullptr;
         captured->endPointerInteraction({mPointerPosition});
         mResizeCursor = CursorStyle::Auto;
     }
-    if (Widget* pressed = mPressed.get(); pressed && !isEnabledInTree(pressed)) {
-        pressed->setState(WidgetState::Active, false);
-        mPressed.set(nullptr);
+    if (Element* pressed = mPressed; pressed && !isEnabledInTree(pressed)) {
+        pressed->setState(ElementState::Active, false);
+        mPressed = nullptr;
     }
-    if (Widget* hovered = mHovered.get(); hovered && !isEnabledInTree(hovered)) setHovered(nullptr);
-    if (Widget* keyPressed = mKeyPressed.get(); keyPressed && !isEnabledInTree(keyPressed)) clearKeyboardPress();
-    if (Widget* target = mLongClickTarget.get(); target && !isEnabledInTree(target)) resetLongClick();
+    if (Element* hovered = mHovered; hovered && !isEnabledInTree(hovered)) setHovered(nullptr);
+    if (Element* keyPressed = mKeyPressed; keyPressed && !isEnabledInTree(keyPressed)) clearKeyboardPress();
     validateFocus();
 }
 
-void Surface::resetLongClick() {
-    mLongClickTarget.set(nullptr);
-    mLongClickElapsed = std::chrono::milliseconds(0);
-    mLongClickFired = false;
-}
-
-std::chrono::milliseconds Surface::defaultLongClickDelay() const {
-    return mSystem ? mSystem->longClickDelay() : System::defaultLongClickDelay();
-}
-
 bool Surface::moveFocus(bool backwards) {
-    if (!mRoot) return false;
-    std::vector<WidgetRef<Widget>> focusable;
+    std::vector<ElementRef<Element>> focusable;
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
-    if (hasActiveModal()) collectFocusable(layerRoot(SurfaceLayer::Modal), focusable, styles);
+    const auto collectLayer = [&](SurfaceLayer layer) {
+        for (const auto& root : roots(layer)) collectFocusable(*root, focusable, styles);
+    };
+    if (hasActiveModal()) collectLayer(SurfaceLayer::Modal);
     else {
-        collectFocusable(*mRoot, focusable, styles);
-        collectFocusable(layerRoot(SurfaceLayer::Floater), focusable, styles);
-        collectFocusable(layerRoot(SurfaceLayer::Popup), focusable, styles);
+        collectLayer(SurfaceLayer::Content);
+        collectLayer(SurfaceLayer::Floater);
+        collectLayer(SurfaceLayer::Popup);
     }
     if (focusable.empty()) return false;
 
     focusable.erase(
-        std::remove_if(focusable.begin(), focusable.end(), [this](const WidgetRef<Widget>& ref) { return !ref || !isFocusableInTree(ref.get()); }),
+        std::remove_if(focusable.begin(), focusable.end(), [this](const ElementRef<Element>& ref) { return !ref || !isFocusableInTree(ref.get()); }),
         focusable.end());
     if (focusable.empty()) return false;
 
-    const auto current =
-        std::find_if(focusable.begin(), focusable.end(), [this](const WidgetRef<Widget>& ref) { return ref.get() == mFocused.get(); });
-    WidgetRef<Widget> next;
+    const auto current = std::find_if(focusable.begin(), focusable.end(), [this](const ElementRef<Element>& ref) { return ref.get() == mFocused; });
+    ElementRef<Element> next;
     if (current == focusable.end()) next = backwards ? focusable.back() : focusable.front();
     else if (backwards) next = current == focusable.begin() ? focusable.back() : *(current - 1);
     else next = std::next(current) == focusable.end() ? focusable.front() : *std::next(current);
-    if (Widget* focused = next.get()) setFocused(focused, true);
+    if (Element* focused = next.get()) setFocused(focused, true);
     return true;
 }
 } // namespace radia::ui

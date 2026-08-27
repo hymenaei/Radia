@@ -16,7 +16,7 @@ add_library(ll::gmock_main ALIAS GTest::gmock_main)
 include(GoogleTest)
 include(LLTestCommand)
 
-function(_RD_GOOGLETEST_SOURCE_FILES OUTVAR)
+function(_GOOGLETEST_SOURCE_FILES OUTVAR)
   set(test_sources)
 
   foreach(source IN LISTS ARGN)
@@ -43,7 +43,7 @@ function(_RD_GOOGLETEST_SOURCE_FILES OUTVAR)
   set(${OUTVAR} "${test_sources}" PARENT_SCOPE)
 endfunction()
 
-function(_RD_ADD_GOOGLETEST_TARGET target sources link_targets)
+function(_ADD_GOOGLETEST_TARGET target sources link_targets)
   add_executable(${target} ${sources})
   target_link_libraries(${target}
     PRIVATE
@@ -58,7 +58,7 @@ function(_RD_ADD_GOOGLETEST_TARGET target sources link_targets)
 
   set_target_properties(${target}
     PROPERTIES
-    FOLDER "Tests/GoogleTest"
+    FOLDER "Tests"
     RUNTIME_OUTPUT_DIRECTORY "${EXE_STAGING_DIR}"
   )
 
@@ -123,13 +123,13 @@ function(_RD_ADD_GOOGLETEST_TARGET target sources link_targets)
   )
 endfunction()
 
-function(RD_ADD_UNIT_TESTS project sources)
+function(ADD_UNIT_TESTS project sources)
   if(ARGC LESS 2)
-    message(FATAL_ERROR "RD_ADD_UNIT_TESTS requires a project and source list")
+    message(FATAL_ERROR "ADD_UNIT_TESTS requires a project and source list")
   endif()
 
   if(NOT project)
-    message(FATAL_ERROR "RD_ADD_UNIT_TESTS requires a project")
+    message(FATAL_ERROR "ADD_UNIT_TESTS requires a project")
   endif()
 
   # An empty source list is a valid no-op while a module is being migrated.
@@ -137,13 +137,69 @@ function(RD_ADD_UNIT_TESTS project sources)
     return()
   endif()
 
-  _RD_GOOGLETEST_SOURCE_FILES(test_sources ${sources})
+  cmake_parse_arguments(
+    UNIT_TEST
+    ""
+    ""
+    "IMPLEMENTATION_SOURCES;LINK_TARGETS;INCLUDE_DIRECTORIES"
+    ${ARGN}
+  )
 
-  set(test_target "${project}_tests")
-  _RD_ADD_GOOGLETEST_TARGET("${test_target}" "${test_sources}" "${project}")
+  _GOOGLETEST_SOURCE_FILES(test_sources ${sources})
+
+  set(test_target "UNIT_TESTS_${project}")
+  set(test_target_sources ${test_sources})
+  set(test_include_directories ${UNIT_TEST_INCLUDE_DIRECTORIES})
+
+  if(TARGET "${project}")
+    get_target_property(project_type "${project}" TYPE)
+  endif()
+
+  if(UNIT_TEST_IMPLEMENTATION_SOURCES)
+    set(test_implementation_sources ${UNIT_TEST_IMPLEMENTATION_SOURCES})
+  elseif(project_type STREQUAL "EXECUTABLE")
+    # Pair each logical source with its implementation source by default.
+    set(test_implementation_sources ${sources})
+  endif()
+  list(APPEND test_target_sources ${test_implementation_sources})
+
+  if(UNIT_TEST_LINK_TARGETS)
+    set(test_link_targets ${UNIT_TEST_LINK_TARGETS})
+  elseif(project_type STREQUAL "EXECUTABLE")
+    # An executable cannot provide its object files through a normal link.
+    # LINK_LIBRARIES remains a useful fallback for executable targets that
+    # already expose a suitable dependency set.
+    get_target_property(test_link_targets
+      "${project}"
+      LINK_LIBRARIES
+    )
+    if(NOT test_link_targets OR "${test_link_targets}" MATCHES "-NOTFOUND$")
+      message(FATAL_ERROR
+        "ADD_UNIT_TESTS executable project ${project} requires "
+        "LINK_TARGETS or LINK_LIBRARIES.")
+    endif()
+  else()
+    set(test_link_targets ${project})
+  endif()
+
+  if(project_type STREQUAL "EXECUTABLE")
+    get_target_property(project_include_directories
+      "${project}"
+      INCLUDE_DIRECTORIES
+    )
+    if(NOT "${project_include_directories}" MATCHES "-NOTFOUND$")
+      list(APPEND test_include_directories ${project_include_directories})
+    endif()
+    list(APPEND test_include_directories "${CMAKE_CURRENT_SOURCE_DIR}")
+  endif()
+
+  _ADD_GOOGLETEST_TARGET("${test_target}" "${test_target_sources}" "${test_link_targets}")
+  if(test_include_directories)
+    target_include_directories("${test_target}" PRIVATE ${test_include_directories})
+  endif()
 endfunction()
 
-function(RD_ADD_INTEGRATION_TEST
+function(ADD_INTEGRATION_TEST
     testname
     additional_source_files
     library_dependencies
@@ -151,16 +207,16 @@ function(RD_ADD_INTEGRATION_TEST
   )
   if(ARGC LESS 4)
     message(FATAL_ERROR
-      "RD_ADD_INTEGRATION_TEST requires a test name, source files, "
+      "ADD_INTEGRATION_TEST requires a test name, source files, "
       "library dependencies, and project")
   endif()
 
   if(NOT testname)
-    message(FATAL_ERROR "RD_ADD_INTEGRATION_TEST requires a test name")
+    message(FATAL_ERROR "ADD_INTEGRATION_TEST requires a test name")
   endif()
 
   if(NOT test_project)
-    message(FATAL_ERROR "RD_ADD_INTEGRATION_TEST requires a project")
+    message(FATAL_ERROR "ADD_INTEGRATION_TEST requires a project")
   endif()
 
   set(test_source
@@ -168,21 +224,16 @@ function(RD_ADD_INTEGRATION_TEST
   )
   if(NOT EXISTS "${test_source}")
     message(FATAL_ERROR
-      "RD_ADD_INTEGRATION_TEST expected test source ${test_source}")
+      "ADD_INTEGRATION_TEST expected test source ${test_source}")
   endif()
 
   set(test_sources "${test_source}")
   list(APPEND test_sources ${additional_source_files})
 
-  set(test_target "${test_project}_${testname}_integration_test")
-  _RD_ADD_GOOGLETEST_TARGET(
+  set(test_target "INTEGRATION_TEST_${test_project}_${testname}")
+  _ADD_GOOGLETEST_TARGET(
     "${test_target}"
     "${test_sources}"
     "${library_dependencies}"
-  )
-
-  set_target_properties("${test_target}"
-    PROPERTIES
-    FOLDER "Tests/GoogleTest/${test_project}"
   )
 endfunction()

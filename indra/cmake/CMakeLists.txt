@@ -28,6 +28,7 @@ set(cmake_SOURCE_FILES
         GLIB.cmake
         GLM.cmake
         GStreamer10Plugin.cmake
+        GenerateDefaultStylesheet.cmake
         Havok.cmake
         Hunspell.cmake
         JPEG.cmake

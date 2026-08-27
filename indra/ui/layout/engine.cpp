@@ -1,92 +1,79 @@
 /**
- * @file engine.cpp
- * @brief Coordinates layout transactions and exposes public layout statistics.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
 #include "linden_common.h"
 #include "layout/engineinternal.h"
 #include "layout/layoutcontext.h"
+#include "surface/surface.h"
 #include "text/metrics.h"
 
 namespace radia::ui {
-Style resolveWidgetStyle(const StyleSheet& styleSheet, const Widget& node) {
-    LayoutPass pass(styleSheet, fixedTextMetrics());
+Style resolveElementStyle(const StyleSheet& styleSheet, const Element& node) {
+    LayoutPass pass(styleSheet, fixedTextMetrics(), node.mSurface ? node.mSurface->layoutDirection() : LayoutDirection::LeftToRight);
     return pass.style(node);
 }
 
-Vec2 LayoutEngine::measure(Widget& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics, std::optional<float> outerWidth,
+Vec2 LayoutEngine::measure(Element& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics, std::optional<float> outerWidth,
                            std::optional<float> outerHeight) {
-    LayoutPass pass(styleSheet, textMetrics);
+    LayoutPass pass(styleSheet, textMetrics, node.mSurface ? node.mSurface->layoutDirection() : LayoutDirection::LeftToRight);
     return measure(node, pass, outerWidth, outerHeight);
 }
 
-LayoutStatistics LayoutEngine::arrange(Widget& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction) {
-    return run(node, styleSheet, textMetrics, direction);
+LayoutStatistics LayoutEngine::arrange(Element& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction,
+                                       ScrollLayoutOptions scrollOptions) {
+    return run(node, styleSheet, textMetrics, direction, scrollOptions);
 }
 
-LayoutStatistics LayoutEngine::layout(Widget& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction) {
-    return run(node, styleSheet, textMetrics, direction);
+LayoutStatistics LayoutEngine::layout(Element& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction,
+                                      ScrollLayoutOptions scrollOptions) {
+    return run(node, styleSheet, textMetrics, direction, scrollOptions);
 }
 
-LayoutStatistics LayoutEngine::layout(Widget& node, StylePass& styles, LayoutDirection direction) {
-    return run(node, styles, direction);
+LayoutStatistics LayoutEngine::layout(Element& node, StylePass& styles, ScrollLayoutOptions scrollOptions) {
+    return run(node, styles, scrollOptions);
 }
 
-LayoutStatistics LayoutEngine::run(Widget& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction) {
-    LayoutPass pass(styleSheet, textMetrics);
-    return runWithPass(node, direction, pass);
+LayoutStatistics LayoutEngine::run(Element& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction,
+                                   ScrollLayoutOptions scrollOptions) {
+    LayoutPass pass(styleSheet, textMetrics, direction, scrollOptions);
+    return runWithPass(node, pass);
 }
 
-LayoutStatistics LayoutEngine::run(Widget& node, StylePass& styles, LayoutDirection direction) {
-    LayoutPass pass(styles);
-    return runWithPass(node, direction, pass);
+LayoutStatistics LayoutEngine::run(Element& node, StylePass& styles, ScrollLayoutOptions scrollOptions) {
+    LayoutPass pass(styles, scrollOptions);
+    return runWithPass(node, pass);
 }
 
-LayoutStatistics LayoutEngine::runWithPass(Widget& node, LayoutDirection direction, LayoutPass& pass) {
+LayoutStatistics LayoutEngine::runWithPass(Element& node, LayoutPass& pass) {
     const NodeSnapshot state(node);
     measure(node, pass);
-    Widget* current = state.get();
+    Element* current = state.get();
     if (!state.valid()) return pass.statistics();
-    if (current->isDisplayed(pass.style(*current))) arrangeNode(*current, direction, pass);
+    if (current->isDisplayed(pass.style(*current))) arrangeNode(*current, pass);
     return pass.statistics();
 }
 
-Vec2 measureWidget(const Widget& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics) {
-    return LayoutEngine::measure(const_cast<Widget&>(node), styleSheet, textMetrics);
+Vec2 measureElement(const Element& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics) {
+    return LayoutEngine::measure(const_cast<Element&>(node), styleSheet, textMetrics);
 }
 
-void measureTree(Widget& root, const StyleSheet& styleSheet, const TextMetrics& textMetrics) {
+void measureTree(Element& root, const StyleSheet& styleSheet, const TextMetrics& textMetrics) {
     LayoutEngine::measure(root, styleSheet, textMetrics);
 }
 
-void arrangeTree(Widget& root, const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction) {
-    LayoutEngine::arrange(root, styleSheet, textMetrics, direction);
+void arrangeTree(Element& root, const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction,
+                 ScrollLayoutOptions scrollOptions) {
+    LayoutEngine::arrange(root, styleSheet, textMetrics, direction, scrollOptions);
 }
 
-LayoutStatistics layoutTree(Widget& root, const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction) {
-    return LayoutEngine::layout(root, styleSheet, textMetrics, direction);
+LayoutStatistics layoutTree(Element& root, const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction,
+                            ScrollLayoutOptions scrollOptions) {
+    return LayoutEngine::layout(root, styleSheet, textMetrics, direction, scrollOptions);
 }
 
-LayoutStatistics layoutTreeUsingStylePass(Widget& root, StylePass& styles, LayoutDirection direction) {
-    return LayoutEngine::layout(root, styles, direction);
+LayoutStatistics layoutTreeUsingStylePass(Element& root, StylePass& styles, ScrollLayoutOptions scrollOptions) {
+    return LayoutEngine::layout(root, styles, scrollOptions);
 }
 } // namespace radia::ui

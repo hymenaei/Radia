@@ -1,39 +1,20 @@
 /**
- * @file resize.cpp
- * @brief Resolves floater resize edges, constraints, and pointer behavior.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
 #include "linden_common.h"
 #include <algorithm>
+#include "elements/floater.h"
 #include "layout/engine.h"
 #include "style/stylepass.h"
 #include "surface/floaterresize.h"
 #include "surface/surface.h"
-#include "widgets/floater.h"
-#include "widgets/panel.h"
+#include "surface/surfaceinternal.h"
 
 namespace radia::ui {
 namespace {
-bool blocksPointerEvents(const Floater& floater, const Style& style) {
+bool blocksPointerEvents(const FloaterElement& floater, const Style& style) {
     const PointerEvents policy = style.pointerEvents;
     if (policy == PointerEvents::Auto) return true;
     if (policy == PointerEvents::PassThrough) return false;
@@ -41,9 +22,9 @@ bool blocksPointerEvents(const Floater& floater, const Style& style) {
 }
 } // namespace
 
-Vec2 Surface::minimumFloaterSize(const Floater& floater) const {
+Vec2 Surface::minimumFloaterSize(const FloaterElement& floater) const {
     const Vec2 authoredSize = floater.authoredSize();
-    const WidgetSnapshot floaterSnapshot = snapshot(const_cast<Floater&>(floater));
+    const ElementSnapshot floaterSnapshot = snapshot(const_cast<FloaterElement&>(floater));
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
     const Style& floaterStyle = styles.style(floater);
@@ -51,38 +32,38 @@ Vec2 Surface::minimumFloaterSize(const Floater& floater) const {
     Vec2 minimum{floaterStyle.minWidth ? floaterStyle.minWidth->resolve(authoredSize.x) : 0.f,
                  floaterStyle.minHeight ? floaterStyle.minHeight->resolve(authoredSize.y) : 0.f};
 
-    if (const Panel* header = floater.header()) {
-        const WidgetSnapshot headerSnapshot = snapshot(*const_cast<Panel*>(header));
-        const Vec2 measured = measureWidget(*header, *mStyleSheet, mTextMetrics);
-        if (!snapshotValid(floaterSnapshot) || !snapshotChildValid(headerSnapshot, floater)) return {};
-        const Style& headerStyle = styles.style(*header);
-        if (!snapshotValid(floaterSnapshot) || !snapshotChildValid(headerSnapshot, floater)) return {};
-        minimum.x = std::max(minimum.x, measured.x + headerStyle.margin.horizontal() + floaterStyle.padding.horizontal());
-        minimum.y = std::max(minimum.y, measured.y + headerStyle.margin.vertical() + floaterStyle.padding.vertical());
+    if (const Element* head = floater.head()) {
+        const ElementSnapshot headSnapshot = snapshot(*const_cast<Element*>(head));
+        const Vec2 measured = measureElement(*head, *mStyleSheet, mTextMetrics);
+        if (!snapshotValid(floaterSnapshot) || !snapshotChildValid(headSnapshot, floater)) return {};
+        const Style& headStyle = styles.style(*head);
+        if (!snapshotValid(floaterSnapshot) || !snapshotChildValid(headSnapshot, floater)) return {};
+        minimum.x = std::max(minimum.x, measured.x + headStyle.margin.horizontal() + floaterStyle.padding.horizontal());
+        minimum.y = std::max(minimum.y, measured.y + headStyle.margin.vertical() + floaterStyle.padding.vertical());
     }
     return minimum;
 }
 
-Floater* Surface::resizeFloaterAt(const Vec2& point, std::uint8_t& edges) const {
+FloaterElement* Surface::resizeFloaterAt(const Vec2& point, std::uint8_t& edges) const {
     edges = 0;
     if (!mViewport.contains(point)) return nullptr;
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
-    const auto findInLayer = [&](SurfaceLayer layer) -> Floater* {
-        const StylePass::ChildSnapshot children = styles.sourceChildren(layerRoot(layer));
-        for (auto child = children->rbegin(); child != children->rend(); ++child) {
-            auto* floater = dynamic_cast<Floater*>(child->get());
+    const auto findInLayer = [&](SurfaceLayer layer) -> FloaterElement* {
+        const RootList& layerRoots = roots(layer);
+        for (auto child = layerRoots.rbegin(); child != layerRoots.rend(); ++child) {
+            auto* floater = dynamic_cast<FloaterElement*>(*child);
             if (!floater || floater->closed()) continue;
-            const WidgetSnapshot floaterSnapshot = snapshot(*floater);
+            const ElementSnapshot floaterSnapshot = snapshot(*floater);
             const Style& floaterStyle = styles.style(*floater);
             if (!snapshotValid(floaterSnapshot) || !isRootedInSurface(floaterSnapshot.lifetime.get()) || !floater->isVisible(floaterStyle)) continue;
             const bool floaterBlocksPointerEvents = blocksPointerEvents(*floater, floaterStyle);
             if (!snapshotValid(floaterSnapshot) || !isRootedInSurface(floaterSnapshot.lifetime.get())) continue;
-            floater = dynamic_cast<Floater*>(floaterSnapshot.lifetime.get());
+            floater = dynamic_cast<FloaterElement*>(floaterSnapshot.lifetime.get());
             if (!floater || floater->closed() || !floater->isVisible(floaterStyle)) continue;
             if (!floaterBlocksPointerEvents) {
                 const bool descendantHit = hitTestNode(*floater, point, mViewport, styles) != nullptr;
-                floater = dynamic_cast<Floater*>(floaterSnapshot.lifetime.get());
+                floater = dynamic_cast<FloaterElement*>(floaterSnapshot.lifetime.get());
                 if (!snapshotValid(floaterSnapshot)
                     || !floater
                     || !isRootedInSurface(floater)
@@ -94,7 +75,7 @@ Floater* Surface::resizeFloaterAt(const Vec2& point, std::uint8_t& edges) const 
                 continue;
             }
             if (!floater->rect().contains(point)) continue;
-            if (!floater->canResize() || floater->minimized()) return nullptr;
+            if (!floater->resizeable() || floater->minimized()) return nullptr;
             const detail::ResizeEdges hit = detail::resizeEdgesAt(floater->rect(), point);
             if (hit == detail::ResizeEdges::NoEdges) return nullptr;
             edges = static_cast<std::uint8_t>(hit);
@@ -108,8 +89,9 @@ Floater* Surface::resizeFloaterAt(const Vec2& point, std::uint8_t& edges) const 
 }
 
 void Surface::updateResizeCursor(const Vec2& point) {
-    if (Widget* captured = mCaptured.get()) {
-        if (auto* floater = dynamic_cast<Floater*>(captured); floater && floater->mInteraction == Floater::FloaterInteraction::Resize) return;
+    if (Element* captured = mCaptured) {
+        if (auto* floater = dynamic_cast<FloaterElement*>(captured); floater && floater->mInteraction == FloaterElement::FloaterInteraction::Resize)
+            return;
     }
     std::uint8_t edges = 0;
     resizeFloaterAt(point, edges);

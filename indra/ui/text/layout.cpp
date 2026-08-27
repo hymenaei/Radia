@@ -1,25 +1,6 @@
 /**
- * @file layout.cpp
- * @brief Wraps, truncates, orders, and measures styled text lines.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
 #include "linden_common.h"
@@ -80,8 +61,7 @@ LogicalLine logicalLine(const TextLine& line) {
     result.sources.reserve(line.size());
     for (std::size_t source = 0; source < line.size(); ++source) {
         const std::size_t begin = result.value.size();
-        if (line[source].keybinding()) result.value.push_back(0xfffc);
-        else result.value += utf8str_to_wstring(line[source].value);
+        result.value += utf8str_to_wstring(line[source].value);
         result.sources.push_back({begin, result.value.size(), source});
     }
     return result;
@@ -111,7 +91,8 @@ std::vector<std::size_t> unicodeBoundaries(const LLWString& wide, UBreakIterator
     std::vector<std::size_t> result;
     for (int32_t boundary = ubrk_first(iterator.get()); boundary != UBRK_DONE; boundary = ubrk_next(iterator.get())) {
         const auto found = std::lower_bound(codepointToUtf16Offsets.begin(), codepointToUtf16Offsets.end(), boundary);
-        if (found != codepointToUtf16Offsets.end() && *found == boundary) result.push_back(static_cast<std::size_t>(found - codepointToUtf16Offsets.begin()));
+        if (found != codepointToUtf16Offsets.end() && *found == boundary)
+            result.push_back(static_cast<std::size_t>(found - codepointToUtf16Offsets.begin()));
     }
     return result;
 }
@@ -162,8 +143,7 @@ std::vector<TextChunk> lineBreakChunks(const TextLine& line, const TextMetrics& 
             const std::size_t end = std::min(chunkEnd, range.end);
             if (begin >= end) continue;
             const TextRun& run = line[range.source];
-            if (run.keybinding()) chunk.push_back({run, range.source, false});
-            else appendStyledAtoms(chunk, logical.value.substr(begin, end - begin), range.source, run.style, metrics);
+            appendStyledAtoms(chunk, logical.value.substr(begin, end - begin), range.source, run.style, metrics);
         }
         if (!chunk.empty()) chunks.push_back(std::move(chunk));
     }
@@ -189,15 +169,12 @@ std::vector<TextChunk> characterClusters(const TextLine& line, const TextMetrics
             const std::size_t end = std::min(clusterEnd, range.end);
             if (begin >= end) continue;
             const TextRun& run = line[range.source];
-            if (run.keybinding()) cluster.push_back({run, range.source, false});
-            else {
-                const LLWString value = logical.value.substr(begin, end - begin);
-                cluster.push_back({
-                    makeRun(wstring_to_utf8str(value), run.style, metrics),
-                    range.source,
-                    whitespace(value),
-                });
-            }
+            const LLWString value = logical.value.substr(begin, end - begin);
+            cluster.push_back({
+                makeRun(wstring_to_utf8str(value), run.style, metrics),
+                range.source,
+                whitespace(value),
+            });
         }
         if (!cluster.empty()) result.push_back(std::move(cluster));
     }
@@ -205,14 +182,13 @@ std::vector<TextChunk> characterClusters(const TextLine& line, const TextMetrics
 }
 
 void appendAtom(TextLine& line, const TextAtom& atom, std::size_t& previousSourceIndex) {
-    if (!atom.run.keybinding() && !line.empty() && atom.source == previousSourceIndex) line.back().value += atom.run.value;
+    if (!line.empty() && atom.source == previousSourceIndex) line.back().value += atom.run.value;
     else line.push_back(atom.run);
     previousSourceIndex = atom.source;
 }
 
 void measureRuns(TextLine& line, const TextMetrics& metrics) {
-    for (TextRun& run : line)
-        if (!run.keybinding()) run.size = metrics.measureText(run.value, run.style);
+    for (TextRun& run : line) run.size = metrics.measureText(run.value, run.style);
 }
 
 TextLine coalesce(const std::vector<TextAtom>& atoms, const TextMetrics& metrics) {
@@ -289,7 +265,7 @@ private:
     }
 
     void appendRun(const TextRun& run, std::size_t source) {
-        if (!mLine.empty() && !run.keybinding() && !mLine.back().keybinding() && mLastSource == source) {
+        if (!mLine.empty() && mLastSource == source) {
             const float previousSpacing = mLine.size() > 1 ? interRunSpacing(mLine[mLine.size() - 2], mLine.back(), mMetrics) : 0.f;
             mWidth -= mLine.back().size.x + previousSpacing;
             mLine.back().value += run.value;
@@ -339,11 +315,8 @@ TextLine visualRuns(const TextLine& line, LayoutDirection direction, const TextM
     ranges.reserve(line.size());
     for (const TextRun& run : line) {
         const std::size_t begin = logical.size();
-        if (run.keybinding()) logical.push_back(0xfffc);
-        else {
-            const LLWString wide = utf8str_to_wstring(run.value);
-            for (llwchar character : wide) logical.push_back(static_cast<FriBidiChar>(character));
-        }
+        const LLWString wide = utf8str_to_wstring(run.value);
+        for (llwchar character : wide) logical.push_back(static_cast<FriBidiChar>(character));
         ranges.emplace_back(begin, logical.size());
     }
     if (logical.empty() || logical.size() > static_cast<std::size_t>(std::numeric_limits<FriBidiStrIndex>::max())) return line;
@@ -363,10 +336,6 @@ TextLine visualRuns(const TextLine& line, LayoutDirection direction, const TextM
     std::vector<VisualRun> segments;
     for (std::size_t runIndex = 0; runIndex < line.size(); ++runIndex) {
         const auto [runBegin, runEnd] = ranges[runIndex];
-        if (line[runIndex].keybinding()) {
-            segments.push_back({logicalToVisual[runBegin], line[runIndex]});
-            continue;
-        }
         std::size_t begin = runBegin;
         while (begin < runEnd) {
             std::size_t end = begin + 1;
@@ -464,7 +433,7 @@ TextLine truncateLine(const TextLine& line, float available, float fallbackHeigh
 } // namespace
 
 float interRunSpacing(const TextRun& left, const TextRun& right, const TextMetrics& metrics) {
-    if (left.keybinding() || right.keybinding() || left.value.empty() || right.value.empty()) return 0.f;
+    if (left.value.empty() || right.value.empty()) return 0.f;
     const LLWString leftWide = utf8str_to_wstring(left.value);
     LLWString joined = leftWide;
     joined += utf8str_to_wstring(right.value);

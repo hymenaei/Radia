@@ -1,35 +1,15 @@
 /**
- * @file engine.h
- * @brief Coordinates layout transactions and exposes public layout statistics.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
-#ifndef RD_LAYOUT_ENGINE_H
-#define RD_LAYOUT_ENGINE_H
+#pragma once
 
 #include <cstddef>
 #include "types.h"
 
 namespace radia::ui {
-class Widget;
+class Element;
 struct Style;
 class StyleSheet;
 class TextMetrics;
@@ -41,12 +21,11 @@ struct LayoutStatistics {
     std::size_t skippedNodes = 0;
 };
 
-Style resolveWidgetStyle(const StyleSheet& styleSheet, const Widget& node);
-Vec2 measureWidget(const Widget& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics);
-void measureTree(Widget& root, const StyleSheet& styleSheet, const TextMetrics& textMetrics);
-void arrangeTree(Widget& root, const StyleSheet& styleSheet, const TextMetrics& textMetrics,
-                 LayoutDirection direction = LayoutDirection::LeftToRight);
-LayoutStatistics layoutTree(Widget& root, const StyleSheet& styleSheet, const TextMetrics& textMetrics,
-                            LayoutDirection direction = LayoutDirection::LeftToRight);
+Style resolveElementStyle(const StyleSheet& styleSheet, const Element& node);
+Vec2 measureElement(const Element& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics);
+void measureTree(Element& root, const StyleSheet& styleSheet, const TextMetrics& textMetrics);
+void arrangeTree(Element& root, const StyleSheet& styleSheet, const TextMetrics& textMetrics,
+                 LayoutDirection direction = LayoutDirection::LeftToRight, ScrollLayoutOptions scrollOptions = {});
+LayoutStatistics layoutTree(Element& root, const StyleSheet& styleSheet, const TextMetrics& textMetrics,
+                            LayoutDirection direction = LayoutDirection::LeftToRight, ScrollLayoutOptions scrollOptions = {});
 } // namespace radia::ui
-#endif // RD_LAYOUT_ENGINE_H

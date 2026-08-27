@@ -1,29 +1,9 @@
 /**
- * @file binder.h
- * @brief Validates and commits controller bindings to UI Widget trees.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
-#ifndef RD_BINDING_BINDER_H
-#define RD_BINDING_BINDER_H
+#pragma once
 
 #include <functional>
 #include <limits>
@@ -40,26 +20,37 @@
 #include "binding/settingresolver.h"
 #include "binding/valuebinding.h"
 #include "diagnostic.h"
-#include "widgets/widget.h"
+#include "elements/element.h"
+#include "elements/input.h"
 
 namespace radia::ui {
 class Binder;
-class ValueControl;
 
 class Binding {
     friend class Binder;
 
 public:
     Binding() = default;
+    ~Binding();
     Binding(const Binding&) = delete;
     Binding& operator=(const Binding&) = delete;
-    Binding(Binding&&) noexcept = default;
-    Binding& operator=(Binding&&) noexcept = default;
+    Binding(Binding&& other) noexcept;
+    Binding& operator=(Binding&& other) noexcept;
 
     explicit operator bool() const { return mCommitted; }
 
 private:
-    std::vector<std::shared_ptr<detail::EventHandler>> mHandlers;
+    struct EventAttachment {
+        Element* element = nullptr;
+        std::weak_ptr<char> lifetime;
+        std::string type;
+        EventHandler handler;
+        bool capture = false;
+    };
+
+    void clearEventListeners() noexcept;
+
+    std::vector<EventAttachment> mEventAttachments;
     std::vector<ValueBindingSubscription> mValueSubscriptions;
     bool mCommitted = false;
 };
@@ -91,12 +82,12 @@ struct PreparedBindingResult : DiagnosticResult {
 class Binder {
 public:
     struct EventDeclaration {
-        Widget* widget = nullptr;
-        WidgetEventKind kind = WidgetEventKind::Click;
+        Element* element = nullptr;
+        std::string type;
         const EventCall* call = nullptr;
     };
 
-    explicit Binder(Widget& root, SettingResolver* settingResolver = nullptr) : mRoot(&root), mSettingResolver(settingResolver) {}
+    explicit Binder(Element& root, SettingResolver* settingResolver = nullptr) : mRoot(&root), mSettingResolver(settingResolver) {}
 
     Binder(const Binder&) = delete;
     Binder& operator=(const Binder&) = delete;
@@ -123,9 +114,8 @@ public:
 private:
     struct PendingEventHandler {
         std::string name;
-        std::optional<WidgetEventKind> kind;
-        std::shared_ptr<detail::EventHandler> handler;
-        std::function<const char*(const EventCall&, WidgetEventKind)> argumentError;
+        EventRegistrationDescriptor::Invoke invoke;
+        std::function<const char*(const EventCall&)> argumentError;
         bool valid = false;
     };
 
@@ -141,18 +131,17 @@ private:
     Binder(Binder&&) noexcept = default;
     Binder& operator=(Binder&&) noexcept = default;
 
-    void validate(Widget& root, DiagnosticResult& result);
-    void commit(Widget& root, Binding& binding);
+    void validate(Element& root, DiagnosticResult& result);
+    void commit(Element& root, Binding& binding);
 
-    Widget* mRoot = nullptr;
+    Element* mRoot = nullptr;
     SettingResolver* mSettingResolver = nullptr;
     std::vector<PendingEventHandler> mPendingEventHandlers;
     std::vector<PendingValueRequirement> mPendingValueRequirements;
-    std::vector<ValueControl*> mValueControls;
+    std::vector<InputElement*> mBoundInputs;
     std::map<std::string, std::vector<EventDeclaration>> mEventDeclarations;
     bool mFinished = false;
 
     friend class PreparedBinding;
 };
 } // namespace radia::ui
-#endif // RD_BINDING_BINDER_H

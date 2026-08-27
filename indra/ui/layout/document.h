@@ -1,33 +1,15 @@
 /**
- * @file document.h
- * @brief Parses Layout Resource documents into validated node and attribute trees.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
-#ifndef RD_LAYOUT_DOCUMENT_H
-#define RD_LAYOUT_DOCUMENT_H
+#pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 #include "diagnostic.h"
@@ -44,60 +26,91 @@ struct SourceRange {
     SourceLocation end;
 };
 
-struct LayoutAttribute {
+enum class Tag : uint8_t {
+    Unknown,
+    Abbr,
+    B,
+    Button,
+    Br,
+    Cite,
+    Code,
+    Dfn,
+    Del,
+    Div,
+    Em,
+    Fieldset,
+    Floater,
+    Head,
+    Header,
+    I,
+    Icon,
+    Ins,
+    Kbd,
+    Label,
+    Legend,
+    Link,
+    Mark,
+    Minimize,
+    Close,
+    Panel,
+    Paragraph,
+    Q,
+    S,
+    Small,
+    Strong,
+    Title,
+    U,
+    Input,
+    Body
+};
+
+const char* sourceTagName(Tag tag);
+Tag sourceTagFromName(std::string_view name);
+bool isGenericElementTag(Tag tag);
+bool isLocalizedInlineTag(Tag tag);
+const std::vector<Tag>& genericElementTags();
+const std::vector<Tag>& localizedInlineTags();
+
+struct SourceAttribute {
     std::string authoredName;
     std::string value;
     SourceRange source;
 };
 
-struct LayoutNode;
+using SourceAttributeMap = std::unordered_map<std::string, SourceAttribute>;
 
-struct LayoutContent {
+struct SourceNode;
+
+struct SourceContent {
     SourceRange source;
     std::string text;
-    std::unique_ptr<LayoutNode> node;
+    std::unique_ptr<SourceNode> node;
 
     bool isText() const { return !node; }
 };
 
-struct LayoutNode {
-    std::string name;
+struct SourceNode {
+    Tag tag = Tag::Unknown;
+    std::string authoredName;
     SourceRange source;
-    std::unordered_map<std::string, LayoutAttribute> attributes;
-    std::vector<LayoutContent> content;
+    SourceAttributeMap attributes;
+    std::vector<SourceContent> content;
 };
 
-struct LayoutDocument {
+struct SourceDocument {
     std::string source;
-    std::unique_ptr<LayoutNode> root;
+    std::unique_ptr<SourceNode> root;
 };
 
-using LayoutDocumentMap = std::unordered_map<std::string, std::shared_ptr<const LayoutDocument>>;
+using SourceDocumentMap = std::unordered_map<std::string, std::shared_ptr<const SourceDocument>>;
 
-class LayoutElement final {
-public:
-    explicit LayoutElement(const LayoutNode& node, const LayoutNode* defaults = nullptr) : mNode(node), mDefaults(defaults) {}
-
-    const std::string& name() const { return mNode.name; }
-    const SourceRange& source() const { return mNode.source; }
-    const std::unordered_map<std::string, LayoutAttribute>& attributes() const { return mNode.attributes; }
-    const std::vector<LayoutContent>& content() const { return mNode.content; }
-
-    const LayoutAttribute* attribute(const std::string& name) const;
-
-private:
-    const LayoutNode& mNode;
-    const LayoutNode* mDefaults = nullptr;
-};
-
-struct LayoutDocumentParseResult : DiagnosticResult {
-    std::unique_ptr<LayoutDocument> document;
+struct SourceDocumentParseResult : DiagnosticResult {
+    std::unique_ptr<SourceDocument> document;
     bool ok() const { return !hasErrors() && document && document->root; }
 };
 
-class LayoutDocumentParser final {
+class SourceDocumentParser final {
 public:
-    LayoutDocumentParseResult parse(const std::string& xml, const std::string& source = {}) const;
+    SourceDocumentParseResult parse(const std::string& html, const std::string& source = {}) const;
 };
 } // namespace radia::ui
-#endif // RD_LAYOUT_DOCUMENT_H

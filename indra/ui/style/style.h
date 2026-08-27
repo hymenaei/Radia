@@ -1,29 +1,9 @@
 /**
- * @file style.h
- * @brief Defines typed RSL style values, layout properties, states, and inheritance metadata.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
-#ifndef RD_STYLE_H
-#define RD_STYLE_H
+#pragma once
 
 #include <cstddef>
 #include <cstdint>
@@ -38,6 +18,31 @@ struct Length {
 
     float resolve(float reference) const { return pixels + percent * reference; }
     bool isPercentage() const { return percent != 0.f; }
+};
+
+struct BorderRadius {
+    Length horizontal;
+    Length vertical;
+
+    static BorderRadius uniform(Length radius) { return {radius, radius}; }
+};
+
+struct BorderRadii {
+    BorderRadius topLeft;
+    BorderRadius topRight;
+    BorderRadius bottomRight;
+    BorderRadius bottomLeft;
+
+    static BorderRadii uniform(Length radius) {
+        const BorderRadius corner = BorderRadius::uniform(radius);
+        return {corner, corner, corner, corner};
+    }
+};
+
+struct ScrollbarColors {
+    bool automatic = true;
+    Color thumb;
+    Color track;
 };
 
 class Dimension {
@@ -172,12 +177,27 @@ struct Effect {
 
 inline constexpr std::size_t kMaxEffectCount = 8;
 
-enum class DisplayMode { Inline, Block, Flex, NoneValue };
+struct GridArea {
+    int row = 1;
+    int column = 1;
+};
+
+struct Translate {
+    float x = 0.f;
+    float y = 0.f;
+};
+
+enum class AppearanceMode { Auto, Unstyled };
+enum class DisplayMode { Inline, InlineBlock, Block, Flex, Grid, InlineGrid, NoneValue };
 enum class FlexDirection { Row, Column };
+enum class PositionMode { Static, Relative };
 enum class JustifyContent { Start, Center, End, Left, Right };
+enum class JustifySelf { Auto, Start, Center, End, Stretch };
 enum class AlignItems { Normal, Start, Center, End, Stretch };
 enum class AlignSelf { Auto, Start, Center, End, Stretch };
-enum class Overflow { Visible, Hidden };
+enum class Overflow { Visible, Hidden, Scroll, Auto };
+enum class ScrollbarWidth { Auto, Thin, NoneValue };
+enum class ScrollbarGutter { Auto, Stable, StableBothEdges };
 enum class PointerEvents { Default, Auto, PassThrough };
 enum class CursorStyle {
     Auto,
@@ -211,6 +231,7 @@ enum class CursorStyle {
 enum class TextAlign { Left, Center, Right, Start, End };
 enum class TextOverflow { Clip, Ellipsis, EllipsisCenter };
 enum class TextWrap { Wrap, NoWrap };
+enum class TextDecoration { NoneValue, Underline, LineThrough };
 enum class VerticalAlign { Top, Middle, Bottom };
 enum class FontFamily { Sans };
 
@@ -220,22 +241,28 @@ enum class InheritedStyleProperty : uint16_t {
     FontSize = 1 << 1,
     FontWeight = 1 << 2,
     FontStyle = 1 << 3,
-    LineHeight = 1 << 4,
-    TextColor = 1 << 5,
-    TextAlign = 1 << 6,
-    Cursor = 1 << 7,
-    LetterSpacing = 1 << 8,
-    WordSpacing = 1 << 9,
-    TextWrap = 1 << 10,
-    Visibility = 1 << 11
+    TextDecoration = 1 << 4,
+    LineHeight = 1 << 5,
+    TextColor = 1 << 6,
+    TextAlign = 1 << 7,
+    Cursor = 1 << 8,
+    LetterSpacing = 1 << 9,
+    WordSpacing = 1 << 10,
+    TextWrap = 1 << 11,
+    Visibility = 1 << 12,
+    ScrollbarColor = 1 << 13
 };
 
 using InheritedStyleProperties = uint16_t;
 
 struct Style {
+    AppearanceMode appearance = AppearanceMode::Auto;
     DisplayMode display = DisplayMode::Inline;
     bool displaySet = false;
     FlexDirection flexDirection = FlexDirection::Row;
+    PositionMode position = PositionMode::Static;
+    std::optional<GridArea> gridArea;
+    Translate translate;
     Visibility visibility = Visibility::Visible;
     Color backgroundColor = Color(0.f, 0.f, 0.f, 0.f);
     Color borderColor = Color(0.f, 0.f, 0.f, 1.f);
@@ -246,7 +273,7 @@ struct Style {
     std::vector<BoxShadow> shadows;
     std::vector<Effect> effects;
     Outline outline;
-    float borderRadius = 0.f;
+    BorderRadii borderRadius;
     EdgeInsets borderWidth;
     std::optional<Length> svgStrokeWidth;
     StrokeCap svgStrokeCap = StrokeCap::Butt;
@@ -274,7 +301,7 @@ struct Style {
     FontFamily fontFamily = FontFamily::Sans;
     U16 fontWeight = 400;
     bool fontItalic = false;
-    bool fontStrike = false;
+    TextDecoration textDecoration = TextDecoration::NoneValue;
     TextAlign textAlign = TextAlign::Start;
     TextOverflow textOverflow = TextOverflow::Clip;
     TextWrap textWrap = TextWrap::Wrap;
@@ -284,11 +311,17 @@ struct Style {
     bool flexDirectionSet = false;
     JustifyContent justifyContent = JustifyContent::Start;
     bool justifyContentSet = false;
+    JustifySelf justifySelf = JustifySelf::Auto;
     AlignItems alignItems = AlignItems::Normal;
     AlignSelf alignSelf = AlignSelf::Auto;
     std::optional<float> aspectRatio;
     Overflow overflowX = Overflow::Visible;
     Overflow overflowY = Overflow::Visible;
+    ScrollbarMode scrollbarMode = ScrollbarMode::Classic;
+    bool scrollbarModeSet = false;
+    ScrollbarWidth scrollbarWidth = ScrollbarWidth::Auto;
+    ScrollbarGutter scrollbarGutter = ScrollbarGutter::Auto;
+    ScrollbarColors scrollbarColor;
     PointerEvents pointerEvents = PointerEvents::Default;
     CursorStyle cursor = CursorStyle::Auto;
     InheritedStyleProperties specifiedInheritedProperties = 0;
@@ -296,4 +329,3 @@ struct Style {
 
 void inheritStyle(Style& style, const Style& parent);
 } // namespace radia::ui
-#endif // RD_STYLE_H

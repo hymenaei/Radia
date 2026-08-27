@@ -1,29 +1,9 @@
 /**
- * @file valuebinding.h
- * @brief Defines typed value state, validation, observation, and controller binding interfaces.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
-#ifndef RD_UI_VALUE_BINDING_H
-#define RD_UI_VALUE_BINDING_H
+#pragma once
 
 #include <functional>
 #include <memory>
@@ -31,19 +11,17 @@
 #include <string>
 #include <typeinfo>
 #include <utility>
-#include "localization/localization.h"
-#include "text/source.h"
 
 namespace radia::ui {
 enum class ValueValidationStatus { Valid, Invalid, Pending };
 
 struct ValueValidation {
     ValueValidationStatus status = ValueValidationStatus::Valid;
-    std::optional<TextSource> message;
+    std::optional<std::string> message;
 
     static ValueValidation valid() { return {}; }
-    static ValueValidation invalid(std::optional<TextSource> message = std::nullopt) { return {ValueValidationStatus::Invalid, std::move(message)}; }
-    static ValueValidation pending(std::optional<TextSource> message = std::nullopt) { return {ValueValidationStatus::Pending, std::move(message)}; }
+    static ValueValidation invalid(std::optional<std::string> message = std::nullopt) { return {ValueValidationStatus::Invalid, std::move(message)}; }
+    static ValueValidation pending(std::optional<std::string> message = std::nullopt) { return {ValueValidationStatus::Pending, std::move(message)}; }
 };
 
 template<typename T> struct ValueState {
@@ -53,7 +31,7 @@ template<typename T> struct ValueState {
 
     bool dirty() const { return value != baseline; }
     ValueValidationStatus validationStatus() const { return validation ? validation->status : ValueValidationStatus::Valid; }
-    const TextSource* validationMessage() const { return validation && validation->message ? &*validation->message : nullptr; }
+    const std::string* validationMessage() const { return validation && validation->message ? &*validation->message : nullptr; }
 };
 
 class ValueBindingSubscription {
@@ -142,4 +120,3 @@ template<> inline const char* valueTypeName<std::string>() {
 }
 } // namespace detail
 } // namespace radia::ui
-#endif // RD_UI_VALUE_BINDING_H

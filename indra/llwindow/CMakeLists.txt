@@ -45,7 +45,6 @@ add_library(llwindow STATIC)
 target_sources(llwindow
   PRIVATE
     ${llwindow_BASE_SOURCE_FILES}
-  PUBLIC
     ${llwindow_BASE_HEADER_FILES}
     llpreeditor.h
 )
@@ -60,7 +59,6 @@ if(USE_SDL_WINDOW)
       llsdl.cpp
       llkeyboardsdl.cpp
       llwindowsdl.cpp
-    PUBLIC
       llsdl.h
       llkeyboardsdl.h
       llwindowsdl.h
@@ -74,7 +72,6 @@ if(USE_SDL_WINDOW)
     target_sources(llwindow
       PRIVATE
         llsdl_macos.mm
-      PUBLIC
         llsdl_macos.h
     )
 
@@ -96,7 +93,6 @@ if(WINDOWS)
   target_sources(llwindow
     PRIVATE
       lldxhardware.cpp
-    PUBLIC
       lldxhardware.h
   )
 
@@ -114,7 +110,7 @@ if(WINDOWS)
     )
   endif()
   target_sources(llwindow
-    PUBLIC
+    PRIVATE
       llwindowwin32.h
       llkeyboardwin32.h
       lldragdropwin32.h
@@ -129,7 +125,6 @@ if(BUILD_HEADLESS)
     PRIVATE
       ${llwindow_BASE_SOURCE_FILES}
       llwindowmesaheadless.cpp
-    PUBLIC
       ${llwindow_BASE_HEADER_FILES}
       llwindowmesaheadless.h
   )

@@ -1,29 +1,9 @@
 /**
- * @file layout.h
- * @brief Wraps, truncates, orders, and measures styled text lines.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
-#ifndef RD_TEXT_LAYOUT_H
-#define RD_TEXT_LAYOUT_H
+#pragma once
 
 #include <optional>
 #include <string>
@@ -37,21 +17,9 @@ namespace radia::ui::detail {
 std::vector<std::size_t> graphemeBoundaries(const LLWString& value);
 
 struct TextRun {
-    struct Key {
-        std::string value;
-        Style style;
-        Vec2 textSize;
-        Vec2 boxSize;
-        Vec2 size;
-    };
-
     std::string value;
     Style style;
     Vec2 size;
-    Vec2 boxSize;
-    std::vector<Key> keys;
-
-    bool keybinding() const { return !keys.empty(); }
 };
 
 using TextLine = std::vector<TextRun>;
@@ -71,4 +39,3 @@ struct TextLayout {
 TextLayout layoutText(const std::vector<TextLine>& hardLines, const Style& style, const TextMetrics& metrics, std::optional<float> availableWidth,
                       bool visualOrder, bool applyOverflow);
 } // namespace radia::ui::detail
-#endif // RD_TEXT_LAYOUT_H

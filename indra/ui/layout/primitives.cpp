@@ -1,30 +1,12 @@
 /**
- * @file primitives.cpp
- * @brief Shared private layout math and geometry primitives.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
 #include "linden_common.h"
 #include "layout/primitives.h"
 #include <algorithm>
+#include <cctype>
 
 namespace radia::ui::layout_detail {
 float styledDimension(const Dimension& value, const std::optional<Length>& minimum, float fallback, float reference) {
@@ -32,19 +14,8 @@ float styledDimension(const Dimension& value, const std::optional<Length>& minim
     return minimum ? std::max(resolved, minimum->resolve(reference)) : resolved;
 }
 
-void warnIgnoredPosition(const Widget& child, const Style& style, FlexDirection flexDirection) {
-    const char* property = style.left ? "left" : style.right ? "right" : style.top ? "top" : style.bottom ? "bottom" : nullptr;
-    if (!property) return;
-    LL_WARNS("UI")
-        << "Ignoring '"
-        << property
-        << "' on <"
-        << child.elementName()
-        << (child.id().empty() ? "" : " id=\"" + child.id() + "\"")
-        << ">: parent flex direction is '"
-        << (flexDirection == FlexDirection::Row ? "row" : "column")
-        << "'."
-        << LL_ENDL;
+bool isInlineLevel(DisplayMode display) {
+    return display == DisplayMode::Inline || display == DisplayMode::InlineBlock || display == DisplayMode::InlineGrid;
 }
 
 const Style& emptyChildStyle() {
@@ -53,20 +24,37 @@ const Style& emptyChildStyle() {
 }
 
 ChildLayout invalidChildLayout() {
-    return {WidgetRef<Widget>(), emptyChildStyle(), {}, {}};
+    return {detail::NodeRef(), emptyChildStyle(), {}, {}};
 }
 
-void removeChildrenExcludedFromLayout(Widget& parent, std::vector<ChildLayout>& children) {
+bool isDisplayed(const ChildLayout& child) {
+    if (!child.node) return false;
+    if (const Element* element = child.node.element()) return element->isDisplayed(child.style);
+    return child.style.display != DisplayMode::NoneValue;
+}
+
+bool isWhitespaceOnlyText(const detail::NodeRef& node) {
+    const Text* text = node.text();
+    if (!text || text->getData().empty()) return false;
+    return std::all_of(text->getData().begin(), text->getData().end(), [](unsigned char character) { return std::isspace(character) != 0; });
+}
+
+bool flowBreakBefore(const ChildLayout& child) {
+    const Node* node = child.node.get();
+    return node && detail::NodeAccess::flowBreakBefore(*node);
+}
+
+void removeChildrenExcludedFromLayout(Element& parent, std::vector<ChildLayout>& children) {
     if (std::all_of(children.begin(), children.end(), [&parent](const ChildLayout& child) {
-            const Widget* node = child.node.get();
-            return node && node->parent() == &parent && node->isDisplayed(child.style);
+            const Node* node = child.node.get();
+            return node && node->parentNode() == &parent && isDisplayed(child);
         }))
         return;
     std::vector<ChildLayout> attached;
     attached.reserve(children.size());
     for (const ChildLayout& child : children) {
-        const Widget* node = child.node.get();
-        if (node && node->parent() == &parent && node->isDisplayed(child.style)) attached.push_back(child);
+        const Node* node = child.node.get();
+        if (node && node->parentNode() == &parent && isDisplayed(child)) attached.push_back(child);
     }
     children.swap(attached);
 }
@@ -91,8 +79,8 @@ void applyFlexBasis(ChildLayout& child, FlexDirection flexDirection, float avail
     mainSize(child, flexDirection) = std::max(basis, mainMinimum(child, flexDirection, availableMain, basis));
 }
 
-void distributeFlexSpace(std::vector<ChildLayout>& children, std::size_t begin, std::size_t end, FlexDirection flexDirection, float availableMain, bool allowGrowth,
-                         float& total) {
+void distributeFlexSpace(std::vector<ChildLayout>& children, std::size_t begin, std::size_t end, FlexDirection flexDirection, float availableMain,
+                         bool allowGrowth, float& total) {
     const float freeSpace = availableMain - total;
     if (freeSpace > 0.f && allowGrowth) {
         float totalGrow = 0.f;
@@ -135,7 +123,7 @@ void distributeFlexSpace(std::vector<ChildLayout>& children, std::size_t begin, 
             const float reduction = std::min(share, size - minimum);
             size -= reduction;
             reduced += reduction;
-        if (size <= minimum + kFlexEpsilon) active[offset] = false;
+            if (size <= minimum + kFlexEpsilon) active[offset] = false;
         }
         if (reduced <= kFlexEpsilon) break;
         deficit -= reduced;
@@ -189,11 +177,52 @@ float rowAlignmentOffset(JustifyContent alignment, LayoutDirection direction, fl
     return 0.f;
 }
 
+float justifySelfOffset(JustifySelf alignment, LayoutDirection direction, float freeSpace) {
+    if (alignment == JustifySelf::Center) return freeSpace * .5f;
+    if (alignment == JustifySelf::End) return direction == LayoutDirection::RightToLeft ? 0.f : freeSpace;
+    if (alignment == JustifySelf::Start) return direction == LayoutDirection::RightToLeft ? freeSpace : 0.f;
+    return 0.f;
+}
+
+GridTrackSizes gridTrackSizes(const std::vector<ChildLayout>& children, std::optional<float> availableWidth, std::optional<float> availableHeight) {
+    std::size_t columnCount = 1;
+    std::size_t rowCount = 1;
+    for (const ChildLayout& child : children) {
+        if (!isDisplayed(child)) continue;
+        const GridArea area = child.style.gridArea.value_or(GridArea{});
+        columnCount = std::max(columnCount, static_cast<std::size_t>(std::max(1, area.column)));
+        rowCount = std::max(rowCount, static_cast<std::size_t>(std::max(1, area.row)));
+    }
+
+    GridTrackSizes result;
+    result.columns.resize(columnCount);
+    result.rows.resize(rowCount);
+    for (const ChildLayout& child : children) {
+        if (!isDisplayed(child)) continue;
+        const GridArea area = child.style.gridArea.value_or(GridArea{});
+        const std::size_t column = static_cast<std::size_t>(std::max(1, area.column)) - 1;
+        const std::size_t row = static_cast<std::size_t>(std::max(1, area.row)) - 1;
+        result.columns[column] = std::max(result.columns[column], child.measured.x + child.style.margin.horizontal());
+        result.rows[row] = std::max(result.rows[row], child.measured.y + child.style.margin.vertical());
+    }
+
+    const auto distributeFreeSpace = [](std::vector<float>& tracks, std::optional<float> available) {
+        if (!available || tracks.empty()) return;
+        float used = 0.f;
+        for (const float track : tracks) used += track;
+        const float freeSpace = *available - used;
+        if (freeSpace <= 0.f) return;
+        const float extra = freeSpace / static_cast<float>(tracks.size());
+        for (float& track : tracks) track += extra;
+    };
+    distributeFreeSpace(result.columns, availableWidth);
+    distributeFreeSpace(result.rows, availableHeight);
+    return result;
+}
+
 Rect positionedRect(const ChildLayout& child, const Rect& parent, VerticalAlign verticalAlignment) {
-    const Widget* node = child.node.get();
-    llassert(node);
-    if (!node) return {};
-    const bool explicitRect = node->mRectExplicit;
+    const Element* node = child.node.element();
+    const bool explicitRect = node && node->mRectExplicit;
     const float width = explicitRect && child.style.width.isAuto()
         ? child.style.minWidth ? std::max(node->mRect.w, child.style.minWidth->resolve(parent.w)) : node->mRect.w
         : styledDimension(child.style.width, child.style.minWidth, child.measured.x > 0.f ? child.measured.x : parent.w, parent.w);
@@ -207,33 +236,52 @@ Rect positionedRect(const ChildLayout& child, const Rect& parent, VerticalAlign 
     const float verticalSpace = std::max(0.f, parent.h - height - margin.vertical());
     float y =
         explicitRect ? node->mRect.y : parent.top() - margin.top.fixedPixels() - height - verticalAlignmentOffset(verticalAlignment, verticalSpace);
-    if (child.style.left) x = parent.left() + child.style.left->resolve(parent.w) + margin.left.fixedPixels();
-    else if (child.style.right) x = parent.right() - child.style.right->resolve(parent.w) - margin.right.fixedPixels() - width;
-    if (child.style.top) y = parent.top() - child.style.top->resolve(parent.h) - margin.top.fixedPixels() - height;
-    else if (child.style.bottom) y = parent.bottom() + child.style.bottom->resolve(parent.h) + margin.bottom.fixedPixels();
     return {x, y, width, height};
 }
 
-void setArrangedRect(Widget& node, const Rect& rect) {
+Rect relativeRect(const ChildLayout& child, const Rect& rect, const Rect& containingBlock) {
+    if (child.style.position != PositionMode::Relative) return rect;
+
+    float x = rect.x;
+    float y = rect.y;
+    if (child.style.left) x += child.style.left->resolve(containingBlock.w);
+    else if (child.style.right) x -= child.style.right->resolve(containingBlock.w);
+    if (child.style.top) y -= child.style.top->resolve(containingBlock.h);
+    else if (child.style.bottom) y += child.style.bottom->resolve(containingBlock.h);
+    return {x, y, rect.w, rect.h};
+}
+
+Rect translatedRect(const ChildLayout& child, const Rect& rect) {
+    return {rect.x + child.style.translate.x, rect.y + child.style.translate.y, rect.w, rect.h};
+}
+
+void setArrangedRect(Element& node, const Rect& rect) {
     const bool changed = node.mRect.x != rect.x || node.mRect.y != rect.y || node.mRect.w != rect.w || node.mRect.h != rect.h;
     if (!changed) return;
     node.mRect = rect;
-    node.mLayoutCache.arrangeValid = false;
+    detail::ElementInternalAccess::layoutCache(node).arrangeValid = false;
     node.mInvalidationReasons.add(LayoutInvalidationReason::Arrange);
     node.invalidatePaint();
 }
 
-std::optional<AdjacentLayout> adjacentLayout(const WidgetVisit& parentState, Widget* first, Widget* second, const Style& parentStyle) {
-    Widget* parent = parentState.get();
-    if (!parentState.valid() || !first || !second || first->parent() != parent || second->parent() != parent) return std::nullopt;
-    const WidgetVisit firstState(*first);
-    const WidgetVisit secondState(*second);
-    const bool hasGap = WidgetLayoutAccess::hasGap(*parent, *first, *second);
+std::optional<AdjacentLayout> adjacentLayout(const ElementVisit& parentState, const detail::NodeRef& firstRef, const detail::NodeRef& secondRef,
+                                             const Style& parentStyle) {
+    Element* parent = parentState.get();
+    Node* firstNode = firstRef.get();
+    Node* secondNode = secondRef.get();
+    if (!parentState.valid() || !firstNode || !secondNode || firstNode->parentNode() != parent || secondNode->parentNode() != parent)
+        return std::nullopt;
+    Element* first = firstRef.element();
+    Element* second = secondRef.element();
+    if (!first || !second) return AdjacentLayout{true, 0.f};
+    const ElementVisit firstState(*first);
+    const ElementVisit secondState(*second);
+    const bool hasGap = ElementLayoutAccess::hasGap(*parent, *first, *second);
     parent = parentState.get();
     first = firstState.get();
     second = secondState.get();
     if (!parentState.valid() || !parent || !firstState.validChildOf(*parent) || !secondState.validChildOf(*parent)) return std::nullopt;
-    const float overlap = WidgetLayoutAccess::overlap(*parent, *first, *second, parentStyle);
+    const float overlap = ElementLayoutAccess::overlap(*parent, *first, *second, parentStyle);
     parent = parentState.get();
     first = firstState.get();
     second = secondState.get();
@@ -245,8 +293,7 @@ std::vector<std::pair<std::size_t, std::size_t>> rowLines(const std::vector<Chil
     std::vector<std::pair<std::size_t, std::size_t>> lines;
     std::size_t lineStart = 0;
     for (std::size_t index = 0; index < children.size(); ++index) {
-        const Widget* child = children[index].node.get();
-        if (index > lineStart && child && child->flowBreakBefore()) {
+        if (index > lineStart && flowBreakBefore(children[index])) {
             lines.emplace_back(lineStart, index);
             lineStart = index;
         }
@@ -265,17 +312,16 @@ std::vector<NormalLine> normalLines(const std::vector<ChildLayout>& children, st
 
     for (std::size_t index = 0; index < children.size(); ++index) {
         const ChildLayout& child = children[index];
-        const Widget* node = child.node.get();
-        if (!node) continue;
+        if (!child.node) continue;
         const float width = child.measured.x + child.style.margin.horizontal();
         const float height = child.measured.y + child.style.margin.vertical();
-        const bool block = child.style.display != DisplayMode::Inline;
+        const bool block = !isInlineLevel(child.style.display);
         if (block) {
             finish();
             lines.push_back({index, index + 1, width, height, true});
             continue;
         }
-        if (node->flowBreakBefore() && current) finish();
+        if (flowBreakBefore(child) && current) finish();
         if (availableWidth && current && current->width > 0.f && current->width + width > *availableWidth) finish();
         if (!current) current = NormalLine{index, index + 1, width, height, false};
         else {
@@ -288,9 +334,9 @@ std::vector<NormalLine> normalLines(const std::vector<ChildLayout>& children, st
     return lines;
 }
 
-MainAxisAllocation allocateMainAxis(Widget& parent, std::vector<ChildLayout>& children, std::size_t begin, std::size_t end, const Style& parentStyle,
+MainAxisAllocation allocateMainAxis(Element& parent, std::vector<ChildLayout>& children, std::size_t begin, std::size_t end, const Style& parentStyle,
                                     FlexDirection flexDirection, float availableMain) {
-    const WidgetVisit parentState(parent);
+    const ElementVisit parentState(parent);
     const auto invalidAllocation = [] {
         MainAxisAllocation invalid;
         invalid.valid = false;
@@ -300,15 +346,15 @@ MainAxisAllocation allocateMainAxis(Widget& parent, std::vector<ChildLayout>& ch
     int autoMargins = 0;
     for (std::size_t index = begin; index < end; ++index) {
         const ChildLayout& child = children[index];
-        total += mainSize(child, flexDirection)
-            + (flexDirection == FlexDirection::Row ? child.style.margin.horizontal() : child.style.margin.vertical());
+        total +=
+            mainSize(child, flexDirection) + (flexDirection == FlexDirection::Row ? child.style.margin.horizontal() : child.style.margin.vertical());
         autoMargins += flexDirection == FlexDirection::Row ? child.style.margin.horizontalAutoCount() : child.style.margin.verticalAutoCount();
     }
     std::size_t gapCount = 0;
     float overlap = 0.f;
     for (std::size_t index = begin + 1; index < end; ++index) {
-        Widget* previous = children[index - 1].node.get();
-        Widget* current = children[index].node.get();
+        const detail::NodeRef& previous = children[index - 1].node;
+        const detail::NodeRef& current = children[index].node;
         if (!parentState.valid()) return invalidAllocation();
         const std::optional<AdjacentLayout> adjacent = adjacentLayout(parentState, previous, current, parentStyle);
         if (!adjacent) return invalidAllocation();

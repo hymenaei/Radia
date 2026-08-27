@@ -2,46 +2,55 @@
 
 add_library(ui STATIC)
 
-set(ui_event_sources
-    binding/eventdescriptor.h
-    binding/eventregistration.h
-    eventcall.cpp
-    widgetevents.def
-)
+include(GenerateDefaultStylesheet)
 
-set(ui_binding_sources
+set(default_stylesheet_source "${CMAKE_CURRENT_SOURCE_DIR}/style/defaults.css")
+set(default_stylesheet_output "${CMAKE_CURRENT_BINARY_DIR}/style/defaults.inc")
+generate_default_stylesheet(SOURCE "${default_stylesheet_source}" OUTPUT "${default_stylesheet_output}")
+
+set(private_sources
+    eventcall.cpp
+    localization.cpp
+    path.cpp
+    path.h
+    system.cpp
+
     binding/binder.cpp
     binding/settingresolver.h
-)
 
-set(ui_layout_sources
+    elements/button.cpp
+    elements/document.cpp
+    elements/element.cpp
+    elements/elementtext.cpp
+    elements/elementdefinition.cpp
+    elements/elementdefinition.h
+    elements/elementinternal.h
+    elements/fieldset.cpp
+    elements/floater.cpp
+    elements/icon.cpp
+    elements/input.cpp
+    elements/inputcheckbox.cpp
+    elements/inputradio.cpp
+    elements/label.cpp
+    elements/panel.cpp
+
+    layout/arrange.cpp
     layout/document.cpp
     layout/document.h
     layout/engine.cpp
-    layout/layoutcontext.h
     layout/engine.h
+    layout/engineinternal.h
+    layout/layoutcontext.h
     layout/measure.cpp
-    layout/arrange.cpp
-    layout/treecache.cpp
-    layout/treecache.h
     layout/primitives.cpp
     layout/primitives.h
-    layout/engineinternal.h
     layout/resourcecompiler.cpp
     layout/resourcecompiler.h
     layout/schema.cpp
     layout/schema.h
-)
+    layout/treecache.cpp
+    layout/treecache.h
 
-set(ui_localization_sources
-    localization/compiler.cpp
-    localization/internal.h
-    localization/localization.cpp
-    localization/richstring.cpp
-    localization/yaml.cpp
-)
-
-set(ui_render_sources
     render/openglpaintcontext.cpp
     render/openglpaintstate.cpp
     render/openglpaintstate.h
@@ -49,17 +58,14 @@ set(ui_render_sources
     render/recordingpaintcontext.cpp
     render/svg.cpp
     render/tessellator.cpp
-)
 
-set(ui_skin_sources
     skin/compiler.cpp
     skin/generation.cpp
     skin/generationinternal.h
-)
 
-set(ui_style_sources
     style/color.cpp
     style/compiler.cpp
+    style/defaults.css
     style/model.h
     style/resolver.cpp
     style/stylepass.cpp
@@ -69,111 +75,77 @@ set(ui_style_sources
     style/syntax.cpp
     style/syntax.h
     style/valueparser.cpp
-)
 
-set(ui_surface_sources
     surface/floaterresize.cpp
     surface/floaters.cpp
     surface/input.cpp
     surface/resize.cpp
+    surface/scrollgeometry.cpp
     surface/surface.cpp
-    surface/ordering.h
-)
+    surface/surfaceinternal.h
 
-set(ui_text_sources
     text/host.cpp
-    text/inlinecontent.cpp
-    text/inlinecontent.def
-    text/inlinecontentcompiler.cpp
-    text/inlinecontentcompiler.h
+    text/inlineelements.cpp
+    text/inlineelements.h
     text/layout.cpp
     text/layout.h
     text/metrics.cpp
-    text/source.cpp
 )
 
-set(ui_widget_sources
-    widgets/button.cpp
-    widgets/div.cpp
-    widgets/field.cpp
-    widgets/fieldset.cpp
-    widgets/floater.cpp
-    widgets/icon.cpp
-    widgets/label.cpp
-    widgets/panel.cpp
-    widgets/switch.cpp
-    widgets/text.cpp
-    widgets/widget.cpp
-    widgets/widgetcatalog.cpp
-    widgets/widgetcatalog.h
-    widgets/widgetcontract.cpp
-    widgets/widgetcontract.h
-    widgets/widgetcontractbuilder.h
-    widgets/widgetcontractmodel.h
-)
-
-target_sources(ui
-    PRIVATE
-    path.cpp
-    path.h
-    system.cpp
-    ${ui_event_sources}
-    ${ui_binding_sources}
-    ${ui_layout_sources}
-    ${ui_localization_sources}
-    ${ui_render_sources}
-    ${ui_skin_sources}
-    ${ui_style_sources}
-    ${ui_surface_sources}
-    ${ui_text_sources}
-    ${ui_widget_sources}
-    PUBLIC
-    FILE_SET
-    HEADERS
-    BASE_DIRS
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    FILES
-    binding/valuebinding.h
-    binding/valuecontrol.h
-    binding/eventdescriptor.h
+set(public_sources
     diagnostic.h
     event.h
     eventcall.h
+    localization.h
+    localizedtext.h
+    nativeappearance.h
+    resourceprovider.h
+    system.h
+    types.h
+
+    binding/valuebinding.h
+    binding/eventregistration.h
+
     layout/buildresult.h
-    localization/localization.h
-    localization/value.h
+
     render/openglpaintcontext.h
     render/paintcontext.h
     render/recordingpaintcontext.h
-    resourceprovider.h
+
     skin/compiler.h
     skin/generation.h
+
     style/color.h
     style/style.h
     style/stylesheet.h
+
     surface/floaterresize.h
+    surface/scrollgeometry.h
     surface/surface.h
-    system.h
-    text/host.h
-    text/inlinecontent.def
-    text/inlinecontent.h
+
+    text/keybinding.h
     text/metrics.h
-    text/source.h
-    types.h
-    widgetevent.h
-    widgetevents.def
-    widgets/button.h
-    widgets/div.h
-    widgets/field.h
-    widgets/fieldset.h
-    widgets/floater.h
-    widgets/icon.h
-    widgets/label.h
-    widgets/panel.h
-    widgets/switch.h
-    widgets/text.h
-    widgets/widget.h
+
+    elements/elementevent.h
+    elements/button.h
+    elements/floater.h
+    elements/icon.h
+    elements/input.h
+    elements/document.h
+    elements/label.h
+    elements/panel.h
+    elements/element.h
+    elements/elementtext.h
 )
+
+target_sources(ui
+    PRIVATE ${private_sources}
+    PUBLIC
+    FILE_SET HEADERS
+    FILES ${public_sources}
+)
+
+target_include_directories(ui PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 
 target_link_libraries(ui
     PUBLIC
@@ -188,32 +160,39 @@ target_link_libraries(ui
 target_precompile_headers(ui REUSE_FROM llprecompiled)
 
 if(BUILD_TESTING)
-    set(ui_test_sources
-        localization/localization.cpp
-        binding/binder.cpp
+    set(test_sources
         eventcall.cpp
+        localization.cpp
         path.cpp
-        widgets/switch.cpp
-        widgets/field.cpp
+        system.cpp
+
+        binding/binder.cpp
+
+        elements/element.cpp
+        elements/fieldset.cpp
+        elements/inputcheckbox.cpp
+
+        layout/engine.cpp
+        layout/resourcecompiler.cpp
+        layout/schema.cpp
+
+        render/svg.cpp
+        render/tessellator.cpp
+
         style/color.cpp
         style/compiler.cpp
         style/stylesheet.cpp
-        system.cpp
-        render/svg.cpp
-        render/tessellator.cpp
-        surface/floaters.cpp
+
         surface/floaterresize.cpp
+        surface/floaters.cpp
+        surface/scrollgeometry.cpp
         surface/surface.cpp
-        layout/engine.cpp
-        layout/schema.cpp
-        layout/resourcecompiler.cpp
-        widgets/widget.cpp
     )
 
-    rd_add_unit_tests(ui "${ui_test_sources}")
-    rd_add_integration_test(surfacestate "" "ui" "ui")
+    ADD_UNIT_TESTS(ui "${test_sources}")
+    ADD_INTEGRATION_TEST(surfacestate "" "ui" "ui")
 endif()
 
-if(BUILD_BENCHMARKS)
-    rd_add_benchmarks(ui "layout/engine.cpp")
+if(BUILD_BENCHMARKING)
+    ADD_BENCHMARKS(ui "layout/engine.cpp")
 endif()

@@ -1,104 +1,127 @@
 /**
- * @file floaters.cpp
- * @brief Manages Surface floater placement, ordering, and interaction geometry.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
 #include "linden_common.h"
 #include <algorithm>
 #include <iterator>
 #include <optional>
+#include "elements/document.h"
+#include "elements/elementinternal.h"
+#include "elements/floater.h"
+#include "elements/panel.h"
 #include "layout/engine.h"
 #include "style/stylepass.h"
 #include "surface/surface.h"
-#include "widgets/floater.h"
-#include "widgets/panel.h"
+#include "surface/surfaceinternal.h"
 
 namespace radia::ui {
-Floater& Surface::mountFloater(std::unique_ptr<Floater> floater, SurfaceLayer layer) {
+FloaterElement& Surface::mountFloater(std::unique_ptr<FloaterElement> floater, SurfaceLayer layer) {
     if (layer != SurfaceLayer::Floater && layer != SurfaceLayer::Modal) layer = SurfaceLayer::Floater;
-    WidgetRef<Floater> mountedRef(floater.get());
+    ElementRef<FloaterElement> mountedRef(floater.get());
     mount(std::move(floater), layer);
-    Floater* mounted = mountedRef.get();
-    llassert_always(mounted && mounted->parent() == &layerRoot(layer));
+    FloaterElement* mounted = mountedRef.get();
+    llassert_always(mounted && mounted->parentElement() == nullptr && mountedRoot(mounted) == mounted);
     mFloaters.emplace_back(mounted);
     constrainFloater(*mounted);
     mounted = mountedRef.get();
-    llassert_always(mounted && mounted->parent() == &layerRoot(layer));
+    llassert_always(mounted && mounted->parentElement() == nullptr && mountedRoot(mounted) == mounted);
     return *mounted;
 }
 
-std::unique_ptr<Floater> Surface::replaceFloater(Floater& current, std::unique_ptr<Floater> replacement) {
+FloaterElement& Surface::mountFloater(Document& document, SurfaceLayer layer) {
+    Element* root = document.documentElement();
+    FloaterElement* floater = root ? dynamic_cast<FloaterElement*>(root) : nullptr;
+    llassert_always(floater);
+    if (layer != SurfaceLayer::Floater && layer != SurfaceLayer::Modal) layer = SurfaceLayer::Floater;
+    mount(*floater, layer);
+    mFloaters.emplace_back(floater);
+    constrainFloater(*floater);
+    return *floater;
+}
+
+std::unique_ptr<FloaterElement> Surface::replaceFloater(FloaterElement& current, std::unique_ptr<FloaterElement> replacement) {
     if (!replacement || !managesFloater(current)) return nullptr;
 
-    Widget* parent = current.parent();
-    if (!parent) return nullptr;
-    auto found = std::find_if(parent->mChildren.begin(), parent->mChildren.end(), [&current](const auto& child) { return child.get() == &current; });
-    if (found == parent->mChildren.end()) return nullptr;
+    const std::optional<SurfaceLayer> layer = layerOf(&current);
+    if (!layer) return nullptr;
+    RootList& layerRoots = roots(*layer);
+    auto found = std::find(layerRoots.begin(), layerRoots.end(), &current);
+    if (found == layerRoots.end()) return nullptr;
 
-    const auto managed = std::find_if(mFloaters.begin(), mFloaters.end(), [&current](const auto& floater) { return floater.get() == &current; });
+    const auto managed = std::find_if(mFloaters.begin(), mFloaters.end(), [&current](const auto& floater) { return floater == &current; });
     if (managed == mFloaters.end()) return nullptr;
 
     clearInteractionState();
-    std::unique_ptr<Widget> retired = std::move(*found);
-    replacement->mParent = parent;
+    std::unique_ptr<Element> retired = takeOwnedRoot(current);
+    if (!retired) return nullptr;
+    Element* replacementRoot = replacement.get();
     replacement->setSurface(this);
-    *found = std::move(replacement);
-    ++parent->mChildSnapshotRevision;
+    mOwnedRoots.emplace_back(std::move(replacement));
+    *found = replacementRoot;
     invalidateOrderingCache();
-    managed->set(static_cast<Floater*>(found->get()));
+    *managed = static_cast<FloaterElement*>(replacementRoot);
     requestLayout();
     refreshHover();
 
-    retired->mParent = nullptr;
     retired->setSurface(nullptr);
-    return std::unique_ptr<Floater>(static_cast<Floater*>(retired.release()));
+    return std::unique_ptr<FloaterElement>(static_cast<FloaterElement*>(retired.release()));
 }
 
-std::unique_ptr<Floater> Surface::unmountFloater(Floater& floater) {
-    std::unique_ptr<Widget> widget = unmount(floater);
-    return std::unique_ptr<Floater>(static_cast<Floater*>(widget.release()));
+bool Surface::replaceFloater(FloaterElement& current, FloaterElement& replacement) {
+    if (&current == &replacement || replacement.parentElement() || replacement.surface() || !managesFloater(current)) return false;
+
+    const std::optional<SurfaceLayer> layer = layerOf(&current);
+    if (!layer) return false;
+    RootList& layerRoots = roots(*layer);
+    const auto found = std::find(layerRoots.begin(), layerRoots.end(), &current);
+    if (found == layerRoots.end()) return false;
+
+    const auto managed = std::find_if(mFloaters.begin(), mFloaters.end(), [&current](const auto& floater) { return floater == &current; });
+    if (managed == mFloaters.end()) return false;
+
+    clearInteractionState();
+    replacement.setSurface(this);
+    *found = &replacement;
+    current.setSurface(nullptr);
+    *managed = &replacement;
+    invalidateOrderingCache();
+    requestLayout();
+    refreshHover();
+    return true;
 }
 
-bool Surface::ownsFloater(const Floater& floater) const {
+std::unique_ptr<FloaterElement> Surface::unmountFloater(FloaterElement& floater) {
+    std::unique_ptr<Element> element = unmount(floater);
+    return std::unique_ptr<FloaterElement>(static_cast<FloaterElement*>(element.release()));
+}
+
+bool Surface::unmountBorrowedFloater(FloaterElement& floater) {
+    return unmountBorrowed(floater);
+}
+
+bool Surface::ownsFloater(const FloaterElement& floater) const {
     return managesFloater(floater);
 }
 
-bool Surface::raise(Widget& widget) {
+bool Surface::raise(Element& element) {
     for (std::size_t index = 0; index <= static_cast<std::size_t>(SurfaceLayer::Modal); ++index)
-        if (raiseWithinLayer(widget, static_cast<SurfaceLayer>(index))) return true;
+        if (raiseWithinLayer(element, static_cast<SurfaceLayer>(index))) return true;
     return false;
 }
 
-void Surface::constrainFloater(Floater& floater) {
+void Surface::constrainFloater(FloaterElement& floater) {
     if (!managesFloater(floater)) return;
     floater.setMovementBounds(mViewport);
     floater.clampToMovementBounds();
 }
 
-void Surface::placeFloater(Floater& floater, const Rect& rect) {
+void Surface::placeFloater(FloaterElement& floater, const Rect& rect) {
     if (!managesFloater(floater)) return;
-    const WidgetSnapshot floaterSnapshot = snapshot(floater);
+    const ElementSnapshot floaterSnapshot = snapshot(floater);
     Rect placed = rect;
-    if (floater.canResize()) {
+    if (floater.resizeable()) {
         const Vec2 minimum = minimumFloaterSize(floater);
         if (!snapshotValid(floaterSnapshot) || !isRootedInSurface(floaterSnapshot.lifetime.get())) return;
         placed.w = std::min(mViewport.w, std::max(placed.w, minimum.x));
@@ -108,13 +131,13 @@ void Surface::placeFloater(Floater& floater, const Rect& rect) {
     constrainFloater(floater);
 }
 
-Vec2 Surface::preferredFloaterSize(const Floater& floater) const {
-    const WidgetSnapshot floaterSnapshot = snapshot(const_cast<Floater&>(floater));
+Vec2 Surface::preferredFloaterSize(const FloaterElement& floater) const {
+    const ElementSnapshot floaterSnapshot = snapshot(const_cast<FloaterElement&>(floater));
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
     const Style& style = styles.style(floater);
     if (!snapshotValid(floaterSnapshot)) return {};
-    const Vec2 measured = measureWidget(floater, *mStyleSheet, mTextMetrics);
+    const Vec2 measured = measureElement(floater, *mStyleSheet, mTextMetrics);
     if (!snapshotValid(floaterSnapshot)) return {};
     const auto resolve = [](const Dimension& value, const std::optional<Length>& minimum, float fallback, float reference) {
         const float result = value.resolve(fallback, reference);
@@ -123,8 +146,8 @@ Vec2 Surface::preferredFloaterSize(const Floater& floater) const {
     return {resolve(style.width, style.minWidth, measured.x, mViewport.w), resolve(style.height, style.minHeight, measured.y, mViewport.h)};
 }
 
-std::optional<Rect> Surface::initialFloaterRect(const Floater& floater) const {
-    const WidgetSnapshot floaterSnapshot = snapshot(const_cast<Floater&>(floater));
+std::optional<Rect> Surface::initialFloaterRect(const FloaterElement& floater) const {
+    const ElementSnapshot floaterSnapshot = snapshot(const_cast<FloaterElement&>(floater));
     const Vec2 size = preferredFloaterSize(floater);
     if (!snapshotValid(floaterSnapshot)) return std::nullopt;
     StylePass& styles = stylePass();
@@ -140,29 +163,26 @@ std::optional<Rect> Surface::initialFloaterRect(const Floater& floater) const {
     return Rect{x, y, size.x, size.y};
 }
 
-std::optional<Rect> Surface::prepareFloater(Floater& floater) const {
-    const WidgetSnapshot floaterSnapshot = snapshot(floater);
+std::optional<Rect> Surface::prepareFloater(FloaterElement& floater) const {
+    const ElementSnapshot floaterSnapshot = snapshot(floater);
     const std::optional<Rect> authored = initialFloaterRect(floater);
     if (!authored || !snapshotValid(floaterSnapshot)) return std::nullopt;
-    Widget* content = floater.content();
-    const WidgetSnapshot contentSnapshot = content ? snapshot(*content) : WidgetSnapshot{};
-    const Vec2 contentSize = content ? measureWidget(*content, *mStyleSheet, mTextMetrics) : Vec2{};
-    if (!snapshotValid(floaterSnapshot) || (content && !snapshotChildValid(contentSnapshot, floater))) return std::nullopt;
-    floater.setAuthoredSize({authored->w, authored->h}, contentSize);
+    Element* body = floater.body();
+    const ElementSnapshot bodySnapshot = body ? snapshot(*body) : ElementSnapshot{};
+    const Vec2 bodySize = body ? measureElement(*body, *mStyleSheet, mTextMetrics) : Vec2{};
+    if (!snapshotValid(floaterSnapshot) || (body && !snapshotChildValid(bodySnapshot, floater))) return std::nullopt;
+    floater.setAuthoredSize({authored->w, authored->h}, bodySize);
     return authored;
 }
 
-bool Surface::raiseWithinLayer(Widget& widget, SurfaceLayer layer) {
-    Widget& root = layerRoot(layer);
-    Widget* directChild = &widget;
-    while (directChild->parent() && directChild->parent() != &root) directChild = directChild->parent();
-    if (directChild->parent() != &root) return false;
-
-    auto found = std::find_if(root.mChildren.begin(), root.mChildren.end(), [directChild](const auto& child) { return child.get() == directChild; });
-    if (found == root.mChildren.end()) return false;
-    if (std::next(found) != root.mChildren.end()) {
-        std::rotate(found, std::next(found), root.mChildren.end());
-        ++root.mChildSnapshotRevision;
+bool Surface::raiseWithinLayer(Element& element, SurfaceLayer layer) {
+    const Element* directRoot = mountedRoot(&element);
+    if (!directRoot || layerOf(directRoot) != layer) return false;
+    RootList& layerRoots = roots(layer);
+    auto found = std::find(layerRoots.begin(), layerRoots.end(), directRoot);
+    if (found == layerRoots.end()) return false;
+    if (std::next(found) != layerRoots.end()) {
+        std::rotate(found, std::next(found), layerRoots.end());
         invalidateOrderingCache();
         requestPaint();
         refreshHover();
@@ -170,24 +190,27 @@ bool Surface::raiseWithinLayer(Widget& widget, SurfaceLayer layer) {
     return true;
 }
 
-bool Surface::managesFloater(const Floater& floater) const {
-    return (floater.parent() == &layerRoot(SurfaceLayer::Floater) || floater.parent() == &layerRoot(SurfaceLayer::Modal))
-        && std::any_of(mFloaters.begin(), mFloaters.end(), [&floater](const auto& managed) { return managed.get() == &floater; });
+bool Surface::managesFloater(const FloaterElement& floater) const {
+    const std::optional<SurfaceLayer> layer = layerOf(&floater);
+    return layer
+        && (*layer == SurfaceLayer::Floater || *layer == SurfaceLayer::Modal)
+        && mountedRoot(&floater) == &floater
+        && std::any_of(mFloaters.begin(), mFloaters.end(), [&floater](const auto& managed) { return managed == &floater; });
 }
 
-void Surface::floaterClosed(Floater& floater) {
+void Surface::floaterClosed(FloaterElement& floater) {
     if (managesFloater(floater) && mFloaterDelegate) mFloaterDelegate->floaterClosed(*this, floater);
 }
 
-void Surface::floaterMinimizedChanged(Floater& floater) {
+void Surface::floaterMinimizedChanged(FloaterElement& floater) {
     if (managesFloater(floater) && mFloaterDelegate) mFloaterDelegate->floaterMinimizedChanged(*this, floater);
 }
 
-void Surface::floaterMoveEnded(Floater& floater) {
+void Surface::floaterMoveEnded(FloaterElement& floater) {
     if (managesFloater(floater) && mFloaterDelegate) mFloaterDelegate->floaterMoveEnded(*this, floater);
 }
 
-void Surface::floaterResizeEnded(Floater& floater) {
+void Surface::floaterResizeEnded(FloaterElement& floater) {
     if (!managesFloater(floater)) return;
     if (mFloaterDelegate) mFloaterDelegate->floaterResizeEnded(*this, floater);
 }

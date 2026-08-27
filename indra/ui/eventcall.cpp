@@ -1,25 +1,6 @@
 /**
- * @file eventcall.cpp
- * @brief Defines and parses the restricted Event Handler Call language used by Layout Resources.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
 #include "linden_common.h"
@@ -150,7 +131,7 @@ private:
 
         if (word == "true") arguments.emplace_back(true);
         else if (word == "false") arguments.emplace_back(false);
-        else if (word == "this") arguments.emplace_back(SourceWidgetArgument{});
+        else if (word == "this") arguments.emplace_back(SourceElementArgument{});
         else if (word == "event") arguments.emplace_back(CurrentEventArgument{});
         else return failure(EventCallParseError::LiteralUnsupported, begin);
         return {};

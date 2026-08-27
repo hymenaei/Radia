@@ -1,31 +1,10 @@
 /**
- * @file system.h
- * @brief Owns UI skin generations, locale state, surfaces, and viewer-facing services.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
-#ifndef RD_SYSTEM_H
-#define RD_SYSTEM_H
+#pragma once
 
-#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -34,16 +13,17 @@
 #include <utility>
 #include "diagnostic.h"
 #include "layout/buildresult.h"
-#include "localization/localization.h"
+#include "localization.h"
+#include "nativeappearance.h"
 #include "style/stylesheet.h"
-#include "text/inlinecontent.h"
-#include "text/source.h"
+#include "text/keybinding.h"
 
 namespace radia::ui {
 class SkinGeneration;
 class Surface;
 class TextMetrics;
 class OpenGLPaintContext;
+class Element;
 struct SvgIcon;
 
 class PublicationCommit {
@@ -54,21 +34,19 @@ public:
 
 class System {
 public:
-    static constexpr std::chrono::milliseconds defaultLongClickDelay() { return std::chrono::milliseconds{500}; }
-
     System();
     ~System();
 
     bool publish(std::shared_ptr<const SkinGeneration> generation);
     bool publish(std::shared_ptr<const SkinGeneration> generation, PublicationCommit& commit);
     bool hasRelevantStyleChange(const ResourceSnapshot& current, const ResourceSnapshot& previous) const;
-    LayoutBuildResult buildWidgetTree(const std::string& resourceId) const;
+    LayoutBuildResult buildElementTree(const std::string& resourceId) const;
     std::unique_ptr<Surface> createSurface(const TextMetrics& textMetrics) const;
-    bool setLongClickDelay(std::chrono::milliseconds delay);
     bool setLocale(const std::string& localeId);
     void setLocaleChangedHandler(std::function<void(const std::string&)> handler) { mLocaleChangedHandler = std::move(handler); }
     void setKeybindingResolver(std::function<KeybindingPresentation(const std::string&)> resolver);
     void refreshKeybindings();
+    void setNativeAppearance(std::shared_ptr<const NativeAppearance> appearance);
 
     std::vector<LocaleInfo> locales() const;
     const std::string& activeLocale() const { return mActiveLocale; }
@@ -80,22 +58,21 @@ public:
     }
     bool hasLocalizationKey(const std::string& id) const;
     std::string resolveText(const std::string& id) const;
-    std::string resolveText(const LocalizationRequest& request) const;
-    InlineContent resolveContent(const LocalizationRequest& request) const;
+    std::string resolveText(const LocalizedText& text) const;
     KeybindingPresentation resolveKeybinding(const std::string& id) const;
-    TextSource localize(std::string id) const;
-    TextSource localize(LocalizationRequest request) const;
+    LocalizedText t(std::string id, LocalizationArguments arguments = {}) const;
+    std::string resolveMarkup(const LocalizedText& text) const;
     bool hasIcon(const std::string& name) const;
     std::uint64_t generation() const { return mGenerationNumber; }
     std::uint64_t localeGeneration() const { return mLocaleGeneration; }
-    std::chrono::milliseconds longClickDelay() const { return mLongClickDelay; }
+    const NativeAppearance& nativeAppearance() const { return *mNativeAppearance; }
 
 private:
     std::shared_ptr<const SkinGeneration> mSkinGeneration;
+    std::shared_ptr<const NativeAppearance> mNativeAppearance;
     std::string mActiveLocale;
     std::uint64_t mGenerationNumber = 0;
     std::uint64_t mLocaleGeneration = 0;
-    std::chrono::milliseconds mLongClickDelay{defaultLongClickDelay()};
     mutable std::unordered_set<Surface*> mSurfaces;
     std::function<void(const std::string&)> mLocaleChangedHandler;
     std::function<KeybindingPresentation(const std::string&)> mKeybindingResolver;
@@ -108,6 +85,6 @@ private:
     bool publishImpl(std::shared_ptr<const SkinGeneration> generation, PublicationCommit* commit);
     friend class Surface;
     friend class OpenGLPaintContext;
+    friend class Element;
 };
 } // namespace radia::ui
-#endif // RD_SYSTEM_H

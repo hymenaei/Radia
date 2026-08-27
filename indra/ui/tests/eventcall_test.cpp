@@ -1,25 +1,6 @@
 /**
- * @file eventcall_test.cpp
- * @brief Tests the restricted Event Handler Call language used by Layout Resources.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
 #include "linden_common.h"
@@ -35,7 +16,7 @@ using radia::ui::CurrentEventArgument;
 using radia::ui::EventCallParseError;
 using radia::ui::EventCallParseResult;
 using radia::ui::parseEventCall;
-using radia::ui::SourceWidgetArgument;
+using radia::ui::SourceElementArgument;
 using ::testing::Message;
 }
 
@@ -72,7 +53,7 @@ TEST(EventCallTest, ParsesSupportedArgumentKinds) {
     EXPECT_EQ(std::get<std::string>(arguments[0]), "settings");
     EXPECT_TRUE(std::get<bool>(arguments[1]));
     EXPECT_FALSE(std::get<bool>(arguments[2]));
-    EXPECT_TRUE(std::holds_alternative<SourceWidgetArgument>(arguments[3]));
+    EXPECT_TRUE(std::holds_alternative<SourceElementArgument>(arguments[3]));
     EXPECT_TRUE(std::holds_alternative<CurrentEventArgument>(arguments[4]));
 }
 

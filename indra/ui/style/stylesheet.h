@@ -1,41 +1,33 @@
 /**
- * @file stylesheet.h
- * @brief Owns the public stylesheet lifecycle and immutable generation metadata.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
-#ifndef RD_STYLE_STYLESHEET_H
-#define RD_STYLE_STYLESHEET_H
+#pragma once
 
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include "diagnostic.h"
 #include "resourceprovider.h"
 #include "style/style.h"
 
 namespace radia::ui {
-class Widget;
+class Element;
+
+enum class StyleOrigin : std::uint8_t { Default = 0, Skin = 1 };
+
+struct StyleLayer {
+    StyleOrigin origin;
+    ResourceLayer resource;
+};
+
+inline constexpr std::string_view kDefaultStylesheetResourceId = "style/defaults.css";
+
+std::string_view defaultStylesheetSource() noexcept;
 
 struct StyleSheetLoadResult : DiagnosticResult {
     bool ok() const { return !hasErrors(); }
@@ -53,25 +45,27 @@ public:
     StyleSheet& operator=(StyleSheet&& other) noexcept;
 
     StyleSheetLoadResult loadRadia(const std::string& stylesheetSource, const std::string& sourceName = {});
-    StyleSheetLoadResult loadRadiaLayers(const std::vector<ResourceLayer>& layers);
+    StyleSheetLoadResult loadRadiaLayers(const std::vector<StyleLayer>& layers);
     std::uint64_t generation() const;
     const DependencyMap& dependencies() const;
-    bool stateAffectsLayout(WidgetState state) const;
-    bool stateAffectsLayout(const Widget& widget, WidgetState state) const;
-    bool stateAffectsHitTesting(WidgetState state) const;
-    bool stateAffectsHitTesting(const Widget& widget, WidgetState state) const;
-    bool stateAffectsDescendants(const Widget& widget, WidgetState state) const;
+    bool stateAffectsLayout(ElementState state) const;
+    bool stateAffectsLayout(const Element& element, ElementState state) const;
+    bool stateAffectsHitTesting(ElementState state) const;
+    bool stateAffectsHitTesting(const Element& element, ElementState state) const;
+    bool stateAffectsDescendants(const Element& element, ElementState state) const;
 
-    Style resolve(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint8_t states) const;
-    Style resolvePart(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint8_t ownerStates,
-                      const std::string& part, uint8_t partStates = 0) const;
-    Style resolveWidget(const Widget& widget) const;
-    Style resolveWidgetPart(const Widget& owner, const Widget& part) const;
-    Style resolveInline(const Widget& owner, const std::string& element, const std::vector<std::string>& inlineAncestors = {}) const;
+    Style resolve(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t states,
+                  LayoutDirection direction = LayoutDirection::LeftToRight) const;
+    Style resolvePart(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t ownerStates,
+                      const std::string& part, uint16_t partStates = 0, LayoutDirection direction = LayoutDirection::LeftToRight) const;
+    Style resolveElement(const Element& element, LayoutDirection direction = LayoutDirection::LeftToRight) const;
+    Style resolveElementPart(const Element& owner, const Element& part, LayoutDirection direction = LayoutDirection::LeftToRight) const;
+    Style resolveInline(const Element& owner, const std::string& element, const std::vector<std::string>& inlineAncestors = {},
+                        LayoutDirection direction = LayoutDirection::LeftToRight) const;
 
 private:
     struct Impl;
+    static std::shared_ptr<Impl> makeEmptyImpl();
     std::shared_ptr<Impl> mImpl;
 };
 } // namespace radia::ui
-#endif // RD_STYLE_STYLESHEET_H

@@ -46,9 +46,9 @@
 #include "llsetkeybinddialog.h"
 #include "llviewerinput.h"
 #include "llviewermenu.h"
-#include "ui/components/floaterdemo.h"
-#include "ui/inputbridge.h"
-#include "ui/runtime.h"
+#include "controllers/floaterdemo.h"
+#include "inputbridge.h"
+#include "runtime.h"
 
 #include "llviewquery.h"
 #include "llxmltree.h"
@@ -1937,7 +1937,7 @@ void LLViewerWindow::handleFocusLost(LLWindow *window)
 
 void LLViewerWindow::handleMouseCaptureLost(LLWindow*)
 {
-    if (mUIRuntime) mUIRuntime->mouseCaptureLost();
+    if (mUIRuntime) mUIRuntime->pointerCaptureLost();
 }
 
 

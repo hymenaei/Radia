@@ -1,32 +1,13 @@
 /**
- * @file paintcontext.h
- * @brief Defines the abstract painting and text-measurement interface for UI widgets.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
-#ifndef RD_RENDER_PAINTCONTEXT_H
-#define RD_RENDER_PAINTCONTEXT_H
+#pragma once
 
 #include <optional>
 #include <string>
+#include "nativeappearance.h"
 #include "style/style.h"
 #include "text/metrics.h"
 
@@ -46,11 +27,13 @@ public:
     virtual void endFrame() {}
     virtual void pushClip(const Rect& rect, float scale, ClipAxes axes = ClipAxes::Both) = 0;
     virtual void popClip() = 0;
+    virtual void pushTranslation(const Vec2& translation) = 0;
+    virtual void popTranslation() = 0;
     virtual void beginEffects(const Rect& rect, const Style& style, float scale) = 0;
     virtual void endEffects() = 0;
+    virtual void paintNativeScrollbar(const NativeScrollbarPaintRequest&) {}
     virtual void paintBox(const Rect& rect, const Style& style, std::optional<TopBorderGap> topBorderGap = std::nullopt) = 0;
     virtual void paintText(const std::string& text, const Rect& rect, const Style& style) = 0;
     virtual void paintIcon(const std::string& name, const Rect& rect, const Style& style, float scale) = 0;
 };
 } // namespace radia::ui
-#endif // RD_RENDER_PAINTCONTEXT_H

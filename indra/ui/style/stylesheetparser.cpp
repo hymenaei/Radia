@@ -1,25 +1,6 @@
 /**
- * @file stylesheetparser.cpp
- * @brief Parses RSL modules, imports, selectors, declarations, and diagnostics.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
 #include "linden_common.h"
@@ -29,16 +10,16 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include "elements/elementdefinition.h"
 #include "layout/schema.h"
 #include "style/color.h"
 #include "style/model.h"
 #include "style/stylesheet.h"
 #include "style/syntax.h"
-#include "text/inlinecontent.h"
-#include "widgets/widgetcontract.h"
 
 namespace radia::ui {
 namespace {
+using detail::lower;
 using detail::startsWith;
 using detail::trim;
 
@@ -73,7 +54,7 @@ std::optional<std::size_t> topLevelDelimiter(const std::string& value, std::size
 }
 
 bool isColorValue(const std::string& value) {
-    return isColorSyntax(value) || startsWith(value, "var(") || startsWith(value, "token(");
+    return isColorSyntax(value) || startsWith(value, "var(");
 }
 
 bool isSupportedState(const std::string& state) {
@@ -85,13 +66,59 @@ bool isSupportedState(const std::string& state) {
         || state == "disabled"
         || state == "checked"
         || state == "minimized"
-        || state == "invalid";
+        || state == "invalid"
+        || state == "indeterminate";
 }
 
-std::optional<WidgetState> targetSpecificState(const std::string& state) {
-    if (state == "checked") return WidgetState::Checked;
-    if (state == "minimized") return WidgetState::Minimized;
-    if (state == "invalid") return WidgetState::Invalid;
+void appendSelectorState(StyleSelector& selector, const std::string& state) {
+    if (selector.state.empty()) selector.state = state;
+    else selector.state += ":" + state;
+}
+
+void parsePseudoClasses(std::string& token, StyleSelector& result) {
+    const std::size_t separator = token.find(':');
+    if (separator == std::string::npos) return;
+
+    const std::string pseudoClasses = token.substr(separator);
+    token.erase(separator);
+    std::size_t position = 0;
+    while (position < pseudoClasses.size()) {
+        if (pseudoClasses[position] != ':') {
+            appendSelectorState(result, pseudoClasses.substr(position));
+            break;
+        }
+        const std::size_t start = ++position;
+        int parentheses = 0;
+        while (position < pseudoClasses.size()) {
+            const char character = pseudoClasses[position];
+            if (character == '(') ++parentheses;
+            else if (character == ')' && parentheses > 0) --parentheses;
+            else if (character == ':' && parentheses == 0) break;
+            ++position;
+        }
+
+        const std::string pseudoClass = pseudoClasses.substr(start, position - start);
+        const std::size_t open = pseudoClass.find('(');
+        if (open != std::string::npos && lower(trim(pseudoClass.substr(0, open))) == "dir") {
+            if (pseudoClass.size() <= open + 1 || pseudoClass.back() != ')') {
+                result.directionSyntaxInvalid = true;
+                continue;
+            }
+            const std::string value = lower(trim(pseudoClass.substr(open + 1, pseudoClass.size() - open - 2)));
+            if (value == "ltr" && !result.direction) result.direction = LayoutDirection::LeftToRight;
+            else if (value == "rtl" && !result.direction) result.direction = LayoutDirection::RightToLeft;
+            else result.directionSyntaxInvalid = true;
+            continue;
+        }
+        appendSelectorState(result, pseudoClass);
+    }
+}
+
+std::optional<ElementState> targetSpecificState(const std::string& state) {
+    if (state == "checked") return ElementState::Checked;
+    if (state == "minimized") return ElementState::Minimized;
+    if (state == "invalid") return ElementState::Invalid;
+    if (state == "indeterminate") return ElementState::Indeterminate;
     return std::nullopt;
 }
 
@@ -138,8 +165,8 @@ std::optional<std::string> normalizeImportPath(const std::string& current, const
         if (!result.empty()) result += '/';
         result += segment;
     }
-    constexpr const char* kRadiaExtension = ".radia";
-    if (result.size() < 6 || result.compare(result.size() - 6, 6, kRadiaExtension) != 0) return std::nullopt;
+    constexpr const char* kCssExtension = ".css";
+    if (result.size() < 4 || result.compare(result.size() - 4, 4, kCssExtension) != 0) return std::nullopt;
     return result;
 }
 
@@ -159,11 +186,18 @@ std::string importChain(const std::vector<std::string>& stack, const std::option
 StyleSelector mergeSelector(const StyleSelector& parent, const StyleSelector& child) {
     StyleSelector result;
     result.universal = child.universal ? true : parent.universal;
+    result.attributeSyntaxInvalid = parent.attributeSyntaxInvalid || child.attributeSyntaxInvalid;
+    result.directionSyntaxInvalid = parent.directionSyntaxInvalid || child.directionSyntaxInvalid;
     result.element = child.element.empty() ? parent.element : child.element;
+    const bool childHasAttribute = !child.attributeName.empty();
+    result.attributeName = childHasAttribute ? child.attributeName : parent.attributeName;
+    result.attributeValue = childHasAttribute ? child.attributeValue : parent.attributeValue;
+    result.attributePresence = childHasAttribute ? child.attributePresence : parent.attributePresence;
     result.id = child.id.empty() ? parent.id : child.id;
     result.className = child.className.empty() ? parent.className : child.className;
     result.state = parent.state;
     result.partState = parent.partState;
+    result.direction = child.direction ? child.direction : parent.direction;
     if (!child.state.empty()) {
         if (parent.parts.empty()) result.state = child.state;
         else result.partState = child.state;
@@ -172,6 +206,55 @@ StyleSelector mergeSelector(const StyleSelector& parent, const StyleSelector& ch
     result.parts = parent.parts;
     result.parts.insert(result.parts.end(), child.parts.begin(), child.parts.end());
     return result;
+}
+
+void parseAttributeSelector(std::string& token, StyleSelector& result) {
+    const std::size_t open = token.find('[');
+    if (open == std::string::npos) return;
+    const std::size_t close = token.find(']', open + 1);
+    if (close == std::string::npos || close != token.size() - 1 || token.find('[', open + 1) != std::string::npos) {
+        result.attributeSyntaxInvalid = true;
+        token.erase(open);
+        return;
+    }
+
+    const std::string expression = token.substr(open + 1, close - open - 1);
+    const std::size_t equals = expression.find('=');
+    if (equals == std::string::npos) {
+        result.attributeName = lower(trim(expression));
+        if (result.attributeName.empty()) result.attributeSyntaxInvalid = true;
+        else result.attributePresence = true;
+        token.erase(open);
+        return;
+    }
+    if (expression.find('=', equals + 1) != std::string::npos) {
+        result.attributeSyntaxInvalid = true;
+        token.erase(open);
+        return;
+    }
+
+    result.attributeName = lower(trim(expression.substr(0, equals)));
+    std::string value = trim(expression.substr(equals + 1));
+    if (result.attributeName.empty() || value.empty()) {
+        result.attributeSyntaxInvalid = true;
+        token.erase(open);
+        return;
+    }
+    if (value.front() == '\'' || value.front() == '"') {
+        if (value.size() < 2 || value.back() != value.front()) {
+            result.attributeSyntaxInvalid = true;
+            token.erase(open);
+            return;
+        }
+        value = value.substr(1, value.size() - 2);
+    } else if (!isElementIdentifier(value)) {
+        result.attributeSyntaxInvalid = true;
+        token.erase(open);
+        return;
+    }
+    if (value.empty()) result.attributeSyntaxInvalid = true;
+    else result.attributeValue = value;
+    token.erase(open);
 }
 
 void appendSelector(StyleRule& destination, const StyleRule& suffix, SelectorCombinator combinator) {
@@ -231,10 +314,8 @@ StyleSelector parseSimpleSelector(const std::string& selectorText) {
         result.parts = detail::splitPartPath(partToken);
         token.erase(separator);
     }
-    if (const std::size_t separator = token.find(':'); separator != std::string::npos) {
-        result.state = token.substr(separator + 1);
-        token.erase(separator);
-    }
+    parsePseudoClasses(token, result);
+    parseAttributeSelector(token, result);
     if (const std::size_t separator = token.find('#'); separator != std::string::npos) {
         result.id = token.substr(separator + 1);
         token.erase(separator);
@@ -465,24 +546,30 @@ StyleRule detail::parseSelector(const std::string& selector) {
 }
 
 StyleSheetLoadResult StyleSheet::loadRadia(const std::string& stylesheetSource, const std::string& sourceName) {
-    return loadRadiaLayers({ResourceLayer{sourceName, stylesheetSource}});
+    return loadRadiaLayers({StyleLayer{StyleOrigin::Default, ResourceLayer{sourceName, stylesheetSource}}});
 }
 
-StyleSheetLoadResult StyleSheet::loadRadiaLayers(const std::vector<ResourceLayer>& layers) {
+StyleSheetLoadResult StyleSheet::loadRadiaLayers(const std::vector<StyleLayer>& layers) {
     Impl candidate;
     StyleSheetLoadResult result;
     if (layers.empty()) {
         result.error("stylesheet.layers.empty", "No stylesheet layers were provided.");
         return result;
     }
-    for (const ResourceLayer& layer : layers) {
+    // Root tokens are applied while parsing, so their layer order must match rule precedence.
+    std::vector<StyleLayer> orderedLayers = layers;
+    std::stable_sort(orderedLayers.begin(), orderedLayers.end(), [](const StyleLayer& left, const StyleLayer& right) {
+        return static_cast<std::uint8_t>(left.origin) < static_cast<std::uint8_t>(right.origin);
+    });
+    for (const StyleLayer& styleLayer : orderedLayers) {
+        const ResourceLayer& layer = styleLayer.resource;
         const std::string entrypoint = layer.entrypoint.empty() ? layer.sourceName : layer.entrypoint;
         StyleSheetModuleGraph graph(layer, candidate, result);
         graph.build(entrypoint);
         if (result.hasErrors()) continue;
 
         auto compileModule = [&](const ParsedRuleBlock& rule, const std::string& sourceName) {
-            candidate.parseBlock(rule.selector, rule.body, {}, result, sourceName);
+            candidate.parseBlock(rule.selector, rule.body, {}, styleLayer.origin, result, sourceName);
         };
         graph.visit(entrypoint, compileModule);
     }
@@ -511,18 +598,34 @@ bool validateSelector(StyleRule& rule, const std::string& selector, StyleSheetLo
     for (std::size_t index = 0; index < rule.selectors.size(); ++index) {
         StyleSelector& component = rule.selectors[index];
         const bool declarationComponent = index + 1 == rule.selectors.size();
-        if (!component.id.empty() && !isWidgetIdentifier(component.id)) {
-            result.error("stylesheet.selector.id_invalid", "Widget IDs in selectors must be valid identifiers: " + selector + ".", sourceName);
+        if (component.attributeSyntaxInvalid) {
+            result.error("stylesheet.selector.attribute_invalid",
+                         "Attribute selectors must use [attribute] or [type=\"value\"] syntax: " + selector + ".", sourceName);
             return false;
         }
-        if (!component.className.empty() && !isKebabCaseIdentifier(component.className)) {
-            result.error("stylesheet.selector.class_invalid", "Widget classes in selectors must use lowercase kebab-case: " + selector + ".",
+        if (!component.attributeName.empty()
+            && component.attributeName != "type"
+            && component.attributeName != "switch"
+            && component.attributeName != "name") {
+            result.error("stylesheet.selector.attribute_unsupported", "Only the type, switch, and name attributes can be selected: " + selector + ".",
                          sourceName);
             return false;
         }
-        if (std::any_of(component.parts.begin(), component.parts.end(), [](const std::string& part) { return !isKebabCaseIdentifier(part); })) {
-            result.error("stylesheet.selector.part_invalid", "Widget parts in selectors must use lowercase kebab-case: " + selector + ".",
+        if (!component.id.empty() && !isElementIdentifier(component.id)) {
+            result.error("stylesheet.selector.id_invalid", "Element IDs in selectors must be valid identifiers: " + selector + ".", sourceName);
+            return false;
+        }
+        if (!component.className.empty() && !isElementIdentifier(component.className)) {
+            result.error("stylesheet.selector.class_invalid", "Element classes in selectors must be valid identifiers: " + selector + ".",
                          sourceName);
+            return false;
+        }
+        if (std::any_of(component.parts.begin(), component.parts.end(), [](const std::string& part) { return !isElementIdentifier(part); })) {
+            result.error("stylesheet.selector.part_invalid", "Element parts in selectors must be valid identifiers: " + selector + ".", sourceName);
+            return false;
+        }
+        if (component.directionSyntaxInvalid) {
+            result.error("stylesheet.selector.state_unknown", "Invalid :dir() selector: " + selector + ".", sourceName);
             return false;
         }
         if (!isSupportedState(component.state) || !isSupportedState(component.partState)) {
@@ -531,40 +634,46 @@ bool validateSelector(StyleRule& rule, const std::string& selector, StyleSheetLo
             return false;
         }
         if (!declarationComponent && !component.parts.empty()) {
-            result.error("stylesheet.selector.part_structural", "Widget parts cannot participate in structural combinators: " + selector + ".",
+            result.error("stylesheet.selector.part_structural", "Element parts cannot participate in structural combinators: " + selector + ".",
                          sourceName);
             return false;
         }
         if (component.element.empty()) {
-            if (!component.parts.empty() || !component.state.empty() || !component.partState.empty()) {
-                result.error("stylesheet.selector.target_required", "Parts and states require an element-qualified selector: " + selector + ".",
+            if (!component.attributeName.empty() || !component.parts.empty()) {
+                result.error("stylesheet.selector.target_required", "Attributes and parts require an element-qualified selector: " + selector + ".",
                              sourceName);
                 return false;
             }
             continue;
         }
-        if (isInlineStyleElement(component.element)) {
-            if (!component.id.empty() || !component.className.empty()) {
+        if (schemaNameKey(component.element) == "kbd") {
+            if (!component.attributeName.empty() || !component.id.empty() || !component.className.empty()) {
                 result.error("stylesheet.selector.inline_identity_unsupported",
-                             "Inline style elements do not have Widget IDs or classes: " + selector + ".", sourceName);
+                             "Inline style elements do not have Element IDs, classes, or attributes: " + selector + ".", sourceName);
                 return false;
             }
-            component.element = inlineContentElement(InlineContentKind::Kbd);
+            component.element = "kbd";
             if (!component.parts.empty()) {
                 result.error("stylesheet.selector.part_unknown", "Unknown style part for " + component.element + ".", sourceName);
                 return false;
             }
             continue;
         }
-        const WidgetContract* componentOwner = findWidgetContract(component.element);
-        if (!componentOwner) {
-            result.error("stylesheet.selector.element_unknown", "Unknown widget element: " + component.element + ".", sourceName);
+        const Tag componentTag = sourceTagFromName(component.element);
+        if (!component.attributeName.empty() && componentTag != Tag::Input) {
+            result.error("stylesheet.selector.attribute_unsupported", "Input attributes can only be selected on input: " + selector + ".",
+                         sourceName);
             return false;
         }
-        component.element = componentOwner->elementName;
-        const CompositePartContract* componentPart =
-            component.parts.empty() ? nullptr : findCompositePartContract(*componentOwner, component.parts);
-        if (!component.parts.empty() && !componentPart) {
+        const ElementSelectorMetadata metadata =
+            inspectElementSelector(componentTag, component.attributeName.empty() ? std::string_view{} : std::string_view(component.attributeValue),
+                                   component.parts, targetSpecificState(component.state), targetSpecificState(component.partState));
+        if (!metadata.known) {
+            result.error("stylesheet.selector.element_unknown", "Unknown element element: " + component.element + ".", sourceName);
+            return false;
+        }
+        component.element = metadata.elementName;
+        if (!metadata.partKnown) {
             std::string part;
             for (const std::string& segment : component.parts) {
                 if (!part.empty()) part += "::";
@@ -573,10 +682,10 @@ bool validateSelector(StyleRule& rule, const std::string& selector, StyleSheetLo
             result.error("stylesheet.selector.part_unknown", "Unknown style part for " + component.element + ": " + part + ".", sourceName);
             return false;
         }
-        if (const auto state = targetSpecificState(component.state); state && !producesState(*componentOwner, *state))
+        if (targetSpecificState(component.state) && !metadata.elementProducesState)
             result.warning("stylesheet.selector.state_never_matches",
                            "State :" + component.state + " is never produced by " + component.element + ".", sourceName);
-        if (const auto state = targetSpecificState(component.partState); state && componentPart && !producesState(*componentPart, *state))
+        if (targetSpecificState(component.partState) && !metadata.partProducesState && !component.parts.empty())
             result.warning("stylesheet.selector.state_never_matches",
                            "State :" + component.partState + " is never produced by the selected part of " + component.element + ".", sourceName);
     }
@@ -676,7 +785,7 @@ void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& select
                 break;
             }
             model.parseBlock(trim(body.substr(fragment->start, *fragment->open - fragment->start)),
-                             body.substr(*fragment->open + 1, *fragment->close - *fragment->open - 1), rule, result, sourceName);
+                             body.substr(*fragment->open + 1, *fragment->close - *fragment->open - 1), rule, rule.origin, result, sourceName);
             continue;
         }
         addDeclaration(body.substr(fragment->start, fragment->end - fragment->start));
@@ -688,18 +797,19 @@ void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& select
 }
 } // namespace
 
-void StyleModel::parseBlock(const std::string& selectorText, const std::string& body, const StyleRule& parent, StyleSheetLoadResult& result,
-                            const std::string& sourceName) {
+void StyleModel::parseBlock(const std::string& selectorText, const std::string& body, const StyleRule& parent, StyleOrigin origin,
+                            StyleSheetLoadResult& result, const std::string& sourceName) {
     const std::vector<std::string> selectors = splitSelectorList(selectorText);
     if (selectors.size() > 1) {
         for (const std::string& selector : selectors)
-            if (!selector.empty()) parseBlock(selector, body, parent, result, sourceName);
+            if (!selector.empty()) parseBlock(selector, body, parent, origin, result, sourceName);
         return;
     }
 
     const std::string selector = trim(selectorText);
     const bool nested = !parent.selectors.empty();
     StyleRule rule = nested ? expandNestedSelector(parent, selector) : detail::parseSelector(selector);
+    rule.origin = origin;
     const bool rootRule = !nested && selector == ":root";
     if (!rootRule && rule.selectors.empty()) {
         result.error("stylesheet.selector.empty", "Rule selector is empty.", sourceName);

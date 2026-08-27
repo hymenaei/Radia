@@ -13,17 +13,6 @@
             <key>Value</key>
             <string></string>
         </map>
-        <key>LongClickDelay</key>
-        <map>
-            <key>Comment</key>
-            <string>Default held-click duration for Radia UI widgets, in milliseconds. Values below 1 are clamped.</string>
-            <key>Persist</key>
-            <integer>1</integer>
-            <key>Type</key>
-            <string>S32</string>
-            <key>Value</key>
-            <integer>500</integer>
-        </map>
         <key>SkinAutoReload</key>
         <map>
             <key>Comment</key>

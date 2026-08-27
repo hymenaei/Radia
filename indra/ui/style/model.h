@@ -1,29 +1,9 @@
 /**
- * @file model.h
- * @brief Private stylesheet model shared by the style compiler, parser, and resolver.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
-#ifndef RD_STYLE_MODEL_H
-#define RD_STYLE_MODEL_H
+#pragma once
 
 #include <array>
 #include <cstddef>
@@ -60,16 +40,19 @@ struct StyleIconStroke {
     Color color;
 };
 
+struct InitialStyleValue {};
+
 struct StyleModel;
 struct StyleRule;
 
 namespace detail { struct StylePropertyDefinition; }
 
 using StyleValue =
-    std::variant<Color, StylePaint, StyleBorder, StyleSize, StyleIconStroke, EdgeInsets, MarginInsets, Dimension, Length, std::optional<Length>,
-                 GapValue, std::vector<BoxShadow>, std::vector<Effect>, Outline, float, int, bool, FontFamily, TextAlign, TextOverflow, TextWrap,
-                 VerticalAlign, DisplayMode, FlexDirection, JustifyContent, AlignItems, AlignSelf, Overflow, PointerEvents, CursorStyle,
-                 StrokeCap, Visibility>;
+    std::variant<InitialStyleValue, Color, StylePaint, StyleBorder, StyleSize, StyleIconStroke, EdgeInsets, MarginInsets, Dimension, Length,
+                 BorderRadii, std::optional<Length>, GapValue, std::vector<BoxShadow>, std::vector<Effect>, Outline, GridArea, Translate, float, int,
+                 bool, AppearanceMode, FontFamily, TextAlign, TextOverflow, TextWrap, VerticalAlign, TextDecoration, DisplayMode, FlexDirection,
+                 PositionMode, JustifyContent, JustifySelf, AlignItems, AlignSelf, Overflow, ScrollbarMode, ScrollbarWidth, ScrollbarGutter,
+                 PointerEvents, CursorStyle, StrokeCap, Visibility, ScrollbarColors>;
 
 struct StyleDeclaration {
     std::reference_wrapper<const detail::StylePropertyDefinition> property;
@@ -123,15 +106,22 @@ enum class SelectorCombinator { Descendant, Child };
 
 struct StyleSelector {
     bool universal = false;
+    bool attributeSyntaxInvalid = false;
+    bool directionSyntaxInvalid = false;
     std::string element;
+    std::string attributeName;
+    std::string attributeValue;
+    bool attributePresence = false;
     std::string id;
     std::string className;
     std::string state;
     std::string partState;
+    std::optional<LayoutDirection> direction;
     std::vector<std::string> parts;
 };
 
 struct StyleRule {
+    StyleOrigin origin = StyleOrigin::Default;
     std::vector<StyleSelector> selectors;
     std::vector<SelectorCombinator> combinators;
     std::vector<StyleDeclaration> declarations;
@@ -149,6 +139,7 @@ struct StyleModel {
     Color parseColorValue(const std::string& value, const Color& fallback) const;
     float parseNumberValue(const std::string& value, float fallback) const;
     std::optional<Length> parseLengthValue(const std::string& value) const;
+    std::optional<BorderRadii> parseBorderRadius(const std::string& value) const;
     std::optional<Gradient> parseGradient(const std::string& value) const;
     std::optional<std::vector<BoxShadow>> parseShadows(const std::string& value) const;
     std::optional<std::vector<Effect>> parseEffects(const std::string& value) const;
@@ -162,10 +153,10 @@ struct StyleModel {
     std::optional<std::vector<StyleDeclaration>> compileDeclaration(const detail::StylePropertyDefinition& property, const std::string& value,
                                                                     const std::string& selector, StyleSheetLoadResult& result,
                                                                     const std::string& sourceName) const;
-    Style resolveInternal(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint8_t ownerStates,
-                          const std::vector<std::string>& partPath, uint8_t partStates, const Widget* widget = nullptr,
-                          const std::vector<std::string>* inlineAncestors = nullptr) const;
-    void parseBlock(const std::string& selector, const std::string& body, const StyleRule& parent, StyleSheetLoadResult& result,
+    Style resolveInternal(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t ownerStates,
+                          const std::vector<std::string>& partPath, uint16_t partStates, const Element* target = nullptr,
+                          const std::vector<std::string>* inlineAncestors = nullptr, LayoutDirection direction = LayoutDirection::LeftToRight) const;
+    void parseBlock(const std::string& selector, const std::string& body, const StyleRule& parent, StyleOrigin origin, StyleSheetLoadResult& result,
                     const std::string& sourceName);
 
     std::map<std::string, Color> colorTokens;
@@ -173,27 +164,26 @@ struct StyleModel {
     StyleSheet::DependencyMap dependencies;
     std::vector<StyleRule> rules;
     std::uint64_t generation = 0;
-    mutable std::uint8_t layoutStateMask = 0;
+    mutable std::uint16_t layoutStateMask = 0;
     mutable bool layoutStateMaskValid = false;
-    mutable std::array<std::vector<std::size_t>, 8> layoutStateRules;
-    mutable std::uint8_t hitTestStateMask = 0;
+    mutable std::array<std::vector<std::size_t>, 9> layoutStateRules;
+    mutable std::uint16_t hitTestStateMask = 0;
     mutable bool hitTestStateMaskValid = false;
-    mutable std::array<std::vector<std::size_t>, 8> hitTestStateRules;
+    mutable std::array<std::vector<std::size_t>, 9> hitTestStateRules;
     mutable bool descendantStateRulesValid = false;
-    mutable std::array<std::vector<std::size_t>, 8> descendantStateRules;
+    mutable std::array<std::vector<std::size_t>, 9> descendantStateRules;
     mutable bool ruleIndexValid = false;
     mutable std::vector<std::size_t> universalRuleIndices;
     mutable std::unordered_map<std::string, std::vector<std::size_t>> elementRuleIndices;
     mutable std::unordered_map<std::string, std::vector<std::size_t>> idRuleIndices;
     mutable std::unordered_map<std::string, std::vector<std::size_t>> classRuleIndices;
 
-    bool stateAffectsLayout(WidgetState state) const;
-    bool stateAffectsLayout(const Widget& widget, WidgetState state) const;
-    bool stateAffectsHitTesting(WidgetState state) const;
-    bool stateAffectsHitTesting(const Widget& widget, WidgetState state) const;
-    bool stateAffectsDescendants(const Widget& widget, WidgetState state) const;
+    bool stateAffectsLayout(ElementState state) const;
+    bool stateAffectsLayout(const Element& element, ElementState state) const;
+    bool stateAffectsHitTesting(ElementState state) const;
+    bool stateAffectsHitTesting(const Element& element, ElementState state) const;
+    bool stateAffectsDescendants(const Element& element, ElementState state) const;
 };
 
 struct StyleSheet::Impl : StyleModel {};
 } // namespace radia::ui
-#endif // RD_STYLE_MODEL_H

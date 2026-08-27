@@ -9,8 +9,6 @@ include(TemplateCheck)
 set(VIEWER_BINARY_NAME "alchemy-bin" CACHE STRING
     "The name of the viewer executable to create.")
 
-add_subdirectory(ui)
-
 # Generate version vars header
 configure_file(llversioninfovars.h.in llversioninfovars.h @ONLY)
 
@@ -148,7 +146,28 @@ if (HAVOK)
    endif()
 endif ()
 
+set(viewer_controllers_SOURCE_FILES
+    controllers/floaterdemo.cpp
+    )
+
+set(viewer_controllers_HEADER_FILES
+    controllers/floaterdemo.h
+    )
+
 set(viewer_SOURCE_FILES
+    componentmanager.cpp
+    documentcontroller.cpp
+    floaterhost.cpp
+    inputbridge.cpp
+    reloadcoordinator.cpp
+    resources.cpp
+    resolver.cpp
+    runtime.cpp
+    settingsadapter.cpp
+    skinpreparation.cpp
+    workspacepersistence.cpp
+    ${viewer_controllers_SOURCE_FILES}
+
     ao.cpp
     aoengine.cpp
     aoset.cpp
@@ -920,6 +939,24 @@ set(viewer_SOURCE_FILES
 
 set(viewer_HEADER_FILES
     ViewerInstall.cmake
+
+    componentinstancekey.h
+    componentmanager.h
+    controllerregistration.h
+    documentcontroller.h
+    documentcontrollerinternal.h
+    floaterhost.h
+    inputbridge.h
+    nativeinput.h
+    reloadcoordinator.h
+    resources.h
+    resolver.h
+    runtime.h
+    settingsadapter.h
+    skinpreparation.h
+    workspacepersistence.h
+    ${viewer_controllers_HEADER_FILES}
+
     ao.h
     aoengine.h
     aoset.h
@@ -1688,6 +1725,8 @@ set(viewer_HEADER_FILES
     )
 
 source_group("CMake Rules" FILES ViewerInstall.cmake)
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/controllers PREFIX "Skin Files"
+             FILES ${viewer_controllers_SOURCE_FILES} ${viewer_controllers_HEADER_FILES})
 
 #build_data.json creation moved to viewer_manifest.py MAINT-6413
 # the viewer_version.txt file created here is for passing to viewer_manifest and autobuild
@@ -1841,19 +1880,15 @@ endif (WINDOWS)
 
 # Add the xui files. This is handy for searching for xui elements
 # from within the IDE.
-file(GLOB_RECURSE viewer_XUI_FILES LIST_DIRECTORIES FALSE
-    ${CMAKE_CURRENT_SOURCE_DIR}/skins/*.xml)
-source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/skins PREFIX "XUI Files" FILES ${viewer_XUI_FILES})
-set_source_files_properties(${viewer_XUI_FILES}
-                            PROPERTIES HEADER_FILE_ONLY TRUE)
-list(APPEND viewer_SOURCE_FILES ${viewer_XUI_FILES})
+file(GLOB_RECURSE viewer_SKIN_FILES LIST_DIRECTORIES FALSE ${CMAKE_CURRENT_SOURCE_DIR}/skins/*)
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/skins PREFIX "Skin Files" FILES ${viewer_SKIN_FILES})
+set_source_files_properties(${viewer_SKIN_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
+list(APPEND viewer_SOURCE_FILES ${viewer_SKIN_FILES})
 
 # Add the shader sources
-file(GLOB_RECURSE viewer_SHADER_FILES LIST_DIRECTORIES FALSE
-    ${CMAKE_CURRENT_SOURCE_DIR}/app_settings/shaders/*.glsl)
-source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/app_settings/shaders PREFIX "Shaders" FILES ${viewer_SHADER_FILES})
-set_source_files_properties(${viewer_SHADER_FILES}
-                            PROPERTIES HEADER_FILE_ONLY TRUE)
+file(GLOB_RECURSE viewer_SHADER_FILES LIST_DIRECTORIES FALSE ${CMAKE_CURRENT_SOURCE_DIR}/app_settings/shaders/*.glsl)
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/app_settings/shaders PREFIX "Shader Files" FILES ${viewer_SHADER_FILES})
+set_source_files_properties(${viewer_SHADER_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
 list(APPEND viewer_SOURCE_FILES ${viewer_SHADER_FILES})
 
 # note that the scripts which publish these files are sensitive to the file
@@ -1903,7 +1938,7 @@ set(viewer_CHARACTER_FILES
     character/genepool.xml
     )
 
-source_group("Character File" FILES ${viewer_CHARACTER_FILES})
+source_group("Character Files" FILES ${viewer_CHARACTER_FILES})
 
 set_source_files_properties(${viewer_CHARACTER_FILES}
                             PROPERTIES HEADER_FILE_ONLY TRUE)
@@ -1936,20 +1971,6 @@ add_executable(${VIEWER_BINARY_NAME}
     MACOSX_BUNDLE
     ${viewer_SOURCE_FILES}
     )
-
-# Development viewers load shaders from the configuration staging directory.
-# Keep that runtime copy current even when only a HEADER_FILE_ONLY shader source
-# changes and the viewer binary itself does not need to relink.
-if (WINDOWS)
-  add_custom_target(copy_viewer_shaders ALL
-    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
-      "${CMAKE_CURRENT_SOURCE_DIR}/app_settings/shaders"
-      "${VIEWER_STAGING_DIR}/app_settings/shaders"
-    DEPENDS ${viewer_SHADER_FILES}
-    COMMENT "Staging viewer shaders"
-    )
-  add_dependencies(${VIEWER_BINARY_NAME} copy_viewer_shaders)
-endif ()
 
 check_message_template(${VIEWER_BINARY_NAME})
 
@@ -2018,7 +2039,6 @@ target_link_libraries(${VIEWER_BINARY_NAME}
         ll::tinyexr
         ll::minizip
         ui
-        viewer_ui
         )
 
 if (TARGET ll::velopack)
@@ -2382,9 +2402,6 @@ if (PACKAGE AND (RELEASE_CRASH_REPORTING OR NON_RELEASE_CRASH_REPORTING))
   endif (USE_BUGSPLAT)
 endif ()
 
-add_custom_target(viewer)
-add_dependencies(viewer ${VIEWER_BINARY_NAME})
-
 elseif(BUILD_TESTING)
 
 # Create a dummy executable for test projects to generate against when viewer build is disabled
@@ -2394,6 +2411,36 @@ target_include_directories(${VIEWER_BINARY_NAME} PUBLIC ${CMAKE_CURRENT_BINARY_D
 endif(BUILD_VIEWER)
 
 if (BUILD_TESTING)
+  set(viewer_GTEST_SOURCE_FILES
+    componentmanager.cpp
+    floaterhost.cpp
+    inputbridge.cpp
+    reloadcoordinator.cpp
+    resolver.cpp
+    runtime.cpp
+    settingsadapter.cpp
+    skinpreparation.cpp
+    workspacepersistence.cpp
+  )
+
+  ADD_UNIT_TESTS(${VIEWER_BINARY_NAME} "${viewer_GTEST_SOURCE_FILES}"
+    LINK_TARGETS
+    llcommon
+    llmath
+    llfilesystem
+    llmessage
+    llcharacter
+    llprimitive
+    llrender
+    llwindow
+    llxml
+    ui
+    IMPLEMENTATION_SOURCES
+    ${viewer_GTEST_SOURCE_FILES}
+    documentcontroller.cpp
+    resources.cpp
+  )
+
   # To add a viewer unit test, just add the test .cpp file below
   # This creates a separate test project per file listed.
 

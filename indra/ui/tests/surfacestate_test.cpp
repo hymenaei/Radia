@@ -1,66 +1,48 @@
 /**
- * @file surfacestate_test.cpp
- * @brief Tests state-driven Surface layout, hit testing, and visibility.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public License
- * as published by the Free Software Foundation; version 2.1 of the
- * License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
 #include "linden_common.h"
 #include <gtest/gtest.h>
 #include <memory>
+#include "elements/button.h"
+#include "elements/floater.h"
+#include "elements/label.h"
+#include "elements/panel.h"
+#include "floater_test_helpers.h"
 #include "render/recordingpaintcontext.h"
 #include "style/stylesheet.h"
 #include "surface/surface.h"
-#include "widgets/button.h"
-#include "widgets/floater.h"
-#include "widgets/label.h"
-#include "widgets/panel.h"
 
 namespace {
-using radia::ui::Button;
-using radia::ui::Floater;
-using radia::ui::Label;
-using radia::ui::Panel;
+using radia::ui::ButtonElement;
+using radia::ui::ElementState;
+using radia::ui::FloaterElement;
+using radia::ui::LabelElement;
+using radia::ui::PanelElement;
 using radia::ui::RecordingPaintContext;
 using radia::ui::StyleSheet;
 using radia::ui::Surface;
 using radia::ui::Visibility;
-using radia::ui::WidgetState;
 } // namespace
 
 TEST(SurfaceStateTest, ReflowsWhenHoveredStateChangesLayout) {
     StyleSheet styleSheet;
     constexpr char kStateLayout[] = "button { width: 20px; height: 10px; } button:hover { width: 40px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kStateLayout).ok());
-    EXPECT_TRUE(styleSheet.stateAffectsLayout(WidgetState::Hovered));
+    EXPECT_TRUE(styleSheet.stateAffectsLayout(ElementState::Hovered));
     Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
-    auto button = std::make_unique<Button>();
-    Button* target = button.get();
+    auto button = std::make_unique<ButtonElement>();
+    ButtonElement* target = button.get();
     ASSERT_NE(target, nullptr);
-    button->setRect({0.f, 0.f, 20.f, 10.f}).setPointerEvents(true);
-    surface.root().addChild(std::move(button));
+    button->setPointerEvents(true);
+    surface.mount(std::move(button));
     surface.updateLayout();
     EXPECT_FLOAT_EQ(target->rect().w, 20.f);
-    surface.pointerMove({{5.f, 5.f}});
-    ASSERT_TRUE(target->hasState(WidgetState::Hovered));
+    surface.pointerMove({{5.f, 95.f}});
+    ASSERT_TRUE(target->hasState(ElementState::Hovered));
     surface.updateLayout();
     EXPECT_FLOAT_EQ(target->rect().w, 40.f);
 }
@@ -69,22 +51,22 @@ TEST(SurfaceStateTest, RefreshesHitTestingWhenHoveredPolicyChanges) {
     StyleSheet styleSheet;
     constexpr char kStateHitTest[] = "button { pointer-events: auto; } button:hover { pointer-events: none; }";
     ASSERT_TRUE(styleSheet.loadRadia(kStateHitTest).ok());
-    EXPECT_TRUE(styleSheet.stateAffectsHitTesting(WidgetState::Hovered));
+    EXPECT_TRUE(styleSheet.stateAffectsHitTesting(ElementState::Hovered));
     Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
-    auto button = std::make_unique<Button>();
-    Button* target = button.get();
+    auto button = std::make_unique<ButtonElement>();
+    ButtonElement* target = button.get();
     ASSERT_NE(target, nullptr);
     button->setRect({0.f, 0.f, 20.f, 10.f}).setPointerEvents(true);
-    surface.root().addChild(std::move(button));
+    surface.mount(std::move(button));
 
     surface.pointerMove({{5.f, 5.f}});
-    ASSERT_TRUE(target->hasState(WidgetState::Hovered));
+    ASSERT_TRUE(target->hasState(ElementState::Hovered));
     RecordingPaintContext recording;
     surface.paint(recording);
-    EXPECT_FALSE(target->hasState(WidgetState::Hovered));
+    EXPECT_FALSE(target->hasState(ElementState::Hovered));
     surface.paint(recording);
-    EXPECT_FALSE(target->hasState(WidgetState::Hovered));
+    EXPECT_FALSE(target->hasState(ElementState::Hovered));
 }
 
 TEST(SurfaceStateTest, InvalidatesDescendantLayoutForOwnerState) {
@@ -94,69 +76,68 @@ TEST(SurfaceStateTest, InvalidatesDescendantLayoutForOwnerState) {
     ASSERT_TRUE(styleSheet.loadRadia(kDescendantState).ok());
     Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
-    auto panel = std::make_unique<Panel>();
-    Panel* parent = panel.get();
+    auto panel = std::make_unique<PanelElement>();
+    PanelElement* parent = panel.get();
     ASSERT_NE(parent, nullptr);
     panel->setRect({0.f, 0.f, 100.f, 20.f}).setPointerEvents(true);
-    auto label = std::make_unique<Label>("descendant");
-    Label* target = label.get();
+    auto label = std::make_unique<LabelElement>("descendant");
+    LabelElement* target = label.get();
     ASSERT_NE(target, nullptr);
-    panel->addChild(std::move(label));
-    surface.root().addChild(std::move(panel));
+    panel->append(std::move(label));
+    surface.mount(std::move(panel));
 
     surface.updateLayout();
     EXPECT_FLOAT_EQ(target->rect().w, 20.f);
     surface.pointerMove({{5.f, 5.f}});
-    ASSERT_TRUE(parent->hasState(WidgetState::Hovered));
+    ASSERT_TRUE(parent->hasState(ElementState::Hovered));
     surface.updateLayout();
     EXPECT_FLOAT_EQ(target->rect().w, 40.f);
 }
 
-TEST(SurfaceStateTest, RemovesUnavailableWidgetsFromStationaryHitTesting) {
+TEST(SurfaceStateTest, RemovesUnavailableElementsFromStationaryHitTesting) {
     Surface surface;
     surface.setViewport(100.f, 100.f);
-    auto button = std::make_unique<Button>();
-    Button* target = button.get();
+    auto button = std::make_unique<ButtonElement>();
+    ButtonElement* target = button.get();
     ASSERT_NE(target, nullptr);
     button->setRect({0.f, 0.f, 20.f, 10.f}).setPointerEvents(true);
-    surface.root().addChild(std::move(button));
+    surface.mount(std::move(button));
     surface.pointerMove({{5.f, 5.f}});
-    ASSERT_TRUE(target->hasState(WidgetState::Hovered));
+    ASSERT_TRUE(target->hasState(ElementState::Hovered));
 
     RecordingPaintContext recording;
     target->setVisibility(Visibility::Hidden);
     surface.paint(recording);
-    EXPECT_FALSE(target->hasState(WidgetState::Hovered));
+    EXPECT_FALSE(target->hasState(ElementState::Hovered));
 
     target->setVisibility(Visibility::Visible);
     surface.paint(recording);
-    EXPECT_TRUE(target->hasState(WidgetState::Hovered));
+    EXPECT_TRUE(target->hasState(ElementState::Hovered));
 
-    target->setDisabled(true);
+    target->disabled(true);
     surface.paint(recording);
-    EXPECT_FALSE(target->hasState(WidgetState::Hovered));
-    target->setDisabled(false);
+    EXPECT_FALSE(target->hasState(ElementState::Hovered));
+    target->disabled(false);
     surface.paint(recording);
-    EXPECT_TRUE(target->hasState(WidgetState::Hovered));
+    EXPECT_TRUE(target->hasState(ElementState::Hovered));
 }
 
 TEST(SurfaceStateTest, RestylesCompositePartsWhenOwnerStateChanges) {
     StyleSheet styleSheet;
-    constexpr char kCompositeOwnerState[] = "floater { display: flex; flex-direction: column; width: 100px; height: 100px; "
-                                            "&:minimized::header { height: 40px; } } "
-                                            "floater::header { height: 20px; } floater::content { flex-grow: 1; }";
+    constexpr char kCompositeOwnerState[] = "floater { display: flex; flex-direction: column; width: 100px; height: 100px; } "
+                                            "floater:minimized > head { height: 40px; } "
+                                            "floater > head { height: 20px; } floater > body { flex-grow: 1; }";
     ASSERT_TRUE(styleSheet.loadRadia(kCompositeOwnerState).ok());
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
-    auto floater = std::make_unique<Floater>();
-    Floater* target = floater.get();
+    auto floater = test::makeFloater(false, true);
+    FloaterElement* target = floater.get();
     ASSERT_NE(target, nullptr);
-    floater->setCanMinimize(true);
     surface.mountFloater(std::move(floater));
     surface.updateLayout();
-    EXPECT_FLOAT_EQ(target->header()->rect().h, 20.f);
+    EXPECT_FLOAT_EQ(target->head()->rect().h, 20.f);
 
     target->setMinimized(true);
     surface.updateLayout();
-    EXPECT_FLOAT_EQ(target->header()->rect().h, 40.f);
+    EXPECT_FLOAT_EQ(target->head()->rect().h, 40.f);
 }

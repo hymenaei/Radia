@@ -1,29 +1,9 @@
 /**
- * @file types.h
- * @brief Defines shared UI geometry, color, inset, and widget-state types.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
-#ifndef RD_TYPES_H
-#define RD_TYPES_H
+#pragma once
 
 #include <algorithm>
 #include <cmath>
@@ -34,6 +14,13 @@ namespace radia::ui {
 enum class LayoutDirection { LeftToRight, RightToLeft };
 
 enum class Visibility : std::uint8_t { Visible, Hidden, Collapse };
+
+enum class ScrollbarMode : std::uint8_t { Classic, Overlay };
+
+struct ScrollLayoutOptions {
+    ScrollbarMode scrollbarMode = ScrollbarMode::Classic;
+    float scrollbarThickness = 15.f;
+};
 
 struct Vec2 {
     float x = 0.f;
@@ -146,7 +133,7 @@ inline Rect insetRect(const Rect& rect, const EdgeInsets& insets) {
 
 enum class StrokeCap { Butt, Round, Square };
 
-enum class WidgetState : uint8_t {
+enum class ElementState : uint16_t {
     Default = 0,
     Hovered = 1 << 0,
     Active = 1 << 1,
@@ -155,20 +142,20 @@ enum class WidgetState : uint8_t {
     Checked = 1 << 4,
     FocusVisible = 1 << 5,
     Minimized = 1 << 6,
-    Invalid = 1 << 7
+    Invalid = 1 << 7,
+    Indeterminate = 1 << 8
 };
 
-inline uint8_t operator|(WidgetState lhs, WidgetState rhs) {
-    return static_cast<uint8_t>(lhs) | static_cast<uint8_t>(rhs);
+inline uint16_t operator|(ElementState lhs, ElementState rhs) {
+    return static_cast<uint16_t>(lhs) | static_cast<uint16_t>(rhs);
 }
 
-inline bool hasState(uint8_t states, WidgetState state) {
-    return (states & static_cast<uint8_t>(state)) != 0;
+inline bool hasState(uint16_t states, ElementState state) {
+    return (states & static_cast<uint16_t>(state)) != 0;
 }
 
-inline void setState(uint8_t& states, WidgetState state, bool enabled) {
-    const uint8_t bit = static_cast<uint8_t>(state);
-    states = enabled ? static_cast<uint8_t>(states | bit) : static_cast<uint8_t>(states & ~bit);
+inline void setState(uint16_t& states, ElementState state, bool enabled) {
+    const uint16_t bit = static_cast<uint16_t>(state);
+    states = enabled ? static_cast<uint16_t>(states | bit) : static_cast<uint16_t>(states & ~bit);
 }
 } // namespace radia::ui
-#endif // RD_TYPES_H

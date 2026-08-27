@@ -1,25 +1,6 @@
 /**
- * @file engine_benchmark.cpp
- * @brief Benchmarks retained Radia UI layout transactions.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Battery Street, San Francisco, CA 02110-1301 USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
 #include "linden_common.h"
@@ -30,28 +11,36 @@
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include "elements/button.h"
+#include "elements/element.h"
+#include "elements/icon.h"
+#include "elements/input.h"
+#include "elements/label.h"
+#include "elements/panel.h"
 #include "layout/engine.h"
 #include "style/stylesheet.h"
 #include "text/metrics.h"
-#include "widgets/button.h"
-#include "widgets/label.h"
-#include "widgets/panel.h"
-#include "widgets/switch.h"
-#include "widgets/text.h"
 
 namespace {
-using radia::ui::Button;
+using radia::ui::ButtonElement;
+using radia::ui::Element;
 using radia::ui::fixedTextMetrics;
-using radia::ui::Label;
+using radia::ui::IconElement;
+using radia::ui::InputElement;
+using radia::ui::LabelElement;
 using radia::ui::LayoutDirection;
 using radia::ui::LayoutStatistics;
 using radia::ui::layoutTree;
-using radia::ui::Panel;
+using radia::ui::PanelElement;
 using radia::ui::Rect;
 using radia::ui::StyleSheet;
-using radia::ui::Switch;
-using radia::ui::Text;
 using radia::ui::Visibility;
+
+std::unique_ptr<Element> makeParagraph(std::string text) {
+    auto paragraph = std::make_unique<Element>("p");
+    paragraph->textContent(std::move(text));
+    return paragraph;
+}
 
 enum class LayoutCase {
     FlatColumn,
@@ -68,7 +57,7 @@ enum class LayoutCase {
 };
 
 struct LayoutFixture {
-    std::unique_ptr<Panel> root;
+    std::unique_ptr<PanelElement> root;
     StyleSheet styleSheet;
     LayoutDirection direction = LayoutDirection::LeftToRight;
 };
@@ -79,66 +68,68 @@ constexpr std::array<int, 1> kStateNodeCounts = {1000};
 constexpr std::array<int, 1> kCacheNodeCounts = {1000};
 constexpr std::array<int, 2> kDirectionNodeCounts = {100, 1000};
 
-void addFlatLabels(Panel& root, std::size_t nodeCount, bool withText, Visibility specialVisibility = Visibility::Visible) {
+void addFlatLabels(PanelElement& root, std::size_t nodeCount, bool withText, Visibility specialVisibility = Visibility::Visible) {
     for (std::size_t index = 0; index < nodeCount; ++index) {
-        auto label = std::make_unique<Label>(withText ? "Item " + std::to_string(index) : std::string());
+        auto label = std::make_unique<LabelElement>(withText ? "Item " + std::to_string(index) : std::string());
         if (specialVisibility != Visibility::Visible && index % 4 == 0) label->setVisibility(specialVisibility);
-        root.addChild(std::move(label));
+        root.append(std::move(label));
     }
 }
 
-void addBalancedChildren(Panel& parent, std::size_t& remaining, std::size_t depth) {
+void addBalancedChildren(PanelElement& parent, std::size_t& remaining, std::size_t depth) {
     if (remaining == 0) return;
 
     const std::size_t branchCount = depth % 2 == 0 ? 2 : 3;
     for (std::size_t branch = 0; branch < branchCount && remaining > 0; ++branch) {
         if (remaining > 1 && depth < 8) {
-            auto child = std::make_unique<Panel>();
-            Panel* childPointer = child.get();
-            parent.addChild(std::move(child));
+            auto child = std::make_unique<PanelElement>();
+            PanelElement* childPointer = child.get();
+            parent.append(std::move(child));
             --remaining;
             addBalancedChildren(*childPointer, remaining, depth + 1);
         } else {
-            parent.addChild(std::make_unique<Label>());
+            parent.append(std::make_unique<LabelElement>());
             --remaining;
         }
     }
 }
 
-void addExplicitLabels(Panel& root, std::size_t nodeCount) {
+void addExplicitLabels(PanelElement& root, std::size_t nodeCount) {
     for (std::size_t index = 0; index < nodeCount; ++index) {
-        auto label = std::make_unique<Label>();
+        auto label = std::make_unique<LabelElement>();
         const float x = static_cast<float>(index % 32) * 18.f;
         const float y = static_cast<float>(index / 32) * 14.f;
         label->setRect({x, y, 14.f, 10.f});
-        root.addChild(std::move(label));
+        root.append(std::move(label));
     }
 }
 
-void addCompositeControls(Panel& root, std::size_t nodeCount) {
+void addCompositeControls(PanelElement& root, std::size_t nodeCount) {
     for (std::size_t index = 0; index < nodeCount; ++index) {
         switch (index % 3) {
             case 0: {
-                auto button = std::make_unique<Button>();
-                button->setIcon("search");
-                button->setLabel("Apply");
-                root.addChild(std::move(button));
+                auto button = std::make_unique<ButtonElement>();
+                auto icon = std::make_unique<IconElement>("search");
+                button->append(std::move(icon));
+                radia::ui::detail::appendText(*button, "Apply");
+                root.append(std::move(button));
                 break;
             }
             case 1: {
-                auto control = std::make_unique<Switch>();
-                control->setChecked(index % 2 == 0);
-                root.addChild(std::move(control));
+                auto control = std::make_unique<InputElement>();
+                control->type("checkbox").switchMode(true);
+                control->checked(index % 2 == 0);
+                root.append(std::move(control));
                 break;
             }
-            default: root.addChild(std::make_unique<Label>("Status")); break;
+            default: root.append(std::make_unique<LabelElement>("Status")); break;
         }
     }
 }
 
 LayoutFixture makeFixture(LayoutCase layoutCase, std::size_t nodeCount) {
     LayoutFixture fixture;
-    fixture.root = std::make_unique<Panel>();
+    fixture.root = std::make_unique<PanelElement>();
 
     std::string styleSource;
     Rect rootRect;
@@ -171,20 +162,23 @@ LayoutFixture makeFixture(LayoutCase layoutCase, std::size_t nodeCount) {
             rootRect = {0.f, 0.f, 600.f, std::max(200.f, static_cast<float>((nodeCount + 31) / 32) * 14.f + 20.f)};
             break;
         case LayoutCase::ShortLabels:
-            styleSource = "panel { display: flex; flex-direction: column; gap: 2px; } label { width: 180px; height: 18px; font-size: 12px; line-height: 18px; }";
+            styleSource =
+                "panel { display: flex; flex-direction: column; gap: 2px; } label { width: 180px; height: 18px; font-size: 12px; line-height: 18px; }";
             addFlatLabels(*fixture.root, nodeCount, true);
             rootRect = {0.f, 0.f, 240.f, std::max(120.f, static_cast<float>(nodeCount) * 20.f)};
             break;
         case LayoutCase::WrappedText:
-            styleSource = "panel { display: flex; flex-direction: column; gap: 2px; } p { width: 48px; font-size: 10px; line-height: 10px; text-wrap: wrap; }";
-            for (std::size_t index = 0; index < nodeCount; ++index) fixture.root->addChild(std::make_unique<Text>("alpha beta gamma delta"));
+            styleSource =
+                "panel { display: flex; flex-direction: column; gap: 2px; } p { width: 48px; font-size: 10px; line-height: 10px; text-wrap: wrap; }";
+            for (std::size_t index = 0; index < nodeCount; ++index) fixture.root->append(makeParagraph("alpha beta gamma delta"));
             rootRect = {0.f, 0.f, 240.f, std::max(120.f, static_cast<float>(nodeCount) * 42.f)};
             break;
         case LayoutCase::CompositeControls:
             styleSource = "panel { display: flex; flex-direction: column; gap: 2px; } "
                           "button { width: 160px; height: 24px; padding: 4px; gap: 4px; display: flex; flex-direction: row; } "
-                          "button > icon { size: 16px; } switch { width: 64px; height: 24px; } "
-                          "switch::thumb { size: 18px; } label { width: 160px; height: 18px; }";
+                          "button > icon { size: 16px; } input { width: 64px; height: 24px; } "
+                          "input { display: flex; flex-direction: row; } input::track { width: 100%; min-width: 0; align-self: stretch; } "
+                          "input::thumb { order: -1; size: 18px; } input:checked::thumb { order: 1; } label { width: 160px; height: 18px; }";
             addCompositeControls(*fixture.root, nodeCount);
             rootRect = {0.f, 0.f, 240.f, std::max(120.f, static_cast<float>(nodeCount) * 28.f)};
             break;
@@ -207,7 +201,7 @@ LayoutFixture makeFixture(LayoutCase layoutCase, std::size_t nodeCount) {
     }
 
     fixture.root->setRect(rootRect);
-    if (!fixture.styleSheet.loadRadia(styleSource, "engine_benchmark.radia").ok()) std::abort();
+    if (!fixture.styleSheet.loadRadia(styleSource, "engine_benchmark.css").ok()) std::abort();
     return fixture;
 }
 

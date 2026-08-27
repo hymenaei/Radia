@@ -56,6 +56,6 @@ endif (WINDOWS)
 # Ensure people working on the viewer don't break this library
 # *NOTE: This could be removed, or only built by Parabuild, if the build
 # and link times become too long. JC
-add_dependencies(viewer llui_libtest)
+add_dependencies(${VIEWER_BINARY_NAME} llui_libtest)
 
 endif (VIEWER)

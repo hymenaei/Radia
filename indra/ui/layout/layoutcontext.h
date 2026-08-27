@@ -1,30 +1,11 @@
 /**
- * @file layoutcontext.h
- * @brief Shared private layout context and phase declarations.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
-#ifndef RD_LAYOUT_LAYOUTCONTEXT_H
-#define RD_LAYOUT_LAYOUTCONTEXT_H
+#pragma once
 
+#include <algorithm>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -35,17 +16,25 @@
 namespace radia::ui {
 class LayoutPass {
 public:
-    LayoutPass(const StyleSheet& styleSheet, const TextMetrics& textMetrics)
-        : mOwnedStyles(std::in_place, styleSheet, textMetrics), mStyles(*mOwnedStyles) {}
-    explicit LayoutPass(StylePass& styles) : mStyles(styles) {}
+    LayoutPass(const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction = LayoutDirection::LeftToRight,
+               ScrollLayoutOptions scrollOptions = {})
+        : mOwnedStyles(std::in_place, styleSheet, textMetrics, direction), mStyles(*mOwnedStyles), mScrollOptions(scrollOptions) {}
+    explicit LayoutPass(StylePass& styles, ScrollLayoutOptions scrollOptions = {}) : mStyles(styles), mScrollOptions(scrollOptions) {}
     LayoutPass(const LayoutPass&) = delete;
     LayoutPass& operator=(const LayoutPass&) = delete;
     LayoutPass(LayoutPass&&) = delete;
     LayoutPass& operator=(LayoutPass&&) = delete;
 
-    LayoutContextKey contextKey() const { return mStyles.contextKey(); }
+    LayoutContextKey contextKey() const {
+        LayoutContextKey result = mStyles.contextKey();
+        result.scrollbarMode = mScrollOptions.scrollbarMode;
+        result.scrollbarThickness = std::max(0.f, mScrollOptions.scrollbarThickness);
+        return result;
+    }
     const StyleSheet& styleSheet() const { return mStyles.styleSheet(); }
     const TextMetrics& textMetrics() const { return mStyles.textMetrics(); }
+    LayoutDirection direction() const { return mStyles.direction(); }
+    const ScrollLayoutOptions& scrollLayoutOptions() const { return mScrollOptions; }
     void recordMeasured(bool constrained) {
         ++mStatistics.measuredNodes;
         if (constrained) ++mStatistics.constrainedRemeasures;
@@ -54,12 +43,55 @@ public:
     void recordSkipped() { ++mStatistics.skippedNodes; }
     const LayoutStatistics& statistics() const { return mStatistics; }
 
-    const Style& style(const Widget& node) { return mStyles.style(node); }
-    StylePass::ChildSnapshot orderedChildren(const Widget& node) { return mStyles.orderedChildren(node); }
+    const Style& style(const Element& node) { return mStyles.style(node); }
+    StylePass::ChildSnapshot orderedChildren(Element& node) { return mStyles.orderedChildren(node); }
+
+    std::vector<detail::NodeRef> orderedNodes(Element& parent) {
+        std::vector<detail::NodeRef> result;
+        result.reserve(detail::nodes(parent).size());
+        for (detail::Node& node : detail::nodes(parent)) result.emplace_back(&node);
+        std::stable_sort(result.begin(), result.end(), [this](const detail::NodeRef& left, const detail::NodeRef& right) {
+            const Element* leftElement = left.element();
+            const Element* rightElement = right.element();
+            const int leftOrder = leftElement ? style(*leftElement).order : 0;
+            const int rightOrder = rightElement ? style(*rightElement).order : 0;
+            return leftOrder < rightOrder;
+        });
+        return result;
+    }
+
+    Style style(const detail::NodeRef& node, const Style& parentStyle) {
+        if (const Element* element = node.element()) return mStyles.style(*element);
+        Style result;
+        inheritStyle(result, parentStyle);
+        result.textOverflow = parentStyle.textOverflow;
+        result.overflowX = parentStyle.overflowX;
+        result.display = DisplayMode::Inline;
+        result.displaySet = true;
+        result.margin = {};
+        result.padding = {};
+        return result;
+    }
+
+    bool preservesNormalFlowWhitespace(const std::vector<detail::NodeRef>& children, std::size_t index, const Style& parentStyle) {
+        if (parentStyle.display == DisplayMode::Flex || parentStyle.display == DisplayMode::Grid || parentStyle.display == DisplayMode::InlineGrid)
+            return false;
+        if (index == 0 || index + 1 >= children.size() || !layout_detail::isWhitespaceOnlyText(children[index])) return false;
+
+        const auto isDisplayedInline = [&](const detail::NodeRef& child) {
+            const Element* element = child.element();
+            if (element && element->elementName() == "br") return false;
+            const Style childStyle = style(child, parentStyle);
+            if (element) return element->isDisplayed(childStyle) && layout_detail::isInlineLevel(childStyle.display);
+            return child.text() && childStyle.display != DisplayMode::NoneValue;
+        };
+        return isDisplayedInline(children[index - 1]) && isDisplayedInline(children[index + 1]);
+    }
 
 private:
     std::optional<StylePass> mOwnedStyles;
     StylePass& mStyles;
+    ScrollLayoutOptions mScrollOptions;
     LayoutStatistics mStatistics;
 };
 
@@ -67,7 +99,7 @@ class LayoutEngine {
 private:
     using ChildLayout = layout_detail::ChildLayout;
     using MainAxisAllocation = layout_detail::MainAxisAllocation;
-    using NodeSnapshot = WidgetVisit;
+    using NodeSnapshot = ElementVisit;
 
     struct RowSizing {
         std::vector<std::pair<std::size_t, std::size_t>> lines;
@@ -76,49 +108,56 @@ private:
         bool valid = true;
     };
 
-    static ChildLayout measureChild(Widget& parent, Widget& child, const Style& parentStyle, FlexDirection flexDirection,
-                                    std::optional<float> resolvedWidth,
-                                    std::optional<float> resolvedHeight, LayoutPass& pass);
-    // Returns no result when child measurement mutates the parent or a child.
-    static std::optional<std::vector<ChildLayout>> measureNormalChildren(Widget& parent, std::optional<float> contentWidth,
+    static ChildLayout measureChild(Element& parent, detail::NodeRef child, const Style& parentStyle, FlexDirection flexDirection,
+                                    std::optional<float> resolvedWidth, std::optional<float> resolvedHeight, LayoutPass& pass);
+    static std::optional<std::vector<ChildLayout>> measureNormalChildren(Element& parent, std::optional<float> contentWidth,
                                                                          std::optional<float> contentHeight, LayoutPass& pass);
-    static Vec2 measureRow(Widget& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
+    static std::optional<std::vector<ChildLayout>> measureGridChildren(Element& parent, std::optional<float> contentWidth,
+                                                                       std::optional<float> contentHeight, LayoutPass& pass);
+    static Vec2 measureRow(Element& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
                            std::optional<float> resolvedHeight, LayoutPass& pass);
-    static Vec2 measureColumn(Widget& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
+    static Vec2 measureColumn(Element& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
                               std::optional<float> resolvedHeight, LayoutPass& pass);
-    static Vec2 measureNormal(Widget& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
+    static Vec2 measureGrid(Element& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
+                            std::optional<float> resolvedHeight, LayoutPass& pass);
+    static Vec2 measureNormal(Element& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
                               std::optional<float> resolvedHeight, LayoutPass& pass);
-    static bool remeasureRowChildren(Widget& parent, std::vector<ChildLayout>& children, std::size_t begin, std::size_t end, LayoutPass& pass);
-    static bool remeasureColumnChildren(Widget& parent, std::vector<ChildLayout>& children, const std::vector<Vec2>& initialSizes, LayoutPass& pass);
-    static RowSizing allocateRowLines(Widget& parent, std::vector<ChildLayout>& children, const Style& parentStyle, float availableMain,
+    static bool remeasureRowChildren(Element& parent, std::vector<ChildLayout>& children, std::size_t begin, std::size_t end, LayoutPass& pass);
+    static bool remeasureColumnChildren(Element& parent, std::vector<ChildLayout>& children, const std::vector<Vec2>& initialSizes, LayoutPass& pass);
+    static RowSizing allocateRowLines(Element& parent, std::vector<ChildLayout>& children, const Style& parentStyle, float availableMain,
                                       LayoutPass& pass);
-    static RowSizing resolveRowSizes(Widget& node, const Style& parentStyle, const Rect& panel, std::vector<ChildLayout>& children, LayoutPass& pass);
-    static MainAxisAllocation resolveColumnSizes(Widget& node, const Style& parentStyle, const Rect& panel, std::vector<ChildLayout>& children,
+    static RowSizing resolveRowSizes(Element& node, const Style& parentStyle, const Rect& available, std::vector<ChildLayout>& children,
+                                     LayoutPass& pass);
+    static MainAxisAllocation resolveColumnSizes(Element& node, const Style& parentStyle, const Rect& available, std::vector<ChildLayout>& children,
                                                  LayoutPass& pass);
-    static std::optional<std::vector<ChildLayout>> layoutChildren(Widget& parent, bool flexParent, const Rect& content, LayoutPass& pass);
+    static std::optional<std::vector<ChildLayout>> layoutChildren(Element& parent, DisplayMode display, const Rect& content, LayoutPass& pass);
 
-    static void arrangeNode(Widget& node, LayoutDirection direction, LayoutPass& pass);
-    static void arrangeRow(Widget& node, const Style& parentStyle, const Rect& content, const Rect& panel, std::vector<ChildLayout>& children,
-                           LayoutDirection direction, LayoutPass& pass);
-    static void arrangeColumn(Widget& node, const Style& parentStyle, const Rect& content, const Rect& panel, std::vector<ChildLayout>& children,
-                              LayoutDirection direction, LayoutPass& pass);
-    static void arrangeNormal(Widget& node, const Style& parentStyle, const Rect& content, std::vector<ChildLayout>& children,
-                              LayoutDirection direction, LayoutPass& pass);
+    static void arrangeNode(Element& node, LayoutPass& pass);
+    static void arrangeNode(detail::NodeRef node, LayoutPass& pass);
+    static void setArrangedRect(detail::NodeRef node, const Rect& rect);
+    static void arrangeRow(Element& node, const Style& parentStyle, const Rect& content, const Rect& available, std::vector<ChildLayout>& children,
+                           LayoutPass& pass);
+    static void arrangeColumn(Element& node, const Style& parentStyle, const Rect& content, const Rect& available, std::vector<ChildLayout>& children,
+                              LayoutPass& pass);
+    static void arrangeGrid(Element& node, const Style& parentStyle, const Rect& content, std::vector<ChildLayout>& children, LayoutPass& pass);
+    static void arrangeNormal(Element& node, const Style& parentStyle, const Rect& content, std::vector<ChildLayout>& children, LayoutPass& pass);
 
 public:
-    static Vec2 measure(Widget& node, LayoutPass& pass, std::optional<float> outerWidth = std::nullopt,
+    static Vec2 measure(Element& node, LayoutPass& pass, std::optional<float> outerWidth = std::nullopt,
                         std::optional<float> outerHeight = std::nullopt);
-    static Vec2 measure(Widget& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics, std::optional<float> outerWidth = std::nullopt,
+    static Vec2 measure(Element& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics, std::optional<float> outerWidth = std::nullopt,
                         std::optional<float> outerHeight = std::nullopt);
-    static LayoutStatistics arrange(Widget& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction);
-    static LayoutStatistics layout(Widget& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction);
-    static LayoutStatistics layout(Widget& node, StylePass& styles, LayoutDirection direction);
+    static LayoutStatistics arrange(Element& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction,
+                                    ScrollLayoutOptions scrollOptions = {});
+    static LayoutStatistics layout(Element& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction,
+                                   ScrollLayoutOptions scrollOptions = {});
+    static LayoutStatistics layout(Element& node, StylePass& styles, ScrollLayoutOptions scrollOptions = {});
 
 private:
-    static LayoutStatistics run(Widget& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction);
-    static LayoutStatistics run(Widget& node, StylePass& styles, LayoutDirection direction);
-    static LayoutStatistics runWithPass(Widget& node, LayoutDirection direction, LayoutPass& pass);
-    static StylePass::ChildSnapshot orderedChildren(const Widget& node, LayoutPass& pass) { return pass.orderedChildren(node); }
+    static LayoutStatistics run(Element& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction,
+                                ScrollLayoutOptions scrollOptions);
+    static LayoutStatistics run(Element& node, StylePass& styles, ScrollLayoutOptions scrollOptions);
+    static LayoutStatistics runWithPass(Element& node, LayoutPass& pass);
+    static std::vector<detail::NodeRef> orderedNodes(Element& node, LayoutPass& pass) { return pass.orderedNodes(node); }
 };
 } // namespace radia::ui
-#endif // RD_LAYOUT_LAYOUTCONTEXT_H

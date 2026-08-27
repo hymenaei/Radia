@@ -1,25 +1,6 @@
 /**
- * @file system.cpp
- * @brief Owns UI skin generations, locale state, surfaces, and viewer-facing services.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
 #include "linden_common.h"
@@ -46,7 +27,7 @@ bool equalStyleInputs(const radia::ui::ResourceSnapshot& left, const radia::ui::
         const auto rightResource = rightResources.find(resourceId);
         if (rightResource == rightResources.end()) return false;
         const auto& rightLayers = rightResource->second;
-        if (resourceId != "skin.radia") {
+        if (resourceId != "skin.css") {
             if (leftLayers != rightLayers) return false;
             continue;
         }
@@ -76,7 +57,7 @@ bool equalStyleInputs(const radia::ui::ResourceSnapshot& left, const radia::ui::
 } // namespace
 
 namespace radia::ui {
-System::System() : mSkinGeneration(SkinGeneration::empty()) {}
+System::System() : mSkinGeneration(SkinGeneration::empty()), mNativeAppearance(std::make_shared<FallbackNativeAppearance>()) {}
 
 System::~System() = default;
 
@@ -141,24 +122,19 @@ bool System::hasLocalizationKey(const std::string& id) const {
 }
 
 std::string System::resolveText(const std::string& id) const {
-    return resolveText(LocalizationRequest::text(id));
+    return resolveText(LocalizedText(id));
 }
 
-std::string System::resolveText(const LocalizationRequest& request) const {
-    return mSkinGeneration->resolveText(mActiveLocale, request);
+std::string System::resolveText(const LocalizedText& text) const {
+    return mSkinGeneration->resolveText(mActiveLocale, text);
 }
 
-InlineContent System::resolveContent(const LocalizationRequest& request) const {
-    return mSkinGeneration->resolveContent(mActiveLocale, request);
+std::string System::resolveMarkup(const LocalizedText& text) const {
+    return mSkinGeneration->resolveMarkup(mActiveLocale, text);
 }
 
-TextSource System::localize(std::string id) const {
-    return localize(LocalizationRequest::text(std::move(id)));
-}
-
-TextSource System::localize(LocalizationRequest request) const {
-    InlineContent content = resolveContent(request);
-    return TextSource::fromLocalization(std::move(request), std::move(content));
+LocalizedText System::t(std::string id, LocalizationArguments arguments) const {
+    return LocalizedText(std::move(id), std::move(arguments));
 }
 
 const StyleSheet& System::styleSheet() const {
@@ -196,6 +172,14 @@ void System::refreshKeybindings() {
         if (surface) surface->keybindingsChanged();
 }
 
+void System::setNativeAppearance(std::shared_ptr<const NativeAppearance> appearance) {
+    if (!appearance) appearance = std::make_shared<FallbackNativeAppearance>();
+    if (mNativeAppearance == appearance && mNativeAppearance->revision() == appearance->revision()) return;
+    mNativeAppearance = std::move(appearance);
+    for (Surface* surface : mSurfaces)
+        if (surface) surface->nativeAppearanceChanged();
+}
+
 void System::registerSurface(Surface& surface) const {
     mSurfaces.insert(&surface);
 }
@@ -210,17 +194,11 @@ void System::notifyLocaleChanged() {
     if (mLocaleChangedHandler) mLocaleChangedHandler(mActiveLocale);
 }
 
-LayoutBuildResult System::buildWidgetTree(const std::string& resourceId) const {
-    return mSkinGeneration->buildWidgetTree(resourceId, mActiveLocale);
+LayoutBuildResult System::buildElementTree(const std::string& resourceId) const {
+    return mSkinGeneration->buildElementTree(resourceId, mActiveLocale);
 }
 
 std::unique_ptr<Surface> System::createSurface(const TextMetrics& textMetrics) const {
     return std::unique_ptr<Surface>(new Surface(*this, textMetrics));
-}
-
-bool System::setLongClickDelay(std::chrono::milliseconds delay) {
-    if (delay.count() <= 0) return false;
-    mLongClickDelay = delay;
-    return true;
 }
 } // namespace radia::ui

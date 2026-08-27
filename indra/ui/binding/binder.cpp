@@ -1,35 +1,43 @@
 /**
- * @file binder.cpp
- * @brief Validates and commits controller bindings to UI Widget trees.
- *
- * $LicenseInfo:firstyear=2026&license=viewerlgpl$
- * Radia Viewer Source Code
- * Copyright (C) 2026, Hymenaei
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License only.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * $/LicenseInfo$
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
  */
 
 #include "linden_common.h"
 #include "binding/binder.h"
 #include <map>
 #include <set>
-#include "binding/valuecontrol.h"
+#include "elements/elementevent.h"
+#include "elements/elementinternal.h"
 #include "layout/schema.h"
 
 namespace radia::ui {
+Binding::~Binding() {
+    clearEventListeners();
+}
+
+Binding::Binding(Binding&& other) noexcept
+    : mEventAttachments(std::move(other.mEventAttachments)), mValueSubscriptions(std::move(other.mValueSubscriptions)), mCommitted(other.mCommitted) {
+    other.mCommitted = false;
+}
+
+Binding& Binding::operator=(Binding&& other) noexcept {
+    if (this == &other) return *this;
+    clearEventListeners();
+    mEventAttachments = std::move(other.mEventAttachments);
+    mValueSubscriptions = std::move(other.mValueSubscriptions);
+    mCommitted = other.mCommitted;
+    other.mCommitted = false;
+    return *this;
+}
+
+void Binding::clearEventListeners() noexcept {
+    for (const EventAttachment& attachment : mEventAttachments)
+        if (attachment.element && !attachment.lifetime.expired())
+            attachment.element->removeEventListener(attachment.type, attachment.handler, attachment.capture);
+    mEventAttachments.clear();
+}
+
 PreparedBinding::PreparedBinding() = default;
 PreparedBinding::~PreparedBinding() = default;
 PreparedBinding::PreparedBinding(PreparedBinding&&) noexcept = default;
@@ -45,12 +53,10 @@ Binding PreparedBinding::commit() {
 
 void Binder::event(EventHandlerRegistration&& registration) {
     const bool valid = registration.valid();
-    auto handler = std::make_shared<detail::EventHandler>();
-    const std::optional<WidgetEventKind> kind = registration.kind();
-    handler->kind = kind;
-    handler->invoke = std::move(registration).takeInvoke();
-    mPendingEventHandlers.push_back(
-        {std::move(registration).takeName(), kind, std::move(handler), std::move(registration).takeArgumentError(), valid});
+    std::string name = std::move(registration).takeName();
+    EventRegistrationDescriptor::Invoke invoke = std::move(registration).takeInvoke();
+    EventHandlerRegistration::ArgumentError argumentError = std::move(registration).takeArgumentError();
+    mPendingEventHandlers.push_back({std::move(name), std::move(invoke), std::move(argumentError), valid});
 }
 
 void Binder::event(const EventHandlerRegistration& registration) {
@@ -58,46 +64,41 @@ void Binder::event(const EventHandlerRegistration& registration) {
 }
 
 namespace {
-void collectEventCalls(Widget& widget, std::map<std::string, std::vector<Binder::EventDeclaration>>& declarations, DiagnosticResult& result) {
-    for (WidgetEventKind kind : kAllWidgetEventKinds) {
-        const EventCall* eventCall = widget.eventCall(kind);
+void collectEventCalls(Element& element, std::map<std::string, std::vector<Binder::EventDeclaration>>& declarations) {
+    for (const AuthoredEventDescriptor& descriptor : kAuthoredEventDescriptors) {
+        const std::string type(descriptor.type);
+        const EventCall* eventCall = element.eventCall(type);
         if (!eventCall) continue;
         const std::string& name = eventCall->name();
-        auto& byName = declarations[name];
-        if (!byName.empty() && byName.front().kind != kind)
-            result.error("binding.event.kind_mismatch", "Event Handler " + name + " is declared for multiple Event kinds.");
-        byName.push_back({&widget, kind, eventCall});
+        declarations[name].push_back({&element, type, eventCall});
     }
-    for (const auto& child : widget.children())
-        if (!child->idScopeRoot()) collectEventCalls(*child, declarations, result);
+    for (Element* child : element.children())
+        if (!child->idScopeRoot()) collectEventCalls(*child, declarations);
 }
 
-void collectValueControls(Widget& widget, std::vector<ValueControl*>& controls) {
-    if (auto* control = dynamic_cast<ValueControl*>(&widget); control && control->valueBindingRequest()) controls.push_back(control);
-    for (const auto& child : widget.children())
-        if (!child->idScopeRoot()) collectValueControls(*child, controls);
+void collectBoundInputs(Element& element, std::vector<InputElement*>& inputs) {
+    if (auto* input = dynamic_cast<InputElement*>(&element); input && input->valueBindingRequest()) inputs.push_back(input);
+    for (Element* child : element.children())
+        if (!child->idScopeRoot()) collectBoundInputs(*child, inputs);
 }
 } // namespace
 
-void Binder::validate(Widget& root, DiagnosticResult& result) {
-    mValueControls.clear();
-    collectValueControls(root, mValueControls);
-    for (ValueControl* control : mValueControls) control->prepareValueBinding(*this);
+void Binder::validate(Element& root, DiagnosticResult& result) {
+    mBoundInputs.clear();
+    collectBoundInputs(root, mBoundInputs);
+    for (InputElement* input : mBoundInputs) input->prepareValueBinding(*this);
 
     mEventDeclarations.clear();
-    collectEventCalls(root, mEventDeclarations, result);
+    collectEventCalls(root, mEventDeclarations);
 
-    std::map<std::string, std::optional<WidgetEventKind>> registeredHandlers;
+    std::set<std::string> registeredHandlers;
     for (PendingEventHandler& pending : mPendingEventHandlers) {
         if (!pending.valid)
             result.error("binding.event.registration_invalid", "Controller Event Handler registration is incomplete: " + pending.name + ".");
         if (!isEventHandlerName(pending.name))
             result.error("binding.event.name_invalid", "Controller Event Handler name must use lower-camel-case: " + pending.name + ".");
-        const auto inserted = registeredHandlers.emplace(pending.name, pending.kind);
+        const auto inserted = registeredHandlers.emplace(pending.name);
         if (!inserted.second) result.error("binding.event.duplicate", "Controller Event Handler is registered more than once: " + pending.name + ".");
-        const auto declared = mEventDeclarations.find(pending.name);
-        if (declared != mEventDeclarations.end() && pending.kind && !declared->second.empty() && declared->second.front().kind != *pending.kind)
-            result.error("binding.event.kind_mismatch", "Controller Event kind does not match Layout Resource call: " + pending.name + ".");
     }
 
     for (const auto& entry : mEventDeclarations) {
@@ -110,9 +111,8 @@ void Binder::validate(Widget& root, DiagnosticResult& result) {
         const auto found = mEventDeclarations.find(pending.name);
         if (found == mEventDeclarations.end()) continue;
         for (const EventDeclaration& declaration : found->second) {
-            if (pending.kind && *pending.kind != declaration.kind) continue;
             if (pending.argumentError) {
-                if (const char* error = pending.argumentError(*declaration.call, declaration.kind))
+                if (const char* error = pending.argumentError(*declaration.call))
                     result.warning(error, "Event Handler Call " + pending.name + " does not match its registered Handler signature.");
             }
         }
@@ -156,12 +156,12 @@ void Binder::validate(Widget& root, DiagnosticResult& result) {
     }
 }
 
-void Binder::commit(Widget&, Binding& binding) {
+void Binder::commit(Element&, Binding& binding) {
     binding.mCommitted = true;
 
     for (PendingValueRequirement& pending : mPendingValueRequirements) pending.commit(pending.resolved);
-    for (ValueControl* control : mValueControls) {
-        ValueBindingSubscription subscription = control->commitValueBinding();
+    for (InputElement* input : mBoundInputs) {
+        ValueBindingSubscription subscription = input->commitValueBinding();
         if (subscription) binding.mValueSubscriptions.push_back(std::move(subscription));
     }
     std::map<std::string, PendingEventHandler*> handlers;
@@ -171,11 +171,14 @@ void Binder::commit(Widget&, Binding& binding) {
         if (found == handlers.end()) continue;
         PendingEventHandler& pending = *found->second;
         for (const EventDeclaration& declaration : declarations)
-            if ((!pending.kind || declaration.kind == *pending.kind)
-                && (!pending.argumentError || !pending.argumentError(*declaration.call, declaration.kind)))
-                declaration.widget->bindEventHandler(declaration.kind, pending.handler);
+            if (!pending.argumentError || !pending.argumentError(*declaration.call)) {
+                const EventCall call = *declaration.call;
+                EventHandler listener([invoke = pending.invoke, call](Event& event) mutable { invoke(event, call); });
+                declaration.element->addEventListener(declaration.type, listener);
+                binding.mEventAttachments.push_back({declaration.element, detail::ElementInternalAccess::lifetime(*declaration.element),
+                                                     declaration.type, std::move(listener), false});
+            }
     }
-    for (PendingEventHandler& pending : mPendingEventHandlers) binding.mHandlers.push_back(std::move(pending.handler));
 }
 
 PreparedBindingResult Binder::prepare() {

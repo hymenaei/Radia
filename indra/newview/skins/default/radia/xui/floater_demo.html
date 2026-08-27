@@ -1,0 +1,95 @@
+<floater id="floaterDemo" resizeable>
+    <head>
+        <title>
+            <icon src="search"/>
+            {{demo.title}}
+        </title>
+        <minimize/>
+        <close/>
+    </head>
+
+    <body>
+    <p id="status">{{demo.status}}</p>
+
+    <p>{{demo.inlineContent}}</p>
+
+    <div class="demo-property-sections">
+        <div class="demo-section demo-text-properties">
+            <p class="demo-section-heading">{{demo.textProperties}}</p>
+
+            <p class="demo-font">{{demo.fontShorthand}}</p>
+            <p class="demo-tracking">{{demo.letterSpacing}}</p>
+            <p class="demo-word-spacing">{{demo.wordSpacing}}</p>
+            <p class="demo-wrap">{{demo.wrapping}}</p>
+
+            <p class="demo-ellipsis-end">{{demo.ellipsisEndInventory}}</p>
+            <p class="demo-ellipsis-center">{{demo.ellipsisCenterInventory}}</p>
+        </div>
+
+        <div class="demo-section demo-box-properties">
+            <p class="demo-section-heading">{{demo.boxProperties}}</p>
+
+            <p class="demo-outline">{{demo.outline}}</p>
+
+            <div class="demo-overflow-row">
+                <div class="demo-overflow-x">
+                    <p>{{demo.overflowX}}</p>
+                </div>
+                <div class="demo-overflow-y">
+                    <p>{{demo.overflowY}}</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <button class="primary" onClick="press()">
+        <icon src="search"/>
+        {{demo.press}}
+    </button>
+
+    <fieldset class="demo-settings">
+        <legend>{{demo.settings}}</legend>
+
+        <div class="switch control-first">
+            <input type="checkbox" id="demoCheckbox">
+            <label for="demoCheckbox">{{demo.checkbox}}</label>
+        </div>
+
+        <div class="switch control-first">
+            <input type="radio" name="demoChoice" id="demoChoiceOne" checked="true">
+            <label for="demoChoiceOne">{{demo.radioOne}}</label>
+        </div>
+
+        <div class="switch control-first">
+            <input type="radio" name="demoChoice" id="demoChoiceTwo">
+            <label for="demoChoiceTwo">{{demo.radioTwo}}</label>
+        </div>
+
+        <div class="switch demo-setting">
+            <label for="demoSwitch">{{demo.switch}}</label>
+            <input type="checkbox" switch id="demoSwitch" setting="DemoSwitch" onChange="switchChanged(event)"><br>
+            <div class="hint">{{demo.switchHint}}</div><br>
+            <div class="error">{{demo.switchError}}</div>
+        </div>
+
+        <div class="switch control-first">
+            <input type="checkbox" switch id="skinAutoReloadToggle" setting="SkinAutoReload">
+            <label for="skinAutoReloadToggle">{{demo.automaticWatching}}</label><br>
+            <div class="hint">{{demo.automaticWatchingHint}}</div><br>
+            <div class="error">{{demo.automaticWatchingError}}</div>
+        </div>
+    </fieldset>
+
+    <button class="compact" disabled/>
+
+    <p id="languageHeading">{{demo.language}}</p>
+    <p id="activeLocale"/>
+
+    <div id="languageButtons">
+        <button id="previousLocale" class="language previous" onClick="selectLocale(-1)">{{demo.previous}}</button>
+        <button id="nextLocale" class="language next" onClick="selectLocale(+1)">{{demo.next}}</button>
+    </div>
+
+    <button class="reload" onClick="requestSkinReload()">{{demo.reloadNow}}</button>
+    </body>
+</floater>

@@ -1,0 +1,32 @@
+input {
+    appearance: auto;
+    display: inline-block;
+    margin: 0;
+}
+
+input[type="radio"], input[type="checkbox"] {
+    margin: 3px 2px;
+    padding: 0;
+    border-width: 0;
+    background-color: transparent;
+}
+
+input[switch] {
+    margin: initial;
+    display: initial;
+}
+
+button {
+    display: flex;
+    flex-direction: row;
+    justify-content: center;
+    vertical-align: middle;
+}
+
+div, p { display: block; }
+b, strong { font-weight: bold; }
+i, em, cite, dfn { font-style: italic; }
+s, del { text-decoration: line-through; }
+u, ins { text-decoration: underline; }
+mark { background-color: #fff59dff; }
+small { font-size: 11px; }

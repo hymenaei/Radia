@@ -20,6 +20,8 @@ PAINT_OP_ENTRY(GradientBorder, 6)
 PAINT_OP_ENTRY(Blur, 7)
 // Composite blends the captured effect texture back into the target.
 PAINT_OP_ENTRY(Composite, 8)
+// Arrow draws an antialiased directional scrollbar glyph.
+PAINT_OP_ENTRY(Arrow, 9)
 
 // Gradient interpolation mode uploaded as the gradientKind uniform.
 GRADIENT_OP_ENTRY(Linear, 0)

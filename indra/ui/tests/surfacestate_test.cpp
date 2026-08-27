@@ -25,6 +25,7 @@ using radia::ui::RecordingPaintContext;
 using radia::ui::StyleSheet;
 using radia::ui::Surface;
 using radia::ui::Visibility;
+using radia::ui::test::makeFloater;
 } // namespace
 
 TEST(SurfaceStateTest, ReflowsWhenHoveredStateChangesLayout) {
@@ -130,7 +131,7 @@ TEST(SurfaceStateTest, RestylesCompositePartsWhenOwnerStateChanges) {
     ASSERT_TRUE(styleSheet.loadRadia(kCompositeOwnerState).ok());
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
-    auto floater = test::makeFloater(false, true);
+    auto floater = makeFloater(false, true);
     FloaterElement* target = floater.get();
     ASSERT_NE(target, nullptr);
     surface.mountFloater(std::move(floater));

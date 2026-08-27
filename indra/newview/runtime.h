@@ -70,9 +70,9 @@ public:
     };
 
     struct TestOverrides {
-        SkinSnapshotProvider captureSkin = {};
-        Clock now = {};
-        PaintContextFactory paintContext = {};
+        SkinSnapshotProvider captureSkin;
+        Clock now;
+        PaintContextFactory paintContext;
     };
 
     Runtime(LLControlGroup& savedSettings, LLControlGroup& perAccountSettings, LLGLSLShader& uiShader, LLWindow* mainWindow,

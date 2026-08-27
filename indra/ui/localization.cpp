@@ -638,7 +638,6 @@ struct LocalizationCatalog::Impl {
     DiagnosticResult load(const std::vector<ResourceLayer>& layers);
     void compile(DiagnosticResult& result);
 
-    const LocaleRecord* locale(const std::string& localeId) const;
     LocaleRecord* locale(const std::string& localeId);
     const StringValue* find(const LocaleRecord& locale, const std::string& key) const;
 
@@ -806,11 +805,6 @@ void LocalizationCatalog::Impl::compile(DiagnosticResult& result) {
                              localized.source, localized.line);
         }
     }
-}
-
-const LocaleRecord* LocalizationCatalog::Impl::locale(const std::string& localeId) const {
-    const auto found = localeIndices.find(localeIdentity(localeId));
-    return found == localeIndices.end() ? nullptr : &locales[found->second];
 }
 
 LocaleRecord* LocalizationCatalog::Impl::locale(const std::string& localeId) {

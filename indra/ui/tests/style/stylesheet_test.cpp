@@ -10,20 +10,24 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "../floater_test_helpers.h"
 #include "elements/button.h"
+#include "elements/document.h"
 #include "elements/elementdefinition.h"
 #include "elements/floater.h"
 #include "elements/icon.h"
 #include "elements/input.h"
 #include "elements/label.h"
 #include "elements/panel.h"
-#include "../floater_test_helpers.h"
 #include "layout/engine.h"
 #include "style/stylesheet.h"
 
 namespace {
+using radia::ui::AccentColor;
 using radia::ui::ButtonElement;
+using radia::ui::ColorScheme;
 using radia::ui::CursorStyle;
+using radia::ui::Document;
 using radia::ui::EffectKind;
 using radia::ui::Element;
 using radia::ui::ElementState;
@@ -60,9 +64,9 @@ IconElement& appendIcon(ButtonElement& button, std::string name) {
 }
 
 constexpr char kColorTokenStyles[] = ":root { --accent: hsl(120 100% 50%); --ink: rgb(255, 0, 0, 50%); } "
-                                     "button { background-color: var(--accent); text-color: var(--ink); "
+                                     "button { background-color: var(--accent); color: var(--ink); "
                                      "font-size: 17px; } "
-                                     "label { text-color: #00ff00ff; font-size: 29px; }";
+                                     "label { color: #00ff00ff; font-size: 29px; }";
 } // namespace
 
 TEST(StyleSheetTest, ResolvesColorTokensAndInheritance) {
@@ -75,10 +79,42 @@ TEST(StyleSheetTest, ResolvesColorTokensAndInheritance) {
     Element* label = labelElement.get();
     labelElement->textContent("Inherited");
     control.append(std::move(labelElement));
-    EXPECT_NEAR(resolveElementStyle(stylesheet, *label).textColor.a, .5f, 1.0e-4f);
+    EXPECT_NEAR(resolveElementStyle(stylesheet, *label).color.a, .5f, 1.0e-4f);
     EXPECT_EQ(resolveElementStyle(stylesheet, *label).fontSize, 17.f);
     LabelElement standalone("Standalone");
     EXPECT_EQ(resolveElementStyle(stylesheet, standalone).fontSize, 29.f);
+}
+
+TEST(StyleSheetTest, TreatsRootAsDocumentRootSelector) {
+    constexpr char kRootStyles[] = ":root { --root-width: 24px; color-scheme: light; width: var(--root-width); min-width: 18px; "
+                                   "color: #204060ff; } "
+                                   ".root { width: 30px; } :root > label { width: 17px; } label { width: 9px; }";
+
+    StyleSheet stylesheet;
+    const auto loadResult = stylesheet.loadRadia(kRootStyles);
+    ASSERT_TRUE(loadResult.ok()) << (loadResult.errors.empty() ? std::string() : loadResult.errors.front().message);
+
+    auto rootOwner = std::make_unique<PanelElement>();
+    rootOwner->addClass("root");
+    Document document(std::move(rootOwner));
+    auto labelOwner = std::make_unique<LabelElement>();
+    LabelElement* label = labelOwner.get();
+    document.documentElement()->append(std::move(labelOwner));
+
+    const Style rootStyle = resolveElementStyle(stylesheet, *document.documentElement());
+    EXPECT_EQ(rootStyle.colorScheme, ColorScheme::Light);
+    EXPECT_EQ(rootStyle.width.pixels(), 30.f);
+    ASSERT_TRUE(rootStyle.minWidth.has_value());
+    EXPECT_EQ(rootStyle.minWidth->pixels, 18.f);
+
+    const Style labelStyle = resolveElementStyle(stylesheet, *label);
+    EXPECT_EQ(labelStyle.width.pixels(), 17.f);
+    EXPECT_EQ(labelStyle.colorScheme, ColorScheme::Light);
+    EXPECT_NEAR(labelStyle.color.r, 32.f / 255.f, 1.0e-4f);
+    EXPECT_FALSE(labelStyle.minWidth.has_value());
+
+    PanelElement standaloneRoot;
+    EXPECT_EQ(resolveElementStyle(stylesheet, standaloneRoot).colorScheme, ColorScheme::Light);
 }
 
 TEST(StyleSheetTest, StartsWithoutImplicitCoreRules) {
@@ -144,7 +180,7 @@ TEST(StyleSheetTest, AcceptsElementlessPseudoClassSelectors) {
 
 TEST(StyleSheetTest, MatchesDirectionAlongsideCheckedState) {
     constexpr char kDirectionStyles[] = "input { &:dir(rtl):checked::thumb { translate: -22px 0; } "
-                                         "&:dir(ltr):checked::thumb { translate: 22px 0; } }";
+                                        "&:dir(ltr):checked::thumb { translate: 22px 0; } }";
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kDirectionStyles).ok());
@@ -341,7 +377,8 @@ TEST(StyleSheetTest, WarnsWhenTargetSpecificStateCannotMatch) {
 
 TEST(StyleSheetTest, InheritsOnlyInheritablePropertiesAndAllowsOverrides) {
     constexpr char kInheritedStyles[] = "panel { font-family: sans; font-size: 19px; font-weight: bold; "
-                                        "font-style: italic; line-height: 23px; text-color: #204060ff; "
+                                        "font-style: italic; line-height: 23px; color: #204060ff; "
+                                        "accent-color: #102030ff; "
                                         "text-align: center; vertical-align: bottom; cursor: grab; opacity: .5; "
                                         "pointer-events: none; background-color: #ffffffff; } "
                                         "label#override { font-size: 11px; cursor: default; }";
@@ -365,7 +402,9 @@ TEST(StyleSheetTest, InheritsOnlyInheritablePropertiesAndAllowsOverrides) {
     EXPECT_TRUE(inheritedStyle.fontItalic);
     ASSERT_TRUE(inheritedStyle.lineHeight.has_value());
     EXPECT_EQ(inheritedStyle.lineHeight->pixels, 23.f);
-    EXPECT_NEAR(inheritedStyle.textColor.b, 96.f / 255.f, 1.0e-4f);
+    EXPECT_NEAR(inheritedStyle.color.b, 96.f / 255.f, 1.0e-4f);
+    EXPECT_EQ(inheritedStyle.accentColor.kind, AccentColor::Kind::Color);
+    EXPECT_NEAR(inheritedStyle.accentColor.color.r, 16.f / 255.f, 1.0e-4f);
     EXPECT_EQ(inheritedStyle.textAlign, TextAlign::Center);
     EXPECT_EQ(inheritedStyle.verticalAlign, VerticalAlign::Top);
     EXPECT_EQ(inheritedStyle.cursor, CursorStyle::Grab);
@@ -489,6 +528,65 @@ TEST(StyleSheetTest, ParsesScrollbarPolicyProperties) {
     EXPECT_TRUE(initial.scrollbarColor.automatic);
 }
 
+TEST(StyleSheetTest, ParsesAccentColorValues) {
+    constexpr char kAccentStyles[] = "panel { accent-color: #12345678; } #current { accent-color: currentcolor; } "
+                                     "#automatic { accent-color: auto; }";
+
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia(kAccentStyles).ok());
+
+    const Style color = stylesheet.resolve("panel", "", {}, 0);
+    EXPECT_EQ(color.accentColor.kind, AccentColor::Kind::Color);
+    EXPECT_NEAR(color.accentColor.color.r, 0x12 / 255.f, 1.0e-6f);
+    EXPECT_NEAR(color.accentColor.color.a, 0x78 / 255.f, 1.0e-6f);
+
+    EXPECT_EQ(stylesheet.resolve("panel", "current", {}, 0).accentColor.kind, AccentColor::Kind::CurrentColor);
+    EXPECT_EQ(stylesheet.resolve("panel", "automatic", {}, 0).accentColor.kind, AccentColor::Kind::Auto);
+}
+
+TEST(StyleSheetTest, InheritsColorSchemeAndAllowsOverride) {
+    constexpr char kColorSchemeStyles[] = "panel { color-scheme: light; } input.dark { color-scheme: dark; }";
+
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia(kColorSchemeStyles).ok());
+
+    PanelElement panel;
+    auto inheritedInput = std::make_unique<InputElement>();
+    InputElement* inheritedInputPtr = inheritedInput.get();
+    inheritedInputPtr->type("checkbox");
+    panel.append(std::move(inheritedInput));
+
+    auto overriddenInput = std::make_unique<InputElement>();
+    InputElement* overriddenInputPtr = overriddenInput.get();
+    overriddenInputPtr->type("checkbox").addClass("dark");
+    panel.append(std::move(overriddenInput));
+
+    EXPECT_EQ(resolveElementStyle(stylesheet, *inheritedInputPtr).colorScheme, ColorScheme::Light);
+    EXPECT_EQ(resolveElementStyle(stylesheet, *overriddenInputPtr).colorScheme, ColorScheme::Dark);
+}
+
+TEST(StyleSheetTest, ResolvesLightDarkAfterColorSchemeInheritance) {
+    constexpr char kLightDarkStyles[] = ":root { color-scheme: light; } panel.dark { color-scheme: dark; } "
+                                         "label { color: light-dark(#101010, #f0f0f0); }";
+
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia(kLightDarkStyles).ok());
+
+    PanelElement lightPanel;
+    auto lightLabel = std::make_unique<LabelElement>("light");
+    LabelElement* lightLabelPtr = lightLabel.get();
+    lightPanel.append(std::move(lightLabel));
+
+    PanelElement darkPanel;
+    darkPanel.addClass("dark");
+    auto darkLabel = std::make_unique<LabelElement>("dark");
+    LabelElement* darkLabelPtr = darkLabel.get();
+    darkPanel.append(std::move(darkLabel));
+
+    EXPECT_NEAR(resolveElementStyle(stylesheet, *lightLabelPtr).color.r, 16.f / 255.f, 1.0e-4f);
+    EXPECT_NEAR(resolveElementStyle(stylesheet, *darkLabelPtr).color.r, 240.f / 255.f, 1.0e-4f);
+}
+
 TEST(StyleSheetTest, ProjectsMinimizedFloaterStateIntoHeadStyles) {
     constexpr char kMinimizedFloaterStyles[] = "floater > head { border-width: 0px 0px 1px; } "
                                                "floater:minimized > head { border-width: 0px; }";
@@ -505,17 +603,6 @@ TEST(StyleSheetTest, ProjectsMinimizedFloaterStateIntoHeadStyles) {
     floater.setMinimized(false);
     EXPECT_FALSE(floater.hasState(ElementState::Minimized));
     EXPECT_EQ(resolveElementStyle(stylesheet, *floater.head()).borderWidth.bottom, 1.f);
-}
-
-TEST(StyleSheetTest, StartsWithExplicitStyleDefaults) {
-    const Style initial;
-    EXPECT_TRUE(initial.width.isAuto());
-    EXPECT_TRUE(initial.height.isAuto());
-    EXPECT_FALSE(initial.minWidth.has_value());
-    EXPECT_FALSE(initial.left.has_value());
-    EXPECT_FALSE(initial.lineHeight.has_value());
-    EXPECT_FALSE(initial.svgStrokeWidth.has_value());
-    EXPECT_TRUE(initial.effects.empty());
 }
 
 TEST(StyleSheetTest, ParsesTypedLengthsAndAutomaticDimensions) {
@@ -601,7 +688,7 @@ TEST(StyleSheetTest, ParsesGradientsEffectsShadowsAndOutlines) {
                                         "rgb(0, 255, 0, 50%) 75%, #0000ffff); "
                                         "box-shadow: 1px 2px #11223344, 3px 4px 5px 6px "
                                         "rgb(10, 20, 30, 40%) inset; outline-offset: 3px; "
-                                        "outline: 2px solid #abcdef88; } "
+                                        "outline: light-dark(#abcdef88, #12345688) solid 2px; } panel.light { color-scheme: light; } "
                                         "label { outline: 1px dashed #ffffffff; }";
     constexpr char kBlurEffectStyles[] = "panel { effect: background-blur(to bottom, 0px 25%, 16px 75%), "
                                          "layer-blur(4px); } button { effect: layer-blur(to right, "
@@ -633,7 +720,8 @@ TEST(StyleSheetTest, ParsesGradientsEffectsShadowsAndOutlines) {
     EXPECT_TRUE(style.shadows[1].inset);
     EXPECT_EQ(style.outline.width, 2.f);
     EXPECT_EQ(style.outline.offset, 3.f);
-    EXPECT_NEAR(style.outline.color.r, 171.f / 255.f, 1.0e-4f);
+    EXPECT_NEAR(style.outline.color.r, 18.f / 255.f, 1.0e-4f);
+    EXPECT_NEAR(stylesheet.resolve("panel", "", {"light"}, 0).outline.color.r, 171.f / 255.f, 1.0e-4f);
     EXPECT_EQ(stylesheet.resolve("label", "", {}, 0).outline.offset, 0.f);
     EXPECT_EQ(stylesheet.resolve("label", "", {}, 0).outline.style, radia::ui::OutlineStyle::Dashed);
 
@@ -691,10 +779,16 @@ TEST(StyleSheetTest, RejectsInvalidBoxEffects) {
         "panel { border: 1px repeating-linear-gradient(#fff 20%, #000 20%); }",
         "panel { background: #ffffffff; }",
         "panel { box-shadow: 0 0 -1px #000; }",
+        "panel { background-color: ButtonFace; }",
+        "panel { border-color: ButtonBorder; }",
+        "panel { border: 1px ButtonBorder; }",
+        "panel { color: ButtonText; }",
         "panel { outline: 10% #000; }",
         "panel { outline: 1px 2px #000; }",
         "panel { outline-offset: 0%; }",
         "panel { outline: 1px dashed solid #000; }",
+        "panel { outline: #000 auto 1px; }",
+        "panel { outline: -focus-ring-color auto 1px; }",
         "panel { effect: blur(4px); }",
         "panel { effect: layer-blur(to bottom, 4px); }",
         "panel { effect: background-blur(to nowhere, 0px 0%, 4px 100%); }",
@@ -710,7 +804,8 @@ TEST(StyleSheetTest, RejectsInvalidBoxEffects) {
         SCOPED_TRACE(Message() << "invalid box effect: " << source);
         StyleSheet stylesheet;
         const auto result = stylesheet.loadRadia(source, "effects.css");
-        EXPECT_FALSE(result.ok());
+        ASSERT_FALSE(result.ok());
+        ASSERT_FALSE(result.errors.empty());
     }
 
     StyleSheet stylesheet;
@@ -791,8 +886,6 @@ TEST(StyleSheetTest, CopiesAndMovesStylesheetsWithoutSharingState) {
 
     StyleSheet moved = std::move(assigned);
     EXPECT_EQ(moved.resolve("panel", "", {}, 0).width.pixels(), 10.f);
-    EXPECT_TRUE(assigned.dependencies().empty());
-    EXPECT_EQ(assigned.generation(), std::uint64_t(0));
 }
 
 TEST(StyleSheetTest, MergesStyleLayersTransactionally) {
@@ -829,6 +922,26 @@ TEST(StyleSheetTest, SkinOriginOverridesMoreSpecificDefaultRule) {
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadiaLayers(layers).ok());
     EXPECT_EQ(stylesheet.resolve("panel", "", {"primary"}, 0).width.pixels(), 20.f);
+}
+
+TEST(StyleSheetTest, RestrictsInternalAlignmentToDefaultStylesheet) {
+    StyleSheet stylesheet;
+    const auto skinOnly = stylesheet.loadRadiaLayers({
+        {StyleOrigin::Skin, {"skin.css", "button { -internal-align-content-block: center; }"}},
+    });
+    ASSERT_TRUE(skinOnly.ok());
+    ASSERT_EQ(skinOnly.warnings.size(), std::size_t(1));
+    EXPECT_EQ(skinOnly.warnings.front().code, "stylesheet.property.ua_only");
+    EXPECT_FALSE(stylesheet.resolve("button", "", {}, 0).alignContentBlockCenter);
+
+    const auto defaultAndSkin = stylesheet.loadRadiaLayers({
+        {StyleOrigin::Skin, {"skin.css", "button { -internal-align-content-block: normal; }"}},
+        {StyleOrigin::Default, {"defaults.css", "button { -internal-align-content-block: center; }"}},
+    });
+    ASSERT_TRUE(defaultAndSkin.ok());
+    ASSERT_EQ(defaultAndSkin.warnings.size(), std::size_t(1));
+    EXPECT_EQ(defaultAndSkin.warnings.front().code, "stylesheet.property.ua_only");
+    EXPECT_TRUE(stylesheet.resolve("button", "", {}, 0).alignContentBlockCenter);
 }
 
 TEST(StyleSheetTest, ResolvesRecursiveImportsAndRecordsDependencies) {

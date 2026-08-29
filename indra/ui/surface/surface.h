@@ -69,7 +69,7 @@ public:
     std::optional<Rect> initialFloaterRect(const FloaterElement& floater) const;
     std::optional<Rect> prepareFloater(FloaterElement& floater) const;
     void updateLayout();
-    void paint(PaintContext& context, float scale = 1.f);
+    void paint(PaintContext& context, float scale = 1.f, Vec2 pixelOrigin = {});
     void clearInteractionState();
     void clearFocus() { setFocused(nullptr, false); }
 
@@ -82,11 +82,13 @@ public:
     bool keyUp(const KeyEvent& event);
     bool charInput(unsigned int codepoint);
     void refreshHover();
+    void advanceScrollbarInteraction(float deltaSeconds);
 
     bool hasFocus() const { return mFocused != nullptr; }
     bool hasPointerCapture() const { return mCaptured != nullptr || mScrollbarCapture.has_value(); }
     bool needsPaint() const { return mPaintDirty; }
     const TextMetrics& textMetrics() const { return mTextMetrics; }
+    const NativeAppearance& nativeAppearance() const;
     LayoutDirection layoutDirection() const;
     CursorStyle cursor() const;
     float width() const { return mViewport.w; }
@@ -164,6 +166,8 @@ private:
 
     struct ScrollbarInteraction : ScrollbarTarget {
         float grabOffset = 0.f;
+        float repeatElapsed = 0.f;
+        bool repeatStarted = false;
     };
 
     ScrollGeometry scrollbarGeometry(const Element& element, const Style& style) const;
@@ -172,6 +176,8 @@ private:
     bool scrollFocusedElement(const KeyEvent& event, Element& focused);
     void setScrollbarHover(std::optional<ScrollbarTarget> target);
     bool scrollbarTargetMatches(const ScrollbarTarget& target, const Element& element, ScrollbarAxis axis, ScrollbarPart part) const;
+    const NativeAppearance& effectiveNativeAppearance() const;
+    NativeScrollbarMetrics scrollbarMetrics(ScrollbarMode mode) const;
     void syncNativeAppearance();
     bool updateScrollbarInteraction(const Vec2& point);
     bool beginScrollbarInteraction(const ScrollbarTarget& target, const Vec2& point);
@@ -204,7 +210,6 @@ private:
     bool mPaintDirty = true;
     std::uint64_t mPaintRequestGeneration = 0;
     CursorStyle mResizeCursor = CursorStyle::Auto;
-    NativeScrollbarMetrics mScrollbarMetrics;
     std::uint64_t mNativeAppearanceRevision = 1;
     std::optional<ScrollbarTarget> mScrollbarHover;
     std::optional<ScrollbarInteraction> mScrollbarCapture;

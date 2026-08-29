@@ -53,10 +53,12 @@ private:
 struct IntrinsicSizeConstraints {
     std::optional<float> width;
     std::optional<float> height;
+    const NativeAppearance* nativeAppearance = nullptr;
 
     IntrinsicSizeConstraints() = default;
-    IntrinsicSizeConstraints(std::optional<float> constrainedWidth, std::optional<float> constrainedHeight)
-        : width(constrainedWidth), height(constrainedHeight) {}
+    IntrinsicSizeConstraints(std::optional<float> constrainedWidth, std::optional<float> constrainedHeight,
+                             const NativeAppearance* appearance = nullptr)
+        : width(constrainedWidth), height(constrainedHeight), nativeAppearance(appearance) {}
 };
 
 inline constexpr InvalidationFlags layoutInvalidationMask(LayoutInvalidationReason reason) {

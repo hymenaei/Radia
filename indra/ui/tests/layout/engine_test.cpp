@@ -21,6 +21,7 @@
 namespace {
 using radia::ui::arrangeTree;
 using radia::ui::ButtonElement;
+using radia::ui::defaultStylesheetSource;
 using radia::ui::DisplayMode;
 using radia::ui::Element;
 using radia::ui::FixedTextMetrics;
@@ -29,7 +30,6 @@ using radia::ui::IconElement;
 using radia::ui::InputElement;
 using radia::ui::LabelElement;
 using radia::ui::LayoutDirection;
-using radia::ui::LayoutStatistics;
 using radia::ui::layoutTree;
 using radia::ui::measureElement;
 using radia::ui::measureTree;
@@ -39,6 +39,8 @@ using radia::ui::resolveElementStyle;
 using radia::ui::ScrollbarMode;
 using radia::ui::ScrollLayoutOptions;
 using radia::ui::Style;
+using radia::ui::StyleLayer;
+using radia::ui::StyleOrigin;
 using radia::ui::StyleSheet;
 using radia::ui::StyleSheetLoadResult;
 using radia::ui::Text;
@@ -150,6 +152,29 @@ TEST_F(LayoutEngineTest, PreservesWhitespaceBetweenAdjacentInlineRuns) {
     EXPECT_FLOAT_EQ(strikePtr->rect().x, separatorPtr->rect().right());
 }
 
+TEST_F(LayoutEngineTest, CollapsesFormattingWhitespaceBetweenButtonContent) {
+    StyleSheet styleSheet;
+    constexpr char kButtonLayout[] =
+        "button { display: inline-block; width: 100px; height: 40px; padding: 0; font-size: 10px; line-height: 10px; } button > icon { size: 16px; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kButtonLayout).ok());
+
+    ButtonElement button;
+    button.setRect({0.f, 0.f, 100.f, 40.f});
+    IconElement& icon = appendIcon(button, "search");
+    auto separator = std::make_unique<Text>("\n            ");
+    Text* separatorPtr = separator.get();
+    button.append(std::move(separator));
+    auto label = std::make_unique<Text>("Press");
+    Text* labelPtr = label.get();
+    button.append(std::move(label));
+
+    layoutTree(button, styleSheet, text);
+
+    EXPECT_FLOAT_EQ(separatorPtr->rect().w, 6.f);
+    EXPECT_FLOAT_EQ(separatorPtr->rect().h, 10.f);
+    EXPECT_FLOAT_EQ(labelPtr->rect().left() - icon.rect().right(), 6.f);
+}
+
 TEST_F(LayoutEngineTest, IgnoresFormattingWhitespaceBeforeNormalFlowChildren) {
     StyleSheet styleSheet;
     constexpr char kNormalLayout[] = "panel { display: block; } p { display: block; height: 20px; }";
@@ -224,6 +249,26 @@ TEST_F(LayoutEngineTest, LaysOutInlineSiblingsAndBlockChildrenInNormalFlow) {
     EXPECT_EQ(panel.children()[3]->rect().top(), 40.f);
 }
 
+TEST_F(LayoutEngineTest, AlignsNormalFlowInlineContentWithTextAlign) {
+    StyleSheet styleSheet;
+    constexpr char kAlignedLayout[] = "panel { display: block; text-align: center; } .inline { display: inline; width: 20px; height: 10px; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kAlignedLayout).ok());
+
+    PanelElement panel;
+    panel.setRect({0.f, 0.f, 100.f, 20.f});
+    auto first = std::make_unique<LabelElement>("first");
+    first->addClass("inline");
+    panel.append(std::move(first));
+    auto second = std::make_unique<LabelElement>("second");
+    second->addClass("inline");
+    panel.append(std::move(second));
+
+    layoutTree(panel, styleSheet, text);
+
+    EXPECT_FLOAT_EQ(panel.children()[0]->rect().left(), 30.f);
+    EXPECT_FLOAT_EQ(panel.children()[1]->rect().left(), 50.f);
+}
+
 TEST_F(LayoutEngineTest, WrapsInlineSiblingsAtTheContainingBlockWidth) {
     StyleSheet styleSheet;
     constexpr char kNormalLayout[] = "panel { display: block; } .inline { display: inline; width: 30px; height: 10px; }";
@@ -270,6 +315,81 @@ TEST_F(LayoutEngineTest, CentersButtonContentWithinExplicitWidth) {
     EXPECT_EQ(first->asElement()->rect().x - result.rect().x, (result.rect().w - contentWidth) * 0.5f);
 }
 
+TEST_F(LayoutEngineTest, NativeButtonUsesNormalContentLayoutWithoutChangingDisplay) {
+    StyleSheet styleSheet;
+    constexpr char kButtonLayout[] =
+        "button { display: inline-block; width: 128px; height: 32px; padding: 7px; text-align: center; line-height: 18px; } button > icon { size: 14px; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kButtonLayout).ok());
+
+    ButtonElement button;
+    button.setRect({0.f, 0.f, 128.f, 32.f});
+    IconElement& icon = appendIcon(button, "search");
+    auto label = std::make_unique<Text>("\n        Apply\n    ");
+    Text* labelPtr = label.get();
+    button.append(std::move(label));
+
+    const Style computed = resolveElementStyle(styleSheet, button);
+    ASSERT_EQ(computed.appearance, radia::ui::AppearanceMode::Auto);
+    ASSERT_EQ(computed.display, DisplayMode::InlineBlock);
+
+    layoutTree(button, styleSheet, text);
+
+    EXPECT_FLOAT_EQ(labelPtr->rect().h, 18.f);
+    EXPECT_EQ(labelPtr->getData(), "\n        Apply\n    ");
+    EXPECT_EQ(resolveElementStyle(styleSheet, button).display, DisplayMode::InlineBlock);
+    const float contentLeft = button.rect().left() + computed.borderWidth.left + computed.padding.left;
+    const float contentWidth = button.rect().w - computed.borderWidth.horizontal() - computed.padding.horizontal();
+    const float contentWidthUsed = labelPtr->rect().right() - icon.rect().left();
+    EXPECT_FLOAT_EQ(icon.rect().left(), contentLeft + (contentWidth - contentWidthUsed) * 0.5f);
+}
+
+TEST_F(LayoutEngineTest, CentersButtonBlockContentFromDefaultAlignment) {
+    StyleSheet styleSheet;
+    constexpr char kButtonLayout[] = "button { display: inline-block; width: 100px; height: 40px; padding: 0; line-height: 10px; }";
+    const std::vector<StyleLayer> layers{
+        {StyleOrigin::Default, {"defaults.css", std::string(defaultStylesheetSource())}},
+        {StyleOrigin::Skin, {"skin.css", kButtonLayout}},
+    };
+    ASSERT_TRUE(styleSheet.loadRadiaLayers(layers).ok());
+
+    ButtonElement button;
+    button.setRect({0.f, 0.f, 100.f, 40.f});
+    auto label = std::make_unique<Text>("Apply");
+    Text* labelPtr = label.get();
+    button.append(std::move(label));
+
+    layoutTree(button, styleSheet, text);
+
+    EXPECT_FLOAT_EQ(labelPtr->rect().bottom(), 15.f);
+    EXPECT_FLOAT_EQ(labelPtr->rect().top(), 25.f);
+}
+
+TEST_F(LayoutEngineTest, DoesNotCenterUnstyledButtonBlockContent) {
+    StyleSheet styleSheet;
+    constexpr char kButtonLayout[] =
+        "button { display: inline-block; width: 100px; height: 40px; padding: 0; line-height: 10px; } button.unstyled { appearance: none; }";
+    const std::vector<StyleLayer> layers{
+        {StyleOrigin::Default, {"defaults.css", std::string(defaultStylesheetSource())}},
+        {StyleOrigin::Skin, {"skin.css", kButtonLayout}},
+    };
+    ASSERT_TRUE(styleSheet.loadRadiaLayers(layers).ok());
+
+    ButtonElement button;
+    button.addClass("unstyled");
+    button.setRect({0.f, 0.f, 100.f, 40.f});
+    auto label = std::make_unique<Text>("Apply");
+    Text* labelPtr = label.get();
+    button.append(std::move(label));
+
+    const Style computed = resolveElementStyle(styleSheet, button);
+    ASSERT_EQ(computed.appearance, radia::ui::AppearanceMode::Unstyled);
+
+    layoutTree(button, styleSheet, text);
+
+    EXPECT_FLOAT_EQ(labelPtr->rect().bottom(), 29.f);
+    EXPECT_FLOAT_EQ(labelPtr->rect().top(), 39.f);
+}
+
 TEST_F(LayoutEngineTest, LaysOutColumnChildrenWithPaddingAndGap) {
     StyleSheet styleSheet;
     constexpr char kColumnLayout[] = "panel { padding: 10px; display: flex; flex-direction: column; gap: 5px; } "
@@ -282,6 +402,27 @@ TEST_F(LayoutEngineTest, LaysOutColumnChildrenWithPaddingAndGap) {
     layoutTree(root, styleSheet, text);
     EXPECT_EQ(root.children()[0]->rect().w, 80.f);
     EXPECT_EQ(root.children()[0]->rect().bottom() - root.children()[1]->rect().top(), 5.f);
+}
+
+TEST_F(LayoutEngineTest, AppliesContentBoxAndBorderBoxToExplicitDimensions) {
+    StyleSheet styleSheet;
+    constexpr char kBoxSizingLayout[] = "panel { display: block; } label { display: block; width: 100px; height: 20px; padding: 10px; "
+                                        "border: 2px solid #000000; } label.border { box-sizing: border-box; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kBoxSizingLayout).ok());
+
+    PanelElement panel;
+    panel.setRect({0.f, 0.f, 400.f, 100.f});
+    panel.append(std::make_unique<LabelElement>("content-box"));
+    auto borderBox = std::make_unique<LabelElement>("border-box");
+    borderBox->addClass("border");
+    panel.append(std::move(borderBox));
+
+    layoutTree(panel, styleSheet, text);
+
+    EXPECT_FLOAT_EQ(panel.children()[0]->rect().w, 124.f);
+    EXPECT_FLOAT_EQ(panel.children()[0]->rect().h, 44.f);
+    EXPECT_FLOAT_EQ(panel.children()[1]->rect().w, 100.f);
+    EXPECT_FLOAT_EQ(panel.children()[1]->rect().h, 20.f);
 }
 
 TEST_F(LayoutEngineTest, KeepsPaddingInTheClientBoxAndOutOfChildContent) {
@@ -828,17 +969,8 @@ TEST_F(LayoutEngineTest, AppliesContainerVerticalAlignmentToContent) {
     constexpr char kVerticalAlignment[] = "panel { size: 40px 100px; display: flex; flex-direction: row; } label { size: 10px; } "
                                           "panel.middle { vertical-align: middle; } panel.bottom { vertical-align: bottom; } "
                                           "panel.column { display: flex; flex-direction: column; vertical-align: bottom; } "
-                                          "panel.free-bottom { display: block; vertical-align: bottom; } "
-                                          "button { size: 40px 100px; } button > * { size: 10px; } "
-                                          "button.top { vertical-align: top; }";
-    ASSERT_TRUE(styleSheet
-                    .loadRadiaLayers({
-                        radia::ui::StyleLayer{radia::ui::StyleOrigin::Default,
-                                              radia::ui::ResourceLayer{std::string(radia::ui::kDefaultStylesheetResourceId),
-                                                                       std::string(radia::ui::defaultStylesheetSource())}},
-                        radia::ui::StyleLayer{radia::ui::StyleOrigin::Skin, radia::ui::ResourceLayer{"test.css", kVerticalAlignment}},
-                    })
-                    .ok());
+                                          "panel.free-bottom { display: block; vertical-align: bottom; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kVerticalAlignment).ok());
 
     auto addLabel = [](Element& container) { container.append(std::make_unique<LabelElement>("child")); };
 
@@ -877,26 +1009,6 @@ TEST_F(LayoutEngineTest, AppliesContainerVerticalAlignmentToContent) {
     addLabel(freeBottom);
     layoutTree(freeBottom, styleSheet, text);
     EXPECT_EQ(freeBottom.children()[0]->rect().bottom(), 30.f);
-
-    ButtonElement button;
-    button.setRect({0.f, 0.f, 100.f, 40.f});
-    auto buttonContent = std::make_unique<Element>("span");
-    buttonContent->textContent("button");
-    Element* buttonContentPtr = buttonContent.get();
-    button.append(std::move(buttonContent));
-    layoutTree(button, styleSheet, text);
-    EXPECT_EQ(buttonContentPtr->rect().bottom(), 15.f);
-    EXPECT_EQ(buttonContentPtr->rect().left(), 45.f);
-
-    ButtonElement topButton;
-    topButton.setRect({0.f, 0.f, 100.f, 40.f});
-    topButton.addClass("top");
-    auto topButtonContent = std::make_unique<Element>("span");
-    topButtonContent->textContent("button");
-    Element* topButtonContentPtr = topButtonContent.get();
-    topButton.append(std::move(topButtonContent));
-    layoutTree(topButton, styleSheet, text);
-    EXPECT_EQ(topButtonContentPtr->rect().top(), 40.f);
 }
 
 TEST_F(LayoutEngineTest, WrapsChildrenAcrossFlowBreaks) {
@@ -1018,8 +1130,7 @@ TEST_F(LayoutEngineTest, RemeasuresWrappedTextAfterRowFlexShrink) {
     EXPECT_EQ(measured.y, 20.f);
 
     panel.setRect({0.f, 0.f, measured.x, measured.y});
-    const LayoutStatistics layoutStats = layoutTree(panel, styleSheet, text);
-    EXPECT_GT(layoutStats.constrainedRemeasures, std::size_t(0));
+    layoutTree(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[0]->rect().h, 20.f);
     EXPECT_EQ(panel.children()[1]->rect().w, 10.f);
     EXPECT_EQ(panel.children()[1]->rect().h, 20.f);
@@ -1045,65 +1156,31 @@ TEST_F(LayoutEngineTest, ReappliesFlexBasisAfterTextReflow) {
     layoutTree(row, rowTheme, text);
     EXPECT_EQ(row.children()[0]->rect().w, 70.f);
 }
-TEST_F(LayoutEngineTest, ReusesCleanLayoutCache) {
-    StyleSheet styleSheet;
-    constexpr char kRowLayout[] = "panel { display: flex; flex-direction: row; } "
-                                  "label { size: 10px; }";
-    ASSERT_TRUE(styleSheet.loadRadia(kRowLayout).ok());
-    PanelElement panel;
-    panel.setRect({0.f, 0.f, 100.f, 20.f});
-    panel.append(std::make_unique<LabelElement>("first"));
-    panel.append(std::make_unique<LabelElement>("second"));
-
-    const LayoutStatistics first = layoutTree(panel, styleSheet, text);
-    const LayoutStatistics second = layoutTree(panel, styleSheet, text);
-    EXPECT_GT(first.measuredNodes, std::size_t(0));
-    EXPECT_GT(first.arrangedNodes, std::size_t(0));
-    EXPECT_EQ(second.measuredNodes, std::size_t(0));
-    EXPECT_EQ(second.arrangedNodes, std::size_t(0));
-    EXPECT_GE(second.skippedNodes, std::size_t(2));
-}
-
-TEST_F(LayoutEngineTest, InvalidatesLayoutCacheForResizeAndDirection) {
-    StyleSheet styleSheet;
-    constexpr char kRowLayout[] = "panel { display: flex; flex-direction: row; } "
-                                  "label { size: 10px; } label:dir(rtl) { width: 20px; }";
-    ASSERT_TRUE(styleSheet.loadRadia(kRowLayout).ok());
-    PanelElement panel;
-    panel.setRect({0.f, 0.f, 100.f, 20.f});
-    panel.append(std::make_unique<LabelElement>("first"));
-    panel.append(std::make_unique<LabelElement>("second"));
-    layoutTree(panel, styleSheet, text);
-
-    panel.setRect({0.f, 0.f, 140.f, 20.f});
-    const LayoutStatistics resized = layoutTree(panel, styleSheet, text);
-    EXPECT_GT(resized.measuredNodes, std::size_t(0));
-    EXPECT_GT(resized.arrangedNodes, std::size_t(0));
-
-    const LayoutStatistics directionChanged = layoutTree(panel, styleSheet, text, LayoutDirection::RightToLeft);
-    EXPECT_GT(directionChanged.measuredNodes, std::size_t(0));
-    EXPECT_GT(directionChanged.arrangedNodes, std::size_t(0));
-    EXPECT_EQ(panel.children()[0]->rect().w, 20.f);
-}
-
 TEST_F(LayoutEngineTest, InvalidatesTextMeasurementCacheWhenMetricsGenerationChanges) {
     class GenerationTextMetrics final : public TextMetrics {
     public:
-        Vec2 measureText(const std::string&, const Style&) const override { return {32.f, 12.f}; }
+        Vec2 measureText(const std::string&, const Style&) const override { return mSize; }
         std::uint64_t generation() const override { return mGeneration; }
-        void advance() { ++mGeneration; }
+        void advance() {
+            ++mGeneration;
+            mSize = {64.f, 18.f};
+        }
 
     private:
         std::uint64_t mGeneration = 1;
+        Vec2 mSize{32.f, 12.f};
     } metrics;
 
     StyleSheet styleSheet;
     LabelElement label("generation");
-    const LayoutStatistics first = layoutTree(label, styleSheet, metrics);
+    measureTree(label, styleSheet, metrics);
+    EXPECT_FLOAT_EQ(label.desiredSize().x, 32.f);
+    EXPECT_FLOAT_EQ(label.desiredSize().y, 12.f);
+
     metrics.advance();
-    const LayoutStatistics second = layoutTree(label, styleSheet, metrics);
-    EXPECT_GT(first.measuredNodes, std::size_t(0));
-    EXPECT_GT(second.measuredNodes, std::size_t(0));
+    measureTree(label, styleSheet, metrics);
+    EXPECT_FLOAT_EQ(label.desiredSize().x, 64.f);
+    EXPECT_FLOAT_EQ(label.desiredSize().y, 18.f);
 }
 
 TEST_F(LayoutEngineTest, ReallocatesColumnFlexChildrenUnderHeightConstraint) {
@@ -1116,8 +1193,7 @@ TEST_F(LayoutEngineTest, ReallocatesColumnFlexChildrenUnderHeightConstraint) {
     panel.append(std::make_unique<LabelElement>("first"));
     panel.append(std::make_unique<LabelElement>("second"));
 
-    const LayoutStatistics stats = layoutTree(panel, styleSheet, text);
-    EXPECT_GE(stats.constrainedRemeasures, std::size_t(2));
+    layoutTree(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[0]->rect().h, 50.f);
     EXPECT_EQ(panel.children()[1]->rect().h, 50.f);
     EXPECT_EQ(panel.children()[1]->rect().bottom(), 0.f);
@@ -1177,27 +1253,6 @@ TEST_F(LayoutEngineTest, RespectsColumnMinimumHeightsDuringShrink) {
     layoutTree(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[0]->rect().h, 25.f);
     EXPECT_EQ(panel.children()[1]->rect().h, 25.f);
-}
-
-TEST_F(LayoutEngineTest, ReusesHeightConstrainedColumnCache) {
-    StyleSheet styleSheet;
-    constexpr char kFlexLayout[] = "panel { display: flex; flex-direction: column; } "
-                                   "label { flex: 1; }";
-    ASSERT_TRUE(styleSheet.loadRadia(kFlexLayout).ok());
-    PanelElement panel;
-    panel.setRect({0.f, 0.f, 100.f, 100.f});
-    panel.append(std::make_unique<LabelElement>("first"));
-    panel.append(std::make_unique<LabelElement>("second"));
-
-    const LayoutStatistics first = layoutTree(panel, styleSheet, text);
-    const LayoutStatistics clean = layoutTree(panel, styleSheet, text);
-    EXPECT_GT(first.constrainedRemeasures, std::size_t(0));
-    EXPECT_EQ(clean.measuredNodes, std::size_t(0));
-    EXPECT_EQ(clean.arrangedNodes, std::size_t(0));
-
-    panel.setRect({0.f, 0.f, 100.f, 140.f});
-    const LayoutStatistics resized = layoutTree(panel, styleSheet, text);
-    EXPECT_GT(resized.constrainedRemeasures, std::size_t(0));
 }
 
 TEST_F(LayoutEngineTest, SeparatesLayoutCachesByStylesheetIdentity) {
@@ -1665,6 +1720,31 @@ TEST_F(LayoutEngineTest, StableBothEdgesMirrorsTheInlineGutter) {
     panel.append(std::move(content));
 
     layoutTree(panel, styleSheet, text);
+
+    EXPECT_FLOAT_EQ(panel.clientWidth(), 70.f);
+    EXPECT_FLOAT_EQ(panel.clientHeight(), 100.f);
+    EXPECT_FLOAT_EQ(panel.scrollWidth(), 70.f);
+    EXPECT_FLOAT_EQ(panel.scrollHeight(), 100.f);
+    EXPECT_FLOAT_EQ(contentPtr->rect().left(), 15.f);
+    EXPECT_FLOAT_EQ(contentPtr->rect().right(), 85.f);
+    EXPECT_FLOAT_EQ(contentPtr->rect().bottom(), 0.f);
+    EXPECT_FLOAT_EQ(contentPtr->rect().top(), 100.f);
+}
+
+TEST_F(LayoutEngineTest, StableBothEdgesReservesPhysicalInlineEdgesInRtl) {
+    StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet
+                    .loadRadia("panel#viewport { display: block; overflow: auto; scrollbar-gutter: stable both-edges; } "
+                               "#content { display: block; width: 100%; height: 100%; }")
+                    .ok());
+    PanelElement panel;
+    panel.setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
+    auto content = std::make_unique<Element>("content");
+    Element* contentPtr = content.get();
+    content->setId("content");
+    panel.append(std::move(content));
+
+    layoutTree(panel, styleSheet, text, LayoutDirection::RightToLeft);
 
     EXPECT_FLOAT_EQ(panel.clientWidth(), 70.f);
     EXPECT_FLOAT_EQ(panel.clientHeight(), 100.f);

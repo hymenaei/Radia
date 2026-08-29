@@ -13,7 +13,7 @@ div.switch {
 }
 
 p#languageHeading {
-    text-color: var(--muted);
+    color: var(--muted);
 }
 
 p#activeLocale {
@@ -45,7 +45,7 @@ div.demo-section {
 }
 
 p.demo-section-heading {
-    text-color: var(--muted);
+    color: var(--muted);
     font-weight: bold;
 }
 

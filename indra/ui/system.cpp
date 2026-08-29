@@ -57,7 +57,7 @@ bool equalStyleInputs(const radia::ui::ResourceSnapshot& left, const radia::ui::
 } // namespace
 
 namespace radia::ui {
-System::System() : mSkinGeneration(SkinGeneration::empty()), mNativeAppearance(std::make_shared<FallbackNativeAppearance>()) {}
+System::System() : mSkinGeneration(SkinGeneration::empty()), mNativeAppearance(makeDefaultNativeAppearance()) {}
 
 System::~System() = default;
 
@@ -173,7 +173,7 @@ void System::refreshKeybindings() {
 }
 
 void System::setNativeAppearance(std::shared_ptr<const NativeAppearance> appearance) {
-    if (!appearance) appearance = std::make_shared<FallbackNativeAppearance>();
+    if (!appearance) appearance = makeDefaultNativeAppearance();
     if (mNativeAppearance == appearance && mNativeAppearance->revision() == appearance->revision()) return;
     mNativeAppearance = std::move(appearance);
     for (Surface* surface : mSurfaces)

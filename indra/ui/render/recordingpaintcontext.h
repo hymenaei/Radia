@@ -22,6 +22,9 @@ enum class PaintCommandKind {
     BeginEffects,
     EndEffects,
     Scrollbar,
+    NativeInput,
+    NativeInputMark,
+    NativeButton,
     Box,
     Text,
     Icon
@@ -37,6 +40,10 @@ struct PaintCommand {
     std::optional<TopBorderGap> topBorderGap;
     Vec2 translation;
     std::optional<NativeScrollbarPaintRequest> scrollbar;
+    std::optional<NativeInputPaintRequest> nativeInput;
+    std::optional<NativeInputMarkPaintRequest> nativeInputMark;
+    std::optional<NativeButtonPaintRequest> nativeButton;
+    PaintTarget target;
 };
 
 class RecordingPaintContext final : public PaintContext {
@@ -46,7 +53,7 @@ public:
     Vec2 measureText(const std::string& text, const Style& style) const override;
     float usedLetterSpacing(const Style& style) const override;
     std::uint64_t generation() const override { return mTextMetrics.generation(); }
-    void beginFrame() override;
+    void beginFrame(const PaintTarget& target) override;
     void endFrame() override;
     void pushClip(const Rect& rect, float scale, ClipAxes axes = ClipAxes::Both) override;
     void popClip() override;
@@ -55,6 +62,9 @@ public:
     void beginEffects(const Rect& rect, const Style& style, float scale) override;
     void endEffects() override;
     void paintNativeScrollbar(const NativeScrollbarPaintRequest& request) override;
+    void paintNativeInput(const NativeInputPaintRequest& request) override;
+    void paintNativeInputMark(const NativeInputMarkPaintRequest& request) override;
+    void paintNativeButton(const NativeButtonPaintRequest& request) override;
     void paintBox(const Rect& rect, const Style& style, std::optional<TopBorderGap> topBorderGap = std::nullopt) override;
     void paintText(const std::string& text, const Rect& rect, const Style& style) override;
     void paintIcon(const std::string& name, const Rect& rect, const Style& style, float scale) override;

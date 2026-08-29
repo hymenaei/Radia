@@ -11,25 +11,27 @@
 
 namespace radia::ui::paint {
 namespace {
-void applyScissor(const Rect& rect, float scale, const Vec2& renderOrigin, const Vec2& pixelOrigin) {
+void applyScissor(const Rect& rect, float scale, const Vec2& renderOrigin, const Vec2& pixelOrigin, bool coverage) {
     const S32 left = llfloor(pixelOrigin.x + (rect.left() - renderOrigin.x) * scale);
     const S32 right = llceil(pixelOrigin.x + (rect.right() - renderOrigin.x) * scale);
     const S32 bottom = llfloor(pixelOrigin.y + (rect.bottom() - renderOrigin.y) * scale);
     const S32 top = llceil(pixelOrigin.y + (rect.top() - renderOrigin.y) * scale);
-    glScissor(left, bottom, llmax(0, right - left), llmax(0, top - bottom));
+    const S32 fringe = coverage ? 1 : 0;
+    glScissor(left - fringe, bottom - fringe, llmax(0, right - left + fringe * 2), llmax(0, top - bottom + fringe * 2));
 }
 } // namespace
 
-MatrixGuard::MatrixGuard(const Rect& bounds) : mPreviousMode(gGL.getMatrixMode()) {
+MatrixGuard::MatrixGuard(const Rect& bounds, float scale) : mPreviousMode(gGL.getMatrixMode()), mScale(std::max(scale, .0001f)) {
     gGL.matrixMode(LLRender::MM_PROJECTION);
     gGL.pushMatrix();
     gGL.loadIdentity();
-    gGL.ortho(0.f, bounds.w, 0.f, bounds.h, -1.f, 1.f);
+    gGL.ortho(0.f, bounds.w * mScale, 0.f, bounds.h * mScale, -1.f, 1.f);
     gGL.matrixMode(LLRender::MM_MODELVIEW);
     gGL.pushMatrix();
     gGL.loadIdentity();
     gGL.pushUIMatrix();
     gGL.loadUIIdentity();
+    gGL.scaleUI(mScale, mScale, 1.f);
     gGL.translateUI(-bounds.x, -bounds.y, 0.f);
 }
 
@@ -62,7 +64,7 @@ ClearColorGuard::~ClearColorGuard() {
     glClearColor(mColor[0], mColor[1], mColor[2], mColor[3]);
 }
 
-void ClipStack::beginFrame() {
+void ClipStack::beginFrame(const PaintTarget& target) {
     popAllTranslations();
     if (!mClips.empty()) popAll();
     else if (mScissorState) {
@@ -72,15 +74,16 @@ void ClipStack::beginFrame() {
     }
     GLint viewport[4]{};
     glGetIntegerv(GL_VIEWPORT, viewport);
-    mState = {{0.f, 0.f},
-              {static_cast<float>(viewport[0]), static_cast<float>(viewport[1])},
-              {0.f, 0.f, static_cast<float>(viewport[2]), static_cast<float>(viewport[3])}};
+    PaintTarget resolvedTarget = target;
+    if (resolvedTarget.kind == PaintTargetKind::Direct)
+        resolvedTarget.pixelOrigin = {static_cast<float>(viewport[0]) + target.pixelOrigin.x, static_cast<float>(viewport[1]) + target.pixelOrigin.y};
+    mState = {resolvedTarget, {target.bounds.x, target.bounds.y}};
     mTranslation = {};
 }
 
 void ClipStack::push(const Rect& rect, float scale, ClipAxes axes) {
     const float resolvedScale = std::max(0.f, scale);
-    const Rect inherited = mClips.empty() ? mState.bounds : mClips.back().first;
+    const Rect inherited = mClips.empty() ? mState.target.bounds : mClips.back().first;
     const Rect translated = {rect.x + mTranslation.x, rect.y + mTranslation.y, rect.w, rect.h};
     const Rect clipped = clipToAxes(inherited, translated, axes);
     if (mClips.empty()) {
@@ -90,7 +93,8 @@ void ClipStack::push(const Rect& rect, float scale, ClipAxes axes) {
     }
     mClips.emplace_back(clipped, resolvedScale);
     gGL.flush();
-    applyScissor(intersectRects(clipped, mState.bounds), resolvedScale, mState.origin, mState.pixelOrigin);
+    applyScissor(intersectRects(clipped, mState.target.bounds), resolvedScale, mState.origin, mState.target.pixelOrigin,
+                 mState.target.clipAA == AAIntent::Coverage);
 }
 
 void ClipStack::pop() {
@@ -100,7 +104,8 @@ void ClipStack::pop() {
     if (!mClips.empty()) {
         const Rect& clip = mClips.back().first;
         const float scale = mClips.back().second;
-        applyScissor(intersectRects(clip, mState.bounds), scale, mState.origin, mState.pixelOrigin);
+        applyScissor(intersectRects(clip, mState.target.bounds), scale, mState.origin, mState.target.pixelOrigin,
+                     mState.target.clipAA == AAIntent::Coverage);
         return;
     }
     glScissor(mPreviousScissor[0], mPreviousScissor[1], mPreviousScissor[2], mPreviousScissor[3]);
@@ -133,12 +138,20 @@ void ClipStack::popAllTranslations() {
 
 void ClipStack::reapply() {
     if (mClips.empty()) return;
-    const Rect clipped = intersectRects(mClips.back().first, mState.bounds);
-    applyScissor(clipped, mClips.back().second, mState.origin, mState.pixelOrigin);
+    const Rect clipped = intersectRects(mClips.back().first, mState.target.bounds);
+    applyScissor(clipped, mClips.back().second, mState.origin, mState.target.pixelOrigin, mState.target.clipAA == AAIntent::Coverage);
 }
 
 const Rect& ClipStack::bounds() const {
-    return mState.bounds;
+    return mState.target.bounds;
+}
+
+std::optional<Rect> ClipStack::coverageBounds() const {
+    if (mClips.empty() || mState.target.clipAA != AAIntent::Coverage) return std::nullopt;
+    const Rect logical = intersectRects(mClips.back().first, mState.target.bounds);
+    const float scale = mClips.back().second;
+    return Rect{mState.target.pixelOrigin.x + (logical.left() - mState.origin.x) * scale,
+                mState.target.pixelOrigin.y + (logical.bottom() - mState.origin.y) * scale, logical.w * scale, logical.h * scale};
 }
 
 PaintState ClipStack::snapshot() const {
@@ -147,7 +160,12 @@ PaintState ClipStack::snapshot() const {
 
 PaintState ClipStack::beginCapture(const Rect& capture) {
     PaintState previous = mState;
-    mState = {{capture.x, capture.y}, {0.f, 0.f}, capture};
+    PaintTarget target = mState.target;
+    target.bounds = capture;
+    target.pixelOrigin = {};
+    target.kind = PaintTargetKind::Offscreen;
+    target.opaque = false;
+    mState = {target, {capture.x, capture.y}};
     return previous;
 }
 
@@ -155,14 +173,14 @@ void ClipStack::restoreCapture(PaintState previous) {
     mState = std::move(previous);
 }
 
-EffectCaptureGuard::EffectCaptureGuard(ClipStack& clips, LLRenderTarget& target, const Rect& capture) : mClips(clips), mTarget(target) {
+EffectCaptureGuard::EffectCaptureGuard(ClipStack& clips, LLRenderTarget& target, const Rect& capture, float scale) : mClips(clips), mTarget(target) {
     {
         LLGLDisable disableScissor(GL_SCISSOR_TEST);
         ClearColorGuard clearColor;
         glClearColor(0.f, 0.f, 0.f, 0.f);
         mTarget.clear(GL_COLOR_BUFFER_BIT);
     }
-    mMatrixGuard.emplace(capture);
+    mMatrixGuard.emplace(capture, scale);
     mPreviousState = mClips.beginCapture(capture);
 }
 

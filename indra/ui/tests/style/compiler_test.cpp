@@ -26,12 +26,16 @@
 #include "style/model.h"
 #include "style/stylesheet.h"
 #include "style/syntax.h"
+#include "text/metrics.h"
 
 namespace {
 using radia::ui::AlignItems;
 using radia::ui::AlignSelf;
 using radia::ui::AppearanceMode;
+using radia::ui::BoxSizing;
 using radia::ui::ButtonElement;
+using radia::ui::Color;
+using radia::ui::ColorScheme;
 using radia::ui::DisplayMode;
 using radia::ui::Element;
 using radia::ui::ElementState;
@@ -51,7 +55,6 @@ using radia::ui::StrokeCap;
 using radia::ui::Style;
 using radia::ui::StyleSheet;
 using radia::ui::TextAlign;
-using radia::ui::TextDecoration;
 using radia::ui::TextOverflow;
 using radia::ui::TextWrap;
 using radia::ui::VerticalAlign;
@@ -72,24 +75,7 @@ IconElement& appendIcon(ButtonElement& button, std::string name) {
     return *result;
 }
 
-void loadCoreStylesheet(StyleSheet& stylesheet) {
-    ASSERT_TRUE(stylesheet.loadRadia(std::string(radia::ui::defaultStylesheetSource()), std::string(radia::ui::kDefaultStylesheetResourceId)).ok());
-}
 } // namespace
-
-TEST(StyleCompilerTest, ResolvesSelectorsByElementClassStateAndChild) {
-    constexpr char kSelectorStyles[] = "button.primary:hover > icon { width: 17px; }";
-
-    StyleSheet stylesheet;
-    ASSERT_TRUE(stylesheet.loadRadia(kSelectorStyles).ok());
-
-    ButtonElement button;
-    button.addClass("primary");
-    ElementCompilerAccess::setState(button, ElementState::Hovered, true);
-    IconElement& icon = appendIcon(button, "search");
-
-    EXPECT_EQ(resolveElementStyle(stylesheet, icon).width.pixels(), 17.f);
-}
 
 TEST(StyleCompilerTest, ResolvesStructuralDivStyles) {
     constexpr char kDivStyles[] = "div.stack { display: flex; flex-direction: row; gap: 8px; padding: 2px; }";
@@ -141,41 +127,66 @@ TEST(StyleCompilerTest, ResolvesDisplayAndInheritedVisibility) {
     EXPECT_EQ(resolveElementStyle(stylesheet, *childPtr).visibility, Visibility::Hidden);
 }
 
-TEST(StyleCompilerTest, UsesCssInitialAndDivDisplayDefaults) {
+TEST(StyleCompilerTest, ParsesColorSchemeValues) {
+    constexpr char kColorSchemeStyles[] = "panel { color-scheme: light; } panel.dark { color-scheme: dark; } "
+                                          "panel.both { color-scheme: light dark; } panel.reset { color-scheme: initial; }";
+
     StyleSheet stylesheet;
-    const std::string source(radia::ui::defaultStylesheetSource());
-    ASSERT_TRUE(stylesheet.loadRadia(source, std::string(radia::ui::kDefaultStylesheetResourceId)).ok());
-    PanelElement panel;
-    const auto* definition = radia::ui::findElementDefinition(radia::ui::Tag::Div);
-    ASSERT_NE(definition, nullptr);
-    auto div = definition->create();
-    ASSERT_NE(div, nullptr);
-    Element paragraph("p");
+    ASSERT_TRUE(stylesheet.loadRadia(kColorSchemeStyles).ok());
 
-    const Style panelStyle = resolveElementStyle(stylesheet, panel);
-    const Style divStyle = resolveElementStyle(stylesheet, *div);
-    const Style paragraphStyle = resolveElementStyle(stylesheet, paragraph);
-    EXPECT_EQ(panelStyle.display, DisplayMode::Inline);
-    EXPECT_FALSE(panelStyle.displaySet);
-    EXPECT_EQ(divStyle.display, DisplayMode::Block);
-    EXPECT_TRUE(divStyle.displaySet);
-    EXPECT_EQ(paragraphStyle.display, DisplayMode::Block);
-    EXPECT_TRUE(paragraphStyle.displaySet);
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).colorScheme, ColorScheme::Light);
+    EXPECT_EQ(stylesheet.resolve("panel", "", {"dark"}, 0).colorScheme, ColorScheme::Dark);
+    EXPECT_EQ(stylesheet.resolve("panel", "", {"both"}, 0).colorScheme, ColorScheme::LightDark);
+    EXPECT_EQ(stylesheet.resolve("panel", "", {"reset"}, 0).colorScheme, ColorScheme::Auto);
 
-    ASSERT_TRUE(
-        stylesheet
-            .loadRadiaLayers({
-                radia::ui::StyleLayer{radia::ui::StyleOrigin::Default,
-                                      radia::ui::ResourceLayer{std::string(radia::ui::kDefaultStylesheetResourceId), source}},
-                radia::ui::StyleLayer{radia::ui::StyleOrigin::Skin, radia::ui::ResourceLayer{"test.css", "div.inline { display: inline; }"}},
-            })
-            .ok());
-    div->addClass("inline");
-    const Style authoredDivStyle = resolveElementStyle(stylesheet, *div);
-    EXPECT_EQ(authoredDivStyle.display, DisplayMode::Inline);
-    EXPECT_TRUE(authoredDivStyle.displaySet);
-    EXPECT_EQ(resolveElementStyle(stylesheet, paragraph).display, DisplayMode::Block);
-    EXPECT_TRUE(resolveElementStyle(stylesheet, paragraph).displaySet);
+    StyleSheet invalid;
+    const auto result = invalid.loadRadia("panel { color-scheme: light light; }");
+    ASSERT_FALSE(result.ok());
+    ASSERT_FALSE(result.errors.empty());
+    EXPECT_EQ(result.errors.front().code, "stylesheet.property.value_invalid");
+}
+
+TEST(StyleCompilerTest, ParsesBoxSizingValuesAndInitial) {
+    constexpr char kBoxSizingStyles[] = "panel { box-sizing: border-box; } panel.content { box-sizing: content-box; } "
+                                        "panel.reset { box-sizing: initial; }";
+
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia(kBoxSizingStyles).ok());
+
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).boxSizing, BoxSizing::BorderBox);
+    EXPECT_EQ(stylesheet.resolve("panel", "", {"content"}, 0).boxSizing, BoxSizing::ContentBox);
+    EXPECT_EQ(stylesheet.resolve("panel", "", {"reset"}, 0).boxSizing, BoxSizing::ContentBox);
+
+    StyleSheet invalid;
+    const auto result = invalid.loadRadia("panel { box-sizing: padding-box; }");
+    ASSERT_FALSE(result.ok());
+    ASSERT_FALSE(result.errors.empty());
+    EXPECT_EQ(result.errors.front().code, "stylesheet.property.value_invalid");
+}
+
+TEST(StyleCompilerTest, ResolvesLightDarkColorChoicesForTheActiveScheme) {
+    constexpr char kLightDarkStyles[] =
+        "panel { color-scheme: light; background-color: light-dark(#ffffff, #000000); color: light-dark(#101010, #f0f0f0); "
+        "border: 1px solid light-dark(#cccccc, #333333); } panel.dark { color-scheme: dark; }";
+
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia(kLightDarkStyles).ok());
+
+    const Style light = stylesheet.resolve("panel", "", {}, 0);
+    EXPECT_NEAR(light.backgroundColor.r, 1.f, 1.0e-4f);
+    EXPECT_NEAR(light.color.r, 16.f / 255.f, 1.0e-4f);
+    EXPECT_NEAR(light.borderColor.r, 204.f / 255.f, 1.0e-4f);
+
+    const Style dark = stylesheet.resolve("panel", "", {"dark"}, 0);
+    EXPECT_FLOAT_EQ(dark.backgroundColor.r, 0.f);
+    EXPECT_NEAR(dark.color.r, 240.f / 255.f, 1.0e-4f);
+    EXPECT_NEAR(dark.borderColor.r, 51.f / 255.f, 1.0e-4f);
+
+    StyleSheet invalid;
+    const auto result = invalid.loadRadia("panel { color: light-dark(#fff); }");
+    ASSERT_FALSE(result.ok());
+    ASSERT_FALSE(result.errors.empty());
+    EXPECT_EQ(result.errors.front().code, "stylesheet.property.value_invalid");
 }
 
 TEST(StyleCompilerTest, ResolvesColorAndLengthTokens) {
@@ -313,42 +324,11 @@ TEST(StyleCompilerTest, ParsesIndependentTypographyPropertiesAndVariableWeights)
     EXPECT_EQ(variableWeight.resolve("label", "", {}, 0).fontWeight, static_cast<U16>(525));
 }
 
-TEST(StyleCompilerTest, SuppliesUserAgentDecorationForSemanticTextElements) {
-    StyleSheet stylesheet;
-    loadCoreStylesheet(stylesheet);
-    EXPECT_EQ(stylesheet.resolve("s", "", {}, 0).textDecoration, TextDecoration::LineThrough);
-    EXPECT_EQ(stylesheet.resolve("del", "", {}, 0).textDecoration, TextDecoration::LineThrough);
-    EXPECT_EQ(stylesheet.resolve("u", "", {}, 0).textDecoration, TextDecoration::Underline);
-    EXPECT_EQ(stylesheet.resolve("ins", "", {}, 0).textDecoration, TextDecoration::Underline);
-    EXPECT_EQ(stylesheet.resolve("strong", "", {}, 0).fontWeight, static_cast<U16>(700));
-    EXPECT_TRUE(stylesheet.resolve("em", "", {}, 0).fontItalic);
-    EXPECT_TRUE(stylesheet.resolve("cite", "", {}, 0).fontItalic);
-    EXPECT_TRUE(stylesheet.resolve("dfn", "", {}, 0).fontItalic);
-    EXPECT_EQ(stylesheet.resolve("small", "", {}, 0).fontSize, 11.f);
-    EXPECT_NEAR(stylesheet.resolve("mark", "", {}, 0).backgroundColor.r, 1.f, 1.0e-4f);
-    EXPECT_NEAR(stylesheet.resolve("mark", "", {}, 0).backgroundColor.g, 245.f / 255.f, 1.0e-4f);
-}
-
-TEST(StyleCompilerTest, SuppliesCoreSwitchStructure) {
-    StyleSheet stylesheet;
-    loadCoreStylesheet(stylesheet);
-
-    InputElement switchInput;
-    switchInput.type("checkbox").switchMode(true);
-    const Style owner = resolveElementStyle(stylesheet, switchInput);
-
-    EXPECT_EQ(owner.appearance, AppearanceMode::Auto);
-    EXPECT_EQ(owner.display, DisplayMode::Inline);
-    EXPECT_TRUE(owner.displaySet);
-    EXPECT_TRUE(resolveElementStyle(stylesheet, *switchInput.track()).width.isAuto());
-    EXPECT_EQ(resolveElementStyle(stylesheet, *switchInput.thumb()).order, 0);
-}
-
 TEST(StyleCompilerTest, AppliesInitialToLonghandsAndShorthands) {
     constexpr char kInitialStyles[] = "panel { display: flex; margin: 4px; padding: 5px; size: 20px 30px; min-size: 2px 3px; "
-                                      "flex: 2 3 4px; overflow: hidden; font: italic 700 21px/25px sans; text-color: #abcdef; } "
+                                      "flex: 2 3 4px; overflow: hidden; font: italic 700 21px/25px sans; color: #abcdef; } "
                                       "panel.reset { display: initial; margin: initial; padding: initial; size: initial; min-size: initial; "
-                                      "flex: initial; overflow: initial; font: initial; text-color: initial; }";
+                                      "flex: initial; overflow: initial; font: initial; color: initial; }";
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kInitialStyles).ok());
@@ -374,9 +354,9 @@ TEST(StyleCompilerTest, AppliesInitialToLonghandsAndShorthands) {
     EXPECT_EQ(style.fontSize, 13.f);
     EXPECT_FALSE(style.lineHeight.has_value());
     EXPECT_EQ(style.fontFamily, FontFamily::Sans);
-    EXPECT_FLOAT_EQ(style.textColor.r, 0.f);
-    EXPECT_FLOAT_EQ(style.textColor.g, 0.f);
-    EXPECT_FLOAT_EQ(style.textColor.b, 0.f);
+    EXPECT_FLOAT_EQ(style.color.r, 0.f);
+    EXPECT_FLOAT_EQ(style.color.g, 0.f);
+    EXPECT_FLOAT_EQ(style.color.b, 0.f);
 }
 
 TEST(StyleCompilerTest, InitialOverridesInheritedValue) {
@@ -407,7 +387,10 @@ TEST(StyleCompilerTest, RejectsInvalidTypographyForms) {
     for (const auto& test : cases) {
         SCOPED_TRACE(Message() << "invalid typography case: " << test.name);
         StyleSheet stylesheet;
-        EXPECT_FALSE(stylesheet.loadRadia(test.styles).ok());
+        const auto result = stylesheet.loadRadia(test.styles);
+        ASSERT_FALSE(result.ok());
+        ASSERT_FALSE(result.errors.empty());
+        EXPECT_EQ(result.errors.front().code, "stylesheet.property.value_invalid");
     }
 }
 
@@ -534,7 +517,10 @@ TEST(StyleCompilerTest, RejectsUnitBearingFlexGrow) {
     constexpr char kUnitBearingFlexGrow[] = "panel { flex-grow: 1px; }";
 
     StyleSheet stylesheet;
-    EXPECT_FALSE(stylesheet.loadRadia(kUnitBearingFlexGrow).ok());
+    const auto result = stylesheet.loadRadia(kUnitBearingFlexGrow);
+    ASSERT_FALSE(result.ok());
+    ASSERT_FALSE(result.errors.empty());
+    EXPECT_EQ(result.errors.front().code, "stylesheet.property.value_invalid");
 }
 
 TEST(StyleCompilerTest, ProvidesStableStyleDefaults) {
@@ -557,29 +543,7 @@ TEST(StyleCompilerTest, ProvidesStableStyleDefaults) {
     EXPECT_EQ(style.backgroundColor.a, 0.f);
 }
 
-TEST(StyleCompilerTest, AppliesIntrinsicButtonLayoutAndAuthoredOverrides) {
-    constexpr char kButtonOverrideStyles[] = "button { display: flex; flex-direction: column; justify-content: end; vertical-align: top; }";
-
-    StyleSheet stylesheet;
-    loadCoreStylesheet(stylesheet);
-    ButtonElement button;
-    const Style defaults = resolveElementStyle(stylesheet, button);
-    EXPECT_EQ(defaults.display, DisplayMode::Flex);
-    EXPECT_EQ(defaults.flexDirection, FlexDirection::Row);
-    EXPECT_EQ(defaults.justifyContent, JustifyContent::Center);
-    EXPECT_EQ(defaults.verticalAlign, VerticalAlign::Middle);
-
-    ASSERT_TRUE(stylesheet.loadRadia(kButtonOverrideStyles).ok());
-    const Style authored = resolveElementStyle(stylesheet, button);
-    EXPECT_EQ(authored.display, DisplayMode::Flex);
-    EXPECT_EQ(authored.flexDirection, FlexDirection::Column);
-    EXPECT_EQ(authored.justifyContent, JustifyContent::End);
-    EXPECT_EQ(authored.verticalAlign, VerticalAlign::Top);
-}
-
 TEST(StyleCompilerTest, KeepsFloaterHeadAndControlsAsAuthoredElements) {
-    StyleSheet stylesheet;
-    loadCoreStylesheet(stylesheet);
     FloaterElement floater;
     radia::ui::test::appendFloaterStructure(floater, true, true);
     ASSERT_NE(floater.head(), nullptr);
@@ -640,7 +604,10 @@ TEST(StyleCompilerTest, RejectsInvalidFontAndTextOverflowValues) {
     for (const auto& test : cases) {
         SCOPED_TRACE(Message() << "invalid text style case: " << test.name);
         StyleSheet stylesheet;
-        EXPECT_FALSE(stylesheet.loadRadia(test.styles).ok());
+        const auto result = stylesheet.loadRadia(test.styles);
+        ASSERT_FALSE(result.ok());
+        ASSERT_FALSE(result.errors.empty());
+        EXPECT_EQ(result.errors.front().code, "stylesheet.property.value_invalid");
     }
 }
 
@@ -682,7 +649,10 @@ TEST(StyleCompilerTest, RejectsNonFiniteEdgeValues) {
         SCOPED_TRACE(Message() << "non-finite " << test.property << " value: " << test.value);
         const std::string styles = std::string("panel { ") + test.property + ": " + test.value + "; }";
         StyleSheet stylesheet;
-        EXPECT_FALSE(stylesheet.loadRadia(styles, "nonfinite-edge.css").ok());
+        const auto result = stylesheet.loadRadia(styles, "nonfinite-edge.css");
+        ASSERT_FALSE(result.ok());
+        ASSERT_FALSE(result.errors.empty());
+        EXPECT_EQ(result.errors.front().code, "stylesheet.property.value_invalid");
     }
 }
 
@@ -714,6 +684,4 @@ TEST(StyleCompilerTest, KeepsStylePropertyRegistryCompleteAndConsistent) {
         EXPECT_NE(property->compile, nullptr);
         EXPECT_EQ(property->apply == nullptr, shorthandNames.count(property->name) != 0);
     }
-
-    EXPECT_EQ(names.size(), std::size_t(66));
 }

@@ -53,8 +53,13 @@ bool matchesAttribute(const StyleSelector& selector, const Element* element) {
     return value && schemaNameKey(*value) == schemaNameKey(selector.attributeValue);
 }
 
+bool matchesRoot(const StyleSelector& selector, const Element* element) {
+    return !selector.root || (element && element->parentElement() == nullptr);
+}
+
 bool selectorCanBeOwnedBy(const StyleSelector& selector, const Element& element) {
     return (selector.element.empty() || selector.element == element.styleElement())
+        && matchesRoot(selector, &element)
         && matchesAttribute(selector, &element)
         && (selector.id.empty() || selector.id == element.id())
         && (selector.className.empty() || element.classes().find(selector.className) != element.classes().end());
@@ -70,6 +75,7 @@ std::optional<std::size_t> stateIndex(ElementState state) {
 
 int specificity(const StyleSelector& selector) {
     return (!selector.id.empty() ? 100 : 0)
+        + (selector.root ? 10 : 0)
         + (!selector.attributeName.empty() ? 10 : 0)
         + (!selector.className.empty() ? 10 : 0)
         + (!selector.state.empty() ? 10 : 0)
@@ -89,6 +95,7 @@ bool matchesSelector(const StyleSelector& selector, const std::string& element, 
                      uint16_t ownerStates, const std::vector<std::string>& parts, uint16_t partStates, const Element* target,
                      LayoutDirection direction) {
     return (selector.element.empty() || selector.element == element)
+        && matchesRoot(selector, target)
         && matchesAttribute(selector, target)
         && (selector.id.empty() || selector.id == id)
         && (selector.className.empty() || classes.find(selector.className) != classes.end())
@@ -397,6 +404,7 @@ Style StyleModel::resolveInternal(const std::string& element, const std::string&
         if (!matchesRule(rule, element, id, classes, ownerStates, parts, partStates, target, inlineAncestors, direction)) continue;
         for (const StyleDeclaration& declaration : rule.declarations) detail::applyStyleDeclaration(style, declaration);
     }
+    resolveLightDarkColors(style);
     return style;
 }
 } // namespace radia::ui

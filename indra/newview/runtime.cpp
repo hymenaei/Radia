@@ -215,13 +215,15 @@ public:
         }
     }
 
-    void frame(int width, int height) {
+    void frame(int width, int height, float paintScale, float paintOriginX, float paintOriginY) {
         if (!isInteractive() || width <= 0 || height <= 0) return;
         const TimePoint frameTime = currentTime();
-        (void)frameTime;
+        const float deltaSeconds = mPreviousFrameTime ? std::max(0.f, std::chrono::duration<float>(frameTime - *mPreviousFrameTime).count()) : 0.f;
+        mPreviousFrameTime = frameTime;
+        surface().advanceScrollbarInteraction(deltaSeconds);
         if (width != mSurfaceState.width || height != mSurfaceState.height) layout(width, height);
         surface().refreshHover();
-        surface().paint(*mSurfaceState.paintContext);
+        surface().paint(*mSurfaceState.paintContext, std::max(paintScale, .0001f), {paintOriginX, paintOriginY});
     }
 
     InputDispatchResult pointerMove(const PointerEvent& event) {
@@ -237,9 +239,11 @@ public:
 
     bool dispatchPointerButton(const PointerEvent& event, bool down) {
         if (!isInteractive()) return false;
+        if (down) mPreviousFrameTime.reset();
         bool handled = false;
         if (!down && event.button == PointerButton::Left && surface().hasPointerCapture()) handled = pointerMove(event).handled;
         handled = (down ? surface().pointerDown(event) : surface().pointerUp(event)) || handled;
+        if (!down) mPreviousFrameTime.reset();
         if (down && !handled) surface().clearFocus();
         if (down && draggingFloater()) setDragCursorClipping(dragCursorClippingRequired());
         if (!down || !draggingFloater()) clearDragCursorState();
@@ -273,6 +277,7 @@ public:
 
     void clearInteraction() {
         if (mInitialization != InitializationState::Uninitialized) surface().clearInteractionState();
+        mPreviousFrameTime.reset();
         mTabKeyOwned = false;
         clearDragCursorState();
     }
@@ -441,6 +446,7 @@ private:
     KeybindingResolver mResolveKeybinding;
     KeybindingStateProvider mKeybindingState;
     Clock mNow;
+    std::optional<TimePoint> mPreviousFrameTime;
     WorkspacePersistence mWorkspacePersistence;
     LLWindow* mMainWindow;
     radia::viewer::ui::SkinResources mResources;
@@ -499,8 +505,8 @@ void Runtime::setVisibility(bool visible) {
     mImpl->setVisibility(visible);
 }
 
-void Runtime::frame(S32 width, S32 height) {
-    mImpl->frame(width, height);
+void Runtime::frame(S32 width, S32 height, F32 paintScale, F32 paintOriginX, F32 paintOriginY) {
+    mImpl->frame(width, height, paintScale, paintOriginX, paintOriginY);
 }
 
 void Runtime::idle() {

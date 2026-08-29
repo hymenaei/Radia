@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <utility>
 #include <vector>
 #include "types.h"
 
@@ -39,10 +40,29 @@ struct BorderRadii {
     }
 };
 
+struct LightDarkColor {
+    Color light;
+    Color dark;
+};
+
 struct ScrollbarColors {
     bool automatic = true;
     Color thumb;
     Color track;
+    std::optional<LightDarkColor> thumbLightDarkColor;
+    std::optional<LightDarkColor> trackLightDarkColor;
+};
+
+struct AccentColor {
+    enum class Kind : uint8_t { Auto, CurrentColor, Color };
+
+    Kind kind = Kind::Auto;
+    Color color;
+    std::optional<LightDarkColor> lightDarkColor;
+
+    static AccentColor currentColor() { return {Kind::CurrentColor, {}}; }
+    static AccentColor fromColor(Color value) { return {Kind::Color, value}; }
+    static AccentColor fromLightDark(LightDarkColor value) { return {Kind::Color, value.dark, std::move(value)}; }
 };
 
 class Dimension {
@@ -129,6 +149,7 @@ struct MarginInsets {
 struct GradientStop {
     Color color;
     float position = 0.f;
+    std::optional<LightDarkColor> lightDarkColor;
 };
 
 enum class GradientKind { Linear, Radial, Conic };
@@ -151,6 +172,7 @@ struct BoxShadow {
     float spread = 0.f;
     Color color;
     bool inset = false;
+    std::optional<LightDarkColor> lightDarkColor;
 };
 
 enum class OutlineStyle { Solid, Dashed };
@@ -160,6 +182,7 @@ struct Outline {
     float offset = 0.f;
     Color color;
     OutlineStyle style = OutlineStyle::Solid;
+    std::optional<LightDarkColor> lightDarkColor;
 };
 
 enum class EffectKind { BackgroundBlur, LayerBlur };
@@ -188,7 +211,10 @@ struct Translate {
 };
 
 enum class AppearanceMode { Auto, Unstyled };
+enum class ColorScheme { Auto, Light, Dark, LightDark };
+enum class BoxSizing { ContentBox, BorderBox };
 enum class DisplayMode { Inline, InlineBlock, Block, Flex, Grid, InlineGrid, NoneValue };
+enum class BorderStyle { Solid, Outset, Inset };
 enum class FlexDirection { Row, Column };
 enum class PositionMode { Static, Relative };
 enum class JustifyContent { Start, Center, End, Left, Right };
@@ -243,20 +269,24 @@ enum class InheritedStyleProperty : uint16_t {
     FontStyle = 1 << 3,
     TextDecoration = 1 << 4,
     LineHeight = 1 << 5,
-    TextColor = 1 << 6,
+    Color = 1 << 6,
     TextAlign = 1 << 7,
     Cursor = 1 << 8,
     LetterSpacing = 1 << 9,
     WordSpacing = 1 << 10,
     TextWrap = 1 << 11,
     Visibility = 1 << 12,
-    ScrollbarColor = 1 << 13
+    ScrollbarColor = 1 << 13,
+    AccentColor = 1 << 14,
+    ColorScheme = 1 << 15
 };
 
 using InheritedStyleProperties = uint16_t;
 
 struct Style {
     AppearanceMode appearance = AppearanceMode::Auto;
+    ColorScheme colorScheme = ColorScheme::Auto;
+    BoxSizing boxSizing = BoxSizing::ContentBox;
     DisplayMode display = DisplayMode::Inline;
     bool displaySet = false;
     FlexDirection flexDirection = FlexDirection::Row;
@@ -265,9 +295,15 @@ struct Style {
     Translate translate;
     Visibility visibility = Visibility::Visible;
     Color backgroundColor = Color(0.f, 0.f, 0.f, 0.f);
+    std::optional<LightDarkColor> backgroundColorLightDark;
     Color borderColor = Color(0.f, 0.f, 0.f, 1.f);
-    Color textColor = Color(0.f, 0.f, 0.f, 1.f);
+    std::optional<LightDarkColor> borderColorLightDark;
+    BorderStyle borderStyle = BorderStyle::Solid;
+    Color color = Color(0.f, 0.f, 0.f, 1.f);
+    std::optional<LightDarkColor> colorLightDark;
+    AccentColor accentColor;
     Color iconStrokeColor = Color(0.f, 0.f, 0.f, 1.f);
+    std::optional<LightDarkColor> iconStrokeColorLightDark;
     std::optional<Gradient> backgroundGradient;
     std::optional<Gradient> borderGradient;
     std::vector<BoxShadow> shadows;
@@ -313,6 +349,7 @@ struct Style {
     bool justifyContentSet = false;
     JustifySelf justifySelf = JustifySelf::Auto;
     AlignItems alignItems = AlignItems::Normal;
+    bool alignContentBlockCenter = false;
     AlignSelf alignSelf = AlignSelf::Auto;
     std::optional<float> aspectRatio;
     Overflow overflowX = Overflow::Visible;
@@ -327,5 +364,6 @@ struct Style {
     InheritedStyleProperties specifiedInheritedProperties = 0;
 };
 
+void resolveLightDarkColors(Style& style);
 void inheritStyle(Style& style, const Style& parent);
 } // namespace radia::ui

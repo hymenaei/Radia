@@ -1,6 +1,7 @@
 @import "variants.css";
 
 :root {
+    color-scheme: dark;
     --panel: #151922e8;
     --panel-border: #333333;
     --surface: #242c38f2;
@@ -35,6 +36,7 @@ floater {
 
 floater > head {
     height: 48px;
+    box-sizing: border-box;
     border-color: var(--panel-border);
     border-width: 0px 0px 1px;
     display: flex;
@@ -50,7 +52,7 @@ title {
     align-items: center;
     flex-grow: 1;
     gap: 6px;
-    text-color: var(--text);
+    color: var(--text);
     font-family: sans;
     font-size: 13px;
     line-height: 18px;
@@ -90,7 +92,7 @@ floater > body {
 }
 
 div, label, p {
-    text-color: var(--text);
+    color: var(--text);
     font-family: sans;
     font-size: 13px;
     line-height: 18px;
@@ -118,7 +120,7 @@ fieldset {
     flex-direction: column;
 
     > legend {
-        text-color: var(--muted);
+        color: var(--muted);
         font-weight: bold;
         font-size: 13px;
         line-height: 18px;
@@ -127,18 +129,16 @@ fieldset {
 }
 
 button {
-    cursor: pointer;
-    height: 32px;
     background-color: var(--surface);
     border-radius: var(--radius-md);
     border: 1px #ffffff24;
     gap: 6px;
-    padding: 9px;
-    text-color: var(--text);
+    padding: 6px;
+    color: var(--text);
 
     &:hover { background-color: var(--surface-hover); }
     &:active { background-color: var(--surface-active); }
-    &:disabled { opacity: 0.55; cursor: default; }
+    &:disabled { opacity: 0.55; }
 
     > icon {
         size: 16px;
@@ -147,7 +147,6 @@ button {
 }
 
 input[switch] {
-    cursor: pointer;
     appearance: none;
     display: inline-grid;
     position: relative;

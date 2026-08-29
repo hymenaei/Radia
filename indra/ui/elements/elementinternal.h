@@ -31,7 +31,8 @@ struct LayoutContextKey {
     std::uint64_t textMetricsGeneration = 0;
     LayoutDirection direction = LayoutDirection::LeftToRight;
     ScrollbarMode scrollbarMode = ScrollbarMode::Classic;
-    float scrollbarThickness = 15.f;
+    const NativeAppearance* nativeAppearance = nullptr;
+    std::uint64_t nativeAppearanceRevision = 0;
 
     constexpr bool operator==(const LayoutContextKey& other) const {
         return styleSheet == other.styleSheet
@@ -40,7 +41,8 @@ struct LayoutContextKey {
             && textMetricsGeneration == other.textMetricsGeneration
             && direction == other.direction
             && scrollbarMode == other.scrollbarMode
-            && scrollbarThickness == other.scrollbarThickness;
+            && nativeAppearance == other.nativeAppearance
+            && nativeAppearanceRevision == other.nativeAppearanceRevision;
     }
 };
 

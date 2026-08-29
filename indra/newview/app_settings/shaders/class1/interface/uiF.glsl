@@ -12,6 +12,23 @@
 // The text shadow uniform is shared by the legacy font path and captured
 // buffer replay; retained paint operations simply leave it unused.
 uniform int textShadowMode = 0; // 0 = passthrough, 1 = drop, 2 = soft
+uniform vec4 clipCoverageRect;
+uniform int clipCoverageEnabled;
+
+float clipCoverage() {
+    if (clipCoverageEnabled == 0) return 1.0;
+    vec2 size = max(clipCoverageRect.zw, vec2(0.0));
+    vec2 point = gl_FragCoord.xy - clipCoverageRect.xy;
+    vec2 q = abs(point - size * 0.5) - size * 0.5;
+    float signedDistance = length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0);
+    float aa = max(fwidth(signedDistance), 1.0e-4);
+    return 1.0 - smoothstep(-aa * 0.5, aa * 0.5, signedDistance);
+}
+
+vec4 applyClipCoverage(vec4 color) {
+    color.a *= clipCoverage();
+    return color;
+}
 
 #ifdef PAINT_SHADER
 out vec4 fragColor;
@@ -374,17 +391,17 @@ vec4 filteredGradientColor(vec2 localCoord) {
 
 void main() {
     if (paintOp == kPaintOpDirect) {
-        fragColor = vertexColor;
+        fragColor = applyClipCoverage(vertexColor);
         return;
     }
 
     if (paintOp == kPaintOpBlur) {
-        fragColor = blurredEffectColor(shapeCoord);
+        fragColor = applyClipCoverage(blurredEffectColor(shapeCoord));
         return;
     }
 
     if (paintOp == kPaintOpComposite) {
-        fragColor = compositedEffectColor(shapeCoord);
+        fragColor = applyClipCoverage(compositedEffectColor(shapeCoord));
         return;
     }
 
@@ -420,7 +437,7 @@ void main() {
             float clipDistance = roundedRectDistance(clipCoord, scrollbarClipRect.zw, scrollbarClipRadiusX, scrollbarClipRadiusY);
             alpha *= coverageFromDistance(clipDistance);
         }
-        fragColor = vec4(shapeColor.rgb, shapeColor.a * alpha);
+        fragColor = applyClipCoverage(vec4(shapeColor.rgb, shapeColor.a * alpha));
         return;
     }
 
@@ -437,7 +454,7 @@ void main() {
     if (paintOp == kPaintOpOuterShadow) {
         float softness = max(shadowBlur, fwidth(outerDistance));
         alpha = 1.0 - smoothstep(-softness, softness, outerDistance);
-        fragColor = vec4(shapeColor.rgb, shapeColor.a * alpha);
+        fragColor = applyClipCoverage(vec4(shapeColor.rgb, shapeColor.a * alpha));
         return;
     }
 
@@ -447,7 +464,7 @@ void main() {
         float holeDistance = roundedRectDistance(holeCoord, holeSize, innerRadiusX, innerRadiusY);
         float softness = max(shadowBlur, fwidth(holeDistance));
         alpha *= smoothstep(-softness, softness, holeDistance);
-        fragColor = vec4(shapeColor.rgb, shapeColor.a * alpha);
+        fragColor = applyClipCoverage(vec4(shapeColor.rgb, shapeColor.a * alpha));
         return;
     }
 
@@ -473,11 +490,11 @@ void main() {
 
     if (paintOp == kPaintOpGradient || paintOp == kPaintOpGradientBorder) {
         vec4 color = filteredGradientColor(localCoord);
-        fragColor = vec4(color.rgb, color.a * alpha);
+        fragColor = applyClipCoverage(vec4(color.rgb, color.a * alpha));
         return;
     }
 
-    fragColor = vec4(shapeColor.rgb, shapeColor.a * alpha);
+    fragColor = applyClipCoverage(vec4(shapeColor.rgb, shapeColor.a * alpha));
 }
 
 #else
@@ -503,22 +520,22 @@ void main() {
             float coverage;
             vec4 premul = hb_gpu_paint(vary_texcoord0, vary_glyphLoc & 0x3FFFFFFFu, vec4(vertexColor.rgb, 1.0), coverage);
             if ((vary_glyphLoc & 0x40000000u) != 0u) {
-                fragColor = vec4(vertexColor.rgb, premul.a * vertexColor.a);
+                fragColor = applyClipCoverage(vec4(vertexColor.rgb, premul.a * vertexColor.a));
                 return;
             }
-            fragColor = vec4(premul.rgb / max(premul.a, 1e-5), premul.a * vertexColor.a);
+            fragColor = applyClipCoverage(vec4(premul.rgb / max(premul.a, 1e-5), premul.a * vertexColor.a));
             return;
         }
 
         float coverage = hb_gpu_draw(vary_texcoord0, vary_glyphLoc);
         float ppem = hb_gpu_ppem(vary_texcoord0, vary_glyphLoc);
         coverage = alchemy_font_refine_coverage(coverage, vertexColor.rgb, ppem);
-        fragColor = vec4(vertexColor.rgb, vertexColor.a * coverage);
+        fragColor = applyClipCoverage(vec4(vertexColor.rgb, vertexColor.a * coverage));
         return;
     }
 #endif
     if (textShadowMode == 0) {
-        fragColor = vertexColor * texture(diffuseMap, vary_texcoord0.xy);
+        fragColor = applyClipCoverage(vertexColor * texture(diffuseMap, vary_texcoord0.xy));
         return;
     }
 
@@ -534,6 +551,6 @@ void main() {
         p *= (1.0 - vertexColorAlpha * sampleAtlasAlpha(vary_texcoord0 + atlasTexelSize * vec2(1.0, -1.0)));
         p *= (1.0 - vertexColorAlpha * sampleAtlasAlpha(vary_texcoord0 + atlasTexelSize * vec2(0.0, 2.0)));
     }
-    fragColor = vec4(vertexColor.rgb, 1.0 - p);
+    fragColor = applyClipCoverage(vec4(vertexColor.rgb, 1.0 - p));
 }
 #endif

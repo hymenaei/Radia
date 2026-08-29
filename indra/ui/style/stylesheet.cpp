@@ -6,10 +6,39 @@
 #include "linden_common.h"
 #include "style/stylesheet.h"
 #include <algorithm>
-#include "style/model.h"
 #include "style/defaults.inc"
+#include "style/model.h"
 
 namespace radia::ui {
+namespace {
+Color resolveLightDarkColor(const LightDarkColor& colors, ColorScheme scheme) {
+    return scheme == ColorScheme::Light ? colors.light : colors.dark;
+}
+
+void resolveLightDarkColor(Color& color, std::optional<LightDarkColor>& colors, ColorScheme scheme) {
+    if (colors) color = resolveLightDarkColor(*colors, scheme);
+}
+
+} // namespace
+
+void resolveLightDarkColors(Style& style) {
+    resolveLightDarkColor(style.backgroundColor, style.backgroundColorLightDark, style.colorScheme);
+    resolveLightDarkColor(style.borderColor, style.borderColorLightDark, style.colorScheme);
+    resolveLightDarkColor(style.color, style.colorLightDark, style.colorScheme);
+    resolveLightDarkColor(style.iconStrokeColor, style.iconStrokeColorLightDark, style.colorScheme);
+    if (style.accentColor.lightDarkColor) style.accentColor.color = resolveLightDarkColor(*style.accentColor.lightDarkColor, style.colorScheme);
+    if (style.scrollbarColor.thumbLightDarkColor)
+        style.scrollbarColor.thumb = resolveLightDarkColor(*style.scrollbarColor.thumbLightDarkColor, style.colorScheme);
+    if (style.scrollbarColor.trackLightDarkColor)
+        style.scrollbarColor.track = resolveLightDarkColor(*style.scrollbarColor.trackLightDarkColor, style.colorScheme);
+    if (style.backgroundGradient)
+        for (GradientStop& stop : style.backgroundGradient->stops) resolveLightDarkColor(stop.color, stop.lightDarkColor, style.colorScheme);
+    if (style.borderGradient)
+        for (GradientStop& stop : style.borderGradient->stops) resolveLightDarkColor(stop.color, stop.lightDarkColor, style.colorScheme);
+    for (BoxShadow& shadow : style.shadows) resolveLightDarkColor(shadow.color, shadow.lightDarkColor, style.colorScheme);
+    resolveLightDarkColor(style.outline.color, style.outline.lightDarkColor, style.colorScheme);
+}
+
 void inheritStyle(Style& style, const Style& parent) {
     for (const detail::StylePropertyDefinition* property = detail::stylePropertyBegin(); property != detail::stylePropertyEnd(); ++property)
         if (property->inherit) property->inherit(style, parent);

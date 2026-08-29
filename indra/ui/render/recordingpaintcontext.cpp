@@ -16,8 +16,10 @@ float RecordingPaintContext::usedLetterSpacing(const Style& style) const {
     return mTextMetrics.usedLetterSpacing(style);
 }
 
-void RecordingPaintContext::beginFrame() {
-    mCommands.push_back({PaintCommandKind::BeginFrame});
+void RecordingPaintContext::beginFrame(const PaintTarget& target) {
+    PaintCommand command{PaintCommandKind::BeginFrame};
+    command.target = target;
+    mCommands.push_back(std::move(command));
 }
 
 void RecordingPaintContext::endFrame() {
@@ -61,6 +63,24 @@ void RecordingPaintContext::endEffects() {
 void RecordingPaintContext::paintNativeScrollbar(const NativeScrollbarPaintRequest& request) {
     PaintCommand command{PaintCommandKind::Scrollbar};
     command.scrollbar = request;
+    mCommands.push_back(std::move(command));
+}
+
+void RecordingPaintContext::paintNativeInput(const NativeInputPaintRequest& request) {
+    PaintCommand command{PaintCommandKind::NativeInput};
+    command.nativeInput = request;
+    mCommands.push_back(std::move(command));
+}
+
+void RecordingPaintContext::paintNativeInputMark(const NativeInputMarkPaintRequest& request) {
+    PaintCommand command{PaintCommandKind::NativeInputMark};
+    command.nativeInputMark = request;
+    mCommands.push_back(std::move(command));
+}
+
+void RecordingPaintContext::paintNativeButton(const NativeButtonPaintRequest& request) {
+    PaintCommand command{PaintCommandKind::NativeButton};
+    command.nativeButton = request;
     mCommands.push_back(std::move(command));
 }
 

@@ -24,6 +24,14 @@ using detail::lower;
 using detail::StylePropertyImpact;
 using detail::trim;
 
+std::optional<BorderStyle> parseBorderStyle(const std::string& raw) {
+    const std::string value = lower(trim(raw));
+    if (value == "solid") return BorderStyle::Solid;
+    if (value == "outset") return BorderStyle::Outset;
+    if (value == "inset") return BorderStyle::Inset;
+    return std::nullopt;
+}
+
 bool parseStrokeCap(const std::string& raw, StrokeCap& cap) {
     const std::string value = lower(trim(raw));
     if (value == "butt") cap = StrokeCap::Butt;
@@ -55,18 +63,26 @@ void detail::applyStyleDeclaration(Style& style, const StyleDeclaration& declara
     if (std::holds_alternative<InitialStyleValue>(declaration.value)) {
         const Style initial;
         if (property.name == "appearance") style.appearance = initial.appearance;
+        else if (property.name == "color-scheme") style.colorScheme = initial.colorScheme;
+        else if (property.name == "box-sizing") style.boxSizing = initial.boxSizing;
+        else if (property.name == "accent-color") style.accentColor = initial.accentColor;
         else if (property.name == "background-color") {
             style.backgroundColor = initial.backgroundColor;
+            style.backgroundColorLightDark = initial.backgroundColorLightDark;
             style.backgroundGradient = initial.backgroundGradient;
         } else if (property.name == "border") {
             style.borderWidth = initial.borderWidth;
             style.borderColor = initial.borderColor;
+            style.borderColorLightDark = initial.borderColorLightDark;
+            style.borderStyle = initial.borderStyle;
             style.borderGradient = initial.borderGradient;
         } else if (property.name == "border-color") {
             style.borderColor = initial.borderColor;
+            style.borderColorLightDark = initial.borderColorLightDark;
             style.borderGradient = initial.borderGradient;
         } else if (property.name == "border-radius") style.borderRadius = initial.borderRadius;
         else if (property.name == "border-width") style.borderWidth = initial.borderWidth;
+        else if (property.name == "border-style") style.borderStyle = initial.borderStyle;
         else if (property.name == "bottom") style.bottom = initial.bottom;
         else if (property.name == "cursor") style.cursor = initial.cursor;
         else if (property.name == "display") {
@@ -104,6 +120,7 @@ void detail::applyStyleDeclaration(Style& style, const StyleDeclaration& declara
             style.justifyContent = initial.justifyContent;
             style.justifyContentSet = true;
         } else if (property.name == "justify-self") style.justifySelf = initial.justifySelf;
+        else if (property.name == "-internal-align-content-block") style.alignContentBlockCenter = initial.alignContentBlockCenter;
         else if (property.name == "align-self") style.alignSelf = initial.alignSelf;
         else if (property.name == "flex-basis") style.flexBasis = initial.flexBasis;
         else if (property.name == "flex-grow") style.flexGrow = initial.flexGrow;
@@ -118,8 +135,10 @@ void detail::applyStyleDeclaration(Style& style, const StyleDeclaration& declara
         else if (property.name == "letter-spacing") style.letterSpacing = initial.letterSpacing;
         else if (property.name == "word-spacing") style.wordSpacing = initial.wordSpacing;
         else if (property.name == "text-align") style.textAlign = initial.textAlign;
-        else if (property.name == "text-color") style.textColor = initial.textColor;
-        else if (property.name == "text-overflow") style.textOverflow = initial.textOverflow;
+        else if (property.name == "color") {
+            style.color = initial.color;
+            style.colorLightDark = initial.colorLightDark;
+        } else if (property.name == "text-overflow") style.textOverflow = initial.textOverflow;
         else if (property.name == "text-wrap") style.textWrap = initial.textWrap;
         else if (property.name == "vertical-align") {
             style.verticalAlign = initial.verticalAlign;
@@ -134,8 +153,11 @@ void detail::applyStyleDeclaration(Style& style, const StyleDeclaration& declara
         else if (property.name == "stroke") {
             style.svgStrokeWidth = initial.svgStrokeWidth;
             style.iconStrokeColor = initial.iconStrokeColor;
-        } else if (property.name == "stroke-color") style.iconStrokeColor = initial.iconStrokeColor;
-        else if (property.name == "stroke-linecap") {
+            style.iconStrokeColorLightDark = initial.iconStrokeColorLightDark;
+        } else if (property.name == "stroke-color") {
+            style.iconStrokeColor = initial.iconStrokeColor;
+            style.iconStrokeColorLightDark = initial.iconStrokeColorLightDark;
+        } else if (property.name == "stroke-linecap") {
             style.svgStrokeCap = initial.svgStrokeCap;
             style.svgStrokeCapSet = true;
         } else if (property.name == "stroke-width") style.svgStrokeWidth = initial.svgStrokeWidth;
@@ -255,6 +277,8 @@ struct detail::StyleCompileContext {
         return parsed.a < 0.f ? std::nullopt : std::optional<Color>(parsed);
     }
 
+    std::optional<StyleColorValue> colorValue(const std::string& raw = {}) const { return model.parseColorChoiceValue(raw.empty() ? value : raw); }
+
     std::optional<float> number(const std::string& raw = {}) const {
         const float parsed = model.parseNumberValue(raw.empty() ? value : raw, std::numeric_limits<float>::quiet_NaN());
         return std::isfinite(parsed) ? std::optional<float>(parsed) : std::nullopt;
@@ -305,26 +329,58 @@ CompileResult compileOutlineOffset(detail::StyleCompileContext& context) {
 CompileResult compilePaint(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
     if (const std::optional<Gradient> gradient = model.parseGradient(value)) return context.compiled(StylePaint{Color(), *gradient});
-    const auto parsed = context.color();
-    return parsed ? context.compiled(StylePaint{*parsed, std::nullopt}) : context.invalid();
+    const auto parsed = context.colorValue();
+    if (!parsed) return context.invalid();
+    if (const auto color = std::get_if<Color>(&*parsed)) return context.compiled(StylePaint{*color, std::nullopt});
+    return context.compiled(StylePaint{Color(0.f, 0.f, 0.f, 0.f), std::nullopt, std::get<LightDarkColor>(*parsed)});
+}
+
+CompileResult compileColorValue(detail::StyleCompileContext& context) {
+    const auto parsed = context.colorValue();
+    if (!parsed) return context.invalid();
+    if (const auto color = std::get_if<Color>(&*parsed)) return context.compiled(*color);
+    return context.compiled(std::get<LightDarkColor>(*parsed));
 }
 
 CompileResult compileColor(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
-    const auto parsed = context.color();
-    return parsed ? context.compiled(*parsed) : context.invalid();
+    return compileColorValue(context);
+}
+
+CompileResult compileAccentColor(detail::StyleCompileContext& context) {
+    const std::string value = lower(trim(context.value));
+    if (value == "auto") return context.compiled(AccentColor{});
+    if (value == "currentcolor") return context.compiled(AccentColor::currentColor());
+    const auto parsed = context.colorValue();
+    if (!parsed) return context.invalid();
+    if (const auto color = std::get_if<Color>(&*parsed)) return context.compiled(AccentColor::fromColor(*color));
+    return context.compiled(AccentColor::fromLightDark(std::get<LightDarkColor>(*parsed)));
 }
 
 CompileResult compileBorder(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
     const std::vector<std::string> tokens = context.tokens();
-    if (tokens.size() != 2) return context.invalid();
+    if (tokens.size() < 2 || tokens.size() > 3) return context.invalid();
     const auto width = context.number(tokens[0]);
     if (!width || *width < 0.f) return context.invalid();
-    if (const std::optional<Gradient> gradient = model.parseGradient(tokens[1]))
-        return context.compiled(StyleBorder{*width, StylePaint{Color(), *gradient}});
-    const auto parsed = context.color(tokens[1]);
-    return parsed ? context.compiled(StyleBorder{*width, StylePaint{*parsed, std::nullopt}}) : context.invalid();
+    BorderStyle borderStyle = BorderStyle::Solid;
+    const std::string& colorToken = tokens.size() == 2 ? tokens[1] : tokens[2];
+    if (tokens.size() == 3) {
+        const std::optional<BorderStyle> parsedStyle = parseBorderStyle(tokens[1]);
+        if (!parsedStyle) return context.invalid();
+        borderStyle = *parsedStyle;
+    }
+    if (const std::optional<Gradient> gradient = model.parseGradient(colorToken))
+        return context.compiled(StyleBorder{*width, StylePaint{Color(), *gradient}, borderStyle});
+    const auto parsed = context.colorValue(colorToken);
+    if (!parsed) return context.invalid();
+    if (const auto color = std::get_if<Color>(&*parsed)) return context.compiled(StyleBorder{*width, StylePaint{*color, std::nullopt}, borderStyle});
+    return context.compiled(
+        StyleBorder{*width, StylePaint{Color(0.f, 0.f, 0.f, 0.f), std::nullopt, std::get<LightDarkColor>(*parsed)}, borderStyle});
+}
+
+CompileResult compileBorderStyle(detail::StyleCompileContext& context) {
+    const std::optional<BorderStyle> parsed = parseBorderStyle(context.value);
+    return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileStroke(detail::StyleCompileContext& context) {
@@ -333,8 +389,10 @@ CompileResult compileStroke(detail::StyleCompileContext& context) {
     if (tokens.size() != 2) return context.invalid();
     const auto width = context.number(tokens[0]);
     if (!width || *width < 0.f) return context.invalid();
-    const auto parsed = context.color(tokens[1]);
-    return parsed ? context.compiled(StyleIconStroke{*width, *parsed}) : context.invalid();
+    const auto parsed = context.colorValue(tokens[1]);
+    if (!parsed) return context.invalid();
+    if (const auto color = std::get_if<Color>(&*parsed)) return context.compiled(StyleIconStroke{*width, *color});
+    return context.compiled(StyleIconStroke{*width, Color(0.f, 0.f, 0.f, 0.f), std::get<LightDarkColor>(*parsed)});
 }
 
 CompileResult compileEdges(detail::StyleCompileContext& context) {
@@ -495,6 +553,13 @@ CompileResult compileAlignItems(detail::StyleCompileContext& context) {
     return compileAlignment(context, value, sAlignItemsValues);
 }
 
+CompileResult compileInternalAlignContentBlock(detail::StyleCompileContext& context) {
+    const std::string alignment = lower(trim(context.value));
+    if (alignment == "normal") return context.compiled(false);
+    if (alignment == "center") return context.compiled(true);
+    return context.invalid();
+}
+
 CompileResult compileAlignSelf(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
     static constexpr std::array<std::pair<std::string_view, AlignSelf>, 5> sAlignSelfValues{{
@@ -591,6 +656,28 @@ CompileResult compileAppearance(detail::StyleCompileContext& context) {
     const std::string appearance = lower(trim(context.value));
     if (appearance == "auto") return context.compiled(AppearanceMode::Auto);
     if (appearance == "none") return context.compiled(AppearanceMode::Unstyled);
+    return context.invalid();
+}
+
+CompileResult compileBoxSizing(detail::StyleCompileContext& context) {
+    const std::string boxSizing = lower(trim(context.value));
+    if (boxSizing == "content-box") return context.compiled(BoxSizing::ContentBox);
+    if (boxSizing == "border-box") return context.compiled(BoxSizing::BorderBox);
+    return context.invalid();
+}
+
+CompileResult compileColorScheme(detail::StyleCompileContext& context) {
+    const std::vector<std::string> tokens = context.tokens();
+    if (tokens.size() == 1) {
+        const std::string scheme = lower(trim(tokens.front()));
+        if (scheme == "auto" || scheme == "normal") return context.compiled(ColorScheme::Auto);
+        if (scheme == "light") return context.compiled(ColorScheme::Light);
+        if (scheme == "dark") return context.compiled(ColorScheme::Dark);
+    } else if (tokens.size() == 2) {
+        const std::string first = lower(trim(tokens[0]));
+        const std::string second = lower(trim(tokens[1]));
+        if ((first == "light" && second == "dark") || (first == "dark" && second == "light")) return context.compiled(ColorScheme::LightDark);
+    }
     return context.invalid();
 }
 
@@ -693,9 +780,22 @@ CompileResult compileScrollbarColor(detail::StyleCompileContext& context) {
     if (value == "auto") return context.compiled(ScrollbarColors{});
     const std::vector<std::string> tokens = context.tokens();
     if (tokens.size() != 2) return context.invalid();
-    const std::optional<Color> thumb = context.color(tokens[0]);
-    const std::optional<Color> track = context.color(tokens[1]);
-    return thumb && track ? context.compiled(ScrollbarColors{false, *thumb, *track}) : context.invalid();
+    const std::optional<StyleColorValue> thumb = context.colorValue(tokens[0]);
+    const std::optional<StyleColorValue> track = context.colorValue(tokens[1]);
+    if (!thumb || !track) return context.invalid();
+    ScrollbarColors colors;
+    colors.automatic = false;
+    if (const auto solid = std::get_if<Color>(&*thumb)) colors.thumb = *solid;
+    else {
+        colors.thumb = std::get<LightDarkColor>(*thumb).dark;
+        colors.thumbLightDarkColor = std::get<LightDarkColor>(*thumb);
+    }
+    if (const auto solid = std::get_if<Color>(&*track)) colors.track = *solid;
+    else {
+        colors.track = std::get<LightDarkColor>(*track).dark;
+        colors.trackLightDarkColor = std::get<LightDarkColor>(*track);
+    }
+    return context.compiled(colors);
 }
 
 CompileResult compileOrder(detail::StyleCompileContext& context) {
@@ -854,30 +954,58 @@ template<InheritedStyleProperty Property, auto Member> void inheritMember(Style&
     if ((style.specifiedInheritedProperties & flag) == 0) style.*Member = parent.*Member;
 }
 
+void inheritColor(Style& style, const Style& parent) {
+    const auto flag = static_cast<InheritedStyleProperties>(InheritedStyleProperty::Color);
+    if ((style.specifiedInheritedProperties & flag) == 0) {
+        style.color = parent.color;
+        style.colorLightDark = parent.colorLightDark;
+    }
+}
+
 template<InheritedStyleProperty Property> void specifyInherited(Style& style) {
     style.specifiedInheritedProperties |= static_cast<InheritedStyleProperties>(Property);
 }
 
-void applyPaint(Color& color, std::optional<Gradient>& gradient, const StyleValue& value) {
+void applyPaint(Color& color, std::optional<LightDarkColor>& lightDarkColor, std::optional<Gradient>& gradient, const StyleValue& value) {
     const StylePaint& paint = std::get<StylePaint>(value);
-    color = paint.gradient ? Color(0.f, 0.f, 0.f, 0.f) : paint.color;
+    lightDarkColor = paint.lightDarkColor;
+    color = paint.gradient || paint.lightDarkColor ? Color(0.f, 0.f, 0.f, 0.f) : paint.color;
     gradient = paint.gradient;
 }
 
 void applyBackground(Style& style, const StyleValue& value) {
-    applyPaint(style.backgroundColor, style.backgroundGradient, value);
+    applyPaint(style.backgroundColor, style.backgroundColorLightDark, style.backgroundGradient, value);
 }
 void applyBorder(Style& style, const StyleValue& value) {
     const StyleBorder& border = std::get<StyleBorder>(value);
     style.borderWidth = {border.width, border.width, border.width, border.width};
-    style.borderColor = border.paint.gradient ? Color(0.f, 0.f, 0.f, 0.f) : border.paint.color;
+    style.borderColorLightDark = border.paint.lightDarkColor;
+    style.borderColor =
+        border.paint.gradient || border.paint.lightDarkColor ? Color(0.f, 0.f, 0.f, 0.f) : border.paint.color;
+    style.borderStyle = border.style;
     style.borderGradient = border.paint.gradient;
+}
+void applyBorderStyle(Style& style, const StyleValue& value) {
+    style.borderStyle = std::get<BorderStyle>(value);
+}
+void applyColor(Style& style, const StyleValue& value) {
+    if (const auto lightDarkColor = std::get_if<LightDarkColor>(&value)) {
+        style.colorLightDark = *lightDarkColor;
+        style.color = lightDarkColor->dark;
+    } else {
+        style.colorLightDark.reset();
+        style.color = std::get<Color>(value);
+    }
+}
+void applyAccentColor(Style& style, const StyleValue& value) {
+    style.accentColor = std::get<AccentColor>(value);
 }
 void applyOutline(Style& style, const StyleValue& value) {
     const Outline& outline = std::get<Outline>(value);
     style.outline.width = outline.width;
     style.outline.color = outline.color;
     style.outline.style = outline.style;
+    style.outline.lightDarkColor = outline.lightDarkColor;
 }
 void applyOutlineOffset(Style& style, const StyleValue& value) {
     style.outline.offset = std::get<Length>(value).pixels;
@@ -914,6 +1042,7 @@ void applyIconStroke(Style& style, const StyleValue& value) {
     const StyleIconStroke& stroke = std::get<StyleIconStroke>(value);
     style.svgStrokeWidth = Length{stroke.width};
     style.iconStrokeColor = stroke.color;
+    style.iconStrokeColorLightDark = stroke.lightDarkColor;
 }
 void applyIconStrokeLinecap(Style& style, const StyleValue& value) {
     style.svgStrokeCap = std::get<StrokeCap>(value);
@@ -923,13 +1052,32 @@ void applyIconStrokeWidth(Style& style, const StyleValue& value) {
     style.svgStrokeWidth = std::get<Length>(value);
 }
 
+void applyIconStrokeColor(Style& style, const StyleValue& value) {
+    if (const auto lightDarkColor = std::get_if<LightDarkColor>(&value)) {
+        style.iconStrokeColor = lightDarkColor->dark;
+        style.iconStrokeColorLightDark = *lightDarkColor;
+    } else {
+        style.iconStrokeColor = std::get<Color>(value);
+        style.iconStrokeColorLightDark.reset();
+    }
+}
+
 const detail::StylePropertyDefinition kPropertyDefinitions[] = {
+    {"accent-color", compileAccentColor, applyAccentColor, specifyInherited<InheritedStyleProperty::AccentColor>,
+     inheritMember<InheritedStyleProperty::AccentColor, &Style::accentColor>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited},
     {"appearance", compileAppearance, applyMember<&Style::appearance>, nullptr, nullptr, StylePropertyImpact::Paint},
+    {"color-scheme", compileColorScheme, applyMember<&Style::colorScheme>, specifyInherited<InheritedStyleProperty::ColorScheme>,
+     inheritMember<InheritedStyleProperty::ColorScheme, &Style::colorScheme>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited},
+    {"box-sizing", compileBoxSizing, applyMember<&Style::boxSizing>, nullptr, nullptr, StylePropertyImpact::Layout},
     {"background-color", compilePaint, applyBackground, nullptr, nullptr, StylePropertyImpact::Paint},
     {"border", compileBorder, applyBorder, nullptr, nullptr, StylePropertyImpact::Layout | StylePropertyImpact::Paint},
-    {"border-color", compilePaint, [](Style& style, const StyleValue& value) { applyPaint(style.borderColor, style.borderGradient, value); }, nullptr,
-     nullptr, StylePropertyImpact::Paint},
+    {"border-color", compilePaint,
+     [](Style& style, const StyleValue& value) {
+         applyPaint(style.borderColor, style.borderColorLightDark, style.borderGradient, value);
+     },
+     nullptr, nullptr, StylePropertyImpact::Paint},
     {"border-radius", compileBorderRadius, applyMember<&Style::borderRadius>, nullptr, nullptr, StylePropertyImpact::Paint},
+    {"border-style", compileBorderStyle, applyBorderStyle, nullptr, nullptr, StylePropertyImpact::Paint},
     {"border-width", compileEdges, applyMember<&Style::borderWidth>, nullptr, nullptr, StylePropertyImpact::Layout | StylePropertyImpact::Paint},
     {"bottom", compilePosition, applyLengthToOptional<&Style::bottom>, nullptr, nullptr,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
@@ -983,6 +1131,8 @@ const detail::StylePropertyDefinition kPropertyDefinitions[] = {
     {"justify-content", compileJustifyContent, applyJustifyContent},
     {"justify-self", compileJustifySelf, applyMember<&Style::justifySelf>, nullptr, nullptr,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"-internal-align-content-block", compileInternalAlignContentBlock, applyMember<&Style::alignContentBlockCenter>, nullptr, nullptr,
+     StylePropertyImpact::Layout, true},
     {"align-self", compileAlignSelf, applyMember<&Style::alignSelf>},
     {"flex", compileFlex},
     {"flex-basis", compileDimension, applyMember<&Style::flexBasis>},
@@ -1008,8 +1158,8 @@ const detail::StylePropertyDefinition kPropertyDefinitions[] = {
      inheritMember<InheritedStyleProperty::WordSpacing, &Style::wordSpacing>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
     {"text-align", compileTextAlign, applyMember<&Style::textAlign>, specifyInherited<InheritedStyleProperty::TextAlign>,
      inheritMember<InheritedStyleProperty::TextAlign, &Style::textAlign>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited},
-    {"text-color", compileColor, applyMember<&Style::textColor>, specifyInherited<InheritedStyleProperty::TextColor>,
-     inheritMember<InheritedStyleProperty::TextColor, &Style::textColor>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited},
+    {"color", compileColor, applyColor, specifyInherited<InheritedStyleProperty::Color>, inheritColor,
+     StylePropertyImpact::Paint | StylePropertyImpact::Inherited},
     {"text-overflow", compileTextOverflow, applyMember<&Style::textOverflow>, nullptr, nullptr, StylePropertyImpact::Paint},
     {"text-wrap", compileTextWrap, applyMember<&Style::textWrap>, specifyInherited<InheritedStyleProperty::TextWrap>,
      inheritMember<InheritedStyleProperty::TextWrap, &Style::textWrap>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
@@ -1018,7 +1168,7 @@ const detail::StylePropertyDefinition kPropertyDefinitions[] = {
      inheritMember<InheritedStyleProperty::Visibility, &Style::visibility>,
      StylePropertyImpact::Paint | StylePropertyImpact::Inherited | StylePropertyImpact::HitTest},
     {"stroke", compileStroke, applyIconStroke, nullptr, nullptr, StylePropertyImpact::Paint},
-    {"stroke-color", compileColor, applyMember<&Style::iconStrokeColor>, nullptr, nullptr, StylePropertyImpact::Paint},
+    {"stroke-color", compileColorValue, applyIconStrokeColor, nullptr, nullptr, StylePropertyImpact::Paint},
     {"stroke-linecap", compileStrokeLinecap, applyIconStrokeLinecap, nullptr, nullptr, StylePropertyImpact::Paint},
     {"stroke-width", compileStrokeWidth, applyIconStrokeWidth, nullptr, nullptr, StylePropertyImpact::Paint},
 };

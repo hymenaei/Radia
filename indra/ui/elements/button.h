@@ -15,8 +15,10 @@ public:
     ButtonElement();
     bool defaultPointerEvents() const override { return true; }
     bool focusable() const override { return true; }
+    void paint(PaintContext& context, const Style& style, float scale) const override;
 
 protected:
     explicit ButtonElement(const char* elementName);
+    void constrainResolvedStyle(Style& style) const override;
 };
 } // namespace radia::ui

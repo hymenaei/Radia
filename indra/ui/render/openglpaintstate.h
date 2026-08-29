@@ -11,18 +11,17 @@
 #include <vector>
 #include "llgl.h"
 #include "llrendertarget.h"
-#include "types.h"
+#include "render/painttarget.h"
 
 namespace radia::ui::paint {
 struct PaintState {
+    PaintTarget target;
     Vec2 origin;
-    Vec2 pixelOrigin;
-    Rect bounds;
 };
 
 class MatrixGuard final {
 public:
-    explicit MatrixGuard(const Rect& bounds);
+    explicit MatrixGuard(const Rect& bounds, float scale = 1.f);
     ~MatrixGuard();
 
     MatrixGuard(const MatrixGuard&) = delete;
@@ -30,6 +29,7 @@ public:
 
 private:
     LLRender::eMatrixMode mPreviousMode;
+    float mScale = 1.f;
 };
 
 class RenderTargetGuard final {
@@ -60,7 +60,7 @@ private:
 
 class ClipStack final {
 public:
-    void beginFrame();
+    void beginFrame(const PaintTarget& target);
     void push(const Rect& rect, float scale, ClipAxes axes);
     void pop();
     void popAll();
@@ -70,6 +70,7 @@ public:
     void reapply();
 
     const Rect& bounds() const;
+    std::optional<Rect> coverageBounds() const;
     PaintState snapshot() const;
     PaintState beginCapture(const Rect& capture);
     void restoreCapture(PaintState previous);
@@ -85,7 +86,7 @@ private:
 
 class EffectCaptureGuard final {
 public:
-    EffectCaptureGuard(ClipStack& clips, LLRenderTarget& target, const Rect& capture);
+    EffectCaptureGuard(ClipStack& clips, LLRenderTarget& target, const Rect& capture, float scale);
     ~EffectCaptureGuard();
 
     EffectCaptureGuard(const EffectCaptureGuard&) = delete;

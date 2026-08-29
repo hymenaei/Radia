@@ -19,6 +19,21 @@
 namespace radia::ui {
 namespace {
 constexpr float kScrollbarLineStep = 40.f;
+constexpr float kScrollbarButtonRepeatDelay = .4f;
+constexpr float kScrollbarButtonRepeatInterval = .05f;
+
+float scrollbarArrowDelta(ScrollbarPart part) {
+    if (part == ScrollbarPart::StartArrow) return -kScrollbarLineStep;
+    if (part == ScrollbarPart::EndArrow) return kScrollbarLineStep;
+    return 0.f;
+}
+
+Vec2 defaultWheelDelta(const WheelEvent& event, LayoutDirection direction) {
+    const bool shiftToHorizontal = (event.modifiers & kModifierShift) && event.dx == 0.f;
+    const float horizontal = shiftToHorizontal ? event.dy : event.dx;
+    const float vertical = shiftToHorizontal ? 0.f : event.dy;
+    return {direction == LayoutDirection::RightToLeft ? -horizontal : horizontal, vertical};
+}
 
 bool acceptsPointerEvents(const Element& element, const Style& style) {
     const PointerEvents policy = style.pointerEvents;
@@ -81,7 +96,8 @@ Element* Surface::hitTestNode(Element& node, const Vec2& point, const Rect& inhe
     const bool clipsY = style.overflowY != Overflow::Visible;
     const ClipAxes clipAxes = (clipsX ? ClipAxes::X : ClipAxes::NoAxes) | (clipsY ? ClipAxes::Y : ClipAxes::NoAxes);
     const bool clipsChildren = clipAxes != ClipAxes::NoAxes;
-    const Vec2 scrollOffset = clipsChildren ? Vec2{node.scrollLeft(), -node.scrollTop()} : Vec2{};
+    const Vec2 scrollTranslation = scrollContentTranslation(layoutDirection(), {node.scrollLeft(), node.scrollTop()});
+    const Vec2 scrollOffset = clipsChildren ? Vec2{-scrollTranslation.x, -scrollTranslation.y} : Vec2{};
     Rect childClip = clipsChildren ? clipToAxes(inheritedClip, detail::ElementInternalAccess::scrollport(node), clipAxes) : inheritedClip;
     if (clipsChildren) childClip = offsetRect(childClip, scrollOffset);
     const Vec2 childPoint = point + scrollOffset;
@@ -227,7 +243,8 @@ std::optional<Surface::ScrollbarTarget> Surface::hitTestScrollbarNode(Element& n
     const bool clipsY = style.overflowY != Overflow::Visible;
     const ClipAxes clipAxes = (clipsX ? ClipAxes::X : ClipAxes::NoAxes) | (clipsY ? ClipAxes::Y : ClipAxes::NoAxes);
     const bool clipsChildren = clipAxes != ClipAxes::NoAxes;
-    const Vec2 scrollOffset = clipsChildren ? Vec2{node.scrollLeft(), -node.scrollTop()} : Vec2{};
+    const Vec2 scrollTranslation = scrollContentTranslation(layoutDirection(), {node.scrollLeft(), node.scrollTop()});
+    const Vec2 scrollOffset = clipsChildren ? Vec2{-scrollTranslation.x, -scrollTranslation.y} : Vec2{};
     Rect childClip = clipsChildren ? clipToAxes(inheritedClip, detail::ElementInternalAccess::scrollport(node), clipAxes) : inheritedClip;
     if (clipsChildren) childClip = offsetRect(childClip, scrollOffset);
     const Vec2 childPoint = point + scrollOffset;
@@ -308,10 +325,8 @@ bool Surface::beginScrollbarInteraction(const ScrollbarTarget& target, const Vec
             const float thumbStart = target.hit.axis == ScrollbarAxis::Horizontal ? axis->thumb.left() : axis->thumb.bottom();
             interaction.grabOffset = scrollbarAxisPosition(target.hit.axis, point) - thumbStart;
         } else {
-            float delta = 0.f;
-            if (target.hit.part == ScrollbarPart::StartArrow) delta = -kScrollbarLineStep;
-            else if (target.hit.part == ScrollbarPart::EndArrow) delta = kScrollbarLineStep;
-            else if (target.hit.part == ScrollbarPart::Track) {
+            float delta = scrollbarArrowDelta(target.hit.part);
+            if (target.hit.part == ScrollbarPart::Track) {
                 const float thumbStart = target.hit.axis == ScrollbarAxis::Horizontal ? axis->thumb.left() : axis->thumb.bottom();
                 bool beforeThumb;
                 if (target.hit.axis == ScrollbarAxis::Horizontal) beforeThumb = scrollbarAxisPosition(target.hit.axis, point) < thumbStart;
@@ -350,6 +365,57 @@ bool Surface::beginScrollbarInteraction(const ScrollbarTarget& target, const Vec
     flushScrollNotifications();
     requestPaint();
     return true;
+}
+
+void Surface::advanceScrollbarInteraction(float deltaSeconds) {
+    if (!mScrollbarCapture) return;
+    ScrollbarInteraction& interaction = *mScrollbarCapture;
+    if (interaction.hit.part != ScrollbarPart::StartArrow && interaction.hit.part != ScrollbarPart::EndArrow) return;
+
+    ElementRef<Element> elementRef(interaction.element);
+    Element* element = elementRef.get();
+    if (!element || !isRootedInSurface(element) || !isEnabledInTree(element)) {
+        mScrollbarCapture.reset();
+        setScrollbarHover(std::nullopt);
+        requestPaint();
+        return;
+    }
+    if (!(deltaSeconds > 0.f)) return;
+
+    interaction.repeatElapsed += std::min(deltaSeconds, 1.f);
+    std::size_t repeatCount = 0;
+    if (!interaction.repeatStarted) {
+        if (interaction.repeatElapsed < kScrollbarButtonRepeatDelay) return;
+        interaction.repeatElapsed -= kScrollbarButtonRepeatDelay;
+        interaction.repeatStarted = true;
+        repeatCount = 1;
+    }
+    const std::size_t intervalCount = static_cast<std::size_t>(interaction.repeatElapsed / kScrollbarButtonRepeatInterval);
+    interaction.repeatElapsed -= intervalCount * kScrollbarButtonRepeatInterval;
+    repeatCount += intervalCount;
+    if (repeatCount == 0) return;
+
+    const float delta = scrollbarArrowDelta(interaction.hit.part);
+    for (std::size_t index = 0; index < repeatCount; ++index)
+        if (interaction.hit.axis == ScrollbarAxis::Horizontal) element->scrollBy(delta, 0.f);
+        else element->scrollBy(0.f, delta);
+
+    element = elementRef.get();
+    if (!element || !isRootedInSurface(element) || !isEnabledInTree(element)) {
+        mScrollbarCapture.reset();
+        setScrollbarHover(std::nullopt);
+        requestPaint();
+        return;
+    }
+    {
+        StylePass& styles = stylePass();
+        const StylePass::TraversalScope traversal = styles.enterTraversal();
+        const Style& style = styles.style(*element);
+        interaction.geometry = scrollbarGeometry(*element, style);
+    }
+    setScrollbarHover(ScrollbarTarget{element, interaction.geometry, interaction.hit});
+    flushScrollNotifications();
+    requestPaint();
 }
 
 bool Surface::updateScrollbarInteraction(const Vec2& point) {
@@ -741,7 +807,7 @@ bool Surface::scroll(const WheelEvent& event) {
     if (!defaultPrevented) {
         StylePass& styles = stylePass();
         const StylePass::TraversalScope traversal = styles.enterTraversal();
-        Vec2 remaining{event.dx, event.dy};
+        Vec2 remaining = defaultWheelDelta(event, layoutDirection());
         for (Element* candidate = hit; candidate;) {
             ElementRef<Element> candidateRef(candidate);
             ElementRef<Element> parentRef(candidate ? candidate->parentElement() : nullptr);

@@ -17,9 +17,11 @@ enum class Visibility : std::uint8_t { Visible, Hidden, Collapse };
 
 enum class ScrollbarMode : std::uint8_t { Classic, Overlay };
 
+class NativeAppearance;
+
 struct ScrollLayoutOptions {
     ScrollbarMode scrollbarMode = ScrollbarMode::Classic;
-    float scrollbarThickness = 15.f;
+    const NativeAppearance* nativeAppearance = nullptr;
 };
 
 struct Vec2 {

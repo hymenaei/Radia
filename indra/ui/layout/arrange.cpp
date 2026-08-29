@@ -34,7 +34,8 @@ using layout_detail::removeChildrenExcludedFromLayout;
 using layout_detail::rowAlignmentOffset;
 using layout_detail::rowLines;
 using layout_detail::setArrangedRect;
-using layout_detail::styledDimension;
+using layout_detail::styledBoxDimension;
+using layout_detail::textAlignmentOffset;
 using layout_detail::translatedRect;
 using layout_detail::verticalAlignmentOffset;
 
@@ -97,8 +98,8 @@ bool needsScrollbar(Overflow overflow, float extent, float client) {
     return overflow == Overflow::Auto && extent > client + kScrollEpsilon;
 }
 
-float scrollbarThicknessFor(ScrollbarWidth width, const ScrollLayoutOptions& options) {
-    const float thickness = std::max(0.f, options.scrollbarThickness);
+float scrollbarThicknessFor(ScrollbarWidth width, const NativeScrollbarMetrics& metrics) {
+    const float thickness = std::max(0.f, metrics.thickness);
     if (width == ScrollbarWidth::NoneValue) return 0.f;
     if (width == ScrollbarWidth::Thin) return thickness * .5f;
     return thickness;
@@ -117,7 +118,7 @@ LayoutEngine::RowSizing LayoutEngine::resolveRowSizes(Element& node, const Style
     const float availableCross = available.h;
     prepareMainAxis(children, FlexDirection::Row, availableMain);
     for (ChildLayout& child : children)
-        child.measured.y = styledDimension(child.style.height, child.style.minHeight, child.measured.y, availableCross);
+        child.measured.y = styledBoxDimension(child.style, false, child.style.height, child.style.minHeight, child.measured.y, availableCross);
 
     RowSizing sizing;
     sizing.lines = rowLines(children);
@@ -181,7 +182,7 @@ MainAxisAllocation LayoutEngine::resolveColumnSizes(Element& node, const Style& 
             allocation.valid = false;
             return allocation;
         }
-        child.measured.x = styledDimension(child.style.width, child.style.minWidth, child.measured.x, availableCross);
+        child.measured.x = styledBoxDimension(child.style, true, child.style.width, child.style.minWidth, child.measured.x, availableCross);
         applyCrossAxisSizing(child.measured, child.style, FlexDirection::Column, availableCross,
                              crossAlignment(parentStyle, child.style, FlexDirection::Column));
         if (child.style.height.isAuto() && !child.style.aspectRatio) {
@@ -299,7 +300,7 @@ void LayoutEngine::arrangeNode(Element& node, LayoutPass& pass) {
     const ScrollbarMode scrollbarMode = parentStyle.scrollbarModeSet ? parentStyle.scrollbarMode : scrollOptions.scrollbarMode;
     const bool classicScrollbars = scrollbarMode == ScrollbarMode::Classic;
     const bool scrollbarSpaceAvailable = classicScrollbars && parentStyle.scrollbarWidth != ScrollbarWidth::NoneValue;
-    const float scrollbarThickness = scrollbarThicknessFor(parentStyle.scrollbarWidth, scrollOptions);
+    const float scrollbarThickness = scrollbarThicknessFor(parentStyle.scrollbarWidth, pass.scrollbarMetrics(scrollbarMode));
     const bool stableGutter = parentStyle.scrollbarGutter != ScrollbarGutter::Auto;
     const bool reservesVerticalGutter = scrollbarSpaceAvailable && stableGutter && isScrollContainer(parentStyle.overflowY);
     const float verticalGutter = parentStyle.scrollbarGutter == ScrollbarGutter::StableBothEdges ? scrollbarThickness * 2.f : scrollbarThickness;
@@ -322,8 +323,8 @@ void LayoutEngine::arrangeNode(Element& node, LayoutPass& pass) {
         const bool reserveVerticalSpace = scrollbarSpaceAvailable && (verticalScrollbar || reservesVerticalGutter);
         const bool reserveHorizontalSpace = scrollbarSpaceAvailable && horizontalScrollbar;
         const bool rightToLeft = pass.direction() == LayoutDirection::RightToLeft;
-        const float inlineStartGutter = (rightToLeft && reserveVerticalSpace ? scrollbarThickness : 0.f)
-            + (parentStyle.scrollbarGutter == ScrollbarGutter::StableBothEdges && reservesVerticalGutter ? scrollbarThickness : 0.f);
+        const bool stableBothEdges = parentStyle.scrollbarGutter == ScrollbarGutter::StableBothEdges && reservesVerticalGutter;
+        const float inlineStartGutter = stableBothEdges ? scrollbarThickness : (rightToLeft && reserveVerticalSpace ? scrollbarThickness : 0.f);
         const float blockEndGutter = reserveHorizontalSpace ? scrollbarThickness : 0.f;
         scrollport = {paddingBox.x + inlineStartGutter, paddingBox.y + blockEndGutter,
                       std::max(0.f, paddingBox.w - (reserveVerticalSpace ? verticalGutter : 0.f)),
@@ -559,12 +560,10 @@ void LayoutEngine::arrangeGrid(Element& node, const Style&, const Rect& content,
         const float availableWidth = std::max(0.f, cellWidth - margin.horizontal());
         const float availableHeight = std::max(0.f, cellHeight - margin.vertical());
         const bool stretch = child.style.justifySelf == JustifySelf::Auto || child.style.justifySelf == JustifySelf::Stretch;
-        float width = child.style.width.isAuto() && stretch ? availableWidth
-            : child.style.width.isAuto()                    ? child.measured.x
-                                                            : child.style.width.resolve(child.measured.x, content.w);
-        float height = child.style.height.isAuto() ? availableHeight : child.style.height.resolve(child.measured.y, content.h);
-        if (child.style.minWidth) width = std::max(width, child.style.minWidth->resolve(content.w));
-        if (child.style.minHeight) height = std::max(height, child.style.minHeight->resolve(content.h));
+        const float widthFallback = child.style.width.isAuto() ? (stretch ? availableWidth : child.measured.x) : child.measured.x;
+        const float heightFallback = child.style.height.isAuto() ? availableHeight : child.measured.y;
+        const float width = styledBoxDimension(child.style, true, child.style.width, child.style.minWidth, widthFallback, content.w);
+        const float height = styledBoxDimension(child.style, false, child.style.height, child.style.minHeight, heightFallback, content.h);
 
         const float freeSpace = std::max(0.f, availableWidth - width);
         const float x = cellLeft + margin.left.fixedPixels() + justifySelfOffset(child.style.justifySelf, direction, freeSpace);
@@ -582,12 +581,17 @@ void LayoutEngine::arrangeNormal(Element& node, const Style& parentStyle, const 
     removeChildrenExcludedFromLayout(node, children);
     const std::optional<float> availableWidth = content.w >= 0.f ? std::optional<float>(content.w) : std::nullopt;
     const std::vector<layout_detail::NormalLine> lines = normalLines(children, availableWidth);
-    float lineTop = content.top();
+    float contentHeight = 0.f;
+    for (const layout_detail::NormalLine& line : lines) contentHeight += line.height;
+    const float blockAlignmentOffset = parentStyle.alignContentBlockCenter ? (content.h - contentHeight) * .5f : 0.f;
+    float lineTop = content.top() - blockAlignmentOffset;
     const bool rtl = direction == LayoutDirection::RightToLeft;
 
     for (const layout_detail::NormalLine& line : lines) {
         const float lineBottom = lineTop - line.height;
-        float x = rtl ? content.right() : content.left();
+        const float freeSpace = std::max(0.f, content.w - line.width);
+        const float alignmentOffset = line.block ? 0.f : textAlignmentOffset(parentStyle.textAlign, direction, freeSpace);
+        float x = rtl ? content.right() - alignmentOffset : content.left() + alignmentOffset;
         for (std::size_t index = line.begin; index < line.end; ++index) {
             ChildLayout& child = children[index];
             detail::NodeRef childNode = child.node;

@@ -151,4 +151,8 @@ float scrollOffsetForThumbPosition(const ScrollbarAxisGeometry& geometry, float 
     const float logicalFraction = reversePhysicalAxis ? 1.f - physicalFraction : physicalFraction;
     return geometry.maxScrollOffset * logicalFraction;
 }
+
+Vec2 scrollContentTranslation(LayoutDirection direction, const Vec2& scrollOffset) {
+    return {direction == LayoutDirection::RightToLeft ? scrollOffset.x : -scrollOffset.x, scrollOffset.y};
+}
 } // namespace radia::ui

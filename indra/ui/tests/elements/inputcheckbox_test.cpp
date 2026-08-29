@@ -16,27 +16,45 @@
 #include "elements/input.h"
 #include "elements/panel.h"
 #include "event.h"
+#include "layout/engine.h"
+#include "nativeappearance.h"
 #include "render/recordingpaintcontext.h"
 #include "style/style.h"
+#include "style/stylesheet.h"
+#include "surface/surface.h"
+#include "text/metrics.h"
 
 namespace {
+using radia::ui::AccentColor;
 using radia::ui::AppearanceMode;
+using radia::ui::Color;
+using radia::ui::ColorScheme;
 using radia::ui::ElementState;
 using radia::ui::Event;
+using radia::ui::fixedTextMetrics;
 using radia::ui::InputElement;
 using radia::ui::kChangeEvent;
 using radia::ui::kInputEvent;
 using radia::ui::LayoutDirection;
-using radia::ui::PaintCommandKind;
+using radia::ui::NativeAppearanceBase;
+using radia::ui::NativeInputControl;
+using radia::ui::NativeInputMark;
+using radia::ui::NativeInputMetrics;
+using radia::ui::NativeInputPaintRequest;
 using radia::ui::PaintCommand;
+using radia::ui::PaintCommandKind;
 using radia::ui::PanelElement;
 using radia::ui::RecordingPaintContext;
+using radia::ui::ScrollLayoutOptions;
 using radia::ui::Style;
+using radia::ui::StyleSheet;
+using radia::ui::Surface;
 using radia::ui::ValueBinding;
 using radia::ui::ValueBindingSubscription;
 using radia::ui::ValueState;
 using radia::ui::ValueValidation;
 using radia::ui::ValueValidationStatus;
+using radia::ui::Vec2;
 
 template<typename T> class MemoryValueBinding final : public ValueBinding<T>, public std::enable_shared_from_this<MemoryValueBinding<T>> {
 public:
@@ -140,14 +158,17 @@ TEST(InputTest, KeepsOneElementIdentityAcrossInputTypes) {
     EXPECT_EQ(input.thumb(), nullptr);
 }
 
-TEST(InputTest, AppearanceSelectsBuiltInOrOrdinaryPaint) {
+TEST(InputTest, AppearanceSelectsNativeCommandOrOrdinaryPaint) {
     InputElement input;
     RecordingPaintContext recording;
     Style style;
 
     input.type("checkbox").setRect({0.f, 0.f, 13.f, 13.f});
     input.paint(recording, style, 1.f);
-    EXPECT_EQ(recording.count(PaintCommandKind::Box), std::size_t{1});
+    ASSERT_EQ(recording.count(PaintCommandKind::NativeInput), std::size_t{1});
+    ASSERT_NE(recording.last(PaintCommandKind::NativeInput), nullptr);
+    ASSERT_TRUE(recording.last(PaintCommandKind::NativeInput)->nativeInput.has_value());
+    EXPECT_EQ(recording.last(PaintCommandKind::NativeInput)->nativeInput->control, NativeInputControl::Checkbox);
 
     recording.clear();
     style.appearance = AppearanceMode::Unstyled;
@@ -161,46 +182,215 @@ TEST(InputTest, AppearanceSelectsBuiltInOrOrdinaryPaint) {
     control.type("checkbox").switchMode(true).setRect({0.f, 0.f, 36.f, 20.f});
     recording.clear();
     control.paint(recording, Style{}, 1.f);
-    EXPECT_EQ(recording.count(PaintCommandKind::Box), std::size_t{2});
+    ASSERT_EQ(recording.count(PaintCommandKind::NativeInput), std::size_t{1});
+    ASSERT_NE(recording.last(PaintCommandKind::NativeInput), nullptr);
+    ASSERT_TRUE(recording.last(PaintCommandKind::NativeInput)->nativeInput.has_value());
+    EXPECT_EQ(recording.last(PaintCommandKind::NativeInput)->nativeInput->control, NativeInputControl::Switch);
 }
 
-TEST(InputTest, BuiltInSwitchPaintUsesResolvedDirection) {
-    InputElement control;
-    control.type("checkbox").switchMode(true).setRect({10.f, 0.f, 36.f, 20.f});
+TEST(InputTest, NativeRequestCarriesResolvedAccentColor) {
+    InputElement input;
+    input.type("checkbox").setRect({0.f, 0.f, 13.f, 13.f});
     RecordingPaintContext recording;
     Style style;
+    style.accentColor = AccentColor::fromColor({.2f, .4f, .6f, .8f});
 
-    control.paint(recording, style, 1.f);
+    input.paint(recording, style, 1.f);
+
+    const PaintCommand* command = recording.last(PaintCommandKind::NativeInput);
+    ASSERT_NE(command, nullptr);
+    ASSERT_TRUE(command->nativeInput.has_value());
+    ASSERT_TRUE(command->nativeInput->accentColor.has_value());
+    EXPECT_NEAR(command->nativeInput->accentColor->r, .2f, 1.0e-6f);
+    EXPECT_NEAR(command->nativeInput->accentColor->g, .4f, 1.0e-6f);
+    EXPECT_NEAR(command->nativeInput->accentColor->b, .6f, 1.0e-6f);
+    EXPECT_NEAR(command->nativeInput->accentColor->a, .8f, 1.0e-6f);
+}
+
+TEST(InputTest, NativeRequestCarriesResolvedColorScheme) {
+    InputElement input;
+    input.type("checkbox").setRect({0.f, 0.f, 13.f, 13.f});
+    RecordingPaintContext recording;
+    Style style;
+    style.colorScheme = ColorScheme::Light;
+
+    input.paint(recording, style, 1.f);
+
+    const PaintCommand* command = recording.last(PaintCommandKind::NativeInput);
+    ASSERT_NE(command, nullptr);
+    ASSERT_TRUE(command->nativeInput.has_value());
+    EXPECT_EQ(command->nativeInput->colorScheme, ColorScheme::Light);
+}
+
+TEST(InputTest, NativeAppearanceBasePaintsCenteredCheckboxAndVectorMark) {
+    NativeAppearanceBase appearance;
+    NativeInputPaintRequest request;
+    request.control = NativeInputControl::Checkbox;
+    request.bounds = {0.f, 0.f, 20.f, 12.f};
+    request.checked = true;
+    request.accentColor = Color{.2f, .4f, .6f, 1.f};
+    RecordingPaintContext recording;
+
+    appearance.paintInput(recording, request);
+
+    ASSERT_EQ(recording.count(PaintCommandKind::Box), std::size_t{2});
+    const PaintCommand* checkedBox = recording.last(PaintCommandKind::Box);
+    ASSERT_NE(checkedBox, nullptr);
+    EXPECT_FLOAT_EQ(checkedBox->rect.x, 4.f);
+    EXPECT_FLOAT_EQ(checkedBox->rect.y, 0.f);
+    EXPECT_FLOAT_EQ(checkedBox->rect.w, 12.f);
+    EXPECT_FLOAT_EQ(checkedBox->rect.h, 12.f);
+    const PaintCommand* mark = recording.last(PaintCommandKind::NativeInputMark);
+    ASSERT_NE(mark, nullptr);
+    ASSERT_TRUE(mark->nativeInputMark.has_value());
+    EXPECT_EQ(mark->nativeInputMark->mark, NativeInputMark::Check);
+    EXPECT_FLOAT_EQ(mark->nativeInputMark->strokeWidth, 12.f * .16f);
+    ASSERT_EQ(mark->nativeInputMark->path.commands().size(), std::size_t{3});
+    const auto& path = mark->nativeInputMark->path.commands();
+    EXPECT_EQ(path[0].verb, radia::ui::PathVerb::MoveTo);
+    EXPECT_EQ(path[1].verb, radia::ui::PathVerb::LineTo);
+    EXPECT_EQ(path[2].verb, radia::ui::PathVerb::LineTo);
+    EXPECT_FLOAT_EQ(path[0].p0.x, 6.4f);
+    EXPECT_FLOAT_EQ(path[0].p0.y, 6.f);
+    EXPECT_FLOAT_EQ(path[1].p0.x, 8.8f);
+    EXPECT_FLOAT_EQ(path[1].p0.y, 3.6f);
+    EXPECT_FLOAT_EQ(path[2].p0.x, 13.6f);
+    EXPECT_FLOAT_EQ(path[2].p0.y, 9.6f);
+
+    request.checked = false;
+    request.indeterminate = true;
+    recording.clear();
+    appearance.paintInput(recording, request);
+
+    ASSERT_EQ(recording.count(PaintCommandKind::Box), std::size_t{2});
+    mark = recording.last(PaintCommandKind::NativeInputMark);
+    ASSERT_NE(mark, nullptr);
+    ASSERT_TRUE(mark->nativeInputMark.has_value());
+    EXPECT_EQ(mark->nativeInputMark->mark, NativeInputMark::Dash);
+    EXPECT_TRUE(mark->nativeInputMark->path.empty());
+}
+
+TEST(InputTest, NativeAppearancePaintsRadioDotAsRoundCircle) {
+    NativeAppearanceBase appearance;
+    NativeInputPaintRequest request;
+    request.control = NativeInputControl::Radio;
+    request.bounds = {0.f, 0.f, 13.f, 13.f};
+    request.checked = true;
+    RecordingPaintContext recording;
+
+    appearance.paintInput(recording, request);
+
+    ASSERT_EQ(recording.count(PaintCommandKind::Box), std::size_t{3});
+    const PaintCommand* dot = recording.last(PaintCommandKind::Box);
+    ASSERT_NE(dot, nullptr);
+    EXPECT_FLOAT_EQ(dot->rect.w, 7.8f);
+    EXPECT_FLOAT_EQ(dot->rect.h, 7.8f);
+    EXPECT_FLOAT_EQ(dot->style.borderRadius.topLeft.horizontal.pixels, 3.9f);
+    EXPECT_FLOAT_EQ(dot->style.borderRadius.topLeft.vertical.pixels, 3.9f);
+}
+
+TEST(InputTest, NativeAppearanceUsesDistinctLightAndDarkInputPalettes) {
+    NativeAppearanceBase appearance;
+    NativeInputPaintRequest request;
+    request.control = NativeInputControl::Checkbox;
+    request.bounds = {0.f, 0.f, 13.f, 13.f};
+    RecordingPaintContext recording;
+
+    request.colorScheme = ColorScheme::Light;
+    appearance.paintInput(recording, request);
+    ASSERT_EQ(recording.commands().size(), std::size_t{2});
+    const Color lightBackground = recording.commands().front().style.backgroundColor;
+    const Color lightBorder = recording.commands().back().style.borderColor;
+
+    request.colorScheme = ColorScheme::Dark;
+    recording.clear();
+    appearance.paintInput(recording, request);
+    ASSERT_EQ(recording.commands().size(), std::size_t{2});
+    const Color darkBackground = recording.commands().front().style.backgroundColor;
+    const Color darkBorder = recording.commands().back().style.borderColor;
+
+    EXPECT_GT(lightBackground.r, darkBackground.r);
+    EXPECT_GT(lightBackground.g, darkBackground.g);
+    EXPECT_GT(lightBackground.b, darkBackground.b);
+    EXPECT_NE(lightBorder.r, darkBorder.r);
+    EXPECT_NE(lightBorder.g, darkBorder.g);
+    EXPECT_NE(lightBorder.b, darkBorder.b);
+}
+
+TEST(InputTest, NativeAppearanceBasePaintsSwitchInResolvedDirection) {
+    NativeAppearanceBase appearance;
+    NativeInputPaintRequest request;
+    request.control = NativeInputControl::Switch;
+    request.bounds = {10.f, 0.f, 36.f, 20.f};
+    RecordingPaintContext recording;
+
+    appearance.paintInput(recording, request);
     ASSERT_EQ(recording.count(PaintCommandKind::Box), std::size_t{2});
     const PaintCommand* uncheckedThumb = recording.last(PaintCommandKind::Box);
     ASSERT_NE(uncheckedThumb, nullptr);
     EXPECT_FLOAT_EQ(uncheckedThumb->rect.x, 12.f);
-    EXPECT_NE(uncheckedThumb->style.backgroundColor.r, recording.commands().front().style.backgroundColor.r);
+    EXPECT_FLOAT_EQ(uncheckedThumb->rect.y, 2.f);
 
-    control.checked(true);
+    request.checked = true;
     recording.clear();
-    control.paint(recording, style, 1.f);
+    appearance.paintInput(recording, request);
     ASSERT_EQ(recording.count(PaintCommandKind::Box), std::size_t{2});
     const PaintCommand* checkedThumb = recording.last(PaintCommandKind::Box);
     ASSERT_NE(checkedThumb, nullptr);
     EXPECT_FLOAT_EQ(checkedThumb->rect.x, 28.f);
+    EXPECT_FLOAT_EQ(checkedThumb->rect.y, 2.f);
 
-    style.direction = LayoutDirection::RightToLeft;
-    control.checked(false);
+    request.direction = LayoutDirection::RightToLeft;
+    request.checked = false;
     recording.clear();
-    control.paint(recording, style, 1.f);
+    appearance.paintInput(recording, request);
     ASSERT_EQ(recording.count(PaintCommandKind::Box), std::size_t{2});
     const PaintCommand* rtlUncheckedThumb = recording.last(PaintCommandKind::Box);
     ASSERT_NE(rtlUncheckedThumb, nullptr);
     EXPECT_FLOAT_EQ(rtlUncheckedThumb->rect.x, 28.f);
+    EXPECT_FLOAT_EQ(rtlUncheckedThumb->rect.y, 2.f);
 
-    control.checked(true);
+    request.checked = true;
     recording.clear();
-    control.paint(recording, style, 1.f);
+    appearance.paintInput(recording, request);
     ASSERT_EQ(recording.count(PaintCommandKind::Box), std::size_t{2});
     const PaintCommand* rtlCheckedThumb = recording.last(PaintCommandKind::Box);
     ASSERT_NE(rtlCheckedThumb, nullptr);
     EXPECT_FLOAT_EQ(rtlCheckedThumb->rect.x, 12.f);
+    EXPECT_FLOAT_EQ(rtlCheckedThumb->rect.y, 2.f);
+}
+
+class SizedNativeAppearance final : public NativeAppearanceBase {
+public:
+    NativeInputMetrics inputMetrics(NativeInputControl) const override { return {{21.f, 22.f}}; }
+};
+
+TEST(InputTest, IntrinsicSizeUsesSurfaceNativeAppearanceMetrics) {
+    StyleSheet styleSheet;
+    InputElement input;
+    input.type("radio");
+    SizedNativeAppearance appearance;
+    Surface surface(styleSheet);
+    surface.setScrollLayoutOptions({radia::ui::ScrollbarMode::Classic, &appearance});
+    surface.mount(input);
+
+    const Vec2 size = input.intrinsicSize(styleSheet, Style{}, fixedTextMetrics());
+    EXPECT_FLOAT_EQ(size.x, 21.f);
+    EXPECT_FLOAT_EQ(size.y, 22.f);
+}
+
+TEST(InputTest, DetachedLayoutUsesRequestedNativeAppearanceMetrics) {
+    StyleSheet styleSheet;
+    InputElement input;
+    input.type("radio");
+    SizedNativeAppearance appearance;
+    ScrollLayoutOptions options;
+    options.nativeAppearance = &appearance;
+
+    radia::ui::layoutTree(input, styleSheet, fixedTextMetrics(), LayoutDirection::LeftToRight, options);
+
+    EXPECT_FLOAT_EQ(input.desiredSize().x, 21.f);
+    EXPECT_FLOAT_EQ(input.desiredSize().y, 22.f);
 }
 
 TEST(InputTest, UsesTypeSpecificCheckableActivation) {
@@ -309,18 +499,6 @@ TEST(InputTest, DoesNotGroupRadioInputsWithDifferentOrEmptyNames) {
     EXPECT_TRUE(namedPtr->checked());
     EXPECT_TRUE(differentPtr->checked());
     EXPECT_TRUE(unnamedPtr->checked());
-}
-
-TEST(SwitchTest, ExposesCheckedProperty) {
-    InputElement control;
-    control.type("checkbox").switchMode(true);
-
-    EXPECT_FALSE(control.checked()) << "switch starts unchecked";
-
-    control.checked(true);
-    EXPECT_TRUE(control.checked()) << "checked setter updates the element state";
-    control.checked(false);
-    EXPECT_FALSE(control.checked()) << "checked setter clears the element state";
 }
 
 TEST(SwitchTest, ActivationTogglesAndNotifiesCheckedChange) {

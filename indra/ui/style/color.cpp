@@ -213,7 +213,8 @@ bool isColorSyntax(const std::string& raw) {
         || value.rfind("lab(", 0) == 0
         || value.rfind("lch(", 0) == 0
         || value.rfind("oklab(", 0) == 0
-        || value.rfind("oklch(", 0) == 0;
+        || value.rfind("oklch(", 0) == 0
+        || value.rfind("light-dark(", 0) == 0;
 }
 
 std::optional<Color> parseColor(const std::string& raw) {
@@ -224,7 +225,9 @@ std::optional<Color> parseColor(const std::string& raw) {
     const std::size_t open = value.find('(');
     if (open == std::string::npos || value.empty() || value.back() != ')') return std::nullopt;
     const std::string name = value.substr(0, open);
-    if (name != "rgb" && name != "hsl" && name != "hwb" && name != "lab" && name != "lch" && name != "oklab" && name != "oklch") return std::nullopt;
+    const bool supportedFunction =
+        name == "rgb" || name == "hsl" || name == "hwb" || name == "lab" || name == "lch" || name == "oklab" || name == "oklch";
+    if (!supportedFunction) return std::nullopt;
 
     const std::string body = value.substr(open + 1, value.size() - open - 2);
     if (name != "rgb" && name != "hsl" && body.find(',') != std::string::npos) return std::nullopt;

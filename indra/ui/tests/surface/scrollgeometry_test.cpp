@@ -28,7 +28,7 @@ void expectRect(const Rect& actual, const Rect& expected) {
 } // namespace
 
 TEST(ScrollGeometryTest, ComputesClassicTracksArrowsThumbsAndCorner) {
-    ScrollGeometryInput input;
+    ScrollGeometryInput input{};
     input.scrollport = {10.f, 20.f, 100.f, 80.f};
     input.horizontal = {10.f, 200.f, 100.f, true};
     input.vertical = {0.f, 160.f, 80.f, true};
@@ -64,13 +64,15 @@ TEST(ScrollGeometryTest, ComputesClassicTracksArrowsThumbsAndCorner) {
 }
 
 TEST(ScrollGeometryTest, ComputesOverlayBarsWithoutArrowsAndGivesCornerPrecedence) {
-    ScrollGeometryInput input;
+    ScrollGeometryInput input{};
     input.scrollport = {0.f, 0.f, 100.f, 100.f};
     input.horizontal = {0.f, 200.f, 100.f, true};
     input.vertical = {0.f, 200.f, 100.f, true};
     input.mode = ScrollbarMode::Overlay;
     input.thickness = 10.f;
     input.arrowLength = 15.f;
+    input.minimumThumbLength = 20.f;
+    input.thumbPadding = 3.f;
 
     const auto geometry = makeScrollGeometry(input);
     expectRect(geometry.vertical.bounds, {90.f, 0.f, 10.f, 100.f});
@@ -89,12 +91,13 @@ TEST(ScrollGeometryTest, ComputesOverlayBarsWithoutArrowsAndGivesCornerPrecedenc
 }
 
 TEST(ScrollGeometryTest, InsetsThumbInsideScrollbarTrack) {
-    ScrollGeometryInput input;
+    ScrollGeometryInput input{};
     input.scrollport = {0.f, 0.f, 100.f, 100.f};
     input.horizontal = {0.f, 200.f, 100.f, true};
     input.vertical = {0.f, 200.f, 100.f, true};
     input.thickness = 15.f;
     input.arrowLength = 15.f;
+    input.minimumThumbLength = 20.f;
     input.thumbPadding = 3.f;
 
     const auto geometry = makeScrollGeometry(input);
@@ -107,7 +110,7 @@ TEST(ScrollGeometryTest, InsetsThumbInsideScrollbarTrack) {
 }
 
 TEST(ScrollGeometryTest, SeparatesThumbFromClassicButtons) {
-    ScrollGeometryInput input;
+    ScrollGeometryInput input{};
     input.scrollport = {0.f, 0.f, 100.f, 100.f};
     input.horizontal = {0.f, 200.f, 100.f, true};
     input.vertical = {0.f, 200.f, 100.f, true};
@@ -138,13 +141,14 @@ TEST(ScrollGeometryTest, SeparatesThumbFromClassicButtons) {
 }
 
 TEST(ScrollGeometryTest, MirrorsClassicPlacementAndThumbMovementForRtl) {
-    ScrollGeometryInput input;
+    ScrollGeometryInput input{};
     input.scrollport = {20.f, 30.f, 100.f, 80.f};
     input.horizontal = {0.f, 200.f, 100.f, true};
     input.vertical = {0.f, 160.f, 80.f, true};
     input.direction = LayoutDirection::RightToLeft;
     input.thickness = 12.f;
     input.arrowLength = 10.f;
+    input.minimumThumbLength = 20.f;
     input.thumbPadding = 0.f;
 
     const auto geometry = makeScrollGeometry(input);

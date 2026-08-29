@@ -4,28 +4,12 @@
  */
 
 #include "linden_common.h"
-#include <algorithm>
 #include "elements/elementdefinition.h"
 #include "elements/input.h"
-#include "render/paintcontext.h"
 #include "style/style.h"
 
 namespace radia::ui {
 namespace {
-constexpr float kCheckboxSize = 13.f;
-constexpr float kSwitchWidth = 36.f;
-constexpr float kSwitchHeight = 20.f;
-
-Color switchTrack(bool checked, bool disabled) {
-    const Color color = checked ? Color(.12f, .42f, .86f) : Color(.45f, .45f, .48f);
-    return disabled ? color.withAlpha(.55f) : color;
-}
-
-Color switchThumb(bool disabled) {
-    const Color color(.98f, .98f, .98f);
-    return disabled ? color.withAlpha(.65f) : color;
-}
-
 class SwitchTrack final : public Element {
 public:
     SwitchTrack() : Element("switch-track") { setPointerEvents(false); }
@@ -42,41 +26,6 @@ protected:
     }
 };
 } // namespace
-
-Vec2 InputElement::nativeCheckboxIntrinsicSize() const {
-    return {kCheckboxSize, kCheckboxSize};
-}
-
-Vec2 InputElement::nativeSwitchIntrinsicSize() const {
-    return {kSwitchWidth, kSwitchHeight};
-}
-
-void InputElement::paintNativeSwitch(PaintContext& context, const Style& style, float) const {
-    const Rect bounds = rect();
-    const float radius = std::max(0.f, bounds.h * .5f);
-    context.paintBox(bounds, nativeControlStyle(style, switchTrack(checked(), disabled()), nativeControlBorder(disabled()), radius));
-
-    const float inset = std::min(2.f, std::max(0.f, std::min(bounds.w, bounds.h) * .5f));
-    const float thumbSize = std::max(0.f, bounds.h - inset * 2.f);
-    const bool thumbAtRight = style.direction == LayoutDirection::LeftToRight ? checked() : !checked();
-    const float thumbLeft = thumbAtRight ? bounds.right() - inset - thumbSize : bounds.left() + inset;
-    const Rect thumb{thumbLeft, bounds.bottom() + inset, thumbSize, thumbSize};
-    context.paintBox(thumb, nativeMarkStyle(style, switchThumb(disabled()), thumbSize * .5f));
-}
-
-void InputElement::paintNativeCheckbox(PaintContext& context, const Style& style, float) const {
-    const bool selected = checked() || indeterminate();
-    const Rect bounds = rect();
-    context.paintBox(bounds, nativeControlStyle(style, nativeControlFill(selected, disabled()), nativeControlBorder(disabled()), 2.f));
-    if (!selected) return;
-
-    Style mark = nativeMarkStyle(style, nativeControlMark(disabled()));
-    mark.backgroundColor = {};
-    mark.textColor = nativeControlMark(disabled());
-    mark.textAlign = TextAlign::Center;
-    mark.fontSize = 11.f;
-    context.paintText(indeterminate() ? "−" : "✓", bounds, mark);
-}
 
 void InputElement::activateCheckbox() {
     activateChecked(!checked());

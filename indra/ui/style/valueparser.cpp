@@ -26,6 +26,17 @@ bool parseFiniteFloat(const std::string& value, float& result) {
     result = std::strtof(value.c_str(), &end);
     return end != value.c_str() && *end == '\0' && std::isfinite(result);
 }
+
+void assignColorValue(const StyleColorValue& value, Color& color, std::optional<LightDarkColor>& lightDarkColor) {
+    if (const auto solid = std::get_if<Color>(&value)) {
+        color = *solid;
+        lightDarkColor.reset();
+    } else {
+        const LightDarkColor& themed = std::get<LightDarkColor>(value);
+        color = themed.dark;
+        lightDarkColor = themed;
+    }
+}
 } // namespace
 
 Color StyleModel::parseColorValue(const std::string& raw, const Color& fallback) const {
@@ -34,6 +45,27 @@ Color StyleModel::parseColorValue(const std::string& raw, const Color& fallback)
     if (startsWith(lowered, "var(") && value.size() > 5 && value.back() == ')') return colorToken(trim(value.substr(4, value.size() - 5)), fallback);
     if (const std::optional<Color> parsed = parseColor(value)) return *parsed;
     return colorToken(value, fallback);
+}
+
+std::optional<StyleColorValue> StyleModel::parseColorChoiceValue(const std::string& raw) const {
+    const std::string value = trim(raw);
+    const std::string lowered = lower(value);
+    constexpr char kLightDarkPrefix[] = "light-dark(";
+    if (startsWith(lowered, kLightDarkPrefix)) {
+        const std::size_t prefixSize = sizeof(kLightDarkPrefix) - 1;
+        if (value.size() <= prefixSize || value.back() != ')') return std::nullopt;
+        const std::vector<std::string> choices = detail::splitTopLevel(value.substr(prefixSize, value.size() - prefixSize - 1), ',');
+        if (choices.size() != 2 || choices[0].empty() || choices[1].empty()) return std::nullopt;
+        const Color marker(-1.f, -1.f, -1.f, -1.f);
+        const Color light = parseColorValue(choices[0], marker);
+        const Color dark = parseColorValue(choices[1], marker);
+        if (light.a < 0.f || dark.a < 0.f) return std::nullopt;
+        return LightDarkColor{light, dark};
+    }
+
+    const Color marker(-1.f, -1.f, -1.f, -1.f);
+    const Color color = parseColorValue(value, marker);
+    return color.a < 0.f ? std::nullopt : std::optional<StyleColorValue>(color);
 }
 
 float StyleModel::parseNumberValue(const std::string& raw, float fallback) const {
@@ -209,8 +241,7 @@ std::optional<Gradient> StyleModel::parseGradient(const std::string& raw) const 
     auto parsesAsColorStop = [&](const std::string& argument) {
         const std::vector<std::string> tokens = detail::tokenizeTopLevel(argument);
         if (tokens.empty()) return false;
-        const Color marker(-1.f, -1.f, -1.f, -1.f);
-        return parseColorValue(tokens.front(), marker).a >= 0.f;
+        return parseColorChoiceValue(tokens.front()).has_value();
     };
 
     std::size_t firstStop = 0;
@@ -287,15 +318,18 @@ std::optional<Gradient> StyleModel::parseGradient(const std::string& raw) const 
     for (std::size_t index = firstStop; index < arguments.size(); ++index) {
         const std::vector<std::string> tokens = detail::tokenizeTopLevel(arguments[index]);
         if (tokens.empty() || tokens.size() > 3) return std::nullopt;
-        const Color marker(-1.f, -1.f, -1.f, -1.f);
-        const Color color = parseColorValue(tokens.front(), marker);
-        if (color.a < 0.f) return std::nullopt;
+        const std::optional<StyleColorValue> color = parseColorChoiceValue(tokens.front());
+        if (!color) return std::nullopt;
         float position = unspecified;
         if (tokens.size() >= 2 && !parseStopPosition(tokens[1], position)) return std::nullopt;
-        gradient.stops.push_back({color, position});
+        gradient.stops.emplace_back();
+        assignColorValue(*color, gradient.stops.back().color, gradient.stops.back().lightDarkColor);
+        gradient.stops.back().position = position;
         if (tokens.size() == 3) {
             if (!parseStopPosition(tokens[2], position)) return std::nullopt;
-            gradient.stops.push_back({color, position});
+            gradient.stops.emplace_back();
+            assignColorValue(*color, gradient.stops.back().color, gradient.stops.back().lightDarkColor);
+            gradient.stops.back().position = position;
         }
         if (gradient.stops.size() > 8) return std::nullopt;
     }
@@ -349,9 +383,9 @@ std::optional<std::vector<BoxShadow>> StyleModel::parseShadows(const std::string
             if (!fixedLength(tokens[3], shadow.spread)) return std::nullopt;
             colorIndex = 4;
         }
-        const Color marker(-1.f, -1.f, -1.f, -1.f);
-        shadow.color = parseColorValue(tokens[colorIndex], marker);
-        if (shadow.color.a < 0.f) return std::nullopt;
+        const std::optional<StyleColorValue> color = parseColorChoiceValue(tokens[colorIndex]);
+        if (!color) return std::nullopt;
+        assignColorValue(*color, shadow.color, shadow.lightDarkColor);
         shadows.push_back(shadow);
     }
     return shadows;
@@ -443,26 +477,33 @@ std::optional<std::vector<Effect>> StyleModel::parseEffects(const std::string& r
 std::optional<Outline> StyleModel::parseOutline(const std::string& raw) const {
     const std::vector<std::string> tokens = detail::tokenizeTopLevel(raw);
     if (tokens.size() < 2 || tokens.size() > 3) return std::nullopt;
-    const std::optional<Length> width = parseLengthValue(tokens.front());
-    if (!width || width->percent != 0.f || width->pixels < 0.f) return std::nullopt;
-
     Outline outline;
-    outline.width = width->pixels;
+    bool hasWidth = false;
+    bool hasColor = false;
     bool hasStyle = false;
-    for (std::size_t index = 1; index + 1 < tokens.size(); ++index) {
-        const std::string token = lower(trim(tokens[index]));
+    for (const std::string& rawToken : tokens) {
+        const std::string rawValue = trim(rawToken);
+        const std::string token = lower(rawValue);
+        if (const std::optional<Length> width = parseLengthValue(rawValue)) {
+            if (hasWidth || width->percent != 0.f || width->pixels < 0.f) return std::nullopt;
+            outline.width = width->pixels;
+            hasWidth = true;
+            continue;
+        }
+
         if (token == "solid" || token == "dashed") {
             if (hasStyle) return std::nullopt;
             outline.style = token == "dashed" ? OutlineStyle::Dashed : OutlineStyle::Solid;
             hasStyle = true;
             continue;
         }
-        return std::nullopt;
-    }
 
-    const Color marker(-1.f, -1.f, -1.f, -1.f);
-    outline.color = parseColorValue(tokens.back(), marker);
-    return outline.color.a < 0.f ? std::nullopt : std::optional<Outline>(outline);
+        const std::optional<StyleColorValue> color = parseColorChoiceValue(rawValue);
+        if (!color || hasColor) return std::nullopt;
+        assignColorValue(*color, outline.color, outline.lightDarkColor);
+        hasColor = true;
+    }
+    return hasWidth && hasColor ? std::optional<Outline>(outline) : std::nullopt;
 }
 
 EdgeInsets StyleModel::parseEdgeInsets(const std::string& raw, const EdgeInsets& fallback) const {

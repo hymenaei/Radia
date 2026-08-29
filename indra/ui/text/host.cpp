@@ -22,17 +22,31 @@ namespace {
 using detail::TextLine;
 using detail::TextRun;
 
+bool isCollapsibleWhitespace(char character) {
+    return character == ' ' || character == '\t' || character == '\n' || character == '\f' || character == '\r';
+}
+
+std::string collapseWhitespace(const std::string& text) {
+    std::string result;
+    result.reserve(text.size());
+    bool whitespace = false;
+    for (const char character : text) {
+        if (isCollapsibleWhitespace(character)) {
+            whitespace = true;
+            continue;
+        }
+        if (whitespace) result.push_back(' ');
+        result.push_back(character);
+        whitespace = false;
+    }
+    if (whitespace) result.push_back(' ');
+    return result;
+}
+
 std::vector<TextLine> layoutLines(const std::string& text, const Style& style, const TextMetrics& metrics) {
     std::vector<TextLine> lines(1);
-    std::size_t start = 0;
-    while (start <= text.size()) {
-        const std::size_t end = text.find('\n', start);
-        const std::string value = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
-        if (!value.empty()) lines.back().push_back({value, style, metrics.measureText(value, style)});
-        if (end == std::string::npos) break;
-        lines.emplace_back();
-        start = end + 1;
-    }
+    const std::string value = collapseWhitespace(text);
+    if (!value.empty()) lines.front().push_back({value, style, metrics.measureText(value, style)});
     return lines;
 }
 
@@ -73,7 +87,7 @@ std::size_t textStyleFingerprint(const Style& style) {
     if (style.lineHeight) mixLength(hash, *style.lineHeight);
     mixLength(hash, style.letterSpacing);
     mixLength(hash, style.wordSpacing);
-    mixColor(hash, style.textColor);
+    mixColor(hash, style.color);
     return hash;
 }
 

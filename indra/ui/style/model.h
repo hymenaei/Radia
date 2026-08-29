@@ -23,11 +23,13 @@ namespace radia::ui {
 struct StylePaint {
     Color color;
     std::optional<Gradient> gradient;
+    std::optional<LightDarkColor> lightDarkColor;
 };
 
 struct StyleBorder {
     float width = 0.f;
     StylePaint paint;
+    BorderStyle style = BorderStyle::Solid;
 };
 
 struct StyleSize {
@@ -38,6 +40,7 @@ struct StyleSize {
 struct StyleIconStroke {
     float width = 0.f;
     Color color;
+    std::optional<LightDarkColor> lightDarkColor;
 };
 
 struct InitialStyleValue {};
@@ -47,12 +50,14 @@ struct StyleRule;
 
 namespace detail { struct StylePropertyDefinition; }
 
-using StyleValue =
-    std::variant<InitialStyleValue, Color, StylePaint, StyleBorder, StyleSize, StyleIconStroke, EdgeInsets, MarginInsets, Dimension, Length,
-                 BorderRadii, std::optional<Length>, GapValue, std::vector<BoxShadow>, std::vector<Effect>, Outline, GridArea, Translate, float, int,
-                 bool, AppearanceMode, FontFamily, TextAlign, TextOverflow, TextWrap, VerticalAlign, TextDecoration, DisplayMode, FlexDirection,
-                 PositionMode, JustifyContent, JustifySelf, AlignItems, AlignSelf, Overflow, ScrollbarMode, ScrollbarWidth, ScrollbarGutter,
-                 PointerEvents, CursorStyle, StrokeCap, Visibility, ScrollbarColors>;
+using StyleValue = std::variant<InitialStyleValue, Color, LightDarkColor, StylePaint, StyleBorder, StyleSize, StyleIconStroke, EdgeInsets,
+                                MarginInsets, Dimension, Length, BorderRadii, std::optional<Length>, GapValue, std::vector<BoxShadow>,
+                                std::vector<Effect>, Outline, GridArea, Translate, float, int, bool, AppearanceMode, ColorScheme,
+                                BoxSizing, BorderStyle, FontFamily, TextAlign, TextOverflow, TextWrap, VerticalAlign, TextDecoration, DisplayMode,
+                                FlexDirection, PositionMode, JustifyContent, JustifySelf, AlignItems, AlignSelf, Overflow, ScrollbarMode,
+                                ScrollbarWidth, ScrollbarGutter, PointerEvents, CursorStyle, StrokeCap, Visibility, ScrollbarColors, AccentColor>;
+
+using StyleColorValue = std::variant<Color, LightDarkColor>;
 
 struct StyleDeclaration {
     std::reference_wrapper<const detail::StylePropertyDefinition> property;
@@ -87,6 +92,7 @@ struct StylePropertyDefinition {
     StyleSpecifyFunction specify = nullptr;
     StyleInheritFunction inherit = nullptr;
     StylePropertyImpact impact = StylePropertyImpact::Layout;
+    bool defaultOnly = false;
 
     bool isPaintOnly() const { return hasImpact(impact, StylePropertyImpact::Paint) && !hasImpact(impact, StylePropertyImpact::Layout); }
     bool isInherited() const { return hasImpact(impact, StylePropertyImpact::Inherited); }
@@ -103,9 +109,11 @@ StyleRule parseSelector(const std::string& selector);
 } // namespace detail
 
 enum class SelectorCombinator { Descendant, Child };
+enum class StyleParsePass : std::uint8_t { Tokens, Rules };
 
 struct StyleSelector {
     bool universal = false;
+    bool root = false;
     bool attributeSyntaxInvalid = false;
     bool directionSyntaxInvalid = false;
     std::string element;
@@ -137,6 +145,7 @@ struct StyleModel {
     Color colorToken(const std::string& name, const Color& fallback) const;
     float numberToken(const std::string& name, float fallback) const;
     Color parseColorValue(const std::string& value, const Color& fallback) const;
+    std::optional<StyleColorValue> parseColorChoiceValue(const std::string& value) const;
     float parseNumberValue(const std::string& value, float fallback) const;
     std::optional<Length> parseLengthValue(const std::string& value) const;
     std::optional<BorderRadii> parseBorderRadius(const std::string& value) const;
@@ -156,8 +165,8 @@ struct StyleModel {
     Style resolveInternal(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t ownerStates,
                           const std::vector<std::string>& partPath, uint16_t partStates, const Element* target = nullptr,
                           const std::vector<std::string>* inlineAncestors = nullptr, LayoutDirection direction = LayoutDirection::LeftToRight) const;
-    void parseBlock(const std::string& selector, const std::string& body, const StyleRule& parent, StyleOrigin origin, StyleSheetLoadResult& result,
-                    const std::string& sourceName);
+    void parseBlock(const std::string& selector, const std::string& body, const StyleRule& parent, StyleOrigin origin, StyleParsePass pass,
+                    StyleSheetLoadResult& result, const std::string& sourceName);
 
     std::map<std::string, Color> colorTokens;
     std::map<std::string, float> numberTokens;

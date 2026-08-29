@@ -35,7 +35,8 @@ public:
     };
 
     StylePass(const StyleSheet& styleSheet, const TextMetrics& textMetrics,
-              LayoutDirection direction = LayoutDirection::LeftToRight);
+              LayoutDirection direction = LayoutDirection::LeftToRight,
+              const NativeAppearance* nativeAppearance = nullptr);
     StylePass(const StylePass&) = delete;
     StylePass& operator=(const StylePass&) = delete;
     StylePass(StylePass&&) = delete;
@@ -56,7 +57,8 @@ public:
     ChildSnapshot sourceChildren(Element& parent);
     const LayoutContextKey& contextKey() const { return mContext; }
     bool matches(const StyleSheet& styleSheet, const TextMetrics& textMetrics,
-                 LayoutDirection direction = LayoutDirection::LeftToRight) const;
+                 LayoutDirection direction = LayoutDirection::LeftToRight,
+                 const NativeAppearance* nativeAppearance = nullptr) const;
     const StyleSheet& styleSheet() const { return mStyleSheet; }
     const TextMetrics& textMetrics() const { return mTextMetrics; }
     LayoutDirection direction() const { return mDirection; }
@@ -73,6 +75,7 @@ private:
     StyleSheet mStyleSheet;
     const TextMetrics& mTextMetrics;
     LayoutDirection mDirection = LayoutDirection::LeftToRight;
+    const NativeAppearance* mNativeAppearance = nullptr;
     LayoutContextKey mContext;
     bool mInvalidated = false;
     bool mResetStorageAtBoundary = false;

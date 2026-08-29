@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include "elements/button.h"
 #include "elements/elementtext.h"
 #include "elements/input.h"
 #include "elements/label.h"
@@ -21,6 +22,8 @@
 #include "text/metrics.h"
 
 namespace {
+using radia::ui::AppearanceMode;
+using radia::ui::ButtonElement;
 using radia::ui::Element;
 using radia::ui::fixedTextMetrics;
 using radia::ui::InputElement;
@@ -28,16 +31,22 @@ using radia::ui::KeybindingPresentation;
 using radia::ui::LabelElement;
 using radia::ui::LayoutBuildResult;
 using radia::ui::NativeAppearance;
+using radia::ui::NativeAppearanceBase;
+using radia::ui::NativeButtonPaintRequest;
 using radia::ui::NativeScrollbarMetrics;
+using radia::ui::NativeScrollbarPaintRequest;
 using radia::ui::NodeList;
 using radia::ui::PaintCommand;
 using radia::ui::PaintCommandKind;
 using radia::ui::PublicationCommit;
 using radia::ui::RecordingPaintContext;
 using radia::ui::ResourceSnapshot;
+using radia::ui::ScrollbarAxis;
 using radia::ui::ScrollbarMode;
+using radia::ui::ScrollLayoutOptions;
 using radia::ui::SkinCompiler;
 using radia::ui::SkinGenerationPrepareResult;
+using radia::ui::Style;
 using radia::ui::Surface;
 using radia::ui::System;
 
@@ -66,6 +75,55 @@ float resolvedLabelWidth(const System& system) {
 }
 } // namespace
 
+TEST(NativeAppearanceTest, BaseOwnsScrollbarDefaultsAndStateStyling) {
+    NativeAppearanceBase appearance;
+    const NativeScrollbarMetrics metrics = appearance.scrollbarMetrics(ScrollbarMode::Classic);
+    EXPECT_FLOAT_EQ(metrics.thickness, 15.f);
+    EXPECT_FLOAT_EQ(metrics.minimumThumbLength, 20.f);
+    EXPECT_FLOAT_EQ(metrics.arrowLength, 15.f);
+    EXPECT_FLOAT_EQ(metrics.thumbPadding, 3.f);
+
+    NativeScrollbarPaintRequest request;
+    request.geometry.vertical.thumb = {0.f, 0.f, 8.f, 20.f};
+    request.vertical.hoveredPart = radia::ui::ScrollbarPart::Thumb;
+    const auto style = appearance.scrollbarPaintStyle(request, ScrollbarAxis::Vertical);
+    EXPECT_FLOAT_EQ(style.track.r, .08f);
+    EXPECT_FLOAT_EQ(style.track.g, .09f);
+    EXPECT_FLOAT_EQ(style.track.b, .1f);
+    EXPECT_FLOAT_EQ(style.thumbRadius, 4.f);
+    EXPECT_GT(style.thumb.r, .55f);
+}
+
+TEST(NativeAppearanceTest, ButtonPaintDispatchUsesNativeAppearanceForAutoMode) {
+    ButtonElement button;
+    RecordingPaintContext recording;
+    Style style;
+    style.appearance = AppearanceMode::Auto;
+
+    button.paint(recording, style, 1.25f);
+
+    const PaintCommand* command = recording.last(PaintCommandKind::NativeButton);
+    ASSERT_NE(command, nullptr);
+    ASSERT_TRUE(command->nativeButton.has_value());
+    EXPECT_FLOAT_EQ(command->nativeButton->scale, 1.25f);
+    EXPECT_FLOAT_EQ(command->nativeButton->bounds.x, button.rect().x);
+    EXPECT_FLOAT_EQ(command->nativeButton->bounds.y, button.rect().y);
+    EXPECT_FLOAT_EQ(command->nativeButton->bounds.w, button.rect().w);
+    EXPECT_FLOAT_EQ(command->nativeButton->bounds.h, button.rect().h);
+}
+
+TEST(NativeAppearanceTest, ButtonPaintDispatchKeepsUnstyledModeOnCssPath) {
+    ButtonElement button;
+    RecordingPaintContext recording;
+    Style style;
+    style.appearance = AppearanceMode::Unstyled;
+
+    button.paint(recording, style, 1.f);
+
+    EXPECT_EQ(recording.count(PaintCommandKind::NativeButton), 0U);
+    EXPECT_EQ(recording.count(PaintCommandKind::Box), 1U);
+}
+
 class LocaleProbe final : public Element {
 public:
     LocaleProbe() : Element("locale-probe") {}
@@ -76,15 +134,20 @@ private:
     int mNotifications = 0;
 };
 
-class TestNativeAppearance final : public NativeAppearance {
+class TestNativeAppearance final : public NativeAppearanceBase {
 public:
-    TestNativeAppearance(NativeScrollbarMetrics metrics, std::uint64_t revision) : mMetrics(metrics), mRevision(revision) {}
+    TestNativeAppearance(NativeScrollbarMetrics metrics, std::uint64_t revision) : TestNativeAppearance(metrics, metrics, revision) {}
+    TestNativeAppearance(NativeScrollbarMetrics classicMetrics, NativeScrollbarMetrics overlayMetrics, std::uint64_t revision)
+        : mClassicMetrics(classicMetrics), mOverlayMetrics(overlayMetrics), mRevision(revision) {}
 
-    NativeScrollbarMetrics scrollbarMetrics(ScrollbarMode) const override { return mMetrics; }
+    NativeScrollbarMetrics scrollbarMetrics(ScrollbarMode mode) const override {
+        return mode == ScrollbarMode::Classic ? mClassicMetrics : mOverlayMetrics;
+    }
     std::uint64_t revision() const noexcept override { return mRevision; }
 
 private:
-    NativeScrollbarMetrics mMetrics;
+    NativeScrollbarMetrics mClassicMetrics;
+    NativeScrollbarMetrics mOverlayMetrics;
     std::uint64_t mRevision;
 };
 
@@ -130,7 +193,7 @@ TEST(SystemTest, NativeAppearanceMetricsDriveLayoutAndPaintRevision) {
 
     System system;
     ASSERT_TRUE(system.publish(prepared.generation));
-    system.setNativeAppearance(std::make_shared<TestNativeAppearance>(NativeScrollbarMetrics{20.f, 24.f, 20.f}, 42));
+    system.setNativeAppearance(std::make_shared<TestNativeAppearance>(NativeScrollbarMetrics{20.f, 24.f, 20.f, 3.f}, 42));
 
     std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
     surface->setViewport(200.f, 200.f);
@@ -153,7 +216,7 @@ TEST(SystemTest, NativeAppearanceMetricsDriveLayoutAndPaintRevision) {
     EXPECT_FLOAT_EQ(initialScrollbar->scrollbar->metrics.thickness, 20.f);
     EXPECT_EQ(initialScrollbar->scrollbar->appearanceRevision, 42u);
 
-    system.setNativeAppearance(std::make_shared<TestNativeAppearance>(NativeScrollbarMetrics{24.f, 28.f, 24.f}, 43));
+    system.setNativeAppearance(std::make_shared<TestNativeAppearance>(NativeScrollbarMetrics{24.f, 28.f, 24.f, 3.f}, 43));
     EXPECT_TRUE(surface->needsPaint());
     surface->updateLayout();
     EXPECT_FLOAT_EQ(viewportPtr->clientWidth(), 76.f);
@@ -168,20 +231,76 @@ TEST(SystemTest, NativeAppearanceMetricsDriveLayoutAndPaintRevision) {
     EXPECT_EQ(updatedScrollbar->scrollbar->appearanceRevision, 43u);
 }
 
+TEST(SystemTest, NativeAppearanceMetricsFollowAuthoredScrollbarMode) {
+    constexpr char kScrollStyles[] = "#classic { display: block; overflow: scroll; scrollbar-mode: classic; } "
+                                     "#overlay { display: block; overflow: scroll; }";
+    const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(skinSnapshot({}, kScrollStyles));
+    ASSERT_TRUE(prepared.ok());
+
+    System system;
+    ASSERT_TRUE(system.publish(prepared.generation));
+    system.setNativeAppearance(
+        std::make_shared<TestNativeAppearance>(NativeScrollbarMetrics{20.f, 24.f, 20.f, 3.f}, NativeScrollbarMetrics{8.f, 10.f, 8.f, 2.f}, 44));
+
+    std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
+    surface->setViewport(240.f, 120.f);
+    ScrollLayoutOptions options;
+    options.scrollbarMode = ScrollbarMode::Overlay;
+    surface->setScrollLayoutOptions(options);
+
+    auto classic = std::make_unique<radia::ui::PanelElement>();
+    classic->setId("classic").setRect({0.f, 0.f, 100.f, 100.f});
+    auto classicContent = std::make_unique<radia::ui::PanelElement>();
+    classicContent->setRect({0.f, 0.f, 180.f, 180.f});
+    classic->append(std::move(classicContent));
+    radia::ui::PanelElement* classicPtr = classic.get();
+
+    auto overlay = std::make_unique<radia::ui::PanelElement>();
+    overlay->setId("overlay").setRect({120.f, 0.f, 100.f, 100.f});
+    auto overlayContent = std::make_unique<radia::ui::PanelElement>();
+    overlayContent->setRect({0.f, 0.f, 180.f, 180.f});
+    overlay->append(std::move(overlayContent));
+    radia::ui::PanelElement* overlayPtr = overlay.get();
+
+    surface->mount(std::move(classic));
+    surface->mount(std::move(overlay));
+    surface->updateLayout();
+
+    EXPECT_FLOAT_EQ(classicPtr->clientWidth(), 80.f);
+    EXPECT_FLOAT_EQ(classicPtr->clientHeight(), 80.f);
+    EXPECT_FLOAT_EQ(overlayPtr->clientWidth(), 100.f);
+    EXPECT_FLOAT_EQ(overlayPtr->clientHeight(), 100.f);
+
+    RecordingPaintContext recording;
+    surface->paint(recording);
+    const PaintCommand* classicScrollbar = nullptr;
+    const PaintCommand* overlayScrollbar = nullptr;
+    for (const PaintCommand& command : recording.commands()) {
+        if (command.kind != PaintCommandKind::Scrollbar || !command.scrollbar) continue;
+        if (command.scrollbar->mode == ScrollbarMode::Classic) classicScrollbar = &command;
+        else overlayScrollbar = &command;
+    }
+    ASSERT_NE(classicScrollbar, nullptr);
+    ASSERT_NE(overlayScrollbar, nullptr);
+    EXPECT_FLOAT_EQ(classicScrollbar->scrollbar->metrics.thickness, 20.f);
+    EXPECT_FLOAT_EQ(overlayScrollbar->scrollbar->metrics.thickness, 8.f);
+}
+
 TEST(SystemTest, RejectsInvalidCandidatesWithoutReplacingLiveGeneration) {
     constexpr char kLiveStyles[] = "label { width: 40px; }";
     constexpr char kInvalidLocalization[] = "defaultLocale: [";
     constexpr char kInvalidStyles[] = "label { display: sideways; width: 90px; }";
 
     System system;
-    const SkinGenerationPrepareResult live =
-        SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Live"), kLiveStyles));
+    const SkinGenerationPrepareResult live = SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Live"), kLiveStyles));
     ASSERT_TRUE(live.ok());
     ASSERT_TRUE(system.publish(live.generation));
 
     const SkinGenerationPrepareResult rejected = SkinCompiler().prepare(skinSnapshot(kInvalidLocalization, kInvalidStyles));
     ASSERT_FALSE(rejected.ok());
     EXPECT_FALSE(rejected.generation);
+    ASSERT_FALSE(rejected.errors.empty());
+    EXPECT_EQ(rejected.errors.front().code, "localization.yaml.invalid");
     EXPECT_EQ(system.generation(), 1ULL);
     EXPECT_EQ(system.resolveText("message"), "Live");
     EXPECT_EQ(resolvedLabelWidth(system), 40.f);
@@ -196,6 +315,8 @@ TEST(SystemTest, RejectsEmptyReferencedIcons) {
 
     ASSERT_FALSE(rejected.ok());
     EXPECT_FALSE(rejected.generation);
+    ASSERT_FALSE(rejected.errors.empty());
+    EXPECT_EQ(rejected.errors.front().code, "svg.empty");
 }
 
 TEST(SystemTest, RejectsUnknownIconsInLayoutResources) {
@@ -212,6 +333,8 @@ TEST(SystemTest, RejectsUnknownIconsInLayoutResources) {
 
     ASSERT_FALSE(rejected.ok());
     EXPECT_FALSE(rejected.generation);
+    ASSERT_FALSE(rejected.errors.empty());
+    EXPECT_EQ(rejected.errors.front().code, "layout.icon.missing");
 }
 
 TEST(SystemTest, RejectsSnapshotsWithoutLocalization) {
@@ -223,6 +346,7 @@ TEST(SystemTest, RejectsSnapshotsWithoutLocalization) {
 
     ASSERT_FALSE(rejected.ok());
     ASSERT_FALSE(rejected.errors.empty());
+    EXPECT_EQ(rejected.errors.front().code, "rdui.resource.missing");
     EXPECT_EQ(rejected.errors.front().source, "localization.yaml");
 }
 
@@ -236,6 +360,7 @@ TEST(SystemTest, RejectsMalformedIcons) {
 
     ASSERT_FALSE(rejected.ok());
     ASSERT_FALSE(rejected.errors.empty());
+    EXPECT_EQ(rejected.errors.front().code, "svg.path.arguments_invalid");
     EXPECT_EQ(rejected.errors.front().source, "resources/icons/search.svg");
 }
 
@@ -266,15 +391,14 @@ TEST(SystemTest, UpdatesMountedElementsWhenLocaleChanges) {
 }
 
 TEST(SystemTest, ResolvesDirectionSelectorsWhenLocaleChanges) {
-    constexpr char kDirectionStyles[] =
-        "input[switch] { appearance: none; display: inline-grid; width: 44px; height: 20px; } "
-        "input[switch]::track { grid-area: 1 / 1; width: 100%; } "
-        "input[switch]::thumb { grid-area: 1 / 1; width: 24px; height: 24px; margin: -2px -1px; } "
-        "input[switch]:checked::thumb { translate: 22px 0; } "
-        "input[switch]:dir(rtl):checked::thumb { translate: -22px 0; }";
+    constexpr char kDirectionStyles[] = "input[switch] { appearance: none; display: inline-grid; width: 44px; height: 20px; } "
+                                        "input[switch]::track { grid-area: 1 / 1; width: 100%; } "
+                                        "input[switch]::thumb { grid-area: 1 / 1; width: 24px; height: 24px; margin: -2px -1px; } "
+                                        "input[switch]:checked::thumb { translate: 22px 0; } "
+                                        "input[switch]:dir(rtl):checked::thumb { translate: -22px 0; }";
 
-    const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(skinSnapshot(
-        "defaultLocale: en\nlocales: {en: {strings: {}}, ar: {strings: {}}}\n", kDirectionStyles));
+    const SkinGenerationPrepareResult prepared =
+        SkinCompiler().prepare(skinSnapshot("defaultLocale: en\nlocales: {en: {strings: {}}, ar: {strings: {}}}\n", kDirectionStyles));
     ASSERT_TRUE(prepared.ok());
 
     System system;
@@ -375,8 +499,7 @@ TEST(SystemTest, PreservesLocaleAcrossPublicationAndFallsBackWhenRemoved) {
     ASSERT_TRUE(system.publish(compatible.generation));
     EXPECT_EQ(system.activeLocale(), "pt");
 
-    const SkinGenerationPrepareResult fallback =
-        SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Ready again")));
+    const SkinGenerationPrepareResult fallback = SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Ready again")));
     ASSERT_TRUE(fallback.ok());
     ASSERT_TRUE(system.publish(fallback.generation));
     EXPECT_EQ(system.activeLocale(), "en");
@@ -389,8 +512,7 @@ TEST(SystemTest, PublishesGenerationUpdatesToExistingSurfacesAndNewTrees) {
     constexpr char kViewMarkup[] = "<p>{{message}}</p>";
 
     System system;
-    const SkinGenerationPrepareResult live =
-        SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Old"), kLiveStyles));
+    const SkinGenerationPrepareResult live = SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Old"), kLiveStyles));
     ASSERT_TRUE(live.ok());
     ASSERT_TRUE(system.publish(live.generation));
 
@@ -441,6 +563,8 @@ TEST(SystemTest, RejectsInvalidUnmountedLayoutResources) {
 
     ASSERT_FALSE(rejected.ok());
     EXPECT_FALSE(rejected.generation);
+    ASSERT_FALSE(rejected.errors.empty());
+    EXPECT_EQ(rejected.errors.front().code, "layout.element.unknown");
 }
 
 TEST(SystemTest, RefreshesKbdPresentationWhenKeybindingsChange) {

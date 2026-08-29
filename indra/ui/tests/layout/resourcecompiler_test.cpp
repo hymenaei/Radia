@@ -219,13 +219,14 @@ TEST_F(LayoutResourceCompilerTest, RejectsInvalidResourceReferences) {
         const char* markup;
         const char* resourceId;
         const char* resourceMarkup;
+        const char* diagnostic;
     };
 
     const InvalidReferenceCase cases[] = {
-        {"missing resource", "<panel><panel filename=\"missing.html\"/></panel>", nullptr, nullptr},
-        {"non-panel resource", "<panel><panel filename=\"wrong.html\"/></panel>", "wrong.html", "<p/>"},
-        {"filename on non-panel", "<button filename=\"x.html\"/>", nullptr, nullptr},
-        {"resource root escape", "<panel><panel filename=\"../outside.html\"/></panel>", nullptr, nullptr},
+        {"missing resource", "<panel><panel filename=\"missing.html\"/></panel>", nullptr, nullptr, "layout.resource.missing"},
+        {"non-panel resource", "<panel><panel filename=\"wrong.html\"/></panel>", "wrong.html", "<p/>", "layout.resource.root_invalid"},
+        {"filename on non-panel", "<button filename=\"x.html\"/>", nullptr, nullptr, "layout.filename.unsupported"},
+        {"resource root escape", "<panel><panel filename=\"../outside.html\"/></panel>", nullptr, nullptr, "layout.resource.path_invalid"},
     };
 
     for (const auto& test : cases) {
@@ -236,6 +237,8 @@ TEST_F(LayoutResourceCompilerTest, RejectsInvalidResourceReferences) {
         const LayoutBuildResult result = factory.buildElementTreeFromString(test.markup, "root.html");
         ASSERT_FALSE(result.ok());
         EXPECT_FALSE(result.document);
+        ASSERT_FALSE(result.errors.empty());
+        EXPECT_EQ(result.errors.front().code, test.diagnostic);
     }
 
     resources["empty.html"] = "";
@@ -475,6 +478,8 @@ TEST_F(LayoutResourceCompilerTest, MatchesPaintProtocolWithShaderConstants) {
                 && contains(fragmentSource, "uniform vec4 scrollbarClipRadiusX;")
                 && contains(fragmentSource, "uniform vec4 scrollbarClipRadiusY;")
                 && contains(fragmentSource, "uniform int scrollbarClipEnabled;")
+                && contains(fragmentSource, "uniform vec4 clipCoverageRect;")
+                && contains(fragmentSource, "uniform int clipCoverageEnabled;")
                 && contains(fragmentSource, "uniform vec2 effectTextureSize;")
                 && contains(fragmentSource, "uniform int gradientKind;")
                 && contains(fragmentSource, "uniform int outlineStyle;")
@@ -485,6 +490,9 @@ TEST_F(LayoutResourceCompilerTest, MatchesPaintProtocolWithShaderConstants) {
     EXPECT_TRUE(contains(fragmentSource, "roundedTriangleCornerDistance")
                 && contains(fragmentSource, "roundedTriangleCoverage(shapeCoord, a, b, c, arrowRadius)"));
     EXPECT_TRUE(contains(fragmentSource, "scrollbarClipEnabled != 0") && contains(fragmentSource, "coverageFromDistance(clipDistance)"));
+    EXPECT_TRUE(contains(fragmentSource, "applyClipCoverage")
+                && contains(fragmentSource, "gl_FragCoord.xy")
+                && contains(fragmentSource, "clipCoverageEnabled == 0"));
     EXPECT_TRUE(contains(fragmentSource, "kGradientLinear = 0")
                 && contains(fragmentSource, "kGradientRadial = 1")
                 && contains(fragmentSource, "kGradientConic = 2")
@@ -518,7 +526,7 @@ TEST_F(LayoutResourceCompilerTest, RefreshesLocalizedElementsAcrossLocaleChanges
     constexpr char kLocalizationYaml[] = "defaultLocale: en\n"
                                          "locales: {en: {strings: {title: Title, status: Ready, press: Press}}, "
                                          "pt: {strings: {title: Título, status: Pronto, press: Pressione}}}\n";
-    constexpr char kStyles[] = "label { text-color: #ffffffff; }";
+    constexpr char kStyles[] = "label { color: #ffffffff; }";
     constexpr char kLocalizedLayout[] = "<floater><head><title>{{title}}</title></head><body>"
                                         "<label id=\"status\" for=\"target\">{{status}}</label>"
                                         "<input type=\"checkbox\" switch=\"true\" id=\"target\"/>"
@@ -588,8 +596,10 @@ TEST_F(LayoutResourceCompilerTest, RefreshesLocalizedElementsAcrossLocaleChanges
     constexpr char kMissingLayout[] = "<p>{{missing}}</p>";
     resources.add("missing.html", kMissingLayout);
     const SkinGenerationPrepareResult missing = SkinCompiler().prepare(std::move(resources));
-    EXPECT_FALSE(missing.ok());
+    ASSERT_FALSE(missing.ok());
     EXPECT_FALSE(missing.generation);
+    ASSERT_FALSE(missing.errors.empty());
+    EXPECT_EQ(missing.errors.front().code, "layout.localization.missing");
 }
 
 TEST_F(LayoutResourceCompilerTest, RefreshesLocalizedRichTextAcrossLocaleChanges) {
@@ -905,10 +915,15 @@ TEST_F(LayoutResourceCompilerTest, RejectsInvalidElementDefaults) {
     resources["elements/floater.html"] = kInvalidFloaterDefaultsLayout;
     resources["defaulted.html"] = kDefaultedLayout;
 
-    EXPECT_TRUE(factory.validateElementDefaults("floater").hasErrors());
+    const DiagnosticResult defaults = factory.validateElementDefaults("floater");
+    ASSERT_TRUE(defaults.hasErrors());
+    ASSERT_FALSE(defaults.errors.empty());
+    EXPECT_EQ(defaults.errors.front().code, "layout.defaults.root_invalid");
     const LayoutBuildResult result = factory.buildElementTreeFromResource("defaulted.html");
     ASSERT_FALSE(result.ok());
     EXPECT_FALSE(result.document);
+    ASSERT_FALSE(result.errors.empty());
+    EXPECT_EQ(result.errors.front().code, "layout.defaults.root_invalid");
 }
 
 TEST_F(LayoutResourceCompilerTest, CompilesTypedVisibilityValues) {
@@ -995,7 +1010,12 @@ TEST_F(LayoutResourceCompilerTest, RejectsInvalidNamesAndCaseFoldedConflicts) {
         EXPECT_EQ(result.errors.front().code, test.diagnostic);
     }
 
-    EXPECT_TRUE(factory.buildElementTreeFromString("<panel id=\"bad_id\" class=\"good_class\"/>", "underscore-identifiers.html").ok());
+    const LayoutBuildResult underscore =
+        factory.buildElementTreeFromString("<panel id=\"bad_id\" class=\"good_class\"/>", "underscore-identifiers.html");
+    ASSERT_TRUE(underscore.ok());
+    ASSERT_TRUE(underscore.document);
+    EXPECT_EQ(underscore.document->documentElement()->id(), "bad_id");
+    EXPECT_TRUE(underscore.document->documentElement()->classes().contains("good_class"));
 
     constexpr char kInvalidHandlerLayout[] = "<button onClick=\"bad_action()\"/>";
     const LayoutBuildResult invalidHandler = factory.buildElementTreeFromString(kInvalidHandlerLayout, "handler-name.html");

@@ -89,7 +89,7 @@ public:
     void endAccountSession();
     void requestSkinReload();
     void setVisibility(bool visible);
-    void frame(S32 width, S32 height);
+    void frame(S32 width, S32 height, F32 paintScale = 1.f, F32 paintOriginX = 0.f, F32 paintOriginY = 0.f);
     void idle();
     bool hasPointerCapture() const;
     InputDispatchResult pointerMove(const PointerEvent& event);

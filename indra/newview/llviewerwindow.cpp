@@ -3169,6 +3169,8 @@ void LLViewerWindow::draw()
         // apply camera zoom transform (for high res screenshots)
         F32 zoom_factor = LLViewerCamera::getInstance()->getZoomFactor();
         S16 sub_region = LLViewerCamera::getInstance()->getZoomSubRegion();
+        F32 paintOriginX = 0.f;
+        F32 paintOriginY = 0.f;
         if (zoom_factor > 1.f)
         {
             //decompose subregion number to x and y values
@@ -3180,6 +3182,8 @@ void LLViewerWindow::draw()
                         0.f);
             gGL.scalef(zoom_factor, zoom_factor, 1.f);
             LLUI::getScaleFactor() *= zoom_factor;
+            paintOriginX = -(F32)getWindowWidthScaled() * (F32)pos_x;
+            paintOriginY = -(F32)getWindowHeightScaled() * (F32)pos_y;
         }
 
         // Draw tool specific overlay on world
@@ -3227,7 +3231,8 @@ void LLViewerWindow::draw()
                 LLFontGL::HCENTER, LLFontGL::TOP);
         }
 
-        if (mUIRuntime) mUIRuntime->frame(getWindowWidthScaled(), getWindowHeightScaled());
+        if (mUIRuntime)
+            mUIRuntime->frame(getWindowWidthScaled(), getWindowHeightScaled(), mDisplayScale.mV[VX] * zoom_factor, paintOriginX, paintOriginY);
 
         LLUI::setScaleFactor(old_scale_factor);
     }

@@ -245,7 +245,7 @@ TEST(FloatersTest, KeepsWrappedBodyContentInsideFloaterWidth) {
                                        "floater > body { display: flex; flex-direction: column; flex-grow: 1; min-size: 0px; margin: 8px; gap: 8px; "
                                        "overflow: auto; scrollbar-mode: classic; scrollbar-gutter: stable; } "
                                        "#sections { display: flex; flex-direction: column; width: 100%; } "
-                                       "#section { display: flex; flex-direction: column; width: 100%; padding: 8px; } "
+                                       "#section { display: flex; flex-direction: column; width: 100%; padding: 8px; box-sizing: border-box; } "
                                        "#copy { text-wrap: wrap; }";
     ASSERT_TRUE(styleSheet.loadRadia(kScrollableBody).ok());
 

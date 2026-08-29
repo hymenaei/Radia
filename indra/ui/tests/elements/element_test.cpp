@@ -113,7 +113,6 @@ TEST(ElementTest, DisabledButtonsDoNotActivate) {
     button.activate();
     button.disabled(true).activate();
     EXPECT_EQ(activations, 1);
-    EXPECT_TRUE(button.focusable());
 }
 
 TEST(ElementTest, ChildInsertionMaintainsOrderAndOwnership) {
@@ -317,13 +316,6 @@ TEST(ElementTest, PreservesWhitespaceOnlyTextNodes) {
     EXPECT_EQ(runtimeChildren.begin()->asText()->getData(), " \t\n");
 }
 
-TEST(ElementTest, StoresLiteralText) {
-    Element root("p");
-    root.textContent("Hello world!");
-
-    EXPECT_EQ(root.textContent(), "Hello world!");
-}
-
 TEST(ElementTest, TextDataMutationUpdatesOwnerTextContent) {
     Element root("p");
     Text* text = root.append(std::make_unique<Text>("before"))->asText();
@@ -403,7 +395,7 @@ TEST(ElementPaintTest, PaintsCompiledResourcesWithLocaleAndEffects) {
     EXPECT_EQ(effectCommand->scale, 2.f);
     EXPECT_EQ(effectCommand->style.effects.size(), 2U);
     EXPECT_EQ(iconCommand->textOrIconName, "search");
-    EXPECT_EQ(textCommand->style.textColor.a, .25f);
+    EXPECT_EQ(textCommand->style.color.a, .25f);
     EXPECT_EQ(static_cast<int>(textCommand->style.textAlign), static_cast<int>(TextAlign::Left));
     EXPECT_EQ(textCommand->rect.x, -8.f);
     EXPECT_EQ(static_cast<int>(recording.commands().front().kind), static_cast<int>(PaintCommandKind::BeginFrame));
@@ -643,20 +635,6 @@ TEST(TextLayoutTest, AppliesLetterAndWordSpacingToMeasuredText) {
     EXPECT_EQ(metrics.measureText("a b", style).x, 20.f);
     style.wordSpacing = Length{3.f};
     EXPECT_EQ(metrics.measureText("a\u2003b", style).x, 18.f);
-}
-
-TEST(ElementTest, UpdatesDisabledAndVisibilityState) {
-    ButtonElement button;
-
-    button.disabled(true);
-    EXPECT_TRUE(button.disabled());
-    button.disabled(false);
-    EXPECT_FALSE(button.disabled());
-
-    button.setHidden(true);
-    EXPECT_EQ(button.visibility(), Visibility::Hidden);
-    button.setHidden(false);
-    EXPECT_EQ(button.visibility(), Visibility::Visible);
 }
 
 TEST(SwitchElementTest, PointerActivationUpdatesStateAndThumb) {

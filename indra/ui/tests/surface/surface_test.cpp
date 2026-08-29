@@ -21,7 +21,9 @@
 #include "elements/input.h"
 #include "elements/label.h"
 #include "elements/panel.h"
+#include "nativeappearance.h"
 #include "render/recordingpaintcontext.h"
+#include "skin/compiler.h"
 #include "surface/surface.h"
 #include "system.h"
 #include "text/metrics.h"
@@ -29,6 +31,7 @@
 namespace {
 using radia::ui::Binder;
 using radia::ui::Binding;
+using radia::ui::AAIntent;
 using radia::ui::ButtonElement;
 using radia::ui::ClipAxes;
 using radia::ui::clipsAxis;
@@ -59,17 +62,23 @@ using radia::ui::kPointerUpEvent;
 using radia::ui::kScrollEvent;
 using radia::ui::kWheelEvent;
 using radia::ui::LabelElement;
+using radia::ui::LayoutDirection;
+using radia::ui::NativeAppearanceBase;
 using radia::ui::PaintCommand;
 using radia::ui::PaintCommandKind;
 using radia::ui::PaintContext;
+using radia::ui::PaintTargetKind;
 using radia::ui::PanelElement;
 using radia::ui::PointerButton;
 using radia::ui::PointerEvent;
 using radia::ui::PreparedBindingResult;
 using radia::ui::RecordingPaintContext;
 using radia::ui::Rect;
+using radia::ui::ResourceSnapshot;
 using radia::ui::ScrollbarAxisGeometry;
 using radia::ui::ScrollbarPart;
+using radia::ui::SkinCompiler;
+using radia::ui::SkinGenerationPrepareResult;
 using radia::ui::Style;
 using radia::ui::StyleSheet;
 using radia::ui::Surface;
@@ -242,6 +251,69 @@ private:
     std::vector<std::string>& mLog;
 };
 
+TEST(SurfaceTest, RecordsExplicitPaintTarget) {
+    Surface surface;
+    surface.setViewport(240.f, 120.f);
+    NativeAppearanceBase appearance;
+    surface.setScrollLayoutOptions({radia::ui::ScrollbarMode::Classic, &appearance});
+
+    RecordingPaintContext recording;
+    surface.paint(recording, 1.25f, {-3.f, 4.f});
+
+    const PaintCommand* frame = recording.last(PaintCommandKind::BeginFrame);
+    ASSERT_NE(frame, nullptr);
+    EXPECT_FLOAT_EQ(frame->target.bounds.w, 240.f);
+    EXPECT_FLOAT_EQ(frame->target.bounds.h, 120.f);
+    EXPECT_FLOAT_EQ(frame->target.pixelOrigin.x, -3.f);
+    EXPECT_FLOAT_EQ(frame->target.pixelOrigin.y, 4.f);
+    EXPECT_FLOAT_EQ(frame->target.scale, 1.25f);
+    EXPECT_EQ(frame->target.kind, PaintTargetKind::Direct);
+    EXPECT_EQ(frame->target.nativeAppearance, &appearance);
+    EXPECT_FALSE(frame->target.opaque);
+    EXPECT_EQ(frame->target.shapeAA, AAIntent::Coverage);
+    EXPECT_EQ(frame->target.textAA, AAIntent::Coverage);
+    EXPECT_EQ(frame->target.clipAA, AAIntent::Coverage);
+}
+
+TEST(SurfaceTest, SizesBodyDocumentRootToViewportInsideItsMargin) {
+    StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet.loadRadia(":root { display: block; margin: 8px; background-color: #ff0000; }").ok());
+
+    Surface surface(styleSheet);
+    surface.setViewport(100.f, 80.f);
+    auto body = std::make_unique<Element>("body");
+    Element* bodyPtr = body.get();
+    body->append(std::make_unique<ButtonElement>());
+    surface.mount(std::move(body));
+    surface.updateLayout();
+
+    EXPECT_FLOAT_EQ(bodyPtr->rect().x, 8.f);
+    EXPECT_FLOAT_EQ(bodyPtr->rect().y, 8.f);
+    EXPECT_FLOAT_EQ(bodyPtr->rect().w, 84.f);
+    EXPECT_FLOAT_EQ(bodyPtr->rect().h, 64.f);
+}
+
+TEST(SurfaceTest, PaintsBodyDocumentRootBackgroundAcrossViewport) {
+    StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet.loadRadia(":root { display: block; margin: 8px; background-color: #ff0000; }").ok());
+
+    Surface surface(styleSheet);
+    surface.setViewport(100.f, 80.f);
+    auto body = std::make_unique<Element>("body");
+    body->append(std::make_unique<ButtonElement>());
+    surface.mount(std::move(body));
+
+    RecordingPaintContext recording;
+    surface.paint(recording);
+
+    const auto command = std::find_if(recording.commands().begin(), recording.commands().end(), [](const PaintCommand& candidate) {
+        return candidate.kind == PaintCommandKind::Box && candidate.rect.x == 0.f && candidate.rect.y == 0.f && candidate.rect.w == 100.f
+            && candidate.rect.h == 80.f && candidate.style.backgroundColor.r == 1.f && candidate.style.backgroundColor.g == 0.f
+            && candidate.style.backgroundColor.b == 0.f;
+    });
+    ASSERT_NE(command, recording.commands().end());
+}
+
 TEST(SurfaceTest, HandlesPointerHoverPressAndRelease) {
     Surface context;
     context.setViewport(100.f, 100.f);
@@ -349,7 +421,7 @@ TEST(SurfaceTest, DragsMinimizesAndRestoresFloaters) {
     EXPECT_EQ(contentNode->visibility(), Visibility::Visible);
     EXPECT_EQ(floaterPtr->rect().top(), expandedTop);
     EXPECT_EQ(floaterPtr->rect().h, 30.f);
-    EXPECT_TRUE(floaterPtr->rect().w < expandedWidth);
+    EXPECT_LT(floaterPtr->rect().w, expandedWidth);
     floaterPtr->setMinimized(false);
     EXPECT_FALSE(floaterPtr->hasState(ElementState::Minimized));
     EXPECT_EQ(floaterPtr->body()->visibility(), Visibility::Visible);
@@ -554,6 +626,36 @@ TEST(SurfaceTest, ScrollsScrollableElementWithWheel) {
     EXPECT_FLOAT_EQ(viewportPtr->scrollTop(), 25.f);
 }
 
+TEST(SurfaceTest, ShiftWheelScrollsHorizontallyAndPreservesWheelPayload) {
+    StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: auto; scrollbar-mode: overlay; pointer-events: auto; }").ok());
+    Surface surface(styleSheet);
+    surface.setViewport(200.f, 200.f);
+
+    auto viewport = std::make_unique<PanelElement>();
+    viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
+    auto content = std::make_unique<PanelElement>();
+    content->setRect({0.f, 0.f, 200.f, 200.f});
+    viewport->append(std::move(content));
+    PanelElement* viewportPtr = viewport.get();
+    float observedDeltaX = 0.f;
+    float observedDeltaY = 0.f;
+    viewportPtr->addEventListener(kWheelEvent, [&](Event& event) {
+        const WheelEvent* payload = event.wheel();
+        ASSERT_NE(payload, nullptr);
+        observedDeltaX = payload->dx;
+        observedDeltaY = payload->dy;
+    });
+    surface.mount(std::move(viewport));
+    surface.updateLayout();
+
+    EXPECT_TRUE(surface.scroll({{50.f, 50.f}, 0.f, 25.f, kModifierShift}));
+    EXPECT_FLOAT_EQ(viewportPtr->scrollLeft(), 25.f);
+    EXPECT_FLOAT_EQ(viewportPtr->scrollTop(), 0.f);
+    EXPECT_FLOAT_EQ(observedDeltaX, 0.f);
+    EXPECT_FLOAT_EQ(observedDeltaY, 25.f);
+}
+
 TEST(SurfaceTest, RecordsSemanticFallbackScrollbarRequest) {
     StyleSheet styleSheet;
     ASSERT_TRUE(styleSheet
@@ -639,6 +741,140 @@ TEST(SurfaceTest, ScrollbarThumbCapturesPointerAndReachesBothEndpoints) {
     EXPECT_TRUE(surface.pointerUp({{center(thumbAtEnd).x, verticalBounds.top()}, PointerButton::Left}));
 }
 
+TEST(SurfaceTest, RtlScrollbarHitTestingAndHorizontalTrackClicks) {
+    constexpr char kLocalization[] = "defaultLocale: en\nlocales: {en: {strings: {}}, ar: {strings: {}}}\n";
+    ResourceSnapshot snapshot;
+    snapshot.add("localization.yaml", kLocalization);
+    snapshot.add("skin.css", "#viewport { display: block; overflow: scroll; scrollbar-mode: classic; pointer-events: auto; }");
+    const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(std::move(snapshot));
+    ASSERT_TRUE(prepared.ok());
+
+    System system;
+    ASSERT_TRUE(system.publish(prepared.generation));
+    std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
+    surface->setViewport(200.f, 200.f);
+
+    auto viewport = std::make_unique<PanelElement>();
+    viewport->setId("viewport").setRect({20.f, 20.f, 100.f, 100.f});
+    auto content = std::make_unique<PanelElement>();
+    content->setRect({0.f, 0.f, 240.f, 240.f});
+    viewport->append(std::move(content));
+    PanelElement* viewportPtr = viewport.get();
+    surface->mount(std::move(viewport));
+    surface->updateLayout();
+    ASSERT_TRUE(system.setLocale("ar"));
+    surface->updateLayout();
+
+    RecordingPaintContext recording;
+    surface->paint(recording);
+    const PaintCommand* command = recording.last(PaintCommandKind::Scrollbar);
+    ASSERT_NE(command, nullptr);
+    ASSERT_TRUE(command->scrollbar.has_value());
+    const auto& request = *command->scrollbar;
+    EXPECT_EQ(request.direction, LayoutDirection::RightToLeft);
+    ASSERT_TRUE(request.geometry.vertical.visible);
+    ASSERT_TRUE(request.geometry.horizontal.visible);
+
+    const auto center = [](const Rect& rect) { return Vec2{rect.x + rect.w * .5f, rect.y + rect.h * .5f}; };
+    const Vec2 verticalPoint = center(request.geometry.vertical.bounds);
+    EXPECT_TRUE(surface->pointerDown({verticalPoint, PointerButton::Left}));
+    EXPECT_TRUE(surface->hasPointerCapture());
+    EXPECT_TRUE(surface->pointerUp({verticalPoint, PointerButton::Left}));
+
+    const ScrollbarAxisGeometry& horizontal = request.geometry.horizontal;
+    const float initialThumbX = horizontal.thumb.x;
+    const Vec2 leftTrackPoint{horizontal.track.left() + horizontal.track.w * .25f, horizontal.track.y + horizontal.track.h * .5f};
+    ASSERT_FALSE(horizontal.thumb.contains(leftTrackPoint));
+    EXPECT_FLOAT_EQ(viewportPtr->scrollLeft(), 0.f);
+    EXPECT_TRUE(surface->pointerDown({leftTrackPoint, PointerButton::Left}));
+    EXPECT_GT(viewportPtr->scrollLeft(), 0.f);
+    EXPECT_TRUE(surface->pointerUp({leftTrackPoint, PointerButton::Left}));
+
+    RecordingPaintContext afterClickRecording;
+    surface->paint(afterClickRecording);
+    const PaintCommand* afterClickCommand = afterClickRecording.last(PaintCommandKind::Scrollbar);
+    ASSERT_NE(afterClickCommand, nullptr);
+    ASSERT_TRUE(afterClickCommand->scrollbar.has_value());
+    EXPECT_LT(afterClickCommand->scrollbar->geometry.horizontal.thumb.x, initialThumbX);
+}
+
+TEST(SurfaceTest, RtlHorizontalWheelReversesNormalizedScrollDirection) {
+    constexpr char kLocalization[] = "defaultLocale: en\nlocales: {en: {strings: {}}, ar: {strings: {}}}\n";
+    ResourceSnapshot snapshot;
+    snapshot.add("localization.yaml", kLocalization);
+    snapshot.add("skin.css", "#viewport { display: block; overflow: scroll; scrollbar-mode: classic; pointer-events: auto; }");
+    const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(std::move(snapshot));
+    ASSERT_TRUE(prepared.ok());
+
+    System system;
+    ASSERT_TRUE(system.publish(prepared.generation));
+    std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
+    surface->setViewport(200.f, 200.f);
+
+    auto viewport = std::make_unique<PanelElement>();
+    viewport->setId("viewport").setRect({20.f, 20.f, 100.f, 100.f});
+    auto content = std::make_unique<PanelElement>();
+    content->setRect({0.f, 0.f, 240.f, 240.f});
+    viewport->append(std::move(content));
+    PanelElement* viewportPtr = viewport.get();
+    surface->mount(std::move(viewport));
+    ASSERT_TRUE(system.setLocale("ar"));
+    surface->updateLayout();
+    ASSERT_GT(viewportPtr->scrollMetrics().maxScrollLeft, 0.f);
+
+    viewportPtr->scrollTo(viewportPtr->scrollMetrics().maxScrollLeft * .5f, 0.f);
+    RecordingPaintContext initialPaint;
+    surface->paint(initialPaint);
+    const PaintCommand* initialCommand = initialPaint.last(PaintCommandKind::Scrollbar);
+    ASSERT_NE(initialCommand, nullptr);
+    ASSERT_TRUE(initialCommand->scrollbar.has_value());
+    const float initialScrollLeft = viewportPtr->scrollLeft();
+    const float initialThumbX = initialCommand->scrollbar->geometry.horizontal.thumb.x;
+
+    EXPECT_TRUE(surface->scroll({{70.f, 60.f}, 20.f, 0.f}));
+    EXPECT_LT(viewportPtr->scrollLeft(), initialScrollLeft);
+
+    RecordingPaintContext afterWheelPaint;
+    surface->paint(afterWheelPaint);
+    const PaintCommand* afterWheelCommand = afterWheelPaint.last(PaintCommandKind::Scrollbar);
+    ASSERT_NE(afterWheelCommand, nullptr);
+    ASSERT_TRUE(afterWheelCommand->scrollbar.has_value());
+    EXPECT_GT(afterWheelCommand->scrollbar->geometry.horizontal.thumb.x, initialThumbX);
+}
+
+TEST(SurfaceTest, RtlScrollTransformMirrorsHorizontalContentTranslation) {
+    constexpr char kLocalization[] = "defaultLocale: en\nlocales: {en: {strings: {}}, ar: {strings: {}}}\n";
+    ResourceSnapshot snapshot;
+    snapshot.add("localization.yaml", kLocalization);
+    snapshot.add("skin.css", "#viewport { display: block; overflow: hidden; scrollbar-width: none; } ");
+    const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(std::move(snapshot));
+    ASSERT_TRUE(prepared.ok());
+
+    System system;
+    ASSERT_TRUE(system.publish(prepared.generation));
+    std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
+    surface->setViewport(200.f, 200.f);
+
+    auto viewport = std::make_unique<PanelElement>();
+    viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
+    auto target = std::make_unique<ButtonElement>();
+    target->setId("target").setRect({-130.f, 10.f, 20.f, 20.f});
+    viewport->append(std::move(target));
+    PanelElement* viewportPtr = viewport.get();
+    surface->mount(std::move(viewport));
+    ASSERT_TRUE(system.setLocale("ar"));
+    surface->updateLayout();
+
+    viewportPtr->scrollTo(20.f, 0.f);
+    RecordingPaintContext recording;
+    surface->paint(recording);
+    const auto translation = std::find_if(recording.commands().begin(), recording.commands().end(),
+                                          [](const PaintCommand& command) { return command.kind == PaintCommandKind::PushTranslation; });
+    ASSERT_NE(translation, recording.commands().end());
+    EXPECT_FLOAT_EQ(translation->translation.x, 20.f);
+    EXPECT_FLOAT_EQ(translation->translation.y, 0.f);
+}
+
 TEST(SurfaceTest, ScrollbarArrowsAndTrackPageByInputPolicy) {
     StyleSheet styleSheet;
     ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: scroll; scrollbar-mode: classic; pointer-events: auto; }").ok());
@@ -671,6 +907,42 @@ TEST(SurfaceTest, ScrollbarArrowsAndTrackPageByInputPolicy) {
     EXPECT_TRUE(surface.pointerDown({trackPoint, PointerButton::Left}));
     EXPECT_TRUE(surface.pointerUp({trackPoint, PointerButton::Left}));
     EXPECT_FLOAT_EQ(viewportPtr->scrollTop(), viewportPtr->clientHeight() - 40.f);
+}
+
+TEST(SurfaceTest, HeldScrollbarArrowRepeatsUntilRelease) {
+    StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: scroll; scrollbar-mode: classic; pointer-events: auto; }").ok());
+    Surface surface(styleSheet);
+    surface.setViewport(200.f, 200.f);
+
+    auto viewport = std::make_unique<PanelElement>();
+    viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
+    auto content = std::make_unique<PanelElement>();
+    content->setRect({0.f, 0.f, 100.f, 300.f});
+    viewport->append(std::move(content));
+    PanelElement* viewportPtr = viewport.get();
+    surface.mount(std::move(viewport));
+    surface.updateLayout();
+
+    RecordingPaintContext recording;
+    surface.paint(recording);
+    const PaintCommand* command = recording.last(PaintCommandKind::Scrollbar);
+    ASSERT_NE(command, nullptr);
+    ASSERT_TRUE(command->scrollbar.has_value());
+    const auto center = [](const Rect& rect) { return Vec2{rect.x + rect.w * .5f, rect.y + rect.h * .5f}; };
+    const Vec2 endArrowPoint = center(command->scrollbar->geometry.vertical.endArrow);
+
+    EXPECT_TRUE(surface.pointerDown({endArrowPoint, PointerButton::Left}));
+    EXPECT_FLOAT_EQ(viewportPtr->scrollTop(), 40.f);
+    surface.advanceScrollbarInteraction(.39f);
+    EXPECT_FLOAT_EQ(viewportPtr->scrollTop(), 40.f);
+    surface.advanceScrollbarInteraction(.02f);
+    EXPECT_FLOAT_EQ(viewportPtr->scrollTop(), 80.f);
+
+    EXPECT_TRUE(surface.pointerUp({endArrowPoint, PointerButton::Left}));
+    const float afterRelease = viewportPtr->scrollTop();
+    surface.advanceScrollbarInteraction(1.f);
+    EXPECT_FLOAT_EQ(viewportPtr->scrollTop(), afterRelease);
 }
 
 TEST(SurfaceTest, ScrollbarTrackClickContinuesIntoThumbDrag) {
@@ -1229,7 +1501,7 @@ TEST(SurfaceTest, RemeasuresAfterIntrinsicContentChanges) {
     const float shortWidth = text->rect().w;
     text->textContent("a much longer label");
     surface.updateLayout();
-    EXPECT_TRUE(text->rect().w > shortWidth);
+    EXPECT_GT(text->rect().w, shortWidth);
 }
 
 TEST(SurfaceTest, RemeasuresAfterTextNodeDataChanges) {
@@ -1253,7 +1525,7 @@ TEST(SurfaceTest, RemeasuresAfterTextNodeDataChanges) {
     const float shortWidth = labelElement->rect().w;
     text->setData("a much longer label");
     surface.updateLayout();
-    EXPECT_TRUE(labelElement->rect().w > shortWidth);
+    EXPECT_GT(labelElement->rect().w, shortWidth);
 }
 
 TEST(SurfaceTest, InvalidatesLayoutAfterStylesheetGenerationChanges) {

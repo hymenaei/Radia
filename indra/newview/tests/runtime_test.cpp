@@ -221,6 +221,21 @@ TEST_F(RuntimeTest, InitializesFromInjectedSkinAndShutsDownCleanly) {
     EXPECT_EQ(controllerState.closed, 1);
 }
 
+TEST_F(RuntimeTest, ForwardsPaintScaleToSurface) {
+    ASSERT_TRUE(runtime.initialize());
+    ASSERT_TRUE(registerTestFloater());
+    ASSERT_NE(runtime.openFloater("runtimeTest"), nullptr);
+
+    runtime.frame(800, 600, 1.5f, -24.f, 18.f);
+
+    ASSERT_NE(paintContext, nullptr);
+    const auto* frame = paintContext->last(PaintCommandKind::BeginFrame);
+    ASSERT_NE(frame, nullptr);
+    EXPECT_FLOAT_EQ(frame->target.scale, 1.5f);
+    EXPECT_FLOAT_EQ(frame->target.pixelOrigin.x, -24.f);
+    EXPECT_FLOAT_EQ(frame->target.pixelOrigin.y, 18.f);
+}
+
 TEST_F(RuntimeTest, RoutesAttachedInputToBoundComponent) {
     ASSERT_TRUE(runtime.initialize());
     ASSERT_TRUE(registerTestFloater());

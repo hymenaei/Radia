@@ -25,10 +25,10 @@ struct ScrollGeometryInput {
     ScrollbarAxisInput vertical;
     ScrollbarMode mode = ScrollbarMode::Classic;
     LayoutDirection direction = LayoutDirection::LeftToRight;
-    float thickness = 15.f;
-    float arrowLength = 15.f;
-    float minimumThumbLength = 20.f;
-    float thumbPadding = 3.f;
+    float thickness;
+    float arrowLength;
+    float minimumThumbLength;
+    float thumbPadding;
 };
 
 struct ScrollbarAxisGeometry {
@@ -63,4 +63,5 @@ ScrollGeometry makeScrollGeometry(const ScrollGeometryInput& input);
 ScrollbarHit hitTestScrollbar(const ScrollGeometry& geometry, const Vec2& point);
 float scrollbarAxisPosition(ScrollbarAxis axis, const Vec2& point);
 float scrollOffsetForThumbPosition(const ScrollbarAxisGeometry& geometry, float pointerPosition, float grabOffset);
+Vec2 scrollContentTranslation(LayoutDirection direction, const Vec2& scrollOffset);
 } // namespace radia::ui

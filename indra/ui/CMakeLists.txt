@@ -11,8 +11,8 @@ generate_default_stylesheet(SOURCE "${default_stylesheet_source}" OUTPUT "${defa
 set(private_sources
     eventcall.cpp
     localization.cpp
+    nativeappearance.cpp
     path.cpp
-    path.h
     system.cpp
 
     binding/binder.cpp
@@ -99,6 +99,7 @@ set(public_sources
     localization.h
     localizedtext.h
     nativeappearance.h
+    path.h
     resourceprovider.h
     system.h
     types.h
@@ -110,6 +111,7 @@ set(public_sources
 
     render/openglpaintcontext.h
     render/paintcontext.h
+    render/painttarget.h
     render/recordingpaintcontext.h
 
     skin/compiler.h

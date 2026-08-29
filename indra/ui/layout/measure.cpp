@@ -17,6 +17,7 @@ using layout_detail::adjacentLayout;
 using layout_detail::allocateMainAxis;
 using layout_detail::applyCrossAxisSizing;
 using layout_detail::ChildLayout;
+using layout_detail::contentBoxDimension;
 using layout_detail::crossAlignment;
 using layout_detail::flowBreakBefore;
 using layout_detail::gridTrackSizes;
@@ -25,9 +26,10 @@ using layout_detail::isDisplayed;
 using layout_detail::isInlineLevel;
 using layout_detail::isWhitespaceOnlyText;
 using layout_detail::MainAxisAllocation;
+using layout_detail::minimumBoxDimension;
 using layout_detail::prepareMainAxis;
 using layout_detail::rowLines;
-using layout_detail::styledDimension;
+using layout_detail::styledBoxDimension;
 
 Vec2 LayoutEngine::measure(Element& node, LayoutPass& pass, std::optional<float> outerWidth, std::optional<float> outerHeight) {
     const LayoutContextKey contextKey = pass.contextKey();
@@ -82,15 +84,16 @@ Vec2 LayoutEngine::measure(Element& node, LayoutPass& pass, std::optional<float>
     const NodeSnapshot styledState(node);
     if (!styledState.valid()) return {};
     std::optional<float> resolvedWidth = outerWidth;
-    if (!resolvedWidth && !style.width.isAuto() && !style.width.isPercentage()) resolvedWidth = styledDimension(style.width, style.minWidth, 0.f);
+    if (!resolvedWidth && !style.width.isAuto() && !style.width.isPercentage())
+        resolvedWidth = styledBoxDimension(style, true, style.width, style.minWidth, 0.f);
     if (!resolvedWidth && node.mRectExplicit && style.width.isAuto()) resolvedWidth = std::max(0.f, node.mRect.w);
     if (!resolvedWidth && node.mRectExplicit && style.width.isPercentage()) resolvedWidth = std::max(0.f, node.mRect.w);
     std::optional<float> resolvedHeight = outerHeight;
     if (!resolvedHeight && !style.height.isAuto() && !style.height.isPercentage())
-        resolvedHeight = styledDimension(style.height, style.minHeight, 0.f);
+        resolvedHeight = styledBoxDimension(style, false, style.height, style.minHeight, 0.f);
     if (!resolvedHeight && node.mRectExplicit && style.height.isAuto()) resolvedHeight = std::max(0.f, node.mRect.h);
     if (!resolvedHeight && node.mRectExplicit && style.height.isPercentage()) resolvedHeight = std::max(0.f, node.mRect.h);
-    const IntrinsicSizeConstraints constraints{resolvedWidth, resolvedHeight};
+    const IntrinsicSizeConstraints constraints{resolvedWidth, resolvedHeight, &pass.nativeAppearance()};
     const ElementRef<Element> lifetime(&node);
     const Surface* surface = node.mSurface;
     const Element* parent = node.mParent;
@@ -109,19 +112,20 @@ Vec2 LayoutEngine::measure(Element& node, LayoutPass& pass, std::optional<float>
     if (!current || current->mSurface != surface || current->mParent != parent || current->mLayoutInvalidationRevision != layoutRevision)
         return content;
 
-    const Vec2 natural(content.x + style.padding.horizontal(), content.y + style.padding.vertical());
+    const Vec2 natural(content.x + style.padding.horizontal() + style.borderWidth.horizontal(),
+                       content.y + style.padding.vertical() + style.borderWidth.vertical());
     const bool authoredWidth = !style.width.isAuto() && !style.width.isPercentage();
     const bool authoredHeight = !style.height.isAuto() && !style.height.isPercentage();
     const bool explicitPercentageWidth = node.mRectExplicit && style.width.isPercentage();
     const bool explicitPercentageHeight = node.mRectExplicit && style.height.isPercentage();
-    float desiredWidth = styledDimension(style.width, style.minWidth, natural.x, resolvedWidth.value_or(0.f));
-    if (explicitPercentageWidth) desiredWidth = styledDimension(style.width, style.minWidth, natural.x, *resolvedWidth);
+    float desiredWidth = styledBoxDimension(style, true, style.width, style.minWidth, natural.x, resolvedWidth.value_or(0.f));
+    if (explicitPercentageWidth) desiredWidth = std::max(*resolvedWidth, minimumBoxDimension(style, true, style.minWidth, *resolvedWidth));
     else if (resolvedWidth && (outerWidth || authoredWidth))
-        desiredWidth = styledDimension(Dimension::fromPixels(*resolvedWidth), style.minWidth, natural.x);
-    float desiredHeight = styledDimension(style.height, style.minHeight, natural.y, resolvedHeight.value_or(0.f));
-    if (explicitPercentageHeight) desiredHeight = styledDimension(style.height, style.minHeight, natural.y, *resolvedHeight);
+        desiredWidth = std::max(*resolvedWidth, minimumBoxDimension(style, true, style.minWidth, *resolvedWidth));
+    float desiredHeight = styledBoxDimension(style, false, style.height, style.minHeight, natural.y, resolvedHeight.value_or(0.f));
+    if (explicitPercentageHeight) desiredHeight = std::max(*resolvedHeight, minimumBoxDimension(style, false, style.minHeight, *resolvedHeight));
     else if (resolvedHeight && (outerHeight || authoredHeight))
-        desiredHeight = styledDimension(Dimension::fromPixels(*resolvedHeight), style.minHeight, natural.y);
+        desiredHeight = std::max(*resolvedHeight, minimumBoxDimension(style, false, style.minHeight, *resolvedHeight));
     const Vec2 desired = {desiredWidth, desiredHeight};
     detail::ElementInternalAccess::layoutCache(node).measuredSize = desired;
     detail::ElementInternalAccess::layoutCache(node).measuredWidth = outerWidth.value_or(0.f);
@@ -162,9 +166,11 @@ ChildLayout LayoutEngine::measureChild(Element& parent, detail::NodeRef child, c
     std::optional<float> childWidth;
     std::optional<float> childHeight;
     if (resolvedWidth && childStyle.width.isPercentage())
-        childWidth = styledDimension(childStyle.width, childStyle.minWidth, 0.f, std::max(0.f, *resolvedWidth - parentStyle.padding.horizontal()));
+        childWidth =
+            styledBoxDimension(childStyle, true, childStyle.width, childStyle.minWidth, 0.f, contentBoxDimension(parentStyle, true, *resolvedWidth));
     if (resolvedHeight && childStyle.height.isPercentage())
-        childHeight = styledDimension(childStyle.height, childStyle.minHeight, 0.f, std::max(0.f, *resolvedHeight - parentStyle.padding.vertical()));
+        childHeight = styledBoxDimension(childStyle, false, childStyle.height, childStyle.minHeight, 0.f,
+                                         contentBoxDimension(parentStyle, false, *resolvedHeight));
     Vec2 childSize;
     if (childElement) childSize = measure(*childElement, pass, childWidth, childHeight);
     else if (Text* text = childState.text())
@@ -180,24 +186,27 @@ ChildLayout LayoutEngine::measureChild(Element& parent, detail::NodeRef child, c
         std::optional<float> crossSize;
         if (flexDirection == FlexDirection::Row) {
             if (resolvedHeight) crossSize = resolvedHeight;
-            else if (!parentStyle.height.isAuto()) crossSize = parentStyle.height.resolve(0.f, currentParent->mRect.h);
+            else if (!parentStyle.height.isAuto())
+                crossSize =
+                    styledBoxDimension(parentStyle, false, parentStyle.height, parentStyle.minHeight, currentParent->mRect.h, currentParent->mRect.h);
             else if (currentParent->mRectExplicit) crossSize = currentParent->mRect.h;
         } else {
             if (resolvedWidth) crossSize = resolvedWidth;
-            else if (!parentStyle.width.isAuto()) crossSize = parentStyle.width.resolve(0.f, currentParent->mRect.w);
+            else if (!parentStyle.width.isAuto())
+                crossSize =
+                    styledBoxDimension(parentStyle, true, parentStyle.width, parentStyle.minWidth, currentParent->mRect.w, currentParent->mRect.w);
             else if (currentParent->mRectExplicit) crossSize = currentParent->mRect.w;
         }
         if (crossSize) {
-            const float padding = flexDirection == FlexDirection::Row ? parentStyle.padding.vertical() : parentStyle.padding.horizontal();
-            applyCrossAxisSizing(childSize, childStyle, flexDirection, std::max(0.f, *crossSize - padding),
-                                 crossAlignment(parentStyle, childStyle, flexDirection));
+            const float availableCross = contentBoxDimension(parentStyle, flexDirection == FlexDirection::Column, *crossSize);
+            applyCrossAxisSizing(childSize, childStyle, flexDirection, availableCross, crossAlignment(parentStyle, childStyle, flexDirection));
         }
     }
 
     Vec2 childAutomaticMinimum = childSize;
     if (flexDirection == FlexDirection::Column && resolvedWidth) {
-        const float availableCross = std::max(0.f, *resolvedWidth - parentStyle.padding.horizontal());
-        childSize.x = styledDimension(childStyle.width, childStyle.minWidth, childSize.x, availableCross);
+        const float availableCross = contentBoxDimension(parentStyle, true, *resolvedWidth);
+        childSize.x = styledBoxDimension(childStyle, true, childStyle.width, childStyle.minWidth, childSize.x, availableCross);
         applyCrossAxisSizing(childSize, childStyle, flexDirection, availableCross, crossAlignment(parentStyle, childStyle, flexDirection));
         if (childStyle.height.isAuto() && !childStyle.aspectRatio) {
             if (currentElement) childSize.y = measure(*currentElement, pass, childSize.x).y;
@@ -212,16 +221,22 @@ ChildLayout LayoutEngine::measureChild(Element& parent, detail::NodeRef child, c
         const Dimension& parentDimension = flexDirection == FlexDirection::Row ? parentStyle.width : parentStyle.height;
         const std::optional<float> resolvedParent = flexDirection == FlexDirection::Row ? resolvedWidth : resolvedHeight;
         const float rectSize = flexDirection == FlexDirection::Row ? currentParent->mRect.w : currentParent->mRect.h;
-        const float padding = flexDirection == FlexDirection::Row ? parentStyle.padding.horizontal() : parentStyle.padding.vertical();
+        const float padding = flexDirection == FlexDirection::Row ? parentStyle.padding.horizontal() + parentStyle.borderWidth.horizontal()
+                                                                  : parentStyle.padding.vertical() + parentStyle.borderWidth.vertical();
         const bool definiteParent = resolvedParent || !parentDimension.isAuto() || parent.mRectExplicit;
         const bool percentageIsAuto = childStyle.flexBasis.isPercentage() && !definiteParent;
         if (!percentageIsAuto) {
-            const float parentSize = resolvedParent.value_or(parentDimension.isAuto() ? rectSize : parentDimension.resolve(0.f, rectSize));
+            const bool horizontal = flexDirection == FlexDirection::Row;
+            const float parentSize = resolvedParent.value_or(
+                parentDimension.isAuto() ? rectSize
+                                         : styledBoxDimension(parentStyle, horizontal, parentDimension,
+                                                              horizontal ? parentStyle.minWidth : parentStyle.minHeight, rectSize, rectSize));
             const float reference = std::max(0.f, parentSize - padding);
-            const float basis = childStyle.flexBasis.resolve(0.f, reference);
+            const float basis = styledBoxDimension(childStyle, horizontal, childStyle.flexBasis, std::nullopt, 0.f, reference);
             const std::optional<Length>& authoredMinimum = flexDirection == FlexDirection::Row ? childStyle.minWidth : childStyle.minHeight;
             const float automaticMinimum = flexDirection == FlexDirection::Row ? childAutomaticMinimum.x : childAutomaticMinimum.y;
-            const float minimum = authoredMinimum ? authoredMinimum->resolve(reference) : std::min(automaticMinimum, basis);
+            const float minimum =
+                authoredMinimum ? minimumBoxDimension(childStyle, horizontal, authoredMinimum, reference) : std::min(automaticMinimum, basis);
             if (flexDirection == FlexDirection::Row) childSize.x = std::max(basis, minimum);
             else childSize.y = std::max(basis, minimum);
         }
@@ -258,10 +273,11 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::measureNormalChildren(Elem
         const bool blockLevel = !isInlineLevel(childStyle.display);
         const bool fillsContainingBlock = contentWidth && blockLevel && childStyle.width.isAuto() && (!childPtr || !childPtr->mRectExplicit);
         std::optional<float> childWidth;
-        if (contentWidth && childStyle.width.isPercentage()) childWidth = styledDimension(childStyle.width, childStyle.minWidth, 0.f, *contentWidth);
+        if (contentWidth && childStyle.width.isPercentage())
+            childWidth = styledBoxDimension(childStyle, true, childStyle.width, childStyle.minWidth, 0.f, *contentWidth);
         else if (fillsContainingBlock) childWidth = std::max(0.f, *contentWidth - childStyle.margin.horizontal());
         const std::optional<float> childHeight = contentHeight && childStyle.height.isPercentage()
-            ? std::optional<float>(styledDimension(childStyle.height, childStyle.minHeight, 0.f, *contentHeight))
+            ? std::optional<float>(styledBoxDimension(childStyle, false, childStyle.height, childStyle.minHeight, 0.f, *contentHeight))
             : std::nullopt;
 
         const auto measureNode = [&](std::optional<float> width, std::optional<float> height) {
@@ -324,10 +340,10 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::measureGridChildren(Elemen
         if (!valid()) return std::nullopt;
 
         const std::optional<float> childWidth = contentWidth && childStyle.width.isPercentage()
-            ? std::optional<float>(styledDimension(childStyle.width, childStyle.minWidth, 0.f, *contentWidth))
+            ? std::optional<float>(styledBoxDimension(childStyle, true, childStyle.width, childStyle.minWidth, 0.f, *contentWidth))
             : std::nullopt;
         const std::optional<float> childHeight = contentHeight && childStyle.height.isPercentage()
-            ? std::optional<float>(styledDimension(childStyle.height, childStyle.minHeight, 0.f, *contentHeight))
+            ? std::optional<float>(styledBoxDimension(childStyle, false, childStyle.height, childStyle.minHeight, 0.f, *contentHeight))
             : std::nullopt;
         Vec2 childSize;
         if (childElement) childSize = measure(*childElement, pass, childWidth, childHeight);
@@ -347,10 +363,9 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::measureGridChildren(Elemen
 Vec2 LayoutEngine::measureGrid(Element& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
                                std::optional<float> resolvedHeight, LayoutPass& pass) {
     Vec2 content = intrinsic;
-    const std::optional<float> contentWidth =
-        resolvedWidth ? std::optional<float>(std::max(0.f, *resolvedWidth - style.padding.horizontal())) : std::nullopt;
+    const std::optional<float> contentWidth = resolvedWidth ? std::optional<float>(contentBoxDimension(style, true, *resolvedWidth)) : std::nullopt;
     const std::optional<float> contentHeight =
-        resolvedHeight ? std::optional<float>(std::max(0.f, *resolvedHeight - style.padding.vertical())) : std::nullopt;
+        resolvedHeight ? std::optional<float>(contentBoxDimension(style, false, *resolvedHeight)) : std::nullopt;
     const std::optional<std::vector<ChildLayout>> layoutsResult = measureGridChildren(node, contentWidth, contentHeight, pass);
     if (!layoutsResult) return content;
     const layout_detail::GridTrackSizes tracks = gridTrackSizes(*layoutsResult, contentWidth, contentHeight);
@@ -414,7 +429,7 @@ Vec2 LayoutEngine::measureRow(Element& node, const Style& style, const Vec2& int
 
     if (rowChildren || !rowLines) finishRow();
     if (resolvedWidth && !rowLayouts.empty()) {
-        const float availableMain = std::max(0.f, *resolvedWidth - style.padding.horizontal());
+        const float availableMain = contentBoxDimension(style, true, *resolvedWidth);
         prepareMainAxis(rowLayouts, FlexDirection::Row, availableMain);
         const RowSizing sizing = allocateRowLines(node, rowLayouts, style, availableMain, pass);
         content.y = 0.f;
@@ -463,10 +478,9 @@ Vec2 LayoutEngine::measureColumn(Element& node, const Style& style, const Vec2& 
 Vec2 LayoutEngine::measureNormal(Element& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
                                  std::optional<float> resolvedHeight, LayoutPass& pass) {
     Vec2 content = intrinsic;
-    const std::optional<float> contentWidth =
-        resolvedWidth ? std::optional<float>(std::max(0.f, *resolvedWidth - style.padding.horizontal())) : std::nullopt;
+    const std::optional<float> contentWidth = resolvedWidth ? std::optional<float>(contentBoxDimension(style, true, *resolvedWidth)) : std::nullopt;
     const std::optional<float> contentHeight =
-        resolvedHeight ? std::optional<float>(std::max(0.f, *resolvedHeight - style.padding.vertical())) : std::nullopt;
+        resolvedHeight ? std::optional<float>(contentBoxDimension(style, false, *resolvedHeight)) : std::nullopt;
     const std::optional<std::vector<ChildLayout>> layoutsResult = measureNormalChildren(node, contentWidth, contentHeight, pass);
     if (!layoutsResult) return content;
     const std::vector<ChildLayout>& layouts = *layoutsResult;

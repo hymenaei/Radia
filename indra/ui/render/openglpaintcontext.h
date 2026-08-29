@@ -19,7 +19,7 @@ public:
     OpenGLPaintContext(::LLGLSLShader& shapeProgram, const System& system);
     ~OpenGLPaintContext() override;
 
-    void beginFrame() override;
+    void beginFrame(const PaintTarget& target) override;
     void endFrame() override;
     Vec2 measureText(const std::string& text, const Style& style) const override;
     float usedLetterSpacing(const Style& style) const override;
@@ -31,6 +31,9 @@ public:
     void beginEffects(const Rect& rect, const Style& style, float scale) override;
     void endEffects() override;
     void paintNativeScrollbar(const NativeScrollbarPaintRequest& request) override;
+    void paintNativeInput(const NativeInputPaintRequest& request) override;
+    void paintNativeInputMark(const NativeInputMarkPaintRequest& request) override;
+    void paintNativeButton(const NativeButtonPaintRequest& request) override;
     void paintBox(const Rect& rect, const Style& style, std::optional<TopBorderGap> topBorderGap = std::nullopt) override;
     void paintText(const std::string& text, const Rect& rect, const Style& style) override;
     void paintIcon(const std::string& name, const Rect& rect, const Style& style, float scale) override;

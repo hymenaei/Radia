@@ -26,7 +26,7 @@ void applyOpacity(Style& style, float inheritedOpacity) {
     const float opacity = inheritedOpacity * style.opacity;
     style.backgroundColor.a *= opacity;
     style.borderColor.a *= opacity;
-    style.textColor.a *= opacity;
+    style.color.a *= opacity;
     style.iconStrokeColor.a *= opacity;
     style.outline.color.a *= opacity;
     if (!style.scrollbarColor.automatic) {
@@ -94,8 +94,7 @@ Surface::Surface(const StyleSheet& styleSheet)
 Surface::Surface(const System& system, const TextMetrics& textMetrics)
     : mStyleSheet(&system.styleSheet()), mSystem(&system), mTextMetrics(textMetrics), mObservedStyleGeneration(system.generation()),
       mObservedTextMetricsGeneration(mTextMetrics.generation()) {
-    mScrollbarMetrics = system.nativeAppearance().scrollbarMetrics(mScrollLayoutOptions.scrollbarMode);
-    mScrollLayoutOptions.scrollbarThickness = std::max(0.f, mScrollbarMetrics.thickness);
+    mScrollLayoutOptions.nativeAppearance = &system.nativeAppearance();
     mNativeAppearanceRevision = system.nativeAppearance().revision();
     system.registerSurface(*this);
 }
@@ -125,27 +124,29 @@ void Surface::generationChanged(const StyleSheet& styleSheet) {
 }
 
 void Surface::setViewport(float width, float height) {
+    const bool changed = mViewport.w != width || mViewport.h != height;
     mViewport = Rect(0.f, 0.f, width, height);
     for (auto floater = mFloaters.begin(); floater != mFloaters.end();)
         if (FloaterElement* managed = *floater) {
             constrainFloater(*managed);
             ++floater;
         } else floater = mFloaters.erase(floater);
+    if (changed) requestLayout();
 }
 
 void Surface::setScrollLayoutOptions(ScrollLayoutOptions options) {
     syncNativeAppearance();
-    options.scrollbarThickness = std::max(0.f, options.scrollbarThickness);
-    if (mScrollLayoutOptions.scrollbarMode == options.scrollbarMode && mScrollLayoutOptions.scrollbarThickness == options.scrollbarThickness) return;
+    if (mSystem) options.nativeAppearance = &mSystem->nativeAppearance();
+    const bool optionsChanged =
+        mScrollLayoutOptions.scrollbarMode != options.scrollbarMode || mScrollLayoutOptions.nativeAppearance != options.nativeAppearance;
+    if (!optionsChanged) return;
     mScrollLayoutOptions = options;
-    mScrollbarMetrics.thickness = options.scrollbarThickness;
     requestLayout();
 }
 
 void Surface::nativeAppearanceChanged() {
     if (!mSystem) return;
-    mScrollbarMetrics = mSystem->nativeAppearance().scrollbarMetrics(mScrollLayoutOptions.scrollbarMode);
-    mScrollLayoutOptions.scrollbarThickness = std::max(0.f, mScrollbarMetrics.thickness);
+    mScrollLayoutOptions.nativeAppearance = &mSystem->nativeAppearance();
     mNativeAppearanceRevision = mSystem->nativeAppearance().revision();
     requestLayout();
     requestPaint();
@@ -155,22 +156,35 @@ void Surface::syncNativeAppearance() {
     if (mSystem && mNativeAppearanceRevision != mSystem->nativeAppearance().revision()) nativeAppearanceChanged();
 }
 
+const NativeAppearance& Surface::effectiveNativeAppearance() const {
+    return mScrollLayoutOptions.nativeAppearance ? *mScrollLayoutOptions.nativeAppearance : defaultNativeAppearance();
+}
+
+const NativeAppearance& Surface::nativeAppearance() const {
+    return effectiveNativeAppearance();
+}
+
+NativeScrollbarMetrics Surface::scrollbarMetrics(ScrollbarMode mode) const {
+    return effectiveNativeAppearance().scrollbarMetrics(mode);
+}
+
 ScrollGeometry Surface::scrollbarGeometry(const Element& element, const Style& style) const {
     const ScrollbarMode mode = style.scrollbarModeSet ? style.scrollbarMode : mScrollLayoutOptions.scrollbarMode;
+    const NativeScrollbarMetrics metrics = scrollbarMetrics(mode);
     const float widthScale = style.scrollbarWidth == ScrollbarWidth::Thin ? .5f : 1.f;
     const bool enabled = style.scrollbarWidth != ScrollbarWidth::NoneValue;
     const auto visible = [enabled](Overflow overflow, float maximum) {
         return enabled && (overflow == Overflow::Scroll || (overflow == Overflow::Auto && maximum > 0.f));
     };
 
-    ScrollGeometryInput input;
+    ScrollGeometryInput input{};
     input.scrollport = detail::ElementInternalAccess::scrollport(element);
     input.mode = mode;
-    input.direction = style.direction;
-    input.thickness = mScrollbarMetrics.thickness * widthScale;
-    input.arrowLength = mScrollbarMetrics.arrowLength * widthScale;
-    input.minimumThumbLength = mScrollbarMetrics.minimumThumbLength;
-    input.thumbPadding = mScrollbarMetrics.thumbPadding * widthScale;
+    input.direction = layoutDirection();
+    input.thickness = metrics.thickness * widthScale;
+    input.arrowLength = metrics.arrowLength * widthScale;
+    input.minimumThumbLength = metrics.minimumThumbLength;
+    input.thumbPadding = metrics.thumbPadding * widthScale;
     input.horizontal = {element.scrollLeft(), element.scrollWidth(), element.clientWidth(),
                         visible(style.overflowX, element.scrollMetrics().maxScrollLeft)};
     input.vertical = {element.scrollTop(), element.scrollHeight(), element.clientHeight(),
@@ -363,9 +377,8 @@ void Surface::requestHitTestRefresh() {
 void Surface::queueScrollNotification(Element& element) {
     if (element.mSurface != this) return;
     const std::shared_ptr<char> mountLifetime = detail::ElementInternalAccess::mountLifetime(element);
-    const auto duplicate = std::find_if(mPendingScrollNotifications.begin(), mPendingScrollNotifications.end(), [&](const auto& pending) {
-        return pending.element == &element && pending.mountLifetime == mountLifetime;
-    });
+    const auto duplicate = std::find_if(mPendingScrollNotifications.begin(), mPendingScrollNotifications.end(),
+                                        [&](const auto& pending) { return pending.element == &element && pending.mountLifetime == mountLifetime; });
     if (duplicate != mPendingScrollNotifications.end()) return;
     mPendingScrollNotifications.push_back({&element, detail::ElementInternalAccess::lifetime(element), mountLifetime});
 }
@@ -389,7 +402,8 @@ void Surface::flushScrollNotifications() {
         for (const PendingScrollNotification& notification : pending) {
             if (!notification.element || notification.lifetime.expired() || notification.mountLifetime == nullptr) continue;
             Element* element = notification.element;
-            if (element->mSurface != this || detail::ElementInternalAccess::mountLifetime(*element) != notification.mountLifetime
+            if (element->mSurface != this
+                || detail::ElementInternalAccess::mountLifetime(*element) != notification.mountLifetime
                 || !isRootedInSurface(element))
                 continue;
             dispatchScrollNotification(*element);
@@ -422,8 +436,10 @@ StylePass& Surface::stylePass() const {
         mStylePass.reset();
     }
     const LayoutDirection direction = layoutDirection();
-    const bool mismatched = !mStylePass || !mStylePass->matches(*mStyleSheet, mTextMetrics, direction);
-    if (mismatched && (!mStylePass || !mStylePass->active())) mStylePass = std::make_unique<StylePass>(*mStyleSheet, mTextMetrics, direction);
+    const NativeAppearance& appearance = effectiveNativeAppearance();
+    const bool mismatched = !mStylePass || !mStylePass->matches(*mStyleSheet, mTextMetrics, direction, &appearance);
+    if (mismatched && (!mStylePass || !mStylePass->active()))
+        mStylePass = std::make_unique<StylePass>(*mStyleSheet, mTextMetrics, direction, &appearance);
     return *mStylePass;
 }
 
@@ -478,14 +494,17 @@ bool Surface::updateLayoutIfNeeded() {
 
         const Style& rootStyle = styles.style(root);
         if (!root.isDisplayed(rootStyle)) return;
+        const bool bodyRoot = root.elementName() == "body";
         const Vec2 desired = root.desiredSize();
         const float width = rootStyle.width.isAuto() ? ((rootStyle.display == DisplayMode::Inline
                                                          || rootStyle.display == DisplayMode::InlineBlock
                                                          || rootStyle.display == DisplayMode::InlineGrid)
                                                             ? desired.x
-                                                            : mViewport.w)
+                                                            : bodyRoot ? std::max(0.f, mViewport.w - rootStyle.margin.horizontal())
+                                                                       : mViewport.w)
                                                      : rootStyle.width.resolve(desired.x, mViewport.w);
-        const float height = rootStyle.height.isAuto() ? desired.y : rootStyle.height.resolve(desired.y, mViewport.h);
+        const float height = rootStyle.height.isAuto() ? (bodyRoot ? std::max(0.f, mViewport.h - rootStyle.margin.vertical()) : desired.y)
+                                                       : rootStyle.height.resolve(desired.y, mViewport.h);
         const float x = rootStyle.left ? rootStyle.left->resolve(mViewport.w)
             : rootStyle.right          ? mViewport.w - rootStyle.right->resolve(mViewport.w) - width
                                        : rootStyle.margin.left.fixedPixels();
@@ -500,12 +519,18 @@ bool Surface::updateLayoutIfNeeded() {
     return true;
 }
 
-void Surface::paint(PaintContext& context, float scale) {
+void Surface::paint(PaintContext& context, float scale, Vec2 pixelOrigin) {
     updateLayout();
     const std::uint64_t paintedGeneration = mPaintRequestGeneration;
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
-    context.beginFrame();
+    PaintTarget target;
+    target.bounds = mViewport;
+    target.pixelOrigin = pixelOrigin;
+    target.scale = scale;
+    target.nativeAppearance = &effectiveNativeAppearance();
+    target.clipAA = AAIntent::Coverage;
+    context.beginFrame(target);
     context.pushClip(mViewport, scale);
     for (const RootList& layerRoots : mRoots)
         for (const auto& root : layerRoots) paintElement(*root, context, scale, 1.f, styles);
@@ -542,12 +567,25 @@ void Surface::paintElement(const Element& element, PaintContext& context, float 
         if (needsDirection) applyDirection(*paintedStorage, direction);
         painted = &*paintedStorage;
     }
+    const bool paintsBodyCanvasBackground = element.elementName() == "body"
+        && !originalParent
+        && (painted->backgroundColor.a > 0.f || painted->backgroundGradient.has_value());
     const bool clipsX = unresolved.overflowX != Overflow::Visible;
     const bool clipsY = unresolved.overflowY != Overflow::Visible;
     const bool clipsChildren = clipsX || clipsY;
     const ClipAxes clipAxes = (clipsX ? ClipAxes::X : ClipAxes::NoAxes) | (clipsY ? ClipAxes::Y : ClipAxes::NoAxes);
     if (!painted->effects.empty()) context.beginEffects(element.paintBounds(), *painted, scale);
-    element.paint(context, *painted, scale);
+    if (paintsBodyCanvasBackground) {
+        Style canvasBackground;
+        canvasBackground.backgroundColor = painted->backgroundColor;
+        canvasBackground.backgroundGradient = painted->backgroundGradient;
+        context.paintBox(mViewport, canvasBackground);
+
+        Style bodyStyle = *painted;
+        bodyStyle.backgroundColor = Color(0.f, 0.f, 0.f, 0.f);
+        bodyStyle.backgroundGradient.reset();
+        element.paint(context, bodyStyle, scale);
+    } else element.paint(context, *painted, scale);
     const auto isParentStillValid = [&] {
         const Element* currentElement = lifetime.get();
         return currentElement
@@ -561,7 +599,7 @@ void Surface::paintElement(const Element& element, PaintContext& context, float 
     if (isParentStillValid()) {
         if (clipsChildren) {
             context.pushClip(detail::ElementInternalAccess::scrollport(element), scale, clipAxes);
-            context.pushTranslation({-element.scrollLeft(), element.scrollTop()});
+            context.pushTranslation(scrollContentTranslation(layoutDirection(), {element.scrollLeft(), element.scrollTop()}));
         }
         Style textStyle;
         inheritStyle(textStyle, *painted);
@@ -591,12 +629,12 @@ void Surface::paintElement(const Element& element, PaintContext& context, float 
         if (geometry.horizontal.visible || geometry.vertical.visible || geometry.hasCorner) {
             NativeScrollbarPaintRequest request;
             request.geometry = geometry;
-            request.metrics = mScrollbarMetrics;
             request.colors = painted->scrollbarColor;
             request.mode = painted->scrollbarModeSet ? painted->scrollbarMode : mScrollLayoutOptions.scrollbarMode;
+            request.metrics = scrollbarMetrics(request.mode);
             request.direction = painted->direction;
             request.scale = scale;
-            request.appearanceRevision = mNativeAppearanceRevision;
+            request.appearanceRevision = effectiveNativeAppearance().revision();
             if (const Element* clipOwner = scrollbarClipOwner(element, *painted)) {
                 const Style* clipStyle = clipOwner == &element ? painted : &styles.style(*clipOwner);
                 request.clip.enabled = true;

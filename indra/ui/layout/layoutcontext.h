@@ -11,14 +11,17 @@
 #include <vector>
 #include "layout/engine.h"
 #include "layout/primitives.h"
+#include "nativeappearance.h"
 #include "style/stylepass.h"
 
 namespace radia::ui {
 class LayoutPass {
 public:
-    LayoutPass(const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction = LayoutDirection::LeftToRight,
-               ScrollLayoutOptions scrollOptions = {})
-        : mOwnedStyles(std::in_place, styleSheet, textMetrics, direction), mStyles(*mOwnedStyles), mScrollOptions(scrollOptions) {}
+    LayoutPass(const StyleSheet& styleSheet, const TextMetrics& textMetrics,
+               LayoutDirection direction = LayoutDirection::LeftToRight, ScrollLayoutOptions scrollOptions = {})
+        : mOwnedStyles(std::in_place, styleSheet, textMetrics, direction, scrollOptions.nativeAppearance),
+          mStyles(*mOwnedStyles),
+          mScrollOptions(scrollOptions) {}
     explicit LayoutPass(StylePass& styles, ScrollLayoutOptions scrollOptions = {}) : mStyles(styles), mScrollOptions(scrollOptions) {}
     LayoutPass(const LayoutPass&) = delete;
     LayoutPass& operator=(const LayoutPass&) = delete;
@@ -28,13 +31,19 @@ public:
     LayoutContextKey contextKey() const {
         LayoutContextKey result = mStyles.contextKey();
         result.scrollbarMode = mScrollOptions.scrollbarMode;
-        result.scrollbarThickness = std::max(0.f, mScrollOptions.scrollbarThickness);
+        const NativeAppearance& appearance = nativeAppearance();
+        result.nativeAppearance = &appearance;
+        result.nativeAppearanceRevision = appearance.revision();
         return result;
     }
     const StyleSheet& styleSheet() const { return mStyles.styleSheet(); }
     const TextMetrics& textMetrics() const { return mStyles.textMetrics(); }
     LayoutDirection direction() const { return mStyles.direction(); }
     const ScrollLayoutOptions& scrollLayoutOptions() const { return mScrollOptions; }
+    const NativeAppearance& nativeAppearance() const {
+        return mScrollOptions.nativeAppearance ? *mScrollOptions.nativeAppearance : defaultNativeAppearance();
+    }
+    NativeScrollbarMetrics scrollbarMetrics(ScrollbarMode mode) const { return nativeAppearance().scrollbarMetrics(mode); }
     void recordMeasured(bool constrained) {
         ++mStatistics.measuredNodes;
         if (constrained) ++mStatistics.constrainedRemeasures;

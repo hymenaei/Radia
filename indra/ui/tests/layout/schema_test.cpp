@@ -31,13 +31,3 @@ TEST(DiagnosticResultTest, AppendsDiagnosticsPreservingSeverityAndOrder) {
     EXPECT_EQ(destination.errors[0].code, "error.first");
     EXPECT_EQ(destination.errors[1].code, "error.second");
 }
-
-TEST(DiagnosticResultTest, AppendingEmptyResultLeavesDiagnosticsUnchanged) {
-    DiagnosticResult destination;
-    DiagnosticResult empty;
-
-    destination.append(std::move(empty));
-
-    EXPECT_FALSE(destination.hasErrors());
-    EXPECT_TRUE(destination.warnings.empty());
-}

@@ -66,20 +66,9 @@ protected:
 
 private:
     static bool isCheckableType(std::string_view type);
-    static Color nativeControlFill(bool selected, bool disabled);
-    static Color nativeControlBorder(bool disabled);
-    static Color nativeControlMark(bool disabled);
-    static Style nativeControlStyle(const Style& source, Color background, Color border, float radius, bool bordered = true);
-    static Style nativeMarkStyle(const Style& source, Color color, float radius = 0.f);
     bool isCheckboxType() const;
     bool isRadioType() const;
     bool isSwitchType() const;
-    Vec2 nativeCheckboxIntrinsicSize() const;
-    Vec2 nativeSwitchIntrinsicSize() const;
-    Vec2 nativeRadioIntrinsicSize() const;
-    void paintNativeCheckbox(PaintContext& context, const Style& style, float scale) const;
-    void paintNativeSwitch(PaintContext& context, const Style& style, float scale) const;
-    void paintNativeRadio(PaintContext& context, const Style& style, float scale) const;
     void activateCheckbox();
     void activateRadio();
     void activateSwitch();

@@ -8,21 +8,31 @@
 #include <algorithm>
 #include <utility>
 #include "elements/element.h"
+#include "nativeappearance.h"
 #include "style/stylesheet.h"
 #include "text/metrics.h"
 
 namespace radia::ui {
 namespace {
-LayoutContextKey makeContextKey(const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction) {
-    return {&styleSheet, &textMetrics, styleSheet.generation(), textMetrics.generation(), direction};
+LayoutContextKey makeContextKey(const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction,
+                                const NativeAppearance* nativeAppearance) {
+    const NativeAppearance& appearance = nativeAppearance ? *nativeAppearance : defaultNativeAppearance();
+    LayoutContextKey result{&styleSheet, &textMetrics, styleSheet.generation(), textMetrics.generation(), direction};
+    result.nativeAppearance = &appearance;
+    result.nativeAppearanceRevision = appearance.revision();
+    return result;
 }
 } // namespace
 
-StylePass::StylePass(const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction)
-    : mStyleSheet(styleSheet), mTextMetrics(textMetrics), mDirection(direction), mContext(makeContextKey(styleSheet, textMetrics, direction)) {}
+StylePass::StylePass(const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction,
+                     const NativeAppearance* nativeAppearance)
+    : mStyleSheet(styleSheet), mTextMetrics(textMetrics), mDirection(direction),
+      mNativeAppearance(nativeAppearance ? nativeAppearance : &defaultNativeAppearance()),
+      mContext(makeContextKey(styleSheet, textMetrics, direction, mNativeAppearance)) {}
 
-bool StylePass::matches(const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction) const {
-    return mContext == makeContextKey(styleSheet, textMetrics, direction);
+bool StylePass::matches(const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction,
+                        const NativeAppearance* nativeAppearance) const {
+    return mContext == makeContextKey(styleSheet, textMetrics, direction, nativeAppearance);
 }
 
 void StylePass::beginTraversal() {
@@ -86,7 +96,6 @@ const Style& StylePass::style(const Element& element) {
         }
         resolved = mStyleSheet.resolveElementPart(*owner, element, mDirection);
     }
-    element.constrainResolvedStyle(resolved);
     const Element* current = styledRef.get();
     const auto transient = [&]() -> const Style& {
         mStyleStorage.emplace_back(std::move(resolved));
@@ -101,6 +110,8 @@ const Style& StylePass::style(const Element& element) {
         if (!current || !currentParent || !elementSnapshot.styleValid() || !parentSnapshot.styleValid()) return transient();
         inheritStyle(resolved, parentStyle);
     }
+    element.constrainResolvedStyle(resolved);
+    resolveLightDarkColors(resolved);
 
     current = styledRef.get();
     if (!current || !elementSnapshot.styleValid()) return transient();

@@ -8,8 +8,10 @@
 #include "binding/binder.h"
 #include "elements/elementdefinition.h"
 #include "layout/schema.h"
+#include "nativeappearance.h"
 #include "render/paintcontext.h"
 #include "style/style.h"
+#include "surface/surface.h"
 
 namespace radia::ui {
 bool InputElement::isCheckableType(std::string_view type) {
@@ -31,49 +33,16 @@ bool InputElement::isSwitchType() const {
 
 InputElement::InputElement() : Element("input") {}
 
-Color InputElement::nativeControlFill(bool selected, bool disabled) {
-    const Color color = selected ? Color(.12f, .42f, .86f) : Color(.97f, .97f, .97f);
-    return disabled ? color.withAlpha(.55f) : color;
-}
-
-Color InputElement::nativeControlBorder(bool disabled) {
-    const Color color(.35f, .35f, .35f);
-    return disabled ? color.withAlpha(.55f) : color;
-}
-
-Color InputElement::nativeControlMark(bool disabled) {
-    const Color color(1.f, 1.f, 1.f);
-    return disabled ? color.withAlpha(.65f) : color;
-}
-
-Style InputElement::nativeControlStyle(const Style& source, Color background, Color border, float radius, bool bordered) {
-    Style result = source;
-    result.backgroundColor = background;
-    result.backgroundGradient.reset();
-    result.borderColor = border;
-    result.borderGradient.reset();
-    result.borderWidth = bordered ? EdgeInsets{1.f, 1.f, 1.f, 1.f} : EdgeInsets{};
-    result.borderRadius = BorderRadii::uniform(Length{radius});
-    result.shadows.clear();
-    return result;
-}
-
-Style InputElement::nativeMarkStyle(const Style& source, Color color, float radius) {
-    Style result = source;
-    result.backgroundColor = color;
-    result.backgroundGradient.reset();
-    result.borderColor = color;
-    result.borderGradient.reset();
-    result.borderWidth = {};
-    result.borderRadius = BorderRadii::uniform(Length{radius});
-    result.shadows.clear();
-    return result;
-}
-
-Vec2 InputElement::intrinsicSize(const StyleSheet&, const Style& style, const TextMetrics&, const IntrinsicSizeConstraints&) const {
+Vec2 InputElement::intrinsicSize(const StyleSheet&, const Style& style, const TextMetrics&, const IntrinsicSizeConstraints& constraints) const {
     if (style.appearance == AppearanceMode::Unstyled || !isCheckableType(mType)) return {};
-    if (isRadioType()) return nativeRadioIntrinsicSize();
-    return isSwitchType() ? nativeSwitchIntrinsicSize() : nativeCheckboxIntrinsicSize();
+    const NativeInputControl control = isRadioType() ? NativeInputControl::Radio
+        : isSwitchType()                             ? NativeInputControl::Switch
+                                                     : NativeInputControl::Checkbox;
+    const Surface* owner = surface();
+    const NativeAppearance& appearance = constraints.nativeAppearance ? *constraints.nativeAppearance
+        : owner                                                       ? owner->nativeAppearance()
+                                                                      : defaultNativeAppearance();
+    return appearance.inputMetrics(control).intrinsicSize;
 }
 
 void InputElement::paint(PaintContext& context, const Style& style, float scale) const {
@@ -82,9 +51,20 @@ void InputElement::paint(PaintContext& context, const Style& style, float scale)
         return;
     }
 
-    if (isRadioType()) paintNativeRadio(context, style, scale);
-    else if (isSwitchType()) paintNativeSwitch(context, style, scale);
-    else paintNativeCheckbox(context, style, scale);
+    NativeInputPaintRequest request;
+    request.control = isRadioType() ? NativeInputControl::Radio : isSwitchType() ? NativeInputControl::Switch : NativeInputControl::Checkbox;
+    request.bounds = rect();
+    request.checked = checked();
+    request.indeterminate = indeterminate();
+    request.disabled = disabled();
+    request.hovered = hasState(ElementState::Hovered);
+    request.pressed = hasState(ElementState::Active);
+    if (style.accentColor.kind == AccentColor::Kind::CurrentColor) request.accentColor = style.color;
+    else if (style.accentColor.kind == AccentColor::Kind::Color) request.accentColor = style.accentColor.color;
+    request.colorScheme = style.colorScheme;
+    request.direction = style.direction;
+    request.scale = scale;
+    context.paintNativeInput(request);
 }
 
 InputElement& InputElement::type(std::string type) {

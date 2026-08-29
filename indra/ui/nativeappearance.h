@@ -6,15 +6,18 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
+#include <optional>
+#include "path.h"
 #include "style/style.h"
 #include "surface/scrollgeometry.h"
 
 namespace radia::ui {
 struct NativeScrollbarMetrics {
-    float thickness = 15.f;
-    float minimumThumbLength = 20.f;
-    float arrowLength = 15.f;
-    float thumbPadding = 3.f;
+    float thickness;
+    float minimumThumbLength;
+    float arrowLength;
+    float thumbPadding;
 };
 
 struct NativeScrollbarState {
@@ -32,7 +35,7 @@ struct NativeScrollbarClip {
 
 struct NativeScrollbarPaintRequest {
     ScrollGeometry geometry;
-    NativeScrollbarMetrics metrics;
+    NativeScrollbarMetrics metrics{};
     ScrollbarColors colors;
     NativeScrollbarClip clip;
     ScrollbarMode mode = ScrollbarMode::Classic;
@@ -43,21 +46,90 @@ struct NativeScrollbarPaintRequest {
     std::uint64_t appearanceRevision = 1;
 };
 
+struct NativeScrollbarPaintStyle {
+    Color track;
+    Color thumb;
+    Color startArrow;
+    Color endArrow;
+    float thumbRadius = 0.f;
+};
+
+enum class NativeInputControl : std::uint8_t { Checkbox, Radio, Switch };
+
+enum class NativeInputMark : std::uint8_t { Check, Dash };
+
+struct NativeInputMarkPaintRequest {
+    NativeInputMark mark = NativeInputMark::Check;
+    Rect bounds;
+    Color color;
+    float strokeWidth = 0.f;
+    float radius = 0.f;
+    float scale = 1.f;
+    Path path;
+};
+
+class NativeControlPaintContext {
+public:
+    virtual ~NativeControlPaintContext() = default;
+    virtual void paintNativeBox(const Rect& rect, const Style& style) = 0;
+    virtual void paintNativeInputMark(const NativeInputMarkPaintRequest&) = 0;
+};
+
+struct NativeInputMetrics {
+    Vec2 intrinsicSize;
+};
+
+struct NativeInputPaintRequest {
+    NativeInputControl control = NativeInputControl::Checkbox;
+    Rect bounds;
+    bool checked = false;
+    bool indeterminate = false;
+    bool disabled = false;
+    bool hovered = false;
+    bool pressed = false;
+    std::optional<Color> accentColor;
+    ColorScheme colorScheme = ColorScheme::Auto;
+    LayoutDirection direction = LayoutDirection::LeftToRight;
+    float scale = 1.f;
+};
+
+struct NativeButtonPaintRequest {
+    Rect bounds;
+    Style style;
+    bool disabled = false;
+    bool hovered = false;
+    bool pressed = false;
+    bool focused = false;
+    bool focusVisible = false;
+    float scale = 1.f;
+};
+
 class NativeAppearance {
 public:
     virtual ~NativeAppearance() = default;
-    virtual NativeScrollbarMetrics scrollbarMetrics(ScrollbarMode mode) const = 0;
-    virtual std::uint64_t revision() const noexcept = 0;
+    virtual NativeScrollbarMetrics scrollbarMetrics(ScrollbarMode) const = 0;
+    virtual NativeScrollbarPaintStyle scrollbarPaintStyle(const NativeScrollbarPaintRequest&, ScrollbarAxis) const = 0;
+    virtual NativeInputMetrics inputMetrics(NativeInputControl) const = 0;
+    virtual void paintInput(NativeControlPaintContext&, const NativeInputPaintRequest&) const = 0;
+    virtual void paintButton(NativeControlPaintContext&, const NativeButtonPaintRequest&) const = 0;
+    virtual std::uint64_t revision() const noexcept { return 1; }
 };
 
-class FallbackNativeAppearance final : public NativeAppearance {
+class NativeAppearanceBase : public NativeAppearance {
 public:
-    explicit FallbackNativeAppearance(NativeScrollbarMetrics metrics = {}) : mMetrics(metrics) {}
+    NativeAppearanceBase();
+    explicit NativeAppearanceBase(NativeScrollbarMetrics metrics);
 
-    NativeScrollbarMetrics scrollbarMetrics(ScrollbarMode) const override { return mMetrics; }
-    std::uint64_t revision() const noexcept override { return 1; }
+    NativeScrollbarMetrics scrollbarMetrics(ScrollbarMode) const override;
+    NativeScrollbarPaintStyle scrollbarPaintStyle(const NativeScrollbarPaintRequest&, ScrollbarAxis) const override;
+    NativeInputMetrics inputMetrics(NativeInputControl) const override;
+    void paintInput(NativeControlPaintContext&, const NativeInputPaintRequest&) const override;
+    void paintButton(NativeControlPaintContext&, const NativeButtonPaintRequest&) const override;
 
 private:
-    NativeScrollbarMetrics mMetrics;
+    NativeScrollbarMetrics mScrollbarMetrics;
 };
+
+const NativeAppearance& defaultNativeAppearance();
+std::shared_ptr<const NativeAppearance> makeDefaultNativeAppearance();
 } // namespace radia::ui

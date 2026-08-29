@@ -54,7 +54,8 @@ std::optional<std::size_t> topLevelDelimiter(const std::string& value, std::size
 }
 
 bool isColorValue(const std::string& value) {
-    return isColorSyntax(value) || startsWith(value, "var(");
+    const std::string lowered = lower(trim(value));
+    return isColorSyntax(lowered) || startsWith(lowered, "var(");
 }
 
 bool isSupportedState(const std::string& state) {
@@ -98,6 +99,10 @@ void parsePseudoClasses(std::string& token, StyleSelector& result) {
         }
 
         const std::string pseudoClass = pseudoClasses.substr(start, position - start);
+        if (lower(trim(pseudoClass)) == "root") {
+            result.root = true;
+            continue;
+        }
         const std::size_t open = pseudoClass.find('(');
         if (open != std::string::npos && lower(trim(pseudoClass.substr(0, open))) == "dir") {
             if (pseudoClass.size() <= open + 1 || pseudoClass.back() != ')') {
@@ -186,6 +191,7 @@ std::string importChain(const std::vector<std::string>& stack, const std::option
 StyleSelector mergeSelector(const StyleSelector& parent, const StyleSelector& child) {
     StyleSelector result;
     result.universal = child.universal ? true : parent.universal;
+    result.root = parent.root || child.root;
     result.attributeSyntaxInvalid = parent.attributeSyntaxInvalid || child.attributeSyntaxInvalid;
     result.directionSyntaxInvalid = parent.directionSyntaxInvalid || child.directionSyntaxInvalid;
     result.element = child.element.empty() ? parent.element : child.element;
@@ -363,11 +369,11 @@ public:
         std::vector<VisitEntry> moduleVisits;
         collectModules(resourceId, importStack, moduleVisits);
 
-        const auto emit = [&](const VisitEntry& entry, bool emitTokenRules) {
+        const auto emit = [&](const VisitEntry& entry, StyleParsePass pass) {
             for (const ParsedRuleBlock& rule : entry.module->rules) {
-                if ((rule.selector == ":root") != emitTokenRules) continue;
+                if (pass == StyleParsePass::Tokens && rule.selector != ":root") continue;
                 const std::size_t firstError = mResult.errors.size();
-                callback(rule, entry.module->sourceName);
+                callback(rule, entry.module->sourceName, pass);
                 if (entry.importChain.size() > 1) {
                     for (std::size_t index = firstError; index < mResult.errors.size(); ++index)
                         if (mResult.errors[index].message.find("Import chain:") == std::string::npos
@@ -376,8 +382,8 @@ public:
                 }
             }
         };
-        for (const VisitEntry& entry : moduleVisits) emit(entry, true);
-        for (const VisitEntry& entry : moduleVisits) emit(entry, false);
+        for (const VisitEntry& entry : moduleVisits) emit(entry, StyleParsePass::Tokens);
+        for (const VisitEntry& entry : moduleVisits) emit(entry, StyleParsePass::Rules);
     }
 
 private:
@@ -523,7 +529,7 @@ std::vector<std::string> detail::splitPartPath(const std::string& part) {
 StyleRule detail::parseSelector(const std::string& selector) {
     StyleRule rule;
     const std::string input = trim(selector);
-    if (input.empty() || input == ":root") return rule;
+    if (input.empty()) return rule;
 
     std::size_t position = 0;
     SelectorCombinator pending = SelectorCombinator::Descendant;
@@ -556,7 +562,7 @@ StyleSheetLoadResult StyleSheet::loadRadiaLayers(const std::vector<StyleLayer>& 
         result.error("stylesheet.layers.empty", "No stylesheet layers were provided.");
         return result;
     }
-    // Root tokens are applied while parsing, so their layer order must match rule precedence.
+    // Root tokens are collected before ordinary declarations, while the rules pass preserves source order.
     std::vector<StyleLayer> orderedLayers = layers;
     std::stable_sort(orderedLayers.begin(), orderedLayers.end(), [](const StyleLayer& left, const StyleLayer& right) {
         return static_cast<std::uint8_t>(left.origin) < static_cast<std::uint8_t>(right.origin);
@@ -568,8 +574,8 @@ StyleSheetLoadResult StyleSheet::loadRadiaLayers(const std::vector<StyleLayer>& 
         graph.build(entrypoint);
         if (result.hasErrors()) continue;
 
-        auto compileModule = [&](const ParsedRuleBlock& rule, const std::string& sourceName) {
-            candidate.parseBlock(rule.selector, rule.body, {}, styleLayer.origin, result, sourceName);
+        auto compileModule = [&](const ParsedRuleBlock& rule, const std::string& sourceName, StyleParsePass pass) {
+            candidate.parseBlock(rule.selector, rule.body, {}, styleLayer.origin, pass, result, sourceName);
         };
         graph.visit(entrypoint, compileModule);
     }
@@ -730,7 +736,7 @@ private:
     std::size_t mPosition = 0;
 };
 
-void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& selector, const std::string& body, bool rootRule,
+void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& selector, const std::string& body, bool rootRule, StyleParsePass pass,
                    StyleSheetLoadResult& result, const std::string& sourceName) {
     std::vector<StyleDeclaration> declarations;
     const auto addDeclaration = [&](const std::string& declaration) {
@@ -750,6 +756,7 @@ void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& select
                 result.error("stylesheet.token.root_required", "Style Tokens may be declared only in :root: " + name + ".", sourceName);
                 return;
             }
+            if (pass == StyleParsePass::Rules) return;
             if (isColorValue(value)) {
                 const Color marker(-1.f, -1.f, -1.f, -1.f);
                 const Color parsed = model.parseColorValue(value, marker);
@@ -764,13 +771,14 @@ void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& select
             }
             return;
         }
+        if (pass == StyleParsePass::Tokens) return;
         const detail::StylePropertyDefinition* descriptor = detail::findStyleProperty(name);
         if (!descriptor) {
             result.error("stylesheet.property.unknown", "Unknown property: " + name + ".", sourceName);
             return;
         }
-        if (rootRule) {
-            result.error("stylesheet.property.root_unsupported", "Ordinary properties are not allowed in :root: " + name + ".", sourceName);
+        if (descriptor->defaultOnly && rule.origin != StyleOrigin::Default) {
+            result.warning("stylesheet.property.ua_only", "Ignoring UA-only property outside the default stylesheet: " + name + ".", sourceName);
             return;
         }
         if (auto compiled = model.compileDeclaration(*descriptor, value, selector, result, sourceName))
@@ -784,8 +792,10 @@ void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& select
                 result.error("stylesheet.syntax.unclosed_block", "Nested rule block is not closed.", sourceName);
                 break;
             }
-            model.parseBlock(trim(body.substr(fragment->start, *fragment->open - fragment->start)),
-                             body.substr(*fragment->open + 1, *fragment->close - *fragment->open - 1), rule, rule.origin, result, sourceName);
+            if (pass == StyleParsePass::Rules)
+                model.parseBlock(trim(body.substr(fragment->start, *fragment->open - fragment->start)),
+                                 body.substr(*fragment->open + 1, *fragment->close - *fragment->open - 1), rule, rule.origin, pass, result,
+                                 sourceName);
             continue;
         }
         addDeclaration(body.substr(fragment->start, fragment->end - fragment->start));
@@ -798,11 +808,11 @@ void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& select
 } // namespace
 
 void StyleModel::parseBlock(const std::string& selectorText, const std::string& body, const StyleRule& parent, StyleOrigin origin,
-                            StyleSheetLoadResult& result, const std::string& sourceName) {
+                            StyleParsePass pass, StyleSheetLoadResult& result, const std::string& sourceName) {
     const std::vector<std::string> selectors = splitSelectorList(selectorText);
     if (selectors.size() > 1) {
         for (const std::string& selector : selectors)
-            if (!selector.empty()) parseBlock(selector, body, parent, origin, result, sourceName);
+            if (!selector.empty()) parseBlock(selector, body, parent, origin, pass, result, sourceName);
         return;
     }
 
@@ -811,13 +821,13 @@ void StyleModel::parseBlock(const std::string& selectorText, const std::string& 
     StyleRule rule = nested ? expandNestedSelector(parent, selector) : detail::parseSelector(selector);
     rule.origin = origin;
     const bool rootRule = !nested && selector == ":root";
-    if (!rootRule && rule.selectors.empty()) {
+    if (rule.selectors.empty()) {
         result.error("stylesheet.selector.empty", "Rule selector is empty.", sourceName);
         return;
     }
 
     if (!validateSelector(rule, selector, result, sourceName)) return;
 
-    parseRuleBody(*this, rule, selector, body, rootRule, result, sourceName);
+    parseRuleBody(*this, rule, selector, body, rootRule, pass, result, sourceName);
 }
 } // namespace radia::ui

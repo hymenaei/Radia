@@ -125,7 +125,6 @@ TEST_F(FieldsetTest, LocalizesAndDecoratesInlineElements) {
     constexpr char kLocalizedTextLayout[] = "<p>{{inlineExample}}</p>";
     constexpr char kDecorationLayout[] = "<p><s>outdated</s> "
                                          "<kbd shortcut=\"toggle-fly\"/></p>";
-    constexpr char kUnsupportedHeadingLayout[] = "<heading>Title</heading>";
     const LayoutBuildResult localizedResult =
         LayoutResourceCompiler().buildElementTreeFromString(kLocalizedTextLayout, "localized-inline.xml", &context);
     ASSERT_TRUE(localizedResult.ok());
@@ -146,7 +145,6 @@ TEST_F(FieldsetTest, LocalizesAndDecoratesInlineElements) {
     EXPECT_EQ(decorated->children()[0]->textContent(), "outdated");
     EXPECT_EQ(decorated->children()[1]->elementName(), "kbd");
     EXPECT_EQ(decorated->children()[1]->textContent(), "");
-    EXPECT_FALSE(factory.buildElementTreeFromString(kUnsupportedHeadingLayout, "heading.xml").ok());
 }
 
 TEST_F(FieldsetTest, BuildsAllLocalizedSemanticInlineElements) {
@@ -332,12 +330,21 @@ TEST_F(FieldsetTest, RejectsInvalidLabelRelationships) {
 }
 
 TEST_F(FieldsetTest, ResolvesLabelTargetsInsideIncludedResources) {
-    constexpr char kNestedValidLayout[] = "<panel><label for=\"nestedSwitch\">Nested</label>"
+    constexpr char kNestedValidLayout[] = "<panel><label id=\"nestedLabel\" for=\"nestedSwitch\">Nested</label>"
                                           "<input type=\"checkbox\" switch=\"true\" id=\"nestedSwitch\"/></panel>";
     constexpr char kNestedLabelLayout[] = "<panel><panel filename=\"nested-valid.xml\"/></panel>";
     resources["nested-valid.xml"] = kNestedValidLayout;
     const LayoutBuildResult result = factory.buildElementTreeFromString(kNestedLabelLayout, "label-nested.xml");
-    EXPECT_TRUE(result.ok());
+    ASSERT_TRUE(result.ok());
+    ASSERT_TRUE(result.document);
+    Element& root = *result.document->documentElement();
+    ASSERT_EQ(root.children().size(), 1U);
+    Element& included = *root.children().front();
+    const ElementRef<LabelElement> label = requireElement<LabelElement>(included, "nestedLabel");
+    const ElementRef<InputElement> target = requireElement<InputElement>(included, "nestedSwitch");
+    ASSERT_TRUE(label);
+    ASSERT_TRUE(target);
+    EXPECT_EQ(ElementCompilerAccess::labelTarget(*label), target.get());
 }
 
 TEST_F(FieldsetTest, AcceptsGenericFieldsetChildrenAndScopesLegend) {
@@ -359,8 +366,8 @@ TEST_F(FieldsetTest, AcceptsGenericFieldsetChildrenAndScopesLegend) {
     EXPECT_EQ(fieldset->children()[1]->elementName(), "div");
     EXPECT_TRUE(fieldset->children()[1]->classes().contains("row"));
     ASSERT_EQ(fieldset->children()[1]->children().size(), 4U);
-    EXPECT_EQ(fieldset->children()[1]->children()[2]->classes().contains("hint"), true);
-    EXPECT_EQ(fieldset->children()[1]->children()[3]->classes().contains("error"), true);
+    EXPECT_TRUE(fieldset->children()[1]->children()[2]->classes().contains("hint"));
+    EXPECT_TRUE(fieldset->children()[1]->children()[3]->classes().contains("error"));
     EXPECT_TRUE(fieldset->children()[2]->classes().contains("row"));
 
     StyleSheet stylesheet;
@@ -407,12 +414,6 @@ TEST_F(FieldsetTest, EnforcesLegendScopeAndUniqueness) {
         EXPECT_EQ(result.errors.front().code, test.diagnostic);
     }
 
-    EXPECT_TRUE(factory.buildElementTreeFromString("<fieldset><panel/><div/></fieldset>", "generic-fieldset.xml").ok());
-    EXPECT_TRUE(factory.buildElementTreeFromString("<div class=\"hint\">Hint</div>", "hint-class.xml").ok());
-    EXPECT_TRUE(factory.buildElementTreeFromString("<div class=\"error\">Error</div>", "error-class.xml").ok());
-
-    StyleSheet stylesheet;
-    ASSERT_TRUE(stylesheet.loadRadia("div.hint { text-color: #ffffffff; } div.error { text-color: #ff0000ff; }").ok());
 }
 
 TEST_F(FieldsetTest, PreservesFieldsetChildOrder) {

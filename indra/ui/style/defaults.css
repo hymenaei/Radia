@@ -1,3 +1,5 @@
+:focus-visible { outline: light-dark(#101010, #FFFFFF) solid 1px; }
+
 input {
     appearance: auto;
     display: inline-block;
@@ -17,16 +19,41 @@ input[switch] {
 }
 
 button {
-    display: flex;
-    flex-direction: row;
-    justify-content: center;
-    vertical-align: middle;
+    appearance: auto;
+    -internal-align-content-block: center;
+    display: inline-block;
+    cursor: default;
+    padding: 1px 6px;
+    border: 1px solid light-dark(#767676, #6b6b6b);
+    border-radius: 2px;
+    background-color: light-dark(#efefef, #6b6b6b);
+    color: light-dark(#101010, #ffffff);
+    box-sizing: border-box;
+    text-align: center;
+
+    &:hover {
+        background-color: light-dark(#e5e5e5, #7b7b7b);
+        border-color: light-dark(#4f4f4f, #7b7b7b);
+    }
+    &:active {
+        background-color: light-dark(#f5f5f5, #616161);
+        border-color: light-dark(#8d8d8d, #616161);
+    }
+    &:disabled {
+        background-color: light-dark(rgb(239 239 239 / 0.3), #363636 );
+        color: light-dark(rgb(16 16 16 / 0.3), rgb(255 255 255 / 0.3));
+        border-color: light-dark(rgb(118 118 118 / 0.3), #363636);
+    }
 }
 
-div, p { display: block; }
+
+:root { background-color: light-dark(#ffffff, #121212); }
+head, body { padding: 8px; }
+head { display: inline; }
+body, div, p { display: block; }
 b, strong { font-weight: bold; }
 i, em, cite, dfn { font-style: italic; }
 s, del { text-decoration: line-through; }
 u, ins { text-decoration: underline; }
-mark { background-color: #fff59dff; }
+mark { background-color: #ffff00; }
 small { font-size: 11px; }

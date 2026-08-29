@@ -52,6 +52,10 @@ struct MainAxisAllocation {
 };
 
 float styledDimension(const Dimension& value, const std::optional<Length>& minimum, float fallback, float reference = 0.f);
+float styledBoxDimension(const Style& style, bool horizontal, const Dimension& value, const std::optional<Length>& minimum, float fallback,
+                         float reference = 0.f);
+float minimumBoxDimension(const Style& style, bool horizontal, const std::optional<Length>& minimum, float reference);
+float contentBoxDimension(const Style& style, bool horizontal, float borderBoxSize);
 bool isInlineLevel(DisplayMode display);
 const Style& emptyChildStyle();
 ChildLayout invalidChildLayout();
@@ -69,6 +73,7 @@ float verticalAlignmentOffset(VerticalAlign alignment, float freeSpace);
 CrossAlignment crossAlignment(const Style& parent, const Style& child, FlexDirection flexDirection);
 void applyCrossAxisSizing(Vec2& size, const Style& style, FlexDirection flexDirection, float availableCross, CrossAlignment alignment);
 float rowAlignmentOffset(JustifyContent alignment, LayoutDirection direction, float freeSpace);
+float textAlignmentOffset(TextAlign alignment, LayoutDirection direction, float freeSpace);
 float justifySelfOffset(JustifySelf alignment, LayoutDirection direction, float freeSpace);
 struct GridTrackSizes {
     std::vector<float> columns;

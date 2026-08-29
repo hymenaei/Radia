@@ -90,7 +90,7 @@ class LLTexture ;
 class TestImageProvider : public LLImageProviderInterface
 {
 public:
-    /*virtual*/ LLPointer<LLUIImage> getUIImage(const std::string& name, S32 priority)
+    /*virtual*/ LLPointer<LLUIImage> getUIImage(std::string_view name, S32 priority)
     {
         return makeImage();
     }
@@ -121,7 +121,9 @@ TestImageProvider gTestImageProvider;
 void init_llui()
 {
     // Font lookup needs directory support
-#if LL_DARWIN
+#ifdef LLUI_LIBTEST_NEWVIEW_PATH
+    const char* newview_path = LLUI_LIBTEST_NEWVIEW_PATH;
+#elif LL_DARWIN
     const char* newview_path = "../../../../newview";
 #else
     const char* newview_path = "../../../newview";
@@ -133,7 +135,7 @@ void init_llui()
     LLUIColorTable::instance().loadFromSettings();
 
     std::string config_filename = gDirUtilp->getExpandedFilename(LL_PATH_APP_SETTINGS, "settings.xml");
-    gSavedSettings.loadFromFile(config_filename);
+    gSavedSettings.loadFromFile(config_filename, true);
 
     // See LLAppViewer::init()
     LLUI::settings_map_t settings;
@@ -143,7 +145,7 @@ void init_llui()
     settings["account"] = &gSavedPerAccountSettings;
 
     // Don't use real images as we don't have a GL context
-    LLUI::initClass(settings, &gTestImageProvider);
+    LLUI::createInstance(settings, &gTestImageProvider, nullptr, nullptr);
 
     const bool no_register_widgets = false;
     LLWidgetReg::initClass( no_register_widgets );
@@ -218,7 +220,7 @@ void export_test_floaters()
 int main(int argc, char** argv)
 {
     // Must init LLError for llerrs to actually cause errors.
-    LLError::initForApplication(".");
+    LLError::initForApplication(".", ".");
 
     init_llui();
 

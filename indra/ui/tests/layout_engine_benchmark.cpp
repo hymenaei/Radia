@@ -228,6 +228,9 @@ struct StatisticsTotals {
 };
 
 void BM_Layout_RelayoutAfterResize(benchmark::State& state, LayoutCase layoutCase) {
+    // Measure CPU layout cost after a warmed fixture changes size. Fixture
+    // construction, stylesheet parsing, and the initial layout are excluded;
+    // the rectangle mutation is scenario setup rather than layout work.
     LayoutFixture fixture = makeFixture(layoutCase, static_cast<std::size_t>(state.range(0)));
     const auto& textMetrics = fixedTextMetrics();
     const Rect baseRect = fixture.root->rect();
@@ -250,6 +253,8 @@ void BM_Layout_RelayoutAfterResize(benchmark::State& state, LayoutCase layoutCas
 }
 
 void BM_Layout_CachedLayout(benchmark::State& state, LayoutCase layoutCase) {
+    // Measure the CPU cost of resolving a layout tree that has already reached
+    // its steady state. The first layout warms the cache and is not measured.
     LayoutFixture fixture = makeFixture(layoutCase, static_cast<std::size_t>(state.range(0)));
     const auto& textMetrics = fixedTextMetrics();
     LayoutStatistics warmup = layoutTree(*fixture.root, fixture.styleSheet, textMetrics, fixture.direction);
@@ -264,6 +269,9 @@ void BM_Layout_CachedLayout(benchmark::State& state, LayoutCase layoutCase) {
 }
 
 void BM_Layout_RelayoutAfterDirectionChange(benchmark::State& state, LayoutCase layoutCase) {
+    // Measure CPU layout cost when direction alternates between iterations.
+    // The direction transition is part of the workload represented by this
+    // family, while fixture construction and the initial layout are excluded.
     LayoutFixture fixture = makeFixture(layoutCase, static_cast<std::size_t>(state.range(0)));
     const auto& textMetrics = fixedTextMetrics();
     LayoutStatistics warmup = layoutTree(*fixture.root, fixture.styleSheet, textMetrics, LayoutDirection::LeftToRight);

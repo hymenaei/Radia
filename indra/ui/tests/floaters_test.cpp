@@ -8,7 +8,7 @@
 #include <gtest/gtest.h>
 #include <memory>
 #include <optional>
-#include "../floater_test_helpers.h"
+#include "floater_test_helpers.h"
 #include "binding/binder.h"
 #include "elements/button.h"
 #include "elements/elementinternal.h"

@@ -5,7 +5,7 @@
 
 #include "linden_common.h"
 #include <gtest/gtest.h>
-#include "../floater_test_helpers.h"
+#include "floater_test_helpers.h"
 #include "elements/button.h"
 #include "elements/elementdefinition.h"
 #include "elements/elementtext.h"

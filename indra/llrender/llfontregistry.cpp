@@ -2044,7 +2044,8 @@ bool LLFontRegistry::reload(const LLSD& font_overrides)
             head->mFontFreetype = fresh->mFontFreetype;
             head->mFontDescriptor = desc;
             storeFont(desc, head);
-            if (!desc.hasPointSize() || !LLFontGL::sEnableFontGpu) head->generateASCIIglyphs();
+            if (mCreateGLTextures && (!desc.hasPointSize() || !LLFontGL::sEnableFontGpu))
+                head->generateASCIIglyphs();
         }
         else
         {
@@ -2163,9 +2164,11 @@ LLFontGL *LLFontRegistry::getFont(const LLFontDescriptor& desc, bool prewarm_asc
                     <<" style=[" << ((S32) desc.getStyle()) << "]"
                     << " size=[" << desc.getSize() << "]" << LL_ENDL;
         }
-        else if (prewarm_ascii)
+        else if (prewarm_ascii && mCreateGLTextures)
         {
-            //generate glyphs for ASCII chars to avoid stalls later
+            // A no-GL registry uses fallback heads so it can provide font
+            // metrics to headless callers without touching the atlas.
+            // Rasterizing those heads would violate that contract.
             fontp->generateASCIIglyphs();
         }
         return fontp;

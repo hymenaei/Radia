@@ -2411,35 +2411,7 @@ target_include_directories(${VIEWER_BINARY_NAME} PUBLIC ${CMAKE_CURRENT_BINARY_D
 endif(BUILD_VIEWER)
 
 if (BUILD_TESTING)
-  set(viewer_GTEST_SOURCE_FILES
-    componentmanager.cpp
-    floaterhost.cpp
-    inputbridge.cpp
-    reloadcoordinator.cpp
-    resolver.cpp
-    runtime.cpp
-    settingsadapter.cpp
-    skinpreparation.cpp
-    workspacepersistence.cpp
-  )
-
-  ADD_UNIT_TESTS(${VIEWER_BINARY_NAME} "${viewer_GTEST_SOURCE_FILES}"
-    LINK_TARGETS
-    llcommon
-    llmath
-    llfilesystem
-    llmessage
-    llcharacter
-    llprimitive
-    llrender
-    llwindow
-    llxml
-    ui
-    IMPLEMENTATION_SOURCES
-    ${viewer_GTEST_SOURCE_FILES}
-    documentcontroller.cpp
-    resources.cpp
-  )
+  add_subdirectory(tests)
 
   # To add a viewer unit test, just add the test .cpp file below
   # This creates a separate test project per file listed.

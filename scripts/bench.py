@@ -1,28 +1,7 @@
 #!/usr/bin/env python3
 """\
-@file bench.py
-@brief Run, query, and compare Google Benchmark results.
-
-$LicenseInfo:firstyear=2026&license=viewerlgpl$
-Radia Viewer Source Code
-Copyright (C) 2026, Hymenaei
-
-This library is free software; you can redistribute it and/or
-modify it under the terms of the GNU Lesser General Public
-License as published by the Free Software Foundation;
-version 2.1 of the License only.
-
-This library is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-Lesser General Public License for more details.
-
-You should have received a copy of the GNU Lesser General Public
-License along with this library; if not, write to the Free Software
-Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02111-1301  USA
-
-Linden Research, Inc., 945 Battery Street, San Francisco, CA  94111  USA
-$/LicenseInfo$
+Copyright (C) 2026 Radia Viewer
+SPDX-License-Identifier: LGPL-2.1-only
 """
 
 import argparse
@@ -44,6 +23,17 @@ _COLORS = {
     "yellow": "\033[33m",
 }
 _RESET = "\033[0m"
+
+_RUNNER_CONTRACT_VERSION = 1
+_COMPARABLE_CONTEXT_FIELDS = (
+    "library_version",
+    "library_build_type",
+    "host_name",
+    "num_cpus",
+    "mhz_per_cpu",
+    "caches",
+    "json_schema_version",
+)
 
 
 def _use_color() -> bool:
@@ -183,6 +173,135 @@ def _read_google_benchmark_report(path: Path) -> dict:
     return report
 
 
+def _history_report(entry: dict) -> dict:
+    report = entry.get("report")
+    if not isinstance(report, dict) or not isinstance(report.get("benchmarks"), list):
+        raise ValueError("benchmark history contains an invalid Google Benchmark report")
+    return report
+
+
+def _benchmark_metadata(
+    executable: Path,
+    config: str,
+    benchmark_args: list[str],
+    metric: str,
+) -> dict:
+    return {
+        "runner_version": _RUNNER_CONTRACT_VERSION,
+        "target": executable.stem,
+        "binary": executable.name,
+        "config": config,
+        "metric": metric,
+        "arguments": list(benchmark_args),
+    }
+
+
+def _executable_name(value) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    return re.split(r"[\\/]", value)[-1] or None
+
+
+def _report_executable_identity(report: dict) -> tuple[str | None, str | None]:
+    context = report.get("context")
+    if not isinstance(context, dict):
+        return None, None
+
+    binary = _executable_name(context.get("executable"))
+    if binary is None:
+        return None, None
+    return binary, Path(binary).stem
+
+
+def _metadata_executable_identity(metadata: dict) -> tuple[str | None, str | None]:
+    binary = _executable_name(metadata.get("binary"))
+    target = metadata.get("target")
+    if not isinstance(target, str) or not target:
+        target = None
+    return binary, target
+
+
+def _comparison_mismatch_reasons(
+    current_report: dict,
+    baseline_report: dict,
+    current_metadata: dict,
+    baseline_metadata: dict | None,
+) -> list[str]:
+    if not isinstance(baseline_metadata, dict):
+        return ["baseline run metadata is unavailable"]
+
+    reasons = []
+    for field in ("runner_version", "config", "metric", "arguments"):
+        if field not in baseline_metadata:
+            reasons.append(f"baseline {field} metadata is missing")
+        elif field not in current_metadata:
+            reasons.append(f"current {field} metadata is missing")
+        elif baseline_metadata[field] != current_metadata[field]:
+            reasons.append(f"{field} changed")
+
+    current_report_binary, current_report_target = _report_executable_identity(current_report)
+    baseline_report_binary, baseline_report_target = _report_executable_identity(baseline_report)
+    current_metadata_binary, current_metadata_target = _metadata_executable_identity(current_metadata)
+    baseline_metadata_binary, baseline_metadata_target = _metadata_executable_identity(baseline_metadata)
+
+    for identity, metadata_binary, report_binary, metadata_target, report_target in (
+        (
+            "current",
+            current_metadata_binary,
+            current_report_binary,
+            current_metadata_target,
+            current_report_target,
+        ),
+        (
+            "baseline",
+            baseline_metadata_binary,
+            baseline_report_binary,
+            baseline_metadata_target,
+            baseline_report_target,
+        ),
+    ):
+        if metadata_binary and report_binary and metadata_binary != report_binary:
+            reasons.append(
+                f"{identity} benchmark binary metadata does not match Google Benchmark report"
+            )
+        if metadata_target and report_target and metadata_target != report_target:
+            reasons.append(
+                f"{identity} benchmark target metadata does not match Google Benchmark report"
+            )
+
+    current_binary = current_metadata_binary or current_report_binary
+    current_target = current_metadata_target or current_report_target
+    baseline_binary = baseline_metadata_binary or baseline_report_binary
+    baseline_target = baseline_metadata_target or baseline_report_target
+
+    if current_binary is None or baseline_binary is None:
+        reasons.append("benchmark binary identity is unavailable")
+    elif current_binary != baseline_binary:
+        reasons.append("benchmark binary changed")
+
+    if current_target is None or baseline_target is None:
+        reasons.append("benchmark target identity is unavailable")
+    elif current_target != baseline_target:
+        reasons.append("benchmark target changed")
+
+    current_context = current_report.get("context")
+    baseline_context = baseline_report.get("context")
+    if not isinstance(current_context, dict) or not isinstance(baseline_context, dict):
+        reasons.append("Google Benchmark context is unavailable")
+    else:
+        for field in _COMPARABLE_CONTEXT_FIELDS:
+            current_has_field = field in current_context
+            baseline_has_field = field in baseline_context
+            if not current_has_field and not baseline_has_field:
+                continue
+            if not current_has_field or not baseline_has_field:
+                reasons.append(f"Google Benchmark context {field} is incomplete")
+            elif current_context[field] != baseline_context[field]:
+                reasons.append(f"Google Benchmark context {field} changed")
+
+    return reasons
+
+
 def _run_benchmark(
     executable: Path,
     benchmark_args: list[str],
@@ -253,6 +372,20 @@ def _history_path(repository_root: Path, name: str) -> Path:
     return repository_root / "benchmarks" / "history" / f"{Path(name).stem}.json"
 
 
+def _latest_history_entry(repository_root: Path, name: str) -> dict | None:
+    path = _history_path(repository_root, name)
+    if not path.exists():
+        return None
+
+    history = _read_history(path)
+    if not history:
+        return None
+    entry = history[-1]
+    if not isinstance(entry, dict):
+        raise ValueError(f"benchmark history contains a non-object run entry: {path}")
+    return entry
+
+
 def _query_run(
     entry: dict,
     metric: str,
@@ -262,19 +395,23 @@ def _query_run(
     if not isinstance(entry, dict):
         raise ValueError("benchmark history contains a non-object run entry")
 
-    report = entry.get("report")
-    if not isinstance(report, dict) or not isinstance(report.get("benchmarks"), list):
-        raise ValueError("benchmark history contains an invalid Google Benchmark report")
+    report = _history_report(entry)
 
     records = _benchmark_records(report)
     previous_records = {}
+    previous_report = None
+    compatibility_reasons = []
     if previous_entry is not None:
         if not isinstance(previous_entry, dict):
             raise ValueError("benchmark history contains a non-object run entry")
-        previous_report = previous_entry.get("report")
-        if not isinstance(previous_report, dict) or not isinstance(previous_report.get("benchmarks"), list):
-            raise ValueError("benchmark history contains an invalid Google Benchmark report")
+        previous_report = _history_report(previous_entry)
         previous_records = _benchmark_records(previous_report)
+        compatibility_reasons = _comparison_mismatch_reasons(
+            report,
+            previous_report,
+            entry,
+            previous_entry,
+        )
 
     if case_pattern is not None:
         records = {
@@ -298,13 +435,10 @@ def _query_run(
 
         if previous_entry is None:
             comparison = {"status": "baseline"}
-        elif (
-            entry.get("config") != previous_entry.get("config")
-            or entry.get("arguments", []) != previous_entry.get("arguments", [])
-        ):
+        elif compatibility_reasons:
             comparison = {
                 "status": "not_comparable",
-                "reason": "run settings changed",
+                "reason": "; ".join(compatibility_reasons),
             }
         else:
             previous = previous_records.get(name)
@@ -349,7 +483,10 @@ def _query_run(
         {
             "git_commit": entry.get("git_commit"),
             "git_dirty": entry.get("git_dirty"),
+            "target": entry.get("target"),
+            "binary": entry.get("binary"),
             "config": entry.get("config"),
+            "run_metric": entry.get("metric"),
             "arguments": entry.get("arguments", []),
             "benchmarks": benchmarks,
         }
@@ -386,6 +523,10 @@ def _print_query_text(results: list[dict], metric: str) -> None:
                 metadata.append("dirty" if run["git_dirty"] else "clean")
             if run.get("config"):
                 metadata.append(str(run["config"]))
+            if run.get("binary"):
+                metadata.append(f"binary {run['binary']}")
+            if run.get("run_metric"):
+                metadata.append(f"metric {run['run_metric']}")
             if metadata:
                 print(f"    {' | '.join(metadata)}")
 
@@ -467,6 +608,7 @@ def _status_color(status: str) -> str:
     return {
         "Regression": "red",
         "Improvement": "green",
+        "Not comparable": "yellow",
         "New": "yellow",
         "Removed": "yellow",
         "Skipped": "yellow",
@@ -476,12 +618,26 @@ def _status_color(status: str) -> str:
 def _compare_reports(
     executable: Path,
     current: dict,
-    baseline_path: Path,
+    baseline_entry: dict,
+    current_metadata: dict,
     metric: str,
     threshold: float,
     color_enabled: bool,
 ) -> tuple[int, int, int]:
-    baseline = _read_google_benchmark_report(baseline_path)
+    baseline = _history_report(baseline_entry)
+    compatibility_reasons = _comparison_mismatch_reasons(
+        current,
+        baseline,
+        current_metadata,
+        baseline_entry,
+    )
+    if compatibility_reasons:
+        print(
+            f"  {_paint('Not comparable', _status_color('Not comparable'), color_enabled)}"
+            f"  {executable.stem}: {'; '.join(compatibility_reasons)}"
+        )
+        return 0, 0, 1
+
     current_records = _benchmark_records(current)
     baseline_records = _benchmark_records(baseline)
     comparison_count = 0
@@ -495,6 +651,14 @@ def _compare_reports(
         if previous is None:
             reported_count += 1
             print(f"  {_paint('New', _status_color('New'), color_enabled)}  {name}")
+            continue
+
+        if metric not in record or metric not in previous:
+            reported_count += 1
+            print(
+                f"  {_paint('Skipped', _status_color('Skipped'), color_enabled)}"
+                f"  {name} (metric unavailable: {metric})"
+            )
             continue
 
         previous_unit = previous.get("time_unit", "ns")
@@ -573,6 +737,7 @@ def _save_report(
     description: str | None,
     config: str,
     benchmark_args: list[str],
+    metric: str,
     git_commit: str | None,
     git_dirty: bool,
 ) -> None:
@@ -586,18 +751,19 @@ def _save_report(
     entry = {"timestamp": timestamp}
     if description is not None:
         entry["description"] = description
+    entry.update(_benchmark_metadata(executable, config, benchmark_args, metric))
     entry.update(
         {
             "git_commit": git_commit,
             "git_dirty": git_dirty,
-            "config": config,
-            "arguments": benchmark_args,
             "report": report,
         }
     )
     history.append(entry)
-    _write_json(latest_path, report)
+    # History is authoritative for comparisons. Refresh the convenience copy
+    # only after the complete run record has been stored.
     _write_json(history_path, history)
+    _write_json(latest_path, report)
 
 
 def _parse_args() -> tuple[argparse.Namespace, list[str]]:
@@ -848,11 +1014,12 @@ def main() -> int:
     missing_baselines = []
     if args.compare:
         for benchmark, report in reports:
-            baseline_path = repository_root / "benchmarks" / f"{benchmark.stem}.json"
-            if not baseline_path.exists():
-                missing_baselines.append(benchmark.stem)
-                continue
+            baseline_history_path = _history_path(repository_root, benchmark.stem)
             try:
+                baseline_entry = _latest_history_entry(repository_root, benchmark.stem)
+                if baseline_entry is None:
+                    missing_baselines.append(benchmark.stem)
+                    continue
                 print()
                 (
                     current_comparisons,
@@ -861,7 +1028,13 @@ def main() -> int:
                 ) = _compare_reports(
                     benchmark,
                     report,
-                    baseline_path,
+                    baseline_entry,
+                    _benchmark_metadata(
+                        benchmark,
+                        args.config,
+                        benchmark_args,
+                        args.metric,
+                    ),
                     args.metric,
                     args.regression_threshold,
                     color_enabled,
@@ -870,7 +1043,7 @@ def main() -> int:
                 regression_count += current_regressions
                 comparison_status_count += current_status_count
             except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
-                print(f"error: could not compare {baseline_path}: {error}", file=sys.stderr)
+                print(f"error: could not compare {baseline_history_path}: {error}", file=sys.stderr)
                 return 1
 
     if args.save:
@@ -886,6 +1059,7 @@ def main() -> int:
                     args.description,
                     args.config,
                     benchmark_args,
+                    args.metric,
                     git_commit,
                     git_dirty,
                 )
@@ -895,7 +1069,10 @@ def main() -> int:
 
     if args.compare:
         if comparison_count == 0:
-            print("Nothing to compare.")
+            if comparison_status_count:
+                print("No compatible benchmark cases to compare.")
+            else:
+                print("Nothing to compare.")
         else:
             subject = "There is" if regression_count == 1 else "There are"
             regression_word = "regression" if regression_count == 1 else "regressions"
@@ -905,8 +1082,7 @@ def main() -> int:
                 print()
             print(f"{summary_prefix}{summary_suffix}")
         for benchmark in missing_baselines:
-            if comparison_count:
-                print(f"Nothing to compare for {benchmark}.")
+            print(f"Not comparable for {benchmark}: no saved baseline exists.")
 
     if regression_count and args.fail_on_regression:
         return 1

@@ -158,7 +158,7 @@ MACRO(LL_ADD_PROJECT_UNIT_TESTS project sources)
     # Add to Tests folder in IDE
     set_target_properties(PROJECT_${project}_TEST_${name}
             PROPERTIES
-            FOLDER "Tests/${project}"
+            FOLDER "Tests/Unit"
     )
 
     target_compile_definitions(PROJECT_${project}_TEST_${name} PRIVATE
@@ -253,7 +253,7 @@ FUNCTION(LL_ADD_INTEGRATION_TEST
   set_target_properties(INTEGRATION_TEST_${testname}
           PROPERTIES
           RUNTIME_OUTPUT_DIRECTORY "${EXE_STAGING_DIR}"
-          FOLDER "Tests/${testproject}"
+          FOLDER "Tests/Integration"
           )
   target_compile_definitions(INTEGRATION_TEST_${testname} PRIVATE
           "LL_TEST=${testname}"

@@ -21,7 +21,7 @@
 #include "elements/input.h"
 #include "elements/label.h"
 #include "elements/panel.h"
-#include "../floater_test_helpers.h"
+#include "floater_test_helpers.h"
 #include "layout/engine.h"
 #include "style/model.h"
 #include "style/stylesheet.h"

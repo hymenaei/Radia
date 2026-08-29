@@ -10,7 +10,7 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include "../floater_test_helpers.h"
+#include "floater_test_helpers.h"
 #include "elements/button.h"
 #include "elements/document.h"
 #include "elements/elementdefinition.h"

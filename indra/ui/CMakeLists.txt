@@ -161,40 +161,6 @@ target_link_libraries(ui
 
 target_precompile_headers(ui REUSE_FROM llprecompiled)
 
-if(BUILD_TESTING)
-    set(test_sources
-        eventcall.cpp
-        localization.cpp
-        path.cpp
-        system.cpp
-
-        binding/binder.cpp
-
-        elements/element.cpp
-        elements/fieldset.cpp
-        elements/inputcheckbox.cpp
-
-        layout/engine.cpp
-        layout/resourcecompiler.cpp
-        layout/schema.cpp
-
-        render/svg.cpp
-        render/tessellator.cpp
-
-        style/color.cpp
-        style/compiler.cpp
-        style/stylesheet.cpp
-
-        surface/floaterresize.cpp
-        surface/floaters.cpp
-        surface/scrollgeometry.cpp
-        surface/surface.cpp
-    )
-
-    ADD_UNIT_TESTS(ui "${test_sources}")
-    ADD_INTEGRATION_TEST(surfacestate "" "ui" "ui")
-endif()
-
-if(BUILD_BENCHMARKING)
-    ADD_BENCHMARKS(ui "layout/engine.cpp")
+if(BUILD_TESTING OR BUILD_BENCHMARKING)
+    add_subdirectory(tests)
 endif()

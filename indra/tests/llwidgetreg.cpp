@@ -102,6 +102,4 @@ void LLWidgetReg::initClass(bool register_widgets)
         LLDefaultChildRegistry::Register<LLViewBorder> view_border("view_border");
     }
 
-    // *HACK: Usually this is registered as a viewer text editor
-    LLDefaultChildRegistry::Register<LLTextEditor> text_editor("text_editor");
 }

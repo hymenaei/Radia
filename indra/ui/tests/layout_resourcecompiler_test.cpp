@@ -11,7 +11,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
-#include "../floater_test_helpers.h"
+#include "floater_test_helpers.h"
 #include "elements/button.h"
 #include "elements/elementinternal.h"
 #include "elements/elementtext.h"
@@ -381,7 +381,7 @@ TEST_F(LayoutResourceCompilerTest, ComposesButtonInlineChildren) {
 }
 
 TEST_F(LayoutResourceCompilerTest, MatchesPaintProtocolWithShaderConstants) {
-    const std::filesystem::path uiSourceRoot = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
+    const std::filesystem::path uiSourceRoot = std::filesystem::path(__FILE__).parent_path().parent_path();
     const std::filesystem::path newviewSourceRoot = uiSourceRoot.parent_path() / "newview";
     std::ifstream vertexFile(newviewSourceRoot / "app_settings/shaders/class1/interface/uiV.glsl");
     std::ifstream fragmentFile(newviewSourceRoot / "app_settings/shaders/class1/interface/uiF.glsl");

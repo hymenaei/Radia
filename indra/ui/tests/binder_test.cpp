@@ -182,7 +182,7 @@ TEST(BinderTest, CommitsEventBindingAndResolvesTypedElement) {
     bindEvent(binder, "save", [&] { ++activations; });
     TestBindingResult result = finishBinding(binder);
     ASSERT_TRUE(result.ok());
-    ASSERT_TRUE(static_cast<bool>(save));
+    ASSERT_NE(save.get(), nullptr);
     save->activate();
     EXPECT_EQ(activations, 1);
 }
@@ -208,9 +208,9 @@ TEST(BinderTest, DistinguishesTypedAndMissingElementLookups) {
     missing = lookupElement<radia::ui::LabelElement>(root, "missing");
     const TestBindingResult result = finishBinding(binder);
     ASSERT_TRUE(result.ok());
-    ASSERT_TRUE(static_cast<bool>(save));
-    EXPECT_FALSE(static_cast<bool>(wrongType));
-    EXPECT_FALSE(static_cast<bool>(missing));
+    ASSERT_NE(save.get(), nullptr);
+    EXPECT_EQ(wrongType.get(), nullptr);
+    EXPECT_EQ(missing.get(), nullptr);
     source->activate();
     EXPECT_EQ(activations, 1);
 }
@@ -225,9 +225,9 @@ TEST(BinderTest, InvalidatesElementReferenceAfterElementRemoval) {
     reference = lookupElement<ButtonElement>(root, "temporary");
     const TestBindingResult result = finishBinding(binder);
     ASSERT_TRUE(result.ok());
-    ASSERT_TRUE(static_cast<bool>(reference));
+    ASSERT_NE(reference.get(), nullptr);
     root.replaceChildren();
-    EXPECT_FALSE(static_cast<bool>(reference));
+    EXPECT_EQ(reference.get(), nullptr);
 }
 
 TEST(BinderTest, DetachesEventHandlerWhenBindingIsDestroyed) {
@@ -253,16 +253,26 @@ TEST(BinderTest, DetachesEventHandlerWhenBindingIsDestroyed) {
 TEST(BinderTest, AllowsOneHandlerAcrossMultipleEventTypes) {
     PanelElement root;
     auto button = std::make_unique<ButtonElement>();
+    ButtonElement* buttonTarget = button.get();
     button->setEventCall(kClickEvent, EventCall("shared"));
     root.append(std::move(button));
     auto control = std::make_unique<InputElement>();
+    InputElement* controlTarget = control.get();
     control->type("checkbox").switchMode(true);
     control->setEventCall(kChangeEvent, EventCall("shared"));
     root.append(std::move(control));
 
+    std::vector<std::string> eventTypes;
     Binder binder(root);
+    bindEvent(binder, "shared", [&](Event& event, const EventCall&) { eventTypes.emplace_back(event.type()); }, noEventArguments);
     const TestBindingResult result = finishBinding(binder);
     ASSERT_TRUE(result.ok());
+    buttonTarget->activate();
+    ASSERT_EQ(eventTypes.size(), std::size_t{1});
+    EXPECT_EQ(eventTypes.front(), "click");
+    controlTarget->activate();
+    ASSERT_EQ(eventTypes.size(), std::size_t{2});
+    EXPECT_EQ(eventTypes.back(), "change");
 }
 
 TEST(BinderTest, BindsChangeEventsWithCurrentState) {
@@ -315,8 +325,8 @@ TEST(BinderTest, ResolvesIdsWithinIndependentResourceScopes) {
     rightScope = lookupElement<PanelElement>(root, "right");
     const TestBindingResult parentResult = finishBinding(parent);
     ASSERT_TRUE(parentResult.ok());
-    ASSERT_TRUE(static_cast<bool>(leftScope));
-    ASSERT_TRUE(static_cast<bool>(rightScope));
+    ASSERT_NE(leftScope.get(), nullptr);
+    ASSERT_NE(rightScope.get(), nullptr);
 
     ElementRef<radia::ui::LabelElement> leftBound;
     ElementRef<radia::ui::LabelElement> rightBound;
@@ -326,10 +336,10 @@ TEST(BinderTest, ResolvesIdsWithinIndependentResourceScopes) {
     rightBound = lookupElement<radia::ui::LabelElement>(*rightScope, "item");
     const TestBindingResult leftResult = finishBinding(leftBinder);
     ASSERT_TRUE(leftResult.ok());
-    ASSERT_TRUE(static_cast<bool>(leftBound));
+    ASSERT_NE(leftBound.get(), nullptr);
     const TestBindingResult rightResult = finishBinding(rightBinder);
     ASSERT_TRUE(rightResult.ok());
-    ASSERT_TRUE(static_cast<bool>(rightBound));
+    ASSERT_NE(rightBound.get(), nullptr);
     EXPECT_NE(leftBound.get(), rightBound.get());
 }
 
@@ -360,7 +370,7 @@ TEST(BinderTest, PreparesReplacementWithoutMutatingLiveBinding) {
     PreparedBindingResult prepared = candidateBinder.prepare();
     ASSERT_TRUE(prepared.ok());
     EXPECT_EQ(reference.get(), liveButtonPtr);
-    ASSERT_TRUE(static_cast<bool>(candidateReference));
+    ASSERT_NE(candidateReference.get(), nullptr);
 
     Binding replacement = prepared.binding.commit();
     EXPECT_EQ(candidateReference.get(), candidateButtonPtr);
@@ -371,7 +381,7 @@ TEST(BinderTest, PreparesReplacementWithoutMutatingLiveBinding) {
     auto removedReference = lookupElement<ButtonElement>(removedCandidate, "reload");
     PreparedBindingResult removed = removedBinder.prepare();
     ASSERT_TRUE(removed.ok());
-    EXPECT_FALSE(static_cast<bool>(removedReference));
+    EXPECT_EQ(removedReference.get(), nullptr);
     EXPECT_EQ(reference.get(), liveButtonPtr);
     Binding removedBinding = removed.binding.commit();
     EXPECT_EQ(reference.get(), liveButtonPtr);
@@ -438,7 +448,7 @@ TEST(BinderTest, PreservesLiveValueBindingUntilReplacementCommits) {
     Binding replacement = prepared.binding.commit();
     ASSERT_TRUE(static_cast<bool>(replacement));
     EXPECT_EQ(reference.get(), candidate.get());
-    ASSERT_TRUE(static_cast<bool>(reference));
+    ASSERT_NE(reference.get(), nullptr);
     EXPECT_TRUE(reference->state().value);
 }
 
@@ -450,7 +460,7 @@ TEST(BinderTest, RejectsMissingSetting) {
     binder.requireValueBinding({"missing-value"}, reference);
     PreparedBindingResult result = binder.prepare();
     ASSERT_FALSE(result.ok());
-    EXPECT_FALSE(static_cast<bool>(reference));
+    EXPECT_EQ(reference.get(), nullptr);
     ASSERT_EQ(result.errors.size(), std::size_t{1});
     EXPECT_EQ(result.errors.front().code, "binding.setting.missing");
 }
@@ -465,7 +475,7 @@ TEST(BinderTest, RejectsSettingTypeMismatch) {
     binder.requireValueBinding({"demo-enabled"}, reference);
     const PreparedBindingResult result = binder.prepare();
     ASSERT_FALSE(result.ok());
-    EXPECT_FALSE(static_cast<bool>(reference));
+    EXPECT_EQ(reference.get(), nullptr);
     ASSERT_EQ(result.errors.size(), std::size_t{1});
     EXPECT_EQ(result.errors.front().code, "binding.setting.type_mismatch");
 }
@@ -500,16 +510,23 @@ TEST(BinderTest, ReplacesValueBindingOnTheSameControl) {
     Binder firstBinder(*control, &firstResolver);
     TestBindingResult firstResult = finishBinding(firstBinder);
     ASSERT_TRUE(firstResult.ok());
+    Binding activeBinding = std::move(firstResult.binding);
+    ASSERT_TRUE(static_cast<bool>(activeBinding));
+    EXPECT_FALSE(control->checked());
 
     auto secondProvider = std::make_shared<TestValueBinding<bool>>(true);
     TestSettingResolver secondResolver;
     secondResolver.add("replaceable-value", secondProvider);
     Binder secondBinder(*control, &secondResolver);
-    TestBindingResult secondResult = finishBinding(secondBinder);
-    ASSERT_TRUE(secondResult.ok());
+    TestBindingResult replacementResult = finishBinding(secondBinder);
+    ASSERT_TRUE(replacementResult.ok());
+    EXPECT_TRUE(static_cast<bool>(replacementResult.binding));
     EXPECT_TRUE(control->checked());
 
-    firstResult.binding = std::move(secondResult.binding);
+    // Releasing the old binding detaches the first provider before the new
+    // binding becomes the owner of the control's subscription.
+    activeBinding = std::move(replacementResult.binding);
+    ASSERT_TRUE(static_cast<bool>(activeBinding));
     control->activate();
     EXPECT_FALSE(secondProvider->state().value);
     EXPECT_FALSE(control->checked());
@@ -546,7 +563,7 @@ TEST(BinderTest, DispatchesGenericEventHandler) {
     bindEvent(binder, "press", [&] { ++invocations; });
     TestBindingResult result = finishBinding(binder);
     ASSERT_TRUE(result.ok());
-    EXPECT_TRUE(result.warnings.empty());
+    EXPECT_EQ(result.warnings.size(), std::size_t{0});
     target->activate();
     EXPECT_EQ(invocations, 1);
 }
@@ -587,7 +604,7 @@ TEST(BinderTest, DispatchesTypedEventArguments) {
     bindEvent(binder, "inspectEventSource", [&](Event& event, const EventCall&) { source = &event.target(); }, currentEventArgument);
     TestBindingResult result = finishBinding(binder);
     ASSERT_TRUE(result.ok());
-    EXPECT_TRUE(result.warnings.empty());
+    EXPECT_EQ(result.warnings.size(), std::size_t{0});
     selectTarget->activate();
     openTarget->activate();
     enabledTarget->activate();
@@ -660,7 +677,6 @@ TEST(BinderTest, RejectsMissingLayoutSetting) {
     constexpr char kMissingSettingLayout[] = "<input type=\"checkbox\" switch=\"true\" setting=\"missing-setting\"/>";
     LayoutBuildResult buildResult = LayoutResourceCompiler().buildElementTreeFromString(kMissingSettingLayout, "missing-setting.xml");
     ASSERT_TRUE(buildResult.ok());
-    ASSERT_TRUE(buildResult.document);
     TestSettingResolver resolver;
     Binder binder(*buildResult.document->documentElement(), &resolver);
     const TestBindingResult result = finishBinding(binder);
@@ -673,7 +689,6 @@ TEST(BinderTest, RejectsMismatchedLayoutSetting) {
     constexpr char kStringSettingLayout[] = "<input type=\"checkbox\" switch=\"true\" setting=\"string-setting\"/>";
     LayoutBuildResult buildResult = LayoutResourceCompiler().buildElementTreeFromString(kStringSettingLayout, "typed-setting.xml");
     ASSERT_TRUE(buildResult.ok());
-    ASSERT_TRUE(buildResult.document);
     TestSettingResolver resolver;
     resolver.add("string-setting", std::make_shared<TestValueBinding<std::string>>("not a boolean"));
     Binder binder(*buildResult.document->documentElement(), &resolver);
@@ -718,7 +733,6 @@ TEST(BinderTest, RejectsMisreportedSettingTypeSafely) {
     constexpr char kMisreportedSettingLayout[] = "<input type=\"checkbox\" switch=\"true\" setting=\"misreported-setting\"/>";
     LayoutBuildResult buildResult = LayoutResourceCompiler().buildElementTreeFromString(kMisreportedSettingLayout, "misreported-setting.xml");
     ASSERT_TRUE(buildResult.ok());
-    ASSERT_TRUE(buildResult.document);
     MisreportingSettingResolver resolver;
     Binder binder(*buildResult.document->documentElement(), &resolver);
     const TestBindingResult result = finishBinding(binder);

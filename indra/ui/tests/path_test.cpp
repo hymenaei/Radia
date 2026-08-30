@@ -69,7 +69,7 @@ TEST(PathTest, RefinesCubicFlatteningAsToleranceTightens) {
 
     float maximumY = adaptiveCurve.front().y;
     for (const Vec2& point : adaptiveCurve) maximumY = std::max(maximumY, point.y);
-    EXPECT_NEAR(maximumY, 15.f, .5f) << "flattened curve follows its expected apex";
+    EXPECT_NEAR(maximumY, 15.f, .25f) << "flattened curve follows its expected apex";
 }
 
 TEST(PathTest, CircleFlattensToClosedContourAtExpectedRadius) {

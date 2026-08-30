@@ -51,6 +51,13 @@ using radia::ui::Surface;
 using radia::ui::System;
 
 constexpr char kEmptyLocalization[] = "defaultLocale: en\nlocales: {en: {strings: {}}}\n";
+constexpr NativeScrollbarMetrics kExpectedClassicScrollbarMetrics{15.f, 20.f, 15.f, 3.f};
+constexpr float kExpectedScrollbarTrackRed = .08f;
+constexpr float kExpectedScrollbarTrackGreen = .09f;
+constexpr float kExpectedScrollbarTrackBlue = .1f;
+constexpr float kExpectedScrollbarTrackAlpha = .52f;
+constexpr float kExpectedThumbCornerRadius = 4.f;
+constexpr float kMinimumHoveredThumbRed = .55f;
 
 std::string singleStringLocalization(const std::string& key, const std::string& value) {
     return "defaultLocale: en\nlocales: {en: {strings: {" + key + ": \"" + value + "\"}}}\n";
@@ -78,20 +85,21 @@ float resolvedLabelWidth(const System& system) {
 TEST(NativeAppearanceTest, BaseOwnsScrollbarDefaultsAndStateStyling) {
     NativeAppearanceBase appearance;
     const NativeScrollbarMetrics metrics = appearance.scrollbarMetrics(ScrollbarMode::Classic);
-    EXPECT_FLOAT_EQ(metrics.thickness, 15.f);
-    EXPECT_FLOAT_EQ(metrics.minimumThumbLength, 20.f);
-    EXPECT_FLOAT_EQ(metrics.arrowLength, 15.f);
-    EXPECT_FLOAT_EQ(metrics.thumbPadding, 3.f);
+    EXPECT_FLOAT_EQ(metrics.thickness, kExpectedClassicScrollbarMetrics.thickness);
+    EXPECT_FLOAT_EQ(metrics.minimumThumbLength, kExpectedClassicScrollbarMetrics.minimumThumbLength);
+    EXPECT_FLOAT_EQ(metrics.arrowLength, kExpectedClassicScrollbarMetrics.arrowLength);
+    EXPECT_FLOAT_EQ(metrics.thumbPadding, kExpectedClassicScrollbarMetrics.thumbPadding);
 
     NativeScrollbarPaintRequest request;
     request.geometry.vertical.thumb = {0.f, 0.f, 8.f, 20.f};
     request.vertical.hoveredPart = radia::ui::ScrollbarPart::Thumb;
     const auto style = appearance.scrollbarPaintStyle(request, ScrollbarAxis::Vertical);
-    EXPECT_FLOAT_EQ(style.track.r, .08f);
-    EXPECT_FLOAT_EQ(style.track.g, .09f);
-    EXPECT_FLOAT_EQ(style.track.b, .1f);
-    EXPECT_FLOAT_EQ(style.thumbRadius, 4.f);
-    EXPECT_GT(style.thumb.r, .55f);
+    EXPECT_FLOAT_EQ(style.track.r, kExpectedScrollbarTrackRed);
+    EXPECT_FLOAT_EQ(style.track.g, kExpectedScrollbarTrackGreen);
+    EXPECT_FLOAT_EQ(style.track.b, kExpectedScrollbarTrackBlue);
+    EXPECT_FLOAT_EQ(style.track.a, kExpectedScrollbarTrackAlpha);
+    EXPECT_FLOAT_EQ(style.thumbRadius, kExpectedThumbCornerRadius);
+    EXPECT_GT(style.thumb.r, kMinimumHoveredThumbRed);
 }
 
 TEST(NativeAppearanceTest, ButtonPaintDispatchUsesNativeAppearanceForAutoMode) {
@@ -167,7 +175,7 @@ TEST(SystemTest, PublishesLocalizationStylesIconsAndElementResources) {
     ASSERT_TRUE(system.publish(prepared.generation));
     EXPECT_EQ(system.generation(), 1ULL);
     EXPECT_EQ(system.resolveText("message"), "Ready");
-    EXPECT_EQ(resolvedLabelWidth(system), 40.f);
+    EXPECT_FLOAT_EQ(resolvedLabelWidth(system), 40.f);
     EXPECT_TRUE(system.hasIcon("search"));
 
     const LayoutBuildResult buildResult = system.buildElementTree("view.html");
@@ -183,7 +191,7 @@ TEST(SystemTest, PublishesLocalizationStylesIconsAndElementResources) {
     LabelElement* styledPtr = styled.get();
     surface->mount(std::move(styled));
     surface->updateLayout();
-    EXPECT_EQ(styledPtr->rect().w, 40.f);
+    EXPECT_FLOAT_EQ(styledPtr->rect().w, 40.f);
 }
 
 TEST(SystemTest, NativeAppearanceMetricsDriveLayoutAndPaintRevision) {
@@ -196,6 +204,7 @@ TEST(SystemTest, NativeAppearanceMetricsDriveLayoutAndPaintRevision) {
     system.setNativeAppearance(std::make_shared<TestNativeAppearance>(NativeScrollbarMetrics{20.f, 24.f, 20.f, 3.f}, 42));
 
     std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
+    ASSERT_NE(surface, nullptr);
     surface->setViewport(200.f, 200.f);
     auto viewport = std::make_unique<radia::ui::PanelElement>();
     viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
@@ -243,6 +252,7 @@ TEST(SystemTest, NativeAppearanceMetricsFollowAuthoredScrollbarMode) {
         std::make_shared<TestNativeAppearance>(NativeScrollbarMetrics{20.f, 24.f, 20.f, 3.f}, NativeScrollbarMetrics{8.f, 10.f, 8.f, 2.f}, 44));
 
     std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
+    ASSERT_NE(surface, nullptr);
     surface->setViewport(240.f, 120.f);
     ScrollLayoutOptions options;
     options.scrollbarMode = ScrollbarMode::Overlay;
@@ -345,6 +355,7 @@ TEST(SystemTest, RejectsSnapshotsWithoutLocalization) {
     const SkinGenerationPrepareResult rejected = SkinCompiler().prepare(std::move(snapshot));
 
     ASSERT_FALSE(rejected.ok());
+    EXPECT_FALSE(rejected.generation);
     ASSERT_FALSE(rejected.errors.empty());
     EXPECT_EQ(rejected.errors.front().code, "rdui.resource.missing");
     EXPECT_EQ(rejected.errors.front().source, "localization.yaml");
@@ -359,6 +370,7 @@ TEST(SystemTest, RejectsMalformedIcons) {
     const SkinGenerationPrepareResult rejected = SkinCompiler().prepare(std::move(snapshot));
 
     ASSERT_FALSE(rejected.ok());
+    EXPECT_FALSE(rejected.generation);
     ASSERT_FALSE(rejected.errors.empty());
     EXPECT_EQ(rejected.errors.front().code, "svg.path.arguments_invalid");
     EXPECT_EQ(rejected.errors.front().source, "resources/icons/search.svg");
@@ -406,6 +418,7 @@ TEST(SystemTest, ResolvesDirectionSelectorsWhenLocaleChanges) {
     ASSERT_TRUE(system.setLocale("ar"));
 
     std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
+    ASSERT_NE(surface, nullptr);
     surface->setViewport(100.f, 20.f);
     auto control = std::make_unique<InputElement>();
     InputElement* controlPtr = control.get();
@@ -415,11 +428,12 @@ TEST(SystemTest, ResolvesDirectionSelectorsWhenLocaleChanges) {
     surface->updateLayout();
 
     ASSERT_NE(controlPtr->thumb(), nullptr);
-    EXPECT_EQ(controlPtr->thumb()->rect().x, -13.f);
+    EXPECT_FLOAT_EQ(controlPtr->thumb()->rect().x, -13.f);
 
     ASSERT_TRUE(system.setLocale("en"));
     surface->updateLayout();
-    EXPECT_EQ(controlPtr->thumb()->rect().x, 31.f);
+    ASSERT_NE(controlPtr->thumb(), nullptr);
+    EXPECT_FLOAT_EQ(controlPtr->thumb()->rect().x, 31.f);
 }
 
 TEST(SystemTest, SeparatesPlainTextAndLocalizedContent) {
@@ -523,7 +537,7 @@ TEST(SystemTest, PublishesGenerationUpdatesToExistingSurfacesAndNewTrees) {
     LabelElement* styledPtr = styled.get();
     surface->mount(std::move(styled));
     surface->updateLayout();
-    EXPECT_EQ(styledPtr->rect().w, 40.f);
+    EXPECT_FLOAT_EQ(styledPtr->rect().w, 40.f);
 
     ResourceSnapshot snapshot = skinSnapshot(singleStringLocalization("message", "New"), kCandidateStyles);
     snapshot.add("view.html", kViewMarkup);
@@ -542,7 +556,7 @@ TEST(SystemTest, PublishesGenerationUpdatesToExistingSurfacesAndNewTrees) {
     EXPECT_EQ(system.generation(), 2ULL);
     EXPECT_EQ(system.resolveText("message"), "New");
     surface->updateLayout();
-    EXPECT_EQ(styledPtr->rect().w, 90.f);
+    EXPECT_FLOAT_EQ(styledPtr->rect().w, 90.f);
 
     const LayoutBuildResult liveBuild = system.buildElementTree("view.html");
     ASSERT_TRUE(liveBuild.ok());

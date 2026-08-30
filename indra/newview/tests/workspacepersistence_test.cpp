@@ -69,8 +69,8 @@ TEST_F(WorkspacePersistenceTest, IgnoresMalformedWorkspaceIdentities) {
 
     const std::vector<ComponentInstanceKey> restored = persistence.openComponentKeys();
     ASSERT_EQ(restored.size(), std::size_t{2});
-    EXPECT_TRUE(std::find(restored.begin(), restored.end(), ComponentInstanceKey{"settings", {}}) != restored.end());
-    EXPECT_TRUE(std::find(restored.begin(), restored.end(), ComponentInstanceKey{"profile", "alice"}) != restored.end());
+    EXPECT_NE(std::find(restored.begin(), restored.end(), ComponentInstanceKey{"settings", {}}), restored.end());
+    EXPECT_NE(std::find(restored.begin(), restored.end(), ComponentInstanceKey{"profile", "alice"}), restored.end());
 }
 
 TEST_F(WorkspacePersistenceTest, WritesLayoutAndWorkspaceToTheirOwningSettings) {

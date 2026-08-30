@@ -8,7 +8,6 @@ if(BUILD_TESTING)
         PRIVATE
         llfilesystem
         GTest::gtest_main
-        GTest::gmock
     )
     _CONFIGURE_GTEST_TARGET(llfilesystem_test unit)
 
@@ -18,10 +17,7 @@ if(BUILD_TESTING)
     target_link_libraries(llfilesystem_lldir_test
         PRIVATE
         llfilesystem
-        llmath
-        llcommon
         GTest::gtest_main
-        GTest::gmock
     )
     _CONFIGURE_GTEST_TARGET(llfilesystem_lldir_test integration)
 endif()

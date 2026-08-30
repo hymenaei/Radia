@@ -8,7 +8,6 @@
 #include <array>
 #include <benchmark/benchmark.h>
 #include <cstddef>
-#include <cstdlib>
 #include <memory>
 #include <string>
 #include "elements/button.h"
@@ -62,7 +61,7 @@ struct LayoutFixture {
     LayoutDirection direction = LayoutDirection::LeftToRight;
 };
 
-constexpr std::array<int, 5> kScaleNodeCounts = {0, 1, 10, 100, 1000};
+constexpr std::array<int, 3> kScaleNodeCounts = {10, 100, 1000};
 constexpr std::array<int, 2> kRepresentativeNodeCounts = {100, 1000};
 constexpr std::array<int, 1> kStateNodeCounts = {1000};
 constexpr std::array<int, 1> kCacheNodeCounts = {1000};
@@ -127,8 +126,7 @@ void addCompositeControls(PanelElement& root, std::size_t nodeCount) {
     }
 }
 
-LayoutFixture makeFixture(LayoutCase layoutCase, std::size_t nodeCount) {
-    LayoutFixture fixture;
+bool makeFixture(LayoutFixture& fixture, LayoutCase layoutCase, std::size_t nodeCount, benchmark::State& state) {
     fixture.root = std::make_unique<PanelElement>();
 
     std::string styleSource;
@@ -201,29 +199,32 @@ LayoutFixture makeFixture(LayoutCase layoutCase, std::size_t nodeCount) {
     }
 
     fixture.root->setRect(rootRect);
-    if (!fixture.styleSheet.loadRadia(styleSource, "engine_benchmark.css").ok()) std::abort();
-    return fixture;
+    const auto loadResult = fixture.styleSheet.loadRadia(styleSource, "engine_benchmark.css");
+    if (!loadResult.ok()) {
+        state.SkipWithError(loadResult.errors.empty() ? "Failed to load benchmark stylesheet." : loadResult.errors.front().formatted());
+        return false;
+    }
+    return true;
 }
 
 struct StatisticsTotals {
     std::size_t measuredNodes = 0;
     std::size_t constrainedRemeasures = 0;
     std::size_t arrangedNodes = 0;
-    std::size_t cacheSkips = 0;
+    std::size_t skippedNodes = 0;
 
     void add(const LayoutStatistics& statistics) {
         measuredNodes += statistics.measuredNodes;
         constrainedRemeasures += statistics.constrainedRemeasures;
         arrangedNodes += statistics.arrangedNodes;
-        cacheSkips += statistics.skippedNodes;
+        skippedNodes += statistics.skippedNodes;
     }
 
     void publish(benchmark::State& state) const {
-        state.counters["MeasureCalls"] = benchmark::Counter(static_cast<double>(measuredNodes), benchmark::Counter::kAvgIterations);
-        state.counters["ConstrainedMeasureCalls"] =
-            benchmark::Counter(static_cast<double>(constrainedRemeasures), benchmark::Counter::kAvgIterations);
-        state.counters["ArrangeCalls"] = benchmark::Counter(static_cast<double>(arrangedNodes), benchmark::Counter::kAvgIterations);
-        state.counters["CacheReuseEvents"] = benchmark::Counter(static_cast<double>(cacheSkips), benchmark::Counter::kAvgIterations);
+        state.counters["MeasuredNodes"] = benchmark::Counter(static_cast<double>(measuredNodes), benchmark::Counter::kAvgIterations);
+        state.counters["ConstrainedRemeasures"] = benchmark::Counter(static_cast<double>(constrainedRemeasures), benchmark::Counter::kAvgIterations);
+        state.counters["ArrangedNodes"] = benchmark::Counter(static_cast<double>(arrangedNodes), benchmark::Counter::kAvgIterations);
+        state.counters["SkippedNodes"] = benchmark::Counter(static_cast<double>(skippedNodes), benchmark::Counter::kAvgIterations);
     }
 };
 
@@ -231,7 +232,8 @@ void BM_Layout_RelayoutAfterResize(benchmark::State& state, LayoutCase layoutCas
     // Measure CPU layout cost after a warmed fixture changes size. Fixture
     // construction, stylesheet parsing, and the initial layout are excluded;
     // the rectangle mutation is scenario setup rather than layout work.
-    LayoutFixture fixture = makeFixture(layoutCase, static_cast<std::size_t>(state.range(0)));
+    LayoutFixture fixture;
+    if (!makeFixture(fixture, layoutCase, static_cast<std::size_t>(state.range(0)), state)) return;
     const auto& textMetrics = fixedTextMetrics();
     const Rect baseRect = fixture.root->rect();
 
@@ -247,7 +249,9 @@ void BM_Layout_RelayoutAfterResize(benchmark::State& state, LayoutCase layoutCas
         state.ResumeTiming();
 
         LayoutStatistics statistics = layoutTree(*fixture.root, fixture.styleSheet, textMetrics, fixture.direction);
+        state.PauseTiming();
         totals.add(statistics);
+        state.ResumeTiming();
     }
     totals.publish(state);
 }
@@ -255,7 +259,8 @@ void BM_Layout_RelayoutAfterResize(benchmark::State& state, LayoutCase layoutCas
 void BM_Layout_CachedLayout(benchmark::State& state, LayoutCase layoutCase) {
     // Measure the CPU cost of resolving a layout tree that has already reached
     // its steady state. The first layout warms the cache and is not measured.
-    LayoutFixture fixture = makeFixture(layoutCase, static_cast<std::size_t>(state.range(0)));
+    LayoutFixture fixture;
+    if (!makeFixture(fixture, layoutCase, static_cast<std::size_t>(state.range(0)), state)) return;
     const auto& textMetrics = fixedTextMetrics();
     LayoutStatistics warmup = layoutTree(*fixture.root, fixture.styleSheet, textMetrics, fixture.direction);
     benchmark::DoNotOptimize(warmup.measuredNodes);
@@ -263,7 +268,9 @@ void BM_Layout_CachedLayout(benchmark::State& state, LayoutCase layoutCase) {
     StatisticsTotals totals;
     for (auto _ : state) {
         LayoutStatistics statistics = layoutTree(*fixture.root, fixture.styleSheet, textMetrics, fixture.direction);
+        state.PauseTiming();
         totals.add(statistics);
+        state.ResumeTiming();
     }
     totals.publish(state);
 }
@@ -272,7 +279,8 @@ void BM_Layout_RelayoutAfterDirectionChange(benchmark::State& state, LayoutCase 
     // Measure CPU layout cost when direction alternates between iterations.
     // The direction transition is part of the workload represented by this
     // family, while fixture construction and the initial layout are excluded.
-    LayoutFixture fixture = makeFixture(layoutCase, static_cast<std::size_t>(state.range(0)));
+    LayoutFixture fixture;
+    if (!makeFixture(fixture, layoutCase, static_cast<std::size_t>(state.range(0)), state)) return;
     const auto& textMetrics = fixedTextMetrics();
     LayoutStatistics warmup = layoutTree(*fixture.root, fixture.styleSheet, textMetrics, LayoutDirection::LeftToRight);
     benchmark::DoNotOptimize(warmup.measuredNodes);
@@ -283,7 +291,9 @@ void BM_Layout_RelayoutAfterDirectionChange(benchmark::State& state, LayoutCase 
         rightToLeft = !rightToLeft;
         const auto direction = rightToLeft ? LayoutDirection::RightToLeft : LayoutDirection::LeftToRight;
         LayoutStatistics statistics = layoutTree(*fixture.root, fixture.styleSheet, textMetrics, direction);
+        state.PauseTiming();
         totals.add(statistics);
+        state.ResumeTiming();
     }
     totals.publish(state);
 }
@@ -324,7 +334,7 @@ BENCHMARK_CAPTURE(BM_Layout_RelayoutAfterResize, WrappedText, LayoutCase::Wrappe
 BENCHMARK_CAPTURE(BM_Layout_RelayoutAfterResize, CompositeControls, LayoutCase::CompositeControls)->Apply(addRepresentativeCases);
 BENCHMARK_CAPTURE(BM_Layout_RelayoutAfterResize, HiddenLabels, LayoutCase::HiddenLabels)->Apply(addStateCases);
 BENCHMARK_CAPTURE(BM_Layout_RelayoutAfterResize, CollapsedLabels, LayoutCase::CollapsedLabels)->Apply(addStateCases);
-BENCHMARK_CAPTURE(BM_Layout_RelayoutAfterResize, RightToLeftRow, LayoutCase::RightToLeftRow)->Apply(addStateCases);
+BENCHMARK_CAPTURE(BM_Layout_RelayoutAfterResize, RightToLeftRow, LayoutCase::RightToLeftRow)->Apply(addDirectionCases);
 
 BENCHMARK_CAPTURE(BM_Layout_CachedLayout, FlatColumn, LayoutCase::FlatColumn)->Apply(addCacheCases);
 BENCHMARK_CAPTURE(BM_Layout_CachedLayout, WrappedText, LayoutCase::WrappedText)->Apply(addCacheCases);

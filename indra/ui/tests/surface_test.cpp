@@ -12,7 +12,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include "floater_test_helpers.h"
 #include "binding/binder.h"
 #include "elements/button.h"
 #include "elements/elementinternal.h"
@@ -21,6 +20,7 @@
 #include "elements/input.h"
 #include "elements/label.h"
 #include "elements/panel.h"
+#include "floater_test_helpers.h"
 #include "nativeappearance.h"
 #include "render/recordingpaintcontext.h"
 #include "skin/compiler.h"
@@ -29,9 +29,9 @@
 #include "text/metrics.h"
 
 namespace {
+using radia::ui::AAIntent;
 using radia::ui::Binder;
 using radia::ui::Binding;
-using radia::ui::AAIntent;
 using radia::ui::ButtonElement;
 using radia::ui::ClipAxes;
 using radia::ui::clipsAxis;
@@ -307,8 +307,13 @@ TEST(SurfaceTest, PaintsBodyDocumentRootBackgroundAcrossViewport) {
     surface.paint(recording);
 
     const auto command = std::find_if(recording.commands().begin(), recording.commands().end(), [](const PaintCommand& candidate) {
-        return candidate.kind == PaintCommandKind::Box && candidate.rect.x == 0.f && candidate.rect.y == 0.f && candidate.rect.w == 100.f
-            && candidate.rect.h == 80.f && candidate.style.backgroundColor.r == 1.f && candidate.style.backgroundColor.g == 0.f
+        return candidate.kind == PaintCommandKind::Box
+            && candidate.rect.x == 0.f
+            && candidate.rect.y == 0.f
+            && candidate.rect.w == 100.f
+            && candidate.rect.h == 80.f
+            && candidate.style.backgroundColor.r == 1.f
+            && candidate.style.backgroundColor.g == 0.f
             && candidate.style.backgroundColor.b == 0.f;
     });
     ASSERT_NE(command, recording.commands().end());
@@ -377,7 +382,7 @@ TEST(SurfaceTest, ClearsInteractionAfterTreeMutation) {
     context.pointerMove({{15.f, 15.f}});
     context.pointerDown({{15.f, 15.f}, PointerButton::Left});
     EXPECT_TRUE(context.hasFocus());
-    ASSERT_TRUE(context.unmount(*mounted));
+    ASSERT_NE(context.unmount(*mounted), nullptr);
     EXPECT_FALSE(context.hasFocus());
     EXPECT_FALSE(context.pointerMove({{15.f, 15.f}}));
 }
@@ -504,11 +509,9 @@ TEST(SurfaceTest, RoutesWheelInputWithWheelPayload) {
         EXPECT_EQ(event.type(), kWheelEvent);
         EXPECT_FALSE(event.defaultPrevented());
         const WheelEvent* payload = event.wheel();
-        EXPECT_NE(payload, nullptr);
-        if (payload) {
-            observedDeltaX = payload->dx;
-            observedDeltaY = payload->dy;
-        }
+        ASSERT_NE(payload, nullptr);
+        observedDeltaX = payload->dx;
+        observedDeltaY = payload->dy;
     });
     context.mount(std::move(probe));
 
@@ -1407,9 +1410,9 @@ TEST(SurfaceTest, DispatchesMouseBindingsInExpectedOrder) {
         events.push_back("context");
     });
     PreparedBindingResult prepared = binder.prepare();
-    const bool bindingPrepared = prepared.ok();
-    Binding binding = bindingPrepared ? prepared.binding.commit() : Binding{};
-    ASSERT_TRUE(bindingPrepared && binding);
+    ASSERT_TRUE(prepared.ok());
+    Binding binding = prepared.binding.commit();
+    ASSERT_TRUE(static_cast<bool>(binding));
 
     context.pointerDown({{15.f, 15.f}, PointerButton::Left});
     context.pointerUp({{15.f, 15.f}, PointerButton::Left});
@@ -1441,7 +1444,7 @@ TEST(SurfaceTest, UnmountsRootElementsSafely) {
     auto panel = std::make_unique<PanelElement>();
     PanelElement* mounted = panel.get();
     context.mount(std::move(panel));
-    ASSERT_TRUE(context.unmount(*mounted));
+    ASSERT_NE(context.unmount(*mounted), nullptr);
 
     EXPECT_EQ(context.width(), 100.f);
     EXPECT_EQ(context.height(), 80.f);
@@ -1633,13 +1636,13 @@ TEST(SurfaceTest, InheritsAndOverridesCursorStyles) {
     surface.mount(std::move(parent));
 
     EXPECT_TRUE(surface.pointerMove({{15.f, 15.f}}));
-    EXPECT_EQ(static_cast<int>(surface.cursor()), static_cast<int>(CursorStyle::Grab));
+    EXPECT_EQ(surface.cursor(), CursorStyle::Grab);
 
     ASSERT_TRUE(styleSheet.loadRadia(kDefaultChildCursorLayout).ok());
-    EXPECT_EQ(static_cast<int>(surface.cursor()), static_cast<int>(CursorStyle::Default));
+    EXPECT_EQ(surface.cursor(), CursorStyle::Default);
 
     ASSERT_TRUE(styleSheet.loadRadia(kTextChildCursorLayout).ok());
-    EXPECT_EQ(static_cast<int>(surface.cursor()), static_cast<int>(CursorStyle::Text));
+    EXPECT_EQ(surface.cursor(), CursorStyle::Text);
 }
 
 TEST(SurfaceTest, RoutesInputBySurfaceLayerPriority) {
@@ -1796,7 +1799,10 @@ TEST(SurfaceTest, PaintsNestedScrollersWithBalancedViewportClipsAndTranslations)
         PaintCommandKind::PopClip,        PaintCommandKind::PopClip,         PaintCommandKind::EndFrame,
     };
     ASSERT_EQ(recording.commands().size(), expectedKinds.size());
-    for (std::size_t index = 0; index < expectedKinds.size(); ++index) EXPECT_EQ(recording.commands()[index].kind, expectedKinds[index]);
+    for (std::size_t index = 0; index < expectedKinds.size(); ++index) {
+        SCOPED_TRACE(Message() << "paint command index: " << index);
+        EXPECT_EQ(recording.commands()[index].kind, expectedKinds[index]);
+    }
 
     EXPECT_EQ(recording.clipDepth(), 0);
     EXPECT_EQ(recording.maxClipDepth(), 3);
@@ -1833,13 +1839,13 @@ TEST(SurfaceTest, TransfersMountedElementsBetweenSurfaces) {
     first.pointerDown({{15.f, 15.f}, PointerButton::Left});
 
     std::unique_ptr<Element> detached = first.unmount(*transferred);
-    ASSERT_TRUE(detached);
+    ASSERT_NE(detached, nullptr);
     EXPECT_EQ(detached.get(), transferred);
     EXPECT_FALSE(first.hasPointerCapture());
     EXPECT_EQ(transferred->parentElement(), nullptr);
     second.mount(std::move(detached), SurfaceLayer::Floater);
     EXPECT_EQ(transferred->parentElement(), nullptr);
-    EXPECT_TRUE(second.unmount(*transferred));
+    EXPECT_NE(second.unmount(*transferred), nullptr);
 }
 
 TEST(SurfaceTest, KeepsMountedRootsIndependent) {
@@ -1867,7 +1873,7 @@ TEST(SurfaceTest, KeepsMountedRootsIndependent) {
     EXPECT_EQ(firstDescendant->parentElement(), firstRoot);
 
     std::unique_ptr<Element> retired = surface.unmount(*firstRoot);
-    ASSERT_TRUE(retired);
+    ASSERT_NE(retired, nullptr);
     EXPECT_EQ(retired.get(), firstRoot);
     EXPECT_EQ(firstRoot->parentElement(), nullptr);
     EXPECT_EQ(secondRoot->parentElement(), nullptr);

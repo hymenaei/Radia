@@ -4,7 +4,10 @@
  */
 
 #include "linden_common.h"
+#include <cstdlib>
 #include <gtest/gtest.h>
+#include <iostream>
+#include <string>
 #include <type_traits>
 #include "elements/button.h"
 #include "elements/document.h"
@@ -14,6 +17,7 @@
 #include "elements/input.h"
 #include "elements/label.h"
 #include "elements/panel.h"
+#include "llerrorcontrol.h"
 #include "render/recordingpaintcontext.h"
 #include "skin/compiler.h"
 #include "surface/surface.h"
@@ -62,6 +66,11 @@ using radia::ui::TextOverflow;
 using radia::ui::TextWrap;
 using radia::ui::Vec2;
 using radia::ui::Visibility;
+
+[[noreturn]] void reportFatalDiagnostic(const std::string& message) {
+    std::cerr << message << std::endl;
+    std::abort();
+}
 } // namespace
 
 namespace {
@@ -84,7 +93,6 @@ public:
 private:
     TextLayout mLayout;
 };
-
 } // namespace
 
 namespace {
@@ -101,9 +109,9 @@ TEST(ElementTest, ElementReferencesExpireAfterUnmount) {
     auto button = std::make_unique<ButtonElement>();
     ElementRef<ButtonElement> reference(button.get());
     root.append(std::move(button));
-    ASSERT_TRUE(reference);
+    ASSERT_NE(reference.get(), nullptr);
     root.replaceChildren();
-    EXPECT_FALSE(reference);
+    EXPECT_EQ(reference.get(), nullptr);
 }
 
 TEST(ElementTest, DisabledButtonsDoNotActivate) {
@@ -123,19 +131,29 @@ TEST(ElementTest, ChildInsertionMaintainsOrderAndOwnership) {
     auto leading = std::make_unique<ButtonElement>();
     leading->setId("leading");
     root.prepend(std::move(leading));
-    EXPECT_EQ(root.children().front()->id(), "leading");
-    EXPECT_EQ(root.children().front()->parentElement(), &root);
+    ASSERT_EQ(root.children().size(), 2U);
+    EXPECT_EQ(root.children()[0]->id(), "leading");
+    EXPECT_EQ(root.children()[1]->id(), "first");
+    EXPECT_EQ(root.children()[0]->parentElement(), &root);
     root.replaceChildren();
     EXPECT_TRUE(root.children().empty());
 }
 
 TEST(ElementTest, UsesModernChildMutationMethods) {
     PanelElement root;
-    Element* first = root.append(std::make_unique<LabelElement>("first"))->asElement();
-    Element* last = root.append(std::make_unique<LabelElement>("last"))->asElement();
+    Node* firstNode = root.append(std::make_unique<LabelElement>("first"));
+    ASSERT_NE(firstNode, nullptr);
+    Element* first = firstNode->asElement();
+    ASSERT_NE(first, nullptr);
+    Node* lastNode = root.append(std::make_unique<LabelElement>("last"));
+    ASSERT_NE(lastNode, nullptr);
+    Element* last = lastNode->asElement();
+    ASSERT_NE(last, nullptr);
 
     Node* before = first->before(std::make_unique<LabelElement>("before"));
     Node* after = last->after(std::make_unique<LabelElement>("after"));
+    ASSERT_NE(before, nullptr);
+    ASSERT_NE(after, nullptr);
     ASSERT_EQ(root.children().size(), 4U);
     EXPECT_EQ(root.children()[0], before->asElement());
     EXPECT_EQ(root.children()[3], after->asElement());
@@ -153,6 +171,7 @@ TEST(ElementTest, UsesModernChildMutationMethods) {
     EXPECT_EQ(root.children()[1], replacement);
 
     Node* text = root.append(std::make_unique<Text>("text"));
+    ASSERT_NE(text, nullptr);
     ASSERT_EQ(text->nodeType(), NodeType::Text);
     EXPECT_EQ(text->parentElement(), &root);
     NodePtr detachedText = text->remove();
@@ -163,7 +182,10 @@ TEST(ElementTest, ExposesDomShapedNodeTraversal) {
     PanelElement root;
     root.textContent("before");
     auto childOwner = std::make_unique<LabelElement>("child");
-    Element* child = root.append(std::move(childOwner))->asElement();
+    Node* childNode = root.append(std::move(childOwner));
+    ASSERT_NE(childNode, nullptr);
+    Element* child = childNode->asElement();
+    ASSERT_NE(child, nullptr);
 
     ASSERT_EQ(root.nodeType(), NodeType::Element);
     ASSERT_EQ(root.childNodes().size(), 2U);
@@ -215,18 +237,22 @@ TEST(DocumentTest, OwnsDocumentElementAndTransfersDetachedChildren) {
     EXPECT_EQ(documentElement->parentElement(), nullptr);
     ASSERT_EQ(document.getElementById("root"), documentElement);
     auto buttonOwner = document.createElement("button");
+    ASSERT_NE(buttonOwner.get(), nullptr);
     buttonOwner->setId("button");
-    Element* button = documentElement->append(std::move(buttonOwner))->asElement();
+    Node* buttonNode = documentElement->append(std::move(buttonOwner));
+    ASSERT_NE(buttonNode, nullptr);
+    Element* button = buttonNode->asElement();
+    ASSERT_NE(button, nullptr);
 
     EXPECT_EQ(document.getElementById("button"), button);
     EXPECT_EQ(button->parentElement(), documentElement);
 
     NodePtr detached = button->remove();
-    EXPECT_EQ(detached.get(), button);
+    ASSERT_EQ(detached.get(), button);
     EXPECT_EQ(button->parentElement(), nullptr);
     EXPECT_EQ(document.getElementById("button"), nullptr);
 
-    EXPECT_EQ(documentElement->append(std::move(detached)), button);
+    ASSERT_EQ(documentElement->append(std::move(detached)), button);
     EXPECT_EQ(document.getElementById("button"), button);
 }
 
@@ -234,28 +260,47 @@ TEST(DocumentTest, ReparentsDetachedElementsWithinDocument) {
     auto documentElementOwner = std::make_unique<PanelElement>();
     Document document(std::move(documentElementOwner));
     Element* documentElement = document.documentElement();
+    ASSERT_NE(documentElement, nullptr);
 
     auto firstPanelOwner = document.createElement("panel");
-    Element* firstPanel = documentElement->append(std::move(firstPanelOwner))->asElement();
+    ASSERT_NE(firstPanelOwner.get(), nullptr);
+    Node* firstPanelNode = documentElement->append(std::move(firstPanelOwner));
+    ASSERT_NE(firstPanelNode, nullptr);
+    Element* firstPanel = firstPanelNode->asElement();
+    ASSERT_NE(firstPanel, nullptr);
     auto secondPanelOwner = document.createElement("panel");
-    Element* secondPanel = documentElement->append(std::move(secondPanelOwner))->asElement();
+    ASSERT_NE(secondPanelOwner.get(), nullptr);
+    Node* secondPanelNode = documentElement->append(std::move(secondPanelOwner));
+    ASSERT_NE(secondPanelNode, nullptr);
+    Element* secondPanel = secondPanelNode->asElement();
+    ASSERT_NE(secondPanel, nullptr);
 
     auto buttonOwner = document.createElement("button");
-    Element* button = firstPanel->append(std::move(buttonOwner))->asElement();
+    ASSERT_NE(buttonOwner.get(), nullptr);
+    Node* buttonNode = firstPanel->append(std::move(buttonOwner));
+    ASSERT_NE(buttonNode, nullptr);
+    Element* button = buttonNode->asElement();
+    ASSERT_NE(button, nullptr);
     NodePtr detached = button->remove();
 
     ASSERT_EQ(detached.get(), button);
     EXPECT_EQ(button->parentElement(), nullptr);
     EXPECT_EQ(button->elementName(), "button");
 
-    EXPECT_EQ(secondPanel->append(std::move(detached)), button);
+    ASSERT_EQ(secondPanel->append(std::move(detached)), button);
     EXPECT_EQ(button->parentElement(), secondPanel);
+    ASSERT_EQ(secondPanel->children().size(), 1U);
     EXPECT_EQ(secondPanel->children().front(), button);
 }
 
 TEST(ElementTreeDeathTest, RejectsNullChild) {
     PanelElement root;
-    EXPECT_DEATH(root.append(NodePtr()), ".*");
+    EXPECT_DEATH(
+        {
+            LLError::setFatalFunction(reportFatalDiagnostic);
+            root.append(NodePtr());
+        },
+        "ASSERT \\(child\\)");
     EXPECT_TRUE(root.children().empty());
 }
 
@@ -266,7 +311,12 @@ TEST(ElementTreeDeathTest, RejectsCrossDocumentChild) {
     Document second(std::move(secondRootOwner));
     auto childOwner = first.createElement("button");
 
-    EXPECT_DEATH(second.documentElement()->append(std::move(childOwner)), ".*");
+    EXPECT_DEATH(
+        {
+            LLError::setFatalFunction(reportFatalDiagnostic);
+            second.documentElement()->append(std::move(childOwner));
+        },
+        "childIdentityToken == parentIdentityToken");
     EXPECT_TRUE(second.documentElement()->children().empty());
 }
 
@@ -274,7 +324,12 @@ TEST(ElementTreeDeathTest, RejectsMutationOfDocumentElement) {
     auto documentElementOwner = std::make_unique<PanelElement>();
     Document document(std::move(documentElementOwner));
 
-    EXPECT_DEATH(document.documentElement()->remove(), ".*");
+    EXPECT_DEATH(
+        {
+            LLError::setFatalFunction(reportFatalDiagnostic);
+            document.documentElement()->remove();
+        },
+        "ASSERT \\(parent\\)");
     EXPECT_NE(document.documentElement(), nullptr);
 }
 
@@ -282,7 +337,12 @@ TEST(ElementTreeDeathTest, RejectsUnknownRuntimeElement) {
     auto documentElementOwner = std::make_unique<PanelElement>();
     Document document(std::move(documentElementOwner));
 
-    EXPECT_DEATH(document.createElement("not-a-radia-element"), ".*");
+    EXPECT_DEATH(
+        {
+            LLError::setFatalFunction(reportFatalDiagnostic);
+            document.createElement("not-a-radia-element");
+        },
+        "Unknown UI Element type");
 }
 
 TEST(ElementTest, NormalizesAdjacentTextNodes) {
@@ -318,7 +378,9 @@ TEST(ElementTest, PreservesWhitespaceOnlyTextNodes) {
 
 TEST(ElementTest, TextDataMutationUpdatesOwnerTextContent) {
     Element root("p");
-    Text* text = root.append(std::make_unique<Text>("before"))->asText();
+    Node* textNode = root.append(std::make_unique<Text>("before"));
+    ASSERT_NE(textNode, nullptr);
+    Text* text = textNode->asText();
     ASSERT_NE(text, nullptr);
 
     text->setData("after");
@@ -363,7 +425,7 @@ TEST(ElementPaintTest, PaintsCompiledResourcesWithLocaleAndEffects) {
     resources.add("resources/icons/search.svg", kSearchIconSvg);
     SkinGenerationPrepareResult prepared = SkinCompiler().prepare(std::move(resources));
     ASSERT_TRUE(prepared.ok());
-    system.publish(prepared.generation);
+    ASSERT_TRUE(system.publish(prepared.generation));
     ASSERT_TRUE(system.setLocale("ar"));
 
     std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
@@ -396,10 +458,10 @@ TEST(ElementPaintTest, PaintsCompiledResourcesWithLocaleAndEffects) {
     EXPECT_EQ(effectCommand->style.effects.size(), 2U);
     EXPECT_EQ(iconCommand->textOrIconName, "search");
     EXPECT_EQ(textCommand->style.color.a, .25f);
-    EXPECT_EQ(static_cast<int>(textCommand->style.textAlign), static_cast<int>(TextAlign::Left));
+    EXPECT_EQ(textCommand->style.textAlign, TextAlign::Left);
     EXPECT_EQ(textCommand->rect.x, -8.f);
-    EXPECT_EQ(static_cast<int>(recording.commands().front().kind), static_cast<int>(PaintCommandKind::BeginFrame));
-    EXPECT_EQ(static_cast<int>(recording.commands().back().kind), static_cast<int>(PaintCommandKind::EndFrame));
+    EXPECT_EQ(recording.commands().front().kind, PaintCommandKind::BeginFrame);
+    EXPECT_EQ(recording.commands().back().kind, PaintCommandKind::EndFrame);
     EXPECT_LT(textCommand, iconCommand);
     EXPECT_FALSE(surface->needsPaint());
 }
@@ -523,7 +585,7 @@ TEST(TextLayoutTest, WrapsAtWordAndUnicodeBoundaries) {
     Style style;
     style.fontSize = 10.f;
     style.textOverflow = TextOverflow::Clip;
-    EXPECT_EQ(static_cast<int>(style.textWrap), static_cast<int>(TextWrap::Wrap));
+    ASSERT_EQ(style.textWrap, TextWrap::Wrap);
 
     TextLayoutTestElement wrapped("alpha beta");
     wrapped.setRect({0.f, 0.f, 30.f, 20.f});
@@ -589,11 +651,10 @@ TEST(TextLayoutTest, UsesShapedWidthsForCenterEllipsis) {
 
 TEST(TextLayoutTest, AppliesOverflowToMountedTextNodes) {
     StyleSheet stylesheet;
-    constexpr char kTextOverflowStyle[] =
-        "panel { display: block; } "
-        "p { width: 20px; height: 10px; font-size: 10px; line-height: 10px; text-wrap: nowrap; overflow: hidden; } "
-        "p.end { text-overflow: ellipsis; } "
-        "p.center { text-overflow: ellipsis-center; }";
+    constexpr char kTextOverflowStyle[] = "panel { display: block; } "
+                                          "p { width: 20px; height: 10px; font-size: 10px; line-height: 10px; text-wrap: nowrap; overflow: hidden; } "
+                                          "p.end { text-overflow: ellipsis; } "
+                                          "p.center { text-overflow: ellipsis-center; }";
     ASSERT_TRUE(stylesheet.loadRadia(kTextOverflowStyle).ok());
 
     Surface surface(stylesheet);
@@ -657,11 +718,13 @@ TEST(SwitchElementTest, PointerActivationUpdatesStateAndThumb) {
 
     surface.updateLayout();
     ASSERT_NE(target->track(), nullptr);
+    ASSERT_NE(target->thumb(), nullptr);
     const float uncheckedLeft = target->thumb()->rect().left();
     surface.pointerDown({{5.f, 10.f}, PointerButton::Left});
     surface.pointerUp({{5.f, 10.f}, PointerButton::Left});
     surface.updateLayout();
 
     EXPECT_TRUE(target->checked());
+    ASSERT_NE(target->thumb(), nullptr);
     EXPECT_GT(target->thumb()->rect().left(), uncheckedLeft);
 }

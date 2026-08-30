@@ -4,14 +4,10 @@
  */
 
 #include "linden_common.h"
-#include <filesystem>
-#include <fstream>
 #include <gtest/gtest.h>
 #include <map>
 #include <memory>
-#include <sstream>
 #include <string>
-#include "floater_test_helpers.h"
 #include "elements/button.h"
 #include "elements/elementinternal.h"
 #include "elements/elementtext.h"
@@ -21,14 +17,15 @@
 #include "elements/label.h"
 #include "elements/panel.h"
 #include "event.h"
-#include "layout/document.h"
+#include "floater_test_helpers.h"
 #include "layout/engine.h"
+#include "layout_test_helpers.h"
 #include "layout/resourcecompiler.h"
+#include "layout/document.h"
 #include "skin/compiler.h"
 #include "style/style.h"
 #include "surface/surface.h"
 #include "system.h"
-#include "test_layout_helpers.h"
 #include "text/metrics.h"
 
 namespace {
@@ -101,8 +98,8 @@ TEST_F(LayoutResourceCompilerTest, BuildsFloaterWithControlsAndEventCalls) {
 
     const ElementRef<ButtonElement> go = requireElement<ButtonElement>(*floater, "go");
     const ElementRef<InputElement> toggle = requireElement<InputElement>(*floater, "toggle");
-    ASSERT_TRUE(go);
-    ASSERT_TRUE(toggle);
+    ASSERT_NE(go.get(), nullptr);
+    ASSERT_NE(toggle.get(), nullptr);
     EXPECT_TRUE(toggle->checked());
     EXPECT_EQ(toggle->name(), "mode");
 
@@ -148,14 +145,18 @@ TEST_F(LayoutResourceCompilerTest, RefreshesCachedDocumentWhenResourceChanges) {
 
     const LayoutBuildResult first = compiler.buildElementTreeFromResource("panel.html");
     ASSERT_TRUE(first.ok());
-    ASSERT_EQ(first.rootAs<PanelElement>()->children().size(), std::size_t{1});
-    EXPECT_EQ(first.rootAs<PanelElement>()->children().front()->id(), "first");
+    const PanelElement* firstPanel = first.rootAs<PanelElement>();
+    ASSERT_NE(firstPanel, nullptr);
+    ASSERT_EQ(firstPanel->children().size(), std::size_t{1});
+    EXPECT_EQ(firstPanel->children().front()->id(), "first");
 
     resources.add("panel.html", "<panel><p id=\"second\"/></panel>");
     const LayoutBuildResult second = compiler.buildElementTreeFromResource("panel.html");
     ASSERT_TRUE(second.ok());
-    ASSERT_EQ(second.rootAs<PanelElement>()->children().size(), std::size_t{1});
-    EXPECT_EQ(second.rootAs<PanelElement>()->children().front()->id(), "second");
+    const PanelElement* secondPanel = second.rootAs<PanelElement>();
+    ASSERT_NE(secondPanel, nullptr);
+    ASSERT_EQ(secondPanel->children().size(), std::size_t{1});
+    EXPECT_EQ(secondPanel->children().front()->id(), "second");
 }
 
 TEST_F(LayoutResourceCompilerTest, InstantiatesIndependentEmbeddedResourcePanels) {
@@ -169,8 +170,8 @@ TEST_F(LayoutResourceCompilerTest, InstantiatesIndependentEmbeddedResourcePanels
 
     const ElementRef<PanelElement> first = requireElement<PanelElement>(*result.document->documentElement(), "one");
     const ElementRef<PanelElement> second = requireElement<PanelElement>(*result.document->documentElement(), "two");
-    ASSERT_TRUE(first);
-    ASSERT_TRUE(second);
+    ASSERT_NE(first.get(), nullptr);
+    ASSERT_NE(second.get(), nullptr);
     EXPECT_NE(first.get(), second.get());
     EXPECT_EQ(first->classes().count("shared"), 1U);
     EXPECT_EQ(first->classes().count("first"), 1U);
@@ -197,6 +198,17 @@ TEST_F(LayoutResourceCompilerTest, ResolvesNestedResourceReferences) {
     ASSERT_EQ(result.document->documentElement()->children().size(), 1U);
     ASSERT_EQ(result.document->documentElement()->children()[0]->children().size(), 1U);
     EXPECT_EQ(result.document->documentElement()->children()[0]->children()[0]->id(), "inner");
+}
+
+TEST_F(LayoutResourceCompilerTest, ResolvesRootedLayoutResourceReferences) {
+    resources["shared.html"] = "<panel id=\"shared\"/>";
+
+    const LayoutBuildResult result =
+        factory.buildElementTreeFromString("<panel><panel filename=\"/shared.html\"/></panel>", "nested/outer.html");
+    ASSERT_TRUE(result.ok());
+    ASSERT_TRUE(result.document);
+    ASSERT_EQ(result.document->documentElement()->children().size(), 1U);
+    EXPECT_EQ(result.document->documentElement()->children().front()->id(), "shared");
 }
 
 TEST_F(LayoutResourceCompilerTest, RejectsResourceCycles) {
@@ -271,7 +283,7 @@ TEST_F(LayoutResourceCompilerTest, PreservesMixedContentOrderAndSourceRanges) {
     EXPECT_FALSE(parsed.document->root->content[1].isText());
     EXPECT_TRUE(parsed.document->root->content[2].isText());
     EXPECT_EQ(parsed.document->root->content[1].source.begin.line, 1U);
-    EXPECT_GE(parsed.document->root->content[1].source.end.offset, parsed.document->root->content[1].source.begin.offset);
+    EXPECT_GT(parsed.document->root->content[1].source.end.offset, parsed.document->root->content[1].source.begin.offset);
 }
 
 TEST_F(LayoutResourceCompilerTest, BuildsMixedTextAndElementsAsOneOrderedRuntimeTree) {
@@ -380,146 +392,6 @@ TEST_F(LayoutResourceCompilerTest, ComposesButtonInlineChildren) {
     EXPECT_EQ(rebuiltIcon->name(), "rebuilt");
 }
 
-TEST_F(LayoutResourceCompilerTest, MatchesPaintProtocolWithShaderConstants) {
-    const std::filesystem::path uiSourceRoot = std::filesystem::path(__FILE__).parent_path().parent_path();
-    const std::filesystem::path newviewSourceRoot = uiSourceRoot.parent_path() / "newview";
-    std::ifstream vertexFile(newviewSourceRoot / "app_settings/shaders/class1/interface/uiV.glsl");
-    std::ifstream fragmentFile(newviewSourceRoot / "app_settings/shaders/class1/interface/uiF.glsl");
-    std::ifstream paintProtocolFile(uiSourceRoot / "render/paintprotocol.def");
-    ASSERT_TRUE(vertexFile.good());
-    ASSERT_TRUE(fragmentFile.good());
-    ASSERT_TRUE(paintProtocolFile.good());
-
-    std::ostringstream vertex;
-    std::ostringstream fragment;
-    std::ostringstream paintProtocol;
-    vertex << vertexFile.rdbuf();
-    fragment << fragmentFile.rdbuf();
-    paintProtocol << paintProtocolFile.rdbuf();
-    const std::string vertexSource = vertex.str();
-    const std::string fragmentSource = fragment.str();
-    const std::string paintProtocolSource = paintProtocol.str();
-
-    const auto contains = [](const std::string& source, const char* text) { return source.find(text) != std::string::npos; };
-    const auto trimToken = [](std::string token) {
-        const std::size_t first = token.find_first_not_of(" \t\r\n");
-        const std::size_t last = token.find_last_not_of(" \t\r\n");
-        return first == std::string::npos ? std::string() : token.substr(first, last - first + 1);
-    };
-    const auto parseDefinition = [&](const char* macro) {
-        std::map<std::string, int> entries;
-        const std::string marker = std::string(macro) + "(";
-        std::size_t position = 0;
-        while ((position = paintProtocolSource.find(marker, position)) != std::string::npos) {
-            const std::size_t nameStart = position + marker.size();
-            const std::size_t firstComma = paintProtocolSource.find(',', nameStart);
-            const std::size_t close = paintProtocolSource.find(')', firstComma + 1);
-            if (firstComma == std::string::npos || close == std::string::npos) break;
-            entries.emplace(trimToken(paintProtocolSource.substr(nameStart, firstComma - nameStart)),
-                            std::stoi(trimToken(paintProtocolSource.substr(firstComma + 1, close - firstComma - 1))));
-            position = close + 1;
-        }
-        return entries;
-    };
-    const auto parseShaderConstants = [&](const char* prefix) {
-        std::map<std::string, int> entries;
-        const std::string marker = std::string("const int ") + prefix;
-        std::size_t position = 0;
-        while ((position = fragmentSource.find(marker, position)) != std::string::npos) {
-            const std::size_t nameStart = position + std::string("const int ").size();
-            const std::size_t equals = fragmentSource.find('=', nameStart);
-            const std::size_t semicolon = fragmentSource.find(';', equals);
-            if (equals == std::string::npos || semicolon == std::string::npos) break;
-            const std::string name = trimToken(fragmentSource.substr(nameStart, equals - nameStart));
-            entries.emplace(name.substr(std::string(prefix).size()), std::stoi(trimToken(fragmentSource.substr(equals + 1, semicolon - equals - 1))));
-            position = semicolon + 1;
-        }
-        return entries;
-    };
-    const auto expectProtocol = [&](const char* macro, const char* shaderPrefix) {
-        const auto definitions = parseDefinition(macro);
-        const auto constants = parseShaderConstants(shaderPrefix);
-        EXPECT_EQ(definitions.size(), constants.size()) << macro;
-        for (const auto& [name, value] : definitions) {
-            SCOPED_TRACE(Message() << "paint protocol entry: " << name);
-            const auto found = constants.find(name);
-            ASSERT_NE(found, constants.end());
-            EXPECT_EQ(found->second, value);
-        }
-    };
-
-    expectProtocol("PAINT_OP_ENTRY", "kPaintOp");
-    expectProtocol("GRADIENT_OP_ENTRY", "kGradient");
-    expectProtocol("OUTLINE_OP_ENTRY", "kOutline");
-
-    EXPECT_TRUE(contains(vertexSource, "#ifdef PAINT_SHADER"));
-    EXPECT_TRUE(contains(fragmentSource, "#ifdef PAINT_SHADER"));
-    EXPECT_TRUE(contains(vertexSource, "shapeCoord = texcoord0"));
-    EXPECT_TRUE(contains(fragmentSource, "kPaintOpDirect = 0")
-                && contains(fragmentSource, "kPaintOpFill = 1")
-                && contains(fragmentSource, "paintOp == kPaintOpDirect"));
-    EXPECT_TRUE(contains(paintProtocolSource, "PAINT_OP_ENTRY(Direct, 0)")
-                && contains(paintProtocolSource, "PAINT_OP_ENTRY(Fill, 1)")
-                && contains(paintProtocolSource, "PAINT_OP_ENTRY(Border, 2)")
-                && contains(paintProtocolSource, "PAINT_OP_ENTRY(Gradient, 3)")
-                && contains(paintProtocolSource, "PAINT_OP_ENTRY(OuterShadow, 4)")
-                && contains(paintProtocolSource, "PAINT_OP_ENTRY(InsetShadow, 5)")
-                && contains(paintProtocolSource, "PAINT_OP_ENTRY(GradientBorder, 6)")
-                && contains(paintProtocolSource, "PAINT_OP_ENTRY(Blur, 7)")
-                && contains(paintProtocolSource, "PAINT_OP_ENTRY(Composite, 8)")
-                && contains(paintProtocolSource, "PAINT_OP_ENTRY(Arrow, 9)"));
-    EXPECT_TRUE(contains(fragmentSource, "uniform int paintOp;")
-                && contains(fragmentSource, "uniform vec4 shapeRect;")
-                && contains(fragmentSource, "uniform vec4 shapeRadiusX;")
-                && contains(fragmentSource, "uniform vec4 shapeRadiusY;")
-                && contains(fragmentSource, "uniform vec4 innerRadiusX;")
-                && contains(fragmentSource, "uniform vec4 innerRadiusY;")
-                && contains(fragmentSource, "uniform vec4 scrollbarClipRect;")
-                && contains(fragmentSource, "uniform vec4 scrollbarClipRadiusX;")
-                && contains(fragmentSource, "uniform vec4 scrollbarClipRadiusY;")
-                && contains(fragmentSource, "uniform int scrollbarClipEnabled;")
-                && contains(fragmentSource, "uniform vec4 clipCoverageRect;")
-                && contains(fragmentSource, "uniform int clipCoverageEnabled;")
-                && contains(fragmentSource, "uniform vec2 effectTextureSize;")
-                && contains(fragmentSource, "uniform int gradientKind;")
-                && contains(fragmentSource, "uniform int outlineStyle;")
-                && !contains(fragmentSource, "rduiPaintOp"));
-    EXPECT_TRUE(contains(fragmentSource, "kPaintOpBorder = 2")
-                && contains(fragmentSource, "paintOp == kPaintOpBorder")
-                && contains(fragmentSource, "fwidth"));
-    EXPECT_TRUE(contains(fragmentSource, "roundedTriangleCornerDistance")
-                && contains(fragmentSource, "roundedTriangleCoverage(shapeCoord, a, b, c, arrowRadius)"));
-    EXPECT_TRUE(contains(fragmentSource, "scrollbarClipEnabled != 0") && contains(fragmentSource, "coverageFromDistance(clipDistance)"));
-    EXPECT_TRUE(contains(fragmentSource, "applyClipCoverage")
-                && contains(fragmentSource, "gl_FragCoord.xy")
-                && contains(fragmentSource, "clipCoverageEnabled == 0"));
-    EXPECT_TRUE(contains(fragmentSource, "kGradientLinear = 0")
-                && contains(fragmentSource, "kGradientRadial = 1")
-                && contains(fragmentSource, "kGradientConic = 2")
-                && contains(fragmentSource, "kOutlineSolid = 0")
-                && contains(fragmentSource, "kOutlineDashed = 1"));
-    EXPECT_TRUE(contains(fragmentSource, "topBorderGap"));
-    EXPECT_TRUE(contains(fragmentSource, "gradientKind") && contains(fragmentSource, "atan(delta.x, delta.y)"));
-    EXPECT_TRUE(contains(fragmentSource, "gradientRepeating")
-                && contains(fragmentSource, "underlyingGradientIntegral")
-                && contains(fragmentSource, "cycles * repeatingTotal"));
-    EXPECT_TRUE(contains(fragmentSource, "gradientPixelWidth")
-                && contains(fragmentSource, "filteredGradientColor")
-                && contains(fragmentSource, "gradientIntervalIntegral")
-                && contains(fragmentSource, "dFdx(delta)"));
-    EXPECT_TRUE(contains(fragmentSource, "kPaintOpGradientBorder = 6")
-                && contains(fragmentSource, "paintOp == kPaintOpGradientBorder")
-                && contains(fragmentSource, "borderWidths"));
-    EXPECT_TRUE(contains(fragmentSource, "kPaintOpBlur = 7")
-                && contains(fragmentSource, "kPaintOpComposite = 8")
-                && contains(fragmentSource, "paintOp == kPaintOpBlur")
-                && contains(fragmentSource, "paintOp == kPaintOpComposite")
-                && contains(fragmentSource, "blurredEffectColor")
-                && contains(fragmentSource, "maxSamplesPerSide")
-                && contains(fragmentSource, "totalWeight"));
-    EXPECT_TRUE(contains(fragmentSource, "return vec4(color.rgb, mask);") && !contains(fragmentSource, "color.a * mask"));
-}
-
 TEST_F(LayoutResourceCompilerTest, RefreshesLocalizedElementsAcrossLocaleChanges) {
     System system;
     ResourceSnapshot resources;
@@ -537,7 +409,7 @@ TEST_F(LayoutResourceCompilerTest, RefreshesLocalizedElementsAcrossLocaleChanges
 
     const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(resources);
     ASSERT_TRUE(prepared.ok());
-    system.publish(prepared.generation);
+    ASSERT_TRUE(system.publish(prepared.generation));
 
     LayoutBuildResult result = system.buildElementTree("localized.html");
     ASSERT_TRUE(result.ok());
@@ -545,8 +417,8 @@ TEST_F(LayoutResourceCompilerTest, RefreshesLocalizedElementsAcrossLocaleChanges
     ASSERT_NE(floater, nullptr);
     const ElementRef<LabelElement> status = requireElement<LabelElement>(*floater, "status");
     const ElementRef<ButtonElement> press = requireElement<ButtonElement>(*floater, "press");
-    ASSERT_TRUE(status);
-    ASSERT_TRUE(press);
+    ASSERT_NE(status.get(), nullptr);
+    ASSERT_NE(press.get(), nullptr);
     auto pressNodes = nodes(*press);
     ASSERT_EQ(pressNodes.size(), 1U);
     ASSERT_NE(pressNodes.begin()->asText(), nullptr);
@@ -578,9 +450,9 @@ TEST_F(LayoutResourceCompilerTest, RefreshesLocalizedElementsAcrossLocaleChanges
     auto bodyChild = std::make_unique<Element>("p");
     bodyChild->setId("body-child");
     localizedBodyFloater->body()->append(std::move(bodyChild));
+    ASSERT_EQ(localizedBodyFloater->body()->children().size(), 1U);
     localizedBodyFloater->body()->children().front()->content(system.t("status"));
     EXPECT_EQ(localizedBodyFloater->body()->textContent(), "Pronto");
-    ASSERT_EQ(localizedBodyFloater->body()->children().size(), 1U);
 
     status->content(system.t("status"));
     ASSERT_TRUE(system.setLocale("en"));
@@ -614,7 +486,7 @@ TEST_F(LayoutResourceCompilerTest, RefreshesLocalizedRichTextAcrossLocaleChanges
 
     const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(resources);
     ASSERT_TRUE(prepared.ok());
-    system.publish(prepared.generation);
+    ASSERT_TRUE(system.publish(prepared.generation));
 
     LayoutBuildResult result = system.buildElementTree("rich.html");
     ASSERT_TRUE(result.ok());
@@ -709,8 +581,16 @@ TEST_F(LayoutResourceCompilerTest, RejectsInvalidBooleanAttributes) {
     ASSERT_FALSE(result.ok());
     EXPECT_FALSE(result.document);
     ASSERT_EQ(result.errors.size(), 2U);
-    EXPECT_EQ(result.errors.front().code, "layout.attribute.boolean_invalid");
-    EXPECT_EQ(result.errors.front().source, "booleans.html");
+    EXPECT_EQ(result.errors[0].code, "layout.attribute.boolean_invalid");
+    EXPECT_EQ(result.errors[0].message, "Invalid boolean value for resizeable: sometimes.");
+    EXPECT_EQ(result.errors[0].source, "booleans.html");
+    EXPECT_EQ(result.errors[0].line, 1U);
+    EXPECT_EQ(result.errors[0].column, 1U);
+    EXPECT_EQ(result.errors[1].code, "layout.attribute.boolean_invalid");
+    EXPECT_EQ(result.errors[1].message, "Invalid boolean value for checked: yes.");
+    EXPECT_EQ(result.errors[1].source, "booleans.html");
+    EXPECT_EQ(result.errors[1].line, 1U);
+    EXPECT_EQ(result.errors[1].column, 46U);
 }
 
 TEST_F(LayoutResourceCompilerTest, AcceptsBooleanAttributesWithoutValue) {
@@ -768,8 +648,8 @@ TEST_F(LayoutResourceCompilerTest, ManagesAuthoredFloaterHeadLifecycle) {
 
     ElementRef<PanelElement> content = requireElement<PanelElement>(*floater, "content");
     ElementRef<ButtonElement> refresh = requireElement<ButtonElement>(*floater, "refresh");
-    ASSERT_TRUE(content);
-    ASSERT_TRUE(refresh);
+    ASSERT_NE(content.get(), nullptr);
+    ASSERT_NE(refresh.get(), nullptr);
     ASSERT_NE(floater->head(), nullptr);
     ASSERT_NE(floater->body(), nullptr);
     EXPECT_EQ(content->parentElement(), floater->body());
@@ -794,8 +674,8 @@ TEST_F(LayoutResourceCompilerTest, ManagesAuthoredFloaterHeadLifecycle) {
     floater->replaceChildren();
     EXPECT_EQ(floater->head(), nullptr);
     EXPECT_EQ(floater->body(), nullptr);
-    EXPECT_FALSE(content);
-    EXPECT_FALSE(refresh);
+    EXPECT_EQ(content.get(), nullptr);
+    EXPECT_EQ(refresh.get(), nullptr);
 }
 
 TEST_F(LayoutResourceCompilerTest, FindsFloaterControlsThroughHeadWrappers) {
@@ -877,8 +757,8 @@ TEST_F(LayoutResourceCompilerTest, AppliesChildBearingElementDefaults) {
     resources["elements/close.html"] = "<close><icon src=\"close\"/></close>";
     constexpr char kDefaultedFloaterLayout[] = "<floater><head><title>defaulted</title><minimize/><close/></head><body/></floater>";
 
-    EXPECT_FALSE(factory.validateElementDefaults("MINIMIZE").hasErrors());
-    EXPECT_FALSE(factory.validateElementDefaults("close").hasErrors());
+    ASSERT_FALSE(factory.validateElementDefaults("MINIMIZE").hasErrors());
+    ASSERT_FALSE(factory.validateElementDefaults("close").hasErrors());
     LayoutBuildResult result = factory.buildElementTreeFromString(kDefaultedFloaterLayout, "defaulted.html");
     ASSERT_TRUE(result.ok());
     FloaterElement* floater = result.rootAs<FloaterElement>();
@@ -982,7 +862,7 @@ TEST_F(LayoutResourceCompilerTest, AcceptsCaseInsensitiveMarkupNames) {
     FloaterElement* floater = result.rootAs<FloaterElement>();
     ASSERT_NE(floater, nullptr);
     const ElementRef<ButtonElement> button = requireElement<ButtonElement>(*floater, "saveFile");
-    ASSERT_TRUE(button);
+    ASSERT_NE(button.get(), nullptr);
     ASSERT_EQ(button->children().size(), 1U);
     ASSERT_NE(dynamic_cast<radia::ui::IconElement*>(button->children().front()), nullptr);
     EXPECT_EQ(button->elementName(), "button");
@@ -1038,9 +918,9 @@ TEST_F(LayoutResourceCompilerTest, PreservesValidEventCallsAndWarnsForInvalidCal
     const ElementRef<ButtonElement> inspect = requireElement<ButtonElement>(*result.document->documentElement(), "inspect");
     const ElementRef<ButtonElement> bare = requireElement<ButtonElement>(*result.document->documentElement(), "bare");
     const ElementRef<ButtonElement> lifecycle = requireElement<ButtonElement>(*result.document->documentElement(), "lifecycle");
-    ASSERT_TRUE(inspect);
-    ASSERT_TRUE(bare);
-    ASSERT_TRUE(lifecycle);
+    ASSERT_NE(inspect.get(), nullptr);
+    ASSERT_NE(bare.get(), nullptr);
+    ASSERT_NE(lifecycle.get(), nullptr);
     ASSERT_NE(inspect->eventCall(kClickEvent), nullptr);
     EXPECT_EQ(inspect->eventCall(kClickEvent)->name(), "inspect");
     EXPECT_EQ(inspect->eventCall(kClickEvent)->arguments().size(), 5U);

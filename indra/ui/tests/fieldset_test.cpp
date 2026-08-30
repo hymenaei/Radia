@@ -11,7 +11,6 @@
 #include <memory>
 #include <string>
 #include <utility>
-#include "test_layout_helpers.h"
 #include "binding/binder.h"
 #include "elements/button.h"
 #include "elements/elementdefinition.h"
@@ -25,6 +24,7 @@
 #include "layout/document.h"
 #include "layout/engine.h"
 #include "layout/resourcecompiler.h"
+#include "layout_test_helpers.h"
 #include "render/recordingpaintcontext.h"
 #include "skin/compiler.h"
 #include "surface/surface.h"
@@ -92,8 +92,8 @@ TEST_F(FieldsetTest, PreservesInlineElementStructureAcrossTextAndLabels) {
 
     const ElementRef<Element> text = requireElement<Element>(*result.document->documentElement(), "copy");
     const ElementRef<Element> title = requireElement<Element>(*result.document->documentElement(), "title");
-    ASSERT_TRUE(text);
-    ASSERT_TRUE(title);
+    ASSERT_NE(text.get(), nullptr);
+    ASSERT_NE(title.get(), nullptr);
     EXPECT_EQ(text->textContent(), "before boldboth\nafter");
     ASSERT_EQ(text->children().size(), 3U);
     EXPECT_EQ(text->children()[0]->elementName(), "b");
@@ -107,7 +107,7 @@ TEST_F(FieldsetTest, PreservesInlineElementStructureAcrossTextAndLabels) {
     const LayoutBuildResult labelResult = factory.buildElementTreeFromString(kLabelInlineLayout, "label-inline.xml");
     ASSERT_TRUE(labelResult.ok());
     const ElementRef<LabelElement> label = requireElement<LabelElement>(*labelResult.document->documentElement(), "label");
-    ASSERT_TRUE(label);
+    ASSERT_NE(label.get(), nullptr);
     ASSERT_EQ(label->children().size(), 3U);
     EXPECT_EQ(label->children()[0]->elementName(), "b");
     EXPECT_EQ(label->children()[1]->elementName(), "br");
@@ -255,8 +255,8 @@ TEST_F(FieldsetTest, ActivatesLabelTargetOnlyWhenInteractive) {
 
     const ElementRef<LabelElement> label = requireElement<LabelElement>(*result.document->documentElement(), "toggleLabel");
     const ElementRef<InputElement> target = requireElement<InputElement>(*result.document->documentElement(), "toggle");
-    ASSERT_TRUE(label);
-    ASSERT_TRUE(target);
+    ASSERT_NE(label.get(), nullptr);
+    ASSERT_NE(target.get(), nullptr);
     EXPECT_TRUE(label->defaultPointerEvents());
 
     int changes = 0;
@@ -342,8 +342,8 @@ TEST_F(FieldsetTest, ResolvesLabelTargetsInsideIncludedResources) {
     Element& included = *root.children().front();
     const ElementRef<LabelElement> label = requireElement<LabelElement>(included, "nestedLabel");
     const ElementRef<InputElement> target = requireElement<InputElement>(included, "nestedSwitch");
-    ASSERT_TRUE(label);
-    ASSERT_TRUE(target);
+    ASSERT_NE(label.get(), nullptr);
+    ASSERT_NE(target.get(), nullptr);
     EXPECT_EQ(ElementCompilerAccess::labelTarget(*label), target.get());
 }
 
@@ -413,7 +413,6 @@ TEST_F(FieldsetTest, EnforcesLegendScopeAndUniqueness) {
         ASSERT_FALSE(result.errors.empty());
         EXPECT_EQ(result.errors.front().code, test.diagnostic);
     }
-
 }
 
 TEST_F(FieldsetTest, PreservesFieldsetChildOrder) {

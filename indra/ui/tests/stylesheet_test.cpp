@@ -10,7 +10,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include "floater_test_helpers.h"
 #include "elements/button.h"
 #include "elements/document.h"
 #include "elements/elementdefinition.h"
@@ -19,6 +18,7 @@
 #include "elements/input.h"
 #include "elements/label.h"
 #include "elements/panel.h"
+#include "floater_test_helpers.h"
 #include "layout/engine.h"
 #include "style/stylesheet.h"
 
@@ -372,7 +372,8 @@ TEST(StyleSheetTest, WarnsWhenTargetSpecificStateCannotMatch) {
 
     ASSERT_TRUE(result.ok());
     ASSERT_EQ(result.warnings.size(), std::size_t(2));
-    EXPECT_EQ(result.warnings.front().code, "stylesheet.selector.state_never_matches");
+    EXPECT_EQ(result.warnings[0].code, "stylesheet.selector.state_never_matches");
+    EXPECT_EQ(result.warnings[1].code, "stylesheet.selector.state_never_matches");
 }
 
 TEST(StyleSheetTest, InheritsOnlyInheritablePropertiesAndAllowsOverrides) {
@@ -486,6 +487,7 @@ TEST(StyleSheetTest, RejectsMalformedEllipticalBorderRadiusShorthand) {
     constexpr char kTooManyValuesStyles[] = "panel { border-radius: 1px 2px 3px 4px 5px; }";
 
     for (const char* source : {kInvalidStyles, kMultipleSlashStyles, kTooManyValuesStyles}) {
+        SCOPED_TRACE(Message() << "malformed border-radius CSS: " << source);
         StyleSheet stylesheet;
         const auto result = stylesheet.loadRadia(source, "border-radius.css");
         ASSERT_FALSE(result.ok());
@@ -567,7 +569,7 @@ TEST(StyleSheetTest, InheritsColorSchemeAndAllowsOverride) {
 
 TEST(StyleSheetTest, ResolvesLightDarkAfterColorSchemeInheritance) {
     constexpr char kLightDarkStyles[] = ":root { color-scheme: light; } panel.dark { color-scheme: dark; } "
-                                         "label { color: light-dark(#101010, #f0f0f0); }";
+                                        "label { color: light-dark(#101010, #f0f0f0); }";
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kLightDarkStyles).ok());
@@ -595,14 +597,16 @@ TEST(StyleSheetTest, ProjectsMinimizedFloaterStateIntoHeadStyles) {
     ASSERT_TRUE(stylesheet.loadRadia(kMinimizedFloaterStyles).ok());
     FloaterElement floater;
     radia::ui::test::appendFloaterStructure(floater, false, true);
+    Element* head = floater.head();
+    ASSERT_NE(head, nullptr);
 
-    EXPECT_EQ(resolveElementStyle(stylesheet, *floater.head()).borderWidth.bottom, 1.f);
+    EXPECT_EQ(resolveElementStyle(stylesheet, *head).borderWidth.bottom, 1.f);
     floater.setMinimized(true);
     EXPECT_TRUE(floater.hasState(ElementState::Minimized));
-    EXPECT_EQ(resolveElementStyle(stylesheet, *floater.head()).borderWidth.bottom, 0.f);
+    EXPECT_EQ(resolveElementStyle(stylesheet, *head).borderWidth.bottom, 0.f);
     floater.setMinimized(false);
     EXPECT_FALSE(floater.hasState(ElementState::Minimized));
-    EXPECT_EQ(resolveElementStyle(stylesheet, *floater.head()).borderWidth.bottom, 1.f);
+    EXPECT_EQ(resolveElementStyle(stylesheet, *head).borderWidth.bottom, 1.f);
 }
 
 TEST(StyleSheetTest, ParsesTypedLengthsAndAutomaticDimensions) {
@@ -1096,7 +1100,8 @@ TEST(StyleSheetTest, ReportsEachSharedImportFailure) {
     const auto result = stylesheet.loadRadiaLayers({StyleLayer{StyleOrigin::Skin, layer}});
     ASSERT_FALSE(result.ok());
     ASSERT_EQ(result.errors.size(), std::size_t(2));
-    EXPECT_EQ(result.errors.front().source, "theme/shared.css");
+    EXPECT_EQ(result.errors[0].source, "theme/shared.css");
+    EXPECT_EQ(result.errors[1].source, "theme/shared.css");
 }
 
 TEST(StyleSheetTest, MarksStateBorderChangesAsLayoutAffecting) {

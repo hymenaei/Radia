@@ -29,11 +29,11 @@ target_include_directories(newview_test
     "${CMAKE_CURRENT_BINARY_DIR}/.."
     "${CMAKE_CURRENT_SOURCE_DIR}/.."
 )
+target_compile_definitions(newview_test PRIVATE RADIA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 
 target_link_libraries(newview_test
     PRIVATE
     GTest::gtest_main
-    GTest::gmock
     llcommon
     llmath
     llfilesystem

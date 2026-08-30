@@ -5,14 +5,14 @@
 
 #include "linden_common.h"
 #include <algorithm>
-#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <stdexcept>
 #include <string_view>
-#include "skin/compiler.h"
+#include "namedtempfile.h"
 #include "resolver.h"
+#include "skin/compiler.h"
 
 namespace {
 using radia::ui::SkinCompiler;
@@ -24,8 +24,14 @@ constexpr char kLayoutResourcePath[] = R"("layouts": "radia/xui")";
 constexpr char kLocalization[] = "defaultLocale: en\nlocales: {en: {strings: {title: Base}}}\n";
 constexpr char kMinimalFloaterLayout[] = "<floater><head><title>Base</title></head><body/></floater>";
 
+void createDirectory(const std::filesystem::path& directory) {
+    std::error_code error;
+    std::filesystem::create_directories(directory, error);
+    if (error) throw std::runtime_error("Could not create test directory '" + directory.string() + "': " + error.message());
+}
+
 void writeFile(const std::filesystem::path& filename, std::string_view source) {
-    std::filesystem::create_directories(filename.parent_path());
+    createDirectory(filename.parent_path());
     std::ofstream output(filename, std::ios::binary);
     if (!output) throw std::runtime_error("Could not create test file: " + filename.string());
     output << source;
@@ -45,14 +51,19 @@ std::string manifest(std::string_view id, std::string_view base, std::string_vie
 class SkinResolverTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        root = std::filesystem::temp_directory_path()
-            / ("radia-skin-resolver-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-        std::filesystem::create_directories(root);
+        root = NamedTempFile::temp_path("radia-skin-resolver-");
+        std::error_code error;
+        ASSERT_TRUE(std::filesystem::create_directories(root, error))
+            << "Could not create test directory '"
+            << root.string()
+            << "': "
+            << error.message();
     }
 
     void TearDown() override {
         std::error_code error;
         std::filesystem::remove_all(root, error);
+        EXPECT_FALSE(error) << "Could not remove test directory '" << root.string() << "': " << error.message();
     }
 
     std::filesystem::path makeRoot(std::string_view directory, std::string_view id) {
@@ -61,11 +72,11 @@ protected:
         writeFile(skin / "radia/skin.css", "floater { width: 300px; }");
         writeFile(skin / "radia/localization.yaml", kLocalization);
         writeFile(skin / "radia/xui/base.html", kMinimalFloaterLayout);
-        std::filesystem::create_directories(skin / "radia/resources");
+        createDirectory(skin / "radia/resources");
         return skin;
     }
 
-    std::filesystem::path viewerSourceRoot() const { return std::filesystem::path(__FILE__).parent_path().parent_path(); }
+    std::filesystem::path viewerSourceRoot() const { return std::filesystem::path(RADIA_SOURCE_ROOT) / "newview"; }
 
     std::filesystem::path root;
     SkinResolver resolver;
@@ -85,7 +96,7 @@ TEST_F(SkinResolverTest, LayersDerivedResourcesAfterTheirBase) {
 
     const auto result = resolver.resolve(derived, {root});
 
-    ASSERT_TRUE(result.ok());
+    ASSERT_TRUE(result.ok()) << (result.errors.empty() ? "unknown skin resolution error" : result.errors.front().formatted());
     EXPECT_EQ(result.skinId, "test.derived");
     EXPECT_TRUE(result.snapshot.load("base.html").has_value());
     EXPECT_TRUE(result.snapshot.load("derived.html").has_value());
@@ -96,9 +107,7 @@ TEST_F(SkinResolverTest, LayersDerivedResourcesAfterTheirBase) {
     ASSERT_TRUE(asset.has_value());
     EXPECT_EQ(*asset, kDerivedAsset);
     const auto compiled = SkinCompiler().prepare(result.snapshot);
-    if (!compiled.ok())
-        for (const auto& error : compiled.errors) ADD_FAILURE() << error.formatted();
-    EXPECT_TRUE(compiled.ok());
+    ASSERT_TRUE(compiled.ok()) << (compiled.errors.empty() ? "unknown skin preparation error" : compiled.errors.front().formatted());
 }
 
 TEST_F(SkinResolverTest, DoesNotMergeResourcesFromUnrelatedSkins) {
@@ -108,7 +117,7 @@ TEST_F(SkinResolverTest, DoesNotMergeResourcesFromUnrelatedSkins) {
 
     const auto result = resolver.resolve(selected, {root});
 
-    ASSERT_TRUE(result.ok());
+    ASSERT_TRUE(result.ok()) << (result.errors.empty() ? "unknown skin resolution error" : result.errors.front().formatted());
     EXPECT_TRUE(result.snapshot.load("base.html").has_value());
     EXPECT_FALSE(result.snapshot.load("unrelated.html").has_value());
     EXPECT_EQ(result.snapshot.layers("skin.css").size(), std::size_t{1});
@@ -138,7 +147,7 @@ TEST_F(SkinResolverTest, RejectsMalformedDerivedLayoutOverrides) {
 
     const auto resolved = resolver.resolve(derived, {root});
 
-    ASSERT_TRUE(resolved.ok());
+    ASSERT_TRUE(resolved.ok()) << (resolved.errors.empty() ? "unknown skin resolution error" : resolved.errors.front().formatted());
     const auto shared = resolved.snapshot.load("shared.html");
     ASSERT_TRUE(shared.has_value());
     EXPECT_EQ(*shared, "<unknown-element/>");
@@ -161,7 +170,7 @@ TEST_F(SkinResolverTest, RejectsDuplicateInstalledSkinIds) {
 
 TEST_F(SkinResolverTest, RejectsManifestResourceTraversal) {
     const std::filesystem::path selected = root / "selected";
-    std::filesystem::create_directories(root / "outside");
+    createDirectory(root / "outside");
     writeFile(selected / "manifest.json", manifest("test.selected", "\"test.base\"", R"("layouts": "../outside")"));
 
     const auto result = resolver.resolve(selected, {root});
@@ -178,7 +187,7 @@ TEST_F(SkinResolverTest, CapturesImportedStylesheetModulesInTheirLayer) {
 
     const auto result = resolver.resolve(selected, {root});
 
-    ASSERT_TRUE(result.ok());
+    ASSERT_TRUE(result.ok()) << (result.errors.empty() ? "unknown skin resolution error" : result.errors.front().formatted());
     const auto& layers = result.snapshot.layers("skin.css");
     ASSERT_EQ(layers.size(), std::size_t{1});
     EXPECT_EQ(layers.front().entrypoint, "radia/skin.css");
@@ -198,7 +207,7 @@ TEST_F(SkinResolverTest, DoesNotFallBackToBaseStylesheetModules) {
 
     const auto result = resolver.resolve(derived, {root});
 
-    ASSERT_TRUE(result.ok());
+    ASSERT_TRUE(result.ok()) << (result.errors.empty() ? "unknown skin resolution error" : result.errors.front().formatted());
     const auto compiled = SkinCompiler().prepare(result.snapshot);
     ASSERT_FALSE(compiled.ok());
     ASSERT_FALSE(compiled.errors.empty());
@@ -212,7 +221,7 @@ TEST_F(SkinResolverTest, LoadsBundledSkinResourcesAndStableIdentities) {
 
     const auto result = resolver.resolve(bundled, {bundled.parent_path()});
 
-    ASSERT_TRUE(result.ok());
+    ASSERT_TRUE(result.ok()) << (result.errors.empty() ? "unknown skin resolution error" : result.errors.front().formatted());
     EXPECT_EQ(result.skinId, "alchemy.default");
 
     const auto& styleLayers = result.snapshot.layers("skin.css");
@@ -232,5 +241,5 @@ TEST_F(SkinResolverTest, LoadsBundledSkinResourcesAndStableIdentities) {
     EXPECT_TRUE(result.snapshot.load("resources/icons/close.svg").has_value());
     EXPECT_TRUE(result.snapshot.load("resources/icons/minimize.svg").has_value());
     const auto compiled = SkinCompiler().prepare(result.snapshot);
-    EXPECT_TRUE(compiled.ok()) << (compiled.errors.empty() ? "unknown skin preparation error" : compiled.errors.front().formatted());
+    ASSERT_TRUE(compiled.ok()) << (compiled.errors.empty() ? "unknown skin preparation error" : compiled.errors.front().formatted());
 }

@@ -14,16 +14,16 @@
 #include <typeindex>
 #include <utility>
 #include <vector>
-#include "test_floater_host.h"
 #include "binding/settingresolver.h"
 #include "componentmanager.h"
 #include "controllerregistration.h"
 #include "documentcontroller.h"
 #include "elements/floater.h"
-#include "skin/compiler.h"
 #include "reloadcoordinator.h"
 #include "resolver.h"
+#include "skin/compiler.h"
 #include "system.h"
+#include "test_floater_host.h"
 
 namespace {
 using radia::ui::Document;
@@ -116,7 +116,7 @@ protected:
     void SetUp() override {
         const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(skinSnapshot());
         ASSERT_TRUE(prepared.ok());
-        system.publish(std::move(prepared.generation));
+        ASSERT_TRUE(system.publish(std::move(prepared.generation)));
 
         ASSERT_TRUE(components.registerDefinition("component", "view.html", [this](System& system, Document& document) {
             return std::make_unique<Controller>(system, document, componentState);

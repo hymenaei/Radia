@@ -4,6 +4,8 @@
  */
 
 #include "linden_common.h"
+#include <cmath>
+#include <cstddef>
 #include <gtest/gtest.h>
 #include "render/svg.h"
 #include "render/tessellator.h"
@@ -50,7 +52,15 @@ TEST(SvgTest, CompilesPathAndCircleShapesIntoIndependentContours) {
 
     const auto circleContours = icon.paths[1].flatten();
     ASSERT_EQ(circleContours.size(), std::size_t(1));
-    EXPECT_GE(circleContours.front().size(), std::size_t(24));
+    const auto& circle = circleContours.front();
+    ASSERT_GE(circle.size(), std::size_t{2});
+    EXPECT_FLOAT_EQ(circle.front().x, circle.back().x);
+    EXPECT_FLOAT_EQ(circle.front().y, circle.back().y);
+    for (std::size_t index = 0; index < circle.size(); ++index) {
+        SCOPED_TRACE(Message() << "circle point index: " << index);
+        const auto& point = circle[index];
+        EXPECT_NEAR(std::hypot(point.x - 11.f, point.y - 11.f), 8.f, 0.001f);
+    }
 }
 
 TEST(SvgTest, TransformsAndTessellatesPathsWithinTheTargetBounds) {
@@ -65,11 +75,22 @@ TEST(SvgTest, TransformsAndTessellatesPathsWithinTheTargetBounds) {
     const Mesh mesh = tessellateStroke(transformed, {1.f, 1.f, 1.f, 1.f}, 2.f, 1.f);
 
     ASSERT_FALSE(mesh.empty());
+    const auto contours = transformed.flatten();
+    ASSERT_EQ(contours.size(), std::size_t(1));
+    ASSERT_EQ(contours.front().size(), std::size_t(3));
+    EXPECT_NEAR(contours.front()[0].x, 23.333333f, 0.001f);
+    EXPECT_NEAR(contours.front()[0].y, 29.333333f, 0.001f);
+    EXPECT_NEAR(contours.front()[1].x, 19.333333f, 0.001f);
+    EXPECT_NEAR(contours.front()[1].y, 29.333333f, 0.001f);
+    EXPECT_NEAR(contours.front()[2].x, 19.333333f, 0.001f);
+    EXPECT_NEAR(contours.front()[2].y, 33.333333f, 0.001f);
+
+    constexpr float kFringeWidth = 1.f;
     for (const Vertex& vertex : mesh.vertices) {
-        EXPECT_GE(vertex.position.x, target.x - 1.f);
-        EXPECT_LE(vertex.position.x, target.x + target.w + 1.f);
-        EXPECT_GE(vertex.position.y, target.y - 1.f);
-        EXPECT_LE(vertex.position.y, target.y + target.h + 1.f);
+        EXPECT_GE(vertex.position.x, target.x - kFringeWidth);
+        EXPECT_LE(vertex.position.x, target.x + target.w + kFringeWidth);
+        EXPECT_GE(vertex.position.y, target.y - kFringeWidth);
+        EXPECT_LE(vertex.position.y, target.y + target.h + kFringeWidth);
     }
 }
 

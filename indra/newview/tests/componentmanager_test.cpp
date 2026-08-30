@@ -15,9 +15,9 @@
 #include <vector>
 #include "binding/settingresolver.h"
 #include "binding/valuebinding.h"
-#include "documentcontroller.h"
-#include "controllerregistration.h"
 #include "componentmanager.h"
+#include "controllerregistration.h"
+#include "documentcontroller.h"
 #include "elements/button.h"
 #include "elements/elementinternal.h"
 #include "elements/floater.h"
@@ -47,9 +47,9 @@ using radia::ui::System;
 using radia::ui::ValueBinding;
 using radia::ui::ValueBindingSubscription;
 using radia::ui::ValueState;
-using radia::viewer::ui::DocumentController;
 using radia::viewer::ui::ComponentInstanceKey;
 using radia::viewer::ui::ComponentManager;
+using radia::viewer::ui::DocumentController;
 using radia::viewer::ui::test::TestFloaterHost;
 
 Element* findElement(Element& root, std::string_view id) {
@@ -196,7 +196,7 @@ protected:
     void SetUp() override {
         const SkinGenerationPrepareResult prepared = prepareGeneration();
         ASSERT_TRUE(prepared.ok());
-        system.publish(std::move(prepared.generation));
+        ASSERT_TRUE(system.publish(std::move(prepared.generation)));
         surface = system.createSurface(fixedTextMetrics());
         host.surface = surface.get();
     }
@@ -487,7 +487,7 @@ TEST_F(ComponentManagerTest, EvictsClosedFloatersBeforeReplacement) {
     manager.idle();
     EXPECT_TRUE(liveFloaters().empty());
     EXPECT_TRUE(host.mounted.empty());
-    EXPECT_FALSE(evictedRoot);
+    EXPECT_EQ(evictedRoot.get(), nullptr);
 
     const SkinGenerationPrepareResult generation = prepareGeneration();
     ASSERT_TRUE(generation.ok());

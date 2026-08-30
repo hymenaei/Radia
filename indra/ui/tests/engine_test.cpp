@@ -5,7 +5,6 @@
 
 #include "linden_common.h"
 #include <gtest/gtest.h>
-#include "floater_test_helpers.h"
 #include "elements/button.h"
 #include "elements/elementdefinition.h"
 #include "elements/elementtext.h"
@@ -14,6 +13,7 @@
 #include "elements/input.h"
 #include "elements/label.h"
 #include "elements/panel.h"
+#include "floater_test_helpers.h"
 #include "layout/engine.h"
 #include "style/stylesheet.h"
 #include "text/metrics.h"
@@ -86,11 +86,13 @@ TEST_F(LayoutEngineTest, MeasuresButtonWithIconAndLabel) {
     appendButtonText(*button, "Apply");
     root.append(std::move(button));
     layoutTree(root, styleSheet, text);
+    ASSERT_EQ(root.children().size(), 1U);
     const Element& result = *root.children().front();
     EXPECT_EQ(result.rect().w, 300.f);
     EXPECT_EQ(result.rect().h, 32.f);
     const auto runtimeChildren = radia::ui::detail::nodes(result);
     ASSERT_EQ(runtimeChildren.size(), 2U);
+    ASSERT_NE(runtimeChildren.begin()->asElement(), nullptr);
     EXPECT_EQ(runtimeChildren.begin()->asElement()->elementName(), "icon");
     auto textChild = runtimeChildren.begin();
     ++textChild;
@@ -303,6 +305,7 @@ TEST_F(LayoutEngineTest, CentersButtonContentWithinExplicitWidth) {
     appendButtonText(*button, "Apply");
     root.append(std::move(button));
     layoutTree(root, styleSheet, text);
+    ASSERT_EQ(root.children().size(), 1U);
     const Element& result = *root.children().front();
     const auto runtimeChildren = radia::ui::detail::nodes(result);
     ASSERT_EQ(runtimeChildren.size(), 2U);
@@ -514,6 +517,8 @@ TEST_F(LayoutEngineTest, LaysOutFloaterHeadAndBodyWithinPadding) {
     ASSERT_TRUE(styleSheet.loadRadia(kFloaterLayout).ok());
     FloaterElement floater;
     radia::ui::test::appendFloaterStructure(floater);
+    ASSERT_NE(floater.head(), nullptr);
+    ASSERT_NE(floater.body(), nullptr);
     floater.setRect({0.f, 0.f, 100.f, 100.f});
     floater.body()->append(std::make_unique<LabelElement>("content"));
     layoutTree(floater, styleSheet, text);
@@ -528,6 +533,7 @@ TEST_F(LayoutEngineTest, DisplayNoneFloaterHeadDoesNotReserveSpace) {
     ASSERT_TRUE(styleSheet.loadRadia(kCollapsedFloaterLayout).ok());
     FloaterElement floater;
     radia::ui::test::appendFloaterStructure(floater);
+    ASSERT_NE(floater.body(), nullptr);
     floater.setRect({0.f, 0.f, 100.f, 100.f});
     floater.body()->append(std::make_unique<LabelElement>("content"));
     layoutTree(floater, styleSheet, text);
@@ -584,6 +590,7 @@ TEST_F(LayoutEngineTest, AlignsColumnContentToEnd) {
     panel.setRect({0.f, 0.f, 100.f, 40.f});
     panel.append(std::make_unique<LabelElement>("bottom"));
     layoutTree(panel, styleSheet, text);
+    ASSERT_EQ(panel.children().size(), 1U);
     EXPECT_EQ(panel.children().front()->rect().bottom(), 0.f);
 }
 
@@ -628,6 +635,7 @@ TEST_F(LayoutEngineTest, PreservesExplicitGeometryInNormalLayout) {
     panel.append(std::move(button));
 
     layoutTree(panel, styleSheet, text);
+    ASSERT_EQ(panel.children().size(), 1U);
     const Rect& rect = panel.children().front()->rect();
     EXPECT_EQ(rect.x, 10.f);
     EXPECT_EQ(rect.y, 10.f);
@@ -648,6 +656,7 @@ TEST_F(LayoutEngineTest, PreservesExplicitHeightWhenNormalWidthIsPercentage) {
     panel.append(std::move(label));
 
     layoutTree(panel, styleSheet, text);
+    ASSERT_EQ(panel.children().size(), 1U);
 
     const Rect& rect = panel.children().front()->rect();
     EXPECT_EQ(rect.w, 50.f);
@@ -671,6 +680,7 @@ TEST_F(LayoutEngineTest, AppliesSwitchIntrinsicAndPartLayout) {
     layoutTree(control, styleSheet, text);
     EXPECT_EQ(resolveElementStyle(styleSheet, control).display, radia::ui::DisplayMode::Flex);
     ASSERT_NE(control.track(), nullptr);
+    ASSERT_NE(control.thumb(), nullptr);
     EXPECT_EQ(control.track()->rect().bottom(), 23.f);
     EXPECT_EQ(control.track()->rect().h, 26.f);
     EXPECT_EQ(control.thumb()->rect().left(), 15.f);
@@ -682,12 +692,14 @@ TEST_F(LayoutEngineTest, AppliesSwitchIntrinsicAndPartLayout) {
     const float uncheckedThumbLeft = control.thumb()->rect().left();
     control.checked(true);
     layoutTree(control, styleSheet, text);
+    ASSERT_NE(control.track(), nullptr);
+    ASSERT_NE(control.thumb(), nullptr);
     EXPECT_EQ(control.thumb()->rect().left(), control.track()->rect().right());
     EXPECT_GT(control.thumb()->rect().left(), uncheckedThumbLeft);
 
     control.replaceChildren();
-    ASSERT_TRUE(control.track());
-    ASSERT_TRUE(control.thumb());
+    ASSERT_NE(control.track(), nullptr);
+    ASSERT_NE(control.thumb(), nullptr);
     EXPECT_EQ(control.track()->part(), "track");
     EXPECT_EQ(control.track()->parentElement(), &control);
     EXPECT_EQ(control.thumb()->part(), "thumb");
@@ -710,6 +722,8 @@ TEST_F(LayoutEngineTest, OverlaysInlineGridSwitchPartsAndAppliesTranslate) {
 
     layoutTree(control, styleSheet, text);
     EXPECT_EQ(resolveElementStyle(styleSheet, control).display, DisplayMode::InlineGrid);
+    ASSERT_NE(control.track(), nullptr);
+    ASSERT_NE(control.thumb(), nullptr);
     EXPECT_EQ(control.track()->rect().x, 10.f);
     EXPECT_EQ(control.track()->rect().y, 20.f);
     EXPECT_EQ(control.track()->rect().w, 44.f);
@@ -721,6 +735,8 @@ TEST_F(LayoutEngineTest, OverlaysInlineGridSwitchPartsAndAppliesTranslate) {
 
     control.checked(true);
     layoutTree(control, styleSheet, text);
+    ASSERT_NE(control.track(), nullptr);
+    ASSERT_NE(control.thumb(), nullptr);
     EXPECT_EQ(control.thumb()->rect().x, 31.f);
     EXPECT_EQ(control.thumb()->rect().y, 18.f);
 
@@ -728,6 +744,8 @@ TEST_F(LayoutEngineTest, OverlaysInlineGridSwitchPartsAndAppliesTranslate) {
     rtlControl.type("checkbox").switchMode(true).checked(true);
     rtlControl.setRect({10.f, 20.f, 44.f, 20.f});
     layoutTree(rtlControl, styleSheet, text, LayoutDirection::RightToLeft);
+    ASSERT_NE(rtlControl.track(), nullptr);
+    ASSERT_NE(rtlControl.thumb(), nullptr);
     EXPECT_EQ(rtlControl.thumb()->rect().x, -13.f);
     EXPECT_EQ(rtlControl.thumb()->rect().y, 18.f);
 }
@@ -821,11 +839,12 @@ TEST_F(LayoutEngineTest, ResolvesPercentageGeometryAgainstContainingBlock) {
     panel.append(std::make_unique<LabelElement>("percentage"));
 
     layoutTree(panel, styleSheet, text);
+    ASSERT_EQ(panel.children().size(), 1U);
     const Rect& rect = panel.children().front()->rect();
-    EXPECT_NEAR(rect.w, 100.f, 6);
-    EXPECT_NEAR(rect.h, 25.f, 6);
-    EXPECT_NEAR(rect.left(), 20.f, 6);
-    EXPECT_NEAR(rect.top(), 80.f, 6);
+    EXPECT_FLOAT_EQ(rect.w, 100.f);
+    EXPECT_FLOAT_EQ(rect.h, 25.f);
+    EXPECT_FLOAT_EQ(rect.left(), 20.f);
+    EXPECT_FLOAT_EQ(rect.top(), 80.f);
 }
 
 TEST_F(LayoutEngineTest, DistributesAutomaticRowAndColumnGaps) {
@@ -860,6 +879,7 @@ TEST_F(LayoutEngineTest, MeasuresFloaterWithFixedHeightAndAutomaticWidth) {
     ASSERT_TRUE(styleSheet.loadRadia(kFloater).ok());
     FloaterElement floater;
     radia::ui::test::appendFloaterStructure(floater);
+    ASSERT_NE(floater.body(), nullptr);
     floater.body()->append(std::make_unique<LabelElement>("first"));
     floater.body()->append(std::make_unique<LabelElement>("second"));
 
@@ -1067,9 +1087,9 @@ TEST_F(LayoutEngineTest, AppliesFlexBasisAndScaledShrink) {
     second->addClass("second");
     panel.append(std::move(second));
     layoutTree(panel, styleSheet, text);
-    EXPECT_NEAR(panel.children()[0]->rect().w, 200.f / 3.f, 5);
-    EXPECT_NEAR(panel.children()[1]->rect().w, 100.f / 3.f, 5);
-    EXPECT_NEAR(panel.children()[1]->rect().right(), 100.f, 5);
+    EXPECT_NEAR(panel.children()[0]->rect().w, 200.f / 3.f, 0.001f);
+    EXPECT_NEAR(panel.children()[1]->rect().w, 100.f / 3.f, 0.001f);
+    EXPECT_FLOAT_EQ(panel.children()[1]->rect().right(), 100.f);
 }
 
 TEST_F(LayoutEngineTest, CentersOversizedFloaterHeadChildren) {
@@ -1083,13 +1103,16 @@ TEST_F(LayoutEngineTest, CentersOversizedFloaterHeadChildren) {
 
     FloaterElement floater;
     radia::ui::test::appendFloaterStructure(floater, true);
+    Element* head = floater.head();
+    ASSERT_NE(head, nullptr);
+    ASSERT_FALSE(head->children().empty());
     auto icon = std::make_unique<IconElement>("search");
-    floater.head()->children().front()->append(std::move(icon));
-    floater.head()->setRect({0.f, 0.f, 200.f, 48.f});
-    layoutTree(*floater.head(), styleSheet, text);
+    head->children().front()->append(std::move(icon));
+    head->setRect({0.f, 0.f, 200.f, 48.f});
+    layoutTree(*head, styleSheet, text);
 
-    const float headCenter = floater.head()->rect().y + floater.head()->rect().h * .5f;
-    for (const auto& child : floater.head()->children()) {
+    const float headCenter = head->rect().y + head->rect().h * .5f;
+    for (const auto& child : head->children()) {
         if (!child->isVisible(resolveElementStyle(styleSheet, *child))) continue;
         const float childCenter = child->rect().y + child->rect().h * .5f;
         SCOPED_TRACE(Message() << "head child: " << child->elementName());
@@ -1214,9 +1237,9 @@ TEST_F(LayoutEngineTest, ResolvesSiblingColumnPercentages) {
     panel.append(std::move(half));
 
     layoutTree(panel, styleSheet, text);
-    EXPECT_NEAR(panel.children()[0]->rect().h, 25.f, 6);
-    EXPECT_NEAR(panel.children()[1]->rect().h, 50.f, 6);
-    EXPECT_NEAR(panel.children()[0]->rect().bottom(), panel.children()[1]->rect().top(), 6);
+    EXPECT_FLOAT_EQ(panel.children()[0]->rect().h, 25.f);
+    EXPECT_FLOAT_EQ(panel.children()[1]->rect().h, 50.f);
+    EXPECT_FLOAT_EQ(panel.children()[0]->rect().bottom(), panel.children()[1]->rect().top());
 }
 
 TEST_F(LayoutEngineTest, ResolvesNestedColumnPercentages) {
@@ -1235,9 +1258,11 @@ TEST_F(LayoutEngineTest, ResolvesNestedColumnPercentages) {
     panel.append(std::move(child));
 
     layoutTree(panel, styleSheet, text);
+    ASSERT_EQ(panel.children().size(), 1U);
     const Element& nestedPanel = *panel.children().front();
-    EXPECT_NEAR(nestedPanel.rect().h, 50.f, 6);
-    EXPECT_NEAR(nestedPanel.children().front()->rect().h, 25.f, 6);
+    ASSERT_EQ(nestedPanel.children().size(), 1U);
+    EXPECT_FLOAT_EQ(nestedPanel.rect().h, 50.f);
+    EXPECT_FLOAT_EQ(nestedPanel.children().front()->rect().h, 25.f);
 }
 
 TEST_F(LayoutEngineTest, RespectsColumnMinimumHeightsDuringShrink) {
@@ -1330,6 +1355,7 @@ TEST_F(LayoutEngineTest, RemeasuresNormalPercentageTextAfterResize) {
     panel.append(makeParagraph("alpha beta"));
 
     layoutTree(panel, styleSheet, text);
+    ASSERT_EQ(panel.children().size(), 1U);
     EXPECT_EQ(panel.children().front()->rect().h, 20.f);
 
     panel.setRect({0.f, 0.f, 200.f, 100.f});
@@ -1401,6 +1427,7 @@ TEST_F(LayoutEngineTest, IncludesWrappedPercentageChildInNormalIntrinsicHeight) 
     panel.append(makeParagraph("alpha beta"));
 
     layoutTree(panel, styleSheet, text);
+    ASSERT_EQ(panel.children().size(), 1U);
     EXPECT_EQ(panel.desiredSize().y, 20.f);
     EXPECT_EQ(panel.children().front()->rect().h, 20.f);
 }
@@ -1415,6 +1442,7 @@ TEST_F(LayoutEngineTest, RelativePercentageOffsetsDoNotChangeIntrinsicSize) {
     panel.append(std::make_unique<LabelElement>("positioned"));
 
     layoutTree(panel, styleSheet, text);
+    ASSERT_EQ(panel.children().size(), 1U);
     EXPECT_EQ(panel.desiredSize().x, 20.f);
     EXPECT_EQ(panel.desiredSize().y, 10.f);
     EXPECT_EQ(panel.children().front()->rect().left(), 50.f);
@@ -1431,8 +1459,9 @@ TEST_F(LayoutEngineTest, ResolvesNormalPercentageDimensionsAgainstExplicitParent
     panel.append(std::make_unique<LabelElement>("sized"));
 
     layoutTree(panel, styleSheet, text);
-    EXPECT_NEAR(panel.children().front()->rect().w, 50.f, 6);
-    EXPECT_NEAR(panel.children().front()->rect().h, 40.f, 6);
+    ASSERT_EQ(panel.children().size(), 1U);
+    EXPECT_FLOAT_EQ(panel.children().front()->rect().w, 50.f);
+    EXPECT_FLOAT_EQ(panel.children().front()->rect().h, 40.f);
 }
 
 TEST_F(LayoutEngineTest, ResolvesNestedPercentageFlexBasis) {
@@ -1447,12 +1476,13 @@ TEST_F(LayoutEngineTest, ResolvesNestedPercentageFlexBasis) {
     inner->setId("inner");
     Element* innerPtr = inner.get();
     inner->append(std::make_unique<LabelElement>("basis"));
+    ASSERT_EQ(inner->children().size(), 1U);
     Element* label = inner->children().front();
     outer.append(std::move(inner));
 
     layoutTree(outer, styleSheet, text);
-    EXPECT_NEAR(innerPtr->rect().w, 50.f, 6);
-    EXPECT_NEAR(label->rect().w, 25.f, 6);
+    EXPECT_FLOAT_EQ(innerPtr->rect().w, 50.f);
+    EXPECT_FLOAT_EQ(label->rect().w, 25.f);
 }
 
 TEST_F(LayoutEngineTest, ComputesScrollMetricsAndClampsProgrammaticPosition) {

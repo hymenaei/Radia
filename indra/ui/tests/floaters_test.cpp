@@ -8,7 +8,6 @@
 #include <gtest/gtest.h>
 #include <memory>
 #include <optional>
-#include "floater_test_helpers.h"
 #include "binding/binder.h"
 #include "elements/button.h"
 #include "elements/elementinternal.h"
@@ -17,6 +16,7 @@
 #include "elements/input.h"
 #include "elements/label.h"
 #include "elements/panel.h"
+#include "floater_test_helpers.h"
 #include "render/recordingpaintcontext.h"
 #include "surface/surface.h"
 #include "system.h"
@@ -104,7 +104,7 @@ TEST(FloatersTest, RestoresFloaterWithinViewportAfterMinimization) {
     target->setMinimized(false);
     EXPECT_EQ(target->rect().w, 100.f);
     EXPECT_EQ(target->rect().right(), 200.f);
-    EXPECT_TRUE(target->rect().left() < minimizedLeft);
+    EXPECT_LT(target->rect().left(), minimizedLeft);
 }
 
 TEST(FloatersTest, TransfersFloaterBetweenSurfacesAndReportsLifecycle) {
@@ -505,7 +505,7 @@ TEST(FloatersTest, KeepsFixedOuterSizeWhileTrackingContentGeometry) {
     EXPECT_EQ(firstOuter.x, 100.f);
     EXPECT_EQ(firstOuter.y, 50.f);
     EXPECT_EQ(firstOuter.h, secondOuter.h);
-    EXPECT_TRUE(secondContent.y > firstContent.y);
+    EXPECT_GT(secondContent.y, firstContent.y);
 }
 
 TEST(FloatersTest, ResolvesPercentageGeometryAgainstViewport) {
@@ -518,10 +518,10 @@ TEST(FloatersTest, ResolvesPercentageGeometryAgainstViewport) {
     const std::optional<Rect> prepared = surface.prepareFloater(floater);
     ASSERT_TRUE(prepared.has_value());
     const Rect rect = *prepared;
-    EXPECT_NEAR(rect.w, 200.f, 6);
-    EXPECT_NEAR(rect.h, 75.f, 6);
-    EXPECT_NEAR(rect.x, 40.f, 6);
-    EXPECT_NEAR(rect.y, 30.f, 6);
+    EXPECT_FLOAT_EQ(rect.w, 200.f);
+    EXPECT_FLOAT_EQ(rect.h, 75.f);
+    EXPECT_FLOAT_EQ(rect.x, 40.f);
+    EXPECT_FLOAT_EQ(rect.y, 30.f);
 }
 
 TEST(FloatersTest, RoutesResizeThroughPointerTransparentFloater) {
@@ -595,7 +595,7 @@ TEST(FloatersTest, ReplacesFloaterAndReturnsRetiredRoot) {
     std::unique_ptr<FloaterElement> retired = surface.replaceFloater(*originalPointer, std::move(replacement));
     radia::ui::ElementRef<FloaterElement> replacementHandle(replacementPointer);
 
-    ASSERT_TRUE(retired);
+    ASSERT_NE(retired, nullptr);
     EXPECT_EQ(retired.get(), originalPointer);
     EXPECT_TRUE(surface.ownsFloater(*replacementPointer));
     EXPECT_EQ(retired->parentElement(), nullptr);

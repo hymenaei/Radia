@@ -293,8 +293,8 @@ TEST(StyleCompilerTest, ParsesLogicalTextAndCrossAxisAlignmentEnums) {
 
 TEST(StyleCompilerTest, ParsesGridSelfAlignment) {
     constexpr char kGridAlignmentStyles[] = "input { justify-self: center; } button.start { justify-self: start; } "
-                                             "button.end { justify-self: end; } label.stretch { justify-self: stretch; } "
-                                             "label.auto { justify-self: auto; }";
+                                            "button.end { justify-self: end; } label.stretch { justify-self: stretch; } "
+                                            "label.auto { justify-self: auto; }";
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kGridAlignmentStyles).ok());
@@ -414,16 +414,17 @@ TEST(StyleCompilerTest, ParsesBordersAndSvgStrokeProperties) {
 }
 
 TEST(StyleCompilerTest, ResolvesGridSwitchPresentationProperties) {
-    constexpr char kGridSwitchStyles[] =
-        "input.basic-switch { appearance: none; display: inline-grid; position: relative; }"
-        "input.basic-switch::track { grid-area: 1 / 1; box-shadow: 0 0 5px rgb(0, 0, 0, .3); }"
-        "input.basic-switch::thumb { grid-area: 1/1; translate: 22px 0; }";
+    constexpr char kGridSwitchStyles[] = "input.basic-switch { appearance: none; display: inline-grid; position: relative; }"
+                                         "input.basic-switch::track { grid-area: 1 / 1; box-shadow: 0 0 5px rgb(0, 0, 0, .3); }"
+                                         "input.basic-switch::thumb { grid-area: 1/1; translate: 22px 0; }";
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kGridSwitchStyles).ok());
 
     InputElement switchInput;
     switchInput.type("checkbox").switchMode(true).addClass("basic-switch");
+    ASSERT_NE(switchInput.track(), nullptr);
+    ASSERT_NE(switchInput.thumb(), nullptr);
     const Style owner = resolveElementStyle(stylesheet, switchInput);
     const Style track = resolveElementStyle(stylesheet, *switchInput.track());
     const Style thumb = resolveElementStyle(stylesheet, *switchInput.thumb());

@@ -25,14 +25,55 @@
  */
 
 #include "linden_common.h"
+#include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
+#include "../../test/namedtempfile.h"
 #include "../lldiriterator.h"
 
 TEST(LLDirIterator, AcceptsSpecialCharactersInMask) {
     // CHOP-662 covered group names containing regular-expression characters.
-    EXPECT_NO_THROW({
-        LLDirIterator iter(".", "+bad-group-name]+?\?-??.*");
-        LLDirIterator iter1(".", "))--@---bad-group-name2((?\?-??.*\\.txt");
-        LLDirIterator iter2(".", "__^v--x)Cuide d sua vida(x--v^__?\?-??.*");
-    });
+    const std::filesystem::path directory = NamedTempFile::temp_path("radia-dir-iterator-");
+    std::error_code error;
+    ASSERT_TRUE(std::filesystem::create_directories(directory, error))
+        << "Could not create test directory '"
+        << directory.string()
+        << "': "
+        << error.message();
+
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() {
+            std::error_code cleanupError;
+            std::filesystem::remove_all(path, cleanupError);
+        }
+    } cleanup{directory};
+
+    struct MaskCase {
+        const char* mask;
+        const char* filename;
+    };
+    const MaskCase cases[] = {
+        {"+bad-group-name]+?\?-??.*", "+bad-group-name]+ab-cd.txt"},
+        {"))--@---bad-group-name2((?\?-??*.txt", "))--@---bad-group-name2((ab-cd.txt"},
+        {"__^v--x)Cuide d sua vida(x--v^__?\?-??.*", "__^v--x)Cuide d sua vida(x--v^__ab-cd.log"},
+    };
+
+    for (const MaskCase& test : cases) {
+        {
+            std::ofstream output(directory / test.filename, std::ios::binary);
+            ASSERT_TRUE(output.good()) << "Could not create test file '" << (directory / test.filename).string() << "'";
+            output << "match";
+            ASSERT_TRUE(output.good());
+        }
+
+        LLDirIterator iterator(directory, test.mask);
+        std::string result;
+        ASSERT_TRUE(iterator.next(result)) << "Mask did not match its special-character filename: " << test.mask;
+        EXPECT_EQ(result, test.filename);
+        EXPECT_FALSE(iterator.next(result));
+
+        std::filesystem::remove(directory / test.filename, error);
+        ASSERT_FALSE(error) << "Could not remove test file '" << (directory / test.filename).string() << "': " << error.message();
+    }
 }

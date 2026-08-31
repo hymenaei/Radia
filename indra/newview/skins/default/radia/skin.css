@@ -21,7 +21,7 @@
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 floater {
-    size: auto 362px;
+    size: 400px 362px;
     min-size: 300px 362px;
     display: flex;
     flex-direction: column;
@@ -80,9 +80,10 @@ close, minimize {
 floater > body {
     display: flex;
     flex-direction: column;
-    flex-grow: 1;
+    flex: 1 1 auto;
     min-size: 0px;
-    overflow: auto;
+    overflow-y: auto;
+    overflow-x: hidden;
     pointer-events: auto;
     scrollbar-mode: classic;
     scrollbar-color: #9e9e9e #4d4d4d;

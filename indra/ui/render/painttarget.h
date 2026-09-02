@@ -11,7 +11,7 @@
 namespace radia::ui {
 enum class PaintTargetKind : std::uint8_t { Direct, Offscreen };
 
-enum class AAIntent : std::uint8_t { None, Coverage };
+enum class AAIntent : std::uint8_t { NoCoverage, Coverage };
 
 struct PaintTarget {
     Rect bounds;
@@ -21,7 +21,7 @@ struct PaintTarget {
     bool opaque = false;
     AAIntent shapeAA = AAIntent::Coverage;
     AAIntent textAA = AAIntent::Coverage;
-    AAIntent clipAA = AAIntent::None;
+    AAIntent clipAA = AAIntent::NoCoverage;
     const NativeAppearance* nativeAppearance = nullptr;
 };
 } // namespace radia::ui

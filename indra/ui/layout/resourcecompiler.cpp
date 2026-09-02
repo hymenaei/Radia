@@ -24,7 +24,7 @@
 namespace radia::ui {
 using detail::appendLocalizedText;
 using detail::appendText;
-using detail::ElementCompilerAccess;
+using detail::ElementInternalAccess;
 using detail::HTMLElementFactory;
 using detail::NodeAccess;
 
@@ -158,7 +158,7 @@ ResourceBuildResult ResourceCompiler::buildElementTreeFromResource(const Resourc
     }
     std::unique_ptr<Element> root = createResourceElement(id, state);
     if (root && !state.result.hasErrors()) {
-        ElementCompilerAccess::setIdScopeRoot(*root);
+        ElementInternalAccess::setIdScopeRoot(*root);
         validateElementScope(*root, state, id.value());
     }
     if (!state.result.hasErrors() && root) state.result.document = std::make_unique<Document>(std::move(root));
@@ -180,7 +180,7 @@ ResourceBuildResult ResourceCompiler::buildElementTreeFromString(const std::stri
     state.baseId = std::move(baseId);
     std::unique_ptr<Element> root = buildDocument(*document, nullptr, state);
     if (root && !state.result.hasErrors()) {
-        ElementCompilerAccess::setIdScopeRoot(*root);
+        ElementInternalAccess::setIdScopeRoot(*root);
         validateElementScope(*root, state, sourceName);
     }
     if (!state.result.hasErrors() && root) state.result.document = std::make_unique<Document>(std::move(root));
@@ -279,7 +279,7 @@ std::unique_ptr<Element> ResourceCompiler::createResourceElement(const ResourceI
     state.resourceStack.push_back(id);
     std::unique_ptr<Element> root = buildDocument(*document, nullptr, state);
     state.resourceStack.pop_back();
-    if (root) ElementCompilerAccess::setIdScopeRoot(*root);
+    if (root) ElementInternalAccess::setIdScopeRoot(*root);
     return root;
 }
 
@@ -370,7 +370,7 @@ bool ResourceCompiler::resolveElementResource(const ElementBuildInput& input, co
         return false;
     }
 
-    const ResourceId id = ResourceId::resolve(baseId, filename);
+    const ResourceId id = mProvider ? mProvider->resolve(baseId, filename) : ResourceId::resolve(baseId, filename);
     if (!id.valid()) {
         state.result.error("layout.resource.path_invalid", "Invalid resource filename: " + filename + ".", input.sourceName, input.source.begin.line,
                            input.source.begin.column);

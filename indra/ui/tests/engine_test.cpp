@@ -49,7 +49,7 @@ using radia::ui::TextMetrics;
 using radia::ui::Vec2;
 using radia::ui::Visibility;
 using radia::ui::detail::appendText;
-using radia::ui::detail::ElementCompilerAccess;
+using radia::ui::detail::NodeAccess;
 using radia::ui::detail::makeElement;
 using radia::ui::detail::makeElementValue;
 using radia::ui::detail::nodes;
@@ -1059,7 +1059,7 @@ TEST_F(LayoutEngineTest, WrapsChildrenAcrossFlowBreaks) {
     auto first = makeElement<HTMLLabelElement>("first");
     auto second = makeElement<HTMLLabelElement>("second");
     auto third = makeElement<HTMLLabelElement>("third");
-    ElementCompilerAccess::setFlowBreakBefore(*second, true);
+    NodeAccess::setFlowBreakBefore(*second, true);
     panel.append(std::move(first));
     panel.append(std::move(second));
     panel.append(std::move(third));

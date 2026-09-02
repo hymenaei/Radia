@@ -61,7 +61,6 @@ using radia::ui::ResourceCompiler;
 using radia::ui::Style;
 using radia::ui::StyleSheet;
 using radia::ui::Visibility;
-using radia::ui::detail::ElementCompilerAccess;
 using radia::ui::detail::findElementInScope;
 using radia::ui::detail::makeElementValue;
 using radia::ui::detail::makeEventRegistration;
@@ -319,6 +318,11 @@ TEST_F(FieldsetTest, RejectsInvalidLabelRelationships) {
          "<panel><label for=\"copy\">Wrong target</label>"
          "<p id=\"copy\">Copy</p></panel>",
          "layout.label.target_not_labelable"},
+        {"ambiguous target",
+         "<panel><label for=\"toggle\">Ambiguous target</label>"
+         "<input type=\"checkbox\" switch=\"true\" id=\"toggle\">"
+         "<input type=\"checkbox\" switch=\"true\" id=\"toggle\"></panel>",
+         "layout.label.target_ambiguous"},
         {"cross-scope target",
          "<panel><label for=\"nestedTarget\">Cross scope</label>"
          "<panel filename=\"nested-target.html\"></panel></panel>",
@@ -349,15 +353,14 @@ TEST_F(FieldsetTest, ResolvesLabelTargetsInsideIncludedResources) {
     const ElementRef<HTMLInputElement> target = requireElement<HTMLInputElement>(included, "nestedSwitch");
     ASSERT_NE(label.get(), nullptr);
     ASSERT_NE(target.get(), nullptr);
-    EXPECT_EQ(ElementCompilerAccess::labelTarget(*label), target.get());
+    EXPECT_TRUE(label->defaultPointerEvents());
 
     target->setId("renamed");
-    EXPECT_EQ(ElementCompilerAccess::labelTarget(*label), nullptr);
+    EXPECT_FALSE(label->defaultPointerEvents());
     target->setId("nestedSwitch");
-    EXPECT_EQ(ElementCompilerAccess::labelTarget(*label), target.get());
+    EXPECT_TRUE(label->defaultPointerEvents());
 
     NodePtr detached = target->remove();
-    EXPECT_EQ(ElementCompilerAccess::labelTarget(*label), nullptr);
     EXPECT_FALSE(label->defaultPointerEvents());
 }
 
@@ -369,11 +372,9 @@ TEST_F(FieldsetTest, ResolvesLabelTargetsInFragmentContent) {
     const ElementRef<HTMLInputElement> target = requireElement<HTMLInputElement>(root, "toggle");
     ASSERT_NE(label.get(), nullptr);
     ASSERT_NE(target.get(), nullptr);
-    EXPECT_EQ(ElementCompilerAccess::labelTarget(*label), target.get());
     EXPECT_TRUE(label->defaultPointerEvents());
 
     target->setId("renamed");
-    EXPECT_EQ(ElementCompilerAccess::labelTarget(*label), nullptr);
     EXPECT_FALSE(label->defaultPointerEvents());
 }
 

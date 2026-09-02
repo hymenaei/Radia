@@ -50,7 +50,7 @@ LayoutStatistics LayoutEngine::runWithPass(Element& node, LayoutPass& pass) {
     const NodeSnapshot state(node);
     measure(node, pass);
     Element* current = state.get();
-    if (!state.valid()) return pass.statistics();
+    if (!state.layoutValid()) return pass.statistics();
     if (current->isDisplayed(pass.style(*current))) arrangeNode(*current, pass);
     return pass.statistics();
 }

@@ -73,7 +73,7 @@ TreeTraversalCache::ChildSnapshot TreeTraversalCache::build(Element& parent, boo
         cache.revisions[&parent] = revision;
     };
 
-    if (!parentState.valid()) return std::make_shared<std::vector<ElementRef<Element>>>();
+    if (!parentState.layoutValid()) return std::make_shared<std::vector<ElementRef<Element>>>();
     if (ordered && resolve) {
         const Style& parentStyle = (*resolve)(parent);
         if (!parentState.styleValid()) return std::make_shared<std::vector<ElementRef<Element>>>();
@@ -97,7 +97,7 @@ TreeTraversalCache::ChildSnapshot TreeTraversalCache::build(Element& parent, boo
         }
         if (!parentState.styleValid()) return std::make_shared<std::vector<ElementRef<Element>>>();
     }
-    if (!parentState.valid()) return std::make_shared<std::vector<ElementRef<Element>>>();
+    if (!parentState.layoutValid()) return std::make_shared<std::vector<ElementRef<Element>>>();
     commit();
     return result;
 }

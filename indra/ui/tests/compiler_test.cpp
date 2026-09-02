@@ -60,7 +60,7 @@ using radia::ui::TextOverflow;
 using radia::ui::TextWrap;
 using radia::ui::VerticalAlign;
 using radia::ui::Visibility;
-using radia::ui::detail::ElementCompilerAccess;
+using radia::ui::detail::ElementInternalAccess;
 using radia::ui::detail::HTMLElementFactory;
 using radia::ui::detail::makeElement;
 using radia::ui::detail::makeElementValue;
@@ -261,7 +261,7 @@ TEST(StyleCompilerTest, ResolvesNestedStateAndChildSelectors) {
     EXPECT_EQ(stylesheet.resolve("button", "", {}, hover).backgroundColor.r, 32.f / 255.f);
 
     auto button = makeElementValue<HTMLButtonElement>();
-    ElementCompilerAccess::setState(button, ElementState::Hovered, true);
+    ElementInternalAccess::setState(button, ElementState::Hovered, true);
     const Style iconStyle = resolveElementStyle(stylesheet, appendIcon(button, "search"));
     EXPECT_EQ(iconStyle.width.pixels(), 16.f);
     ASSERT_TRUE(iconStyle.svgStrokeWidth.has_value());

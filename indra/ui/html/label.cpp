@@ -12,9 +12,6 @@
 #include "style/style.h"
 
 namespace radia::ui {
-using detail::ElementCompilerAccess;
-using detail::findElementInScope;
-
 namespace {
 const Element* scopeRootForLabel(const HTMLLabelElement& label) {
     const Element* root = &label;
@@ -44,8 +41,11 @@ Element* HTMLLabelElement::target() const {
     const Attribute* targetAttribute = attribute("for");
     if (!targetAttribute || !targetAttribute->value || targetAttribute->value->empty()) return nullptr;
 
-    const Element* candidate = findElementInScope(*scopeRootForLabel(*this), *targetAttribute->value);
-    return candidate && isLabelable(*candidate) ? const_cast<Element*>(candidate) : nullptr;
+    detail::ElementIdIndex index;
+    detail::indexElementsInScope(*const_cast<Element*>(scopeRootForLabel(*this)), index);
+    const auto found = index.first.find(*targetAttribute->value);
+    if (found == index.first.end() || index.ambiguous.contains(*targetAttribute->value)) return nullptr;
+    return isLabelable(*found->second) ? found->second : nullptr;
 }
 
 void HTMLLabelElement::onActivate() {
@@ -75,7 +75,7 @@ ResourceElementDefinition detail::ElementDefinitions::label() {
                 return;
             }
 
-            const std::string& targetId = ElementCompilerAccess::labelTargetId(label);
+            const std::string& targetId = label.targetId();
             if (targetId.empty()) return;
             if (scope.ambiguous(targetId)) {
                 context.error("layout.label.target_ambiguous", "HTMLLabelElement target is ambiguous in its Layout Resource scope: " + targetId + ".",

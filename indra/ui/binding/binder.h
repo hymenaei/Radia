@@ -115,6 +115,8 @@ public:
     void event(const EventHandlerRegistration& registration);
 
 private:
+    using MountEpoch = detail::MountEpoch;
+
     struct BoundInput {
         HTMLInputElement* element = nullptr;
         std::weak_ptr<char> lifetime;
@@ -147,8 +149,8 @@ private:
 
     Element* mRoot = nullptr;
     std::weak_ptr<char> mRootLifetime;
-    std::weak_ptr<char> mRootMountLifetime;
     bool mRootWasMounted = false;
+    MountEpoch mRootMountEpoch;
     Node* mRootParent = nullptr;
     SettingResolver* mSettingResolver = nullptr;
     std::vector<PendingEventHandler> mPendingEventHandlers;

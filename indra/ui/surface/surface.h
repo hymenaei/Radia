@@ -96,11 +96,14 @@ public:
     float height() const { return mViewport.h; }
 
 private:
-    struct ElementSnapshot;
+    using ElementObservation = detail::ElementVisit<Element>;
+    using ConstElementObservation = detail::ElementVisit<const Element>;
+    using MountEpoch = detail::MountEpoch;
+
     struct PendingScrollNotification {
         Element* element = nullptr;
         std::weak_ptr<char> lifetime;
-        std::shared_ptr<char> mountLifetime;
+        MountEpoch mountEpoch;
     };
 
     Surface(const System& system, const TextMetrics& textMetrics);
@@ -121,9 +124,8 @@ private:
     bool isRootedInSurface(const Element* node) const;
     bool isEnabledInTree(const Element* node) const;
     bool isFocusableInTree(const Element* node) const;
-    ElementSnapshot snapshot(Element& element) const;
-    bool snapshotValid(const ElementSnapshot& snapshot) const;
-    bool snapshotChildValid(const ElementSnapshot& snapshot, const Element& parent) const;
+    ElementObservation observe(Element& element) const;
+    ConstElementObservation observe(const Element& element) const;
     void clearKeyboardPress();
     void refreshHoverState();
     void updatePressedState();

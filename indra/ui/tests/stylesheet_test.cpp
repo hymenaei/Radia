@@ -54,7 +54,7 @@ using radia::ui::StyleOrigin;
 using radia::ui::StyleSheet;
 using radia::ui::TextAlign;
 using radia::ui::VerticalAlign;
-using radia::ui::detail::ElementCompilerAccess;
+using radia::ui::detail::ElementInternalAccess;
 using radia::ui::detail::makeElement;
 using radia::ui::detail::makeElementValue;
 using ::testing::Message;
@@ -245,7 +245,7 @@ TEST(StyleSheetTest, MatchesChildSelectorsUsingOwnerClassAndState) {
     HTMLIconElement& icon = appendIcon(button, "search");
 
     EXPECT_EQ(resolveElementStyle(stylesheet, icon).width.pixels(), 10.f);
-    ElementCompilerAccess::setState(button, ElementState::Hovered, true);
+    ElementInternalAccess::setState(button, ElementState::Hovered, true);
     EXPECT_EQ(resolveElementStyle(stylesheet, icon).width.pixels(), 18.f);
 }
 
@@ -259,9 +259,9 @@ TEST(StyleSheetTest, MatchesInteractivePartStateIndependentlyFromOwner) {
     auto* closeButton = floater.closeButton();
     ASSERT_NE(closeButton, nullptr);
 
-    ElementCompilerAccess::setState(floater, ElementState::Hovered, true);
+    ElementInternalAccess::setState(floater, ElementState::Hovered, true);
     EXPECT_EQ(resolveElementStyle(stylesheet, *closeButton).width.pixels(), 10.f);
-    ElementCompilerAccess::setState(*closeButton, ElementState::Hovered, true);
+    ElementInternalAccess::setState(*closeButton, ElementState::Hovered, true);
     EXPECT_EQ(resolveElementStyle(stylesheet, *closeButton).width.pixels(), 18.f);
 }
 
@@ -321,6 +321,19 @@ TEST(StyleSheetTest, SelectsRadioInputsByNameAttribute) {
     auto input = makeElementValue<HTMLInputElement>();
     input.type("radio").name("choice");
     EXPECT_EQ(resolveElementStyle(stylesheet, input).width.pixels(), 40.f);
+}
+
+TEST(StyleSheetTest, ClearsNamePresenceWhenRadioNameIsRemoved) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia("input { width: 10px; } input[name] { width: 20px; } input[name=choice] { width: 40px; }").ok());
+
+    auto input = makeElementValue<HTMLInputElement>();
+    input.type("radio").name("choice");
+    EXPECT_EQ(resolveElementStyle(stylesheet, input).width.pixels(), 40.f);
+
+    input.name("");
+    EXPECT_FALSE(input.hasAttribute("name"));
+    EXPECT_EQ(resolveElementStyle(stylesheet, input).width.pixels(), 10.f);
 }
 
 TEST(StyleSheetTest, SelectsIndeterminateInputs) {

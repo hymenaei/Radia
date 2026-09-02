@@ -7,9 +7,11 @@
 #include <cstdlib>
 #include <gtest/gtest.h>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <vector>
 #include "dom/document.h"
 #include "dom/elementinternal.h"
 #include "dom/fragment.h"
@@ -35,6 +37,8 @@ using radia::ui::Dimension;
 using radia::ui::Document;
 using radia::ui::Element;
 using radia::ui::ElementRef;
+using radia::ui::ElementState;
+using radia::ui::ElementVisit;
 using radia::ui::Event;
 using radia::ui::FixedTextMetrics;
 using radia::ui::fixedTextMetrics;
@@ -77,6 +81,7 @@ using radia::ui::TextWrap;
 using radia::ui::Vec2;
 using radia::ui::Visibility;
 using radia::ui::detail::appendText;
+using radia::ui::detail::ElementInternalAccess;
 using radia::ui::detail::makeElement;
 using radia::ui::detail::makeElementValue;
 using radia::ui::detail::nodes;
@@ -113,6 +118,59 @@ public:
 
 private:
     TextLayout mLayout;
+};
+} // namespace
+
+namespace {
+class MutationCallbackProbe final : public Element {
+public:
+    MutationCallbackProbe(std::vector<std::string>& events, std::string name) : Element("probe"), mEvents(events), mName(std::move(name)) {}
+
+protected:
+    void onTreeAttached() override { record("tree-attached"); }
+    void onTreeDetached() override { record("tree-detached"); }
+    void onChildAdded(Element&) override { record("child-added"); }
+    void onChildRemoved(Element&) override { record("child-removed"); }
+    void onDescendantAdded(Element&) override { record("descendant-added"); }
+    void onDescendantRemoved(Element&) override { record("descendant-removed"); }
+
+private:
+    void record(std::string_view callback) { mEvents.push_back(mName + "." + std::string(callback)); }
+
+    std::vector<std::string>& mEvents;
+    std::string mName;
+};
+
+class DestroyOnChildrenCleared final : public Element {
+public:
+    explicit DestroyOnChildrenCleared(std::unique_ptr<Element>* owner) : Element("destroying"), mOwner(owner) {}
+
+protected:
+    void onChildrenCleared() override { mOwner->reset(); }
+
+private:
+    std::unique_ptr<Element>* mOwner;
+};
+
+class DestroyRootOnChildRemoved final : public Element {
+public:
+    DestroyRootOnChildRemoved(Surface& surface, Element& root) : Element("destroying"), mSurface(&surface), mRoot(&root) {}
+
+protected:
+    void onChildRemoved(Element&) override { mSurface->unmount(*mRoot); }
+
+private:
+    Surface* mSurface;
+    Element* mRoot;
+};
+
+class ObserveMountStateAtDestruction final : public Element {
+public:
+    explicit ObserveMountStateAtDestruction(bool* wasMounted) : Element("probe"), mWasMounted(wasMounted) {}
+    ~ObserveMountStateAtDestruction() override { *mWasMounted = ElementInternalAccess::isMounted(*this); }
+
+private:
+    bool* mWasMounted;
 };
 } // namespace
 
@@ -240,9 +298,11 @@ TEST(ElementTest, UsesModernChildMutationMethods) {
 
     auto replacementOwner = makeElement<HTMLLabelElement>("replacement");
     Element* replacement = replacementOwner.get();
+    const ElementVisit replacedObservation(*last);
     NodePtr replaced = last->replaceWith(std::move(replacementOwner));
     ASSERT_EQ(replaced.get(), last);
     EXPECT_EQ(last->parentNode(), nullptr);
+    EXPECT_FALSE(replacedObservation.topologyValid());
     ASSERT_EQ(root.children().size(), 3U);
     EXPECT_EQ(root.children()[1], replacement);
 
@@ -342,6 +402,61 @@ TEST(FragmentTest, ReplacesWithFragmentWithoutReversingChildren) {
     EXPECT_EQ(root.children()[2]->textContent(), "tail");
 }
 
+TEST(FragmentTest, OrdersMutationCallbacksAroundTreeAttachmentAndRemoval) {
+    std::vector<std::string> events;
+    auto outer = std::make_unique<MutationCallbackProbe>(events, "outer");
+    auto root = std::make_unique<MutationCallbackProbe>(events, "root");
+    MutationCallbackProbe* rootPtr = root.get();
+    outer->append(std::move(root));
+    events.clear();
+
+    auto child = std::make_unique<MutationCallbackProbe>(events, "child");
+    MutationCallbackProbe* childPtr = child.get();
+    rootPtr->append(std::move(child));
+
+    ASSERT_EQ(events.size(), 3U);
+    EXPECT_EQ(events[0], "child.tree-attached");
+    EXPECT_EQ(events[1], "root.child-added");
+    EXPECT_EQ(events[2], "outer.descendant-added");
+
+    events.clear();
+    NodePtr removed = childPtr->remove();
+    ASSERT_EQ(removed.get(), childPtr);
+    ASSERT_EQ(events.size(), 3U);
+    EXPECT_EQ(events[0], "root.child-removed");
+    EXPECT_EQ(events[1], "child.tree-detached");
+    EXPECT_EQ(events[2], "outer.descendant-removed");
+}
+
+TEST(FragmentTest, AllowsChildrenClearedCallbackToDestroyParent) {
+    std::unique_ptr<Element> owner;
+    owner = std::make_unique<DestroyOnChildrenCleared>(&owner);
+    Element* parent = owner.get();
+    parent->append(makeElement<HTMLLabelElement>("old"));
+
+    parent->replaceChildren();
+
+    EXPECT_FALSE(owner);
+}
+
+TEST(FragmentTest, FullyDetachesRemainingChildrenWhenRemovalCallbackDestroysParent) {
+    Surface surface;
+    auto root = makeElement<HTMLPanelElement>();
+    HTMLPanelElement* rootPtr = root.get();
+    auto parent = std::make_unique<DestroyRootOnChildRemoved>(surface, *rootPtr);
+    DestroyRootOnChildRemoved* parentPtr = parent.get();
+    parent->append(makeElement<HTMLLabelElement>("first"));
+
+    bool remainingChildWasMounted = false;
+    parent->append(makeElement<ObserveMountStateAtDestruction>(&remainingChildWasMounted));
+    root->append(std::move(parent));
+    surface.mount(std::move(root));
+
+    parentPtr->replaceChildren();
+
+    EXPECT_FALSE(remainingChildWasMounted);
+}
+
 TEST(FragmentTest, ParsesAndSerializesBoundedHTML) {
     auto root = makeElementValue<HTMLPanelElement>();
 
@@ -354,6 +469,21 @@ TEST(FragmentTest, ParsesAndSerializesBoundedHTML) {
     EXPECT_TRUE(root.children()[0]->classes().contains("primary.bad"));
     EXPECT_TRUE(root.children()[0]->classes().contains("@token"));
     EXPECT_EQ(root.children()[1]->elementName(), "input");
+}
+
+TEST(FragmentTest, InnerHTMLReplacesExistingChildren) {
+    auto root = makeElementValue<HTMLPanelElement>();
+    Node* oldChild = root.append(makeElement<HTMLLabelElement>("old"));
+    ASSERT_NE(oldChild, nullptr);
+    const ElementRef<Element> oldChildRef(oldChild->asElement());
+    root.append(makeElement<HTMLLabelElement>("tail"));
+
+    root.innerHTML("<button id='new'>new</button>");
+
+    EXPECT_FALSE(oldChildRef);
+    ASSERT_EQ(root.children().size(), 1U);
+    EXPECT_EQ(root.children().front()->elementName(), "button");
+    EXPECT_EQ(root.children().front()->textContent(), "new");
 }
 
 TEST(FragmentTest, KeepsSlashInUnquotedAttributeValues) {
@@ -428,6 +558,26 @@ TEST(FragmentTest, TreatsMalformedHTMLAsLiteralText) {
 
     EXPECT_EQ(root.textContent(), "<p/>");
     EXPECT_EQ(root.innerHTML(), "&lt;p/&gt;");
+}
+
+TEST(ElementTest, LabelTargetBecomesUnavailableWhenIdTurnsAmbiguous) {
+    auto root = makeElementValue<HTMLPanelElement>();
+    root.innerHTML("<input id=target><label for=target>Target</label>");
+
+    ASSERT_EQ(root.children().size(), 2U);
+    auto* label = dynamic_cast<HTMLLabelElement*>(root.children()[1]);
+    ASSERT_NE(label, nullptr);
+    EXPECT_TRUE(label->defaultPointerEvents());
+
+    auto duplicate = makeElement<HTMLInputElement>();
+    HTMLInputElement* duplicatePtr = duplicate.get();
+    duplicate->setId("target");
+    root.append(std::move(duplicate));
+    EXPECT_FALSE(label->defaultPointerEvents());
+
+    NodePtr detached = duplicatePtr->remove();
+    ASSERT_NE(detached, nullptr);
+    EXPECT_TRUE(label->defaultPointerEvents());
 }
 
 TEST(HTMLNamesTest, KeepsVoidnessInTheHTMLVocabulary) {
@@ -566,6 +716,95 @@ TEST(DocumentTest, AdoptsCrossDocumentChildOnInsertion) {
     EXPECT_EQ(second.getElementById("adopted"), child);
 }
 
+TEST(DocumentTest, AdoptsDetachedSubtreesBeforeInsertion) {
+    auto firstRootOwner = makeElement<HTMLPanelElement>();
+    Document first(std::move(firstRootOwner));
+    auto secondRootOwner = makeElement<HTMLPanelElement>();
+    Document second(std::move(secondRootOwner));
+
+    auto subtree = first.createElement("panel");
+    auto descendant = first.createElement("button");
+    descendant->setId("nested-adopted");
+    Element* subtreeElement = subtree.get();
+    Element* descendantElement = descendant.get();
+    subtree->append(std::move(descendant));
+
+    NodePtr subtreeNode = std::move(subtree);
+    NodePtr adopted = second.adoptNode(std::move(subtreeNode));
+    EXPECT_EQ(radia::ui::detail::NodeAccess::documentIdentity(*subtreeElement), radia::ui::detail::NodeAccess::documentIdentity(second));
+    EXPECT_EQ(radia::ui::detail::NodeAccess::documentIdentity(*descendantElement), radia::ui::detail::NodeAccess::documentIdentity(second));
+
+    ASSERT_EQ(second.documentElement()->append(std::move(adopted)), subtreeElement);
+    EXPECT_EQ(second.getElementById("nested-adopted"), descendantElement);
+}
+
+TEST(DocumentTest, AllowsDuplicateIdsAndReturnsFirstTreeOrderMatch) {
+    auto documentElementOwner = makeElement<HTMLPanelElement>();
+    Document document(std::move(documentElementOwner));
+    Element* documentElement = document.documentElement();
+    ASSERT_NE(documentElement, nullptr);
+
+    auto firstOwner = document.createElement("button");
+    auto secondOwner = document.createElement("button");
+    firstOwner->setId("duplicate");
+    secondOwner->setId("duplicate");
+    Element* first = firstOwner.get();
+    Element* second = secondOwner.get();
+    documentElement->append(std::move(firstOwner));
+    documentElement->append(std::move(secondOwner));
+
+    EXPECT_EQ(document.getElementById("duplicate"), first);
+    NodePtr detached = first->remove();
+    ASSERT_EQ(detached.get(), first);
+    EXPECT_EQ(document.getElementById("duplicate"), second);
+}
+
+TEST(DocumentTest, KeepsDuplicateIdLookupStableAcrossReplacementReorderingAndAdoption) {
+    auto targetRootOwner = makeElement<HTMLPanelElement>();
+    Document target(std::move(targetRootOwner));
+    Element* targetRoot = target.documentElement();
+    ASSERT_NE(targetRoot, nullptr);
+
+    auto firstOwner = target.createElement("button");
+    auto secondOwner = target.createElement("button");
+    auto thirdOwner = target.createElement("button");
+    firstOwner->setId("duplicate");
+    secondOwner->setId("duplicate");
+    thirdOwner->setId("duplicate");
+    Element* first = firstOwner.get();
+    Element* second = secondOwner.get();
+    Element* third = thirdOwner.get();
+    targetRoot->append(std::move(firstOwner));
+    targetRoot->append(std::move(secondOwner));
+    targetRoot->append(std::move(thirdOwner));
+    EXPECT_EQ(target.getElementById("duplicate"), first);
+
+    NodePtr detachedFirst = first->remove();
+    ASSERT_EQ(detachedFirst.get(), first);
+    EXPECT_EQ(target.getElementById("duplicate"), second);
+    ASSERT_EQ(targetRoot->append(std::move(detachedFirst)), first);
+    EXPECT_EQ(target.getElementById("duplicate"), second);
+
+    auto replacementOwner = target.createElement("button");
+    replacementOwner->setId("duplicate");
+    Element* replacement = replacementOwner.get();
+    NodePtr detachedSecond = second->replaceWith(std::move(replacementOwner));
+    ASSERT_EQ(detachedSecond.get(), second);
+    EXPECT_EQ(target.getElementById("duplicate"), replacement);
+
+    auto sourceRootOwner = makeElement<HTMLPanelElement>();
+    Document source(std::move(sourceRootOwner));
+    auto adoptedOwner = source.createElement("button");
+    adoptedOwner->setId("duplicate");
+    Element* adopted = adoptedOwner.get();
+    source.documentElement()->append(std::move(adoptedOwner));
+    NodePtr adoptedNode = adopted->remove();
+    ASSERT_EQ(targetRoot->prepend(std::move(adoptedNode)), adopted);
+    EXPECT_EQ(source.getElementById("duplicate"), nullptr);
+    EXPECT_EQ(target.getElementById("duplicate"), adopted);
+    EXPECT_NE(target.getElementById("duplicate"), third);
+}
+
 TEST(DocumentTest, RemovesDocumentElementThroughNodeMutation) {
     auto documentElementOwner = makeElement<HTMLPanelElement>();
     Document document(std::move(documentElementOwner));
@@ -600,6 +839,109 @@ TEST(ElementTest, NormalizesAdjacentTextNodes) {
     EXPECT_EQ(runtimeChildren.begin()->asText()->data(), "beforeafter");
 }
 
+TEST(ElementVisitTest, SeparatesObjectMountTopologyStyleAndLayoutObservations) {
+    auto root = makeElementValue<HTMLPanelElement>();
+    auto childOwner = makeElement<HTMLPanelElement>();
+    Element* child = childOwner.get();
+    root.append(std::move(childOwner));
+
+    const ElementVisit initial(*child);
+    EXPECT_TRUE(initial.objectAlive());
+    EXPECT_TRUE(initial.mountValid());
+    EXPECT_TRUE(initial.topologyValid());
+    EXPECT_TRUE(initial.styleValid());
+    EXPECT_TRUE(initial.layoutValid());
+
+    child->setId("changed-id");
+    EXPECT_TRUE(initial.objectAlive());
+    EXPECT_TRUE(initial.mountValid());
+    EXPECT_TRUE(initial.topologyValid());
+    EXPECT_FALSE(initial.layoutValid());
+    EXPECT_FALSE(initial.styleValid());
+
+    const ElementVisit beforeLayoutChange(*child);
+    child->setRect({1.f, 2.f, 3.f, 4.f});
+    EXPECT_TRUE(beforeLayoutChange.objectAlive());
+    EXPECT_TRUE(beforeLayoutChange.mountValid());
+    EXPECT_TRUE(beforeLayoutChange.topologyValid());
+    EXPECT_TRUE(beforeLayoutChange.styleValid());
+    EXPECT_FALSE(beforeLayoutChange.layoutValid());
+
+    auto other = makeElementValue<HTMLPanelElement>();
+    NodePtr detached = child->remove();
+    ASSERT_EQ(detached.get(), child);
+    other.append(std::move(detached));
+    EXPECT_TRUE(initial.objectAlive());
+    EXPECT_TRUE(initial.mountValid());
+    EXPECT_FALSE(initial.topologyValid());
+    EXPECT_FALSE(initial.layoutValid());
+
+    ElementVisit dead;
+    {
+        auto temporary = makeElementValue<HTMLPanelElement>();
+        dead = ElementVisit(temporary);
+    }
+    EXPECT_FALSE(dead.objectAlive());
+}
+
+TEST(ElementVisitTest, PaintOnlyStateChangeLeavesLayoutObservationCurrent) {
+    StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet.loadRadia("panel:hover { color: #ffffff; }").ok());
+    EXPECT_FALSE(styleSheet.stateAffectsLayout(ElementState::Hovered));
+
+    Surface surface(styleSheet);
+    surface.setViewport(100.f, 100.f);
+    auto panelOwner = makeElement<HTMLPanelElement>();
+    Element* panel = panelOwner.get();
+    panelOwner->setRect({0.f, 0.f, 100.f, 100.f}).setPointerEvents(true);
+    surface.mount(std::move(panelOwner));
+    surface.updateLayout();
+
+    const ElementVisit observation(*panel);
+    surface.pointerMove({{5.f, 5.f}});
+    ASSERT_TRUE(panel->hasState(ElementState::Hovered));
+    EXPECT_TRUE(observation.objectAlive());
+    EXPECT_TRUE(observation.mountValid());
+    EXPECT_TRUE(observation.topologyValid());
+    EXPECT_TRUE(observation.layoutValid());
+    EXPECT_FALSE(observation.styleValid());
+}
+
+TEST(ElementVisitTest, RejectsSiblingOrderChanges) {
+    auto root = makeElementValue<HTMLPanelElement>();
+    auto firstOwner = makeElement<HTMLPanelElement>();
+    auto secondOwner = makeElement<HTMLPanelElement>();
+    Element* first = firstOwner.get();
+    Element* second = secondOwner.get();
+    root.append(std::move(firstOwner));
+    root.append(std::move(secondOwner));
+
+    const ElementVisit observation(*second);
+    NodePtr detached = first->remove();
+    ASSERT_EQ(detached.get(), first);
+    ASSERT_EQ(root.append(std::move(detached)), first);
+
+    EXPECT_TRUE(observation.objectAlive());
+    EXPECT_FALSE(observation.topologyValid());
+}
+
+TEST(ElementVisitTest, RejectsUnmountAndRemountAsNewMount) {
+    Surface surface;
+    auto rootOwner = makeElement<HTMLPanelElement>();
+    Element* root = rootOwner.get();
+    surface.mount(std::move(rootOwner));
+
+    const ElementVisit observation(*root);
+    std::unique_ptr<Element> detached = surface.unmount(*root);
+    ASSERT_EQ(detached.get(), root);
+    Element& remounted = surface.mount(std::move(detached));
+    ASSERT_EQ(&remounted, root);
+
+    EXPECT_TRUE(observation.objectAlive());
+    EXPECT_TRUE(observation.topologyValid());
+    EXPECT_FALSE(observation.mountValid());
+}
+
 TEST(ElementTest, StoresLiteralTextContent) {
     auto root = makeElementValue<Element>("p");
     root.textContent("beforeafter");
@@ -608,6 +950,14 @@ TEST(ElementTest, StoresLiteralTextContent) {
     ASSERT_EQ(runtimeChildren.size(), 1U);
     ASSERT_NE(runtimeChildren.begin()->asText(), nullptr);
     EXPECT_EQ(runtimeChildren.begin()->asText()->data(), "beforeafter");
+}
+
+TEST(ElementTest, EmptyTextContentRemovesTextNodes) {
+    auto root = makeElementValue<Element>("p");
+    root.textContent("content");
+    root.textContent("");
+
+    EXPECT_TRUE(root.childNodes().empty());
 }
 
 TEST(ElementTest, PreservesWhitespaceOnlyTextNodes) {

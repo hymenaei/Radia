@@ -14,6 +14,7 @@
 #include "text/metrics.h"
 
 namespace radia::ui {
+using detail::ElementInternalAccess;
 using layout_detail::AdjacentLayout;
 using layout_detail::adjacentLayout;
 using layout_detail::allocateMainAxis;
@@ -40,52 +41,52 @@ Vec2 LayoutEngine::measure(Element& node, LayoutPass& pass, std::optional<float>
     const TextMetrics& textMetrics = pass.textMetrics();
     const Style& style = pass.style(node);
     if (!node.isDisplayed(style)) {
-        detail::ElementInternalAccess::layoutCache(node).measuredSize = {};
-        detail::ElementInternalAccess::layoutCache(node).measuredWidth = outerWidth.value_or(0.f);
-        detail::ElementInternalAccess::layoutCache(node).measuredHeight = outerHeight.value_or(0.f);
-        detail::ElementInternalAccess::layoutCache(node).measuredWidthSet = outerWidth.has_value();
-        detail::ElementInternalAccess::layoutCache(node).measuredHeightSet = outerHeight.has_value();
-        detail::ElementInternalAccess::layoutCache(node).measuredRectExplicit = node.mRectExplicit;
-        detail::ElementInternalAccess::layoutCache(node).measuredRectConstraintSet = node.mRectExplicit;
-        detail::ElementInternalAccess::layoutCache(node).measuredRectWidth = node.mRect.w;
-        detail::ElementInternalAccess::layoutCache(node).measuredRectHeight = node.mRect.h;
-        detail::ElementInternalAccess::layoutCache(node).layoutContext = contextKey;
-        detail::ElementInternalAccess::layoutCache(node).measureValid = true;
-        detail::ElementInternalAccess::layoutCache(node).intrinsicValid = false;
-        detail::ElementInternalAccess::layoutCache(node).arrangeValid = false;
+        ElementInternalAccess::layoutCache(node).measuredSize = {};
+        ElementInternalAccess::layoutCache(node).measuredWidth = outerWidth.value_or(0.f);
+        ElementInternalAccess::layoutCache(node).measuredHeight = outerHeight.value_or(0.f);
+        ElementInternalAccess::layoutCache(node).measuredWidthSet = outerWidth.has_value();
+        ElementInternalAccess::layoutCache(node).measuredHeightSet = outerHeight.has_value();
+        ElementInternalAccess::layoutCache(node).measuredRectExplicit = node.mRectExplicit;
+        ElementInternalAccess::layoutCache(node).measuredRectConstraintSet = node.mRectExplicit;
+        ElementInternalAccess::layoutCache(node).measuredRectWidth = node.mRect.w;
+        ElementInternalAccess::layoutCache(node).measuredRectHeight = node.mRect.h;
+        ElementInternalAccess::layoutCache(node).layoutContext = contextKey;
+        ElementInternalAccess::layoutCache(node).measureValid = true;
+        ElementInternalAccess::layoutCache(node).intrinsicValid = false;
+        ElementInternalAccess::layoutCache(node).arrangeValid = false;
         if (!outerWidth && !outerHeight) node.mDesiredSize = {};
         node.mInvalidationReasons.remove(kMeasureInvalidationReasons);
         return {};
     }
 
-    const bool widthMatches = detail::ElementInternalAccess::layoutCache(node).measuredWidthSet == outerWidth.has_value()
-        && (!outerWidth || detail::ElementInternalAccess::layoutCache(node).measuredWidth == *outerWidth);
-    const bool heightMatches = detail::ElementInternalAccess::layoutCache(node).measuredHeightSet == outerHeight.has_value()
-        && (!outerHeight || detail::ElementInternalAccess::layoutCache(node).measuredHeight == *outerHeight);
-    const bool rectModeMatches = detail::ElementInternalAccess::layoutCache(node).measuredRectExplicit == node.mRectExplicit;
-    const bool rectConstraintMatches = !detail::ElementInternalAccess::layoutCache(node).measuredRectConstraintSet
+    const bool widthMatches = ElementInternalAccess::layoutCache(node).measuredWidthSet == outerWidth.has_value()
+        && (!outerWidth || ElementInternalAccess::layoutCache(node).measuredWidth == *outerWidth);
+    const bool heightMatches = ElementInternalAccess::layoutCache(node).measuredHeightSet == outerHeight.has_value()
+        && (!outerHeight || ElementInternalAccess::layoutCache(node).measuredHeight == *outerHeight);
+    const bool rectModeMatches = ElementInternalAccess::layoutCache(node).measuredRectExplicit == node.mRectExplicit;
+    const bool rectConstraintMatches = !ElementInternalAccess::layoutCache(node).measuredRectConstraintSet
         || (node.mRectExplicit
-            && detail::ElementInternalAccess::layoutCache(node).measuredRectWidth == node.mRect.w
-            && detail::ElementInternalAccess::layoutCache(node).measuredRectHeight == node.mRect.h);
-    const bool cacheMatches = detail::ElementInternalAccess::layoutCache(node).measureValid
+            && ElementInternalAccess::layoutCache(node).measuredRectWidth == node.mRect.w
+            && ElementInternalAccess::layoutCache(node).measuredRectHeight == node.mRect.h);
+    const bool cacheMatches = ElementInternalAccess::layoutCache(node).measureValid
         && widthMatches
         && heightMatches
         && rectModeMatches
         && rectConstraintMatches
-        && detail::ElementInternalAccess::layoutCache(node).layoutContext == contextKey;
-    const bool cacheContextMatches = detail::ElementInternalAccess::layoutCache(node).layoutContext == contextKey;
+        && ElementInternalAccess::layoutCache(node).layoutContext == contextKey;
+    const bool cacheContextMatches = ElementInternalAccess::layoutCache(node).layoutContext == contextKey;
     if (node.mInvalidationReasons.intersects(kMeasureInvalidationReasons) || !cacheContextMatches || !rectModeMatches || !rectConstraintMatches)
-        detail::ElementInternalAccess::layoutCache(node).intrinsicValid = false;
+        ElementInternalAccess::layoutCache(node).intrinsicValid = false;
     if (!node.mInvalidationReasons.intersects(kMeasureInvalidationReasons) && cacheMatches) {
         pass.recordSkipped();
-        return detail::ElementInternalAccess::layoutCache(node).measuredSize;
+        return ElementInternalAccess::layoutCache(node).measuredSize;
     }
 
     pass.recordMeasured(outerWidth.has_value() || outerHeight.has_value());
-    detail::ElementInternalAccess::layoutCache(node).arrangeValid = false;
+    ElementInternalAccess::layoutCache(node).arrangeValid = false;
 
     const NodeSnapshot styledState(node);
-    if (!styledState.valid()) return {};
+    if (!styledState.layoutValid()) return {};
     std::optional<float> resolvedWidth = outerWidth;
     if (!resolvedWidth && !style.width.isAuto() && !style.width.isPercentage())
         resolvedWidth = styledBoxDimension(style, true, style.width, style.minWidth, 0.f);
@@ -130,20 +131,20 @@ Vec2 LayoutEngine::measure(Element& node, LayoutPass& pass, std::optional<float>
     else if (resolvedHeight && (outerHeight || authoredHeight))
         desiredHeight = std::max(*resolvedHeight, minimumBoxDimension(style, false, style.minHeight, *resolvedHeight));
     const Vec2 desired = {desiredWidth, desiredHeight};
-    detail::ElementInternalAccess::layoutCache(node).measuredSize = desired;
-    detail::ElementInternalAccess::layoutCache(node).measuredWidth = outerWidth.value_or(0.f);
-    detail::ElementInternalAccess::layoutCache(node).measuredHeight = outerHeight.value_or(0.f);
-    detail::ElementInternalAccess::layoutCache(node).measuredWidthSet = outerWidth.has_value();
-    detail::ElementInternalAccess::layoutCache(node).measuredHeightSet = outerHeight.has_value();
-    detail::ElementInternalAccess::layoutCache(node).measuredRectExplicit = node.mRectExplicit;
-    detail::ElementInternalAccess::layoutCache(node).measuredRectConstraintSet = node.mRectExplicit;
-    detail::ElementInternalAccess::layoutCache(node).measuredRectWidth = node.mRect.w;
-    detail::ElementInternalAccess::layoutCache(node).measuredRectHeight = node.mRect.h;
-    detail::ElementInternalAccess::layoutCache(node).layoutContext = contextKey;
-    detail::ElementInternalAccess::layoutCache(node).measureValid = true;
+    ElementInternalAccess::layoutCache(node).measuredSize = desired;
+    ElementInternalAccess::layoutCache(node).measuredWidth = outerWidth.value_or(0.f);
+    ElementInternalAccess::layoutCache(node).measuredHeight = outerHeight.value_or(0.f);
+    ElementInternalAccess::layoutCache(node).measuredWidthSet = outerWidth.has_value();
+    ElementInternalAccess::layoutCache(node).measuredHeightSet = outerHeight.has_value();
+    ElementInternalAccess::layoutCache(node).measuredRectExplicit = node.mRectExplicit;
+    ElementInternalAccess::layoutCache(node).measuredRectConstraintSet = node.mRectExplicit;
+    ElementInternalAccess::layoutCache(node).measuredRectWidth = node.mRect.w;
+    ElementInternalAccess::layoutCache(node).measuredRectHeight = node.mRect.h;
+    ElementInternalAccess::layoutCache(node).layoutContext = contextKey;
+    ElementInternalAccess::layoutCache(node).measureValid = true;
     if (!outerWidth && !outerHeight) {
-        detail::ElementInternalAccess::layoutCache(node).intrinsicSize = desired;
-        detail::ElementInternalAccess::layoutCache(node).intrinsicValid = true;
+        ElementInternalAccess::layoutCache(node).intrinsicSize = desired;
+        ElementInternalAccess::layoutCache(node).intrinsicValid = true;
         node.mDesiredSize = desired;
     }
     node.mInvalidationReasons.remove(kMeasureInvalidationReasons);
@@ -229,14 +230,14 @@ ChildLayout LayoutEngine::measureChild(Element& parent, LayoutChildRef child, co
     const LayoutChildRef childState = child;
     Element* childElement = child.element();
     PseudoElement* childPseudoElement = child.pseudoElement;
-    const auto valid = [&]() {
+    const auto isCurrent = [&]() {
         Element* currentParent = parentState.get();
-        if (!parentState.valid() || !currentParent || !childState.attachedTo(*currentParent)) return false;
+        if (!parentState.layoutValid() || !currentParent || !childState.attachedTo(*currentParent)) return false;
         return childPseudoElement || !childElement || childElement->mSurface == parentState.surface;
     };
 
     const Style childStyle = pass.style(child, parentStyle);
-    if (!valid()) return invalidChildLayout();
+    if (!isCurrent()) return invalidChildLayout();
     if (childElement ? !childElement->isDisplayed(childStyle) : childStyle.display == DisplayMode::NoneValue) return invalidChildLayout();
     std::optional<float> childWidth;
     std::optional<float> childHeight;
@@ -251,7 +252,7 @@ ChildLayout LayoutEngine::measureChild(Element& parent, LayoutChildRef child, co
     else if (childPseudoElement) childSize = measurePseudoElement(*childPseudoElement, childStyle, childWidth, childHeight, pass);
     else if (Text* text = childState.text())
         childSize = text->intrinsicSize(pass.styleSheet(), childStyle, pass.textMetrics(), {childWidth, childHeight});
-    if (!valid()) return invalidChildLayout();
+    if (!isCurrent()) return invalidChildLayout();
     Element* currentParent = parentState.get();
     Element* currentElement = childState.element();
     if (currentElement && currentElement->mRectExplicit) {
@@ -289,7 +290,7 @@ ChildLayout LayoutEngine::measureChild(Element& parent, LayoutChildRef child, co
             else if (childPseudoElement) childSize.y = measurePseudoElement(*childPseudoElement, childStyle, childSize.x, std::nullopt, pass).y;
             else if (Text* text = childState.text())
                 childSize.y = text->intrinsicSize(pass.styleSheet(), childStyle, pass.textMetrics(), {childSize.x, std::nullopt}).y;
-            if (!valid()) return invalidChildLayout();
+            if (!isCurrent()) return invalidChildLayout();
         }
         childAutomaticMinimum = childSize;
     }
@@ -318,7 +319,7 @@ ChildLayout LayoutEngine::measureChild(Element& parent, LayoutChildRef child, co
             else childSize.y = std::max(basis, minimum);
         }
     }
-    if (!valid()) return invalidChildLayout();
+    if (!isCurrent()) return invalidChildLayout();
     return {childState, childStyle, childAutomaticMinimum, childSize};
 }
 
@@ -339,11 +340,11 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::measureNormalChildren(Elem
         const Style childStyle = pass.style(childRef, parentStyle);
         if (childPtr ? !childPtr->isDisplayed(childStyle) : childStyle.display == DisplayMode::NoneValue) continue;
 
-        const auto valid = [&] {
+        const auto isCurrent = [&] {
             Element* currentParent = parentState.get();
-            return parentState.valid() && currentParent && childRef.attachedTo(*currentParent);
+            return parentState.layoutValid() && currentParent && childRef.attachedTo(*currentParent);
         };
-        if (!valid()) return std::nullopt;
+        if (!isCurrent()) return std::nullopt;
 
         const bool blockLevel = !isInlineLevel(childStyle.display);
         const bool fillsContainingBlock = contentWidth && blockLevel && childStyle.width.isAuto() && (!childPtr || !childPtr->mRectExplicit);
@@ -363,7 +364,7 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::measureNormalChildren(Elem
             return Vec2{};
         };
         Vec2 childSize = measureNode(fillsContainingBlock ? std::nullopt : childWidth, childHeight);
-        if (!valid()) return std::nullopt;
+        if (!isCurrent()) return std::nullopt;
 
         Element* currentChild = childRef.element();
         if (currentChild && currentChild->mRectExplicit) {
@@ -372,7 +373,7 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::measureNormalChildren(Elem
         }
         if (fillsContainingBlock) {
             childSize = measureNode(childWidth, childHeight);
-            if (!valid()) return std::nullopt;
+            if (!isCurrent()) return std::nullopt;
         }
         const bool constrainedEllipsisText = childRef.text()
             && childStyle.textWrap == TextWrap::NoWrap
@@ -386,7 +387,7 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::measureNormalChildren(Elem
             const float availableInlineWidth = std::max(0.f, *contentWidth - childStyle.margin.horizontal());
             childSize = measureNode(availableInlineWidth, childHeight);
             if (constrainedEllipsisText) childSize.x = availableInlineWidth;
-            if (!valid()) return std::nullopt;
+            if (!isCurrent()) return std::nullopt;
         }
         layouts.push_back({childRef, childStyle, childSize, childSize});
     }
@@ -408,11 +409,11 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::measureGridChildren(Elemen
         const Style childStyle = pass.style(childRef, pass.style(parent));
         if (childElement ? !childElement->isDisplayed(childStyle) : childStyle.display == DisplayMode::NoneValue) continue;
 
-        const auto valid = [&] {
+        const auto isCurrent = [&] {
             Element* currentParent = parentState.get();
-            return parentState.valid() && currentParent && childRef.attachedTo(*currentParent);
+            return parentState.layoutValid() && currentParent && childRef.attachedTo(*currentParent);
         };
-        if (!valid()) return std::nullopt;
+        if (!isCurrent()) return std::nullopt;
 
         const std::optional<float> childWidth = contentWidth && childStyle.width.isPercentage()
             ? std::optional<float>(styledBoxDimension(childStyle, true, childStyle.width, childStyle.minWidth, 0.f, *contentWidth))
@@ -426,7 +427,7 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::measureGridChildren(Elemen
             childSize = measurePseudoElement(*pseudoElement, childStyle, childWidth, childHeight, pass);
         else if (Text* text = childRef.text())
             childSize = text->intrinsicSize(pass.styleSheet(), childStyle, pass.textMetrics(), {childWidth, childHeight});
-        if (!valid()) return std::nullopt;
+        if (!isCurrent()) return std::nullopt;
 
         if (childElement && childElement->mRectExplicit) {
             if (childStyle.width.isAuto() && !childWidth) childSize.x = childElement->mRect.w;
@@ -486,7 +487,7 @@ Vec2 LayoutEngine::measureRow(Element& node, const Style& style, const Vec2& int
         if (const Element* child = childRef.element(); child && child->elementName() == kBrTag.localName) continue;
         ChildLayout measured = measureChild(node, childRef, style, FlexDirection::Row, resolvedWidth, resolvedHeight, pass);
         Element* currentNode = nodeState.get();
-        if (!nodeState.valid()) return content;
+        if (!nodeState.layoutValid()) return content;
         if (!measured.node || !measured.node.attachedTo(*currentNode) || !isDisplayed(measured)) continue;
         const float childOuterWidth = measured.measured.x + measured.style.margin.horizontal();
         const float outerHeight = measured.measured.y + measured.style.margin.vertical();
@@ -535,7 +536,7 @@ Vec2 LayoutEngine::measureColumn(Element& node, const Style& style, const Vec2& 
         if (const Element* child = childRef.element(); child && child->elementName() == kBrTag.localName) continue;
         ChildLayout measured = measureChild(node, childRef, style, FlexDirection::Column, resolvedWidth, resolvedHeight, pass);
         Element* currentNode = nodeState.get();
-        if (!nodeState.valid()) return content;
+        if (!nodeState.layoutValid()) return content;
         if (!measured.node || !measured.node.attachedTo(*currentNode) || !isDisplayed(measured)) continue;
         const float childOuterWidth = measured.measured.x + measured.style.margin.horizontal();
         const float outerHeight = measured.measured.y + measured.style.margin.vertical();
@@ -593,7 +594,7 @@ bool LayoutEngine::remeasureRowChildren(Element& parent, std::vector<ChildLayout
             child.measured.y = text->intrinsicSize(pass.styleSheet(), child.style, pass.textMetrics(), {child.measured.x, std::nullopt}).y;
         Element* currentParent = parentState.get();
         node = nodeLifetime.get();
-        if (!parentState.valid()
+        if (!parentState.layoutValid()
             || !currentParent
             || !child.node.attachedTo(*currentParent)
             || (node && (node->mSurface != parentState.surface || node->mLayoutInvalidationRevision != nodeRevision)))
@@ -620,7 +621,7 @@ bool LayoutEngine::remeasureColumnChildren(Element& parent, std::vector<ChildLay
             : child.node.text()->intrinsicSize(pass.styleSheet(), child.style, pass.textMetrics(), {child.measured.x, child.measured.y});
         Element* currentParent = parentState.get();
         node = nodeLifetime.get();
-        if (!parentState.valid()
+        if (!parentState.layoutValid()
             || !currentParent
             || !child.node.attachedTo(*currentParent)
             || (node && (node->mSurface != parentState.surface || node->mLayoutInvalidationRevision != nodeRevision)))

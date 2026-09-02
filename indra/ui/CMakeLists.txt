@@ -95,7 +95,6 @@ set(private_sources
     surface/resize.cpp
     surface/scrollgeometry.cpp
     surface/surface.cpp
-    surface/surfaceinternal.h
 
     text/host.cpp
     text/inlineelements.cpp

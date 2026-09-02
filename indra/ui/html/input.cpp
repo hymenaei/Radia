@@ -16,8 +16,8 @@
 #include "surface/surface.h"
 
 namespace radia::ui {
-using detail::ElementCompilerAccess;
 using detail::ElementDefinitions;
+using detail::ElementInternalAccess;
 
 bool HTMLInputElement::isCheckableType(std::string_view type) {
     const std::string key = canonicalizeHTMLName(type);
@@ -80,7 +80,7 @@ void HTMLInputElement::paint(PaintContext& context, const Style& style, float sc
             const bool clipsX = style.overflowX != Overflow::Visible;
             const bool clipsY = style.overflowY != Overflow::Visible;
             const ClipAxes clipAxes = (clipsX ? ClipAxes::X : ClipAxes::NoAxes) | (clipsY ? ClipAxes::Y : ClipAxes::NoAxes);
-            if (clipsX || clipsY) context.pushClip(detail::ElementInternalAccess::scrollport(*this), scale, clipAxes);
+            if (clipsX || clipsY) context.pushClip(ElementInternalAccess::scrollport(*this), scale, clipAxes);
             const auto paintPseudoElement = [&context, scale](const PseudoElement& pseudoElement, float inheritedOpacity,
                                                               const auto& paintChildren) -> void {
                 const Style& pseudoStyle = pseudoElement.style();
@@ -143,7 +143,7 @@ HTMLInputElement& HTMLInputElement::type(std::string type) {
     if (wasRadio) refreshRadioGroup(oldName, this);
     mType = std::move(type);
     setAttribute("type", mType);
-    ElementCompilerAccess::setStyleAttribute(*this, "type", mType);
+    ElementInternalAccess::setStyleAttribute(*this, "type", mType);
     if (!isCheckboxType()) resetIndeterminateState();
 
     if (isRadioType()) refreshRadioGroup();
@@ -156,9 +156,13 @@ HTMLInputElement& HTMLInputElement::name(std::string name) {
     const std::string oldName = mName;
     if (isRadioType()) refreshRadioGroup(oldName, this);
     mName = std::move(name);
-    if (mName.empty()) removeAttribute("name");
-    else setAttribute("name", mName);
-    ElementCompilerAccess::setStyleAttribute(*this, "name", mName);
+    if (mName.empty()) {
+        removeAttribute("name");
+        ElementInternalAccess::removeStyleAttribute(*this, "name");
+    } else {
+        setAttribute("name", mName);
+        ElementInternalAccess::setStyleAttribute(*this, "name", mName);
+    }
     if (isRadioType()) refreshRadioGroup();
     return *this;
 }
@@ -169,8 +173,8 @@ HTMLInputElement& HTMLInputElement::switchMode(bool enabled) {
     mSwitchMode = enabled;
     if (enabled) setAttribute("switch");
     else removeAttribute("switch");
-    if (enabled) ElementCompilerAccess::setStyleAttribute(*this, "switch", "true");
-    else ElementCompilerAccess::removeStyleAttribute(*this, "switch");
+    if (enabled) ElementInternalAccess::setStyleAttribute(*this, "switch", "true");
+    else ElementInternalAccess::removeStyleAttribute(*this, "switch");
 
     return *this;
 }

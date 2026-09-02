@@ -90,19 +90,23 @@ inline constexpr InvalidationFlags kPaintStyleInvalidationReasons = layoutInvali
 inline constexpr InvalidationFlags kLayoutStyleInvalidationReasons = kArrangeInvalidationReasons | LayoutInvalidationReason::Paint;
 
 class Element;
-class HTMLFloaterElement;
 class PseudoElement;
 
 namespace detail {
 struct ElementPrivateData;
 class AuthoredEventStore;
 class ElementInternalAccess;
-class ElementDefinitions;
 class ElementConstructionAccess;
-}
+
+struct MountEpoch {
+    std::uint64_t value = 0;
+
+    friend constexpr bool operator==(MountEpoch left, MountEpoch right) { return left.value == right.value; }
+    friend constexpr bool operator!=(MountEpoch left, MountEpoch right) { return !(left == right); }
+};
+} // namespace detail
 
 namespace detail {
-class ElementCompilerAccess;
 template<typename ElementT> class ElementVisit;
 class NodeChildren;
 class ConstNodeChildren;
@@ -150,14 +154,12 @@ class Element : public Node {
     friend class TreeTraversalCache;
     friend class Binder;
     friend class LayoutPass;
-    friend class HTMLFloaterElement;
     friend class LayoutEngine;
     friend class StylePass;
     friend class Surface;
     friend Rect layout_detail::positionedRect(const layout_detail::ChildLayout&, const Rect&, VerticalAlign);
     friend void layout_detail::setArrangedRect(Element&, const Rect&);
     friend class layout_detail::ElementLayoutAccess;
-    friend class detail::ElementCompilerAccess;
     friend class detail::ElementConstructionAccess;
     friend class detail::NodeMutation;
     friend class detail::AuthoredEventStore;
@@ -287,7 +289,6 @@ protected:
     virtual bool hasLayoutGapBetween(const Element&, const Element&) const { return true; }
     virtual float layoutOverlapBetween(const Element&, const Element&, const Style&) const { return 0.f; }
     virtual std::vector<PseudoElement*> generatedPseudoElements() const { return {}; }
-    void clearDirectTextContent();
     void translateChild(Element& child, const Vec2& delta);
     void setState(ElementState state, bool enabled);
     Element& setDisplayNone(bool displayNone);
@@ -335,6 +336,7 @@ private:
     void removeAttributeValue(std::string_view name);
     void rebuildTextContent();
     void rebuildResolvedHTML(std::string html);
+    void replaceResolvedHTML(std::string html);
     bool refreshTextContentSlots();
     Element& setIdScopeRoot(bool scopeRoot);
     void setScrollMetrics(const ScrollMetrics& metrics, const Rect& scrollableOverflow, const Rect& scrollport);
@@ -357,6 +359,7 @@ private:
     Rect mScrollport;
     std::vector<std::unique_ptr<Node>> mChildren;
     std::uint64_t mChildSnapshotRevision = 1;
+    std::uint64_t mChildTopologyRevision = 1;
     std::function<void(Element&)> mOnActivate;
     std::unique_ptr<detail::AuthoredEventStore> mAuthoredEventStore;
     std::vector<EventListener> mEventListeners;
@@ -367,7 +370,6 @@ private:
     std::optional<bool> mDisplayNoneOverride;
     bool mIdScopeRoot = false;
     bool mRectExplicit = false;
-    bool mBuildingTextContent = false;
     bool mSuppressTextSlots = false;
     std::optional<LocalizedContent> mLocalizedContent;
 

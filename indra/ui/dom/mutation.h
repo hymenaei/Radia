@@ -36,14 +36,19 @@ public:
     static void setTextData(Text& text, std::string value);
 
 private:
+    friend class radia::ui::Document;
+
     using NodeOwners = std::vector<NodePtr>;
 
+    static void adopt(const Document& document, Node& node);
+    static void adopt(Node& node, const std::shared_ptr<DocumentIdentity>& identity);
     static void validateChild(const Node& parent, const Node* child);
     static void validateDetachedSubtree(const Node& node);
     static void assignDocumentIdentity(Node& node, const std::shared_ptr<DocumentIdentity>& identity);
     static void validateFragment(const Node& parent, const Fragment& fragment);
     static void clearTextSlots(Element& parent);
     static void detachElementChild(Element& parent, Node& node, Surface* surface);
+    static void detachOrphanedChild(Node& node, Surface* surface);
     static void notifyAncestorAdded(Element& parent, Element& child);
     static void notifyAncestorRemoved(Element& parent, Element& child);
     static void attachElementChild(Element& parent, Node& node);

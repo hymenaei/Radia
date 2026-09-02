@@ -11,6 +11,7 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -81,7 +82,7 @@ struct ElementLayoutCache {
 
 struct ElementPrivateData {
     std::shared_ptr<char> lifetime = std::make_shared<char>(0);
-    std::shared_ptr<char> mountLifetime;
+    MountEpoch mountEpoch;
     ElementLayoutCache layoutCache;
 };
 
@@ -103,14 +104,25 @@ public:
     using NodeOwners = std::vector<std::unique_ptr<Node>>;
 
     static std::weak_ptr<char> lifetime(const Element& element) { return element.mPrivate->lifetime; }
-    static std::shared_ptr<char>& mountLifetime(Element& element) { return element.mPrivate->mountLifetime; }
-    static const std::shared_ptr<char>& mountLifetime(const Element& element) { return element.mPrivate->mountLifetime; }
+    static MountEpoch& mountEpoch(Element& element) { return element.mPrivate->mountEpoch; }
+    static const MountEpoch& mountEpoch(const Element& element) { return element.mPrivate->mountEpoch; }
+    static bool isMounted(const Element& element) { return element.mSurface != nullptr; }
     static ElementLayoutCache& layoutCache(Element& element) { return element.mPrivate->layoutCache; }
     static const ElementLayoutCache& layoutCache(const Element& element) { return element.mPrivate->layoutCache; }
     static const Rect& scrollableOverflow(const Element& element) { return element.mScrollableOverflow; }
     static const Rect& scrollport(const Element& element) { return element.mScrollport; }
     static std::map<std::string, std::string>& styleAttributes(Element& element) { return element.mStyleAttributes; }
     static const std::map<std::string, std::string>& styleAttributes(const Element& element) { return element.mStyleAttributes; }
+    static void setStyleAttribute(Element& element, std::string name, std::string value) {
+        element.mStyleAttributes[std::move(name)] = std::move(value);
+        element.invalidateStyleTree(true, true);
+    }
+    static void removeStyleAttribute(Element& element, std::string_view name) {
+        element.mStyleAttributes.erase(std::string(name));
+        element.invalidateStyleTree(true, true);
+    }
+    static void setIdScopeRoot(Element& element) { element.setIdScopeRoot(true); }
+    static void setState(Element& element, ElementState state, bool enabled) { element.setState(state, enabled); }
 };
 
 class NodeRef {
@@ -220,7 +232,16 @@ private:
 const std::string* styleAttribute(const Element& element, std::string_view name);
 Element* findElementInScope(Element& element, std::string_view id);
 const Element* findElementInScope(const Element& element, std::string_view id);
-void indexElementsInScope(Element& element, std::map<std::string, Element*>& index);
+struct ElementIdIndex {
+    std::map<std::string, Element*> first;
+    std::set<std::string> ambiguous;
+
+    void add(Element& element) {
+        if (element.id().empty()) return;
+        if (!first.emplace(element.id(), &element).second) ambiguous.emplace(element.id());
+    }
+};
+void indexElementsInScope(Element& element, ElementIdIndex& index);
 Node& appendText(Element& parent, std::string text);
 Node& appendLocalizedText(Element& parent, LocalizedText text, std::string html);
 NodeChildren nodes(Element& element);
@@ -233,6 +254,10 @@ namespace radia::ui {
 using LayoutContextKey = detail::LayoutContextKey;
 
 template<typename ElementT> class ElementRef {
+    using ElementInternalAccess = detail::ElementInternalAccess;
+    using Lifetime = std::weak_ptr<char>;
+    using MountEpoch = detail::MountEpoch;
+
 public:
     ElementRef() = default;
     ElementRef(ElementT* element) { set(element); }
@@ -240,7 +265,8 @@ public:
     ElementT* get() const { return mLifetime.expired() ? nullptr : mElement; }
     ElementT* getMounted() const {
         ElementT* element = get();
-        return element && (!mHasMountLifetime || !mMountLifetime.expired()) ? element : nullptr;
+        return element && ElementInternalAccess::isMounted(*element) && ElementInternalAccess::mountEpoch(*element) == mMountEpoch ? element
+                                                                                                                                   : nullptr;
     }
     ElementT* operator->() const { return get(); }
     ElementT& operator*() const { return *get(); }
@@ -248,16 +274,14 @@ public:
 
     void set(ElementT* element) {
         mElement = element;
-        mLifetime = element ? detail::ElementInternalAccess::lifetime(*element) : std::weak_ptr<char>();
-        mMountLifetime = element ? detail::ElementInternalAccess::mountLifetime(*element) : std::weak_ptr<char>();
-        mHasMountLifetime = element && detail::ElementInternalAccess::mountLifetime(*element) != nullptr;
+        mLifetime = element ? ElementInternalAccess::lifetime(*element) : Lifetime{};
+        mMountEpoch = element ? ElementInternalAccess::mountEpoch(*element) : MountEpoch{};
     }
 
 private:
     ElementT* mElement = nullptr;
-    std::weak_ptr<char> mLifetime;
-    std::weak_ptr<char> mMountLifetime;
-    bool mHasMountLifetime = false;
+    Lifetime mLifetime;
+    MountEpoch mMountEpoch;
 };
 
 namespace detail {
@@ -267,33 +291,50 @@ public:
 
     ElementVisit() = default;
     explicit ElementVisit(ElementT& element)
-        : lifetime(&element), surface(element.mSurface), parent(element.parentElement()), layoutRevision(element.mLayoutInvalidationRevision),
-          styleRevision(element.mStyleRevision), mountLifetime(ElementInternalAccess::mountLifetime(element)) {}
+        : lifetime(&element), parentLifetime(element.parentElement()), surface(element.mSurface), parentNode(element.parentNode()),
+          parent(element.parentElement()), layoutRevision(element.mLayoutInvalidationRevision), childTopologyRevision(element.mChildTopologyRevision),
+          parentChildTopologyRevision(parent ? parent->mChildTopologyRevision : 0), styleRevision(element.mStyleRevision),
+          mountEpoch(ElementInternalAccess::mountEpoch(element)) {}
 
     ElementT* get() const { return lifetime.get(); }
-    bool valid() const {
-        const ElementT* element = lifetime.get();
-        return element
-            && element->mSurface == surface
-            && element->parentElement() == parent
-            && ElementInternalAccess::mountLifetime(*element) == mountLifetime.lock()
-            && element->mLayoutInvalidationRevision == layoutRevision;
+    bool objectAlive() const { return get() != nullptr; }
+    bool mountValid() const {
+        const ElementT* element = get();
+        return element && element->mSurface == surface && ElementInternalAccess::mountEpoch(*element) == mountEpoch;
     }
-    bool validChildOf(const Element& expectedParent) const {
-        const ElementT* element = lifetime.get();
-        return valid() && element->parentElement() == &expectedParent;
+    bool topologyValid() const {
+        const ElementT* element = get();
+        const Element* currentParent = parentLifetime.get();
+        return element
+            && currentParent == parent
+            && element->parentNode() == parentNode
+            && element->parentElement() == parent
+            && element->mChildTopologyRevision == childTopologyRevision
+            && (!parent || currentParent->mChildTopologyRevision == parentChildTopologyRevision);
+    }
+    bool layoutValid() const {
+        const ElementT* element = get();
+        return mountValid() && topologyValid() && element->mLayoutInvalidationRevision == layoutRevision;
     }
     bool styleValid() const {
-        const ElementT* element = lifetime.get();
-        return valid() && element->mStyleRevision == styleRevision;
+        const ElementT* element = get();
+        return mountValid() && topologyValid() && element->mStyleRevision == styleRevision;
+    }
+    bool attachedTo(const Element& expectedParent) const {
+        const ElementT* element = get();
+        return element && element->parentElement() == &expectedParent;
     }
 
     ElementRef<ElementT> lifetime;
+    ElementRef<const Element> parentLifetime;
     const Surface* surface = nullptr;
+    const Node* parentNode = nullptr;
     const Element* parent = nullptr;
     std::uint64_t layoutRevision = 0;
+    std::uint64_t childTopologyRevision = 0;
+    std::uint64_t parentChildTopologyRevision = 0;
     std::uint64_t styleRevision = 0;
-    std::weak_ptr<char> mountLifetime;
+    MountEpoch mountEpoch;
 };
 } // namespace detail
 

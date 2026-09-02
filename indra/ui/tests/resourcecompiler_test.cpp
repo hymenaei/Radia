@@ -132,8 +132,7 @@ TEST(ResourceSnapshotTest, EqualityIncludesPrefixAliases) {
 
 TEST_F(ResourceCompilerTest, ConsumesCanonicalLogicalIdsWithoutProviderTranslation) {
     ResourceSnapshot snapshot;
-    ASSERT_TRUE(snapshot.add("root.html", "<panel><panel filename=\"views/child.html\"></panel></panel>"));
-    ASSERT_TRUE(snapshot.add("child.html", "<panel id=\"child\"></panel>"));
+    ASSERT_TRUE(snapshot.add("root.html", "<panel></panel>"));
     ASSERT_TRUE(snapshot.addPrefixAlias("views"));
 
     const ResourceBuildResult physicalRoot = ResourceCompiler(&snapshot).buildElementTreeFromResource(ResourceId("views/root.html"));
@@ -141,12 +140,19 @@ TEST_F(ResourceCompilerTest, ConsumesCanonicalLogicalIdsWithoutProviderTranslati
     ASSERT_FALSE(physicalRoot.errors.empty());
     EXPECT_EQ(physicalRoot.errors.front().code, "layout.resource.missing");
     EXPECT_EQ(physicalRoot.errors.front().source, "views/root.html");
+}
 
-    const ResourceBuildResult physicalReference = ResourceCompiler(&snapshot).buildElementTreeFromResource(ResourceId("root.html"));
-    ASSERT_FALSE(physicalReference.ok());
-    ASSERT_FALSE(physicalReference.errors.empty());
-    EXPECT_EQ(physicalReference.errors.front().code, "layout.resource.missing");
-    EXPECT_EQ(physicalReference.errors.front().source, "views/child.html");
+TEST_F(ResourceCompilerTest, ResolvesResourceReferencesThroughProvider) {
+    ResourceSnapshot snapshot;
+    ASSERT_TRUE(snapshot.add("root.html", "<panel><panel filename=\"views/child.html\"></panel></panel>"));
+    ASSERT_TRUE(snapshot.add("child.html", "<panel id=\"child\"></panel>"));
+    ASSERT_TRUE(snapshot.addPrefixAlias("views"));
+
+    const ResourceBuildResult result = ResourceCompiler(&snapshot).buildElementTreeFromResource(ResourceId("root.html"));
+    ASSERT_TRUE(result.ok());
+    ASSERT_TRUE(result.document);
+    ASSERT_EQ(result.document->documentElement()->children().size(), 1U);
+    EXPECT_EQ(result.document->documentElement()->children().front()->id(), "child");
 }
 
 TEST_F(ResourceCompilerTest, BuildsFloaterWithControlsAndEventCalls) {

@@ -15,6 +15,7 @@
 #include "style/stylesheet.h"
 
 namespace radia::ui {
+using detail::ElementInternalAccess;
 using layout_detail::AdjacentLayout;
 using layout_detail::adjacentLayout;
 using layout_detail::allocateMainAxis;
@@ -91,7 +92,7 @@ Rect scrollableOverflow(Element& node, const Style& parentStyle, const Rect& scr
         } else if (Element* child = childRef.element()) {
             if (!child->isDisplayed(childStyle)) continue;
             includeOverflow(bounds, child->rect(), true, true);
-            const Rect& childOverflow = detail::ElementInternalAccess::scrollableOverflow(*child);
+            const Rect& childOverflow = ElementInternalAccess::scrollableOverflow(*child);
             if (!childOverflow.empty())
                 includeOverflow(bounds, childOverflow, childStyle.overflowX == Overflow::Visible, childStyle.overflowY == Overflow::Visible);
         } else if (Text* text = childRef.text()) {
@@ -143,7 +144,7 @@ bool isScrollContainer(Overflow overflow) {
 LayoutEngine::RowSizing LayoutEngine::resolveRowSizes(Element& node, const Style& parentStyle, const Rect& available,
                                                       std::vector<ChildLayout>& children, LayoutPass& pass) {
     const NodeSnapshot nodeState(node);
-    const auto nodeValid = [&] { return nodeState.valid(); };
+    const auto nodeLayoutValid = [&] { return nodeState.layoutValid(); };
     const float availableMain = available.w;
     const float availableCross = available.h;
     prepareMainAxis(children, FlexDirection::Row, availableMain);
@@ -165,7 +166,7 @@ LayoutEngine::RowSizing LayoutEngine::resolveRowSizes(Element& node, const Style
 
     sizing.allocations.reserve(lines.size());
     for (const auto& [begin, end] : lines) {
-        if (!nodeValid()) {
+        if (!nodeLayoutValid()) {
             sizing.valid = false;
             return sizing;
         }
@@ -177,7 +178,7 @@ LayoutEngine::RowSizing LayoutEngine::resolveRowSizes(Element& node, const Style
         }
     }
 
-    if (!nodeValid()) {
+    if (!nodeLayoutValid()) {
         sizing.valid = false;
         return sizing;
     }
@@ -200,7 +201,7 @@ LayoutEngine::RowSizing LayoutEngine::resolveRowSizes(Element& node, const Style
 MainAxisAllocation LayoutEngine::resolveColumnSizes(Element& node, const Style& parentStyle, const Rect& available,
                                                     std::vector<ChildLayout>& children, LayoutPass& pass) {
     const NodeSnapshot nodeState(node);
-    const auto nodeValid = [&] { return nodeState.valid(); };
+    const auto nodeLayoutValid = [&] { return nodeState.layoutValid(); };
     MainAxisAllocation allocation;
     const float availableMain = available.h;
     const float availableCross = available.w;
@@ -208,7 +209,7 @@ MainAxisAllocation LayoutEngine::resolveColumnSizes(Element& node, const Style& 
     initialSizes.reserve(children.size());
     for (const ChildLayout& child : children) initialSizes.push_back(child.measured);
     for (ChildLayout& child : children) {
-        if (!nodeValid()) {
+        if (!nodeLayoutValid()) {
             allocation.valid = false;
             return allocation;
         }
@@ -227,7 +228,7 @@ MainAxisAllocation LayoutEngine::resolveColumnSizes(Element& node, const Style& 
             else if (Text* text = child.node.text())
                 child.measured.y = text->intrinsicSize(pass.styleSheet(), child.style, pass.textMetrics(), {child.measured.x, std::nullopt}).y;
             childNode = childLifetime.get();
-            if (!nodeValid()
+            if (!nodeLayoutValid()
                 || !child.node.attachedTo(*nodeState.get())
                 || (childNode && (childNode->mLayoutInvalidationRevision != childRevision || childNode->mSurface != nodeState.surface))) {
                 allocation.valid = false;
@@ -237,7 +238,7 @@ MainAxisAllocation LayoutEngine::resolveColumnSizes(Element& node, const Style& 
         }
     }
     prepareMainAxis(children, FlexDirection::Column, availableMain);
-    if (!nodeValid()) {
+    if (!nodeLayoutValid()) {
         allocation.valid = false;
         return allocation;
     }
@@ -276,24 +277,24 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::layoutChildren(Element& pa
         if (child ? !child->isDisplayed(style) : style.display == DisplayMode::NoneValue) continue;
         Element* currentParent = parentState.get();
         child = childRef.element();
-        if (!parentState.valid()
+        if (!parentState.layoutValid()
             || !currentParent
             || !childRef.attachedTo(*currentParent)
             || (child && child->mLayoutInvalidationRevision != childRevision))
             continue;
         Vec2 measured;
         if (child) {
-            const bool cacheMatches = detail::ElementInternalAccess::layoutCache(*child).intrinsicValid
+            const bool cacheMatches = ElementInternalAccess::layoutCache(*child).intrinsicValid
                 && !child->mInvalidationReasons.intersects(kMeasureInvalidationReasons)
-                && detail::ElementInternalAccess::layoutCache(*child).layoutContext == contextKey;
-            measured = cacheMatches ? detail::ElementInternalAccess::layoutCache(*child).intrinsicSize : LayoutEngine::measure(*child, pass);
+                && ElementInternalAccess::layoutCache(*child).layoutContext == contextKey;
+            measured = cacheMatches ? ElementInternalAccess::layoutCache(*child).intrinsicSize : LayoutEngine::measure(*child, pass);
         } else if (PseudoElement* pseudoElement = childRef.pseudoElement) {
             measured = LayoutEngine::measurePseudoElement(*pseudoElement, style, std::nullopt, std::nullopt, pass);
         } else if (Text* text = childRef.text()) {
             measured = text->intrinsicSize(pass.styleSheet(), style, pass.textMetrics());
         }
         currentParent = parentState.get();
-        if (!parentState.valid() || !currentParent || !childRef.attachedTo(*currentParent)) continue;
+        if (!parentState.layoutValid() || !currentParent || !childRef.attachedTo(*currentParent)) continue;
         result.push_back({childRef, style, measured, measured});
     }
     return result;
@@ -302,7 +303,7 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::layoutChildren(Element& pa
 void LayoutEngine::arrangeNode(Element& node, LayoutPass& pass) {
     const LayoutContextKey contextKey = pass.contextKey();
     const bool cacheMatches =
-        detail::ElementInternalAccess::layoutCache(node).arrangeValid && detail::ElementInternalAccess::layoutCache(node).layoutContext == contextKey;
+        ElementInternalAccess::layoutCache(node).arrangeValid && ElementInternalAccess::layoutCache(node).layoutContext == contextKey;
     if (!node.mInvalidationReasons.intersects(kArrangeInvalidationReasons) && cacheMatches) {
         pass.recordSkipped();
         return;
@@ -397,8 +398,8 @@ void LayoutEngine::arrangeNode(Element& node, LayoutPass& pass) {
     overflow = scrollableOverflow(*current, parentStyle, scrollport, pass);
     metrics = scrollMetrics(parentStyle, scrollport, overflow);
     current->setScrollMetrics(metrics, overflow, scrollport);
-    detail::ElementInternalAccess::layoutCache(*current).layoutContext = contextKey;
-    detail::ElementInternalAccess::layoutCache(*current).arrangeValid = true;
+    ElementInternalAccess::layoutCache(*current).layoutContext = contextKey;
+    ElementInternalAccess::layoutCache(*current).arrangeValid = true;
     current->mInvalidationReasons.remove(LayoutInvalidationReason::Arrange);
 }
 
@@ -602,7 +603,7 @@ void LayoutEngine::arrangeRow(Element& node, const Style& parentStyle, const Rec
             ChildLayout& child = children[index];
             const LayoutChildRef& current = child.node;
             Element* currentNode = nodeState.get();
-            if (!nodeState.valid()) return;
+            if (!nodeState.layoutValid()) return;
             if (!current || !current.attachedTo(*currentNode) || !isDisplayed(child)) continue;
             LayoutChildRef next = index + 1 < end ? children[index + 1].node : LayoutChildRef();
             if (next && (!next.attachedTo(*currentNode) || !isDisplayed(children[index + 1]))) next = {};
@@ -648,7 +649,7 @@ void LayoutEngine::arrangeRow(Element& node, const Style& parentStyle, const Rec
             }
             arrangeNode(child.node, pass);
             currentNode = nodeState.get();
-            if (!nodeState.valid()) return;
+            if (!nodeState.layoutValid()) return;
         }
         lineTop = lineBottom - lineGap;
     }
@@ -675,7 +676,7 @@ void LayoutEngine::arrangeColumn(Element& node, const Style& parentStyle, const 
         ChildLayout& child = children[i];
         const LayoutChildRef& current = child.node;
         Element* currentNode = nodeState.get();
-        if (!nodeState.valid()) return;
+        if (!nodeState.layoutValid()) return;
         if (!current || !current.attachedTo(*currentNode) || !isDisplayed(child)) continue;
         LayoutChildRef previous = i ? children[i - 1].node : LayoutChildRef();
         if (previous && (!previous.attachedTo(*currentNode) || !isDisplayed(children[i - 1]))) previous = {};
@@ -713,7 +714,7 @@ void LayoutEngine::arrangeColumn(Element& node, const Style& parentStyle, const 
         setArrangedRect(child.node, translatedRect(child, relativeRect(child, base, content)));
         arrangeNode(child.node, pass);
         currentNode = nodeState.get();
-        if (!nodeState.valid()) return;
+        if (!nodeState.layoutValid()) return;
         y -= margin.bottom.fixedPixels() + (margin.bottom.isAuto() ? autoMargin : 0.f);
     }
 }
@@ -730,7 +731,7 @@ void LayoutEngine::arrangeGrid(Element& node, const Style&, const Rect& content,
     };
     for (ChildLayout& child : children) {
         Element* currentNode = nodeState.get();
-        if (!nodeState.valid()) return;
+        if (!nodeState.layoutValid()) return;
         if (!child.node || !child.node.attachedTo(*currentNode) || !isDisplayed(child)) continue;
 
         const GridArea area = child.style.gridArea.value_or(GridArea{});
@@ -756,7 +757,7 @@ void LayoutEngine::arrangeGrid(Element& node, const Style&, const Rect& content,
         setArrangedRect(child.node, translatedRect(child, relativeRect(child, item, content)));
         arrangeNode(child.node, pass);
         currentNode = nodeState.get();
-        if (!nodeState.valid()) return;
+        if (!nodeState.layoutValid()) return;
     }
 }
 
@@ -781,7 +782,7 @@ void LayoutEngine::arrangeNormal(Element& node, const Style& parentStyle, const 
             ChildLayout& child = children[index];
             const LayoutChildRef& childNode = child.node;
             Element* currentNode = nodeState.get();
-            if (!nodeState.valid()) return;
+            if (!nodeState.layoutValid()) return;
             if (!childNode || !childNode.attachedTo(*currentNode) || !isDisplayed(child)) continue;
 
             const MarginInsets& margin = child.style.margin;
@@ -812,7 +813,7 @@ void LayoutEngine::arrangeNormal(Element& node, const Style& parentStyle, const 
             setArrangedRect(child.node, translatedRect(child, relativeRect(child, base, content)));
             arrangeNode(child.node, pass);
             currentNode = nodeState.get();
-            if (!nodeState.valid()) return;
+            if (!nodeState.layoutValid()) return;
         }
         lineTop = lineBottom;
     }

@@ -10,11 +10,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include "eventcall.h"
-#include "html/label.h"
 
 namespace radia::ui {
-using detail::ElementCompilerAccess;
-
 namespace {
 std::optional<bool> parseBooleanValue(std::string_view value) {
     if (value.empty() || value == "true" || value == "1") return true;
@@ -35,38 +32,7 @@ ResourceElementDefinition htmlContentDefinition(HTMLTag tag) {
     }
     return result;
 }
-
 } // namespace
-
-void detail::ElementCompilerAccess::setStyleAttribute(Element& element, std::string name, std::string value) {
-    element.mStyleAttributes[std::move(name)] = std::move(value);
-    element.invalidateStyleTree(true, true);
-}
-
-void detail::ElementCompilerAccess::removeStyleAttribute(Element& element, std::string_view name) {
-    element.mStyleAttributes.erase(std::string(name));
-    element.invalidateStyleTree(true, true);
-}
-
-void detail::ElementCompilerAccess::setIdScopeRoot(Element& element) {
-    element.setIdScopeRoot(true);
-}
-
-void detail::ElementCompilerAccess::setState(Element& element, ElementState state, bool enabled) {
-    element.setState(state, enabled);
-}
-
-const std::string& detail::ElementCompilerAccess::labelTargetId(const HTMLLabelElement& label) {
-    return label.mTargetId;
-}
-
-Element* detail::ElementCompilerAccess::labelTarget(const HTMLLabelElement& label) {
-    return label.target();
-}
-
-void detail::ElementCompilerAccess::setFlowBreakBefore(Element& element, bool enabled) {
-    NodeAccess::setFlowBreakBefore(element, enabled);
-}
 
 bool producesState(const ResourceElementDefinition& definition, ElementState state) {
     return std::find(definition.producedStates.begin(), definition.producedStates.end(), state) != definition.producedStates.end();

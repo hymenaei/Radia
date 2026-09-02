@@ -12,9 +12,9 @@
 #include "dom/text.h"
 #include "eventcallinternal.h"
 #include "html/fragmentinternal.h"
-#include "style/pseudoelement.h"
 #include "layout/engine.h"
 #include "render/paintcontext.h"
+#include "style/pseudoelement.h"
 #include "style/style.h"
 #include "surface/surface.h"
 #include "system.h"
@@ -64,15 +64,11 @@ const Element* findElementInTree(const Element& element, std::string_view id) {
     return nullptr;
 }
 
-void indexElementsInScope(Element& element, std::map<std::string, Element*>& index) {
-    if (!element.id().empty()) index.emplace(element.id(), &element);
-    for (Element* child : element.children()) {
-        if (child->idScopeRoot()) {
-            if (!child->id().empty()) index.emplace(child->id(), child);
-        } else {
-            indexElementsInScope(*child, index);
-        }
-    }
+void indexElementsInScope(Element& element, ElementIdIndex& index) {
+    index.add(element);
+    for (Element* child : element.children())
+        if (child->idScopeRoot()) index.add(*child);
+        else indexElementsInScope(*child, index);
 }
 
 const std::string* styleAttribute(const Element& element, std::string_view name) {
@@ -129,6 +125,28 @@ using detail::NodeMutation;
 using detail::NodeRef;
 using html_detail::parseFragment;
 using html_detail::serializeChildren;
+
+namespace {
+FragmentPtr parseOrLiteralText(std::string html) {
+    FragmentPtr fragment = parseFragment(html);
+    if (!fragment) {
+        fragment = std::make_unique<Fragment>();
+        fragment->append(std::make_unique<Text>(std::move(html)));
+    }
+    return fragment;
+}
+
+FragmentPtr parseResolvedHTML(std::string html) {
+    FragmentPtr fragment = parseOrLiteralText(std::move(html));
+    if (fragment && !fragment->firstChild()) fragment->append(std::make_unique<Text>(std::string()));
+    return fragment;
+}
+
+void replaceTextContent(Element& element, std::string text) {
+    if (text.empty()) NodeMutation::replaceChildren(element);
+    else NodeMutation::replaceChildren(element, std::make_unique<Text>(std::move(text)));
+}
+} // namespace
 
 Element::Element(std::string_view elementName)
     : Node(NodeType::Element), mElementName(elementName), mPrivate(std::make_unique<ElementPrivateData>()) {}
@@ -465,14 +483,8 @@ std::string Element::innerHTML() const {
 }
 
 Element& Element::innerHTML(std::string html) {
-    FragmentPtr fragment = parseFragment(html);
-    if (!fragment) {
-        fragment = std::make_unique<Fragment>();
-        fragment->append(std::make_unique<Text>(html));
-    }
     mLocalizedContent.reset();
-    clearDirectTextContent();
-    append(std::move(fragment));
+    NodeMutation::replaceChildren(*this, parseOrLiteralText(std::move(html)));
     return *this;
 }
 
@@ -513,21 +525,19 @@ Element& Element::setDisplayNone(bool displayNone) {
 
 Element& Element::textContent(std::string text) {
     mLocalizedContent.reset();
-    clearDirectTextContent();
-    if (!text.empty()) appendText(*this, std::move(text));
+    if (text.empty()) NodeMutation::replaceChildren(*this);
+    else NodeMutation::replaceChildren(*this, std::make_unique<Text>(std::move(text)));
     return *this;
 }
 
 Element& Element::textContent(LocalizedText text) {
     mLocalizedContent = LocalizedContent{std::move(text), LocalizedContentMode::Literal};
-    clearDirectTextContent();
     rebuildTextContent();
     return *this;
 }
 
 Element& Element::innerHTML(LocalizedText text) {
     mLocalizedContent = LocalizedContent{std::move(text), LocalizedContentMode::HTML};
-    clearDirectTextContent();
     rebuildTextContent();
     return *this;
 }
@@ -596,22 +606,12 @@ void Element::dispatchEvent(Event& event) {
     event.setCurrentTarget(nullptr);
 }
 
-void Element::clearDirectTextContent() {
-    for (NodeRef current(firstChild()); current;) {
-        Node* currentNode = current.get();
-        NodeRef next(currentNode->nextSibling());
-        removeNode(*currentNode);
-        current.set(next.get());
-    }
-}
-
 void Element::setSurface(Surface* surface) {
     if (mSurface == surface) return;
     if (mSurface) mSurface->invalidateStyleCache();
     ElementInternalAccess::layoutCache(*this) = {};
     mSurface = surface;
-    if (surface) ElementInternalAccess::mountLifetime(*this) = std::make_shared<char>(0);
-    else ElementInternalAccess::mountLifetime(*this).reset();
+    ++ElementInternalAccess::mountEpoch(*this).value;
     const Element* expectedParent = mParent;
     const ElementRef<Element> self(this);
     std::vector<ElementRef<Element>> children;
@@ -634,29 +634,26 @@ void Element::setSurface(Surface* surface) {
 }
 
 void Element::rebuildTextContent() {
-    const bool previousBuilding = mBuildingTextContent;
-    const bool previousSuppress = mSuppressTextSlots;
-    mBuildingTextContent = true;
-    mSuppressTextSlots = true;
     if (mLocalizedContent) {
         if (const System* currentSystem = system())
-            if (mLocalizedContent->mode == LocalizedContentMode::HTML) rebuildResolvedHTML(currentSystem->resolveHTML(mLocalizedContent->text));
-            else appendText(*this, currentSystem->resolveHTML(mLocalizedContent->text));
-        else appendText(*this, mLocalizedContent->text.key());
+            if (mLocalizedContent->mode == LocalizedContentMode::HTML) replaceResolvedHTML(currentSystem->resolveHTML(mLocalizedContent->text));
+            else replaceTextContent(*this, currentSystem->resolveHTML(mLocalizedContent->text));
+        else replaceTextContent(*this, mLocalizedContent->text.key());
     }
-    mSuppressTextSlots = previousSuppress;
-    mBuildingTextContent = previousBuilding;
 }
 
 void Element::rebuildResolvedHTML(std::string html) {
-    FragmentPtr fragment = parseFragment(html);
-    if (!fragment) {
-        fragment = std::make_unique<Fragment>();
-        fragment->append(std::make_unique<Text>(std::move(html)));
-    } else if (!fragment->firstChild()) {
-        fragment->append(std::make_unique<Text>(std::string()));
-    }
-    append(std::move(fragment));
+    append(parseResolvedHTML(std::move(html)));
+}
+
+void Element::replaceResolvedHTML(std::string html) {
+    const ElementRef<Element> self(this);
+    mTextContentSlots.clear();
+    const bool previousSuppress = mSuppressTextSlots;
+    mSuppressTextSlots = true;
+    NodeMutation::replaceChildren(*this, parseResolvedHTML(std::move(html)));
+    if (!self) return;
+    mSuppressTextSlots = previousSuppress;
 }
 
 bool Element::refreshTextContentSlots() {
@@ -672,21 +669,15 @@ bool Element::refreshTextContentSlots() {
 
         const bool flowBreakBefore = NodeAccess::flowBreakBefore(*(*first));
         const std::string html = system() ? system()->resolveHTML(slot.text) : slot.text.key();
-        FragmentPtr replacement = parseFragment(html);
-        if (!replacement) {
-            replacement = std::make_unique<Fragment>();
-            replacement->append(std::make_unique<Text>(html));
-        } else if (!replacement->firstChild()) {
-            replacement->append(std::make_unique<Text>(std::string()));
-        }
+        FragmentPtr replacement = parseResolvedHTML(html);
         NodeRef replacementFirst(replacement->firstChild());
         NodeRef replacementLast(replacement->lastChild());
         NodeAccess::setFlowBreakBefore(*replacementFirst.get(), flowBreakBefore);
         const bool previousSuppress = mSuppressTextSlots;
         mSuppressTextSlots = true;
         replaceRange(*slot.first, *slot.last, std::move(replacement));
-        mSuppressTextSlots = previousSuppress;
         if (!self) return true;
+        mSuppressTextSlots = previousSuppress;
         slot.first = replacementFirst.get();
         slot.last = replacementLast.get();
     }
@@ -887,10 +878,8 @@ Vec2 Element::intrinsicSize(const StyleSheet&, const Style&, const TextMetrics&,
 }
 
 void Element::onLocaleChanged(const System& system) {
-    if (mLocalizedContent) {
-        clearDirectTextContent();
-        rebuildTextContent();
-    } else refreshTextContentSlots();
+    if (mLocalizedContent) rebuildTextContent();
+    else refreshTextContentSlots();
 }
 
 void Element::paint(PaintContext& context, const Style& style, float) const {

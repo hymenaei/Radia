@@ -29,12 +29,12 @@
 #include "text/metrics.h"
 
 namespace {
+using radia::ui::authoredEventCall;
 using radia::ui::DiagnosticResult;
 using radia::ui::Document;
 using radia::ui::Element;
 using radia::ui::ElementRef;
 using radia::ui::Event;
-using radia::ui::authoredEventCall;
 using radia::ui::fixedTextMetrics;
 using radia::ui::HTMLButtonElement;
 using radia::ui::HTMLFloaterElement;
@@ -247,11 +247,15 @@ protected:
                                             "<button id=\"press\" onClick=\"press()\"></button>"
                                             "<input type=\"checkbox\" switch=\"true\" id=\"changed\" checked=\"false\" onChange=\"changed(event)\">"
                                             "</panel>";
-        constexpr char kPanelWithoutStatus[] =
-            "<panel>"
-            "<button id=\"press\" onClick=\"press()\"></button>"
-            "<input type=\"checkbox\" switch=\"true\" id=\"changed\" checked=\"false\" onChange=\"changed(event)\">"
-            "</panel>";
+        constexpr char kPanelWithoutStatus[] = "<panel>"
+                                               "<button id=\"press\" onClick=\"press()\"></button>"
+                                               "<input type=\"checkbox\" switch=\"true\" id=\"changed\" "
+                                               "checked=\"false\" onChange=\"changed(event)\">"
+                                               "</panel>";
+        constexpr char kDuplicateControllerView[] = "<floater>"
+                                                    "<head><title>duplicate</title><close></close></head>"
+                                                    "<body><p id=\"status\"></p><p id=\"status\"></p></body>"
+                                                    "</floater>";
 
         ResourceSnapshot resources;
         resources.add("localization.yaml", kLocalization);
@@ -260,6 +264,7 @@ protected:
         resources.add("two.html", includeStatus ? kViewWithStatus : kViewWithoutStatus);
         resources.add("empty.html", "<floater><head><title>empty</title><close></close></head><body></body></floater>");
         resources.add("panel.html", includeStatus ? kPanelWithStatus : kPanelWithoutStatus);
+        resources.add("duplicate.html", kDuplicateControllerView);
         return SkinCompiler().prepare(std::move(resources));
     }
 
@@ -288,6 +293,12 @@ protected:
     bool registerMismatched() {
         return manager.registerDefinition(
             "mismatched", "empty.html", [](System& system, Document& document) { return std::make_unique<MismatchedController>(system, document); });
+    }
+
+    bool registerDuplicate() {
+        return manager.registerDefinition("duplicate", "duplicate.html", [this](System& system, Document& document) {
+            return std::make_unique<Controller>(system, document, controllerState);
+        });
     }
 
     std::vector<HTMLFloaterElement*> liveFloaters() const {
@@ -593,6 +604,16 @@ TEST_F(ComponentManagerTest, RejectsEventHandlerRegisteredForAnotherControllerTy
     EXPECT_FALSE(opened.ok());
     ASSERT_FALSE(opened.errors.empty());
     EXPECT_EQ(opened.errors.front().code, "binding.event.registration_invalid");
+    EXPECT_TRUE(host.mounted.empty());
+}
+
+TEST_F(ComponentManagerTest, RejectsAmbiguousControllerElementId) {
+    ASSERT_TRUE(registerDuplicate());
+    const auto opened = manager.open("duplicate");
+
+    EXPECT_FALSE(opened.ok());
+    ASSERT_FALSE(opened.errors.empty());
+    EXPECT_EQ(opened.errors.front().code, "controller.element.ambiguous");
     EXPECT_TRUE(host.mounted.empty());
 }
 

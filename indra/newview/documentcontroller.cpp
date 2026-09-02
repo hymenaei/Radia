@@ -23,6 +23,7 @@ using radia::ui::PreparedBinding;
 using radia::ui::PreparedBindingResult;
 using radia::ui::SettingResolver;
 using radia::ui::System;
+using radia::ui::detail::ElementIdIndex;
 using radia::ui::detail::ElementInternalAccess;
 using radia::ui::detail::indexElementsInScope;
 using radia::ui::detail::makeEventRegistration;
@@ -60,9 +61,16 @@ bool DocumentController::PreparedMountResult::ok() const {
 DocumentController::~DocumentController() = default;
 
 Element* DocumentController::getElementById(std::string_view id) {
+    if (id.empty()) return nullptr;
     const std::string key(id);
     mImpl->elementIds.emplace(key);
-    return mDocument.getElementById(key);
+    Element* root = mDocument.documentElement();
+    if (!root) return nullptr;
+    ElementIdIndex index;
+    indexElementsInScope(*root, index);
+    if (index.ambiguous.find(key) != index.ambiguous.end()) return nullptr;
+    const auto found = index.first.find(key);
+    return found == index.first.end() ? nullptr : found->second;
 }
 
 LocalizedText DocumentController::t(std::string localizationKey, LocalizationArguments arguments) const {
@@ -85,12 +93,13 @@ DocumentController::PreparedMountResult DocumentController::prepare(SettingResol
     result.append(std::move(binding));
     if (!bindingOk) return result;
 
-    std::map<std::string, Element*> index;
+    ElementIdIndex index;
     indexElementsInScope(*root, index);
-    for (const std::string& id : mImpl->elementIds) {
-        const auto indexed = index.find(id);
-        if (indexed == index.end()) result.warning("controller.element.missing", "Controller Element ID is not present in this skin: " + id + ".");
-    }
+    for (const std::string& id : mImpl->elementIds)
+        if (index.ambiguous.find(id) != index.ambiguous.end())
+            result.error("controller.element.ambiguous", "Controller Element ID is not unique in this skin: " + id + ".");
+        else if (index.first.find(id) == index.first.end())
+            result.warning("controller.element.missing", "Controller Element ID is not present in this skin: " + id + ".");
     if (result.hasErrors()) return result;
 
     result.mount.mState = std::make_unique<PreparedMount::State>();

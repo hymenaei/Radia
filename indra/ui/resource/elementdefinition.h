@@ -28,8 +28,6 @@
 #include "types.h"
 
 namespace radia::ui {
-class HTMLLabelElement;
-
 class ResourceBuildContext {
 public:
     ResourceBuildContext(const LocalizationCatalog& localization, std::string locale) : mLocalization(localization), mLocale(std::move(locale)) {}
@@ -216,19 +214,6 @@ ElementSelectorMetadata inspectElementSelector(HTMLTag tag, std::string_view pse
 bool readElementAttribute(const ElementBuildInput& input, std::string_view name, std::string& value);
 bool readElementBoolean(const ElementBuildInput& input, std::string_view name, bool& value, ElementBuildContext& context);
 bool producesState(const ResourceElementDefinition& element, ElementState state);
-namespace detail {
-class ElementCompilerAccess {
-public:
-    static void setStyleAttribute(Element& element, std::string name, std::string value);
-    static void removeStyleAttribute(Element& element, std::string_view name);
-    static void setIdScopeRoot(Element& element);
-    static void setState(Element& element, ElementState state, bool enabled);
-    static const std::string& labelTargetId(const HTMLLabelElement& label);
-    static Element* labelTarget(const HTMLLabelElement& label);
-    static void setFlowBreakBefore(Element& element, bool enabled);
-};
-
-} // namespace detail
 
 struct ResolvedLayoutText {
     std::string literal;

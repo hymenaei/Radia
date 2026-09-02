@@ -11,6 +11,9 @@
 #include "eventcall.h"
 
 namespace radia::ui {
+using detail::ElementInternalAccess;
+using detail::MountEpoch;
+
 Binding::~Binding() {
     clearEventListeners();
 }
@@ -58,7 +61,7 @@ Binding PreparedBinding::commit() {
 }
 
 Binder::Binder(Element& root, SettingResolver* settingResolver)
-    : mRoot(&root), mRootLifetime(detail::ElementInternalAccess::lifetime(root)), mSettingResolver(settingResolver) {}
+    : mRoot(&root), mRootLifetime(ElementInternalAccess::lifetime(root)), mSettingResolver(settingResolver) {}
 
 void Binder::event(EventHandlerRegistration&& registration) {
     const bool valid = registration.valid();
@@ -99,7 +102,7 @@ void collectEventCalls(Element& element, std::map<std::string, std::vector<Binde
         const EventCall* eventCall = authoredEventCall(element, type);
         if (!eventCall) continue;
         const std::string& name = eventCall->name();
-        declarations[name].push_back({&element, detail::ElementInternalAccess::lifetime(element), element.parentNode(), type, *eventCall});
+        declarations[name].push_back({&element, ElementInternalAccess::lifetime(element), element.parentNode(), type, *eventCall});
     }
     for (Element* child : element.children())
         if (!child->idScopeRoot()) collectEventCalls(*child, declarations);
@@ -121,7 +124,7 @@ void Binder::validate(Element& root, DiagnosticResult& result) {
         const std::optional<ValueBindingRequest> request = input->valueBindingRequest();
         if (!request) continue;
         input->prepareValueBinding(*this);
-        mBoundInputs.push_back({input, detail::ElementInternalAccess::lifetime(*input), input->parentNode(), request->settingName});
+        mBoundInputs.push_back({input, ElementInternalAccess::lifetime(*input), input->parentNode(), request->settingName});
     }
 
     mEventDeclarations.clear();
@@ -209,23 +212,27 @@ void Binder::commit(Element&, Binding& binding) {
         PendingEventHandler& pending = *found->second;
         for (const EventDeclaration& declaration : declarations)
             if (!pending.argumentError || !pending.argumentError(declaration.call)) {
-                const std::shared_ptr<char> mountLifetime = detail::ElementInternalAccess::mountLifetime(*declaration.element);
-                const std::weak_ptr<char> mountLifetimeWeak = mountLifetime;
-                const bool hasMountLifetime = static_cast<bool>(mountLifetime);
-                EventHandler listener([invoke = pending.invoke, call = declaration.call, mountLifetimeWeak, hasMountLifetime](Event& event) mutable {
-                    if (hasMountLifetime && mountLifetimeWeak.expired()) return;
-                    invoke(event, call);
-                });
+                const ElementRef<Element> declarationRef(declaration.element);
+                const MountEpoch declarationMountEpoch = ElementInternalAccess::mountEpoch(*declaration.element);
+                EventHandler listener(
+                    [invoke = pending.invoke, call = declaration.call, declarationRef, declarationMountEpoch](Event& event) mutable {
+                        Element* element = declarationRef.get();
+                        if (!element || ElementInternalAccess::mountEpoch(*element) != declarationMountEpoch) return;
+                        invoke(event, call);
+                    });
                 declaration.element->addEventListener(declaration.type, listener);
-                binding.mEventAttachments.push_back({declaration.element, detail::ElementInternalAccess::lifetime(*declaration.element),
-                                                     declaration.type, std::move(listener), false});
+                binding.mEventAttachments.push_back(
+                    {declaration.element, ElementInternalAccess::lifetime(*declaration.element), declaration.type, std::move(listener), false});
             }
     }
 }
 
 bool Binder::validForCommit() const {
     if (!mRoot || mRootLifetime.expired() || mRoot->parentNode() != mRootParent) return false;
-    if (mRootWasMounted && mRootMountLifetime.lock() != detail::ElementInternalAccess::mountLifetime(*mRoot)) return false;
+    const MountEpoch currentMountEpoch = ElementInternalAccess::mountEpoch(*mRoot);
+    const bool firstMountAfterPrepare =
+        !mRootWasMounted && ElementInternalAccess::isMounted(*mRoot) && currentMountEpoch.value == mRootMountEpoch.value + 1;
+    if (currentMountEpoch != mRootMountEpoch && !firstMountAfterPrepare) return false;
 
     const auto isInRoot = [this](const Element& element) {
         for (const Node* current = &element; current; current = current->parentNode())
@@ -266,8 +273,8 @@ PreparedBindingResult Binder::prepare() {
         return result;
     }
     mRootParent = mRoot->parentNode();
-    mRootMountLifetime = detail::ElementInternalAccess::mountLifetime(*mRoot);
-    mRootWasMounted = static_cast<bool>(mRootMountLifetime.lock());
+    mRootWasMounted = ElementInternalAccess::isMounted(*mRoot);
+    mRootMountEpoch = ElementInternalAccess::mountEpoch(*mRoot);
     validate(*mRoot, result);
     if (!result.hasErrors()) {
         auto binder = std::unique_ptr<Binder>(new Binder(std::move(*this)));

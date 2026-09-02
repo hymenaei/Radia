@@ -13,7 +13,6 @@
 #include "style/stylepass.h"
 #include "surface/floaterresize.h"
 #include "surface/surface.h"
-#include "surface/surfaceinternal.h"
 #include "system.h"
 
 namespace radia::ui {
@@ -66,14 +65,11 @@ Vec2 consumeWheelDelta(Element& element, const Style& style, const Vec2& delta) 
 }
 
 void collectFocusable(Element& node, std::vector<ElementRef<Element>>& result, StylePass& styles) {
-    const Style& style = styles.style(node);
-    if (!node.isVisible(style) || node.disabled()) return;
-    const ElementRef<Element> lifetime(&node);
-    const Element* parent = node.parentElement();
-    const bool focusable = node.focusable();
-    Element* current = lifetime.get();
-    if (!current || current->parentElement() != parent || !current->isVisible(style) || current->disabled()) return;
-    if (focusable) result.emplace_back(current);
+    const ElementVisit observation(node);
+    const Style style = styles.style(node);
+    Element* current = observation.get();
+    if (!current || !observation.layoutValid() || !observation.styleValid() || !current->isVisible(style) || current->disabled()) return;
+    if (current->focusable()) result.emplace_back(current);
     const StylePass::ChildSnapshot children = styles.sourceChildren(*current);
     for (const ElementRef<Element>& childRef : *children)
         if (Element* child = childRef.get(); child && child->parentElement() == current) collectFocusable(*child, result, styles);
@@ -82,56 +78,35 @@ void collectFocusable(Element& node, std::vector<ElementRef<Element>>& result, S
 
 Element* Surface::hitTestNode(Element& node, const Vec2& point, const Rect& inheritedClip, StylePass& styles) const {
     if (!inheritedClip.contains(point) || !isRootedInSurface(&node)) return nullptr;
-    const ElementRef<Element> lifetime(&node);
-    const Element* originalParent = node.parentElement();
-    const std::uint64_t originalStyleRevision = node.mStyleRevision;
-    const std::uint64_t originalLayoutRevision = node.mLayoutInvalidationRevision;
-    const Style& style = styles.style(node);
+    const ElementObservation observation = observe(node);
+    const Style style = styles.style(node);
     if (!node.isVisible(style)) return nullptr;
-    Element* styledNode = lifetime.get();
-    if (!styledNode
-        || !isRootedInSurface(styledNode)
-        || !styledNode->isVisible(style)
-        || styledNode->parentElement() != originalParent
-        || styledNode->mStyleRevision != originalStyleRevision
-        || styledNode->mLayoutInvalidationRevision != originalLayoutRevision)
+    Element* current = observation.get();
+    if (!current || !observation.layoutValid() || !observation.styleValid() || !isRootedInSurface(current) || !current->isVisible(style))
         return nullptr;
     const bool clipsX = style.overflowX != Overflow::Visible;
     const bool clipsY = style.overflowY != Overflow::Visible;
     const ClipAxes clipAxes = (clipsX ? ClipAxes::X : ClipAxes::NoAxes) | (clipsY ? ClipAxes::Y : ClipAxes::NoAxes);
     const bool clipsChildren = clipAxes != ClipAxes::NoAxes;
-    const Vec2 scrollTranslation = scrollContentTranslation(layoutDirection(), {node.scrollLeft(), node.scrollTop()});
+    const Vec2 scrollTranslation = scrollContentTranslation(layoutDirection(), {current->scrollLeft(), current->scrollTop()});
     const Vec2 scrollOffset = clipsChildren ? Vec2{-scrollTranslation.x, -scrollTranslation.y} : Vec2{};
-    Rect childClip = clipsChildren ? clipToAxes(inheritedClip, ElementInternalAccess::scrollport(node), clipAxes) : inheritedClip;
+    Rect childClip = clipsChildren ? clipToAxes(inheritedClip, ElementInternalAccess::scrollport(*current), clipAxes) : inheritedClip;
     if (clipsChildren) childClip = offsetRect(childClip, scrollOffset);
     const Vec2 childPoint = point + scrollOffset;
-    const StylePass::ChildSnapshot children = styles.sourceChildren(node);
+    const StylePass::ChildSnapshot children = styles.sourceChildren(*current);
     Element* hitResult = nullptr;
     for (auto child = children->rbegin(); child != children->rend(); ++child)
         if (Element* childElement = child->get())
-            if (childElement->parentElement() == &node)
+            if (childElement->parentElement() == current)
                 if (Element* hit = hitTestNode(*childElement, childPoint, childClip, styles)) {
                     hitResult = hit;
                     break;
                 }
-    Element* current = lifetime.get();
-    if (!current
-        || !isRootedInSurface(current)
-        || !current->isVisible(style)
-        || current->parentElement() != originalParent
-        || current->mStyleRevision != originalStyleRevision
-        || current->mLayoutInvalidationRevision != originalLayoutRevision)
+    current = observation.get();
+    if (!current || !observation.layoutValid() || !observation.styleValid() || !isRootedInSurface(current) || !current->isVisible(style))
         return nullptr;
     if (hitResult) return hitResult;
     if (!current->rect().contains(point) || !acceptsPointerEvents(*current, style)) return nullptr;
-    current = lifetime.get();
-    if (!current
-        || !isRootedInSurface(current)
-        || !current->isVisible(style)
-        || current->parentElement() != originalParent
-        || current->mStyleRevision != originalStyleRevision
-        || current->mLayoutInvalidationRevision != originalLayoutRevision)
-        return nullptr;
     return current;
 }
 
@@ -246,49 +221,36 @@ Element* Surface::hitTestAt(const Vec2& point) {
 std::optional<Surface::ScrollbarTarget> Surface::hitTestScrollbarNode(Element& node, const Vec2& point, const Rect& inheritedClip,
                                                                       StylePass& styles) const {
     if (!inheritedClip.contains(point) || !isRootedInSurface(&node)) return std::nullopt;
-    const ElementRef<Element> lifetime(&node);
-    const Element* originalParent = node.parentElement();
-    const std::uint64_t originalStyleRevision = node.mStyleRevision;
-    const std::uint64_t originalLayoutRevision = node.mLayoutInvalidationRevision;
-    const Style& style = styles.style(node);
+    const ElementObservation observation = observe(node);
+    const Style style = styles.style(node);
     if (!node.isVisible(style)) return std::nullopt;
-    Element* styledNode = lifetime.get();
-    if (!styledNode
-        || !isRootedInSurface(styledNode)
-        || !styledNode->isVisible(style)
-        || styledNode->parentElement() != originalParent
-        || styledNode->mStyleRevision != originalStyleRevision
-        || styledNode->mLayoutInvalidationRevision != originalLayoutRevision)
+    Element* current = observation.get();
+    if (!current || !observation.layoutValid() || !observation.styleValid() || !isRootedInSurface(current) || !current->isVisible(style))
         return std::nullopt;
 
     if (style.pointerEvents != PointerEvents::PassThrough) {
-        const ScrollGeometry geometry = scrollbarGeometry(*styledNode, style);
+        const ScrollGeometry geometry = scrollbarGeometry(*current, style);
         const ScrollbarHit hit = hitTestScrollbar(geometry, point);
-        if (hit.valid()) return ScrollbarTarget{styledNode, geometry, hit};
+        if (hit.valid()) return ScrollbarTarget{current, geometry, hit};
     }
 
     const bool clipsX = style.overflowX != Overflow::Visible;
     const bool clipsY = style.overflowY != Overflow::Visible;
     const ClipAxes clipAxes = (clipsX ? ClipAxes::X : ClipAxes::NoAxes) | (clipsY ? ClipAxes::Y : ClipAxes::NoAxes);
     const bool clipsChildren = clipAxes != ClipAxes::NoAxes;
-    const Vec2 scrollTranslation = scrollContentTranslation(layoutDirection(), {node.scrollLeft(), node.scrollTop()});
+    const Vec2 scrollTranslation = scrollContentTranslation(layoutDirection(), {current->scrollLeft(), current->scrollTop()});
     const Vec2 scrollOffset = clipsChildren ? Vec2{-scrollTranslation.x, -scrollTranslation.y} : Vec2{};
-    Rect childClip = clipsChildren ? clipToAxes(inheritedClip, ElementInternalAccess::scrollport(node), clipAxes) : inheritedClip;
+    Rect childClip = clipsChildren ? clipToAxes(inheritedClip, ElementInternalAccess::scrollport(*current), clipAxes) : inheritedClip;
     if (clipsChildren) childClip = offsetRect(childClip, scrollOffset);
     const Vec2 childPoint = point + scrollOffset;
-    const StylePass::ChildSnapshot children = styles.sourceChildren(node);
+    const StylePass::ChildSnapshot children = styles.sourceChildren(*current);
     for (auto child = children->rbegin(); child != children->rend(); ++child)
         if (Element* childElement = child->get())
-            if (childElement->parentElement() == &node)
+            if (childElement->parentElement() == current)
                 if (std::optional<ScrollbarTarget> hit = hitTestScrollbarNode(*childElement, childPoint, childClip, styles)) return hit;
 
-    Element* current = lifetime.get();
-    if (!current
-        || !isRootedInSurface(current)
-        || !current->isVisible(style)
-        || current->parentElement() != originalParent
-        || current->mStyleRevision != originalStyleRevision
-        || current->mLayoutInvalidationRevision != originalLayoutRevision)
+    current = observation.get();
+    if (!current || !observation.layoutValid() || !observation.styleValid() || !isRootedInSurface(current) || !current->isVisible(style))
         return std::nullopt;
     return std::nullopt;
 }
@@ -589,19 +551,12 @@ CursorStyle Surface::cursor() const {
     if (scrollbar) return CursorStyle::Default;
     const Element* element = mCaptured ? mCaptured : mHovered;
     if (!element) return CursorStyle::Default;
-    const ElementRef<const Element> lifetime(element);
-    const Element* originalParent = element->parentElement();
-    const std::uint64_t originalStyleRevision = element->mStyleRevision;
-    const std::uint64_t originalLayoutRevision = element->mLayoutInvalidationRevision;
+    const ConstElementObservation observation = observe(*element);
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
-    const Style& style = styles.style(*element);
-    const Element* current = lifetime.get();
-    if (!current
-        || !isRootedInSurface(current)
-        || current->parentElement() != originalParent
-        || current->mStyleRevision != originalStyleRevision
-        || current->mLayoutInvalidationRevision != originalLayoutRevision)
+    const Style style = styles.style(*element);
+    const Element* current = observation.get();
+    if (!current || !observation.layoutValid() || !observation.styleValid() || !isRootedInSurface(current) || !current->isVisible(style))
         return CursorStyle::Default;
     const CursorStyle cursor = style.cursor;
     return cursor == CursorStyle::Auto ? CursorStyle::Default : cursor;
@@ -716,7 +671,7 @@ bool Surface::pointerDown(const PointerEvent& event) {
     hit = hitRef.get();
     const bool hitEnabledBeforeInteraction = isEnabledInTree(hit);
     for (Element* candidate = hitEnabledBeforeInteraction && !defaultPrevented ? hit : nullptr; candidate;) {
-        const ElementSnapshot candidateSnapshot = snapshot(*candidate);
+        const ElementObservation candidateObservation = observe(*candidate);
         ElementRef<Element> parentRef(candidate->parentElement());
         if (!isEnabledInTree(candidate)) {
             candidate = parentRef.get();
@@ -726,9 +681,10 @@ bool Surface::pointerDown(const PointerEvent& event) {
             candidate = parentRef.get();
             continue;
         }
-        candidate = candidateSnapshot.lifetime.get();
+        candidate = candidateObservation.get();
         if (!candidate
-            || !snapshotValid(candidateSnapshot)
+            || !candidateObservation.layoutValid()
+            || !candidateObservation.styleValid()
             || candidate->parentElement() != parentRef.get()
             || !isEnabledInTree(candidate)
             || !isRootedInSurface(candidate))
@@ -739,10 +695,10 @@ bool Surface::pointerDown(const PointerEvent& event) {
     }
     hit = hitRef.get();
     const bool hitEnabledAfterInteraction = isEnabledInTree(hit);
-    const ElementSnapshot hitSnapshot = hit ? snapshot(*hit) : ElementSnapshot{};
+    const ElementObservation hitObservation = hit ? observe(*hit) : ElementObservation{};
     const bool focusable = hitEnabledAfterInteraction && !defaultPrevented && hit->focusable();
-    hit = hitSnapshot.lifetime.get();
-    if (hit && (!snapshotValid(hitSnapshot) || !isRootedInSurface(hit))) return true;
+    hit = hitObservation.get();
+    if (hit && (!hitObservation.layoutValid() || !hitObservation.styleValid() || !isRootedInSurface(hit))) return true;
     setFocused(focusable ? hit : nullptr, false);
     mPressed = hitEnabledAfterInteraction && !defaultPrevented ? hit : nullptr;
     mPressedClickCount = mPressed ? event.clickCount : 0;
@@ -839,7 +795,7 @@ bool Surface::scroll(const WheelEvent& event) {
         for (Element* candidate = hit; candidate;) {
             ElementRef<Element> candidateRef(candidate);
             ElementRef<Element> parentRef(candidate ? candidate->parentElement() : nullptr);
-            const ElementSnapshot candidateSnapshot = candidate ? snapshot(*candidate) : ElementSnapshot{};
+            const ElementObservation candidateObservation = candidate ? observe(*candidate) : ElementObservation{};
             if (!candidateRef || !isEnabledInTree(candidate) || !isRootedInSurface(candidate)) break;
 
             WheelEvent defaultEvent = event;
@@ -850,7 +806,12 @@ bool Surface::scroll(const WheelEvent& event) {
                 break;
             }
             candidate = candidateRef.get();
-            if (!candidate || !snapshotValid(candidateSnapshot) || !isEnabledInTree(candidate) || !isRootedInSurface(candidate)) break;
+            if (!candidate
+                || !candidateObservation.layoutValid()
+                || !candidateObservation.styleValid()
+                || !isEnabledInTree(candidate)
+                || !isRootedInSurface(candidate))
+                break;
 
             const Style style = styles.style(*candidate);
             const Vec2 consumed = consumeWheelDelta(*candidate, style, remaining);

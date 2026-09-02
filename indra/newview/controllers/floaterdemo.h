@@ -16,7 +16,7 @@ class Runtime;
 
 class FloaterDemo final : public DocumentController {
 public:
-    FloaterDemo(System& system, Document& document, std::function<void()> requestSkinReload = {});
+    FloaterDemo(System& system, Document* document, std::function<void()> requestSkinReload = {});
 
     void refreshLocaleControls();
     void onReloadSucceeded() override;

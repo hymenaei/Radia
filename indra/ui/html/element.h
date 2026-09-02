@@ -10,7 +10,10 @@
 #include "dom/element.h"
 
 namespace radia::ui {
-namespace detail { class HTMLElementFactory; }
+namespace detail {
+class ElementDefinitions;
+class HTMLElementFactory;
+}
 
 namespace html_detail { class FragmentParser; }
 

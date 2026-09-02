@@ -25,6 +25,17 @@ void NodeMutation::validateChild(const Node& parent, const Node* child) {
     for (const Node* current = &parent; current; current = current->parentNode()) llassert_always(current != child);
 }
 
+void NodeMutation::adopt(const Document& document, Node& node) {
+    adopt(node, NodeAccess::documentIdentity(document));
+}
+
+void NodeMutation::adopt(Node& node, const std::shared_ptr<DocumentIdentity>& identity) {
+    llassert_always(node.nodeType() != NodeType::Document);
+    llassert_always(!node.parentNode());
+    if (Element* element = node.asElement()) llassert_always(!element->mSurface);
+    assignDocumentIdentity(node, identity);
+}
+
 void NodeMutation::validateDetachedSubtree(const Node& node) {
     if (const Element* element = node.asElement()) {
         llassert_always(!element->mSurface);
@@ -111,6 +122,17 @@ void NodeMutation::detachElementChild(Element& parent, Node& node, Surface* surf
     if (childLifetime) child->setSurface(nullptr);
 }
 
+void NodeMutation::detachOrphanedChild(Node& node, Surface* surface) {
+    NodeAccess::setParent(node, nullptr);
+    Element* child = node.asElement();
+    if (!child) return;
+
+    const ElementRef<Element> childLifetime(child);
+    if (childLifetime) child->notifyTreeDetached();
+    if (surface && childLifetime) surface->elementBecameUnavailable(*child);
+    if (childLifetime) child->setSurface(nullptr);
+}
+
 void NodeMutation::attachElementChild(Element& parent, Node& node) {
     NodeAccess::setParent(node, &parent);
 }
@@ -122,17 +144,18 @@ void NodeMutation::detachAll(Element& parent) {
     NodeOwners children = std::move(parent.mChildren);
     parent.mChildren.clear();
     ++parent.mChildSnapshotRevision;
+    ++parent.mChildTopologyRevision;
     if (surface) surface->invalidateOrderingCache();
+    parent.invalidateMeasure();
     for (NodePtr& child : children) {
         if (!parentLifetime) {
-            NodeAccess::setParent(*child, nullptr);
+            detachOrphanedChild(*child, surface);
             continue;
         }
         detachElementChild(parent, *child, surface);
     }
     if (!parentLifetime) return;
     parent.onChildrenCleared();
-    parent.invalidateMeasure();
 }
 
 void NodeMutation::detachAll(Fragment& parent) {
@@ -161,7 +184,7 @@ Node* NodeMutation::insertElementChildren(Element& parent, NodeOwners children, 
         : parent.mChildren.size();
     for (NodePtr& child : children) {
         llassert_always(child && !child->parentNode());
-        assignDocumentIdentity(*child, NodeAccess::documentIdentity(parent));
+        adopt(*child, NodeAccess::documentIdentity(parent));
         attachElementChild(parent, *child);
     }
 
@@ -174,15 +197,15 @@ Node* NodeMutation::insertElementChildren(Element& parent, NodeOwners children, 
         ++insertionIndex;
         if (Element* element = added->asElement()) elementRefs.emplace_back(element);
     }
+    ++parent.mChildSnapshotRevision;
+    ++parent.mChildTopologyRevision;
+    if (parent.mSurface) parent.mSurface->invalidateOrderingCache();
+    if (!parent.mSuppressTextSlots) parent.mTextContentSlots.clear();
+    parent.invalidateMeasure();
     for (const ElementRef<Element>& childRef : elementRefs) {
         if (Element* child = childRef.get()) child->setSurface(parent.mSurface);
         if (!parentLifetime) return firstLifetime.get();
     }
-
-    ++parent.mChildSnapshotRevision;
-    if (parent.mSurface) parent.mSurface->invalidateOrderingCache();
-    if (!parent.mSuppressTextSlots) parent.mTextContentSlots.clear();
-    parent.invalidateMeasure();
 
     for (const ElementRef<Element>& childRef : elementRefs) {
         Element* currentParent = parentLifetime.get();
@@ -222,7 +245,7 @@ Node* NodeMutation::insertFragmentChildren(Fragment& parent, NodeOwners children
     std::size_t insertionIndex = referenceIndex;
     for (NodePtr& child : children) {
         llassert_always(child && !child->parentNode());
-        assignDocumentIdentity(*child, NodeAccess::documentIdentity(parent));
+        adopt(*child, NodeAccess::documentIdentity(parent));
         NodeAccess::setParent(*child, &parent);
         parent.mChildren.insert(parent.mChildren.begin() + static_cast<std::ptrdiff_t>(insertionIndex), std::move(child));
         ++insertionIndex;
@@ -260,11 +283,13 @@ NodePtr NodeMutation::replaceElementChild(Element& parent, Node& child, Fragment
     const ElementRef<Element> parentLifetime(&parent);
     NodePtr detached = std::move(*found);
     parent.mChildren.erase(found);
-    detachElementChild(parent, *detached, parent.mSurface);
-    if (!parentLifetime) return detached;
     ++parent.mChildSnapshotRevision;
+    ++parent.mChildTopologyRevision;
     if (parent.mSurface) parent.mSurface->invalidateOrderingCache();
     clearTextSlots(parent);
+    parent.invalidateMeasure();
+    detachElementChild(parent, *detached, parent.mSurface);
+    if (!parentLifetime) return detached;
 
     NodeOwners children = std::move(replacement->mChildren);
     replacement->mChildren.clear();
@@ -310,21 +335,24 @@ Node* NodeMutation::replaceElementRange(Element& parent, Node& first, Node& last
     const NodeRef referenceLifetime(next == parent.mChildren.end() ? nullptr : next->get());
     const bool flowBreakBefore = NodeAccess::flowBreakBefore(first);
     const ElementRef<Element> parentLifetime(&parent);
+    Surface* surface = parent.mSurface;
 
     NodeOwners removed;
     for (auto current = firstFound; current != lastFound + 1; ++current) removed.push_back(std::move(*current));
     parent.mChildren.erase(firstFound, lastFound + 1);
+    ++parent.mChildSnapshotRevision;
+    ++parent.mChildTopologyRevision;
+    if (surface) surface->invalidateOrderingCache();
+    clearTextSlots(parent);
+    parent.invalidateMeasure();
     for (NodePtr& node : removed) {
         if (!parentLifetime) {
-            NodeAccess::setParent(*node, nullptr);
+            detachOrphanedChild(*node, surface);
             continue;
         }
-        detachElementChild(parent, *node, parent.mSurface);
+        detachElementChild(parent, *node, surface);
     }
     if (!parentLifetime) return nullptr;
-    ++parent.mChildSnapshotRevision;
-    if (parent.mSurface) parent.mSurface->invalidateOrderingCache();
-    clearTextSlots(parent);
 
     NodeOwners children = std::move(replacement->mChildren);
     replacement->mChildren.clear();
@@ -398,9 +426,13 @@ NodePtr NodeMutation::replace(Element& parent, Node& child, NodePtr replacement)
     const ElementRef<Element> parentLifetime(&parent);
     NodePtr detached = std::move(*found);
     parent.mChildren.erase(found);
+    ++parent.mChildSnapshotRevision;
+    ++parent.mChildTopologyRevision;
+    if (parent.mSurface) parent.mSurface->invalidateOrderingCache();
+    clearTextSlots(parent);
+    parent.invalidateMeasure();
     detachElementChild(parent, *detached, parent.mSurface);
     if (!parentLifetime) return detached;
-    clearTextSlots(parent);
     Node* reference = referenceLifetime.get();
     if (!reference || reference->parentNode() != &parent) reference = nullptr;
     Node* inserted = insertElementChild(parent, std::move(replacement), reference);
@@ -439,12 +471,13 @@ NodePtr NodeMutation::remove(Element& parent, Node& child) {
     const ElementRef<Element> parentLifetime(&parent);
     NodePtr detached = std::move(*found);
     parent.mChildren.erase(found);
-    detachElementChild(parent, *detached, parent.mSurface);
-    if (!parentLifetime) return detached;
     ++parent.mChildSnapshotRevision;
+    ++parent.mChildTopologyRevision;
     if (parent.mSurface) parent.mSurface->invalidateOrderingCache();
     clearTextSlots(parent);
     parent.invalidateMeasure();
+    detachElementChild(parent, *detached, parent.mSurface);
+    if (!parentLifetime) return detached;
     return detached;
 }
 

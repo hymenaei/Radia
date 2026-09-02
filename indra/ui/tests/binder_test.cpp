@@ -60,7 +60,7 @@ using radia::ui::ValueBindingSubscription;
 using radia::ui::ValueState;
 using radia::ui::ValueValidation;
 using radia::ui::Visibility;
-using radia::ui::detail::ElementCompilerAccess;
+using radia::ui::detail::ElementInternalAccess;
 using radia::ui::detail::findElementInScope;
 using radia::ui::detail::makeElement;
 using radia::ui::detail::makeElementValue;
@@ -312,7 +312,7 @@ TEST(BinderTest, ResolvesIdsWithinIndependentResourceScopes) {
     auto root = makeElementValue<HTMLPanelElement>();
     auto left = makeElement<HTMLPanelElement>();
     left->setId("left");
-    ElementCompilerAccess::setIdScopeRoot(*left);
+    ElementInternalAccess::setIdScopeRoot(*left);
     auto leftItem = makeElement<HTMLLabelElement>();
     leftItem->setId("item");
     left->append(std::move(leftItem));
@@ -320,7 +320,7 @@ TEST(BinderTest, ResolvesIdsWithinIndependentResourceScopes) {
 
     auto right = makeElement<HTMLPanelElement>();
     right->setId("right");
-    ElementCompilerAccess::setIdScopeRoot(*right);
+    ElementInternalAccess::setIdScopeRoot(*right);
     auto rightItem = makeElement<HTMLLabelElement>();
     rightItem->setId("item");
     right->append(std::move(rightItem));

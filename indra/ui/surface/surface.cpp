@@ -18,12 +18,13 @@
 #include "layout/primitives.h"
 #include "render/paintcontext.h"
 #include "style/stylepass.h"
-#include "surface/surfaceinternal.h"
 #include "system.h"
 #include "text/metrics.h"
 
 namespace radia::ui {
 using detail::ElementInternalAccess;
+using detail::MountEpoch;
+using detail::NodeRef;
 
 namespace {
 void applyDirection(Style& style, LayoutDirection direction) {
@@ -47,30 +48,11 @@ const Element* scrollbarClipOwner(const Element& element, const Style& style) {
 }
 } // namespace
 
-Surface::ElementSnapshot Surface::snapshot(Element& element) const {
-    ElementSnapshot result;
-    result.lifetime.set(&element);
-    result.element = &element;
-    result.surface = element.mSurface;
-    result.parent = element.parentElement();
-    result.layoutRevision = element.mLayoutInvalidationRevision;
-    result.styleRevision = element.mStyleRevision;
-    result.mountLifetime = detail::ElementInternalAccess::mountLifetime(element);
-    return result;
+Surface::ElementObservation Surface::observe(Element& element) const {
+    return ElementObservation(element);
 }
-
-bool Surface::snapshotValid(const ElementSnapshot& snapshot) const {
-    const Element* element = snapshot.lifetime.get();
-    return element
-        && element->mSurface == snapshot.surface
-        && element->parentElement() == snapshot.parent
-        && detail::ElementInternalAccess::mountLifetime(*element) == snapshot.mountLifetime
-        && element->mLayoutInvalidationRevision == snapshot.layoutRevision
-        && element->mStyleRevision == snapshot.styleRevision;
-}
-
-bool Surface::snapshotChildValid(const ElementSnapshot& snapshot, const Element& parent) const {
-    return snapshotValid(snapshot) && snapshot.parent == &parent;
+Surface::ConstElementObservation Surface::observe(const Element& element) const {
+    return ConstElementObservation(element);
 }
 
 Surface::Surface() : mTextMetrics(fixedTextMetrics()), mObservedTextMetricsGeneration(mTextMetrics.generation()) {}
@@ -378,11 +360,11 @@ void Surface::requestHitTestRefresh() {
 
 void Surface::queueScrollNotification(Element& element) {
     if (element.mSurface != this) return;
-    const std::shared_ptr<char> mountLifetime = ElementInternalAccess::mountLifetime(element);
+    const MountEpoch mountEpoch = ElementInternalAccess::mountEpoch(element);
     const auto duplicate = std::find_if(mPendingScrollNotifications.begin(), mPendingScrollNotifications.end(),
-                                        [&](const auto& pending) { return pending.element == &element && pending.mountLifetime == mountLifetime; });
+                                        [&](const auto& pending) { return pending.element == &element && pending.mountEpoch == mountEpoch; });
     if (duplicate != mPendingScrollNotifications.end()) return;
-    mPendingScrollNotifications.push_back({&element, ElementInternalAccess::lifetime(element), mountLifetime});
+    mPendingScrollNotifications.push_back({&element, ElementInternalAccess::lifetime(element), mountEpoch});
 }
 
 void Surface::dispatchScrollNotification(Element& element) {
@@ -403,11 +385,9 @@ void Surface::flushScrollNotifications() {
         std::vector<PendingScrollNotification> pending;
         pending.swap(mPendingScrollNotifications);
         for (const PendingScrollNotification& notification : pending) {
-            if (!notification.element || notification.lifetime.expired() || notification.mountLifetime == nullptr) continue;
+            if (!notification.element || notification.lifetime.expired()) continue;
             Element* element = notification.element;
-            if (element->mSurface != this
-                || ElementInternalAccess::mountLifetime(*element) != notification.mountLifetime
-                || !isRootedInSurface(element))
+            if (element->mSurface != this || ElementInternalAccess::mountEpoch(*element) != notification.mountEpoch || !isRootedInSurface(element))
                 continue;
             dispatchScrollNotification(*element);
         }
@@ -544,21 +524,14 @@ void Surface::paint(PaintContext& context, float scale, Vec2 pixelOrigin) {
 }
 
 void Surface::paintElement(const Element& element, PaintContext& context, float scale, float inheritedOpacity, StylePass& styles) const {
-    const ElementRef<const Element> lifetime(&element);
-    const Surface* originalSurface = element.surface();
-    const Element* originalParent = element.parentElement();
-    const std::uint64_t originalStyleRevision = element.mStyleRevision;
-    const std::uint64_t originalLayoutRevision = element.mLayoutInvalidationRevision;
+    const ConstElementObservation observation = observe(element);
     const Style& unresolved = styles.style(element);
-    const Element* styledElement = lifetime.get();
-    if (!styledElement
-        || styledElement->surface() != originalSurface
-        || styledElement->parentElement() != originalParent
-        || styledElement->mStyleRevision != originalStyleRevision
-        || styledElement->mLayoutInvalidationRevision != originalLayoutRevision)
-        return;
-    if (!element.isVisible(unresolved)) return;
-    styles.styleGeneratedPseudoElements(element, unresolved);
+    const Element* current = observation.get();
+    if (!current || !observation.layoutValid() || !observation.styleValid()) return;
+    if (!current->isVisible(unresolved)) return;
+    styles.styleGeneratedPseudoElements(*current, unresolved);
+    current = observation.get();
+    if (!current || !observation.layoutValid() || !observation.styleValid()) return;
     const float childOpacity = inheritedOpacity * unresolved.opacity;
     const LayoutDirection direction = layoutDirection();
     const bool needsOpacity = inheritedOpacity != 1.f || unresolved.opacity != 1.f;
@@ -572,14 +545,14 @@ void Surface::paintElement(const Element& element, PaintContext& context, float 
         if (needsDirection) applyDirection(*paintedStorage, direction);
         painted = &*paintedStorage;
     }
-    const bool paintsBodyCanvasBackground = element.elementName() == kBodyTag.localName
-        && !originalParent
+    const bool paintsBodyCanvasBackground = current->elementName() == kBodyTag.localName
+        && !observation.parent
         && (painted->backgroundColor.a > 0.f || painted->backgroundGradient.has_value());
     const bool clipsX = unresolved.overflowX != Overflow::Visible;
     const bool clipsY = unresolved.overflowY != Overflow::Visible;
     const bool clipsChildren = clipsX || clipsY;
     const ClipAxes clipAxes = (clipsX ? ClipAxes::X : ClipAxes::NoAxes) | (clipsY ? ClipAxes::Y : ClipAxes::NoAxes);
-    if (!painted->effects.empty()) context.beginEffects(element.paintBounds(), *painted, scale);
+    if (!painted->effects.empty()) context.beginEffects(current->paintBounds(), *painted, scale);
     if (paintsBodyCanvasBackground) {
         Style canvasBackground;
         canvasBackground.backgroundColor = painted->backgroundColor;
@@ -589,22 +562,22 @@ void Surface::paintElement(const Element& element, PaintContext& context, float 
         Style bodyStyle = *painted;
         bodyStyle.backgroundColor = Color(0.f, 0.f, 0.f, 0.f);
         bodyStyle.backgroundGradient.reset();
-        element.paint(context, bodyStyle, scale);
-    } else element.paint(context, *painted, scale);
+        current->paint(context, bodyStyle, scale);
+    } else current->paint(context, *painted, scale);
     const auto isParentStillValid = [&] {
-        const Element* currentElement = lifetime.get();
+        const Element* currentElement = observation.get();
         return currentElement
-            && currentElement->surface() == originalSurface
-            && currentElement->mStyleRevision == originalStyleRevision
-            && currentElement->mLayoutInvalidationRevision == originalLayoutRevision
+            && observation.layoutValid()
+            && observation.styleValid()
             && currentElement->isVisible(unresolved)
             && isRootedInSurface(currentElement)
-            && (currentElement->parentElement() == originalParent || (!originalParent && isSurfaceRoot(currentElement)));
+            && (currentElement->parentElement() == observation.parent || (!observation.parent && isSurfaceRoot(currentElement)));
     };
     if (isParentStillValid()) {
+        current = observation.get();
         if (clipsChildren) {
-            context.pushClip(ElementInternalAccess::scrollport(element), scale, clipAxes);
-            context.pushTranslation(scrollContentTranslation(layoutDirection(), {element.scrollLeft(), element.scrollTop()}));
+            context.pushClip(ElementInternalAccess::scrollport(*current), scale, clipAxes);
+            context.pushTranslation(scrollContentTranslation(layoutDirection(), {current->scrollLeft(), current->scrollTop()}));
         }
         Style textStyle;
         inheritStyle(textStyle, *painted);
@@ -614,14 +587,22 @@ void Surface::paintElement(const Element& element, PaintContext& context, float 
         textStyle.displaySet = true;
         textStyle.padding = {};
         textStyle.margin = {};
-        for (const auto& childNode : element.mChildren) {
+        std::vector<NodeRef> children;
+        children.reserve(current->mChildren.size());
+        for (const auto& childNode : current->mChildren) children.emplace_back(childNode.get());
+        for (const NodeRef& childRef : children) {
             if (!isParentStillValid()) break;
+            const Node* childNode = childRef.get();
+            if (!childNode) continue;
             if (const Text* text = childNode->asText()) {
-                text->paint(context, textStyle, element.styleSheet(), element);
+                const Element* parent = observation.get();
+                if (!parent) break;
+                text->paint(context, textStyle, parent->styleSheet(), *parent);
                 continue;
             }
             const Element* child = childNode->asElement();
-            if (child && child->parentElement() == &element && isRootedInSurface(child)) paintElement(*child, context, scale, childOpacity, styles);
+            if (child && child->parentElement() == observation.get() && isRootedInSurface(child))
+                paintElement(*child, context, scale, childOpacity, styles);
         }
         if (clipsChildren) {
             context.popTranslation();
@@ -629,7 +610,8 @@ void Surface::paintElement(const Element& element, PaintContext& context, float 
         }
     }
     if (isParentStillValid()) {
-        const ScrollGeometry geometry = scrollbarGeometry(element, *painted);
+        current = observation.get();
+        const ScrollGeometry geometry = scrollbarGeometry(*current, *painted);
         if (geometry.horizontal.visible || geometry.vertical.visible || geometry.hasCorner) {
             NativeScrollbarPaintRequest request;
             request.geometry = geometry;
@@ -639,28 +621,28 @@ void Surface::paintElement(const Element& element, PaintContext& context, float 
             request.direction = painted->direction;
             request.scale = scale;
             request.appearanceRevision = effectiveNativeAppearance().revision();
-            if (const Element* clipOwner = scrollbarClipOwner(element, *painted)) {
-                const Style* clipStyle = clipOwner == &element ? painted : &styles.style(*clipOwner);
+            if (const Element* clipOwner = scrollbarClipOwner(*current, *painted)) {
+                const Style* clipStyle = clipOwner == current ? painted : &styles.style(*clipOwner);
                 request.clip.enabled = true;
                 request.clip.borderBox = clipOwner->rect();
                 request.clip.borderRadius = clipStyle->borderRadius;
                 request.clip.borderWidth = clipStyle->borderWidth;
             }
             if (mScrollbarHover) {
-                if (scrollbarTargetMatches(*mScrollbarHover, element, ScrollbarAxis::Horizontal, ScrollbarPart::NoneValue))
+                if (scrollbarTargetMatches(*mScrollbarHover, *current, ScrollbarAxis::Horizontal, ScrollbarPart::NoneValue))
                     request.horizontal.hoveredPart = mScrollbarHover->hit.part;
-                if (scrollbarTargetMatches(*mScrollbarHover, element, ScrollbarAxis::Vertical, ScrollbarPart::NoneValue))
+                if (scrollbarTargetMatches(*mScrollbarHover, *current, ScrollbarAxis::Vertical, ScrollbarPart::NoneValue))
                     request.vertical.hoveredPart = mScrollbarHover->hit.part;
             }
             if (mScrollbarCapture) {
-                if (scrollbarTargetMatches(*mScrollbarCapture, element, ScrollbarAxis::Horizontal, ScrollbarPart::NoneValue))
+                if (scrollbarTargetMatches(*mScrollbarCapture, *current, ScrollbarAxis::Horizontal, ScrollbarPart::NoneValue))
                     request.horizontal.pressedPart = mScrollbarCapture->hit.part;
-                if (scrollbarTargetMatches(*mScrollbarCapture, element, ScrollbarAxis::Vertical, ScrollbarPart::NoneValue))
+                if (scrollbarTargetMatches(*mScrollbarCapture, *current, ScrollbarAxis::Vertical, ScrollbarPart::NoneValue))
                     request.vertical.pressedPart = mScrollbarCapture->hit.part;
             }
             request.horizontal.disabled = geometry.horizontal.visible && geometry.horizontal.maxScrollOffset <= 0.f;
             request.vertical.disabled = geometry.vertical.visible && geometry.vertical.maxScrollOffset <= 0.f;
-            context.pushClip(element.rect(), scale);
+            context.pushClip(current->rect(), scale);
             context.paintNativeScrollbar(request);
             context.popClip();
         }

@@ -14,7 +14,6 @@
 #include "layout/engine.h"
 #include "style/stylepass.h"
 #include "surface/surface.h"
-#include "surface/surfaceinternal.h"
 
 namespace radia::ui {
 HTMLFloaterElement& Surface::mountFloater(std::unique_ptr<HTMLFloaterElement> floater, SurfaceLayer layer) {
@@ -119,11 +118,11 @@ void Surface::constrainFloater(HTMLFloaterElement& floater) {
 
 void Surface::placeFloater(HTMLFloaterElement& floater, const Rect& rect) {
     if (!managesFloater(floater)) return;
-    const ElementSnapshot floaterSnapshot = snapshot(floater);
+    const ElementObservation floaterObservation = observe(floater);
     Rect placed = rect;
     if (floater.resizeable()) {
         const Vec2 minimum = minimumFloaterSize(floater);
-        if (!snapshotValid(floaterSnapshot) || !isRootedInSurface(floaterSnapshot.lifetime.get())) return;
+        if (!floaterObservation.layoutValid() || !floaterObservation.styleValid() || !isRootedInSurface(floaterObservation.get())) return;
         placed.w = std::min(mViewport.w, std::max(placed.w, minimum.x));
         placed.h = std::min(mViewport.h, std::max(placed.h, minimum.y));
     }
@@ -132,13 +131,13 @@ void Surface::placeFloater(HTMLFloaterElement& floater, const Rect& rect) {
 }
 
 Vec2 Surface::preferredFloaterSize(const HTMLFloaterElement& floater) const {
-    const ElementSnapshot floaterSnapshot = snapshot(const_cast<HTMLFloaterElement&>(floater));
+    const ElementObservation floaterObservation = observe(const_cast<HTMLFloaterElement&>(floater));
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
     const Style& style = styles.style(floater);
-    if (!snapshotValid(floaterSnapshot)) return {};
+    if (!floaterObservation.layoutValid() || !floaterObservation.styleValid()) return {};
     const Vec2 measured = measureElement(floater, *mStyleSheet, mTextMetrics);
-    if (!snapshotValid(floaterSnapshot)) return {};
+    if (!floaterObservation.layoutValid() || !floaterObservation.styleValid()) return {};
     const auto resolve = [](const Dimension& value, const std::optional<Length>& minimum, float fallback, float reference) {
         const float result = value.resolve(fallback, reference);
         return minimum ? std::max(result, minimum->resolve(result)) : result;
@@ -147,13 +146,13 @@ Vec2 Surface::preferredFloaterSize(const HTMLFloaterElement& floater) const {
 }
 
 std::optional<Rect> Surface::initialFloaterRect(const HTMLFloaterElement& floater) const {
-    const ElementSnapshot floaterSnapshot = snapshot(const_cast<HTMLFloaterElement&>(floater));
+    const ElementObservation floaterObservation = observe(const_cast<HTMLFloaterElement&>(floater));
     const Vec2 size = preferredFloaterSize(floater);
-    if (!snapshotValid(floaterSnapshot)) return std::nullopt;
+    if (!floaterObservation.layoutValid() || !floaterObservation.styleValid()) return std::nullopt;
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
     const Style& style = styles.style(floater);
-    if (!snapshotValid(floaterSnapshot)) return std::nullopt;
+    if (!floaterObservation.layoutValid() || !floaterObservation.styleValid()) return std::nullopt;
     const float x = style.left ? style.left->resolve(mViewport.w)
         : style.right          ? mViewport.w - style.right->resolve(mViewport.w) - size.x
                                : std::max(0.f, (mViewport.w - size.x) * .5f);
@@ -164,13 +163,16 @@ std::optional<Rect> Surface::initialFloaterRect(const HTMLFloaterElement& floate
 }
 
 std::optional<Rect> Surface::prepareFloater(HTMLFloaterElement& floater) const {
-    const ElementSnapshot floaterSnapshot = snapshot(floater);
+    const ElementObservation floaterObservation = observe(floater);
     const std::optional<Rect> authored = initialFloaterRect(floater);
-    if (!authored || !snapshotValid(floaterSnapshot)) return std::nullopt;
+    if (!authored || !floaterObservation.layoutValid() || !floaterObservation.styleValid()) return std::nullopt;
     Element* body = floater.body();
-    const ElementSnapshot bodySnapshot = body ? snapshot(*body) : ElementSnapshot{};
+    const ElementObservation bodyObservation = body ? observe(*body) : ElementObservation{};
     const Vec2 bodySize = body ? measureElement(*body, *mStyleSheet, mTextMetrics) : Vec2{};
-    if (!snapshotValid(floaterSnapshot) || (body && !snapshotChildValid(bodySnapshot, floater))) return std::nullopt;
+    if (!floaterObservation.layoutValid()
+        || !floaterObservation.styleValid()
+        || (body && (!bodyObservation.layoutValid() || !bodyObservation.styleValid() || !bodyObservation.attachedTo(floater))))
+        return std::nullopt;
     floater.setAuthoredSize({authored->w, authored->h}, bodySize);
     return authored;
 }

@@ -18,19 +18,11 @@ using detail::HTMLElementFactory;
 using detail::NodeAccess;
 using detail::NodeMutation;
 
-namespace {
-void assignIdentity(Node& node, const std::shared_ptr<DocumentIdentity>& identity) {
-    NodeAccess::setDocumentIdentity(node, identity);
-    for (Node* child : node.childNodes()) assignIdentity(*child, identity);
-}
-} // namespace
-
 Document::Document(ElementPtr documentElement) : Node(NodeType::Document), mIdentity(std::make_shared<DocumentIdentity>()) {
-    llassert_always(documentElement && !documentElement->parentNode());
-    llassert_always(documentElement && !documentElement->mSurface);
+    llassert_always(documentElement);
     NodeAccess::setDocumentIdentity(*this, mIdentity);
+    NodeMutation::adopt(*this, *documentElement);
     NodeAccess::setParent(*documentElement, this);
-    assignIdentity(*documentElement, mIdentity);
     mChildren.emplace_back(std::move(documentElement));
     if (Element* root = mChildren.front()->asElement()) root->notifyTreeAttached();
 }
@@ -56,22 +48,19 @@ ElementPtr Document::releaseDocumentElement() {
 ElementPtr Document::createElement(std::string_view elementName) const {
     ElementPtr element = HTMLElementFactory::Create(elementName);
     if (!element) LL_ERRS("UI") << "Unknown UI Element type: " << elementName << LL_ENDL;
-    assignIdentity(*element, mIdentity);
+    NodeMutation::adopt(*this, *element);
     return element;
 }
 
 FragmentPtr Document::createFragment() const {
     auto fragment = std::make_unique<Fragment>();
-    assignIdentity(*fragment, mIdentity);
+    NodeMutation::adopt(*this, *fragment);
     return fragment;
 }
 
 NodePtr Document::adoptNode(NodePtr node) const {
     llassert_always(node);
-    llassert_always(node->nodeType() != NodeType::Document);
-    llassert_always(!node->parentNode());
-    if (Element* element = node->asElement()) llassert_always(!element->mSurface);
-    assignIdentity(*node, mIdentity);
+    NodeMutation::adopt(*this, *node);
     return node;
 }
 

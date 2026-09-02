@@ -23,16 +23,16 @@ using radia::ui::System;
 
 void registerFloaterDemo(Runtime& runtime) {
     runtime.registerFloater("floaterDemo", "floater_demo.html", [&runtime](System& system, Document& document) {
-        return std::make_unique<FloaterDemo>(system, document, [&runtime] { runtime.requestSkinReload(); });
+        return std::make_unique<FloaterDemo>(system, &document, [&runtime] { runtime.requestSkinReload(); });
     });
 }
 
-FloaterDemo::FloaterDemo(System& system, Document& document, std::function<void()> requestSkinReload)
-    : DocumentController(system, document), mRequestSkinReload(std::move(requestSkinReload)) {
-    mStatus = getElementById("status");
-    mActiveLocale = getElementById("activeLocale");
-    mPreviousLocale = getElementById("previousLocale");
-    mNextLocale = getElementById("nextLocale");
+FloaterDemo::FloaterDemo(System& system, Document* document, std::function<void()> requestSkinReload)
+    : DocumentController(system, *document), mRequestSkinReload(std::move(requestSkinReload)) {
+    mStatus = document->getElementById("status");
+    mActiveLocale = document->getElementById("activeLocale");
+    mPreviousLocale = document->getElementById("previousLocale");
+    mNextLocale = document->getElementById("nextLocale");
     handler("press", &FloaterDemo::press);
     handler("switchChanged", &FloaterDemo::switchChanged);
     handler("selectLocale", &FloaterDemo::selectLocale);

@@ -9,6 +9,8 @@
 #include <cctype>
 
 namespace radia::ui::layout_detail {
+using radia::ui::detail::ElementInternalAccess;
+
 float styledDimension(const Dimension& value, const std::optional<Length>& minimum, float fallback, float reference) {
     const float resolved = value.resolve(fallback, reference);
     return minimum ? std::max(resolved, minimum->resolve(reference)) : resolved;
@@ -301,7 +303,7 @@ void setArrangedRect(Element& node, const Rect& rect) {
     const bool changed = node.mRect.x != rect.x || node.mRect.y != rect.y || node.mRect.w != rect.w || node.mRect.h != rect.h;
     if (!changed) return;
     node.mRect = rect;
-    detail::ElementInternalAccess::layoutCache(node).arrangeValid = false;
+    ElementInternalAccess::layoutCache(node).arrangeValid = false;
     node.mInvalidationReasons.add(LayoutInvalidationReason::Arrange);
     node.invalidatePaint();
 }
@@ -309,7 +311,7 @@ void setArrangedRect(Element& node, const Rect& rect) {
 std::optional<AdjacentLayout> adjacentLayout(const ElementVisit& parentState, const LayoutChildRef& firstRef, const LayoutChildRef& secondRef,
                                              const Style& parentStyle) {
     Element* parent = parentState.get();
-    if (!parentState.valid() || !firstRef.attachedTo(*parent) || !secondRef.attachedTo(*parent)) return std::nullopt;
+    if (!parentState.layoutValid() || !firstRef.attachedTo(*parent) || !secondRef.attachedTo(*parent)) return std::nullopt;
     if (firstRef.isPseudoElement() || secondRef.isPseudoElement()) return AdjacentLayout{true, 0.f};
     Node* firstNode = firstRef.get();
     Node* secondNode = secondRef.get();
@@ -323,12 +325,24 @@ std::optional<AdjacentLayout> adjacentLayout(const ElementVisit& parentState, co
     parent = parentState.get();
     first = firstState.get();
     second = secondState.get();
-    if (!parentState.valid() || !parent || !firstState.validChildOf(*parent) || !secondState.validChildOf(*parent)) return std::nullopt;
+    if (!parentState.layoutValid()
+        || !parent
+        || !firstState.layoutValid()
+        || !firstState.attachedTo(*parent)
+        || !secondState.layoutValid()
+        || !secondState.attachedTo(*parent))
+        return std::nullopt;
     const float overlap = ElementLayoutAccess::overlap(*parent, *first, *second, parentStyle);
     parent = parentState.get();
     first = firstState.get();
     second = secondState.get();
-    if (!parentState.valid() || !parent || !firstState.validChildOf(*parent) || !secondState.validChildOf(*parent)) return std::nullopt;
+    if (!parentState.layoutValid()
+        || !parent
+        || !firstState.layoutValid()
+        || !firstState.attachedTo(*parent)
+        || !secondState.layoutValid()
+        || !secondState.attachedTo(*parent))
+        return std::nullopt;
     return AdjacentLayout{hasGap, overlap};
 }
 
@@ -398,7 +412,7 @@ MainAxisAllocation allocateMainAxis(Element& parent, std::vector<ChildLayout>& c
     for (std::size_t index = begin + 1; index < end; ++index) {
         const LayoutChildRef& previous = children[index - 1].node;
         const LayoutChildRef& current = children[index].node;
-        if (!parentState.valid()) return invalidAllocation();
+        if (!parentState.layoutValid()) return invalidAllocation();
         const std::optional<AdjacentLayout> adjacent = adjacentLayout(parentState, previous, current, parentStyle);
         if (!adjacent) return invalidAllocation();
         if (adjacent->hasGap) ++gapCount;

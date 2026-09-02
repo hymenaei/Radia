@@ -17,12 +17,12 @@ struct SkinGeneration::Impl {
     Impl(ResourceSnapshot resourcesValue, LocalizationCatalog localizationValue, StyleSheet styleSheetValue,
          std::unordered_map<std::string, SvgIcon> iconsValue)
         : resources(std::make_shared<const ResourceSnapshot>(std::move(resourcesValue))), localization(std::move(localizationValue)),
-          styleSheet(std::move(styleSheetValue)), icons(std::move(iconsValue)), layoutCompiler(resources.get()) {}
+          styleSheet(std::move(styleSheetValue)), icons(std::move(iconsValue)), resourceCompiler(resources.get()) {}
 
     std::shared_ptr<const ResourceSnapshot> resources;
     LocalizationCatalog localization;
     StyleSheet styleSheet;
     std::unordered_map<std::string, SvgIcon> icons;
-    LayoutResourceCompiler layoutCompiler;
+    ResourceCompiler resourceCompiler;
 };
 } // namespace radia::ui

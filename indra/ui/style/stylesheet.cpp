@@ -19,6 +19,11 @@ void resolveLightDarkColor(Color& color, std::optional<LightDarkColor>& colors, 
     if (colors) color = resolveLightDarkColor(*colors, scheme);
 }
 
+bool explicitlyInherits(const Style& style, std::string_view propertyName) {
+    return std::find(style.explicitlyInheritedProperties.begin(), style.explicitlyInheritedProperties.end(), propertyName)
+        != style.explicitlyInheritedProperties.end();
+}
+
 } // namespace
 
 void resolveLightDarkColors(Style& style) {
@@ -39,10 +44,49 @@ void resolveLightDarkColors(Style& style) {
     resolveLightDarkColor(style.outline.color, style.outline.lightDarkColor, style.colorScheme);
 }
 
+void resolveCurrentColors(Style& style) {
+    if (style.backgroundColorCurrent) {
+        style.backgroundColor = style.color;
+        style.backgroundColorLightDark.reset();
+        style.backgroundGradient.reset();
+    }
+    if (style.borderColorCurrent) {
+        style.borderColor = style.color;
+        style.borderColorLightDark.reset();
+        style.borderGradient.reset();
+    }
+}
+
+void normalizeOverflow(Style& style) {
+    const auto scrollable = [](Overflow value) { return value == Overflow::Hidden || value == Overflow::Scroll || value == Overflow::Auto; };
+    if (style.overflowX == Overflow::Visible && scrollable(style.overflowY)) style.overflowX = Overflow::Auto;
+    if (style.overflowY == Overflow::Visible && scrollable(style.overflowX)) style.overflowY = Overflow::Auto;
+}
+
 void inheritStyle(Style& style, const Style& parent) {
     for (const detail::StylePropertyDefinition* property = detail::stylePropertyBegin(); property != detail::stylePropertyEnd(); ++property)
-        if (property->inherit) property->inherit(style, parent);
+        if (property->inherit && (property->isInherited() || explicitlyInherits(style, property->name))) property->inherit(style, parent);
     style.specifiedInheritedProperties |= parent.specifiedInheritedProperties;
+    style.explicitlyInheritedProperties.clear();
+}
+
+void applyOpacity(Style& style, float inheritedOpacity) {
+    const float opacity = inheritedOpacity * style.opacity;
+    style.backgroundColor.a *= opacity;
+    style.borderColor.a *= opacity;
+    style.color.a *= opacity;
+    style.iconStrokeColor.a *= opacity;
+    style.outline.color.a *= opacity;
+    if (!style.scrollbarColor.automatic) {
+        style.scrollbarColor.thumb.a *= opacity;
+        style.scrollbarColor.track.a *= opacity;
+    }
+    for (BoxShadow& shadow : style.shadows) shadow.color.a *= opacity;
+    if (style.backgroundGradient)
+        for (GradientStop& stop : style.backgroundGradient->stops) stop.color.a *= opacity;
+    if (style.borderGradient)
+        for (GradientStop& stop : style.borderGradient->stops) stop.color.a *= opacity;
+    style.opacity = opacity;
 }
 
 std::shared_ptr<StyleSheet::Impl> StyleSheet::makeEmptyImpl() {

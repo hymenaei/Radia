@@ -9,6 +9,7 @@
 #include <optional>
 #include <utility>
 #include <vector>
+#include "html/elementnames.h"
 #include "layout/engine.h"
 #include "layout/primitives.h"
 #include "nativeappearance.h"
@@ -17,10 +18,9 @@
 namespace radia::ui {
 class LayoutPass {
 public:
-    LayoutPass(const StyleSheet& styleSheet, const TextMetrics& textMetrics,
-               LayoutDirection direction = LayoutDirection::LeftToRight, ScrollLayoutOptions scrollOptions = {})
-        : mOwnedStyles(std::in_place, styleSheet, textMetrics, direction, scrollOptions.nativeAppearance),
-          mStyles(*mOwnedStyles),
+    LayoutPass(const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction = LayoutDirection::LeftToRight,
+               ScrollLayoutOptions scrollOptions = {})
+        : mOwnedStyles(std::in_place, styleSheet, textMetrics, direction, scrollOptions.nativeAppearance), mStyles(*mOwnedStyles),
           mScrollOptions(scrollOptions) {}
     explicit LayoutPass(StylePass& styles, ScrollLayoutOptions scrollOptions = {}) : mStyles(styles), mScrollOptions(scrollOptions) {}
     LayoutPass(const LayoutPass&) = delete;
@@ -53,23 +53,39 @@ public:
     const LayoutStatistics& statistics() const { return mStatistics; }
 
     const Style& style(const Element& node) { return mStyles.style(node); }
+    Style style(PseudoElement& node) { return mStyles.style(node); }
     StylePass::ChildSnapshot orderedChildren(Element& node) { return mStyles.orderedChildren(node); }
 
-    std::vector<detail::NodeRef> orderedNodes(Element& parent) {
-        std::vector<detail::NodeRef> result;
-        result.reserve(detail::nodes(parent).size());
+    std::vector<layout_detail::LayoutChildRef> orderedChildrenForLayout(Element& parent) {
+        std::vector<layout_detail::LayoutChildRef> result;
+        const Style& parentStyle = style(parent);
+        const bool includesPseudoElements = parentStyle.appearance == AppearanceMode::Base;
+        result.reserve(detail::nodes(parent).size() + (includesPseudoElements ? parent.generatedPseudoElements().size() : 0));
         for (detail::Node& node : detail::nodes(parent)) result.emplace_back(&node);
-        std::stable_sort(result.begin(), result.end(), [this](const detail::NodeRef& left, const detail::NodeRef& right) {
-            const Element* leftElement = left.element();
-            const Element* rightElement = right.element();
-            const int leftOrder = leftElement ? style(*leftElement).order : 0;
-            const int rightOrder = rightElement ? style(*rightElement).order : 0;
+        if (includesPseudoElements)
+            for (PseudoElement* pseudoElement : parent.generatedPseudoElements())
+                if (pseudoElement) result.emplace_back(pseudoElement);
+        std::stable_sort(result.begin(), result.end(), [this](const layout_detail::LayoutChildRef& left, const layout_detail::LayoutChildRef& right) {
+            const int leftOrder = left.pseudoElement ? style(*left.pseudoElement).order : left.element() ? style(*left.element()).order : 0;
+            const int rightOrder = right.pseudoElement ? style(*right.pseudoElement).order : right.element() ? style(*right.element()).order : 0;
             return leftOrder < rightOrder;
         });
         return result;
     }
 
-    Style style(const detail::NodeRef& node, const Style& parentStyle) {
+    std::vector<layout_detail::LayoutChildRef> orderedChildrenForLayout(PseudoElement& parent) {
+        std::vector<layout_detail::LayoutChildRef> result;
+        result.reserve(parent.generatedPseudoElements().size());
+        for (PseudoElement* pseudoElement : parent.generatedPseudoElements())
+            if (pseudoElement) result.emplace_back(pseudoElement);
+        std::stable_sort(result.begin(), result.end(), [this](const layout_detail::LayoutChildRef& left, const layout_detail::LayoutChildRef& right) {
+            return style(*left.pseudoElement).order < style(*right.pseudoElement).order;
+        });
+        return result;
+    }
+
+    Style style(const layout_detail::LayoutChildRef& node, const Style& parentStyle) {
+        if (node.pseudoElement) return style(*node.pseudoElement);
         if (const Element* element = node.element()) return mStyles.style(*element);
         Style result;
         inheritStyle(result, parentStyle);
@@ -82,16 +98,18 @@ public:
         return result;
     }
 
-    bool preservesNormalFlowWhitespace(const std::vector<detail::NodeRef>& children, std::size_t index, const Style& parentStyle) {
-        if (parentStyle.display == DisplayMode::Flex || parentStyle.display == DisplayMode::Grid || parentStyle.display == DisplayMode::InlineGrid)
+    bool preservesNormalFlowWhitespace(const std::vector<layout_detail::LayoutChildRef>& children, std::size_t index, const Style& parentStyle) {
+        if (isFlexDisplay(parentStyle.display) || parentStyle.display == DisplayMode::Grid || parentStyle.display == DisplayMode::InlineGrid)
             return false;
         if (index == 0 || index + 1 >= children.size() || !layout_detail::isWhitespaceOnlyText(children[index])) return false;
 
-        const auto isDisplayedInline = [&](const detail::NodeRef& child) {
+        const auto isDisplayedInline = [&](const layout_detail::LayoutChildRef& child) {
             const Element* element = child.element();
-            if (element && element->elementName() == "br") return false;
             const Style childStyle = style(child, parentStyle);
-            if (element) return element->isDisplayed(childStyle) && layout_detail::isInlineLevel(childStyle.display);
+            if (element) {
+                if (element->elementName() == kBrTag.localName) return false;
+                return element->isDisplayed(childStyle) && layout_detail::isInlineLevel(childStyle.display);
+            }
             return child.text() && childStyle.display != DisplayMode::NoneValue;
         };
         return isDisplayedInline(children[index - 1]) && isDisplayedInline(children[index + 1]);
@@ -117,7 +135,7 @@ private:
         bool valid = true;
     };
 
-    static ChildLayout measureChild(Element& parent, detail::NodeRef child, const Style& parentStyle, FlexDirection flexDirection,
+    static ChildLayout measureChild(Element& parent, layout_detail::LayoutChildRef child, const Style& parentStyle, FlexDirection flexDirection,
                                     std::optional<float> resolvedWidth, std::optional<float> resolvedHeight, LayoutPass& pass);
     static std::optional<std::vector<ChildLayout>> measureNormalChildren(Element& parent, std::optional<float> contentWidth,
                                                                          std::optional<float> contentHeight, LayoutPass& pass);
@@ -142,8 +160,9 @@ private:
     static std::optional<std::vector<ChildLayout>> layoutChildren(Element& parent, DisplayMode display, const Rect& content, LayoutPass& pass);
 
     static void arrangeNode(Element& node, LayoutPass& pass);
-    static void arrangeNode(detail::NodeRef node, LayoutPass& pass);
-    static void setArrangedRect(detail::NodeRef node, const Rect& rect);
+    static void arrangeNode(const layout_detail::LayoutChildRef& node, LayoutPass& pass);
+    static void arrangePseudoElement(PseudoElement& node, LayoutPass& pass);
+    static void setArrangedRect(const layout_detail::LayoutChildRef& node, const Rect& rect);
     static void arrangeRow(Element& node, const Style& parentStyle, const Rect& content, const Rect& available, std::vector<ChildLayout>& children,
                            LayoutPass& pass);
     static void arrangeColumn(Element& node, const Style& parentStyle, const Rect& content, const Rect& available, std::vector<ChildLayout>& children,
@@ -167,6 +186,8 @@ private:
                                 ScrollLayoutOptions scrollOptions);
     static LayoutStatistics run(Element& node, StylePass& styles, ScrollLayoutOptions scrollOptions);
     static LayoutStatistics runWithPass(Element& node, LayoutPass& pass);
-    static std::vector<detail::NodeRef> orderedNodes(Element& node, LayoutPass& pass) { return pass.orderedNodes(node); }
+    static std::vector<layout_detail::LayoutChildRef> orderedChildren(Element& node, LayoutPass& pass) { return pass.orderedChildrenForLayout(node); }
+    static Vec2 measurePseudoElement(PseudoElement& node, const Style& style, std::optional<float> outerWidth, std::optional<float> outerHeight,
+                                     LayoutPass& pass);
 };
 } // namespace radia::ui

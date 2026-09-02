@@ -10,7 +10,6 @@
 #include <cmath>
 #include <optional>
 #include <regex>
-#include <set>
 #include <sstream>
 #include <string_view>
 #include <unordered_map>
@@ -26,25 +25,26 @@
 #include <yaml-cpp/eventhandler.h>
 #include <yaml-cpp/parser.h>
 #include <yaml-cpp/yaml.h>
+#include "html/elementnames.h"
+#include "html/fragmentinternal.h"
 #include "layout/document.h"
-#include "text/inlineelements.h"
 
 namespace radia::ui {
+using html_detail::isValidHTMLAttribute;
+
 namespace {
 class StringValue {
 public:
-    StringValue(std::string pattern, std::multiset<std::string> shortcutIds, std::string sourceName, std::size_t sourceLine)
-        : mPattern(std::move(pattern)), mShortcutIds(std::move(shortcutIds)), source(std::move(sourceName)), line(sourceLine) {}
+    StringValue(std::string pattern, std::string sourceName, std::size_t sourceLine)
+        : mPattern(std::move(pattern)), source(std::move(sourceName)), line(sourceLine) {}
 
     const std::string& pattern() const { return mPattern; }
-    const std::multiset<std::string>& shortcutIds() const { return mShortcutIds; }
 
     std::string source;
     std::size_t line = 0;
 
 private:
     std::string mPattern;
-    std::multiset<std::string> mShortcutIds;
 };
 
 using StringMap = std::unordered_map<std::string, StringValue>;
@@ -154,76 +154,30 @@ bool validCatalogText(const std::string& value) {
     return U_SUCCESS(status) && normalizer && normalizer->isNormalized(unicode, status) && U_SUCCESS(status);
 }
 
-std::size_t markupLine(std::size_t sourceLine, const SourceLocation& location) {
+std::size_t htmlLine(std::size_t sourceLine, const SourceLocation& location) {
     return sourceLine + (location.line > 0 ? location.line - 1 : 0);
 }
 
-void appendLocalizedMarkupDiagnostics(const InlineValidationResult& validation, DiagnosticResult& result, const std::string& sourceName,
-                                      std::size_t sourceLine) {
-    std::set<std::size_t> attributeNodes;
-    for (const InlineValidationFinding& finding : validation.findings) {
-        const SourceLocation& elementLocation = finding.elementSource.begin;
-        const SourceLocation& location = finding.source.begin;
-        switch (finding.kind) {
-            case InlineValidationKind::UnsupportedElement:
-                result.error("localization.string.tag_invalid", "Element <" + finding.elementName + "> is not allowed in localized content.",
-                             sourceName, markupLine(sourceLine, elementLocation));
-                break;
-            case InlineValidationKind::NotImplemented:
-                result.error("localization.string.tag_invalid", "Element <" + finding.elementName + "> is not allowed in localized content.",
-                             sourceName, markupLine(sourceLine, elementLocation));
-                break;
-            case InlineValidationKind::AttributeUnknown:
-                if (!attributeNodes.insert(elementLocation.offset).second) break;
-                if (finding.tag == Tag::Kbd)
-                    result.error("localization.string.attribute_invalid", "Localized <kbd> accepts only the shortcut attribute.", sourceName,
-                                 markupLine(sourceLine, elementLocation));
-                else
-                    result.error("localization.string.attribute_invalid", "Localized inline Elements do not accept attributes.", sourceName,
-                                 markupLine(sourceLine, elementLocation));
-                break;
-            case InlineValidationKind::KbdShortcutRequired:
-                result.error("localization.string.kbd_shortcut_required", "Localized <kbd> requires a shortcut attribute.", sourceName,
-                             markupLine(sourceLine, elementLocation));
-                break;
-            case InlineValidationKind::KbdShortcutInvalid:
-                result.error("localization.string.kbd_shortcut_invalid", "Localized <kbd> shortcut must be a valid identifier.", sourceName,
-                             markupLine(sourceLine, location));
-                break;
-            case InlineValidationKind::ChildrenUnsupported:
-                result.error("localization.string.children_invalid", "Localized <" + finding.elementName + "> cannot contain content.", sourceName,
-                             markupLine(sourceLine, elementLocation));
-                break;
-        }
+void validateHTMLAttributes(const SourceNode& node, DiagnosticResult& result, const std::string& sourceName, std::size_t sourceLine) {
+    for (const auto& [name, attribute] : node.attributes) {
+        if (isValidHTMLAttribute(node.tag, name, attribute.hasValue, attribute.value)) continue;
+        result.error("localization.string.attribute_invalid",
+                     "Invalid HTML attribute on <" + node.authoredName + ">: " + attribute.authoredName + ".", sourceName,
+                     htmlLine(sourceLine, attribute.source.begin));
     }
+    for (const SourceContent& content : node.content)
+        if (content.node) validateHTMLAttributes(*content.node, result, sourceName, sourceLine);
 }
 
-void collectLocalizedShortcutIds(const std::vector<SourceContent>& content, std::multiset<std::string>& shortcutIds) {
-    for (const SourceContent& item : content) {
-        if (!item.node) continue;
-        const SourceNode& node = *item.node;
-        if (node.tag == Tag::Kbd) {
-            const auto shortcut = node.attributes.find("shortcut");
-            if (shortcut != node.attributes.end()) shortcutIds.insert(shortcut->second.value);
-        }
-        collectLocalizedShortcutIds(node.content, shortcutIds);
-    }
-}
-
-std::optional<std::multiset<std::string>> parseLocalizedMarkup(const std::string& source, DiagnosticResult& result, const std::string& sourceName,
-                                                               std::size_t sourceLine) {
+bool parseLocalizedHTML(const std::string& source, DiagnosticResult& result, const std::string& sourceName, std::size_t sourceLine) {
     const SourceDocumentParseResult parsed = SourceDocumentParser().parse("<div>" + source + "</div>", sourceName);
     for (const Diagnostic& diagnostic : parsed.errors)
-        result.error("localization.string.markup_invalid", diagnostic.message, sourceName,
-                     markupLine(sourceLine, {diagnostic.line, diagnostic.column, 0}), diagnostic.column);
-    if (!parsed.ok() || !parsed.document || !parsed.document->root || result.hasErrors()) return std::nullopt;
+        result.error("localization.string.html_invalid", diagnostic.message, sourceName,
+                     htmlLine(sourceLine, {diagnostic.line, diagnostic.column, 0}), diagnostic.column);
+    if (!parsed.ok() || !parsed.document || !parsed.document->root || result.hasErrors()) return false;
 
-    const InlineValidationResult validation = validateInlineContent(parsed.document->root->content, localizedInlineTags());
-    appendLocalizedMarkupDiagnostics(validation, result, sourceName, sourceLine);
-    if (result.hasErrors()) return std::nullopt;
-    std::multiset<std::string> shortcutIds;
-    collectLocalizedShortcutIds(parsed.document->root->content, shortcutIds);
-    return shortcutIds;
+    validateHTMLAttributes(*parsed.document->root, result, sourceName, sourceLine);
+    return !result.hasErrors();
 }
 
 std::optional<std::string> canonicalLanguageTag(const std::string& value) {
@@ -472,9 +426,8 @@ private:
 
         const std::optional<std::string> text = scalar(node, "Localized String " + key);
         if (!text) return std::nullopt;
-        const std::optional<std::multiset<std::string>> shortcutIds = parseLocalizedMarkup(*text, mResult, mSourceName, lineOf(node));
-        if (!shortcutIds) return std::nullopt;
-        return StringValue(*text, *shortcutIds, mSourceName, lineOf(keyNode));
+        if (!parseLocalizedHTML(*text, mResult, mSourceName, lineOf(node))) return std::nullopt;
+        return StringValue(*text, mSourceName, lineOf(keyNode));
     }
 
     const std::string& mYaml;
@@ -496,7 +449,7 @@ std::string unicodeToUtf8(const icu::UnicodeString& value) {
     return result;
 }
 
-std::string escapeMarkup(std::string_view value) {
+std::string escapeHTML(std::string_view value) {
     std::string result;
     for (const char character : value) {
         switch (character) {
@@ -595,7 +548,7 @@ std::optional<FormattedMessage> formatMessage(const LocaleRecord& locale, const 
             if (U_FAILURE(status)) return std::nullopt;
 
             const std::string isolated = std::string(kFirstStrongIsolate) + *text + kPopDirectionalIsolate;
-            formatted.replacements.emplace(token, escapeMarkup(isolated));
+            formatted.replacements.emplace(token, escapeHTML(isolated));
         } else if (const auto* integer = std::get_if<std::int64_t>(&argument.value())) {
             arguments.emplace_back(*integer);
         } else {
@@ -619,13 +572,13 @@ void appendPlainText(const SourceNode& node, std::string& output) {
             continue;
         }
 
-        if (content.node->tag == Tag::Br) output += '\n';
+        if (content.node->tag == HTMLTag::Br) output += '\n';
         else appendPlainText(*content.node, output);
     }
 }
 
-std::optional<std::string> plainTextFromMarkup(const std::string& markup) {
-    const SourceDocumentParseResult parsed = SourceDocumentParser().parse("<div>" + markup + "</div>", "<localized text>");
+std::optional<std::string> plainTextFromHTML(const std::string& html) {
+    const SourceDocumentParseResult parsed = SourceDocumentParser().parse("<div>" + html + "</div>", "<localized text>");
     if (!parsed.ok()) return std::nullopt;
 
     std::string result;
@@ -683,7 +636,7 @@ DiagnosticResult LocalizationCatalog::Impl::load(const std::vector<ResourceLayer
     }
 
     ParsedCatalog base;
-    result.append(parseYamlCatalog(layers.front().source, layers.front().sourceName, true, base));
+    result.append(parseYamlCatalog(layers.front().content, layers.front().provenance, true, base));
     if (result.hasErrors()) return result;
 
     defaultLocale = *base.defaultLocale;
@@ -706,7 +659,7 @@ DiagnosticResult LocalizationCatalog::Impl::load(const std::vector<ResourceLayer
     for (std::size_t layerIndex = 1; layerIndex < layers.size(); ++layerIndex) {
         const ResourceLayer& layer = layers[layerIndex];
         ParsedCatalog patch;
-        result.append(parseYamlCatalog(layer.source, layer.sourceName, false, patch));
+        result.append(parseYamlCatalog(layer.content, layer.provenance, false, patch));
         if (result.hasErrors()) return result;
 
         for (ParsedLocale& parsed : patch.locales) {
@@ -794,17 +747,6 @@ void LocalizationCatalog::Impl::compile(DiagnosticResult& result) {
                 result.error("localization.default.string_missing", "String '" + key + "' exists outside the default locale " + defaultLocale + ".",
                              value.source, value.line);
     }
-
-    for (const auto& [key, defaultValue] : defaults) {
-        for (const LocaleRecord& locale : locales) {
-            const auto found = locale.strings.find(key);
-            if (found == locale.strings.end()) continue;
-            const StringValue& localized = found->second;
-            if (localized.shortcutIds() != defaultValue.shortcutIds())
-                result.error("localization.string.bindings_mismatch", "Translation must preserve the default kbd bindings: " + key + ".",
-                             localized.source, localized.line);
-        }
-    }
 }
 
 LocaleRecord* LocalizationCatalog::Impl::locale(const std::string& localeId) {
@@ -859,10 +801,10 @@ bool LocalizationCatalog::containsDefaultString(const std::string& stringKey) co
     return locale && mImpl->find(*locale, stringKey);
 }
 
-std::string LocalizationCatalog::resolveMarkup(const std::string& localeId, const LocalizedText& text) const {
+std::string LocalizationCatalog::resolveHTML(const std::string& localeId, const LocalizedText& text) const {
     const LocaleRecord* active = mImpl->locale(localeId);
     if (!active) active = mImpl->locale(mImpl->defaultLocale);
-    if (!active) return escapeMarkup(text.key());
+    if (!active) return escapeHTML(text.key());
 
     const StringValue* value = nullptr;
     for (const std::size_t localeIndex : active->fallbackChain) {
@@ -871,13 +813,13 @@ std::string LocalizationCatalog::resolveMarkup(const std::string& localeId, cons
     }
     if (!value) {
         LL_WARNS("UI") << "Unknown localization String Key: " << text.key() << LL_ENDL;
-        return escapeMarkup(text.key());
+        return escapeHTML(text.key());
     }
 
     const std::optional<FormattedMessage> formatted = formatMessage(*active, *value, text);
     if (!formatted) {
         LL_WARNS("UI") << "Could not format localization String Key: " << text.key() << LL_ENDL;
-        return escapeMarkup(text.key());
+        return escapeHTML(text.key());
     }
 
     std::string fallback;
@@ -886,7 +828,7 @@ std::string LocalizationCatalog::resolveMarkup(const std::string& localeId, cons
 }
 
 std::string LocalizationCatalog::resolveText(const std::string& localeId, const LocalizedText& text) const {
-    const std::optional<std::string> plainText = plainTextFromMarkup(resolveMarkup(localeId, text));
+    const std::optional<std::string> plainText = plainTextFromHTML(resolveHTML(localeId, text));
     return plainText.value_or(text.key());
 }
 

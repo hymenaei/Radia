@@ -18,7 +18,7 @@
 #include "componentmanager.h"
 #include "controllerregistration.h"
 #include "documentcontroller.h"
-#include "elements/floater.h"
+#include "html/floater.h"
 #include "reloadcoordinator.h"
 #include "resolver.h"
 #include "skin/compiler.h"
@@ -27,7 +27,7 @@
 
 namespace {
 using radia::ui::Document;
-using radia::ui::FloaterElement;
+using radia::ui::HTMLFloaterElement;
 using radia::ui::ResourceLayer;
 using radia::ui::ResourceSnapshot;
 using radia::ui::SettingResolution;
@@ -45,8 +45,9 @@ using radia::viewer::ui::SkinSnapshotSource;
 using radia::viewer::ui::test::TestFloaterHost;
 using std::chrono_literals::operator""ms;
 using std::chrono_literals::operator""s;
+using ::testing::Test;
 
-constexpr char kEmptyFloaterView[] = "<floater><head><title>reload</title></head><body/></floater>";
+constexpr char kEmptyFloaterView[] = "<floater><head><title>reload</title></head><body></body></floater>";
 
 SettingResolver& missingSettingResolver() {
     class MissingSettingResolver final : public SettingResolver {
@@ -73,10 +74,10 @@ ResourceSnapshot importedStyleSnapshot(std::string entrypoint, std::map<std::str
 
 ResourceSnapshot conflictingEventSnapshot() {
     return skinSnapshot(
-        R"XML(<floater><head><title>events</title></head><body><button onClick="shared()"/><input type="checkbox" switch="true" onChange="shared()"/></body></floater>)XML");
+        R"XML(<floater><head><title>events</title></head><body><button onClick="shared()"></button><input type="checkbox" switch="true" onChange="shared()"></body></floater>)XML");
 }
 
-class SkinReloadCoordinatorTest : public ::testing::Test {
+class SkinReloadCoordinatorTest : public Test {
 protected:
     struct SnapshotSource final : SkinSnapshotSource {
         SkinSnapshotResult capture() const override {
@@ -126,7 +127,7 @@ protected:
         host.replacements = 0;
     }
 
-    FloaterElement* installed(const std::string& definitionId = "component") const {
+    HTMLFloaterElement* installed(const std::string& definitionId = "component") const {
         for (const auto& [root, floater] : host.mounted)
             if (floater && components.componentKeyFor(*floater) == ComponentInstanceKey{definitionId, {}}) return floater.get();
         return nullptr;
@@ -178,7 +179,7 @@ TEST_F(SkinReloadCoordinatorTest, RejectsInvalidCandidateWithoutDisturbingLiveSt
     const auto baseline = update();
     ASSERT_TRUE(baseline.has_value());
     ASSERT_TRUE(baseline->ok());
-    FloaterElement* live = installed();
+    HTMLFloaterElement* live = installed();
     const int commits = componentState.commits;
 
     snapshotSource.snapshot.add("localization.yaml", "defaultLocale: [");
@@ -195,7 +196,7 @@ TEST_F(SkinReloadCoordinatorTest, RejectsInvalidCandidateWithoutDisturbingLiveSt
 
 TEST_F(SkinReloadCoordinatorTest, AcceptsControllerHandlerAcrossEventTypes) {
     snapshotSource.snapshot = conflictingEventSnapshot();
-    FloaterElement* live = installed();
+    HTMLFloaterElement* live = installed();
     coordinator.request();
 
     const auto rejected = update();
@@ -315,8 +316,8 @@ TEST_F(SkinReloadCoordinatorTest, ReplacesEveryOpenComponentInOneGeneration) {
     }));
     ASSERT_TRUE(components.open("second").ok());
     secondComponentState.commits = 0;
-    FloaterElement* firstLive = installed();
-    FloaterElement* secondLive = installed("second");
+    HTMLFloaterElement* firstLive = installed();
+    HTMLFloaterElement* secondLive = installed("second");
     coordinator.request();
 
     const auto result = update();
@@ -339,8 +340,8 @@ TEST_F(SkinReloadCoordinatorTest, ReplacesEveryComponentWhenHandlersCoverMultipl
     ASSERT_TRUE(components.open("second").ok());
     componentState.commits = 0;
     rejectedComponentState.commits = 0;
-    FloaterElement* firstLive = installed();
-    FloaterElement* secondLive = installed("second");
+    HTMLFloaterElement* firstLive = installed();
+    HTMLFloaterElement* secondLive = installed("second");
     snapshotSource.snapshot = conflictingEventSnapshot();
     coordinator.request();
 
@@ -356,7 +357,7 @@ TEST_F(SkinReloadCoordinatorTest, ReplacesEveryComponentWhenHandlersCoverMultipl
 }
 
 TEST_F(SkinReloadCoordinatorTest, PreservesLiveStateWhenHostRejectsReplacement) {
-    FloaterElement* live = installed();
+    HTMLFloaterElement* live = installed();
     host.rejectReplacements = true;
     coordinator.request();
 
@@ -379,8 +380,8 @@ TEST_F(SkinReloadCoordinatorTest, PreservesEveryComponentWhenHostRejectsMultiRoo
     ASSERT_TRUE(components.open("second").ok());
     componentState.commits = 0;
     secondComponentState.commits = 0;
-    FloaterElement* firstLive = installed();
-    FloaterElement* secondLive = installed("second");
+    HTMLFloaterElement* firstLive = installed();
+    HTMLFloaterElement* secondLive = installed("second");
     host.failCommit = true;
     coordinator.request();
 

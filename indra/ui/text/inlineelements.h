@@ -7,12 +7,13 @@
 
 #include <string>
 #include <vector>
+#include "html/elementnames.h"
 #include "layout/buildresult.h"
 #include "layout/document.h"
 
 namespace radia::ui {
 class Element;
-class LayoutBuildContext;
+class ElementBuildContext;
 
 enum class InlineValidationKind {
     UnsupportedElement,
@@ -25,7 +26,7 @@ enum class InlineValidationKind {
 
 struct InlineValidationFinding {
     InlineValidationKind kind;
-    Tag tag = Tag::Unknown;
+    HTMLTag tag = HTMLTag::Unknown;
     SourceRange elementSource;
     SourceRange source;
     std::string elementName;
@@ -36,9 +37,8 @@ struct InlineValidationResult {
     std::vector<InlineValidationFinding> findings;
 };
 
-InlineValidationResult validateInlineContent(const std::vector<SourceContent>& contentItems, const std::vector<Tag>& acceptedElements);
+InlineValidationResult validateInlineContent(const std::vector<SourceContent>& contentItems, const std::vector<HTMLTag>& acceptedTags);
 
-void appendInlineElements(Element& target, const std::vector<SourceContent>& contentItems, const std::string& hostElementName,
-                          const std::vector<Tag>& acceptedElements, LayoutBuildResult& result, const std::string& source,
-                          const LayoutBuildContext* context);
+void appendInlineElements(Element& target, const std::vector<SourceContent>& contentItems, const std::string& hostName,
+                          const std::vector<HTMLTag>& acceptedTags, ElementBuildContext& context, const std::string& sourceName);
 } // namespace radia::ui

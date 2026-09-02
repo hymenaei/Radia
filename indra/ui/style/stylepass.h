@@ -11,8 +11,9 @@
 #include <memory>
 #include <unordered_map>
 #include <vector>
-#include "elements/element.h"
-#include "elements/elementinternal.h"
+#include "dom/element.h"
+#include "dom/elementinternal.h"
+#include "style/pseudoelement.h"
 #include "layout/treecache.h"
 #include "style/style.h"
 #include "style/stylesheet.h"
@@ -34,8 +35,7 @@ public:
         StylePass* mPass;
     };
 
-    StylePass(const StyleSheet& styleSheet, const TextMetrics& textMetrics,
-              LayoutDirection direction = LayoutDirection::LeftToRight,
+    StylePass(const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction = LayoutDirection::LeftToRight,
               const NativeAppearance* nativeAppearance = nullptr);
     StylePass(const StylePass&) = delete;
     StylePass& operator=(const StylePass&) = delete;
@@ -53,11 +53,12 @@ public:
     TraversalScope enterTraversal() { return TraversalScope(*this); }
     bool active() const { return mTraversalDepth != 0; }
     const Style& style(const Element& element);
+    Style style(PseudoElement& pseudoElement);
+    void styleGeneratedPseudoElements(const Element& element, const Style& ownerStyle);
     ChildSnapshot orderedChildren(Element& parent);
     ChildSnapshot sourceChildren(Element& parent);
     const LayoutContextKey& contextKey() const { return mContext; }
-    bool matches(const StyleSheet& styleSheet, const TextMetrics& textMetrics,
-                 LayoutDirection direction = LayoutDirection::LeftToRight,
+    bool matches(const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction = LayoutDirection::LeftToRight,
                  const NativeAppearance* nativeAppearance = nullptr) const;
     const StyleSheet& styleSheet() const { return mStyleSheet; }
     const TextMetrics& textMetrics() const { return mTextMetrics; }

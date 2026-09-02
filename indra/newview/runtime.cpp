@@ -14,9 +14,9 @@
 #include <utility>
 #include <vector>
 #include "componentmanager.h"
-#include "elements/button.h"
-#include "elements/floater.h"
 #include "floaterhost.h"
+#include "html/button.h"
+#include "html/floater.h"
 #include "llgl.h"
 #include "llrender.h"
 #include "llrendertarget.h"
@@ -78,7 +78,7 @@ namespace radia::viewer::ui {
 using radia::ui::CursorStyle;
 using radia::ui::Diagnostic;
 using radia::ui::DiagnosticResult;
-using radia::ui::FloaterElement;
+using radia::ui::HTMLFloaterElement;
 using radia::ui::KeybindingPresentation;
 using radia::ui::KeyEvent;
 using radia::ui::kKeyTab;
@@ -164,11 +164,11 @@ public:
         mInitialization = InitializationState::Failed;
     }
 
-    bool registerFloater(std::string definitionId, std::string resourceId, Runtime::ControllerFactory factory) {
-        return mComponents.registerDefinition(std::move(definitionId), std::move(resourceId), std::move(factory));
+    bool registerFloater(std::string definitionId, std::string resource, Runtime::ControllerFactory factory) {
+        return mComponents.registerDefinition(std::move(definitionId), std::move(resource), std::move(factory));
     }
 
-    FloaterElement* openFloater(const std::string& definitionId, const std::string& instanceKey) {
+    HTMLFloaterElement* openFloater(const std::string& definitionId, const std::string& instanceKey) {
         if (mInitialization != InitializationState::Ready) return nullptr;
         ComponentOpenResult result = mComponents.open(definitionId, instanceKey);
         logDiagnostics(result);
@@ -326,7 +326,7 @@ private:
         if (!mWorkspaceRestored || !mPersistenceDirty || mRestoringWorkspace) return;
         std::vector<ComponentInstanceState> states;
         mComponents.forEachOpen(
-            [&](const ComponentInstanceKey& componentKey, FloaterElement& floater) { states.push_back({componentKey, floater.minimized()}); });
+            [&](const ComponentInstanceKey& componentKey, HTMLFloaterElement& floater) { states.push_back({componentKey, floater.minimized()}); });
 
         const std::vector<ComponentInstanceKey> preserved(mUnrestoredWorkspace.begin(), mUnrestoredWorkspace.end());
         mWorkspacePersistence.saveWorkspace(states, preserved);
@@ -358,13 +358,13 @@ private:
     static bool isSurfaceTab(const KeyEvent& event) { return event.key == kKeyTab && (event.modifiers & ~kModifierShift) == 0; }
 
     bool dragCursorClippingRequired() const {
-        const FloaterElement* floater = draggingFloater();
+        const HTMLFloaterElement* floater = draggingFloater();
         return floater && floater->minimized();
     }
 
-    FloaterElement* draggingFloater() const {
-        FloaterElement* result = nullptr;
-        mComponents.forEachOpen([&](const ComponentInstanceKey&, FloaterElement& floater) {
+    HTMLFloaterElement* draggingFloater() const {
+        HTMLFloaterElement* result = nullptr;
+        mComponents.forEachOpen([&](const ComponentInstanceKey&, HTMLFloaterElement& floater) {
             if (!result && floater.dragging()) result = &floater;
         });
         return result;
@@ -378,41 +378,41 @@ private:
 
     void clearDragCursorState() { setDragCursorClipping(false); }
 
-    void floaterClosed(Surface&, FloaterElement&) override {
+    void floaterClosed(Surface&, HTMLFloaterElement&) override {
         clearInteraction();
         mPersistenceDirty = true;
     }
 
-    void floaterMinimizedChanged(Surface&, FloaterElement& floater) override {
+    void floaterMinimizedChanged(Surface&, HTMLFloaterElement& floater) override {
         saveFloaterPlacement(floater);
         mPersistenceDirty = true;
     }
 
-    void floaterMoveEnded(Surface&, FloaterElement& floater) override {
+    void floaterMoveEnded(Surface&, HTMLFloaterElement& floater) override {
         saveFloaterPlacement(floater);
         mPersistenceDirty = true;
     }
 
-    void floaterResizeEnded(Surface&, FloaterElement& floater) override {
+    void floaterResizeEnded(Surface&, HTMLFloaterElement& floater) override {
         saveFloaterPlacement(floater);
         mPersistenceDirty = true;
     }
 
-    void saveFloaterPlacement(const FloaterElement& floater) {
+    void saveFloaterPlacement(const HTMLFloaterElement& floater) {
         if (const std::optional<ComponentInstanceKey> componentKey = mComponents.componentKeyFor(floater))
             saveFloaterPlacement(*componentKey, floater);
     }
 
-    void saveFloaterPlacement(const ComponentInstanceKey& componentKey, const FloaterElement& floater) {
+    void saveFloaterPlacement(const ComponentInstanceKey& componentKey, const HTMLFloaterElement& floater) {
         mWorkspacePersistence.saveFloaterPlacement(componentKey, floater);
     }
 
     void saveFloaterPlacements() {
         mComponents.forEachOpen(
-            [this](const ComponentInstanceKey& componentKey, FloaterElement& floater) { saveFloaterPlacement(componentKey, floater); });
+            [this](const ComponentInstanceKey& componentKey, HTMLFloaterElement& floater) { saveFloaterPlacement(componentKey, floater); });
     }
 
-    void restorePlacement(const ComponentInstanceKey& componentKey, FloaterElement& floater) {
+    void restorePlacement(const ComponentInstanceKey& componentKey, HTMLFloaterElement& floater) {
         const std::optional<radia::viewer::ui::FloaterPlacement> placement = mWorkspacePersistence.restorePlacement(componentKey);
         if (!placement) return;
         const auto& restored = *placement;
@@ -431,7 +431,7 @@ private:
         mSurfaceState.width = width;
         mSurfaceState.height = height;
         surface().setViewport(static_cast<float>(width), static_cast<float>(height));
-        mComponents.forEachOpen([&](const ComponentInstanceKey& componentKey, FloaterElement& floater) {
+        mComponents.forEachOpen([&](const ComponentInstanceKey& componentKey, HTMLFloaterElement& floater) {
             auto found = mLayoutInitialized.find(componentKey);
             if (found != mLayoutInitialized.end() && found->second == &floater) return;
             mLayoutInitialized[componentKey] = &floater;
@@ -463,7 +463,7 @@ private:
     bool mPersistenceDirty = false;
     std::set<ComponentInstanceKey> mUnrestoredWorkspace;
     std::optional<RuntimeKeybindingState> mObservedBindingState;
-    std::map<ComponentInstanceKey, FloaterElement*> mLayoutInitialized;
+    std::map<ComponentInstanceKey, HTMLFloaterElement*> mLayoutInitialized;
     bool mShuttingDown = false;
     bool mTabKeyOwned = false;
 };
@@ -481,11 +481,11 @@ void Runtime::shutdown() {
     mImpl->shutdown();
 }
 
-bool Runtime::registerFloater(std::string definitionId, std::string resourceId, ControllerFactory factory) {
-    return mImpl->registerFloater(std::move(definitionId), std::move(resourceId), std::move(factory));
+bool Runtime::registerFloater(std::string definitionId, std::string resource, ControllerFactory factory) {
+    return mImpl->registerFloater(std::move(definitionId), std::move(resource), std::move(factory));
 }
 
-FloaterElement* Runtime::openFloater(const std::string& definitionId, const std::string& instanceKey) {
+HTMLFloaterElement* Runtime::openFloater(const std::string& definitionId, const std::string& instanceKey) {
     return mImpl->openFloater(definitionId, instanceKey);
 }
 

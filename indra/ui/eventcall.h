@@ -12,12 +12,30 @@
 #include <string_view>
 #include <variant>
 #include <vector>
+#include "event.h"
 
 namespace radia::ui {
 struct SourceElementArgument {};
 struct CurrentEventArgument {};
 
 using EventArgument = std::variant<std::int64_t, std::string, bool, SourceElementArgument, CurrentEventArgument>;
+
+struct AuthoredEventDescriptor {
+    std::string_view attribute;
+    std::string_view type;
+};
+
+inline constexpr AuthoredEventDescriptor kAuthoredEventDescriptors[] = {
+    {"onClick", kClickEvent},
+    {"onDoubleClick", kDoubleClickEvent},
+    {"onInput", kInputEvent},
+    {"onChange", kChangeEvent},
+    {"onPointerDown", kPointerDownEvent},
+    {"onPointerUp", kPointerUpEvent},
+    {"onPointerMove", kPointerMoveEvent},
+    {"onContextMenu", kContextMenuEvent},
+    {"onWheel", kWheelEvent},
+};
 
 class EventCall {
 public:
@@ -30,6 +48,10 @@ private:
     std::string mName;
     std::vector<EventArgument> mArguments;
 };
+
+class Element;
+Element& setAuthoredEventCall(Element& element, std::string_view type, EventCall call);
+const EventCall* authoredEventCall(const Element& element, std::string_view type);
 
 enum class EventCallParseError : std::uint8_t { NoError, CallRequired, NameInvalid, SyntaxInvalid, LiteralUnsupported, IntegerOutOfRange };
 

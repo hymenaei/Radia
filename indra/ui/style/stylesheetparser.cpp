@@ -7,11 +7,12 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <iterator>
 #include <limits>
 #include <map>
-#include "elements/elementdefinition.h"
-#include "layout/schema.h"
+#include "html/elementnames.h"
+#include "resource/elementdefinition.h"
 #include "style/color.h"
 #include "style/model.h"
 #include "style/stylesheet.h"
@@ -71,13 +72,154 @@ bool isSupportedState(const std::string& state) {
         || state == "indeterminate";
 }
 
+bool isCSSWhitespace(char character) {
+    return character == '\t' || character == '\n' || character == '\f' || character == '\r' || character == ' ';
+}
+
+bool isCSSNameStart(char character) {
+    const auto value = static_cast<unsigned char>(character);
+    return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || character == '_' || value >= 0x80;
+}
+
+bool isCSSNameCodePoint(char character) {
+    const auto value = static_cast<unsigned char>(character);
+    return isCSSNameStart(character) || (value >= '0' && value <= '9') || character == '-';
+}
+
+bool isCSSHexDigit(char character) {
+    const auto value = static_cast<unsigned char>(character);
+    return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f') || (value >= 'A' && value <= 'F');
+}
+
+bool isValidCSSEscape(std::string_view value, std::size_t offset) {
+    if (offset + 1 >= value.size() || value[offset] != '\\') return false;
+    return value[offset + 1] != '\n' && value[offset + 1] != '\r' && value[offset + 1] != '\f';
+}
+
+std::size_t consumeCSSEscape(std::string_view value, std::size_t offset) {
+    std::size_t position = offset + 1;
+    if (position >= value.size() || !isCSSHexDigit(value[position])) return position + (position < value.size() ? 1 : 0);
+    std::size_t digits = 0;
+    while (position < value.size() && digits < 6 && isCSSHexDigit(value[position])) {
+        ++position;
+        ++digits;
+    }
+    if (position < value.size() && isCSSWhitespace(value[position])) ++position;
+    return position;
+}
+
+std::size_t findUnescaped(std::string_view value, char target, std::size_t start = 0) {
+    for (std::size_t position = start; position < value.size(); ++position) {
+        if (value[position] == '\\' && isValidCSSEscape(value, position)) {
+            position = consumeCSSEscape(value, position) - 1;
+            continue;
+        }
+        if (value[position] == target) return position;
+    }
+    return std::string_view::npos;
+}
+
+std::size_t findUnescapedSequence(std::string_view value, std::string_view target, std::size_t start = 0) {
+    if (target.empty()) return start <= value.size() ? start : std::string_view::npos;
+    for (std::size_t position = start; position + target.size() <= value.size(); ++position) {
+        if (value[position] == '\\' && isValidCSSEscape(value, position)) {
+            position = consumeCSSEscape(value, position) - 1;
+            continue;
+        }
+        if (value.compare(position, target.size(), target) == 0) return position;
+    }
+    return std::string_view::npos;
+}
+
+std::size_t consumeSelectorComponent(std::string_view value, std::size_t position) {
+    while (position < value.size() && !isCSSWhitespace(value[position]) && value[position] != '>')
+        if (value[position] == '\\' && isValidCSSEscape(value, position)) position = consumeCSSEscape(value, position);
+        else ++position;
+    return position;
+}
+
+bool isValidCSSIdentifier(std::string_view value) {
+    if (value.empty()) return false;
+
+    std::size_t position = 0;
+    if (value[position] == '-') {
+        if (value.size() == 1) return false;
+        ++position;
+        if (value[position] == '-') ++position;
+        else if (isCSSNameStart(value[position])) ++position;
+        else if (isValidCSSEscape(value, position)) position = consumeCSSEscape(value, position);
+        else return false;
+    } else if (isCSSNameStart(value[position])) {
+        ++position;
+    } else if (isValidCSSEscape(value, position)) {
+        position = consumeCSSEscape(value, position);
+    } else {
+        return false;
+    }
+
+    while (position < value.size())
+        if (isCSSNameCodePoint(value[position])) ++position;
+        else if (isValidCSSEscape(value, position)) position = consumeCSSEscape(value, position);
+        else return false;
+    return true;
+}
+
+void appendCSSCodePoint(std::string& result, std::uint32_t codePoint) {
+    if (codePoint == 0 || codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) codePoint = 0xfffd;
+    if (codePoint <= 0x7f) result.push_back(static_cast<char>(codePoint));
+    else if (codePoint <= 0x7ff) {
+        result.push_back(static_cast<char>(0xc0 | (codePoint >> 6)));
+        result.push_back(static_cast<char>(0x80 | (codePoint & 0x3f)));
+    } else if (codePoint <= 0xffff) {
+        result.push_back(static_cast<char>(0xe0 | (codePoint >> 12)));
+        result.push_back(static_cast<char>(0x80 | ((codePoint >> 6) & 0x3f)));
+        result.push_back(static_cast<char>(0x80 | (codePoint & 0x3f)));
+    } else {
+        result.push_back(static_cast<char>(0xf0 | (codePoint >> 18)));
+        result.push_back(static_cast<char>(0x80 | ((codePoint >> 12) & 0x3f)));
+        result.push_back(static_cast<char>(0x80 | ((codePoint >> 6) & 0x3f)));
+        result.push_back(static_cast<char>(0x80 | (codePoint & 0x3f)));
+    }
+}
+
+std::string decodeCSSIdentifier(std::string_view value) {
+    std::string result;
+    result.reserve(value.size());
+    for (std::size_t position = 0; position < value.size();) {
+        if (value[position] != '\\') {
+            result.push_back(value[position++]);
+            continue;
+        }
+        const std::size_t escapeStart = position++;
+        if (position >= value.size()) {
+            result.push_back(value[escapeStart]);
+            continue;
+        }
+        if (!isCSSHexDigit(value[position])) {
+            result.push_back(value[position++]);
+            continue;
+        }
+        std::uint32_t codePoint = 0;
+        std::size_t digits = 0;
+        while (position < value.size() && digits < 6 && isCSSHexDigit(value[position])) {
+            codePoint *= 16;
+            const auto digit = static_cast<unsigned char>(value[position++]);
+            codePoint += digit <= '9' ? digit - '0' : (digit >= 'a' && digit <= 'f' ? digit - 'a' + 10 : digit - 'A' + 10);
+            ++digits;
+        }
+        if (position < value.size() && isCSSWhitespace(value[position])) ++position;
+        appendCSSCodePoint(result, codePoint);
+    }
+    return result;
+}
+
 void appendSelectorState(StyleSelector& selector, const std::string& state) {
     if (selector.state.empty()) selector.state = state;
     else selector.state += ":" + state;
 }
 
 void parsePseudoClasses(std::string& token, StyleSelector& result) {
-    const std::size_t separator = token.find(':');
+    const std::size_t separator = findUnescaped(token, ':');
     if (separator == std::string::npos) return;
 
     const std::string pseudoClasses = token.substr(separator);
@@ -138,7 +280,7 @@ std::pair<std::size_t, std::size_t> sourcePosition(const std::string& source, st
     return {line, column};
 }
 
-std::optional<std::string> normalizeImportPath(const std::string& current, const std::string& requestedPath) {
+std::optional<std::string> normalizeImportPath(const std::string& currentId, const std::string& requestedPath) {
     if (requestedPath.empty()
         || requestedPath.front() == '/'
         || requestedPath.find('\\') != std::string::npos
@@ -148,8 +290,8 @@ std::optional<std::string> normalizeImportPath(const std::string& current, const
     }
 
     std::vector<std::string> segments;
-    const std::size_t slash = current.rfind('/');
-    const std::string combined = (slash == std::string::npos ? std::string() : current.substr(0, slash + 1)) + requestedPath;
+    const std::size_t slash = currentId.rfind('/');
+    const std::string combined = (slash == std::string::npos ? std::string() : currentId.substr(0, slash + 1)) + requestedPath;
     std::size_t start = 0;
     while (start <= combined.size()) {
         const std::size_t end = combined.find('/', start);
@@ -193,74 +335,107 @@ StyleSelector mergeSelector(const StyleSelector& parent, const StyleSelector& ch
     result.universal = child.universal ? true : parent.universal;
     result.root = parent.root || child.root;
     result.attributeSyntaxInvalid = parent.attributeSyntaxInvalid || child.attributeSyntaxInvalid;
+    result.idSyntaxInvalid = parent.idSyntaxInvalid || child.idSyntaxInvalid;
+    result.classSyntaxInvalid = parent.classSyntaxInvalid || child.classSyntaxInvalid;
     result.directionSyntaxInvalid = parent.directionSyntaxInvalid || child.directionSyntaxInvalid;
     result.element = child.element.empty() ? parent.element : child.element;
-    const bool childHasAttribute = !child.attributeName.empty();
-    result.attributeName = childHasAttribute ? child.attributeName : parent.attributeName;
-    result.attributeValue = childHasAttribute ? child.attributeValue : parent.attributeValue;
-    result.attributePresence = childHasAttribute ? child.attributePresence : parent.attributePresence;
+    result.attributes = parent.attributes;
+    result.attributes.insert(result.attributes.end(), child.attributes.begin(), child.attributes.end());
     result.id = child.id.empty() ? parent.id : child.id;
     result.className = child.className.empty() ? parent.className : child.className;
     result.state = parent.state;
-    result.partState = parent.partState;
+    result.pseudoElementSyntaxInvalid =
+        parent.pseudoElementSyntaxInvalid || child.pseudoElementSyntaxInvalid || (!parent.pseudoElement.empty() && !child.pseudoElement.empty());
     result.direction = child.direction ? child.direction : parent.direction;
     if (!child.state.empty()) {
-        if (parent.parts.empty()) result.state = child.state;
-        else result.partState = child.state;
+        if (parent.pseudoElement.empty()) result.state = child.state;
+        else result.pseudoElementSyntaxInvalid = true;
     }
-    if (!child.partState.empty()) result.partState = child.partState;
-    result.parts = parent.parts;
-    result.parts.insert(result.parts.end(), child.parts.begin(), child.parts.end());
+    result.pseudoElement = child.pseudoElement.empty() ? parent.pseudoElement : child.pseudoElement;
     return result;
 }
 
 void parseAttributeSelector(std::string& token, StyleSelector& result) {
-    const std::size_t open = token.find('[');
-    if (open == std::string::npos) return;
-    const std::size_t close = token.find(']', open + 1);
-    if (close == std::string::npos || close != token.size() - 1 || token.find('[', open + 1) != std::string::npos) {
-        result.attributeSyntaxInvalid = true;
-        token.erase(open);
-        return;
-    }
+    while (true) {
+        const std::size_t open = findUnescaped(token, '[');
+        if (open == std::string::npos) return;
 
-    const std::string expression = token.substr(open + 1, close - open - 1);
-    const std::size_t equals = expression.find('=');
-    if (equals == std::string::npos) {
-        result.attributeName = lower(trim(expression));
-        if (result.attributeName.empty()) result.attributeSyntaxInvalid = true;
-        else result.attributePresence = true;
-        token.erase(open);
-        return;
-    }
-    if (expression.find('=', equals + 1) != std::string::npos) {
-        result.attributeSyntaxInvalid = true;
-        token.erase(open);
-        return;
-    }
-
-    result.attributeName = lower(trim(expression.substr(0, equals)));
-    std::string value = trim(expression.substr(equals + 1));
-    if (result.attributeName.empty() || value.empty()) {
-        result.attributeSyntaxInvalid = true;
-        token.erase(open);
-        return;
-    }
-    if (value.front() == '\'' || value.front() == '"') {
-        if (value.size() < 2 || value.back() != value.front()) {
+        char quote = 0;
+        std::size_t close = open + 1;
+        for (; close < token.size(); ++close) {
+            const char character = token[close];
+            if (quote) {
+                if (character == quote && token[close - 1] != '\\') quote = 0;
+            } else if (character == '\'' || character == '"') {
+                quote = character;
+            } else if (character == ']') {
+                break;
+            }
+        }
+        if (close == token.size() || quote) {
             result.attributeSyntaxInvalid = true;
             token.erase(open);
             return;
         }
-        value = value.substr(1, value.size() - 2);
-    } else if (!isElementIdentifier(value)) {
-        result.attributeSyntaxInvalid = true;
-        token.erase(open);
-        return;
+
+        const std::string expression = token.substr(open + 1, close - open - 1);
+        std::size_t equals = std::string::npos;
+        quote = 0;
+        for (std::size_t index = 0; index < expression.size(); ++index) {
+            const char character = expression[index];
+            if (quote) {
+                if (character == quote && expression[index - 1] != '\\') quote = 0;
+            } else if (character == '\'' || character == '"') {
+                quote = character;
+            } else if (character == '=') {
+                if (equals != std::string::npos) {
+                    result.attributeSyntaxInvalid = true;
+                    token.erase(open);
+                    return;
+                }
+                equals = index;
+            }
+        }
+
+        StyleAttributeSelector attribute;
+        if (equals == std::string::npos) {
+            attribute.name = lower(trim(expression));
+            if (attribute.name.empty()) {
+                result.attributeSyntaxInvalid = true;
+                token.erase(open);
+                return;
+            }
+            attribute.presence = true;
+        } else {
+            attribute.name = lower(trim(expression.substr(0, equals)));
+            std::string value = trim(expression.substr(equals + 1));
+            if (attribute.name.empty() || value.empty()) {
+                result.attributeSyntaxInvalid = true;
+                token.erase(open);
+                return;
+            }
+            if (value.front() == '\'' || value.front() == '"') {
+                if (value.size() < 2 || value.back() != value.front()) {
+                    result.attributeSyntaxInvalid = true;
+                    token.erase(open);
+                    return;
+                }
+                value = value.substr(1, value.size() - 2);
+            } else if (!isValidCSSIdentifier(value)) {
+                result.attributeSyntaxInvalid = true;
+                token.erase(open);
+                return;
+            }
+            if (value.empty()) {
+                result.attributeSyntaxInvalid = true;
+                token.erase(open);
+                return;
+            }
+            attribute.value = decodeCSSIdentifier(value);
+        }
+        result.attributes.push_back(std::move(attribute));
+        token.erase(open, close - open + 1);
     }
-    if (value.empty()) result.attributeSyntaxInvalid = true;
-    else result.attributeValue = value;
-    token.erase(open);
 }
 
 void appendSelector(StyleRule& destination, const StyleRule& suffix, SelectorCombinator combinator) {
@@ -284,7 +459,7 @@ StyleRule expandNestedSelector(const StyleRule& parent, const std::string& rawSe
 
     const std::string tail = selector.substr(1);
     if (tail.empty()) return result;
-    if (std::isspace(static_cast<unsigned char>(tail.front())) || tail.front() == '>') {
+    if (isCSSWhitespace(tail.front()) || tail.front() == '>') {
         const std::string trimmedTail = trim(tail);
         const bool child = !trimmedTail.empty() && trimmedTail.front() == '>';
         const std::string suffix = trim(trimmedTail.substr(child ? 1 : 0));
@@ -292,8 +467,7 @@ StyleRule expandNestedSelector(const StyleRule& parent, const std::string& rawSe
         return result;
     }
 
-    std::size_t split = 0;
-    while (split < tail.size() && !std::isspace(static_cast<unsigned char>(tail[split])) && tail[split] != '>') ++split;
+    const std::size_t split = consumeSelectorComponent(tail, 0);
     const StyleRule continuation = detail::parseSelector(tail.substr(0, split));
     if (!continuation.selectors.empty() && !result.selectors.empty())
         result.selectors.back() = mergeSelector(result.selectors.back(), continuation.selectors.front());
@@ -310,24 +484,28 @@ StyleSelector parseSimpleSelector(const std::string& selectorText) {
     StyleSelector result;
     std::string token = trim(selectorText);
 
-    if (const std::size_t separator = token.find("::"); separator != std::string::npos) {
-        std::string partToken = token.substr(separator + 2);
-        if (const std::size_t stateSeparator = partToken.rfind(':');
-            stateSeparator != std::string::npos && (stateSeparator == 0 || partToken[stateSeparator - 1] != ':')) {
-            result.partState = partToken.substr(stateSeparator + 1);
-            partToken.erase(stateSeparator);
-        }
-        result.parts = detail::splitPartPath(partToken);
+    if (const std::size_t separator = findUnescapedSequence(token, "::"); separator != std::string::npos) {
+        const std::string pseudoElement = trim(token.substr(separator + 2));
+        if (pseudoElement.empty()
+            || findUnescapedSequence(pseudoElement, "::") != std::string::npos
+            || findUnescaped(pseudoElement, ':') != std::string::npos)
+            result.pseudoElementSyntaxInvalid = true;
+        else if (!isValidCSSIdentifier(pseudoElement)) result.pseudoElementSyntaxInvalid = true;
+        else result.pseudoElement = decodeCSSIdentifier(pseudoElement);
         token.erase(separator);
     }
     parsePseudoClasses(token, result);
     parseAttributeSelector(token, result);
-    if (const std::size_t separator = token.find('#'); separator != std::string::npos) {
-        result.id = token.substr(separator + 1);
+    if (const std::size_t separator = findUnescaped(token, '#'); separator != std::string::npos) {
+        const std::string value = token.substr(separator + 1);
+        if (!isValidCSSIdentifier(value)) result.idSyntaxInvalid = true;
+        else result.id = decodeCSSIdentifier(value);
         token.erase(separator);
     }
-    if (const std::size_t separator = token.find('.'); separator != std::string::npos) {
-        result.className = token.substr(separator + 1);
+    if (const std::size_t separator = findUnescaped(token, '.'); separator != std::string::npos) {
+        const std::string value = token.substr(separator + 1);
+        if (!isValidCSSIdentifier(value)) result.classSyntaxInvalid = true;
+        else result.className = decodeCSSIdentifier(value);
         token.erase(separator);
     }
     result.universal = token == "*";
@@ -341,14 +519,14 @@ struct ParsedRuleBlock {
 };
 
 struct ParsedImport {
-    std::string resourceId;
+    std::string id;
     std::string requestedPath;
     std::size_t line = 1;
     std::size_t column = 1;
 };
 
 struct ParsedModule {
-    std::string resourceId;
+    std::string id;
     std::string sourceName;
     std::vector<ParsedImport> imports;
     std::vector<ParsedRuleBlock> rules;
@@ -361,13 +539,13 @@ public:
 
     bool build(const std::string& entrypoint) {
         std::vector<std::string> importStack;
-        return ensureParsed(entrypoint, mLayer.source, mLayer.sourceName, importStack);
+        return ensureParsed(entrypoint, mLayer.content, mLayer.provenance, importStack);
     }
 
-    template<typename Callback> void visit(const std::string& resourceId, Callback& callback) const {
+    template<typename Callback> void visit(const std::string& id, Callback& callback) const {
         std::vector<std::string> importStack;
         std::vector<VisitEntry> moduleVisits;
-        collectModules(resourceId, importStack, moduleVisits);
+        collectModules(id, importStack, moduleVisits);
 
         const auto emit = [&](const VisitEntry& entry, StyleParsePass pass) {
             for (const ParsedRuleBlock& rule : entry.module->rules) {
@@ -392,8 +570,8 @@ private:
         std::vector<std::string> importChain;
     };
 
-    std::optional<ParsedModule> parseSyntax(const std::string& source, const std::string& resourceId, const std::string& sourceName) {
-        ParsedModule module{resourceId, sourceName};
+    std::optional<ParsedModule> parseSyntax(const std::string& source, const std::string& id, const std::string& sourceName) {
+        ParsedModule module{id, sourceName};
         bool sawRule = false;
         std::size_t position = 0;
         while (position < source.size() && !mResult.hasErrors()) {
@@ -418,13 +596,13 @@ private:
                     return std::nullopt;
                 }
                 const std::string requestedPath = argument.substr(1, argument.size() - 2);
-                const std::optional<std::string> importedId = normalizeImportPath(resourceId, requestedPath);
+                const std::optional<std::string> importedId = normalizeImportPath(id, requestedPath);
                 if (!importedId) {
                     mResult.error("stylesheet.import.path_invalid", "Invalid or escaping @import path: " + requestedPath + ".", sourceName, line,
                                   column);
                     return std::nullopt;
                 }
-                mModel.dependencies[sourceName].insert(mLayer.sourceNameFor(*importedId));
+                mModel.dependencies[sourceName].insert(mLayer.provenanceFor(*importedId));
                 module.imports.push_back({*importedId, requestedPath, line, column});
                 position = *semicolon + 1;
                 continue;
@@ -458,50 +636,49 @@ private:
         return module;
     }
 
-    bool ensureParsed(const std::string& resourceId, const std::string& source, const std::string& sourceName,
-                      std::vector<std::string>& importStack) {
-        if (mModules.find(resourceId) != mModules.end()) return true;
-        const std::optional<ParsedModule> parsed = parseSyntax(source, resourceId, sourceName);
+    bool ensureParsed(const std::string& id, const std::string& source, const std::string& sourceName, std::vector<std::string>& importStack) {
+        if (mModules.find(id) != mModules.end()) return true;
+        const std::optional<ParsedModule> parsed = parseSyntax(source, id, sourceName);
         if (!parsed) return false;
-        mModules.emplace(resourceId, *parsed);
-        importStack.push_back(resourceId);
+        mModules.emplace(id, *parsed);
+        importStack.push_back(id);
         for (const ParsedImport& imported : parsed->imports) {
-            if (std::find(importStack.begin(), importStack.end(), imported.resourceId) != importStack.end()) {
-                mResult.error("stylesheet.import.cycle", "Cyclic @import: " + importChain(importStack, imported.resourceId) + ".", sourceName,
-                              imported.line, imported.column);
+            if (std::find(importStack.begin(), importStack.end(), imported.id) != importStack.end()) {
+                mResult.error("stylesheet.import.cycle", "Cyclic @import: " + importChain(importStack, imported.id) + ".", sourceName, imported.line,
+                              imported.column);
                 continue;
             }
-            const std::string importedName = mLayer.sourceNameFor(imported.resourceId);
+            const std::string importedName = mLayer.provenanceFor(imported.id);
             const std::string* importedSource = nullptr;
-            if (imported.resourceId == mLayer.entrypoint) importedSource = &mLayer.source;
-            else if (const auto found = mLayer.modules.find(imported.resourceId); found != mLayer.modules.end()) importedSource = &found->second;
+            if (imported.id == mLayer.entrypoint) importedSource = &mLayer.content;
+            else if (const auto found = mLayer.modules.find(imported.id); found != mLayer.modules.end()) importedSource = &found->second;
             if (!importedSource) {
                 mResult.error("stylesheet.import.missing",
                               "Imported stylesheet module is missing: "
                                   + imported.requestedPath
                                   + ". Import chain: "
-                                  + importChain(importStack, imported.resourceId)
+                                  + importChain(importStack, imported.id)
                                   + ".",
                               sourceName, imported.line, imported.column);
                 continue;
             }
             const std::size_t firstError = mResult.errors.size();
-            ensureParsed(imported.resourceId, *importedSource, importedName, importStack);
+            ensureParsed(imported.id, *importedSource, importedName, importStack);
             for (std::size_t index = firstError; index < mResult.errors.size(); ++index)
                 if (mResult.errors[index].message.find("Import chain:") == std::string::npos
                     && mResult.errors[index].code != "stylesheet.import.cycle")
-                    mResult.errors[index].message += " Import chain: " + importChain(importStack, imported.resourceId) + ".";
+                    mResult.errors[index].message += " Import chain: " + importChain(importStack, imported.id) + ".";
         }
         importStack.pop_back();
         return !mResult.hasErrors();
     }
 
-    void collectModules(const std::string& resourceId, std::vector<std::string>& importStack, std::vector<VisitEntry>& moduleVisits) const {
-        if (std::find(importStack.begin(), importStack.end(), resourceId) != importStack.end()) return;
-        const auto module = mModules.find(resourceId);
+    void collectModules(const std::string& id, std::vector<std::string>& importStack, std::vector<VisitEntry>& moduleVisits) const {
+        if (std::find(importStack.begin(), importStack.end(), id) != importStack.end()) return;
+        const auto module = mModules.find(id);
         if (module == mModules.end()) return;
-        importStack.push_back(resourceId);
-        for (const ParsedImport& imported : module->second.imports) collectModules(imported.resourceId, importStack, moduleVisits);
+        importStack.push_back(id);
+        for (const ParsedImport& imported : module->second.imports) collectModules(imported.id, importStack, moduleVisits);
         moduleVisits.push_back({&module->second, importStack});
         importStack.pop_back();
     }
@@ -513,19 +690,6 @@ private:
 };
 } // namespace
 
-std::vector<std::string> detail::splitPartPath(const std::string& part) {
-    std::vector<std::string> result;
-    std::size_t start = 0;
-    while (start < part.size()) {
-        const std::size_t separator = part.find("::", start);
-        const std::string segment = trim(part.substr(start, separator == std::string::npos ? std::string::npos : separator - start));
-        if (!segment.empty()) result.push_back(segment);
-        if (separator == std::string::npos) break;
-        start = separator + 2;
-    }
-    return result;
-}
-
 StyleRule detail::parseSelector(const std::string& selector) {
     StyleRule rule;
     const std::string input = trim(selector);
@@ -534,7 +698,7 @@ StyleRule detail::parseSelector(const std::string& selector) {
     std::size_t position = 0;
     SelectorCombinator pending = SelectorCombinator::Descendant;
     while (position < input.size()) {
-        while (position < input.size() && std::isspace(static_cast<unsigned char>(input[position]))) ++position;
+        while (position < input.size() && isCSSWhitespace(input[position])) ++position;
         if (position >= input.size()) break;
         if (input[position] == '>') {
             pending = SelectorCombinator::Child;
@@ -543,7 +707,7 @@ StyleRule detail::parseSelector(const std::string& selector) {
         }
 
         const std::size_t start = position;
-        while (position < input.size() && !std::isspace(static_cast<unsigned char>(input[position])) && input[position] != '>') ++position;
+        position = consumeSelectorComponent(input, position);
         if (!rule.selectors.empty()) rule.combinators.push_back(pending);
         rule.selectors.push_back(parseSimpleSelector(input.substr(start, position - start)));
         pending = SelectorCombinator::Descendant;
@@ -569,7 +733,7 @@ StyleSheetLoadResult StyleSheet::loadRadiaLayers(const std::vector<StyleLayer>& 
     });
     for (const StyleLayer& styleLayer : orderedLayers) {
         const ResourceLayer& layer = styleLayer.resource;
-        const std::string entrypoint = layer.entrypoint.empty() ? layer.sourceName : layer.entrypoint;
+        const std::string entrypoint = layer.entrypoint.empty() ? layer.provenance : layer.entrypoint;
         StyleSheetModuleGraph graph(layer, candidate, result);
         graph.build(entrypoint);
         if (result.hasErrors()) continue;
@@ -609,91 +773,81 @@ bool validateSelector(StyleRule& rule, const std::string& selector, StyleSheetLo
                          "Attribute selectors must use [attribute] or [type=\"value\"] syntax: " + selector + ".", sourceName);
             return false;
         }
-        if (!component.attributeName.empty()
-            && component.attributeName != "type"
-            && component.attributeName != "switch"
-            && component.attributeName != "name") {
-            result.error("stylesheet.selector.attribute_unsupported", "Only the type, switch, and name attributes can be selected: " + selector + ".",
+        if (component.pseudoElementSyntaxInvalid) {
+            result.error("stylesheet.selector.pseudo_element_invalid", "Pseudo-elements cannot be followed by pseudo-classes: " + selector + ".",
                          sourceName);
             return false;
         }
-        if (!component.id.empty() && !isElementIdentifier(component.id)) {
-            result.error("stylesheet.selector.id_invalid", "Element IDs in selectors must be valid identifiers: " + selector + ".", sourceName);
+        for (const StyleAttributeSelector& attribute : component.attributes)
+            if (attribute.name != "type" && attribute.name != "switch" && attribute.name != "name") {
+                result.error("stylesheet.selector.attribute_unsupported",
+                             "Only the type, switch, and name attributes can be selected: " + selector + ".", sourceName);
+                return false;
+            }
+        if (component.idSyntaxInvalid) {
+            result.error("stylesheet.selector.id_invalid", "Element IDs in selectors must use CSS identifier syntax: " + selector + ".", sourceName);
             return false;
         }
-        if (!component.className.empty() && !isElementIdentifier(component.className)) {
-            result.error("stylesheet.selector.class_invalid", "Element classes in selectors must be valid identifiers: " + selector + ".",
+        if (component.classSyntaxInvalid) {
+            result.error("stylesheet.selector.class_invalid", "Element classes in selectors must use CSS identifier syntax: " + selector + ".",
                          sourceName);
-            return false;
-        }
-        if (std::any_of(component.parts.begin(), component.parts.end(), [](const std::string& part) { return !isElementIdentifier(part); })) {
-            result.error("stylesheet.selector.part_invalid", "Element parts in selectors must be valid identifiers: " + selector + ".", sourceName);
             return false;
         }
         if (component.directionSyntaxInvalid) {
             result.error("stylesheet.selector.state_unknown", "Invalid :dir() selector: " + selector + ".", sourceName);
             return false;
         }
-        if (!isSupportedState(component.state) || !isSupportedState(component.partState)) {
-            const std::string& state = !isSupportedState(component.state) ? component.state : component.partState;
+        if (!isSupportedState(component.state)) {
+            const std::string& state = component.state;
             result.error("stylesheet.selector.state_unknown", "Unknown selector state: " + state + ".", sourceName);
             return false;
         }
-        if (!declarationComponent && !component.parts.empty()) {
-            result.error("stylesheet.selector.part_structural", "Element parts cannot participate in structural combinators: " + selector + ".",
-                         sourceName);
+        if (!declarationComponent && !component.pseudoElement.empty()) {
+            result.error("stylesheet.selector.pseudo_element_structural",
+                         "Pseudo-elements cannot participate in structural combinators: " + selector + ".", sourceName);
             return false;
         }
         if (component.element.empty()) {
-            if (!component.attributeName.empty() || !component.parts.empty()) {
-                result.error("stylesheet.selector.target_required", "Attributes and parts require an element-qualified selector: " + selector + ".",
-                             sourceName);
+            if (!component.attributes.empty() || !component.pseudoElement.empty()) {
+                result.error("stylesheet.selector.target_required",
+                             "Attributes and pseudo-elements require an element-qualified selector: " + selector + ".", sourceName);
                 return false;
             }
             continue;
         }
-        if (schemaNameKey(component.element) == "kbd") {
-            if (!component.attributeName.empty() || !component.id.empty() || !component.className.empty()) {
+        if (canonicalizeHTMLName(component.element) == kKbdTag.localName) {
+            if (!component.attributes.empty() || !component.id.empty() || !component.className.empty()) {
                 result.error("stylesheet.selector.inline_identity_unsupported",
                              "Inline style elements do not have Element IDs, classes, or attributes: " + selector + ".", sourceName);
                 return false;
             }
-            component.element = "kbd";
-            if (!component.parts.empty()) {
-                result.error("stylesheet.selector.part_unknown", "Unknown style part for " + component.element + ".", sourceName);
+            component.element = kKbdTag.localName;
+            if (!component.pseudoElement.empty()) {
+                result.error("stylesheet.selector.pseudo_element_unknown", "Unknown pseudo-element for " + component.element + ".", sourceName);
                 return false;
             }
             continue;
         }
-        const Tag componentTag = sourceTagFromName(component.element);
-        if (!component.attributeName.empty() && componentTag != Tag::Input) {
+        const HTMLTag componentTag = lookupHTMLTag(component.element);
+        if (!component.attributes.empty() && componentTag != HTMLTag::Input) {
             result.error("stylesheet.selector.attribute_unsupported", "Input attributes can only be selected on input: " + selector + ".",
                          sourceName);
             return false;
         }
-        const ElementSelectorMetadata metadata =
-            inspectElementSelector(componentTag, component.attributeName.empty() ? std::string_view{} : std::string_view(component.attributeValue),
-                                   component.parts, targetSpecificState(component.state), targetSpecificState(component.partState));
+        const ElementSelectorMetadata metadata = inspectElementSelector(componentTag, component.pseudoElement, targetSpecificState(component.state));
         if (!metadata.known) {
             result.error("stylesheet.selector.element_unknown", "Unknown element element: " + component.element + ".", sourceName);
             return false;
         }
         component.element = metadata.elementName;
-        if (!metadata.partKnown) {
-            std::string part;
-            for (const std::string& segment : component.parts) {
-                if (!part.empty()) part += "::";
-                part += segment;
-            }
-            result.error("stylesheet.selector.part_unknown", "Unknown style part for " + component.element + ": " + part + ".", sourceName);
+        if (!metadata.pseudoElementKnown) {
+            result.error("stylesheet.selector.pseudo_element_unknown",
+                         "Unknown pseudo-element for " + component.element + ": " + component.pseudoElement + ".", sourceName);
             return false;
         }
         if (targetSpecificState(component.state) && !metadata.elementProducesState)
             result.warning("stylesheet.selector.state_never_matches",
                            "State :" + component.state + " is never produced by " + component.element + ".", sourceName);
-        if (targetSpecificState(component.partState) && !metadata.partProducesState && !component.parts.empty())
-            result.warning("stylesheet.selector.state_never_matches",
-                           "State :" + component.partState + " is never produced by the selected part of " + component.element + ".", sourceName);
     }
     return true;
 }
@@ -739,6 +893,13 @@ private:
 void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& selector, const std::string& body, bool rootRule, StyleParsePass pass,
                    StyleSheetLoadResult& result, const std::string& sourceName) {
     std::vector<StyleDeclaration> declarations;
+    const auto flushDeclarations = [&] {
+        if (declarations.empty()) return;
+        StyleRule declarationRule = rule;
+        declarationRule.declarations = std::move(declarations);
+        model.addRule(declarationRule);
+        declarations.clear();
+    };
     const auto addDeclaration = [&](const std::string& declaration) {
         const std::size_t colon = declaration.find(':');
         if (colon == std::string::npos) {
@@ -792,18 +953,17 @@ void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& select
                 result.error("stylesheet.syntax.unclosed_block", "Nested rule block is not closed.", sourceName);
                 break;
             }
-            if (pass == StyleParsePass::Rules)
+            if (pass == StyleParsePass::Rules) {
+                flushDeclarations();
                 model.parseBlock(trim(body.substr(fragment->start, *fragment->open - fragment->start)),
                                  body.substr(*fragment->open + 1, *fragment->close - *fragment->open - 1), rule, rule.origin, pass, result,
                                  sourceName);
+            }
             continue;
         }
         addDeclaration(body.substr(fragment->start, fragment->end - fragment->start));
     }
-    if (!declarations.empty()) {
-        rule.declarations = std::move(declarations);
-        model.addRule(rule);
-    }
+    if (pass == StyleParsePass::Rules) flushDeclarations();
 }
 } // namespace
 

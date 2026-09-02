@@ -10,9 +10,8 @@
 #include "binding/binder.h"
 #include "binding/eventregistration.h"
 #include "documentcontrollerinternal.h"
-#include "elements/document.h"
-#include "elements/elementinternal.h"
-#include "layout/schema.h"
+#include "dom/document.h"
+#include "dom/elementinternal.h"
 #include "system.h"
 
 namespace radia::viewer::ui {
@@ -20,17 +19,19 @@ using radia::ui::Binder;
 using radia::ui::Binding;
 using radia::ui::DiagnosticResult;
 using radia::ui::EventRegistrationDescriptor;
-using radia::ui::isElementIdentifier;
 using radia::ui::PreparedBinding;
 using radia::ui::PreparedBindingResult;
 using radia::ui::SettingResolver;
 using radia::ui::System;
+using radia::ui::detail::ElementInternalAccess;
 using radia::ui::detail::indexElementsInScope;
 using radia::ui::detail::makeEventRegistration;
 
 struct DocumentController::PreparedMount::State {
     DocumentController* controller = nullptr;
     Document* document = nullptr;
+    Element* root = nullptr;
+    std::weak_ptr<char> rootLifetime;
     PreparedBinding binding;
 };
 
@@ -41,8 +42,7 @@ struct DocumentController::Impl {
     Binding binding;
 };
 
-DocumentController::DocumentController(System& system, Document& document)
-    : mSystem(system), mDocument(document), mImpl(std::make_unique<Impl>()) {}
+DocumentController::DocumentController(System& system, Document& document) : mSystem(system), mDocument(document), mImpl(std::make_unique<Impl>()) {}
 
 DocumentController::PreparedMount::PreparedMount() = default;
 DocumentController::PreparedMount::~PreparedMount() = default;
@@ -88,30 +88,32 @@ DocumentController::PreparedMountResult DocumentController::prepare(SettingResol
     std::map<std::string, Element*> index;
     indexElementsInScope(*root, index);
     for (const std::string& id : mImpl->elementIds) {
-        if (!isElementIdentifier(id)) {
-            result.warning("controller.element.name_invalid", "Controller Element ID is not a valid Element identifier: " + id + ".");
-            continue;
-        }
         const auto indexed = index.find(id);
-        if (indexed == index.end())
-            result.warning("controller.element.missing", "Controller Element ID is not present in this skin: " + id + ".");
+        if (indexed == index.end()) result.warning("controller.element.missing", "Controller Element ID is not present in this skin: " + id + ".");
     }
     if (result.hasErrors()) return result;
 
     result.mount.mState = std::make_unique<PreparedMount::State>();
     result.mount.mState->controller = this;
     result.mount.mState->document = &mDocument;
+    result.mount.mState->root = root;
+    result.mount.mState->rootLifetime = ElementInternalAccess::lifetime(*root);
     result.mount.mState->binding = std::move(binding.binding);
     return result;
 }
 
 bool DocumentController::canCommit(const PreparedMount& prepared) const {
-    return prepared.mState && prepared.mState->controller == this && prepared.mState->document == &mDocument;
+    return prepared.mState
+        && prepared.mState->controller == this
+        && prepared.mState->document == &mDocument
+        && prepared.mState->root
+        && !prepared.mState->rootLifetime.expired()
+        && mDocument.documentElement() == prepared.mState->root
+        && static_cast<bool>(prepared.mState->binding);
 }
 
 void DocumentController::commit(PreparedMount&& prepared) {
-    if (!prepared.mState || prepared.mState->controller != this || !prepared.mState->document)
-        LL_ERRS("UI") << "DocumentController committed an invalid prepared mount." << LL_ENDL;
+    if (!canCommit(prepared)) LL_ERRS("UI") << "DocumentController committed an invalid prepared mount." << LL_ENDL;
     PreparedMount::State& state = *prepared.mState;
     mImpl->binding = state.binding.commit();
     prepared.mState.reset();

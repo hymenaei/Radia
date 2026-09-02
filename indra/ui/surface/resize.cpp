@@ -5,7 +5,7 @@
 
 #include "linden_common.h"
 #include <algorithm>
-#include "elements/floater.h"
+#include "html/floater.h"
 #include "layout/engine.h"
 #include "style/stylepass.h"
 #include "surface/floaterresize.h"
@@ -13,8 +13,12 @@
 #include "surface/surfaceinternal.h"
 
 namespace radia::ui {
+using detail::resizeCursor;
+using detail::ResizeEdges;
+using detail::resizeEdgesAt;
+
 namespace {
-bool blocksPointerEvents(const FloaterElement& floater, const Style& style) {
+bool blocksPointerEvents(const HTMLFloaterElement& floater, const Style& style) {
     const PointerEvents policy = style.pointerEvents;
     if (policy == PointerEvents::Auto) return true;
     if (policy == PointerEvents::PassThrough) return false;
@@ -22,9 +26,9 @@ bool blocksPointerEvents(const FloaterElement& floater, const Style& style) {
 }
 } // namespace
 
-Vec2 Surface::minimumFloaterSize(const FloaterElement& floater) const {
+Vec2 Surface::minimumFloaterSize(const HTMLFloaterElement& floater) const {
     const Vec2 authoredSize = floater.authoredSize();
-    const ElementSnapshot floaterSnapshot = snapshot(const_cast<FloaterElement&>(floater));
+    const ElementSnapshot floaterSnapshot = snapshot(const_cast<HTMLFloaterElement&>(floater));
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
     const Style& floaterStyle = styles.style(floater);
@@ -44,26 +48,26 @@ Vec2 Surface::minimumFloaterSize(const FloaterElement& floater) const {
     return minimum;
 }
 
-FloaterElement* Surface::resizeFloaterAt(const Vec2& point, std::uint8_t& edges) const {
+HTMLFloaterElement* Surface::resizeFloaterAt(const Vec2& point, std::uint8_t& edges) const {
     edges = 0;
     if (!mViewport.contains(point)) return nullptr;
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
-    const auto findInLayer = [&](SurfaceLayer layer) -> FloaterElement* {
+    const auto findInLayer = [&](SurfaceLayer layer) -> HTMLFloaterElement* {
         const RootList& layerRoots = roots(layer);
         for (auto child = layerRoots.rbegin(); child != layerRoots.rend(); ++child) {
-            auto* floater = dynamic_cast<FloaterElement*>(*child);
+            auto* floater = dynamic_cast<HTMLFloaterElement*>(*child);
             if (!floater || floater->closed()) continue;
             const ElementSnapshot floaterSnapshot = snapshot(*floater);
             const Style& floaterStyle = styles.style(*floater);
             if (!snapshotValid(floaterSnapshot) || !isRootedInSurface(floaterSnapshot.lifetime.get()) || !floater->isVisible(floaterStyle)) continue;
             const bool floaterBlocksPointerEvents = blocksPointerEvents(*floater, floaterStyle);
             if (!snapshotValid(floaterSnapshot) || !isRootedInSurface(floaterSnapshot.lifetime.get())) continue;
-            floater = dynamic_cast<FloaterElement*>(floaterSnapshot.lifetime.get());
+            floater = dynamic_cast<HTMLFloaterElement*>(floaterSnapshot.lifetime.get());
             if (!floater || floater->closed() || !floater->isVisible(floaterStyle)) continue;
             if (!floaterBlocksPointerEvents) {
                 const bool descendantHit = hitTestNode(*floater, point, mViewport, styles) != nullptr;
-                floater = dynamic_cast<FloaterElement*>(floaterSnapshot.lifetime.get());
+                floater = dynamic_cast<HTMLFloaterElement*>(floaterSnapshot.lifetime.get());
                 if (!snapshotValid(floaterSnapshot)
                     || !floater
                     || !isRootedInSurface(floater)
@@ -76,8 +80,8 @@ FloaterElement* Surface::resizeFloaterAt(const Vec2& point, std::uint8_t& edges)
             }
             if (!floater->rect().contains(point)) continue;
             if (!floater->resizeable() || floater->minimized()) return nullptr;
-            const detail::ResizeEdges hit = detail::resizeEdgesAt(floater->rect(), point);
-            if (hit == detail::ResizeEdges::NoEdges) return nullptr;
+            const ResizeEdges hit = resizeEdgesAt(floater->rect(), point);
+            if (hit == ResizeEdges::NoEdges) return nullptr;
             edges = static_cast<std::uint8_t>(hit);
             return floater;
         }
@@ -90,11 +94,12 @@ FloaterElement* Surface::resizeFloaterAt(const Vec2& point, std::uint8_t& edges)
 
 void Surface::updateResizeCursor(const Vec2& point) {
     if (Element* captured = mCaptured) {
-        if (auto* floater = dynamic_cast<FloaterElement*>(captured); floater && floater->mInteraction == FloaterElement::FloaterInteraction::Resize)
+        if (auto* floater = dynamic_cast<HTMLFloaterElement*>(captured);
+            floater && floater->mInteraction == HTMLFloaterElement::FloaterInteraction::Resize)
             return;
     }
     std::uint8_t edges = 0;
     resizeFloaterAt(point, edges);
-    mResizeCursor = detail::resizeCursor(static_cast<detail::ResizeEdges>(edges));
+    mResizeCursor = resizeCursor(static_cast<ResizeEdges>(edges));
 }
 } // namespace radia::ui

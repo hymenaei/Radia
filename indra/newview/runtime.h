@@ -25,7 +25,7 @@ class LLWindow;
 
 namespace radia::ui {
 class Document;
-class FloaterElement;
+class HTMLFloaterElement;
 class PaintContext;
 class System;
 } // namespace radia::ui
@@ -33,13 +33,13 @@ class System;
 namespace radia::viewer::ui {
 using radia::ui::CursorStyle;
 using radia::ui::Document;
-using radia::ui::FloaterElement;
+using radia::ui::HTMLFloaterElement;
 using radia::ui::KeybindingPresentation;
 using radia::ui::KeyEvent;
 using radia::ui::PaintContext;
 using radia::ui::PointerEvent;
-using radia::ui::WheelEvent;
 using radia::ui::System;
+using radia::ui::WheelEvent;
 
 struct InputDispatchResult {
     bool handled = false;
@@ -83,8 +83,8 @@ public:
 
     bool initialize();
     void shutdown();
-    bool registerFloater(std::string definitionId, std::string resourceId, ControllerFactory factory);
-    FloaterElement* openFloater(const std::string& definitionId, const std::string& instanceKey = {});
+    bool registerFloater(std::string definitionId, std::string resource, ControllerFactory factory);
+    HTMLFloaterElement* openFloater(const std::string& definitionId, const std::string& instanceKey = {});
     void restoreWorkspace();
     void endAccountSession();
     void requestSkinReload();

@@ -6,43 +6,44 @@
 #include "linden_common.h"
 #include <gtest/gtest.h>
 #include <memory>
-#include "elements/document.h"
-#include "elements/elementinternal.h"
-#include "elements/floater.h"
+#include "dom/document.h"
+#include "dom/elementinternal.h"
 #include "floaterhost.h"
+#include "html/floater.h"
 #include "style/stylesheet.h"
 #include "surface/surface.h"
 
 namespace {
 using radia::ui::Document;
-using radia::ui::FloaterElement;
+using radia::ui::HTMLFloaterElement;
 using radia::ui::Rect;
 using radia::ui::StyleSheet;
 using radia::ui::Surface;
+using radia::ui::detail::makeElement;
 using radia::viewer::ui::FloaterHost;
 
 constexpr char kFloaterStyles[] = "floater { size: 100px 80px; min-size: 40px 30px; display: flex; flex-direction: column; } "
                                   "floater > head { height: 20px; } floater > body { flex-grow: 1; }";
 
-void appendFloaterStructure(FloaterElement& floater) {
-    auto head = std::make_unique<radia::ui::Element>("head");
-    auto title = std::make_unique<radia::ui::Element>("title");
+void appendFloaterStructure(HTMLFloaterElement& floater) {
+    auto head = makeElement<radia::ui::Element>("head");
+    auto title = makeElement<radia::ui::Element>("title");
     title->textContent("title");
     head->append(std::move(title));
     floater.append(std::move(head));
-    floater.append(std::make_unique<radia::ui::Element>("body"));
+    floater.append(makeElement<radia::ui::Element>("body"));
 }
 } // namespace
 
 TEST(FloaterHostTest, ReplacesMountedFloaterThroughSurfaceSeam) {
-    auto currentDocument = std::make_unique<Document>(std::make_unique<FloaterElement>());
-    FloaterElement* current = dynamic_cast<FloaterElement*>(currentDocument->documentElement());
+    auto currentDocument = std::make_unique<Document>(makeElement<HTMLFloaterElement>());
+    HTMLFloaterElement* current = dynamic_cast<HTMLFloaterElement*>(currentDocument->documentElement());
     ASSERT_NE(current, nullptr);
     appendFloaterStructure(*current);
     current->setResizeable(true);
 
-    auto replacementDocument = std::make_unique<Document>(std::make_unique<FloaterElement>());
-    FloaterElement* replacement = dynamic_cast<FloaterElement*>(replacementDocument->documentElement());
+    auto replacementDocument = std::make_unique<Document>(makeElement<HTMLFloaterElement>());
+    HTMLFloaterElement* replacement = dynamic_cast<HTMLFloaterElement*>(replacementDocument->documentElement());
     ASSERT_NE(replacement, nullptr);
     appendFloaterStructure(*replacement);
     replacement->setResizeable(true);

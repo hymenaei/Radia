@@ -7,7 +7,7 @@
 #include "style/stylepass.h"
 #include <algorithm>
 #include <utility>
-#include "elements/element.h"
+#include "dom/element.h"
 #include "nativeappearance.h"
 #include "style/stylesheet.h"
 #include "text/metrics.h"
@@ -85,17 +85,7 @@ const Style& StylePass::style(const Element& element) {
     const ElementRef<const Element> styledRef(&element);
     const Element* parent = elementSnapshot.parent;
     const std::uint64_t contextRevision = element.styleContextRevision();
-    const Element* owner = &element;
-    Style resolved;
-    if (element.part().empty()) resolved = mStyleSheet.resolveElement(element, mDirection);
-    else {
-        for (const Element* candidate = element.parentElement(); candidate; candidate = candidate->parentElement()) {
-            if (candidate->styleElement() != element.styleElement()) continue;
-            owner = candidate;
-            if (candidate->part().empty()) break;
-        }
-        resolved = mStyleSheet.resolveElementPart(*owner, element, mDirection);
-    }
+    Style resolved = mStyleSheet.resolveElement(element, mDirection);
     const Element* current = styledRef.get();
     const auto transient = [&]() -> const Style& {
         mStyleStorage.emplace_back(std::move(resolved));
@@ -111,7 +101,9 @@ const Style& StylePass::style(const Element& element) {
         inheritStyle(resolved, parentStyle);
     }
     element.constrainResolvedStyle(resolved);
+    normalizeOverflow(resolved);
     resolveLightDarkColors(resolved);
+    resolveCurrentColors(resolved);
 
     current = styledRef.get();
     if (!current || !elementSnapshot.styleValid()) return transient();
@@ -120,6 +112,31 @@ const Style& StylePass::style(const Element& element) {
     const std::size_t storageIndex = mStyleStorage.size() - 1;
     mStyles[&element] = CachedStyle{storageIndex, elementLifetime, finalContextRevision == contextRevision ? contextRevision : finalContextRevision};
     return mStyleStorage[storageIndex];
+}
+
+Style StylePass::style(PseudoElement& pseudoElement) {
+    const Element& owner = pseudoElement.originatingElement();
+    const Style& ownerStyle = style(owner);
+    Style resolved = mStyleSheet.resolvePseudoElement(owner, pseudoElement.name(), mDirection);
+    const Style& parentStyle = pseudoElement.parentPseudoElement() ? style(*pseudoElement.parentPseudoElement()) : ownerStyle;
+    inheritStyle(resolved, parentStyle);
+    resolved.appearance = ownerStyle.appearance;
+    normalizeOverflow(resolved);
+    resolveLightDarkColors(resolved);
+    resolveCurrentColors(resolved);
+    pseudoElement.setResolvedStyle(resolved);
+    return resolved;
+}
+
+void StylePass::styleGeneratedPseudoElements(const Element& element, const Style& ownerStyle) {
+    if (ownerStyle.appearance != AppearanceMode::Base) return;
+    const auto stylePseudoElementTree = [this](auto&& self, PseudoElement& pseudoElement) -> void {
+        style(pseudoElement);
+        for (PseudoElement* child : pseudoElement.generatedPseudoElements())
+            if (child) self(self, *child);
+    };
+    for (PseudoElement* pseudoElement : element.generatedPseudoElements())
+        if (pseudoElement) stylePseudoElementTree(stylePseudoElementTree, *pseudoElement);
 }
 
 StylePass::ChildSnapshot StylePass::orderedChildren(Element& parent) {

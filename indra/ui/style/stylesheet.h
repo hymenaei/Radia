@@ -56,10 +56,9 @@ public:
 
     Style resolve(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t states,
                   LayoutDirection direction = LayoutDirection::LeftToRight) const;
-    Style resolvePart(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t ownerStates,
-                      const std::string& part, uint16_t partStates = 0, LayoutDirection direction = LayoutDirection::LeftToRight) const;
     Style resolveElement(const Element& element, LayoutDirection direction = LayoutDirection::LeftToRight) const;
-    Style resolveElementPart(const Element& owner, const Element& part, LayoutDirection direction = LayoutDirection::LeftToRight) const;
+    Style resolvePseudoElement(const Element& owner, std::string_view pseudoElementName,
+                               LayoutDirection direction = LayoutDirection::LeftToRight) const;
     Style resolveInline(const Element& owner, const std::string& element, const std::vector<std::string>& inlineAncestors = {},
                         LayoutDirection direction = LayoutDirection::LeftToRight) const;
 

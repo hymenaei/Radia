@@ -16,7 +16,7 @@
 
 namespace radia::ui {
 class Document;
-class FloaterElement;
+class HTMLFloaterElement;
 class SettingResolver;
 class SkinGeneration;
 } // namespace radia::ui
@@ -24,7 +24,7 @@ class SkinGeneration;
 namespace radia::viewer::ui {
 using radia::ui::DiagnosticResult;
 using radia::ui::Document;
-using radia::ui::FloaterElement;
+using radia::ui::HTMLFloaterElement;
 using radia::ui::PublicationCommit;
 using radia::ui::SettingResolver;
 using radia::ui::SkinGeneration;
@@ -33,7 +33,7 @@ using radia::ui::System;
 class DocumentController;
 
 struct ComponentOpenResult : DiagnosticResult {
-    FloaterElement* floater = nullptr;
+    HTMLFloaterElement* floater = nullptr;
     bool ok() const { return !hasErrors() && floater; }
 };
 
@@ -68,16 +68,16 @@ public:
     class Host {
     public:
         struct ReplacementRequest {
-            FloaterElement* current = nullptr;
+            HTMLFloaterElement* current = nullptr;
             Document* replacement = nullptr;
         };
 
         virtual ~Host() = default;
         virtual void mount(Document& document) = 0;
-        virtual bool unmount(FloaterElement& root) = 0;
+        virtual bool unmount(HTMLFloaterElement& root) = 0;
         virtual bool replaceAll(std::vector<ReplacementRequest> replacements) = 0;
-        virtual bool clearAll(std::vector<FloaterElement*> roots) = 0;
-        virtual void present(FloaterElement& root) = 0;
+        virtual bool clearAll(std::vector<HTMLFloaterElement*> roots) = 0;
+        virtual void present(HTMLFloaterElement& root) = 0;
     };
 
     using ControllerFactory = std::function<std::unique_ptr<DocumentController>(System& system, Document& document)>;
@@ -87,12 +87,12 @@ public:
     ComponentManager(const ComponentManager&) = delete;
     ComponentManager& operator=(const ComponentManager&) = delete;
 
-    bool registerDefinition(std::string definitionId, std::string resourceId, ControllerFactory factory);
+    bool registerDefinition(std::string definitionId, std::string resource, ControllerFactory factory);
     ComponentOpenResult open(const std::string& definitionId, const std::string& instanceKey = {});
 
-    using OpenComponentCallback = std::function<void(const ComponentInstanceKey&, FloaterElement&)>;
+    using OpenComponentCallback = std::function<void(const ComponentInstanceKey&, HTMLFloaterElement&)>;
     void forEachOpen(const OpenComponentCallback& callback) const;
-    std::optional<ComponentInstanceKey> componentKeyFor(const FloaterElement& floater) const;
+    std::optional<ComponentInstanceKey> componentKeyFor(const HTMLFloaterElement& floater) const;
     ReplacementResult prepareReplacement(std::shared_ptr<const SkinGeneration> generation, std::string locale);
     bool clearInstances();
     void idle();

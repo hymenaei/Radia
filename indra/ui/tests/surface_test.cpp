@@ -13,14 +13,15 @@
 #include <utility>
 #include <vector>
 #include "binding/binder.h"
-#include "elements/button.h"
-#include "elements/elementinternal.h"
-#include "elements/elementtext.h"
-#include "elements/floater.h"
-#include "elements/input.h"
-#include "elements/label.h"
-#include "elements/panel.h"
+#include "dom/elementinternal.h"
+#include "dom/text.h"
+#include "eventcall.h"
 #include "floater_test_helpers.h"
+#include "html/button.h"
+#include "html/floater.h"
+#include "html/input.h"
+#include "html/label.h"
+#include "html/panel.h"
 #include "nativeappearance.h"
 #include "render/recordingpaintcontext.h"
 #include "skin/compiler.h"
@@ -32,7 +33,6 @@ namespace {
 using radia::ui::AAIntent;
 using radia::ui::Binder;
 using radia::ui::Binding;
-using radia::ui::ButtonElement;
 using radia::ui::ClipAxes;
 using radia::ui::clipsAxis;
 using radia::ui::CursorStyle;
@@ -43,8 +43,11 @@ using radia::ui::EventCall;
 using radia::ui::EventHandler;
 using radia::ui::EventPhase;
 using radia::ui::fixedTextMetrics;
-using radia::ui::FloaterElement;
-using radia::ui::InputElement;
+using radia::ui::HTMLButtonElement;
+using radia::ui::HTMLFloaterElement;
+using radia::ui::HTMLInputElement;
+using radia::ui::HTMLLabelElement;
+using radia::ui::HTMLPanelElement;
 using radia::ui::kChangeEvent;
 using radia::ui::kClickEvent;
 using radia::ui::kContextMenuEvent;
@@ -59,16 +62,15 @@ using radia::ui::kModifierShift;
 using radia::ui::kPointerDownEvent;
 using radia::ui::kPointerMoveEvent;
 using radia::ui::kPointerUpEvent;
+using radia::ui::setAuthoredEventCall;
 using radia::ui::kScrollEvent;
 using radia::ui::kWheelEvent;
-using radia::ui::LabelElement;
 using radia::ui::LayoutDirection;
 using radia::ui::NativeAppearanceBase;
 using radia::ui::PaintCommand;
 using radia::ui::PaintCommandKind;
 using radia::ui::PaintContext;
 using radia::ui::PaintTargetKind;
-using radia::ui::PanelElement;
 using radia::ui::PointerButton;
 using radia::ui::PointerEvent;
 using radia::ui::PreparedBindingResult;
@@ -88,6 +90,8 @@ using radia::ui::Text;
 using radia::ui::Vec2;
 using radia::ui::Visibility;
 using radia::ui::WheelEvent;
+using radia::ui::detail::makeElement;
+using radia::ui::detail::makeElementValue;
 using radia::ui::detail::makeEventRegistration;
 using ::testing::Message;
 
@@ -281,9 +285,9 @@ TEST(SurfaceTest, SizesBodyDocumentRootToViewportInsideItsMargin) {
 
     Surface surface(styleSheet);
     surface.setViewport(100.f, 80.f);
-    auto body = std::make_unique<Element>("body");
+    auto body = makeElement<Element>("body");
     Element* bodyPtr = body.get();
-    body->append(std::make_unique<ButtonElement>());
+    body->append(makeElement<HTMLButtonElement>());
     surface.mount(std::move(body));
     surface.updateLayout();
 
@@ -299,8 +303,8 @@ TEST(SurfaceTest, PaintsBodyDocumentRootBackgroundAcrossViewport) {
 
     Surface surface(styleSheet);
     surface.setViewport(100.f, 80.f);
-    auto body = std::make_unique<Element>("body");
-    body->append(std::make_unique<ButtonElement>());
+    auto body = makeElement<Element>("body");
+    body->append(makeElement<HTMLButtonElement>());
     surface.mount(std::move(body));
 
     RecordingPaintContext recording;
@@ -322,8 +326,8 @@ TEST(SurfaceTest, PaintsBodyDocumentRootBackgroundAcrossViewport) {
 TEST(SurfaceTest, HandlesPointerHoverPressAndRelease) {
     Surface context;
     context.setViewport(100.f, 100.f);
-    auto button = std::make_unique<ButtonElement>();
-    ButtonElement* target = button.get();
+    auto button = makeElement<HTMLButtonElement>();
+    HTMLButtonElement* target = button.get();
     int activations = 0;
     button->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true).setOnActivate([&](Element&) { ++activations; });
     context.mount(std::move(button));
@@ -350,8 +354,8 @@ TEST(SurfaceTest, HandlesPointerHoverPressAndRelease) {
 TEST(SurfaceTest, ActivatesSwitchWithMouseAndKeyboard) {
     Surface context;
     context.setViewport(100.f, 100.f);
-    auto control = std::make_unique<InputElement>();
-    InputElement* target = control.get();
+    auto control = makeElement<HTMLInputElement>();
+    HTMLInputElement* target = control.get();
     control->type("checkbox").switchMode(true);
     int changes = 0;
     control->setOnCheckedChanged([&](bool) { ++changes; });
@@ -375,9 +379,9 @@ TEST(SurfaceTest, ActivatesSwitchWithMouseAndKeyboard) {
 TEST(SurfaceTest, ClearsInteractionAfterTreeMutation) {
     Surface context;
     context.setViewport(100.f, 100.f);
-    auto button = std::make_unique<ButtonElement>();
+    auto button = makeElement<HTMLButtonElement>();
     button->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
-    ButtonElement* mounted = button.get();
+    HTMLButtonElement* mounted = button.get();
     context.mount(std::move(button));
     context.pointerMove({{15.f, 15.f}});
     context.pointerDown({{15.f, 15.f}, PointerButton::Left});
@@ -390,7 +394,7 @@ TEST(SurfaceTest, ClearsInteractionAfterTreeMutation) {
 TEST(SurfaceTest, BlocksDisabledControlsWithoutFocusingThem) {
     Surface context;
     context.setViewport(100.f, 100.f);
-    auto button = std::make_unique<ButtonElement>();
+    auto button = makeElement<HTMLButtonElement>();
     button->disabled(true).setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
     context.mount(std::move(button));
     EXPECT_TRUE(context.pointerDown({{15.f, 15.f}, PointerButton::Left}));
@@ -404,9 +408,9 @@ TEST(SurfaceTest, DragsMinimizesAndRestoresFloaters) {
     context.setViewport(200.f, 200.f);
 
     auto floater = radia::ui::test::makeFloater(false, true);
-    FloaterElement* floaterPtr = floater.get();
-    auto content = std::make_unique<LabelElement>("content");
-    LabelElement* contentNode = content.get();
+    HTMLFloaterElement* floaterPtr = floater.get();
+    auto content = makeElement<HTMLLabelElement>("content");
+    HTMLLabelElement* contentNode = content.get();
     floater->body()->append(std::move(content));
     floater->setRect({20.f, 20.f, 100.f, 100.f});
     context.mountFloater(std::move(floater));
@@ -445,8 +449,8 @@ TEST(SurfaceTest, DragsMinimizesAndRestoresFloaters) {
 TEST(SurfaceTest, IgnoresNonPrimaryPointerButtons) {
     Surface context;
     context.setViewport(100.f, 100.f);
-    auto button = std::make_unique<ButtonElement>();
-    ButtonElement* target = button.get();
+    auto button = makeElement<HTMLButtonElement>();
+    HTMLButtonElement* target = button.get();
     int activations = 0;
     button->setRect({10.f, 10.f, 20.f, 20.f}).setOnActivate([&](Element&) { ++activations; });
     context.mount(std::move(button));
@@ -548,12 +552,12 @@ TEST(SurfaceTest, HitTestsScrolledChildAtPaintedLocation) {
     surface.setViewport(200.f, 200.f);
     int activations = 0;
 
-    auto viewport = std::make_unique<PanelElement>();
+    auto viewport = makeElement<HTMLPanelElement>();
     viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto target = std::make_unique<ButtonElement>();
+    auto target = makeElement<HTMLButtonElement>();
     target->setId("target").setRect({130.f, 10.f, 20.f, 20.f}).setOnActivate([&activations](Element&) { ++activations; });
     viewport->append(std::move(target));
-    PanelElement* viewportPtr = viewport.get();
+    HTMLPanelElement* viewportPtr = viewport.get();
     surface.mount(std::move(viewport));
     surface.updateLayout();
     ASSERT_GT(viewportPtr->scrollMetrics().maxScrollLeft, 0.f);
@@ -574,12 +578,12 @@ TEST(SurfaceTest, HitTestsVerticallyScrolledChildAtPaintedLocation) {
     surface.setViewport(200.f, 200.f);
     int activations = 0;
 
-    auto viewport = std::make_unique<PanelElement>();
+    auto viewport = makeElement<HTMLPanelElement>();
     viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto target = std::make_unique<ButtonElement>();
+    auto target = makeElement<HTMLButtonElement>();
     target->setId("target").setRect({10.f, -80.f, 20.f, 20.f}).setOnActivate([&activations](Element&) { ++activations; });
     viewport->append(std::move(target));
-    PanelElement* viewportPtr = viewport.get();
+    HTMLPanelElement* viewportPtr = viewport.get();
     surface.mount(std::move(viewport));
     surface.updateLayout();
     ASSERT_GT(viewportPtr->scrollMetrics().maxScrollTop, 0.f);
@@ -599,9 +603,9 @@ TEST(SurfaceTest, ClipsScrolledContentFromHitTesting) {
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
 
-    auto viewport = std::make_unique<PanelElement>();
+    auto viewport = makeElement<HTMLPanelElement>();
     viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto target = std::make_unique<ButtonElement>();
+    auto target = makeElement<HTMLButtonElement>();
     target->setId("target").setRect({130.f, 10.f, 20.f, 20.f});
     viewport->append(std::move(target));
     surface.mount(std::move(viewport));
@@ -616,12 +620,12 @@ TEST(SurfaceTest, ScrollsScrollableElementWithWheel) {
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
 
-    auto viewport = std::make_unique<PanelElement>();
+    auto viewport = makeElement<HTMLPanelElement>();
     viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<PanelElement>();
+    auto content = makeElement<HTMLPanelElement>();
     content->setRect({0.f, 0.f, 100.f, 200.f});
     viewport->append(std::move(content));
-    PanelElement* viewportPtr = viewport.get();
+    HTMLPanelElement* viewportPtr = viewport.get();
     surface.mount(std::move(viewport));
     surface.updateLayout();
 
@@ -635,12 +639,12 @@ TEST(SurfaceTest, ShiftWheelScrollsHorizontallyAndPreservesWheelPayload) {
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
 
-    auto viewport = std::make_unique<PanelElement>();
+    auto viewport = makeElement<HTMLPanelElement>();
     viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<PanelElement>();
+    auto content = makeElement<HTMLPanelElement>();
     content->setRect({0.f, 0.f, 200.f, 200.f});
     viewport->append(std::move(content));
-    PanelElement* viewportPtr = viewport.get();
+    HTMLPanelElement* viewportPtr = viewport.get();
     float observedDeltaX = 0.f;
     float observedDeltaY = 0.f;
     viewportPtr->addEventListener(kWheelEvent, [&](Event& event) {
@@ -668,9 +672,9 @@ TEST(SurfaceTest, RecordsSemanticFallbackScrollbarRequest) {
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
 
-    auto viewport = std::make_unique<PanelElement>();
+    auto viewport = makeElement<HTMLPanelElement>();
     viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<PanelElement>();
+    auto content = makeElement<HTMLPanelElement>();
     content->setRect({0.f, 0.f, 180.f, 180.f});
     viewport->append(std::move(content));
     surface.mount(std::move(viewport));
@@ -703,15 +707,15 @@ TEST(SurfaceTest, ScrollbarThumbCapturesPointerAndReachesBothEndpoints) {
     surface.setViewport(200.f, 200.f);
 
     int activations = 0;
-    auto viewport = std::make_unique<PanelElement>();
+    auto viewport = makeElement<HTMLPanelElement>();
     viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<PanelElement>();
+    auto content = makeElement<HTMLPanelElement>();
     content->setRect({0.f, 0.f, 100.f, 240.f});
     viewport->append(std::move(content));
-    auto button = std::make_unique<ButtonElement>();
+    auto button = makeElement<HTMLButtonElement>();
     button->setRect({85.f, 20.f, 15.f, 20.f}).setOnActivate([&activations](Element&) { ++activations; });
     viewport->append(std::move(button));
-    PanelElement* viewportPtr = viewport.get();
+    HTMLPanelElement* viewportPtr = viewport.get();
     surface.mount(std::move(viewport));
     surface.updateLayout();
 
@@ -757,12 +761,12 @@ TEST(SurfaceTest, RtlScrollbarHitTestingAndHorizontalTrackClicks) {
     std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
     surface->setViewport(200.f, 200.f);
 
-    auto viewport = std::make_unique<PanelElement>();
+    auto viewport = makeElement<HTMLPanelElement>();
     viewport->setId("viewport").setRect({20.f, 20.f, 100.f, 100.f});
-    auto content = std::make_unique<PanelElement>();
+    auto content = makeElement<HTMLPanelElement>();
     content->setRect({0.f, 0.f, 240.f, 240.f});
     viewport->append(std::move(content));
-    PanelElement* viewportPtr = viewport.get();
+    HTMLPanelElement* viewportPtr = viewport.get();
     surface->mount(std::move(viewport));
     surface->updateLayout();
     ASSERT_TRUE(system.setLocale("ar"));
@@ -814,12 +818,12 @@ TEST(SurfaceTest, RtlHorizontalWheelReversesNormalizedScrollDirection) {
     std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
     surface->setViewport(200.f, 200.f);
 
-    auto viewport = std::make_unique<PanelElement>();
+    auto viewport = makeElement<HTMLPanelElement>();
     viewport->setId("viewport").setRect({20.f, 20.f, 100.f, 100.f});
-    auto content = std::make_unique<PanelElement>();
+    auto content = makeElement<HTMLPanelElement>();
     content->setRect({0.f, 0.f, 240.f, 240.f});
     viewport->append(std::move(content));
-    PanelElement* viewportPtr = viewport.get();
+    HTMLPanelElement* viewportPtr = viewport.get();
     surface->mount(std::move(viewport));
     ASSERT_TRUE(system.setLocale("ar"));
     surface->updateLayout();
@@ -858,12 +862,12 @@ TEST(SurfaceTest, RtlScrollTransformMirrorsHorizontalContentTranslation) {
     std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
     surface->setViewport(200.f, 200.f);
 
-    auto viewport = std::make_unique<PanelElement>();
+    auto viewport = makeElement<HTMLPanelElement>();
     viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto target = std::make_unique<ButtonElement>();
+    auto target = makeElement<HTMLButtonElement>();
     target->setId("target").setRect({-130.f, 10.f, 20.f, 20.f});
     viewport->append(std::move(target));
-    PanelElement* viewportPtr = viewport.get();
+    HTMLPanelElement* viewportPtr = viewport.get();
     surface->mount(std::move(viewport));
     ASSERT_TRUE(system.setLocale("ar"));
     surface->updateLayout();
@@ -884,12 +888,12 @@ TEST(SurfaceTest, ScrollbarArrowsAndTrackPageByInputPolicy) {
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
 
-    auto viewport = std::make_unique<PanelElement>();
+    auto viewport = makeElement<HTMLPanelElement>();
     viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<PanelElement>();
+    auto content = makeElement<HTMLPanelElement>();
     content->setRect({0.f, 0.f, 100.f, 300.f});
     viewport->append(std::move(content));
-    PanelElement* viewportPtr = viewport.get();
+    HTMLPanelElement* viewportPtr = viewport.get();
     surface.mount(std::move(viewport));
     surface.updateLayout();
 
@@ -918,12 +922,12 @@ TEST(SurfaceTest, HeldScrollbarArrowRepeatsUntilRelease) {
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
 
-    auto viewport = std::make_unique<PanelElement>();
+    auto viewport = makeElement<HTMLPanelElement>();
     viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<PanelElement>();
+    auto content = makeElement<HTMLPanelElement>();
     content->setRect({0.f, 0.f, 100.f, 300.f});
     viewport->append(std::move(content));
-    PanelElement* viewportPtr = viewport.get();
+    HTMLPanelElement* viewportPtr = viewport.get();
     surface.mount(std::move(viewport));
     surface.updateLayout();
 
@@ -954,12 +958,12 @@ TEST(SurfaceTest, ScrollbarTrackClickContinuesIntoThumbDrag) {
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
 
-    auto viewport = std::make_unique<PanelElement>();
+    auto viewport = makeElement<HTMLPanelElement>();
     viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<PanelElement>();
+    auto content = makeElement<HTMLPanelElement>();
     content->setRect({0.f, 0.f, 100.f, 300.f});
     viewport->append(std::move(content));
-    PanelElement* viewportPtr = viewport.get();
+    HTMLPanelElement* viewportPtr = viewport.get();
     surface.mount(std::move(viewport));
     surface.updateLayout();
 
@@ -987,9 +991,9 @@ TEST(SurfaceTest, KeepsDefaultCursorOverScrollbar) {
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
 
-    auto viewport = std::make_unique<PanelElement>();
+    auto viewport = makeElement<HTMLPanelElement>();
     viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<PanelElement>();
+    auto content = makeElement<HTMLPanelElement>();
     content->setRect({0.f, 0.f, 100.f, 240.f});
     viewport->append(std::move(content));
     surface.mount(std::move(viewport));
@@ -1017,9 +1021,9 @@ TEST(SurfaceTest, ReportsPartSpecificScrollbarHoverAndPressedState) {
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
 
-    auto viewport = std::make_unique<PanelElement>();
+    auto viewport = makeElement<HTMLPanelElement>();
     viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<PanelElement>();
+    auto content = makeElement<HTMLPanelElement>();
     content->setRect({0.f, 0.f, 100.f, 300.f});
     viewport->append(std::move(content));
     surface.mount(std::move(viewport));
@@ -1085,16 +1089,16 @@ TEST(SurfaceTest, ScrollsFocusedAncestorWithKeyboard) {
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
 
-    auto viewport = std::make_unique<PanelElement>();
+    auto viewport = makeElement<HTMLPanelElement>();
     viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<PanelElement>();
+    auto content = makeElement<HTMLPanelElement>();
     content->setRect({0.f, 0.f, 100.f, 240.f});
     viewport->append(std::move(content));
-    auto button = std::make_unique<ButtonElement>();
+    auto button = makeElement<HTMLButtonElement>();
     button->setRect({10.f, 20.f, 20.f, 20.f});
-    ButtonElement* buttonPtr = button.get();
+    HTMLButtonElement* buttonPtr = button.get();
     viewport->append(std::move(button));
-    PanelElement* viewportPtr = viewport.get();
+    HTMLPanelElement* viewportPtr = viewport.get();
     surface.mount(std::move(viewport));
     surface.updateLayout();
 
@@ -1118,17 +1122,17 @@ TEST(SurfaceTest, ScrollsColumnContentDownAndMovesPaintedText) {
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
 
-    auto viewport = std::make_unique<PanelElement>();
+    auto viewport = makeElement<HTMLPanelElement>();
     viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
     auto appendItem = [&viewport](const char* id, const char* value) {
-        auto item = std::make_unique<PanelElement>();
+        auto item = makeElement<HTMLPanelElement>();
         item->setId(id).textContent(value);
         viewport->append(std::move(item));
     };
     appendItem("first", "first");
     appendItem("second", "second");
     appendItem("third", "third");
-    PanelElement* viewportPtr = viewport.get();
+    HTMLPanelElement* viewportPtr = viewport.get();
     surface.mount(std::move(viewport));
     surface.updateLayout();
 
@@ -1155,12 +1159,12 @@ TEST(SurfaceTest, PreventsDefaultWheelScrollingWhenCanceled) {
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
 
-    auto viewport = std::make_unique<PanelElement>();
+    auto viewport = makeElement<HTMLPanelElement>();
     viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<PanelElement>();
+    auto content = makeElement<HTMLPanelElement>();
     content->setRect({0.f, 0.f, 100.f, 200.f});
     viewport->append(std::move(content));
-    PanelElement* viewportPtr = viewport.get();
+    HTMLPanelElement* viewportPtr = viewport.get();
     viewportPtr->addEventListener(kWheelEvent, [](Event& event) { event.preventDefault(); });
     surface.mount(std::move(viewport));
     surface.updateLayout();
@@ -1175,12 +1179,12 @@ TEST(SurfaceTest, DoesNotWheelScrollHiddenOverflow) {
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
 
-    auto viewport = std::make_unique<PanelElement>();
+    auto viewport = makeElement<HTMLPanelElement>();
     viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<PanelElement>();
+    auto content = makeElement<HTMLPanelElement>();
     content->setRect({0.f, 0.f, 100.f, 200.f});
     viewport->append(std::move(content));
-    PanelElement* viewportPtr = viewport.get();
+    HTMLPanelElement* viewportPtr = viewport.get();
     surface.mount(std::move(viewport));
     surface.updateLayout();
 
@@ -1199,15 +1203,15 @@ TEST(SurfaceTest, ChainsWheelDeltaFromInnerToOuterScroller) {
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
 
-    auto outer = std::make_unique<PanelElement>();
+    auto outer = makeElement<HTMLPanelElement>();
     outer->setId("outer").setRect({0.f, 0.f, 100.f, 100.f});
-    auto inner = std::make_unique<PanelElement>();
+    auto inner = makeElement<HTMLPanelElement>();
     inner->setId("inner").setRect({0.f, 0.f, 100.f, 200.f});
-    auto content = std::make_unique<PanelElement>();
+    auto content = makeElement<HTMLPanelElement>();
     content->setRect({0.f, 0.f, 100.f, 300.f});
     inner->append(std::move(content));
-    PanelElement* outerPtr = outer.get();
-    PanelElement* innerPtr = inner.get();
+    HTMLPanelElement* outerPtr = outer.get();
+    HTMLPanelElement* innerPtr = inner.get();
     outer->append(std::move(inner));
     surface.mount(std::move(outer));
     surface.updateLayout();
@@ -1228,20 +1232,20 @@ TEST(SurfaceTest, DispatchesCoalescedTargetOnlyScrollNotification) {
     int targetNotifications = 0;
     int parentNotifications = 0;
 
-    auto parent = std::make_unique<PanelElement>();
+    auto parent = makeElement<HTMLPanelElement>();
     parent->setRect({0.f, 0.f, 100.f, 100.f});
-    auto viewport = std::make_unique<PanelElement>();
+    auto viewport = makeElement<HTMLPanelElement>();
     viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<PanelElement>();
+    auto content = makeElement<HTMLPanelElement>();
     content->setRect({0.f, 0.f, 100.f, 200.f});
     viewport->append(std::move(content));
-    PanelElement* viewportPtr = viewport.get();
+    HTMLPanelElement* viewportPtr = viewport.get();
     parent->addEventListener(kScrollEvent, [&parentNotifications](Event&) { ++parentNotifications; });
     viewportPtr->addEventListener(kScrollEvent, [&](Event& event) {
         ++targetNotifications;
         EXPECT_EQ(event.phase(), EventPhase::Target);
         EXPECT_EQ(event.currentTarget(), viewportPtr);
-        EXPECT_EQ(&event.target(), viewportPtr);
+        EXPECT_EQ(event.target(), viewportPtr);
         EXPECT_FALSE(event.cancelable());
         event.preventDefault();
         EXPECT_FALSE(event.defaultPrevented());
@@ -1284,23 +1288,23 @@ TEST(SurfaceTest, TraversesFocusableControlsAndSkipsUnavailableNodes) {
     Surface context;
     context.setViewport(200.f, 200.f);
 
-    auto first = std::make_unique<ButtonElement>();
-    ButtonElement* firstTarget = first.get();
+    auto first = makeElement<HTMLButtonElement>();
+    HTMLButtonElement* firstTarget = first.get();
     first->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
     context.mount(std::move(first));
 
-    auto hidden = std::make_unique<ButtonElement>();
-    ButtonElement* hiddenTarget = hidden.get();
+    auto hidden = makeElement<HTMLButtonElement>();
+    HTMLButtonElement* hiddenTarget = hidden.get();
     hidden->setVisibility(Visibility::Hidden).setRect({40.f, 10.f, 20.f, 20.f});
     context.mount(std::move(hidden));
 
-    auto disabled = std::make_unique<ButtonElement>();
-    ButtonElement* disabledTarget = disabled.get();
+    auto disabled = makeElement<HTMLButtonElement>();
+    HTMLButtonElement* disabledTarget = disabled.get();
     disabled->disabled(true).setRect({70.f, 10.f, 20.f, 20.f});
     context.mount(std::move(disabled));
 
-    auto last = std::make_unique<InputElement>();
-    InputElement* lastTarget = last.get();
+    auto last = makeElement<HTMLInputElement>();
+    HTMLInputElement* lastTarget = last.get();
     last->type("checkbox").switchMode(true);
     last->setRect({100.f, 10.f, 40.f, 20.f});
     context.mount(std::move(last));
@@ -1341,11 +1345,11 @@ TEST(SurfaceTest, TraversesFocusableControlsAndSkipsUnavailableNodes) {
 TEST(SurfaceTest, ClearsInteractionWhenDescendantsBecomeUnavailable) {
     Surface context;
     context.setViewport(100.f, 100.f);
-    auto panel = std::make_unique<PanelElement>();
-    PanelElement* parent = panel.get();
+    auto panel = makeElement<HTMLPanelElement>();
+    HTMLPanelElement* parent = panel.get();
     panel->setRect({0.f, 0.f, 100.f, 100.f});
-    auto button = std::make_unique<ButtonElement>();
-    ButtonElement* target = button.get();
+    auto button = makeElement<HTMLButtonElement>();
+    HTMLButtonElement* target = button.get();
     button->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
     panel->append(std::move(button));
     context.mount(std::move(panel));
@@ -1380,14 +1384,14 @@ TEST(SurfaceTest, ClearsInteractionWhenDescendantsBecomeUnavailable) {
 TEST(SurfaceTest, DispatchesMouseBindingsInExpectedOrder) {
     Surface context;
     context.setViewport(100.f, 100.f);
-    auto button = std::make_unique<ButtonElement>();
+    auto button = makeElement<HTMLButtonElement>();
     button->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
-    button->setEventCall(kPointerDownEvent, EventCall("press"));
-    button->setEventCall(kPointerUpEvent, EventCall("release"));
-    button->setEventCall(kClickEvent, EventCall("click"));
-    button->setEventCall(kDoubleClickEvent, EventCall("doubleClick"));
-    button->setEventCall(kContextMenuEvent, EventCall("contextMenu"));
-    ButtonElement* mounted = button.get();
+    setAuthoredEventCall(*button, kPointerDownEvent, EventCall("press"));
+    setAuthoredEventCall(*button, kPointerUpEvent, EventCall("release"));
+    setAuthoredEventCall(*button, kClickEvent, EventCall("click"));
+    setAuthoredEventCall(*button, kDoubleClickEvent, EventCall("doubleClick"));
+    setAuthoredEventCall(*button, kContextMenuEvent, EventCall("contextMenu"));
+    HTMLButtonElement* mounted = button.get();
     context.mount(std::move(button));
 
     std::vector<std::string> events;
@@ -1441,8 +1445,8 @@ TEST(SurfaceTest, DispatchesMouseBindingsInExpectedOrder) {
 TEST(SurfaceTest, UnmountsRootElementsSafely) {
     Surface context;
     context.setViewport(100.f, 80.f);
-    auto panel = std::make_unique<PanelElement>();
-    PanelElement* mounted = panel.get();
+    auto panel = makeElement<HTMLPanelElement>();
+    HTMLPanelElement* mounted = panel.get();
     context.mount(std::move(panel));
     ASSERT_NE(context.unmount(*mounted), nullptr);
 
@@ -1474,10 +1478,10 @@ TEST(SurfaceTest, AppliesPointerPolicyStylesWithoutLayout) {
     Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
 
-    auto button = std::make_unique<ButtonElement>();
+    auto button = makeElement<HTMLButtonElement>();
     button->setRect({10.f, 10.f, 20.f, 20.f});
     surface.mount(std::move(button));
-    auto panel = std::make_unique<PanelElement>();
+    auto panel = makeElement<HTMLPanelElement>();
     panel->setRect({40.f, 10.f, 20.f, 20.f});
     surface.mount(std::move(panel));
 
@@ -1493,10 +1497,10 @@ TEST(SurfaceTest, RemeasuresAfterIntrinsicContentChanges) {
     Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
 
-    auto panel = std::make_unique<PanelElement>();
+    auto panel = makeElement<HTMLPanelElement>();
     panel->setRect({0.f, 0.f, 100.f, 20.f});
-    auto label = std::make_unique<LabelElement>("a");
-    LabelElement* text = label.get();
+    auto label = makeElement<HTMLLabelElement>("a");
+    HTMLLabelElement* text = label.get();
     panel->append(std::move(label));
     surface.mount(std::move(panel));
 
@@ -1514,10 +1518,10 @@ TEST(SurfaceTest, RemeasuresAfterTextNodeDataChanges) {
     Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
 
-    auto panel = std::make_unique<PanelElement>();
+    auto panel = makeElement<HTMLPanelElement>();
     panel->setRect({0.f, 0.f, 100.f, 20.f});
-    auto label = std::make_unique<LabelElement>("a");
-    LabelElement* labelElement = label.get();
+    auto label = makeElement<HTMLLabelElement>("a");
+    HTMLLabelElement* labelElement = label.get();
     ASSERT_NE(label->firstChild(), nullptr);
     Text* text = label->firstChild()->asText();
     ASSERT_NE(text, nullptr);
@@ -1539,10 +1543,10 @@ TEST(SurfaceTest, InvalidatesLayoutAfterStylesheetGenerationChanges) {
     Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
 
-    auto panel = std::make_unique<PanelElement>();
+    auto panel = makeElement<HTMLPanelElement>();
     panel->setRect({0.f, 0.f, 100.f, 20.f});
-    auto label = std::make_unique<LabelElement>("text");
-    LabelElement* text = label.get();
+    auto label = makeElement<HTMLLabelElement>("text");
+    HTMLLabelElement* text = label.get();
     panel->append(std::move(label));
     surface.mount(std::move(panel));
     surface.updateLayout();
@@ -1573,7 +1577,7 @@ TEST(SurfaceTest, RoutesPointerEventsThroughCaptureTargetAndBubble) {
 }
 
 TEST(SurfaceTest, PreservesEventHandlerIdentityAndSuppressesDuplicates) {
-    ButtonElement button;
+    auto button = makeElementValue<HTMLButtonElement>();
     int calls = 0;
     EventHandler handler([&](Event& event) {
         EXPECT_EQ(event.type(), kClickEvent);
@@ -1590,8 +1594,61 @@ TEST(SurfaceTest, PreservesEventHandlerIdentityAndSuppressesDuplicates) {
     EXPECT_EQ(calls, 1);
 }
 
+TEST(SurfaceTest, EventListenerRemovalTakesEffectDuringTheCurrentDispatch) {
+    auto button = makeElementValue<HTMLButtonElement>();
+    int firstCalls = 0;
+    int removedCalls = 0;
+    EventHandler removed([&](Event&) { ++removedCalls; });
+    EventHandler first([&](Event&) {
+        ++firstCalls;
+        button.removeEventListener(kClickEvent, removed);
+    });
+    button.addEventListener(kClickEvent, first);
+    button.addEventListener(kClickEvent, removed);
+
+    button.activate();
+
+    EXPECT_EQ(firstCalls, 1);
+    EXPECT_EQ(removedCalls, 0);
+}
+
+TEST(SurfaceTest, EventListenerAddedDuringDispatchWaitsForTheNextDispatch) {
+    auto button = makeElementValue<HTMLButtonElement>();
+    int addedCalls = 0;
+    EventHandler added([&](Event&) { ++addedCalls; });
+    EventHandler installer([&](Event&) { button.addEventListener(kClickEvent, added); });
+    button.addEventListener(kClickEvent, installer);
+
+    button.activate();
+    EXPECT_EQ(addedCalls, 0);
+    button.activate();
+    EXPECT_EQ(addedCalls, 1);
+}
+
+TEST(SurfaceTest, EventRoutingUsesOneListenerSnapshotForTheWholeRoute) {
+    Surface surface;
+    surface.setViewport(100.f, 100.f);
+    auto parent = makeElement<HTMLPanelElement>();
+    parent->setRect({0.f, 0.f, 100.f, 100.f});
+    auto button = makeElement<HTMLButtonElement>();
+    HTMLButtonElement* target = button.get();
+    button->setRect({10.f, 10.f, 20.f, 20.f});
+    parent->append(std::move(button));
+
+    int lateCalls = 0;
+    EventHandler late([&](Event&) { ++lateCalls; });
+    parent->addEventListener(kPointerDownEvent, [&](Event&) { target->addEventListener(kPointerDownEvent, late); }, true);
+    surface.mount(std::move(parent));
+
+    ASSERT_TRUE(surface.pointerDown({{15.f, 15.f}, PointerButton::Left}));
+    EXPECT_EQ(lateCalls, 0);
+    surface.pointerUp({{15.f, 15.f}, PointerButton::Left});
+    ASSERT_TRUE(surface.pointerDown({{15.f, 15.f}, PointerButton::Left}));
+    EXPECT_EQ(lateCalls, 1);
+}
+
 TEST(SurfaceTest, StopImmediatePropagationSkipsLaterListeners) {
-    ButtonElement button;
+    auto button = makeElementValue<HTMLButtonElement>();
     int skipped = 0;
     button.addEventListener(kClickEvent, [](Event& event) { event.stopImmediatePropagation(); });
     button.addEventListener(kClickEvent, [&](Event&) { ++skipped; });
@@ -1628,9 +1685,9 @@ TEST(SurfaceTest, InheritsAndOverridesCursorStyles) {
     Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
 
-    auto parent = std::make_unique<PanelElement>();
+    auto parent = makeElement<HTMLPanelElement>();
     parent->setId("parent").setRect({0.f, 0.f, 100.f, 100.f});
-    auto child = std::make_unique<PanelElement>();
+    auto child = makeElement<HTMLPanelElement>();
     child->setId("child").setRect({10.f, 10.f, 20.f, 20.f});
     parent->append(std::move(child));
     surface.mount(std::move(parent));
@@ -1656,11 +1713,11 @@ TEST(SurfaceTest, RoutesInputBySurfaceLayerPriority) {
     int modalActivations = 0;
 
     auto mountButton = [&](SurfaceLayer layer, int& activations, const Rect& rect) {
-        auto button = std::make_unique<ButtonElement>();
+        auto button = makeElement<HTMLButtonElement>();
         button->setRect(rect).setOnActivate([&activations](Element&) { ++activations; });
         surface.mount(std::move(button), layer);
     };
-    mountButton(SurfaceLayer::Content, contentActivations, {0.f, 0.f, 100.f, 100.f});
+    mountButton(SurfaceLayer::Base, contentActivations, {0.f, 0.f, 100.f, 100.f});
     mountButton(SurfaceLayer::Floater, floaterActivations, {10.f, 10.f, 30.f, 30.f});
     mountButton(SurfaceLayer::Popup, popupActivations, {10.f, 10.f, 30.f, 30.f});
     mountButton(SurfaceLayer::Tooltip, tooltipActivations, {10.f, 10.f, 30.f, 30.f});
@@ -1693,16 +1750,16 @@ TEST(SurfaceTest, RaisesContainingFloaterOnPress) {
     int firstActivations = 0;
     int secondActivations = 0;
 
-    auto first = std::make_unique<PanelElement>();
+    auto first = makeElement<HTMLPanelElement>();
     first->setRect({0.f, 0.f, 50.f, 50.f});
-    auto firstButton = std::make_unique<ButtonElement>();
+    auto firstButton = makeElement<HTMLButtonElement>();
     firstButton->setRect({0.f, 0.f, 50.f, 50.f}).setOnActivate([&firstActivations](Element&) { ++firstActivations; });
     first->append(std::move(firstButton));
     surface.mount(std::move(first), SurfaceLayer::Floater);
 
-    auto second = std::make_unique<PanelElement>();
+    auto second = makeElement<HTMLPanelElement>();
     second->setRect({25.f, 0.f, 50.f, 50.f});
-    auto secondButton = std::make_unique<ButtonElement>();
+    auto secondButton = makeElement<HTMLButtonElement>();
     secondButton->setRect({25.f, 0.f, 50.f, 50.f}).setOnActivate([&secondActivations](Element&) { ++secondActivations; });
     second->append(std::move(secondButton));
     surface.mount(std::move(second), SurfaceLayer::Floater);
@@ -1722,9 +1779,9 @@ TEST(SurfaceTest, AppliesOverflowVisibilityToHitTestingAndPainting) {
     ASSERT_TRUE(stylesheet.loadRadia(kOverflowVisibleLayout).ok());
     Surface surface(stylesheet);
     surface.setViewport(100.f, 100.f);
-    auto parent = std::make_unique<PanelElement>();
+    auto parent = makeElement<HTMLPanelElement>();
     parent->setId("parent").setRect({10.f, 10.f, 20.f, 20.f});
-    auto child = std::make_unique<PanelElement>();
+    auto child = makeElement<HTMLPanelElement>();
     child->setId("child").setRect({40.f, 10.f, 10.f, 10.f});
     parent->append(std::move(child));
     surface.mount(std::move(parent));
@@ -1735,14 +1792,14 @@ TEST(SurfaceTest, AppliesOverflowVisibilityToHitTestingAndPainting) {
     constexpr char kVerticalOverflow[] = "#parent { overflow-x: visible; overflow-y: hidden; pointer-events: none; } "
                                          "#child { pointer-events: auto; }";
     ASSERT_TRUE(stylesheet.loadRadia(kVerticalOverflow).ok());
-    EXPECT_TRUE(surface.pointerDown({{45.f, 15.f}, PointerButton::Left}));
+    EXPECT_FALSE(surface.pointerDown({{45.f, 15.f}, PointerButton::Left}));
     surface.pointerUp({{45.f, 15.f}, PointerButton::Left});
 
     RecordingPaintContext verticalRecording;
     surface.paint(verticalRecording);
     const PaintCommand* verticalClip = verticalRecording.last(PaintCommandKind::PushClip);
     ASSERT_NE(verticalClip, nullptr);
-    EXPECT_FALSE(clipsAxis(verticalClip->clipAxes, ClipAxes::X));
+    EXPECT_TRUE(clipsAxis(verticalClip->clipAxes, ClipAxes::X));
     EXPECT_TRUE(clipsAxis(verticalClip->clipAxes, ClipAxes::Y));
 
     constexpr char kHorizontalOverflow[] = "#parent { overflow-x: hidden; overflow-y: visible; pointer-events: none; } "
@@ -1758,7 +1815,7 @@ TEST(SurfaceTest, AppliesOverflowVisibilityToHitTestingAndPainting) {
     ASSERT_NE(overflowClip, nullptr);
     EXPECT_EQ(overflowClip->rect.w, 20.f);
     EXPECT_TRUE(clipsAxis(overflowClip->clipAxes, ClipAxes::X));
-    EXPECT_FALSE(clipsAxis(overflowClip->clipAxes, ClipAxes::Y));
+    EXPECT_TRUE(clipsAxis(overflowClip->clipAxes, ClipAxes::Y));
 }
 
 TEST(SurfaceTest, PaintsNestedScrollersWithBalancedViewportClipsAndTranslations) {
@@ -1770,15 +1827,15 @@ TEST(SurfaceTest, PaintsNestedScrollersWithBalancedViewportClipsAndTranslations)
     Surface surface(stylesheet);
     surface.setViewport(100.f, 100.f);
 
-    auto outer = std::make_unique<PanelElement>();
+    auto outer = makeElement<HTMLPanelElement>();
     outer->setId("outer").setRect({0.f, 0.f, 100.f, 100.f});
-    PanelElement* outerPtr = outer.get();
-    auto inner = std::make_unique<PanelElement>();
+    HTMLPanelElement* outerPtr = outer.get();
+    auto inner = makeElement<HTMLPanelElement>();
     inner->setId("inner").setRect({40.f, 40.f, 120.f, 120.f});
-    PanelElement* innerPtr = inner.get();
-    auto content = std::make_unique<PanelElement>();
+    HTMLPanelElement* innerPtr = inner.get();
+    auto content = makeElement<HTMLPanelElement>();
     content->setRect({40.f, 40.f, 180.f, 180.f});
-    PanelElement* contentPtr = content.get();
+    HTMLPanelElement* contentPtr = content.get();
     inner->append(std::move(content));
     outer->append(std::move(inner));
     surface.mount(std::move(outer));
@@ -1832,8 +1889,8 @@ TEST(SurfaceTest, TransfersMountedElementsBetweenSurfaces) {
     first.setViewport(100.f, 100.f);
     second.setViewport(80.f, 60.f);
 
-    auto button = std::make_unique<ButtonElement>();
-    ButtonElement* transferred = button.get();
+    auto button = makeElement<HTMLButtonElement>();
+    HTMLButtonElement* transferred = button.get();
     button->setRect({10.f, 10.f, 20.f, 20.f});
     first.mount(std::move(button), SurfaceLayer::Floater);
     first.pointerDown({{15.f, 15.f}, PointerButton::Left});
@@ -1852,14 +1909,14 @@ TEST(SurfaceTest, KeepsMountedRootsIndependent) {
     Surface surface;
     surface.setViewport(100.f, 100.f);
 
-    auto first = std::make_unique<PanelElement>();
-    PanelElement* firstRoot = first.get();
-    auto firstChild = std::make_unique<ButtonElement>();
-    ButtonElement* firstDescendant = firstChild.get();
+    auto first = makeElement<HTMLPanelElement>();
+    HTMLPanelElement* firstRoot = first.get();
+    auto firstChild = makeElement<HTMLButtonElement>();
+    HTMLButtonElement* firstDescendant = firstChild.get();
     first->append(std::move(firstChild));
 
-    auto second = std::make_unique<PanelElement>();
-    PanelElement* secondRoot = second.get();
+    auto second = makeElement<HTMLPanelElement>();
+    HTMLPanelElement* secondRoot = second.get();
 
     surface.mount(std::move(first), SurfaceLayer::Floater);
     surface.mount(std::move(second), SurfaceLayer::Floater);
@@ -1970,14 +2027,14 @@ TEST(SurfaceTest, InvalidatesAncestorLayoutAfterStateChanges) {
     ASSERT_TRUE(styleSheet.loadRadia(kStateLayout).ok());
     Surface surface(styleSheet);
     surface.setViewport(100.f, 20.f);
-    auto panel = std::make_unique<PanelElement>();
+    auto panel = makeElement<HTMLPanelElement>();
     panel->setRect({0.f, 0.f, 100.f, 20.f});
-    auto control = std::make_unique<InputElement>();
-    InputElement* target = control.get();
+    auto control = makeElement<HTMLInputElement>();
+    HTMLInputElement* target = control.get();
     control->type("checkbox").switchMode(true);
     panel->append(std::move(control));
-    auto label = std::make_unique<LabelElement>("after");
-    LabelElement* after = label.get();
+    auto label = makeElement<HTMLLabelElement>("after");
+    HTMLLabelElement* after = label.get();
     panel->append(std::move(label));
     surface.mount(std::move(panel));
 
@@ -1996,7 +2053,7 @@ TEST(SurfaceTest, PreservesOrderedPaintingHitTestingAndFocus) {
     ASSERT_TRUE(styleSheet.loadRadia(kOrderedOverlap).ok());
     Surface surface(styleSheet);
     surface.setViewport(40.f, 20.f);
-    auto panel = std::make_unique<PanelElement>();
+    auto panel = makeElement<HTMLPanelElement>();
     std::vector<std::string> paintOrder;
     auto early = std::make_unique<OrderedPaintProbe>("early", paintOrder);
     auto late = std::make_unique<OrderedPaintProbe>("late", paintOrder);
@@ -2033,14 +2090,14 @@ TEST(SurfaceTest, PreservesOrderedPaintingHitTestingAndFocus) {
 TEST(SurfaceTest, InvalidatesCachedTraversalAfterChildMutation) {
     Surface surface;
     surface.setViewport(100.f, 100.f);
-    auto panel = std::make_unique<PanelElement>();
-    PanelElement* parent = panel.get();
+    auto panel = makeElement<HTMLPanelElement>();
+    HTMLPanelElement* parent = panel.get();
     panel->setRect({0.f, 0.f, 100.f, 100.f});
     surface.mount(std::move(panel));
     surface.updateLayout();
 
-    auto button = std::make_unique<ButtonElement>();
-    ButtonElement* target = button.get();
+    auto button = makeElement<HTMLButtonElement>();
+    HTMLButtonElement* target = button.get();
     button->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
     parent->append(std::move(button));
     EXPECT_TRUE(surface.pointerDown({{15.f, 15.f}, PointerButton::Left}));

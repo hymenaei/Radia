@@ -18,25 +18,27 @@
 #include "componentmanager.h"
 #include "controllerregistration.h"
 #include "documentcontroller.h"
-#include "elements/button.h"
-#include "elements/elementinternal.h"
-#include "elements/floater.h"
-#include "elements/input.h"
+#include "dom/elementinternal.h"
+#include "eventcall.h"
+#include "html/button.h"
+#include "html/floater.h"
+#include "html/input.h"
 #include "skin/compiler.h"
 #include "system.h"
 #include "test_floater_host.h"
 #include "text/metrics.h"
 
 namespace {
-using radia::ui::ButtonElement;
 using radia::ui::DiagnosticResult;
 using radia::ui::Document;
 using radia::ui::Element;
 using radia::ui::ElementRef;
 using radia::ui::Event;
+using radia::ui::authoredEventCall;
 using radia::ui::fixedTextMetrics;
-using radia::ui::FloaterElement;
-using radia::ui::InputElement;
+using radia::ui::HTMLButtonElement;
+using radia::ui::HTMLFloaterElement;
+using radia::ui::HTMLInputElement;
 using radia::ui::ResourceSnapshot;
 using radia::ui::SettingResolution;
 using radia::ui::SettingResolver;
@@ -51,6 +53,7 @@ using radia::viewer::ui::ComponentInstanceKey;
 using radia::viewer::ui::ComponentManager;
 using radia::viewer::ui::DocumentController;
 using radia::viewer::ui::test::TestFloaterHost;
+using ::testing::Test;
 
 Element* findElement(Element& root, std::string_view id) {
     if (root.id() == id) return &root;
@@ -101,7 +104,7 @@ public:
     std::shared_ptr<TestBooleanBinding> binding;
 };
 
-class ComponentManagerTest : public ::testing::Test {
+class ComponentManagerTest : public Test {
 protected:
     struct ControllerState {
         int committedCount = 0;
@@ -119,6 +122,7 @@ protected:
         bool pointerUpObserved = false;
         bool pointerMoveObserved = false;
         bool contextMenuObserved = false;
+        bool bubbledCurrentTargetValid = false;
         std::optional<Element*> previousStatus;
         std::optional<Element*> activeStatus;
     };
@@ -139,6 +143,7 @@ protected:
             handler("pointerUp", &Controller::pointerUp);
             handler("pointerMove", &Controller::pointerMove);
             handler("contextMenu", &Controller::contextMenu);
+            handler("observeCurrentTarget", &Controller::observeCurrentTarget);
         }
 
         void onOpen() override {
@@ -158,12 +163,17 @@ protected:
     private:
         void press() {
             ++mState.pressCount;
-            if (mStatus) mStatus->content(t("controller.ready"));
+            if (mStatus) mStatus->innerHTML(t("controller.ready"));
         }
 
         void inspect(int index, std::string destination, bool enabled, Element* source, const Event& event) {
-            mState.inspectArgumentsValid =
-                index == 4 && destination == "settings" && enabled && source && source->id() == "inspect" && event.target().id() == source->id();
+            mState.inspectArgumentsValid = index == 4
+                && destination == "settings"
+                && enabled
+                && source
+                && source->id() == "inspect"
+                && event.target()
+                && event.target()->id() == source->id();
         }
 
         void changed(const Event& event) { mState.changeObserved = event.checked(); }
@@ -172,6 +182,9 @@ protected:
         void pointerUp(const Event&) { mState.pointerUpObserved = true; }
         void pointerMove(const Event&) { mState.pointerMoveObserved = true; }
         void contextMenu(const Event&) { mState.contextMenuObserved = true; }
+        void observeCurrentTarget(Element* source, const Event& event) {
+            mState.bubbledCurrentTargetValid = source && source == event.currentTarget() && event.target() != source;
+        }
 
         ControllerState& mState;
         Element* mStatus = nullptr;
@@ -205,40 +218,39 @@ protected:
         constexpr char kLocalization[] = "defaultLocale: en\n"
                                          "locales: {en: {strings: {controller.ready: Ready}}}\n";
         constexpr char kViewWithStatus[] = "<floater>"
-                                           "<head><title>controller</title><close/></head>"
-                                           "<body>"
-                                           "<p id=\"status\"/>"
-                                           "<button id=\"press\" onClick=\"press()\"/>"
-                                           "<button id=\"inspect\" onClick=\"inspect(4, 'settings', true, this, event)\"/>"
+                                           "<head><title>controller</title><close></close></head>"
+                                           "<body onClick=\"observeCurrentTarget(this, event)\">"
+                                           "<p id=\"status\"></p>"
+                                           "<button id=\"press\" onClick=\"press()\"></button>"
+                                           "<button id=\"inspect\" onClick=\"inspect(4, 'settings', true, this, event)\"></button>"
                                            "<button id=\"events\" onDoubleClick=\"doubleClick(event)\" onPointerDown=\"pointerDown(event)\" "
                                            "onPointerUp=\"pointerUp(event)\" onPointerMove=\"pointerMove(event)\" "
-                                           "onContextMenu=\"contextMenu(event)\"/>"
-                                           "<input type=\"checkbox\" switch=\"true\" id=\"changed\" checked=\"false\" onChange=\"changed(event)\"/>"
-                                           "<input type=\"checkbox\" switch=\"true\" id=\"setting\" setting=\"test-enabled\"/>"
+                                           "onContextMenu=\"contextMenu(event)\"></button>"
+                                           "<input type=\"checkbox\" switch=\"true\" id=\"changed\" checked=\"false\" onChange=\"changed(event)\">"
+                                           "<input type=\"checkbox\" switch=\"true\" id=\"setting\" setting=\"test-enabled\">"
                                            "</body>"
                                            "</floater>";
-        constexpr char kViewWithoutStatus[] =
-            "<floater>"
-            "<head><title>controller</title><close/></head>"
-            "<body>"
-            "<button id=\"press\" onClick=\"press()\"/>"
-            "<button id=\"inspect\" onClick=\"inspect(4, 'settings', true, this, event)\"/>"
-            "<button id=\"events\" onDoubleClick=\"doubleClick(event)\" onPointerDown=\"pointerDown(event)\" "
-            "onPointerUp=\"pointerUp(event)\" onPointerMove=\"pointerMove(event)\" "
-            "onContextMenu=\"contextMenu(event)\"/>"
-            "<input type=\"checkbox\" switch=\"true\" id=\"changed\" checked=\"false\" onChange=\"changed(event)\"/>"
-            "<input type=\"checkbox\" switch=\"true\" id=\"setting\" setting=\"test-enabled\"/>"
-            "</body>"
-            "</floater>";
+        constexpr char kViewWithoutStatus[] = "<floater>"
+                                              "<head><title>controller</title><close></close></head>"
+                                              "<body>"
+                                              "<button id=\"press\" onClick=\"press()\"></button>"
+                                              "<button id=\"inspect\" onClick=\"inspect(4, 'settings', true, this, event)\"></button>"
+                                              "<button id=\"events\" onDoubleClick=\"doubleClick(event)\" onPointerDown=\"pointerDown(event)\" "
+                                              "onPointerUp=\"pointerUp(event)\" onPointerMove=\"pointerMove(event)\" "
+                                              "onContextMenu=\"contextMenu(event)\"></button>"
+                                              "<input type=\"checkbox\" switch=\"true\" id=\"changed\" checked=\"false\" onChange=\"changed(event)\">"
+                                              "<input type=\"checkbox\" switch=\"true\" id=\"setting\" setting=\"test-enabled\">"
+                                              "</body>"
+                                              "</floater>";
         constexpr char kPanelWithStatus[] = "<panel>"
-                                            "<p id=\"status\"/>"
-                                            "<button id=\"press\" onClick=\"press()\"/>"
-                                            "<input type=\"checkbox\" switch=\"true\" id=\"changed\" checked=\"false\" onChange=\"changed(event)\"/>"
+                                            "<p id=\"status\"></p>"
+                                            "<button id=\"press\" onClick=\"press()\"></button>"
+                                            "<input type=\"checkbox\" switch=\"true\" id=\"changed\" checked=\"false\" onChange=\"changed(event)\">"
                                             "</panel>";
         constexpr char kPanelWithoutStatus[] =
             "<panel>"
-            "<button id=\"press\" onClick=\"press()\"/>"
-            "<input type=\"checkbox\" switch=\"true\" id=\"changed\" checked=\"false\" onChange=\"changed(event)\"/>"
+            "<button id=\"press\" onClick=\"press()\"></button>"
+            "<input type=\"checkbox\" switch=\"true\" id=\"changed\" checked=\"false\" onChange=\"changed(event)\">"
             "</panel>";
 
         ResourceSnapshot resources;
@@ -246,7 +258,7 @@ protected:
         resources.add("skin.css", "");
         resources.add("one.html", includeStatus ? kViewWithStatus : kViewWithoutStatus);
         resources.add("two.html", includeStatus ? kViewWithStatus : kViewWithoutStatus);
-        resources.add("empty.html", "<floater><head><title>empty</title><close/></head><body/></floater>");
+        resources.add("empty.html", "<floater><head><title>empty</title><close></close></head><body></body></floater>");
         resources.add("panel.html", includeStatus ? kPanelWithStatus : kPanelWithoutStatus);
         return SkinCompiler().prepare(std::move(resources));
     }
@@ -278,16 +290,16 @@ protected:
             "mismatched", "empty.html", [](System& system, Document& document) { return std::make_unique<MismatchedController>(system, document); });
     }
 
-    std::vector<FloaterElement*> liveFloaters() const {
-        std::vector<FloaterElement*> result;
+    std::vector<HTMLFloaterElement*> liveFloaters() const {
+        std::vector<HTMLFloaterElement*> result;
         for (const auto& [root, floater] : host.mounted)
             if (floater && !floater->closed()) result.push_back(floater.get());
         return result;
     }
 
-    std::optional<ComponentInstanceKey> keyFor(const FloaterElement& floater) const { return manager.componentKeyFor(floater); }
+    std::optional<ComponentInstanceKey> keyFor(const HTMLFloaterElement& floater) const { return manager.componentKeyFor(floater); }
 
-    FloaterElement* mountedFor(const ComponentInstanceKey& key) const {
+    HTMLFloaterElement* mountedFor(const ComponentInstanceKey& key) const {
         for (const auto& [root, floater] : host.mounted)
             if (floater && manager.componentKeyFor(*floater) == key) return floater.get();
         return nullptr;
@@ -346,10 +358,10 @@ TEST_F(ComponentManagerTest, OpensComponentAndDispatchesTypedEvents) {
     EXPECT_EQ(controllerState.openCount, 1);
     EXPECT_EQ(controllerState.availableElementCount, 1);
 
-    auto* press = dynamic_cast<ButtonElement*>(findElement(*opened.floater, "press"));
-    auto* inspect = dynamic_cast<ButtonElement*>(findElement(*opened.floater, "inspect"));
-    auto* events = dynamic_cast<ButtonElement*>(findElement(*opened.floater, "events"));
-    auto* changed = dynamic_cast<InputElement*>(findElement(*opened.floater, "changed"));
+    auto* press = dynamic_cast<HTMLButtonElement*>(findElement(*opened.floater, "press"));
+    auto* inspect = dynamic_cast<HTMLButtonElement*>(findElement(*opened.floater, "inspect"));
+    auto* events = dynamic_cast<HTMLButtonElement*>(findElement(*opened.floater, "events"));
+    auto* changed = dynamic_cast<HTMLInputElement*>(findElement(*opened.floater, "changed"));
     auto* status = findElement(*opened.floater, "status");
     ASSERT_NE(press, nullptr);
     ASSERT_NE(inspect, nullptr);
@@ -357,11 +369,11 @@ TEST_F(ComponentManagerTest, OpensComponentAndDispatchesTypedEvents) {
     ASSERT_NE(changed, nullptr);
     ASSERT_NE(status, nullptr);
 
-    EXPECT_TRUE(events->eventCall("dblclick"));
-    EXPECT_TRUE(events->eventCall("pointerdown"));
-    EXPECT_TRUE(events->eventCall("pointerup"));
-    EXPECT_TRUE(events->eventCall("pointermove"));
-    EXPECT_TRUE(events->eventCall("contextmenu"));
+    EXPECT_TRUE(authoredEventCall(*events, "dblclick"));
+    EXPECT_TRUE(authoredEventCall(*events, "pointerdown"));
+    EXPECT_TRUE(authoredEventCall(*events, "pointerup"));
+    EXPECT_TRUE(authoredEventCall(*events, "pointermove"));
+    EXPECT_TRUE(authoredEventCall(*events, "contextmenu"));
 
     press->activate();
     inspect->activate();
@@ -369,6 +381,7 @@ TEST_F(ComponentManagerTest, OpensComponentAndDispatchesTypedEvents) {
 
     EXPECT_EQ(controllerState.pressCount, 1);
     EXPECT_TRUE(controllerState.inspectArgumentsValid);
+    EXPECT_TRUE(controllerState.bubbledCurrentTargetValid);
     EXPECT_TRUE(controllerState.changeObserved);
     EXPECT_EQ(status->textContent(), "Ready");
 }
@@ -377,7 +390,7 @@ TEST_F(ComponentManagerTest, ReplacesOpenComponentWithoutChangingItsIdentity) {
     ASSERT_TRUE(registerOne());
     const auto opened = manager.open("one");
     ASSERT_TRUE(opened.ok());
-    FloaterElement* original = opened.floater;
+    HTMLFloaterElement* original = opened.floater;
 
     opened.floater->close();
     ASSERT_TRUE(manager.open("one").ok());
@@ -392,7 +405,7 @@ TEST_F(ComponentManagerTest, ReplacesOpenComponentWithoutChangingItsIdentity) {
 
     ASSERT_TRUE(prepared.replacement.commit());
     ASSERT_EQ(liveFloaters().size(), std::size_t{1});
-    FloaterElement* replacement = liveFloaters().front();
+    HTMLFloaterElement* replacement = liveFloaters().front();
     manager.idle();
     manager.reportReloadSucceeded();
     const DiagnosticResult diagnostics;
@@ -421,7 +434,7 @@ TEST_F(ComponentManagerTest, ReportsOpenComponentKeysAfterClosingAndReopeningAnI
 
     const auto openComponents = [this] {
         std::vector<ComponentInstanceKey> result;
-        manager.forEachOpen([&](const ComponentInstanceKey& key, FloaterElement&) { result.push_back(key); });
+        manager.forEachOpen([&](const ComponentInstanceKey& key, HTMLFloaterElement&) { result.push_back(key); });
         return result;
     };
 
@@ -451,7 +464,7 @@ TEST_F(ComponentManagerTest, KeepsRemainingBindingsLiveWhenAnOptionalElementDisa
 
     EXPECT_FALSE(controllerState.statusAvailable);
     EXPECT_EQ(controllerState.availableElementCount, 1);
-    auto* press = dynamic_cast<ButtonElement*>(findElement(*liveFloaters().front(), "press"));
+    auto* press = dynamic_cast<HTMLButtonElement*>(findElement(*liveFloaters().front(), "press"));
     ASSERT_NE(press, nullptr);
     press->activate();
     EXPECT_EQ(controllerState.pressCount, 1);
@@ -461,7 +474,7 @@ TEST_F(ComponentManagerTest, LeavesCurrentComponentUntouchedWhenTheHostRejectsRe
     ASSERT_TRUE(registerOne());
     const auto opened = manager.open("one");
     ASSERT_TRUE(opened.ok());
-    FloaterElement* original = opened.floater;
+    HTMLFloaterElement* original = opened.floater;
 
     const SkinGenerationPrepareResult generation = prepareGeneration();
     ASSERT_TRUE(generation.ok());
@@ -479,7 +492,7 @@ TEST_F(ComponentManagerTest, EvictsClosedFloatersBeforeReplacement) {
     ASSERT_TRUE(registerOne());
     const auto opened = manager.open("one");
     ASSERT_TRUE(opened.ok());
-    ElementRef<FloaterElement> evictedRoot(opened.floater);
+    ElementRef<HTMLFloaterElement> evictedRoot(opened.floater);
     opened.floater->close();
     ASSERT_TRUE(opened.floater->closed());
     const int openCount = controllerState.openCount;
@@ -526,7 +539,7 @@ TEST_F(ComponentManagerTest, PreservesLiveGenerationWhenHostPublicationFails) {
     ASSERT_TRUE(registerOne());
     const auto opened = manager.open("one");
     ASSERT_TRUE(opened.ok());
-    FloaterElement* original = opened.floater;
+    HTMLFloaterElement* original = opened.floater;
 
     const SkinGenerationPrepareResult generation = prepareGeneration();
     ASSERT_TRUE(generation.ok());
@@ -547,8 +560,8 @@ TEST_F(ComponentManagerTest, LeavesEveryRootUntouchedWhenHostRejectsMultiRootPub
     const auto second = manager.open("two", "second");
     ASSERT_TRUE(first.ok());
     ASSERT_TRUE(second.ok());
-    FloaterElement* originalFirst = first.floater;
-    FloaterElement* originalSecond = second.floater;
+    HTMLFloaterElement* originalFirst = first.floater;
+    HTMLFloaterElement* originalSecond = second.floater;
 
     const SkinGenerationPrepareResult generation = prepareGeneration();
     ASSERT_TRUE(generation.ok());
@@ -597,7 +610,7 @@ TEST_F(ComponentManagerTest, SynchronizesSettingBindingWithMountedSwitch) {
     ASSERT_TRUE(registerOne());
     const auto opened = manager.open("one");
     ASSERT_TRUE(opened.ok());
-    auto* setting = dynamic_cast<InputElement*>(findElement(*opened.floater, "setting"));
+    auto* setting = dynamic_cast<HTMLInputElement*>(findElement(*opened.floater, "setting"));
     ASSERT_NE(setting, nullptr);
 
     EXPECT_TRUE(setting->checked());

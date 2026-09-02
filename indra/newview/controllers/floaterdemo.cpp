@@ -48,11 +48,11 @@ void FloaterDemo::refreshLocaleControls() {
 }
 
 void FloaterDemo::press() {
-    if (mStatus) mStatus->content(t("demo.clicked"));
+    if (mStatus) mStatus->innerHTML(t("demo.clicked"));
 }
 
 void FloaterDemo::switchChanged(const Event& event) {
-    if (mStatus) mStatus->content(t(event.checked() ? "demo.switchOn" : "demo.switchOff"));
+    if (mStatus) mStatus->innerHTML(t(event.checked() ? "demo.switchOn" : "demo.switchOff"));
 }
 
 void FloaterDemo::selectLocale(int step) {
@@ -74,7 +74,7 @@ void FloaterDemo::requestSkinReload() {
 }
 
 void FloaterDemo::onReloadSucceeded() {
-    if (mStatus) mStatus->content(t("demo.reloadSucceeded"));
+    if (mStatus) mStatus->innerHTML(t("demo.reloadSucceeded"));
 }
 
 void FloaterDemo::onReloadFailed(const DiagnosticResult& diagnostics) {

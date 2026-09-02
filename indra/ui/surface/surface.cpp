@@ -7,10 +7,12 @@
 #include "surface/surface.h"
 #include <algorithm>
 #include <optional>
-#include "elements/document.h"
-#include "elements/elementinternal.h"
-#include "elements/elementtext.h"
-#include "elements/floater.h"
+#include "dom/document.h"
+#include "dom/elementinternal.h"
+#include "dom/text.h"
+#include "html/element.h"
+#include "html/elementnames.h"
+#include "html/floater.h"
 #include "layout/engine.h"
 #include "layout/engineinternal.h"
 #include "layout/primitives.h"
@@ -21,26 +23,9 @@
 #include "text/metrics.h"
 
 namespace radia::ui {
-namespace {
-void applyOpacity(Style& style, float inheritedOpacity) {
-    const float opacity = inheritedOpacity * style.opacity;
-    style.backgroundColor.a *= opacity;
-    style.borderColor.a *= opacity;
-    style.color.a *= opacity;
-    style.iconStrokeColor.a *= opacity;
-    style.outline.color.a *= opacity;
-    if (!style.scrollbarColor.automatic) {
-        style.scrollbarColor.thumb.a *= opacity;
-        style.scrollbarColor.track.a *= opacity;
-    }
-    for (BoxShadow& shadow : style.shadows) shadow.color.a *= opacity;
-    if (style.backgroundGradient)
-        for (GradientStop& stop : style.backgroundGradient->stops) stop.color.a *= opacity;
-    if (style.borderGradient)
-        for (GradientStop& stop : style.borderGradient->stops) stop.color.a *= opacity;
-    style.opacity = 1.f;
-}
+using detail::ElementInternalAccess;
 
+namespace {
 void applyDirection(Style& style, LayoutDirection direction) {
     style.direction = direction;
     if (style.textAlign == TextAlign::Start) style.textAlign = direction == LayoutDirection::RightToLeft ? TextAlign::Right : TextAlign::Left;
@@ -57,7 +42,7 @@ bool hasBorderRadius(const BorderRadii& radii) {
 const Element* scrollbarClipOwner(const Element& element, const Style& style) {
     if (style.borderWidth.any() || hasBorderRadius(style.borderRadius)) return &element;
     for (const Element* ancestor = element.parentElement(); ancestor; ancestor = ancestor->parentElement())
-        if (dynamic_cast<const FloaterElement*>(ancestor)) return ancestor;
+        if (dynamic_cast<const HTMLFloaterElement*>(ancestor)) return ancestor;
     return nullptr;
 }
 } // namespace
@@ -70,6 +55,7 @@ Surface::ElementSnapshot Surface::snapshot(Element& element) const {
     result.parent = element.parentElement();
     result.layoutRevision = element.mLayoutInvalidationRevision;
     result.styleRevision = element.mStyleRevision;
+    result.mountLifetime = detail::ElementInternalAccess::mountLifetime(element);
     return result;
 }
 
@@ -78,7 +64,9 @@ bool Surface::snapshotValid(const ElementSnapshot& snapshot) const {
     return element
         && element->mSurface == snapshot.surface
         && element->parentElement() == snapshot.parent
-        && element->mLayoutInvalidationRevision == snapshot.layoutRevision;
+        && detail::ElementInternalAccess::mountLifetime(*element) == snapshot.mountLifetime
+        && element->mLayoutInvalidationRevision == snapshot.layoutRevision
+        && element->mStyleRevision == snapshot.styleRevision;
 }
 
 bool Surface::snapshotChildValid(const ElementSnapshot& snapshot, const Element& parent) const {
@@ -100,6 +88,7 @@ Surface::Surface(const System& system, const TextMetrics& textMetrics)
 }
 
 Surface::~Surface() {
+    mLifetime.reset();
     for (RootList& layerRoots : mRoots)
         for (auto& root : layerRoots)
             if (root) root->setSurface(nullptr);
@@ -127,7 +116,7 @@ void Surface::setViewport(float width, float height) {
     const bool changed = mViewport.w != width || mViewport.h != height;
     mViewport = Rect(0.f, 0.f, width, height);
     for (auto floater = mFloaters.begin(); floater != mFloaters.end();)
-        if (FloaterElement* managed = *floater) {
+        if (HTMLFloaterElement* managed = *floater) {
             constrainFloater(*managed);
             ++floater;
         } else floater = mFloaters.erase(floater);
@@ -178,7 +167,7 @@ ScrollGeometry Surface::scrollbarGeometry(const Element& element, const Style& s
     };
 
     ScrollGeometryInput input{};
-    input.scrollport = detail::ElementInternalAccess::scrollport(element);
+    input.scrollport = ElementInternalAccess::scrollport(element);
     input.mode = mode;
     input.direction = layoutDirection();
     input.thickness = metrics.thickness * widthScale;
@@ -201,11 +190,11 @@ bool Surface::scrollbarTargetMatches(const ScrollbarTarget& target, const Elemen
 
 Element& Surface::mount(std::unique_ptr<Element> element, SurfaceLayer layer) {
     if (layer == SurfaceLayer::Modal) clearInteractionState();
-    llassert_always(element && !element->parentElement());
+    llassert_always(element && !element->parentNode() && !element->surface());
     Element* mounted = element.get();
-    element->setSurface(this);
     mOwnedRoots.emplace_back(std::move(element));
     roots(layer).push_back(mounted);
+    mounted->setSurface(this);
     llassert_always(mounted && mounted->parentElement() == nullptr && mounted->surface() == this);
     invalidateOrderingCache();
     requestLayout();
@@ -214,15 +203,28 @@ Element& Surface::mount(std::unique_ptr<Element> element, SurfaceLayer layer) {
 
 Element& Surface::mount(Document& document, SurfaceLayer layer) {
     Element* root = document.documentElement();
-    llassert_always(root);
-    return mount(*root, layer);
+    llassert_always(root && root->parentNode() == &document && !root->surface());
+
+    const std::weak_ptr<char> surfaceLifetime = mLifetime;
+    const std::weak_ptr<char> rootLifetime = ElementInternalAccess::lifetime(*root);
+    document.addDestructionObserver([this, root, surfaceLifetime, rootLifetime] {
+        if (surfaceLifetime.expired() || rootLifetime.expired()) return;
+        (void)unmountBorrowed(*root);
+    });
+
+    if (layer == SurfaceLayer::Modal) clearInteractionState();
+    roots(layer).push_back(root);
+    root->setSurface(this);
+    invalidateOrderingCache();
+    requestLayout();
+    return *root;
 }
 
 Element& Surface::mount(Element& element, SurfaceLayer layer) {
     if (layer == SurfaceLayer::Modal) clearInteractionState();
-    llassert_always(!element.parentElement() && !element.surface());
-    element.setSurface(this);
+    llassert_always(!element.parentNode() && !element.surface());
     roots(layer).push_back(&element);
+    element.setSurface(this);
     invalidateOrderingCache();
     requestLayout();
     return element;
@@ -348,7 +350,7 @@ void Surface::keybindingsChanged() {
         const ElementList authoredChildren = element.children();
         children.reserve(authoredChildren.size());
         for (Element* child : authoredChildren) children.emplace_back(child);
-        element.onKeybindingsChanged(*mSystem);
+        if (auto* htmlElement = dynamic_cast<HTMLElement*>(&element)) htmlElement->onKeybindingsChanged(*mSystem);
         Element* current = lifetime.get();
         if (!current || current->mSurface != surface || current->mParent != parent) return;
         for (const ElementRef<Element>& childRef : children)
@@ -376,11 +378,11 @@ void Surface::requestHitTestRefresh() {
 
 void Surface::queueScrollNotification(Element& element) {
     if (element.mSurface != this) return;
-    const std::shared_ptr<char> mountLifetime = detail::ElementInternalAccess::mountLifetime(element);
+    const std::shared_ptr<char> mountLifetime = ElementInternalAccess::mountLifetime(element);
     const auto duplicate = std::find_if(mPendingScrollNotifications.begin(), mPendingScrollNotifications.end(),
                                         [&](const auto& pending) { return pending.element == &element && pending.mountLifetime == mountLifetime; });
     if (duplicate != mPendingScrollNotifications.end()) return;
-    mPendingScrollNotifications.push_back({&element, detail::ElementInternalAccess::lifetime(element), mountLifetime});
+    mPendingScrollNotifications.push_back({&element, ElementInternalAccess::lifetime(element), mountLifetime});
 }
 
 void Surface::dispatchScrollNotification(Element& element) {
@@ -388,8 +390,9 @@ void Surface::dispatchScrollNotification(Element& element) {
     event.setCancelable(false);
     event.setPhase(EventPhase::Target);
     event.setCurrentTarget(&element);
-    element.dispatchListeners(event, true);
-    if (!event.immediatePropagationStopped()) element.dispatchListeners(event, false);
+    const Element::EventListenerSnapshot listeners = element.eventListenerSnapshot();
+    element.dispatchListeners(event, true, listeners);
+    if (!event.immediatePropagationStopped()) element.dispatchListeners(event, false, listeners);
     event.setCurrentTarget(nullptr);
 }
 
@@ -403,7 +406,7 @@ void Surface::flushScrollNotifications() {
             if (!notification.element || notification.lifetime.expired() || notification.mountLifetime == nullptr) continue;
             Element* element = notification.element;
             if (element->mSurface != this
-                || detail::ElementInternalAccess::mountLifetime(*element) != notification.mountLifetime
+                || ElementInternalAccess::mountLifetime(*element) != notification.mountLifetime
                 || !isRootedInSurface(element))
                 continue;
             dispatchScrollNotification(*element);
@@ -423,7 +426,7 @@ void Surface::invalidateOrderingCache() {
 bool Surface::hasVisibleFloater() const {
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
-    return std::any_of(mFloaters.begin(), mFloaters.end(), [this, &styles](FloaterElement* floater) {
+    return std::any_of(mFloaters.begin(), mFloaters.end(), [this, &styles](HTMLFloaterElement* floater) {
         if (!floater || !isRootedInSurface(floater)) return false;
         return floater->isVisible(styles.style(*floater));
     });
@@ -494,10 +497,11 @@ bool Surface::updateLayoutIfNeeded() {
 
         const Style& rootStyle = styles.style(root);
         if (!root.isDisplayed(rootStyle)) return;
-        const bool bodyRoot = root.elementName() == "body";
+        const bool bodyRoot = root.elementName() == kBodyTag.localName;
         const Vec2 desired = root.desiredSize();
         const float width = rootStyle.width.isAuto() ? ((rootStyle.display == DisplayMode::Inline
                                                          || rootStyle.display == DisplayMode::InlineBlock
+                                                         || rootStyle.display == DisplayMode::InlineFlex
                                                          || rootStyle.display == DisplayMode::InlineGrid)
                                                             ? desired.x
                                                             : bodyRoot ? std::max(0.f, mViewport.w - rootStyle.margin.horizontal())
@@ -554,6 +558,7 @@ void Surface::paintElement(const Element& element, PaintContext& context, float 
         || styledElement->mLayoutInvalidationRevision != originalLayoutRevision)
         return;
     if (!element.isVisible(unresolved)) return;
+    styles.styleGeneratedPseudoElements(element, unresolved);
     const float childOpacity = inheritedOpacity * unresolved.opacity;
     const LayoutDirection direction = layoutDirection();
     const bool needsOpacity = inheritedOpacity != 1.f || unresolved.opacity != 1.f;
@@ -567,7 +572,7 @@ void Surface::paintElement(const Element& element, PaintContext& context, float 
         if (needsDirection) applyDirection(*paintedStorage, direction);
         painted = &*paintedStorage;
     }
-    const bool paintsBodyCanvasBackground = element.elementName() == "body"
+    const bool paintsBodyCanvasBackground = element.elementName() == kBodyTag.localName
         && !originalParent
         && (painted->backgroundColor.a > 0.f || painted->backgroundGradient.has_value());
     const bool clipsX = unresolved.overflowX != Overflow::Visible;
@@ -598,7 +603,7 @@ void Surface::paintElement(const Element& element, PaintContext& context, float 
     };
     if (isParentStillValid()) {
         if (clipsChildren) {
-            context.pushClip(detail::ElementInternalAccess::scrollport(element), scale, clipAxes);
+            context.pushClip(ElementInternalAccess::scrollport(element), scale, clipAxes);
             context.pushTranslation(scrollContentTranslation(layoutDirection(), {element.scrollLeft(), element.scrollTop()}));
         }
         Style textStyle;
@@ -616,8 +621,7 @@ void Surface::paintElement(const Element& element, PaintContext& context, float 
                 continue;
             }
             const Element* child = childNode->asElement();
-            if (child && child->parentElement() == &element && isRootedInSurface(child) && element.shouldPaintChild(*child, *painted))
-                paintElement(*child, context, scale, childOpacity, styles);
+            if (child && child->parentElement() == &element && isRootedInSurface(child)) paintElement(*child, context, scale, childOpacity, styles);
         }
         if (clipsChildren) {
             context.popTranslation();

@@ -6,11 +6,13 @@
 #include "linden_common.h"
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <initializer_list>
 #include <iterator>
 #include <limits>
+#include <string>
 #include <type_traits>
 #include "style/color.h"
 #include "style/model.h"
@@ -58,113 +60,46 @@ std::vector<StyleDeclaration> makeDeclarations(std::initializer_list<std::pair<s
 }
 } // namespace
 
+namespace {
+void resetStyleProperty(Style& style, const detail::StylePropertyDefinition& property) {
+    if (!property.reset) {
+        LL_ERRS("UI") << "Attempted to reset a style property without a reset function: " << property.name << LL_ENDL;
+        return;
+    }
+    property.reset(style);
+}
+
+void clearExplicitInheritance(Style& style, std::string_view propertyName) {
+    auto& properties = style.explicitlyInheritedProperties;
+    properties.erase(std::remove(properties.begin(), properties.end(), propertyName), properties.end());
+}
+
+void markExplicitInheritance(Style& style, std::string_view propertyName) {
+    if (std::find(style.explicitlyInheritedProperties.begin(), style.explicitlyInheritedProperties.end(), propertyName)
+        == style.explicitlyInheritedProperties.end())
+        style.explicitlyInheritedProperties.push_back(propertyName);
+}
+} // namespace
+
 void detail::applyStyleDeclaration(Style& style, const StyleDeclaration& declaration) {
     const detail::StylePropertyDefinition& property = declaration.property.get();
     if (std::holds_alternative<InitialStyleValue>(declaration.value)) {
-        const Style initial;
-        if (property.name == "appearance") style.appearance = initial.appearance;
-        else if (property.name == "color-scheme") style.colorScheme = initial.colorScheme;
-        else if (property.name == "box-sizing") style.boxSizing = initial.boxSizing;
-        else if (property.name == "accent-color") style.accentColor = initial.accentColor;
-        else if (property.name == "background-color") {
-            style.backgroundColor = initial.backgroundColor;
-            style.backgroundColorLightDark = initial.backgroundColorLightDark;
-            style.backgroundGradient = initial.backgroundGradient;
-        } else if (property.name == "border") {
-            style.borderWidth = initial.borderWidth;
-            style.borderColor = initial.borderColor;
-            style.borderColorLightDark = initial.borderColorLightDark;
-            style.borderStyle = initial.borderStyle;
-            style.borderGradient = initial.borderGradient;
-        } else if (property.name == "border-color") {
-            style.borderColor = initial.borderColor;
-            style.borderColorLightDark = initial.borderColorLightDark;
-            style.borderGradient = initial.borderGradient;
-        } else if (property.name == "border-radius") style.borderRadius = initial.borderRadius;
-        else if (property.name == "border-width") style.borderWidth = initial.borderWidth;
-        else if (property.name == "border-style") style.borderStyle = initial.borderStyle;
-        else if (property.name == "bottom") style.bottom = initial.bottom;
-        else if (property.name == "cursor") style.cursor = initial.cursor;
-        else if (property.name == "display") {
-            style.display = initial.display;
-            style.displaySet = true;
-        } else if (property.name == "effect") style.effects = initial.effects;
-        else if (property.name == "height") style.height = initial.height;
-        else if (property.name == "left") style.left = initial.left;
-        else if (property.name == "margin") style.margin = initial.margin;
-        else if (property.name == "min-height") style.minHeight = initial.minHeight;
-        else if (property.name == "min-width") style.minWidth = initial.minWidth;
-        else if (property.name == "opacity") style.opacity = initial.opacity;
-        else if (property.name == "outline") style.outline = initial.outline;
-        else if (property.name == "outline-offset") style.outline.offset = initial.outline.offset;
-        else if (property.name == "overflow-x") style.overflowX = initial.overflowX;
-        else if (property.name == "overflow-y") style.overflowY = initial.overflowY;
-        else if (property.name == "padding") style.padding = initial.padding;
-        else if (property.name == "pointer-events") style.pointerEvents = initial.pointerEvents;
-        else if (property.name == "position") style.position = initial.position;
-        else if (property.name == "right") style.right = initial.right;
-        else if (property.name == "box-shadow") style.shadows = initial.shadows;
-        else if (property.name == "size") {
-            style.height = initial.height;
-            style.width = initial.width;
-        } else if (property.name == "top") style.top = initial.top;
-        else if (property.name == "translate") style.translate = initial.translate;
-        else if (property.name == "width") style.width = initial.width;
-        else if (property.name == "align-items") style.alignItems = initial.alignItems;
-        else if (property.name == "flex-direction") {
-            style.flexDirection = initial.flexDirection;
-            style.flexDirectionSet = true;
-        } else if (property.name == "gap") style.gap = initial.gap;
-        else if (property.name == "grid-area") style.gridArea = initial.gridArea;
-        else if (property.name == "justify-content") {
-            style.justifyContent = initial.justifyContent;
-            style.justifyContentSet = true;
-        } else if (property.name == "justify-self") style.justifySelf = initial.justifySelf;
-        else if (property.name == "-internal-align-content-block") style.alignContentBlockCenter = initial.alignContentBlockCenter;
-        else if (property.name == "align-self") style.alignSelf = initial.alignSelf;
-        else if (property.name == "flex-basis") style.flexBasis = initial.flexBasis;
-        else if (property.name == "flex-grow") style.flexGrow = initial.flexGrow;
-        else if (property.name == "flex-shrink") style.flexShrink = initial.flexShrink;
-        else if (property.name == "order") style.order = initial.order;
-        else if (property.name == "font-family") style.fontFamily = initial.fontFamily;
-        else if (property.name == "font-size") style.fontSize = initial.fontSize;
-        else if (property.name == "font-style") style.fontItalic = initial.fontItalic;
-        else if (property.name == "text-decoration") style.textDecoration = initial.textDecoration;
-        else if (property.name == "font-weight") style.fontWeight = initial.fontWeight;
-        else if (property.name == "line-height") style.lineHeight = initial.lineHeight;
-        else if (property.name == "letter-spacing") style.letterSpacing = initial.letterSpacing;
-        else if (property.name == "word-spacing") style.wordSpacing = initial.wordSpacing;
-        else if (property.name == "text-align") style.textAlign = initial.textAlign;
-        else if (property.name == "color") {
-            style.color = initial.color;
-            style.colorLightDark = initial.colorLightDark;
-        } else if (property.name == "text-overflow") style.textOverflow = initial.textOverflow;
-        else if (property.name == "text-wrap") style.textWrap = initial.textWrap;
-        else if (property.name == "vertical-align") {
-            style.verticalAlign = initial.verticalAlign;
-            style.verticalAlignSet = true;
-        } else if (property.name == "visibility") style.visibility = initial.visibility;
-        else if (property.name == "scrollbar-mode") {
-            style.scrollbarMode = initial.scrollbarMode;
-            style.scrollbarModeSet = true;
-        } else if (property.name == "scrollbar-width") style.scrollbarWidth = initial.scrollbarWidth;
-        else if (property.name == "scrollbar-gutter") style.scrollbarGutter = initial.scrollbarGutter;
-        else if (property.name == "scrollbar-color") style.scrollbarColor = initial.scrollbarColor;
-        else if (property.name == "stroke") {
-            style.svgStrokeWidth = initial.svgStrokeWidth;
-            style.iconStrokeColor = initial.iconStrokeColor;
-            style.iconStrokeColorLightDark = initial.iconStrokeColorLightDark;
-        } else if (property.name == "stroke-color") {
-            style.iconStrokeColor = initial.iconStrokeColor;
-            style.iconStrokeColorLightDark = initial.iconStrokeColorLightDark;
-        } else if (property.name == "stroke-linecap") {
-            style.svgStrokeCap = initial.svgStrokeCap;
-            style.svgStrokeCapSet = true;
-        } else if (property.name == "stroke-width") style.svgStrokeWidth = initial.svgStrokeWidth;
-        else LL_ERRS("UI") << "Attempted to reset an unknown initial style property: " << property.name << LL_ENDL;
+        clearExplicitInheritance(style, property.name);
+        resetStyleProperty(style, property);
         if (property.specify) property.specify(style);
         return;
     }
+    if (const auto keyword = std::get_if<StyleWideKeyword>(&declaration.value)) {
+        clearExplicitInheritance(style, property.name);
+        resetStyleProperty(style, property);
+        const bool inherit = *keyword == StyleWideKeyword::Inherit || (*keyword == StyleWideKeyword::Unset && property.isInherited());
+        if (inherit) {
+            style.specifiedInheritedProperties &= static_cast<InheritedStyleProperties>(~property.inheritedBit());
+            markExplicitInheritance(style, property.name);
+        } else if (property.specify) property.specify(style);
+        return;
+    }
+    clearExplicitInheritance(style, property.name);
     if (!property.apply) {
         LL_ERRS("UI") << "Attempted to apply a stylesheet declaration without an applicable property definition." << LL_ENDL;
         return;
@@ -302,6 +237,89 @@ CompileResult compileShadow(detail::StyleCompileContext& context) {
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
+struct ParsedContent {
+    bool valid = false;
+    std::optional<std::string> value;
+};
+
+std::optional<std::pair<std::string, std::size_t>> parseCssString(const std::string& value, std::size_t start) {
+    if (start >= value.size() || (value[start] != '\'' && value[start] != '"')) return std::nullopt;
+    const char quote = value[start];
+    std::string result;
+    const auto appendCodePoint = [&result](std::uint32_t codePoint) {
+        if (codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) return false;
+        if (codePoint <= 0x7f) result.push_back(static_cast<char>(codePoint));
+        else if (codePoint <= 0x7ff) {
+            result.push_back(static_cast<char>(0xc0 | (codePoint >> 6)));
+            result.push_back(static_cast<char>(0x80 | (codePoint & 0x3f)));
+        } else if (codePoint <= 0xffff) {
+            result.push_back(static_cast<char>(0xe0 | (codePoint >> 12)));
+            result.push_back(static_cast<char>(0x80 | ((codePoint >> 6) & 0x3f)));
+            result.push_back(static_cast<char>(0x80 | (codePoint & 0x3f)));
+        } else {
+            result.push_back(static_cast<char>(0xf0 | (codePoint >> 18)));
+            result.push_back(static_cast<char>(0x80 | ((codePoint >> 12) & 0x3f)));
+            result.push_back(static_cast<char>(0x80 | ((codePoint >> 6) & 0x3f)));
+            result.push_back(static_cast<char>(0x80 | (codePoint & 0x3f)));
+        }
+        return true;
+    };
+
+    for (std::size_t index = start + 1; index < value.size();) {
+        const char character = value[index++];
+        if (character == quote) return std::pair{std::move(result), index};
+        if (character != '\\') {
+            result.push_back(character);
+            continue;
+        }
+        if (index >= value.size()) return std::nullopt;
+        const char escaped = value[index++];
+        if (escaped == '\n' || escaped == '\r' || escaped == '\f') continue;
+        if (!std::isxdigit(static_cast<unsigned char>(escaped))) {
+            result.push_back(escaped);
+            continue;
+        }
+        std::uint32_t codePoint = 0;
+        std::size_t digits = 0;
+        --index;
+        while (index < value.size() && digits < 6 && std::isxdigit(static_cast<unsigned char>(value[index]))) {
+            const char digit = value[index++];
+            codePoint = codePoint * 16
+                + static_cast<std::uint32_t>(std::isdigit(static_cast<unsigned char>(digit))
+                                                 ? digit - '0'
+                                                 : std::tolower(static_cast<unsigned char>(digit)) - 'a' + 10);
+            ++digits;
+        }
+        if (index < value.size() && std::isspace(static_cast<unsigned char>(value[index]))) ++index;
+        if (!appendCodePoint(codePoint)) return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+ParsedContent parseContent(const std::string& raw) {
+    const std::string value = trim(raw);
+    const std::string keyword = lower(value);
+    if (keyword == "none" || keyword == "normal") return {true, std::nullopt};
+
+    const auto primary = parseCssString(value, 0);
+    if (!primary) return {};
+    std::size_t position = primary->second;
+    while (position < value.size() && std::isspace(static_cast<unsigned char>(value[position]))) ++position;
+    if (position == value.size()) return {true, primary->first};
+    if (value[position++] != '/') return {};
+    while (position < value.size() && std::isspace(static_cast<unsigned char>(value[position]))) ++position;
+    const auto alternative = parseCssString(value, position);
+    if (!alternative) return {};
+    position = alternative->second;
+    while (position < value.size() && std::isspace(static_cast<unsigned char>(value[position]))) ++position;
+    return position == value.size() ? ParsedContent{true, primary->first} : ParsedContent{};
+}
+
+CompileResult compileContent(detail::StyleCompileContext& context) {
+    const ParsedContent parsed = parseContent(context.value);
+    return parsed.valid ? context.compiled(parsed.value) : context.invalid();
+}
+
 CompileResult compileEffect(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
     const auto parsed = model.parseEffects(value);
@@ -329,6 +347,7 @@ CompileResult compileOutlineOffset(detail::StyleCompileContext& context) {
 CompileResult compilePaint(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
     if (const std::optional<Gradient> gradient = model.parseGradient(value)) return context.compiled(StylePaint{Color(), *gradient});
+    if (detail::lower(detail::trim(value)) == "currentcolor") return context.compiled(StylePaint{Color(), std::nullopt, std::nullopt, true});
     const auto parsed = context.colorValue();
     if (!parsed) return context.invalid();
     if (const auto color = std::get_if<Color>(&*parsed)) return context.compiled(StylePaint{*color, std::nullopt});
@@ -369,13 +388,14 @@ CompileResult compileBorder(detail::StyleCompileContext& context) {
         if (!parsedStyle) return context.invalid();
         borderStyle = *parsedStyle;
     }
+    if (detail::lower(detail::trim(colorToken)) == "currentcolor")
+        return context.compiled(StyleBorder{*width, StylePaint{Color(), std::nullopt, std::nullopt, true}, borderStyle});
     if (const std::optional<Gradient> gradient = model.parseGradient(colorToken))
         return context.compiled(StyleBorder{*width, StylePaint{Color(), *gradient}, borderStyle});
     const auto parsed = context.colorValue(colorToken);
     if (!parsed) return context.invalid();
     if (const auto color = std::get_if<Color>(&*parsed)) return context.compiled(StyleBorder{*width, StylePaint{*color, std::nullopt}, borderStyle});
-    return context.compiled(
-        StyleBorder{*width, StylePaint{Color(0.f, 0.f, 0.f, 0.f), std::nullopt, std::get<LightDarkColor>(*parsed)}, borderStyle});
+    return context.compiled(StyleBorder{*width, StylePaint{Color(0.f, 0.f, 0.f, 0.f), std::nullopt, std::get<LightDarkColor>(*parsed)}, borderStyle});
 }
 
 CompileResult compileBorderStyle(detail::StyleCompileContext& context) {
@@ -644,6 +664,7 @@ CompileResult compileDisplay(detail::StyleCompileContext& context) {
     const std::string display = lower(trim(context.value));
     if (display == "none") return context.compiled(DisplayMode::NoneValue);
     if (display == "flex") return context.compiled(DisplayMode::Flex);
+    if (display == "inline-flex") return context.compiled(DisplayMode::InlineFlex);
     if (display == "grid") return context.compiled(DisplayMode::Grid);
     if (display == "inline-grid") return context.compiled(DisplayMode::InlineGrid);
     if (display == "block") return context.compiled(DisplayMode::Block);
@@ -655,6 +676,7 @@ CompileResult compileDisplay(detail::StyleCompileContext& context) {
 CompileResult compileAppearance(detail::StyleCompileContext& context) {
     const std::string appearance = lower(trim(context.value));
     if (appearance == "auto") return context.compiled(AppearanceMode::Auto);
+    if (appearance == "base") return context.compiled(AppearanceMode::Base);
     if (appearance == "none") return context.compiled(AppearanceMode::Unstyled);
     return context.invalid();
 }
@@ -917,7 +939,8 @@ CompileResult compileSpacing(detail::StyleCompileContext& context) {
 std::optional<std::vector<StyleDeclaration>> StyleModel::compileDeclaration(const detail::StylePropertyDefinition& property, const std::string& value,
                                                                             const std::string& selector, StyleSheetLoadResult& result,
                                                                             const std::string& sourceName) const {
-    if (detail::lower(detail::trim(value)) == "initial") {
+    const std::string normalizedValue = detail::lower(detail::trim(value));
+    if (normalizedValue == "initial") {
         if (property.name == "overflow") return makeDeclarations({{"overflow-x", InitialStyleValue{}}, {"overflow-y", InitialStyleValue{}}});
         if (property.name == "min-size") return makeDeclarations({{"min-height", InitialStyleValue{}}, {"min-width", InitialStyleValue{}}});
         if (property.name == "flex")
@@ -929,6 +952,16 @@ std::optional<std::vector<StyleDeclaration>> StyleModel::compileDeclaration(cons
                                      {"line-height", InitialStyleValue{}},
                                      {"font-family", InitialStyleValue{}}});
         return std::vector<StyleDeclaration>{makeDeclaration(property.name, InitialStyleValue{})};
+    }
+    if (normalizedValue == "inherit" || normalizedValue == "unset") {
+        const StyleWideKeyword keyword = normalizedValue == "inherit" ? StyleWideKeyword::Inherit : StyleWideKeyword::Unset;
+        if (property.name == "overflow") return makeDeclarations({{"overflow-x", keyword}, {"overflow-y", keyword}});
+        if (property.name == "min-size") return makeDeclarations({{"min-height", keyword}, {"min-width", keyword}});
+        if (property.name == "flex") return makeDeclarations({{"flex-grow", keyword}, {"flex-shrink", keyword}, {"flex-basis", keyword}});
+        if (property.name == "font")
+            return makeDeclarations(
+                {{"font-style", keyword}, {"font-weight", keyword}, {"font-size", keyword}, {"line-height", keyword}, {"font-family", keyword}});
+        return std::vector<StyleDeclaration>{makeDeclaration(property.name, keyword)};
     }
     if (!property.compile) {
         result.error("stylesheet.property.value_invalid", "Property has no compiler: " + std::string(property.name) + ".", sourceName);
@@ -954,6 +987,155 @@ template<InheritedStyleProperty Property, auto Member> void inheritMember(Style&
     if ((style.specifiedInheritedProperties & flag) == 0) style.*Member = parent.*Member;
 }
 
+template<auto Member> void copyMember(Style& style, const Style& parent) {
+    style.*Member = parent.*Member;
+}
+
+void copyBackground(Style& style, const Style& parent) {
+    style.backgroundColor = parent.backgroundColor;
+    style.backgroundColorLightDark = parent.backgroundColorLightDark;
+    style.backgroundGradient = parent.backgroundGradient;
+    style.backgroundColorCurrent = parent.backgroundColorCurrent;
+}
+
+void copyBorder(Style& style, const Style& parent) {
+    style.borderWidth = parent.borderWidth;
+    style.borderColor = parent.borderColor;
+    style.borderColorLightDark = parent.borderColorLightDark;
+    style.borderStyle = parent.borderStyle;
+    style.borderGradient = parent.borderGradient;
+    style.borderColorCurrent = parent.borderColorCurrent;
+    style.borderWidthSet = parent.borderWidthSet;
+    style.borderColorSet = parent.borderColorSet;
+}
+
+void copyBorderColor(Style& style, const Style& parent) {
+    style.borderColor = parent.borderColor;
+    style.borderColorLightDark = parent.borderColorLightDark;
+    style.borderGradient = parent.borderGradient;
+    style.borderColorCurrent = parent.borderColorCurrent;
+    style.borderColorSet = parent.borderColorSet;
+}
+
+void copyBorderWidth(Style& style, const Style& parent) {
+    style.borderWidth = parent.borderWidth;
+    style.borderWidthSet = parent.borderWidthSet;
+}
+
+void copyDisplay(Style& style, const Style& parent) {
+    style.display = parent.display;
+    style.displaySet = parent.displaySet;
+}
+
+void copyFlexDirection(Style& style, const Style& parent) {
+    style.flexDirection = parent.flexDirection;
+    style.flexDirectionSet = parent.flexDirectionSet;
+}
+
+void copyJustifyContent(Style& style, const Style& parent) {
+    style.justifyContent = parent.justifyContent;
+    style.justifyContentSet = parent.justifyContentSet;
+}
+
+void copyOutlineOffset(Style& style, const Style& parent) {
+    style.outline.offset = parent.outline.offset;
+}
+
+void copySize(Style& style, const Style& parent) {
+    style.height = parent.height;
+    style.width = parent.width;
+}
+
+void copyStroke(Style& style, const Style& parent) {
+    style.svgStrokeWidth = parent.svgStrokeWidth;
+    style.iconStrokeColor = parent.iconStrokeColor;
+    style.iconStrokeColorLightDark = parent.iconStrokeColorLightDark;
+}
+
+void copyStrokeColor(Style& style, const Style& parent) {
+    style.iconStrokeColor = parent.iconStrokeColor;
+    style.iconStrokeColorLightDark = parent.iconStrokeColorLightDark;
+}
+
+void copyStrokeLinecap(Style& style, const Style& parent) {
+    style.svgStrokeCap = parent.svgStrokeCap;
+    style.svgStrokeCapSet = parent.svgStrokeCapSet;
+}
+
+void copyScrollbarMode(Style& style, const Style& parent) {
+    style.scrollbarMode = parent.scrollbarMode;
+    style.scrollbarModeSet = parent.scrollbarModeSet;
+}
+
+void copyVerticalAlign(Style& style, const Style& parent) {
+    style.verticalAlign = parent.verticalAlign;
+    style.verticalAlignSet = parent.verticalAlignSet;
+}
+
+template<auto Member> void resetMember(Style& style) {
+    const Style initial;
+    style.*Member = initial.*Member;
+}
+
+template<void (*Copy)(Style&, const Style&)> void resetWith(Style& style) {
+    const Style initial;
+    Copy(style, initial);
+}
+
+void resetDisplay(Style& style) {
+    const Style initial;
+    style.display = initial.display;
+    style.displaySet = true;
+}
+
+void resetFlexDirection(Style& style) {
+    const Style initial;
+    style.flexDirection = initial.flexDirection;
+    style.flexDirectionSet = true;
+}
+
+void resetJustifyContent(Style& style) {
+    const Style initial;
+    style.justifyContent = initial.justifyContent;
+    style.justifyContentSet = true;
+}
+
+void resetScrollbarMode(Style& style) {
+    const Style initial;
+    style.scrollbarMode = initial.scrollbarMode;
+    style.scrollbarModeSet = true;
+}
+
+void resetSize(Style& style) {
+    const Style initial;
+    style.height = initial.height;
+    style.width = initial.width;
+}
+
+void resetBorderWidth(Style& style) {
+    const Style initial;
+    style.borderWidth = initial.borderWidth;
+    style.borderWidthSet = false;
+}
+
+void resetColor(Style& style) {
+    const Style initial;
+    style.color = initial.color;
+    style.colorLightDark = initial.colorLightDark;
+}
+
+void resetStrokeLinecap(Style& style) {
+    const Style initial;
+    style.svgStrokeCap = initial.svgStrokeCap;
+    style.svgStrokeCapSet = true;
+}
+
+void resetVerticalAlign(Style& style) {
+    const Style initial;
+    style.verticalAlign = initial.verticalAlign;
+    style.verticalAlignSet = true;
+}
+
 void inheritColor(Style& style, const Style& parent) {
     const auto flag = static_cast<InheritedStyleProperties>(InheritedStyleProperty::Color);
     if ((style.specifiedInheritedProperties & flag) == 0) {
@@ -966,22 +1148,31 @@ template<InheritedStyleProperty Property> void specifyInherited(Style& style) {
     style.specifiedInheritedProperties |= static_cast<InheritedStyleProperties>(Property);
 }
 
-void applyPaint(Color& color, std::optional<LightDarkColor>& lightDarkColor, std::optional<Gradient>& gradient, const StyleValue& value) {
+void applyPaint(Color& color, std::optional<LightDarkColor>& lightDarkColor, std::optional<Gradient>& gradient, bool& currentColor,
+                const StyleValue& value) {
     const StylePaint& paint = std::get<StylePaint>(value);
     lightDarkColor = paint.lightDarkColor;
-    color = paint.gradient || paint.lightDarkColor ? Color(0.f, 0.f, 0.f, 0.f) : paint.color;
+    currentColor = paint.currentColor;
+    color = paint.gradient || paint.lightDarkColor || paint.currentColor ? Color(0.f, 0.f, 0.f, 0.f) : paint.color;
     gradient = paint.gradient;
 }
 
 void applyBackground(Style& style, const StyleValue& value) {
-    applyPaint(style.backgroundColor, style.backgroundColorLightDark, style.backgroundGradient, value);
+    applyPaint(style.backgroundColor, style.backgroundColorLightDark, style.backgroundGradient, style.backgroundColorCurrent, value);
+}
+void applyBorderWidth(Style& style, const StyleValue& value) {
+    style.borderWidth = std::get<EdgeInsets>(value);
+    style.borderWidthSet = true;
 }
 void applyBorder(Style& style, const StyleValue& value) {
     const StyleBorder& border = std::get<StyleBorder>(value);
     style.borderWidth = {border.width, border.width, border.width, border.width};
     style.borderColorLightDark = border.paint.lightDarkColor;
+    style.borderColorCurrent = border.paint.currentColor;
+    style.borderWidthSet = true;
+    style.borderColorSet = true;
     style.borderColor =
-        border.paint.gradient || border.paint.lightDarkColor ? Color(0.f, 0.f, 0.f, 0.f) : border.paint.color;
+        border.paint.gradient || border.paint.lightDarkColor || border.paint.currentColor ? Color(0.f, 0.f, 0.f, 0.f) : border.paint.color;
     style.borderStyle = border.style;
     style.borderGradient = border.paint.gradient;
 }
@@ -1063,114 +1254,148 @@ void applyIconStrokeColor(Style& style, const StyleValue& value) {
 }
 
 const detail::StylePropertyDefinition kPropertyDefinitions[] = {
-    {"accent-color", compileAccentColor, applyAccentColor, specifyInherited<InheritedStyleProperty::AccentColor>,
-     inheritMember<InheritedStyleProperty::AccentColor, &Style::accentColor>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited},
-    {"appearance", compileAppearance, applyMember<&Style::appearance>, nullptr, nullptr, StylePropertyImpact::Paint},
-    {"color-scheme", compileColorScheme, applyMember<&Style::colorScheme>, specifyInherited<InheritedStyleProperty::ColorScheme>,
-     inheritMember<InheritedStyleProperty::ColorScheme, &Style::colorScheme>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited},
-    {"box-sizing", compileBoxSizing, applyMember<&Style::boxSizing>, nullptr, nullptr, StylePropertyImpact::Layout},
-    {"background-color", compilePaint, applyBackground, nullptr, nullptr, StylePropertyImpact::Paint},
-    {"border", compileBorder, applyBorder, nullptr, nullptr, StylePropertyImpact::Layout | StylePropertyImpact::Paint},
+    {"accent-color", compileAccentColor, applyAccentColor, resetMember<&Style::accentColor>, specifyInherited<InheritedStyleProperty::AccentColor>,
+     inheritMember<InheritedStyleProperty::AccentColor, &Style::accentColor>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited, false,
+     InheritedStyleProperty::AccentColor},
+    {"appearance", compileAppearance, applyMember<&Style::appearance>, resetMember<&Style::appearance>, nullptr, copyMember<&Style::appearance>,
+     StylePropertyImpact::Layout | StylePropertyImpact::Paint},
+    {"color-scheme", compileColorScheme, applyMember<&Style::colorScheme>, resetMember<&Style::colorScheme>,
+     specifyInherited<InheritedStyleProperty::ColorScheme>, inheritMember<InheritedStyleProperty::ColorScheme, &Style::colorScheme>,
+     StylePropertyImpact::Paint | StylePropertyImpact::Inherited, false, InheritedStyleProperty::ColorScheme},
+    {"box-sizing", compileBoxSizing, applyMember<&Style::boxSizing>, resetMember<&Style::boxSizing>, nullptr, copyMember<&Style::boxSizing>,
+     StylePropertyImpact::Layout},
+    {"background-color", compilePaint, applyBackground, resetWith<copyBackground>, nullptr, copyBackground, StylePropertyImpact::Paint},
+    {"border", compileBorder, applyBorder, resetWith<copyBorder>, nullptr, copyBorder, StylePropertyImpact::Layout | StylePropertyImpact::Paint},
     {"border-color", compilePaint,
      [](Style& style, const StyleValue& value) {
-         applyPaint(style.borderColor, style.borderColorLightDark, style.borderGradient, value);
+         applyPaint(style.borderColor, style.borderColorLightDark, style.borderGradient, style.borderColorCurrent, value);
+         style.borderColorSet = true;
      },
-     nullptr, nullptr, StylePropertyImpact::Paint},
-    {"border-radius", compileBorderRadius, applyMember<&Style::borderRadius>, nullptr, nullptr, StylePropertyImpact::Paint},
-    {"border-style", compileBorderStyle, applyBorderStyle, nullptr, nullptr, StylePropertyImpact::Paint},
-    {"border-width", compileEdges, applyMember<&Style::borderWidth>, nullptr, nullptr, StylePropertyImpact::Layout | StylePropertyImpact::Paint},
-    {"bottom", compilePosition, applyLengthToOptional<&Style::bottom>, nullptr, nullptr,
+     resetWith<copyBorderColor>, nullptr, copyBorderColor, StylePropertyImpact::Paint},
+    {"border-radius", compileBorderRadius, applyMember<&Style::borderRadius>, resetMember<&Style::borderRadius>, nullptr,
+     copyMember<&Style::borderRadius>, StylePropertyImpact::Paint},
+    {"border-style", compileBorderStyle, applyBorderStyle, resetMember<&Style::borderStyle>, nullptr, copyMember<&Style::borderStyle>,
+     StylePropertyImpact::Paint},
+    {"border-width", compileEdges, applyBorderWidth, resetBorderWidth, nullptr, copyBorderWidth,
+     StylePropertyImpact::Layout | StylePropertyImpact::Paint},
+    {"bottom", compilePosition, applyLengthToOptional<&Style::bottom>, resetMember<&Style::bottom>, nullptr, copyMember<&Style::bottom>,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"cursor", compileCursor, applyMember<&Style::cursor>, specifyInherited<InheritedStyleProperty::Cursor>,
-     inheritMember<InheritedStyleProperty::Cursor, &Style::cursor>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited},
-    {"display", compileDisplay, applyDisplay, nullptr, nullptr,
+    {"cursor", compileCursor, applyMember<&Style::cursor>, resetMember<&Style::cursor>, specifyInherited<InheritedStyleProperty::Cursor>,
+     inheritMember<InheritedStyleProperty::Cursor, &Style::cursor>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited, false,
+     InheritedStyleProperty::Cursor},
+    {"display", compileDisplay, applyDisplay, resetDisplay, nullptr, copyDisplay,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"effect", compileEffect, applyMember<&Style::effects>, nullptr, nullptr, StylePropertyImpact::Paint},
-    {"height", compileDimension, applyMember<&Style::height>},
-    {"left", compilePosition, applyLengthToOptional<&Style::left>, nullptr, nullptr,
+    {"effect", compileEffect, applyMember<&Style::effects>, resetMember<&Style::effects>, nullptr, copyMember<&Style::effects>,
+     StylePropertyImpact::Paint},
+    {"height", compileDimension, applyMember<&Style::height>, resetMember<&Style::height>, nullptr, copyMember<&Style::height>},
+    {"left", compilePosition, applyLengthToOptional<&Style::left>, resetMember<&Style::left>, nullptr, copyMember<&Style::left>,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"margin", compileMargin, applyMember<&Style::margin>},
-    {"min-height", compileNonnegativeLength, applyLengthToOptional<&Style::minHeight>},
+    {"margin", compileMargin, applyMember<&Style::margin>, resetMember<&Style::margin>, nullptr, copyMember<&Style::margin>},
+    {"min-height", compileNonnegativeLength, applyLengthToOptional<&Style::minHeight>, resetMember<&Style::minHeight>, nullptr,
+     copyMember<&Style::minHeight>},
     {"min-size", compileMinSize},
-    {"min-width", compileNonnegativeLength, applyLengthToOptional<&Style::minWidth>},
-    {"opacity", compileOpacity, applyMember<&Style::opacity>, nullptr, nullptr, StylePropertyImpact::Paint},
-    {"outline", compileOutline, applyOutline, nullptr, nullptr, StylePropertyImpact::Paint},
-    {"outline-offset", compileOutlineOffset, applyOutlineOffset, nullptr, nullptr, StylePropertyImpact::Paint},
-    {"overflow", compileOverflow, nullptr, nullptr, nullptr, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"overflow-x", compileOverflowAxis, applyMember<&Style::overflowX>, nullptr, nullptr,
+    {"min-width", compileNonnegativeLength, applyLengthToOptional<&Style::minWidth>, resetMember<&Style::minWidth>, nullptr,
+     copyMember<&Style::minWidth>},
+    {"opacity", compileOpacity, applyMember<&Style::opacity>, resetMember<&Style::opacity>, nullptr, copyMember<&Style::opacity>,
+     StylePropertyImpact::Paint},
+    {"outline", compileOutline, applyOutline, resetMember<&Style::outline>, nullptr, copyMember<&Style::outline>, StylePropertyImpact::Paint},
+    {"outline-offset", compileOutlineOffset, applyOutlineOffset, resetWith<copyOutlineOffset>, nullptr, copyOutlineOffset,
+     StylePropertyImpact::Paint},
+    {"overflow", compileOverflow, nullptr, nullptr, nullptr, nullptr,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"overflow-y", compileOverflowAxis, applyMember<&Style::overflowY>, nullptr, nullptr,
+    {"overflow-x", compileOverflowAxis, applyMember<&Style::overflowX>, resetMember<&Style::overflowX>, nullptr, copyMember<&Style::overflowX>,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"padding", compileEdges, applyMember<&Style::padding>},
-    {"pointer-events", compilePointerEvents, applyMember<&Style::pointerEvents>, nullptr, nullptr,
-     StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"position", compilePositionMode, applyMember<&Style::position>, nullptr, nullptr,
+    {"overflow-y", compileOverflowAxis, applyMember<&Style::overflowY>, resetMember<&Style::overflowY>, nullptr, copyMember<&Style::overflowY>,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"right", compilePosition, applyLengthToOptional<&Style::right>, nullptr, nullptr,
+    {"padding", compileEdges, applyMember<&Style::padding>, resetMember<&Style::padding>, nullptr, copyMember<&Style::padding>},
+    {"pointer-events", compilePointerEvents, applyMember<&Style::pointerEvents>, resetMember<&Style::pointerEvents>, nullptr,
+     copyMember<&Style::pointerEvents>, StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"position", compilePositionMode, applyMember<&Style::position>, resetMember<&Style::position>, nullptr, copyMember<&Style::position>,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"scrollbar-gutter", compileScrollbarGutter, applyMember<&Style::scrollbarGutter>, nullptr, nullptr,
+    {"right", compilePosition, applyLengthToOptional<&Style::right>, resetMember<&Style::right>, nullptr, copyMember<&Style::right>,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"scrollbar-mode", compileScrollbarMode, applyScrollbarMode, nullptr, nullptr,
+    {"scrollbar-gutter", compileScrollbarGutter, applyMember<&Style::scrollbarGutter>, resetMember<&Style::scrollbarGutter>, nullptr,
+     copyMember<&Style::scrollbarGutter>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"scrollbar-mode", compileScrollbarMode, applyScrollbarMode, resetScrollbarMode, nullptr, copyScrollbarMode,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"scrollbar-width", compileScrollbarWidth, applyMember<&Style::scrollbarWidth>, nullptr, nullptr,
+    {"scrollbar-width", compileScrollbarWidth, applyMember<&Style::scrollbarWidth>, resetMember<&Style::scrollbarWidth>, nullptr,
+     copyMember<&Style::scrollbarWidth>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"scrollbar-color", compileScrollbarColor, applyMember<&Style::scrollbarColor>, resetMember<&Style::scrollbarColor>,
+     specifyInherited<InheritedStyleProperty::ScrollbarColor>, inheritMember<InheritedStyleProperty::ScrollbarColor, &Style::scrollbarColor>,
+     StylePropertyImpact::Paint | StylePropertyImpact::Inherited, false, InheritedStyleProperty::ScrollbarColor},
+    {"box-shadow", compileShadow, applyMember<&Style::shadows>, resetMember<&Style::shadows>, nullptr, copyMember<&Style::shadows>,
+     StylePropertyImpact::Paint},
+    {"size", compileSize, applySize, resetSize, nullptr, copySize},
+    {"top", compilePosition, applyLengthToOptional<&Style::top>, resetMember<&Style::top>, nullptr, copyMember<&Style::top>,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"scrollbar-color", compileScrollbarColor, applyMember<&Style::scrollbarColor>, specifyInherited<InheritedStyleProperty::ScrollbarColor>,
-     inheritMember<InheritedStyleProperty::ScrollbarColor, &Style::scrollbarColor>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited},
-    {"box-shadow", compileShadow, applyMember<&Style::shadows>, nullptr, nullptr, StylePropertyImpact::Paint},
-    {"size", compileSize, applySize},
-    {"top", compilePosition, applyLengthToOptional<&Style::top>, nullptr, nullptr,
+    {"translate", compileTranslate, applyMember<&Style::translate>, resetMember<&Style::translate>, nullptr, copyMember<&Style::translate>,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"translate", compileTranslate, applyMember<&Style::translate>, nullptr, nullptr,
+    {"width", compileDimension, applyMember<&Style::width>, resetMember<&Style::width>, nullptr, copyMember<&Style::width>},
+    {"align-items", compileAlignItems, applyMember<&Style::alignItems>, resetMember<&Style::alignItems>, nullptr, copyMember<&Style::alignItems>},
+    {"flex-direction", compileFlexDirection, applyFlexDirection, resetFlexDirection, nullptr, copyFlexDirection},
+    {"gap", compileGap, applyMember<&Style::gap>, resetMember<&Style::gap>, nullptr, copyMember<&Style::gap>},
+    {"grid-area", compileGridArea, [](Style& style, const StyleValue& value) { style.gridArea = std::get<GridArea>(value); },
+     resetMember<&Style::gridArea>, nullptr, copyMember<&Style::gridArea>,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"width", compileDimension, applyMember<&Style::width>},
-    {"align-items", compileAlignItems, applyMember<&Style::alignItems>},
-    {"flex-direction", compileFlexDirection, applyFlexDirection},
-    {"gap", compileGap, applyMember<&Style::gap>},
-    {"grid-area", compileGridArea, [](Style& style, const StyleValue& value) { style.gridArea = std::get<GridArea>(value); }, nullptr, nullptr,
+    {"justify-content", compileJustifyContent, applyJustifyContent, resetJustifyContent, nullptr, copyJustifyContent},
+    {"justify-self", compileJustifySelf, applyMember<&Style::justifySelf>, resetMember<&Style::justifySelf>, nullptr, copyMember<&Style::justifySelf>,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"justify-content", compileJustifyContent, applyJustifyContent},
-    {"justify-self", compileJustifySelf, applyMember<&Style::justifySelf>, nullptr, nullptr,
-     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"-internal-align-content-block", compileInternalAlignContentBlock, applyMember<&Style::alignContentBlockCenter>, nullptr, nullptr,
-     StylePropertyImpact::Layout, true},
-    {"align-self", compileAlignSelf, applyMember<&Style::alignSelf>},
+    {"-internal-align-content-block", compileInternalAlignContentBlock, applyMember<&Style::alignContentBlockCenter>,
+     resetMember<&Style::alignContentBlockCenter>, nullptr, copyMember<&Style::alignContentBlockCenter>, StylePropertyImpact::Layout, true},
+    {"align-self", compileAlignSelf, applyMember<&Style::alignSelf>, resetMember<&Style::alignSelf>, nullptr, copyMember<&Style::alignSelf>},
     {"flex", compileFlex},
-    {"flex-basis", compileDimension, applyMember<&Style::flexBasis>},
-    {"flex-grow", compileUnitlessNonnegativeNumber, applyMember<&Style::flexGrow>},
-    {"flex-shrink", compileUnitlessNonnegativeNumber, applyMember<&Style::flexShrink>},
-    {"order", compileOrder, applyMember<&Style::order>},
+    {"flex-basis", compileDimension, applyMember<&Style::flexBasis>, resetMember<&Style::flexBasis>, nullptr, copyMember<&Style::flexBasis>},
+    {"flex-grow", compileUnitlessNonnegativeNumber, applyMember<&Style::flexGrow>, resetMember<&Style::flexGrow>, nullptr,
+     copyMember<&Style::flexGrow>},
+    {"flex-shrink", compileUnitlessNonnegativeNumber, applyMember<&Style::flexShrink>, resetMember<&Style::flexShrink>, nullptr,
+     copyMember<&Style::flexShrink>},
+    {"order", compileOrder, applyMember<&Style::order>, resetMember<&Style::order>, nullptr, copyMember<&Style::order>},
     {"font", compileFont},
-    {"font-family", compileFontFamily, applyMember<&Style::fontFamily>, specifyInherited<InheritedStyleProperty::FontFamily>,
-     inheritMember<InheritedStyleProperty::FontFamily, &Style::fontFamily>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
-    {"font-size", compileNonnegativeNumber, applyMember<&Style::fontSize>, specifyInherited<InheritedStyleProperty::FontSize>,
-     inheritMember<InheritedStyleProperty::FontSize, &Style::fontSize>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
-    {"font-style", compileFontStyle, applyMember<&Style::fontItalic>, specifyInherited<InheritedStyleProperty::FontStyle>,
-     inheritMember<InheritedStyleProperty::FontStyle, &Style::fontItalic>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
-    {"text-decoration", compileTextDecoration, applyMember<&Style::textDecoration>, specifyInherited<InheritedStyleProperty::TextDecoration>,
-     inheritMember<InheritedStyleProperty::TextDecoration, &Style::textDecoration>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited},
-    {"font-weight", compileFontWeight, applyFontWeight, specifyInherited<InheritedStyleProperty::FontWeight>,
-     inheritMember<InheritedStyleProperty::FontWeight, &Style::fontWeight>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
-    {"line-height", compileLineHeight, applyMember<&Style::lineHeight>, specifyInherited<InheritedStyleProperty::LineHeight>,
-     inheritMember<InheritedStyleProperty::LineHeight, &Style::lineHeight>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
-    {"letter-spacing", compileSpacing, applyMember<&Style::letterSpacing>, specifyInherited<InheritedStyleProperty::LetterSpacing>,
-     inheritMember<InheritedStyleProperty::LetterSpacing, &Style::letterSpacing>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
-    {"word-spacing", compileSpacing, applyMember<&Style::wordSpacing>, specifyInherited<InheritedStyleProperty::WordSpacing>,
-     inheritMember<InheritedStyleProperty::WordSpacing, &Style::wordSpacing>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
-    {"text-align", compileTextAlign, applyMember<&Style::textAlign>, specifyInherited<InheritedStyleProperty::TextAlign>,
-     inheritMember<InheritedStyleProperty::TextAlign, &Style::textAlign>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited},
-    {"color", compileColor, applyColor, specifyInherited<InheritedStyleProperty::Color>, inheritColor,
-     StylePropertyImpact::Paint | StylePropertyImpact::Inherited},
-    {"text-overflow", compileTextOverflow, applyMember<&Style::textOverflow>, nullptr, nullptr, StylePropertyImpact::Paint},
-    {"text-wrap", compileTextWrap, applyMember<&Style::textWrap>, specifyInherited<InheritedStyleProperty::TextWrap>,
-     inheritMember<InheritedStyleProperty::TextWrap, &Style::textWrap>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited},
-    {"vertical-align", compileVerticalAlign, applyVerticalAlign},
-    {"visibility", compileVisibility, applyMember<&Style::visibility>, specifyInherited<InheritedStyleProperty::Visibility>,
-     inheritMember<InheritedStyleProperty::Visibility, &Style::visibility>,
-     StylePropertyImpact::Paint | StylePropertyImpact::Inherited | StylePropertyImpact::HitTest},
-    {"stroke", compileStroke, applyIconStroke, nullptr, nullptr, StylePropertyImpact::Paint},
-    {"stroke-color", compileColorValue, applyIconStrokeColor, nullptr, nullptr, StylePropertyImpact::Paint},
-    {"stroke-linecap", compileStrokeLinecap, applyIconStrokeLinecap, nullptr, nullptr, StylePropertyImpact::Paint},
-    {"stroke-width", compileStrokeWidth, applyIconStrokeWidth, nullptr, nullptr, StylePropertyImpact::Paint},
+    {"font-family", compileFontFamily, applyMember<&Style::fontFamily>, resetMember<&Style::fontFamily>,
+     specifyInherited<InheritedStyleProperty::FontFamily>, inheritMember<InheritedStyleProperty::FontFamily, &Style::fontFamily>,
+     StylePropertyImpact::Layout | StylePropertyImpact::Inherited, false, InheritedStyleProperty::FontFamily},
+    {"font-size", compileNonnegativeNumber, applyMember<&Style::fontSize>, resetMember<&Style::fontSize>,
+     specifyInherited<InheritedStyleProperty::FontSize>, inheritMember<InheritedStyleProperty::FontSize, &Style::fontSize>,
+     StylePropertyImpact::Layout | StylePropertyImpact::Inherited, false, InheritedStyleProperty::FontSize},
+    {"font-style", compileFontStyle, applyMember<&Style::fontItalic>, resetMember<&Style::fontItalic>,
+     specifyInherited<InheritedStyleProperty::FontStyle>, inheritMember<InheritedStyleProperty::FontStyle, &Style::fontItalic>,
+     StylePropertyImpact::Layout | StylePropertyImpact::Inherited, false, InheritedStyleProperty::FontStyle},
+    {"text-decoration", compileTextDecoration, applyMember<&Style::textDecoration>, resetMember<&Style::textDecoration>,
+     specifyInherited<InheritedStyleProperty::TextDecoration>, inheritMember<InheritedStyleProperty::TextDecoration, &Style::textDecoration>,
+     StylePropertyImpact::Paint | StylePropertyImpact::Inherited, false, InheritedStyleProperty::TextDecoration},
+    {"content", compileContent, applyMember<&Style::content>, resetMember<&Style::content>, nullptr, copyMember<&Style::content>,
+     StylePropertyImpact::Layout | StylePropertyImpact::Paint},
+    {"font-weight", compileFontWeight, applyFontWeight, resetMember<&Style::fontWeight>, specifyInherited<InheritedStyleProperty::FontWeight>,
+     inheritMember<InheritedStyleProperty::FontWeight, &Style::fontWeight>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited, false,
+     InheritedStyleProperty::FontWeight},
+    {"line-height", compileLineHeight, applyMember<&Style::lineHeight>, resetMember<&Style::lineHeight>,
+     specifyInherited<InheritedStyleProperty::LineHeight>, inheritMember<InheritedStyleProperty::LineHeight, &Style::lineHeight>,
+     StylePropertyImpact::Layout | StylePropertyImpact::Inherited, false, InheritedStyleProperty::LineHeight},
+    {"letter-spacing", compileSpacing, applyMember<&Style::letterSpacing>, resetMember<&Style::letterSpacing>,
+     specifyInherited<InheritedStyleProperty::LetterSpacing>, inheritMember<InheritedStyleProperty::LetterSpacing, &Style::letterSpacing>,
+     StylePropertyImpact::Layout | StylePropertyImpact::Inherited, false, InheritedStyleProperty::LetterSpacing},
+    {"word-spacing", compileSpacing, applyMember<&Style::wordSpacing>, resetMember<&Style::wordSpacing>,
+     specifyInherited<InheritedStyleProperty::WordSpacing>, inheritMember<InheritedStyleProperty::WordSpacing, &Style::wordSpacing>,
+     StylePropertyImpact::Layout | StylePropertyImpact::Inherited, false, InheritedStyleProperty::WordSpacing},
+    {"text-align", compileTextAlign, applyMember<&Style::textAlign>, resetMember<&Style::textAlign>,
+     specifyInherited<InheritedStyleProperty::TextAlign>, inheritMember<InheritedStyleProperty::TextAlign, &Style::textAlign>,
+     StylePropertyImpact::Paint | StylePropertyImpact::Inherited, false, InheritedStyleProperty::TextAlign},
+    {"color", compileColor, applyColor, resetColor, specifyInherited<InheritedStyleProperty::Color>, inheritColor,
+     StylePropertyImpact::Paint | StylePropertyImpact::Inherited, false, InheritedStyleProperty::Color},
+    {"text-overflow", compileTextOverflow, applyMember<&Style::textOverflow>, resetMember<&Style::textOverflow>, nullptr,
+     copyMember<&Style::textOverflow>, StylePropertyImpact::Paint},
+    {"text-wrap", compileTextWrap, applyMember<&Style::textWrap>, resetMember<&Style::textWrap>, specifyInherited<InheritedStyleProperty::TextWrap>,
+     inheritMember<InheritedStyleProperty::TextWrap, &Style::textWrap>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited, false,
+     InheritedStyleProperty::TextWrap},
+    {"vertical-align", compileVerticalAlign, applyVerticalAlign, resetVerticalAlign, nullptr, copyVerticalAlign},
+    {"visibility", compileVisibility, applyMember<&Style::visibility>, resetMember<&Style::visibility>,
+     specifyInherited<InheritedStyleProperty::Visibility>, inheritMember<InheritedStyleProperty::Visibility, &Style::visibility>,
+     StylePropertyImpact::Paint | StylePropertyImpact::Inherited | StylePropertyImpact::HitTest, false, InheritedStyleProperty::Visibility},
+    {"stroke", compileStroke, applyIconStroke, resetWith<copyStroke>, nullptr, copyStroke, StylePropertyImpact::Paint},
+    {"stroke-color", compileColorValue, applyIconStrokeColor, resetWith<copyStrokeColor>, nullptr, copyStrokeColor, StylePropertyImpact::Paint},
+    {"stroke-linecap", compileStrokeLinecap, applyIconStrokeLinecap, resetStrokeLinecap, nullptr, copyStrokeLinecap, StylePropertyImpact::Paint},
+    {"stroke-width", compileStrokeWidth, applyIconStrokeWidth, resetMember<&Style::svgStrokeWidth>, nullptr, copyMember<&Style::svgStrokeWidth>,
+     StylePropertyImpact::Paint},
 };
 } // namespace
 

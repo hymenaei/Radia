@@ -7,10 +7,10 @@
 
 #include <memory>
 #include "diagnostic.h"
-#include "elements/document.h"
+#include "dom/document.h"
 
 namespace radia::ui {
-struct LayoutBuildResult : DiagnosticResult {
+struct ResourceBuildResult : DiagnosticResult {
     std::unique_ptr<Document> document;
     bool ok() const { return !hasErrors() && document != nullptr; }
 

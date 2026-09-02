@@ -9,6 +9,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -20,8 +21,8 @@
 #include "binding/settingresolver.h"
 #include "binding/valuebinding.h"
 #include "diagnostic.h"
-#include "elements/element.h"
-#include "elements/input.h"
+#include "dom/element.h"
+#include "html/input.h"
 
 namespace radia::ui {
 class Binder;
@@ -67,7 +68,7 @@ public:
     PreparedBinding(const PreparedBinding&) = delete;
     PreparedBinding& operator=(const PreparedBinding&) = delete;
 
-    explicit operator bool() const { return mBinder != nullptr; }
+    explicit operator bool() const;
     Binding commit();
 
 private:
@@ -83,11 +84,13 @@ class Binder {
 public:
     struct EventDeclaration {
         Element* element = nullptr;
+        std::weak_ptr<char> lifetime;
+        Node* parent = nullptr;
         std::string type;
-        const EventCall* call = nullptr;
+        EventCall call;
     };
 
-    explicit Binder(Element& root, SettingResolver* settingResolver = nullptr) : mRoot(&root), mSettingResolver(settingResolver) {}
+    explicit Binder(Element& root, SettingResolver* settingResolver = nullptr);
 
     Binder(const Binder&) = delete;
     Binder& operator=(const Binder&) = delete;
@@ -112,6 +115,13 @@ public:
     void event(const EventHandlerRegistration& registration);
 
 private:
+    struct BoundInput {
+        HTMLInputElement* element = nullptr;
+        std::weak_ptr<char> lifetime;
+        Node* parent = nullptr;
+        std::string settingName;
+    };
+
     struct PendingEventHandler {
         std::string name;
         EventRegistrationDescriptor::Invoke invoke;
@@ -131,14 +141,19 @@ private:
     Binder(Binder&&) noexcept = default;
     Binder& operator=(Binder&&) noexcept = default;
 
+    bool validForCommit() const;
     void validate(Element& root, DiagnosticResult& result);
     void commit(Element& root, Binding& binding);
 
     Element* mRoot = nullptr;
+    std::weak_ptr<char> mRootLifetime;
+    std::weak_ptr<char> mRootMountLifetime;
+    bool mRootWasMounted = false;
+    Node* mRootParent = nullptr;
     SettingResolver* mSettingResolver = nullptr;
     std::vector<PendingEventHandler> mPendingEventHandlers;
     std::vector<PendingValueRequirement> mPendingValueRequirements;
-    std::vector<InputElement*> mBoundInputs;
+    std::vector<BoundInput> mBoundInputs;
     std::map<std::string, std::vector<EventDeclaration>> mEventDeclarations;
     bool mFinished = false;
 

@@ -13,16 +13,17 @@
 #include <string_view>
 #include <utility>
 #include <vector>
-#include "elements/button.h"
-#include "elements/elementdefinition.h"
-#include "elements/elementinternal.h"
-#include "elements/floater.h"
-#include "elements/icon.h"
-#include "elements/input.h"
-#include "elements/label.h"
-#include "elements/panel.h"
+#include "dom/elementinternal.h"
 #include "floater_test_helpers.h"
+#include "html/button.h"
+#include "html/elementfactory.h"
+#include "html/floater.h"
+#include "html/icon.h"
+#include "html/input.h"
+#include "html/label.h"
+#include "html/panel.h"
 #include "layout/engine.h"
+#include "resource/elementdefinition.h"
 #include "style/model.h"
 #include "style/stylesheet.h"
 #include "style/syntax.h"
@@ -33,21 +34,21 @@ using radia::ui::AlignItems;
 using radia::ui::AlignSelf;
 using radia::ui::AppearanceMode;
 using radia::ui::BoxSizing;
-using radia::ui::ButtonElement;
 using radia::ui::Color;
 using radia::ui::ColorScheme;
 using radia::ui::DisplayMode;
 using radia::ui::Element;
 using radia::ui::ElementState;
 using radia::ui::FlexDirection;
-using radia::ui::FloaterElement;
 using radia::ui::FontFamily;
-using radia::ui::IconElement;
-using radia::ui::InputElement;
+using radia::ui::HTMLButtonElement;
+using radia::ui::HTMLFloaterElement;
+using radia::ui::HTMLIconElement;
+using radia::ui::HTMLInputElement;
+using radia::ui::HTMLLabelElement;
+using radia::ui::HTMLPanelElement;
 using radia::ui::JustifyContent;
 using radia::ui::JustifySelf;
-using radia::ui::LabelElement;
-using radia::ui::PanelElement;
 using radia::ui::PointerEvents;
 using radia::ui::PositionMode;
 using radia::ui::resolveElementStyle;
@@ -60,6 +61,9 @@ using radia::ui::TextWrap;
 using radia::ui::VerticalAlign;
 using radia::ui::Visibility;
 using radia::ui::detail::ElementCompilerAccess;
+using radia::ui::detail::HTMLElementFactory;
+using radia::ui::detail::makeElement;
+using radia::ui::detail::makeElementValue;
 using radia::ui::detail::matchingBlock;
 using radia::ui::detail::splitTopLevel;
 using radia::ui::detail::stylePropertyBegin;
@@ -68,9 +72,9 @@ using radia::ui::detail::stylePropertyEnd;
 using radia::ui::detail::tokenizeTopLevel;
 using ::testing::Message;
 
-IconElement& appendIcon(ButtonElement& button, std::string name) {
-    auto icon = std::make_unique<IconElement>(std::move(name));
-    IconElement* result = icon.get();
+HTMLIconElement& appendIcon(HTMLButtonElement& button, std::string name) {
+    auto icon = makeElement<HTMLIconElement>(std::move(name));
+    HTMLIconElement* result = icon.get();
     button.append(std::move(icon));
     return *result;
 }
@@ -83,9 +87,9 @@ TEST(StyleCompilerTest, ResolvesStructuralDivStyles) {
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kDivStyles).ok());
 
-    const auto* definition = radia::ui::findElementDefinition(radia::ui::Tag::Div);
+    const auto* definition = radia::ui::findElementDefinition(radia::ui::HTMLTag::Div);
     ASSERT_NE(definition, nullptr);
-    auto div = definition->create();
+    auto div = HTMLElementFactory::Create("div");
     ASSERT_NE(div, nullptr);
     div->addClass("stack");
     const Style style = resolveElementStyle(stylesheet, *div);
@@ -98,31 +102,36 @@ TEST(StyleCompilerTest, ResolvesStructuralDivStyles) {
 
 TEST(StyleCompilerTest, ResolvesDisplayAndInheritedVisibility) {
     constexpr char kDisplayStyles[] = "panel.flex { display: flex; flex-direction: column; } "
-                                      "panel.inline { display: inline; } panel.none { display: none; } "
+                                      "panel.inline { display: inline; } panel.inline-flex { display: inline-flex; } "
+                                      "panel.none { display: none; } "
                                       "panel.hidden { visibility: hidden; }";
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kDisplayStyles).ok());
 
-    PanelElement flex;
+    auto flex = makeElementValue<HTMLPanelElement>();
     flex.addClass("flex");
     const Style flexStyle = resolveElementStyle(stylesheet, flex);
     EXPECT_EQ(flexStyle.display, DisplayMode::Flex);
     EXPECT_EQ(flexStyle.flexDirection, FlexDirection::Column);
 
-    PanelElement inlinePanel;
+    auto inlinePanel = makeElementValue<HTMLPanelElement>();
     inlinePanel.addClass("inline");
     const Style inlineStyle = resolveElementStyle(stylesheet, inlinePanel);
     EXPECT_EQ(inlineStyle.display, DisplayMode::Inline);
 
-    PanelElement none;
+    auto inlineFlexPanel = makeElementValue<HTMLPanelElement>();
+    inlineFlexPanel.addClass("inline-flex");
+    EXPECT_EQ(resolveElementStyle(stylesheet, inlineFlexPanel).display, DisplayMode::InlineFlex);
+
+    auto none = makeElementValue<HTMLPanelElement>();
     none.addClass("none");
     EXPECT_EQ(resolveElementStyle(stylesheet, none).display, DisplayMode::NoneValue);
 
-    PanelElement hidden;
+    auto hidden = makeElementValue<HTMLPanelElement>();
     hidden.addClass("hidden");
-    auto child = std::make_unique<LabelElement>("child");
-    LabelElement* childPtr = child.get();
+    auto child = makeElement<HTMLLabelElement>("child");
+    HTMLLabelElement* childPtr = child.get();
     hidden.append(std::move(child));
     EXPECT_EQ(resolveElementStyle(stylesheet, *childPtr).visibility, Visibility::Hidden);
 }
@@ -251,7 +260,7 @@ TEST(StyleCompilerTest, ResolvesNestedStateAndChildSelectors) {
     const uint16_t hover = static_cast<uint16_t>(ElementState::Hovered) | static_cast<uint16_t>(ElementState::Default);
     EXPECT_EQ(stylesheet.resolve("button", "", {}, hover).backgroundColor.r, 32.f / 255.f);
 
-    ButtonElement button;
+    auto button = makeElementValue<HTMLButtonElement>();
     ElementCompilerAccess::setState(button, ElementState::Hovered, true);
     const Style iconStyle = resolveElementStyle(stylesheet, appendIcon(button, "search"));
     EXPECT_EQ(iconStyle.width.pixels(), 16.f);
@@ -332,7 +341,7 @@ TEST(StyleCompilerTest, AppliesInitialToLonghandsAndShorthands) {
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kInitialStyles).ok());
-    PanelElement reset;
+    auto reset = makeElementValue<HTMLPanelElement>();
     reset.addClass("reset");
     const Style style = resolveElementStyle(stylesheet, reset);
 
@@ -364,9 +373,9 @@ TEST(StyleCompilerTest, InitialOverridesInheritedValue) {
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kInitialStyles).ok());
-    PanelElement panel;
-    auto label = std::make_unique<LabelElement>("label");
-    LabelElement* labelPtr = label.get();
+    auto panel = makeElementValue<HTMLPanelElement>();
+    auto label = makeElement<HTMLLabelElement>("label");
+    HTMLLabelElement* labelPtr = label.get();
     panel.append(std::move(label));
 
     EXPECT_EQ(resolveElementStyle(stylesheet, panel).fontSize, 22.f);
@@ -406,7 +415,7 @@ TEST(StyleCompilerTest, ParsesBordersAndSvgStrokeProperties) {
     EXPECT_EQ(buttonStyle.borderWidth.right, 3.f);
     EXPECT_EQ(buttonStyle.borderColor.r, 1.f);
 
-    ButtonElement button;
+    auto button = makeElementValue<HTMLButtonElement>();
     const Style iconStyle = resolveElementStyle(stylesheet, appendIcon(button, "search"));
     ASSERT_TRUE(iconStyle.svgStrokeWidth.has_value());
     EXPECT_EQ(iconStyle.svgStrokeWidth->pixels, 4.f);
@@ -414,22 +423,24 @@ TEST(StyleCompilerTest, ParsesBordersAndSvgStrokeProperties) {
 }
 
 TEST(StyleCompilerTest, ResolvesGridSwitchPresentationProperties) {
-    constexpr char kGridSwitchStyles[] = "input.basic-switch { appearance: none; display: inline-grid; position: relative; }"
-                                         "input.basic-switch::track { grid-area: 1 / 1; box-shadow: 0 0 5px rgb(0, 0, 0, .3); }"
-                                         "input.basic-switch::thumb { grid-area: 1/1; translate: 22px 0; }";
+    constexpr char kGridSwitchStyles[] = "input.basic-switch { appearance: base; display: inline-grid; position: relative; }"
+                                         "input.basic-switch::slider-track { grid-area: 1 / 1; box-shadow: 0 0 5px rgb(0, 0, 0, .3); }"
+                                         "input.basic-switch::slider-fill { width: 37px; }"
+                                         "input.basic-switch::slider-thumb { grid-area: 1/1; translate: 22px 0; }";
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kGridSwitchStyles).ok());
 
-    InputElement switchInput;
+    auto switchInput = makeElementValue<HTMLInputElement>();
     switchInput.type("checkbox").switchMode(true).addClass("basic-switch");
-    ASSERT_NE(switchInput.track(), nullptr);
-    ASSERT_NE(switchInput.thumb(), nullptr);
+    ASSERT_NE(switchInput.sliderTrack(), nullptr);
+    ASSERT_NE(switchInput.sliderThumb(), nullptr);
     const Style owner = resolveElementStyle(stylesheet, switchInput);
-    const Style track = resolveElementStyle(stylesheet, *switchInput.track());
-    const Style thumb = resolveElementStyle(stylesheet, *switchInput.thumb());
+    const Style track = stylesheet.resolvePseudoElement(switchInput, "slider-track");
+    const Style fill = stylesheet.resolvePseudoElement(switchInput, "slider-fill");
+    const Style thumb = stylesheet.resolvePseudoElement(switchInput, "slider-thumb");
 
-    EXPECT_EQ(owner.appearance, AppearanceMode::Unstyled);
+    EXPECT_EQ(owner.appearance, AppearanceMode::Base);
     EXPECT_EQ(owner.display, DisplayMode::InlineGrid);
     EXPECT_EQ(owner.position, PositionMode::Relative);
     ASSERT_TRUE(track.gridArea.has_value());
@@ -437,8 +448,47 @@ TEST(StyleCompilerTest, ResolvesGridSwitchPresentationProperties) {
     EXPECT_EQ(track.gridArea->column, 1);
     ASSERT_EQ(track.shadows.size(), std::size_t(1));
     EXPECT_NEAR(track.shadows.front().blur, 5.f, 1.0e-4f);
+    EXPECT_EQ(fill.width.pixels(), 37.f);
     EXPECT_EQ(thumb.translate.x, 22.f);
     EXPECT_EQ(thumb.translate.y, 0.f);
+}
+
+TEST(StyleCompilerTest, ResolvesFlatSwitchFillSelectorWithMultipleAttributes) {
+    constexpr char kSwitchFillStyles[] = "input[type=\"checkbox\"][switch]::slider-fill { width: 37px; }";
+
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia(kSwitchFillStyles).ok());
+
+    auto input = makeElementValue<HTMLInputElement>();
+    input.type("checkbox").switchMode(true);
+    EXPECT_EQ(stylesheet.resolvePseudoElement(input, "slider-fill").width.pixels(), 37.f);
+
+    input.type("radio");
+    EXPECT_EQ(stylesheet.resolvePseudoElement(input, "slider-fill").width.resolve(0.f), 0.f);
+}
+
+TEST(StyleCompilerTest, ResolvesCheckmarkPseudoElementsForCheckableInputs) {
+    constexpr char kCheckmarkStyles[] =
+        "input[type=checkbox]::checkmark { content: \"\\2713\" / \"\"; width: 10px; height: 10px; border-radius: 2px; }"
+        "input[type=radio]::checkmark { width: 8px; height: 8px; border-width: 1px; }";
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia(kCheckmarkStyles).ok());
+
+    auto checkbox = makeElementValue<HTMLInputElement>();
+    checkbox.type("checkbox");
+    auto radio = makeElementValue<HTMLInputElement>();
+    radio.type("radio");
+
+    const Style checkboxMark = stylesheet.resolvePseudoElement(checkbox, "checkmark");
+    const Style radioMark = stylesheet.resolvePseudoElement(radio, "checkmark");
+    EXPECT_EQ(checkboxMark.width.pixels(), 10.f);
+    EXPECT_EQ(checkboxMark.height.pixels(), 10.f);
+    ASSERT_TRUE(checkboxMark.content.has_value());
+    EXPECT_EQ(*checkboxMark.content, "\xE2\x9C\x93");
+    EXPECT_EQ(checkboxMark.borderRadius.topLeft.horizontal.pixels, 2.f);
+    EXPECT_EQ(radioMark.width.pixels(), 8.f);
+    EXPECT_EQ(radioMark.height.pixels(), 8.f);
+    EXPECT_EQ(radioMark.borderWidth.top, 1.f);
 }
 
 TEST(StyleCompilerTest, RejectsUnsupportedDisplayValuesWithoutCommittingThem) {
@@ -464,7 +514,7 @@ TEST(StyleCompilerTest, AppliesSelectorListsChildRulesAndStates) {
     EXPECT_EQ(stylesheet.resolve("button", "", {}, 0).height.pixels(), 32.f);
     EXPECT_EQ(stylesheet.resolve("input", "", {}, 0).height.pixels(), 32.f);
 
-    ButtonElement button;
+    auto button = makeElementValue<HTMLButtonElement>();
     EXPECT_EQ(resolveElementStyle(stylesheet, appendIcon(button, "search")).width.pixels(), 14.f);
     const uint16_t disabled = static_cast<uint16_t>(ElementState::Disabled);
     EXPECT_EQ(stylesheet.resolve("button", "", {}, disabled).opacity, .5f);
@@ -545,7 +595,7 @@ TEST(StyleCompilerTest, ProvidesStableStyleDefaults) {
 }
 
 TEST(StyleCompilerTest, KeepsFloaterHeadAndControlsAsAuthoredElements) {
-    FloaterElement floater;
+    auto floater = makeElementValue<HTMLFloaterElement>();
     radia::ui::test::appendFloaterStructure(floater, true, true);
     ASSERT_NE(floater.head(), nullptr);
     ASSERT_NE(floater.body(), nullptr);
@@ -568,8 +618,8 @@ TEST(StyleCompilerTest, ParsesTextPresentationAndFontShorthands) {
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kTextPresentationStyles).ok());
 
-    auto parent = std::make_unique<PanelElement>();
-    auto text = std::make_unique<Element>("p");
+    auto parent = makeElement<HTMLPanelElement>();
+    auto text = makeElement<Element>("p");
     Element* child = text.get();
     child->textContent("inventory item");
     parent->append(std::move(text));
@@ -684,5 +734,6 @@ TEST(StyleCompilerTest, KeepsStylePropertyRegistryCompleteAndConsistent) {
         EXPECT_TRUE(names.insert(property->name).second);
         EXPECT_NE(property->compile, nullptr);
         EXPECT_EQ(property->apply == nullptr, shorthandNames.count(property->name) != 0);
+        EXPECT_EQ(property->reset == nullptr, property->apply == nullptr);
     }
 }

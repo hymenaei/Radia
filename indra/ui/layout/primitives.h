@@ -8,8 +8,9 @@
 #include <cstddef>
 #include <optional>
 #include <vector>
-#include "elements/element.h"
-#include "elements/elementinternal.h"
+#include "dom/element.h"
+#include "dom/elementinternal.h"
+#include "style/pseudoelement.h"
 #include "style/style.h"
 
 namespace radia::ui::layout_detail {
@@ -21,8 +22,28 @@ public:
     }
 };
 
-struct ChildLayout {
+struct LayoutChildRef {
     detail::NodeRef node;
+    PseudoElement* pseudoElement = nullptr;
+
+    LayoutChildRef() = default;
+    explicit LayoutChildRef(Node* child) : node(child) {}
+    explicit LayoutChildRef(PseudoElement* child) : pseudoElement(child) {}
+
+    bool isPseudoElement() const noexcept { return pseudoElement != nullptr; }
+    bool attachedTo(const Element& parent) const noexcept {
+        return pseudoElement ? pseudoElement->parentPseudoElement() == nullptr && &pseudoElement->originatingElement() == &parent
+                             : node && node.get()->parentElement() == &parent;
+    }
+    bool attachedTo(const PseudoElement& parent) const noexcept { return pseudoElement && pseudoElement->parentPseudoElement() == &parent; }
+    Node* get() const noexcept { return node.get(); }
+    Element* element() const noexcept { return node.element(); }
+    Text* text() const noexcept { return node.text(); }
+    explicit operator bool() const noexcept { return pseudoElement || static_cast<bool>(node); }
+};
+
+struct ChildLayout {
+    LayoutChildRef node;
     Style style;
     Vec2 fitSize;
     Vec2 measured;
@@ -62,6 +83,7 @@ ChildLayout invalidChildLayout();
 void removeChildrenExcludedFromLayout(Element& parent, std::vector<ChildLayout>& children);
 bool isDisplayed(const ChildLayout& child);
 bool isWhitespaceOnlyText(const detail::NodeRef& node);
+bool isWhitespaceOnlyText(const LayoutChildRef& node);
 bool flowBreakBefore(const ChildLayout& child);
 float& mainSize(ChildLayout& child, FlexDirection flexDirection);
 float mainSize(const ChildLayout& child, FlexDirection flexDirection);
@@ -85,7 +107,7 @@ Rect positionedRect(const ChildLayout& child, const Rect& parent, VerticalAlign 
 Rect relativeRect(const ChildLayout& child, const Rect& rect, const Rect& containingBlock);
 Rect translatedRect(const ChildLayout& child, const Rect& rect);
 void setArrangedRect(Element& node, const Rect& rect);
-std::optional<AdjacentLayout> adjacentLayout(const ElementVisit& parentState, const detail::NodeRef& first, const detail::NodeRef& second,
+std::optional<AdjacentLayout> adjacentLayout(const ElementVisit& parentState, const LayoutChildRef& first, const LayoutChildRef& second,
                                              const Style& parentStyle);
 std::vector<std::pair<std::size_t, std::size_t>> rowLines(const std::vector<ChildLayout>& children);
 std::vector<NormalLine> normalLines(const std::vector<ChildLayout>& children, std::optional<float> availableWidth);

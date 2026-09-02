@@ -9,7 +9,7 @@
 
 namespace radia::ui {
 class Document;
-class FloaterElement;
+class HTMLFloaterElement;
 class Surface;
 } // namespace radia::ui
 
@@ -21,10 +21,10 @@ public:
     explicit FloaterHost(Surface& surface);
 
     void mount(Document& document) override;
-    bool unmount(FloaterElement& root) override;
+    bool unmount(HTMLFloaterElement& root) override;
     bool replaceAll(std::vector<ReplacementRequest> replacements) override;
-    bool clearAll(std::vector<FloaterElement*> roots) override;
-    void present(FloaterElement& root) override;
+    bool clearAll(std::vector<HTMLFloaterElement*> roots) override;
+    void present(HTMLFloaterElement& root) override;
 
 private:
     Surface& mSurface;

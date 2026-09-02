@@ -11,10 +11,10 @@
 #include "llsd.h"
 
 class LLControlGroup;
-namespace radia::ui { class FloaterElement; }
+namespace radia::ui { class HTMLFloaterElement; }
 
 namespace radia::viewer::ui {
-using radia::ui::FloaterElement;
+using radia::ui::HTMLFloaterElement;
 
 enum class ComponentOpenState { Closed, Open };
 
@@ -42,7 +42,7 @@ public:
     std::vector<ComponentInstanceKey> openComponentKeys() const;
     void saveWorkspace(const std::vector<ComponentInstanceState>& states, const std::vector<ComponentInstanceKey>& preserved = {});
     std::optional<FloaterPlacement> restorePlacement(const ComponentInstanceKey& componentKey) const;
-    void saveFloaterPlacement(const ComponentInstanceKey& componentKey, const FloaterElement& floater);
+    void saveFloaterPlacement(const ComponentInstanceKey& componentKey, const HTMLFloaterElement& floater);
     void savePlacement(const ComponentInstanceKey& componentKey, FloaterPlacement placement, ComponentOpenState state);
 
 private:

@@ -38,7 +38,7 @@ template<typename T> struct ControllerEventArgumentAdapter {
 template<> struct ControllerEventArgumentAdapter<Element*> {
     static constexpr bool sSupported = true;
     static bool matches(const EventArgument& argument) { return std::holds_alternative<SourceElementArgument>(argument); }
-    static Element* value(const EventArgument&, Event& event) { return &event.target(); }
+    static Element* value(const EventArgument&, Event& event) { return event.currentTarget(); }
 };
 
 template<> struct ControllerEventArgumentAdapter<Event> {
@@ -122,8 +122,7 @@ template<typename T> inline constexpr bool kIsControllerEventParameter = Control
     || std::is_same_v<ControllerEventParameterBase<T>, std::string_view>;
 
 template<typename Controller, typename... Args>
-ControllerHandlerRegistration makeControllerHandlerRegistration(std::string handlerName, Controller* object,
-                                                                         void (Controller::*method)(Args...)) {
+ControllerHandlerRegistration makeControllerHandlerRegistration(std::string handlerName, Controller* object, void (Controller::*method)(Args...)) {
     static_assert((kIsControllerEventParameter<Args> && ...), "Unsupported DocumentController Event parameter.");
     static_assert((kIsSupportedControllerEventParameter<Args> && ...), "Unsupported DocumentController Event parameter.");
     if (!object) return {std::move(handlerName), {}, controllerEventCallArgumentError<Args...>};
@@ -136,7 +135,7 @@ ControllerHandlerRegistration makeControllerHandlerRegistration(std::string hand
 
 template<typename Controller, typename... Args>
 ControllerHandlerRegistration makeControllerHandlerRegistration(std::string handlerName, Controller* object,
-                                                                         void (Controller::*method)(Args...) const) {
+                                                                void (Controller::*method)(Args...) const) {
     static_assert((kIsControllerEventParameter<Args> && ...), "Unsupported DocumentController Event parameter.");
     static_assert((kIsSupportedControllerEventParameter<Args> && ...), "Unsupported DocumentController Event parameter.");
     if (!object) return {std::move(handlerName), {}, controllerEventCallArgumentError<Args...>};

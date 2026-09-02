@@ -10,6 +10,7 @@
 #include <vector>
 #include "layout/buildresult.h"
 #include "localization.h"
+#include "resourceprovider.h"
 #include "style/stylesheet.h"
 
 namespace radia::ui {
@@ -24,21 +25,21 @@ public:
     SkinGeneration(const SkinGeneration&) = delete;
     SkinGeneration& operator=(const SkinGeneration&) = delete;
 
-    LayoutBuildResult buildElementTree(const std::string& resourceId, const std::string& locale) const;
+    ResourceBuildResult buildElementTree(const ResourceId& id, const std::string& locale) const;
 
 private:
     struct Impl;
     explicit SkinGeneration(std::unique_ptr<Impl> implementation);
 
     static std::shared_ptr<const SkinGeneration> empty();
-    DiagnosticResult validateElementDefaults(const std::string& element) const;
-    void validateIconReferences(Element& element, LayoutBuildResult& result) const;
+    DiagnosticResult validateElementDefaults(const std::string& elementName) const;
+    void validateIconReferences(Element& element, ResourceBuildResult& result) const;
     std::vector<LocaleInfo> locales() const;
     const std::string& defaultLocale() const;
     const LocaleInfo* locale(const std::string& id) const;
     bool containsLocale(const std::string& id) const;
     bool hasLocalizationKey(const std::string& id) const;
-    std::string resolveMarkup(const std::string& locale, const LocalizedText& text) const;
+    std::string resolveHTML(const std::string& locale, const LocalizedText& text) const;
     std::string resolveText(const std::string& locale, const LocalizedText& text) const;
     const StyleSheet& styleSheet() const;
     const SvgIcon* icon(const std::string& name) const;

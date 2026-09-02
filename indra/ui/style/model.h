@@ -12,6 +12,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <string>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
@@ -24,6 +25,7 @@ struct StylePaint {
     Color color;
     std::optional<Gradient> gradient;
     std::optional<LightDarkColor> lightDarkColor;
+    bool currentColor = false;
 };
 
 struct StyleBorder {
@@ -45,16 +47,18 @@ struct StyleIconStroke {
 
 struct InitialStyleValue {};
 
+enum class StyleWideKeyword : std::uint8_t { Inherit, Unset };
+
 struct StyleModel;
 struct StyleRule;
 
 namespace detail { struct StylePropertyDefinition; }
 
-using StyleValue = std::variant<InitialStyleValue, Color, LightDarkColor, StylePaint, StyleBorder, StyleSize, StyleIconStroke, EdgeInsets,
-                                MarginInsets, Dimension, Length, BorderRadii, std::optional<Length>, GapValue, std::vector<BoxShadow>,
-                                std::vector<Effect>, Outline, GridArea, Translate, float, int, bool, AppearanceMode, ColorScheme,
-                                BoxSizing, BorderStyle, FontFamily, TextAlign, TextOverflow, TextWrap, VerticalAlign, TextDecoration, DisplayMode,
-                                FlexDirection, PositionMode, JustifyContent, JustifySelf, AlignItems, AlignSelf, Overflow, ScrollbarMode,
+using StyleValue = std::variant<InitialStyleValue, StyleWideKeyword, Color, LightDarkColor, StylePaint, StyleBorder, StyleSize, StyleIconStroke,
+                                EdgeInsets, MarginInsets, Dimension, Length, BorderRadii, std::optional<Length>, GapValue, std::vector<BoxShadow>,
+                                std::vector<Effect>, Outline, GridArea, Translate, std::optional<std::string>, float, int, bool, AppearanceMode,
+                                ColorScheme, BoxSizing, BorderStyle, FontFamily, TextAlign, TextOverflow, TextWrap, VerticalAlign, TextDecoration,
+                                DisplayMode, FlexDirection, PositionMode, JustifyContent, JustifySelf, AlignItems, AlignSelf, Overflow, ScrollbarMode,
                                 ScrollbarWidth, ScrollbarGutter, PointerEvents, CursorStyle, StrokeCap, Visibility, ScrollbarColors, AccentColor>;
 
 using StyleColorValue = std::variant<Color, LightDarkColor>;
@@ -72,6 +76,7 @@ struct StyleCompileContext;
 using StyleCompileResult = std::optional<std::vector<StyleDeclaration>>;
 using StyleCompileFunction = StyleCompileResult (*)(StyleCompileContext&);
 using StyleApplyFunction = void (*)(Style&, const StyleValue&);
+using StyleResetFunction = void (*)(Style&);
 using StyleSpecifyFunction = void (*)(Style&);
 using StyleInheritFunction = void (*)(Style&, const Style&);
 
@@ -89,6 +94,7 @@ struct StylePropertyDefinition {
     std::string_view name;
     StyleCompileFunction compile = nullptr;
     StyleApplyFunction apply = nullptr;
+    StyleResetFunction reset = nullptr;
     StyleSpecifyFunction specify = nullptr;
     StyleInheritFunction inherit = nullptr;
     StylePropertyImpact impact = StylePropertyImpact::Layout;
@@ -97,6 +103,9 @@ struct StylePropertyDefinition {
     bool isPaintOnly() const { return hasImpact(impact, StylePropertyImpact::Paint) && !hasImpact(impact, StylePropertyImpact::Layout); }
     bool isInherited() const { return hasImpact(impact, StylePropertyImpact::Inherited); }
     bool affectsHitTesting() const { return hasImpact(impact, StylePropertyImpact::HitTest); }
+    InheritedStyleProperties inheritedBit() const { return static_cast<InheritedStyleProperties>(inheritedProperty); }
+
+    InheritedStyleProperty inheritedProperty = InheritedStyleProperty::NotInherited;
 };
 
 const StylePropertyDefinition* findStyleProperty(std::string_view name);
@@ -104,28 +113,33 @@ const StylePropertyDefinition* stylePropertyBegin();
 const StylePropertyDefinition* stylePropertyEnd();
 void applyStyleDeclaration(Style& style, const StyleDeclaration& declaration);
 
-std::vector<std::string> splitPartPath(const std::string& part);
 StyleRule parseSelector(const std::string& selector);
 } // namespace detail
 
 enum class SelectorCombinator { Descendant, Child };
 enum class StyleParsePass : std::uint8_t { Tokens, Rules };
 
+struct StyleAttributeSelector {
+    std::string name;
+    std::string value;
+    bool presence = false;
+};
+
 struct StyleSelector {
     bool universal = false;
     bool root = false;
     bool attributeSyntaxInvalid = false;
+    bool idSyntaxInvalid = false;
+    bool classSyntaxInvalid = false;
+    bool pseudoElementSyntaxInvalid = false;
     bool directionSyntaxInvalid = false;
     std::string element;
-    std::string attributeName;
-    std::string attributeValue;
-    bool attributePresence = false;
+    std::vector<StyleAttributeSelector> attributes;
     std::string id;
     std::string className;
     std::string state;
-    std::string partState;
     std::optional<LayoutDirection> direction;
-    std::vector<std::string> parts;
+    std::string pseudoElement;
 };
 
 struct StyleRule {
@@ -163,8 +177,8 @@ struct StyleModel {
                                                                     const std::string& selector, StyleSheetLoadResult& result,
                                                                     const std::string& sourceName) const;
     Style resolveInternal(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t ownerStates,
-                          const std::vector<std::string>& partPath, uint16_t partStates, const Element* target = nullptr,
-                          const std::vector<std::string>* inlineAncestors = nullptr, LayoutDirection direction = LayoutDirection::LeftToRight) const;
+                          std::string_view pseudoElement, const Element* target = nullptr, const std::vector<std::string>* inlineAncestors = nullptr,
+                          LayoutDirection direction = LayoutDirection::LeftToRight) const;
     void parseBlock(const std::string& selector, const std::string& body, const StyleRule& parent, StyleOrigin origin, StyleParsePass pass,
                     StyleSheetLoadResult& result, const std::string& sourceName);
 

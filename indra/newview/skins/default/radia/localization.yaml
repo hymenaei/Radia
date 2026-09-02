@@ -6,7 +6,7 @@ locales:
       demo.title: "Radia UI Demo"
       demo.status: "Ready"
       demo.inlineHeading: "Inline content"
-      demo.inlineContent: 'Plain Text run <b>Bold B run</b><br/><i>Italic I run</i> <s>Strike S run</s><br/>Fly shortcut <kbd shortcut="toggle-fly"/>'
+      demo.inlineContent: 'Plain Text run <b>Bold B run</b><br><i>Italic I run</i> <s>Strike S run</s><br>Fly shortcut <kbd shortcut="toggle-fly"></kbd>'
       demo.textProperties: "Text properties"
       demo.fontShorthand: "Font shorthand · italic · weight 525 · 15/21"
       demo.letterSpacing: "Letter spacing at 8% of the font space advance"
@@ -45,7 +45,7 @@ locales:
       demo.title: "Radia UI Demo"
       demo.status: "Pronto"
       demo.inlineHeading: "Conteúdo em linha"
-      demo.inlineContent: 'Trecho Text normal <b>Trecho B em negrito</b><br/><i>Trecho I em itálico</i> <s>Trecho S rasurado</s><br/>Atalho de voo <kbd shortcut="toggle-fly"/>'
+      demo.inlineContent: 'Trecho Text normal <b>Trecho B em negrito</b><br><i>Trecho I em itálico</i> <s>Trecho S rasurado</s><br>Atalho de voo <kbd shortcut="toggle-fly"></kbd>'
       demo.textProperties: "Propriedades de texto"
       demo.fontShorthand: "Atalho de tipo de letra · itálico · peso 525 · 15/21"
       demo.letterSpacing: "Espaçamento a 8% do avanço do espaço da fonte"
@@ -84,7 +84,7 @@ locales:
       demo.title: "عرض Radia UI التجريبي"
       demo.status: "جاهز"
       demo.inlineHeading: "محتوى مضمّن"
-      demo.inlineContent: 'نص Text عادي <b>نص B عريض</b><br/><i>نص I مائل</i> <s>نص S مشطوب</s><br/>اختصار الطيران <kbd shortcut="toggle-fly"/>'
+      demo.inlineContent: 'نص Text عادي <b>نص B عريض</b><br><i>نص I مائل</i> <s>نص S مشطوب</s><br>اختصار الطيران <kbd shortcut="toggle-fly"></kbd>'
       demo.textProperties: "خصائص النص"
       demo.fontShorthand: "اختصار الخط · مائل · وزن 525 · 15/21"
       demo.letterSpacing: "تباعد الأحرف بنسبة 8% من عرض مسافة الخط"

@@ -6,8 +6,8 @@
 #include "linden_common.h"
 #include <algorithm>
 #include <optional>
-#include "elements/element.h"
-#include "layout/schema.h"
+#include "dom/element.h"
+#include "html/elementnames.h"
 #include "style/model.h"
 #include "style/stylesheet.h"
 
@@ -45,12 +45,14 @@ std::optional<ElementState> selectorState(const std::string& state) {
 }
 
 bool matchesAttribute(const StyleSelector& selector, const Element* element) {
-    if (selector.attributeName.empty()) return true;
+    if (selector.attributes.empty()) return true;
     if (!element) return false;
-    const std::string* value = detail::styleAttribute(*element, selector.attributeName);
-    if (selector.attributePresence) return value != nullptr;
-    if (selector.attributeName == "name") return value && *value == selector.attributeValue;
-    return value && schemaNameKey(*value) == schemaNameKey(selector.attributeValue);
+    return std::all_of(selector.attributes.begin(), selector.attributes.end(), [element](const StyleAttributeSelector& attribute) {
+        const std::string* value = detail::styleAttribute(*element, attribute.name);
+        if (attribute.presence) return value != nullptr;
+        if (attribute.name == "name") return value && *value == attribute.value;
+        return value && canonicalizeHTMLName(*value) == canonicalizeHTMLName(attribute.value);
+    });
 }
 
 bool matchesRoot(const StyleSelector& selector, const Element* element) {
@@ -58,7 +60,7 @@ bool matchesRoot(const StyleSelector& selector, const Element* element) {
 }
 
 bool selectorCanBeOwnedBy(const StyleSelector& selector, const Element& element) {
-    return (selector.element.empty() || selector.element == element.styleElement())
+    return (selector.element.empty() || selector.element == element.elementName())
         && matchesRoot(selector, &element)
         && matchesAttribute(selector, &element)
         && (selector.id.empty() || selector.id == element.id())
@@ -76,13 +78,12 @@ std::optional<std::size_t> stateIndex(ElementState state) {
 int specificity(const StyleSelector& selector) {
     return (!selector.id.empty() ? 100 : 0)
         + (selector.root ? 10 : 0)
-        + (!selector.attributeName.empty() ? 10 : 0)
+        + static_cast<int>(selector.attributes.size()) * 10
         + (!selector.className.empty() ? 10 : 0)
         + (!selector.state.empty() ? 10 : 0)
         + (selector.direction ? 10 : 0)
-        + (!selector.partState.empty() ? 10 : 0)
         + (!selector.element.empty() ? 1 : 0)
-        + static_cast<int>(selector.parts.size());
+        + (!selector.pseudoElement.empty() ? 1 : 0);
 }
 
 int specificity(const StyleRule& rule) {
@@ -92,8 +93,7 @@ int specificity(const StyleRule& rule) {
 }
 
 bool matchesSelector(const StyleSelector& selector, const std::string& element, const std::string& id, const std::set<std::string>& classes,
-                     uint16_t ownerStates, const std::vector<std::string>& parts, uint16_t partStates, const Element* target,
-                     LayoutDirection direction) {
+                     uint16_t ownerStates, std::string_view pseudoElement, const Element* target, LayoutDirection direction) {
     return (selector.element.empty() || selector.element == element)
         && matchesRoot(selector, target)
         && matchesAttribute(selector, target)
@@ -101,26 +101,21 @@ bool matchesSelector(const StyleSelector& selector, const std::string& element, 
         && (selector.className.empty() || classes.find(selector.className) != classes.end())
         && matchesDirection(selector.direction, direction)
         && matchesState(selector.state, ownerStates)
-        && matchesState(selector.partState, partStates)
-        && selector.parts == parts;
+        && selector.pseudoElement == pseudoElement;
 }
 
 const Element* structuralParent(const Element* element) {
     if (!element) return nullptr;
-    const Element* parent = element->parentElement();
-    while (parent && !parent->part().empty()) parent = parent->parentElement();
-    return parent;
+    return element->parentElement();
 }
 
 bool matchesStructuralSelector(const StyleSelector& selector, const Element& element, LayoutDirection direction) {
-    static const std::vector<std::string> sNoParts;
-    return matchesSelector(selector, element.styleElement(), element.id(), element.classes(), element.states(), sNoParts, 0, &element, direction);
+    return matchesSelector(selector, element.elementName(), element.id(), element.classes(), element.states(), {}, &element, direction);
 }
 
 bool matchesRule(const StyleRule& rule, const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t ownerStates,
-                 const std::vector<std::string>& parts, uint16_t partStates, const Element* target, const std::vector<std::string>* inlineAncestors,
-                 LayoutDirection direction) {
-    if (rule.selectors.empty() || !matchesSelector(rule.selectors.back(), element, id, classes, ownerStates, parts, partStates, target, direction))
+                 std::string_view pseudoElement, const Element* target, const std::vector<std::string>* inlineAncestors, LayoutDirection direction) {
+    if (rule.selectors.empty() || !matchesSelector(rule.selectors.back(), element, id, classes, ownerStates, pseudoElement, target, direction))
         return false;
     if (rule.selectors.size() == 1) return true;
     if (!target || rule.combinators.size() + 1 != rule.selectors.size()) return false;
@@ -129,10 +124,9 @@ bool matchesRule(const StyleRule& rule, const std::string& element, const std::s
     const Element* ancestor = inlineAncestors ? target : structuralParent(target);
     const auto nextAncestorMatches = [&](const StyleSelector& selector) -> std::optional<bool> {
         static const std::set<std::string> sNoClasses;
-        static const std::vector<std::string> sNoParts;
         if (inlineAncestors && inlineIndex) {
             const std::string& inlineElement = (*inlineAncestors)[--inlineIndex];
-            return matchesSelector(selector, inlineElement, {}, sNoClasses, 0, sNoParts, 0, nullptr, direction);
+            return matchesSelector(selector, inlineElement, {}, sNoClasses, 0, {}, nullptr, direction);
         }
         if (!ancestor) return std::nullopt;
         const Element* candidate = ancestor;
@@ -188,7 +182,6 @@ bool StyleModel::stateAffectsLayout(ElementState state) const {
                     if (std::find(candidates.begin(), candidates.end(), ruleIndex) == candidates.end()) candidates.push_back(ruleIndex);
                 };
                 addState(selectorState(selector.state));
-                addState(selectorState(selector.partState));
             }
         }
         layoutStateMaskValid = true;
@@ -210,8 +203,6 @@ bool StyleModel::stateAffectsLayout(const Element& element, ElementState state) 
         for (const StyleSelector& selector : rule.selectors) {
             const std::optional<ElementState> ownerState = selectorState(selector.state);
             if (ownerState && *ownerState == state && selectorCanBeOwnedBy(selector, element)) return true;
-            const std::optional<ElementState> partState = selectorState(selector.partState);
-            if (partState && *partState == state && !element.part().empty() && selectorCanBeOwnedBy(selector, element)) return true;
         }
     }
     return false;
@@ -237,7 +228,6 @@ bool StyleModel::stateAffectsHitTesting(ElementState state) const {
                     if (std::find(candidates.begin(), candidates.end(), ruleIndex) == candidates.end()) candidates.push_back(ruleIndex);
                 };
                 addState(selectorState(selector.state));
-                addState(selectorState(selector.partState));
             }
         }
         hitTestStateMaskValid = true;
@@ -254,8 +244,6 @@ bool StyleModel::stateAffectsHitTesting(const Element& element, ElementState sta
         for (const StyleSelector& selector : rule.selectors) {
             const std::optional<ElementState> ownerState = selectorState(selector.state);
             if (ownerState && *ownerState == state && selectorCanBeOwnedBy(selector, element)) return true;
-            const std::optional<ElementState> partState = selectorState(selector.partState);
-            if (partState && *partState == state && !element.part().empty() && selectorCanBeOwnedBy(selector, element)) return true;
         }
     }
     return false;
@@ -273,16 +261,13 @@ bool StyleModel::stateAffectsDescendants(const Element& element, ElementState st
             for (std::size_t selectorIndex = 0; selectorIndex < rule.selectors.size(); ++selectorIndex) {
                 const StyleSelector& selector = rule.selectors[selectorIndex];
                 const std::optional<ElementState> selectorStateValue = selectorState(selector.state);
-                const std::optional<ElementState> partState = selectorState(selector.partState);
-                const auto addCandidate = [&](const std::optional<ElementState>& candidate, bool partOwned) {
+                const auto addCandidate = [&](const std::optional<ElementState>& candidate) {
                     if (!candidate) return;
                     const std::optional<std::size_t> candidateStateIndex = stateIndex(*candidate);
                     if (!candidateStateIndex) return;
-                    if (selectorIndex + 1 < rule.selectors.size() || (!partOwned && !selector.parts.empty()) || inherits)
-                        descendantStateRules[*candidateStateIndex].push_back(ruleIndex);
+                    if (selectorIndex + 1 < rule.selectors.size() || inherits) descendantStateRules[*candidateStateIndex].push_back(ruleIndex);
                 };
-                addCandidate(selectorStateValue, false);
-                addCandidate(partState, true);
+                addCandidate(selectorStateValue);
             }
         }
         for (auto& candidates : descendantStateRules) {
@@ -300,13 +285,6 @@ bool StyleModel::stateAffectsDescendants(const Element& element, ElementState st
             const std::optional<ElementState> ownerState = selectorState(selector.state);
             if (ownerState
                 && *ownerState == state
-                && selectorCanBeOwnedBy(selector, element)
-                && (selectorIndex + 1 < rule.selectors.size() || !selector.parts.empty() || inherits))
-                return true;
-            const std::optional<ElementState> partState = selectorState(selector.partState);
-            if (partState
-                && *partState == state
-                && !element.part().empty()
                 && selectorCanBeOwnedBy(selector, element)
                 && (selectorIndex + 1 < rule.selectors.size() || inherits))
                 return true;
@@ -330,33 +308,26 @@ void StyleModel::sortRules() {
 
 Style StyleSheet::resolve(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t states,
                           LayoutDirection direction) const {
-    return mImpl->resolveInternal(element, id, classes, states, {}, 0, nullptr, nullptr, direction);
-}
-
-Style StyleSheet::resolvePart(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t ownerStates,
-                              const std::string& part, uint16_t partStates, LayoutDirection direction) const {
-    return mImpl->resolveInternal(element, id, classes, ownerStates, detail::splitPartPath(part), partStates, nullptr, nullptr, direction);
+    return mImpl->resolveInternal(element, id, classes, states, {}, nullptr, nullptr, direction);
 }
 
 Style StyleSheet::resolveElement(const Element& element, LayoutDirection direction) const {
-    return mImpl->resolveInternal(element.styleElement(), element.id(), element.classes(), element.states(), {}, 0, &element, nullptr, direction);
+    return mImpl->resolveInternal(element.elementName(), element.id(), element.classes(), element.states(), {}, &element, nullptr, direction);
 }
 
-Style StyleSheet::resolveElementPart(const Element& owner, const Element& part, LayoutDirection direction) const {
-    return mImpl->resolveInternal(owner.styleElement(), owner.id(), owner.classes(), owner.states(), detail::splitPartPath(part.part()),
-                                  part.states(), &owner, nullptr, direction);
+Style StyleSheet::resolvePseudoElement(const Element& owner, std::string_view pseudoElementName, LayoutDirection direction) const {
+    return mImpl->resolveInternal(owner.elementName(), owner.id(), owner.classes(), owner.states(), pseudoElementName, &owner, nullptr, direction);
 }
 
 Style StyleSheet::resolveInline(const Element& owner, const std::string& element, const std::vector<std::string>& inlineAncestors,
                                 LayoutDirection direction) const {
     static const std::set<std::string> sNoClasses;
-    static const std::vector<std::string> sNoParts;
-    return mImpl->resolveInternal(element, {}, sNoClasses, 0, sNoParts, 0, &owner, &inlineAncestors, direction);
+    return mImpl->resolveInternal(element, {}, sNoClasses, 0, {}, &owner, &inlineAncestors, direction);
 }
 
 Style StyleModel::resolveInternal(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t ownerStates,
-                                  const std::vector<std::string>& parts, uint16_t partStates, const Element* target,
-                                  const std::vector<std::string>* inlineAncestors, LayoutDirection direction) const {
+                                  std::string_view pseudoElement, const Element* target, const std::vector<std::string>* inlineAncestors,
+                                  LayoutDirection direction) const {
     if (!ruleIndexValid) {
         universalRuleIndices.clear();
         elementRuleIndices.clear();
@@ -401,9 +372,10 @@ Style StyleModel::resolveInternal(const std::string& element, const std::string&
     Style style;
     for (const std::size_t ruleIndex : candidates) {
         const StyleRule& rule = rules[ruleIndex];
-        if (!matchesRule(rule, element, id, classes, ownerStates, parts, partStates, target, inlineAncestors, direction)) continue;
+        if (!matchesRule(rule, element, id, classes, ownerStates, pseudoElement, target, inlineAncestors, direction)) continue;
         for (const StyleDeclaration& declaration : rule.declarations) detail::applyStyleDeclaration(style, declaration);
     }
+    normalizeOverflow(style);
     resolveLightDarkColors(style);
     return style;
 }

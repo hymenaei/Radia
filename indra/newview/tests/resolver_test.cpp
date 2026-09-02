@@ -12,17 +12,20 @@
 #include <string_view>
 #include "namedtempfile.h"
 #include "resolver.h"
+#include "resourceprovider.h"
 #include "skin/compiler.h"
 
 namespace {
+using radia::ui::ResourceId;
 using radia::ui::SkinCompiler;
 using radia::viewer::ui::SkinResolver;
+using ::testing::Test;
 
 constexpr char kRootResourcePaths[] =
     R"("stylesheet": "radia/skin.css","layouts": "radia/xui","localization": "radia/localization.yaml","assets": "radia/resources")";
 constexpr char kLayoutResourcePath[] = R"("layouts": "radia/xui")";
 constexpr char kLocalization[] = "defaultLocale: en\nlocales: {en: {strings: {title: Base}}}\n";
-constexpr char kMinimalFloaterLayout[] = "<floater><head><title>Base</title></head><body/></floater>";
+constexpr char kMinimalFloaterLayout[] = "<floater><head><title>Base</title></head><body></body></floater>";
 
 void createDirectory(const std::filesystem::path& directory) {
     std::error_code error;
@@ -48,7 +51,7 @@ std::string manifest(std::string_view id, std::string_view base, std::string_vie
         + "}}\n";
 }
 
-class SkinResolverTest : public ::testing::Test {
+class SkinResolverTest : public Test {
 protected:
     void SetUp() override {
         root = NamedTempFile::temp_path("radia-skin-resolver-");
@@ -66,12 +69,15 @@ protected:
         EXPECT_FALSE(error) << "Could not remove test directory '" << root.string() << "': " << error.message();
     }
 
-    std::filesystem::path makeRoot(std::string_view directory, std::string_view id) {
+    std::filesystem::path makeRoot(std::string_view directory, std::string_view id, std::string_view layoutDirectory = "radia/xui") {
         const std::filesystem::path skin = root / directory;
-        writeFile(skin / "manifest.json", manifest(id, "null", kRootResourcePaths));
+        const std::string resourcePaths = R"("stylesheet": "radia/skin.css","layouts": ")"
+            + std::string(layoutDirectory)
+            + R"(","localization": "radia/localization.yaml","assets": "radia/resources")";
+        writeFile(skin / "manifest.json", manifest(id, "null", resourcePaths));
         writeFile(skin / "radia/skin.css", "floater { width: 300px; }");
         writeFile(skin / "radia/localization.yaml", kLocalization);
-        writeFile(skin / "radia/xui/base.html", kMinimalFloaterLayout);
+        writeFile(skin / std::filesystem::path(layoutDirectory) / "base.html", kMinimalFloaterLayout);
         createDirectory(skin / "radia/resources");
         return skin;
     }
@@ -98,16 +104,33 @@ TEST_F(SkinResolverTest, LayersDerivedResourcesAfterTheirBase) {
 
     ASSERT_TRUE(result.ok()) << (result.errors.empty() ? "unknown skin resolution error" : result.errors.front().formatted());
     EXPECT_EQ(result.skinId, "test.derived");
-    EXPECT_TRUE(result.snapshot.load("base.html").has_value());
-    EXPECT_TRUE(result.snapshot.load("derived.html").has_value());
-    EXPECT_EQ(result.snapshot.layers("skin.css").size(), std::size_t{2});
-    EXPECT_EQ(result.snapshot.layers("localization.yaml").size(), std::size_t{2});
+    EXPECT_TRUE(result.snapshot.load(ResourceId("base.html")).has_value());
+    EXPECT_TRUE(result.snapshot.load(ResourceId("derived.html")).has_value());
+    EXPECT_EQ(result.snapshot.layers(ResourceId("skin.css")).size(), std::size_t{2});
+    EXPECT_EQ(result.snapshot.layers(ResourceId("localization.yaml")).size(), std::size_t{2});
 
-    const auto asset = result.snapshot.load("resources/icons/shared.svg");
+    const auto asset = result.snapshot.load(ResourceId("resources/icons/shared.svg"));
     ASSERT_TRUE(asset.has_value());
-    EXPECT_EQ(*asset, kDerivedAsset);
+    EXPECT_EQ(asset->content, kDerivedAsset);
     const auto compiled = SkinCompiler().prepare(result.snapshot);
     ASSERT_TRUE(compiled.ok()) << (compiled.errors.empty() ? "unknown skin preparation error" : compiled.errors.front().formatted());
+}
+
+TEST_F(SkinResolverTest, MapsManifestDeclaredLayoutDirectoriesToLogicalIds) {
+    for (const std::string_view layoutDirectory : {"views", "html", "ui"}) {
+        const std::string id = "test." + std::string(layoutDirectory);
+        const std::filesystem::path skin = makeRoot(std::string(layoutDirectory), id, layoutDirectory);
+        writeFile(skin / std::filesystem::path(layoutDirectory) / "foo.html", kMinimalFloaterLayout);
+
+        const auto result = resolver.resolve(skin, {});
+        ASSERT_TRUE(result.ok()) << (result.errors.empty() ? "unknown skin resolution error" : result.errors.front().formatted());
+        const auto resource = result.snapshot.load(ResourceId("foo.html"));
+        ASSERT_TRUE(resource.has_value());
+        EXPECT_EQ(resource->provenance, id + "/" + std::string(layoutDirectory) + "/foo.html");
+        const ResourceId physicalId(std::string(layoutDirectory) + "/foo.html");
+        EXPECT_FALSE(result.snapshot.load(physicalId));
+        EXPECT_EQ(result.snapshot.resolve(ResourceId("base.html"), physicalId.value()), ResourceId("foo.html"));
+    }
 }
 
 TEST_F(SkinResolverTest, DoesNotMergeResourcesFromUnrelatedSkins) {
@@ -118,9 +141,9 @@ TEST_F(SkinResolverTest, DoesNotMergeResourcesFromUnrelatedSkins) {
     const auto result = resolver.resolve(selected, {root});
 
     ASSERT_TRUE(result.ok()) << (result.errors.empty() ? "unknown skin resolution error" : result.errors.front().formatted());
-    EXPECT_TRUE(result.snapshot.load("base.html").has_value());
-    EXPECT_FALSE(result.snapshot.load("unrelated.html").has_value());
-    EXPECT_EQ(result.snapshot.layers("skin.css").size(), std::size_t{1});
+    EXPECT_TRUE(result.snapshot.load(ResourceId("base.html")).has_value());
+    EXPECT_FALSE(result.snapshot.load(ResourceId("unrelated.html")).has_value());
+    EXPECT_EQ(result.snapshot.layers(ResourceId("skin.css")).size(), std::size_t{1});
 }
 
 TEST_F(SkinResolverTest, RejectsBaseSkinCycles) {
@@ -143,14 +166,14 @@ TEST_F(SkinResolverTest, RejectsMalformedDerivedLayoutOverrides) {
     writeFile(base / "radia/xui/shared.html", kMinimalFloaterLayout);
     const std::filesystem::path derived = root / "derived";
     writeFile(derived / "manifest.json", manifest("test.derived", "\"test.base\"", kLayoutResourcePath));
-    writeFile(derived / "radia/xui/shared.html", "<unknown-element/>");
+    writeFile(derived / "radia/xui/shared.html", "<unknown-element></unknown-element>");
 
     const auto resolved = resolver.resolve(derived, {root});
 
     ASSERT_TRUE(resolved.ok()) << (resolved.errors.empty() ? "unknown skin resolution error" : resolved.errors.front().formatted());
-    const auto shared = resolved.snapshot.load("shared.html");
+    const auto shared = resolved.snapshot.load(ResourceId("shared.html"));
     ASSERT_TRUE(shared.has_value());
-    EXPECT_EQ(*shared, "<unknown-element/>");
+    EXPECT_EQ(shared->content, "<unknown-element></unknown-element>");
     EXPECT_FALSE(SkinCompiler().prepare(resolved.snapshot).ok());
 }
 
@@ -188,7 +211,7 @@ TEST_F(SkinResolverTest, CapturesImportedStylesheetModulesInTheirLayer) {
     const auto result = resolver.resolve(selected, {root});
 
     ASSERT_TRUE(result.ok()) << (result.errors.empty() ? "unknown skin resolution error" : result.errors.front().formatted());
-    const auto& layers = result.snapshot.layers("skin.css");
+    const auto& layers = result.snapshot.layers(ResourceId("skin.css"));
     ASSERT_EQ(layers.size(), std::size_t{1});
     EXPECT_EQ(layers.front().entrypoint, "radia/skin.css");
     EXPECT_TRUE(layers.front().modules.contains("radia/styles/panel.css"));
@@ -224,22 +247,22 @@ TEST_F(SkinResolverTest, LoadsBundledSkinResourcesAndStableIdentities) {
     ASSERT_TRUE(result.ok()) << (result.errors.empty() ? "unknown skin resolution error" : result.errors.front().formatted());
     EXPECT_EQ(result.skinId, "alchemy.default");
 
-    const auto& styleLayers = result.snapshot.layers("skin.css");
+    const auto& styleLayers = result.snapshot.layers(ResourceId("skin.css"));
     ASSERT_EQ(styleLayers.size(), std::size_t{1});
-    EXPECT_EQ(styleLayers.front().sourceName, "alchemy.default/radia/skin.css");
+    EXPECT_EQ(styleLayers.front().provenance, "alchemy.default/radia/skin.css");
     EXPECT_EQ(styleLayers.front().entrypoint, "radia/skin.css");
     EXPECT_TRUE(styleLayers.front().modules.contains("radia/variants.css"));
 
-    const auto& localizationLayers = result.snapshot.layers("localization.yaml");
+    const auto& localizationLayers = result.snapshot.layers(ResourceId("localization.yaml"));
     ASSERT_EQ(localizationLayers.size(), std::size_t{1});
-    EXPECT_EQ(localizationLayers.front().sourceName, "alchemy.default/radia/localization.yaml");
+    EXPECT_EQ(localizationLayers.front().provenance, "alchemy.default/radia/localization.yaml");
 
-    EXPECT_TRUE(result.snapshot.load("floater_demo.html").has_value());
-    EXPECT_TRUE(result.snapshot.load("elements/close.html").has_value());
-    EXPECT_TRUE(result.snapshot.load("elements/minimize.html").has_value());
-    EXPECT_TRUE(result.snapshot.load("resources/icons/search.svg").has_value());
-    EXPECT_TRUE(result.snapshot.load("resources/icons/close.svg").has_value());
-    EXPECT_TRUE(result.snapshot.load("resources/icons/minimize.svg").has_value());
+    EXPECT_TRUE(result.snapshot.load(ResourceId("floater_demo.html")).has_value());
+    EXPECT_TRUE(result.snapshot.load(ResourceId("elements/close.html")).has_value());
+    EXPECT_TRUE(result.snapshot.load(ResourceId("elements/minimize.html")).has_value());
+    EXPECT_TRUE(result.snapshot.load(ResourceId("resources/icons/search.svg")).has_value());
+    EXPECT_TRUE(result.snapshot.load(ResourceId("resources/icons/close.svg")).has_value());
+    EXPECT_TRUE(result.snapshot.load(ResourceId("resources/icons/minimize.svg")).has_value());
     const auto compiled = SkinCompiler().prepare(result.snapshot);
     ASSERT_TRUE(compiled.ok()) << (compiled.errors.empty() ? "unknown skin preparation error" : compiled.errors.front().formatted());
 }

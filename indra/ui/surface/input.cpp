@@ -8,8 +8,8 @@
 #include <iterator>
 #include <optional>
 #include <vector>
-#include "elements/elementinternal.h"
-#include "elements/floater.h"
+#include "dom/elementinternal.h"
+#include "html/floater.h"
 #include "style/stylepass.h"
 #include "surface/floaterresize.h"
 #include "surface/surface.h"
@@ -17,6 +17,10 @@
 #include "system.h"
 
 namespace radia::ui {
+using detail::ElementInternalAccess;
+using detail::resizeCursor;
+using detail::ResizeEdges;
+
 namespace {
 constexpr float kScrollbarLineStep = 40.f;
 constexpr float kScrollbarButtonRepeatDelay = .4f;
@@ -98,7 +102,7 @@ Element* Surface::hitTestNode(Element& node, const Vec2& point, const Rect& inhe
     const bool clipsChildren = clipAxes != ClipAxes::NoAxes;
     const Vec2 scrollTranslation = scrollContentTranslation(layoutDirection(), {node.scrollLeft(), node.scrollTop()});
     const Vec2 scrollOffset = clipsChildren ? Vec2{-scrollTranslation.x, -scrollTranslation.y} : Vec2{};
-    Rect childClip = clipsChildren ? clipToAxes(inheritedClip, detail::ElementInternalAccess::scrollport(node), clipAxes) : inheritedClip;
+    Rect childClip = clipsChildren ? clipToAxes(inheritedClip, ElementInternalAccess::scrollport(node), clipAxes) : inheritedClip;
     if (clipsChildren) childClip = offsetRect(childClip, scrollOffset);
     const Vec2 childPoint = point + scrollOffset;
     const StylePass::ChildSnapshot children = styles.sourceChildren(node);
@@ -134,12 +138,20 @@ Element* Surface::hitTestNode(Element& node, const Vec2& point, const Rect& inhe
 bool Surface::routeEvent(Event& event) {
     std::vector<ElementRef<Element>> route;
     std::vector<const Element*> routeParents;
-    for (Element* current = &event.target(); current; current = current->parentElement()) {
+    for (Element* current = event.target(); current; current = current->parentElement()) {
         route.emplace_back(current);
         routeParents.push_back(current->parentElement());
         if (isSurfaceRoot(current)) break;
     }
     if (route.empty() || !route.back() || !isSurfaceRoot(route.back().get()) || !isRootedInSurface(route.front().get())) return false;
+
+    std::vector<Element::EventListenerSnapshot> listenerSnapshots;
+    listenerSnapshots.reserve(route.size());
+    for (const ElementRef<Element>& elementRef : route) {
+        Element* element = elementRef.get();
+        if (!element) return false;
+        listenerSnapshots.push_back(element->eventListenerSnapshot());
+    }
 
     event.setPhase(EventPhase::Capture);
     for (std::size_t index = route.size() - 1; index > 0; --index) {
@@ -148,7 +160,11 @@ bool Surface::routeEvent(Event& event) {
         if (!target || !child || target->parentElement() != routeParents[index] || child->parentElement() != target || !isRootedInSurface(target))
             break;
         event.setCurrentTarget(target);
-        target->dispatchListeners(event, true);
+        target->dispatchListeners(event, true, listenerSnapshots[index]);
+        if (!route[index]) {
+            event.setCurrentTarget(nullptr);
+            return event.handled() || event.defaultPrevented();
+        }
         if (event.propagationStopped()) {
             event.setCurrentTarget(nullptr);
             return event.handled() || event.defaultPrevented();
@@ -166,8 +182,16 @@ bool Surface::routeEvent(Event& event) {
         return event.handled() || event.defaultPrevented();
     }
     event.setCurrentTarget(target);
-    target->dispatchListeners(event, true);
-    if (!event.immediatePropagationStopped()) target->dispatchListeners(event, false);
+    target->dispatchListeners(event, true, listenerSnapshots.front());
+    if (!route.front()) {
+        event.setCurrentTarget(nullptr);
+        return event.handled() || event.defaultPrevented();
+    }
+    if (!event.immediatePropagationStopped()) target->dispatchListeners(event, false, listenerSnapshots.front());
+    if (!route.front()) {
+        event.setCurrentTarget(nullptr);
+        return event.handled() || event.defaultPrevented();
+    }
     if (!event.propagationStopped()) {
         event.setPhase(EventPhase::Bubble);
         for (std::size_t index = 1; index < route.size(); ++index) {
@@ -180,7 +204,11 @@ bool Surface::routeEvent(Event& event) {
                 || !isRootedInSurface(bubbleTarget))
                 break;
             event.setCurrentTarget(bubbleTarget);
-            bubbleTarget->dispatchListeners(event, false);
+            bubbleTarget->dispatchListeners(event, false, listenerSnapshots[index]);
+            if (!route[index]) {
+                event.setCurrentTarget(nullptr);
+                return event.handled() || event.defaultPrevented();
+            }
             if (event.propagationStopped()) break;
         }
     }
@@ -207,12 +235,12 @@ Element* Surface::hitTestAt(const Vec2& point) {
     };
     if (hasActiveModal()) return hitInLayer(SurfaceLayer::Modal);
 
-    for (std::size_t index = static_cast<std::size_t>(SurfaceLayer::Modal); index > static_cast<std::size_t>(SurfaceLayer::Content); --index) {
+    for (std::size_t index = static_cast<std::size_t>(SurfaceLayer::Modal); index > static_cast<std::size_t>(SurfaceLayer::Base); --index) {
         const SurfaceLayer layer = static_cast<SurfaceLayer>(index);
         if (layer == SurfaceLayer::Tooltip || layer == SurfaceLayer::Drag || layer == SurfaceLayer::Modal) continue;
         if (Element* hit = hitInLayer(layer)) return hit;
     }
-    return hitInLayer(SurfaceLayer::Content);
+    return hitInLayer(SurfaceLayer::Base);
 }
 
 std::optional<Surface::ScrollbarTarget> Surface::hitTestScrollbarNode(Element& node, const Vec2& point, const Rect& inheritedClip,
@@ -245,7 +273,7 @@ std::optional<Surface::ScrollbarTarget> Surface::hitTestScrollbarNode(Element& n
     const bool clipsChildren = clipAxes != ClipAxes::NoAxes;
     const Vec2 scrollTranslation = scrollContentTranslation(layoutDirection(), {node.scrollLeft(), node.scrollTop()});
     const Vec2 scrollOffset = clipsChildren ? Vec2{-scrollTranslation.x, -scrollTranslation.y} : Vec2{};
-    Rect childClip = clipsChildren ? clipToAxes(inheritedClip, detail::ElementInternalAccess::scrollport(node), clipAxes) : inheritedClip;
+    Rect childClip = clipsChildren ? clipToAxes(inheritedClip, ElementInternalAccess::scrollport(node), clipAxes) : inheritedClip;
     if (clipsChildren) childClip = offsetRect(childClip, scrollOffset);
     const Vec2 childPoint = point + scrollOffset;
     const StylePass::ChildSnapshot children = styles.sourceChildren(node);
@@ -277,12 +305,12 @@ std::optional<Surface::ScrollbarTarget> Surface::hitTestScrollbarAt(const Vec2& 
     };
     if (hasActiveModal()) return hitInLayer(SurfaceLayer::Modal);
 
-    for (std::size_t index = static_cast<std::size_t>(SurfaceLayer::Modal); index > static_cast<std::size_t>(SurfaceLayer::Content); --index) {
+    for (std::size_t index = static_cast<std::size_t>(SurfaceLayer::Modal); index > static_cast<std::size_t>(SurfaceLayer::Base); --index) {
         const SurfaceLayer layer = static_cast<SurfaceLayer>(index);
         if (layer == SurfaceLayer::Tooltip || layer == SurfaceLayer::Drag || layer == SurfaceLayer::Modal) continue;
         if (std::optional<ScrollbarTarget> hit = hitInLayer(layer)) return hit;
     }
-    return hitInLayer(SurfaceLayer::Content);
+    return hitInLayer(SurfaceLayer::Base);
 }
 
 namespace {
@@ -621,9 +649,9 @@ bool Surface::pointerDown(const PointerEvent& event) {
     mPointerPosition = event.position;
     mPointerPositionKnown = true;
     std::uint8_t resizeEdges = 0;
-    FloaterElement* resizeFloater = event.button == PointerButton::Left ? resizeFloaterAt(event.position, resizeEdges) : nullptr;
+    HTMLFloaterElement* resizeFloater = event.button == PointerButton::Left ? resizeFloaterAt(event.position, resizeEdges) : nullptr;
     if (resizeFloater) {
-        ElementRef<FloaterElement> resizeRef(resizeFloater);
+        ElementRef<HTMLFloaterElement> resizeRef(resizeFloater);
         const std::optional<SurfaceLayer> resolvedLayer = layerOf(resizeFloater);
         if (!resolvedLayer) return false;
         const SurfaceLayer layer = *resolvedLayer;
@@ -631,7 +659,7 @@ bool Surface::pointerDown(const PointerEvent& event) {
         const Surface* resizeSurface = resizeFloater->surface();
         const Element* resizeParent = resizeFloater->parentElement();
         const auto isResizeFloaterStillAttached = [&]() {
-            FloaterElement* current = resizeRef.get();
+            HTMLFloaterElement* current = resizeRef.get();
             return current && current->surface() == resizeSurface && current->parentElement() == resizeParent && isRootedInSurface(current);
         };
         mPressedClickCount = 0;
@@ -650,7 +678,7 @@ bool Surface::pointerDown(const PointerEvent& event) {
             mCaptured = resizeFloater;
             setHovered(resizeFloater);
             setFocused(nullptr, false);
-            mResizeCursor = detail::resizeCursor(static_cast<detail::ResizeEdges>(resizeEdges));
+            mResizeCursor = resizeCursor(static_cast<ResizeEdges>(resizeEdges));
             return true;
         }
     }
@@ -1018,7 +1046,7 @@ bool Surface::moveFocus(bool backwards) {
     };
     if (hasActiveModal()) collectLayer(SurfaceLayer::Modal);
     else {
-        collectLayer(SurfaceLayer::Content);
+        collectLayer(SurfaceLayer::Base);
         collectLayer(SurfaceLayer::Floater);
         collectLayer(SurfaceLayer::Popup);
     }

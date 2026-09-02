@@ -12,20 +12,21 @@
 #include <string>
 #include <utility>
 #include "binding/binder.h"
-#include "elements/button.h"
-#include "elements/elementdefinition.h"
-#include "elements/elementinternal.h"
-#include "elements/elementtext.h"
-#include "elements/floater.h"
-#include "elements/icon.h"
-#include "elements/input.h"
-#include "elements/label.h"
-#include "elements/panel.h"
+#include "dom/elementinternal.h"
+#include "dom/text.h"
+#include "html/button.h"
+#include "html/elementnames.h"
+#include "html/floater.h"
+#include "html/icon.h"
+#include "html/input.h"
+#include "html/label.h"
+#include "html/panel.h"
 #include "layout/document.h"
 #include "layout/engine.h"
 #include "layout/resourcecompiler.h"
 #include "layout_test_helpers.h"
 #include "render/recordingpaintcontext.h"
+#include "resource/elementdefinition.h"
 #include "skin/compiler.h"
 #include "surface/surface.h"
 #include "system.h"
@@ -34,36 +35,41 @@
 namespace {
 using radia::ui::Binder;
 using radia::ui::Binding;
-using radia::ui::CompositePartDefinition;
 using radia::ui::Element;
-using radia::ui::ElementDefinition;
 using radia::ui::ElementRef;
 using radia::ui::Event;
 using radia::ui::EventCall;
 using radia::ui::FixedTextMetrics;
-using radia::ui::InputElement;
-using radia::ui::LabelElement;
-using radia::ui::LayoutBuildContext;
-using radia::ui::LayoutBuildResult;
+using radia::ui::HTMLInputElement;
+using radia::ui::HTMLLabelElement;
+using radia::ui::HTMLPanelElement;
+using radia::ui::kBrTag;
+using radia::ui::kBTag;
+using radia::ui::kITag;
+using radia::ui::kKbdTag;
 using radia::ui::LayoutDirection;
-using radia::ui::LayoutResourceCompiler;
 using radia::ui::layoutTree;
 using radia::ui::LocalizationCatalog;
+using radia::ui::NodePtr;
 using radia::ui::PaintCommand;
 using radia::ui::PaintCommandKind;
-using radia::ui::PanelElement;
 using radia::ui::PreparedBindingResult;
 using radia::ui::resolveElementStyle;
+using radia::ui::ResourceBuildContext;
+using radia::ui::ResourceBuildResult;
+using radia::ui::ResourceCompiler;
 using radia::ui::Style;
 using radia::ui::StyleSheet;
 using radia::ui::Visibility;
 using radia::ui::detail::ElementCompilerAccess;
 using radia::ui::detail::findElementInScope;
-using radia::ui::detail::instantiateCompositePart;
-using radia::ui::detail::instantiateCompositeParts;
+using radia::ui::detail::makeElementValue;
 using radia::ui::detail::makeEventRegistration;
-using radia::ui::test::LayoutCompilerTestHelper;
+using radia::ui::detail::NodeAccess;
+using radia::ui::detail::nodes;
+using radia::ui::test::ResourceCompilerTestHelper;
 using ::testing::Message;
+using ::testing::Test;
 
 void bindChangeEvent(Binder& binder, std::string name, std::function<void(const Event&)> callback) {
     binder.event(makeEventRegistration(
@@ -71,23 +77,23 @@ void bindChangeEvent(Binder& binder, std::string name, std::function<void(const 
         [](const EventCall& call) { return call.arguments().empty() ? nullptr : "binding.event.arity_mismatch"; }));
 }
 
-class FieldsetTest : public ::testing::Test {
+class FieldsetTest : public Test {
 protected:
     template<typename ElementT> ElementRef<ElementT> requireElement(Element& root, const std::string& id) const {
         return ElementRef<ElementT>(dynamic_cast<ElementT*>(findElementInScope(root, id)));
     }
 
-    LayoutCompilerTestHelper factory;
+    ResourceCompilerTestHelper factory;
     std::map<std::string, std::string>& resources = factory.resources;
 };
 } // namespace
 
 TEST_F(FieldsetTest, PreservesInlineElementStructureAcrossTextAndLabels) {
-    constexpr char kInlineLayout[] = "<panel><p id=\"copy\">before <b>bold<i>both</i></b><br/>"
+    constexpr char kInlineLayout[] = "<panel><p id=\"copy\">before <b>bold<i>both</i></b><br>"
                                      "<i>after</i></p><p id=\"title\">Title</p></panel>";
     constexpr char kLabelInlineLayout[] = "<panel><label id=\"label\" for=\"target\">name <b>important</b>"
-                                          "<br/><i>detail</i></label><input type=\"checkbox\" switch=\"true\" id=\"target\"/></panel>";
-    const LayoutBuildResult result = factory.buildElementTreeFromString(kInlineLayout, "inline.xml");
+                                          "<br><i>detail</i></label><input type=\"checkbox\" switch=\"true\" id=\"target\"></panel>";
+    const ResourceBuildResult result = factory.buildElementTreeFromString(kInlineLayout, "inline.html");
     ASSERT_TRUE(result.ok());
 
     const ElementRef<Element> text = requireElement<Element>(*result.document->documentElement(), "copy");
@@ -104,9 +110,9 @@ TEST_F(FieldsetTest, PreservesInlineElementStructureAcrossTextAndLabels) {
     EXPECT_TRUE(title->children().empty());
     EXPECT_EQ(title->textContent(), "Title");
 
-    const LayoutBuildResult labelResult = factory.buildElementTreeFromString(kLabelInlineLayout, "label-inline.xml");
+    const ResourceBuildResult labelResult = factory.buildElementTreeFromString(kLabelInlineLayout, "label-inline.html");
     ASSERT_TRUE(labelResult.ok());
-    const ElementRef<LabelElement> label = requireElement<LabelElement>(*labelResult.document->documentElement(), "label");
+    const ElementRef<HTMLLabelElement> label = requireElement<HTMLLabelElement>(*labelResult.document->documentElement(), "label");
     ASSERT_NE(label.get(), nullptr);
     ASSERT_EQ(label->children().size(), 3U);
     EXPECT_EQ(label->children()[0]->elementName(), "b");
@@ -121,12 +127,12 @@ TEST_F(FieldsetTest, LocalizesAndDecoratesInlineElements) {
                                            "locales: {en: {strings: "
                                            "{inlineExample: \"First <b>Second</b>\"}}}\n";
     ASSERT_FALSE(localization.loadYaml(kInlineLocalization).hasErrors());
-    const LayoutBuildContext context(localization, "en");
+    const ResourceBuildContext context(localization, "en");
     constexpr char kLocalizedTextLayout[] = "<p>{{inlineExample}}</p>";
     constexpr char kDecorationLayout[] = "<p><s>outdated</s> "
-                                         "<kbd shortcut=\"toggle-fly\"/></p>";
-    const LayoutBuildResult localizedResult =
-        LayoutResourceCompiler().buildElementTreeFromString(kLocalizedTextLayout, "localized-inline.xml", &context);
+                                         "<kbd shortcut=\"toggle-fly\"></kbd></p>";
+    const ResourceBuildResult localizedResult =
+        ResourceCompiler().buildElementTreeFromString(kLocalizedTextLayout, "localized-inline.html", &context);
     ASSERT_TRUE(localizedResult.ok());
 
     const Element* localized = localizedResult.rootAs<Element>();
@@ -136,7 +142,7 @@ TEST_F(FieldsetTest, LocalizesAndDecoratesInlineElements) {
     EXPECT_EQ(localized->children()[0]->elementName(), "b");
     EXPECT_EQ(localized->children()[0]->textContent(), "Second");
 
-    const LayoutBuildResult decoration = factory.buildElementTreeFromString(kDecorationLayout, "decoration.xml");
+    const ResourceBuildResult decoration = factory.buildElementTreeFromString(kDecorationLayout, "decoration.html");
     ASSERT_TRUE(decoration.ok());
     const Element* decorated = decoration.rootAs<Element>();
     ASSERT_NE(decorated, nullptr);
@@ -155,8 +161,8 @@ TEST_F(FieldsetTest, BuildsAllLocalizedSemanticInlineElements) {
                                              "<del>f</del><em>g</em><i>h</i><ins>i</ins><mark>j</mark>"
                                              "<q>k</q><s>l</s><small>m</small><strong>n</strong><u>o</u>'}}}\n";
     ASSERT_FALSE(localization.loadYaml(kSemanticLocalization).hasErrors());
-    const LayoutBuildContext context(localization, "en");
-    const LayoutBuildResult result = LayoutResourceCompiler().buildElementTreeFromString("<p>{{semantic}}</p>", "semantic-inline.xml", &context);
+    const ResourceBuildContext context(localization, "en");
+    const ResourceBuildResult result = ResourceCompiler().buildElementTreeFromString("<p>{{semantic}}</p>", "semantic-inline.html", &context);
     ASSERT_TRUE(result.ok());
 
     const Element* paragraph = result.rootAs<Element>();
@@ -170,15 +176,14 @@ TEST_F(FieldsetTest, PreservesLocalizedBreaksBetweenInlineRuns) {
     LocalizationCatalog localization;
     constexpr char kInlineLocalization[] = "defaultLocale: en\n"
                                            "locales: {en: {strings: "
-                                           "{inlineExample: 'First <b>Second</b><br/><i>Third</i><br/>Fourth <kbd shortcut=\"toggle-fly\"/>'}}}\n";
+                                           "{inlineExample: 'First <b>Second</b><br><i>Third</i><br>Fourth <kbd shortcut=\"toggle-fly\"></kbd>'}}}\n";
     ASSERT_FALSE(localization.loadYaml(kInlineLocalization).hasErrors());
 
-    EXPECT_EQ(localization.resolveMarkup("en", radia::ui::LocalizedText("inlineExample")),
-              "First <b>Second</b><br/><i>Third</i><br/>Fourth <kbd shortcut=\"toggle-fly\"/>");
+    EXPECT_EQ(localization.resolveHTML("en", radia::ui::LocalizedText("inlineExample")),
+              "First <b>Second</b><br><i>Third</i><br>Fourth <kbd shortcut=\"toggle-fly\"></kbd>");
 
-    const LayoutBuildContext context(localization, "en");
-    const LayoutBuildResult result =
-        LayoutResourceCompiler().buildElementTreeFromString("<p>{{inlineExample}}</p>", "localized-breaks.xml", &context);
+    const ResourceBuildContext context(localization, "en");
+    const ResourceBuildResult result = ResourceCompiler().buildElementTreeFromString("<p>{{inlineExample}}</p>", "localized-breaks.html", &context);
     ASSERT_TRUE(result.ok());
 
     Element* paragraph = result.document->documentElement();
@@ -191,10 +196,10 @@ TEST_F(FieldsetTest, PreservesLocalizedBreaksBetweenInlineRuns) {
     std::vector<std::string> nodeNames;
     const radia::ui::Node* postBreakText = nullptr;
     bool sawBreak = false;
-    for (radia::ui::Node& node : radia::ui::detail::nodes(*paragraph)) {
+    for (radia::ui::Node& node : nodes(*paragraph)) {
         if (const Element* element = node.asElement()) {
             nodeNames.push_back(element->elementName());
-            if (element->elementName() == "br") sawBreak = true;
+            if (element->elementName() == kBrTag.localName) sawBreak = true;
         } else {
             nodeNames.push_back("#text");
             if (sawBreak && !postBreakText) postBreakText = &node;
@@ -208,9 +213,9 @@ TEST_F(FieldsetTest, PreservesLocalizedBreaksBetweenInlineRuns) {
     const Element* italic = nullptr;
     const Element* shortcut = nullptr;
     for (const auto& child : paragraph->children()) {
-        if (child->elementName() == "b") bold = child;
-        if (child->elementName() == "i") italic = child;
-        if (child->elementName() == "kbd") shortcut = child;
+        if (child->elementName() == kBTag.localName) bold = child;
+        if (child->elementName() == kITag.localName) italic = child;
+        if (child->elementName() == kKbdTag.localName) shortcut = child;
     }
     ASSERT_NE(bold, nullptr);
     ASSERT_NE(italic, nullptr);
@@ -218,7 +223,7 @@ TEST_F(FieldsetTest, PreservesLocalizedBreaksBetweenInlineRuns) {
     const auto* postBreak = postBreakText->asText();
     ASSERT_NE(postBreak, nullptr);
     EXPECT_TRUE(italic->flowBreakBefore());
-    EXPECT_TRUE(radia::ui::detail::NodeAccess::flowBreakBefore(*postBreakText));
+    EXPECT_TRUE(NodeAccess::flowBreakBefore(*postBreakText));
     EXPECT_LT(italic->rect().y, bold->rect().y);
     EXPECT_LT(postBreak->rect().y, italic->rect().y);
 }
@@ -231,8 +236,8 @@ TEST_F(FieldsetTest, RejectsUnsupportedInlineElements) {
     };
 
     const InvalidInlineCase cases[] = {
-        {"missing shortcut", "<p><kbd/></p>", "layout.kbd.shortcut_required"},
-        {"invalid shortcut", "<p><kbd shortcut=\"toggle.fly\"/></p>", "layout.kbd.shortcut_invalid"},
+        {"missing shortcut", "<p><kbd></kbd></p>", "layout.kbd.shortcut_required"},
+        {"empty shortcut", "<p><kbd shortcut=\"\"></kbd></p>", "layout.kbd.shortcut_invalid"},
         {"inline attribute", "<fieldset><legend><b emphasis=\"true\">bad</b></legend></fieldset>", "layout.inline.attribute_unknown"},
         {"inline children", "<fieldset><legend><kbd shortcut=\"toggle-fly\">bad</kbd></legend></fieldset>", "layout.inline.children_unsupported"},
         {"element child", "<p><label>not-inline</label></p>", "layout.label.for_required"},
@@ -240,7 +245,7 @@ TEST_F(FieldsetTest, RejectsUnsupportedInlineElements) {
 
     for (const auto& test : cases) {
         SCOPED_TRACE(Message() << "unsupported inline case: " << test.name);
-        const LayoutBuildResult result = factory.buildElementTreeFromString(test.source, test.name);
+        const ResourceBuildResult result = factory.buildElementTreeFromString(test.source, test.name);
         ASSERT_FALSE(result.ok());
         ASSERT_FALSE(result.errors.empty());
         EXPECT_EQ(result.errors.front().code, test.diagnostic) << result.errors.front().message;
@@ -249,12 +254,12 @@ TEST_F(FieldsetTest, RejectsUnsupportedInlineElements) {
 
 TEST_F(FieldsetTest, ActivatesLabelTargetOnlyWhenInteractive) {
     constexpr char kLabelTargetLayout[] = "<panel><label id=\"toggleLabel\" for=\"toggle\">Enable</label>"
-                                          "<input type=\"checkbox\" switch=\"true\" id=\"toggle\" onChange=\"toggleChanged()\"/></panel>";
-    const LayoutBuildResult result = factory.buildElementTreeFromString(kLabelTargetLayout, "label-target.xml");
+                                          "<input type=\"checkbox\" switch=\"true\" id=\"toggle\" onChange=\"toggleChanged()\"></panel>";
+    const ResourceBuildResult result = factory.buildElementTreeFromString(kLabelTargetLayout, "label-target.html");
     ASSERT_TRUE(result.ok());
 
-    const ElementRef<LabelElement> label = requireElement<LabelElement>(*result.document->documentElement(), "toggleLabel");
-    const ElementRef<InputElement> target = requireElement<InputElement>(*result.document->documentElement(), "toggle");
+    const ElementRef<HTMLLabelElement> label = requireElement<HTMLLabelElement>(*result.document->documentElement(), "toggleLabel");
+    const ElementRef<HTMLInputElement> target = requireElement<HTMLInputElement>(*result.document->documentElement(), "toggle");
     ASSERT_NE(label.get(), nullptr);
     ASSERT_NE(target.get(), nullptr);
     EXPECT_TRUE(label->defaultPointerEvents());
@@ -300,15 +305,15 @@ TEST_F(FieldsetTest, RejectsInvalidLabelRelationships) {
     };
 
     constexpr char kNestedTargetLayout[] = "<panel>"
-                                           "<input type=\"checkbox\" switch=\"true\" id=\"nestedTarget\"/></panel>";
-    resources["nested-target.xml"] = kNestedTargetLayout;
+                                           "<input type=\"checkbox\" switch=\"true\" id=\"nestedTarget\"></panel>";
+    resources["nested-target.html"] = kNestedTargetLayout;
     const InvalidLabelCase cases[] = {
-        {"missing for", "<panel><label>Missing relationship</label><input type=\"checkbox\" switch=\"true\" id=\"toggle\"/></panel>",
+        {"missing for", "<panel><label>Missing relationship</label><input type=\"checkbox\" switch=\"true\" id=\"toggle\"></panel>",
          "layout.label.for_required"},
-        {"invalid target id",
-         "<panel><label for=\"Bad_Target!\">Invalid relationship</label>"
-         "<input type=\"checkbox\" switch=\"true\" id=\"toggle\"/></panel>",
-         "layout.label.for_invalid"},
+        {"missing target with punctuation",
+         "<panel><label for=\"Bad_Target!\">Missing relationship</label>"
+         "<input type=\"checkbox\" switch=\"true\" id=\"toggle\"></panel>",
+         "layout.label.target_missing"},
         {"missing target", "<panel><label for=\"missing\">Missing target</label></panel>", "layout.label.target_missing"},
         {"non-labelable target",
          "<panel><label for=\"copy\">Wrong target</label>"
@@ -316,13 +321,13 @@ TEST_F(FieldsetTest, RejectsInvalidLabelRelationships) {
          "layout.label.target_not_labelable"},
         {"cross-scope target",
          "<panel><label for=\"nestedTarget\">Cross scope</label>"
-         "<panel filename=\"nested-target.xml\"/></panel>",
+         "<panel filename=\"nested-target.html\"></panel></panel>",
          "layout.label.target_missing"},
     };
 
     for (const auto& test : cases) {
         SCOPED_TRACE(Message() << "invalid label relationship: " << test.name);
-        const LayoutBuildResult result = factory.buildElementTreeFromString(test.source, test.name);
+        const ResourceBuildResult result = factory.buildElementTreeFromString(test.source, test.name);
         ASSERT_FALSE(result.ok());
         ASSERT_FALSE(result.errors.empty());
         EXPECT_EQ(result.errors.front().code, test.diagnostic);
@@ -331,29 +336,54 @@ TEST_F(FieldsetTest, RejectsInvalidLabelRelationships) {
 
 TEST_F(FieldsetTest, ResolvesLabelTargetsInsideIncludedResources) {
     constexpr char kNestedValidLayout[] = "<panel><label id=\"nestedLabel\" for=\"nestedSwitch\">Nested</label>"
-                                          "<input type=\"checkbox\" switch=\"true\" id=\"nestedSwitch\"/></panel>";
-    constexpr char kNestedLabelLayout[] = "<panel><panel filename=\"nested-valid.xml\"/></panel>";
-    resources["nested-valid.xml"] = kNestedValidLayout;
-    const LayoutBuildResult result = factory.buildElementTreeFromString(kNestedLabelLayout, "label-nested.xml");
+                                          "<input type=\"checkbox\" switch=\"true\" id=\"nestedSwitch\"></panel>";
+    constexpr char kNestedLabelLayout[] = "<panel><panel filename=\"nested-valid.html\"></panel></panel>";
+    resources["nested-valid.html"] = kNestedValidLayout;
+    const ResourceBuildResult result = factory.buildElementTreeFromString(kNestedLabelLayout, "label-nested.html");
     ASSERT_TRUE(result.ok());
     ASSERT_TRUE(result.document);
     Element& root = *result.document->documentElement();
     ASSERT_EQ(root.children().size(), 1U);
     Element& included = *root.children().front();
-    const ElementRef<LabelElement> label = requireElement<LabelElement>(included, "nestedLabel");
-    const ElementRef<InputElement> target = requireElement<InputElement>(included, "nestedSwitch");
+    const ElementRef<HTMLLabelElement> label = requireElement<HTMLLabelElement>(included, "nestedLabel");
+    const ElementRef<HTMLInputElement> target = requireElement<HTMLInputElement>(included, "nestedSwitch");
     ASSERT_NE(label.get(), nullptr);
     ASSERT_NE(target.get(), nullptr);
     EXPECT_EQ(ElementCompilerAccess::labelTarget(*label), target.get());
+
+    target->setId("renamed");
+    EXPECT_EQ(ElementCompilerAccess::labelTarget(*label), nullptr);
+    target->setId("nestedSwitch");
+    EXPECT_EQ(ElementCompilerAccess::labelTarget(*label), target.get());
+
+    NodePtr detached = target->remove();
+    EXPECT_EQ(ElementCompilerAccess::labelTarget(*label), nullptr);
+    EXPECT_FALSE(label->defaultPointerEvents());
+}
+
+TEST_F(FieldsetTest, ResolvesLabelTargetsInFragmentContent) {
+    auto root = makeElementValue<HTMLPanelElement>();
+    root.innerHTML("<label id='label' for='toggle'>Enable</label><input type='checkbox' switch id='toggle'>");
+
+    const ElementRef<HTMLLabelElement> label = requireElement<HTMLLabelElement>(root, "label");
+    const ElementRef<HTMLInputElement> target = requireElement<HTMLInputElement>(root, "toggle");
+    ASSERT_NE(label.get(), nullptr);
+    ASSERT_NE(target.get(), nullptr);
+    EXPECT_EQ(ElementCompilerAccess::labelTarget(*label), target.get());
+    EXPECT_TRUE(label->defaultPointerEvents());
+
+    target->setId("renamed");
+    EXPECT_EQ(ElementCompilerAccess::labelTarget(*label), nullptr);
+    EXPECT_FALSE(label->defaultPointerEvents());
 }
 
 TEST_F(FieldsetTest, AcceptsGenericFieldsetChildrenAndScopesLegend) {
     constexpr char kFieldsetLayout[] = "<fieldset id=\"settings\"><legend id=\"settingsLegend\" class=\"heading\">Settings <b>demo</b></legend>"
                                        "<div class=\"row\"><label for=\"toggle\">Toggle</label>"
-                                       "<input type=\"checkbox\" switch=\"true\" id=\"toggle\"/><div class=\"hint\">Helpful</div>"
+                                       "<input type=\"checkbox\" switch=\"true\" id=\"toggle\"><div class=\"hint\">Helpful</div>"
                                        "<div class=\"error\">Fallback</div></div>"
                                        "<div class=\"row\">Second row</div></fieldset>";
-    LayoutBuildResult result = factory.buildElementTreeFromString(kFieldsetLayout, "fieldset.xml");
+    ResourceBuildResult result = factory.buildElementTreeFromString(kFieldsetLayout, "fieldset.html");
     ASSERT_TRUE(result.ok());
 
     Element* fieldset = result.rootAs<Element>();
@@ -408,7 +438,7 @@ TEST_F(FieldsetTest, EnforcesLegendScopeAndUniqueness) {
 
     for (const auto& test : cases) {
         SCOPED_TRACE(Message() << "invalid generic layout: " << test.name);
-        const LayoutBuildResult result = factory.buildElementTreeFromString(test.source, test.name);
+        const ResourceBuildResult result = factory.buildElementTreeFromString(test.source, test.name);
         ASSERT_FALSE(result.ok());
         ASSERT_FALSE(result.errors.empty());
         EXPECT_EQ(result.errors.front().code, test.diagnostic);
@@ -416,8 +446,8 @@ TEST_F(FieldsetTest, EnforcesLegendScopeAndUniqueness) {
 }
 
 TEST_F(FieldsetTest, PreservesFieldsetChildOrder) {
-    const LayoutBuildResult result = factory.buildElementTreeFromString(
-        "<fieldset><div class=\"late\"/><legend>Settings</legend><div class=\"early\"/></fieldset>", "fieldset-order.xml");
+    const ResourceBuildResult result = factory.buildElementTreeFromString(
+        "<fieldset><div class=\"late\"></div><legend>Settings</legend><div class=\"early\"></div></fieldset>", "fieldset-order.html");
     ASSERT_TRUE(result.ok());
     const Element* fieldset = result.rootAs<Element>();
     ASSERT_NE(fieldset, nullptr);
@@ -425,35 +455,4 @@ TEST_F(FieldsetTest, PreservesFieldsetChildOrder) {
     EXPECT_TRUE(fieldset->children()[0]->classes().contains("late"));
     EXPECT_EQ(fieldset->children()[1]->elementName(), "legend");
     EXPECT_TRUE(fieldset->children()[2]->classes().contains("early"));
-}
-
-TEST_F(FieldsetTest, ReusesExistingCompositePartsAndInstantiatesThemIdempotently) {
-    PanelElement owner;
-    auto existingParent = std::make_unique<PanelElement>();
-    PanelElement* parent = existingParent.get();
-    auto existingChild = std::make_unique<PanelElement>();
-    PanelElement* child = existingChild.get();
-    ElementCompilerAccess::setStyleIdentity(*parent, owner.styleElement(), "parent");
-    ElementCompilerAccess::setStyleIdentity(*child, owner.styleElement(), "parent::child");
-    parent->append(std::move(existingChild));
-    owner.append(std::move(existingParent));
-
-    ElementDefinition definition;
-    CompositePartDefinition nested;
-    nested.path = "parent::child";
-    nested.parentPath = "parent";
-    nested.create = [] { return std::make_unique<PanelElement>(); };
-    CompositePartDefinition root;
-    root.path = "parent";
-    root.create = [] { return std::make_unique<PanelElement>(); };
-    definition.compositeParts = {nested, root};
-
-    instantiateCompositeParts(owner, definition);
-    ASSERT_EQ(owner.children().size(), 1U);
-    ASSERT_EQ(parent->children().size(), 1U);
-    EXPECT_EQ(owner.children().front(), parent);
-    EXPECT_EQ(parent->children().front(), child);
-
-    instantiateCompositePart(owner, definition, "parent::child");
-    EXPECT_EQ(parent->children().size(), 1U);
 }

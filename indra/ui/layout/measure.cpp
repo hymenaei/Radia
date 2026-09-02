@@ -6,10 +6,12 @@
 #include "linden_common.h"
 #include <algorithm>
 #include <cmath>
-#include "elements/element.h"
-#include "elements/elementtext.h"
+#include "dom/element.h"
+#include "dom/text.h"
+#include "html/elementnames.h"
 #include "layout/layoutcontext.h"
 #include "style/stylesheet.h"
+#include "text/metrics.h"
 
 namespace radia::ui {
 using layout_detail::AdjacentLayout;
@@ -25,6 +27,7 @@ using layout_detail::invalidChildLayout;
 using layout_detail::isDisplayed;
 using layout_detail::isInlineLevel;
 using layout_detail::isWhitespaceOnlyText;
+using layout_detail::LayoutChildRef;
 using layout_detail::MainAxisAllocation;
 using layout_detail::minimumBoxDimension;
 using layout_detail::prepareMainAxis;
@@ -102,9 +105,9 @@ Vec2 LayoutEngine::measure(Element& node, LayoutPass& pass, std::optional<float>
     Element* current = lifetime.get();
     if (!current || current->mSurface != surface || current->mParent != parent || current->mLayoutInvalidationRevision != layoutRevision) return {};
     Vec2 content;
-    if (style.display == DisplayMode::Flex && style.flexDirection == FlexDirection::Row)
+    if (isFlexDisplay(style.display) && style.flexDirection == FlexDirection::Row)
         content = measureRow(node, style, intrinsic, resolvedWidth, resolvedHeight, pass);
-    else if (style.display == DisplayMode::Flex) content = measureColumn(node, style, intrinsic, resolvedWidth, resolvedHeight, pass);
+    else if (isFlexDisplay(style.display)) content = measureColumn(node, style, intrinsic, resolvedWidth, resolvedHeight, pass);
     else if (style.display == DisplayMode::Grid || style.display == DisplayMode::InlineGrid)
         content = measureGrid(node, style, intrinsic, resolvedWidth, resolvedHeight, pass);
     else content = measureNormal(node, style, intrinsic, resolvedWidth, resolvedHeight, pass);
@@ -147,17 +150,89 @@ Vec2 LayoutEngine::measure(Element& node, LayoutPass& pass, std::optional<float>
     return desired;
 }
 
-ChildLayout LayoutEngine::measureChild(Element& parent, detail::NodeRef child, const Style& parentStyle, FlexDirection flexDirection,
+Vec2 LayoutEngine::measurePseudoElement(PseudoElement& node, const Style& style, std::optional<float> outerWidth, std::optional<float> outerHeight,
+                                        LayoutPass& pass) {
+    if (style.display == DisplayMode::NoneValue) {
+        node.setDesiredSize({});
+        return {};
+    }
+
+    std::optional<float> resolvedWidth = outerWidth;
+    if (!resolvedWidth && !style.width.isAuto() && !style.width.isPercentage())
+        resolvedWidth = styledBoxDimension(style, true, style.width, style.minWidth, 0.f);
+    std::optional<float> resolvedHeight = outerHeight;
+    if (!resolvedHeight && !style.height.isAuto() && !style.height.isPercentage())
+        resolvedHeight = styledBoxDimension(style, false, style.height, style.minHeight, 0.f);
+
+    const Vec2 textSize = style.content && !style.content->empty() ? pass.textMetrics().measureText(*style.content, style) : Vec2{};
+    Vec2 contentSize = textSize;
+    std::vector<ChildLayout> children;
+    const std::optional<float> contentWidth = resolvedWidth ? std::optional<float>(contentBoxDimension(style, true, *resolvedWidth)) : std::nullopt;
+    const std::optional<float> contentHeight =
+        resolvedHeight ? std::optional<float>(contentBoxDimension(style, false, *resolvedHeight)) : std::nullopt;
+    for (const LayoutChildRef& child : pass.orderedChildrenForLayout(node)) {
+        if (!child.attachedTo(node) || !child.pseudoElement) continue;
+        const Style childStyle = pass.style(*child.pseudoElement);
+        if (childStyle.display == DisplayMode::NoneValue) continue;
+        const std::optional<float> childWidth = contentWidth && childStyle.width.isPercentage()
+            ? std::optional<float>(styledBoxDimension(childStyle, true, childStyle.width, childStyle.minWidth, 0.f, *contentWidth))
+            : std::nullopt;
+        const std::optional<float> childHeight = contentHeight && childStyle.height.isPercentage()
+            ? std::optional<float>(styledBoxDimension(childStyle, false, childStyle.height, childStyle.minHeight, 0.f, *contentHeight))
+            : std::nullopt;
+        const Vec2 measured = measurePseudoElement(*child.pseudoElement, childStyle, childWidth, childHeight, pass);
+        children.push_back({child, childStyle, measured, measured});
+    }
+    if (!children.empty()) {
+        if (style.display == DisplayMode::Grid || style.display == DisplayMode::InlineGrid) {
+            const layout_detail::GridTrackSizes tracks = gridTrackSizes(children, contentWidth, contentHeight);
+            for (const float width : tracks.columns) contentSize.x += width;
+            for (const float height : tracks.rows) contentSize.y += height;
+        } else if (isFlexDisplay(style.display) && style.flexDirection == FlexDirection::Row) {
+            contentSize.x += style.gap.fixedPixels() * static_cast<float>(children.size() - 1);
+            for (const ChildLayout& child : children) {
+                contentSize.x += child.measured.x + child.style.margin.horizontal();
+                contentSize.y = std::max(contentSize.y, child.measured.y + child.style.margin.vertical());
+            }
+        } else if (isFlexDisplay(style.display)) {
+            contentSize.y += style.gap.fixedPixels() * static_cast<float>(children.size() - 1);
+            for (const ChildLayout& child : children) {
+                contentSize.y += child.measured.y + child.style.margin.vertical();
+                contentSize.x = std::max(contentSize.x, child.measured.x + child.style.margin.horizontal());
+            }
+        } else {
+            for (const ChildLayout& child : children) {
+                contentSize.x = std::max(contentSize.x, child.measured.x + child.style.margin.horizontal());
+                contentSize.y += child.measured.y + child.style.margin.vertical();
+            }
+        }
+    }
+    const Vec2 natural(contentSize.x + style.padding.horizontal() + style.borderWidth.horizontal(),
+                       contentSize.y + style.padding.vertical() + style.borderWidth.vertical());
+    const bool authoredWidth = !style.width.isAuto() && !style.width.isPercentage();
+    const bool authoredHeight = !style.height.isAuto() && !style.height.isPercentage();
+    float desiredWidth = styledBoxDimension(style, true, style.width, style.minWidth, natural.x, resolvedWidth.value_or(0.f));
+    if (resolvedWidth && (outerWidth || authoredWidth))
+        desiredWidth = std::max(*resolvedWidth, minimumBoxDimension(style, true, style.minWidth, *resolvedWidth));
+    float desiredHeight = styledBoxDimension(style, false, style.height, style.minHeight, natural.y, resolvedHeight.value_or(0.f));
+    if (resolvedHeight && (outerHeight || authoredHeight))
+        desiredHeight = std::max(*resolvedHeight, minimumBoxDimension(style, false, style.minHeight, *resolvedHeight));
+
+    const Vec2 desired{desiredWidth, desiredHeight};
+    node.setDesiredSize(desired);
+    return desired;
+}
+
+ChildLayout LayoutEngine::measureChild(Element& parent, LayoutChildRef child, const Style& parentStyle, FlexDirection flexDirection,
                                        std::optional<float> resolvedWidth, std::optional<float> resolvedHeight, LayoutPass& pass) {
     const NodeSnapshot parentState(parent);
-    const detail::NodeRef childState(child.get());
+    const LayoutChildRef childState = child;
     Element* childElement = child.element();
+    PseudoElement* childPseudoElement = child.pseudoElement;
     const auto valid = [&]() {
         Element* currentParent = parentState.get();
-        Node* currentChild = childState.get();
-        if (!parentState.valid() || !currentParent || !currentChild || currentChild->parentNode() != currentParent) return false;
-        Element* currentElement = currentChild->asElement();
-        return !currentElement || currentElement->mSurface == parentState.surface;
+        if (!parentState.valid() || !currentParent || !childState.attachedTo(*currentParent)) return false;
+        return childPseudoElement || !childElement || childElement->mSurface == parentState.surface;
     };
 
     const Style childStyle = pass.style(child, parentStyle);
@@ -173,6 +248,7 @@ ChildLayout LayoutEngine::measureChild(Element& parent, detail::NodeRef child, c
                                          contentBoxDimension(parentStyle, false, *resolvedHeight));
     Vec2 childSize;
     if (childElement) childSize = measure(*childElement, pass, childWidth, childHeight);
+    else if (childPseudoElement) childSize = measurePseudoElement(*childPseudoElement, childStyle, childWidth, childHeight, pass);
     else if (Text* text = childState.text())
         childSize = text->intrinsicSize(pass.styleSheet(), childStyle, pass.textMetrics(), {childWidth, childHeight});
     if (!valid()) return invalidChildLayout();
@@ -210,6 +286,7 @@ ChildLayout LayoutEngine::measureChild(Element& parent, detail::NodeRef child, c
         applyCrossAxisSizing(childSize, childStyle, flexDirection, availableCross, crossAlignment(parentStyle, childStyle, flexDirection));
         if (childStyle.height.isAuto() && !childStyle.aspectRatio) {
             if (currentElement) childSize.y = measure(*currentElement, pass, childSize.x).y;
+            else if (childPseudoElement) childSize.y = measurePseudoElement(*childPseudoElement, childStyle, childSize.x, std::nullopt, pass).y;
             else if (Text* text = childState.text())
                 childSize.y = text->intrinsicSize(pass.styleSheet(), childStyle, pass.textMetrics(), {childSize.x, std::nullopt}).y;
             if (!valid()) return invalidChildLayout();
@@ -241,7 +318,7 @@ ChildLayout LayoutEngine::measureChild(Element& parent, detail::NodeRef child, c
             else childSize.y = std::max(basis, minimum);
         }
     }
-    if (!valid() || !childState.get()) return invalidChildLayout();
+    if (!valid()) return invalidChildLayout();
     return {childState, childStyle, childAutomaticMinimum, childSize};
 }
 
@@ -249,24 +326,22 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::measureNormalChildren(Elem
                                                                             std::optional<float> contentHeight, LayoutPass& pass) {
     const NodeSnapshot parentState(parent);
     std::vector<ChildLayout> layouts;
-    layouts.reserve(parent.mChildren.size());
+    layouts.reserve(parent.mChildren.size() + parent.generatedPseudoElements().size());
     const Style parentStyle = pass.style(parent);
-    const std::vector<detail::NodeRef> children = orderedNodes(parent, pass);
+    const std::vector<LayoutChildRef> children = orderedChildren(parent, pass);
     for (std::size_t index = 0; index < children.size(); ++index) {
-        const detail::NodeRef& childRef = children[index];
-        Node* childNode = childRef.get();
+        const LayoutChildRef& childRef = children[index];
         Element* childPtr = childRef.element();
-        if (!childNode || childNode->parentNode() != &parent) continue;
+        if (!childRef.attachedTo(parent)) continue;
         if (isWhitespaceOnlyText(childRef) && !pass.preservesNormalFlowWhitespace(children, index, parentStyle)) continue;
-        if (childPtr && childPtr->elementName() == "br") continue;
+        if (childPtr && childPtr->elementName() == kBrTag.localName) continue;
 
         const Style childStyle = pass.style(childRef, parentStyle);
         if (childPtr ? !childPtr->isDisplayed(childStyle) : childStyle.display == DisplayMode::NoneValue) continue;
 
         const auto valid = [&] {
             Element* currentParent = parentState.get();
-            Node* currentChild = childRef.get();
-            return parentState.valid() && currentParent && currentChild && currentChild->parentNode() == currentParent;
+            return parentState.valid() && currentParent && childRef.attachedTo(*currentParent);
         };
         if (!valid()) return std::nullopt;
 
@@ -282,6 +357,8 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::measureNormalChildren(Elem
 
         const auto measureNode = [&](std::optional<float> width, std::optional<float> height) {
             if (Element* element = childRef.element()) return LayoutEngine::measure(*element, pass, width, height);
+            if (PseudoElement* pseudoElement = childRef.pseudoElement)
+                return LayoutEngine::measurePseudoElement(*pseudoElement, childStyle, width, height, pass);
             if (Text* text = childRef.text()) return text->intrinsicSize(pass.styleSheet(), childStyle, pass.textMetrics(), {width, height});
             return Vec2{};
         };
@@ -320,22 +397,20 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::measureGridChildren(Elemen
                                                                           std::optional<float> contentHeight, LayoutPass& pass) {
     const NodeSnapshot parentState(parent);
     std::vector<ChildLayout> layouts;
-    layouts.reserve(parent.mChildren.size());
-    const std::vector<detail::NodeRef> children = orderedNodes(parent, pass);
-    for (const detail::NodeRef& childRef : children) {
-        Node* childNode = childRef.get();
+    layouts.reserve(parent.mChildren.size() + parent.generatedPseudoElements().size());
+    const std::vector<LayoutChildRef> children = orderedChildren(parent, pass);
+    for (const LayoutChildRef& childRef : children) {
         Element* childElement = childRef.element();
-        if (!childNode || childNode->parentNode() != &parent) continue;
+        if (!childRef.attachedTo(parent)) continue;
         if (isWhitespaceOnlyText(childRef)) continue;
-        if (childElement && childElement->elementName() == "br") continue;
+        if (childElement && childElement->elementName() == kBrTag.localName) continue;
 
         const Style childStyle = pass.style(childRef, pass.style(parent));
         if (childElement ? !childElement->isDisplayed(childStyle) : childStyle.display == DisplayMode::NoneValue) continue;
 
         const auto valid = [&] {
             Element* currentParent = parentState.get();
-            Node* currentChild = childRef.get();
-            return parentState.valid() && currentParent && currentChild && currentChild->parentNode() == currentParent;
+            return parentState.valid() && currentParent && childRef.attachedTo(*currentParent);
         };
         if (!valid()) return std::nullopt;
 
@@ -347,6 +422,8 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::measureGridChildren(Elemen
             : std::nullopt;
         Vec2 childSize;
         if (childElement) childSize = measure(*childElement, pass, childWidth, childHeight);
+        else if (PseudoElement* pseudoElement = childRef.pseudoElement)
+            childSize = measurePseudoElement(*pseudoElement, childStyle, childWidth, childHeight, pass);
         else if (Text* text = childRef.text())
             childSize = text->intrinsicSize(pass.styleSheet(), childStyle, pass.textMetrics(), {childWidth, childHeight});
         if (!valid()) return std::nullopt;
@@ -388,7 +465,7 @@ Vec2 LayoutEngine::measureRow(Element& node, const Style& style, const Vec2& int
     std::size_t rowChildren = 0;
     std::size_t rowLines = 0;
     std::vector<ChildLayout> rowLayouts;
-    detail::NodeRef previousChild;
+    LayoutChildRef previousChild;
     const float fixedGap = style.gap.fixedPixels();
     const auto finishRow = [&] {
         if (!rowChildren && intrinsic.x == 0.f && intrinsic.y == 0.f) return;
@@ -399,23 +476,23 @@ Vec2 LayoutEngine::measureRow(Element& node, const Style& style, const Vec2& int
         rowWidth = 0.f;
         rowHeight = 0.f;
         rowChildren = 0;
-        previousChild.set(nullptr);
+        previousChild = {};
     };
 
-    const std::vector<detail::NodeRef> children = orderedNodes(node, pass);
-    for (const detail::NodeRef& childRef : children) {
-        if (!childRef.get() || childRef.get()->parentNode() != &node) continue;
+    const std::vector<LayoutChildRef> children = orderedChildren(node, pass);
+    for (const LayoutChildRef& childRef : children) {
+        if (!childRef || !childRef.attachedTo(node)) continue;
         if (isWhitespaceOnlyText(childRef)) continue;
-        if (const Element* child = childRef.element(); child && child->elementName() == "br") continue;
+        if (const Element* child = childRef.element(); child && child->elementName() == kBrTag.localName) continue;
         ChildLayout measured = measureChild(node, childRef, style, FlexDirection::Row, resolvedWidth, resolvedHeight, pass);
         Element* currentNode = nodeState.get();
         if (!nodeState.valid()) return content;
-        if (!measured.node || measured.node.get()->parentNode() != currentNode || !isDisplayed(measured)) continue;
+        if (!measured.node || !measured.node.attachedTo(*currentNode) || !isDisplayed(measured)) continue;
         const float childOuterWidth = measured.measured.x + measured.style.margin.horizontal();
         const float outerHeight = measured.measured.y + measured.style.margin.vertical();
         rowLayouts.push_back(measured);
         if (flowBreakBefore(measured) && rowChildren) finishRow();
-        if (previousChild && previousChild.get()->parentNode() == currentNode) {
+        if (previousChild && previousChild.attachedTo(*currentNode)) {
             const std::optional<AdjacentLayout> adjacent = adjacentLayout(nodeState, previousChild, measured.node, style);
             if (!adjacent) return content;
             if (adjacent->hasGap) rowWidth += fixedGap;
@@ -449,20 +526,20 @@ Vec2 LayoutEngine::measureColumn(Element& node, const Style& style, const Vec2& 
                                  std::optional<float> resolvedHeight, LayoutPass& pass) {
     const NodeSnapshot nodeState(node);
     Vec2 content = intrinsic;
-    detail::NodeRef previousChild;
+    LayoutChildRef previousChild;
     const float fixedGap = style.gap.fixedPixels();
-    const std::vector<detail::NodeRef> children = orderedNodes(node, pass);
-    for (const detail::NodeRef& childRef : children) {
-        if (!childRef.get() || childRef.get()->parentNode() != &node) continue;
+    const std::vector<LayoutChildRef> children = orderedChildren(node, pass);
+    for (const LayoutChildRef& childRef : children) {
+        if (!childRef || !childRef.attachedTo(node)) continue;
         if (isWhitespaceOnlyText(childRef)) continue;
-        if (const Element* child = childRef.element(); child && child->elementName() == "br") continue;
+        if (const Element* child = childRef.element(); child && child->elementName() == kBrTag.localName) continue;
         ChildLayout measured = measureChild(node, childRef, style, FlexDirection::Column, resolvedWidth, resolvedHeight, pass);
         Element* currentNode = nodeState.get();
         if (!nodeState.valid()) return content;
-        if (!measured.node || measured.node.get()->parentNode() != currentNode || !isDisplayed(measured)) continue;
+        if (!measured.node || !measured.node.attachedTo(*currentNode) || !isDisplayed(measured)) continue;
         const float childOuterWidth = measured.measured.x + measured.style.margin.horizontal();
         const float outerHeight = measured.measured.y + measured.style.margin.vertical();
-        if (previousChild && previousChild.get()->parentNode() == currentNode) {
+        if (previousChild && previousChild.attachedTo(*currentNode)) {
             const std::optional<AdjacentLayout> adjacent = adjacentLayout(nodeState, previousChild, measured.node, style);
             if (!adjacent) return content;
             if (adjacent->hasGap) content.y += fixedGap;
@@ -506,20 +583,19 @@ bool LayoutEngine::remeasureRowChildren(Element& parent, std::vector<ChildLayout
         ChildLayout& child = children[index];
         if (!child.style.height.isAuto() || child.style.aspectRatio) continue;
         Element* node = child.node.element();
-        Node* rawNode = child.node.get();
-        if (!rawNode || rawNode->parentNode() != &parent) continue;
+        PseudoElement* pseudoElement = child.node.pseudoElement;
+        if (!child.node.attachedTo(parent)) continue;
         const ElementRef<Element> nodeLifetime(node);
         const std::uint64_t nodeRevision = node ? node->mLayoutInvalidationRevision : 0;
         if (node) child.measured.y = measure(*node, pass, child.measured.x).y;
+        else if (pseudoElement) child.measured.y = measurePseudoElement(*pseudoElement, child.style, child.measured.x, std::nullopt, pass).y;
         else if (Text* text = child.node.text())
             child.measured.y = text->intrinsicSize(pass.styleSheet(), child.style, pass.textMetrics(), {child.measured.x, std::nullopt}).y;
         Element* currentParent = parentState.get();
         node = nodeLifetime.get();
-        rawNode = child.node.get();
         if (!parentState.valid()
-            || !rawNode
             || !currentParent
-            || rawNode->parentNode() != currentParent
+            || !child.node.attachedTo(*currentParent)
             || (node && (node->mSurface != parentState.surface || node->mLayoutInvalidationRevision != nodeRevision)))
             return false;
         child.fitSize.y = child.measured.y;
@@ -534,20 +610,19 @@ bool LayoutEngine::remeasureColumnChildren(Element& parent, std::vector<ChildLay
         ChildLayout& child = children[index];
         if (std::abs(child.measured.x - initialSizes[index].x) <= 1.0e-4f && std::abs(child.measured.y - initialSizes[index].y) <= 1.0e-4f) continue;
         Element* node = child.node.element();
-        Node* rawNode = child.node.get();
-        if (!rawNode || rawNode->parentNode() != &parent) continue;
+        PseudoElement* pseudoElement = child.node.pseudoElement;
+        if (!child.node.attachedTo(parent)) continue;
         const ElementRef<Element> nodeLifetime(node);
         const std::uint64_t nodeRevision = node ? node->mLayoutInvalidationRevision : 0;
-        const Vec2 constrained = node
-            ? measure(*node, pass, child.measured.x, child.measured.y)
+        const Vec2 constrained = node ? measure(*node, pass, child.measured.x, child.measured.y)
+            : pseudoElement
+            ? measurePseudoElement(*pseudoElement, child.style, child.measured.x, child.measured.y, pass)
             : child.node.text()->intrinsicSize(pass.styleSheet(), child.style, pass.textMetrics(), {child.measured.x, child.measured.y});
         Element* currentParent = parentState.get();
         node = nodeLifetime.get();
-        rawNode = child.node.get();
         if (!parentState.valid()
-            || !rawNode
             || !currentParent
-            || rawNode->parentNode() != currentParent
+            || !child.node.attachedTo(*currentParent)
             || (node && (node->mSurface != parentState.surface || node->mLayoutInvalidationRevision != nodeRevision)))
             return false;
         child.measured = constrained;

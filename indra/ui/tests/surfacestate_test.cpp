@@ -6,25 +6,29 @@
 #include "linden_common.h"
 #include <gtest/gtest.h>
 #include <memory>
-#include "elements/button.h"
-#include "elements/floater.h"
-#include "elements/label.h"
-#include "elements/panel.h"
+#include "dom/elementinternal.h"
 #include "floater_test_helpers.h"
+#include "html/button.h"
+#include "html/floater.h"
+#include "html/input.h"
+#include "html/label.h"
+#include "html/panel.h"
 #include "render/recordingpaintcontext.h"
 #include "style/stylesheet.h"
 #include "surface/surface.h"
 
 namespace {
-using radia::ui::ButtonElement;
 using radia::ui::ElementState;
-using radia::ui::FloaterElement;
-using radia::ui::LabelElement;
-using radia::ui::PanelElement;
+using radia::ui::HTMLButtonElement;
+using radia::ui::HTMLFloaterElement;
+using radia::ui::HTMLInputElement;
+using radia::ui::HTMLLabelElement;
+using radia::ui::HTMLPanelElement;
 using radia::ui::RecordingPaintContext;
 using radia::ui::StyleSheet;
 using radia::ui::Surface;
 using radia::ui::Visibility;
+using radia::ui::detail::makeElement;
 using radia::ui::test::makeFloater;
 } // namespace
 
@@ -35,8 +39,8 @@ TEST(SurfaceStateTest, ReflowsWhenHoveredStateChangesLayout) {
     EXPECT_TRUE(styleSheet.stateAffectsLayout(ElementState::Hovered));
     Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
-    auto button = std::make_unique<ButtonElement>();
-    ButtonElement* target = button.get();
+    auto button = makeElement<HTMLButtonElement>();
+    HTMLButtonElement* target = button.get();
     ASSERT_NE(target, nullptr);
     button->setPointerEvents(true);
     surface.mount(std::move(button));
@@ -55,8 +59,8 @@ TEST(SurfaceStateTest, RefreshesHitTestingWhenHoveredPolicyChanges) {
     EXPECT_TRUE(styleSheet.stateAffectsHitTesting(ElementState::Hovered));
     Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
-    auto button = std::make_unique<ButtonElement>();
-    ButtonElement* target = button.get();
+    auto button = makeElement<HTMLButtonElement>();
+    HTMLButtonElement* target = button.get();
     ASSERT_NE(target, nullptr);
     button->setRect({0.f, 0.f, 20.f, 10.f}).setPointerEvents(true);
     surface.mount(std::move(button));
@@ -77,12 +81,12 @@ TEST(SurfaceStateTest, InvalidatesDescendantLayoutForOwnerState) {
     ASSERT_TRUE(styleSheet.loadRadia(kDescendantState).ok());
     Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
-    auto panel = std::make_unique<PanelElement>();
-    PanelElement* parent = panel.get();
+    auto panel = makeElement<HTMLPanelElement>();
+    HTMLPanelElement* parent = panel.get();
     ASSERT_NE(parent, nullptr);
     panel->setRect({0.f, 0.f, 100.f, 20.f}).setPointerEvents(true);
-    auto label = std::make_unique<LabelElement>("descendant");
-    LabelElement* target = label.get();
+    auto label = makeElement<HTMLLabelElement>("descendant");
+    HTMLLabelElement* target = label.get();
     ASSERT_NE(target, nullptr);
     panel->append(std::move(label));
     surface.mount(std::move(panel));
@@ -95,11 +99,31 @@ TEST(SurfaceStateTest, InvalidatesDescendantLayoutForOwnerState) {
     EXPECT_FLOAT_EQ(target->rect().w, 40.f);
 }
 
+TEST(SurfaceStateTest, ReflowsWhenStyleSelectorAttributeChanges) {
+    StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet
+                    .loadRadia("input { display: block; width: 20px; height: 10px; } "
+                               "input[type=\"checkbox\"] { width: 40px; }")
+                    .ok());
+    Surface surface(styleSheet);
+    surface.setViewport(100.f, 100.f);
+    auto input = makeElement<HTMLInputElement>();
+    HTMLInputElement* target = input.get();
+    surface.mount(std::move(input));
+
+    surface.updateLayout();
+    EXPECT_FLOAT_EQ(target->rect().w, 20.f);
+
+    target->type("checkbox");
+    surface.updateLayout();
+    EXPECT_FLOAT_EQ(target->rect().w, 40.f);
+}
+
 TEST(SurfaceStateTest, RemovesUnavailableElementsFromStationaryHitTesting) {
     Surface surface;
     surface.setViewport(100.f, 100.f);
-    auto button = std::make_unique<ButtonElement>();
-    ButtonElement* target = button.get();
+    auto button = makeElement<HTMLButtonElement>();
+    HTMLButtonElement* target = button.get();
     ASSERT_NE(target, nullptr);
     button->setRect({0.f, 0.f, 20.f, 10.f}).setPointerEvents(true);
     surface.mount(std::move(button));
@@ -132,7 +156,7 @@ TEST(SurfaceStateTest, RestylesCompositePartsWhenOwnerStateChanges) {
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
     auto floater = makeFloater(false, true);
-    FloaterElement* target = floater.get();
+    HTMLFloaterElement* target = floater.get();
     ASSERT_NE(target, nullptr);
     surface.mountFloater(std::move(floater));
     surface.updateLayout();

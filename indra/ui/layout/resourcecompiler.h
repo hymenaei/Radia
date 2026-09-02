@@ -5,36 +5,38 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
 #include "layout/buildresult.h"
+#include "resourceprovider.h"
 
 namespace radia::ui {
 class Element;
-class LayoutBuildContext;
-class ResourceProvider;
+class ResourceBuildContext;
 struct ElementBuildInput;
-struct ElementDefinition;
+struct ResourceElementDefinition;
 struct SourceContent;
 struct SourceDocument;
 struct SourceNode;
 
-class LayoutResourceCompiler final {
+class ResourceCompiler final {
 public:
-    explicit LayoutResourceCompiler(const ResourceProvider* resources = nullptr);
+    explicit ResourceCompiler(const ResourceProvider* provider = nullptr);
 
-    LayoutBuildResult buildElementTreeFromResource(const std::string& resourceId, const LayoutBuildContext* context = nullptr) const;
-    LayoutBuildResult buildElementTreeFromString(const std::string& xml, const std::string& sourceName = {},
-                                                 const LayoutBuildContext* context = nullptr) const;
-    DiagnosticResult validateElementDefaults(const std::string& element, const LayoutBuildContext* context = nullptr) const;
+    ResourceBuildResult buildElementTreeFromResource(const ResourceId& id, const ResourceBuildContext* context = nullptr) const;
+    ResourceBuildResult buildElementTreeFromString(const std::string& html, const std::string& sourceName = {},
+                                                   const ResourceBuildContext* context = nullptr, ResourceId baseId = {}) const;
+    DiagnosticResult validateElementDefaults(const std::string& elementName, const ResourceBuildContext* context = nullptr) const;
 
 private:
     struct CachedDocument {
         bool initialized = false;
-        std::string source;
+        std::string content;
+        std::string provenance;
         std::shared_ptr<const SourceDocument> document;
         std::vector<Diagnostic> warnings;
         std::vector<Diagnostic> errors;
@@ -43,27 +45,26 @@ private:
     struct ChildBuildContext;
     enum class ChildHandling : uint8_t { Unhandled, Handled };
 
-    static std::string normalizeResource(std::string resourceId);
     std::unique_ptr<Element> buildDocument(const SourceDocument& document, std::unique_ptr<Element> root, BuildState& state) const;
-    std::unique_ptr<Element> buildNode(const SourceNode& sourceNode, const std::string& source, std::unique_ptr<Element> element,
+    std::unique_ptr<Element> buildNode(const SourceNode& node, const std::string& sourceName, std::unique_ptr<Element> element,
                                        BuildState& state) const;
-    const ElementDefinition* lookupElementDefinition(const SourceNode& sourceNode, const std::string& source, BuildState& state) const;
-    bool resolveElementResource(const ElementBuildInput& input, const ElementDefinition& definition, std::unique_ptr<Element>& element,
-                                BuildState& state) const;
-    void buildChildren(Element& target, const SourceNode& node, const ElementDefinition& definition, const std::string& source,
+    const ResourceElementDefinition* lookupElementDefinition(const SourceNode& node, const std::string& sourceName, BuildState& state) const;
+    bool resolveElementResource(const ElementBuildInput& input, const ResourceElementDefinition& definition, std::unique_ptr<Element>& element,
+                                const ResourceId& baseId, BuildState& state) const;
+    void buildChildren(Element& target, const SourceNode& node, const ResourceElementDefinition& definition, const std::string& sourceName,
                        BuildState& state) const;
     ChildHandling appendTextContent(const SourceContent& content, ChildBuildContext& context) const;
     ChildHandling consumeFlowBreak(const SourceNode& childNode, ChildBuildContext& context) const;
     ChildHandling consumeScopedElement(const SourceNode& childNode, ChildBuildContext& context) const;
     ChildHandling consumeChildContainer(const SourceNode& childNode, ChildBuildContext& context) const;
     ChildHandling buildRegularChild(const SourceNode& childNode, ChildBuildContext& context) const;
-    std::unique_ptr<Element> createResourceElement(const std::string& resourceId, BuildState& state) const;
-    const SourceDocument* loadDocument(const std::string& resourceId, BuildState& state, bool required) const;
-    void loadElementDefaults(const std::string& element, BuildState& state) const;
-    void validateElementScope(Element& scope, BuildState& state, const std::string& source, bool includeRootInIdScope = true) const;
+    std::unique_ptr<Element> createResourceElement(const ResourceId& id, BuildState& state) const;
+    const SourceDocument* loadDocument(const ResourceId& id, BuildState& state, bool required) const;
+    void loadElementDefaults(const std::string& elementName, BuildState& state) const;
+    void validateElementScope(Element& scope, BuildState& state, const std::string& sourceName, bool includeRootInIdScope = true) const;
 
-    const ResourceProvider* mResources = nullptr;
+    const ResourceProvider* mProvider = nullptr;
     mutable std::mutex mDocumentCacheMutex;
-    mutable std::unordered_map<std::string, CachedDocument> mDocumentCache;
+    mutable std::map<ResourceId, CachedDocument> mDocumentCache;
 };
 } // namespace radia::ui

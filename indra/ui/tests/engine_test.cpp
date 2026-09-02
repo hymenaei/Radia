@@ -5,35 +5,36 @@
 
 #include "linden_common.h"
 #include <gtest/gtest.h>
-#include "elements/button.h"
-#include "elements/elementdefinition.h"
-#include "elements/elementtext.h"
-#include "elements/floater.h"
-#include "elements/icon.h"
-#include "elements/input.h"
-#include "elements/label.h"
-#include "elements/panel.h"
+#include "dom/elementinternal.h"
+#include "dom/text.h"
 #include "floater_test_helpers.h"
+#include "html/button.h"
+#include "html/floater.h"
+#include "html/icon.h"
+#include "html/input.h"
+#include "html/label.h"
+#include "html/panel.h"
 #include "layout/engine.h"
+#include "resource/elementdefinition.h"
 #include "style/stylesheet.h"
 #include "text/metrics.h"
 
 namespace {
 using radia::ui::arrangeTree;
-using radia::ui::ButtonElement;
 using radia::ui::defaultStylesheetSource;
 using radia::ui::DisplayMode;
 using radia::ui::Element;
 using radia::ui::FixedTextMetrics;
-using radia::ui::FloaterElement;
-using radia::ui::IconElement;
-using radia::ui::InputElement;
-using radia::ui::LabelElement;
+using radia::ui::HTMLButtonElement;
+using radia::ui::HTMLFloaterElement;
+using radia::ui::HTMLIconElement;
+using radia::ui::HTMLInputElement;
+using radia::ui::HTMLLabelElement;
+using radia::ui::HTMLPanelElement;
 using radia::ui::LayoutDirection;
 using radia::ui::layoutTree;
 using radia::ui::measureElement;
 using radia::ui::measureTree;
-using radia::ui::PanelElement;
 using radia::ui::Rect;
 using radia::ui::resolveElementStyle;
 using radia::ui::ScrollbarMode;
@@ -47,28 +48,34 @@ using radia::ui::Text;
 using radia::ui::TextMetrics;
 using radia::ui::Vec2;
 using radia::ui::Visibility;
+using radia::ui::detail::appendText;
+using radia::ui::detail::ElementCompilerAccess;
+using radia::ui::detail::makeElement;
+using radia::ui::detail::makeElementValue;
+using radia::ui::detail::nodes;
 using ::testing::Message;
+using ::testing::Test;
 } // namespace
 
 namespace {
 std::unique_ptr<Element> makeParagraph(std::string text) {
-    auto paragraph = std::make_unique<Element>("p");
+    auto paragraph = makeElement<Element>("p");
     paragraph->textContent(std::move(text));
     return paragraph;
 }
 
-IconElement& appendIcon(ButtonElement& button, std::string name) {
-    auto icon = std::make_unique<IconElement>(std::move(name));
-    IconElement* result = icon.get();
+HTMLIconElement& appendIcon(HTMLButtonElement& button, std::string name) {
+    auto icon = makeElement<HTMLIconElement>(std::move(name));
+    HTMLIconElement* result = icon.get();
     button.append(std::move(icon));
     return *result;
 }
 
-void appendButtonText(ButtonElement& button, std::string text) {
-    radia::ui::detail::appendText(button, std::move(text));
+void appendButtonText(HTMLButtonElement& button, std::string text) {
+    appendText(button, std::move(text));
 }
 
-class LayoutEngineTest : public ::testing::Test {
+class LayoutEngineTest : public Test {
 protected:
     FixedTextMetrics text;
 };
@@ -79,9 +86,9 @@ TEST_F(LayoutEngineTest, MeasuresButtonWithIconAndLabel) {
         "button { position: relative; left: 10px; top: 10px; padding: 7px; gap: 6px; display: flex; flex-direction: row; "
         "font-size: 13px; line-height: 18px; } button > icon { size: 14px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kButtonLayout).ok());
-    PanelElement root;
+    auto root = makeElementValue<HTMLPanelElement>();
     root.setRect({0.f, 0.f, 300.f, 200.f});
-    auto button = std::make_unique<ButtonElement>();
+    auto button = makeElement<HTMLButtonElement>();
     appendIcon(*button, "search");
     appendButtonText(*button, "Apply");
     root.append(std::move(button));
@@ -90,7 +97,7 @@ TEST_F(LayoutEngineTest, MeasuresButtonWithIconAndLabel) {
     const Element& result = *root.children().front();
     EXPECT_EQ(result.rect().w, 300.f);
     EXPECT_EQ(result.rect().h, 32.f);
-    const auto runtimeChildren = radia::ui::detail::nodes(result);
+    const auto runtimeChildren = nodes(result);
     ASSERT_EQ(runtimeChildren.size(), 2U);
     ASSERT_NE(runtimeChildren.begin()->asElement(), nullptr);
     EXPECT_EQ(runtimeChildren.begin()->asElement()->elementName(), "icon");
@@ -107,12 +114,12 @@ TEST_F(LayoutEngineTest, IgnoresWhitespaceOnlyTextBetweenFlexItems) {
         "button > icon { size: 14px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kButtonLayout).ok());
 
-    ButtonElement button;
+    auto button = makeElementValue<HTMLButtonElement>();
     button.setRect({0.f, 0.f, 100.f, 20.f});
     auto leadingWhitespace = std::make_unique<Text>("\n        ");
     Text* leadingWhitespacePtr = leadingWhitespace.get();
     button.append(std::move(leadingWhitespace));
-    IconElement& icon = appendIcon(button, "search");
+    HTMLIconElement& icon = appendIcon(button, "search");
     auto betweenWhitespace = std::make_unique<Text>("\n        ");
     Text* betweenWhitespacePtr = betweenWhitespace.get();
     button.append(std::move(betweenWhitespace));
@@ -133,14 +140,14 @@ TEST_F(LayoutEngineTest, PreservesWhitespaceBetweenAdjacentInlineRuns) {
     constexpr char kInlineLayout[] = "p { display: block; } i, s { display: inline; }";
     ASSERT_TRUE(styleSheet.loadRadia(kInlineLayout).ok());
 
-    Element paragraph("p");
+    auto paragraph = makeElementValue<Element>("p");
     paragraph.setRect({0.f, 0.f, 200.f, 20.f});
-    auto italic = std::make_unique<Element>("i");
+    auto italic = makeElement<Element>("i");
     Element* italicPtr = italic.get();
     italic->append(std::make_unique<Text>("Italic I run"));
     auto separator = std::make_unique<Text>(" ");
     Text* separatorPtr = separator.get();
-    auto strike = std::make_unique<Element>("s");
+    auto strike = makeElement<Element>("s");
     Element* strikePtr = strike.get();
     strike->append(std::make_unique<Text>("Strike S run"));
     paragraph.append(std::move(italic));
@@ -160,9 +167,9 @@ TEST_F(LayoutEngineTest, CollapsesFormattingWhitespaceBetweenButtonContent) {
         "button { display: inline-block; width: 100px; height: 40px; padding: 0; font-size: 10px; line-height: 10px; } button > icon { size: 16px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kButtonLayout).ok());
 
-    ButtonElement button;
+    auto button = makeElementValue<HTMLButtonElement>();
     button.setRect({0.f, 0.f, 100.f, 40.f});
-    IconElement& icon = appendIcon(button, "search");
+    HTMLIconElement& icon = appendIcon(button, "search");
     auto separator = std::make_unique<Text>("\n            ");
     Text* separatorPtr = separator.get();
     button.append(std::move(separator));
@@ -182,7 +189,7 @@ TEST_F(LayoutEngineTest, IgnoresFormattingWhitespaceBeforeNormalFlowChildren) {
     constexpr char kNormalLayout[] = "panel { display: block; } p { display: block; height: 20px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kNormalLayout).ok());
 
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 60.f});
     auto leadingWhitespace = std::make_unique<Text>("\n        ");
     Text* leadingWhitespacePtr = leadingWhitespace.get();
@@ -205,12 +212,12 @@ TEST_F(LayoutEngineTest, FloaterBodyStartsAtFirstElementAfterFormattingWhitespac
                                       "p { height: 18px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kFloaterLayout).ok());
 
-    FloaterElement floater;
+    auto floater = makeElementValue<HTMLFloaterElement>();
     radia::ui::test::appendFloaterStructure(floater);
     ASSERT_NE(floater.body(), nullptr);
     floater.setRect({0.f, 0.f, 100.f, 100.f});
     floater.body()->append(std::make_unique<Text>("\n        "));
-    auto status = std::make_unique<Element>("p");
+    auto status = makeElement<Element>("p");
     Element* statusPtr = status.get();
     status->setId("status");
     status->textContent("Ready");
@@ -227,18 +234,18 @@ TEST_F(LayoutEngineTest, LaysOutInlineSiblingsAndBlockChildrenInNormalFlow) {
         "panel { display: block; } .inline { display: inline; width: 30px; height: 10px; } .block { display: block; width: 50px; height: 10px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kNormalLayout).ok());
 
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 60.f});
-    auto first = std::make_unique<LabelElement>("first");
+    auto first = makeElement<HTMLLabelElement>("first");
     first->addClass("inline");
     panel.append(std::move(first));
-    auto second = std::make_unique<LabelElement>("second");
+    auto second = makeElement<HTMLLabelElement>("second");
     second->addClass("inline");
     panel.append(std::move(second));
-    auto block = std::make_unique<LabelElement>("block");
+    auto block = makeElement<HTMLLabelElement>("block");
     block->addClass("block");
     panel.append(std::move(block));
-    auto after = std::make_unique<LabelElement>("after");
+    auto after = makeElement<HTMLLabelElement>("after");
     after->addClass("inline");
     panel.append(std::move(after));
 
@@ -256,12 +263,12 @@ TEST_F(LayoutEngineTest, AlignsNormalFlowInlineContentWithTextAlign) {
     constexpr char kAlignedLayout[] = "panel { display: block; text-align: center; } .inline { display: inline; width: 20px; height: 10px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kAlignedLayout).ok());
 
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 20.f});
-    auto first = std::make_unique<LabelElement>("first");
+    auto first = makeElement<HTMLLabelElement>("first");
     first->addClass("inline");
     panel.append(std::move(first));
-    auto second = std::make_unique<LabelElement>("second");
+    auto second = makeElement<HTMLLabelElement>("second");
     second->addClass("inline");
     panel.append(std::move(second));
 
@@ -276,12 +283,12 @@ TEST_F(LayoutEngineTest, WrapsInlineSiblingsAtTheContainingBlockWidth) {
     constexpr char kNormalLayout[] = "panel { display: block; } .inline { display: inline; width: 30px; height: 10px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kNormalLayout).ok());
 
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 50.f, 40.f});
-    auto first = std::make_unique<LabelElement>("first");
+    auto first = makeElement<HTMLLabelElement>("first");
     first->addClass("inline");
     panel.append(std::move(first));
-    auto second = std::make_unique<LabelElement>("second");
+    auto second = makeElement<HTMLLabelElement>("second");
     second->addClass("inline");
     panel.append(std::move(second));
 
@@ -298,16 +305,16 @@ TEST_F(LayoutEngineTest, CentersButtonContentWithinExplicitWidth) {
     constexpr char kCenteredButtonLayout[] = "button { width: 128px; height: 32px; padding: 7px; gap: 6px; display: flex; flex-direction: row; "
                                              "justify-content: center; line-height: 18px; } button > icon { size: 14px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kCenteredButtonLayout).ok());
-    PanelElement root;
+    auto root = makeElementValue<HTMLPanelElement>();
     root.setRect({0.f, 0.f, 300.f, 200.f});
-    auto button = std::make_unique<ButtonElement>();
+    auto button = makeElement<HTMLButtonElement>();
     appendIcon(*button, "search");
     appendButtonText(*button, "Apply");
     root.append(std::move(button));
     layoutTree(root, styleSheet, text);
     ASSERT_EQ(root.children().size(), 1U);
     const Element& result = *root.children().front();
-    const auto runtimeChildren = radia::ui::detail::nodes(result);
+    const auto runtimeChildren = nodes(result);
     ASSERT_EQ(runtimeChildren.size(), 2U);
     auto first = runtimeChildren.begin();
     auto second = first;
@@ -324,9 +331,9 @@ TEST_F(LayoutEngineTest, NativeButtonUsesNormalContentLayoutWithoutChangingDispl
         "button { display: inline-block; width: 128px; height: 32px; padding: 7px; text-align: center; line-height: 18px; } button > icon { size: 14px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kButtonLayout).ok());
 
-    ButtonElement button;
+    auto button = makeElementValue<HTMLButtonElement>();
     button.setRect({0.f, 0.f, 128.f, 32.f});
-    IconElement& icon = appendIcon(button, "search");
+    HTMLIconElement& icon = appendIcon(button, "search");
     auto label = std::make_unique<Text>("\n        Apply\n    ");
     Text* labelPtr = label.get();
     button.append(std::move(label));
@@ -338,7 +345,7 @@ TEST_F(LayoutEngineTest, NativeButtonUsesNormalContentLayoutWithoutChangingDispl
     layoutTree(button, styleSheet, text);
 
     EXPECT_FLOAT_EQ(labelPtr->rect().h, 18.f);
-    EXPECT_EQ(labelPtr->getData(), "\n        Apply\n    ");
+    EXPECT_EQ(labelPtr->data(), "\n        Apply\n    ");
     EXPECT_EQ(resolveElementStyle(styleSheet, button).display, DisplayMode::InlineBlock);
     const float contentLeft = button.rect().left() + computed.borderWidth.left + computed.padding.left;
     const float contentWidth = button.rect().w - computed.borderWidth.horizontal() - computed.padding.horizontal();
@@ -355,7 +362,7 @@ TEST_F(LayoutEngineTest, CentersButtonBlockContentFromDefaultAlignment) {
     };
     ASSERT_TRUE(styleSheet.loadRadiaLayers(layers).ok());
 
-    ButtonElement button;
+    auto button = makeElementValue<HTMLButtonElement>();
     button.setRect({0.f, 0.f, 100.f, 40.f});
     auto label = std::make_unique<Text>("Apply");
     Text* labelPtr = label.get();
@@ -377,7 +384,7 @@ TEST_F(LayoutEngineTest, DoesNotCenterUnstyledButtonBlockContent) {
     };
     ASSERT_TRUE(styleSheet.loadRadiaLayers(layers).ok());
 
-    ButtonElement button;
+    auto button = makeElementValue<HTMLButtonElement>();
     button.addClass("unstyled");
     button.setRect({0.f, 0.f, 100.f, 40.f});
     auto label = std::make_unique<Text>("Apply");
@@ -398,10 +405,10 @@ TEST_F(LayoutEngineTest, LaysOutColumnChildrenWithPaddingAndGap) {
     constexpr char kColumnLayout[] = "panel { padding: 10px; display: flex; flex-direction: column; gap: 5px; } "
                                      "label { height: 20px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kColumnLayout).ok());
-    PanelElement root;
+    auto root = makeElementValue<HTMLPanelElement>();
     root.setRect({0.f, 0.f, 100.f, 100.f});
-    root.append(std::make_unique<LabelElement>("one"));
-    root.append(std::make_unique<LabelElement>("two"));
+    root.append(makeElement<HTMLLabelElement>("one"));
+    root.append(makeElement<HTMLLabelElement>("two"));
     layoutTree(root, styleSheet, text);
     EXPECT_EQ(root.children()[0]->rect().w, 80.f);
     EXPECT_EQ(root.children()[0]->rect().bottom() - root.children()[1]->rect().top(), 5.f);
@@ -413,10 +420,10 @@ TEST_F(LayoutEngineTest, AppliesContentBoxAndBorderBoxToExplicitDimensions) {
                                         "border: 2px solid #000000; } label.border { box-sizing: border-box; }";
     ASSERT_TRUE(styleSheet.loadRadia(kBoxSizingLayout).ok());
 
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 400.f, 100.f});
-    panel.append(std::make_unique<LabelElement>("content-box"));
-    auto borderBox = std::make_unique<LabelElement>("border-box");
+    panel.append(makeElement<HTMLLabelElement>("content-box"));
+    auto borderBox = makeElement<HTMLLabelElement>("border-box");
     borderBox->addClass("border");
     panel.append(std::move(borderBox));
 
@@ -434,9 +441,9 @@ TEST_F(LayoutEngineTest, KeepsPaddingInTheClientBoxAndOutOfChildContent) {
                     .loadRadia("panel#viewport { display: block; overflow: hidden; padding: 10px 20px 30px 40px; } "
                                "#content { display: block; width: 100%; height: 100%; }")
                     .ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<Element>("content");
+    auto content = makeElement<Element>("content");
     Element* contentPtr = content.get();
     content->setId("content");
     panel.append(std::move(content));
@@ -459,9 +466,9 @@ TEST_F(LayoutEngineTest, KeepsPaddingAfterOverflowingContent) {
                     .loadRadia("panel#viewport { display: block; overflow: hidden; padding: 10px 20px 30px 40px; } "
                                "#content { display: block; width: 100px; height: 100px; }")
                     .ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<Element>("content");
+    auto content = makeElement<Element>("content");
     content->setId("content");
     panel.append(std::move(content));
 
@@ -479,9 +486,9 @@ TEST_F(LayoutEngineTest, KeepsBorderOutsidePaddingScrollport) {
                     .loadRadia("panel#viewport { display: block; overflow: hidden; border: 2px #ffffff; padding: 4px; } "
                                "#content { display: block; width: 100%; height: 100%; }")
                     .ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<Element>("content");
+    auto content = makeElement<Element>("content");
     Element* contentPtr = content.get();
     content->setId("content");
     panel.append(std::move(content));
@@ -500,9 +507,9 @@ TEST_F(LayoutEngineTest, PositionsNormalChildByRightAndBottom) {
     StyleSheet styleSheet;
     constexpr char kRightBottomLayout[] = "panel { position: relative; width: 40px; height: 30px; right: 5px; bottom: 7px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kRightBottomLayout).ok());
-    PanelElement root;
+    auto root = makeElementValue<HTMLPanelElement>();
     root.setRect({0.f, 0.f, 100.f, 100.f});
-    root.append(std::make_unique<PanelElement>());
+    root.append(makeElement<HTMLPanelElement>());
     layoutTree(root, styleSheet, text);
     EXPECT_EQ(root.children()[0]->rect().right(), 35.f);
     EXPECT_EQ(root.children()[0]->rect().bottom(), 77.f);
@@ -515,12 +522,12 @@ TEST_F(LayoutEngineTest, LaysOutFloaterHeadAndBodyWithinPadding) {
         "floater > body { flex-grow: 1; } floater > head > title { position: relative; left: 5px; top: 5px; height: 15px; } "
         "label { height: 20px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kFloaterLayout).ok());
-    FloaterElement floater;
+    auto floater = makeElementValue<HTMLFloaterElement>();
     radia::ui::test::appendFloaterStructure(floater);
     ASSERT_NE(floater.head(), nullptr);
     ASSERT_NE(floater.body(), nullptr);
     floater.setRect({0.f, 0.f, 100.f, 100.f});
-    floater.body()->append(std::make_unique<LabelElement>("content"));
+    floater.body()->append(makeElement<HTMLLabelElement>("content"));
     layoutTree(floater, styleSheet, text);
     EXPECT_EQ(floater.head()->rect().top(), 90.f);
     EXPECT_EQ(floater.body()->rect().top(), 60.f);
@@ -531,11 +538,11 @@ TEST_F(LayoutEngineTest, DisplayNoneFloaterHeadDoesNotReserveSpace) {
     constexpr char kCollapsedFloaterLayout[] = "floater { display: flex; flex-direction: column; } floater > head { display: none; height: 30px; } "
                                                "floater > body { flex-grow: 1; } label { height: 20px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kCollapsedFloaterLayout).ok());
-    FloaterElement floater;
+    auto floater = makeElementValue<HTMLFloaterElement>();
     radia::ui::test::appendFloaterStructure(floater);
     ASSERT_NE(floater.body(), nullptr);
     floater.setRect({0.f, 0.f, 100.f, 100.f});
-    floater.body()->append(std::make_unique<LabelElement>("content"));
+    floater.body()->append(makeElement<HTMLLabelElement>("content"));
     layoutTree(floater, styleSheet, text);
     EXPECT_EQ(floater.body()->rect().top(), 100.f);
 }
@@ -545,12 +552,12 @@ TEST_F(LayoutEngineTest, DistributesAutoMarginAlongRow) {
     constexpr char kAutoMarginLayout[] = "panel { display: flex; flex-direction: row; } label { width: 10px; height: 10px; } "
                                          "#first { margin: 0px auto 0px 0px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kAutoMarginLayout).ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 20.f});
-    auto first = std::make_unique<LabelElement>("first");
+    auto first = makeElement<HTMLLabelElement>("first");
     first->setId("first");
     panel.append(std::move(first));
-    panel.append(std::make_unique<LabelElement>("second"));
+    panel.append(makeElement<HTMLLabelElement>("second"));
     layoutTree(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[0]->rect().x, 0.f);
     EXPECT_EQ(panel.children()[1]->rect().x, 90.f);
@@ -561,9 +568,9 @@ TEST_F(LayoutEngineTest, CentersColumnChildWithAutoMargins) {
     constexpr char kCenteredColumnLayout[] = "panel { display: flex; flex-direction: column; } "
                                              "label { width: 20px; height: 10px; margin: 0px auto; }";
     ASSERT_TRUE(styleSheet.loadRadia(kCenteredColumnLayout).ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 40.f});
-    panel.append(std::make_unique<LabelElement>("center"));
+    panel.append(makeElement<HTMLLabelElement>("center"));
     layoutTree(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[0]->rect().x, 40.f);
 }
@@ -573,9 +580,9 @@ TEST_F(LayoutEngineTest, CentersIconInsideOversizedButtonPadding) {
     constexpr char kButtonLayout[] = "button { size: 24px; padding: 20px; display: flex; flex-direction: row; justify-content: center; } "
                                      "button > icon { size: 16px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kButtonLayout).ok());
-    ButtonElement button;
+    auto button = makeElementValue<HTMLButtonElement>();
     button.setRect({0.f, 0.f, 24.f, 24.f});
-    IconElement& icon = appendIcon(button, "search");
+    HTMLIconElement& icon = appendIcon(button, "search");
     layoutTree(button, styleSheet, text);
     EXPECT_EQ(icon.rect().x, 4.f);
     EXPECT_EQ(icon.rect().y, 4.f);
@@ -586,9 +593,9 @@ TEST_F(LayoutEngineTest, AlignsColumnContentToEnd) {
     constexpr char kColumnContentLayout[] = "panel { display: flex; flex-direction: column; justify-content: end; } "
                                             "label { height: 10px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kColumnContentLayout).ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 40.f});
-    panel.append(std::make_unique<LabelElement>("bottom"));
+    panel.append(makeElement<HTMLLabelElement>("bottom"));
     layoutTree(panel, styleSheet, text);
     ASSERT_EQ(panel.children().size(), 1U);
     EXPECT_EQ(panel.children().front()->rect().bottom(), 0.f);
@@ -599,10 +606,10 @@ TEST_F(LayoutEngineTest, DistributesRemainingWidthAcrossFlexChildren) {
     constexpr char kFlexDistributionLayout[] = "panel { display: flex; flex-direction: row; } "
                                                "label { width: 10px; height: 10px; flex: 1; }";
     ASSERT_TRUE(styleSheet.loadRadia(kFlexDistributionLayout).ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 20.f});
-    panel.append(std::make_unique<LabelElement>("first"));
-    panel.append(std::make_unique<LabelElement>("second"));
+    panel.append(makeElement<HTMLLabelElement>("first"));
+    panel.append(makeElement<HTMLLabelElement>("second"));
     layoutTree(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[0]->rect().w, 50.f);
     EXPECT_EQ(panel.children()[1]->rect().right(), 100.f);
@@ -613,9 +620,9 @@ TEST_F(LayoutEngineTest, MeasuresAndArrangesRowChildren) {
     constexpr char kRowLayout[] = "panel { display: flex; flex-direction: row; gap: 3px; padding: 2px; } "
                                   "label { width: 10px; height: 8px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kRowLayout).ok());
-    PanelElement panel;
-    panel.append(std::make_unique<LabelElement>("first"));
-    panel.append(std::make_unique<LabelElement>("second"));
+    auto panel = makeElementValue<HTMLPanelElement>();
+    panel.append(makeElement<HTMLLabelElement>("first"));
+    panel.append(makeElement<HTMLLabelElement>("second"));
 
     measureTree(panel, styleSheet, text);
     EXPECT_EQ(panel.desiredSize().x, 27.f);
@@ -628,9 +635,9 @@ TEST_F(LayoutEngineTest, MeasuresAndArrangesRowChildren) {
 
 TEST_F(LayoutEngineTest, PreservesExplicitGeometryInNormalLayout) {
     StyleSheet styleSheet;
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 100.f});
-    auto button = std::make_unique<ButtonElement>();
+    auto button = makeElement<HTMLButtonElement>();
     button->setRect({10.f, 10.f, 20.f, 20.f});
     panel.append(std::move(button));
 
@@ -648,9 +655,9 @@ TEST_F(LayoutEngineTest, PreservesExplicitHeightWhenNormalWidthIsPercentage) {
     constexpr char kNormalLayout[] = "panel { display: block; } label { display: block; } label#sized { width: 50%; height: auto; }";
     ASSERT_TRUE(styleSheet.loadRadia(kNormalLayout).ok());
 
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 100.f});
-    auto label = std::make_unique<LabelElement>("sized");
+    auto label = makeElement<HTMLLabelElement>("sized");
     label->setId("sized");
     label->setRect({0.f, 0.f, 40.f, 30.f});
     panel.append(std::move(label));
@@ -663,91 +670,102 @@ TEST_F(LayoutEngineTest, PreservesExplicitHeightWhenNormalWidthIsPercentage) {
     EXPECT_EQ(rect.h, 30.f);
 }
 
-TEST_F(LayoutEngineTest, AppliesSwitchIntrinsicAndPartLayout) {
+TEST_F(LayoutEngineTest, AppliesSwitchIntrinsicAndPseudoElementLayout) {
     StyleSheet styleSheet;
     constexpr char kIntrinsicSwitchLayout[] = "input { display: flex; flex-direction: column; justify-content: center; }";
     const StyleSheetLoadResult intrinsic = styleSheet.loadRadia(kIntrinsicSwitchLayout, "switch.css");
     ASSERT_TRUE(intrinsic.ok());
-    constexpr char kSwitch[] = "input[switch] { width: 64px; height: 32px; padding: 3px 5px; display: flex; flex-direction: row; } "
-                               "input[switch]::track { width: 100%; min-width: 0; align-self: stretch; } "
-                               "input[switch]::thumb { order: -1; border-radius: 7px; } "
-                               "input[switch]:checked::thumb { order: 1; }";
+    constexpr char kSwitch[] = "input[switch] { appearance: base; width: 64px; height: 32px; padding: 3px 5px; display: flex; flex-direction: row; } "
+                               "input[switch]::slider-track { width: 100%; min-width: 0; align-self: stretch; } "
+                               "input[switch]::slider-fill { display: block; width: 0%; height: 100%; } "
+                               "input[switch]:checked::slider-fill { width: 100%; } "
+                               "input[switch]::slider-thumb { order: -1; width: 26px; height: 26px; border-radius: 7px; } "
+                               "input[switch]:checked::slider-thumb { order: 1; }";
     ASSERT_TRUE(styleSheet.loadRadia(kSwitch).ok());
-    InputElement control;
+    auto control = makeElementValue<HTMLInputElement>();
     control.type("checkbox").switchMode(true);
     control.setRect({10.f, 20.f, 64.f, 32.f});
 
     layoutTree(control, styleSheet, text);
     EXPECT_EQ(resolveElementStyle(styleSheet, control).display, radia::ui::DisplayMode::Flex);
-    ASSERT_NE(control.track(), nullptr);
-    ASSERT_NE(control.thumb(), nullptr);
-    EXPECT_EQ(control.track()->rect().bottom(), 23.f);
-    EXPECT_EQ(control.track()->rect().h, 26.f);
-    EXPECT_EQ(control.thumb()->rect().left(), 15.f);
-    EXPECT_EQ(control.thumb()->rect().h, 26.f);
-    EXPECT_EQ(control.thumb()->rect().w, 26.f);
-    EXPECT_EQ(control.track()->rect().left(), control.thumb()->rect().right());
-    EXPECT_EQ(resolveElementStyle(styleSheet, *control.thumb()).borderRadius.topLeft.horizontal.pixels, 7.f);
+    ASSERT_NE(control.sliderTrack(), nullptr);
+    ASSERT_NE(control.sliderThumb(), nullptr);
+    EXPECT_EQ(control.sliderTrack()->rect().bottom(), 23.f);
+    EXPECT_EQ(control.sliderTrack()->rect().h, 26.f);
+    EXPECT_EQ(control.sliderThumb()->rect().left(), 15.f);
+    EXPECT_EQ(control.sliderThumb()->rect().h, 26.f);
+    EXPECT_EQ(control.sliderThumb()->rect().w, 26.f);
+    EXPECT_EQ(control.sliderTrack()->rect().left(), control.sliderThumb()->rect().right());
+    EXPECT_EQ(control.sliderThumb()->style().borderRadius.topLeft.horizontal.pixels, 7.f);
+    EXPECT_EQ(control.sliderFill()->rect().left(), control.sliderTrack()->rect().left());
+    EXPECT_EQ(control.sliderFill()->rect().right(), control.sliderFill()->rect().left());
+    EXPECT_EQ(control.sliderFill()->rect().bottom(), control.sliderTrack()->rect().bottom());
+    EXPECT_EQ(control.sliderFill()->rect().top(), control.sliderTrack()->rect().top());
 
-    const float uncheckedThumbLeft = control.thumb()->rect().left();
+    const float uncheckedThumbLeft = control.sliderThumb()->rect().left();
     control.checked(true);
     layoutTree(control, styleSheet, text);
-    ASSERT_NE(control.track(), nullptr);
-    ASSERT_NE(control.thumb(), nullptr);
-    EXPECT_EQ(control.thumb()->rect().left(), control.track()->rect().right());
-    EXPECT_GT(control.thumb()->rect().left(), uncheckedThumbLeft);
+    ASSERT_NE(control.sliderTrack(), nullptr);
+    ASSERT_NE(control.sliderThumb(), nullptr);
+    ASSERT_NE(control.sliderFill(), nullptr);
+    EXPECT_EQ(control.sliderThumb()->rect().left(), control.sliderTrack()->rect().right());
+    EXPECT_GT(control.sliderThumb()->rect().left(), uncheckedThumbLeft);
+    EXPECT_EQ(control.sliderFill()->rect().left(), control.sliderTrack()->rect().left());
+    EXPECT_EQ(control.sliderFill()->rect().right(), control.sliderTrack()->rect().right());
 
     control.replaceChildren();
-    ASSERT_NE(control.track(), nullptr);
-    ASSERT_NE(control.thumb(), nullptr);
-    EXPECT_EQ(control.track()->part(), "track");
-    EXPECT_EQ(control.track()->parentElement(), &control);
-    EXPECT_EQ(control.thumb()->part(), "thumb");
-    EXPECT_EQ(control.thumb()->parentElement(), &control);
+    ASSERT_NE(control.sliderTrack(), nullptr);
+    ASSERT_NE(control.sliderFill(), nullptr);
+    ASSERT_NE(control.sliderThumb(), nullptr);
+    EXPECT_TRUE(control.children().empty());
+    EXPECT_TRUE(control.childNodes().empty());
+    EXPECT_EQ(control.sliderTrack()->name(), "slider-track");
+    EXPECT_EQ(control.sliderFill()->name(), "slider-fill");
+    EXPECT_EQ(control.sliderThumb()->name(), "slider-thumb");
 }
 
-TEST_F(LayoutEngineTest, OverlaysInlineGridSwitchPartsAndAppliesTranslate) {
+TEST_F(LayoutEngineTest, OverlaysInlineGridSwitchPseudosAndAppliesTranslate) {
     StyleSheet styleSheet;
     constexpr char kGridSwitch[] =
-        "input[switch] { appearance: none; display: inline-grid; position: relative; width: 44px; height: 20px; padding: 0px; } "
-        "input[switch]::track { grid-area: 1 / 1; width: 100%; } "
-        "input[switch]::thumb { grid-area: 1 / 1; width: 24px; height: 24px; margin: -2px -1px; } "
-        "input[switch]:checked::thumb { translate: 22px 0; } "
-        "input[switch]:dir(rtl):checked::thumb { translate: -22px 0; }";
+        "input[switch] { appearance: base; display: inline-grid; position: relative; width: 44px; height: 20px; padding: 0px; } "
+        "input[switch]::slider-track { grid-area: 1 / 1; width: 100%; } "
+        "input[switch]::slider-thumb { grid-area: 1 / 1; width: 24px; height: 24px; margin: -2px -1px; } "
+        "input[switch]:checked::slider-thumb { translate: 22px 0; } "
+        "input[switch]:dir(rtl):checked::slider-thumb { translate: -22px 0; }";
     ASSERT_TRUE(styleSheet.loadRadia(kGridSwitch).ok());
 
-    InputElement control;
+    auto control = makeElementValue<HTMLInputElement>();
     control.type("checkbox").switchMode(true);
     control.setRect({10.f, 20.f, 44.f, 20.f});
 
     layoutTree(control, styleSheet, text);
     EXPECT_EQ(resolveElementStyle(styleSheet, control).display, DisplayMode::InlineGrid);
-    ASSERT_NE(control.track(), nullptr);
-    ASSERT_NE(control.thumb(), nullptr);
-    EXPECT_EQ(control.track()->rect().x, 10.f);
-    EXPECT_EQ(control.track()->rect().y, 20.f);
-    EXPECT_EQ(control.track()->rect().w, 44.f);
-    EXPECT_EQ(control.track()->rect().h, 20.f);
-    EXPECT_EQ(control.thumb()->rect().x, 9.f);
-    EXPECT_EQ(control.thumb()->rect().y, 18.f);
-    EXPECT_EQ(control.thumb()->rect().w, 24.f);
-    EXPECT_EQ(control.thumb()->rect().h, 24.f);
+    ASSERT_NE(control.sliderTrack(), nullptr);
+    ASSERT_NE(control.sliderThumb(), nullptr);
+    EXPECT_EQ(control.sliderTrack()->rect().x, 10.f);
+    EXPECT_EQ(control.sliderTrack()->rect().y, 20.f);
+    EXPECT_EQ(control.sliderTrack()->rect().w, 44.f);
+    EXPECT_EQ(control.sliderTrack()->rect().h, 20.f);
+    EXPECT_EQ(control.sliderThumb()->rect().x, 9.f);
+    EXPECT_EQ(control.sliderThumb()->rect().y, 18.f);
+    EXPECT_EQ(control.sliderThumb()->rect().w, 24.f);
+    EXPECT_EQ(control.sliderThumb()->rect().h, 24.f);
 
     control.checked(true);
     layoutTree(control, styleSheet, text);
-    ASSERT_NE(control.track(), nullptr);
-    ASSERT_NE(control.thumb(), nullptr);
-    EXPECT_EQ(control.thumb()->rect().x, 31.f);
-    EXPECT_EQ(control.thumb()->rect().y, 18.f);
+    ASSERT_NE(control.sliderTrack(), nullptr);
+    ASSERT_NE(control.sliderThumb(), nullptr);
+    EXPECT_EQ(control.sliderThumb()->rect().x, 31.f);
+    EXPECT_EQ(control.sliderThumb()->rect().y, 18.f);
 
-    InputElement rtlControl;
+    auto rtlControl = makeElementValue<HTMLInputElement>();
     rtlControl.type("checkbox").switchMode(true).checked(true);
     rtlControl.setRect({10.f, 20.f, 44.f, 20.f});
     layoutTree(rtlControl, styleSheet, text, LayoutDirection::RightToLeft);
-    ASSERT_NE(rtlControl.track(), nullptr);
-    ASSERT_NE(rtlControl.thumb(), nullptr);
-    EXPECT_EQ(rtlControl.thumb()->rect().x, -13.f);
-    EXPECT_EQ(rtlControl.thumb()->rect().y, 18.f);
+    ASSERT_NE(rtlControl.sliderTrack(), nullptr);
+    ASSERT_NE(rtlControl.sliderThumb(), nullptr);
+    EXPECT_EQ(rtlControl.sliderThumb()->rect().x, -13.f);
+    EXPECT_EQ(rtlControl.sliderThumb()->rect().y, 18.f);
 }
 
 TEST_F(LayoutEngineTest, PlacesGridAreasInImplicitTracks) {
@@ -756,16 +774,16 @@ TEST_F(LayoutEngineTest, PlacesGridAreasInImplicitTracks) {
                                    "#top-right { grid-area: 1 / 2; } #bottom-left { grid-area: 2 / 1; } #bottom-right { grid-area: 2 / 2; }";
     ASSERT_TRUE(styleSheet.loadRadia(kGridLayout).ok());
 
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 40.f});
-    panel.append(std::make_unique<LabelElement>("top-left"));
-    auto topRight = std::make_unique<LabelElement>("top-right");
+    panel.append(makeElement<HTMLLabelElement>("top-left"));
+    auto topRight = makeElement<HTMLLabelElement>("top-right");
     topRight->setId("top-right");
     panel.append(std::move(topRight));
-    auto bottomLeft = std::make_unique<LabelElement>("bottom-left");
+    auto bottomLeft = makeElement<HTMLLabelElement>("bottom-left");
     bottomLeft->setId("bottom-left");
     panel.append(std::move(bottomLeft));
-    auto bottomRight = std::make_unique<LabelElement>("bottom-right");
+    auto bottomRight = makeElement<HTMLLabelElement>("bottom-right");
     bottomRight->setId("bottom-right");
     panel.append(std::move(bottomRight));
 
@@ -793,7 +811,7 @@ TEST_F(LayoutEngineTest, UsesInjectedTextMetricsForMeasurement) {
     } exact;
 
     StyleSheet styleSheet;
-    LabelElement label("adapter-owned");
+    auto label = makeElementValue<HTMLLabelElement>("adapter-owned");
     measureTree(label, styleSheet, exact);
     EXPECT_EQ(label.desiredSize().x, 47.f);
     EXPECT_EQ(label.desiredSize().y, 19.f);
@@ -805,10 +823,10 @@ TEST_F(LayoutEngineTest, AppliesRightToLeftRowDirection) {
         "panel { display: flex; flex-direction: row; justify-content: start; gap: 5px; } label { width: 10px; height: 10px; } "
         "#physical { margin: 0px 7px 0px 0px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kDirection).ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 20.f});
-    panel.append(std::make_unique<LabelElement>("first"));
-    auto physical = std::make_unique<LabelElement>("second");
+    panel.append(makeElement<HTMLLabelElement>("first"));
+    auto physical = makeElement<HTMLLabelElement>("second");
     physical->setId("physical");
     panel.append(std::move(physical));
 
@@ -821,9 +839,9 @@ TEST_F(LayoutEngineTest, PreservesNegativeNormalOffsets) {
     StyleSheet styleSheet;
     constexpr char kNegativeOffsetLayout[] = "label { position: relative; width: 10px; height: 10px; left: -8px; bottom: -3px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kNegativeOffsetLayout).ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 100.f});
-    panel.append(std::make_unique<LabelElement>("offset"));
+    panel.append(makeElement<HTMLLabelElement>("offset"));
 
     layoutTree(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[0]->rect().left(), -8.f);
@@ -834,9 +852,9 @@ TEST_F(LayoutEngineTest, ResolvesPercentageGeometryAgainstContainingBlock) {
     StyleSheet styleSheet;
     constexpr char kPercentageGeometryLayout[] = "label { position: relative; width: 50%; height: 25%; left: 10%; top: 20%; }";
     ASSERT_TRUE(styleSheet.loadRadia(kPercentageGeometryLayout).ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 200.f, 100.f});
-    panel.append(std::make_unique<LabelElement>("percentage"));
+    panel.append(makeElement<HTMLLabelElement>("percentage"));
 
     layoutTree(panel, styleSheet, text);
     ASSERT_EQ(panel.children().size(), 1U);
@@ -852,11 +870,11 @@ TEST_F(LayoutEngineTest, DistributesAutomaticRowAndColumnGaps) {
     constexpr char kRowGapLayout[] = "panel { display: flex; flex-direction: row; gap: auto; } "
                                      "label { width: 10px; height: 10px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kRowGapLayout).ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 20.f});
-    panel.append(std::make_unique<LabelElement>("first"));
-    panel.append(std::make_unique<LabelElement>("second"));
-    panel.append(std::make_unique<LabelElement>("third"));
+    panel.append(makeElement<HTMLLabelElement>("first"));
+    panel.append(makeElement<HTMLLabelElement>("second"));
+    panel.append(makeElement<HTMLLabelElement>("third"));
 
     layoutTree(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[1]->rect().left(), 45.f);
@@ -877,11 +895,11 @@ TEST_F(LayoutEngineTest, MeasuresFloaterWithFixedHeightAndAutomaticWidth) {
     constexpr char kFloater[] = "floater { size: auto 100px; display: flex; flex-direction: column; } floater > head { height: 30px; } "
                                 "floater > body { display: flex; flex-direction: column; gap: 5px; } label { height: 20px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kFloater).ok());
-    FloaterElement floater;
+    auto floater = makeElementValue<HTMLFloaterElement>();
     radia::ui::test::appendFloaterStructure(floater);
     ASSERT_NE(floater.body(), nullptr);
-    floater.body()->append(std::make_unique<LabelElement>("first"));
-    floater.body()->append(std::make_unique<LabelElement>("second"));
+    floater.body()->append(makeElement<HTMLLabelElement>("first"));
+    floater.body()->append(makeElement<HTMLLabelElement>("second"));
 
     const Vec2 measured = measureElement(floater, styleSheet, text);
     EXPECT_EQ(measured.x, 100.f);
@@ -894,10 +912,10 @@ TEST_F(LayoutEngineTest, AppliesCrossAxisAlignmentAndDirection) {
                                      "label#center { align-self: center; } label#end { align-self: end; } "
                                      "label#stretch { height: auto; align-self: stretch; }";
     ASSERT_TRUE(styleSheet.loadRadia(kRowAlignment).ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 40.f});
     for (const char* id : {"start", "center", "end", "stretch"}) {
-        auto label = std::make_unique<LabelElement>(id);
+        auto label = makeElement<HTMLLabelElement>(id);
         label->setId(id);
         panel.append(std::move(label));
     }
@@ -931,10 +949,10 @@ TEST_F(LayoutEngineTest, AppliesGridJustifySelfInBothDirections) {
                                       "label#end { justify-self: end; }";
     ASSERT_TRUE(styleSheet.loadRadia(kGridAlignment).ok());
 
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 40.f});
     for (const char* id : {"start", "center", "end"}) {
-        auto label = std::make_unique<LabelElement>(id);
+        auto label = makeElement<HTMLLabelElement>(id);
         label->setId(id);
         panel.append(std::move(label));
     }
@@ -955,15 +973,15 @@ TEST_F(LayoutEngineTest, DistinguishesVisibilityFromDisplayLayout) {
     constexpr char kVisibilityLayout[] = "panel { display: flex; flex-direction: row; } "
                                          "label { width: 10px; height: 10px; } label.none { display: none; }";
     ASSERT_TRUE(styleSheet.loadRadia(kVisibilityLayout).ok());
-    PanelElement panel;
-    panel.append(std::make_unique<LabelElement>("visible"));
-    auto hidden = std::make_unique<LabelElement>("hidden");
+    auto panel = makeElementValue<HTMLPanelElement>();
+    panel.append(makeElement<HTMLLabelElement>("visible"));
+    auto hidden = makeElement<HTMLLabelElement>("hidden");
     hidden->setVisibility(Visibility::Hidden);
     panel.append(std::move(hidden));
-    auto collapsed = std::make_unique<LabelElement>("collapsed");
+    auto collapsed = makeElement<HTMLLabelElement>("collapsed");
     collapsed->setVisibility(Visibility::Collapse);
     panel.append(std::move(collapsed));
-    auto displayNone = std::make_unique<LabelElement>("display-none");
+    auto displayNone = makeElement<HTMLLabelElement>("display-none");
     displayNone->addClass("none");
     panel.append(std::move(displayNone));
 
@@ -992,29 +1010,29 @@ TEST_F(LayoutEngineTest, AppliesContainerVerticalAlignmentToContent) {
                                           "panel.free-bottom { display: block; vertical-align: bottom; }";
     ASSERT_TRUE(styleSheet.loadRadia(kVerticalAlignment).ok());
 
-    auto addLabel = [](Element& container) { container.append(std::make_unique<LabelElement>("child")); };
+    auto addLabel = [](Element& container) { container.append(makeElement<HTMLLabelElement>("child")); };
 
-    PanelElement top;
+    auto top = makeElementValue<HTMLPanelElement>();
     top.setRect({0.f, 0.f, 100.f, 40.f});
     addLabel(top);
     layoutTree(top, styleSheet, text);
     EXPECT_EQ(top.children()[0]->rect().top(), 40.f);
 
-    PanelElement middle;
+    auto middle = makeElementValue<HTMLPanelElement>();
     middle.setRect({0.f, 0.f, 100.f, 40.f});
     middle.addClass("middle");
     addLabel(middle);
     layoutTree(middle, styleSheet, text);
     EXPECT_EQ(middle.children()[0]->rect().bottom(), 15.f);
 
-    PanelElement bottom;
+    auto bottom = makeElementValue<HTMLPanelElement>();
     bottom.setRect({0.f, 0.f, 100.f, 40.f});
     bottom.addClass("bottom");
     addLabel(bottom);
     layoutTree(bottom, styleSheet, text);
     EXPECT_EQ(bottom.children()[0]->rect().bottom(), 0.f);
 
-    PanelElement column;
+    auto column = makeElementValue<HTMLPanelElement>();
     column.setRect({0.f, 0.f, 100.f, 40.f});
     column.addClass("column");
     addLabel(column);
@@ -1023,7 +1041,7 @@ TEST_F(LayoutEngineTest, AppliesContainerVerticalAlignmentToContent) {
     EXPECT_EQ(column.children()[0]->rect().top(), 20.f);
     EXPECT_EQ(column.children()[1]->rect().bottom(), 0.f);
 
-    PanelElement freeBottom;
+    auto freeBottom = makeElementValue<HTMLPanelElement>();
     freeBottom.setRect({0.f, 0.f, 100.f, 40.f});
     freeBottom.addClass("free-bottom");
     addLabel(freeBottom);
@@ -1037,11 +1055,11 @@ TEST_F(LayoutEngineTest, WrapsChildrenAcrossFlowBreaks) {
                                         "label { size: 10px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kFlowBreakLayout).ok());
 
-    PanelElement panel;
-    auto first = std::make_unique<LabelElement>("first");
-    auto second = std::make_unique<LabelElement>("second");
-    auto third = std::make_unique<LabelElement>("third");
-    radia::ui::detail::ElementCompilerAccess::setFlowBreakBefore(*second, true);
+    auto panel = makeElementValue<HTMLPanelElement>();
+    auto first = makeElement<HTMLLabelElement>("first");
+    auto second = makeElement<HTMLLabelElement>("second");
+    auto third = makeElement<HTMLLabelElement>("third");
+    ElementCompilerAccess::setFlowBreakBefore(*second, true);
     panel.append(std::move(first));
     panel.append(std::move(second));
     panel.append(std::move(third));
@@ -1063,9 +1081,9 @@ TEST_F(LayoutEngineTest, AppliesFlexBasisAndScaledShrink) {
                                         "label.second { flex-basis: 40px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kFlexBasisLayout).ok());
 
-    PanelElement intrinsic;
-    intrinsic.append(std::make_unique<LabelElement>());
-    auto intrinsicSecond = std::make_unique<LabelElement>();
+    auto intrinsic = makeElementValue<HTMLPanelElement>();
+    intrinsic.append(makeElement<HTMLLabelElement>());
+    auto intrinsicSecond = makeElement<HTMLLabelElement>();
     intrinsicSecond->addClass("second");
     intrinsic.append(std::move(intrinsicSecond));
     measureTree(intrinsic, styleSheet, text);
@@ -1075,15 +1093,15 @@ TEST_F(LayoutEngineTest, AppliesFlexBasisAndScaledShrink) {
     constexpr char kPercentageFlexBasisLayout[] = "panel { display: flex; flex-direction: row; } "
                                                   "label { width: 30px; flex-basis: 50%; }";
     ASSERT_TRUE(percentageTheme.loadRadia(kPercentageFlexBasisLayout).ok());
-    PanelElement indefinite;
-    indefinite.append(std::make_unique<LabelElement>());
+    auto indefinite = makeElementValue<HTMLPanelElement>();
+    indefinite.append(makeElement<HTMLLabelElement>());
     measureTree(indefinite, percentageTheme, text);
     EXPECT_EQ(indefinite.desiredSize().x, 30.f);
 
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 20.f});
-    panel.append(std::make_unique<LabelElement>());
-    auto second = std::make_unique<LabelElement>();
+    panel.append(makeElement<HTMLLabelElement>());
+    auto second = makeElement<HTMLLabelElement>();
     second->addClass("second");
     panel.append(std::move(second));
     layoutTree(panel, styleSheet, text);
@@ -1101,12 +1119,12 @@ TEST_F(LayoutEngineTest, CentersOversizedFloaterHeadChildren) {
         "floater > head > close { size: 24px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kFloaterHead).ok());
 
-    FloaterElement floater;
+    auto floater = makeElementValue<HTMLFloaterElement>();
     radia::ui::test::appendFloaterStructure(floater, true);
     Element* head = floater.head();
     ASSERT_NE(head, nullptr);
     ASSERT_FALSE(head->children().empty());
-    auto icon = std::make_unique<IconElement>("search");
+    auto icon = makeElement<HTMLIconElement>("search");
     head->children().front()->append(std::move(icon));
     head->setRect({0.f, 0.f, 200.f, 48.f});
     layoutTree(*head, styleSheet, text);
@@ -1126,7 +1144,7 @@ TEST_F(LayoutEngineTest, ReflowsWrappedTextInColumnLayout) {
                                  "p { font-size: 10px; line-height: 10px; text-wrap: wrap; }";
     ASSERT_TRUE(styleSheet.loadRadia(kWrapping).ok());
 
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 30.f, 100.f});
     panel.append(makeParagraph("alpha beta"));
     panel.append(makeParagraph("after"));
@@ -1145,9 +1163,9 @@ TEST_F(LayoutEngineTest, RemeasuresWrappedTextAfterRowFlexShrink) {
                                     "label { width: 10px; flex-shrink: 0; align-self: stretch; }";
     ASSERT_TRUE(styleSheet.loadRadia(kRowWrapping).ok());
 
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.append(makeParagraph("alpha beta"));
-    panel.append(std::make_unique<LabelElement>("x"));
+    panel.append(makeElement<HTMLLabelElement>("x"));
 
     const Vec2 measured = measureElement(panel, styleSheet, text);
     EXPECT_EQ(measured.y, 20.f);
@@ -1164,7 +1182,7 @@ TEST_F(LayoutEngineTest, ReappliesFlexBasisAfterTextReflow) {
     constexpr char kColumnBasis[] = "panel { width: 30px; display: flex; flex-direction: column; } "
                                     "p { flex-basis: 40px; font-size: 10px; line-height: 10px; text-wrap: wrap; }";
     ASSERT_TRUE(columnTheme.loadRadia(kColumnBasis).ok());
-    PanelElement column;
+    auto column = makeElementValue<HTMLPanelElement>();
     column.append(makeParagraph("alpha beta"));
     EXPECT_EQ(measureElement(column, columnTheme, text).y, 40.f);
 
@@ -1172,9 +1190,9 @@ TEST_F(LayoutEngineTest, ReappliesFlexBasisAfterTextReflow) {
     constexpr char kRowMinimum[] = "panel { width: 80px; display: flex; flex-direction: row; } p { flex: 0 1 100px; font-size: 10px; "
                                    "line-height: 10px; text-wrap: wrap; } label { width: 10px; flex-shrink: 0; }";
     ASSERT_TRUE(rowTheme.loadRadia(kRowMinimum).ok());
-    PanelElement row;
+    auto row = makeElementValue<HTMLPanelElement>();
     row.append(makeParagraph("alpha beta"));
-    row.append(std::make_unique<LabelElement>("x"));
+    row.append(makeElement<HTMLLabelElement>("x"));
     row.setRect({0.f, 0.f, 80.f, 20.f});
     layoutTree(row, rowTheme, text);
     EXPECT_EQ(row.children()[0]->rect().w, 70.f);
@@ -1195,7 +1213,7 @@ TEST_F(LayoutEngineTest, InvalidatesTextMeasurementCacheWhenMetricsGenerationCha
     } metrics;
 
     StyleSheet styleSheet;
-    LabelElement label("generation");
+    auto label = makeElementValue<HTMLLabelElement>("generation");
     measureTree(label, styleSheet, metrics);
     EXPECT_FLOAT_EQ(label.desiredSize().x, 32.f);
     EXPECT_FLOAT_EQ(label.desiredSize().y, 12.f);
@@ -1211,10 +1229,10 @@ TEST_F(LayoutEngineTest, ReallocatesColumnFlexChildrenUnderHeightConstraint) {
     constexpr char kColumnFlexLayout[] = "panel { display: flex; flex-direction: column; } "
                                          "label { height: 10px; flex-grow: 1; }";
     ASSERT_TRUE(styleSheet.loadRadia(kColumnFlexLayout).ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 100.f});
-    panel.append(std::make_unique<LabelElement>("first"));
-    panel.append(std::make_unique<LabelElement>("second"));
+    panel.append(makeElement<HTMLLabelElement>("first"));
+    panel.append(makeElement<HTMLLabelElement>("second"));
 
     layoutTree(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[0]->rect().h, 50.f);
@@ -1227,11 +1245,11 @@ TEST_F(LayoutEngineTest, ResolvesSiblingColumnPercentages) {
     constexpr char kSiblingColumnLayout[] = "panel { display: flex; flex-direction: column; } "
                                             "#quarter { height: 25%; } #half { height: 50%; }";
     ASSERT_TRUE(styleSheet.loadRadia(kSiblingColumnLayout).ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 100.f});
-    auto quarter = std::make_unique<LabelElement>("quarter");
+    auto quarter = makeElement<HTMLLabelElement>("quarter");
     quarter->setId("quarter");
-    auto half = std::make_unique<LabelElement>("half");
+    auto half = makeElement<HTMLLabelElement>("half");
     half->setId("half");
     panel.append(std::move(quarter));
     panel.append(std::move(half));
@@ -1248,11 +1266,11 @@ TEST_F(LayoutEngineTest, ResolvesNestedColumnPercentages) {
         "panel { display: flex; flex-direction: column; } #child { height: 50%; display: flex; flex-direction: column; } "
         "#grandchild { height: 50%; }";
     ASSERT_TRUE(styleSheet.loadRadia(kNestedColumnLayout).ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 100.f});
-    auto child = std::make_unique<PanelElement>();
+    auto child = makeElement<HTMLPanelElement>();
     child->setId("child");
-    auto grandchild = std::make_unique<LabelElement>("nested");
+    auto grandchild = makeElement<HTMLLabelElement>("nested");
     grandchild->setId("grandchild");
     child->append(std::move(grandchild));
     panel.append(std::move(child));
@@ -1270,10 +1288,10 @@ TEST_F(LayoutEngineTest, RespectsColumnMinimumHeightsDuringShrink) {
     constexpr char kColumnMinimumLayout[] = "panel { display: flex; flex-direction: column; } "
                                             "label { height: 30px; min-height: 25px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kColumnMinimumLayout).ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 40.f});
-    panel.append(std::make_unique<LabelElement>("first"));
-    panel.append(std::make_unique<LabelElement>("second"));
+    panel.append(makeElement<HTMLLabelElement>("first"));
+    panel.append(makeElement<HTMLLabelElement>("second"));
 
     layoutTree(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[0]->rect().h, 25.f);
@@ -1288,7 +1306,7 @@ TEST_F(LayoutEngineTest, SeparatesLayoutCachesByStylesheetIdentity) {
     ASSERT_TRUE(narrow.loadRadia(kNarrowLabelLayout).ok());
     ASSERT_TRUE(wide.loadRadia(kWideLabelLayout).ok());
 
-    LabelElement label("identity");
+    auto label = makeElementValue<HTMLLabelElement>("identity");
     layoutTree(label, narrow, text);
     layoutTree(label, wide, text);
     EXPECT_EQ(label.desiredSize().x, 30.f);
@@ -1305,7 +1323,7 @@ TEST_F(LayoutEngineTest, SeparatesLayoutCachesByTextMetricsIdentity) {
     } narrow(12.f), wide(48.f);
 
     StyleSheet styleSheet;
-    LabelElement label("identity");
+    auto label = makeElementValue<HTMLLabelElement>("identity");
     layoutTree(label, styleSheet, narrow);
     layoutTree(label, styleSheet, wide);
     EXPECT_EQ(label.desiredSize().x, 48.f);
@@ -1316,11 +1334,11 @@ TEST_F(LayoutEngineTest, OrdersChildrenBeforeRowLayout) {
     constexpr char kOrderedFlow[] = "panel { display: flex; flex-direction: row; } #late { order: 2; width: 10px; height: 10px; } "
                                     "#early { order: -1; width: 10px; height: 10px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kOrderedFlow).ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 20.f});
-    auto late = std::make_unique<LabelElement>("late");
+    auto late = makeElement<HTMLLabelElement>("late");
     late->setId("late");
-    auto early = std::make_unique<LabelElement>("early");
+    auto early = makeElement<HTMLLabelElement>("early");
     early->setId("early");
     panel.append(std::move(late));
     panel.append(std::move(early));
@@ -1335,7 +1353,7 @@ TEST_F(LayoutEngineTest, InvalidatesLayoutCacheWhenStylesheetIsAssigned) {
     constexpr char kInitialLabelLayout[] = "label { width: 10px; height: 10px; }";
     constexpr char kReplacementLabelLayout[] = "label { width: 30px; height: 10px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kInitialLabelLayout).ok());
-    LabelElement label("assigned");
+    auto label = makeElementValue<HTMLLabelElement>("assigned");
     layoutTree(label, styleSheet, text);
 
     StyleSheet replacement;
@@ -1350,7 +1368,7 @@ TEST_F(LayoutEngineTest, RemeasuresNormalPercentageTextAfterResize) {
     constexpr char kNormalTextLayout[] = "panel { display: block; } "
                                          "p { width: 50%; font-size: 10px; line-height: 10px; text-wrap: wrap; }";
     ASSERT_TRUE(styleSheet.loadRadia(kNormalTextLayout).ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 100.f});
     panel.append(makeParagraph("alpha beta"));
 
@@ -1368,8 +1386,8 @@ TEST_F(LayoutEngineTest, RelativeOffsetsDoNotChangeIntrinsicSize) {
     constexpr char kNormalOffsetLayout[] = "panel { display: block; } "
                                            "label { position: relative; width: 20px; height: 10px; right: 5px; bottom: 7px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kNormalOffsetLayout).ok());
-    PanelElement panel;
-    panel.append(std::make_unique<LabelElement>("positioned"));
+    auto panel = makeElementValue<HTMLPanelElement>();
+    panel.append(makeElement<HTMLLabelElement>("positioned"));
     layoutTree(panel, styleSheet, text);
     EXPECT_EQ(panel.desiredSize().x, 20.f);
     EXPECT_EQ(panel.desiredSize().y, 10.f);
@@ -1379,8 +1397,8 @@ TEST_F(LayoutEngineTest, IncludesExplicitNormalGeometryInIntrinsicSize) {
     StyleSheet styleSheet;
     constexpr char kNormalLayout[] = "panel { display: block; }";
     ASSERT_TRUE(styleSheet.loadRadia(kNormalLayout).ok());
-    PanelElement panel;
-    auto child = std::make_unique<PanelElement>();
+    auto panel = makeElementValue<HTMLPanelElement>();
+    auto child = makeElement<HTMLPanelElement>();
     child->setRect({0.f, 0.f, 40.f, 30.f});
     panel.append(std::move(child));
     layoutTree(panel, styleSheet, text);
@@ -1392,8 +1410,8 @@ TEST_F(LayoutEngineTest, InvalidatesIntrinsicSizeAfterExplicitGeometryChange) {
     StyleSheet styleSheet;
     constexpr char kNormalLayout[] = "panel { display: block; }";
     ASSERT_TRUE(styleSheet.loadRadia(kNormalLayout).ok());
-    PanelElement panel;
-    auto child = std::make_unique<PanelElement>();
+    auto panel = makeElementValue<HTMLPanelElement>();
+    auto child = makeElement<HTMLPanelElement>();
     child->setRect({0.f, 0.f, 20.f, 10.f});
     Element* childPtr = child.get();
     panel.append(std::move(child));
@@ -1409,8 +1427,8 @@ TEST_F(LayoutEngineTest, IncludesExplicitNormalPositionInIntrinsicSize) {
     StyleSheet styleSheet;
     constexpr char kNormalLayout[] = "panel { display: block; }";
     ASSERT_TRUE(styleSheet.loadRadia(kNormalLayout).ok());
-    PanelElement panel;
-    auto child = std::make_unique<PanelElement>();
+    auto panel = makeElementValue<HTMLPanelElement>();
+    auto child = makeElement<HTMLPanelElement>();
     child->setRect({10.f, 12.f, 20.f, 8.f});
     panel.append(std::move(child));
     layoutTree(panel, styleSheet, text);
@@ -1423,7 +1441,7 @@ TEST_F(LayoutEngineTest, IncludesWrappedPercentageChildInNormalIntrinsicHeight) 
     constexpr char kWrappedTextLayout[] = "panel { display: block; width: 100px; } "
                                           "p { width: 50%; font-size: 10px; line-height: 10px; text-wrap: wrap; }";
     ASSERT_TRUE(styleSheet.loadRadia(kWrappedTextLayout).ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.append(makeParagraph("alpha beta"));
 
     layoutTree(panel, styleSheet, text);
@@ -1437,9 +1455,9 @@ TEST_F(LayoutEngineTest, RelativePercentageOffsetsDoNotChangeIntrinsicSize) {
     constexpr char kNormalPercentageOffsetLayout[] = "panel { display: block; } "
                                                      "label { position: relative; width: 20px; height: 10px; left: 50%; top: 20%; }";
     ASSERT_TRUE(styleSheet.loadRadia(kNormalPercentageOffsetLayout).ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 100.f});
-    panel.append(std::make_unique<LabelElement>("positioned"));
+    panel.append(makeElement<HTMLLabelElement>("positioned"));
 
     layoutTree(panel, styleSheet, text);
     ASSERT_EQ(panel.children().size(), 1U);
@@ -1454,9 +1472,9 @@ TEST_F(LayoutEngineTest, ResolvesNormalPercentageDimensionsAgainstExplicitParent
     constexpr char kNormalPercentageLayout[] = "panel { display: block; width: 50%; height: 50%; } "
                                                "label { width: 50%; height: 50%; }";
     ASSERT_TRUE(styleSheet.loadRadia(kNormalPercentageLayout).ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 80.f});
-    panel.append(std::make_unique<LabelElement>("sized"));
+    panel.append(makeElement<HTMLLabelElement>("sized"));
 
     layoutTree(panel, styleSheet, text);
     ASSERT_EQ(panel.children().size(), 1U);
@@ -1469,13 +1487,13 @@ TEST_F(LayoutEngineTest, ResolvesNestedPercentageFlexBasis) {
     constexpr char kNestedFlexBasis[] = "#outer { display: flex; flex-direction: row; width: 100px; height: 20px; } "
                                         "#inner { display: flex; flex-direction: row; width: 50%; } label { flex-basis: 50%; height: 10px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kNestedFlexBasis).ok());
-    PanelElement outer;
+    auto outer = makeElementValue<HTMLPanelElement>();
     outer.setRect({0.f, 0.f, 100.f, 20.f});
     outer.setId("outer");
-    auto inner = std::make_unique<PanelElement>();
+    auto inner = makeElement<HTMLPanelElement>();
     inner->setId("inner");
     Element* innerPtr = inner.get();
-    inner->append(std::make_unique<LabelElement>("basis"));
+    inner->append(makeElement<HTMLLabelElement>("basis"));
     ASSERT_EQ(inner->children().size(), 1U);
     Element* label = inner->children().front();
     outer.append(std::move(inner));
@@ -1488,9 +1506,9 @@ TEST_F(LayoutEngineTest, ResolvesNestedPercentageFlexBasis) {
 TEST_F(LayoutEngineTest, ComputesScrollMetricsAndClampsProgrammaticPosition) {
     StyleSheet styleSheet;
     ASSERT_TRUE(styleSheet.loadRadia("panel#viewport { display: block; overflow: auto; }").ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<Element>("content");
+    auto content = makeElement<Element>("content");
     content->setRect({0.f, 0.f, 180.f, 240.f});
     panel.append(std::move(content));
 
@@ -1514,9 +1532,9 @@ TEST_F(LayoutEngineTest, ComputesScrollMetricsAndClampsProgrammaticPosition) {
 TEST_F(LayoutEngineTest, ClassicScrollbarsReflowTheOppositeAxis) {
     StyleSheet styleSheet;
     ASSERT_TRUE(styleSheet.loadRadia("panel#viewport { display: block; overflow: auto; }").ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<Element>("content");
+    auto content = makeElement<Element>("content");
     content->setRect({0.f, 0.f, 100.f, 120.f});
     panel.append(std::move(content));
 
@@ -1533,9 +1551,9 @@ TEST_F(LayoutEngineTest, ClassicScrollbarsReflowTheOppositeAxis) {
 TEST_F(LayoutEngineTest, HiddenOverflowHasAProgrammaticRangeWithoutScrollbarSpace) {
     StyleSheet styleSheet;
     ASSERT_TRUE(styleSheet.loadRadia("panel#viewport { display: block; overflow: hidden; }").ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<Element>("content");
+    auto content = makeElement<Element>("content");
     content->setRect({0.f, 0.f, 180.f, 240.f});
     panel.append(std::move(content));
 
@@ -1555,9 +1573,9 @@ TEST_F(LayoutEngineTest, HiddenOverflowHasAProgrammaticRangeWithoutScrollbarSpac
 TEST_F(LayoutEngineTest, OverlayScrollbarsDoNotReduceClientSize) {
     StyleSheet styleSheet;
     ASSERT_TRUE(styleSheet.loadRadia("panel#viewport { display: block; overflow: auto; }").ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<Element>("content");
+    auto content = makeElement<Element>("content");
     content->setRect({0.f, 0.f, 180.f, 240.f});
     panel.append(std::move(content));
     ScrollLayoutOptions options;
@@ -1577,9 +1595,9 @@ TEST_F(LayoutEngineTest, ForcedScrollbarsReserveClassicSpaceWithoutOverflow) {
     StyleSheet styleSheet;
     ASSERT_TRUE(
         styleSheet.loadRadia("panel#viewport { display: block; overflow: scroll; } #content { display: block; width: 40px; height: 40px; }").ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<Element>("content");
+    auto content = makeElement<Element>("content");
     panel.append(std::move(content));
 
     layoutTree(panel, styleSheet, text);
@@ -1595,9 +1613,9 @@ TEST_F(LayoutEngineTest, ForcedScrollbarsReserveClassicSpaceWithoutOverflow) {
 TEST_F(LayoutEngineTest, VisibleOverflowDoesNotCreateAProgrammaticRange) {
     StyleSheet styleSheet;
     ASSERT_TRUE(styleSheet.loadRadia("panel#viewport { display: block; overflow: visible; }").ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<Element>("content");
+    auto content = makeElement<Element>("content");
     content->setRect({0.f, 0.f, 180.f, 240.f});
     panel.append(std::move(content));
 
@@ -1617,9 +1635,9 @@ TEST_F(LayoutEngineTest, VisibleOverflowDoesNotCreateAProgrammaticRange) {
 TEST_F(LayoutEngineTest, RecomputingOverflowClampsStaleScrollPosition) {
     StyleSheet styleSheet;
     ASSERT_TRUE(styleSheet.loadRadia("panel#viewport { display: block; overflow: hidden; }").ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<Element>("content");
+    auto content = makeElement<Element>("content");
     Element* contentPtr = content.get();
     content->setRect({0.f, 0.f, 180.f, 240.f});
     panel.append(std::move(content));
@@ -1640,9 +1658,9 @@ TEST_F(LayoutEngineTest, RecomputingOverflowClampsStaleScrollPosition) {
 TEST_F(LayoutEngineTest, UsesNormalizedScrollLeftInRightToLeftLayout) {
     StyleSheet styleSheet;
     ASSERT_TRUE(styleSheet.loadRadia("panel#viewport { display: block; overflow: auto; }").ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<Element>("content");
+    auto content = makeElement<Element>("content");
     content->setRect({0.f, 0.f, 180.f, 40.f});
     panel.append(std::move(content));
 
@@ -1659,9 +1677,9 @@ TEST_F(LayoutEngineTest, AuthoredScrollbarModeOverridesSurfacePolicy) {
                     .loadRadia("panel#viewport { display: block; overflow: auto; scrollbar-mode: overlay; "
                                "scrollbar-gutter: stable both-edges; }")
                     .ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<Element>("content");
+    auto content = makeElement<Element>("content");
     content->setRect({0.f, 0.f, 180.f, 240.f});
     panel.append(std::move(content));
     ScrollLayoutOptions options;
@@ -1678,9 +1696,9 @@ TEST_F(LayoutEngineTest, AuthoredScrollbarModeOverridesSurfacePolicy) {
 TEST_F(LayoutEngineTest, NoneScrollbarWidthPreservesRangeWithoutScrollbarSpace) {
     StyleSheet styleSheet;
     ASSERT_TRUE(styleSheet.loadRadia("panel#viewport { display: block; overflow: auto; scrollbar-width: none; }").ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<Element>("content");
+    auto content = makeElement<Element>("content");
     content->setRect({0.f, 0.f, 180.f, 240.f});
     panel.append(std::move(content));
 
@@ -1697,9 +1715,9 @@ TEST_F(LayoutEngineTest, NoneScrollbarWidthPreservesRangeWithoutScrollbarSpace) 
 TEST_F(LayoutEngineTest, ThinScrollbarWidthUsesReducedClassicThickness) {
     StyleSheet styleSheet;
     ASSERT_TRUE(styleSheet.loadRadia("panel#viewport { display: block; overflow: scroll; scrollbar-width: thin; }").ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<Element>("content");
+    auto content = makeElement<Element>("content");
     content->setRect({0.f, 0.f, 180.f, 240.f});
     panel.append(std::move(content));
 
@@ -1717,9 +1735,9 @@ TEST_F(LayoutEngineTest, StableScrollbarGutterReservesClassicSpaceWithoutOverflo
                     .loadRadia("panel#viewport { display: block; overflow: auto; scrollbar-gutter: stable; } "
                                "#content { display: block; width: 100%; height: 100%; }")
                     .ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<Element>("content");
+    auto content = makeElement<Element>("content");
     Element* contentPtr = content.get();
     content->setId("content");
     panel.append(std::move(content));
@@ -1742,9 +1760,9 @@ TEST_F(LayoutEngineTest, StableBothEdgesMirrorsTheInlineGutter) {
                     .loadRadia("panel#viewport { display: block; overflow: auto; scrollbar-gutter: stable both-edges; } "
                                "#content { display: block; width: 100%; height: 100%; }")
                     .ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<Element>("content");
+    auto content = makeElement<Element>("content");
     Element* contentPtr = content.get();
     content->setId("content");
     panel.append(std::move(content));
@@ -1767,9 +1785,9 @@ TEST_F(LayoutEngineTest, StableBothEdgesReservesPhysicalInlineEdgesInRtl) {
                     .loadRadia("panel#viewport { display: block; overflow: auto; scrollbar-gutter: stable both-edges; } "
                                "#content { display: block; width: 100%; height: 100%; }")
                     .ok());
-    PanelElement panel;
+    auto panel = makeElementValue<HTMLPanelElement>();
     panel.setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
-    auto content = std::make_unique<Element>("content");
+    auto content = makeElement<Element>("content");
     Element* contentPtr = content.get();
     content->setId("content");
     panel.append(std::move(content));

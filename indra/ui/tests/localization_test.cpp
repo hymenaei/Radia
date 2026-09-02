@@ -32,7 +32,7 @@ constexpr char kPluralCatalog[] = "defaultLocale: en\n"
 
 constexpr char kRichTextCatalog[] = "defaultLocale: en\n"
                                     "locales: {en: {strings: {"
-                                    "rich: 'TextElement <b>{userName}</b><br/><kbd shortcut=\"toggle-fly\"/>', "
+                                    "rich: 'TextElement <b>{userName}</b><br><kbd shortcut=\"toggle-fly\"></kbd>', "
                                     "escaped: 'Write ''{count}'' and &lt;b&gt;' }}}\n";
 } // namespace
 
@@ -274,7 +274,7 @@ TEST(LocalizationCatalogTest, RejectsInvalidIcuMessageValues) {
     }
 }
 
-TEST(LocalizationCatalogTest, ResolvesLocalizedTextAndEscapedMarkup) {
+TEST(LocalizationCatalogTest, ResolvesLocalizedTextAndEscapedHTML) {
     LocalizationCatalog catalog;
     ASSERT_FALSE(catalog.loadYaml(kRichTextCatalog).hasErrors());
 
@@ -299,42 +299,71 @@ TEST(LocalizationCatalogTest, ResolvesSemanticInlineElements) {
     const std::string expected = "<abbr>abbr</abbr> <b>b</b> <cite>cite</cite> <code>code</code> <dfn>dfn</dfn> "
                                  "<del>del</del> <em>em</em> <i>i</i> <ins>ins</ins> <mark>mark</mark> <q>q</q> "
                                  "<s>s</s> <small>small</small> <strong>strong</strong> <u>u</u>";
-    EXPECT_EQ(catalog.resolveMarkup("en", LocalizedText("value")), expected);
+    EXPECT_EQ(catalog.resolveHTML("en", LocalizedText("value")), expected);
     EXPECT_EQ(catalog.resolveText("en", "value"), "abbr b cite code dfn del em i ins mark q s small strong u");
 }
 
-TEST(LocalizationCatalogTest, RejectsUnsupportedRichTextMarkup) {
-    struct InvalidMarkupCase {
+TEST(LocalizationCatalogTest, AcceptsTranslatedBlockAndControlHTML) {
+    constexpr char kBlockAndControlCatalog[] = "defaultLocale: en\n"
+                                               "locales: {en: {strings: {value: '<div><button>Open</button><p>Ready</p>"
+                                               "<input type=\"checkbox\" checked></div>'}}}\n";
+
+    LocalizationCatalog catalog;
+    ASSERT_FALSE(catalog.loadYaml(kBlockAndControlCatalog).hasErrors());
+    EXPECT_EQ(catalog.resolveHTML("en", LocalizedText("value")), "<div><button>Open</button><p>Ready</p><input type=\"checkbox\" checked></div>");
+}
+
+TEST(LocalizationCatalogTest, AcceptsTranslatedKeybindingChanges) {
+    constexpr char kKeybindingCatalog[] = "defaultLocale: en\n"
+                                          "locales: {en: {strings: {value: '<kbd shortcut=\"toggle-fly\"></kbd>'}}, "
+                                          "pt: {strings: {value: '<kbd shortcut=\"open-map\"></kbd>'}}}\n";
+
+    LocalizationCatalog catalog;
+    ASSERT_FALSE(catalog.loadYaml(kKeybindingCatalog).hasErrors());
+    EXPECT_EQ(catalog.resolveHTML("pt", LocalizedText("value")), "<kbd shortcut=\"open-map\"></kbd>");
+}
+
+TEST(LocalizationCatalogTest, RejectsMalformedHTML) {
+    const char* cases[] = {
+        "defaultLocale: en\nlocales: {en: {strings: {value: '<div>unclosed'}}}\n",
+        "defaultLocale: en\nlocales: {en: {strings: {value: '<div>wrong</p>'}}}\n",
+    };
+
+    for (const char* yaml : cases) {
+        LocalizationCatalog catalog;
+        EXPECT_TRUE(catalog.loadYaml(yaml).hasErrors());
+    }
+}
+
+TEST(LocalizationCatalogTest, RejectsUnknownHTML) {
+    struct InvalidHTMLCase {
         const char* name;
         const char* yaml;
     };
 
-    const InvalidMarkupCase cases[] = {
+    const InvalidHTMLCase cases[] = {
         {"unknown tag",
          "defaultLocale: en\n"
          "locales: {en: {strings: {value: \"<script>bad</script>\"}}}\n"},
-        {"mismatched key binding",
-         "defaultLocale: en\n"
-         "locales: {en: {strings: {shortcut: '<kbd shortcut=\"toggle-fly\"/>'}}, "
-         "pt: {strings: {shortcut: '<kbd shortcut=\"open-map\"/>'}}}\n"},
     };
 
     for (const auto& test : cases) {
-        SCOPED_TRACE(Message() << "invalid rich text case: " << test.name);
+        SCOPED_TRACE(Message() << "invalid HTML case: " << test.name);
         LocalizationCatalog catalog;
         EXPECT_TRUE(catalog.loadYaml(test.yaml).hasErrors());
     }
 }
 
-TEST(LocalizationCatalogTest, ReportsLocalizedInlineValidationDiagnostics) {
-    struct InvalidMarkupCase {
+TEST(LocalizationCatalogTest, ReportsHTMLAttributeValidationDiagnostics) {
+    struct InvalidHTMLCase {
         const char* yaml;
         const char* diagnostic;
     };
 
-    const InvalidMarkupCase cases[] = {
+    const InvalidHTMLCase cases[] = {
         {"defaultLocale: en\nlocales:\n  en:\n    strings:\n      value: '<b emphasis=\"true\">bad</b>'\n", "localization.string.attribute_invalid"},
-        {"defaultLocale: en\nlocales:\n  en:\n    strings:\n      value: '<kbd shortcut=\"toggle-fly\">bad</kbd>'\n", "localization.string.children_invalid"},
+        {"defaultLocale: en\nlocales:\n  en:\n    strings:\n      value: '<div unknown=\"true\">bad</div>'\n",
+         "localization.string.attribute_invalid"},
     };
 
     for (const auto& test : cases) {

@@ -10,7 +10,8 @@
 #include <utility>
 #include "binding/settingresolver.h"
 #include "documentcontrollerinternal.h"
-#include "elements/floater.h"
+#include "html/floater.h"
+#include "resourceprovider.h"
 #include "skin/generation.h"
 #include "system.h"
 
@@ -18,61 +19,62 @@ namespace radia::viewer::ui {
 using radia::ui::DiagnosticResult;
 using radia::ui::Document;
 using radia::ui::Element;
-using radia::ui::FloaterElement;
-using radia::ui::LayoutBuildResult;
+using radia::ui::HTMLFloaterElement;
+using radia::ui::ResourceBuildResult;
+using radia::ui::ResourceId;
 using radia::ui::SettingResolver;
 using radia::ui::SkinGeneration;
 using radia::ui::System;
 
 namespace {
-void attachRootLifecycle(FloaterElement& root, DocumentController& controller, std::function<void()> onClose = {}) {
+void attachRootLifecycle(HTMLFloaterElement& root, DocumentController& controller, std::function<void()> onClose = {}) {
     root.setLifecycleCallbacks({}, [&controller, onClose = std::move(onClose)] {
         controller.onClose();
         if (onClose) onClose();
     });
 }
 
-bool isClosed(const FloaterElement& root) {
+bool isClosed(const HTMLFloaterElement& root) {
     return root.closed();
 }
 
-std::unique_ptr<Document> takeFloaterDocument(LayoutBuildResult layout, const std::string& rootError, const std::string& source,
+std::unique_ptr<Document> takeFloaterDocument(ResourceBuildResult buildResult, const std::string& rootError, const std::string& sourceName,
                                               DiagnosticResult& result) {
-    Document* document = layout.document.get();
+    Document* document = buildResult.document.get();
     Element* root = document ? document->documentElement() : nullptr;
-    FloaterElement* candidate = root ? dynamic_cast<FloaterElement*>(root) : nullptr;
-    if (layout.ok() && !candidate) layout.error("component.root.type_mismatch", rootError, source);
-    const bool layoutOk = layout.ok() && candidate;
-    std::unique_ptr<Document> resultDocument = std::move(layout.document);
-    result.append(std::move(layout));
-    if (!layoutOk) return {};
+    HTMLFloaterElement* candidate = root ? dynamic_cast<HTMLFloaterElement*>(root) : nullptr;
+    if (buildResult.ok() && !candidate) buildResult.error("component.root.type_mismatch", rootError, sourceName);
+    const bool buildOk = buildResult.ok() && candidate;
+    std::unique_ptr<Document> resultDocument = std::move(buildResult.document);
+    result.append(std::move(buildResult));
+    if (!buildOk) return {};
     return resultDocument;
 }
 } // namespace
 
 struct ComponentManager::Impl final {
     struct Definition {
-        std::string resourceId;
+        ResourceId resource;
         ControllerFactory factory;
     };
 
     struct Instance {
-        Instance(ComponentInstanceKey componentKey, std::string resourceId, std::unique_ptr<Document> document,
+        Instance(ComponentInstanceKey componentKey, ResourceId resource, std::unique_ptr<Document> document,
                  std::unique_ptr<DocumentController> controller)
-            : componentKey(std::move(componentKey)), resourceId(std::move(resourceId)), document(std::move(document)),
-              controller(std::move(controller)) {}
+            : componentKey(std::move(componentKey)), resource(std::move(resource)), document(std::move(document)), controller(std::move(controller)) {
+        }
 
         ComponentInstanceKey componentKey;
-        std::string resourceId;
+        ResourceId resource;
         std::unique_ptr<Document> document;
         std::unique_ptr<DocumentController> controller;
-        FloaterElement* root = nullptr;
+        HTMLFloaterElement* root = nullptr;
     };
 
     Impl(System& system, Host& host, SettingResolver& resolver) : system(system), host(host), settingResolver(resolver) {}
 
     ~Impl() {
-        std::vector<FloaterElement*> roots;
+        std::vector<HTMLFloaterElement*> roots;
         roots.reserve(instances.size());
         for (auto& entry : instances)
             if (entry.second.root) roots.push_back(entry.second.root);
@@ -86,7 +88,7 @@ struct ComponentManager::Impl final {
     SettingResolver& settingResolver;
     std::map<std::string, Definition> definitions;
     std::map<ComponentInstanceKey, Instance> instances;
-    std::map<const FloaterElement*, ComponentInstanceKey> rootKeys;
+    std::map<const HTMLFloaterElement*, ComponentInstanceKey> rootKeys;
     std::set<ComponentInstanceKey> pendingEvictions;
 
     void evictClosed() {
@@ -97,7 +99,7 @@ struct ComponentManager::Impl final {
                 continue;
             }
 
-            FloaterElement* root = found->second.root;
+            HTMLFloaterElement* root = found->second.root;
             if (!host.unmount(*root)) {
                 LL_WARNS("UI") << "Closed component could not be unmounted: " << pending->persistenceKey() << LL_ENDL;
                 ++pending;
@@ -119,8 +121,8 @@ struct ComponentManager::PreparedReplacement::State {
         std::unique_ptr<DocumentController> controller;
         DocumentController::PreparedMount mount;
         ComponentManager::Impl::Instance* instance = nullptr;
-        FloaterElement* current = nullptr;
-        FloaterElement* candidate = nullptr;
+        HTMLFloaterElement* current = nullptr;
+        HTMLFloaterElement* candidate = nullptr;
     };
 
     std::weak_ptr<ComponentManager::Impl> manager;
@@ -171,21 +173,22 @@ bool ComponentManager::PreparedReplacement::State::commit() {
         const auto definition = impl->definitions.find(component.componentKey.definitionId);
         if (definition == impl->definitions.end()) {
             diagnostics.error("floater.definition.missing",
-                              "Unknown FloaterElement definition during reload: " + component.componentKey.definitionId + ".");
+                              "Unknown HTMLFloaterElement definition during reload: " + component.componentKey.definitionId + ".");
             return false;
         }
 
-        LayoutBuildResult layout = generation->buildElementTree(component.instance->resourceId, locale);
-        component.replacement =
-            takeFloaterDocument(std::move(layout), "Reloaded Component must have a <floater> root.", component.instance->resourceId, diagnostics);
+        ResourceBuildResult buildResult = generation->buildElementTree(component.instance->resource, locale);
+        component.replacement = takeFloaterDocument(std::move(buildResult), "Reloaded Component must have a <floater> root.",
+                                                    component.instance->resource.value(), diagnostics);
         if (!component.replacement) return false;
         component.candidate =
-            component.replacement->documentElement() ? dynamic_cast<FloaterElement*>(component.replacement->documentElement()) : nullptr;
+            component.replacement->documentElement() ? dynamic_cast<HTMLFloaterElement*>(component.replacement->documentElement()) : nullptr;
 
         component.controller = definition->second.factory(impl->system, *component.replacement);
         if (!component.controller) {
-            diagnostics.error("floater.controller.missing",
-                              "FloaterElement controller factory returned no controller during reload: " + component.componentKey.definitionId + ".");
+            diagnostics.error(
+                "floater.controller.missing",
+                "HTMLFloaterElement controller factory returned no controller during reload: " + component.componentKey.definitionId + ".");
             return false;
         }
 
@@ -195,7 +198,7 @@ bool ComponentManager::PreparedReplacement::State::commit() {
         if (!preparedOk) return false;
         if (!component.controller->canCommit(prepared.mount)) {
             diagnostics.error("floater.controller.commit_invalid",
-                              "FloaterElement controller prepared an invalid mount: " + component.componentKey.persistenceKey() + ".");
+                              "HTMLFloaterElement controller prepared an invalid mount: " + component.componentKey.persistenceKey() + ".");
             return false;
         }
         component.mount = std::move(prepared.mount);
@@ -229,8 +232,8 @@ bool ComponentManager::PreparedReplacement::State::commit() {
         instance.document = std::move(component.replacement);
         instance.controller = std::move(component.controller);
         DocumentController& controller = *instance.controller;
-        FloaterElement* current = instance.root;
-        FloaterElement* root = component.candidate;
+        HTMLFloaterElement* current = instance.root;
+        HTMLFloaterElement* root = component.candidate;
         impl->rootKeys.erase(current);
         impl->rootKeys[root] = instance.componentKey;
         instance.root = root;
@@ -242,16 +245,17 @@ bool ComponentManager::PreparedReplacement::State::commit() {
     return true;
 }
 
-bool ComponentManager::registerDefinition(std::string definitionId, std::string resourceId, ControllerFactory factory) {
-    if (!ComponentInstanceKey{definitionId, {}}.valid() || resourceId.empty() || !factory) return false;
-    return mImpl->definitions.emplace(std::move(definitionId), Impl::Definition{std::move(resourceId), std::move(factory)}).second;
+bool ComponentManager::registerDefinition(std::string definitionId, std::string resource, ControllerFactory factory) {
+    const ResourceId id(resource);
+    if (!ComponentInstanceKey{definitionId, {}}.valid() || !id.valid() || !factory) return false;
+    return mImpl->definitions.emplace(std::move(definitionId), Impl::Definition{id, std::move(factory)}).second;
 }
 
 ComponentOpenResult ComponentManager::open(const std::string& definitionId, const std::string& instanceKey) {
     ComponentOpenResult result;
     const auto definition = mImpl->definitions.find(definitionId);
     if (definition == mImpl->definitions.end()) {
-        result.error("floater.definition.missing", "Unknown FloaterElement definition: " + definitionId + ".");
+        result.error("floater.definition.missing", "Unknown HTMLFloaterElement definition: " + definitionId + ".");
         return result;
     }
 
@@ -270,30 +274,30 @@ ComponentOpenResult ComponentManager::open(const std::string& definitionId, cons
         return result;
     }
 
-    LayoutBuildResult layout = mImpl->system.buildElementTree(definition->second.resourceId);
+    ResourceBuildResult buildResult = mImpl->system.buildElementTree(definition->second.resource);
     std::unique_ptr<Document> document =
-        takeFloaterDocument(std::move(layout), "Component definition must have a <floater> root.", definition->second.resourceId, result);
+        takeFloaterDocument(std::move(buildResult), "Component definition must have a <floater> root.", definition->second.resource.value(), result);
     if (!document) return result;
 
     std::unique_ptr<DocumentController> controller = definition->second.factory(mImpl->system, *document);
     if (!controller) {
-        result.error("floater.controller.missing", "FloaterElement controller factory returned no controller: " + definitionId + ".");
+        result.error("floater.controller.missing", "HTMLFloaterElement controller factory returned no controller: " + definitionId + ".");
         return result;
     }
 
     DocumentController::PreparedMountResult prepared;
-    FloaterElement* floater = document->documentElement() ? dynamic_cast<FloaterElement*>(document->documentElement()) : nullptr;
+    HTMLFloaterElement* floater = document->documentElement() ? dynamic_cast<HTMLFloaterElement*>(document->documentElement()) : nullptr;
     prepared = controller->prepare(mImpl->settingResolver);
     const bool preparedOk = prepared.ok();
     result.append(std::move(prepared));
     if (!preparedOk) return result;
 
     if (!controller->canCommit(prepared.mount)) {
-        result.error("floater.controller.commit_invalid", "FloaterElement controller prepared an invalid mount: " + persistenceKey + ".");
+        result.error("floater.controller.commit_invalid", "HTMLFloaterElement controller prepared an invalid mount: " + persistenceKey + ".");
         return result;
     }
 
-    Impl::Instance instance(component, definition->second.resourceId, std::move(document), std::move(controller));
+    Impl::Instance instance(component, definition->second.resource, std::move(document), std::move(controller));
     instance.root = floater;
     mImpl->host.mount(*instance.document);
     result.floater = instance.root;
@@ -315,10 +319,10 @@ ComponentOpenResult ComponentManager::open(const std::string& definitionId, cons
 void ComponentManager::forEachOpen(const OpenComponentCallback& callback) const {
     if (!callback) return;
     for (const auto& [key, instance] : mImpl->instances)
-        if (FloaterElement* floater = instance.root; floater && !isClosed(*floater)) callback(key, *floater);
+        if (HTMLFloaterElement* floater = instance.root; floater && !isClosed(*floater)) callback(key, *floater);
 }
 
-std::optional<ComponentInstanceKey> ComponentManager::componentKeyFor(const FloaterElement& floater) const {
+std::optional<ComponentInstanceKey> ComponentManager::componentKeyFor(const HTMLFloaterElement& floater) const {
     const auto found = mImpl->rootKeys.find(&floater);
     if (found == mImpl->rootKeys.end()) return std::nullopt;
     return found->second;
@@ -351,10 +355,10 @@ ComponentManager::ReplacementResult ComponentManager::prepareReplacement(std::sh
 }
 
 bool ComponentManager::clearInstances() {
-    std::vector<FloaterElement*> roots;
+    std::vector<HTMLFloaterElement*> roots;
     roots.reserve(mImpl->instances.size());
     for (auto& entry : mImpl->instances)
-        if (FloaterElement* root = entry.second.root) roots.push_back(root);
+        if (HTMLFloaterElement* root = entry.second.root) roots.push_back(root);
 
     if (!mImpl->host.clearAll(std::move(roots))) {
         LL_WARNS("UI") << "Component host rejected account teardown; retaining the current component generation." << LL_ENDL;

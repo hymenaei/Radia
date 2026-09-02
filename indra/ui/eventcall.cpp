@@ -7,9 +7,34 @@
 #include "eventcall.h"
 #include <charconv>
 #include <limits>
+#include <memory>
+#include "dom/element.h"
+#include "eventcallinternal.h"
 
 namespace radia::ui {
 EventCall::EventCall(std::string name, std::vector<EventArgument> arguments) : mName(std::move(name)), mArguments(std::move(arguments)) {}
+
+namespace detail {
+void AuthoredEventStore::set(Element& element, std::string_view type, EventCall call) {
+    if (!element.mAuthoredEventStore) element.mAuthoredEventStore = std::make_unique<AuthoredEventStore>();
+    element.mAuthoredEventStore->mCalls.insert_or_assign(std::string(type), std::move(call));
+}
+
+const EventCall* AuthoredEventStore::find(const Element& element, std::string_view type) {
+    if (!element.mAuthoredEventStore) return nullptr;
+    const auto found = element.mAuthoredEventStore->mCalls.find(type);
+    return found == element.mAuthoredEventStore->mCalls.end() ? nullptr : &found->second;
+}
+} // namespace detail
+
+Element& setAuthoredEventCall(Element& element, std::string_view type, EventCall call) {
+    detail::AuthoredEventStore::set(element, type, std::move(call));
+    return element;
+}
+
+const EventCall* authoredEventCall(const Element& element, std::string_view type) {
+    return detail::AuthoredEventStore::find(element, type);
+}
 
 namespace {
 bool isLowercaseAscii(char value) {

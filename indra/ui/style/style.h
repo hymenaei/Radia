@@ -8,6 +8,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 #include "types.h"
@@ -210,10 +212,14 @@ struct Translate {
     float y = 0.f;
 };
 
-enum class AppearanceMode { Auto, Unstyled };
+enum class AppearanceMode { Auto, Base, Unstyled };
 enum class ColorScheme { Auto, Light, Dark, LightDark };
 enum class BoxSizing { ContentBox, BorderBox };
-enum class DisplayMode { Inline, InlineBlock, Block, Flex, Grid, InlineGrid, NoneValue };
+enum class DisplayMode { Inline, InlineBlock, Block, Flex, InlineFlex, Grid, InlineGrid, NoneValue };
+
+inline constexpr bool isFlexDisplay(DisplayMode display) noexcept {
+    return display == DisplayMode::Flex || display == DisplayMode::InlineFlex;
+}
 enum class BorderStyle { Solid, Outset, Inset };
 enum class FlexDirection { Row, Column };
 enum class PositionMode { Static, Relative };
@@ -296,8 +302,10 @@ struct Style {
     Visibility visibility = Visibility::Visible;
     Color backgroundColor = Color(0.f, 0.f, 0.f, 0.f);
     std::optional<LightDarkColor> backgroundColorLightDark;
+    bool backgroundColorCurrent = false;
     Color borderColor = Color(0.f, 0.f, 0.f, 1.f);
     std::optional<LightDarkColor> borderColorLightDark;
+    bool borderColorCurrent = false;
     BorderStyle borderStyle = BorderStyle::Solid;
     Color color = Color(0.f, 0.f, 0.f, 1.f);
     std::optional<LightDarkColor> colorLightDark;
@@ -311,6 +319,8 @@ struct Style {
     Outline outline;
     BorderRadii borderRadius;
     EdgeInsets borderWidth;
+    bool borderWidthSet = false;
+    bool borderColorSet = false;
     std::optional<Length> svgStrokeWidth;
     StrokeCap svgStrokeCap = StrokeCap::Butt;
     bool svgStrokeCapSet = false;
@@ -338,6 +348,7 @@ struct Style {
     U16 fontWeight = 400;
     bool fontItalic = false;
     TextDecoration textDecoration = TextDecoration::NoneValue;
+    std::optional<std::string> content;
     TextAlign textAlign = TextAlign::Start;
     TextOverflow textOverflow = TextOverflow::Clip;
     TextWrap textWrap = TextWrap::Wrap;
@@ -362,8 +373,12 @@ struct Style {
     PointerEvents pointerEvents = PointerEvents::Default;
     CursorStyle cursor = CursorStyle::Auto;
     InheritedStyleProperties specifiedInheritedProperties = 0;
+    std::vector<std::string_view> explicitlyInheritedProperties;
 };
 
 void resolveLightDarkColors(Style& style);
+void resolveCurrentColors(Style& style);
+void normalizeOverflow(Style& style);
 void inheritStyle(Style& style, const Style& parent);
+void applyOpacity(Style& style, float inheritedOpacity);
 } // namespace radia::ui

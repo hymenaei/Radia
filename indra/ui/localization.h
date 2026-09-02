@@ -39,7 +39,7 @@ public:
     bool containsLocale(const std::string& localeId) const;
     bool containsDefaultString(const std::string& stringKey) const;
 
-    std::string resolveMarkup(const std::string& localeId, const LocalizedText& text) const;
+    std::string resolveHTML(const std::string& localeId, const LocalizedText& text) const;
     std::string resolveText(const std::string& localeId, const LocalizedText& text) const;
     std::string resolveText(const std::string& localeId, const std::string& stringKey) const;
 

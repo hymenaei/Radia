@@ -7,21 +7,21 @@
 #include <algorithm>
 #include <iterator>
 #include <optional>
-#include "elements/document.h"
-#include "elements/elementinternal.h"
-#include "elements/floater.h"
-#include "elements/panel.h"
+#include "dom/document.h"
+#include "dom/elementinternal.h"
+#include "html/floater.h"
+#include "html/panel.h"
 #include "layout/engine.h"
 #include "style/stylepass.h"
 #include "surface/surface.h"
 #include "surface/surfaceinternal.h"
 
 namespace radia::ui {
-FloaterElement& Surface::mountFloater(std::unique_ptr<FloaterElement> floater, SurfaceLayer layer) {
+HTMLFloaterElement& Surface::mountFloater(std::unique_ptr<HTMLFloaterElement> floater, SurfaceLayer layer) {
     if (layer != SurfaceLayer::Floater && layer != SurfaceLayer::Modal) layer = SurfaceLayer::Floater;
-    ElementRef<FloaterElement> mountedRef(floater.get());
+    ElementRef<HTMLFloaterElement> mountedRef(floater.get());
     mount(std::move(floater), layer);
-    FloaterElement* mounted = mountedRef.get();
+    HTMLFloaterElement* mounted = mountedRef.get();
     llassert_always(mounted && mounted->parentElement() == nullptr && mountedRoot(mounted) == mounted);
     mFloaters.emplace_back(mounted);
     constrainFloater(*mounted);
@@ -30,18 +30,18 @@ FloaterElement& Surface::mountFloater(std::unique_ptr<FloaterElement> floater, S
     return *mounted;
 }
 
-FloaterElement& Surface::mountFloater(Document& document, SurfaceLayer layer) {
+HTMLFloaterElement& Surface::mountFloater(Document& document, SurfaceLayer layer) {
     Element* root = document.documentElement();
-    FloaterElement* floater = root ? dynamic_cast<FloaterElement*>(root) : nullptr;
+    HTMLFloaterElement* floater = root ? dynamic_cast<HTMLFloaterElement*>(root) : nullptr;
     llassert_always(floater);
     if (layer != SurfaceLayer::Floater && layer != SurfaceLayer::Modal) layer = SurfaceLayer::Floater;
-    mount(*floater, layer);
+    mount(document, layer);
     mFloaters.emplace_back(floater);
     constrainFloater(*floater);
     return *floater;
 }
 
-std::unique_ptr<FloaterElement> Surface::replaceFloater(FloaterElement& current, std::unique_ptr<FloaterElement> replacement) {
+std::unique_ptr<HTMLFloaterElement> Surface::replaceFloater(HTMLFloaterElement& current, std::unique_ptr<HTMLFloaterElement> replacement) {
     if (!replacement || !managesFloater(current)) return nullptr;
 
     const std::optional<SurfaceLayer> layer = layerOf(&current);
@@ -61,15 +61,15 @@ std::unique_ptr<FloaterElement> Surface::replaceFloater(FloaterElement& current,
     mOwnedRoots.emplace_back(std::move(replacement));
     *found = replacementRoot;
     invalidateOrderingCache();
-    *managed = static_cast<FloaterElement*>(replacementRoot);
+    *managed = static_cast<HTMLFloaterElement*>(replacementRoot);
     requestLayout();
     refreshHover();
 
     retired->setSurface(nullptr);
-    return std::unique_ptr<FloaterElement>(static_cast<FloaterElement*>(retired.release()));
+    return std::unique_ptr<HTMLFloaterElement>(static_cast<HTMLFloaterElement*>(retired.release()));
 }
 
-bool Surface::replaceFloater(FloaterElement& current, FloaterElement& replacement) {
+bool Surface::replaceFloater(HTMLFloaterElement& current, HTMLFloaterElement& replacement) {
     if (&current == &replacement || replacement.parentElement() || replacement.surface() || !managesFloater(current)) return false;
 
     const std::optional<SurfaceLayer> layer = layerOf(&current);
@@ -92,16 +92,16 @@ bool Surface::replaceFloater(FloaterElement& current, FloaterElement& replacemen
     return true;
 }
 
-std::unique_ptr<FloaterElement> Surface::unmountFloater(FloaterElement& floater) {
+std::unique_ptr<HTMLFloaterElement> Surface::unmountFloater(HTMLFloaterElement& floater) {
     std::unique_ptr<Element> element = unmount(floater);
-    return std::unique_ptr<FloaterElement>(static_cast<FloaterElement*>(element.release()));
+    return std::unique_ptr<HTMLFloaterElement>(static_cast<HTMLFloaterElement*>(element.release()));
 }
 
-bool Surface::unmountBorrowedFloater(FloaterElement& floater) {
+bool Surface::unmountBorrowedFloater(HTMLFloaterElement& floater) {
     return unmountBorrowed(floater);
 }
 
-bool Surface::ownsFloater(const FloaterElement& floater) const {
+bool Surface::ownsFloater(const HTMLFloaterElement& floater) const {
     return managesFloater(floater);
 }
 
@@ -111,13 +111,13 @@ bool Surface::raise(Element& element) {
     return false;
 }
 
-void Surface::constrainFloater(FloaterElement& floater) {
+void Surface::constrainFloater(HTMLFloaterElement& floater) {
     if (!managesFloater(floater)) return;
     floater.setMovementBounds(mViewport);
     floater.clampToMovementBounds();
 }
 
-void Surface::placeFloater(FloaterElement& floater, const Rect& rect) {
+void Surface::placeFloater(HTMLFloaterElement& floater, const Rect& rect) {
     if (!managesFloater(floater)) return;
     const ElementSnapshot floaterSnapshot = snapshot(floater);
     Rect placed = rect;
@@ -131,8 +131,8 @@ void Surface::placeFloater(FloaterElement& floater, const Rect& rect) {
     constrainFloater(floater);
 }
 
-Vec2 Surface::preferredFloaterSize(const FloaterElement& floater) const {
-    const ElementSnapshot floaterSnapshot = snapshot(const_cast<FloaterElement&>(floater));
+Vec2 Surface::preferredFloaterSize(const HTMLFloaterElement& floater) const {
+    const ElementSnapshot floaterSnapshot = snapshot(const_cast<HTMLFloaterElement&>(floater));
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
     const Style& style = styles.style(floater);
@@ -146,8 +146,8 @@ Vec2 Surface::preferredFloaterSize(const FloaterElement& floater) const {
     return {resolve(style.width, style.minWidth, measured.x, mViewport.w), resolve(style.height, style.minHeight, measured.y, mViewport.h)};
 }
 
-std::optional<Rect> Surface::initialFloaterRect(const FloaterElement& floater) const {
-    const ElementSnapshot floaterSnapshot = snapshot(const_cast<FloaterElement&>(floater));
+std::optional<Rect> Surface::initialFloaterRect(const HTMLFloaterElement& floater) const {
+    const ElementSnapshot floaterSnapshot = snapshot(const_cast<HTMLFloaterElement&>(floater));
     const Vec2 size = preferredFloaterSize(floater);
     if (!snapshotValid(floaterSnapshot)) return std::nullopt;
     StylePass& styles = stylePass();
@@ -163,7 +163,7 @@ std::optional<Rect> Surface::initialFloaterRect(const FloaterElement& floater) c
     return Rect{x, y, size.x, size.y};
 }
 
-std::optional<Rect> Surface::prepareFloater(FloaterElement& floater) const {
+std::optional<Rect> Surface::prepareFloater(HTMLFloaterElement& floater) const {
     const ElementSnapshot floaterSnapshot = snapshot(floater);
     const std::optional<Rect> authored = initialFloaterRect(floater);
     if (!authored || !snapshotValid(floaterSnapshot)) return std::nullopt;
@@ -190,7 +190,7 @@ bool Surface::raiseWithinLayer(Element& element, SurfaceLayer layer) {
     return true;
 }
 
-bool Surface::managesFloater(const FloaterElement& floater) const {
+bool Surface::managesFloater(const HTMLFloaterElement& floater) const {
     const std::optional<SurfaceLayer> layer = layerOf(&floater);
     return layer
         && (*layer == SurfaceLayer::Floater || *layer == SurfaceLayer::Modal)
@@ -198,19 +198,19 @@ bool Surface::managesFloater(const FloaterElement& floater) const {
         && std::any_of(mFloaters.begin(), mFloaters.end(), [&floater](const auto& managed) { return managed == &floater; });
 }
 
-void Surface::floaterClosed(FloaterElement& floater) {
+void Surface::floaterClosed(HTMLFloaterElement& floater) {
     if (managesFloater(floater) && mFloaterDelegate) mFloaterDelegate->floaterClosed(*this, floater);
 }
 
-void Surface::floaterMinimizedChanged(FloaterElement& floater) {
+void Surface::floaterMinimizedChanged(HTMLFloaterElement& floater) {
     if (managesFloater(floater) && mFloaterDelegate) mFloaterDelegate->floaterMinimizedChanged(*this, floater);
 }
 
-void Surface::floaterMoveEnded(FloaterElement& floater) {
+void Surface::floaterMoveEnded(HTMLFloaterElement& floater) {
     if (managesFloater(floater) && mFloaterDelegate) mFloaterDelegate->floaterMoveEnded(*this, floater);
 }
 
-void Surface::floaterResizeEnded(FloaterElement& floater) {
+void Surface::floaterResizeEnded(HTMLFloaterElement& floater) {
     if (!managesFloater(floater)) return;
     if (mFloaterDelegate) mFloaterDelegate->floaterResizeEnded(*this, floater);
 }

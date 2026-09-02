@@ -7,7 +7,7 @@
 
 #include <cstdint>
 #include <memory>
-#include "elements/elementinternal.h"
+#include "dom/elementinternal.h"
 #include "surface/surface.h"
 
 namespace radia::ui {
@@ -18,5 +18,6 @@ struct Surface::ElementSnapshot {
     const Element* parent = nullptr;
     std::uint64_t layoutRevision = 0;
     std::uint64_t styleRevision = 0;
+    std::shared_ptr<char> mountLifetime;
 };
 } // namespace radia::ui

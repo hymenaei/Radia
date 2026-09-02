@@ -21,6 +21,8 @@ class Element;
 class Surface;
 class Event;
 
+namespace detail { std::weak_ptr<char> eventTargetLifetime(const Element& element); } // namespace detail
+
 enum class EventPhase : uint8_t { Capture, Target, Bubble };
 
 enum class PointerButton : uint8_t { NoButton, Left, Right, Middle, Auxiliary1, Auxiliary2 };
@@ -97,8 +99,8 @@ class Event final {
 public:
     std::string_view type() const noexcept { return mType; }
     EventPhase phase() const noexcept { return mPhase; }
-    Element& target() const noexcept { return mTarget; }
-    Element* currentTarget() const noexcept { return mCurrentTarget; }
+    Element* target() const noexcept { return mTargetLifetime.expired() ? nullptr : mTarget; }
+    Element* currentTarget() const noexcept { return mCurrentTargetLifetime.expired() ? nullptr : mCurrentTarget; }
     bool handled() const noexcept { return mHandled; }
     bool cancelable() const noexcept { return mCancelable; }
     bool defaultPrevented() const noexcept { return mDefaultPrevented; }
@@ -108,7 +110,10 @@ public:
     const PointerEvent* pointer() const noexcept { return std::get_if<PointerEvent>(&mPayload); }
     const WheelEvent* wheel() const noexcept { return std::get_if<WheelEvent>(&mPayload); }
     const KeyEvent* key() const noexcept { return std::get_if<KeyEvent>(&mPayload); }
-    bool checked() const { return std::get<bool>(mPayload); }
+    bool checked() const noexcept {
+        const bool* value = std::get_if<bool>(&mPayload);
+        return value && *value;
+    }
     std::optional<unsigned int> character() const noexcept {
         if (const unsigned int* value = std::get_if<unsigned int>(&mPayload)) return *value;
         return std::nullopt;
@@ -124,7 +129,7 @@ public:
         mPropagationStopped = true;
     }
 
-    Event(std::string_view type, Element& target) : mType(type), mTarget(target) {}
+    Event(std::string_view type, Element& target) : mType(type), mTarget(&target), mTargetLifetime(detail::eventTargetLifetime(target)) {}
     Event(std::string_view type, Element& target, PointerEvent payload) : Event(type, target, Payload(std::move(payload))) {}
     Event(std::string_view type, Element& target, WheelEvent payload) : Event(type, target, Payload(std::move(payload))) {}
     Event(std::string_view type, Element& target, KeyEvent payload) : Event(type, target, Payload(std::move(payload))) {}
@@ -132,15 +137,21 @@ public:
     Event(std::string_view type, Element& target, unsigned int payload) : Event(type, target, Payload(payload)) {}
 
 private:
-    Event(std::string_view type, Element& target, Payload payload) : mType(type), mTarget(target), mPayload(std::move(payload)) {}
+    Event(std::string_view type, Element& target, Payload payload)
+        : mType(type), mTarget(&target), mTargetLifetime(detail::eventTargetLifetime(target)), mPayload(std::move(payload)) {}
 
     void setPhase(EventPhase phase) noexcept { mPhase = phase; }
-    void setCurrentTarget(Element* target) noexcept { mCurrentTarget = target; }
+    void setCurrentTarget(Element* target) noexcept {
+        mCurrentTarget = target;
+        mCurrentTargetLifetime = target ? detail::eventTargetLifetime(*target) : std::weak_ptr<char>();
+    }
     void setCancelable(bool cancelable) noexcept { mCancelable = cancelable; }
 
     std::string mType;
-    Element& mTarget;
+    Element* mTarget = nullptr;
+    std::weak_ptr<char> mTargetLifetime;
     Element* mCurrentTarget = nullptr;
+    std::weak_ptr<char> mCurrentTargetLifetime;
     Payload mPayload;
     EventPhase mPhase = EventPhase::Target;
     bool mHandled = false;

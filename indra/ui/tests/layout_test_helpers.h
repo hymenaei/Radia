@@ -14,28 +14,28 @@
 
 namespace radia::ui::test {
 using radia::ui::DiagnosticResult;
-using radia::ui::LayoutBuildResult;
-using radia::ui::LayoutResourceCompiler;
+using radia::ui::ResourceBuildResult;
+using radia::ui::ResourceCompiler;
 using radia::ui::ResourceSnapshot;
 
-struct LayoutCompilerTestHelper {
+struct ResourceCompilerTestHelper {
     std::map<std::string, std::string> resources;
 
     ResourceSnapshot snapshot() const { return ResourceSnapshot(resources); }
 
-    LayoutBuildResult buildElementTreeFromResource(const std::string& resourceId) const {
+    ResourceBuildResult buildElementTreeFromResource(const ResourceId& id) const {
         ResourceSnapshot resourcesSnapshot = snapshot();
-        return LayoutResourceCompiler(&resourcesSnapshot).buildElementTreeFromResource(resourceId);
+        return ResourceCompiler(&resourcesSnapshot).buildElementTreeFromResource(id);
     }
 
-    LayoutBuildResult buildElementTreeFromString(const std::string& xml, const std::string& sourceName = {}) const {
+    ResourceBuildResult buildElementTreeFromString(const std::string& html, const std::string& sourceName = {}) const {
         ResourceSnapshot resourcesSnapshot = snapshot();
-        return LayoutResourceCompiler(&resourcesSnapshot).buildElementTreeFromString(xml, sourceName);
+        return ResourceCompiler(&resourcesSnapshot).buildElementTreeFromString(html, sourceName);
     }
 
-    DiagnosticResult validateElementDefaults(const std::string& element) const {
+    DiagnosticResult validateElementDefaults(const std::string& elementName) const {
         ResourceSnapshot resourcesSnapshot = snapshot();
-        return LayoutResourceCompiler(&resourcesSnapshot).validateElementDefaults(element);
+        return ResourceCompiler(&resourcesSnapshot).validateElementDefaults(elementName);
     }
 };
 } // namespace radia::ui::test

@@ -17,6 +17,7 @@
 
 namespace radia::viewer::ui {
 using radia::ui::DiagnosticResult;
+using radia::ui::ResourceId;
 using radia::ui::ResourceLayer;
 using radia::ui::ResourceSnapshot;
 
@@ -67,21 +68,21 @@ bool allowedKey(const std::string& key, std::initializer_list<const char*> allow
     return std::any_of(allowed.begin(), allowed.end(), [&key](const char* candidate) { return key == candidate; });
 }
 
-void validateKeys(const LLSD& object, std::initializer_list<const char*> allowed, DiagnosticResult& result, const std::string& source,
+void validateKeys(const LLSD& object, std::initializer_list<const char*> allowed, DiagnosticResult& result, const std::string& sourceName,
                   const std::string& context) {
     if (!object.isMap()) return;
     for (auto entry = object.beginMap(); entry != object.endMap(); ++entry)
         if (!allowedKey(entry->first, allowed))
-            result.error("skin.manifest.key_unknown", "Unknown " + context + " key: " + entry->first + ".", source);
+            result.error("skin.manifest.key_unknown", "Unknown " + context + " key: " + entry->first + ".", sourceName);
 }
 
-bool requireString(const LLSD& object, const char* key, std::string& value, DiagnosticResult& result, const std::string& source) {
+bool requireString(const LLSD& object, const char* key, std::string& value, DiagnosticResult& result, const std::string& sourceName) {
     if (!object.has(key)) {
-        result.error("skin.manifest.field_missing", "Missing required manifest field: " + std::string(key) + ".", source);
+        result.error("skin.manifest.field_missing", "Missing required manifest field: " + std::string(key) + ".", sourceName);
         return false;
     }
     if (!object[key].isString() || object[key].asString().empty()) {
-        result.error("skin.manifest.field_invalid", "Manifest field '" + std::string(key) + "' must be a non-empty string.", source);
+        result.error("skin.manifest.field_invalid", "Manifest field '" + std::string(key) + "' must be a non-empty string.", sourceName);
         return false;
     }
     value = object[key].asString();
@@ -97,22 +98,22 @@ bool inside(const std::filesystem::path& path, const std::filesystem::path& root
 }
 
 std::optional<std::filesystem::path> resourcePath(const LLSD& radiaResources, const char* key, const std::filesystem::path& skinRoot, bool directory,
-                                                  DiagnosticResult& result, const std::string& source) {
+                                                  DiagnosticResult& result, const std::string& sourceName) {
     if (!radiaResources.has(key)) return std::nullopt;
     if (!radiaResources[key].isString() || radiaResources[key].asString().empty()) {
-        result.error("skin.manifest.resource.invalid", "Radia resource '" + std::string(key) + "' must be a non-empty relative path.", source);
+        result.error("skin.manifest.resource.invalid", "Radia resource '" + std::string(key) + "' must be a non-empty relative path.", sourceName);
         return std::nullopt;
     }
 
     const std::string value = radiaResources[key].asString();
     const std::filesystem::path relative(value);
     if (relative.is_absolute() || relative.has_root_name() || value.find("://") != std::string::npos) {
-        result.error("skin.manifest.path.invalid", "Radia resource path must be Skin-relative: " + value + ".", source);
+        result.error("skin.manifest.path.invalid", "Radia resource path must be Skin-relative: " + value + ".", sourceName);
         return std::nullopt;
     }
     for (const auto& part : relative) {
         if (part == "..") {
-            result.error("skin.manifest.path.traversal", "Radia resource path escapes its Skin: " + value + ".", source);
+            result.error("skin.manifest.path.traversal", "Radia resource path escapes its Skin: " + value + ".", sourceName);
             return std::nullopt;
         }
     }
@@ -120,118 +121,119 @@ std::optional<std::filesystem::path> resourcePath(const LLSD& radiaResources, co
     std::error_code error;
     const std::filesystem::path canonicalRoot = std::filesystem::canonical(skinRoot, error);
     if (error) {
-        result.error("skin.manifest.root.invalid", "Could not canonicalize Skin root.", source);
+        result.error("skin.manifest.root.invalid", "Could not canonicalize Skin root.", sourceName);
         return std::nullopt;
     }
     const std::filesystem::path resolved = std::filesystem::canonical(skinRoot / relative, error);
     if (error || !inside(resolved, canonicalRoot)) {
-        result.error("skin.manifest.resource.missing", "Radia resource is missing or outside its Skin: " + value + ".", source);
+        result.error("skin.manifest.resource.missing", "Radia resource is missing or outside its Skin: " + value + ".", sourceName);
         return std::nullopt;
     }
     const bool correctType = directory ? std::filesystem::is_directory(resolved, error) : std::filesystem::is_regular_file(resolved, error);
     if (error || !correctType) {
-        result.error("skin.manifest.resource.type_invalid", "Radia resource has the wrong filesystem type: " + value + ".", source);
+        result.error("skin.manifest.resource.type_invalid", "Radia resource has the wrong filesystem type: " + value + ".", sourceName);
         return std::nullopt;
     }
     return resolved;
 }
 
-ManifestResult parseManifest(const std::filesystem::path& root) {
+ManifestResult parseManifest(const std::filesystem::path& skinRoot) {
     ManifestResult result;
     std::error_code rootError;
-    const std::filesystem::path canonicalRoot = std::filesystem::canonical(root, rootError);
+    const std::filesystem::path canonicalRoot = std::filesystem::canonical(skinRoot, rootError);
     if (rootError || !std::filesystem::is_directory(canonicalRoot, rootError)) {
-        result.error("skin.manifest.root.invalid", "Skin root is missing or invalid.", root.generic_string());
+        result.error("skin.manifest.root.invalid", "Skin root is missing or invalid.", skinRoot.generic_string());
         return result;
     }
     const std::filesystem::path filename = canonicalRoot / "manifest.json";
-    const std::string source = filename.generic_string();
+    const std::string sourceName = filename.generic_string();
     const std::optional<std::string> json = readFile(filename);
     if (!json) {
-        result.error("skin.manifest.missing", "Skin has no manifest.json.", source);
+        result.error("skin.manifest.missing", "Skin has no manifest.json.", sourceName);
         return result;
     }
 
     LLSD document;
     std::string parseError;
     if (!LlsdFromJsonString(*json, document, &parseError) || !document.isMap()) {
-        result.error("skin.manifest.json_invalid", "Invalid Skin manifest JSON: " + parseError + ".", source);
+        result.error("skin.manifest.json_invalid", "Invalid Skin manifest JSON: " + parseError + ".", sourceName);
         return result;
     }
-    validateKeys(document, {"id", "name", "author", "url", "notes", "preview", "base", "radia"}, result, source, "manifest");
+    validateKeys(document, {"id", "name", "author", "url", "notes", "preview", "base", "radia"}, result, sourceName, "manifest");
 
     SkinManifest manifest;
     manifest.root = canonicalRoot;
     std::string ignored;
-    requireString(document, "id", manifest.id, result, source);
-    requireString(document, "name", ignored, result, source);
-    requireString(document, "author", ignored, result, source);
+    requireString(document, "id", manifest.id, result, sourceName);
+    requireString(document, "name", ignored, result, sourceName);
+    requireString(document, "author", ignored, result, sourceName);
     if (!manifest.id.empty() && !validSkinId(manifest.id))
-        result.error("skin.manifest.id_invalid", "Invalid stable Skin ID: " + manifest.id + ".", source);
+        result.error("skin.manifest.id_invalid", "Invalid stable Skin ID: " + manifest.id + ".", sourceName);
 
-    if (!document.has("base")) result.error("skin.manifest.field_missing", "Missing required manifest field: base.", source);
+    if (!document.has("base")) result.error("skin.manifest.field_missing", "Missing required manifest field: base.", sourceName);
     else if (document["base"].isUndefined()) manifest.base.reset();
     else if (!document["base"].isString() || !validSkinId(document["base"].asString()))
-        result.error("skin.manifest.base_invalid", "Manifest base must be null or a valid stable Skin ID.", source);
+        result.error("skin.manifest.base_invalid", "Manifest base must be null or a valid stable Skin ID.", sourceName);
     else manifest.base = document["base"].asString();
 
-    if (!document.has("radia")) result.error("skin.manifest.field_missing", "Missing required manifest field: radia.", source);
-    else if (!document["radia"].isMap()) result.error("skin.manifest.radia_invalid", "Manifest radia field must be an object.", source);
+    if (!document.has("radia")) result.error("skin.manifest.field_missing", "Missing required manifest field: radia.", sourceName);
+    else if (!document["radia"].isMap()) result.error("skin.manifest.radia_invalid", "Manifest radia field must be an object.", sourceName);
     else {
         const LLSD& radiaResources = document["radia"];
-        validateKeys(radiaResources, {"stylesheet", "layouts", "localization", "assets"}, result, source, "radia");
+        validateKeys(radiaResources, {"stylesheet", "layouts", "localization", "assets"}, result, sourceName, "radia");
         const bool rootSkin = document.has("base") && document["base"].isUndefined();
         if (rootSkin) {
             for (const char* key : {"stylesheet", "layouts", "localization", "assets"})
                 if (!radiaResources.has(key))
-                    result.error("skin.manifest.resource.required", "Root Skin must declare Radia resource: " + std::string(key) + ".", source);
+                    result.error("skin.manifest.resource.required", "Root Skin must declare Radia resource: " + std::string(key) + ".", sourceName);
         } else if (radiaResources.size() == 0)
-            result.error("skin.manifest.radia_empty", "Derived Skin must declare at least one Radia resource.", source);
+            result.error("skin.manifest.radia_empty", "Derived Skin must declare at least one Radia resource.", sourceName);
 
-        manifest.resources.stylesheet = resourcePath(radiaResources, "stylesheet", canonicalRoot, false, result, source);
-        manifest.resources.layouts = resourcePath(radiaResources, "layouts", canonicalRoot, true, result, source);
-        manifest.resources.localization = resourcePath(radiaResources, "localization", canonicalRoot, false, result, source);
-        manifest.resources.assets = resourcePath(radiaResources, "assets", canonicalRoot, true, result, source);
+        manifest.resources.stylesheet = resourcePath(radiaResources, "stylesheet", canonicalRoot, false, result, sourceName);
+        manifest.resources.layouts = resourcePath(radiaResources, "layouts", canonicalRoot, true, result, sourceName);
+        manifest.resources.localization = resourcePath(radiaResources, "localization", canonicalRoot, false, result, sourceName);
+        manifest.resources.assets = resourcePath(radiaResources, "assets", canonicalRoot, true, result, sourceName);
     }
 
     for (const char* optional : {"url", "notes", "preview"})
         if (document.has(optional) && !document[optional].isString())
-            result.error("skin.manifest.field_invalid", "Optional manifest field '" + std::string(optional) + "' must be a string.", source);
+            result.error("skin.manifest.field_invalid", "Optional manifest field '" + std::string(optional) + "' must be a string.", sourceName);
     if (!result.hasErrors()) result.manifest = std::move(manifest);
     return result;
 }
 
-std::string sourceName(const SkinManifest& manifest, const std::filesystem::path& path) {
+std::string resourceProvenance(const SkinManifest& manifest, const std::filesystem::path& path) {
     std::error_code error;
     const std::filesystem::path relative = std::filesystem::relative(path, manifest.root, error);
     return manifest.id + "/" + (error ? path.filename().generic_string() : relative.generic_string());
 }
 
 void addLayer(const SkinManifest& manifest, const std::filesystem::path& path, std::vector<ResourceLayer>& layers, SkinSnapshotResult& result) {
-    const std::optional<std::string> source = readFile(path);
-    if (!source) {
-        result.error("skin.resource.read_failed", "Could not read declared Skin resource.", sourceName(manifest, path));
+    const std::optional<std::string> content = readFile(path);
+    if (!content) {
+        result.error("skin.resource.read_failed", "Could not read declared Skin resource.", resourceProvenance(manifest, path));
         return;
     }
-    layers.push_back({sourceName(manifest, path), *source});
+    layers.push_back({resourceProvenance(manifest, path), *content});
 }
 
 void addStyleLayer(const SkinManifest& manifest, const std::filesystem::path& entrypoint, std::vector<ResourceLayer>& layers,
                    SkinSnapshotResult& result) {
-    const std::optional<std::string> source = readFile(entrypoint);
-    if (!source) {
-        result.error("skin.resource.read_failed", "Could not read declared Skin resource.", sourceName(manifest, entrypoint));
+    const std::optional<std::string> content = readFile(entrypoint);
+    if (!content) {
+        result.error("skin.resource.read_failed", "Could not read declared Skin resource.", resourceProvenance(manifest, entrypoint));
         return;
     }
 
     std::error_code error;
     const std::filesystem::path relativeEntrypoint = std::filesystem::relative(entrypoint, manifest.root, error);
     if (error) {
-        result.error("skin.resource.path_invalid", "Could not identify the stylesheet entrypoint inside its Skin.", sourceName(manifest, entrypoint));
+        result.error("skin.resource.path_invalid", "Could not identify the stylesheet entrypoint inside its Skin.",
+                     resourceProvenance(manifest, entrypoint));
         return;
     }
 
-    ResourceLayer layer{sourceName(manifest, entrypoint), *source};
+    ResourceLayer layer{resourceProvenance(manifest, entrypoint), *content};
     layer.entrypoint = relativeEntrypoint.generic_string();
     for (std::filesystem::recursive_directory_iterator iterator(manifest.root, error), end; iterator != end && !error; iterator.increment(error)) {
         std::error_code fileError;
@@ -254,23 +256,23 @@ void addStyleLayer(const SkinManifest& manifest, const std::filesystem::path& en
 void overlayDirectory(const SkinManifest& manifest, const std::filesystem::path& root, const std::string& logicalPrefix, ResourceSnapshot& snapshot,
                       SkinSnapshotResult& result) {
     std::error_code error;
+    const std::filesystem::path& skinRoot = manifest.root;
     for (std::filesystem::recursive_directory_iterator iterator(root, error), end; iterator != end && !error; iterator.increment(error)) {
         if (!iterator->is_regular_file(error) || error) continue;
         const std::filesystem::path canonicalFile = std::filesystem::canonical(iterator->path(), error);
-        const std::filesystem::path canonicalSkin = std::filesystem::canonical(manifest.root, error);
-        if (error || !inside(canonicalFile, canonicalSkin)) {
+        if (error || !inside(canonicalFile, skinRoot)) {
             result.error("skin.resource.path_invalid", "Discovered resource escapes its Skin.", iterator->path().generic_string());
             error.clear();
             continue;
         }
         const std::filesystem::path relative = std::filesystem::relative(iterator->path(), root, error);
         if (error) break;
-        const std::optional<std::string> source = readFile(iterator->path());
-        if (!source) {
-            result.error("skin.resource.read_failed", "Could not read Skin resource.", sourceName(manifest, iterator->path()));
+        const std::optional<std::string> content = readFile(iterator->path());
+        if (!content) {
+            result.error("skin.resource.read_failed", "Could not read Skin resource.", resourceProvenance(manifest, iterator->path()));
             continue;
         }
-        snapshot.add(logicalPrefix + relative.generic_string(), *source);
+        snapshot.add(logicalPrefix + relative.generic_string(), *content, resourceProvenance(manifest, canonicalFile));
     }
     if (error) result.error("skin.resource.discovery_failed", "Could not enumerate declared Skin resource directory.", root.generic_string());
 }
@@ -339,16 +341,21 @@ SkinSnapshotResult SkinResolver::resolve(const std::filesystem::path& selectedRo
     for (const SkinManifest* manifest : chain) {
         if (manifest->resources.stylesheet) addStyleLayer(*manifest, *manifest->resources.stylesheet, styleLayers, result);
         if (manifest->resources.localization) addLayer(*manifest, *manifest->resources.localization, localizationLayers, result);
-        if (manifest->resources.layouts) overlayDirectory(*manifest, *manifest->resources.layouts, "", result.snapshot, result);
+        if (manifest->resources.layouts) {
+            const std::filesystem::path relativeLayouts = std::filesystem::relative(*manifest->resources.layouts, manifest->root, error);
+            if (!error) result.snapshot.addPrefixAlias(relativeLayouts.generic_string());
+            error.clear();
+            overlayDirectory(*manifest, *manifest->resources.layouts, "", result.snapshot, result);
+        }
         if (manifest->resources.assets) overlayDirectory(*manifest, *manifest->resources.assets, "resources/", result.snapshot, result);
     }
 
     if (!styleLayers.empty()) {
-        result.snapshot.add("skin.css", styleLayers.back().source);
+        result.snapshot.add("skin.css", styleLayers.back().content, styleLayers.back().provenance);
         result.snapshot.setLayers("skin.css", std::move(styleLayers));
     }
     if (!localizationLayers.empty()) {
-        result.snapshot.add("localization.yaml", localizationLayers.back().source);
+        result.snapshot.add("localization.yaml", localizationLayers.back().content, localizationLayers.back().provenance);
         result.snapshot.setLayers("localization.yaml", std::move(localizationLayers));
     }
     return result;

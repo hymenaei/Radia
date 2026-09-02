@@ -10,7 +10,7 @@
 #include <cstdint>
 #include <functional>
 #include <utility>
-#include "elements/element.h"
+#include "dom/element.h"
 #include "render/paintcontext.h"
 #include "style/style.h"
 #include "style/stylesheet.h"

@@ -10,13 +10,13 @@
 #include <memory>
 #include <optional>
 #include <vector>
-#include "elements/element.h"
+#include "dom/element.h"
 #include "event.h"
 #include "nativeappearance.h"
 #include "style/stylesheet.h"
 
 namespace radia::ui {
-class FloaterElement;
+class HTMLFloaterElement;
 class Document;
 class System;
 class PaintContext;
@@ -27,18 +27,19 @@ class TextMetrics;
 class SurfaceFloaterDelegate {
 public:
     virtual ~SurfaceFloaterDelegate() = default;
-    virtual void floaterClosed(Surface&, FloaterElement&) {}
-    virtual void floaterMinimizedChanged(Surface&, FloaterElement&) {}
-    virtual void floaterMoveEnded(Surface&, FloaterElement&) {}
-    virtual void floaterResizeEnded(Surface&, FloaterElement&) {}
+    virtual void floaterClosed(Surface&, HTMLFloaterElement&) {}
+    virtual void floaterMinimizedChanged(Surface&, HTMLFloaterElement&) {}
+    virtual void floaterMoveEnded(Surface&, HTMLFloaterElement&) {}
+    virtual void floaterResizeEnded(Surface&, HTMLFloaterElement&) {}
 };
 
-enum class SurfaceLayer : uint8_t { Content, Floater, Popup, Tooltip, Drag, Modal };
+enum class SurfaceLayer : uint8_t { Base, Floater, Popup, Tooltip, Drag, Modal };
 
 class Surface {
     friend class System;
     friend class Element;
-    friend class FloaterElement;
+    friend class HTMLFloaterElement;
+    friend class detail::NodeMutation;
 
 public:
     Surface();
@@ -48,26 +49,26 @@ public:
     void setViewport(float width, float height);
     void setScrollLayoutOptions(ScrollLayoutOptions options);
     void setFloaterDelegate(SurfaceFloaterDelegate* delegate) { mFloaterDelegate = delegate; }
-    Element& mount(std::unique_ptr<Element> element, SurfaceLayer layer = SurfaceLayer::Content);
-    Element& mount(Element& element, SurfaceLayer layer = SurfaceLayer::Content);
-    Element& mount(Document& document, SurfaceLayer layer = SurfaceLayer::Content);
-    FloaterElement& mountFloater(std::unique_ptr<FloaterElement> floater, SurfaceLayer layer = SurfaceLayer::Floater);
-    FloaterElement& mountFloater(Document& document, SurfaceLayer layer = SurfaceLayer::Floater);
-    std::unique_ptr<FloaterElement> replaceFloater(FloaterElement& current, std::unique_ptr<FloaterElement> replacement);
-    bool replaceFloater(FloaterElement& current, FloaterElement& replacement);
+    Element& mount(std::unique_ptr<Element> element, SurfaceLayer layer = SurfaceLayer::Base);
+    Element& mount(Element& element, SurfaceLayer layer = SurfaceLayer::Base);
+    Element& mount(Document& document, SurfaceLayer layer = SurfaceLayer::Base);
+    HTMLFloaterElement& mountFloater(std::unique_ptr<HTMLFloaterElement> floater, SurfaceLayer layer = SurfaceLayer::Floater);
+    HTMLFloaterElement& mountFloater(Document& document, SurfaceLayer layer = SurfaceLayer::Floater);
+    std::unique_ptr<HTMLFloaterElement> replaceFloater(HTMLFloaterElement& current, std::unique_ptr<HTMLFloaterElement> replacement);
+    bool replaceFloater(HTMLFloaterElement& current, HTMLFloaterElement& replacement);
     std::unique_ptr<Element> unmount(Element& element);
-    std::unique_ptr<FloaterElement> unmountFloater(FloaterElement& floater);
+    std::unique_ptr<HTMLFloaterElement> unmountFloater(HTMLFloaterElement& floater);
     bool unmountBorrowed(Element& element);
-    bool unmountBorrowedFloater(FloaterElement& floater);
-    bool ownsFloater(const FloaterElement& floater) const;
+    bool unmountBorrowedFloater(HTMLFloaterElement& floater);
+    bool ownsFloater(const HTMLFloaterElement& floater) const;
     bool hasVisibleFloater() const;
     void clearLayer(SurfaceLayer layer);
     bool raise(Element& element);
-    void placeFloater(FloaterElement& floater, const Rect& rect);
-    Vec2 preferredFloaterSize(const FloaterElement& floater) const;
-    Vec2 minimumFloaterSize(const FloaterElement& floater) const;
-    std::optional<Rect> initialFloaterRect(const FloaterElement& floater) const;
-    std::optional<Rect> prepareFloater(FloaterElement& floater) const;
+    void placeFloater(HTMLFloaterElement& floater, const Rect& rect);
+    Vec2 preferredFloaterSize(const HTMLFloaterElement& floater) const;
+    Vec2 minimumFloaterSize(const HTMLFloaterElement& floater) const;
+    std::optional<Rect> initialFloaterRect(const HTMLFloaterElement& floater) const;
+    std::optional<Rect> prepareFloater(HTMLFloaterElement& floater) const;
     void updateLayout();
     void paint(PaintContext& context, float scale = 1.f, Vec2 pixelOrigin = {});
     void clearInteractionState();
@@ -143,16 +144,16 @@ private:
     bool hasActiveModal() const;
     Element* hitTestAt(const Vec2& point);
     Element* hitTestNode(Element& node, const Vec2& point, const Rect& inheritedClip, StylePass& styles) const;
-    FloaterElement* resizeFloaterAt(const Vec2& point, std::uint8_t& edges) const;
+    HTMLFloaterElement* resizeFloaterAt(const Vec2& point, std::uint8_t& edges) const;
     void updateResizeCursor(const Vec2& point);
     bool raiseWithinLayer(Element& element, SurfaceLayer layer);
-    void constrainFloater(FloaterElement& floater);
+    void constrainFloater(HTMLFloaterElement& floater);
     bool updateLayoutIfNeeded();
-    bool managesFloater(const FloaterElement& floater) const;
-    void floaterClosed(FloaterElement& floater);
-    void floaterMinimizedChanged(FloaterElement& floater);
-    void floaterMoveEnded(FloaterElement& floater);
-    void floaterResizeEnded(FloaterElement& floater);
+    bool managesFloater(const HTMLFloaterElement& floater) const;
+    void floaterClosed(HTMLFloaterElement& floater);
+    void floaterMinimizedChanged(HTMLFloaterElement& floater);
+    void floaterMoveEnded(HTMLFloaterElement& floater);
+    void floaterResizeEnded(HTMLFloaterElement& floater);
     void generationChanged(const StyleSheet& styleSheet);
     void localeChanged();
     void keybindingsChanged();
@@ -184,7 +185,8 @@ private:
 
     std::array<RootList, kSurfaceLayerCount> mRoots;
     std::vector<std::unique_ptr<Element>> mOwnedRoots;
-    std::vector<FloaterElement*> mFloaters;
+    std::vector<HTMLFloaterElement*> mFloaters;
+    std::shared_ptr<char> mLifetime = std::make_shared<char>(0);
     StyleSheet mDefaultStyleSheet;
     mutable const StyleSheet* mStyleSheet = &mDefaultStyleSheet;
     mutable const StyleSheet* mPendingStyleSheet = nullptr;

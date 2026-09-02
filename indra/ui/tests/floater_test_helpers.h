@@ -6,23 +6,28 @@
 #pragma once
 
 #include <memory>
-#include "elements/elementinternal.h"
-#include "elements/floater.h"
+#include "dom/elementinternal.h"
+#include "html/elementfactory.h"
+#include "html/floater.h"
+#include "resource/elementdefinition.h"
 
 namespace radia::ui::test {
-inline void appendFloaterStructure(FloaterElement& floater, bool withClose = false, bool withMinimize = false) {
-    auto head = std::make_unique<Element>("head");
-    auto title = std::make_unique<Element>("title");
+using detail::HTMLElementFactory;
+using detail::makeElement;
+
+inline void appendFloaterStructure(HTMLFloaterElement& floater, bool withClose = false, bool withMinimize = false) {
+    auto head = makeElement<Element>("head");
+    auto title = makeElement<Element>("title");
     title->textContent("title");
     head->append(std::move(title));
-    if (withMinimize) head->append(detail::createRuntimeElement("minimize"));
-    if (withClose) head->append(detail::createRuntimeElement("close"));
+    if (withMinimize) head->append(HTMLElementFactory::Create("minimize"));
+    if (withClose) head->append(HTMLElementFactory::Create("close"));
     floater.append(std::move(head));
-    floater.append(std::make_unique<Element>("body"));
+    floater.append(makeElement<Element>("body"));
 }
 
-inline std::unique_ptr<FloaterElement> makeFloater(bool withClose = false, bool withMinimize = false) {
-    auto floater = std::make_unique<FloaterElement>();
+inline std::unique_ptr<HTMLFloaterElement> makeFloater(bool withClose = false, bool withMinimize = false) {
+    auto floater = makeElement<HTMLFloaterElement>();
     appendFloaterStructure(*floater, withClose, withMinimize);
     return floater;
 }

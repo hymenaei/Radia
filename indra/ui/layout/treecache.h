@@ -10,8 +10,8 @@
 #include <memory>
 #include <unordered_map>
 #include <vector>
-#include "elements/element.h"
-#include "elements/elementinternal.h"
+#include "dom/element.h"
+#include "dom/elementinternal.h"
 
 namespace radia::ui {
 struct Style;

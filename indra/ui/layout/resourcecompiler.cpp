@@ -9,46 +9,54 @@
 #include <cctype>
 #include <functional>
 #include <memory>
+#include <set>
 #include <unordered_set>
-#include "elements/button.h"
-#include "elements/elementdefinition.h"
-#include "elements/elementevent.h"
-#include "elements/elementinternal.h"
-#include "elements/floater.h"
-#include "elements/icon.h"
-#include "elements/label.h"
+#include "dom/elementinternal.h"
+#include "eventcall.h"
+#include "html/element.h"
+#include "html/elementfactory.h"
+#include "html/elementnames.h"
 #include "layout/document.h"
+#include "resource/elementdefinition.h"
 #include "resourceprovider.h"
 #include "text/inlineelements.h"
 
 namespace radia::ui {
-struct LayoutResourceCompiler::BuildState {
+using detail::appendLocalizedText;
+using detail::appendText;
+using detail::ElementCompilerAccess;
+using detail::HTMLElementFactory;
+using detail::NodeAccess;
+
+struct ResourceCompiler::BuildState {
     struct AuthoredElement {
         Element* element = nullptr;
         ElementBuildInput input;
-        const ElementDefinition* definition = nullptr;
+        const ResourceElementDefinition* definition = nullptr;
     };
 
-    LayoutBuildResult result;
-    std::vector<std::string> resourceStack;
-    std::unordered_map<std::string, std::shared_ptr<const SourceDocument>> documents;
-    std::unordered_set<std::string> invalidDocuments;
+    ResourceBuildResult result;
+    std::vector<ResourceId> resourceStack;
+    std::map<ResourceId, std::shared_ptr<const SourceDocument>> documents;
+    std::set<ResourceId> invalidDocuments;
     std::unordered_map<std::string, const SourceNode*> elementDefaults;
     std::unordered_map<const Element*, AuthoredElement> authoredElementRecords;
-    const LayoutBuildContext* context = nullptr;
+    std::unique_ptr<ElementBuildContext> buildContext;
+    ResourceId baseId;
 };
 
-struct LayoutResourceCompiler::ChildBuildContext {
+struct ResourceCompiler::ChildBuildContext {
     Element& target;
-    const ElementDefinition& definition;
-    const std::string& source;
+    const ResourceElementDefinition& definition;
+    const std::string& sourceName;
     BuildState& state;
+    ElementBuildContext& buildContext;
     std::string elementText;
     bool pendingFlowBreak = false;
     bool hasLayoutChild = false;
 
     void markLayoutChild(Node& child) {
-        detail::NodeAccess::setFlowBreakBefore(child, pendingFlowBreak);
+        NodeAccess::setFlowBreakBefore(child, pendingFlowBreak);
         pendingFlowBreak = false;
         hasLayoutChild = true;
     }
@@ -62,19 +70,14 @@ std::string trimmedText(const std::string& text) {
     return std::string(first, last);
 }
 
-std::string directoryOf(const std::string& sourcePath) {
-    const std::size_t slash = sourcePath.find_last_of('/');
-    return slash == std::string::npos ? std::string() : sourcePath.substr(0, slash + 1);
-}
-
-std::string resourceChain(const std::vector<std::string>& resourceStack, const std::string& resourceId) {
+std::string resourceChain(const std::vector<ResourceId>& stack, const ResourceId& id) {
     std::string result;
-    for (const std::string& resource : resourceStack) {
+    for (const ResourceId& item : stack) {
         if (!result.empty()) result += " -> ";
-        result += resource;
+        result += item.value();
     }
     if (!result.empty()) result += " -> ";
-    return result + resourceId;
+    return result + id.value();
 }
 
 bool hasAuthoredContent(const SourceNode& node) {
@@ -83,12 +86,12 @@ bool hasAuthoredContent(const SourceNode& node) {
     return false;
 }
 
-ElementBuildInput makeElementInput(const SourceNode& node, const SourceNode* defaults, const std::string& source) {
+ElementBuildInput makeElementInput(const SourceNode& node, const SourceNode* defaults, const std::string& sourceName) {
     ElementBuildInput input;
     input.tag = node.tag;
     input.authoredName = node.authoredName;
     input.source = node.source;
-    input.sourceName = source;
+    input.sourceName = sourceName;
     input.attributes.reserve(node.attributes.size() + (defaults ? defaults->attributes.size() : 0));
     for (const auto& [name, attribute] : node.attributes)
         input.attributes.emplace(name, ElementAttribute{attribute.authoredName, attribute.value, attribute.source});
@@ -98,139 +101,103 @@ ElementBuildInput makeElementInput(const SourceNode& node, const SourceNode* def
     return input;
 }
 
-void rejectAuthoredAttributes(const SourceNode& node, LayoutBuildResult& result, const std::string& source) {
+void rejectAuthoredAttributes(const SourceNode& node, ElementBuildContext& context, const std::string& sourceName) {
     for (const auto& [name, attribute] : node.attributes)
-        result.error("layout.attribute.unknown",
-                     "Unknown attribute on <" + std::string(sourceTagName(node.tag)) + ">: " + attribute.authoredName + ".", source,
-                     attribute.source.begin.line, attribute.source.begin.column);
+        context.error("layout.attribute.unknown",
+                      "Unknown attribute on <" + std::string(htmlTagName(node.tag)) + ">: " + attribute.authoredName + ".", sourceName,
+                      attribute.source.begin.line, attribute.source.begin.column);
 }
 
-bool validateDefaultNode(const SourceNode& node, LayoutBuildResult& result, const std::string& source, const LayoutBuildContext* context) {
-    std::string inputType;
-    if (node.tag == Tag::Input) {
-        const auto type = node.attributes.find("type");
-        if (type != node.attributes.end()) inputType = type->second.value;
-    }
-    const ElementDefinition* definition = findElementDefinition(node.tag, inputType);
+bool validateDefaultNode(const SourceNode& node, ElementBuildContext& context, const std::string& sourceName) {
+    const ResourceElementDefinition* definition = findElementDefinition(node.tag);
     if (!definition) {
-        result.error("layout.defaults.element_unknown", "Element Defaults contain an unsupported element: " + node.authoredName + ".", source,
-                     node.source.begin.line, node.source.begin.column);
+        context.error("layout.defaults.element_unknown", "Element Defaults contain an unsupported element: " + node.authoredName + ".", sourceName,
+                      node.source.begin.line, node.source.begin.column);
         return false;
     }
 
-    const std::size_t errorsBefore = result.errors.size();
-    const ElementBuildInput input = makeElementInput(node, nullptr, source);
-    validateElementAttributes(input, definition->attributes, result);
+    const std::size_t errorsBefore = context.errorCount();
+    const ElementBuildInput input = makeElementInput(node, nullptr, sourceName);
+    validateElementAttributes(input, definition->attributes, context);
 
     std::string ignored;
     if (readElementAttribute(input, "id", ignored)
         || readElementAttribute(input, "filename", ignored)
         || readElementAttribute(input, "for", ignored)) {
-        result.error("layout.defaults.controller_attribute",
-                     "Element Defaults cannot declare IDs, relationships, includes, or controller behavior.", source,
-                     node.source.begin.line, node.source.begin.column);
+        context.error("layout.defaults.controller_attribute", "Element Defaults cannot declare IDs, relationships, includes, or controller behavior.",
+                      sourceName, node.source.begin.line, node.source.begin.column);
     }
     for (const AuthoredEventDescriptor& descriptor : kAuthoredEventDescriptors) {
         if (readElementAttribute(input, descriptor.attribute, ignored)) {
-            result.error("layout.defaults.controller_attribute", "Element Defaults cannot declare Event Handler Calls.", source,
-                         node.source.begin.line, node.source.begin.column);
+            context.error("layout.defaults.controller_attribute", "Element Defaults cannot declare Event Handler Calls.", sourceName,
+                          node.source.begin.line, node.source.begin.column);
             break;
         }
     }
 
-    std::unique_ptr<Element> probe = definition->create();
+    std::unique_ptr<Element> probe = HTMLElementFactory::Create(htmlTagName(node.tag));
     if (probe) {
-        applyCommonElementAttributes(input, *probe, result);
-        if (definition->attributeBehavior.apply) definition->attributeBehavior.apply(input, *probe, result, context);
+        applyCommonElementAttributes(input, *probe, context);
+        if (definition->attributeBehavior.apply) definition->attributeBehavior.apply(input, *probe, context);
     }
 
     for (const SourceContent& content : node.content)
-        if (content.node) validateDefaultNode(*content.node, result, source, context);
-    return result.errors.size() == errorsBefore;
+        if (content.node) validateDefaultNode(*content.node, context, sourceName);
+    return context.errorCount() == errorsBefore;
 }
 } // namespace
 
-LayoutResourceCompiler::LayoutResourceCompiler(const ResourceProvider* resources) : mResources(resources) {}
+ResourceCompiler::ResourceCompiler(const ResourceProvider* provider) : mProvider(provider) {}
 
-std::string LayoutResourceCompiler::normalizeResource(std::string resourceId) {
-    std::replace(resourceId.begin(), resourceId.end(), '\\', '/');
-    while (resourceId.rfind("./", 0) == 0) resourceId.erase(0, 2);
-    if (resourceId.rfind("xui/", 0) == 0) resourceId.erase(0, 4);
-    if (resourceId.empty()) return {};
-
-    std::vector<std::string> segments;
-    std::size_t start = 0;
-    while (start <= resourceId.size()) {
-        const std::size_t slash = resourceId.find('/', start);
-        const std::string segment = resourceId.substr(start, slash == std::string::npos ? std::string::npos : slash - start);
-        if (segment == "..") {
-            if (segments.empty()) return {};
-            segments.pop_back();
-        } else if (!segment.empty() && segment != ".") segments.push_back(segment);
-        if (slash == std::string::npos) break;
-        start = slash + 1;
-    }
-
-    std::string result;
-    for (const std::string& segment : segments) {
-        if (!result.empty()) result += '/';
-        result += segment;
-    }
-    return result;
-}
-
-LayoutBuildResult LayoutResourceCompiler::buildElementTreeFromResource(const std::string& resourceId, const LayoutBuildContext* context) const {
+ResourceBuildResult ResourceCompiler::buildElementTreeFromResource(const ResourceId& id, const ResourceBuildContext* context) const {
     BuildState state;
-    state.context = context;
-    const std::string resource = normalizeResource(resourceId);
-    std::unique_ptr<Element> root = createResourceElement(resource, state);
+    state.buildContext = std::make_unique<ElementBuildContext>(state.result, context);
+    if (!id.valid()) {
+        state.result.error("layout.resource.path_invalid", "Invalid or empty resource path.", id.value());
+        return std::move(state.result);
+    }
+    std::unique_ptr<Element> root = createResourceElement(id, state);
     if (root && !state.result.hasErrors()) {
-        detail::ElementCompilerAccess::setIdScopeRoot(*root);
-        validateElementScope(*root, state, resource);
+        ElementCompilerAccess::setIdScopeRoot(*root);
+        validateElementScope(*root, state, id.value());
     }
     if (!state.result.hasErrors() && root) state.result.document = std::make_unique<Document>(std::move(root));
     return std::move(state.result);
 }
 
-LayoutBuildResult LayoutResourceCompiler::buildElementTreeFromString(const std::string& xml, const std::string& sourceName,
-                                                                     const LayoutBuildContext* context) const {
-    LayoutBuildResult result;
-    const std::string source = normalizeResource(sourceName);
-    SourceDocumentParseResult parsed = SourceDocumentParser().parse(xml, source);
+ResourceBuildResult ResourceCompiler::buildElementTreeFromString(const std::string& html, const std::string& sourceName,
+                                                                 const ResourceBuildContext* context, ResourceId baseId) const {
+    ResourceBuildResult result;
+    SourceDocumentParseResult parsed = SourceDocumentParser().parse(html, sourceName);
     result.warnings = std::move(parsed.warnings);
     result.errors = std::move(parsed.errors);
-    std::unique_ptr<SourceDocument> document = std::move(parsed.document);
+    const std::shared_ptr<const SourceDocument> document = parsed.document;
     if (!document || result.hasErrors()) return result;
 
     BuildState state;
-    state.context = context;
     state.result = std::move(result);
+    state.buildContext = std::make_unique<ElementBuildContext>(state.result, context);
+    state.baseId = std::move(baseId);
     std::unique_ptr<Element> root = buildDocument(*document, nullptr, state);
     if (root && !state.result.hasErrors()) {
-        detail::ElementCompilerAccess::setIdScopeRoot(*root);
-        validateElementScope(*root, state, source);
+        ElementCompilerAccess::setIdScopeRoot(*root);
+        validateElementScope(*root, state, sourceName);
     }
     if (!state.result.hasErrors() && root) state.result.document = std::make_unique<Document>(std::move(root));
     return std::move(state.result);
 }
 
-void LayoutResourceCompiler::validateElementScope(Element& scope, BuildState& state, const std::string& source, bool includeRootInIdScope) const {
+void ResourceCompiler::validateElementScope(Element& scope, BuildState& state, const std::string& sourceName, bool includeRootInIdScope) const {
     std::unordered_map<std::string, Element*> ids;
     std::unordered_set<std::string> duplicates;
     std::vector<const BuildState::AuthoredElement*> authoredElementRecords;
     std::function<void(Element&, bool)> visit = [&](Element& element, bool root) {
         if (!root && element.idScopeRoot()) {
-            if (!element.id().empty() && !ids.emplace(element.id(), &element).second) {
-                duplicates.insert(element.id());
-                state.result.error("layout.id.duplicate", "Duplicate element id: " + element.id() + ".", source);
-            }
-            validateElementScope(element, state, source, false);
+            if (!element.id().empty() && !ids.emplace(element.id(), &element).second) duplicates.insert(element.id());
+            validateElementScope(element, state, sourceName, false);
             return;
         }
-        if ((!root || includeRootInIdScope) && !element.id().empty() && !ids.emplace(element.id(), &element).second) {
-            duplicates.insert(element.id());
-            state.result.error("layout.id.duplicate", "Duplicate element id: " + element.id() + ".", source);
-        }
+        if ((!root || includeRootInIdScope) && !element.id().empty() && !ids.emplace(element.id(), &element).second) duplicates.insert(element.id());
         const auto authored = state.authoredElementRecords.find(&element);
         if (authored != state.authoredElementRecords.end()) authoredElementRecords.push_back(&authored->second);
         for (Element* child : element.children()) visit(*child, false);
@@ -238,99 +205,99 @@ void LayoutResourceCompiler::validateElementScope(Element& scope, BuildState& st
     visit(scope, true);
 
     const ElementScopeContext context(ids, duplicates, [](const Element& element) {
-        const ElementDefinition* definition = findElementDefinition(sourceTagFromName(element.elementName()));
+        const ResourceElementDefinition* definition = findElementDefinition(lookupHTMLTag(element.elementName()));
         return definition && definition->labelable;
     });
     for (const BuildState::AuthoredElement* authored : authoredElementRecords) {
         if (!authored->element || !authored->definition || !authored->definition->compositionBehavior.validate) continue;
-        authored->definition->compositionBehavior.validate(authored->input, *authored->element, context, state.result);
+        authored->definition->compositionBehavior.validate(authored->input, *authored->element, context, *state.buildContext);
     }
 }
 
-DiagnosticResult LayoutResourceCompiler::validateElementDefaults(const std::string& element, const LayoutBuildContext* context) const {
+DiagnosticResult ResourceCompiler::validateElementDefaults(const std::string& elementName, const ResourceBuildContext* context) const {
     BuildState state;
-    state.context = context;
-    loadElementDefaults(element, state);
+    state.buildContext = std::make_unique<ElementBuildContext>(state.result, context);
+    loadElementDefaults(elementName, state);
     DiagnosticResult result;
     result.warnings = std::move(state.result.warnings);
     result.errors = std::move(state.result.errors);
     return result;
 }
 
-void LayoutResourceCompiler::loadElementDefaults(const std::string& element, BuildState& state) const {
-    const std::string lookup = schemaNameKey(element);
+void ResourceCompiler::loadElementDefaults(const std::string& elementName, BuildState& state) const {
+    const std::string lookup = canonicalizeHTMLName(elementName);
     if (state.elementDefaults.find(lookup) != state.elementDefaults.end()) return;
-    const ElementDefinition* definition = findElementDefinition(sourceTagFromName(element));
-    const std::string canonical = definition ? definition->elementName : element;
-    const std::string defaultResource = "elements/" + canonical + ".html";
+    const ResourceElementDefinition* definition = findElementDefinition(lookupHTMLTag(elementName));
+    const std::string canonical = definition ? definition->elementName : elementName;
+    const ResourceId defaultId("elements/" + canonical + ".html");
     const SourceNode* defaultRoot = nullptr;
     if (!definition) {
-        state.result.error("layout.defaults.element_unknown", "Element Defaults target an unsupported element: " + canonical + ".", defaultResource);
+        state.result.error("layout.defaults.element_unknown", "Element Defaults target an unsupported element: " + canonical + ".",
+                           defaultId.value());
         state.elementDefaults.emplace(lookup, nullptr);
         return;
     }
 
-    if (mResources) {
-        const SourceDocument* document = loadDocument(defaultResource, state, false);
+    if (mProvider) {
+        const SourceDocument* document = loadDocument(defaultId, state, false);
         if (!document || !document->root) {
             state.elementDefaults.emplace(lookup, nullptr);
             return;
         }
         defaultRoot = document->root.get();
         const std::size_t errorsBefore = state.result.errors.size();
-        if (schemaNameKey(sourceTagName(defaultRoot->tag)) != lookup) {
-            state.result.error("layout.defaults.root_invalid", "Element Defaults root must be <" + canonical + ">.", defaultResource,
+        if (canonicalizeHTMLName(htmlTagName(defaultRoot->tag)) != lookup) {
+            state.result.error("layout.defaults.root_invalid", "Element Defaults root must be <" + canonical + ">.", document->sourceName,
                                defaultRoot->source.begin.line, defaultRoot->source.begin.column);
             defaultRoot = nullptr;
         } else {
-            if (!validateDefaultNode(*defaultRoot, state.result, defaultResource, state.context)) defaultRoot = nullptr;
+            if (!validateDefaultNode(*defaultRoot, *state.buildContext, document->sourceName)) defaultRoot = nullptr;
         }
         if (state.result.errors.size() != errorsBefore) defaultRoot = nullptr;
     }
     state.elementDefaults.emplace(lookup, defaultRoot);
 }
 
-std::unique_ptr<Element> LayoutResourceCompiler::createResourceElement(const std::string& resourceId, BuildState& state) const {
-    const std::string resource = normalizeResource(resourceId);
-    if (resource.empty()) {
-        state.result.error("layout.resource.path_invalid", "Invalid or empty resource path: " + resourceId + ".", resourceId);
+std::unique_ptr<Element> ResourceCompiler::createResourceElement(const ResourceId& id, BuildState& state) const {
+    if (!id.valid()) {
+        state.result.error("layout.resource.path_invalid", "Invalid or empty resource path.", id.value());
         return nullptr;
     }
-    if (resource.rfind("elements/", 0) == 0) {
-        state.result.error("layout.resource.reserved", "Element default resources cannot be instantiated as Layout Resources: " + resource + ".",
-                           resource);
+    if (id.value().rfind("elements/", 0) == 0) {
+        state.result.error("layout.resource.reserved", "Element default resources cannot be instantiated as Layout Resources: " + id.value() + ".",
+                           id.value());
         return nullptr;
     }
-    if (std::find(state.resourceStack.begin(), state.resourceStack.end(), resource) != state.resourceStack.end()) {
-        state.result.error("layout.resource.cycle", "Recursive layout resource reference: " + resourceChain(state.resourceStack, resource) + ".",
-                           resource);
+    if (std::find(state.resourceStack.begin(), state.resourceStack.end(), id) != state.resourceStack.end()) {
+        state.result.error("layout.resource.cycle", "Recursive layout resource reference: " + resourceChain(state.resourceStack, id) + ".",
+                           id.value());
         return nullptr;
     }
-    const SourceDocument* document = loadDocument(resource, state, true);
+    const SourceDocument* document = loadDocument(id, state, true);
     if (!document) return nullptr;
 
-    state.resourceStack.push_back(resource);
+    state.resourceStack.push_back(id);
     std::unique_ptr<Element> root = buildDocument(*document, nullptr, state);
     state.resourceStack.pop_back();
-    if (root) detail::ElementCompilerAccess::setIdScopeRoot(*root);
+    if (root) ElementCompilerAccess::setIdScopeRoot(*root);
     return root;
 }
 
-const SourceDocument* LayoutResourceCompiler::loadDocument(const std::string& resourceId, BuildState& state, bool required) const {
-    const auto cached = state.documents.find(resourceId);
+const SourceDocument* ResourceCompiler::loadDocument(const ResourceId& id, BuildState& state, bool required) const {
+    const auto cached = state.documents.find(id);
     if (cached != state.documents.end()) return cached->second.get();
-    if (state.invalidDocuments.find(resourceId) != state.invalidDocuments.end()) return nullptr;
+    if (state.invalidDocuments.find(id) != state.invalidDocuments.end()) return nullptr;
 
-    if (!mResources) {
-        if (required) state.result.error("layout.resource.provider_missing", "No Layout Resource collection is configured.", resourceId);
+    if (!mProvider) {
+        if (required) state.result.error("layout.resource.provider_missing", "No Layout Resource collection is configured.", id.value());
         return nullptr;
     }
 
-    const std::optional<std::string> source = mResources->load(resourceId);
-    if (!source) {
+    const std::optional<ResourceSource> loaded = mProvider->load(id);
+    if (!loaded) {
         if (required)
-            state.result.error("layout.resource.missing", "Could not load resource chain: " + resourceChain(state.resourceStack, resourceId) + ".",
-                               resourceId);
+            state.result.error("layout.resource.missing", "Could not load resource chain: " + resourceChain(state.resourceStack, id) + ".",
+                               id.value());
         return nullptr;
     }
 
@@ -338,12 +305,13 @@ const SourceDocument* LayoutResourceCompiler::loadDocument(const std::string& re
     bool valid = false;
     {
         std::lock_guard<std::mutex> lock(mDocumentCacheMutex);
-        CachedDocument& cached = mDocumentCache[resourceId];
-        if (!cached.initialized || cached.source != *source) {
-            SourceDocumentParseResult parsed = SourceDocumentParser().parse(*source, resourceId);
+        CachedDocument& cached = mDocumentCache[id];
+        if (!cached.initialized || cached.content != loaded->content || cached.provenance != loaded->provenance) {
+            SourceDocumentParseResult parsed = SourceDocumentParser().parse(loaded->content, loaded->provenance);
             cached.initialized = true;
-            cached.source = *source;
-            cached.document = std::shared_ptr<const SourceDocument>(std::move(parsed.document));
+            cached.content = loaded->content;
+            cached.provenance = loaded->provenance;
+            cached.document = parsed.document;
             cached.warnings = std::move(parsed.warnings);
             cached.errors = std::move(parsed.errors);
         }
@@ -354,51 +322,45 @@ const SourceDocument* LayoutResourceCompiler::loadDocument(const std::string& re
     }
 
     if (!valid) {
-        state.invalidDocuments.insert(resourceId);
+        state.invalidDocuments.insert(id);
         return nullptr;
     }
 
     const SourceDocument* result = document.get();
-    state.documents.emplace(resourceId, std::move(document));
+    state.documents.emplace(id, std::move(document));
     return result;
 }
 
-std::unique_ptr<Element> LayoutResourceCompiler::buildDocument(const SourceDocument& document, std::unique_ptr<Element> root,
-                                                               BuildState& state) const {
+std::unique_ptr<Element> ResourceCompiler::buildDocument(const SourceDocument& document, std::unique_ptr<Element> root, BuildState& state) const {
     if (!document.root) {
-        state.result.error("layout.html.invalid", "Radia UI HTML must contain one root element.", document.source);
+        state.result.error("layout.html.invalid", "Radia UI HTML must contain one root element.", document.sourceName);
         return nullptr;
     }
 
-    return buildNode(*document.root, document.source, std::move(root), state);
+    return buildNode(*document.root, document.sourceName, std::move(root), state);
 }
 
-const ElementDefinition* LayoutResourceCompiler::lookupElementDefinition(const SourceNode& sourceNode, const std::string& source,
-                                                                         BuildState& state) const {
-    std::string inputType;
-    if (sourceNode.tag == Tag::Input) {
-        const auto type = sourceNode.attributes.find("type");
-        if (type != sourceNode.attributes.end()) inputType = type->second.value;
-    }
-    const ElementDefinition* definition = findElementDefinition(sourceNode.tag, inputType);
+const ResourceElementDefinition* ResourceCompiler::lookupElementDefinition(const SourceNode& node, const std::string& sourceName,
+                                                                           BuildState& state) const {
+    const ResourceElementDefinition* definition = findElementDefinition(node.tag);
     if (!definition) {
-        state.result.error("layout.element.unknown", "Unsupported HTML element: " + sourceNode.authoredName + ".", source,
-                           sourceNode.source.begin.line, sourceNode.source.begin.column);
+        state.result.error("layout.element.unknown", "Unsupported HTML element: " + node.authoredName + ".", sourceName, node.source.begin.line,
+                           node.source.begin.column);
         return nullptr;
     }
     if (definition->scopedOnly) {
-        state.result.error("layout.element.scoped", "<" + definition->elementName + "> is valid only in its owning composite.", source,
-                           sourceNode.source.begin.line, sourceNode.source.begin.column);
+        state.result.error("layout.element.scoped", "<" + definition->elementName + "> is valid only in its owning composite.", sourceName,
+                           node.source.begin.line, node.source.begin.column);
         return nullptr;
     }
     return definition;
 }
 
-bool LayoutResourceCompiler::resolveElementResource(const ElementBuildInput& input, const ElementDefinition& definition,
-                                                    std::unique_ptr<Element>& element, BuildState& state) const {
+bool ResourceCompiler::resolveElementResource(const ElementBuildInput& input, const ResourceElementDefinition& definition,
+                                              std::unique_ptr<Element>& element, const ResourceId& baseId, BuildState& state) const {
     std::string filename;
     if (!readElementAttribute(input, "filename", filename)) {
-        if (!element) element = definition.create();
+        if (!element) element = HTMLElementFactory::Create(htmlTagName(input.tag));
         return true;
     }
 
@@ -408,70 +370,70 @@ bool LayoutResourceCompiler::resolveElementResource(const ElementBuildInput& inp
         return false;
     }
 
-    const bool rooted = filename.rfind("xui/", 0) == 0 || (!filename.empty() && (filename.front() == '/' || filename.front() == '\\'));
-    const std::string resource = normalizeResource(rooted ? filename : directoryOf(input.sourceName) + filename);
-    if (resource.empty()) {
+    const ResourceId id = ResourceId::resolve(baseId, filename);
+    if (!id.valid()) {
         state.result.error("layout.resource.path_invalid", "Invalid resource filename: " + filename + ".", input.sourceName, input.source.begin.line,
                            input.source.begin.column);
         return false;
     }
-    element = createResourceElement(resource, state);
+    element = createResourceElement(id, state);
     if (!element) return false;
-    if (schemaNameKey(element->elementName()) != schemaNameKey(definition.resourceRoot->expectedElementName)) {
+    if (canonicalizeHTMLName(element->elementName()) != canonicalizeHTMLName(definition.resourceRoot->expectedElementName)) {
         state.result.error("layout.resource.root_invalid",
-                           "Referenced resource must have a <" + definition.resourceRoot->expectedElementName + "> root: " + resource + ".",
+                           "Referenced resource must have a <" + definition.resourceRoot->expectedElementName + "> root: " + id.value() + ".",
                            input.sourceName, input.source.begin.line, input.source.begin.column);
         return false;
     }
     return true;
 }
 
-std::unique_ptr<Element> LayoutResourceCompiler::buildNode(const SourceNode& sourceNode, const std::string& source, std::unique_ptr<Element> element,
-                                                           BuildState& state) const {
-    const ElementDefinition* definition = lookupElementDefinition(sourceNode, source, state);
+std::unique_ptr<Element> ResourceCompiler::buildNode(const SourceNode& node, const std::string& sourceName, std::unique_ptr<Element> element,
+                                                     BuildState& state) const {
+    const ResourceElementDefinition* definition = lookupElementDefinition(node, sourceName, state);
     if (!definition) return nullptr;
 
     loadElementDefaults(definition->elementName, state);
-    const auto defaults = state.elementDefaults.find(schemaNameKey(definition->elementName));
+    const auto defaults = state.elementDefaults.find(canonicalizeHTMLName(definition->elementName));
     const SourceNode* defaultRoot = defaults == state.elementDefaults.end() ? nullptr : defaults->second;
-    ElementBuildInput input = makeElementInput(sourceNode, defaultRoot, source);
-    if (!resolveElementResource(input, *definition, element, state)) return nullptr;
+    ElementBuildInput input = makeElementInput(node, defaultRoot, sourceName);
+    const ResourceId& baseId = state.resourceStack.empty() ? state.baseId : state.resourceStack.back();
+    if (!resolveElementResource(input, *definition, element, baseId, state)) return nullptr;
 
     Element* target = element.get();
     if (!target || target->elementName() != definition->elementName) {
-        state.result.error("layout.builder.type_mismatch", "Registered builder does not create <" + definition->elementName + ">.", source,
-                           sourceNode.source.begin.line, sourceNode.source.begin.column);
+        state.result.error("layout.builder.type_mismatch", "Registered builder does not create <" + definition->elementName + ">.", sourceName,
+                           node.source.begin.line, node.source.begin.column);
         return nullptr;
     }
 
-    validateElementAttributes(input, definition->attributes, state.result);
-    applyCommonElementAttributes(input, *target, state.result);
-    if (definition->attributeBehavior.apply) definition->attributeBehavior.apply(input, *target, state.result, state.context);
-    if (sourceNode.tag == Tag::Kbd) {
+    validateElementAttributes(input, definition->attributes, *state.buildContext);
+    applyCommonElementAttributes(input, *target, *state.buildContext);
+    if (definition->attributeBehavior.apply) definition->attributeBehavior.apply(input, *target, *state.buildContext);
+    if (node.tag == HTMLTag::Kbd) {
         std::string shortcut;
         if (!readElementAttribute(input, "shortcut", shortcut)) {
-            state.result.error("layout.kbd.shortcut_required", "<kbd> requires a shortcut attribute.", source, sourceNode.source.begin.line,
-                               sourceNode.source.begin.column);
-        } else if (!isElementIdentifier(shortcut)) {
+            state.result.error("layout.kbd.shortcut_required", "<kbd> requires a shortcut attribute.", sourceName, node.source.begin.line,
+                               node.source.begin.column);
+        } else if (shortcut.empty()) {
             const ElementAttribute* attribute = input.find("shortcut");
-            state.result.error("layout.kbd.shortcut_invalid", "<kbd> shortcut must be a valid identifier.", source,
-                               attribute ? attribute->source.begin.line : sourceNode.source.begin.line,
-                               attribute ? attribute->source.begin.column : sourceNode.source.begin.column);
+            state.result.error("layout.kbd.shortcut_invalid", "<kbd> shortcut must be non-empty.", sourceName,
+                               attribute ? attribute->source.begin.line : node.source.begin.line,
+                               attribute ? attribute->source.begin.column : node.source.begin.column);
         } else {
-            detail::ElementCompilerAccess::setKeybinding(*target, std::move(shortcut));
+            static_cast<HTMLElement&>(*target).setKeybinding(std::move(shortcut));
         }
     }
     if (definition->compositionBehavior.validate)
         state.authoredElementRecords.emplace(target, BuildState::AuthoredElement{target, std::move(input), definition});
 
-    const SourceNode& contentNode = defaultRoot && !hasAuthoredContent(sourceNode) ? *defaultRoot : sourceNode;
-    buildChildren(*target, contentNode, *definition, source, state);
+    const SourceNode& contentNode = defaultRoot && !hasAuthoredContent(node) ? *defaultRoot : node;
+    buildChildren(*target, contentNode, *definition, sourceName, state);
     return element;
 }
 
-void LayoutResourceCompiler::buildChildren(Element& target, const SourceNode& node, const ElementDefinition& definition, const std::string& source,
-                                           BuildState& state) const {
-    ChildBuildContext context{target, definition, source, state};
+void ResourceCompiler::buildChildren(Element& target, const SourceNode& node, const ResourceElementDefinition& definition,
+                                     const std::string& sourceName, BuildState& state) const {
+    ChildBuildContext context{target, definition, sourceName, state, *state.buildContext};
     for (const SourceContent& content : node.content) {
         if (content.isText()) {
             appendTextContent(content, context);
@@ -481,36 +443,35 @@ void LayoutResourceCompiler::buildChildren(Element& target, const SourceNode& no
         const SourceNode& childNode = *content.node;
         if (consumeFlowBreak(childNode, context) == ChildHandling::Handled) continue;
         if (consumeScopedElement(childNode, context) == ChildHandling::Handled) continue;
-        const auto partAttributes = definition.childrenBehavior.partAttributes.find(sourceTagName(childNode.tag));
+        const auto partAttributes = definition.childrenBehavior.partAttributes.find(std::string(htmlTagName(childNode.tag)));
         if (partAttributes != definition.childrenBehavior.partAttributes.end())
-            validateElementAttributes(makeElementInput(childNode, nullptr, source), partAttributes->second, state.result);
+            validateElementAttributes(makeElementInput(childNode, nullptr, sourceName), partAttributes->second, *state.buildContext);
         if (consumeChildContainer(childNode, context) == ChildHandling::Handled) continue;
         (void)buildRegularChild(childNode, context);
     }
     if (context.pendingFlowBreak)
-        state.result.error("layout.flow_break.trailing", "Flow Break requires a following layout child.", source, node.source.end.line,
+        state.result.error("layout.flow_break.trailing", "Flow Break requires a following layout child.", sourceName, node.source.end.line,
                            node.source.end.column);
     if (definition.contentBehavior.mode == ElementContentMode::ElementText && !context.elementText.empty() && definition.contentBehavior.applyText)
-        definition.contentBehavior.applyText(std::move(context.elementText), target, state.result, source, state.context, node.source.begin.line);
+        definition.contentBehavior.applyText(std::move(context.elementText), target, *state.buildContext, sourceName, node.source.begin.line);
 }
 
-LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::appendTextContent(const SourceContent& content, ChildBuildContext& context) const {
+ResourceCompiler::ChildHandling ResourceCompiler::appendTextContent(const SourceContent& content, ChildBuildContext& context) const {
     const std::string& value = content.text;
     if (value.empty()) return ChildHandling::Handled;
     if (context.definition.contentBehavior.mode == ElementContentMode::Unsupported && trimmedText(value).empty()) return ChildHandling::Handled;
     if (context.definition.contentBehavior.mode == ElementContentMode::Unsupported) {
         context.state.result.error("layout.text.unsupported", "Text content is not supported in <" + context.definition.elementName + ">.",
-                                   context.source, content.source.begin.line, content.source.begin.column);
+                                   context.sourceName, content.source.begin.line, content.source.begin.column);
     } else if (context.definition.contentBehavior.mode == ElementContentMode::ElementText) {
         if (!context.elementText.empty()) context.elementText += value;
         else context.elementText = std::move(value);
     } else {
         const bool contributesLayoutChild = !trimmedText(value).empty();
-        const ResolvedLayoutText text =
-            localizedLayoutText(std::move(value), context.state.result, context.source, context.state.context, content.source.begin.line);
+        const ResolvedLayoutText text = localizedLayoutText(std::move(value), context.buildContext, context.sourceName, content.source.begin.line);
         const auto appendLiteral = [&](std::string literal) {
             if (literal.empty()) return;
-            Node& child = detail::appendText(context.target, std::move(literal));
+            Node& child = appendText(context.target, std::move(literal));
             if (contributesLayoutChild) context.markLayoutChild(child);
         };
         if (!text.text) {
@@ -522,7 +483,7 @@ LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::appendTextContent(
             } else appendLiteral(text.literal);
         } else {
             appendLiteral(text.prefix);
-            Node& child = detail::appendLocalizedText(context.target, *text.text, context.state.context->resolveMarkup(*text.text));
+            Node& child = appendLocalizedText(context.target, *text.text, context.buildContext.resolveHTML(*text.text));
             context.markLayoutChild(child);
             appendLiteral(text.suffix);
         }
@@ -530,66 +491,66 @@ LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::appendTextContent(
     return ChildHandling::Handled;
 }
 
-LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::consumeFlowBreak(const SourceNode& childNode, ChildBuildContext& context) const {
-    if (childNode.tag != Tag::Br) return ChildHandling::Unhandled;
-    rejectAuthoredAttributes(childNode, context.state.result, context.source);
+ResourceCompiler::ChildHandling ResourceCompiler::consumeFlowBreak(const SourceNode& childNode, ChildBuildContext& context) const {
+    if (childNode.tag != HTMLTag::Br) return ChildHandling::Unhandled;
+    rejectAuthoredAttributes(childNode, context.buildContext, context.sourceName);
     if (hasAuthoredContent(childNode))
-        context.state.result.error("layout.flow_break.children_unsupported", "Flow Break <br> cannot contain content.", context.source,
+        context.state.result.error("layout.flow_break.children_unsupported", "Flow Break <br> cannot contain content.", context.sourceName,
                                    childNode.source.begin.line, childNode.source.begin.column);
     if (!context.hasLayoutChild)
-        context.state.result.error("layout.flow_break.leading", "Flow Break requires a preceding layout child.", context.source,
+        context.state.result.error("layout.flow_break.leading", "Flow Break requires a preceding layout child.", context.sourceName,
                                    childNode.source.begin.line, childNode.source.begin.column);
     else if (context.pendingFlowBreak)
-        context.state.result.error("layout.flow_break.consecutive", "Consecutive Flow Break directives are not supported.", context.source,
+        context.state.result.error("layout.flow_break.consecutive", "Consecutive Flow Break directives are not supported.", context.sourceName,
                                    childNode.source.begin.line, childNode.source.begin.column);
     else context.pendingFlowBreak = true;
-    if (auto child = buildNode(childNode, context.source, nullptr, context.state)) context.target.append(std::move(child));
+    if (auto child = buildNode(childNode, context.sourceName, nullptr, context.state)) context.target.append(std::move(child));
     return ChildHandling::Handled;
 }
 
-LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::consumeScopedElement(const SourceNode& childNode, ChildBuildContext& context) const {
-    const auto scopedInline = context.definition.contentBehavior.scopedElements.find(schemaNameKey(sourceTagName(childNode.tag)));
+ResourceCompiler::ChildHandling ResourceCompiler::consumeScopedElement(const SourceNode& childNode, ChildBuildContext& context) const {
+    const auto scopedInline = context.definition.contentBehavior.scopedElements.find(canonicalizeHTMLName(htmlTagName(childNode.tag)));
     if (scopedInline == context.definition.contentBehavior.scopedElements.end()) return ChildHandling::Unhandled;
-    const ElementDefinition* scopedDefinition = findElementDefinition(childNode.tag);
-    const ElementBuildInput input = makeElementInput(childNode, nullptr, context.source);
-    Element* scopedPart =
-        scopedInline->second.create(context.target, context.state.result, context.source, childNode.source.begin.line, childNode.source.begin.column);
+    const ResourceElementDefinition* scopedDefinition = findElementDefinition(childNode.tag);
+    const ElementBuildInput input = makeElementInput(childNode, nullptr, context.sourceName);
+    Element* scopedPart = scopedInline->second.create(context.target, context.buildContext, context.sourceName, childNode.source.begin.line,
+                                                      childNode.source.begin.column);
     if (scopedPart)
-        appendInlineElements(*scopedPart, childNode.content, scopedInline->second.elementName, scopedInline->second.acceptedElements,
-                             context.state.result, context.source, context.state.context);
+        appendInlineElements(*scopedPart, childNode.content, scopedInline->second.elementName, scopedInline->second.acceptedTags,
+                             context.buildContext, context.sourceName);
     if (scopedDefinition) {
-        validateElementAttributes(input, scopedDefinition->attributes, context.state.result);
-        if (scopedPart) applyCommonElementAttributes(input, *scopedPart, context.state.result);
+        validateElementAttributes(input, scopedDefinition->attributes, context.buildContext);
+        if (scopedPart) applyCommonElementAttributes(input, *scopedPart, context.buildContext);
     } else {
-        rejectAuthoredAttributes(childNode, context.state.result, context.source);
+        rejectAuthoredAttributes(childNode, context.buildContext, context.sourceName);
     }
     if (scopedPart) context.markLayoutChild(*scopedPart);
     return ChildHandling::Handled;
 }
 
-LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::consumeChildContainer(const SourceNode& childNode, ChildBuildContext& context) const {
+ResourceCompiler::ChildHandling ResourceCompiler::consumeChildContainer(const SourceNode& childNode, ChildBuildContext& context) const {
     if (!context.definition.childrenBehavior.claim) return ChildHandling::Unhandled;
     const ChildClaim claim =
-        context.definition.childrenBehavior.claim(makeElementInput(childNode, nullptr, context.source), context.target, context.state.result);
+        context.definition.childrenBehavior.claim(makeElementInput(childNode, nullptr, context.sourceName), context.target, context.buildContext);
     if (claim.kind() == ChildClaim::Kind::NotHandled) return ChildHandling::Unhandled;
     if (Element* container = claim.container()) {
         for (const SourceContent& nestedContent : childNode.content) {
             if (nestedContent.isText()) {
                 if (!trimmedText(nestedContent.text).empty())
                     context.state.result.error("layout.text.unsupported",
-                                               "Text content is not supported in <" + std::string(sourceTagName(childNode.tag)) + ">.",
-                                               context.source, nestedContent.source.begin.line, nestedContent.source.begin.column);
+                                               "Text content is not supported in <" + std::string(htmlTagName(childNode.tag)) + ">.",
+                                               context.sourceName, nestedContent.source.begin.line, nestedContent.source.begin.column);
                 continue;
             }
-            if (auto childElement = buildNode(*nestedContent.node, context.source, nullptr, context.state))
+            if (auto childElement = buildNode(*nestedContent.node, context.sourceName, nullptr, context.state))
                 container->append(std::move(childElement));
         }
     }
     return ChildHandling::Handled;
 }
 
-LayoutResourceCompiler::ChildHandling LayoutResourceCompiler::buildRegularChild(const SourceNode& childNode, ChildBuildContext& context) const {
-    if (auto childElement = buildNode(childNode, context.source, nullptr, context.state)) {
+ResourceCompiler::ChildHandling ResourceCompiler::buildRegularChild(const SourceNode& childNode, ChildBuildContext& context) const {
+    if (auto childElement = buildNode(childNode, context.sourceName, nullptr, context.state)) {
         context.markLayoutChild(*childElement);
         context.target.append(std::move(childElement));
     }

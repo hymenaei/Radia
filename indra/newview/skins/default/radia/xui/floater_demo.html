@@ -1,11 +1,11 @@
 <floater id="floaterDemo" resizeable>
     <head>
         <title>
-            <icon src="search"/>
+            <icon src="search"></icon>
             {{demo.title}}
         </title>
-        <minimize/>
-        <close/>
+        <minimize></minimize>
+        <close></close>
     </head>
 
     <body>
@@ -43,7 +43,7 @@
         </div>
 
         <button onClick="press()">
-            <icon src="search"/>
+            <icon src="search"></icon>
             {{demo.press}}
         </button>
 
@@ -85,10 +85,10 @@
             </div>
         </fieldset>
 
-        <button class="compact" disabled/>
+        <button class="compact" disabled></button>
 
         <p id="languageHeading">{{demo.language}}</p>
-        <p id="activeLocale"/>
+        <p id="activeLocale"></p>
 
         <div id="languageButtons">
             <button id="previousLocale" class="language previous" onClick="selectLocale(-1)">{{demo.previous}}</button>

@@ -11,12 +11,12 @@
 #include <string>
 #include <string_view>
 #include <vector>
-#include "documentcontroller.h"
 #include "controllerregistration.h"
-#include "elements/button.h"
-#include "elements/element.h"
-#include "elements/floater.h"
-#include "elements/panel.h"
+#include "documentcontroller.h"
+#include "dom/element.h"
+#include "html/button.h"
+#include "html/floater.h"
+#include "html/panel.h"
 #include "llcontrol.h"
 #include "llglslshader.h"
 #include "llsd.h"
@@ -24,10 +24,10 @@
 #include "runtime.h"
 
 namespace {
-using radia::ui::ButtonElement;
 using radia::ui::Document;
 using radia::ui::Element;
-using radia::ui::FloaterElement;
+using radia::ui::HTMLButtonElement;
+using radia::ui::HTMLFloaterElement;
 using radia::ui::KeybindingPresentation;
 using radia::ui::KeyEvent;
 using radia::ui::kKeyReturn;
@@ -38,8 +38,8 @@ using radia::ui::PointerButton;
 using radia::ui::PointerEvent;
 using radia::ui::RecordingPaintContext;
 using radia::ui::Rect;
-using radia::ui::WheelEvent;
 using radia::ui::System;
+using radia::ui::WheelEvent;
 using radia::viewer::ui::DocumentController;
 using radia::viewer::ui::Runtime;
 using radia::viewer::ui::RuntimeKeybindingState;
@@ -62,10 +62,9 @@ KeyEvent makeKeyEvent(int key, std::uint32_t modifiers = 0, bool repeated = fals
 SkinSnapshotResult runtimeSkinSnapshot() {
     constexpr char kLocalization[] = "defaultLocale: en\n"
                                      "locales: {en: {strings: {runtime: Runtime}}}\n";
-    constexpr char kSkin[] =
-        "floater { display: flex; flex-direction: column; } floater > head { height: 30px; } button { size: 128px 32px; }";
+    constexpr char kSkin[] = "floater { display: flex; flex-direction: column; } floater > head { height: 30px; } button { size: 128px 32px; }";
     constexpr char kView[] =
-        "<floater resizeable><head><title>runtime</title><minimize/><close/></head><body><button id=\"press\" onClick=\"press()\"/></body></floater>";
+        "<floater resizeable><head><title>runtime</title><minimize></minimize><close></close></head><body><button id=\"press\" onClick=\"press()\"></button></body></floater>";
 
     SkinSnapshotResult result;
     result.snapshot.add("localization.yaml", kLocalization);
@@ -239,9 +238,9 @@ TEST_F(RuntimeTest, ForwardsPaintScaleToSurface) {
 TEST_F(RuntimeTest, RoutesAttachedInputToBoundComponent) {
     ASSERT_TRUE(runtime.initialize());
     ASSERT_TRUE(registerTestFloater());
-    FloaterElement* floater = runtime.openFloater("runtimeTest");
+    HTMLFloaterElement* floater = runtime.openFloater("runtimeTest");
     ASSERT_NE(floater, nullptr);
-    ButtonElement* press = dynamic_cast<ButtonElement*>(findElement(*floater, "press"));
+    HTMLButtonElement* press = dynamic_cast<HTMLButtonElement*>(findElement(*floater, "press"));
     ASSERT_NE(press, nullptr);
 
     nowCalls = 0;
@@ -277,9 +276,9 @@ TEST_F(RuntimeTest, LeavesUnclaimedInputForViewerFallback) {
 TEST_F(RuntimeTest, HeadDragRetainsCaptureUntilRelease) {
     ASSERT_TRUE(runtime.initialize());
     ASSERT_TRUE(registerTestFloater());
-    FloaterElement* floater = runtime.openFloater("runtimeTest");
+    HTMLFloaterElement* floater = runtime.openFloater("runtimeTest");
     ASSERT_NE(floater, nullptr);
-    ButtonElement* press = dynamic_cast<ButtonElement*>(findElement(*floater, "press"));
+    HTMLButtonElement* press = dynamic_cast<HTMLButtonElement*>(findElement(*floater, "press"));
     ASSERT_NE(press, nullptr);
     ASSERT_NE(floater->head(), nullptr);
 
@@ -308,7 +307,7 @@ TEST_F(RuntimeTest, HeadDragRetainsCaptureUntilRelease) {
 TEST_F(RuntimeTest, PersistsMinimizedFloaterMove) {
     ASSERT_TRUE(runtime.initialize());
     ASSERT_TRUE(registerTestFloater());
-    FloaterElement* floater = runtime.openFloater("runtimeTest");
+    HTMLFloaterElement* floater = runtime.openFloater("runtimeTest");
     ASSERT_NE(floater, nullptr);
     ASSERT_NE(floater->head(), nullptr);
 
@@ -345,7 +344,7 @@ TEST_F(RuntimeTest, PersistsMinimizedFloaterMove) {
 TEST_F(RuntimeTest, CapturedPointerContinuesOutsideViewportUntilRelease) {
     ASSERT_TRUE(runtime.initialize());
     ASSERT_TRUE(registerTestFloater());
-    FloaterElement* floater = runtime.openFloater("runtimeTest");
+    HTMLFloaterElement* floater = runtime.openFloater("runtimeTest");
     ASSERT_NE(floater, nullptr);
     ASSERT_NE(floater->head(), nullptr);
     runtime.frame(800, 600);
@@ -370,7 +369,7 @@ TEST_F(RuntimeTest, CapturedPointerContinuesOutsideViewportUntilRelease) {
 TEST_F(RuntimeTest, FocusLossCancelsHeadDrag) {
     ASSERT_TRUE(runtime.initialize());
     ASSERT_TRUE(registerTestFloater());
-    FloaterElement* floater = runtime.openFloater("runtimeTest");
+    HTMLFloaterElement* floater = runtime.openFloater("runtimeTest");
     ASSERT_NE(floater, nullptr);
     ASSERT_NE(floater->head(), nullptr);
 
@@ -393,7 +392,7 @@ TEST_F(RuntimeTest, FocusLossCancelsHeadDrag) {
 TEST_F(RuntimeTest, PointerCaptureLossCancelsHeadDrag) {
     ASSERT_TRUE(runtime.initialize());
     ASSERT_TRUE(registerTestFloater());
-    FloaterElement* floater = runtime.openFloater("runtimeTest");
+    HTMLFloaterElement* floater = runtime.openFloater("runtimeTest");
     ASSERT_NE(floater, nullptr);
     ASSERT_NE(floater->head(), nullptr);
 
@@ -458,9 +457,9 @@ TEST_F(RuntimeTest, ShutdownStopsFrameAndIdleWork) {
 TEST_F(RuntimeTest, VisibilityAndAccountTransitionsClearInteraction) {
     ASSERT_TRUE(runtime.initialize());
     ASSERT_TRUE(registerTestFloater());
-    FloaterElement* floater = runtime.openFloater("runtimeTest");
+    HTMLFloaterElement* floater = runtime.openFloater("runtimeTest");
     ASSERT_NE(floater, nullptr);
-    ButtonElement* press = dynamic_cast<ButtonElement*>(findElement(*floater, "press"));
+    HTMLButtonElement* press = dynamic_cast<HTMLButtonElement*>(findElement(*floater, "press"));
     ASSERT_NE(press, nullptr);
 
     runtime.frame(800, 600);

@@ -8,12 +8,12 @@
 #include <cmath>
 #include <string_view>
 #include <utility>
-#include "elements/floater.h"
+#include "html/floater.h"
 #include "llcontrol.h"
 #include "llsdutil.h"
 
 namespace radia::viewer::ui {
-using radia::ui::FloaterElement;
+using radia::ui::HTMLFloaterElement;
 
 namespace {
 constexpr std::string_view kUILayout = "UILayout";
@@ -138,7 +138,7 @@ std::optional<FloaterPlacement> WorkspacePersistence::restorePlacement(const Com
     return decodePlacement(mergedPlacement(layout[componentKey.definitionId], workspace[componentKey.persistenceKey()]));
 }
 
-void WorkspacePersistence::saveFloaterPlacement(const ComponentInstanceKey& componentKey, const FloaterElement& floater) {
+void WorkspacePersistence::saveFloaterPlacement(const ComponentInstanceKey& componentKey, const HTMLFloaterElement& floater) {
     const auto& placementRect = floater.minimized() ? floater.expandedRect() : floater.rect();
     std::optional<FloaterLogicalSize> size;
     if (floater.resizeable()) size = FloaterLogicalSize{placementRect.w, placementRect.h};

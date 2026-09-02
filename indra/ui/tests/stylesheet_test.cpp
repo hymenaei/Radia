@@ -10,36 +10,37 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include "elements/button.h"
-#include "elements/document.h"
-#include "elements/elementdefinition.h"
-#include "elements/floater.h"
-#include "elements/icon.h"
-#include "elements/input.h"
-#include "elements/label.h"
-#include "elements/panel.h"
+#include "dom/document.h"
+#include "dom/elementinternal.h"
 #include "floater_test_helpers.h"
+#include "html/button.h"
+#include "html/floater.h"
+#include "html/icon.h"
+#include "html/input.h"
+#include "html/label.h"
+#include "html/panel.h"
 #include "layout/engine.h"
+#include "resource/elementdefinition.h"
 #include "style/stylesheet.h"
 
 namespace {
 using radia::ui::AccentColor;
-using radia::ui::ButtonElement;
 using radia::ui::ColorScheme;
 using radia::ui::CursorStyle;
 using radia::ui::Document;
 using radia::ui::EffectKind;
 using radia::ui::Element;
 using radia::ui::ElementState;
-using radia::ui::FloaterElement;
 using radia::ui::FontFamily;
 using radia::ui::GradientKind;
-using radia::ui::IconElement;
-using radia::ui::InputElement;
-using radia::ui::LabelElement;
+using radia::ui::HTMLButtonElement;
+using radia::ui::HTMLFloaterElement;
+using radia::ui::HTMLIconElement;
+using radia::ui::HTMLInputElement;
+using radia::ui::HTMLLabelElement;
+using radia::ui::HTMLPanelElement;
 using radia::ui::LayoutDirection;
 using radia::ui::Overflow;
-using radia::ui::PanelElement;
 using radia::ui::PointerEvents;
 using radia::ui::RadialGradientShape;
 using radia::ui::resolveElementStyle;
@@ -54,11 +55,13 @@ using radia::ui::StyleSheet;
 using radia::ui::TextAlign;
 using radia::ui::VerticalAlign;
 using radia::ui::detail::ElementCompilerAccess;
+using radia::ui::detail::makeElement;
+using radia::ui::detail::makeElementValue;
 using ::testing::Message;
 
-IconElement& appendIcon(ButtonElement& button, std::string name) {
-    auto icon = std::make_unique<IconElement>(std::move(name));
-    IconElement* result = icon.get();
+HTMLIconElement& appendIcon(HTMLButtonElement& button, std::string name) {
+    auto icon = makeElement<HTMLIconElement>(std::move(name));
+    HTMLIconElement* result = icon.get();
     button.append(std::move(icon));
     return *result;
 }
@@ -74,14 +77,14 @@ TEST(StyleSheetTest, ResolvesColorTokensAndInheritance) {
     ASSERT_TRUE(stylesheet.loadRadia(kColorTokenStyles).ok());
     const Style button = stylesheet.resolve("button", "", {}, 0);
     EXPECT_NEAR(button.backgroundColor.g, 1.f, 1.0e-4f);
-    ButtonElement control;
-    auto labelElement = std::make_unique<Element>("span");
+    auto control = makeElementValue<HTMLButtonElement>();
+    auto labelElement = makeElement<Element>("span");
     Element* label = labelElement.get();
     labelElement->textContent("Inherited");
     control.append(std::move(labelElement));
     EXPECT_NEAR(resolveElementStyle(stylesheet, *label).color.a, .5f, 1.0e-4f);
     EXPECT_EQ(resolveElementStyle(stylesheet, *label).fontSize, 17.f);
-    LabelElement standalone("Standalone");
+    auto standalone = makeElementValue<HTMLLabelElement>("Standalone");
     EXPECT_EQ(resolveElementStyle(stylesheet, standalone).fontSize, 29.f);
 }
 
@@ -94,11 +97,11 @@ TEST(StyleSheetTest, TreatsRootAsDocumentRootSelector) {
     const auto loadResult = stylesheet.loadRadia(kRootStyles);
     ASSERT_TRUE(loadResult.ok()) << (loadResult.errors.empty() ? std::string() : loadResult.errors.front().message);
 
-    auto rootOwner = std::make_unique<PanelElement>();
+    auto rootOwner = makeElement<HTMLPanelElement>();
     rootOwner->addClass("root");
     Document document(std::move(rootOwner));
-    auto labelOwner = std::make_unique<LabelElement>();
-    LabelElement* label = labelOwner.get();
+    auto labelOwner = makeElement<HTMLLabelElement>();
+    HTMLLabelElement* label = labelOwner.get();
     document.documentElement()->append(std::move(labelOwner));
 
     const Style rootStyle = resolveElementStyle(stylesheet, *document.documentElement());
@@ -113,7 +116,7 @@ TEST(StyleSheetTest, TreatsRootAsDocumentRootSelector) {
     EXPECT_NEAR(labelStyle.color.r, 32.f / 255.f, 1.0e-4f);
     EXPECT_FALSE(labelStyle.minWidth.has_value());
 
-    PanelElement standaloneRoot;
+    auto standaloneRoot = makeElementValue<HTMLPanelElement>();
     EXPECT_EQ(resolveElementStyle(stylesheet, standaloneRoot).colorScheme, ColorScheme::Light);
 }
 
@@ -179,16 +182,18 @@ TEST(StyleSheetTest, AcceptsElementlessPseudoClassSelectors) {
 }
 
 TEST(StyleSheetTest, MatchesDirectionAlongsideCheckedState) {
-    constexpr char kDirectionStyles[] = "input { &:dir(rtl):checked::thumb { translate: -22px 0; } "
-                                        "&:dir(ltr):checked::thumb { translate: 22px 0; } }";
+    constexpr char kDirectionStyles[] = "input { &:dir(rtl):checked::slider-thumb { translate: -22px 0; } "
+                                        "&:dir(ltr):checked::slider-thumb { translate: 22px 0; } }";
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kDirectionStyles).ok());
-    const uint8_t checked = static_cast<uint8_t>(ElementState::Checked);
+    auto input = makeElementValue<HTMLInputElement>();
+    input.type("checkbox").switchMode(true).checked(true);
 
-    EXPECT_EQ(stylesheet.resolvePart("input", "", {}, checked, "thumb", 0, LayoutDirection::RightToLeft).translate.x, -22.f);
-    EXPECT_EQ(stylesheet.resolvePart("input", "", {}, checked, "thumb", 0, LayoutDirection::LeftToRight).translate.x, 22.f);
-    EXPECT_EQ(stylesheet.resolvePart("input", "", {}, 0, "thumb", 0, LayoutDirection::RightToLeft).translate.x, 0.f);
+    EXPECT_EQ(stylesheet.resolvePseudoElement(input, "slider-thumb", LayoutDirection::RightToLeft).translate.x, -22.f);
+    EXPECT_EQ(stylesheet.resolvePseudoElement(input, "slider-thumb", LayoutDirection::LeftToRight).translate.x, 22.f);
+    input.checked(false);
+    EXPECT_EQ(stylesheet.resolvePseudoElement(input, "slider-thumb", LayoutDirection::RightToLeft).translate.x, 0.f);
 }
 
 TEST(StyleSheetTest, PreservesLiveStylesheetAfterUnknownProperty) {
@@ -235,9 +240,9 @@ TEST(StyleSheetTest, MatchesChildSelectorsUsingOwnerClassAndState) {
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kChildOwnerStyles).ok());
-    ButtonElement button;
+    auto button = makeElementValue<HTMLButtonElement>();
     button.addClass("primary");
-    IconElement& icon = appendIcon(button, "search");
+    HTMLIconElement& icon = appendIcon(button, "search");
 
     EXPECT_EQ(resolveElementStyle(stylesheet, icon).width.pixels(), 10.f);
     ElementCompilerAccess::setState(button, ElementState::Hovered, true);
@@ -249,7 +254,7 @@ TEST(StyleSheetTest, MatchesInteractivePartStateIndependentlyFromOwner) {
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kInteractivePartStyles).ok());
-    FloaterElement floater;
+    auto floater = makeElementValue<HTMLFloaterElement>();
     radia::ui::test::appendFloaterStructure(floater, true);
     auto* closeButton = floater.closeButton();
     ASSERT_NE(closeButton, nullptr);
@@ -283,8 +288,8 @@ TEST(StyleSheetTest, ParsesCursorValuesAndPreservesPriorValueAfterFailure) {
 TEST(StyleSheetTest, CompilesTargetSpecificRulesWithoutWarnings) {
     constexpr char kRelevantAndIrrelevantStyles[] =
         "input { padding: 4px; "
-        "&:checked::thumb { order: 1; } } "
-        "input::track { display: flex; } input::thumb { border-radius: 10px; } label { font-size: 13px; } "
+        "&:checked::slider-thumb { order: 1; } } "
+        "input::slider-track { display: flex; } input::slider-thumb { border-radius: 10px; } label { font-size: 13px; } "
         "panel { display: flex; flex-direction: row; font-size: 14px; } input { display: flex; flex-direction: row; } "
         "label { gap: 2px; align-items: center; } "
         "icon { font-size: 13px; } "
@@ -302,8 +307,8 @@ TEST(StyleSheetTest, SelectsSwitchInputsByAttribute) {
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia("input { width: 10px; } input[switch] { width: 40px; }").ok());
 
-    InputElement genericInput;
-    InputElement switchInput;
+    auto genericInput = makeElementValue<HTMLInputElement>();
+    auto switchInput = makeElementValue<HTMLInputElement>();
     switchInput.type("checkbox").switchMode(true);
     EXPECT_EQ(resolveElementStyle(stylesheet, genericInput).width.pixels(), 10.f);
     EXPECT_EQ(resolveElementStyle(stylesheet, switchInput).width.pixels(), 40.f);
@@ -313,7 +318,7 @@ TEST(StyleSheetTest, SelectsRadioInputsByNameAttribute) {
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia("input { width: 10px; } input[name=choice] { width: 40px; }").ok());
 
-    InputElement input;
+    auto input = makeElementValue<HTMLInputElement>();
     input.type("radio").name("choice");
     EXPECT_EQ(resolveElementStyle(stylesheet, input).width.pixels(), 40.f);
 }
@@ -322,7 +327,7 @@ TEST(StyleSheetTest, SelectsIndeterminateInputs) {
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia("input:indeterminate { opacity: .5; }").ok());
 
-    InputElement input;
+    auto input = makeElementValue<HTMLInputElement>();
     input.type("checkbox");
     EXPECT_FLOAT_EQ(resolveElementStyle(stylesheet, input).opacity, 1.f);
     input.indeterminate(true);
@@ -336,8 +341,8 @@ TEST(StyleSheetTest, RejectsInvalidSelectorsAndPropertyValues) {
     };
 
     const InvalidRuleCase cases[] = {
-        {"button::label { stroke-width: 2px; }", "stylesheet.selector.part_unknown"},
-        {"input::missing { width: 10px; }", "stylesheet.selector.part_unknown"},
+        {"button::label { stroke-width: 2px; }", "stylesheet.selector.pseudo_element_unknown"},
+        {"input::missing { width: 10px; }", "stylesheet.selector.pseudo_element_unknown"},
         {"panel { align-items: sideways; }", "stylesheet.property.value_invalid"},
         {"button { align-self: sideways; }", "stylesheet.property.value_invalid"},
         {"input { justify-self: sideways; }", "stylesheet.property.value_invalid"},
@@ -364,16 +369,26 @@ TEST(StyleSheetTest, RejectsInvalidSelectorsAndPropertyValues) {
     }
 }
 
-TEST(StyleSheetTest, WarnsWhenTargetSpecificStateCannotMatch) {
-    constexpr char kUnmatchableStateStyles[] = "input::thumb:checked { width: 10px; } label:checked { opacity: .5; }";
+TEST(StyleSheetTest, RejectsPseudoElementPseudoClasses) {
+    constexpr char kPseudoElementStateStyles[] = "input::slider-thumb:checked { width: 10px; }";
 
     StyleSheet stylesheet;
-    const auto result = stylesheet.loadRadia(kUnmatchableStateStyles, "contract.css");
+    const auto result = stylesheet.loadRadia(kPseudoElementStateStyles, "contract.css");
 
-    ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.warnings.size(), std::size_t(2));
-    EXPECT_EQ(result.warnings[0].code, "stylesheet.selector.state_never_matches");
-    EXPECT_EQ(result.warnings[1].code, "stylesheet.selector.state_never_matches");
+    ASSERT_FALSE(result.ok());
+    ASSERT_FALSE(result.errors.empty());
+    EXPECT_EQ(result.errors.front().code, "stylesheet.selector.pseudo_element_invalid");
+}
+
+TEST(StyleSheetTest, RejectsNestedPseudoElements) {
+    constexpr char kNestedPseudoElementStyles[] = "input::slider-track::slider-fill { width: 10px; }";
+
+    StyleSheet stylesheet;
+    const auto result = stylesheet.loadRadia(kNestedPseudoElementStyles, "contract.css");
+
+    ASSERT_FALSE(result.ok());
+    ASSERT_FALSE(result.errors.empty());
+    EXPECT_EQ(result.errors.front().code, "stylesheet.selector.pseudo_element_invalid");
 }
 
 TEST(StyleSheetTest, InheritsOnlyInheritablePropertiesAndAllowsOverrides) {
@@ -387,12 +402,12 @@ TEST(StyleSheetTest, InheritsOnlyInheritablePropertiesAndAllowsOverrides) {
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kInheritedStyles).ok());
 
-    auto parent = std::make_unique<PanelElement>();
-    auto inherited = std::make_unique<LabelElement>("Inherited");
-    LabelElement* inheritedLabel = inherited.get();
+    auto parent = makeElement<HTMLPanelElement>();
+    auto inherited = makeElement<HTMLLabelElement>("Inherited");
+    HTMLLabelElement* inheritedLabel = inherited.get();
     parent->append(std::move(inherited));
-    auto overridden = std::make_unique<LabelElement>("Overridden");
-    LabelElement* overriddenLabel = overridden.get();
+    auto overridden = makeElement<HTMLLabelElement>("Overridden");
+    HTMLLabelElement* overriddenLabel = overridden.get();
     overridden->setId("override");
     parent->append(std::move(overridden));
 
@@ -418,10 +433,67 @@ TEST(StyleSheetTest, InheritsOnlyInheritablePropertiesAndAllowsOverrides) {
     EXPECT_EQ(overriddenStyle.cursor, CursorStyle::Default);
 }
 
+TEST(StyleSheetTest, ResolvesCSSWideInheritanceKeywords) {
+    constexpr char kStyles[] = "panel { width: 42px; display: block; color: #204060ff; font-size: 19px; } "
+                               "label.explicit-inherit { width: inherit; display: inherit; color: inherit; } "
+                               "label.unset-inherited { color: unset; font-size: unset; } "
+                               "label.unset-initial { width: unset; } "
+                               "label.late-inherit { width: 7px; width: inherit; } "
+                               "label.late-value { width: inherit; width: 9px; }";
+
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia(kStyles).ok());
+
+    auto parent = makeElementValue<HTMLPanelElement>();
+    auto explicitInherit = makeElement<HTMLLabelElement>();
+    explicitInherit->addClass("explicit-inherit");
+    HTMLLabelElement* explicitInheritPtr = explicitInherit.get();
+    parent.append(std::move(explicitInherit));
+    auto unsetInherited = makeElement<HTMLLabelElement>();
+    unsetInherited->addClass("unset-inherited");
+    HTMLLabelElement* unsetInheritedPtr = unsetInherited.get();
+    parent.append(std::move(unsetInherited));
+    auto unsetInitial = makeElement<HTMLLabelElement>();
+    unsetInitial->addClass("unset-initial");
+    HTMLLabelElement* unsetInitialPtr = unsetInitial.get();
+    parent.append(std::move(unsetInitial));
+    auto lateInherit = makeElement<HTMLLabelElement>();
+    lateInherit->addClass("late-inherit");
+    HTMLLabelElement* lateInheritPtr = lateInherit.get();
+    parent.append(std::move(lateInherit));
+    auto lateValue = makeElement<HTMLLabelElement>();
+    lateValue->addClass("late-value");
+    HTMLLabelElement* lateValuePtr = lateValue.get();
+    parent.append(std::move(lateValue));
+
+    const Style parentStyle = resolveElementStyle(stylesheet, parent);
+    EXPECT_EQ(parentStyle.width.pixels(), 42.f);
+    EXPECT_EQ(parentStyle.display, radia::ui::DisplayMode::Block);
+    EXPECT_NEAR(parentStyle.color.r, 32.f / 255.f, 1.0e-4f);
+    EXPECT_EQ(parentStyle.fontSize, 19.f);
+
+    const Style explicitInheritStyle = resolveElementStyle(stylesheet, *explicitInheritPtr);
+    EXPECT_EQ(explicitInheritStyle.width.pixels(), 42.f);
+    EXPECT_EQ(explicitInheritStyle.display, radia::ui::DisplayMode::Block);
+    EXPECT_NEAR(explicitInheritStyle.color.r, parentStyle.color.r, 1.0e-4f);
+
+    const Style unsetInheritedStyle = resolveElementStyle(stylesheet, *unsetInheritedPtr);
+    EXPECT_NEAR(unsetInheritedStyle.color.r, parentStyle.color.r, 1.0e-4f);
+    EXPECT_EQ(unsetInheritedStyle.fontSize, parentStyle.fontSize);
+
+    const Style unsetInitialStyle = resolveElementStyle(stylesheet, *unsetInitialPtr);
+    EXPECT_TRUE(unsetInitialStyle.width.isAuto());
+
+    EXPECT_EQ(resolveElementStyle(stylesheet, *lateInheritPtr).width.pixels(), 42.f);
+    EXPECT_EQ(resolveElementStyle(stylesheet, *lateValuePtr).width.pixels(), 9.f);
+}
+
 TEST(StyleSheetTest, ParsesOverflowShorthandAndRejectsUnsupportedValues) {
     constexpr char kOverflowStyles[] = "panel { overflow: scroll auto; } "
                                        "#single { overflow: auto; } "
                                        "#longhand { overflow-x: auto; overflow-y: scroll; } "
+                                       "#vertical { overflow-x: visible; overflow-y: hidden; } "
+                                       "#horizontal { overflow-x: hidden; overflow-y: visible; } "
                                        "#initial { overflow: scroll; overflow-x: initial; overflow-y: initial; }";
     constexpr char kInvalidOverflowStyles[] = "panel { overflow: clip; }";
 
@@ -436,6 +508,12 @@ TEST(StyleSheetTest, ParsesOverflowShorthandAndRejectsUnsupportedValues) {
     const Style longhand = stylesheet.resolve("panel", "longhand", {}, 0);
     EXPECT_EQ(longhand.overflowX, Overflow::Auto);
     EXPECT_EQ(longhand.overflowY, Overflow::Scroll);
+    const Style vertical = stylesheet.resolve("panel", "vertical", {}, 0);
+    EXPECT_EQ(vertical.overflowX, Overflow::Auto);
+    EXPECT_EQ(vertical.overflowY, Overflow::Hidden);
+    const Style horizontal = stylesheet.resolve("panel", "horizontal", {}, 0);
+    EXPECT_EQ(horizontal.overflowX, Overflow::Hidden);
+    EXPECT_EQ(horizontal.overflowY, Overflow::Auto);
     const Style initial = stylesheet.resolve("panel", "initial", {}, 0);
     EXPECT_EQ(initial.overflowX, Overflow::Visible);
     EXPECT_EQ(initial.overflowY, Overflow::Visible);
@@ -552,14 +630,14 @@ TEST(StyleSheetTest, InheritsColorSchemeAndAllowsOverride) {
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kColorSchemeStyles).ok());
 
-    PanelElement panel;
-    auto inheritedInput = std::make_unique<InputElement>();
-    InputElement* inheritedInputPtr = inheritedInput.get();
+    auto panel = makeElementValue<HTMLPanelElement>();
+    auto inheritedInput = makeElement<HTMLInputElement>();
+    HTMLInputElement* inheritedInputPtr = inheritedInput.get();
     inheritedInputPtr->type("checkbox");
     panel.append(std::move(inheritedInput));
 
-    auto overriddenInput = std::make_unique<InputElement>();
-    InputElement* overriddenInputPtr = overriddenInput.get();
+    auto overriddenInput = makeElement<HTMLInputElement>();
+    HTMLInputElement* overriddenInputPtr = overriddenInput.get();
     overriddenInputPtr->type("checkbox").addClass("dark");
     panel.append(std::move(overriddenInput));
 
@@ -574,15 +652,15 @@ TEST(StyleSheetTest, ResolvesLightDarkAfterColorSchemeInheritance) {
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kLightDarkStyles).ok());
 
-    PanelElement lightPanel;
-    auto lightLabel = std::make_unique<LabelElement>("light");
-    LabelElement* lightLabelPtr = lightLabel.get();
+    auto lightPanel = makeElementValue<HTMLPanelElement>();
+    auto lightLabel = makeElement<HTMLLabelElement>("light");
+    HTMLLabelElement* lightLabelPtr = lightLabel.get();
     lightPanel.append(std::move(lightLabel));
 
-    PanelElement darkPanel;
+    auto darkPanel = makeElementValue<HTMLPanelElement>();
     darkPanel.addClass("dark");
-    auto darkLabel = std::make_unique<LabelElement>("dark");
-    LabelElement* darkLabelPtr = darkLabel.get();
+    auto darkLabel = makeElement<HTMLLabelElement>("dark");
+    HTMLLabelElement* darkLabelPtr = darkLabel.get();
     darkPanel.append(std::move(darkLabel));
 
     EXPECT_NEAR(resolveElementStyle(stylesheet, *lightLabelPtr).color.r, 16.f / 255.f, 1.0e-4f);
@@ -595,7 +673,7 @@ TEST(StyleSheetTest, ProjectsMinimizedFloaterStateIntoHeadStyles) {
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kMinimizedFloaterStyles).ok());
-    FloaterElement floater;
+    auto floater = makeElementValue<HTMLFloaterElement>();
     radia::ui::test::appendFloaterStructure(floater, false, true);
     Element* head = floater.head();
     ASSERT_NE(head, nullptr);
@@ -654,17 +732,17 @@ TEST(StyleSheetTest, MatchesStructuralSelectorsAndCombinators) {
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kStructuralStyles).ok());
 
-    PanelElement root;
+    auto root = makeElementValue<HTMLPanelElement>();
     root.addClass("root");
-    auto direct = std::make_unique<LabelElement>("direct");
+    auto direct = makeElement<HTMLLabelElement>("direct");
     direct->addClass("direct");
-    LabelElement* directLabel = direct.get();
+    HTMLLabelElement* directLabel = direct.get();
     root.append(std::move(direct));
 
-    auto container = std::make_unique<PanelElement>();
-    auto nested = std::make_unique<LabelElement>("nested");
+    auto container = makeElement<HTMLPanelElement>();
+    auto nested = makeElement<HTMLLabelElement>("nested");
     nested->addClass("nested");
-    LabelElement* nestedLabel = nested.get();
+    HTMLLabelElement* nestedLabel = nested.get();
     container->append(std::move(nested));
     root.append(std::move(container));
 
@@ -1034,11 +1112,14 @@ TEST(StyleSheetTest, RejectsImportFailuresAndPreservesLiveStylesheet) {
     EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).width.pixels(), 44.f);
 }
 
-TEST(StyleSheetTest, NormalizesSelectorNamesAndRejectsInvalidIdentifiers) {
+TEST(StyleSheetTest, NormalizesSelectorNamesAndUsesCSSIdentifierSyntax) {
     constexpr char kMixedCaseSelector[] = "BuTtOn { width: 23px; }";
     constexpr char kUnderscoreSelector[] = "button#bad_id { width: 29px; }";
+    constexpr char kEscapedIdSelector[] = "button#bad\\.id { width: 31px; }";
+    constexpr char kEscapedColonSelector[] = "button#bad\\:id { width: 37px; }";
+    constexpr char kHexEscapedIdSelector[] = "button#\\31 23\\:bad\\.id { width: 41px; }";
     constexpr char kInvalidIdSelector[] = "button#bad@id { width: 1px; }";
-    constexpr char kInvalidPartSelector[] = "floater::head.part { width: 1px; }";
+    constexpr char kInvalidPseudoElementSelector[] = "floater::head.part { width: 1px; }";
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kMixedCaseSelector).ok());
@@ -1047,26 +1128,35 @@ TEST(StyleSheetTest, NormalizesSelectorNamesAndRejectsInvalidIdentifiers) {
     ASSERT_TRUE(stylesheet.loadRadia(kUnderscoreSelector).ok());
     EXPECT_EQ(stylesheet.resolve("button", "bad_id", {}, 0).width.pixels(), 29.f);
 
+    ASSERT_TRUE(stylesheet.loadRadia(kEscapedIdSelector).ok());
+    EXPECT_EQ(stylesheet.resolve("button", "bad.id", {}, 0).width.pixels(), 31.f);
+
+    ASSERT_TRUE(stylesheet.loadRadia(kEscapedColonSelector).ok());
+    EXPECT_EQ(stylesheet.resolve("button", "bad:id", {}, 0).width.pixels(), 37.f);
+
+    ASSERT_TRUE(stylesheet.loadRadia(kHexEscapedIdSelector).ok());
+    EXPECT_EQ(stylesheet.resolve("button", "123:bad.id", {}, 0).width.pixels(), 41.f);
+
     const auto invalidId = stylesheet.loadRadia(kInvalidIdSelector);
     ASSERT_FALSE(invalidId.ok());
     ASSERT_FALSE(invalidId.errors.empty());
     EXPECT_EQ(invalidId.errors.front().code, "stylesheet.selector.id_invalid");
 
-    const auto invalidPart = stylesheet.loadRadia(kInvalidPartSelector);
-    ASSERT_FALSE(invalidPart.ok());
-    ASSERT_FALSE(invalidPart.errors.empty());
-    EXPECT_EQ(invalidPart.errors.front().code, "stylesheet.selector.part_invalid");
+    const auto invalidPseudoElement = stylesheet.loadRadia(kInvalidPseudoElementSelector);
+    ASSERT_FALSE(invalidPseudoElement.ok());
+    ASSERT_FALSE(invalidPseudoElement.errors.empty());
+    EXPECT_EQ(invalidPseudoElement.errors.front().code, "stylesheet.selector.pseudo_element_invalid");
 }
 
 TEST(StyleSheetTest, ResolvesNestedInlineKbdSelectors) {
     constexpr char kKbdStyles[] = "kbd { padding: 1px; border-radius: 4px; > kbd { padding: 2px; "
                                   "border-radius: 3px; } } p > kbd { gap: 5px; }";
-    constexpr char kRejectedKbdPart[] = "kbd::key { padding: 1px; }";
+    constexpr char kRejectedKbdPseudoElement[] = "kbd::key { padding: 1px; }";
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kKbdStyles).ok());
 
-    Element owner("p");
+    auto owner = makeElementValue<Element>("p");
     const Style chord = stylesheet.resolveInline(owner, "kbd");
     const Style key = stylesheet.resolveInline(owner, "kbd", {"kbd"});
     EXPECT_EQ(chord.padding.left, 1.f);
@@ -1076,10 +1166,20 @@ TEST(StyleSheetTest, ResolvesNestedInlineKbdSelectors) {
     EXPECT_EQ(key.borderRadius.topLeft.vertical.pixels, 3.f);
     EXPECT_NE(key.gap.fixedPixels(), 5.f);
 
-    const auto rejectedPart = stylesheet.loadRadia(kRejectedKbdPart);
-    ASSERT_FALSE(rejectedPart.ok());
-    ASSERT_FALSE(rejectedPart.errors.empty());
-    EXPECT_EQ(rejectedPart.errors.front().code, "stylesheet.selector.part_unknown");
+    const auto rejectedPseudoElement = stylesheet.loadRadia(kRejectedKbdPseudoElement);
+    ASSERT_FALSE(rejectedPseudoElement.ok());
+    ASSERT_FALSE(rejectedPseudoElement.errors.empty());
+    EXPECT_EQ(rejectedPseudoElement.errors.front().code, "stylesheet.selector.pseudo_element_unknown");
+}
+
+TEST(StyleSheetTest, PreservesSourceOrderAcrossNestedRules) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia("button { color: #ff0000ff; & { color: #00ff00ff; } color: #0000ffff; }").ok());
+
+    const Style style = stylesheet.resolve("button", "", {}, 0);
+    EXPECT_FLOAT_EQ(style.color.r, 0.f);
+    EXPECT_FLOAT_EQ(style.color.g, 0.f);
+    EXPECT_FLOAT_EQ(style.color.b, 1.f);
 }
 
 TEST(StyleSheetTest, ReportsEachSharedImportFailure) {
@@ -1110,5 +1210,11 @@ TEST(StyleSheetTest, MarksStateBorderChangesAsLayoutAffecting) {
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kStateBorderStyles).ok());
+    EXPECT_TRUE(stylesheet.stateAffectsLayout(ElementState::Hovered));
+}
+
+TEST(StyleSheetTest, MarksStateAppearanceChangesAsLayoutAffecting) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia("input:hover { appearance: none; }").ok());
     EXPECT_TRUE(stylesheet.stateAffectsLayout(ElementState::Hovered));
 }

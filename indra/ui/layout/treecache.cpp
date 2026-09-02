@@ -77,7 +77,7 @@ TreeTraversalCache::ChildSnapshot TreeTraversalCache::build(Element& parent, boo
     if (ordered && resolve) {
         const Style& parentStyle = (*resolve)(parent);
         if (!parentState.styleValid()) return std::make_shared<std::vector<ElementRef<Element>>>();
-        if (parentStyle.display == DisplayMode::Flex) {
+        if (isFlexDisplay(parentStyle.display)) {
             std::vector<std::pair<ElementRef<Element>, int>> ranked;
             ranked.reserve(result->size());
             for (const ElementRef<Element>& childRef : *result) {

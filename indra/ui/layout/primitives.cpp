@@ -42,7 +42,10 @@ float contentBoxDimension(const Style& style, bool horizontal, float borderBoxSi
 }
 
 bool isInlineLevel(DisplayMode display) {
-    return display == DisplayMode::Inline || display == DisplayMode::InlineBlock || display == DisplayMode::InlineGrid;
+    return display == DisplayMode::Inline
+        || display == DisplayMode::InlineBlock
+        || display == DisplayMode::InlineFlex
+        || display == DisplayMode::InlineGrid;
 }
 
 const Style& emptyChildStyle() {
@@ -51,38 +54,40 @@ const Style& emptyChildStyle() {
 }
 
 ChildLayout invalidChildLayout() {
-    return {detail::NodeRef(), emptyChildStyle(), {}, {}};
+    return {LayoutChildRef(), emptyChildStyle(), {}, {}};
 }
 
 bool isDisplayed(const ChildLayout& child) {
     if (!child.node) return false;
+    if (child.node.pseudoElement) return child.style.display != DisplayMode::NoneValue;
     if (const Element* element = child.node.element()) return element->isDisplayed(child.style);
     return child.style.display != DisplayMode::NoneValue;
 }
 
 bool isWhitespaceOnlyText(const detail::NodeRef& node) {
     const Text* text = node.text();
-    if (!text || text->getData().empty()) return false;
-    return std::all_of(text->getData().begin(), text->getData().end(), [](unsigned char character) { return std::isspace(character) != 0; });
+    if (!text || text->data().empty()) return false;
+    return std::all_of(text->data().begin(), text->data().end(), [](unsigned char character) { return std::isspace(character) != 0; });
+}
+
+bool isWhitespaceOnlyText(const LayoutChildRef& node) {
+    return !node.pseudoElement && isWhitespaceOnlyText(node.node);
 }
 
 bool flowBreakBefore(const ChildLayout& child) {
+    if (child.node.pseudoElement) return false;
     const Node* node = child.node.get();
     return node && detail::NodeAccess::flowBreakBefore(*node);
 }
 
 void removeChildrenExcludedFromLayout(Element& parent, std::vector<ChildLayout>& children) {
-    if (std::all_of(children.begin(), children.end(), [&parent](const ChildLayout& child) {
-            const Node* node = child.node.get();
-            return node && node->parentNode() == &parent && isDisplayed(child);
-        }))
+    if (std::all_of(children.begin(), children.end(),
+                    [&parent](const ChildLayout& child) { return child.node.attachedTo(parent) && isDisplayed(child); }))
         return;
     std::vector<ChildLayout> attached;
     attached.reserve(children.size());
-    for (const ChildLayout& child : children) {
-        const Node* node = child.node.get();
-        if (node && node->parentNode() == &parent && isDisplayed(child)) attached.push_back(child);
-    }
+    for (const ChildLayout& child : children)
+        if (child.node.attachedTo(parent) && isDisplayed(child)) attached.push_back(child);
     children.swap(attached);
 }
 
@@ -301,13 +306,14 @@ void setArrangedRect(Element& node, const Rect& rect) {
     node.invalidatePaint();
 }
 
-std::optional<AdjacentLayout> adjacentLayout(const ElementVisit& parentState, const detail::NodeRef& firstRef, const detail::NodeRef& secondRef,
+std::optional<AdjacentLayout> adjacentLayout(const ElementVisit& parentState, const LayoutChildRef& firstRef, const LayoutChildRef& secondRef,
                                              const Style& parentStyle) {
     Element* parent = parentState.get();
+    if (!parentState.valid() || !firstRef.attachedTo(*parent) || !secondRef.attachedTo(*parent)) return std::nullopt;
+    if (firstRef.isPseudoElement() || secondRef.isPseudoElement()) return AdjacentLayout{true, 0.f};
     Node* firstNode = firstRef.get();
     Node* secondNode = secondRef.get();
-    if (!parentState.valid() || !firstNode || !secondNode || firstNode->parentNode() != parent || secondNode->parentNode() != parent)
-        return std::nullopt;
+    if (!firstNode || !secondNode) return std::nullopt;
     Element* first = firstRef.element();
     Element* second = secondRef.element();
     if (!first || !second) return AdjacentLayout{true, 0.f};
@@ -390,8 +396,8 @@ MainAxisAllocation allocateMainAxis(Element& parent, std::vector<ChildLayout>& c
     std::size_t gapCount = 0;
     float overlap = 0.f;
     for (std::size_t index = begin + 1; index < end; ++index) {
-        const detail::NodeRef& previous = children[index - 1].node;
-        const detail::NodeRef& current = children[index].node;
+        const LayoutChildRef& previous = children[index - 1].node;
+        const LayoutChildRef& current = children[index].node;
         if (!parentState.valid()) return invalidAllocation();
         const std::optional<AdjacentLayout> adjacent = adjacentLayout(parentState, previous, current, parentStyle);
         if (!adjacent) return invalidAllocation();

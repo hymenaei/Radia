@@ -16,12 +16,6 @@ using radia::ui::ResourceSnapshot;
 using radia::ui::SkinGenerationPrepareResult;
 using radia::ui::System;
 
-namespace {
-bool equalSnapshots(const ResourceSnapshot& left, const ResourceSnapshot& right) {
-    return left.resources() == right.resources() && left.layeredResources() == right.layeredResources();
-}
-} // namespace
-
 class SkinReloadCoordinator::Impl {
 public:
     Impl(System& system, const SkinSnapshotSource& snapshotSource) : mSystem(system), mSnapshotSource(snapshotSource) {}
@@ -84,8 +78,7 @@ private:
         }
         if (!mSettling) {
             const bool unchanged = mAcknowledgedSnapshot
-                && (mRetryAfterAnyChange ? equalSnapshots(current, *mAcknowledgedSnapshot)
-                                         : !mSystem.hasRelevantStyleChange(current, *mAcknowledgedSnapshot));
+                && (mRetryAfterAnyChange ? current == *mAcknowledgedSnapshot : !mSystem.hasRelevantStyleChange(current, *mAcknowledgedSnapshot));
             if (unchanged) {
                 mObservedSnapshot = current;
                 mAcknowledgedSnapshot = current;
@@ -96,7 +89,7 @@ private:
             mSettling = true;
             return std::nullopt;
         }
-        if (!equalSnapshots(current, *mObservedSnapshot)) {
+        if (current != *mObservedSnapshot) {
             mObservedSnapshot = std::move(current);
             mLastChange = now;
             return std::nullopt;

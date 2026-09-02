@@ -9,14 +9,54 @@ input {
 input[type="radio"], input[type="checkbox"] {
     margin: 3px 2px;
     padding: 0;
-    border-width: 0;
     background-color: transparent;
+    display: inline-flex;
+    box-sizing: border-box;
+    align-items: center;
+    justify-content: center;
 }
 
 input[switch] {
     margin: initial;
     display: initial;
+    width: initial;
+    height: initial;
 }
+
+input[type="checkbox"]::checkmark {
+    content: "\2713" / "";
+    visibility: hidden;
+    width: 100%;
+    height: 100%;
+    text-align: center;
+}
+input[type="checkbox"]:checked::checkmark,
+input[type="checkbox"]:indeterminate::checkmark {
+    visibility: visible;
+}
+input[type="checkbox"]:indeterminate::checkmark { content: "\2500" / ""; }
+input[type="radio"]::checkmark {
+    content: "";
+    visibility: hidden;
+}
+input[type="radio"]:checked::checkmark { visibility: visible; }
+input[type="radio"] { border-radius: 50%; }
+input[type="radio"]:checked::checkmark {
+    background-color: currentColor;
+    display: inline-block;
+    border-radius: inherit;
+    width: 100%;
+    height: 100%;
+}
+
+input[type="checkbox"][switch]::slider-fill {
+    display: inline-block;
+    width: 0%;
+    height: 100%;
+    background-color: currentColor;
+    border-radius: inherit;
+}
+input[type="checkbox"][switch]:checked::slider-fill { width: 100%; }
 
 button {
     appearance: auto;

@@ -7,15 +7,15 @@
 #include "floaterhost.h"
 #include <optional>
 #include <utility>
-#include "elements/document.h"
-#include "elements/floater.h"
+#include "dom/document.h"
+#include "html/floater.h"
 #include "surface/floaterresize.h"
 #include "surface/surface.h"
 
 namespace radia::viewer::ui {
 using radia::ui::Document;
 using radia::ui::Element;
-using radia::ui::FloaterElement;
+using radia::ui::HTMLFloaterElement;
 using radia::ui::Rect;
 using radia::ui::Surface;
 using radia::ui::Vec2;
@@ -27,10 +27,10 @@ public:
     FloaterReplacement(Surface& surface, std::vector<ReplacementRequest> replacements) : mSurface(surface) {
         mPlanned.reserve(replacements.size());
         for (auto& request : replacements) {
-            FloaterElement* current = request.current;
+            HTMLFloaterElement* current = request.current;
             Document* document = request.replacement;
             Element* documentElement = document ? document->documentElement() : nullptr;
-            FloaterElement* candidate = documentElement ? dynamic_cast<FloaterElement*>(documentElement) : nullptr;
+            HTMLFloaterElement* candidate = documentElement ? dynamic_cast<HTMLFloaterElement*>(documentElement) : nullptr;
             if (!current || !candidate) return;
 
             if (!mSurface.ownsFloater(*current)) return;
@@ -82,19 +82,19 @@ private:
 
     struct AppliedReplacement {
         std::size_t index = 0;
-        FloaterElement* installed = nullptr;
+        HTMLFloaterElement* installed = nullptr;
     };
 
     bool replaceOne(std::size_t index, AppliedReplacement& applied) {
         PlannedReplacement& replacement = mPlanned[index];
         ReplacementRequest& request = replacement.request;
-        FloaterElement* current = request.current;
-        FloaterElement* candidate = request.replacement && request.replacement->documentElement()
-            ? dynamic_cast<FloaterElement*>(request.replacement->documentElement())
+        HTMLFloaterElement* current = request.current;
+        HTMLFloaterElement* candidate = request.replacement && request.replacement->documentElement()
+            ? dynamic_cast<HTMLFloaterElement*>(request.replacement->documentElement())
             : nullptr;
         if (!current || !candidate) return false;
         candidate->setRect(replacement.replacementRect);
-        FloaterElement* mounted = candidate;
+        HTMLFloaterElement* mounted = candidate;
         if (!mSurface.replaceFloater(*current, *candidate)) return false;
 
         mSurface.placeFloater(*mounted, replacement.replacementRect);
@@ -122,7 +122,7 @@ private:
     }
 
     void rollbackOrDie() {
-        if (!rollback()) LL_ERRS("UI") << "Component FloaterElement replacement could not be rolled back." << LL_ENDL;
+        if (!rollback()) LL_ERRS("UI") << "Component HTMLFloaterElement replacement could not be rolled back." << LL_ENDL;
     }
 
     Surface& mSurface;
@@ -139,7 +139,7 @@ void FloaterHost::mount(Document& document) {
     mSurface.mountFloater(document);
 }
 
-bool FloaterHost::unmount(FloaterElement& root) {
+bool FloaterHost::unmount(HTMLFloaterElement& root) {
     return mSurface.unmountBorrowedFloater(root);
 }
 
@@ -148,17 +148,17 @@ bool FloaterHost::replaceAll(std::vector<ReplacementRequest> replacements) {
     return transaction.commit();
 }
 
-bool FloaterHost::clearAll(std::vector<FloaterElement*> roots) {
-    for (FloaterElement* root : roots)
+bool FloaterHost::clearAll(std::vector<HTMLFloaterElement*> roots) {
+    for (HTMLFloaterElement* root : roots)
         if (!root || !mSurface.ownsFloater(*root)) return false;
-    for (FloaterElement* root : roots) {
+    for (HTMLFloaterElement* root : roots) {
         if (!root->closed()) root->close();
-        if (!mSurface.unmountBorrowedFloater(*root)) LL_ERRS("UI") << "Component host lost a FloaterElement during account teardown." << LL_ENDL;
+        if (!mSurface.unmountBorrowedFloater(*root)) LL_ERRS("UI") << "Component host lost a HTMLFloaterElement during account teardown." << LL_ENDL;
     }
     return true;
 }
 
-void FloaterHost::present(FloaterElement& root) {
+void FloaterHost::present(HTMLFloaterElement& root) {
     root.open();
     mSurface.raise(root);
 }

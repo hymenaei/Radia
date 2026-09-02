@@ -5,16 +5,19 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <list>
 #include <memory>
 #include <string>
-#include <unordered_set>
 #include <utility>
+#include <vector>
 #include "diagnostic.h"
 #include "layout/buildresult.h"
 #include "localization.h"
 #include "nativeappearance.h"
+#include "resourceprovider.h"
 #include "style/stylesheet.h"
 #include "text/keybinding.h"
 
@@ -40,7 +43,7 @@ public:
     bool publish(std::shared_ptr<const SkinGeneration> generation);
     bool publish(std::shared_ptr<const SkinGeneration> generation, PublicationCommit& commit);
     bool hasRelevantStyleChange(const ResourceSnapshot& current, const ResourceSnapshot& previous) const;
-    LayoutBuildResult buildElementTree(const std::string& resourceId) const;
+    ResourceBuildResult buildElementTree(const ResourceId& id) const;
     std::unique_ptr<Surface> createSurface(const TextMetrics& textMetrics) const;
     bool setLocale(const std::string& localeId);
     void setLocaleChangedHandler(std::function<void(const std::string&)> handler) { mLocaleChangedHandler = std::move(handler); }
@@ -61,7 +64,7 @@ public:
     std::string resolveText(const LocalizedText& text) const;
     KeybindingPresentation resolveKeybinding(const std::string& id) const;
     LocalizedText t(std::string id, LocalizationArguments arguments = {}) const;
-    std::string resolveMarkup(const LocalizedText& text) const;
+    std::string resolveHTML(const LocalizedText& text) const;
     bool hasIcon(const std::string& name) const;
     std::uint64_t generation() const { return mGenerationNumber; }
     std::uint64_t localeGeneration() const { return mLocaleGeneration; }
@@ -73,7 +76,19 @@ private:
     std::string mActiveLocale;
     std::uint64_t mGenerationNumber = 0;
     std::uint64_t mLocaleGeneration = 0;
-    mutable std::unordered_set<Surface*> mSurfaces;
+
+    using SurfaceRegistrationId = std::uint64_t;
+    struct SurfaceRegistration {
+        SurfaceRegistrationId id = 0;
+        Surface* surface = nullptr;
+        bool active = false;
+    };
+
+    class SurfaceNotificationScope;
+
+    mutable std::list<SurfaceRegistration> mSurfaceRegistrations;
+    mutable SurfaceRegistrationId mNextSurfaceRegistrationId = 1;
+    mutable std::size_t mSurfaceNotificationDepth = 0;
     std::function<void(const std::string&)> mLocaleChangedHandler;
     std::function<KeybindingPresentation(const std::string&)> mKeybindingResolver;
 
@@ -81,6 +96,9 @@ private:
     const StyleSheet& styleSheet() const;
     void registerSurface(Surface& surface) const;
     void unregisterSurface(Surface& surface) const;
+    std::vector<SurfaceRegistrationId> surfaceRegistrationSnapshot() const;
+    Surface* surfaceForRegistration(SurfaceRegistrationId id) const;
+    void compactSurfaceRegistrations() const;
     void notifyLocaleChanged();
     bool publishImpl(std::shared_ptr<const SkinGeneration> generation, PublicationCommit* commit);
     friend class Surface;

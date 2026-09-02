@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <vector>
 #include "diagnostic.h"
+#include "html/elementnames.h"
 
 namespace radia::ui {
 struct SourceLocation {
@@ -26,54 +27,10 @@ struct SourceRange {
     SourceLocation end;
 };
 
-enum class Tag : uint8_t {
-    Unknown,
-    Abbr,
-    B,
-    Button,
-    Br,
-    Cite,
-    Code,
-    Dfn,
-    Del,
-    Div,
-    Em,
-    Fieldset,
-    Floater,
-    Head,
-    Header,
-    I,
-    Icon,
-    Ins,
-    Kbd,
-    Label,
-    Legend,
-    Link,
-    Mark,
-    Minimize,
-    Close,
-    Panel,
-    Paragraph,
-    Q,
-    S,
-    Small,
-    Strong,
-    Title,
-    U,
-    Input,
-    Body
-};
-
-const char* sourceTagName(Tag tag);
-Tag sourceTagFromName(std::string_view name);
-bool isGenericElementTag(Tag tag);
-bool isLocalizedInlineTag(Tag tag);
-const std::vector<Tag>& genericElementTags();
-const std::vector<Tag>& localizedInlineTags();
-
 struct SourceAttribute {
     std::string authoredName;
     std::string value;
+    bool hasValue = false;
     SourceRange source;
 };
 
@@ -84,13 +41,13 @@ struct SourceNode;
 struct SourceContent {
     SourceRange source;
     std::string text;
-    std::unique_ptr<SourceNode> node;
+    std::unique_ptr<const SourceNode> node;
 
     bool isText() const { return !node; }
 };
 
 struct SourceNode {
-    Tag tag = Tag::Unknown;
+    HTMLTag tag = HTMLTag::Unknown;
     std::string authoredName;
     SourceRange source;
     SourceAttributeMap attributes;
@@ -98,19 +55,17 @@ struct SourceNode {
 };
 
 struct SourceDocument {
-    std::string source;
-    std::unique_ptr<SourceNode> root;
+    std::string sourceName;
+    std::unique_ptr<const SourceNode> root;
 };
 
-using SourceDocumentMap = std::unordered_map<std::string, std::shared_ptr<const SourceDocument>>;
-
 struct SourceDocumentParseResult : DiagnosticResult {
-    std::unique_ptr<SourceDocument> document;
+    std::shared_ptr<const SourceDocument> document;
     bool ok() const { return !hasErrors() && document && document->root; }
 };
 
 class SourceDocumentParser final {
 public:
-    SourceDocumentParseResult parse(const std::string& html, const std::string& source = {}) const;
+    SourceDocumentParseResult parse(const std::string& html, const std::string& sourceName = {}) const;
 };
 } // namespace radia::ui

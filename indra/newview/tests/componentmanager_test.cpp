@@ -23,6 +23,7 @@
 #include "html/button.h"
 #include "html/floater.h"
 #include "html/input.h"
+#include "html/label.h"
 #include "skin/compiler.h"
 #include "system.h"
 #include "test_floater_host.h"
@@ -39,6 +40,7 @@ using radia::ui::fixedTextMetrics;
 using radia::ui::HTMLButtonElement;
 using radia::ui::HTMLFloaterElement;
 using radia::ui::HTMLInputElement;
+using radia::ui::HTMLLabelElement;
 using radia::ui::ResourceSnapshot;
 using radia::ui::SettingResolution;
 using radia::ui::SettingResolver;
@@ -93,15 +95,17 @@ private:
 
 class TestSettingResolver final : public SettingResolver {
 public:
-    TestSettingResolver() : binding(std::make_shared<TestBooleanBinding>(true)) {}
+    TestSettingResolver() : binding(std::make_shared<TestBooleanBinding>(true)), secondBinding(std::make_shared<TestBooleanBinding>(false)) {}
 
     SettingResolution resolve(std::string_view settingName, std::type_index requestedType) override {
-        if (settingName != "test-enabled") return {SettingResolution::ResolutionStatus::Missing, {}};
         if (requestedType != typeid(bool)) return {SettingResolution::ResolutionStatus::TypeMismatch, {}};
-        return {SettingResolution::ResolutionStatus::Found, binding};
+        if (settingName == "test-enabled") return {SettingResolution::ResolutionStatus::Found, binding};
+        if (settingName == "second-enabled") return {SettingResolution::ResolutionStatus::Found, secondBinding};
+        return {SettingResolution::ResolutionStatus::Missing, {}};
     }
 
     std::shared_ptr<TestBooleanBinding> binding;
+    std::shared_ptr<TestBooleanBinding> secondBinding;
 };
 
 class ComponentManagerTest : public Test {
@@ -227,7 +231,10 @@ protected:
                                            "onPointerUp=\"pointerUp(event)\" onPointerMove=\"pointerMove(event)\" "
                                            "onContextMenu=\"contextMenu(event)\"></button>"
                                            "<input type=\"checkbox\" switch=\"true\" id=\"changed\" checked=\"false\" onChange=\"changed(event)\">"
+                                           "<label id=\"first-label\" for=\"setting\"></label>"
                                            "<input type=\"checkbox\" switch=\"true\" id=\"setting\" setting=\"test-enabled\">"
+                                           "<label id=\"second-label\" for=\"second-setting\"></label>"
+                                           "<input type=\"checkbox\" switch=\"true\" id=\"second-setting\" setting=\"second-enabled\">"
                                            "</body>"
                                            "</floater>";
         constexpr char kViewWithoutStatus[] = "<floater>"
@@ -239,7 +246,10 @@ protected:
                                               "onPointerUp=\"pointerUp(event)\" onPointerMove=\"pointerMove(event)\" "
                                               "onContextMenu=\"contextMenu(event)\"></button>"
                                               "<input type=\"checkbox\" switch=\"true\" id=\"changed\" checked=\"false\" onChange=\"changed(event)\">"
+                                              "<label id=\"first-label\" for=\"setting\"></label>"
                                               "<input type=\"checkbox\" switch=\"true\" id=\"setting\" setting=\"test-enabled\">"
+                                              "<label id=\"second-label\" for=\"second-setting\"></label>"
+                                              "<input type=\"checkbox\" switch=\"true\" id=\"second-setting\" setting=\"second-enabled\">"
                                               "</body>"
                                               "</floater>";
         constexpr char kPanelWithStatus[] = "<panel>"
@@ -281,6 +291,12 @@ protected:
                 EmptyController(System& system, Document& document) : DocumentController(system, document) {}
             };
             return std::make_unique<EmptyController>(system, document);
+        });
+    }
+
+    bool registerLocalized() {
+        return manager.registerDefinition("localized", "localized.html", [this](System& system, Document& document) {
+            return std::make_unique<Controller>(system, document, controllerState);
         });
     }
 
@@ -397,6 +413,34 @@ TEST_F(ComponentManagerTest, OpensComponentAndDispatchesTypedEvents) {
     EXPECT_EQ(status->textContent(), "Ready");
 }
 
+TEST_F(ComponentManagerTest, DoesNotActivateControllerBeforeHostMountReturns) {
+    ASSERT_TRUE(registerOne());
+    host.onMount = [](HTMLFloaterElement& root) {
+        if (auto* press = dynamic_cast<HTMLButtonElement*>(findElement(root, "press"))) press->activate();
+    };
+
+    const auto opened = manager.open("one");
+    ASSERT_TRUE(opened.ok());
+    EXPECT_EQ(controllerState.pressCount, 0);
+
+    auto* press = dynamic_cast<HTMLButtonElement*>(findElement(*opened.floater, "press"));
+    ASSERT_NE(press, nullptr);
+    press->activate();
+    EXPECT_EQ(controllerState.pressCount, 1);
+}
+
+TEST_F(ComponentManagerTest, RollsBackHostMountWhenControllerActivationFails) {
+    ASSERT_TRUE(registerOne());
+    host.onMount = [](HTMLFloaterElement& root) { root.replaceChildren(); };
+
+    const auto opened = manager.open("one");
+
+    EXPECT_FALSE(opened.ok());
+    ASSERT_FALSE(opened.errors.empty());
+    EXPECT_EQ(opened.errors.front().code, "floater.controller.activation_invalid");
+    EXPECT_TRUE(host.mounted.empty());
+}
+
 TEST_F(ComponentManagerTest, ReplacesOpenComponentWithoutChangingItsIdentity) {
     ASSERT_TRUE(registerOne());
     const auto opened = manager.open("one");
@@ -499,6 +543,34 @@ TEST_F(ComponentManagerTest, LeavesCurrentComponentUntouchedWhenTheHostRejectsRe
     EXPECT_EQ(controllerState.committedCount, 1);
 }
 
+TEST_F(ComponentManagerTest, RollsBackPublishedReplacementWhenControllerActivationFails) {
+    ASSERT_TRUE(registerOne());
+    const auto opened = manager.open("one");
+    ASSERT_TRUE(opened.ok());
+    HTMLFloaterElement* original = opened.floater;
+
+    const SkinGenerationPrepareResult generation = prepareGeneration();
+    ASSERT_TRUE(generation.ok());
+    auto prepared = manager.prepareReplacement(generation.generation, "en");
+    ASSERT_TRUE(prepared.ok());
+
+    bool invalidateCandidate = true;
+    host.afterReplacement = [&invalidateCandidate](HTMLFloaterElement& root) {
+        if (!invalidateCandidate) return;
+        root.replaceChildren();
+        invalidateCandidate = false;
+    };
+
+    EXPECT_FALSE(prepared.replacement.commit());
+    ASSERT_EQ(liveFloaters().size(), std::size_t{1});
+    EXPECT_EQ(liveFloaters().front(), original);
+
+    auto* press = dynamic_cast<HTMLButtonElement*>(findElement(*original, "press"));
+    ASSERT_NE(press, nullptr);
+    press->activate();
+    EXPECT_EQ(controllerState.pressCount, 1);
+}
+
 TEST_F(ComponentManagerTest, EvictsClosedFloatersBeforeReplacement) {
     ASSERT_TRUE(registerOne());
     const auto opened = manager.open("one");
@@ -597,6 +669,30 @@ TEST_F(ComponentManagerTest, MountsControllerWithoutElementsOrEventHandlers) {
     EXPECT_EQ(manager.componentKeyFor(*opened.floater), expectedKey);
 }
 
+TEST_F(ComponentManagerTest, OpensFloaterWithLocalizedContent) {
+    constexpr char kLocalization[] = "defaultLocale: en\nlocales: {en: {strings: {localized.title: Localized}}}\n";
+    constexpr char kView[] = "<floater><head><title>{{localized.title}}</title><close></close></head>"
+                             "<body><p>{{localized.title}}</p><button id=\"press\" onClick=\"press()\"></button></body></floater>";
+
+    ResourceSnapshot resources;
+    resources.add("localization.yaml", kLocalization);
+    resources.add("skin.css", "");
+    resources.add("localized.html", kView);
+    const SkinGenerationPrepareResult generation = SkinCompiler().prepare(std::move(resources));
+    ASSERT_TRUE(generation.ok());
+    ASSERT_TRUE(system.publish(generation.generation));
+    ASSERT_TRUE(registerLocalized());
+
+    const auto opened = manager.open("localized");
+
+    ASSERT_TRUE(opened.ok()) << (opened.errors.empty() ? std::string() : opened.errors.front().formatted());
+    ASSERT_NE(opened.floater, nullptr);
+    auto* press = dynamic_cast<HTMLButtonElement*>(findElement(*opened.floater, "press"));
+    ASSERT_NE(press, nullptr);
+    press->activate();
+    EXPECT_EQ(controllerState.pressCount, 1);
+}
+
 TEST_F(ComponentManagerTest, RejectsEventHandlerRegisteredForAnotherControllerType) {
     ASSERT_TRUE(registerMismatched());
     const auto opened = manager.open("mismatched");
@@ -639,6 +735,60 @@ TEST_F(ComponentManagerTest, SynchronizesSettingBindingWithMountedSwitch) {
     EXPECT_FALSE(setting->checked());
     setting->activate();
     EXPECT_TRUE(resolver.binding->state().value);
+}
+
+TEST_F(ComponentManagerTest, KeepsIndependentBoundSwitchesTogglableThroughReplacement) {
+    ASSERT_TRUE(registerOne());
+    const auto opened = manager.open("one");
+    ASSERT_TRUE(opened.ok());
+
+    auto* first = dynamic_cast<HTMLInputElement*>(findElement(*opened.floater, "setting"));
+    auto* second = dynamic_cast<HTMLInputElement*>(findElement(*opened.floater, "second-setting"));
+    auto* firstLabel = dynamic_cast<HTMLLabelElement*>(findElement(*opened.floater, "first-label"));
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+    ASSERT_NE(firstLabel, nullptr);
+
+    EXPECT_TRUE(first->checked());
+    EXPECT_FALSE(second->checked());
+
+    first->activate();
+    EXPECT_FALSE(first->checked());
+    EXPECT_FALSE(resolver.binding->state().value);
+    first->activate();
+    EXPECT_TRUE(first->checked());
+    EXPECT_TRUE(resolver.binding->state().value);
+
+    second->activate();
+    EXPECT_TRUE(second->checked());
+    EXPECT_TRUE(resolver.secondBinding->state().value);
+    second->activate();
+    EXPECT_FALSE(second->checked());
+    EXPECT_FALSE(resolver.secondBinding->state().value);
+    firstLabel->activate();
+    EXPECT_FALSE(first->checked());
+    EXPECT_FALSE(resolver.binding->state().value);
+
+    const SkinGenerationPrepareResult generation = prepareGeneration();
+    ASSERT_TRUE(generation.ok());
+    auto prepared = manager.prepareReplacement(generation.generation, "en");
+    ASSERT_TRUE(prepared.ok());
+    ASSERT_TRUE(prepared.replacement.commit());
+
+    HTMLFloaterElement* replacement = liveFloaters().front();
+    first = dynamic_cast<HTMLInputElement*>(findElement(*replacement, "setting"));
+    second = dynamic_cast<HTMLInputElement*>(findElement(*replacement, "second-setting"));
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+    EXPECT_FALSE(first->checked());
+    EXPECT_FALSE(second->checked());
+
+    first->activate();
+    EXPECT_TRUE(first->checked());
+    EXPECT_TRUE(resolver.binding->state().value);
+    second->activate();
+    EXPECT_TRUE(second->checked());
+    EXPECT_TRUE(resolver.secondBinding->state().value);
 }
 
 TEST_F(ComponentManagerTest, ClearsAndUnmountsComponentsForAnAccountReset) {

@@ -130,16 +130,36 @@ private:
     void refreshHoverState();
     void updatePressedState();
     void elementBecameUnavailable(Element& element);
+    void elementOwnerDestroyed(Element& element);
     bool moveFocus(bool backwards);
     bool routeEvent(Event& event);
     void paintElement(const Element& element, PaintContext& context, float scale, float inheritedOpacity, StylePass& styles) const;
-    using RootList = std::vector<Element*>;
     static constexpr std::size_t kSurfaceLayerCount = static_cast<std::size_t>(SurfaceLayer::Modal) + 1;
 
-    RootList& roots(SurfaceLayer layer);
-    const RootList& roots(SurfaceLayer layer) const;
-    std::unique_ptr<Element> takeOwnedRoot(Element& element);
-    bool detachRoot(Element& element);
+    struct Mount {
+        enum class Ownership : uint8_t { Owned, Borrowed };
+
+        Mount(std::unique_ptr<Element> root, SurfaceLayer layer, HTMLFloaterElement* floater);
+        Mount(Element& root, SurfaceLayer layer, HTMLFloaterElement* floater);
+        ~Mount();
+
+        Element* root = nullptr;
+        std::unique_ptr<Element> ownedRoot;
+        SurfaceLayer layer;
+        Ownership ownership;
+        HTMLFloaterElement* floater = nullptr;
+        std::shared_ptr<char> lifetime = std::make_shared<char>(0);
+    };
+
+    using MountPtr = std::unique_ptr<Mount>;
+    using MountList = std::vector<MountPtr>;
+
+    MountList& mounts(SurfaceLayer layer);
+    const MountList& mounts(SurfaceLayer layer) const;
+    Mount* findMount(Element* element) noexcept;
+    const Mount* findMount(const Element* element) const noexcept;
+    Element& installMount(MountPtr mount);
+    MountPtr detachMount(Element& element);
     const Element* mountedRoot(const Element* element) const;
     std::optional<SurfaceLayer> layerOf(const Element* element) const;
     bool isSurfaceRoot(const Element* element) const;
@@ -185,9 +205,7 @@ private:
     bool updateScrollbarInteraction(const Vec2& point);
     bool beginScrollbarInteraction(const ScrollbarTarget& target, const Vec2& point);
 
-    std::array<RootList, kSurfaceLayerCount> mRoots;
-    std::vector<std::unique_ptr<Element>> mOwnedRoots;
-    std::vector<HTMLFloaterElement*> mFloaters;
+    std::array<MountList, kSurfaceLayerCount> mMounts;
     std::shared_ptr<char> mLifetime = std::make_shared<char>(0);
     StyleSheet mDefaultStyleSheet;
     mutable const StyleSheet* mStyleSheet = &mDefaultStyleSheet;

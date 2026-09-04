@@ -7,7 +7,6 @@
 
 #include <memory>
 #include <vector>
-#include "binding/binder.h"
 #include "documentcontroller.h"
 
 namespace radia::viewer::ui {

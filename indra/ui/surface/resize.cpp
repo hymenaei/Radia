@@ -27,24 +27,43 @@ bool blocksPointerEvents(const HTMLFloaterElement& floater, const Style& style) 
 } // namespace
 
 Vec2 Surface::minimumFloaterSize(const HTMLFloaterElement& floater) const {
-    const Vec2 authoredSize = floater.authoredSize();
     const ElementObservation floaterObservation = observe(const_cast<HTMLFloaterElement&>(floater));
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
-    const Style& floaterStyle = styles.style(floater);
     if (!floaterObservation.layoutValid() || !floaterObservation.styleValid()) return {};
+    HTMLFloaterElement* currentFloater = dynamic_cast<HTMLFloaterElement*>(floaterObservation.get());
+    if (!currentFloater) return {};
+    const Style floaterStyle = styles.style(*currentFloater);
+    if (!floaterObservation.layoutValid() || !floaterObservation.styleValid()) return {};
+    const Vec2 authoredSize = currentFloater->authoredSize();
     Vec2 minimum{floaterStyle.minWidth ? floaterStyle.minWidth->resolve(authoredSize.x) : 0.f,
                  floaterStyle.minHeight ? floaterStyle.minHeight->resolve(authoredSize.y) : 0.f};
 
-    if (const Element* head = floater.head()) {
-        const ElementObservation headObservation = observe(*const_cast<Element*>(head));
+    if (Element* head = currentFloater->head()) {
+        const ElementRef<Element> headRef(head);
+        head = headRef.get();
+        if (!head || head->parentElement() != currentFloater) return {};
+        const ElementObservation headObservation = observe(*head);
+        if (!headObservation.layoutValid() || !headObservation.styleValid() || !headObservation.attachedTo(*currentFloater)) return {};
         const Vec2 measured = measureElement(*head, *mStyleSheet, mTextMetrics);
-        if (!floaterObservation.layoutValid() || !floaterObservation.styleValid()
-            || !headObservation.layoutValid() || !headObservation.styleValid() || !headObservation.attachedTo(floater))
+        head = headRef.get();
+        if (!floaterObservation.layoutValid()
+            || !floaterObservation.styleValid()
+            || !head
+            || !headObservation.layoutValid()
+            || !headObservation.styleValid()
+            || !headObservation.attachedTo(*currentFloater)
+            || head->parentElement() != currentFloater
+            || currentFloater->head() != head)
             return {};
         const Style& headStyle = styles.style(*head);
-        if (!floaterObservation.layoutValid() || !floaterObservation.styleValid()
-            || !headObservation.layoutValid() || !headObservation.styleValid() || !headObservation.attachedTo(floater))
+        if (!floaterObservation.layoutValid()
+            || !floaterObservation.styleValid()
+            || !headObservation.layoutValid()
+            || !headObservation.styleValid()
+            || !headObservation.attachedTo(*currentFloater)
+            || head->parentElement() != currentFloater
+            || currentFloater->head() != head)
             return {};
         minimum.x = std::max(minimum.x, measured.x + headStyle.margin.horizontal() + floaterStyle.padding.horizontal());
         minimum.y = std::max(minimum.y, measured.y + headStyle.margin.vertical() + floaterStyle.padding.vertical());
@@ -58,13 +77,16 @@ HTMLFloaterElement* Surface::resizeFloaterAt(const Vec2& point, std::uint8_t& ed
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
     const auto findInLayer = [&](SurfaceLayer layer) -> HTMLFloaterElement* {
-        const RootList& layerRoots = roots(layer);
-        for (auto child = layerRoots.rbegin(); child != layerRoots.rend(); ++child) {
-            auto* floater = dynamic_cast<HTMLFloaterElement*>(*child);
+        const MountList& layerMounts = mounts(layer);
+        for (auto child = layerMounts.rbegin(); child != layerMounts.rend(); ++child) {
+            if (!*child || !(*child)->root) continue;
+            auto* floater = dynamic_cast<HTMLFloaterElement*>((*child)->root);
             if (!floater || floater->closed()) continue;
             const ElementObservation floaterObservation = observe(*floater);
             const Style& floaterStyle = styles.style(*floater);
-            if (!floaterObservation.layoutValid() || !floaterObservation.styleValid() || !isRootedInSurface(floaterObservation.get())
+            if (!floaterObservation.layoutValid()
+                || !floaterObservation.styleValid()
+                || !isRootedInSurface(floaterObservation.get())
                 || !floater->isVisible(floaterStyle))
                 continue;
             const bool floaterBlocksPointerEvents = blocksPointerEvents(*floater, floaterStyle);

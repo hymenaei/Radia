@@ -118,14 +118,26 @@ bool DocumentController::canCommit(const PreparedMount& prepared) const {
         && prepared.mState->root
         && !prepared.mState->rootLifetime.expired()
         && mDocument.documentElement() == prepared.mState->root
-        && static_cast<bool>(prepared.mState->binding);
+        && static_cast<bool>(prepared.mState->binding)
+        && !mImpl->binding;
 }
 
-void DocumentController::commit(PreparedMount&& prepared) {
-    if (!canCommit(prepared)) LL_ERRS("UI") << "DocumentController committed an invalid prepared mount." << LL_ENDL;
+bool DocumentController::commit(PreparedMount&& prepared) {
+    if (!canCommit(prepared)) return false;
     PreparedMount::State& state = *prepared.mState;
-    mImpl->binding = state.binding.commit();
+    Binding binding = state.binding.commit();
+    if (!binding) return false;
+    mImpl->binding = std::move(binding);
     prepared.mState.reset();
+    return true;
+}
+
+void DocumentController::deactivate() noexcept {
+    mImpl->binding.deactivate();
+}
+
+bool DocumentController::activate() {
+    return mImpl->binding.activate();
 }
 
 void DocumentController::addHandlerRegistration(EventRegistrationDescriptor registration) {

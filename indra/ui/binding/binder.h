@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <limits>
 #include <map>
@@ -40,19 +41,34 @@ public:
 
     explicit operator bool() const { return mCommitted; }
 
+    [[nodiscard]] bool activate();
+    void deactivate() noexcept;
+
 private:
+    struct ValueAttachment {
+        HTMLInputElement* element = nullptr;
+        std::weak_ptr<char> lifetime;
+    };
+
     struct EventAttachment {
         Element* element = nullptr;
         std::weak_ptr<char> lifetime;
         std::string type;
         EventHandler handler;
         bool capture = false;
+        bool attached = false;
     };
 
     void clearEventListeners() noexcept;
+    void attachEventListeners();
 
     std::vector<EventAttachment> mEventAttachments;
+    std::vector<ValueAttachment> mValueAttachments;
     std::vector<ValueBindingSubscription> mValueSubscriptions;
+    Element* mRoot = nullptr;
+    Node* mRootParent = nullptr;
+    std::weak_ptr<char> mRootLifetime;
+    std::shared_ptr<bool> mActive = std::make_shared<bool>(false);
     bool mCommitted = false;
 };
 
@@ -88,6 +104,8 @@ public:
         Node* parent = nullptr;
         std::string type;
         EventCall call;
+        detail::MountEpoch mountEpoch;
+        std::uint64_t parentTopologyEpoch = 0;
     };
 
     explicit Binder(Element& root, SettingResolver* settingResolver = nullptr);
@@ -122,6 +140,8 @@ private:
         std::weak_ptr<char> lifetime;
         Node* parent = nullptr;
         std::string settingName;
+        detail::MountEpoch mountEpoch;
+        std::uint64_t parentTopologyEpoch = 0;
     };
 
     struct PendingEventHandler {
@@ -140,6 +160,12 @@ private:
         std::shared_ptr<ValueBindingBase> resolved;
     };
 
+    struct TopologyObservation {
+        Element* element = nullptr;
+        std::weak_ptr<char> lifetime;
+        std::uint64_t epoch = 0;
+    };
+
     Binder(Binder&&) noexcept = default;
     Binder& operator=(Binder&&) noexcept = default;
 
@@ -151,11 +177,13 @@ private:
     std::weak_ptr<char> mRootLifetime;
     bool mRootWasMounted = false;
     MountEpoch mRootMountEpoch;
+    std::uint64_t mRootTopologyEpoch = 0;
     Node* mRootParent = nullptr;
     SettingResolver* mSettingResolver = nullptr;
     std::vector<PendingEventHandler> mPendingEventHandlers;
     std::vector<PendingValueRequirement> mPendingValueRequirements;
     std::vector<BoundInput> mBoundInputs;
+    std::vector<TopologyObservation> mTopologyObservations;
     std::map<std::string, std::vector<EventDeclaration>> mEventDeclarations;
     bool mFinished = false;
 

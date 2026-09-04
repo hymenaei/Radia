@@ -19,6 +19,8 @@ struct ValueValidation {
     ValueValidationStatus status = ValueValidationStatus::Valid;
     std::optional<std::string> message;
 
+    friend bool operator==(const ValueValidation&, const ValueValidation&) = default;
+
     static ValueValidation valid() { return {}; }
     static ValueValidation invalid(std::optional<std::string> message = std::nullopt) { return {ValueValidationStatus::Invalid, std::move(message)}; }
     static ValueValidation pending(std::optional<std::string> message = std::nullopt) { return {ValueValidationStatus::Pending, std::move(message)}; }
@@ -28,6 +30,8 @@ template<typename T> struct ValueState {
     T value{};
     T baseline{};
     std::optional<ValueValidation> validation;
+
+    friend bool operator==(const ValueState&, const ValueState&) = default;
 
     bool dirty() const { return value != baseline; }
     ValueValidationStatus validationStatus() const { return validation ? validation->status : ValueValidationStatus::Valid; }

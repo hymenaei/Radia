@@ -77,7 +77,10 @@ struct ComponentManager::Impl final {
         std::vector<HTMLFloaterElement*> roots;
         roots.reserve(instances.size());
         for (auto& entry : instances)
-            if (entry.second.root) roots.push_back(entry.second.root);
+            if (entry.second.root) {
+                entry.second.controller->deactivate();
+                roots.push_back(entry.second.root);
+            }
 
         if (!roots.empty() && !host.clearAll(std::move(roots)))
             LL_ERRS("UI") << "Component host could not detach all roots during manager shutdown." << LL_ENDL;
@@ -100,7 +103,10 @@ struct ComponentManager::Impl final {
             }
 
             HTMLFloaterElement* root = found->second.root;
+            DocumentController& controller = *found->second.controller;
+            controller.deactivate();
             if (!host.unmount(*root)) {
+                if (!controller.activate()) LL_ERRS("UI") << "Closed component could not reactivate after host unmount rejection." << LL_ENDL;
                 LL_WARNS("UI") << "Closed component could not be unmounted: " << pending->persistenceKey() << LL_ENDL;
                 ++pending;
                 continue;
@@ -223,12 +229,53 @@ bool ComponentManager::PreparedReplacement::State::commit() {
         requests.push_back({component.current, component.replacement.get()});
     }
 
-    if (!impl->host.replaceAll(std::move(requests))) return false;
+    for (PendingComponent& component : components) {
+        if (!component.controller->commit(std::move(component.mount))) {
+            diagnostics.error(
+                "floater.controller.commit_invalid",
+                "HTMLFloaterElement controller could not commit its prepared binding: " + component.componentKey.persistenceKey() + ".");
+            return false;
+        }
+    }
+
+    for (const PendingComponent& component : components) component.instance->controller->deactivate();
+
+    const auto reactivateCurrentControllers = [&]() {
+        for (const PendingComponent& component : components)
+            if (!component.instance->controller->activate())
+                LL_ERRS("UI") << "Component controller could not reactivate after host replacement rollback." << LL_ENDL;
+    };
+
+    if (!impl->host.replaceAll(std::move(requests))) {
+        reactivateCurrentControllers();
+        return false;
+    }
+
+    const auto rollbackHost = [&]() {
+        std::vector<ComponentManager::Host::ReplacementRequest> rollbackRequests;
+        rollbackRequests.reserve(components.size());
+        for (const PendingComponent& component : components) rollbackRequests.push_back({component.candidate, component.instance->document.get()});
+        if (!impl->host.replaceAll(std::move(rollbackRequests)))
+            LL_ERRS("UI") << "Component host could not roll back a failed replacement publication." << LL_ENDL;
+    };
+
+    std::size_t activatedControllers = 0;
+    for (PendingComponent& component : components) {
+        if (!component.controller->activate()) {
+            diagnostics.error(
+                "floater.controller.activation_invalid",
+                "HTMLFloaterElement controller could not activate its mounted binding: " + component.componentKey.persistenceKey() + ".");
+            for (std::size_t index = 0; index < activatedControllers; ++index) components[index].controller->deactivate();
+            rollbackHost();
+            reactivateCurrentControllers();
+            return false;
+        }
+        ++activatedControllers;
+    }
 
     const std::weak_ptr<ComponentManager::Impl> weakManager = impl;
     for (PendingComponent& component : components) {
         ComponentManager::Impl::Instance& instance = *component.instance;
-        component.controller->commit(std::move(component.mount));
         instance.document = std::move(component.replacement);
         instance.controller = std::move(component.controller);
         DocumentController& controller = *instance.controller;
@@ -297,9 +344,25 @@ ComponentOpenResult ComponentManager::open(const std::string& definitionId, cons
         return result;
     }
 
+    if (!controller->commit(std::move(prepared.mount))) {
+        result.error("floater.controller.commit_invalid",
+                     "HTMLFloaterElement controller could not commit its prepared binding: " + persistenceKey + ".");
+        return result;
+    }
+
+    if (!mImpl->host.mount(*document)) {
+        result.error("floater.host.mount_failed", "Component host could not mount HTMLFloaterElement: " + persistenceKey + ".");
+        return result;
+    }
+    if (!controller->activate()) {
+        if (!mImpl->host.unmount(*floater)) LL_ERRS("UI") << "Component host could not roll back a failed HTMLFloaterElement mount." << LL_ENDL;
+        result.error("floater.controller.activation_invalid",
+                     "HTMLFloaterElement controller could not activate its mounted binding: " + persistenceKey + ".");
+        return result;
+    }
+
     Impl::Instance instance(component, definition->second.resource, std::move(document), std::move(controller));
     instance.root = floater;
-    mImpl->host.mount(*instance.document);
     result.floater = instance.root;
 
     mImpl->rootKeys[result.floater] = component;
@@ -308,7 +371,6 @@ ComponentOpenResult ComponentManager::open(const std::string& definitionId, cons
     attachRootLifecycle(*result.floater, *instance.controller, [weakImpl, closedComponentKey] {
         if (const std::shared_ptr<Impl> impl = weakImpl.lock()) impl->pendingEvictions.insert(closedComponentKey);
     });
-    instance.controller->commit(std::move(prepared.mount));
     DocumentController* mountedController = instance.controller.get();
     mImpl->instances.insert_or_assign(component, std::move(instance));
     mImpl->host.present(*result.floater);
@@ -358,9 +420,15 @@ bool ComponentManager::clearInstances() {
     std::vector<HTMLFloaterElement*> roots;
     roots.reserve(mImpl->instances.size());
     for (auto& entry : mImpl->instances)
-        if (HTMLFloaterElement* root = entry.second.root) roots.push_back(root);
+        if (HTMLFloaterElement* root = entry.second.root) {
+            entry.second.controller->deactivate();
+            roots.push_back(root);
+        }
 
     if (!mImpl->host.clearAll(std::move(roots))) {
+        for (auto& entry : mImpl->instances)
+            if (entry.second.root && !entry.second.controller->activate())
+                LL_ERRS("UI") << "Component controller could not reactivate after account teardown rejection." << LL_ENDL;
         LL_WARNS("UI") << "Component host rejected account teardown; retaining the current component generation." << LL_ENDL;
         return false;
     }

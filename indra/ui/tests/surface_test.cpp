@@ -37,6 +37,7 @@ using radia::ui::ClipAxes;
 using radia::ui::clipsAxis;
 using radia::ui::CursorStyle;
 using radia::ui::Element;
+using radia::ui::ElementRef;
 using radia::ui::ElementState;
 using radia::ui::Event;
 using radia::ui::EventCall;
@@ -62,11 +63,11 @@ using radia::ui::kModifierShift;
 using radia::ui::kPointerDownEvent;
 using radia::ui::kPointerMoveEvent;
 using radia::ui::kPointerUpEvent;
-using radia::ui::setAuthoredEventCall;
 using radia::ui::kScrollEvent;
 using radia::ui::kWheelEvent;
 using radia::ui::LayoutDirection;
 using radia::ui::NativeAppearanceBase;
+using radia::ui::NodePtr;
 using radia::ui::PaintCommand;
 using radia::ui::PaintCommandKind;
 using radia::ui::PaintContext;
@@ -78,7 +79,9 @@ using radia::ui::RecordingPaintContext;
 using radia::ui::Rect;
 using radia::ui::ResourceSnapshot;
 using radia::ui::ScrollbarAxisGeometry;
+using radia::ui::ScrollbarMode;
 using radia::ui::ScrollbarPart;
+using radia::ui::setAuthoredEventCall;
 using radia::ui::SkinCompiler;
 using radia::ui::SkinGenerationPrepareResult;
 using radia::ui::Style;
@@ -87,12 +90,15 @@ using radia::ui::Surface;
 using radia::ui::SurfaceLayer;
 using radia::ui::System;
 using radia::ui::Text;
+using radia::ui::TopBorderGap;
 using radia::ui::Vec2;
 using radia::ui::Visibility;
 using radia::ui::WheelEvent;
+using radia::ui::detail::ElementInternalAccess;
 using radia::ui::detail::makeElement;
 using radia::ui::detail::makeElementValue;
 using radia::ui::detail::makeEventRegistration;
+using radia::ui::test::makeFloater;
 using ::testing::Message;
 
 constexpr char kFloaterInteractionLayout[] = "floater { display: flex; flex-direction: column; } "
@@ -190,7 +196,7 @@ public:
     }
     void beginEffects(const Rect&, const Style&, float) override {}
     void endEffects() override {}
-    void paintBox(const Rect&, const Style&, std::optional<radia::ui::TopBorderGap>) override {}
+    void paintBox(const Rect&, const Style&, std::optional<TopBorderGap>) override {}
     void paintText(const std::string& text, const Rect& rect, const Style&) override {
         mTexts.push_back({text, {rect.x + mTranslation.x, rect.y + mTranslation.y, rect.w, rect.h}});
     }
@@ -259,7 +265,7 @@ TEST(SurfaceTest, RecordsExplicitPaintTarget) {
     Surface surface;
     surface.setViewport(240.f, 120.f);
     NativeAppearanceBase appearance;
-    surface.setScrollLayoutOptions({radia::ui::ScrollbarMode::Classic, &appearance});
+    surface.setScrollLayoutOptions({ScrollbarMode::Classic, &appearance});
 
     RecordingPaintContext recording;
     surface.paint(recording, 1.25f, {-3.f, 4.f});
@@ -407,7 +413,7 @@ TEST(SurfaceTest, DragsMinimizesAndRestoresFloaters) {
     Surface context(styleSheet);
     context.setViewport(200.f, 200.f);
 
-    auto floater = radia::ui::test::makeFloater(false, true);
+    auto floater = makeFloater(false, true);
     HTMLFloaterElement* floaterPtr = floater.get();
     auto content = makeElement<HTMLLabelElement>("content");
     HTMLLabelElement* contentNode = content.get();
@@ -688,8 +694,8 @@ TEST(SurfaceTest, RecordsSemanticFallbackScrollbarRequest) {
     ASSERT_NE(command, nullptr);
     ASSERT_TRUE(command->scrollbar.has_value());
     const auto& request = *command->scrollbar;
-    EXPECT_EQ(request.mode, radia::ui::ScrollbarMode::Classic);
-    EXPECT_EQ(request.direction, radia::ui::LayoutDirection::LeftToRight);
+    EXPECT_EQ(request.mode, ScrollbarMode::Classic);
+    EXPECT_EQ(request.direction, LayoutDirection::LeftToRight);
     EXPECT_EQ(request.appearanceRevision, 1u);
     EXPECT_FLOAT_EQ(request.metrics.thickness, 15.f);
     EXPECT_TRUE(request.geometry.horizontal.visible);
@@ -1268,7 +1274,7 @@ TEST(SurfaceTest, ReleasesPointerCaptureWhenInteractionStateClears) {
     ASSERT_TRUE(styleSheet.loadRadia(kFloaterInteractionLayout).ok());
     Surface context(styleSheet);
     context.setViewport(200.f, 200.f);
-    auto floater = radia::ui::test::makeFloater();
+    auto floater = makeFloater();
     floater->setRect({20.f, 20.f, 100.f, 100.f});
     context.mountFloater(std::move(floater));
     context.updateLayout();
@@ -1417,6 +1423,7 @@ TEST(SurfaceTest, DispatchesMouseBindingsInExpectedOrder) {
     ASSERT_TRUE(prepared.ok());
     Binding binding = prepared.binding.commit();
     ASSERT_TRUE(static_cast<bool>(binding));
+    ASSERT_TRUE(binding.activate());
 
     context.pointerDown({{15.f, 15.f}, PointerButton::Left});
     context.pointerUp({{15.f, 15.f}, PointerButton::Left});
@@ -1442,6 +1449,80 @@ TEST(SurfaceTest, DispatchesMouseBindingsInExpectedOrder) {
     EXPECT_EQ(events[11], "double");
 }
 
+TEST(SurfaceTest, KeepsOwnedBindingScopedToUnmountAndRemount) {
+    Surface surface;
+    auto root = makeElement<HTMLPanelElement>();
+    HTMLPanelElement* rootPointer = root.get();
+    auto button = makeElement<HTMLButtonElement>();
+    HTMLButtonElement* target = button.get();
+    setAuthoredEventCall(*button, kClickEvent, EventCall("activate"));
+    root->append(std::move(button));
+
+    int activations = 0;
+    Binder binder(*root);
+    bindAction(binder, "activate", [&] { ++activations; });
+    PreparedBindingResult prepared = binder.prepare();
+    ASSERT_TRUE(prepared.ok());
+    Binding binding = prepared.binding.commit();
+    ASSERT_TRUE(binding);
+
+    surface.mount(std::move(root));
+    ASSERT_TRUE(binding.activate());
+    target->activate();
+    EXPECT_EQ(activations, 1);
+
+    NodePtr detachedTarget = target->remove();
+    ASSERT_NE(detachedTarget, nullptr);
+    target->activate();
+    EXPECT_EQ(activations, 1);
+    rootPointer->append(std::move(detachedTarget));
+    target->activate();
+    EXPECT_EQ(activations, 2);
+
+    binding.deactivate();
+    std::unique_ptr<Element> detachedRoot = surface.unmount(*rootPointer);
+    ASSERT_NE(detachedRoot, nullptr);
+    target->activate();
+    EXPECT_EQ(activations, 2);
+
+    surface.mount(std::move(detachedRoot));
+    ASSERT_TRUE(binding.activate());
+    target->activate();
+    EXPECT_EQ(activations, 3);
+}
+
+TEST(SurfaceTest, KeepsBorrowedBindingScopedToUnmountAndRemount) {
+    Surface surface;
+    auto root = makeElementValue<HTMLPanelElement>();
+    auto button = makeElement<HTMLButtonElement>();
+    HTMLButtonElement* target = button.get();
+    setAuthoredEventCall(*button, kClickEvent, EventCall("activate"));
+    root.append(std::move(button));
+
+    int activations = 0;
+    Binder binder(root);
+    bindAction(binder, "activate", [&] { ++activations; });
+    PreparedBindingResult prepared = binder.prepare();
+    ASSERT_TRUE(prepared.ok());
+    Binding binding = prepared.binding.commit();
+    ASSERT_TRUE(binding);
+
+    surface.mount(root);
+    ASSERT_TRUE(binding.activate());
+    target->activate();
+    EXPECT_EQ(activations, 1);
+
+    binding.deactivate();
+    ASSERT_TRUE(surface.unmountBorrowed(root));
+    target->activate();
+    EXPECT_EQ(activations, 1);
+
+    surface.mount(root);
+    ASSERT_TRUE(binding.activate());
+    target->activate();
+    EXPECT_EQ(activations, 2);
+}
+
 TEST(SurfaceTest, UnmountsRootElementsSafely) {
     Surface context;
     context.setViewport(100.f, 80.f);
@@ -1453,6 +1534,29 @@ TEST(SurfaceTest, UnmountsRootElementsSafely) {
     EXPECT_EQ(context.width(), 100.f);
     EXPECT_EQ(context.height(), 80.f);
     EXPECT_FALSE(context.pointerDown({{10.f, 10.f}, PointerButton::Left}));
+}
+
+TEST(SurfaceTest, RemovesBorrowedRootBeforeItsOwnerDestroysIt) {
+    Surface surface;
+    surface.setViewport(100.f, 80.f);
+    auto owner = std::make_unique<CaptureProbe>();
+    owner->setRect({0.f, 0.f, 100.f, 80.f});
+    CaptureProbe* root = owner.get();
+    surface.mount(*root);
+    surface.updateLayout();
+
+    surface.pointerMove({{10.f, 10.f}});
+    ASSERT_TRUE(surface.pointerDown({{10.f, 10.f}, PointerButton::Left}));
+    ASSERT_TRUE(surface.hasPointerCapture());
+
+    owner.reset();
+
+    EXPECT_FALSE(surface.hasPointerCapture());
+    EXPECT_FALSE(surface.hasFocus());
+    surface.updateLayout();
+    RecordingPaintContext recording;
+    surface.paint(recording);
+    EXPECT_FALSE(surface.pointerMove({{10.f, 10.f}}));
 }
 
 TEST(SurfaceTest, ClearsPointerCaptureWhenElementBecomesDisabled) {
@@ -1625,7 +1729,23 @@ TEST(SurfaceTest, EventListenerAddedDuringDispatchWaitsForTheNextDispatch) {
     EXPECT_EQ(addedCalls, 1);
 }
 
-TEST(SurfaceTest, EventRoutingUsesOneListenerSnapshotForTheWholeRoute) {
+TEST(SurfaceTest, EventListenerCanRemoveItselfDuringDispatch) {
+    auto button = makeElementValue<HTMLButtonElement>();
+    int calls = 0;
+    EventHandler self;
+    self = EventHandler([&](Event&) {
+        ++calls;
+        button.removeEventListener(kClickEvent, self);
+    });
+    button.addEventListener(kClickEvent, self);
+
+    button.activate();
+    button.activate();
+
+    EXPECT_EQ(calls, 1);
+}
+
+TEST(SurfaceTest, EventRoutingSnapshotsEachCurrentTargetInvocation) {
     Surface surface;
     surface.setViewport(100.f, 100.f);
     auto parent = makeElement<HTMLPanelElement>();
@@ -1641,10 +1761,127 @@ TEST(SurfaceTest, EventRoutingUsesOneListenerSnapshotForTheWholeRoute) {
     surface.mount(std::move(parent));
 
     ASSERT_TRUE(surface.pointerDown({{15.f, 15.f}, PointerButton::Left}));
-    EXPECT_EQ(lateCalls, 0);
+    EXPECT_EQ(lateCalls, 1);
     surface.pointerUp({{15.f, 15.f}, PointerButton::Left});
     ASSERT_TRUE(surface.pointerDown({{15.f, 15.f}, PointerButton::Left}));
-    EXPECT_EQ(lateCalls, 1);
+    EXPECT_EQ(lateCalls, 2);
+}
+
+TEST(SurfaceTest, EventRoutingSkipsAListenerRemovedBeforeItsTurn) {
+    Surface surface;
+    surface.setViewport(100.f, 100.f);
+    auto parent = makeElement<HTMLPanelElement>();
+    parent->setRect({0.f, 0.f, 100.f, 100.f});
+    auto button = makeElement<HTMLButtonElement>();
+    HTMLButtonElement* target = button.get();
+    button->setRect({10.f, 10.f, 20.f, 20.f});
+    EventHandler removed([&](Event&) { FAIL() << "removed listener ran"; });
+    button->addEventListener(kPointerDownEvent, removed);
+    parent->addEventListener(kPointerDownEvent, [&](Event&) { target->removeEventListener(kPointerDownEvent, removed); }, true);
+    parent->append(std::move(button));
+    surface.mount(std::move(parent));
+
+    EXPECT_TRUE(surface.pointerDown({{15.f, 15.f}, PointerButton::Left}));
+}
+
+TEST(SurfaceTest, EventRoutingIncludesListenersAddedByEarlierPathItems) {
+    Surface surface;
+    surface.setViewport(100.f, 100.f);
+    auto root = makeElement<HTMLPanelElement>();
+    root->setRect({0.f, 0.f, 100.f, 100.f});
+    auto parent = makeElement<HTMLPanelElement>();
+    HTMLPanelElement* parentPointer = parent.get();
+    parent->setRect({0.f, 0.f, 100.f, 100.f});
+    auto button = makeElement<HTMLButtonElement>();
+    button->setRect({10.f, 10.f, 20.f, 20.f});
+
+    int calls = 0;
+    EventHandler late([&](Event&) { ++calls; });
+    parent->addEventListener(kPointerDownEvent, late, true);
+    root->addEventListener(kPointerDownEvent, [&](Event&) { parentPointer->addEventListener(kPointerDownEvent, late, true); }, true);
+    parent->append(std::move(button));
+    root->append(std::move(parent));
+    surface.mount(std::move(root));
+
+    EXPECT_TRUE(surface.pointerDown({{15.f, 15.f}, PointerButton::Left}));
+    EXPECT_EQ(calls, 1);
+}
+
+TEST(SurfaceTest, EventRoutingUsesFixedPathForARetainedDetachedTarget) {
+    Surface surface;
+    surface.setViewport(100.f, 100.f);
+    auto root = makeElement<HTMLPanelElement>();
+    root->setRect({0.f, 0.f, 100.f, 100.f});
+    auto button = makeElement<HTMLButtonElement>();
+    HTMLButtonElement* target = button.get();
+    button->setRect({10.f, 10.f, 20.f, 20.f});
+    NodePtr retained;
+    int targetBubbleCalls = 0;
+    int rootBubbleCalls = 0;
+    button->addEventListener(kPointerDownEvent, [&](Event&) { retained = target->remove(); }, true);
+    button->addEventListener(kPointerDownEvent, [&](Event& event) {
+        ++targetBubbleCalls;
+        EXPECT_EQ(event.target(), target);
+        EXPECT_EQ(event.currentTarget(), target);
+    });
+    root->addEventListener(kPointerDownEvent, [&](Event&) { ++rootBubbleCalls; });
+    root->append(std::move(button));
+    surface.mount(std::move(root));
+
+    EXPECT_TRUE(surface.pointerDown({{15.f, 15.f}, PointerButton::Left}));
+    EXPECT_EQ(targetBubbleCalls, 1);
+    EXPECT_EQ(rootBubbleCalls, 1);
+    EXPECT_EQ(retained.get(), target);
+    EXPECT_FALSE(ElementInternalAccess::isMounted(*target));
+}
+
+TEST(SurfaceTest, EventRoutingStopsSafelyWhenTheTargetIsDestroyed) {
+    Surface surface;
+    surface.setViewport(100.f, 100.f);
+    auto root = makeElement<HTMLPanelElement>();
+    HTMLPanelElement* rootPointer = root.get();
+    root->setRect({0.f, 0.f, 100.f, 100.f});
+    auto button = makeElement<HTMLButtonElement>();
+    HTMLButtonElement* target = button.get();
+    ElementRef<HTMLButtonElement> targetRef(target);
+    button->setRect({10.f, 10.f, 20.f, 20.f});
+    button->addEventListener(
+        kPointerDownEvent,
+        [&](Event&) {
+            std::unique_ptr<Element> detached = surface.unmount(*rootPointer);
+            detached.reset();
+        },
+        true);
+    root->append(std::move(button));
+    surface.mount(std::move(root));
+
+    EXPECT_FALSE(surface.pointerDown({{15.f, 15.f}, PointerButton::Left}));
+    EXPECT_EQ(targetRef.get(), nullptr);
+}
+
+TEST(SurfaceTest, ScrollDispatchStopsSafelyWhenTheTargetIsDestroyed) {
+    StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet.loadRadia("panel { width: 100px; height: 100px; overflow: auto; }").ok());
+    Surface surface(styleSheet);
+    auto root = makeElement<HTMLPanelElement>();
+    HTMLPanelElement* rootPointer = root.get();
+    ElementRef<HTMLPanelElement> rootRef(rootPointer);
+    auto child = makeElement<HTMLPanelElement>();
+    child->setRect({0.f, 0.f, 200.f, 200.f});
+    root->addEventListener(
+        kScrollEvent,
+        [&](Event&) {
+            std::unique_ptr<Element> detached = surface.unmount(*rootPointer);
+            detached.reset();
+        },
+        true);
+    root->append(std::move(child));
+    surface.mount(std::move(root));
+    surface.updateLayout();
+
+    rootPointer->scrollTo(1.f, 0.f);
+    surface.updateLayout();
+    EXPECT_EQ(rootRef.get(), nullptr);
 }
 
 TEST(SurfaceTest, StopImmediatePropagationSkipsLaterListeners) {
@@ -1921,9 +2158,9 @@ TEST(SurfaceTest, KeepsMountedRootsIndependent) {
     surface.mount(std::move(first), SurfaceLayer::Floater);
     surface.mount(std::move(second), SurfaceLayer::Floater);
 
-    radia::ui::ElementRef<Element> firstHandle(firstRoot);
-    radia::ui::ElementRef<Element> firstDescendantHandle(firstDescendant);
-    radia::ui::ElementRef<Element> secondHandle(secondRoot);
+    ElementRef<Element> firstHandle(firstRoot);
+    ElementRef<Element> firstDescendantHandle(firstDescendant);
+    ElementRef<Element> secondHandle(secondRoot);
 
     EXPECT_EQ(firstRoot->parentElement(), nullptr);
     EXPECT_EQ(secondRoot->parentElement(), nullptr);

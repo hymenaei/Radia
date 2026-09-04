@@ -66,9 +66,11 @@ protected:
     bool beginPointerInteraction(const PointerEvent& event) override;
     bool updatePointerInteraction(const PointerEvent& event) override;
     bool endPointerInteraction(const PointerEvent& event) override;
+    void onChildWillBeRemoved(Element& child) override;
     void onChildAdded(Element& child) override;
     void onChildRemoved(Element& child) override;
     void onDescendantAdded(Element& child) override;
+    void onDescendantWillBeRemoved(Element& child) override;
     void onDescendantRemoved(Element& child) override;
     void onChildrenCleared() override;
     void onLocaleChanged(const System& system) override;
@@ -93,6 +95,7 @@ private:
     void refreshAuthoredStructure();
     void setMovementBounds(const Rect& bounds);
     void clampToMovementBounds();
+    void normalizeMinimizedState();
 
     Rect mMovementBounds;
     Rect mExpandedRect;

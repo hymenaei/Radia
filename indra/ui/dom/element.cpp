@@ -150,7 +150,9 @@ void replaceTextContent(Element& element, std::string text) {
 
 Element::Element(std::string_view elementName)
     : Node(NodeType::Element), mElementName(elementName), mPrivate(std::make_unique<ElementPrivateData>()) {}
-Element::~Element() = default;
+Element::~Element() {
+    if (mSurface) mSurface->elementOwnerDestroyed(*this);
+}
 
 void Element::setAttributeValue(std::string name, std::optional<std::string> value) {
     const auto found = std::find_if(mAttributes.begin(), mAttributes.end(), [&name](const Attribute& attribute) { return attribute.name == name; });
@@ -567,15 +569,14 @@ void Element::removeEventListener(std::string_view type, const EventHandler& han
 }
 
 Element& Element::setIdScopeRoot(bool scopeRoot) {
+    if (mIdScopeRoot == scopeRoot) return *this;
     mIdScopeRoot = scopeRoot;
+    ++mChildTopologyRevision;
     return *this;
 }
 
 void Element::dispatchListeners(Event& event, bool capture) {
-    dispatchListeners(event, capture, eventListenerSnapshot());
-}
-
-void Element::dispatchListeners(Event& event, bool capture, const EventListenerSnapshot& listeners) {
+    const EventListenerSnapshot listeners = mEventListeners;
     const ElementRef<Element> self(this);
     for (const EventListener& listener : listeners) {
         if (event.immediatePropagationStopped()) break;
@@ -596,13 +597,12 @@ void Element::dispatchEvent(Event& event) {
     const ElementRef<Element> self(this);
     event.setPhase(EventPhase::Target);
     event.setCurrentTarget(this);
-    const EventListenerSnapshot listeners = eventListenerSnapshot();
-    dispatchListeners(event, true, listeners);
+    dispatchListeners(event, true);
     if (!self) {
         event.setCurrentTarget(nullptr);
         return;
     }
-    if (!event.immediatePropagationStopped()) dispatchListeners(event, false, listeners);
+    if (!event.immediatePropagationStopped()) dispatchListeners(event, false);
     event.setCurrentTarget(nullptr);
 }
 
@@ -705,6 +705,21 @@ void Element::notifyTreeAttached() {
     }();
     for (const ElementRef<Element>& child : children)
         if (Element* current = child.get(); current && current->parentElement() == this) current->notifyTreeAttached();
+}
+
+void Element::notifyTreeWillBeDetached() {
+    const ElementRef<Element> self(this);
+    onTreeWillBeDetached();
+    if (!self) return;
+    const std::vector<ElementRef<Element>> children = [&] {
+        std::vector<ElementRef<Element>> result;
+        result.reserve(mChildren.size());
+        for (const auto& childNode : mChildren)
+            if (Element* child = childNode->asElement()) result.emplace_back(child);
+        return result;
+    }();
+    for (const ElementRef<Element>& child : children)
+        if (Element* current = child.get(); current && current->parentElement() == this) current->notifyTreeWillBeDetached();
 }
 
 void Element::notifyTreeDetached() {

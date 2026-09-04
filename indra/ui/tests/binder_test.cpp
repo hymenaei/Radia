@@ -27,6 +27,7 @@
 #include "html/panel.h"
 #include "layout/resourcecompiler.h"
 #include "resource/elementdefinition.h"
+#include "surface/surface.h"
 #include "text/metrics.h"
 
 namespace {
@@ -50,9 +51,10 @@ using radia::ui::PreparedBinding;
 using radia::ui::PreparedBindingResult;
 using radia::ui::ResourceBuildResult;
 using radia::ui::ResourceCompiler;
+using radia::ui::setAuthoredEventCall;
 using radia::ui::SettingResolution;
 using radia::ui::SettingResolver;
-using radia::ui::setAuthoredEventCall;
+using radia::ui::Surface;
 using radia::ui::ValueBinding;
 using radia::ui::ValueBindingBase;
 using radia::ui::ValueBindingRef;
@@ -91,12 +93,12 @@ template<typename Callback> void bindEvent(Binder& binder, std::string settingNa
 
 template<typename T> class TestValueBinding final : public ValueBinding<T> {
 public:
-    explicit TestValueBinding(T value) : mState{value, value, std::nullopt} {}
+    explicit TestValueBinding(T value, bool notifyWrites = true) : mState{value, value, std::nullopt}, mNotifyWrites(notifyWrites) {}
 
     ValueState<T> state() const override { return mState; }
     void write(T value) override {
         mState.value = std::move(value);
-        notify();
+        if (mNotifyWrites) notify();
     }
     ValueBindingSubscription observe(typename ValueBinding<T>::Observer observer) override {
         const std::size_t id = mNextObserver++;
@@ -119,6 +121,7 @@ private:
     }
 
     ValueState<T> mState;
+    bool mNotifyWrites = true;
     std::map<std::size_t, typename ValueBinding<T>::Observer> mObservers;
     std::size_t mNextObserver = 1;
 };
@@ -170,10 +173,35 @@ TestBindingResult finishBinding(Binder& binder) {
     TestBindingResult result;
     result.warnings = std::move(prepared.warnings);
     result.errors = std::move(prepared.errors);
-    if (prepared.ok()) result.binding = prepared.binding.commit();
+    if (prepared.ok()) {
+        result.binding = prepared.binding.commit();
+        if (result.binding && !result.binding.activate()) result.binding = Binding{};
+    }
     return result;
 }
 } // namespace
+
+TEST(BinderTest, KeepsCommittedEventBindingInactiveUntilActivated) {
+    auto root = makeElementValue<HTMLPanelElement>();
+    auto button = makeElement<HTMLButtonElement>();
+    HTMLButtonElement* target = button.get();
+    setAuthoredEventCall(*button, kClickEvent, EventCall("activate"));
+    root.append(std::move(button));
+
+    int activations = 0;
+    Binder binder(root);
+    bindEvent(binder, "activate", [&] { ++activations; });
+    PreparedBindingResult prepared = binder.prepare();
+    ASSERT_TRUE(prepared.ok());
+    Binding binding = prepared.binding.commit();
+    ASSERT_TRUE(binding);
+
+    target->activate();
+    EXPECT_EQ(activations, 0);
+    ASSERT_TRUE(binding.activate());
+    target->activate();
+    EXPECT_EQ(activations, 1);
+}
 
 TEST(BinderTest, CommitsEventBindingAndResolvesTypedElement) {
     auto root = makeElementValue<HTMLPanelElement>();
@@ -208,12 +236,12 @@ TEST(BinderTest, DistinguishesTypedAndMissingElementLookups) {
     int activations = 0;
     ElementRef<HTMLButtonElement> save;
     ElementRef<HTMLButtonElement> wrongType;
-    ElementRef<radia::ui::HTMLLabelElement> missing;
+    ElementRef<HTMLLabelElement> missing;
     Binder binder(root);
     save = lookupElement<HTMLButtonElement>(root, "save");
     bindEvent(binder, "save", [&] { ++activations; });
     wrongType = lookupElement<HTMLButtonElement>(root, "status");
-    missing = lookupElement<radia::ui::HTMLLabelElement>(root, "missing");
+    missing = lookupElement<HTMLLabelElement>(root, "missing");
     const TestBindingResult result = finishBinding(binder);
     ASSERT_TRUE(result.ok());
     ASSERT_NE(save.get(), nullptr);
@@ -336,12 +364,12 @@ TEST(BinderTest, ResolvesIdsWithinIndependentResourceScopes) {
     ASSERT_NE(leftScope.get(), nullptr);
     ASSERT_NE(rightScope.get(), nullptr);
 
-    ElementRef<radia::ui::HTMLLabelElement> leftBound;
-    ElementRef<radia::ui::HTMLLabelElement> rightBound;
+    ElementRef<HTMLLabelElement> leftBound;
+    ElementRef<HTMLLabelElement> rightBound;
     Binder leftBinder(*leftScope);
-    leftBound = lookupElement<radia::ui::HTMLLabelElement>(*leftScope, "item");
+    leftBound = lookupElement<HTMLLabelElement>(*leftScope, "item");
     Binder rightBinder(*rightScope);
-    rightBound = lookupElement<radia::ui::HTMLLabelElement>(*rightScope, "item");
+    rightBound = lookupElement<HTMLLabelElement>(*rightScope, "item");
     const TestBindingResult leftResult = finishBinding(leftBinder);
     ASSERT_TRUE(leftResult.ok());
     ASSERT_NE(leftBound.get(), nullptr);
@@ -412,6 +440,23 @@ TEST(BinderTest, RejectsPreparedBindingAfterItsBoundTargetMoves) {
 
     auto detached = target->remove();
     ASSERT_NE(detached, nullptr);
+
+    EXPECT_FALSE(static_cast<bool>(prepared.binding));
+    EXPECT_FALSE(static_cast<bool>(prepared.binding.commit()));
+}
+
+TEST(BinderTest, RejectsPreparedBindingAfterItsRootTopologyChanges) {
+    auto root = makeElementValue<HTMLPanelElement>();
+    auto button = makeElement<HTMLButtonElement>();
+    setAuthoredEventCall(*button, kClickEvent, EventCall("unused"));
+    root.append(std::move(button));
+
+    Binder binder(root);
+    bindEvent(binder, "unused", [] {});
+    PreparedBindingResult prepared = binder.prepare();
+    ASSERT_TRUE(prepared.ok());
+
+    root.append(makeElement<HTMLLabelElement>());
 
     EXPECT_FALSE(static_cast<bool>(prepared.binding));
     EXPECT_FALSE(static_cast<bool>(prepared.binding.commit()));
@@ -514,6 +559,108 @@ TEST(BinderTest, PreservesLiveValueBindingUntilReplacementCommits) {
     EXPECT_TRUE(reference->state().value);
 }
 
+TEST(BinderTest, DeactivatesValueBindingWhileItsRootIsUnmounted) {
+    ResourceBuildResult buildResult = ResourceCompiler().buildElementTreeFromString(
+        "<panel><input id=\"control\" type=\"checkbox\" switch=\"true\" setting=\"demo-enabled\"></panel>", "binding-lifetime.html");
+    ASSERT_TRUE(buildResult.ok());
+    HTMLPanelElement* root = buildResult.rootAs<HTMLPanelElement>();
+    ASSERT_NE(root, nullptr);
+    HTMLInputElement* inputPointer = dynamic_cast<HTMLInputElement*>(findElementInScope(*root, "control"));
+    ASSERT_NE(inputPointer, nullptr);
+
+    auto provider = std::make_shared<TestValueBinding<bool>>(false);
+    TestSettingResolver resolver;
+    resolver.add("demo-enabled", provider);
+    ValueBindingRef<bool> reference;
+    Binder binder(*root, &resolver);
+    binder.requireValueBinding({"demo-enabled"}, reference);
+    PreparedBindingResult prepared = binder.prepare();
+    ASSERT_TRUE(prepared.ok());
+    Binding binding = prepared.binding.commit();
+    ASSERT_TRUE(binding);
+
+    Surface surface;
+    surface.mount(*buildResult.document);
+    ASSERT_TRUE(binding.activate());
+    provider->publish({true, false, std::nullopt});
+    EXPECT_TRUE(inputPointer->checked());
+
+    auto detachedInput = inputPointer->remove();
+    ASSERT_NE(detachedInput, nullptr);
+    provider->publish({false, false, std::nullopt});
+    EXPECT_TRUE(inputPointer->checked());
+
+    root->append(std::move(detachedInput));
+    provider->publish({false, false, std::nullopt});
+    EXPECT_FALSE(inputPointer->checked());
+    provider->publish({true, false, std::nullopt});
+    EXPECT_TRUE(inputPointer->checked());
+
+    binding.deactivate();
+    ASSERT_TRUE(surface.unmountBorrowed(*root));
+    provider->publish({false, false, std::nullopt});
+    EXPECT_TRUE(inputPointer->checked());
+
+    surface.mount(*buildResult.document);
+    ASSERT_TRUE(binding.activate());
+    provider->publish({false, false, std::nullopt});
+    EXPECT_FALSE(inputPointer->checked());
+}
+
+TEST(BinderTest, ResynchronizesValueBindingWhenRootRemounts) {
+    ResourceBuildResult buildResult = ResourceCompiler().buildElementTreeFromString(
+        "<panel><input id=\"control\" type=\"checkbox\" switch=\"true\" setting=\"demo-enabled\"></panel>", "binding-remount.html");
+    ASSERT_TRUE(buildResult.ok());
+    HTMLPanelElement* root = buildResult.rootAs<HTMLPanelElement>();
+    ASSERT_NE(root, nullptr);
+    HTMLInputElement* inputPointer = dynamic_cast<HTMLInputElement*>(findElementInScope(*root, "control"));
+    ASSERT_NE(inputPointer, nullptr);
+
+    auto provider = std::make_shared<TestValueBinding<bool>>(false);
+    TestSettingResolver resolver;
+    resolver.add("demo-enabled", provider);
+    ValueBindingRef<bool> reference;
+    Binder binder(*root, &resolver);
+    binder.requireValueBinding({"demo-enabled"}, reference);
+    PreparedBindingResult prepared = binder.prepare();
+    ASSERT_TRUE(prepared.ok());
+    Binding binding = prepared.binding.commit();
+    ASSERT_TRUE(binding);
+
+    Surface surface;
+    surface.mount(*buildResult.document);
+    ASSERT_TRUE(binding.activate());
+
+    binding.deactivate();
+    ASSERT_TRUE(surface.unmountBorrowed(*root));
+    provider->publish({true, false, std::nullopt});
+    EXPECT_FALSE(inputPointer->checked());
+
+    surface.mount(*buildResult.document);
+    ASSERT_TRUE(binding.activate());
+    EXPECT_TRUE(inputPointer->checked());
+}
+
+TEST(BinderTest, AppliesSynchronousValueBindingWriteWithoutObserverNotification) {
+    constexpr char kSilentSettingLayout[] = "<input type=\"checkbox\" switch=\"true\" setting=\"demo-enabled\">";
+    ResourceBuildResult buildResult = ResourceCompiler().buildElementTreeFromString(kSilentSettingLayout, "silent-setting.html");
+    ASSERT_TRUE(buildResult.ok());
+    HTMLInputElement* control = buildResult.rootAs<HTMLInputElement>();
+    ASSERT_NE(control, nullptr);
+
+    auto provider = std::make_shared<TestValueBinding<bool>>(false, false);
+    TestSettingResolver resolver;
+    resolver.add("demo-enabled", provider);
+    Binder binder(*control, &resolver);
+    TestBindingResult result = finishBinding(binder);
+    ASSERT_TRUE(result.ok());
+
+    control->activate();
+
+    EXPECT_TRUE(provider->state().value);
+    EXPECT_TRUE(control->checked());
+}
+
 TEST(BinderTest, RejectsMissingSetting) {
     auto root = makeElementValue<HTMLPanelElement>();
     ValueBindingRef<bool> reference;
@@ -585,8 +732,6 @@ TEST(BinderTest, ReplacesValueBindingOnTheSameControl) {
     EXPECT_TRUE(static_cast<bool>(replacementResult.binding));
     EXPECT_TRUE(control->checked());
 
-    // Releasing the old binding detaches the first provider before the new
-    // binding becomes the owner of the control's subscription.
     activeBinding = std::move(replacementResult.binding);
     ASSERT_TRUE(static_cast<bool>(activeBinding));
     control->activate();

@@ -50,6 +50,7 @@ private:
     static void detachElementChild(Element& parent, Node& node, Surface* surface);
     static void detachOrphanedChild(Node& node, Surface* surface);
     static void notifyAncestorAdded(Element& parent, Element& child);
+    static void notifyAncestorWillBeRemoved(Element& parent, Element& child);
     static void notifyAncestorRemoved(Element& parent, Element& child);
     static void attachElementChild(Element& parent, Node& node);
     static void detachAll(Element& parent);

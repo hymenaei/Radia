@@ -17,6 +17,7 @@
 #include "style/pseudoelement.h"
 
 namespace radia::ui {
+class Binding;
 class Binder;
 
 struct InputValueState {
@@ -29,6 +30,7 @@ class HTMLInputElement : public HTMLElement {
     friend class detail::ElementDefinitions;
     friend class detail::ElementConstructionAccess;
     friend class detail::HTMLElementFactory;
+    friend class Binding;
     friend class Binder;
 
 public:
@@ -66,8 +68,8 @@ public:
 protected:
     void constrainResolvedStyle(Style& style) const override;
     void onActivate() override;
+    void onTreeWillBeDetached() override;
     void onTreeAttached() override;
-    void onTreeDetached() override;
     std::vector<PseudoElement*> generatedPseudoElements() const override;
 
 private:
@@ -84,7 +86,7 @@ private:
     void initializeChecked(bool checked);
     void activateChecked(bool checked);
     void prepareValueBinding(Binder& binder);
-    ValueBindingSubscription commitValueBinding();
+    ValueBindingSubscription commitValueBinding(const std::shared_ptr<bool>& bindingActive, Element& root);
     bool updateCheckedState(bool checked);
     void updateRadioGroup();
     void refreshRadioGroup();
@@ -94,6 +96,7 @@ private:
     bool updateIndeterminateState(bool indeterminate);
     void setCheckedFromRadioGroup(bool checked);
     void applyValueState(ValueState<bool> state);
+    void synchronizeValueBinding();
     void notifyValueState();
 
     std::string mType = "text";

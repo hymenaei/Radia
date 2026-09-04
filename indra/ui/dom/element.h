@@ -276,11 +276,14 @@ protected:
     const TextMetrics& textMetrics() const;
     virtual void onActivate() {}
     virtual void onLabelActivate() { activate(); }
+    virtual void onTreeWillBeDetached() {}
     virtual void onTreeAttached() {}
     virtual void onTreeDetached() {}
+    virtual void onChildWillBeRemoved(Element&) {}
     virtual void onChildAdded(Element&) {}
     virtual void onChildRemoved(Element&) {}
     virtual void onDescendantAdded(Element&) {}
+    virtual void onDescendantWillBeRemoved(Element&) {}
     virtual void onDescendantRemoved(Element&) {}
     virtual void onChildrenCleared() {}
     virtual void onLocaleChanged(const System&);
@@ -322,14 +325,13 @@ private:
     using EventListenerSnapshot = std::vector<EventListener>;
 
     void dispatchListeners(Event& event, bool capture);
-    void dispatchListeners(Event& event, bool capture, const EventListenerSnapshot& listeners);
-    EventListenerSnapshot eventListenerSnapshot() const { return mEventListeners; }
     void translateSubtree(const Vec2& delta);
     void invalidateArrangeTree();
     void invalidateTextTree();
     void invalidateStyleTree(bool layoutAffecting = true, bool propagateToDescendants = true);
     void clearPaintInvalidationTree();
     void notifyTreeAttached();
+    void notifyTreeWillBeDetached();
     void notifyTreeDetached();
     void setSurface(Surface* surface);
     void setAttributeValue(std::string name, std::optional<std::string> value);

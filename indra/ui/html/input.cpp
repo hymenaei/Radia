@@ -241,25 +241,44 @@ void HTMLInputElement::notifyValueState() {
 }
 
 void HTMLInputElement::applyValueState(ValueState<bool> state) {
+    const bool changed = mValueState != state;
     mValueState = std::move(state);
     updateCheckedState(mValueState.value);
     if (isRadioType()) updateRadioGroup();
     else refreshIndeterminateState();
-    notifyValueState();
+    if (changed) notifyValueState();
+}
+
+void HTMLInputElement::synchronizeValueBinding() {
+    if (mBinding) applyValueState(mBinding->state());
 }
 
 void HTMLInputElement::prepareValueBinding(Binder& binder) {
     if (mValueBindingRequest) binder.requireValueBinding(*mValueBindingRequest, mBinding);
 }
 
-ValueBindingSubscription HTMLInputElement::commitValueBinding() {
+ValueBindingSubscription HTMLInputElement::commitValueBinding(const std::shared_ptr<bool>& bindingActive, Element& root) {
     if (!mBinding) return {};
     applyValueState(mBinding->state());
     std::weak_ptr<char> lifetime = mValueObserverLifetime;
+    const std::weak_ptr<bool> active = bindingActive;
+    const ElementRef<Element> rootRef(&root);
+    const ElementRef<HTMLInputElement> inputRef(this);
     std::shared_ptr<ValueBinding<bool>> provider = mBinding.shared();
-    auto providerSubscription = std::make_shared<ValueBindingSubscription>(provider->observe([this, lifetime](const ValueState<bool>& state) {
-        if (!lifetime.expired()) applyValueState(state);
-    }));
+    auto providerSubscription =
+        std::make_shared<ValueBindingSubscription>(provider->observe([lifetime, active, rootRef, inputRef](const ValueState<bool>& state) {
+            const std::shared_ptr<bool> bindingIsActive = active.lock();
+            Element* rootElement = rootRef.get();
+            HTMLInputElement* input = inputRef.get();
+            if (!lifetime.expired() && bindingIsActive && *bindingIsActive && rootElement && input) {
+                for (Element* current = input; current; current = current->parentElement()) {
+                    if (current == rootElement) {
+                        input->applyValueState(state);
+                        break;
+                    }
+                }
+            }
+        }));
     return ValueBindingSubscription([this, lifetime, provider = std::move(provider), providerSubscription] {
         providerSubscription->reset();
         if (!lifetime.expired() && mBinding.shared() == provider) mBinding.reset();
@@ -275,7 +294,11 @@ void HTMLInputElement::activateChecked(bool checked) {
     ElementRef<HTMLInputElement> self(this);
     const bool previous = this->checked();
     if (mBinding) {
-        mBinding->write(checked);
+        const std::shared_ptr<ValueBinding<bool>> provider = mBinding.shared();
+        provider->write(checked);
+        HTMLInputElement* current = self.get();
+        if (!current || current->mBinding.shared() != provider) return;
+        current->applyValueState(provider->state());
     } else {
         mValueState.value = checked;
         updateCheckedState(checked);
@@ -301,7 +324,7 @@ void HTMLInputElement::onTreeAttached() {
     else refreshIndeterminateState();
 }
 
-void HTMLInputElement::onTreeDetached() {
+void HTMLInputElement::onTreeWillBeDetached() {
     if (isRadioType()) refreshRadioGroup(mName, this);
 }
 

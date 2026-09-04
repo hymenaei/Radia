@@ -38,6 +38,7 @@ using radia::ui::HTMLPanelElement;
 using radia::ui::kChangeEvent;
 using radia::ui::kInputEvent;
 using radia::ui::LayoutDirection;
+using radia::ui::layoutTree;
 using radia::ui::NativeAppearanceBase;
 using radia::ui::NativeInputControl;
 using radia::ui::NativeInputMark;
@@ -45,8 +46,10 @@ using radia::ui::NativeInputMetrics;
 using radia::ui::NativeInputPaintRequest;
 using radia::ui::PaintCommand;
 using radia::ui::PaintCommandKind;
+using radia::ui::PathVerb;
 using radia::ui::RecordingPaintContext;
 using radia::ui::resolveElementStyle;
+using radia::ui::ScrollbarMode;
 using radia::ui::ScrollLayoutOptions;
 using radia::ui::Style;
 using radia::ui::StyleSheet;
@@ -281,9 +284,9 @@ TEST(InputTest, NativeAppearanceBasePaintsCenteredCheckboxAndVectorMark) {
     EXPECT_FLOAT_EQ(mark->nativeInputMark->strokeWidth, 12.f * .16f);
     ASSERT_EQ(mark->nativeInputMark->path.commands().size(), std::size_t{3});
     const auto& path = mark->nativeInputMark->path.commands();
-    EXPECT_EQ(path[0].verb, radia::ui::PathVerb::MoveTo);
-    EXPECT_EQ(path[1].verb, radia::ui::PathVerb::LineTo);
-    EXPECT_EQ(path[2].verb, radia::ui::PathVerb::LineTo);
+    EXPECT_EQ(path[0].verb, PathVerb::MoveTo);
+    EXPECT_EQ(path[1].verb, PathVerb::LineTo);
+    EXPECT_EQ(path[2].verb, PathVerb::LineTo);
     EXPECT_FLOAT_EQ(path[0].p0.x, 6.4f);
     EXPECT_FLOAT_EQ(path[0].p0.y, 6.f);
     EXPECT_FLOAT_EQ(path[1].p0.x, 8.8f);
@@ -405,7 +408,7 @@ TEST(InputTest, IntrinsicSizeUsesSurfaceNativeAppearanceMetrics) {
     input.type("radio");
     SizedNativeAppearance appearance;
     Surface surface(styleSheet);
-    surface.setScrollLayoutOptions({radia::ui::ScrollbarMode::Classic, &appearance});
+    surface.setScrollLayoutOptions({ScrollbarMode::Classic, &appearance});
     surface.mount(input);
 
     const Vec2 size = input.intrinsicSize(styleSheet, Style{}, fixedTextMetrics());
@@ -421,7 +424,7 @@ TEST(InputTest, DetachedLayoutUsesRequestedNativeAppearanceMetrics) {
     ScrollLayoutOptions options;
     options.nativeAppearance = &appearance;
 
-    radia::ui::layoutTree(input, styleSheet, fixedTextMetrics(), LayoutDirection::LeftToRight, options);
+    layoutTree(input, styleSheet, fixedTextMetrics(), LayoutDirection::LeftToRight, options);
 
     EXPECT_FLOAT_EQ(input.desiredSize().x, 21.f);
     EXPECT_FLOAT_EQ(input.desiredSize().y, 22.f);
@@ -533,6 +536,44 @@ TEST(InputTest, DoesNotGroupRadioInputsWithDifferentOrEmptyNames) {
     EXPECT_TRUE(namedPtr->checked());
     EXPECT_TRUE(differentPtr->checked());
     EXPECT_TRUE(unnamedPtr->checked());
+}
+
+TEST(InputTest, RefreshesRadioGroupWhenACheckedRadioIsRemoved) {
+    auto root = makeElementValue<HTMLPanelElement>();
+    auto checked = makeElement<HTMLInputElement>();
+    auto remaining = makeElement<HTMLInputElement>();
+    HTMLInputElement* checkedPointer = checked.get();
+    HTMLInputElement* remainingPointer = remaining.get();
+    checked->type("radio").name("choice");
+    remaining->type("radio").name("choice");
+    root.append(std::move(checked));
+    root.append(std::move(remaining));
+    checkedPointer->checked(true);
+
+    auto detached = checkedPointer->remove();
+
+    ASSERT_NE(detached, nullptr);
+    EXPECT_TRUE(remainingPointer->hasState(ElementState::Indeterminate));
+}
+
+TEST(InputTest, RefreshesRadioGroupWhenAWrapperIsRemoved) {
+    auto root = makeElementValue<HTMLPanelElement>();
+    auto wrapper = makeElement<HTMLPanelElement>();
+    auto checked = makeElement<HTMLInputElement>();
+    auto remaining = makeElement<HTMLInputElement>();
+    HTMLInputElement* checkedPointer = checked.get();
+    HTMLInputElement* remainingPointer = remaining.get();
+    checked->type("radio").name("choice");
+    remaining->type("radio").name("choice");
+    wrapper->append(std::move(checked));
+    root.append(std::move(wrapper));
+    root.append(std::move(remaining));
+    checkedPointer->checked(true);
+
+    auto detached = root.firstChild()->remove();
+
+    ASSERT_NE(detached, nullptr);
+    EXPECT_TRUE(remainingPointer->hasState(ElementState::Indeterminate));
 }
 
 TEST(SwitchTest, ActivationTogglesAndNotifiesCheckedChange) {

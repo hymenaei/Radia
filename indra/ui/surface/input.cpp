@@ -112,30 +112,18 @@ Element* Surface::hitTestNode(Element& node, const Vec2& point, const Rect& inhe
 
 bool Surface::routeEvent(Event& event) {
     std::vector<ElementRef<Element>> route;
-    std::vector<const Element*> routeParents;
     for (Element* current = event.target(); current; current = current->parentElement()) {
         route.emplace_back(current);
-        routeParents.push_back(current->parentElement());
         if (isSurfaceRoot(current)) break;
     }
     if (route.empty() || !route.back() || !isSurfaceRoot(route.back().get()) || !isRootedInSurface(route.front().get())) return false;
 
-    std::vector<Element::EventListenerSnapshot> listenerSnapshots;
-    listenerSnapshots.reserve(route.size());
-    for (const ElementRef<Element>& elementRef : route) {
-        Element* element = elementRef.get();
-        if (!element) return false;
-        listenerSnapshots.push_back(element->eventListenerSnapshot());
-    }
-
     event.setPhase(EventPhase::Capture);
     for (std::size_t index = route.size() - 1; index > 0; --index) {
         Element* target = route[index].get();
-        Element* child = route[index - 1].get();
-        if (!target || !child || target->parentElement() != routeParents[index] || child->parentElement() != target || !isRootedInSurface(target))
-            break;
+        if (!target) break;
         event.setCurrentTarget(target);
-        target->dispatchListeners(event, true, listenerSnapshots[index]);
+        target->dispatchListeners(event, true);
         if (!route[index]) {
             event.setCurrentTarget(nullptr);
             return event.handled() || event.defaultPrevented();
@@ -148,21 +136,17 @@ bool Surface::routeEvent(Event& event) {
 
     event.setPhase(EventPhase::Target);
     Element* target = route.front().get();
-    if (!target || !isRootedInSurface(target)) {
-        event.setCurrentTarget(nullptr);
-        return event.handled() || event.defaultPrevented();
-    }
-    if (target->parentElement() != routeParents.front() || (route.size() > 1 && target->parentElement() != route[1].get())) {
+    if (!target) {
         event.setCurrentTarget(nullptr);
         return event.handled() || event.defaultPrevented();
     }
     event.setCurrentTarget(target);
-    target->dispatchListeners(event, true, listenerSnapshots.front());
+    target->dispatchListeners(event, true);
     if (!route.front()) {
         event.setCurrentTarget(nullptr);
         return event.handled() || event.defaultPrevented();
     }
-    if (!event.immediatePropagationStopped()) target->dispatchListeners(event, false, listenerSnapshots.front());
+    if (!event.immediatePropagationStopped()) target->dispatchListeners(event, false);
     if (!route.front()) {
         event.setCurrentTarget(nullptr);
         return event.handled() || event.defaultPrevented();
@@ -171,15 +155,9 @@ bool Surface::routeEvent(Event& event) {
         event.setPhase(EventPhase::Bubble);
         for (std::size_t index = 1; index < route.size(); ++index) {
             Element* bubbleTarget = route[index].get();
-            Element* child = route[index - 1].get();
-            if (!bubbleTarget
-                || !child
-                || bubbleTarget->parentElement() != routeParents[index]
-                || child->parentElement() != bubbleTarget
-                || !isRootedInSurface(bubbleTarget))
-                break;
+            if (!bubbleTarget) break;
             event.setCurrentTarget(bubbleTarget);
-            bubbleTarget->dispatchListeners(event, false, listenerSnapshots[index]);
+            bubbleTarget->dispatchListeners(event, false);
             if (!route[index]) {
                 event.setCurrentTarget(nullptr);
                 return event.handled() || event.defaultPrevented();
@@ -194,8 +172,9 @@ bool Surface::routeEvent(Event& event) {
 bool Surface::hasActiveModal() const {
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
-    const RootList& modalRoots = roots(SurfaceLayer::Modal);
-    return std::any_of(modalRoots.begin(), modalRoots.end(), [&styles](const auto& root) { return root->isVisible(styles.style(*root)); });
+    const MountList& modalMounts = mounts(SurfaceLayer::Modal);
+    return std::any_of(modalMounts.begin(), modalMounts.end(),
+                       [&styles](const MountPtr& mount) { return mount && mount->root && mount->root->isVisible(styles.style(*mount->root)); });
 }
 
 Element* Surface::hitTestAt(const Vec2& point) {
@@ -203,9 +182,10 @@ Element* Surface::hitTestAt(const Vec2& point) {
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
     const auto hitInLayer = [&](SurfaceLayer layer) -> Element* {
-        const RootList& layerRoots = roots(layer);
-        for (auto current = layerRoots.rbegin(); current != layerRoots.rend(); ++current)
-            if (Element* hit = hitTestNode(**current, point, mViewport, styles)) return hit;
+        const MountList& layerMounts = mounts(layer);
+        for (auto current = layerMounts.rbegin(); current != layerMounts.rend(); ++current)
+            if (*current && (*current)->root)
+                if (Element* hit = hitTestNode(*(*current)->root, point, mViewport, styles)) return hit;
         return nullptr;
     };
     if (hasActiveModal()) return hitInLayer(SurfaceLayer::Modal);
@@ -260,9 +240,10 @@ std::optional<Surface::ScrollbarTarget> Surface::hitTestScrollbarAt(const Vec2& 
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
     const auto hitInLayer = [&](SurfaceLayer layer) -> std::optional<ScrollbarTarget> {
-        const RootList& layerRoots = roots(layer);
-        for (auto current = layerRoots.rbegin(); current != layerRoots.rend(); ++current)
-            if (std::optional<ScrollbarTarget> hit = hitTestScrollbarNode(**current, point, mViewport, styles)) return hit;
+        const MountList& layerMounts = mounts(layer);
+        for (auto current = layerMounts.rbegin(); current != layerMounts.rend(); ++current)
+            if (*current && (*current)->root)
+                if (std::optional<ScrollbarTarget> hit = hitTestScrollbarNode(*(*current)->root, point, mViewport, styles)) return hit;
         return std::nullopt;
     };
     if (hasActiveModal()) return hitInLayer(SurfaceLayer::Modal);
@@ -526,18 +507,24 @@ bool Surface::scrollFocusedElement(const KeyEvent& event, Element& focused) {
 }
 
 void Surface::clearInteractionState() {
-    if (Element* hovered = mHovered) hovered->setState(ElementState::Hovered, false);
-    if (Element* pressed = mPressed) pressed->setState(ElementState::Active, false);
-    clearKeyboardPress();
-    if (Element* focused = mFocused) {
-        focused->setState(ElementState::Focused, false);
-        focused->setState(ElementState::FocusVisible, false);
-    }
-    if (Element* captured = mCaptured) captured->endPointerInteraction({mPointerPosition});
+    const std::weak_ptr<char> surfaceLifetime = mLifetime;
+    Element* hovered = mHovered;
+    Element* pressed = mPressed;
+    Element* focused = mFocused;
+    Element* captured = mCaptured;
     mHovered = nullptr;
     mPressed = nullptr;
     mFocused = nullptr;
     mCaptured = nullptr;
+    if (hovered) hovered->setState(ElementState::Hovered, false);
+    if (pressed) pressed->setState(ElementState::Active, false);
+    clearKeyboardPress();
+    if (focused) {
+        focused->setState(ElementState::Focused, false);
+        focused->setState(ElementState::FocusVisible, false);
+    }
+    if (captured) captured->endPointerInteraction({mPointerPosition});
+    if (surfaceLifetime.expired()) return;
     mResizeCursor = CursorStyle::Auto;
     mScrollbarHover.reset();
     mScrollbarCapture.reset();
@@ -979,6 +966,7 @@ void Surface::updatePressedState() {
 }
 
 void Surface::elementBecameUnavailable(Element&) {
+    const std::weak_ptr<char> surfaceLifetime = mLifetime;
     if (mScrollbarCapture && (!mScrollbarCapture->element || !isEnabledInTree(mScrollbarCapture->element))) {
         mScrollbarCapture.reset();
         requestPaint();
@@ -987,6 +975,7 @@ void Surface::elementBecameUnavailable(Element&) {
     if (Element* captured = mCaptured; captured && !isEnabledInTree(captured)) {
         mCaptured = nullptr;
         captured->endPointerInteraction({mPointerPosition});
+        if (surfaceLifetime.expired()) return;
         mResizeCursor = CursorStyle::Auto;
     }
     if (Element* pressed = mPressed; pressed && !isEnabledInTree(pressed)) {
@@ -1003,7 +992,8 @@ bool Surface::moveFocus(bool backwards) {
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
     const auto collectLayer = [&](SurfaceLayer layer) {
-        for (const auto& root : roots(layer)) collectFocusable(*root, focusable, styles);
+        for (const MountPtr& mount : mounts(layer))
+            if (mount && mount->root) collectFocusable(*mount->root, focusable, styles);
     };
     if (hasActiveModal()) collectLayer(SurfaceLayer::Modal);
     else {

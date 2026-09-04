@@ -106,6 +106,7 @@ public:
     static std::weak_ptr<char> lifetime(const Element& element) { return element.mPrivate->lifetime; }
     static MountEpoch& mountEpoch(Element& element) { return element.mPrivate->mountEpoch; }
     static const MountEpoch& mountEpoch(const Element& element) { return element.mPrivate->mountEpoch; }
+    static std::uint64_t topologyEpoch(const Element& element) { return element.mChildTopologyRevision; }
     static bool isMounted(const Element& element) { return element.mSurface != nullptr; }
     static ElementLayoutCache& layoutCache(Element& element) { return element.mPrivate->layoutCache; }
     static const ElementLayoutCache& layoutCache(const Element& element) { return element.mPrivate->layoutCache; }

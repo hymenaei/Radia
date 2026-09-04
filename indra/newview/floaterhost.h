@@ -20,7 +20,7 @@ class FloaterHost final : public ComponentManager::Host {
 public:
     explicit FloaterHost(Surface& surface);
 
-    void mount(Document& document) override;
+    bool mount(Document& document) override;
     bool unmount(HTMLFloaterElement& root) override;
     bool replaceAll(std::vector<ReplacementRequest> replacements) override;
     bool clearAll(std::vector<HTMLFloaterElement*> roots) override;

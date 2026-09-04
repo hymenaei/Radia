@@ -16,13 +16,14 @@
 #include "surface/surface.h"
 
 namespace radia::ui {
+using detail::ElementInternalAccess;
+
 HTMLFloaterElement& Surface::mountFloater(std::unique_ptr<HTMLFloaterElement> floater, SurfaceLayer layer) {
     if (layer != SurfaceLayer::Floater && layer != SurfaceLayer::Modal) layer = SurfaceLayer::Floater;
     ElementRef<HTMLFloaterElement> mountedRef(floater.get());
     mount(std::move(floater), layer);
     HTMLFloaterElement* mounted = mountedRef.get();
     llassert_always(mounted && mounted->parentElement() == nullptr && mountedRoot(mounted) == mounted);
-    mFloaters.emplace_back(mounted);
     constrainFloater(*mounted);
     mounted = mountedRef.get();
     llassert_always(mounted && mounted->parentElement() == nullptr && mountedRoot(mounted) == mounted);
@@ -35,60 +36,88 @@ HTMLFloaterElement& Surface::mountFloater(Document& document, SurfaceLayer layer
     llassert_always(floater);
     if (layer != SurfaceLayer::Floater && layer != SurfaceLayer::Modal) layer = SurfaceLayer::Floater;
     mount(document, layer);
-    mFloaters.emplace_back(floater);
     constrainFloater(*floater);
     return *floater;
 }
 
 std::unique_ptr<HTMLFloaterElement> Surface::replaceFloater(HTMLFloaterElement& current, std::unique_ptr<HTMLFloaterElement> replacement) {
     if (!replacement || !managesFloater(current)) return nullptr;
+    if (replacement->parentNode() || ElementInternalAccess::isMounted(*replacement)) return nullptr;
 
-    const std::optional<SurfaceLayer> layer = layerOf(&current);
-    if (!layer) return nullptr;
-    RootList& layerRoots = roots(*layer);
-    auto found = std::find(layerRoots.begin(), layerRoots.end(), &current);
-    if (found == layerRoots.end()) return nullptr;
-
-    const auto managed = std::find_if(mFloaters.begin(), mFloaters.end(), [&current](const auto& floater) { return floater == &current; });
-    if (managed == mFloaters.end()) return nullptr;
-
+    const ElementRef<HTMLFloaterElement> currentRef(&current);
+    const std::weak_ptr<char> surfaceLifetime = mLifetime;
     clearInteractionState();
-    std::unique_ptr<Element> retired = takeOwnedRoot(current);
-    if (!retired) return nullptr;
+    if (surfaceLifetime.expired()) return nullptr;
+    HTMLFloaterElement* currentElement = currentRef.get();
+    if (!currentElement || !managesFloater(*currentElement)) return nullptr;
+
+    Mount* currentMount = findMount(currentElement);
+    if (!currentMount || currentMount->ownership != Mount::Ownership::Owned || currentMount->floater != currentElement) return nullptr;
+    MountList& layerMounts = mounts(currentMount->layer);
+    const auto found = std::find_if(layerMounts.begin(), layerMounts.end(),
+                                    [currentElement](const MountPtr& mount) { return mount && mount->root == currentElement; });
+    if (found == layerMounts.end()) return nullptr;
+
+    const SurfaceLayer layer = currentMount->layer;
+    MountPtr retired = std::move(*found);
+    ElementRef<HTMLFloaterElement> retiredRef(currentElement);
+    retired->lifetime.reset();
+    retired->root = nullptr;
+    retired->floater = nullptr;
     Element* replacementRoot = replacement.get();
-    replacement->setSurface(this);
-    mOwnedRoots.emplace_back(std::move(replacement));
-    *found = replacementRoot;
+    MountPtr replacementMount = std::make_unique<Mount>(std::move(replacement), layer, static_cast<HTMLFloaterElement*>(replacementRoot));
+    ElementRef<HTMLFloaterElement> replacementRef(static_cast<HTMLFloaterElement*>(replacementRoot));
+    *found = std::move(replacementMount);
+    if (Element* oldRoot = retiredRef.get(); oldRoot && oldRoot->surface() == this) oldRoot->setSurface(nullptr);
+    if (HTMLFloaterElement* installed = replacementRef.get()) installed->setSurface(this);
     invalidateOrderingCache();
-    *managed = static_cast<HTMLFloaterElement*>(replacementRoot);
     requestLayout();
     refreshHover();
 
-    retired->setSurface(nullptr);
-    return std::unique_ptr<HTMLFloaterElement>(static_cast<HTMLFloaterElement*>(retired.release()));
+    return std::unique_ptr<HTMLFloaterElement>(static_cast<HTMLFloaterElement*>(retired->ownedRoot.release()));
 }
 
 bool Surface::replaceFloater(HTMLFloaterElement& current, HTMLFloaterElement& replacement) {
-    if (&current == &replacement || replacement.parentElement() || replacement.surface() || !managesFloater(current)) return false;
+    if (&current == &replacement
+        || replacement.parentElement()
+        || (replacement.parentNode() && !replacement.parentNode()->asDocument())
+        || ElementInternalAccess::isMounted(replacement)
+        || !managesFloater(current))
+        return false;
 
-    const std::optional<SurfaceLayer> layer = layerOf(&current);
-    if (!layer) return false;
-    RootList& layerRoots = roots(*layer);
-    const auto found = std::find(layerRoots.begin(), layerRoots.end(), &current);
-    if (found == layerRoots.end()) return false;
-
-    const auto managed = std::find_if(mFloaters.begin(), mFloaters.end(), [&current](const auto& floater) { return floater == &current; });
-    if (managed == mFloaters.end()) return false;
-
+    const ElementRef<HTMLFloaterElement> currentRef(&current);
+    const ElementRef<HTMLFloaterElement> replacementRef(&replacement);
+    const std::weak_ptr<char> surfaceLifetime = mLifetime;
     clearInteractionState();
-    replacement.setSurface(this);
-    *found = &replacement;
-    current.setSurface(nullptr);
-    *managed = &replacement;
+    if (surfaceLifetime.expired()) return false;
+    HTMLFloaterElement* currentElement = currentRef.get();
+    HTMLFloaterElement* replacementElement = replacementRef.get();
+    if (!currentElement || !replacementElement || !managesFloater(*currentElement)) return false;
+    if (replacementElement->parentElement()
+        || (replacementElement->parentNode() && !replacementElement->parentNode()->asDocument())
+        || ElementInternalAccess::isMounted(*replacementElement))
+        return false;
+
+    Mount* currentMount = findMount(currentElement);
+    if (!currentMount || currentMount->ownership != Mount::Ownership::Borrowed || currentMount->floater != currentElement) return false;
+    MountList& layerMounts = mounts(currentMount->layer);
+    const auto found = std::find_if(layerMounts.begin(), layerMounts.end(),
+                                    [currentElement](const MountPtr& mount) { return mount && mount->root == currentElement; });
+    if (found == layerMounts.end()) return false;
+
+    const SurfaceLayer layer = currentMount->layer;
+    MountPtr retired = std::move(*found);
+    ElementRef<HTMLFloaterElement> retiredRef(currentElement);
+    retired->lifetime.reset();
+    retired->root = nullptr;
+    retired->floater = nullptr;
+    *found = std::make_unique<Mount>(*replacementElement, layer, replacementElement);
+    if (Element* oldRoot = retiredRef.get(); oldRoot && oldRoot->surface() == this) oldRoot->setSurface(nullptr);
+    if (HTMLFloaterElement* installed = replacementRef.get()) installed->setSurface(this);
     invalidateOrderingCache();
     requestLayout();
     refreshHover();
-    return true;
+    return replacementRef.get() != nullptr;
 }
 
 std::unique_ptr<HTMLFloaterElement> Surface::unmountFloater(HTMLFloaterElement& floater) {
@@ -166,25 +195,39 @@ std::optional<Rect> Surface::prepareFloater(HTMLFloaterElement& floater) const {
     const ElementObservation floaterObservation = observe(floater);
     const std::optional<Rect> authored = initialFloaterRect(floater);
     if (!authored || !floaterObservation.layoutValid() || !floaterObservation.styleValid()) return std::nullopt;
-    Element* body = floater.body();
+    HTMLFloaterElement* currentFloater = dynamic_cast<HTMLFloaterElement*>(floaterObservation.get());
+    if (!currentFloater) return std::nullopt;
+    Element* body = currentFloater->body();
+    const ElementRef<Element> bodyRef(body);
+    body = bodyRef.get();
+    if (body && body->parentElement() != currentFloater) return std::nullopt;
     const ElementObservation bodyObservation = body ? observe(*body) : ElementObservation{};
+    if (body && (!bodyObservation.layoutValid() || !bodyObservation.styleValid() || !bodyObservation.attachedTo(*currentFloater)))
+        return std::nullopt;
     const Vec2 bodySize = body ? measureElement(*body, *mStyleSheet, mTextMetrics) : Vec2{};
+    body = bodyRef.get();
     if (!floaterObservation.layoutValid()
         || !floaterObservation.styleValid()
-        || (body && (!bodyObservation.layoutValid() || !bodyObservation.styleValid() || !bodyObservation.attachedTo(floater))))
+        || (body
+            && (!bodyObservation.layoutValid()
+                || !bodyObservation.styleValid()
+                || !bodyObservation.attachedTo(*currentFloater)
+                || body->parentElement() != currentFloater
+                || currentFloater->body() != body)))
         return std::nullopt;
-    floater.setAuthoredSize({authored->w, authored->h}, bodySize);
+    currentFloater->setAuthoredSize({authored->w, authored->h}, bodySize);
     return authored;
 }
 
 bool Surface::raiseWithinLayer(Element& element, SurfaceLayer layer) {
     const Element* directRoot = mountedRoot(&element);
     if (!directRoot || layerOf(directRoot) != layer) return false;
-    RootList& layerRoots = roots(layer);
-    auto found = std::find(layerRoots.begin(), layerRoots.end(), directRoot);
-    if (found == layerRoots.end()) return false;
-    if (std::next(found) != layerRoots.end()) {
-        std::rotate(found, std::next(found), layerRoots.end());
+    MountList& layerMounts = mounts(layer);
+    const auto found =
+        std::find_if(layerMounts.begin(), layerMounts.end(), [directRoot](const MountPtr& mount) { return mount && mount->root == directRoot; });
+    if (found == layerMounts.end()) return false;
+    if (std::next(found) != layerMounts.end()) {
+        std::rotate(found, std::next(found), layerMounts.end());
         invalidateOrderingCache();
         requestPaint();
         refreshHover();
@@ -193,11 +236,11 @@ bool Surface::raiseWithinLayer(Element& element, SurfaceLayer layer) {
 }
 
 bool Surface::managesFloater(const HTMLFloaterElement& floater) const {
-    const std::optional<SurfaceLayer> layer = layerOf(&floater);
-    return layer
-        && (*layer == SurfaceLayer::Floater || *layer == SurfaceLayer::Modal)
-        && mountedRoot(&floater) == &floater
-        && std::any_of(mFloaters.begin(), mFloaters.end(), [&floater](const auto& managed) { return managed == &floater; });
+    const Mount* mount = findMount(&floater);
+    return mount
+        && mount->root == &floater
+        && mount->floater == &floater
+        && (mount->layer == SurfaceLayer::Floater || mount->layer == SurfaceLayer::Modal);
 }
 
 void Surface::floaterClosed(HTMLFloaterElement& floater) {

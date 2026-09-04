@@ -15,29 +15,90 @@ using detail::ElementInternalAccess;
 using detail::MountEpoch;
 
 Binding::~Binding() {
-    clearEventListeners();
+    deactivate();
 }
 
 Binding::Binding(Binding&& other) noexcept
-    : mEventAttachments(std::move(other.mEventAttachments)), mValueSubscriptions(std::move(other.mValueSubscriptions)), mCommitted(other.mCommitted) {
+    : mEventAttachments(std::move(other.mEventAttachments)), mValueAttachments(std::move(other.mValueAttachments)),
+      mValueSubscriptions(std::move(other.mValueSubscriptions)), mRoot(other.mRoot), mRootParent(other.mRootParent),
+      mRootLifetime(std::move(other.mRootLifetime)), mActive(std::move(other.mActive)), mCommitted(other.mCommitted) {
+    other.mRoot = nullptr;
+    other.mRootParent = nullptr;
     other.mCommitted = false;
 }
 
 Binding& Binding::operator=(Binding&& other) noexcept {
     if (this == &other) return *this;
-    clearEventListeners();
+    deactivate();
     mEventAttachments = std::move(other.mEventAttachments);
+    mValueAttachments = std::move(other.mValueAttachments);
     mValueSubscriptions = std::move(other.mValueSubscriptions);
+    mRoot = other.mRoot;
+    mRootParent = other.mRootParent;
+    mRootLifetime = std::move(other.mRootLifetime);
+    mActive = std::move(other.mActive);
     mCommitted = other.mCommitted;
+    other.mRoot = nullptr;
+    other.mRootParent = nullptr;
     other.mCommitted = false;
     return *this;
 }
 
 void Binding::clearEventListeners() noexcept {
-    for (const EventAttachment& attachment : mEventAttachments)
-        if (attachment.element && !attachment.lifetime.expired())
+    for (EventAttachment& attachment : mEventAttachments) {
+        if (attachment.attached && attachment.element && !attachment.lifetime.expired())
             attachment.element->removeEventListener(attachment.type, attachment.handler, attachment.capture);
-    mEventAttachments.clear();
+        attachment.attached = false;
+    }
+}
+
+void Binding::attachEventListeners() {
+    for (EventAttachment& attachment : mEventAttachments) {
+        if (attachment.attached || !attachment.element || attachment.lifetime.expired()) continue;
+        attachment.element->addEventListener(attachment.type, attachment.handler, attachment.capture);
+        attachment.attached = true;
+    }
+}
+
+bool Binding::activate() {
+    if (!mCommitted || !mRoot || mRootLifetime.expired() || mRoot->parentNode() != mRootParent) {
+        deactivate();
+        return false;
+    }
+
+    const auto isInRoot = [this](const Element& element) {
+        for (const Node* current = &element; current; current = current->parentNode())
+            if (current == mRoot) return true;
+        return false;
+    };
+
+    for (const ValueAttachment& attachment : mValueAttachments) {
+        if (!attachment.element || attachment.lifetime.expired() || !isInRoot(*attachment.element)) {
+            deactivate();
+            return false;
+        }
+    }
+
+    for (const EventAttachment& attachment : mEventAttachments) {
+        if (!attachment.element || attachment.lifetime.expired() || !isInRoot(*attachment.element)) {
+            deactivate();
+            return false;
+        }
+    }
+
+    if (!mActive) mActive = std::make_shared<bool>(false);
+    attachEventListeners();
+    *mActive = true;
+    for (const ValueAttachment& attachment : mValueAttachments) {
+        ElementRef<HTMLInputElement> input(attachment.element);
+        if (input) input->synchronizeValueBinding();
+    }
+    return true;
+}
+
+void Binding::deactivate() noexcept {
+    if (mActive) *mActive = false;
+    clearEventListeners();
 }
 
 PreparedBinding::PreparedBinding() = default;
@@ -102,7 +163,9 @@ void collectEventCalls(Element& element, std::map<std::string, std::vector<Binde
         const EventCall* eventCall = authoredEventCall(element, type);
         if (!eventCall) continue;
         const std::string& name = eventCall->name();
-        declarations[name].push_back({&element, ElementInternalAccess::lifetime(element), element.parentNode(), type, *eventCall});
+        declarations[name].push_back({&element, ElementInternalAccess::lifetime(element), element.parentNode(), type, *eventCall,
+                                      ElementInternalAccess::mountEpoch(element),
+                                      element.parentElement() ? ElementInternalAccess::topologyEpoch(*element.parentElement()) : 0});
     }
     for (Element* child : element.children())
         if (!child->idScopeRoot()) collectEventCalls(*child, declarations);
@@ -124,7 +187,9 @@ void Binder::validate(Element& root, DiagnosticResult& result) {
         const std::optional<ValueBindingRequest> request = input->valueBindingRequest();
         if (!request) continue;
         input->prepareValueBinding(*this);
-        mBoundInputs.push_back({input, ElementInternalAccess::lifetime(*input), input->parentNode(), request->settingName});
+        mBoundInputs.push_back({input, ElementInternalAccess::lifetime(*input), input->parentNode(), request->settingName,
+                                ElementInternalAccess::mountEpoch(*input),
+                                input->parentElement() ? ElementInternalAccess::topologyEpoch(*input->parentElement()) : 0});
     }
 
     mEventDeclarations.clear();
@@ -197,11 +262,17 @@ void Binder::validate(Element& root, DiagnosticResult& result) {
 
 void Binder::commit(Element&, Binding& binding) {
     binding.mCommitted = true;
+    binding.mRoot = mRoot;
+    binding.mRootParent = mRootParent;
+    binding.mRootLifetime = mRootLifetime;
+    if (!binding.mActive) binding.mActive = std::make_shared<bool>(false);
+    *binding.mActive = false;
 
     for (PendingValueRequirement& pending : mPendingValueRequirements) pending.commit(pending.resolved);
     for (const BoundInput& bound : mBoundInputs) {
         if (bound.lifetime.expired()) continue;
-        ValueBindingSubscription subscription = bound.element->commitValueBinding();
+        ValueBindingSubscription subscription = bound.element->commitValueBinding(binding.mActive, *mRoot);
+        binding.mValueAttachments.push_back({bound.element, bound.lifetime});
         if (subscription) binding.mValueSubscriptions.push_back(std::move(subscription));
     }
     std::map<std::string, PendingEventHandler*> handlers;
@@ -213,16 +284,27 @@ void Binder::commit(Element&, Binding& binding) {
         for (const EventDeclaration& declaration : declarations)
             if (!pending.argumentError || !pending.argumentError(declaration.call)) {
                 const ElementRef<Element> declarationRef(declaration.element);
-                const MountEpoch declarationMountEpoch = ElementInternalAccess::mountEpoch(*declaration.element);
-                EventHandler listener(
-                    [invoke = pending.invoke, call = declaration.call, declarationRef, declarationMountEpoch](Event& event) mutable {
-                        Element* element = declarationRef.get();
-                        if (!element || ElementInternalAccess::mountEpoch(*element) != declarationMountEpoch) return;
-                        invoke(event, call);
-                    });
-                declaration.element->addEventListener(declaration.type, listener);
-                binding.mEventAttachments.push_back(
-                    {declaration.element, ElementInternalAccess::lifetime(*declaration.element), declaration.type, std::move(listener), false});
+                const ElementRef<Element> rootRef(mRoot);
+                const std::weak_ptr<bool> bindingActive = binding.mActive;
+                EventHandler listener([invoke = pending.invoke, call = declaration.call, type = declaration.type, declarationRef, rootRef,
+                                       bindingActive](Event& event) mutable {
+                    const std::shared_ptr<bool> active = bindingActive.lock();
+                    if (!active || !*active) return;
+                    Element* element = declarationRef.get();
+                    Element* root = rootRef.get();
+                    if (!element || !root) return;
+                    bool inRoot = false;
+                    for (Node* current = element; current; current = current->parentNode())
+                        if (current == root) {
+                            inRoot = true;
+                            break;
+                        }
+                    const EventCall* authored = authoredEventCall(*element, type);
+                    if (!inRoot || !authored || !sameEventCall(*authored, call)) return;
+                    invoke(event, call);
+                });
+                binding.mEventAttachments.push_back({declaration.element, ElementInternalAccess::lifetime(*declaration.element), declaration.type,
+                                                     std::move(listener), false, false});
             }
     }
 }
@@ -230,9 +312,25 @@ void Binder::commit(Element&, Binding& binding) {
 bool Binder::validForCommit() const {
     if (!mRoot || mRootLifetime.expired() || mRoot->parentNode() != mRootParent) return false;
     const MountEpoch currentMountEpoch = ElementInternalAccess::mountEpoch(*mRoot);
-    const bool firstMountAfterPrepare =
-        !mRootWasMounted && ElementInternalAccess::isMounted(*mRoot) && currentMountEpoch.value == mRootMountEpoch.value + 1;
+    const bool firstMountAfterPrepare = !mRootWasMounted
+        && ElementInternalAccess::isMounted(*mRoot)
+        && mRootMountEpoch.value < std::numeric_limits<std::uint64_t>::max()
+        && currentMountEpoch.value == mRootMountEpoch.value + 1;
     if (currentMountEpoch != mRootMountEpoch && !firstMountAfterPrepare) return false;
+    if (ElementInternalAccess::topologyEpoch(*mRoot) != mRootTopologyEpoch) return false;
+
+    const auto mountEpochValid = [this, firstMountAfterPrepare](const Element& element, MountEpoch expected) {
+        const MountEpoch current = ElementInternalAccess::mountEpoch(element);
+        if (current == expected) return true;
+        return firstMountAfterPrepare
+            && ElementInternalAccess::isMounted(element)
+            && expected.value < std::numeric_limits<std::uint64_t>::max()
+            && current.value == expected.value + 1;
+    };
+
+    for (const TopologyObservation& observation : mTopologyObservations)
+        if (!observation.element || observation.lifetime.expired() || ElementInternalAccess::topologyEpoch(*observation.element) != observation.epoch)
+            return false;
 
     const auto isInRoot = [this](const Element& element) {
         for (const Node* current = &element; current; current = current->parentNode())
@@ -241,7 +339,14 @@ bool Binder::validForCommit() const {
     };
 
     for (const BoundInput& bound : mBoundInputs) {
-        if (!bound.element || bound.lifetime.expired() || bound.element->parentNode() != bound.parent || !isInRoot(*bound.element)) return false;
+        if (!bound.element
+            || bound.lifetime.expired()
+            || bound.element->parentNode() != bound.parent
+            || !isInRoot(*bound.element)
+            || !mountEpochValid(*bound.element, bound.mountEpoch)
+            || (bound.element->parentElement() ? ElementInternalAccess::topologyEpoch(*bound.element->parentElement()) : 0)
+                != bound.parentTopologyEpoch)
+            return false;
         const std::optional<ValueBindingRequest> request = bound.element->valueBindingRequest();
         if (!request || request->settingName != bound.settingName) return false;
     }
@@ -251,7 +356,10 @@ bool Binder::validForCommit() const {
             if (!declaration.element
                 || declaration.lifetime.expired()
                 || declaration.element->parentNode() != declaration.parent
-                || !isInRoot(*declaration.element))
+                || !isInRoot(*declaration.element)
+                || !mountEpochValid(*declaration.element, declaration.mountEpoch)
+                || (declaration.element->parentElement() ? ElementInternalAccess::topologyEpoch(*declaration.element->parentElement()) : 0)
+                    != declaration.parentTopologyEpoch)
                 return false;
             const EventCall* current = authoredEventCall(*declaration.element, declaration.type);
             if (!current || !sameEventCall(*current, declaration.call)) return false;
@@ -275,6 +383,13 @@ PreparedBindingResult Binder::prepare() {
     mRootParent = mRoot->parentNode();
     mRootWasMounted = ElementInternalAccess::isMounted(*mRoot);
     mRootMountEpoch = ElementInternalAccess::mountEpoch(*mRoot);
+    mRootTopologyEpoch = ElementInternalAccess::topologyEpoch(*mRoot);
+    mTopologyObservations.clear();
+    const auto collectTopology = [this](auto&& self, Element& element) -> void {
+        mTopologyObservations.push_back({&element, ElementInternalAccess::lifetime(element), ElementInternalAccess::topologyEpoch(element)});
+        for (Element* child : element.children()) self(self, *child);
+    };
+    collectTopology(collectTopology, *mRoot);
     validate(*mRoot, result);
     if (!result.hasErrors()) {
         auto binder = std::unique_ptr<Binder>(new Binder(std::move(*this)));

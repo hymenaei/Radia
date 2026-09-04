@@ -57,7 +57,9 @@ private:
 
     PreparedMountResult prepare(SettingResolver& settingResolver);
     bool canCommit(const PreparedMount& prepared) const;
-    void commit(PreparedMount&& prepared);
+    bool commit(PreparedMount&& prepared);
+    void deactivate() noexcept;
+    bool activate();
     void addHandlerRegistration(EventRegistrationDescriptor registration);
 
     System& mSystem;

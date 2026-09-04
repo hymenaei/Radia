@@ -73,7 +73,7 @@ public:
         };
 
         virtual ~Host() = default;
-        virtual void mount(Document& document) = 0;
+        virtual bool mount(Document& document) = 0;
         virtual bool unmount(HTMLFloaterElement& root) = 0;
         virtual bool replaceAll(std::vector<ReplacementRequest> replacements) = 0;
         virtual bool clearAll(std::vector<HTMLFloaterElement*> roots) = 0;

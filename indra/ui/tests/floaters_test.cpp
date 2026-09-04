@@ -13,6 +13,7 @@
 #include "dom/text.h"
 #include "floater_test_helpers.h"
 #include "html/button.h"
+#include "html/elementfactory.h"
 #include "html/floater.h"
 #include "html/input.h"
 #include "html/label.h"
@@ -24,11 +25,14 @@
 
 namespace {
 using radia::ui::CursorStyle;
+using radia::ui::Element;
+using radia::ui::ElementRef;
 using radia::ui::HTMLButtonElement;
 using radia::ui::HTMLFloaterElement;
 using radia::ui::HTMLLabelElement;
 using radia::ui::HTMLPanelElement;
 using radia::ui::Node;
+using radia::ui::NodePtr;
 using radia::ui::PaintCommandKind;
 using radia::ui::PointerButton;
 using radia::ui::RecordingPaintContext;
@@ -39,12 +43,28 @@ using radia::ui::SurfaceFloaterDelegate;
 using radia::ui::SurfaceLayer;
 using radia::ui::Text;
 using radia::ui::Vec2;
+using radia::ui::detail::HTMLElementFactory;
 using radia::ui::detail::makeElement;
 using radia::ui::detail::makeElementValue;
 using radia::ui::detail::nodes;
+using radia::ui::test::makeFloater;
 } // namespace
 
 namespace {
+class FloaterPartRemovalProbe final : public Element {
+public:
+    FloaterPartRemovalProbe(HTMLFloaterElement& floater, HTMLButtonElement& retired, bool& sawStaleControl)
+        : Element("probe"), mFloater(floater), mRetired(retired), mSawStaleControl(sawStaleControl) {}
+
+protected:
+    void onTreeDetached() override { mSawStaleControl = mFloater.closeButton() == &mRetired; }
+
+private:
+    HTMLFloaterElement& mFloater;
+    HTMLButtonElement& mRetired;
+    bool& mSawStaleControl;
+};
+
 class FloaterDelegateProbe final : public SurfaceFloaterDelegate {
 public:
     void floaterClosed(Surface&, HTMLFloaterElement&) override { ++closes; }
@@ -56,6 +76,18 @@ public:
     int minimizeChanges = 0;
     int moveCompletions = 0;
     int resizeCompletions = 0;
+};
+
+class ReentrantFloaterDelegate final : public SurfaceFloaterDelegate {
+public:
+    void floaterClosed(Surface& surface, HTMLFloaterElement& floater) override {
+        removed = surface.unmountFloater(floater);
+        removed.reset();
+    }
+
+    void floaterMoveEnded(Surface& surface, HTMLFloaterElement& floater) override { removed = surface.unmountFloater(floater); }
+
+    std::unique_ptr<HTMLFloaterElement> removed;
 };
 
 TEST(FloatersTest, ReportsFloaterVisibilityFromResolvedDisplayAndVisibility) {
@@ -89,7 +121,7 @@ TEST(FloatersTest, RestoresFloaterWithinViewportAfterMinimization) {
     ASSERT_TRUE(styleSheet.loadRadia(kMinimizedFloaterStyle).ok());
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
-    auto floater = radia::ui::test::makeFloater(false, true);
+    auto floater = makeFloater(false, true);
     HTMLFloaterElement* target = floater.get();
     floater->setRect({20.f, 20.f, 100.f, 100.f});
     surface.mountFloater(std::move(floater));
@@ -109,6 +141,32 @@ TEST(FloatersTest, RestoresFloaterWithinViewportAfterMinimization) {
     EXPECT_LT(target->rect().left(), minimizedLeft);
 }
 
+TEST(FloatersTest, NormalizesMinimizedStateWhenHeadIsRemoved) {
+    Surface surface;
+    surface.setViewport(200.f, 200.f);
+    auto floater = makeFloater(false, true);
+    HTMLFloaterElement* target = floater.get();
+    target->setRect({20.f, 20.f, 100.f, 100.f});
+    surface.mountFloater(std::move(floater));
+    surface.updateLayout();
+    target->setMinimized(true);
+    ASSERT_TRUE(target->minimized());
+    const Rect expanded = target->expandedRect();
+
+    auto detachedHead = target->head()->remove();
+
+    ASSERT_NE(detachedHead, nullptr);
+    EXPECT_FALSE(target->minimized());
+    EXPECT_FLOAT_EQ(target->rect().x, expanded.x);
+    EXPECT_FLOAT_EQ(target->rect().y, expanded.y);
+    EXPECT_FLOAT_EQ(target->rect().w, expanded.w);
+    EXPECT_FLOAT_EQ(target->rect().h, expanded.h);
+
+    target->append(std::move(detachedHead));
+    target->setMinimized(true);
+    EXPECT_TRUE(target->minimized());
+}
+
 TEST(FloatersTest, TransfersFloaterBetweenSurfacesAndReportsLifecycle) {
     Surface first;
     Surface second;
@@ -119,7 +177,7 @@ TEST(FloatersTest, TransfersFloaterBetweenSurfacesAndReportsLifecycle) {
     first.setViewport(100.f, 100.f);
     second.setViewport(80.f, 60.f);
 
-    auto floater = radia::ui::test::makeFloater(true, true);
+    auto floater = makeFloater(true, true);
     HTMLFloaterElement* target = floater.get();
     floater->setRect({90.f, 90.f, 30.f, 30.f});
     first.mountFloater(std::move(floater));
@@ -148,7 +206,7 @@ TEST(FloatersTest, ReportsMoveCompletionAfterPointerUp) {
     ASSERT_TRUE(styleSheet.loadRadia(kMove).ok());
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
-    auto floater = radia::ui::test::makeFloater(false, true);
+    auto floater = makeFloater(false, true);
     HTMLFloaterElement* target = floater.get();
     floater->setRect({20.f, 20.f, 100.f, 100.f});
     surface.mountFloater(std::move(floater));
@@ -169,6 +227,52 @@ TEST(FloatersTest, ReportsMoveCompletionAfterPointerUp) {
     EXPECT_EQ(delegate.moveCompletions, 1);
 }
 
+TEST(FloatersTest, RejectsReplacementAfterMoveCompletionUnmountsCurrentFloater) {
+    StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet.loadRadia("floater { display: flex; flex-direction: column; } floater > head { height: 30px; }").ok());
+    Surface surface(styleSheet);
+    surface.setViewport(200.f, 200.f);
+    auto current = makeFloater(false, true);
+    HTMLFloaterElement* currentPointer = current.get();
+    currentPointer->setRect({20.f, 20.f, 100.f, 100.f});
+    surface.mountFloater(std::move(current));
+    surface.updateLayout();
+    ReentrantFloaterDelegate delegate;
+    surface.setFloaterDelegate(&delegate);
+
+    ASSERT_NE(currentPointer->head(), nullptr);
+    ASSERT_FALSE(currentPointer->head()->rect().empty());
+    const Rect headRect = currentPointer->head()->rect();
+    const Vec2 dragPoint{headRect.left() + headRect.w / 2.f, headRect.bottom() + headRect.h / 2.f};
+    ASSERT_TRUE(surface.pointerMove({dragPoint}));
+    ASSERT_TRUE(surface.pointerDown({dragPoint, PointerButton::Left}));
+    ASSERT_TRUE(currentPointer->dragging());
+    auto replacement = makeFloater();
+    const std::unique_ptr<HTMLFloaterElement> retired = surface.replaceFloater(*currentPointer, std::move(replacement));
+
+    EXPECT_EQ(retired, nullptr);
+    EXPECT_EQ(delegate.removed.get(), currentPointer);
+    EXPECT_FALSE(surface.ownsFloater(*currentPointer));
+}
+
+TEST(FloatersTest, DoesNotInvokeCloseLifecycleAfterDelegateDestroysFloater) {
+    Surface surface;
+    surface.setViewport(200.f, 200.f);
+    auto floater = makeFloater(true);
+    HTMLFloaterElement* target = floater.get();
+    bool lifecycleCalled = false;
+    floater->setLifecycleCallbacks({}, [&lifecycleCalled] { lifecycleCalled = true; });
+    surface.mountFloater(std::move(floater));
+    ReentrantFloaterDelegate delegate;
+    surface.setFloaterDelegate(&delegate);
+
+    target->close();
+
+    EXPECT_FALSE(lifecycleCalled);
+    EXPECT_EQ(delegate.removed, nullptr);
+    EXPECT_FALSE(surface.hasVisibleFloater());
+}
+
 TEST(FloatersTest, MovesRetainedTextWithFloater) {
     StyleSheet styleSheet;
     constexpr char kMove[] = "floater { display: flex; flex-direction: column; } "
@@ -177,7 +281,7 @@ TEST(FloatersTest, MovesRetainedTextWithFloater) {
     ASSERT_TRUE(styleSheet.loadRadia(kMove).ok());
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
-    auto floater = radia::ui::test::makeFloater();
+    auto floater = makeFloater();
     HTMLFloaterElement* target = floater.get();
     floater->setRect({20.f, 20.f, 100.f, 100.f});
     surface.mountFloater(std::move(floater));
@@ -210,7 +314,7 @@ TEST(FloatersTest, MovesScrollableBodyClipWithFloater) {
     ASSERT_TRUE(styleSheet.loadRadia(kMove).ok());
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
-    auto floater = radia::ui::test::makeFloater();
+    auto floater = makeFloater();
     HTMLFloaterElement* target = floater.get();
     floater->setRect({20.f, 20.f, 100.f, 100.f});
     surface.mountFloater(std::move(floater));
@@ -253,7 +357,7 @@ TEST(FloatersTest, KeepsWrappedBodyContentInsideFloaterWidth) {
 
     Surface surface(styleSheet);
     surface.setViewport(400.f, 300.f);
-    auto floater = radia::ui::test::makeFloater();
+    auto floater = makeFloater();
     HTMLFloaterElement* target = floater.get();
     target->setRect({40.f, 40.f, 160.f, 140.f});
     auto sections = makeElement<HTMLPanelElement>();
@@ -294,7 +398,7 @@ TEST(FloatersTest, KeepsHorizontalScrollbarLocalToFloaterBody) {
 
     Surface surface(styleSheet);
     surface.setViewport(400.f, 300.f);
-    auto floater = radia::ui::test::makeFloater();
+    auto floater = makeFloater();
     HTMLFloaterElement* target = floater.get();
     target->setRect({40.f, 40.f, 160.f, 140.f});
     auto wide = makeElement<HTMLPanelElement>();
@@ -324,7 +428,7 @@ TEST(FloatersTest, KeepsScrollbarsInsideFloaterBorder) {
 
     Surface surface(styleSheet);
     surface.setViewport(400.f, 300.f);
-    auto floater = radia::ui::test::makeFloater();
+    auto floater = makeFloater();
     HTMLFloaterElement* target = floater.get();
     target->setRect({40.f, 40.f, 160.f, 140.f});
     auto tall = makeElement<HTMLPanelElement>();
@@ -376,7 +480,7 @@ TEST(FloatersTest, KeepsFloaterResizeCursorOverBorderedScrollbar) {
 
     Surface surface(styleSheet);
     surface.setViewport(400.f, 300.f);
-    auto floater = radia::ui::test::makeFloater();
+    auto floater = makeFloater();
     HTMLFloaterElement* target = floater.get();
     target->setResizeable(true).setRect({40.f, 40.f, 160.f, 140.f});
     auto tall = makeElement<HTMLPanelElement>();
@@ -437,7 +541,7 @@ TEST(FloatersTest, ResizesFloaterWithinSurfaceBounds) {
 TEST(FloatersTest, HidesResizeCursorWhenResizingIsUnavailable) {
     Surface surface;
     surface.setViewport(200.f, 160.f);
-    auto floater = radia::ui::test::makeFloater(false, true);
+    auto floater = makeFloater(false, true);
     HTMLFloaterElement* target = floater.get();
     floater->setResizeable(false).setRect({20.f, 20.f, 100.f, 80.f});
     surface.mountFloater(std::move(floater));
@@ -491,7 +595,7 @@ TEST(FloatersTest, KeepsFixedOuterSizeWhileTrackingContentGeometry) {
     ASSERT_TRUE(styleSheet.loadRadia(kFixedOuter).ok());
     Surface surface(styleSheet);
     surface.setViewport(500.f, 400.f);
-    auto floater = radia::ui::test::makeFloater();
+    auto floater = makeFloater();
     floater->body()->append(makeElement<HTMLLabelElement>("first"));
 
     const std::optional<Rect> firstPrepared = surface.prepareFloater(*floater);
@@ -536,7 +640,7 @@ TEST(FloatersTest, RoutesResizeThroughPointerTransparentFloater) {
     HTMLFloaterElement* lowerTarget = lower.get();
     lower->setResizeable(true).setRect({20.f, 20.f, 100.f, 80.f});
     surface.mountFloater(std::move(lower));
-    auto upper = radia::ui::test::makeFloater();
+    auto upper = makeFloater();
     HTMLFloaterElement* upperTarget = upper.get();
     upper->setResizeable(false).setRect({70.f, 20.f, 100.f, 80.f});
     surface.mountFloater(std::move(upper));
@@ -568,7 +672,7 @@ TEST(FloatersTest, KeepsOverflowVisibleDescendantAsPointerTarget) {
     lower->setResizeable(true).setRect({20.f, 20.f, 100.f, 80.f});
     surface.mountFloater(std::move(lower));
 
-    auto upper = radia::ui::test::makeFloater();
+    auto upper = makeFloater();
     HTMLFloaterElement* upperTarget = upper.get();
     upper->addClass("pass-through").setRect({70.f, 20.f, 40.f, 80.f});
     surface.mountFloater(std::move(upper));
@@ -589,13 +693,13 @@ TEST(FloatersTest, ReplacesFloaterAndReturnsRetiredRoot) {
     HTMLFloaterElement* originalPointer = original.get();
     original->setRect({20.f, 25.f, 100.f, 80.f});
     surface.mountFloater(std::move(original));
-    radia::ui::ElementRef<HTMLFloaterElement> originalHandle(originalPointer);
+    ElementRef<HTMLFloaterElement> originalHandle(originalPointer);
 
     auto replacement = makeElement<HTMLFloaterElement>();
     HTMLFloaterElement* replacementPointer = replacement.get();
     replacement->setRect({30.f, 35.f, 120.f, 90.f});
     std::unique_ptr<HTMLFloaterElement> retired = surface.replaceFloater(*originalPointer, std::move(replacement));
-    radia::ui::ElementRef<HTMLFloaterElement> replacementHandle(replacementPointer);
+    ElementRef<HTMLFloaterElement> replacementHandle(replacementPointer);
 
     ASSERT_NE(retired, nullptr);
     EXPECT_EQ(retired.get(), originalPointer);
@@ -605,5 +709,75 @@ TEST(FloatersTest, ReplacesFloaterAndReturnsRetiredRoot) {
     EXPECT_EQ(originalHandle.get(), originalPointer);
     EXPECT_EQ(originalHandle.getMounted(), nullptr);
     EXPECT_EQ(replacementHandle.getMounted(), replacementPointer);
+}
+
+TEST(FloatersTest, ClearsRetiredControlCallbacksBeforeDetachment) {
+    auto floater = makeFloater();
+    HTMLFloaterElement* floaterPointer = floater.get();
+    bool sawStaleControl = false;
+    auto close = HTMLElementFactory::Create("close");
+    HTMLButtonElement* closePointer = dynamic_cast<HTMLButtonElement*>(close.get());
+    ASSERT_NE(closePointer, nullptr);
+    auto probe = std::make_unique<FloaterPartRemovalProbe>(*floaterPointer, *closePointer, sawStaleControl);
+    FloaterPartRemovalProbe* probePointer = probe.get();
+    probe->append(std::move(close));
+    floater->head()->append(std::move(probe));
+    ASSERT_EQ(floater->closeButton(), closePointer);
+
+    NodePtr retired = probePointer->remove();
+
+    EXPECT_FALSE(sawStaleControl);
+    EXPECT_EQ(floater->closeButton(), nullptr);
+    EXPECT_FALSE(floater->closable());
+    closePointer->activate();
+    EXPECT_FALSE(floater->closed());
+}
+
+TEST(FloatersTest, RefreshesNamedPartsAfterReplacementAndReordering) {
+    auto floater = makeFloater(true, true);
+    Element* originalHead = floater->head();
+    Element* originalBody = floater->body();
+    Element* originalTitle = originalHead->children().front();
+    HTMLButtonElement* originalClose = floater->closeButton();
+    HTMLButtonElement* originalMinimize = floater->minimizeButton();
+    ASSERT_NE(originalClose, nullptr);
+    ASSERT_NE(originalMinimize, nullptr);
+
+    NodePtr head = originalHead->remove();
+    EXPECT_EQ(floater->head(), nullptr);
+    EXPECT_EQ(floater->closeButton(), nullptr);
+    EXPECT_EQ(floater->minimizeButton(), nullptr);
+    floater->prepend(std::move(head));
+    EXPECT_EQ(floater->head(), originalHead);
+    EXPECT_EQ(floater->title(), "title");
+    EXPECT_EQ(floater->closeButton(), originalClose);
+    EXPECT_EQ(floater->minimizeButton(), originalMinimize);
+
+    NodePtr title = originalTitle->remove();
+    originalHead->append(std::move(title));
+    EXPECT_EQ(floater->title(), "title");
+
+    NodePtr body = originalBody->remove();
+    EXPECT_EQ(floater->body(), nullptr);
+    floater->append(std::move(body));
+    EXPECT_EQ(floater->body(), originalBody);
+}
+
+TEST(FloatersTest, ReplacesNamedClosePartWithoutLeavingTheRetiredCallback) {
+    auto floater = makeFloater(true);
+    HTMLButtonElement* oldClose = floater->closeButton();
+    auto replacement = HTMLElementFactory::Create("close");
+    HTMLButtonElement* newClose = dynamic_cast<HTMLButtonElement*>(replacement.get());
+    ASSERT_NE(oldClose, nullptr);
+    ASSERT_NE(newClose, nullptr);
+
+    NodePtr retired = oldClose->replaceWith(std::move(replacement));
+
+    EXPECT_EQ(floater->closeButton(), newClose);
+    oldClose->activate();
+    EXPECT_FALSE(floater->closed());
+    newClose->activate();
+    EXPECT_TRUE(floater->closed());
+    EXPECT_EQ(retired.get(), oldClose);
 }
 } // namespace

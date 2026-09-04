@@ -19,6 +19,7 @@ using radia::ui::HTMLFloaterElement;
 using radia::ui::Rect;
 using radia::ui::Surface;
 using radia::ui::Vec2;
+using radia::ui::detail::preserveUserResizeOnReload;
 
 namespace {
 class FloaterReplacement final {
@@ -40,9 +41,9 @@ public:
             if (!authoredRect) return;
             const Vec2 authoredSize{authoredRect->w, authoredRect->h};
             Rect replacementRect = wasMinimized ? current->expandedRect() : current->rect();
-            const bool preserveSize = radia::ui::detail::preserveUserResizeOnReload(current->resizeable(), candidate->resizeable(),
-                                                                                    {current->authoredSize(), current->authoredContentSize()},
-                                                                                    {authoredSize, candidate->authoredContentSize()});
+            const bool preserveSize =
+                preserveUserResizeOnReload(current->resizeable(), candidate->resizeable(), {current->authoredSize(), current->authoredContentSize()},
+                                           {authoredSize, candidate->authoredContentSize()});
             if (!preserveSize) {
                 replacementRect.w = authoredSize.x;
                 replacementRect.h = authoredSize.y;
@@ -100,21 +101,24 @@ private:
         mSurface.placeFloater(*mounted, replacement.replacementRect);
         if (replacement.wasMinimized && mounted->minimizable()) mounted->setMinimized(true);
         mSurface.updateLayout();
-        applied = {index, mounted};
+        applied.index = index;
+        applied.installed = mounted;
         return true;
     }
 
     bool rollback() {
         for (auto current = mApplied.rbegin(); current != mApplied.rend(); ++current) {
-            const PlannedReplacement& replacement = mPlanned[current->index];
-            if (!current->installed) {
+            AppliedReplacement& applied = *current;
+            const PlannedReplacement& replacement = mPlanned[applied.index];
+            if (!applied.installed) {
                 mFinalized = true;
                 return false;
             }
-            if (!replacement.request.current || !mSurface.replaceFloater(*current->installed, *replacement.request.current)) {
+            if (!replacement.request.current || !mSurface.replaceFloater(*applied.installed, *replacement.request.current)) {
                 mFinalized = true;
                 return false;
             }
+            applied.installed = nullptr;
         }
         mSurface.updateLayout();
         mFinalized = true;
@@ -135,8 +139,9 @@ private:
 
 FloaterHost::FloaterHost(Surface& surface) : mSurface(surface) {}
 
-void FloaterHost::mount(Document& document) {
+bool FloaterHost::mount(Document& document) {
     mSurface.mountFloater(document);
+    return true;
 }
 
 bool FloaterHost::unmount(HTMLFloaterElement& root) {

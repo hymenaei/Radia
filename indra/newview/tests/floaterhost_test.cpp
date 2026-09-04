@@ -6,6 +6,8 @@
 #include "linden_common.h"
 #include <gtest/gtest.h>
 #include <memory>
+#include <utility>
+#include <vector>
 #include "dom/document.h"
 #include "dom/elementinternal.h"
 #include "floaterhost.h"
@@ -15,23 +17,25 @@
 
 namespace {
 using radia::ui::Document;
+using radia::ui::Element;
 using radia::ui::HTMLFloaterElement;
 using radia::ui::Rect;
 using radia::ui::StyleSheet;
 using radia::ui::Surface;
 using radia::ui::detail::makeElement;
+using radia::viewer::ui::ComponentManager;
 using radia::viewer::ui::FloaterHost;
 
 constexpr char kFloaterStyles[] = "floater { size: 100px 80px; min-size: 40px 30px; display: flex; flex-direction: column; } "
                                   "floater > head { height: 20px; } floater > body { flex-grow: 1; }";
 
 void appendFloaterStructure(HTMLFloaterElement& floater) {
-    auto head = makeElement<radia::ui::Element>("head");
-    auto title = makeElement<radia::ui::Element>("title");
+    auto head = makeElement<Element>("head");
+    auto title = makeElement<Element>("title");
     title->textContent("title");
     head->append(std::move(title));
     floater.append(std::move(head));
-    floater.append(makeElement<radia::ui::Element>("body"));
+    floater.append(makeElement<Element>("body"));
 }
 } // namespace
 
@@ -54,7 +58,7 @@ TEST(FloaterHostTest, ReplacesMountedFloaterThroughSurfaceSeam) {
     surface.setViewport(300.f, 200.f);
     FloaterHost host(surface);
 
-    host.mount(*currentDocument);
+    ASSERT_TRUE(host.mount(*currentDocument));
     ASSERT_TRUE(surface.ownsFloater(*current));
     ASSERT_TRUE(surface.prepareFloater(*current).has_value());
 
@@ -62,7 +66,10 @@ TEST(FloaterHostTest, ReplacesMountedFloaterThroughSurfaceSeam) {
     surface.placeFloater(*current, userRect);
     surface.updateLayout();
 
-    ASSERT_TRUE(host.replaceAll({{current, replacementDocument.get()}}));
+    ComponentManager::Host::ReplacementRequest request{current, replacementDocument.get()};
+    std::vector<ComponentManager::Host::ReplacementRequest> requests;
+    requests.push_back(std::move(request));
+    ASSERT_TRUE(host.replaceAll(std::move(requests)));
     EXPECT_FALSE(surface.ownsFloater(*current));
     EXPECT_TRUE(surface.ownsFloater(*replacement));
     EXPECT_FLOAT_EQ(replacement->rect().x, userRect.x);

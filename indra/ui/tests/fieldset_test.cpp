@@ -271,8 +271,9 @@ TEST_F(FieldsetTest, ActivatesLabelTargetOnlyWhenInteractive) {
     });
     PreparedBindingResult prepared = binder.prepare();
     ASSERT_TRUE(prepared.ok());
-    const Binding binding = prepared.binding.commit();
+    Binding binding = prepared.binding.commit();
     ASSERT_TRUE(binding);
+    ASSERT_TRUE(binding.activate());
 
     label->activate();
     EXPECT_TRUE(target->checked());

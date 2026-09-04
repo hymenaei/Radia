@@ -107,10 +107,30 @@ void NodeMutation::notifyAncestorRemoved(Element& parent, Element& child) {
     }
 }
 
+void NodeMutation::notifyAncestorWillBeRemoved(Element& parent, Element& child) {
+    std::vector<ElementRef<Element>> ancestors;
+    for (Element* ancestor = parent.parentElement(); ancestor; ancestor = ancestor->parentElement()) ancestors.emplace_back(ancestor);
+    const ElementRef<Element> childLifetime(&child);
+    for (const ElementRef<Element>& ancestorRef : ancestors) {
+        Element* ancestor = ancestorRef.get();
+        Element* currentChild = childLifetime.get();
+        if (!ancestor || !currentChild) return;
+        ancestor->onDescendantWillBeRemoved(*currentChild);
+    }
+}
+
 void NodeMutation::detachElementChild(Element& parent, Node& node, Surface* surface) {
     Element* child = node.asElement();
     const ElementRef<Element> parentLifetime(&parent);
     const ElementRef<Element> childLifetime(child);
+    const std::weak_ptr<char> surfaceLifetime = surface ? surface->mLifetime : std::weak_ptr<char>();
+
+    if (child && parentLifetime) {
+        parent.onChildWillBeRemoved(*child);
+        if (parentLifetime && childLifetime) notifyAncestorWillBeRemoved(parent, *child);
+        if (parentLifetime && childLifetime) child->notifyTreeWillBeDetached();
+    }
+    if (child && !childLifetime) return;
 
     NodeAccess::setParent(node, nullptr);
     if (!child) return;
@@ -118,8 +138,8 @@ void NodeMutation::detachElementChild(Element& parent, Node& node, Surface* surf
     if (parentLifetime) parent.onChildRemoved(*child);
     if (childLifetime) child->notifyTreeDetached();
     if (parentLifetime) notifyAncestorRemoved(parent, *child);
-    if (surface && childLifetime) surface->elementBecameUnavailable(*child);
-    if (childLifetime) child->setSurface(nullptr);
+    if (surface && !surfaceLifetime.expired() && childLifetime) surface->elementBecameUnavailable(*child);
+    if (childLifetime && (!surface || !surfaceLifetime.expired())) child->setSurface(nullptr);
 }
 
 void NodeMutation::detachOrphanedChild(Node& node, Surface* surface) {

@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstddef>
 #include <string_view>
+#include "dom/elementinternal.h"
 #include "html/button.h"
 #include "html/elementfactory.h"
 #include "html/elementnames.h"
@@ -94,6 +95,7 @@ void HTMLFloaterElement::refreshAuthoredStructure() {
 
     if (mHead) findAuthoredHeadElements(*mHead, mTitleElement, mMinimizeButton, mCloseButton);
 
+    if (!mHead) normalizeMinimizedState();
     mClosable = mCloseButton != nullptr;
     mMinimizable = mMinimizeButton != nullptr;
     if (mCloseButton) mCloseButton->setOnActivate([this](Element&) { close(); });
@@ -171,12 +173,22 @@ void HTMLFloaterElement::onChildAdded(Element&) {
     refreshAuthoredStructure();
 }
 
+void HTMLFloaterElement::onChildWillBeRemoved(Element& child) {
+    clearAuthoredCallbacks(child);
+    refreshAuthoredStructure();
+}
+
 void HTMLFloaterElement::onChildRemoved(Element& child) {
     clearAuthoredCallbacks(child);
     refreshAuthoredStructure();
 }
 
 void HTMLFloaterElement::onDescendantAdded(Element&) {
+    refreshAuthoredStructure();
+}
+
+void HTMLFloaterElement::onDescendantWillBeRemoved(Element& child) {
+    clearAuthoredCallbacks(child);
     refreshAuthoredStructure();
 }
 
@@ -209,28 +221,41 @@ void HTMLFloaterElement::close() {
     mInteraction = FloaterInteraction::Idle;
     setVisibility(Visibility::Hidden);
     setDisplayNone(true);
-    if (Surface* surface = this->surface()) surface->floaterClosed(*this);
-    if (mOnClose) mOnClose();
+    Surface* surface = this->surface();
+    const ElementRef<HTMLFloaterElement> self(this);
+    if (surface) surface->floaterClosed(*this);
+    if (self && mOnClose) mOnClose();
 }
 
 void HTMLFloaterElement::setMinimized(bool minimized) {
-    if ((minimized && !mMinimizable) || minimized == mMinimized || !mHead) return;
+    if ((minimized && !mMinimizable) || minimized == mMinimized) return;
 
     if (minimized) {
-        mExpandedRect = rect();
-        mMinimized = true;
-        setState(ElementState::Minimized, true);
+        ElementRef<Element> headRef(mHead);
+        Element* head = headRef.get();
+        if (!head || head->parentElement() != this || mHead != head) {
+            refreshAuthoredStructure();
+            return;
+        }
 
         float width = rect().w;
-        float height = mHead->rect().h;
+        float height = head->rect().h;
         if (const StyleSheet* styleSheet = this->styleSheet()) {
-            const Vec2 headSize = measureElement(*mHead, *styleSheet, textMetrics());
+            const Vec2 headSize = measureElement(*head, *styleSheet, textMetrics());
+            head = headRef.get();
+            if (!head || head->parentElement() != this || mHead != head || !mMinimizable) {
+                refreshAuthoredStructure();
+                return;
+            }
             const Style floaterStyle = resolveElementStyle(*styleSheet, *this);
-            const Style headStyle = resolveElementStyle(*styleSheet, *mHead);
+            const Style headStyle = resolveElementStyle(*styleSheet, *head);
             width = headSize.x + headStyle.margin.horizontal() + floaterStyle.padding.horizontal();
             height = headSize.y + headStyle.margin.vertical() + floaterStyle.padding.vertical();
         }
         if (mMovementBounds.w > 0.f) width = std::min(width, mMovementBounds.w);
+        mExpandedRect = rect();
+        mMinimized = true;
+        setState(ElementState::Minimized, true);
         setRect({rect().x, rect().top() - height, width, height});
     } else {
         mMinimized = false;
@@ -253,6 +278,16 @@ void HTMLFloaterElement::clampToMovementBounds() {
     if (mMinimized) {
         mExpandedRect.x += delta.x;
         mExpandedRect.y += delta.y;
+    }
+}
+
+void HTMLFloaterElement::normalizeMinimizedState() {
+    const bool wasMinimized = mMinimized;
+    mMinimized = false;
+    setState(ElementState::Minimized, false);
+    if (wasMinimized) {
+        setRect(mExpandedRect);
+        clampToMovementBounds();
     }
 }
 
@@ -335,6 +370,7 @@ bool HTMLFloaterElement::endPointerInteraction(const PointerEvent&) {
 }
 
 void HTMLFloaterElement::onChildrenCleared() {
+    normalizeMinimizedState();
     mHead = nullptr;
     mBody = nullptr;
     mTitleElement = nullptr;
@@ -343,7 +379,5 @@ void HTMLFloaterElement::onChildrenCleared() {
     mClosable = false;
     mMinimizable = false;
     mInteraction = FloaterInteraction::Idle;
-    mMinimized = false;
-    setState(ElementState::Minimized, false);
 }
 } // namespace radia::ui

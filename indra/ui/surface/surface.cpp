@@ -40,6 +40,14 @@ bool hasBorderRadius(const BorderRadii& radii) {
     return hasRadius(radii.topLeft) || hasRadius(radii.topRight) || hasRadius(radii.bottomRight) || hasRadius(radii.bottomLeft);
 }
 
+bool isDetachedOwnedRoot(const Element& element) {
+    return !element.parentNode() && !ElementInternalAccess::isMounted(element);
+}
+
+bool isDetachedBorrowedRoot(const Element& element) {
+    return !element.parentElement() && (!element.parentNode() || element.parentNode()->asDocument()) && !ElementInternalAccess::isMounted(element);
+}
+
 const Element* scrollbarClipOwner(const Element& element, const Style& style) {
     if (style.borderWidth.any() || hasBorderRadius(style.borderRadius)) return &element;
     for (const Element* ancestor = element.parentElement(); ancestor; ancestor = ancestor->parentElement())
@@ -69,11 +77,32 @@ Surface::Surface(const System& system, const TextMetrics& textMetrics)
     system.registerSurface(*this);
 }
 
+Surface::Mount::Mount(std::unique_ptr<Element> root, SurfaceLayer layer, HTMLFloaterElement* floater)
+    : root(root.get()), ownedRoot(std::move(root)), layer(layer), ownership(Ownership::Owned), floater(floater) {}
+
+Surface::Mount::Mount(Element& root, SurfaceLayer layer, HTMLFloaterElement* floater)
+    : root(&root), layer(layer), ownership(Ownership::Borrowed), floater(floater) {}
+
+Surface::Mount::~Mount() = default;
+
 Surface::~Surface() {
     mLifetime.reset();
-    for (RootList& layerRoots : mRoots)
-        for (auto& root : layerRoots)
-            if (root) root->setSurface(nullptr);
+
+    std::vector<ElementRef<Element>> mountedRoots;
+    for (MountList& layerMounts : mMounts)
+        for (MountPtr& mount : layerMounts) {
+            if (!mount || !mount->root) continue;
+            mountedRoots.emplace_back(mount->root);
+            mount->lifetime.reset();
+            mount->root = nullptr;
+            mount->floater = nullptr;
+        }
+
+    clearInteractionState();
+    for (const ElementRef<Element>& rootRef : mountedRoots)
+        if (Element* root = rootRef.get(); root && root->surface() == this) root->setSurface(nullptr);
+
+    for (MountList& layerMounts : mMounts) layerMounts.clear();
     if (mSystem) mSystem->unregisterSurface(*this);
 }
 
@@ -97,11 +126,9 @@ void Surface::generationChanged(const StyleSheet& styleSheet) {
 void Surface::setViewport(float width, float height) {
     const bool changed = mViewport.w != width || mViewport.h != height;
     mViewport = Rect(0.f, 0.f, width, height);
-    for (auto floater = mFloaters.begin(); floater != mFloaters.end();)
-        if (HTMLFloaterElement* managed = *floater) {
-            constrainFloater(*managed);
-            ++floater;
-        } else floater = mFloaters.erase(floater);
+    for (const MountList& layerMounts : mMounts)
+        for (const MountPtr& mount : layerMounts)
+            if (mount && mount->root && mount->floater) constrainFloater(*mount->floater);
     if (changed) requestLayout();
 }
 
@@ -171,109 +198,127 @@ bool Surface::scrollbarTargetMatches(const ScrollbarTarget& target, const Elemen
 }
 
 Element& Surface::mount(std::unique_ptr<Element> element, SurfaceLayer layer) {
-    if (layer == SurfaceLayer::Modal) clearInteractionState();
-    llassert_always(element && !element->parentNode() && !element->surface());
-    Element* mounted = element.get();
-    mOwnedRoots.emplace_back(std::move(element));
-    roots(layer).push_back(mounted);
-    mounted->setSurface(this);
-    llassert_always(mounted && mounted->parentElement() == nullptr && mounted->surface() == this);
-    invalidateOrderingCache();
-    requestLayout();
-    return *mounted;
+    llassert_always(element);
+    HTMLFloaterElement* floater = dynamic_cast<HTMLFloaterElement*>(element.get());
+    return installMount(std::make_unique<Mount>(std::move(element), layer, floater));
 }
 
 Element& Surface::mount(Document& document, SurfaceLayer layer) {
     Element* root = document.documentElement();
     llassert_always(root && root->parentNode() == &document && !root->surface());
 
+    MountPtr mount = std::make_unique<Mount>(*root, layer, dynamic_cast<HTMLFloaterElement*>(root));
     const std::weak_ptr<char> surfaceLifetime = mLifetime;
     const std::weak_ptr<char> rootLifetime = ElementInternalAccess::lifetime(*root);
-    document.addDestructionObserver([this, root, surfaceLifetime, rootLifetime] {
-        if (surfaceLifetime.expired() || rootLifetime.expired()) return;
+    const std::weak_ptr<char> mountLifetime = mount->lifetime;
+    document.addDestructionObserver([this, root, surfaceLifetime, rootLifetime, mountLifetime] {
+        if (surfaceLifetime.expired() || rootLifetime.expired() || mountLifetime.expired()) return;
         (void)unmountBorrowed(*root);
     });
 
-    if (layer == SurfaceLayer::Modal) clearInteractionState();
-    roots(layer).push_back(root);
-    root->setSurface(this);
-    invalidateOrderingCache();
-    requestLayout();
-    return *root;
+    return installMount(std::move(mount));
 }
 
 Element& Surface::mount(Element& element, SurfaceLayer layer) {
-    if (layer == SurfaceLayer::Modal) clearInteractionState();
-    llassert_always(!element.parentNode() && !element.surface());
-    roots(layer).push_back(&element);
-    element.setSurface(this);
+    return installMount(std::make_unique<Mount>(element, layer, dynamic_cast<HTMLFloaterElement*>(&element)));
+}
+
+Element& Surface::installMount(MountPtr mount) {
+    llassert_always(mount
+                    && mount->root
+                    && (mount->ownership == Mount::Ownership::Owned ? isDetachedOwnedRoot(*mount->root) : isDetachedBorrowedRoot(*mount->root)));
+    if (mount->layer == SurfaceLayer::Modal) clearInteractionState();
+
+    Element* mounted = mount->root;
+    ElementRef<Element> mountedRef(mounted);
+    mounts(mount->layer).emplace_back(std::move(mount));
+    mounted->setSurface(this);
+    Element* current = mountedRef.get();
+    llassert_always(current && current->parentElement() == nullptr && current->surface() == this);
     invalidateOrderingCache();
     requestLayout();
-    return element;
+    return *current;
 }
 
-std::unique_ptr<Element> Surface::takeOwnedRoot(Element& element) {
-    const auto found = std::find_if(mOwnedRoots.begin(), mOwnedRoots.end(), [&element](const auto& root) { return root.get() == &element; });
-    if (found == mOwnedRoots.end()) return nullptr;
-    std::unique_ptr<Element> result = std::move(*found);
-    mOwnedRoots.erase(found);
-    return result;
+Surface::MountList& Surface::mounts(SurfaceLayer layer) {
+    return mMounts[static_cast<std::size_t>(layer)];
 }
 
-bool Surface::detachRoot(Element& element) {
-    for (RootList& layerRoots : mRoots) {
-        auto found = std::find(layerRoots.begin(), layerRoots.end(), &element);
-        if (found == layerRoots.end()) continue;
+const Surface::MountList& Surface::mounts(SurfaceLayer layer) const {
+    return mMounts[static_cast<std::size_t>(layer)];
+}
 
+Surface::Mount* Surface::findMount(Element* element) noexcept {
+    if (!element) return nullptr;
+    for (MountList& layerMounts : mMounts)
+        for (MountPtr& mount : layerMounts)
+            if (mount && mount->root == element) return mount.get();
+    return nullptr;
+}
+
+const Surface::Mount* Surface::findMount(const Element* element) const noexcept {
+    if (!element) return nullptr;
+    for (const MountList& layerMounts : mMounts)
+        for (const MountPtr& mount : layerMounts)
+            if (mount && mount->root == element) return mount.get();
+    return nullptr;
+}
+
+Surface::MountPtr Surface::detachMount(Element& element) {
+    for (MountList& layerMounts : mMounts) {
+        const auto found =
+            std::find_if(layerMounts.begin(), layerMounts.end(), [&element](const MountPtr& mount) { return mount && mount->root == &element; });
+        if (found == layerMounts.end()) continue;
+
+        MountPtr detached = std::move(*found);
+        layerMounts.erase(found);
+        ElementRef<Element> rootRef(detached->root);
+        detached->lifetime.reset();
+        detached->root = nullptr;
+        detached->floater = nullptr;
         clearInteractionState();
-        mFloaters.erase(std::remove_if(mFloaters.begin(), mFloaters.end(), [&element](const auto& floater) { return floater == &element; }),
-                        mFloaters.end());
-        layerRoots.erase(found);
-        element.setSurface(nullptr);
+        if (Element* root = rootRef.get(); root && root->surface() == this) root->setSurface(nullptr);
         invalidateOrderingCache();
         requestLayout();
         refreshHover();
-        return true;
+        return detached;
     }
-    return false;
+    return nullptr;
+}
+
+void Surface::elementOwnerDestroyed(Element& element) {
+    const Mount* mount = findMount(&element);
+    if (!mount || mount->ownership != Mount::Ownership::Borrowed) return;
+    (void)detachMount(element);
 }
 
 std::unique_ptr<Element> Surface::unmount(Element& element) {
-    if (!detachRoot(element)) return nullptr;
-    return takeOwnedRoot(element);
+    const Mount* mount = findMount(&element);
+    if (!mount || mount->ownership != Mount::Ownership::Owned) return nullptr;
+    MountPtr detached = detachMount(element);
+    if (!detached) return nullptr;
+    return std::move(detached->ownedRoot);
 }
 
 bool Surface::unmountBorrowed(Element& element) {
-    if (std::any_of(mOwnedRoots.begin(), mOwnedRoots.end(), [&element](const auto& root) { return root.get() == &element; })) return false;
-    return detachRoot(element);
+    const Mount* mount = findMount(&element);
+    if (!mount || mount->ownership != Mount::Ownership::Borrowed) return false;
+    return static_cast<bool>(detachMount(element));
 }
 
 void Surface::clearLayer(SurfaceLayer layer) {
-    RootList& layerRoots = roots(layer);
-    for (auto current = layerRoots.begin(); current != layerRoots.end();) {
-        Element* root = *current;
-        if (root) {
-            mFloaters.erase(std::remove(mFloaters.begin(), mFloaters.end(), root), mFloaters.end());
-            root->setSurface(nullptr);
-            elementBecameUnavailable(*root);
-            (void)takeOwnedRoot(*root);
+    MountList& layerMounts = mounts(layer);
+    while (!layerMounts.empty()) {
+        Element* root = layerMounts.front() ? layerMounts.front()->root : nullptr;
+        if (!root) {
+            layerMounts.erase(layerMounts.begin());
+            continue;
         }
-        current = layerRoots.erase(current);
+        (void)detachMount(*root);
     }
-    mFloaters.erase(
-        std::remove_if(mFloaters.begin(), mFloaters.end(), [this, layer](const auto& floater) { return !floater || layerOf(floater) == layer; }),
-        mFloaters.end());
     invalidateOrderingCache();
     requestLayout();
     refreshHover();
-}
-
-Surface::RootList& Surface::roots(SurfaceLayer layer) {
-    return mRoots[static_cast<std::size_t>(layer)];
-}
-
-const Surface::RootList& Surface::roots(SurfaceLayer layer) const {
-    return mRoots[static_cast<std::size_t>(layer)];
 }
 
 const Element* Surface::mountedRoot(const Element* element) const {
@@ -286,19 +331,12 @@ const Element* Surface::mountedRoot(const Element* element) const {
 std::optional<SurfaceLayer> Surface::layerOf(const Element* element) const {
     const Element* root = mountedRoot(element);
     if (!root) return std::nullopt;
-    for (std::size_t index = 0; index < kSurfaceLayerCount; ++index) {
-        const auto layer = static_cast<SurfaceLayer>(index);
-        const RootList& layerRoots = roots(layer);
-        if (std::any_of(layerRoots.begin(), layerRoots.end(), [root](const auto* candidate) { return candidate == root; })) return layer;
-    }
-    return std::nullopt;
+    const Mount* mount = findMount(root);
+    return mount ? std::optional<SurfaceLayer>(mount->layer) : std::nullopt;
 }
 
 bool Surface::isSurfaceRoot(const Element* element) const {
-    if (!element || element->parentElement()) return false;
-    for (const RootList& layerRoots : mRoots)
-        if (std::any_of(layerRoots.begin(), layerRoots.end(), [element](const auto* root) { return root == element; })) return true;
-    return false;
+    return element && !element->parentElement() && findMount(element);
 }
 
 void Surface::localeChanged() {
@@ -317,8 +355,12 @@ void Surface::localeChanged() {
         for (const ElementRef<Element>& childRef : children)
             if (Element* child = childRef.get(); child && child->parentElement() == current) self(self, *child);
     };
-    for (const RootList& layerRoots : mRoots)
-        for (const auto& root : layerRoots) refresh(refresh, *root);
+    std::vector<ElementRef<Element>> mountedRoots;
+    for (const MountList& layerMounts : mMounts)
+        for (const MountPtr& mount : layerMounts)
+            if (mount && mount->root) mountedRoots.emplace_back(mount->root);
+    for (const ElementRef<Element>& rootRef : mountedRoots)
+        if (Element* root = rootRef.get(); root && root->mSurface == this && isSurfaceRoot(root)) refresh(refresh, *root);
     requestLayout();
 }
 
@@ -338,8 +380,12 @@ void Surface::keybindingsChanged() {
         for (const ElementRef<Element>& childRef : children)
             if (Element* child = childRef.get(); child && child->parentElement() == current) self(self, *child);
     };
-    for (const RootList& layerRoots : mRoots)
-        for (const auto& root : layerRoots) refresh(refresh, *root);
+    std::vector<ElementRef<Element>> mountedRoots;
+    for (const MountList& layerMounts : mMounts)
+        for (const MountPtr& mount : layerMounts)
+            if (mount && mount->root) mountedRoots.emplace_back(mount->root);
+    for (const ElementRef<Element>& rootRef : mountedRoots)
+        if (Element* root = rootRef.get(); root && root->mSurface == this && isSurfaceRoot(root)) refresh(refresh, *root);
 }
 
 void Surface::requestLayout() {
@@ -368,13 +414,13 @@ void Surface::queueScrollNotification(Element& element) {
 }
 
 void Surface::dispatchScrollNotification(Element& element) {
+    const ElementRef<Element> target(&element);
     Event event(kScrollEvent, element);
     event.setCancelable(false);
     event.setPhase(EventPhase::Target);
     event.setCurrentTarget(&element);
-    const Element::EventListenerSnapshot listeners = element.eventListenerSnapshot();
-    element.dispatchListeners(event, true, listeners);
-    if (!event.immediatePropagationStopped()) element.dispatchListeners(event, false, listeners);
+    element.dispatchListeners(event, true);
+    if (target && !event.immediatePropagationStopped()) element.dispatchListeners(event, false);
     event.setCurrentTarget(nullptr);
 }
 
@@ -406,10 +452,18 @@ void Surface::invalidateOrderingCache() {
 bool Surface::hasVisibleFloater() const {
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
-    return std::any_of(mFloaters.begin(), mFloaters.end(), [this, &styles](HTMLFloaterElement* floater) {
-        if (!floater || !isRootedInSurface(floater)) return false;
-        return floater->isVisible(styles.style(*floater));
-    });
+    for (const MountList& layerMounts : mMounts)
+        for (const MountPtr& mount : layerMounts) {
+            HTMLFloaterElement* floater = mount ? mount->floater : nullptr;
+            if (!floater
+                || !mount->root
+                || mount->root != floater
+                || (mount->layer != SurfaceLayer::Floater && mount->layer != SurfaceLayer::Modal)
+                || !isRootedInSurface(floater))
+                continue;
+            if (floater->isVisible(styles.style(*floater))) return true;
+        }
+    return false;
 }
 
 StylePass& Surface::stylePass() const {
@@ -432,8 +486,9 @@ void Surface::didPaint(std::uint64_t paintedGeneration) {
         return;
     }
     mPaintDirty = false;
-    for (RootList& layerRoots : mRoots)
-        for (auto& root : layerRoots) root->clearPaintInvalidationTree();
+    for (MountList& layerMounts : mMounts)
+        for (const MountPtr& mount : layerMounts)
+            if (mount && mount->root) mount->root->clearPaintInvalidationTree();
 }
 
 void Surface::updateLayout() {
@@ -451,20 +506,23 @@ bool Surface::updateLayoutIfNeeded() {
     const std::uint64_t styleGeneration = mSystem ? mSystem->generation() : mStyleSheet->generation();
     if (styleGeneration != mObservedStyleGeneration) {
         mObservedStyleGeneration = styleGeneration;
-        for (RootList& layerRoots : mRoots)
-            for (auto& root : layerRoots) root->invalidateStyleTree();
+        for (MountList& layerMounts : mMounts)
+            for (const MountPtr& mount : layerMounts)
+                if (mount && mount->root) mount->root->invalidateStyleTree();
     }
     const std::uint64_t textMetricsGeneration = mTextMetrics.generation();
     if (textMetricsGeneration != mObservedTextMetricsGeneration) {
         mObservedTextMetricsGeneration = textMetricsGeneration;
-        for (RootList& layerRoots : mRoots)
-            for (auto& root : layerRoots) root->invalidateTextTree();
+        for (MountList& layerMounts : mMounts)
+            for (const MountPtr& mount : layerMounts)
+                if (mount && mount->root) mount->root->invalidateTextTree();
     }
     const LayoutDirection direction = layoutDirection();
     if (direction != mObservedLayoutDirection) {
         mObservedLayoutDirection = direction;
-        for (RootList& layerRoots : mRoots)
-            for (auto& root : layerRoots) root->invalidateArrangeTree();
+        for (MountList& layerMounts : mMounts)
+            for (const MountPtr& mount : layerMounts)
+                if (mount && mount->root) mount->root->invalidateArrangeTree();
     }
     if (!mLayoutDirty) return false;
     mLayoutDirty = false;
@@ -498,8 +556,9 @@ bool Surface::updateLayoutIfNeeded() {
         layout_detail::setArrangedRect(root, {x, y, width, height});
         layoutTreeUsingStylePass(root, styles, mScrollLayoutOptions);
     };
-    for (const RootList& layerRoots : mRoots)
-        for (const auto& root : layerRoots) layoutRoot(*root);
+    for (const MountList& layerMounts : mMounts)
+        for (const MountPtr& mount : layerMounts)
+            if (mount && mount->root) layoutRoot(*mount->root);
     return true;
 }
 
@@ -516,8 +575,9 @@ void Surface::paint(PaintContext& context, float scale, Vec2 pixelOrigin) {
     target.clipAA = AAIntent::Coverage;
     context.beginFrame(target);
     context.pushClip(mViewport, scale);
-    for (const RootList& layerRoots : mRoots)
-        for (const auto& root : layerRoots) paintElement(*root, context, scale, 1.f, styles);
+    for (const MountList& layerMounts : mMounts)
+        for (const MountPtr& mount : layerMounts)
+            if (mount && mount->root) paintElement(*mount->root, context, scale, 1.f, styles);
     context.popClip();
     context.endFrame();
     didPaint(paintedGeneration);

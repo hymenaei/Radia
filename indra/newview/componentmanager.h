@@ -49,7 +49,9 @@ public:
         PreparedReplacement& operator=(const PreparedReplacement&) = delete;
 
         explicit operator bool() const { return static_cast<bool>(mState); }
+        bool prepare() override;
         bool commit() override;
+        void finalize() override;
         DiagnosticResult takeDiagnostics();
 
     private:

@@ -18,6 +18,7 @@ using radia::ui::Element;
 using radia::ui::HTMLFloaterElement;
 using radia::ui::Rect;
 using radia::ui::Surface;
+using radia::ui::SurfaceLayer;
 using radia::ui::Vec2;
 using radia::ui::detail::preserveUserResizeOnReload;
 
@@ -55,7 +56,7 @@ public:
     }
 
     ~FloaterReplacement() {
-        if (!mFinalized && !mApplied.empty()) rollbackOrDie();
+        if (!mFinalized && !mApplied.empty()) rollback();
     }
 
     bool commit() {
@@ -64,7 +65,7 @@ public:
         for (std::size_t index = 0; index < mPlanned.size(); ++index) {
             AppliedReplacement applied;
             if (!replaceOne(index, applied)) {
-                rollbackOrDie();
+                rollback();
                 return false;
             }
             mApplied.push_back(std::move(applied));
@@ -110,23 +111,13 @@ private:
         for (auto current = mApplied.rbegin(); current != mApplied.rend(); ++current) {
             AppliedReplacement& applied = *current;
             const PlannedReplacement& replacement = mPlanned[applied.index];
-            if (!applied.installed) {
-                mFinalized = true;
-                return false;
-            }
-            if (!replacement.request.current || !mSurface.replaceFloater(*applied.installed, *replacement.request.current)) {
-                mFinalized = true;
-                return false;
-            }
+            if (!applied.installed || !replacement.request.current || !mSurface.replaceFloater(*applied.installed, *replacement.request.current))
+                LL_ERRS("UI") << "Component HTMLFloaterElement replacement violated its rollback contract." << LL_ENDL;
             applied.installed = nullptr;
         }
         mSurface.updateLayout();
         mFinalized = true;
         return true;
-    }
-
-    void rollbackOrDie() {
-        if (!rollback()) LL_ERRS("UI") << "Component HTMLFloaterElement replacement could not be rolled back." << LL_ENDL;
     }
 
     Surface& mSurface;
@@ -154,11 +145,43 @@ bool FloaterHost::replaceAll(std::vector<ReplacementRequest> replacements) {
 }
 
 bool FloaterHost::clearAll(std::vector<HTMLFloaterElement*> roots) {
-    for (HTMLFloaterElement* root : roots)
-        if (!root || !mSurface.ownsFloater(*root)) return false;
+    struct PendingRoot {
+        HTMLFloaterElement* root = nullptr;
+        Document* document = nullptr;
+        bool wasClosed = false;
+    };
+
+    std::vector<PendingRoot> pending;
+    pending.reserve(roots.size());
     for (HTMLFloaterElement* root : roots) {
-        if (!root->closed()) root->close();
-        if (!mSurface.unmountBorrowedFloater(*root)) LL_ERRS("UI") << "Component host lost a HTMLFloaterElement during account teardown." << LL_ENDL;
+        if (!root || !mSurface.ownsFloater(*root)) return false;
+        Document* document = root->parentNode() ? root->parentNode()->asDocument() : nullptr;
+        if (!document) return false;
+        pending.push_back({root, document, root->closed()});
+    }
+
+    const auto restore = [&](const PendingRoot& entry) {
+        bool restored = true;
+        if (!mSurface.ownsFloater(*entry.root)) {
+            mSurface.mount(*entry.document, SurfaceLayer::Floater);
+            restored = mSurface.ownsFloater(*entry.root);
+        }
+        if (!entry.wasClosed && entry.root->closed()) entry.root->open();
+        return restored;
+    };
+
+    std::vector<PendingRoot> detached;
+    detached.reserve(pending.size());
+    for (const PendingRoot& entry : pending) {
+        if (!entry.wasClosed) entry.root->close();
+        if (!mSurface.unmountBorrowedFloater(*entry.root)) {
+            bool restored = restore(entry);
+            for (auto detachedRoot = detached.rbegin(); detachedRoot != detached.rend(); ++detachedRoot)
+                restored = restore(*detachedRoot) && restored;
+            if (!restored) LL_ERRS("UI") << "Component host violated the clear rollback contract." << LL_ENDL;
+            return false;
+        }
+        detached.push_back(entry);
     }
     return true;
 }

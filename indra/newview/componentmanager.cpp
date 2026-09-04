@@ -5,11 +5,15 @@
 
 #include "linden_common.h"
 #include "componentmanager.h"
+#include <cstdint>
 #include <map>
 #include <set>
 #include <utility>
+#include <vector>
 #include "binding/settingresolver.h"
+#include "componentmanagerinternal.h"
 #include "documentcontrollerinternal.h"
+#include "dom/elementinternal.h"
 #include "html/floater.h"
 #include "resourceprovider.h"
 #include "skin/generation.h"
@@ -19,6 +23,7 @@ namespace radia::viewer::ui {
 using radia::ui::DiagnosticResult;
 using radia::ui::Document;
 using radia::ui::Element;
+using radia::ui::ElementRef;
 using radia::ui::HTMLFloaterElement;
 using radia::ui::ResourceBuildResult;
 using radia::ui::ResourceId;
@@ -26,119 +31,193 @@ using radia::ui::SettingResolver;
 using radia::ui::SkinGeneration;
 using radia::ui::System;
 
-namespace {
-void attachRootLifecycle(HTMLFloaterElement& root, DocumentController& controller, std::function<void()> onClose = {}) {
-    root.setLifecycleCallbacks({}, [&controller, onClose = std::move(onClose)] {
-        controller.onClose();
-        if (onClose) onClose();
-    });
-}
+using componentmanager_internal::attachRootLifecycle;
+using componentmanager_internal::isClosed;
+using componentmanager_internal::takeFloaterDocument;
 
-bool isClosed(const HTMLFloaterElement& root) {
-    return root.closed();
-}
+ComponentManager::Impl::Impl(System& system, Host& host, SettingResolver& resolver) : system(system), host(host), settingResolver(resolver) {}
 
-std::unique_ptr<Document> takeFloaterDocument(ResourceBuildResult buildResult, const std::string& rootError, const std::string& sourceName,
-                                              DiagnosticResult& result) {
-    Document* document = buildResult.document.get();
-    Element* root = document ? document->documentElement() : nullptr;
-    HTMLFloaterElement* candidate = root ? dynamic_cast<HTMLFloaterElement*>(root) : nullptr;
-    if (buildResult.ok() && !candidate) buildResult.error("component.root.type_mismatch", rootError, sourceName);
-    const bool buildOk = buildResult.ok() && candidate;
-    std::unique_ptr<Document> resultDocument = std::move(buildResult.document);
-    result.append(std::move(buildResult));
-    if (!buildOk) return {};
-    return resultDocument;
-}
-} // namespace
+ComponentManager::Impl::~Impl() {
+    MutationScope operation(*this, MutationMode::PublicationCommit);
+    if (!operation) LL_ERRS("UI") << "Component manager was destroyed during another mutation." << LL_ENDL;
 
-struct ComponentManager::Impl final {
-    struct Definition {
-        ResourceId resource;
-        ControllerFactory factory;
-    };
-
-    struct Instance {
-        Instance(ComponentInstanceKey componentKey, ResourceId resource, std::unique_ptr<Document> document,
-                 std::unique_ptr<DocumentController> controller)
-            : componentKey(std::move(componentKey)), resource(std::move(resource)), document(std::move(document)), controller(std::move(controller)) {
+    std::vector<HTMLFloaterElement*> roots;
+    roots.reserve(instances.size() + retainedMounts.size());
+    for (auto& entry : instances)
+        if (entry.second.root) {
+            entry.second.controller->deactivate();
+            roots.push_back(entry.second.root);
         }
+    for (const RetainedMount& retained : retainedMounts)
+        if (HTMLFloaterElement* root = retained.root.get()) roots.push_back(root);
+        else LL_ERRS("UI") << "Retained component mount lost its root during manager shutdown." << LL_ENDL;
 
-        ComponentInstanceKey componentKey;
-        ResourceId resource;
-        std::unique_ptr<Document> document;
-        std::unique_ptr<DocumentController> controller;
-        HTMLFloaterElement* root = nullptr;
-    };
-
-    Impl(System& system, Host& host, SettingResolver& resolver) : system(system), host(host), settingResolver(resolver) {}
-
-    ~Impl() {
-        std::vector<HTMLFloaterElement*> roots;
-        roots.reserve(instances.size());
+    if (!roots.empty()) {
+        const bool previousSuppressCloseCallback = mSuppressCloseControllerCallback;
+        mSuppressCloseControllerCallback = true;
+        const bool cleared = host.clearAll(std::move(roots));
+        mSuppressCloseControllerCallback = previousSuppressCloseCallback;
+        if (!cleared) LL_ERRS("UI") << "Component host could not detach all roots during manager shutdown." << LL_ENDL;
         for (auto& entry : instances)
-            if (entry.second.root) {
-                entry.second.controller->deactivate();
-                roots.push_back(entry.second.root);
+            if (!entry.second.closeNotified) {
+                entry.second.closeNotified = true;
+                entry.second.controller->onClose();
             }
-
-        if (!roots.empty() && !host.clearAll(std::move(roots)))
-            LL_ERRS("UI") << "Component host could not detach all roots during manager shutdown." << LL_ENDL;
     }
+    retainedMounts.clear();
+}
 
-    System& system;
-    Host& host;
-    SettingResolver& settingResolver;
-    std::map<std::string, Definition> definitions;
-    std::map<ComponentInstanceKey, Instance> instances;
-    std::map<const HTMLFloaterElement*, ComponentInstanceKey> rootKeys;
-    std::set<ComponentInstanceKey> pendingEvictions;
+bool ComponentManager::Impl::beginMutation(MutationMode mode) {
+    const bool publicationCommit = mode == MutationMode::PublicationCommit;
+    if (mMutationActive
+        || (mPublicationReserved && !publicationCommit)
+        || (!publicationCommit && system.publicationInProgress())
+        || (!retainedMounts.empty() && mode == MutationMode::Normal)) {
+        rejectMutation();
+        return false;
+    }
+    mMutationActive = true;
+    mMutationRejected = false;
+    return true;
+}
 
-    void evictClosed() {
-        for (auto pending = pendingEvictions.begin(); pending != pendingEvictions.end();) {
-            const auto found = instances.find(*pending);
-            if (found == instances.end() || !found->second.root || !isClosed(*found->second.root)) {
-                pending = pendingEvictions.erase(pending);
-                continue;
-            }
+void ComponentManager::Impl::endMutation() {
+    mMutationActive = false;
+}
 
-            HTMLFloaterElement* root = found->second.root;
-            DocumentController& controller = *found->second.controller;
-            controller.deactivate();
-            if (!host.unmount(*root)) {
-                if (!controller.activate()) LL_ERRS("UI") << "Closed component could not reactivate after host unmount rejection." << LL_ENDL;
-                LL_WARNS("UI") << "Closed component could not be unmounted: " << pending->persistenceKey() << LL_ENDL;
-                ++pending;
-                continue;
-            }
+void ComponentManager::Impl::rejectMutation() {
+    mMutationRejected = true;
+    if (mPublicationReserved) mPublicationMutationRejected = true;
+}
 
-            rootKeys.erase(root);
-            found->second.root = nullptr;
-            instances.erase(found);
-            pending = pendingEvictions.erase(pending);
+bool ComponentManager::Impl::reservePublication() {
+    if (mPublicationReserved || mMutationActive || !retainedMounts.empty()) {
+        rejectMutation();
+        return false;
+    }
+    mPublicationReserved = true;
+    mPublicationMutationRejected = false;
+    return true;
+}
+
+void ComponentManager::Impl::releasePublication() {
+    mPublicationReserved = false;
+    mPublicationMutationRejected = false;
+}
+
+bool ComponentManager::Impl::retryRetainedMounts() {
+    bool allReleased = true;
+    for (auto retained = retainedMounts.begin(); retained != retainedMounts.end();) {
+        HTMLFloaterElement* root = retained->root.get();
+        if (!root) LL_ERRS("UI") << "Retained component mount lost its root during retry." << LL_ENDL;
+        if (host.unmount(*root)) retained = retainedMounts.erase(retained);
+        else {
+            allReleased = false;
+            ++retained;
         }
     }
-};
+    return allReleased;
+}
 
-struct ComponentManager::PreparedReplacement::State {
-    struct PendingComponent {
-        ComponentInstanceKey componentKey;
-        std::unique_ptr<Document> replacement;
-        std::unique_ptr<DocumentController> controller;
-        DocumentController::PreparedMount mount;
-        ComponentManager::Impl::Instance* instance = nullptr;
-        HTMLFloaterElement* current = nullptr;
-        HTMLFloaterElement* candidate = nullptr;
-    };
+bool ComponentManager::Impl::unmountOrRetain(ComponentInstanceKey componentKey, std::unique_ptr<Document> document,
+                                             std::unique_ptr<DocumentController> controller, HTMLFloaterElement& root) {
+    root.setLifecycleCallbacks({}, {});
+    if (host.unmount(root)) return true;
+    root.close();
+    retainedMounts.push_back({std::move(componentKey), std::move(document), std::move(controller), ElementRef<HTMLFloaterElement>(&root)});
+    return false;
+}
 
-    std::weak_ptr<ComponentManager::Impl> manager;
-    std::shared_ptr<const SkinGeneration> generation;
-    std::string locale;
-    std::vector<PendingComponent> components;
-    DiagnosticResult diagnostics;
+bool ComponentManager::Impl::discardMountedInstance(std::map<ComponentInstanceKey, Instance>::iterator found) {
+    Instance& instance = found->second;
+    const ComponentInstanceKey componentKey = instance.componentKey;
+    HTMLFloaterElement* root = instance.root;
+    if (!root || !instance.document || !instance.controller) LL_ERRS("UI") << "Mounted component instance lost an owner before rollback." << LL_ENDL;
+    std::unique_ptr<Document> document = std::move(instance.document);
+    std::unique_ptr<DocumentController> controller = std::move(instance.controller);
+    const auto rootKey = rootKeys.find(root);
+    if (rootKey != rootKeys.end() && rootKey->second == componentKey) rootKeys.erase(rootKey);
+    pendingEvictions.erase(componentKey);
+    instances.erase(found);
+    return unmountOrRetain(componentKey, std::move(document), std::move(controller), *root);
+}
 
-    bool commit();
-};
+std::vector<ComponentManager::Impl::OpenComponentSnapshot> ComponentManager::Impl::openSnapshot() const {
+    std::vector<OpenComponentSnapshot> snapshot;
+    snapshot.reserve(instances.size());
+    for (const auto& [key, instance] : instances) {
+        if (!instance.root || isClosed(*instance.root)) continue;
+        snapshot.push_back({key, ElementRef<HTMLFloaterElement>(instance.root)});
+    }
+    return snapshot;
+}
+
+void ComponentManager::Impl::rootClosed(const ComponentInstanceKey& key, HTMLFloaterElement* root) {
+    const auto found = instances.find(key);
+    if (found == instances.end() || found->second.root != root || !root || !isClosed(*root)) return;
+    pendingEvictions.insert(key);
+    ++mutationEpoch;
+    if (mMutationActive || mSuppressCloseControllerCallback || mPublicationReserved || system.publicationInProgress()) return;
+
+    MutationScope operation(*this);
+    if (!operation) {
+        LL_WARNS("UI") << "Rejected a nested component close operation." << LL_ENDL;
+        return;
+    }
+
+    const auto current = instances.find(key);
+    if (current == instances.end() || current->second.root != root || !isClosed(*root)) return;
+    if (!current->second.closeNotified) {
+        current->second.closeNotified = true;
+        current->second.controller->onClose();
+        if (!isClosed(*root)) {
+            current->second.closeNotified = false;
+            pendingEvictions.erase(key);
+        }
+    }
+}
+
+bool ComponentManager::Impl::evictClosed() {
+    bool allEvicted = true;
+    const std::vector<ComponentInstanceKey> pending(pendingEvictions.begin(), pendingEvictions.end());
+    for (const ComponentInstanceKey& key : pending) {
+        const auto found = instances.find(key);
+        if (found == instances.end() || !found->second.root || !isClosed(*found->second.root)) {
+            pendingEvictions.erase(key);
+            continue;
+        }
+
+        HTMLFloaterElement* root = found->second.root;
+        DocumentController& controller = *found->second.controller;
+        if (!found->second.closeNotified) {
+            found->second.closeNotified = true;
+            controller.onClose();
+            if (!isClosed(*root)) {
+                found->second.closeNotified = false;
+                pendingEvictions.erase(key);
+                continue;
+            }
+            if (mMutationRejected) {
+                allEvicted = false;
+                break;
+            }
+        }
+        controller.deactivate();
+        if (!host.unmount(*root)) {
+            if (!controller.activate()) LL_WARNS("UI") << "Closed component could not reactivate after host unmount rejection." << LL_ENDL;
+            LL_WARNS("UI") << "Closed component could not be unmounted: " << key.persistenceKey() << LL_ENDL;
+            allEvicted = false;
+            continue;
+        }
+
+        rootKeys.erase(root);
+        found->second.root = nullptr;
+        instances.erase(found);
+        pendingEvictions.erase(key);
+        ++mutationEpoch;
+    }
+    return allEvicted;
+}
 
 ComponentManager::ComponentManager(System& system, Host& host, SettingResolver& settingResolver)
     : mImpl(std::make_shared<Impl>(system, host, settingResolver)) {}
@@ -151,155 +230,24 @@ ComponentManager::PreparedReplacement::~PreparedReplacement() = default;
 ComponentManager::PreparedReplacement::PreparedReplacement(PreparedReplacement&&) noexcept = default;
 ComponentManager::PreparedReplacement& ComponentManager::PreparedReplacement::operator=(PreparedReplacement&&) noexcept = default;
 
-bool ComponentManager::PreparedReplacement::commit() {
-    if (!mState) return false;
-    std::unique_ptr<State> state = std::move(mState);
-    const bool committed = state->commit();
-    mDiagnostics.append(std::move(state->diagnostics));
-    return committed;
-}
-
-DiagnosticResult ComponentManager::PreparedReplacement::takeDiagnostics() {
-    DiagnosticResult result;
-    result.append(std::move(mDiagnostics));
-    return result;
-}
-
-bool ComponentManager::PreparedReplacement::State::commit() {
-    const std::shared_ptr<ComponentManager::Impl> impl = manager.lock();
-    if (!impl || !generation) return false;
-
-    for (const PendingComponent& component : components) {
-        const auto found = impl->instances.find(component.componentKey);
-        const ComponentManager::Impl::Instance* instance = found == impl->instances.end() ? nullptr : &found->second;
-        if (!instance || instance != component.instance || !instance->root || instance->root != component.current) return false;
-    }
-
-    for (PendingComponent& component : components) {
-        const auto definition = impl->definitions.find(component.componentKey.definitionId);
-        if (definition == impl->definitions.end()) {
-            diagnostics.error("floater.definition.missing",
-                              "Unknown HTMLFloaterElement definition during reload: " + component.componentKey.definitionId + ".");
-            return false;
-        }
-
-        ResourceBuildResult buildResult = generation->buildElementTree(component.instance->resource, locale);
-        component.replacement = takeFloaterDocument(std::move(buildResult), "Reloaded Component must have a <floater> root.",
-                                                    component.instance->resource.value(), diagnostics);
-        if (!component.replacement) return false;
-        component.candidate =
-            component.replacement->documentElement() ? dynamic_cast<HTMLFloaterElement*>(component.replacement->documentElement()) : nullptr;
-
-        component.controller = definition->second.factory(impl->system, *component.replacement);
-        if (!component.controller) {
-            diagnostics.error(
-                "floater.controller.missing",
-                "HTMLFloaterElement controller factory returned no controller during reload: " + component.componentKey.definitionId + ".");
-            return false;
-        }
-
-        DocumentController::PreparedMountResult prepared = component.controller->prepare(impl->settingResolver);
-        const bool preparedOk = prepared.ok();
-        diagnostics.append(std::move(prepared));
-        if (!preparedOk) return false;
-        if (!component.controller->canCommit(prepared.mount)) {
-            diagnostics.error("floater.controller.commit_invalid",
-                              "HTMLFloaterElement controller prepared an invalid mount: " + component.componentKey.persistenceKey() + ".");
-            return false;
-        }
-        component.mount = std::move(prepared.mount);
-    }
-
-    std::vector<ComponentManager::Host::ReplacementRequest> requests;
-    requests.reserve(components.size());
-    for (PendingComponent& component : components) {
-        const auto found = impl->instances.find(component.componentKey);
-        ComponentManager::Impl::Instance* instance = found == impl->instances.end() ? nullptr : &found->second;
-        DocumentController* controller = component.controller.get();
-        if (found == impl->instances.end()
-            || instance != component.instance
-            || !instance->root
-            || instance->root != component.current
-            || !controller
-            || !component.replacement
-            || !component.controller
-            || !component.candidate
-            || !controller->canCommit(component.mount))
-            return false;
-        requests.push_back({component.current, component.replacement.get()});
-    }
-
-    for (PendingComponent& component : components) {
-        if (!component.controller->commit(std::move(component.mount))) {
-            diagnostics.error(
-                "floater.controller.commit_invalid",
-                "HTMLFloaterElement controller could not commit its prepared binding: " + component.componentKey.persistenceKey() + ".");
-            return false;
-        }
-    }
-
-    for (const PendingComponent& component : components) component.instance->controller->deactivate();
-
-    const auto reactivateCurrentControllers = [&]() {
-        for (const PendingComponent& component : components)
-            if (!component.instance->controller->activate())
-                LL_ERRS("UI") << "Component controller could not reactivate after host replacement rollback." << LL_ENDL;
-    };
-
-    if (!impl->host.replaceAll(std::move(requests))) {
-        reactivateCurrentControllers();
-        return false;
-    }
-
-    const auto rollbackHost = [&]() {
-        std::vector<ComponentManager::Host::ReplacementRequest> rollbackRequests;
-        rollbackRequests.reserve(components.size());
-        for (const PendingComponent& component : components) rollbackRequests.push_back({component.candidate, component.instance->document.get()});
-        if (!impl->host.replaceAll(std::move(rollbackRequests)))
-            LL_ERRS("UI") << "Component host could not roll back a failed replacement publication." << LL_ENDL;
-    };
-
-    std::size_t activatedControllers = 0;
-    for (PendingComponent& component : components) {
-        if (!component.controller->activate()) {
-            diagnostics.error(
-                "floater.controller.activation_invalid",
-                "HTMLFloaterElement controller could not activate its mounted binding: " + component.componentKey.persistenceKey() + ".");
-            for (std::size_t index = 0; index < activatedControllers; ++index) components[index].controller->deactivate();
-            rollbackHost();
-            reactivateCurrentControllers();
-            return false;
-        }
-        ++activatedControllers;
-    }
-
-    const std::weak_ptr<ComponentManager::Impl> weakManager = impl;
-    for (PendingComponent& component : components) {
-        ComponentManager::Impl::Instance& instance = *component.instance;
-        instance.document = std::move(component.replacement);
-        instance.controller = std::move(component.controller);
-        DocumentController& controller = *instance.controller;
-        HTMLFloaterElement* current = instance.root;
-        HTMLFloaterElement* root = component.candidate;
-        impl->rootKeys.erase(current);
-        impl->rootKeys[root] = instance.componentKey;
-        instance.root = root;
-        const ComponentInstanceKey closedComponentKey = instance.componentKey;
-        attachRootLifecycle(*root, controller, [weakManager, closedComponentKey] {
-            if (const std::shared_ptr<ComponentManager::Impl> impl = weakManager.lock()) impl->pendingEvictions.insert(closedComponentKey);
-        });
-    }
-    return true;
-}
-
 bool ComponentManager::registerDefinition(std::string definitionId, std::string resource, ControllerFactory factory) {
     const ResourceId id(resource);
     if (!ComponentInstanceKey{definitionId, {}}.valid() || !id.valid() || !factory) return false;
-    return mImpl->definitions.emplace(std::move(definitionId), Impl::Definition{id, std::move(factory)}).second;
+    Impl::MutationScope operation(*mImpl);
+    if (!operation) return false;
+    const bool inserted = mImpl->definitions.emplace(std::move(definitionId), Impl::Definition{id, std::move(factory)}).second;
+    if (inserted) ++mImpl->mutationEpoch;
+    return inserted;
 }
 
 ComponentOpenResult ComponentManager::open(const std::string& definitionId, const std::string& instanceKey) {
     ComponentOpenResult result;
+    Impl::MutationScope operation(*mImpl);
+    if (!operation) {
+        result.error("floater.transaction.busy", "The Component Manager is already processing another operation.");
+        return result;
+    }
+
     const auto definition = mImpl->definitions.find(definitionId);
     if (definition == mImpl->definitions.end()) {
         result.error("floater.definition.missing", "Unknown HTMLFloaterElement definition: " + definitionId + ".");
@@ -314,10 +262,39 @@ ComponentOpenResult ComponentManager::open(const std::string& definitionId, cons
 
     const std::string persistenceKey = component.persistenceKey();
     if (const auto existing = mImpl->instances.find(component); existing != mImpl->instances.end() && existing->second.root) {
+        Impl::Instance& live = existing->second;
+        HTMLFloaterElement* root = live.root;
+        const bool wasClosed = isClosed(*root);
+        const bool wasPending = mImpl->pendingEvictions.contains(component);
+        const bool wasCloseNotified = live.closeNotified;
         mImpl->pendingEvictions.erase(component);
-        result.floater = existing->second.root;
+        live.closeNotified = false;
+        result.floater = root;
         mImpl->host.present(*result.floater);
-        existing->second.controller->onOpen();
+        if (!operation.valid() || isClosed(*root)) {
+            if (wasClosed && !isClosed(*root)) root->close();
+            live.closeNotified = wasCloseNotified;
+            if (isClosed(*root) || wasPending) mImpl->pendingEvictions.insert(component);
+            else mImpl->pendingEvictions.erase(component);
+            result.floater = nullptr;
+            result.error("floater.transaction.reentrant", "A component mutation was requested while presenting a component.");
+            return result;
+        }
+        live.controller->onOpen();
+        if (!operation.valid() || isClosed(*root)) {
+            if (wasClosed) {
+                if (!isClosed(*root)) root->close();
+                live.controller->onClose();
+                live.closeNotified = true;
+            } else {
+                live.closeNotified = wasCloseNotified;
+            }
+            if (isClosed(*root) || wasPending) mImpl->pendingEvictions.insert(component);
+            else mImpl->pendingEvictions.erase(component);
+            result.floater = nullptr;
+            result.error("floater.transaction.reentrant", "A component mutation was requested while opening a component.");
+        }
+        if (wasClosed && result.ok()) ++mImpl->mutationEpoch;
         return result;
     }
 
@@ -331,6 +308,10 @@ ComponentOpenResult ComponentManager::open(const std::string& definitionId, cons
         result.error("floater.controller.missing", "HTMLFloaterElement controller factory returned no controller: " + definitionId + ".");
         return result;
     }
+    if (!operation.valid()) {
+        result.error("floater.transaction.reentrant", "A component mutation was requested while creating a component controller.");
+        return result;
+    }
 
     DocumentController::PreparedMountResult prepared;
     HTMLFloaterElement* floater = document->documentElement() ? dynamic_cast<HTMLFloaterElement*>(document->documentElement()) : nullptr;
@@ -338,6 +319,10 @@ ComponentOpenResult ComponentManager::open(const std::string& definitionId, cons
     const bool preparedOk = prepared.ok();
     result.append(std::move(prepared));
     if (!preparedOk) return result;
+    if (!operation.valid()) {
+        result.error("floater.transaction.reentrant", "A component mutation was requested while preparing a component.");
+        return result;
+    }
 
     if (!controller->canCommit(prepared.mount)) {
         result.error("floater.controller.commit_invalid", "HTMLFloaterElement controller prepared an invalid mount: " + persistenceKey + ".");
@@ -354,8 +339,15 @@ ComponentOpenResult ComponentManager::open(const std::string& definitionId, cons
         result.error("floater.host.mount_failed", "Component host could not mount HTMLFloaterElement: " + persistenceKey + ".");
         return result;
     }
+    if (!operation.valid()) {
+        controller->deactivate();
+        mImpl->unmountOrRetain(component, std::move(document), std::move(controller), *floater);
+        result.error("floater.transaction.reentrant", "A component mutation was requested while mounting a component.");
+        return result;
+    }
     if (!controller->activate()) {
-        if (!mImpl->host.unmount(*floater)) LL_ERRS("UI") << "Component host could not roll back a failed HTMLFloaterElement mount." << LL_ENDL;
+        controller->deactivate();
+        mImpl->unmountOrRetain(component, std::move(document), std::move(controller), *floater);
         result.error("floater.controller.activation_invalid",
                      "HTMLFloaterElement controller could not activate its mounted binding: " + persistenceKey + ".");
         return result;
@@ -365,23 +357,61 @@ ComponentOpenResult ComponentManager::open(const std::string& definitionId, cons
     instance.root = floater;
     result.floater = instance.root;
 
-    mImpl->rootKeys[result.floater] = component;
+    auto [inserted, insertedNew] =
+        mImpl->instances.try_emplace(component, component, instance.resource, std::move(instance.document), std::move(instance.controller));
+    if (!insertedNew) {
+        instance.controller->deactivate();
+        mImpl->unmountOrRetain(component, std::move(instance.document), std::move(instance.controller), *floater);
+        result.floater = nullptr;
+        result.error("floater.transaction.identity_conflict", "The component identity was claimed during mount: " + persistenceKey + ".");
+        return result;
+    }
+
+    Impl::Instance& live = inserted->second;
+    live.root = floater;
+    if (!mImpl->rootKeys.emplace(floater, component).second) {
+        live.controller->deactivate();
+        mImpl->discardMountedInstance(inserted);
+        result.floater = nullptr;
+        result.error("floater.transaction.identity_conflict", "The component root identity was already registered: " + persistenceKey + ".");
+        return result;
+    }
+
     const std::weak_ptr<Impl> weakImpl = mImpl;
     const ComponentInstanceKey closedComponentKey = component;
-    attachRootLifecycle(*result.floater, *instance.controller, [weakImpl, closedComponentKey] {
-        if (const std::shared_ptr<Impl> impl = weakImpl.lock()) impl->pendingEvictions.insert(closedComponentKey);
+    attachRootLifecycle(*result.floater, [weakImpl, closedComponentKey, floater] {
+        if (const std::shared_ptr<Impl> impl = weakImpl.lock()) impl->rootClosed(closedComponentKey, floater);
     });
-    DocumentController* mountedController = instance.controller.get();
-    mImpl->instances.insert_or_assign(component, std::move(instance));
     mImpl->host.present(*result.floater);
-    mountedController->onOpen();
+    if (!operation.valid() || isClosed(*floater)) {
+        result.error("floater.transaction.reentrant", "A component mutation was requested while presenting a component.");
+        live.controller->deactivate();
+        mImpl->discardMountedInstance(inserted);
+        result.floater = nullptr;
+        return result;
+    }
+    live.controller->onOpen();
+    if (!operation.valid() || isClosed(*floater)) {
+        result.error("floater.transaction.reentrant", "A component mutation was requested while opening a component.");
+        live.controller->onClose();
+        live.controller->deactivate();
+        mImpl->discardMountedInstance(inserted);
+        result.floater = nullptr;
+        return result;
+    }
+    ++mImpl->mutationEpoch;
     return result;
 }
 
 void ComponentManager::forEachOpen(const OpenComponentCallback& callback) const {
     if (!callback) return;
-    for (const auto& [key, instance] : mImpl->instances)
-        if (HTMLFloaterElement* floater = instance.root; floater && !isClosed(*floater)) callback(key, *floater);
+    const std::vector<Impl::OpenComponentSnapshot> snapshot = mImpl->openSnapshot();
+    for (const Impl::OpenComponentSnapshot& entry : snapshot) {
+        const auto found = mImpl->instances.find(entry.key);
+        HTMLFloaterElement* floater = entry.root.get();
+        if (found == mImpl->instances.end() || found->second.root != floater || !floater || isClosed(*floater)) continue;
+        callback(entry.key, *floater);
+    }
 }
 
 std::optional<ComponentInstanceKey> ComponentManager::componentKeyFor(const HTMLFloaterElement& floater) const {
@@ -397,10 +427,17 @@ ComponentManager::ReplacementResult ComponentManager::prepareReplacement(std::sh
         return result;
     }
 
+    if (mImpl->mMutationActive || mImpl->mPublicationReserved || mImpl->system.publicationInProgress() || !mImpl->retainedMounts.empty()) {
+        mImpl->rejectMutation();
+        result.error("floater.transaction.busy", "The Component Manager is already processing another operation.");
+        return result;
+    }
+
     auto pending = std::make_unique<PreparedReplacement::State>();
     pending->manager = mImpl;
     pending->generation = std::move(generation);
     pending->locale = std::move(locale);
+    pending->mutationEpoch = mImpl->mutationEpoch;
     pending->components.reserve(mImpl->instances.size());
     for (auto& [componentKey, instance] : mImpl->instances) {
         if (!instance.root || isClosed(*instance.root)) continue;
@@ -417,24 +454,52 @@ ComponentManager::ReplacementResult ComponentManager::prepareReplacement(std::sh
 }
 
 bool ComponentManager::clearInstances() {
-    std::vector<HTMLFloaterElement*> roots;
-    roots.reserve(mImpl->instances.size());
-    for (auto& entry : mImpl->instances)
-        if (HTMLFloaterElement* root = entry.second.root) {
-            entry.second.controller->deactivate();
-            roots.push_back(root);
-        }
+    Impl::MutationScope operation(*mImpl, Impl::MutationMode::Cleanup);
+    if (!operation) return false;
 
-    if (!mImpl->host.clearAll(std::move(roots))) {
-        for (auto& entry : mImpl->instances)
-            if (entry.second.root && !entry.second.controller->activate())
-                LL_ERRS("UI") << "Component controller could not reactivate after account teardown rejection." << LL_ENDL;
+    struct PendingClear {
+        ComponentInstanceKey key;
+        HTMLFloaterElement* root = nullptr;
+        DocumentController* controller = nullptr;
+        bool wasClosed = false;
+        bool closeNotified = false;
+    };
+
+    const std::set<ComponentInstanceKey> previousPendingEvictions = mImpl->pendingEvictions;
+    std::vector<PendingClear> pending;
+    pending.reserve(mImpl->instances.size());
+    std::vector<HTMLFloaterElement*> roots;
+    roots.reserve(mImpl->instances.size() + mImpl->retainedMounts.size());
+    for (auto& [key, instance] : mImpl->instances)
+        if (instance.root) {
+            pending.push_back({key, instance.root, instance.controller.get(), isClosed(*instance.root), instance.closeNotified});
+            instance.controller->deactivate();
+            roots.push_back(instance.root);
+        }
+    for (const Impl::RetainedMount& retained : mImpl->retainedMounts)
+        if (HTMLFloaterElement* root = retained.root.get()) roots.push_back(root);
+        else LL_ERRS("UI") << "Retained component mount lost its root during account teardown." << LL_ENDL;
+
+    const bool previousSuppressCloseCallback = mImpl->mSuppressCloseControllerCallback;
+    mImpl->mSuppressCloseControllerCallback = true;
+    const bool cleared = mImpl->host.clearAll(std::move(roots));
+    mImpl->mSuppressCloseControllerCallback = previousSuppressCloseCallback;
+    if (!cleared) {
+        mImpl->pendingEvictions = previousPendingEvictions;
+        for (PendingClear& entry : pending) {
+            if (!entry.root) continue;
+            if (!entry.wasClosed && isClosed(*entry.root)) entry.root->open();
+            if (!entry.controller->activate())
+                LL_WARNS("UI") << "Component controller could not reactivate after account teardown rejection." << LL_ENDL;
+        }
         LL_WARNS("UI") << "Component host rejected account teardown; retaining the current component generation." << LL_ENDL;
         return false;
     }
 
-    for (auto& entry : mImpl->instances) {
-        auto& instance = entry.second;
+    for (const PendingClear& entry : pending)
+        if (!entry.closeNotified) entry.controller->onClose();
+
+    for (auto& [key, instance] : mImpl->instances) {
         instance.root = nullptr;
         instance.controller.reset();
         instance.document.reset();
@@ -442,20 +507,41 @@ bool ComponentManager::clearInstances() {
     mImpl->instances.clear();
     mImpl->rootKeys.clear();
     mImpl->pendingEvictions.clear();
+    mImpl->retainedMounts.clear();
+    ++mImpl->mutationEpoch;
     return true;
 }
 
 void ComponentManager::idle() {
+    Impl::MutationScope operation(*mImpl, Impl::MutationMode::Cleanup);
+    if (!operation) return;
+    mImpl->retryRetainedMounts();
     mImpl->evictClosed();
 }
 
 void ComponentManager::reportReloadSucceeded() {
-    for (const auto& [key, instance] : mImpl->instances)
-        if (instance.root && !isClosed(*instance.root)) instance.controller->onReloadSucceeded();
+    Impl::MutationScope operation(*mImpl);
+    if (!operation) return;
+    const std::vector<Impl::OpenComponentSnapshot> snapshot = mImpl->openSnapshot();
+    for (const Impl::OpenComponentSnapshot& entry : snapshot) {
+        const auto found = mImpl->instances.find(entry.key);
+        HTMLFloaterElement* root = entry.root.get();
+        if (found == mImpl->instances.end() || found->second.root != root || !root || isClosed(*root)) continue;
+        found->second.controller->onReloadSucceeded();
+        if (!operation.valid()) break;
+    }
 }
 
 void ComponentManager::reportReloadFailed(const DiagnosticResult& diagnostics) {
-    for (const auto& [key, instance] : mImpl->instances)
-        if (instance.root && !isClosed(*instance.root)) instance.controller->onReloadFailed(diagnostics);
+    Impl::MutationScope operation(*mImpl);
+    if (!operation) return;
+    const std::vector<Impl::OpenComponentSnapshot> snapshot = mImpl->openSnapshot();
+    for (const Impl::OpenComponentSnapshot& entry : snapshot) {
+        const auto found = mImpl->instances.find(entry.key);
+        HTMLFloaterElement* root = entry.root.get();
+        if (found == mImpl->instances.end() || found->second.root != root || !root || isClosed(*root)) continue;
+        found->second.controller->onReloadFailed(diagnostics);
+        if (!operation.valid()) break;
+    }
 }
 } // namespace radia::viewer::ui

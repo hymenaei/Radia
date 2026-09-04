@@ -43,6 +43,7 @@ using radia::ui::WheelEvent;
 using radia::viewer::ui::DocumentController;
 using radia::viewer::ui::Runtime;
 using radia::viewer::ui::RuntimeKeybindingState;
+using radia::viewer::ui::RuntimeState;
 using radia::viewer::ui::SkinSnapshotResult;
 using ::testing::Test;
 
@@ -120,23 +121,26 @@ protected:
                                                     ++keybindingStateCalls;
                                                     return RuntimeKeybindingState{};
                                                 }},
-                  Runtime::TestOverrides{.captureSkin =
-                                             [this] {
-                                                 ++captures;
-                                                 return snapshot;
-                                             },
-                                         .now =
-                                             [this] {
-                                                 controllerState.lifecycleEvents.emplace_back(RuntimeLifecycleEvent::FrameClock);
-                                                 ++nowCalls;
-                                                 return now;
-                                             },
-                                         .paintContext =
-                                             [this](LLGLSLShader&, System&) {
-                                                 auto context = std::make_unique<RecordingPaintContext>();
-                                                 paintContext = context.get();
-                                                 return context;
-                                             }}) {
+                  Runtime::TestOverrides{
+                      .captureSkin =
+                          [this] {
+                              ++captures;
+                              return snapshot;
+                          },
+                      .now =
+                          [this] {
+                              controllerState.lifecycleEvents.emplace_back(RuntimeLifecycleEvent::FrameClock);
+                              ++nowCalls;
+                              return now;
+                          },
+                      .paintContext =
+                          [this](LLGLSLShader&, System&) {
+                              auto context = std::make_unique<RecordingPaintContext>();
+                              paintContext = context.get();
+                              return context;
+                          },
+                      .failTeardown = [this] { return failTeardown; },
+                  }) {
         savedSettings.declareString("Locale", "", "test locale");
         savedSettings.declareLLSD("UILayout", LLSD::emptyMap(), "test layout", LLControlVariable::PERSIST_NO);
         savedSettings.declareBOOL("SkinAutoReload", false, "test skin reload");
@@ -144,7 +148,6 @@ protected:
         savedSettings.declareS32("SkinAutoReloadSettleInterval", 150, "test settle interval");
         accountSettings.declareLLSD("UIWorkspace", LLSD::emptyMap(), "test workspace", LLControlVariable::PERSIST_NO);
     }
-
     bool registerTestFloater() {
         return runtime.registerFloater("runtimeTest", "view.html", [this](System& system, Document& document) {
             return std::make_unique<RuntimeController>(system, document, controllerState);
@@ -161,6 +164,7 @@ protected:
     int nowCalls = 0;
     std::chrono::steady_clock::time_point now;
     RuntimeControllerState controllerState;
+    bool failTeardown = false;
     RecordingPaintContext* paintContext = nullptr;
     Runtime runtime;
 };
@@ -197,6 +201,41 @@ TEST_F(RuntimeTest, InitializationIsIdempotent) {
 
     EXPECT_TRUE(runtime.initialize());
     EXPECT_EQ(captures, 1);
+}
+
+TEST_F(RuntimeTest, ReportsItsLifecycleState) {
+    EXPECT_EQ(runtime.lifecycleState(), RuntimeState::Running);
+    ASSERT_TRUE(runtime.initialize());
+    EXPECT_EQ(runtime.lifecycleState(), RuntimeState::Running);
+
+    runtime.shutdown();
+
+    EXPECT_EQ(runtime.lifecycleState(), RuntimeState::Stopped);
+    runtime.shutdown();
+    EXPECT_EQ(runtime.lifecycleState(), RuntimeState::Stopped);
+}
+
+TEST_F(RuntimeTest, RetriesAFailedShutdownWithoutDroppingOwners) {
+    ASSERT_TRUE(runtime.initialize());
+    ASSERT_TRUE(registerTestFloater());
+    HTMLFloaterElement* floater = runtime.openFloater("runtimeTest");
+    ASSERT_NE(floater, nullptr);
+
+    failTeardown = true;
+    runtime.shutdown();
+
+    EXPECT_EQ(runtime.lifecycleState(), RuntimeState::TeardownFailed);
+    EXPECT_FALSE(floater->closed());
+    EXPECT_EQ(controllerState.closed, 0);
+    EXPECT_EQ(runtime.openFloater("runtimeTest", "after-failure"), nullptr);
+
+    failTeardown = false;
+    runtime.shutdown();
+
+    EXPECT_EQ(runtime.lifecycleState(), RuntimeState::Stopped);
+    EXPECT_EQ(controllerState.closed, 1);
+    runtime.shutdown();
+    EXPECT_EQ(runtime.lifecycleState(), RuntimeState::Stopped);
 }
 
 TEST_F(RuntimeTest, ShutdownPreventsReinitialization) {

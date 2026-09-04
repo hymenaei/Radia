@@ -32,7 +32,9 @@ struct SvgIcon;
 class PublicationCommit {
 public:
     virtual ~PublicationCommit() = default;
+    virtual bool prepare() { return true; }
     virtual bool commit() = 0;
+    virtual void finalize() {}
 };
 
 class System {
@@ -46,7 +48,10 @@ public:
     ResourceBuildResult buildElementTree(const ResourceId& id) const;
     std::unique_ptr<Surface> createSurface(const TextMetrics& textMetrics) const;
     bool setLocale(const std::string& localeId);
-    void setLocaleChangedHandler(std::function<void(const std::string&)> handler) { mLocaleChangedHandler = std::move(handler); }
+    void setLocaleChangedHandler(std::function<void(const std::string&)> handler) {
+        if (mPublicationInProgress) return;
+        mLocaleChangedHandler = std::move(handler);
+    }
     void setKeybindingResolver(std::function<KeybindingPresentation(const std::string&)> resolver);
     void refreshKeybindings();
     void setNativeAppearance(std::shared_ptr<const NativeAppearance> appearance);
@@ -68,6 +73,7 @@ public:
     bool hasIcon(const std::string& name) const;
     std::uint64_t generation() const { return mGenerationNumber; }
     std::uint64_t localeGeneration() const { return mLocaleGeneration; }
+    bool publicationInProgress() const { return mPublicationInProgress; }
     const NativeAppearance& nativeAppearance() const { return *mNativeAppearance; }
 
 private:
@@ -85,10 +91,12 @@ private:
     };
 
     class SurfaceNotificationScope;
+    class PublicationScope;
 
     mutable std::list<SurfaceRegistration> mSurfaceRegistrations;
     mutable SurfaceRegistrationId mNextSurfaceRegistrationId = 1;
     mutable std::size_t mSurfaceNotificationDepth = 0;
+    bool mPublicationInProgress = false;
     std::function<void(const std::string&)> mLocaleChangedHandler;
     std::function<KeybindingPresentation(const std::string&)> mKeybindingResolver;
 

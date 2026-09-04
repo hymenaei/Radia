@@ -156,6 +156,7 @@ set(viewer_controllers_HEADER_FILES
 
 set(viewer_SOURCE_FILES
     componentmanager.cpp
+    componentmanagerreplacement.cpp
     documentcontroller.cpp
     floaterhost.cpp
     inputbridge.cpp
@@ -942,6 +943,7 @@ set(viewer_HEADER_FILES
 
     componentinstancekey.h
     componentmanager.h
+    componentmanagerinternal.h
     controllerregistration.h
     documentcontroller.h
     documentcontrollerinternal.h

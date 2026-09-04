@@ -55,6 +55,8 @@ struct RuntimeKeybindingState {
     bool operator==(const RuntimeKeybindingState& other) const { return generation == other.generation && mode == other.mode; }
 };
 
+enum class RuntimeState { Running, ShuttingDown, Stopped, TeardownFailed };
+
 class Runtime final {
 public:
     using ControllerFactory = std::function<std::unique_ptr<DocumentController>(System& system, Document& document)>;
@@ -73,6 +75,7 @@ public:
         SkinSnapshotProvider captureSkin;
         Clock now;
         PaintContextFactory paintContext;
+        std::function<bool()> failTeardown;
     };
 
     Runtime(LLControlGroup& savedSettings, LLControlGroup& perAccountSettings, LLGLSLShader& uiShader, LLWindow* mainWindow,
@@ -83,6 +86,7 @@ public:
 
     bool initialize();
     void shutdown();
+    RuntimeState lifecycleState() const;
     bool registerFloater(std::string definitionId, std::string resource, ControllerFactory factory);
     HTMLFloaterElement* openFloater(const std::string& definitionId, const std::string& instanceKey = {});
     void restoreWorkspace();

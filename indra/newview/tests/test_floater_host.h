@@ -35,6 +35,7 @@ struct TestFloaterHost final : ComponentManager::Host {
     }
 
     bool unmount(HTMLFloaterElement& root) override {
+        if (rejectUnmounts) return false;
         const auto found = mounted.find(&root);
         if (found == mounted.end()) return false;
         if (surface && !surface->unmountBorrowedFloater(root)) return false;
@@ -64,6 +65,7 @@ struct TestFloaterHost final : ComponentManager::Host {
     bool rejectReplacements = false;
     bool failCommit = false;
     bool rejectClears = false;
+    bool rejectUnmounts = false;
     std::function<void(HTMLFloaterElement&)> onMount;
     std::function<void(HTMLFloaterElement&)> afterReplacement;
     Surface* surface = nullptr;

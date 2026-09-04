@@ -77,3 +77,28 @@ TEST(FloaterHostTest, ReplacesMountedFloaterThroughSurfaceSeam) {
     EXPECT_FLOAT_EQ(replacement->rect().w, userRect.w);
     EXPECT_FLOAT_EQ(replacement->rect().h, userRect.h);
 }
+
+TEST(FloaterHostTest, RejectsClearWhenAnyRootIsNotMounted) {
+    auto currentDocument = std::make_unique<Document>(makeElement<HTMLFloaterElement>());
+    HTMLFloaterElement* current = dynamic_cast<HTMLFloaterElement*>(currentDocument->documentElement());
+    ASSERT_NE(current, nullptr);
+    appendFloaterStructure(*current);
+
+    auto unmountedDocument = std::make_unique<Document>(makeElement<HTMLFloaterElement>());
+    HTMLFloaterElement* unmounted = dynamic_cast<HTMLFloaterElement*>(unmountedDocument->documentElement());
+    ASSERT_NE(unmounted, nullptr);
+    appendFloaterStructure(*unmounted);
+
+    StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet.loadRadia(kFloaterStyles).ok());
+    Surface surface(styleSheet);
+    surface.setViewport(300.f, 200.f);
+    FloaterHost host(surface);
+
+    ASSERT_TRUE(host.mount(*currentDocument));
+    ASSERT_TRUE(surface.ownsFloater(*current));
+
+    EXPECT_FALSE(host.clearAll({current, unmounted}));
+    EXPECT_TRUE(surface.ownsFloater(*current));
+    EXPECT_FALSE(current->closed());
+}

@@ -12,6 +12,7 @@ add_executable(newview_test
     workspacepersistence_test.cpp
 
     ../componentmanager.cpp
+    ../componentmanagerreplacement.cpp
     ../floaterhost.cpp
     ../inputbridge.cpp
     ../reloadcoordinator.cpp

@@ -73,6 +73,18 @@ private:
     const System& mSystem;
 };
 
+class System::PublicationScope {
+public:
+    explicit PublicationScope(System& system) : mSystem(system) { mSystem.mPublicationInProgress = true; }
+    ~PublicationScope() { mSystem.mPublicationInProgress = false; }
+
+    PublicationScope(const PublicationScope&) = delete;
+    PublicationScope& operator=(const PublicationScope&) = delete;
+
+private:
+    System& mSystem;
+};
+
 System::System() : mSkinGeneration(SkinGeneration::empty()), mNativeAppearance(makeDefaultNativeAppearance()) {}
 
 System::~System() = default;
@@ -90,7 +102,12 @@ bool System::hasRelevantStyleChange(const ResourceSnapshot& current, const Resou
 }
 
 bool System::publishImpl(std::shared_ptr<const SkinGeneration> generation, PublicationCommit* commit) {
-    if (!generation) return false;
+    if (!generation || mPublicationInProgress) return false;
+    const PublicationScope publication(*this);
+    if (commit && !commit->prepare()) {
+        commit->finalize();
+        return false;
+    }
 
     const std::shared_ptr<const SkinGeneration> previousGeneration = mSkinGeneration;
     const std::string previousLocale = mActiveLocale;
@@ -108,6 +125,7 @@ bool System::publishImpl(std::shared_ptr<const SkinGeneration> generation, Publi
             if (Surface* surface = surfaceForRegistration(id)) surface->generationChanged(styleSheet());
     }
 
+    bool committed = true;
     if (commit && !commit->commit()) {
         const bool localeChanged = mActiveLocale != previousLocale;
         mSkinGeneration = previousGeneration;
@@ -120,11 +138,12 @@ bool System::publishImpl(std::shared_ptr<const SkinGeneration> generation, Publi
                 if (Surface* surface = surfaceForRegistration(id)) surface->generationChanged(styleSheet());
         }
         if (localeChanged) notifyLocaleChanged();
-        return false;
+        committed = false;
     }
 
-    notifyLocaleChanged();
-    return true;
+    if (committed) notifyLocaleChanged();
+    if (commit) commit->finalize();
+    return committed;
 }
 
 std::vector<LocaleInfo> System::locales() const {
@@ -172,6 +191,7 @@ bool System::hasIcon(const std::string& name) const {
 }
 
 bool System::setLocale(const std::string& localeId) {
+    if (mPublicationInProgress) return false;
     if (!mSkinGeneration->containsLocale(localeId)) return false;
     if (localeId == mActiveLocale) return true;
     mActiveLocale = localeId;
@@ -181,6 +201,7 @@ bool System::setLocale(const std::string& localeId) {
 }
 
 void System::setKeybindingResolver(std::function<KeybindingPresentation(const std::string&)> resolver) {
+    if (mPublicationInProgress) return;
     mKeybindingResolver = std::move(resolver);
     refreshKeybindings();
 }
@@ -190,12 +211,14 @@ KeybindingPresentation System::resolveKeybinding(const std::string& id) const {
 }
 
 void System::refreshKeybindings() {
+    if (mPublicationInProgress) return;
     const SurfaceNotificationScope notification(*this);
     for (SurfaceRegistrationId id : surfaceRegistrationSnapshot())
         if (Surface* surface = surfaceForRegistration(id)) surface->keybindingsChanged();
 }
 
 void System::setNativeAppearance(std::shared_ptr<const NativeAppearance> appearance) {
+    if (mPublicationInProgress) return;
     if (!appearance) appearance = makeDefaultNativeAppearance();
     if (mNativeAppearance == appearance && mNativeAppearance->revision() == appearance->revision()) return;
     mNativeAppearance = std::move(appearance);

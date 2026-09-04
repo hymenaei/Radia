@@ -161,7 +161,7 @@ TEST_F(SkinReloadCoordinatorTest, CommitsRequestedReloadAsOneTransaction) {
     EXPECT_FALSE(update().has_value());
 }
 
-TEST_F(SkinReloadCoordinatorTest, BuildsReplacementControllersAgainstCandidateGeneration) {
+TEST_F(SkinReloadCoordinatorTest, BuildsReplacementControllersAgainstCurrentGenerationDuringPreparation) {
     EXPECT_EQ(componentState.constructorMessage, "Live");
     snapshotSource.snapshot.add("localization.yaml", "defaultLocale: en\nlocales: {en: {strings: {reload.message: Candidate}}}\n");
     coordinator.request();
@@ -170,7 +170,7 @@ TEST_F(SkinReloadCoordinatorTest, BuildsReplacementControllersAgainstCandidateGe
 
     ASSERT_TRUE(result.has_value());
     ASSERT_TRUE(result->ok());
-    EXPECT_EQ(componentState.constructorMessage, "Candidate");
+    EXPECT_EQ(componentState.constructorMessage, "Live");
     EXPECT_EQ(system.resolveText("reload.message"), "Candidate");
 }
 

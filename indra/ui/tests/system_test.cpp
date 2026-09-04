@@ -874,3 +874,39 @@ TEST(SystemTest, RollsBackPublicationWhenCommitRejectsCandidate) {
     EXPECT_EQ(system.generation(), 1ULL);
     EXPECT_EQ(system.resolveText("message"), "Old");
 }
+
+TEST(SystemTest, RejectsNestedPublicationMutation) {
+    System system;
+    const SkinGenerationPrepareResult live = SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Old")));
+    ASSERT_TRUE(live.ok());
+    ASSERT_TRUE(system.publish(live.generation));
+
+    constexpr char kCandidateLocalization[] = "defaultLocale: en\n"
+                                              "locales: {en: {strings: {message: New}}, pt: {strings: {message: Novo}}}\n";
+    const SkinGenerationPrepareResult candidate = SkinCompiler().prepare(skinSnapshot(kCandidateLocalization));
+    ASSERT_TRUE(candidate.ok());
+
+    class ReentrantCommit final : public PublicationCommit {
+    public:
+        ReentrantCommit(System& system, std::shared_ptr<const radia::ui::SkinGeneration> candidate)
+            : mSystem(system), mCandidate(std::move(candidate)) {}
+
+        bool commit() override {
+            nestedPublish = mSystem.publish(mCandidate);
+            nestedLocale = mSystem.setLocale("pt");
+            return true;
+        }
+
+        bool nestedPublish = false;
+        bool nestedLocale = false;
+
+    private:
+        System& mSystem;
+        std::shared_ptr<const radia::ui::SkinGeneration> mCandidate;
+    } reentrantCommit(system, candidate.generation);
+
+    ASSERT_TRUE(system.publish(candidate.generation, reentrantCommit));
+    EXPECT_FALSE(reentrantCommit.nestedPublish);
+    EXPECT_FALSE(reentrantCommit.nestedLocale);
+    EXPECT_EQ(system.resolveText("message"), "New");
+}

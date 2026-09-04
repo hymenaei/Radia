@@ -4,6 +4,8 @@
  */
 
 #include "linden_common.h"
+#include <cstdint>
+#include <functional>
 #include <gtest/gtest.h>
 #include <map>
 #include <memory>
@@ -21,6 +23,7 @@
 #include "dom/elementinternal.h"
 #include "eventcall.h"
 #include "html/button.h"
+#include "html/element.h"
 #include "html/floater.h"
 #include "html/input.h"
 #include "html/label.h"
@@ -38,6 +41,7 @@ using radia::ui::ElementRef;
 using radia::ui::Event;
 using radia::ui::fixedTextMetrics;
 using radia::ui::HTMLButtonElement;
+using radia::ui::HTMLElement;
 using radia::ui::HTMLFloaterElement;
 using radia::ui::HTMLInputElement;
 using radia::ui::HTMLLabelElement;
@@ -51,8 +55,10 @@ using radia::ui::System;
 using radia::ui::ValueBinding;
 using radia::ui::ValueBindingSubscription;
 using radia::ui::ValueState;
+using radia::ui::detail::makeElement;
 using radia::viewer::ui::ComponentInstanceKey;
 using radia::viewer::ui::ComponentManager;
+using radia::viewer::ui::ComponentOpenResult;
 using radia::viewer::ui::DocumentController;
 using radia::viewer::ui::test::TestFloaterHost;
 using ::testing::Test;
@@ -108,6 +114,18 @@ public:
     std::shared_ptr<TestBooleanBinding> secondBinding;
 };
 
+class PublicationLocaleProbe final : public HTMLElement {
+public:
+    explicit PublicationLocaleProbe(std::function<void()> callback) : HTMLElement("publication-locale-probe"), mCallback(std::move(callback)) {}
+
+private:
+    void onLocaleChanged(const System&) override {
+        if (mCallback) mCallback();
+    }
+
+    std::function<void()> mCallback;
+};
+
 class ComponentManagerTest : public Test {
 protected:
     struct ControllerState {
@@ -118,6 +136,10 @@ protected:
         int reloadSuccessCount = 0;
         int reloadFailureCount = 0;
         int pressCount = 0;
+        std::function<void()> openCallback;
+        std::function<void()> closeCallback;
+        std::function<void()> factoryCallback;
+        std::function<void()> reloadCallback;
         bool inspectArgumentsValid = false;
         bool statusAvailable = false;
         bool changeObserved = false;
@@ -156,13 +178,21 @@ protected:
                 mOpened = true;
                 ++mState.committedCount;
             }
+            if (mState.openCallback) mState.openCallback();
         }
-        void onClose() override { ++mState.closeCount; }
+        void onClose() override {
+            ++mState.closeCount;
+            if (mState.closeCallback) mState.closeCallback();
+        }
         void onReloadSucceeded() override {
             ++mState.reloadSuccessCount;
             ++mState.committedCount;
+            if (mState.reloadCallback) mState.reloadCallback();
         }
-        void onReloadFailed(const DiagnosticResult&) override { ++mState.reloadFailureCount; }
+        void onReloadFailed(const DiagnosticResult&) override {
+            ++mState.reloadFailureCount;
+            if (mState.reloadCallback) mState.reloadCallback();
+        }
 
     private:
         void press() {
@@ -280,6 +310,7 @@ protected:
 
     bool registerOne(std::string definitionId = "one") {
         return manager.registerDefinition(std::move(definitionId), "one.html", [this](System& system, Document& document) {
+            if (controllerState.factoryCallback) controllerState.factoryCallback();
             return std::make_unique<Controller>(system, document, controllerState);
         });
     }
@@ -441,6 +472,157 @@ TEST_F(ComponentManagerTest, RollsBackHostMountWhenControllerActivationFails) {
     EXPECT_TRUE(host.mounted.empty());
 }
 
+TEST_F(ComponentManagerTest, RetainsFailedOpenOwnersWhenHostRejectsRollback) {
+    ASSERT_TRUE(registerOne());
+    host.rejectUnmounts = true;
+    host.onMount = [](HTMLFloaterElement& root) { root.replaceChildren(); };
+
+    const auto opened = manager.open("one");
+
+    EXPECT_FALSE(opened.ok());
+    EXPECT_EQ(host.mounted.size(), std::size_t{1});
+    manager.idle();
+    EXPECT_EQ(host.mounted.size(), std::size_t{1});
+
+    host.rejectUnmounts = false;
+    manager.idle();
+    EXPECT_TRUE(host.mounted.empty());
+}
+
+TEST_F(ComponentManagerTest, ClearsRetainedFailedOpenOwnersDuringTeardown) {
+    ASSERT_TRUE(registerOne());
+    host.rejectUnmounts = true;
+    host.onMount = [](HTMLFloaterElement& root) { root.replaceChildren(); };
+
+    EXPECT_FALSE(manager.open("one").ok());
+    ASSERT_EQ(host.mounted.size(), std::size_t{1});
+
+    host.rejectClears = true;
+    EXPECT_FALSE(manager.clearInstances());
+    EXPECT_EQ(host.mounted.size(), std::size_t{1});
+
+    host.rejectClears = false;
+    EXPECT_TRUE(manager.clearInstances());
+    EXPECT_TRUE(host.mounted.empty());
+}
+
+TEST_F(ComponentManagerTest, RejectsNestedMutationDuringMount) {
+    ASSERT_TRUE(registerOne());
+    host.onMount = [this](HTMLFloaterElement&) { EXPECT_FALSE(manager.open("one", "nested").ok()); };
+
+    const auto opened = manager.open("one");
+
+    EXPECT_FALSE(opened.ok());
+    ASSERT_FALSE(opened.errors.empty());
+    EXPECT_EQ(opened.errors.front().code, "floater.transaction.reentrant");
+    EXPECT_TRUE(host.mounted.empty());
+}
+
+TEST_F(ComponentManagerTest, RejectsNestedMutationDuringControllerOpen) {
+    ASSERT_TRUE(registerOne());
+    bool nestedOpenSucceeded = false;
+    controllerState.openCallback = [this, &nestedOpenSucceeded] { nestedOpenSucceeded = manager.open("one", "nested").ok(); };
+
+    const auto opened = manager.open("one");
+
+    EXPECT_FALSE(opened.ok());
+    EXPECT_FALSE(nestedOpenSucceeded);
+    EXPECT_EQ(controllerState.closeCount, 1);
+    EXPECT_TRUE(host.mounted.empty());
+}
+
+TEST_F(ComponentManagerTest, RejectsNestedMutationDuringExistingControllerOpen) {
+    ASSERT_TRUE(registerOne());
+    const auto opened = manager.open("one");
+    ASSERT_TRUE(opened.ok());
+    ElementRef<HTMLFloaterElement> original(opened.floater);
+    opened.floater->close();
+
+    bool nestedOpenSucceeded = false;
+    controllerState.openCallback = [this, &nestedOpenSucceeded] { nestedOpenSucceeded = manager.open("one", "nested").ok(); };
+    const auto reopened = manager.open("one");
+
+    EXPECT_FALSE(reopened.ok());
+    EXPECT_FALSE(nestedOpenSucceeded);
+    EXPECT_EQ(controllerState.closeCount, 2);
+    ASSERT_NE(original.get(), nullptr);
+    EXPECT_TRUE(original->closed());
+    manager.idle();
+    EXPECT_TRUE(host.mounted.empty());
+}
+
+TEST_F(ComponentManagerTest, RejectsNestedMutationDuringCloseNotification) {
+    ASSERT_TRUE(registerOne());
+    const auto opened = manager.open("one");
+    ASSERT_TRUE(opened.ok());
+    bool nestedOpenSucceeded = false;
+    controllerState.closeCallback = [this, &nestedOpenSucceeded] { nestedOpenSucceeded = manager.open("one", "nested").ok(); };
+
+    opened.floater->close();
+
+    EXPECT_FALSE(nestedOpenSucceeded);
+    EXPECT_EQ(controllerState.closeCount, 1);
+    manager.idle();
+    EXPECT_TRUE(host.mounted.empty());
+}
+
+TEST_F(ComponentManagerTest, RetriesClosedComponentAfterHostUnmountRejection) {
+    ASSERT_TRUE(registerOne());
+    const auto opened = manager.open("one");
+    ASSERT_TRUE(opened.ok());
+    ElementRef<HTMLFloaterElement> root(opened.floater);
+
+    opened.floater->close();
+    ASSERT_EQ(controllerState.closeCount, 1);
+    host.rejectUnmounts = true;
+    manager.idle();
+
+    ASSERT_NE(root.get(), nullptr);
+    EXPECT_TRUE(root->closed());
+    EXPECT_EQ(host.mounted.size(), std::size_t{1});
+    EXPECT_EQ(controllerState.closeCount, 1);
+
+    host.rejectUnmounts = false;
+    manager.idle();
+
+    EXPECT_EQ(root.get(), nullptr);
+    EXPECT_TRUE(host.mounted.empty());
+}
+
+TEST_F(ComponentManagerTest, RepeatsCloseNotificationWhenControllerReopensRoot) {
+    ASSERT_TRUE(registerOne());
+    const auto opened = manager.open("one");
+    ASSERT_TRUE(opened.ok());
+    ElementRef<HTMLFloaterElement> root(opened.floater);
+    controllerState.closeCallback = [floater = opened.floater] { floater->open(); };
+
+    opened.floater->close();
+    EXPECT_FALSE(opened.floater->closed());
+    EXPECT_EQ(controllerState.closeCount, 1);
+    manager.idle();
+    EXPECT_EQ(host.mounted.size(), std::size_t{1});
+
+    controllerState.closeCallback = {};
+    opened.floater->close();
+    EXPECT_EQ(controllerState.closeCount, 2);
+    manager.idle();
+    EXPECT_EQ(root.get(), nullptr);
+    EXPECT_TRUE(host.mounted.empty());
+}
+
+TEST_F(ComponentManagerTest, RejectsNestedMutationDuringReloadNotification) {
+    ASSERT_TRUE(registerOne());
+    ASSERT_TRUE(manager.open("one").ok());
+    bool nestedOpenSucceeded = false;
+    controllerState.reloadCallback = [this, &nestedOpenSucceeded] { nestedOpenSucceeded = manager.open("one", "nested").ok(); };
+
+    manager.reportReloadSucceeded();
+
+    EXPECT_FALSE(nestedOpenSucceeded);
+    EXPECT_EQ(controllerState.reloadSuccessCount, 1);
+    EXPECT_EQ(host.mounted.size(), std::size_t{1});
+}
+
 TEST_F(ComponentManagerTest, ReplacesOpenComponentWithoutChangingItsIdentity) {
     ASSERT_TRUE(registerOne());
     const auto opened = manager.open("one");
@@ -480,6 +662,47 @@ TEST_F(ComponentManagerTest, ReplacesOpenComponentWithoutChangingItsIdentity) {
     EXPECT_EQ(controllerState.reloadFailureCount, 1);
 }
 
+TEST_F(ComponentManagerTest, PreparesReplacementAgainstTheCurrentGeneration) {
+    ASSERT_TRUE(registerOne());
+    ASSERT_TRUE(manager.open("one").ok());
+
+    const SkinGenerationPrepareResult generation = prepareGeneration();
+    ASSERT_TRUE(generation.ok());
+    auto prepared = manager.prepareReplacement(generation.generation, "en");
+    ASSERT_TRUE(prepared.ok());
+
+    const auto currentGeneration = system.generation();
+    std::optional<std::uint64_t> observedGeneration;
+    controllerState.factoryCallback = [this, &observedGeneration] { observedGeneration = system.generation(); };
+
+    ASSERT_TRUE(system.publish(generation.generation, prepared.replacement));
+    ASSERT_TRUE(observedGeneration.has_value());
+    EXPECT_EQ(*observedGeneration, currentGeneration);
+}
+
+TEST_F(ComponentManagerTest, RejectsPreparedReplacementAfterClosedInstanceReopens) {
+    ASSERT_TRUE(registerOne());
+    const auto opened = manager.open("one");
+    ASSERT_TRUE(opened.ok());
+    HTMLFloaterElement* original = opened.floater;
+
+    original->close();
+    ASSERT_TRUE(original->closed());
+
+    const SkinGenerationPrepareResult generation = prepareGeneration();
+    ASSERT_TRUE(generation.ok());
+    auto prepared = manager.prepareReplacement(generation.generation, "en");
+    ASSERT_TRUE(prepared.ok());
+
+    ASSERT_TRUE(manager.open("one").ok());
+    EXPECT_FALSE(prepared.replacement.commit());
+    const DiagnosticResult diagnostics = prepared.replacement.takeDiagnostics();
+    ASSERT_FALSE(diagnostics.errors.empty());
+    EXPECT_EQ(diagnostics.errors.front().code, "floater.transaction.stale");
+    ASSERT_EQ(liveFloaters().size(), std::size_t{1});
+    EXPECT_EQ(liveFloaters().front(), original);
+}
+
 TEST_F(ComponentManagerTest, ReportsOpenComponentKeysAfterClosingAndReopeningAnInstance) {
     ASSERT_TRUE(registerOne("profile"));
     const auto first = manager.open("profile", "alice");
@@ -501,6 +724,21 @@ TEST_F(ComponentManagerTest, ReportsOpenComponentKeysAfterClosingAndReopeningAnI
 
     ASSERT_TRUE(manager.open("profile", "bob").ok());
     EXPECT_EQ(openComponents().size(), std::size_t{2});
+}
+
+TEST_F(ComponentManagerTest, SnapshotsOpenComponentsBeforeCallbacksCanDestroyThem) {
+    ASSERT_TRUE(registerOne("profile"));
+    ASSERT_TRUE(manager.open("profile", "alice").ok());
+    ASSERT_TRUE(manager.open("profile", "bob").ok());
+
+    std::vector<ComponentInstanceKey> visited;
+    manager.forEachOpen([&](const ComponentInstanceKey& key, HTMLFloaterElement&) {
+        visited.push_back(key);
+        if (visited.size() == 1u) EXPECT_TRUE(manager.clearInstances());
+    });
+
+    EXPECT_EQ(visited.size(), std::size_t{1});
+    EXPECT_TRUE(host.mounted.empty());
 }
 
 TEST_F(ComponentManagerTest, KeepsRemainingBindingsLiveWhenAnOptionalElementDisappears) {
@@ -541,6 +779,132 @@ TEST_F(ComponentManagerTest, LeavesCurrentComponentUntouchedWhenTheHostRejectsRe
     EXPECT_EQ(liveFloaters().front(), original);
     EXPECT_EQ(host.replacements, 0);
     EXPECT_EQ(controllerState.committedCount, 1);
+}
+
+TEST_F(ComponentManagerTest, RejectsNestedMutationDuringPublishedReplacement) {
+    ASSERT_TRUE(registerOne());
+    const auto opened = manager.open("one");
+    ASSERT_TRUE(opened.ok());
+    HTMLFloaterElement* original = opened.floater;
+
+    const SkinGenerationPrepareResult generation = prepareGeneration();
+    ASSERT_TRUE(generation.ok());
+    auto prepared = manager.prepareReplacement(generation.generation, "en");
+    ASSERT_TRUE(prepared.ok());
+
+    bool nestedOpenSucceeded = false;
+    host.afterReplacement = [&](HTMLFloaterElement&) { nestedOpenSucceeded = manager.open("one", "nested").ok(); };
+
+    EXPECT_FALSE(system.publish(generation.generation, prepared.replacement));
+    EXPECT_FALSE(nestedOpenSucceeded);
+    ASSERT_EQ(liveFloaters().size(), std::size_t{1});
+    EXPECT_EQ(liveFloaters().front(), original);
+    EXPECT_EQ(system.generation(), 1ULL);
+}
+
+TEST_F(ComponentManagerTest, RejectsPublishedReplacementWhenCurrentClosesDuringPreparation) {
+    ASSERT_TRUE(registerOne());
+    const auto opened = manager.open("one");
+    ASSERT_TRUE(opened.ok());
+    ElementRef<HTMLFloaterElement> original(opened.floater);
+
+    const SkinGenerationPrepareResult generation = prepareGeneration();
+    ASSERT_TRUE(generation.ok());
+    auto prepared = manager.prepareReplacement(generation.generation, "en");
+    ASSERT_TRUE(prepared.ok());
+    controllerState.factoryCallback = [floater = opened.floater] { floater->close(); };
+
+    EXPECT_FALSE(system.publish(generation.generation, prepared.replacement));
+    EXPECT_EQ(host.replacements, 0);
+    EXPECT_TRUE(liveFloaters().empty());
+    ASSERT_NE(original.get(), nullptr);
+    EXPECT_TRUE(original->closed());
+
+    manager.idle();
+    EXPECT_EQ(controllerState.closeCount, 1);
+    EXPECT_EQ(original.get(), nullptr);
+    EXPECT_TRUE(host.mounted.empty());
+}
+
+TEST_F(ComponentManagerTest, DefersCloseObservedDuringPublicationUntilIdle) {
+    ASSERT_TRUE(registerOne());
+    const auto opened = manager.open("one");
+    ASSERT_TRUE(opened.ok());
+    ElementRef<HTMLFloaterElement> root(opened.floater);
+    bool closeDuringPublication = false;
+    surface->mount(makeElement<PublicationLocaleProbe>([floater = opened.floater, &closeDuringPublication] {
+        if (closeDuringPublication) floater->close();
+    }));
+    closeDuringPublication = true;
+
+    const SkinGenerationPrepareResult generation = prepareGeneration();
+    ASSERT_TRUE(generation.ok());
+    ASSERT_TRUE(system.publish(generation.generation));
+    ASSERT_NE(root.get(), nullptr);
+    EXPECT_TRUE(root->closed());
+    EXPECT_EQ(controllerState.closeCount, 0);
+    EXPECT_EQ(host.mounted.size(), std::size_t{1});
+
+    manager.idle();
+    EXPECT_EQ(controllerState.closeCount, 1);
+    EXPECT_EQ(root.get(), nullptr);
+    EXPECT_TRUE(host.mounted.empty());
+}
+
+TEST_F(ComponentManagerTest, RejectsMutationDuringPublicationLocaleNotification) {
+    ASSERT_TRUE(registerOne());
+    ASSERT_TRUE(manager.open("one").ok());
+
+    bool nestedOpenSucceeded = false;
+    bool allowMutation = false;
+    std::size_t hostSizeDuringCallback = 0;
+    std::string nestedOpenError;
+    surface->mount(makeElement<PublicationLocaleProbe>([this, &allowMutation, &nestedOpenSucceeded, &hostSizeDuringCallback, &nestedOpenError] {
+        if (!allowMutation) return;
+        const ComponentOpenResult nested = manager.open("one", "nested");
+        nestedOpenSucceeded = nested.ok();
+        if (!nested.errors.empty()) nestedOpenError = nested.errors.front().code;
+        hostSizeDuringCallback = host.mounted.size();
+    }));
+    allowMutation = true;
+
+    const SkinGenerationPrepareResult generation = prepareGeneration();
+    ASSERT_TRUE(generation.ok());
+    auto prepared = manager.prepareReplacement(generation.generation, "en");
+    ASSERT_TRUE(prepared.ok());
+    EXPECT_EQ(host.mounted.size(), std::size_t{1});
+
+    ASSERT_TRUE(system.publish(generation.generation, prepared.replacement));
+    EXPECT_FALSE(nestedOpenSucceeded);
+    EXPECT_EQ(nestedOpenError, "floater.transaction.busy");
+    EXPECT_EQ(hostSizeDuringCallback, std::size_t{1});
+    EXPECT_EQ(host.mounted.size(), std::size_t{1});
+    EXPECT_TRUE(manager.open("one", "nested").ok());
+}
+
+TEST_F(ComponentManagerTest, RejectsMutationDuringBarePublicationNotification) {
+    ASSERT_TRUE(registerOne());
+    ASSERT_TRUE(manager.open("one").ok());
+
+    bool nestedOpenSucceeded = false;
+    bool allowMutation = false;
+    std::string nestedOpenError;
+    surface->mount(makeElement<PublicationLocaleProbe>([this, &allowMutation, &nestedOpenSucceeded, &nestedOpenError] {
+        if (!allowMutation) return;
+        const ComponentOpenResult nested = manager.open("one", "nested");
+        nestedOpenSucceeded = nested.ok();
+        if (!nested.errors.empty()) nestedOpenError = nested.errors.front().code;
+    }));
+    allowMutation = true;
+
+    const SkinGenerationPrepareResult generation = prepareGeneration();
+    ASSERT_TRUE(generation.ok());
+    ASSERT_TRUE(system.publish(generation.generation));
+
+    EXPECT_FALSE(nestedOpenSucceeded);
+    EXPECT_EQ(nestedOpenError, "floater.transaction.busy");
+    EXPECT_EQ(host.mounted.size(), std::size_t{1});
+    EXPECT_TRUE(manager.open("one", "nested").ok());
 }
 
 TEST_F(ComponentManagerTest, RollsBackPublishedReplacementWhenControllerActivationFails) {
@@ -860,4 +1224,8 @@ TEST_F(ComponentManagerTest, LeavesAllComponentsUntouchedWhenClearPreparationFai
     EXPECT_FALSE(second.floater->closed());
     EXPECT_EQ(controllerState.closeCount, 0);
     host.rejectClears = false;
+
+    EXPECT_TRUE(manager.clearInstances());
+    EXPECT_TRUE(host.mounted.empty());
+    EXPECT_EQ(controllerState.closeCount, 2);
 }

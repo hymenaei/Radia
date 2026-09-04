@@ -103,8 +103,8 @@ public:
          Runtime::IntegrationHooks integrationHooks, Runtime::TestOverrides testOverrides)
         : mSavedSettings(savedSettings), mResolveKeybinding(std::move(integrationHooks.resolveKeybinding)),
           mKeybindingState(std::move(integrationHooks.keybindingState)), mNow(std::move(testOverrides.now)),
-          mWorkspacePersistence(savedSettings, perAccountSettings), mMainWindow(mainWindow), mResources(),
-          mSnapshotSource(mResources, std::move(testOverrides.captureSkin)), mSystem(), mReloadCoordinator(mSystem, mSnapshotSource),
+          mFailTeardown(std::move(testOverrides.failTeardown)), mWorkspacePersistence(savedSettings, perAccountSettings), mMainWindow(mainWindow),
+          mResources(), mSnapshotSource(mResources, std::move(testOverrides.captureSkin)), mSystem(), mReloadCoordinator(mSystem, mSnapshotSource),
           mSurfaceState(uiShader, mSystem, std::move(testOverrides.paintContext)), mFloaterHost(*mSurfaceState.surface),
           mSettingsAdapter(savedSettings), mComponents(mSystem, mFloaterHost, mSettingsAdapter) {
         mSurfaceState.surface->setFloaterDelegate(this);
@@ -116,13 +116,23 @@ public:
         });
     }
 
-    ~Impl() { shutdown(); }
+    ~Impl() {
+        shutdown();
+        if (mState != RuntimeState::Stopped) {
+            mFailTeardown = {};
+            if (!mComponents.clearInstances()) LL_ERRS("UI") << "Runtime could not clear component owners before destruction." << LL_ENDL;
+        }
+        mSurfaceState.surface->setFloaterDelegate(nullptr);
+        mSystem.setLocaleChangedHandler({});
+        mSystem.setKeybindingResolver({});
+    }
 
     void focusLost() { clearInteraction(); }
 
     void pointerCaptureLost() { clearInteraction(); }
 
     bool initialize() {
+        if (mState != RuntimeState::Running) return false;
         if (mInitialization != InitializationState::Uninitialized) return mInitialization == InitializationState::Ready;
         mInitialization = InitializationState::Failed;
 
@@ -136,7 +146,7 @@ public:
         for (const Diagnostic& warning : skinGenerationResult.warnings) LL_WARNS("UI") << warning.formatted() << LL_ENDL;
         for (const Diagnostic& error : skinGenerationResult.errors) LL_WARNS("UI") << error.formatted() << LL_ENDL;
         if (!skinGenerationResult.ok()) return false;
-        mSystem.publish(std::move(skinGenerationResult.generation));
+        if (!mSystem.publish(std::move(skinGenerationResult.generation))) return false;
         applySettings();
 
         const std::string savedLocale = mSavedSettings.getString("Locale");
@@ -149,12 +159,16 @@ public:
     }
 
     void shutdown() {
-        if (mShuttingDown) return;
-        mShuttingDown = true;
+        if (mState == RuntimeState::Stopped || mState == RuntimeState::ShuttingDown) return;
+        mState = RuntimeState::ShuttingDown;
         clearInteraction();
-        surface().setFloaterDelegate(nullptr);
         persistWorkspace();
-        if (!mComponents.clearInstances()) LL_WARNS("UI") << "Some Radia controllers could not be cleared during runtime shutdown." << LL_ENDL;
+        if ((mFailTeardown && mFailTeardown()) || !mComponents.clearInstances()) {
+            LL_WARNS("UI") << "Some Radia controllers could not be cleared during runtime shutdown; shutdown can be retried." << LL_ENDL;
+            mState = RuntimeState::TeardownFailed;
+            return;
+        }
+        surface().setFloaterDelegate(nullptr);
         mSystem.setLocaleChangedHandler({});
         mSystem.setKeybindingResolver({});
         clearDragCursorState();
@@ -162,14 +176,18 @@ public:
         mWorkspaceRestored = false;
         mPersistenceDirty = false;
         mInitialization = InitializationState::Failed;
+        mState = RuntimeState::Stopped;
     }
 
+    RuntimeState lifecycleState() const { return mState; }
+
     bool registerFloater(std::string definitionId, std::string resource, Runtime::ControllerFactory factory) {
+        if (mState != RuntimeState::Running) return false;
         return mComponents.registerDefinition(std::move(definitionId), std::move(resource), std::move(factory));
     }
 
     HTMLFloaterElement* openFloater(const std::string& definitionId, const std::string& instanceKey) {
-        if (mInitialization != InitializationState::Ready) return nullptr;
+        if (mState != RuntimeState::Running || mInitialization != InitializationState::Ready) return nullptr;
         ComponentOpenResult result = mComponents.open(definitionId, instanceKey);
         logDiagnostics(result);
         if (!result.ok()) return nullptr;
@@ -181,7 +199,7 @@ public:
     }
 
     void restoreWorkspace() {
-        if (mInitialization != InitializationState::Ready || mWorkspaceRestored) return;
+        if (mState != RuntimeState::Running || mInitialization != InitializationState::Ready || mWorkspaceRestored) return;
         mRestoringWorkspace = true;
         mUnrestoredWorkspace.clear();
         for (const ComponentInstanceKey& component : mWorkspacePersistence.openComponentKeys())
@@ -193,6 +211,7 @@ public:
     }
 
     void endAccountSession() {
+        if (mState != RuntimeState::Running) return;
         clearInteraction();
         if (mWorkspaceRestored) persistWorkspace();
         if (!mComponents.clearInstances()) {
@@ -206,7 +225,9 @@ public:
         mLayoutInitialized.clear();
     }
 
-    void requestSkinReload() { mReloadCoordinator.request(); }
+    void requestSkinReload() {
+        if (mState == RuntimeState::Running) mReloadCoordinator.request();
+    }
 
     void setVisibility(bool visible) {
         if (mSurfaceState.visible != visible) {
@@ -234,7 +255,7 @@ public:
     }
 
     void pointerLeave() {
-        if (mInitialization == InitializationState::Ready) surface().pointerLeave();
+        if (mState == RuntimeState::Running && mInitialization == InitializationState::Ready) surface().pointerLeave();
     }
 
     bool dispatchPointerButton(const PointerEvent& event, bool down) {
@@ -257,7 +278,8 @@ public:
     InputDispatchResult scroll(const WheelEvent& event) { return {isInteractive() && surface().scroll(event), std::nullopt}; }
 
     InputDispatchResult keyDown(const KeyEvent& event) {
-        const bool ownsTab = mInitialization == InitializationState::Ready && mSurfaceState.visible && isSurfaceTab(event);
+        const bool ownsTab =
+            mState == RuntimeState::Running && mInitialization == InitializationState::Ready && mSurfaceState.visible && isSurfaceTab(event);
         const bool handled = (isInteractive() || ownsTab) && surface().keyDown(event);
         if (isSurfaceTab(event)) mTabKeyOwned = ownsTab;
         return {handled || ownsTab, std::nullopt};
@@ -283,7 +305,7 @@ public:
     }
 
     void idle() {
-        if (mShuttingDown || mInitialization != InitializationState::Ready) return;
+        if (mState != RuntimeState::Running || mInitialization != InitializationState::Ready) return;
         const RuntimeKeybindingState binding = mKeybindingState ? mKeybindingState() : RuntimeKeybindingState{};
         if (mObservedBindingState != binding) {
             mObservedBindingState = binding;
@@ -336,7 +358,7 @@ private:
     void processReload() {
         applySettings();
         mReloadCoordinator.setSkinAutoReload(mSavedSettings.getBOOL("SkinAutoReload"));
-        if (mInitialization != InitializationState::Ready) return;
+        if (mState != RuntimeState::Running || mInitialization != InitializationState::Ready) return;
 
         std::optional<radia::viewer::ui::SkinReloadResult> result = mReloadCoordinator.update(currentTime(), mComponents);
         if (!result) return;
@@ -352,7 +374,10 @@ private:
     }
 
     bool isInteractive() const {
-        return mInitialization == InitializationState::Ready && mSurfaceState.visible && mSurfaceState.surface->hasVisibleFloater();
+        return mState == RuntimeState::Running
+            && mInitialization == InitializationState::Ready
+            && mSurfaceState.visible
+            && mSurfaceState.surface->hasVisibleFloater();
     }
 
     static bool isSurfaceTab(const KeyEvent& event) { return event.key == kKeyTab && (event.modifiers & ~kModifierShift) == 0; }
@@ -446,6 +471,7 @@ private:
     KeybindingResolver mResolveKeybinding;
     KeybindingStateProvider mKeybindingState;
     Clock mNow;
+    std::function<bool()> mFailTeardown;
     std::optional<TimePoint> mPreviousFrameTime;
     WorkspacePersistence mWorkspacePersistence;
     LLWindow* mMainWindow;
@@ -464,7 +490,7 @@ private:
     std::set<ComponentInstanceKey> mUnrestoredWorkspace;
     std::optional<RuntimeKeybindingState> mObservedBindingState;
     std::map<ComponentInstanceKey, HTMLFloaterElement*> mLayoutInitialized;
-    bool mShuttingDown = false;
+    RuntimeState mState = RuntimeState::Running;
     bool mTabKeyOwned = false;
 };
 
@@ -479,6 +505,10 @@ bool Runtime::initialize() {
 
 void Runtime::shutdown() {
     mImpl->shutdown();
+}
+
+RuntimeState Runtime::lifecycleState() const {
+    return mImpl->lifecycleState();
 }
 
 bool Runtime::registerFloater(std::string definitionId, std::string resource, ControllerFactory factory) {

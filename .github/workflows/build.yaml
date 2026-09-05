@@ -206,7 +206,7 @@ jobs:
       VCPKG_ROOT: ${{ github.workspace }}/vcpkg
       VCPKG_USERNAME: ${{ github.repository_owner }}
       VCPKG_FEED_URL: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
-      VCPKG_BINARY_SOURCES: "clear;nuget,https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json,readwrite"
+      VCPKG_BINARY_SOURCES: "clear;nuget,https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json,${{ github.event_name == 'pull_request' && 'read' || 'readwrite' }}"
     steps:
       - name: Linux Dependency Install and Disk Cleanup
         if: runner.os == 'Linux'
@@ -391,7 +391,11 @@ jobs:
             cmake --build --preset $CMAKE_PRESET_NAME-$BUILD_CONFIG --target BUILD_AND_RUN_TESTS
           elif $BUILD_VIEWER
           then
-            cmake --build --preset $CMAKE_PRESET_NAME-$BUILD_CONFIG || fatal "failed building $BUILD_CONFIG viewer"
+            if ! cmake --build --preset $CMAKE_PRESET_NAME-$BUILD_CONFIG
+            then
+              echo "::error::Failed building $BUILD_CONFIG viewer"
+              exit 1
+            fi
           else
             echo "::notice::Skipping build due to both viewer and tests being disabled"
           fi

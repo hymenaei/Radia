@@ -3329,6 +3329,7 @@ void LLWindowSDL::initCursors()
     mSDLCursors[UI_CURSOR_TOOLPATHFINDING_PATH_END] = makeSDLCursorFromMacTIF("UI_CURSOR_PATHFINDING_END.tif", 16, 16);
     mSDLCursors[UI_CURSOR_TOOLPATHFINDING_PATH_END_ADD] = makeSDLCursorFromMacTIF("UI_CURSOR_PATHFINDING_END_ADD.tif", 16, 16);
     mSDLCursors[UI_CURSOR_TOOLNO] = makeSDLCursorFromMacTIF("UI_CURSOR_NO.tif", 8, 8);
+    mSDLCursors[UI_CURSOR_TOOLGRABBING] = makeSDLCursorFromMacTIF("UI_CURSOR_TOOLGRAB.tif", 2, 14);
 #elif LL_WINDOWS
     // Load the branded cursors from the exe's embedded .cur resources — the
     // same resource names LLWindowWin32::initCursors uses. Hot-spots come from
@@ -3365,6 +3366,7 @@ void LLWindowSDL::initCursors()
     mSDLCursors[UI_CURSOR_TOOLPATHFINDING_PATH_END] = makeSDLCursorFromWin32("TOOLPATHFINDINGPATHEND");
     mSDLCursors[UI_CURSOR_TOOLPATHFINDING_PATH_END_ADD] = makeSDLCursorFromWin32("TOOLPATHFINDINGPATHENDADD");
     mSDLCursors[UI_CURSOR_TOOLNO] = makeSDLCursorFromWin32("TOOLNO");
+    mSDLCursors[UI_CURSOR_TOOLGRABBING] = makeSDLCursorFromWin32("TOOLGRABBING");
 #else
     mSDLCursors[UI_CURSOR_TOOLGRAB] = makeSDLCursorFromBMP("lltoolgrab.BMP",2,13);
     mSDLCursors[UI_CURSOR_TOOLLAND] = makeSDLCursorFromBMP("lltoolland.BMP",1,6);
@@ -3398,6 +3400,7 @@ void LLWindowSDL::initCursors()
     mSDLCursors[UI_CURSOR_TOOLPATHFINDING_PATH_END] = makeSDLCursorFromBMP("lltoolpathfindingpathend.BMP", 16, 16);
     mSDLCursors[UI_CURSOR_TOOLPATHFINDING_PATH_END_ADD] = makeSDLCursorFromBMP("lltoolpathfindingpathendadd.BMP", 16, 16);
     mSDLCursors[UI_CURSOR_TOOLNO] = makeSDLCursorFromBMP("llno.BMP",8,8);
+    mSDLCursors[UI_CURSOR_TOOLGRABBING] = makeSDLCursorFromBMP("lltoolgrab.BMP",2,13);
 #endif // LL_DARWIN
 }
 
@@ -4357,4 +4360,3 @@ void LLWindowSDL::setUseMultGL(bool use_mult_gl)
     }
 }
 #endif
-

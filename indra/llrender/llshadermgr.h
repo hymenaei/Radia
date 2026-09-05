@@ -33,6 +33,8 @@
 #include "llgl.h"
 #include "llglslshader.h"
 
+#include <optional>
+
 class LLShaderMgr
 {
 public:
@@ -516,7 +518,7 @@ public:
 
         // End Alchemy Effects Stack
         TEXT_SHADOW_MODE,                   //  "textShadowMode"
-
+        FONT_GLYPH_BUFFER,                  //  "hb_gpu_atlas"
 
         END_RESERVED_UNIFORMS
     } eGLSLReservedUniforms;
@@ -535,7 +537,13 @@ public:
     // `cache_key` overrides the map key the compiled object is stored under; empty means the
     // path. Shared objects are compiled once and attached by name, so a source that keys on a
     // compile-time variant axis is compiled once per axis value under distinct keys.
-    GLuint loadShaderFile(const std::string& filename, S32 & shader_level, GLenum type, std::map<std::string, std::string>* defines = NULL, S32 texture_index_channels = -1, const std::string& cache_key = std::string());
+    GLuint loadShaderFile(const std::string& filename, S32 & shader_level, GLenum type,
+                          std::map<std::string, std::string>* defines = NULL,
+                          S32 texture_index_channels = -1,
+                          const std::string& cache_key = std::string(),
+                          const std::string& extra_source = std::string());
+
+    std::optional<std::string> expandEngineBlocks(const std::string& source, const std::string& source_name = std::string());
 
     // Suffixes marking the axis copies of a shared object. Not legal path character sequences,
     // so they cannot collide with a real file.
@@ -594,6 +602,7 @@ public:
     std::string mShaderCacheDir;
 
 protected:
+    std::string getEngineBlockSource(const std::string& block_name);
 
     // our parameter manager singleton instance
     static LLShaderMgr * sInstance;

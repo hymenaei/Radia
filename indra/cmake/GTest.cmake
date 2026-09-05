@@ -8,49 +8,26 @@ endif()
 
 find_package(GTest CONFIG REQUIRED)
 
-add_library(ll::gtest ALIAS GTest::gtest)
-add_library(ll::gtest_main ALIAS GTest::gtest_main)
-add_library(ll::gmock ALIAS GTest::gmock)
-add_library(ll::gmock_main ALIAS GTest::gmock_main)
-
 include(GoogleTest)
 include(LLTestCommand)
 
-function(_RD_GOOGLETEST_SOURCE_FILES OUTVAR)
-  set(test_sources)
+function(_CONFIGURE_GTEST_TARGET target label)
+  if(NOT TARGET "${target}")
+    message(FATAL_ERROR
+      "_CONFIGURE_GTEST_TARGET requires an existing target: ${target}")
+  endif()
 
-  foreach(source IN LISTS ARGN)
-    get_filename_component(source_name "${source}" NAME_WE)
-    get_filename_component(source_extension "${source}" EXT)
-    get_filename_component(source_directory "${source}" DIRECTORY)
+  if(NOT label)
+    message(FATAL_ERROR
+      "_CONFIGURE_GTEST_TARGET requires a CTest label")
+  endif()
 
-    if(source_directory)
-      set(test_source
-        "${CMAKE_CURRENT_SOURCE_DIR}/tests/${source_directory}/${source_name}_test${source_extension}")
-    else()
-      set(test_source
-        "${CMAKE_CURRENT_SOURCE_DIR}/tests/${source_name}_test${source_extension}")
-    endif()
+  set(solution_folder "${label}")
+  string(SUBSTRING "${solution_folder}" 0 1 first_character)
+  string(TOUPPER "${first_character}" first_character)
+  string(SUBSTRING "${solution_folder}" 1 -1 remaining_characters)
+  set(solution_folder "${first_character}${remaining_characters}")
 
-    if(NOT EXISTS "${test_source}")
-      message(FATAL_ERROR
-        "RD GoogleTest helpers expected test source ${test_source} for ${source}")
-    endif()
-
-    list(APPEND test_sources "${test_source}")
-  endforeach()
-
-  set(${OUTVAR} "${test_sources}" PARENT_SCOPE)
-endfunction()
-
-function(_RD_ADD_GOOGLETEST_TARGET target sources link_targets)
-  add_executable(${target} ${sources})
-  target_link_libraries(${target}
-    PRIVATE
-    ll::gtest_main
-    ll::gmock
-    ${link_targets}
-  )
   target_include_directories(${target}
     PRIVATE
     ${INDRA_SOURCE_DIR}/test
@@ -58,7 +35,7 @@ function(_RD_ADD_GOOGLETEST_TARGET target sources link_targets)
 
   set_target_properties(${target}
     PROPERTIES
-    FOLDER "Tests/GoogleTest"
+    FOLDER "Tests/${solution_folder}"
     RUNTIME_OUTPUT_DIRECTORY "${EXE_STAGING_DIR}"
   )
 
@@ -118,70 +95,8 @@ function(_RD_ADD_GOOGLETEST_TARGET target sources link_targets)
     DISCOVERY_TIMEOUT 30
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
     PROPERTIES
+    LABELS "${label}"
     ENVIRONMENT_MODIFICATION "${runtime_environment_modification}"
-  )
-endfunction()
-
-function(RD_ADD_UNIT_TESTS project sources)
-  if(ARGC LESS 2)
-    message(FATAL_ERROR "RD_ADD_UNIT_TESTS requires a project and source list")
-  endif()
-
-  if(NOT project)
-    message(FATAL_ERROR "RD_ADD_UNIT_TESTS requires a project")
-  endif()
-
-  # An empty source list is a valid no-op while a module is being migrated.
-  if(NOT sources)
-    return()
-  endif()
-
-  _RD_GOOGLETEST_SOURCE_FILES(test_sources ${sources})
-
-  set(test_target "${project}_tests")
-  _RD_ADD_GOOGLETEST_TARGET("${test_target}" "${test_sources}" "${project}")
-endfunction()
-
-function(RD_ADD_INTEGRATION_TEST
-    testname
-    additional_source_files
-    library_dependencies
-    test_project
-  )
-  if(ARGC LESS 4)
-    message(FATAL_ERROR
-      "RD_ADD_INTEGRATION_TEST requires a test name, source files, "
-      "library dependencies, and project")
-  endif()
-
-  if(NOT testname)
-    message(FATAL_ERROR "RD_ADD_INTEGRATION_TEST requires a test name")
-  endif()
-
-  if(NOT test_project)
-    message(FATAL_ERROR "RD_ADD_INTEGRATION_TEST requires a project")
-  endif()
-
-  set(test_source
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/${testname}_test.cpp"
-  )
-  if(NOT EXISTS "${test_source}")
-    message(FATAL_ERROR
-      "RD_ADD_INTEGRATION_TEST expected test source ${test_source}")
-  endif()
-
-  set(test_sources "${test_source}")
-  list(APPEND test_sources ${additional_source_files})
-
-  set(test_target "${test_project}_${testname}_integration_test")
-  _RD_ADD_GOOGLETEST_TARGET(
-    "${test_target}"
-    "${test_sources}"
-    "${library_dependencies}"
-  )
-
-  set_target_properties("${test_target}"
-    PROPERTIES
-    FOLDER "Tests/GoogleTest/${test_project}"
+    ENVIRONMENT "GTEST_BRIEF=1"
   )
 endfunction()

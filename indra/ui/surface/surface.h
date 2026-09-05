@@ -1,0 +1,257 @@
+/**
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
+ */
+
+#pragma once
+
+#include <array>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <vector>
+#include "css/stylesheet.h"
+#include "dom/element.h"
+#include "event.h"
+#include "nativeappearance.h"
+
+namespace radia::ui {
+class HTMLFloaterElement;
+class Document;
+class System;
+class PaintContext;
+class Surface;
+class Binding;
+class LayoutEngine;
+class StylePass;
+class TextMetrics;
+template<typename ElementT> class ElementRef;
+
+class SurfaceFloaterDelegate {
+public:
+    virtual ~SurfaceFloaterDelegate() = default;
+    virtual void floaterClosed(Surface&, HTMLFloaterElement&) {}
+    virtual void floaterMinimizedChanged(Surface&, HTMLFloaterElement&) {}
+    virtual void floaterMoveEnded(Surface&, HTMLFloaterElement&) {}
+    virtual void floaterResizeEnded(Surface&, HTMLFloaterElement&) {}
+};
+
+enum class SurfaceLayer : uint8_t { Base, Floater, Popup, Tooltip, Drag, Modal };
+
+class Surface {
+    friend class System;
+    friend class Element;
+    friend class LayoutEngine;
+    friend class HTMLFloaterElement;
+    friend class Binding;
+    friend class detail::NodeMutation;
+
+public:
+    Surface();
+    explicit Surface(const StyleSheet& styleSheet);
+    ~Surface();
+
+    void setViewport(float width, float height);
+    void setScrollLayoutOptions(ScrollLayoutOptions options);
+    void setFloaterDelegate(SurfaceFloaterDelegate* delegate) { mFloaterDelegate = delegate; }
+    Element& mount(std::unique_ptr<Element> element, SurfaceLayer layer = SurfaceLayer::Base);
+    Element& mount(Element& element, SurfaceLayer layer = SurfaceLayer::Base);
+    Element& mount(Document& document, SurfaceLayer layer = SurfaceLayer::Base);
+    HTMLFloaterElement& mountFloater(std::unique_ptr<HTMLFloaterElement> floater, SurfaceLayer layer = SurfaceLayer::Floater);
+    HTMLFloaterElement& mountFloater(Document& document, SurfaceLayer layer = SurfaceLayer::Floater);
+    std::unique_ptr<HTMLFloaterElement> replaceFloater(HTMLFloaterElement& current, std::unique_ptr<HTMLFloaterElement> replacement);
+    bool replaceFloater(HTMLFloaterElement& current, HTMLFloaterElement& replacement);
+    std::unique_ptr<Element> unmount(Element& element);
+    std::unique_ptr<HTMLFloaterElement> unmountFloater(HTMLFloaterElement& floater);
+    bool unmountBorrowed(Element& element);
+    bool unmountBorrowedFloater(HTMLFloaterElement& floater);
+    bool ownsFloater(const HTMLFloaterElement& floater) const;
+    bool hasVisibleFloater() const;
+    void clearLayer(SurfaceLayer layer);
+    bool raise(Element& element);
+    void placeFloater(HTMLFloaterElement& floater, const Rect& rect);
+    Vec2 preferredFloaterSize(HTMLFloaterElement& floater);
+    Vec2 minimumFloaterSize(HTMLFloaterElement& floater);
+    std::optional<Rect> initialFloaterRect(HTMLFloaterElement& floater);
+    std::optional<Rect> prepareFloater(HTMLFloaterElement& floater);
+    void updateLayout();
+    void paint(PaintContext& context, float scale = 1.f, Vec2 pixelOrigin = {});
+    void clearInteractionState();
+    void clearFocus() { setFocused(nullptr, false); }
+
+    bool pointerMove(const PointerEvent& event);
+    void pointerLeave();
+    bool pointerDown(const PointerEvent& event);
+    bool pointerUp(const PointerEvent& event);
+    bool scroll(const WheelEvent& event);
+    bool keyDown(const KeyEvent& event);
+    bool keyUp(const KeyEvent& event);
+    bool charInput(unsigned int codepoint);
+    void refreshHover();
+    void advanceScrollbarInteraction(float deltaSeconds);
+
+    bool hasFocus() const { return mFocused != nullptr; }
+    bool hasPointerCapture() const { return mCaptured != nullptr || mScrollbarCapture.has_value(); }
+    bool needsPaint() const { return mPaintDirty; }
+    const TextMetrics& textMetrics() const { return mTextMetrics; }
+    NativeLayoutMetrics nativeLayoutMetrics() const { return mScrollLayoutOptions.nativeMetrics; }
+    const NativeAppearance& nativeAppearance() const;
+    LayoutDirection layoutDirection() const;
+    CursorStyle cursor() const;
+    float width() const { return mViewport.w; }
+    float height() const { return mViewport.h; }
+
+private:
+    using ElementObservation = detail::ElementVisit<Element>;
+    using ConstElementObservation = detail::ElementVisit<const Element>;
+    using MountEpoch = detail::MountEpoch;
+
+    struct PendingScrollNotification {
+        Element* element = nullptr;
+        std::weak_ptr<char> lifetime;
+        MountEpoch mountEpoch;
+    };
+
+    Surface(const System& system, const TextMetrics& textMetrics);
+    const StyleSheet& styleSheet() const { return *mStyleSheet; }
+    void setHovered(Element* node);
+    void requestLayout();
+    void requestPaint();
+    void requestHitTestRefresh();
+    void queueScrollNotification(Element& element);
+    void flushScrollNotifications();
+    void dispatchScrollNotification(Element& element);
+    StylePass& stylePass() const;
+    void invalidateStyleCache();
+    void invalidateOrderingCache();
+    void didPaint(std::uint64_t paintedGeneration);
+    void setFocused(Element* node, bool focusVisible);
+    void validateFocus();
+    bool isRootedInSurface(const Element* node) const;
+    bool isEnabledInTree(const Element* node) const;
+    bool isFocusableInTree(const Element* node) const;
+    ElementObservation observe(Element& element) const;
+    ConstElementObservation observe(const Element& element) const;
+    void clearKeyboardPress();
+    void refreshHoverState();
+    void updatePressedState();
+    void elementBecameUnavailable(Element& element);
+    void elementOwnerDestroyed(Element& element);
+    bool moveFocus(bool backwards);
+    bool routeEvent(Event& event);
+    void collectFocusable(Element& node, std::vector<ElementRef<Element>>& result, StylePass& styles) const;
+    void paintElement(const Element& element, PaintContext& context, float scale, float inheritedOpacity, StylePass& styles) const;
+    static constexpr std::size_t kSurfaceLayerCount = static_cast<std::size_t>(SurfaceLayer::Modal) + 1;
+
+    struct Mount {
+        enum class Ownership : uint8_t { Owned, Borrowed };
+
+        Mount(std::unique_ptr<Element> root, SurfaceLayer layer, HTMLFloaterElement* floater);
+        Mount(Element& root, SurfaceLayer layer, HTMLFloaterElement* floater);
+        ~Mount();
+
+        Element* root = nullptr;
+        std::unique_ptr<Element> ownedRoot;
+        SurfaceLayer layer;
+        Ownership ownership;
+        HTMLFloaterElement* floater = nullptr;
+        std::shared_ptr<char> lifetime = std::make_shared<char>(0);
+        std::vector<Binding*> bindings;
+    };
+
+    using MountPtr = std::unique_ptr<Mount>;
+    using MountList = std::vector<MountPtr>;
+
+    MountList& mounts(SurfaceLayer layer);
+    const MountList& mounts(SurfaceLayer layer) const;
+    Mount* findMount(Element* element) noexcept;
+    const Mount* findMount(const Element* element) const noexcept;
+    Element& installMount(MountPtr mount);
+    MountPtr detachMount(Element& element);
+    bool attachBinding(Element& root, Binding& binding);
+    void detachBinding(Binding& binding) noexcept;
+    void replaceBinding(Binding& current, Binding& replacement) noexcept;
+    void detachBindings(Mount& mount) noexcept;
+    Element* mountedRoot(Element* element);
+    const Element* mountedRoot(const Element* element) const;
+    const ScrollLayoutOptions& scrollLayoutOptions() const { return mScrollLayoutOptions; }
+    std::optional<SurfaceLayer> layerOf(const Element* element) const;
+    bool isSurfaceRoot(const Element* element) const;
+    bool hasActiveModal() const;
+    Element* hitTestAt(const Vec2& point);
+    Element* hitTestNode(Element& node, const Vec2& point, const Rect& inheritedClip, StylePass& styles) const;
+    HTMLFloaterElement* resizeFloaterAt(const Vec2& point, std::uint8_t& edges) const;
+    void updateResizeCursor(const Vec2& point);
+    bool raiseWithinLayer(Element& element, SurfaceLayer layer);
+    void constrainFloater(HTMLFloaterElement& floater);
+    bool updateLayoutIfNeeded();
+    bool managesFloater(const HTMLFloaterElement& floater) const;
+    void floaterClosed(HTMLFloaterElement& floater);
+    void floaterMinimizedChanged(HTMLFloaterElement& floater);
+    void floaterMoveEnded(HTMLFloaterElement& floater);
+    void floaterResizeEnded(HTMLFloaterElement& floater);
+    void generationChanged(const StyleSheet& styleSheet);
+    void localeChanged();
+    void keybindingsChanged();
+    void nativeAppearanceChanged();
+
+    struct ScrollbarTarget {
+        Element* element = nullptr;
+        ScrollGeometry geometry;
+        ScrollbarHit hit;
+    };
+
+    struct ScrollbarInteraction : ScrollbarTarget {
+        float grabOffset = 0.f;
+        float repeatElapsed = 0.f;
+        bool repeatStarted = false;
+    };
+
+    ScrollGeometry scrollbarGeometry(const Element& element, const ComputedStyle& style) const;
+    std::optional<ScrollbarTarget> hitTestScrollbarAt(const Vec2& point);
+    std::optional<ScrollbarTarget> hitTestScrollbarNode(Element& node, const Vec2& point, const Rect& inheritedClip, StylePass& styles) const;
+    bool scrollFocusedElement(const KeyEvent& event, Element& focused);
+    void setScrollbarHover(std::optional<ScrollbarTarget> target);
+    bool scrollbarTargetMatches(const ScrollbarTarget& target, const Element& element, ScrollbarAxis axis, ScrollbarPart part) const;
+    const NativeAppearance& effectiveNativeAppearance() const;
+    NativeScrollbarMetrics scrollbarMetrics(ScrollbarMode mode) const;
+    void syncNativeAppearance();
+    bool updateScrollbarInteraction(const Vec2& point);
+    bool beginScrollbarInteraction(const ScrollbarTarget& target, const Vec2& point);
+
+    std::array<MountList, kSurfaceLayerCount> mMounts;
+    std::shared_ptr<char> mLifetime = std::make_shared<char>(0);
+    StyleSheet mDefaultStyleSheet;
+    mutable const StyleSheet* mStyleSheet = &mDefaultStyleSheet;
+    mutable const StyleSheet* mPendingStyleSheet = nullptr;
+    const System* mSystem = nullptr;
+    SurfaceFloaterDelegate* mFloaterDelegate = nullptr;
+    const TextMetrics& mTextMetrics;
+    mutable std::unique_ptr<StylePass> mStylePass;
+    ScrollLayoutOptions mScrollLayoutOptions;
+    Rect mViewport;
+    Element* mHovered = nullptr;
+    Element* mPressed = nullptr;
+    Element* mFocused = nullptr;
+    Element* mCaptured = nullptr;
+    Element* mKeyPressed = nullptr;
+    Vec2 mPointerPosition;
+    int mPressedKey = 0;
+    uint8_t mPressedClickCount = 0;
+    bool mPointerPositionKnown = false;
+    bool mHitTestDirty = false;
+    bool mTabKeyHandled = false;
+    bool mDispatchingScrollNotifications = false;
+    bool mLayoutDirty = true;
+    bool mPaintDirty = true;
+    std::uint64_t mPaintRequestGeneration = 0;
+    CursorStyle mResizeCursor = CursorStyle::Auto;
+    std::uint64_t mNativeAppearanceRevision = 1;
+    std::optional<ScrollbarTarget> mScrollbarHover;
+    std::optional<ScrollbarInteraction> mScrollbarCapture;
+    std::uint64_t mObservedStyleGeneration = 0;
+    std::uint64_t mObservedTextMetricsGeneration = 0;
+    LayoutDirection mObservedLayoutDirection = LayoutDirection::LeftToRight;
+    std::vector<PendingScrollNotification> mPendingScrollNotifications;
+};
+} // namespace radia::ui

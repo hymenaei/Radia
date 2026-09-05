@@ -339,6 +339,7 @@ public:
     void vertexBatchPreTransformed(LLVector4a* verts, S32 vert_count);
     void vertexBatchPreTransformed(LLVector4a* verts, LLVector2* uvs, S32 vert_count);
     void vertexBatchPreTransformed(LLVector4a* verts, LLVector2* uvs, LLColor4U*, S32 vert_count);
+    void vertexBatchPreTransformed(LLVector4a* verts, LLVector2* uvs, LLColor4U* colors, U32* glyph_locs, S32 vert_count);
 
     void setColorMask(bool writeColor, bool writeAlpha);
     void setColorMask(bool writeColorR, bool writeColorG, bool writeColorB, bool writeAlpha);
@@ -376,6 +377,8 @@ public:
     void rebasePolygonOffset();
 
     ALTextureSlot* getTextureSlot(U32 index);
+
+    void activateTextureUnit(U32 index);
 
     U32 getCurrentTexUnitIndex(void) const { return mCurrTextureUnitIndex; }
 
@@ -506,6 +509,7 @@ private:
     LLStrider<LLVector4a>       mVerticesp;
     LLStrider<LLVector2>        mTexcoordsp;
     LLStrider<LLColor4U>        mColorsp;
+    LLStrider<U32>              mGlyphLocp;
     U32                         mDummyVAO = 0;
     std::array<ALTextureSlot, AL_NUM_TEXTURE_SLOTS> mTextureSlots;
     // This context's sampler objects. Sits beside mTextureSlots deliberately: the units hold

@@ -40,6 +40,8 @@
 #include "llversioninfo.h"
 
 #include "llrender.h"
+#include "llfontgl.h"
+#include "llfontgpushader.h"
 #include "llenvironment.h"
 #include "llerrorcontrol.h"
 #include "llworld.h"
@@ -150,6 +152,8 @@ LLGLSLShader        gUnderWaterProgram;
 
 //interface shaders
 LLGLSLShader        gHighlightProgram;
+LLGLSLShader        gRadiaUIProgram;
+LLGLSLShader        gSkinnedHighlightProgram;
 LLGLSLShader        gHighlightNormalProgram;
 LLGLSLShader        gHighlightSpecularProgram;
 
@@ -758,6 +762,12 @@ void LLViewerShaderMgr::setShaders()
 
 void LLViewerShaderMgr::unloadShaders()
 {
+#if LL_HAS_HB_GPU
+    // The standalone HUD/world/debug font program participates in the global
+    // shader instance set. Reset its lazy-build attempt flag before the global
+    // unload so it can be rebuilt after any shader reload.
+    LLFontGpuShader::destroyBatchedProgram();
+#endif
     while (!LLGLSLShader::sInstances.empty())
     {
         LLGLSLShader* shader = *(LLGLSLShader::sInstances.begin());
@@ -3640,8 +3650,37 @@ bool LLViewerShaderMgr::loadShadersInterface()
         gUIProgram.mShaderFiles.clear();
         gUIProgram.mShaderFiles.push_back(make_pair("interface/uiV.glsl", GL_VERTEX_SHADER));
         gUIProgram.mShaderFiles.push_back(make_pair("interface/uiF.glsl", GL_FRAGMENT_SHADER));
-        gUIProgram.mShaderLevel = mShaderLevel[SHADER_INTERFACE];
+        const S32 interface_level = mShaderLevel[SHADER_INTERFACE];
+        gUIProgram.mShaderLevel = interface_level;
+#if LL_HAS_HB_GPU
+        auto configure_font_gpu = [](bool enabled)
+        {
+            gUIProgram.mExtraFragmentSource.clear();
+            gUIProgram.mDefines.erase("HAS_FONT_GPU");
+            gUIProgram.mHasFontGpu = false;
+            if (enabled)
+            {
+                gUIProgram.mExtraFragmentSource = LLFontGpuShader::fragmentLibSource();
+                gUIProgram.mDefines["HAS_FONT_GPU"] = "1";
+            }
+        };
+        const bool try_font_gpu =
+            LLFontGL::sEnableFontGpu && LLFontGpuShader::isRuntimeSupported();
+        configure_font_gpu(try_font_gpu);
+#endif
         success = gUIProgram.createShader();
+#if LL_HAS_HB_GPU
+        if (!success && try_font_gpu)
+        {
+            LL_WARNS("FontGpu")
+                << "Analytic UI shader failed; retrying the compatibility atlas shader."
+                << LL_ENDL;
+            configure_font_gpu(false);
+            gUIProgram.mShaderLevel = interface_level;
+            success = gUIProgram.createShader();
+        }
+        gUIProgram.mHasFontGpu = success && try_font_gpu && gUIProgram.mDefines.count("HAS_FONT_GPU") != 0;
+#endif
         if (success)
         {
             // Initialize the shadow-path uniform to passthrough so non-text UI
@@ -3654,6 +3693,22 @@ bool LLViewerShaderMgr::loadShadersInterface()
             gUIProgram.uniform1i(LLShaderMgr::TEXT_SHADOW_MODE, 0);
             gUIProgram.unbind();
         }
+    }
+
+    if (success)
+    {
+        // The two programs intentionally compile variants of the same uiF/uiV
+        // source pair while legacy viewer UI migrates to retained painting.
+        // Once that migration is complete, remove the legacy shader branch,
+        // fold this setup into gUIProgram, and remove PAINT_SHADER.
+        gRadiaUIProgram.mName = "Radia UI Shape Shader";
+        gRadiaUIProgram.mShaderFiles.clear();
+        gRadiaUIProgram.mShaderFiles.push_back(make_pair("interface/uiV.glsl", GL_VERTEX_SHADER));
+        gRadiaUIProgram.mShaderFiles.push_back(make_pair("interface/uiF.glsl", GL_FRAGMENT_SHADER));
+        gRadiaUIProgram.clearPermutations();
+        gRadiaUIProgram.addPermutation("PAINT_SHADER", "1");
+        gRadiaUIProgram.mShaderLevel = mShaderLevel[SHADER_INTERFACE];
+        success = gRadiaUIProgram.createShader();
     }
 
     if (success)
@@ -3984,4 +4039,3 @@ void LLViewerShaderMgr::updateShaderUniforms(LLGLSLShader * shader)
 {
     LLEnvironment::instance().updateShaderUniforms(shader);
 }
-

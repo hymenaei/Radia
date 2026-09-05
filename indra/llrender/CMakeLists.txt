@@ -13,6 +13,10 @@ set(llrender_SOURCE_FILES
     llfontbitmapcache.cpp
     llfontfreetype.cpp
     llfontgl.cpp
+    llfontgpubatch.cpp
+    llfontgpuglyphcache.cpp
+    llfontgpurenderer.cpp
+    llfontgpushader.cpp
     llfontvertexbuffer.cpp
     llfontregistry.cpp
     llgl.cpp
@@ -45,6 +49,11 @@ set(llrender_HEADER_FILES
     llfontgl.h
     llfontvertexbuffer.h
     llfontfreetype.h
+    llfontgpubatch.h
+    llfontgpuglyphcache.h
+    llfontgpurenderer.h
+    llfontgpushader.h
+    llhbgpu.h
     llfontbitmapcache.h
     llfontregistry.h
     llgl.h
@@ -84,6 +93,7 @@ if (BUILD_HEADLESS)
           llfilesystem
           llwindowheadless
           ll::freetype
+          ll::fribidi
           ll::harfbuzz
           ll::plutosvg
           ll::glext
@@ -106,6 +116,7 @@ target_link_libraries(llrender
         llxml
         llwindow
         ll::freetype
+        ll::fribidi
         ll::harfbuzz
         ll::plutosvg
         ll::glext
@@ -124,7 +135,7 @@ endif()
 
 if (BUILD_TESTING)
   # llrender pulls in llcommon / llimage / llmath / llfilesystem / llxml /
-  # llwindow + ll::freetype / ll::harfbuzz / ll::plutosvg / ll::glext via
+  # llwindow + ll::freetype / ll::fribidi / ll::harfbuzz / ll::plutosvg / ll::glext via
   # its own target_link_libraries; transitive linking propagates them to
   # consumers, so listing llrender alone is enough.
   #
@@ -145,6 +156,16 @@ if (BUILD_TESTING)
   LL_ADD_INTEGRATION_TEST(llfontbitmapcache "" "${registry_test_libs}" "${test_project}")
   LL_ADD_INTEGRATION_TEST(alfontshaping "" "${registry_test_libs}" "${test_project}")
   LL_ADD_INTEGRATION_TEST(llfontfreetype "" "${registry_test_libs}" "${test_project}")
+  LL_ADD_INTEGRATION_TEST(llfontgpu "" "${registry_test_libs}" "${test_project}")
+  LL_ADD_INTEGRATION_TEST(llfontgpuglyphcache "" "${registry_test_libs}" "${test_project}")
+  LL_ADD_INTEGRATION_TEST(llfontgpushader "" "${registry_test_libs}" "${test_project}")
+  LL_ADD_INTEGRATION_TEST(llfontgpubatch "" "${registry_test_libs}" "${test_project}")
+  foreach(font_gpu_test llfontgpu llfontgpuglyphcache llfontgpubatch)
+    if (TARGET INTEGRATION_TEST_${font_gpu_test})
+      target_compile_definitions(INTEGRATION_TEST_${font_gpu_test} PRIVATE
+          "LLFONT_TEST_DATA_DIR=\"${INDRA_SOURCE_DIR}/newview/fonts/\"")
+    endif()
+  endforeach()
   if (TARGET INTEGRATION_TEST_alfontcolrv1)
     # Hand the source-tree font directory to the test as a string literal.
     # Tests that need a real font file (Noto-COLRv1.ttf, InterVariable.woff2)
@@ -201,6 +222,13 @@ if (BUILD_TESTING)
       target_compile_definitions(INTEGRATION_TEST_llfontfreetype PRIVATE
           ${headless_test_compile_defs})
     endif()
+
+    foreach(font_gpu_test llfontgpu llfontgpuglyphcache llfontgpushader llfontgpubatch)
+      if (TARGET INTEGRATION_TEST_${font_gpu_test})
+        target_compile_definitions(INTEGRATION_TEST_${font_gpu_test} PRIVATE
+            ${headless_test_compile_defs})
+      endif()
+    endforeach()
 
     if (TARGET INTEGRATION_TEST_alfontcolrv1)
       # alfontcolrv1's GL-gated tests cover the integration of the

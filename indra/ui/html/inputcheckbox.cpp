@@ -8,7 +8,7 @@
 #include "html/elementnames.h"
 #include "html/input.h"
 #include "resource/elementdefinition.h"
-#include "style/style.h"
+#include "style/computedstyle.h"
 
 namespace radia::ui {
 using detail::ElementDefinitions;

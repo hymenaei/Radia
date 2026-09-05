@@ -5,6 +5,7 @@
 
 #include "linden_common.h"
 #include <gtest/gtest.h>
+#include "css/stylesheet.h"
 #include "dom/elementinternal.h"
 #include "dom/text.h"
 #include "floater_test_helpers.h"
@@ -16,11 +17,12 @@
 #include "html/panel.h"
 #include "layout/engine.h"
 #include "resource/elementdefinition.h"
-#include "style/stylesheet.h"
+#include "style/stylepass.h"
 #include "text/metrics.h"
 
 namespace {
-using radia::ui::arrangeTree;
+using radia::ui::BoxSizing;
+using radia::ui::ComputedStyle;
 using radia::ui::defaultStylesheetSource;
 using radia::ui::DisplayMode;
 using radia::ui::Element;
@@ -32,16 +34,13 @@ using radia::ui::HTMLInputElement;
 using radia::ui::HTMLLabelElement;
 using radia::ui::HTMLPanelElement;
 using radia::ui::LayoutDirection;
-using radia::ui::layoutTree;
-using radia::ui::measureElement;
-using radia::ui::measureTree;
+using radia::ui::LayoutEngine;
 using radia::ui::Rect;
-using radia::ui::resolveElementStyle;
 using radia::ui::ScrollbarMode;
 using radia::ui::ScrollLayoutOptions;
-using radia::ui::Style;
 using radia::ui::StyleLayer;
 using radia::ui::StyleOrigin;
+using radia::ui::StylePass;
 using radia::ui::StyleSheet;
 using radia::ui::StyleSheetLoadResult;
 using radia::ui::Text;
@@ -49,12 +48,17 @@ using radia::ui::TextMetrics;
 using radia::ui::Vec2;
 using radia::ui::Visibility;
 using radia::ui::detail::appendText;
-using radia::ui::detail::NodeAccess;
 using radia::ui::detail::makeElement;
 using radia::ui::detail::makeElementValue;
+using radia::ui::detail::NodeAccess;
 using radia::ui::detail::nodes;
 using ::testing::Message;
 using ::testing::Test;
+
+ComputedStyle computedStyle(const StyleSheet& stylesheet, const Element& element) {
+    StylePass styles(stylesheet, FixedTextMetrics{});
+    return styles.style(element);
+}
 } // namespace
 
 namespace {
@@ -92,7 +96,7 @@ TEST_F(LayoutEngineTest, MeasuresButtonWithIconAndLabel) {
     appendIcon(*button, "search");
     appendButtonText(*button, "Apply");
     root.append(std::move(button));
-    layoutTree(root, styleSheet, text);
+    LayoutEngine::layout(root, styleSheet, text);
     ASSERT_EQ(root.children().size(), 1U);
     const Element& result = *root.children().front();
     EXPECT_EQ(result.rect().w, 300.f);
@@ -127,7 +131,7 @@ TEST_F(LayoutEngineTest, IgnoresWhitespaceOnlyTextBetweenFlexItems) {
     Text* labelPtr = label.get();
     button.append(std::move(label));
 
-    layoutTree(button, styleSheet, text);
+    LayoutEngine::layout(button, styleSheet, text);
 
     EXPECT_EQ(leadingWhitespacePtr->rect().w, 0.f);
     EXPECT_EQ(betweenWhitespacePtr->rect().w, 0.f);
@@ -154,7 +158,7 @@ TEST_F(LayoutEngineTest, PreservesWhitespaceBetweenAdjacentInlineRuns) {
     paragraph.append(std::move(separator));
     paragraph.append(std::move(strike));
 
-    layoutTree(paragraph, styleSheet, text);
+    LayoutEngine::layout(paragraph, styleSheet, text);
 
     EXPECT_GT(separatorPtr->rect().w, 0.f);
     EXPECT_FLOAT_EQ(separatorPtr->rect().x, italicPtr->rect().right());
@@ -177,7 +181,7 @@ TEST_F(LayoutEngineTest, CollapsesFormattingWhitespaceBetweenButtonContent) {
     Text* labelPtr = label.get();
     button.append(std::move(label));
 
-    layoutTree(button, styleSheet, text);
+    LayoutEngine::layout(button, styleSheet, text);
 
     EXPECT_FLOAT_EQ(separatorPtr->rect().w, 6.f);
     EXPECT_FLOAT_EQ(separatorPtr->rect().h, 10.f);
@@ -198,7 +202,7 @@ TEST_F(LayoutEngineTest, IgnoresFormattingWhitespaceBeforeNormalFlowChildren) {
     Element* paragraphPtr = paragraph.get();
     panel.append(std::move(paragraph));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
 
     EXPECT_EQ(leadingWhitespacePtr->rect().h, 0.f);
     EXPECT_EQ(paragraphPtr->rect().top(), 60.f);
@@ -223,7 +227,7 @@ TEST_F(LayoutEngineTest, FloaterBodyStartsAtFirstElementAfterFormattingWhitespac
     status->textContent("Ready");
     floater.body()->append(std::move(status));
 
-    layoutTree(floater, styleSheet, text);
+    LayoutEngine::layout(floater, styleSheet, text);
 
     EXPECT_EQ(statusPtr->rect().top(), floater.body()->rect().top());
 }
@@ -249,7 +253,7 @@ TEST_F(LayoutEngineTest, LaysOutInlineSiblingsAndBlockChildrenInNormalFlow) {
     after->addClass("inline");
     panel.append(std::move(after));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
 
     EXPECT_EQ(panel.children()[0]->rect().left(), 0.f);
     EXPECT_EQ(panel.children()[1]->rect().left(), 30.f);
@@ -272,7 +276,7 @@ TEST_F(LayoutEngineTest, AlignsNormalFlowInlineContentWithTextAlign) {
     second->addClass("inline");
     panel.append(std::move(second));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
 
     EXPECT_FLOAT_EQ(panel.children()[0]->rect().left(), 30.f);
     EXPECT_FLOAT_EQ(panel.children()[1]->rect().left(), 50.f);
@@ -292,7 +296,7 @@ TEST_F(LayoutEngineTest, WrapsInlineSiblingsAtTheContainingBlockWidth) {
     second->addClass("inline");
     panel.append(std::move(second));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
 
     EXPECT_EQ(panel.children()[0]->rect().left(), 0.f);
     EXPECT_EQ(panel.children()[1]->rect().left(), 0.f);
@@ -311,7 +315,7 @@ TEST_F(LayoutEngineTest, CentersButtonContentWithinExplicitWidth) {
     appendIcon(*button, "search");
     appendButtonText(*button, "Apply");
     root.append(std::move(button));
-    layoutTree(root, styleSheet, text);
+    LayoutEngine::layout(root, styleSheet, text);
     ASSERT_EQ(root.children().size(), 1U);
     const Element& result = *root.children().front();
     const auto runtimeChildren = nodes(result);
@@ -338,15 +342,15 @@ TEST_F(LayoutEngineTest, NativeButtonUsesNormalContentLayoutWithoutChangingDispl
     Text* labelPtr = label.get();
     button.append(std::move(label));
 
-    const Style computed = resolveElementStyle(styleSheet, button);
+    const ComputedStyle computed = computedStyle(styleSheet, button);
     ASSERT_EQ(computed.appearance, radia::ui::AppearanceMode::Auto);
     ASSERT_EQ(computed.display, DisplayMode::InlineBlock);
 
-    layoutTree(button, styleSheet, text);
+    LayoutEngine::layout(button, styleSheet, text);
 
     EXPECT_FLOAT_EQ(labelPtr->rect().h, 18.f);
     EXPECT_EQ(labelPtr->data(), "\n        Apply\n    ");
-    EXPECT_EQ(resolveElementStyle(styleSheet, button).display, DisplayMode::InlineBlock);
+    EXPECT_EQ(computedStyle(styleSheet, button).display, DisplayMode::InlineBlock);
     const float contentLeft = button.rect().left() + computed.borderWidth.left + computed.padding.left;
     const float contentWidth = button.rect().w - computed.borderWidth.horizontal() - computed.padding.horizontal();
     const float contentWidthUsed = labelPtr->rect().right() - icon.rect().left();
@@ -368,7 +372,7 @@ TEST_F(LayoutEngineTest, CentersButtonBlockContentFromDefaultAlignment) {
     Text* labelPtr = label.get();
     button.append(std::move(label));
 
-    layoutTree(button, styleSheet, text);
+    LayoutEngine::layout(button, styleSheet, text);
 
     EXPECT_FLOAT_EQ(labelPtr->rect().bottom(), 15.f);
     EXPECT_FLOAT_EQ(labelPtr->rect().top(), 25.f);
@@ -391,10 +395,10 @@ TEST_F(LayoutEngineTest, DoesNotCenterUnstyledButtonBlockContent) {
     Text* labelPtr = label.get();
     button.append(std::move(label));
 
-    const Style computed = resolveElementStyle(styleSheet, button);
+    const ComputedStyle computed = computedStyle(styleSheet, button);
     ASSERT_EQ(computed.appearance, radia::ui::AppearanceMode::Unstyled);
 
-    layoutTree(button, styleSheet, text);
+    LayoutEngine::layout(button, styleSheet, text);
 
     EXPECT_FLOAT_EQ(labelPtr->rect().bottom(), 29.f);
     EXPECT_FLOAT_EQ(labelPtr->rect().top(), 39.f);
@@ -409,7 +413,7 @@ TEST_F(LayoutEngineTest, LaysOutColumnChildrenWithPaddingAndGap) {
     root.setRect({0.f, 0.f, 100.f, 100.f});
     root.append(makeElement<HTMLLabelElement>("one"));
     root.append(makeElement<HTMLLabelElement>("two"));
-    layoutTree(root, styleSheet, text);
+    LayoutEngine::layout(root, styleSheet, text);
     EXPECT_EQ(root.children()[0]->rect().w, 80.f);
     EXPECT_EQ(root.children()[0]->rect().bottom() - root.children()[1]->rect().top(), 5.f);
 }
@@ -427,8 +431,10 @@ TEST_F(LayoutEngineTest, AppliesContentBoxAndBorderBoxToExplicitDimensions) {
     borderBox->addClass("border");
     panel.append(std::move(borderBox));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
 
+    EXPECT_EQ(computedStyle(styleSheet, *panel.children()[0]).boxSizing, BoxSizing::ContentBox);
+    EXPECT_EQ(computedStyle(styleSheet, *panel.children()[1]).boxSizing, BoxSizing::BorderBox);
     EXPECT_FLOAT_EQ(panel.children()[0]->rect().w, 124.f);
     EXPECT_FLOAT_EQ(panel.children()[0]->rect().h, 44.f);
     EXPECT_FLOAT_EQ(panel.children()[1]->rect().w, 100.f);
@@ -448,7 +454,7 @@ TEST_F(LayoutEngineTest, KeepsPaddingInTheClientBoxAndOutOfChildContent) {
     content->setId("content");
     panel.append(std::move(content));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
 
     EXPECT_FLOAT_EQ(panel.clientWidth(), 100.f);
     EXPECT_FLOAT_EQ(panel.clientHeight(), 100.f);
@@ -472,7 +478,7 @@ TEST_F(LayoutEngineTest, KeepsPaddingAfterOverflowingContent) {
     content->setId("content");
     panel.append(std::move(content));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
 
     EXPECT_FLOAT_EQ(panel.clientWidth(), 100.f);
     EXPECT_FLOAT_EQ(panel.clientHeight(), 100.f);
@@ -493,7 +499,7 @@ TEST_F(LayoutEngineTest, KeepsBorderOutsidePaddingScrollport) {
     content->setId("content");
     panel.append(std::move(content));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
 
     EXPECT_FLOAT_EQ(panel.clientWidth(), 96.f);
     EXPECT_FLOAT_EQ(panel.clientHeight(), 96.f);
@@ -510,7 +516,7 @@ TEST_F(LayoutEngineTest, PositionsNormalChildByRightAndBottom) {
     auto root = makeElementValue<HTMLPanelElement>();
     root.setRect({0.f, 0.f, 100.f, 100.f});
     root.append(makeElement<HTMLPanelElement>());
-    layoutTree(root, styleSheet, text);
+    LayoutEngine::layout(root, styleSheet, text);
     EXPECT_EQ(root.children()[0]->rect().right(), 35.f);
     EXPECT_EQ(root.children()[0]->rect().bottom(), 77.f);
 }
@@ -528,7 +534,7 @@ TEST_F(LayoutEngineTest, LaysOutFloaterHeadAndBodyWithinPadding) {
     ASSERT_NE(floater.body(), nullptr);
     floater.setRect({0.f, 0.f, 100.f, 100.f});
     floater.body()->append(makeElement<HTMLLabelElement>("content"));
-    layoutTree(floater, styleSheet, text);
+    LayoutEngine::layout(floater, styleSheet, text);
     EXPECT_EQ(floater.head()->rect().top(), 90.f);
     EXPECT_EQ(floater.body()->rect().top(), 60.f);
 }
@@ -543,7 +549,7 @@ TEST_F(LayoutEngineTest, DisplayNoneFloaterHeadDoesNotReserveSpace) {
     ASSERT_NE(floater.body(), nullptr);
     floater.setRect({0.f, 0.f, 100.f, 100.f});
     floater.body()->append(makeElement<HTMLLabelElement>("content"));
-    layoutTree(floater, styleSheet, text);
+    LayoutEngine::layout(floater, styleSheet, text);
     EXPECT_EQ(floater.body()->rect().top(), 100.f);
 }
 
@@ -558,7 +564,7 @@ TEST_F(LayoutEngineTest, DistributesAutoMarginAlongRow) {
     first->setId("first");
     panel.append(std::move(first));
     panel.append(makeElement<HTMLLabelElement>("second"));
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[0]->rect().x, 0.f);
     EXPECT_EQ(panel.children()[1]->rect().x, 90.f);
 }
@@ -571,7 +577,7 @@ TEST_F(LayoutEngineTest, CentersColumnChildWithAutoMargins) {
     auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 40.f});
     panel.append(makeElement<HTMLLabelElement>("center"));
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[0]->rect().x, 40.f);
 }
 
@@ -583,7 +589,7 @@ TEST_F(LayoutEngineTest, CentersIconInsideOversizedButtonPadding) {
     auto button = makeElementValue<HTMLButtonElement>();
     button.setRect({0.f, 0.f, 24.f, 24.f});
     HTMLIconElement& icon = appendIcon(button, "search");
-    layoutTree(button, styleSheet, text);
+    LayoutEngine::layout(button, styleSheet, text);
     EXPECT_EQ(icon.rect().x, 4.f);
     EXPECT_EQ(icon.rect().y, 4.f);
 }
@@ -596,7 +602,7 @@ TEST_F(LayoutEngineTest, AlignsColumnContentToEnd) {
     auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 40.f});
     panel.append(makeElement<HTMLLabelElement>("bottom"));
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     ASSERT_EQ(panel.children().size(), 1U);
     EXPECT_EQ(panel.children().front()->rect().bottom(), 0.f);
 }
@@ -610,7 +616,7 @@ TEST_F(LayoutEngineTest, DistributesRemainingWidthAcrossFlexChildren) {
     panel.setRect({0.f, 0.f, 100.f, 20.f});
     panel.append(makeElement<HTMLLabelElement>("first"));
     panel.append(makeElement<HTMLLabelElement>("second"));
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[0]->rect().w, 50.f);
     EXPECT_EQ(panel.children()[1]->rect().right(), 100.f);
 }
@@ -624,12 +630,12 @@ TEST_F(LayoutEngineTest, MeasuresAndArrangesRowChildren) {
     panel.append(makeElement<HTMLLabelElement>("first"));
     panel.append(makeElement<HTMLLabelElement>("second"));
 
-    measureTree(panel, styleSheet, text);
+    LayoutEngine::measure(panel, styleSheet, text);
     EXPECT_EQ(panel.desiredSize().x, 27.f);
     EXPECT_EQ(panel.desiredSize().y, 12.f);
 
     panel.setRect({0.f, 0.f, 40.f, 20.f});
-    arrangeTree(panel, styleSheet, text);
+    LayoutEngine::arrange(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[1]->rect().right(), 25.f);
 }
 
@@ -641,7 +647,7 @@ TEST_F(LayoutEngineTest, PreservesExplicitGeometryInNormalLayout) {
     button->setRect({10.f, 10.f, 20.f, 20.f});
     panel.append(std::move(button));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     ASSERT_EQ(panel.children().size(), 1U);
     const Rect& rect = panel.children().front()->rect();
     EXPECT_EQ(rect.x, 10.f);
@@ -662,7 +668,7 @@ TEST_F(LayoutEngineTest, PreservesExplicitHeightWhenNormalWidthIsPercentage) {
     label->setRect({0.f, 0.f, 40.f, 30.f});
     panel.append(std::move(label));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     ASSERT_EQ(panel.children().size(), 1U);
 
     const Rect& rect = panel.children().front()->rect();
@@ -686,8 +692,8 @@ TEST_F(LayoutEngineTest, AppliesSwitchIntrinsicAndPseudoElementLayout) {
     control.type("checkbox").switchMode(true);
     control.setRect({10.f, 20.f, 64.f, 32.f});
 
-    layoutTree(control, styleSheet, text);
-    EXPECT_EQ(resolveElementStyle(styleSheet, control).display, radia::ui::DisplayMode::Flex);
+    LayoutEngine::layout(control, styleSheet, text);
+    EXPECT_EQ(computedStyle(styleSheet, control).display, radia::ui::DisplayMode::Flex);
     ASSERT_NE(control.sliderTrack(), nullptr);
     ASSERT_NE(control.sliderThumb(), nullptr);
     EXPECT_EQ(control.sliderTrack()->rect().bottom(), 23.f);
@@ -704,7 +710,7 @@ TEST_F(LayoutEngineTest, AppliesSwitchIntrinsicAndPseudoElementLayout) {
 
     const float uncheckedThumbLeft = control.sliderThumb()->rect().left();
     control.checked(true);
-    layoutTree(control, styleSheet, text);
+    LayoutEngine::layout(control, styleSheet, text);
     ASSERT_NE(control.sliderTrack(), nullptr);
     ASSERT_NE(control.sliderThumb(), nullptr);
     ASSERT_NE(control.sliderFill(), nullptr);
@@ -738,8 +744,8 @@ TEST_F(LayoutEngineTest, OverlaysInlineGridSwitchPseudosAndAppliesTranslate) {
     control.type("checkbox").switchMode(true);
     control.setRect({10.f, 20.f, 44.f, 20.f});
 
-    layoutTree(control, styleSheet, text);
-    EXPECT_EQ(resolveElementStyle(styleSheet, control).display, DisplayMode::InlineGrid);
+    LayoutEngine::layout(control, styleSheet, text);
+    EXPECT_EQ(computedStyle(styleSheet, control).display, DisplayMode::InlineGrid);
     ASSERT_NE(control.sliderTrack(), nullptr);
     ASSERT_NE(control.sliderThumb(), nullptr);
     EXPECT_EQ(control.sliderTrack()->rect().x, 10.f);
@@ -752,7 +758,7 @@ TEST_F(LayoutEngineTest, OverlaysInlineGridSwitchPseudosAndAppliesTranslate) {
     EXPECT_EQ(control.sliderThumb()->rect().h, 24.f);
 
     control.checked(true);
-    layoutTree(control, styleSheet, text);
+    LayoutEngine::layout(control, styleSheet, text);
     ASSERT_NE(control.sliderTrack(), nullptr);
     ASSERT_NE(control.sliderThumb(), nullptr);
     EXPECT_EQ(control.sliderThumb()->rect().x, 31.f);
@@ -761,7 +767,7 @@ TEST_F(LayoutEngineTest, OverlaysInlineGridSwitchPseudosAndAppliesTranslate) {
     auto rtlControl = makeElementValue<HTMLInputElement>();
     rtlControl.type("checkbox").switchMode(true).checked(true);
     rtlControl.setRect({10.f, 20.f, 44.f, 20.f});
-    layoutTree(rtlControl, styleSheet, text, LayoutDirection::RightToLeft);
+    LayoutEngine::layout(rtlControl, styleSheet, text, LayoutDirection::RightToLeft);
     ASSERT_NE(rtlControl.sliderTrack(), nullptr);
     ASSERT_NE(rtlControl.sliderThumb(), nullptr);
     EXPECT_EQ(rtlControl.sliderThumb()->rect().x, -13.f);
@@ -787,7 +793,7 @@ TEST_F(LayoutEngineTest, PlacesGridAreasInImplicitTracks) {
     bottomRight->setId("bottom-right");
     panel.append(std::move(bottomRight));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[0]->rect().left(), 0.f);
     EXPECT_EQ(panel.children()[0]->rect().top(), 40.f);
     EXPECT_EQ(panel.children()[1]->rect().left(), 50.f);
@@ -797,7 +803,7 @@ TEST_F(LayoutEngineTest, PlacesGridAreasInImplicitTracks) {
     EXPECT_EQ(panel.children()[3]->rect().left(), 50.f);
     EXPECT_EQ(panel.children()[3]->rect().top(), 20.f);
 
-    layoutTree(panel, styleSheet, text, LayoutDirection::RightToLeft);
+    LayoutEngine::layout(panel, styleSheet, text, LayoutDirection::RightToLeft);
     EXPECT_EQ(panel.children()[0]->rect().left(), 90.f);
     EXPECT_EQ(panel.children()[1]->rect().left(), 40.f);
     EXPECT_EQ(panel.children()[2]->rect().left(), 90.f);
@@ -807,12 +813,13 @@ TEST_F(LayoutEngineTest, PlacesGridAreasInImplicitTracks) {
 TEST_F(LayoutEngineTest, UsesInjectedTextMetricsForMeasurement) {
     class ExactTextMetrics final : public TextMetrics {
     public:
-        Vec2 measureText(const std::string&, const Style&) const override { return {47.f, 19.f}; }
+        Vec2 measureText(const std::string&, const ComputedStyle&) const override { return {47.f, 19.f}; }
+        std::uint64_t generation() const noexcept override { return 1; }
     } exact;
 
     StyleSheet styleSheet;
     auto label = makeElementValue<HTMLLabelElement>("adapter-owned");
-    measureTree(label, styleSheet, exact);
+    LayoutEngine::measure(label, styleSheet, exact);
     EXPECT_EQ(label.desiredSize().x, 47.f);
     EXPECT_EQ(label.desiredSize().y, 19.f);
 }
@@ -830,7 +837,7 @@ TEST_F(LayoutEngineTest, AppliesRightToLeftRowDirection) {
     physical->setId("physical");
     panel.append(std::move(physical));
 
-    layoutTree(panel, styleSheet, text, LayoutDirection::RightToLeft);
+    LayoutEngine::layout(panel, styleSheet, text, LayoutDirection::RightToLeft);
     EXPECT_EQ(panel.children()[0]->rect().right(), 100.f);
     EXPECT_EQ(panel.children()[1]->rect().right(), 78.f);
 }
@@ -843,7 +850,7 @@ TEST_F(LayoutEngineTest, PreservesNegativeNormalOffsets) {
     panel.setRect({0.f, 0.f, 100.f, 100.f});
     panel.append(makeElement<HTMLLabelElement>("offset"));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[0]->rect().left(), -8.f);
     EXPECT_EQ(panel.children()[0]->rect().bottom(), 87.f);
 }
@@ -856,7 +863,7 @@ TEST_F(LayoutEngineTest, ResolvesPercentageGeometryAgainstContainingBlock) {
     panel.setRect({0.f, 0.f, 200.f, 100.f});
     panel.append(makeElement<HTMLLabelElement>("percentage"));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     ASSERT_EQ(panel.children().size(), 1U);
     const Rect& rect = panel.children().front()->rect();
     EXPECT_FLOAT_EQ(rect.w, 100.f);
@@ -876,7 +883,7 @@ TEST_F(LayoutEngineTest, DistributesAutomaticRowAndColumnGaps) {
     panel.append(makeElement<HTMLLabelElement>("second"));
     panel.append(makeElement<HTMLLabelElement>("third"));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[1]->rect().left(), 45.f);
     EXPECT_EQ(panel.children()[2]->rect().right(), 100.f);
     EXPECT_EQ(panel.desiredSize().x, 30.f);
@@ -885,7 +892,7 @@ TEST_F(LayoutEngineTest, DistributesAutomaticRowAndColumnGaps) {
                                         "label { width: 10px; height: 10px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kColumnGapLayout).ok());
     panel.setRect({0.f, 0.f, 20.f, 100.f});
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[1]->rect().top(), 55.f);
     EXPECT_EQ(panel.children()[2]->rect().bottom(), 0.f);
 }
@@ -901,7 +908,7 @@ TEST_F(LayoutEngineTest, MeasuresFloaterWithFixedHeightAndAutomaticWidth) {
     floater.body()->append(makeElement<HTMLLabelElement>("first"));
     floater.body()->append(makeElement<HTMLLabelElement>("second"));
 
-    const Vec2 measured = measureElement(floater, styleSheet, text);
+    const Vec2 measured = LayoutEngine::measure(floater, styleSheet, text);
     EXPECT_EQ(measured.x, 100.f);
     EXPECT_EQ(measured.y, 75.f);
 }
@@ -920,7 +927,7 @@ TEST_F(LayoutEngineTest, AppliesCrossAxisAlignmentAndDirection) {
         panel.append(std::move(label));
     }
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[0]->rect().top(), 40.f);
     EXPECT_EQ(panel.children()[1]->rect().bottom(), 15.f);
     EXPECT_EQ(panel.children()[2]->rect().bottom(), 0.f);
@@ -931,13 +938,13 @@ TEST_F(LayoutEngineTest, AppliesCrossAxisAlignmentAndDirection) {
                                         "label#stretch { width: auto; align-self: stretch; }";
     ASSERT_TRUE(styleSheet.loadRadia(kColumnAlignment).ok());
     panel.setRect({0.f, 0.f, 100.f, 40.f});
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[0]->rect().left(), 0.f);
     EXPECT_EQ(panel.children()[1]->rect().left(), 45.f);
     EXPECT_EQ(panel.children()[2]->rect().right(), 100.f);
     EXPECT_EQ(panel.children()[3]->rect().w, 100.f);
 
-    layoutTree(panel, styleSheet, text, LayoutDirection::RightToLeft);
+    LayoutEngine::layout(panel, styleSheet, text, LayoutDirection::RightToLeft);
     EXPECT_EQ(panel.children()[0]->rect().right(), 100.f);
     EXPECT_EQ(panel.children()[2]->rect().left(), 0.f);
 }
@@ -957,12 +964,12 @@ TEST_F(LayoutEngineTest, AppliesGridJustifySelfInBothDirections) {
         panel.append(std::move(label));
     }
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[0]->rect().left(), 0.f);
     EXPECT_EQ(panel.children()[1]->rect().left(), 40.f);
     EXPECT_EQ(panel.children()[2]->rect().left(), 80.f);
 
-    layoutTree(panel, styleSheet, text, LayoutDirection::RightToLeft);
+    LayoutEngine::layout(panel, styleSheet, text, LayoutDirection::RightToLeft);
     EXPECT_EQ(panel.children()[0]->rect().left(), 80.f);
     EXPECT_EQ(panel.children()[1]->rect().left(), 40.f);
     EXPECT_EQ(panel.children()[2]->rect().left(), 0.f);
@@ -985,19 +992,19 @@ TEST_F(LayoutEngineTest, DistinguishesVisibilityFromDisplayLayout) {
     displayNone->addClass("none");
     panel.append(std::move(displayNone));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.desiredSize().x, 30.f);
     EXPECT_EQ(panel.children()[1]->rect().left(), 10.f);
     EXPECT_EQ(panel.children()[2]->rect().left(), 20.f);
-    EXPECT_EQ(measureElement(*panel.children()[2], styleSheet, text).x, 10.f);
+    EXPECT_EQ(LayoutEngine::measure(*panel.children()[2], styleSheet, text).x, 10.f);
     EXPECT_EQ(panel.children()[3]->desiredSize().x, 0.f);
 
     panel.children()[1]->setVisibility(Visibility::Collapse);
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.desiredSize().x, 30.f);
 
     panel.children()[2]->setVisibility(Visibility::Visible);
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.desiredSize().x, 30.f);
     EXPECT_EQ(panel.children()[2]->rect().left(), 20.f);
 }
@@ -1015,21 +1022,21 @@ TEST_F(LayoutEngineTest, AppliesContainerVerticalAlignmentToContent) {
     auto top = makeElementValue<HTMLPanelElement>();
     top.setRect({0.f, 0.f, 100.f, 40.f});
     addLabel(top);
-    layoutTree(top, styleSheet, text);
+    LayoutEngine::layout(top, styleSheet, text);
     EXPECT_EQ(top.children()[0]->rect().top(), 40.f);
 
     auto middle = makeElementValue<HTMLPanelElement>();
     middle.setRect({0.f, 0.f, 100.f, 40.f});
     middle.addClass("middle");
     addLabel(middle);
-    layoutTree(middle, styleSheet, text);
+    LayoutEngine::layout(middle, styleSheet, text);
     EXPECT_EQ(middle.children()[0]->rect().bottom(), 15.f);
 
     auto bottom = makeElementValue<HTMLPanelElement>();
     bottom.setRect({0.f, 0.f, 100.f, 40.f});
     bottom.addClass("bottom");
     addLabel(bottom);
-    layoutTree(bottom, styleSheet, text);
+    LayoutEngine::layout(bottom, styleSheet, text);
     EXPECT_EQ(bottom.children()[0]->rect().bottom(), 0.f);
 
     auto column = makeElementValue<HTMLPanelElement>();
@@ -1037,7 +1044,7 @@ TEST_F(LayoutEngineTest, AppliesContainerVerticalAlignmentToContent) {
     column.addClass("column");
     addLabel(column);
     addLabel(column);
-    layoutTree(column, styleSheet, text);
+    LayoutEngine::layout(column, styleSheet, text);
     EXPECT_EQ(column.children()[0]->rect().top(), 20.f);
     EXPECT_EQ(column.children()[1]->rect().bottom(), 0.f);
 
@@ -1045,7 +1052,7 @@ TEST_F(LayoutEngineTest, AppliesContainerVerticalAlignmentToContent) {
     freeBottom.setRect({0.f, 0.f, 100.f, 40.f});
     freeBottom.addClass("free-bottom");
     addLabel(freeBottom);
-    layoutTree(freeBottom, styleSheet, text);
+    LayoutEngine::layout(freeBottom, styleSheet, text);
     EXPECT_EQ(freeBottom.children()[0]->rect().bottom(), 30.f);
 }
 
@@ -1064,12 +1071,12 @@ TEST_F(LayoutEngineTest, WrapsChildrenAcrossFlowBreaks) {
     panel.append(std::move(second));
     panel.append(std::move(third));
 
-    measureTree(panel, styleSheet, text);
+    LayoutEngine::measure(panel, styleSheet, text);
     EXPECT_EQ(panel.desiredSize().x, 22.f);
     EXPECT_EQ(panel.desiredSize().y, 22.f);
 
     panel.setRect({0.f, 0.f, 40.f, 40.f});
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[0]->rect().top(), 40.f);
     EXPECT_EQ(panel.children()[1]->rect().top(), 28.f);
     EXPECT_EQ(panel.children()[2]->rect().left(), 12.f);
@@ -1086,7 +1093,7 @@ TEST_F(LayoutEngineTest, AppliesFlexBasisAndScaledShrink) {
     auto intrinsicSecond = makeElement<HTMLLabelElement>();
     intrinsicSecond->addClass("second");
     intrinsic.append(std::move(intrinsicSecond));
-    measureTree(intrinsic, styleSheet, text);
+    LayoutEngine::measure(intrinsic, styleSheet, text);
     EXPECT_EQ(intrinsic.desiredSize().x, 120.f);
 
     StyleSheet percentageTheme;
@@ -1095,7 +1102,7 @@ TEST_F(LayoutEngineTest, AppliesFlexBasisAndScaledShrink) {
     ASSERT_TRUE(percentageTheme.loadRadia(kPercentageFlexBasisLayout).ok());
     auto indefinite = makeElementValue<HTMLPanelElement>();
     indefinite.append(makeElement<HTMLLabelElement>());
-    measureTree(indefinite, percentageTheme, text);
+    LayoutEngine::measure(indefinite, percentageTheme, text);
     EXPECT_EQ(indefinite.desiredSize().x, 30.f);
 
     auto panel = makeElementValue<HTMLPanelElement>();
@@ -1104,7 +1111,7 @@ TEST_F(LayoutEngineTest, AppliesFlexBasisAndScaledShrink) {
     auto second = makeElement<HTMLLabelElement>();
     second->addClass("second");
     panel.append(std::move(second));
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_NEAR(panel.children()[0]->rect().w, 200.f / 3.f, 0.001f);
     EXPECT_NEAR(panel.children()[1]->rect().w, 100.f / 3.f, 0.001f);
     EXPECT_FLOAT_EQ(panel.children()[1]->rect().right(), 100.f);
@@ -1127,11 +1134,11 @@ TEST_F(LayoutEngineTest, CentersOversizedFloaterHeadChildren) {
     auto icon = makeElement<HTMLIconElement>("search");
     head->children().front()->append(std::move(icon));
     head->setRect({0.f, 0.f, 200.f, 48.f});
-    layoutTree(*head, styleSheet, text);
+    LayoutEngine::layout(*head, styleSheet, text);
 
     const float headCenter = head->rect().y + head->rect().h * .5f;
     for (const auto& child : head->children()) {
-        if (!child->isVisible(resolveElementStyle(styleSheet, *child))) continue;
+        if (!child->isVisible(computedStyle(styleSheet, *child))) continue;
         const float childCenter = child->rect().y + child->rect().h * .5f;
         SCOPED_TRACE(Message() << "head child: " << child->elementName());
         EXPECT_FLOAT_EQ(childCenter, headCenter);
@@ -1149,7 +1156,7 @@ TEST_F(LayoutEngineTest, ReflowsWrappedTextInColumnLayout) {
     panel.append(makeParagraph("alpha beta"));
     panel.append(makeParagraph("after"));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     const Element& wrapped = *panel.children()[0];
     const Element& following = *panel.children()[1];
     EXPECT_EQ(wrapped.rect().h, 20.f);
@@ -1167,11 +1174,11 @@ TEST_F(LayoutEngineTest, RemeasuresWrappedTextAfterRowFlexShrink) {
     panel.append(makeParagraph("alpha beta"));
     panel.append(makeElement<HTMLLabelElement>("x"));
 
-    const Vec2 measured = measureElement(panel, styleSheet, text);
+    const Vec2 measured = LayoutEngine::measure(panel, styleSheet, text);
     EXPECT_EQ(measured.y, 20.f);
 
     panel.setRect({0.f, 0.f, measured.x, measured.y});
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[0]->rect().h, 20.f);
     EXPECT_EQ(panel.children()[1]->rect().w, 10.f);
     EXPECT_EQ(panel.children()[1]->rect().h, 20.f);
@@ -1184,7 +1191,7 @@ TEST_F(LayoutEngineTest, ReappliesFlexBasisAfterTextReflow) {
     ASSERT_TRUE(columnTheme.loadRadia(kColumnBasis).ok());
     auto column = makeElementValue<HTMLPanelElement>();
     column.append(makeParagraph("alpha beta"));
-    EXPECT_EQ(measureElement(column, columnTheme, text).y, 40.f);
+    EXPECT_EQ(LayoutEngine::measure(column, columnTheme, text).y, 40.f);
 
     StyleSheet rowTheme;
     constexpr char kRowMinimum[] = "panel { width: 80px; display: flex; flex-direction: row; } p { flex: 0 1 100px; font-size: 10px; "
@@ -1194,14 +1201,14 @@ TEST_F(LayoutEngineTest, ReappliesFlexBasisAfterTextReflow) {
     row.append(makeParagraph("alpha beta"));
     row.append(makeElement<HTMLLabelElement>("x"));
     row.setRect({0.f, 0.f, 80.f, 20.f});
-    layoutTree(row, rowTheme, text);
+    LayoutEngine::layout(row, rowTheme, text);
     EXPECT_EQ(row.children()[0]->rect().w, 70.f);
 }
 TEST_F(LayoutEngineTest, InvalidatesTextMeasurementCacheWhenMetricsGenerationChanges) {
     class GenerationTextMetrics final : public TextMetrics {
     public:
-        Vec2 measureText(const std::string&, const Style&) const override { return mSize; }
-        std::uint64_t generation() const override { return mGeneration; }
+        Vec2 measureText(const std::string&, const ComputedStyle&) const override { return mSize; }
+        std::uint64_t generation() const noexcept override { return mGeneration; }
         void advance() {
             ++mGeneration;
             mSize = {64.f, 18.f};
@@ -1214,12 +1221,12 @@ TEST_F(LayoutEngineTest, InvalidatesTextMeasurementCacheWhenMetricsGenerationCha
 
     StyleSheet styleSheet;
     auto label = makeElementValue<HTMLLabelElement>("generation");
-    measureTree(label, styleSheet, metrics);
+    LayoutEngine::measure(label, styleSheet, metrics);
     EXPECT_FLOAT_EQ(label.desiredSize().x, 32.f);
     EXPECT_FLOAT_EQ(label.desiredSize().y, 12.f);
 
     metrics.advance();
-    measureTree(label, styleSheet, metrics);
+    LayoutEngine::measure(label, styleSheet, metrics);
     EXPECT_FLOAT_EQ(label.desiredSize().x, 64.f);
     EXPECT_FLOAT_EQ(label.desiredSize().y, 18.f);
 }
@@ -1234,7 +1241,7 @@ TEST_F(LayoutEngineTest, ReallocatesColumnFlexChildrenUnderHeightConstraint) {
     panel.append(makeElement<HTMLLabelElement>("first"));
     panel.append(makeElement<HTMLLabelElement>("second"));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[0]->rect().h, 50.f);
     EXPECT_EQ(panel.children()[1]->rect().h, 50.f);
     EXPECT_EQ(panel.children()[1]->rect().bottom(), 0.f);
@@ -1254,7 +1261,7 @@ TEST_F(LayoutEngineTest, ResolvesSiblingColumnPercentages) {
     panel.append(std::move(quarter));
     panel.append(std::move(half));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_FLOAT_EQ(panel.children()[0]->rect().h, 25.f);
     EXPECT_FLOAT_EQ(panel.children()[1]->rect().h, 50.f);
     EXPECT_FLOAT_EQ(panel.children()[0]->rect().bottom(), panel.children()[1]->rect().top());
@@ -1275,7 +1282,7 @@ TEST_F(LayoutEngineTest, ResolvesNestedColumnPercentages) {
     child->append(std::move(grandchild));
     panel.append(std::move(child));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     ASSERT_EQ(panel.children().size(), 1U);
     const Element& nestedPanel = *panel.children().front();
     ASSERT_EQ(nestedPanel.children().size(), 1U);
@@ -1293,7 +1300,7 @@ TEST_F(LayoutEngineTest, RespectsColumnMinimumHeightsDuringShrink) {
     panel.append(makeElement<HTMLLabelElement>("first"));
     panel.append(makeElement<HTMLLabelElement>("second"));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[0]->rect().h, 25.f);
     EXPECT_EQ(panel.children()[1]->rect().h, 25.f);
 }
@@ -1307,16 +1314,26 @@ TEST_F(LayoutEngineTest, SeparatesLayoutCachesByStylesheetIdentity) {
     ASSERT_TRUE(wide.loadRadia(kWideLabelLayout).ok());
 
     auto label = makeElementValue<HTMLLabelElement>("identity");
-    layoutTree(label, narrow, text);
-    layoutTree(label, wide, text);
+    LayoutEngine::layout(label, narrow, text);
+    LayoutEngine::layout(label, wide, text);
     EXPECT_EQ(label.desiredSize().x, 30.f);
+}
+
+TEST_F(LayoutEngineTest, MatchesCopiedStylesheetSnapshot) {
+    StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet.loadRadia("label { width: 10px; height: 10px; }").ok());
+    StyleSheet copy = styleSheet;
+    StylePass pass(styleSheet, text);
+
+    EXPECT_TRUE(pass.matches(copy, text));
 }
 
 TEST_F(LayoutEngineTest, SeparatesLayoutCachesByTextMetricsIdentity) {
     class WidthMetrics final : public TextMetrics {
     public:
         explicit WidthMetrics(float width) : mWidth(width) {}
-        Vec2 measureText(const std::string&, const Style&) const override { return {mWidth, 12.f}; }
+        Vec2 measureText(const std::string&, const ComputedStyle&) const override { return {mWidth, 12.f}; }
+        std::uint64_t generation() const noexcept override { return 1; }
 
     private:
         float mWidth;
@@ -1324,8 +1341,8 @@ TEST_F(LayoutEngineTest, SeparatesLayoutCachesByTextMetricsIdentity) {
 
     StyleSheet styleSheet;
     auto label = makeElementValue<HTMLLabelElement>("identity");
-    layoutTree(label, styleSheet, narrow);
-    layoutTree(label, styleSheet, wide);
+    LayoutEngine::layout(label, styleSheet, narrow);
+    LayoutEngine::layout(label, styleSheet, wide);
     EXPECT_EQ(label.desiredSize().x, 48.f);
 }
 
@@ -1343,7 +1360,7 @@ TEST_F(LayoutEngineTest, OrdersChildrenBeforeRowLayout) {
     panel.append(std::move(late));
     panel.append(std::move(early));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[1]->rect().x, 0.f);
     EXPECT_EQ(panel.children()[0]->rect().x, 10.f);
 }
@@ -1354,12 +1371,12 @@ TEST_F(LayoutEngineTest, InvalidatesLayoutCacheWhenStylesheetIsAssigned) {
     constexpr char kReplacementLabelLayout[] = "label { width: 30px; height: 10px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kInitialLabelLayout).ok());
     auto label = makeElementValue<HTMLLabelElement>("assigned");
-    layoutTree(label, styleSheet, text);
+    LayoutEngine::layout(label, styleSheet, text);
 
     StyleSheet replacement;
     ASSERT_TRUE(replacement.loadRadia(kReplacementLabelLayout).ok());
     styleSheet = replacement;
-    layoutTree(label, styleSheet, text);
+    LayoutEngine::layout(label, styleSheet, text);
     EXPECT_EQ(label.desiredSize().x, 30.f);
 }
 
@@ -1372,12 +1389,12 @@ TEST_F(LayoutEngineTest, RemeasuresNormalPercentageTextAfterResize) {
     panel.setRect({0.f, 0.f, 100.f, 100.f});
     panel.append(makeParagraph("alpha beta"));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     ASSERT_EQ(panel.children().size(), 1U);
     EXPECT_EQ(panel.children().front()->rect().h, 20.f);
 
     panel.setRect({0.f, 0.f, 200.f, 100.f});
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.children().front()->rect().h, 10.f);
 }
 
@@ -1388,7 +1405,7 @@ TEST_F(LayoutEngineTest, RelativeOffsetsDoNotChangeIntrinsicSize) {
     ASSERT_TRUE(styleSheet.loadRadia(kNormalOffsetLayout).ok());
     auto panel = makeElementValue<HTMLPanelElement>();
     panel.append(makeElement<HTMLLabelElement>("positioned"));
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.desiredSize().x, 20.f);
     EXPECT_EQ(panel.desiredSize().y, 10.f);
 }
@@ -1401,7 +1418,7 @@ TEST_F(LayoutEngineTest, IncludesExplicitNormalGeometryInIntrinsicSize) {
     auto child = makeElement<HTMLPanelElement>();
     child->setRect({0.f, 0.f, 40.f, 30.f});
     panel.append(std::move(child));
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.desiredSize().x, 40.f);
     EXPECT_EQ(panel.desiredSize().y, 30.f);
 }
@@ -1415,11 +1432,11 @@ TEST_F(LayoutEngineTest, InvalidatesIntrinsicSizeAfterExplicitGeometryChange) {
     child->setRect({0.f, 0.f, 20.f, 10.f});
     Element* childPtr = child.get();
     panel.append(std::move(child));
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.desiredSize().x, 20.f);
 
     childPtr->setRect({0.f, 0.f, 60.f, 10.f});
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.desiredSize().x, 60.f);
 }
 
@@ -1431,7 +1448,7 @@ TEST_F(LayoutEngineTest, IncludesExplicitNormalPositionInIntrinsicSize) {
     auto child = makeElement<HTMLPanelElement>();
     child->setRect({10.f, 12.f, 20.f, 8.f});
     panel.append(std::move(child));
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.desiredSize().x, 30.f);
     EXPECT_EQ(panel.desiredSize().y, 20.f);
 }
@@ -1444,7 +1461,7 @@ TEST_F(LayoutEngineTest, IncludesWrappedPercentageChildInNormalIntrinsicHeight) 
     auto panel = makeElementValue<HTMLPanelElement>();
     panel.append(makeParagraph("alpha beta"));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     ASSERT_EQ(panel.children().size(), 1U);
     EXPECT_EQ(panel.desiredSize().y, 20.f);
     EXPECT_EQ(panel.children().front()->rect().h, 20.f);
@@ -1459,7 +1476,7 @@ TEST_F(LayoutEngineTest, RelativePercentageOffsetsDoNotChangeIntrinsicSize) {
     panel.setRect({0.f, 0.f, 100.f, 100.f});
     panel.append(makeElement<HTMLLabelElement>("positioned"));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     ASSERT_EQ(panel.children().size(), 1U);
     EXPECT_EQ(panel.desiredSize().x, 20.f);
     EXPECT_EQ(panel.desiredSize().y, 10.f);
@@ -1476,7 +1493,7 @@ TEST_F(LayoutEngineTest, ResolvesNormalPercentageDimensionsAgainstExplicitParent
     panel.setRect({0.f, 0.f, 100.f, 80.f});
     panel.append(makeElement<HTMLLabelElement>("sized"));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     ASSERT_EQ(panel.children().size(), 1U);
     EXPECT_FLOAT_EQ(panel.children().front()->rect().w, 50.f);
     EXPECT_FLOAT_EQ(panel.children().front()->rect().h, 40.f);
@@ -1498,7 +1515,7 @@ TEST_F(LayoutEngineTest, ResolvesNestedPercentageFlexBasis) {
     Element* label = inner->children().front();
     outer.append(std::move(inner));
 
-    layoutTree(outer, styleSheet, text);
+    LayoutEngine::layout(outer, styleSheet, text);
     EXPECT_FLOAT_EQ(innerPtr->rect().w, 50.f);
     EXPECT_FLOAT_EQ(label->rect().w, 25.f);
 }
@@ -1512,7 +1529,7 @@ TEST_F(LayoutEngineTest, ComputesScrollMetricsAndClampsProgrammaticPosition) {
     content->setRect({0.f, 0.f, 180.f, 240.f});
     panel.append(std::move(content));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
 
     EXPECT_FLOAT_EQ(panel.clientWidth(), 85.f);
     EXPECT_FLOAT_EQ(panel.clientHeight(), 85.f);
@@ -1538,7 +1555,7 @@ TEST_F(LayoutEngineTest, ClassicScrollbarsReflowTheOppositeAxis) {
     content->setRect({0.f, 0.f, 100.f, 120.f});
     panel.append(std::move(content));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
 
     EXPECT_FLOAT_EQ(panel.clientWidth(), 85.f);
     EXPECT_FLOAT_EQ(panel.clientHeight(), 85.f);
@@ -1557,7 +1574,7 @@ TEST_F(LayoutEngineTest, HiddenOverflowHasAProgrammaticRangeWithoutScrollbarSpac
     content->setRect({0.f, 0.f, 180.f, 240.f});
     panel.append(std::move(content));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
 
     EXPECT_FLOAT_EQ(panel.clientWidth(), 100.f);
     EXPECT_FLOAT_EQ(panel.clientHeight(), 100.f);
@@ -1581,7 +1598,7 @@ TEST_F(LayoutEngineTest, OverlayScrollbarsDoNotReduceClientSize) {
     ScrollLayoutOptions options;
     options.scrollbarMode = ScrollbarMode::Overlay;
 
-    layoutTree(panel, styleSheet, text, LayoutDirection::LeftToRight, options);
+    LayoutEngine::layout(panel, styleSheet, text, LayoutDirection::LeftToRight, options);
 
     EXPECT_FLOAT_EQ(panel.clientWidth(), 100.f);
     EXPECT_FLOAT_EQ(panel.clientHeight(), 100.f);
@@ -1600,7 +1617,7 @@ TEST_F(LayoutEngineTest, ForcedScrollbarsReserveClassicSpaceWithoutOverflow) {
     auto content = makeElement<Element>("content");
     panel.append(std::move(content));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
 
     EXPECT_FLOAT_EQ(panel.clientWidth(), 85.f);
     EXPECT_FLOAT_EQ(panel.clientHeight(), 85.f);
@@ -1619,7 +1636,7 @@ TEST_F(LayoutEngineTest, VisibleOverflowDoesNotCreateAProgrammaticRange) {
     content->setRect({0.f, 0.f, 180.f, 240.f});
     panel.append(std::move(content));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
 
     EXPECT_FLOAT_EQ(panel.clientWidth(), 100.f);
     EXPECT_FLOAT_EQ(panel.clientHeight(), 100.f);
@@ -1642,10 +1659,10 @@ TEST_F(LayoutEngineTest, RecomputingOverflowClampsStaleScrollPosition) {
     content->setRect({0.f, 0.f, 180.f, 240.f});
     panel.append(std::move(content));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
     panel.scrollTo(500.f, 500.f);
     contentPtr->setRect({0.f, 0.f, 40.f, 40.f});
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
 
     EXPECT_FLOAT_EQ(panel.scrollWidth(), 100.f);
     EXPECT_FLOAT_EQ(panel.scrollHeight(), 100.f);
@@ -1664,7 +1681,7 @@ TEST_F(LayoutEngineTest, UsesNormalizedScrollLeftInRightToLeftLayout) {
     content->setRect({0.f, 0.f, 180.f, 40.f});
     panel.append(std::move(content));
 
-    layoutTree(panel, styleSheet, text, LayoutDirection::RightToLeft);
+    LayoutEngine::layout(panel, styleSheet, text, LayoutDirection::RightToLeft);
     panel.scrollTo(20.f, 0.f);
 
     EXPECT_FLOAT_EQ(panel.scrollLeft(), 20.f);
@@ -1685,7 +1702,7 @@ TEST_F(LayoutEngineTest, AuthoredScrollbarModeOverridesSurfacePolicy) {
     ScrollLayoutOptions options;
     options.scrollbarMode = ScrollbarMode::Classic;
 
-    layoutTree(panel, styleSheet, text, LayoutDirection::LeftToRight, options);
+    LayoutEngine::layout(panel, styleSheet, text, LayoutDirection::LeftToRight, options);
 
     EXPECT_FLOAT_EQ(panel.clientWidth(), 100.f);
     EXPECT_FLOAT_EQ(panel.clientHeight(), 100.f);
@@ -1702,7 +1719,7 @@ TEST_F(LayoutEngineTest, NoneScrollbarWidthPreservesRangeWithoutScrollbarSpace) 
     content->setRect({0.f, 0.f, 180.f, 240.f});
     panel.append(std::move(content));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
 
     EXPECT_FLOAT_EQ(panel.clientWidth(), 100.f);
     EXPECT_FLOAT_EQ(panel.clientHeight(), 100.f);
@@ -1721,7 +1738,7 @@ TEST_F(LayoutEngineTest, ThinScrollbarWidthUsesReducedClassicThickness) {
     content->setRect({0.f, 0.f, 180.f, 240.f});
     panel.append(std::move(content));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
 
     EXPECT_FLOAT_EQ(panel.clientWidth(), 92.5f);
     EXPECT_FLOAT_EQ(panel.clientHeight(), 92.5f);
@@ -1742,7 +1759,7 @@ TEST_F(LayoutEngineTest, StableScrollbarGutterReservesClassicSpaceWithoutOverflo
     content->setId("content");
     panel.append(std::move(content));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
 
     EXPECT_FLOAT_EQ(panel.clientWidth(), 85.f);
     EXPECT_FLOAT_EQ(panel.clientHeight(), 100.f);
@@ -1767,7 +1784,7 @@ TEST_F(LayoutEngineTest, StableBothEdgesMirrorsTheInlineGutter) {
     content->setId("content");
     panel.append(std::move(content));
 
-    layoutTree(panel, styleSheet, text);
+    LayoutEngine::layout(panel, styleSheet, text);
 
     EXPECT_FLOAT_EQ(panel.clientWidth(), 70.f);
     EXPECT_FLOAT_EQ(panel.clientHeight(), 100.f);
@@ -1792,7 +1809,7 @@ TEST_F(LayoutEngineTest, StableBothEdgesReservesPhysicalInlineEdgesInRtl) {
     content->setId("content");
     panel.append(std::move(content));
 
-    layoutTree(panel, styleSheet, text, LayoutDirection::RightToLeft);
+    LayoutEngine::layout(panel, styleSheet, text, LayoutDirection::RightToLeft);
 
     EXPECT_FLOAT_EQ(panel.clientWidth(), 70.f);
     EXPECT_FLOAT_EQ(panel.clientHeight(), 100.f);

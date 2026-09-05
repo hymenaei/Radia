@@ -8,10 +8,10 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "css/stylesheet.h"
 #include "layout/buildresult.h"
 #include "localization.h"
 #include "resourceprovider.h"
-#include "style/stylesheet.h"
 
 namespace radia::ui {
 class SkinCompiler;

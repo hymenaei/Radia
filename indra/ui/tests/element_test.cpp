@@ -32,6 +32,7 @@
 #include "text/metrics.h"
 
 namespace {
+using radia::ui::ComputedStyle;
 using radia::ui::ConstElementList;
 using radia::ui::Dimension;
 using radia::ui::Document;
@@ -68,7 +69,6 @@ using radia::ui::RecordingPaintContext;
 using radia::ui::ResourceSnapshot;
 using radia::ui::SkinCompiler;
 using radia::ui::SkinGenerationPrepareResult;
-using radia::ui::Style;
 using radia::ui::StyleSheet;
 using radia::ui::Surface;
 using radia::ui::System;
@@ -106,12 +106,12 @@ public:
 
     const std::string& text() const { return mLayout.plainText(); }
 
-    Vec2 intrinsicSize(const StyleSheet& styleSheet, const Style& style, const TextMetrics& textMetrics,
+    Vec2 intrinsicSize(const StyleSheet& styleSheet, const ComputedStyle& style, const TextMetrics& textMetrics,
                        const IntrinsicSizeConstraints& constraints = IntrinsicSizeConstraints()) const override {
         return mLayout.measure(textMetrics, style, styleSheet, *this, constraints.width);
     }
 
-    void paint(PaintContext& context, const Style& style, float scale) const override {
+    void paint(PaintContext& context, const ComputedStyle& style, float scale) const override {
         context.paintBox(rect(), style);
         mLayout.paint(context, insetRect(rect(), style.padding), style, styleSheet(), *this);
     }
@@ -985,7 +985,7 @@ TEST(ElementTest, TextDataMutationUpdatesOwnerTextContent) {
 
 TEST(ElementPaintTest, RecordsElementOwnPrimitives) {
     RecordingPaintContext recording;
-    Style style;
+    ComputedStyle style;
 
     auto label = makeElementValue<HTMLLabelElement>("hello");
     label.setRect({1.f, 2.f, 30.f, 10.f});
@@ -1088,19 +1088,20 @@ TEST(ElementPaintTest, PaintsMixedTextAndElementsInSourceOrder) {
 TEST(TextLayoutTest, PreservesFittingShapedLines) {
     class ShapedRunMetrics final : public TextMetrics {
     public:
-        Vec2 measureText(const std::string& value, const Style&) const override {
+        Vec2 measureText(const std::string& value, const ComputedStyle&) const override {
             if (value == "Radia UI Demo") return {50.f, 10.f};
             if (value == "Radia UI") return {28.f, 10.f};
             if (value == " ") return {6.f, 10.f};
             if (value == "Demo") return {20.f, 10.f};
             return {0.f, 10.f};
         }
+        std::uint64_t generation() const noexcept override { return 1; }
     } shapedMetrics;
 
     TextLayoutTestElement naturallySized("Radia UI Demo");
     naturallySized.setRect({0.f, 0.f, 50.f, 10.f});
     RecordingPaintContext recording(shapedMetrics);
-    naturallySized.paint(recording, Style{}, 1.f);
+    naturallySized.paint(recording, ComputedStyle{}, 1.f);
 
     ASSERT_EQ(recording.count(PaintCommandKind::Text), 1U);
     ASSERT_GE(recording.commands().size(), 2U);
@@ -1109,7 +1110,7 @@ TEST(TextLayoutTest, PreservesFittingShapedLines) {
 
 TEST(TextLayoutTest, EllipsizesAccordingToTextDirection) {
     const FixedTextMetrics metrics(.5f, .5f);
-    Style style;
+    ComputedStyle style;
     style.fontSize = 10.f;
     style.textWrap = TextWrap::NoWrap;
     style.textOverflow = TextOverflow::EllipsisCenter;
@@ -1138,7 +1139,7 @@ TEST(TextLayoutTest, EllipsizesAccordingToTextDirection) {
 
 TEST(TextLayoutTest, PreservesGraphemeBoundariesWhenEllipsizing) {
     const FixedTextMetrics metrics(.5f, .5f);
-    Style style;
+    ComputedStyle style;
     style.fontSize = 10.f;
     style.textWrap = TextWrap::NoWrap;
     style.textOverflow = TextOverflow::Ellipsis;
@@ -1159,7 +1160,7 @@ TEST(TextLayoutTest, PreservesGraphemeBoundariesWhenEllipsizing) {
 
 TEST(TextLayoutTest, ClipsOverflowWithoutRewritingText) {
     const FixedTextMetrics metrics(.5f, .5f);
-    Style style;
+    ComputedStyle style;
     style.fontSize = 10.f;
     style.textWrap = TextWrap::NoWrap;
     style.textOverflow = TextOverflow::Clip;
@@ -1176,7 +1177,7 @@ TEST(TextLayoutTest, ClipsOverflowWithoutRewritingText) {
 
 TEST(TextLayoutTest, WrapsAtWordAndUnicodeBoundaries) {
     const FixedTextMetrics metrics(.5f, .5f);
-    Style style;
+    ComputedStyle style;
     style.fontSize = 10.f;
     style.textOverflow = TextOverflow::Clip;
     ASSERT_EQ(style.textWrap, TextWrap::Wrap);
@@ -1219,7 +1220,7 @@ TEST(TextLayoutTest, WrapsAtWordAndUnicodeBoundaries) {
 TEST(TextLayoutTest, UsesShapedWidthsForCenterEllipsis) {
     class VariableTextMetrics final : public TextMetrics {
     public:
-        Vec2 measureText(const std::string& value, const Style&) const override {
+        Vec2 measureText(const std::string& value, const ComputedStyle&) const override {
             if (value.empty()) return {0.f, 10.f};
             if (value == "W") return {20.f, 10.f};
             if (value == "\xE2\x80\xA6") return {5.f, 10.f};
@@ -1228,9 +1229,10 @@ TEST(TextLayoutTest, UsesShapedWidthsForCenterEllipsis) {
                 10.f,
             };
         }
+        std::uint64_t generation() const noexcept override { return 1; }
     } variableMetrics;
 
-    Style style;
+    ComputedStyle style;
     style.fontSize = 10.f;
     style.textWrap = TextWrap::NoWrap;
     style.textOverflow = TextOverflow::EllipsisCenter;
@@ -1275,7 +1277,7 @@ TEST(TextLayoutTest, AppliesOverflowToMountedTextNodes) {
 
 TEST(TextLayoutTest, AppliesLetterAndWordSpacingToMeasuredText) {
     const FixedTextMetrics metrics(.5f, .5f);
-    Style style;
+    ComputedStyle style;
     style.fontSize = 10.f;
 
     style.letterSpacing = Length{2.f};

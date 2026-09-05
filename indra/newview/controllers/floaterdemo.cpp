@@ -73,7 +73,12 @@ void FloaterDemo::requestSkinReload() {
     if (mRequestSkinReload) mRequestSkinReload();
 }
 
+void FloaterDemo::onOpen() {
+    refreshLocaleControls();
+}
+
 void FloaterDemo::onReloadSucceeded() {
+    refreshLocaleControls();
     if (mStatus) mStatus->innerHTML(t("demo.reloadSucceeded"));
 }
 

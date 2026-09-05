@@ -20,6 +20,8 @@
 #include "dom/element.h"
 #include "dom/text.h"
 
+namespace radia::ui { struct StyleRuleSet; }
+
 namespace radia::ui::detail {
 using Node = radia::ui::Node;
 struct DocumentIdentity {};
@@ -42,24 +44,22 @@ template<typename ElementT, typename... Args> ElementT makeElementValue(Args&&..
 }
 
 struct LayoutContextKey {
-    const StyleSheet* styleSheet = nullptr;
+    const StyleRuleSet* styleRuleSet = nullptr;
     const TextMetrics* textMetrics = nullptr;
     std::uint64_t styleGeneration = 0;
     std::uint64_t textMetricsGeneration = 0;
     LayoutDirection direction = LayoutDirection::LeftToRight;
     ScrollbarMode scrollbarMode = ScrollbarMode::Classic;
-    const NativeAppearance* nativeAppearance = nullptr;
-    std::uint64_t nativeAppearanceRevision = 0;
+    NativeLayoutMetrics nativeMetrics;
 
     constexpr bool operator==(const LayoutContextKey& other) const {
-        return styleSheet == other.styleSheet
+        return styleRuleSet == other.styleRuleSet
             && textMetrics == other.textMetrics
             && styleGeneration == other.styleGeneration
             && textMetricsGeneration == other.textMetricsGeneration
             && direction == other.direction
             && scrollbarMode == other.scrollbarMode
-            && nativeAppearance == other.nativeAppearance
-            && nativeAppearanceRevision == other.nativeAppearanceRevision;
+            && nativeMetrics == other.nativeMetrics;
     }
 };
 
@@ -234,6 +234,8 @@ const std::string* styleAttribute(const Element& element, std::string_view name)
 Element* findElementInScope(Element& element, std::string_view id);
 const Element* findElementInScope(const Element& element, std::string_view id);
 struct ElementIdIndex {
+    using ElementPointer = Element*;
+
     std::map<std::string, Element*> first;
     std::set<std::string> ambiguous;
 
@@ -242,7 +244,19 @@ struct ElementIdIndex {
         if (!first.emplace(element.id(), &element).second) ambiguous.emplace(element.id());
     }
 };
+struct ConstElementIdIndex {
+    using ElementPointer = const Element*;
+
+    std::map<std::string, const Element*> first;
+    std::set<std::string> ambiguous;
+
+    void add(const Element& element) {
+        if (element.id().empty()) return;
+        if (!first.emplace(element.id(), &element).second) ambiguous.emplace(element.id());
+    }
+};
 void indexElementsInScope(Element& element, ElementIdIndex& index);
+void indexElementsInScope(const Element& element, ConstElementIdIndex& index);
 Node& appendText(Element& parent, std::string text);
 Node& appendLocalizedText(Element& parent, LocalizedText text, std::string html);
 NodeChildren nodes(Element& element);
@@ -252,8 +266,6 @@ template<typename ElementT> class ElementVisit;
 } // namespace radia::ui::detail
 
 namespace radia::ui {
-using LayoutContextKey = detail::LayoutContextKey;
-
 template<typename ElementT> class ElementRef {
     using ElementInternalAccess = detail::ElementInternalAccess;
     using Lifetime = std::weak_ptr<char>;

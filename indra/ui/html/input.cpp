@@ -12,7 +12,7 @@
 #include "nativeappearance.h"
 #include "render/paintcontext.h"
 #include "resource/elementdefinition.h"
-#include "style/style.h"
+#include "style/computedstyle.h"
 #include "surface/surface.h"
 
 namespace radia::ui {
@@ -44,7 +44,7 @@ HTMLInputElement::HTMLInputElement()
     setAttribute("type", mType);
 }
 
-void HTMLInputElement::constrainResolvedStyle(Style& style) const {
+void HTMLInputElement::constrainResolvedStyle(ComputedStyle& style) const {
     if (style.appearance != AppearanceMode::Base || !isCheckableType(mType) || isSwitchType() || style.borderWidthSet) return;
     style.borderWidth = {1.f, 1.f, 1.f, 1.f};
     if (!style.borderColorSet) {
@@ -55,7 +55,8 @@ void HTMLInputElement::constrainResolvedStyle(Style& style) const {
     }
 }
 
-Vec2 HTMLInputElement::intrinsicSize(const StyleSheet&, const Style& style, const TextMetrics&, const IntrinsicSizeConstraints& constraints) const {
+Vec2 HTMLInputElement::intrinsicSize(const StyleSheet&, const ComputedStyle& style, const TextMetrics&,
+                                     const IntrinsicSizeConstraints& constraints) const {
     if (!isCheckableType(mType)) return {};
     if (style.appearance == AppearanceMode::Base && !isSwitchType()) {
         const float size = std::max(24.f, style.fontSize);
@@ -66,14 +67,12 @@ Vec2 HTMLInputElement::intrinsicSize(const StyleSheet&, const Style& style, cons
     const NativeInputControl control = isRadioType() ? NativeInputControl::Radio
         : isSwitchType()                             ? NativeInputControl::Switch
                                                      : NativeInputControl::Checkbox;
-    const Surface* owner = surface();
-    const NativeAppearance& appearance = constraints.nativeAppearance ? *constraints.nativeAppearance
-        : owner                                                       ? owner->nativeAppearance()
-                                                                      : defaultNativeAppearance();
-    return appearance.inputMetrics(control).intrinsicSize;
+    const NativeLayoutMetrics metrics =
+        constraints.nativeMetrics.value_or(surface() ? surface()->nativeLayoutMetrics() : defaultNativeLayoutMetrics());
+    return metrics.inputMetrics(control).intrinsicSize;
 }
 
-void HTMLInputElement::paint(PaintContext& context, const Style& style, float scale) const {
+void HTMLInputElement::paint(PaintContext& context, const ComputedStyle& style, float scale) const {
     if (style.appearance != AppearanceMode::Auto || !isCheckableType(mType)) {
         Element::paint(context, style, scale);
         if (style.appearance == AppearanceMode::Base) {
@@ -83,9 +82,9 @@ void HTMLInputElement::paint(PaintContext& context, const Style& style, float sc
             if (clipsX || clipsY) context.pushClip(ElementInternalAccess::scrollport(*this), scale, clipAxes);
             const auto paintPseudoElement = [&context, scale](const PseudoElement& pseudoElement, float inheritedOpacity,
                                                               const auto& paintChildren) -> void {
-                const Style& pseudoStyle = pseudoElement.style();
+                const ComputedStyle& pseudoStyle = pseudoElement.style();
                 if (pseudoStyle.display == DisplayMode::NoneValue || pseudoElement.rect().empty()) return;
-                Style paintedStyle = pseudoStyle;
+                ComputedStyle paintedStyle = pseudoStyle;
                 applyOpacity(paintedStyle, inheritedOpacity);
                 const bool clipsX = paintedStyle.overflowX != Overflow::Visible;
                 const bool clipsY = paintedStyle.overflowY != Overflow::Visible;

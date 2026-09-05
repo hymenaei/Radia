@@ -61,12 +61,12 @@ public:
 
     bool defaultPointerEvents() const override { return true; }
     bool focusable() const override { return true; }
-    Vec2 intrinsicSize(const StyleSheet& styleSheet, const Style& style, const TextMetrics& textMetrics,
+    Vec2 intrinsicSize(const StyleSheet& styleSheet, const ComputedStyle& style, const TextMetrics& textMetrics,
                        const IntrinsicSizeConstraints& constraints = IntrinsicSizeConstraints()) const override;
-    void paint(PaintContext& context, const Style& style, float scale) const override;
+    void paint(PaintContext& context, const ComputedStyle& style, float scale) const override;
 
 protected:
-    void constrainResolvedStyle(Style& style) const override;
+    void constrainResolvedStyle(ComputedStyle& style) const override;
     void onActivate() override;
     void onTreeWillBeDetached() override;
     void onTreeAttached() override;

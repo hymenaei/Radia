@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <memory>
 #include <optional>
 #include <regex>
 #include <sstream>
@@ -17,10 +18,12 @@
 #include <vector>
 #include <simdutf.h>
 #include <unicode/fmtable.h>
+#include <unicode/locdspnm.h>
 #include <unicode/locid.h>
 #include <unicode/msgfmt.h>
 #include <unicode/normalizer2.h>
 #include <unicode/uchar.h>
+#include <unicode/udisplaycontext.h>
 #include <unicode/unistr.h>
 #include <yaml-cpp/eventhandler.h>
 #include <yaml-cpp/parser.h>
@@ -601,8 +604,10 @@ struct LocalizationCatalog::Impl {
 
 namespace {
 std::string localeDisplayName(const icu::Locale& locale) {
+    UDisplayContext context = UDISPCTX_CAPITALIZATION_FOR_UI_LIST_OR_MENU;
+    const std::unique_ptr<icu::LocaleDisplayNames> displayNames(icu::LocaleDisplayNames::createInstance(locale, &context, 1));
     icu::UnicodeString displayName;
-    locale.getDisplayName(locale, displayName);
+    if (displayNames) displayNames->localeDisplayName(locale, displayName);
     return unicodeToUtf8(displayName);
 }
 

@@ -28,6 +28,7 @@
 #include "render/recordingpaintcontext.h"
 #include "resource/elementdefinition.h"
 #include "skin/compiler.h"
+#include "style/stylepass.h"
 #include "surface/surface.h"
 #include "system.h"
 #include "text/metrics.h"
@@ -35,6 +36,7 @@
 namespace {
 using radia::ui::Binder;
 using radia::ui::Binding;
+using radia::ui::ComputedStyle;
 using radia::ui::Element;
 using radia::ui::ElementRef;
 using radia::ui::Event;
@@ -48,17 +50,16 @@ using radia::ui::kBTag;
 using radia::ui::kITag;
 using radia::ui::kKbdTag;
 using radia::ui::LayoutDirection;
-using radia::ui::layoutTree;
+using radia::ui::LayoutEngine;
 using radia::ui::LocalizationCatalog;
 using radia::ui::NodePtr;
 using radia::ui::PaintCommand;
 using radia::ui::PaintCommandKind;
 using radia::ui::PreparedBindingResult;
-using radia::ui::resolveElementStyle;
 using radia::ui::ResourceBuildContext;
 using radia::ui::ResourceBuildResult;
 using radia::ui::ResourceCompiler;
-using radia::ui::Style;
+using radia::ui::StylePass;
 using radia::ui::StyleSheet;
 using radia::ui::Visibility;
 using radia::ui::detail::findElementInScope;
@@ -69,6 +70,11 @@ using radia::ui::detail::nodes;
 using radia::ui::test::ResourceCompilerTestHelper;
 using ::testing::Message;
 using ::testing::Test;
+
+ComputedStyle computedStyle(const StyleSheet& stylesheet, const Element& element) {
+    StylePass styles(stylesheet, FixedTextMetrics{});
+    return styles.style(element);
+}
 
 void bindChangeEvent(Binder& binder, std::string name, std::function<void(const Event&)> callback) {
     binder.event(makeEventRegistration(
@@ -190,7 +196,7 @@ TEST_F(FieldsetTest, PreservesLocalizedBreaksBetweenInlineRuns) {
     paragraph->setRect({0.f, 0.f, 300.f, 100.f});
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia("p, b, i, kbd { display: inline; font-size: 10px; line-height: 10px; }").ok());
-    layoutTree(*paragraph, stylesheet, FixedTextMetrics());
+    LayoutEngine::layout(*paragraph, stylesheet, FixedTextMetrics());
 
     std::vector<std::string> nodeNames;
     const radia::ui::Node* postBreakText = nullptr;
@@ -408,7 +414,7 @@ TEST_F(FieldsetTest, AcceptsGenericFieldsetChildrenAndScopesLegend) {
                                "fieldset > legend { height: 10px; } div.row { height: 20px; }")
                     .ok());
     fieldset->setRect({0.f, 0.f, 120.f, 90.f});
-    layoutTree(*fieldset, stylesheet, FixedTextMetrics{});
+    LayoutEngine::layout(*fieldset, stylesheet, FixedTextMetrics{});
     EXPECT_FLOAT_EQ(fieldset->children()[0]->rect().left(), 7.f);
     EXPECT_LT(fieldset->children()[0]->rect().right(), fieldset->rect().right());
     EXPECT_LT(fieldset->children()[0]->rect().w, fieldset->rect().w - 12.f);
@@ -417,7 +423,7 @@ TEST_F(FieldsetTest, AcceptsGenericFieldsetChildrenAndScopesLegend) {
     EXPECT_FLOAT_EQ(fieldset->children()[1]->rect().bottom() - fieldset->children()[2]->rect().top(), 10.f);
 
     radia::ui::RecordingPaintContext recording(FixedTextMetrics{});
-    fieldset->paint(recording, resolveElementStyle(stylesheet, *fieldset), 1.f);
+    fieldset->paint(recording, computedStyle(stylesheet, *fieldset), 1.f);
     const PaintCommand* fieldsetBox = recording.last(PaintCommandKind::Box);
     ASSERT_NE(fieldsetBox, nullptr);
     ASSERT_TRUE(fieldsetBox->topBorderGap.has_value());

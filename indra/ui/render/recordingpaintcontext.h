@@ -33,7 +33,7 @@ enum class PaintCommandKind {
 struct PaintCommand {
     PaintCommandKind kind;
     Rect rect;
-    Style style;
+    ComputedStyle style;
     std::string textOrIconName;
     float scale = 1.f;
     ClipAxes clipAxes = ClipAxes::Both;
@@ -50,24 +50,24 @@ class RecordingPaintContext final : public PaintContext {
 public:
     explicit RecordingPaintContext(const TextMetrics& textMetrics = fixedTextMetrics()) : mTextMetrics(textMetrics) {}
 
-    Vec2 measureText(const std::string& text, const Style& style) const override;
-    float usedLetterSpacing(const Style& style) const override;
-    std::uint64_t generation() const override { return mTextMetrics.generation(); }
+    Vec2 measureText(const std::string& text, const ComputedStyle& style) const override;
+    float usedLetterSpacing(const ComputedStyle& style) const override;
+    std::uint64_t generation() const noexcept override { return mTextMetrics.generation(); }
     void beginFrame(const PaintTarget& target) override;
     void endFrame() override;
     void pushClip(const Rect& rect, float scale, ClipAxes axes = ClipAxes::Both) override;
     void popClip() override;
     void pushTranslation(const Vec2& translation) override;
     void popTranslation() override;
-    void beginEffects(const Rect& rect, const Style& style, float scale) override;
+    void beginEffects(const Rect& rect, const ComputedStyle& style, float scale) override;
     void endEffects() override;
     void paintNativeScrollbar(const NativeScrollbarPaintRequest& request) override;
     void paintNativeInput(const NativeInputPaintRequest& request) override;
     void paintNativeInputMark(const NativeInputMarkPaintRequest& request) override;
     void paintNativeButton(const NativeButtonPaintRequest& request) override;
-    void paintBox(const Rect& rect, const Style& style, std::optional<TopBorderGap> topBorderGap = std::nullopt) override;
-    void paintText(const std::string& text, const Rect& rect, const Style& style) override;
-    void paintIcon(const std::string& name, const Rect& rect, const Style& style, float scale) override;
+    void paintBox(const Rect& rect, const ComputedStyle& style, std::optional<TopBorderGap> topBorderGap = std::nullopt) override;
+    void paintText(const std::string& text, const Rect& rect, const ComputedStyle& style) override;
+    void paintIcon(const std::string& name, const Rect& rect, const ComputedStyle& style, float scale) override;
 
     const std::vector<PaintCommand>& commands() const { return mCommands; }
     std::size_t count(PaintCommandKind kind) const;

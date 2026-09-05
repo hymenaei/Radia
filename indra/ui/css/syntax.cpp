@@ -4,7 +4,7 @@
  */
 
 #include "linden_common.h"
-#include "style/syntax.h"
+#include "css/syntax.h"
 #include <algorithm>
 #include <cctype>
 

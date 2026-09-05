@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 #include "llstring.h"
-#include "style/style.h"
+#include "style/computedstyle.h"
 
 namespace radia::ui { class TextMetrics; }
 
@@ -18,7 +18,7 @@ std::vector<std::size_t> graphemeBoundaries(const LLWString& value);
 
 struct TextRun {
     std::string value;
-    Style style;
+    ComputedStyle style;
     Vec2 size;
 };
 
@@ -36,6 +36,6 @@ struct TextLayout {
     Vec2 size;
 };
 
-TextLayout layoutText(const std::vector<TextLine>& hardLines, const Style& style, const TextMetrics& metrics, std::optional<float> availableWidth,
-                      bool visualOrder, bool applyOverflow);
+TextLayout layoutText(const std::vector<TextLine>& hardLines, const ComputedStyle& style, const TextMetrics& metrics,
+                      std::optional<float> availableWidth, bool visualOrder, bool applyOverflow);
 } // namespace radia::ui::detail

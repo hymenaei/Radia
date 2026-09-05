@@ -15,7 +15,7 @@ class HTMLIconElement : public HTMLElement {
 public:
     HTMLIconElement& setName(std::string name);
     const std::string& name() const { return mName; }
-    void paint(PaintContext& context, const Style& style, float scale) const override;
+    void paint(PaintContext& context, const ComputedStyle& style, float scale) const override;
 
 protected:
 private:

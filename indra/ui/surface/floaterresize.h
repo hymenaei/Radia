@@ -7,7 +7,7 @@
 
 #include <cstdint>
 #include <optional>
-#include "style/style.h"
+#include "style/computedstyle.h"
 #include "types.h"
 
 namespace radia::ui::detail {

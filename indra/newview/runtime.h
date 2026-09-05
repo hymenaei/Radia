@@ -15,7 +15,7 @@
 #include "event.h"
 #include "resolver.h"
 #include "stdtypes.h"
-#include "style/style.h"
+#include "style/computedstyle.h"
 #include "text/keybinding.h"
 #include "types.h"
 

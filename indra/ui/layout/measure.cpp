@@ -6,11 +6,11 @@
 #include "linden_common.h"
 #include <algorithm>
 #include <cmath>
+#include "css/stylesheet.h"
 #include "dom/element.h"
 #include "dom/text.h"
 #include "html/elementnames.h"
 #include "layout/layoutcontext.h"
-#include "style/stylesheet.h"
 #include "text/metrics.h"
 
 namespace radia::ui {
@@ -36,10 +36,10 @@ using layout_detail::rowLines;
 using layout_detail::styledBoxDimension;
 
 Vec2 LayoutEngine::measure(Element& node, LayoutPass& pass, std::optional<float> outerWidth, std::optional<float> outerHeight) {
-    const LayoutContextKey contextKey = pass.contextKey();
+    const detail::LayoutContextKey contextKey = pass.contextKey();
     const StyleSheet& styleSheet = pass.styleSheet();
     const TextMetrics& textMetrics = pass.textMetrics();
-    const Style& style = pass.style(node);
+    const ComputedStyle& style = pass.style(node);
     if (!node.isDisplayed(style)) {
         ElementInternalAccess::layoutCache(node).measuredSize = {};
         ElementInternalAccess::layoutCache(node).measuredWidth = outerWidth.value_or(0.f);
@@ -97,7 +97,7 @@ Vec2 LayoutEngine::measure(Element& node, LayoutPass& pass, std::optional<float>
         resolvedHeight = styledBoxDimension(style, false, style.height, style.minHeight, 0.f);
     if (!resolvedHeight && node.mRectExplicit && style.height.isAuto()) resolvedHeight = std::max(0.f, node.mRect.h);
     if (!resolvedHeight && node.mRectExplicit && style.height.isPercentage()) resolvedHeight = std::max(0.f, node.mRect.h);
-    const IntrinsicSizeConstraints constraints{resolvedWidth, resolvedHeight, &pass.nativeAppearance()};
+    const IntrinsicSizeConstraints constraints{resolvedWidth, resolvedHeight, pass.nativeMetrics()};
     const ElementRef<Element> lifetime(&node);
     const Surface* surface = node.mSurface;
     const Element* parent = node.mParent;
@@ -151,8 +151,8 @@ Vec2 LayoutEngine::measure(Element& node, LayoutPass& pass, std::optional<float>
     return desired;
 }
 
-Vec2 LayoutEngine::measurePseudoElement(PseudoElement& node, const Style& style, std::optional<float> outerWidth, std::optional<float> outerHeight,
-                                        LayoutPass& pass) {
+Vec2 LayoutEngine::measurePseudoElement(PseudoElement& node, const ComputedStyle& style, std::optional<float> outerWidth,
+                                        std::optional<float> outerHeight, LayoutPass& pass) {
     if (style.display == DisplayMode::NoneValue) {
         node.setDesiredSize({});
         return {};
@@ -173,7 +173,7 @@ Vec2 LayoutEngine::measurePseudoElement(PseudoElement& node, const Style& style,
         resolvedHeight ? std::optional<float>(contentBoxDimension(style, false, *resolvedHeight)) : std::nullopt;
     for (const LayoutChildRef& child : pass.orderedChildrenForLayout(node)) {
         if (!child.attachedTo(node) || !child.pseudoElement) continue;
-        const Style childStyle = pass.style(*child.pseudoElement);
+        const ComputedStyle childStyle = pass.style(*child.pseudoElement);
         if (childStyle.display == DisplayMode::NoneValue) continue;
         const std::optional<float> childWidth = contentWidth && childStyle.width.isPercentage()
             ? std::optional<float>(styledBoxDimension(childStyle, true, childStyle.width, childStyle.minWidth, 0.f, *contentWidth))
@@ -224,7 +224,7 @@ Vec2 LayoutEngine::measurePseudoElement(PseudoElement& node, const Style& style,
     return desired;
 }
 
-ChildLayout LayoutEngine::measureChild(Element& parent, LayoutChildRef child, const Style& parentStyle, FlexDirection flexDirection,
+ChildLayout LayoutEngine::measureChild(Element& parent, LayoutChildRef child, const ComputedStyle& parentStyle, FlexDirection flexDirection,
                                        std::optional<float> resolvedWidth, std::optional<float> resolvedHeight, LayoutPass& pass) {
     const NodeSnapshot parentState(parent);
     const LayoutChildRef childState = child;
@@ -236,7 +236,7 @@ ChildLayout LayoutEngine::measureChild(Element& parent, LayoutChildRef child, co
         return childPseudoElement || !childElement || childElement->mSurface == parentState.surface;
     };
 
-    const Style childStyle = pass.style(child, parentStyle);
+    const ComputedStyle childStyle = pass.style(child, parentStyle);
     if (!isCurrent()) return invalidChildLayout();
     if (childElement ? !childElement->isDisplayed(childStyle) : childStyle.display == DisplayMode::NoneValue) return invalidChildLayout();
     std::optional<float> childWidth;
@@ -328,8 +328,8 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::measureNormalChildren(Elem
     const NodeSnapshot parentState(parent);
     std::vector<ChildLayout> layouts;
     layouts.reserve(parent.mChildren.size() + parent.generatedPseudoElements().size());
-    const Style parentStyle = pass.style(parent);
-    const std::vector<LayoutChildRef> children = orderedChildren(parent, pass);
+    const ComputedStyle parentStyle = pass.style(parent);
+    const std::vector<LayoutChildRef> children = pass.orderedChildrenForLayout(parent);
     for (std::size_t index = 0; index < children.size(); ++index) {
         const LayoutChildRef& childRef = children[index];
         Element* childPtr = childRef.element();
@@ -337,7 +337,7 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::measureNormalChildren(Elem
         if (isWhitespaceOnlyText(childRef) && !pass.preservesNormalFlowWhitespace(children, index, parentStyle)) continue;
         if (childPtr && childPtr->elementName() == kBrTag.localName) continue;
 
-        const Style childStyle = pass.style(childRef, parentStyle);
+        const ComputedStyle childStyle = pass.style(childRef, parentStyle);
         if (childPtr ? !childPtr->isDisplayed(childStyle) : childStyle.display == DisplayMode::NoneValue) continue;
 
         const auto isCurrent = [&] {
@@ -399,14 +399,14 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::measureGridChildren(Elemen
     const NodeSnapshot parentState(parent);
     std::vector<ChildLayout> layouts;
     layouts.reserve(parent.mChildren.size() + parent.generatedPseudoElements().size());
-    const std::vector<LayoutChildRef> children = orderedChildren(parent, pass);
+    const std::vector<LayoutChildRef> children = pass.orderedChildrenForLayout(parent);
     for (const LayoutChildRef& childRef : children) {
         Element* childElement = childRef.element();
         if (!childRef.attachedTo(parent)) continue;
         if (isWhitespaceOnlyText(childRef)) continue;
         if (childElement && childElement->elementName() == kBrTag.localName) continue;
 
-        const Style childStyle = pass.style(childRef, pass.style(parent));
+        const ComputedStyle childStyle = pass.style(childRef, pass.style(parent));
         if (childElement ? !childElement->isDisplayed(childStyle) : childStyle.display == DisplayMode::NoneValue) continue;
 
         const auto isCurrent = [&] {
@@ -438,7 +438,7 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::measureGridChildren(Elemen
     return layouts;
 }
 
-Vec2 LayoutEngine::measureGrid(Element& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
+Vec2 LayoutEngine::measureGrid(Element& node, const ComputedStyle& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
                                std::optional<float> resolvedHeight, LayoutPass& pass) {
     Vec2 content = intrinsic;
     const std::optional<float> contentWidth = resolvedWidth ? std::optional<float>(contentBoxDimension(style, true, *resolvedWidth)) : std::nullopt;
@@ -457,7 +457,7 @@ Vec2 LayoutEngine::measureGrid(Element& node, const Style& style, const Vec2& in
     return content;
 }
 
-Vec2 LayoutEngine::measureRow(Element& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
+Vec2 LayoutEngine::measureRow(Element& node, const ComputedStyle& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
                               std::optional<float> resolvedHeight, LayoutPass& pass) {
     const NodeSnapshot nodeState(node);
     Vec2 content;
@@ -480,7 +480,7 @@ Vec2 LayoutEngine::measureRow(Element& node, const Style& style, const Vec2& int
         previousChild = {};
     };
 
-    const std::vector<LayoutChildRef> children = orderedChildren(node, pass);
+    const std::vector<LayoutChildRef> children = pass.orderedChildrenForLayout(node);
     for (const LayoutChildRef& childRef : children) {
         if (!childRef || !childRef.attachedTo(node)) continue;
         if (isWhitespaceOnlyText(childRef)) continue;
@@ -523,13 +523,13 @@ Vec2 LayoutEngine::measureRow(Element& node, const Style& style, const Vec2& int
     return content;
 }
 
-Vec2 LayoutEngine::measureColumn(Element& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
+Vec2 LayoutEngine::measureColumn(Element& node, const ComputedStyle& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
                                  std::optional<float> resolvedHeight, LayoutPass& pass) {
     const NodeSnapshot nodeState(node);
     Vec2 content = intrinsic;
     LayoutChildRef previousChild;
     const float fixedGap = style.gap.fixedPixels();
-    const std::vector<LayoutChildRef> children = orderedChildren(node, pass);
+    const std::vector<LayoutChildRef> children = pass.orderedChildrenForLayout(node);
     for (const LayoutChildRef& childRef : children) {
         if (!childRef || !childRef.attachedTo(node)) continue;
         if (isWhitespaceOnlyText(childRef)) continue;
@@ -553,7 +553,7 @@ Vec2 LayoutEngine::measureColumn(Element& node, const Style& style, const Vec2& 
     return content;
 }
 
-Vec2 LayoutEngine::measureNormal(Element& node, const Style& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
+Vec2 LayoutEngine::measureNormal(Element& node, const ComputedStyle& style, const Vec2& intrinsic, std::optional<float> resolvedWidth,
                                  std::optional<float> resolvedHeight, LayoutPass& pass) {
     Vec2 content = intrinsic;
     const std::optional<float> contentWidth = resolvedWidth ? std::optional<float>(contentBoxDimension(style, true, *resolvedWidth)) : std::nullopt;
@@ -631,7 +631,7 @@ bool LayoutEngine::remeasureColumnChildren(Element& parent, std::vector<ChildLay
     return true;
 }
 
-LayoutEngine::RowSizing LayoutEngine::allocateRowLines(Element& parent, std::vector<ChildLayout>& children, const Style& parentStyle,
+LayoutEngine::RowSizing LayoutEngine::allocateRowLines(Element& parent, std::vector<ChildLayout>& children, const ComputedStyle& parentStyle,
                                                        float availableMain, LayoutPass& pass) {
     RowSizing sizing;
     sizing.lines = rowLines(children);

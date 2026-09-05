@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 #include "binding/valuebinding.h"
+#include "css/stylesheet.h"
 #include "dom/elementinternal.h"
 #include "event.h"
 #include "html/input.h"
@@ -20,8 +21,8 @@
 #include "layout/engine.h"
 #include "nativeappearance.h"
 #include "render/recordingpaintcontext.h"
-#include "style/style.h"
-#include "style/stylesheet.h"
+#include "style/computedstyle.h"
+#include "style/stylepass.h"
 #include "surface/surface.h"
 #include "text/metrics.h"
 
@@ -30,6 +31,7 @@ using radia::ui::AccentColor;
 using radia::ui::AppearanceMode;
 using radia::ui::Color;
 using radia::ui::ColorScheme;
+using radia::ui::ComputedStyle;
 using radia::ui::ElementState;
 using radia::ui::Event;
 using radia::ui::fixedTextMetrics;
@@ -38,7 +40,7 @@ using radia::ui::HTMLPanelElement;
 using radia::ui::kChangeEvent;
 using radia::ui::kInputEvent;
 using radia::ui::LayoutDirection;
-using radia::ui::layoutTree;
+using radia::ui::LayoutEngine;
 using radia::ui::NativeAppearanceBase;
 using radia::ui::NativeInputControl;
 using radia::ui::NativeInputMark;
@@ -48,10 +50,9 @@ using radia::ui::PaintCommand;
 using radia::ui::PaintCommandKind;
 using radia::ui::PathVerb;
 using radia::ui::RecordingPaintContext;
-using radia::ui::resolveElementStyle;
 using radia::ui::ScrollbarMode;
 using radia::ui::ScrollLayoutOptions;
-using radia::ui::Style;
+using radia::ui::StylePass;
 using radia::ui::StyleSheet;
 using radia::ui::Surface;
 using radia::ui::ValueBinding;
@@ -62,6 +63,11 @@ using radia::ui::ValueValidationStatus;
 using radia::ui::Vec2;
 using radia::ui::detail::makeElement;
 using radia::ui::detail::makeElementValue;
+
+ComputedStyle computedStyle(const StyleSheet& stylesheet, const radia::ui::Element& element) {
+    StylePass styles(stylesheet, fixedTextMetrics());
+    return styles.style(element);
+}
 
 template<typename T> class MemoryValueBinding final : public ValueBinding<T>, public std::enable_shared_from_this<MemoryValueBinding<T>> {
 public:
@@ -179,7 +185,7 @@ TEST(InputTest, KeepsOneElementIdentityAcrossInputTypes) {
 TEST(InputTest, AppearanceSelectsNativeCommandOrOrdinaryPaint) {
     auto input = makeElementValue<HTMLInputElement>();
     RecordingPaintContext recording;
-    Style style;
+    ComputedStyle style;
 
     input.type("checkbox").setRect({0.f, 0.f, 13.f, 13.f});
     input.paint(recording, style, 1.f);
@@ -199,7 +205,7 @@ TEST(InputTest, AppearanceSelectsNativeCommandOrOrdinaryPaint) {
     auto control = makeElementValue<HTMLInputElement>();
     control.type("checkbox").switchMode(true).setRect({0.f, 0.f, 36.f, 20.f});
     recording.clear();
-    control.paint(recording, Style{}, 1.f);
+    control.paint(recording, ComputedStyle{}, 1.f);
     ASSERT_EQ(recording.count(PaintCommandKind::NativeInput), std::size_t{1});
     ASSERT_NE(recording.last(PaintCommandKind::NativeInput), nullptr);
     ASSERT_TRUE(recording.last(PaintCommandKind::NativeInput)->nativeInput.has_value());
@@ -215,10 +221,10 @@ TEST(InputTest, BaseAppearancePaintsCheckmarkContent) {
 
     auto input = makeElementValue<HTMLInputElement>();
     input.type("checkbox").checked(true).setRect({0.f, 0.f, 20.f, 20.f});
-    layoutTree(input, stylesheet, fixedTextMetrics());
+    LayoutEngine::layout(input, stylesheet, fixedTextMetrics());
 
     RecordingPaintContext recording;
-    input.paint(recording, resolveElementStyle(stylesheet, input), 1.f);
+    input.paint(recording, computedStyle(stylesheet, input), 1.f);
 
     const PaintCommand* text = recording.last(PaintCommandKind::Text);
     ASSERT_NE(text, nullptr);
@@ -229,7 +235,7 @@ TEST(InputTest, NativeRequestCarriesResolvedAccentColor) {
     auto input = makeElementValue<HTMLInputElement>();
     input.type("checkbox").setRect({0.f, 0.f, 13.f, 13.f});
     RecordingPaintContext recording;
-    Style style;
+    ComputedStyle style;
     style.accentColor = AccentColor::fromColor({.2f, .4f, .6f, .8f});
 
     input.paint(recording, style, 1.f);
@@ -248,7 +254,7 @@ TEST(InputTest, NativeRequestCarriesResolvedColorScheme) {
     auto input = makeElementValue<HTMLInputElement>();
     input.type("checkbox").setRect({0.f, 0.f, 13.f, 13.f});
     RecordingPaintContext recording;
-    Style style;
+    ComputedStyle style;
     style.colorScheme = ColorScheme::Light;
 
     input.paint(recording, style, 1.f);
@@ -408,10 +414,10 @@ TEST(InputTest, IntrinsicSizeUsesSurfaceNativeAppearanceMetrics) {
     input.type("radio");
     SizedNativeAppearance appearance;
     Surface surface(styleSheet);
-    surface.setScrollLayoutOptions({ScrollbarMode::Classic, &appearance});
+    surface.setScrollLayoutOptions({ScrollbarMode::Classic, appearance.layoutMetrics()});
     surface.mount(input);
 
-    const Vec2 size = input.intrinsicSize(styleSheet, Style{}, fixedTextMetrics());
+    const Vec2 size = input.intrinsicSize(styleSheet, ComputedStyle{}, fixedTextMetrics());
     EXPECT_FLOAT_EQ(size.x, 21.f);
     EXPECT_FLOAT_EQ(size.y, 22.f);
 }
@@ -422,9 +428,24 @@ TEST(InputTest, DetachedLayoutUsesRequestedNativeAppearanceMetrics) {
     input.type("radio");
     SizedNativeAppearance appearance;
     ScrollLayoutOptions options;
-    options.nativeAppearance = &appearance;
+    options.nativeMetrics = appearance.layoutMetrics();
 
-    layoutTree(input, styleSheet, fixedTextMetrics(), LayoutDirection::LeftToRight, options);
+    LayoutEngine::layout(input, styleSheet, fixedTextMetrics(), LayoutDirection::LeftToRight, options);
+
+    EXPECT_FLOAT_EQ(input.desiredSize().x, 21.f);
+    EXPECT_FLOAT_EQ(input.desiredSize().y, 22.f);
+}
+
+TEST(InputTest, AttachedLayoutUsesSurfaceNativeAppearanceMetrics) {
+    StyleSheet styleSheet;
+    auto input = makeElementValue<HTMLInputElement>();
+    input.type("radio");
+    SizedNativeAppearance appearance;
+    Surface surface(styleSheet);
+    surface.setScrollLayoutOptions({ScrollbarMode::Classic, appearance.layoutMetrics()});
+    surface.mount(input);
+
+    LayoutEngine::measure(input, styleSheet, fixedTextMetrics());
 
     EXPECT_FLOAT_EQ(input.desiredSize().x, 21.f);
     EXPECT_FLOAT_EQ(input.desiredSize().y, 22.f);

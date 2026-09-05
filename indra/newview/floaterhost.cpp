@@ -8,6 +8,7 @@
 #include <optional>
 #include <utility>
 #include "dom/document.h"
+#include "dom/elementinternal.h"
 #include "html/floater.h"
 #include "surface/floaterresize.h"
 #include "surface/surface.h"
@@ -20,6 +21,7 @@ using radia::ui::Rect;
 using radia::ui::Surface;
 using radia::ui::SurfaceLayer;
 using radia::ui::Vec2;
+using radia::ui::detail::ElementInternalAccess;
 using radia::ui::detail::preserveUserResizeOnReload;
 
 namespace {
@@ -131,6 +133,9 @@ private:
 FloaterHost::FloaterHost(Surface& surface) : mSurface(surface) {}
 
 bool FloaterHost::mount(Document& document) {
+    Element* root = document.documentElement();
+    HTMLFloaterElement* floater = root ? dynamic_cast<HTMLFloaterElement*>(root) : nullptr;
+    if (!floater || root->parentNode() != &document || ElementInternalAccess::isMounted(*floater)) return false;
     mSurface.mountFloater(document);
     return true;
 }

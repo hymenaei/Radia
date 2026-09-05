@@ -26,6 +26,8 @@ struct TestFloaterHost final : ComponentManager::Host {
     using ReplacementRequest = ComponentManager::Host::ReplacementRequest;
 
     bool mount(Document& document) override {
+        ++mountCalls;
+        if (rejectMount) return false;
         HTMLFloaterElement* result = document.documentElement() ? dynamic_cast<HTMLFloaterElement*>(document.documentElement()) : nullptr;
         if (!result) return false;
         if (surface) surface->mountFloater(document);
@@ -62,6 +64,8 @@ struct TestFloaterHost final : ComponentManager::Host {
     int replacements = 0;
     int presentations = 0;
     int clearCalls = 0;
+    int mountCalls = 0;
+    bool rejectMount = false;
     bool rejectReplacements = false;
     bool failCommit = false;
     bool rejectClears = false;

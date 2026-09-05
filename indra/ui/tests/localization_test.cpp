@@ -48,8 +48,12 @@ TEST(LocalizationCatalogTest, LoadsLocaleMetadataAndSupportsCaseInsensitiveLooku
 
     const auto* portuguese = catalog.locale("PT");
     ASSERT_NE(portuguese, nullptr);
-    EXPECT_FALSE(portuguese->name.empty());
+    EXPECT_EQ(portuguese->name, "Português");
     EXPECT_EQ(portuguese->direction, LayoutDirection::LeftToRight);
+
+    const auto* english = catalog.locale("en");
+    ASSERT_NE(english, nullptr);
+    EXPECT_EQ(english->name, "English");
 
     const auto* arabic = catalog.locale("ar");
     ASSERT_NE(arabic, nullptr);

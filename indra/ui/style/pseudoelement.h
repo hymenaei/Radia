@@ -9,7 +9,7 @@
 #include <string_view>
 #include <utility>
 #include <vector>
-#include "style/style.h"
+#include "style/computedstyle.h"
 #include "types.h"
 
 namespace radia::ui {
@@ -43,7 +43,7 @@ public:
     const std::vector<PseudoElement*>& generatedPseudoElements() const noexcept { return mGenerated; }
     const Rect& rect() const noexcept { return mRect; }
     const Vec2& desiredSize() const noexcept { return mDesiredSize; }
-    const Style& style() const noexcept { return mStyle; }
+    const ComputedStyle& style() const noexcept { return mStyle; }
 
 private:
     friend class Element;
@@ -52,7 +52,7 @@ private:
     friend class StylePass;
 
     void addGeneratedPseudoElement(PseudoElement& pseudoElement) { mGenerated.push_back(&pseudoElement); }
-    void setResolvedStyle(Style style) { mStyle = std::move(style); }
+    void setResolvedStyle(ComputedStyle style) { mStyle = std::move(style); }
     void setDesiredSize(Vec2 size) { mDesiredSize = std::move(size); }
     void setRect(const Rect& rect) { mRect = rect; }
     void translate(const Vec2& delta) {
@@ -65,7 +65,7 @@ private:
     Element* mOriginatingElement = nullptr;
     PseudoElement* mParent = nullptr;
     std::vector<PseudoElement*> mGenerated;
-    Style mStyle;
+    ComputedStyle mStyle;
     Rect mRect;
     Vec2 mDesiredSize;
 };

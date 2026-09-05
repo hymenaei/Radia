@@ -54,19 +54,19 @@ Rect snappedScrollbarArrow(const ScrollbarAxisGeometry& axis, bool start) {
     return {bounds.x, onTop ? bounds.top() - length : bounds.bottom(), bounds.w, length};
 }
 
-bool hasVisibleBorder(const Style& style) {
+bool hasVisibleBorder(const ComputedStyle& style) {
     return style.borderWidth.any() && (style.borderGradient.has_value() || style.borderColor.a > 0.f);
 }
 
-bool hasOpaqueBackground(const Style& style) {
+bool hasOpaqueBackground(const ComputedStyle& style) {
     if (!style.backgroundGradient) return style.backgroundColor.a >= 1.f;
     return std::all_of(style.backgroundGradient->stops.begin(), style.backgroundGradient->stops.end(),
                        [](const GradientStop& stop) { return stop.color.a >= 1.f; });
 }
 
 Color shade(Color source, Color target, float amount) {
-    return {source.r + (target.r - source.r) * amount, source.g + (target.g - source.g) * amount,
-            source.b + (target.b - source.b) * amount, source.a};
+    return {source.r + (target.r - source.r) * amount, source.g + (target.g - source.g) * amount, source.b + (target.b - source.b) * amount,
+            source.a};
 }
 
 struct ResolvedBorderRadii {
@@ -164,7 +164,7 @@ bool ensureTarget(LLRenderTarget& target, U32 width, U32 height) {
     return target.isComplete() && target.getWidth() == width && target.getHeight() == height;
 }
 
-LLFontGL::HAlign horizontalAlignment(const Style& style) {
+LLFontGL::HAlign horizontalAlignment(const ComputedStyle& style) {
     return style.textAlign == TextAlign::Center ? LLFontGL::HCENTER : style.textAlign == TextAlign::Right ? LLFontGL::RIGHT : LLFontGL::LEFT;
 }
 
@@ -184,19 +184,19 @@ float textBaseline(const Rect& rect, LLFontGL::VAlign align, const LLFontGL& fon
     return anchor;
 }
 
-const LLFontGL& fontForStyle(const Style& style) {
+const LLFontGL& fontForStyle(const ComputedStyle& style) {
     LLFontGL* font = LLFontGL::getFontAtPixelSize("SansSerif", style.fontSize, style.fontWeight, style.fontItalic);
     if (!font) LL_ERRS("UI") << "OpenGL text adapter used before viewer fonts were initialized." << LL_ENDL;
     return *font;
 }
 
-float textLineHeight(const Style& style) {
+float textLineHeight(const ComputedStyle& style) {
     if (style.lineHeight) return std::ceil(style.lineHeight->pixels);
     if (style.fontSize <= 0.f) return 0.f;
     return static_cast<float>(fontForStyle(style).getLineHeight());
 }
 
-LLFontGL::TextSpacing usedTextSpacing(const Style& style, const LLFontGL& font) {
+LLFontGL::TextSpacing usedTextSpacing(const ComputedStyle& style, const LLFontGL& font) {
     static const LLWString sSpace(U" ");
     const float spaceAdvance = std::max(0.f, font.getWidthF32(sSpace.c_str(), 0, 1, true));
     return {
@@ -205,7 +205,7 @@ LLFontGL::TextSpacing usedTextSpacing(const Style& style, const LLFontGL& font) 
     };
 }
 
-Vec2 measureOpenGLText(const std::string& text, const Style& style) {
+Vec2 measureOpenGLText(const std::string& text, const ComputedStyle& style) {
     if (style.fontSize <= 0.f) return {0.f, textLineHeight(style)};
     if (text.empty()) return {0.f, textLineHeight(style)};
     const LLWString wide = utf8str_to_wstring(text);
@@ -380,9 +380,9 @@ struct GeometryPainter {
     void drawRoundedGradient(const Rect& rect, const ResolvedBorderRadii& radii, const Gradient& gradient, const EdgeInsets* borderWidths = nullptr,
                              std::optional<TopBorderGap> topBorderGap = std::nullopt, const ResolvedBorderRadii* innerRadii = nullptr);
     void drawShadow(const Rect& rect, const ResolvedBorderRadii& radii, const BoxShadow& shadow);
-    void drawBorder(const Rect& rect, const Style& style, std::optional<TopBorderGap> topBorderGap = std::nullopt);
-    void drawOutline(const Rect& rect, const Style& style);
-    void paintBox(const Rect& rect, const Style& style, std::optional<TopBorderGap> topBorderGap);
+    void drawBorder(const Rect& rect, const ComputedStyle& style, std::optional<TopBorderGap> topBorderGap = std::nullopt);
+    void drawOutline(const Rect& rect, const ComputedStyle& style);
+    void paintBox(const Rect& rect, const ComputedStyle& style, std::optional<TopBorderGap> topBorderGap);
     void prepareVectorDraw();
     void applyClipCoverage(::LLGLSLShader& target) const { setClipCoverageUniforms(target, clips.coverageBounds()); }
     static void drawShapeQuad(const Rect& rect);
@@ -396,9 +396,9 @@ struct GeometryPainter {
 struct TextPainter {
     explicit TextPainter(GeometryPainter& geometryPainter) : geometry(geometryPainter) {}
 
-    Vec2 measureText(const std::string& text, const Style& style) const;
-    float usedLetterSpacing(const Style& style) const;
-    void paintText(const std::string& text, const Rect& rect, const Style& style);
+    Vec2 measureText(const std::string& text, const ComputedStyle& style) const;
+    float usedLetterSpacing(const ComputedStyle& style) const;
+    void paintText(const std::string& text, const Rect& rect, const ComputedStyle& style);
     static void prepareTextDraw();
 
     GeometryPainter& geometry;
@@ -407,7 +407,7 @@ struct TextPainter {
 struct IconPainter {
     explicit IconPainter(GeometryPainter& geometryPainter) : geometry(geometryPainter) {}
 
-    void paintIcon(const SvgIcon* icon, const Rect& rect, const Style& style, float scale);
+    void paintIcon(const SvgIcon* icon, const Rect& rect, const ComputedStyle& style, float scale);
 
     GeometryPainter& geometry;
 };
@@ -425,7 +425,7 @@ class EffectRenderer final {
 public:
     EffectRenderer(::LLGLSLShader& shapeProgram, paint::ClipStack& clipStack) : mProgram(shapeProgram), mClips(clipStack) {}
 
-    void begin(const Rect& rect, const Style& style, float scale);
+    void begin(const Rect& rect, const ComputedStyle& style, float scale);
     void end();
     void resetFrame() {
         while (mEffectDepth > 0) mEffectLayers[--mEffectDepth].capture.reset();
@@ -453,22 +453,20 @@ struct OpenGLPaintContext::Impl {
 
     void beginFrame(const PaintTarget& target);
     void endFrame();
-    Vec2 measureText(const std::string& text, const Style& style) const;
-    float usedLetterSpacing(const Style& style) const;
+    Vec2 measureText(const std::string& text, const ComputedStyle& style) const;
+    float usedLetterSpacing(const ComputedStyle& style) const;
     void pushClip(const Rect& rect, float scale, ClipAxes axes);
     void popClip();
     void pushTranslation(const Vec2& translation);
     void popTranslation();
-    void beginEffects(const Rect& rect, const Style& style, float scale);
+    void beginEffects(const Rect& rect, const ComputedStyle& style, float scale);
     void endEffects();
-    const NativeAppearance& nativeAppearance() const {
-        return mFrameNativeAppearance ? *mFrameNativeAppearance : system.nativeAppearance();
-    }
+    const NativeAppearance& nativeAppearance() const { return mFrameNativeAppearance ? *mFrameNativeAppearance : system.nativeAppearance(); }
     void paintNativeScrollbar(const NativeScrollbarPaintRequest& request);
     void paintNativeInputMark(const NativeInputMarkPaintRequest& request);
-    void paintBox(const Rect& rect, const Style& style, std::optional<TopBorderGap> topBorderGap);
-    void paintText(const std::string& text, const Rect& rect, const Style& style);
-    void paintIcon(const std::string& name, const Rect& rect, const Style& style, float scale);
+    void paintBox(const Rect& rect, const ComputedStyle& style, std::optional<TopBorderGap> topBorderGap);
+    void paintText(const std::string& text, const Rect& rect, const ComputedStyle& style);
+    void paintIcon(const std::string& name, const Rect& rect, const ComputedStyle& style, float scale);
 
     std::unique_ptr<LLGLSUIDefault> uiState;
     const System& system;
@@ -492,15 +490,15 @@ void OpenGLPaintContext::endFrame() {
     mImpl->endFrame();
 }
 
-Vec2 OpenGLPaintContext::measureText(const std::string& text, const Style& style) const {
+Vec2 OpenGLPaintContext::measureText(const std::string& text, const ComputedStyle& style) const {
     return mImpl->measureText(text, style);
 }
 
-float OpenGLPaintContext::usedLetterSpacing(const Style& style) const {
+float OpenGLPaintContext::usedLetterSpacing(const ComputedStyle& style) const {
     return mImpl->usedLetterSpacing(style);
 }
 
-std::uint64_t OpenGLPaintContext::generation() const {
+std::uint64_t OpenGLPaintContext::generation() const noexcept {
     return mImpl->system.generation();
 }
 
@@ -520,7 +518,7 @@ void OpenGLPaintContext::popTranslation() {
     mImpl->popTranslation();
 }
 
-void OpenGLPaintContext::beginEffects(const Rect& rect, const Style& style, float scale) {
+void OpenGLPaintContext::beginEffects(const Rect& rect, const ComputedStyle& style, float scale) {
     mImpl->beginEffects(rect, style, scale);
 }
 
@@ -544,23 +542,23 @@ void OpenGLPaintContext::paintNativeButton(const NativeButtonPaintRequest& reque
     mImpl->nativeAppearance().paintButton(*this, request);
 }
 
-void OpenGLPaintContext::paintBox(const Rect& rect, const Style& style, std::optional<TopBorderGap> topBorderGap) {
+void OpenGLPaintContext::paintBox(const Rect& rect, const ComputedStyle& style, std::optional<TopBorderGap> topBorderGap) {
     mImpl->paintBox(rect, style, topBorderGap);
 }
 
-void OpenGLPaintContext::paintText(const std::string& text, const Rect& rect, const Style& style) {
+void OpenGLPaintContext::paintText(const std::string& text, const Rect& rect, const ComputedStyle& style) {
     mImpl->paintText(text, rect, style);
 }
 
-void OpenGLPaintContext::paintIcon(const std::string& name, const Rect& rect, const Style& style, float scale) {
+void OpenGLPaintContext::paintIcon(const std::string& name, const Rect& rect, const ComputedStyle& style, float scale) {
     mImpl->paintIcon(name, rect, style, scale);
 }
 
-Vec2 TextPainter::measureText(const std::string& text, const Style& style) const {
+Vec2 TextPainter::measureText(const std::string& text, const ComputedStyle& style) const {
     return measureOpenGLText(text, style);
 }
 
-float TextPainter::usedLetterSpacing(const Style& style) const {
+float TextPainter::usedLetterSpacing(const ComputedStyle& style) const {
     if (style.fontSize <= 0.f) return 0.f;
     const LLFontGL& font = fontForStyle(style);
     return usedTextSpacing(style, font).letter;
@@ -592,11 +590,11 @@ void OpenGLPaintContext::Impl::endFrame() {
     mFrameNativeAppearance = nullptr;
 }
 
-Vec2 OpenGLPaintContext::Impl::measureText(const std::string& textValue, const Style& style) const {
+Vec2 OpenGLPaintContext::Impl::measureText(const std::string& textValue, const ComputedStyle& style) const {
     return text.measureText(textValue, style);
 }
 
-float OpenGLPaintContext::Impl::usedLetterSpacing(const Style& style) const {
+float OpenGLPaintContext::Impl::usedLetterSpacing(const ComputedStyle& style) const {
     return text.usedLetterSpacing(style);
 }
 
@@ -616,7 +614,7 @@ void OpenGLPaintContext::Impl::popTranslation() {
     clipStack.popTranslation();
 }
 
-void OpenGLPaintContext::Impl::beginEffects(const Rect& rect, const Style& style, float scale) {
+void OpenGLPaintContext::Impl::beginEffects(const Rect& rect, const ComputedStyle& style, float scale) {
     effects.begin(rect, style, scale);
 }
 
@@ -653,11 +651,11 @@ void OpenGLPaintContext::Impl::paintNativeScrollbar(const NativeScrollbarPaintRe
     }
 }
 
-void OpenGLPaintContext::Impl::paintBox(const Rect& rect, const Style& style, std::optional<TopBorderGap> topBorderGap) {
+void OpenGLPaintContext::Impl::paintBox(const Rect& rect, const ComputedStyle& style, std::optional<TopBorderGap> topBorderGap) {
     geometry.paintBox(rect, style, topBorderGap);
 }
 
-void OpenGLPaintContext::Impl::paintText(const std::string& textValue, const Rect& rect, const Style& style) {
+void OpenGLPaintContext::Impl::paintText(const std::string& textValue, const Rect& rect, const ComputedStyle& style) {
     text.paintText(textValue, rect, style);
 }
 
@@ -665,7 +663,7 @@ void OpenGLPaintContext::Impl::paintNativeInputMark(const NativeInputMarkPaintRe
     geometry.drawNativeInputMark(request);
 }
 
-void OpenGLPaintContext::Impl::paintIcon(const std::string& name, const Rect& rect, const Style& style, float scale) {
+void OpenGLPaintContext::Impl::paintIcon(const std::string& name, const Rect& rect, const ComputedStyle& style, float scale) {
     icons.paintIcon(system.icon(name), rect, style, scale);
 }
 
@@ -757,7 +755,7 @@ void EffectRenderer::compositeEffect(LLRenderTarget& source, const Rect& capture
     setPaintOp(mProgram, PaintOp::Direct);
 }
 
-void EffectRenderer::begin(const Rect& rect, const Style& style, float scale) {
+void EffectRenderer::begin(const Rect& rect, const ComputedStyle& style, float scale) {
     if (mEffectDepth == mEffectLayers.size()) mEffectLayers.emplace_back();
     EffectLayer& frame = mEffectLayers[mEffectDepth++];
     frame.layerEffects.clear();
@@ -880,7 +878,7 @@ void GeometryPainter::drawNativeInputMark(const NativeInputMarkPaintRequest& req
     drawMesh(tessellateStroke(request.path, request.color, request.strokeWidth, coverageFringeWidth(request.scale), StrokeCap::Butt));
 }
 
-void TextPainter::paintText(const std::string& text, const Rect& rect, const Style& style) {
+void TextPainter::paintText(const std::string& text, const Rect& rect, const ComputedStyle& style) {
     if (text.empty() || style.fontSize <= 0.f || style.color.a <= 0.f) return;
     const LLFontGL& font = fontForStyle(style);
     prepareTextDraw();
@@ -1059,13 +1057,22 @@ void GeometryPainter::drawShapeQuad(const Rect& rect) {
     gGL.end();
 }
 
-void GeometryPainter::drawBorder(const Rect& rect, const Style& style, std::optional<TopBorderGap> topBorderGap) {
+void GeometryPainter::drawBorder(const Rect& rect, const ComputedStyle& style, std::optional<TopBorderGap> topBorderGap) {
     if (!style.borderWidth.any()) return;
     const Rect box = rect;
     const ResolvedBorderRadii borderRadii = resolveBorderRadii(box, style.borderRadius);
-    const bool square = borderRadii.topLeft.x == 0.f && borderRadii.topLeft.y == 0.f && borderRadii.topRight.x == 0.f && borderRadii.topRight.y == 0.f
-        && borderRadii.bottomRight.x == 0.f && borderRadii.bottomRight.y == 0.f && borderRadii.bottomLeft.x == 0.f && borderRadii.bottomLeft.y == 0.f;
-    if (style.borderStyle != BorderStyle::Solid && style.borderWidth.isUniform() && !style.borderGradient && square
+    const bool square = borderRadii.topLeft.x == 0.f
+        && borderRadii.topLeft.y == 0.f
+        && borderRadii.topRight.x == 0.f
+        && borderRadii.topRight.y == 0.f
+        && borderRadii.bottomRight.x == 0.f
+        && borderRadii.bottomRight.y == 0.f
+        && borderRadii.bottomLeft.x == 0.f
+        && borderRadii.bottomLeft.y == 0.f;
+    if (style.borderStyle != BorderStyle::Solid
+        && style.borderWidth.isUniform()
+        && !style.borderGradient
+        && square
         && (!topBorderGap || topBorderGap->empty())) {
         const float width = style.borderWidth.top;
         const Color highlight = shade(style.borderColor, Color(1.f, 1.f, 1.f, style.borderColor.a), .45f);
@@ -1109,7 +1116,7 @@ void GeometryPainter::drawBorder(const Rect& rect, const Style& style, std::opti
                      zeroRadii, 0.f, style.borderColor);
 }
 
-void GeometryPainter::drawOutline(const Rect& rect, const Style& style) {
+void GeometryPainter::drawOutline(const Rect& rect, const ComputedStyle& style) {
     if (style.outline.width <= 0.f || style.outline.color.a <= 0.f) return;
     const float width = style.outline.width;
     const float expansion = width + style.outline.offset;
@@ -1121,7 +1128,7 @@ void GeometryPainter::drawOutline(const Rect& rect, const Style& style) {
     drawRoundedShape(PaintOp::Border, outlineBox, outlineRadii, width, style.outline.color, style.outline.style, std::nullopt, &innerRadii);
 }
 
-void GeometryPainter::paintBox(const Rect& rect, const Style& style, std::optional<TopBorderGap> topBorderGap) {
+void GeometryPainter::paintBox(const Rect& rect, const ComputedStyle& style, std::optional<TopBorderGap> topBorderGap) {
     const Rect box = rect;
     const ResolvedBorderRadii borderRadii = resolveBorderRadii(box, style.borderRadius);
     for (auto shadow = style.shadows.rbegin(); shadow != style.shadows.rend(); ++shadow)
@@ -1146,7 +1153,7 @@ void GeometryPainter::paintBox(const Rect& rect, const Style& style, std::option
     drawOutline(rect, style);
 }
 
-void IconPainter::paintIcon(const SvgIcon* icon, const Rect& rect, const Style& style, float scale) {
+void IconPainter::paintIcon(const SvgIcon* icon, const Rect& rect, const ComputedStyle& style, float scale) {
     if (!icon || icon->empty()) return;
     const Rect source = icon->viewBox;
     const Color color = style.iconStrokeColor.a > 0.f ? style.iconStrokeColor : style.backgroundColor;

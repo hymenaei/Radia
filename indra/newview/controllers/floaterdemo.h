@@ -19,6 +19,7 @@ public:
     FloaterDemo(System& system, Document* document, std::function<void()> requestSkinReload = {});
 
     void refreshLocaleControls();
+    void onOpen() override;
     void onReloadSucceeded() override;
     void onReloadFailed(const DiagnosticResult& diagnostics) override;
 

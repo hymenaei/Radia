@@ -4,14 +4,14 @@
  */
 
 #include "linden_common.h"
-#include "style/color.h"
+#include "css/color.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <numbers>
 #include <sstream>
 #include <vector>
-#include "style/syntax.h"
+#include "css/syntax.h"
 
 namespace radia::ui {
 namespace {

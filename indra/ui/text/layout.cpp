@@ -47,7 +47,7 @@ Vec2 lineSize(const TextLine& line, float fallbackHeight, const TextMetrics& met
     return size;
 }
 
-TextRun makeRun(std::string value, const Style& style, const TextMetrics& metrics) {
+TextRun makeRun(std::string value, const ComputedStyle& style, const TextMetrics& metrics) {
     return {value, style, metrics.measureText(value, style)};
 }
 
@@ -103,7 +103,8 @@ std::vector<std::size_t> graphemeBoundaries(const LLWString& value) {
 }
 
 namespace {
-void appendStyledAtoms(std::vector<TextAtom>& atoms, const LLWString& value, std::size_t source, const Style& style, const TextMetrics& metrics) {
+void appendStyledAtoms(std::vector<TextAtom>& atoms, const LLWString& value, std::size_t source, const ComputedStyle& style,
+                       const TextMetrics& metrics) {
     std::size_t begin = 0;
     while (begin < value.size()) {
         const bool isWhitespace = std::iswspace(static_cast<wint_t>(value[begin])) != 0;
@@ -364,7 +365,7 @@ TextLine visualRuns(const TextLine& line, LayoutDirection direction, const TextM
     return result;
 }
 
-TextLine truncateLine(const TextLine& line, float available, float fallbackHeight, const Style& style, const TextMetrics& metrics) {
+TextLine truncateLine(const TextLine& line, float available, float fallbackHeight, const ComputedStyle& style, const TextMetrics& metrics) {
     if (lineSize(line, fallbackHeight, metrics).x <= available) return line;
     if (style.textOverflow == TextOverflow::Clip) return line;
     const std::vector<TextChunk> clusters = characterClusters(line, metrics);
@@ -442,8 +443,8 @@ float interRunSpacing(const TextRun& left, const TextRun& right, const TextMetri
     return metrics.usedLetterSpacing(left.style);
 }
 
-TextLayout layoutText(const std::vector<TextLine>& hardLines, const Style& style, const TextMetrics& metrics, std::optional<float> availableWidth,
-                      bool visualOrder, bool applyOverflow) {
+TextLayout layoutText(const std::vector<TextLine>& hardLines, const ComputedStyle& style, const TextMetrics& metrics,
+                      std::optional<float> availableWidth, bool visualOrder, bool applyOverflow) {
     TextLayout result;
     const float fallbackHeight = metrics.measureText({}, style).y;
     for (const TextLine& hardLine : hardLines) {

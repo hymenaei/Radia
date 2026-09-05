@@ -18,7 +18,7 @@ using detail::ResizeEdges;
 using detail::resizeEdgesAt;
 
 namespace {
-bool blocksPointerEvents(const HTMLFloaterElement& floater, const Style& style) {
+bool blocksPointerEvents(const HTMLFloaterElement& floater, const ComputedStyle& style) {
     const PointerEvents policy = style.pointerEvents;
     if (policy == PointerEvents::Auto) return true;
     if (policy == PointerEvents::PassThrough) return false;
@@ -26,14 +26,14 @@ bool blocksPointerEvents(const HTMLFloaterElement& floater, const Style& style) 
 }
 } // namespace
 
-Vec2 Surface::minimumFloaterSize(const HTMLFloaterElement& floater) const {
-    const ElementObservation floaterObservation = observe(const_cast<HTMLFloaterElement&>(floater));
+Vec2 Surface::minimumFloaterSize(HTMLFloaterElement& floater) {
+    const ElementObservation floaterObservation = observe(floater);
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
     if (!floaterObservation.layoutValid() || !floaterObservation.styleValid()) return {};
     HTMLFloaterElement* currentFloater = dynamic_cast<HTMLFloaterElement*>(floaterObservation.get());
     if (!currentFloater) return {};
-    const Style floaterStyle = styles.style(*currentFloater);
+    const ComputedStyle floaterStyle = styles.style(*currentFloater);
     if (!floaterObservation.layoutValid() || !floaterObservation.styleValid()) return {};
     const Vec2 authoredSize = currentFloater->authoredSize();
     Vec2 minimum{floaterStyle.minWidth ? floaterStyle.minWidth->resolve(authoredSize.x) : 0.f,
@@ -45,7 +45,7 @@ Vec2 Surface::minimumFloaterSize(const HTMLFloaterElement& floater) const {
         if (!head || head->parentElement() != currentFloater) return {};
         const ElementObservation headObservation = observe(*head);
         if (!headObservation.layoutValid() || !headObservation.styleValid() || !headObservation.attachedTo(*currentFloater)) return {};
-        const Vec2 measured = measureElement(*head, *mStyleSheet, mTextMetrics);
+        const Vec2 measured = LayoutEngine::measure(*head, *mStyleSheet, mTextMetrics);
         head = headRef.get();
         if (!floaterObservation.layoutValid()
             || !floaterObservation.styleValid()
@@ -56,7 +56,7 @@ Vec2 Surface::minimumFloaterSize(const HTMLFloaterElement& floater) const {
             || head->parentElement() != currentFloater
             || currentFloater->head() != head)
             return {};
-        const Style& headStyle = styles.style(*head);
+        const ComputedStyle& headStyle = styles.style(*head);
         if (!floaterObservation.layoutValid()
             || !floaterObservation.styleValid()
             || !headObservation.layoutValid()
@@ -83,7 +83,7 @@ HTMLFloaterElement* Surface::resizeFloaterAt(const Vec2& point, std::uint8_t& ed
             auto* floater = dynamic_cast<HTMLFloaterElement*>((*child)->root);
             if (!floater || floater->closed()) continue;
             const ElementObservation floaterObservation = observe(*floater);
-            const Style& floaterStyle = styles.style(*floater);
+            const ComputedStyle& floaterStyle = styles.style(*floater);
             if (!floaterObservation.layoutValid()
                 || !floaterObservation.styleValid()
                 || !isRootedInSurface(floaterObservation.get())

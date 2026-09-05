@@ -20,7 +20,7 @@ HTMLIconElement& HTMLIconElement::setName(std::string name) {
     return *this;
 }
 
-void HTMLIconElement::paint(PaintContext& context, const Style& style, float scale) const {
+void HTMLIconElement::paint(PaintContext& context, const ComputedStyle& style, float scale) const {
     context.paintBox(rect(), style);
     context.paintIcon(mName, rect(), style, scale);
 }

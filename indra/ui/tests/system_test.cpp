@@ -27,6 +27,7 @@
 
 namespace {
 using radia::ui::AppearanceMode;
+using radia::ui::ComputedStyle;
 using radia::ui::Element;
 using radia::ui::fixedTextMetrics;
 using radia::ui::HTMLButtonElement;
@@ -53,7 +54,6 @@ using radia::ui::ScrollbarMode;
 using radia::ui::ScrollLayoutOptions;
 using radia::ui::SkinCompiler;
 using radia::ui::SkinGenerationPrepareResult;
-using radia::ui::Style;
 using radia::ui::Surface;
 using radia::ui::System;
 using radia::ui::detail::makeElement;
@@ -114,7 +114,7 @@ TEST(NativeAppearanceTest, BaseOwnsScrollbarDefaultsAndStateStyling) {
 TEST(NativeAppearanceTest, ButtonPaintDispatchUsesNativeAppearanceForAutoMode) {
     auto button = makeElementValue<HTMLButtonElement>();
     RecordingPaintContext recording;
-    Style style;
+    ComputedStyle style;
     style.appearance = AppearanceMode::Auto;
 
     button.paint(recording, style, 1.25f);
@@ -132,7 +132,7 @@ TEST(NativeAppearanceTest, ButtonPaintDispatchUsesNativeAppearanceForAutoMode) {
 TEST(NativeAppearanceTest, ButtonPaintDispatchKeepsUnstyledModeOnCssPath) {
     auto button = makeElementValue<HTMLButtonElement>();
     RecordingPaintContext recording;
-    Style style;
+    ComputedStyle style;
     style.appearance = AppearanceMode::Unstyled;
 
     button.paint(recording, style, 1.f);

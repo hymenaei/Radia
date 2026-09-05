@@ -289,7 +289,7 @@ enum class InheritedStyleProperty : uint16_t {
 
 using InheritedStyleProperties = uint16_t;
 
-struct Style {
+struct ComputedStyle {
     AppearanceMode appearance = AppearanceMode::Auto;
     ColorScheme colorScheme = ColorScheme::Auto;
     BoxSizing boxSizing = BoxSizing::ContentBox;
@@ -376,9 +376,9 @@ struct Style {
     std::vector<std::string_view> explicitlyInheritedProperties;
 };
 
-void resolveLightDarkColors(Style& style);
-void resolveCurrentColors(Style& style);
-void normalizeOverflow(Style& style);
-void inheritStyle(Style& style, const Style& parent);
-void applyOpacity(Style& style, float inheritedOpacity);
+void resolveLightDarkColors(ComputedStyle& style);
+void resolveCurrentColors(ComputedStyle& style);
+void normalizeOverflow(ComputedStyle& style);
+void inheritStyle(ComputedStyle& style, const ComputedStyle& parent);
+void applyOpacity(ComputedStyle& style, float inheritedOpacity);
 } // namespace radia::ui

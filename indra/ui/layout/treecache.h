@@ -6,7 +6,6 @@
 #pragma once
 
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -14,19 +13,15 @@
 #include "dom/elementinternal.h"
 
 namespace radia::ui {
-struct Style;
-
 class TreeTraversalCache {
 public:
     using ChildSnapshot = std::shared_ptr<const std::vector<ElementRef<Element>>>;
-    using StyleResolver = std::function<const Style&(const Element&)>;
 
     void beginTraversal();
     void endTraversal();
     void invalidateOrdering();
     bool active() const { return mTraversalDepth != 0; }
 
-    ChildSnapshot orderedChildren(Element& parent, const StyleResolver& resolve);
     ChildSnapshot sourceChildren(Element& parent);
 
 private:
@@ -42,11 +37,9 @@ private:
         }
     };
 
-    ChildSnapshot build(Element& parent, bool ordered, const StyleResolver* resolve);
+    ChildSnapshot build(Element& parent);
 
-    SnapshotCache mOrdered;
     SnapshotCache mSource;
-    SnapshotCache mActiveOrdered;
     SnapshotCache mActiveSource;
     std::size_t mTraversalDepth = 0;
     bool mResetAtBoundary = false;

@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <memory>
 #include <string>
+#include "css/stylesheet.h"
 #include "dom/element.h"
 #include "dom/elementinternal.h"
 #include "html/button.h"
@@ -18,7 +19,6 @@
 #include "html/label.h"
 #include "html/panel.h"
 #include "layout/engine.h"
-#include "style/stylesheet.h"
 #include "text/metrics.h"
 
 namespace {
@@ -30,8 +30,8 @@ using radia::ui::HTMLInputElement;
 using radia::ui::HTMLLabelElement;
 using radia::ui::HTMLPanelElement;
 using radia::ui::LayoutDirection;
+using radia::ui::LayoutEngine;
 using radia::ui::LayoutStatistics;
-using radia::ui::layoutTree;
 using radia::ui::Rect;
 using radia::ui::StyleSheet;
 using radia::ui::Visibility;
@@ -175,11 +175,12 @@ bool makeFixture(LayoutFixture& fixture, LayoutCase layoutCase, std::size_t node
             rootRect = {0.f, 0.f, 240.f, std::max(120.f, static_cast<float>(nodeCount) * 42.f)};
             break;
         case LayoutCase::CompositeControls:
-            styleSource = "panel { display: flex; flex-direction: column; gap: 2px; } "
-                          "button { width: 160px; height: 24px; padding: 4px; gap: 4px; display: flex; flex-direction: row; } "
-                          "button > icon { size: 16px; } input { width: 64px; height: 24px; } "
-                          "input { display: flex; flex-direction: row; } input::slider-track { width: 100%; min-width: 0; align-self: stretch; } "
-                          "input::slider-thumb { order: -1; size: 18px; } input:checked::slider-thumb { order: 1; } label { width: 160px; height: 18px; }";
+            styleSource =
+                "panel { display: flex; flex-direction: column; gap: 2px; } "
+                "button { width: 160px; height: 24px; padding: 4px; gap: 4px; display: flex; flex-direction: row; } "
+                "button > icon { size: 16px; } input { width: 64px; height: 24px; } "
+                "input { display: flex; flex-direction: row; } input::slider-track { width: 100%; min-width: 0; align-self: stretch; } "
+                "input::slider-thumb { order: -1; size: 18px; } input:checked::slider-thumb { order: 1; } label { width: 160px; height: 18px; }";
             addCompositeControls(*fixture.root, nodeCount);
             rootRect = {0.f, 0.f, 240.f, std::max(120.f, static_cast<float>(nodeCount) * 28.f)};
             break;
@@ -240,7 +241,7 @@ void BM_Layout_RelayoutAfterResize(benchmark::State& state, LayoutCase layoutCas
     const auto& textMetrics = fixedTextMetrics();
     const Rect baseRect = fixture.root->rect();
 
-    LayoutStatistics warmup = layoutTree(*fixture.root, fixture.styleSheet, textMetrics, fixture.direction);
+    LayoutStatistics warmup = LayoutEngine::layout(*fixture.root, fixture.styleSheet, textMetrics, fixture.direction);
     benchmark::DoNotOptimize(warmup.measuredNodes);
 
     StatisticsTotals totals;
@@ -251,7 +252,7 @@ void BM_Layout_RelayoutAfterResize(benchmark::State& state, LayoutCase layoutCas
         fixture.root->setRect({baseRect.x, baseRect.y, width, baseRect.h});
         state.ResumeTiming();
 
-        LayoutStatistics statistics = layoutTree(*fixture.root, fixture.styleSheet, textMetrics, fixture.direction);
+        LayoutStatistics statistics = LayoutEngine::layout(*fixture.root, fixture.styleSheet, textMetrics, fixture.direction);
         state.PauseTiming();
         totals.add(statistics);
         state.ResumeTiming();
@@ -265,12 +266,12 @@ void BM_Layout_CachedLayout(benchmark::State& state, LayoutCase layoutCase) {
     LayoutFixture fixture;
     if (!makeFixture(fixture, layoutCase, static_cast<std::size_t>(state.range(0)), state)) return;
     const auto& textMetrics = fixedTextMetrics();
-    LayoutStatistics warmup = layoutTree(*fixture.root, fixture.styleSheet, textMetrics, fixture.direction);
+    LayoutStatistics warmup = LayoutEngine::layout(*fixture.root, fixture.styleSheet, textMetrics, fixture.direction);
     benchmark::DoNotOptimize(warmup.measuredNodes);
 
     StatisticsTotals totals;
     for (auto _ : state) {
-        LayoutStatistics statistics = layoutTree(*fixture.root, fixture.styleSheet, textMetrics, fixture.direction);
+        LayoutStatistics statistics = LayoutEngine::layout(*fixture.root, fixture.styleSheet, textMetrics, fixture.direction);
         state.PauseTiming();
         totals.add(statistics);
         state.ResumeTiming();
@@ -285,7 +286,7 @@ void BM_Layout_RelayoutAfterDirectionChange(benchmark::State& state, LayoutCase 
     LayoutFixture fixture;
     if (!makeFixture(fixture, layoutCase, static_cast<std::size_t>(state.range(0)), state)) return;
     const auto& textMetrics = fixedTextMetrics();
-    LayoutStatistics warmup = layoutTree(*fixture.root, fixture.styleSheet, textMetrics, LayoutDirection::LeftToRight);
+    LayoutStatistics warmup = LayoutEngine::layout(*fixture.root, fixture.styleSheet, textMetrics, LayoutDirection::LeftToRight);
     benchmark::DoNotOptimize(warmup.measuredNodes);
 
     StatisticsTotals totals;
@@ -293,7 +294,7 @@ void BM_Layout_RelayoutAfterDirectionChange(benchmark::State& state, LayoutCase 
     for (auto _ : state) {
         rightToLeft = !rightToLeft;
         const auto direction = rightToLeft ? LayoutDirection::RightToLeft : LayoutDirection::LeftToRight;
-        LayoutStatistics statistics = layoutTree(*fixture.root, fixture.styleSheet, textMetrics, direction);
+        LayoutStatistics statistics = LayoutEngine::layout(*fixture.root, fixture.styleSheet, textMetrics, direction);
         state.PauseTiming();
         totals.add(statistics);
         state.ResumeTiming();

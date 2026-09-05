@@ -11,12 +11,13 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include "css/color.h"
+#include "css/rules.h"
+#include "css/stylesheet.h"
+#include "css/syntax.h"
 #include "html/elementnames.h"
 #include "resource/elementdefinition.h"
-#include "style/color.h"
-#include "style/model.h"
-#include "style/stylesheet.h"
-#include "style/syntax.h"
+#include "style/property.h"
 
 namespace radia::ui {
 namespace {
@@ -720,13 +721,12 @@ StyleSheetLoadResult StyleSheet::loadRadia(const std::string& stylesheetSource, 
 }
 
 StyleSheetLoadResult StyleSheet::loadRadiaLayers(const std::vector<StyleLayer>& layers) {
-    Impl candidate;
+    StyleModel candidate;
     StyleSheetLoadResult result;
     if (layers.empty()) {
         result.error("stylesheet.layers.empty", "No stylesheet layers were provided.");
         return result;
     }
-    // Root tokens are collected before ordinary declarations, while the rules pass preserves source order.
     std::vector<StyleLayer> orderedLayers = layers;
     std::stable_sort(orderedLayers.begin(), orderedLayers.end(), [](const StyleLayer& left, const StyleLayer& right) {
         return static_cast<std::uint8_t>(left.origin) < static_cast<std::uint8_t>(right.origin);
@@ -744,9 +744,9 @@ StyleSheetLoadResult StyleSheet::loadRadiaLayers(const std::vector<StyleLayer>& 
         graph.visit(entrypoint, compileModule);
     }
     if (result.ok()) {
-        candidate.sortRules();
-        candidate.generation = mImpl->generation + 1;
-        mImpl = std::make_shared<Impl>(std::move(candidate));
+        auto replacement = std::make_shared<Impl>(std::move(candidate).build());
+        replacement->generation = mImpl->generation + 1;
+        mImpl = std::move(replacement);
     }
     return result;
 }

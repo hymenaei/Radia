@@ -6,10 +6,11 @@
 #include "linden_common.h"
 #include <algorithm>
 #include <optional>
+#include "css/rules.h"
+#include "css/stylesheet.h"
 #include "dom/element.h"
 #include "html/elementnames.h"
-#include "style/model.h"
-#include "style/stylesheet.h"
+#include "style/property.h"
 
 namespace radia::ui {
 namespace {
@@ -153,43 +154,89 @@ void StyleModel::addRule(const StyleRule& rule) {
     StyleRule copy = rule;
     copy.sourceOrder = static_cast<int>(rules.size());
     rules.push_back(std::move(copy));
-    layoutStateMaskValid = false;
-    hitTestStateMaskValid = false;
-    descendantStateRulesValid = false;
-    ruleIndexValid = false;
 }
 
-bool StyleModel::stateAffectsLayout(ElementState state) const {
-    if (!layoutStateMaskValid) {
-        layoutStateMask = 0;
-        for (auto& candidates : layoutStateRules) candidates.clear();
-        for (std::size_t ruleIndex = 0; ruleIndex < rules.size(); ++ruleIndex) {
-            const StyleRule& rule = rules[ruleIndex];
-            bool layoutDeclaration = false;
-            for (const StyleDeclaration& declaration : rule.declarations)
-                if (!declaration.property.get().isPaintOnly()) {
-                    layoutDeclaration = true;
-                    break;
-                }
-            if (!layoutDeclaration) continue;
-            for (const StyleSelector& selector : rule.selectors) {
-                const auto addState = [&](const std::optional<ElementState>& candidate) {
-                    if (!candidate) return;
-                    const std::optional<std::size_t> index = stateIndex(*candidate);
-                    if (!index) return;
-                    layoutStateMask |= static_cast<std::uint16_t>(*candidate);
-                    auto& candidates = layoutStateRules[*index];
-                    if (std::find(candidates.begin(), candidates.end(), ruleIndex) == candidates.end()) candidates.push_back(ruleIndex);
-                };
-                addState(selectorState(selector.state));
-            }
+StyleRuleSet::StyleRuleSet(StyleModel&& model)
+    : mColorTokens(std::move(model.colorTokens)), mNumberTokens(std::move(model.numberTokens)), mDependencies(std::move(model.dependencies)),
+      mRules(std::move(model.rules)) {
+    std::stable_sort(mRules.begin(), mRules.end(), [](const StyleRule& lhs, const StyleRule& rhs) {
+        if (lhs.origin != rhs.origin) return static_cast<std::uint8_t>(lhs.origin) < static_cast<std::uint8_t>(rhs.origin);
+        const int left = specificity(lhs);
+        const int right = specificity(rhs);
+        return left == right ? lhs.sourceOrder < rhs.sourceOrder : left < right;
+    });
+    buildIndexes();
+}
+
+void StyleRuleSet::buildIndexes() {
+    const auto addIndex = [](auto& index, const std::string& key, std::size_t ruleIndex) {
+        if (!key.empty()) index[key].push_back(ruleIndex);
+    };
+    const auto addUnique = [](auto& values, std::size_t value) {
+        if (std::find(values.begin(), values.end(), value) == values.end()) values.push_back(value);
+    };
+    const auto addStateRule = [&](const std::string& state, auto& mask, auto& buckets, std::size_t ruleIndex) {
+        const std::optional<ElementState> candidate = selectorState(state);
+        if (!candidate) return;
+        const std::optional<std::size_t> index = stateIndex(*candidate);
+        if (!index) return;
+        mask |= static_cast<std::uint16_t>(*candidate);
+        addUnique(buckets[*index], ruleIndex);
+    };
+    const auto addStateBucket = [&](const std::string& state, auto& buckets, std::size_t ruleIndex) {
+        const std::optional<ElementState> candidate = selectorState(state);
+        if (!candidate) return;
+        const std::optional<std::size_t> index = stateIndex(*candidate);
+        if (!index) return;
+        addUnique(buckets[*index], ruleIndex);
+    };
+
+    for (std::size_t ruleIndex = 0; ruleIndex < mRules.size(); ++ruleIndex) {
+        const StyleRule& rule = mRules[ruleIndex];
+        if (!rule.selectors.empty()) {
+            const StyleSelector& selector = rule.selectors.back();
+            if (selector.element.empty() && selector.id.empty() && selector.className.empty()) mUniversalRuleIndices.push_back(ruleIndex);
+            addIndex(mElementRuleIndices, selector.element, ruleIndex);
+            addIndex(mIdRuleIndices, selector.id, ruleIndex);
+            addIndex(mClassRuleIndices, selector.className, ruleIndex);
         }
-        layoutStateMaskValid = true;
+
+        const bool layoutDeclaration = std::any_of(rule.declarations.begin(), rule.declarations.end(),
+                                                   [](const StyleDeclaration& declaration) { return !declaration.property.get().isPaintOnly(); });
+        const bool hitTestDeclaration = std::any_of(rule.declarations.begin(), rule.declarations.end(), [](const StyleDeclaration& declaration) {
+            return declaration.property.get().affectsHitTesting();
+        });
+        const bool inherits = std::any_of(rule.declarations.begin(), rule.declarations.end(),
+                                          [](const StyleDeclaration& declaration) { return declaration.property.get().isInherited(); });
+        for (std::size_t selectorIndex = 0; selectorIndex < rule.selectors.size(); ++selectorIndex) {
+            const StyleSelector& selector = rule.selectors[selectorIndex];
+            if (layoutDeclaration) addStateRule(selector.state, mLayoutStateMask, mLayoutStateRules, ruleIndex);
+            if (hitTestDeclaration) addStateRule(selector.state, mHitTestStateMask, mHitTestStateRules, ruleIndex);
+            if (selectorIndex + 1 < rule.selectors.size() || inherits) addStateBucket(selector.state, mDescendantStateRules, ruleIndex);
+        }
     }
-    return (layoutStateMask & static_cast<std::uint16_t>(state)) != 0;
+
+    const auto sortUnique = [](auto& index) {
+        for (auto& [key, values] : index) {
+            std::sort(values.begin(), values.end());
+            values.erase(std::unique(values.begin(), values.end()), values.end());
+        }
+    };
+    std::sort(mUniversalRuleIndices.begin(), mUniversalRuleIndices.end());
+    sortUnique(mElementRuleIndices);
+    sortUnique(mIdRuleIndices);
+    sortUnique(mClassRuleIndices);
+    for (auto& candidates : mDescendantStateRules) {
+        std::sort(candidates.begin(), candidates.end());
+        candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+    }
 }
 
-bool StyleModel::stateAffectsLayout(const Element& element, ElementState state) const {
+bool StyleRuleSet::stateAffectsLayout(ElementState state) const {
+    return (mLayoutStateMask & static_cast<std::uint16_t>(state)) != 0;
+}
+
+bool StyleRuleSet::stateAffectsLayout(const Element& element, ElementState state) const {
     if (!stateAffectsLayout(state)) return false;
     const std::optional<std::size_t> index = stateIndex(state);
     if (!index) return false;
@@ -197,8 +244,8 @@ bool StyleModel::stateAffectsLayout(const Element& element, ElementState state) 
         return std::any_of(rule.declarations.begin(), rule.declarations.end(),
                            [](const StyleDeclaration& declaration) { return !declaration.property.get().isPaintOnly(); });
     };
-    for (const std::size_t ruleIndex : layoutStateRules[*index]) {
-        const StyleRule& rule = rules[ruleIndex];
+    for (const std::size_t ruleIndex : mLayoutStateRules[*index]) {
+        const StyleRule& rule = mRules[ruleIndex];
         if (!hasLayoutDeclaration(rule)) continue;
         for (const StyleSelector& selector : rule.selectors) {
             const std::optional<ElementState> ownerState = selectorState(selector.state);
@@ -208,39 +255,16 @@ bool StyleModel::stateAffectsLayout(const Element& element, ElementState state) 
     return false;
 }
 
-bool StyleModel::stateAffectsHitTesting(ElementState state) const {
-    if (!hitTestStateMaskValid) {
-        hitTestStateMask = 0;
-        for (auto& candidates : hitTestStateRules) candidates.clear();
-        for (std::size_t ruleIndex = 0; ruleIndex < rules.size(); ++ruleIndex) {
-            const StyleRule& rule = rules[ruleIndex];
-            const bool hitTestDeclaration = std::any_of(rule.declarations.begin(), rule.declarations.end(), [](const StyleDeclaration& declaration) {
-                return declaration.property.get().affectsHitTesting();
-            });
-            if (!hitTestDeclaration) continue;
-            for (const StyleSelector& selector : rule.selectors) {
-                const auto addState = [&](const std::optional<ElementState>& candidate) {
-                    if (!candidate) return;
-                    const std::optional<std::size_t> index = stateIndex(*candidate);
-                    if (!index) return;
-                    hitTestStateMask |= static_cast<std::uint16_t>(*candidate);
-                    auto& candidates = hitTestStateRules[*index];
-                    if (std::find(candidates.begin(), candidates.end(), ruleIndex) == candidates.end()) candidates.push_back(ruleIndex);
-                };
-                addState(selectorState(selector.state));
-            }
-        }
-        hitTestStateMaskValid = true;
-    }
-    return (hitTestStateMask & static_cast<std::uint16_t>(state)) != 0;
+bool StyleRuleSet::stateAffectsHitTesting(ElementState state) const {
+    return (mHitTestStateMask & static_cast<std::uint16_t>(state)) != 0;
 }
 
-bool StyleModel::stateAffectsHitTesting(const Element& element, ElementState state) const {
+bool StyleRuleSet::stateAffectsHitTesting(const Element& element, ElementState state) const {
     if (!stateAffectsHitTesting(state)) return false;
     const std::optional<std::size_t> index = stateIndex(state);
     if (!index) return false;
-    for (const std::size_t ruleIndex : hitTestStateRules[*index]) {
-        const StyleRule& rule = rules[ruleIndex];
+    for (const std::size_t ruleIndex : mHitTestStateRules[*index]) {
+        const StyleRule& rule = mRules[ruleIndex];
         for (const StyleSelector& selector : rule.selectors) {
             const std::optional<ElementState> ownerState = selectorState(selector.state);
             if (ownerState && *ownerState == state && selectorCanBeOwnedBy(selector, element)) return true;
@@ -249,35 +273,11 @@ bool StyleModel::stateAffectsHitTesting(const Element& element, ElementState sta
     return false;
 }
 
-bool StyleModel::stateAffectsDescendants(const Element& element, ElementState state) const {
+bool StyleRuleSet::stateAffectsDescendants(const Element& element, ElementState state) const {
     const std::optional<std::size_t> index = stateIndex(state);
     if (!index) return false;
-    if (!descendantStateRulesValid) {
-        for (auto& candidates : descendantStateRules) candidates.clear();
-        for (std::size_t ruleIndex = 0; ruleIndex < rules.size(); ++ruleIndex) {
-            const StyleRule& rule = rules[ruleIndex];
-            const bool inherits = std::any_of(rule.declarations.begin(), rule.declarations.end(),
-                                              [](const StyleDeclaration& declaration) { return declaration.property.get().isInherited(); });
-            for (std::size_t selectorIndex = 0; selectorIndex < rule.selectors.size(); ++selectorIndex) {
-                const StyleSelector& selector = rule.selectors[selectorIndex];
-                const std::optional<ElementState> selectorStateValue = selectorState(selector.state);
-                const auto addCandidate = [&](const std::optional<ElementState>& candidate) {
-                    if (!candidate) return;
-                    const std::optional<std::size_t> candidateStateIndex = stateIndex(*candidate);
-                    if (!candidateStateIndex) return;
-                    if (selectorIndex + 1 < rule.selectors.size() || inherits) descendantStateRules[*candidateStateIndex].push_back(ruleIndex);
-                };
-                addCandidate(selectorStateValue);
-            }
-        }
-        for (auto& candidates : descendantStateRules) {
-            std::sort(candidates.begin(), candidates.end());
-            candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
-        }
-        descendantStateRulesValid = true;
-    }
-    for (const std::size_t ruleIndex : descendantStateRules[*index]) {
-        const StyleRule& rule = rules[ruleIndex];
+    for (const std::size_t ruleIndex : mDescendantStateRules[*index]) {
+        const StyleRule& rule = mRules[ruleIndex];
         const bool inherits = std::any_of(rule.declarations.begin(), rule.declarations.end(),
                                           [](const StyleDeclaration& declaration) { return declaration.property.get().isInherited(); });
         for (std::size_t selectorIndex = 0; selectorIndex < rule.selectors.size(); ++selectorIndex) {
@@ -293,85 +293,44 @@ bool StyleModel::stateAffectsDescendants(const Element& element, ElementState st
     return false;
 }
 
-void StyleModel::sortRules() {
-    std::stable_sort(rules.begin(), rules.end(), [](const StyleRule& lhs, const StyleRule& rhs) {
-        if (lhs.origin != rhs.origin) return static_cast<std::uint8_t>(lhs.origin) < static_cast<std::uint8_t>(rhs.origin);
-        const int left = specificity(lhs);
-        const int right = specificity(rhs);
-        return left == right ? lhs.sourceOrder < rhs.sourceOrder : left < right;
-    });
-    layoutStateMaskValid = false;
-    hitTestStateMaskValid = false;
-    descendantStateRulesValid = false;
-    ruleIndexValid = false;
-}
-
-Style StyleSheet::resolve(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t states,
-                          LayoutDirection direction) const {
-    return mImpl->resolveInternal(element, id, classes, states, {}, nullptr, nullptr, direction);
-}
-
-Style StyleSheet::resolveElement(const Element& element, LayoutDirection direction) const {
-    return mImpl->resolveInternal(element.elementName(), element.id(), element.classes(), element.states(), {}, &element, nullptr, direction);
-}
-
-Style StyleSheet::resolvePseudoElement(const Element& owner, std::string_view pseudoElementName, LayoutDirection direction) const {
-    return mImpl->resolveInternal(owner.elementName(), owner.id(), owner.classes(), owner.states(), pseudoElementName, &owner, nullptr, direction);
-}
-
-Style StyleSheet::resolveInline(const Element& owner, const std::string& element, const std::vector<std::string>& inlineAncestors,
-                                LayoutDirection direction) const {
-    static const std::set<std::string> sNoClasses;
-    return mImpl->resolveInternal(element, {}, sNoClasses, 0, {}, &owner, &inlineAncestors, direction);
-}
-
-Style StyleModel::resolveInternal(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t ownerStates,
-                                  std::string_view pseudoElement, const Element* target, const std::vector<std::string>* inlineAncestors,
+ComputedStyle StyleSheet::resolve(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t states,
                                   LayoutDirection direction) const {
-    if (!ruleIndexValid) {
-        universalRuleIndices.clear();
-        elementRuleIndices.clear();
-        idRuleIndices.clear();
-        classRuleIndices.clear();
-        const auto addIndex = [](auto& index, const std::string& key, std::size_t ruleIndex) {
-            if (!key.empty()) index[key].push_back(ruleIndex);
-        };
-        for (std::size_t ruleIndex = 0; ruleIndex < rules.size(); ++ruleIndex) {
-            if (rules[ruleIndex].selectors.empty()) continue;
-            const StyleSelector& selector = rules[ruleIndex].selectors.back();
-            if (selector.element.empty() && selector.id.empty() && selector.className.empty()) universalRuleIndices.push_back(ruleIndex);
-            addIndex(elementRuleIndices, selector.element, ruleIndex);
-            addIndex(idRuleIndices, selector.id, ruleIndex);
-            addIndex(classRuleIndices, selector.className, ruleIndex);
-        }
-        const auto sortUnique = [](auto& index) {
-            for (auto& [key, values] : index) {
-                std::sort(values.begin(), values.end());
-                values.erase(std::unique(values.begin(), values.end()), values.end());
-            }
-        };
-        std::sort(universalRuleIndices.begin(), universalRuleIndices.end());
-        sortUnique(elementRuleIndices);
-        sortUnique(idRuleIndices);
-        sortUnique(classRuleIndices);
-        ruleIndexValid = true;
-    }
+    return mImpl->ruleSet.resolveInternal(element, id, classes, states, {}, nullptr, nullptr, direction);
+}
 
-    std::vector<std::size_t> candidates = universalRuleIndices;
-    if (const auto found = elementRuleIndices.find(element); found != elementRuleIndices.end())
+ComputedStyle StyleSheet::resolveElement(const Element& element, LayoutDirection direction) const {
+    return mImpl->ruleSet.resolveInternal(element.elementName(), element.id(), element.classes(), element.states(), {}, &element, nullptr, direction);
+}
+
+ComputedStyle StyleSheet::resolvePseudoElement(const Element& owner, std::string_view pseudoElementName, LayoutDirection direction) const {
+    return mImpl->ruleSet.resolveInternal(owner.elementName(), owner.id(), owner.classes(), owner.states(), pseudoElementName, &owner, nullptr,
+                                          direction);
+}
+
+ComputedStyle StyleSheet::resolveInline(const Element& owner, const std::string& element, const std::vector<std::string>& inlineAncestors,
+                                        LayoutDirection direction) const {
+    static const std::set<std::string> sNoClasses;
+    return mImpl->ruleSet.resolveInternal(element, {}, sNoClasses, 0, {}, &owner, &inlineAncestors, direction);
+}
+
+ComputedStyle StyleRuleSet::resolveInternal(const std::string& element, const std::string& id, const std::set<std::string>& classes,
+                                            uint16_t ownerStates, std::string_view pseudoElement, const Element* target,
+                                            const std::vector<std::string>* inlineAncestors, LayoutDirection direction) const {
+    std::vector<std::size_t> candidates = mUniversalRuleIndices;
+    if (const auto found = mElementRuleIndices.find(element); found != mElementRuleIndices.end())
         candidates.insert(candidates.end(), found->second.begin(), found->second.end());
     if (!id.empty())
-        if (const auto found = idRuleIndices.find(id); found != idRuleIndices.end())
+        if (const auto found = mIdRuleIndices.find(id); found != mIdRuleIndices.end())
             candidates.insert(candidates.end(), found->second.begin(), found->second.end());
     for (const std::string& className : classes)
-        if (const auto found = classRuleIndices.find(className); found != classRuleIndices.end())
+        if (const auto found = mClassRuleIndices.find(className); found != mClassRuleIndices.end())
             candidates.insert(candidates.end(), found->second.begin(), found->second.end());
     std::sort(candidates.begin(), candidates.end());
     candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
 
-    Style style;
+    ComputedStyle style;
     for (const std::size_t ruleIndex : candidates) {
-        const StyleRule& rule = rules[ruleIndex];
+        const StyleRule& rule = mRules[ruleIndex];
         if (!matchesRule(rule, element, id, classes, ownerStates, pseudoElement, target, inlineAncestors, direction)) continue;
         for (const StyleDeclaration& declaration : rule.declarations) detail::applyStyleDeclaration(style, declaration);
     }

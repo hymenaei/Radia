@@ -11,12 +11,15 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <vector>
 #include "diagnostic.h"
 #include "resourceprovider.h"
-#include "style/style.h"
+#include "style/computedstyle.h"
 
 namespace radia::ui {
 class Element;
+class StylePass;
+struct StyleRuleSet;
 
 enum class StyleOrigin : std::uint8_t { Default = 0, Skin = 1 };
 
@@ -54,17 +57,20 @@ public:
     bool stateAffectsHitTesting(const Element& element, ElementState state) const;
     bool stateAffectsDescendants(const Element& element, ElementState state) const;
 
-    Style resolve(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t states,
-                  LayoutDirection direction = LayoutDirection::LeftToRight) const;
-    Style resolveElement(const Element& element, LayoutDirection direction = LayoutDirection::LeftToRight) const;
-    Style resolvePseudoElement(const Element& owner, std::string_view pseudoElementName,
-                               LayoutDirection direction = LayoutDirection::LeftToRight) const;
-    Style resolveInline(const Element& owner, const std::string& element, const std::vector<std::string>& inlineAncestors = {},
-                        LayoutDirection direction = LayoutDirection::LeftToRight) const;
+    ComputedStyle resolve(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t states,
+                          LayoutDirection direction = LayoutDirection::LeftToRight) const;
+    ComputedStyle resolveElement(const Element& element, LayoutDirection direction = LayoutDirection::LeftToRight) const;
+    ComputedStyle resolvePseudoElement(const Element& owner, std::string_view pseudoElementName,
+                                       LayoutDirection direction = LayoutDirection::LeftToRight) const;
+    ComputedStyle resolveInline(const Element& owner, const std::string& element, const std::vector<std::string>& inlineAncestors = {},
+                                LayoutDirection direction = LayoutDirection::LeftToRight) const;
 
 private:
+    friend class StylePass;
+
     struct Impl;
     static std::shared_ptr<Impl> makeEmptyImpl();
+    const StyleRuleSet* ruleSetIdentity() const;
     std::shared_ptr<Impl> mImpl;
 };
 } // namespace radia::ui

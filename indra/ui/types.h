@@ -17,13 +17,6 @@ enum class Visibility : std::uint8_t { Visible, Hidden, Collapse };
 
 enum class ScrollbarMode : std::uint8_t { Classic, Overlay };
 
-class NativeAppearance;
-
-struct ScrollLayoutOptions {
-    ScrollbarMode scrollbarMode = ScrollbarMode::Classic;
-    const NativeAppearance* nativeAppearance = nullptr;
-};
-
 struct Vec2 {
     float x = 0.f;
     float y = 0.f;
@@ -34,6 +27,54 @@ struct Vec2 {
     Vec2 operator+(const Vec2& rhs) const { return Vec2(x + rhs.x, y + rhs.y); }
     Vec2 operator-(const Vec2& rhs) const { return Vec2(x - rhs.x, y - rhs.y); }
     Vec2 operator*(float s) const { return Vec2(x * s, y * s); }
+};
+
+struct NativeScrollbarMetrics {
+    float thickness = 0.f;
+    float minimumThumbLength = 0.f;
+    float arrowLength = 0.f;
+    float thumbPadding = 0.f;
+
+    friend constexpr bool operator==(const NativeScrollbarMetrics&, const NativeScrollbarMetrics&) = default;
+};
+
+enum class NativeInputControl : std::uint8_t { Checkbox, Radio, Switch };
+
+struct NativeInputMetrics {
+    Vec2 intrinsicSize;
+
+    friend constexpr bool operator==(const NativeInputMetrics& left, const NativeInputMetrics& right) {
+        return left.intrinsicSize.x == right.intrinsicSize.x && left.intrinsicSize.y == right.intrinsicSize.y;
+    }
+};
+
+struct NativeLayoutMetrics {
+    NativeScrollbarMetrics classicScrollbar;
+    NativeScrollbarMetrics overlayScrollbar;
+    NativeInputMetrics checkbox;
+    NativeInputMetrics radio;
+    NativeInputMetrics switchControl;
+    std::uint64_t revision = 1;
+
+    NativeScrollbarMetrics scrollbarMetrics(ScrollbarMode mode) const { return mode == ScrollbarMode::Classic ? classicScrollbar : overlayScrollbar; }
+
+    NativeInputMetrics inputMetrics(NativeInputControl control) const {
+        switch (control) {
+            case NativeInputControl::Checkbox: return checkbox;
+            case NativeInputControl::Radio: return radio;
+            case NativeInputControl::Switch: return switchControl;
+        }
+        return {};
+    }
+
+    friend constexpr bool operator==(const NativeLayoutMetrics&, const NativeLayoutMetrics&) = default;
+};
+
+NativeLayoutMetrics defaultNativeLayoutMetrics() noexcept;
+
+struct ScrollLayoutOptions {
+    ScrollbarMode scrollbarMode = ScrollbarMode::Classic;
+    NativeLayoutMetrics nativeMetrics = defaultNativeLayoutMetrics();
 };
 
 inline float dot(const Vec2& a, const Vec2& b) {

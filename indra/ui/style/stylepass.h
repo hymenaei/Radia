@@ -11,19 +11,20 @@
 #include <memory>
 #include <unordered_map>
 #include <vector>
+#include "css/stylesheet.h"
 #include "dom/element.h"
 #include "dom/elementinternal.h"
-#include "style/pseudoelement.h"
 #include "layout/treecache.h"
-#include "style/style.h"
-#include "style/stylesheet.h"
+#include "style/computedstyle.h"
+#include "style/pseudoelement.h"
 
 namespace radia::ui {
 class TextMetrics;
+class Surface;
+class LayoutPass;
 
 class StylePass {
 public:
-    using ChildSnapshot = TreeTraversalCache::ChildSnapshot;
     class TraversalScope {
     public:
         explicit TraversalScope(StylePass& pass) : mPass(&pass) { mPass->beginTraversal(); }
@@ -36,7 +37,7 @@ public:
     };
 
     StylePass(const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction = LayoutDirection::LeftToRight,
-              const NativeAppearance* nativeAppearance = nullptr);
+              NativeLayoutMetrics nativeMetrics = defaultNativeLayoutMetrics());
     StylePass(const StylePass&) = delete;
     StylePass& operator=(const StylePass&) = delete;
     StylePass(StylePass&&) = delete;
@@ -52,19 +53,19 @@ public:
     void endTraversal();
     TraversalScope enterTraversal() { return TraversalScope(*this); }
     bool active() const { return mTraversalDepth != 0; }
-    const Style& style(const Element& element);
-    Style style(PseudoElement& pseudoElement);
-    void styleGeneratedPseudoElements(const Element& element, const Style& ownerStyle);
-    ChildSnapshot orderedChildren(Element& parent);
-    ChildSnapshot sourceChildren(Element& parent);
-    const LayoutContextKey& contextKey() const { return mContext; }
+    const ComputedStyle& style(const Element& element);
+    ComputedStyle style(PseudoElement& pseudoElement);
+    void styleGeneratedPseudoElements(const Element& element, const ComputedStyle& ownerStyle);
     bool matches(const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction = LayoutDirection::LeftToRight,
-                 const NativeAppearance* nativeAppearance = nullptr) const;
+                 NativeLayoutMetrics nativeMetrics = defaultNativeLayoutMetrics()) const;
     const StyleSheet& styleSheet() const { return mStyleSheet; }
     const TextMetrics& textMetrics() const { return mTextMetrics; }
     LayoutDirection direction() const { return mDirection; }
 
 private:
+    friend class Surface;
+    friend class LayoutPass;
+
     struct CachedStyle {
         std::size_t storageIndex = 0;
         std::weak_ptr<char> lifetime;
@@ -72,16 +73,18 @@ private:
     };
 
     void compactStyles();
+    const detail::LayoutContextKey& contextKey() const { return mContext; }
+    TreeTraversalCache::ChildSnapshot sourceChildren(Element& parent);
 
     StyleSheet mStyleSheet;
     const TextMetrics& mTextMetrics;
     LayoutDirection mDirection = LayoutDirection::LeftToRight;
-    const NativeAppearance* mNativeAppearance = nullptr;
-    LayoutContextKey mContext;
+    NativeLayoutMetrics mNativeMetrics;
+    detail::LayoutContextKey mContext;
     bool mInvalidated = false;
     bool mResetStorageAtBoundary = false;
     std::size_t mTraversalDepth = 0;
-    std::deque<Style> mStyleStorage;
+    std::deque<ComputedStyle> mStyleStorage;
     std::unordered_map<const Element*, CachedStyle> mStyles;
     TreeTraversalCache mTree;
 };

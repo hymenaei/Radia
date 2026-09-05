@@ -38,7 +38,7 @@ Vec2 defaultWheelDelta(const WheelEvent& event, LayoutDirection direction) {
     return {direction == LayoutDirection::RightToLeft ? -horizontal : horizontal, vertical};
 }
 
-bool acceptsPointerEvents(const Element& element, const Style& style) {
+bool acceptsPointerEvents(const Element& element, const ComputedStyle& style) {
     const PointerEvents policy = style.pointerEvents;
     if (policy == PointerEvents::Auto) return true;
     if (policy == PointerEvents::PassThrough) return false;
@@ -53,7 +53,7 @@ bool acceptsWheelScrolling(Overflow overflow) {
     return overflow == Overflow::Auto || overflow == Overflow::Scroll;
 }
 
-Vec2 consumeWheelDelta(Element& element, const Style& style, const Vec2& delta) {
+Vec2 consumeWheelDelta(Element& element, const ComputedStyle& style, const Vec2& delta) {
     const float currentLeft = element.scrollLeft();
     const float currentTop = element.scrollTop();
     const float nextLeft =
@@ -63,23 +63,23 @@ Vec2 consumeWheelDelta(Element& element, const Style& style, const Vec2& delta) 
     if (nextLeft != currentLeft || nextTop != currentTop) element.scrollTo(nextLeft, nextTop);
     return {nextLeft - currentLeft, nextTop - currentTop};
 }
+} // namespace
 
-void collectFocusable(Element& node, std::vector<ElementRef<Element>>& result, StylePass& styles) {
+void Surface::collectFocusable(Element& node, std::vector<ElementRef<Element>>& result, StylePass& styles) const {
     const ElementVisit observation(node);
-    const Style style = styles.style(node);
+    const ComputedStyle style = styles.style(node);
     Element* current = observation.get();
     if (!current || !observation.layoutValid() || !observation.styleValid() || !current->isVisible(style) || current->disabled()) return;
     if (current->focusable()) result.emplace_back(current);
-    const StylePass::ChildSnapshot children = styles.sourceChildren(*current);
+    const auto children = styles.sourceChildren(*current);
     for (const ElementRef<Element>& childRef : *children)
         if (Element* child = childRef.get(); child && child->parentElement() == current) collectFocusable(*child, result, styles);
 }
-} // namespace
 
 Element* Surface::hitTestNode(Element& node, const Vec2& point, const Rect& inheritedClip, StylePass& styles) const {
     if (!inheritedClip.contains(point) || !isRootedInSurface(&node)) return nullptr;
     const ElementObservation observation = observe(node);
-    const Style style = styles.style(node);
+    const ComputedStyle style = styles.style(node);
     if (!node.isVisible(style)) return nullptr;
     Element* current = observation.get();
     if (!current || !observation.layoutValid() || !observation.styleValid() || !isRootedInSurface(current) || !current->isVisible(style))
@@ -93,7 +93,7 @@ Element* Surface::hitTestNode(Element& node, const Vec2& point, const Rect& inhe
     Rect childClip = clipsChildren ? clipToAxes(inheritedClip, ElementInternalAccess::scrollport(*current), clipAxes) : inheritedClip;
     if (clipsChildren) childClip = offsetRect(childClip, scrollOffset);
     const Vec2 childPoint = point + scrollOffset;
-    const StylePass::ChildSnapshot children = styles.sourceChildren(*current);
+    const auto children = styles.sourceChildren(*current);
     Element* hitResult = nullptr;
     for (auto child = children->rbegin(); child != children->rend(); ++child)
         if (Element* childElement = child->get())
@@ -202,7 +202,7 @@ std::optional<Surface::ScrollbarTarget> Surface::hitTestScrollbarNode(Element& n
                                                                       StylePass& styles) const {
     if (!inheritedClip.contains(point) || !isRootedInSurface(&node)) return std::nullopt;
     const ElementObservation observation = observe(node);
-    const Style style = styles.style(node);
+    const ComputedStyle style = styles.style(node);
     if (!node.isVisible(style)) return std::nullopt;
     Element* current = observation.get();
     if (!current || !observation.layoutValid() || !observation.styleValid() || !isRootedInSurface(current) || !current->isVisible(style))
@@ -223,7 +223,7 @@ std::optional<Surface::ScrollbarTarget> Surface::hitTestScrollbarNode(Element& n
     Rect childClip = clipsChildren ? clipToAxes(inheritedClip, ElementInternalAccess::scrollport(*current), clipAxes) : inheritedClip;
     if (clipsChildren) childClip = offsetRect(childClip, scrollOffset);
     const Vec2 childPoint = point + scrollOffset;
-    const StylePass::ChildSnapshot children = styles.sourceChildren(*current);
+    const auto children = styles.sourceChildren(*current);
     for (auto child = children->rbegin(); child != children->rend(); ++child)
         if (Element* childElement = child->get())
             if (childElement->parentElement() == current)
@@ -283,7 +283,7 @@ bool Surface::beginScrollbarInteraction(const ScrollbarTarget& target, const Vec
     {
         StylePass& styles = stylePass();
         const StylePass::TraversalScope traversal = styles.enterTraversal();
-        const Style& style = styles.style(*element);
+        const ComputedStyle& style = styles.style(*element);
         const ScrollGeometry geometry = scrollbarGeometry(*element, style);
         const ScrollbarAxisGeometry* axis = scrollbarAxisGeometry(geometry, target.hit.axis);
         if (!axis || !axis->visible) return false;
@@ -381,7 +381,7 @@ void Surface::advanceScrollbarInteraction(float deltaSeconds) {
     {
         StylePass& styles = stylePass();
         const StylePass::TraversalScope traversal = styles.enterTraversal();
-        const Style& style = styles.style(*element);
+        const ComputedStyle& style = styles.style(*element);
         interaction.geometry = scrollbarGeometry(*element, style);
     }
     setScrollbarHover(ScrollbarTarget{element, interaction.geometry, interaction.hit});
@@ -405,7 +405,7 @@ bool Surface::updateScrollbarInteraction(const Vec2& point) {
     {
         StylePass& styles = stylePass();
         const StylePass::TraversalScope traversal = styles.enterTraversal();
-        const Style& style = styles.style(*element);
+        const ComputedStyle& style = styles.style(*element);
         const ScrollGeometry geometry = scrollbarGeometry(*element, style);
         const ScrollbarAxis axis = mScrollbarCapture->hit.axis;
         const ScrollbarAxisGeometry* axisGeometry = scrollbarAxisGeometry(geometry, axis);
@@ -455,7 +455,7 @@ bool Surface::scrollFocusedElement(const KeyEvent& event, Element& focused) {
     {
         StylePass& styles = stylePass();
         const StylePass::TraversalScope traversal = styles.enterTraversal();
-        const auto tryAxis = [&](Element& element, const Style& style, ScrollbarAxis axis) {
+        const auto tryAxis = [&](Element& element, const ComputedStyle& style, ScrollbarAxis axis) {
             const Overflow overflow = axis == ScrollbarAxis::Horizontal ? style.overflowX : style.overflowY;
             if (!acceptsWheelScrolling(overflow)) return false;
             const float current = axis == ScrollbarAxis::Horizontal ? element.scrollLeft() : element.scrollTop();
@@ -481,7 +481,7 @@ bool Surface::scrollFocusedElement(const KeyEvent& event, Element& focused) {
 
         for (Element* candidate = &focused; candidate;) {
             ElementRef<Element> candidateRef(candidate);
-            const Style& style = styles.style(*candidate);
+            const ComputedStyle& style = styles.style(*candidate);
             candidate = candidateRef.get();
             if (!candidate || !isRootedInSurface(candidate) || !isEnabledInTree(candidate)) break;
             if (horizontalKey) {
@@ -541,7 +541,7 @@ CursorStyle Surface::cursor() const {
     const ConstElementObservation observation = observe(*element);
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
-    const Style style = styles.style(*element);
+    const ComputedStyle style = styles.style(*element);
     const Element* current = observation.get();
     if (!current || !observation.layoutValid() || !observation.styleValid() || !isRootedInSurface(current) || !current->isVisible(style))
         return CursorStyle::Default;
@@ -800,7 +800,7 @@ bool Surface::scroll(const WheelEvent& event) {
                 || !isRootedInSurface(candidate))
                 break;
 
-            const Style style = styles.style(*candidate);
+            const ComputedStyle style = styles.style(*candidate);
             const Vec2 consumed = consumeWheelDelta(*candidate, style, remaining);
             remaining = remaining - consumed;
             if (consumed.x != 0.f || consumed.y != 0.f) scrollHandled = true;

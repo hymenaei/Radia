@@ -9,10 +9,16 @@
 #include "html/elementnames.h"
 #include "localization.h"
 #include "resource/elementdefinition.h"
-#include "style/style.h"
+#include "style/computedstyle.h"
 
 namespace radia::ui {
 namespace {
+Element* scopeRootForLabel(HTMLLabelElement& label) {
+    Element* root = &label;
+    while (root->parentElement() && !root->idScopeRoot()) root = root->parentElement();
+    return root;
+}
+
 const Element* scopeRootForLabel(const HTMLLabelElement& label) {
     const Element* root = &label;
     while (root->parentElement() && !root->idScopeRoot()) root = root->parentElement();
@@ -24,6 +30,16 @@ bool isLabelable(const Element& element) {
     return definition && definition->labelable;
 }
 
+template<typename LabelT, typename IndexT> auto findLabelTarget(LabelT& label) {
+    const Element::Attribute* targetAttribute = label.attribute("for");
+    if (!targetAttribute || !targetAttribute->value || targetAttribute->value->empty()) return static_cast<typename IndexT::ElementPointer>(nullptr);
+
+    IndexT index;
+    detail::indexElementsInScope(*scopeRootForLabel(label), index);
+    const auto found = index.first.find(*targetAttribute->value);
+    if (found == index.first.end() || index.ambiguous.contains(*targetAttribute->value)) return static_cast<typename IndexT::ElementPointer>(nullptr);
+    return isLabelable(*found->second) ? found->second : static_cast<typename IndexT::ElementPointer>(nullptr);
+}
 } // namespace
 
 HTMLLabelElement::HTMLLabelElement(std::string text) : HTMLElement(kLabelTag.localName) {
@@ -37,15 +53,12 @@ HTMLLabelElement& HTMLLabelElement::setTargetId(std::string id) {
     return *this;
 }
 
-Element* HTMLLabelElement::target() const {
-    const Attribute* targetAttribute = attribute("for");
-    if (!targetAttribute || !targetAttribute->value || targetAttribute->value->empty()) return nullptr;
+Element* HTMLLabelElement::target() {
+    return findLabelTarget<HTMLLabelElement, detail::ElementIdIndex>(*this);
+}
 
-    detail::ElementIdIndex index;
-    detail::indexElementsInScope(*const_cast<Element*>(scopeRootForLabel(*this)), index);
-    const auto found = index.first.find(*targetAttribute->value);
-    if (found == index.first.end() || index.ambiguous.contains(*targetAttribute->value)) return nullptr;
-    return isLabelable(*found->second) ? found->second : nullptr;
+const Element* HTMLLabelElement::target() const {
+    return findLabelTarget<const HTMLLabelElement, detail::ConstElementIdIndex>(*this);
 }
 
 void HTMLLabelElement::onActivate() {

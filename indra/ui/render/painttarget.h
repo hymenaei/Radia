@@ -9,6 +9,8 @@
 #include "types.h"
 
 namespace radia::ui {
+class NativeAppearance;
+
 enum class PaintTargetKind : std::uint8_t { Direct, Offscreen };
 
 enum class AAIntent : std::uint8_t { NoCoverage, Coverage };

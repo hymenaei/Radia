@@ -1,5 +1,7 @@
 :focus-visible { outline: light-dark(#101010, #FFFFFF) solid 1px; }
 
+* { box-sizing: content-box; }
+
 input {
     appearance: auto;
     display: inline-block;

@@ -7,6 +7,7 @@
 #include "surface/surface.h"
 #include <algorithm>
 #include <optional>
+#include "binding/binder.h"
 #include "dom/document.h"
 #include "dom/elementinternal.h"
 #include "dom/text.h"
@@ -14,7 +15,6 @@
 #include "html/elementnames.h"
 #include "html/floater.h"
 #include "layout/engine.h"
-#include "layout/engineinternal.h"
 #include "layout/primitives.h"
 #include "render/paintcontext.h"
 #include "style/stylepass.h"
@@ -27,7 +27,7 @@ using detail::MountEpoch;
 using detail::NodeRef;
 
 namespace {
-void applyDirection(Style& style, LayoutDirection direction) {
+void applyDirection(ComputedStyle& style, LayoutDirection direction) {
     style.direction = direction;
     if (style.textAlign == TextAlign::Start) style.textAlign = direction == LayoutDirection::RightToLeft ? TextAlign::Right : TextAlign::Left;
     else if (style.textAlign == TextAlign::End) style.textAlign = direction == LayoutDirection::RightToLeft ? TextAlign::Left : TextAlign::Right;
@@ -48,7 +48,7 @@ bool isDetachedBorrowedRoot(const Element& element) {
     return !element.parentElement() && (!element.parentNode() || element.parentNode()->asDocument()) && !ElementInternalAccess::isMounted(element);
 }
 
-const Element* scrollbarClipOwner(const Element& element, const Style& style) {
+const Element* scrollbarClipOwner(const Element& element, const ComputedStyle& style) {
     if (style.borderWidth.any() || hasBorderRadius(style.borderRadius)) return &element;
     for (const Element* ancestor = element.parentElement(); ancestor; ancestor = ancestor->parentElement())
         if (dynamic_cast<const HTMLFloaterElement*>(ancestor)) return ancestor;
@@ -72,8 +72,8 @@ Surface::Surface(const StyleSheet& styleSheet)
 Surface::Surface(const System& system, const TextMetrics& textMetrics)
     : mStyleSheet(&system.styleSheet()), mSystem(&system), mTextMetrics(textMetrics), mObservedStyleGeneration(system.generation()),
       mObservedTextMetricsGeneration(mTextMetrics.generation()) {
-    mScrollLayoutOptions.nativeAppearance = &system.nativeAppearance();
-    mNativeAppearanceRevision = system.nativeAppearance().revision();
+    mScrollLayoutOptions.nativeMetrics = system.nativeAppearance().layoutMetrics();
+    mNativeAppearanceRevision = mScrollLayoutOptions.nativeMetrics.revision;
     system.registerSurface(*this);
 }
 
@@ -91,7 +91,9 @@ Surface::~Surface() {
     std::vector<ElementRef<Element>> mountedRoots;
     for (MountList& layerMounts : mMounts)
         for (MountPtr& mount : layerMounts) {
-            if (!mount || !mount->root) continue;
+            if (!mount) continue;
+            detachBindings(*mount);
+            if (!mount->root) continue;
             mountedRoots.emplace_back(mount->root);
             mount->lifetime.reset();
             mount->root = nullptr;
@@ -134,9 +136,9 @@ void Surface::setViewport(float width, float height) {
 
 void Surface::setScrollLayoutOptions(ScrollLayoutOptions options) {
     syncNativeAppearance();
-    if (mSystem) options.nativeAppearance = &mSystem->nativeAppearance();
+    if (mSystem) options.nativeMetrics = mSystem->nativeAppearance().layoutMetrics();
     const bool optionsChanged =
-        mScrollLayoutOptions.scrollbarMode != options.scrollbarMode || mScrollLayoutOptions.nativeAppearance != options.nativeAppearance;
+        mScrollLayoutOptions.scrollbarMode != options.scrollbarMode || mScrollLayoutOptions.nativeMetrics != options.nativeMetrics;
     if (!optionsChanged) return;
     mScrollLayoutOptions = options;
     requestLayout();
@@ -144,18 +146,20 @@ void Surface::setScrollLayoutOptions(ScrollLayoutOptions options) {
 
 void Surface::nativeAppearanceChanged() {
     if (!mSystem) return;
-    mScrollLayoutOptions.nativeAppearance = &mSystem->nativeAppearance();
-    mNativeAppearanceRevision = mSystem->nativeAppearance().revision();
+    mScrollLayoutOptions.nativeMetrics = mSystem->nativeAppearance().layoutMetrics();
+    mNativeAppearanceRevision = mScrollLayoutOptions.nativeMetrics.revision;
     requestLayout();
     requestPaint();
 }
 
 void Surface::syncNativeAppearance() {
-    if (mSystem && mNativeAppearanceRevision != mSystem->nativeAppearance().revision()) nativeAppearanceChanged();
+    if (!mSystem) return;
+    const NativeLayoutMetrics metrics = mSystem->nativeAppearance().layoutMetrics();
+    if (mNativeAppearanceRevision != metrics.revision || mScrollLayoutOptions.nativeMetrics != metrics) nativeAppearanceChanged();
 }
 
 const NativeAppearance& Surface::effectiveNativeAppearance() const {
-    return mScrollLayoutOptions.nativeAppearance ? *mScrollLayoutOptions.nativeAppearance : defaultNativeAppearance();
+    return mSystem ? mSystem->nativeAppearance() : defaultNativeAppearance();
 }
 
 const NativeAppearance& Surface::nativeAppearance() const {
@@ -163,10 +167,10 @@ const NativeAppearance& Surface::nativeAppearance() const {
 }
 
 NativeScrollbarMetrics Surface::scrollbarMetrics(ScrollbarMode mode) const {
-    return effectiveNativeAppearance().scrollbarMetrics(mode);
+    return mScrollLayoutOptions.nativeMetrics.scrollbarMetrics(mode);
 }
 
-ScrollGeometry Surface::scrollbarGeometry(const Element& element, const Style& style) const {
+ScrollGeometry Surface::scrollbarGeometry(const Element& element, const ComputedStyle& style) const {
     const ScrollbarMode mode = style.scrollbarModeSet ? style.scrollbarMode : mScrollLayoutOptions.scrollbarMode;
     const NativeScrollbarMetrics metrics = scrollbarMetrics(mode);
     const float widthScale = style.scrollbarWidth == ScrollbarWidth::Thin ? .5f : 1.f;
@@ -256,6 +260,48 @@ Surface::Mount* Surface::findMount(Element* element) noexcept {
     return nullptr;
 }
 
+bool Surface::attachBinding(Element& root, Binding& binding) {
+    Element* mounted = mountedRoot(&root);
+    Mount* mount = findMount(mounted);
+    if (!mount) return false;
+    if (std::find(mount->bindings.begin(), mount->bindings.end(), &binding) == mount->bindings.end()) mount->bindings.push_back(&binding);
+    binding.mAttachedSurface = this;
+    return true;
+}
+
+void Surface::detachBinding(Binding& binding) noexcept {
+    for (MountList& layerMounts : mMounts)
+        for (MountPtr& mount : layerMounts)
+            if (mount) mount->bindings.erase(std::remove(mount->bindings.begin(), mount->bindings.end(), &binding), mount->bindings.end());
+    if (binding.mAttachedSurface == this) binding.mAttachedSurface = nullptr;
+}
+
+void Surface::replaceBinding(Binding& current, Binding& replacement) noexcept {
+    bool replaced = false;
+    for (MountList& layerMounts : mMounts) {
+        for (MountPtr& mount : layerMounts) {
+            if (!mount) continue;
+            for (Binding*& binding : mount->bindings) {
+                if (binding != &current) continue;
+                binding = &replacement;
+                replaced = true;
+            }
+        }
+    }
+    current.mAttachedSurface = nullptr;
+    replacement.mAttachedSurface = replaced ? this : nullptr;
+}
+
+void Surface::detachBindings(Mount& mount) noexcept {
+    std::vector<Binding*> bindings;
+    bindings.swap(mount.bindings);
+    for (Binding* binding : bindings) {
+        if (!binding || binding->mAttachedSurface != this) continue;
+        binding->mAttachedSurface = nullptr;
+        binding->deactivate();
+    }
+}
+
 const Surface::Mount* Surface::findMount(const Element* element) const noexcept {
     if (!element) return nullptr;
     for (const MountList& layerMounts : mMounts)
@@ -272,6 +318,7 @@ Surface::MountPtr Surface::detachMount(Element& element) {
 
         MountPtr detached = std::move(*found);
         layerMounts.erase(found);
+        detachBindings(*detached);
         ElementRef<Element> rootRef(detached->root);
         detached->lifetime.reset();
         detached->root = nullptr;
@@ -319,6 +366,13 @@ void Surface::clearLayer(SurfaceLayer layer) {
     invalidateOrderingCache();
     requestLayout();
     refreshHover();
+}
+
+Element* Surface::mountedRoot(Element* element) {
+    if (!element) return nullptr;
+    Element* root = element;
+    while (root->parentElement()) root = root->parentElement();
+    return isSurfaceRoot(root) ? root : nullptr;
 }
 
 const Element* Surface::mountedRoot(const Element* element) const {
@@ -473,10 +527,10 @@ StylePass& Surface::stylePass() const {
         mStylePass.reset();
     }
     const LayoutDirection direction = layoutDirection();
-    const NativeAppearance& appearance = effectiveNativeAppearance();
-    const bool mismatched = !mStylePass || !mStylePass->matches(*mStyleSheet, mTextMetrics, direction, &appearance);
+    const NativeLayoutMetrics metrics = mScrollLayoutOptions.nativeMetrics;
+    const bool mismatched = !mStylePass || !mStylePass->matches(*mStyleSheet, mTextMetrics, direction, metrics);
     if (mismatched && (!mStylePass || !mStylePass->active()))
-        mStylePass = std::make_unique<StylePass>(*mStyleSheet, mTextMetrics, direction, &appearance);
+        mStylePass = std::make_unique<StylePass>(*mStyleSheet, mTextMetrics, direction, metrics);
     return *mStylePass;
 }
 
@@ -530,10 +584,10 @@ bool Surface::updateLayoutIfNeeded() {
     const StylePass::TraversalScope traversal = styles.enterTraversal();
     const auto layoutRoot = [&](Element& root) {
         const bool authoredRect = root.mRectExplicit;
-        layoutTreeUsingStylePass(root, styles, mScrollLayoutOptions);
+        LayoutEngine::layout(root, styles, mScrollLayoutOptions);
         if (authoredRect) return;
 
-        const Style& rootStyle = styles.style(root);
+        const ComputedStyle& rootStyle = styles.style(root);
         if (!root.isDisplayed(rootStyle)) return;
         const bool bodyRoot = root.elementName() == kBodyTag.localName;
         const Vec2 desired = root.desiredSize();
@@ -554,7 +608,7 @@ bool Surface::updateLayoutIfNeeded() {
             : rootStyle.bottom        ? rootStyle.bottom->resolve(mViewport.h)
                                       : mViewport.h - height - rootStyle.margin.top.fixedPixels();
         layout_detail::setArrangedRect(root, {x, y, width, height});
-        layoutTreeUsingStylePass(root, styles, mScrollLayoutOptions);
+        LayoutEngine::layout(root, styles, mScrollLayoutOptions);
     };
     for (const MountList& layerMounts : mMounts)
         for (const MountPtr& mount : layerMounts)
@@ -585,7 +639,7 @@ void Surface::paint(PaintContext& context, float scale, Vec2 pixelOrigin) {
 
 void Surface::paintElement(const Element& element, PaintContext& context, float scale, float inheritedOpacity, StylePass& styles) const {
     const ConstElementObservation observation = observe(element);
-    const Style& unresolved = styles.style(element);
+    const ComputedStyle& unresolved = styles.style(element);
     const Element* current = observation.get();
     if (!current || !observation.layoutValid() || !observation.styleValid()) return;
     if (!current->isVisible(unresolved)) return;
@@ -597,8 +651,8 @@ void Surface::paintElement(const Element& element, PaintContext& context, float 
     const bool needsOpacity = inheritedOpacity != 1.f || unresolved.opacity != 1.f;
     const bool needsDirection =
         unresolved.direction != direction || unresolved.textAlign == TextAlign::Start || unresolved.textAlign == TextAlign::End;
-    std::optional<Style> paintedStorage;
-    const Style* painted = &unresolved;
+    std::optional<ComputedStyle> paintedStorage;
+    const ComputedStyle* painted = &unresolved;
     if (needsOpacity || needsDirection) {
         paintedStorage.emplace(unresolved);
         if (needsOpacity) applyOpacity(*paintedStorage, inheritedOpacity);
@@ -614,12 +668,12 @@ void Surface::paintElement(const Element& element, PaintContext& context, float 
     const ClipAxes clipAxes = (clipsX ? ClipAxes::X : ClipAxes::NoAxes) | (clipsY ? ClipAxes::Y : ClipAxes::NoAxes);
     if (!painted->effects.empty()) context.beginEffects(current->paintBounds(), *painted, scale);
     if (paintsBodyCanvasBackground) {
-        Style canvasBackground;
+        ComputedStyle canvasBackground;
         canvasBackground.backgroundColor = painted->backgroundColor;
         canvasBackground.backgroundGradient = painted->backgroundGradient;
         context.paintBox(mViewport, canvasBackground);
 
-        Style bodyStyle = *painted;
+        ComputedStyle bodyStyle = *painted;
         bodyStyle.backgroundColor = Color(0.f, 0.f, 0.f, 0.f);
         bodyStyle.backgroundGradient.reset();
         current->paint(context, bodyStyle, scale);
@@ -639,14 +693,7 @@ void Surface::paintElement(const Element& element, PaintContext& context, float 
             context.pushClip(ElementInternalAccess::scrollport(*current), scale, clipAxes);
             context.pushTranslation(scrollContentTranslation(layoutDirection(), {current->scrollLeft(), current->scrollTop()}));
         }
-        Style textStyle;
-        inheritStyle(textStyle, *painted);
-        textStyle.textOverflow = painted->textOverflow;
-        textStyle.overflowX = painted->overflowX;
-        textStyle.display = DisplayMode::Inline;
-        textStyle.displaySet = true;
-        textStyle.padding = {};
-        textStyle.margin = {};
+        const ComputedStyle textStyle = Text::styleForParent(*painted);
         std::vector<NodeRef> children;
         children.reserve(current->mChildren.size());
         for (const auto& childNode : current->mChildren) children.emplace_back(childNode.get());
@@ -682,7 +729,7 @@ void Surface::paintElement(const Element& element, PaintContext& context, float 
             request.scale = scale;
             request.appearanceRevision = effectiveNativeAppearance().revision();
             if (const Element* clipOwner = scrollbarClipOwner(*current, *painted)) {
-                const Style* clipStyle = clipOwner == current ? painted : &styles.style(*clipOwner);
+                const ComputedStyle* clipStyle = clipOwner == current ? painted : &styles.style(*clipOwner);
                 request.clip.enabled = true;
                 request.clip.borderBox = clipOwner->rect();
                 request.clip.borderRadius = clipStyle->borderRadius;

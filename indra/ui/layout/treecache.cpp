@@ -5,16 +5,12 @@
 
 #include "linden_common.h"
 #include "layout/treecache.h"
-#include <algorithm>
-#include "style/style.h"
 
 namespace radia::ui {
 void TreeTraversalCache::beginTraversal() {
     if (mTraversalDepth++ != 0) return;
     if (mResetAtBoundary) {
-        mOrdered.clear();
         mSource.clear();
-        mActiveOrdered.clear();
         mActiveSource.clear();
         mResetAtBoundary = false;
     }
@@ -29,9 +25,9 @@ void TreeTraversalCache::invalidateOrdering() {
     mResetAtBoundary = true;
 }
 
-TreeTraversalCache::ChildSnapshot TreeTraversalCache::build(Element& parent, bool ordered, const StyleResolver* resolve) {
-    SnapshotCache& cache = ordered ? mOrdered : mSource;
-    SnapshotCache& activeCache = ordered ? mActiveOrdered : mActiveSource;
+TreeTraversalCache::ChildSnapshot TreeTraversalCache::build(Element& parent) {
+    SnapshotCache& cache = mSource;
+    SnapshotCache& activeCache = mActiveSource;
     const auto lifetime = detail::NodeAccess::lifetime(parent).lock();
     const std::uint64_t revision = parent.mChildSnapshotRevision;
     const auto found = cache.snapshots.find(&parent);
@@ -74,39 +70,11 @@ TreeTraversalCache::ChildSnapshot TreeTraversalCache::build(Element& parent, boo
     };
 
     if (!parentState.layoutValid()) return std::make_shared<std::vector<ElementRef<Element>>>();
-    if (ordered && resolve) {
-        const Style& parentStyle = (*resolve)(parent);
-        if (!parentState.styleValid()) return std::make_shared<std::vector<ElementRef<Element>>>();
-        if (isFlexDisplay(parentStyle.display)) {
-            std::vector<std::pair<ElementRef<Element>, int>> ranked;
-            ranked.reserve(result->size());
-            for (const ElementRef<Element>& childRef : *result) {
-                Element* child = childRef.get();
-                if (!child || child->parentElement() != &parent) continue;
-                const ElementVisit childState(*child);
-                const Style& childStyle = (*resolve)(*child);
-                child = childState.get();
-                if (!parentState.styleValid() || !childState.styleValid() || !child || child->parentElement() != &parent)
-                    return std::make_shared<std::vector<ElementRef<Element>>>();
-                ranked.emplace_back(childRef, childStyle.order);
-            }
-            std::stable_sort(ranked.begin(), ranked.end(), [](const auto& left, const auto& right) { return left.second < right.second; });
-            result->clear();
-            result->reserve(ranked.size());
-            for (auto& [childRef, order] : ranked) result->push_back(std::move(childRef));
-        }
-        if (!parentState.styleValid()) return std::make_shared<std::vector<ElementRef<Element>>>();
-    }
-    if (!parentState.layoutValid()) return std::make_shared<std::vector<ElementRef<Element>>>();
     commit();
     return result;
 }
 
-TreeTraversalCache::ChildSnapshot TreeTraversalCache::orderedChildren(Element& parent, const StyleResolver& resolve) {
-    return build(parent, true, &resolve);
-}
-
 TreeTraversalCache::ChildSnapshot TreeTraversalCache::sourceChildren(Element& parent) {
-    return build(parent, false, nullptr);
+    return build(parent);
 }
 } // namespace radia::ui

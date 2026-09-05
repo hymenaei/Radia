@@ -28,7 +28,7 @@ enum class LayoutInvalidationReason : uint8_t {
     NoInvalidation = 0,
     Measure = 1 << 0,
     Arrange = 1 << 1,
-    Style = 1 << 2,
+    ComputedStyle = 1 << 2,
     Text = 1 << 3,
     Paint = 1 << 4
 };
@@ -53,12 +53,12 @@ private:
 struct IntrinsicSizeConstraints {
     std::optional<float> width;
     std::optional<float> height;
-    const NativeAppearance* nativeAppearance = nullptr;
+    std::optional<NativeLayoutMetrics> nativeMetrics;
 
     IntrinsicSizeConstraints() = default;
     IntrinsicSizeConstraints(std::optional<float> constrainedWidth, std::optional<float> constrainedHeight,
-                             const NativeAppearance* appearance = nullptr)
-        : width(constrainedWidth), height(constrainedHeight), nativeAppearance(appearance) {}
+                             std::optional<NativeLayoutMetrics> metrics = std::nullopt)
+        : width(constrainedWidth), height(constrainedHeight), nativeMetrics(metrics) {}
 };
 
 inline constexpr InvalidationFlags layoutInvalidationMask(LayoutInvalidationReason reason) {
@@ -82,7 +82,7 @@ inline constexpr InvalidationFlags operator|(LayoutInvalidationReason left, Inva
 }
 
 inline constexpr InvalidationFlags kMeasureInvalidationReasons =
-    layoutInvalidationMask(LayoutInvalidationReason::Measure | LayoutInvalidationReason::Style | LayoutInvalidationReason::Text);
+    layoutInvalidationMask(LayoutInvalidationReason::Measure | LayoutInvalidationReason::ComputedStyle | LayoutInvalidationReason::Text);
 inline constexpr InvalidationFlags kArrangeInvalidationReasons = kMeasureInvalidationReasons | LayoutInvalidationReason::Arrange;
 inline constexpr InvalidationFlags kTextInvalidationReasons =
     layoutInvalidationMask(LayoutInvalidationReason::Measure | LayoutInvalidationReason::Arrange | LayoutInvalidationReason::Text);
@@ -124,7 +124,8 @@ class LayoutEngine;
 class PaintContext;
 class System;
 class Surface;
-struct Style;
+class Binding;
+struct ComputedStyle;
 class StyleSheet;
 class TextMetrics;
 enum class VerticalAlign;
@@ -153,6 +154,7 @@ class Element : public Node {
     friend class Document;
     friend class TreeTraversalCache;
     friend class Binder;
+    friend class Binding;
     friend class LayoutPass;
     friend class LayoutEngine;
     friend class StylePass;
@@ -168,7 +170,6 @@ class Element : public Node {
     friend Node& detail::appendLocalizedText(Element&, LocalizedText, std::string);
     friend detail::NodeChildren detail::nodes(Element&);
     friend detail::ConstNodeChildren detail::nodes(const Element&);
-    friend Style resolveElementStyle(const StyleSheet& styleSheet, const Element& node);
 
 public:
     struct Attribute {
@@ -237,8 +238,8 @@ public:
     std::uint64_t styleContextRevision() const;
     bool pointerEvents() const { return mPointerEvents.value_or(defaultPointerEvents()); }
     Visibility visibility() const { return mVisibilityOverride.value_or(Visibility::Visible); }
-    bool isDisplayed(const Style& style) const;
-    bool isVisible(const Style& style) const;
+    bool isDisplayed(const ComputedStyle& style) const;
+    bool isVisible(const ComputedStyle& style) const;
     bool disabled() const { return radia::ui::hasState(mStates, ElementState::Disabled); }
     bool idScopeRoot() const { return mIdScopeRoot; }
     bool flowBreakBefore() const;
@@ -247,11 +248,11 @@ public:
     void activate();
     void activateFromLabel();
 
-    virtual Vec2 intrinsicSize(const StyleSheet& styleSheet, const Style& style, const TextMetrics& textMetrics,
+    virtual Vec2 intrinsicSize(const StyleSheet& styleSheet, const ComputedStyle& style, const TextMetrics& textMetrics,
                                const IntrinsicSizeConstraints& constraints = IntrinsicSizeConstraints()) const;
     virtual bool defaultPointerEvents() const { return false; }
     virtual bool focusable() const { return false; }
-    virtual void paint(PaintContext& context, const Style& style, float scale) const;
+    virtual void paint(PaintContext& context, const ComputedStyle& style, float scale) const;
 
 protected:
     explicit Element(std::string_view elementName);
@@ -263,7 +264,7 @@ protected:
     virtual bool beginPointerInteraction(const PointerEvent& event);
     virtual bool updatePointerInteraction(const PointerEvent& event);
     virtual bool endPointerInteraction(const PointerEvent& event);
-    virtual void constrainResolvedStyle(Style& style) const {}
+    virtual void constrainResolvedStyle(ComputedStyle& style) const {}
     void dispatchEvent(Event& event);
     void translate(const Vec2& delta);
     void invalidateMeasure();
@@ -287,10 +288,10 @@ protected:
     virtual void onDescendantRemoved(Element&) {}
     virtual void onChildrenCleared() {}
     virtual void onLocaleChanged(const System&);
-    virtual void onArranged(const Style&) {}
+    virtual void onArranged(const ComputedStyle&) {}
     virtual Rect paintBounds() const { return mRect; }
     virtual bool hasLayoutGapBetween(const Element&, const Element&) const { return true; }
-    virtual float layoutOverlapBetween(const Element&, const Element&, const Style&) const { return 0.f; }
+    virtual float layoutOverlapBetween(const Element&, const Element&, const ComputedStyle&) const { return 0.f; }
     virtual std::vector<PseudoElement*> generatedPseudoElements() const { return {}; }
     void translateChild(Element& child, const Vec2& delta);
     void setState(ElementState state, bool enabled);
@@ -384,7 +385,7 @@ private:
     std::uint64_t mStyleRevision = 1;
     std::uint64_t mLayoutInvalidationRevision = 0;
     InvalidationFlags mInvalidationReasons =
-        layoutInvalidationMask(LayoutInvalidationReason::Measure | LayoutInvalidationReason::Arrange | LayoutInvalidationReason::Style);
+        layoutInvalidationMask(LayoutInvalidationReason::Measure | LayoutInvalidationReason::Arrange | LayoutInvalidationReason::ComputedStyle);
     std::unique_ptr<detail::ElementPrivateData> mPrivate;
 };
 } // namespace radia::ui

@@ -10,10 +10,10 @@
 #include <cstdint>
 #include <functional>
 #include <utility>
+#include "css/stylesheet.h"
 #include "dom/element.h"
 #include "render/paintcontext.h"
-#include "style/style.h"
-#include "style/stylesheet.h"
+#include "style/computedstyle.h"
 #include "text/layout.h"
 #include "text/metrics.h"
 
@@ -43,7 +43,7 @@ std::string collapseWhitespace(const std::string& text) {
     return result;
 }
 
-std::vector<TextLine> layoutLines(const std::string& text, const Style& style, const TextMetrics& metrics) {
+std::vector<TextLine> layoutLines(const std::string& text, const ComputedStyle& style, const TextMetrics& metrics) {
     std::vector<TextLine> lines(1);
     const std::string value = collapseWhitespace(text);
     if (!value.empty()) lines.front().push_back({value, style, metrics.measureText(value, style)});
@@ -76,7 +76,7 @@ void mixColor(std::size_t& hash, const Color& value) {
     mixStyleValue(hash, value.a);
 }
 
-std::size_t textStyleFingerprint(const Style& style) {
+std::size_t textStyleFingerprint(const ComputedStyle& style) {
     std::size_t hash = 0;
     mixStyleValue(hash, static_cast<std::size_t>(style.fontFamily));
     mixStyleValue(hash, style.fontSize);
@@ -91,7 +91,7 @@ std::size_t textStyleFingerprint(const Style& style) {
     return hash;
 }
 
-std::size_t textLayoutFingerprint(const Style& style, bool visualOrder, bool applyOverflow) {
+std::size_t textLayoutFingerprint(const ComputedStyle& style, bool visualOrder, bool applyOverflow) {
     std::size_t hash = 0;
     mixStyleValue(hash, static_cast<std::size_t>(style.textWrap));
     if (applyOverflow) {
@@ -101,7 +101,6 @@ std::size_t textLayoutFingerprint(const Style& style, bool visualOrder, bool app
     if (visualOrder) mixStyleValue(hash, static_cast<std::size_t>(style.direction));
     return hash;
 }
-
 } // namespace
 
 void TextLayout::setText(std::string text) {
@@ -114,7 +113,7 @@ void TextLayout::updatePlainText() {
     mPlainText = mText;
 }
 
-Vec2 TextLayout::measure(const TextMetrics& metrics, const Style& style, const StyleSheet& styleSheet, const Element& owner,
+Vec2 TextLayout::measure(const TextMetrics& metrics, const ComputedStyle& style, const StyleSheet& styleSheet, const Element& owner,
                          std::optional<float> resolvedWidth) const {
     std::optional<float> availableWidth;
     if (resolvedWidth) availableWidth = std::max(0.f, *resolvedWidth - style.padding.horizontal());
@@ -122,7 +121,8 @@ Vec2 TextLayout::measure(const TextMetrics& metrics, const Style& style, const S
     return cachedLayout(metrics, style, &styleSheet, owner, availableWidth, false, false).size;
 }
 
-void TextLayout::paint(PaintContext& context, const Rect& rect, const Style& style, const StyleSheet* styleSheet, const Element& owner) const {
+void TextLayout::paint(PaintContext& context, const Rect& rect, const ComputedStyle& style, const StyleSheet* styleSheet,
+                       const Element& owner) const {
     const detail::TextLayout& layout = cachedLayout(context, style, styleSheet, owner, rect.w, true, true);
     float y = rect.top();
     for (const detail::LaidOutTextLine& line : layout.lines) {
@@ -130,7 +130,7 @@ void TextLayout::paint(PaintContext& context, const Rect& rect, const Style& sty
         float x = rect.x + alignedOffset(rect.w, line.size.x, style.textAlign);
         for (std::size_t runIndex = 0; runIndex < line.runs.size(); ++runIndex) {
             const TextRun& run = line.runs[runIndex];
-            Style runStyle = run.style;
+            ComputedStyle runStyle = run.style;
             runStyle.textAlign = TextAlign::Left;
             context.paintText(run.value, {x, y, run.size.x, line.size.y}, runStyle);
             x += run.size.x;
@@ -139,15 +139,16 @@ void TextLayout::paint(PaintContext& context, const Rect& rect, const Style& sty
     }
 }
 
-const std::vector<detail::TextLine>& TextLayout::cachedLines(const TextMetrics& metrics, const Style& style, const StyleSheet* styleSheet,
+const std::vector<detail::TextLine>& TextLayout::cachedLines(const TextMetrics& metrics, const ComputedStyle& style, const StyleSheet* styleSheet,
                                                              const Element& owner) const {
     const std::size_t fingerprint = textStyleFingerprint(style);
     const std::uint64_t styleSheetGeneration = styleSheet ? styleSheet->generation() : 0;
+    const std::uint64_t metricsGeneration = metrics.generation();
     const std::uint64_t ownerStyleRevision = owner.styleContextRevision();
     const Element* ownerParent = owner.parentElement();
     if (mCachedContentGeneration == mContentGeneration
         && mCachedMetrics == &metrics
-        && mCachedMetricsGeneration == metrics.generation()
+        && mCachedMetricsGeneration == metricsGeneration
         && mCachedStyleSheet == styleSheet
         && mCachedStyleSheetGeneration == styleSheetGeneration
         && mCachedOwner == &owner
@@ -160,7 +161,7 @@ const std::vector<detail::TextLine>& TextLayout::cachedLines(const TextMetrics& 
     mCachedLayoutValid = false;
     mCachedContentGeneration = mContentGeneration;
     mCachedMetrics = &metrics;
-    mCachedMetricsGeneration = metrics.generation();
+    mCachedMetricsGeneration = metricsGeneration;
     mCachedStyleSheet = styleSheet;
     mCachedStyleSheetGeneration = styleSheetGeneration;
     mCachedOwner = &owner;
@@ -170,8 +171,9 @@ const std::vector<detail::TextLine>& TextLayout::cachedLines(const TextMetrics& 
     return mCachedLines;
 }
 
-const detail::TextLayout& TextLayout::cachedLayout(const TextMetrics& metrics, const Style& style, const StyleSheet* styleSheet, const Element& owner,
-                                                   std::optional<float> availableWidth, bool visualOrder, bool applyOverflow) const {
+const detail::TextLayout& TextLayout::cachedLayout(const TextMetrics& metrics, const ComputedStyle& style, const StyleSheet* styleSheet,
+                                                   const Element& owner, std::optional<float> availableWidth, bool visualOrder,
+                                                   bool applyOverflow) const {
     const std::vector<detail::TextLine>& lines = cachedLines(metrics, style, styleSheet, owner);
     const std::size_t layoutFingerprint = textLayoutFingerprint(style, visualOrder, applyOverflow);
     const bool widthMatches = mCachedLayoutWidthSet == availableWidth.has_value() && (!availableWidth || mCachedLayoutWidth == *availableWidth);

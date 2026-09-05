@@ -9,6 +9,7 @@
 #include <set>
 #include "dom/elementinternal.h"
 #include "eventcall.h"
+#include "surface/surface.h"
 
 namespace radia::ui {
 using detail::ElementInternalAccess;
@@ -21,9 +22,12 @@ Binding::~Binding() {
 Binding::Binding(Binding&& other) noexcept
     : mEventAttachments(std::move(other.mEventAttachments)), mValueAttachments(std::move(other.mValueAttachments)),
       mValueSubscriptions(std::move(other.mValueSubscriptions)), mRoot(other.mRoot), mRootParent(other.mRootParent),
-      mRootLifetime(std::move(other.mRootLifetime)), mActive(std::move(other.mActive)), mCommitted(other.mCommitted) {
+      mRootLifetime(std::move(other.mRootLifetime)), mActive(std::move(other.mActive)), mAttachedSurface(other.mAttachedSurface),
+      mCommitted(other.mCommitted) {
+    if (mAttachedSurface) mAttachedSurface->replaceBinding(other, *this);
     other.mRoot = nullptr;
     other.mRootParent = nullptr;
+    other.mAttachedSurface = nullptr;
     other.mCommitted = false;
 }
 
@@ -37,9 +41,12 @@ Binding& Binding::operator=(Binding&& other) noexcept {
     mRootParent = other.mRootParent;
     mRootLifetime = std::move(other.mRootLifetime);
     mActive = std::move(other.mActive);
+    mAttachedSurface = other.mAttachedSurface;
     mCommitted = other.mCommitted;
+    if (mAttachedSurface) mAttachedSurface->replaceBinding(other, *this);
     other.mRoot = nullptr;
     other.mRootParent = nullptr;
+    other.mAttachedSurface = nullptr;
     other.mCommitted = false;
     return *this;
 }
@@ -86,8 +93,18 @@ bool Binding::activate() {
         }
     }
 
+    Surface* surface = mRoot->surface();
+    if (mAttachedSurface && mAttachedSurface != surface) {
+        deactivate();
+        return false;
+    }
+
     if (!mActive) mActive = std::make_shared<bool>(false);
     attachEventListeners();
+    if (surface && !surface->attachBinding(*mRoot, *this)) {
+        deactivate();
+        return false;
+    }
     *mActive = true;
     for (const ValueAttachment& attachment : mValueAttachments) {
         ElementRef<HTMLInputElement> input(attachment.element);
@@ -97,6 +114,7 @@ bool Binding::activate() {
 }
 
 void Binding::deactivate() noexcept {
+    if (mAttachedSurface) mAttachedSurface->detachBinding(*this);
     if (mActive) *mActive = false;
     clearEventListeners();
 }

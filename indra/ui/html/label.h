@@ -23,7 +23,8 @@ protected:
 
 private:
     explicit HTMLLabelElement(std::string text = {});
-    Element* target() const;
+    Element* target();
+    const Element* target() const;
 
     void onActivate() override;
 

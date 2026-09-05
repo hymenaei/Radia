@@ -8,7 +8,7 @@
 #include "event.h"
 #include "llcursortypes.h"
 #include "nativeinput.h"
-#include "style/style.h"
+#include "style/computedstyle.h"
 
 namespace radia::viewer::ui {
 using radia::ui::CursorStyle;

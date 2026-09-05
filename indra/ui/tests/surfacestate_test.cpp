@@ -6,6 +6,7 @@
 #include "linden_common.h"
 #include <gtest/gtest.h>
 #include <memory>
+#include "css/stylesheet.h"
 #include "dom/elementinternal.h"
 #include "floater_test_helpers.h"
 #include "html/button.h"
@@ -14,7 +15,6 @@
 #include "html/label.h"
 #include "html/panel.h"
 #include "render/recordingpaintcontext.h"
-#include "style/stylesheet.h"
 #include "surface/surface.h"
 
 namespace {

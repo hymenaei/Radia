@@ -472,6 +472,26 @@ TEST_F(ComponentManagerTest, RollsBackHostMountWhenControllerActivationFails) {
     EXPECT_TRUE(host.mounted.empty());
 }
 
+TEST_F(ComponentManagerTest, LeavesStateUntouchedWhenHostRejectsMount) {
+    ASSERT_TRUE(registerOne());
+    host.rejectMount = true;
+
+    const ComponentOpenResult rejected = manager.open("one");
+
+    EXPECT_FALSE(rejected.ok());
+    ASSERT_FALSE(rejected.errors.empty());
+    EXPECT_EQ(rejected.errors.front().code, "floater.host.mount_failed");
+    EXPECT_EQ(host.mountCalls, 1);
+    EXPECT_TRUE(host.mounted.empty());
+    EXPECT_TRUE(liveFloaters().empty());
+    EXPECT_EQ(controllerState.openCount, 0);
+
+    host.rejectMount = false;
+    const ComponentOpenResult opened = manager.open("one");
+    EXPECT_TRUE(opened.ok());
+    EXPECT_EQ(host.mountCalls, 2);
+}
+
 TEST_F(ComponentManagerTest, RetainsFailedOpenOwnersWhenHostRejectsRollback) {
     ASSERT_TRUE(registerOne());
     host.rejectUnmounts = true;

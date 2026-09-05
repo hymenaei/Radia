@@ -596,7 +596,6 @@ TEST(BinderTest, DeactivatesValueBindingWhileItsRootIsUnmounted) {
     provider->publish({true, false, std::nullopt});
     EXPECT_TRUE(inputPointer->checked());
 
-    binding.deactivate();
     ASSERT_TRUE(surface.unmountBorrowed(*root));
     provider->publish({false, false, std::nullopt});
     EXPECT_TRUE(inputPointer->checked());
@@ -631,7 +630,6 @@ TEST(BinderTest, ResynchronizesValueBindingWhenRootRemounts) {
     surface.mount(*buildResult.document);
     ASSERT_TRUE(binding.activate());
 
-    binding.deactivate();
     ASSERT_TRUE(surface.unmountBorrowed(*root));
     provider->publish({true, false, std::nullopt});
     EXPECT_FALSE(inputPointer->checked());

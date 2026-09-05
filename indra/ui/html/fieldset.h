@@ -15,7 +15,7 @@ class HTMLLegendElement final : public HTMLElement {
     friend class detail::HTMLElementFactory;
 
 protected:
-    void constrainResolvedStyle(Style& style) const override;
+    void constrainResolvedStyle(ComputedStyle& style) const override;
 
 private:
     HTMLLegendElement();
@@ -26,12 +26,12 @@ class HTMLFieldsetElement final : public HTMLElement {
     friend class detail::HTMLElementFactory;
 
 public:
-    void paint(PaintContext& context, const Style& style, float scale) const override;
+    void paint(PaintContext& context, const ComputedStyle& style, float scale) const override;
 
 protected:
     bool hasLayoutGapBetween(const Element& first, const Element& second) const override;
-    float layoutOverlapBetween(const Element& first, const Element& second, const Style& style) const override;
-    void onArranged(const Style& style) override;
+    float layoutOverlapBetween(const Element& first, const Element& second, const ComputedStyle& style) const override;
+    void onArranged(const ComputedStyle& style) override;
 
 private:
     static bool isDirectLegend(const Element& element);

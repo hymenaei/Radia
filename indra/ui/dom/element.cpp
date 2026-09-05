@@ -14,8 +14,9 @@
 #include "html/fragmentinternal.h"
 #include "layout/engine.h"
 #include "render/paintcontext.h"
+#include "style/computedstyle.h"
 #include "style/pseudoelement.h"
-#include "style/style.h"
+#include "style/stylepass.h"
 #include "surface/surface.h"
 #include "system.h"
 #include "text/metrics.h"
@@ -67,6 +68,13 @@ const Element* findElementInTree(const Element& element, std::string_view id) {
 void indexElementsInScope(Element& element, ElementIdIndex& index) {
     index.add(element);
     for (Element* child : element.children())
+        if (child->idScopeRoot()) index.add(*child);
+        else indexElementsInScope(*child, index);
+}
+
+void indexElementsInScope(const Element& element, ConstElementIdIndex& index) {
+    index.add(element);
+    for (const Element* child : element.children())
         if (child->idScopeRoot()) index.add(*child);
         else indexElementsInScope(*child, index);
 }
@@ -498,11 +506,11 @@ std::string Element::textContent() const {
     return result;
 }
 
-bool Element::isDisplayed(const Style& style) const {
+bool Element::isDisplayed(const ComputedStyle& style) const {
     return style.display != DisplayMode::NoneValue && !mDisplayNoneOverride.value_or(false);
 }
 
-bool Element::isVisible(const Style& style) const {
+bool Element::isVisible(const ComputedStyle& style) const {
     return isDisplayed(style) && mVisibilityOverride.value_or(style.visibility) == Visibility::Visible;
 }
 
@@ -845,13 +853,11 @@ void Element::activate() {
 
 void Element::activateFromLabel() {
     const StyleSheet* styleSheet = this->styleSheet();
+    std::optional<StylePass> styles;
+    if (styleSheet) styles.emplace(*styleSheet, textMetrics(), mSurface ? mSurface->layoutDirection() : LayoutDirection::LeftToRight);
     for (const Element* current = this; current; current = current->parentElement()) {
         if (current->disabled()) return;
-        if (styleSheet) {
-            if (!current->isVisible(resolveElementStyle(*styleSheet, *current))) return;
-        } else if (!current->isVisible(Style{})) {
-            return;
-        }
+        if (!current->isVisible(styles ? styles->style(*current) : ComputedStyle{})) return;
     }
     onLabelActivate();
 }
@@ -888,7 +894,7 @@ void Element::translateChild(Element& child, const Vec2& delta) {
     child.translate(delta);
 }
 
-Vec2 Element::intrinsicSize(const StyleSheet&, const Style&, const TextMetrics&, const IntrinsicSizeConstraints&) const {
+Vec2 Element::intrinsicSize(const StyleSheet&, const ComputedStyle&, const TextMetrics&, const IntrinsicSizeConstraints&) const {
     return {};
 }
 
@@ -897,7 +903,7 @@ void Element::onLocaleChanged(const System& system) {
     else refreshTextContentSlots();
 }
 
-void Element::paint(PaintContext& context, const Style& style, float) const {
+void Element::paint(PaintContext& context, const ComputedStyle& style, float) const {
     context.paintBox(rect(), style);
 }
 

@@ -8,18 +8,18 @@
 #include <algorithm>
 #include <cmath>
 #include "llstring.h"
-#include "style/style.h"
+#include "style/computedstyle.h"
 #include "text/layout.h"
 
 namespace radia::ui {
-float TextMetrics::usedLetterSpacing(const Style& style) const {
-    Style unspacedStyle = style;
+float TextMetrics::usedLetterSpacing(const ComputedStyle& style) const {
+    ComputedStyle unspacedStyle = style;
     unspacedStyle.letterSpacing = {};
     unspacedStyle.wordSpacing = {};
     return style.letterSpacing.resolve(measureText(" ", unspacedStyle).x);
 }
 
-Vec2 FixedTextMetrics::measureText(const std::string& text, const Style& style) const {
+Vec2 FixedTextMetrics::measureText(const std::string& text, const ComputedStyle& style) const {
     const float lineHeight = std::ceil(style.lineHeight ? style.lineHeight->pixels : style.fontSize);
     if (text.empty()) return {0.f, lineHeight};
     const LLWString wide = utf8str_to_wstring(text);
@@ -41,7 +41,7 @@ Vec2 FixedTextMetrics::measureText(const std::string& text, const Style& style) 
     };
 }
 
-float FixedTextMetrics::usedLetterSpacing(const Style& style) const {
+float FixedTextMetrics::usedLetterSpacing(const ComputedStyle& style) const {
     const float weightBlend = std::clamp((static_cast<float>(style.fontWeight) - 400.f) / 300.f, 0.f, 1.f);
     const float widthFactor = mRegularWidthFactor + (mBoldWidthFactor - mRegularWidthFactor) * weightBlend;
     return style.letterSpacing.resolve(style.fontSize * widthFactor);

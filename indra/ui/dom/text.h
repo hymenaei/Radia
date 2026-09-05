@@ -23,11 +23,12 @@ public:
     const std::string& data() const { return mValue; }
     void setData(std::string value);
 
-    Vec2 intrinsicSize(const StyleSheet& styleSheet, const Style& style, const TextMetrics& textMetrics,
+    static ComputedStyle styleForParent(const ComputedStyle& parentStyle);
+    Vec2 intrinsicSize(const StyleSheet& styleSheet, const ComputedStyle& style, const TextMetrics& textMetrics,
                        const IntrinsicSizeConstraints& constraints = IntrinsicSizeConstraints()) const;
     void setRect(const Rect& rect) { mRect = rect; }
     const Rect& rect() const { return mRect; }
-    void paint(PaintContext& context, const Style& style, const StyleSheet* styleSheet, const Element& owner) const;
+    void paint(PaintContext& context, const ComputedStyle& style, const StyleSheet* styleSheet, const Element& owner) const;
 
 private:
     friend class detail::NodeMutation;

@@ -27,16 +27,18 @@
 #include "layout_test_helpers.h"
 #include "resourceprovider.h"
 #include "skin/compiler.h"
-#include "style/style.h"
+#include "style/computedstyle.h"
+#include "style/stylepass.h"
 #include "surface/surface.h"
 #include "system.h"
 #include "text/metrics.h"
 
 namespace {
+using radia::ui::authoredEventCall;
+using radia::ui::ComputedStyle;
 using radia::ui::DiagnosticResult;
 using radia::ui::Element;
 using radia::ui::ElementRef;
-using radia::ui::authoredEventCall;
 using radia::ui::fixedTextMetrics;
 using radia::ui::HTMLButtonElement;
 using radia::ui::HTMLFloaterElement;
@@ -52,7 +54,6 @@ using radia::ui::kDoubleClickEvent;
 using radia::ui::kInputEvent;
 using radia::ui::kPointerDownEvent;
 using radia::ui::kWheelEvent;
-using radia::ui::resolveElementStyle;
 using radia::ui::ResourceBuildResult;
 using radia::ui::ResourceCompiler;
 using radia::ui::ResourceId;
@@ -61,7 +62,7 @@ using radia::ui::SkinCompiler;
 using radia::ui::SkinGenerationPrepareResult;
 using radia::ui::SourceDocumentParser;
 using radia::ui::SourceDocumentParseResult;
-using radia::ui::Style;
+using radia::ui::StylePass;
 using radia::ui::StyleSheet;
 using radia::ui::Surface;
 using radia::ui::System;
@@ -74,6 +75,11 @@ using radia::ui::detail::nodes;
 using radia::ui::test::ResourceCompilerTestHelper;
 using ::testing::Message;
 using ::testing::Test;
+
+ComputedStyle computedStyle(const StyleSheet& stylesheet, const Element& element) {
+    StylePass styles(stylesheet, fixedTextMetrics());
+    return styles.style(element);
+}
 
 static_assert(std::is_same_v<decltype(SourceDocumentParseResult::document), std::shared_ptr<const radia::ui::SourceDocument>>);
 
@@ -780,10 +786,10 @@ TEST_F(ResourceCompilerTest, ManagesAuthoredFloaterHeadLifecycle) {
     floater->setMinimized(true);
     EXPECT_EQ(floater->head()->visibility(), Visibility::Visible);
     EXPECT_EQ(floater->body()->visibility(), Visibility::Visible);
-    EXPECT_FALSE(floater->body()->isDisplayed(resolveElementStyle(styleSheet, *floater->body())));
+    EXPECT_FALSE(floater->body()->isDisplayed(computedStyle(styleSheet, *floater->body())));
 
     floater->setMinimized(false);
-    EXPECT_TRUE(floater->body()->isDisplayed(resolveElementStyle(styleSheet, *floater->body())));
+    EXPECT_TRUE(floater->body()->isDisplayed(computedStyle(styleSheet, *floater->body())));
 
     floater->replaceChildren();
     EXPECT_EQ(floater->head(), nullptr);

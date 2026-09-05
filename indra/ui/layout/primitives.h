@@ -10,14 +10,14 @@
 #include <vector>
 #include "dom/element.h"
 #include "dom/elementinternal.h"
+#include "style/computedstyle.h"
 #include "style/pseudoelement.h"
-#include "style/style.h"
 
 namespace radia::ui::layout_detail {
 class ElementLayoutAccess {
 public:
     static bool hasGap(const Element& parent, const Element& first, const Element& second) { return parent.hasLayoutGapBetween(first, second); }
-    static float overlap(const Element& parent, const Element& first, const Element& second, const Style& style) {
+    static float overlap(const Element& parent, const Element& first, const Element& second, const ComputedStyle& style) {
         return parent.layoutOverlapBetween(first, second, style);
     }
 };
@@ -44,7 +44,7 @@ struct LayoutChildRef {
 
 struct ChildLayout {
     LayoutChildRef node;
-    Style style;
+    ComputedStyle style;
     Vec2 fitSize;
     Vec2 measured;
 };
@@ -73,12 +73,12 @@ struct MainAxisAllocation {
 };
 
 float styledDimension(const Dimension& value, const std::optional<Length>& minimum, float fallback, float reference = 0.f);
-float styledBoxDimension(const Style& style, bool horizontal, const Dimension& value, const std::optional<Length>& minimum, float fallback,
+float styledBoxDimension(const ComputedStyle& style, bool horizontal, const Dimension& value, const std::optional<Length>& minimum, float fallback,
                          float reference = 0.f);
-float minimumBoxDimension(const Style& style, bool horizontal, const std::optional<Length>& minimum, float reference);
-float contentBoxDimension(const Style& style, bool horizontal, float borderBoxSize);
+float minimumBoxDimension(const ComputedStyle& style, bool horizontal, const std::optional<Length>& minimum, float reference);
+float contentBoxDimension(const ComputedStyle& style, bool horizontal, float borderBoxSize);
 bool isInlineLevel(DisplayMode display);
-const Style& emptyChildStyle();
+const ComputedStyle& emptyChildStyle();
 ChildLayout invalidChildLayout();
 void removeChildrenExcludedFromLayout(Element& parent, std::vector<ChildLayout>& children);
 bool isDisplayed(const ChildLayout& child);
@@ -92,8 +92,8 @@ void applyFlexBasis(ChildLayout& child, FlexDirection flexDirection, float avail
 void distributeFlexSpace(std::vector<ChildLayout>& children, std::size_t begin, std::size_t end, FlexDirection flexDirection, float availableMain,
                          bool allowGrowth, float& total);
 float verticalAlignmentOffset(VerticalAlign alignment, float freeSpace);
-CrossAlignment crossAlignment(const Style& parent, const Style& child, FlexDirection flexDirection);
-void applyCrossAxisSizing(Vec2& size, const Style& style, FlexDirection flexDirection, float availableCross, CrossAlignment alignment);
+CrossAlignment crossAlignment(const ComputedStyle& parent, const ComputedStyle& child, FlexDirection flexDirection);
+void applyCrossAxisSizing(Vec2& size, const ComputedStyle& style, FlexDirection flexDirection, float availableCross, CrossAlignment alignment);
 float rowAlignmentOffset(JustifyContent alignment, LayoutDirection direction, float freeSpace);
 float textAlignmentOffset(TextAlign alignment, LayoutDirection direction, float freeSpace);
 float justifySelfOffset(JustifySelf alignment, LayoutDirection direction, float freeSpace);
@@ -108,10 +108,10 @@ Rect relativeRect(const ChildLayout& child, const Rect& rect, const Rect& contai
 Rect translatedRect(const ChildLayout& child, const Rect& rect);
 void setArrangedRect(Element& node, const Rect& rect);
 std::optional<AdjacentLayout> adjacentLayout(const ElementVisit& parentState, const LayoutChildRef& first, const LayoutChildRef& second,
-                                             const Style& parentStyle);
+                                             const ComputedStyle& parentStyle);
 std::vector<std::pair<std::size_t, std::size_t>> rowLines(const std::vector<ChildLayout>& children);
 std::vector<NormalLine> normalLines(const std::vector<ChildLayout>& children, std::optional<float> availableWidth);
-MainAxisAllocation allocateMainAxis(Element& parent, std::vector<ChildLayout>& children, std::size_t begin, std::size_t end, const Style& parentStyle,
-                                    FlexDirection flexDirection, float availableMain);
+MainAxisAllocation allocateMainAxis(Element& parent, std::vector<ChildLayout>& children, std::size_t begin, std::size_t end,
+                                    const ComputedStyle& parentStyle, FlexDirection flexDirection, float availableMain);
 void prepareMainAxis(std::vector<ChildLayout>& children, FlexDirection flexDirection, float availableMain);
 } // namespace radia::ui::layout_detail

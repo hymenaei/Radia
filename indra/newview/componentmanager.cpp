@@ -336,6 +336,7 @@ ComponentOpenResult ComponentManager::open(const std::string& definitionId, cons
     }
 
     if (!mImpl->host.mount(*document)) {
+        controller->deactivate();
         result.error("floater.host.mount_failed", "Component host could not mount HTMLFloaterElement: " + persistenceKey + ".");
         return result;
     }

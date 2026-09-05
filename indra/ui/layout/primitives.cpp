@@ -17,14 +17,14 @@ float styledDimension(const Dimension& value, const std::optional<Length>& minim
 }
 
 namespace {
-float boxSizingExtra(const Style& style, bool horizontal) {
+float boxSizingExtra(const ComputedStyle& style, bool horizontal) {
     if (style.boxSizing == BoxSizing::BorderBox) return 0.f;
     return (horizontal ? style.padding.horizontal() : style.padding.vertical())
         + (horizontal ? style.borderWidth.horizontal() : style.borderWidth.vertical());
 }
 } // namespace
 
-float styledBoxDimension(const Style& style, bool horizontal, const Dimension& value, const std::optional<Length>& minimum, float fallback,
+float styledBoxDimension(const ComputedStyle& style, bool horizontal, const Dimension& value, const std::optional<Length>& minimum, float fallback,
                          float reference) {
     const float extra = boxSizingExtra(style, horizontal);
     const float resolved = value.resolve(fallback, reference) + (value.isAuto() ? 0.f : extra);
@@ -32,11 +32,11 @@ float styledBoxDimension(const Style& style, bool horizontal, const Dimension& v
     return std::max(resolved, minimumSize);
 }
 
-float minimumBoxDimension(const Style& style, bool horizontal, const std::optional<Length>& minimum, float reference) {
+float minimumBoxDimension(const ComputedStyle& style, bool horizontal, const std::optional<Length>& minimum, float reference) {
     return minimum ? minimum->resolve(reference) + boxSizingExtra(style, horizontal) : 0.f;
 }
 
-float contentBoxDimension(const Style& style, bool horizontal, float borderBoxSize) {
+float contentBoxDimension(const ComputedStyle& style, bool horizontal, float borderBoxSize) {
     return std::max(
         0.f,
         borderBoxSize
@@ -50,8 +50,8 @@ bool isInlineLevel(DisplayMode display) {
         || display == DisplayMode::InlineGrid;
 }
 
-const Style& emptyChildStyle() {
-    static const Style sEmpty;
+const ComputedStyle& emptyChildStyle() {
+    static const ComputedStyle sEmpty;
     return sEmpty;
 }
 
@@ -172,7 +172,7 @@ float verticalAlignmentOffset(VerticalAlign alignment, float freeSpace) {
     return 0.f;
 }
 
-CrossAlignment crossAlignment(const Style& parent, const Style& child, FlexDirection flexDirection) {
+CrossAlignment crossAlignment(const ComputedStyle& parent, const ComputedStyle& child, FlexDirection flexDirection) {
     if (child.alignSelf != AlignSelf::Auto) {
         if (child.alignSelf == AlignSelf::Start) return CrossAlignment::Start;
         if (child.alignSelf == AlignSelf::Center) return CrossAlignment::Center;
@@ -189,7 +189,7 @@ CrossAlignment crossAlignment(const Style& parent, const Style& child, FlexDirec
     return CrossAlignment::Start;
 }
 
-void applyCrossAxisSizing(Vec2& size, const Style& style, FlexDirection flexDirection, float availableCross, CrossAlignment alignment) {
+void applyCrossAxisSizing(Vec2& size, const ComputedStyle& style, FlexDirection flexDirection, float availableCross, CrossAlignment alignment) {
     if (alignment != CrossAlignment::Stretch) return;
     if (flexDirection == FlexDirection::Row) {
         if (!style.height.isAuto() || style.margin.verticalAutoCount()) return;
@@ -309,7 +309,7 @@ void setArrangedRect(Element& node, const Rect& rect) {
 }
 
 std::optional<AdjacentLayout> adjacentLayout(const ElementVisit& parentState, const LayoutChildRef& firstRef, const LayoutChildRef& secondRef,
-                                             const Style& parentStyle) {
+                                             const ComputedStyle& parentStyle) {
     Element* parent = parentState.get();
     if (!parentState.layoutValid() || !firstRef.attachedTo(*parent) || !secondRef.attachedTo(*parent)) return std::nullopt;
     if (firstRef.isPseudoElement() || secondRef.isPseudoElement()) return AdjacentLayout{true, 0.f};
@@ -391,8 +391,8 @@ std::vector<NormalLine> normalLines(const std::vector<ChildLayout>& children, st
     return lines;
 }
 
-MainAxisAllocation allocateMainAxis(Element& parent, std::vector<ChildLayout>& children, std::size_t begin, std::size_t end, const Style& parentStyle,
-                                    FlexDirection flexDirection, float availableMain) {
+MainAxisAllocation allocateMainAxis(Element& parent, std::vector<ChildLayout>& children, std::size_t begin, std::size_t end,
+                                    const ComputedStyle& parentStyle, FlexDirection flexDirection, float availableMain) {
     const ElementVisit parentState(parent);
     const auto invalidAllocation = [] {
         MainAxisAllocation invalid;

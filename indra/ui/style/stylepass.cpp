@@ -7,32 +7,28 @@
 #include "style/stylepass.h"
 #include <algorithm>
 #include <utility>
+#include "css/stylesheet.h"
 #include "dom/element.h"
 #include "nativeappearance.h"
-#include "style/stylesheet.h"
 #include "text/metrics.h"
 
 namespace radia::ui {
 namespace {
-LayoutContextKey makeContextKey(const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction,
-                                const NativeAppearance* nativeAppearance) {
-    const NativeAppearance& appearance = nativeAppearance ? *nativeAppearance : defaultNativeAppearance();
-    LayoutContextKey result{&styleSheet, &textMetrics, styleSheet.generation(), textMetrics.generation(), direction};
-    result.nativeAppearance = &appearance;
-    result.nativeAppearanceRevision = appearance.revision();
+detail::LayoutContextKey makeContextKey(const StyleRuleSet* ruleSet, const TextMetrics& textMetrics, std::uint64_t styleGeneration,
+                                        LayoutDirection direction, const NativeLayoutMetrics& nativeMetrics) {
+    detail::LayoutContextKey result{ruleSet, &textMetrics, styleGeneration, textMetrics.generation(), direction};
+    result.nativeMetrics = nativeMetrics;
     return result;
 }
 } // namespace
 
-StylePass::StylePass(const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction,
-                     const NativeAppearance* nativeAppearance)
-    : mStyleSheet(styleSheet), mTextMetrics(textMetrics), mDirection(direction),
-      mNativeAppearance(nativeAppearance ? nativeAppearance : &defaultNativeAppearance()),
-      mContext(makeContextKey(styleSheet, textMetrics, direction, mNativeAppearance)) {}
+StylePass::StylePass(const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction, NativeLayoutMetrics nativeMetrics)
+    : mStyleSheet(styleSheet), mTextMetrics(textMetrics), mDirection(direction), mNativeMetrics(nativeMetrics),
+      mContext(makeContextKey(styleSheet.ruleSetIdentity(), textMetrics, styleSheet.generation(), direction, mNativeMetrics)) {}
 
 bool StylePass::matches(const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction,
-                        const NativeAppearance* nativeAppearance) const {
-    return mContext == makeContextKey(styleSheet, textMetrics, direction, nativeAppearance);
+                        NativeLayoutMetrics nativeMetrics) const {
+    return mContext == makeContextKey(styleSheet.ruleSetIdentity(), textMetrics, styleSheet.generation(), direction, nativeMetrics);
 }
 
 void StylePass::beginTraversal() {
@@ -52,7 +48,7 @@ void StylePass::compactStyles() {
     constexpr std::size_t kStorageSlack = 32;
     if (mStyleStorage.size() <= mStyles.size() * 2 + kStorageSlack) return;
 
-    std::deque<Style> compacted;
+    std::deque<ComputedStyle> compacted;
     std::unordered_map<const Element*, CachedStyle> styles;
     styles.reserve(mStyles.size());
     for (const auto& [element, cached] : mStyles) {
@@ -69,7 +65,7 @@ void StylePass::endTraversal() {
     mTree.endTraversal();
 }
 
-const Style& StylePass::style(const Element& element) {
+const ComputedStyle& StylePass::style(const Element& element) {
     if (mInvalidated) {
         mStyles.clear();
         mInvalidated = false;
@@ -85,16 +81,16 @@ const Style& StylePass::style(const Element& element) {
     const ElementRef<const Element> styledRef(&element);
     const Element* parent = elementSnapshot.parent;
     const std::uint64_t contextRevision = element.styleContextRevision();
-    Style resolved = mStyleSheet.resolveElement(element, mDirection);
+    ComputedStyle resolved = mStyleSheet.resolveElement(element, mDirection);
     const Element* current = styledRef.get();
-    const auto transient = [&]() -> const Style& {
+    const auto transient = [&]() -> const ComputedStyle& {
         mStyleStorage.emplace_back(std::move(resolved));
         return mStyleStorage.back();
     };
     if (!current || !elementSnapshot.styleValid()) return transient();
     if (parent) {
         const ConstElementVisit parentSnapshot(*parent);
-        const Style& parentStyle = style(*parent);
+        const ComputedStyle& parentStyle = style(*parent);
         current = styledRef.get();
         const Element* currentParent = parentSnapshot.get();
         if (!current || !currentParent || !elementSnapshot.styleValid() || !parentSnapshot.styleValid()) return transient();
@@ -114,11 +110,11 @@ const Style& StylePass::style(const Element& element) {
     return mStyleStorage[storageIndex];
 }
 
-Style StylePass::style(PseudoElement& pseudoElement) {
+ComputedStyle StylePass::style(PseudoElement& pseudoElement) {
     const Element& owner = pseudoElement.originatingElement();
-    const Style& ownerStyle = style(owner);
-    Style resolved = mStyleSheet.resolvePseudoElement(owner, pseudoElement.name(), mDirection);
-    const Style& parentStyle = pseudoElement.parentPseudoElement() ? style(*pseudoElement.parentPseudoElement()) : ownerStyle;
+    const ComputedStyle& ownerStyle = style(owner);
+    ComputedStyle resolved = mStyleSheet.resolvePseudoElement(owner, pseudoElement.name(), mDirection);
+    const ComputedStyle& parentStyle = pseudoElement.parentPseudoElement() ? style(*pseudoElement.parentPseudoElement()) : ownerStyle;
     inheritStyle(resolved, parentStyle);
     resolved.appearance = ownerStyle.appearance;
     normalizeOverflow(resolved);
@@ -128,7 +124,7 @@ Style StylePass::style(PseudoElement& pseudoElement) {
     return resolved;
 }
 
-void StylePass::styleGeneratedPseudoElements(const Element& element, const Style& ownerStyle) {
+void StylePass::styleGeneratedPseudoElements(const Element& element, const ComputedStyle& ownerStyle) {
     if (ownerStyle.appearance != AppearanceMode::Base) return;
     const auto stylePseudoElementTree = [this](auto&& self, PseudoElement& pseudoElement) -> void {
         style(pseudoElement);
@@ -139,11 +135,7 @@ void StylePass::styleGeneratedPseudoElements(const Element& element, const Style
         if (pseudoElement) stylePseudoElementTree(stylePseudoElementTree, *pseudoElement);
 }
 
-StylePass::ChildSnapshot StylePass::orderedChildren(Element& parent) {
-    return mTree.orderedChildren(parent, [this](const Element& node) -> const Style& { return style(node); });
-}
-
-StylePass::ChildSnapshot StylePass::sourceChildren(Element& parent) {
+TreeTraversalCache::ChildSnapshot StylePass::sourceChildren(Element& parent) {
     return mTree.sourceChildren(parent);
 }
 } // namespace radia::ui

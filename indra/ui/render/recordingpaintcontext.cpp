@@ -8,11 +8,11 @@
 #include <algorithm>
 
 namespace radia::ui {
-Vec2 RecordingPaintContext::measureText(const std::string& text, const Style& style) const {
+Vec2 RecordingPaintContext::measureText(const std::string& text, const ComputedStyle& style) const {
     return mTextMetrics.measureText(text, style);
 }
 
-float RecordingPaintContext::usedLetterSpacing(const Style& style) const {
+float RecordingPaintContext::usedLetterSpacing(const ComputedStyle& style) const {
     return mTextMetrics.usedLetterSpacing(style);
 }
 
@@ -52,7 +52,7 @@ void RecordingPaintContext::popTranslation() {
     --mTranslationDepth;
 }
 
-void RecordingPaintContext::beginEffects(const Rect& rect, const Style& style, float scale) {
+void RecordingPaintContext::beginEffects(const Rect& rect, const ComputedStyle& style, float scale) {
     mCommands.push_back({PaintCommandKind::BeginEffects, rect, style, {}, scale});
 }
 
@@ -84,17 +84,17 @@ void RecordingPaintContext::paintNativeButton(const NativeButtonPaintRequest& re
     mCommands.push_back(std::move(command));
 }
 
-void RecordingPaintContext::paintBox(const Rect& rect, const Style& style, std::optional<TopBorderGap> topBorderGap) {
+void RecordingPaintContext::paintBox(const Rect& rect, const ComputedStyle& style, std::optional<TopBorderGap> topBorderGap) {
     PaintCommand command{PaintCommandKind::Box, rect, style};
     command.topBorderGap = topBorderGap;
     mCommands.push_back(std::move(command));
 }
 
-void RecordingPaintContext::paintText(const std::string& text, const Rect& rect, const Style& style) {
+void RecordingPaintContext::paintText(const std::string& text, const Rect& rect, const ComputedStyle& style) {
     mCommands.push_back({PaintCommandKind::Text, rect, style, text});
 }
 
-void RecordingPaintContext::paintIcon(const std::string& name, const Rect& rect, const Style& style, float scale) {
+void RecordingPaintContext::paintIcon(const std::string& name, const Rect& rect, const ComputedStyle& style, float scale) {
     mCommands.push_back({PaintCommandKind::Icon, rect, style, name, scale});
 }
 

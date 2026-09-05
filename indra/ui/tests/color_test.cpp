@@ -6,7 +6,7 @@
 #include "linden_common.h"
 #include <gtest/gtest.h>
 #include <string>
-#include "style/color.h"
+#include "css/color.h"
 
 namespace {
 using radia::ui::Color;

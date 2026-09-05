@@ -13,12 +13,12 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "css/stylesheet.h"
 #include "diagnostic.h"
 #include "layout/buildresult.h"
 #include "localization.h"
 #include "nativeappearance.h"
 #include "resourceprovider.h"
-#include "style/stylesheet.h"
 #include "text/keybinding.h"
 
 namespace radia::ui {

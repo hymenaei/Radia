@@ -18,7 +18,7 @@ class StyleSheet;
 class Element;
 
 class PaintContext;
-struct Style;
+struct ComputedStyle;
 class TextMetrics;
 
 class TextLayout {
@@ -29,15 +29,15 @@ public:
     void setText(std::string text);
     const std::string& plainText() const { return mPlainText; }
 
-    Vec2 measure(const TextMetrics& metrics, const Style& style, const StyleSheet& styleSheet, const Element& owner,
+    Vec2 measure(const TextMetrics& metrics, const ComputedStyle& style, const StyleSheet& styleSheet, const Element& owner,
                  std::optional<float> resolvedWidth = std::nullopt) const;
-    void paint(PaintContext& context, const Rect& rect, const Style& style, const StyleSheet* styleSheet, const Element& owner) const;
+    void paint(PaintContext& context, const Rect& rect, const ComputedStyle& style, const StyleSheet* styleSheet, const Element& owner) const;
 
 private:
     void updatePlainText();
-    const std::vector<detail::TextLine>& cachedLines(const TextMetrics& metrics, const Style& style, const StyleSheet* styleSheet,
+    const std::vector<detail::TextLine>& cachedLines(const TextMetrics& metrics, const ComputedStyle& style, const StyleSheet* styleSheet,
                                                      const Element& owner) const;
-    const detail::TextLayout& cachedLayout(const TextMetrics& metrics, const Style& style, const StyleSheet* styleSheet, const Element& owner,
+    const detail::TextLayout& cachedLayout(const TextMetrics& metrics, const ComputedStyle& style, const StyleSheet* styleSheet, const Element& owner,
                                            std::optional<float> availableWidth, bool visualOrder, bool applyOverflow) const;
 
     std::string mText;

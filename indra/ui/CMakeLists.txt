@@ -4,8 +4,8 @@ add_library(ui STATIC)
 
 include(GenerateDefaultStylesheet)
 
-set(default_stylesheet_source "${CMAKE_CURRENT_SOURCE_DIR}/style/defaults.css")
-set(default_stylesheet_output "${CMAKE_CURRENT_BINARY_DIR}/style/defaults.inc")
+set(default_stylesheet_source "${CMAKE_CURRENT_SOURCE_DIR}/css/defaults.css")
+set(default_stylesheet_output "${CMAKE_CURRENT_BINARY_DIR}/css/defaults.inc")
 generate_default_stylesheet(SOURCE "${default_stylesheet_source}" OUTPUT "${default_stylesheet_output}")
 
 set(private_sources
@@ -18,6 +18,15 @@ set(private_sources
 
     binding/binder.cpp
     binding/settingresolver.h
+
+    css/color.cpp
+    css/cssparser.cpp
+    css/defaults.css
+    css/rules.h
+    css/stylesheet.cpp
+    css/syntax.cpp
+    css/syntax.h
+    css/valueparser.cpp
 
     dom/document.cpp
     dom/element.cpp
@@ -54,7 +63,6 @@ set(private_sources
     layout/document.h
     layout/engine.cpp
     layout/engine.h
-    layout/engineinternal.h
     layout/layoutcontext.h
     layout/measure.cpp
     layout/primitives.cpp
@@ -76,18 +84,11 @@ set(private_sources
     skin/generation.cpp
     skin/generationinternal.h
 
-    style/color.cpp
-    style/compiler.cpp
-    style/defaults.css
-    style/model.h
+    style/property.h
+    style/property.cpp
     style/resolver.cpp
     style/stylepass.cpp
     style/stylepass.h
-    style/stylesheet.cpp
-    style/stylesheetparser.cpp
-    style/syntax.cpp
-    style/syntax.h
-    style/valueparser.cpp
 
     surface/floaterresize.cpp
     surface/floaters.cpp
@@ -119,6 +120,9 @@ set(public_sources
     binding/valuebinding.h
     binding/eventregistration.h
 
+    css/color.h
+    css/stylesheet.h
+
     layout/buildresult.h
 
     render/openglpaintcontext.h
@@ -129,9 +133,7 @@ set(public_sources
     skin/compiler.h
     skin/generation.h
 
-    style/color.h
-    style/style.h
-    style/stylesheet.h
+    style/computedstyle.h
 
     surface/floaterresize.h
     surface/scrollgeometry.h

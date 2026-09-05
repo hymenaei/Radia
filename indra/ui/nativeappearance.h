@@ -9,17 +9,11 @@
 #include <memory>
 #include <optional>
 #include "path.h"
-#include "style/style.h"
+#include "style/computedstyle.h"
 #include "surface/scrollgeometry.h"
+#include "types.h"
 
 namespace radia::ui {
-struct NativeScrollbarMetrics {
-    float thickness;
-    float minimumThumbLength;
-    float arrowLength;
-    float thumbPadding;
-};
-
 struct NativeScrollbarState {
     ScrollbarPart hoveredPart = ScrollbarPart::NoneValue;
     ScrollbarPart pressedPart = ScrollbarPart::NoneValue;
@@ -54,8 +48,6 @@ struct NativeScrollbarPaintStyle {
     float thumbRadius = 0.f;
 };
 
-enum class NativeInputControl : std::uint8_t { Checkbox, Radio, Switch };
-
 enum class NativeInputMark : std::uint8_t { Check, Dash };
 
 struct NativeInputMarkPaintRequest {
@@ -71,12 +63,8 @@ struct NativeInputMarkPaintRequest {
 class NativeControlPaintContext {
 public:
     virtual ~NativeControlPaintContext() = default;
-    virtual void paintNativeBox(const Rect& rect, const Style& style) = 0;
+    virtual void paintNativeBox(const Rect& rect, const ComputedStyle& style) = 0;
     virtual void paintNativeInputMark(const NativeInputMarkPaintRequest&) = 0;
-};
-
-struct NativeInputMetrics {
-    Vec2 intrinsicSize;
 };
 
 struct NativeInputPaintRequest {
@@ -95,7 +83,7 @@ struct NativeInputPaintRequest {
 
 struct NativeButtonPaintRequest {
     Rect bounds;
-    Style style;
+    ComputedStyle style;
     bool disabled = false;
     bool hovered = false;
     bool pressed = false;
@@ -108,6 +96,7 @@ class NativeAppearance {
 public:
     virtual ~NativeAppearance() = default;
     virtual NativeScrollbarMetrics scrollbarMetrics(ScrollbarMode) const = 0;
+    virtual NativeLayoutMetrics layoutMetrics() const;
     virtual NativeScrollbarPaintStyle scrollbarPaintStyle(const NativeScrollbarPaintRequest&, ScrollbarAxis) const = 0;
     virtual NativeInputMetrics inputMetrics(NativeInputControl) const = 0;
     virtual void paintInput(NativeControlPaintContext&, const NativeInputPaintRequest&) const = 0;

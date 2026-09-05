@@ -27,9 +27,11 @@
 
 namespace radia::ui {
 class Binder;
+class Surface;
 
 class Binding {
     friend class Binder;
+    friend class Surface;
 
 public:
     Binding() = default;
@@ -69,6 +71,7 @@ private:
     Node* mRootParent = nullptr;
     std::weak_ptr<char> mRootLifetime;
     std::shared_ptr<bool> mActive = std::make_shared<bool>(false);
+    Surface* mAttachedSurface = nullptr;
     bool mCommitted = false;
 };
 

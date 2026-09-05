@@ -4,10 +4,12 @@
  */
 
 #include "linden_common.h"
-#include "style/stylesheet.h"
+#include "css/stylesheet.h"
 #include <algorithm>
-#include "style/defaults.inc"
-#include "style/model.h"
+#include <utility>
+#include "css/defaults.inc"
+#include "css/rules.h"
+#include "style/property.h"
 
 namespace radia::ui {
 namespace {
@@ -19,14 +21,13 @@ void resolveLightDarkColor(Color& color, std::optional<LightDarkColor>& colors, 
     if (colors) color = resolveLightDarkColor(*colors, scheme);
 }
 
-bool explicitlyInherits(const Style& style, std::string_view propertyName) {
+bool explicitlyInherits(const ComputedStyle& style, std::string_view propertyName) {
     return std::find(style.explicitlyInheritedProperties.begin(), style.explicitlyInheritedProperties.end(), propertyName)
         != style.explicitlyInheritedProperties.end();
 }
-
 } // namespace
 
-void resolveLightDarkColors(Style& style) {
+void resolveLightDarkColors(ComputedStyle& style) {
     resolveLightDarkColor(style.backgroundColor, style.backgroundColorLightDark, style.colorScheme);
     resolveLightDarkColor(style.borderColor, style.borderColorLightDark, style.colorScheme);
     resolveLightDarkColor(style.color, style.colorLightDark, style.colorScheme);
@@ -44,7 +45,7 @@ void resolveLightDarkColors(Style& style) {
     resolveLightDarkColor(style.outline.color, style.outline.lightDarkColor, style.colorScheme);
 }
 
-void resolveCurrentColors(Style& style) {
+void resolveCurrentColors(ComputedStyle& style) {
     if (style.backgroundColorCurrent) {
         style.backgroundColor = style.color;
         style.backgroundColorLightDark.reset();
@@ -57,20 +58,20 @@ void resolveCurrentColors(Style& style) {
     }
 }
 
-void normalizeOverflow(Style& style) {
+void normalizeOverflow(ComputedStyle& style) {
     const auto scrollable = [](Overflow value) { return value == Overflow::Hidden || value == Overflow::Scroll || value == Overflow::Auto; };
     if (style.overflowX == Overflow::Visible && scrollable(style.overflowY)) style.overflowX = Overflow::Auto;
     if (style.overflowY == Overflow::Visible && scrollable(style.overflowX)) style.overflowY = Overflow::Auto;
 }
 
-void inheritStyle(Style& style, const Style& parent) {
+void inheritStyle(ComputedStyle& style, const ComputedStyle& parent) {
     for (const detail::StylePropertyDefinition* property = detail::stylePropertyBegin(); property != detail::stylePropertyEnd(); ++property)
         if (property->inherit && (property->isInherited() || explicitlyInherits(style, property->name))) property->inherit(style, parent);
     style.specifiedInheritedProperties |= parent.specifiedInheritedProperties;
     style.explicitlyInheritedProperties.clear();
 }
 
-void applyOpacity(Style& style, float inheritedOpacity) {
+void applyOpacity(ComputedStyle& style, float inheritedOpacity) {
     const float opacity = inheritedOpacity * style.opacity;
     style.backgroundColor.a *= opacity;
     style.borderColor.a *= opacity;
@@ -124,28 +125,37 @@ StyleSheet& StyleSheet::operator=(StyleSheet&& other) noexcept {
 std::uint64_t StyleSheet::generation() const {
     return mImpl->generation;
 }
+
+const StyleRuleSet* StyleSheet::ruleSetIdentity() const {
+    return &mImpl->ruleSet;
+}
+
 const StyleSheet::DependencyMap& StyleSheet::dependencies() const {
-    return mImpl->dependencies;
+    return mImpl->ruleSet.dependencies();
 }
 
 bool StyleSheet::stateAffectsLayout(ElementState state) const {
-    return mImpl->stateAffectsLayout(state);
+    return mImpl->ruleSet.stateAffectsLayout(state);
 }
 
 bool StyleSheet::stateAffectsLayout(const Element& element, ElementState state) const {
-    return mImpl->stateAffectsLayout(element, state);
+    return mImpl->ruleSet.stateAffectsLayout(element, state);
 }
 
 bool StyleSheet::stateAffectsHitTesting(ElementState state) const {
-    return mImpl->stateAffectsHitTesting(state);
+    return mImpl->ruleSet.stateAffectsHitTesting(state);
 }
 
 bool StyleSheet::stateAffectsHitTesting(const Element& element, ElementState state) const {
-    return mImpl->stateAffectsHitTesting(element, state);
+    return mImpl->ruleSet.stateAffectsHitTesting(element, state);
 }
 
 bool StyleSheet::stateAffectsDescendants(const Element& element, ElementState state) const {
-    return mImpl->stateAffectsDescendants(element, state);
+    return mImpl->ruleSet.stateAffectsDescendants(element, state);
+}
+
+StyleRuleSet StyleModel::build() && {
+    return StyleRuleSet(std::move(*this));
 }
 
 void StyleModel::setColorToken(const std::string& name, const Color& color) {

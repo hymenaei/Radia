@@ -7,12 +7,12 @@
 #include <algorithm>
 #include <cmath>
 #include <utility>
+#include "css/stylesheet.h"
 #include "dom/element.h"
 #include "dom/elementinternal.h"
 #include "dom/text.h"
 #include "html/elementnames.h"
 #include "layout/layoutcontext.h"
-#include "style/stylesheet.h"
 
 namespace radia::ui {
 using detail::ElementInternalAccess;
@@ -53,12 +53,13 @@ void includeOverflow(Rect& bounds, const Rect& candidate, bool includeX, bool in
     const float top = includeY ? std::max(bounds.top(), candidate.top()) : bounds.top();
     bounds = {left, bottom, std::max(0.f, right - left), std::max(0.f, top - bottom)};
 }
+} // namespace
 
-Rect scrollableOverflow(Element& node, const Style& parentStyle, const Rect& scrollport, LayoutPass& pass) {
+Rect LayoutEngine::scrollableOverflow(Element& node, const ComputedStyle& parentStyle, const Rect& scrollport, LayoutPass& pass) {
     Rect bounds = scrollport;
     const std::vector<LayoutChildRef> children = pass.orderedChildrenForLayout(node);
     const auto collectPseudoOverflow = [&](PseudoElement& pseudoElement, const auto& collectChildren) -> Rect {
-        const Style pseudoStyle = pass.style(pseudoElement);
+        const ComputedStyle pseudoStyle = pass.style(pseudoElement);
         if (pseudoStyle.display == DisplayMode::NoneValue || pseudoElement.rect().empty()) return {};
         Rect subtree = pseudoElement.rect();
         const bool clipsX = pseudoStyle.overflowX != Overflow::Visible;
@@ -86,7 +87,7 @@ Rect scrollableOverflow(Element& node, const Style& parentStyle, const Rect& scr
     for (std::size_t index = 0; index < children.size(); ++index) {
         const LayoutChildRef& childRef = children[index];
         if (!childRef.attachedTo(node)) continue;
-        const Style childStyle = pass.style(childRef, parentStyle);
+        const ComputedStyle childStyle = pass.style(childRef, parentStyle);
         if (PseudoElement* pseudoElement = childRef.pseudoElement) {
             includeOverflow(bounds, collectPseudoOverflow(*pseudoElement, collectPseudoOverflow), true, true);
         } else if (Element* child = childRef.element()) {
@@ -113,7 +114,8 @@ Rect scrollableOverflow(Element& node, const Style& parentStyle, const Rect& scr
     return bounds;
 }
 
-ScrollMetrics scrollMetrics(const Style& style, const Rect& scrollport, const Rect& overflow) {
+namespace {
+ScrollMetrics scrollMetrics(const ComputedStyle& style, const Rect& scrollport, const Rect& overflow) {
     ScrollMetrics metrics;
     metrics.clientWidth = scrollport.w;
     metrics.clientHeight = scrollport.h;
@@ -141,7 +143,7 @@ bool isScrollContainer(Overflow overflow) {
 }
 } // namespace
 
-LayoutEngine::RowSizing LayoutEngine::resolveRowSizes(Element& node, const Style& parentStyle, const Rect& available,
+LayoutEngine::RowSizing LayoutEngine::resolveRowSizes(Element& node, const ComputedStyle& parentStyle, const Rect& available,
                                                       std::vector<ChildLayout>& children, LayoutPass& pass) {
     const NodeSnapshot nodeState(node);
     const auto nodeLayoutValid = [&] { return nodeState.layoutValid(); };
@@ -198,7 +200,7 @@ LayoutEngine::RowSizing LayoutEngine::resolveRowSizes(Element& node, const Style
     return sizing;
 }
 
-MainAxisAllocation LayoutEngine::resolveColumnSizes(Element& node, const Style& parentStyle, const Rect& available,
+MainAxisAllocation LayoutEngine::resolveColumnSizes(Element& node, const ComputedStyle& parentStyle, const Rect& available,
                                                     std::vector<ChildLayout>& children, LayoutPass& pass) {
     const NodeSnapshot nodeState(node);
     const auto nodeLayoutValid = [&] { return nodeState.layoutValid(); };
@@ -261,19 +263,19 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::layoutChildren(Element& pa
         return std::move(*children);
     }
 
-    const LayoutContextKey contextKey = pass.contextKey();
+    const detail::LayoutContextKey contextKey = pass.contextKey();
     const NodeSnapshot parentState(parent);
     std::vector<ChildLayout> result;
     result.reserve(parent.mChildren.size() + parent.generatedPseudoElements().size());
-    const Style parentStyle = pass.style(parent);
-    const std::vector<LayoutChildRef> children = orderedChildren(parent, pass);
+    const ComputedStyle parentStyle = pass.style(parent);
+    const std::vector<LayoutChildRef> children = pass.orderedChildrenForLayout(parent);
     for (const LayoutChildRef& childRef : children) {
         Element* child = childRef.element();
         if (!childRef.attachedTo(parent)) continue;
         if (isWhitespaceOnlyText(childRef)) continue;
         if (child && child->elementName() == kBrTag.localName) continue;
         const std::uint64_t childRevision = child ? child->mLayoutInvalidationRevision : 0;
-        const Style style = pass.style(childRef, parentStyle);
+        const ComputedStyle style = pass.style(childRef, parentStyle);
         if (child ? !child->isDisplayed(style) : style.display == DisplayMode::NoneValue) continue;
         Element* currentParent = parentState.get();
         child = childRef.element();
@@ -301,7 +303,7 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::layoutChildren(Element& pa
 }
 
 void LayoutEngine::arrangeNode(Element& node, LayoutPass& pass) {
-    const LayoutContextKey contextKey = pass.contextKey();
+    const detail::LayoutContextKey contextKey = pass.contextKey();
     const bool cacheMatches =
         ElementInternalAccess::layoutCache(node).arrangeValid && ElementInternalAccess::layoutCache(node).layoutContext == contextKey;
     if (!node.mInvalidationReasons.intersects(kArrangeInvalidationReasons) && cacheMatches) {
@@ -314,7 +316,7 @@ void LayoutEngine::arrangeNode(Element& node, LayoutPass& pass) {
     const Surface* surface = node.mSurface;
     const Element* parent = node.mParent;
     const std::uint64_t layoutRevision = node.mLayoutInvalidationRevision;
-    const Style& parentStyle = pass.style(node);
+    const ComputedStyle& parentStyle = pass.style(node);
     Element* styledNode = lifetime.get();
     if (!styledNode || styledNode->mSurface != surface || styledNode->mParent != parent || styledNode->mLayoutInvalidationRevision != layoutRevision)
         return;
@@ -430,7 +432,7 @@ void LayoutEngine::arrangePseudoElement(PseudoElement& node, LayoutPass& pass) {
     std::vector<ChildLayout> children;
     for (const LayoutChildRef& child : pass.orderedChildrenForLayout(node)) {
         if (!child.attachedTo(node) || !child.pseudoElement) continue;
-        const Style childStyle = pass.style(*child.pseudoElement);
+        const ComputedStyle childStyle = pass.style(*child.pseudoElement);
         if (childStyle.display == DisplayMode::NoneValue) {
             child.pseudoElement->setRect({});
             continue;
@@ -569,8 +571,8 @@ void LayoutEngine::arrangePseudoElement(PseudoElement& node, LayoutPass& pass) {
     }
 }
 
-void LayoutEngine::arrangeRow(Element& node, const Style& parentStyle, const Rect& content, const Rect& available, std::vector<ChildLayout>& children,
-                              LayoutPass& pass) {
+void LayoutEngine::arrangeRow(Element& node, const ComputedStyle& parentStyle, const Rect& content, const Rect& available,
+                              std::vector<ChildLayout>& children, LayoutPass& pass) {
     const LayoutDirection direction = pass.direction();
     const NodeSnapshot nodeState(node);
     removeChildrenExcludedFromLayout(node, children);
@@ -655,7 +657,7 @@ void LayoutEngine::arrangeRow(Element& node, const Style& parentStyle, const Rec
     }
 }
 
-void LayoutEngine::arrangeColumn(Element& node, const Style& parentStyle, const Rect& content, const Rect& available,
+void LayoutEngine::arrangeColumn(Element& node, const ComputedStyle& parentStyle, const Rect& content, const Rect& available,
                                  std::vector<ChildLayout>& children, LayoutPass& pass) {
     const LayoutDirection direction = pass.direction();
     const NodeSnapshot nodeState(node);
@@ -719,7 +721,7 @@ void LayoutEngine::arrangeColumn(Element& node, const Style& parentStyle, const 
     }
 }
 
-void LayoutEngine::arrangeGrid(Element& node, const Style&, const Rect& content, std::vector<ChildLayout>& children, LayoutPass& pass) {
+void LayoutEngine::arrangeGrid(Element& node, const ComputedStyle&, const Rect& content, std::vector<ChildLayout>& children, LayoutPass& pass) {
     const LayoutDirection direction = pass.direction();
     const NodeSnapshot nodeState(node);
     removeChildrenExcludedFromLayout(node, children);
@@ -761,7 +763,8 @@ void LayoutEngine::arrangeGrid(Element& node, const Style&, const Rect& content,
     }
 }
 
-void LayoutEngine::arrangeNormal(Element& node, const Style& parentStyle, const Rect& content, std::vector<ChildLayout>& children, LayoutPass& pass) {
+void LayoutEngine::arrangeNormal(Element& node, const ComputedStyle& parentStyle, const Rect& content, std::vector<ChildLayout>& children,
+                                 LayoutPass& pass) {
     const LayoutDirection direction = pass.direction();
     const NodeSnapshot nodeState(node);
     removeChildrenExcludedFromLayout(node, children);

@@ -35,7 +35,9 @@ using radia::ui::Binder;
 using radia::ui::Binding;
 using radia::ui::ClipAxes;
 using radia::ui::clipsAxis;
+using radia::ui::ComputedStyle;
 using radia::ui::CursorStyle;
+using radia::ui::defaultNativeAppearance;
 using radia::ui::Element;
 using radia::ui::ElementRef;
 using radia::ui::ElementState;
@@ -66,7 +68,6 @@ using radia::ui::kPointerUpEvent;
 using radia::ui::kScrollEvent;
 using radia::ui::kWheelEvent;
 using radia::ui::LayoutDirection;
-using radia::ui::NativeAppearanceBase;
 using radia::ui::NodePtr;
 using radia::ui::PaintCommand;
 using radia::ui::PaintCommandKind;
@@ -84,7 +85,6 @@ using radia::ui::ScrollbarPart;
 using radia::ui::setAuthoredEventCall;
 using radia::ui::SkinCompiler;
 using radia::ui::SkinGenerationPrepareResult;
-using radia::ui::Style;
 using radia::ui::StyleSheet;
 using radia::ui::Surface;
 using radia::ui::SurfaceLayer;
@@ -169,7 +169,7 @@ public:
 
     bool defaultPointerEvents() const override { return true; }
     bool focusable() const override { return true; }
-    void paint(PaintContext&, const Style&, float) const override { ++paints; }
+    void paint(PaintContext&, const ComputedStyle&, float) const override { ++paints; }
 
     mutable int paints = 0;
 };
@@ -181,8 +181,9 @@ public:
         Rect rect;
     };
 
-    Vec2 measureText(const std::string& text, const Style& style) const override { return fixedTextMetrics().measureText(text, style); }
-    float usedLetterSpacing(const Style& style) const override { return fixedTextMetrics().usedLetterSpacing(style); }
+    Vec2 measureText(const std::string& text, const ComputedStyle& style) const override { return fixedTextMetrics().measureText(text, style); }
+    float usedLetterSpacing(const ComputedStyle& style) const override { return fixedTextMetrics().usedLetterSpacing(style); }
+    std::uint64_t generation() const noexcept override { return fixedTextMetrics().generation(); }
     void pushClip(const Rect&, float, ClipAxes) override {}
     void popClip() override {}
     void pushTranslation(const Vec2& translation) override {
@@ -194,13 +195,13 @@ public:
         mTranslation = mTranslation - mTranslations.back();
         mTranslations.pop_back();
     }
-    void beginEffects(const Rect&, const Style&, float) override {}
+    void beginEffects(const Rect&, const ComputedStyle&, float) override {}
     void endEffects() override {}
-    void paintBox(const Rect&, const Style&, std::optional<TopBorderGap>) override {}
-    void paintText(const std::string& text, const Rect& rect, const Style&) override {
+    void paintBox(const Rect&, const ComputedStyle&, std::optional<TopBorderGap>) override {}
+    void paintText(const std::string& text, const Rect& rect, const ComputedStyle&) override {
         mTexts.push_back({text, {rect.x + mTranslation.x, rect.y + mTranslation.y, rect.w, rect.h}});
     }
-    void paintIcon(const std::string&, const Rect&, const Style&, float) override {}
+    void paintIcon(const std::string&, const Rect&, const ComputedStyle&, float) override {}
 
     const TextRecord* find(const std::string& value) const {
         const auto found = std::find_if(mTexts.begin(), mTexts.end(), [&value](const TextRecord& text) { return text.value == value; });
@@ -220,7 +221,7 @@ public:
 
     bool defaultPointerEvents() const override { return true; }
     bool focusable() const override { return true; }
-    void paint(PaintContext&, const Style&, float) const override { mPaintOrder.push_back(mName); }
+    void paint(PaintContext&, const ComputedStyle&, float) const override { mPaintOrder.push_back(mName); }
 
 private:
     std::string mName;
@@ -264,9 +265,6 @@ private:
 TEST(SurfaceTest, RecordsExplicitPaintTarget) {
     Surface surface;
     surface.setViewport(240.f, 120.f);
-    NativeAppearanceBase appearance;
-    surface.setScrollLayoutOptions({ScrollbarMode::Classic, &appearance});
-
     RecordingPaintContext recording;
     surface.paint(recording, 1.25f, {-3.f, 4.f});
 
@@ -278,7 +276,7 @@ TEST(SurfaceTest, RecordsExplicitPaintTarget) {
     EXPECT_FLOAT_EQ(frame->target.pixelOrigin.y, 4.f);
     EXPECT_FLOAT_EQ(frame->target.scale, 1.25f);
     EXPECT_EQ(frame->target.kind, PaintTargetKind::Direct);
-    EXPECT_EQ(frame->target.nativeAppearance, &appearance);
+    EXPECT_EQ(frame->target.nativeAppearance, &defaultNativeAppearance());
     EXPECT_FALSE(frame->target.opaque);
     EXPECT_EQ(frame->target.shapeAA, AAIntent::Coverage);
     EXPECT_EQ(frame->target.textAA, AAIntent::Coverage);
@@ -1468,6 +1466,7 @@ TEST(SurfaceTest, KeepsOwnedBindingScopedToUnmountAndRemount) {
 
     surface.mount(std::move(root));
     ASSERT_TRUE(binding.activate());
+    Binding movedBinding = std::move(binding);
     target->activate();
     EXPECT_EQ(activations, 1);
 
@@ -1479,14 +1478,13 @@ TEST(SurfaceTest, KeepsOwnedBindingScopedToUnmountAndRemount) {
     target->activate();
     EXPECT_EQ(activations, 2);
 
-    binding.deactivate();
     std::unique_ptr<Element> detachedRoot = surface.unmount(*rootPointer);
     ASSERT_NE(detachedRoot, nullptr);
     target->activate();
     EXPECT_EQ(activations, 2);
 
     surface.mount(std::move(detachedRoot));
-    ASSERT_TRUE(binding.activate());
+    ASSERT_TRUE(movedBinding.activate());
     target->activate();
     EXPECT_EQ(activations, 3);
 }
@@ -1512,7 +1510,6 @@ TEST(SurfaceTest, KeepsBorrowedBindingScopedToUnmountAndRemount) {
     target->activate();
     EXPECT_EQ(activations, 1);
 
-    binding.deactivate();
     ASSERT_TRUE(surface.unmountBorrowed(root));
     target->activate();
     EXPECT_EQ(activations, 1);
@@ -2280,6 +2277,33 @@ TEST(SurfaceTest, InvalidatesAncestorLayoutAfterStateChanges) {
     target->checked(true);
     surface.updateLayout();
     EXPECT_EQ(after->rect().left(), 40.f);
+}
+
+TEST(SurfaceTest, ReflowsInlineContentAfterTextAlignStateChange) {
+    StyleSheet styleSheet;
+    constexpr char kTextAlignStyles[] = "panel { text-align: left; } panel:hover { text-align: center; } "
+                                        ".inline { display: inline; width: 20px; height: 10px; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kTextAlignStyles).ok());
+    ASSERT_TRUE(styleSheet.stateAffectsLayout(ElementState::Hovered));
+
+    Surface surface(styleSheet);
+    surface.setViewport(100.f, 20.f);
+    auto panel = makeElement<HTMLPanelElement>();
+    HTMLPanelElement* panelTarget = panel.get();
+    panel->setRect({0.f, 0.f, 100.f, 20.f}).setPointerEvents(true);
+    auto child = makeElement<HTMLLabelElement>("child");
+    HTMLLabelElement* childTarget = child.get();
+    child->addClass("inline");
+    panel->append(std::move(child));
+    surface.mount(std::move(panel));
+
+    surface.updateLayout();
+    EXPECT_FLOAT_EQ(childTarget->rect().left(), 0.f);
+
+    EXPECT_TRUE(surface.pointerMove({{90.f, 5.f}}));
+    ASSERT_TRUE(panelTarget->hasState(ElementState::Hovered));
+    surface.updateLayout();
+    EXPECT_FLOAT_EQ(childTarget->rect().left(), 40.f);
 }
 
 TEST(SurfaceTest, PreservesOrderedPaintingHitTestingAndFocus) {

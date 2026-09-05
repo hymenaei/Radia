@@ -10,14 +10,14 @@
 #include "types.h"
 
 namespace radia::ui {
-struct Style;
+struct ComputedStyle;
 
 class TextMetrics {
 public:
     virtual ~TextMetrics() = default;
-    virtual Vec2 measureText(const std::string& text, const Style& style) const = 0;
-    virtual float usedLetterSpacing(const Style& style) const;
-    virtual std::uint64_t generation() const { return 0; }
+    virtual Vec2 measureText(const std::string& text, const ComputedStyle& style) const = 0;
+    virtual float usedLetterSpacing(const ComputedStyle& style) const;
+    virtual std::uint64_t generation() const noexcept = 0;
 };
 
 class FixedTextMetrics final : public TextMetrics {
@@ -25,8 +25,9 @@ public:
     explicit FixedTextMetrics(float regularWidthFactor = .58f, float boldWidthFactor = .62f)
         : mRegularWidthFactor(regularWidthFactor), mBoldWidthFactor(boldWidthFactor) {}
 
-    Vec2 measureText(const std::string& text, const Style& style) const override;
-    float usedLetterSpacing(const Style& style) const override;
+    Vec2 measureText(const std::string& text, const ComputedStyle& style) const override;
+    float usedLetterSpacing(const ComputedStyle& style) const override;
+    std::uint64_t generation() const noexcept override { return 1; }
 
 private:
     float mRegularWidthFactor;

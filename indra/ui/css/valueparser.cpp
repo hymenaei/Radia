@@ -10,9 +10,9 @@
 #include <cstdlib>
 #include <limits>
 #include <sstream>
-#include "style/color.h"
-#include "style/model.h"
-#include "style/syntax.h"
+#include "css/color.h"
+#include "css/rules.h"
+#include "css/syntax.h"
 
 namespace radia::ui {
 namespace {

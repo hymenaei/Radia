@@ -60,6 +60,7 @@ std::unique_ptr<HTMLFloaterElement> Surface::replaceFloater(HTMLFloaterElement& 
 
     const SurfaceLayer layer = currentMount->layer;
     MountPtr retired = std::move(*found);
+    detachBindings(*retired);
     ElementRef<HTMLFloaterElement> retiredRef(currentElement);
     retired->lifetime.reset();
     retired->root = nullptr;
@@ -107,6 +108,7 @@ bool Surface::replaceFloater(HTMLFloaterElement& current, HTMLFloaterElement& re
 
     const SurfaceLayer layer = currentMount->layer;
     MountPtr retired = std::move(*found);
+    detachBindings(*retired);
     ElementRef<HTMLFloaterElement> retiredRef(currentElement);
     retired->lifetime.reset();
     retired->root = nullptr;
@@ -159,13 +161,13 @@ void Surface::placeFloater(HTMLFloaterElement& floater, const Rect& rect) {
     constrainFloater(floater);
 }
 
-Vec2 Surface::preferredFloaterSize(const HTMLFloaterElement& floater) const {
-    const ElementObservation floaterObservation = observe(const_cast<HTMLFloaterElement&>(floater));
+Vec2 Surface::preferredFloaterSize(HTMLFloaterElement& floater) {
+    const ElementObservation floaterObservation = observe(floater);
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
-    const Style& style = styles.style(floater);
+    const ComputedStyle& style = styles.style(floater);
     if (!floaterObservation.layoutValid() || !floaterObservation.styleValid()) return {};
-    const Vec2 measured = measureElement(floater, *mStyleSheet, mTextMetrics);
+    const Vec2 measured = LayoutEngine::measure(floater, *mStyleSheet, mTextMetrics);
     if (!floaterObservation.layoutValid() || !floaterObservation.styleValid()) return {};
     const auto resolve = [](const Dimension& value, const std::optional<Length>& minimum, float fallback, float reference) {
         const float result = value.resolve(fallback, reference);
@@ -174,13 +176,13 @@ Vec2 Surface::preferredFloaterSize(const HTMLFloaterElement& floater) const {
     return {resolve(style.width, style.minWidth, measured.x, mViewport.w), resolve(style.height, style.minHeight, measured.y, mViewport.h)};
 }
 
-std::optional<Rect> Surface::initialFloaterRect(const HTMLFloaterElement& floater) const {
-    const ElementObservation floaterObservation = observe(const_cast<HTMLFloaterElement&>(floater));
+std::optional<Rect> Surface::initialFloaterRect(HTMLFloaterElement& floater) {
+    const ElementObservation floaterObservation = observe(floater);
     const Vec2 size = preferredFloaterSize(floater);
     if (!floaterObservation.layoutValid() || !floaterObservation.styleValid()) return std::nullopt;
     StylePass& styles = stylePass();
     const StylePass::TraversalScope traversal = styles.enterTraversal();
-    const Style& style = styles.style(floater);
+    const ComputedStyle& style = styles.style(floater);
     if (!floaterObservation.layoutValid() || !floaterObservation.styleValid()) return std::nullopt;
     const float x = style.left ? style.left->resolve(mViewport.w)
         : style.right          ? mViewport.w - style.right->resolve(mViewport.w) - size.x
@@ -191,7 +193,7 @@ std::optional<Rect> Surface::initialFloaterRect(const HTMLFloaterElement& floate
     return Rect{x, y, size.x, size.y};
 }
 
-std::optional<Rect> Surface::prepareFloater(HTMLFloaterElement& floater) const {
+std::optional<Rect> Surface::prepareFloater(HTMLFloaterElement& floater) {
     const ElementObservation floaterObservation = observe(floater);
     const std::optional<Rect> authored = initialFloaterRect(floater);
     if (!authored || !floaterObservation.layoutValid() || !floaterObservation.styleValid()) return std::nullopt;
@@ -204,7 +206,7 @@ std::optional<Rect> Surface::prepareFloater(HTMLFloaterElement& floater) const {
     const ElementObservation bodyObservation = body ? observe(*body) : ElementObservation{};
     if (body && (!bodyObservation.layoutValid() || !bodyObservation.styleValid() || !bodyObservation.attachedTo(*currentFloater)))
         return std::nullopt;
-    const Vec2 bodySize = body ? measureElement(*body, *mStyleSheet, mTextMetrics) : Vec2{};
+    const Vec2 bodySize = body ? LayoutEngine::measure(*body, *mStyleSheet, mTextMetrics) : Vec2{};
     body = bodyRef.get();
     if (!floaterObservation.layoutValid()
         || !floaterObservation.styleValid()

@@ -8,18 +8,18 @@
 #include "html/elementnames.h"
 #include "render/paintcontext.h"
 #include "resource/elementdefinition.h"
-#include "style/style.h"
+#include "style/computedstyle.h"
 
 namespace radia::ui {
 HTMLButtonElement::HTMLButtonElement() : HTMLButtonElement(kButtonTag.localName) {}
 
 HTMLButtonElement::HTMLButtonElement(std::string_view elementName) : HTMLElement(elementName) {}
 
-void HTMLButtonElement::constrainResolvedStyle(Style& style) const {
+void HTMLButtonElement::constrainResolvedStyle(ComputedStyle& style) const {
     style.alignContentBlockCenter = style.appearance == AppearanceMode::Auto && style.display == DisplayMode::InlineBlock;
 }
 
-void HTMLButtonElement::paint(PaintContext& context, const Style& style, float scale) const {
+void HTMLButtonElement::paint(PaintContext& context, const ComputedStyle& style, float scale) const {
     if (style.appearance == AppearanceMode::Auto) {
         NativeButtonPaintRequest request;
         request.bounds = rect();

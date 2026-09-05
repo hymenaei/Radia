@@ -13,6 +13,9 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#include "css/rules.h"
+#include "css/stylesheet.h"
+#include "css/syntax.h"
 #include "dom/elementinternal.h"
 #include "floater_test_helpers.h"
 #include "html/button.h"
@@ -24,9 +27,8 @@
 #include "html/panel.h"
 #include "layout/engine.h"
 #include "resource/elementdefinition.h"
-#include "style/model.h"
-#include "style/stylesheet.h"
-#include "style/syntax.h"
+#include "style/property.h"
+#include "style/stylepass.h"
 #include "text/metrics.h"
 
 namespace {
@@ -36,9 +38,11 @@ using radia::ui::AppearanceMode;
 using radia::ui::BoxSizing;
 using radia::ui::Color;
 using radia::ui::ColorScheme;
+using radia::ui::ComputedStyle;
 using radia::ui::DisplayMode;
 using radia::ui::Element;
 using radia::ui::ElementState;
+using radia::ui::FixedTextMetrics;
 using radia::ui::FlexDirection;
 using radia::ui::FontFamily;
 using radia::ui::HTMLButtonElement;
@@ -51,9 +55,8 @@ using radia::ui::JustifyContent;
 using radia::ui::JustifySelf;
 using radia::ui::PointerEvents;
 using radia::ui::PositionMode;
-using radia::ui::resolveElementStyle;
 using radia::ui::StrokeCap;
-using radia::ui::Style;
+using radia::ui::StylePass;
 using radia::ui::StyleSheet;
 using radia::ui::TextAlign;
 using radia::ui::TextOverflow;
@@ -61,6 +64,7 @@ using radia::ui::TextWrap;
 using radia::ui::VerticalAlign;
 using radia::ui::Visibility;
 using radia::ui::detail::ElementInternalAccess;
+using radia::ui::detail::findStyleProperty;
 using radia::ui::detail::HTMLElementFactory;
 using radia::ui::detail::makeElement;
 using radia::ui::detail::makeElementValue;
@@ -71,6 +75,11 @@ using radia::ui::detail::StylePropertyDefinition;
 using radia::ui::detail::stylePropertyEnd;
 using radia::ui::detail::tokenizeTopLevel;
 using ::testing::Message;
+
+ComputedStyle computedStyle(const StyleSheet& stylesheet, const Element& element) {
+    StylePass styles(stylesheet, FixedTextMetrics{});
+    return styles.style(element);
+}
 
 HTMLIconElement& appendIcon(HTMLButtonElement& button, std::string name) {
     auto icon = makeElement<HTMLIconElement>(std::move(name));
@@ -92,7 +101,7 @@ TEST(StyleCompilerTest, ResolvesStructuralDivStyles) {
     auto div = HTMLElementFactory::Create("div");
     ASSERT_NE(div, nullptr);
     div->addClass("stack");
-    const Style style = resolveElementStyle(stylesheet, *div);
+    const ComputedStyle style = computedStyle(stylesheet, *div);
     EXPECT_EQ(style.display, DisplayMode::Flex);
     EXPECT_TRUE(style.displaySet);
     EXPECT_EQ(style.flexDirection, FlexDirection::Row);
@@ -111,29 +120,29 @@ TEST(StyleCompilerTest, ResolvesDisplayAndInheritedVisibility) {
 
     auto flex = makeElementValue<HTMLPanelElement>();
     flex.addClass("flex");
-    const Style flexStyle = resolveElementStyle(stylesheet, flex);
+    const ComputedStyle flexStyle = computedStyle(stylesheet, flex);
     EXPECT_EQ(flexStyle.display, DisplayMode::Flex);
     EXPECT_EQ(flexStyle.flexDirection, FlexDirection::Column);
 
     auto inlinePanel = makeElementValue<HTMLPanelElement>();
     inlinePanel.addClass("inline");
-    const Style inlineStyle = resolveElementStyle(stylesheet, inlinePanel);
+    const ComputedStyle inlineStyle = computedStyle(stylesheet, inlinePanel);
     EXPECT_EQ(inlineStyle.display, DisplayMode::Inline);
 
     auto inlineFlexPanel = makeElementValue<HTMLPanelElement>();
     inlineFlexPanel.addClass("inline-flex");
-    EXPECT_EQ(resolveElementStyle(stylesheet, inlineFlexPanel).display, DisplayMode::InlineFlex);
+    EXPECT_EQ(computedStyle(stylesheet, inlineFlexPanel).display, DisplayMode::InlineFlex);
 
     auto none = makeElementValue<HTMLPanelElement>();
     none.addClass("none");
-    EXPECT_EQ(resolveElementStyle(stylesheet, none).display, DisplayMode::NoneValue);
+    EXPECT_EQ(computedStyle(stylesheet, none).display, DisplayMode::NoneValue);
 
     auto hidden = makeElementValue<HTMLPanelElement>();
     hidden.addClass("hidden");
     auto child = makeElement<HTMLLabelElement>("child");
     HTMLLabelElement* childPtr = child.get();
     hidden.append(std::move(child));
-    EXPECT_EQ(resolveElementStyle(stylesheet, *childPtr).visibility, Visibility::Hidden);
+    EXPECT_EQ(computedStyle(stylesheet, *childPtr).visibility, Visibility::Hidden);
 }
 
 TEST(StyleCompilerTest, ParsesColorSchemeValues) {
@@ -181,12 +190,12 @@ TEST(StyleCompilerTest, ResolvesLightDarkColorChoicesForTheActiveScheme) {
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kLightDarkStyles).ok());
 
-    const Style light = stylesheet.resolve("panel", "", {}, 0);
+    const ComputedStyle light = stylesheet.resolve("panel", "", {}, 0);
     EXPECT_NEAR(light.backgroundColor.r, 1.f, 1.0e-4f);
     EXPECT_NEAR(light.color.r, 16.f / 255.f, 1.0e-4f);
     EXPECT_NEAR(light.borderColor.r, 204.f / 255.f, 1.0e-4f);
 
-    const Style dark = stylesheet.resolve("panel", "", {"dark"}, 0);
+    const ComputedStyle dark = stylesheet.resolve("panel", "", {"dark"}, 0);
     EXPECT_FLOAT_EQ(dark.backgroundColor.r, 0.f);
     EXPECT_NEAR(dark.color.r, 240.f / 255.f, 1.0e-4f);
     EXPECT_NEAR(dark.borderColor.r, 51.f / 255.f, 1.0e-4f);
@@ -205,7 +214,7 @@ TEST(StyleCompilerTest, ResolvesColorAndLengthTokens) {
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kTokenStyles).ok());
-    const Style style = stylesheet.resolve("button", "", {}, 0);
+    const ComputedStyle style = stylesheet.resolve("button", "", {}, 0);
 
     EXPECT_NEAR(style.backgroundColor.b, 96.f / 255.f, 1.0e-4f);
     EXPECT_EQ(style.padding.left, 12.f);
@@ -218,7 +227,7 @@ TEST(StyleCompilerTest, ResolvesPercentageBorderRadius) {
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kPercentageRadiusStyles).ok());
-    const Style style = stylesheet.resolve("input", "", {}, 0);
+    const ComputedStyle style = stylesheet.resolve("input", "", {}, 0);
 
     EXPECT_FLOAT_EQ(style.borderRadius.topLeft.horizontal.pixels, 0.f);
     EXPECT_FLOAT_EQ(style.borderRadius.topLeft.horizontal.percent, 1.f);
@@ -233,7 +242,7 @@ TEST(StyleCompilerTest, UsesLaterDeclarationsWithoutDiscardingShorthandValues) {
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kDeclarationOrderStyles).ok());
-    const Style style = stylesheet.resolve("button", "", {}, 0);
+    const ComputedStyle style = stylesheet.resolve("button", "", {}, 0);
 
     EXPECT_EQ(style.width.pixels(), 40.f);
     EXPECT_EQ(style.height.pixels(), 20.f);
@@ -262,7 +271,7 @@ TEST(StyleCompilerTest, ResolvesNestedStateAndChildSelectors) {
 
     auto button = makeElementValue<HTMLButtonElement>();
     ElementInternalAccess::setState(button, ElementState::Hovered, true);
-    const Style iconStyle = resolveElementStyle(stylesheet, appendIcon(button, "search"));
+    const ComputedStyle iconStyle = computedStyle(stylesheet, appendIcon(button, "search"));
     EXPECT_EQ(iconStyle.width.pixels(), 16.f);
     ASSERT_TRUE(iconStyle.svgStrokeWidth.has_value());
     EXPECT_EQ(iconStyle.svgStrokeWidth->pixels, 3.f);
@@ -274,8 +283,8 @@ TEST(StyleCompilerTest, ParsesContainerAndTextAlignmentEnums) {
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kAlignmentStyles).ok());
-    const Style panel = stylesheet.resolve("panel", "", {}, 0);
-    const Style label = stylesheet.resolve("label", "", {}, 0);
+    const ComputedStyle panel = stylesheet.resolve("panel", "", {}, 0);
+    const ComputedStyle label = stylesheet.resolve("label", "", {}, 0);
 
     EXPECT_EQ(panel.display, DisplayMode::Flex);
     EXPECT_EQ(panel.pointerEvents, PointerEvents::PassThrough);
@@ -322,7 +331,7 @@ TEST(StyleCompilerTest, ParsesIndependentTypographyPropertiesAndVariableWeights)
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kTypographyStyles).ok());
-    const Style label = stylesheet.resolve("label", "a", {}, 0);
+    const ComputedStyle label = stylesheet.resolve("label", "a", {}, 0);
     EXPECT_EQ(label.fontFamily, FontFamily::Sans);
     EXPECT_EQ(label.fontSize, 19.f);
     EXPECT_EQ(label.fontWeight, static_cast<U16>(700));
@@ -343,7 +352,7 @@ TEST(StyleCompilerTest, AppliesInitialToLonghandsAndShorthands) {
     ASSERT_TRUE(stylesheet.loadRadia(kInitialStyles).ok());
     auto reset = makeElementValue<HTMLPanelElement>();
     reset.addClass("reset");
-    const Style style = resolveElementStyle(stylesheet, reset);
+    const ComputedStyle style = computedStyle(stylesheet, reset);
 
     EXPECT_EQ(style.display, DisplayMode::Inline);
     EXPECT_TRUE(style.displaySet);
@@ -378,8 +387,8 @@ TEST(StyleCompilerTest, InitialOverridesInheritedValue) {
     HTMLLabelElement* labelPtr = label.get();
     panel.append(std::move(label));
 
-    EXPECT_EQ(resolveElementStyle(stylesheet, panel).fontSize, 22.f);
-    EXPECT_EQ(resolveElementStyle(stylesheet, *labelPtr).fontSize, 13.f);
+    EXPECT_EQ(computedStyle(stylesheet, panel).fontSize, 22.f);
+    EXPECT_EQ(computedStyle(stylesheet, *labelPtr).fontSize, 13.f);
 }
 
 TEST(StyleCompilerTest, RejectsInvalidTypographyForms) {
@@ -410,13 +419,13 @@ TEST(StyleCompilerTest, ParsesBordersAndSvgStrokeProperties) {
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kBorderStyles).ok());
-    const Style buttonStyle = stylesheet.resolve("button", "", {}, 0);
+    const ComputedStyle buttonStyle = stylesheet.resolve("button", "", {}, 0);
     EXPECT_EQ(buttonStyle.borderWidth.top, 2.f);
     EXPECT_EQ(buttonStyle.borderWidth.right, 3.f);
     EXPECT_EQ(buttonStyle.borderColor.r, 1.f);
 
     auto button = makeElementValue<HTMLButtonElement>();
-    const Style iconStyle = resolveElementStyle(stylesheet, appendIcon(button, "search"));
+    const ComputedStyle iconStyle = computedStyle(stylesheet, appendIcon(button, "search"));
     ASSERT_TRUE(iconStyle.svgStrokeWidth.has_value());
     EXPECT_EQ(iconStyle.svgStrokeWidth->pixels, 4.f);
     EXPECT_EQ(iconStyle.svgStrokeCap, StrokeCap::Square);
@@ -435,10 +444,10 @@ TEST(StyleCompilerTest, ResolvesGridSwitchPresentationProperties) {
     switchInput.type("checkbox").switchMode(true).addClass("basic-switch");
     ASSERT_NE(switchInput.sliderTrack(), nullptr);
     ASSERT_NE(switchInput.sliderThumb(), nullptr);
-    const Style owner = resolveElementStyle(stylesheet, switchInput);
-    const Style track = stylesheet.resolvePseudoElement(switchInput, "slider-track");
-    const Style fill = stylesheet.resolvePseudoElement(switchInput, "slider-fill");
-    const Style thumb = stylesheet.resolvePseudoElement(switchInput, "slider-thumb");
+    const ComputedStyle owner = computedStyle(stylesheet, switchInput);
+    const ComputedStyle track = stylesheet.resolvePseudoElement(switchInput, "slider-track");
+    const ComputedStyle fill = stylesheet.resolvePseudoElement(switchInput, "slider-fill");
+    const ComputedStyle thumb = stylesheet.resolvePseudoElement(switchInput, "slider-thumb");
 
     EXPECT_EQ(owner.appearance, AppearanceMode::Base);
     EXPECT_EQ(owner.display, DisplayMode::InlineGrid);
@@ -479,8 +488,8 @@ TEST(StyleCompilerTest, ResolvesCheckmarkPseudoElementsForCheckableInputs) {
     auto radio = makeElementValue<HTMLInputElement>();
     radio.type("radio");
 
-    const Style checkboxMark = stylesheet.resolvePseudoElement(checkbox, "checkmark");
-    const Style radioMark = stylesheet.resolvePseudoElement(radio, "checkmark");
+    const ComputedStyle checkboxMark = stylesheet.resolvePseudoElement(checkbox, "checkmark");
+    const ComputedStyle radioMark = stylesheet.resolvePseudoElement(radio, "checkmark");
     EXPECT_EQ(checkboxMark.width.pixels(), 10.f);
     EXPECT_EQ(checkboxMark.height.pixels(), 10.f);
     ASSERT_TRUE(checkboxMark.content.has_value());
@@ -515,7 +524,7 @@ TEST(StyleCompilerTest, AppliesSelectorListsChildRulesAndStates) {
     EXPECT_EQ(stylesheet.resolve("input", "", {}, 0).height.pixels(), 32.f);
 
     auto button = makeElementValue<HTMLButtonElement>();
-    EXPECT_EQ(resolveElementStyle(stylesheet, appendIcon(button, "search")).width.pixels(), 14.f);
+    EXPECT_EQ(computedStyle(stylesheet, appendIcon(button, "search")).width.pixels(), 14.f);
     const uint16_t disabled = static_cast<uint16_t>(ElementState::Disabled);
     EXPECT_EQ(stylesheet.resolve("button", "", {}, disabled).opacity, .5f);
 }
@@ -528,7 +537,7 @@ TEST(StyleCompilerTest, ParsesFlexItemShorthands) {
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kFlexItemStyles).ok());
-    const Style style = stylesheet.resolve("panel", "", {}, 0);
+    const ComputedStyle style = stylesheet.resolve("panel", "", {}, 0);
     EXPECT_EQ(style.padding.top, 1.f);
     EXPECT_EQ(style.padding.right, 2.f);
     EXPECT_EQ(style.padding.bottom, 3.f);
@@ -541,25 +550,25 @@ TEST(StyleCompilerTest, ParsesFlexItemShorthands) {
     EXPECT_NEAR(style.flexBasis.resolve(0.f, 200.f), 80.f, 1.0e-4f);
     EXPECT_EQ(style.order, -2);
 
-    const Style automatic = stylesheet.resolve("panel", "", {"auto"}, 0);
+    const ComputedStyle automatic = stylesheet.resolve("panel", "", {"auto"}, 0);
     EXPECT_EQ(automatic.flexGrow, 1.f);
     EXPECT_EQ(automatic.flexShrink, 1.f);
     EXPECT_TRUE(automatic.flexBasis.isAuto());
 
-    const Style none = stylesheet.resolve("panel", "", {"none"}, 0);
+    const ComputedStyle none = stylesheet.resolve("panel", "", {"none"}, 0);
     EXPECT_EQ(none.flexGrow, 0.f);
     EXPECT_EQ(none.flexShrink, 0.f);
     EXPECT_TRUE(none.flexBasis.isAuto());
 
-    const Style one = stylesheet.resolve("panel", "", {"one"}, 0);
+    const ComputedStyle one = stylesheet.resolve("panel", "", {"one"}, 0);
     EXPECT_EQ(one.flexGrow, 4.f);
     EXPECT_EQ(one.flexBasis.resolve(1.f), 0.f);
 
-    const Style two = stylesheet.resolve("panel", "", {"two"}, 0);
+    const ComputedStyle two = stylesheet.resolve("panel", "", {"two"}, 0);
     EXPECT_EQ(two.flexGrow, 5.f);
     EXPECT_EQ(two.flexShrink, 6.f);
 
-    const Style basis = stylesheet.resolve("panel", "", {"basis"}, 0);
+    const ComputedStyle basis = stylesheet.resolve("panel", "", {"basis"}, 0);
     EXPECT_EQ(basis.flexGrow, 1.f);
     EXPECT_EQ(basis.flexBasis.resolve(0.f), 10.f);
 }
@@ -575,7 +584,7 @@ TEST(StyleCompilerTest, RejectsUnitBearingFlexGrow) {
 }
 
 TEST(StyleCompilerTest, ProvidesStableStyleDefaults) {
-    const Style style;
+    const ComputedStyle style;
 
     EXPECT_EQ(style.display, DisplayMode::Inline);
     EXPECT_FALSE(style.displaySet);
@@ -623,20 +632,20 @@ TEST(StyleCompilerTest, ParsesTextPresentationAndFontShorthands) {
     Element* child = text.get();
     child->textContent("inventory item");
     parent->append(std::move(text));
-    const Style inherited = resolveElementStyle(stylesheet, *child);
+    const ComputedStyle inherited = computedStyle(stylesheet, *child);
     EXPECT_EQ(inherited.letterSpacing.percent, .5f);
     EXPECT_EQ(inherited.wordSpacing.percent, .25f);
     EXPECT_EQ(inherited.textWrap, TextWrap::NoWrap);
     EXPECT_EQ(inherited.textOverflow, TextOverflow::EllipsisCenter);
 
-    const Style shorthand = stylesheet.resolve("label", "", {}, 0);
+    const ComputedStyle shorthand = stylesheet.resolve("label", "", {}, 0);
     EXPECT_TRUE(shorthand.fontItalic);
     EXPECT_EQ(shorthand.fontWeight, static_cast<U16>(525));
     EXPECT_EQ(shorthand.fontSize, 17.f);
     ASSERT_TRUE(shorthand.lineHeight.has_value());
     EXPECT_EQ(shorthand.lineHeight->pixels, 21.f);
 
-    const Style reset = stylesheet.resolve("label", "", {"reset"}, 0);
+    const ComputedStyle reset = stylesheet.resolve("label", "", {"reset"}, 0);
     EXPECT_FALSE(reset.fontItalic);
     EXPECT_EQ(reset.fontWeight, static_cast<U16>(400));
     EXPECT_FALSE(reset.lineHeight.has_value());
@@ -731,9 +740,12 @@ TEST(StyleCompilerTest, KeepsStylePropertyRegistryCompleteAndConsistent) {
     std::set<std::string_view> names;
     for (const StylePropertyDefinition* property = stylePropertyBegin(); property != stylePropertyEnd(); ++property) {
         SCOPED_TRACE(Message() << "style property: " << property->name);
+        const bool shorthand = shorthandNames.count(property->name) != 0;
         EXPECT_TRUE(names.insert(property->name).second);
         EXPECT_NE(property->compile, nullptr);
-        EXPECT_EQ(property->apply == nullptr, shorthandNames.count(property->name) != 0);
+        EXPECT_EQ(property->apply == nullptr, shorthand);
         EXPECT_EQ(property->reset == nullptr, property->apply == nullptr);
+        EXPECT_EQ(property->longhands.empty(), !shorthand);
+        for (const std::string_view longhand : property->longhands) EXPECT_NE(findStyleProperty(longhand), nullptr);
     }
 }

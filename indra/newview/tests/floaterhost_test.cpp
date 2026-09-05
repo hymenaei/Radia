@@ -8,11 +8,11 @@
 #include <memory>
 #include <utility>
 #include <vector>
+#include "css/stylesheet.h"
 #include "dom/document.h"
 #include "dom/elementinternal.h"
 #include "floaterhost.h"
 #include "html/floater.h"
-#include "style/stylesheet.h"
 #include "surface/surface.h"
 
 namespace {
@@ -22,6 +22,7 @@ using radia::ui::HTMLFloaterElement;
 using radia::ui::Rect;
 using radia::ui::StyleSheet;
 using radia::ui::Surface;
+using radia::ui::detail::ElementInternalAccess;
 using radia::ui::detail::makeElement;
 using radia::viewer::ui::ComponentManager;
 using radia::viewer::ui::FloaterHost;
@@ -101,4 +102,18 @@ TEST(FloaterHostTest, RejectsClearWhenAnyRootIsNotMounted) {
     EXPECT_FALSE(host.clearAll({current, unmounted}));
     EXPECT_TRUE(surface.ownsFloater(*current));
     EXPECT_FALSE(current->closed());
+}
+
+TEST(FloaterHostTest, RejectsInvalidMountWithoutChangingTheSurface) {
+    auto document = std::make_unique<Document>(makeElement<Element>("panel"));
+    Element* root = document->documentElement();
+    ASSERT_NE(root, nullptr);
+
+    StyleSheet styleSheet;
+    Surface surface(styleSheet);
+    FloaterHost host(surface);
+
+    EXPECT_FALSE(host.mount(*document));
+    EXPECT_FALSE(ElementInternalAccess::isMounted(*root));
+    EXPECT_FALSE(surface.hasVisibleFloater());
 }

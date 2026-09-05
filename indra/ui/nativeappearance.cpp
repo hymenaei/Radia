@@ -166,8 +166,8 @@ Color switchThumb(const NativeInputPaintRequest& request) {
     return nativeControlBackground(request);
 }
 
-Style nativeControlStyle(Color background, Color border, float radius, bool bordered = true) {
-    Style result;
+ComputedStyle nativeControlStyle(Color background, Color border, float radius, bool bordered = true) {
+    ComputedStyle result;
     result.backgroundColor = background;
     result.borderColor = border;
     result.borderWidth = bordered ? EdgeInsets{1.f, 1.f, 1.f, 1.f} : EdgeInsets{};
@@ -175,8 +175,8 @@ Style nativeControlStyle(Color background, Color border, float radius, bool bord
     return result;
 }
 
-Style nativeMarkStyle(Color color, float radius = 0.f) {
-    Style result;
+ComputedStyle nativeMarkStyle(Color color, float radius = 0.f) {
+    ComputedStyle result;
     result.backgroundColor = color;
     result.borderColor = color;
     result.borderRadius = BorderRadii::uniform(Length{radius});
@@ -193,7 +193,7 @@ void paintInputBase(NativeControlPaintContext& context, const Rect& bounds, Colo
     context.paintNativeBox(backgroundBounds, nativeMarkStyle(background, std::max(0.f, radius - .2f)));
     if (!drawBorder) return;
 
-    Style borderStyle = nativeMarkStyle(Color(0.f, 0.f, 0.f, 0.f), radius);
+    ComputedStyle borderStyle = nativeMarkStyle(Color(0.f, 0.f, 0.f, 0.f), radius);
     borderStyle.borderColor = border;
     borderStyle.borderWidth = {1.f, 1.f, 1.f, 1.f};
     context.paintNativeBox(bounds, borderStyle);
@@ -254,6 +254,15 @@ void paintRadio(NativeControlPaintContext& context, const NativeInputPaintReques
     context.paintNativeBox(dot, nativeMarkStyle(accent, size * .5f));
 }
 } // namespace
+
+NativeLayoutMetrics defaultNativeLayoutMetrics() noexcept {
+    return {kDefaultScrollbarMetrics, kDefaultScrollbarMetrics, kCheckboxMetrics, kRadioMetrics, kSwitchMetrics, 1};
+}
+
+NativeLayoutMetrics NativeAppearance::layoutMetrics() const {
+    return {scrollbarMetrics(ScrollbarMode::Classic), scrollbarMetrics(ScrollbarMode::Overlay), inputMetrics(NativeInputControl::Checkbox),
+            inputMetrics(NativeInputControl::Radio),  inputMetrics(NativeInputControl::Switch), revision()};
+}
 
 NativeAppearanceBase::NativeAppearanceBase() : mScrollbarMetrics(kDefaultScrollbarMetrics) {}
 

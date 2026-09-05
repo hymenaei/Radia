@@ -4,6 +4,7 @@
  */
 
 #include "linden_common.h"
+#include "style/property.h"
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -14,10 +15,10 @@
 #include <limits>
 #include <string>
 #include <type_traits>
-#include "style/color.h"
-#include "style/model.h"
-#include "style/stylesheet.h"
-#include "style/syntax.h"
+#include "css/color.h"
+#include "css/rules.h"
+#include "css/stylesheet.h"
+#include "css/syntax.h"
 
 namespace radia::ui {
 namespace {
@@ -58,10 +59,23 @@ std::vector<StyleDeclaration> makeDeclarations(std::initializer_list<std::pair<s
     for (auto& value : values) declarations.push_back(makeDeclaration(value.first, std::move(value.second)));
     return declarations;
 }
+
+std::vector<StyleDeclaration> makeDeclarations(const detail::StylePropertyDefinition& property, StyleValue value) {
+    if (property.longhands.empty()) return {{property, std::move(value)}};
+
+    std::vector<StyleDeclaration> declarations;
+    declarations.reserve(property.longhands.size());
+    for (const std::string_view name : property.longhands) {
+        const detail::StylePropertyDefinition* longhand = detail::findStyleProperty(name);
+        llassert_always(longhand != nullptr);
+        declarations.emplace_back(*longhand, value);
+    }
+    return declarations;
+}
 } // namespace
 
 namespace {
-void resetStyleProperty(Style& style, const detail::StylePropertyDefinition& property) {
+void resetStyleProperty(ComputedStyle& style, const detail::StylePropertyDefinition& property) {
     if (!property.reset) {
         LL_ERRS("UI") << "Attempted to reset a style property without a reset function: " << property.name << LL_ENDL;
         return;
@@ -69,19 +83,19 @@ void resetStyleProperty(Style& style, const detail::StylePropertyDefinition& pro
     property.reset(style);
 }
 
-void clearExplicitInheritance(Style& style, std::string_view propertyName) {
+void clearExplicitInheritance(ComputedStyle& style, std::string_view propertyName) {
     auto& properties = style.explicitlyInheritedProperties;
     properties.erase(std::remove(properties.begin(), properties.end(), propertyName), properties.end());
 }
 
-void markExplicitInheritance(Style& style, std::string_view propertyName) {
+void markExplicitInheritance(ComputedStyle& style, std::string_view propertyName) {
     if (std::find(style.explicitlyInheritedProperties.begin(), style.explicitlyInheritedProperties.end(), propertyName)
         == style.explicitlyInheritedProperties.end())
         style.explicitlyInheritedProperties.push_back(propertyName);
 }
 } // namespace
 
-void detail::applyStyleDeclaration(Style& style, const StyleDeclaration& declaration) {
+void detail::applyStyleDeclaration(ComputedStyle& style, const StyleDeclaration& declaration) {
     const detail::StylePropertyDefinition& property = declaration.property.get();
     if (std::holds_alternative<InitialStyleValue>(declaration.value)) {
         clearExplicitInheritance(style, property.name);
@@ -940,28 +954,10 @@ std::optional<std::vector<StyleDeclaration>> StyleModel::compileDeclaration(cons
                                                                             const std::string& selector, StyleSheetLoadResult& result,
                                                                             const std::string& sourceName) const {
     const std::string normalizedValue = detail::lower(detail::trim(value));
-    if (normalizedValue == "initial") {
-        if (property.name == "overflow") return makeDeclarations({{"overflow-x", InitialStyleValue{}}, {"overflow-y", InitialStyleValue{}}});
-        if (property.name == "min-size") return makeDeclarations({{"min-height", InitialStyleValue{}}, {"min-width", InitialStyleValue{}}});
-        if (property.name == "flex")
-            return makeDeclarations({{"flex-grow", InitialStyleValue{}}, {"flex-shrink", InitialStyleValue{}}, {"flex-basis", InitialStyleValue{}}});
-        if (property.name == "font")
-            return makeDeclarations({{"font-style", InitialStyleValue{}},
-                                     {"font-weight", InitialStyleValue{}},
-                                     {"font-size", InitialStyleValue{}},
-                                     {"line-height", InitialStyleValue{}},
-                                     {"font-family", InitialStyleValue{}}});
-        return std::vector<StyleDeclaration>{makeDeclaration(property.name, InitialStyleValue{})};
-    }
+    if (normalizedValue == "initial") return makeDeclarations(property, InitialStyleValue{});
     if (normalizedValue == "inherit" || normalizedValue == "unset") {
         const StyleWideKeyword keyword = normalizedValue == "inherit" ? StyleWideKeyword::Inherit : StyleWideKeyword::Unset;
-        if (property.name == "overflow") return makeDeclarations({{"overflow-x", keyword}, {"overflow-y", keyword}});
-        if (property.name == "min-size") return makeDeclarations({{"min-height", keyword}, {"min-width", keyword}});
-        if (property.name == "flex") return makeDeclarations({{"flex-grow", keyword}, {"flex-shrink", keyword}, {"flex-basis", keyword}});
-        if (property.name == "font")
-            return makeDeclarations(
-                {{"font-style", keyword}, {"font-weight", keyword}, {"font-size", keyword}, {"line-height", keyword}, {"font-family", keyword}});
-        return std::vector<StyleDeclaration>{makeDeclaration(property.name, keyword)};
+        return makeDeclarations(property, keyword);
     }
     if (!property.compile) {
         result.error("stylesheet.property.value_invalid", "Property has no compiler: " + std::string(property.name) + ".", sourceName);
@@ -973,32 +969,32 @@ std::optional<std::vector<StyleDeclaration>> StyleModel::compileDeclaration(cons
 
 namespace {
 
-template<auto Member> void applyMember(Style& style, const StyleValue& value) {
+template<auto Member> void applyMember(ComputedStyle& style, const StyleValue& value) {
     using Value = std::decay_t<decltype(style.*Member)>;
     style.*Member = std::get<Value>(value);
 }
 
-template<auto Member> void applyLengthToOptional(Style& style, const StyleValue& value) {
+template<auto Member> void applyLengthToOptional(ComputedStyle& style, const StyleValue& value) {
     style.*Member = std::get<Length>(value);
 }
 
-template<InheritedStyleProperty Property, auto Member> void inheritMember(Style& style, const Style& parent) {
+template<InheritedStyleProperty Property, auto Member> void inheritMember(ComputedStyle& style, const ComputedStyle& parent) {
     const auto flag = static_cast<InheritedStyleProperties>(Property);
     if ((style.specifiedInheritedProperties & flag) == 0) style.*Member = parent.*Member;
 }
 
-template<auto Member> void copyMember(Style& style, const Style& parent) {
+template<auto Member> void copyMember(ComputedStyle& style, const ComputedStyle& parent) {
     style.*Member = parent.*Member;
 }
 
-void copyBackground(Style& style, const Style& parent) {
+void copyBackground(ComputedStyle& style, const ComputedStyle& parent) {
     style.backgroundColor = parent.backgroundColor;
     style.backgroundColorLightDark = parent.backgroundColorLightDark;
     style.backgroundGradient = parent.backgroundGradient;
     style.backgroundColorCurrent = parent.backgroundColorCurrent;
 }
 
-void copyBorder(Style& style, const Style& parent) {
+void copyBorder(ComputedStyle& style, const ComputedStyle& parent) {
     style.borderWidth = parent.borderWidth;
     style.borderColor = parent.borderColor;
     style.borderColorLightDark = parent.borderColorLightDark;
@@ -1009,7 +1005,7 @@ void copyBorder(Style& style, const Style& parent) {
     style.borderColorSet = parent.borderColorSet;
 }
 
-void copyBorderColor(Style& style, const Style& parent) {
+void copyBorderColor(ComputedStyle& style, const ComputedStyle& parent) {
     style.borderColor = parent.borderColor;
     style.borderColorLightDark = parent.borderColorLightDark;
     style.borderGradient = parent.borderGradient;
@@ -1017,126 +1013,126 @@ void copyBorderColor(Style& style, const Style& parent) {
     style.borderColorSet = parent.borderColorSet;
 }
 
-void copyBorderWidth(Style& style, const Style& parent) {
+void copyBorderWidth(ComputedStyle& style, const ComputedStyle& parent) {
     style.borderWidth = parent.borderWidth;
     style.borderWidthSet = parent.borderWidthSet;
 }
 
-void copyDisplay(Style& style, const Style& parent) {
+void copyDisplay(ComputedStyle& style, const ComputedStyle& parent) {
     style.display = parent.display;
     style.displaySet = parent.displaySet;
 }
 
-void copyFlexDirection(Style& style, const Style& parent) {
+void copyFlexDirection(ComputedStyle& style, const ComputedStyle& parent) {
     style.flexDirection = parent.flexDirection;
     style.flexDirectionSet = parent.flexDirectionSet;
 }
 
-void copyJustifyContent(Style& style, const Style& parent) {
+void copyJustifyContent(ComputedStyle& style, const ComputedStyle& parent) {
     style.justifyContent = parent.justifyContent;
     style.justifyContentSet = parent.justifyContentSet;
 }
 
-void copyOutlineOffset(Style& style, const Style& parent) {
+void copyOutlineOffset(ComputedStyle& style, const ComputedStyle& parent) {
     style.outline.offset = parent.outline.offset;
 }
 
-void copySize(Style& style, const Style& parent) {
+void copySize(ComputedStyle& style, const ComputedStyle& parent) {
     style.height = parent.height;
     style.width = parent.width;
 }
 
-void copyStroke(Style& style, const Style& parent) {
+void copyStroke(ComputedStyle& style, const ComputedStyle& parent) {
     style.svgStrokeWidth = parent.svgStrokeWidth;
     style.iconStrokeColor = parent.iconStrokeColor;
     style.iconStrokeColorLightDark = parent.iconStrokeColorLightDark;
 }
 
-void copyStrokeColor(Style& style, const Style& parent) {
+void copyStrokeColor(ComputedStyle& style, const ComputedStyle& parent) {
     style.iconStrokeColor = parent.iconStrokeColor;
     style.iconStrokeColorLightDark = parent.iconStrokeColorLightDark;
 }
 
-void copyStrokeLinecap(Style& style, const Style& parent) {
+void copyStrokeLinecap(ComputedStyle& style, const ComputedStyle& parent) {
     style.svgStrokeCap = parent.svgStrokeCap;
     style.svgStrokeCapSet = parent.svgStrokeCapSet;
 }
 
-void copyScrollbarMode(Style& style, const Style& parent) {
+void copyScrollbarMode(ComputedStyle& style, const ComputedStyle& parent) {
     style.scrollbarMode = parent.scrollbarMode;
     style.scrollbarModeSet = parent.scrollbarModeSet;
 }
 
-void copyVerticalAlign(Style& style, const Style& parent) {
+void copyVerticalAlign(ComputedStyle& style, const ComputedStyle& parent) {
     style.verticalAlign = parent.verticalAlign;
     style.verticalAlignSet = parent.verticalAlignSet;
 }
 
-template<auto Member> void resetMember(Style& style) {
-    const Style initial;
+template<auto Member> void resetMember(ComputedStyle& style) {
+    const ComputedStyle initial;
     style.*Member = initial.*Member;
 }
 
-template<void (*Copy)(Style&, const Style&)> void resetWith(Style& style) {
-    const Style initial;
+template<void (*Copy)(ComputedStyle&, const ComputedStyle&)> void resetWith(ComputedStyle& style) {
+    const ComputedStyle initial;
     Copy(style, initial);
 }
 
-void resetDisplay(Style& style) {
-    const Style initial;
+void resetDisplay(ComputedStyle& style) {
+    const ComputedStyle initial;
     style.display = initial.display;
     style.displaySet = true;
 }
 
-void resetFlexDirection(Style& style) {
-    const Style initial;
+void resetFlexDirection(ComputedStyle& style) {
+    const ComputedStyle initial;
     style.flexDirection = initial.flexDirection;
     style.flexDirectionSet = true;
 }
 
-void resetJustifyContent(Style& style) {
-    const Style initial;
+void resetJustifyContent(ComputedStyle& style) {
+    const ComputedStyle initial;
     style.justifyContent = initial.justifyContent;
     style.justifyContentSet = true;
 }
 
-void resetScrollbarMode(Style& style) {
-    const Style initial;
+void resetScrollbarMode(ComputedStyle& style) {
+    const ComputedStyle initial;
     style.scrollbarMode = initial.scrollbarMode;
     style.scrollbarModeSet = true;
 }
 
-void resetSize(Style& style) {
-    const Style initial;
+void resetSize(ComputedStyle& style) {
+    const ComputedStyle initial;
     style.height = initial.height;
     style.width = initial.width;
 }
 
-void resetBorderWidth(Style& style) {
-    const Style initial;
+void resetBorderWidth(ComputedStyle& style) {
+    const ComputedStyle initial;
     style.borderWidth = initial.borderWidth;
     style.borderWidthSet = false;
 }
 
-void resetColor(Style& style) {
-    const Style initial;
+void resetColor(ComputedStyle& style) {
+    const ComputedStyle initial;
     style.color = initial.color;
     style.colorLightDark = initial.colorLightDark;
 }
 
-void resetStrokeLinecap(Style& style) {
-    const Style initial;
+void resetStrokeLinecap(ComputedStyle& style) {
+    const ComputedStyle initial;
     style.svgStrokeCap = initial.svgStrokeCap;
     style.svgStrokeCapSet = true;
 }
 
-void resetVerticalAlign(Style& style) {
-    const Style initial;
+void resetVerticalAlign(ComputedStyle& style) {
+    const ComputedStyle initial;
     style.verticalAlign = initial.verticalAlign;
     style.verticalAlignSet = true;
 }
 
-void inheritColor(Style& style, const Style& parent) {
+void inheritColor(ComputedStyle& style, const ComputedStyle& parent) {
     const auto flag = static_cast<InheritedStyleProperties>(InheritedStyleProperty::Color);
     if ((style.specifiedInheritedProperties & flag) == 0) {
         style.color = parent.color;
@@ -1144,7 +1140,7 @@ void inheritColor(Style& style, const Style& parent) {
     }
 }
 
-template<InheritedStyleProperty Property> void specifyInherited(Style& style) {
+template<InheritedStyleProperty Property> void specifyInherited(ComputedStyle& style) {
     style.specifiedInheritedProperties |= static_cast<InheritedStyleProperties>(Property);
 }
 
@@ -1157,14 +1153,14 @@ void applyPaint(Color& color, std::optional<LightDarkColor>& lightDarkColor, std
     gradient = paint.gradient;
 }
 
-void applyBackground(Style& style, const StyleValue& value) {
+void applyBackground(ComputedStyle& style, const StyleValue& value) {
     applyPaint(style.backgroundColor, style.backgroundColorLightDark, style.backgroundGradient, style.backgroundColorCurrent, value);
 }
-void applyBorderWidth(Style& style, const StyleValue& value) {
+void applyBorderWidth(ComputedStyle& style, const StyleValue& value) {
     style.borderWidth = std::get<EdgeInsets>(value);
     style.borderWidthSet = true;
 }
-void applyBorder(Style& style, const StyleValue& value) {
+void applyBorder(ComputedStyle& style, const StyleValue& value) {
     const StyleBorder& border = std::get<StyleBorder>(value);
     style.borderWidth = {border.width, border.width, border.width, border.width};
     style.borderColorLightDark = border.paint.lightDarkColor;
@@ -1176,10 +1172,10 @@ void applyBorder(Style& style, const StyleValue& value) {
     style.borderStyle = border.style;
     style.borderGradient = border.paint.gradient;
 }
-void applyBorderStyle(Style& style, const StyleValue& value) {
+void applyBorderStyle(ComputedStyle& style, const StyleValue& value) {
     style.borderStyle = std::get<BorderStyle>(value);
 }
-void applyColor(Style& style, const StyleValue& value) {
+void applyColor(ComputedStyle& style, const StyleValue& value) {
     if (const auto lightDarkColor = std::get_if<LightDarkColor>(&value)) {
         style.colorLightDark = *lightDarkColor;
         style.color = lightDarkColor->dark;
@@ -1188,62 +1184,62 @@ void applyColor(Style& style, const StyleValue& value) {
         style.color = std::get<Color>(value);
     }
 }
-void applyAccentColor(Style& style, const StyleValue& value) {
+void applyAccentColor(ComputedStyle& style, const StyleValue& value) {
     style.accentColor = std::get<AccentColor>(value);
 }
-void applyOutline(Style& style, const StyleValue& value) {
+void applyOutline(ComputedStyle& style, const StyleValue& value) {
     const Outline& outline = std::get<Outline>(value);
     style.outline.width = outline.width;
     style.outline.color = outline.color;
     style.outline.style = outline.style;
     style.outline.lightDarkColor = outline.lightDarkColor;
 }
-void applyOutlineOffset(Style& style, const StyleValue& value) {
+void applyOutlineOffset(ComputedStyle& style, const StyleValue& value) {
     style.outline.offset = std::get<Length>(value).pixels;
 }
-void applySize(Style& style, const StyleValue& value) {
+void applySize(ComputedStyle& style, const StyleValue& value) {
     const StyleSize& size = std::get<StyleSize>(value);
     style.height = size.height;
     style.width = size.width;
 }
-void applyDisplay(Style& style, const StyleValue& value) {
+void applyDisplay(ComputedStyle& style, const StyleValue& value) {
     style.display = std::get<DisplayMode>(value);
     style.displaySet = true;
 }
-void applyScrollbarMode(Style& style, const StyleValue& value) {
+void applyScrollbarMode(ComputedStyle& style, const StyleValue& value) {
     style.scrollbarMode = std::get<ScrollbarMode>(value);
     style.scrollbarModeSet = true;
 }
-void applyFlexDirection(Style& style, const StyleValue& value) {
+void applyFlexDirection(ComputedStyle& style, const StyleValue& value) {
     style.flexDirection = std::get<FlexDirection>(value);
     style.flexDirectionSet = true;
 }
-void applyJustifyContent(Style& style, const StyleValue& value) {
+void applyJustifyContent(ComputedStyle& style, const StyleValue& value) {
     style.justifyContent = std::get<JustifyContent>(value);
     style.justifyContentSet = true;
 }
-void applyVerticalAlign(Style& style, const StyleValue& value) {
+void applyVerticalAlign(ComputedStyle& style, const StyleValue& value) {
     style.verticalAlign = std::get<VerticalAlign>(value);
     style.verticalAlignSet = true;
 }
-void applyFontWeight(Style& style, const StyleValue& value) {
+void applyFontWeight(ComputedStyle& style, const StyleValue& value) {
     style.fontWeight = static_cast<U16>(std::get<float>(value));
 }
-void applyIconStroke(Style& style, const StyleValue& value) {
+void applyIconStroke(ComputedStyle& style, const StyleValue& value) {
     const StyleIconStroke& stroke = std::get<StyleIconStroke>(value);
     style.svgStrokeWidth = Length{stroke.width};
     style.iconStrokeColor = stroke.color;
     style.iconStrokeColorLightDark = stroke.lightDarkColor;
 }
-void applyIconStrokeLinecap(Style& style, const StyleValue& value) {
+void applyIconStrokeLinecap(ComputedStyle& style, const StyleValue& value) {
     style.svgStrokeCap = std::get<StrokeCap>(value);
     style.svgStrokeCapSet = true;
 }
-void applyIconStrokeWidth(Style& style, const StyleValue& value) {
+void applyIconStrokeWidth(ComputedStyle& style, const StyleValue& value) {
     style.svgStrokeWidth = std::get<Length>(value);
 }
 
-void applyIconStrokeColor(Style& style, const StyleValue& value) {
+void applyIconStrokeColor(ComputedStyle& style, const StyleValue& value) {
     if (const auto lightDarkColor = std::get_if<LightDarkColor>(&value)) {
         style.iconStrokeColor = lightDarkColor->dark;
         style.iconStrokeColorLightDark = *lightDarkColor;
@@ -1253,149 +1249,165 @@ void applyIconStrokeColor(Style& style, const StyleValue& value) {
     }
 }
 
+constexpr std::array<std::string_view, 2> kOverflowLonghands{"overflow-x", "overflow-y"};
+constexpr std::array<std::string_view, 2> kMinSizeLonghands{"min-height", "min-width"};
+constexpr std::array<std::string_view, 3> kFlexLonghands{"flex-grow", "flex-shrink", "flex-basis"};
+constexpr std::array<std::string_view, 5> kFontLonghands{"font-style", "font-weight", "font-size", "line-height", "font-family"};
+
 const detail::StylePropertyDefinition kPropertyDefinitions[] = {
-    {"accent-color", compileAccentColor, applyAccentColor, resetMember<&Style::accentColor>, specifyInherited<InheritedStyleProperty::AccentColor>,
-     inheritMember<InheritedStyleProperty::AccentColor, &Style::accentColor>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited, false,
-     InheritedStyleProperty::AccentColor},
-    {"appearance", compileAppearance, applyMember<&Style::appearance>, resetMember<&Style::appearance>, nullptr, copyMember<&Style::appearance>,
-     StylePropertyImpact::Layout | StylePropertyImpact::Paint},
-    {"color-scheme", compileColorScheme, applyMember<&Style::colorScheme>, resetMember<&Style::colorScheme>,
-     specifyInherited<InheritedStyleProperty::ColorScheme>, inheritMember<InheritedStyleProperty::ColorScheme, &Style::colorScheme>,
+    {"accent-color", compileAccentColor, applyAccentColor, resetMember<&ComputedStyle::accentColor>,
+     specifyInherited<InheritedStyleProperty::AccentColor>, inheritMember<InheritedStyleProperty::AccentColor, &ComputedStyle::accentColor>,
+     StylePropertyImpact::Paint | StylePropertyImpact::Inherited, false, InheritedStyleProperty::AccentColor},
+    {"appearance", compileAppearance, applyMember<&ComputedStyle::appearance>, resetMember<&ComputedStyle::appearance>, nullptr,
+     copyMember<&ComputedStyle::appearance>, StylePropertyImpact::Layout | StylePropertyImpact::Paint},
+    {"color-scheme", compileColorScheme, applyMember<&ComputedStyle::colorScheme>, resetMember<&ComputedStyle::colorScheme>,
+     specifyInherited<InheritedStyleProperty::ColorScheme>, inheritMember<InheritedStyleProperty::ColorScheme, &ComputedStyle::colorScheme>,
      StylePropertyImpact::Paint | StylePropertyImpact::Inherited, false, InheritedStyleProperty::ColorScheme},
-    {"box-sizing", compileBoxSizing, applyMember<&Style::boxSizing>, resetMember<&Style::boxSizing>, nullptr, copyMember<&Style::boxSizing>,
-     StylePropertyImpact::Layout},
+    {"box-sizing", compileBoxSizing, applyMember<&ComputedStyle::boxSizing>, resetMember<&ComputedStyle::boxSizing>, nullptr,
+     copyMember<&ComputedStyle::boxSizing>, StylePropertyImpact::Layout},
     {"background-color", compilePaint, applyBackground, resetWith<copyBackground>, nullptr, copyBackground, StylePropertyImpact::Paint},
     {"border", compileBorder, applyBorder, resetWith<copyBorder>, nullptr, copyBorder, StylePropertyImpact::Layout | StylePropertyImpact::Paint},
     {"border-color", compilePaint,
-     [](Style& style, const StyleValue& value) {
+     [](ComputedStyle& style, const StyleValue& value) {
          applyPaint(style.borderColor, style.borderColorLightDark, style.borderGradient, style.borderColorCurrent, value);
          style.borderColorSet = true;
      },
      resetWith<copyBorderColor>, nullptr, copyBorderColor, StylePropertyImpact::Paint},
-    {"border-radius", compileBorderRadius, applyMember<&Style::borderRadius>, resetMember<&Style::borderRadius>, nullptr,
-     copyMember<&Style::borderRadius>, StylePropertyImpact::Paint},
-    {"border-style", compileBorderStyle, applyBorderStyle, resetMember<&Style::borderStyle>, nullptr, copyMember<&Style::borderStyle>,
+    {"border-radius", compileBorderRadius, applyMember<&ComputedStyle::borderRadius>, resetMember<&ComputedStyle::borderRadius>, nullptr,
+     copyMember<&ComputedStyle::borderRadius>, StylePropertyImpact::Paint},
+    {"border-style", compileBorderStyle, applyBorderStyle, resetMember<&ComputedStyle::borderStyle>, nullptr, copyMember<&ComputedStyle::borderStyle>,
      StylePropertyImpact::Paint},
     {"border-width", compileEdges, applyBorderWidth, resetBorderWidth, nullptr, copyBorderWidth,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint},
-    {"bottom", compilePosition, applyLengthToOptional<&Style::bottom>, resetMember<&Style::bottom>, nullptr, copyMember<&Style::bottom>,
-     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"cursor", compileCursor, applyMember<&Style::cursor>, resetMember<&Style::cursor>, specifyInherited<InheritedStyleProperty::Cursor>,
-     inheritMember<InheritedStyleProperty::Cursor, &Style::cursor>, StylePropertyImpact::Paint | StylePropertyImpact::Inherited, false,
-     InheritedStyleProperty::Cursor},
+    {"bottom", compilePosition, applyLengthToOptional<&ComputedStyle::bottom>, resetMember<&ComputedStyle::bottom>, nullptr,
+     copyMember<&ComputedStyle::bottom>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"cursor", compileCursor, applyMember<&ComputedStyle::cursor>, resetMember<&ComputedStyle::cursor>,
+     specifyInherited<InheritedStyleProperty::Cursor>, inheritMember<InheritedStyleProperty::Cursor, &ComputedStyle::cursor>,
+     StylePropertyImpact::Paint | StylePropertyImpact::Inherited, false, InheritedStyleProperty::Cursor},
     {"display", compileDisplay, applyDisplay, resetDisplay, nullptr, copyDisplay,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"effect", compileEffect, applyMember<&Style::effects>, resetMember<&Style::effects>, nullptr, copyMember<&Style::effects>,
+    {"effect", compileEffect, applyMember<&ComputedStyle::effects>, resetMember<&ComputedStyle::effects>, nullptr,
+     copyMember<&ComputedStyle::effects>, StylePropertyImpact::Paint},
+    {"height", compileDimension, applyMember<&ComputedStyle::height>, resetMember<&ComputedStyle::height>, nullptr,
+     copyMember<&ComputedStyle::height>},
+    {"left", compilePosition, applyLengthToOptional<&ComputedStyle::left>, resetMember<&ComputedStyle::left>, nullptr,
+     copyMember<&ComputedStyle::left>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"margin", compileMargin, applyMember<&ComputedStyle::margin>, resetMember<&ComputedStyle::margin>, nullptr, copyMember<&ComputedStyle::margin>},
+    {"min-height", compileNonnegativeLength, applyLengthToOptional<&ComputedStyle::minHeight>, resetMember<&ComputedStyle::minHeight>, nullptr,
+     copyMember<&ComputedStyle::minHeight>},
+    {"min-size", compileMinSize, nullptr, nullptr, nullptr, nullptr, StylePropertyImpact::Layout, false, InheritedStyleProperty::NotInherited,
+     std::span<const std::string_view>(kMinSizeLonghands)},
+    {"min-width", compileNonnegativeLength, applyLengthToOptional<&ComputedStyle::minWidth>, resetMember<&ComputedStyle::minWidth>, nullptr,
+     copyMember<&ComputedStyle::minWidth>},
+    {"opacity", compileOpacity, applyMember<&ComputedStyle::opacity>, resetMember<&ComputedStyle::opacity>, nullptr,
+     copyMember<&ComputedStyle::opacity>, StylePropertyImpact::Paint},
+    {"outline", compileOutline, applyOutline, resetMember<&ComputedStyle::outline>, nullptr, copyMember<&ComputedStyle::outline>,
      StylePropertyImpact::Paint},
-    {"height", compileDimension, applyMember<&Style::height>, resetMember<&Style::height>, nullptr, copyMember<&Style::height>},
-    {"left", compilePosition, applyLengthToOptional<&Style::left>, resetMember<&Style::left>, nullptr, copyMember<&Style::left>,
-     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"margin", compileMargin, applyMember<&Style::margin>, resetMember<&Style::margin>, nullptr, copyMember<&Style::margin>},
-    {"min-height", compileNonnegativeLength, applyLengthToOptional<&Style::minHeight>, resetMember<&Style::minHeight>, nullptr,
-     copyMember<&Style::minHeight>},
-    {"min-size", compileMinSize},
-    {"min-width", compileNonnegativeLength, applyLengthToOptional<&Style::minWidth>, resetMember<&Style::minWidth>, nullptr,
-     copyMember<&Style::minWidth>},
-    {"opacity", compileOpacity, applyMember<&Style::opacity>, resetMember<&Style::opacity>, nullptr, copyMember<&Style::opacity>,
-     StylePropertyImpact::Paint},
-    {"outline", compileOutline, applyOutline, resetMember<&Style::outline>, nullptr, copyMember<&Style::outline>, StylePropertyImpact::Paint},
     {"outline-offset", compileOutlineOffset, applyOutlineOffset, resetWith<copyOutlineOffset>, nullptr, copyOutlineOffset,
      StylePropertyImpact::Paint},
     {"overflow", compileOverflow, nullptr, nullptr, nullptr, nullptr,
-     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"overflow-x", compileOverflowAxis, applyMember<&Style::overflowX>, resetMember<&Style::overflowX>, nullptr, copyMember<&Style::overflowX>,
-     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"overflow-y", compileOverflowAxis, applyMember<&Style::overflowY>, resetMember<&Style::overflowY>, nullptr, copyMember<&Style::overflowY>,
-     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"padding", compileEdges, applyMember<&Style::padding>, resetMember<&Style::padding>, nullptr, copyMember<&Style::padding>},
-    {"pointer-events", compilePointerEvents, applyMember<&Style::pointerEvents>, resetMember<&Style::pointerEvents>, nullptr,
-     copyMember<&Style::pointerEvents>, StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"position", compilePositionMode, applyMember<&Style::position>, resetMember<&Style::position>, nullptr, copyMember<&Style::position>,
-     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"right", compilePosition, applyLengthToOptional<&Style::right>, resetMember<&Style::right>, nullptr, copyMember<&Style::right>,
-     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"scrollbar-gutter", compileScrollbarGutter, applyMember<&Style::scrollbarGutter>, resetMember<&Style::scrollbarGutter>, nullptr,
-     copyMember<&Style::scrollbarGutter>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest, false, InheritedStyleProperty::NotInherited,
+     std::span<const std::string_view>(kOverflowLonghands)},
+    {"overflow-x", compileOverflowAxis, applyMember<&ComputedStyle::overflowX>, resetMember<&ComputedStyle::overflowX>, nullptr,
+     copyMember<&ComputedStyle::overflowX>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"overflow-y", compileOverflowAxis, applyMember<&ComputedStyle::overflowY>, resetMember<&ComputedStyle::overflowY>, nullptr,
+     copyMember<&ComputedStyle::overflowY>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"padding", compileEdges, applyMember<&ComputedStyle::padding>, resetMember<&ComputedStyle::padding>, nullptr,
+     copyMember<&ComputedStyle::padding>},
+    {"pointer-events", compilePointerEvents, applyMember<&ComputedStyle::pointerEvents>, resetMember<&ComputedStyle::pointerEvents>, nullptr,
+     copyMember<&ComputedStyle::pointerEvents>, StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"position", compilePositionMode, applyMember<&ComputedStyle::position>, resetMember<&ComputedStyle::position>, nullptr,
+     copyMember<&ComputedStyle::position>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"right", compilePosition, applyLengthToOptional<&ComputedStyle::right>, resetMember<&ComputedStyle::right>, nullptr,
+     copyMember<&ComputedStyle::right>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"scrollbar-gutter", compileScrollbarGutter, applyMember<&ComputedStyle::scrollbarGutter>, resetMember<&ComputedStyle::scrollbarGutter>, nullptr,
+     copyMember<&ComputedStyle::scrollbarGutter>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"scrollbar-mode", compileScrollbarMode, applyScrollbarMode, resetScrollbarMode, nullptr, copyScrollbarMode,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"scrollbar-width", compileScrollbarWidth, applyMember<&Style::scrollbarWidth>, resetMember<&Style::scrollbarWidth>, nullptr,
-     copyMember<&Style::scrollbarWidth>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"scrollbar-color", compileScrollbarColor, applyMember<&Style::scrollbarColor>, resetMember<&Style::scrollbarColor>,
-     specifyInherited<InheritedStyleProperty::ScrollbarColor>, inheritMember<InheritedStyleProperty::ScrollbarColor, &Style::scrollbarColor>,
+    {"scrollbar-width", compileScrollbarWidth, applyMember<&ComputedStyle::scrollbarWidth>, resetMember<&ComputedStyle::scrollbarWidth>, nullptr,
+     copyMember<&ComputedStyle::scrollbarWidth>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"scrollbar-color", compileScrollbarColor, applyMember<&ComputedStyle::scrollbarColor>, resetMember<&ComputedStyle::scrollbarColor>,
+     specifyInherited<InheritedStyleProperty::ScrollbarColor>, inheritMember<InheritedStyleProperty::ScrollbarColor, &ComputedStyle::scrollbarColor>,
      StylePropertyImpact::Paint | StylePropertyImpact::Inherited, false, InheritedStyleProperty::ScrollbarColor},
-    {"box-shadow", compileShadow, applyMember<&Style::shadows>, resetMember<&Style::shadows>, nullptr, copyMember<&Style::shadows>,
-     StylePropertyImpact::Paint},
+    {"box-shadow", compileShadow, applyMember<&ComputedStyle::shadows>, resetMember<&ComputedStyle::shadows>, nullptr,
+     copyMember<&ComputedStyle::shadows>, StylePropertyImpact::Paint},
     {"size", compileSize, applySize, resetSize, nullptr, copySize},
-    {"top", compilePosition, applyLengthToOptional<&Style::top>, resetMember<&Style::top>, nullptr, copyMember<&Style::top>,
+    {"top", compilePosition, applyLengthToOptional<&ComputedStyle::top>, resetMember<&ComputedStyle::top>, nullptr, copyMember<&ComputedStyle::top>,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"translate", compileTranslate, applyMember<&Style::translate>, resetMember<&Style::translate>, nullptr, copyMember<&Style::translate>,
-     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"width", compileDimension, applyMember<&Style::width>, resetMember<&Style::width>, nullptr, copyMember<&Style::width>},
-    {"align-items", compileAlignItems, applyMember<&Style::alignItems>, resetMember<&Style::alignItems>, nullptr, copyMember<&Style::alignItems>},
+    {"translate", compileTranslate, applyMember<&ComputedStyle::translate>, resetMember<&ComputedStyle::translate>, nullptr,
+     copyMember<&ComputedStyle::translate>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"width", compileDimension, applyMember<&ComputedStyle::width>, resetMember<&ComputedStyle::width>, nullptr, copyMember<&ComputedStyle::width>},
+    {"align-items", compileAlignItems, applyMember<&ComputedStyle::alignItems>, resetMember<&ComputedStyle::alignItems>, nullptr,
+     copyMember<&ComputedStyle::alignItems>},
     {"flex-direction", compileFlexDirection, applyFlexDirection, resetFlexDirection, nullptr, copyFlexDirection},
-    {"gap", compileGap, applyMember<&Style::gap>, resetMember<&Style::gap>, nullptr, copyMember<&Style::gap>},
-    {"grid-area", compileGridArea, [](Style& style, const StyleValue& value) { style.gridArea = std::get<GridArea>(value); },
-     resetMember<&Style::gridArea>, nullptr, copyMember<&Style::gridArea>,
+    {"gap", compileGap, applyMember<&ComputedStyle::gap>, resetMember<&ComputedStyle::gap>, nullptr, copyMember<&ComputedStyle::gap>},
+    {"grid-area", compileGridArea, [](ComputedStyle& style, const StyleValue& value) { style.gridArea = std::get<GridArea>(value); },
+     resetMember<&ComputedStyle::gridArea>, nullptr, copyMember<&ComputedStyle::gridArea>,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"justify-content", compileJustifyContent, applyJustifyContent, resetJustifyContent, nullptr, copyJustifyContent},
-    {"justify-self", compileJustifySelf, applyMember<&Style::justifySelf>, resetMember<&Style::justifySelf>, nullptr, copyMember<&Style::justifySelf>,
-     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"-internal-align-content-block", compileInternalAlignContentBlock, applyMember<&Style::alignContentBlockCenter>,
-     resetMember<&Style::alignContentBlockCenter>, nullptr, copyMember<&Style::alignContentBlockCenter>, StylePropertyImpact::Layout, true},
-    {"align-self", compileAlignSelf, applyMember<&Style::alignSelf>, resetMember<&Style::alignSelf>, nullptr, copyMember<&Style::alignSelf>},
-    {"flex", compileFlex},
-    {"flex-basis", compileDimension, applyMember<&Style::flexBasis>, resetMember<&Style::flexBasis>, nullptr, copyMember<&Style::flexBasis>},
-    {"flex-grow", compileUnitlessNonnegativeNumber, applyMember<&Style::flexGrow>, resetMember<&Style::flexGrow>, nullptr,
-     copyMember<&Style::flexGrow>},
-    {"flex-shrink", compileUnitlessNonnegativeNumber, applyMember<&Style::flexShrink>, resetMember<&Style::flexShrink>, nullptr,
-     copyMember<&Style::flexShrink>},
-    {"order", compileOrder, applyMember<&Style::order>, resetMember<&Style::order>, nullptr, copyMember<&Style::order>},
-    {"font", compileFont},
-    {"font-family", compileFontFamily, applyMember<&Style::fontFamily>, resetMember<&Style::fontFamily>,
-     specifyInherited<InheritedStyleProperty::FontFamily>, inheritMember<InheritedStyleProperty::FontFamily, &Style::fontFamily>,
+    {"justify-self", compileJustifySelf, applyMember<&ComputedStyle::justifySelf>, resetMember<&ComputedStyle::justifySelf>, nullptr,
+     copyMember<&ComputedStyle::justifySelf>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"-internal-align-content-block", compileInternalAlignContentBlock, applyMember<&ComputedStyle::alignContentBlockCenter>,
+     resetMember<&ComputedStyle::alignContentBlockCenter>, nullptr, copyMember<&ComputedStyle::alignContentBlockCenter>, StylePropertyImpact::Layout,
+     true},
+    {"align-self", compileAlignSelf, applyMember<&ComputedStyle::alignSelf>, resetMember<&ComputedStyle::alignSelf>, nullptr,
+     copyMember<&ComputedStyle::alignSelf>},
+    {"flex", compileFlex, nullptr, nullptr, nullptr, nullptr, StylePropertyImpact::Layout, false, InheritedStyleProperty::NotInherited,
+     std::span<const std::string_view>(kFlexLonghands)},
+    {"flex-basis", compileDimension, applyMember<&ComputedStyle::flexBasis>, resetMember<&ComputedStyle::flexBasis>, nullptr,
+     copyMember<&ComputedStyle::flexBasis>},
+    {"flex-grow", compileUnitlessNonnegativeNumber, applyMember<&ComputedStyle::flexGrow>, resetMember<&ComputedStyle::flexGrow>, nullptr,
+     copyMember<&ComputedStyle::flexGrow>},
+    {"flex-shrink", compileUnitlessNonnegativeNumber, applyMember<&ComputedStyle::flexShrink>, resetMember<&ComputedStyle::flexShrink>, nullptr,
+     copyMember<&ComputedStyle::flexShrink>},
+    {"order", compileOrder, applyMember<&ComputedStyle::order>, resetMember<&ComputedStyle::order>, nullptr, copyMember<&ComputedStyle::order>},
+    {"font", compileFont, nullptr, nullptr, nullptr, nullptr, StylePropertyImpact::Layout, false, InheritedStyleProperty::NotInherited,
+     std::span<const std::string_view>(kFontLonghands)},
+    {"font-family", compileFontFamily, applyMember<&ComputedStyle::fontFamily>, resetMember<&ComputedStyle::fontFamily>,
+     specifyInherited<InheritedStyleProperty::FontFamily>, inheritMember<InheritedStyleProperty::FontFamily, &ComputedStyle::fontFamily>,
      StylePropertyImpact::Layout | StylePropertyImpact::Inherited, false, InheritedStyleProperty::FontFamily},
-    {"font-size", compileNonnegativeNumber, applyMember<&Style::fontSize>, resetMember<&Style::fontSize>,
-     specifyInherited<InheritedStyleProperty::FontSize>, inheritMember<InheritedStyleProperty::FontSize, &Style::fontSize>,
+    {"font-size", compileNonnegativeNumber, applyMember<&ComputedStyle::fontSize>, resetMember<&ComputedStyle::fontSize>,
+     specifyInherited<InheritedStyleProperty::FontSize>, inheritMember<InheritedStyleProperty::FontSize, &ComputedStyle::fontSize>,
      StylePropertyImpact::Layout | StylePropertyImpact::Inherited, false, InheritedStyleProperty::FontSize},
-    {"font-style", compileFontStyle, applyMember<&Style::fontItalic>, resetMember<&Style::fontItalic>,
-     specifyInherited<InheritedStyleProperty::FontStyle>, inheritMember<InheritedStyleProperty::FontStyle, &Style::fontItalic>,
+    {"font-style", compileFontStyle, applyMember<&ComputedStyle::fontItalic>, resetMember<&ComputedStyle::fontItalic>,
+     specifyInherited<InheritedStyleProperty::FontStyle>, inheritMember<InheritedStyleProperty::FontStyle, &ComputedStyle::fontItalic>,
      StylePropertyImpact::Layout | StylePropertyImpact::Inherited, false, InheritedStyleProperty::FontStyle},
-    {"text-decoration", compileTextDecoration, applyMember<&Style::textDecoration>, resetMember<&Style::textDecoration>,
-     specifyInherited<InheritedStyleProperty::TextDecoration>, inheritMember<InheritedStyleProperty::TextDecoration, &Style::textDecoration>,
+    {"text-decoration", compileTextDecoration, applyMember<&ComputedStyle::textDecoration>, resetMember<&ComputedStyle::textDecoration>,
+     specifyInherited<InheritedStyleProperty::TextDecoration>, inheritMember<InheritedStyleProperty::TextDecoration, &ComputedStyle::textDecoration>,
      StylePropertyImpact::Paint | StylePropertyImpact::Inherited, false, InheritedStyleProperty::TextDecoration},
-    {"content", compileContent, applyMember<&Style::content>, resetMember<&Style::content>, nullptr, copyMember<&Style::content>,
-     StylePropertyImpact::Layout | StylePropertyImpact::Paint},
-    {"font-weight", compileFontWeight, applyFontWeight, resetMember<&Style::fontWeight>, specifyInherited<InheritedStyleProperty::FontWeight>,
-     inheritMember<InheritedStyleProperty::FontWeight, &Style::fontWeight>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited, false,
-     InheritedStyleProperty::FontWeight},
-    {"line-height", compileLineHeight, applyMember<&Style::lineHeight>, resetMember<&Style::lineHeight>,
-     specifyInherited<InheritedStyleProperty::LineHeight>, inheritMember<InheritedStyleProperty::LineHeight, &Style::lineHeight>,
+    {"content", compileContent, applyMember<&ComputedStyle::content>, resetMember<&ComputedStyle::content>, nullptr,
+     copyMember<&ComputedStyle::content>, StylePropertyImpact::Layout | StylePropertyImpact::Paint},
+    {"font-weight", compileFontWeight, applyFontWeight, resetMember<&ComputedStyle::fontWeight>, specifyInherited<InheritedStyleProperty::FontWeight>,
+     inheritMember<InheritedStyleProperty::FontWeight, &ComputedStyle::fontWeight>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited,
+     false, InheritedStyleProperty::FontWeight},
+    {"line-height", compileLineHeight, applyMember<&ComputedStyle::lineHeight>, resetMember<&ComputedStyle::lineHeight>,
+     specifyInherited<InheritedStyleProperty::LineHeight>, inheritMember<InheritedStyleProperty::LineHeight, &ComputedStyle::lineHeight>,
      StylePropertyImpact::Layout | StylePropertyImpact::Inherited, false, InheritedStyleProperty::LineHeight},
-    {"letter-spacing", compileSpacing, applyMember<&Style::letterSpacing>, resetMember<&Style::letterSpacing>,
-     specifyInherited<InheritedStyleProperty::LetterSpacing>, inheritMember<InheritedStyleProperty::LetterSpacing, &Style::letterSpacing>,
+    {"letter-spacing", compileSpacing, applyMember<&ComputedStyle::letterSpacing>, resetMember<&ComputedStyle::letterSpacing>,
+     specifyInherited<InheritedStyleProperty::LetterSpacing>, inheritMember<InheritedStyleProperty::LetterSpacing, &ComputedStyle::letterSpacing>,
      StylePropertyImpact::Layout | StylePropertyImpact::Inherited, false, InheritedStyleProperty::LetterSpacing},
-    {"word-spacing", compileSpacing, applyMember<&Style::wordSpacing>, resetMember<&Style::wordSpacing>,
-     specifyInherited<InheritedStyleProperty::WordSpacing>, inheritMember<InheritedStyleProperty::WordSpacing, &Style::wordSpacing>,
+    {"word-spacing", compileSpacing, applyMember<&ComputedStyle::wordSpacing>, resetMember<&ComputedStyle::wordSpacing>,
+     specifyInherited<InheritedStyleProperty::WordSpacing>, inheritMember<InheritedStyleProperty::WordSpacing, &ComputedStyle::wordSpacing>,
      StylePropertyImpact::Layout | StylePropertyImpact::Inherited, false, InheritedStyleProperty::WordSpacing},
-    {"text-align", compileTextAlign, applyMember<&Style::textAlign>, resetMember<&Style::textAlign>,
-     specifyInherited<InheritedStyleProperty::TextAlign>, inheritMember<InheritedStyleProperty::TextAlign, &Style::textAlign>,
-     StylePropertyImpact::Paint | StylePropertyImpact::Inherited, false, InheritedStyleProperty::TextAlign},
+    {"text-align", compileTextAlign, applyMember<&ComputedStyle::textAlign>, resetMember<&ComputedStyle::textAlign>,
+     specifyInherited<InheritedStyleProperty::TextAlign>, inheritMember<InheritedStyleProperty::TextAlign, &ComputedStyle::textAlign>,
+     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::Inherited, false, InheritedStyleProperty::TextAlign},
     {"color", compileColor, applyColor, resetColor, specifyInherited<InheritedStyleProperty::Color>, inheritColor,
      StylePropertyImpact::Paint | StylePropertyImpact::Inherited, false, InheritedStyleProperty::Color},
-    {"text-overflow", compileTextOverflow, applyMember<&Style::textOverflow>, resetMember<&Style::textOverflow>, nullptr,
-     copyMember<&Style::textOverflow>, StylePropertyImpact::Paint},
-    {"text-wrap", compileTextWrap, applyMember<&Style::textWrap>, resetMember<&Style::textWrap>, specifyInherited<InheritedStyleProperty::TextWrap>,
-     inheritMember<InheritedStyleProperty::TextWrap, &Style::textWrap>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited, false,
-     InheritedStyleProperty::TextWrap},
+    {"text-overflow", compileTextOverflow, applyMember<&ComputedStyle::textOverflow>, resetMember<&ComputedStyle::textOverflow>, nullptr,
+     copyMember<&ComputedStyle::textOverflow>, StylePropertyImpact::Paint},
+    {"text-wrap", compileTextWrap, applyMember<&ComputedStyle::textWrap>, resetMember<&ComputedStyle::textWrap>,
+     specifyInherited<InheritedStyleProperty::TextWrap>, inheritMember<InheritedStyleProperty::TextWrap, &ComputedStyle::textWrap>,
+     StylePropertyImpact::Layout | StylePropertyImpact::Inherited, false, InheritedStyleProperty::TextWrap},
     {"vertical-align", compileVerticalAlign, applyVerticalAlign, resetVerticalAlign, nullptr, copyVerticalAlign},
-    {"visibility", compileVisibility, applyMember<&Style::visibility>, resetMember<&Style::visibility>,
-     specifyInherited<InheritedStyleProperty::Visibility>, inheritMember<InheritedStyleProperty::Visibility, &Style::visibility>,
+    {"visibility", compileVisibility, applyMember<&ComputedStyle::visibility>, resetMember<&ComputedStyle::visibility>,
+     specifyInherited<InheritedStyleProperty::Visibility>, inheritMember<InheritedStyleProperty::Visibility, &ComputedStyle::visibility>,
      StylePropertyImpact::Paint | StylePropertyImpact::Inherited | StylePropertyImpact::HitTest, false, InheritedStyleProperty::Visibility},
     {"stroke", compileStroke, applyIconStroke, resetWith<copyStroke>, nullptr, copyStroke, StylePropertyImpact::Paint},
     {"stroke-color", compileColorValue, applyIconStrokeColor, resetWith<copyStrokeColor>, nullptr, copyStrokeColor, StylePropertyImpact::Paint},
     {"stroke-linecap", compileStrokeLinecap, applyIconStrokeLinecap, resetStrokeLinecap, nullptr, copyStrokeLinecap, StylePropertyImpact::Paint},
-    {"stroke-width", compileStrokeWidth, applyIconStrokeWidth, resetMember<&Style::svgStrokeWidth>, nullptr, copyMember<&Style::svgStrokeWidth>,
-     StylePropertyImpact::Paint},
+    {"stroke-width", compileStrokeWidth, applyIconStrokeWidth, resetMember<&ComputedStyle::svgStrokeWidth>, nullptr,
+     copyMember<&ComputedStyle::svgStrokeWidth>, StylePropertyImpact::Paint},
 };
 } // namespace
 

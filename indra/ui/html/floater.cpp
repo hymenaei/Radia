@@ -15,7 +15,8 @@
 #include "html/elementnames.h"
 #include "layout/engine.h"
 #include "resource/elementdefinition.h"
-#include "style/style.h"
+#include "style/computedstyle.h"
+#include "style/stylepass.h"
 #include "surface/floaterresize.h"
 #include "surface/surface.h"
 #include "system.h"
@@ -241,14 +242,15 @@ void HTMLFloaterElement::setMinimized(bool minimized) {
         float width = rect().w;
         float height = head->rect().h;
         if (const StyleSheet* styleSheet = this->styleSheet()) {
-            const Vec2 headSize = measureElement(*head, *styleSheet, textMetrics());
+            const Vec2 headSize = LayoutEngine::measure(*head, *styleSheet, textMetrics());
             head = headRef.get();
             if (!head || head->parentElement() != this || mHead != head || !mMinimizable) {
                 refreshAuthoredStructure();
                 return;
             }
-            const Style floaterStyle = resolveElementStyle(*styleSheet, *this);
-            const Style headStyle = resolveElementStyle(*styleSheet, *head);
+            StylePass styles(*styleSheet, textMetrics(), surface() ? surface()->layoutDirection() : LayoutDirection::LeftToRight);
+            const ComputedStyle floaterStyle = styles.style(*this);
+            const ComputedStyle headStyle = styles.style(*head);
             width = headSize.x + headStyle.margin.horizontal() + floaterStyle.padding.horizontal();
             height = headSize.y + headStyle.margin.vertical() + floaterStyle.padding.vertical();
         }
@@ -293,8 +295,10 @@ void HTMLFloaterElement::normalizeMinimizedState() {
 
 bool HTMLFloaterElement::overChromeButton(const Vec2& point) const {
     const StyleSheet* styleSheet = this->styleSheet();
-    const auto visible = [styleSheet](const Element* element) {
-        return element && (styleSheet ? element->isVisible(resolveElementStyle(*styleSheet, *element)) : element->isVisible(Style{}));
+    std::optional<StylePass> styles;
+    if (styleSheet) styles.emplace(*styleSheet, textMetrics(), surface() ? surface()->layoutDirection() : LayoutDirection::LeftToRight);
+    const auto visible = [&styles](const Element* element) {
+        return element && (styles ? element->isVisible(styles->style(*element)) : element->isVisible(ComputedStyle{}));
     };
     return (visible(mCloseButton) && mCloseButton->rect().contains(point)) || (visible(mMinimizeButton) && mMinimizeButton->rect().contains(point));
 }

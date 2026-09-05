@@ -11,19 +11,22 @@
 #include "layout/engine.h"
 #include "render/paintcontext.h"
 #include "resource/elementdefinition.h"
+#include "style/stylepass.h"
+#include "surface/surface.h"
+#include "text/metrics.h"
 
 namespace radia::ui {
 using detail::HTMLElementFactory;
 
 HTMLLegendElement::HTMLLegendElement() : HTMLElement(kLegendTag.localName) {}
 
-void HTMLLegendElement::constrainResolvedStyle(Style& style) const {
+void HTMLLegendElement::constrainResolvedStyle(ComputedStyle& style) const {
     if (style.alignSelf == AlignSelf::Auto) style.alignSelf = AlignSelf::Start;
 }
 
 HTMLFieldsetElement::HTMLFieldsetElement() : HTMLElement(kFieldsetTag.localName) {}
 
-void HTMLFieldsetElement::paint(PaintContext& context, const Style& style, float) const {
+void HTMLFieldsetElement::paint(PaintContext& context, const ComputedStyle& style, float) const {
     context.paintBox(rect(), style, topBorderGap());
 }
 
@@ -31,13 +34,13 @@ bool HTMLFieldsetElement::hasLayoutGapBetween(const Element& first, const Elemen
     return !isDirectLegend(first) && !isDirectLegend(second);
 }
 
-float HTMLFieldsetElement::layoutOverlapBetween(const Element& first, const Element&, const Style& style) const {
+float HTMLFieldsetElement::layoutOverlapBetween(const Element& first, const Element&, const ComputedStyle& style) const {
     if (!isDirectLegend(first)) return 0.f;
 
     return std::max(0.f, style.padding.top + first.desiredSize().y * 0.5f - style.borderWidth.top * 0.5f);
 }
 
-void HTMLFieldsetElement::onArranged(const Style& style) {
+void HTMLFieldsetElement::onArranged(const ComputedStyle& style) {
     Element* legend = directLegend();
     if (!legend || !isLegendVisible(*legend)) return;
 
@@ -64,8 +67,11 @@ const Element* HTMLFieldsetElement::directLegend() const {
 }
 
 bool HTMLFieldsetElement::isLegendVisible(const Element& legend) const {
-    if (const StyleSheet* sheet = styleSheet()) return legend.isVisible(resolveElementStyle(*sheet, legend));
-    return legend.isVisible(Style{});
+    if (const StyleSheet* sheet = styleSheet()) {
+        StylePass styles(*sheet, textMetrics(), surface() ? surface()->layoutDirection() : LayoutDirection::LeftToRight);
+        return legend.isVisible(styles.style(legend));
+    }
+    return legend.isVisible(ComputedStyle{});
 }
 
 std::optional<TopBorderGap> HTMLFieldsetElement::topBorderGap() const {

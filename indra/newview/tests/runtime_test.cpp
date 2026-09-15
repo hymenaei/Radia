@@ -77,7 +77,7 @@ SkinSnapshotResult runtimeSkinSnapshot() {
     constexpr char kSkin[] = "floater { display: flex; flex-direction: column; } floater > head { height: 30px; } "
                              "button { size: 128px 32px; cursor: pointer; }";
     constexpr char kView[] =
-        "<floater resizeable><head><title>runtime</title><minimize></minimize><close></close></head><body><button id=\"press\" onClick=\"press()\"></button></body></floater>";
+        "<floater resizable><head><title>runtime</title><minimize></minimize><close></close></head><body><button id=\"press\" onClick=\"press()\"></button></body></floater>";
 
     SkinSnapshotResult result;
     result.snapshot.add("localization.yaml", kLocalization);

@@ -215,6 +215,43 @@ TEST(InputTest, ClearsCheckableStateWhenChangingType) {
     EXPECT_FALSE(input.switchMode());
 }
 
+TEST(InputTest, AppliesProgrammaticAttributePresence) {
+    auto input = makeElementValue<HTMLInputElement>();
+
+    input.setAttribute("TYPE", "checkbox");
+    input.setAttribute("CHECKED", "false");
+    input.setAttribute("SWITCH", "0");
+
+    EXPECT_EQ(input.type(), "checkbox");
+    EXPECT_TRUE(input.checked());
+    EXPECT_TRUE(input.switchMode());
+    ASSERT_NE(input.attribute("checked"), nullptr);
+    ASSERT_NE(input.attribute("switch"), nullptr);
+    ASSERT_TRUE(input.attribute("checked")->value.has_value());
+    ASSERT_TRUE(input.attribute("switch")->value.has_value());
+    EXPECT_EQ(*input.attribute("checked")->value, "false");
+    EXPECT_EQ(*input.attribute("switch")->value, "0");
+
+    input.removeAttribute("SWITCH");
+    input.removeAttribute("CHECKED");
+    EXPECT_FALSE(input.switchMode());
+    EXPECT_FALSE(input.checked());
+    EXPECT_FALSE(input.hasAttribute("checked"));
+}
+
+TEST(InputTest, KeepsDirtyCheckedStateSeparateFromAttribute) {
+    auto input = makeElementValue<HTMLInputElement>();
+    input.type("checkbox").setAttribute("checked", "false");
+
+    input.activate();
+
+    EXPECT_FALSE(input.checked());
+    EXPECT_TRUE(input.hasAttribute("checked"));
+    ASSERT_TRUE(input.attribute("checked")->value.has_value());
+    EXPECT_EQ(*input.attribute("checked")->value, "false");
+    EXPECT_TRUE(input.valueState().dirty);
+}
+
 TEST(InputTest, SelectsNativeAppearance) {
     auto input = makeElementValue<HTMLInputElement>();
     RecordingPaintContext recording;

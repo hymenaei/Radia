@@ -48,7 +48,7 @@ ResourceElementDefinition htmlContentDefinition(HTMLTag tag) {
 bool isKnownHTMLAttribute(HTMLTag tag, std::string_view name) {
     const std::string canonicalName = canonicalizeHTMLName(name);
     if (tag == HTMLTag::Br) return false;
-    if (canonicalName == "id" || canonicalName == "class" || canonicalName == "disabled") return true;
+    if (canonicalName == "id" || canonicalName == "class" || canonicalName == "disabled" || canonicalName == "hidden") return true;
     for (const AuthoredEventDescriptor& descriptor : kAuthoredEventDescriptors)
         if (canonicalizeHTMLName(descriptor.attribute) == canonicalName) return true;
 
@@ -147,6 +147,7 @@ void applyCommonElementAttributes(const ElementBuildInput& input, Element& eleme
     }
     bool boolean = false;
     if (readElementBoolean(input, "disabled", boolean, context)) element.disabled(boolean);
+    if (readElementBoolean(input, "hidden", boolean, context)) element.setHidden(boolean);
 
     for (const AuthoredEventDescriptor& descriptor : kAuthoredEventDescriptors) {
         if (!readElementAttribute(input, descriptor.attribute, value)) continue;
@@ -185,11 +186,11 @@ const ResourceElementDefinition* findElementDefinition(HTMLTag tag) {
         add(HTMLTag::Close, ElementDefinitions::close());
         add(HTMLTag::Panel, ElementDefinitions::panel());
         const HTMLTag registeredTags[] = {
-            HTMLTag::Abbr,     HTMLTag::B,     HTMLTag::Button, HTMLTag::Br,        HTMLTag::Cite,    HTMLTag::Code, HTMLTag::Dfn,
-            HTMLTag::Del,      HTMLTag::Div,   HTMLTag::Em,     HTMLTag::Fieldset,  HTMLTag::Floater, HTMLTag::Head, HTMLTag::Header,
-            HTMLTag::I,        HTMLTag::Ins,   HTMLTag::Kbd,    HTMLTag::Label,     HTMLTag::Legend,  HTMLTag::Link, HTMLTag::Mark,
-            HTMLTag::Minimize, HTMLTag::Close, HTMLTag::Panel,  HTMLTag::Paragraph, HTMLTag::Q,       HTMLTag::S,    HTMLTag::Small,
-            HTMLTag::Strong,   HTMLTag::Title, HTMLTag::U,      HTMLTag::Input,     HTMLTag::Body,
+            HTMLTag::Abbr,  HTMLTag::B,     HTMLTag::Button,    HTMLTag::Br,       HTMLTag::Cite,    HTMLTag::Code,  HTMLTag::Dfn,
+            HTMLTag::Del,   HTMLTag::Div,   HTMLTag::Em,        HTMLTag::Fieldset, HTMLTag::Floater, HTMLTag::Head,  HTMLTag::Header,
+            HTMLTag::I,     HTMLTag::Ins,   HTMLTag::Kbd,       HTMLTag::Label,    HTMLTag::Legend,  HTMLTag::Mark,  HTMLTag::Minimize,
+            HTMLTag::Close, HTMLTag::Panel, HTMLTag::Paragraph, HTMLTag::Q,        HTMLTag::S,       HTMLTag::Small, HTMLTag::Strong,
+            HTMLTag::Title, HTMLTag::U,     HTMLTag::Input,     HTMLTag::Body,
         };
         for (const HTMLTag tag : registeredTags)
             if (!result.contains(tag)) add(tag, htmlContentDefinition(tag));

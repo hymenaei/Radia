@@ -37,7 +37,7 @@ public:
     std::string title() const;
     bool closable() const { return mClosable; }
     bool minimizable() const { return mMinimizable; }
-    bool resizeable() const { return mResizeable; }
+    bool resizable() const { return mResizable; }
     bool closed() const { return mClosed; }
     bool minimized() const { return mMinimized; }
     bool dragging() const { return mInteraction == FloaterInteraction::Move; }
@@ -59,11 +59,13 @@ public:
     void close();
     void setMinimized(bool minimized);
     void toggleMinimized();
-    HTMLFloaterElement& setResizeable(bool value);
+    HTMLFloaterElement& setResizable(bool value);
 
     bool defaultPointerEvents() const override { return true; }
 
 protected:
+    void onAttributeSet(std::string_view name, const std::optional<std::string>& value) override;
+    void onAttributeRemoved(std::string_view name) override;
     bool beginPointerInteraction(const PointerEvent& event) override;
     bool updatePointerInteraction(const PointerEvent& event) override;
     bool endPointerInteraction(const PointerEvent& event) override;
@@ -111,7 +113,8 @@ private:
     HTMLButtonElement* mMinimizeButton = nullptr;
     bool mClosable = false;
     bool mMinimizable = false;
-    bool mResizeable = false;
+    bool mResizable = false;
+    bool mUpdatingAttribute = false;
     bool mClosed = false;
     bool mMinimized = false;
     FloaterInteraction mInteraction = FloaterInteraction::Idle;

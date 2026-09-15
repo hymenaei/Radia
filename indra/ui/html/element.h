@@ -32,10 +32,6 @@ protected:
     void onLocaleChanged(const System& system) override;
     virtual void onKeybindingsChanged(const System& system);
 
-public:
-    using Element::textContent;
-    std::string textContent() const override;
-
 private:
     void rebuildKeybindingContent(const System& system);
 

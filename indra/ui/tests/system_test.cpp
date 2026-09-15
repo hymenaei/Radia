@@ -1068,7 +1068,7 @@ TEST(SystemTest, RefreshesKeyPresentation) {
     presentation = {{"Ctrl", "F"}};
     system.refreshKeybindings();
     surface->updateLayout();
-    EXPECT_EQ(text->textContent(), "Fly Ctrl F");
+    EXPECT_EQ(text->textContent(), "Fly CtrlF");
     EXPECT_GT(text->desiredSize().x, initialWidth);
 }
 

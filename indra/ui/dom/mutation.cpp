@@ -25,15 +25,10 @@ void NodeMutation::validateChild(const Node& parent, const Node* child) {
     for (const Node* current = &parent; current; current = current->parentNode()) llassert_always(current != child);
 }
 
-void NodeMutation::adopt(const Document& document, Node& node) {
-    adopt(node, NodeAccess::documentIdentity(document));
-}
-
-void NodeMutation::adopt(Node& node, const std::shared_ptr<DocumentIdentity>& identity) {
+void NodeMutation::adopt(Node& node) {
     llassert_always(node.nodeType() != NodeType::Document);
     llassert_always(!node.parentNode());
     if (Element* element = node.asElement()) llassert_always(!element->surface());
-    assignDocumentIdentity(node, identity);
 }
 
 void NodeMutation::validateDetachedSubtree(const Node& node) {
@@ -59,14 +54,6 @@ NodeOwnerList::iterator findChild(NodeOwnerList& children, Node& child) {
 }
 
 } // namespace
-
-void NodeMutation::assignDocumentIdentity(Node& node, const std::shared_ptr<DocumentIdentity>& identity) {
-    NodeAccess::setDocumentIdentity(node, identity);
-    if (Element* element = node.asElement())
-        for (Node& child : nodes(*element)) assignDocumentIdentity(child, identity);
-    else if (Fragment* fragment = node.asFragment())
-        for (const NodePtr& child : fragment->mChildren) assignDocumentIdentity(*child, identity);
-}
 
 void NodeMutation::validateFragment(const Node& parent, const Fragment& fragment) {
     for (const NodePtr& child : fragment.mChildren) {
@@ -204,7 +191,7 @@ Node* NodeMutation::insertElementChildren(Element& parent, NodeOwners children, 
         : parent.mChildren.size();
     for (NodePtr& child : children) {
         llassert_always(child && !child->parentNode());
-        adopt(*child, NodeAccess::documentIdentity(parent));
+        adopt(*child);
         attachElementChild(parent, *child);
     }
 
@@ -265,7 +252,7 @@ Node* NodeMutation::insertFragmentChildren(Fragment& parent, NodeOwners children
     std::size_t insertionIndex = referenceIndex;
     for (NodePtr& child : children) {
         llassert_always(child && !child->parentNode());
-        adopt(*child, NodeAccess::documentIdentity(parent));
+        adopt(*child);
         NodeAccess::setParent(*child, &parent);
         parent.mChildren.insert(parent.mChildren.begin() + static_cast<std::ptrdiff_t>(insertionIndex), std::move(child));
         ++insertionIndex;

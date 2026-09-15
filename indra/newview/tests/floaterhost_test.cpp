@@ -45,13 +45,13 @@ TEST(FloaterHostTest, ReplacesMountedFloater) {
     HTMLFloaterElement* current = dynamic_cast<HTMLFloaterElement*>(currentDocument->documentElement());
     ASSERT_NE(current, nullptr);
     appendFloaterStructure(*current);
-    current->setResizeable(true);
+    current->setResizable(true);
 
     auto replacementDocument = std::make_unique<Document>(makeElement<HTMLFloaterElement>());
     HTMLFloaterElement* replacement = dynamic_cast<HTMLFloaterElement*>(replacementDocument->documentElement());
     ASSERT_NE(replacement, nullptr);
     appendFloaterStructure(*replacement);
-    replacement->setResizeable(true);
+    replacement->setResizable(true);
 
     StyleSheet styleSheet;
     ASSERT_TRUE(styleSheet.loadRadia(kFloaterStyles).ok());

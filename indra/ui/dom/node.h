@@ -26,7 +26,6 @@ using ElementList = std::vector<Element*>;
 using ConstElementList = std::vector<const Element*>;
 
 namespace detail {
-struct DocumentIdentity;
 class NodeAccess;
 class NodeMutation;
 } // namespace detail
@@ -78,6 +77,5 @@ private:
 
     NodeType mNodeType;
     std::shared_ptr<char> mLifetime = std::make_shared<char>(0);
-    std::shared_ptr<detail::DocumentIdentity> mDocumentIdentity;
 };
 } // namespace radia::ui

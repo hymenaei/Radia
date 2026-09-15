@@ -69,7 +69,7 @@ std::unique_ptr<Element> makeParagraph(std::string text) {
 Element& appendIcon(HTMLButtonElement& button, std::string name) {
     auto icon = makeElement<Element>("i");
     Element* result = icon.get();
-    result->addClass("i-" + name);
+    result->classList().add("i-" + name);
     button.append(std::move(icon));
     return *result;
 }
@@ -240,16 +240,16 @@ TEST_F(LayoutEngineTest, LaysOutNormalFlowChildren) {
     auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 60.f});
     auto first = makeElement<HTMLLabelElement>("first");
-    first->addClass("inline");
+    first->classList().add("inline");
     panel.append(std::move(first));
     auto second = makeElement<HTMLLabelElement>("second");
-    second->addClass("inline");
+    second->classList().add("inline");
     panel.append(std::move(second));
     auto block = makeElement<HTMLLabelElement>("block");
-    block->addClass("block");
+    block->classList().add("block");
     panel.append(std::move(block));
     auto after = makeElement<HTMLLabelElement>("after");
-    after->addClass("inline");
+    after->classList().add("inline");
     panel.append(std::move(after));
 
     LayoutEngine::layout(panel, styleSheet, text);
@@ -269,10 +269,10 @@ TEST_F(LayoutEngineTest, AlignsInlineContent) {
     auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 100.f, 20.f});
     auto first = makeElement<HTMLLabelElement>("first");
-    first->addClass("inline");
+    first->classList().add("inline");
     panel.append(std::move(first));
     auto second = makeElement<HTMLLabelElement>("second");
-    second->addClass("inline");
+    second->classList().add("inline");
     panel.append(std::move(second));
 
     LayoutEngine::layout(panel, styleSheet, text);
@@ -289,10 +289,10 @@ TEST_F(LayoutEngineTest, WrapsInlineSiblings) {
     auto panel = makeElementValue<HTMLPanelElement>();
     panel.setRect({0.f, 0.f, 50.f, 40.f});
     auto first = makeElement<HTMLLabelElement>("first");
-    first->addClass("inline");
+    first->classList().add("inline");
     panel.append(std::move(first));
     auto second = makeElement<HTMLLabelElement>("second");
-    second->addClass("inline");
+    second->classList().add("inline");
     panel.append(std::move(second));
 
     LayoutEngine::layout(panel, styleSheet, text);
@@ -388,7 +388,7 @@ TEST_F(LayoutEngineTest, LeavesUnstyledButtonUncentered) {
     ASSERT_TRUE(styleSheet.loadRadiaLayers(layers).ok());
 
     auto button = makeElementValue<HTMLButtonElement>();
-    button.addClass("unstyled");
+    button.classList().add("unstyled");
     button.setRect({0.f, 0.f, 100.f, 40.f});
     auto label = std::make_unique<Text>("Apply");
     Text* labelPtr = label.get();
@@ -427,7 +427,7 @@ TEST_F(LayoutEngineTest, AppliesBoxSizing) {
     panel.setRect({0.f, 0.f, 400.f, 100.f});
     panel.append(makeElement<HTMLLabelElement>("content-box"));
     auto borderBox = makeElement<HTMLLabelElement>("border-box");
-    borderBox->addClass("border");
+    borderBox->classList().add("border");
     panel.append(std::move(borderBox));
 
     LayoutEngine::layout(panel, styleSheet, text);
@@ -1006,7 +1006,7 @@ TEST_F(LayoutEngineTest, SeparatesVisibilityFromDisplay) {
     collapsed->setVisibility(Visibility::Collapse);
     panel.append(std::move(collapsed));
     auto displayNone = makeElement<HTMLLabelElement>("display-none");
-    displayNone->addClass("none");
+    displayNone->classList().add("none");
     panel.append(std::move(displayNone));
 
     LayoutEngine::layout(panel, styleSheet, text);
@@ -1044,21 +1044,21 @@ TEST_F(LayoutEngineTest, AlignsContainerContent) {
 
     auto middle = makeElementValue<HTMLPanelElement>();
     middle.setRect({0.f, 0.f, 100.f, 40.f});
-    middle.addClass("middle");
+    middle.classList().add("middle");
     addLabel(middle);
     LayoutEngine::layout(middle, styleSheet, text);
     EXPECT_EQ(middle.children()[0]->rect().bottom(), 15.f);
 
     auto bottom = makeElementValue<HTMLPanelElement>();
     bottom.setRect({0.f, 0.f, 100.f, 40.f});
-    bottom.addClass("bottom");
+    bottom.classList().add("bottom");
     addLabel(bottom);
     LayoutEngine::layout(bottom, styleSheet, text);
     EXPECT_EQ(bottom.children()[0]->rect().bottom(), 0.f);
 
     auto column = makeElementValue<HTMLPanelElement>();
     column.setRect({0.f, 0.f, 100.f, 40.f});
-    column.addClass("column");
+    column.classList().add("column");
     addLabel(column);
     addLabel(column);
     LayoutEngine::layout(column, styleSheet, text);
@@ -1067,7 +1067,7 @@ TEST_F(LayoutEngineTest, AlignsContainerContent) {
 
     auto freeBottom = makeElementValue<HTMLPanelElement>();
     freeBottom.setRect({0.f, 0.f, 100.f, 40.f});
-    freeBottom.addClass("free-bottom");
+    freeBottom.classList().add("free-bottom");
     addLabel(freeBottom);
     LayoutEngine::layout(freeBottom, styleSheet, text);
     EXPECT_EQ(freeBottom.children()[0]->rect().bottom(), 30.f);
@@ -1108,7 +1108,7 @@ TEST_F(LayoutEngineTest, AppliesFlexShrink) {
     auto intrinsic = makeElementValue<HTMLPanelElement>();
     intrinsic.append(makeElement<HTMLLabelElement>());
     auto intrinsicSecond = makeElement<HTMLLabelElement>();
-    intrinsicSecond->addClass("second");
+    intrinsicSecond->classList().add("second");
     intrinsic.append(std::move(intrinsicSecond));
     LayoutEngine::measure(intrinsic, styleSheet, text);
     EXPECT_EQ(intrinsic.desiredSize().x, 120.f);
@@ -1126,7 +1126,7 @@ TEST_F(LayoutEngineTest, AppliesFlexShrink) {
     panel.setRect({0.f, 0.f, 100.f, 20.f});
     panel.append(makeElement<HTMLLabelElement>());
     auto second = makeElement<HTMLLabelElement>();
-    second->addClass("second");
+    second->classList().add("second");
     panel.append(std::move(second));
     LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_NEAR(panel.children()[0]->rect().w, 200.f / 3.f, 0.001f);
@@ -1149,7 +1149,7 @@ TEST_F(LayoutEngineTest, CentersFloaterHeadChildren) {
     ASSERT_NE(head, nullptr);
     ASSERT_FALSE(head->children().empty());
     auto icon = makeElement<Element>("i");
-    icon->addClass("i-search");
+    icon->classList().add("i-search");
     head->children().front()->append(std::move(icon));
     head->setRect({0.f, 0.f, 200.f, 48.f});
     LayoutEngine::layout(*head, styleSheet, text);

@@ -102,10 +102,10 @@ TEST(FloatersTest, ReportsFloaterVisibility) {
     EXPECT_TRUE(surface.hasVisibleFloater());
 
     auto hidden = makeElement<HTMLFloaterElement>();
-    hidden->addClass("hidden");
+    hidden->classList().add("hidden");
     surface.mountFloater(std::move(hidden));
     auto none = makeElement<HTMLFloaterElement>();
-    none->addClass("none");
+    none->classList().add("none");
     surface.mountFloater(std::move(none));
     EXPECT_TRUE(surface.hasVisibleFloater());
 
@@ -482,7 +482,7 @@ TEST(FloatersTest, KeepsResizeCursorOverScrollbar) {
     surface.setViewport(400.f, 300.f);
     auto floater = makeFloater();
     HTMLFloaterElement* target = floater.get();
-    target->setResizeable(true).setRect({40.f, 40.f, 160.f, 140.f});
+    target->setResizable(true).setRect({40.f, 40.f, 160.f, 140.f});
     auto tall = makeElement<HTMLPanelElement>();
     tall->setId("tall");
     target->body()->append(std::move(tall));
@@ -522,7 +522,7 @@ TEST(FloatersTest, ResizesFloaterWithinSurfaceBounds) {
     surface.setFloaterDelegate(&delegate);
     auto floater = makeElement<HTMLFloaterElement>();
     HTMLFloaterElement* target = floater.get();
-    floater->setResizeable(true);
+    floater->setResizable(true);
     surface.mountFloater(std::move(floater));
     const std::optional<Rect> prepared = surface.prepareFloater(*target);
     ASSERT_TRUE(prepared.has_value());
@@ -543,12 +543,12 @@ TEST(FloatersTest, HidesUnavailableResizeCursor) {
     surface.setViewport(200.f, 160.f);
     auto floater = makeFloater(false, true);
     HTMLFloaterElement* target = floater.get();
-    floater->setResizeable(false).setRect({20.f, 20.f, 100.f, 80.f});
+    floater->setResizable(false).setRect({20.f, 20.f, 100.f, 80.f});
     surface.mountFloater(std::move(floater));
 
     surface.pointerMove({{119.f, 60.f}});
     EXPECT_EQ(surface.cursor(), CursorStyle::Default);
-    target->setResizeable(true).setMinimized(true);
+    target->setResizable(true).setMinimized(true);
     surface.pointerMove({{target->rect().right() - 1.f, target->rect().bottom() + 2.f}});
     EXPECT_EQ(surface.cursor(), CursorStyle::Default);
 }
@@ -561,7 +561,7 @@ TEST(FloatersTest, UsesFrozenWidth) {
     surface.setViewport(400.f, 300.f);
     auto floater = makeElement<HTMLFloaterElement>();
     HTMLFloaterElement* target = floater.get();
-    floater->setResizeable(true);
+    floater->setResizable(true);
     surface.mountFloater(std::move(floater));
     const std::optional<Rect> prepared = surface.prepareFloater(*target);
     ASSERT_TRUE(prepared.has_value());
@@ -579,7 +579,7 @@ TEST(FloatersTest, ResizesFloatersMountedInModalLayer) {
     surface.setViewport(200.f, 160.f);
     auto floater = makeElement<HTMLFloaterElement>();
     HTMLFloaterElement* target = floater.get();
-    floater->setResizeable(true).setRect({20.f, 20.f, 100.f, 80.f});
+    floater->setResizable(true).setRect({20.f, 20.f, 100.f, 80.f});
     surface.mountFloater(std::move(floater), SurfaceLayer::Modal);
 
     EXPECT_TRUE(surface.pointerDown({{119.f, 60.f}, PointerButton::Left}));
@@ -638,11 +638,11 @@ TEST(FloatersTest, RoutesThroughTransparentFloater) {
     surface.setViewport(200.f, 160.f);
     auto lower = makeElement<HTMLFloaterElement>();
     HTMLFloaterElement* lowerTarget = lower.get();
-    lower->setResizeable(true).setRect({20.f, 20.f, 100.f, 80.f});
+    lower->setResizable(true).setRect({20.f, 20.f, 100.f, 80.f});
     surface.mountFloater(std::move(lower));
     auto upper = makeFloater();
     HTMLFloaterElement* upperTarget = upper.get();
-    upper->setResizeable(false).setRect({70.f, 20.f, 100.f, 80.f});
+    upper->setResizable(false).setRect({70.f, 20.f, 100.f, 80.f});
     surface.mountFloater(std::move(upper));
     auto upperChild = makeElement<HTMLButtonElement>();
     upperChild->setRect({0.f, 0.f, 100.f, 80.f}).setPointerEvents(true);
@@ -653,7 +653,7 @@ TEST(FloatersTest, RoutesThroughTransparentFloater) {
     EXPECT_FALSE(surface.hasPointerCapture());
     surface.pointerUp({lowerEdgeUnderUpper, PointerButton::Left});
 
-    upperTarget->addClass("pass-through");
+    upperTarget->classList().add("pass-through");
     EXPECT_TRUE(surface.pointerDown({lowerEdgeUnderUpper, PointerButton::Left}));
     EXPECT_TRUE(surface.hasPointerCapture());
     surface.pointerUp({lowerEdgeUnderUpper, PointerButton::Left});
@@ -669,12 +669,13 @@ TEST(FloatersTest, KeepsVisibleDescendantTarget) {
 
     auto lower = makeElement<HTMLFloaterElement>();
     HTMLFloaterElement* lowerTarget = lower.get();
-    lower->setResizeable(true).setRect({20.f, 20.f, 100.f, 80.f});
+    lower->setResizable(true).setRect({20.f, 20.f, 100.f, 80.f});
     surface.mountFloater(std::move(lower));
 
     auto upper = makeFloater();
     HTMLFloaterElement* upperTarget = upper.get();
-    upper->addClass("pass-through").setRect({70.f, 20.f, 40.f, 80.f});
+    upper->classList().add("pass-through");
+    upper->setRect({70.f, 20.f, 40.f, 80.f});
     surface.mountFloater(std::move(upper));
 
     auto overflowChild = makeElement<HTMLButtonElement>();

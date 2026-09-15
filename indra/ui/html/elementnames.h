@@ -31,7 +31,6 @@ enum class HTMLTag : std::uint8_t {
     Kbd,
     Label,
     Legend,
-    Link,
     Mark,
     Minimize,
     Close,
@@ -70,7 +69,6 @@ inline constexpr HTMLTagName kInsTag{"ins"};
 inline constexpr HTMLTagName kKbdTag{"kbd"};
 inline constexpr HTMLTagName kLabelTag{"label"};
 inline constexpr HTMLTagName kLegendTag{"legend"};
-inline constexpr HTMLTagName kLinkTag{"link"};
 inline constexpr HTMLTagName kMarkTag{"mark"};
 inline constexpr HTMLTagName kMinimizeTag{"minimize"};
 inline constexpr HTMLTagName kCloseTag{"close"};
@@ -92,4 +90,5 @@ bool isHTMLNameCharacter(char character);
 bool isHTMLWhitespace(char character);
 bool containsHTMLWhitespace(std::string_view value);
 std::string canonicalizeHTMLName(std::string_view name);
+std::string decodeHTMLReferences(std::string_view value);
 } // namespace radia::ui

@@ -66,11 +66,6 @@ void validateNode(const SourceNode& node, const std::vector<HTMLTag>& acceptedTa
         return;
     }
 
-    if (node.tag == HTMLTag::Link) {
-        addFinding(result, InlineValidationKind::NotImplemented, node, node.source.begin);
-        return;
-    }
-
     if (node.tag == HTMLTag::Kbd) {
         const auto shortcut = node.attributes.find("shortcut");
         if (shortcut == node.attributes.end()) addFinding(result, InlineValidationKind::KbdShortcutRequired, node, node.source.begin);
@@ -100,10 +95,6 @@ void appendValidationDiagnostics(const InlineValidationResult& validation, Eleme
             case InlineValidationKind::UnsupportedElement:
                 context.error("layout.inline.unsupported", "Inline <" + finding.elementName + "> is not supported in <" + hostName + ">.", sourceName,
                               elementLocation.line, elementLocation.column);
-                break;
-            case InlineValidationKind::NotImplemented:
-                context.error("layout.inline.not_implemented", "Inline <link> is not implemented yet.", sourceName, elementLocation.line,
-                              elementLocation.column);
                 break;
             case InlineValidationKind::AttributeUnknown:
                 context.error("layout.inline.attribute_unknown",
@@ -163,8 +154,6 @@ void appendChildren(AppendState& state, const std::vector<SourceContent>& conten
 void appendElement(AppendState& state, const SourceNode& node) {
     const std::string_view elementName = htmlTagName(node.tag);
     if (!accepts(state.acceptedTags, node.tag)) return;
-
-    if (node.tag == HTMLTag::Link) return;
 
     auto element = HTMLElementFactory::create(elementName);
     if (!element) return;

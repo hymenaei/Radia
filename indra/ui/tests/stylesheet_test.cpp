@@ -79,7 +79,7 @@ ComputedStyle computedStyle(const StyleSheet& stylesheet, const Element& element
 Element& appendIcon(HTMLButtonElement& button, std::string name) {
     auto icon = makeElement<Element>("i");
     Element* result = icon.get();
-    result->addClass("i-" + name);
+    result->classList().add("i-" + name);
     button.append(std::move(icon));
     return *result;
 }
@@ -116,7 +116,7 @@ TEST(StyleSheetTest, TreatsRootAsDocumentRootSelector) {
     ASSERT_TRUE(loadResult.ok()) << (loadResult.errors.empty() ? std::string() : loadResult.errors.front().message);
 
     auto rootOwner = makeElement<HTMLPanelElement>();
-    rootOwner->addClass("root");
+    rootOwner->classList().add("root");
     Document document(std::move(rootOwner));
     auto labelOwner = makeElement<HTMLLabelElement>();
     HTMLLabelElement* label = labelOwner.get();
@@ -143,9 +143,9 @@ TEST(StyleSheetTest, ScopesStructuralSelectors) {
     ASSERT_TRUE(stylesheet.loadRadia(":root { width: 24px; } .outer .inner { opacity: .5; } .inner > label { width: 13px; }").ok());
 
     auto outer = makeElementValue<HTMLPanelElement>();
-    outer.addClass("outer");
+    outer.classList().add("outer");
     auto resource = makeElement<HTMLPanelElement>();
-    resource->addClass("inner");
+    resource->classList().add("inner");
     ElementInternalAccess::setIdScopeRoot(*resource);
     auto label = makeElement<HTMLLabelElement>();
     HTMLLabelElement* labelPointer = label.get();
@@ -281,7 +281,7 @@ TEST(StyleSheetTest, MatchesChildSelectors) {
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kChildOwnerStyles).ok());
     auto button = makeElementValue<HTMLButtonElement>();
-    button.addClass("primary");
+    button.classList().add("primary");
     Element& icon = appendIcon(button, "search");
 
     EXPECT_EQ(computedStyle(stylesheet, icon).width.pixels(), 10.f);
@@ -438,7 +438,7 @@ TEST(StyleSheetTest, MatchesCSSAttributeOperators) {
     EXPECT_EQ(mixedType.order, 3);
 
     auto icon = makeElement<Element>("i");
-    icon->addClass("i-search");
+    icon->classList().add("i-search");
     EXPECT_FLOAT_EQ(computedStyle(stylesheet, *icon).opacity, .5f);
 }
 
@@ -473,7 +473,7 @@ TEST(StyleSheetTest, DecodesEscapedAttributeSelectorDelimiters) {
 
 TEST(StyleSheetTest, InvalidatesDynamicAttributeSelectors) {
     StyleSheet stylesheet;
-    ASSERT_TRUE(stylesheet.loadRadia("panel[hidden] { width: 11px; } panel[visibility=hidden] { height: 12px; }").ok());
+    ASSERT_TRUE(stylesheet.loadRadia("panel[hidden] { width: 11px; }").ok());
 
     auto panel = makeElementValue<HTMLPanelElement>();
     StylePass styles(stylesheet, FixedTextMetrics{});
@@ -487,10 +487,8 @@ TEST(StyleSheetTest, InvalidatesDynamicAttributeSelectors) {
     EXPECT_TRUE(styles.style(panel).width.isAuto());
 
     panel.setVisibility(Visibility::Hidden);
-    ASSERT_FALSE(styles.style(panel).height.isAuto());
-    EXPECT_EQ(styles.style(panel).height.pixels(), 12.f);
+    EXPECT_FALSE(panel.hasAttribute("visibility"));
     panel.setVisibility(Visibility::Visible);
-    EXPECT_TRUE(styles.style(panel).height.isAuto());
 }
 
 TEST(StyleSheetTest, SelectsIndeterminateInputs) {
@@ -616,23 +614,23 @@ TEST(StyleSheetTest, ResolvesCSSWideInheritanceKeywords) {
 
     auto parent = makeElementValue<HTMLPanelElement>();
     auto explicitInherit = makeElement<HTMLLabelElement>();
-    explicitInherit->addClass("explicit-inherit");
+    explicitInherit->classList().add("explicit-inherit");
     HTMLLabelElement* explicitInheritPtr = explicitInherit.get();
     parent.append(std::move(explicitInherit));
     auto unsetInherited = makeElement<HTMLLabelElement>();
-    unsetInherited->addClass("unset-inherited");
+    unsetInherited->classList().add("unset-inherited");
     HTMLLabelElement* unsetInheritedPtr = unsetInherited.get();
     parent.append(std::move(unsetInherited));
     auto unsetInitial = makeElement<HTMLLabelElement>();
-    unsetInitial->addClass("unset-initial");
+    unsetInitial->classList().add("unset-initial");
     HTMLLabelElement* unsetInitialPtr = unsetInitial.get();
     parent.append(std::move(unsetInitial));
     auto lateInherit = makeElement<HTMLLabelElement>();
-    lateInherit->addClass("late-inherit");
+    lateInherit->classList().add("late-inherit");
     HTMLLabelElement* lateInheritPtr = lateInherit.get();
     parent.append(std::move(lateInherit));
     auto lateValue = makeElement<HTMLLabelElement>();
-    lateValue->addClass("late-value");
+    lateValue->classList().add("late-value");
     HTMLLabelElement* lateValuePtr = lateValue.get();
     parent.append(std::move(lateValue));
 
@@ -808,7 +806,8 @@ TEST(StyleSheetTest, OverridesColorScheme) {
 
     auto overriddenInput = makeElement<HTMLInputElement>();
     HTMLInputElement* overriddenInputPtr = overriddenInput.get();
-    overriddenInputPtr->type("checkbox").addClass("dark");
+    overriddenInputPtr->type("checkbox");
+    overriddenInputPtr->classList().add("dark");
     panel.append(std::move(overriddenInput));
 
     EXPECT_EQ(computedStyle(stylesheet, *inheritedInputPtr).colorScheme, ColorScheme::Light);
@@ -828,7 +827,7 @@ TEST(StyleSheetTest, ResolvesInheritedSchemeColors) {
     lightPanel.append(std::move(lightLabel));
 
     auto darkPanel = makeElementValue<HTMLPanelElement>();
-    darkPanel.addClass("dark");
+    darkPanel.classList().add("dark");
     auto darkLabel = makeElement<HTMLLabelElement>("dark");
     HTMLLabelElement* darkLabelPtr = darkLabel.get();
     darkPanel.append(std::move(darkLabel));
@@ -903,15 +902,15 @@ TEST(StyleSheetTest, MatchesStructuralSelectors) {
     ASSERT_TRUE(stylesheet.loadRadia(kStructuralStyles).ok());
 
     auto root = makeElementValue<HTMLPanelElement>();
-    root.addClass("root");
+    root.classList().add("root");
     auto direct = makeElement<HTMLLabelElement>("direct");
-    direct->addClass("direct");
+    direct->classList().add("direct");
     HTMLLabelElement* directLabel = direct.get();
     root.append(std::move(direct));
 
     auto container = makeElement<HTMLPanelElement>();
     auto nested = makeElement<HTMLLabelElement>("nested");
-    nested->addClass("nested");
+    nested->classList().add("nested");
     HTMLLabelElement* nestedLabel = nested.get();
     container->append(std::move(nested));
     root.append(std::move(container));
@@ -1613,4 +1612,33 @@ TEST(StyleSheetTest, MarksAppearanceStateLayout) {
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia("input:hover { appearance: none; }").ok());
     EXPECT_TRUE(stylesheet.stateAffectsLayout(ElementState::Hovered));
+}
+
+TEST(StyleSheetTest, MatchesEffectiveFieldsetDisabledState) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia("fieldset:disabled { opacity: .25; } button:disabled { opacity: .5; }").ok());
+
+    auto fieldset = makeElement<Element>("fieldset");
+    auto legend = makeElement<Element>("legend");
+    auto legendButton = makeElement<HTMLButtonElement>();
+    auto normalButton = makeElement<HTMLButtonElement>();
+    HTMLButtonElement* legendButtonPtr = legendButton.get();
+    HTMLButtonElement* normalButtonPtr = normalButton.get();
+    legend->append(std::move(legendButton));
+    fieldset->append(std::move(legend));
+    fieldset->append(std::move(normalButton));
+
+    EXPECT_FLOAT_EQ(stylesheet.resolveElement(*fieldset).opacity, 1.f);
+    EXPECT_FLOAT_EQ(stylesheet.resolveElement(*normalButtonPtr).opacity, 1.f);
+
+    fieldset->disabled(true);
+    EXPECT_FLOAT_EQ(stylesheet.resolveElement(*fieldset).opacity, .25f);
+    EXPECT_TRUE(normalButtonPtr->disabled());
+    EXPECT_FALSE(legendButtonPtr->disabled());
+    EXPECT_FLOAT_EQ(stylesheet.resolveElement(*normalButtonPtr).opacity, .5f);
+    EXPECT_FLOAT_EQ(stylesheet.resolveElement(*legendButtonPtr).opacity, 1.f);
+
+    fieldset->disabled(false);
+    EXPECT_FALSE(normalButtonPtr->disabled());
+    EXPECT_FLOAT_EQ(stylesheet.resolveElement(*normalButtonPtr).opacity, 1.f);
 }

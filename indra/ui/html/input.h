@@ -70,6 +70,8 @@ public:
 
 protected:
     void constrainResolvedStyle(ComputedStyle& style) const override;
+    void onAttributeSet(std::string_view name, const std::optional<std::string>& value) override;
+    void onAttributeRemoved(std::string_view name) override;
     void onActivate() override;
     void onTreeWillBeDetached() override;
     void onTreeAttached() override;
@@ -85,6 +87,7 @@ private:
     void activateCheckbox();
     void activateRadio();
     void activateSwitch();
+    void clearValueBinding();
     HTMLInputElement& setSettingName(std::string name);
     void initializeChecked(bool checked);
     void activateChecked(bool checked);
@@ -112,6 +115,7 @@ private:
     mutable PseudoElement mCheckmark;
     std::function<void(bool)> mOnCheckedChanged;
     std::optional<ValueBindingRequest> mValueBindingRequest;
+    bool mUpdatingAttribute = false;
     ValueBindingRef<bool> mBinding;
     std::weak_ptr<ValueBindingSubscription> mBindingSubscription;
     ValueState<bool> mValueState{false, false, std::nullopt};

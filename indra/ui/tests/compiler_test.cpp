@@ -83,7 +83,7 @@ ComputedStyle computedStyle(const StyleSheet& stylesheet, const Element& element
 Element& appendIcon(HTMLButtonElement& button, std::string name) {
     auto icon = makeElement<Element>("i");
     Element* result = icon.get();
-    result->addClass("i-" + name);
+    result->classList().add("i-" + name);
     button.append(std::move(icon));
     return *result;
 }
@@ -100,7 +100,7 @@ TEST(StyleCompilerTest, ResolvesStructuralDivStyles) {
     ASSERT_NE(definition, nullptr);
     auto div = HTMLElementFactory::create("div");
     ASSERT_NE(div, nullptr);
-    div->addClass("stack");
+    div->classList().add("stack");
     const ComputedStyle style = computedStyle(stylesheet, *div);
     EXPECT_EQ(style.display, DisplayMode::Flex);
     EXPECT_TRUE(style.displaySet);
@@ -119,26 +119,26 @@ TEST(StyleCompilerTest, ResolvesVisibility) {
     ASSERT_TRUE(stylesheet.loadRadia(kDisplayStyles).ok());
 
     auto flex = makeElementValue<HTMLPanelElement>();
-    flex.addClass("flex");
+    flex.classList().add("flex");
     const ComputedStyle flexStyle = computedStyle(stylesheet, flex);
     EXPECT_EQ(flexStyle.display, DisplayMode::Flex);
     EXPECT_EQ(flexStyle.flexDirection, FlexDirection::Column);
 
     auto inlinePanel = makeElementValue<HTMLPanelElement>();
-    inlinePanel.addClass("inline");
+    inlinePanel.classList().add("inline");
     const ComputedStyle inlineStyle = computedStyle(stylesheet, inlinePanel);
     EXPECT_EQ(inlineStyle.display, DisplayMode::Inline);
 
     auto inlineFlexPanel = makeElementValue<HTMLPanelElement>();
-    inlineFlexPanel.addClass("inline-flex");
+    inlineFlexPanel.classList().add("inline-flex");
     EXPECT_EQ(computedStyle(stylesheet, inlineFlexPanel).display, DisplayMode::InlineFlex);
 
     auto none = makeElementValue<HTMLPanelElement>();
-    none.addClass("none");
+    none.classList().add("none");
     EXPECT_EQ(computedStyle(stylesheet, none).display, DisplayMode::NoneValue);
 
     auto hidden = makeElementValue<HTMLPanelElement>();
-    hidden.addClass("hidden");
+    hidden.classList().add("hidden");
     auto child = makeElement<HTMLLabelElement>("child");
     HTMLLabelElement* childPtr = child.get();
     hidden.append(std::move(child));
@@ -351,7 +351,7 @@ TEST(StyleCompilerTest, ExpandsInitialValues) {
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kInitialStyles).ok());
     auto reset = makeElementValue<HTMLPanelElement>();
-    reset.addClass("reset");
+    reset.classList().add("reset");
     const ComputedStyle style = computedStyle(stylesheet, reset);
 
     EXPECT_EQ(style.display, DisplayMode::Inline);
@@ -468,7 +468,8 @@ TEST(StyleCompilerTest, ResolvesGridSwitchStyles) {
     ASSERT_TRUE(stylesheet.loadRadia(kGridSwitchStyles).ok());
 
     auto switchInput = makeElementValue<HTMLInputElement>();
-    switchInput.type("checkbox").switchMode(true).addClass("basic-switch");
+    switchInput.type("checkbox").switchMode(true);
+    switchInput.classList().add("basic-switch");
     ASSERT_NE(switchInput.sliderTrack(), nullptr);
     ASSERT_NE(switchInput.sliderThumb(), nullptr);
     const ComputedStyle owner = computedStyle(stylesheet, switchInput);

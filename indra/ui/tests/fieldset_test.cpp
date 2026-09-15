@@ -12,6 +12,7 @@
 #include <string>
 #include <utility>
 #include "binding/binder.h"
+#include "dom/document.h"
 #include "dom/elementinternal.h"
 #include "dom/text.h"
 #include "html/button.h"
@@ -39,11 +40,13 @@ using radia::ui::AuthoredEventCall;
 using radia::ui::Binder;
 using radia::ui::Binding;
 using radia::ui::ComputedStyle;
+using radia::ui::Document;
 using radia::ui::Element;
 using radia::ui::ElementRef;
 using radia::ui::ElementState;
 using radia::ui::Event;
 using radia::ui::FixedTextMetrics;
+using radia::ui::HTMLButtonElement;
 using radia::ui::HTMLInputElement;
 using radia::ui::HTMLLabelElement;
 using radia::ui::HTMLPanelElement;
@@ -51,6 +54,7 @@ using radia::ui::kBrTag;
 using radia::ui::kBTag;
 using radia::ui::kITag;
 using radia::ui::kKbdTag;
+using radia::ui::kKeySpace;
 using radia::ui::LayoutDirection;
 using radia::ui::LayoutEngine;
 using radia::ui::LocalizationCatalog;
@@ -66,6 +70,7 @@ using radia::ui::StyleSheet;
 using radia::ui::Surface;
 using radia::ui::Visibility;
 using radia::ui::detail::findElementInScope;
+using radia::ui::detail::makeElement;
 using radia::ui::detail::makeElementValue;
 using radia::ui::detail::makeEventRegistration;
 using radia::ui::detail::NodeAccess;
@@ -108,7 +113,7 @@ TEST_F(FieldsetTest, PreservesInlineElementStructure) {
     const ElementRef<Element> title = requireElement<Element>(*result.document->documentElement(), "title");
     ASSERT_NE(text.get(), nullptr);
     ASSERT_NE(title.get(), nullptr);
-    EXPECT_EQ(text->textContent(), "before boldboth\nafter");
+    EXPECT_EQ(text->textContent(), "before boldbothafter");
     ASSERT_EQ(text->children().size(), 3U);
     EXPECT_EQ(text->children()[0]->elementName(), "b");
     EXPECT_EQ(text->children()[0]->textContent(), "boldboth");
@@ -126,7 +131,7 @@ TEST_F(FieldsetTest, PreservesInlineElementStructure) {
     EXPECT_EQ(label->children()[0]->elementName(), "b");
     EXPECT_EQ(label->children()[1]->elementName(), "br");
     EXPECT_EQ(label->children()[2]->elementName(), "i");
-    EXPECT_EQ(label->textContent(), "name important\ndetail");
+    EXPECT_EQ(label->textContent(), "name importantdetail");
 }
 
 TEST_F(FieldsetTest, RejectsWhitespaceInInlineShortcut) {
@@ -318,6 +323,93 @@ TEST_F(FieldsetTest, ActivatesInteractiveLabel) {
     EXPECT_EQ(changes, 1);
 }
 
+TEST_F(FieldsetTest, ComputesDisabledFieldsetDescendants) {
+    constexpr char kDisabledLayout[] = "<fieldset><legend><button id=\"legendButton\">Legend</button></legend>"
+                                       "<label id=\"normalLabel\" for=\"normalButton\">Normal</label>"
+                                       "<button id=\"normalButton\">Normal</button></fieldset>";
+    const ResourceBuildResult result = factory.buildElementTreeFromString(kDisabledLayout, "disabled-fieldset.html");
+    ASSERT_TRUE(result.ok());
+
+    Element* fieldset = result.document->documentElement();
+    ASSERT_NE(fieldset, nullptr);
+    const ElementRef<HTMLButtonElement> legendButton = requireElement<HTMLButtonElement>(*fieldset, "legendButton");
+    const ElementRef<HTMLLabelElement> normalLabel = requireElement<HTMLLabelElement>(*fieldset, "normalLabel");
+    const ElementRef<HTMLButtonElement> normalButton = requireElement<HTMLButtonElement>(*fieldset, "normalButton");
+    ASSERT_NE(legendButton.get(), nullptr);
+    ASSERT_NE(normalLabel.get(), nullptr);
+    ASSERT_NE(normalButton.get(), nullptr);
+
+    int legendActivations = 0;
+    int normalActivations = 0;
+    legendButton->setOnActivate([&](Element&) { ++legendActivations; });
+    normalButton->setOnActivate([&](Element&) { ++normalActivations; });
+
+    Surface surface;
+    surface.setViewport(100.f, 100.f);
+    fieldset->setRect({0.f, 0.f, 100.f, 100.f});
+    legendButton->setRect({10.f, 10.f, 30.f, 20.f});
+    normalButton->setRect({10.f, 50.f, 30.f, 20.f});
+    surface.mount(*result.document);
+
+    EXPECT_TRUE(surface.pointerDown({{15.f, 55.f}, radia::ui::PointerButton::Left}));
+    EXPECT_TRUE(surface.pointerUp({{15.f, 55.f}, radia::ui::PointerButton::Left}));
+    EXPECT_EQ(normalActivations, 1);
+    EXPECT_TRUE(normalButton->hasState(ElementState::Focused));
+
+    fieldset->disabled(true);
+    EXPECT_TRUE(normalButton->disabled());
+    EXPECT_TRUE(normalLabel->disabled());
+    EXPECT_FALSE(legendButton->disabled());
+    EXPECT_FALSE(surface.hasFocus());
+    EXPECT_FALSE(surface.keyDown({kKeySpace}));
+
+    normalButton->activate();
+    normalLabel->activate();
+    EXPECT_EQ(normalActivations, 1);
+
+    legendButton->activate();
+    EXPECT_EQ(legendActivations, 1);
+}
+
+TEST_F(FieldsetTest, InvalidatesStylesForDisabledFieldsetDescendants) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia("button:disabled { opacity: .5; }").ok());
+
+    auto fieldsetOwner = makeElement<Element>("fieldset");
+    auto buttonOwner = makeElement<HTMLButtonElement>();
+    Element* fieldset = fieldsetOwner.get();
+    HTMLButtonElement* button = buttonOwner.get();
+    fieldset->append(std::move(buttonOwner));
+    Document document(std::move(fieldsetOwner));
+    Surface surface(stylesheet);
+    surface.mount(document);
+
+    const std::uint64_t initialRevision = button->styleContextRevision();
+    fieldset->disabled(true);
+    EXPECT_GT(button->styleContextRevision(), initialRevision);
+    const std::uint64_t disabledRevision = button->styleContextRevision();
+    fieldset->disabled(false);
+    EXPECT_GT(button->styleContextRevision(), disabledRevision);
+}
+
+TEST_F(FieldsetTest, SupportsImplicitLabelForOneDescendant) {
+    const ResourceBuildResult result = factory.buildElementTreeFromString(
+        "<panel><label id=\"label\">Enable <button id=\"target\">Save</button></label></panel>", "implicit-label.html");
+    ASSERT_TRUE(result.ok());
+
+    const ElementRef<HTMLLabelElement> label = requireElement<HTMLLabelElement>(*result.document->documentElement(), "label");
+    const ElementRef<HTMLButtonElement> target = requireElement<HTMLButtonElement>(*result.document->documentElement(), "target");
+    ASSERT_NE(label.get(), nullptr);
+    ASSERT_NE(target.get(), nullptr);
+    const HTMLLabelElement* labelView = label.get();
+    EXPECT_EQ(labelView->target(), target.get());
+
+    int activations = 0;
+    target->setOnActivate([&](Element&) { ++activations; });
+    label->activate();
+    EXPECT_EQ(activations, 1);
+}
+
 TEST_F(FieldsetTest, ExposesInteractiveAccessibilitySemantics) {
     constexpr char kAccessibleLayout[] =
         "<panel><label id=\"toggleLabel\" for=\"toggle\">Enable</label><input type=\"checkbox\" switch id=\"toggle\"></panel>";
@@ -362,6 +454,8 @@ TEST_F(FieldsetTest, RejectsInvalidLabelRelationships) {
     const InvalidLabelCase cases[] = {
         {"missing for", "<panel><label>Missing relationship</label><input type=\"checkbox\" switch=\"true\" id=\"toggle\"></panel>",
          "layout.label.for_required"},
+        {"ambiguous implicit target", "<panel><label>Ambiguous relationship<button></button><input type=\"checkbox\"></label></panel>",
+         "layout.label.target_ambiguous"},
         {"missing target with punctuation",
          "<panel><label for=\"Bad_Target!\">Missing relationship</label>"
          "<input type=\"checkbox\" switch=\"true\" id=\"toggle\"></panel>",
@@ -445,14 +539,14 @@ TEST_F(FieldsetTest, ScopesLegend) {
     ASSERT_EQ(fieldset->children().size(), 3U);
     EXPECT_EQ(fieldset->children()[0]->elementName(), "legend");
     EXPECT_EQ(fieldset->children()[0]->id(), "settingsLegend");
-    EXPECT_TRUE(fieldset->children()[0]->classes().contains("heading"));
+    EXPECT_TRUE(fieldset->children()[0]->classList().contains("heading"));
     EXPECT_EQ(fieldset->children()[0]->textContent(), "Settings demo");
     EXPECT_EQ(fieldset->children()[1]->elementName(), "div");
-    EXPECT_TRUE(fieldset->children()[1]->classes().contains("row"));
+    EXPECT_TRUE(fieldset->children()[1]->classList().contains("row"));
     ASSERT_EQ(fieldset->children()[1]->children().size(), 4U);
-    EXPECT_TRUE(fieldset->children()[1]->children()[2]->classes().contains("hint"));
-    EXPECT_TRUE(fieldset->children()[1]->children()[3]->classes().contains("error"));
-    EXPECT_TRUE(fieldset->children()[2]->classes().contains("row"));
+    EXPECT_TRUE(fieldset->children()[1]->children()[2]->classList().contains("hint"));
+    EXPECT_TRUE(fieldset->children()[1]->children()[3]->classList().contains("error"));
+    EXPECT_TRUE(fieldset->children()[2]->classList().contains("row"));
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet
@@ -506,7 +600,7 @@ TEST_F(FieldsetTest, PreservesFieldsetChildOrder) {
     const Element* fieldset = result.rootAs<Element>();
     ASSERT_NE(fieldset, nullptr);
     ASSERT_EQ(fieldset->children().size(), 3U);
-    EXPECT_TRUE(fieldset->children()[0]->classes().contains("late"));
+    EXPECT_TRUE(fieldset->children()[0]->classList().contains("late"));
     EXPECT_EQ(fieldset->children()[1]->elementName(), "legend");
-    EXPECT_TRUE(fieldset->children()[2]->classes().contains("early"));
+    EXPECT_TRUE(fieldset->children()[2]->classList().contains("early"));
 }

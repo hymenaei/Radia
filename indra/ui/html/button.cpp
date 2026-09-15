@@ -43,6 +43,30 @@ void HTMLButtonElement::paint(PaintContext& context, const ComputedStyle& style,
 }
 
 ResourceElementDefinition detail::ElementDefinitions::button() {
-    return defineElement<HTMLButtonElement>(kButtonTag.localName).build();
+    return defineElement<HTMLButtonElement>(kButtonTag.localName)
+        .attributes({allowedAttribute("type")})
+        .validate([](const ElementBuildInput& input, HTMLButtonElement& button, ElementBuildContext& context) {
+            const ElementAttribute* type = input.find("type");
+            if (!type) return;
+            if (!type->hasValue) {
+                context.error("layout.button.type_value_required", "Button type requires a value.", input.sourceName, type->source.begin.line,
+                              type->source.begin.column);
+                return;
+            }
+            const std::string typeName = canonicalizeHTMLName(type->value);
+            if (typeName == "submit" || typeName == "reset") {
+                context.error("layout.button.type_unsupported", "Button type is not supported: " + type->value + ".", input.sourceName,
+                              type->source.begin.line, type->source.begin.column);
+                return;
+            }
+            if (typeName != "button") {
+                context.error("layout.button.type_invalid", "Unsupported button type: " + type->value + ".", input.sourceName,
+                              type->source.begin.line, type->source.begin.column);
+                return;
+            }
+            button.setAttribute("type", type->value);
+        })
+        .labelable()
+        .build();
 }
 } // namespace radia::ui

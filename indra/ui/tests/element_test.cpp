@@ -301,23 +301,52 @@ TEST(ElementTest, PreservesChildOrder) {
 TEST(ElementTest, PreservesAttributeOrder) {
     auto element = makeElementValue<Element>("p");
 
-    element.setAttribute("data-state", "ready");
-    element.setAttribute("aria-label", "A & B");
-    element.setAttribute("data-state", "updated");
+    element.setAttribute("DATA-State", "ready");
+    element.setAttribute("aria-LABEL", "A & B");
+    element.setAttribute("data-STATE", "updated");
 
     ASSERT_EQ(element.attributes().size(), 2U);
     EXPECT_EQ(element.attributes()[0].name, "data-state");
     ASSERT_TRUE(element.attributes()[0].value.has_value());
     EXPECT_EQ(*element.attributes()[0].value, "updated");
     EXPECT_EQ(element.attributes()[1].name, "aria-label");
-    ASSERT_NE(element.attribute("aria-label"), nullptr);
-    EXPECT_TRUE(element.hasAttribute("data-state"));
+    ASSERT_NE(element.attribute("ARIA-Label"), nullptr);
+    EXPECT_TRUE(element.hasAttribute("DATA-state"));
+
+    element.removeAttribute("");
+    EXPECT_EQ(element.attributes().size(), 2U);
 
     element.removeAttribute("data-state");
 
     ASSERT_EQ(element.attributes().size(), 1U);
     EXPECT_FALSE(element.hasAttribute("data-state"));
     EXPECT_EQ(element.attributes()[0].name, "aria-label");
+}
+
+TEST(ElementTest, ManagesClassTokensInFirstSeenOrder) {
+    auto element = makeElementValue<Element>("p");
+
+    element.setAttribute("CLASS", "second first second");
+    ASSERT_NE(element.attribute("class"), nullptr);
+    ASSERT_TRUE(element.attribute("class")->value.has_value());
+    EXPECT_EQ(*element.attribute("class")->value, "second first");
+    EXPECT_TRUE(element.classList().contains("second"));
+    EXPECT_TRUE(element.classList().contains("first"));
+
+    element.classList().add("third").add("first");
+    EXPECT_EQ(*element.attribute("class")->value, "second first third");
+    element.classList().remove("first");
+    EXPECT_EQ(*element.attribute("class")->value, "second third");
+    EXPECT_FALSE(element.classList().toggle("second"));
+    EXPECT_TRUE(element.classList().toggle("last"));
+    EXPECT_EQ(*element.attribute("class")->value, "third last");
+    EXPECT_TRUE(element.classList().replace("last", "final"));
+    EXPECT_EQ(*element.attribute("class")->value, "third final");
+    EXPECT_FALSE(element.classList().replace("missing", "new"));
+    EXPECT_TRUE(element.classList().replace("final", "third"));
+    EXPECT_EQ(*element.attribute("class")->value, "third");
+    EXPECT_FALSE(element.classList().replace("third", "bad token"));
+    EXPECT_EQ(*element.attribute("class")->value, "third");
 }
 
 TEST(ElementTest, UsesModernChildMutationMethods) {
@@ -405,6 +434,54 @@ TEST(NodeTest, DetachedMutationMethodsAreNoOps) {
     EXPECT_EQ(node->before(makeElement<HTMLLabelElement>("before")), nullptr);
     EXPECT_EQ(node->after(makeElement<HTMLLabelElement>("after")), nullptr);
     EXPECT_EQ(node->replaceWith(makeElement<HTMLLabelElement>("replacement")), nullptr);
+}
+
+TEST(ElementTreeDeathTest, RejectsDocumentParentSiblingMutation) {
+    auto documentElementOwner = makeElement<HTMLPanelElement>();
+    Document document(std::move(documentElementOwner));
+
+    EXPECT_DEATH(
+        {
+            LLError::setFatalFunction(reportFatalDiagnostic);
+            auto node = makeElement<HTMLLabelElement>("before");
+            document.documentElement()->before(std::move(node));
+        },
+        "parent->asDocument");
+    EXPECT_DEATH(
+        {
+            LLError::setFatalFunction(reportFatalDiagnostic);
+            auto fragment = document.createFragment();
+            document.documentElement()->before(std::move(fragment));
+        },
+        "parent->asDocument");
+    EXPECT_DEATH(
+        {
+            LLError::setFatalFunction(reportFatalDiagnostic);
+            auto node = makeElement<HTMLLabelElement>("after");
+            document.documentElement()->after(std::move(node));
+        },
+        "parent->asDocument");
+    EXPECT_DEATH(
+        {
+            LLError::setFatalFunction(reportFatalDiagnostic);
+            auto fragment = document.createFragment();
+            document.documentElement()->after(std::move(fragment));
+        },
+        "parent->asDocument");
+    EXPECT_DEATH(
+        {
+            LLError::setFatalFunction(reportFatalDiagnostic);
+            auto node = makeElement<HTMLLabelElement>("replacement");
+            document.documentElement()->replaceWith(std::move(node));
+        },
+        "parent->asDocument");
+    EXPECT_DEATH(
+        {
+            LLError::setFatalFunction(reportFatalDiagnostic);
+            auto fragment = document.createFragment();
+            document.documentElement()->replaceWith(std::move(fragment));
+        },
+        "parent->asDocument");
 }
 
 TEST(FragmentTest, PreservesChildOrder) {
@@ -527,12 +604,12 @@ TEST(FragmentTest, RoundTripsBoundedHTML) {
 
     root.innerHTML("<p id='123:bad.id' class='primary.bad @token'>Hello &amp; <br>world</p><input type=checkbox>");
 
-    EXPECT_EQ(root.textContent(), "Hello & \nworld");
+    EXPECT_EQ(root.textContent(), "Hello & world");
     EXPECT_EQ(root.innerHTML(), "<p id=\"123:bad.id\" class=\"primary.bad @token\">Hello &amp; <br>world</p><input type=\"checkbox\">");
     ASSERT_EQ(root.children().size(), 2U);
     EXPECT_EQ(root.children()[0]->id(), "123:bad.id");
-    EXPECT_TRUE(root.children()[0]->classes().contains("primary.bad"));
-    EXPECT_TRUE(root.children()[0]->classes().contains("@token"));
+    EXPECT_TRUE(root.children()[0]->classList().contains("primary.bad"));
+    EXPECT_TRUE(root.children()[0]->classList().contains("@token"));
     EXPECT_EQ(root.children()[1]->elementName(), "input");
 }
 
@@ -833,8 +910,6 @@ TEST(DocumentTest, AdoptsDetachedSubtrees) {
 
     NodePtr subtreeNode = std::move(subtree);
     NodePtr adopted = second.adoptNode(std::move(subtreeNode));
-    EXPECT_EQ(radia::ui::detail::NodeAccess::documentIdentity(*subtreeElement), radia::ui::detail::NodeAccess::documentIdentity(second));
-    EXPECT_EQ(radia::ui::detail::NodeAccess::documentIdentity(*descendantElement), radia::ui::detail::NodeAccess::documentIdentity(second));
 
     ASSERT_EQ(second.documentElement()->append(std::move(adopted)), subtreeElement);
     EXPECT_EQ(second.getElementById("nested-adopted"), descendantElement);
@@ -915,19 +990,13 @@ TEST(DocumentTest, RemovesDocumentElement) {
     ASSERT_NE(detached, nullptr);
     EXPECT_EQ(document.documentElement(), nullptr);
     EXPECT_EQ(detached->parentNode(), nullptr);
-    EXPECT_EQ(radia::ui::detail::NodeAccess::documentIdentity(*detached), radia::ui::detail::NodeAccess::documentIdentity(document));
 }
 
-TEST(ElementTreeDeathTest, RejectsUnknownRuntimeElement) {
+TEST(DocumentTest, ReturnsNullForUnknownRuntimeElement) {
     auto documentElementOwner = makeElement<HTMLPanelElement>();
     Document document(std::move(documentElementOwner));
 
-    EXPECT_DEATH(
-        {
-            LLError::setFatalFunction(reportFatalDiagnostic);
-            document.createElement("not-a-radia-element");
-        },
-        "Unknown UI Element type");
+    EXPECT_EQ(document.createElement("not-a-radia-element"), nullptr);
 }
 
 TEST(ElementTest, NormalizesAdjacentTextNodes) {
@@ -1054,12 +1123,14 @@ TEST(ElementTest, StoresLiteralTextContent) {
     EXPECT_EQ(runtimeChildren.begin()->asText()->data(), "beforeafter");
 }
 
-TEST(ElementTest, EmptyTextContentRemovesTextNodes) {
+TEST(ElementTest, EmptyTextContentInstallsEmptyTextNode) {
     auto root = makeElementValue<Element>("p");
     root.textContent("content");
     root.textContent("");
 
-    EXPECT_TRUE(root.childNodes().empty());
+    ASSERT_EQ(root.childNodes().size(), 1U);
+    ASSERT_NE(root.childNodes().front()->asText(), nullptr);
+    EXPECT_TRUE(root.childNodes().front()->asText()->data().empty());
 }
 
 TEST(ElementTest, PreservesWhitespaceOnlyTextNodes) {
@@ -1096,7 +1167,7 @@ TEST(ElementPaintTest, RecordsElementOwnPrimitives) {
     EXPECT_EQ(recording.count(PaintCommandKind::Text), 0U);
 
     auto icon = makeElementValue<Element>("i");
-    icon.addClass("i-search");
+    icon.classList().add("i-search");
     icon.setRect({4.f, 5.f, 16.f, 16.f});
     icon.paint(recording, style, 2.f);
     EXPECT_EQ(recording.count(PaintCommandKind::Box), 2U);
@@ -1128,7 +1199,7 @@ TEST(ElementPaintTest, PaintsLocalizedResources) {
     label->setRect({0.f, 20.f, 30.f, 10.f});
     panel->append(std::move(label));
     auto icon = makeElement<Element>("i");
-    icon->addClass("i-search");
+    icon->classList().add("i-search");
     icon->setRect({0.f, 0.f, 16.f, 16.f});
     panel->append(std::move(icon));
     surface->mount(std::move(panel));
@@ -1356,12 +1427,12 @@ TEST(TextLayoutTest, AppliesOverflowToMountedTextNodes) {
     panel->setRect({0.f, 0.f, 20.f, 20.f});
 
     auto end = makeElement<Element>("p");
-    end->addClass("end");
+    end->classList().add("end");
     end->textContent("abcdef");
     panel->append(std::move(end));
 
     auto center = makeElement<Element>("p");
-    center->addClass("center");
+    center->classList().add("center");
     center->textContent("abcdef");
     panel->append(std::move(center));
 
@@ -1450,7 +1521,7 @@ TEST(TextLayoutTest, ProjectsPaintColor) {
 
     RecordingPaintContext first;
     surface.paint(first);
-    paragraphPtr->addClass("accent");
+    paragraphPtr->classList().add("accent");
     RecordingPaintContext second;
     surface.paint(second);
 

@@ -112,7 +112,7 @@ void addCompositeControls(HTMLPanelElement& root, std::size_t nodeCount) {
             case 0: {
                 auto button = makeElement<HTMLButtonElement>();
                 auto icon = makeElement<Element>("i");
-                icon->addClass("i-search");
+                icon->classList().add("i-search");
                 button->append(std::move(icon));
                 appendText(*button, "Apply");
                 root.append(std::move(button));

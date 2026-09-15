@@ -141,7 +141,7 @@ std::optional<FloaterPlacement> WorkspacePersistence::restorePlacement(const Com
 void WorkspacePersistence::saveFloaterPlacement(const ComponentInstanceKey& componentKey, const HTMLFloaterElement& floater) {
     const auto& placementRect = floater.minimized() ? floater.expandedRect() : floater.rect();
     std::optional<FloaterLogicalSize> size;
-    if (floater.resizeable()) size = FloaterLogicalSize{placementRect.w, placementRect.h};
+    if (floater.resizable()) size = FloaterLogicalSize{placementRect.w, placementRect.h};
     savePlacement(componentKey, FloaterPlacement{placementRect.x, placementRect.y, size, floater.minimized()},
                   floater.closed() ? ComponentOpenState::Closed : ComponentOpenState::Open);
 }

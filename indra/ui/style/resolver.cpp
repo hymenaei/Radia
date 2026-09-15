@@ -15,13 +15,13 @@
 
 namespace radia::ui {
 namespace {
-bool matchesState(const std::string& state, uint16_t states) {
+bool matchesState(const std::string& state, uint16_t states, const Element* target) {
     if (state.empty()) return true;
     if (state == "hover") return hasState(states, ElementState::Hovered);
     if (state == "active") return hasState(states, ElementState::Active);
     if (state == "focus") return hasState(states, ElementState::Focused);
     if (state == "focus-visible") return hasState(states, ElementState::Focused) && hasState(states, ElementState::FocusVisible);
-    if (state == "disabled") return hasState(states, ElementState::Disabled);
+    if (state == "disabled") return target ? target->disabled() : hasState(states, ElementState::Disabled);
     if (state == "checked") return hasState(states, ElementState::Checked);
     if (state == "minimized") return hasState(states, ElementState::Minimized);
     if (state == "invalid") return hasState(states, ElementState::Invalid);
@@ -51,12 +51,10 @@ bool matchesAttribute(const StyleSelector& selector, const Element* element) {
     if (!element) return false;
     return std::all_of(selector.attributes.begin(), selector.attributes.end(), [element](const StyleAttributeSelector& attribute) {
         const Element::Attribute* serialized = element->attribute(attribute.name);
-        const std::string* styleValue = detail::styleAttribute(*element, attribute.name);
-        if (attribute.presence) return serialized != nullptr || styleValue != nullptr;
-        const std::string* value = serialized && serialized->value ? &*serialized->value : styleValue;
-        if (!value) return false;
+        if (attribute.presence) return serialized != nullptr;
+        if (!serialized || !serialized->value) return false;
 
-        std::string actual = *value;
+        std::string actual = *serialized->value;
         std::string expected = attribute.value;
         if (attribute.caseInsensitive || (!attribute.caseSensitivitySpecified && (attribute.name == "type" || attribute.name == "switch"))) {
             actual = detail::lower(std::move(actual));
@@ -131,7 +129,7 @@ bool matchesSelector(const StyleSelector& selector, const std::string& element, 
         && (selector.id.empty() || selector.id == id)
         && (selector.className.empty() || classes.find(selector.className) != classes.end())
         && matchesDirection(selector.direction, direction)
-        && matchesState(selector.state, ownerStates)
+        && matchesState(selector.state, ownerStates, target)
         && selector.pseudoElement == pseudoElement;
 }
 
@@ -286,6 +284,7 @@ bool StyleRuleSet::stateAffectsLayout(ElementState state) const {
 }
 
 bool StyleRuleSet::stateAffectsLayout(const Element& element, ElementState state) const {
+    if (state == ElementState::Disabled && element.elementName() == kFieldsetTag.localName) return stateAffectsLayout(state);
     if (!stateAffectsLayout(state)) return false;
     const std::optional<std::size_t> index = stateIndex(state);
     if (!index) return false;
@@ -309,6 +308,7 @@ bool StyleRuleSet::stateAffectsHitTesting(ElementState state) const {
 }
 
 bool StyleRuleSet::stateAffectsHitTesting(const Element& element, ElementState state) const {
+    if (state == ElementState::Disabled && element.elementName() == kFieldsetTag.localName) return stateAffectsHitTesting(state);
     if (!stateAffectsHitTesting(state)) return false;
     const std::optional<std::size_t> index = stateIndex(state);
     if (!index) return false;
@@ -323,6 +323,7 @@ bool StyleRuleSet::stateAffectsHitTesting(const Element& element, ElementState s
 }
 
 bool StyleRuleSet::stateAffectsDescendants(const Element& element, ElementState state) const {
+    if (state == ElementState::Disabled && element.elementName() == kFieldsetTag.localName) return true;
     const std::optional<std::size_t> index = stateIndex(state);
     if (!index) return false;
     for (const std::size_t ruleIndex : mDescendantStateRules[*index]) {

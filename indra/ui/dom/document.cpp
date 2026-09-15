@@ -9,19 +9,16 @@
 #include "dom/fragment.h"
 #include "dom/mutation.h"
 #include "html/elementfactory.h"
-#include "llerror.h"
 
 namespace radia::ui {
-using detail::DocumentIdentity;
 using detail::findElementInTree;
 using detail::HTMLElementFactory;
 using detail::NodeAccess;
 using detail::NodeMutation;
 
-Document::Document(ElementPtr documentElement) : Node(NodeType::Document), mIdentity(std::make_shared<DocumentIdentity>()) {
+Document::Document(ElementPtr documentElement) : Node(NodeType::Document) {
     llassert_always(documentElement);
-    NodeAccess::setDocumentIdentity(*this, mIdentity);
-    NodeMutation::adopt(*this, *documentElement);
+    NodeMutation::adopt(*documentElement);
     NodeAccess::setParent(*documentElement, this);
     mChildren.emplace_back(std::move(documentElement));
     if (Element* root = mChildren.front()->asElement()) root->notifyTreeAttached();
@@ -47,20 +44,20 @@ ElementPtr Document::releaseDocumentElement() {
 
 ElementPtr Document::createElement(std::string_view elementName) const {
     ElementPtr element = HTMLElementFactory::create(elementName);
-    if (!element) LL_ERRS("UI") << "Unknown UI Element type: " << elementName << LL_ENDL;
-    NodeMutation::adopt(*this, *element);
+    if (!element) return nullptr;
+    NodeMutation::adopt(*element);
     return element;
 }
 
 FragmentPtr Document::createFragment() const {
     auto fragment = std::make_unique<Fragment>();
-    NodeMutation::adopt(*this, *fragment);
+    NodeMutation::adopt(*fragment);
     return fragment;
 }
 
 NodePtr Document::adoptNode(NodePtr node) const {
     llassert_always(node);
-    NodeMutation::adopt(*this, *node);
+    NodeMutation::adopt(*node);
     return node;
 }
 

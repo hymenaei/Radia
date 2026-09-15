@@ -116,7 +116,6 @@ namespace detail {
 template<typename ElementT> class ElementVisit;
 class NodeChildren;
 class ConstNodeChildren;
-const std::string* styleAttribute(const Element& element, std::string_view name);
 Node& appendText(Element& parent, std::string text);
 Node& appendLocalizedText(Element& parent, LocalizedText text, std::string html);
 Element* findElementInTree(Element& element, std::string_view id);
@@ -171,13 +170,15 @@ class Element : public Node {
     friend class detail::ElementConstructionAccess;
     friend class detail::NodeMutation;
     friend class detail::AuthoredEventStore;
-    friend const std::string* detail::styleAttribute(const Element&, std::string_view);
     friend Node& detail::appendText(Element&, std::string);
     friend Node& detail::appendLocalizedText(Element&, LocalizedText, std::string);
     friend detail::NodeChildren detail::nodes(Element&);
     friend detail::ConstNodeChildren detail::nodes(const Element&);
 
 public:
+    class ClassList;
+    class ConstClassList;
+
     struct Attribute {
         std::string name;
         std::optional<std::string> value;
@@ -196,11 +197,12 @@ public:
     NodeSnapshot childNodes() override;
     ConstNodeSnapshot childNodes() const override;
     Element& setId(std::string id);
-    Element& addClass(std::string className);
+    ClassList classList();
+    ConstClassList classList() const;
     const AttributeList& attributes() const noexcept { return mAttributes; }
     void setAttribute(std::string name, std::optional<std::string> value = std::nullopt);
-    bool hasAttribute(std::string_view name) const noexcept;
-    const Attribute* attribute(std::string_view name) const noexcept;
+    bool hasAttribute(std::string_view name) const;
+    const Attribute* attribute(std::string_view name) const;
     void removeAttribute(std::string_view name);
     Element& setRect(const Rect& rect);
     Element& setPointerEvents(bool pointerEvents);
@@ -246,7 +248,7 @@ public:
     Visibility visibility() const { return mVisibilityOverride.value_or(Visibility::Visible); }
     bool isDisplayed(const ComputedStyle& style) const;
     bool isVisible(const ComputedStyle& style) const;
-    bool disabled() const { return radia::ui::hasState(mStates, ElementState::Disabled); }
+    bool disabled() const;
     bool idScopeRoot() const { return mIdScopeRoot; }
     bool flowBreakBefore() const;
 
@@ -271,6 +273,8 @@ protected:
     virtual bool beginPointerInteraction(const PointerEvent& event);
     virtual bool updatePointerInteraction(const PointerEvent& event);
     virtual bool endPointerInteraction(const PointerEvent& event);
+    virtual void onAttributeSet(std::string_view, const std::optional<std::string>&) {}
+    virtual void onAttributeRemoved(std::string_view) {}
     virtual void constrainResolvedStyle(ComputedStyle& style) const {}
     void dispatchEvent(Event& event);
     void translate(const Vec2& delta);
@@ -357,10 +361,10 @@ private:
     };
 
     std::string mElementName;
-    std::map<std::string, std::string> mStyleAttributes;
     AttributeList mAttributes;
     std::string mId;
     std::set<std::string> mClasses;
+    std::vector<std::string> mClassOrder;
     Rect mRect;
     Vec2 mDesiredSize;
     ScrollMetrics mScrollMetrics;
@@ -395,5 +399,33 @@ private:
     InvalidationFlags mInvalidationReasons =
         LayoutInvalidationReason::Measure | LayoutInvalidationReason::Arrange | LayoutInvalidationReason::ComputedStyle;
     std::unique_ptr<detail::ElementPrivateData> mPrivate;
+};
+
+class Element::ClassList {
+public:
+    ClassList& add(std::string_view className);
+    ClassList& remove(std::string_view className);
+    bool toggle(std::string_view className);
+    bool replace(std::string_view oldClass, std::string_view newClass);
+    bool contains(std::string_view className) const;
+
+private:
+    explicit ClassList(Element& element) : mElement(element) {}
+
+    friend class Element;
+
+    Element& mElement;
+};
+
+class Element::ConstClassList {
+public:
+    bool contains(std::string_view className) const;
+
+private:
+    explicit ConstClassList(const Element& element) : mElement(element) {}
+
+    friend class Element;
+
+    const Element& mElement;
 };
 } // namespace radia::ui

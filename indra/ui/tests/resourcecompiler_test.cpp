@@ -171,7 +171,7 @@ TEST_F(ResourceCompilerTest, ResolvesResourceReferences) {
 TEST_F(ResourceCompilerTest, BuildsFloaterEvents) {
     resources["elements/minimize.html"] = "<minimize><i class=\"i-minimize md\"></i></minimize>";
     resources["elements/close.html"] = "<close><i class=\"i-close md\"></i></close>";
-    constexpr char kFloaterLayout[] = "<floater resizeable><head><title>title</title><minimize></minimize><close></close></head><body>"
+    constexpr char kFloaterLayout[] = "<floater resizable><head><title>title</title><minimize></minimize><close></close></head><body>"
                                       "<p id=\"status\">Ready</p>"
                                       "<button id=\"go\" onClick=\"demoGo()\" onDoubleClick=\"demoDouble()\" "
                                       "onPointerDown=\"demoPress()\" onContextMenu=\"demoMenu()\" onWheel=\"demoWheel()\">"
@@ -187,7 +187,7 @@ TEST_F(ResourceCompilerTest, BuildsFloaterEvents) {
     ASSERT_NE(floater->body(), nullptr);
     ASSERT_NE(floater->minimizeButton(), nullptr);
     ASSERT_NE(floater->closeButton(), nullptr);
-    EXPECT_TRUE(floater->resizeable());
+    EXPECT_TRUE(floater->resizable());
 
     const ElementRef<HTMLButtonElement> go = requireElement<HTMLButtonElement>(*floater, "go");
     const ElementRef<HTMLInputElement> toggle = requireElement<HTMLInputElement>(*floater, "toggle");
@@ -231,7 +231,7 @@ TEST_F(ResourceCompilerTest, BuildsStructuralDivs) {
     const Element* root = result.rootAs<Element>();
     ASSERT_NE(root, nullptr);
     EXPECT_EQ(root->elementName(), "div");
-    EXPECT_EQ(root->classes().count("stack"), 1U);
+    EXPECT_TRUE(root->classList().contains("stack"));
     ASSERT_EQ(root->children().size(), 1U);
 
     const Element* group = root->children().front();
@@ -293,8 +293,8 @@ TEST_F(ResourceCompilerTest, InstantiatesEmbeddedPanels) {
     ASSERT_NE(first.get(), nullptr);
     ASSERT_NE(second.get(), nullptr);
     EXPECT_NE(first.get(), second.get());
-    EXPECT_EQ(first->classes().count("shared"), 1U);
-    EXPECT_EQ(first->classes().count("first"), 1U);
+    EXPECT_TRUE(first->classList().contains("shared"));
+    EXPECT_TRUE(first->classList().contains("first"));
     ASSERT_FALSE(first->children().empty());
     ASSERT_FALSE(second->children().empty());
     EXPECT_EQ(first->children().front()->id(), "resourceChild");
@@ -429,7 +429,7 @@ TEST_F(ResourceCompilerTest, BuildsOrderedTree) {
     ASSERT_NE(child->asText(), nullptr);
     EXPECT_TRUE(NodeAccess::flowBreakBefore(*child));
     EXPECT_EQ(child->asText()->data(), "Again");
-    EXPECT_EQ(root->textContent(), "Hello world\nAgain");
+    EXPECT_EQ(root->textContent(), "Hello worldAgain");
 }
 
 TEST_F(ResourceCompilerTest, PreservesWhitespaceInTextNodes) {
@@ -496,7 +496,7 @@ TEST_F(ResourceCompilerTest, ComposesButtonInlineChildren) {
     ASSERT_NE(iconNode->asElement(), nullptr);
     auto* icon = iconNode->asElement();
     ASSERT_NE(icon, nullptr);
-    EXPECT_TRUE(icon->classes().contains("i-one"));
+    EXPECT_TRUE(icon->classList().contains("i-one"));
     ASSERT_EQ(button->children().size(), 1U);
     EXPECT_EQ(button->children().front(), icon);
 
@@ -649,10 +649,10 @@ TEST_F(ResourceCompilerTest, RefreshesLocalizedText) {
         EXPECT_EQ(child->asText()->data(), last);
     };
 
-    EXPECT_EQ(root->textContent(), "Hello bold\nAgain");
+    EXPECT_EQ(root->textContent(), "Hello boldAgain");
     assertRuntime("Hello ", "b", "bold", "Again");
     ASSERT_TRUE(system.setLocale("pt"));
-    EXPECT_EQ(root->textContent(), "Olá itálico\nNovamente");
+    EXPECT_EQ(root->textContent(), "Olá itálicoNovamente");
     assertRuntime("Olá ", "i", "itálico", "Novamente");
 }
 
@@ -660,6 +660,9 @@ TEST_F(ResourceCompilerTest, RejectsUnknownMarkup) {
     constexpr char kUnknownElementLayout[] = "<panel>"
                                              "<unknown></unknown></panel>";
     constexpr char kUnknownAttributeLayout[] = "<floater invented=\"true\"></floater>";
+    constexpr char kVisibilityAttributeLayout[] = "<panel visibility=\"bar\"></panel>";
+    constexpr char kLegacyResizableAttributeLayout[] = "<panel resizeable></panel>";
+    constexpr char kHiddenAttributeLayout[] = "<panel hidden></panel>";
     const ResourceBuildResult unknownElement = factory.buildElementTreeFromString(kUnknownElementLayout, "unknown.html");
     ASSERT_FALSE(unknownElement.ok());
     EXPECT_FALSE(unknownElement.document);
@@ -672,6 +675,22 @@ TEST_F(ResourceCompilerTest, RejectsUnknownMarkup) {
     EXPECT_FALSE(unknownAttribute.document);
     ASSERT_FALSE(unknownAttribute.errors.empty());
     EXPECT_EQ(unknownAttribute.errors.front().code, "layout.attribute.unknown");
+
+    const ResourceBuildResult visibilityAttribute = factory.buildElementTreeFromString(kVisibilityAttributeLayout, "visibility.html");
+    ASSERT_FALSE(visibilityAttribute.ok());
+    EXPECT_FALSE(visibilityAttribute.document);
+    ASSERT_FALSE(visibilityAttribute.errors.empty());
+    EXPECT_EQ(visibilityAttribute.errors.front().code, "layout.attribute.unknown");
+
+    const ResourceBuildResult legacyResizable = factory.buildElementTreeFromString(kLegacyResizableAttributeLayout, "legacy-resizable.html");
+    ASSERT_FALSE(legacyResizable.ok());
+    ASSERT_FALSE(legacyResizable.errors.empty());
+    EXPECT_EQ(legacyResizable.errors.front().code, "layout.attribute.unknown");
+
+    const ResourceBuildResult hiddenAttribute = factory.buildElementTreeFromString(kHiddenAttributeLayout, "hidden.html");
+    ASSERT_TRUE(hiddenAttribute.ok());
+    ASSERT_NE(hiddenAttribute.rootAs<HTMLPanelElement>(), nullptr);
+    EXPECT_TRUE(hiddenAttribute.rootAs<HTMLPanelElement>()->hasAttribute("hidden"));
 }
 
 TEST_F(ResourceCompilerTest, ValidatesElementEvents) {
@@ -704,14 +723,14 @@ TEST_F(ResourceCompilerTest, UsesTreeOrderForDuplicateIds) {
 }
 
 TEST_F(ResourceCompilerTest, RejectsInvalidBooleanAttributes) {
-    constexpr char kInvalidBooleanLayout[] = "<floater resizeable=\"sometimes\"><head></head><body>"
+    constexpr char kInvalidBooleanLayout[] = "<floater resizable=\"sometimes\"><head></head><body>"
                                              "<input type=\"checkbox\" switch=\"true\" checked=\"yes\"></body></floater>";
     const ResourceBuildResult result = factory.buildElementTreeFromString(kInvalidBooleanLayout, "booleans.html");
     ASSERT_FALSE(result.ok());
     EXPECT_FALSE(result.document);
     ASSERT_EQ(result.errors.size(), 2U);
     EXPECT_EQ(result.errors[0].code, "layout.attribute.boolean_invalid");
-    EXPECT_EQ(result.errors[0].message, "Invalid boolean value for resizeable: sometimes.");
+    EXPECT_EQ(result.errors[0].message, "Invalid boolean value for resizable: sometimes.");
     EXPECT_EQ(result.errors[0].source, "booleans.html");
     EXPECT_EQ(result.errors[0].line, 1U);
     EXPECT_EQ(result.errors[0].column, 1U);
@@ -719,7 +738,7 @@ TEST_F(ResourceCompilerTest, RejectsInvalidBooleanAttributes) {
     EXPECT_EQ(result.errors[1].message, "Invalid boolean value for checked: yes.");
     EXPECT_EQ(result.errors[1].source, "booleans.html");
     EXPECT_EQ(result.errors[1].line, 1U);
-    EXPECT_EQ(result.errors[1].column, 52U);
+    EXPECT_EQ(result.errors[1].column, 51U);
 }
 
 TEST_F(ResourceCompilerTest, AcceptsBooleanAttributes) {
@@ -730,6 +749,31 @@ TEST_F(ResourceCompilerTest, AcceptsBooleanAttributes) {
     ASSERT_NE(button, nullptr);
     EXPECT_TRUE(button->disabled());
     EXPECT_EQ(button->textContent(), "Save");
+}
+
+TEST_F(ResourceCompilerTest, ValidatesButtonType) {
+    const ResourceBuildResult valid = factory.buildElementTreeFromString("<button type=button>Save</button>", "button-type.html");
+    ASSERT_TRUE(valid.ok());
+    ASSERT_NE(valid.rootAs<HTMLButtonElement>(), nullptr);
+    ASSERT_NE(valid.rootAs<HTMLButtonElement>()->attribute("type"), nullptr);
+    EXPECT_EQ(*valid.rootAs<HTMLButtonElement>()->attribute("type")->value, "button");
+
+    struct InvalidTypeCase {
+        const char* source;
+        const char* diagnostic;
+    };
+    const InvalidTypeCase cases[] = {
+        {"<button type></button>", "layout.button.type_value_required"},
+        {"<button type=submit></button>", "layout.button.type_unsupported"},
+        {"<button type=reset></button>", "layout.button.type_unsupported"},
+        {"<button type=menu></button>", "layout.button.type_invalid"},
+    };
+    for (const InvalidTypeCase& test : cases) {
+        const ResourceBuildResult result = factory.buildElementTreeFromString(test.source, "button-type-invalid.html");
+        ASSERT_FALSE(result.ok());
+        ASSERT_FALSE(result.errors.empty());
+        EXPECT_EQ(result.errors.front().code, test.diagnostic);
+    }
 }
 
 TEST_F(ResourceCompilerTest, ParsesRadiaHTMLSyntaxDirectly) {
@@ -750,13 +794,13 @@ TEST_F(ResourceCompilerTest, ParsesRadiaHTMLSyntaxDirectly) {
 }
 
 TEST_F(ResourceCompilerTest, DecodesEntities) {
-    constexpr char kHTML[] = "<p title=\"a&amp;b\">&lt; &quot; &apos;</p>";
+    constexpr char kHTML[] = "<p title=\"a&amp;b&#65;&#x42;&nbsp;&unknown;\">&lt; &quot; &apos; &#65; &#x42; &nbsp; &unknown;</p>";
     const SourceDocumentParseResult parsed = SourceDocumentParser().parse(kHTML, "entities.html");
     ASSERT_TRUE(parsed.ok());
     ASSERT_NE(parsed.document, nullptr);
     ASSERT_EQ(parsed.document->root->content.size(), 1U);
-    EXPECT_EQ(parsed.document->root->attributes.at("title").value, "a&b");
-    EXPECT_EQ(parsed.document->root->content.front().text, "< \" '");
+    EXPECT_EQ(parsed.document->root->attributes.at("title").value, std::string("a&bAB") + "\xC2\xA0&unknown;");
+    EXPECT_EQ(parsed.document->root->content.front().text, std::string("< \" ' A B ") + "\xC2\xA0 &unknown;");
 }
 
 TEST_F(ResourceCompilerTest, RejectsMismatchedHTMLTags) {
@@ -904,8 +948,8 @@ TEST_F(ResourceCompilerTest, AppliesChildBearingElementDefaults) {
     const auto* minimizeIcon = floater->minimizeButton()->children().front();
     ASSERT_NE(closeIcon, nullptr);
     ASSERT_NE(minimizeIcon, nullptr);
-    EXPECT_TRUE(closeIcon->classes().contains("i-close"));
-    EXPECT_TRUE(minimizeIcon->classes().contains("i-minimize"));
+    EXPECT_TRUE(closeIcon->classList().contains("i-close"));
+    EXPECT_TRUE(minimizeIcon->classList().contains("i-minimize"));
     EXPECT_TRUE(floater->closable());
     EXPECT_TRUE(floater->minimizable());
 
@@ -920,7 +964,7 @@ TEST_F(ResourceCompilerTest, AppliesChildBearingElementDefaults) {
     ASSERT_EQ(floater->minimizeButton()->children().size(), 1U);
     const auto* customIcon = floater->minimizeButton()->children().front();
     ASSERT_NE(customIcon, nullptr);
-    EXPECT_TRUE(customIcon->classes().contains("i-custom"));
+    EXPECT_TRUE(customIcon->classList().contains("i-custom"));
 }
 
 TEST_F(ResourceCompilerTest, RejectsInvalidElementDefaults) {
@@ -1004,7 +1048,7 @@ TEST_F(ResourceCompilerTest, PreservesDiagnosticProvenance) {
 
 TEST_F(ResourceCompilerTest, AcceptsCaseInsensitiveHTMLNames) {
     constexpr char kCaseInsensitiveLayout[] =
-        "<FlOaTeR ReSiZeAbLe><HeAd><TiTlE>tools</TiTlE><MiNiMiZe><I class=\"i-minimize md\"></I></MiNiMiZe></HeAd><BoDy>"
+        "<FlOaTeR ReSiZaBlE><HeAd><TiTlE>tools</TiTlE><MiNiMiZe><I class=\"i-minimize md\"></I></MiNiMiZe></HeAd><BoDy>"
         "<BuTtOn ID=\"saveFile\" ONCLICK=\"saveFile()\">"
         "<I class=\"i-search md\"></I>Save</BuTtOn></BoDy></FlOaTeR>";
     ResourceBuildResult result = factory.buildElementTreeFromString(kCaseInsensitiveLayout, "case-insensitive.html");
@@ -1045,8 +1089,8 @@ TEST_F(ResourceCompilerTest, RejectsMalformedAttributes) {
     ASSERT_TRUE(standardValues.ok());
     ASSERT_TRUE(standardValues.document);
     EXPECT_EQ(standardValues.document->documentElement()->id(), "123:bad.id");
-    EXPECT_TRUE(standardValues.document->documentElement()->classes().contains("bad.class"));
-    EXPECT_TRUE(standardValues.document->documentElement()->classes().contains("@token"));
+    EXPECT_TRUE(standardValues.document->documentElement()->classList().contains("bad.class"));
+    EXPECT_TRUE(standardValues.document->documentElement()->classList().contains("@token"));
 
     constexpr char kInvalidHandlerLayout[] = "<button onClick=\"bad_action()\"></button>";
     const ResourceBuildResult invalidHandler = factory.buildElementTreeFromString(kInvalidHandlerLayout, "handler-name.html");

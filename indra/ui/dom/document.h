@@ -50,7 +50,6 @@ private:
     void addDestructionObserver(std::function<void()> observer);
     ElementPtr releaseDocumentElement();
 
-    std::shared_ptr<detail::DocumentIdentity> mIdentity;
     std::vector<std::unique_ptr<Node>> mChildren;
     std::vector<std::function<void()>> mDestructionObservers;
     bool mDestroying = false;

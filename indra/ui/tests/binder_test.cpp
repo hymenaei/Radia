@@ -792,6 +792,53 @@ TEST(BinderTest, StopsWritingAfterInputTypeChanges) {
     EXPECT_FALSE(result.binding.activate());
 }
 
+TEST(BinderTest, StopsWritingAfterSettingAttributeChanges) {
+    constexpr char kBoundInput[] = "<input type=checkbox switch setting=demo-enabled>";
+    ResourceBuildResult buildResult = ResourceCompiler().buildElementTreeFromString(kBoundInput, "setting-change-binding.html");
+    ASSERT_TRUE(buildResult.ok());
+    HTMLInputElement* control = buildResult.rootAs<HTMLInputElement>();
+    ASSERT_NE(control, nullptr);
+
+    auto provider = std::make_shared<TestValueBinding<bool>>(false);
+    TestSettingResolver resolver;
+    resolver.add("demo-enabled", provider);
+    Binder binder(*control, &resolver);
+    TestBindingResult result = finishBinding(binder);
+    ASSERT_TRUE(result.ok());
+
+    control->setAttribute("setting", "other-enabled");
+    provider->publish({true, false, std::nullopt});
+
+    ASSERT_TRUE(control->valueBindingRequest().has_value());
+    EXPECT_EQ(control->valueBindingRequest()->settingName, "other-enabled");
+    EXPECT_FALSE(control->checked());
+    EXPECT_EQ(provider->observerCount(), 0U);
+    EXPECT_FALSE(result.binding.activate());
+}
+
+TEST(BinderTest, StopsWritingAfterSettingAttributeRemoval) {
+    constexpr char kBoundInput[] = "<input type=checkbox switch setting=demo-enabled>";
+    ResourceBuildResult buildResult = ResourceCompiler().buildElementTreeFromString(kBoundInput, "setting-removal-binding.html");
+    ASSERT_TRUE(buildResult.ok());
+    HTMLInputElement* control = buildResult.rootAs<HTMLInputElement>();
+    ASSERT_NE(control, nullptr);
+
+    auto provider = std::make_shared<TestValueBinding<bool>>(false);
+    TestSettingResolver resolver;
+    resolver.add("demo-enabled", provider);
+    Binder binder(*control, &resolver);
+    TestBindingResult result = finishBinding(binder);
+    ASSERT_TRUE(result.ok());
+
+    control->removeAttribute("setting");
+    provider->publish({true, false, std::nullopt});
+
+    EXPECT_FALSE(control->valueBindingRequest().has_value());
+    EXPECT_FALSE(control->checked());
+    EXPECT_EQ(provider->observerCount(), 0U);
+    EXPECT_FALSE(result.binding.activate());
+}
+
 TEST(BinderTest, RejectsMissingSetting) {
     auto root = makeElementValue<HTMLPanelElement>();
     ValueBindingRef<bool> reference;

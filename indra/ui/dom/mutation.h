@@ -14,6 +14,7 @@ namespace radia::ui {
 class Fragment;
 
 namespace detail {
+// Tree ownership operations. This class does not implement MutationObserver.
 class NodeMutation final {
 public:
     static Node* insert(Element& parent, NodePtr child, Node* reference);
@@ -43,11 +44,9 @@ private:
 
     using NodeOwners = std::vector<NodePtr>;
 
-    static void adopt(const Document& document, Node& node);
-    static void adopt(Node& node, const std::shared_ptr<DocumentIdentity>& identity);
+    static void adopt(Node& node);
     static void validateChild(const Node& parent, const Node* child);
     static void validateDetachedSubtree(const Node& node);
-    static void assignDocumentIdentity(Node& node, const std::shared_ptr<DocumentIdentity>& identity);
     static void validateFragment(const Node& parent, const Fragment& fragment);
     static void clearTextSlots(Element& parent);
     static void detachElementChild(Element& parent, Node& node, Surface* surface, const std::weak_ptr<char>& surfaceLifetime);

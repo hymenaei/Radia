@@ -21,6 +21,16 @@ using detail::ElementDefinitions;
 using detail::ElementInternalAccess;
 
 namespace {
+class AttributeUpdateGuard final {
+public:
+    explicit AttributeUpdateGuard(bool& updating) : mUpdating(updating), mPrevious(updating) { mUpdating = true; }
+    ~AttributeUpdateGuard() { mUpdating = mPrevious; }
+
+private:
+    bool& mUpdating;
+    bool mPrevious;
+};
+
 const Element* scopeRootForInput(const HTMLInputElement& input) {
     const Element* root = &input;
     while (root->parentElement() && !root->idScopeRoot()) root = root->parentElement();
@@ -64,8 +74,38 @@ HTMLInputElement::HTMLInputElement()
     : HTMLElement(kInputTag.localName), mSliderTrack(PseudoElementType::SliderTrack, *this),
       mSliderFill(PseudoElementType::SliderFill, *this, &mSliderTrack), mSliderThumb(PseudoElementType::SliderThumb, *this),
       mCheckmark(PseudoElementType::Checkmark, *this) {
+    AttributeUpdateGuard guard(mUpdatingAttribute);
     mSliderTrack.addGeneratedPseudoElement(mSliderFill);
     setAttribute("type", mType);
+}
+
+void HTMLInputElement::onAttributeSet(std::string_view name, const std::optional<std::string>& value) {
+    if (mUpdatingAttribute) return;
+    AttributeUpdateGuard guard(mUpdatingAttribute);
+    if (name == "type") type(value.value_or("text"));
+    else if (name == "name") this->name(value.value_or(std::string()));
+    else if (name == "switch") switchMode(true);
+    else if (name == "checked" && !mValueState.dirty()) initializeChecked(true);
+    else if (name == "setting") setSettingName(value.value_or(std::string()));
+}
+
+void HTMLInputElement::onAttributeRemoved(std::string_view name) {
+    if (mUpdatingAttribute) return;
+    AttributeUpdateGuard guard(mUpdatingAttribute);
+    if (name == "type") {
+        type("text");
+        Element::removeAttribute("type");
+    } else if (name == "name") {
+        this->name({});
+    } else if (name == "switch") {
+        switchMode(false);
+    } else if (name == "checked" && !mValueState.dirty()) {
+        initializeChecked(false);
+        Element::removeAttribute("checked");
+    } else if (name == "setting") {
+        clearValueBinding();
+        mValueBindingRequest.reset();
+    }
 }
 
 AccessibleSemantics HTMLInputElement::accessibleSemantics() const {
@@ -178,11 +218,11 @@ void HTMLInputElement::paint(PaintContext& context, const ComputedStyle& style, 
 }
 
 HTMLInputElement& HTMLInputElement::type(std::string type) {
+    AttributeUpdateGuard guard(mUpdatingAttribute);
     if (type.empty()) type = "text";
     if (canonicalizeHTMLName(mType) == canonicalizeHTMLName(type)) {
         mType = std::move(type);
         setAttribute("type", mType);
-        ElementInternalAccess::setStyleAttribute(*this, "type", mType);
         return *this;
     }
 
@@ -190,9 +230,7 @@ HTMLInputElement& HTMLInputElement::type(std::string type) {
     const std::string oldName = mName;
     if (wasRadio) refreshRadioGroup(oldName, this);
 
-    if (const std::shared_ptr<ValueBindingSubscription> subscription = mBindingSubscription.lock()) subscription->reset();
-    mBindingSubscription.reset();
-    mBinding.reset();
+    clearValueBinding();
     mValueBindingRequest.reset();
     mValueState = {};
     updateCheckedState(false);
@@ -202,12 +240,9 @@ HTMLInputElement& HTMLInputElement::type(std::string type) {
     removeAttribute("checked");
     removeAttribute("switch");
     removeAttribute("setting");
-    ElementInternalAccess::removeStyleAttribute(*this, "switch");
-    ElementInternalAccess::removeStyleAttribute(*this, "setting");
 
     mType = std::move(type);
     setAttribute("type", mType);
-    ElementInternalAccess::setStyleAttribute(*this, "type", mType);
 
     if (isRadioType()) refreshRadioGroup();
     else refreshIndeterminateState();
@@ -215,35 +250,34 @@ HTMLInputElement& HTMLInputElement::type(std::string type) {
 }
 
 HTMLInputElement& HTMLInputElement::name(std::string name) {
+    AttributeUpdateGuard guard(mUpdatingAttribute);
     if (mName == name) return *this;
     const std::string oldName = mName;
     if (isRadioType()) refreshRadioGroup(oldName, this);
     mName = std::move(name);
-    if (mName.empty()) {
-        removeAttribute("name");
-        ElementInternalAccess::removeStyleAttribute(*this, "name");
-    } else {
-        setAttribute("name", mName);
-        ElementInternalAccess::setStyleAttribute(*this, "name", mName);
-    }
+    if (mName.empty()) removeAttribute("name");
+    else setAttribute("name", mName);
     if (isRadioType()) refreshRadioGroup();
     return *this;
 }
 
 HTMLInputElement& HTMLInputElement::switchMode(bool enabled) {
+    const bool updateAttribute = !mUpdatingAttribute;
+    AttributeUpdateGuard guard(mUpdatingAttribute);
     if (mSwitchMode == enabled) return *this;
     if (enabled && !isCheckboxType()) return *this;
 
     mSwitchMode = enabled;
-    if (enabled) setAttribute("switch");
-    else removeAttribute("switch");
-    if (enabled) ElementInternalAccess::setStyleAttribute(*this, "switch", "true");
-    else ElementInternalAccess::removeStyleAttribute(*this, "switch");
+    if (updateAttribute) {
+        if (enabled) setAttribute("switch");
+        else removeAttribute("switch");
+    }
 
     return *this;
 }
 
 HTMLInputElement& HTMLInputElement::checked(bool checked) {
+    AttributeUpdateGuard guard(mUpdatingAttribute);
     if (!isCheckableType(mType)) return *this;
     const ElementRef<HTMLInputElement> self(this);
     const bool changed = updateCheckedState(checked);
@@ -258,11 +292,15 @@ HTMLInputElement& HTMLInputElement::checked(bool checked) {
 }
 
 void HTMLInputElement::initializeChecked(bool checked) {
+    const bool updateAttribute = !mUpdatingAttribute;
+    AttributeUpdateGuard guard(mUpdatingAttribute);
     if (!isCheckableType(mType)) return;
     mValueState = {checked, checked, std::nullopt};
     updateCheckedState(checked);
-    if (checked) setAttribute("checked");
-    else removeAttribute("checked");
+    if (updateAttribute) {
+        if (checked) setAttribute("checked");
+        else removeAttribute("checked");
+    }
     if (isRadioType()) updateRadioGroup();
     else refreshIndeterminateState();
 }
@@ -274,7 +312,15 @@ bool HTMLInputElement::updateCheckedState(bool checked) {
     return changed;
 }
 
+void HTMLInputElement::clearValueBinding() {
+    if (const std::shared_ptr<ValueBindingSubscription> subscription = mBindingSubscription.lock()) subscription->reset();
+    mBindingSubscription.reset();
+    mBinding.reset();
+}
+
 HTMLInputElement& HTMLInputElement::setSettingName(std::string name) {
+    if (mValueBindingRequest && mValueBindingRequest->settingName == name) return *this;
+    clearValueBinding();
     mValueBindingRequest = ValueBindingRequest{std::move(name)};
     return *this;
 }

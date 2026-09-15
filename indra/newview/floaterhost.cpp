@@ -45,7 +45,7 @@ public:
             const Vec2 authoredSize{authoredRect->w, authoredRect->h};
             Rect replacementRect = wasMinimized ? current->expandedRect() : current->rect();
             const bool preserveSize =
-                preserveUserResizeOnReload(current->resizeable(), candidate->resizeable(), {current->authoredSize(), current->authoredContentSize()},
+                preserveUserResizeOnReload(current->resizable(), candidate->resizable(), {current->authoredSize(), current->authoredContentSize()},
                                            {authoredSize, candidate->authoredContentSize()});
             if (!preserveSize) {
                 replacementRect.w = authoredSize.x;

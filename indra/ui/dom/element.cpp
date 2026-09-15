@@ -12,6 +12,7 @@
 #include "dom/mutation.h"
 #include "dom/text.h"
 #include "event/eventcallinternal.h"
+#include "html/elementnames.h"
 #include "layout/engine.h"
 #include "paint/paintcontext.h"
 #include "style/computedstyle.h"
@@ -25,6 +26,19 @@ namespace radia::ui {
 namespace {
 bool isASCIIWhitespace(char character) {
     return character == '\t' || character == '\n' || character == '\f' || character == '\r' || character == ' ';
+}
+
+bool isValidClassToken(std::string_view className) {
+    return !className.empty() && std::none_of(className.begin(), className.end(), isASCIIWhitespace);
+}
+
+std::string serializeClassTokens(const std::vector<std::string>& classes) {
+    std::string result;
+    for (const std::string& name : classes) {
+        if (!result.empty()) result += ' ';
+        result += name;
+    }
+    return result;
 }
 } // namespace
 
@@ -77,11 +91,6 @@ void indexElementsInScope(const Element& element, ConstElementIdIndex& index) {
     for (const Element* child : element.children())
         if (child->idScopeRoot()) index.add(*child);
         else indexElementsInScope(*child, index);
-}
-
-const std::string* styleAttribute(const Element& element, std::string_view name) {
-    const auto found = element.mStyleAttributes.find(std::string(name));
-    return found == element.mStyleAttributes.end() ? nullptr : &found->second;
 }
 
 Node& appendText(Element& parent, std::string value) {
@@ -151,8 +160,7 @@ FragmentPtr parseResolvedHTML(std::string html) {
 }
 
 void replaceTextContent(Element& element, std::string text) {
-    if (text.empty()) NodeMutation::replaceChildren(element);
-    else NodeMutation::replaceChildren(element, std::make_unique<Text>(std::move(text)));
+    NodeMutation::replaceChildren(element, std::make_unique<Text>(std::move(text)));
 }
 } // namespace
 
@@ -160,6 +168,74 @@ Element::Element(std::string_view elementName)
     : Node(NodeType::Element), mElementName(elementName), mPrivate(std::make_unique<ElementPrivateData>()) {}
 Element::~Element() {
     if (Surface* currentSurface = surface()) currentSurface->elementOwnerDestroyed(*this);
+}
+
+Element::ClassList Element::classList() {
+    return ClassList(*this);
+}
+
+Element::ConstClassList Element::classList() const {
+    return ConstClassList(*this);
+}
+
+Element::ClassList& Element::ClassList::add(std::string_view className) {
+    if (!isValidClassToken(className)) return *this;
+    std::string ownedClass(className);
+    if (!mElement.mClasses.emplace(ownedClass).second) return *this;
+    mElement.mClassOrder.push_back(std::move(ownedClass));
+    mElement.setAttributeValue("class", serializeClassTokens(mElement.mClassOrder));
+    mElement.invalidateStyleTree();
+    return *this;
+}
+
+Element::ClassList& Element::ClassList::remove(std::string_view className) {
+    if (mElement.mClasses.erase(std::string(className)) == 0) return *this;
+    mElement.mClassOrder.erase(std::remove(mElement.mClassOrder.begin(), mElement.mClassOrder.end(), className), mElement.mClassOrder.end());
+    mElement.setAttributeValue("class", serializeClassTokens(mElement.mClassOrder));
+    mElement.invalidateStyleTree();
+    return *this;
+}
+
+bool Element::ClassList::toggle(std::string_view className) {
+    if (contains(className)) {
+        remove(className);
+        return false;
+    }
+    if (!isValidClassToken(className)) return false;
+    add(className);
+    return true;
+}
+
+bool Element::ClassList::replace(std::string_view oldClass, std::string_view newClass) {
+    if (!isValidClassToken(oldClass) || !isValidClassToken(newClass)) return false;
+
+    const auto oldSetEntry = mElement.mClasses.find(std::string(oldClass));
+    if (oldSetEntry == mElement.mClasses.end()) return false;
+    if (oldClass == newClass) return true;
+
+    const auto oldOrderEntry = std::find(mElement.mClassOrder.begin(), mElement.mClassOrder.end(), oldClass);
+    if (oldOrderEntry == mElement.mClassOrder.end()) return false;
+
+    if (mElement.mClasses.find(std::string(newClass)) != mElement.mClasses.end()) {
+        mElement.mClasses.erase(oldSetEntry);
+        mElement.mClassOrder.erase(oldOrderEntry);
+    } else {
+        mElement.mClasses.erase(oldSetEntry);
+        mElement.mClasses.emplace(std::string(newClass));
+        *oldOrderEntry = std::string(newClass);
+    }
+
+    mElement.setAttributeValue("class", serializeClassTokens(mElement.mClassOrder));
+    mElement.invalidateStyleTree();
+    return true;
+}
+
+bool Element::ClassList::contains(std::string_view className) const {
+    return mElement.mClasses.find(std::string(className)) != mElement.mClasses.end();
+}
+
+bool Element::ConstClassList::contains(std::string_view className) const {
+    return mElement.mClasses.find(std::string(className)) != mElement.mClasses.end();
 }
 
 void Element::setAttributeValue(std::string name, std::optional<std::string> value) {
@@ -173,17 +249,27 @@ void Element::removeAttributeValue(std::string_view name) {
                       mAttributes.end());
 }
 
-const Element::Attribute* Element::attribute(std::string_view name) const noexcept {
-    const auto found = std::find_if(mAttributes.begin(), mAttributes.end(), [name](const Attribute& attribute) { return attribute.name == name; });
+const Element::Attribute* Element::attribute(std::string_view name) const {
+    const std::string canonicalName = canonicalizeHTMLName(name);
+    const auto found = std::find_if(mAttributes.begin(), mAttributes.end(),
+                                    [&canonicalName](const Attribute& attribute) { return attribute.name == canonicalName; });
     return found == mAttributes.end() ? nullptr : &*found;
 }
 
-bool Element::hasAttribute(std::string_view name) const noexcept {
+bool Element::hasAttribute(std::string_view name) const {
     return attribute(name) != nullptr;
 }
 
 void Element::setAttribute(std::string name, std::optional<std::string> value) {
-    if (name.empty()) return;
+    name = canonicalizeHTMLName(name);
+    if (name.empty()) {
+        LL_WARNS("UI") << "Ignoring an empty HTML attribute name." << LL_ENDL;
+        return;
+    }
+    if (name == "visibility") {
+        LL_WARNS("UI") << "Ignoring unsupported HTML attribute: visibility." << LL_ENDL;
+        return;
+    }
 
     if (name == "id") {
         mId = value.value_or(std::string());
@@ -193,6 +279,7 @@ void Element::setAttribute(std::string name, std::optional<std::string> value) {
     }
     if (name == "class") {
         mClasses.clear();
+        mClassOrder.clear();
         if (value) {
             std::size_t begin = 0;
             while (begin < value->size()) {
@@ -202,11 +289,15 @@ void Element::setAttribute(std::string name, std::optional<std::string> value) {
                     while (cursor < value->size() && !isASCIIWhitespace((*value)[cursor])) ++cursor;
                     return cursor;
                 }();
-                if (end > begin) mClasses.emplace(value->substr(begin, end - begin));
+                if (end > begin) {
+                    std::string token = value->substr(begin, end - begin);
+                    if (mClasses.emplace(token).second) mClassOrder.push_back(std::move(token));
+                }
                 begin = end;
             }
         }
-        setAttributeValue(std::move(name), std::move(value));
+        if (value) setAttributeValue(std::move(name), serializeClassTokens(mClassOrder));
+        else setAttributeValue(std::move(name), std::nullopt);
         invalidateStyleTree();
         return;
     }
@@ -232,26 +323,20 @@ void Element::setAttribute(std::string name, std::optional<std::string> value) {
         if (Surface* currentSurface = surface()) currentSurface->elementBecameUnavailable(*this);
         return;
     }
-    if (name == "visibility") {
-        if (value) {
-            if (*value == "hidden") mVisibilityOverride = Visibility::Hidden;
-            else if (*value == "collapse") mVisibilityOverride = Visibility::Collapse;
-            else if (*value == "visible") mVisibilityOverride = Visibility::Visible;
-        }
-        setAttributeValue(std::move(name), std::move(value));
-        if (Surface* currentSurface = surface()) currentSurface->requestHitTestRefresh();
-        invalidateStyleTree();
-        invalidatePaint();
-        if (mVisibilityOverride && *mVisibilityOverride != Visibility::Visible) {
-            if (Surface* currentSurface = surface()) currentSurface->elementBecameUnavailable(*this);
-        }
-        return;
-    }
+    const std::string attributeName = name;
+    const std::optional<std::string> authoredValue = value;
     setAttributeValue(std::move(name), std::move(value));
     invalidateStyleTree();
+    onAttributeSet(attributeName, authoredValue);
 }
 
 void Element::removeAttribute(std::string_view name) {
+    const std::string canonicalName = canonicalizeHTMLName(name);
+    if (canonicalName.empty()) {
+        LL_WARNS("UI") << "Ignoring an empty HTML attribute name." << LL_ENDL;
+        return;
+    }
+    name = canonicalName;
     if (name == "id") {
         mId.clear();
         removeAttributeValue(name);
@@ -260,6 +345,7 @@ void Element::removeAttribute(std::string_view name) {
     }
     if (name == "class") {
         mClasses.clear();
+        mClassOrder.clear();
         removeAttributeValue(name);
         invalidateStyleTree();
         return;
@@ -282,16 +368,9 @@ void Element::removeAttribute(std::string_view name) {
         invalidatePaint();
         return;
     }
-    if (name == "visibility") {
-        mVisibilityOverride = Visibility::Visible;
-        removeAttributeValue(name);
-        if (Surface* currentSurface = surface()) currentSurface->requestHitTestRefresh();
-        invalidateStyleTree();
-        invalidatePaint();
-        return;
-    }
     removeAttributeValue(name);
     invalidateStyleTree();
+    onAttributeRemoved(name);
 }
 
 bool Element::flowBreakBefore() const {
@@ -344,6 +423,28 @@ ConstElementList Element::children() const {
     return result;
 }
 
+bool Element::disabled() const {
+    if (radia::ui::hasState(mStates, ElementState::Disabled)) return true;
+
+    for (const Element* ancestor = parentElement(); ancestor; ancestor = ancestor->parentElement()) {
+        if (ancestor->elementName() != kFieldsetTag.localName || !radia::ui::hasState(ancestor->mStates, ElementState::Disabled)) continue;
+
+        const Element* directChild = this;
+        while (directChild && directChild->parentElement() != ancestor) directChild = directChild->parentElement();
+        if (!directChild || directChild->elementName() != kLegendTag.localName) return true;
+
+        const Element* firstLegend = nullptr;
+        for (const Element* child : ancestor->children()) {
+            if (child->elementName() == kLegendTag.localName) {
+                firstLegend = child;
+                break;
+            }
+        }
+        if (directChild != firstLegend) return true;
+    }
+    return false;
+}
+
 std::uint64_t Element::styleContextRevision() const {
     return mStyleRevision;
 }
@@ -352,18 +453,6 @@ Element& Element::setId(std::string id) {
     mId = std::move(id);
     if (mId.empty()) removeAttributeValue("id");
     else setAttributeValue("id", mId);
-    invalidateStyleTree();
-    return *this;
-}
-
-Element& Element::addClass(std::string className) {
-    mClasses.insert(std::move(className));
-    std::string value;
-    for (const std::string& name : mClasses) {
-        if (!value.empty()) value += ' ';
-        value += name;
-    }
-    setAttributeValue("class", std::move(value));
     invalidateStyleTree();
     return *this;
 }
@@ -437,10 +526,6 @@ Element& Element::disabled(bool disabled) {
 Element& Element::setVisibility(Visibility visibility) {
     if (mVisibilityOverride && *mVisibilityOverride == visibility) return *this;
     mVisibilityOverride = visibility;
-    if (visibility == Visibility::Visible) removeAttributeValue("visibility");
-    else
-        setAttributeValue("visibility",
-                          visibility == Visibility::Hidden ? std::optional<std::string>("hidden") : std::optional<std::string>("collapse"));
     removeAttributeValue("hidden");
     if (Surface* currentSurface = surface()) currentSurface->requestHitTestRefresh();
     invalidateStyleTree();
@@ -452,7 +537,9 @@ Element& Element::setVisibility(Visibility visibility) {
 }
 
 Element& Element::setHidden(bool hidden) {
-    return setVisibility(hidden ? Visibility::Hidden : Visibility::Visible);
+    if (hidden) setAttribute("hidden");
+    else removeAttribute("hidden");
+    return *this;
 }
 
 Node* Element::append(NodePtr child) {
@@ -556,8 +643,7 @@ Element& Element::setDisplayNone(bool displayNone) {
 
 Element& Element::textContent(std::string text) {
     mLocalizedContent.reset();
-    if (text.empty()) NodeMutation::replaceChildren(*this);
-    else NodeMutation::replaceChildren(*this, std::make_unique<Text>(std::move(text)));
+    NodeMutation::replaceChildren(*this, std::make_unique<Text>(std::move(text)));
     return *this;
 }
 

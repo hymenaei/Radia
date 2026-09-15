@@ -15,14 +15,7 @@ namespace radia::ui {
 class Element;
 class ElementBuildContext;
 
-enum class InlineValidationKind {
-    UnsupportedElement,
-    NotImplemented,
-    AttributeUnknown,
-    KbdShortcutRequired,
-    KbdShortcutInvalid,
-    ChildrenUnsupported
-};
+enum class InlineValidationKind { UnsupportedElement, AttributeUnknown, KbdShortcutRequired, KbdShortcutInvalid, ChildrenUnsupported };
 
 struct InlineValidationFinding {
     InlineValidationKind kind;

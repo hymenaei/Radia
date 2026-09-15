@@ -5,6 +5,7 @@
 
 #include "linden_common.h"
 #include "html/label.h"
+#include <type_traits>
 #include "dom/elementinternal.h"
 #include "html/elementnames.h"
 #include "localization.h"
@@ -30,9 +31,39 @@ bool isLabelable(const Element& element) {
     return definition && definition->labelable;
 }
 
+template<typename LabelT> auto findImplicitLabelTarget(LabelT& label) {
+    using ElementPointer = std::conditional_t<std::is_const_v<LabelT>, const Element*, Element*>;
+    ElementPointer result = nullptr;
+    std::size_t count = 0;
+    const auto visit = [&](auto&& self, auto& current) -> void {
+        for (auto* child : current.children()) {
+            if (isLabelable(*child)) {
+                ++count;
+                if (count == 1) result = child;
+            }
+            if (!child->idScopeRoot()) self(self, *child);
+        }
+    };
+    visit(visit, label);
+    return count == 1 ? result : nullptr;
+}
+
+std::size_t implicitLabelTargetCount(const Element& label) {
+    std::size_t count = 0;
+    const auto visit = [&](auto&& self, const Element& current) -> void {
+        for (const Element* child : current.children()) {
+            if (isLabelable(*child)) ++count;
+            if (!child->idScopeRoot()) self(self, *child);
+        }
+    };
+    visit(visit, label);
+    return count;
+}
+
 template<typename LabelT, typename IndexT> auto findLabelTarget(LabelT& label) {
     const Element::Attribute* targetAttribute = label.attribute("for");
-    if (!targetAttribute || !targetAttribute->value || targetAttribute->value->empty()) return static_cast<typename IndexT::ElementPointer>(nullptr);
+    if (!targetAttribute) return findImplicitLabelTarget(label);
+    if (!targetAttribute->value || targetAttribute->value->empty()) return static_cast<typename IndexT::ElementPointer>(nullptr);
 
     IndexT index;
     detail::indexElementsInScope(*scopeRootForLabel(label), index);
@@ -90,8 +121,12 @@ ResourceElementDefinition detail::ElementDefinitions::label() {
             const ElementAttribute* attribute = input.find("for");
             const SourceRange& sourceRange = attribute ? attribute->source : input.source;
             if (!attribute) {
-                context.error("layout.label.for_required", "HTMLLabelElement requires a for element id.", input.sourceName, sourceRange.begin.line,
-                              sourceRange.begin.column);
+                if (findImplicitLabelTarget(label)) return;
+                const bool ambiguous = implicitLabelTargetCount(label) > 1;
+                context.error(ambiguous ? "layout.label.target_ambiguous" : "layout.label.for_required",
+                              ambiguous ? "HTMLLabelElement has more than one labelable descendant."
+                                        : "HTMLLabelElement requires a for element id or one labelable descendant.",
+                              input.sourceName, sourceRange.begin.line, sourceRange.begin.column);
                 return;
             }
 

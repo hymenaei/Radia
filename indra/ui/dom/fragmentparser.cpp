@@ -57,8 +57,8 @@ bool isVoidElement(const Element& element) {
 }
 
 bool isFragmentBooleanAttribute(HTMLTag tag, std::string_view name) {
-    if (name == "disabled") return true;
-    return (tag == HTMLTag::Input && (name == "switch" || name == "checked")) || (tag == HTMLTag::Floater && name == "resizeable");
+    if (name == "disabled" || name == "hidden") return true;
+    return (tag == HTMLTag::Input && (name == "switch" || name == "checked")) || (tag == HTMLTag::Floater && name == "resizable");
 }
 
 bool applyFragmentAttributes(Element& element, HTMLTag tag, std::string_view elementName, const std::vector<Attribute>& attributes) {
@@ -158,7 +158,7 @@ private:
     std::string parseText() {
         const std::size_t end = mHTML.find('<', mOffset);
         const std::size_t textEnd = end == std::string_view::npos ? mHTML.size() : end;
-        std::string result = LLStringFn::xml_decode(std::string(mHTML.substr(mOffset, textEnd - mOffset)));
+        std::string result = decodeHTMLReferences(mHTML.substr(mOffset, textEnd - mOffset));
         mOffset = textEnd;
         return result;
     }
@@ -207,7 +207,7 @@ private:
             while (mOffset < mHTML.size() && !isHTMLWhitespace(mHTML[mOffset]) && mHTML[mOffset] != '>') ++mOffset;
             attribute.value = std::string(mHTML.substr(begin, mOffset - begin));
         }
-        attribute.value = LLStringFn::xml_decode(attribute.value, true);
+        attribute.value = decodeHTMLReferences(attribute.value);
         return true;
     }
 

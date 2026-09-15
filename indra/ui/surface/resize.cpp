@@ -108,7 +108,7 @@ HTMLFloaterElement* Surface::resizeFloaterAt(const Vec2& point, std::uint8_t& ed
                 continue;
             }
             if (!floater->rect().contains(point)) continue;
-            if (!floater->resizeable() || floater->minimized()) return nullptr;
+            if (!floater->resizable() || floater->minimized() || floater->disabled()) return nullptr;
             const ResizeEdges hit = resizeEdgesAt(floater->rect(), point);
             if (hit == ResizeEdges::NoEdges) return nullptr;
             edges = static_cast<std::uint8_t>(hit);

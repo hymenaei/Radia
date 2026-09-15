@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <string_view>
 #include "html/elementnames.h"
-#include "llstring.h"
 
 namespace radia::ui {
 namespace {
@@ -112,7 +111,7 @@ private:
             MutableSourceContent content;
             content.source.begin = mLocation;
             content.source.end = locationAt(textEnd);
-            content.text = LLStringFn::xml_decode(std::string(mHTML.substr(begin, textEnd - begin)), true);
+            content.text = decodeHTMLReferences(mHTML.substr(begin, textEnd - begin));
             MutableSourceContent* previous = mNodeStack.back()->content.empty() ? nullptr : &mNodeStack.back()->content.back();
             if (previous && previous->isText()) {
                 previous->text += content.text;
@@ -189,7 +188,7 @@ private:
                     while (cursor < mHTML.size() && !isHTMLWhitespace(mHTML[cursor]) && mHTML[cursor] != '>') ++cursor;
                     value = std::string(mHTML.substr(valueBegin, cursor - valueBegin));
                 }
-                value = LLStringFn::xml_decode(value, true);
+                value = decodeHTMLReferences(value);
             }
 
             SourceAttribute attribute;

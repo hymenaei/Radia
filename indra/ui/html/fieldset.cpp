@@ -90,9 +90,9 @@ ResourceElementDefinition detail::ElementDefinitions::fieldset() {
     ScopedElementDefinition legend;
     legend.elementName = kLegendTag.localName;
     legend.acceptedTags = {
-        HTMLTag::Abbr, HTMLTag::B,    HTMLTag::Br, HTMLTag::Button, HTMLTag::Cite,  HTMLTag::Code,   HTMLTag::Dfn,
-        HTMLTag::Del,  HTMLTag::Em,   HTMLTag::I,  HTMLTag::Input,  HTMLTag::Ins,   HTMLTag::Kbd,    HTMLTag::Label,
-        HTMLTag::Link, HTMLTag::Mark, HTMLTag::Q,  HTMLTag::S,      HTMLTag::Small, HTMLTag::Strong, HTMLTag::U,
+        HTMLTag::Abbr, HTMLTag::B,  HTMLTag::Br, HTMLTag::Button, HTMLTag::Cite,   HTMLTag::Code, HTMLTag::Dfn,
+        HTMLTag::Del,  HTMLTag::Em, HTMLTag::I,  HTMLTag::Input,  HTMLTag::Ins,    HTMLTag::Kbd,  HTMLTag::Label,
+        HTMLTag::Mark, HTMLTag::Q,  HTMLTag::S,  HTMLTag::Small,  HTMLTag::Strong, HTMLTag::U,
     };
     legend.create = [](Element& fieldset, ElementBuildContext& context, const std::string& sourceName, std::size_t line,
                        std::size_t column) -> Element* {

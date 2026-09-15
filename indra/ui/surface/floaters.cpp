@@ -151,7 +151,7 @@ void Surface::placeFloater(HTMLFloaterElement& floater, const Rect& rect) {
     if (!managesFloater(floater)) return;
     const ElementObservation floaterObservation = observe(floater);
     Rect placed = rect;
-    if (floater.resizeable()) {
+    if (floater.resizable()) {
         const Vec2 minimum = minimumFloaterSize(floater);
         if (!floaterObservation.layoutValid() || !floaterObservation.styleValid() || !isRootedInSurface(floaterObservation.get())) return;
         placed.w = std::min(mViewport.w, std::max(placed.w, minimum.x));

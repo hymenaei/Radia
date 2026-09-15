@@ -55,6 +55,7 @@ const Node* Node::nextSibling() const noexcept {
 Node* Node::before(NodePtr node) {
     Node* parent = parentNode();
     if (!parent) return nullptr;
+    llassert_always(!parent->asDocument());
     if (Element* element = parent->asElement()) return element->insertBefore(std::move(node), this);
     if (Fragment* fragment = parent->asFragment()) return NodeMutation::insert(*fragment, std::move(node), this);
     return nullptr;
@@ -63,6 +64,7 @@ Node* Node::before(NodePtr node) {
 Node* Node::before(FragmentPtr fragment) {
     Node* parent = parentNode();
     if (!parent) return nullptr;
+    llassert_always(!parent->asDocument());
     if (Element* element = parent->asElement()) return element->insertBefore(std::move(fragment), this);
     if (Fragment* parentFragment = parent->asFragment()) return NodeMutation::insert(*parentFragment, std::move(fragment), this);
     return nullptr;
@@ -71,6 +73,7 @@ Node* Node::before(FragmentPtr fragment) {
 Node* Node::after(NodePtr node) {
     Node* parent = parentNode();
     if (!parent) return nullptr;
+    llassert_always(!parent->asDocument());
     Node* reference = nextSibling();
     if (Element* element = parent->asElement()) return element->insertBefore(std::move(node), reference);
     if (Fragment* fragment = parent->asFragment()) return NodeMutation::insert(*fragment, std::move(node), reference);
@@ -80,6 +83,7 @@ Node* Node::after(NodePtr node) {
 Node* Node::after(FragmentPtr fragment) {
     Node* parent = parentNode();
     if (!parent) return nullptr;
+    llassert_always(!parent->asDocument());
     Node* reference = nextSibling();
     if (Element* element = parent->asElement()) return element->insertBefore(std::move(fragment), reference);
     if (Fragment* parentFragment = parent->asFragment()) return NodeMutation::insert(*parentFragment, std::move(fragment), reference);
@@ -89,6 +93,7 @@ Node* Node::after(FragmentPtr fragment) {
 NodePtr Node::replaceWith(NodePtr node) {
     Node* parent = parentNode();
     if (!parent) return nullptr;
+    llassert_always(!parent->asDocument());
     if (Element* element = parent->asElement()) return element->replaceNode(*this, std::move(node));
     if (Fragment* fragment = parent->asFragment()) return NodeMutation::replace(*fragment, *this, std::move(node));
     return nullptr;
@@ -97,6 +102,7 @@ NodePtr Node::replaceWith(NodePtr node) {
 NodePtr Node::replaceWith(FragmentPtr fragment) {
     Node* parent = parentNode();
     if (!parent) return nullptr;
+    llassert_always(!parent->asDocument());
     if (Element* element = parent->asElement()) return element->replaceNode(*this, std::move(fragment));
     if (Fragment* parentFragment = parent->asFragment()) return NodeMutation::replace(*parentFragment, *this, std::move(fragment));
     return nullptr;

@@ -341,7 +341,7 @@ TEST(SurfaceTest, SuppliesBackgroundAttachmentContext) {
     HTMLPanelElement* panelPtr = panel.get();
     panel->setRect({0.f, 0.f, 100.f, 100.f});
     auto content = makeElement<HTMLPanelElement>();
-    content->addClass("fixed");
+    content->classList().add("fixed");
     content->setRect({0.f, 0.f, 100.f, 200.f});
     panel->append(std::move(content));
     surface.mount(std::move(panel));
@@ -2331,7 +2331,8 @@ TEST(SurfaceTest, HonorsVisibilityStyles) {
     auto add = [&](float x, const char* className) {
         auto probe = std::make_unique<PaintProbe>();
         PaintProbe* result = probe.get();
-        probe->setRect({x, 10.f, 20.f, 20.f}).addClass(className);
+        probe->setRect({x, 10.f, 20.f, 20.f});
+        probe->classList().add(className);
         surface.mount(std::move(probe));
         return result;
     };
@@ -2401,7 +2402,7 @@ TEST(SurfaceTest, ReflowsAfterTextAlign) {
     panel->setRect({0.f, 0.f, 100.f, 20.f}).setPointerEvents(true);
     auto child = makeElement<HTMLLabelElement>("child");
     HTMLLabelElement* childTarget = child.get();
-    child->addClass("inline");
+    child->classList().add("inline");
     panel->append(std::move(child));
     surface.mount(std::move(panel));
 

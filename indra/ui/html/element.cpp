@@ -22,24 +22,6 @@ void HTMLElement::setKeybinding(std::string keybindingId) {
     else setAttribute("shortcut", mKeybindingId);
 }
 
-std::string HTMLElement::textContent() const {
-    if (elementName() == kBrTag.localName) return "\n";
-    if (elementName() != kKbdTag.localName) return Element::textContent();
-
-    std::string result;
-    bool first = true;
-    for (const Node* child : childNodes()) {
-        if (const Element* element = child->asElement()) {
-            if (!first) result += ' ';
-            result += element->textContent();
-        } else if (const Text* text = child->asText()) {
-            result += text->data();
-        }
-        first = false;
-    }
-    return result;
-}
-
 void HTMLElement::onLocaleChanged(const System& system) {
     Element::onLocaleChanged(system);
     if (elementName() == kKbdTag.localName && !mKeybindingId.empty()) rebuildKeybindingContent(system);

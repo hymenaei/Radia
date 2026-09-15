@@ -25,6 +25,18 @@ namespace radia::ui {
 using detail::resizedRect;
 using detail::ResizeEdges;
 
+namespace {
+class AttributeUpdateGuard final {
+public:
+    explicit AttributeUpdateGuard(bool& updating) : mUpdating(updating), mPrevious(updating) { mUpdating = true; }
+    ~AttributeUpdateGuard() { mUpdating = mPrevious; }
+
+private:
+    bool& mUpdating;
+    bool mPrevious;
+};
+} // namespace
+
 HTMLMinimizeButtonElement::HTMLMinimizeButtonElement() : HTMLButtonElement(kMinimizeTag.localName) {}
 
 HTMLCloseButtonElement::HTMLCloseButtonElement() : HTMLButtonElement(kCloseTag.localName) {}
@@ -64,14 +76,23 @@ void clearAuthoredCallbacks(Element& root, const Element& scopeRoot) {
 
 HTMLFloaterElement::HTMLFloaterElement() : HTMLElement(kFloaterTag.localName) {}
 
+void HTMLFloaterElement::onAttributeSet(std::string_view name, const std::optional<std::string>&) {
+    if (!mUpdatingAttribute && name == "resizable") mResizable = true;
+}
+
+void HTMLFloaterElement::onAttributeRemoved(std::string_view name) {
+    if (!mUpdatingAttribute && name == "resizable") mResizable = false;
+}
+
 std::string HTMLFloaterElement::title() const {
     return mTitleElement ? mTitleElement->textContent() : std::string();
 }
 
-HTMLFloaterElement& HTMLFloaterElement::setResizeable(bool value) {
-    mResizeable = value;
-    if (value) setAttribute("resizeable");
-    else removeAttribute("resizeable");
+HTMLFloaterElement& HTMLFloaterElement::setResizable(bool value) {
+    AttributeUpdateGuard guard(mUpdatingAttribute);
+    mResizable = value;
+    if (value) setAttribute("resizable");
+    else removeAttribute("resizable");
     return *this;
 }
 
@@ -108,7 +129,7 @@ void HTMLFloaterElement::refreshAuthoredStructure() {
 
 ResourceElementDefinition detail::ElementDefinitions::floater() {
     return defineElement<HTMLFloaterElement>(kFloaterTag.localName)
-        .attributes({booleanAttribute("resizeable", &HTMLFloaterElement::setResizeable)})
+        .attributes({booleanAttribute("resizable", &HTMLFloaterElement::setResizable)})
         .composition([](const ElementBuildInput& input, HTMLFloaterElement& floater, const ElementScopeContext&, ElementBuildContext& context) {
             const std::size_t headCount = countAuthoredElements(floater, kHeadTag.localName);
             const std::size_t bodyCount = countAuthoredElements(floater, kBodyTag.localName);
@@ -324,7 +345,7 @@ Vec2 HTMLFloaterElement::authoredSize() const {
 
 bool HTMLFloaterElement::beginResizeInteraction(const PointerEvent& event, std::uint8_t edges, const Vec2& minimum,
                                                 const std::optional<Rect>& bounds) {
-    if (event.button != PointerButton::Left || !mResizeable || mMinimized || edges == 0) return false;
+    if (event.button != PointerButton::Left || !mResizable || mMinimized || edges == 0) return false;
     mInteraction = FloaterInteraction::Resize;
     mResizeInteraction = {edges, event.position, rect(), minimum, bounds};
     return true;

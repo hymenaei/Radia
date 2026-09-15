@@ -24,7 +24,6 @@ namespace radia::ui { struct StyleRuleSet; }
 
 namespace radia::ui::detail {
 using Node = radia::ui::Node;
-struct DocumentIdentity {};
 
 class ElementConstructionAccess {
 public:
@@ -89,8 +88,6 @@ struct ElementPrivateData {
 class NodeAccess {
 public:
     static std::weak_ptr<char> lifetime(const Node& node) { return node.mLifetime; }
-    static const std::shared_ptr<DocumentIdentity>& documentIdentity(const Node& node) { return node.mDocumentIdentity; }
-    static void setDocumentIdentity(Node& node, std::shared_ptr<DocumentIdentity> identity) { node.mDocumentIdentity = std::move(identity); }
     static void setParent(Node& node, Node* parent) {
         node.mParentNode = parent;
         node.mParent = parent ? parent->asElement() : nullptr;
@@ -112,16 +109,6 @@ public:
     static const ElementLayoutCache& layoutCache(const Element& element) { return element.mPrivate->layoutCache; }
     static const Rect& scrollableOverflow(const Element& element) { return element.mScrollableOverflow; }
     static const Rect& scrollport(const Element& element) { return element.mScrollport; }
-    static std::map<std::string, std::string>& styleAttributes(Element& element) { return element.mStyleAttributes; }
-    static const std::map<std::string, std::string>& styleAttributes(const Element& element) { return element.mStyleAttributes; }
-    static void setStyleAttribute(Element& element, std::string name, std::string value) {
-        element.mStyleAttributes[std::move(name)] = std::move(value);
-        element.invalidateStyleTree(true, true);
-    }
-    static void removeStyleAttribute(Element& element, std::string_view name) {
-        element.mStyleAttributes.erase(std::string(name));
-        element.invalidateStyleTree(true, true);
-    }
     static void setIdScopeRoot(Element& element) { element.setIdScopeRoot(true); }
     static void setState(Element& element, ElementState state, bool enabled) { element.setState(state, enabled); }
 };
@@ -230,7 +217,6 @@ private:
     const ElementInternalAccess::NodeOwners* mNodes = nullptr;
 };
 
-const std::string* styleAttribute(const Element& element, std::string_view name);
 Element* findElementInScope(Element& element, std::string_view id);
 const Element* findElementInScope(const Element& element, std::string_view id);
 struct ElementIdIndex {

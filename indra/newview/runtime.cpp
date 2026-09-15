@@ -460,7 +460,7 @@ private:
         if (!placement) return;
         const auto& restored = *placement;
         Rect saved{restored.x, restored.y, floater.rect().w, floater.rect().h};
-        if (floater.resizeable() && restored.size) {
+        if (floater.resizable() && restored.size) {
             saved.w = restored.size->width;
             saved.h = restored.size->height;
         }

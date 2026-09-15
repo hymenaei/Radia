@@ -15,6 +15,12 @@ HTMLButtonElement::HTMLButtonElement() : HTMLButtonElement(kButtonTag.localName)
 
 HTMLButtonElement::HTMLButtonElement(std::string_view elementName) : HTMLElement(elementName) {}
 
+AccessibleSemantics HTMLButtonElement::accessibleSemantics() const {
+    AccessibleSemantics result = HTMLElement::accessibleSemantics();
+    result.role = AccessibleRole::Button;
+    return result;
+}
+
 void HTMLButtonElement::constrainResolvedStyle(ComputedStyle& style) const {
     style.alignContentBlockCenter = style.appearance == AppearanceMode::Auto && style.display == DisplayMode::InlineBlock;
 }

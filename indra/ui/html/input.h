@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <functional>
 #include <map>
 #include <memory>
@@ -27,6 +28,7 @@ struct InputValueState {
 };
 
 class HTMLInputElement : public HTMLElement {
+    friend class dom_detail::FragmentParser;
     friend class detail::ElementDefinitions;
     friend class detail::ElementConstructionAccess;
     friend class detail::HTMLElementFactory;
@@ -61,6 +63,7 @@ public:
 
     bool defaultPointerEvents() const override { return true; }
     bool focusable() const override { return true; }
+    AccessibleSemantics accessibleSemantics() const override;
     Vec2 intrinsicSize(const StyleSheet& styleSheet, const ComputedStyle& style, const TextMetrics& textMetrics,
                        const IntrinsicSizeConstraints& constraints = IntrinsicSizeConstraints()) const override;
     void paint(PaintContext& context, const ComputedStyle& style, float scale) const override;
@@ -110,6 +113,7 @@ private:
     std::function<void(bool)> mOnCheckedChanged;
     std::optional<ValueBindingRequest> mValueBindingRequest;
     ValueBindingRef<bool> mBinding;
+    std::weak_ptr<ValueBindingSubscription> mBindingSubscription;
     ValueState<bool> mValueState{false, false, std::nullopt};
     std::map<std::size_t, ValueStateObserver> mValueObservers;
     std::size_t mNextValueObserver = 1;

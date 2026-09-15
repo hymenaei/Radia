@@ -14,13 +14,10 @@
 #include "dom/fragment.h"
 #include "dom/fragmentinternal.h"
 #include "dom/text.h"
-#include "html/element.h"
 #include "html/elementfactory.h"
 #include "html/elementnames.h"
-#include "html/floater.h"
-#include "html/input.h"
-#include "html/label.h"
 #include "llstring.h"
+#include "resource/elementdefinition.h"
 
 namespace radia::ui::dom_detail {
 using detail::appendText;
@@ -58,22 +55,37 @@ bool isLineBreakElement(const Element& element) {
 bool isVoidElement(const Element& element) {
     return isVoidHTMLTag(lookupHTMLTag(element.elementName()));
 }
-} // namespace
 
-bool isValidHTMLAttribute(HTMLTag tag, std::string_view name, bool hasValue, std::string_view value) {
-    if (name == "id") return hasValue && !value.empty() && !containsHTMLWhitespace(value);
-    if (name == "class") return true;
-    if (name == "disabled" || name == "hidden") return true;
-    if (name == "visibility") return hasValue && (value == "visible" || value == "hidden" || value == "collapse");
-    if (name == "shortcut") return tag == HTMLTag::Kbd && hasValue && !value.empty();
-    if (tag == HTMLTag::Input) {
-        if (name == "type" || name == "name") return hasValue;
-        if (name == "switch" || name == "checked") return true;
-    }
-    if (tag == HTMLTag::Label && name == "for") return hasValue && !value.empty() && !containsHTMLWhitespace(value);
-    if (tag == HTMLTag::Floater && name == "resizeable") return true;
-    return false;
+bool isFragmentBooleanAttribute(HTMLTag tag, std::string_view name) {
+    if (name == "disabled") return true;
+    return (tag == HTMLTag::Input && (name == "switch" || name == "checked")) || (tag == HTMLTag::Floater && name == "resizeable");
 }
+
+bool applyFragmentAttributes(Element& element, HTMLTag tag, std::string_view elementName, const std::vector<Attribute>& attributes) {
+    ResourceBuildResult result;
+    ElementBuildContext context(result, nullptr);
+    ElementBuildInput input;
+    input.tag = tag;
+    input.authoredName = elementName;
+    input.sourceName = "<fragment>";
+    input.attributes.reserve(attributes.size());
+    for (const Attribute& attribute : attributes) {
+        if (!isRegisteredHTMLAttribute(tag, attribute.name) || attribute.name == "filename") return false;
+        ElementAttribute value{attribute.name, attribute.value, attribute.hasValue, {}};
+        if (isFragmentBooleanAttribute(tag, attribute.name)) {
+            value.value = "true";
+            value.hasValue = true;
+        }
+        input.attributes.emplace(attribute.name, std::move(value));
+    }
+
+    const ResourceElementDefinition* definition = findElementDefinition(tag);
+    if (!definition || definition->scopedOnly) return false;
+    applyCommonElementAttributes(input, element, context);
+    applyElementDefinitionAttributes(*definition, input, element, context);
+    return result.warnings.empty() && !result.hasErrors();
+}
+} // namespace
 
 class FragmentSerializer final {
 public:
@@ -143,53 +155,6 @@ public:
     }
 
 private:
-    static bool applyAttribute(Element& element, const Attribute& attribute) {
-        const std::optional<std::string> value = attribute.hasValue ? std::optional<std::string>(attribute.value) : std::nullopt;
-        if (!isValidHTMLAttribute(lookupHTMLTag(element.elementName()), attribute.name, attribute.hasValue, attribute.value)) return false;
-
-        if (attribute.name == "id" || attribute.name == "class" || attribute.name == "disabled" || attribute.name == "hidden") {
-            element.setAttribute(attribute.name, value);
-            return true;
-        }
-        if (attribute.name == "visibility") {
-            element.setAttribute(attribute.name, value);
-            return true;
-        }
-        if (attribute.name == "shortcut") {
-            auto* htmlElement = dynamic_cast<HTMLElement*>(&element);
-            if (!htmlElement || element.elementName() != kKbdTag.localName) return false;
-            htmlElement->setKeybinding(attribute.value);
-            return true;
-        }
-        if (auto* input = dynamic_cast<HTMLInputElement*>(&element)) {
-            if (attribute.name == "type") {
-                input->type(attribute.value);
-                return true;
-            }
-            if (attribute.name == "name") {
-                input->name(attribute.value);
-                return true;
-            }
-            if (attribute.name == "switch") {
-                input->switchMode(true);
-                return true;
-            }
-            if (attribute.name == "checked") {
-                input->checked(true);
-                return true;
-            }
-        }
-        if (auto* label = dynamic_cast<HTMLLabelElement*>(&element); label && attribute.name == "for") {
-            label->setTargetId(attribute.value);
-            return true;
-        }
-        if (auto* floater = dynamic_cast<HTMLFloaterElement*>(&element); floater && attribute.name == "resizeable") {
-            floater->setResizeable(true);
-            return true;
-        }
-        return false;
-    }
-
     std::string parseText() {
         const std::size_t end = mHTML.find('<', mOffset);
         const std::size_t textEnd = end == std::string_view::npos ? mHTML.size() : end;
@@ -251,7 +216,7 @@ private:
         std::string name;
         if (!readName(name)) return nullptr;
         const HTMLTag tag = lookupHTMLTag(name);
-        ElementPtr element = HTMLElementFactory::Create(name);
+        ElementPtr element = HTMLElementFactory::create(name);
         if (!element) return nullptr;
 
         std::vector<Attribute> attributes;
@@ -282,10 +247,7 @@ private:
         }
         if (!closed) return nullptr;
         if (selfClosing && !isVoidHTMLTag(tag)) return nullptr;
-        for (const Attribute& attribute : attributes)
-            if (attribute.name == "type" && !applyAttribute(*element, attribute)) return nullptr;
-        for (const Attribute& attribute : attributes)
-            if (attribute.name != "type" && !applyAttribute(*element, attribute)) return nullptr;
+        if (!applyFragmentAttributes(*element, tag, name, attributes)) return nullptr;
         if (isVoidHTMLTag(tag)) return NodePtr(std::move(element));
 
         bool pendingFlowBreak = false;

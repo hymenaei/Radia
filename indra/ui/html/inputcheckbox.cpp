@@ -54,6 +54,13 @@ ResourceElementDefinition detail::ElementDefinitions::input() {
             const ElementAttribute* setting = input.find("setting");
             const ElementAttribute* checked = input.find("checked");
             const ElementAttribute* switchAttribute = input.find("switch");
+            const ElementAttribute* type = input.find("type");
+            const ElementAttribute* name = input.find("name");
+            if ((type && !type->hasValue) || (name && !name->hasValue)) {
+                const ElementAttribute* attribute = type ? type : name;
+                context.error("layout.input.attribute_value_required", "Input type and name attributes require values.", input.sourceName,
+                              attribute->source.begin.line, attribute->source.begin.column);
+            }
             if (switchAttribute && canonicalizeHTMLName(element.type()) != "checkbox")
                 context.error("layout.input.attribute_type", "The switch attribute requires a checkbox input type.", input.sourceName,
                               switchAttribute->source.begin.line, switchAttribute->source.begin.column);
@@ -62,9 +69,9 @@ ResourceElementDefinition detail::ElementDefinitions::input() {
                 context.error("layout.input.attribute_type", "The checked and setting attributes require a checkable input type.", input.sourceName,
                               attribute->source.begin.line, attribute->source.begin.column);
             }
-            if (setting && setting->value.empty())
-                context.error("layout.value.setting_invalid", "Input setting must not be empty.", input.sourceName, setting->source.begin.line,
-                              setting->source.begin.column);
+            if (setting && (setting->value.empty() || !setting->hasValue || containsHTMLWhitespace(setting->value)))
+                context.error("layout.value.setting_invalid", "Input setting must be non-empty and contain no ASCII whitespace.", input.sourceName,
+                              setting->source.begin.line, setting->source.begin.column);
             if (setting && checked)
                 context.error("layout.value.multiple_sources", "An input cannot declare both setting and checked.", input.sourceName,
                               setting->source.begin.line, setting->source.begin.column);

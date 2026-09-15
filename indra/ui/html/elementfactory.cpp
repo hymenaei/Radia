@@ -16,7 +16,7 @@
 #include "html/panel.h"
 
 namespace radia::ui::detail {
-std::unique_ptr<Element> HTMLElementFactory::Create(std::string_view localName) {
+std::unique_ptr<Element> HTMLElementFactory::create(std::string_view localName) {
     const HTMLTag tag = lookupHTMLTag(localName);
     switch (tag) {
         case HTMLTag::Button: return std::unique_ptr<HTMLButtonElement>(new HTMLButtonElement());

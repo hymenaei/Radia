@@ -53,7 +53,7 @@ void HTMLElement::rebuildKeybindingContent(const System& system) {
     replaceChildren();
     const KeybindingPresentation presentation = system.resolveKeybinding(mKeybindingId);
     for (const std::string& key : presentation.keys) {
-        ElementPtr keyElement = HTMLElementFactory::Create(kKbdTag.localName);
+        ElementPtr keyElement = HTMLElementFactory::create(kKbdTag.localName);
         if (!keyElement) continue;
         appendText(*keyElement, key);
         append(std::move(keyElement));

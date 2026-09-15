@@ -9,6 +9,7 @@
 #include "binding/binder.h"
 #include "dom/elementinternal.h"
 #include "html/elementnames.h"
+#include "html/label.h"
 #include "paint/nativeappearance.h"
 #include "paint/paintcontext.h"
 #include "resource/elementdefinition.h"
@@ -18,6 +19,29 @@
 namespace radia::ui {
 using detail::ElementDefinitions;
 using detail::ElementInternalAccess;
+
+namespace {
+const Element* scopeRootForInput(const HTMLInputElement& input) {
+    const Element* root = &input;
+    while (root->parentElement() && !root->idScopeRoot()) root = root->parentElement();
+    return root;
+}
+
+void appendLabelName(const Element& root, const HTMLInputElement& input, std::string& name) {
+    for (const Node* node : root.childNodes()) {
+        const Element* child = node->asElement();
+        if (!child || child->idScopeRoot()) continue;
+        if (const auto* label = dynamic_cast<const HTMLLabelElement*>(child); label && label->target() == &input) {
+            const std::string labelText = label->textContent();
+            if (!labelText.empty()) {
+                if (!name.empty()) name += ' ';
+                name += labelText;
+            }
+        }
+        appendLabelName(*child, input, name);
+    }
+}
+} // namespace
 
 bool HTMLInputElement::isCheckableType(std::string_view type) {
     const std::string key = canonicalizeHTMLName(type);
@@ -44,6 +68,21 @@ HTMLInputElement::HTMLInputElement()
     setAttribute("type", mType);
 }
 
+AccessibleSemantics HTMLInputElement::accessibleSemantics() const {
+    AccessibleSemantics result = HTMLElement::accessibleSemantics();
+    if (isSwitchType()) result.role = AccessibleRole::Switch;
+    else if (isRadioType()) result.role = AccessibleRole::Radio;
+    else if (isCheckboxType()) result.role = AccessibleRole::Checkbox;
+    else result.role = AccessibleRole::TextInput;
+    result.name.clear();
+    appendLabelName(*scopeRootForInput(*this), *this, result.name);
+    if (isCheckableType(mType)) {
+        result.checked = checked();
+        result.indeterminate = indeterminate();
+    }
+    return result;
+}
+
 void HTMLInputElement::constrainResolvedStyle(ComputedStyle& style) const {
     if (style.appearance != AppearanceMode::Base || !isCheckableType(mType) || isSwitchType() || style.borderWidthSet) return;
     style.borderWidth = {1.f, 1.f, 1.f, 1.f};
@@ -58,15 +97,15 @@ void HTMLInputElement::constrainResolvedStyle(ComputedStyle& style) const {
 Vec2 HTMLInputElement::intrinsicSize(const StyleSheet&, const ComputedStyle& style, const TextMetrics&,
                                      const IntrinsicSizeConstraints& constraints) const {
     if (!isCheckableType(mType)) return {};
-    if (style.appearance == AppearanceMode::Base && !isSwitchType()) {
+    if (style.appearance != AppearanceMode::Auto && !isSwitchType()) {
         const float size = std::max(24.f, style.fontSize);
         return {std::max(0.f, size - style.padding.horizontal() - style.borderWidth.horizontal()),
                 std::max(0.f, size - style.padding.vertical() - style.borderWidth.vertical())};
     }
     if (style.appearance != AppearanceMode::Auto) return {};
-    const NativeInputControl control = isRadioType() ? NativeInputControl::Radio
-        : isSwitchType()                             ? NativeInputControl::Switch
-                                                     : NativeInputControl::Checkbox;
+    NativeInputControl control = NativeInputControl::Checkbox;
+    if (isRadioType()) control = NativeInputControl::Radio;
+    else if (isSwitchType()) control = NativeInputControl::Switch;
     const NativeLayoutMetrics metrics =
         constraints.nativeMetrics.value_or(surface() ? surface()->nativeLayoutMetrics() : defaultNativeLayoutMetrics());
     return metrics.inputMetrics(control).intrinsicSize;
@@ -75,7 +114,7 @@ Vec2 HTMLInputElement::intrinsicSize(const StyleSheet&, const ComputedStyle& sty
 void HTMLInputElement::paint(PaintContext& context, const ComputedStyle& style, float scale) const {
     if (style.appearance != AppearanceMode::Auto || !isCheckableType(mType)) {
         Element::paint(context, style, scale);
-        if (style.appearance == AppearanceMode::Base) {
+        if (style.appearance != AppearanceMode::Auto) {
             const bool clipsX = style.overflowX != Overflow::Visible;
             const bool clipsY = style.overflowY != Overflow::Visible;
             const ClipAxes clipAxes = (clipsX ? ClipAxes::X : ClipAxes::NoAxes) | (clipsY ? ClipAxes::Y : ClipAxes::NoAxes);
@@ -120,13 +159,16 @@ void HTMLInputElement::paint(PaintContext& context, const ComputedStyle& style, 
     }
 
     NativeInputPaintRequest request;
-    request.control = isRadioType() ? NativeInputControl::Radio : isSwitchType() ? NativeInputControl::Switch : NativeInputControl::Checkbox;
+    if (isRadioType()) request.control = NativeInputControl::Radio;
+    else if (isSwitchType()) request.control = NativeInputControl::Switch;
+    else request.control = NativeInputControl::Checkbox;
     request.bounds = rect();
     request.checked = checked();
     request.indeterminate = indeterminate();
     request.disabled = disabled();
     request.hovered = hasState(ElementState::Hovered);
     request.pressed = hasState(ElementState::Active);
+    request.opacity = style.opacity;
     if (style.accentColor.kind == AccentColor::Kind::CurrentColor) request.accentColor = style.color;
     else if (style.accentColor.kind == AccentColor::Kind::Color) request.accentColor = style.accentColor.color;
     request.colorScheme = style.colorScheme;
@@ -137,13 +179,35 @@ void HTMLInputElement::paint(PaintContext& context, const ComputedStyle& style, 
 
 HTMLInputElement& HTMLInputElement::type(std::string type) {
     if (type.empty()) type = "text";
+    if (canonicalizeHTMLName(mType) == canonicalizeHTMLName(type)) {
+        mType = std::move(type);
+        setAttribute("type", mType);
+        ElementInternalAccess::setStyleAttribute(*this, "type", mType);
+        return *this;
+    }
+
     const bool wasRadio = isRadioType();
     const std::string oldName = mName;
     if (wasRadio) refreshRadioGroup(oldName, this);
+
+    if (const std::shared_ptr<ValueBindingSubscription> subscription = mBindingSubscription.lock()) subscription->reset();
+    mBindingSubscription.reset();
+    mBinding.reset();
+    mValueBindingRequest.reset();
+    mValueState = {};
+    updateCheckedState(false);
+    mIndeterminate = false;
+    updateIndeterminateState(false);
+    mSwitchMode = false;
+    removeAttribute("checked");
+    removeAttribute("switch");
+    removeAttribute("setting");
+    ElementInternalAccess::removeStyleAttribute(*this, "switch");
+    ElementInternalAccess::removeStyleAttribute(*this, "setting");
+
     mType = std::move(type);
     setAttribute("type", mType);
     ElementInternalAccess::setStyleAttribute(*this, "type", mType);
-    if (!isCheckboxType()) resetIndeterminateState();
 
     if (isRadioType()) refreshRadioGroup();
     else refreshIndeterminateState();
@@ -168,6 +232,7 @@ HTMLInputElement& HTMLInputElement::name(std::string name) {
 
 HTMLInputElement& HTMLInputElement::switchMode(bool enabled) {
     if (mSwitchMode == enabled) return *this;
+    if (enabled && !isCheckboxType()) return *this;
 
     mSwitchMode = enabled;
     if (enabled) setAttribute("switch");
@@ -180,12 +245,14 @@ HTMLInputElement& HTMLInputElement::switchMode(bool enabled) {
 
 HTMLInputElement& HTMLInputElement::checked(bool checked) {
     if (!isCheckableType(mType)) return *this;
+    const ElementRef<HTMLInputElement> self(this);
     const bool changed = updateCheckedState(checked);
     mValueState.value = checked;
     if (checked) setAttribute("checked");
     else removeAttribute("checked");
     if (isRadioType()) updateRadioGroup();
     else refreshIndeterminateState();
+    if (!self) return *this;
     if (changed) notifyValueState();
     return *this;
 }
@@ -240,11 +307,13 @@ void HTMLInputElement::notifyValueState() {
 }
 
 void HTMLInputElement::applyValueState(ValueState<bool> state) {
+    const ElementRef<HTMLInputElement> self(this);
     const bool changed = mValueState != state;
     mValueState = std::move(state);
     updateCheckedState(mValueState.value);
     if (isRadioType()) updateRadioGroup();
     else refreshIndeterminateState();
+    if (!self) return;
     if (changed) notifyValueState();
 }
 
@@ -258,26 +327,40 @@ void HTMLInputElement::prepareValueBinding(Binder& binder) {
 
 ValueBindingSubscription HTMLInputElement::commitValueBinding(const std::shared_ptr<bool>& bindingActive, Element& root) {
     if (!mBinding) return {};
-    applyValueState(mBinding->state());
     std::weak_ptr<char> lifetime = mValueObserverLifetime;
     const std::weak_ptr<bool> active = bindingActive;
     const ElementRef<Element> rootRef(&root);
     const ElementRef<HTMLInputElement> inputRef(this);
     std::shared_ptr<ValueBinding<bool>> provider = mBinding.shared();
-    auto providerSubscription =
-        std::make_shared<ValueBindingSubscription>(provider->observe([lifetime, active, rootRef, inputRef](const ValueState<bool>& state) {
-            const std::shared_ptr<bool> bindingIsActive = active.lock();
-            Element* rootElement = rootRef.get();
-            HTMLInputElement* input = inputRef.get();
-            if (!lifetime.expired() && bindingIsActive && *bindingIsActive && rootElement && input) {
-                for (Element* current = input; current; current = current->parentElement()) {
-                    if (current == rootElement) {
-                        input->applyValueState(state);
-                        break;
-                    }
+    const ValueBinding<bool>* providerPointer = provider.get();
+    const auto isValid = [&] {
+        HTMLInputElement* input = inputRef.get();
+        Element* rootElement = rootRef.get();
+        if (!input || !rootElement || input->mBinding.shared() != provider) return false;
+        for (Node* current = input; current; current = current->parentNode())
+            if (current == rootElement) return true;
+        return false;
+    };
+    applyValueState(provider->state());
+    if (!isValid()) return {};
+    auto providerSubscription = std::make_shared<ValueBindingSubscription>(provider->observe([lifetime, active, rootRef, inputRef,
+                                                                                              providerPointer](const ValueState<bool>& state) {
+        const std::shared_ptr<bool> bindingIsActive = active.lock();
+        Element* rootElement = rootRef.get();
+        HTMLInputElement* input = inputRef.get();
+        if (!lifetime.expired() && bindingIsActive && *bindingIsActive && rootElement && input && input->mBinding.shared().get() == providerPointer) {
+            for (Element* current = input; current; current = current->parentElement()) {
+                if (current == rootElement) {
+                    input->applyValueState(state);
+                    break;
                 }
             }
-        }));
+        }
+    }));
+    if (!isValid()) {
+        providerSubscription->reset();
+        return {};
+    }
     return ValueBindingSubscription([this, lifetime, provider = std::move(provider), providerSubscription] {
         providerSubscription->reset();
         if (!lifetime.expired() && mBinding.shared() == provider) mBinding.reset();

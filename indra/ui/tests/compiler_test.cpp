@@ -98,7 +98,7 @@ TEST(StyleCompilerTest, ResolvesStructuralDivStyles) {
 
     const auto* definition = radia::ui::findElementDefinition(radia::ui::HTMLTag::Div);
     ASSERT_NE(definition, nullptr);
-    auto div = HTMLElementFactory::Create("div");
+    auto div = HTMLElementFactory::create("div");
     ASSERT_NE(div, nullptr);
     div->addClass("stack");
     const ComputedStyle style = computedStyle(stylesheet, *div);

@@ -65,12 +65,6 @@ bool hasVisibleBorder(const ComputedStyle& style) {
     return style.borderWidth.any() && (style.borderGradient.has_value() || style.borderColor.a > 0.f);
 }
 
-bool hasOpaqueBackground(const ComputedStyle& style) {
-    if (!style.backgroundGradient) return style.backgroundColor.a >= 1.f;
-    return std::all_of(style.backgroundGradient->stops.begin(), style.backgroundGradient->stops.end(),
-                       [](const GradientStop& stop) { return stop.color.a >= 1.f; });
-}
-
 Color shade(Color source, Color target, float amount) {
     return {source.r + (target.r - source.r) * amount, source.g + (target.g - source.g) * amount, source.b + (target.b - source.b) * amount,
             source.a};
@@ -1281,6 +1275,7 @@ void GeometryPainter::paintMaskLayers(const Rect& rect, const ComputedStyle& sty
     if (!program.mProgramObject || layers.empty()) return;
     ComputedStyle maskStyle = style;
     maskStyle.color = Color(1.f, 1.f, 1.f, 1.f);
+    maskStyle.opacity = 1.f;
     for (auto layer = layers.rbegin(); layer != layers.rend(); ++layer) {
         program.bind();
         program.uniform1i(shaderUniforms().maskMode,
@@ -1449,27 +1444,19 @@ void GeometryPainter::paintBox(const Rect& rect, const ComputedStyle& style, std
     for (auto shadow = style.shadows.rbegin(); shadow != style.shadows.rend(); ++shadow)
         if (!shadow->inset) drawShadow(rect, borderRadii, *shadow);
 
-    Rect fillBox = box;
-    ResolvedBorderRadii fillRadii = borderRadii;
     const bool bordered = hasVisibleBorder(style);
-    const bool hasBackgroundLayers = std::any_of(style.backgroundLayers.begin(), style.backgroundLayers.end(),
-                                                 [](const BackgroundLayer& layer) { return layer.gradient || !layer.resource.empty(); });
-    if (bordered) {
-        if (!hasBackgroundLayers && style.borderStyle == BorderStyle::Solid && hasOpaqueBackground(style) && (!topBorderGap || topBorderGap->empty()))
-            if (style.borderGradient) drawRoundedGradient(fillBox, borderRadii, *style.borderGradient);
-            else drawRoundedShape(PaintOp::Fill, fillBox, borderRadii, 0.f, style.borderColor);
-        else if (!hasBackgroundLayers) drawBorder(rect, style, topBorderGap);
-        fillBox = insetRect(fillBox, style.borderWidth);
-        fillRadii = insetBorderRadii(borderRadii, style.borderWidth, fillBox.w, fillBox.h);
-    }
+    const BackgroundBox backgroundClip = style.backgroundLayers.empty() ? BackgroundBox::BorderBox : style.backgroundLayers.back().clip;
+    const Rect fillBox = backgroundBox(box, style, backgroundClip);
+    const ResolvedBorderRadii fillRadii = backgroundBoxRadii(box, style, backgroundClip);
     if (style.backgroundColor.a > 0.f) drawRoundedShape(PaintOp::Fill, fillBox, fillRadii, 0.f, style.backgroundColor);
     if (style.backgroundGradient) drawRoundedGradient(fillBox, fillRadii, *style.backgroundGradient);
     paintImageLayers(box, style, style.backgroundLayers, style.strokeColor, style.strokeGradient ? &*style.strokeGradient : nullptr,
                      backgroundContext);
-    if (bordered && hasBackgroundLayers) drawBorder(rect, style, topBorderGap);
+    if (bordered) drawBorder(rect, style, topBorderGap);
+    const Rect insetBox = insetRect(box, style.borderWidth);
+    const ResolvedBorderRadii insetRadii = insetBorderRadii(borderRadii, style.borderWidth, insetBox.w, insetBox.h);
     for (auto shadow = style.shadows.rbegin(); shadow != style.shadows.rend(); ++shadow)
-        if (shadow->inset) drawShadow(fillBox, fillRadii, *shadow);
-    if (!bordered) drawBorder(rect, style, topBorderGap);
+        if (shadow->inset) drawShadow(insetBox, insetRadii, *shadow);
     drawOutline(rect, style);
 }
 } // namespace radia::ui

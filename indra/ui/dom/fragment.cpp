@@ -30,15 +30,15 @@ const Node* Fragment::lastChild() const noexcept {
     return mChildren.empty() ? nullptr : mChildren.back().get();
 }
 
-NodeList Fragment::childNodes() {
-    NodeList result;
+NodeSnapshot Fragment::childNodes() {
+    NodeSnapshot result;
     result.reserve(mChildren.size());
     for (const NodePtr& child : mChildren) result.push_back(child.get());
     return result;
 }
 
-ConstNodeList Fragment::childNodes() const {
-    ConstNodeList result;
+ConstNodeSnapshot Fragment::childNodes() const {
+    ConstNodeSnapshot result;
     result.reserve(mChildren.size());
     for (const NodePtr& child : mChildren) result.push_back(child.get());
     return result;

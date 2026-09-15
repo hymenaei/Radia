@@ -87,7 +87,7 @@ bool matchesAttribute(const StyleSelector& selector, const Element* element) {
 }
 
 bool matchesRoot(const StyleSelector& selector, const Element* element) {
-    return !selector.root || (element && element->parentElement() == nullptr);
+    return !selector.root || (element && (element->parentElement() == nullptr || element->idScopeRoot()));
 }
 
 bool selectorCanBeOwnedBy(const StyleSelector& selector, const Element& element) {
@@ -136,7 +136,7 @@ bool matchesSelector(const StyleSelector& selector, const std::string& element, 
 }
 
 const Element* structuralParent(const Element* element) {
-    if (!element) return nullptr;
+    if (!element || element->idScopeRoot()) return nullptr;
     return element->parentElement();
 }
 

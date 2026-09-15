@@ -7,7 +7,7 @@
 #include "dom/text.h"
 #include <utility>
 #include "dom/mutation.h"
-#include "text/host.h"
+#include "text/layout.h"
 
 namespace radia::ui {
 using detail::NodeMutation;

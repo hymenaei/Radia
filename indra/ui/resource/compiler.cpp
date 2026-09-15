@@ -16,9 +16,9 @@
 #include "html/element.h"
 #include "html/elementfactory.h"
 #include "html/elementnames.h"
-#include "resource/sourcedocument.h"
 #include "resource/elementdefinition.h"
 #include "resource/resourceprovider.h"
+#include "resource/sourcedocument.h"
 #include "text/inlineelements.h"
 
 namespace radia::ui {
@@ -43,6 +43,9 @@ struct ResourceCompiler::BuildState {
     std::unordered_map<const Element*, AuthoredElement> authoredElementRecords;
     std::unique_ptr<ElementBuildContext> buildContext;
     ResourceId baseId;
+    std::vector<std::string> defaultStack;
+    std::unordered_set<std::string> resolvingDefaults;
+    std::vector<const SourceNode*> defaultProbeRoots;
 };
 
 struct ResourceCompiler::ChildBuildContext {
@@ -80,6 +83,16 @@ std::string resourceChain(const std::vector<ResourceId>& stack, const ResourceId
     return result + id.value();
 }
 
+std::string defaultChain(const std::vector<std::string>& stack, std::string_view elementName) {
+    std::string result;
+    for (const std::string& item : stack) {
+        if (!result.empty()) result += " -> ";
+        result += item;
+    }
+    if (!result.empty()) result += " -> ";
+    return result + std::string(elementName);
+}
+
 bool hasAuthoredContent(const SourceNode& node) {
     for (const SourceContent& content : node.content)
         if (content.node || !trimmedText(content.text).empty()) return true;
@@ -94,10 +107,10 @@ ElementBuildInput makeElementInput(const SourceNode& node, const SourceNode* def
     input.sourceName = sourceName;
     input.attributes.reserve(node.attributes.size() + (defaults ? defaults->attributes.size() : 0));
     for (const auto& [name, attribute] : node.attributes)
-        input.attributes.emplace(name, ElementAttribute{attribute.authoredName, attribute.value, attribute.source});
+        input.attributes.emplace(name, ElementAttribute{attribute.authoredName, attribute.value, attribute.hasValue, attribute.source});
     if (defaults)
         for (const auto& [name, attribute] : defaults->attributes)
-            input.attributes.try_emplace(name, ElementAttribute{attribute.authoredName, attribute.value, attribute.source});
+            input.attributes.try_emplace(name, ElementAttribute{attribute.authoredName, attribute.value, attribute.hasValue, attribute.source});
     return input;
 }
 
@@ -118,13 +131,14 @@ bool validateDefaultNode(const SourceNode& node, ElementBuildContext& context, c
 
     const std::size_t errorsBefore = context.errorCount();
     const ElementBuildInput input = makeElementInput(node, nullptr, sourceName);
-    validateElementAttributes(input, definition->attributes, context);
+    validateElementAttributes(input, context);
 
     std::string ignored;
     if (readElementAttribute(input, "id", ignored)
         || readElementAttribute(input, "filename", ignored)
-        || readElementAttribute(input, "for", ignored)) {
-        context.error("layout.defaults.controller_attribute", "Element Defaults cannot declare IDs, relationships, includes, or controller behavior.",
+        || readElementAttribute(input, "for", ignored)
+        || readElementAttribute(input, "setting", ignored)) {
+        context.error("layout.defaults.controller_attribute", "Element Defaults cannot declare IDs, relationships, includes, or controller bindings.",
                       sourceName, node.source.begin.line, node.source.begin.column);
     }
     for (const AuthoredEventDescriptor& descriptor : kAuthoredEventDescriptors) {
@@ -135,10 +149,9 @@ bool validateDefaultNode(const SourceNode& node, ElementBuildContext& context, c
         }
     }
 
-    std::unique_ptr<Element> probe = HTMLElementFactory::Create(htmlTagName(node.tag));
-    if (probe) {
-        applyCommonElementAttributes(input, *probe, context);
-        if (definition->attributeBehavior.apply) definition->attributeBehavior.apply(input, *probe, context);
+    if (definition->attributeBehavior.apply) {
+        if (std::unique_ptr<Element> probe = HTMLElementFactory::create(htmlTagName(node.tag)))
+            definition->attributeBehavior.apply(input, *probe, context);
     }
 
     for (const SourceContent& content : node.content)
@@ -238,23 +251,46 @@ void ResourceCompiler::loadElementDefaults(const std::string& elementName, Build
         return;
     }
 
-    if (mProvider) {
-        const SourceDocument* document = loadDocument(defaultId, state, false);
-        if (!document || !document->root) {
-            state.elementDefaults.emplace(lookup, nullptr);
-            return;
-        }
+    if (!mProvider) {
+        state.elementDefaults.emplace(lookup, nullptr);
+        return;
+    }
+    if (!state.resolvingDefaults.insert(lookup).second) {
+        state.result.error("layout.defaults.cycle", "Recursive element defaults: " + defaultChain(state.defaultStack, lookup) + ".",
+                           defaultId.value());
+        state.elementDefaults.emplace(lookup, nullptr);
+        return;
+    }
+    state.defaultStack.push_back(lookup);
+
+    const SourceDocument* document = loadDocument(defaultId, state, false);
+    if (document && document->root) {
         defaultRoot = document->root.get();
         const std::size_t errorsBefore = state.result.errors.size();
         if (canonicalizeHTMLName(htmlTagName(defaultRoot->tag)) != lookup) {
             state.result.error("layout.defaults.root_invalid", "Element Defaults root must be <" + canonical + ">.", document->sourceName,
                                defaultRoot->source.begin.line, defaultRoot->source.begin.column);
             defaultRoot = nullptr;
-        } else {
-            if (!validateDefaultNode(*defaultRoot, *state.buildContext, document->sourceName)) defaultRoot = nullptr;
+        } else if (!validateDefaultNode(*defaultRoot, *state.buildContext, document->sourceName)) defaultRoot = nullptr;
+        else {
+            const std::size_t buildErrorsBefore = state.result.errors.size();
+            auto savedRecords = std::move(state.authoredElementRecords);
+            state.defaultProbeRoots.push_back(defaultRoot);
+            std::unique_ptr<Element> probe = buildNode(*defaultRoot, document->sourceName, nullptr, state);
+            state.defaultProbeRoots.pop_back();
+            if (probe && state.result.errors.size() == buildErrorsBefore) {
+                ElementInternalAccess::setIdScopeRoot(*probe);
+                validateElementScope(*probe, state, document->sourceName);
+            }
+            state.authoredElementRecords.clear();
+            state.authoredElementRecords = std::move(savedRecords);
+            if (state.result.errors.size() != buildErrorsBefore) defaultRoot = nullptr;
         }
         if (state.result.errors.size() != errorsBefore) defaultRoot = nullptr;
     }
+
+    state.defaultStack.pop_back();
+    state.resolvingDefaults.erase(lookup);
     state.elementDefaults.emplace(lookup, defaultRoot);
 }
 
@@ -360,7 +396,7 @@ bool ResourceCompiler::resolveElementResource(const ElementBuildInput& input, co
                                               std::unique_ptr<Element>& element, const ResourceId& baseId, BuildState& state) const {
     std::string filename;
     if (!readElementAttribute(input, "filename", filename)) {
-        if (!element) element = HTMLElementFactory::Create(htmlTagName(input.tag));
+        if (!element) element = HTMLElementFactory::create(htmlTagName(input.tag));
         return true;
     }
 
@@ -392,9 +428,13 @@ std::unique_ptr<Element> ResourceCompiler::buildNode(const SourceNode& node, con
     const ResourceElementDefinition* definition = lookupElementDefinition(node, sourceName, state);
     if (!definition) return nullptr;
 
-    loadElementDefaults(definition->elementName, state);
-    const auto defaults = state.elementDefaults.find(canonicalizeHTMLName(definition->elementName));
-    const SourceNode* defaultRoot = defaults == state.elementDefaults.end() ? nullptr : defaults->second;
+    const SourceNode* defaultRoot = nullptr;
+    const bool probingDefaultRoot = std::find(state.defaultProbeRoots.begin(), state.defaultProbeRoots.end(), &node) != state.defaultProbeRoots.end();
+    if (!probingDefaultRoot) {
+        loadElementDefaults(definition->elementName, state);
+        const auto defaults = state.elementDefaults.find(canonicalizeHTMLName(definition->elementName));
+        defaultRoot = defaults == state.elementDefaults.end() ? nullptr : defaults->second;
+    }
     ElementBuildInput input = makeElementInput(node, defaultRoot, sourceName);
     const ResourceId& baseId = state.resourceStack.empty() ? state.baseId : state.resourceStack.back();
     if (!resolveElementResource(input, *definition, element, baseId, state)) return nullptr;
@@ -406,23 +446,9 @@ std::unique_ptr<Element> ResourceCompiler::buildNode(const SourceNode& node, con
         return nullptr;
     }
 
-    validateElementAttributes(input, definition->attributes, *state.buildContext);
+    validateElementAttributes(input, *state.buildContext);
     applyCommonElementAttributes(input, *target, *state.buildContext);
-    if (definition->attributeBehavior.apply) definition->attributeBehavior.apply(input, *target, *state.buildContext);
-    if (node.tag == HTMLTag::Kbd) {
-        std::string shortcut;
-        if (!readElementAttribute(input, "shortcut", shortcut)) {
-            state.result.error("layout.kbd.shortcut_required", "<kbd> requires a shortcut attribute.", sourceName, node.source.begin.line,
-                               node.source.begin.column);
-        } else if (shortcut.empty()) {
-            const ElementAttribute* attribute = input.find("shortcut");
-            state.result.error("layout.kbd.shortcut_invalid", "<kbd> shortcut must be non-empty.", sourceName,
-                               attribute ? attribute->source.begin.line : node.source.begin.line,
-                               attribute ? attribute->source.begin.column : node.source.begin.column);
-        } else {
-            static_cast<HTMLElement&>(*target).setKeybinding(std::move(shortcut));
-        }
-    }
+    applyElementDefinitionAttributes(*definition, input, *target, *state.buildContext);
     if (definition->compositionBehavior.validate)
         state.authoredElementRecords.emplace(target, BuildState::AuthoredElement{target, std::move(input), definition});
 
@@ -445,7 +471,7 @@ void ResourceCompiler::buildChildren(Element& target, const SourceNode& node, co
         if (consumeScopedElement(childNode, context) == ChildHandling::Handled) continue;
         const auto partAttributes = definition.childrenBehavior.partAttributes.find(std::string(htmlTagName(childNode.tag)));
         if (partAttributes != definition.childrenBehavior.partAttributes.end())
-            validateElementAttributes(makeElementInput(childNode, nullptr, sourceName), partAttributes->second, *state.buildContext);
+            validateElementAttributes(makeElementInput(childNode, nullptr, sourceName), *state.buildContext);
         if (consumeChildContainer(childNode, context) == ChildHandling::Handled) continue;
         (void)buildRegularChild(childNode, context);
     }
@@ -493,7 +519,6 @@ ResourceCompiler::ChildHandling ResourceCompiler::appendTextContent(const Source
 
 ResourceCompiler::ChildHandling ResourceCompiler::consumeFlowBreak(const SourceNode& childNode, ChildBuildContext& context) const {
     if (childNode.tag != HTMLTag::Br) return ChildHandling::Unhandled;
-    rejectAuthoredAttributes(childNode, context.buildContext, context.sourceName);
     if (hasAuthoredContent(childNode))
         context.state.result.error("layout.flow_break.children_unsupported", "Flow Break <br> cannot contain content.", context.sourceName,
                                    childNode.source.begin.line, childNode.source.begin.column);
@@ -519,8 +544,11 @@ ResourceCompiler::ChildHandling ResourceCompiler::consumeScopedElement(const Sou
         appendInlineElements(*scopedPart, childNode.content, scopedInline->second.elementName, scopedInline->second.acceptedTags,
                              context.buildContext, context.sourceName);
     if (scopedDefinition) {
-        validateElementAttributes(input, scopedDefinition->attributes, context.buildContext);
-        if (scopedPart) applyCommonElementAttributes(input, *scopedPart, context.buildContext);
+        validateElementAttributes(input, context.buildContext);
+        if (scopedPart) {
+            applyCommonElementAttributes(input, *scopedPart, context.buildContext);
+            applyElementDefinitionAttributes(*scopedDefinition, input, *scopedPart, context.buildContext);
+        }
     } else {
         rejectAuthoredAttributes(childNode, context.buildContext, context.sourceName);
     }

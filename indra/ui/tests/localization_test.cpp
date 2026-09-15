@@ -358,16 +358,26 @@ TEST(LocalizationCatalogTest, RejectsUnknownHTML) {
     }
 }
 
-TEST(LocalizationCatalogTest, ReportsAttributeDiagnostics) {
+TEST(LocalizationCatalogTest, RejectsScopedHTML) {
+    constexpr char kScopedCatalog[] = "defaultLocale: en\nlocales: {en: {strings: {value: '<legend>Orphan</legend>'}}}\n";
+
+    LocalizationCatalog catalog;
+    const auto result = catalog.loadYaml(kScopedCatalog);
+
+    ASSERT_TRUE(result.hasErrors());
+    EXPECT_TRUE(std::any_of(result.errors.begin(), result.errors.end(),
+                            [](const radia::ui::Diagnostic& diagnostic) { return diagnostic.code == "localization.string.html_invalid"; }));
+}
+
+TEST(LocalizationCatalogTest, RejectsInvalidHTMLAttributes) {
     struct InvalidHTMLCase {
         const char* yaml;
         const char* diagnostic;
     };
 
     const InvalidHTMLCase cases[] = {
-        {"defaultLocale: en\nlocales:\n  en:\n    strings:\n      value: '<b emphasis=\"true\">bad</b>'\n", "localization.string.attribute_invalid"},
-        {"defaultLocale: en\nlocales:\n  en:\n    strings:\n      value: '<div unknown=\"true\">bad</div>'\n",
-         "localization.string.attribute_invalid"},
+        {"defaultLocale: en\nlocales:\n  en:\n    strings:\n      value: '<b emphasis=\"true\">bad</b>'\n", "localization.string.html_invalid"},
+        {"defaultLocale: en\nlocales:\n  en:\n    strings:\n      value: '<div unknown=\"true\">bad</div>'\n", "localization.string.html_invalid"},
     };
 
     for (const auto& test : cases) {

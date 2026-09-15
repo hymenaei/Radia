@@ -20,8 +20,8 @@ enum class NodeType : uint8_t { Document, Element, Fragment, Text };
 using NodePtr = std::unique_ptr<Node>;
 using ElementPtr = std::unique_ptr<Element>;
 using FragmentPtr = std::unique_ptr<Fragment>;
-using NodeList = std::vector<Node*>;
-using ConstNodeList = std::vector<const Node*>;
+using NodeSnapshot = std::vector<Node*>;
+using ConstNodeSnapshot = std::vector<const Node*>;
 using ElementList = std::vector<Element*>;
 using ConstElementList = std::vector<const Element*>;
 
@@ -44,8 +44,8 @@ public:
     virtual const Node* firstChild() const noexcept { return nullptr; }
     virtual Node* lastChild() noexcept { return nullptr; }
     virtual const Node* lastChild() const noexcept { return nullptr; }
-    virtual NodeList childNodes() { return {}; }
-    virtual ConstNodeList childNodes() const { return {}; }
+    virtual NodeSnapshot childNodes() { return {}; }
+    virtual ConstNodeSnapshot childNodes() const { return {}; }
     Node* previousSibling() noexcept;
     const Node* previousSibling() const noexcept;
     Node* nextSibling() noexcept;

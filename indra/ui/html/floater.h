@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include "html/button.h"
 #include "html/element.h"

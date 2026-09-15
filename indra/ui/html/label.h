@@ -17,6 +17,8 @@ class HTMLLabelElement : public HTMLElement {
 public:
     const std::string& targetId() const { return mTargetId; }
     bool defaultPointerEvents() const override { return target() != nullptr; }
+    const Element* target() const;
+    AccessibleSemantics accessibleSemantics() const override;
 
 protected:
     HTMLLabelElement& setTargetId(std::string id);
@@ -24,7 +26,6 @@ protected:
 private:
     explicit HTMLLabelElement(std::string text = {});
     Element* target();
-    const Element* target() const;
 
     void onActivate() override;
 

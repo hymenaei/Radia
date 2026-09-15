@@ -8,13 +8,11 @@
 #include <string>
 #include <string_view>
 #include "dom/node.h"
-#include "html/elementnames.h"
 
 namespace radia::ui {
 class Fragment;
 
 namespace dom_detail {
-bool isValidHTMLAttribute(HTMLTag tag, std::string_view name, bool hasValue, std::string_view value);
 FragmentPtr parseFragment(std::string_view html);
 std::string serializeChildren(const Node& parent);
 } // namespace dom_detail

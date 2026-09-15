@@ -33,12 +33,15 @@
 #include "text/metrics.h"
 
 namespace {
+using radia::ui::AccessibleRole;
+using radia::ui::AccessibleSemantics;
 using radia::ui::AuthoredEventCall;
 using radia::ui::Binder;
 using radia::ui::Binding;
 using radia::ui::ComputedStyle;
 using radia::ui::Element;
 using radia::ui::ElementRef;
+using radia::ui::ElementState;
 using radia::ui::Event;
 using radia::ui::FixedTextMetrics;
 using radia::ui::HTMLInputElement;
@@ -60,6 +63,7 @@ using radia::ui::ResourceBuildResult;
 using radia::ui::ResourceCompiler;
 using radia::ui::StylePass;
 using radia::ui::StyleSheet;
+using radia::ui::Surface;
 using radia::ui::Visibility;
 using radia::ui::detail::findElementInScope;
 using radia::ui::detail::makeElementValue;
@@ -123,6 +127,15 @@ TEST_F(FieldsetTest, PreservesInlineElementStructure) {
     EXPECT_EQ(label->children()[1]->elementName(), "br");
     EXPECT_EQ(label->children()[2]->elementName(), "i");
     EXPECT_EQ(label->textContent(), "name important\ndetail");
+}
+
+TEST_F(FieldsetTest, RejectsWhitespaceInInlineShortcut) {
+    const ResourceBuildResult result =
+        factory.buildElementTreeFromString("<panel><p>before <kbd shortcut=\"toggle fly\"></kbd> after</p></panel>", "invalid-inline-shortcut.html");
+
+    ASSERT_FALSE(result.ok());
+    ASSERT_FALSE(result.errors.empty());
+    EXPECT_EQ(result.errors.front().code, "layout.kbd.shortcut_invalid");
 }
 
 TEST_F(FieldsetTest, LocalizesInlineElements) {
@@ -280,8 +293,11 @@ TEST_F(FieldsetTest, ActivatesInteractiveLabel) {
     ASSERT_TRUE(binding);
     ASSERT_TRUE(binding.activate());
 
+    Surface surface;
+    surface.mount(*result.document);
     label->activate();
     EXPECT_TRUE(target->checked());
+    EXPECT_TRUE(target->hasState(ElementState::Focused));
     EXPECT_EQ(changes, 1);
 
     target->disabled(true);
@@ -300,6 +316,37 @@ TEST_F(FieldsetTest, ActivatesInteractiveLabel) {
     label->activate();
     EXPECT_TRUE(target->checked());
     EXPECT_EQ(changes, 1);
+}
+
+TEST_F(FieldsetTest, ExposesInteractiveAccessibilitySemantics) {
+    constexpr char kAccessibleLayout[] =
+        "<panel><label id=\"toggleLabel\" for=\"toggle\">Enable</label><input type=\"checkbox\" switch id=\"toggle\"></panel>";
+    const ResourceBuildResult result = factory.buildElementTreeFromString(kAccessibleLayout, "accessible.html");
+    ASSERT_TRUE(result.ok());
+
+    const ElementRef<HTMLLabelElement> label = requireElement<HTMLLabelElement>(*result.document->documentElement(), "toggleLabel");
+    const ElementRef<HTMLInputElement> target = requireElement<HTMLInputElement>(*result.document->documentElement(), "toggle");
+    ASSERT_NE(label.get(), nullptr);
+    ASSERT_NE(target.get(), nullptr);
+
+    const AccessibleSemantics labelSemantics = label->accessibleSemantics();
+    EXPECT_EQ(labelSemantics.role, AccessibleRole::Label);
+    EXPECT_EQ(labelSemantics.name, "Enable");
+    EXPECT_EQ(labelSemantics.labelTarget, target.get());
+
+    const AccessibleSemantics targetSemantics = target->accessibleSemantics();
+    EXPECT_EQ(targetSemantics.role, AccessibleRole::Switch);
+    EXPECT_EQ(targetSemantics.name, "Enable");
+    ASSERT_TRUE(targetSemantics.checked.has_value());
+    EXPECT_FALSE(*targetSemantics.checked);
+    EXPECT_TRUE(targetSemantics.focusable);
+
+    Surface surface;
+    surface.mount(*result.document);
+    label->activate();
+    const AccessibleSemantics focusedSemantics = target->accessibleSemantics();
+    EXPECT_TRUE(focusedSemantics.focused);
+    EXPECT_TRUE(focusedSemantics.checked.value_or(false));
 }
 
 TEST_F(FieldsetTest, RejectsInvalidLabelRelationships) {

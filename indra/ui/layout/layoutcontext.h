@@ -6,6 +6,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstddef>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -57,7 +58,7 @@ private:
     std::vector<layout_detail::LayoutChildRef> orderedChildrenForLayout(Element& parent) {
         std::vector<layout_detail::LayoutChildRef> result;
         const ComputedStyle& parentStyle = style(parent);
-        const bool includesPseudoElements = parentStyle.appearance == AppearanceMode::Base;
+        const bool includesPseudoElements = parentStyle.appearance != AppearanceMode::Auto;
         result.reserve(detail::nodes(parent).size() + (includesPseudoElements ? parent.generatedPseudoElements().size() : 0));
         for (detail::Node& node : detail::nodes(parent)) result.emplace_back(&node);
         if (includesPseudoElements)

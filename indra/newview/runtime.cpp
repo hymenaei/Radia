@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 #include "componentmanager.h"
+#include "dom/elementinternal.h"
 #include "floaterhost.h"
 #include "html/button.h"
 #include "html/floater.h"
@@ -34,6 +35,7 @@
 #include "workspacepersistence.h"
 
 namespace {
+using radia::ui::ElementRef;
 using radia::ui::OpenGLPaintContext;
 using radia::ui::PaintContext;
 using radia::ui::SkinGenerationPrepareResult;
@@ -418,8 +420,9 @@ private:
 
     void clearDragCursorState() { setDragCursorClipping(false); }
 
-    void floaterClosed(Surface&, HTMLFloaterElement&) override {
+    void floaterClosed(Surface&, HTMLFloaterElement& floater) override {
         clearInteraction();
+        if (const std::optional<ComponentInstanceKey> componentKey = mComponents.componentKeyFor(floater)) mLayoutInitialized.erase(*componentKey);
         mPersistenceDirty = true;
     }
 
@@ -473,8 +476,8 @@ private:
         surface().setViewport(static_cast<float>(width), static_cast<float>(height));
         mComponents.forEachOpen([&](const ComponentInstanceKey& componentKey, HTMLFloaterElement& floater) {
             auto found = mLayoutInitialized.find(componentKey);
-            if (found != mLayoutInitialized.end() && found->second == &floater) return;
-            mLayoutInitialized[componentKey] = &floater;
+            if (found != mLayoutInitialized.end() && found->second.get() == &floater) return;
+            mLayoutInitialized[componentKey].set(&floater);
             if (const std::optional<Rect> prepared = surface().prepareFloater(floater)) surface().placeFloater(floater, *prepared);
             restorePlacement(componentKey, floater);
         });
@@ -504,7 +507,7 @@ private:
     bool mPersistenceDirty = false;
     std::set<ComponentInstanceKey> mUnrestoredWorkspace;
     std::optional<RuntimeKeybindingState> mObservedBindingState;
-    std::map<ComponentInstanceKey, HTMLFloaterElement*> mLayoutInitialized;
+    std::map<ComponentInstanceKey, ElementRef<HTMLFloaterElement>> mLayoutInitialized;
     RuntimeState mState = RuntimeState::Running;
     bool mTabKeyOwned = false;
 };

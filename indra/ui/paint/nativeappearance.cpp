@@ -183,34 +183,40 @@ ComputedStyle nativeMarkStyle(Color color, float radius = 0.f) {
     return result;
 }
 
+void paintNativeInputBox(NativeControlPaintContext& context, const Rect& rect, ComputedStyle style, float opacity) {
+    applyOpacity(style, opacity);
+    context.paintNativeBox(rect, style);
+}
+
 Rect centeredSquare(const Rect& bounds) {
     const float size = std::min(bounds.w, bounds.h);
     return {bounds.x + (bounds.w - size) * .5f, bounds.y + (bounds.h - size) * .5f, std::max(0.f, size), std::max(0.f, size)};
 }
 
-void paintInputBase(NativeControlPaintContext& context, const Rect& bounds, Color background, Color border, float radius, bool drawBorder) {
+void paintInputBase(NativeControlPaintContext& context, const Rect& bounds, Color background, Color border, float radius, bool drawBorder,
+                    float opacity) {
     const Rect backgroundBounds = insetRect(bounds, {.2f, .2f, .2f, .2f});
-    context.paintNativeBox(backgroundBounds, nativeMarkStyle(background, std::max(0.f, radius - .2f)));
+    paintNativeInputBox(context, backgroundBounds, nativeMarkStyle(background, std::max(0.f, radius - .2f)), opacity);
     if (!drawBorder) return;
 
     ComputedStyle borderStyle = nativeMarkStyle(Color(0.f, 0.f, 0.f, 0.f), radius);
     borderStyle.borderColor = border;
     borderStyle.borderWidth = {1.f, 1.f, 1.f, 1.f};
-    context.paintNativeBox(bounds, borderStyle);
+    paintNativeInputBox(context, bounds, borderStyle, opacity);
 }
 
 void paintSwitch(NativeControlPaintContext& context, const NativeInputPaintRequest& request) {
     const Rect bounds = request.bounds;
     const float radius = std::max(0.f, bounds.h * .5f);
     const Color track = switchTrack(request);
-    context.paintNativeBox(bounds, nativeControlStyle(track, track, radius));
+    paintNativeInputBox(context, bounds, nativeControlStyle(track, track, radius), request.opacity);
 
     const float inset = std::min(2.f, std::max(0.f, std::min(bounds.w, bounds.h) * .5f));
     const float thumbSize = std::max(0.f, bounds.h - inset * 2.f);
     const bool thumbAtRight = request.direction == LayoutDirection::LeftToRight ? request.checked : !request.checked;
     const float thumbLeft = thumbAtRight ? bounds.right() - inset - thumbSize : bounds.left() + inset;
     const Rect thumb{thumbLeft, bounds.y + inset, thumbSize, thumbSize};
-    context.paintNativeBox(thumb, nativeMarkStyle(switchThumb(request), thumbSize * .5f));
+    paintNativeInputBox(context, thumb, nativeMarkStyle(switchThumb(request), thumbSize * .5f), request.opacity);
 }
 
 void paintCheckbox(NativeControlPaintContext& context, const NativeInputPaintRequest& request) {
@@ -218,13 +224,14 @@ void paintCheckbox(NativeControlPaintContext& context, const NativeInputPaintReq
     const Rect bounds = centeredSquare(request.bounds);
     const float radius = std::min(2.f, std::min(bounds.w, bounds.h) * .5f);
     const Color accent = inputAccent(request);
-    paintInputBase(context, bounds, nativeControlBackground(request), nativeControlBorder(request), radius, !selected);
-    if (selected) context.paintNativeBox(bounds, nativeMarkStyle(accent, radius));
+    paintInputBase(context, bounds, nativeControlBackground(request), nativeControlBorder(request), radius, !selected, request.opacity);
+    if (selected) paintNativeInputBox(context, bounds, nativeMarkStyle(accent, radius), request.opacity);
     if (!selected) return;
 
     NativeInputMarkPaintRequest mark;
     mark.mark = request.indeterminate ? NativeInputMark::Dash : NativeInputMark::Check;
-    mark.color = inputMarkColor(request);
+    const Color markColor = inputMarkColor(request);
+    mark.color = markColor.withAlpha(markColor.a * request.opacity);
     mark.scale = request.scale;
     if (request.indeterminate) {
         const float xInset = bounds.w * (5.5f / 13.f);
@@ -245,13 +252,14 @@ void paintRadio(NativeControlPaintContext& context, const NativeInputPaintReques
     const Rect bounds = centeredSquare(request.bounds);
     const float radius = std::min(bounds.w, bounds.h) * .5f;
     const Color accent = inputAccent(request);
-    paintInputBase(context, bounds, nativeControlBackground(request), request.checked ? accent : nativeControlBorder(request), radius, true);
+    paintInputBase(context, bounds, nativeControlBackground(request), request.checked ? accent : nativeControlBorder(request), radius, true,
+                   request.opacity);
     if (!request.checked) return;
 
     const float inset = std::min(bounds.w, bounds.h) * .2f;
     const float size = std::max(0.f, std::min(bounds.w, bounds.h) - inset * 2.f);
     const Rect dot{bounds.x + (bounds.w - size) * .5f, bounds.y + (bounds.h - size) * .5f, size, size};
-    context.paintNativeBox(dot, nativeMarkStyle(accent, size * .5f));
+    paintNativeInputBox(context, dot, nativeMarkStyle(accent, size * .5f), request.opacity);
 }
 } // namespace
 

@@ -987,7 +987,18 @@ CompileResult compileMask(detail::StyleCompileContext& context) {
         }
         parsed.push_back(std::move(layer));
     }
-    return context.compiled(StyleMaskLayers{std::move(parsed), StyleImageComponent::All});
+    std::vector<StyleDeclaration> declarations;
+    const auto imageValue = [&parsed](StyleImageComponent component) { return StyleMaskLayers{parsed, component}; };
+    declarations.push_back(makeDeclaration("mask-image", imageValue(StyleImageComponent::Image)));
+    declarations.push_back(makeDeclaration("mask-mode", imageValue(StyleImageComponent::Mode)));
+    declarations.push_back(makeDeclaration("mask-position", imageValue(StyleImageComponent::Position)));
+    declarations.push_back(makeDeclaration("mask-size", imageValue(StyleImageComponent::Size)));
+    declarations.push_back(makeDeclaration("mask-repeat", imageValue(StyleImageComponent::Repeat)));
+    declarations.push_back(makeDeclaration("mask-origin", imageValue(StyleImageComponent::Origin)));
+    declarations.push_back(makeDeclaration("mask-clip", imageValue(StyleImageComponent::Clip)));
+    declarations.push_back(makeDeclaration("mask-composite", imageValue(StyleImageComponent::Composite)));
+    declarations.push_back(makeDeclaration("mask-type", imageValue(StyleImageComponent::Type)));
+    return declarations;
 }
 
 CompileResult compilePaint(detail::StyleCompileContext& context) {
@@ -1661,7 +1672,7 @@ void copyCursor(ComputedStyle& style, const ComputedStyle& parent) {
 }
 
 void inheritCursor(ComputedStyle& style, const ComputedStyle& parent) {
-    const auto flag = static_cast<InheritedStyleProperties>(InheritedStyleProperty::Cursor);
+    const auto flag = static_cast<InheritedStyleProperties>(InheritedStyleProperty::CursorPresentation);
     if ((style.specifiedInheritedProperties & flag) == 0) copyCursor(style, parent);
 }
 
@@ -2048,8 +2059,8 @@ const detail::StylePropertyDefinition kPropertyDefinitions[] = {
      StylePropertyImpact::Layout | StylePropertyImpact::Paint},
     {"bottom", compilePosition, applyLengthToOptional<&ComputedStyle::bottom>, resetMember<&ComputedStyle::bottom>, nullptr,
      copyMember<&ComputedStyle::bottom>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"cursor", compileCursor, applyCursor, resetCursor, specifyInherited<InheritedStyleProperty::Cursor>, inheritCursor,
-     StylePropertyImpact::Paint | StylePropertyImpact::Inherited, false, InheritedStyleProperty::Cursor},
+    {"cursor", compileCursor, applyCursor, resetCursor, specifyInherited<InheritedStyleProperty::CursorPresentation>, inheritCursor,
+     StylePropertyImpact::Paint | StylePropertyImpact::Inherited, false, InheritedStyleProperty::CursorPresentation},
     {"display", compileDisplay, applyDisplay, resetDisplay, nullptr, copyDisplay,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"effect", compileEffect, applyMember<&ComputedStyle::effects>, resetMember<&ComputedStyle::effects>, nullptr,

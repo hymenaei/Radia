@@ -6,13 +6,20 @@
 #include "linden_common.h"
 #include "text/layout.h"
 #include <algorithm>
+#include <cstdint>
 #include <cwctype>
+#include <functional>
 #include <limits>
 #include <memory>
+#include <utility>
 #include <fribidi.h>
 #include <unicode/ubrk.h>
 #include <unicode/utf16.h>
+#include "css/stylesheet.h"
+#include "dom/element.h"
 #include "llstring.h"
+#include "paint/paintcontext.h"
+#include "style/computedstyle.h"
 #include "text/metrics.h"
 
 namespace radia::ui::detail {
@@ -443,9 +450,9 @@ float interRunSpacing(const TextRun& left, const TextRun& right, const TextMetri
     return metrics.usedLetterSpacing(left.style);
 }
 
-TextLayout layoutText(const std::vector<TextLine>& hardLines, const ComputedStyle& style, const TextMetrics& metrics,
-                      std::optional<float> availableWidth, bool visualOrder, bool applyOverflow) {
-    TextLayout result;
+LaidOutText layoutText(const std::vector<TextLine>& hardLines, const ComputedStyle& style, const TextMetrics& metrics,
+                       std::optional<float> availableWidth, bool visualOrder, bool applyOverflow) {
+    LaidOutText result;
     const float fallbackHeight = metrics.measureText({}, style).y;
     for (const TextLine& hardLine : hardLines) {
         std::vector<TextLine> visualLines;
@@ -466,3 +473,200 @@ TextLayout layoutText(const std::vector<TextLine>& hardLines, const ComputedStyl
     return result;
 }
 } // namespace radia::ui::detail
+
+namespace radia::ui {
+namespace {
+using detail::TextLine;
+using detail::TextRun;
+
+bool isCollapsibleWhitespace(char character) {
+    return character == ' ' || character == '\t' || character == '\n' || character == '\f' || character == '\r';
+}
+
+std::string collapseWhitespace(const std::string& text) {
+    std::string result;
+    result.reserve(text.size());
+    bool whitespace = false;
+    for (const char character : text) {
+        if (isCollapsibleWhitespace(character)) {
+            whitespace = true;
+            continue;
+        }
+        if (whitespace) result.push_back(' ');
+        result.push_back(character);
+        whitespace = false;
+    }
+    if (whitespace) result.push_back(' ');
+    return result;
+}
+
+std::vector<TextLine> layoutLines(const std::string& text, const ComputedStyle& style, const TextMetrics& metrics) {
+    std::vector<TextLine> lines(1);
+    const std::string value = collapseWhitespace(text);
+    if (!value.empty()) lines.front().push_back({value, style, metrics.measureText(value, style)});
+    return lines;
+}
+
+float alignedOffset(float available, float occupied, TextAlign alignment) {
+    if (alignment == TextAlign::Center) return (available - occupied) * .5f;
+    if (alignment == TextAlign::Right || alignment == TextAlign::End) return available - occupied;
+    return 0.f;
+}
+
+void mixStyleValue(std::size_t& hash, std::size_t value) {
+    hash ^= value + static_cast<std::size_t>(0x9e3779b9) + (hash << 6) + (hash >> 2);
+}
+
+void mixStyleValue(std::size_t& hash, float value) {
+    mixStyleValue(hash, std::hash<float>{}(value));
+}
+
+void mixLength(std::size_t& hash, const Length& value) {
+    mixStyleValue(hash, value.pixels);
+    mixStyleValue(hash, value.percent);
+}
+
+std::size_t textStyleFingerprint(const ComputedStyle& style) {
+    std::size_t hash = 0;
+    mixStyleValue(hash, static_cast<std::size_t>(style.fontFamily));
+    mixStyleValue(hash, style.fontSize);
+    mixStyleValue(hash, static_cast<std::size_t>(style.fontWeight));
+    mixStyleValue(hash, static_cast<std::size_t>(style.fontItalic));
+    mixStyleValue(hash, static_cast<std::size_t>(style.lineHeight.has_value()));
+    if (style.lineHeight) mixLength(hash, *style.lineHeight);
+    mixLength(hash, style.letterSpacing);
+    mixLength(hash, style.wordSpacing);
+    return hash;
+}
+
+std::size_t textLayoutFingerprint(const ComputedStyle& style, bool visualOrder, bool applyOverflow) {
+    std::size_t hash = 0;
+    mixStyleValue(hash, static_cast<std::size_t>(style.textWrap));
+    if (applyOverflow) {
+        mixStyleValue(hash, static_cast<std::size_t>(style.textOverflow));
+        mixStyleValue(hash, static_cast<std::size_t>(style.overflowX));
+    }
+    if (visualOrder) mixStyleValue(hash, static_cast<std::size_t>(style.direction));
+    return hash;
+}
+} // namespace
+
+void TextLayout::setText(std::string text) {
+    mText = std::move(text);
+    ++mContentGeneration;
+}
+
+Vec2 TextLayout::measure(const TextMetrics& metrics, const ComputedStyle& style, const StyleSheet& styleSheet, const Element& owner,
+                         std::optional<float> resolvedWidth) const {
+    std::optional<float> availableWidth;
+    if (resolvedWidth) availableWidth = std::max(0.f, *resolvedWidth - style.padding.horizontal());
+    else if (!style.width.isAuto() && !style.width.isPercentage()) availableWidth = std::max(0.f, style.width.pixels() - style.padding.horizontal());
+    return cachedLayout(metrics, style, &styleSheet, owner, availableWidth, false, false).size;
+}
+
+void TextLayout::preparePaint(const TextMetrics& metrics, const ComputedStyle& style, const StyleSheet& styleSheet, const Element& owner,
+                              float availableWidth) const {
+    (void)cachedLayout(metrics, style, &styleSheet, owner, availableWidth, true, true);
+}
+
+void TextLayout::paint(PaintContext& context, const Rect& rect, const ComputedStyle& style, const StyleSheet* styleSheet,
+                       const Element& owner) const {
+    const TextMetrics& metrics = context.textMetrics();
+    const detail::LaidOutText& layout = cachedLayout(metrics, style, styleSheet, owner, rect.w, true, true);
+    const TextPaintStyle paintStyle{style.color, style.colorLightDark, style.textDecoration, style.textAlign};
+    paintLayout(context, rect, paintStyle, layout, metrics);
+}
+
+void TextLayout::paintPrepared(PaintContext& context, const Rect& rect, const ComputedStyle& layoutStyle, const TextPaintStyle& paintStyle,
+                               const StyleSheet* styleSheet, const Element& owner) const {
+    const TextMetrics& metrics = context.textMetrics();
+    const bool widthMatches = mCachedLayoutWidthSet && mCachedLayoutWidth == rect.w;
+    const std::uint64_t styleSheetGeneration = styleSheet ? styleSheet->generation() : 0;
+    const bool matches = mCachedLayoutValid
+        && mCachedContentGeneration == mContentGeneration
+        && mCachedMetrics == &metrics
+        && mCachedMetricsGeneration == metrics.generation()
+        && mCachedStyleSheet == styleSheet
+        && mCachedStyleSheetGeneration == styleSheetGeneration
+        && mCachedOwner == &owner
+        && widthMatches
+        && mCachedLayoutVisualOrder
+        && mCachedLayoutOverflow
+        && mCachedLayoutStyleFingerprint == textLayoutFingerprint(layoutStyle, true, true)
+        && mCachedStyleFingerprint == textStyleFingerprint(layoutStyle);
+    if (matches) {
+        paintLayout(context, rect, paintStyle, mCachedLayout, *mCachedMetrics);
+        return;
+    }
+    const detail::LaidOutText& layout = cachedLayout(metrics, layoutStyle, styleSheet, owner, rect.w, true, true);
+    paintLayout(context, rect, paintStyle, layout, metrics);
+}
+
+void TextLayout::paintLayout(PaintContext& context, const Rect& rect, const TextPaintStyle& style, const detail::LaidOutText& layout,
+                             const TextMetrics& metrics) const {
+    float y = rect.top();
+    for (const detail::LaidOutTextLine& line : layout.lines) {
+        y -= line.size.y;
+        float x = rect.x + alignedOffset(rect.w, line.size.x, style.textAlign);
+        for (std::size_t runIndex = 0; runIndex < line.runs.size(); ++runIndex) {
+            const TextRun& run = line.runs[runIndex];
+            ComputedStyle runStyle = run.style;
+            runStyle.color = style.color;
+            runStyle.colorLightDark = style.colorLightDark;
+            runStyle.textDecoration = style.textDecoration;
+            runStyle.textAlign = TextAlign::Left;
+            context.paintText(run.value, {x, y, run.size.x, line.size.y}, runStyle);
+            x += run.size.x;
+            if (runIndex + 1 < line.runs.size()) x += interRunSpacing(run, line.runs[runIndex + 1], metrics);
+        }
+    }
+}
+
+const std::vector<detail::TextLine>& TextLayout::cachedLines(const TextMetrics& metrics, const ComputedStyle& style, const StyleSheet* styleSheet,
+                                                             const Element& owner) const {
+    const std::size_t fingerprint = textStyleFingerprint(style);
+    const std::uint64_t styleSheetGeneration = styleSheet ? styleSheet->generation() : 0;
+    const std::uint64_t metricsGeneration = metrics.generation();
+    if (mCachedContentGeneration == mContentGeneration
+        && mCachedMetrics == &metrics
+        && mCachedMetricsGeneration == metricsGeneration
+        && mCachedStyleSheet == styleSheet
+        && mCachedStyleSheetGeneration == styleSheetGeneration
+        && mCachedOwner == &owner
+        && mCachedStyleFingerprint == fingerprint)
+        return mCachedLines;
+
+    mCachedLines = layoutLines(mText, style, metrics);
+    mCachedLayoutValid = false;
+    mCachedContentGeneration = mContentGeneration;
+    mCachedMetrics = &metrics;
+    mCachedMetricsGeneration = metricsGeneration;
+    mCachedStyleSheet = styleSheet;
+    mCachedStyleSheetGeneration = styleSheetGeneration;
+    mCachedOwner = &owner;
+    mCachedStyleFingerprint = fingerprint;
+    return mCachedLines;
+}
+
+const detail::LaidOutText& TextLayout::cachedLayout(const TextMetrics& metrics, const ComputedStyle& style, const StyleSheet* styleSheet,
+                                                    const Element& owner, std::optional<float> availableWidth, bool visualOrder,
+                                                    bool applyOverflow) const {
+    const std::vector<detail::TextLine>& lines = cachedLines(metrics, style, styleSheet, owner);
+    const std::size_t layoutFingerprint = textLayoutFingerprint(style, visualOrder, applyOverflow);
+    const bool widthMatches = mCachedLayoutWidthSet == availableWidth.has_value() && (!availableWidth || mCachedLayoutWidth == *availableWidth);
+    if (!mCachedLayoutValid
+        || !widthMatches
+        || mCachedLayoutVisualOrder != visualOrder
+        || mCachedLayoutOverflow != applyOverflow
+        || mCachedLayoutStyleFingerprint != layoutFingerprint) {
+        mCachedLayout = detail::layoutText(lines, style, metrics, availableWidth, visualOrder, applyOverflow);
+        mCachedLayoutWidthSet = availableWidth.has_value();
+        mCachedLayoutWidth = availableWidth.value_or(0.f);
+        mCachedLayoutVisualOrder = visualOrder;
+        mCachedLayoutOverflow = applyOverflow;
+        mCachedLayoutStyleFingerprint = layoutFingerprint;
+        mCachedLayoutValid = true;
+    }
+    return mCachedLayout;
+}
+} // namespace radia::ui

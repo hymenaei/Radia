@@ -46,7 +46,7 @@ ElementPtr Document::releaseDocumentElement() {
 }
 
 ElementPtr Document::createElement(std::string_view elementName) const {
-    ElementPtr element = HTMLElementFactory::Create(elementName);
+    ElementPtr element = HTMLElementFactory::create(elementName);
     if (!element) LL_ERRS("UI") << "Unknown UI Element type: " << elementName << LL_ENDL;
     NodeMutation::adopt(*this, *element);
     return element;
@@ -88,15 +88,15 @@ const Node* Document::lastChild() const noexcept {
     return mChildren.empty() ? nullptr : mChildren.back().get();
 }
 
-NodeList Document::childNodes() {
-    NodeList result;
+NodeSnapshot Document::childNodes() {
+    NodeSnapshot result;
     result.reserve(mChildren.size());
     for (const auto& child : mChildren) result.push_back(child.get());
     return result;
 }
 
-ConstNodeList Document::childNodes() const {
-    ConstNodeList result;
+ConstNodeSnapshot Document::childNodes() const {
+    ConstNodeSnapshot result;
     result.reserve(mChildren.size());
     for (const auto& child : mChildren) result.push_back(child.get());
     return result;

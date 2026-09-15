@@ -61,14 +61,6 @@ struct IntrinsicSizeConstraints {
         : width(constrainedWidth), height(constrainedHeight), nativeMetrics(metrics) {}
 };
 
-inline constexpr InvalidationFlags layoutInvalidationMask(LayoutInvalidationReason reason) {
-    return InvalidationFlags(reason);
-}
-
-inline constexpr InvalidationFlags layoutInvalidationMask(InvalidationFlags flags) {
-    return flags;
-}
-
 inline constexpr InvalidationFlags operator|(LayoutInvalidationReason left, LayoutInvalidationReason right) {
     return InvalidationFlags(static_cast<uint8_t>(left) | static_cast<uint8_t>(right));
 }
@@ -82,15 +74,29 @@ inline constexpr InvalidationFlags operator|(LayoutInvalidationReason left, Inva
 }
 
 inline constexpr InvalidationFlags kMeasureInvalidationReasons =
-    layoutInvalidationMask(LayoutInvalidationReason::Measure | LayoutInvalidationReason::ComputedStyle | LayoutInvalidationReason::Text);
+    LayoutInvalidationReason::Measure | LayoutInvalidationReason::ComputedStyle | LayoutInvalidationReason::Text;
 inline constexpr InvalidationFlags kArrangeInvalidationReasons = kMeasureInvalidationReasons | LayoutInvalidationReason::Arrange;
 inline constexpr InvalidationFlags kTextInvalidationReasons =
-    layoutInvalidationMask(LayoutInvalidationReason::Measure | LayoutInvalidationReason::Arrange | LayoutInvalidationReason::Text);
-inline constexpr InvalidationFlags kPaintStyleInvalidationReasons = layoutInvalidationMask(LayoutInvalidationReason::Paint);
+    LayoutInvalidationReason::Measure | LayoutInvalidationReason::Arrange | LayoutInvalidationReason::Text;
+inline constexpr InvalidationFlags kPaintStyleInvalidationReasons = InvalidationFlags(LayoutInvalidationReason::Paint);
 inline constexpr InvalidationFlags kLayoutStyleInvalidationReasons = kArrangeInvalidationReasons | LayoutInvalidationReason::Paint;
 
 class Element;
 class PseudoElement;
+
+enum class AccessibleRole : uint8_t { Generic, Button, TextInput, Checkbox, Radio, Switch, Label };
+
+struct AccessibleSemantics {
+    AccessibleRole role = AccessibleRole::Generic;
+    std::string name;
+    std::optional<bool> checked;
+    const Element* labelTarget = nullptr;
+    bool indeterminate = false;
+    bool focusable = false;
+    bool disabled = false;
+    bool focused = false;
+    bool focusVisible = false;
+};
 
 namespace detail {
 struct ElementPrivateData;
@@ -187,8 +193,8 @@ public:
     const Node* firstChild() const noexcept override;
     Node* lastChild() noexcept override;
     const Node* lastChild() const noexcept override;
-    NodeList childNodes() override;
-    ConstNodeList childNodes() const override;
+    NodeSnapshot childNodes() override;
+    ConstNodeSnapshot childNodes() const override;
     Element& setId(std::string id);
     Element& addClass(std::string className);
     const AttributeList& attributes() const noexcept { return mAttributes; }
@@ -252,6 +258,7 @@ public:
                                const IntrinsicSizeConstraints& constraints = IntrinsicSizeConstraints()) const;
     virtual bool defaultPointerEvents() const { return false; }
     virtual bool focusable() const { return false; }
+    virtual AccessibleSemantics accessibleSemantics() const;
     virtual void paint(PaintContext& context, const ComputedStyle& style, float scale) const;
 
 protected:
@@ -325,7 +332,7 @@ private:
 
     using EventListenerSnapshot = std::vector<EventListener>;
 
-    void dispatchListeners(Event& event, bool capture);
+    void dispatchListeners(Event& event, bool capture, const std::function<bool()>& isValid = {});
     void translateSubtree(const Vec2& delta);
     void invalidateArrangeTree();
     void invalidateTextTree();
@@ -386,7 +393,7 @@ private:
     std::uint64_t mStyleRevision = 1;
     std::uint64_t mLayoutInvalidationRevision = 0;
     InvalidationFlags mInvalidationReasons =
-        layoutInvalidationMask(LayoutInvalidationReason::Measure | LayoutInvalidationReason::Arrange | LayoutInvalidationReason::ComputedStyle);
+        LayoutInvalidationReason::Measure | LayoutInvalidationReason::Arrange | LayoutInvalidationReason::ComputedStyle;
     std::unique_ptr<detail::ElementPrivateData> mPrivate;
 };
 } // namespace radia::ui

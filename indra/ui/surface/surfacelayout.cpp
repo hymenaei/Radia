@@ -147,14 +147,9 @@ void Surface::queueScrollNotification(Element& element) {
 }
 
 void Surface::dispatchScrollNotification(Element& element) {
-    const ElementRef<Element> target(&element);
     Event event(kScrollEvent, element);
     event.setCancelable(false);
-    event.setPhase(EventPhase::Target);
-    event.setCurrentTarget(&element);
-    element.dispatchListeners(event, true);
-    if (target && !event.immediatePropagationStopped()) element.dispatchListeners(event, false);
-    event.setCurrentTarget(nullptr);
+    routeEvent(event);
 }
 
 void Surface::flushScrollNotifications() {

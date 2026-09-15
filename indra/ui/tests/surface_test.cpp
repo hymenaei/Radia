@@ -1310,6 +1310,7 @@ TEST(SurfaceTest, CoalescesScrollNotification) {
     int parentNotifications = 0;
 
     auto parent = makeElement<HTMLPanelElement>();
+    HTMLPanelElement* parentPointer = parent.get();
     parent->setRect({0.f, 0.f, 100.f, 100.f});
     auto viewport = makeElement<HTMLPanelElement>();
     viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
@@ -1317,7 +1318,13 @@ TEST(SurfaceTest, CoalescesScrollNotification) {
     content->setRect({0.f, 0.f, 100.f, 200.f});
     viewport->append(std::move(content));
     HTMLPanelElement* viewportPtr = viewport.get();
-    parent->addEventListener(kScrollEvent, [&parentNotifications](Event&) { ++parentNotifications; });
+    parent->addEventListener(kScrollEvent, [&parentNotifications, parentPointer, viewportPtr](Event& event) {
+        ++parentNotifications;
+        EXPECT_EQ(event.phase(), EventPhase::Bubble);
+        EXPECT_EQ(event.currentTarget(), parentPointer);
+        EXPECT_EQ(event.target(), viewportPtr);
+        EXPECT_FALSE(event.cancelable());
+    });
     viewportPtr->addEventListener(kScrollEvent, [&](Event& event) {
         ++targetNotifications;
         EXPECT_EQ(event.phase(), EventPhase::Target);
@@ -1336,7 +1343,7 @@ TEST(SurfaceTest, CoalescesScrollNotification) {
     surface.updateLayout();
 
     EXPECT_EQ(targetNotifications, 1);
-    EXPECT_EQ(parentNotifications, 0);
+    EXPECT_EQ(parentNotifications, 1);
     EXPECT_FLOAT_EQ(viewportPtr->scrollTop(), 20.f);
 }
 
@@ -1750,6 +1757,34 @@ TEST(SurfaceTest, RoutesCapturedPointerEvents) {
     EXPECT_EQ(log[2], std::string("parent:bubble"));
 }
 
+TEST(SurfaceTest, ScopesEventsAtResourceRoot) {
+    Surface surface;
+    surface.setViewport(100.f, 100.f);
+    std::vector<std::string> log;
+
+    auto root = makeElement<HTMLPanelElement>();
+    root->setRect({0.f, 0.f, 100.f, 100.f});
+    auto resource = makeElement<HTMLPanelElement>();
+    HTMLPanelElement* resourcePointer = resource.get();
+    resource->setRect({0.f, 0.f, 100.f, 100.f});
+    ElementInternalAccess::setIdScopeRoot(*resource);
+    auto button = makeElement<HTMLButtonElement>();
+    button->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
+    button->addEventListener(kPointerDownEvent, [&log](Event&) { log.emplace_back("target"); });
+    resource->addEventListener(kPointerDownEvent, [&log](Event&) { log.emplace_back("resource:capture"); }, true);
+    resource->addEventListener(kPointerDownEvent, [&log](Event&) { log.emplace_back("resource:bubble"); });
+    root->addEventListener(kPointerDownEvent, [&log](Event&) { log.emplace_back("outer:capture"); }, true);
+    root->addEventListener(kPointerDownEvent, [&log](Event&) { log.emplace_back("outer:bubble"); });
+    resource->append(std::move(button));
+    root->append(std::move(resource));
+    surface.mount(std::move(root));
+
+    EXPECT_TRUE(surface.pointerDown({{15.f, 15.f}, PointerButton::Left}));
+    const std::vector<std::string> expected{"resource:capture", "target", "resource:bubble"};
+    EXPECT_EQ(log, expected);
+    EXPECT_TRUE(resourcePointer->idScopeRoot());
+}
+
 TEST(SurfaceTest, PreservesHandlerIdentity) {
     auto button = makeElementValue<HTMLButtonElement>();
     int calls = 0;
@@ -1899,8 +1934,8 @@ TEST(SurfaceTest, RoutesDetachedTarget) {
     surface.mount(std::move(root));
 
     EXPECT_TRUE(surface.pointerDown({{15.f, 15.f}, PointerButton::Left}));
-    EXPECT_EQ(targetBubbleCalls, 1);
-    EXPECT_EQ(rootBubbleCalls, 1);
+    EXPECT_EQ(targetBubbleCalls, 0);
+    EXPECT_EQ(rootBubbleCalls, 0);
     EXPECT_EQ(retained.get(), target);
     EXPECT_FALSE(ElementInternalAccess::isMounted(*target));
 }

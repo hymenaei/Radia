@@ -17,7 +17,7 @@ using detail::NodeMutation;
 Node* Node::previousSibling() noexcept {
     Node* parent = parentNode();
     if (!parent) return nullptr;
-    const NodeList siblings = parent->childNodes();
+    const NodeSnapshot siblings = parent->childNodes();
     const auto found = std::find(siblings.begin(), siblings.end(), this);
     if (found == siblings.end() || found == siblings.begin()) return nullptr;
     return *std::prev(found);
@@ -26,7 +26,7 @@ Node* Node::previousSibling() noexcept {
 const Node* Node::previousSibling() const noexcept {
     const Node* parent = parentNode();
     if (!parent) return nullptr;
-    const ConstNodeList siblings = parent->childNodes();
+    const ConstNodeSnapshot siblings = parent->childNodes();
     const auto found = std::find(siblings.begin(), siblings.end(), this);
     if (found == siblings.end() || found == siblings.begin()) return nullptr;
     return *std::prev(found);
@@ -35,7 +35,7 @@ const Node* Node::previousSibling() const noexcept {
 Node* Node::nextSibling() noexcept {
     Node* parent = parentNode();
     if (!parent) return nullptr;
-    const NodeList siblings = parent->childNodes();
+    const NodeSnapshot siblings = parent->childNodes();
     const auto found = std::find(siblings.begin(), siblings.end(), this);
     if (found == siblings.end()) return nullptr;
     const auto next = std::next(found);
@@ -45,7 +45,7 @@ Node* Node::nextSibling() noexcept {
 const Node* Node::nextSibling() const noexcept {
     const Node* parent = parentNode();
     if (!parent) return nullptr;
-    const ConstNodeList siblings = parent->childNodes();
+    const ConstNodeSnapshot siblings = parent->childNodes();
     const auto found = std::find(siblings.begin(), siblings.end(), this);
     if (found == siblings.end()) return nullptr;
     const auto next = std::next(found);

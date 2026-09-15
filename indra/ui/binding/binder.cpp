@@ -68,32 +68,57 @@ void Binding::attachEventListeners() {
 }
 
 bool Binding::activate() {
-    if (!mCommitted || !mRoot || mRootLifetime.expired() || mRoot->parentNode() != mRootParent) {
+    const ElementRef<Element> rootRef(mRoot);
+    Element* root = rootRef.get();
+    if (!mCommitted || !root || mRootLifetime.expired() || root->parentNode() != mRootParent) {
         deactivate();
         return false;
     }
 
-    const auto isInRoot = [this](const Element& element) {
+    const Node* rootParent = mRootParent;
+    const MountEpoch rootMountEpoch = ElementInternalAccess::mountEpoch(*root);
+    Surface* surface = root->surface();
+    const auto rootIsStable = [&] {
+        Element* currentRoot = rootRef.get();
+        return currentRoot
+            && currentRoot->parentNode() == rootParent
+            && ElementInternalAccess::mountEpoch(*currentRoot) == rootMountEpoch
+            && currentRoot->surface() == surface
+            && mCommitted
+            && mActive
+            && *mActive;
+    };
+    const auto isInRoot = [&rootRef](const Element& element) {
+        const Element* currentRoot = rootRef.get();
+        if (!currentRoot) return false;
         for (const Node* current = &element; current; current = current->parentNode())
-            if (current == mRoot) return true;
+            if (current == currentRoot) return true;
         return false;
     };
+    const auto valueAttachmentIsValid = [&](const ValueAttachment& attachment) {
+        if (!attachment.element || attachment.lifetime.expired()) return false;
+        const ElementRef<HTMLInputElement> input(attachment.element);
+        const std::shared_ptr<ValueBindingSubscription> subscription = input ? input->mBindingSubscription.lock() : nullptr;
+        return input && isInRoot(*input) && input->mBinding && subscription && *subscription;
+    };
+    const auto eventAttachmentIsValid = [&](const EventAttachment& attachment) {
+        if (!attachment.element || attachment.lifetime.expired()) return false;
+        const ElementRef<Element> element(attachment.element);
+        return element && isInRoot(*element);
+    };
 
-    for (const ValueAttachment& attachment : mValueAttachments) {
-        if (!attachment.element || attachment.lifetime.expired() || !isInRoot(*attachment.element)) {
+    for (const ValueAttachment& attachment : mValueAttachments)
+        if (!valueAttachmentIsValid(attachment)) {
             deactivate();
             return false;
         }
-    }
 
-    for (const EventAttachment& attachment : mEventAttachments) {
-        if (!attachment.element || attachment.lifetime.expired() || !isInRoot(*attachment.element)) {
+    for (const EventAttachment& attachment : mEventAttachments)
+        if (!eventAttachmentIsValid(attachment)) {
             deactivate();
             return false;
         }
-    }
 
-    Surface* surface = mRoot->surface();
     if (mAttachedSurface && mAttachedSurface != surface) {
         deactivate();
         return false;
@@ -101,23 +126,31 @@ bool Binding::activate() {
 
     if (!mActive) mActive = std::make_shared<bool>(false);
     attachEventListeners();
-    if (surface && !surface->attachBinding(*mRoot, *this)) {
+    if (surface && !surface->attachBinding(*root, *this)) {
         deactivate();
         return false;
     }
     *mActive = true;
+    const auto attachmentsAreStable = [&] {
+        if (!rootIsStable()) return false;
+        for (const ValueAttachment& attachment : mValueAttachments)
+            if (!valueAttachmentIsValid(attachment)) return false;
+        for (const EventAttachment& attachment : mEventAttachments)
+            if (!eventAttachmentIsValid(attachment)) return false;
+        return true;
+    };
+    if (!attachmentsAreStable()) {
+        deactivate();
+        return false;
+    }
     for (const ValueAttachment& attachment : mValueAttachments) {
-        if (attachment.lifetime.expired()) {
-            deactivate();
-            return false;
-        }
         ElementRef<HTMLInputElement> input(attachment.element);
         if (!input) {
             deactivate();
             return false;
         }
         input->synchronizeValueBinding();
-        if (!input) {
+        if (!attachmentsAreStable()) {
             deactivate();
             return false;
         }
@@ -197,14 +230,12 @@ void collectAuthoredEventCalls(Element& element, std::map<std::string, std::vect
                                       ElementInternalAccess::mountEpoch(element),
                                       element.parentElement() ? ElementInternalAccess::topologyEpoch(*element.parentElement()) : 0});
     }
-    for (Element* child : element.children())
-        if (!child->idScopeRoot()) collectAuthoredEventCalls(*child, declarations);
+    for (Element* child : element.children()) collectAuthoredEventCalls(*child, declarations);
 }
 
 void collectBoundInputs(Element& element, std::vector<HTMLInputElement*>& inputs) {
     if (auto* input = dynamic_cast<HTMLInputElement*>(&element); input && input->valueBindingRequest()) inputs.push_back(input);
-    for (Element* child : element.children())
-        if (!child->idScopeRoot()) collectBoundInputs(*child, inputs);
+    for (Element* child : element.children()) collectBoundInputs(*child, inputs);
 }
 } // namespace
 
@@ -290,52 +321,75 @@ void Binder::validate(Element& root, DiagnosticResult& result) {
     }
 }
 
-void Binder::commit(Element&, Binding& binding) {
+void Binder::commit(Element& root, Binding& binding) {
     binding.mCommitted = true;
     binding.mRoot = mRoot;
     binding.mRootParent = mRootParent;
     binding.mRootLifetime = mRootLifetime;
     if (!binding.mActive) binding.mActive = std::make_shared<bool>(false);
     *binding.mActive = false;
+    const ElementRef<Element> rootRef(&root);
 
     for (PendingValueRequirement& pending : mPendingValueRequirements) pending.commit(pending.resolved);
     for (const BoundInput& bound : mBoundInputs) {
         if (bound.lifetime.expired()) continue;
-        ValueBindingSubscription subscription = bound.element->commitValueBinding(binding.mActive, *mRoot);
-        binding.mValueAttachments.push_back({bound.element, bound.lifetime});
-        if (subscription) binding.mValueSubscriptions.push_back(std::move(subscription));
+        Element* currentRoot = rootRef.get();
+        if (!currentRoot) return;
+        ElementRef<HTMLInputElement> input(bound.element);
+        if (!input) return;
+        auto subscription = std::make_shared<ValueBindingSubscription>();
+        input->mBindingSubscription = subscription;
+        *subscription = input->commitValueBinding(binding.mActive, *currentRoot);
+        if (!rootRef) {
+            if (input) input->mBindingSubscription.reset();
+            subscription->reset();
+            return;
+        }
+        if (!input) {
+            subscription->reset();
+            continue;
+        }
+        if (!input->mBinding || input->mBindingSubscription.lock() != subscription || !*subscription) {
+            input->mBindingSubscription.reset();
+            subscription->reset();
+            continue;
+        }
+        binding.mValueAttachments.push_back({input.get(), bound.lifetime});
+        binding.mValueSubscriptions.push_back(std::move(subscription));
     }
+    if (!rootRef) return;
     std::map<std::string, PendingEventHandler*> handlers;
     for (PendingEventHandler& pending : mPendingEventHandlers) handlers.emplace(pending.name, &pending);
     for (const auto& [name, declarations] : mEventDeclarations) {
         const auto found = handlers.find(name);
         if (found == handlers.end()) continue;
         PendingEventHandler& pending = *found->second;
-        for (const EventDeclaration& declaration : declarations)
-            if (!pending.argumentError || !pending.argumentError(declaration.call)) {
-                const ElementRef<Element> declarationRef(declaration.element);
-                const ElementRef<Element> rootRef(mRoot);
-                const std::weak_ptr<bool> bindingActive = binding.mActive;
-                EventHandler listener([invoke = pending.invoke, call = declaration.call, type = declaration.type, declarationRef, rootRef,
-                                       bindingActive](Event& event) mutable {
-                    const std::shared_ptr<bool> active = bindingActive.lock();
-                    if (!active || !*active) return;
-                    Element* element = declarationRef.get();
-                    Element* root = rootRef.get();
-                    if (!element || !root) return;
-                    bool inRoot = false;
-                    for (Node* current = element; current; current = current->parentNode())
-                        if (current == root) {
-                            inRoot = true;
-                            break;
-                        }
-                    const AuthoredEventCall* authored = authoredEventCall(*element, type);
-                    if (!inRoot || !authored || !sameAuthoredEventCall(*authored, call)) return;
-                    invoke(event, call);
-                });
-                binding.mEventAttachments.push_back({declaration.element, ElementInternalAccess::lifetime(*declaration.element), declaration.type,
-                                                     std::move(listener), false, false});
-            }
+        for (const EventDeclaration& declaration : declarations) {
+            if (pending.argumentError && pending.argumentError(declaration.call)) continue;
+            if (!rootRef) return;
+            if (!declaration.element || declaration.lifetime.expired()) continue;
+            const ElementRef<Element> declarationRef(declaration.element);
+            if (!declarationRef) continue;
+            const std::weak_ptr<bool> bindingActive = binding.mActive;
+            EventHandler listener([invoke = pending.invoke, call = declaration.call, type = declaration.type, declarationRef, rootRef,
+                                   bindingActive](Event& event) mutable {
+                const std::shared_ptr<bool> active = bindingActive.lock();
+                if (!active || !*active) return;
+                Element* element = declarationRef.get();
+                Element* root = rootRef.get();
+                if (!element || !root) return;
+                bool inRoot = false;
+                for (Node* current = element; current; current = current->parentNode())
+                    if (current == root) {
+                        inRoot = true;
+                        break;
+                    }
+                const AuthoredEventCall* authored = authoredEventCall(*element, type);
+                if (!inRoot || !authored || !sameAuthoredEventCall(*authored, call)) return;
+                invoke(event, call);
+            });
+            binding.mEventAttachments.push_back({declarationRef.get(), declaration.lifetime, declaration.type, std::move(listener), false, false});
+        }
     }
 }
 

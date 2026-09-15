@@ -31,8 +31,8 @@ public:
     const Node* firstChild() const noexcept override;
     Node* lastChild() noexcept override;
     const Node* lastChild() const noexcept override;
-    NodeList childNodes() override;
-    ConstNodeList childNodes() const override;
+    NodeSnapshot childNodes() override;
+    ConstNodeSnapshot childNodes() const override;
 
     ElementPtr createElement(std::string_view elementName) const;
     FragmentPtr createFragment() const;

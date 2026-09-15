@@ -332,7 +332,7 @@ enum class InheritedStyleProperty : uint16_t {
     LineHeight = 1 << 5,
     Color = 1 << 6,
     TextAlign = 1 << 7,
-    Cursor = 1 << 8,
+    CursorPresentation = 1 << 8,
     LetterSpacing = 1 << 9,
     WordSpacing = 1 << 10,
     TextWrap = 1 << 11,

@@ -125,7 +125,7 @@ ComputedStyle StylePass::style(PseudoElement& pseudoElement) {
 }
 
 void StylePass::styleGeneratedPseudoElements(const Element& element, const ComputedStyle& ownerStyle) {
-    if (ownerStyle.appearance != AppearanceMode::Base) return;
+    if (ownerStyle.appearance == AppearanceMode::Auto) return;
     const auto stylePseudoElementTree = [this](auto&& self, PseudoElement& pseudoElement) -> void {
         style(pseudoElement);
         for (PseudoElement* child : pseudoElement.generatedPseudoElements())

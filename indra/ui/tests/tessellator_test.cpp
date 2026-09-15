@@ -137,3 +137,14 @@ TEST(TessellatorTest, TessellatesClosedCircleContour) {
     EXPECT_NEAR(minY(mesh), -11.5f, 0.1f);
     EXPECT_NEAR(maxY(mesh), 11.5f, 0.1f);
 }
+
+TEST(TessellatorTest, TessellatesClosedTwoPointStroke) {
+    Path path;
+    path.moveTo(0.f, 0.f).lineTo(10.f, 0.f).close();
+
+    const Mesh mesh = tessellateStroke(path, Color(), 2.f, 0.f);
+
+    ASSERT_FALSE(mesh.empty());
+    EXPECT_FLOAT_EQ(minX(mesh), 0.f);
+    EXPECT_FLOAT_EQ(maxX(mesh), 10.f);
+}

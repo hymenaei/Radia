@@ -8,8 +8,8 @@
 #include <algorithm>
 #include <cctype>
 #include <unordered_map>
-#include <unordered_set>
 #include "event/eventcall.h"
+#include "html/element.h"
 
 namespace radia::ui {
 namespace {
@@ -27,15 +27,44 @@ ResourceElementDefinition htmlContentDefinition(HTMLTag tag) {
         case HTMLTag::Kbd:
             result.attributes.push_back("shortcut");
             result.contentBehavior.mode = ElementContentMode::Unsupported;
+            result.attributeBehavior.apply = [](const ElementBuildInput& input, Element& element, ElementBuildContext& context) {
+                const ElementAttribute* shortcut = input.find("shortcut");
+                if (!shortcut) {
+                    context.error("layout.kbd.shortcut_required", "<kbd> requires a shortcut attribute.", input.sourceName, input.source.begin.line,
+                                  input.source.begin.column);
+                } else if (!shortcut->hasValue || shortcut->value.empty() || containsHTMLWhitespace(shortcut->value)) {
+                    context.error("layout.kbd.shortcut_invalid", "<kbd> shortcut must be non-empty and contain no ASCII whitespace.",
+                                  input.sourceName, shortcut->source.begin.line, shortcut->source.begin.column);
+                } else {
+                    static_cast<HTMLElement&>(element).setKeybinding(shortcut->value);
+                }
+            };
             break;
         default: break;
     }
     return result;
 }
+
+bool isKnownHTMLAttribute(HTMLTag tag, std::string_view name) {
+    const std::string canonicalName = canonicalizeHTMLName(name);
+    if (tag == HTMLTag::Br) return false;
+    if (canonicalName == "id" || canonicalName == "class" || canonicalName == "disabled") return true;
+    for (const AuthoredEventDescriptor& descriptor : kAuthoredEventDescriptors)
+        if (canonicalizeHTMLName(descriptor.attribute) == canonicalName) return true;
+
+    const ResourceElementDefinition* definition = findElementDefinition(tag);
+    if (!definition) return false;
+    return std::any_of(definition->attributes.begin(), definition->attributes.end(),
+                       [&](const std::string& attribute) { return canonicalizeHTMLName(attribute) == canonicalName; });
+}
 } // namespace
 
 bool producesState(const ResourceElementDefinition& definition, ElementState state) {
     return std::find(definition.producedStates.begin(), definition.producedStates.end(), state) != definition.producedStates.end();
+}
+
+bool isRegisteredHTMLAttribute(HTMLTag tag, std::string_view name) {
+    return isKnownHTMLAttribute(tag, name);
 }
 
 bool readElementAttribute(const ElementBuildInput& input, std::string_view name, std::string& value) {
@@ -57,22 +86,6 @@ bool readElementBoolean(const ElementBuildInput& input, std::string_view name, b
     }
     return true;
 }
-
-namespace {
-bool readElementVisibility(const ElementBuildInput& input, Visibility& value, ElementBuildContext& context) {
-    std::string text;
-    if (!readElementAttribute(input, "visibility", text)) return false;
-    if (text == "visible") value = Visibility::Visible;
-    else if (text == "hidden") value = Visibility::Hidden;
-    else if (text == "collapse") value = Visibility::Collapse;
-    else {
-        context.error("layout.attribute.visibility_invalid", "Invalid visibility value: " + text + ". Expected visible, hidden, or collapse.",
-                      input.sourceName, input.source.begin.line, input.source.begin.column);
-        return false;
-    }
-    return true;
-}
-} // namespace
 
 ResolvedLayoutText localizedLayoutText(std::string value, ElementBuildContext& context, const std::string& sourceName, std::size_t line) {
     ResolvedLayoutText resolved;
@@ -103,32 +116,20 @@ ResolvedLayoutText localizedLayoutText(std::string value, ElementBuildContext& c
     return resolved;
 }
 
-void validateElementAttributes(const ElementBuildInput& input, const std::vector<std::string>& elementAttributes, ElementBuildContext& context) {
-    static const std::unordered_set<std::string> sCommonAttributes = {
-        "id", "class", "visibility", "disabled", "x", "y", "width", "height", "interactive", "blocksPointer",
-    };
-    std::unordered_set<std::string> allowed;
-    for (const std::string& name : elementAttributes) allowed.insert(canonicalizeHTMLName(name));
-    for (const std::string& name : sCommonAttributes) allowed.insert(canonicalizeHTMLName(name));
-    for (const AuthoredEventDescriptor& descriptor : kAuthoredEventDescriptors) allowed.insert(canonicalizeHTMLName(descriptor.attribute));
+void validateElementAttributes(const ElementBuildInput& input, ElementBuildContext& context) {
     const std::string elementName = input.authoredName.empty() ? std::string(htmlTagName(input.tag)) : input.authoredName;
     for (const auto& [attributeName, attribute] : input.attributes)
-        if (!allowed.count(attributeName))
+        if (!isRegisteredHTMLAttribute(input.tag, attributeName))
             context.error("layout.attribute.unknown", "Unknown attribute on <" + elementName + ">: " + attribute.authoredName + ".", input.sourceName,
                           attribute.source.begin.line, attribute.source.begin.column);
 }
 
-void applyCommonElementAttributes(const ElementBuildInput& input, Element& element, ElementBuildContext& context) {
-    static const char* sUnsupportedAttributes[] = {
-        "x", "y", "width", "height", "interactive", "blocksPointer",
-    };
-    for (const char* name : sUnsupportedAttributes) {
-        std::string ignored;
-        if (readElementAttribute(input, name, ignored))
-            context.error("layout.attribute.unsupported", std::string("Unsupported HTML attribute: ") + name + ".", input.sourceName,
-                          input.source.begin.line, input.source.begin.column);
-    }
+void applyElementDefinitionAttributes(const ResourceElementDefinition& definition, const ElementBuildInput& input, Element& element,
+                                      ElementBuildContext& context) {
+    if (definition.attributeBehavior.apply) definition.attributeBehavior.apply(input, element, context);
+}
 
+void applyCommonElementAttributes(const ElementBuildInput& input, Element& element, ElementBuildContext& context) {
     std::string value;
     if (readElementAttribute(input, "id", value)) {
         const ElementAttribute* attribute = input.find("id");
@@ -144,8 +145,6 @@ void applyCommonElementAttributes(const ElementBuildInput& input, Element& eleme
         classes += value;
         element.setAttribute("class", std::move(classes));
     }
-    Visibility visibility = Visibility::Visible;
-    if (readElementVisibility(input, visibility, context)) element.setVisibility(visibility);
     bool boolean = false;
     if (readElementBoolean(input, "disabled", boolean, context)) element.disabled(boolean);
 

@@ -729,6 +729,24 @@ TEST_F(LayoutEngineTest, LaysOutSwitchPseudos) {
     EXPECT_EQ(control.sliderThumb()->name(), "slider-thumb");
 }
 
+TEST_F(LayoutEngineTest, LaysOutUnstyledCheckmark) {
+    StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet
+                    .loadRadia("input[type=checkbox] { appearance: none; display: flex; width: 20px; height: 20px; } "
+                               "input[type=checkbox]::checkmark { width: 10px; height: 10px; }")
+                    .ok());
+
+    auto control = makeElementValue<HTMLInputElement>();
+    control.type("checkbox").checked(true);
+    control.setRect({10.f, 20.f, 20.f, 20.f});
+
+    LayoutEngine::layout(control, styleSheet, text);
+
+    ASSERT_NE(control.checkmark(), nullptr);
+    EXPECT_EQ(control.checkmark()->rect().w, 10.f);
+    EXPECT_EQ(control.checkmark()->rect().h, 10.f);
+}
+
 TEST_F(LayoutEngineTest, PositionsSwitchPseudos) {
     StyleSheet styleSheet;
     constexpr char kGridSwitch[] =

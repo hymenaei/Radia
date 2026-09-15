@@ -6,6 +6,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstddef>
 #include <map>
 #include <optional>
 #include <set>
@@ -104,7 +105,6 @@ public:
 
     virtual ResourceId canonicalId(const ResourceId& id) const { return id; }
     virtual ResourceId resolve(const ResourceId& base, std::string_view reference) const { return ResourceId::resolve(base, reference); }
-    virtual std::vector<ResourceId> list(const ResourceId&) const { return {}; }
 };
 
 class ResourceSnapshot final : public ResourceProvider {
@@ -165,14 +165,6 @@ public:
             if (logicalReference != rawReference) return logicalReference;
         }
         return canonicalId(ResourceId::resolve(base, reference));
-    }
-
-    std::vector<ResourceId> list(const ResourceId& prefix) const override {
-        std::vector<ResourceId> result;
-        const std::string directory = prefix.valid() ? prefix.value() + "/" : std::string();
-        for (const auto& entry : mResources)
-            if (directory.empty() || entry.first.value().rfind(directory, 0) == 0) result.push_back(entry.first);
-        return result;
     }
 
     const std::map<ResourceId, ResourceSource>& resources() const { return mResources; }

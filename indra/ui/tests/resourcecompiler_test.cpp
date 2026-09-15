@@ -35,6 +35,7 @@
 namespace {
 using radia::ui::authoredEventCall;
 using radia::ui::ComputedStyle;
+using radia::ui::Diagnostic;
 using radia::ui::DiagnosticResult;
 using radia::ui::Element;
 using radia::ui::ElementRef;
@@ -210,6 +211,16 @@ TEST_F(ResourceCompilerTest, BuildsFloaterEvents) {
     EXPECT_EQ(authoredEventCall(*toggle, kChangeEvent)->name(), "demoChanged");
     ASSERT_NE(authoredEventCall(*toggle, kInputEvent), nullptr);
     EXPECT_EQ(authoredEventCall(*toggle, kInputEvent)->name(), "demoInput");
+}
+
+TEST_F(ResourceCompilerTest, IgnoresNestedResourceFloaterParts) {
+    resources["nested.html"] = "<panel><title>Nested content</title></panel>";
+    constexpr char kFloaterLayout[] = "<floater><head><title>Outer</title></head><body><panel filename=\"nested.html\"></panel></body></floater>";
+
+    const ResourceBuildResult result = factory.buildElementTreeFromString(kFloaterLayout, "nested-floater-parts.html");
+
+    ASSERT_TRUE(result.ok());
+    ASSERT_NE(result.rootAs<HTMLFloaterElement>(), nullptr);
 }
 
 TEST_F(ResourceCompilerTest, BuildsStructuralDivs) {
@@ -648,7 +659,6 @@ TEST_F(ResourceCompilerTest, RefreshesLocalizedText) {
 TEST_F(ResourceCompilerTest, RejectsUnknownMarkup) {
     constexpr char kUnknownElementLayout[] = "<panel>"
                                              "<unknown></unknown></panel>";
-    constexpr char kUnsupportedAttributeLayout[] = "<panel width=\"10\"></panel>";
     constexpr char kUnknownAttributeLayout[] = "<floater invented=\"true\"></floater>";
     const ResourceBuildResult unknownElement = factory.buildElementTreeFromString(kUnknownElementLayout, "unknown.html");
     ASSERT_FALSE(unknownElement.ok());
@@ -656,12 +666,6 @@ TEST_F(ResourceCompilerTest, RejectsUnknownMarkup) {
     ASSERT_FALSE(unknownElement.errors.empty());
     EXPECT_EQ(unknownElement.errors.front().code, "layout.element.unknown");
     EXPECT_EQ(unknownElement.errors.front().source, "unknown.html");
-
-    const ResourceBuildResult unsupportedAttribute = factory.buildElementTreeFromString(kUnsupportedAttributeLayout, "attribute.html");
-    ASSERT_FALSE(unsupportedAttribute.ok());
-    EXPECT_FALSE(unsupportedAttribute.document);
-    ASSERT_FALSE(unsupportedAttribute.errors.empty());
-    EXPECT_EQ(unsupportedAttribute.errors.front().code, "layout.attribute.unsupported");
 
     const ResourceBuildResult unknownAttribute = factory.buildElementTreeFromString(kUnknownAttributeLayout, "unknown_attribute.html");
     ASSERT_FALSE(unknownAttribute.ok());
@@ -936,56 +940,62 @@ TEST_F(ResourceCompilerTest, RejectsInvalidElementDefaults) {
     EXPECT_EQ(result.errors.front().code, "layout.defaults.root_invalid");
 }
 
-TEST_F(ResourceCompilerTest, CompilesTypedVisibilityValues) {
-    constexpr char kVisibilityLayout[] = "<panel><p id=\"shown\" visibility=\"visible\"></p>"
-                                         "<p id=\"hidden\" visibility=\"hidden\"></p>"
-                                         "<p id=\"collapsed\" visibility=\"collapse\"></p></panel>";
-    const ResourceBuildResult result = factory.buildElementTreeFromString(kVisibilityLayout, "visibility.html");
-    ASSERT_TRUE(result.ok());
-    ASSERT_TRUE(result.document);
-    ASSERT_EQ(result.document->documentElement()->children().size(), 3U);
-    EXPECT_EQ(result.document->documentElement()->children()[0]->visibility(), Visibility::Visible);
-    EXPECT_EQ(result.document->documentElement()->children()[1]->visibility(), Visibility::Hidden);
-    EXPECT_EQ(result.document->documentElement()->children()[2]->visibility(), Visibility::Collapse);
+TEST_F(ResourceCompilerTest, RejectsRecursiveElementDefaults) {
+    resources["elements/panel.html"] = "<panel><panel></panel></panel>";
+
+    const DiagnosticResult result = factory.validateElementDefaults("panel");
+
+    ASSERT_TRUE(result.hasErrors());
+    EXPECT_TRUE(std::any_of(result.errors.begin(), result.errors.end(),
+                            [](const Diagnostic& diagnostic) { return diagnostic.code == "layout.defaults.cycle"; }));
 }
 
-TEST_F(ResourceCompilerTest, RejectsInvalidVisibilitySyntax) {
-    struct InvalidVisibilityCase {
-        const char* name;
-        const char* html;
-        const char* diagnostic;
-    };
-    const InvalidVisibilityCase cases[] = {
-        {"invalid enum value", "<p visibility=\"invisible\"></p>", "layout.attribute.visibility_invalid"},
-    };
-    for (const auto& test : cases) {
-        SCOPED_TRACE(Message() << "visibility HTML: " << test.name);
-        const ResourceBuildResult result = factory.buildElementTreeFromString(test.html, test.name);
-        ASSERT_FALSE(result.ok());
-        ASSERT_FALSE(result.errors.empty());
-        EXPECT_EQ(result.errors.front().code, test.diagnostic);
-    }
+TEST_F(ResourceCompilerTest, RejectsInvalidValueForKnownAttribute) {
+    const ResourceBuildResult result = factory.buildElementTreeFromString("<input type=checkbox setting=\"bad name\">", "invalid-setting.html");
+    ASSERT_FALSE(result.ok());
+    ASSERT_FALSE(result.document);
+    ASSERT_FALSE(result.errors.empty());
+    EXPECT_EQ(result.errors.front().code, "layout.value.setting_invalid");
 }
 
 TEST_F(ResourceCompilerTest, ValidatesElementDefaultDiagnostics) {
-    constexpr char kInvalidVisibilityDefaultsLayout[] = "<label visibility=\"sometimes\"></label>";
     constexpr char kLabelDefaultsLayout[] = "<label></label>";
     constexpr char kInvalidSwitchDefaultsLayout[] = "<input type=\"checkbox\" switch=\"true\" checked=\"sometimes\">";
-    resources["elements/label.html"] = kInvalidVisibilityDefaultsLayout;
-    const DiagnosticResult visibility = factory.validateElementDefaults("label");
-    ASSERT_TRUE(visibility.hasErrors());
-    EXPECT_EQ(visibility.errors.front().code, "layout.attribute.visibility_invalid");
-
     resources["elements/label.html"] = kLabelDefaultsLayout;
+    const DiagnosticResult requiredLabel = factory.validateElementDefaults("label");
+    ASSERT_TRUE(requiredLabel.hasErrors());
+    EXPECT_EQ(requiredLabel.errors.front().code, "layout.label.for_required");
+
     resources["elements/input.html"] = kInvalidSwitchDefaultsLayout;
     const DiagnosticResult elementAttribute = factory.validateElementDefaults("input");
     ASSERT_TRUE(elementAttribute.hasErrors());
     EXPECT_EQ(elementAttribute.errors.front().code, "layout.attribute.boolean_invalid");
 }
 
+TEST_F(ResourceCompilerTest, ValidatesElementDefaultContentAndComposition) {
+    resources["elements/kbd.html"] = "<kbd shortcut=\"enter\">unsupported text</kbd>";
+    const DiagnosticResult content = factory.validateElementDefaults("kbd");
+    ASSERT_TRUE(content.hasErrors());
+    EXPECT_EQ(content.errors.front().code, "layout.text.unsupported");
+
+    resources["elements/floater.html"] = "<floater><body></body></floater>";
+    const DiagnosticResult composition = factory.validateElementDefaults("floater");
+    ASSERT_TRUE(composition.hasErrors());
+    EXPECT_EQ(composition.errors.front().code, "layout.floater.head_required");
+}
+
+TEST_F(ResourceCompilerTest, RejectsControllerBindingsInElementDefaults) {
+    resources["elements/input.html"] = "<input type=\"checkbox\" setting=\"all\">";
+
+    const DiagnosticResult result = factory.validateElementDefaults("input");
+    ASSERT_TRUE(result.hasErrors());
+    ASSERT_FALSE(result.errors.empty());
+    EXPECT_EQ(result.errors.front().code, "layout.defaults.controller_attribute");
+}
+
 TEST_F(ResourceCompilerTest, PreservesDiagnosticProvenance) {
     ResourceSnapshot snapshot;
-    ASSERT_TRUE(snapshot.add("elements/label.html", "<label visibility=\"sometimes\"></label>", "skins/views/elements/label.html"));
+    ASSERT_TRUE(snapshot.add("elements/label.html", "<label></label>", "skins/views/elements/label.html"));
 
     const DiagnosticResult result = ResourceCompiler(&snapshot).validateElementDefaults("label");
     ASSERT_FALSE(result.errors.empty());

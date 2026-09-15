@@ -11,7 +11,7 @@
 #include "dom/elementinternal.h"
 #include "dom/fragment.h"
 #include "surface/surface.h"
-#include "text/host.h"
+#include "text/layout.h"
 
 namespace radia::ui::detail {
 namespace { using NodeOwnerList = std::vector<NodePtr>; } // namespace

@@ -27,6 +27,7 @@
 #include "html/panel.h"
 #include "resource/compiler.h"
 #include "resource/elementdefinition.h"
+#include "resource/resourceprovider.h"
 #include "surface/surface.h"
 #include "text/metrics.h"
 
@@ -47,10 +48,12 @@ using radia::ui::HTMLLabelElement;
 using radia::ui::HTMLPanelElement;
 using radia::ui::kChangeEvent;
 using radia::ui::kClickEvent;
+using radia::ui::NodePtr;
 using radia::ui::PreparedBinding;
 using radia::ui::PreparedBindingResult;
 using radia::ui::ResourceBuildResult;
 using radia::ui::ResourceCompiler;
+using radia::ui::ResourceSnapshot;
 using radia::ui::setAuthoredEventCall;
 using radia::ui::SettingResolution;
 using radia::ui::SettingResolver;
@@ -608,6 +611,80 @@ TEST(BinderTest, PausesBindingWhileUnmounted) {
     EXPECT_FALSE(inputPointer->checked());
 }
 
+TEST(BinderTest, CommitSurvivesInputDestruction) {
+    ResourceBuildResult buildResult = ResourceCompiler().buildElementTreeFromString(
+        "<panel><input id=\"first\" type=\"checkbox\" switch=\"true\" setting=\"demo-enabled\" onChange=\"changed()\"><input id=\"second\" "
+        "type=\"checkbox\" switch=\"true\" setting=\"demo-enabled\"></panel>",
+        "binding-commit-reentrant.html");
+    ASSERT_TRUE(buildResult.ok());
+    HTMLPanelElement* root = buildResult.rootAs<HTMLPanelElement>();
+    ASSERT_NE(root, nullptr);
+    HTMLInputElement* first = dynamic_cast<HTMLInputElement*>(findElementInScope(*root, "first"));
+    HTMLInputElement* second = dynamic_cast<HTMLInputElement*>(findElementInScope(*root, "second"));
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+
+    const ElementRef<HTMLInputElement> firstReference(first);
+    const ElementRef<HTMLInputElement> secondReference(second);
+    auto provider = std::make_shared<TestValueBinding<bool>>(true);
+    TestSettingResolver resolver;
+    resolver.add("demo-enabled", provider);
+    Binder binder(*root, &resolver);
+    bindEvent(binder, "changed", [] {});
+    PreparedBindingResult prepared = binder.prepare();
+    ASSERT_TRUE(prepared.ok());
+    const ValueBindingSubscription destroyFirst = first->observeValueState([first](const auto&) { first->remove(); });
+
+    Binding binding = prepared.binding.commit();
+
+    ASSERT_TRUE(binding);
+    EXPECT_EQ(firstReference.get(), nullptr);
+    ASSERT_NE(secondReference.get(), nullptr);
+
+    Surface surface;
+    surface.mount(*buildResult.document);
+    ASSERT_TRUE(binding.activate());
+    provider->publish({false, false, std::nullopt});
+    EXPECT_FALSE(secondReference->checked());
+}
+
+TEST(BinderTest, RejectsRootUnmountDuringActivation) {
+    ResourceBuildResult buildResult = ResourceCompiler().buildElementTreeFromString(
+        "<panel><panel id=\"root\"><input id=\"first\" type=\"checkbox\" switch=\"true\" setting=\"demo-enabled\">"
+        "<input id=\"second\" type=\"checkbox\" switch=\"true\" setting=\"demo-enabled\"></panel></panel>",
+        "binding-root-unmount.html");
+    ASSERT_TRUE(buildResult.ok());
+    HTMLPanelElement* owner = buildResult.rootAs<HTMLPanelElement>();
+    ASSERT_NE(owner, nullptr);
+    HTMLPanelElement* rootPointer = dynamic_cast<HTMLPanelElement*>(findElementInScope(*owner, "root"));
+    ASSERT_NE(rootPointer, nullptr);
+    HTMLInputElement* firstPointer = dynamic_cast<HTMLInputElement*>(findElementInScope(*rootPointer, "first"));
+    HTMLInputElement* secondPointer = dynamic_cast<HTMLInputElement*>(findElementInScope(*rootPointer, "second"));
+    ASSERT_NE(firstPointer, nullptr);
+    ASSERT_NE(secondPointer, nullptr);
+
+    auto provider = std::make_shared<TestValueBinding<bool>>(false);
+    TestSettingResolver resolver;
+    resolver.add("demo-enabled", provider);
+    Binder binder(*rootPointer, &resolver);
+    PreparedBindingResult prepared = binder.prepare();
+    ASSERT_TRUE(prepared.ok());
+    Binding binding = prepared.binding.commit();
+    ASSERT_TRUE(binding);
+
+    const ElementRef<HTMLInputElement> secondReference(secondPointer);
+    NodePtr detachedRoot;
+    const ValueBindingSubscription detachRoot =
+        firstPointer->observeValueState([rootPointer, &detachedRoot](const auto&) { detachedRoot = rootPointer->remove(); });
+    provider->publish({true, false, std::nullopt});
+
+    EXPECT_FALSE(binding.activate());
+    ASSERT_NE(detachedRoot, nullptr);
+    ASSERT_NE(secondReference.get(), nullptr);
+    EXPECT_TRUE(firstPointer->checked());
+    EXPECT_FALSE(secondReference->checked());
+}
+
 TEST(BinderTest, RejectsDestroyedAttachment) {
     ResourceBuildResult buildResult =
         ResourceCompiler().buildElementTreeFromString("<panel><input id=\"first\" type=\"checkbox\" switch=\"true\" setting=\"demo-enabled\">"
@@ -689,6 +766,30 @@ TEST(BinderTest, WritesWithoutNotification) {
 
     EXPECT_TRUE(provider->state().value);
     EXPECT_TRUE(control->checked());
+}
+
+TEST(BinderTest, StopsWritingAfterInputTypeChanges) {
+    constexpr char kBoundInput[] = "<input type=checkbox switch setting=demo-enabled>";
+    ResourceBuildResult buildResult = ResourceCompiler().buildElementTreeFromString(kBoundInput, "type-change-binding.html");
+    ASSERT_TRUE(buildResult.ok());
+    HTMLInputElement* control = buildResult.rootAs<HTMLInputElement>();
+    ASSERT_NE(control, nullptr);
+
+    auto provider = std::make_shared<TestValueBinding<bool>>(false);
+    TestSettingResolver resolver;
+    resolver.add("demo-enabled", provider);
+    Binder binder(*control, &resolver);
+    TestBindingResult result = finishBinding(binder);
+    ASSERT_TRUE(result.ok());
+
+    control->type("text");
+    provider->publish({true, false, std::nullopt});
+
+    EXPECT_EQ(control->type(), "text");
+    EXPECT_FALSE(control->checked());
+    EXPECT_FALSE(control->valueBindingRequest().has_value());
+    EXPECT_EQ(provider->observerCount(), 0U);
+    EXPECT_FALSE(result.binding.activate());
 }
 
 TEST(BinderTest, RejectsMissingSetting) {
@@ -909,6 +1010,41 @@ TEST(BinderTest, BindsSwitchSetting) {
     EXPECT_TRUE(control->checked());
     control->activate();
     EXPECT_FALSE(provider->state().value);
+}
+
+TEST(BinderTest, BindsControlsInsideIncludedPanels) {
+    ResourceSnapshot resources;
+    ASSERT_TRUE(resources.add("child.html",
+                              "<panel><button id=\"action\" onClick=\"clicked()\"></button>"
+                              "<input id=\"toggle\" type=checkbox setting=demo-enabled></panel>"));
+    ResourceCompiler compiler(&resources);
+    ResourceBuildResult buildResult = compiler.buildElementTreeFromString("<panel><panel filename=child.html></panel></panel>", "parent.html");
+    ASSERT_TRUE(buildResult.ok());
+    HTMLPanelElement* root = buildResult.rootAs<HTMLPanelElement>();
+    ASSERT_NE(root, nullptr);
+    Element* included = root->children().front();
+    ASSERT_NE(included, nullptr);
+    HTMLButtonElement* action = dynamic_cast<HTMLButtonElement*>(findElementInScope(*included, "action"));
+    HTMLInputElement* toggle = dynamic_cast<HTMLInputElement*>(findElementInScope(*included, "toggle"));
+    ASSERT_NE(action, nullptr);
+    ASSERT_NE(toggle, nullptr);
+
+    auto provider = std::make_shared<TestValueBinding<bool>>(false);
+    TestSettingResolver resolver;
+    resolver.add("demo-enabled", provider);
+    int clicks = 0;
+    Binder binder(*root, &resolver);
+    bindEvent(binder, "clicked", [&clicks] { ++clicks; });
+    TestBindingResult result = finishBinding(binder);
+    ASSERT_TRUE(result.ok());
+
+    Surface surface;
+    surface.mount(*buildResult.document);
+    action->activate();
+    provider->publish({true, false, std::nullopt});
+
+    EXPECT_EQ(clicks, 1);
+    EXPECT_TRUE(toggle->checked());
 }
 
 TEST(BinderTest, RejectsMissingLayoutSetting) {

@@ -715,7 +715,7 @@ TEST(FloatersTest, ClearsRetiredCallbacks) {
     auto floater = makeFloater();
     HTMLFloaterElement* floaterPointer = floater.get();
     bool sawStaleControl = false;
-    auto close = HTMLElementFactory::Create("close");
+    auto close = HTMLElementFactory::create("close");
     HTMLButtonElement* closePointer = dynamic_cast<HTMLButtonElement*>(close.get());
     ASSERT_NE(closePointer, nullptr);
     auto probe = std::make_unique<FloaterPartRemovalProbe>(*floaterPointer, *closePointer, sawStaleControl);
@@ -766,7 +766,7 @@ TEST(FloatersTest, RefreshesNamedParts) {
 TEST(FloatersTest, ReplacesClosePart) {
     auto floater = makeFloater(true);
     HTMLButtonElement* oldClose = floater->closeButton();
-    auto replacement = HTMLElementFactory::Create("close");
+    auto replacement = HTMLElementFactory::create("close");
     HTMLButtonElement* newClose = dynamic_cast<HTMLButtonElement*>(replacement.get());
     ASSERT_NE(oldClose, nullptr);
     ASSERT_NE(newClose, nullptr);

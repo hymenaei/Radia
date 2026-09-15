@@ -76,6 +76,7 @@ enum class ElementContentMode : uint8_t { Unsupported, ElementText, TextChildren
 struct ElementAttribute {
     std::string authoredName;
     std::string value;
+    bool hasValue = false;
     SourceRange source;
 };
 
@@ -210,6 +211,7 @@ struct ElementSelectorMetadata {
 const ResourceElementDefinition* findElementDefinition(HTMLTag tag);
 ElementSelectorMetadata inspectElementSelector(HTMLTag tag, std::string_view pseudoElement, std::optional<ElementState> elementState = std::nullopt);
 
+bool isRegisteredHTMLAttribute(HTMLTag tag, std::string_view name);
 bool readElementAttribute(const ElementBuildInput& input, std::string_view name, std::string& value);
 bool readElementBoolean(const ElementBuildInput& input, std::string_view name, bool& value, ElementBuildContext& context);
 bool producesState(const ResourceElementDefinition& element, ElementState state);
@@ -222,7 +224,9 @@ struct ResolvedLayoutText {
 };
 
 ResolvedLayoutText localizedLayoutText(std::string value, ElementBuildContext& context, const std::string& sourceName, std::size_t line = 0);
-void validateElementAttributes(const ElementBuildInput& input, const std::vector<std::string>& elementAttributes, ElementBuildContext& context);
+void validateElementAttributes(const ElementBuildInput& input, ElementBuildContext& context);
+void applyElementDefinitionAttributes(const ResourceElementDefinition& definition, const ElementBuildInput& input, Element& element,
+                                      ElementBuildContext& context);
 void applyCommonElementAttributes(const ElementBuildInput& input, Element& element, ElementBuildContext& context);
 
 inline ElementAttributeDefinition allowedAttribute(std::string name) {

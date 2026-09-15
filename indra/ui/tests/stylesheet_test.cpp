@@ -138,6 +138,28 @@ TEST(StyleSheetTest, TreatsRootAsDocumentRootSelector) {
     EXPECT_EQ(computedStyle(stylesheet, standaloneRoot).colorScheme, ColorScheme::Light);
 }
 
+TEST(StyleSheetTest, ScopesStructuralSelectors) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia(":root { width: 24px; } .outer .inner { opacity: .5; } .inner > label { width: 13px; }").ok());
+
+    auto outer = makeElementValue<HTMLPanelElement>();
+    outer.addClass("outer");
+    auto resource = makeElement<HTMLPanelElement>();
+    resource->addClass("inner");
+    ElementInternalAccess::setIdScopeRoot(*resource);
+    auto label = makeElement<HTMLLabelElement>();
+    HTMLLabelElement* labelPointer = label.get();
+    resource->append(std::move(label));
+    outer.append(std::move(resource));
+
+    const ComputedStyle resourceStyle = computedStyle(stylesheet, *outer.children().front());
+    EXPECT_EQ(resourceStyle.width.pixels(), 24.f);
+    EXPECT_EQ(resourceStyle.opacity, 1.f);
+
+    const ComputedStyle labelStyle = computedStyle(stylesheet, *labelPointer);
+    EXPECT_EQ(labelStyle.width.pixels(), 13.f);
+}
+
 TEST(StyleSheetTest, StartsWithoutImplicitCoreRules) {
     StyleSheet stylesheet;
     const ComputedStyle paragraph = stylesheet.resolve("p", "", {}, 0);
@@ -281,6 +303,18 @@ TEST(StyleSheetTest, SeparatesPartState) {
     EXPECT_EQ(computedStyle(stylesheet, *closeButton).width.pixels(), 10.f);
     ElementInternalAccess::setState(*closeButton, ElementState::Hovered, true);
     EXPECT_EQ(computedStyle(stylesheet, *closeButton).width.pixels(), 18.f);
+}
+
+TEST(StyleSheetTest, MatchesPseudoElementState) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia("input::slider-thumb { width: 10px; } input::slider-thumb:hover { width: 18px; }").ok());
+
+    auto input = makeElementValue<HTMLInputElement>();
+    input.type("checkbox").switchMode(true);
+
+    EXPECT_EQ(stylesheet.resolvePseudoElement(input, "slider-thumb", LayoutDirection::LeftToRight).width.pixels(), 10.f);
+    ElementInternalAccess::setState(input, ElementState::Hovered, true);
+    EXPECT_EQ(stylesheet.resolvePseudoElement(input, "slider-thumb", LayoutDirection::LeftToRight).width.pixels(), 18.f);
 }
 
 TEST(StyleSheetTest, PreservesCursorOnFailure) {
@@ -505,8 +539,8 @@ TEST(StyleSheetTest, RejectsInvalidRules) {
     }
 }
 
-TEST(StyleSheetTest, RejectsPseudoElementPseudoClasses) {
-    constexpr char kPseudoElementStateStyles[] = "input::slider-thumb:checked { width: 10px; }";
+TEST(StyleSheetTest, RejectsMultiplePseudoElementStates) {
+    constexpr char kPseudoElementStateStyles[] = "input::slider-thumb:hover:checked { width: 10px; }";
 
     StyleSheet stylesheet;
     const auto result = stylesheet.loadRadia(kPseudoElementStateStyles, "contract.css");
@@ -1038,6 +1072,18 @@ TEST(StyleSheetTest, ParsesBackgroundMaskAndCursorLayers) {
     EXPECT_EQ(references[2].value, "cursors/pointer.cur");
     EXPECT_FALSE(references[2].optional);
     EXPECT_TRUE(references[2].cursor);
+}
+
+TEST(StyleSheetTest, ParsesMaskShorthand) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia("i { mask: url(icons/mask.svg) alpha; }").ok());
+
+    const ComputedStyle style = stylesheet.resolve("i", "", {}, 0);
+    ASSERT_EQ(style.maskLayers.size(), 1U);
+    EXPECT_EQ(style.maskLayers.front().image.resource, "icons/mask.svg");
+    EXPECT_EQ(style.maskLayers.front().mode, MaskMode::Alpha);
+    EXPECT_EQ(style.maskLayers.front().composite, MaskComposite::Add);
+    EXPECT_EQ(style.maskLayers.front().type, MaskType::Alpha);
 }
 
 TEST(StyleSheetTest, DecodesEscapedImageURLsAndEvenQuoteEscapes) {

@@ -556,14 +556,25 @@ StyleSelector parseSimpleSelector(const std::string& selectorText) {
     std::string token = trim(selectorText);
 
     if (const std::size_t separator = findUnescapedSequence(token, "::"); separator != std::string::npos) {
-        const std::string pseudoElement = trim(token.substr(separator + 2));
-        if (pseudoElement.empty()
-            || findUnescapedSequence(pseudoElement, "::") != std::string::npos
-            || findUnescaped(pseudoElement, ':') != std::string::npos)
-            result.pseudoElementSyntaxInvalid = true;
+        std::string pseudoElement = trim(token.substr(separator + 2));
+        std::string pseudoElementState;
+        if (const std::size_t stateSeparator = findUnescaped(pseudoElement, ':'); stateSeparator != std::string::npos) {
+            pseudoElementState = trim(pseudoElement.substr(stateSeparator + 1));
+            pseudoElement.erase(stateSeparator);
+            if (pseudoElementState.empty()
+                || findUnescaped(pseudoElementState, ':') != std::string::npos
+                || !isValidCSSIdentifier(pseudoElementState)
+                || !isSupportedState(pseudoElementState))
+                result.pseudoElementSyntaxInvalid = true;
+        }
+        if (pseudoElement.empty() || findUnescapedSequence(pseudoElement, "::") != std::string::npos) result.pseudoElementSyntaxInvalid = true;
         else if (!isValidCSSIdentifier(pseudoElement)) result.pseudoElementSyntaxInvalid = true;
-        else result.pseudoElement = decodeCSSIdentifier(pseudoElement);
-        token.erase(separator);
+        else {
+            result.pseudoElement = decodeCSSIdentifier(pseudoElement);
+            token.erase(separator);
+            if (!pseudoElementState.empty() && !result.pseudoElementSyntaxInvalid) token += ":" + pseudoElementState;
+        }
+        if (result.pseudoElementSyntaxInvalid) token.erase(separator);
     }
     parsePseudoClasses(token, result);
     parseAttributeSelector(token, result);

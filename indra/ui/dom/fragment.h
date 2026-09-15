@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <vector>
 #include "dom/node.h"
 
 namespace radia::ui {
@@ -25,8 +26,8 @@ public:
     const Node* firstChild() const noexcept override;
     Node* lastChild() noexcept override;
     const Node* lastChild() const noexcept override;
-    NodeList childNodes() override;
-    ConstNodeList childNodes() const override;
+    NodeSnapshot childNodes() override;
+    ConstNodeSnapshot childNodes() const override;
 
     Node* append(NodePtr child);
     Node* append(FragmentPtr fragment);

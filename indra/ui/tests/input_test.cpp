@@ -32,6 +32,7 @@ using radia::ui::AppearanceMode;
 using radia::ui::Color;
 using radia::ui::ColorScheme;
 using radia::ui::ComputedStyle;
+using radia::ui::ElementRef;
 using radia::ui::ElementState;
 using radia::ui::Event;
 using radia::ui::fixedTextMetrics;
@@ -182,6 +183,38 @@ TEST(InputTest, PreservesElementIdentity) {
     EXPECT_EQ(input.checkmark()->name(), "checkmark");
 }
 
+TEST(InputTest, RejectsSwitchModeForNonCheckbox) {
+    auto input = makeElementValue<HTMLInputElement>();
+
+    input.switchMode(true);
+    EXPECT_FALSE(input.switchMode());
+    EXPECT_FALSE(input.hasAttribute("switch"));
+
+    input.type("radio").switchMode(true);
+    EXPECT_FALSE(input.switchMode());
+    EXPECT_FALSE(input.hasAttribute("switch"));
+}
+
+TEST(InputTest, ClearsCheckableStateWhenChangingType) {
+    auto input = makeElementValue<HTMLInputElement>();
+    input.type("checkbox").switchMode(true).checked(true).indeterminate(true);
+    input.setAttribute("setting", "demo-enabled");
+
+    input.type("text");
+    EXPECT_FALSE(input.checked());
+    EXPECT_FALSE(input.indeterminate());
+    EXPECT_FALSE(input.switchMode());
+    EXPECT_FALSE(input.hasAttribute("checked"));
+    EXPECT_FALSE(input.hasAttribute("switch"));
+    EXPECT_FALSE(input.hasAttribute("setting"));
+    EXPECT_FALSE(input.valueState().dirty);
+
+    input.type("checkbox");
+    EXPECT_FALSE(input.checked());
+    EXPECT_FALSE(input.indeterminate());
+    EXPECT_FALSE(input.switchMode());
+}
+
 TEST(InputTest, SelectsNativeAppearance) {
     auto input = makeElementValue<HTMLInputElement>();
     RecordingPaintContext recording;
@@ -231,6 +264,25 @@ TEST(InputTest, PaintsCheckmark) {
     EXPECT_EQ(text->text, "\xE2\x9C\x93");
 }
 
+TEST(InputTest, PaintsUnstyledCheckmark) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet
+                    .loadRadia("input[type=checkbox] { appearance: none; display: flex; width: 20px; height: 20px; } "
+                               "input[type=checkbox]::checkmark { content: \"\\2713\" / \"\"; width: 10px; height: 10px; visibility: visible; }")
+                    .ok());
+
+    auto input = makeElementValue<HTMLInputElement>();
+    input.type("checkbox").checked(true).setRect({0.f, 0.f, 20.f, 20.f});
+    LayoutEngine::layout(input, stylesheet, fixedTextMetrics());
+
+    RecordingPaintContext recording;
+    input.paint(recording, computedStyle(stylesheet, input), 1.f);
+
+    const PaintCommand* text = recording.last(PaintCommandKind::Text);
+    ASSERT_NE(text, nullptr);
+    EXPECT_EQ(text->text, "\xE2\x9C\x93");
+}
+
 TEST(InputTest, CarriesAccentColor) {
     auto input = makeElementValue<HTMLInputElement>();
     input.type("checkbox").setRect({0.f, 0.f, 13.f, 13.f});
@@ -248,6 +300,21 @@ TEST(InputTest, CarriesAccentColor) {
     EXPECT_NEAR(command->nativeInput->accentColor->g, .4f, 1.0e-6f);
     EXPECT_NEAR(command->nativeInput->accentColor->b, .6f, 1.0e-6f);
     EXPECT_NEAR(command->nativeInput->accentColor->a, .8f, 1.0e-6f);
+}
+
+TEST(InputTest, CarriesOpacityToNativeAppearance) {
+    auto input = makeElementValue<HTMLInputElement>();
+    input.type("checkbox").setRect({0.f, 0.f, 13.f, 13.f});
+    RecordingPaintContext recording;
+    ComputedStyle style;
+    style.opacity = .4f;
+
+    input.paint(recording, style, 1.f);
+
+    const PaintCommand* command = recording.last(PaintCommandKind::NativeInput);
+    ASSERT_NE(command, nullptr);
+    ASSERT_TRUE(command->nativeInput.has_value());
+    EXPECT_FLOAT_EQ(command->nativeInput->opacity, .4f);
 }
 
 TEST(InputTest, CarriesColorScheme) {
@@ -311,6 +378,30 @@ TEST(InputTest, PaintsNativeCheckbox) {
     ASSERT_TRUE(mark->nativeInputMark.has_value());
     EXPECT_EQ(mark->nativeInputMark->mark, NativeInputMark::Dash);
     EXPECT_TRUE(mark->nativeInputMark->path.empty());
+}
+
+TEST(InputTest, AppliesNativeInputOpacity) {
+    NativeAppearanceBase appearance;
+    NativeInputPaintRequest request;
+    request.control = NativeInputControl::Checkbox;
+    request.bounds = {0.f, 0.f, 20.f, 12.f};
+    request.opacity = .5f;
+    RecordingPaintContext recording;
+
+    appearance.paintInput(recording, request);
+
+    ASSERT_EQ(recording.count(PaintCommandKind::Box), std::size_t{2});
+    EXPECT_FLOAT_EQ(recording.commands()[0].style.backgroundColor.a, .5f);
+    EXPECT_FLOAT_EQ(recording.commands()[1].style.borderColor.a, .5f);
+
+    request.checked = true;
+    recording.clear();
+    appearance.paintInput(recording, request);
+
+    const PaintCommand* mark = recording.last(PaintCommandKind::NativeInputMark);
+    ASSERT_NE(mark, nullptr);
+    ASSERT_TRUE(mark->nativeInputMark.has_value());
+    EXPECT_FLOAT_EQ(mark->nativeInputMark->color.a, .5f);
 }
 
 TEST(InputTest, PaintsRoundRadioDot) {
@@ -533,6 +624,27 @@ TEST(InputTest, GroupsRadioInputsByName) {
     secondPtr->checked(true);
     secondPtr->name("other");
     EXPECT_TRUE(firstPtr->hasState(ElementState::Indeterminate));
+}
+
+TEST(InputTest, RadioTraversalSurvivesRemoval) {
+    auto root = makeElementValue<HTMLPanelElement>();
+    auto first = makeElement<HTMLInputElement>();
+    auto second = makeElement<HTMLInputElement>();
+    HTMLInputElement* firstPointer = first.get();
+    HTMLInputElement* secondPointer = second.get();
+    first->type("radio").name("choice");
+    second->type("radio").name("choice");
+    root.append(std::move(first));
+    root.append(std::move(second));
+    firstPointer->checked(true);
+
+    const ElementRef<HTMLInputElement> secondReference(secondPointer);
+    const ValueBindingSubscription destroyCurrent = firstPointer->observeValueState([secondPointer](const auto&) { secondPointer->remove(); });
+
+    secondPointer->checked(true);
+
+    EXPECT_EQ(secondReference.get(), nullptr);
+    EXPECT_FALSE(firstPointer->checked());
 }
 
 TEST(InputTest, SeparatesRadioGroupsByName) {

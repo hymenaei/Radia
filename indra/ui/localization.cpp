@@ -28,12 +28,11 @@
 #include <yaml-cpp/eventhandler.h>
 #include <yaml-cpp/parser.h>
 #include <yaml-cpp/yaml.h>
-#include "html/elementnames.h"
+#include "dom/fragment.h"
 #include "dom/fragmentinternal.h"
 #include "resource/sourcedocument.h"
 
 namespace radia::ui {
-using dom_detail::isValidHTMLAttribute;
 
 namespace {
 class StringValue {
@@ -161,17 +160,6 @@ std::size_t htmlLine(std::size_t sourceLine, const SourceLocation& location) {
     return sourceLine + (location.line > 0 ? location.line - 1 : 0);
 }
 
-void validateHTMLAttributes(const SourceNode& node, DiagnosticResult& result, const std::string& sourceName, std::size_t sourceLine) {
-    for (const auto& [name, attribute] : node.attributes) {
-        if (isValidHTMLAttribute(node.tag, name, attribute.hasValue, attribute.value)) continue;
-        result.error("localization.string.attribute_invalid",
-                     "Invalid HTML attribute on <" + node.authoredName + ">: " + attribute.authoredName + ".", sourceName,
-                     htmlLine(sourceLine, attribute.source.begin));
-    }
-    for (const SourceContent& content : node.content)
-        if (content.node) validateHTMLAttributes(*content.node, result, sourceName, sourceLine);
-}
-
 bool parseLocalizedHTML(const std::string& source, DiagnosticResult& result, const std::string& sourceName, std::size_t sourceLine) {
     const SourceDocumentParseResult parsed = SourceDocumentParser().parse("<div>" + source + "</div>", sourceName);
     for (const Diagnostic& diagnostic : parsed.errors)
@@ -179,8 +167,11 @@ bool parseLocalizedHTML(const std::string& source, DiagnosticResult& result, con
                      htmlLine(sourceLine, {diagnostic.line, diagnostic.column, 0}), diagnostic.column);
     if (!parsed.ok() || !parsed.document || !parsed.document->root || result.hasErrors()) return false;
 
-    validateHTMLAttributes(*parsed.document->root, result, sourceName, sourceLine);
-    return !result.hasErrors();
+    if (!dom_detail::parseFragment(source)) {
+        result.error("localization.string.html_invalid", "Localized HTML violates the HTML fragment contract.", sourceName, sourceLine);
+        return false;
+    }
+    return true;
 }
 
 std::optional<std::string> canonicalLanguageTag(const std::string& value) {

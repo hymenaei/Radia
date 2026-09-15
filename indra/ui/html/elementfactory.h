@@ -14,7 +14,7 @@ class Element;
 namespace detail {
 class HTMLElementFactory final {
 public:
-    static std::unique_ptr<Element> Create(std::string_view localName);
+    static std::unique_ptr<Element> create(std::string_view localName);
 };
 } // namespace detail
 } // namespace radia::ui

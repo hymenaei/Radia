@@ -44,7 +44,7 @@ using radia::ui::NativeAppearanceBase;
 using radia::ui::NativeButtonPaintRequest;
 using radia::ui::NativeScrollbarMetrics;
 using radia::ui::NativeScrollbarPaintRequest;
-using radia::ui::NodeList;
+using radia::ui::NodeSnapshot;
 using radia::ui::PaintCommand;
 using radia::ui::PaintCommandKind;
 using radia::ui::PublicationCommit;
@@ -879,7 +879,7 @@ TEST(SystemTest, SeparatesLocalizedContent) {
     rich->innerHTML(system.t("hello"));
     surface->mount(std::move(rich));
 
-    const NodeList richNodes = richPtr->childNodes();
+    const NodeSnapshot richNodes = richPtr->childNodes();
     ASSERT_EQ(richNodes.size(), 2U);
     ASSERT_NE(richNodes[0]->asText(), nullptr);
     ASSERT_NE(richNodes[1]->asElement(), nullptr);
@@ -895,7 +895,7 @@ TEST(SystemTest, SeparatesLocalizedContent) {
     rawContent->innerHTML("hello <b>world</b>");
     surface->mount(std::move(rawContent));
 
-    const NodeList rawNodes = rawContentPtr->childNodes();
+    const NodeSnapshot rawNodes = rawContentPtr->childNodes();
     ASSERT_EQ(rawNodes.size(), 2U);
     ASSERT_NE(rawNodes[0]->asText(), nullptr);
     ASSERT_NE(rawNodes[1]->asElement(), nullptr);

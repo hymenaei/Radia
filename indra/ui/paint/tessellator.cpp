@@ -95,6 +95,7 @@ Mesh tessellateStroke(const Path& path, const Color& color, float width, float f
         if (contour.size() < 2) continue;
         bool closed = contour.size() > 2 && samePoint(contour.front(), contour.back());
         if (closed) contour.pop_back();
+        if (closed && contour.size() == 2) closed = false;
         if (contour.size() < (closed ? 3U : 2U)) continue;
 
         std::vector<Vec2> stroke = contour;

@@ -92,6 +92,7 @@ struct NativeInputPaintRequest {
     bool disabled = false;
     bool hovered = false;
     bool pressed = false;
+    float opacity = 1.f;
     std::optional<Color> accentColor;
     ColorScheme colorScheme = ColorScheme::Auto;
     LayoutDirection direction = LayoutDirection::LeftToRight;

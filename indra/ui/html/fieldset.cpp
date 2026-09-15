@@ -102,7 +102,7 @@ ResourceElementDefinition detail::ElementDefinitions::fieldset() {
             return child;
         }
 
-        auto legend = HTMLElementFactory::Create(kLegendTag.localName);
+        auto legend = HTMLElementFactory::create(kLegendTag.localName);
         Element* resultElement = legend.get();
         fieldset.append(std::move(legend));
         return resultElement;

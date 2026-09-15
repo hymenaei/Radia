@@ -61,6 +61,13 @@ const Element* HTMLLabelElement::target() const {
     return findLabelTarget<const HTMLLabelElement, detail::ConstElementIdIndex>(*this);
 }
 
+AccessibleSemantics HTMLLabelElement::accessibleSemantics() const {
+    AccessibleSemantics result = HTMLElement::accessibleSemantics();
+    result.role = AccessibleRole::Label;
+    result.labelTarget = target();
+    return result;
+}
+
 void HTMLLabelElement::onActivate() {
     if (Element* targetElement = target()) targetElement->activateFromLabel();
 }

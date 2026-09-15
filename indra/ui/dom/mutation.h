@@ -5,6 +5,9 @@
 
 #pragma once
 
+#include <memory>
+#include <string>
+#include <vector>
 #include "dom/element.h"
 
 namespace radia::ui {

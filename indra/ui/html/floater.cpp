@@ -32,6 +32,7 @@ HTMLCloseButtonElement::HTMLCloseButtonElement() : HTMLButtonElement(kCloseTag.l
 namespace {
 void findAuthoredHeadElements(Element& root, Element*& title, HTMLButtonElement*& minimize, HTMLButtonElement*& close) {
     for (Element* child : root.children()) {
+        if (child->idScopeRoot()) continue;
         if (child->elementName() == kTitleTag.localName) {
             if (!title) title = child;
         } else if (child->elementName() == kMinimizeTag.localName) {
@@ -47,15 +48,17 @@ void findAuthoredHeadElements(Element& root, Element*& title, HTMLButtonElement*
 std::size_t countAuthoredElements(const Element& root, std::string_view elementName) {
     std::size_t count = 0;
     for (const Element* child : root.children()) {
+        if (child->idScopeRoot()) continue;
         if (child->elementName() == elementName) ++count;
         count += countAuthoredElements(*child, elementName);
     }
     return count;
 }
 
-void clearAuthoredCallbacks(Element& root) {
+void clearAuthoredCallbacks(Element& root, const Element& scopeRoot) {
+    if (&root != &scopeRoot && root.idScopeRoot()) return;
     if (root.elementName() == kCloseTag.localName || root.elementName() == kMinimizeTag.localName) root.setOnActivate({});
-    for (Element* child : root.children()) clearAuthoredCallbacks(*child);
+    for (Element* child : root.children()) clearAuthoredCallbacks(*child, scopeRoot);
 }
 } // namespace
 
@@ -175,12 +178,12 @@ void HTMLFloaterElement::onChildAdded(Element&) {
 }
 
 void HTMLFloaterElement::onChildWillBeRemoved(Element& child) {
-    clearAuthoredCallbacks(child);
+    clearAuthoredCallbacks(child, *this);
     refreshAuthoredStructure();
 }
 
 void HTMLFloaterElement::onChildRemoved(Element& child) {
-    clearAuthoredCallbacks(child);
+    clearAuthoredCallbacks(child, *this);
     refreshAuthoredStructure();
 }
 
@@ -189,12 +192,12 @@ void HTMLFloaterElement::onDescendantAdded(Element&) {
 }
 
 void HTMLFloaterElement::onDescendantWillBeRemoved(Element& child) {
-    clearAuthoredCallbacks(child);
+    clearAuthoredCallbacks(child, *this);
     refreshAuthoredStructure();
 }
 
 void HTMLFloaterElement::onDescendantRemoved(Element& child) {
-    clearAuthoredCallbacks(child);
+    clearAuthoredCallbacks(child, *this);
     refreshAuthoredStructure();
 }
 

@@ -101,7 +101,6 @@ set(private_sources
     surface/surfaceinput.cpp
     surface/surfacescroll.cpp
 
-    text/host.cpp
     text/inlineelements.cpp
     text/inlineelements.h
     text/layout.cpp

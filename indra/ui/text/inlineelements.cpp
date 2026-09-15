@@ -44,6 +44,18 @@ bool accepts(const std::vector<HTMLTag>& acceptedTags, HTMLTag tag) {
     return std::find(acceptedTags.begin(), acceptedTags.end(), tag) != acceptedTags.end();
 }
 
+ElementBuildInput makeElementInput(const SourceNode& node, const std::string& sourceName) {
+    ElementBuildInput input;
+    input.tag = node.tag;
+    input.authoredName = node.authoredName;
+    input.source = node.source;
+    input.sourceName = sourceName;
+    input.attributes.reserve(node.attributes.size());
+    for (const auto& [name, attribute] : node.attributes)
+        input.attributes.emplace(name, ElementAttribute{attribute.authoredName, attribute.value, attribute.hasValue, attribute.source});
+    return input;
+}
+
 void addFinding(InlineValidationResult& result, InlineValidationKind kind, const SourceNode& node, const SourceLocation& location = {}) {
     result.findings.push_back({kind, node.tag, node.source, {location, location}, node.authoredName, {}});
 }
@@ -62,18 +74,13 @@ void validateNode(const SourceNode& node, const std::vector<HTMLTag>& acceptedTa
     if (node.tag == HTMLTag::Kbd) {
         const auto shortcut = node.attributes.find("shortcut");
         if (shortcut == node.attributes.end()) addFinding(result, InlineValidationKind::KbdShortcutRequired, node, node.source.begin);
-        else if (shortcut->second.value.empty())
+        else if (!shortcut->second.hasValue || shortcut->second.value.empty() || containsHTMLWhitespace(shortcut->second.value))
             addFinding(result, InlineValidationKind::KbdShortcutInvalid, node, shortcut->second.source.begin);
-
-        for (const auto& [name, attribute] : node.attributes)
-            if (name != "shortcut")
-                result.findings.push_back(
-                    {InlineValidationKind::AttributeUnknown, node.tag, node.source, attribute.source, node.authoredName, attribute.authoredName});
-    } else {
-        for (const auto& [name, attribute] : node.attributes)
+    }
+    for (const auto& [name, attribute] : node.attributes)
+        if (!(node.tag == HTMLTag::Kbd && name == "shortcut") && !isRegisteredHTMLAttribute(node.tag, name))
             result.findings.push_back(
                 {InlineValidationKind::AttributeUnknown, node.tag, node.source, attribute.source, node.authoredName, attribute.authoredName});
-    }
 
     if (node.tag == HTMLTag::Br || node.tag == HTMLTag::Kbd) {
         if (hasAuthoredContent(node)) addFinding(result, InlineValidationKind::ChildrenUnsupported, node, node.source.begin);
@@ -108,8 +115,8 @@ void appendValidationDiagnostics(const InlineValidationResult& validation, Eleme
                               elementLocation.column);
                 break;
             case InlineValidationKind::KbdShortcutInvalid:
-                context.error("layout.inline.kbd.shortcut_invalid", "Inline <kbd> shortcut must be non-empty.", sourceName, location.line,
-                              location.column);
+                context.error("layout.inline.kbd.shortcut_invalid", "Inline <kbd> shortcut must be non-empty and contain no ASCII whitespace.",
+                              sourceName, location.line, location.column);
                 break;
             case InlineValidationKind::ChildrenUnsupported:
                 context.error("layout.inline.children_unsupported", "Inline <" + finding.elementName + "> cannot contain authored content.",
@@ -159,24 +166,28 @@ void appendElement(AppendState& state, const SourceNode& node) {
 
     if (node.tag == HTMLTag::Link) return;
 
-    if (node.tag == HTMLTag::Kbd) {
-        const auto shortcut = node.attributes.find("shortcut");
-        if (shortcut == node.attributes.end() || shortcut->second.value.empty()) return;
+    auto element = HTMLElementFactory::create(elementName);
+    if (!element) return;
+    ElementBuildInput input = makeElementInput(node, state.sourceName);
+    const ResourceElementDefinition* definition = findElementDefinition(node.tag);
+    if (!definition) return;
+    const std::size_t errorsBefore = state.context.errorCount();
+    applyCommonElementAttributes(input, *element, state.context);
+    applyElementDefinitionAttributes(*definition, input, *element, state.context);
+    if (state.context.errorCount() != errorsBefore) return;
+    Element* added = element.get();
 
+    if (node.tag == HTMLTag::Kbd) {
         if (state.hasPendingSpace) {
             appendText(state.target, " ");
             state.hasPendingSpace = false;
         }
-        auto element = HTMLElementFactory::Create(kKbdTag.localName);
-        static_cast<HTMLElement&>(*element).setKeybinding(shortcut->second.value);
         state.target.append(std::move(element));
         state.hasEmittedContent = true;
         return;
     }
 
     if (node.tag == HTMLTag::Br) {
-        auto element = HTMLElementFactory::Create(kBrTag.localName);
-        Element* added = element.get();
         state.target.append(std::move(element));
         NodeAccess::setFlowBreakBefore(*added, false);
         state.hasEmittedContent = false;
@@ -188,8 +199,6 @@ void appendElement(AppendState& state, const SourceNode& node) {
         appendText(state.target, " ");
         state.hasPendingSpace = false;
     }
-    auto element = HTMLElementFactory::Create(elementName);
-    Element* added = element.get();
     AppendState nested{*element, state.hostName, state.acceptedTags, state.context, state.sourceName};
     appendChildren(nested, node.content);
     state.target.append(std::move(element));
@@ -235,7 +244,9 @@ InlineValidationResult validateInlineContent(const std::vector<SourceContent>& c
 
 void appendInlineElements(Element& target, const std::vector<SourceContent>& contentItems, const std::string& hostName,
                           const std::vector<HTMLTag>& acceptedTags, ElementBuildContext& context, const std::string& sourceName) {
-    appendValidationDiagnostics(validateInlineContent(contentItems, acceptedTags), context, sourceName, hostName);
+    const InlineValidationResult validation = validateInlineContent(contentItems, acceptedTags);
+    appendValidationDiagnostics(validation, context, sourceName, hostName);
+    if (!validation.findings.empty()) return;
     AppendState state{target, hostName, acceptedTags, context, sourceName};
     appendChildren(state, contentItems);
 }

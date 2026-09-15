@@ -16,6 +16,7 @@
 #include "dom/elementinternal.h"
 #include "dom/fragment.h"
 #include "dom/text.h"
+#include "event/eventcall.h"
 #include "html/button.h"
 #include "html/element.h"
 #include "html/elementnames.h"
@@ -27,7 +28,7 @@
 #include "skin/compiler.h"
 #include "surface/surface.h"
 #include "system.h"
-#include "text/host.h"
+#include "text/layout.h"
 #include "text/metrics.h"
 
 namespace {
@@ -535,6 +536,16 @@ TEST(FragmentTest, RoundTripsBoundedHTML) {
     EXPECT_EQ(root.children()[1]->elementName(), "input");
 }
 
+TEST(FragmentTest, RejectsScopedElementsWithoutOwner) {
+    auto root = makeElementValue<HTMLPanelElement>();
+    constexpr char kInvalidHTML[] = "<legend>Orphan</legend>";
+
+    root.innerHTML(kInvalidHTML);
+
+    ASSERT_EQ(root.childNodes().size(), 1U);
+    EXPECT_EQ(root.textContent(), kInvalidHTML);
+}
+
 TEST(FragmentTest, InnerHTMLReplacesExistingChildren) {
     auto root = makeElementValue<HTMLPanelElement>();
     Node* oldChild = root.append(makeElement<HTMLLabelElement>("old"));
@@ -590,6 +601,28 @@ TEST(FragmentTest, TreatsBooleanAttributesAsPresence) {
     const auto* button = dynamic_cast<const HTMLButtonElement*>(root.children().front());
     ASSERT_NE(button, nullptr);
     EXPECT_TRUE(button->disabled());
+}
+
+TEST(FragmentTest, AppliesAuthoredEventAttributes) {
+    auto root = makeElementValue<HTMLPanelElement>();
+
+    root.innerHTML("<button onClick='activate()'>Save</button>");
+
+    ASSERT_EQ(root.children().size(), 1U);
+    const auto* button = dynamic_cast<const HTMLButtonElement*>(root.children().front());
+    ASSERT_NE(button, nullptr);
+    ASSERT_NE(radia::ui::authoredEventCall(*button, kClickEvent), nullptr);
+    EXPECT_EQ(radia::ui::authoredEventCall(*button, kClickEvent)->name(), "activate");
+}
+
+TEST(FragmentTest, RejectsIncompatibleElementAttributes) {
+    auto root = makeElementValue<HTMLPanelElement>();
+    constexpr char kInvalidHTML[] = "<input type=text checked>";
+
+    root.innerHTML(kInvalidHTML);
+
+    EXPECT_EQ(root.childNodes().size(), 1U);
+    EXPECT_EQ(root.textContent(), kInvalidHTML);
 }
 
 TEST(FragmentTest, SerializesOwnedParts) {

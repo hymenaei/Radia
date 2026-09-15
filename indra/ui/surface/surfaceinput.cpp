@@ -77,17 +77,31 @@ bool Surface::routeEvent(Event& event) {
     std::vector<ElementRef<Element>> route;
     for (Element* current = event.target(); current; current = current->parentElement()) {
         route.emplace_back(current);
-        if (isSurfaceRoot(current)) break;
+        if (current->idScopeRoot() || isSurfaceRoot(current)) break;
     }
-    if (route.empty() || !route.back() || !isSurfaceRoot(route.back().get()) || !isRootedInSurface(route.front().get())) return false;
+    const auto routeIsValid = [&]() {
+        if (route.empty()) return false;
+        for (std::size_t index = 0; index < route.size(); ++index) {
+            Element* current = route[index].getMounted();
+            if (!current || current->surface() != this) return false;
+            if (index + 1 < route.size()) {
+                Element* parent = route[index + 1].getMounted();
+                if (!parent || current->parentElement() != parent) return false;
+            } else if (!current->idScopeRoot() && !isSurfaceRoot(current)) {
+                return false;
+            }
+        }
+        return isRootedInSurface(route.front().get());
+    };
+    if (!routeIsValid()) return false;
 
     event.setPhase(EventPhase::Capture);
     for (std::size_t index = route.size() - 1; index > 0; --index) {
         Element* target = route[index].get();
         if (!target) break;
         event.setCurrentTarget(target);
-        target->dispatchListeners(event, true);
-        if (!route[index]) {
+        target->dispatchListeners(event, true, routeIsValid);
+        if (!routeIsValid()) {
             event.setCurrentTarget(nullptr);
             return event.handled() || event.defaultPrevented();
         }
@@ -104,13 +118,13 @@ bool Surface::routeEvent(Event& event) {
         return event.handled() || event.defaultPrevented();
     }
     event.setCurrentTarget(target);
-    target->dispatchListeners(event, true);
-    if (!route.front()) {
+    target->dispatchListeners(event, true, routeIsValid);
+    if (!routeIsValid()) {
         event.setCurrentTarget(nullptr);
         return event.handled() || event.defaultPrevented();
     }
-    if (!event.immediatePropagationStopped()) target->dispatchListeners(event, false);
-    if (!route.front()) {
+    if (!event.immediatePropagationStopped()) target->dispatchListeners(event, false, routeIsValid);
+    if (!routeIsValid()) {
         event.setCurrentTarget(nullptr);
         return event.handled() || event.defaultPrevented();
     }
@@ -120,8 +134,8 @@ bool Surface::routeEvent(Event& event) {
             Element* bubbleTarget = route[index].get();
             if (!bubbleTarget) break;
             event.setCurrentTarget(bubbleTarget);
-            bubbleTarget->dispatchListeners(event, false);
-            if (!route[index]) {
+            bubbleTarget->dispatchListeners(event, false, routeIsValid);
+            if (!routeIsValid()) {
                 event.setCurrentTarget(nullptr);
                 return event.handled() || event.defaultPrevented();
             }

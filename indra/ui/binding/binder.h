@@ -66,7 +66,7 @@ private:
 
     std::vector<EventAttachment> mEventAttachments;
     std::vector<ValueAttachment> mValueAttachments;
-    std::vector<ValueBindingSubscription> mValueSubscriptions;
+    std::vector<std::shared_ptr<ValueBindingSubscription>> mValueSubscriptions;
     Element* mRoot = nullptr;
     Node* mRootParent = nullptr;
     std::weak_ptr<char> mRootLifetime;

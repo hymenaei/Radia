@@ -314,15 +314,15 @@ const Node* Element::lastChild() const noexcept {
     return mChildren.empty() ? nullptr : mChildren.back().get();
 }
 
-NodeList Element::childNodes() {
-    NodeList result;
+NodeSnapshot Element::childNodes() {
+    NodeSnapshot result;
     result.reserve(mChildren.size());
     for (const auto& child : mChildren) result.push_back(child.get());
     return result;
 }
 
-ConstNodeList Element::childNodes() const {
-    ConstNodeList result;
+ConstNodeSnapshot Element::childNodes() const {
+    ConstNodeSnapshot result;
     result.reserve(mChildren.size());
     for (const auto& child : mChildren) result.push_back(child.get());
     return result;
@@ -604,14 +604,14 @@ Element& Element::setIdScopeRoot(bool scopeRoot) {
     return *this;
 }
 
-void Element::dispatchListeners(Event& event, bool capture) {
+void Element::dispatchListeners(Event& event, bool capture, const std::function<bool()>& isValid) {
     const EventListenerSnapshot listeners = mEventListeners;
     const ElementRef<Element> self(this);
     for (const EventListener& listener : listeners) {
         if (event.immediatePropagationStopped()) break;
         if (listener.capture != capture || listener.type != event.type() || (listener.state && listener.state->removed)) continue;
         listener.handler(event);
-        if (!self) {
+        if (!self || (isValid && !isValid())) {
             event.setCurrentTarget(nullptr);
             return;
         }
@@ -880,6 +880,16 @@ void Element::activate() {
     if (current->mOnActivate) current->mOnActivate(*current);
 }
 
+AccessibleSemantics Element::accessibleSemantics() const {
+    AccessibleSemantics result;
+    result.name = textContent();
+    result.focusable = focusable();
+    result.disabled = disabled();
+    result.focused = hasState(ElementState::Focused);
+    result.focusVisible = hasState(ElementState::FocusVisible);
+    return result;
+}
+
 void Element::activateFromLabel() {
     const StyleSheet* styleSheet = this->styleSheet();
     std::optional<StylePass> styles;
@@ -891,6 +901,7 @@ void Element::activateFromLabel() {
         if (current->disabled()) return;
         if (!current->isVisible(styles ? styles->style(*current) : ComputedStyle{})) return;
     }
+    if (Surface* currentSurface = surface()) currentSurface->setFocused(this, false);
     onLabelActivate();
 }
 

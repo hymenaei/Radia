@@ -20,8 +20,8 @@ inline void appendFloaterStructure(HTMLFloaterElement& floater, bool withClose =
     auto title = makeElement<Element>("title");
     title->textContent("title");
     head->append(std::move(title));
-    if (withMinimize) head->append(HTMLElementFactory::Create("minimize"));
-    if (withClose) head->append(HTMLElementFactory::Create("close"));
+    if (withMinimize) head->append(HTMLElementFactory::create("minimize"));
+    if (withClose) head->append(HTMLElementFactory::create("close"));
     floater.append(std::move(head));
     floater.append(makeElement<Element>("body"));
 }

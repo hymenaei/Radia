@@ -9,7 +9,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <numbers>
-#include <sstream>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -18,8 +17,34 @@
 namespace radia::ui {
 namespace {
 constexpr float kPi = std::numbers::pi_v<float>;
-using detail::lower;
+using detail::normalizeCSSKeyword;
 using detail::trim;
+
+std::string tokenValue(const detail::CSSTokenStream& stream, detail::CSSTokenRange range) {
+    return trim(detail::serializeCSSRange(stream, range));
+}
+
+bool isOpeningToken(detail::CSSTokenKind kind) {
+    return kind == detail::CSSTokenKind::Function
+        || kind == detail::CSSTokenKind::OpenParen
+        || kind == detail::CSSTokenKind::OpenBracket
+        || kind == detail::CSSTokenKind::OpenBrace;
+}
+
+bool hasTopLevelDelimiter(const detail::CSSTokenStream& stream, detail::CSSTokenRange range, char delimiter) {
+    for (std::size_t index = range.begin; index < range.end;) {
+        const detail::CSSTokenKind kind = stream.tokens()[index].kind;
+        if (isOpeningToken(kind)) {
+            index = detail::skipCSSComponent(stream, index, range.end);
+            continue;
+        }
+        if ((delimiter == ',' && kind == detail::CSSTokenKind::Comma)
+            || (kind == detail::CSSTokenKind::Delim && stream.text(index) == std::string_view(&delimiter, 1)))
+            return true;
+        ++index;
+    }
+    return false;
+}
 
 bool parseFloat(const std::string& token, float& result) {
     char* end = nullptr;
@@ -76,42 +101,36 @@ bool parseHue(std::string token, float& degrees) {
     return true;
 }
 
-std::vector<std::string> splitComma(const std::string& value) {
-    std::vector<std::string> result;
-    std::size_t start = 0;
-    while (start <= value.size()) {
-        const std::size_t comma = value.find(',', start);
-        result.push_back(trim(value.substr(start, comma == std::string::npos ? std::string::npos : comma - start)));
-        if (comma == std::string::npos) break;
-        start = comma + 1;
-    }
-    return result;
-}
-
-std::vector<std::string> splitSpace(const std::string& value) {
-    std::stringstream stream(value);
-    std::vector<std::string> result;
-    std::string token;
-    while (stream >> token) result.push_back(token);
-    return result;
-}
-
-bool functionArguments(const std::string& body, std::vector<std::string>& channels, std::string& alpha) {
-    if (body.find(',') != std::string::npos) {
-        if (body.find('/') != std::string::npos) return false;
-        channels = splitComma(body);
-        if (channels.size() == 4) {
-            alpha = channels.back();
-            channels.pop_back();
+bool functionArguments(const detail::CSSTokenStream& stream, detail::CSSTokenRange body, std::vector<std::string>& channels, std::string& alpha) {
+    if (hasTopLevelDelimiter(stream, body, ',')) {
+        if (hasTopLevelDelimiter(stream, body, '/')) return false;
+        std::vector<detail::CSSTokenRange> arguments = detail::splitCSSOnDelimiter(stream, body, ',');
+        if (arguments.size() == 4) {
+            alpha = tokenValue(stream, arguments.back());
+            if (alpha.empty()) return false;
+            arguments.pop_back();
+        }
+        for (const detail::CSSTokenRange argument : arguments) {
+            const std::string value = tokenValue(stream, argument);
+            if (value.empty()) return false;
+            channels.push_back(value);
         }
         return channels.size() == 3;
     }
 
-    const std::size_t slash = body.find('/');
-    if (slash != std::string::npos && body.find('/', slash + 1) != std::string::npos) return false;
-    channels = splitSpace(trim(body.substr(0, slash)));
-    if (slash != std::string::npos) alpha = trim(body.substr(slash + 1));
-    return channels.size() == 3 && (slash == std::string::npos || !alpha.empty());
+    const std::vector<detail::CSSTokenRange> components = detail::splitCSSComponents(stream, body, true);
+    std::size_t slash = detail::kNoMatchingCSSToken;
+    for (std::size_t index = 0; index < components.size(); ++index) {
+        if (tokenValue(stream, components[index]) == "/") {
+            if (slash != detail::kNoMatchingCSSToken) return false;
+            slash = index;
+        }
+    }
+    const std::size_t channelEnd = slash == detail::kNoMatchingCSSToken ? components.size() : slash;
+    if (channelEnd != 3 || (slash != detail::kNoMatchingCSSToken && slash + 2 != components.size())) return false;
+    for (std::size_t index = 0; index < channelEnd; ++index) channels.push_back(tokenValue(stream, components[index]));
+    if (slash != detail::kNoMatchingCSSToken) alpha = tokenValue(stream, components[slash + 1]);
+    return alpha.empty() == (slash == detail::kNoMatchingCSSToken);
 }
 
 Color hsl(float hue, float saturation, float lightness, float alpha) {
@@ -365,40 +384,46 @@ std::optional<Color> namedColor(const std::string& value) {
 }
 } // namespace
 
-bool isColorSyntax(const std::string& raw) {
-    const std::string value = lower(trim(raw));
-    return (!value.empty() && value.front() == '#')
-        || value == "transparent"
-        || namedColor(value).has_value()
-        || value.rfind("rgb(", 0) == 0
-        || value.rfind("hsl(", 0) == 0
-        || value.rfind("hwb(", 0) == 0
-        || value.rfind("lab(", 0) == 0
-        || value.rfind("lch(", 0) == 0
-        || value.rfind("oklab(", 0) == 0
-        || value.rfind("oklch(", 0) == 0
-        || value.rfind("light-dark(", 0) == 0;
+bool isColorSyntax(const detail::CSSTokenStream& stream, detail::CSSTokenRange range) {
+    range = detail::trimCSSRange(stream, range);
+    const std::string value = normalizeCSSKeyword(stream, range);
+    if ((!value.empty() && value.front() == '#') || value == "transparent" || namedColor(value).has_value()) return true;
+    const auto function = detail::parseCSSFunction(stream, range);
+    if (!function) return false;
+    return function->name == "rgb"
+        || function->name == "hsl"
+        || function->name == "hwb"
+        || function->name == "lab"
+        || function->name == "lch"
+        || function->name == "oklab"
+        || function->name == "oklch"
+        || function->name == "light-dark";
 }
 
-std::optional<Color> parseColor(const std::string& raw) {
-    const std::string value = lower(trim(raw));
+bool isColorSyntax(const std::string& raw) {
+    const detail::CSSTokenStream stream(raw);
+    return isColorSyntax(stream, {0, stream.tokens().size()});
+}
+
+std::optional<Color> parseColor(const detail::CSSTokenStream& stream, detail::CSSTokenRange range) {
+    range = detail::trimCSSRange(stream, range);
+    const std::string value = normalizeCSSKeyword(stream, range);
     if (value == "transparent") return Color(0.f, 0.f, 0.f, 0.f);
     if (const std::optional<Color> named = namedColor(value)) return named;
     if (!value.empty() && value.front() == '#') return parseHex(value);
 
-    const std::size_t open = value.find('(');
-    if (open == std::string::npos || value.empty() || value.back() != ')') return std::nullopt;
-    const std::string name = value.substr(0, open);
+    const auto function = detail::parseCSSFunction(stream, range);
+    if (!function) return std::nullopt;
+    const std::string& name = function->name;
     const bool supportedFunction =
         name == "rgb" || name == "hsl" || name == "hwb" || name == "lab" || name == "lch" || name == "oklab" || name == "oklch";
     if (!supportedFunction) return std::nullopt;
 
-    const std::string body = value.substr(open + 1, value.size() - open - 2);
-    if (name != "rgb" && name != "hsl" && body.find(',') != std::string::npos) return std::nullopt;
+    if (name != "rgb" && name != "hsl" && hasTopLevelDelimiter(stream, function->body, ',')) return std::nullopt;
 
     std::vector<std::string> channels;
     std::string alphaToken;
-    if (!functionArguments(body, channels, alphaToken)) return std::nullopt;
+    if (!functionArguments(stream, function->body, channels, alphaToken)) return std::nullopt;
     float alpha = 1.f;
     if (!alphaToken.empty() && !parseAlpha(alphaToken, alpha)) return std::nullopt;
 
@@ -430,5 +455,10 @@ std::optional<Color> parseColor(const std::string& raw) {
     } else if (!parseNumberOrPercent(channels[2], okSpace ? .4f : 125.f, second)) return std::nullopt;
 
     return okSpace ? oklab(lightness, first, second, alpha) : lab(lightness, first, second, alpha);
+}
+
+std::optional<Color> parseColor(const std::string& raw) {
+    const detail::CSSTokenStream stream(raw);
+    return parseColor(stream, {0, stream.tokens().size()});
 }
 } // namespace radia::ui

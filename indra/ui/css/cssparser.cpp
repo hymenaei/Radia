@@ -5,12 +5,12 @@
 
 #include "linden_common.h"
 #include <algorithm>
-#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <iterator>
 #include <limits>
 #include <map>
+#include <memory>
 #include "css/color.h"
 #include "css/rules.h"
 #include "css/stylesheet.h"
@@ -21,45 +21,23 @@
 
 namespace radia::ui {
 namespace {
+using detail::CSSToken;
+using detail::CSSTokenKind;
+using detail::CSSTokenStream;
+using detail::decodeCSSIdentifier;
+using detail::isCSSTrivia;
+using detail::isCSSWhitespace;
 using detail::lower;
+using detail::normalizeCSSKeyword;
+using detail::skipCSSComponent;
 using detail::startsWith;
 using detail::trim;
+using detail::trimCSSRange;
 
-struct TopLevelDelimiter {
-    std::size_t position = 0;
-    char value = 0;
-};
-
-bool isEscaped(std::string_view value, std::size_t position);
-
-std::optional<TopLevelDelimiter> nextTopLevelDelimiter(const std::string& value, std::size_t start) {
-    char quote = 0;
-    int parentheses = 0;
-    for (std::size_t index = start; index < value.size(); ++index) {
-        const char character = value[index];
-        if (quote) {
-            if (character == quote && !isEscaped(value, index)) quote = 0;
-            continue;
-        }
-        if (character == '\'' || character == '"') {
-            quote = character;
-            continue;
-        }
-        if (character == '(') ++parentheses;
-        else if (character == ')' && parentheses > 0) --parentheses;
-        else if (parentheses == 0 && (character == ';' || character == '{')) return TopLevelDelimiter{index, character};
-    }
-    return std::nullopt;
-}
-
-std::optional<std::size_t> topLevelDelimiter(const std::string& value, std::size_t start, char delimiter) {
-    const auto found = nextTopLevelDelimiter(value, start);
-    return found && found->value == delimiter ? std::optional<std::size_t>(found->position) : std::nullopt;
-}
-
-bool isColorValue(const std::string& value) {
-    const std::string lowered = lower(trim(value));
-    return isColorSyntax(lowered) || startsWith(lowered, "var(");
+bool isColorValue(const CSSTokenStream& stream, detail::CSSTokenRange range) {
+    if (isColorSyntax(stream, range)) return true;
+    const auto function = detail::parseCSSFunction(stream, range);
+    return function && function->name == "var";
 }
 
 bool isSupportedState(const std::string& state) {
@@ -75,172 +53,94 @@ bool isSupportedState(const std::string& state) {
         || state == "indeterminate";
 }
 
-bool isCSSWhitespace(char character) {
-    return character == '\t' || character == '\n' || character == '\f' || character == '\r' || character == ' ';
-}
-
-bool isEscaped(std::string_view value, std::size_t position) {
-    std::size_t backslashes = 0;
-    while (position > 0 && value[position - 1] == '\\') {
-        --position;
-        ++backslashes;
-    }
-    return (backslashes & 1U) != 0;
-}
-
-bool isCSSNameStart(char character) {
-    const auto value = static_cast<unsigned char>(character);
-    return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || character == '_' || value >= 0x80;
-}
-
-bool isCSSNameCodePoint(char character) {
-    const auto value = static_cast<unsigned char>(character);
-    return isCSSNameStart(character) || (value >= '0' && value <= '9') || character == '-';
-}
-
-bool isCSSHexDigit(char character) {
-    const auto value = static_cast<unsigned char>(character);
-    return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f') || (value >= 'A' && value <= 'F');
-}
-
-bool isValidCSSEscape(std::string_view value, std::size_t offset) {
-    if (offset + 1 >= value.size() || value[offset] != '\\') return false;
-    return value[offset + 1] != '\n' && value[offset + 1] != '\r' && value[offset + 1] != '\f';
-}
-
-std::size_t consumeCSSEscape(std::string_view value, std::size_t offset) {
-    std::size_t position = offset + 1;
-    if (position >= value.size() || !isCSSHexDigit(value[position])) return position + (position < value.size() ? 1 : 0);
-    std::size_t digits = 0;
-    while (position < value.size() && digits < 6 && isCSSHexDigit(value[position])) {
-        ++position;
-        ++digits;
-    }
-    if (position < value.size() && isCSSWhitespace(value[position])) ++position;
-    return position;
-}
-
-template<typename Match> std::size_t scanCSS(std::string_view value, std::size_t start, Match match) {
-    int brackets = 0;
-    int parentheses = 0;
-    char quote = 0;
-    for (std::size_t position = start; position < value.size(); ++position) {
-        if (value[position] == '\\' && isValidCSSEscape(value, position)) {
-            position = consumeCSSEscape(value, position) - 1;
+std::size_t findUnescaped(std::string_view value, char target, std::size_t start = 0) {
+    const CSSTokenStream stream(value);
+    const auto& tokens = stream.tokens();
+    for (std::size_t index = 0; index < tokens.size();) {
+        const auto& token = tokens[index];
+        if (token.end <= start) {
+            ++index;
             continue;
         }
-        if (quote) {
-            if (value[position] == quote) quote = 0;
+        if (isCSSTrivia(token.kind)) {
+            ++index;
             continue;
         }
-        if (value[position] == '\'' || value[position] == '"') {
-            quote = value[position];
+        if (token.kind == CSSTokenKind::OpenBracket && target == '[') return token.begin;
+        if (token.kind == CSSTokenKind::CloseBracket && target == ']') return token.begin;
+        if (token.kind == CSSTokenKind::Hash && target == '#') return token.begin;
+        if (token.kind == CSSTokenKind::Function || token.kind == CSSTokenKind::OpenParen || token.kind == CSSTokenKind::OpenBracket) {
+            index = skipCSSComponent(stream, index, tokens.size());
             continue;
         }
-        if (match(position, value[position], brackets, parentheses)) return position;
-        if (value[position] == '[') ++brackets;
-        else if (value[position] == ']' && brackets > 0) --brackets;
-        else if (value[position] == '(') ++parentheses;
-        else if (value[position] == ')' && parentheses > 0) --parentheses;
+        if (token.begin >= start && token.end == token.begin + 1 && stream.text(index)[0] == target) return token.begin;
+        ++index;
     }
     return std::string_view::npos;
 }
 
-std::size_t findUnescaped(std::string_view value, char target, std::size_t start = 0) {
-    return scanCSS(value, start, [target](std::size_t, char character, int brackets, int parentheses) {
-        if (target == '[') return character == '[' && brackets == 0;
-        if (target == ']') return character == ']' && brackets == 1;
-        return character == target && brackets == 0 && parentheses == 0;
-    });
-}
-
 std::size_t findUnescapedSequence(std::string_view value, std::string_view target, std::size_t start = 0) {
     if (target.empty()) return start <= value.size() ? start : std::string_view::npos;
-    return scanCSS(value, start, [&value, target](std::size_t position, char, int brackets, int parentheses) {
-        return brackets == 0 && parentheses == 0 && position + target.size() <= value.size() && value.compare(position, target.size(), target) == 0;
-    });
+    const CSSTokenStream stream(value);
+    const auto& tokens = stream.tokens();
+    for (std::size_t index = 0; index < tokens.size();) {
+        const auto& token = tokens[index];
+        if (token.end <= start || isCSSTrivia(token.kind)) {
+            ++index;
+            continue;
+        }
+        if (token.kind == CSSTokenKind::Function || token.kind == CSSTokenKind::OpenParen || token.kind == CSSTokenKind::OpenBracket) {
+            index = skipCSSComponent(stream, index, tokens.size());
+            continue;
+        }
+        if (token.begin >= start && token.begin + target.size() <= value.size() && value.compare(token.begin, target.size(), target) == 0)
+            return token.begin;
+        ++index;
+    }
+    return std::string_view::npos;
 }
 
 std::size_t consumeSelectorComponent(std::string_view value, std::size_t position) {
-    const std::size_t separator = scanCSS(value, position, [](std::size_t, char character, int brackets, int parentheses) {
-        return brackets == 0 && parentheses == 0 && (isCSSWhitespace(character) || character == '>');
-    });
-    return separator == std::string_view::npos ? value.size() : separator;
+    const CSSTokenStream stream(value);
+    const auto& tokens = stream.tokens();
+    for (std::size_t index = 0; index < tokens.size();) {
+        const auto& token = tokens[index];
+        if (token.end <= position) {
+            ++index;
+            continue;
+        }
+        if (isCSSTrivia(token.kind)) return token.begin;
+        if (token.kind == CSSTokenKind::Delim && stream.text(index) == ">") return token.begin;
+        if (token.kind == CSSTokenKind::Function || token.kind == CSSTokenKind::OpenParen || token.kind == CSSTokenKind::OpenBracket) {
+            index = skipCSSComponent(stream, index, tokens.size());
+            continue;
+        }
+        ++index;
+    }
+    return value.size();
 }
 
 bool isValidCSSIdentifier(std::string_view value) {
-    if (value.empty()) return false;
-
-    std::size_t position = 0;
-    if (value[position] == '-') {
-        if (value.size() == 1) return false;
-        ++position;
-        if (value[position] == '-') ++position;
-        else if (isCSSNameStart(value[position])) ++position;
-        else if (isValidCSSEscape(value, position)) position = consumeCSSEscape(value, position);
-        else return false;
-    } else if (isCSSNameStart(value[position])) {
-        ++position;
-    } else if (isValidCSSEscape(value, position)) {
-        position = consumeCSSEscape(value, position);
-    } else {
-        return false;
-    }
-
-    while (position < value.size())
-        if (isCSSNameCodePoint(value[position])) ++position;
-        else if (isValidCSSEscape(value, position)) position = consumeCSSEscape(value, position);
-        else return false;
-    return true;
+    const CSSTokenStream stream(value);
+    if (stream.tokens().size() != 1 || !stream.hasBalancedBlocks()) return false;
+    const auto& token = stream.tokens().front();
+    return token.kind == CSSTokenKind::Ident && token.begin == 0 && token.end == stream.source().size();
 }
 
-void appendCSSCodePoint(std::string& result, std::uint32_t codePoint) {
-    if (codePoint == 0 || codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) codePoint = 0xfffd;
-    if (codePoint <= 0x7f) result.push_back(static_cast<char>(codePoint));
-    else if (codePoint <= 0x7ff) {
-        result.push_back(static_cast<char>(0xc0 | (codePoint >> 6)));
-        result.push_back(static_cast<char>(0x80 | (codePoint & 0x3f)));
-    } else if (codePoint <= 0xffff) {
-        result.push_back(static_cast<char>(0xe0 | (codePoint >> 12)));
-        result.push_back(static_cast<char>(0x80 | ((codePoint >> 6) & 0x3f)));
-        result.push_back(static_cast<char>(0x80 | (codePoint & 0x3f)));
-    } else {
-        result.push_back(static_cast<char>(0xf0 | (codePoint >> 18)));
-        result.push_back(static_cast<char>(0x80 | ((codePoint >> 12) & 0x3f)));
-        result.push_back(static_cast<char>(0x80 | ((codePoint >> 6) & 0x3f)));
-        result.push_back(static_cast<char>(0x80 | (codePoint & 0x3f)));
+bool isExactRootSelector(const CSSTokenStream& stream, detail::CSSTokenRange range) {
+    std::size_t first = detail::kNoMatchingCSSToken;
+    std::size_t second = detail::kNoMatchingCSSToken;
+    for (std::size_t index = range.begin; index < range.end; ++index) {
+        if (isCSSTrivia(stream.tokens()[index].kind)) continue;
+        if (first == detail::kNoMatchingCSSToken) first = index;
+        else if (second == detail::kNoMatchingCSSToken) second = index;
+        else return false;
     }
-}
-
-std::string decodeCSSIdentifier(std::string_view value) {
-    std::string result;
-    result.reserve(value.size());
-    for (std::size_t position = 0; position < value.size();) {
-        if (value[position] != '\\') {
-            result.push_back(value[position++]);
-            continue;
-        }
-        const std::size_t escapeStart = position++;
-        if (position >= value.size()) {
-            result.push_back(value[escapeStart]);
-            continue;
-        }
-        if (!isCSSHexDigit(value[position])) {
-            result.push_back(value[position++]);
-            continue;
-        }
-        std::uint32_t codePoint = 0;
-        std::size_t digits = 0;
-        while (position < value.size() && digits < 6 && isCSSHexDigit(value[position])) {
-            codePoint *= 16;
-            const auto digit = static_cast<unsigned char>(value[position++]);
-            codePoint += digit <= '9' ? digit - '0' : (digit >= 'a' && digit <= 'f' ? digit - 'a' + 10 : digit - 'A' + 10);
-            ++digits;
-        }
-        if (position < value.size() && isCSSWhitespace(value[position])) ++position;
-        appendCSSCodePoint(result, codePoint);
-    }
-    return result;
+    return first != detail::kNoMatchingCSSToken
+        && second != detail::kNoMatchingCSSToken
+        && stream.tokens()[first].kind == CSSTokenKind::Colon
+        && stream.tokens()[second].kind == CSSTokenKind::Ident
+        && lower(decodeCSSIdentifier(stream.text(second))) == "root";
 }
 
 void appendSelectorState(StyleSelector& selector, const std::string& state) {
@@ -254,37 +154,43 @@ void parsePseudoClasses(std::string& token, StyleSelector& result) {
 
     const std::string pseudoClasses = token.substr(separator);
     token.erase(separator);
-    std::size_t position = 0;
-    while (position < pseudoClasses.size()) {
-        if (pseudoClasses[position] != ':') {
-            appendSelectorState(result, pseudoClasses.substr(position));
-            break;
-        }
-        const std::size_t start = ++position;
-        int parentheses = 0;
-        while (position < pseudoClasses.size()) {
-            const char character = pseudoClasses[position];
-            if (character == '(') ++parentheses;
-            else if (character == ')' && parentheses > 0) --parentheses;
-            else if (character == ':' && parentheses == 0) break;
-            ++position;
-        }
+    const CSSTokenStream stream(pseudoClasses);
+    const std::vector<detail::CSSTokenRange> ranges = detail::splitCSSOnDelimiter(stream, {0, stream.tokens().size()}, ':');
+    if (ranges.empty()) {
+        appendSelectorState(result, normalizeCSSKeyword(pseudoClasses.substr(1)));
+        return;
+    }
 
-        const std::string pseudoClass = pseudoClasses.substr(start, position - start);
-        if (lower(trim(pseudoClass)) == "root") {
+    for (std::size_t index = 1; index < ranges.size(); ++index) {
+        const std::string pseudoClass = normalizeCSSKeyword(stream, ranges[index]);
+        if (pseudoClass == "root") {
             result.root = true;
             continue;
         }
-        const std::size_t open = pseudoClass.find('(');
-        if (open != std::string::npos && lower(trim(pseudoClass.substr(0, open))) == "dir") {
-            if (pseudoClass.size() <= open + 1 || pseudoClass.back() != ')') {
-                result.directionSyntaxInvalid = true;
+        const CSSTokenStream pseudoStream(pseudoClass);
+        const auto& pseudoTokens = pseudoStream.tokens();
+        std::vector<std::size_t> significant;
+        for (std::size_t token = 0; token < pseudoTokens.size(); ++token)
+            if (!isCSSTrivia(pseudoTokens[token].kind)) significant.push_back(token);
+
+        if (significant.size() >= 2 && pseudoTokens[significant.front()].kind == CSSTokenKind::Function) {
+            const std::size_t function = significant.front();
+            const std::size_t close = pseudoTokens[function].matching;
+            const std::size_t last = significant.back();
+            const std::string_view functionText = pseudoStream.text(function);
+            const std::string functionName = functionText.empty() || functionText.back() != '('
+                ? std::string()
+                : lower(decodeCSSIdentifier(functionText.substr(0, functionText.size() - 1)));
+            if (functionName == "dir" && close != detail::kNoMatchingCSSToken && close == last) {
+                const std::string value = normalizeCSSKeyword(pseudoStream, {function + 1, close});
+                if (value == "ltr" && !result.direction) result.direction = LayoutDirection::LeftToRight;
+                else if (value == "rtl" && !result.direction) result.direction = LayoutDirection::RightToLeft;
+                else result.directionSyntaxInvalid = true;
                 continue;
             }
-            const std::string value = lower(trim(pseudoClass.substr(open + 1, pseudoClass.size() - open - 2)));
-            if (value == "ltr" && !result.direction) result.direction = LayoutDirection::LeftToRight;
-            else if (value == "rtl" && !result.direction) result.direction = LayoutDirection::RightToLeft;
-            else result.directionSyntaxInvalid = true;
+        }
+        if (pseudoClass.empty()) {
+            result.directionSyntaxInvalid = true;
             continue;
         }
         appendSelectorState(result, pseudoClass);
@@ -297,17 +203,6 @@ std::optional<ElementState> targetSpecificState(const std::string& state) {
     if (state == "invalid") return ElementState::Invalid;
     if (state == "indeterminate") return ElementState::Indeterminate;
     return std::nullopt;
-}
-
-std::pair<std::size_t, std::size_t> sourcePosition(const std::string& source, std::size_t offset) {
-    std::size_t line = 1;
-    std::size_t column = 1;
-    for (std::size_t index = 0; index < offset && index < source.size(); ++index)
-        if (source[index] == '\n') {
-            ++line;
-            column = 1;
-        } else ++column;
-    return {line, column};
 }
 
 std::optional<std::string> normalizeImportPath(const std::string& currentId, const std::string& requestedPath) {
@@ -360,6 +255,113 @@ std::string importChain(const std::vector<std::string>& stack, const std::option
     return chain;
 }
 
+void annotateImportDiagnostics(std::vector<Diagnostic>& diagnostics, std::size_t first, const std::string& chain) {
+    for (std::size_t index = first; index < diagnostics.size(); ++index)
+        if (diagnostics[index].message.find("Import chain:") == std::string::npos && diagnostics[index].code != "stylesheet.import.cycle")
+            diagnostics[index].message += " Import chain: " + chain + ".";
+}
+
+bool isTopLevelStylesheetTrivia(CSSTokenKind kind) {
+    return isCSSTrivia(kind) || kind == CSSTokenKind::CDO || kind == CSSTokenKind::CDC;
+}
+
+std::size_t skipStylesheetTrivia(const CSSTokenStream& stream, std::size_t index, std::size_t end) {
+    while (index < end && isCSSTrivia(stream.tokens()[index].kind)) ++index;
+    return index;
+}
+
+std::size_t skipTopLevelStylesheetTrivia(const CSSTokenStream& stream, std::size_t index, std::size_t end) {
+    while (index < end && isTopLevelStylesheetTrivia(stream.tokens()[index].kind)) ++index;
+    return index;
+}
+
+std::optional<std::size_t> nextAtRuleBoundary(const CSSTokenStream& stream, std::size_t start, std::size_t end) {
+    for (std::size_t index = start; index < end;) {
+        if (isCSSTrivia(stream.tokens()[index].kind)) {
+            ++index;
+            continue;
+        }
+        if (stream.tokens()[index].kind == CSSTokenKind::OpenBrace
+            || stream.tokens()[index].kind == CSSTokenKind::Semicolon
+            || stream.tokens()[index].kind == CSSTokenKind::CloseBrace)
+            return index;
+        if (stream.tokens()[index].kind == CSSTokenKind::Function
+            || stream.tokens()[index].kind == CSSTokenKind::OpenParen
+            || stream.tokens()[index].kind == CSSTokenKind::OpenBracket) {
+            index = skipCSSComponent(stream, index, end);
+            continue;
+        }
+        ++index;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::size_t> nextQualifiedRuleBoundary(const CSSTokenStream& stream, std::size_t start, std::size_t end) {
+    for (std::size_t index = start; index < end;) {
+        if (isCSSTrivia(stream.tokens()[index].kind)) {
+            ++index;
+            continue;
+        }
+        if (stream.tokens()[index].kind == CSSTokenKind::OpenBrace || stream.tokens()[index].kind == CSSTokenKind::CloseBrace) return index;
+        if (stream.tokens()[index].kind == CSSTokenKind::Function
+            || stream.tokens()[index].kind == CSSTokenKind::OpenParen
+            || stream.tokens()[index].kind == CSSTokenKind::OpenBracket) {
+            index = skipCSSComponent(stream, index, end);
+            continue;
+        }
+        ++index;
+    }
+    return std::nullopt;
+}
+
+enum class CSSAtRuleID : std::uint8_t { Unknown, Import };
+
+CSSAtRuleID cssAtRuleID(std::string_view name) {
+    if (name.empty() || name.front() != '@') return CSSAtRuleID::Unknown;
+    name.remove_prefix(1);
+    return lower(decodeCSSIdentifier(name)) == "import" ? CSSAtRuleID::Import : CSSAtRuleID::Unknown;
+}
+
+struct ParsedImportTarget {
+    std::string path;
+    std::size_t next = 0;
+};
+
+std::optional<ParsedImportTarget> parseImportTarget(const CSSTokenStream& stream, std::size_t begin, std::size_t end) {
+    const auto& tokens = stream.tokens();
+    const std::size_t first = skipStylesheetTrivia(stream, begin, end);
+    if (first == end) return std::nullopt;
+
+    const CSSToken& token = tokens[first];
+    if (token.kind == CSSTokenKind::String) {
+        const std::optional<std::string> path = detail::decodeCSSString(stream.text(first));
+        if (!path) return std::nullopt;
+        return ParsedImportTarget{*path, first + 1};
+    }
+    if (token.kind == CSSTokenKind::Url) {
+        const std::string raw(stream.text(first));
+        const std::size_t open = raw.find('(');
+        if (open == std::string::npos || raw.empty() || raw.back() != ')' || open + 1 > raw.size() - 1) return std::nullopt;
+        return ParsedImportTarget{decodeCSSIdentifier(trim(raw.substr(open + 1, raw.size() - open - 2))), first + 1};
+    }
+    if (token.kind != CSSTokenKind::Function || token.matching == detail::kNoMatchingCSSToken || token.matching >= end) return std::nullopt;
+
+    const std::string functionText(stream.text(first));
+    if (functionText.empty()
+        || functionText.back() != '('
+        || lower(decodeCSSIdentifier(std::string_view(functionText).substr(0, functionText.size() - 1))) != "url")
+        return std::nullopt;
+
+    const std::size_t close = token.matching;
+    const std::size_t content = skipStylesheetTrivia(stream, first + 1, close);
+    if (content == close || tokens[content].kind != CSSTokenKind::String) return std::nullopt;
+    const std::size_t afterContent = skipStylesheetTrivia(stream, content + 1, close);
+    if (afterContent != close) return std::nullopt;
+    const std::optional<std::string> path = detail::decodeCSSString(stream.text(content));
+    if (!path) return std::nullopt;
+    return ParsedImportTarget{*path, close + 1};
+}
+
 StyleSelector mergeSelector(const StyleSelector& parent, const StyleSelector& child) {
     StyleSelector result;
     result.universal = child.universal ? true : parent.universal;
@@ -385,128 +387,126 @@ StyleSelector mergeSelector(const StyleSelector& parent, const StyleSelector& ch
     return result;
 }
 
-void parseAttributeSelector(std::string& token, StyleSelector& result) {
-    while (true) {
-        const std::size_t open = findUnescaped(token, '[');
-        if (open == std::string::npos) return;
+std::optional<StyleAttributeSelector> parseAttributeExpression(const CSSTokenStream& stream, std::size_t open, std::size_t close) {
+    const auto& tokens = stream.tokens();
+    std::size_t operatorIndex = detail::kNoMatchingCSSToken;
+    std::size_t operatorWidth = 0;
+    StyleAttributeSelector::Match match = StyleAttributeSelector::Match::Exact;
+    for (std::size_t index = open + 1; index < close;) {
+        if (isCSSTrivia(tokens[index].kind)) {
+            ++index;
+            continue;
+        }
+        if (tokens[index].kind == CSSTokenKind::Function
+            || tokens[index].kind == CSSTokenKind::OpenParen
+            || tokens[index].kind == CSSTokenKind::OpenBracket
+            || tokens[index].kind == CSSTokenKind::OpenBrace) {
+            index = skipCSSComponent(stream, index, close);
+            continue;
+        }
+        const std::string_view text = stream.text(index);
+        const char character = text.size() == 1 ? text.front() : '\0';
+        const bool simpleOperator = character == '=';
+        const bool compoundOperator = character == '^' || character == '$' || character == '*' || character == '~' || character == '|';
+        if (!simpleOperator && !compoundOperator) {
+            ++index;
+            continue;
+        }
+        if (operatorIndex != detail::kNoMatchingCSSToken
+            || (compoundOperator && (index + 1 >= close || tokens[index + 1].kind != CSSTokenKind::Delim || stream.text(index + 1) != "=")))
+            return std::nullopt;
+        operatorIndex = index;
+        operatorWidth = compoundOperator ? 2 : 1;
+        switch (character) {
+            case '^': match = StyleAttributeSelector::Match::Prefix; break;
+            case '$': match = StyleAttributeSelector::Match::Suffix; break;
+            case '*': match = StyleAttributeSelector::Match::Substring; break;
+            case '~': match = StyleAttributeSelector::Match::IncludesWord; break;
+            case '|': match = StyleAttributeSelector::Match::IncludesHyphen; break;
+            default: break;
+        }
+        index += operatorWidth;
+    }
 
-        char quote = 0;
-        std::size_t close = open + 1;
-        for (; close < token.size(); ++close) {
-            const char character = token[close];
-            if (quote) {
-                if (character == quote && !isEscaped(token, close)) quote = 0;
-            } else if (character == '\'' || character == '"') {
-                quote = character;
-            } else if (character == ']' && !isEscaped(token, close)) {
+    StyleAttributeSelector attribute;
+    const std::size_t nameEnd = operatorIndex == detail::kNoMatchingCSSToken ? close : operatorIndex;
+    const std::string rawName = trim(serializeCSSRange(stream, {open + 1, nameEnd}));
+    if (rawName.empty() || !isValidCSSIdentifier(rawName)) return std::nullopt;
+    attribute.name = lower(decodeCSSIdentifier(rawName));
+    if (operatorIndex == detail::kNoMatchingCSSToken) {
+        attribute.presence = true;
+        return attribute;
+    }
+
+    const std::string value = trim(serializeCSSRange(stream, {operatorIndex + operatorWidth, close}));
+    if (value.empty()) return std::nullopt;
+    const CSSTokenStream valueStream(value);
+    std::vector<std::size_t> significant;
+    for (std::size_t index = 0; index < valueStream.tokens().size(); ++index)
+        if (!isCSSTrivia(valueStream.tokens()[index].kind)) significant.push_back(index);
+
+    if (significant.size() == 1 && valueStream.tokens()[significant.front()].kind == CSSTokenKind::String) {
+        const std::optional<std::string> decoded = detail::decodeCSSString(valueStream.text(significant.front()));
+        if (!decoded) return std::nullopt;
+        attribute.value = *decoded;
+    } else if (significant.size() == 2
+               && valueStream.tokens()[significant.front()].kind == CSSTokenKind::String
+               && valueStream.tokens()[significant.back()].kind == CSSTokenKind::Ident) {
+        const std::string flag = normalizeCSSKeyword(valueStream.text(significant.back()));
+        if (flag != "i" && flag != "s") return std::nullopt;
+        const std::optional<std::string> decoded = detail::decodeCSSString(valueStream.text(significant.front()));
+        if (!decoded) return std::nullopt;
+        attribute.value = *decoded;
+        attribute.caseInsensitive = flag == "i";
+        attribute.caseSensitivitySpecified = true;
+    } else {
+        const std::vector<detail::CSSTokenRange> components = detail::splitCSSComponents(valueStream, {0, valueStream.tokens().size()});
+        if (components.empty() || components.size() > 2) return std::nullopt;
+        const std::string first = trim(detail::serializeCSSRange(valueStream, components.front()));
+        if (!isValidCSSIdentifier(first)) return std::nullopt;
+        if (components.size() == 2) {
+            const std::string flag = normalizeCSSKeyword(valueStream, components[1]);
+            if (flag != "i" && flag != "s") return std::nullopt;
+            attribute.caseInsensitive = flag == "i";
+            attribute.caseSensitivitySpecified = true;
+        }
+        attribute.value = decodeCSSIdentifier(first);
+    }
+    attribute.match = match;
+    return attribute;
+}
+
+void parseAttributeSelector(std::string& token, StyleSelector& result) {
+    const CSSTokenStream stream(token);
+    std::string remainder;
+    for (std::size_t index = 0; index < stream.tokens().size();) {
+        const CSSToken& current = stream.tokens()[index];
+        if (current.kind == CSSTokenKind::OpenBracket) {
+            if (current.matching == detail::kNoMatchingCSSToken) {
+                result.attributeSyntaxInvalid = true;
                 break;
             }
-        }
-        if (close == token.size() || quote) {
-            result.attributeSyntaxInvalid = true;
-            token.erase(open);
-            return;
-        }
-
-        const std::string expression = token.substr(open + 1, close - open - 1);
-        std::size_t operatorPosition = std::string::npos;
-        std::size_t valuePosition = std::string::npos;
-        StyleAttributeSelector::Match match = StyleAttributeSelector::Match::Exact;
-        quote = 0;
-        for (std::size_t index = 0; index < expression.size(); ++index) {
-            const char character = expression[index];
-            if (quote) {
-                if (character == quote && !isEscaped(expression, index)) quote = 0;
-            } else if (character == '\'' || character == '"') {
-                quote = character;
-            } else if (character == '=' || character == '^' || character == '$' || character == '*' || character == '~' || character == '|') {
-                if ((character != '=' && (index + 1 >= expression.size() || expression[index + 1] != '=')) || operatorPosition != std::string::npos) {
-                    result.attributeSyntaxInvalid = true;
-                    token.erase(open);
-                    return;
-                }
-                operatorPosition = index;
-                valuePosition = index + (character == '=' ? 1 : 2);
-                switch (character) {
-                    case '^': match = StyleAttributeSelector::Match::Prefix; break;
-                    case '$': match = StyleAttributeSelector::Match::Suffix; break;
-                    case '*': match = StyleAttributeSelector::Match::Substring; break;
-                    case '~': match = StyleAttributeSelector::Match::IncludesWord; break;
-                    case '|': match = StyleAttributeSelector::Match::IncludesHyphen; break;
-                    default: break;
-                }
-                if (character != '=') ++index;
-            }
-        }
-
-        StyleAttributeSelector attribute;
-        if (operatorPosition == std::string::npos) {
-            attribute.name = lower(trim(expression));
-            if (attribute.name.empty() || !isValidCSSIdentifier(attribute.name)) {
+            const std::optional<StyleAttributeSelector> attribute = parseAttributeExpression(stream, index, current.matching);
+            if (!attribute) {
                 result.attributeSyntaxInvalid = true;
-                token.erase(open);
-                return;
+                break;
             }
-            attribute.presence = true;
-        } else {
-            attribute.name = lower(trim(expression.substr(0, operatorPosition)));
-            std::string value = trim(expression.substr(valuePosition));
-            if (attribute.name.empty() || !isValidCSSIdentifier(attribute.name)) {
-                result.attributeSyntaxInvalid = true;
-                token.erase(open);
-                return;
-            }
-            if (value.empty()) {
-                result.attributeSyntaxInvalid = true;
-                token.erase(open);
-                return;
-            }
-            if (value.front() == '\'' || value.front() == '"') {
-                const char valueQuote = value.front();
-                std::size_t closing = 1;
-                for (; closing < value.size(); ++closing)
-                    if (value[closing] == valueQuote && !isEscaped(value, closing)) break;
-                if (closing == value.size()) {
-                    result.attributeSyntaxInvalid = true;
-                    token.erase(open);
-                    return;
-                }
-                const std::string suffix = trim(value.substr(closing + 1));
-                if (!suffix.empty()) {
-                    if (lower(suffix) != "i" && lower(suffix) != "s") {
-                        result.attributeSyntaxInvalid = true;
-                        token.erase(open);
-                        return;
-                    }
-                    attribute.caseInsensitive = lower(suffix) == "i";
-                    attribute.caseSensitivitySpecified = true;
-                }
-                value = value.substr(1, closing - 1);
-            } else {
-                const std::vector<std::string> tokens = detail::tokenizeTopLevel(value);
-                if (tokens.empty()
-                    || tokens.size() > 2
-                    || !isValidCSSIdentifier(tokens.front())
-                    || (tokens.size() == 2 && lower(tokens[1]) != "i" && lower(tokens[1]) != "s")) {
-                    result.attributeSyntaxInvalid = true;
-                    token.erase(open);
-                    return;
-                }
-                attribute.caseInsensitive = tokens.size() == 2 && lower(tokens[1]) == "i";
-                attribute.caseSensitivitySpecified = tokens.size() == 2;
-                value = tokens.front();
-            }
-            if (value.empty() && valuePosition == expression.size()) {
-                result.attributeSyntaxInvalid = true;
-                token.erase(open);
-                return;
-            }
-            attribute.value = decodeCSSIdentifier(value);
-            attribute.match = match;
+            result.attributes.push_back(*attribute);
+            index = current.matching + 1;
+            continue;
         }
-        result.attributes.push_back(std::move(attribute));
-        token.erase(open, close - open + 1);
+        if (current.kind == CSSTokenKind::Function || current.kind == CSSTokenKind::OpenParen || current.kind == CSSTokenKind::OpenBrace) {
+            const std::size_t end = skipCSSComponent(stream, index, stream.tokens().size());
+            remainder.append(stream.source().substr(current.begin,
+                                                    end == stream.tokens().size() ? stream.source().size() - current.begin
+                                                                                  : stream.tokens()[end - 1].end - current.begin));
+            index = end;
+            continue;
+        }
+        remainder.append(stream.text(index));
+        ++index;
     }
+    token = std::move(remainder);
 }
 
 void appendSelector(StyleRule& destination, const StyleRule& suffix, SelectorCombinator combinator) {
@@ -524,6 +524,7 @@ StyleRule expandNestedSelector(const StyleRule& parent, const std::string& rawSe
     if (selector.front() != '&') {
         const bool child = selector.front() == '>';
         const std::string suffix = trim(selector.substr(child ? 1 : 0));
+        if (suffix.empty()) return {};
         appendSelector(result, detail::parseSelector(suffix), child ? SelectorCombinator::Child : SelectorCombinator::Descendant);
         return result;
     }
@@ -534,6 +535,7 @@ StyleRule expandNestedSelector(const StyleRule& parent, const std::string& rawSe
         const std::string trimmedTail = trim(tail);
         const bool child = !trimmedTail.empty() && trimmedTail.front() == '>';
         const std::string suffix = trim(trimmedTail.substr(child ? 1 : 0));
+        if (suffix.empty()) return {};
         appendSelector(result, detail::parseSelector(suffix), child ? SelectorCombinator::Child : SelectorCombinator::Descendant);
         return result;
     }
@@ -545,8 +547,9 @@ StyleRule expandNestedSelector(const StyleRule& parent, const std::string& rawSe
     if (split < tail.size()) {
         const std::string remainder = trim(tail.substr(split));
         const bool child = !remainder.empty() && remainder.front() == '>';
-        appendSelector(result, detail::parseSelector(trim(remainder.substr(child ? 1 : 0))),
-                       child ? SelectorCombinator::Child : SelectorCombinator::Descendant);
+        const std::string suffix = trim(remainder.substr(child ? 1 : 0));
+        if (suffix.empty()) return {};
+        appendSelector(result, detail::parseSelector(suffix), child ? SelectorCombinator::Child : SelectorCombinator::Descendant);
     }
     return result;
 }
@@ -559,18 +562,19 @@ StyleSelector parseSimpleSelector(const std::string& selectorText) {
         std::string pseudoElement = trim(token.substr(separator + 2));
         std::string pseudoElementState;
         if (const std::size_t stateSeparator = findUnescaped(pseudoElement, ':'); stateSeparator != std::string::npos) {
-            pseudoElementState = trim(pseudoElement.substr(stateSeparator + 1));
+            const std::string rawState = trim(pseudoElement.substr(stateSeparator + 1));
+            pseudoElementState = normalizeCSSKeyword(rawState);
             pseudoElement.erase(stateSeparator);
             if (pseudoElementState.empty()
                 || findUnescaped(pseudoElementState, ':') != std::string::npos
-                || !isValidCSSIdentifier(pseudoElementState)
+                || !isValidCSSIdentifier(rawState)
                 || !isSupportedState(pseudoElementState))
                 result.pseudoElementSyntaxInvalid = true;
         }
         if (pseudoElement.empty() || findUnescapedSequence(pseudoElement, "::") != std::string::npos) result.pseudoElementSyntaxInvalid = true;
         else if (!isValidCSSIdentifier(pseudoElement)) result.pseudoElementSyntaxInvalid = true;
         else {
-            result.pseudoElement = decodeCSSIdentifier(pseudoElement);
+            result.pseudoElement = lower(decodeCSSIdentifier(pseudoElement));
             token.erase(separator);
             if (!pseudoElementState.empty() && !result.pseudoElementSyntaxInvalid) token += ":" + pseudoElementState;
         }
@@ -591,13 +595,18 @@ StyleSelector parseSimpleSelector(const std::string& selectorText) {
         token.erase(separator);
     }
     result.universal = token == "*";
-    if (!result.universal) result.element = token;
+    if (!result.universal) {
+        const CSSTokenStream elementStream(token);
+        if (elementStream.tokens().size() == 1 && elementStream.tokens().front().kind == CSSTokenKind::Ident)
+            result.element = decodeCSSIdentifier(elementStream.text(0));
+        else result.element = token;
+    }
     return result;
 }
 
 struct ParsedRuleBlock {
-    std::string selector;
-    std::string body;
+    detail::CSSTokenRange selector;
+    detail::CSSTokenRange body;
 };
 
 struct ParsedImport {
@@ -610,6 +619,7 @@ struct ParsedImport {
 struct ParsedModule {
     std::string id;
     std::string sourceName;
+    CSSTokenStream stream;
     std::vector<ParsedImport> imports;
     std::vector<ParsedRuleBlock> rules;
 };
@@ -631,14 +641,14 @@ public:
 
         const auto emit = [&](const VisitEntry& entry, StyleParsePass pass) {
             for (const ParsedRuleBlock& rule : entry.module->rules) {
-                if (pass == StyleParsePass::Tokens && rule.selector != ":root") continue;
+                if (pass == StyleParsePass::Tokens && !isExactRootSelector(entry.module->stream, rule.selector)) continue;
+                const std::size_t firstWarning = mResult.warnings.size();
                 const std::size_t firstError = mResult.errors.size();
-                callback(rule, entry.module->sourceName, pass);
+                callback(entry.module->stream, rule, entry.module->sourceName, pass);
                 if (entry.importChain.size() > 1) {
-                    for (std::size_t index = firstError; index < mResult.errors.size(); ++index)
-                        if (mResult.errors[index].message.find("Import chain:") == std::string::npos
-                            && mResult.errors[index].code != "stylesheet.import.cycle")
-                            mResult.errors[index].message += " Import chain: " + importChain(entry.importChain) + ".";
+                    const std::string chain = importChain(entry.importChain);
+                    annotateImportDiagnostics(mResult.warnings, firstWarning, chain);
+                    annotateImportDiagnostics(mResult.errors, firstError, chain);
                 }
             }
         };
@@ -653,78 +663,139 @@ private:
     };
 
     std::optional<ParsedModule> parseSyntax(const std::string& source, const std::string& id, const std::string& sourceName) {
-        ParsedModule module{id, sourceName};
+        ParsedModule module{id, sourceName, CSSTokenStream(source)};
+        const CSSTokenStream& stream = module.stream;
+        const auto& tokens = stream.tokens();
+        if (const std::optional<std::size_t> offset = stream.unclosedCommentOffset()) {
+            const auto [line, column] = detail::cssSourcePosition(stream.source(), *offset);
+            mResult.warning("stylesheet.syntax.unclosed_comment", "Stylesheet comment is not closed.", sourceName, line, column);
+        }
         bool sawRule = false;
         std::size_t position = 0;
-        while (position < source.size() && !mResult.hasErrors()) {
-            while (position < source.size() && std::isspace(static_cast<unsigned char>(source[position]))) ++position;
-            if (position == source.size()) break;
+        while (position < tokens.size()) {
+            position = skipTopLevelStylesheetTrivia(stream, position, tokens.size());
+            if (position == tokens.size()) break;
 
-            if (source.compare(position, 7, "@import") == 0
-                && (position + 7 == source.size() || std::isspace(static_cast<unsigned char>(source[position + 7])))) {
-                const auto [line, column] = sourcePosition(source, position);
-                if (sawRule) {
-                    mResult.error("stylesheet.import.order", "@import must precede all rules in its module.", sourceName, line, column);
-                    return std::nullopt;
+            const CSSToken& token = tokens[position];
+            const std::size_t offset = token.begin;
+            const auto [line, column] = detail::cssSourcePosition(stream.source(), offset);
+            if (token.kind == CSSTokenKind::AtKeyword) {
+                switch (cssAtRuleID(stream.text(position))) {
+                    case CSSAtRuleID::Import: {
+                        const std::optional<std::size_t> boundary = nextAtRuleBoundary(stream, position + 1, tokens.size());
+                        const auto recover = [&] {
+                            if (!boundary) position = tokens.size();
+                            else if (tokens[*boundary].kind == CSSTokenKind::OpenBrace && tokens[*boundary].matching != detail::kNoMatchingCSSToken)
+                                position = tokens[*boundary].matching + 1;
+                            else position = *boundary + 1;
+                        };
+
+                        if (sawRule) {
+                            mResult.warning("stylesheet.import.order", "@import must precede all other rules in its module.", sourceName, line,
+                                            column);
+                            recover();
+                            continue;
+                        }
+                        if (!boundary || tokens[*boundary].kind != CSSTokenKind::Semicolon) {
+                            mResult.warning("stylesheet.import.syntax", "@import requires a string or url() target followed by ';'.", sourceName,
+                                            line, column);
+                            recover();
+                            continue;
+                        }
+
+                        const std::optional<ParsedImportTarget> target = parseImportTarget(stream, position + 1, *boundary);
+                        if (!target) {
+                            mResult.warning("stylesheet.import.syntax", "@import requires one valid string or url() target.", sourceName, line,
+                                            column);
+                            position = *boundary + 1;
+                            continue;
+                        }
+                        if (skipStylesheetTrivia(stream, target->next, *boundary) != *boundary) {
+                            mResult.warning("stylesheet.import.unsupported", "@import conditions and layer modifiers are not supported.", sourceName,
+                                            line, column);
+                            position = *boundary + 1;
+                            continue;
+                        }
+                        if (target->path.empty()) {
+                            mResult.warning("stylesheet.import.syntax", "@import requires a non-empty stylesheet path.", sourceName, line, column);
+                            position = *boundary + 1;
+                            continue;
+                        }
+
+                        const std::optional<std::string> importedId = normalizeImportPath(id, target->path);
+                        if (!importedId) {
+                            mResult.error("stylesheet.import.path_invalid", "Invalid or escaping @import path: " + target->path + ".", sourceName,
+                                          line, column);
+                            return std::nullopt;
+                        }
+                        mModel.dependencies[sourceName].insert(mLayer.provenanceFor(*importedId));
+                        module.imports.push_back({*importedId, target->path, line, column});
+                        position = *boundary + 1;
+                        continue;
+                    }
+                    case CSSAtRuleID::Unknown: break;
                 }
-                const std::optional<std::size_t> semicolon = topLevelDelimiter(source, position + 7, ';');
-                if (!semicolon) {
-                    mResult.error("stylesheet.import.syntax", "@import requires a quoted path followed by ';'.", sourceName, line, column);
-                    return std::nullopt;
+                sawRule = true;
+                const std::optional<std::size_t> boundary = nextAtRuleBoundary(stream, position + 1, tokens.size());
+                if (!boundary) {
+                    mResult.warning("stylesheet.at_rule.unsupported", "Unsupported stylesheet at-rule.", sourceName, line, column);
+                    break;
                 }
-                const std::string argument = trim(source.substr(position + 7, *semicolon - position - 7));
-                if (argument.size() < 2 || (argument.front() != '\"' && argument.front() != '\'') || argument.back() != argument.front()) {
-                    mResult.error("stylesheet.import.syntax", "@import requires exactly one quoted path.", sourceName, line, column);
-                    return std::nullopt;
+                if (tokens[*boundary].kind == CSSTokenKind::OpenBrace) {
+                    if (tokens[*boundary].matching == detail::kNoMatchingCSSToken) {
+                        mResult.warning("stylesheet.syntax.unclosed_block", "Unsupported at-rule block is not closed.", sourceName, line, column);
+                        break;
+                    }
+                    mResult.warning("stylesheet.at_rule.unsupported", "Unsupported stylesheet at-rule.", sourceName, line, column);
+                    position = tokens[*boundary].matching + 1;
+                } else {
+                    mResult.warning("stylesheet.at_rule.unsupported", "Unsupported stylesheet at-rule.", sourceName, line, column);
+                    position = *boundary + 1;
                 }
-                const std::string requestedPath = argument.substr(1, argument.size() - 2);
-                const std::optional<std::string> importedId = normalizeImportPath(id, requestedPath);
-                if (!importedId) {
-                    mResult.error("stylesheet.import.path_invalid", "Invalid or escaping @import path: " + requestedPath + ".", sourceName, line,
-                                  column);
-                    return std::nullopt;
-                }
-                mModel.dependencies[sourceName].insert(mLayer.provenanceFor(*importedId));
-                module.imports.push_back({*importedId, requestedPath, line, column});
-                position = *semicolon + 1;
                 continue;
             }
-            if (source[position] == '@') {
-                const auto [line, column] = sourcePosition(source, position);
-                mResult.error("stylesheet.at_rule.unsupported", "Unsupported stylesheet at-rule.", sourceName, line, column);
-                return std::nullopt;
-            }
 
+            const std::optional<std::size_t> boundary = nextQualifiedRuleBoundary(stream, position, tokens.size());
+            if (!boundary) {
+                mResult.warning("stylesheet.syntax.trailing_content",
+                                "Unexpected content outside a rule: " + trim(serializeCSSRange(stream, {position, tokens.size()})) + ".", sourceName,
+                                line, column);
+                break;
+            }
+            if (tokens[*boundary].kind != CSSTokenKind::OpenBrace) {
+                mResult.warning("stylesheet.syntax.trailing_content",
+                                "Unexpected content outside a rule: " + trim(serializeCSSRange(stream, {position, *boundary})) + ".", sourceName,
+                                line, column);
+                position = *boundary + 1;
+                continue;
+            }
             sawRule = true;
-            const std::optional<std::size_t> open = topLevelDelimiter(source, position, '{');
-            if (!open) {
-                mResult.error("stylesheet.syntax.trailing_content", "Unexpected content outside a rule: " + trim(source.substr(position)) + ".",
-                              sourceName);
-                return std::nullopt;
+            if (tokens[*boundary].matching == detail::kNoMatchingCSSToken) {
+                mResult.warning("stylesheet.syntax.unclosed_block", "Rule block is not closed.", sourceName, line, column);
+                const detail::CSSTokenRange selector = {position, *boundary};
+                if (trim(serializeCSSRange(stream, selector)).empty())
+                    mResult.warning("stylesheet.selector.empty", "Rule selector is empty.", sourceName, line, column);
+                else module.rules.push_back({selector, {*boundary + 1, tokens.size()}});
+                break;
             }
-            const std::string selector = trim(source.substr(position, *open - position));
-            if (selector.empty()) {
-                mResult.error("stylesheet.selector.empty", "Rule selector is empty.", sourceName);
-                return std::nullopt;
-            }
-            const std::optional<std::size_t> close = detail::matchingBlock(source, *open);
-            if (!close) {
-                mResult.error("stylesheet.syntax.unclosed_block", "Rule block is not closed: " + selector + ".", sourceName);
-                return std::nullopt;
-            }
-            module.rules.push_back({selector, source.substr(*open + 1, *close - *open - 1)});
-            position = *close + 1;
+            const std::size_t close = tokens[*boundary].matching;
+            const detail::CSSTokenRange selector = {position, *boundary};
+            if (trim(serializeCSSRange(stream, selector)).empty())
+                mResult.warning("stylesheet.selector.empty", "Rule selector is empty.", sourceName, line, column);
+            else module.rules.push_back({selector, {*boundary + 1, close}});
+            position = close + 1;
         }
         return module;
     }
 
     bool ensureParsed(const std::string& id, const std::string& source, const std::string& sourceName, std::vector<std::string>& importStack) {
         if (mModules.find(id) != mModules.end()) return true;
-        const std::optional<ParsedModule> parsed = parseSyntax(source, id, sourceName);
+        std::optional<ParsedModule> parsed = parseSyntax(source, id, sourceName);
         if (!parsed) return false;
-        mModules.emplace(id, *parsed);
+        mModules.emplace(id, std::move(*parsed));
+        const ParsedModule& module = mModules.at(id);
         importStack.push_back(id);
-        for (const ParsedImport& imported : parsed->imports) {
+        for (const ParsedImport& imported : module.imports) {
             if (std::find(importStack.begin(), importStack.end(), imported.id) != importStack.end()) {
                 mResult.error("stylesheet.import.cycle", "Cyclic @import: " + importChain(importStack, imported.id) + ".", sourceName, imported.line,
                               imported.column);
@@ -744,12 +815,12 @@ private:
                               sourceName, imported.line, imported.column);
                 continue;
             }
+            const std::size_t firstWarning = mResult.warnings.size();
             const std::size_t firstError = mResult.errors.size();
             ensureParsed(imported.id, *importedSource, importedName, importStack);
-            for (std::size_t index = firstError; index < mResult.errors.size(); ++index)
-                if (mResult.errors[index].message.find("Import chain:") == std::string::npos
-                    && mResult.errors[index].code != "stylesheet.import.cycle")
-                    mResult.errors[index].message += " Import chain: " + importChain(importStack, imported.id) + ".";
+            const std::string chain = importChain(importStack, imported.id);
+            annotateImportDiagnostics(mResult.warnings, firstWarning, chain);
+            annotateImportDiagnostics(mResult.errors, firstError, chain);
         }
         importStack.pop_back();
         return !mResult.hasErrors();
@@ -773,28 +844,50 @@ private:
 } // namespace
 
 StyleRule detail::parseSelector(const std::string& selector) {
-    StyleRule rule;
-    const std::string input = trim(selector);
-    if (input.empty()) return rule;
+    const CSSTokenStream stream(selector);
+    return detail::parseSelector(stream, {0, stream.tokens().size()});
+}
 
-    std::size_t position = 0;
+StyleRule detail::parseSelector(const CSSTokenStream& stream, detail::CSSTokenRange range) {
+    StyleRule rule;
+    if (range.begin > range.end || range.end > stream.tokens().size()) return rule;
+    range = trimCSSRange(stream, range);
+    if (range.begin == range.end) return rule;
+
+    std::size_t position = range.begin;
     SelectorCombinator pending = SelectorCombinator::Descendant;
-    while (position < input.size()) {
-        while (position < input.size() && isCSSWhitespace(input[position])) ++position;
-        if (position >= input.size()) break;
-        if (input[position] == '>') {
+    bool expectingComponent = true;
+    while (position < range.end) {
+        while (position < range.end && isCSSTrivia(stream.tokens()[position].kind)) ++position;
+        if (position >= range.end) break;
+        if (stream.tokens()[position].kind == CSSTokenKind::Delim && stream.text(position) == ">") {
+            if (expectingComponent) return {};
             pending = SelectorCombinator::Child;
+            expectingComponent = true;
             ++position;
             continue;
         }
 
         const std::size_t start = position;
-        position = consumeSelectorComponent(input, position);
+        while (position < range.end) {
+            const CSSToken& token = stream.tokens()[position];
+            if (isCSSTrivia(token.kind)) break;
+            if (token.kind == CSSTokenKind::Delim && stream.text(position) == ">") break;
+            if (token.kind == CSSTokenKind::Function
+                || token.kind == CSSTokenKind::OpenParen
+                || token.kind == CSSTokenKind::OpenBracket
+                || token.kind == CSSTokenKind::OpenBrace) {
+                if (token.matching == detail::kNoMatchingCSSToken || token.matching >= range.end) return {};
+                position = token.matching + 1;
+            } else ++position;
+        }
+        if (position == start) return {};
         if (!rule.selectors.empty()) rule.combinators.push_back(pending);
-        rule.selectors.push_back(parseSimpleSelector(input.substr(start, position - start)));
+        rule.selectors.push_back(parseSimpleSelector(serializeCSSRange(stream, {start, position})));
         pending = SelectorCombinator::Descendant;
+        expectingComponent = false;
     }
-    return rule;
+    return expectingComponent ? StyleRule{} : rule;
 }
 
 StyleSheetLoadResult StyleSheet::loadRadia(const std::string& stylesheetSource, const std::string& sourceName) {
@@ -819,8 +912,8 @@ StyleSheetLoadResult StyleSheet::loadRadiaLayers(const std::vector<StyleLayer>& 
         graph.build(entrypoint);
         if (result.hasErrors()) continue;
 
-        auto compileModule = [&](const ParsedRuleBlock& rule, const std::string& sourceName, StyleParsePass pass) {
-            candidate.parseBlock(rule.selector, rule.body, {}, styleLayer.origin, pass, result, sourceName);
+        auto compileModule = [&](const CSSTokenStream& stream, const ParsedRuleBlock& rule, const std::string& sourceName, StyleParsePass pass) {
+            candidate.parseBlock(stream, rule.selector, rule.body, {}, styleLayer.origin, pass, result, sourceName);
         };
         graph.visit(entrypoint, compileModule);
     }
@@ -833,78 +926,71 @@ StyleSheetLoadResult StyleSheet::loadRadiaLayers(const std::vector<StyleLayer>& 
 }
 
 namespace {
-std::vector<std::string> splitSelectorList(const std::string& selectorText) {
-    std::vector<std::string> selectors;
-    std::size_t selectorStart = 0;
-    scanCSS(selectorText, 0, [&selectors, &selectorStart, &selectorText](std::size_t index, char character, int brackets, int parentheses) {
-        if (character == ',' && brackets == 0 && parentheses == 0) {
-            selectors.push_back(trim(selectorText.substr(selectorStart, index - selectorStart)));
-            selectorStart = index + 1;
-        }
-        return false;
-    });
-    selectors.push_back(trim(selectorText.substr(selectorStart)));
-    return selectors;
+std::vector<detail::CSSTokenRange> splitSelectorList(const CSSTokenStream& stream, detail::CSSTokenRange range) {
+    const std::vector<detail::CSSTokenRange> ranges = detail::splitCSSOnDelimiter(stream, range, ',');
+    return ranges.empty() ? std::vector<detail::CSSTokenRange>{range} : ranges;
 }
 
-bool validateSelector(StyleRule& rule, const std::string& selector, StyleSheetLoadResult& result, const std::string& sourceName) {
+bool validateSelector(StyleRule& rule, const std::string& selector, StyleSheetLoadResult& result, std::string_view source, std::size_t sourceOffset,
+                      const std::string& sourceName) {
+    const auto warning = [&](std::string code, std::string message) {
+        const auto [line, column] = detail::cssSourcePosition(source, sourceOffset);
+        result.warning(std::move(code), std::move(message), sourceName, line, column);
+    };
     for (std::size_t index = 0; index < rule.selectors.size(); ++index) {
         StyleSelector& component = rule.selectors[index];
         const bool declarationComponent = index + 1 == rule.selectors.size();
         if (component.attributeSyntaxInvalid) {
-            result.error("stylesheet.selector.attribute_invalid", "Invalid CSS attribute selector: " + selector + ".", sourceName);
+            warning("stylesheet.selector.attribute_invalid", "Invalid CSS attribute selector: " + selector + ".");
             return false;
         }
         if (component.pseudoElementSyntaxInvalid) {
-            result.error("stylesheet.selector.pseudo_element_invalid", "Pseudo-elements cannot be followed by pseudo-classes: " + selector + ".",
-                         sourceName);
+            warning("stylesheet.selector.pseudo_element_invalid", "Pseudo-elements cannot be followed by pseudo-classes: " + selector + ".");
             return false;
         }
         if (component.idSyntaxInvalid) {
-            result.error("stylesheet.selector.id_invalid", "Element IDs in selectors must use CSS identifier syntax: " + selector + ".", sourceName);
+            warning("stylesheet.selector.id_invalid", "Element IDs in selectors must use CSS identifier syntax: " + selector + ".");
             return false;
         }
         if (component.classSyntaxInvalid) {
-            result.error("stylesheet.selector.class_invalid", "Element classes in selectors must use CSS identifier syntax: " + selector + ".",
-                         sourceName);
+            warning("stylesheet.selector.class_invalid", "Element classes in selectors must use CSS identifier syntax: " + selector + ".");
             return false;
         }
         if (component.directionSyntaxInvalid) {
-            result.error("stylesheet.selector.state_unknown", "Invalid :dir() selector: " + selector + ".", sourceName);
+            warning("stylesheet.selector.state_unknown", "Invalid :dir() selector: " + selector + ".");
             return false;
         }
         if (!isSupportedState(component.state)) {
             const std::string& state = component.state;
-            result.error("stylesheet.selector.state_unknown", "Unknown selector state: " + state + ".", sourceName);
+            warning("stylesheet.selector.state_unknown", "Unknown selector state: " + state + ".");
             return false;
         }
         if (!declarationComponent && !component.pseudoElement.empty()) {
-            result.error("stylesheet.selector.pseudo_element_structural",
-                         "Pseudo-elements cannot participate in structural combinators: " + selector + ".", sourceName);
+            warning("stylesheet.selector.pseudo_element_structural",
+                    "Pseudo-elements cannot participate in structural combinators: " + selector + ".");
             return false;
         }
         if (component.element.empty()) {
             if (!component.universal && (!component.attributes.empty() || !component.pseudoElement.empty())) {
-                result.error("stylesheet.selector.target_required",
-                             "Attributes and pseudo-elements require an element-qualified selector: " + selector + ".", sourceName);
+                warning("stylesheet.selector.target_required",
+                        "Attributes and pseudo-elements require an element-qualified selector: " + selector + ".");
                 return false;
             }
             if (component.universal && !component.pseudoElement.empty()) {
-                result.error("stylesheet.selector.target_required", "Pseudo-elements require an element-qualified selector: " + selector + ".",
-                             sourceName);
+                warning("stylesheet.selector.target_required", "Pseudo-elements require an element-qualified selector: " + selector + ".");
                 return false;
             }
             continue;
         }
         if (canonicalizeHTMLName(component.element) == kKbdTag.localName) {
             if (!component.attributes.empty() || !component.id.empty() || !component.className.empty()) {
-                result.error("stylesheet.selector.inline_identity_unsupported",
-                             "Inline style elements do not have Element IDs, classes, or attributes: " + selector + ".", sourceName);
+                warning("stylesheet.selector.inline_identity_unsupported",
+                        "Inline style elements do not have Element IDs, classes, or attributes: " + selector + ".");
                 return false;
             }
             component.element = kKbdTag.localName;
             if (!component.pseudoElement.empty()) {
-                result.error("stylesheet.selector.pseudo_element_unknown", "Unknown pseudo-element for " + component.element + ".", sourceName);
+                warning("stylesheet.selector.pseudo_element_unknown", "Unknown pseudo-element for " + component.element + ".");
                 return false;
             }
             continue;
@@ -912,62 +998,66 @@ bool validateSelector(StyleRule& rule, const std::string& selector, StyleSheetLo
         const HTMLTag componentTag = lookupHTMLTag(component.element);
         const ElementSelectorMetadata metadata = inspectElementSelector(componentTag, component.pseudoElement, targetSpecificState(component.state));
         if (!metadata.known) {
-            result.error("stylesheet.selector.element_unknown", "Unknown element element: " + component.element + ".", sourceName);
+            warning("stylesheet.selector.element_unknown", "Unknown element element: " + component.element + ".");
             return false;
         }
         component.element = metadata.elementName;
         if (!metadata.pseudoElementKnown) {
-            result.error("stylesheet.selector.pseudo_element_unknown",
-                         "Unknown pseudo-element for " + component.element + ": " + component.pseudoElement + ".", sourceName);
+            warning("stylesheet.selector.pseudo_element_unknown",
+                    "Unknown pseudo-element for " + component.element + ": " + component.pseudoElement + ".");
             return false;
         }
         if (targetSpecificState(component.state) && !metadata.elementProducesState)
-            result.warning("stylesheet.selector.state_never_matches",
-                           "State :" + component.state + " is never produced by " + component.element + ".", sourceName);
+            warning("stylesheet.selector.state_never_matches", "State :" + component.state + " is never produced by " + component.element + ".");
     }
     return true;
 }
 
-struct RuleBodyFragment {
-    std::size_t start = 0;
-    std::size_t end = 0;
-    std::optional<std::size_t> open;
-    std::optional<std::size_t> close;
-};
-
-class RuleBodyCursor {
-public:
-    explicit RuleBodyCursor(const std::string& body) : mBody(body) {}
-
-    std::optional<RuleBodyFragment> next() {
-        while (mPosition < mBody.size() && std::isspace(static_cast<unsigned char>(mBody[mPosition]))) ++mPosition;
-        if (mPosition >= mBody.size()) return std::nullopt;
-
-        const std::optional<TopLevelDelimiter> delimiter = nextTopLevelDelimiter(mBody, mPosition);
-        if (delimiter && delimiter->value == '{') {
-            const std::optional<std::size_t> close = detail::matchingBlock(mBody, delimiter->position);
-            if (!close) {
-                mPosition = mBody.size();
-                return RuleBodyFragment{mPosition, mPosition, delimiter->position, std::nullopt};
-            }
-            const RuleBodyFragment fragment{mPosition, *close + 1, delimiter->position, close};
-            mPosition = *close + 1;
-            return fragment;
+std::optional<std::size_t> declarationColon(const CSSTokenStream& stream, detail::CSSTokenRange range) {
+    for (std::size_t index = range.begin; index < range.end;) {
+        if (isCSSTrivia(stream.tokens()[index].kind)) {
+            ++index;
+            continue;
         }
-
-        const std::size_t end = delimiter && delimiter->value == ';' ? delimiter->position : mBody.size();
-        const RuleBodyFragment fragment{mPosition, end, std::nullopt, std::nullopt};
-        mPosition = delimiter && delimiter->value == ';' ? delimiter->position + 1 : mBody.size();
-        return fragment;
+        if (stream.tokens()[index].kind == CSSTokenKind::Colon) return index;
+        if (stream.tokens()[index].kind == CSSTokenKind::Function
+            || stream.tokens()[index].kind == CSSTokenKind::OpenParen
+            || stream.tokens()[index].kind == CSSTokenKind::OpenBracket
+            || stream.tokens()[index].kind == CSSTokenKind::OpenBrace) {
+            index = skipCSSComponent(stream, index, range.end);
+            continue;
+        }
+        ++index;
     }
+    return std::nullopt;
+}
 
-private:
-    const std::string& mBody;
-    std::size_t mPosition = 0;
-};
+bool hasInvalidCSSComponent(const CSSTokenStream& stream, detail::CSSTokenRange range) {
+    for (std::size_t index = range.begin; index < range.end; ++index) {
+        const CSSToken& token = stream.tokens()[index];
+        if (token.kind == CSSTokenKind::BadString
+            || token.kind == CSSTokenKind::BadUrl
+            || ((token.kind == CSSTokenKind::CloseParen || token.kind == CSSTokenKind::CloseBracket || token.kind == CSSTokenKind::CloseBrace)
+                && token.matching == detail::kNoMatchingCSSToken))
+            return true;
+        if ((token.kind == CSSTokenKind::Function
+             || token.kind == CSSTokenKind::OpenParen
+             || token.kind == CSSTokenKind::OpenBracket
+             || token.kind == CSSTokenKind::OpenBrace)
+            && token.matching == detail::kNoMatchingCSSToken)
+            return true;
+    }
+    return false;
+}
 
-void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& selector, const std::string& body, bool rootRule, StyleParsePass pass,
-                   StyleSheetLoadResult& result, const std::string& sourceName) {
+void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& selector, const CSSTokenStream& stream, detail::CSSTokenRange bodyRange,
+                   bool rootRule, StyleParsePass pass, StyleSheetLoadResult& result, const std::string& sourceName) {
+    const auto& tokens = stream.tokens();
+    const auto warning = [&](std::string code, std::string message, std::size_t tokenIndex) {
+        const std::size_t offset = tokenIndex < tokens.size() ? tokens[tokenIndex].begin : stream.source().size();
+        const auto [line, column] = detail::cssSourcePosition(stream.source(), offset);
+        result.warning(std::move(code), std::move(message), sourceName, line, column);
+    };
     std::vector<StyleDeclaration> declarations;
     const auto flushDeclarations = [&] {
         if (declarations.empty()) return;
@@ -976,34 +1066,59 @@ void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& select
         model.addRule(declarationRule);
         declarations.clear();
     };
-    const auto addDeclaration = [&](const std::string& declaration) {
-        const std::size_t colon = declaration.find(':');
-        if (colon == std::string::npos) {
-            result.error("stylesheet.declaration.invalid", "Declaration requires a property and value: " + trim(declaration) + ".", sourceName);
+    const auto addDeclaration = [&](detail::CSSTokenRange rawRange) {
+        const detail::CSSTokenRange range = trimCSSRange(stream, rawRange);
+        if (range.begin == range.end) return;
+        const std::optional<std::size_t> colon = declarationColon(stream, range);
+        if (!colon) {
+            if (pass == StyleParsePass::Tokens) return;
+            warning("stylesheet.declaration.invalid",
+                    "Declaration requires a property and value: " + trim(detail::serializeCSSRange(stream, range)) + ".", range.begin);
             return;
         }
-        const std::string name = trim(declaration.substr(0, colon));
-        const std::string value = trim(declaration.substr(colon + 1));
-        if (name.empty() || value.empty()) {
-            result.error("stylesheet.declaration.invalid", "Declaration property and value must not be empty.", sourceName);
+        const detail::CSSTokenRange nameRange = trimCSSRange(stream, {range.begin, *colon});
+        const std::string serializedName = trim(detail::serializeCSSRange(stream, nameRange));
+        const bool tokenLikeName = startsWith(serializedName, "--");
+        const bool validName = nameRange.end == nameRange.begin + 1
+            && nameRange.begin < stream.tokens().size()
+            && stream.tokens()[nameRange.begin].kind == CSSTokenKind::Ident;
+        if (!validName) {
+            if (pass == StyleParsePass::Tokens && !tokenLikeName) return;
+            if (pass == StyleParsePass::Rules && rootRule && tokenLikeName) return;
+            warning("stylesheet.declaration.invalid", "Declaration property name must be one CSS identifier: " + serializedName + ".", range.begin);
+            return;
+        }
+        const std::string decodedName = decodeCSSIdentifier(stream.text(nameRange.begin));
+        const bool tokenDeclaration = startsWith(decodedName, "--");
+        const std::string name = tokenDeclaration ? decodedName : lower(decodedName);
+        if (pass == StyleParsePass::Tokens && !tokenDeclaration) return;
+        if (pass == StyleParsePass::Rules && rootRule && tokenDeclaration) return;
+        if (hasInvalidCSSComponent(stream, range)) {
+            warning("stylesheet.declaration.invalid", "Declaration contains invalid CSS syntax.", range.begin);
+            return;
+        }
+        const detail::CSSTokenRange valueRange = trimCSSRange(stream, {*colon + 1, range.end});
+        const std::string value = trim(detail::serializeCSSRange(stream, valueRange));
+        if (name.empty() || valueRange.begin == valueRange.end || value.empty()) {
+            warning("stylesheet.declaration.invalid", "Declaration property and value must not be empty.", range.begin);
             return;
         }
         if (startsWith(name, "--")) {
             if (!rootRule) {
-                result.error("stylesheet.token.root_required", "Style Tokens may be declared only in :root: " + name + ".", sourceName);
+                warning("stylesheet.token.root_required", "Style Tokens may be declared only in :root: " + name + ".", range.begin);
                 return;
             }
             if (pass == StyleParsePass::Rules) return;
-            if (isColorValue(value)) {
+            if (isColorValue(stream, valueRange)) {
                 const Color marker(-1.f, -1.f, -1.f, -1.f);
-                const Color parsed = model.parseColorValue(value, marker);
+                const Color parsed = model.parseColorValue({stream, valueRange}, marker);
                 if (parsed.a < 0.f)
-                    result.error("stylesheet.token.value_invalid", "Invalid color token value for " + name + ": " + value + ".", sourceName);
+                    warning("stylesheet.token.value_invalid", "Invalid color token value for " + name + ": " + value + ".", range.begin);
                 else model.setColorToken(name, parsed);
             } else {
-                const float parsed = model.parseNumberValue(value, std::numeric_limits<float>::quiet_NaN());
+                const float parsed = model.parseNumberValue({stream, valueRange}, std::numeric_limits<float>::quiet_NaN());
                 if (!std::isfinite(parsed))
-                    result.error("stylesheet.token.value_invalid", "Invalid number token value for " + name + ": " + value + ".", sourceName);
+                    warning("stylesheet.token.value_invalid", "Invalid number token value for " + name + ": " + value + ".", range.begin);
                 else model.setNumberToken(name, parsed);
             }
             return;
@@ -1011,59 +1126,113 @@ void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& select
         if (pass == StyleParsePass::Tokens) return;
         const detail::StylePropertyDefinition* descriptor = detail::findStyleProperty(name);
         if (!descriptor) {
-            result.error("stylesheet.property.unknown", "Unknown property: " + name + ".", sourceName);
+            warning("stylesheet.property.unknown", "Unknown property: " + name + ".", range.begin);
             return;
         }
         if (descriptor->defaultOnly && rule.origin != StyleOrigin::Default) {
-            result.warning("stylesheet.property.ua_only", "Ignoring UA-only property outside the default stylesheet: " + name + ".", sourceName);
+            warning("stylesheet.property.ua_only", "Ignoring UA-only property outside the default stylesheet: " + name + ".", range.begin);
             return;
         }
-        if (auto compiled = model.compileDeclaration(*descriptor, value, selector, result, sourceName))
+        StyleSheetLoadResult declarationResult;
+        if (auto compiled = model.compileDeclaration(*descriptor, stream, valueRange, selector, declarationResult, sourceName))
             declarations.insert(declarations.end(), std::make_move_iterator(compiled->begin()), std::make_move_iterator(compiled->end()));
+        result.append(std::move(declarationResult));
     };
 
-    RuleBodyCursor cursor(body);
-    while (const std::optional<RuleBodyFragment> fragment = cursor.next()) {
-        if (fragment->open) {
-            if (!fragment->close) {
-                result.error("stylesheet.syntax.unclosed_block", "Nested rule block is not closed.", sourceName);
-                break;
-            }
-            if (pass == StyleParsePass::Rules) {
-                flushDeclarations();
-                model.parseBlock(trim(body.substr(fragment->start, *fragment->open - fragment->start)),
-                                 body.substr(*fragment->open + 1, *fragment->close - *fragment->open - 1), rule, rule.origin, pass, result,
-                                 sourceName);
-            }
+    std::size_t start = bodyRange.begin;
+    for (std::size_t index = bodyRange.begin; index < bodyRange.end;) {
+        if (isCSSTrivia(tokens[index].kind)) {
+            ++index;
             continue;
         }
-        addDeclaration(body.substr(fragment->start, fragment->end - fragment->start));
+        if (tokens[index].kind == CSSTokenKind::Semicolon) {
+            addDeclaration({start, index});
+            start = index + 1;
+            ++index;
+            continue;
+        }
+        if (tokens[index].kind == CSSTokenKind::CloseBrace) {
+            addDeclaration({start, index});
+            warning("stylesheet.syntax.unexpected_close", "Unexpected closing brace in rule body.", index);
+            start = index + 1;
+            ++index;
+            continue;
+        }
+        if (tokens[index].kind == CSSTokenKind::OpenBrace) {
+            if (tokens[index].matching == detail::kNoMatchingCSSToken) {
+                warning("stylesheet.syntax.unclosed_block", "Nested rule block is not closed.", index);
+                break;
+            }
+            const std::size_t close = tokens[index].matching;
+            const detail::CSSTokenRange nestedSelectorRange = trimCSSRange(stream, {start, index});
+            const std::string nestedSelector = trim(detail::serializeCSSRange(stream, nestedSelectorRange));
+            if (pass == StyleParsePass::Rules) {
+                flushDeclarations();
+                if (nestedSelector.empty()) warning("stylesheet.selector.empty", "Nested rule selector is empty.", index);
+                else model.parseBlock(stream, nestedSelectorRange, {index + 1, close}, rule, rule.origin, pass, result, sourceName);
+            }
+            start = close + 1;
+            index = close + 1;
+            continue;
+        }
+        if (tokens[index].kind == CSSTokenKind::Function
+            || tokens[index].kind == CSSTokenKind::OpenParen
+            || tokens[index].kind == CSSTokenKind::OpenBracket) {
+            index = skipCSSComponent(stream, index, tokens.size());
+            continue;
+        }
+        ++index;
     }
+    if (start < bodyRange.end) addDeclaration({start, bodyRange.end});
     if (pass == StyleParsePass::Rules) flushDeclarations();
 }
 } // namespace
 
-void StyleModel::parseBlock(const std::string& selectorText, const std::string& body, const StyleRule& parent, StyleOrigin origin,
-                            StyleParsePass pass, StyleSheetLoadResult& result, const std::string& sourceName) {
-    const std::vector<std::string> selectors = splitSelectorList(selectorText);
-    if (selectors.size() > 1) {
-        for (const std::string& selector : selectors)
-            if (!selector.empty()) parseBlock(selector, body, parent, origin, pass, result, sourceName);
+void StyleModel::parseBlock(const CSSTokenStream& stream, detail::CSSTokenRange selectorRange, detail::CSSTokenRange bodyRange,
+                            const StyleRule& parent, StyleOrigin origin, StyleParsePass pass, StyleSheetLoadResult& result,
+                            const std::string& sourceName) {
+    const std::vector<detail::CSSTokenRange> selectorRanges = splitSelectorList(stream, selectorRange);
+    const auto selectorOffset = [&](detail::CSSTokenRange range) {
+        return range.begin < stream.tokens().size() ? stream.tokens()[range.begin].begin : stream.source().size();
+    };
+    if (selectorRanges.size() > 1) {
+        for (const detail::CSSTokenRange range : selectorRanges) {
+            const std::string selector = trim(detail::serializeCSSRange(stream, range));
+            if (selector.empty()) {
+                const auto [line, column] = detail::cssSourcePosition(stream.source(), selectorOffset(range));
+                result.warning("stylesheet.selector.invalid", "Selector list contains an empty selector.", sourceName, line, column);
+                return;
+            }
+            const bool nested = !parent.selectors.empty();
+            StyleRule candidate = nested ? expandNestedSelector(parent, selector) : detail::parseSelector(stream, range);
+            StyleSheetLoadResult validation;
+            if (candidate.selectors.empty()
+                || !validateSelector(candidate, selector, validation, stream.source(), selectorOffset(range), sourceName)) {
+                if (validation.warnings.empty() && validation.errors.empty())
+                    result.warning("stylesheet.selector.invalid", "Selector list contains an invalid selector: " + selector + ".", sourceName,
+                                   detail::cssSourcePosition(stream.source(), selectorOffset(range)).first,
+                                   detail::cssSourcePosition(stream.source(), selectorOffset(range)).second);
+                else result.append(std::move(validation));
+                return;
+            }
+        }
+        for (const detail::CSSTokenRange range : selectorRanges) parseBlock(stream, range, bodyRange, parent, origin, pass, result, sourceName);
         return;
     }
 
-    const std::string selector = trim(selectorText);
+    const std::string selector = trim(detail::serializeCSSRange(stream, selectorRange));
     const bool nested = !parent.selectors.empty();
-    StyleRule rule = nested ? expandNestedSelector(parent, selector) : detail::parseSelector(selector);
+    StyleRule rule = nested ? expandNestedSelector(parent, selector) : detail::parseSelector(stream, selectorRange);
     rule.origin = origin;
-    const bool rootRule = !nested && selector == ":root";
+    const bool rootRule = !nested && isExactRootSelector(stream, selectorRange);
     if (rule.selectors.empty()) {
-        result.error("stylesheet.selector.empty", "Rule selector is empty.", sourceName);
+        const auto [line, column] = detail::cssSourcePosition(stream.source(), selectorOffset(selectorRange));
+        result.warning("stylesheet.selector.empty", "Rule selector is empty.", sourceName, line, column);
         return;
     }
 
-    if (!validateSelector(rule, selector, result, sourceName)) return;
+    if (!validateSelector(rule, selector, result, stream.source(), selectorOffset(selectorRange), sourceName)) return;
 
-    parseRuleBody(*this, rule, selector, body, rootRule, pass, result, sourceName);
+    parseRuleBody(*this, rule, selector, stream, bodyRange, rootRule, pass, result, sourceName);
 }
 } // namespace radia::ui

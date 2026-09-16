@@ -7,9 +7,12 @@
 
 #include <optional>
 #include <string>
+#include "syntax.h"
 #include "types.h"
 
 namespace radia::ui {
+std::optional<Color> parseColor(const detail::CSSTokenStream& stream, detail::CSSTokenRange range);
 std::optional<Color> parseColor(const std::string& value);
+bool isColorSyntax(const detail::CSSTokenStream& stream, detail::CSSTokenRange range);
 bool isColorSyntax(const std::string& value);
 } // namespace radia::ui

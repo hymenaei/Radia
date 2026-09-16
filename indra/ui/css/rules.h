@@ -19,6 +19,7 @@
 #include <variant>
 #include <vector>
 #include "css/stylesheet.h"
+#include "css/syntax.h"
 
 namespace radia::ui {
 struct StylePaint {
@@ -79,7 +80,10 @@ struct StyleDeclaration {
         : property(definition), value(std::move(declarationValue)) {}
 };
 
-namespace detail { StyleRule parseSelector(const std::string& selector); } // namespace detail
+namespace detail {
+StyleRule parseSelector(const std::string& selector);
+StyleRule parseSelector(const CSSTokenStream& stream, CSSTokenRange range);
+} // namespace detail
 
 enum class SelectorCombinator { Descendant, Child };
 enum class StyleParsePass : std::uint8_t { Tokens, Rules };
@@ -128,26 +132,27 @@ struct StyleModel {
 
     Color colorToken(const std::string& name, const Color& fallback) const;
     float numberToken(const std::string& name, float fallback) const;
-    Color parseColorValue(const std::string& value, const Color& fallback) const;
-    std::optional<StyleColorValue> parseColorChoiceValue(const std::string& value) const;
-    float parseNumberValue(const std::string& value, float fallback) const;
-    std::optional<Length> parseLengthValue(const std::string& value) const;
-    std::optional<BorderRadii> parseBorderRadius(const std::string& value) const;
-    std::optional<Gradient> parseGradient(const std::string& value) const;
-    std::optional<std::vector<BoxShadow>> parseShadows(const std::string& value) const;
-    std::optional<std::vector<Effect>> parseEffects(const std::string& value) const;
-    std::optional<Outline> parseOutline(const std::string& value) const;
-    std::optional<bool> parseFontStyleValue(const std::string& value) const;
-    std::optional<float> parseFontWeightValue(const std::string& value) const;
-    std::optional<Length> parseLineHeightValue(const std::string& value) const;
-    std::optional<std::vector<StyleDeclaration>> parseFontShorthand(const std::string& value) const;
-    EdgeInsets parseEdgeInsets(const std::string& value, const EdgeInsets& fallback) const;
-    std::optional<MarginInsets> parseMargin(const std::string& value) const;
-    std::optional<std::vector<StyleDeclaration>> compileDeclaration(const detail::StylePropertyDefinition& property, const std::string& value,
+    Color parseColorValue(detail::CSSValueRange value, const Color& fallback) const;
+    std::optional<StyleColorValue> parseColorChoiceValue(detail::CSSValueRange value) const;
+    float parseNumberValue(detail::CSSValueRange value, float fallback) const;
+    std::optional<Length> parseLengthValue(detail::CSSValueRange value) const;
+    std::optional<BorderRadii> parseBorderRadius(detail::CSSValueRange value) const;
+    std::optional<Gradient> parseGradient(detail::CSSValueRange value) const;
+    std::optional<std::vector<BoxShadow>> parseShadows(detail::CSSValueRange value) const;
+    std::optional<std::vector<Effect>> parseEffects(detail::CSSValueRange value) const;
+    std::optional<Outline> parseOutline(detail::CSSValueRange value) const;
+    std::optional<bool> parseFontStyleValue(detail::CSSValueRange value) const;
+    std::optional<float> parseFontWeightValue(detail::CSSValueRange value) const;
+    std::optional<Length> parseLineHeightValue(detail::CSSValueRange value) const;
+    std::optional<std::vector<StyleDeclaration>> parseFontShorthand(detail::CSSValueRange value) const;
+    EdgeInsets parseEdgeInsets(detail::CSSValueRange value, const EdgeInsets& fallback) const;
+    std::optional<MarginInsets> parseMargin(detail::CSSValueRange value) const;
+    std::optional<std::vector<StyleDeclaration>> compileDeclaration(const detail::StylePropertyDefinition& property,
+                                                                    const detail::CSSTokenStream& stream, detail::CSSTokenRange valueRange,
                                                                     const std::string& selector, StyleSheetLoadResult& result,
                                                                     const std::string& sourceName) const;
-    void parseBlock(const std::string& selector, const std::string& body, const StyleRule& parent, StyleOrigin origin, StyleParsePass pass,
-                    StyleSheetLoadResult& result, const std::string& sourceName);
+    void parseBlock(const detail::CSSTokenStream& stream, detail::CSSTokenRange selectorRange, detail::CSSTokenRange bodyRange,
+                    const StyleRule& parent, StyleOrigin origin, StyleParsePass pass, StyleSheetLoadResult& result, const std::string& sourceName);
 
     std::map<std::string, Color> colorTokens;
     std::map<std::string, float> numberTokens;

@@ -9,7 +9,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
-#include <sstream>
 #include "css/color.h"
 #include "css/rules.h"
 #include "css/syntax.h"
@@ -17,9 +16,16 @@
 namespace radia::ui {
 namespace {
 using detail::endsWith;
-using detail::lower;
-using detail::startsWith;
+using detail::normalizeCSSKeyword;
 using detail::trim;
+
+std::string valueText(detail::CSSValueRange value) {
+    return trim(detail::serializeCSSRange(value.stream, detail::trimCSSRange(value.stream, value.range)));
+}
+
+detail::CSSValueRange subValue(detail::CSSValueRange value, detail::CSSTokenRange range) {
+    return {value.stream, range};
+}
 
 bool parseFiniteFloat(const std::string& value, float& result) {
     char* end = nullptr;
@@ -39,26 +45,22 @@ void assignColorValue(const StyleColorValue& value, Color& color, std::optional<
 }
 } // namespace
 
-Color StyleModel::parseColorValue(const std::string& raw, const Color& fallback) const {
-    const std::string value = trim(raw);
-    const std::string lowered = lower(value);
-    if (startsWith(lowered, "var(") && value.size() > 5 && value.back() == ')') return colorToken(trim(value.substr(4, value.size() - 5)), fallback);
-    if (const std::optional<Color> parsed = parseColor(value)) return *parsed;
-    return colorToken(value, fallback);
+Color StyleModel::parseColorValue(detail::CSSValueRange value, const Color& fallback) const {
+    value.range = detail::trimCSSRange(value.stream, value.range);
+    if (const auto function = detail::parseCSSFunction(value.stream, value.range); function && function->name == "var")
+        return colorToken(normalizeCSSKeyword(value.stream, function->body), fallback);
+    if (const std::optional<Color> parsed = parseColor(value.stream, value.range)) return *parsed;
+    return colorToken(valueText(value), fallback);
 }
 
-std::optional<StyleColorValue> StyleModel::parseColorChoiceValue(const std::string& raw) const {
-    const std::string value = trim(raw);
-    const std::string lowered = lower(value);
-    constexpr char kLightDarkPrefix[] = "light-dark(";
-    if (startsWith(lowered, kLightDarkPrefix)) {
-        const std::size_t prefixSize = sizeof(kLightDarkPrefix) - 1;
-        if (value.size() <= prefixSize || value.back() != ')') return std::nullopt;
-        const std::vector<std::string> choices = detail::splitTopLevel(value.substr(prefixSize, value.size() - prefixSize - 1), ',');
-        if (choices.size() != 2 || choices[0].empty() || choices[1].empty()) return std::nullopt;
+std::optional<StyleColorValue> StyleModel::parseColorChoiceValue(detail::CSSValueRange value) const {
+    value.range = detail::trimCSSRange(value.stream, value.range);
+    if (const auto function = detail::parseCSSFunction(value.stream, value.range); function && function->name == "light-dark") {
+        const std::vector<detail::CSSTokenRange> choices = detail::splitCSSOnDelimiter(value.stream, function->body, ',');
+        if (choices.size() != 2 || choices[0].begin == choices[0].end || choices[1].begin == choices[1].end) return std::nullopt;
         const Color marker(-1.f, -1.f, -1.f, -1.f);
-        const Color light = parseColorValue(choices[0], marker);
-        const Color dark = parseColorValue(choices[1], marker);
+        const Color light = parseColorValue(subValue(value, choices[0]), marker);
+        const Color dark = parseColorValue(subValue(value, choices[1]), marker);
         if (light.a < 0.f || dark.a < 0.f) return std::nullopt;
         return LightDarkColor{light, dark};
     }
@@ -68,44 +70,46 @@ std::optional<StyleColorValue> StyleModel::parseColorChoiceValue(const std::stri
     return color.a < 0.f ? std::nullopt : std::optional<StyleColorValue>(color);
 }
 
-float StyleModel::parseNumberValue(const std::string& raw, float fallback) const {
-    std::string value = trim(raw);
-    const std::string lowered = lower(value);
-    if (startsWith(lowered, "var(") && value.size() > 5 && value.back() == ')') return numberToken(trim(value.substr(4, value.size() - 5)), fallback);
-    if (endsWith(lowered, "px")) value = trim(value.substr(0, value.size() - 2));
+float StyleModel::parseNumberValue(detail::CSSValueRange value, float fallback) const {
+    value.range = detail::trimCSSRange(value.stream, value.range);
+    if (const auto function = detail::parseCSSFunction(value.stream, value.range); function && function->name == "var")
+        return numberToken(normalizeCSSKeyword(value.stream, function->body), fallback);
+    std::string scalar = valueText(value);
+    if (const auto dimension = detail::parseCSSDimension(value.stream, value.range); dimension && dimension->unit == "px") scalar = dimension->number;
     char* end = nullptr;
-    const float parsed = std::strtof(value.c_str(), &end);
-    return end != value.c_str() && *end == '\0' ? parsed : numberToken(value, fallback);
+    const float parsed = std::strtof(scalar.c_str(), &end);
+    return end != scalar.c_str() && *end == '\0' ? parsed : numberToken(scalar, fallback);
 }
 
-std::optional<Length> StyleModel::parseLengthValue(const std::string& raw) const {
-    std::string value = trim(raw);
-    const std::string lowered = lower(value);
-    if (startsWith(lowered, "var(") && value.size() > 5 && value.back() == ')') {
-        const float parsed = numberToken(trim(value.substr(4, value.size() - 5)), std::numeric_limits<float>::quiet_NaN());
+std::optional<Length> StyleModel::parseLengthValue(detail::CSSValueRange value) const {
+    value.range = detail::trimCSSRange(value.stream, value.range);
+    if (const auto function = detail::parseCSSFunction(value.stream, value.range); function && function->name == "var") {
+        const float parsed = numberToken(normalizeCSSKeyword(value.stream, function->body), std::numeric_limits<float>::quiet_NaN());
         return std::isfinite(parsed) ? std::optional<Length>(Length{parsed}) : std::nullopt;
     }
+    std::string scalar = valueText(value);
     bool percentage = false;
-    if (!value.empty() && value.back() == '%') {
+    if (!scalar.empty() && scalar.back() == '%') {
         percentage = true;
-        value = trim(value.substr(0, value.size() - 1));
-    } else if (endsWith(lowered, "px")) value = trim(value.substr(0, value.size() - 2));
+        scalar = trim(scalar.substr(0, scalar.size() - 1));
+    } else if (const auto dimension = detail::parseCSSDimension(value.stream, value.range); dimension && dimension->unit == "px")
+        scalar = dimension->number;
 
     char* end = nullptr;
-    const float parsed = std::strtof(value.c_str(), &end);
-    if (end == value.c_str() || *end != '\0' || !std::isfinite(parsed)) return std::nullopt;
+    const float parsed = std::strtof(scalar.c_str(), &end);
+    if (end == scalar.c_str() || *end != '\0' || !std::isfinite(parsed)) return std::nullopt;
     return percentage ? Length{0.f, parsed / 100.f} : Length{parsed};
 }
 
-std::optional<BorderRadii> StyleModel::parseBorderRadius(const std::string& raw) const {
-    const std::vector<std::string> tokens = detail::tokenizeTopLevel(trim(raw), true);
+std::optional<BorderRadii> StyleModel::parseBorderRadius(detail::CSSValueRange value) const {
+    const std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, detail::trimCSSRange(value.stream, value.range), true);
     if (tokens.empty()) return std::nullopt;
 
-    std::vector<std::string> horizontalTokens;
-    std::vector<std::string> verticalTokens;
+    std::vector<detail::CSSTokenRange> horizontalTokens;
+    std::vector<detail::CSSTokenRange> verticalTokens;
     bool sawSlash = false;
-    for (const std::string& token : tokens) {
-        if (token == "/") {
+    for (const detail::CSSTokenRange token : tokens) {
+        if (valueText(subValue(value, token)) == "/") {
             if (sawSlash || horizontalTokens.empty()) return std::nullopt;
             sawSlash = true;
         } else if (sawSlash) verticalTokens.push_back(token);
@@ -114,12 +118,12 @@ std::optional<BorderRadii> StyleModel::parseBorderRadius(const std::string& raw)
     if (horizontalTokens.empty() || horizontalTokens.size() > 4 || (sawSlash && (verticalTokens.empty() || verticalTokens.size() > 4)))
         return std::nullopt;
 
-    const auto expand = [this](const std::vector<std::string>& values) -> std::optional<std::array<Length, 4>> {
+    const auto expand = [this, &value](const std::vector<detail::CSSTokenRange>& values) -> std::optional<std::array<Length, 4>> {
         std::array<Length, 4> expanded;
         std::vector<Length> parsed;
         parsed.reserve(values.size());
-        for (const std::string& value : values) {
-            const std::optional<Length> length = parseLengthValue(value);
+        for (const detail::CSSTokenRange range : values) {
+            const std::optional<Length> length = parseLengthValue(subValue(value, range));
             if (!length || length->pixels < 0.f || length->percent < 0.f) return std::nullopt;
             parsed.push_back(*length);
         }
@@ -145,85 +149,82 @@ std::optional<BorderRadii> StyleModel::parseBorderRadius(const std::string& raw)
     };
 }
 
-std::optional<Gradient> StyleModel::parseGradient(const std::string& raw) const {
-    const std::string value = trim(raw);
-    const std::string lowered = lower(value);
-    std::string prefix;
+std::optional<Gradient> StyleModel::parseGradient(detail::CSSValueRange value) const {
+    value.range = detail::trimCSSRange(value.stream, value.range);
+    const auto function = detail::parseCSSFunction(value.stream, value.range);
+    if (!function) return std::nullopt;
     Gradient gradient;
-    if (startsWith(lowered, "linear-gradient(")) prefix = "linear-gradient(";
-    else if (startsWith(lowered, "repeating-linear-gradient(")) {
-        prefix = "repeating-linear-gradient(";
+    if (function->name == "linear-gradient") {
+    } else if (function->name == "repeating-linear-gradient") {
         gradient.repeating = true;
-    } else if (startsWith(lowered, "radial-gradient(")) {
-        prefix = "radial-gradient(";
+    } else if (function->name == "radial-gradient") {
         gradient.kind = GradientKind::Radial;
-    } else if (startsWith(lowered, "repeating-radial-gradient(")) {
-        prefix = "repeating-radial-gradient(";
+    } else if (function->name == "repeating-radial-gradient") {
         gradient.kind = GradientKind::Radial;
         gradient.repeating = true;
-    } else if (startsWith(lowered, "conic-gradient(")) {
-        prefix = "conic-gradient(";
+    } else if (function->name == "conic-gradient") {
         gradient.kind = GradientKind::Conic;
         gradient.angleDegrees = 0.f;
-    } else if (startsWith(lowered, "repeating-conic-gradient(")) {
-        prefix = "repeating-conic-gradient(";
+    } else if (function->name == "repeating-conic-gradient") {
         gradient.kind = GradientKind::Conic;
         gradient.angleDegrees = 0.f;
         gradient.repeating = true;
     } else return std::nullopt;
 
-    if (value.size() <= prefix.size() || value.back() != ')') return std::nullopt;
-    std::vector<std::string> arguments = detail::splitTopLevel(value.substr(prefix.size(), value.size() - prefix.size() - 1), ',');
+    const std::vector<detail::CSSTokenRange> arguments = detail::splitCSSOnDelimiter(value.stream, function->body, ',');
     if (arguments.size() < 2) return std::nullopt;
 
-    auto parseAngle = [&](const std::string& token, float& degrees) {
-        std::string number = lower(trim(token));
-        float scale = 1.f;
-        if (endsWith(number, "deg")) number.erase(number.size() - 3);
-        else if (endsWith(number, "turn")) number.erase(number.size() - 4), scale = 360.f;
-        else if (endsWith(number, "rad")) number.erase(number.size() - 3), scale = 57.2957795131f;
+    auto parseAngle = [&](detail::CSSTokenRange token, float& degrees) {
+        const auto dimension = detail::parseCSSDimension(value.stream, token);
+        if (!dimension) return false;
+        const std::string& number = dimension->number;
+        float scale;
+        if (dimension->unit == "deg") scale = 1.f;
+        else if (dimension->unit == "turn") scale = 360.f;
+        else if (dimension->unit == "rad") scale = 57.2957795131f;
         else return false;
         if (!parseFiniteFloat(trim(number), degrees)) return false;
         degrees *= scale;
         return true;
     };
 
-    auto parseCenter = [&](const std::vector<std::string>& tokens, Vec2& center) {
+    auto parseCenter = [&](const std::vector<detail::CSSTokenRange>& tokens, Vec2& center) {
         if (tokens.empty() || tokens.size() > 2) return false;
-        auto parsePercentage = [&](const std::string& token, float& percentage) {
+        auto parsePercentage = [&](detail::CSSTokenRange tokenRange, float& percentage) {
+            const std::string token = valueText(subValue(value, tokenRange));
             if (token.empty() || token.back() != '%') return false;
             if (!parseFiniteFloat(token.substr(0, token.size() - 1), percentage) || percentage < 0.f || percentage > 100.f) return false;
             percentage /= 100.f;
             return true;
         };
-        auto horizontal = [&](const std::string& rawToken, float& result) {
-            const std::string token = lower(trim(rawToken));
+        auto horizontal = [&](detail::CSSTokenRange rawToken, float& result) {
+            const std::string token = normalizeCSSKeyword(value.stream, rawToken);
             if (token == "left") result = 0.f;
             else if (token == "center") result = .5f;
             else if (token == "right") result = 1.f;
-            else if (!parsePercentage(token, result)) return false;
+            else if (!parsePercentage(rawToken, result)) return false;
             return true;
         };
-        auto vertical = [&](const std::string& rawToken, float& result) {
-            const std::string token = lower(trim(rawToken));
+        auto vertical = [&](detail::CSSTokenRange rawToken, float& result) {
+            const std::string token = normalizeCSSKeyword(value.stream, rawToken);
             if (token == "bottom") result = 0.f;
             else if (token == "center") result = .5f;
             else if (token == "top") result = 1.f;
             else {
-                if (!parsePercentage(token, result)) return false;
+                if (!parsePercentage(rawToken, result)) return false;
                 result = 1.f - result;
             }
             return true;
         };
 
         if (tokens.size() == 1) {
-            const std::string token = lower(trim(tokens.front()));
+            const std::string token = normalizeCSSKeyword(value.stream, tokens.front());
             if (token == "top" || token == "bottom") {
                 center.x = .5f;
-                return vertical(token, center.y);
+                return vertical(tokens.front(), center.y);
             }
             center.y = .5f;
-            return horizontal(token, center.x);
+            return horizontal(tokens.front(), center.x);
         }
 
         float x = 0.f, y = 0.f;
@@ -238,16 +239,16 @@ std::optional<Gradient> StyleModel::parseGradient(const std::string& raw) const 
         return false;
     };
 
-    auto parsesAsColorStop = [&](const std::string& argument) {
-        const std::vector<std::string> tokens = detail::tokenizeTopLevel(argument);
+    auto parsesAsColorStop = [&](detail::CSSTokenRange argument) {
+        const std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, argument);
         if (tokens.empty()) return false;
-        return parseColorChoiceValue(tokens.front()).has_value();
+        return parseColorChoiceValue(subValue(value, tokens.front())).has_value();
     };
 
     std::size_t firstStop = 0;
     if (!parsesAsColorStop(arguments.front())) {
-        const std::string prelude = lower(trim(arguments.front()));
-        const std::vector<std::string> tokens = detail::tokenizeTopLevel(prelude);
+        const std::string prelude = normalizeCSSKeyword(value.stream, arguments.front());
+        const std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, arguments.front());
         if (gradient.kind == GradientKind::Linear) {
             if (prelude == "to top"
                 || prelude == "to right"
@@ -273,26 +274,28 @@ std::optional<Gradient> StyleModel::parseGradient(const std::string& raw) const 
                 else if (right) gradient.angleDegrees = 90.f;
                 else if (bottom) gradient.angleDegrees = 180.f;
                 else if (left) gradient.angleDegrees = 270.f;
-            } else if (!parseAngle(prelude, gradient.angleDegrees)) return std::nullopt;
+            } else if (!parseAngle(arguments.front(), gradient.angleDegrees)) return std::nullopt;
         } else if (gradient.kind == GradientKind::Radial) {
-            auto at = std::find(tokens.begin(), tokens.end(), "at");
+            const auto at = std::find_if(tokens.begin(), tokens.end(),
+                                         [&](detail::CSSTokenRange token) { return normalizeCSSKeyword(value.stream, token) == "at"; });
             const std::size_t descriptorCount = static_cast<std::size_t>(at - tokens.begin());
             if (descriptorCount > 1) return std::nullopt;
             if (descriptorCount == 1) {
-                if (tokens.front() == "circle") gradient.radialShape = RadialGradientShape::Circle;
-                else if (tokens.front() != "ellipse") return std::nullopt;
+                const std::string shape = normalizeCSSKeyword(value.stream, tokens.front());
+                if (shape == "circle") gradient.radialShape = RadialGradientShape::Circle;
+                else if (shape != "ellipse") return std::nullopt;
             }
             if (at != tokens.end()) {
-                const std::vector<std::string> centerTokens(at + 1, tokens.end());
+                const std::vector<detail::CSSTokenRange> centerTokens(at + 1, tokens.end());
                 if (!parseCenter(centerTokens, gradient.center)) return std::nullopt;
             }
         } else {
             std::size_t index = 0;
-            if (index < tokens.size() && tokens[index] == "from") {
+            if (index < tokens.size() && normalizeCSSKeyword(value.stream, tokens[index]) == "from") {
                 if (++index == tokens.size() || !parseAngle(tokens[index++], gradient.angleDegrees)) return std::nullopt;
             }
-            if (index < tokens.size() && tokens[index] == "at") {
-                const std::vector<std::string> centerTokens(tokens.begin() + index + 1, tokens.end());
+            if (index < tokens.size() && normalizeCSSKeyword(value.stream, tokens[index]) == "at") {
+                const std::vector<detail::CSSTokenRange> centerTokens(tokens.begin() + index + 1, tokens.end());
                 if (!parseCenter(centerTokens, gradient.center)) return std::nullopt;
                 index = tokens.size();
             }
@@ -303,22 +306,22 @@ std::optional<Gradient> StyleModel::parseGradient(const std::string& raw) const 
 
     if (arguments.size() - firstStop < 2) return std::nullopt;
     const float unspecified = std::numeric_limits<float>::quiet_NaN();
-    auto parseStopPosition = [&](const std::string& rawPosition, float& position) {
-        const std::string token = lower(trim(rawPosition));
+    auto parseStopPosition = [&](detail::CSSTokenRange rawPosition, float& position) {
+        const std::string token = normalizeCSSKeyword(value.stream, rawPosition);
         if (!token.empty() && token.back() == '%') {
             if (!parseFiniteFloat(token.substr(0, token.size() - 1), position)) return false;
             position /= 100.f;
         } else {
             float degrees = 0.f;
-            if (gradient.kind != GradientKind::Conic || !parseAngle(token, degrees)) return false;
+            if (gradient.kind != GradientKind::Conic || !parseAngle(rawPosition, degrees)) return false;
             position = degrees / 360.f;
         }
         return position >= 0.f && position <= 1.f;
     };
     for (std::size_t index = firstStop; index < arguments.size(); ++index) {
-        const std::vector<std::string> tokens = detail::tokenizeTopLevel(arguments[index]);
+        const std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, arguments[index]);
         if (tokens.empty() || tokens.size() > 3) return std::nullopt;
-        const std::optional<StyleColorValue> color = parseColorChoiceValue(tokens.front());
+        const std::optional<StyleColorValue> color = parseColorChoiceValue(subValue(value, tokens.front()));
         if (!color) return std::nullopt;
         float position = unspecified;
         if (tokens.size() >= 2 && !parseStopPosition(tokens[1], position)) return std::nullopt;
@@ -352,23 +355,23 @@ std::optional<Gradient> StyleModel::parseGradient(const std::string& raw) const 
     return gradient;
 }
 
-std::optional<std::vector<BoxShadow>> StyleModel::parseShadows(const std::string& raw) const {
-    const std::vector<std::string> entries = detail::splitTopLevel(raw, ',');
+std::optional<std::vector<BoxShadow>> StyleModel::parseShadows(detail::CSSValueRange value) const {
+    const std::vector<detail::CSSTokenRange> entries = detail::splitCSSOnDelimiter(value.stream, value.range, ',');
     if (entries.empty()) return std::nullopt;
     std::vector<BoxShadow> shadows;
     shadows.reserve(entries.size());
-    for (const std::string& entry : entries) {
-        std::vector<std::string> tokens = detail::tokenizeTopLevel(entry);
+    for (const detail::CSSTokenRange entry : entries) {
+        std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, entry);
         if (tokens.size() < 3) return std::nullopt;
         BoxShadow shadow;
-        const std::string modifier = lower(tokens.back());
+        const std::string modifier = normalizeCSSKeyword(value.stream, tokens.back());
         if (modifier == "inset" || modifier == "outset") {
             shadow.inset = modifier == "inset";
             tokens.pop_back();
         }
         if (tokens.size() < 3 || tokens.size() > 5) return std::nullopt;
-        auto fixedLength = [&](const std::string& token, float& result) {
-            const std::optional<Length> parsed = parseLengthValue(token);
+        auto fixedLength = [&](detail::CSSTokenRange token, float& result) {
+            const std::optional<Length> parsed = parseLengthValue(subValue(value, token));
             if (!parsed || parsed->percent != 0.f) return false;
             result = parsed->pixels;
             return true;
@@ -383,7 +386,7 @@ std::optional<std::vector<BoxShadow>> StyleModel::parseShadows(const std::string
             if (!fixedLength(tokens[3], shadow.spread)) return std::nullopt;
             colorIndex = 4;
         }
-        const std::optional<StyleColorValue> color = parseColorChoiceValue(tokens[colorIndex]);
+        const std::optional<StyleColorValue> color = parseColorChoiceValue(subValue(value, tokens[colorIndex]));
         if (!color) return std::nullopt;
         assignColorValue(*color, shadow.color, shadow.lightDarkColor);
         shadows.push_back(shadow);
@@ -391,14 +394,14 @@ std::optional<std::vector<BoxShadow>> StyleModel::parseShadows(const std::string
     return shadows;
 }
 
-std::optional<std::vector<Effect>> StyleModel::parseEffects(const std::string& raw) const {
-    const std::string value = trim(raw);
-    if (lower(value) == "none") return std::vector<Effect>();
-    const std::vector<std::string> functions = detail::splitTopLevel(value, ',');
+std::optional<std::vector<Effect>> StyleModel::parseEffects(detail::CSSValueRange value) const {
+    value.range = detail::trimCSSRange(value.stream, value.range);
+    if (normalizeCSSKeyword(value.stream, value.range) == "none") return std::vector<Effect>();
+    const std::vector<detail::CSSTokenRange> functions = detail::splitCSSOnDelimiter(value.stream, value.range, ',');
     if (functions.empty() || functions.size() > kMaxEffectCount) return std::nullopt;
 
-    auto parseDirection = [&](const std::string& rawDirection, float& degrees) {
-        const std::string direction = lower(trim(rawDirection));
+    auto parseDirection = [&](detail::CSSTokenRange rawDirection, float& degrees) {
+        const std::string direction = normalizeCSSKeyword(value.stream, rawDirection);
         if (direction == "to top") degrees = 0.f;
         else if (direction == "to top right" || direction == "to right top") degrees = 45.f;
         else if (direction == "to right") degrees = 90.f;
@@ -408,27 +411,29 @@ std::optional<std::vector<Effect>> StyleModel::parseEffects(const std::string& r
         else if (direction == "to left") degrees = 270.f;
         else if (direction == "to top left" || direction == "to left top") degrees = 315.f;
         else {
-            std::string number = direction;
-            float scale = 1.f;
-            if (endsWith(number, "deg")) number.erase(number.size() - 3);
-            else if (endsWith(number, "turn")) number.erase(number.size() - 4), scale = 360.f;
-            else if (endsWith(number, "rad")) number.erase(number.size() - 3), scale = 57.2957795131f;
+            const auto dimension = detail::parseCSSDimension(value.stream, rawDirection);
+            if (!dimension) return false;
+            const std::string& number = dimension->number;
+            float scale;
+            if (dimension->unit == "deg") scale = 1.f;
+            else if (dimension->unit == "turn") scale = 360.f;
+            else if (dimension->unit == "rad") scale = 57.2957795131f;
             else return false;
             if (!parseFiniteFloat(trim(number), degrees)) return false;
             degrees *= scale;
         }
         return true;
     };
-    auto fixedRadius = [&](const std::string& token, float& radius) {
-        const std::optional<Length> parsed = parseLengthValue(token);
+    auto fixedRadius = [&](detail::CSSTokenRange token, float& radius) {
+        const std::optional<Length> parsed = parseLengthValue(subValue(value, token));
         if (!parsed || parsed->percent != 0.f || parsed->pixels < 0.f) return false;
         radius = parsed->pixels;
         return true;
     };
-    auto percentagePosition = [&](const std::string& token, float& position) {
-        const std::string value = lower(trim(token));
-        if (!endsWith(value, "%")) return false;
-        const std::optional<Length> parsed = parseLengthValue(value);
+    auto percentagePosition = [&](detail::CSSTokenRange token, float& position) {
+        const std::string tokenValue = normalizeCSSKeyword(value.stream, token);
+        if (!endsWith(tokenValue, "%")) return false;
+        const std::optional<Length> parsed = parseLengthValue(subValue(value, token));
         if (!parsed || parsed->pixels != 0.f || parsed->percent < 0.f || parsed->percent > 1.f) return false;
         position = parsed->percent;
         return true;
@@ -437,28 +442,25 @@ std::optional<std::vector<Effect>> StyleModel::parseEffects(const std::string& r
     std::vector<Effect> effects;
     effects.reserve(functions.size());
     bool sawLayerEffect = false;
-    for (const std::string& function : functions) {
-        const std::string lowered = lower(function);
+    for (const detail::CSSTokenRange function : functions) {
+        const auto parsedFunction = detail::parseCSSFunction(value.stream, function);
+        if (!parsedFunction) return std::nullopt;
         Effect effect;
-        std::string prefix;
-        if (startsWith(lowered, "background-blur(")) {
+        if (parsedFunction->name == "background-blur") {
             if (sawLayerEffect) return std::nullopt;
             effect.kind = EffectKind::BackgroundBlur;
-            prefix = "background-blur(";
-        } else if (startsWith(lowered, "layer-blur(")) {
+        } else if (parsedFunction->name == "layer-blur") {
             sawLayerEffect = true;
-            prefix = "layer-blur(";
         } else return std::nullopt;
-        if (function.size() <= prefix.size() || function.back() != ')') return std::nullopt;
 
-        const std::vector<std::string> arguments = detail::splitTopLevel(function.substr(prefix.size(), function.size() - prefix.size() - 1), ',');
+        const std::vector<detail::CSSTokenRange> arguments = detail::splitCSSOnDelimiter(value.stream, parsedFunction->body, ',');
         if (arguments.size() == 1) {
-            const std::vector<std::string> radii = detail::tokenizeTopLevel(arguments.front());
+            const std::vector<detail::CSSTokenRange> radii = detail::splitCSSComponents(value.stream, arguments.front());
             if (radii.size() != 1 || !fixedRadius(radii.front(), effect.startRadius)) return std::nullopt;
             effect.endRadius = effect.startRadius;
         } else if (arguments.size() == 3) {
-            const std::vector<std::string> start = detail::tokenizeTopLevel(arguments[1]);
-            const std::vector<std::string> end = detail::tokenizeTopLevel(arguments[2]);
+            const std::vector<detail::CSSTokenRange> start = detail::splitCSSComponents(value.stream, arguments[1]);
+            const std::vector<detail::CSSTokenRange> end = detail::splitCSSComponents(value.stream, arguments[2]);
             if (!parseDirection(arguments[0], effect.angleDegrees)
                 || start.size() != 2
                 || end.size() != 2
@@ -474,17 +476,16 @@ std::optional<std::vector<Effect>> StyleModel::parseEffects(const std::string& r
     return effects;
 }
 
-std::optional<Outline> StyleModel::parseOutline(const std::string& raw) const {
-    const std::vector<std::string> tokens = detail::tokenizeTopLevel(raw);
+std::optional<Outline> StyleModel::parseOutline(detail::CSSValueRange value) const {
+    const std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, value.range);
     if (tokens.size() < 2 || tokens.size() > 3) return std::nullopt;
     Outline outline;
     bool hasWidth = false;
     bool hasColor = false;
     bool hasStyle = false;
-    for (const std::string& rawToken : tokens) {
-        const std::string rawValue = trim(rawToken);
-        const std::string token = lower(rawValue);
-        if (const std::optional<Length> width = parseLengthValue(rawValue)) {
+    for (const detail::CSSTokenRange rawToken : tokens) {
+        const std::string token = normalizeCSSKeyword(value.stream, rawToken);
+        if (const std::optional<Length> width = parseLengthValue(subValue(value, rawToken))) {
             if (hasWidth || width->percent != 0.f || width->pixels < 0.f) return std::nullopt;
             outline.width = width->pixels;
             hasWidth = true;
@@ -498,7 +499,7 @@ std::optional<Outline> StyleModel::parseOutline(const std::string& raw) const {
             continue;
         }
 
-        const std::optional<StyleColorValue> color = parseColorChoiceValue(rawValue);
+        const std::optional<StyleColorValue> color = parseColorChoiceValue(subValue(value, rawToken));
         if (!color || hasColor) return std::nullopt;
         assignColorValue(*color, outline.color, outline.lightDarkColor);
         hasColor = true;
@@ -506,14 +507,13 @@ std::optional<Outline> StyleModel::parseOutline(const std::string& raw) const {
     return hasWidth && hasColor ? std::optional<Outline>(outline) : std::nullopt;
 }
 
-EdgeInsets StyleModel::parseEdgeInsets(const std::string& raw, const EdgeInsets& fallback) const {
-    std::stringstream stream(raw);
+EdgeInsets StyleModel::parseEdgeInsets(detail::CSSValueRange value, const EdgeInsets& fallback) const {
+    const std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, value.range);
     std::vector<float> values;
-    std::string token;
-    while (stream >> token) {
-        const float value = parseNumberValue(token, -1.f);
-        if (!std::isfinite(value) || value < 0.f || values.size() == 4) return fallback;
-        values.push_back(value);
+    for (const detail::CSSTokenRange token : tokens) {
+        const float parsed = parseNumberValue(subValue(value, token), -1.f);
+        if (!std::isfinite(parsed) || parsed < 0.f || values.size() == 4) return fallback;
+        values.push_back(parsed);
     }
     if (values.empty()) return fallback;
     EdgeInsets result;
@@ -524,20 +524,19 @@ EdgeInsets StyleModel::parseEdgeInsets(const std::string& raw, const EdgeInsets&
     return result;
 }
 
-std::optional<MarginInsets> StyleModel::parseMargin(const std::string& raw) const {
-    std::stringstream stream(raw);
+std::optional<MarginInsets> StyleModel::parseMargin(detail::CSSValueRange input) const {
+    const std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(input.stream, input.range);
     std::vector<MarginValue> values;
-    std::string token;
-    while (stream >> token) {
-        MarginValue value;
-        if (lower(trim(token)) == "auto") value = MarginValue::automatic();
+    for (const detail::CSSTokenRange token : tokens) {
+        MarginValue margin;
+        if (normalizeCSSKeyword(input.stream, token) == "auto") margin = MarginValue::automatic();
         else {
-            const float number = parseNumberValue(token, std::numeric_limits<float>::quiet_NaN());
+            const float number = parseNumberValue(subValue(input, token), std::numeric_limits<float>::quiet_NaN());
             if (!std::isfinite(number)) return std::nullopt;
-            value = MarginValue::fromPixels(number);
+            margin = MarginValue::fromPixels(number);
         }
         if (values.size() == 4) return std::nullopt;
-        values.push_back(value);
+        values.push_back(margin);
     }
     if (values.empty()) return std::nullopt;
 

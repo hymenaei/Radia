@@ -4,6 +4,7 @@
  */
 
 #include "linden_common.h"
+#include <algorithm>
 #include <cstdint>
 #include <gtest/gtest.h>
 #include <memory>
@@ -62,12 +63,15 @@ using radia::ui::TextOverflow;
 using radia::ui::TextWrap;
 using radia::ui::VerticalAlign;
 using radia::ui::Visibility;
+using radia::ui::detail::CSSTokenKind;
+using radia::ui::detail::CSSTokenStream;
 using radia::ui::detail::ElementInternalAccess;
 using radia::ui::detail::findStyleProperty;
 using radia::ui::detail::HTMLElementFactory;
 using radia::ui::detail::makeElement;
 using radia::ui::detail::makeElementValue;
 using radia::ui::detail::matchingBlock;
+using radia::ui::detail::serializeCSSRange;
 using radia::ui::detail::splitTopLevel;
 using radia::ui::detail::stylePropertyBegin;
 using radia::ui::detail::StylePropertyDefinition;
@@ -145,6 +149,15 @@ TEST(StyleCompilerTest, ResolvesVisibility) {
     EXPECT_EQ(computedStyle(stylesheet, *childPtr).visibility, Visibility::Hidden);
 }
 
+TEST(StyleCompilerTest, DecodesEscapedDeclarationKeywords) {
+    StyleSheet stylesheet;
+    const auto result = stylesheet.loadRadia("panel { display: n\\6f ne; }");
+
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result.warnings.empty());
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).display, DisplayMode::NoneValue);
+}
+
 TEST(StyleCompilerTest, ParsesColorSchemeValues) {
     constexpr char kColorSchemeStyles[] = "panel { color-scheme: light; } panel.dark { color-scheme: dark; } "
                                           "panel.both { color-scheme: light dark; } panel.reset { color-scheme: initial; }";
@@ -159,9 +172,9 @@ TEST(StyleCompilerTest, ParsesColorSchemeValues) {
 
     StyleSheet invalid;
     const auto result = invalid.loadRadia("panel { color-scheme: light light; }");
-    ASSERT_FALSE(result.ok());
-    ASSERT_FALSE(result.errors.empty());
-    EXPECT_EQ(result.errors.front().code, "stylesheet.property.value_invalid");
+    ASSERT_TRUE(result.ok());
+    ASSERT_FALSE(result.warnings.empty());
+    EXPECT_EQ(result.warnings.front().code, "stylesheet.property.value_invalid");
 }
 
 TEST(StyleCompilerTest, ParsesBoxSizingValues) {
@@ -177,9 +190,9 @@ TEST(StyleCompilerTest, ParsesBoxSizingValues) {
 
     StyleSheet invalid;
     const auto result = invalid.loadRadia("panel { box-sizing: padding-box; }");
-    ASSERT_FALSE(result.ok());
-    ASSERT_FALSE(result.errors.empty());
-    EXPECT_EQ(result.errors.front().code, "stylesheet.property.value_invalid");
+    ASSERT_TRUE(result.ok());
+    ASSERT_FALSE(result.warnings.empty());
+    EXPECT_EQ(result.warnings.front().code, "stylesheet.property.value_invalid");
 }
 
 TEST(StyleCompilerTest, ResolvesSchemeColors) {
@@ -202,9 +215,9 @@ TEST(StyleCompilerTest, ResolvesSchemeColors) {
 
     StyleSheet invalid;
     const auto result = invalid.loadRadia("panel { color: light-dark(#fff); }");
-    ASSERT_FALSE(result.ok());
-    ASSERT_FALSE(result.errors.empty());
-    EXPECT_EQ(result.errors.front().code, "stylesheet.property.value_invalid");
+    ASSERT_TRUE(result.ok());
+    ASSERT_FALSE(result.warnings.empty());
+    EXPECT_EQ(result.warnings.front().code, "stylesheet.property.value_invalid");
 }
 
 TEST(StyleCompilerTest, ResolvesStyleTokens) {
@@ -406,9 +419,9 @@ TEST(StyleCompilerTest, RejectsInvalidTypographyForms) {
         SCOPED_TRACE(Message() << "invalid typography case: " << test.name);
         StyleSheet stylesheet;
         const auto result = stylesheet.loadRadia(test.styles);
-        ASSERT_FALSE(result.ok());
-        ASSERT_FALSE(result.errors.empty());
-        EXPECT_EQ(result.errors.front().code, "stylesheet.property.value_invalid");
+        ASSERT_TRUE(result.ok());
+        ASSERT_FALSE(result.warnings.empty());
+        EXPECT_EQ(result.warnings.front().code, "stylesheet.property.value_invalid");
     }
 }
 
@@ -435,17 +448,28 @@ TEST(StyleCompilerTest, ParsesBorderProperties) {
     EXPECT_FLOAT_EQ(iconStyle.strokeColor.a, 136.f / 255.f);
 }
 
+TEST(StyleCompilerTest, SplitsCommentSeparatedBorderValues) {
+    StyleSheet stylesheet;
+    const auto result = stylesheet.loadRadia("button { border: 2px/**/solid #112233ff; }");
+
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result.warnings.empty());
+    const ComputedStyle style = stylesheet.resolve("button", "", {}, 0);
+    EXPECT_EQ(style.borderWidth.top, 2.f);
+    EXPECT_EQ(style.borderStyle, radia::ui::BorderStyle::Solid);
+}
+
 TEST(StyleCompilerTest, RejectsStrokeShorthandAndLegacyColorProperty) {
     StyleSheet stylesheet;
     const auto shorthand = stylesheet.loadRadia("i { stroke: 4px #abcdef; }");
-    ASSERT_FALSE(shorthand.ok());
-    ASSERT_FALSE(shorthand.errors.empty());
-    EXPECT_EQ(shorthand.errors.front().code, "stylesheet.property.value_invalid");
+    ASSERT_TRUE(shorthand.ok());
+    ASSERT_FALSE(shorthand.warnings.empty());
+    EXPECT_EQ(shorthand.warnings.front().code, "stylesheet.property.value_invalid");
 
     const auto legacy = stylesheet.loadRadia("i { stroke-color: #abcdef; }");
-    ASSERT_FALSE(legacy.ok());
-    ASSERT_FALSE(legacy.errors.empty());
-    EXPECT_EQ(legacy.errors.front().code, "stylesheet.property.unknown");
+    ASSERT_TRUE(legacy.ok());
+    ASSERT_FALSE(legacy.warnings.empty());
+    EXPECT_EQ(legacy.warnings.front().code, "stylesheet.property.unknown");
 }
 
 TEST(StyleCompilerTest, ResolvesGradientStroke) {
@@ -534,12 +558,12 @@ TEST(StyleCompilerTest, RejectsUnsupportedDisplay) {
     StyleSheet stylesheet;
     const auto result = stylesheet.loadRadia(kUnsupportedDisplayStyles, "test.css");
 
-    ASSERT_FALSE(result.ok());
+    ASSERT_TRUE(result.ok());
     EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).display, DisplayMode::Inline);
     EXPECT_EQ(stylesheet.resolve("panel", "bad", {}, 0).display, DisplayMode::Inline);
-    EXPECT_TRUE(result.warnings.empty());
-    ASSERT_EQ(result.errors.size(), std::size_t(2));
-    EXPECT_EQ(result.errors.front().source, "test.css");
+    EXPECT_TRUE(result.errors.empty());
+    ASSERT_EQ(result.warnings.size(), std::size_t(2));
+    EXPECT_EQ(result.warnings.front().source, "test.css");
 }
 
 TEST(StyleCompilerTest, AppliesSelectorRules) {
@@ -606,9 +630,9 @@ TEST(StyleCompilerTest, RejectsUnitBearingFlexGrow) {
 
     StyleSheet stylesheet;
     const auto result = stylesheet.loadRadia(kUnitBearingFlexGrow);
-    ASSERT_FALSE(result.ok());
-    ASSERT_FALSE(result.errors.empty());
-    EXPECT_EQ(result.errors.front().code, "stylesheet.property.value_invalid");
+    ASSERT_TRUE(result.ok());
+    ASSERT_FALSE(result.warnings.empty());
+    EXPECT_EQ(result.warnings.front().code, "stylesheet.property.value_invalid");
 }
 
 TEST(StyleCompilerTest, ProvidesStableStyleDefaults) {
@@ -693,9 +717,9 @@ TEST(StyleCompilerTest, RejectsInvalidTextValues) {
         SCOPED_TRACE(Message() << "invalid text style case: " << test.name);
         StyleSheet stylesheet;
         const auto result = stylesheet.loadRadia(test.styles);
-        ASSERT_FALSE(result.ok());
-        ASSERT_FALSE(result.errors.empty());
-        EXPECT_EQ(result.errors.front().code, "stylesheet.property.value_invalid");
+        ASSERT_TRUE(result.ok());
+        ASSERT_FALSE(result.warnings.empty());
+        EXPECT_EQ(result.warnings.front().code, "stylesheet.property.value_invalid");
     }
 }
 
@@ -738,9 +762,9 @@ TEST(StyleCompilerTest, RejectsNonFiniteEdgeValues) {
         const std::string styles = std::string("panel { ") + test.property + ": " + test.value + "; }";
         StyleSheet stylesheet;
         const auto result = stylesheet.loadRadia(styles, "nonfinite-edge.css");
-        ASSERT_FALSE(result.ok());
-        ASSERT_FALSE(result.errors.empty());
-        EXPECT_EQ(result.errors.front().code, "stylesheet.property.value_invalid");
+        ASSERT_TRUE(result.ok());
+        ASSERT_FALSE(result.warnings.empty());
+        EXPECT_EQ(result.warnings.front().code, "stylesheet.property.value_invalid");
     }
 }
 
@@ -748,8 +772,132 @@ TEST(StyleCompilerTest, PreservesNestedSyntax) {
     const std::vector<std::string> tokens = tokenizeTopLevel("italic 17px/21px sans", true);
     ASSERT_EQ(tokens.size(), std::size_t(5));
     EXPECT_EQ(tokens[2], "/");
+    const std::vector<std::string> commentSeparated = tokenizeTopLevel("1px/**/solid");
+    ASSERT_EQ(commentSeparated.size(), std::size_t(2));
+    EXPECT_EQ(commentSeparated[0], "1px");
+    EXPECT_EQ(commentSeparated[1], "solid");
     EXPECT_TRUE(tokenizeTopLevel("var(--accent", true).empty());
     EXPECT_TRUE(splitTopLevel("rgb(1, 2)), blue", ',').empty());
+}
+
+TEST(StyleCompilerTest, TokenizesCSSStructuralKinds) {
+    const std::string source = R"(<!-- panel { value: rgb(1, fn("}")), url(icon\)name.svg); /* } */ text: "}"; } -->)";
+    const CSSTokenStream stream(source);
+    std::vector<CSSTokenKind> kinds;
+    std::size_t openIndex = 0;
+    std::size_t closeIndex = 0;
+    std::size_t urlIndex = 0;
+    for (std::size_t index = 0; index < stream.tokens().size(); ++index) {
+        const auto kind = stream.tokens()[index].kind;
+        if (kind != CSSTokenKind::Whitespace) kinds.push_back(kind);
+        if (kind == CSSTokenKind::OpenBrace) openIndex = index;
+        if (kind == CSSTokenKind::CloseBrace) closeIndex = index;
+        if (kind == CSSTokenKind::Url) urlIndex = index;
+    }
+
+    EXPECT_EQ(kinds.front(), CSSTokenKind::CDO);
+    EXPECT_EQ(kinds.back(), CSSTokenKind::CDC);
+    EXPECT_NE(std::find(kinds.begin(), kinds.end(), CSSTokenKind::Colon), kinds.end());
+    EXPECT_NE(std::find(kinds.begin(), kinds.end(), CSSTokenKind::Semicolon), kinds.end());
+    EXPECT_NE(std::find(kinds.begin(), kinds.end(), CSSTokenKind::Comma), kinds.end());
+    EXPECT_EQ(stream.text(urlIndex), "url(icon\\)name.svg)");
+    ASSERT_NE(openIndex, std::size_t(0));
+    ASSERT_NE(closeIndex, std::size_t(0));
+    EXPECT_EQ(stream.tokens()[openIndex].matching, closeIndex);
+    EXPECT_EQ(stream.tokens()[closeIndex].begin, source.rfind('}'));
+    EXPECT_EQ(matchingBlock(source, stream.tokens()[openIndex].begin), stream.tokens()[closeIndex].begin);
+}
+
+TEST(StyleCompilerTest, HandlesUnicodeCodePointsAndCSSValueEscapes) {
+    const CSSTokenStream functionStream(R"(r\67 b(1, 2, 3))");
+    const auto function = radia::ui::detail::parseCSSFunction(functionStream, {0, functionStream.tokens().size()});
+    ASSERT_TRUE(function.has_value());
+    EXPECT_EQ(function->name, "rgb");
+    EXPECT_EQ(serializeCSSRange(functionStream, function->body), "1, 2, 3");
+
+    const CSSTokenStream dimensionStream(R"(17p\78)");
+    const auto dimension = radia::ui::detail::parseCSSDimension(dimensionStream, {0, dimensionStream.tokens().size()});
+    ASSERT_TRUE(dimension.has_value());
+    EXPECT_EQ(dimension->number, "17");
+    EXPECT_EQ(dimension->unit, "px");
+    EXPECT_EQ(radia::ui::detail::normalizeCSSKeyword(R"(to t\6f p)"), "to top");
+
+    const std::string urlSource = std::string("url(icon") + std::string("\xC2\x80", 2) + ")";
+    const CSSTokenStream urlStream(urlSource);
+    ASSERT_EQ(urlStream.tokens().size(), std::size_t(1));
+    EXPECT_EQ(urlStream.tokens().front().kind, CSSTokenKind::BadUrl);
+
+    EXPECT_EQ(radia::ui::detail::cssSourcePosition("éx", 2), (std::pair<std::size_t, std::size_t>{1, 2}));
+}
+
+TEST(StyleCompilerTest, PreservesTokenBoundariesAcrossComments) {
+    const CSSTokenStream stream("foo/**/bar");
+
+    ASSERT_EQ(stream.tokens().size(), std::size_t(2));
+    EXPECT_EQ(stream.tokens()[0].kind, CSSTokenKind::Ident);
+    EXPECT_EQ(stream.tokens()[1].kind, CSSTokenKind::Ident);
+    EXPECT_TRUE(stream.tokens()[1].precededByComment);
+    EXPECT_EQ(serializeCSSRange(stream, {0, stream.tokens().size()}), "foo/**/bar");
+    EXPECT_EQ(radia::ui::detail::normalizeCSSKeyword("to/**/right"), "to right");
+}
+
+TEST(StyleCompilerTest, PreservesCSSParseErrorTokensAtEOF) {
+    const CSSTokenStream stringStream("\"unterminated");
+    ASSERT_EQ(stringStream.tokens().size(), std::size_t(1));
+    EXPECT_EQ(stringStream.tokens().front().kind, CSSTokenKind::String);
+
+    const CSSTokenStream urlStream("url(icon.svg");
+    ASSERT_EQ(urlStream.tokens().size(), std::size_t(1));
+    EXPECT_EQ(urlStream.tokens().front().kind, CSSTokenKind::Url);
+
+    const CSSTokenStream escapedURLStream(R"(u\72l(icon.svg))");
+    ASSERT_EQ(escapedURLStream.tokens().size(), std::size_t(1));
+    EXPECT_EQ(escapedURLStream.tokens().front().kind, CSSTokenKind::Url);
+
+    const CSSTokenStream escapedCRLFURLStream("u\\72\r\nl(icon.svg)");
+    ASSERT_EQ(escapedCRLFURLStream.tokens().size(), std::size_t(1));
+    EXPECT_EQ(escapedCRLFURLStream.tokens().front().kind, CSSTokenKind::Url);
+    EXPECT_EQ(radia::ui::detail::decodeCSSIdentifier("u\\72\r\nl"), "url");
+    const auto decodedString = radia::ui::detail::decodeCSSString("\"a\\31\r\nb\"");
+    ASSERT_TRUE(decodedString.has_value());
+    EXPECT_EQ(*decodedString, "a1b");
+
+    std::string nulSource = "\"A";
+    nulSource.push_back('\0');
+    nulSource += "B\"";
+    const CSSTokenStream nulStream(nulSource);
+    ASSERT_EQ(nulStream.tokens().size(), std::size_t(1));
+    EXPECT_EQ(nulStream.tokens().front().kind, CSSTokenKind::String);
+    EXPECT_EQ(nulStream.text(0),
+              "\"A\xEF\xBF\xBD"
+              "B\"");
+
+    const std::string surrogateSource = std::string("A") + "\xED\xA0\x80" + "B";
+    const CSSTokenStream surrogateStream(surrogateSource);
+    ASSERT_EQ(surrogateStream.tokens().size(), std::size_t(1));
+    EXPECT_EQ(surrogateStream.tokens().front().kind, CSSTokenKind::Ident);
+    EXPECT_EQ(surrogateStream.text(0),
+              "A\xEF\xBF\xBD"
+              "B");
+}
+
+TEST(StyleCompilerTest, ConsumesInvalidURLRemnants) {
+    const CSSTokenStream stream("url(foo\\");
+
+    ASSERT_EQ(stream.tokens().size(), std::size_t(1));
+    EXPECT_EQ(stream.tokens().front().kind, CSSTokenKind::BadUrl);
+    EXPECT_EQ(stream.tokens().front().end, stream.source().size());
+}
+
+TEST(StyleCompilerTest, ReconsumesNewlineAfterBadString) {
+    const CSSTokenStream stream("\"unterminated\nwidth: 1px;");
+    ASSERT_GE(stream.tokens().size(), std::size_t(4));
+    EXPECT_EQ(stream.tokens()[0].kind, CSSTokenKind::BadString);
+    EXPECT_EQ(stream.tokens()[0].end, std::size_t(13));
+    EXPECT_EQ(stream.tokens()[1].kind, CSSTokenKind::Whitespace);
+    EXPECT_EQ(stream.tokens()[1].begin, std::size_t(13));
+    EXPECT_EQ(stream.tokens()[2].kind, CSSTokenKind::Ident);
+    EXPECT_EQ(stream.text(2), "width");
 }
 
 TEST(StyleCompilerTest, RejectsUnclosedStyleBlocks) {
@@ -761,6 +909,11 @@ TEST(StyleCompilerTest, RejectsUnclosedStyleBlocks) {
     ASSERT_TRUE(close.has_value());
     EXPECT_EQ(*close, kNestedStyles.size() - 1);
     EXPECT_FALSE(matchingBlock("button {", 7).has_value());
+
+    const std::string lineBreakStyles = "button\r\n{ width: 1px; }";
+    const std::size_t lineBreakOpen = lineBreakStyles.find('{');
+    ASSERT_NE(lineBreakOpen, std::string::npos);
+    EXPECT_EQ(matchingBlock(lineBreakStyles, lineBreakOpen), lineBreakStyles.rfind('}'));
 }
 
 TEST(StyleCompilerTest, KeepsPropertyRegistryValid) {

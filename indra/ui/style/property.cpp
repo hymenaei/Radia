@@ -9,12 +9,12 @@
 #include <array>
 #include <cctype>
 #include <cmath>
-#include <cstdlib>
 #include <initializer_list>
 #include <iterator>
 #include <limits>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include "css/color.h"
 #include "css/rules.h"
 #include "css/stylesheet.h"
@@ -24,26 +24,33 @@ namespace radia::ui {
 namespace {
 using detail::endsWith;
 using detail::lower;
+using detail::normalizeCSSKeyword;
 using detail::startsWith;
 using detail::StylePropertyImpact;
 using detail::trim;
 
-std::optional<BorderStyle> parseBorderStyle(const std::string& raw) {
-    const std::string value = lower(trim(raw));
-    if (value == "solid") return BorderStyle::Solid;
-    if (value == "outset") return BorderStyle::Outset;
-    if (value == "inset") return BorderStyle::Inset;
+bool hasDimensionUnit(const detail::CSSTokenStream& stream, detail::CSSTokenRange range, std::string_view unit) {
+    const auto dimension = detail::parseCSSDimension(stream, range);
+    return dimension && dimension->unit == unit;
+}
+
+std::optional<BorderStyle> parseBorderStyle(detail::CSSValueRange value) {
+    const std::string token = normalizeCSSKeyword(value.stream, value.range);
+    if (token == "solid") return BorderStyle::Solid;
+    if (token == "outset") return BorderStyle::Outset;
+    if (token == "inset") return BorderStyle::Inset;
     return std::nullopt;
 }
 
-bool parseStrokeCap(const std::string& raw, StrokeCap& cap) {
-    const std::string value = lower(trim(raw));
-    if (value == "butt") cap = StrokeCap::Butt;
-    else if (value == "round") cap = StrokeCap::Round;
-    else if (value == "square") cap = StrokeCap::Square;
+bool parseStrokeCap(detail::CSSValueRange value, StrokeCap& cap) {
+    const std::string token = normalizeCSSKeyword(value.stream, value.range);
+    if (token == "butt") cap = StrokeCap::Butt;
+    else if (token == "round") cap = StrokeCap::Round;
+    else if (token == "square") cap = StrokeCap::Square;
     else return false;
     return true;
 }
+
 } // namespace
 
 namespace {
@@ -123,45 +130,48 @@ void detail::applyStyleDeclaration(ComputedStyle& style, const StyleDeclaration&
     if (property.specify) property.specify(style);
 }
 
-std::optional<bool> StyleModel::parseFontStyleValue(const std::string& value) const {
-    const std::string style = lower(trim(value));
+std::optional<bool> StyleModel::parseFontStyleValue(detail::CSSValueRange value) const {
+    const std::string style = normalizeCSSKeyword(value.stream, value.range);
     if (style == "normal") return false;
     if (style == "italic" || style == "oblique") return true;
     return std::nullopt;
 }
 
-std::optional<float> StyleModel::parseFontWeightValue(const std::string& value) const {
-    const std::string weight = lower(trim(value));
+std::optional<float> StyleModel::parseFontWeightValue(detail::CSSValueRange value) const {
+    const std::string weight = normalizeCSSKeyword(value.stream, value.range);
     if (weight == "normal") return 400.f;
     if (weight == "bold") return 700.f;
-    if (endsWith(weight, "px") || endsWith(weight, "%")) return std::nullopt;
-    const float parsed = parseNumberValue(weight, std::numeric_limits<float>::quiet_NaN());
+    if (hasDimensionUnit(value.stream, value.range, "px") || endsWith(weight, "%")) return std::nullopt;
+    const float parsed = parseNumberValue(value, std::numeric_limits<float>::quiet_NaN());
     return std::isfinite(parsed) && parsed >= 1.f && parsed <= 1000.f && std::floor(parsed) == parsed ? std::optional<float>(parsed) : std::nullopt;
 }
 
-std::optional<Length> StyleModel::parseLineHeightValue(const std::string& value) const {
+std::optional<Length> StyleModel::parseLineHeightValue(detail::CSSValueRange value) const {
     const std::optional<Length> parsed = parseLengthValue(value);
     return parsed && parsed->pixels >= 0.f && parsed->percent == 0.f ? parsed : std::nullopt;
 }
 
-std::optional<std::vector<StyleDeclaration>> StyleModel::parseFontShorthand(const std::string& value) const {
-    std::vector<std::string> tokens = detail::tokenizeTopLevel(value, true);
-    if (tokens.size() < 2 || lower(tokens.back()) != "sans") return std::nullopt;
+std::optional<std::vector<StyleDeclaration>> StyleModel::parseFontShorthand(detail::CSSValueRange value) const {
+    std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, value.range, true);
+    if (tokens.size() < 2 || normalizeCSSKeyword(value.stream, tokens.back()) != "sans") return std::nullopt;
     tokens.pop_back();
 
     std::optional<Length> lineHeight;
     std::size_t sizeIndex = tokens.size() - 1;
-    const auto slash = std::find(tokens.begin(), tokens.end(), "/");
+    const auto slash =
+        std::find_if(tokens.begin(), tokens.end(), [&](detail::CSSTokenRange token) { return normalizeCSSKeyword(value.stream, token) == "/"; });
     if (slash != tokens.end()) {
         const std::size_t slashIndex = static_cast<std::size_t>(slash - tokens.begin());
-        if (slashIndex == 0 || slashIndex + 2 != tokens.size() || std::find(slash + 1, tokens.end(), "/") != tokens.end()) return std::nullopt;
+        const auto secondSlash =
+            std::find_if(slash + 1, tokens.end(), [&](detail::CSSTokenRange token) { return normalizeCSSKeyword(value.stream, token) == "/"; });
+        if (slashIndex == 0 || slashIndex + 2 != tokens.size() || secondSlash != tokens.end()) return std::nullopt;
         sizeIndex = slashIndex - 1;
-        lineHeight = parseLineHeightValue(tokens.back());
+        lineHeight = parseLineHeightValue({value.stream, tokens.back()});
         if (!lineHeight) return std::nullopt;
     }
 
-    const std::string size = lower(tokens[sizeIndex]);
-    const float parsedSize = parseNumberValue(size, std::numeric_limits<float>::quiet_NaN());
+    const std::string size = normalizeCSSKeyword(value.stream, tokens[sizeIndex]);
+    const float parsedSize = parseNumberValue({value.stream, tokens[sizeIndex]}, std::numeric_limits<float>::quiet_NaN());
     if (!std::isfinite(parsedSize) || parsedSize < 0.f || endsWith(size, "%")) return std::nullopt;
 
     bool italic = false;
@@ -169,7 +179,7 @@ std::optional<std::vector<StyleDeclaration>> StyleModel::parseFontShorthand(cons
     bool sawStyle = false;
     bool sawWeight = false;
     for (std::size_t index = 0; index < sizeIndex; ++index) {
-        const std::string token = lower(tokens[index]);
+        const std::string token = normalizeCSSKeyword(value.stream, tokens[index]);
         if (token == "normal") {
             if (!sawStyle) sawStyle = true;
             else if (!sawWeight) sawWeight = true;
@@ -177,7 +187,7 @@ std::optional<std::vector<StyleDeclaration>> StyleModel::parseFontShorthand(cons
             continue;
         }
         if (!sawStyle) {
-            const std::optional<bool> parsedStyle = parseFontStyleValue(token);
+            const std::optional<bool> parsedStyle = parseFontStyleValue({value.stream, tokens[index]});
             if (parsedStyle) {
                 italic = *parsedStyle;
                 sawStyle = true;
@@ -185,7 +195,7 @@ std::optional<std::vector<StyleDeclaration>> StyleModel::parseFontShorthand(cons
             }
         }
         if (!sawWeight) {
-            const std::optional<float> parsedWeight = parseFontWeightValue(token);
+            const std::optional<float> parsedWeight = parseFontWeightValue({value.stream, tokens[index]});
             if (parsedWeight) {
                 weight = *parsedWeight;
                 sawWeight = true;
@@ -206,49 +216,86 @@ std::optional<std::vector<StyleDeclaration>> StyleModel::parseFontShorthand(cons
 
 namespace { using CompileResult = detail::StyleCompileResult; } // namespace
 
+struct StyleCompileValue {
+    std::string text;
+    const detail::CSSTokenStream& stream;
+    detail::CSSTokenRange range;
+};
+
 struct detail::StyleCompileContext {
     const StyleModel& model;
     const detail::StylePropertyDefinition& property;
-    const std::string& value;
+    StyleCompileValue value;
     const std::string& selector;
     StyleSheetLoadResult& result;
     const std::string& sourceName;
 
     CompileResult invalid() const {
-        result.error("stylesheet.property.value_invalid", "Invalid value for " + std::string(property.name) + ": " + value + ".", sourceName);
+        const std::size_t offset =
+            value.range.begin < value.stream.tokens().size() ? value.stream.tokens()[value.range.begin].begin : value.stream.source().size();
+        const auto [line, column] = detail::cssSourcePosition(value.stream.source(), offset);
+        result.warning("stylesheet.property.value_invalid", "Invalid value for " + std::string(property.name) + ": " + value.text + ".", sourceName,
+                       line, column);
         return std::nullopt;
     }
 
     CompileResult compiled(StyleValue parsed) const { return std::vector<StyleDeclaration>{makeDeclaration(property.name, std::move(parsed))}; }
 
-    std::optional<Color> color(const std::string& raw = {}) const {
+    std::optional<Color> color() const {
         const Color marker(-1.f, -1.f, -1.f, -1.f);
-        const Color parsed = model.parseColorValue(raw.empty() ? value : raw, marker);
+        const Color parsed = model.parseColorValue({value.stream, value.range}, marker);
         return parsed.a < 0.f ? std::nullopt : std::optional<Color>(parsed);
     }
 
-    std::optional<StyleColorValue> colorValue(const std::string& raw = {}) const { return model.parseColorChoiceValue(raw.empty() ? value : raw); }
+    std::optional<Color> color(detail::CSSValueRange raw) const {
+        const Color marker(-1.f, -1.f, -1.f, -1.f);
+        const Color parsed = model.parseColorValue(raw, marker);
+        return parsed.a < 0.f ? std::nullopt : std::optional<Color>(parsed);
+    }
 
-    std::optional<float> number(const std::string& raw = {}) const {
-        const float parsed = model.parseNumberValue(raw.empty() ? value : raw, std::numeric_limits<float>::quiet_NaN());
+    std::optional<StyleColorValue> colorValue() const { return model.parseColorChoiceValue({value.stream, value.range}); }
+
+    std::optional<StyleColorValue> colorValue(detail::CSSValueRange raw) const { return model.parseColorChoiceValue(raw); }
+
+    std::optional<float> number() const {
+        const float parsed = model.parseNumberValue({value.stream, value.range}, std::numeric_limits<float>::quiet_NaN());
         return std::isfinite(parsed) ? std::optional<float>(parsed) : std::nullopt;
     }
 
-    std::optional<Length> length(const std::string& raw = {}) const { return model.parseLengthValue(raw.empty() ? value : raw); }
+    std::optional<float> number(detail::CSSValueRange raw) const {
+        const float parsed = model.parseNumberValue(raw, std::numeric_limits<float>::quiet_NaN());
+        return std::isfinite(parsed) ? std::optional<float>(parsed) : std::nullopt;
+    }
 
-    std::optional<Length> nonnegativeLength(const std::string& raw) const {
+    std::optional<Length> length() const { return model.parseLengthValue({value.stream, value.range}); }
+
+    std::optional<Length> length(detail::CSSValueRange raw) const { return model.parseLengthValue(raw); }
+
+    std::vector<detail::CSSTokenRange> commaSeparatedRanges() const { return detail::splitCSSOnDelimiter(value.stream, value.range, ','); }
+
+    std::optional<Length> nonnegativeLength() const {
+        const std::optional<Length> parsed = length();
+        if (!parsed || parsed->pixels < 0.f || parsed->percent < 0.f) return std::nullopt;
+        return parsed;
+    }
+
+    std::optional<Length> nonnegativeLength(detail::CSSValueRange raw) const {
         const std::optional<Length> parsed = length(raw);
         if (!parsed || parsed->pixels < 0.f || parsed->percent < 0.f) return std::nullopt;
         return parsed;
     }
 
-    std::vector<std::string> tokens(bool splitSlash = true) const { return detail::tokenizeTopLevel(value, splitSlash); }
+    std::vector<detail::CSSTokenRange> ranges(bool splitSlash = true) const {
+        return detail::splitCSSComponents(value.stream, value.range, splitSlash);
+    }
+
+    std::string keyword() const { return normalizeCSSKeyword(value.stream, value.range); }
 };
 
 namespace {
 CompileResult compileShadow(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    const auto parsed = model.parseShadows(value);
+    const auto parsed = model.parseShadows({value.stream, value.range});
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
@@ -257,77 +304,24 @@ struct ParsedContent {
     std::optional<std::string> value;
 };
 
-std::optional<std::pair<std::string, std::size_t>> parseCssString(const std::string& value, std::size_t start) {
-    if (start >= value.size() || (value[start] != '\'' && value[start] != '"')) return std::nullopt;
-    const char quote = value[start];
-    std::string result;
-    const auto appendCodePoint = [&result](std::uint32_t codePoint) {
-        if (codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) return false;
-        if (codePoint <= 0x7f) result.push_back(static_cast<char>(codePoint));
-        else if (codePoint <= 0x7ff) {
-            result.push_back(static_cast<char>(0xc0 | (codePoint >> 6)));
-            result.push_back(static_cast<char>(0x80 | (codePoint & 0x3f)));
-        } else if (codePoint <= 0xffff) {
-            result.push_back(static_cast<char>(0xe0 | (codePoint >> 12)));
-            result.push_back(static_cast<char>(0x80 | ((codePoint >> 6) & 0x3f)));
-            result.push_back(static_cast<char>(0x80 | (codePoint & 0x3f)));
-        } else {
-            result.push_back(static_cast<char>(0xf0 | (codePoint >> 18)));
-            result.push_back(static_cast<char>(0x80 | ((codePoint >> 12) & 0x3f)));
-            result.push_back(static_cast<char>(0x80 | ((codePoint >> 6) & 0x3f)));
-            result.push_back(static_cast<char>(0x80 | (codePoint & 0x3f)));
-        }
-        return true;
-    };
-
-    for (std::size_t index = start + 1; index < value.size();) {
-        const char character = value[index++];
-        if (character == quote) return std::pair{std::move(result), index};
-        if (character != '\\') {
-            result.push_back(character);
-            continue;
-        }
-        if (index >= value.size()) return std::nullopt;
-        const char escaped = value[index++];
-        if (escaped == '\n' || escaped == '\r' || escaped == '\f') continue;
-        if (!std::isxdigit(static_cast<unsigned char>(escaped))) {
-            result.push_back(escaped);
-            continue;
-        }
-        std::uint32_t codePoint = 0;
-        std::size_t digits = 0;
-        --index;
-        while (index < value.size() && digits < 6 && std::isxdigit(static_cast<unsigned char>(value[index]))) {
-            const char digit = value[index++];
-            codePoint = codePoint * 16
-                + static_cast<std::uint32_t>(std::isdigit(static_cast<unsigned char>(digit))
-                                                 ? digit - '0'
-                                                 : std::tolower(static_cast<unsigned char>(digit)) - 'a' + 10);
-            ++digits;
-        }
-        if (index < value.size() && std::isspace(static_cast<unsigned char>(value[index]))) ++index;
-        if (!appendCodePoint(codePoint)) return std::nullopt;
-    }
-    return std::nullopt;
+std::optional<std::string> decodeCSSStringRange(const detail::CSSTokenStream& stream, detail::CSSTokenRange range) {
+    range = detail::trimCSSRange(stream, range);
+    if (range.end != range.begin + 1 || stream.tokens()[range.begin].kind != detail::CSSTokenKind::String) return std::nullopt;
+    return detail::decodeCSSString(stream.text(range.begin));
 }
 
-ParsedContent parseContent(const std::string& raw) {
-    const std::string value = trim(raw);
-    const std::string keyword = lower(value);
-    if (keyword == "none" || keyword == "normal") return {true, std::nullopt};
-
-    const auto primary = parseCssString(value, 0);
-    if (!primary) return {};
-    std::size_t position = primary->second;
-    while (position < value.size() && std::isspace(static_cast<unsigned char>(value[position]))) ++position;
-    if (position == value.size()) return {true, primary->first};
-    if (value[position++] != '/') return {};
-    while (position < value.size() && std::isspace(static_cast<unsigned char>(value[position]))) ++position;
-    const auto alternative = parseCssString(value, position);
-    if (!alternative) return {};
-    position = alternative->second;
-    while (position < value.size() && std::isspace(static_cast<unsigned char>(value[position]))) ++position;
-    return position == value.size() ? ParsedContent{true, primary->first} : ParsedContent{};
+ParsedContent parseContent(const StyleCompileValue& raw) {
+    const auto& stream = raw.stream;
+    const std::vector<detail::CSSTokenRange> components = detail::splitCSSComponents(stream, raw.range, true);
+    if (components.size() == 1) {
+        const std::string keyword = normalizeCSSKeyword(stream, components.front());
+        if (keyword == "none" || keyword == "normal") return {true, std::nullopt};
+        if (const std::optional<std::string> primary = decodeCSSStringRange(stream, components.front())) return {true, *primary};
+    }
+    if (components.size() != 3 || normalizeCSSKeyword(stream, components[1]) != "/") return {};
+    const std::optional<std::string> primary = decodeCSSStringRange(stream, components[0]);
+    const std::optional<std::string> alternative = decodeCSSStringRange(stream, components[2]);
+    return primary && alternative ? ParsedContent{true, *primary} : ParsedContent{};
 }
 
 CompileResult compileContent(detail::StyleCompileContext& context) {
@@ -337,98 +331,62 @@ CompileResult compileContent(detail::StyleCompileContext& context) {
 
 CompileResult compileEffect(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    const auto parsed = model.parseEffects(value);
+    const auto parsed = model.parseEffects({value.stream, value.range});
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileOutline(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    const auto parsed = model.parseOutline(value);
+    const auto parsed = model.parseOutline({value.stream, value.range});
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileBorderRadius(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    const auto parsed = model.parseBorderRadius(value);
+    const auto parsed = model.parseBorderRadius({value.stream, value.range});
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileOutlineOffset(detail::StyleCompileContext& context) {
-    if (endsWith(lower(trim(context.value)), "%")) return context.invalid();
+    if (endsWith(context.keyword(), "%")) return context.invalid();
     const auto parsed = context.length();
     return parsed && parsed->percent == 0.f ? context.compiled(*parsed) : context.invalid();
 }
 
-bool isEscaped(std::string_view value, std::size_t position) {
-    std::size_t backslashes = 0;
-    while (position > 0 && value[position - 1] == '\\') {
-        --position;
-        ++backslashes;
+std::optional<std::string> parseCSSUrl(detail::CSSValueRange value);
+std::optional<BackgroundLayer> parseBackgroundImage(const StyleModel& model, detail::CSSValueRange value);
+template<typename Parse> std::optional<std::vector<BackgroundLayer>> parseBackgroundLayerList(detail::CSSValueRange value, Parse parse);
+
+std::optional<std::string> parseCSSUrl(detail::CSSValueRange value) {
+    value.range = detail::trimCSSRange(value.stream, value.range);
+    const auto& tokens = value.stream.tokens();
+    std::vector<std::size_t> significant;
+    for (std::size_t index = value.range.begin; index < value.range.end; ++index)
+        if (!detail::isCSSTrivia(tokens[index].kind)) significant.push_back(index);
+    if (significant.size() == 1 && tokens[significant.front()].kind == detail::CSSTokenKind::Url) {
+        const std::string_view token = value.stream.text(significant.front());
+        const std::size_t open = token.find('(');
+        if (open == std::string_view::npos || token.empty() || token.back() != ')') return std::nullopt;
+        const std::string decoded = detail::decodeCSSIdentifier(trim(std::string(token.substr(open + 1, token.size() - open - 2))));
+        return decoded.empty() ? std::nullopt : std::optional<std::string>(decoded);
     }
-    return (backslashes & 1U) != 0;
+    if (significant.size() != 3
+        || tokens[significant[0]].kind != detail::CSSTokenKind::Function
+        || tokens[significant[2]].kind != detail::CSSTokenKind::CloseParen)
+        return std::nullopt;
+    const auto function = detail::parseCSSFunction(value.stream, value.range);
+    if (!function
+        || function->name != "url"
+        || tokens[significant[0]].matching != significant[2]
+        || tokens[significant[1]].kind != detail::CSSTokenKind::String)
+        return std::nullopt;
+    const std::optional<std::string> decoded = detail::decodeCSSString(value.stream.text(significant[1]));
+    return decoded && !decoded->empty() ? decoded : std::nullopt;
 }
 
-bool isValidUnquotedCSSUrl(std::string_view value) {
-    const auto isHexDigit = [](char character) {
-        const auto code = static_cast<unsigned char>(character);
-        return (code >= '0' && code <= '9') || (code >= 'a' && code <= 'f') || (code >= 'A' && code <= 'F');
-    };
-
-    for (std::size_t position = 0; position < value.size();) {
-        if (value[position] == '\\') {
-            ++position;
-            if (position == value.size()) return false;
-            if (value[position] == '\r') {
-                ++position;
-                if (position < value.size() && value[position] == '\n') ++position;
-                continue;
-            }
-            if (value[position] == '\n' || value[position] == '\f') {
-                ++position;
-                continue;
-            }
-            if (isHexDigit(value[position])) {
-                std::size_t digits = 0;
-                while (position < value.size() && digits < 6 && isHexDigit(value[position])) {
-                    ++position;
-                    ++digits;
-                }
-                if (position < value.size() && detail::isCSSWhitespace(value[position])) ++position;
-            } else ++position;
-            continue;
-        }
-        if (detail::isCSSWhitespace(value[position])
-            || value[position] == '\''
-            || value[position] == '"'
-            || value[position] == '('
-            || value[position] == ')')
-            return false;
-        ++position;
-    }
-    return true;
-}
-
-std::optional<std::string> parseCSSUrl(const std::string& raw) {
-    const std::string value = trim(raw);
-    const std::string lowered = lower(value);
-    if (!startsWith(lowered, "url(") || value.size() < 5 || value.back() != ')') return std::nullopt;
-    std::string url = trim(value.substr(4, value.size() - 5));
-    if (url.size() >= 2 && (url.front() == '\'' || url.front() == '"')) {
-        const char quote = url.front();
-        std::size_t closing = 1;
-        for (; closing < url.size(); ++closing)
-            if (url[closing] == quote && !isEscaped(url, closing)) break;
-        if (closing == url.size() || !trim(url.substr(closing + 1)).empty()) return std::nullopt;
-        url = url.substr(1, closing - 1);
-    } else if (!isValidUnquotedCSSUrl(url)) return std::nullopt;
-    url = detail::decodeCSSIdentifier(url);
-    return url.empty() ? std::nullopt : std::optional<std::string>(std::move(url));
-}
-
-std::optional<BackgroundLayer> parseBackgroundImage(const StyleModel& model, const std::string& raw) {
-    const std::string value = trim(raw);
+std::optional<BackgroundLayer> parseBackgroundImage(const StyleModel& model, detail::CSSValueRange value) {
     BackgroundLayer layer;
-    if (lower(value) == "none") return layer;
+    if (normalizeCSSKeyword(value.stream, value.range) == "none") return layer;
     if (const std::optional<std::string> url = parseCSSUrl(value)) {
         layer.resource = *url;
         return layer;
@@ -440,74 +398,93 @@ std::optional<BackgroundLayer> parseBackgroundImage(const StyleModel& model, con
     return std::nullopt;
 }
 
-template<typename Parse> std::optional<std::vector<BackgroundLayer>> parseBackgroundLayerList(const std::string& raw, Parse parse) {
-    const std::vector<std::string> values = detail::splitTopLevel(raw, ',');
+template<typename Parse> std::optional<std::vector<BackgroundLayer>> parseBackgroundLayerList(detail::CSSValueRange value, Parse parse) {
+    const std::vector<detail::CSSTokenRange> values = detail::splitCSSOnDelimiter(value.stream, value.range, ',');
     if (values.empty()) return std::nullopt;
     std::vector<BackgroundLayer> result;
     result.reserve(values.size());
-    for (const std::string& value : values) {
-        const std::optional<BackgroundLayer> layer = parse(value);
+    for (const detail::CSSTokenRange range : values) {
+        const std::optional<BackgroundLayer> layer = parse({value.stream, range});
         if (!layer) return std::nullopt;
         result.push_back(*layer);
     }
     return result;
 }
 
-std::optional<std::vector<BackgroundLayer>> parseBackgroundImages(const StyleModel& model, const std::string& raw) {
-    return parseBackgroundLayerList(raw, [&model](const std::string& value) { return parseBackgroundImage(model, value); });
+std::optional<std::vector<BackgroundLayer>> parseBackgroundImages(const StyleModel& model, detail::CSSValueRange value) {
+    return parseBackgroundLayerList(value, [&model](detail::CSSValueRange range) { return parseBackgroundImage(model, range); });
 }
 
-std::optional<Length> parsePositionHorizontal(const StyleModel& model, const std::string& raw) {
-    const std::string value = lower(trim(raw));
-    if (value == "left") return Length{0.f};
-    if (value == "center") return Length{0.f, .5f};
-    if (value == "right") return Length{0.f, 1.f};
-    return model.parseLengthValue(raw);
+std::optional<Length> parsePositionHorizontal(const StyleModel& model, detail::CSSValueRange value);
+std::optional<Length> parsePositionVertical(const StyleModel& model, detail::CSSValueRange value);
+std::optional<BackgroundPosition> parseBackgroundPosition(const StyleModel& model, detail::CSSValueRange value);
+std::optional<std::vector<BackgroundLayer>> parseBackgroundPositions(const StyleModel& model, detail::CSSValueRange value);
+std::optional<BackgroundSize> parseBackgroundSize(const StyleModel& model, detail::CSSValueRange value);
+std::optional<std::vector<BackgroundLayer>> parseBackgroundSizes(const StyleModel& model, detail::CSSValueRange value);
+std::optional<BackgroundRepeat> parseBackgroundRepeat(detail::CSSValueRange value);
+std::optional<std::vector<BackgroundLayer>> parseBackgroundRepeats(detail::CSSValueRange value);
+std::optional<BackgroundBox> parseBackgroundBox(detail::CSSValueRange value);
+std::optional<std::vector<BackgroundLayer>> parseBackgroundBoxes(detail::CSSValueRange value);
+std::optional<std::vector<BackgroundLayer>> parseBackgroundAttachments(detail::CSSValueRange value);
+std::optional<BackgroundAttachment> parseBackgroundAttachment(detail::CSSValueRange value);
+
+std::optional<Length> parsePositionHorizontal(const StyleModel& model, detail::CSSValueRange value) {
+    const std::string token = normalizeCSSKeyword(value.stream, value.range);
+    if (token == "left") return Length{0.f};
+    if (token == "center") return Length{0.f, .5f};
+    if (token == "right") return Length{0.f, 1.f};
+    return model.parseLengthValue(value);
 }
 
-std::optional<Length> parsePositionVertical(const StyleModel& model, const std::string& raw) {
-    const std::string value = lower(trim(raw));
-    if (value == "bottom") return Length{0.f};
-    if (value == "center") return Length{0.f, .5f};
-    if (value == "top") return Length{0.f, 1.f};
-    const std::optional<Length> length = model.parseLengthValue(raw);
+std::optional<Length> parsePositionVertical(const StyleModel& model, detail::CSSValueRange value) {
+    const std::string token = normalizeCSSKeyword(value.stream, value.range);
+    if (token == "bottom") return Length{0.f};
+    if (token == "center") return Length{0.f, .5f};
+    if (token == "top") return Length{0.f, 1.f};
+    const std::optional<Length> length = model.parseLengthValue(value);
     if (!length) return std::nullopt;
     return Length{-length->pixels, 1.f - length->percent};
 }
 
-bool isPositionToken(const std::string& raw) {
-    const std::string value = lower(trim(raw));
-    return value == "left"
-        || value == "right"
-        || value == "top"
-        || value == "bottom"
-        || value == "center"
-        || endsWith(value, "px")
-        || (!value.empty() && (value.back() == '%' || value.find_first_of("0123456789.-") == 0));
+bool isPositionToken(detail::CSSValueRange value) {
+    const std::string token = normalizeCSSKeyword(value.stream, value.range);
+    const auto dimension = detail::parseCSSDimension(value.stream, value.range);
+    const auto& tokens = value.stream.tokens();
+    const detail::CSSTokenRange trimmed = detail::trimCSSRange(value.stream, value.range);
+    const bool scalar = trimmed.end == trimmed.begin + 1
+        && trimmed.begin < tokens.size()
+        && (tokens[trimmed.begin].kind == detail::CSSTokenKind::Number || tokens[trimmed.begin].kind == detail::CSSTokenKind::Percentage);
+    return token == "left"
+        || token == "right"
+        || token == "top"
+        || token == "bottom"
+        || token == "center"
+        || (dimension && dimension->unit == "px")
+        || scalar;
 }
 
-std::optional<BackgroundPosition> parseBackgroundPosition(const StyleModel& model, const std::string& raw) {
-    const std::vector<std::string> tokens = detail::tokenizeTopLevel(raw);
+std::optional<BackgroundPosition> parseBackgroundPosition(const StyleModel& model, detail::CSSValueRange value) {
+    const std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, value.range);
     if (tokens.empty() || tokens.size() > 2) return std::nullopt;
     if (tokens.size() == 1) {
-        const std::string value = lower(trim(tokens.front()));
-        if (value == "top" || value == "bottom") return BackgroundPosition{{0.f, .5f}, *parsePositionVertical(model, value)};
-        const std::optional<Length> x = parsePositionHorizontal(model, tokens.front());
+        const std::string token = normalizeCSSKeyword(value.stream, tokens.front());
+        if (token == "top" || token == "bottom") return BackgroundPosition{{0.f, .5f}, *parsePositionVertical(model, {value.stream, tokens.front()})};
+        const std::optional<Length> x = parsePositionHorizontal(model, {value.stream, tokens.front()});
         return x ? std::optional<BackgroundPosition>(BackgroundPosition{*x, {0.f, .5f}}) : std::nullopt;
     }
 
-    std::optional<Length> x = parsePositionHorizontal(model, tokens[0]);
-    std::optional<Length> y = parsePositionVertical(model, tokens[1]);
+    std::optional<Length> x = parsePositionHorizontal(model, {value.stream, tokens[0]});
+    std::optional<Length> y = parsePositionVertical(model, {value.stream, tokens[1]});
     if (!x || !y) {
-        x = parsePositionHorizontal(model, tokens[1]);
-        y = parsePositionVertical(model, tokens[0]);
+        x = parsePositionHorizontal(model, {value.stream, tokens[1]});
+        y = parsePositionVertical(model, {value.stream, tokens[0]});
     }
     return x && y ? std::optional<BackgroundPosition>(BackgroundPosition{*x, *y}) : std::nullopt;
 }
 
-std::optional<std::vector<BackgroundLayer>> parseBackgroundPositions(const StyleModel& model, const std::string& raw) {
-    return parseBackgroundLayerList(raw, [&model](const std::string& value) -> std::optional<BackgroundLayer> {
-        const std::optional<BackgroundPosition> position = parseBackgroundPosition(model, value);
+std::optional<std::vector<BackgroundLayer>> parseBackgroundPositions(const StyleModel& model, detail::CSSValueRange value) {
+    return parseBackgroundLayerList(value, [&model](detail::CSSValueRange range) -> std::optional<BackgroundLayer> {
+        const std::optional<BackgroundPosition> position = parseBackgroundPosition(model, range);
         if (!position) return std::nullopt;
         BackgroundLayer layer;
         layer.position = *position;
@@ -515,30 +492,32 @@ std::optional<std::vector<BackgroundLayer>> parseBackgroundPositions(const Style
     });
 }
 
-std::optional<BackgroundSize> parseBackgroundSize(const StyleModel& model, const std::string& raw) {
-    const std::vector<std::string> tokens = detail::tokenizeTopLevel(raw);
+std::optional<BackgroundSize> parseBackgroundSize(const StyleModel& model, detail::CSSValueRange value) {
+    const std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, value.range);
     if (tokens.size() == 1) {
-        const std::string value = lower(trim(tokens.front()));
-        if (value == "cover") return BackgroundSize{BackgroundSizeMode::Cover};
-        if (value == "contain") return BackgroundSize{BackgroundSizeMode::Contain};
-        if (value == "auto") return BackgroundSize{};
+        const std::string token = normalizeCSSKeyword(value.stream, tokens.front());
+        if (token == "cover") return BackgroundSize{BackgroundSizeMode::Cover};
+        if (token == "contain") return BackgroundSize{BackgroundSizeMode::Contain};
+        if (token == "auto") return BackgroundSize{};
     }
     if (tokens.empty() || tokens.size() > 2) return std::nullopt;
-    if (tokens.size() == 2 && lower(trim(tokens[0])) == "auto" && lower(trim(tokens[1])) == "auto") return BackgroundSize{};
-    const auto parse = [&model](const std::string& value) -> std::optional<Length> {
-        if (lower(trim(value)) == "auto") return std::optional<Length>{};
-        const std::optional<Length> length = model.parseLengthValue(value);
+    if (tokens.size() == 2 && normalizeCSSKeyword(value.stream, tokens[0]) == "auto" && normalizeCSSKeyword(value.stream, tokens[1]) == "auto")
+        return BackgroundSize{};
+    const auto parse = [&model, &value](detail::CSSTokenRange token) -> std::optional<Length> {
+        if (normalizeCSSKeyword(value.stream, token) == "auto") return std::optional<Length>{};
+        const std::optional<Length> length = model.parseLengthValue({value.stream, token});
         return length && length->pixels >= 0.f && length->percent >= 0.f ? length : std::nullopt;
     };
     const std::optional<Length> width = parse(tokens[0]);
-    const std::optional<Length> height = parse(tokens.size() == 1 ? "auto" : tokens[1]);
-    if ((!width && lower(trim(tokens[0])) != "auto") || (!height && tokens.size() == 2 && lower(trim(tokens[1])) != "auto")) return std::nullopt;
+    const bool heightAuto = tokens.size() == 1 || normalizeCSSKeyword(value.stream, tokens[1]) == "auto";
+    const std::optional<Length> height = tokens.size() == 1 ? std::optional<Length>{} : parse(tokens[1]);
+    if ((!width && normalizeCSSKeyword(value.stream, tokens[0]) != "auto") || (!height && !heightAuto)) return std::nullopt;
     return BackgroundSize{BackgroundSizeMode::Explicit, width, height};
 }
 
-std::optional<std::vector<BackgroundLayer>> parseBackgroundSizes(const StyleModel& model, const std::string& raw) {
-    return parseBackgroundLayerList(raw, [&model](const std::string& value) -> std::optional<BackgroundLayer> {
-        const std::optional<BackgroundSize> size = parseBackgroundSize(model, value);
+std::optional<std::vector<BackgroundLayer>> parseBackgroundSizes(const StyleModel& model, detail::CSSValueRange value) {
+    return parseBackgroundLayerList(value, [&model](detail::CSSValueRange range) -> std::optional<BackgroundLayer> {
+        const std::optional<BackgroundSize> size = parseBackgroundSize(model, range);
         if (!size) return std::nullopt;
         BackgroundLayer layer;
         layer.size = *size;
@@ -546,23 +525,25 @@ std::optional<std::vector<BackgroundLayer>> parseBackgroundSizes(const StyleMode
     });
 }
 
-std::optional<BackgroundRepeat> parseBackgroundRepeat(const std::string& raw) {
-    const std::vector<std::string> tokens = detail::tokenizeTopLevel(raw);
+std::optional<BackgroundRepeat> parseBackgroundRepeat(detail::CSSValueRange value) {
+    const std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, value.range);
     if (tokens.size() == 1) {
-        const std::string value = lower(trim(tokens.front()));
-        if (value == "repeat") return BackgroundRepeat::Repeat;
-        if (value == "no-repeat") return BackgroundRepeat::NoRepeat;
-        if (value == "repeat-x") return BackgroundRepeat::RepeatX;
-        if (value == "repeat-y") return BackgroundRepeat::RepeatY;
+        const std::string token = normalizeCSSKeyword(value.stream, tokens.front());
+        if (token == "repeat") return BackgroundRepeat::Repeat;
+        if (token == "no-repeat") return BackgroundRepeat::NoRepeat;
+        if (token == "repeat-x") return BackgroundRepeat::RepeatX;
+        if (token == "repeat-y") return BackgroundRepeat::RepeatY;
     }
-    if (tokens.size() == 2 && lower(trim(tokens[0])) == "repeat" && lower(trim(tokens[1])) == "no-repeat") return BackgroundRepeat::RepeatX;
-    if (tokens.size() == 2 && lower(trim(tokens[0])) == "no-repeat" && lower(trim(tokens[1])) == "repeat") return BackgroundRepeat::RepeatY;
+    if (tokens.size() == 2 && normalizeCSSKeyword(value.stream, tokens[0]) == "repeat" && normalizeCSSKeyword(value.stream, tokens[1]) == "no-repeat")
+        return BackgroundRepeat::RepeatX;
+    if (tokens.size() == 2 && normalizeCSSKeyword(value.stream, tokens[0]) == "no-repeat" && normalizeCSSKeyword(value.stream, tokens[1]) == "repeat")
+        return BackgroundRepeat::RepeatY;
     return std::nullopt;
 }
 
-std::optional<std::vector<BackgroundLayer>> parseBackgroundRepeats(const std::string& raw) {
-    return parseBackgroundLayerList(raw, [](const std::string& value) -> std::optional<BackgroundLayer> {
-        const std::optional<BackgroundRepeat> repeat = parseBackgroundRepeat(value);
+std::optional<std::vector<BackgroundLayer>> parseBackgroundRepeats(detail::CSSValueRange value) {
+    return parseBackgroundLayerList(value, [](detail::CSSValueRange range) -> std::optional<BackgroundLayer> {
+        const std::optional<BackgroundRepeat> repeat = parseBackgroundRepeat(range);
         if (!repeat) return std::nullopt;
         BackgroundLayer layer;
         layer.repeat = *repeat;
@@ -570,17 +551,17 @@ std::optional<std::vector<BackgroundLayer>> parseBackgroundRepeats(const std::st
     });
 }
 
-std::optional<BackgroundBox> parseBackgroundBox(const std::string& raw) {
-    const std::string value = lower(trim(raw));
-    if (value == "border-box") return BackgroundBox::BorderBox;
-    if (value == "padding-box") return BackgroundBox::PaddingBox;
-    if (value == "content-box") return BackgroundBox::ContentBox;
+std::optional<BackgroundBox> parseBackgroundBox(detail::CSSValueRange value) {
+    const std::string token = normalizeCSSKeyword(value.stream, value.range);
+    if (token == "border-box") return BackgroundBox::BorderBox;
+    if (token == "padding-box") return BackgroundBox::PaddingBox;
+    if (token == "content-box") return BackgroundBox::ContentBox;
     return std::nullopt;
 }
 
-std::optional<std::vector<BackgroundLayer>> parseBackgroundBoxes(const std::string& raw) {
-    return parseBackgroundLayerList(raw, [](const std::string& value) -> std::optional<BackgroundLayer> {
-        const std::optional<BackgroundBox> box = parseBackgroundBox(value);
+std::optional<std::vector<BackgroundLayer>> parseBackgroundBoxes(detail::CSSValueRange value) {
+    return parseBackgroundLayerList(value, [](detail::CSSValueRange range) -> std::optional<BackgroundLayer> {
+        const std::optional<BackgroundBox> box = parseBackgroundBox(range);
         if (!box) return std::nullopt;
         BackgroundLayer layer;
         layer.origin = *box;
@@ -589,9 +570,9 @@ std::optional<std::vector<BackgroundLayer>> parseBackgroundBoxes(const std::stri
     });
 }
 
-std::optional<std::vector<BackgroundLayer>> parseBackgroundAttachments(const std::string& raw) {
-    return parseBackgroundLayerList(raw, [](const std::string& value) -> std::optional<BackgroundLayer> {
-        const std::string token = lower(trim(value));
+std::optional<std::vector<BackgroundLayer>> parseBackgroundAttachments(detail::CSSValueRange value) {
+    return parseBackgroundLayerList(value, [](detail::CSSValueRange range) -> std::optional<BackgroundLayer> {
+        const std::string token = normalizeCSSKeyword(range.stream, range.range);
         BackgroundLayer layer;
         if (token == "scroll") layer.attachment = BackgroundAttachment::Scroll;
         else if (token == "fixed") layer.attachment = BackgroundAttachment::Fixed;
@@ -601,8 +582,8 @@ std::optional<std::vector<BackgroundLayer>> parseBackgroundAttachments(const std
     });
 }
 
-std::optional<BackgroundAttachment> parseBackgroundAttachment(const std::string& raw) {
-    const std::string token = lower(trim(raw));
+std::optional<BackgroundAttachment> parseBackgroundAttachment(detail::CSSValueRange value) {
+    const std::string token = normalizeCSSKeyword(value.stream, value.range);
     if (token == "scroll") return BackgroundAttachment::Scroll;
     if (token == "fixed") return BackgroundAttachment::Fixed;
     if (token == "local") return BackgroundAttachment::Local;
@@ -688,39 +669,39 @@ std::vector<MaskLayer> makeMaskLayers(const std::vector<BackgroundLayer>& images
     return result;
 }
 
-std::optional<std::vector<MaskLayer>> parseMaskImages(const StyleModel& model, const std::string& raw) {
+std::optional<std::vector<MaskLayer>> parseMaskImages(const StyleModel& model, detail::CSSValueRange value) {
     const std::optional<std::vector<BackgroundLayer>> images =
-        parseBackgroundLayerList(raw, [&model](const std::string& value) { return parseBackgroundImage(model, value); });
+        parseBackgroundLayerList(value, [&model](detail::CSSValueRange range) { return parseBackgroundImage(model, range); });
     if (!images) return std::nullopt;
     return makeMaskLayers(*images);
 }
 
 CompileResult compileBackgroundImage(detail::StyleCompileContext& context) {
-    const auto parsed = parseBackgroundImages(context.model, context.value);
+    const auto parsed = parseBackgroundImages(context.model, {context.value.stream, context.value.range});
     if (!parsed) return context.invalid();
     return context.compiled(StyleImageLayers{*parsed, StyleImageComponent::Image});
 }
 
 CompileResult compileBackgroundPosition(detail::StyleCompileContext& context) {
-    const auto parsed = parseBackgroundPositions(context.model, context.value);
+    const auto parsed = parseBackgroundPositions(context.model, {context.value.stream, context.value.range});
     if (!parsed) return context.invalid();
     return context.compiled(StyleImageLayers{*parsed, StyleImageComponent::Position});
 }
 
 CompileResult compileBackgroundSize(detail::StyleCompileContext& context) {
-    const auto parsed = parseBackgroundSizes(context.model, context.value);
+    const auto parsed = parseBackgroundSizes(context.model, {context.value.stream, context.value.range});
     if (!parsed) return context.invalid();
     return context.compiled(StyleImageLayers{*parsed, StyleImageComponent::Size});
 }
 
 CompileResult compileBackgroundRepeat(detail::StyleCompileContext& context) {
-    const auto parsed = parseBackgroundRepeats(context.value);
+    const auto parsed = parseBackgroundRepeats({context.value.stream, context.value.range});
     if (!parsed) return context.invalid();
     return context.compiled(StyleImageLayers{*parsed, StyleImageComponent::Repeat});
 }
 
 CompileResult compileBackgroundBox(detail::StyleCompileContext& context, StyleImageComponent component) {
-    const auto parsed = parseBackgroundBoxes(context.value);
+    const auto parsed = parseBackgroundBoxes({context.value.stream, context.value.range});
     if (!parsed) return context.invalid();
     return context.compiled(StyleImageLayers{*parsed, component});
 }
@@ -734,37 +715,37 @@ CompileResult compileBackgroundClip(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileBackgroundAttachment(detail::StyleCompileContext& context) {
-    const auto parsed = parseBackgroundAttachments(context.value);
+    const auto parsed = parseBackgroundAttachments({context.value.stream, context.value.range});
     if (!parsed) return context.invalid();
     return context.compiled(StyleImageLayers{*parsed, StyleImageComponent::Attachment});
 }
 
 CompileResult compileMaskImage(detail::StyleCompileContext& context) {
-    const auto parsed = parseMaskImages(context.model, context.value);
+    const auto parsed = parseMaskImages(context.model, {context.value.stream, context.value.range});
     if (!parsed) return context.invalid();
     return context.compiled(StyleMaskLayers{*parsed, StyleImageComponent::Image});
 }
 
 CompileResult compileMaskPosition(detail::StyleCompileContext& context) {
-    const auto parsed = parseBackgroundPositions(context.model, context.value);
+    const auto parsed = parseBackgroundPositions(context.model, {context.value.stream, context.value.range});
     if (!parsed) return context.invalid();
     return context.compiled(StyleMaskLayers{makeMaskLayers(*parsed), StyleImageComponent::Position});
 }
 
 CompileResult compileMaskSize(detail::StyleCompileContext& context) {
-    const auto parsed = parseBackgroundSizes(context.model, context.value);
+    const auto parsed = parseBackgroundSizes(context.model, {context.value.stream, context.value.range});
     if (!parsed) return context.invalid();
     return context.compiled(StyleMaskLayers{makeMaskLayers(*parsed), StyleImageComponent::Size});
 }
 
 CompileResult compileMaskRepeat(detail::StyleCompileContext& context) {
-    const auto parsed = parseBackgroundRepeats(context.value);
+    const auto parsed = parseBackgroundRepeats({context.value.stream, context.value.range});
     if (!parsed) return context.invalid();
     return context.compiled(StyleMaskLayers{makeMaskLayers(*parsed), StyleImageComponent::Repeat});
 }
 
 CompileResult compileMaskBox(detail::StyleCompileContext& context, StyleImageComponent component) {
-    const auto parsed = parseBackgroundBoxes(context.value);
+    const auto parsed = parseBackgroundBoxes({context.value.stream, context.value.range});
     if (!parsed) return context.invalid();
     return context.compiled(StyleMaskLayers{makeMaskLayers(*parsed), component});
 }
@@ -777,16 +758,16 @@ CompileResult compileMaskClip(detail::StyleCompileContext& context) {
     return compileMaskBox(context, StyleImageComponent::Clip);
 }
 
-std::optional<MaskMode> parseMaskMode(const std::string& raw) {
-    const std::string token = lower(trim(raw));
+std::optional<MaskMode> parseMaskMode(detail::CSSValueRange value) {
+    const std::string token = normalizeCSSKeyword(value.stream, value.range);
     if (token == "match-source") return MaskMode::MatchSource;
     if (token == "alpha") return MaskMode::Alpha;
     if (token == "luminance") return MaskMode::Luminance;
     return std::nullopt;
 }
 
-std::optional<MaskComposite> parseMaskComposite(const std::string& raw) {
-    const std::string token = lower(trim(raw));
+std::optional<MaskComposite> parseMaskComposite(detail::CSSValueRange value) {
+    const std::string token = normalizeCSSKeyword(value.stream, value.range);
     if (token == "add") return MaskComposite::Add;
     if (token == "subtract") return MaskComposite::Subtract;
     if (token == "intersect") return MaskComposite::Intersect;
@@ -794,22 +775,22 @@ std::optional<MaskComposite> parseMaskComposite(const std::string& raw) {
     return std::nullopt;
 }
 
-std::optional<MaskType> parseMaskType(const std::string& raw) {
-    const std::string token = lower(trim(raw));
+std::optional<MaskType> parseMaskType(detail::CSSValueRange value) {
+    const std::string token = normalizeCSSKeyword(value.stream, value.range);
     if (token == "luminance") return MaskType::Luminance;
     if (token == "alpha") return MaskType::Alpha;
     return std::nullopt;
 }
 
 template<typename Enum> CompileResult compileMaskEnum(detail::StyleCompileContext& context, StyleImageComponent component,
-                                                      std::optional<Enum> (*parse)(const std::string&), Enum MaskLayer::* member) {
-    const std::vector<std::string> values = detail::splitTopLevel(context.value, ',');
+                                                      std::optional<Enum> (*parse)(detail::CSSValueRange), Enum MaskLayer::* member) {
+    const std::vector<detail::CSSTokenRange> values = context.commaSeparatedRanges();
     if (values.empty()) return context.invalid();
     std::vector<MaskLayer> layers;
     layers.reserve(values.size());
-    for (const std::string& value : values) {
+    for (const detail::CSSTokenRange range : values) {
         MaskLayer layer;
-        const std::optional<Enum> parsed = parse(value);
+        const std::optional<Enum> parsed = parse({context.value.stream, range});
         if (!parsed) return context.invalid();
         layer.*member = *parsed;
         layers.push_back(std::move(layer));
@@ -832,30 +813,33 @@ CompileResult compileMaskType(detail::StyleCompileContext& context) {
 struct ParsedImageLayer {
     BackgroundLayer image;
     std::vector<BackgroundBox> boxes;
-    std::vector<std::string> extras;
+    std::vector<detail::CSSTokenRange> extras;
     bool repeatSpecified = false;
     bool attachmentSpecified = false;
 };
 
-std::optional<ParsedImageLayer> parseImageLayer(const StyleModel& model, const std::string& raw) {
-    const std::vector<std::string> tokens = detail::tokenizeTopLevel(raw, true);
+std::optional<ParsedImageLayer> parseImageLayer(const StyleModel& model, detail::CSSValueRange value);
+
+std::optional<ParsedImageLayer> parseImageLayer(const StyleModel& model, detail::CSSValueRange value) {
+    const std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, value.range, true);
     if (tokens.empty()) return std::nullopt;
 
     ParsedImageLayer result;
-    std::vector<std::string> positions;
-    std::vector<std::string> sizes;
+    std::vector<detail::CSSTokenRange> positions;
+    std::vector<detail::CSSTokenRange> sizes;
     bool afterSlash = false;
     bool sawImage = false;
     for (std::size_t index = 0; index < tokens.size(); ++index) {
-        const std::string& token = tokens[index];
+        const std::string token = normalizeCSSKeyword(value.stream, tokens[index]);
         const auto parseRepeat = [&]() -> std::optional<BackgroundRepeat> {
-            if (index + 1 < tokens.size() && tokens[index + 1] != "/") {
-                if (const std::optional<BackgroundRepeat> repeat = parseBackgroundRepeat(token + " " + tokens[index + 1])) {
+            if (index + 1 < tokens.size() && normalizeCSSKeyword(value.stream, tokens[index + 1]) != "/") {
+                const detail::CSSTokenRange combined{tokens[index].begin, tokens[index + 1].end};
+                if (const std::optional<BackgroundRepeat> repeat = parseBackgroundRepeat({value.stream, combined})) {
                     ++index;
                     return repeat;
                 }
             }
-            return parseBackgroundRepeat(token);
+            return parseBackgroundRepeat({value.stream, tokens[index]});
         };
         if (token == "/") {
             if (afterSlash) return std::nullopt;
@@ -865,14 +849,14 @@ std::optional<ParsedImageLayer> parseImageLayer(const StyleModel& model, const s
                 if (result.repeatSpecified) return std::nullopt;
                 result.image.repeat = *repeat;
                 result.repeatSpecified = true;
-            } else if (const std::optional<BackgroundBox> box = parseBackgroundBox(token)) result.boxes.push_back(*box);
-            else if (const std::optional<BackgroundAttachment> attachment = parseBackgroundAttachment(token)) {
+            } else if (const std::optional<BackgroundBox> box = parseBackgroundBox({value.stream, tokens[index]})) result.boxes.push_back(*box);
+            else if (const std::optional<BackgroundAttachment> attachment = parseBackgroundAttachment({value.stream, tokens[index]})) {
                 if (result.attachmentSpecified) return std::nullopt;
                 result.image.attachment = *attachment;
                 result.attachmentSpecified = true;
-            } else if (parseBackgroundSize(model, token)) sizes.push_back(token);
-            else result.extras.push_back(token);
-        } else if (const std::optional<BackgroundLayer> image = parseBackgroundImage(model, token)) {
+            } else if (parseBackgroundSize(model, {value.stream, tokens[index]})) sizes.push_back(tokens[index]);
+            else result.extras.push_back(tokens[index]);
+        } else if (const std::optional<BackgroundLayer> image = parseBackgroundImage(model, {value.stream, tokens[index]})) {
             if (sawImage) return std::nullopt;
             result.image.resource = image->resource;
             result.image.gradient = image->gradient;
@@ -881,23 +865,24 @@ std::optional<ParsedImageLayer> parseImageLayer(const StyleModel& model, const s
             if (result.repeatSpecified) return std::nullopt;
             result.image.repeat = *repeat;
             result.repeatSpecified = true;
-        } else if (const std::optional<BackgroundBox> box = parseBackgroundBox(token)) result.boxes.push_back(*box);
-        else if (const std::optional<BackgroundAttachment> attachment = parseBackgroundAttachment(token)) {
+        } else if (const std::optional<BackgroundBox> box = parseBackgroundBox({value.stream, tokens[index]})) result.boxes.push_back(*box);
+        else if (const std::optional<BackgroundAttachment> attachment = parseBackgroundAttachment({value.stream, tokens[index]})) {
             if (result.attachmentSpecified) return std::nullopt;
             result.image.attachment = *attachment;
             result.attachmentSpecified = true;
-        } else if (isPositionToken(token)) positions.push_back(token);
-        else result.extras.push_back(token);
+        } else if (isPositionToken(detail::CSSValueRange{value.stream, tokens[index]})) positions.push_back(tokens[index]);
+        else result.extras.push_back(tokens[index]);
     }
     if (positions.size() > 2 || sizes.size() > 2 || (afterSlash && sizes.empty())) return std::nullopt;
     if (!positions.empty()) {
-        const std::optional<BackgroundPosition> position =
-            parseBackgroundPosition(model, positions[0] + (positions.size() > 1 ? " " + positions[1] : ""));
+        const detail::CSSTokenRange positionRange = positions.size() > 1 ? detail::CSSTokenRange{positions[0].begin, positions[1].end} : positions[0];
+        const std::optional<BackgroundPosition> position = parseBackgroundPosition(model, {value.stream, positionRange});
         if (!position) return std::nullopt;
         result.image.position = *position;
     }
     if (!sizes.empty()) {
-        const std::optional<BackgroundSize> size = parseBackgroundSize(model, sizes[0] + (sizes.size() > 1 ? " " + sizes[1] : ""));
+        const detail::CSSTokenRange sizeRange = sizes.size() > 1 ? detail::CSSTokenRange{sizes[0].begin, sizes[1].end} : sizes[0];
+        const std::optional<BackgroundSize> size = parseBackgroundSize(model, {value.stream, sizeRange});
         if (!size) return std::nullopt;
         result.image.size = *size;
     }
@@ -918,20 +903,21 @@ bool applyImageBoxes(BackgroundLayer& image, const std::vector<BackgroundBox>& b
 }
 
 CompileResult compileBackground(detail::StyleCompileContext& context) {
-    const std::vector<std::string> layers = detail::splitTopLevel(context.value, ',');
+    const std::vector<detail::CSSTokenRange> layers = context.commaSeparatedRanges();
     if (layers.empty()) return context.invalid();
     std::vector<BackgroundLayer> parsed;
     std::optional<StyleColorValue> color;
     bool currentColor = false;
     for (std::size_t layerIndex = 0; layerIndex < layers.size(); ++layerIndex) {
-        std::optional<ParsedImageLayer> parsedLayer = parseImageLayer(context.model, layers[layerIndex]);
+        std::optional<ParsedImageLayer> parsedLayer = parseImageLayer(context.model, {context.value.stream, layers[layerIndex]});
         if (!parsedLayer || !applyImageBoxes(parsedLayer->image, parsedLayer->boxes, BackgroundBox::PaddingBox, BackgroundBox::BorderBox))
             return context.invalid();
-        for (const std::string& token : parsedLayer->extras) {
-            if (const std::optional<StyleColorValue> parsedColor = context.colorValue(token)) {
+        for (const detail::CSSTokenRange token : parsedLayer->extras) {
+            const detail::CSSValueRange value{context.value.stream, token};
+            if (const std::optional<StyleColorValue> parsedColor = context.colorValue(value)) {
                 if (layerIndex + 1 != layers.size() || color) return context.invalid();
                 color = *parsedColor;
-            } else if (lower(trim(token)) == "currentcolor") {
+            } else if (normalizeCSSKeyword(value.stream, value.range) == "currentcolor") {
                 if (layerIndex + 1 != layers.size() || color || currentColor) return context.invalid();
                 currentColor = true;
             } else return context.invalid();
@@ -961,11 +947,11 @@ CompileResult compileBackground(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileMask(detail::StyleCompileContext& context) {
-    const std::vector<std::string> layers = detail::splitTopLevel(context.value, ',');
+    const std::vector<detail::CSSTokenRange> layers = context.commaSeparatedRanges();
     if (layers.empty()) return context.invalid();
     std::vector<MaskLayer> parsed;
-    for (const std::string& rawLayer : layers) {
-        std::optional<ParsedImageLayer> parsedLayer = parseImageLayer(context.model, rawLayer);
+    for (const detail::CSSTokenRange rawLayer : layers) {
+        std::optional<ParsedImageLayer> parsedLayer = parseImageLayer(context.model, {context.value.stream, rawLayer});
         if (!parsedLayer
             || parsedLayer->attachmentSpecified
             || !applyImageBoxes(parsedLayer->image, parsedLayer->boxes, BackgroundBox::BorderBox, BackgroundBox::BorderBox))
@@ -974,12 +960,13 @@ CompileResult compileMask(detail::StyleCompileContext& context) {
         layer.image = std::move(parsedLayer->image);
         bool modeSpecified = false;
         bool compositeSpecified = false;
-        for (const std::string& token : parsedLayer->extras) {
-            if (const std::optional<MaskMode> mode = parseMaskMode(token)) {
+        for (const detail::CSSTokenRange token : parsedLayer->extras) {
+            const detail::CSSValueRange value{context.value.stream, token};
+            if (const std::optional<MaskMode> mode = parseMaskMode(value)) {
                 if (modeSpecified) return context.invalid();
                 layer.mode = *mode;
                 modeSpecified = true;
-            } else if (const std::optional<MaskComposite> composite = parseMaskComposite(token)) {
+            } else if (const std::optional<MaskComposite> composite = parseMaskComposite(value)) {
                 if (compositeSpecified) return context.invalid();
                 layer.composite = *composite;
                 compositeSpecified = true;
@@ -1003,8 +990,10 @@ CompileResult compileMask(detail::StyleCompileContext& context) {
 
 CompileResult compilePaint(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    if (const std::optional<Gradient> gradient = model.parseGradient(value)) return context.compiled(StylePaint{Color(), *gradient});
-    if (detail::lower(detail::trim(value)) == "currentcolor") return context.compiled(StylePaint{Color(), std::nullopt, std::nullopt, true});
+    if (const std::optional<Gradient> gradient = model.parseGradient({value.stream, value.range}))
+        return context.compiled(StylePaint{Color(), *gradient});
+    if (normalizeCSSKeyword(value.stream, value.range) == "currentcolor")
+        return context.compiled(StylePaint{Color(), std::nullopt, std::nullopt, true});
     const auto parsed = context.colorValue();
     if (!parsed) return context.invalid();
     if (const auto color = std::get_if<Color>(&*parsed)) return context.compiled(StylePaint{*color, std::nullopt});
@@ -1023,7 +1012,7 @@ CompileResult compileColor(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileAccentColor(detail::StyleCompileContext& context) {
-    const std::string value = lower(trim(context.value));
+    const std::string value = context.keyword();
     if (value == "auto") return context.compiled(AccentColor{});
     if (value == "currentcolor") return context.compiled(AccentColor::currentColor());
     const auto parsed = context.colorValue();
@@ -1034,59 +1023,59 @@ CompileResult compileAccentColor(detail::StyleCompileContext& context) {
 
 CompileResult compileBorder(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    const std::vector<std::string> tokens = context.tokens();
+    const std::vector<detail::CSSTokenRange> tokens = context.ranges();
     if (tokens.size() < 2 || tokens.size() > 3) return context.invalid();
-    const auto width = context.number(tokens[0]);
+    const auto width = context.number({value.stream, tokens[0]});
     if (!width || *width < 0.f) return context.invalid();
     BorderStyle borderStyle = BorderStyle::Solid;
-    const std::string& colorToken = tokens.size() == 2 ? tokens[1] : tokens[2];
+    const detail::CSSTokenRange colorToken = tokens.size() == 2 ? tokens[1] : tokens[2];
     if (tokens.size() == 3) {
-        const std::optional<BorderStyle> parsedStyle = parseBorderStyle(tokens[1]);
+        const std::optional<BorderStyle> parsedStyle = parseBorderStyle({value.stream, tokens[1]});
         if (!parsedStyle) return context.invalid();
         borderStyle = *parsedStyle;
     }
-    if (detail::lower(detail::trim(colorToken)) == "currentcolor")
+    if (normalizeCSSKeyword(value.stream, colorToken) == "currentcolor")
         return context.compiled(StyleBorder{*width, StylePaint{Color(), std::nullopt, std::nullopt, true}, borderStyle});
-    if (const std::optional<Gradient> gradient = model.parseGradient(colorToken))
+    if (const std::optional<Gradient> gradient = model.parseGradient({value.stream, colorToken}))
         return context.compiled(StyleBorder{*width, StylePaint{Color(), *gradient}, borderStyle});
-    const auto parsed = context.colorValue(colorToken);
+    const auto parsed = context.colorValue({value.stream, colorToken});
     if (!parsed) return context.invalid();
     if (const auto color = std::get_if<Color>(&*parsed)) return context.compiled(StyleBorder{*width, StylePaint{*color, std::nullopt}, borderStyle});
     return context.compiled(StyleBorder{*width, StylePaint{Color(0.f, 0.f, 0.f, 0.f), std::nullopt, std::get<LightDarkColor>(*parsed)}, borderStyle});
 }
 
 CompileResult compileBorderStyle(detail::StyleCompileContext& context) {
-    const std::optional<BorderStyle> parsed = parseBorderStyle(context.value);
+    const std::optional<BorderStyle> parsed = parseBorderStyle({context.value.stream, context.value.range});
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileEdges(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
     const float nan = std::numeric_limits<float>::quiet_NaN();
-    const EdgeInsets parsed = model.parseEdgeInsets(value, {nan, nan, nan, nan});
+    const EdgeInsets parsed = model.parseEdgeInsets({value.stream, value.range}, {nan, nan, nan, nan});
     return std::isfinite(parsed.top) ? context.compiled(parsed) : context.invalid();
 }
 
 CompileResult compileMargin(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    const auto parsed = model.parseMargin(value);
+    const auto parsed = model.parseMargin({value.stream, value.range});
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileGap(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    if (lower(trim(value)) == "auto") return context.compiled(GapValue::automatic());
+    if (context.keyword() == "auto") return context.compiled(GapValue::automatic());
     const auto parsed = context.number();
     return parsed && *parsed >= 0.f ? context.compiled(GapValue::fromPixels(*parsed)) : context.invalid();
 }
 
 CompileResult compileSize(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    const std::vector<std::string> tokens = context.tokens();
+    const std::vector<detail::CSSTokenRange> tokens = context.ranges();
     if (tokens.empty() || tokens.size() > 2) return context.invalid();
-    const auto dimension = [&context](const std::string& raw) -> std::optional<Dimension> {
-        if (lower(trim(raw)) == "auto") return Dimension();
-        const auto parsed = context.nonnegativeLength(raw);
+    const auto dimension = [&context, &value](detail::CSSTokenRange raw) -> std::optional<Dimension> {
+        if (normalizeCSSKeyword(value.stream, raw) == "auto") return Dimension();
+        const auto parsed = context.nonnegativeLength({value.stream, raw});
         return parsed ? std::optional<Dimension>(Dimension::fromLength(*parsed)) : std::nullopt;
     };
     const auto height = dimension(tokens[0]);
@@ -1096,10 +1085,10 @@ CompileResult compileSize(detail::StyleCompileContext& context) {
 
 CompileResult compileMinSize(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    const std::vector<std::string> tokens = context.tokens();
+    const std::vector<detail::CSSTokenRange> tokens = context.ranges();
     if (tokens.empty() || tokens.size() > 2) return context.invalid();
-    const auto height = context.nonnegativeLength(tokens[0]);
-    const auto width = context.nonnegativeLength(tokens.size() == 1 ? tokens[0] : tokens[1]);
+    const auto height = context.nonnegativeLength({value.stream, tokens[0]});
+    const auto width = context.nonnegativeLength({value.stream, tokens.size() == 1 ? tokens[0] : tokens[1]});
     if (!height || !width) return context.invalid();
     return makeDeclarations({{"min-height", *height}, {"min-width", *width}});
 }
@@ -1107,34 +1096,34 @@ CompileResult compileMinSize(detail::StyleCompileContext& context) {
 CompileResult compileStrokeLinecap(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
     StrokeCap cap;
-    return parseStrokeCap(value, cap) ? context.compiled(cap) : context.invalid();
+    return parseStrokeCap({context.value.stream, context.value.range}, cap) ? context.compiled(cap) : context.invalid();
 }
 
 CompileResult compileFontFamily(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    return lower(trim(value)) == "sans" ? context.compiled(FontFamily::Sans) : context.invalid();
+    return context.keyword() == "sans" ? context.compiled(FontFamily::Sans) : context.invalid();
 }
 
 CompileResult compileFont(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    const auto parsed = model.parseFontShorthand(value);
+    const auto parsed = model.parseFontShorthand({value.stream, value.range});
     return parsed ? parsed : context.invalid();
 }
 
 CompileResult compileFontWeight(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    const auto parsed = model.parseFontWeightValue(value);
+    const auto parsed = model.parseFontWeightValue({value.stream, value.range});
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileFontStyle(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    const auto parsed = model.parseFontStyleValue(value);
+    const auto parsed = model.parseFontStyleValue({value.stream, value.range});
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileTextDecoration(detail::StyleCompileContext& context) {
-    const std::string decoration = lower(trim(context.value));
+    const std::string decoration = context.keyword();
     if (decoration == "none") return context.compiled(TextDecoration::NoneValue);
     if (decoration == "underline") return context.compiled(TextDecoration::Underline);
     if (decoration == "line-through") return context.compiled(TextDecoration::LineThrough);
@@ -1143,7 +1132,7 @@ CompileResult compileTextDecoration(detail::StyleCompileContext& context) {
 
 CompileResult compileTextAlign(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    const std::string alignment = lower(trim(value));
+    const std::string alignment = context.keyword();
     std::optional<TextAlign> parsed;
     if (alignment == "left") parsed = TextAlign::Left;
     else if (alignment == "start") parsed = TextAlign::Start;
@@ -1155,7 +1144,7 @@ CompileResult compileTextAlign(detail::StyleCompileContext& context) {
 
 CompileResult compileTextOverflow(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    const std::string overflow = lower(trim(value));
+    const std::string overflow = context.keyword();
     if (overflow == "clip") return context.compiled(TextOverflow::Clip);
     if (overflow == "ellipsis") return context.compiled(TextOverflow::Ellipsis);
     if (overflow == "ellipsis-center") return context.compiled(TextOverflow::EllipsisCenter);
@@ -1164,7 +1153,7 @@ CompileResult compileTextOverflow(detail::StyleCompileContext& context) {
 
 CompileResult compileTextWrap(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    const std::string wrap = lower(trim(value));
+    const std::string wrap = context.keyword();
     if (wrap == "wrap") return context.compiled(TextWrap::Wrap);
     if (wrap == "nowrap") return context.compiled(TextWrap::NoWrap);
     return context.invalid();
@@ -1172,7 +1161,7 @@ CompileResult compileTextWrap(detail::StyleCompileContext& context) {
 
 CompileResult compileVerticalAlign(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    const std::string alignment = lower(trim(value));
+    const std::string alignment = context.keyword();
     std::optional<VerticalAlign> parsed;
     if (alignment == "top") parsed = VerticalAlign::Top;
     else if (alignment == "middle") parsed = VerticalAlign::Middle;
@@ -1181,16 +1170,15 @@ CompileResult compileVerticalAlign(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileFlexDirection(detail::StyleCompileContext& context) {
-    const std::string direction = lower(trim(context.value));
+    const std::string direction = context.keyword();
     if (direction == "row") return context.compiled(FlexDirection::Row);
     if (direction == "column") return context.compiled(FlexDirection::Column);
     return context.invalid();
 }
 
-template<typename Enum, std::size_t Size> CompileResult compileAlignment(const detail::StyleCompileContext& context, const std::string& value,
+template<typename Enum, std::size_t Size> CompileResult compileAlignment(const detail::StyleCompileContext& context, std::string_view value,
                                                                          const std::array<std::pair<std::string_view, Enum>, Size>& values) {
-    const std::string normalized = lower(trim(value));
-    const auto found = std::find_if(values.begin(), values.end(), [&normalized](const auto& entry) { return entry.first == normalized; });
+    const auto found = std::find_if(values.begin(), values.end(), [value](const auto& entry) { return entry.first == value; });
     return found == values.end() ? context.invalid() : context.compiled(found->second);
 }
 
@@ -1203,7 +1191,7 @@ CompileResult compileJustifyContent(detail::StyleCompileContext& context) {
         {"end", JustifyContent::End},
         {"right", JustifyContent::Right},
     }};
-    return compileAlignment(context, value, sJustifyContentValues);
+    return compileAlignment(context, context.keyword(), sJustifyContentValues);
 }
 
 CompileResult compileAlignItems(detail::StyleCompileContext& context) {
@@ -1215,11 +1203,11 @@ CompileResult compileAlignItems(detail::StyleCompileContext& context) {
         {"end", AlignItems::End},
         {"stretch", AlignItems::Stretch},
     }};
-    return compileAlignment(context, value, sAlignItemsValues);
+    return compileAlignment(context, context.keyword(), sAlignItemsValues);
 }
 
 CompileResult compileInternalAlignContentBlock(detail::StyleCompileContext& context) {
-    const std::string alignment = lower(trim(context.value));
+    const std::string alignment = context.keyword();
     if (alignment == "normal") return context.compiled(false);
     if (alignment == "center") return context.compiled(true);
     return context.invalid();
@@ -1234,7 +1222,7 @@ CompileResult compileAlignSelf(detail::StyleCompileContext& context) {
         {"end", AlignSelf::End},
         {"stretch", AlignSelf::Stretch},
     }};
-    return compileAlignment(context, value, sAlignSelfValues);
+    return compileAlignment(context, context.keyword(), sAlignSelfValues);
 }
 
 CompileResult compileJustifySelf(detail::StyleCompileContext& context) {
@@ -1246,26 +1234,26 @@ CompileResult compileJustifySelf(detail::StyleCompileContext& context) {
         {"end", JustifySelf::End},
         {"stretch", JustifySelf::Stretch},
     }};
-    return compileAlignment(context, value, sJustifySelfValues);
+    return compileAlignment(context, context.keyword(), sJustifySelfValues);
 }
 
 CompileResult compileFlex(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    const std::vector<std::string> tokens = context.tokens();
+    const std::vector<detail::CSSTokenRange> tokens = context.ranges();
     if (tokens.empty() || tokens.size() > 3) return context.invalid();
-    const std::string keyword = lower(trim(value));
+    const std::string keyword = context.keyword();
     if (keyword == "none") return makeDeclarations({{"flex-grow", 0.f}, {"flex-shrink", 0.f}, {"flex-basis", Dimension()}});
     if (keyword == "auto") return makeDeclarations({{"flex-grow", 1.f}, {"flex-shrink", 1.f}, {"flex-basis", Dimension()}});
 
-    const auto nonnegativeNumber = [&context](const std::string& raw) -> std::optional<float> {
-        const std::string token = lower(trim(raw));
-        if (endsWith(token, "px") || endsWith(token, "%")) return std::nullopt;
-        const auto parsed = context.number(raw);
+    const auto nonnegativeNumber = [&context, &value](detail::CSSTokenRange raw) -> std::optional<float> {
+        const std::string token = normalizeCSSKeyword(value.stream, raw);
+        if (hasDimensionUnit(value.stream, raw, "px") || endsWith(token, "%")) return std::nullopt;
+        const auto parsed = context.number({value.stream, raw});
         return parsed && *parsed >= 0.f ? parsed : std::nullopt;
     };
-    const auto basis = [&context](const std::string& raw) -> std::optional<Dimension> {
-        if (lower(trim(raw)) == "auto") return Dimension();
-        const auto parsed = context.nonnegativeLength(raw);
+    const auto basis = [&context, &value](detail::CSSTokenRange raw) -> std::optional<Dimension> {
+        if (normalizeCSSKeyword(value.stream, raw) == "auto") return Dimension();
+        const auto parsed = context.nonnegativeLength({value.stream, raw});
         return parsed ? std::optional<Dimension>(Dimension::fromLength(*parsed)) : std::nullopt;
     };
 
@@ -1302,11 +1290,11 @@ CompileResult compilePointerEvents(detail::StyleCompileContext& context) {
         {"none", PointerEvents::PassThrough},
         {"default", PointerEvents::Default},
     }};
-    return compileAlignment(context, value, sPointerEventsValues);
+    return compileAlignment(context, context.keyword(), sPointerEventsValues);
 }
 
 CompileResult compileDisplay(detail::StyleCompileContext& context) {
-    const std::string display = lower(trim(context.value));
+    const std::string display = context.keyword();
     if (display == "none") return context.compiled(DisplayMode::NoneValue);
     if (display == "flex") return context.compiled(DisplayMode::Flex);
     if (display == "inline-flex") return context.compiled(DisplayMode::InlineFlex);
@@ -1319,7 +1307,7 @@ CompileResult compileDisplay(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileAppearance(detail::StyleCompileContext& context) {
-    const std::string appearance = lower(trim(context.value));
+    const std::string appearance = context.keyword();
     if (appearance == "auto") return context.compiled(AppearanceMode::Auto);
     if (appearance == "base") return context.compiled(AppearanceMode::Base);
     if (appearance == "none") return context.compiled(AppearanceMode::Unstyled);
@@ -1327,34 +1315,36 @@ CompileResult compileAppearance(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileBoxSizing(detail::StyleCompileContext& context) {
-    const std::string boxSizing = lower(trim(context.value));
+    const std::string boxSizing = context.keyword();
     if (boxSizing == "content-box") return context.compiled(BoxSizing::ContentBox);
     if (boxSizing == "border-box") return context.compiled(BoxSizing::BorderBox);
     return context.invalid();
 }
 
 CompileResult compileColorScheme(detail::StyleCompileContext& context) {
-    const std::vector<std::string> tokens = context.tokens();
+    const auto& value = context.value;
+    const std::vector<detail::CSSTokenRange> tokens = context.ranges();
     if (tokens.size() == 1) {
-        const std::string scheme = lower(trim(tokens.front()));
+        const std::string scheme = normalizeCSSKeyword(value.stream, tokens.front());
         if (scheme == "auto" || scheme == "normal") return context.compiled(ColorScheme::Auto);
         if (scheme == "light") return context.compiled(ColorScheme::Light);
         if (scheme == "dark") return context.compiled(ColorScheme::Dark);
     } else if (tokens.size() == 2) {
-        const std::string first = lower(trim(tokens[0]));
-        const std::string second = lower(trim(tokens[1]));
+        const std::string first = normalizeCSSKeyword(value.stream, tokens[0]);
+        const std::string second = normalizeCSSKeyword(value.stream, tokens[1]);
         if ((first == "light" && second == "dark") || (first == "dark" && second == "light")) return context.compiled(ColorScheme::LightDark);
     }
     return context.invalid();
 }
 
 CompileResult compileGridArea(detail::StyleCompileContext& context) {
-    const std::vector<std::string> tokens = context.tokens(true);
-    if (tokens.size() != 3 || tokens[1] != "/") return context.invalid();
-    const auto line = [&context](const std::string& raw) -> std::optional<int> {
-        const std::string token = lower(trim(raw));
-        if (endsWith(token, "px") || endsWith(token, "%")) return std::nullopt;
-        const auto parsed = context.number(raw);
+    const auto& value = context.value;
+    const std::vector<detail::CSSTokenRange> tokens = context.ranges(true);
+    if (tokens.size() != 3 || normalizeCSSKeyword(value.stream, tokens[1]) != "/") return context.invalid();
+    const auto line = [&context, &value](detail::CSSTokenRange raw) -> std::optional<int> {
+        const std::string token = normalizeCSSKeyword(value.stream, raw);
+        if (hasDimensionUnit(value.stream, raw, "px") || endsWith(token, "%")) return std::nullopt;
+        const auto parsed = context.number({value.stream, raw});
         if (!parsed || *parsed < 1.f || std::floor(*parsed) != *parsed || *parsed > static_cast<float>(std::numeric_limits<int>::max()))
             return std::nullopt;
         return static_cast<int>(*parsed);
@@ -1365,34 +1355,35 @@ CompileResult compileGridArea(detail::StyleCompileContext& context) {
 }
 
 CompileResult compilePositionMode(detail::StyleCompileContext& context) {
-    const std::string position = lower(trim(context.value));
+    const std::string position = context.keyword();
     if (position == "static") return context.compiled(PositionMode::Static);
     if (position == "relative") return context.compiled(PositionMode::Relative);
     return context.invalid();
 }
 
 CompileResult compileTranslate(detail::StyleCompileContext& context) {
-    const std::vector<std::string> tokens = context.tokens();
+    const auto& value = context.value;
+    const std::vector<detail::CSSTokenRange> tokens = context.ranges();
     if (tokens.empty() || tokens.size() > 2) return context.invalid();
-    const auto fixedLength = [&context](const std::string& raw) -> std::optional<float> {
-        const auto parsed = context.length(raw);
+    const auto fixedLength = [&context, &value](detail::CSSTokenRange raw) -> std::optional<float> {
+        const auto parsed = context.length({value.stream, raw});
         return parsed && parsed->percent == 0.f ? std::optional<float>(parsed->pixels) : std::nullopt;
     };
     const auto x = fixedLength(tokens[0]);
-    const auto y = fixedLength(tokens.size() == 1 ? std::string("0") : tokens[1]);
+    const auto y = tokens.size() == 1 ? std::optional<float>(0.f) : fixedLength(tokens[1]);
     return x && y ? context.compiled(Translate{*x, *y}) : context.invalid();
 }
 
 CompileResult compileVisibility(detail::StyleCompileContext& context) {
-    const std::string visibility = lower(trim(context.value));
+    const std::string visibility = context.keyword();
     if (visibility == "visible") return context.compiled(Visibility::Visible);
     if (visibility == "hidden") return context.compiled(Visibility::Hidden);
     if (visibility == "collapse") return context.compiled(Visibility::Collapse);
     return context.invalid();
 }
 
-std::optional<Overflow> parseOverflow(const std::string& raw) {
-    const std::string token = lower(trim(raw));
+std::optional<Overflow> parseOverflow(detail::CSSValueRange value) {
+    const std::string token = normalizeCSSKeyword(value.stream, value.range);
     if (token == "visible") return Overflow::Visible;
     if (token == "hidden") return Overflow::Hidden;
     if (token == "scroll") return Overflow::Scroll;
@@ -1402,29 +1393,29 @@ std::optional<Overflow> parseOverflow(const std::string& raw) {
 
 CompileResult compileOverflow(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    const std::vector<std::string> tokens = context.tokens();
+    const std::vector<detail::CSSTokenRange> tokens = context.ranges();
     if (tokens.empty() || tokens.size() > 2) return context.invalid();
-    const auto horizontal = parseOverflow(tokens[0]);
-    const auto vertical = parseOverflow(tokens.size() == 1 ? tokens[0] : tokens[1]);
+    const auto horizontal = parseOverflow({value.stream, tokens[0]});
+    const auto vertical = parseOverflow({value.stream, tokens.size() == 1 ? tokens[0] : tokens[1]});
     if (!horizontal || !vertical) return context.invalid();
     return makeDeclarations({{"overflow-x", *horizontal}, {"overflow-y", *vertical}});
 }
 
 CompileResult compileOverflowAxis(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    const auto parsed = parseOverflow(value);
+    const auto parsed = parseOverflow({value.stream, value.range});
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileScrollbarMode(detail::StyleCompileContext& context) {
-    const std::string mode = lower(trim(context.value));
+    const std::string mode = context.keyword();
     if (mode == "classic") return context.compiled(ScrollbarMode::Classic);
     if (mode == "overlay") return context.compiled(ScrollbarMode::Overlay);
     return context.invalid();
 }
 
 CompileResult compileScrollbarWidth(detail::StyleCompileContext& context) {
-    const std::string width = lower(trim(context.value));
+    const std::string width = context.keyword();
     if (width == "auto") return context.compiled(ScrollbarWidth::Auto);
     if (width == "thin") return context.compiled(ScrollbarWidth::Thin);
     if (width == "none") return context.compiled(ScrollbarWidth::NoneValue);
@@ -1432,23 +1423,26 @@ CompileResult compileScrollbarWidth(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileScrollbarGutter(detail::StyleCompileContext& context) {
-    const std::vector<std::string> tokens = context.tokens();
+    const auto& value = context.value;
+    const std::vector<detail::CSSTokenRange> tokens = context.ranges();
     if (tokens.size() == 1) {
-        const std::string gutter = lower(trim(tokens[0]));
+        const std::string gutter = normalizeCSSKeyword(value.stream, tokens[0]);
         if (gutter == "auto") return context.compiled(ScrollbarGutter::Auto);
         if (gutter == "stable") return context.compiled(ScrollbarGutter::Stable);
-    } else if (tokens.size() == 2 && lower(trim(tokens[0])) == "stable" && lower(trim(tokens[1])) == "both-edges")
+    } else if (tokens.size() == 2
+               && normalizeCSSKeyword(value.stream, tokens[0]) == "stable"
+               && normalizeCSSKeyword(value.stream, tokens[1]) == "both-edges")
         return context.compiled(ScrollbarGutter::StableBothEdges);
     return context.invalid();
 }
 
 CompileResult compileScrollbarColor(detail::StyleCompileContext& context) {
-    const std::string value = lower(trim(context.value));
-    if (value == "auto") return context.compiled(ScrollbarColors{});
-    const std::vector<std::string> tokens = context.tokens();
+    const auto& value = context.value;
+    if (normalizeCSSKeyword(value.stream, value.range) == "auto") return context.compiled(ScrollbarColors{});
+    const std::vector<detail::CSSTokenRange> tokens = context.ranges();
     if (tokens.size() != 2) return context.invalid();
-    const std::optional<StyleColorValue> thumb = context.colorValue(tokens[0]);
-    const std::optional<StyleColorValue> track = context.colorValue(tokens[1]);
+    const std::optional<StyleColorValue> thumb = context.colorValue({value.stream, tokens[0]});
+    const std::optional<StyleColorValue> track = context.colorValue({value.stream, tokens[1]});
     if (!thumb || !track) return context.invalid();
     ScrollbarColors colors;
     colors.automatic = false;
@@ -1467,11 +1461,10 @@ CompileResult compileScrollbarColor(detail::StyleCompileContext& context) {
 
 CompileResult compileOrder(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    const std::string raw = lower(trim(value));
     const auto parsed = context.number();
     const double numericOrder = parsed ? static_cast<double>(*parsed) : 0.0;
     if (!parsed
-        || endsWith(raw, "px")
+        || hasDimensionUnit(value.stream, value.range, "px")
         || std::trunc(*parsed) != *parsed
         || numericOrder < static_cast<double>(std::numeric_limits<int>::min())
         || numericOrder > static_cast<double>(std::numeric_limits<int>::max()))
@@ -1518,30 +1511,28 @@ CompileResult compileCursor(detail::StyleCompileContext& context) {
         {"context-menu", CursorStyle::ContextMenu},
         {"cell", CursorStyle::Cell},
     }};
-    const auto parseKeyword = [](const std::string& raw) -> std::optional<CursorStyle> {
-        const std::string normalized = lower(trim(raw));
+    const auto parseKeyword = [](std::string_view normalized) -> std::optional<CursorStyle> {
         const auto found =
             std::find_if(sCursorValues.begin(), sCursorValues.end(), [&normalized](const auto& entry) { return entry.first == normalized; });
         return found == sCursorValues.end() ? std::nullopt : std::optional<CursorStyle>(found->second);
     };
 
-    const std::vector<std::string> candidates = detail::splitTopLevel(value, ',');
+    const std::vector<detail::CSSTokenRange> candidates = context.commaSeparatedRanges();
     if (candidates.size() == 1) {
-        const std::optional<CursorStyle> keyword = parseKeyword(candidates.front());
+        const std::optional<CursorStyle> keyword = parseKeyword(normalizeCSSKeyword(value.stream, candidates.front()));
         return keyword ? context.compiled(CursorValue{*keyword, {}}) : context.invalid();
     }
-    const auto parseHotspot = [](const std::string& raw) -> std::optional<float> {
-        const std::string token = trim(raw);
-        char* end = nullptr;
-        const float parsed = std::strtof(token.c_str(), &end);
-        if (end == token.c_str() || *end != '\0' || !std::isfinite(parsed)) return std::nullopt;
-        return parsed;
+    const auto parseHotspot = [&model, &value](detail::CSSTokenRange range) -> std::optional<float> {
+        range = detail::trimCSSRange(value.stream, range);
+        if (range.end != range.begin + 1 || value.stream.tokens()[range.begin].kind != detail::CSSTokenKind::Number) return std::nullopt;
+        const float parsed = model.parseNumberValue({value.stream, range}, std::numeric_limits<float>::quiet_NaN());
+        return std::isfinite(parsed) ? std::optional<float>(parsed) : std::nullopt;
     };
     std::vector<CursorImage> images;
     for (std::size_t index = 0; index + 1 < candidates.size(); ++index) {
-        const std::vector<std::string> tokens = detail::tokenizeTopLevel(candidates[index]);
+        const std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, candidates[index]);
         if (tokens.size() != 1 && tokens.size() != 3) return context.invalid();
-        const std::optional<std::string> resource = parseCSSUrl(tokens.front());
+        const std::optional<std::string> resource = parseCSSUrl({value.stream, tokens.front()});
         if (!resource) return context.invalid();
         CursorImage image;
         image.resource = *resource;
@@ -1550,13 +1541,13 @@ CompileResult compileCursor(detail::StyleCompileContext& context) {
         if ((tokens.size() > 1 && !image.hotspotX) || (tokens.size() > 2 && !image.hotspotY)) return context.invalid();
         images.push_back(std::move(image));
     }
-    const std::optional<CursorStyle> fallback = parseKeyword(candidates.back());
+    const std::optional<CursorStyle> fallback = parseKeyword(normalizeCSSKeyword(value.stream, candidates.back()));
     return fallback && !images.empty() ? context.compiled(CursorValue{*fallback, std::move(images)}) : context.invalid();
 }
 
 CompileResult compileDimension(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    if (lower(trim(value)) == "auto") return context.compiled(Dimension());
+    if (context.keyword() == "auto") return context.compiled(Dimension());
     const auto parsed = context.length();
     if (!parsed || parsed->pixels < 0.f || parsed->percent < 0.f) return context.invalid();
     return context.compiled(Dimension::fromLength(*parsed));
@@ -1570,7 +1561,7 @@ CompileResult compilePosition(detail::StyleCompileContext& context) {
 
 CompileResult compileNonnegativeLength(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    const auto parsed = context.nonnegativeLength(value);
+    const auto parsed = context.nonnegativeLength();
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
@@ -1582,8 +1573,8 @@ CompileResult compileNonnegativeNumber(detail::StyleCompileContext& context) {
 
 CompileResult compileUnitlessNonnegativeNumber(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    const std::string raw = lower(trim(value));
-    if (endsWith(raw, "px") || endsWith(raw, "%")) return context.invalid();
+    const std::string raw = context.keyword();
+    if (hasDimensionUnit(value.stream, value.range, "px") || endsWith(raw, "%")) return context.invalid();
     const auto parsed = context.number();
     return parsed && *parsed >= 0.f ? context.compiled(*parsed) : context.invalid();
 }
@@ -1602,22 +1593,25 @@ CompileResult compileStrokeWidth(detail::StyleCompileContext& context) {
 
 CompileResult compileLineHeight(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    const auto parsed = model.parseLineHeightValue(value);
+    const auto parsed = model.parseLineHeightValue({value.stream, value.range});
     return parsed ? context.compiled(std::optional<Length>(*parsed)) : context.invalid();
 }
 
 CompileResult compileSpacing(detail::StyleCompileContext& context) {
     auto& [model, property, value, selector, result, sourceName] = context;
-    if (lower(trim(value)) == "normal") return context.compiled(Length{});
+    if (context.keyword() == "normal") return context.compiled(Length{});
     const auto parsed = context.length();
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 } // namespace
 
-std::optional<std::vector<StyleDeclaration>> StyleModel::compileDeclaration(const detail::StylePropertyDefinition& property, const std::string& value,
+std::optional<std::vector<StyleDeclaration>> StyleModel::compileDeclaration(const detail::StylePropertyDefinition& property,
+                                                                            const detail::CSSTokenStream& stream, detail::CSSTokenRange valueRange,
                                                                             const std::string& selector, StyleSheetLoadResult& result,
                                                                             const std::string& sourceName) const {
-    const std::string normalizedValue = detail::lower(detail::trim(value));
+    valueRange = detail::trimCSSRange(stream, valueRange);
+    const std::string value = detail::trim(detail::serializeCSSRange(stream, valueRange));
+    const std::string normalizedValue = detail::normalizeCSSKeyword(stream, valueRange);
     if (normalizedValue == "initial") return makeDeclarations(property, InitialStyleValue{});
     if (normalizedValue == "inherit" || normalizedValue == "unset") {
         const StyleWideKeyword keyword = normalizedValue == "inherit" ? StyleWideKeyword::Inherit : StyleWideKeyword::Unset;
@@ -1627,7 +1621,7 @@ std::optional<std::vector<StyleDeclaration>> StyleModel::compileDeclaration(cons
         result.error("stylesheet.property.value_invalid", "Property has no compiler: " + std::string(property.name) + ".", sourceName);
         return std::nullopt;
     }
-    detail::StyleCompileContext context{*this, property, value, selector, result, sourceName};
+    detail::StyleCompileContext context{*this, property, StyleCompileValue{value, stream, valueRange}, selector, result, sourceName};
     return property.compile(context);
 }
 

@@ -168,18 +168,27 @@ TEST(StyleSheetTest, StartsWithoutImplicitCoreRules) {
     EXPECT_EQ(paragraph.fontWeight, static_cast<U16>(400));
 }
 
-TEST(StyleSheetTest, PreservesStylesheetOnInvalidColor) {
-    constexpr char kInvalidColorStyles[] = "input { background-color: ##invalid; }";
+TEST(StyleSheetTest, KeepsValidDeclarationsAroundInvalidColor) {
+    constexpr char kInvalidColorStyles[] = "input { background-color: ##invalid; width: 8px; }";
 
     StyleSheet stylesheet;
-    ASSERT_TRUE(stylesheet.loadRadia(kColorTokenStyles).ok());
-
     const auto invalid = stylesheet.loadRadia(kInvalidColorStyles, "invalid.css");
 
-    ASSERT_FALSE(invalid.ok());
-    ASSERT_FALSE(invalid.errors.empty());
-    EXPECT_EQ(invalid.errors.front().code, "stylesheet.property.value_invalid");
-    EXPECT_NEAR(stylesheet.resolve("button", "", {}, 0).backgroundColor.g, 1.f, 1.0e-4f);
+    ASSERT_TRUE(invalid.ok());
+    ASSERT_FALSE(invalid.warnings.empty());
+    EXPECT_EQ(invalid.warnings.front().code, "stylesheet.property.value_invalid");
+    EXPECT_EQ(invalid.warnings.front().source, "invalid.css");
+    EXPECT_EQ(stylesheet.resolve("input", "", {}, 0).width.pixels(), 8.f);
+}
+
+TEST(StyleSheetTest, ParsesCommentSeparatedColorComponents) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia("panel { color: rgb(1/**/2/**/3); }").ok());
+
+    const Color color = stylesheet.resolve("panel", "", {}, 0).color;
+    EXPECT_NEAR(color.r, 1.f / 255.f, 1.0e-6f);
+    EXPECT_NEAR(color.g, 2.f / 255.f, 1.0e-6f);
+    EXPECT_NEAR(color.b, 3.f / 255.f, 1.0e-6f);
 }
 
 TEST(StyleSheetTest, ParsesBoxShorthands) {
@@ -236,19 +245,28 @@ TEST(StyleSheetTest, MatchesDirectionState) {
     EXPECT_EQ(stylesheet.resolvePseudoElement(input, "slider-thumb", LayoutDirection::RightToLeft).translate.x, 0.f);
 }
 
-TEST(StyleSheetTest, PreservesStylesheetOnUnknown) {
-    constexpr char kInitialStyles[] = "button { width: 12px; }";
-    constexpr char kInvalidStyles[] = "button { width: 99px; unknown-property: 1; }";
+TEST(StyleSheetTest, KeepsValidDeclarationsAroundUnknown) {
+    constexpr char kInvalidStyles[] = "button { width: 99px; unknown-property: 1; height: 7px; }";
 
     StyleSheet stylesheet;
-    ASSERT_TRUE(stylesheet.loadRadia(kInitialStyles).ok());
-    const auto failed = stylesheet.loadRadia(kInvalidStyles, "candidate.css");
+    const auto result = stylesheet.loadRadia(kInvalidStyles, "candidate.css");
 
-    ASSERT_FALSE(failed.ok());
-    ASSERT_FALSE(failed.errors.empty());
-    EXPECT_EQ(stylesheet.resolve("button", "", {}, 0).width.pixels(), 12.f);
-    EXPECT_EQ(failed.errors.front().code, "stylesheet.property.unknown");
-    EXPECT_EQ(failed.errors.front().source, "candidate.css");
+    ASSERT_TRUE(result.ok());
+    ASSERT_FALSE(result.warnings.empty());
+    EXPECT_EQ(stylesheet.resolve("button", "", {}, 0).width.pixels(), 99.f);
+    EXPECT_EQ(stylesheet.resolve("button", "", {}, 0).height.pixels(), 7.f);
+    EXPECT_EQ(result.warnings.front().code, "stylesheet.property.unknown");
+    EXPECT_EQ(result.warnings.front().source, "candidate.css");
+}
+
+TEST(StyleSheetTest, RejectsInvalidDeclarationPropertyNames) {
+    StyleSheet stylesheet;
+    const auto result = stylesheet.loadRadia(":root { --bad name: #ff0000; } panel { width: 13px; }", "property-name.css");
+
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.warnings.size(), std::size_t(1));
+    EXPECT_EQ(result.warnings.front().code, "stylesheet.declaration.invalid");
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).width.pixels(), 13.f);
 }
 
 TEST(StyleSheetTest, RejectsInvalidTokenValues) {
@@ -257,10 +275,10 @@ TEST(StyleSheetTest, RejectsInvalidTokenValues) {
     StyleSheet stylesheet;
     const auto result = stylesheet.loadRadia(kInvalidTokenStyles, "tokens.css");
 
-    ASSERT_FALSE(result.ok());
-    ASSERT_FALSE(result.errors.empty());
-    EXPECT_EQ(result.errors.front().code, "stylesheet.token.value_invalid");
-    EXPECT_EQ(result.errors.front().source, "tokens.css");
+    ASSERT_TRUE(result.ok());
+    ASSERT_FALSE(result.warnings.empty());
+    EXPECT_EQ(result.warnings.front().code, "stylesheet.token.value_invalid");
+    EXPECT_EQ(result.warnings.front().source, "tokens.css");
 }
 
 TEST(StyleSheetTest, RejectsReferencesToMissingTokens) {
@@ -269,9 +287,9 @@ TEST(StyleSheetTest, RejectsReferencesToMissingTokens) {
     StyleSheet stylesheet;
     const auto result = stylesheet.loadRadia(kMissingTokenStyles, "missing-token.css");
 
-    ASSERT_FALSE(result.ok());
-    ASSERT_FALSE(result.errors.empty());
-    EXPECT_EQ(result.errors.front().source, "missing-token.css");
+    ASSERT_TRUE(result.ok());
+    ASSERT_FALSE(result.warnings.empty());
+    EXPECT_EQ(result.warnings.front().source, "missing-token.css");
 }
 
 TEST(StyleSheetTest, MatchesChildSelectors) {
@@ -287,6 +305,35 @@ TEST(StyleSheetTest, MatchesChildSelectors) {
     EXPECT_EQ(computedStyle(stylesheet, icon).width.pixels(), 10.f);
     ElementInternalAccess::setState(button, ElementState::Hovered, true);
     EXPECT_EQ(computedStyle(stylesheet, icon).width.pixels(), 18.f);
+}
+
+TEST(StyleSheetTest, IgnoresCommentsAroundChildCombinators) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia("button /* comment */ > i { width: 19px; }").ok());
+
+    auto button = makeElementValue<HTMLButtonElement>();
+    Element& icon = appendIcon(button, "search");
+    EXPECT_EQ(computedStyle(stylesheet, icon).width.pixels(), 19.f);
+}
+
+TEST(StyleSheetTest, MatchesCaseInsensitivePseudoStatesAndRootTokens) {
+    StyleSheet stylesheet;
+    const auto result = stylesheet.loadRadia(":/**/ROOT { --accent: #123456; } button:HOVER { width: 18px; } panel { color: var(--accent); }");
+
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result.warnings.empty());
+    EXPECT_EQ(stylesheet.resolve("button", "", {}, static_cast<uint16_t>(ElementState::Hovered)).width.pixels(), 18.f);
+    EXPECT_NEAR(stylesheet.resolve("panel", "", {}, 0).color.r, 0x12 / 255.f, 1.0e-6f);
+}
+
+TEST(StyleSheetTest, DecodesEscapedSelectorKeywords) {
+    StyleSheet stylesheet;
+    const auto result = stylesheet.loadRadia("button:h\\6f ver { width: 18px; } input:dir(r\\74 l) { height: 13px; }");
+
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result.warnings.empty());
+    EXPECT_EQ(stylesheet.resolve("button", "", {}, static_cast<uint16_t>(ElementState::Hovered)).width.pixels(), 18.f);
+    EXPECT_EQ(stylesheet.resolve("input", "", {}, 0, LayoutDirection::RightToLeft).height.pixels(), 13.f);
 }
 
 TEST(StyleSheetTest, SeparatesPartState) {
@@ -321,7 +368,7 @@ TEST(StyleSheetTest, PreservesCursorOnFailure) {
     constexpr char kCursorStyles[] = "button { cursor: pointer; } #horizontal { cursor: e-resize; } "
                                      "#diagonal { cursor: sw-resize; } #grab { cursor: grab; } "
                                      "#grabbing { cursor: grabbing; }";
-    constexpr char kInvalidCursorStyles[] = "button { cursor: teleport; }";
+    constexpr char kInvalidCursorStyles[] = "button { cursor: teleport; cursor: pointer; }";
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kCursorStyles).ok());
@@ -333,7 +380,9 @@ TEST(StyleSheetTest, PreservesCursorOnFailure) {
     EXPECT_NE(stylesheet.resolve("panel", "grab", {}, 0).cursor, stylesheet.resolve("panel", "grabbing", {}, 0).cursor);
 
     const auto invalid = stylesheet.loadRadia(kInvalidCursorStyles, "cursor.css");
-    ASSERT_FALSE(invalid.ok());
+    ASSERT_TRUE(invalid.ok());
+    ASSERT_FALSE(invalid.warnings.empty());
+    EXPECT_EQ(invalid.warnings.front().code, "stylesheet.property.value_invalid");
     EXPECT_EQ(stylesheet.resolve("button", "", {}, 0).cursor, CursorStyle::Pointer);
 }
 
@@ -445,9 +494,9 @@ TEST(StyleSheetTest, MatchesCSSAttributeOperators) {
 TEST(StyleSheetTest, RequiresExplicitUniversalForAttributeSelectors) {
     StyleSheet invalid;
     const auto invalidResult = invalid.loadRadia("[hidden] { width: 11px; }");
-    ASSERT_FALSE(invalidResult.ok());
-    ASSERT_FALSE(invalidResult.errors.empty());
-    EXPECT_EQ(invalidResult.errors.front().code, "stylesheet.selector.target_required");
+    ASSERT_TRUE(invalidResult.ok());
+    ASSERT_FALSE(invalidResult.warnings.empty());
+    EXPECT_EQ(invalidResult.warnings.front().code, "stylesheet.selector.target_required");
 
     StyleSheet universal;
     ASSERT_TRUE(universal.loadRadia("*[hidden] { width: 11px; }").ok());
@@ -457,9 +506,9 @@ TEST(StyleSheetTest, RequiresExplicitUniversalForAttributeSelectors) {
 
     StyleSheet universalPseudo;
     const auto pseudoResult = universalPseudo.loadRadia("*::unknown { width: 12px; }");
-    ASSERT_FALSE(pseudoResult.ok());
-    ASSERT_FALSE(pseudoResult.errors.empty());
-    EXPECT_EQ(pseudoResult.errors.front().code, "stylesheet.selector.target_required");
+    ASSERT_TRUE(pseudoResult.ok());
+    ASSERT_FALSE(pseudoResult.warnings.empty());
+    EXPECT_EQ(pseudoResult.warnings.front().code, "stylesheet.selector.target_required");
 }
 
 TEST(StyleSheetTest, DecodesEscapedAttributeSelectorDelimiters) {
@@ -502,7 +551,7 @@ TEST(StyleSheetTest, SelectsIndeterminateInputs) {
     EXPECT_FLOAT_EQ(computedStyle(stylesheet, input).opacity, .5f);
 }
 
-TEST(StyleSheetTest, RejectsInvalidRules) {
+TEST(StyleSheetTest, SkipsInvalidRules) {
     struct InvalidRuleCase {
         const char* source;
         const char* diagnostic;
@@ -531,32 +580,32 @@ TEST(StyleSheetTest, RejectsInvalidRules) {
         StyleSheet stylesheet;
         const auto result = stylesheet.loadRadia(test.source, "contract.css");
 
-        ASSERT_FALSE(result.ok());
-        ASSERT_FALSE(result.errors.empty());
-        EXPECT_EQ(result.errors.front().code, test.diagnostic);
+        ASSERT_TRUE(result.ok());
+        ASSERT_FALSE(result.warnings.empty());
+        EXPECT_EQ(result.warnings.front().code, test.diagnostic);
     }
 }
 
-TEST(StyleSheetTest, RejectsMultiplePseudoElementStates) {
+TEST(StyleSheetTest, SkipsMultiplePseudoElementStates) {
     constexpr char kPseudoElementStateStyles[] = "input::slider-thumb:hover:checked { width: 10px; }";
 
     StyleSheet stylesheet;
     const auto result = stylesheet.loadRadia(kPseudoElementStateStyles, "contract.css");
 
-    ASSERT_FALSE(result.ok());
-    ASSERT_FALSE(result.errors.empty());
-    EXPECT_EQ(result.errors.front().code, "stylesheet.selector.pseudo_element_invalid");
+    ASSERT_TRUE(result.ok());
+    ASSERT_FALSE(result.warnings.empty());
+    EXPECT_EQ(result.warnings.front().code, "stylesheet.selector.pseudo_element_invalid");
 }
 
-TEST(StyleSheetTest, RejectsNestedPseudoElements) {
+TEST(StyleSheetTest, SkipsNestedPseudoElements) {
     constexpr char kNestedPseudoElementStyles[] = "input::slider-track::slider-fill { width: 10px; }";
 
     StyleSheet stylesheet;
     const auto result = stylesheet.loadRadia(kNestedPseudoElementStyles, "contract.css");
 
-    ASSERT_FALSE(result.ok());
-    ASSERT_FALSE(result.errors.empty());
-    EXPECT_EQ(result.errors.front().code, "stylesheet.selector.pseudo_element_invalid");
+    ASSERT_TRUE(result.ok());
+    ASSERT_FALSE(result.warnings.empty());
+    EXPECT_EQ(result.warnings.front().code, "stylesheet.selector.pseudo_element_invalid");
 }
 
 TEST(StyleSheetTest, InheritsAllowedProperties) {
@@ -687,9 +736,9 @@ TEST(StyleSheetTest, ParsesOverflowShorthand) {
     EXPECT_EQ(initial.overflowY, Overflow::Visible);
 
     const auto invalid = stylesheet.loadRadia(kInvalidOverflowStyles, "overflow.css");
-    ASSERT_FALSE(invalid.ok());
-    ASSERT_FALSE(invalid.errors.empty());
-    EXPECT_EQ(invalid.errors.front().code, "stylesheet.property.value_invalid");
+    ASSERT_TRUE(invalid.ok());
+    ASSERT_FALSE(invalid.warnings.empty());
+    EXPECT_EQ(invalid.warnings.front().code, "stylesheet.property.value_invalid");
 }
 
 TEST(StyleSheetTest, ParsesBorderRadius) {
@@ -727,7 +776,7 @@ TEST(StyleSheetTest, ParsesBorderRadius) {
     EXPECT_NEAR(mirrored.borderRadius.bottomLeft.vertical.percent, .1f, 1.0e-6f);
 }
 
-TEST(StyleSheetTest, RejectsMalformedBorderRadius) {
+TEST(StyleSheetTest, SkipsMalformedBorderRadius) {
     constexpr char kInvalidStyles[] = "panel { border-radius: 1px /; }";
     constexpr char kMultipleSlashStyles[] = "panel { border-radius: 1px / 2px / 3px; }";
     constexpr char kTooManyValuesStyles[] = "panel { border-radius: 1px 2px 3px 4px 5px; }";
@@ -736,9 +785,9 @@ TEST(StyleSheetTest, RejectsMalformedBorderRadius) {
         SCOPED_TRACE(Message() << "malformed border-radius CSS: " << source);
         StyleSheet stylesheet;
         const auto result = stylesheet.loadRadia(source, "border-radius.css");
-        ASSERT_FALSE(result.ok());
-        ASSERT_FALSE(result.errors.empty());
-        EXPECT_EQ(result.errors.front().code, "stylesheet.property.value_invalid");
+        ASSERT_TRUE(result.ok());
+        ASSERT_FALSE(result.warnings.empty());
+        EXPECT_EQ(result.warnings.front().code, "stylesheet.property.value_invalid");
     }
 }
 
@@ -935,14 +984,14 @@ TEST(StyleSheetTest, MatchesStructuralSelectors) {
 }
 
 TEST(StyleSheetTest, ParsesVisualEffects) {
-    constexpr char kBoxEffectStyles[] = "panel { background-color: linear-gradient(to right, #ff0000ff, "
+    constexpr char kBoxEffectStyles[] = "panel { background-color: linear-gradient(to/**/right, #ff0000ff, "
                                         "rgb(0, 255, 0, 50%) 75%, #0000ffff); "
                                         "box-shadow: 1px 2px #11223344, 3px 4px 5px 6px "
                                         "rgb(10, 20, 30, 40%) inset; outline-offset: 3px; "
                                         "outline: light-dark(#abcdef88, #12345688) solid 2px; } panel.light { color-scheme: light; } "
                                         "label { outline: 1px dashed #ffffffff; }";
-    constexpr char kBlurEffectStyles[] = "panel { effect: background-blur(to bottom, 0px 25%, 16px 75%), "
-                                         "layer-blur(4px); } button { effect: layer-blur(to right, "
+    constexpr char kBlurEffectStyles[] = "panel { effect: background-blur(to/**/bottom, 0px 25%, 16px 75%), "
+                                         "layer-blur(4px); } button { effect: layer-blur(to/**/right, "
                                          "0px 50%, 4px 50%); } label { effect: none; }";
     constexpr char kGradientStyles[] = "panel { background-color: radial-gradient(circle at 25% 75%, "
                                        "#ffffffff, #00000000 80%); border-width: 3px; border-color: "
@@ -990,6 +1039,7 @@ TEST(StyleSheetTest, ParsesVisualEffects) {
     const ComputedStyle buttonEffects = stylesheet.resolve("button", "", {}, 0);
     ASSERT_FALSE(buttonEffects.effects.empty());
     EXPECT_TRUE(buttonEffects.effects[0].progressive());
+    EXPECT_EQ(buttonEffects.effects[0].angleDegrees, 90.f);
     EXPECT_TRUE(stylesheet.resolve("label", "", {}, 0).effects.empty());
 
     ASSERT_TRUE(stylesheet.loadRadia(kGradientStyles).ok());
@@ -1085,21 +1135,61 @@ TEST(StyleSheetTest, ParsesMaskShorthand) {
     EXPECT_EQ(style.maskLayers.front().type, MaskType::Alpha);
 }
 
-TEST(StyleSheetTest, DecodesEscapedImageURLsAndEvenQuoteEscapes) {
+TEST(StyleSheetTest, DecodesEscapedImageURLsAndFunctionNames) {
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(R"(i[data="a\\"] {} i { background-image: url(icons/a\20 b.svg); })").ok());
 
     const ComputedStyle style = stylesheet.resolve("i", "", {}, 0);
     ASSERT_EQ(style.backgroundLayers.size(), 1U);
     EXPECT_EQ(style.backgroundLayers.front().resource, "icons/a b.svg");
+
+    StyleSheet escapedFunction;
+    ASSERT_TRUE(escapedFunction.loadRadia(R"(i { background-image: u\72l(icons/search.svg); })").ok());
+    ASSERT_EQ(escapedFunction.resolve("i", "", {}, 0).backgroundLayers.size(), 1U);
+    EXPECT_EQ(escapedFunction.resolve("i", "", {}, 0).backgroundLayers.front().resource, "icons/search.svg");
+}
+
+TEST(StyleSheetTest, DecodesEscapedValueFunctionsAndUnits) {
+    constexpr char kStyles[] = R"(:root { --accent: #204060; } panel {
+        background-color: v\61 r(--accent);
+        border-color: linear-g\72 adient(red, blue);
+        effect: layer-bl\75 r(4px);
+        width: 17p\78;
+    })";
+
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia(kStyles).ok());
+
+    const ComputedStyle style = stylesheet.resolve("panel", "", {}, 0);
+    EXPECT_NEAR(style.backgroundColor.r, 32.f / 255.f, 1.0e-4f);
+    ASSERT_TRUE(style.borderGradient.has_value());
+    EXPECT_EQ(style.borderGradient->kind, GradientKind::Linear);
+    ASSERT_EQ(style.effects.size(), std::size_t(1));
+    EXPECT_EQ(style.effects.front().kind, EffectKind::LayerBlur);
+    EXPECT_EQ(style.effects.front().startRadius, 4.f);
+    EXPECT_EQ(style.width.pixels(), 17.f);
+}
+
+TEST(StyleSheetTest, SkipsEmptyImageURL) {
+    StyleSheet stylesheet;
+    const auto result = stylesheet.loadRadia(R"(i { background-image: url(""); })", "empty-url.css");
+
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.warnings.size(), std::size_t(1));
+    EXPECT_EQ(result.warnings.front().code, "stylesheet.property.value_invalid");
+    EXPECT_TRUE(stylesheet.resourceReferences().empty());
 }
 
 TEST(StyleSheetTest, ParsesCSSCursorHotspotNumbers) {
     StyleSheet percentage;
-    EXPECT_FALSE(percentage.loadRadia("i { cursor: url(cursors/default.png) 25% 50%, pointer; }").ok());
+    const auto percentageResult = percentage.loadRadia("i { cursor: url(cursors/default.png) 25% 50%, pointer; }");
+    ASSERT_TRUE(percentageResult.ok());
+    ASSERT_FALSE(percentageResult.warnings.empty());
 
     StyleSheet pixels;
-    EXPECT_FALSE(pixels.loadRadia("i { cursor: url(cursors/default.png) 25px 50px, pointer; }").ok());
+    const auto pixelsResult = pixels.loadRadia("i { cursor: url(cursors/default.png) 25px 50px, pointer; }");
+    ASSERT_TRUE(pixelsResult.ok());
+    ASSERT_FALSE(pixelsResult.warnings.empty());
 
     StyleSheet outOfBounds;
     ASSERT_TRUE(outOfBounds.loadRadia("i { cursor: url(cursors/default.png) -1 1e30, pointer; }").ok());
@@ -1111,7 +1201,9 @@ TEST(StyleSheetTest, ParsesCSSCursorHotspotNumbers) {
     EXPECT_FLOAT_EQ(*style.cursorImages.front().hotspotY, 1e30f);
 
     StyleSheet incomplete;
-    EXPECT_FALSE(incomplete.loadRadia("i { cursor: url(cursors/default.png) 25, pointer; }").ok());
+    const auto incompleteResult = incomplete.loadRadia("i { cursor: url(cursors/default.png) 25, pointer; }");
+    ASSERT_TRUE(incompleteResult.ok());
+    ASSERT_FALSE(incompleteResult.warnings.empty());
 }
 
 TEST(StyleSheetTest, ParsesRasterBackgroundImages) {
@@ -1200,7 +1292,7 @@ TEST(StyleSheetTest, BackgroundShorthandResetsAllComponents) {
     EXPECT_EQ(style.backgroundLayers.front().clip, BackgroundBox::BorderBox);
 }
 
-TEST(StyleSheetTest, RejectsDuplicateImageLayerComponents) {
+TEST(StyleSheetTest, SkipsDuplicateImageLayerComponents) {
     const char* invalid[] = {
         "i { background: url(a.svg) repeat repeat; }",
         "i { background: url(a.svg) fixed scroll; }",
@@ -1209,7 +1301,9 @@ TEST(StyleSheetTest, RejectsDuplicateImageLayerComponents) {
     };
     for (const char* styles : invalid) {
         StyleSheet stylesheet;
-        EXPECT_FALSE(stylesheet.loadRadia(styles).ok()) << styles;
+        const auto result = stylesheet.loadRadia(styles);
+        EXPECT_TRUE(result.ok()) << styles;
+        EXPECT_FALSE(result.warnings.empty()) << styles;
     }
 
     StyleSheet stylesheet;
@@ -1249,7 +1343,7 @@ TEST(StyleSheetTest, DoesNotApplyInheritedOpacityToMaskCoverage) {
     EXPECT_FLOAT_EQ(style.maskLayers[0].image.gradient->stops[1].color.a, .4f);
 }
 
-TEST(StyleSheetTest, RejectsInvalidBoxEffects) {
+TEST(StyleSheetTest, SkipsInvalidBoxEffects) {
     const char* invalidSources[] = {
         "panel { background-color: linear-gradient(#fff); }",
         "panel { background-color: radial-gradient(square, #fff, #000); }",
@@ -1281,15 +1375,15 @@ TEST(StyleSheetTest, RejectsInvalidBoxEffects) {
         SCOPED_TRACE(Message() << "invalid box effect: " << source);
         StyleSheet stylesheet;
         const auto result = stylesheet.loadRadia(source, "effects.css");
-        ASSERT_FALSE(result.ok());
-        ASSERT_FALSE(result.errors.empty());
+        ASSERT_TRUE(result.ok());
+        ASSERT_FALSE(result.warnings.empty());
     }
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kLargeBlurStyles, "large-effect.css").ok());
 }
 
-TEST(StyleSheetTest, RejectsInvalidMinSize) {
+TEST(StyleSheetTest, SkipsInvalidMinSize) {
     constexpr char kMinSizeStyles[] = "panel.one { min-size: 24px; } panel.two { min-size: 30% 80px; } "
                                       "panel.longhand-after { min-size: 10px 20px; min-width: 40px; } "
                                       "panel.shorthand-after { min-height: 5px; min-size: 12px 18px; }";
@@ -1332,10 +1426,11 @@ TEST(StyleSheetTest, RejectsInvalidMinSize) {
     };
     for (const auto& test : invalidCases) {
         SCOPED_TRACE(Message() << "invalid min-size case: " << test.name);
-        const auto result = stylesheet.loadRadia(test.styles, "min-size.css");
-        ASSERT_FALSE(result.ok());
-        ASSERT_FALSE(result.errors.empty());
-        EXPECT_EQ(result.errors.front().code, "stylesheet.property.value_invalid");
+        StyleSheet invalidStylesheet;
+        const auto result = invalidStylesheet.loadRadia(test.styles, "min-size.css");
+        ASSERT_TRUE(result.ok());
+        ASSERT_FALSE(result.warnings.empty());
+        EXPECT_EQ(result.warnings.front().code, "stylesheet.property.value_invalid");
     }
 
     const ComputedStyle preservedStyle = stylesheet.resolve("panel", "", {"one"}, 0);
@@ -1384,10 +1479,10 @@ TEST(StyleSheetTest, MergesStyleLayersTransactionally) {
         {StyleOrigin::Skin, {"base/skin.css", kBaseLayerStyles}},
         {StyleOrigin::Skin, {"derived/skin.css", kMalformedLayerStyles}},
     });
-    ASSERT_FALSE(malformed.ok());
-    ASSERT_FALSE(malformed.errors.empty());
-    EXPECT_EQ(malformed.errors.front().source, "derived/skin.css");
-    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).width.pixels(), 20.f);
+    ASSERT_TRUE(malformed.ok());
+    ASSERT_FALSE(malformed.warnings.empty());
+    EXPECT_EQ(malformed.warnings.front().source, "derived/skin.css");
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).width.pixels(), 10.f);
 }
 
 TEST(StyleSheetTest, OverridesDefaultRule) {
@@ -1450,6 +1545,101 @@ TEST(StyleSheetTest, ResolvesRecursiveImports) {
     EXPECT_TRUE(dependencies.at("theme/components/panel.css").contains("theme/foundation/sizes.css"));
 }
 
+TEST(StyleSheetTest, AcceptsStringAndURLImportTargets) {
+    constexpr char kEntrypointStyles[] = R"(@impor\74 "components/a\2e css";
+@import url(components/b.css);
+@import url("components/c.css");
+panel { width: 30px; })";
+
+    StyleSheet stylesheet;
+    ResourceLayer layer{"theme/main.css", kEntrypointStyles};
+    layer.entrypoint = "main.css";
+    layer.modules = {
+        {"components/a.css", "panel { height: 10px; }"},
+        {"components/b.css", "panel { min-width: 11px; }"},
+        {"components/c.css", "panel { max-width: 12px; }"},
+    };
+
+    const auto result = stylesheet.loadRadiaLayers({StyleLayer{StyleOrigin::Skin, layer}});
+    ASSERT_TRUE(result.ok());
+    const auto& dependencies = stylesheet.dependencies();
+    ASSERT_TRUE(dependencies.contains("theme/main.css"));
+    EXPECT_TRUE(dependencies.at("theme/main.css").contains("theme/components/a.css"));
+    EXPECT_TRUE(dependencies.at("theme/main.css").contains("theme/components/b.css"));
+    EXPECT_TRUE(dependencies.at("theme/main.css").contains("theme/components/c.css"));
+}
+
+TEST(StyleSheetTest, SkipsUnsupportedImportConditionsWithoutLoading) {
+    constexpr char kStyles[] = "@import url(does-not-exist.css) screen; panel { width: 13px; }";
+
+    StyleSheet stylesheet;
+    const auto result = stylesheet.loadRadiaLayers({StyleLayer{StyleOrigin::Skin, {"theme/main.css", kStyles}}});
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.warnings.size(), std::size_t(1));
+    EXPECT_EQ(result.warnings.front().code, "stylesheet.import.unsupported");
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).width.pixels(), 13.f);
+}
+
+TEST(StyleSheetTest, KeepsLaterImportsAfterUnsupportedConditions) {
+    constexpr char kStyles[] = "@import \"skipped.css\" screen; @import \"valid.css\"; panel { width: 13px; }";
+
+    ResourceLayer layer{"theme/main.css", kStyles};
+    layer.entrypoint = "main.css";
+    layer.modules = {{"valid.css", "panel { height: 17px; }"}};
+
+    StyleSheet stylesheet;
+    const auto result = stylesheet.loadRadiaLayers({StyleLayer{StyleOrigin::Skin, layer}});
+
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.warnings.size(), std::size_t(1));
+    EXPECT_EQ(result.warnings.front().code, "stylesheet.import.unsupported");
+    EXPECT_TRUE(stylesheet.dependencies().at("theme/main.css").contains("theme/valid.css"));
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).height.pixels(), 17.f);
+}
+
+TEST(StyleSheetTest, DoesNotTreatCDOAsImportWhitespace) {
+    constexpr char kStyles[] = "@import \"missing.css\" <!--; panel { width: 13px; }";
+
+    StyleSheet stylesheet;
+    const auto result = stylesheet.loadRadia(kStyles, "import.css");
+
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.warnings.size(), std::size_t(1));
+    EXPECT_EQ(result.warnings.front().code, "stylesheet.import.unsupported");
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).width.pixels(), 13.f);
+}
+
+TEST(StyleSheetTest, RecoversMalformedImportAtRuleAtItsBoundary) {
+    constexpr char kStyles[] = "@import \"missing.css\" panel { width: 99px; } label { height: 13px; }";
+
+    StyleSheet stylesheet;
+    const auto result = stylesheet.loadRadia(kStyles, "theme/main.css");
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.warnings.size(), std::size_t(1));
+    EXPECT_EQ(result.warnings.front().code, "stylesheet.import.syntax");
+    EXPECT_TRUE(stylesheet.resolve("panel", "", {}, 0).width.isAuto());
+    EXPECT_EQ(stylesheet.resolve("label", "", {}, 0).height.pixels(), 13.f);
+}
+
+TEST(StyleSheetTest, KeepsLaterImportsAfterMalformedImportAtRules) {
+    constexpr char kStyles[] = "@import \"broken.css\" panel { width: 99px; } @import ???; @import \"\"; "
+                               "@import \"valid.css\"; panel { width: 13px; }";
+
+    ResourceLayer layer{"theme/main.css", kStyles};
+    layer.entrypoint = "main.css";
+    layer.modules = {{"valid.css", "panel { height: 17px; }"}};
+
+    StyleSheet stylesheet;
+    const auto result = stylesheet.loadRadiaLayers({StyleLayer{StyleOrigin::Skin, layer}});
+
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.warnings.size(), std::size_t(3));
+    for (const auto& warning : result.warnings) EXPECT_EQ(warning.code, "stylesheet.import.syntax");
+    EXPECT_TRUE(stylesheet.dependencies().at("theme/main.css").contains("theme/valid.css"));
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).width.pixels(), 13.f);
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).height.pixels(), 17.f);
+}
+
 TEST(StyleSheetTest, PreservesStylesheetOnImportFailure) {
     constexpr char kBaselineStyles[] = "panel { width: 44px; }";
     constexpr char kMissingImport[] = "\n@import \"missing.css\";";
@@ -1476,6 +1666,7 @@ TEST(StyleSheetTest, PreservesStylesheetOnImportFailure) {
     ASSERT_FALSE(missingResult.errors.empty());
     EXPECT_EQ(missingResult.errors.front().code, "stylesheet.import.missing");
     EXPECT_EQ(missingResult.errors.front().line, std::size_t(2));
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).width.pixels(), 44.f);
 
     auto cycle = layer(kCycleImport);
     cycle.modules["cycle.css"] = kCycleModule;
@@ -1483,28 +1674,30 @@ TEST(StyleSheetTest, PreservesStylesheetOnImportFailure) {
     ASSERT_FALSE(cycleResult.ok());
     ASSERT_FALSE(cycleResult.errors.empty());
     EXPECT_EQ(cycleResult.errors.front().code, "stylesheet.import.cycle");
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).width.pixels(), 44.f);
 
     const auto traversalResult = stylesheet.loadRadiaLayers({StyleLayer{StyleOrigin::Skin, layer(kTraversalImport)}});
     ASSERT_FALSE(traversalResult.ok());
     ASSERT_FALSE(traversalResult.errors.empty());
     EXPECT_EQ(traversalResult.errors.front().code, "stylesheet.import.path_invalid");
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).width.pixels(), 44.f);
 
     auto malformed = layer(kMalformedImport);
     malformed.modules["broken.css"] = kMalformedModule;
     const auto malformedResult = stylesheet.loadRadiaLayers({StyleLayer{StyleOrigin::Skin, malformed}});
-    ASSERT_FALSE(malformedResult.ok());
-    ASSERT_FALSE(malformedResult.errors.empty());
-    EXPECT_EQ(malformedResult.errors.front().source, "theme/broken.css");
-    EXPECT_NE(malformedResult.errors.front().message.find("main.css -> broken.css"), std::string::npos);
+    ASSERT_TRUE(malformedResult.ok());
+    ASSERT_FALSE(malformedResult.warnings.empty());
+    EXPECT_EQ(malformedResult.warnings.front().source, "theme/broken.css");
+    EXPECT_TRUE(stylesheet.resolve("panel", "", {}, 0).width.isAuto());
 
     auto late = layer(kLateImport);
     late.modules["late.css"] = kLateModule;
     const auto lateResult = stylesheet.loadRadiaLayers({StyleLayer{StyleOrigin::Skin, late}});
-    ASSERT_FALSE(lateResult.ok());
-    ASSERT_FALSE(lateResult.errors.empty());
-    EXPECT_EQ(lateResult.errors.front().code, "stylesheet.import.order");
+    ASSERT_TRUE(lateResult.ok());
+    ASSERT_FALSE(lateResult.warnings.empty());
+    EXPECT_EQ(lateResult.warnings.front().code, "stylesheet.import.order");
 
-    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).width.pixels(), 44.f);
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).width.pixels(), 1.f);
 }
 
 TEST(StyleSheetTest, NormalizesSelectorNames) {
@@ -1533,14 +1726,14 @@ TEST(StyleSheetTest, NormalizesSelectorNames) {
     EXPECT_EQ(stylesheet.resolve("button", "123:bad.id", {}, 0).width.pixels(), 41.f);
 
     const auto invalidId = stylesheet.loadRadia(kInvalidIdSelector);
-    ASSERT_FALSE(invalidId.ok());
-    ASSERT_FALSE(invalidId.errors.empty());
-    EXPECT_EQ(invalidId.errors.front().code, "stylesheet.selector.id_invalid");
+    ASSERT_TRUE(invalidId.ok());
+    ASSERT_FALSE(invalidId.warnings.empty());
+    EXPECT_EQ(invalidId.warnings.front().code, "stylesheet.selector.id_invalid");
 
     const auto invalidPseudoElement = stylesheet.loadRadia(kInvalidPseudoElementSelector);
-    ASSERT_FALSE(invalidPseudoElement.ok());
-    ASSERT_FALSE(invalidPseudoElement.errors.empty());
-    EXPECT_EQ(invalidPseudoElement.errors.front().code, "stylesheet.selector.pseudo_element_invalid");
+    ASSERT_TRUE(invalidPseudoElement.ok());
+    ASSERT_FALSE(invalidPseudoElement.warnings.empty());
+    EXPECT_EQ(invalidPseudoElement.warnings.front().code, "stylesheet.selector.pseudo_element_invalid");
 }
 
 TEST(StyleSheetTest, ResolvesNestedInlineKbdSelectors) {
@@ -1562,9 +1755,9 @@ TEST(StyleSheetTest, ResolvesNestedInlineKbdSelectors) {
     EXPECT_NE(key.gap.fixedPixels(), 5.f);
 
     const auto rejectedPseudoElement = stylesheet.loadRadia(kRejectedKbdPseudoElement);
-    ASSERT_FALSE(rejectedPseudoElement.ok());
-    ASSERT_FALSE(rejectedPseudoElement.errors.empty());
-    EXPECT_EQ(rejectedPseudoElement.errors.front().code, "stylesheet.selector.pseudo_element_unknown");
+    ASSERT_TRUE(rejectedPseudoElement.ok());
+    ASSERT_FALSE(rejectedPseudoElement.warnings.empty());
+    EXPECT_EQ(rejectedPseudoElement.warnings.front().code, "stylesheet.selector.pseudo_element_unknown");
 }
 
 TEST(StyleSheetTest, PreservesNestedRuleOrder) {
@@ -1577,7 +1770,138 @@ TEST(StyleSheetTest, PreservesNestedRuleOrder) {
     EXPECT_FLOAT_EQ(style.color.b, 1.f);
 }
 
-TEST(StyleSheetTest, ReportsEachSharedImportFailure) {
+TEST(StyleSheetTest, PreservesRulesAcrossCSSTokenBoundaries) {
+    const std::string source =
+        R"(panel { width: 11px; content: "}"; background-image: url(icon\)name.svg); background-color: rgb(1, 2, 3); } /* } ; */ label { height: 13px; })";
+    StyleSheet stylesheet;
+    const auto result = stylesheet.loadRadia(source, "tokens.css");
+
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result.errors.empty());
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).width.pixels(), 11.f);
+    ASSERT_TRUE(stylesheet.resolve("panel", "", {}, 0).content.has_value());
+    EXPECT_EQ(*stylesheet.resolve("panel", "", {}, 0).content, "}");
+    ASSERT_EQ(stylesheet.resolve("panel", "", {}, 0).backgroundLayers.size(), std::size_t(1));
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).backgroundLayers.front().resource, "icon)name.svg");
+    EXPECT_EQ(stylesheet.resolve("label", "", {}, 0).height.pixels(), 13.f);
+}
+
+TEST(StyleSheetTest, DiscardsClosedCommentsWithoutChangingSelectors) {
+    StyleSheet stylesheet;
+    const auto result = stylesheet.loadRadia("button/**/.primary { width: 13px; }");
+
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result.warnings.empty());
+    EXPECT_EQ(stylesheet.resolve("button", "", {"primary"}, 0).width.pixels(), 13.f);
+}
+
+TEST(StyleSheetTest, ReportsUnclosedComments) {
+    StyleSheet stylesheet;
+    const auto result = stylesheet.loadRadia("panel { width: 13px; } /* unclosed", "comment.css");
+
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.warnings.size(), std::size_t(1));
+    EXPECT_EQ(result.warnings.front().code, "stylesheet.syntax.unclosed_comment");
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).width.pixels(), 13.f);
+}
+
+TEST(StyleSheetTest, KeepsValidDeclarationsAroundInvalidDeclaration) {
+    StyleSheet stylesheet;
+    const auto result = stylesheet.loadRadia("panel {\n  width: 11px;\n  malformed;\n  height: 13px;\n}", "declarations.css");
+
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.warnings.size(), std::size_t(1));
+    EXPECT_EQ(result.warnings.front().code, "stylesheet.declaration.invalid");
+    EXPECT_EQ(result.warnings.front().line, std::size_t(3));
+    EXPECT_EQ(result.warnings.front().column, std::size_t(3));
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).width.pixels(), 11.f);
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).height.pixels(), 13.f);
+}
+
+TEST(StyleSheetTest, KeepsQualifiedRulePreludeTogether) {
+    StyleSheet stylesheet;
+    const auto result = stylesheet.loadRadia("bogus; label { height: 13px; }", "qualified.css");
+
+    ASSERT_TRUE(result.ok());
+    ASSERT_FALSE(result.warnings.empty());
+    EXPECT_EQ(result.warnings.front().code, "stylesheet.selector.element_unknown");
+    EXPECT_TRUE(stylesheet.resolve("label", "", {}, 0).height.isAuto());
+}
+
+TEST(StyleSheetTest, RejectsDanglingChildCombinators) {
+    struct InvalidSelector {
+        const char* source;
+        const char* target;
+    };
+    const InvalidSelector cases[] = {
+        {"> label { height: 13px; }", "label"},
+        {"label > { height: 13px; }", "label"},
+        {"label > > input { height: 13px; }", "input"},
+        {"button { & > { height: 99px; } }", "button"},
+    };
+
+    for (const InvalidSelector& test : cases) {
+        SCOPED_TRACE(test.source);
+        StyleSheet stylesheet;
+        const auto result = stylesheet.loadRadia(test.source, "combinator.css");
+
+        ASSERT_TRUE(result.ok());
+        ASSERT_EQ(result.warnings.size(), std::size_t(1));
+        EXPECT_EQ(result.warnings.front().code, "stylesheet.selector.empty");
+        EXPECT_TRUE(stylesheet.resolve(test.target, "", {}, 0).height.isAuto());
+    }
+}
+
+TEST(StyleSheetTest, ReportsMalformedRootDeclarationOnce) {
+    StyleSheet stylesheet;
+    const auto result = stylesheet.loadRadia(":root { malformed; color: #ffffff; }", "root.css");
+
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.warnings.size(), std::size_t(1));
+    EXPECT_EQ(result.warnings.front().code, "stylesheet.declaration.invalid");
+}
+
+TEST(StyleSheetTest, KeepsNeighboringRulesAroundInvalidCSS) {
+    StyleSheet stylesheet;
+    const auto result = stylesheet.loadRadia("panel { width: 11px; } @media screen { panel { width: 99px; } } "
+                                             "button::unknown { width: 99px; } label { height: 13px; }",
+                                             "rules.css");
+
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.warnings.size(), std::size_t(2));
+    EXPECT_EQ(result.warnings[0].code, "stylesheet.at_rule.unsupported");
+    EXPECT_EQ(result.warnings[1].code, "stylesheet.selector.pseudo_element_unknown");
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).width.pixels(), 11.f);
+    EXPECT_EQ(stylesheet.resolve("label", "", {}, 0).height.pixels(), 13.f);
+}
+
+TEST(StyleSheetTest, KeepsEarlierRangeValuesBeforeAnUnclosedRule) {
+    StyleSheet stylesheet;
+    const auto result = stylesheet.loadRadia("panel { min-size: 11px 13px; }\nlabel { height: 13px;", "unclosed.css");
+
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.warnings.size(), std::size_t(1));
+    EXPECT_EQ(result.warnings.front().code, "stylesheet.syntax.unclosed_block");
+    const ComputedStyle style = stylesheet.resolve("panel", "", {}, 0);
+    ASSERT_TRUE(style.minHeight.has_value());
+    ASSERT_TRUE(style.minWidth.has_value());
+    EXPECT_EQ(style.minHeight->pixels, 11.f);
+    EXPECT_EQ(style.minWidth->pixels, 13.f);
+    EXPECT_EQ(stylesheet.resolve("label", "", {}, 0).height.pixels(), 13.f);
+}
+
+TEST(StyleSheetTest, SkipsAnInvalidSelectorListAsAWhole) {
+    StyleSheet stylesheet;
+    const auto result = stylesheet.loadRadia("panel, button::unknown { width: 99px; } panel { height: 13px; }");
+
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.warnings.size(), std::size_t(1));
+    EXPECT_EQ(result.warnings.front().code, "stylesheet.selector.pseudo_element_unknown");
+    EXPECT_TRUE(stylesheet.resolve("panel", "", {}, 0).width.isAuto());
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).height.pixels(), 13.f);
+}
+
+TEST(StyleSheetTest, ReportsEachSharedImportWarning) {
     constexpr char kEntrypointImports[] = "@import \"branch-a.css\"; @import \"branch-b.css\";";
     constexpr char kBranchA[] = "@import \"shared.css\"; panel { width: 10px; }";
     constexpr char kBranchB[] = "@import \"shared.css\"; panel { height: 20px; }";
@@ -1593,10 +1917,12 @@ TEST(StyleSheetTest, ReportsEachSharedImportFailure) {
     };
 
     const auto result = stylesheet.loadRadiaLayers({StyleLayer{StyleOrigin::Skin, layer}});
-    ASSERT_FALSE(result.ok());
-    ASSERT_EQ(result.errors.size(), std::size_t(2));
-    EXPECT_EQ(result.errors[0].source, "theme/shared.css");
-    EXPECT_EQ(result.errors[1].source, "theme/shared.css");
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.warnings.size(), std::size_t(2));
+    EXPECT_EQ(result.warnings[0].source, "theme/shared.css");
+    EXPECT_EQ(result.warnings[1].source, "theme/shared.css");
+    EXPECT_NE(result.warnings[0].message.find("Import chain:"), std::string::npos);
+    EXPECT_NE(result.warnings[1].message.find("Import chain:"), std::string::npos);
 }
 
 TEST(StyleSheetTest, MarksBorderStateLayoutAffecting) {

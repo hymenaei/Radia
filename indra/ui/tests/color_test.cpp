@@ -85,8 +85,8 @@ TEST(ColorTest, ParsesNamedColors) {
 }
 
 TEST(ColorTest, RejectsInvalidSyntax) {
-    for (const char* source : {"##ff880080", "rgba(255 128 0 / 50%)", "hsla(120 100% 50% / .5)", "#ggg", "rgb(1, 2, 3 / .5)", "hsl(0 1 1)",
-                               "color(1 2 3)", "lab(50%, 0, 0)"}) {
+    for (const char* source : {"##ff880080", "rgba(255 128 0 / 50%)", "hsla(120 100% 50% / .5)", "#ggg", "rgb(1, 2, 3 / .5)", "rgb(1, 2, 3,)",
+                               "hsl(1, 2%, 3%,)", "hsl(0 1 1)", "color(1 2 3)", "lab(50%, 0, 0)"}) {
         SCOPED_TRACE(Message() << "unsupported color notation: " << source);
         EXPECT_FALSE(parseColor(source).has_value());
     }

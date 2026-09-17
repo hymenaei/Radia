@@ -185,6 +185,7 @@ Element::ClassList& Element::ClassList::add(std::string_view className) {
     mElement.mClassOrder.push_back(std::move(ownedClass));
     mElement.setAttributeValue("class", serializeClassTokens(mElement.mClassOrder));
     mElement.invalidateStyleTree();
+    mElement.invalidateFollowingSiblingStyleTrees(true, true);
     return *this;
 }
 
@@ -193,6 +194,7 @@ Element::ClassList& Element::ClassList::remove(std::string_view className) {
     mElement.mClassOrder.erase(std::remove(mElement.mClassOrder.begin(), mElement.mClassOrder.end(), className), mElement.mClassOrder.end());
     mElement.setAttributeValue("class", serializeClassTokens(mElement.mClassOrder));
     mElement.invalidateStyleTree();
+    mElement.invalidateFollowingSiblingStyleTrees(true, true);
     return *this;
 }
 
@@ -227,6 +229,7 @@ bool Element::ClassList::replace(std::string_view oldClass, std::string_view new
 
     mElement.setAttributeValue("class", serializeClassTokens(mElement.mClassOrder));
     mElement.invalidateStyleTree();
+    mElement.invalidateFollowingSiblingStyleTrees(true, true);
     return true;
 }
 
@@ -275,6 +278,7 @@ void Element::setAttribute(std::string name, std::optional<std::string> value) {
         mId = value.value_or(std::string());
         setAttributeValue(std::move(name), std::move(value));
         invalidateStyleTree();
+        invalidateFollowingSiblingStyleTrees(true, true);
         return;
     }
     if (name == "class") {
@@ -299,6 +303,7 @@ void Element::setAttribute(std::string name, std::optional<std::string> value) {
         if (value) setAttributeValue(std::move(name), serializeClassTokens(mClassOrder));
         else setAttributeValue(std::move(name), std::nullopt);
         invalidateStyleTree();
+        invalidateFollowingSiblingStyleTrees(true, true);
         return;
     }
     if (name == "disabled") {
@@ -312,6 +317,7 @@ void Element::setAttribute(std::string name, std::optional<std::string> value) {
             }
         }
         if (!changed) invalidateStyleTree();
+        invalidateFollowingSiblingStyleTrees(true, true);
         return;
     }
     if (name == "hidden") {
@@ -319,6 +325,7 @@ void Element::setAttribute(std::string name, std::optional<std::string> value) {
         setAttributeValue(std::move(name), std::move(value));
         if (Surface* currentSurface = surface()) currentSurface->requestHitTestRefresh();
         invalidateStyleTree();
+        invalidateFollowingSiblingStyleTrees(true, true);
         invalidatePaint();
         if (Surface* currentSurface = surface()) currentSurface->elementBecameUnavailable(*this);
         return;
@@ -327,6 +334,7 @@ void Element::setAttribute(std::string name, std::optional<std::string> value) {
     const std::optional<std::string> authoredValue = value;
     setAttributeValue(std::move(name), std::move(value));
     invalidateStyleTree();
+    invalidateFollowingSiblingStyleTrees(true, true);
     onAttributeSet(attributeName, authoredValue);
 }
 
@@ -341,6 +349,7 @@ void Element::removeAttribute(std::string_view name) {
         mId.clear();
         removeAttributeValue(name);
         invalidateStyleTree();
+        invalidateFollowingSiblingStyleTrees(true, true);
         return;
     }
     if (name == "class") {
@@ -348,6 +357,7 @@ void Element::removeAttribute(std::string_view name) {
         mClassOrder.clear();
         removeAttributeValue(name);
         invalidateStyleTree();
+        invalidateFollowingSiblingStyleTrees(true, true);
         return;
     }
     if (name == "disabled") {
@@ -358,6 +368,7 @@ void Element::removeAttribute(std::string_view name) {
             if (Surface* currentSurface = surface()) currentSurface->requestHitTestRefresh();
         }
         if (!changed) invalidateStyleTree();
+        invalidateFollowingSiblingStyleTrees(true, true);
         return;
     }
     if (name == "hidden") {
@@ -365,11 +376,13 @@ void Element::removeAttribute(std::string_view name) {
         removeAttributeValue(name);
         if (Surface* currentSurface = surface()) currentSurface->requestHitTestRefresh();
         invalidateStyleTree();
+        invalidateFollowingSiblingStyleTrees(true, true);
         invalidatePaint();
         return;
     }
     removeAttributeValue(name);
     invalidateStyleTree();
+    invalidateFollowingSiblingStyleTrees(true, true);
     onAttributeRemoved(name);
 }
 
@@ -454,6 +467,7 @@ Element& Element::setId(std::string id) {
     if (mId.empty()) removeAttributeValue("id");
     else setAttributeValue("id", mId);
     invalidateStyleTree();
+    invalidateFollowingSiblingStyleTrees(true, true);
     return *this;
 }
 
@@ -925,6 +939,20 @@ void Element::invalidateStyleTree(bool layoutAffecting, bool propagateToDescenda
     else if (Surface* currentSurface = surface()) currentSurface->requestLayout();
 }
 
+void Element::invalidateFollowingSiblingStyleTrees(bool layoutAffecting, bool propagateToDescendants) {
+    for (Node* sibling = nextSibling(); sibling; sibling = sibling->nextSibling())
+        if (Element* element = sibling->asElement()) element->invalidateStyleTree(layoutAffecting, propagateToDescendants);
+}
+
+void Element::invalidateStyleTreesFrom(Node* firstChild, bool layoutAffecting, bool propagateToDescendants) {
+    bool active = false;
+    for (const NodePtr& childNode : mChildren) {
+        if (!active && childNode.get() == firstChild) active = true;
+        if (active)
+            if (Element* child = childNode->asElement()) child->invalidateStyleTree(layoutAffecting, propagateToDescendants);
+    }
+}
+
 void Element::invalidatePaint() {
     mInvalidationReasons.add(LayoutInvalidationReason::Paint);
     if (Surface* currentSurface = surface()) currentSurface->requestPaint();
@@ -943,12 +971,18 @@ const StyleSheet* Element::styleSheet() const {
 
 void Element::setState(ElementState state, bool enabled) {
     if (radia::ui::hasState(mStates, state) == enabled) return;
-    radia::ui::setState(mStates, state, enabled);
     const StyleSheet* styleSheet = this->styleSheet();
-    const bool layoutAffecting = !styleSheet || styleSheet->stateAffectsLayout(*this, state);
-    const bool propagateToDescendants = !styleSheet || styleSheet->stateAffectsDescendants(*this, state);
+    const bool oldLayoutAffecting = styleSheet && styleSheet->stateAffectsLayout(*this, state);
+    const bool oldDescendants = styleSheet && styleSheet->stateAffectsDescendants(*this, state);
+    const bool oldFollowingSiblings = styleSheet && styleSheet->stateAffectsFollowingSiblings(*this, state);
+    const bool oldHitTesting = styleSheet && styleSheet->stateAffectsHitTesting(*this, state);
+    radia::ui::setState(mStates, state, enabled);
+    const bool layoutAffecting = !styleSheet || oldLayoutAffecting || styleSheet->stateAffectsLayout(*this, state);
+    const bool propagateToDescendants = !styleSheet || oldDescendants || styleSheet->stateAffectsDescendants(*this, state);
     invalidateStyleTree(layoutAffecting, propagateToDescendants);
-    if (styleSheet && styleSheet->stateAffectsHitTesting(*this, state)) {
+    if (styleSheet && (oldFollowingSiblings || styleSheet->stateAffectsFollowingSiblings(*this, state)))
+        invalidateFollowingSiblingStyleTrees(layoutAffecting, propagateToDescendants);
+    if (styleSheet && (oldHitTesting || styleSheet->stateAffectsHitTesting(*this, state))) {
         if (Surface* currentSurface = surface()) currentSurface->requestHitTestRefresh();
     }
 }

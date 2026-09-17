@@ -95,6 +95,7 @@ std::string lower(std::string value);
 std::string normalizeCSSKeyword(std::string_view value);
 std::string normalizeCSSKeyword(const CSSTokenStream& stream, CSSTokenRange range);
 std::optional<CSSFunctionRange> parseCSSFunction(const CSSTokenStream& stream, CSSTokenRange range);
+std::optional<std::string> parseCSSUrl(const CSSTokenStream& stream, CSSTokenRange range);
 std::optional<CSSDimension> parseCSSDimension(const CSSTokenStream& stream, CSSTokenRange range);
 bool startsWith(const std::string& value, const std::string& prefix);
 bool endsWith(const std::string& value, const std::string& suffix);

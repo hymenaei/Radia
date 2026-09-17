@@ -44,7 +44,8 @@ private:
 
     using NodeOwners = std::vector<NodePtr>;
 
-    static void adopt(Node& node);
+    static void assignOwnerDocument(Node& node, Document* document);
+    static void adopt(Node& node, Document* document);
     static void validateChild(const Node& parent, const Node* child);
     static void validateDetachedSubtree(const Node& node);
     static void validateFragment(const Node& parent, const Fragment& fragment);

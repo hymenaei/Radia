@@ -37,6 +37,7 @@ using radia::ui::PaintCommandKind;
 using radia::ui::PointerButton;
 using radia::ui::RecordingPaintContext;
 using radia::ui::Rect;
+using radia::ui::ScrollbarMode;
 using radia::ui::StyleSheet;
 using radia::ui::Surface;
 using radia::ui::SurfaceFloaterDelegate;
@@ -205,6 +206,7 @@ TEST(FloatersTest, ReportsMoveCompletion) {
                              "floater > body { flex-grow: 1; }";
     ASSERT_TRUE(styleSheet.loadRadia(kMove).ok());
     Surface surface(styleSheet);
+    surface.setScrollLayoutOptions({ScrollbarMode::Overlay, surface.nativeLayoutMetrics()});
     surface.setViewport(200.f, 200.f);
     auto floater = makeFloater(false, true);
     HTMLFloaterElement* target = floater.get();
@@ -310,7 +312,7 @@ TEST(FloatersTest, MovesScrollableBodyClipWithFloater) {
     StyleSheet styleSheet;
     constexpr char kMove[] = "floater { display: flex; flex-direction: column; } "
                              "floater > head { height: 30px; display: flex; flex-direction: row; } "
-                             "floater > body { flex-grow: 1; overflow: auto; scrollbar-mode: overlay; }";
+                             "floater > body { flex-grow: 1; overflow: auto; }";
     ASSERT_TRUE(styleSheet.loadRadia(kMove).ok());
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
@@ -349,7 +351,7 @@ TEST(FloatersTest, KeepsBodyWithinWidth) {
     constexpr char kScrollableBody[] = "floater { display: flex; flex-direction: column; } "
                                        "floater > head { height: 30px; display: flex; flex-direction: row; } "
                                        "floater > body { display: flex; flex-direction: column; flex-grow: 1; min-size: 0px; margin: 8px; gap: 8px; "
-                                       "overflow: auto; scrollbar-mode: classic; scrollbar-gutter: stable; } "
+                                       "overflow: auto; scrollbar-gutter: stable; } "
                                        "#sections { display: flex; flex-direction: column; width: 100%; } "
                                        "#section { display: flex; flex-direction: column; width: 100%; padding: 8px; box-sizing: border-box; } "
                                        "#copy { text-wrap: wrap; }";
@@ -393,7 +395,7 @@ TEST(FloatersTest, KeepsScrollbarInBody) {
         "floater { display: flex; flex-direction: column; } "
         "floater > head { height: 30px; display: flex; flex-direction: row; } "
         "floater > body { display: flex; flex-direction: column; flex-grow: 1; min-size: 0px; margin: 8px; overflow: auto; "
-        "scrollbar-mode: classic; } #wide { display: block; width: 500px; height: 20px; }";
+        "} #wide { display: block; width: 500px; height: 20px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kScrollableBody).ok());
 
     Surface surface(styleSheet);
@@ -420,10 +422,11 @@ TEST(FloatersTest, KeepsScrollbarInBody) {
 
 TEST(FloatersTest, KeepsScrollbarsInsideFloaterBorder) {
     StyleSheet styleSheet;
-    constexpr char kBorderedScrollableFloater[] = "floater { display: flex; flex-direction: column; border: 2px #ffffff; border-radius: 12px; } "
-                                                  "floater > head { height: 30px; display: flex; flex-direction: row; } "
-                                                  "floater > body { flex-grow: 1; min-size: 0px; overflow: auto; "
-                                                  "scrollbar-mode: classic; } #tall { display: block; height: 500px; }";
+    constexpr char kBorderedScrollableFloater[] =
+        "floater { display: flex; flex-direction: column; border: 2px solid #ffffff; border-radius: 12px; } "
+        "floater > head { height: 30px; display: flex; flex-direction: row; } "
+        "floater > body { flex-grow: 1; min-size: 0px; overflow: auto; "
+        "} #tall { display: block; height: 500px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kBorderedScrollableFloater).ok());
 
     Surface surface(styleSheet);
@@ -472,10 +475,11 @@ TEST(FloatersTest, KeepsScrollbarsInsideFloaterBorder) {
 
 TEST(FloatersTest, KeepsResizeCursorOverScrollbar) {
     StyleSheet styleSheet;
-    constexpr char kBorderedScrollableFloater[] = "floater { display: flex; flex-direction: column; border: 2px #ffffff; border-radius: 12px; } "
-                                                  "floater > head { height: 30px; display: flex; flex-direction: row; } "
-                                                  "floater > body { flex-grow: 1; min-size: 0px; overflow: auto; "
-                                                  "scrollbar-mode: classic; } #tall { display: block; height: 500px; }";
+    constexpr char kBorderedScrollableFloater[] =
+        "floater { display: flex; flex-direction: column; border: 2px solid #ffffff; border-radius: 12px; } "
+        "floater > head { height: 30px; display: flex; flex-direction: row; } "
+        "floater > body { flex-grow: 1; min-size: 0px; overflow: auto; "
+        "} #tall { display: block; height: 500px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kBorderedScrollableFloater).ok());
 
     Surface surface(styleSheet);

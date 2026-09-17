@@ -6,7 +6,6 @@
 #include "linden_common.h"
 #include "paint/nativeappearance.h"
 #include <algorithm>
-#include <cmath>
 #include "paint/paintcontext.h"
 
 namespace radia::ui {
@@ -28,7 +27,8 @@ struct NativeInputPalette {
     Color hoveredControlBorder;
     Color pressedControlBorder;
     Color disabledControlBorder;
-    Color disabledMark;
+    Color checkboxMark;
+    Color disabledCheckboxMark;
 };
 
 const NativeInputPalette kLightInputPalette{
@@ -40,19 +40,16 @@ const NativeInputPalette kLightInputPalette{
     {79.f / 255.f, 79.f / 255.f, 79.f / 255.f},
     {141.f / 255.f, 141.f / 255.f, 141.f / 255.f},
     {118.f / 255.f, 118.f / 255.f, 118.f / 255.f, 77.f / 255.f},
-    {1.f, 1.f, 1.f, .78f},
+    {1.f, 1.f, 1.f},
+    {1.f, 1.f, 1.f, 153.f / 255.f},
 };
 
 const NativeInputPalette kDarkInputPalette{
-    {10.f / 255.f, 132.f / 255.f, 1.f},
-    {154.f / 255.f, 161.f / 255.f, 172.f / 255.f, .55f},
-    {43.f / 255.f, 47.f / 255.f, 55.f / 255.f},
-    {43.f / 255.f, 47.f / 255.f, 55.f / 255.f, .55f},
-    {154.f / 255.f, 160.f / 255.f, 168.f / 255.f},
-    {195.f / 255.f, 200.f / 255.f, 208.f / 255.f},
-    {225.f / 255.f, 229.f / 255.f, 235.f / 255.f},
-    {154.f / 255.f, 160.f / 255.f, 168.f / 255.f, .5f},
-    {1.f, 1.f, 1.f, .75f},
+    {153.f / 255.f, 200.f / 255.f, 1.f},           {154.f / 255.f, 161.f / 255.f, 172.f / 255.f, .55f},
+    {43.f / 255.f, 47.f / 255.f, 55.f / 255.f},    {43.f / 255.f, 47.f / 255.f, 55.f / 255.f, .55f},
+    {154.f / 255.f, 160.f / 255.f, 168.f / 255.f}, {195.f / 255.f, 200.f / 255.f, 208.f / 255.f},
+    {225.f / 255.f, 229.f / 255.f, 235.f / 255.f}, {154.f / 255.f, 160.f / 255.f, 168.f / 255.f, .5f},
+    {59.f / 255.f, 59.f / 255.f, 59.f / 255.f},    {59.f / 255.f, 59.f / 255.f, 59.f / 255.f},
 };
 
 struct HslColor {
@@ -124,17 +121,9 @@ Color inputAccent(const NativeInputPaintRequest& request) {
     return fromHsl(adjusted, accent.a);
 }
 
-float relativeLuminance(const Color& color) {
-    const auto linear = [](float channel) {
-        channel = std::clamp(channel, 0.f, 1.f);
-        return channel <= .04045f ? channel / 12.92f : std::pow((channel + .055f) / 1.055f, 2.4f);
-    };
-    return .2126f * linear(color.r) + .7152f * linear(color.g) + .0722f * linear(color.b);
-}
-
 Color inputMarkColor(const NativeInputPaintRequest& request) {
-    if (request.disabled) return inputPalette(request).disabledMark;
-    return relativeLuminance(inputAccent(request)) >= .5f ? Color(0.f, 0.f, 0.f) : Color(1.f, 1.f, 1.f);
+    const NativeInputPalette& palette = inputPalette(request);
+    return request.disabled ? palette.disabledCheckboxMark : palette.checkboxMark;
 }
 
 Color scrollbarStateColor(Color color, const NativeScrollbarState& state, ScrollbarPart part) {
@@ -170,6 +159,7 @@ ComputedStyle nativeControlStyle(Color background, Color border, float radius, b
     ComputedStyle result;
     result.backgroundColor = background;
     result.borderColor = border;
+    result.borderStyle = bordered ? BorderStyle::Solid : BorderStyle::NoneValue;
     result.borderWidth = bordered ? EdgeInsets{1.f, 1.f, 1.f, 1.f} : EdgeInsets{};
     result.borderRadius = BorderRadii::uniform(Length{radius});
     return result;
@@ -201,6 +191,7 @@ void paintInputBase(NativeControlPaintContext& context, const Rect& bounds, Colo
 
     ComputedStyle borderStyle = nativeMarkStyle(Color(0.f, 0.f, 0.f, 0.f), radius);
     borderStyle.borderColor = border;
+    borderStyle.borderStyle = BorderStyle::Solid;
     borderStyle.borderWidth = {1.f, 1.f, 1.f, 1.f};
     paintNativeInputBox(context, bounds, borderStyle, opacity);
 }

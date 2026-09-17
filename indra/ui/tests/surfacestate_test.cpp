@@ -15,19 +15,24 @@
 #include "html/label.h"
 #include "html/panel.h"
 #include "paint/recordingpaintcontext.h"
+#include "style/stylepass.h"
 #include "surface/surface.h"
+#include "text/metrics.h"
 
 namespace {
 using radia::ui::ElementState;
+using radia::ui::FixedTextMetrics;
 using radia::ui::HTMLButtonElement;
 using radia::ui::HTMLFloaterElement;
 using radia::ui::HTMLInputElement;
 using radia::ui::HTMLLabelElement;
 using radia::ui::HTMLPanelElement;
 using radia::ui::RecordingPaintContext;
+using radia::ui::StylePass;
 using radia::ui::StyleSheet;
 using radia::ui::Surface;
 using radia::ui::Visibility;
+using radia::ui::detail::ElementInternalAccess;
 using radia::ui::detail::makeElement;
 using radia::ui::test::makeFloater;
 } // namespace
@@ -50,6 +55,55 @@ TEST(SurfaceStateTest, ReflowsOnHover) {
     ASSERT_TRUE(target->hasState(ElementState::Hovered));
     surface.updateLayout();
     EXPECT_FLOAT_EQ(target->rect().w, 40.f);
+    ElementInternalAccess::setState(*target, ElementState::Hovered, false);
+    surface.updateLayout();
+    EXPECT_FLOAT_EQ(target->rect().w, 20.f);
+}
+
+TEST(SurfaceStateTest, InvalidatesFollowingSiblingLayout) {
+    StyleSheet styleSheet;
+    constexpr char kSiblingStateLayout[] = "panel { display: flex; flex-direction: row; } button { width: 20px; height: 10px; } "
+                                           "label { width: 10px; height: 10px; } button:hover + label { width: 40px; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kSiblingStateLayout).ok());
+    Surface surface(styleSheet);
+    surface.setViewport(100.f, 100.f);
+    auto panel = makeElement<HTMLPanelElement>();
+    panel->setRect({0.f, 0.f, 100.f, 20.f});
+    auto button = makeElement<HTMLButtonElement>();
+    HTMLButtonElement* buttonTarget = button.get();
+    auto label = makeElement<HTMLLabelElement>();
+    HTMLLabelElement* labelTarget = label.get();
+    panel->append(std::move(button));
+    panel->append(std::move(label));
+    surface.mount(std::move(panel));
+
+    surface.updateLayout();
+    EXPECT_FLOAT_EQ(labelTarget->rect().w, 10.f);
+    ElementInternalAccess::setState(*buttonTarget, ElementState::Hovered, true);
+    surface.updateLayout();
+    EXPECT_FLOAT_EQ(labelTarget->rect().w, 40.f);
+    ElementInternalAccess::setState(*buttonTarget, ElementState::Hovered, false);
+    surface.updateLayout();
+    EXPECT_FLOAT_EQ(labelTarget->rect().w, 10.f);
+}
+
+TEST(SurfaceStateTest, InvalidatesTextDecorationDescendants) {
+    StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet.loadRadia("panel:hover { text-decoration: underline; }").ok());
+    Surface surface(styleSheet);
+    surface.setViewport(100.f, 100.f);
+    auto panel = makeElement<HTMLPanelElement>();
+    HTMLPanelElement* panelTarget = panel.get();
+    panel->setRect({0.f, 0.f, 100.f, 20.f}).setPointerEvents(true);
+    auto label = makeElement<HTMLLabelElement>("text");
+    HTMLLabelElement* labelTarget = label.get();
+    panel->append(std::move(label));
+    surface.mount(std::move(panel));
+
+    StylePass styles(styleSheet, FixedTextMetrics{});
+    EXPECT_EQ(styles.style(*labelTarget).textDecorationPropagation, radia::ui::TextDecoration::NoneValue);
+    ElementInternalAccess::setState(*panelTarget, ElementState::Hovered, true);
+    EXPECT_EQ(styles.style(*labelTarget).textDecorationPropagation, radia::ui::TextDecoration::Underline);
 }
 
 TEST(SurfaceStateTest, RefreshesHitTestingOnHover) {

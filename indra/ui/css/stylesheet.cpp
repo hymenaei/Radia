@@ -69,6 +69,8 @@ void resolveCurrentColors(ComputedStyle& style) {
         style.strokeColorLightDark.reset();
         style.strokeGradient.reset();
     }
+    for (BoxShadow& shadow : style.shadows)
+        if (shadow.currentColor) shadow.color = style.color;
 }
 
 void normalizeOverflow(ComputedStyle& style) {
@@ -77,11 +79,28 @@ void normalizeOverflow(ComputedStyle& style) {
     if (style.overflowY == Overflow::Visible && scrollable(style.overflowX)) style.overflowY = Overflow::Auto;
 }
 
+void resolveRelativeFontWeight(ComputedStyle& style, U16 inheritedWeight) {
+    if (!style.fontWeightAdjustment) return;
+    const bool lighter = style.fontWeightAdjustment->lighter;
+    const U16 weight = inheritedWeight;
+    if (lighter) style.fontWeight = weight < 100 ? weight : weight < 550 ? 100 : weight < 750 ? 400 : 700;
+    else style.fontWeight = weight < 350 ? 400 : weight < 550 ? 700 : weight < 900 ? 900 : weight;
+    style.fontWeightAdjustment.reset();
+}
+
+void resolvePercentageLineHeight(ComputedStyle& style) {
+    if (style.lineHeight.kind != LineHeight::Kind::Percentage) return;
+    style.lineHeight = {LineHeight::Kind::Length, style.fontSize * style.lineHeight.value};
+}
+
 void inheritStyle(ComputedStyle& style, const ComputedStyle& parent) {
     for (const detail::StylePropertyDefinition* property = detail::stylePropertyBegin(); property != detail::stylePropertyEnd(); ++property)
         if (property->inherit && (property->isInherited() || explicitlyInherits(style, property->name))) property->inherit(style, parent);
     style.specifiedInheritedProperties |= parent.specifiedInheritedProperties;
     style.explicitlyInheritedProperties.clear();
+    style.textDecorationPropagation =
+        static_cast<TextDecoration>(static_cast<unsigned>(parent.textDecorationPropagation) | static_cast<unsigned>(style.textDecoration));
+    resolveRelativeFontWeight(style, parent.fontWeight);
 }
 
 void applyOpacity(ComputedStyle& style, float inheritedOpacity) {
@@ -176,24 +195,11 @@ bool StyleSheet::stateAffectsDescendants(const Element& element, ElementState st
     return mImpl->ruleSet.stateAffectsDescendants(element, state);
 }
 
+bool StyleSheet::stateAffectsFollowingSiblings(const Element& element, ElementState state) const {
+    return mImpl->ruleSet.stateAffectsFollowingSiblings(element, state);
+}
+
 StyleRuleSet StyleModel::build() && {
     return StyleRuleSet(std::move(*this));
-}
-
-void StyleModel::setColorToken(const std::string& name, const Color& color) {
-    colorTokens[name] = color;
-}
-void StyleModel::setNumberToken(const std::string& name, float value) {
-    numberTokens[name] = value;
-}
-
-Color StyleModel::colorToken(const std::string& name, const Color& fallback) const {
-    const auto found = colorTokens.find(name);
-    return found == colorTokens.end() ? fallback : found->second;
-}
-
-float StyleModel::numberToken(const std::string& name, float fallback) const {
-    const auto found = numberTokens.find(name);
-    return found == numberTokens.end() ? fallback : found->second;
 }
 } // namespace radia::ui

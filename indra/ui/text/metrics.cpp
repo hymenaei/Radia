@@ -20,7 +20,9 @@ float TextMetrics::usedLetterSpacing(const ComputedStyle& style) const {
 }
 
 Vec2 FixedTextMetrics::measureText(const std::string& text, const ComputedStyle& style) const {
-    const float lineHeight = std::ceil(style.lineHeight ? style.lineHeight->pixels : style.fontSize);
+    const float lineHeight = std::ceil(style.lineHeight.kind == LineHeight::Kind::Length       ? style.lineHeight.value
+                                           : style.lineHeight.kind == LineHeight::Kind::Normal ? style.fontSize
+                                                                                               : style.fontSize * style.lineHeight.value);
     if (text.empty()) return {0.f, lineHeight};
     const LLWString wide = utf8str_to_wstring(text);
     const std::size_t codepointCount = wide.size();

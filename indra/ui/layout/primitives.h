@@ -92,7 +92,7 @@ void applyFlexBasis(ChildLayout& child, FlexDirection flexDirection, float avail
 void distributeFlexSpace(std::vector<ChildLayout>& children, std::size_t begin, std::size_t end, FlexDirection flexDirection, float availableMain,
                          bool allowGrowth, float& total);
 float verticalAlignmentOffset(VerticalAlign alignment, float freeSpace);
-CrossAlignment crossAlignment(const ComputedStyle& parent, const ComputedStyle& child, FlexDirection flexDirection);
+CrossAlignment crossAlignment(const ComputedStyle& parent, const ComputedStyle& child);
 void applyCrossAxisSizing(Vec2& size, const ComputedStyle& style, FlexDirection flexDirection, float availableCross, CrossAlignment alignment);
 float rowAlignmentOffset(JustifyContent alignment, LayoutDirection direction, float freeSpace);
 float textAlignmentOffset(TextAlign alignment, LayoutDirection direction, float freeSpace);
@@ -102,8 +102,8 @@ struct GridTrackSizes {
     std::vector<float> rows;
 };
 GridTrackSizes gridTrackSizes(const std::vector<ChildLayout>& children, std::optional<float> availableWidth = std::nullopt,
-                              std::optional<float> availableHeight = std::nullopt);
-Rect positionedRect(const ChildLayout& child, const Rect& parent, VerticalAlign verticalAlignment);
+                              std::optional<float> availableHeight = std::nullopt, float columnGap = 0.f, float rowGap = 0.f);
+Rect positionedRect(const ChildLayout& child, const Rect& parent);
 Rect relativeRect(const ChildLayout& child, const Rect& rect, const Rect& containingBlock);
 Rect translatedRect(const ChildLayout& child, const Rect& rect);
 void setArrangedRect(Element& node, const Rect& rect);

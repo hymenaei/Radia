@@ -81,21 +81,22 @@ const ComputedStyle& StylePass::style(const Element& element) {
     const ElementRef<const Element> styledRef(&element);
     const Element* parent = elementSnapshot.parent;
     const std::uint64_t contextRevision = element.styleContextRevision();
-    ComputedStyle resolved = mStyleSheet.resolveElement(element, mDirection);
+    std::optional<ComputedStyle> parentStyle;
+    if (parent) {
+        const ConstElementVisit parentSnapshot(*parent);
+        const ComputedStyle& inherited = style(*parent);
+        if (styledRef.get() && elementSnapshot.styleValid() && parentSnapshot.get() && parentSnapshot.styleValid()) parentStyle = inherited;
+    }
+    ComputedStyle resolved = mStyleSheet.resolveElement(element, mDirection, parentStyle ? &parentStyle->customProperties : nullptr);
     const Element* current = styledRef.get();
     const auto transient = [&]() -> const ComputedStyle& {
         mStyleStorage.emplace_back(std::move(resolved));
         return mStyleStorage.back();
     };
     if (!current || !elementSnapshot.styleValid()) return transient();
-    if (parent) {
-        const ConstElementVisit parentSnapshot(*parent);
-        const ComputedStyle& parentStyle = style(*parent);
-        current = styledRef.get();
-        const Element* currentParent = parentSnapshot.get();
-        if (!current || !currentParent || !elementSnapshot.styleValid() || !parentSnapshot.styleValid()) return transient();
-        inheritStyle(resolved, parentStyle);
-    }
+    if (parentStyle) inheritStyle(resolved, *parentStyle);
+    else resolved.textDecorationPropagation = resolved.textDecoration;
+    resolvePercentageLineHeight(resolved);
     element.constrainResolvedStyle(resolved);
     normalizeOverflow(resolved);
     resolveLightDarkColors(resolved);
@@ -113,9 +114,10 @@ const ComputedStyle& StylePass::style(const Element& element) {
 ComputedStyle StylePass::style(PseudoElement& pseudoElement) {
     const Element& owner = pseudoElement.originatingElement();
     const ComputedStyle& ownerStyle = style(owner);
-    ComputedStyle resolved = mStyleSheet.resolvePseudoElement(owner, pseudoElement.name(), mDirection);
     const ComputedStyle& parentStyle = pseudoElement.parentPseudoElement() ? style(*pseudoElement.parentPseudoElement()) : ownerStyle;
+    ComputedStyle resolved = mStyleSheet.resolvePseudoElement(owner, pseudoElement.name(), mDirection, &parentStyle.customProperties);
     inheritStyle(resolved, parentStyle);
+    resolvePercentageLineHeight(resolved);
     resolved.appearance = ownerStyle.appearance;
     normalizeOverflow(resolved);
     resolveLightDarkColors(resolved);

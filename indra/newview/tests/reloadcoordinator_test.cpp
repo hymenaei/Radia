@@ -278,8 +278,8 @@ TEST_F(SkinReloadCoordinatorTest, ReloadsImportedStylesheets) {
 
 TEST_F(SkinReloadCoordinatorTest, RetriesAfterDependencyFix) {
     const auto start = SkinReloadCoordinator::TimePoint{} + 1s;
-    snapshotSource.snapshot =
-        importedStyleSnapshot("@import \"used.css\";", {{"used.css", "floater { width: 300px; }"}, {"new.css", "floater { width: invalid; }"}});
+    snapshotSource.snapshot = importedStyleSnapshot(
+        "@import \"used.css\";", {{"used.css", "floater { width: 300px; }"}, {"new.css", "@import \"missing.css\"; floater { width: 300px; }"}});
     coordinator.request();
     const auto baseline = update();
     ASSERT_TRUE(baseline.has_value());
@@ -291,8 +291,8 @@ TEST_F(SkinReloadCoordinatorTest, RetriesAfterDependencyFix) {
     ASSERT_TRUE(enabled->ok());
     EXPECT_EQ(system.generation(), 3ULL);
 
-    snapshotSource.snapshot =
-        importedStyleSnapshot("@import \"new.css\";", {{"used.css", "floater { width: 300px; }"}, {"new.css", "floater { width: invalid; }"}});
+    snapshotSource.snapshot = importedStyleSnapshot(
+        "@import \"new.css\";", {{"used.css", "floater { width: 300px; }"}, {"new.css", "@import \"missing.css\"; floater { width: 300px; }"}});
     EXPECT_FALSE(update(start + 250ms).has_value());
     const auto rejected = update(start + 500ms);
     ASSERT_TRUE(rejected.has_value());

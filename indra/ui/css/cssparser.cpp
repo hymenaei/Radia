@@ -34,23 +34,37 @@ using detail::startsWith;
 using detail::trim;
 using detail::trimCSSRange;
 
-bool isColorValue(const CSSTokenStream& stream, detail::CSSTokenRange range) {
-    if (isColorSyntax(stream, range)) return true;
-    const auto function = detail::parseCSSFunction(stream, range);
-    return function && function->name == "var";
+std::optional<ElementState> stateBit(std::string_view state) {
+    if (state == "hover") return ElementState::Hovered;
+    if (state == "active") return ElementState::Active;
+    if (state == "focus") return ElementState::Focused;
+    if (state == "focus-visible") return ElementState::FocusVisible;
+    if (state == "disabled") return ElementState::Disabled;
+    if (state == "checked") return ElementState::Checked;
+    if (state == "minimized") return ElementState::Minimized;
+    if (state == "invalid") return ElementState::Invalid;
+    if (state == "indeterminate") return ElementState::Indeterminate;
+    return std::nullopt;
+}
+
+std::string stateName(ElementState state) {
+    switch (state) {
+        case ElementState::Hovered: return "hover";
+        case ElementState::Active: return "active";
+        case ElementState::Focused: return "focus";
+        case ElementState::Disabled: return "disabled";
+        case ElementState::Checked: return "checked";
+        case ElementState::FocusVisible: return "focus-visible";
+        case ElementState::Minimized: return "minimized";
+        case ElementState::Invalid: return "invalid";
+        case ElementState::Indeterminate: return "indeterminate";
+        case ElementState::Default: break;
+    }
+    return {};
 }
 
 bool isSupportedState(const std::string& state) {
-    return state.empty()
-        || state == "hover"
-        || state == "active"
-        || state == "focus"
-        || state == "focus-visible"
-        || state == "disabled"
-        || state == "checked"
-        || state == "minimized"
-        || state == "invalid"
-        || state == "indeterminate";
+    return state.empty() || stateBit(state).has_value();
 }
 
 std::size_t findUnescaped(std::string_view value, char target, std::size_t start = 0) {
@@ -66,9 +80,9 @@ std::size_t findUnescaped(std::string_view value, char target, std::size_t start
             ++index;
             continue;
         }
-        if (token.kind == CSSTokenKind::OpenBracket && target == '[') return token.begin;
-        if (token.kind == CSSTokenKind::CloseBracket && target == ']') return token.begin;
-        if (token.kind == CSSTokenKind::Hash && target == '#') return token.begin;
+        if (token.kind == CSSTokenKind::OpenBracket && target == '[' && token.begin >= start) return token.begin;
+        if (token.kind == CSSTokenKind::CloseBracket && target == ']' && token.begin >= start) return token.begin;
+        if (token.kind == CSSTokenKind::Hash && target == '#' && token.begin >= start) return token.begin;
         if (token.kind == CSSTokenKind::Function || token.kind == CSSTokenKind::OpenParen || token.kind == CSSTokenKind::OpenBracket) {
             index = skipCSSComponent(stream, index, tokens.size());
             continue;
@@ -100,6 +114,12 @@ std::size_t findUnescapedSequence(std::string_view value, std::string_view targe
     return std::string_view::npos;
 }
 
+bool isColumnCombinator(const CSSTokenStream& stream, std::size_t index, std::size_t end) {
+    if (index + 1 >= end || stream.tokens()[index].kind != CSSTokenKind::Delim || stream.text(index) != "|") return false;
+    const CSSToken& next = stream.tokens()[index + 1];
+    return next.kind == CSSTokenKind::Delim && stream.text(index + 1) == "|" && next.begin == stream.tokens()[index].end;
+}
+
 std::size_t consumeSelectorComponent(std::string_view value, std::size_t position) {
     const CSSTokenStream stream(value);
     const auto& tokens = stream.tokens();
@@ -110,7 +130,12 @@ std::size_t consumeSelectorComponent(std::string_view value, std::size_t positio
             continue;
         }
         if (isCSSTrivia(token.kind)) return token.begin;
-        if (token.kind == CSSTokenKind::Delim && stream.text(index) == ">") return token.begin;
+        if (token.kind == CSSTokenKind::Delim
+            && (stream.text(index) == ">"
+                || stream.text(index) == "+"
+                || stream.text(index) == "~"
+                || isColumnCombinator(stream, index, tokens.size())))
+            return token.begin;
         if (token.kind == CSSTokenKind::Function || token.kind == CSSTokenKind::OpenParen || token.kind == CSSTokenKind::OpenBracket) {
             index = skipCSSComponent(stream, index, tokens.size());
             continue;
@@ -118,6 +143,20 @@ std::size_t consumeSelectorComponent(std::string_view value, std::size_t positio
         ++index;
     }
     return value.size();
+}
+
+struct LeadingSelectorCombinator {
+    SelectorCombinator value;
+    std::size_t length;
+};
+
+std::optional<LeadingSelectorCombinator> leadingSelectorCombinator(std::string_view value) {
+    if (value.rfind("||", 0) == 0) return LeadingSelectorCombinator{SelectorCombinator::Column, 2};
+    if (value.empty()) return std::nullopt;
+    if (value.front() == '>') return LeadingSelectorCombinator{SelectorCombinator::Child, 1};
+    if (value.front() == '+') return LeadingSelectorCombinator{SelectorCombinator::NextSibling, 1};
+    if (value.front() == '~') return LeadingSelectorCombinator{SelectorCombinator::SubsequentSibling, 1};
+    return std::nullopt;
 }
 
 bool isValidCSSIdentifier(std::string_view value) {
@@ -144,8 +183,13 @@ bool isExactRootSelector(const CSSTokenStream& stream, detail::CSSTokenRange ran
 }
 
 void appendSelectorState(StyleSelector& selector, const std::string& state) {
-    if (selector.state.empty()) selector.state = state;
-    else selector.state += ":" + state;
+    if (const std::optional<ElementState> bit = stateBit(state)) {
+        selector.stateMask |= static_cast<std::uint16_t>(*bit);
+        ++selector.stateSpecificity;
+        return;
+    }
+    selector.stateSyntaxInvalid = true;
+    selector.invalidState = state;
 }
 
 void parsePseudoClasses(std::string& token, StyleSelector& result) {
@@ -165,6 +209,7 @@ void parsePseudoClasses(std::string& token, StyleSelector& result) {
         const std::string pseudoClass = normalizeCSSKeyword(stream, ranges[index]);
         if (pseudoClass == "root") {
             result.root = true;
+            ++result.rootSpecificity;
             continue;
         }
         const CSSTokenStream pseudoStream(pseudoClass);
@@ -183,9 +228,15 @@ void parsePseudoClasses(std::string& token, StyleSelector& result) {
                 : lower(decodeCSSIdentifier(functionText.substr(0, functionText.size() - 1)));
             if (functionName == "dir" && close != detail::kNoMatchingCSSToken && close == last) {
                 const std::string value = normalizeCSSKeyword(pseudoStream, {function + 1, close});
-                if (value == "ltr" && !result.direction) result.direction = LayoutDirection::LeftToRight;
-                else if (value == "rtl" && !result.direction) result.direction = LayoutDirection::RightToLeft;
-                else result.directionSyntaxInvalid = true;
+                const LayoutDirection parsed = value == "rtl" ? LayoutDirection::RightToLeft : LayoutDirection::LeftToRight;
+                if ((value == "ltr" || value == "rtl") && (!result.direction || *result.direction == parsed)) {
+                    result.direction = parsed;
+                    ++result.directionSpecificity;
+                } else result.directionSyntaxInvalid = true;
+                continue;
+            }
+            if (!functionName.empty()) {
+                result.functionSyntaxUnsupported = true;
                 continue;
             }
         }
@@ -197,11 +248,9 @@ void parsePseudoClasses(std::string& token, StyleSelector& result) {
     }
 }
 
-std::optional<ElementState> targetSpecificState(const std::string& state) {
-    if (state == "checked") return ElementState::Checked;
-    if (state == "minimized") return ElementState::Minimized;
-    if (state == "invalid") return ElementState::Invalid;
-    if (state == "indeterminate") return ElementState::Indeterminate;
+std::optional<ElementState> targetSpecificState(std::uint16_t stateMask) {
+    for (const ElementState state : {ElementState::Checked, ElementState::Minimized, ElementState::Invalid, ElementState::Indeterminate})
+        if ((stateMask & static_cast<std::uint16_t>(state)) != 0) return state;
     return std::nullopt;
 }
 
@@ -366,23 +415,32 @@ StyleSelector mergeSelector(const StyleSelector& parent, const StyleSelector& ch
     StyleSelector result;
     result.universal = child.universal ? true : parent.universal;
     result.root = parent.root || child.root;
+    result.rootSpecificity = parent.rootSpecificity + child.rootSpecificity;
     result.attributeSyntaxInvalid = parent.attributeSyntaxInvalid || child.attributeSyntaxInvalid;
     result.idSyntaxInvalid = parent.idSyntaxInvalid || child.idSyntaxInvalid;
     result.classSyntaxInvalid = parent.classSyntaxInvalid || child.classSyntaxInvalid;
     result.directionSyntaxInvalid = parent.directionSyntaxInvalid || child.directionSyntaxInvalid;
+    result.functionSyntaxUnsupported = parent.functionSyntaxUnsupported || child.functionSyntaxUnsupported;
     result.element = child.element.empty() ? parent.element : child.element;
     result.attributes = parent.attributes;
     result.attributes.insert(result.attributes.end(), child.attributes.begin(), child.attributes.end());
-    result.id = child.id.empty() ? parent.id : child.id;
-    result.className = child.className.empty() ? parent.className : child.className;
-    result.state = parent.state;
+    result.ids = parent.ids;
+    result.ids.insert(result.ids.end(), child.ids.begin(), child.ids.end());
+    result.classNames = parent.classNames;
+    result.classNames.insert(result.classNames.end(), child.classNames.begin(), child.classNames.end());
+    result.stateMask = parent.stateMask;
+    result.stateSpecificity = parent.stateSpecificity;
+    result.stateSyntaxInvalid = parent.stateSyntaxInvalid || child.stateSyntaxInvalid;
+    result.invalidState = parent.stateSyntaxInvalid ? parent.invalidState : child.invalidState;
     result.pseudoElementSyntaxInvalid =
         parent.pseudoElementSyntaxInvalid || child.pseudoElementSyntaxInvalid || (!parent.pseudoElement.empty() && !child.pseudoElement.empty());
     result.direction = child.direction ? child.direction : parent.direction;
-    if (!child.state.empty()) {
-        if (parent.pseudoElement.empty()) result.state = child.state;
+    result.directionSpecificity = parent.directionSpecificity + child.directionSpecificity;
+    if (child.stateMask != 0) {
+        if (parent.pseudoElement.empty()) result.stateMask |= child.stateMask;
         else result.pseudoElementSyntaxInvalid = true;
     }
+    result.stateSpecificity += child.stateSpecificity;
     result.pseudoElement = child.pseudoElement.empty() ? parent.pseudoElement : child.pseudoElement;
     return result;
 }
@@ -522,21 +580,21 @@ StyleRule expandNestedSelector(const StyleRule& parent, const std::string& rawSe
     if (selector.empty()) return {};
 
     if (selector.front() != '&') {
-        const bool child = selector.front() == '>';
-        const std::string suffix = trim(selector.substr(child ? 1 : 0));
+        const std::optional<LeadingSelectorCombinator> leading = leadingSelectorCombinator(selector);
+        const std::string suffix = trim(selector.substr(leading ? leading->length : 0));
         if (suffix.empty()) return {};
-        appendSelector(result, detail::parseSelector(suffix), child ? SelectorCombinator::Child : SelectorCombinator::Descendant);
+        appendSelector(result, detail::parseSelector(suffix), leading ? leading->value : SelectorCombinator::Descendant);
         return result;
     }
 
     const std::string tail = selector.substr(1);
     if (tail.empty()) return result;
-    if (isCSSWhitespace(tail.front()) || tail.front() == '>') {
+    if (isCSSWhitespace(tail.front()) || leadingSelectorCombinator(tail)) {
         const std::string trimmedTail = trim(tail);
-        const bool child = !trimmedTail.empty() && trimmedTail.front() == '>';
-        const std::string suffix = trim(trimmedTail.substr(child ? 1 : 0));
+        const std::optional<LeadingSelectorCombinator> leading = leadingSelectorCombinator(trimmedTail);
+        const std::string suffix = trim(trimmedTail.substr(leading ? leading->length : 0));
         if (suffix.empty()) return {};
-        appendSelector(result, detail::parseSelector(suffix), child ? SelectorCombinator::Child : SelectorCombinator::Descendant);
+        appendSelector(result, detail::parseSelector(suffix), leading ? leading->value : SelectorCombinator::Descendant);
         return result;
     }
 
@@ -546,10 +604,10 @@ StyleRule expandNestedSelector(const StyleRule& parent, const std::string& rawSe
         result.selectors.back() = mergeSelector(result.selectors.back(), continuation.selectors.front());
     if (split < tail.size()) {
         const std::string remainder = trim(tail.substr(split));
-        const bool child = !remainder.empty() && remainder.front() == '>';
-        const std::string suffix = trim(remainder.substr(child ? 1 : 0));
+        const std::optional<LeadingSelectorCombinator> leading = leadingSelectorCombinator(remainder);
+        const std::string suffix = trim(remainder.substr(leading ? leading->length : 0));
         if (suffix.empty()) return {};
-        appendSelector(result, detail::parseSelector(suffix), child ? SelectorCombinator::Child : SelectorCombinator::Descendant);
+        appendSelector(result, detail::parseSelector(suffix), leading ? leading->value : SelectorCombinator::Descendant);
     }
     return result;
 }
@@ -582,24 +640,32 @@ StyleSelector parseSimpleSelector(const std::string& selectorText) {
     }
     parsePseudoClasses(token, result);
     parseAttributeSelector(token, result);
-    if (const std::size_t separator = findUnescaped(token, '#'); separator != std::string::npos) {
-        const std::string value = token.substr(separator + 1);
-        if (!isValidCSSIdentifier(value)) result.idSyntaxInvalid = true;
-        else result.id = decodeCSSIdentifier(value);
-        token.erase(separator);
+    const std::size_t idSeparator = findUnescaped(token, '#');
+    const std::size_t classSeparator = findUnescaped(token, '.');
+    const std::size_t firstIdentity = std::min(idSeparator, classSeparator);
+    const std::string element = firstIdentity == std::string_view::npos ? token : token.substr(0, firstIdentity);
+    if (firstIdentity != std::string_view::npos) {
+        for (std::size_t separator = firstIdentity; separator < token.size();) {
+            const char marker = token[separator];
+            const std::size_t nextId = findUnescaped(token, '#', separator + 1);
+            const std::size_t nextClass = findUnescaped(token, '.', separator + 1);
+            const std::size_t next = std::min(nextId, nextClass);
+            const std::string value = token.substr(separator + 1, next == std::string_view::npos ? std::string::npos : next - separator - 1);
+            if (!isValidCSSIdentifier(value))
+                if (marker == '#') result.idSyntaxInvalid = true;
+                else result.classSyntaxInvalid = true;
+            else if (marker == '#') result.ids.push_back(decodeCSSIdentifier(value));
+            else result.classNames.push_back(decodeCSSIdentifier(value));
+            if (next == std::string_view::npos) break;
+            separator = next;
+        }
     }
-    if (const std::size_t separator = findUnescaped(token, '.'); separator != std::string::npos) {
-        const std::string value = token.substr(separator + 1);
-        if (!isValidCSSIdentifier(value)) result.classSyntaxInvalid = true;
-        else result.className = decodeCSSIdentifier(value);
-        token.erase(separator);
-    }
-    result.universal = token == "*";
+    result.universal = element == "*";
     if (!result.universal) {
-        const CSSTokenStream elementStream(token);
+        const CSSTokenStream elementStream(element);
         if (elementStream.tokens().size() == 1 && elementStream.tokens().front().kind == CSSTokenKind::Ident)
             result.element = decodeCSSIdentifier(elementStream.text(0));
-        else result.element = token;
+        else result.element = element;
     }
     return result;
 }
@@ -860,11 +926,21 @@ StyleRule detail::parseSelector(const CSSTokenStream& stream, detail::CSSTokenRa
     while (position < range.end) {
         while (position < range.end && isCSSTrivia(stream.tokens()[position].kind)) ++position;
         if (position >= range.end) break;
-        if (stream.tokens()[position].kind == CSSTokenKind::Delim && stream.text(position) == ">") {
+        if (stream.tokens()[position].kind == CSSTokenKind::Delim
+            && (stream.text(position) == ">" || stream.text(position) == "+" || stream.text(position) == "~")) {
             if (expectingComponent) return {};
-            pending = SelectorCombinator::Child;
+            pending = stream.text(position) == ">" ? SelectorCombinator::Child
+                : stream.text(position) == "+"     ? SelectorCombinator::NextSibling
+                                                   : SelectorCombinator::SubsequentSibling;
             expectingComponent = true;
             ++position;
+            continue;
+        }
+        if (isColumnCombinator(stream, position, range.end)) {
+            if (expectingComponent) return {};
+            pending = SelectorCombinator::Column;
+            expectingComponent = true;
+            position += 2;
             continue;
         }
 
@@ -872,7 +948,12 @@ StyleRule detail::parseSelector(const CSSTokenStream& stream, detail::CSSTokenRa
         while (position < range.end) {
             const CSSToken& token = stream.tokens()[position];
             if (isCSSTrivia(token.kind)) break;
-            if (token.kind == CSSTokenKind::Delim && stream.text(position) == ">") break;
+            if (token.kind == CSSTokenKind::Delim
+                && (stream.text(position) == ">"
+                    || stream.text(position) == "+"
+                    || stream.text(position) == "~"
+                    || isColumnCombinator(stream, position, range.end)))
+                break;
             if (token.kind == CSSTokenKind::Function
                 || token.kind == CSSTokenKind::OpenParen
                 || token.kind == CSSTokenKind::OpenBracket
@@ -960,9 +1041,12 @@ bool validateSelector(StyleRule& rule, const std::string& selector, StyleSheetLo
             warning("stylesheet.selector.state_unknown", "Invalid :dir() selector: " + selector + ".");
             return false;
         }
-        if (!isSupportedState(component.state)) {
-            const std::string& state = component.state;
-            warning("stylesheet.selector.state_unknown", "Unknown selector state: " + state + ".");
+        if (component.stateSyntaxInvalid) {
+            warning("stylesheet.selector.state_unknown", "Unknown selector state: " + component.invalidState + ".");
+            return false;
+        }
+        if (component.functionSyntaxUnsupported) {
+            warning("stylesheet.selector.function_unsupported", "Selector functions are not supported: " + selector + ".");
             return false;
         }
         if (!declarationComponent && !component.pseudoElement.empty()) {
@@ -983,7 +1067,7 @@ bool validateSelector(StyleRule& rule, const std::string& selector, StyleSheetLo
             continue;
         }
         if (canonicalizeHTMLName(component.element) == kKbdTag.localName) {
-            if (!component.attributes.empty() || !component.id.empty() || !component.className.empty()) {
+            if (!component.attributes.empty() || !component.ids.empty() || !component.classNames.empty()) {
                 warning("stylesheet.selector.inline_identity_unsupported",
                         "Inline style elements do not have Element IDs, classes, or attributes: " + selector + ".");
                 return false;
@@ -996,7 +1080,8 @@ bool validateSelector(StyleRule& rule, const std::string& selector, StyleSheetLo
             continue;
         }
         const HTMLTag componentTag = lookupHTMLTag(component.element);
-        const ElementSelectorMetadata metadata = inspectElementSelector(componentTag, component.pseudoElement, targetSpecificState(component.state));
+        const std::optional<ElementState> targetedState = targetSpecificState(component.stateMask);
+        const ElementSelectorMetadata metadata = inspectElementSelector(componentTag, component.pseudoElement, targetedState);
         if (!metadata.known) {
             warning("stylesheet.selector.element_unknown", "Unknown element element: " + component.element + ".");
             return false;
@@ -1007,8 +1092,9 @@ bool validateSelector(StyleRule& rule, const std::string& selector, StyleSheetLo
                     "Unknown pseudo-element for " + component.element + ": " + component.pseudoElement + ".");
             return false;
         }
-        if (targetSpecificState(component.state) && !metadata.elementProducesState)
-            warning("stylesheet.selector.state_never_matches", "State :" + component.state + " is never produced by " + component.element + ".");
+        if (targetedState && !metadata.elementProducesState)
+            warning("stylesheet.selector.state_never_matches",
+                    "State :" + stateName(*targetedState) + " is never produced by " + component.element + ".");
     }
     return true;
 }
@@ -1050,6 +1136,27 @@ bool hasInvalidCSSComponent(const CSSTokenStream& stream, detail::CSSTokenRange 
     return false;
 }
 
+bool containsCSSFunction(const CSSTokenStream& stream, detail::CSSTokenRange range, std::string_view name) {
+    for (std::size_t index = range.begin; index < range.end;) {
+        const CSSToken& token = stream.tokens()[index];
+        if (token.kind == CSSTokenKind::Function) {
+            const std::string_view text = stream.text(index);
+            if (!text.empty() && text.back() == '(' && lower(decodeCSSIdentifier(text.substr(0, text.size() - 1))) == name) return true;
+        }
+        if (token.kind == CSSTokenKind::Function
+            || token.kind == CSSTokenKind::OpenParen
+            || token.kind == CSSTokenKind::OpenBracket
+            || token.kind == CSSTokenKind::OpenBrace) {
+            if (token.matching != detail::kNoMatchingCSSToken
+                && token.matching < range.end
+                && containsCSSFunction(stream, {index + 1, token.matching}, name))
+                return true;
+            index = skipCSSComponent(stream, index, range.end);
+        } else ++index;
+    }
+    return false;
+}
+
 void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& selector, const CSSTokenStream& stream, detail::CSSTokenRange bodyRange,
                    bool rootRule, StyleParsePass pass, StyleSheetLoadResult& result, const std::string& sourceName) {
     const auto& tokens = stream.tokens();
@@ -1058,12 +1165,15 @@ void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& select
         const auto [line, column] = detail::cssSourcePosition(stream.source(), offset);
         result.warning(std::move(code), std::move(message), sourceName, line, column);
     };
+    std::vector<CustomPropertyDeclaration> customProperties;
     std::vector<StyleDeclaration> declarations;
     const auto flushDeclarations = [&] {
-        if (declarations.empty()) return;
+        if (declarations.empty() && customProperties.empty()) return;
         StyleRule declarationRule = rule;
+        declarationRule.customProperties = std::move(customProperties);
         declarationRule.declarations = std::move(declarations);
         model.addRule(declarationRule);
+        customProperties.clear();
         declarations.clear();
     };
     const auto addDeclaration = [&](detail::CSSTokenRange rawRange) {
@@ -1089,7 +1199,12 @@ void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& select
             return;
         }
         const std::string decodedName = decodeCSSIdentifier(stream.text(nameRange.begin));
-        const bool tokenDeclaration = startsWith(decodedName, "--");
+        const bool customPropertyName = startsWith(decodedName, "--");
+        const bool tokenDeclaration = customPropertyName && decodedName.size() > 2;
+        if (customPropertyName && !tokenDeclaration) {
+            warning("stylesheet.declaration.invalid", "Custom property name must contain a name after --.", range.begin);
+            return;
+        }
         const std::string name = tokenDeclaration ? decodedName : lower(decodedName);
         if (pass == StyleParsePass::Tokens && !tokenDeclaration) return;
         if (pass == StyleParsePass::Rules && rootRule && tokenDeclaration) return;
@@ -1099,28 +1214,13 @@ void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& select
         }
         const detail::CSSTokenRange valueRange = trimCSSRange(stream, {*colon + 1, range.end});
         const std::string value = trim(detail::serializeCSSRange(stream, valueRange));
-        if (name.empty() || valueRange.begin == valueRange.end || value.empty()) {
+        if (name.empty() || (!tokenDeclaration && (valueRange.begin == valueRange.end || value.empty()))) {
             warning("stylesheet.declaration.invalid", "Declaration property and value must not be empty.", range.begin);
             return;
         }
-        if (startsWith(name, "--")) {
-            if (!rootRule) {
-                warning("stylesheet.token.root_required", "Style Tokens may be declared only in :root: " + name + ".", range.begin);
-                return;
-            }
-            if (pass == StyleParsePass::Rules) return;
-            if (isColorValue(stream, valueRange)) {
-                const Color marker(-1.f, -1.f, -1.f, -1.f);
-                const Color parsed = model.parseColorValue({stream, valueRange}, marker);
-                if (parsed.a < 0.f)
-                    warning("stylesheet.token.value_invalid", "Invalid color token value for " + name + ": " + value + ".", range.begin);
-                else model.setColorToken(name, parsed);
-            } else {
-                const float parsed = model.parseNumberValue({stream, valueRange}, std::numeric_limits<float>::quiet_NaN());
-                if (!std::isfinite(parsed))
-                    warning("stylesheet.token.value_invalid", "Invalid number token value for " + name + ": " + value + ".", range.begin);
-                else model.setNumberToken(name, parsed);
-            }
+        if (tokenDeclaration) {
+            if ((pass == StyleParsePass::Tokens) != rootRule) return;
+            customProperties.push_back({name, CustomPropertyValue{value}});
             return;
         }
         if (pass == StyleParsePass::Tokens) return;
@@ -1134,7 +1234,8 @@ void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& select
             return;
         }
         StyleSheetLoadResult declarationResult;
-        if (auto compiled = model.compileDeclaration(*descriptor, stream, valueRange, selector, declarationResult, sourceName))
+        if (containsCSSFunction(stream, valueRange, "var")) declarations.emplace_back(*descriptor, DeferredStyleValue{value});
+        else if (auto compiled = StyleModel::compileDeclaration(*descriptor, stream, valueRange, selector, declarationResult, sourceName))
             declarations.insert(declarations.end(), std::make_move_iterator(compiled->begin()), std::make_move_iterator(compiled->end()));
         result.append(std::move(declarationResult));
     };
@@ -1184,7 +1285,7 @@ void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& select
         ++index;
     }
     if (start < bodyRange.end) addDeclaration({start, bodyRange.end});
-    if (pass == StyleParsePass::Rules) flushDeclarations();
+    flushDeclarations();
 }
 } // namespace
 

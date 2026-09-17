@@ -9,7 +9,9 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
+#include "css/rules.h"
 #include "css/stylesheet.h"
 #include "dom/document.h"
 #include "dom/elementinternal.h"
@@ -30,12 +32,12 @@ using radia::ui::BackgroundAttachment;
 using radia::ui::BackgroundBox;
 using radia::ui::BackgroundRepeat;
 using radia::ui::BackgroundSizeMode;
+using radia::ui::BlurFilter;
 using radia::ui::Color;
 using radia::ui::ColorScheme;
 using radia::ui::ComputedStyle;
 using radia::ui::CursorStyle;
 using radia::ui::Document;
-using radia::ui::EffectKind;
 using radia::ui::Element;
 using radia::ui::ElementState;
 using radia::ui::FixedTextMetrics;
@@ -48,6 +50,8 @@ using radia::ui::HTMLInputElement;
 using radia::ui::HTMLLabelElement;
 using radia::ui::HTMLPanelElement;
 using radia::ui::LayoutDirection;
+using radia::ui::LinearBlurFilter;
+using radia::ui::LineHeight;
 using radia::ui::MaskComposite;
 using radia::ui::MaskLayer;
 using radia::ui::MaskMode;
@@ -57,13 +61,15 @@ using radia::ui::PointerEvents;
 using radia::ui::RadialGradientShape;
 using radia::ui::ResourceLayer;
 using radia::ui::ScrollbarGutter;
-using radia::ui::ScrollbarMode;
 using radia::ui::ScrollbarWidth;
+using radia::ui::SelectorCombinator;
 using radia::ui::StyleLayer;
 using radia::ui::StyleOrigin;
 using radia::ui::StylePass;
+using radia::ui::StyleRule;
 using radia::ui::StyleSheet;
 using radia::ui::TextAlign;
+using radia::ui::TextDecoration;
 using radia::ui::VerticalAlign;
 using radia::ui::Visibility;
 using radia::ui::detail::ElementInternalAccess;
@@ -192,7 +198,7 @@ TEST(StyleSheetTest, ParsesCommentSeparatedColorComponents) {
 }
 
 TEST(StyleSheetTest, ParsesBoxShorthands) {
-    constexpr char kBoxSpacingStyles[] = "panel { margin: 1px auto 3px -4px; padding: 5px 6px; gap: 7px; }";
+    constexpr char kBoxSpacingStyles[] = "panel { margin: 1px auto 3px -4px; padding: 5px 6px; gap: 7px 11px; }";
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kBoxSpacingStyles).ok());
@@ -203,8 +209,28 @@ TEST(StyleSheetTest, ParsesBoxShorthands) {
     EXPECT_EQ(style.margin.left.fixedPixels(), -4.f);
     EXPECT_FALSE(style.margin.left.isAuto());
     EXPECT_EQ(style.padding.left, 6.f);
-    EXPECT_EQ(style.gap.fixedPixels(), 7.f);
-    EXPECT_FALSE(style.gap.isAuto());
+    EXPECT_EQ(style.rowGap.fixedPixels(), 7.f);
+    EXPECT_EQ(style.columnGap.fixedPixels(), 11.f);
+}
+
+TEST(StyleSheetTest, ParsesGapLonghands) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia("panel { row-gap: 13px; column-gap: 17px; }").ok());
+
+    const ComputedStyle style = stylesheet.resolve("panel", "", {}, 0);
+    EXPECT_EQ(style.rowGap.fixedPixels(), 13.f);
+    EXPECT_EQ(style.columnGap.fixedPixels(), 17.f);
+}
+
+TEST(StyleSheetTest, AcceptsUnitlessShadowZero) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia("panel { box-shadow: 0 0 0 #123456; }").ok());
+
+    const ComputedStyle style = stylesheet.resolve("panel", "", {}, 0);
+    ASSERT_EQ(style.shadows.size(), std::size_t(1));
+    EXPECT_EQ(style.shadows.front().horizontal, 0.f);
+    EXPECT_EQ(style.shadows.front().vertical, 0.f);
+    EXPECT_EQ(style.shadows.front().blur, 0.f);
 }
 
 TEST(StyleSheetTest, DistinguishesFocusStates) {
@@ -269,16 +295,20 @@ TEST(StyleSheetTest, RejectsInvalidDeclarationPropertyNames) {
     EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).width.pixels(), 13.f);
 }
 
-TEST(StyleSheetTest, RejectsInvalidTokenValues) {
-    constexpr char kInvalidTokenStyles[] = ":root { --bad: nonsense; }";
+TEST(StyleSheetTest, AcceptsArbitraryCustomPropertyValues) {
+    constexpr char kCustomPropertyStyles[] = ":root { --bad: nonsense; --empty:; --number: .1; --case-token: MiXeD; } "
+                                             "panel.empty { width: var(--empty, 12px); } panel.fallback { width: var(--missing,); } "
+                                             "panel.boundary { opacity: var(--number)0; }";
 
     StyleSheet stylesheet;
-    const auto result = stylesheet.loadRadia(kInvalidTokenStyles, "tokens.css");
+    const auto result = stylesheet.loadRadia(kCustomPropertyStyles, "tokens.css");
 
     ASSERT_TRUE(result.ok());
-    ASSERT_FALSE(result.warnings.empty());
-    EXPECT_EQ(result.warnings.front().code, "stylesheet.token.value_invalid");
-    EXPECT_EQ(result.warnings.front().source, "tokens.css");
+    EXPECT_TRUE(result.warnings.empty());
+    EXPECT_TRUE(stylesheet.resolve("panel", "", {"empty"}, 0).width.isAuto());
+    EXPECT_TRUE(stylesheet.resolve("panel", "", {"fallback"}, 0).width.isAuto());
+    EXPECT_EQ(stylesheet.resolve("panel", "", {"boundary"}, 0).opacity, 1.f);
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).customProperties.at("--case-token").source, "MiXeD");
 }
 
 TEST(StyleSheetTest, RejectsReferencesToMissingTokens) {
@@ -288,8 +318,75 @@ TEST(StyleSheetTest, RejectsReferencesToMissingTokens) {
     const auto result = stylesheet.loadRadia(kMissingTokenStyles, "missing-token.css");
 
     ASSERT_TRUE(result.ok());
-    ASSERT_FALSE(result.warnings.empty());
-    EXPECT_EQ(result.warnings.front().source, "missing-token.css");
+    EXPECT_TRUE(result.warnings.empty());
+    EXPECT_TRUE(stylesheet.resolve("button", "", {}, 0).width.isAuto());
+}
+
+TEST(StyleSheetTest, InvalidCustomPropertySubstitutionUsesUnsetValue) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia("label { width: 24px; opacity: .5; } label.invalid { width: var(--missing); }").ok());
+
+    auto label = makeElementValue<HTMLLabelElement>();
+    label.classList().add("invalid");
+
+    const ComputedStyle style = computedStyle(stylesheet, label);
+    EXPECT_TRUE(style.width.isAuto());
+    EXPECT_EQ(style.opacity, .5f);
+}
+
+TEST(StyleSheetTest, ResolvesCustomPropertyFallbacksAndCycles) {
+    constexpr char kStyles[] = ":root { --inherited-width: 24px; --cycle-a: var(--cycle-b); --cycle-b: var(--cycle-a); color: #123456; } "
+                               "label { width: var(--inherited-width); opacity: .5; } "
+                               "label.fallback { height: var(--missing-height, 12px); min-width: var(--cycle-a, 8px); } "
+                               "label.invalid { height: var(--cycle-a); }";
+
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia(kStyles).ok());
+
+    auto root = makeElementValue<HTMLPanelElement>();
+    auto fallback = makeElement<HTMLLabelElement>();
+    fallback->classList().add("fallback");
+    HTMLLabelElement* fallbackPointer = fallback.get();
+    root.append(std::move(fallback));
+    auto invalid = makeElement<HTMLLabelElement>();
+    invalid->classList().add("invalid");
+    HTMLLabelElement* invalidPointer = invalid.get();
+    root.append(std::move(invalid));
+
+    const ComputedStyle fallbackStyle = computedStyle(stylesheet, *fallbackPointer);
+    EXPECT_EQ(fallbackStyle.width.pixels(), 24.f);
+    EXPECT_EQ(fallbackStyle.height.pixels(), 12.f);
+    ASSERT_TRUE(fallbackStyle.minWidth.has_value());
+    EXPECT_EQ(fallbackStyle.minWidth->pixels, 8.f);
+    EXPECT_NEAR(fallbackStyle.color.r, 0x12 / 255.f, 1.0e-4f);
+    EXPECT_EQ(fallbackStyle.opacity, .5f);
+
+    const ComputedStyle invalidStyle = computedStyle(stylesheet, *invalidPointer);
+    EXPECT_TRUE(invalidStyle.height.isAuto());
+    EXPECT_EQ(invalidStyle.width.pixels(), 24.f);
+    EXPECT_EQ(invalidStyle.opacity, .5f);
+}
+
+TEST(StyleSheetTest, DoesNotUseFallbackInsideCustomPropertyCycle) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia("label { --a: var(--b, 2px); --b: var(--a, 3px); width: var(--a, 7px); height: var(--a); }").ok());
+
+    auto label = makeElementValue<HTMLLabelElement>();
+    const ComputedStyle style = computedStyle(stylesheet, label);
+
+    EXPECT_EQ(style.width.pixels(), 7.f);
+    EXPECT_TRUE(style.height.isAuto());
+}
+
+TEST(StyleSheetTest, TreatsInitialCustomPropertyAsGuaranteedInvalid) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia("label { --token: initial; width: var(--token, 17px); height: var(--token); }").ok());
+
+    auto label = makeElementValue<HTMLLabelElement>();
+    const ComputedStyle style = computedStyle(stylesheet, label);
+
+    EXPECT_EQ(style.width.pixels(), 17.f);
+    EXPECT_TRUE(style.height.isAuto());
 }
 
 TEST(StyleSheetTest, MatchesChildSelectors) {
@@ -314,6 +411,150 @@ TEST(StyleSheetTest, IgnoresCommentsAroundChildCombinators) {
     auto button = makeElementValue<HTMLButtonElement>();
     Element& icon = appendIcon(button, "search");
     EXPECT_EQ(computedStyle(stylesheet, icon).width.pixels(), 19.f);
+}
+
+TEST(StyleSheetTest, MatchesSiblingSelectors) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia("label + button { width: 10px; } label ~ input { height: 12px; }").ok());
+
+    auto parent = makeElement<HTMLPanelElement>();
+    auto label = makeElement<HTMLLabelElement>();
+    auto button = makeElement<HTMLButtonElement>();
+    HTMLButtonElement* buttonPointer = button.get();
+    auto spacer = makeElement<HTMLPanelElement>();
+    auto input = makeElement<HTMLInputElement>();
+    HTMLInputElement* inputPointer = input.get();
+    parent->append(std::move(label));
+    parent->append(std::move(button));
+    parent->append(std::move(spacer));
+    parent->append(std::move(input));
+
+    EXPECT_EQ(computedStyle(stylesheet, *buttonPointer).width.pixels(), 10.f);
+    EXPECT_EQ(computedStyle(stylesheet, *inputPointer).height.pixels(), 12.f);
+}
+
+TEST(StyleSheetTest, BacktracksMixedSelectorAncestors) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia("label.lead ~ panel.branch label.target { width: 33px; }").ok());
+
+    auto root = makeElement<HTMLPanelElement>();
+    auto lead = makeElement<HTMLLabelElement>();
+    lead->classList().add("lead");
+    root->append(std::move(lead));
+
+    auto outerBranch = makeElement<HTMLPanelElement>();
+    outerBranch->classList().add("branch");
+    auto innerBranch = makeElement<HTMLPanelElement>();
+    innerBranch->classList().add("branch");
+    auto target = makeElement<HTMLLabelElement>();
+    target->classList().add("target");
+    HTMLLabelElement* targetPointer = target.get();
+    innerBranch->append(std::move(target));
+    outerBranch->append(std::move(innerBranch));
+    root->append(std::move(outerBranch));
+
+    const ComputedStyle style = computedStyle(stylesheet, *targetPointer);
+    ASSERT_FALSE(style.width.isAuto());
+    EXPECT_EQ(style.width.pixels(), 33.f);
+}
+
+TEST(StyleSheetTest, InvalidatesFollowingSiblingSelectorsOnMutation) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet
+                    .loadRadia("label.lead + button { width: 10px; } label#lead + button { height: 14px; } "
+                               "label[data-lead] ~ input { height: 12px; }")
+                    .ok());
+
+    auto parent = makeElement<HTMLPanelElement>();
+    auto label = makeElement<HTMLLabelElement>();
+    HTMLLabelElement* labelPointer = label.get();
+    auto button = makeElement<HTMLButtonElement>();
+    HTMLButtonElement* buttonPointer = button.get();
+    auto spacer = makeElement<HTMLPanelElement>();
+    auto input = makeElement<HTMLInputElement>();
+    HTMLInputElement* inputPointer = input.get();
+    parent->append(std::move(label));
+    parent->append(std::move(button));
+    parent->append(std::move(spacer));
+    parent->append(std::move(input));
+
+    StylePass styles(stylesheet, FixedTextMetrics{});
+    EXPECT_TRUE(styles.style(*buttonPointer).width.isAuto());
+    EXPECT_TRUE(styles.style(*buttonPointer).height.isAuto());
+    EXPECT_TRUE(styles.style(*inputPointer).height.isAuto());
+
+    labelPointer->classList().add("lead");
+    EXPECT_EQ(styles.style(*buttonPointer).width.pixels(), 10.f);
+    labelPointer->classList().remove("lead");
+    EXPECT_TRUE(styles.style(*buttonPointer).width.isAuto());
+
+    labelPointer->setId("lead");
+    EXPECT_EQ(styles.style(*buttonPointer).height.pixels(), 14.f);
+    labelPointer->setId("");
+    EXPECT_TRUE(styles.style(*buttonPointer).height.isAuto());
+
+    labelPointer->setAttribute("data-lead", "true");
+    EXPECT_EQ(styles.style(*inputPointer).height.pixels(), 12.f);
+    labelPointer->removeAttribute("data-lead");
+    EXPECT_TRUE(styles.style(*inputPointer).height.isAuto());
+
+    auto inserted = makeElement<HTMLLabelElement>();
+    inserted->classList().add("lead");
+    auto* insertedPointer = buttonPointer->before(std::move(inserted));
+    ASSERT_NE(insertedPointer, nullptr);
+    EXPECT_EQ(styles.style(*buttonPointer).width.pixels(), 10.f);
+    auto removed = insertedPointer->remove();
+    ASSERT_NE(removed, nullptr);
+    EXPECT_TRUE(styles.style(*buttonPointer).width.isAuto());
+}
+
+TEST(StyleSheetTest, ComparesSpecificityAsCSS) {
+    constexpr char kStyles[] = "button.a.b.c.d.e.f.g.h.i.j { width: 10px; } button#save { width: 20px; }";
+
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia(kStyles).ok());
+    auto button = makeElementValue<HTMLButtonElement>();
+    button.setId("save");
+    for (const char* className : {"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}) button.classList().add(className);
+
+    EXPECT_EQ(computedStyle(stylesheet, button).width.pixels(), 20.f);
+}
+
+TEST(StyleSheetTest, CountsRepeatedPseudoSpecificity) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia("button:hover:hover { width: 10px; } button:hover { width: 20px; }").ok());
+
+    auto button = makeElementValue<HTMLButtonElement>();
+    ElementInternalAccess::setState(button, ElementState::Hovered, true);
+    EXPECT_EQ(computedStyle(stylesheet, button).width.pixels(), 10.f);
+}
+
+TEST(StyleSheetTest, MatchesCompoundClassesAndStates) {
+    constexpr char kStyles[] = "button.primary.priority:hover:focus { width: 23px; } button.primary { width: 7px; }";
+
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia(kStyles).ok());
+    auto button = makeElementValue<HTMLButtonElement>();
+    button.classList().add("primary").add("priority");
+    ElementInternalAccess::setState(button, ElementState::Hovered, true);
+    ElementInternalAccess::setState(button, ElementState::Focused, true);
+
+    EXPECT_EQ(computedStyle(stylesheet, button).width.pixels(), 23.f);
+    ElementInternalAccess::setState(button, ElementState::Focused, false);
+    EXPECT_EQ(computedStyle(stylesheet, button).width.pixels(), 7.f);
+}
+
+TEST(StyleSheetTest, ParsesColumnCombinator) {
+    const StyleRule rule = radia::ui::detail::parseSelector("label || button");
+
+    ASSERT_EQ(rule.selectors.size(), std::size_t(2));
+    ASSERT_EQ(rule.combinators.size(), std::size_t(1));
+    EXPECT_EQ(rule.combinators.front(), SelectorCombinator::Column);
+
+    StyleSheet stylesheet;
+    const auto result = stylesheet.loadRadia("label || button { width: 10px; }");
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result.warnings.empty());
 }
 
 TEST(StyleSheetTest, MatchesCaseInsensitivePseudoStatesAndRootTokens) {
@@ -567,10 +808,10 @@ TEST(StyleSheetTest, SkipsInvalidRules) {
         {"panel { vertical-align: center; }", "stylesheet.property.value_invalid"},
         {"mystery { width: 10px; }", "stylesheet.selector.element_unknown"},
         {"label:cheked { opacity: .5; }", "stylesheet.selector.state_unknown"},
-        {"button { --local: 2px; }", "stylesheet.token.root_required"},
+        {"button { &:cheked { opacity: .5; } }", "stylesheet.selector.state_unknown"},
         {"label { order: 1.5; }", "stylesheet.property.value_invalid"},
         {"label { order: 1px; }", "stylesheet.property.value_invalid"},
-        {"panel { scrollbar-mode: native; }", "stylesheet.property.value_invalid"},
+        {"label:is(button) { order: 1; }", "stylesheet.selector.function_unsupported"},
         {"panel { scrollbar-width: wide; }", "stylesheet.property.value_invalid"},
         {"panel { scrollbar-gutter: stable auto; }", "stylesheet.property.value_invalid"},
     };
@@ -609,7 +850,7 @@ TEST(StyleSheetTest, SkipsNestedPseudoElements) {
 }
 
 TEST(StyleSheetTest, InheritsAllowedProperties) {
-    constexpr char kInheritedStyles[] = "panel { font-family: sans; font-size: 19px; font-weight: bold; "
+    constexpr char kInheritedStyles[] = "panel { font-family: sans-serif; font-size: 19px; font-weight: bold; "
                                         "font-style: italic; line-height: 23px; color: #204060ff; "
                                         "accent-color: #102030ff; "
                                         "text-align: center; vertical-align: bottom; cursor: grab; opacity: .5; "
@@ -629,12 +870,12 @@ TEST(StyleSheetTest, InheritsAllowedProperties) {
     parent->append(std::move(overridden));
 
     const ComputedStyle inheritedStyle = computedStyle(stylesheet, *inheritedLabel);
-    EXPECT_EQ(inheritedStyle.fontFamily, FontFamily::Sans);
+    EXPECT_EQ(inheritedStyle.fontFamily, FontFamily::SansSerif);
     EXPECT_EQ(inheritedStyle.fontSize, 19.f);
     EXPECT_EQ(inheritedStyle.fontWeight, static_cast<U16>(700));
     EXPECT_TRUE(inheritedStyle.fontItalic);
-    ASSERT_TRUE(inheritedStyle.lineHeight.has_value());
-    EXPECT_EQ(inheritedStyle.lineHeight->pixels, 23.f);
+    EXPECT_EQ(inheritedStyle.lineHeight.kind, LineHeight::Kind::Length);
+    EXPECT_EQ(inheritedStyle.lineHeight.value, 23.f);
     EXPECT_NEAR(inheritedStyle.color.b, 96.f / 255.f, 1.0e-4f);
     EXPECT_EQ(inheritedStyle.accentColor.kind, AccentColor::Kind::Color);
     EXPECT_NEAR(inheritedStyle.accentColor.color.r, 16.f / 255.f, 1.0e-4f);
@@ -648,6 +889,81 @@ TEST(StyleSheetTest, InheritsAllowedProperties) {
     const ComputedStyle overriddenStyle = computedStyle(stylesheet, *overriddenLabel);
     EXPECT_EQ(overriddenStyle.fontSize, 11.f);
     EXPECT_EQ(overriddenStyle.cursor, CursorStyle::Default);
+}
+
+TEST(StyleSheetTest, OmitsBorderStyleByDefault) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia("panel { border: 3px #123456; } panel.none { border-style: none; border-width: 4px; }").ok());
+
+    const ComputedStyle omitted = stylesheet.resolve("panel", "", {}, 0);
+    EXPECT_EQ(omitted.borderWidth.top, 3.f);
+    EXPECT_EQ(omitted.borderStyle, radia::ui::BorderStyle::NoneValue);
+
+    const ComputedStyle none = stylesheet.resolve("panel", "", {"none"}, 0);
+    EXPECT_EQ(none.borderWidth.top, 4.f);
+    EXPECT_EQ(none.borderStyle, radia::ui::BorderStyle::NoneValue);
+}
+
+TEST(StyleSheetTest, PropagatesTextDecorationWithoutInheritingProperty) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet
+                    .loadRadia("panel { text-decoration: underline; } label.explicit { text-decoration: line-through; } "
+                               "label.inherit { text-decoration: underline; text-decoration: inherit; }")
+                    .ok());
+
+    auto panel = makeElementValue<HTMLPanelElement>();
+    auto inherited = makeElement<HTMLLabelElement>();
+    HTMLLabelElement* inheritedPointer = inherited.get();
+    panel.append(std::move(inherited));
+    auto explicitDecoration = makeElement<HTMLLabelElement>();
+    explicitDecoration->classList().add("explicit");
+    HTMLLabelElement* explicitPointer = explicitDecoration.get();
+    panel.append(std::move(explicitDecoration));
+
+    const ComputedStyle parentStyle = computedStyle(stylesheet, panel);
+    EXPECT_EQ(parentStyle.textDecoration, TextDecoration::Underline);
+    EXPECT_EQ(parentStyle.textDecorationPropagation, TextDecoration::Underline);
+
+    const ComputedStyle inheritedStyle = computedStyle(stylesheet, *inheritedPointer);
+    EXPECT_EQ(inheritedStyle.textDecoration, TextDecoration::NoneValue);
+    EXPECT_EQ(inheritedStyle.textDecorationPropagation, TextDecoration::Underline);
+
+    auto inheritedDecoration = makeElement<HTMLLabelElement>();
+    inheritedDecoration->classList().add("inherit");
+    HTMLLabelElement* inheritedDecorationPointer = inheritedDecoration.get();
+    panel.append(std::move(inheritedDecoration));
+    const ComputedStyle explicitInheritanceStyle = computedStyle(stylesheet, *inheritedDecorationPointer);
+    EXPECT_EQ(explicitInheritanceStyle.textDecoration, TextDecoration::Underline);
+
+    const ComputedStyle explicitStyle = computedStyle(stylesheet, *explicitPointer);
+    const auto both =
+        static_cast<TextDecoration>(static_cast<unsigned>(TextDecoration::Underline) | static_cast<unsigned>(TextDecoration::LineThrough));
+    EXPECT_EQ(explicitStyle.textDecoration, TextDecoration::LineThrough);
+    EXPECT_EQ(explicitStyle.textDecorationPropagation, both);
+}
+
+TEST(StyleSheetTest, ResolvesRelativeFontWeights) {
+    constexpr char kStyles[] = "panel.w400 { font-weight: 400; } panel.w550 { font-weight: 550; } panel.w1000 { font-weight: 1000; } "
+                               "label.bolder { font-weight: bolder; } label.lighter { font-weight: lighter; }";
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia(kStyles).ok());
+
+    const auto childWeight = [&](const char* parentClass, const char* childClass) {
+        auto parent = makeElementValue<HTMLPanelElement>();
+        parent.classList().add(parentClass);
+        auto child = makeElement<HTMLLabelElement>("Child");
+        HTMLLabelElement* childPointer = child.get();
+        childPointer->classList().add(childClass);
+        parent.append(std::move(child));
+        return computedStyle(stylesheet, *childPointer).fontWeight;
+    };
+
+    EXPECT_EQ(childWeight("w400", "bolder"), static_cast<U16>(700));
+    EXPECT_EQ(childWeight("w400", "lighter"), static_cast<U16>(100));
+    EXPECT_EQ(childWeight("w550", "bolder"), static_cast<U16>(900));
+    EXPECT_EQ(childWeight("w550", "lighter"), static_cast<U16>(400));
+    EXPECT_EQ(childWeight("w1000", "bolder"), static_cast<U16>(1000));
+    EXPECT_EQ(childWeight("w1000", "lighter"), static_cast<U16>(700));
 }
 
 TEST(StyleSheetTest, ResolvesCSSWideInheritanceKeywords) {
@@ -791,19 +1107,15 @@ TEST(StyleSheetTest, SkipsMalformedBorderRadius) {
     }
 }
 
-TEST(StyleSheetTest, ParsesScrollbarPolicyProperties) {
-    constexpr char kScrollbarStyles[] =
-        "panel { scrollbar-mode: overlay; scrollbar-width: thin; scrollbar-gutter: stable both-edges; scrollbar-color: #112233 #445566; } "
-        "#classic { scrollbar-mode: classic; scrollbar-width: none; scrollbar-gutter: stable; } "
-        "#initial { scrollbar-mode: overlay; scrollbar-mode: initial; scrollbar-width: thin; scrollbar-width: initial; "
-        "scrollbar-gutter: stable both-edges; scrollbar-gutter: initial; scrollbar-color: #112233 #445566; scrollbar-color: initial; }";
+TEST(StyleSheetTest, ParsesScrollbarCSSProperties) {
+    constexpr char kScrollbarStyles[] = "panel { scrollbar-width: thin; scrollbar-gutter: stable both-edges; scrollbar-color: #112233 #445566; } "
+                                        "#classic { scrollbar-width: none; scrollbar-gutter: stable; } "
+                                        "#initial { scrollbar-width: initial; scrollbar-gutter: initial; scrollbar-color: initial; }";
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kScrollbarStyles).ok());
 
     const ComputedStyle overlay = stylesheet.resolve("panel", "", {}, 0);
-    EXPECT_EQ(overlay.scrollbarMode, ScrollbarMode::Overlay);
-    EXPECT_TRUE(overlay.scrollbarModeSet);
     EXPECT_EQ(overlay.scrollbarWidth, ScrollbarWidth::Thin);
     EXPECT_EQ(overlay.scrollbarGutter, ScrollbarGutter::StableBothEdges);
     EXPECT_FALSE(overlay.scrollbarColor.automatic);
@@ -812,14 +1124,10 @@ TEST(StyleSheetTest, ParsesScrollbarPolicyProperties) {
     EXPECT_NEAR(overlay.scrollbarColor.track.b, 0x66 / 255.f, 1.0e-6f);
 
     const ComputedStyle classic = stylesheet.resolve("panel", "classic", {}, 0);
-    EXPECT_EQ(classic.scrollbarMode, ScrollbarMode::Classic);
-    EXPECT_TRUE(classic.scrollbarModeSet);
     EXPECT_EQ(classic.scrollbarWidth, ScrollbarWidth::NoneValue);
     EXPECT_EQ(classic.scrollbarGutter, ScrollbarGutter::Stable);
 
     const ComputedStyle initial = stylesheet.resolve("panel", "initial", {}, 0);
-    EXPECT_EQ(initial.scrollbarMode, ScrollbarMode::Classic);
-    EXPECT_TRUE(initial.scrollbarModeSet);
     EXPECT_EQ(initial.scrollbarWidth, ScrollbarWidth::Auto);
     EXPECT_EQ(initial.scrollbarGutter, ScrollbarGutter::Auto);
     EXPECT_TRUE(initial.scrollbarColor.automatic);
@@ -906,9 +1214,10 @@ TEST(StyleSheetTest, ProjectsMinimizedState) {
 }
 
 TEST(StyleSheetTest, ParsesTypedDimensions) {
-    constexpr char kTypedLengthStyles[] = "panel { width: 40px; min-width: 20px; left: -8px; line-height: 18px; }";
+    constexpr char kTypedLengthStyles[] = "panel { width: 40px; min-width: 20px; min-height: 10; left: -8px; line-height: 18px; }";
     constexpr char kAutoDimensionStyles[] = "panel { width: 40px; height: 20px; width: auto; height: auto; } "
                                             "button { size: auto; } i { size: auto 16px; }";
+    constexpr char kUnitlessLineHeightStyles[] = "panel { font-size: 20px; line-height: 1.5; min-width: auto; min-height: auto; }";
     constexpr char kAutoGapStyles[] = "panel { gap: auto; }";
 
     StyleSheet stylesheet;
@@ -918,10 +1227,20 @@ TEST(StyleSheetTest, ParsesTypedDimensions) {
     EXPECT_EQ(style.width.pixels(), 40.f);
     ASSERT_TRUE(style.minWidth.has_value());
     EXPECT_EQ(style.minWidth->pixels, 20.f);
+    ASSERT_TRUE(style.minHeight.has_value());
+    EXPECT_EQ(style.minHeight->pixels, 10.f);
     ASSERT_TRUE(style.left.has_value());
     EXPECT_EQ(style.left->pixels, -8.f);
-    ASSERT_TRUE(style.lineHeight.has_value());
-    EXPECT_EQ(style.lineHeight->pixels, 18.f);
+    EXPECT_EQ(style.lineHeight.kind, LineHeight::Kind::Length);
+    EXPECT_EQ(style.lineHeight.value, 18.f);
+
+    StyleSheet unitlessStylesheet;
+    ASSERT_TRUE(unitlessStylesheet.loadRadia(kUnitlessLineHeightStyles).ok());
+    const ComputedStyle unitless = unitlessStylesheet.resolve("panel", "", {}, 0);
+    EXPECT_EQ(unitless.lineHeight.kind, LineHeight::Kind::Number);
+    EXPECT_EQ(unitless.lineHeight.value, 1.5f);
+    EXPECT_FALSE(unitless.minWidth.has_value());
+    EXPECT_FALSE(unitless.minHeight.has_value());
 
     ASSERT_TRUE(stylesheet.loadRadia(kAutoDimensionStyles).ok());
     const ComputedStyle automatic = stylesheet.resolve("panel", "", {}, 0);
@@ -934,10 +1253,15 @@ TEST(StyleSheetTest, ParsesTypedDimensions) {
     EXPECT_TRUE(mixedSize.height.isAuto());
     EXPECT_EQ(mixedSize.width.pixels(), 16.f);
 
-    ASSERT_TRUE(stylesheet.loadRadia(kAutoGapStyles).ok());
-    const ComputedStyle automaticGap = stylesheet.resolve("panel", "", {}, 0);
-    EXPECT_TRUE(automaticGap.gap.isAuto());
-    EXPECT_EQ(automaticGap.gap.fixedPixels(), 0.f);
+    const auto invalidGap = stylesheet.loadRadia(kAutoGapStyles);
+    ASSERT_TRUE(invalidGap.ok());
+    ASSERT_FALSE(invalidGap.warnings.empty());
+    EXPECT_EQ(invalidGap.warnings.front().code, "stylesheet.property.value_invalid");
+
+    const auto percentageGap = stylesheet.loadRadia("panel { gap: 10%; row-gap: 20%; column-gap: 30%; } panel.zero { gap: 0%; }");
+    ASSERT_TRUE(percentageGap.ok());
+    ASSERT_EQ(percentageGap.warnings.size(), std::size_t(4));
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).rowGap.fixedPixels(), 0.f);
 }
 
 TEST(StyleSheetTest, MatchesStructuralSelectors) {
@@ -983,20 +1307,21 @@ TEST(StyleSheetTest, MatchesStructuralSelectors) {
     EXPECT_NEAR(nestedStyle.bottom->percent, .1f, 1.0e-4f);
 }
 
-TEST(StyleSheetTest, ParsesVisualEffects) {
+TEST(StyleSheetTest, ParsesFilterOperations) {
     constexpr char kBoxEffectStyles[] = "panel { background-color: linear-gradient(to/**/right, #ff0000ff, "
                                         "rgb(0, 255, 0, 50%) 75%, #0000ffff); "
                                         "box-shadow: 1px 2px #11223344, 3px 4px 5px 6px "
                                         "rgb(10, 20, 30, 40%) inset; outline-offset: 3px; "
                                         "outline: light-dark(#abcdef88, #12345688) solid 2px; } panel.light { color-scheme: light; } "
                                         "label { outline: 1px dashed #ffffffff; }";
-    constexpr char kBlurEffectStyles[] = "panel { effect: background-blur(to/**/bottom, 0px 25%, 16px 75%), "
-                                         "layer-blur(4px); } button { effect: layer-blur(to/**/right, "
-                                         "0px 50%, 4px 50%); } label { effect: none; }";
+    constexpr char kFilterStyles[] = "panel { backdrop-filter: linear-blur(to bottom, 0px 25%, 16px 75%); "
+                                     "filter: linear-blur(to right, 2px 25%, 6px 75%) blur(4px); } "
+                                     "button { filter: linear-blur(8px); } label { --blur-radius: 4px; "
+                                     "filter: blur(var(--blur-radius)); backdrop-filter: none; }";
     constexpr char kGradientStyles[] = "panel { background-color: radial-gradient(circle at 25% 75%, "
                                        "#ffffffff, #00000000 80%); border-width: 3px; border-color: "
                                        "conic-gradient(from 45deg at top left, #ff0000ff 0deg 90deg, "
-                                       "#0000ffff 100%); } button { border: 2px "
+                                       "#0000ffff 100%); } button { border: 2px solid "
                                        "repeating-linear-gradient(90deg, #ffffffff 0%, #000000ff 20%); } "
                                        "input { background-color: repeating-radial-gradient(ellipse at center, "
                                        "#ffffffff 0%, #000000ff 25%); } floater { background-color: "
@@ -1025,22 +1350,43 @@ TEST(StyleSheetTest, ParsesVisualEffects) {
     EXPECT_EQ(stylesheet.resolve("label", "", {}, 0).outline.offset, 0.f);
     EXPECT_EQ(stylesheet.resolve("label", "", {}, 0).outline.style, radia::ui::OutlineStyle::Dashed);
 
-    ASSERT_TRUE(stylesheet.loadRadia(kBlurEffectStyles).ok());
-    const ComputedStyle effects = stylesheet.resolve("panel", "", {}, 0);
-    ASSERT_EQ(effects.effects.size(), std::size_t(2));
-    EXPECT_EQ(effects.effects[0].kind, EffectKind::BackgroundBlur);
-    EXPECT_EQ(effects.effects[0].startRadius, 0.f);
-    EXPECT_EQ(effects.effects[0].endRadius, 16.f);
-    EXPECT_NEAR(effects.effects[0].startPosition, .25f, 1.0e-4f);
-    EXPECT_NEAR(effects.effects[0].endPosition, .75f, 1.0e-4f);
-    EXPECT_EQ(effects.effects[0].angleDegrees, 180.f);
-    EXPECT_EQ(effects.effects[1].kind, EffectKind::LayerBlur);
-    EXPECT_EQ(effects.effects[1].endRadius, 4.f);
-    const ComputedStyle buttonEffects = stylesheet.resolve("button", "", {}, 0);
-    ASSERT_FALSE(buttonEffects.effects.empty());
-    EXPECT_TRUE(buttonEffects.effects[0].progressive());
-    EXPECT_EQ(buttonEffects.effects[0].angleDegrees, 90.f);
-    EXPECT_TRUE(stylesheet.resolve("label", "", {}, 0).effects.empty());
+    ASSERT_TRUE(stylesheet.loadRadia(kFilterStyles).ok());
+    const ComputedStyle filters = stylesheet.resolve("panel", "", {}, 0);
+    ASSERT_EQ(filters.backdropFilter.size(), std::size_t(1));
+    const LinearBlurFilter* backdrop = std::get_if<LinearBlurFilter>(&filters.backdropFilter.front());
+    ASSERT_NE(backdrop, nullptr);
+    ASSERT_EQ(backdrop->stops.size(), std::size_t(2));
+    EXPECT_EQ(backdrop->stops[0].stdDeviation, 0.f);
+    EXPECT_EQ(backdrop->stops[1].stdDeviation, 16.f);
+    EXPECT_EQ(backdrop->stops[0].position, .25f);
+    EXPECT_EQ(backdrop->stops[1].position, .75f);
+    EXPECT_EQ(backdrop->angleDegrees, 180.f);
+    ASSERT_EQ(filters.filter.size(), std::size_t(2));
+    const LinearBlurFilter* progressive = std::get_if<LinearBlurFilter>(&filters.filter[0]);
+    ASSERT_NE(progressive, nullptr);
+    ASSERT_EQ(progressive->stops.size(), std::size_t(2));
+    EXPECT_EQ(progressive->stops[0].stdDeviation, 2.f);
+    EXPECT_EQ(progressive->stops[1].stdDeviation, 6.f);
+    EXPECT_EQ(progressive->stops[0].position, .25f);
+    EXPECT_EQ(progressive->stops[1].position, .75f);
+    EXPECT_EQ(progressive->angleDegrees, 90.f);
+    const BlurFilter* uniform = std::get_if<BlurFilter>(&filters.filter[1]);
+    ASSERT_NE(uniform, nullptr);
+    EXPECT_EQ(uniform->stdDeviation, 4.f);
+    const ComputedStyle button = stylesheet.resolve("button", "", {}, 0);
+    const LinearBlurFilter* uniformLinear = std::get_if<LinearBlurFilter>(&button.filter.front());
+    ASSERT_NE(uniformLinear, nullptr);
+    ASSERT_EQ(uniformLinear->stops.size(), std::size_t(2));
+    EXPECT_EQ(uniformLinear->stops[0].stdDeviation, 8.f);
+    EXPECT_EQ(uniformLinear->stops[1].stdDeviation, 8.f);
+    EXPECT_EQ(uniformLinear->stops[0].position, 0.f);
+    EXPECT_EQ(uniformLinear->stops[1].position, 1.f);
+    const ComputedStyle label = stylesheet.resolve("label", "", {}, 0);
+    ASSERT_EQ(label.filter.size(), std::size_t(1));
+    const BlurFilter* nested = std::get_if<BlurFilter>(&label.filter.front());
+    ASSERT_NE(nested, nullptr);
+    EXPECT_EQ(nested->stdDeviation, 4.f);
+    EXPECT_TRUE(label.backdropFilter.empty());
 
     ASSERT_TRUE(stylesheet.loadRadia(kGradientStyles).ok());
     const ComputedStyle radial = stylesheet.resolve("panel", "", {}, 0);
@@ -1123,6 +1469,25 @@ TEST(StyleSheetTest, ParsesBackgroundMaskAndCursorLayers) {
     EXPECT_TRUE(references[2].cursor);
 }
 
+TEST(StyleSheetTest, PublishesDeferredResourceReferences) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet
+                    .loadRadia(":root { --background-image: url(icons/variable.svg); --mask-image: url(icons/variable-mask.svg); "
+                               "--pointer: url(cursors/variable.cur), pointer; } "
+                               "i { background-image: var(--background-image); mask-image: var(--mask-image); cursor: var(--pointer); }")
+                    .ok());
+
+    const auto& references = stylesheet.resourceReferences();
+    ASSERT_EQ(references.size(), 3U);
+    EXPECT_EQ(references[0].value, "icons/variable.svg");
+    EXPECT_FALSE(references[0].optional);
+    EXPECT_EQ(references[1].value, "icons/variable-mask.svg");
+    EXPECT_TRUE(references[1].optional);
+    EXPECT_EQ(references[2].value, "cursors/variable.cur");
+    EXPECT_FALSE(references[2].optional);
+    EXPECT_TRUE(references[2].cursor);
+}
+
 TEST(StyleSheetTest, ParsesMaskShorthand) {
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia("i { mask: url(icons/mask.svg) alpha; }").ok());
@@ -1153,7 +1518,7 @@ TEST(StyleSheetTest, DecodesEscapedValueFunctionsAndUnits) {
     constexpr char kStyles[] = R"(:root { --accent: #204060; } panel {
         background-color: v\61 r(--accent);
         border-color: linear-g\72 adient(red, blue);
-        effect: layer-bl\75 r(4px);
+        filter: bl\75 r(4px);
         width: 17p\78;
     })";
 
@@ -1164,9 +1529,10 @@ TEST(StyleSheetTest, DecodesEscapedValueFunctionsAndUnits) {
     EXPECT_NEAR(style.backgroundColor.r, 32.f / 255.f, 1.0e-4f);
     ASSERT_TRUE(style.borderGradient.has_value());
     EXPECT_EQ(style.borderGradient->kind, GradientKind::Linear);
-    ASSERT_EQ(style.effects.size(), std::size_t(1));
-    EXPECT_EQ(style.effects.front().kind, EffectKind::LayerBlur);
-    EXPECT_EQ(style.effects.front().startRadius, 4.f);
+    ASSERT_EQ(style.filter.size(), std::size_t(1));
+    const BlurFilter* filter = std::get_if<BlurFilter>(&style.filter.front());
+    ASSERT_NE(filter, nullptr);
+    EXPECT_EQ(filter->stdDeviation, 4.f);
     EXPECT_EQ(style.width.pixels(), 17.f);
 }
 
@@ -1343,7 +1709,7 @@ TEST(StyleSheetTest, DoesNotApplyInheritedOpacityToMaskCoverage) {
     EXPECT_FLOAT_EQ(style.maskLayers[0].image.gradient->stops[1].color.a, .4f);
 }
 
-TEST(StyleSheetTest, SkipsInvalidBoxEffects) {
+TEST(StyleSheetTest, SkipsInvalidFilters) {
     const char* invalidSources[] = {
         "panel { background-color: linear-gradient(#fff); }",
         "panel { background-color: radial-gradient(square, #fff, #000); }",
@@ -1355,24 +1721,29 @@ TEST(StyleSheetTest, SkipsInvalidBoxEffects) {
         "panel { border: 1px ButtonBorder; }",
         "panel { color: ButtonText; }",
         "panel { outline: 10% #000; }",
+        "panel { outline: 0% #000; }",
         "panel { outline: 1px 2px #000; }",
         "panel { outline-offset: 0%; }",
         "panel { outline: 1px dashed solid #000; }",
         "panel { outline: #000 auto 1px; }",
         "panel { outline: -focus-ring-color auto 1px; }",
-        "panel { effect: blur(4px); }",
-        "panel { effect: layer-blur(to bottom, 4px); }",
-        "panel { effect: background-blur(to nowhere, 0px 0%, 4px 100%); }",
-        "panel { effect: background-blur(to bottom, 0px, 4px 100%); }",
-        "panel { effect: background-blur(to bottom, 0px 75%, 4px 25%); }",
-        "panel { effect: layer-blur(-1px); }",
-        "panel { effect: layer-blur(2px), background-blur(4px); }",
-        "panel { effect: background-blur(2px) layer-blur(4px); }",
+        "panel { filter: blur(4); }",
+        "panel { filter: blur(-1px); }",
+        "panel { filter: blur(1%); }",
+        "panel { filter: blur(0%); }",
+        "panel { filter: blur(); }",
+        "panel { filter: blur(1px, 2px); }",
+        "panel { box-shadow: 0% 0% #000; }",
+        "panel { filter: brightness(1); }",
+        "panel { filter: blur(1px) none; }",
+        "panel { filter: linear-blur(to nowhere, 0px 0%, 4px 100%); }",
+        "panel { filter: linear-blur(0px 75%, 4px 25%); }",
+        "panel { filter: linear-blur(0px 0%, 4px 50%, 8px 100%); }",
     };
-    constexpr char kLargeBlurStyles[] = "panel { effect: layer-blur(64px); }";
+    constexpr char kLargeBlurStyles[] = "panel { filter: blur(64px); }";
 
     for (const char* source : invalidSources) {
-        SCOPED_TRACE(Message() << "invalid box effect: " << source);
+        SCOPED_TRACE(Message() << "invalid filter: " << source);
         StyleSheet stylesheet;
         const auto result = stylesheet.loadRadia(source, "effects.css");
         ASSERT_TRUE(result.ok());
@@ -1380,7 +1751,7 @@ TEST(StyleSheetTest, SkipsInvalidBoxEffects) {
     }
 
     StyleSheet stylesheet;
-    ASSERT_TRUE(stylesheet.loadRadia(kLargeBlurStyles, "large-effect.css").ok());
+    ASSERT_TRUE(stylesheet.loadRadia(kLargeBlurStyles, "large-filter.css").ok());
 }
 
 TEST(StyleSheetTest, SkipsInvalidMinSize) {
@@ -1748,11 +2119,11 @@ TEST(StyleSheetTest, ResolvesNestedInlineKbdSelectors) {
     const ComputedStyle chord = stylesheet.resolveInline(owner, "kbd");
     const ComputedStyle key = stylesheet.resolveInline(owner, "kbd", {"kbd"});
     EXPECT_EQ(chord.padding.left, 1.f);
-    EXPECT_EQ(chord.gap.fixedPixels(), 5.f);
+    EXPECT_EQ(chord.rowGap.fixedPixels(), 5.f);
     EXPECT_EQ(key.padding.left, 2.f);
     EXPECT_EQ(key.borderRadius.topLeft.horizontal.pixels, 3.f);
     EXPECT_EQ(key.borderRadius.topLeft.vertical.pixels, 3.f);
-    EXPECT_NE(key.gap.fixedPixels(), 5.f);
+    EXPECT_NE(key.rowGap.fixedPixels(), 5.f);
 
     const auto rejectedPseudoElement = stylesheet.loadRadia(kRejectedKbdPseudoElement);
     ASSERT_TRUE(rejectedPseudoElement.ok());
@@ -1926,8 +2297,8 @@ TEST(StyleSheetTest, ReportsEachSharedImportWarning) {
 }
 
 TEST(StyleSheetTest, MarksBorderStateLayoutAffecting) {
-    constexpr char kStateBorderStyles[] = "fieldset { border: 1px #ffffff; } "
-                                          "fieldset:hover { border: 4px #ffffff; }";
+    constexpr char kStateBorderStyles[] = "fieldset { border: 1px solid #ffffff; } "
+                                          "fieldset:hover { border: 4px solid #ffffff; }";
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kStateBorderStyles).ok());

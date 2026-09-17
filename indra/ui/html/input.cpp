@@ -51,6 +51,14 @@ void appendLabelName(const Element& root, const HTMLInputElement& input, std::st
         appendLabelName(*child, input, name);
     }
 }
+
+void paintInputOutline(PaintContext& context, const Rect& bounds, const ComputedStyle& style) {
+    if (style.outline.width <= 0.f || style.outline.color.a <= 0.f) return;
+    ComputedStyle outlineStyle;
+    outlineStyle.borderRadius = style.borderRadius;
+    outlineStyle.outline = style.outline;
+    context.paintBox(bounds, outlineStyle);
+}
 } // namespace
 
 bool HTMLInputElement::isCheckableType(std::string_view type) {
@@ -126,6 +134,7 @@ AccessibleSemantics HTMLInputElement::accessibleSemantics() const {
 void HTMLInputElement::constrainResolvedStyle(ComputedStyle& style) const {
     if (style.appearance != AppearanceMode::Base || !isCheckableType(mType) || isSwitchType() || style.borderWidthSet) return;
     style.borderWidth = {1.f, 1.f, 1.f, 1.f};
+    style.borderStyle = BorderStyle::Solid;
     if (!style.borderColorSet) {
         style.borderColor = {};
         style.borderColorLightDark.reset();
@@ -215,6 +224,7 @@ void HTMLInputElement::paint(PaintContext& context, const ComputedStyle& style, 
     request.direction = style.direction;
     request.scale = scale;
     context.paintNativeInput(request);
+    paintInputOutline(context, rect(), style);
 }
 
 HTMLInputElement& HTMLInputElement::type(std::string type) {

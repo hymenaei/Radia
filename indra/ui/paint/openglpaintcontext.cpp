@@ -62,7 +62,7 @@ Rect snappedScrollbarArrow(const NativeScrollbarAxisGeometry& axis, bool start) 
 }
 
 bool hasVisibleBorder(const ComputedStyle& style) {
-    return style.borderWidth.any() && (style.borderGradient.has_value() || style.borderColor.a > 0.f);
+    return style.borderStyle != BorderStyle::NoneValue && style.borderWidth.any() && (style.borderGradient.has_value() || style.borderColor.a > 0.f);
 }
 
 Color shade(Color source, Color target, float amount) {
@@ -202,13 +202,16 @@ float textBaseline(const Rect& rect, LLFontGL::VAlign align, const LLFontGL& fon
 }
 
 const LLFontGL& fontForStyle(const ComputedStyle& style) {
-    LLFontGL* font = LLFontGL::getFontAtPixelSize("SansSerif", style.fontSize, style.fontWeight, style.fontItalic);
+    const char* family = style.fontFamily == FontFamily::Monospace ? "Monospace" : "SansSerif";
+    LLFontGL* font = LLFontGL::getFontAtPixelSize(family, style.fontSize, style.fontWeight, style.fontItalic);
     if (!font) LL_ERRS("UI") << "OpenGL text adapter used before viewer fonts were initialized." << LL_ENDL;
     return *font;
 }
 
 float textLineHeight(const ComputedStyle& style) {
-    if (style.lineHeight) return std::ceil(style.lineHeight->pixels);
+    if (style.lineHeight.kind == LineHeight::Kind::Length) return std::ceil(style.lineHeight.value);
+    if (style.lineHeight.kind == LineHeight::Kind::Number) return std::ceil(style.fontSize * style.lineHeight.value);
+    if (style.lineHeight.kind == LineHeight::Kind::Percentage) return std::ceil(style.fontSize * style.lineHeight.value);
     if (style.fontSize <= 0.f) return 0.f;
     return static_cast<float>(fontForStyle(style).getLineHeight());
 }
@@ -391,7 +394,8 @@ void setScrollbarClipUniforms(LLGLSLShader& program, const PaintShaderUniforms& 
 void setGradientUniforms(LLGLSLShader& program, const PaintShaderUniforms& uniforms, const Rect& rect, const Gradient& gradient) {
     constexpr float kRadiansPerDegree = std::numbers::pi_v<float> / 180.f;
     const float angle = gradient.angleDegrees * kRadiansPerDegree;
-    const Vec2 direction(std::sin(angle), std::cos(angle));
+    Vec2 direction(std::sin(angle), std::cos(angle));
+    if (gradient.cornerDirection) direction = normalize({std::copysign(rect.w, direction.x), std::copysign(rect.h, direction.y)});
     const float extent = std::abs(direction.x) * rect.w + std::abs(direction.y) * rect.h;
     const Vec2 center(rect.w * .5f, rect.h * .5f);
     const Vec2 start = center - direction * (extent * .5f);
@@ -490,11 +494,36 @@ struct TextPainter {
     GeometryPainter& geometry;
 };
 
+struct BlurProfile {
+    float angleDegrees = 180.f;
+    BlurStop start;
+    BlurStop end;
+};
+
+std::optional<BlurProfile> resolveBlurProfile(const BlurFilter& filter) {
+    return BlurProfile{180.f, {filter.stdDeviation, 0.f}, {filter.stdDeviation, 1.f}};
+}
+
+std::optional<BlurProfile> resolveBlurProfile(const LinearBlurFilter& filter) {
+    if (filter.stops.size() != 2) return std::nullopt;
+    return BlurProfile{filter.angleDegrees, filter.stops[0], filter.stops[1]};
+}
+
+std::optional<BlurProfile> resolveBlurProfile(const FilterOperation& operation) {
+    return std::visit([](const auto& filter) { return resolveBlurProfile(filter); }, operation);
+}
+
+std::optional<float> maximumBlurDeviation(const FilterOperation& operation) {
+    const std::optional<BlurProfile> profile = resolveBlurProfile(operation);
+    if (!profile) return std::nullopt;
+    return std::max(profile->start.stdDeviation, profile->end.stdDeviation);
+}
+
 class EffectRenderer final {
     struct EffectLayer {
         std::array<LLRenderTarget, 3> targets;
         LLRenderTarget maskTarget;
-        std::vector<Effect> layerEffects;
+        FilterOperations filterOperations;
         std::vector<MaskLayer> maskLayers;
         ComputedStyle maskStyle;
         Rect effectRect;
@@ -520,7 +549,7 @@ public:
 private:
     bool captureFramebuffer(const Rect& capture, float scale, LLRenderTarget& target);
     LLRenderTarget* applyBlur(LLRenderTarget& source, LLRenderTarget& horizontalTarget, LLRenderTarget& verticalTarget, const Rect& capture,
-                              const Rect& effectRect, const Effect& effect, float scale);
+                              const Rect& effectRect, const FilterOperation& operation, float scale);
     void compositeEffect(LLRenderTarget& source, const Rect& capture, const Rect& destination, const ResolvedBorderRadii& radii, bool roundedMask);
     void compositeMaskedEffect(LLRenderTarget& source, LLRenderTarget& mask, const Rect& capture);
 
@@ -769,22 +798,24 @@ bool EffectRenderer::captureFramebuffer(const Rect& capture, float scale, LLRend
 }
 
 LLRenderTarget* EffectRenderer::applyBlur(LLRenderTarget& source, LLRenderTarget& horizontalTarget, LLRenderTarget& verticalTarget,
-                                          const Rect& capture, const Rect& effectRect, const Effect& effect, float scale) {
+                                          const Rect& capture, const Rect& effectRect, const FilterOperation& operation, float scale) {
     if (!mProgram.mProgramObject) return &source;
     const U32 width = source.getWidth();
     const U32 height = source.getHeight();
     if (!ensureTarget(horizontalTarget, width, height) || !ensureTarget(verticalTarget, width, height)) return &source;
+    const std::optional<BlurProfile> profile = resolveBlurProfile(operation);
+    if (!profile) return &source;
 
     constexpr float kRadiansPerDegree = std::numbers::pi_v<float> / 180.f;
-    const float angle = effect.angleDegrees * kRadiansPerDegree;
+    const float angle = profile->angleDegrees * kRadiansPerDegree;
     const Vec2 direction(std::sin(angle), std::cos(angle));
     const float extent = (std::abs(direction.x) * effectRect.w + std::abs(direction.y) * effectRect.h) * scale;
     const Vec2 center((effectRect.x + effectRect.w * .5f - capture.x) * scale, (effectRect.y + effectRect.h * .5f - capture.y) * scale);
     const Vec2 gradientLineStart = center - direction * (extent * .5f);
     const Vec2 gradientLine = direction * extent;
-    const Vec2 gradientStart = gradientLineStart + gradientLine * effect.startPosition;
-    Vec2 gradientEnd = gradientLineStart + gradientLine * effect.endPosition;
-    if (effect.startPosition == effect.endPosition) gradientEnd = gradientStart + direction * std::max(1.f, scale);
+    const Vec2 gradientStart = gradientLineStart + gradientLine * profile->start.position;
+    Vec2 gradientEnd = gradientLineStart + gradientLine * profile->end.position;
+    if (profile->start.position == profile->end.position) gradientEnd = gradientStart + direction * std::max(1.f, scale);
     const float maximumRadius = static_cast<float>(std::max(width, height));
 
     const PaintShaderUniforms& uniforms = shaderUniforms();
@@ -800,8 +831,8 @@ LLRenderTarget* EffectRenderer::applyBlur(LLRenderTarget& source, LLRenderTarget
         setClipCoverageUniforms(mProgram, std::nullopt);
         mProgram.uniform2f(uniforms.effectTextureSize, static_cast<float>(width), static_cast<float>(height));
         mProgram.uniform2f(uniforms.effectBlurAxis, axisX, axisY);
-        mProgram.uniform2f(uniforms.effectBlurRadii, std::min(effect.startRadius * scale, maximumRadius),
-                           std::min(effect.endRadius * scale, maximumRadius));
+        mProgram.uniform2f(uniforms.effectBlurRadii, std::min(profile->start.stdDeviation * scale, maximumRadius),
+                           std::min(profile->end.stdDeviation * scale, maximumRadius));
         mProgram.uniform2f(uniforms.effectGradientStart, gradientStart.x, gradientStart.y);
         mProgram.uniform2f(uniforms.effectGradientEnd, gradientEnd.x, gradientEnd.y);
         mProgram.bindTexture(LLShaderMgr::DIFFUSE_MAP, &input, ALSamplers::BilinearClamp);
@@ -862,7 +893,7 @@ void EffectRenderer::compositeMaskedEffect(LLRenderTarget& source, LLRenderTarge
 void EffectRenderer::begin(const Rect& rect, const ComputedStyle& style, float scale) {
     if (mEffectDepth == mEffectLayers.size()) mEffectLayers.emplace_back();
     EffectLayer& frame = mEffectLayers[mEffectDepth++];
-    frame.layerEffects.clear();
+    frame.filterOperations.clear();
     frame.maskLayers.clear();
     frame.hasMask = mGeometry.hasRenderableMask(style.maskLayers);
     if (frame.hasMask) {
@@ -884,24 +915,38 @@ void EffectRenderer::begin(const Rect& rect, const ComputedStyle& style, float s
         return intersectRects(expanded, visible);
     };
 
-    for (const Effect& effect : style.effects) {
-        if (effect.startRadius <= 0.f && effect.endRadius <= 0.f) continue;
-        if (effect.kind == EffectKind::LayerBlur) {
-            frame.layerEffects.push_back(effect);
-            continue;
+    if (!style.backdropFilter.empty()) {
+        float padding = 1.f / frame.scale;
+        bool hasBlur = false;
+        for (const FilterOperation& operation : style.backdropFilter) {
+            const std::optional<float> stdDeviation = maximumBlurDeviation(operation);
+            if (!stdDeviation || *stdDeviation <= 0.f) continue;
+            hasBlur = true;
+            padding = std::min(padding + *stdDeviation * 2.f, maximumPadding);
         }
-        const float padding = std::min(std::max(effect.startRadius, effect.endRadius) * 2.f + 1.f / frame.scale, maximumPadding);
-        const Rect capture = captureBounds(padding);
-        if (capture.empty()) continue;
-        if (!captureFramebuffer(capture, frame.scale, mBackgroundTargets[0])) continue;
-        LLRenderTarget* blurred = applyBlur(mBackgroundTargets[0], mBackgroundTargets[1], mBackgroundTargets[2], capture, rect, effect, frame.scale);
-        compositeEffect(*blurred, capture, rect, resolveBorderRadii(rect, style.borderRadius), true);
+        if (hasBlur) {
+            const Rect capture = captureBounds(padding);
+            if (!capture.empty() && captureFramebuffer(capture, frame.scale, mBackgroundTargets[0])) {
+                LLRenderTarget* source = &mBackgroundTargets[0];
+                for (const FilterOperation& operation : style.backdropFilter) {
+                    const std::optional<float> stdDeviation = maximumBlurDeviation(operation);
+                    if (!stdDeviation || *stdDeviation <= 0.f) continue;
+                    LLRenderTarget& horizontal = mBackgroundTargets[1];
+                    LLRenderTarget& vertical = source == &mBackgroundTargets[0] ? mBackgroundTargets[2] : mBackgroundTargets[0];
+                    source = applyBlur(*source, horizontal, vertical, capture, rect, operation, frame.scale);
+                }
+                compositeEffect(*source, capture, rect, resolveBorderRadii(rect, style.borderRadius), true);
+            }
+        }
     }
 
-    if (frame.layerEffects.empty() && !frame.hasMask) return;
+    frame.filterOperations = style.filter;
+    if (frame.filterOperations.empty() && !frame.hasMask) return;
     float padding = 1.f / frame.scale;
-    for (const Effect& effect : frame.layerEffects)
-        padding = std::min(padding + std::max(effect.startRadius, effect.endRadius) * 2.f, maximumPadding);
+    for (const FilterOperation& operation : frame.filterOperations) {
+        const std::optional<float> stdDeviation = maximumBlurDeviation(operation);
+        if (stdDeviation) padding = std::min(padding + *stdDeviation * 2.f, maximumPadding);
+    }
     frame.captureRect = captureBounds(padding);
     if (frame.captureRect.empty()) return;
 
@@ -927,10 +972,10 @@ void EffectRenderer::end() {
     mClips.reapply();
 
     LLRenderTarget* source = &frame.targets[0];
-    for (const Effect& effect : frame.layerEffects) {
+    for (const FilterOperation& operation : frame.filterOperations) {
         LLRenderTarget& horizontal = frame.targets[1];
         LLRenderTarget& vertical = source == &frame.targets[0] ? frame.targets[2] : frame.targets[0];
-        source = applyBlur(*source, horizontal, vertical, frame.captureRect, frame.effectRect, effect, frame.scale);
+        source = applyBlur(*source, horizontal, vertical, frame.captureRect, frame.effectRect, operation, frame.scale);
     }
     if (!frame.hasMask) {
         compositeEffect(*source, frame.captureRect, frame.captureRect, uniformBorderRadii(0.f), false);
@@ -1063,10 +1108,10 @@ void TextPainter::paintText(const std::string& text, const Rect& rect, const Com
     constexpr LLFontGL::VAlign vertical = LLFontGL::VCENTER;
     const LLColor4 color(style.color.r, style.color.g, style.color.b, style.color.a);
     const LLFontGL::TextSpacing spacing = usedTextSpacing(style, font);
-    const U8 fontStyle = style.textDecoration == TextDecoration::Underline ? LLFontGL::UNDERLINE : LLFontGL::NORMAL;
+    const U8 fontStyle = hasTextDecoration(style.textDecoration, TextDecoration::Underline) ? LLFontGL::UNDERLINE : LLFontGL::NORMAL;
     font.renderUTF8(text, 0, textX(glyphRect, horizontal), textY(glyphRect, vertical), color, horizontal, vertical, fontStyle, LLFontGL::NO_SHADOW,
                     S32_MAX, S32_MAX, nullptr, false, true, spacing);
-    if (style.textDecoration == TextDecoration::LineThrough) {
+    if (hasTextDecoration(style.textDecoration, TextDecoration::LineThrough)) {
         const float width = measureOpenGLText(text, style).x;
         const float anchor = textX(rect, horizontal);
         const float left = horizontal == LLFontGL::RIGHT ? anchor - width : horizontal == LLFontGL::HCENTER ? anchor - width * .5f : anchor;
@@ -1367,7 +1412,7 @@ void GeometryPainter::drawShapeQuad(const Rect& rect, float alpha) {
 }
 
 void GeometryPainter::drawBorder(const Rect& rect, const ComputedStyle& style, std::optional<TopBorderGap> topBorderGap) {
-    if (!style.borderWidth.any()) return;
+    if (!style.borderWidth.any() || style.borderStyle == BorderStyle::NoneValue) return;
     const Rect box = rect;
     const ResolvedBorderRadii borderRadii = resolveBorderRadii(box, style.borderRadius);
     const bool square = borderRadii.topLeft.x == 0.f

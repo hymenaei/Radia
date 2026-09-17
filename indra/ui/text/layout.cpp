@@ -532,8 +532,8 @@ std::size_t textStyleFingerprint(const ComputedStyle& style) {
     mixStyleValue(hash, style.fontSize);
     mixStyleValue(hash, static_cast<std::size_t>(style.fontWeight));
     mixStyleValue(hash, static_cast<std::size_t>(style.fontItalic));
-    mixStyleValue(hash, static_cast<std::size_t>(style.lineHeight.has_value()));
-    if (style.lineHeight) mixLength(hash, *style.lineHeight);
+    mixStyleValue(hash, static_cast<std::size_t>(style.lineHeight.kind));
+    mixStyleValue(hash, style.lineHeight.value);
     mixLength(hash, style.letterSpacing);
     mixLength(hash, style.wordSpacing);
     return hash;
@@ -573,7 +573,9 @@ void TextLayout::paint(PaintContext& context, const Rect& rect, const ComputedSt
                        const Element& owner) const {
     const TextMetrics& metrics = context.textMetrics();
     const detail::LaidOutText& layout = cachedLayout(metrics, style, styleSheet, owner, rect.w, true, true);
-    const TextPaintStyle paintStyle{style.color, style.colorLightDark, style.textDecoration, style.textAlign};
+    const TextPaintStyle paintStyle{
+        style.color, style.colorLightDark,
+        style.textDecorationPropagation == TextDecoration::NoneValue ? style.textDecoration : style.textDecorationPropagation, style.textAlign};
     paintLayout(context, rect, paintStyle, layout, metrics);
 }
 

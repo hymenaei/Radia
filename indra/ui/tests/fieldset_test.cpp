@@ -550,7 +550,7 @@ TEST_F(FieldsetTest, ScopesLegend) {
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet
-                    .loadRadia("fieldset { display: flex; flex-direction: column; gap: 10px; padding: 3px 6px; border: 1px #ffffff; } "
+                    .loadRadia("fieldset { display: flex; flex-direction: column; gap: 10px; padding: 3px 6px; border: 1px solid #ffffff; } "
                                "fieldset > legend { height: 10px; } div.row { height: 20px; }")
                     .ok());
     fieldset->setRect({0.f, 0.f, 120.f, 90.f});

@@ -593,10 +593,11 @@ TEST(SurfaceTest, PreventsDefaultWheelAction) {
 TEST(SurfaceTest, HitTestsPaintedChild) {
     StyleSheet styleSheet;
     ASSERT_TRUE(styleSheet
-                    .loadRadia("#viewport { display: block; overflow: auto; scrollbar-mode: overlay; pointer-events: none; } "
+                    .loadRadia("#viewport { display: block; overflow: auto; pointer-events: none; } "
                                "#target { pointer-events: auto; }")
                     .ok());
     Surface surface(styleSheet);
+    surface.setScrollLayoutOptions({ScrollbarMode::Overlay, surface.nativeLayoutMetrics()});
     surface.setViewport(200.f, 200.f);
     int activations = 0;
 
@@ -619,10 +620,11 @@ TEST(SurfaceTest, HitTestsPaintedChild) {
 TEST(SurfaceTest, HitTestsScrolledChild) {
     StyleSheet styleSheet;
     ASSERT_TRUE(styleSheet
-                    .loadRadia("#viewport { display: block; overflow: auto; scrollbar-mode: overlay; pointer-events: none; } "
+                    .loadRadia("#viewport { display: block; overflow: auto; pointer-events: none; } "
                                "#target { pointer-events: auto; }")
                     .ok());
     Surface surface(styleSheet);
+    surface.setScrollLayoutOptions({ScrollbarMode::Overlay, surface.nativeLayoutMetrics()});
     surface.setViewport(200.f, 200.f);
     int activations = 0;
 
@@ -645,10 +647,11 @@ TEST(SurfaceTest, HitTestsScrolledChild) {
 TEST(SurfaceTest, ClipsScrolledContentFromHitTesting) {
     StyleSheet styleSheet;
     ASSERT_TRUE(styleSheet
-                    .loadRadia("#viewport { display: block; overflow: auto; scrollbar-mode: overlay; pointer-events: none; } "
+                    .loadRadia("#viewport { display: block; overflow: auto; pointer-events: none; } "
                                "#target { pointer-events: auto; }")
                     .ok());
     Surface surface(styleSheet);
+    surface.setScrollLayoutOptions({ScrollbarMode::Overlay, surface.nativeLayoutMetrics()});
     surface.setViewport(200.f, 200.f);
 
     auto viewport = makeElement<HTMLPanelElement>();
@@ -664,8 +667,9 @@ TEST(SurfaceTest, ClipsScrolledContentFromHitTesting) {
 
 TEST(SurfaceTest, ScrollsScrollableElementWithWheel) {
     StyleSheet styleSheet;
-    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: auto; scrollbar-mode: overlay; pointer-events: auto; }").ok());
+    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: auto; pointer-events: auto; }").ok());
     Surface surface(styleSheet);
+    surface.setScrollLayoutOptions({ScrollbarMode::Overlay, surface.nativeLayoutMetrics()});
     surface.setViewport(200.f, 200.f);
 
     auto viewport = makeElement<HTMLPanelElement>();
@@ -683,8 +687,9 @@ TEST(SurfaceTest, ScrollsScrollableElementWithWheel) {
 
 TEST(SurfaceTest, ScrollsHorizontallyWithShift) {
     StyleSheet styleSheet;
-    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: auto; scrollbar-mode: overlay; pointer-events: auto; }").ok());
+    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: auto; pointer-events: auto; }").ok());
     Surface surface(styleSheet);
+    surface.setScrollLayoutOptions({ScrollbarMode::Overlay, surface.nativeLayoutMetrics()});
     surface.setViewport(200.f, 200.f);
 
     auto viewport = makeElement<HTMLPanelElement>();
@@ -714,7 +719,7 @@ TEST(SurfaceTest, ScrollsHorizontallyWithShift) {
 TEST(SurfaceTest, RecordsScrollbarFallback) {
     StyleSheet styleSheet;
     ASSERT_TRUE(styleSheet
-                    .loadRadia("#viewport { display: block; overflow: scroll; scrollbar-mode: classic; "
+                    .loadRadia("#viewport { display: block; overflow: scroll; "
                                "scrollbar-color: #112233 #445566; }")
                     .ok());
     Surface surface(styleSheet);
@@ -750,8 +755,9 @@ TEST(SurfaceTest, RecordsScrollbarFallback) {
 
 TEST(SurfaceTest, DragsScrollbarThumb) {
     StyleSheet styleSheet;
-    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: auto; scrollbar-mode: overlay; pointer-events: auto; }").ok());
+    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: auto; pointer-events: auto; }").ok());
     Surface surface(styleSheet);
+    surface.setScrollLayoutOptions({ScrollbarMode::Overlay, surface.nativeLayoutMetrics()});
     surface.setViewport(200.f, 200.f);
 
     int activations = 0;
@@ -800,7 +806,7 @@ TEST(SurfaceTest, HitsRtlScrollbar) {
     constexpr char kLocalization[] = "defaultLocale: en\nlocales: {en: {strings: {}}, ar: {strings: {}}}\n";
     ResourceSnapshot snapshot;
     snapshot.add("localization.yaml", kLocalization);
-    snapshot.add("skin.css", "#viewport { display: block; overflow: scroll; scrollbar-mode: classic; pointer-events: auto; }");
+    snapshot.add("skin.css", "#viewport { display: block; overflow: scroll; pointer-events: auto; }");
     const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(std::move(snapshot));
     ASSERT_TRUE(prepared.ok());
 
@@ -857,7 +863,7 @@ TEST(SurfaceTest, ReversesRtlWheelDirection) {
     constexpr char kLocalization[] = "defaultLocale: en\nlocales: {en: {strings: {}}, ar: {strings: {}}}\n";
     ResourceSnapshot snapshot;
     snapshot.add("localization.yaml", kLocalization);
-    snapshot.add("skin.css", "#viewport { display: block; overflow: scroll; scrollbar-mode: classic; pointer-events: auto; }");
+    snapshot.add("skin.css", "#viewport { display: block; overflow: scroll; pointer-events: auto; }");
     const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(std::move(snapshot));
     ASSERT_TRUE(prepared.ok());
 
@@ -932,7 +938,7 @@ TEST(SurfaceTest, MirrorsRtlScrollTranslation) {
 
 TEST(SurfaceTest, PagesScrollbarByPolicy) {
     StyleSheet styleSheet;
-    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: scroll; scrollbar-mode: classic; pointer-events: auto; }").ok());
+    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: scroll; pointer-events: auto; }").ok());
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
 
@@ -966,7 +972,7 @@ TEST(SurfaceTest, PagesScrollbarByPolicy) {
 
 TEST(SurfaceTest, AppliesScrollbarPointerPolicy) {
     StyleSheet styleSheet;
-    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: scroll; scrollbar-mode: classic; pointer-events: default; }").ok());
+    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: scroll; pointer-events: default; }").ok());
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
 
@@ -995,7 +1001,7 @@ TEST(SurfaceTest, AppliesScrollbarPointerPolicy) {
 
 TEST(SurfaceTest, RepeatsHeldScrollbarArrow) {
     StyleSheet styleSheet;
-    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: scroll; scrollbar-mode: classic; pointer-events: auto; }").ok());
+    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: scroll; pointer-events: auto; }").ok());
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
 
@@ -1031,7 +1037,7 @@ TEST(SurfaceTest, RepeatsHeldScrollbarArrow) {
 
 TEST(SurfaceTest, ContinuesTrackClickIntoDrag) {
     StyleSheet styleSheet;
-    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: scroll; scrollbar-mode: classic; pointer-events: auto; }").ok());
+    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: scroll; pointer-events: auto; }").ok());
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
 
@@ -1064,8 +1070,9 @@ TEST(SurfaceTest, ContinuesTrackClickIntoDrag) {
 
 TEST(SurfaceTest, KeepsDefaultCursorOverScrollbar) {
     StyleSheet styleSheet;
-    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: auto; scrollbar-mode: overlay; pointer-events: auto; }").ok());
+    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: auto; pointer-events: auto; }").ok());
     Surface surface(styleSheet);
+    surface.setScrollLayoutOptions({ScrollbarMode::Overlay, surface.nativeLayoutMetrics()});
     surface.setViewport(200.f, 200.f);
 
     auto viewport = makeElement<HTMLPanelElement>();
@@ -1094,7 +1101,7 @@ TEST(SurfaceTest, KeepsDefaultCursorOverScrollbar) {
 
 TEST(SurfaceTest, ReportsScrollbarPartState) {
     StyleSheet styleSheet;
-    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: scroll; scrollbar-mode: classic; pointer-events: auto; }").ok());
+    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: scroll; pointer-events: auto; }").ok());
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
 
@@ -1162,8 +1169,9 @@ TEST(SurfaceTest, ReportsScrollbarPartState) {
 
 TEST(SurfaceTest, ScrollsFocusedAncestorWithKeyboard) {
     StyleSheet styleSheet;
-    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: auto; scrollbar-mode: overlay; pointer-events: auto; }").ok());
+    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: auto; pointer-events: auto; }").ok());
     Surface surface(styleSheet);
+    surface.setScrollLayoutOptions({ScrollbarMode::Overlay, surface.nativeLayoutMetrics()});
     surface.setViewport(200.f, 200.f);
 
     auto viewport = makeElement<HTMLPanelElement>();
@@ -1193,10 +1201,11 @@ TEST(SurfaceTest, ScrollsFocusedAncestorWithKeyboard) {
 TEST(SurfaceTest, ScrollsColumnText) {
     StyleSheet styleSheet;
     ASSERT_TRUE(styleSheet
-                    .loadRadia("#viewport { display: flex; flex-direction: column; overflow: auto; scrollbar-mode: overlay; pointer-events: auto; } "
+                    .loadRadia("#viewport { display: flex; flex-direction: column; overflow: auto; pointer-events: auto; } "
                                "#first, #second, #third { height: 60px; pointer-events: none; }")
                     .ok());
     Surface surface(styleSheet);
+    surface.setScrollLayoutOptions({ScrollbarMode::Overlay, surface.nativeLayoutMetrics()});
     surface.setViewport(200.f, 200.f);
 
     auto viewport = makeElement<HTMLPanelElement>();
@@ -1232,8 +1241,9 @@ TEST(SurfaceTest, ScrollsColumnText) {
 
 TEST(SurfaceTest, StopsCanceledWheel) {
     StyleSheet styleSheet;
-    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: auto; scrollbar-mode: overlay; pointer-events: auto; }").ok());
+    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: auto; pointer-events: auto; }").ok());
     Surface surface(styleSheet);
+    surface.setScrollLayoutOptions({ScrollbarMode::Overlay, surface.nativeLayoutMetrics()});
     surface.setViewport(200.f, 200.f);
 
     auto viewport = makeElement<HTMLPanelElement>();
@@ -1274,10 +1284,11 @@ TEST(SurfaceTest, DoesNotWheelScrollHiddenOverflow) {
 TEST(SurfaceTest, ChainsWheelDelta) {
     StyleSheet styleSheet;
     ASSERT_TRUE(styleSheet
-                    .loadRadia("#outer { display: block; overflow: auto; scrollbar-mode: overlay; pointer-events: auto; } "
-                               "#inner { display: block; overflow: auto; scrollbar-mode: overlay; pointer-events: auto; }")
+                    .loadRadia("#outer { display: block; overflow: auto; pointer-events: auto; } "
+                               "#inner { display: block; overflow: auto; pointer-events: auto; }")
                     .ok());
     Surface surface(styleSheet);
+    surface.setScrollLayoutOptions({ScrollbarMode::Overlay, surface.nativeLayoutMetrics()});
     surface.setViewport(200.f, 200.f);
 
     auto outer = makeElement<HTMLPanelElement>();
@@ -1303,8 +1314,9 @@ TEST(SurfaceTest, ChainsWheelDelta) {
 
 TEST(SurfaceTest, CoalescesScrollNotification) {
     StyleSheet styleSheet;
-    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: auto; scrollbar-mode: overlay; }").ok());
+    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: auto; }").ok());
     Surface surface(styleSheet);
+    surface.setScrollLayoutOptions({ScrollbarMode::Overlay, surface.nativeLayoutMetrics()});
     surface.setViewport(200.f, 200.f);
     int targetNotifications = 0;
     int parentNotifications = 0;
@@ -2163,8 +2175,8 @@ TEST(SurfaceTest, AppliesOverflowVisibility) {
 TEST(SurfaceTest, PaintsNestedScrollers) {
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet
-                    .loadRadia("#outer { display: block; overflow: auto; scrollbar-mode: overlay; scrollbar-width: none; } "
-                               "#inner { display: block; overflow: auto; scrollbar-mode: overlay; scrollbar-width: none; }")
+                    .loadRadia("#outer { display: block; overflow: auto; scrollbar-width: none; } "
+                               "#inner { display: block; overflow: auto; scrollbar-width: none; }")
                     .ok());
     Surface surface(stylesheet);
     surface.setViewport(100.f, 100.f);

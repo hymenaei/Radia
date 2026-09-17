@@ -91,7 +91,7 @@ NativeScrollbarMetrics Surface::scrollbarMetrics(ScrollbarMode mode) const {
 }
 
 ScrollGeometry Surface::scrollbarGeometry(const Element& element, const ComputedStyle& style) const {
-    const ScrollbarMode mode = style.scrollbarModeSet ? style.scrollbarMode : mScrollLayoutOptions.scrollbarMode;
+    const ScrollbarMode mode = mScrollLayoutOptions.scrollbarMode;
     const NativeScrollbarMetrics metrics = scrollbarMetrics(mode);
     const float widthScale = style.scrollbarWidth == ScrollbarWidth::Thin ? .5f : 1.f;
     const bool enabled = style.scrollbarWidth != ScrollbarWidth::NoneValue;

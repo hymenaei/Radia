@@ -22,7 +22,7 @@ using StyleResetFunction = void (*)(ComputedStyle&);
 using StyleSpecifyFunction = void (*)(ComputedStyle&);
 using StyleInheritFunction = void (*)(ComputedStyle&, const ComputedStyle&);
 
-enum class StylePropertyImpact : std::uint8_t { Layout = 1 << 0, Paint = 1 << 1, Inherited = 1 << 2, HitTest = 1 << 3 };
+enum class StylePropertyImpact : std::uint8_t { Layout = 1 << 0, Paint = 1 << 1, Inherited = 1 << 2, HitTest = 1 << 3, Descendant = 1 << 4 };
 
 inline constexpr StylePropertyImpact operator|(StylePropertyImpact left, StylePropertyImpact right) {
     return static_cast<StylePropertyImpact>(static_cast<std::uint8_t>(left) | static_cast<std::uint8_t>(right));
@@ -44,6 +44,9 @@ struct StylePropertyDefinition {
 
     bool isPaintOnly() const { return hasImpact(impact, StylePropertyImpact::Paint) && !hasImpact(impact, StylePropertyImpact::Layout); }
     bool isInherited() const { return hasImpact(impact, StylePropertyImpact::Inherited); }
+    bool propagatesToDescendants() const {
+        return hasImpact(impact, StylePropertyImpact::Inherited) || hasImpact(impact, StylePropertyImpact::Descendant);
+    }
     bool affectsHitTesting() const { return hasImpact(impact, StylePropertyImpact::HitTest); }
     InheritedStyleProperties inheritedBit() const { return static_cast<InheritedStyleProperties>(inheritedProperty); }
 
@@ -55,4 +58,5 @@ const StylePropertyDefinition* findStyleProperty(std::string_view name);
 const StylePropertyDefinition* stylePropertyBegin();
 const StylePropertyDefinition* stylePropertyEnd();
 void applyStyleDeclaration(ComputedStyle& style, const StyleDeclaration& declaration);
+void applyInvalidStyleDeclaration(ComputedStyle& style, const StylePropertyDefinition& property);
 } // namespace radia::ui::detail

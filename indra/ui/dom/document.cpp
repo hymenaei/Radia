@@ -18,7 +18,7 @@ using detail::NodeMutation;
 
 Document::Document(ElementPtr documentElement) : Node(NodeType::Document) {
     llassert_always(documentElement);
-    NodeMutation::adopt(*documentElement);
+    NodeMutation::adopt(*documentElement, this);
     NodeAccess::setParent(*documentElement, this);
     mChildren.emplace_back(std::move(documentElement));
     if (Element* root = mChildren.front()->asElement()) root->notifyTreeAttached();
@@ -45,19 +45,19 @@ ElementPtr Document::releaseDocumentElement() {
 ElementPtr Document::createElement(std::string_view elementName) const {
     ElementPtr element = HTMLElementFactory::create(elementName);
     if (!element) return nullptr;
-    NodeMutation::adopt(*element);
+    NodeMutation::adopt(*element, const_cast<Document*>(this));
     return element;
 }
 
 FragmentPtr Document::createFragment() const {
     auto fragment = std::make_unique<Fragment>();
-    NodeMutation::adopt(*fragment);
+    NodeMutation::adopt(*fragment, const_cast<Document*>(this));
     return fragment;
 }
 
 NodePtr Document::adoptNode(NodePtr node) const {
     llassert_always(node);
-    NodeMutation::adopt(*node);
+    NodeMutation::adopt(*node, const_cast<Document*>(this));
     return node;
 }
 

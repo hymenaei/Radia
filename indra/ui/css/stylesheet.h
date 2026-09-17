@@ -63,6 +63,7 @@ public:
     bool stateAffectsHitTesting(ElementState state) const;
     bool stateAffectsHitTesting(const Element& element, ElementState state) const;
     bool stateAffectsDescendants(const Element& element, ElementState state) const;
+    bool stateAffectsFollowingSiblings(const Element& element, ElementState state) const;
 
     ComputedStyle resolve(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t states,
                           LayoutDirection direction = LayoutDirection::LeftToRight) const;
@@ -74,6 +75,10 @@ public:
 
 private:
     friend class StylePass;
+
+    ComputedStyle resolveElement(const Element& element, LayoutDirection direction, const CustomPropertyMap* inheritedCustomProperties) const;
+    ComputedStyle resolvePseudoElement(const Element& owner, std::string_view pseudoElementName, LayoutDirection direction,
+                                       const CustomPropertyMap* inheritedCustomProperties) const;
 
     struct Impl;
     static std::shared_ptr<Impl> makeEmptyImpl();

@@ -26,6 +26,7 @@
 #include "llerrorcontrol.h"
 #include "paint/recordingpaintcontext.h"
 #include "skin/compiler.h"
+#include "style/stylepass.h"
 #include "surface/surface.h"
 #include "system.h"
 #include "text/layout.h"
@@ -70,6 +71,7 @@ using radia::ui::RecordingPaintContext;
 using radia::ui::ResourceSnapshot;
 using radia::ui::SkinCompiler;
 using radia::ui::SkinGenerationPrepareResult;
+using radia::ui::StylePass;
 using radia::ui::StyleSheet;
 using radia::ui::Surface;
 using radia::ui::System;
@@ -793,6 +795,7 @@ TEST(DocumentTest, AdoptsDetachedChildren) {
     EXPECT_EQ(document.childNodes().front(), documentElement);
     ASSERT_EQ(document.documentElement(), documentElement);
     EXPECT_EQ(documentElement->nodeType(), NodeType::Element);
+    EXPECT_EQ(documentElement->ownerDocument(), &document);
     EXPECT_EQ(documentElement->parentNode(), static_cast<radia::ui::Node*>(&document));
     EXPECT_EQ(documentElement->parentElement(), nullptr);
     ASSERT_EQ(document.getElementById("root"), documentElement);
@@ -804,6 +807,7 @@ TEST(DocumentTest, AdoptsDetachedChildren) {
     Element* button = buttonNode->asElement();
     ASSERT_NE(button, nullptr);
 
+    EXPECT_EQ(button->ownerDocument(), &document);
     EXPECT_EQ(document.getElementById("button"), button);
     EXPECT_EQ(button->parentElement(), documentElement);
 
@@ -889,10 +893,26 @@ TEST(DocumentTest, AdoptsCrossDocumentChild) {
     childOwner->setId("adopted");
     Element* child = childOwner.get();
 
-    ASSERT_EQ(second.documentElement()->append(std::move(childOwner)), child);
+    NodePtr childNode = second.adoptNode(std::move(childOwner));
+    ASSERT_EQ(second.documentElement()->append(std::move(childNode)), child);
     EXPECT_EQ(child->parentElement(), second.documentElement());
     EXPECT_EQ(first.getElementById("adopted"), nullptr);
     EXPECT_EQ(second.getElementById("adopted"), child);
+}
+
+TEST(ElementTreeDeathTest, RejectsCrossDocumentInsertionWithoutAdoption) {
+    auto firstRootOwner = makeElement<HTMLPanelElement>();
+    Document first(std::move(firstRootOwner));
+    auto secondRootOwner = makeElement<HTMLPanelElement>();
+    Document second(std::move(secondRootOwner));
+
+    EXPECT_DEATH(
+        {
+            LLError::setFatalFunction(reportFatalDiagnostic);
+            auto child = first.createElement("button");
+            second.documentElement()->append(std::move(child));
+        },
+        ".*");
 }
 
 TEST(DocumentTest, AdoptsDetachedSubtrees) {
@@ -911,6 +931,8 @@ TEST(DocumentTest, AdoptsDetachedSubtrees) {
     NodePtr subtreeNode = std::move(subtree);
     NodePtr adopted = second.adoptNode(std::move(subtreeNode));
 
+    EXPECT_EQ(subtreeElement->ownerDocument(), &second);
+    EXPECT_EQ(descendantElement->ownerDocument(), &second);
     ASSERT_EQ(second.documentElement()->append(std::move(adopted)), subtreeElement);
     EXPECT_EQ(second.getElementById("nested-adopted"), descendantElement);
 }
@@ -976,6 +998,7 @@ TEST(DocumentTest, PreservesDuplicateIdLookup) {
     Element* adopted = adoptedOwner.get();
     source.documentElement()->append(std::move(adoptedOwner));
     NodePtr adoptedNode = adopted->remove();
+    adoptedNode = target.adoptNode(std::move(adoptedNode));
     ASSERT_EQ(targetRoot->prepend(std::move(adoptedNode)), adopted);
     EXPECT_EQ(source.getElementById("duplicate"), nullptr);
     EXPECT_EQ(target.getElementById("duplicate"), adopted);
@@ -1173,13 +1196,31 @@ TEST(ElementPaintTest, RecordsElementOwnPrimitives) {
     EXPECT_EQ(recording.count(PaintCommandKind::Box), 2U);
 }
 
+TEST(ElementPaintTest, DoesNotPaintBorderWhenStyleIsOmitted) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia("label { border: 3px #123456; }").ok());
+
+    auto label = makeElementValue<HTMLLabelElement>("hello");
+    label.setRect({0.f, 0.f, 40.f, 12.f});
+    StylePass styles(stylesheet, fixedTextMetrics());
+    const ComputedStyle style = styles.style(label);
+
+    EXPECT_EQ(style.borderWidth.top, 3.f);
+    EXPECT_EQ(style.borderStyle, radia::ui::BorderStyle::NoneValue);
+    RecordingPaintContext recording;
+    label.paint(recording, style, 1.f);
+    const PaintCommand* box = recording.last(PaintCommandKind::Box);
+    ASSERT_NE(box, nullptr);
+    EXPECT_EQ(box->style.borderStyle, radia::ui::BorderStyle::NoneValue);
+}
+
 TEST(ElementPaintTest, PaintsLocalizedResources) {
     System system;
     ResourceSnapshot resources;
     constexpr char kLocalization[] = "defaultLocale: en\n"
                                      "locales: {en: {strings: {}}, "
                                      "ar: {strings: {}}}\n";
-    constexpr char kStyles[] = "panel { opacity: .5; effect: background-blur(3px), layer-blur(to right, 0px 0%, 4px 100%); } "
+    constexpr char kStyles[] = "panel { opacity: .5; backdrop-filter: blur(3px); filter: blur(4px); } "
                                "label { opacity: .5; text-align: start; } i { size: 16px; }";
     constexpr char kSearchIconSvg[] = "<svg viewBox=\"0 0 24 24\">"
                                       "<path d=\"M2 2 L22 22\"/></svg>";
@@ -1218,7 +1259,8 @@ TEST(ElementPaintTest, PaintsLocalizedResources) {
     ASSERT_NE(iconBox, nullptr);
     ASSERT_NE(effectCommand, nullptr);
     EXPECT_EQ(effectCommand->scale, 2.f);
-    EXPECT_EQ(effectCommand->style.effects.size(), 2U);
+    EXPECT_EQ(effectCommand->style.backdropFilter.size(), 1U);
+    EXPECT_EQ(effectCommand->style.filter.size(), 1U);
     EXPECT_EQ(textCommand->style.color.a, .25f);
     EXPECT_EQ(textCommand->style.textAlign, TextAlign::Left);
     EXPECT_EQ(textCommand->rect.x, -8.f);

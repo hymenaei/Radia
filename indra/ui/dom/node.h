@@ -35,6 +35,8 @@ public:
     virtual ~Node() = default;
 
     NodeType nodeType() const noexcept { return mNodeType; }
+    Document* ownerDocument() noexcept { return mOwnerDocument; }
+    const Document* ownerDocument() const noexcept { return mOwnerDocument; }
     Node* parentNode() noexcept { return mParentNode; }
     const Node* parentNode() const noexcept { return mParentNode; }
     Element* parentElement() noexcept { return mParent; }
@@ -76,6 +78,7 @@ private:
     friend class detail::NodeAccess;
 
     NodeType mNodeType;
+    Document* mOwnerDocument = nullptr;
     std::shared_ptr<char> mLifetime = std::make_shared<char>(0);
 };
 } // namespace radia::ui

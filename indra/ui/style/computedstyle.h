@@ -7,14 +7,24 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 #include "types.h"
 
 namespace radia::ui {
+struct CustomPropertyValue {
+    std::string source;
+
+    friend bool operator==(const CustomPropertyValue&, const CustomPropertyValue&) = default;
+};
+
+using CustomPropertyMap = std::map<std::string, CustomPropertyValue>;
+
 struct Length {
     float pixels = 0.f;
     float percent = 0.f;
@@ -116,24 +126,22 @@ class GapValue {
 public:
     GapValue() = default;
 
-    static GapValue automatic() {
-        GapValue result;
-        result.mAutomatic = true;
-        return result;
-    }
-
     static GapValue fromPixels(float pixels) {
         GapValue result;
-        result.mPixels = pixels;
+        result.mLength = Length{pixels};
         return result;
     }
 
-    bool isAuto() const { return mAutomatic; }
-    float fixedPixels() const { return mAutomatic ? 0.f : mPixels; }
+    static GapValue fromLength(Length length) {
+        GapValue result;
+        result.mLength = length;
+        return result;
+    }
+
+    float fixedPixels() const { return mLength.pixels; }
 
 private:
-    bool mAutomatic = false;
-    float mPixels = 0.f;
+    Length mLength;
 };
 
 struct MarginInsets {
@@ -161,6 +169,7 @@ enum class RadialGradientShape { Ellipse, Circle };
 struct Gradient {
     GradientKind kind = GradientKind::Linear;
     bool repeating = false;
+    bool cornerDirection = false;
     float angleDegrees = 180.f;
     Vec2 center = {.5f, .5f};
     RadialGradientShape radialShape = RadialGradientShape::Ellipse;
@@ -213,6 +222,7 @@ struct BoxShadow {
     float blur = 0.f;
     float spread = 0.f;
     Color color;
+    bool currentColor = false;
     bool inset = false;
     std::optional<LightDarkColor> lightDarkColor;
 };
@@ -227,20 +237,22 @@ struct Outline {
     std::optional<LightDarkColor> lightDarkColor;
 };
 
-enum class EffectKind { BackgroundBlur, LayerBlur };
-
-struct Effect {
-    EffectKind kind = EffectKind::LayerBlur;
-    float startRadius = 0.f;
-    float endRadius = 0.f;
-    float startPosition = 0.f;
-    float endPosition = 1.f;
-    float angleDegrees = 180.f;
-
-    bool progressive() const { return startRadius != endRadius; }
+struct BlurFilter {
+    float stdDeviation = 0.f;
 };
 
-inline constexpr std::size_t kMaxEffectCount = 8;
+struct BlurStop {
+    float stdDeviation = 0.f;
+    float position = 0.f;
+};
+
+struct LinearBlurFilter {
+    float angleDegrees = 180.f;
+    std::vector<BlurStop> stops{{0.f, 0.f}, {0.f, 1.f}};
+};
+
+using FilterOperation = std::variant<BlurFilter, LinearBlurFilter>;
+using FilterOperations = std::vector<FilterOperation>;
 
 struct GridArea {
     int row = 1;
@@ -260,7 +272,7 @@ enum class DisplayMode { Inline, InlineBlock, Block, Flex, InlineFlex, Grid, Inl
 inline constexpr bool isFlexDisplay(DisplayMode display) noexcept {
     return display == DisplayMode::Flex || display == DisplayMode::InlineFlex;
 }
-enum class BorderStyle { Solid, Outset, Inset };
+enum class BorderStyle { NoneValue, Solid, Outset, Inset };
 enum class FlexDirection { Row, Column };
 enum class PositionMode { Static, Relative };
 enum class JustifyContent { Start, Center, End, Left, Right };
@@ -318,9 +330,26 @@ struct CursorValue {
 enum class TextAlign { Left, Center, Right, Start, End };
 enum class TextOverflow { Clip, Ellipsis, EllipsisCenter };
 enum class TextWrap { Wrap, NoWrap };
-enum class TextDecoration { NoneValue, Underline, LineThrough };
+enum class TextDecoration : uint8_t { NoneValue = 0, Underline = 1 << 0, LineThrough = 1 << 1 };
+
+inline constexpr bool hasTextDecoration(TextDecoration value, TextDecoration flag) {
+    return (static_cast<uint8_t>(value) & static_cast<uint8_t>(flag)) != 0;
+}
 enum class VerticalAlign { Top, Middle, Bottom };
-enum class FontFamily { Sans };
+enum class FontFamily { SansSerif, Monospace };
+
+struct RelativeFontWeight {
+    bool lighter = false;
+};
+
+using FontWeightValue = std::variant<float, RelativeFontWeight>;
+
+struct LineHeight {
+    enum class Kind { Normal, Number, Length, Percentage };
+
+    Kind kind = Kind::Normal;
+    float value = 0.f;
+};
 
 enum class InheritedStyleProperty : uint16_t {
     NotInherited = 0,
@@ -345,7 +374,7 @@ enum class InheritedStyleProperty : uint16_t {
 using InheritedStyleProperties = uint16_t;
 
 struct ComputedStyle {
-    AppearanceMode appearance = AppearanceMode::Auto;
+    AppearanceMode appearance = AppearanceMode::Unstyled;
     ColorScheme colorScheme = ColorScheme::Auto;
     BoxSizing boxSizing = BoxSizing::ContentBox;
     DisplayMode display = DisplayMode::Inline;
@@ -361,7 +390,7 @@ struct ComputedStyle {
     Color borderColor = Color(0.f, 0.f, 0.f, 1.f);
     std::optional<LightDarkColor> borderColorLightDark;
     bool borderColorCurrent = false;
-    BorderStyle borderStyle = BorderStyle::Solid;
+    BorderStyle borderStyle = BorderStyle::NoneValue;
     Color color = Color(0.f, 0.f, 0.f, 1.f);
     std::optional<LightDarkColor> colorLightDark;
     AccentColor accentColor;
@@ -374,7 +403,8 @@ struct ComputedStyle {
     std::vector<MaskLayer> maskLayers;
     std::optional<Gradient> borderGradient;
     std::vector<BoxShadow> shadows;
-    std::vector<Effect> effects;
+    FilterOperations filter;
+    FilterOperations backdropFilter;
     Outline outline;
     BorderRadii borderRadius;
     EdgeInsets borderWidth;
@@ -384,7 +414,7 @@ struct ComputedStyle {
     StrokeCap svgStrokeCap = StrokeCap::Butt;
     bool svgStrokeCapSet = false;
     float fontSize = 13.f;
-    std::optional<Length> lineHeight;
+    LineHeight lineHeight;
     Length letterSpacing;
     Length wordSpacing;
     float opacity = 1.f;
@@ -398,15 +428,18 @@ struct ComputedStyle {
     std::optional<Length> bottom;
     MarginInsets margin;
     EdgeInsets padding;
-    GapValue gap;
+    GapValue rowGap;
+    GapValue columnGap;
     float flexGrow = 0.f;
     float flexShrink = 1.f;
     Dimension flexBasis;
     int order = 0;
-    FontFamily fontFamily = FontFamily::Sans;
+    FontFamily fontFamily = FontFamily::SansSerif;
     U16 fontWeight = 400;
+    std::optional<RelativeFontWeight> fontWeightAdjustment;
     bool fontItalic = false;
     TextDecoration textDecoration = TextDecoration::NoneValue;
+    TextDecoration textDecorationPropagation = TextDecoration::NoneValue;
     std::optional<std::string> content;
     TextAlign textAlign = TextAlign::Start;
     TextOverflow textOverflow = TextOverflow::Clip;
@@ -424,8 +457,6 @@ struct ComputedStyle {
     std::optional<float> aspectRatio;
     Overflow overflowX = Overflow::Visible;
     Overflow overflowY = Overflow::Visible;
-    ScrollbarMode scrollbarMode = ScrollbarMode::Classic;
-    bool scrollbarModeSet = false;
     ScrollbarWidth scrollbarWidth = ScrollbarWidth::Auto;
     ScrollbarGutter scrollbarGutter = ScrollbarGutter::Auto;
     ScrollbarColors scrollbarColor;
@@ -434,11 +465,14 @@ struct ComputedStyle {
     std::vector<CursorImage> cursorImages;
     InheritedStyleProperties specifiedInheritedProperties = 0;
     std::vector<std::string_view> explicitlyInheritedProperties;
+    CustomPropertyMap customProperties;
 };
 
 void resolveLightDarkColors(ComputedStyle& style);
 void resolveCurrentColors(ComputedStyle& style);
 void normalizeOverflow(ComputedStyle& style);
 void inheritStyle(ComputedStyle& style, const ComputedStyle& parent);
+void resolveRelativeFontWeight(ComputedStyle& style, U16 inheritedWeight = 400);
+void resolvePercentageLineHeight(ComputedStyle& style);
 void applyOpacity(ComputedStyle& style, float inheritedOpacity);
 } // namespace radia::ui

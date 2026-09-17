@@ -186,17 +186,20 @@ Vec2 LayoutEngine::measurePseudoElement(PseudoElement& node, const ComputedStyle
     }
     if (!children.empty()) {
         if (style.display == DisplayMode::Grid || style.display == DisplayMode::InlineGrid) {
-            const layout_detail::GridTrackSizes tracks = gridTrackSizes(children, contentWidth, contentHeight);
+            const layout_detail::GridTrackSizes tracks =
+                gridTrackSizes(children, contentWidth, contentHeight, style.columnGap.fixedPixels(), style.rowGap.fixedPixels());
             for (const float width : tracks.columns) contentSize.x += width;
             for (const float height : tracks.rows) contentSize.y += height;
+            if (tracks.columns.size() > 1) contentSize.x += style.columnGap.fixedPixels() * static_cast<float>(tracks.columns.size() - 1);
+            if (tracks.rows.size() > 1) contentSize.y += style.rowGap.fixedPixels() * static_cast<float>(tracks.rows.size() - 1);
         } else if (isFlexDisplay(style.display) && style.flexDirection == FlexDirection::Row) {
-            contentSize.x += style.gap.fixedPixels() * static_cast<float>(children.size() - 1);
+            contentSize.x += style.columnGap.fixedPixels() * static_cast<float>(children.size() - 1);
             for (const ChildLayout& child : children) {
                 contentSize.x += child.measured.x + child.style.margin.horizontal();
                 contentSize.y = std::max(contentSize.y, child.measured.y + child.style.margin.vertical());
             }
         } else if (isFlexDisplay(style.display)) {
-            contentSize.y += style.gap.fixedPixels() * static_cast<float>(children.size() - 1);
+            contentSize.y += style.rowGap.fixedPixels() * static_cast<float>(children.size() - 1);
             for (const ChildLayout& child : children) {
                 contentSize.y += child.measured.y + child.style.margin.vertical();
                 contentSize.x = std::max(contentSize.x, child.measured.x + child.style.margin.horizontal());
@@ -276,7 +279,7 @@ ChildLayout LayoutEngine::measureChild(Element& parent, LayoutChildRef child, co
         }
         if (crossSize) {
             const float availableCross = contentBoxDimension(parentStyle, flexDirection == FlexDirection::Column, *crossSize);
-            applyCrossAxisSizing(childSize, childStyle, flexDirection, availableCross, crossAlignment(parentStyle, childStyle, flexDirection));
+            applyCrossAxisSizing(childSize, childStyle, flexDirection, availableCross, crossAlignment(parentStyle, childStyle));
         }
     }
 
@@ -284,7 +287,7 @@ ChildLayout LayoutEngine::measureChild(Element& parent, LayoutChildRef child, co
     if (flexDirection == FlexDirection::Column && resolvedWidth) {
         const float availableCross = contentBoxDimension(parentStyle, true, *resolvedWidth);
         childSize.x = styledBoxDimension(childStyle, true, childStyle.width, childStyle.minWidth, childSize.x, availableCross);
-        applyCrossAxisSizing(childSize, childStyle, flexDirection, availableCross, crossAlignment(parentStyle, childStyle, flexDirection));
+        applyCrossAxisSizing(childSize, childStyle, flexDirection, availableCross, crossAlignment(parentStyle, childStyle));
         if (childStyle.height.isAuto() && !childStyle.aspectRatio) {
             if (currentElement) childSize.y = measure(*currentElement, pass, childSize.x).y;
             else if (childPseudoElement) childSize.y = measurePseudoElement(*childPseudoElement, childStyle, childSize.x, std::nullopt, pass).y;
@@ -446,14 +449,15 @@ Vec2 LayoutEngine::measureGrid(Element& node, const ComputedStyle& style, const 
         resolvedHeight ? std::optional<float>(contentBoxDimension(style, false, *resolvedHeight)) : std::nullopt;
     const std::optional<std::vector<ChildLayout>> layoutsResult = measureGridChildren(node, contentWidth, contentHeight, pass);
     if (!layoutsResult) return content;
-    const layout_detail::GridTrackSizes tracks = gridTrackSizes(*layoutsResult, contentWidth, contentHeight);
+    const layout_detail::GridTrackSizes tracks =
+        gridTrackSizes(*layoutsResult, contentWidth, contentHeight, style.columnGap.fixedPixels(), style.rowGap.fixedPixels());
     const auto total = [](const std::vector<float>& sizes) {
         float result = 0.f;
         for (const float size : sizes) result += size;
         return result;
     };
-    content.x = std::max(content.x, total(tracks.columns));
-    content.y = std::max(content.y, total(tracks.rows));
+    content.x = std::max(content.x, total(tracks.columns) + style.columnGap.fixedPixels() * static_cast<float>(tracks.columns.size() - 1));
+    content.y = std::max(content.y, total(tracks.rows) + style.rowGap.fixedPixels() * static_cast<float>(tracks.rows.size() - 1));
     return content;
 }
 
@@ -467,11 +471,12 @@ Vec2 LayoutEngine::measureRow(Element& node, const ComputedStyle& style, const V
     std::size_t rowLines = 0;
     std::vector<ChildLayout> rowLayouts;
     LayoutChildRef previousChild;
-    const float fixedGap = style.gap.fixedPixels();
+    const float itemGap = style.columnGap.fixedPixels();
+    const float lineGap = style.rowGap.fixedPixels();
     const auto finishRow = [&] {
         if (!rowChildren && intrinsic.x == 0.f && intrinsic.y == 0.f) return;
         content.x = std::max(content.x, rowWidth);
-        if (rowLines) content.y += fixedGap;
+        if (rowLines) content.y += lineGap;
         content.y += rowHeight;
         ++rowLines;
         rowWidth = 0.f;
@@ -496,7 +501,7 @@ Vec2 LayoutEngine::measureRow(Element& node, const ComputedStyle& style, const V
         if (previousChild && previousChild.attachedTo(*currentNode)) {
             const std::optional<AdjacentLayout> adjacent = adjacentLayout(nodeState, previousChild, measured.node, style);
             if (!adjacent) return content;
-            if (adjacent->hasGap) rowWidth += fixedGap;
+            if (adjacent->hasGap) rowWidth += itemGap;
             rowWidth -= adjacent->overlap;
         }
         rowWidth += childOuterWidth;
@@ -512,7 +517,7 @@ Vec2 LayoutEngine::measureRow(Element& node, const ComputedStyle& style, const V
         const RowSizing sizing = allocateRowLines(node, rowLayouts, style, availableMain, pass);
         content.y = 0.f;
         for (std::size_t line = 0; line < sizing.lines.size(); ++line) {
-            if (line) content.y += fixedGap;
+            if (line) content.y += lineGap;
             float height = line == 0 ? intrinsic.y : 0.f;
             const auto [begin, end] = sizing.lines[line];
             for (std::size_t index = begin; index < end; ++index)
@@ -528,7 +533,7 @@ Vec2 LayoutEngine::measureColumn(Element& node, const ComputedStyle& style, cons
     const NodeSnapshot nodeState(node);
     Vec2 content = intrinsic;
     LayoutChildRef previousChild;
-    const float fixedGap = style.gap.fixedPixels();
+    const float fixedGap = style.rowGap.fixedPixels();
     const std::vector<LayoutChildRef> children = pass.orderedChildrenForLayout(node);
     for (const LayoutChildRef& childRef : children) {
         if (!childRef || !childRef.attachedTo(node)) continue;

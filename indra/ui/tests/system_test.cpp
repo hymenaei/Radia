@@ -282,7 +282,7 @@ TEST(SystemTest, PublishesSystemResources) {
 }
 
 TEST(SystemTest, UsesAppearanceMetrics) {
-    constexpr char kScrollStyles[] = "#viewport { display: block; overflow: scroll; scrollbar-mode: classic; }";
+    constexpr char kScrollStyles[] = "#viewport { display: block; overflow: scroll; }";
     const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(skinSnapshot({}, kScrollStyles));
     ASSERT_TRUE(prepared.ok());
 
@@ -327,9 +327,8 @@ TEST(SystemTest, UsesAppearanceMetrics) {
     EXPECT_EQ(updatedScrollbar->scrollbar->appearanceRevision, 43u);
 }
 
-TEST(SystemTest, FollowsScrollbarMode) {
-    constexpr char kScrollStyles[] = "#classic { display: block; overflow: scroll; scrollbar-mode: classic; } "
-                                     "#overlay { display: block; overflow: scroll; }";
+TEST(SystemTest, UsesSurfaceScrollbarMode) {
+    constexpr char kScrollStyles[] = "#viewport { display: block; overflow: scroll; }";
     const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(skinSnapshot({}, kScrollStyles));
     ASSERT_TRUE(prepared.ok());
 
@@ -342,45 +341,29 @@ TEST(SystemTest, FollowsScrollbarMode) {
     ASSERT_NE(surface, nullptr);
     surface->setViewport(240.f, 120.f);
     ScrollLayoutOptions options;
-    options.scrollbarMode = ScrollbarMode::Overlay;
+    options.scrollbarMode = ScrollbarMode::Classic;
     surface->setScrollLayoutOptions(options);
 
-    auto classic = makeElement<HTMLPanelElement>();
-    classic->setId("classic").setRect({0.f, 0.f, 100.f, 100.f});
-    auto classicContent = makeElement<HTMLPanelElement>();
-    classicContent->setRect({0.f, 0.f, 180.f, 180.f});
-    classic->append(std::move(classicContent));
-    radia::ui::HTMLPanelElement* classicPtr = classic.get();
+    auto viewport = makeElement<HTMLPanelElement>();
+    viewport->setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
+    auto content = makeElement<HTMLPanelElement>();
+    content->setRect({0.f, 0.f, 180.f, 180.f});
+    viewport->append(std::move(content));
+    radia::ui::HTMLPanelElement* viewportPtr = viewport.get();
 
-    auto overlay = makeElement<HTMLPanelElement>();
-    overlay->setId("overlay").setRect({120.f, 0.f, 100.f, 100.f});
-    auto overlayContent = makeElement<HTMLPanelElement>();
-    overlayContent->setRect({0.f, 0.f, 180.f, 180.f});
-    overlay->append(std::move(overlayContent));
-    radia::ui::HTMLPanelElement* overlayPtr = overlay.get();
-
-    surface->mount(std::move(classic));
-    surface->mount(std::move(overlay));
+    surface->mount(std::move(viewport));
     surface->updateLayout();
 
-    EXPECT_FLOAT_EQ(classicPtr->clientWidth(), 80.f);
-    EXPECT_FLOAT_EQ(classicPtr->clientHeight(), 80.f);
-    EXPECT_FLOAT_EQ(overlayPtr->clientWidth(), 100.f);
-    EXPECT_FLOAT_EQ(overlayPtr->clientHeight(), 100.f);
+    EXPECT_FLOAT_EQ(viewportPtr->clientWidth(), 80.f);
+    EXPECT_FLOAT_EQ(viewportPtr->clientHeight(), 80.f);
 
     RecordingPaintContext recording;
     surface->paint(recording);
-    const PaintCommand* classicScrollbar = nullptr;
-    const PaintCommand* overlayScrollbar = nullptr;
-    for (const PaintCommand& command : recording.commands()) {
-        if (command.kind != PaintCommandKind::Scrollbar || !command.scrollbar) continue;
-        if (command.scrollbar->mode == ScrollbarMode::Classic) classicScrollbar = &command;
-        else overlayScrollbar = &command;
-    }
-    ASSERT_NE(classicScrollbar, nullptr);
-    ASSERT_NE(overlayScrollbar, nullptr);
-    EXPECT_FLOAT_EQ(classicScrollbar->scrollbar->metrics.thickness, 20.f);
-    EXPECT_FLOAT_EQ(overlayScrollbar->scrollbar->metrics.thickness, 8.f);
+    const PaintCommand* scrollbar = recording.last(PaintCommandKind::Scrollbar);
+    ASSERT_NE(scrollbar, nullptr);
+    ASSERT_TRUE(scrollbar->scrollbar.has_value());
+    EXPECT_EQ(scrollbar->scrollbar->mode, ScrollbarMode::Classic);
+    EXPECT_FLOAT_EQ(scrollbar->scrollbar->metrics.thickness, 20.f);
 }
 
 TEST(SystemTest, PreservesLiveGenerationOnFailure) {
@@ -416,6 +399,17 @@ TEST(SystemTest, IgnoresEmptyOptionalMaskSVGAssets) {
     System system;
     ASSERT_TRUE(system.publish(prepared.generation));
     EXPECT_EQ(system.resourceSvg("icons/search.svg"), nullptr);
+}
+
+TEST(SystemTest, IgnoresMissingOptionalMaskAssets) {
+    ResourceSnapshot snapshot = skinSnapshot({}, "i { mask-image: url(icons/missing.svg); }");
+    const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(std::move(snapshot));
+
+    ASSERT_TRUE(prepared.ok());
+    EXPECT_TRUE(prepared.warnings.empty());
+    System system;
+    ASSERT_TRUE(system.publish(prepared.generation));
+    EXPECT_EQ(system.resourceSvg("icons/missing.svg"), nullptr);
 }
 
 TEST(SystemTest, RejectsLegacyIconElements) {
@@ -564,6 +558,16 @@ TEST(SystemTest, RejectsMissingRequiredStyleResources) {
     EXPECT_EQ(rejected.errors[1].code, "ui.resource.missing");
     EXPECT_EQ(rejected.errors[0].source, "skin.css");
     EXPECT_EQ(rejected.errors[1].source, "skin.css");
+}
+
+TEST(SystemTest, RejectsMissingDeferredStyleResources) {
+    const SkinGenerationPrepareResult rejected = SkinCompiler().prepare(
+        skinSnapshot({}, ":root { --missing-background: url(backgrounds/missing.svg); } i { background-image: var(--missing-background); }"));
+
+    ASSERT_FALSE(rejected.ok());
+    ASSERT_EQ(rejected.errors.size(), 1U);
+    EXPECT_EQ(rejected.errors.front().code, "ui.resource.missing");
+    EXPECT_EQ(rejected.errors.front().source, "skin.css");
 }
 
 TEST(SystemTest, CompilesSVGAssetsOutsideIconDirectory) {

@@ -172,7 +172,7 @@ float verticalAlignmentOffset(VerticalAlign alignment, float freeSpace) {
     return 0.f;
 }
 
-CrossAlignment crossAlignment(const ComputedStyle& parent, const ComputedStyle& child, FlexDirection flexDirection) {
+CrossAlignment crossAlignment(const ComputedStyle& parent, const ComputedStyle& child) {
     if (child.alignSelf != AlignSelf::Auto) {
         if (child.alignSelf == AlignSelf::Start) return CrossAlignment::Start;
         if (child.alignSelf == AlignSelf::Center) return CrossAlignment::Center;
@@ -183,10 +183,7 @@ CrossAlignment crossAlignment(const ComputedStyle& parent, const ComputedStyle& 
     if (parent.alignItems == AlignItems::Center) return CrossAlignment::Center;
     if (parent.alignItems == AlignItems::End) return CrossAlignment::End;
     if (parent.alignItems == AlignItems::Stretch) return CrossAlignment::Stretch;
-    if (flexDirection == FlexDirection::Column) return CrossAlignment::Stretch;
-    if (parent.verticalAlign == VerticalAlign::Middle) return CrossAlignment::Center;
-    if (parent.verticalAlign == VerticalAlign::Bottom) return CrossAlignment::End;
-    return CrossAlignment::Start;
+    return CrossAlignment::Stretch;
 }
 
 void applyCrossAxisSizing(Vec2& size, const ComputedStyle& style, FlexDirection flexDirection, float availableCross, CrossAlignment alignment) {
@@ -227,7 +224,8 @@ float justifySelfOffset(JustifySelf alignment, LayoutDirection direction, float 
     return 0.f;
 }
 
-GridTrackSizes gridTrackSizes(const std::vector<ChildLayout>& children, std::optional<float> availableWidth, std::optional<float> availableHeight) {
+GridTrackSizes gridTrackSizes(const std::vector<ChildLayout>& children, std::optional<float> availableWidth, std::optional<float> availableHeight,
+                              float columnGap, float rowGap) {
     std::size_t columnCount = 1;
     std::size_t rowCount = 1;
     for (const ChildLayout& child : children) {
@@ -249,21 +247,21 @@ GridTrackSizes gridTrackSizes(const std::vector<ChildLayout>& children, std::opt
         result.rows[row] = std::max(result.rows[row], child.measured.y + child.style.margin.vertical());
     }
 
-    const auto distributeFreeSpace = [](std::vector<float>& tracks, std::optional<float> available) {
+    const auto distributeFreeSpace = [](std::vector<float>& tracks, std::optional<float> available, float gap) {
         if (!available || tracks.empty()) return;
         float used = 0.f;
         for (const float track : tracks) used += track;
-        const float freeSpace = *available - used;
+        const float freeSpace = *available - used - gap * static_cast<float>(tracks.size() - 1);
         if (freeSpace <= 0.f) return;
         const float extra = freeSpace / static_cast<float>(tracks.size());
         for (float& track : tracks) track += extra;
     };
-    distributeFreeSpace(result.columns, availableWidth);
-    distributeFreeSpace(result.rows, availableHeight);
+    distributeFreeSpace(result.columns, availableWidth, columnGap);
+    distributeFreeSpace(result.rows, availableHeight, rowGap);
     return result;
 }
 
-Rect positionedRect(const ChildLayout& child, const Rect& parent, VerticalAlign verticalAlignment) {
+Rect positionedRect(const ChildLayout& child, const Rect& parent) {
     const Element* node = child.node.element();
     const bool explicitRect = node && node->mRectExplicit;
     const float width = explicitRect && child.style.width.isAuto()
@@ -277,9 +275,7 @@ Rect positionedRect(const ChildLayout& child, const Rect& parent, VerticalAlign 
     const float horizontalSpace = std::max(0.f, parent.w - width - margin.horizontal());
     float x = explicitRect ? node->mRect.x : margin.left.isAuto() ? parent.left() + horizontalSpace : parent.left() + margin.left.fixedPixels();
     if (margin.left.isAuto() && margin.right.isAuto()) x = parent.left() + horizontalSpace * .5f;
-    const float verticalSpace = std::max(0.f, parent.h - height - margin.vertical());
-    float y =
-        explicitRect ? node->mRect.y : parent.top() - margin.top.fixedPixels() - height - verticalAlignmentOffset(verticalAlignment, verticalSpace);
+    const float y = explicitRect ? node->mRect.y : parent.top() - margin.top.fixedPixels() - height;
     return {x, y, width, height};
 }
 
@@ -419,15 +415,11 @@ MainAxisAllocation allocateMainAxis(Element& parent, std::vector<ChildLayout>& c
         overlap += adjacent->overlap;
     }
     MainAxisAllocation allocation;
-    allocation.gap = parentStyle.gap.fixedPixels();
+    const GapValue& mainGap = flexDirection == FlexDirection::Row ? parentStyle.columnGap : parentStyle.rowGap;
+    allocation.gap = mainGap.fixedPixels();
     total += allocation.gap * static_cast<float>(gapCount) - overlap;
-    distributeFlexSpace(children, begin, end, flexDirection, availableMain, !autoMargins && !parentStyle.gap.isAuto(), total);
+    distributeFlexSpace(children, begin, end, flexDirection, availableMain, !autoMargins, total);
     allocation.freeSpace = availableMain - total;
-    if (!autoMargins && parentStyle.gap.isAuto() && gapCount) {
-        allocation.gap = std::max(0.f, allocation.freeSpace) / static_cast<float>(gapCount);
-        total += allocation.gap * static_cast<float>(gapCount);
-        allocation.freeSpace = availableMain - total;
-    }
     allocation.hasAutoMargins = autoMargins != 0;
     if (autoMargins) allocation.autoMargin = std::max(0.f, allocation.freeSpace) / static_cast<float>(autoMargins);
     return allocation;

@@ -53,6 +53,7 @@ using radia::ui::HTMLLabelElement;
 using radia::ui::HTMLPanelElement;
 using radia::ui::JustifyContent;
 using radia::ui::JustifySelf;
+using radia::ui::LineHeight;
 using radia::ui::PointerEvents;
 using radia::ui::PositionMode;
 using radia::ui::StrokeCap;
@@ -109,7 +110,7 @@ TEST(StyleCompilerTest, ResolvesStructuralDivStyles) {
     EXPECT_EQ(style.display, DisplayMode::Flex);
     EXPECT_TRUE(style.displaySet);
     EXPECT_EQ(style.flexDirection, FlexDirection::Row);
-    EXPECT_EQ(style.gap.fixedPixels(), 8.f);
+    EXPECT_EQ(style.rowGap.fixedPixels(), 8.f);
     EXPECT_EQ(style.padding.top, 2.f);
 }
 
@@ -338,14 +339,14 @@ TEST(StyleCompilerTest, ParsesGridSelfAlignment) {
 }
 
 TEST(StyleCompilerTest, ParsesTypographyProperties) {
-    constexpr char kTypographyStyles[] = "label#a { font-family: sans; font-size: 19px; "
+    constexpr char kTypographyStyles[] = "label#a { font-family: sans-serif; font-size: 19px; "
                                          "font-weight: bold; font-style: italic; }";
     constexpr char kVariableWeightStyles[] = "label { font-weight: 525; }";
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kTypographyStyles).ok());
     const ComputedStyle label = stylesheet.resolve("label", "a", {}, 0);
-    EXPECT_EQ(label.fontFamily, FontFamily::Sans);
+    EXPECT_EQ(label.fontFamily, FontFamily::SansSerif);
     EXPECT_EQ(label.fontSize, 19.f);
     EXPECT_EQ(label.fontWeight, static_cast<U16>(700));
     EXPECT_TRUE(label.fontItalic);
@@ -357,7 +358,7 @@ TEST(StyleCompilerTest, ParsesTypographyProperties) {
 
 TEST(StyleCompilerTest, ExpandsInitialValues) {
     constexpr char kInitialStyles[] = "panel { display: flex; margin: 4px; padding: 5px; size: 20px 30px; min-size: 2px 3px; "
-                                      "flex: 2 3 4px; overflow: hidden; font: italic 700 21px/25px sans; color: #abcdef; } "
+                                      "flex: 2 3 4px; overflow: hidden; font: italic 700 21px/25px sans-serif; color: #abcdef; } "
                                       "panel.reset { display: initial; margin: initial; padding: initial; size: initial; min-size: initial; "
                                       "flex: initial; overflow: initial; font: initial; color: initial; }";
 
@@ -383,8 +384,8 @@ TEST(StyleCompilerTest, ExpandsInitialValues) {
     EXPECT_FALSE(style.fontItalic);
     EXPECT_EQ(style.fontWeight, static_cast<U16>(400));
     EXPECT_EQ(style.fontSize, 13.f);
-    EXPECT_FALSE(style.lineHeight.has_value());
-    EXPECT_EQ(style.fontFamily, FontFamily::Sans);
+    EXPECT_EQ(style.lineHeight.kind, LineHeight::Kind::Normal);
+    EXPECT_EQ(style.fontFamily, FontFamily::SansSerif);
     EXPECT_FLOAT_EQ(style.color.r, 0.f);
     EXPECT_FLOAT_EQ(style.color.g, 0.f);
     EXPECT_FLOAT_EQ(style.color.b, 0.f);
@@ -411,6 +412,7 @@ TEST(StyleCompilerTest, RejectsInvalidTypographyForms) {
     };
     const InvalidTypographyCase cases[] = {
         {"pseudo font family", "label { font-family: sans-bold; }"},
+        {"legacy generic family", "label { font-family: sans; }"},
         {"fractional weight", "label { font-weight: 525.5; }"},
         {"unit-bearing weight", "label { font-weight: 700px; }"},
     };
@@ -426,7 +428,7 @@ TEST(StyleCompilerTest, RejectsInvalidTypographyForms) {
 }
 
 TEST(StyleCompilerTest, ParsesBorderProperties) {
-    constexpr char kBorderStyles[] = "button { border: 1px #112233ff; border-width: 2px 3px; "
+    constexpr char kBorderStyles[] = "button { border: 1px solid #112233ff; border-width: 2px 3px; "
                                      "border-color: #ffffffff; } "
                                      "button > i { stroke: #abcdef88; stroke-width: 4px; stroke-linecap: square; }";
 
@@ -596,7 +598,7 @@ TEST(StyleCompilerTest, ParsesFlexItemShorthands) {
     EXPECT_EQ(style.padding.left, 4.f);
     ASSERT_TRUE(style.minWidth.has_value());
     EXPECT_EQ(style.minWidth->pixels, 20.f);
-    EXPECT_EQ(style.gap.fixedPixels(), 7.f);
+    EXPECT_EQ(style.rowGap.fixedPixels(), 7.f);
     EXPECT_EQ(style.flexGrow, 2.f);
     EXPECT_EQ(style.flexShrink, 3.f);
     EXPECT_NEAR(style.flexBasis.resolve(0.f, 200.f), 80.f, 1.0e-4f);
@@ -638,6 +640,7 @@ TEST(StyleCompilerTest, RejectsUnitBearingFlexGrow) {
 TEST(StyleCompilerTest, ProvidesStableStyleDefaults) {
     const ComputedStyle style;
 
+    EXPECT_EQ(style.appearance, AppearanceMode::Unstyled);
     EXPECT_EQ(style.display, DisplayMode::Inline);
     EXPECT_FALSE(style.displaySet);
     EXPECT_EQ(style.justifyContent, JustifyContent::Start);
@@ -647,10 +650,9 @@ TEST(StyleCompilerTest, ProvidesStableStyleDefaults) {
     EXPECT_EQ(style.flexShrink, 1.f);
     EXPECT_TRUE(style.flexBasis.isAuto());
     EXPECT_EQ(style.order, 0);
-    EXPECT_FALSE(style.gap.isAuto());
-    EXPECT_EQ(style.gap.fixedPixels(), 0.f);
+    EXPECT_EQ(style.rowGap.fixedPixels(), 0.f);
     EXPECT_EQ(style.pointerEvents, PointerEvents::Default);
-    EXPECT_EQ(style.fontFamily, FontFamily::Sans);
+    EXPECT_EQ(style.fontFamily, FontFamily::SansSerif);
     EXPECT_EQ(style.verticalAlign, VerticalAlign::Top);
     EXPECT_EQ(style.backgroundColor.a, 0.f);
 }
@@ -672,9 +674,9 @@ TEST(StyleCompilerTest, PreservesAuthoredFloaterParts) {
 TEST(StyleCompilerTest, ParsesTextShorthands) {
     constexpr char kTextPresentationStyles[] = "panel { letter-spacing: 50%; word-spacing: 25%; text-wrap: nowrap; } "
                                                "p { text-overflow: ellipsis-center; } "
-                                               "label { font: italic 525 17px/21px sans; } "
+                                               "label { font: italic 525 17px/21px sans-serif; } "
                                                "label.reset { font-style: italic; font-weight: bold; "
-                                               "line-height: 30px; font: 12px sans; }";
+                                               "line-height: 30px; font: 12px sans-serif; }";
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kTextPresentationStyles).ok());
@@ -694,13 +696,13 @@ TEST(StyleCompilerTest, ParsesTextShorthands) {
     EXPECT_TRUE(shorthand.fontItalic);
     EXPECT_EQ(shorthand.fontWeight, static_cast<U16>(525));
     EXPECT_EQ(shorthand.fontSize, 17.f);
-    ASSERT_TRUE(shorthand.lineHeight.has_value());
-    EXPECT_EQ(shorthand.lineHeight->pixels, 21.f);
+    EXPECT_EQ(shorthand.lineHeight.kind, LineHeight::Kind::Length);
+    EXPECT_EQ(shorthand.lineHeight.value, 21.f);
 
     const ComputedStyle reset = stylesheet.resolve("label", "", {"reset"}, 0);
     EXPECT_FALSE(reset.fontItalic);
     EXPECT_EQ(reset.fontWeight, static_cast<U16>(400));
-    EXPECT_FALSE(reset.lineHeight.has_value());
+    EXPECT_EQ(reset.lineHeight.kind, LineHeight::Kind::Normal);
 }
 
 TEST(StyleCompilerTest, RejectsInvalidTextValues) {
@@ -769,7 +771,7 @@ TEST(StyleCompilerTest, RejectsNonFiniteEdgeValues) {
 }
 
 TEST(StyleCompilerTest, PreservesNestedSyntax) {
-    const std::vector<std::string> tokens = tokenizeTopLevel("italic 17px/21px sans", true);
+    const std::vector<std::string> tokens = tokenizeTopLevel("italic 17px/21px sans-serif", true);
     ASSERT_EQ(tokens.size(), std::size_t(5));
     EXPECT_EQ(tokens[2], "/");
     const std::vector<std::string> commentSeparated = tokenizeTopLevel("1px/**/solid");
@@ -917,7 +919,7 @@ TEST(StyleCompilerTest, RejectsUnclosedStyleBlocks) {
 }
 
 TEST(StyleCompilerTest, KeepsPropertyRegistryValid) {
-    const std::set<std::string_view> shorthandNames{"background", "font", "flex", "mask", "min-size", "overflow"};
+    const std::set<std::string_view> shorthandNames{"background", "font", "flex", "gap", "mask", "min-size", "overflow"};
     std::set<std::string_view> names;
     for (const StylePropertyDefinition* property = stylePropertyBegin(); property != stylePropertyEnd(); ++property) {
         SCOPED_TRACE(Message() << "style property: " << property->name);
@@ -925,7 +927,7 @@ TEST(StyleCompilerTest, KeepsPropertyRegistryValid) {
         EXPECT_TRUE(names.insert(property->name).second);
         EXPECT_NE(property->compile, nullptr);
         EXPECT_EQ(property->apply == nullptr, shorthand);
-        EXPECT_EQ(property->reset == nullptr, property->apply == nullptr);
+        EXPECT_EQ(property->reset == nullptr, shorthand);
         EXPECT_EQ(property->longhands.empty(), !shorthand);
         for (const std::string_view longhand : property->longhands) EXPECT_NE(findStyleProperty(longhand), nullptr);
     }

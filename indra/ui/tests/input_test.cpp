@@ -29,6 +29,7 @@
 namespace {
 using radia::ui::AccentColor;
 using radia::ui::AppearanceMode;
+using radia::ui::BorderStyle;
 using radia::ui::Color;
 using radia::ui::ColorScheme;
 using radia::ui::ComputedStyle;
@@ -62,6 +63,7 @@ using radia::ui::ValueState;
 using radia::ui::ValueValidation;
 using radia::ui::ValueValidationStatus;
 using radia::ui::Vec2;
+using radia::ui::detail::ElementInternalAccess;
 using radia::ui::detail::makeElement;
 using radia::ui::detail::makeElementValue;
 
@@ -256,6 +258,7 @@ TEST(InputTest, SelectsNativeAppearance) {
     auto input = makeElementValue<HTMLInputElement>();
     RecordingPaintContext recording;
     ComputedStyle style;
+    style.appearance = AppearanceMode::Auto;
 
     input.type("checkbox").setRect({0.f, 0.f, 13.f, 13.f});
     input.paint(recording, style, 1.f);
@@ -275,7 +278,9 @@ TEST(InputTest, SelectsNativeAppearance) {
     auto control = makeElementValue<HTMLInputElement>();
     control.type("checkbox").switchMode(true).setRect({0.f, 0.f, 36.f, 20.f});
     recording.clear();
-    control.paint(recording, ComputedStyle{}, 1.f);
+    ComputedStyle nativeStyle;
+    nativeStyle.appearance = AppearanceMode::Auto;
+    control.paint(recording, nativeStyle, 1.f);
     ASSERT_EQ(recording.count(PaintCommandKind::NativeInput), std::size_t{1});
     ASSERT_NE(recording.last(PaintCommandKind::NativeInput), nullptr);
     ASSERT_TRUE(recording.last(PaintCommandKind::NativeInput)->nativeInput.has_value());
@@ -325,6 +330,7 @@ TEST(InputTest, CarriesAccentColor) {
     input.type("checkbox").setRect({0.f, 0.f, 13.f, 13.f});
     RecordingPaintContext recording;
     ComputedStyle style;
+    style.appearance = AppearanceMode::Auto;
     style.accentColor = AccentColor::fromColor({.2f, .4f, .6f, .8f});
 
     input.paint(recording, style, 1.f);
@@ -344,6 +350,7 @@ TEST(InputTest, CarriesOpacityToNativeAppearance) {
     input.type("checkbox").setRect({0.f, 0.f, 13.f, 13.f});
     RecordingPaintContext recording;
     ComputedStyle style;
+    style.appearance = AppearanceMode::Auto;
     style.opacity = .4f;
 
     input.paint(recording, style, 1.f);
@@ -359,6 +366,7 @@ TEST(InputTest, CarriesColorScheme) {
     input.type("checkbox").setRect({0.f, 0.f, 13.f, 13.f});
     RecordingPaintContext recording;
     ComputedStyle style;
+    style.appearance = AppearanceMode::Auto;
     style.colorScheme = ColorScheme::Light;
 
     input.paint(recording, style, 1.f);
@@ -417,6 +425,58 @@ TEST(InputTest, PaintsNativeCheckbox) {
     EXPECT_TRUE(mark->nativeInputMark->path.empty());
 }
 
+TEST(InputTest, PaintsNativeInputBorders) {
+    NativeAppearanceBase appearance;
+    NativeInputPaintRequest request;
+    request.bounds = {0.f, 0.f, 13.f, 13.f};
+    RecordingPaintContext recording;
+
+    request.control = NativeInputControl::Checkbox;
+    appearance.paintInput(recording, request);
+    ASSERT_EQ(recording.count(PaintCommandKind::Box), std::size_t{2});
+    EXPECT_EQ(recording.commands().back().style.borderStyle, BorderStyle::Solid);
+
+    request.control = NativeInputControl::Radio;
+    recording.clear();
+    appearance.paintInput(recording, request);
+    ASSERT_EQ(recording.count(PaintCommandKind::Box), std::size_t{2});
+    EXPECT_EQ(recording.commands().back().style.borderStyle, BorderStyle::Solid);
+}
+
+TEST(InputTest, BaseCheckableAppearanceHasDefaultSolidBorder) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia("input[type=checkbox], input[type=radio] { appearance: base; }").ok());
+
+    auto checkbox = makeElementValue<HTMLInputElement>();
+    checkbox.type("checkbox");
+    const ComputedStyle style = computedStyle(stylesheet, checkbox);
+
+    EXPECT_EQ(style.borderWidth.top, 1.f);
+    EXPECT_EQ(style.borderStyle, BorderStyle::Solid);
+}
+
+TEST(InputTest, PaintsResolvedCssOutlineForNativeInput) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia("input { appearance: auto; } input:focus-visible { outline: light-dark(#101010, #ffffff) solid 1px; }").ok());
+
+    auto input = makeElementValue<HTMLInputElement>();
+    input.type("checkbox").setRect({0.f, 0.f, 13.f, 13.f});
+    ElementInternalAccess::setState(input, ElementState::Focused, true);
+    ElementInternalAccess::setState(input, ElementState::FocusVisible, true);
+    const ComputedStyle style = computedStyle(stylesheet, input);
+    RecordingPaintContext recording;
+
+    input.paint(recording, style, 1.f);
+
+    ASSERT_EQ(recording.count(PaintCommandKind::NativeInput), std::size_t{1});
+    const PaintCommand* outline = recording.last(PaintCommandKind::Box);
+    ASSERT_NE(outline, nullptr);
+    EXPECT_FLOAT_EQ(outline->style.outline.width, 1.f);
+    EXPECT_FLOAT_EQ(outline->style.outline.color.r, 1.f);
+    EXPECT_FLOAT_EQ(outline->style.outline.color.g, 1.f);
+    EXPECT_FLOAT_EQ(outline->style.outline.color.b, 1.f);
+}
+
 TEST(InputTest, AppliesNativeInputOpacity) {
     NativeAppearanceBase appearance;
     NativeInputPaintRequest request;
@@ -454,6 +514,7 @@ TEST(InputTest, PaintsRoundRadioDot) {
     ASSERT_EQ(recording.count(PaintCommandKind::Box), std::size_t{3});
     const PaintCommand* dot = recording.last(PaintCommandKind::Box);
     ASSERT_NE(dot, nullptr);
+    EXPECT_EQ(recording.commands()[1].style.borderStyle, BorderStyle::Solid);
     EXPECT_FLOAT_EQ(dot->rect.w, 7.8f);
     EXPECT_FLOAT_EQ(dot->rect.h, 7.8f);
     EXPECT_FLOAT_EQ(dot->style.borderRadius.topLeft.horizontal.pixels, 3.9f);
@@ -545,13 +606,16 @@ TEST(InputTest, UsesSurfaceMetricsForIntrinsicSize) {
     surface.setScrollLayoutOptions({ScrollbarMode::Classic, appearance.layoutMetrics()});
     surface.mount(input);
 
-    const Vec2 size = input.intrinsicSize(styleSheet, ComputedStyle{}, fixedTextMetrics());
+    ComputedStyle nativeStyle;
+    nativeStyle.appearance = AppearanceMode::Auto;
+    const Vec2 size = input.intrinsicSize(styleSheet, nativeStyle, fixedTextMetrics());
     EXPECT_FLOAT_EQ(size.x, 21.f);
     EXPECT_FLOAT_EQ(size.y, 22.f);
 }
 
 TEST(InputTest, UsesRequestedMetricsWhenDetached) {
     StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet.loadRadia("input { appearance: auto; }").ok());
     auto input = makeElementValue<HTMLInputElement>();
     input.type("radio");
     SizedNativeAppearance appearance;
@@ -566,6 +630,7 @@ TEST(InputTest, UsesRequestedMetricsWhenDetached) {
 
 TEST(InputTest, UsesSurfaceMetricsWhenAttached) {
     StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet.loadRadia("input { appearance: auto; }").ok());
     auto input = makeElementValue<HTMLInputElement>();
     input.type("radio");
     SizedNativeAppearance appearance;

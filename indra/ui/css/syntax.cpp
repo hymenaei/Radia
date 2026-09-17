@@ -698,6 +698,31 @@ std::optional<CSSFunctionRange> parseCSSFunction(const CSSTokenStream& stream, C
     return CSSFunctionRange{lower(decodeCSSIdentifier(functionText.substr(0, functionText.size() - 1))), {function + 1, close}};
 }
 
+std::optional<std::string> parseCSSUrl(const CSSTokenStream& stream, CSSTokenRange range) {
+    range = trimCSSRange(stream, range);
+    const auto& tokens = stream.tokens();
+    std::vector<std::size_t> significant;
+    for (std::size_t index = range.begin; index < range.end; ++index)
+        if (!isCSSTrivia(tokens[index].kind)) significant.push_back(index);
+    if (significant.size() == 1 && tokens[significant.front()].kind == CSSTokenKind::Url) {
+        const std::string_view token = stream.text(significant.front());
+        const std::size_t open = token.find('(');
+        if (open == std::string_view::npos || token.empty() || token.back() != ')') return std::nullopt;
+        const std::string decoded = decodeCSSIdentifier(trim(std::string(token.substr(open + 1, token.size() - open - 2))));
+        return decoded.empty() ? std::nullopt : std::optional<std::string>(decoded);
+    }
+    if (significant.size() != 3 || tokens[significant[0]].kind != CSSTokenKind::Function || tokens[significant[2]].kind != CSSTokenKind::CloseParen)
+        return std::nullopt;
+    const auto function = parseCSSFunction(stream, range);
+    if (!function
+        || function->name != "url"
+        || tokens[significant[0]].matching != significant[2]
+        || tokens[significant[1]].kind != CSSTokenKind::String)
+        return std::nullopt;
+    const std::optional<std::string> decoded = decodeCSSString(stream.text(significant[1]));
+    return decoded && !decoded->empty() ? decoded : std::nullopt;
+}
+
 std::optional<CSSDimension> parseCSSDimension(const CSSTokenStream& stream, CSSTokenRange range) {
     range = trimCSSRange(stream, range);
     std::vector<std::size_t> significant;

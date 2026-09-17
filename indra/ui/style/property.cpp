@@ -36,6 +36,7 @@ bool hasDimensionUnit(const detail::CSSTokenStream& stream, detail::CSSTokenRang
 
 std::optional<BorderStyle> parseBorderStyle(detail::CSSValueRange value) {
     const std::string token = normalizeCSSKeyword(value.stream, value.range);
+    if (token == "none") return BorderStyle::NoneValue;
     if (token == "solid") return BorderStyle::Solid;
     if (token == "outset") return BorderStyle::Outset;
     if (token == "inset") return BorderStyle::Inset;
@@ -130,14 +131,25 @@ void detail::applyStyleDeclaration(ComputedStyle& style, const StyleDeclaration&
     if (property.specify) property.specify(style);
 }
 
-std::optional<bool> StyleModel::parseFontStyleValue(detail::CSSValueRange value) const {
+void detail::applyInvalidStyleDeclaration(ComputedStyle& style, const StylePropertyDefinition& property) {
+    if (property.longhands.empty()) {
+        applyStyleDeclaration(style, StyleDeclaration{property, StyleWideKeyword::Unset});
+        return;
+    }
+    for (const std::string_view longhandName : property.longhands) {
+        const StylePropertyDefinition* longhand = findStyleProperty(longhandName);
+        if (longhand) applyStyleDeclaration(style, StyleDeclaration{*longhand, StyleWideKeyword::Unset});
+    }
+}
+
+std::optional<bool> StyleModel::parseFontStyleValue(detail::CSSValueRange value) {
     const std::string style = normalizeCSSKeyword(value.stream, value.range);
     if (style == "normal") return false;
     if (style == "italic" || style == "oblique") return true;
     return std::nullopt;
 }
 
-std::optional<float> StyleModel::parseFontWeightValue(detail::CSSValueRange value) const {
+std::optional<float> StyleModel::parseFontWeightValue(detail::CSSValueRange value) {
     const std::string weight = normalizeCSSKeyword(value.stream, value.range);
     if (weight == "normal") return 400.f;
     if (weight == "bold") return 700.f;
@@ -146,17 +158,33 @@ std::optional<float> StyleModel::parseFontWeightValue(detail::CSSValueRange valu
     return std::isfinite(parsed) && parsed >= 1.f && parsed <= 1000.f && std::floor(parsed) == parsed ? std::optional<float>(parsed) : std::nullopt;
 }
 
-std::optional<Length> StyleModel::parseLineHeightValue(detail::CSSValueRange value) const {
-    const std::optional<Length> parsed = parseLengthValue(value);
-    return parsed && parsed->pixels >= 0.f && parsed->percent == 0.f ? parsed : std::nullopt;
+std::optional<LineHeight> StyleModel::parseLineHeightValue(detail::CSSValueRange value) {
+    const std::string keyword = normalizeCSSKeyword(value.stream, value.range);
+    if (keyword == "normal") return LineHeight{LineHeight::Kind::Normal, 0.f};
+    if (hasDimensionUnit(value.stream, value.range, "px")) {
+        const std::optional<Length> parsed = parseLengthValue(value);
+        return parsed && parsed->pixels >= 0.f && parsed->percent == 0.f
+            ? std::optional<LineHeight>(LineHeight{LineHeight::Kind::Length, parsed->pixels})
+            : std::nullopt;
+    }
+    if (endsWith(keyword, "%")) {
+        const std::optional<Length> parsed = parseLengthValue(value);
+        return parsed && parsed->percent >= 0.f && parsed->pixels == 0.f
+            ? std::optional<LineHeight>(LineHeight{LineHeight::Kind::Percentage, parsed->percent})
+            : std::nullopt;
+    }
+    const float parsed = parseNumberValue(value, std::numeric_limits<float>::quiet_NaN());
+    return std::isfinite(parsed) && parsed >= 0.f ? std::optional<LineHeight>(LineHeight{LineHeight::Kind::Number, parsed}) : std::nullopt;
 }
 
-std::optional<std::vector<StyleDeclaration>> StyleModel::parseFontShorthand(detail::CSSValueRange value) const {
+std::optional<std::vector<StyleDeclaration>> StyleModel::parseFontShorthand(detail::CSSValueRange value) {
     std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, value.range, true);
-    if (tokens.size() < 2 || normalizeCSSKeyword(value.stream, tokens.back()) != "sans") return std::nullopt;
+    if (tokens.size() < 2) return std::nullopt;
+    const std::string family = normalizeCSSKeyword(value.stream, tokens.back());
+    if (family != "sans-serif" && family != "monospace") return std::nullopt;
     tokens.pop_back();
 
-    std::optional<Length> lineHeight;
+    LineHeight lineHeight;
     std::size_t sizeIndex = tokens.size() - 1;
     const auto slash =
         std::find_if(tokens.begin(), tokens.end(), [&](detail::CSSTokenRange token) { return normalizeCSSKeyword(value.stream, token) == "/"; });
@@ -166,8 +194,9 @@ std::optional<std::vector<StyleDeclaration>> StyleModel::parseFontShorthand(deta
             std::find_if(slash + 1, tokens.end(), [&](detail::CSSTokenRange token) { return normalizeCSSKeyword(value.stream, token) == "/"; });
         if (slashIndex == 0 || slashIndex + 2 != tokens.size() || secondSlash != tokens.end()) return std::nullopt;
         sizeIndex = slashIndex - 1;
-        lineHeight = parseLineHeightValue({value.stream, tokens.back()});
-        if (!lineHeight) return std::nullopt;
+        const std::optional<LineHeight> parsedLineHeight = parseLineHeightValue({value.stream, tokens.back()});
+        if (!parsedLineHeight) return std::nullopt;
+        lineHeight = *parsedLineHeight;
     }
 
     const std::string size = normalizeCSSKeyword(value.stream, tokens[sizeIndex]);
@@ -176,6 +205,7 @@ std::optional<std::vector<StyleDeclaration>> StyleModel::parseFontShorthand(deta
 
     bool italic = false;
     float weight = 400.f;
+    std::optional<RelativeFontWeight> relativeWeight;
     bool sawStyle = false;
     bool sawWeight = false;
     for (std::size_t index = 0; index < sizeIndex; ++index) {
@@ -195,6 +225,11 @@ std::optional<std::vector<StyleDeclaration>> StyleModel::parseFontShorthand(deta
             }
         }
         if (!sawWeight) {
+            if (token == "bolder" || token == "lighter") {
+                relativeWeight = RelativeFontWeight{token == "lighter"};
+                sawWeight = true;
+                continue;
+            }
             const std::optional<float> parsedWeight = parseFontWeightValue({value.stream, tokens[index]});
             if (parsedWeight) {
                 weight = *parsedWeight;
@@ -207,10 +242,10 @@ std::optional<std::vector<StyleDeclaration>> StyleModel::parseFontShorthand(deta
 
     return makeDeclarations({
         {"font-style", italic},
-        {"font-weight", weight},
+        {"font-weight", relativeWeight ? StyleValue(*relativeWeight) : StyleValue(weight)},
         {"font-size", parsedSize},
         {"line-height", lineHeight},
-        {"font-family", FontFamily::Sans},
+        {"font-family", family == "monospace" ? StyleValue(FontFamily::Monospace) : StyleValue(FontFamily::SansSerif)},
     });
 }
 
@@ -223,7 +258,6 @@ struct StyleCompileValue {
 };
 
 struct detail::StyleCompileContext {
-    const StyleModel& model;
     const detail::StylePropertyDefinition& property;
     StyleCompileValue value;
     const std::string& selector;
@@ -243,33 +277,33 @@ struct detail::StyleCompileContext {
 
     std::optional<Color> color() const {
         const Color marker(-1.f, -1.f, -1.f, -1.f);
-        const Color parsed = model.parseColorValue({value.stream, value.range}, marker);
+        const Color parsed = StyleModel::parseColorValue({value.stream, value.range}, marker);
         return parsed.a < 0.f ? std::nullopt : std::optional<Color>(parsed);
     }
 
     std::optional<Color> color(detail::CSSValueRange raw) const {
         const Color marker(-1.f, -1.f, -1.f, -1.f);
-        const Color parsed = model.parseColorValue(raw, marker);
+        const Color parsed = StyleModel::parseColorValue(raw, marker);
         return parsed.a < 0.f ? std::nullopt : std::optional<Color>(parsed);
     }
 
-    std::optional<StyleColorValue> colorValue() const { return model.parseColorChoiceValue({value.stream, value.range}); }
+    std::optional<StyleColorValue> colorValue() const { return StyleModel::parseColorChoiceValue({value.stream, value.range}); }
 
-    std::optional<StyleColorValue> colorValue(detail::CSSValueRange raw) const { return model.parseColorChoiceValue(raw); }
+    std::optional<StyleColorValue> colorValue(detail::CSSValueRange raw) const { return StyleModel::parseColorChoiceValue(raw); }
 
     std::optional<float> number() const {
-        const float parsed = model.parseNumberValue({value.stream, value.range}, std::numeric_limits<float>::quiet_NaN());
+        const float parsed = StyleModel::parseNumberValue({value.stream, value.range}, std::numeric_limits<float>::quiet_NaN());
         return std::isfinite(parsed) ? std::optional<float>(parsed) : std::nullopt;
     }
 
     std::optional<float> number(detail::CSSValueRange raw) const {
-        const float parsed = model.parseNumberValue(raw, std::numeric_limits<float>::quiet_NaN());
+        const float parsed = StyleModel::parseNumberValue(raw, std::numeric_limits<float>::quiet_NaN());
         return std::isfinite(parsed) ? std::optional<float>(parsed) : std::nullopt;
     }
 
-    std::optional<Length> length() const { return model.parseLengthValue({value.stream, value.range}); }
+    std::optional<Length> length() const { return StyleModel::parseLengthValue({value.stream, value.range}); }
 
-    std::optional<Length> length(detail::CSSValueRange raw) const { return model.parseLengthValue(raw); }
+    std::optional<Length> length(detail::CSSValueRange raw) const { return StyleModel::parseLengthValue(raw); }
 
     std::vector<detail::CSSTokenRange> commaSeparatedRanges() const { return detail::splitCSSOnDelimiter(value.stream, value.range, ','); }
 
@@ -294,8 +328,8 @@ struct detail::StyleCompileContext {
 
 namespace {
 CompileResult compileShadow(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
-    const auto parsed = model.parseShadows({value.stream, value.range});
+    auto& [property, value, selector, result, sourceName] = context;
+    const auto parsed = StyleModel::parseShadows({value.stream, value.range});
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
@@ -329,21 +363,21 @@ CompileResult compileContent(detail::StyleCompileContext& context) {
     return parsed.valid ? context.compiled(parsed.value) : context.invalid();
 }
 
-CompileResult compileEffect(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
-    const auto parsed = model.parseEffects({value.stream, value.range});
+CompileResult compileFilter(detail::StyleCompileContext& context) {
+    auto& [property, value, selector, result, sourceName] = context;
+    const auto parsed = StyleModel::parseFilter({value.stream, value.range});
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileOutline(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
-    const auto parsed = model.parseOutline({value.stream, value.range});
+    auto& [property, value, selector, result, sourceName] = context;
+    const auto parsed = StyleModel::parseOutline({value.stream, value.range});
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileBorderRadius(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
-    const auto parsed = model.parseBorderRadius({value.stream, value.range});
+    auto& [property, value, selector, result, sourceName] = context;
+    const auto parsed = StyleModel::parseBorderRadius({value.stream, value.range});
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
@@ -353,45 +387,17 @@ CompileResult compileOutlineOffset(detail::StyleCompileContext& context) {
     return parsed && parsed->percent == 0.f ? context.compiled(*parsed) : context.invalid();
 }
 
-std::optional<std::string> parseCSSUrl(detail::CSSValueRange value);
-std::optional<BackgroundLayer> parseBackgroundImage(const StyleModel& model, detail::CSSValueRange value);
+std::optional<BackgroundLayer> parseBackgroundImage(detail::CSSValueRange value);
 template<typename Parse> std::optional<std::vector<BackgroundLayer>> parseBackgroundLayerList(detail::CSSValueRange value, Parse parse);
 
-std::optional<std::string> parseCSSUrl(detail::CSSValueRange value) {
-    value.range = detail::trimCSSRange(value.stream, value.range);
-    const auto& tokens = value.stream.tokens();
-    std::vector<std::size_t> significant;
-    for (std::size_t index = value.range.begin; index < value.range.end; ++index)
-        if (!detail::isCSSTrivia(tokens[index].kind)) significant.push_back(index);
-    if (significant.size() == 1 && tokens[significant.front()].kind == detail::CSSTokenKind::Url) {
-        const std::string_view token = value.stream.text(significant.front());
-        const std::size_t open = token.find('(');
-        if (open == std::string_view::npos || token.empty() || token.back() != ')') return std::nullopt;
-        const std::string decoded = detail::decodeCSSIdentifier(trim(std::string(token.substr(open + 1, token.size() - open - 2))));
-        return decoded.empty() ? std::nullopt : std::optional<std::string>(decoded);
-    }
-    if (significant.size() != 3
-        || tokens[significant[0]].kind != detail::CSSTokenKind::Function
-        || tokens[significant[2]].kind != detail::CSSTokenKind::CloseParen)
-        return std::nullopt;
-    const auto function = detail::parseCSSFunction(value.stream, value.range);
-    if (!function
-        || function->name != "url"
-        || tokens[significant[0]].matching != significant[2]
-        || tokens[significant[1]].kind != detail::CSSTokenKind::String)
-        return std::nullopt;
-    const std::optional<std::string> decoded = detail::decodeCSSString(value.stream.text(significant[1]));
-    return decoded && !decoded->empty() ? decoded : std::nullopt;
-}
-
-std::optional<BackgroundLayer> parseBackgroundImage(const StyleModel& model, detail::CSSValueRange value) {
+std::optional<BackgroundLayer> parseBackgroundImage(detail::CSSValueRange value) {
     BackgroundLayer layer;
     if (normalizeCSSKeyword(value.stream, value.range) == "none") return layer;
-    if (const std::optional<std::string> url = parseCSSUrl(value)) {
+    if (const std::optional<std::string> url = detail::parseCSSUrl(value.stream, value.range)) {
         layer.resource = *url;
         return layer;
     }
-    if (const std::optional<Gradient> gradient = model.parseGradient(value)) {
+    if (const std::optional<Gradient> gradient = StyleModel::parseGradient(value)) {
         layer.gradient = *gradient;
         return layer;
     }
@@ -411,16 +417,16 @@ template<typename Parse> std::optional<std::vector<BackgroundLayer>> parseBackgr
     return result;
 }
 
-std::optional<std::vector<BackgroundLayer>> parseBackgroundImages(const StyleModel& model, detail::CSSValueRange value) {
-    return parseBackgroundLayerList(value, [&model](detail::CSSValueRange range) { return parseBackgroundImage(model, range); });
+std::optional<std::vector<BackgroundLayer>> parseBackgroundImages(detail::CSSValueRange value) {
+    return parseBackgroundLayerList(value, [](detail::CSSValueRange range) { return parseBackgroundImage(range); });
 }
 
-std::optional<Length> parsePositionHorizontal(const StyleModel& model, detail::CSSValueRange value);
-std::optional<Length> parsePositionVertical(const StyleModel& model, detail::CSSValueRange value);
-std::optional<BackgroundPosition> parseBackgroundPosition(const StyleModel& model, detail::CSSValueRange value);
-std::optional<std::vector<BackgroundLayer>> parseBackgroundPositions(const StyleModel& model, detail::CSSValueRange value);
-std::optional<BackgroundSize> parseBackgroundSize(const StyleModel& model, detail::CSSValueRange value);
-std::optional<std::vector<BackgroundLayer>> parseBackgroundSizes(const StyleModel& model, detail::CSSValueRange value);
+std::optional<Length> parsePositionHorizontal(detail::CSSValueRange value);
+std::optional<Length> parsePositionVertical(detail::CSSValueRange value);
+std::optional<BackgroundPosition> parseBackgroundPosition(detail::CSSValueRange value);
+std::optional<std::vector<BackgroundLayer>> parseBackgroundPositions(detail::CSSValueRange value);
+std::optional<BackgroundSize> parseBackgroundSize(detail::CSSValueRange value);
+std::optional<std::vector<BackgroundLayer>> parseBackgroundSizes(detail::CSSValueRange value);
 std::optional<BackgroundRepeat> parseBackgroundRepeat(detail::CSSValueRange value);
 std::optional<std::vector<BackgroundLayer>> parseBackgroundRepeats(detail::CSSValueRange value);
 std::optional<BackgroundBox> parseBackgroundBox(detail::CSSValueRange value);
@@ -428,20 +434,20 @@ std::optional<std::vector<BackgroundLayer>> parseBackgroundBoxes(detail::CSSValu
 std::optional<std::vector<BackgroundLayer>> parseBackgroundAttachments(detail::CSSValueRange value);
 std::optional<BackgroundAttachment> parseBackgroundAttachment(detail::CSSValueRange value);
 
-std::optional<Length> parsePositionHorizontal(const StyleModel& model, detail::CSSValueRange value) {
+std::optional<Length> parsePositionHorizontal(detail::CSSValueRange value) {
     const std::string token = normalizeCSSKeyword(value.stream, value.range);
     if (token == "left") return Length{0.f};
     if (token == "center") return Length{0.f, .5f};
     if (token == "right") return Length{0.f, 1.f};
-    return model.parseLengthValue(value);
+    return StyleModel::parseLengthValue(value);
 }
 
-std::optional<Length> parsePositionVertical(const StyleModel& model, detail::CSSValueRange value) {
+std::optional<Length> parsePositionVertical(detail::CSSValueRange value) {
     const std::string token = normalizeCSSKeyword(value.stream, value.range);
     if (token == "bottom") return Length{0.f};
     if (token == "center") return Length{0.f, .5f};
     if (token == "top") return Length{0.f, 1.f};
-    const std::optional<Length> length = model.parseLengthValue(value);
+    const std::optional<Length> length = StyleModel::parseLengthValue(value);
     if (!length) return std::nullopt;
     return Length{-length->pixels, 1.f - length->percent};
 }
@@ -463,28 +469,28 @@ bool isPositionToken(detail::CSSValueRange value) {
         || scalar;
 }
 
-std::optional<BackgroundPosition> parseBackgroundPosition(const StyleModel& model, detail::CSSValueRange value) {
+std::optional<BackgroundPosition> parseBackgroundPosition(detail::CSSValueRange value) {
     const std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, value.range);
     if (tokens.empty() || tokens.size() > 2) return std::nullopt;
     if (tokens.size() == 1) {
         const std::string token = normalizeCSSKeyword(value.stream, tokens.front());
-        if (token == "top" || token == "bottom") return BackgroundPosition{{0.f, .5f}, *parsePositionVertical(model, {value.stream, tokens.front()})};
-        const std::optional<Length> x = parsePositionHorizontal(model, {value.stream, tokens.front()});
+        if (token == "top" || token == "bottom") return BackgroundPosition{{0.f, .5f}, *parsePositionVertical({value.stream, tokens.front()})};
+        const std::optional<Length> x = parsePositionHorizontal({value.stream, tokens.front()});
         return x ? std::optional<BackgroundPosition>(BackgroundPosition{*x, {0.f, .5f}}) : std::nullopt;
     }
 
-    std::optional<Length> x = parsePositionHorizontal(model, {value.stream, tokens[0]});
-    std::optional<Length> y = parsePositionVertical(model, {value.stream, tokens[1]});
+    std::optional<Length> x = parsePositionHorizontal({value.stream, tokens[0]});
+    std::optional<Length> y = parsePositionVertical({value.stream, tokens[1]});
     if (!x || !y) {
-        x = parsePositionHorizontal(model, {value.stream, tokens[1]});
-        y = parsePositionVertical(model, {value.stream, tokens[0]});
+        x = parsePositionHorizontal({value.stream, tokens[1]});
+        y = parsePositionVertical({value.stream, tokens[0]});
     }
     return x && y ? std::optional<BackgroundPosition>(BackgroundPosition{*x, *y}) : std::nullopt;
 }
 
-std::optional<std::vector<BackgroundLayer>> parseBackgroundPositions(const StyleModel& model, detail::CSSValueRange value) {
-    return parseBackgroundLayerList(value, [&model](detail::CSSValueRange range) -> std::optional<BackgroundLayer> {
-        const std::optional<BackgroundPosition> position = parseBackgroundPosition(model, range);
+std::optional<std::vector<BackgroundLayer>> parseBackgroundPositions(detail::CSSValueRange value) {
+    return parseBackgroundLayerList(value, [](detail::CSSValueRange range) -> std::optional<BackgroundLayer> {
+        const std::optional<BackgroundPosition> position = parseBackgroundPosition(range);
         if (!position) return std::nullopt;
         BackgroundLayer layer;
         layer.position = *position;
@@ -492,7 +498,7 @@ std::optional<std::vector<BackgroundLayer>> parseBackgroundPositions(const Style
     });
 }
 
-std::optional<BackgroundSize> parseBackgroundSize(const StyleModel& model, detail::CSSValueRange value) {
+std::optional<BackgroundSize> parseBackgroundSize(detail::CSSValueRange value) {
     const std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, value.range);
     if (tokens.size() == 1) {
         const std::string token = normalizeCSSKeyword(value.stream, tokens.front());
@@ -503,9 +509,9 @@ std::optional<BackgroundSize> parseBackgroundSize(const StyleModel& model, detai
     if (tokens.empty() || tokens.size() > 2) return std::nullopt;
     if (tokens.size() == 2 && normalizeCSSKeyword(value.stream, tokens[0]) == "auto" && normalizeCSSKeyword(value.stream, tokens[1]) == "auto")
         return BackgroundSize{};
-    const auto parse = [&model, &value](detail::CSSTokenRange token) -> std::optional<Length> {
+    const auto parse = [&value](detail::CSSTokenRange token) -> std::optional<Length> {
         if (normalizeCSSKeyword(value.stream, token) == "auto") return std::optional<Length>{};
-        const std::optional<Length> length = model.parseLengthValue({value.stream, token});
+        const std::optional<Length> length = StyleModel::parseLengthValue({value.stream, token});
         return length && length->pixels >= 0.f && length->percent >= 0.f ? length : std::nullopt;
     };
     const std::optional<Length> width = parse(tokens[0]);
@@ -515,9 +521,9 @@ std::optional<BackgroundSize> parseBackgroundSize(const StyleModel& model, detai
     return BackgroundSize{BackgroundSizeMode::Explicit, width, height};
 }
 
-std::optional<std::vector<BackgroundLayer>> parseBackgroundSizes(const StyleModel& model, detail::CSSValueRange value) {
-    return parseBackgroundLayerList(value, [&model](detail::CSSValueRange range) -> std::optional<BackgroundLayer> {
-        const std::optional<BackgroundSize> size = parseBackgroundSize(model, range);
+std::optional<std::vector<BackgroundLayer>> parseBackgroundSizes(detail::CSSValueRange value) {
+    return parseBackgroundLayerList(value, [](detail::CSSValueRange range) -> std::optional<BackgroundLayer> {
+        const std::optional<BackgroundSize> size = parseBackgroundSize(range);
         if (!size) return std::nullopt;
         BackgroundLayer layer;
         layer.size = *size;
@@ -669,27 +675,27 @@ std::vector<MaskLayer> makeMaskLayers(const std::vector<BackgroundLayer>& images
     return result;
 }
 
-std::optional<std::vector<MaskLayer>> parseMaskImages(const StyleModel& model, detail::CSSValueRange value) {
+std::optional<std::vector<MaskLayer>> parseMaskImages(detail::CSSValueRange value) {
     const std::optional<std::vector<BackgroundLayer>> images =
-        parseBackgroundLayerList(value, [&model](detail::CSSValueRange range) { return parseBackgroundImage(model, range); });
+        parseBackgroundLayerList(value, [](detail::CSSValueRange range) { return parseBackgroundImage(range); });
     if (!images) return std::nullopt;
     return makeMaskLayers(*images);
 }
 
 CompileResult compileBackgroundImage(detail::StyleCompileContext& context) {
-    const auto parsed = parseBackgroundImages(context.model, {context.value.stream, context.value.range});
+    const auto parsed = parseBackgroundImages({context.value.stream, context.value.range});
     if (!parsed) return context.invalid();
     return context.compiled(StyleImageLayers{*parsed, StyleImageComponent::Image});
 }
 
 CompileResult compileBackgroundPosition(detail::StyleCompileContext& context) {
-    const auto parsed = parseBackgroundPositions(context.model, {context.value.stream, context.value.range});
+    const auto parsed = parseBackgroundPositions({context.value.stream, context.value.range});
     if (!parsed) return context.invalid();
     return context.compiled(StyleImageLayers{*parsed, StyleImageComponent::Position});
 }
 
 CompileResult compileBackgroundSize(detail::StyleCompileContext& context) {
-    const auto parsed = parseBackgroundSizes(context.model, {context.value.stream, context.value.range});
+    const auto parsed = parseBackgroundSizes({context.value.stream, context.value.range});
     if (!parsed) return context.invalid();
     return context.compiled(StyleImageLayers{*parsed, StyleImageComponent::Size});
 }
@@ -721,19 +727,19 @@ CompileResult compileBackgroundAttachment(detail::StyleCompileContext& context) 
 }
 
 CompileResult compileMaskImage(detail::StyleCompileContext& context) {
-    const auto parsed = parseMaskImages(context.model, {context.value.stream, context.value.range});
+    const auto parsed = parseMaskImages({context.value.stream, context.value.range});
     if (!parsed) return context.invalid();
     return context.compiled(StyleMaskLayers{*parsed, StyleImageComponent::Image});
 }
 
 CompileResult compileMaskPosition(detail::StyleCompileContext& context) {
-    const auto parsed = parseBackgroundPositions(context.model, {context.value.stream, context.value.range});
+    const auto parsed = parseBackgroundPositions({context.value.stream, context.value.range});
     if (!parsed) return context.invalid();
     return context.compiled(StyleMaskLayers{makeMaskLayers(*parsed), StyleImageComponent::Position});
 }
 
 CompileResult compileMaskSize(detail::StyleCompileContext& context) {
-    const auto parsed = parseBackgroundSizes(context.model, {context.value.stream, context.value.range});
+    const auto parsed = parseBackgroundSizes({context.value.stream, context.value.range});
     if (!parsed) return context.invalid();
     return context.compiled(StyleMaskLayers{makeMaskLayers(*parsed), StyleImageComponent::Size});
 }
@@ -818,9 +824,9 @@ struct ParsedImageLayer {
     bool attachmentSpecified = false;
 };
 
-std::optional<ParsedImageLayer> parseImageLayer(const StyleModel& model, detail::CSSValueRange value);
+std::optional<ParsedImageLayer> parseImageLayer(detail::CSSValueRange value);
 
-std::optional<ParsedImageLayer> parseImageLayer(const StyleModel& model, detail::CSSValueRange value) {
+std::optional<ParsedImageLayer> parseImageLayer(detail::CSSValueRange value) {
     const std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, value.range, true);
     if (tokens.empty()) return std::nullopt;
 
@@ -854,9 +860,9 @@ std::optional<ParsedImageLayer> parseImageLayer(const StyleModel& model, detail:
                 if (result.attachmentSpecified) return std::nullopt;
                 result.image.attachment = *attachment;
                 result.attachmentSpecified = true;
-            } else if (parseBackgroundSize(model, {value.stream, tokens[index]})) sizes.push_back(tokens[index]);
+            } else if (parseBackgroundSize({value.stream, tokens[index]})) sizes.push_back(tokens[index]);
             else result.extras.push_back(tokens[index]);
-        } else if (const std::optional<BackgroundLayer> image = parseBackgroundImage(model, {value.stream, tokens[index]})) {
+        } else if (const std::optional<BackgroundLayer> image = parseBackgroundImage({value.stream, tokens[index]})) {
             if (sawImage) return std::nullopt;
             result.image.resource = image->resource;
             result.image.gradient = image->gradient;
@@ -876,13 +882,13 @@ std::optional<ParsedImageLayer> parseImageLayer(const StyleModel& model, detail:
     if (positions.size() > 2 || sizes.size() > 2 || (afterSlash && sizes.empty())) return std::nullopt;
     if (!positions.empty()) {
         const detail::CSSTokenRange positionRange = positions.size() > 1 ? detail::CSSTokenRange{positions[0].begin, positions[1].end} : positions[0];
-        const std::optional<BackgroundPosition> position = parseBackgroundPosition(model, {value.stream, positionRange});
+        const std::optional<BackgroundPosition> position = parseBackgroundPosition({value.stream, positionRange});
         if (!position) return std::nullopt;
         result.image.position = *position;
     }
     if (!sizes.empty()) {
         const detail::CSSTokenRange sizeRange = sizes.size() > 1 ? detail::CSSTokenRange{sizes[0].begin, sizes[1].end} : sizes[0];
-        const std::optional<BackgroundSize> size = parseBackgroundSize(model, {value.stream, sizeRange});
+        const std::optional<BackgroundSize> size = parseBackgroundSize({value.stream, sizeRange});
         if (!size) return std::nullopt;
         result.image.size = *size;
     }
@@ -909,7 +915,7 @@ CompileResult compileBackground(detail::StyleCompileContext& context) {
     std::optional<StyleColorValue> color;
     bool currentColor = false;
     for (std::size_t layerIndex = 0; layerIndex < layers.size(); ++layerIndex) {
-        std::optional<ParsedImageLayer> parsedLayer = parseImageLayer(context.model, {context.value.stream, layers[layerIndex]});
+        std::optional<ParsedImageLayer> parsedLayer = parseImageLayer({context.value.stream, layers[layerIndex]});
         if (!parsedLayer || !applyImageBoxes(parsedLayer->image, parsedLayer->boxes, BackgroundBox::PaddingBox, BackgroundBox::BorderBox))
             return context.invalid();
         for (const detail::CSSTokenRange token : parsedLayer->extras) {
@@ -951,7 +957,7 @@ CompileResult compileMask(detail::StyleCompileContext& context) {
     if (layers.empty()) return context.invalid();
     std::vector<MaskLayer> parsed;
     for (const detail::CSSTokenRange rawLayer : layers) {
-        std::optional<ParsedImageLayer> parsedLayer = parseImageLayer(context.model, {context.value.stream, rawLayer});
+        std::optional<ParsedImageLayer> parsedLayer = parseImageLayer({context.value.stream, rawLayer});
         if (!parsedLayer
             || parsedLayer->attachmentSpecified
             || !applyImageBoxes(parsedLayer->image, parsedLayer->boxes, BackgroundBox::BorderBox, BackgroundBox::BorderBox))
@@ -989,8 +995,8 @@ CompileResult compileMask(detail::StyleCompileContext& context) {
 }
 
 CompileResult compilePaint(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
-    if (const std::optional<Gradient> gradient = model.parseGradient({value.stream, value.range}))
+    auto& [property, value, selector, result, sourceName] = context;
+    if (const std::optional<Gradient> gradient = StyleModel::parseGradient({value.stream, value.range}))
         return context.compiled(StylePaint{Color(), *gradient});
     if (normalizeCSSKeyword(value.stream, value.range) == "currentcolor")
         return context.compiled(StylePaint{Color(), std::nullopt, std::nullopt, true});
@@ -1022,26 +1028,45 @@ CompileResult compileAccentColor(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileBorder(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     const std::vector<detail::CSSTokenRange> tokens = context.ranges();
+    if (tokens.size() == 1 && context.keyword() == "none")
+        return context.compiled(StyleBorder{0.f, StylePaint{Color(0.f, 0.f, 0.f, 0.f)}, BorderStyle::NoneValue});
     if (tokens.size() < 2 || tokens.size() > 3) return context.invalid();
-    const auto width = context.number({value.stream, tokens[0]});
-    if (!width || *width < 0.f) return context.invalid();
-    BorderStyle borderStyle = BorderStyle::Solid;
-    const detail::CSSTokenRange colorToken = tokens.size() == 2 ? tokens[1] : tokens[2];
-    if (tokens.size() == 3) {
-        const std::optional<BorderStyle> parsedStyle = parseBorderStyle({value.stream, tokens[1]});
-        if (!parsedStyle) return context.invalid();
-        borderStyle = *parsedStyle;
+    std::optional<float> width;
+    std::optional<BorderStyle> borderStyle;
+    std::optional<StylePaint> paint;
+    for (const detail::CSSTokenRange token : tokens) {
+        if (!width) {
+            if (const auto parsedWidth = context.number({value.stream, token}); parsedWidth && *parsedWidth >= 0.f) {
+                width = *parsedWidth;
+                continue;
+            }
+        }
+        if (!borderStyle) {
+            if (const std::optional<BorderStyle> parsedStyle = parseBorderStyle({value.stream, token})) {
+                borderStyle = *parsedStyle;
+                continue;
+            }
+        }
+        if (!paint && normalizeCSSKeyword(value.stream, token) == "currentcolor") {
+            paint = StylePaint{Color(), std::nullopt, std::nullopt, true};
+            continue;
+        }
+        if (!paint) {
+            if (const std::optional<Gradient> gradient = StyleModel::parseGradient({value.stream, token})) {
+                paint = StylePaint{Color(), *gradient};
+                continue;
+            }
+            if (const auto parsedColor = context.colorValue({value.stream, token})) {
+                if (const auto color = std::get_if<Color>(&*parsedColor)) paint = StylePaint{*color, std::nullopt};
+                else paint = StylePaint{Color(0.f, 0.f, 0.f, 0.f), std::nullopt, std::get<LightDarkColor>(*parsedColor)};
+                continue;
+            }
+        }
+        return context.invalid();
     }
-    if (normalizeCSSKeyword(value.stream, colorToken) == "currentcolor")
-        return context.compiled(StyleBorder{*width, StylePaint{Color(), std::nullopt, std::nullopt, true}, borderStyle});
-    if (const std::optional<Gradient> gradient = model.parseGradient({value.stream, colorToken}))
-        return context.compiled(StyleBorder{*width, StylePaint{Color(), *gradient}, borderStyle});
-    const auto parsed = context.colorValue({value.stream, colorToken});
-    if (!parsed) return context.invalid();
-    if (const auto color = std::get_if<Color>(&*parsed)) return context.compiled(StyleBorder{*width, StylePaint{*color, std::nullopt}, borderStyle});
-    return context.compiled(StyleBorder{*width, StylePaint{Color(0.f, 0.f, 0.f, 0.f), std::nullopt, std::get<LightDarkColor>(*parsed)}, borderStyle});
+    return width && paint ? context.compiled(StyleBorder{*width, *paint, borderStyle.value_or(BorderStyle::NoneValue)}) : context.invalid();
 }
 
 CompileResult compileBorderStyle(detail::StyleCompileContext& context) {
@@ -1050,27 +1075,53 @@ CompileResult compileBorderStyle(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileEdges(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     const float nan = std::numeric_limits<float>::quiet_NaN();
-    const EdgeInsets parsed = model.parseEdgeInsets({value.stream, value.range}, {nan, nan, nan, nan});
+    const EdgeInsets parsed = StyleModel::parseEdgeInsets({value.stream, value.range}, {nan, nan, nan, nan});
     return std::isfinite(parsed.top) ? context.compiled(parsed) : context.invalid();
 }
 
 CompileResult compileMargin(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
-    const auto parsed = model.parseMargin({value.stream, value.range});
+    auto& [property, value, selector, result, sourceName] = context;
+    const auto parsed = StyleModel::parseMargin({value.stream, value.range});
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileGap(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
-    if (context.keyword() == "auto") return context.compiled(GapValue::automatic());
-    const auto parsed = context.number();
-    return parsed && *parsed >= 0.f ? context.compiled(GapValue::fromPixels(*parsed)) : context.invalid();
+    const std::vector<detail::CSSTokenRange> tokens = context.ranges(false);
+    if (tokens.empty() || tokens.size() > 2) return context.invalid();
+    const auto fixedGap = [&context](detail::CSSTokenRange range) -> std::optional<Length> {
+        range = detail::trimCSSRange(context.value.stream, range);
+        if (range.begin == range.end || context.value.stream.tokens()[range.begin].kind == detail::CSSTokenKind::Percentage) return std::nullopt;
+        const std::optional<Length> parsed = context.nonnegativeLength({context.value.stream, range});
+        return parsed && parsed->percent == 0.f ? parsed : std::nullopt;
+    };
+    const std::optional<Length> row = fixedGap(tokens.front());
+    const std::optional<Length> column = fixedGap(tokens.size() == 1 ? tokens.front() : tokens.back());
+    if (!row || !column) return context.invalid();
+    return makeDeclarations({{"row-gap", GapValue::fromLength(*row)}, {"column-gap", GapValue::fromLength(*column)}});
+}
+
+CompileResult compileGapLonghand(detail::StyleCompileContext& context) {
+    const std::vector<detail::CSSTokenRange> tokens = context.ranges(false);
+    if (tokens.size() != 1) return context.invalid();
+    const detail::CSSTokenRange range = detail::trimCSSRange(context.value.stream, tokens.front());
+    if (range.begin == range.end || context.value.stream.tokens()[range.begin].kind == detail::CSSTokenKind::Percentage) return context.invalid();
+    const std::optional<Length> parsed = context.nonnegativeLength({context.value.stream, range});
+    if (!parsed || parsed->percent != 0.f) return context.invalid();
+    return context.compiled(GapValue::fromLength(*parsed));
+}
+
+CompileResult compileMinimumLength(detail::StyleCompileContext& context) {
+    if (context.keyword() == "auto") return context.compiled(std::optional<Length>{});
+    const std::vector<detail::CSSTokenRange> tokens = context.ranges(false);
+    if (tokens.size() != 1) return context.invalid();
+    const std::optional<Length> parsed = context.nonnegativeLength({context.value.stream, tokens.front()});
+    return parsed ? context.compiled(std::optional<Length>(*parsed)) : context.invalid();
 }
 
 CompileResult compileSize(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     const std::vector<detail::CSSTokenRange> tokens = context.ranges();
     if (tokens.empty() || tokens.size() > 2) return context.invalid();
     const auto dimension = [&context, &value](detail::CSSTokenRange raw) -> std::optional<Dimension> {
@@ -1084,41 +1135,45 @@ CompileResult compileSize(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileMinSize(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     const std::vector<detail::CSSTokenRange> tokens = context.ranges();
     if (tokens.empty() || tokens.size() > 2) return context.invalid();
     const auto height = context.nonnegativeLength({value.stream, tokens[0]});
     const auto width = context.nonnegativeLength({value.stream, tokens.size() == 1 ? tokens[0] : tokens[1]});
     if (!height || !width) return context.invalid();
-    return makeDeclarations({{"min-height", *height}, {"min-width", *width}});
+    return makeDeclarations({{"min-height", std::optional<Length>(*height)}, {"min-width", std::optional<Length>(*width)}});
 }
 
 CompileResult compileStrokeLinecap(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     StrokeCap cap;
     return parseStrokeCap({context.value.stream, context.value.range}, cap) ? context.compiled(cap) : context.invalid();
 }
 
 CompileResult compileFontFamily(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
-    return context.keyword() == "sans" ? context.compiled(FontFamily::Sans) : context.invalid();
+    auto& [property, value, selector, result, sourceName] = context;
+    if (context.keyword() == "sans-serif") return context.compiled(FontFamily::SansSerif);
+    if (context.keyword() == "monospace") return context.compiled(FontFamily::Monospace);
+    return context.invalid();
 }
 
 CompileResult compileFont(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
-    const auto parsed = model.parseFontShorthand({value.stream, value.range});
+    auto& [property, value, selector, result, sourceName] = context;
+    const auto parsed = StyleModel::parseFontShorthand({value.stream, value.range});
     return parsed ? parsed : context.invalid();
 }
 
 CompileResult compileFontWeight(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
-    const auto parsed = model.parseFontWeightValue({value.stream, value.range});
+    auto& [property, value, selector, result, sourceName] = context;
+    if (context.keyword() == "bolder") return context.compiled(RelativeFontWeight{false});
+    if (context.keyword() == "lighter") return context.compiled(RelativeFontWeight{true});
+    const auto parsed = StyleModel::parseFontWeightValue({value.stream, value.range});
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileFontStyle(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
-    const auto parsed = model.parseFontStyleValue({value.stream, value.range});
+    auto& [property, value, selector, result, sourceName] = context;
+    const auto parsed = StyleModel::parseFontStyleValue({value.stream, value.range});
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
@@ -1131,7 +1186,7 @@ CompileResult compileTextDecoration(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileTextAlign(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     const std::string alignment = context.keyword();
     std::optional<TextAlign> parsed;
     if (alignment == "left") parsed = TextAlign::Left;
@@ -1143,7 +1198,7 @@ CompileResult compileTextAlign(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileTextOverflow(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     const std::string overflow = context.keyword();
     if (overflow == "clip") return context.compiled(TextOverflow::Clip);
     if (overflow == "ellipsis") return context.compiled(TextOverflow::Ellipsis);
@@ -1152,7 +1207,7 @@ CompileResult compileTextOverflow(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileTextWrap(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     const std::string wrap = context.keyword();
     if (wrap == "wrap") return context.compiled(TextWrap::Wrap);
     if (wrap == "nowrap") return context.compiled(TextWrap::NoWrap);
@@ -1160,7 +1215,7 @@ CompileResult compileTextWrap(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileVerticalAlign(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     const std::string alignment = context.keyword();
     std::optional<VerticalAlign> parsed;
     if (alignment == "top") parsed = VerticalAlign::Top;
@@ -1183,7 +1238,7 @@ template<typename Enum, std::size_t Size> CompileResult compileAlignment(const d
 }
 
 CompileResult compileJustifyContent(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     static constexpr std::array<std::pair<std::string_view, JustifyContent>, 5> sJustifyContentValues{{
         {"start", JustifyContent::Start},
         {"left", JustifyContent::Left},
@@ -1195,7 +1250,7 @@ CompileResult compileJustifyContent(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileAlignItems(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     static constexpr std::array<std::pair<std::string_view, AlignItems>, 5> sAlignItemsValues{{
         {"normal", AlignItems::Normal},
         {"start", AlignItems::Start},
@@ -1214,7 +1269,7 @@ CompileResult compileInternalAlignContentBlock(detail::StyleCompileContext& cont
 }
 
 CompileResult compileAlignSelf(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     static constexpr std::array<std::pair<std::string_view, AlignSelf>, 5> sAlignSelfValues{{
         {"auto", AlignSelf::Auto},
         {"start", AlignSelf::Start},
@@ -1226,7 +1281,7 @@ CompileResult compileAlignSelf(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileJustifySelf(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     static constexpr std::array<std::pair<std::string_view, JustifySelf>, 5> sJustifySelfValues{{
         {"auto", JustifySelf::Auto},
         {"start", JustifySelf::Start},
@@ -1238,7 +1293,7 @@ CompileResult compileJustifySelf(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileFlex(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     const std::vector<detail::CSSTokenRange> tokens = context.ranges();
     if (tokens.empty() || tokens.size() > 3) return context.invalid();
     const std::string keyword = context.keyword();
@@ -1284,7 +1339,7 @@ CompileResult compileFlex(detail::StyleCompileContext& context) {
 }
 
 CompileResult compilePointerEvents(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     static constexpr std::array<std::pair<std::string_view, PointerEvents>, 3> sPointerEventsValues{{
         {"auto", PointerEvents::Auto},
         {"none", PointerEvents::PassThrough},
@@ -1392,7 +1447,7 @@ std::optional<Overflow> parseOverflow(detail::CSSValueRange value) {
 }
 
 CompileResult compileOverflow(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     const std::vector<detail::CSSTokenRange> tokens = context.ranges();
     if (tokens.empty() || tokens.size() > 2) return context.invalid();
     const auto horizontal = parseOverflow({value.stream, tokens[0]});
@@ -1402,16 +1457,9 @@ CompileResult compileOverflow(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileOverflowAxis(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     const auto parsed = parseOverflow({value.stream, value.range});
     return parsed ? context.compiled(*parsed) : context.invalid();
-}
-
-CompileResult compileScrollbarMode(detail::StyleCompileContext& context) {
-    const std::string mode = context.keyword();
-    if (mode == "classic") return context.compiled(ScrollbarMode::Classic);
-    if (mode == "overlay") return context.compiled(ScrollbarMode::Overlay);
-    return context.invalid();
 }
 
 CompileResult compileScrollbarWidth(detail::StyleCompileContext& context) {
@@ -1460,7 +1508,7 @@ CompileResult compileScrollbarColor(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileOrder(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     const auto parsed = context.number();
     const double numericOrder = parsed ? static_cast<double>(*parsed) : 0.0;
     if (!parsed
@@ -1473,7 +1521,7 @@ CompileResult compileOrder(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileCursor(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     static constexpr std::array<std::pair<std::string_view, CursorStyle>, 35> sCursorValues{{
         {"auto", CursorStyle::Auto},
         {"default", CursorStyle::Default},
@@ -1522,17 +1570,17 @@ CompileResult compileCursor(detail::StyleCompileContext& context) {
         const std::optional<CursorStyle> keyword = parseKeyword(normalizeCSSKeyword(value.stream, candidates.front()));
         return keyword ? context.compiled(CursorValue{*keyword, {}}) : context.invalid();
     }
-    const auto parseHotspot = [&model, &value](detail::CSSTokenRange range) -> std::optional<float> {
+    const auto parseHotspot = [&value](detail::CSSTokenRange range) -> std::optional<float> {
         range = detail::trimCSSRange(value.stream, range);
         if (range.end != range.begin + 1 || value.stream.tokens()[range.begin].kind != detail::CSSTokenKind::Number) return std::nullopt;
-        const float parsed = model.parseNumberValue({value.stream, range}, std::numeric_limits<float>::quiet_NaN());
+        const float parsed = StyleModel::parseNumberValue({value.stream, range}, std::numeric_limits<float>::quiet_NaN());
         return std::isfinite(parsed) ? std::optional<float>(parsed) : std::nullopt;
     };
     std::vector<CursorImage> images;
     for (std::size_t index = 0; index + 1 < candidates.size(); ++index) {
         const std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, candidates[index]);
         if (tokens.size() != 1 && tokens.size() != 3) return context.invalid();
-        const std::optional<std::string> resource = parseCSSUrl({value.stream, tokens.front()});
+        const std::optional<std::string> resource = detail::parseCSSUrl(value.stream, tokens.front());
         if (!resource) return context.invalid();
         CursorImage image;
         image.resource = *resource;
@@ -1546,7 +1594,7 @@ CompileResult compileCursor(detail::StyleCompileContext& context) {
 }
 
 CompileResult compileDimension(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     if (context.keyword() == "auto") return context.compiled(Dimension());
     const auto parsed = context.length();
     if (!parsed || parsed->pixels < 0.f || parsed->percent < 0.f) return context.invalid();
@@ -1554,25 +1602,25 @@ CompileResult compileDimension(detail::StyleCompileContext& context) {
 }
 
 CompileResult compilePosition(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     const auto parsed = context.length();
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileNonnegativeLength(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     const auto parsed = context.nonnegativeLength();
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileNonnegativeNumber(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     const auto parsed = context.number();
     return parsed && *parsed >= 0.f ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileUnitlessNonnegativeNumber(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     const std::string raw = context.keyword();
     if (hasDimensionUnit(value.stream, value.range, "px") || endsWith(raw, "%")) return context.invalid();
     const auto parsed = context.number();
@@ -1580,25 +1628,25 @@ CompileResult compileUnitlessNonnegativeNumber(detail::StyleCompileContext& cont
 }
 
 CompileResult compileOpacity(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     const auto parsed = context.number();
     return parsed && *parsed >= 0.f && *parsed <= 1.f ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileStrokeWidth(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     const auto parsed = context.number();
     return parsed && *parsed >= 0.f ? context.compiled(Length{*parsed}) : context.invalid();
 }
 
 CompileResult compileLineHeight(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
-    const auto parsed = model.parseLineHeightValue({value.stream, value.range});
-    return parsed ? context.compiled(std::optional<Length>(*parsed)) : context.invalid();
+    auto& [property, value, selector, result, sourceName] = context;
+    const auto parsed = StyleModel::parseLineHeightValue({value.stream, value.range});
+    return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileSpacing(detail::StyleCompileContext& context) {
-    auto& [model, property, value, selector, result, sourceName] = context;
+    auto& [property, value, selector, result, sourceName] = context;
     if (context.keyword() == "normal") return context.compiled(Length{});
     const auto parsed = context.length();
     return parsed ? context.compiled(*parsed) : context.invalid();
@@ -1608,7 +1656,7 @@ CompileResult compileSpacing(detail::StyleCompileContext& context) {
 std::optional<std::vector<StyleDeclaration>> StyleModel::compileDeclaration(const detail::StylePropertyDefinition& property,
                                                                             const detail::CSSTokenStream& stream, detail::CSSTokenRange valueRange,
                                                                             const std::string& selector, StyleSheetLoadResult& result,
-                                                                            const std::string& sourceName) const {
+                                                                            const std::string& sourceName) {
     valueRange = detail::trimCSSRange(stream, valueRange);
     const std::string value = detail::trim(detail::serializeCSSRange(stream, valueRange));
     const std::string normalizedValue = detail::normalizeCSSKeyword(stream, valueRange);
@@ -1621,7 +1669,7 @@ std::optional<std::vector<StyleDeclaration>> StyleModel::compileDeclaration(cons
         result.error("stylesheet.property.value_invalid", "Property has no compiler: " + std::string(property.name) + ".", sourceName);
         return std::nullopt;
     }
-    detail::StyleCompileContext context{*this, property, StyleCompileValue{value, stream, valueRange}, selector, result, sourceName};
+    detail::StyleCompileContext context{property, StyleCompileValue{value, stream, valueRange}, selector, result, sourceName};
     return property.compile(context);
 }
 
@@ -1730,11 +1778,6 @@ void copyStrokeLinecap(ComputedStyle& style, const ComputedStyle& parent) {
     style.svgStrokeCapSet = parent.svgStrokeCapSet;
 }
 
-void copyScrollbarMode(ComputedStyle& style, const ComputedStyle& parent) {
-    style.scrollbarMode = parent.scrollbarMode;
-    style.scrollbarModeSet = parent.scrollbarModeSet;
-}
-
 void copyVerticalAlign(ComputedStyle& style, const ComputedStyle& parent) {
     style.verticalAlign = parent.verticalAlign;
     style.verticalAlignSet = parent.verticalAlignSet;
@@ -1768,12 +1811,6 @@ void resetJustifyContent(ComputedStyle& style) {
     style.justifyContentSet = true;
 }
 
-void resetScrollbarMode(ComputedStyle& style) {
-    const ComputedStyle initial;
-    style.scrollbarMode = initial.scrollbarMode;
-    style.scrollbarModeSet = true;
-}
-
 void resetSize(ComputedStyle& style) {
     const ComputedStyle initial;
     style.height = initial.height;
@@ -1790,6 +1827,12 @@ void resetColor(ComputedStyle& style) {
     const ComputedStyle initial;
     style.color = initial.color;
     style.colorLightDark = initial.colorLightDark;
+}
+
+void resetFontWeight(ComputedStyle& style) {
+    const ComputedStyle initial;
+    style.fontWeight = initial.fontWeight;
+    style.fontWeightAdjustment.reset();
 }
 
 void resetBackgroundImages(ComputedStyle& style) {
@@ -1969,10 +2012,6 @@ void applyDisplay(ComputedStyle& style, const StyleValue& value) {
     style.display = std::get<DisplayMode>(value);
     style.displaySet = true;
 }
-void applyScrollbarMode(ComputedStyle& style, const StyleValue& value) {
-    style.scrollbarMode = std::get<ScrollbarMode>(value);
-    style.scrollbarModeSet = true;
-}
 void applyFlexDirection(ComputedStyle& style, const StyleValue& value) {
     style.flexDirection = std::get<FlexDirection>(value);
     style.flexDirectionSet = true;
@@ -1986,6 +2025,11 @@ void applyVerticalAlign(ComputedStyle& style, const StyleValue& value) {
     style.verticalAlignSet = true;
 }
 void applyFontWeight(ComputedStyle& style, const StyleValue& value) {
+    if (const auto relative = std::get_if<RelativeFontWeight>(&value)) {
+        style.fontWeightAdjustment = *relative;
+        return;
+    }
+    style.fontWeightAdjustment.reset();
     style.fontWeight = static_cast<U16>(std::get<float>(value));
 }
 void applyStrokeLinecap(ComputedStyle& style, const StyleValue& value) {
@@ -2002,6 +2046,7 @@ void applyStroke(ComputedStyle& style, const StyleValue& value) {
 
 constexpr std::array<std::string_view, 2> kOverflowLonghands{"overflow-x", "overflow-y"};
 constexpr std::array<std::string_view, 2> kMinSizeLonghands{"min-height", "min-width"};
+constexpr std::array<std::string_view, 2> kGapLonghands{"row-gap", "column-gap"};
 constexpr std::array<std::string_view, 3> kFlexLonghands{"flex-grow", "flex-shrink", "flex-basis"};
 constexpr std::array<std::string_view, 5> kFontLonghands{"font-style", "font-weight", "font-size", "line-height", "font-family"};
 constexpr std::array<std::string_view, 8> kBackgroundLonghands{"background-color", "background-image",     "background-position",
@@ -2057,18 +2102,20 @@ const detail::StylePropertyDefinition kPropertyDefinitions[] = {
      StylePropertyImpact::Paint | StylePropertyImpact::Inherited, false, InheritedStyleProperty::CursorPresentation},
     {"display", compileDisplay, applyDisplay, resetDisplay, nullptr, copyDisplay,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"effect", compileEffect, applyMember<&ComputedStyle::effects>, resetMember<&ComputedStyle::effects>, nullptr,
-     copyMember<&ComputedStyle::effects>, StylePropertyImpact::Paint},
+    {"backdrop-filter", compileFilter, applyMember<&ComputedStyle::backdropFilter>, resetMember<&ComputedStyle::backdropFilter>, nullptr,
+     copyMember<&ComputedStyle::backdropFilter>, StylePropertyImpact::Paint},
+    {"filter", compileFilter, applyMember<&ComputedStyle::filter>, resetMember<&ComputedStyle::filter>, nullptr, copyMember<&ComputedStyle::filter>,
+     StylePropertyImpact::Paint},
     {"height", compileDimension, applyMember<&ComputedStyle::height>, resetMember<&ComputedStyle::height>, nullptr,
      copyMember<&ComputedStyle::height>},
     {"left", compilePosition, applyLengthToOptional<&ComputedStyle::left>, resetMember<&ComputedStyle::left>, nullptr,
      copyMember<&ComputedStyle::left>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"margin", compileMargin, applyMember<&ComputedStyle::margin>, resetMember<&ComputedStyle::margin>, nullptr, copyMember<&ComputedStyle::margin>},
-    {"min-height", compileNonnegativeLength, applyLengthToOptional<&ComputedStyle::minHeight>, resetMember<&ComputedStyle::minHeight>, nullptr,
+    {"min-height", compileMinimumLength, applyMember<&ComputedStyle::minHeight>, resetMember<&ComputedStyle::minHeight>, nullptr,
      copyMember<&ComputedStyle::minHeight>},
     {"min-size", compileMinSize, nullptr, nullptr, nullptr, nullptr, StylePropertyImpact::Layout, false, InheritedStyleProperty::NotInherited,
      std::span<const std::string_view>(kMinSizeLonghands)},
-    {"min-width", compileNonnegativeLength, applyLengthToOptional<&ComputedStyle::minWidth>, resetMember<&ComputedStyle::minWidth>, nullptr,
+    {"min-width", compileMinimumLength, applyMember<&ComputedStyle::minWidth>, resetMember<&ComputedStyle::minWidth>, nullptr,
      copyMember<&ComputedStyle::minWidth>},
     {"opacity", compileOpacity, applyMember<&ComputedStyle::opacity>, resetMember<&ComputedStyle::opacity>, nullptr,
      copyMember<&ComputedStyle::opacity>, StylePropertyImpact::Paint},
@@ -2104,8 +2151,6 @@ const detail::StylePropertyDefinition kPropertyDefinitions[] = {
      copyMember<&ComputedStyle::right>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"scrollbar-gutter", compileScrollbarGutter, applyMember<&ComputedStyle::scrollbarGutter>, resetMember<&ComputedStyle::scrollbarGutter>, nullptr,
      copyMember<&ComputedStyle::scrollbarGutter>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
-    {"scrollbar-mode", compileScrollbarMode, applyScrollbarMode, resetScrollbarMode, nullptr, copyScrollbarMode,
-     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"scrollbar-width", compileScrollbarWidth, applyMember<&ComputedStyle::scrollbarWidth>, resetMember<&ComputedStyle::scrollbarWidth>, nullptr,
      copyMember<&ComputedStyle::scrollbarWidth>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"scrollbar-color", compileScrollbarColor, applyMember<&ComputedStyle::scrollbarColor>, resetMember<&ComputedStyle::scrollbarColor>,
@@ -2122,7 +2167,12 @@ const detail::StylePropertyDefinition kPropertyDefinitions[] = {
     {"align-items", compileAlignItems, applyMember<&ComputedStyle::alignItems>, resetMember<&ComputedStyle::alignItems>, nullptr,
      copyMember<&ComputedStyle::alignItems>},
     {"flex-direction", compileFlexDirection, applyFlexDirection, resetFlexDirection, nullptr, copyFlexDirection},
-    {"gap", compileGap, applyMember<&ComputedStyle::gap>, resetMember<&ComputedStyle::gap>, nullptr, copyMember<&ComputedStyle::gap>},
+    {"gap", compileGap, nullptr, nullptr, nullptr, nullptr, StylePropertyImpact::Layout, false, InheritedStyleProperty::NotInherited,
+     std::span<const std::string_view>(kGapLonghands)},
+    {"row-gap", compileGapLonghand, applyMember<&ComputedStyle::rowGap>, resetMember<&ComputedStyle::rowGap>, nullptr,
+     copyMember<&ComputedStyle::rowGap>},
+    {"column-gap", compileGapLonghand, applyMember<&ComputedStyle::columnGap>, resetMember<&ComputedStyle::columnGap>, nullptr,
+     copyMember<&ComputedStyle::columnGap>},
     {"grid-area", compileGridArea, [](ComputedStyle& style, const StyleValue& value) { style.gridArea = std::get<GridArea>(value); },
      resetMember<&ComputedStyle::gridArea>, nullptr, copyMember<&ComputedStyle::gridArea>,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
@@ -2156,10 +2206,10 @@ const detail::StylePropertyDefinition kPropertyDefinitions[] = {
      StylePropertyImpact::Layout | StylePropertyImpact::Inherited, false, InheritedStyleProperty::FontStyle},
     {"text-decoration", compileTextDecoration, applyMember<&ComputedStyle::textDecoration>, resetMember<&ComputedStyle::textDecoration>,
      specifyInherited<InheritedStyleProperty::TextDecoration>, inheritMember<InheritedStyleProperty::TextDecoration, &ComputedStyle::textDecoration>,
-     StylePropertyImpact::Paint | StylePropertyImpact::Inherited, false, InheritedStyleProperty::TextDecoration},
+     StylePropertyImpact::Paint | StylePropertyImpact::Descendant, false, InheritedStyleProperty::TextDecoration},
     {"content", compileContent, applyMember<&ComputedStyle::content>, resetMember<&ComputedStyle::content>, nullptr,
      copyMember<&ComputedStyle::content>, StylePropertyImpact::Layout | StylePropertyImpact::Paint},
-    {"font-weight", compileFontWeight, applyFontWeight, resetMember<&ComputedStyle::fontWeight>, specifyInherited<InheritedStyleProperty::FontWeight>,
+    {"font-weight", compileFontWeight, applyFontWeight, resetFontWeight, specifyInherited<InheritedStyleProperty::FontWeight>,
      inheritMember<InheritedStyleProperty::FontWeight, &ComputedStyle::fontWeight>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited,
      false, InheritedStyleProperty::FontWeight},
     {"line-height", compileLineHeight, applyMember<&ComputedStyle::lineHeight>, resetMember<&ComputedStyle::lineHeight>,

@@ -114,7 +114,8 @@ void Surface::paintElement(const Element& element, PaintContext& context, float 
     backgroundContext.viewport = mViewport;
     backgroundContext.scrollport = ElementInternalAccess::scrollport(*current);
     context.setBackgroundPaintContext(backgroundContext);
-    if (!painted->effects.empty() || !painted->maskLayers.empty()) context.beginEffects(current->paintBounds(), *painted, scale);
+    if (!painted->filter.empty() || !painted->backdropFilter.empty() || !painted->maskLayers.empty())
+        context.beginEffects(current->paintBounds(), *painted, scale);
     if (paintsBodyCanvasBackground) {
         ComputedStyle canvasBackground;
         canvasBackground.backgroundColor = painted->backgroundColor;
@@ -175,7 +176,7 @@ void Surface::paintElement(const Element& element, PaintContext& context, float 
             NativeScrollbarPaintRequest request;
             request.geometry = projectScrollbarGeometry(geometry);
             request.colors = painted->scrollbarColor;
-            request.mode = painted->scrollbarModeSet ? painted->scrollbarMode : mScrollLayoutOptions.scrollbarMode;
+            request.mode = mScrollLayoutOptions.scrollbarMode;
             request.metrics = scrollbarMetrics(request.mode);
             request.direction = painted->direction;
             request.scale = scale;
@@ -206,6 +207,6 @@ void Surface::paintElement(const Element& element, PaintContext& context, float 
             context.popClip();
         }
     }
-    if (!painted->effects.empty() || !painted->maskLayers.empty()) context.endEffects();
+    if (!painted->filter.empty() || !painted->backdropFilter.empty() || !painted->maskLayers.empty()) context.endEffects();
 }
 } // namespace radia::ui

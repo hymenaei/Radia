@@ -133,7 +133,6 @@ class Binding;
 struct ComputedStyle;
 class StyleSheet;
 class TextMetrics;
-enum class VerticalAlign;
 
 struct ScrollMetrics {
     float scrollWidth = 0.f;
@@ -147,7 +146,7 @@ struct ScrollMetrics {
 namespace layout_detail {
 class ElementLayoutAccess;
 struct ChildLayout;
-Rect positionedRect(const ChildLayout& child, const Rect& parent, VerticalAlign verticalAlignment);
+Rect positionedRect(const ChildLayout& child, const Rect& parent);
 void setArrangedRect(Element& node, const Rect& rect);
 } // namespace layout_detail
 
@@ -164,7 +163,7 @@ class Element : public Node {
     friend class LayoutEngine;
     friend class StylePass;
     friend class Surface;
-    friend Rect layout_detail::positionedRect(const layout_detail::ChildLayout&, const Rect&, VerticalAlign);
+    friend Rect layout_detail::positionedRect(const layout_detail::ChildLayout&, const Rect&);
     friend void layout_detail::setArrangedRect(Element&, const Rect&);
     friend class layout_detail::ElementLayoutAccess;
     friend class detail::ElementConstructionAccess;
@@ -341,6 +340,8 @@ private:
     void invalidateArrangeTree();
     void invalidateTextTree();
     void invalidateStyleTree(bool layoutAffecting = true, bool propagateToDescendants = true);
+    void invalidateStyleTreesFrom(Node* firstChild, bool layoutAffecting, bool propagateToDescendants);
+    void invalidateFollowingSiblingStyleTrees(bool layoutAffecting, bool propagateToDescendants);
     void clearPaintInvalidationTree();
     void notifyTreeAttached();
     void notifyTreeWillBeDetached();

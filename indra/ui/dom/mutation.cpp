@@ -16,19 +16,32 @@
 namespace radia::ui::detail {
 namespace { using NodeOwnerList = std::vector<NodePtr>; } // namespace
 
+void NodeMutation::assignOwnerDocument(Node& node, Document* document) {
+    NodeAccess::setOwnerDocument(node, document);
+    if (Element* element = node.asElement())
+        for (Node& child : nodes(*element)) assignOwnerDocument(child, document);
+    else if (Fragment* fragment = node.asFragment())
+        for (const NodePtr& child : fragment->mChildren) assignOwnerDocument(*child, document);
+}
+
 void NodeMutation::validateChild(const Node& parent, const Node* child) {
     llassert_always(child);
     llassert_always(child->nodeType() != NodeType::Document);
     llassert_always(child->nodeType() != NodeType::Fragment);
     llassert_always(!child->parentNode());
     if (const Element* element = child->asElement()) llassert_always(!element->surface());
+    const Document* parentDocument = parent.asDocument();
+    if (!parentDocument) parentDocument = parent.ownerDocument();
+    const Document* childDocument = child->ownerDocument();
+    llassert_always(!parentDocument || !childDocument || parentDocument == childDocument);
     for (const Node* current = &parent; current; current = current->parentNode()) llassert_always(current != child);
 }
 
-void NodeMutation::adopt(Node& node) {
+void NodeMutation::adopt(Node& node, Document* document) {
     llassert_always(node.nodeType() != NodeType::Document);
     llassert_always(!node.parentNode());
     if (Element* element = node.asElement()) llassert_always(!element->surface());
+    assignOwnerDocument(node, document);
 }
 
 void NodeMutation::validateDetachedSubtree(const Node& node) {
@@ -62,6 +75,10 @@ void NodeMutation::validateFragment(const Node& parent, const Fragment& fragment
         llassert_always(child->nodeType() != NodeType::Fragment);
         llassert_always(child->parentNode() == &fragment);
         validateDetachedSubtree(*child);
+        const Document* parentDocument = parent.asDocument();
+        if (!parentDocument) parentDocument = parent.ownerDocument();
+        const Document* childDocument = child->ownerDocument();
+        llassert_always(!parentDocument || !childDocument || parentDocument == childDocument);
         for (const Node* current = &parent; current; current = current->parentNode()) llassert_always(current != child.get());
     }
 }
@@ -191,7 +208,8 @@ Node* NodeMutation::insertElementChildren(Element& parent, NodeOwners children, 
         : parent.mChildren.size();
     for (NodePtr& child : children) {
         llassert_always(child && !child->parentNode());
-        adopt(*child);
+        validateChild(parent, child.get());
+        if (Document* document = parent.ownerDocument()) adopt(*child, document);
         attachElementChild(parent, *child);
     }
 
@@ -209,6 +227,7 @@ Node* NodeMutation::insertElementChildren(Element& parent, NodeOwners children, 
     if (Surface* surface = parent.surface()) surface->invalidateOrderingCache();
     if (!parent.mSuppressTextSlots) parent.mTextContentSlots.clear();
     parent.invalidateMeasure();
+    parent.invalidateStyleTreesFrom(firstLifetime.get(), true, true);
     for (const ElementRef<Element>& childRef : elementRefs) {
         if (Element* child = childRef.get()) child->setSurface(parent.surface());
         if (!parentLifetime) return firstLifetime.get();
@@ -252,7 +271,8 @@ Node* NodeMutation::insertFragmentChildren(Fragment& parent, NodeOwners children
     std::size_t insertionIndex = referenceIndex;
     for (NodePtr& child : children) {
         llassert_always(child && !child->parentNode());
-        adopt(*child);
+        validateChild(parent, child.get());
+        if (Document* document = parent.ownerDocument()) adopt(*child, document);
         NodeAccess::setParent(*child, &parent);
         parent.mChildren.insert(parent.mChildren.begin() + static_cast<std::ptrdiff_t>(insertionIndex), std::move(child));
         ++insertionIndex;
@@ -299,6 +319,7 @@ NodePtr NodeMutation::replaceElementChild(Element& parent, Node& child, Fragment
     parent.invalidateMeasure();
     detachElementChild(parent, *detached, surface, surfaceLifetime);
     if (!parentLifetime) return detached;
+    parent.invalidateStyleTreesFrom(referenceLifetime.get(), true, true);
 
     NodeOwners children = std::move(replacement->mChildren);
     replacement->mChildren.clear();
@@ -363,6 +384,7 @@ Node* NodeMutation::replaceElementRange(Element& parent, Node& first, Node& last
         detachElementChild(parent, *node, surface, surfaceLifetime);
     }
     if (!parentLifetime) return nullptr;
+    parent.invalidateStyleTreesFrom(referenceLifetime.get(), true, true);
 
     NodeOwners children = std::move(replacement->mChildren);
     replacement->mChildren.clear();
@@ -480,6 +502,8 @@ Node* NodeMutation::replaceRange(Element& parent, Node& first, Node& last, Fragm
 
 NodePtr NodeMutation::remove(Element& parent, Node& child) {
     auto found = findChild(parent.mChildren, child);
+    const auto next = std::next(found);
+    const NodeRef referenceLifetime(next == parent.mChildren.end() ? nullptr : next->get());
     const ElementRef<Element> parentLifetime(&parent);
     Surface* surface = parent.surface();
     const std::weak_ptr<char> surfaceLifetime = surface ? surface->mLifetime : std::weak_ptr<char>();
@@ -492,6 +516,7 @@ NodePtr NodeMutation::remove(Element& parent, Node& child) {
     parent.invalidateMeasure();
     detachElementChild(parent, *detached, surface, surfaceLifetime);
     if (!parentLifetime) return detached;
+    parent.invalidateStyleTreesFrom(referenceLifetime.get(), true, true);
     return detached;
 }
 

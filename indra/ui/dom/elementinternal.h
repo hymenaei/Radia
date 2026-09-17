@@ -92,6 +92,7 @@ public:
         node.mParentNode = parent;
         node.mParent = parent ? parent->asElement() : nullptr;
     }
+    static void setOwnerDocument(Node& node, Document* document) { node.mOwnerDocument = document; }
     static bool flowBreakBefore(const Node& node) { return node.mFlowBreakBefore; }
     static void setFlowBreakBefore(Node& node, bool enabled) { node.mFlowBreakBefore = enabled; }
 };

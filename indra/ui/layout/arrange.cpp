@@ -163,7 +163,7 @@ LayoutEngine::RowSizing LayoutEngine::resolveRowSizes(Element& node, const Compu
         if (lines.size() == 1 && availableCross >= 0.f) preliminaryHeight = availableCross;
         for (std::size_t index = begin; index < end; ++index)
             applyCrossAxisSizing(children[index].measured, children[index].style, FlexDirection::Row, preliminaryHeight,
-                                 crossAlignment(parentStyle, children[index].style, FlexDirection::Row));
+                                 crossAlignment(parentStyle, children[index].style));
     }
 
     sizing.allocations.reserve(lines.size());
@@ -195,7 +195,7 @@ LayoutEngine::RowSizing LayoutEngine::resolveRowSizes(Element& node, const Compu
         const auto [begin, end] = lines[line];
         for (std::size_t index = begin; index < end; ++index)
             applyCrossAxisSizing(children[index].measured, children[index].style, FlexDirection::Row, sizing.lineHeights[line],
-                                 crossAlignment(parentStyle, children[index].style, FlexDirection::Row));
+                                 crossAlignment(parentStyle, children[index].style));
     }
     return sizing;
 }
@@ -216,8 +216,7 @@ MainAxisAllocation LayoutEngine::resolveColumnSizes(Element& node, const Compute
             return allocation;
         }
         child.measured.x = styledBoxDimension(child.style, true, child.style.width, child.style.minWidth, child.measured.x, availableCross);
-        applyCrossAxisSizing(child.measured, child.style, FlexDirection::Column, availableCross,
-                             crossAlignment(parentStyle, child.style, FlexDirection::Column));
+        applyCrossAxisSizing(child.measured, child.style, FlexDirection::Column, availableCross, crossAlignment(parentStyle, child.style));
         if (child.style.height.isAuto() && !child.style.aspectRatio) {
             if (!child.node.attachedTo(node)) continue;
             Element* childNode = child.node.element();
@@ -328,7 +327,7 @@ void LayoutEngine::arrangeNode(Element& node, LayoutPass& pass) {
         std::max(0.f, panel.h - parentStyle.borderWidth.vertical()),
     };
     const ScrollLayoutOptions& scrollOptions = pass.scrollLayoutOptions();
-    const ScrollbarMode scrollbarMode = parentStyle.scrollbarModeSet ? parentStyle.scrollbarMode : scrollOptions.scrollbarMode;
+    const ScrollbarMode scrollbarMode = scrollOptions.scrollbarMode;
     const bool classicScrollbars = scrollbarMode == ScrollbarMode::Classic;
     const bool scrollbarSpaceAvailable = classicScrollbars && parentStyle.scrollbarWidth != ScrollbarWidth::NoneValue;
     const float scrollbarThickness = scrollbarThicknessFor(parentStyle.scrollbarWidth, pass.scrollbarMetrics(scrollbarMode));
@@ -448,10 +447,12 @@ void LayoutEngine::arrangePseudoElement(PseudoElement& node, LayoutPass& pass) {
     if (children.empty()) return;
 
     if (node.style().display == DisplayMode::Grid || node.style().display == DisplayMode::InlineGrid) {
-        const layout_detail::GridTrackSizes tracks = gridTrackSizes(children, content.w, content.h);
-        const auto sumBefore = [](const std::vector<float>& sizes, std::size_t end) {
+        const layout_detail::GridTrackSizes tracks =
+            gridTrackSizes(children, content.w, content.h, node.style().columnGap.fixedPixels(), node.style().rowGap.fixedPixels());
+        const auto sumBefore = [](const std::vector<float>& sizes, std::size_t end, std::size_t gapCount, float gap) {
             float result = 0.f;
             for (std::size_t index = 0; index < end; ++index) result += sizes[index];
+            result += gap * static_cast<float>(gapCount);
             return result;
         };
         const auto alignSelfOffset = [](AlignSelf alignment, float freeSpace) {
@@ -465,9 +466,10 @@ void LayoutEngine::arrangePseudoElement(PseudoElement& node, LayoutPass& pass) {
             const std::size_t column = static_cast<std::size_t>(std::max(1, area.column)) - 1;
             const std::size_t row = static_cast<std::size_t>(std::max(1, area.row)) - 1;
             if (column >= tracks.columns.size() || row >= tracks.rows.size()) continue;
-            const float cellLeft = direction == LayoutDirection::RightToLeft ? content.right() - sumBefore(tracks.columns, column + 1)
-                                                                             : content.left() + sumBefore(tracks.columns, column);
-            const float cellTop = content.top() - sumBefore(tracks.rows, row);
+            const float cellLeft = direction == LayoutDirection::RightToLeft
+                ? content.right() - sumBefore(tracks.columns, column + 1, column, node.style().columnGap.fixedPixels())
+                : content.left() + sumBefore(tracks.columns, column, column, node.style().columnGap.fixedPixels());
+            const float cellTop = content.top() - sumBefore(tracks.rows, row, row, node.style().rowGap.fixedPixels());
             const float cellWidth = tracks.columns[column];
             const float cellHeight = tracks.rows[row];
             const MarginInsets& margin = child.style.margin;
@@ -495,9 +497,10 @@ void LayoutEngine::arrangePseudoElement(PseudoElement& node, LayoutPass& pass) {
         const float availableCross = row ? content.h : content.w;
         std::vector<Vec2> sizes;
         sizes.reserve(children.size());
-        float usedMain = node.style().gap.fixedPixels() * static_cast<float>(children.size() - 1);
+        const float mainGap = (row ? node.style().columnGap : node.style().rowGap).fixedPixels();
+        float usedMain = mainGap * static_cast<float>(children.size() - 1);
         for (ChildLayout& child : children) {
-            const CrossAlignment alignment = crossAlignment(node.style(), child.style, row ? FlexDirection::Row : FlexDirection::Column);
+            const CrossAlignment alignment = crossAlignment(node.style(), child.style);
             const float widthFallback = !row && child.style.width.isAuto() && alignment == CrossAlignment::Stretch
                 ? std::max(0.f, availableCross - child.style.margin.horizontal())
                 : child.measured.x;
@@ -521,13 +524,10 @@ void LayoutEngine::arrangePseudoElement(PseudoElement& node, LayoutPass& pass) {
         for (std::size_t index = 0; index < children.size(); ++index) {
             ChildLayout& child = children[index];
             const MarginInsets& margin = child.style.margin;
-            if (index != 0)
-                mainPosition += row && direction == LayoutDirection::LeftToRight ? node.style().gap.fixedPixels()
-                    : row                                                        ? -node.style().gap.fixedPixels()
-                                                                                 : -node.style().gap.fixedPixels();
+            if (index != 0) mainPosition += row && direction == LayoutDirection::LeftToRight ? mainGap : -mainGap;
             const float width = sizes[index].x;
             const float height = sizes[index].y;
-            const CrossAlignment alignment = crossAlignment(node.style(), child.style, row ? FlexDirection::Row : FlexDirection::Column);
+            const CrossAlignment alignment = crossAlignment(node.style(), child.style);
             if (row) {
                 const float crossSpace = std::max(0.f, availableCross - height - margin.vertical());
                 const float crossOffset = alignment == CrossAlignment::Center ? crossSpace * .5f
@@ -567,7 +567,7 @@ void LayoutEngine::arrangePseudoElement(PseudoElement& node, LayoutPass& pass) {
         const float height = styledBoxDimension(child.style, false, child.style.height, child.style.minHeight, child.measured.y, content.h);
         y -= margin.top.fixedPixels() + height;
         arrangeChild(child, {content.left() + margin.left.fixedPixels(), y, width, height});
-        y -= margin.bottom.fixedPixels() + node.style().gap.fixedPixels();
+        y -= margin.bottom.fixedPixels();
     }
 }
 
@@ -576,16 +576,12 @@ void LayoutEngine::arrangeRow(Element& node, const ComputedStyle& parentStyle, c
     const LayoutDirection direction = pass.direction();
     const NodeSnapshot nodeState(node);
     removeChildrenExcludedFromLayout(node, children);
-    const float availableCross = available.h;
     const RowSizing sizing = resolveRowSizes(node, parentStyle, available, children, pass);
     if (!sizing.valid) return;
     const auto& lines = sizing.lines;
     const auto& lineHeights = sizing.lineHeights;
-    const float lineGap = parentStyle.gap.fixedPixels();
-    float blockHeight = 0.f;
-    for (float height : lineHeights) blockHeight += height;
-    if (lineHeights.size() > 1) blockHeight += lineGap * static_cast<float>(lineHeights.size() - 1);
-    float lineTop = content.top() - verticalAlignmentOffset(parentStyle.verticalAlign, std::max(0.f, availableCross - blockHeight));
+    const float lineGap = parentStyle.rowGap.fixedPixels();
+    float lineTop = content.top();
 
     for (std::size_t line = 0; line < sizing.lines.size(); ++line) {
         const auto [begin, end] = sizing.lines[line];
@@ -625,7 +621,7 @@ void LayoutEngine::arrangeRow(Element& node, const ComputedStyle& parentStyle, c
             float y = lineBottom + margin.bottom.fixedPixels();
             if (crossAutoCount) y += margin.bottom.isAuto() ? crossAuto : 0.f;
             else {
-                const CrossAlignment alignment = crossAlignment(parentStyle, child.style, FlexDirection::Row);
+                const CrossAlignment alignment = crossAlignment(parentStyle, child.style);
                 if (alignment == CrossAlignment::Start || alignment == CrossAlignment::Stretch)
                     y = lineTop - margin.top.fixedPixels() - child.measured.y;
                 else if (alignment == CrossAlignment::Center) y += availableCrossSpace * .5f;
@@ -672,7 +668,6 @@ void LayoutEngine::arrangeColumn(Element& node, const ComputedStyle& parentStyle
         const JustifyContent alignment = parentStyle.justifyContent;
         if (alignment == JustifyContent::Center) y -= freeSpace * .5f;
         else if (alignment == JustifyContent::End || alignment == JustifyContent::Right) y -= freeSpace;
-        else if (alignment == JustifyContent::Start) y -= verticalAlignmentOffset(parentStyle.verticalAlign, freeSpace);
     }
     for (std::size_t i = 0; i < children.size(); ++i) {
         ChildLayout& child = children[i];
@@ -703,7 +698,7 @@ void LayoutEngine::arrangeColumn(Element& node, const ComputedStyle& parentStyle
         float x = content.left() + margin.left.fixedPixels();
         if (horizontalAutoCount) x += margin.left.isAuto() ? horizontalAuto : 0.f;
         else {
-            const CrossAlignment alignment = crossAlignment(parentStyle, child.style, FlexDirection::Column);
+            const CrossAlignment alignment = crossAlignment(parentStyle, child.style);
             if (alignment == CrossAlignment::Center) x += horizontalSpace * .5f;
             else {
                 const bool logicalStart = alignment == CrossAlignment::Start || alignment == CrossAlignment::Stretch;
@@ -721,14 +716,16 @@ void LayoutEngine::arrangeColumn(Element& node, const ComputedStyle& parentStyle
     }
 }
 
-void LayoutEngine::arrangeGrid(Element& node, const ComputedStyle&, const Rect& content, std::vector<ChildLayout>& children, LayoutPass& pass) {
+void LayoutEngine::arrangeGrid(Element& node, const ComputedStyle& style, const Rect& content, std::vector<ChildLayout>& children, LayoutPass& pass) {
     const LayoutDirection direction = pass.direction();
     const NodeSnapshot nodeState(node);
     removeChildrenExcludedFromLayout(node, children);
-    const layout_detail::GridTrackSizes tracks = gridTrackSizes(children, content.w, content.h);
-    const auto sumBefore = [](const std::vector<float>& sizes, std::size_t end) {
+    const layout_detail::GridTrackSizes tracks =
+        gridTrackSizes(children, content.w, content.h, style.columnGap.fixedPixels(), style.rowGap.fixedPixels());
+    const auto sumBefore = [](const std::vector<float>& sizes, std::size_t end, std::size_t gapCount, float gap) {
         float result = 0.f;
         for (std::size_t index = 0; index < end; ++index) result += sizes[index];
+        result += gap * static_cast<float>(gapCount);
         return result;
     };
     for (ChildLayout& child : children) {
@@ -739,9 +736,10 @@ void LayoutEngine::arrangeGrid(Element& node, const ComputedStyle&, const Rect& 
         const GridArea area = child.style.gridArea.value_or(GridArea{});
         const std::size_t column = static_cast<std::size_t>(std::max(1, area.column)) - 1;
         const std::size_t row = static_cast<std::size_t>(std::max(1, area.row)) - 1;
-        const float cellLeft = direction == LayoutDirection::RightToLeft ? content.right() - sumBefore(tracks.columns, column + 1)
-                                                                         : content.left() + sumBefore(tracks.columns, column);
-        const float cellTop = content.top() - sumBefore(tracks.rows, row);
+        const float cellLeft = direction == LayoutDirection::RightToLeft
+            ? content.right() - sumBefore(tracks.columns, column + 1, column, style.columnGap.fixedPixels())
+            : content.left() + sumBefore(tracks.columns, column, column, style.columnGap.fixedPixels());
+        const float cellTop = content.top() - sumBefore(tracks.rows, row, row, style.rowGap.fixedPixels());
         const float cellWidth = tracks.columns[column];
         const float cellHeight = tracks.rows[row];
         const MarginInsets& margin = child.style.margin;
@@ -810,8 +808,7 @@ void LayoutEngine::arrangeNormal(Element& node, const ComputedStyle& parentStyle
                 childY = lineBottom + margin.bottom.fixedPixels() + verticalAlignmentOffset(child.style.verticalAlign, freeSpace);
             }
             Rect base;
-            if (Element* element = childNode.element(); element && element->mRectExplicit)
-                base = positionedRect(child, content, parentStyle.verticalAlign);
+            if (Element* element = childNode.element(); element && element->mRectExplicit) base = positionedRect(child, content);
             else base = {childX, childY, width, height};
             setArrangedRect(child.node, translatedRect(child, relativeRect(child, base, content)));
             arrangeNode(child.node, pass);

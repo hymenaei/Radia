@@ -55,6 +55,7 @@ public:
 
     void setViewport(float width, float height);
     void setScrollLayoutOptions(ScrollLayoutOptions options);
+    void setColorSchemeContext(ColorSchemeContext context);
     void setFloaterDelegate(SurfaceFloaterDelegate* delegate) { mFloaterDelegate = delegate; }
     Element& mount(std::unique_ptr<Element> element, SurfaceLayer layer = SurfaceLayer::Base);
     Element& mount(Element& element, SurfaceLayer layer = SurfaceLayer::Base);
@@ -145,8 +146,8 @@ private:
     bool moveFocus(bool backwards);
     bool routeEvent(Event& event);
     void collectFocusable(Element& node, std::vector<ElementRef<Element>>& result, StylePass& styles) const;
-    void paintElement(const Element& element, PaintContext& context, float scale, float inheritedOpacity, StylePass& styles,
-                      Vec2 paintTranslation) const;
+    void collectFixedPositionedElements(Element& node, std::vector<Element*>& result, StylePass& styles) const;
+    void paintElement(Element& element, PaintContext& context, float scale, float inheritedOpacity, StylePass& styles, Vec2 paintTranslation) const;
     static constexpr std::size_t kSurfaceLayerCount = static_cast<std::size_t>(SurfaceLayer::Modal) + 1;
 
     struct Mount {
@@ -236,6 +237,7 @@ private:
     const TextMetrics& mTextMetrics;
     mutable std::unique_ptr<StylePass> mStylePass;
     ScrollLayoutOptions mScrollLayoutOptions;
+    ColorSchemeContext mColorSchemeContext{ColorScheme::Dark};
     Rect mViewport;
     Element* mHovered = nullptr;
     Element* mPressed = nullptr;

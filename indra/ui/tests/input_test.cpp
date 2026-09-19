@@ -268,7 +268,7 @@ TEST(InputTest, SelectsNativeAppearance) {
     EXPECT_EQ(recording.last(PaintCommandKind::NativeInput)->nativeInput->control, NativeInputControl::Checkbox);
 
     recording.clear();
-    style.appearance = AppearanceMode::Unstyled;
+    style.appearance = AppearanceMode::NoneValue;
     style.backgroundColor = {0.2f, 0.3f, 0.4f, 1.f};
     input.paint(recording, style, 1.f);
     ASSERT_EQ(recording.count(PaintCommandKind::Box), std::size_t{1});
@@ -367,7 +367,9 @@ TEST(InputTest, CarriesColorScheme) {
     RecordingPaintContext recording;
     ComputedStyle style;
     style.appearance = AppearanceMode::Auto;
-    style.colorScheme = ColorScheme::Light;
+    style.colorScheme.normal = false;
+    style.colorScheme.schemes = {ColorScheme::Light};
+    style.usedColorScheme = style.colorScheme.used({});
 
     input.paint(recording, style, 1.f);
 

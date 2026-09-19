@@ -315,6 +315,94 @@ std::vector<TextLine> wrapLine(const TextLine& source, float available, float fa
     return result;
 }
 
+std::vector<TextLine> optimizedWrapLine(const TextLine& source, float available, float fallbackHeight, const TextMetrics& metrics,
+                                        TextWrapStyle optimization) {
+    const std::vector<TextLine> greedy = wrapLine(source, available, fallbackHeight, metrics);
+    if (greedy.size() < 2 || greedy.size() > 10) return greedy;
+
+    const std::vector<TextChunk> chunks = lineBreakChunks(source, metrics);
+    if (chunks.size() < greedy.size() || chunks.size() > 128) return greedy;
+
+    const std::size_t chunkCount = chunks.size();
+    std::vector<float> widths((chunkCount + 1) * (chunkCount + 1), std::numeric_limits<float>::quiet_NaN());
+    const auto width = [&](std::size_t begin, std::size_t end) {
+        float& cached = widths[begin * (chunkCount + 1) + end];
+        if (std::isnan(cached)) {
+            WrappedLine line(metrics);
+            for (std::size_t index = begin; index < end; ++index) line.append(chunks[index]);
+            cached = lineSize(line.finish(), fallbackHeight, metrics).x;
+        }
+        return cached;
+    };
+    const std::size_t lineCount = greedy.size();
+    const float targetWidth = width(0, chunkCount) / static_cast<float>(lineCount);
+    const float targetRemaining = available - targetWidth;
+    struct State {
+        float cost = std::numeric_limits<float>::infinity();
+        std::size_t previous = 0;
+    };
+    std::vector<std::vector<State>> states(lineCount + 1, std::vector<State>(chunkCount + 1));
+    states[0][0].cost = 0.f;
+    for (std::size_t line = 1; line <= lineCount; ++line) {
+        for (std::size_t end = line; end + (lineCount - line) <= chunkCount; ++end) {
+            for (std::size_t begin = line - 1; begin < end; ++begin) {
+                if (!std::isfinite(states[line - 1][begin].cost)) continue;
+                const float lineWidth = width(begin, end);
+                const float overflow = std::max(0.f, lineWidth - available);
+                const float remaining = available - lineWidth;
+                float penalty = 0.f;
+                if (optimization == TextWrapStyle::Balance) {
+                    const float deviation = remaining - targetRemaining;
+                    penalty = deviation * deviation;
+                } else {
+                    const float looseSpace = std::max(0.f, remaining);
+                    penalty = looseSpace * looseSpace * (looseSpace + 1.f);
+                    if (line == lineCount) {
+                        const float shortLastLine = std::max(0.f, targetWidth - lineWidth);
+                        penalty += shortLastLine * shortLastLine * 4.f;
+                    }
+                }
+                penalty += overflow * overflow * 1000.f;
+                const float cost = states[line - 1][begin].cost + penalty;
+                if (cost < states[line][end].cost) states[line][end] = {cost, begin};
+            }
+        }
+    }
+    if (!std::isfinite(states[lineCount].back().cost)) return greedy;
+
+    std::vector<std::pair<std::size_t, std::size_t>> ranges(lineCount);
+    std::size_t end = chunkCount;
+    for (std::size_t line = lineCount; line > 0; --line) {
+        const std::size_t begin = states[line][end].previous;
+        ranges[line - 1] = {begin, end};
+        end = begin;
+    }
+    std::vector<TextLine> result;
+    result.reserve(lineCount);
+    for (const auto [begin, rangeEnd] : ranges) {
+        WrappedLine line(metrics);
+        for (std::size_t index = begin; index < rangeEnd; ++index) line.append(chunks[index]);
+        result.push_back(line.finish());
+    }
+    return result;
+}
+
+std::vector<TextLine> balancedWrapLine(const TextLine& source, float available, float fallbackHeight, const TextMetrics& metrics) {
+    return optimizedWrapLine(source, available, fallbackHeight, metrics, TextWrapStyle::Balance);
+}
+
+std::vector<TextLine> prettyWrapLine(const TextLine& source, float available, float fallbackHeight, const TextMetrics& metrics) {
+    return optimizedWrapLine(source, available, fallbackHeight, metrics, TextWrapStyle::Pretty);
+}
+
+std::vector<TextLine> avoidShortLastLine(const TextLine& source, float available, float fallbackHeight, const TextMetrics& metrics) {
+    const std::vector<TextLine> greedy = wrapLine(source, available, fallbackHeight, metrics);
+    if (greedy.size() < 2) return greedy;
+    const std::vector<TextLine> candidate = prettyWrapLine(source, available, fallbackHeight, metrics);
+    if (candidate.size() != greedy.size()) return greedy;
+    return lineSize(candidate.back(), fallbackHeight, metrics).x > lineSize(greedy.back(), fallbackHeight, metrics).x ? candidate : greedy;
+}
+
 TextLine visualRuns(const TextLine& line, LayoutDirection direction, const TextMetrics& metrics) {
     if (line.size() < 2) return line;
 
@@ -456,7 +544,12 @@ LaidOutText layoutText(const std::vector<TextLine>& hardLines, const ComputedSty
     const float fallbackHeight = metrics.measureText({}, style).y;
     for (const TextLine& hardLine : hardLines) {
         std::vector<TextLine> visualLines;
-        if (availableWidth && style.textWrap == TextWrap::Wrap) visualLines = wrapLine(hardLine, *availableWidth, fallbackHeight, metrics);
+        if (availableWidth && style.textWrap == TextWrap::Wrap)
+            if (style.textWrapStyle == TextWrapStyle::Balance) visualLines = balancedWrapLine(hardLine, *availableWidth, fallbackHeight, metrics);
+            else if (style.textWrapStyle == TextWrapStyle::Pretty) visualLines = prettyWrapLine(hardLine, *availableWidth, fallbackHeight, metrics);
+            else if (style.textWrapStyle == TextWrapStyle::AvoidShortLastLine)
+                visualLines = avoidShortLastLine(hardLine, *availableWidth, fallbackHeight, metrics);
+            else visualLines = wrapLine(hardLine, *availableWidth, fallbackHeight, metrics);
         else visualLines.push_back(hardLine);
 
         for (TextLine& line : visualLines) {
@@ -507,10 +600,17 @@ std::vector<TextLine> layoutLines(const std::string& text, const ComputedStyle& 
     return lines;
 }
 
-float alignedOffset(float available, float occupied, TextAlign alignment) {
+float alignedOffset(float available, float occupied, TextAlign alignment, LayoutDirection direction) {
     if (alignment == TextAlign::Center) return (available - occupied) * .5f;
     if (alignment == TextAlign::Right || alignment == TextAlign::End) return available - occupied;
+    if (alignment == TextAlign::MatchParent) return direction == LayoutDirection::RightToLeft ? available - occupied : 0.f;
     return 0.f;
+}
+
+std::size_t whitespaceCount(const TextRun& run) {
+    const LLWString value = utf8str_to_wstring(run.value);
+    return static_cast<std::size_t>(
+        std::count_if(value.begin(), value.end(), [](llwchar character) { return std::iswspace(static_cast<wint_t>(character)) != 0; }));
 }
 
 void mixStyleValue(std::size_t& hash, std::size_t value) {
@@ -542,6 +642,7 @@ std::size_t textStyleFingerprint(const ComputedStyle& style) {
 std::size_t textLayoutFingerprint(const ComputedStyle& style, bool visualOrder, bool applyOverflow) {
     std::size_t hash = 0;
     mixStyleValue(hash, static_cast<std::size_t>(style.textWrap));
+    mixStyleValue(hash, static_cast<std::size_t>(style.textWrapStyle));
     if (applyOverflow) {
         mixStyleValue(hash, static_cast<std::size_t>(style.textOverflow));
         mixStyleValue(hash, static_cast<std::size_t>(style.overflowX));
@@ -560,7 +661,8 @@ Vec2 TextLayout::measure(const TextMetrics& metrics, const ComputedStyle& style,
                          std::optional<float> resolvedWidth) const {
     std::optional<float> availableWidth;
     if (resolvedWidth) availableWidth = std::max(0.f, *resolvedWidth - style.padding.horizontal());
-    else if (!style.width.isAuto() && !style.width.isPercentage()) availableWidth = std::max(0.f, style.width.pixels() - style.padding.horizontal());
+    else if (!style.width.isAuto() && !style.width.isPercentage() && !style.width.isIntrinsic())
+        availableWidth = std::max(0.f, style.width.pixels() - style.padding.horizontal());
     return cachedLayout(metrics, style, &styleSheet, owner, availableWidth, false, false).size;
 }
 
@@ -573,9 +675,10 @@ void TextLayout::paint(PaintContext& context, const Rect& rect, const ComputedSt
                        const Element& owner) const {
     const TextMetrics& metrics = context.textMetrics();
     const detail::LaidOutText& layout = cachedLayout(metrics, style, styleSheet, owner, rect.w, true, true);
-    const TextPaintStyle paintStyle{
-        style.color, style.colorLightDark,
-        style.textDecorationPropagation == TextDecoration::NoneValue ? style.textDecoration : style.textDecorationPropagation, style.textAlign};
+    const TextPaintStyle paintStyle{style.color, style.colorLightDark,
+                                    style.textDecorationPropagation == TextDecoration::NoneValue ? style.textDecoration
+                                                                                                 : style.textDecorationPropagation,
+                                    style.textAlign, style.direction};
     paintLayout(context, rect, paintStyle, layout, metrics);
 }
 
@@ -607,18 +710,40 @@ void TextLayout::paintPrepared(PaintContext& context, const Rect& rect, const Co
 void TextLayout::paintLayout(PaintContext& context, const Rect& rect, const TextPaintStyle& style, const detail::LaidOutText& layout,
                              const TextMetrics& metrics) const {
     float y = rect.top();
-    for (const detail::LaidOutTextLine& line : layout.lines) {
+    for (std::size_t lineIndex = 0; lineIndex < layout.lines.size(); ++lineIndex) {
+        const detail::LaidOutTextLine& line = layout.lines[lineIndex];
         y -= line.size.y;
-        float x = rect.x + alignedOffset(rect.w, line.size.x, style.textAlign);
+        const bool justify = style.textAlign == TextAlign::Justify || style.textAlign == TextAlign::JustifyAll;
+        const bool justifyLine = justify && (style.textAlign == TextAlign::JustifyAll || lineIndex + 1 < layout.lines.size());
+        std::size_t opportunities = 0;
+        if (justifyLine)
+            for (const TextRun& run : line.runs) opportunities += whitespaceCount(run);
+        const float extra = justifyLine && opportunities ? std::max(0.f, rect.w - line.size.x) / static_cast<float>(opportunities) : 0.f;
+        float x = rect.x + alignedOffset(rect.w, line.size.x, style.textAlign, style.direction);
         for (std::size_t runIndex = 0; runIndex < line.runs.size(); ++runIndex) {
             const TextRun& run = line.runs[runIndex];
-            ComputedStyle runStyle = run.style;
-            runStyle.color = style.color;
-            runStyle.colorLightDark = style.colorLightDark;
-            runStyle.textDecoration = style.textDecoration;
-            runStyle.textAlign = TextAlign::Left;
-            context.paintText(run.value, {x, y, run.size.x, line.size.y}, runStyle);
-            x += run.size.x;
+            const auto paintRun = [&](const std::string& value, float width) {
+                ComputedStyle runStyle = run.style;
+                runStyle.color = style.color;
+                runStyle.colorLightDark = style.colorLightDark;
+                runStyle.textDecoration = style.textDecoration;
+                runStyle.textAlign = TextAlign::Left;
+                context.paintText(value, {x, y, width, line.size.y}, runStyle);
+                x += width;
+            };
+            if (!justifyLine || whitespaceCount(run) == 0) paintRun(run.value, run.size.x);
+            else {
+                const LLWString wide = utf8str_to_wstring(run.value);
+                for (std::size_t begin = 0; begin < wide.size();) {
+                    const bool whitespace = std::iswspace(static_cast<wint_t>(wide[begin])) != 0;
+                    std::size_t end = begin + 1;
+                    while (end < wide.size() && (std::iswspace(static_cast<wint_t>(wide[end])) != 0) == whitespace) ++end;
+                    const std::string value = wstring_to_utf8str(wide.substr(begin, end - begin));
+                    paintRun(value, metrics.measureText(value, run.style).x);
+                    if (whitespace) x += extra * static_cast<float>(end - begin);
+                    begin = end;
+                }
+            }
             if (runIndex + 1 < line.runs.size()) x += interRunSpacing(run, line.runs[runIndex + 1], metrics);
         }
     }

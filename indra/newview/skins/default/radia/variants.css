@@ -12,6 +12,24 @@ div.switch {
     > label { flex-grow: 1; }
 }
 
+div.switch.demo-setting {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 4px;
+
+    > div.switch-control {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        gap: 8px;
+
+        > label { flex-grow: 1; }
+    }
+
+    > div.hint { color: var(--muted); }
+    > div.error { color: var(--error); }
+}
+
 p#languageHeading {
     color: var(--muted);
 }

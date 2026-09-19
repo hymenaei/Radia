@@ -79,11 +79,12 @@ std::optional<Surface::ScrollbarTarget> Surface::hitTestScrollbarNode(Element& n
     Rect childClip = clipsChildren ? clipToAxes(inheritedClip, ElementInternalAccess::scrollport(*current), clipAxes) : inheritedClip;
     if (clipsChildren) childClip = {childClip.x + scrollOffset.x, childClip.y + scrollOffset.y, childClip.w, childClip.h};
     const Vec2 childPoint = point + scrollOffset;
-    const auto children = styles.sourceChildren(*current);
+    const auto children = styles.orderedChildren(*current);
     for (auto child = children->rbegin(); child != children->rend(); ++child)
-        if (Element* childElement = child->get())
+        if (Element* childElement = child->element())
             if (childElement->parentElement() == current)
-                if (std::optional<ScrollbarTarget> hit = hitTestScrollbarNode(*childElement, childPoint, childClip, styles)) return hit;
+                if (styles.style(*childElement).position != PositionMode::Fixed)
+                    if (std::optional<ScrollbarTarget> hit = hitTestScrollbarNode(*childElement, childPoint, childClip, styles)) return hit;
 
     current = observation.get();
     if (!current || !observation.layoutValid() || !observation.styleValid() || !isRootedInSurface(current) || !current->isVisible(style))
@@ -98,17 +99,33 @@ std::optional<Surface::ScrollbarTarget> Surface::hitTestScrollbarAt(const Vec2& 
     const auto hitInLayer = [&](SurfaceLayer layer) -> std::optional<ScrollbarTarget> {
         const MountList& layerMounts = mounts(layer);
         for (auto current = layerMounts.rbegin(); current != layerMounts.rend(); ++current)
-            if (*current && (*current)->root)
+            if (*current && (*current)->root && styles.style(*(*current)->root).position != PositionMode::Fixed)
                 if (std::optional<ScrollbarTarget> hit = hitTestScrollbarNode(*(*current)->root, point, mViewport, styles)) return hit;
         return std::nullopt;
     };
-    if (hasActiveModal()) return hitInLayer(SurfaceLayer::Modal);
+    const auto hitFixedInLayer = [&](SurfaceLayer layer) -> std::optional<ScrollbarTarget> {
+        const MountList& layerMounts = mounts(layer);
+        for (auto current = layerMounts.rbegin(); current != layerMounts.rend(); ++current) {
+            if (!*current || !(*current)->root) continue;
+            std::vector<Element*> fixed;
+            collectFixedPositionedElements(*(*current)->root, fixed, styles);
+            for (auto fixedElement = fixed.rbegin(); fixedElement != fixed.rend(); ++fixedElement)
+                if (std::optional<ScrollbarTarget> hit = hitTestScrollbarNode(**fixedElement, point, mViewport, styles)) return hit;
+        }
+        return std::nullopt;
+    };
+    if (hasActiveModal()) {
+        if (std::optional<ScrollbarTarget> hit = hitFixedInLayer(SurfaceLayer::Modal)) return hit;
+        return hitInLayer(SurfaceLayer::Modal);
+    }
 
     for (std::size_t index = static_cast<std::size_t>(SurfaceLayer::Modal); index > static_cast<std::size_t>(SurfaceLayer::Base); --index) {
         const SurfaceLayer layer = static_cast<SurfaceLayer>(index);
         if (layer == SurfaceLayer::Tooltip || layer == SurfaceLayer::Drag || layer == SurfaceLayer::Modal) continue;
+        if (std::optional<ScrollbarTarget> hit = hitFixedInLayer(layer)) return hit;
         if (std::optional<ScrollbarTarget> hit = hitInLayer(layer)) return hit;
     }
+    if (std::optional<ScrollbarTarget> hit = hitFixedInLayer(SurfaceLayer::Base)) return hit;
     return hitInLayer(SurfaceLayer::Base);
 }
 

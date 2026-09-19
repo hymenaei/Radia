@@ -82,6 +82,7 @@ using radia::ui::TextMetrics;
 using radia::ui::TextOverflow;
 using radia::ui::TextPaintStyle;
 using radia::ui::TextWrap;
+using radia::ui::TextWrapStyle;
 using radia::ui::Vec2;
 using radia::ui::Visibility;
 using radia::ui::detail::appendText;
@@ -1425,6 +1426,42 @@ TEST(TextLayoutTest, WrapsAtTextBoundaries) {
     style.textOverflow = TextOverflow::Clip;
     style.width = Dimension::fromPixels(30.f);
     EXPECT_EQ(wrapped.intrinsicSize(StyleSheet(), style, metrics).y, 20.f);
+}
+
+TEST(TextLayoutTest, AppliesBalanceAndPrettyWrapStyles) {
+    const FixedTextMetrics metrics(.5f, .5f);
+    ComputedStyle style;
+    style.fontSize = 10.f;
+    style.textOverflow = TextOverflow::Clip;
+
+    TextLayoutTestElement autoWrapped("alpha beta gamma delta epsilon");
+    autoWrapped.setRect({0.f, 0.f, 50.f, 100.f});
+    RecordingPaintContext autoRecording(metrics);
+    autoWrapped.paint(autoRecording, style, 1.f);
+
+    style.textWrapStyle = TextWrapStyle::Balance;
+    TextLayoutTestElement balanced("alpha beta gamma delta epsilon");
+    balanced.setRect({0.f, 0.f, 50.f, 100.f});
+    RecordingPaintContext balanceRecording(metrics);
+    balanced.paint(balanceRecording, style, 1.f);
+
+    style.textWrapStyle = TextWrapStyle::Pretty;
+    TextLayoutTestElement pretty("alpha beta gamma delta epsilon");
+    pretty.setRect({0.f, 0.f, 50.f, 100.f});
+    RecordingPaintContext prettyRecording(metrics);
+    pretty.paint(prettyRecording, style, 1.f);
+
+    EXPECT_GT(autoRecording.count(PaintCommandKind::Text), 1U);
+    EXPECT_EQ(balanceRecording.count(PaintCommandKind::Text), autoRecording.count(PaintCommandKind::Text));
+    EXPECT_EQ(prettyRecording.count(PaintCommandKind::Text), autoRecording.count(PaintCommandKind::Text));
+    const auto textRuns = [](const RecordingPaintContext& recording) {
+        std::vector<std::string> result;
+        for (const PaintCommand& command : recording.commands())
+            if (command.kind == PaintCommandKind::Text) result.push_back(command.text);
+        return result;
+    };
+    EXPECT_NE(textRuns(balanceRecording), textRuns(autoRecording));
+    EXPECT_NE(textRuns(prettyRecording), textRuns(autoRecording));
 }
 
 TEST(TextLayoutTest, UsesShapedWidthsForCenterEllipsis) {

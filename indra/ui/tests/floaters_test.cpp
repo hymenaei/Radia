@@ -557,7 +557,7 @@ TEST(FloatersTest, HidesUnavailableResizeCursor) {
     EXPECT_EQ(surface.cursor(), CursorStyle::Default);
 }
 
-TEST(FloatersTest, UsesFrozenWidth) {
+TEST(FloatersTest, ResolvesPercentageMinimumAgainstViewport) {
     StyleSheet styleSheet;
     constexpr char kPercentageMinimumLayout[] = "floater { size: 80px 100px; min-size: 50%; }";
     ASSERT_TRUE(styleSheet.loadRadia(kPercentageMinimumLayout).ok());
@@ -569,13 +569,15 @@ TEST(FloatersTest, UsesFrozenWidth) {
     surface.mountFloater(std::move(floater));
     const std::optional<Rect> prepared = surface.prepareFloater(*target);
     ASSERT_TRUE(prepared.has_value());
+    EXPECT_EQ(prepared->w, 200.f);
+    EXPECT_EQ(prepared->h, 150.f);
     surface.placeFloater(*target, *prepared);
 
     const Vec2 leftEdge{target->rect().left() + 1.f, target->rect().bottom() + 30.f};
     surface.pointerDown({leftEdge, PointerButton::Left});
     surface.pointerMove({{target->rect().right() + 500.f, leftEdge.y}, PointerButton::Left});
     surface.pointerUp({{target->rect().right() + 500.f, leftEdge.y}, PointerButton::Left});
-    EXPECT_EQ(target->rect().w, 50.f);
+    EXPECT_EQ(target->rect().w, 200.f);
 }
 
 TEST(FloatersTest, ResizesFloatersMountedInModalLayer) {

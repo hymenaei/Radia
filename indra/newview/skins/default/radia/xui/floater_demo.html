@@ -71,16 +71,20 @@
             </div>
 
             <div class="switch demo-setting">
-                <label for="demoSwitch">{{demo.switch}}</label>
-                <input type="checkbox" switch id="demoSwitch" setting="DemoSwitch" onChange="switchChanged(event)"><br>
-                <div class="hint">{{demo.switchHint}}</div><br>
+                <div class="switch-control">
+                    <label for="demoSwitch">{{demo.switch}}</label>
+                    <input type="checkbox" switch id="demoSwitch" setting="DemoSwitch" onChange="switchChanged(event)">
+                </div>
+                <div class="hint">{{demo.switchHint}}</div>
                 <div class="error">{{demo.switchError}}</div>
             </div>
 
-            <div class="switch control-first">
-                <input type="checkbox" switch id="skinAutoReloadToggle" setting="SkinAutoReload">
-                <label for="skinAutoReloadToggle">{{demo.automaticWatching}}</label><br>
-                <div class="hint">{{demo.automaticWatchingHint}}</div><br>
+            <div class="switch demo-setting">
+                <div class="switch-control">
+                    <input type="checkbox" switch id="skinAutoReloadToggle" setting="SkinAutoReload">
+                    <label for="skinAutoReloadToggle">{{demo.automaticWatching}}</label>
+                </div>
+                <div class="hint">{{demo.automaticWatchingHint}}</div>
                 <div class="error">{{demo.automaticWatchingError}}</div>
             </div>
         </fieldset>

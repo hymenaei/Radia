@@ -95,13 +95,7 @@ Color fromHsl(const HslColor& hsl, float alpha) {
 }
 
 ColorScheme effectiveColorScheme(const NativeInputPaintRequest& request) {
-    switch (request.colorScheme) {
-        case ColorScheme::Light: return ColorScheme::Light;
-        case ColorScheme::Dark: return ColorScheme::Dark;
-        case ColorScheme::Auto:
-        case ColorScheme::LightDark: return ColorScheme::Dark;
-    }
-    return ColorScheme::Dark;
+    return request.colorScheme;
 }
 
 const NativeInputPalette& inputPalette(const NativeInputPaintRequest& request) {

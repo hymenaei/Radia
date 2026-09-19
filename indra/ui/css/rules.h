@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -35,11 +36,6 @@ struct StyleBorder {
     BorderStyle style = BorderStyle::NoneValue;
 };
 
-struct StyleSize {
-    Dimension height;
-    Dimension width;
-};
-
 enum class StyleImageComponent : std::uint8_t { All, Image, Position, Size, Repeat, Origin, Clip, Attachment, Mode, Composite, Type };
 
 struct StyleImageLayers {
@@ -63,16 +59,18 @@ enum class StyleWideKeyword : std::uint8_t { Inherit, Unset };
 struct StyleModel;
 struct StyleRuleSet;
 struct StyleRule;
+struct StyleSelectorFunction;
 
 namespace detail { struct StylePropertyDefinition; }
 
-using StyleValue = std::variant<InitialStyleValue, DeferredStyleValue, StyleWideKeyword, Color, LightDarkColor, AccentColor, ColorScheme, StylePaint,
-                                StyleBorder, StyleSize, StyleImageLayers, StyleMaskLayers, Dimension, Length, std::optional<Length>, EdgeInsets,
-                                MarginInsets, BorderRadii, GapValue, LineHeight, RelativeFontWeight, GridArea, Translate, CursorValue,
-                                ScrollbarColors, std::vector<BoxShadow>, FilterOperations, Outline, std::optional<std::string>, float, int, bool,
-                                AppearanceMode, BoxSizing, BorderStyle, DisplayMode, PositionMode, Visibility, FlexDirection, JustifyContent,
-                                JustifySelf, AlignItems, AlignSelf, Overflow, ScrollbarWidth, ScrollbarGutter, FontFamily, TextAlign, TextOverflow,
-                                TextWrap, VerticalAlign, TextDecoration, PointerEvents, CursorStyle, StrokeCap>;
+using StyleValue =
+    std::variant<InitialStyleValue, DeferredStyleValue, StyleWideKeyword, Color, LightDarkColor, AccentColor, ColorSchemeValue, StylePaint,
+                 StyleBorder, StyleImageLayers, StyleMaskLayers, Dimension, Length, LengthPercentage, std::optional<Length>, std::optional<Dimension>,
+                 EdgeInsets, MarginInsets, BorderRadii, GapValue, LineHeight, RelativeFontWeight, GridArea, Translate, CursorValue, ScrollbarColors,
+                 std::vector<BoxShadow>, FilterOperations, Outline, std::optional<std::string>, float, int, bool, AppearanceMode, BoxSizing,
+                 BorderStyle, DisplayMode, PositionMode, Visibility, FlexDirection, ItemPosition, ContentPosition, ContentDistribution, Overflow,
+                 ScrollbarWidth, ScrollbarGutter, FontFamily, TextAlign, TextOverflow, TextWrap, TextWrapStyle, VerticalAlign, TextDecoration,
+                 PointerEvents, CursorStyle, StrokeCap, SelfAlignmentData, ContentAlignmentData, FlexWrapValue, VerticalAlignValue>;
 
 using StyleColorValue = std::variant<Color, LightDarkColor>;
 
@@ -143,6 +141,7 @@ struct StyleSelector {
     std::optional<LayoutDirection> direction;
     std::uint32_t directionSpecificity = 0;
     std::string pseudoElement;
+    std::vector<std::shared_ptr<StyleSelectorFunction>> selectorFunctions;
 };
 
 struct StyleRule {
@@ -152,6 +151,13 @@ struct StyleRule {
     std::vector<CustomPropertyDeclaration> customProperties;
     std::vector<StyleDeclaration> declarations;
     int sourceOrder = 0;
+};
+
+enum class StyleSelectorFunctionKind : std::uint8_t { Is, Where };
+
+struct StyleSelectorFunction {
+    StyleSelectorFunctionKind kind = StyleSelectorFunctionKind::Is;
+    std::vector<StyleRule> arguments;
 };
 
 struct StyleModel {
@@ -169,7 +175,7 @@ struct StyleModel {
     static std::optional<Outline> parseOutline(detail::CSSValueRange value);
     static std::optional<bool> parseFontStyleValue(detail::CSSValueRange value);
     static std::optional<float> parseFontWeightValue(detail::CSSValueRange value);
-    static std::optional<LineHeight> parseLineHeightValue(detail::CSSValueRange value);
+    static std::optional<StyleValue> parseLineHeightValue(detail::CSSValueRange value);
     static std::optional<std::vector<StyleDeclaration>> parseFontShorthand(detail::CSSValueRange value);
     static EdgeInsets parseEdgeInsets(detail::CSSValueRange value, const EdgeInsets& fallback);
     static std::optional<MarginInsets> parseMargin(detail::CSSValueRange value);

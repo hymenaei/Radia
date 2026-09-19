@@ -80,15 +80,26 @@ bool matchesRoot(const StyleSelector& selector, const Element* element) {
     return !selector.root || !element || element->parentElement() == nullptr || element->idScopeRoot();
 }
 
-bool selectorCanBeOwnedBy(const StyleSelector& selector, const Element& element) {
-    if ((selector.element.empty() || selector.element == element.elementName())
-        && matchesRoot(selector, &element)
-        && matchesAttribute(selector, &element)
-        && std::all_of(selector.ids.begin(), selector.ids.end(), [&element](const std::string& id) { return id == element.id(); })
-        && std::all_of(selector.classNames.begin(), selector.classNames.end(),
-                       [&element](const std::string& name) { return element.classes().find(name) != element.classes().end(); })
-        && matchesStateMask(selector.stateMask, element.states(), &element))
+bool matchesSelector(const StyleSelector& selector, const std::string& element, const std::string& id, const std::set<std::string>& classes,
+                     uint16_t ownerStates, std::string_view pseudoElement, const Element* target, const std::vector<std::string>* inlineAncestors,
+                     LayoutDirection direction);
+
+bool matchesRule(const StyleRule& rule, const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t ownerStates,
+                 std::string_view pseudoElement, const Element* target, const std::vector<std::string>* inlineAncestors, LayoutDirection direction);
+
+std::uint16_t selectorStateMask(const StyleSelector& selector);
+
+bool selectorCanBeOwnedBy(const StyleSelector& selector, const Element& element, ElementState state) {
+    const std::uint16_t stateBit = static_cast<std::uint16_t>(state);
+    if ((selector.stateMask & stateBit) != 0
+        && matchesSelector(selector, element.elementName(), element.id(), element.classes(), element.states(), selector.pseudoElement, &element,
+                           nullptr, LayoutDirection::LeftToRight))
         return true;
+
+    for (const auto& selectorFunction : selector.selectorFunctions)
+        for (const StyleRule& argument : selectorFunction->arguments)
+            for (const StyleSelector& component : argument.selectors)
+                if ((selectorStateMask(component) & stateBit) != 0 && selectorCanBeOwnedBy(component, element, state)) return true;
     return false;
 }
 
@@ -100,14 +111,29 @@ std::optional<std::size_t> stateIndex(ElementState state) {
     return index;
 }
 
+StyleSpecificity specificity(const StyleRule& rule);
+
 StyleSpecificity specificity(const StyleSelector& selector) {
-    return {static_cast<std::uint32_t>(selector.ids.size()),
-            static_cast<std::uint32_t>(selector.classNames.size()
-                                       + selector.attributes.size()
-                                       + selector.stateSpecificity
-                                       + selector.rootSpecificity
-                                       + selector.directionSpecificity),
-            static_cast<std::uint32_t>((selector.element.empty() || selector.universal ? 0 : 1) + (!selector.pseudoElement.empty() ? 1 : 0))};
+    StyleSpecificity result{
+        static_cast<std::uint32_t>(selector.ids.size()),
+        static_cast<std::uint32_t>(selector.classNames.size()
+                                   + selector.attributes.size()
+                                   + selector.stateSpecificity
+                                   + selector.rootSpecificity
+                                   + selector.directionSpecificity),
+        static_cast<std::uint32_t>((selector.element.empty() || selector.universal ? 0 : 1) + (!selector.pseudoElement.empty() ? 1 : 0))};
+    for (const auto& selectorFunction : selector.selectorFunctions) {
+        if (selectorFunction->kind == StyleSelectorFunctionKind::Where) continue;
+        StyleSpecificity argumentSpecificity;
+        for (const StyleRule& argument : selectorFunction->arguments) {
+            const StyleSpecificity candidate = specificity(argument);
+            if (argumentSpecificity < candidate) argumentSpecificity = candidate;
+        }
+        result.ids += argumentSpecificity.ids;
+        result.classesAttributesAndStates += argumentSpecificity.classesAttributesAndStates;
+        result.elements += argumentSpecificity.elements;
+    }
+    return result;
 }
 
 StyleSpecificity specificity(const StyleRule& rule) {
@@ -121,8 +147,76 @@ StyleSpecificity specificity(const StyleRule& rule) {
     return result;
 }
 
+std::uint16_t selectorStateMask(const StyleSelector& selector) {
+    std::uint16_t result = selector.stateMask;
+    for (const auto& selectorFunction : selector.selectorFunctions)
+        for (const StyleRule& argument : selectorFunction->arguments)
+            for (const StyleSelector& component : argument.selectors) result |= selectorStateMask(component);
+    return result;
+}
+
+bool selectorStateAffectsDescendants(const StyleSelector& selector, ElementState state) {
+    const std::uint16_t stateBit = static_cast<std::uint16_t>(state);
+    for (const auto& selectorFunction : selector.selectorFunctions)
+        for (const StyleRule& argument : selectorFunction->arguments) {
+            for (std::size_t index = 0; index < argument.selectors.size(); ++index) {
+                const StyleSelector& component = argument.selectors[index];
+                if ((selectorStateMask(component) & stateBit) != 0 && index + 1 < argument.selectors.size()) return true;
+                if (selectorStateAffectsDescendants(component, state)) return true;
+            }
+        }
+    return false;
+}
+
+bool selectorStateAffectsFollowingSiblings(const StyleSelector& selector, ElementState state) {
+    const std::uint16_t stateBit = static_cast<std::uint16_t>(state);
+    for (const auto& selectorFunction : selector.selectorFunctions)
+        for (const StyleRule& argument : selectorFunction->arguments) {
+            for (std::size_t index = 0; index + 1 < argument.selectors.size(); ++index) {
+                const SelectorCombinator combinator = argument.combinators[index];
+                if ((combinator == SelectorCombinator::NextSibling || combinator == SelectorCombinator::SubsequentSibling)
+                    && (selectorStateMask(argument.selectors[index]) & stateBit) != 0)
+                    return true;
+                if (selectorStateAffectsFollowingSiblings(argument.selectors[index], state)) return true;
+            }
+        }
+    return false;
+}
+
+bool selectorHasNestedDescendantState(const StyleSelector& selector) {
+    for (const auto& selectorFunction : selector.selectorFunctions)
+        for (const StyleRule& argument : selectorFunction->arguments)
+            for (std::size_t index = 0; index < argument.selectors.size(); ++index) {
+                if (index + 1 < argument.selectors.size() && selectorStateMask(argument.selectors[index]) != 0) return true;
+                if (selectorHasNestedDescendantState(argument.selectors[index])) return true;
+            }
+    return false;
+}
+
+bool selectorHasNestedFollowingSiblingState(const StyleSelector& selector) {
+    for (const auto& selectorFunction : selector.selectorFunctions)
+        for (const StyleRule& argument : selectorFunction->arguments)
+            for (std::size_t index = 0; index + 1 < argument.selectors.size(); ++index) {
+                const SelectorCombinator combinator = argument.combinators[index];
+                if ((combinator == SelectorCombinator::NextSibling || combinator == SelectorCombinator::SubsequentSibling)
+                    && selectorStateMask(argument.selectors[index]) != 0)
+                    return true;
+                if (selectorHasNestedFollowingSiblingState(argument.selectors[index])) return true;
+            }
+    return false;
+}
+
+bool matchesSelectorFunction(const StyleSelectorFunction& selectorFunction, const std::string& element, const std::string& id,
+                             const std::set<std::string>& classes, uint16_t ownerStates, std::string_view pseudoElement, const Element* target,
+                             const std::vector<std::string>* inlineAncestors, LayoutDirection direction) {
+    return std::any_of(selectorFunction.arguments.begin(), selectorFunction.arguments.end(), [&](const StyleRule& argument) {
+        return matchesRule(argument, element, id, classes, ownerStates, pseudoElement, target, inlineAncestors, direction);
+    });
+}
+
 bool matchesSelector(const StyleSelector& selector, const std::string& element, const std::string& id, const std::set<std::string>& classes,
-                     uint16_t ownerStates, std::string_view pseudoElement, const Element* target, LayoutDirection direction) {
+                     uint16_t ownerStates, std::string_view pseudoElement, const Element* target, const std::vector<std::string>* inlineAncestors,
+                     LayoutDirection direction) {
     return (selector.element.empty() || selector.element == element)
         && matchesRoot(selector, target)
         && matchesAttribute(selector, target)
@@ -131,6 +225,11 @@ bool matchesSelector(const StyleSelector& selector, const std::string& element, 
                        [&classes](const std::string& className) { return classes.find(className) != classes.end(); })
         && matchesDirection(selector.direction, direction)
         && matchesStateMask(selector.stateMask, ownerStates, target)
+        && std::all_of(selector.selectorFunctions.begin(), selector.selectorFunctions.end(),
+                       [&](const auto& selectorFunction) {
+                           return matchesSelectorFunction(*selectorFunction, element, id, classes, ownerStates, pseudoElement, target,
+                                                          inlineAncestors, direction);
+                       })
         && selector.pseudoElement == pseudoElement;
 }
 
@@ -140,7 +239,7 @@ const Element* structuralParent(const Element* element) {
 }
 
 bool matchesStructuralSelector(const StyleSelector& selector, const Element& element, LayoutDirection direction) {
-    return matchesSelector(selector, element.elementName(), element.id(), element.classes(), element.states(), {}, &element, direction);
+    return matchesSelector(selector, element.elementName(), element.id(), element.classes(), element.states(), {}, &element, nullptr, direction);
 }
 
 const Element* previousElementSibling(const Element* element) {
@@ -151,7 +250,8 @@ const Element* previousElementSibling(const Element* element) {
 
 bool matchesRule(const StyleRule& rule, const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t ownerStates,
                  std::string_view pseudoElement, const Element* target, const std::vector<std::string>* inlineAncestors, LayoutDirection direction) {
-    if (rule.selectors.empty() || !matchesSelector(rule.selectors.back(), element, id, classes, ownerStates, pseudoElement, target, direction))
+    if (rule.selectors.empty()
+        || !matchesSelector(rule.selectors.back(), element, id, classes, ownerStates, pseudoElement, target, inlineAncestors, direction))
         return false;
     if (rule.selectors.size() == 1) return true;
     if (!target || rule.combinators.size() + 1 != rule.selectors.size()) return false;
@@ -166,7 +266,7 @@ bool matchesRule(const StyleRule& rule, const std::string& element, const std::s
             case SelectorCombinator::Child:
                 if (inlineAncestors && inlineIndex) {
                     const std::string& inlineElement = (*inlineAncestors)[inlineIndex - 1];
-                    if (!matchesSelector(selector, inlineElement, {}, sNoClasses, 0, {}, nullptr, direction)) return false;
+                    if (!matchesSelector(selector, inlineElement, {}, sNoClasses, 0, {}, nullptr, inlineAncestors, direction)) return false;
                     return self(self, selectorIndex - 1, current, ancestor, inlineIndex - 1);
                 }
                 if (!ancestor || !matchesStructuralSelector(selector, *ancestor, direction)) return false;
@@ -175,7 +275,7 @@ bool matchesRule(const StyleRule& rule, const std::string& element, const std::s
             case SelectorCombinator::Descendant:
                 if (inlineAncestors && inlineIndex) {
                     const std::string& inlineElement = (*inlineAncestors)[inlineIndex - 1];
-                    if (!matchesSelector(selector, inlineElement, {}, sNoClasses, 0, {}, nullptr, direction)) return false;
+                    if (!matchesSelector(selector, inlineElement, {}, sNoClasses, 0, {}, nullptr, inlineAncestors, direction)) return false;
                     return self(self, selectorIndex - 1, current, ancestor, inlineIndex - 1);
                 }
                 for (const Element* candidate = ancestor; candidate; candidate = structuralParent(candidate)) {
@@ -495,9 +595,14 @@ void StyleRuleSet::buildIndexes() {
                            [](const StyleDeclaration& declaration) { return declaration.property.get().propagatesToDescendants(); });
         for (std::size_t selectorIndex = 0; selectorIndex < rule.selectors.size(); ++selectorIndex) {
             const StyleSelector& selector = rule.selectors[selectorIndex];
-            if (layoutDeclaration) addStateRule(selector.stateMask, mLayoutStateMask, mLayoutStateRules, ruleIndex);
-            if (hitTestDeclaration) addStateRule(selector.stateMask, mHitTestStateMask, mHitTestStateRules, ruleIndex);
-            if (selectorIndex + 1 < rule.selectors.size() || inherits) addStateBucket(selector.stateMask, mDescendantStateRules, ruleIndex);
+            const std::uint16_t stateMask = selectorStateMask(selector);
+            if (layoutDeclaration) addStateRule(stateMask, mLayoutStateMask, mLayoutStateRules, ruleIndex);
+            if (hitTestDeclaration) addStateRule(stateMask, mHitTestStateMask, mHitTestStateRules, ruleIndex);
+            if (selectorIndex + 1 < rule.selectors.size()
+                || inherits
+                || selectorHasNestedDescendantState(selector)
+                || selectorHasNestedFollowingSiblingState(selector))
+                addStateBucket(stateMask, mDescendantStateRules, ruleIndex);
         }
     }
 
@@ -535,7 +640,7 @@ bool StyleRuleSet::stateAffectsLayout(const Element& element, ElementState state
         const StyleRule& rule = mRules[ruleIndex];
         if (!hasLayoutDeclaration(rule)) continue;
         for (const StyleSelector& selector : rule.selectors)
-            if ((selector.stateMask & static_cast<std::uint16_t>(state)) != 0 && selectorCanBeOwnedBy(selector, element)) return true;
+            if ((selectorStateMask(selector) & static_cast<std::uint16_t>(state)) != 0 && selectorCanBeOwnedBy(selector, element, state)) return true;
     }
     return false;
 }
@@ -552,7 +657,7 @@ bool StyleRuleSet::stateAffectsHitTesting(const Element& element, ElementState s
     for (const std::size_t ruleIndex : mHitTestStateRules[*index]) {
         const StyleRule& rule = mRules[ruleIndex];
         for (const StyleSelector& selector : rule.selectors)
-            if ((selector.stateMask & static_cast<std::uint16_t>(state)) != 0 && selectorCanBeOwnedBy(selector, element)) return true;
+            if ((selectorStateMask(selector) & static_cast<std::uint16_t>(state)) != 0 && selectorCanBeOwnedBy(selector, element, state)) return true;
     }
     return false;
 }
@@ -568,9 +673,9 @@ bool StyleRuleSet::stateAffectsDescendants(const Element& element, ElementState 
                            [](const StyleDeclaration& declaration) { return declaration.property.get().propagatesToDescendants(); });
         for (std::size_t selectorIndex = 0; selectorIndex < rule.selectors.size(); ++selectorIndex) {
             const StyleSelector& selector = rule.selectors[selectorIndex];
-            if ((selector.stateMask & static_cast<std::uint16_t>(state)) != 0
-                && selectorCanBeOwnedBy(selector, element)
-                && (selectorIndex + 1 < rule.selectors.size() || inherits))
+            if ((selectorStateMask(selector) & static_cast<std::uint16_t>(state)) != 0
+                && selectorCanBeOwnedBy(selector, element, state)
+                && (selectorIndex + 1 < rule.selectors.size() || inherits || selectorStateAffectsDescendants(selector, state)))
                 return true;
         }
     }
@@ -583,11 +688,19 @@ bool StyleRuleSet::stateAffectsFollowingSiblings(const Element& element, Element
     const std::uint16_t stateBit = static_cast<std::uint16_t>(state);
     for (const std::size_t ruleIndex : mDescendantStateRules[*index]) {
         const StyleRule& rule = mRules[ruleIndex];
+        for (const StyleSelector& selector : rule.selectors)
+            if ((selectorStateMask(selector) & stateBit) != 0
+                && selectorCanBeOwnedBy(selector, element, state)
+                && selectorStateAffectsFollowingSiblings(selector, state))
+                return true;
         for (std::size_t selectorIndex = 0; selectorIndex + 1 < rule.selectors.size(); ++selectorIndex) {
             const StyleSelector& selector = rule.selectors[selectorIndex];
-            if ((selector.stateMask & stateBit) == 0 || !selectorCanBeOwnedBy(selector, element)) continue;
+            if ((selectorStateMask(selector) & stateBit) == 0 || !selectorCanBeOwnedBy(selector, element, state)) continue;
             const SelectorCombinator combinator = rule.combinators[selectorIndex];
-            if (combinator == SelectorCombinator::NextSibling || combinator == SelectorCombinator::SubsequentSibling) return true;
+            if (combinator == SelectorCombinator::NextSibling
+                || combinator == SelectorCombinator::SubsequentSibling
+                || selectorStateAffectsFollowingSiblings(selector, state))
+                return true;
         }
     }
     return false;

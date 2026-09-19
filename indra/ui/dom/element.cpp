@@ -486,6 +486,7 @@ void Element::scrollTo(float left, float top) {
     if (mScrollPosition.inlineOffset == clampedLeft && mScrollPosition.blockOffset == clampedTop) return;
     mScrollPosition.inlineOffset = clampedLeft;
     mScrollPosition.blockOffset = clampedTop;
+    invalidateArrange();
     invalidatePaint();
     if (Surface* currentSurface = surface()) currentSurface->queueScrollNotification(*this);
 }

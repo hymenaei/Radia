@@ -12,6 +12,7 @@
 #include "html/floater.h"
 #include "html/panel.h"
 #include "layout/engine.h"
+#include "layout/primitives.h"
 #include "style/stylepass.h"
 #include "surface/surface.h"
 
@@ -169,11 +170,12 @@ Vec2 Surface::preferredFloaterSize(HTMLFloaterElement& floater) {
     if (!floaterObservation.layoutValid() || !floaterObservation.styleValid()) return {};
     const Vec2 measured = LayoutEngine::measure(floater, *mStyleSheet, mTextMetrics);
     if (!floaterObservation.layoutValid() || !floaterObservation.styleValid()) return {};
-    const auto resolve = [](const Dimension& value, const std::optional<Length>& minimum, float fallback, float reference) {
-        const float result = value.resolve(fallback, reference);
-        return minimum ? std::max(result, minimum->resolve(result)) : result;
+    const auto resolve = [&style](bool horizontal, const Dimension& value, const std::optional<Dimension>& minimum,
+                                  const std::optional<Dimension>& maximum, float fallback, float reference) {
+        return layout_detail::styledBoxDimension(style, horizontal, value, minimum, maximum, fallback, reference);
     };
-    return {resolve(style.width, style.minWidth, measured.x, mViewport.w), resolve(style.height, style.minHeight, measured.y, mViewport.h)};
+    return {resolve(true, style.width, style.minWidth, style.maxWidth, measured.x, mViewport.w),
+            resolve(false, style.height, style.minHeight, style.maxHeight, measured.y, mViewport.h)};
 }
 
 std::optional<Rect> Surface::initialFloaterRect(HTMLFloaterElement& floater) {

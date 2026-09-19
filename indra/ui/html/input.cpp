@@ -220,7 +220,7 @@ void HTMLInputElement::paint(PaintContext& context, const ComputedStyle& style, 
     request.opacity = style.opacity;
     if (style.accentColor.kind == AccentColor::Kind::CurrentColor) request.accentColor = style.color;
     else if (style.accentColor.kind == AccentColor::Kind::Color) request.accentColor = style.accentColor.color;
-    request.colorScheme = style.colorScheme;
+    request.colorScheme = style.usedColorScheme;
     request.direction = style.direction;
     request.scale = scale;
     context.paintNativeInput(request);

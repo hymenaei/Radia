@@ -32,18 +32,21 @@
 #include "text/metrics.h"
 
 namespace {
-using radia::ui::AlignItems;
-using radia::ui::AlignSelf;
 using radia::ui::AppearanceMode;
 using radia::ui::BoxSizing;
 using radia::ui::Color;
 using radia::ui::ColorScheme;
+using radia::ui::ColorSchemeValue;
 using radia::ui::ComputedStyle;
+using radia::ui::ContentDistribution;
+using radia::ui::ContentPosition;
+using radia::ui::DimensionKeyword;
 using radia::ui::DisplayMode;
 using radia::ui::Element;
 using radia::ui::ElementState;
 using radia::ui::FixedTextMetrics;
 using radia::ui::FlexDirection;
+using radia::ui::FlexWrap;
 using radia::ui::FontFamily;
 using radia::ui::GradientKind;
 using radia::ui::HTMLButtonElement;
@@ -51,9 +54,9 @@ using radia::ui::HTMLFloaterElement;
 using radia::ui::HTMLInputElement;
 using radia::ui::HTMLLabelElement;
 using radia::ui::HTMLPanelElement;
-using radia::ui::JustifyContent;
-using radia::ui::JustifySelf;
+using radia::ui::ItemPosition;
 using radia::ui::LineHeight;
+using radia::ui::OverflowAlignment;
 using radia::ui::PointerEvents;
 using radia::ui::PositionMode;
 using radia::ui::StrokeCap;
@@ -62,6 +65,7 @@ using radia::ui::StyleSheet;
 using radia::ui::TextAlign;
 using radia::ui::TextOverflow;
 using radia::ui::TextWrap;
+using radia::ui::TextWrapStyle;
 using radia::ui::VerticalAlign;
 using radia::ui::Visibility;
 using radia::ui::detail::CSSTokenKind;
@@ -166,16 +170,58 @@ TEST(StyleCompilerTest, ParsesColorSchemeValues) {
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kColorSchemeStyles).ok());
 
-    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).colorScheme, ColorScheme::Light);
-    EXPECT_EQ(stylesheet.resolve("panel", "", {"dark"}, 0).colorScheme, ColorScheme::Dark);
-    EXPECT_EQ(stylesheet.resolve("panel", "", {"both"}, 0).colorScheme, ColorScheme::LightDark);
-    EXPECT_EQ(stylesheet.resolve("panel", "", {"reset"}, 0).colorScheme, ColorScheme::Auto);
+    const ColorSchemeValue light = stylesheet.resolve("panel", "", {}, 0).colorScheme;
+    const ColorSchemeValue dark = stylesheet.resolve("panel", "", {"dark"}, 0).colorScheme;
+    const ColorSchemeValue both = stylesheet.resolve("panel", "", {"both"}, 0).colorScheme;
+    const ColorSchemeValue reset = stylesheet.resolve("panel", "", {"reset"}, 0).colorScheme;
+    ASSERT_FALSE(light.normal);
+    ASSERT_EQ(light.schemes.size(), std::size_t{1});
+    EXPECT_EQ(light.schemes.front(), ColorScheme::Light);
+    ASSERT_FALSE(dark.normal);
+    ASSERT_EQ(dark.schemes.size(), std::size_t{1});
+    EXPECT_EQ(dark.schemes.front(), ColorScheme::Dark);
+    ASSERT_FALSE(both.normal);
+    ASSERT_EQ(both.schemes.size(), std::size_t{2});
+    EXPECT_EQ(both.schemes[0], ColorScheme::Light);
+    EXPECT_EQ(both.schemes[1], ColorScheme::Dark);
+    EXPECT_TRUE(reset.normal);
 
     StyleSheet invalid;
     const auto result = invalid.loadRadia("panel { color-scheme: light light; }");
     ASSERT_TRUE(result.ok());
-    ASSERT_FALSE(result.warnings.empty());
-    EXPECT_EQ(result.warnings.front().code, "stylesheet.property.value_invalid");
+    EXPECT_TRUE(result.warnings.empty());
+    EXPECT_EQ(invalid.resolve("panel", "", {}, 0).colorScheme.schemes, std::vector<ColorScheme>{ColorScheme::Light});
+
+    const ColorSchemeValue normal = reset;
+    EXPECT_TRUE(normal.normal);
+    EXPECT_EQ(normal.used({ColorScheme::Light, std::nullopt, false}), ColorScheme::Light);
+    EXPECT_EQ(normal.used({ColorScheme::Dark, std::nullopt, false}), ColorScheme::Dark);
+    EXPECT_EQ(normal.used({std::nullopt, std::nullopt, false}), ColorScheme::Dark);
+    EXPECT_EQ(both.used({ColorScheme::Light, std::nullopt, false}), ColorScheme::Light);
+    EXPECT_EQ(both.used({ColorScheme::Dark, std::nullopt, false}), ColorScheme::Light);
+    EXPECT_EQ(both.used({ColorScheme::Light, ColorScheme::Dark, false}), ColorScheme::Dark);
+
+    StyleSheet custom;
+    ASSERT_TRUE(custom.loadRadia("panel { color-scheme: only LIGHT custom-theme; }").ok());
+    const ColorSchemeValue customValue = custom.resolve("panel", "", {}, 0).colorScheme;
+    EXPECT_TRUE(customValue.only);
+    EXPECT_EQ(customValue.schemes, std::vector<ColorScheme>{ColorScheme::Light});
+    EXPECT_EQ(customValue.customIdentifiers, std::vector<std::string>{"custom-theme"});
+
+    StyleSheet customOnly;
+    ASSERT_TRUE(customOnly.loadRadia("panel { color-scheme: custom-theme; }").ok());
+    const ColorSchemeValue customOnlyValue = customOnly.resolve("panel", "", {}, 0).colorScheme;
+    EXPECT_EQ(customOnlyValue.used({ColorScheme::Dark, std::nullopt, false}), ColorScheme::Dark);
+
+    StyleSheet invalidToken;
+    const auto invalidTokenResult = invalidToken.loadRadia("panel { color-scheme: light url(theme); }");
+    ASSERT_TRUE(invalidTokenResult.ok());
+    ASSERT_FALSE(invalidTokenResult.warnings.empty());
+    EXPECT_EQ(invalidTokenResult.warnings.front().code, "stylesheet.property.value_invalid");
+
+    StyleSheet customKeywords;
+    ASSERT_TRUE(customKeywords.loadRadia("panel { color-scheme: auto none; }").ok());
+    EXPECT_EQ(customKeywords.resolve("panel", "", {}, 0).colorScheme.customIdentifiers, std::vector<std::string>({"auto", "none"}));
 }
 
 TEST(StyleCompilerTest, ParsesBoxSizingValues) {
@@ -252,7 +298,7 @@ TEST(StyleCompilerTest, ResolvesPercentageBorderRadius) {
 }
 
 TEST(StyleCompilerTest, PreservesShorthandValues) {
-    constexpr char kDeclarationOrderStyles[] = "button { width: 10px; size: 20px 30px; width: 40px; }";
+    constexpr char kDeclarationOrderStyles[] = "button { width: 10px; size: 20px 30px; max-size: 15px 25px; width: 40px; }";
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kDeclarationOrderStyles).ok());
@@ -260,6 +306,10 @@ TEST(StyleCompilerTest, PreservesShorthandValues) {
 
     EXPECT_EQ(style.width.pixels(), 40.f);
     EXPECT_EQ(style.height.pixels(), 20.f);
+    ASSERT_TRUE(style.maxWidth.has_value());
+    ASSERT_TRUE(style.maxHeight.has_value());
+    EXPECT_EQ(style.maxWidth->pixels(), 25.f);
+    EXPECT_EQ(style.maxHeight->pixels(), 15.f);
 }
 
 TEST(StyleCompilerTest, AppliesSelectorSpecificity) {
@@ -301,7 +351,7 @@ TEST(StyleCompilerTest, ParsesAlignmentEnums) {
     const ComputedStyle label = stylesheet.resolve("label", "", {}, 0);
 
     EXPECT_EQ(panel.display, DisplayMode::Flex);
-    EXPECT_EQ(panel.pointerEvents, PointerEvents::PassThrough);
+    EXPECT_EQ(panel.pointerEvents, PointerEvents::NoneValue);
     EXPECT_EQ(label.textAlign, TextAlign::Right);
     EXPECT_EQ(panel.verticalAlign, VerticalAlign::Middle);
     EXPECT_EQ(label.verticalAlign, VerticalAlign::Top);
@@ -310,32 +360,153 @@ TEST(StyleCompilerTest, ParsesAlignmentEnums) {
 
 TEST(StyleCompilerTest, ParsesLogicalAlignment) {
     constexpr char kCrossAxisStyles[] = "label { text-align: start; } panel { align-items: end; } "
-                                        "panel.normal { align-items: normal; } button { align-self: start; } "
-                                        "button.auto { align-self: auto; }";
+                                        "panel.normal { align-items: normal; } panel.flex-start { align-items: flex-start; } "
+                                        "button { align-self: start; } button.auto { align-self: auto; } button.flex-end { align-self: flex-end; } "
+                                        "panel.justify { justify-content: normal; } panel.justify-start { justify-content: start; } "
+                                        "panel.justify-flex-start { justify-content: flex-start; } panel.justify-end { justify-content: end; } "
+                                        "panel.justify-flex-end { justify-content: flex-end; } panel.content-start { align-content: start; } "
+                                        "panel.content-flex-start { align-content: flex-start; }";
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kCrossAxisStyles).ok());
 
     EXPECT_EQ(stylesheet.resolve("label", "", {}, 0).textAlign, TextAlign::Start);
-    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).alignItems, AlignItems::End);
-    EXPECT_EQ(stylesheet.resolve("button", "", {}, 0).alignSelf, AlignSelf::Start);
-    EXPECT_EQ(stylesheet.resolve("panel", "", {"normal"}, 0).alignItems, AlignItems::Normal);
-    EXPECT_EQ(stylesheet.resolve("button", "", {"auto"}, 0).alignSelf, AlignSelf::Auto);
+    EXPECT_EQ(stylesheet.resolve("panel", "", {}, 0).alignItems.position, ItemPosition::End);
+    EXPECT_EQ(stylesheet.resolve("button", "", {}, 0).alignSelf.position, ItemPosition::Start);
+    EXPECT_EQ(stylesheet.resolve("panel", "", {"normal"}, 0).alignItems.position, ItemPosition::Normal);
+    EXPECT_EQ(stylesheet.resolve("panel", "", {"flex-start"}, 0).alignItems.position, ItemPosition::FlexStart);
+    EXPECT_EQ(stylesheet.resolve("button", "", {"auto"}, 0).alignSelf.position, ItemPosition::Auto);
+    EXPECT_EQ(stylesheet.resolve("button", "", {"flex-end"}, 0).alignSelf.position, ItemPosition::FlexEnd);
+    EXPECT_EQ(stylesheet.resolve("panel", "", {"justify"}, 0).justifyContent.position, ContentPosition::Normal);
+    EXPECT_EQ(stylesheet.resolve("panel", "", {"justify-start"}, 0).justifyContent.position, ContentPosition::Start);
+    EXPECT_EQ(stylesheet.resolve("panel", "", {"justify-flex-start"}, 0).justifyContent.position, ContentPosition::FlexStart);
+    EXPECT_EQ(stylesheet.resolve("panel", "", {"justify-end"}, 0).justifyContent.position, ContentPosition::End);
+    EXPECT_EQ(stylesheet.resolve("panel", "", {"justify-flex-end"}, 0).justifyContent.position, ContentPosition::FlexEnd);
+    EXPECT_EQ(stylesheet.resolve("panel", "", {"content-start"}, 0).alignContent.position, ContentPosition::Start);
+    EXPECT_EQ(stylesheet.resolve("panel", "", {"content-flex-start"}, 0).alignContent.position, ContentPosition::FlexStart);
 }
 
 TEST(StyleCompilerTest, ParsesGridSelfAlignment) {
     constexpr char kGridAlignmentStyles[] = "input { justify-self: center; } button.start { justify-self: start; } "
                                             "button.end { justify-self: end; } label.stretch { justify-self: stretch; } "
-                                            "label.auto { justify-self: auto; }";
+                                            "label.auto { justify-self: auto; } label.anchor { justify-self: anchor-center; }";
 
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia(kGridAlignmentStyles).ok());
 
-    EXPECT_EQ(stylesheet.resolve("input", "", {}, 0).justifySelf, JustifySelf::Center);
-    EXPECT_EQ(stylesheet.resolve("button", "", {"start"}, 0).justifySelf, JustifySelf::Start);
-    EXPECT_EQ(stylesheet.resolve("button", "", {"end"}, 0).justifySelf, JustifySelf::End);
-    EXPECT_EQ(stylesheet.resolve("label", "", {"stretch"}, 0).justifySelf, JustifySelf::Stretch);
-    EXPECT_EQ(stylesheet.resolve("label", "", {"auto"}, 0).justifySelf, JustifySelf::Auto);
+    EXPECT_EQ(stylesheet.resolve("input", "", {}, 0).justifySelf.position, ItemPosition::Center);
+    EXPECT_EQ(stylesheet.resolve("button", "", {"start"}, 0).justifySelf.position, ItemPosition::Start);
+    EXPECT_EQ(stylesheet.resolve("button", "", {"end"}, 0).justifySelf.position, ItemPosition::End);
+    EXPECT_EQ(stylesheet.resolve("label", "", {"stretch"}, 0).justifySelf.position, ItemPosition::Stretch);
+    EXPECT_EQ(stylesheet.resolve("label", "", {"auto"}, 0).justifySelf.position, ItemPosition::Auto);
+    EXPECT_EQ(stylesheet.resolve("label", "", {"anchor"}, 0).justifySelf.position, ItemPosition::AnchorCenter);
+}
+
+TEST(StyleCompilerTest, ParsesStandardsLayoutExtensions) {
+    constexpr char kStyles[] = "panel { flex-flow: row-reverse wrap-reverse; justify-content: safe center; align-items: last baseline; "
+                               "justify-items: unsafe self-end; align-content: stretch; } "
+                               "panel.place { place-content: safe center space-between; place-items: center start; place-self: end safe center; } "
+                               "label { position: sticky; width: min-content; height: fit-content; flex-basis: max-content; text-wrap: wrap balance; "
+                               "vertical-align: 25%; color-scheme: only light custom-theme; } label.pretty { text-wrap-style: pretty; }";
+
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia(kStyles).ok());
+
+    const ComputedStyle panel = stylesheet.resolve("panel", "", {}, 0);
+    EXPECT_EQ(panel.flexDirection, FlexDirection::RowReverse);
+    EXPECT_EQ(panel.flexWrap, FlexWrap::WrapReverse);
+    EXPECT_FALSE(panel.flexWrapBalance);
+    EXPECT_EQ(panel.justifyContent.position, ContentPosition::Center);
+    EXPECT_EQ(panel.justifyContent.overflow, OverflowAlignment::Safe);
+    EXPECT_EQ(panel.alignItems.position, ItemPosition::LastBaseline);
+    EXPECT_EQ(panel.alignItems.overflow, OverflowAlignment::Default);
+    EXPECT_EQ(panel.justifyItems.position, ItemPosition::SelfEnd);
+    EXPECT_EQ(panel.justifyItems.overflow, OverflowAlignment::Unsafe);
+
+    const ComputedStyle place = stylesheet.resolve("panel", "", {"place"}, 0);
+    EXPECT_EQ(place.alignContent.position, ContentPosition::Center);
+    EXPECT_EQ(place.alignContent.overflow, OverflowAlignment::Safe);
+    EXPECT_EQ(place.justifyContent.distribution, ContentDistribution::SpaceBetween);
+    EXPECT_EQ(place.alignItems.position, ItemPosition::Center);
+    EXPECT_EQ(place.justifyItems.position, ItemPosition::Start);
+    EXPECT_EQ(place.alignSelf.position, ItemPosition::End);
+    EXPECT_EQ(place.justifySelf.position, ItemPosition::Center);
+    EXPECT_EQ(place.justifySelf.overflow, OverflowAlignment::Safe);
+
+    StyleSheet invalidBaseline;
+    const auto invalidBaselineResult = invalidBaseline.loadRadia("panel { align-items: last-baseline; } ");
+    ASSERT_TRUE(invalidBaselineResult.ok());
+    EXPECT_FALSE(invalidBaselineResult.warnings.empty());
+    EXPECT_EQ(invalidBaseline.resolve("panel", "", {}, 0).alignItems.position, ItemPosition::Normal);
+
+    const ComputedStyle label = stylesheet.resolve("label", "", {}, 0);
+    EXPECT_EQ(label.position, PositionMode::Sticky);
+    ASSERT_TRUE(label.width.isIntrinsic());
+    EXPECT_EQ(label.width.intrinsicKeyword(), DimensionKeyword::MinContent);
+    EXPECT_EQ(label.height.intrinsicKeyword(), DimensionKeyword::FitContent);
+    EXPECT_EQ(label.flexBasis.intrinsicKeyword(), DimensionKeyword::MaxContent);
+    EXPECT_EQ(label.textWrap, TextWrap::Wrap);
+    EXPECT_EQ(label.textWrapStyle, TextWrapStyle::Balance);
+    EXPECT_EQ(stylesheet.resolve("label", "", {"pretty"}, 0).textWrapStyle, TextWrapStyle::Pretty);
+    EXPECT_EQ(label.verticalAlign, VerticalAlign::Percentage);
+    EXPECT_TRUE(label.colorScheme.only);
+    ASSERT_EQ(label.colorScheme.schemes.size(), std::size_t{1});
+    EXPECT_EQ(label.colorScheme.schemes.front(), ColorScheme::Light);
+    ASSERT_EQ(label.colorScheme.customIdentifiers.size(), std::size_t{1});
+    EXPECT_EQ(label.colorScheme.customIdentifiers.front(), "custom-theme");
+
+    StyleSheet balanced;
+    ASSERT_TRUE(balanced
+                    .loadRadia(".wrap { flex-wrap: wrap balance; } .reverse { flex-wrap: wrap-reverse balance; } .alone { flex-wrap: balance; } "
+                               ".flow { flex-flow: row wrap balance; } .flow-alone { flex-flow: balance; }")
+                    .ok());
+    const ComputedStyle wrap = balanced.resolve("panel", "", {"wrap"}, 0);
+    EXPECT_EQ(wrap.flexWrap, FlexWrap::Wrap);
+    EXPECT_TRUE(wrap.flexWrapBalance);
+    const ComputedStyle reverse = balanced.resolve("panel", "", {"reverse"}, 0);
+    EXPECT_EQ(reverse.flexWrap, FlexWrap::WrapReverse);
+    EXPECT_TRUE(reverse.flexWrapBalance);
+    const ComputedStyle alone = balanced.resolve("panel", "", {"alone"}, 0);
+    EXPECT_EQ(alone.flexWrap, FlexWrap::Wrap);
+    EXPECT_TRUE(alone.flexWrapBalance);
+    const ComputedStyle flow = balanced.resolve("panel", "", {"flow"}, 0);
+    EXPECT_EQ(flow.flexDirection, FlexDirection::Row);
+    EXPECT_EQ(flow.flexWrap, FlexWrap::Wrap);
+    EXPECT_TRUE(flow.flexWrapBalance);
+    const ComputedStyle flowAlone = balanced.resolve("panel", "", {"flow-alone"}, 0);
+    EXPECT_EQ(flowAlone.flexWrap, FlexWrap::Wrap);
+    EXPECT_TRUE(flowAlone.flexWrapBalance);
+
+    StyleSheet intrinsicSizes;
+    ASSERT_TRUE(intrinsicSizes
+                    .loadRadia("label { size: min-content max-content; min-size: fit-content min-content; "
+                               "max-size: max-content fit-content; } button { min-width: max-content; max-height: min-content; }")
+                    .ok());
+    const ComputedStyle sized = intrinsicSizes.resolve("label", "", {}, 0);
+    EXPECT_EQ(sized.height.intrinsicKeyword(), DimensionKeyword::MinContent);
+    EXPECT_EQ(sized.width.intrinsicKeyword(), DimensionKeyword::MaxContent);
+    ASSERT_TRUE(sized.minHeight.has_value());
+    ASSERT_TRUE(sized.minWidth.has_value());
+    EXPECT_EQ(sized.minHeight->intrinsicKeyword(), DimensionKeyword::FitContent);
+    EXPECT_EQ(sized.minWidth->intrinsicKeyword(), DimensionKeyword::MinContent);
+    ASSERT_TRUE(sized.maxHeight.has_value());
+    ASSERT_TRUE(sized.maxWidth.has_value());
+    EXPECT_EQ(sized.maxHeight->intrinsicKeyword(), DimensionKeyword::MaxContent);
+    EXPECT_EQ(sized.maxWidth->intrinsicKeyword(), DimensionKeyword::FitContent);
+    const ComputedStyle longhands = intrinsicSizes.resolve("button", "", {}, 0);
+    ASSERT_TRUE(longhands.minWidth.has_value());
+    ASSERT_TRUE(longhands.maxHeight.has_value());
+    EXPECT_EQ(longhands.minWidth->intrinsicKeyword(), DimensionKeyword::MaxContent);
+    EXPECT_EQ(longhands.maxHeight->intrinsicKeyword(), DimensionKeyword::MinContent);
+
+    StyleSheet contentBasis;
+    ASSERT_TRUE(contentBasis.loadRadia("label { flex-basis: content; }").ok());
+    EXPECT_EQ(contentBasis.resolve("label", "", {}, 0).flexBasis.intrinsicKeyword(), DimensionKeyword::Content);
+
+    StyleSheet invalidContent;
+    ASSERT_TRUE(invalidContent.loadRadia("label { width: content; height: content; }").ok());
+    EXPECT_TRUE(invalidContent.resolve("label", "", {}, 0).width.isAuto());
+    EXPECT_TRUE(invalidContent.resolve("label", "", {}, 0).height.isAuto());
 }
 
 TEST(StyleCompilerTest, ParsesTypographyProperties) {
@@ -597,7 +768,7 @@ TEST(StyleCompilerTest, ParsesFlexItemShorthands) {
     EXPECT_EQ(style.padding.bottom, 3.f);
     EXPECT_EQ(style.padding.left, 4.f);
     ASSERT_TRUE(style.minWidth.has_value());
-    EXPECT_EQ(style.minWidth->pixels, 20.f);
+    EXPECT_EQ(style.minWidth->pixels(), 20.f);
     EXPECT_EQ(style.rowGap.fixedPixels(), 7.f);
     EXPECT_EQ(style.flexGrow, 2.f);
     EXPECT_EQ(style.flexShrink, 3.f);
@@ -640,18 +811,23 @@ TEST(StyleCompilerTest, RejectsUnitBearingFlexGrow) {
 TEST(StyleCompilerTest, ProvidesStableStyleDefaults) {
     const ComputedStyle style;
 
-    EXPECT_EQ(style.appearance, AppearanceMode::Unstyled);
+    EXPECT_EQ(style.appearance, AppearanceMode::NoneValue);
     EXPECT_EQ(style.display, DisplayMode::Inline);
     EXPECT_FALSE(style.displaySet);
-    EXPECT_EQ(style.justifyContent, JustifyContent::Start);
-    EXPECT_EQ(style.alignItems, AlignItems::Normal);
-    EXPECT_EQ(style.alignSelf, AlignSelf::Auto);
+    EXPECT_EQ(style.justifyContent.position, ContentPosition::Normal);
+    EXPECT_EQ(style.alignItems.position, ItemPosition::Normal);
+    EXPECT_EQ(style.alignSelf.position, ItemPosition::Auto);
+    EXPECT_EQ(style.alignContent.position, ContentPosition::Normal);
+    EXPECT_EQ(style.flexWrap, FlexWrap::Nowrap);
+    EXPECT_FALSE(style.flexWrapBalance);
+    EXPECT_FALSE(style.maxWidth.has_value());
+    EXPECT_FALSE(style.maxHeight.has_value());
     EXPECT_EQ(style.flexGrow, 0.f);
     EXPECT_EQ(style.flexShrink, 1.f);
     EXPECT_TRUE(style.flexBasis.isAuto());
     EXPECT_EQ(style.order, 0);
     EXPECT_EQ(style.rowGap.fixedPixels(), 0.f);
-    EXPECT_EQ(style.pointerEvents, PointerEvents::Default);
+    EXPECT_EQ(style.pointerEvents, PointerEvents::Auto);
     EXPECT_EQ(style.fontFamily, FontFamily::SansSerif);
     EXPECT_EQ(style.verticalAlign, VerticalAlign::Top);
     EXPECT_EQ(style.backgroundColor.a, 0.f);
@@ -919,7 +1095,8 @@ TEST(StyleCompilerTest, RejectsUnclosedStyleBlocks) {
 }
 
 TEST(StyleCompilerTest, KeepsPropertyRegistryValid) {
-    const std::set<std::string_view> shorthandNames{"background", "font", "flex", "gap", "mask", "min-size", "overflow"};
+    const std::set<std::string_view> shorthandNames{"background", "flex",     "flex-flow",     "font",        "gap",        "mask", "max-size",
+                                                    "min-size",   "overflow", "place-content", "place-items", "place-self", "size", "text-wrap"};
     std::set<std::string_view> names;
     for (const StylePropertyDefinition* property = stylePropertyBegin(); property != stylePropertyEnd(); ++property) {
         SCOPED_TRACE(Message() << "style property: " << property->name);

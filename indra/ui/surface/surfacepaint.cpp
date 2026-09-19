@@ -69,19 +69,33 @@ void Surface::paint(PaintContext& context, float scale, Vec2 pixelOrigin) {
     target.clipAA = AAIntent::Coverage;
     context.beginFrame(target);
     context.pushClip(mViewport, scale);
-    for (const MountList& layerMounts : mMounts)
+    for (const MountList& layerMounts : mMounts) {
         for (const MountPtr& mount : layerMounts)
-            if (mount && mount->root) paintElement(*mount->root, context, scale, 1.f, styles, {});
+            if (mount && mount->root && styles.style(*mount->root).position != PositionMode::Fixed)
+                paintElement(*mount->root, context, scale, 1.f, styles, {});
+        for (const MountPtr& mount : layerMounts) {
+            if (!mount || !mount->root) continue;
+            std::vector<Element*> fixed;
+            collectFixedPositionedElements(*mount->root, fixed, styles);
+            for (Element* fixedElement : fixed)
+                if (fixedElement) {
+                    float inheritedOpacity = 1.f;
+                    for (const Element* ancestor = fixedElement->parentElement(); ancestor; ancestor = ancestor->parentElement())
+                        inheritedOpacity *= styles.style(*ancestor).opacity;
+                    paintElement(*fixedElement, context, scale, inheritedOpacity, styles, {});
+                }
+        }
+    }
     context.popClip();
     context.endFrame();
     didPaint(paintedGeneration);
 }
 
-void Surface::paintElement(const Element& element, PaintContext& context, float scale, float inheritedOpacity, StylePass& styles,
+void Surface::paintElement(Element& element, PaintContext& context, float scale, float inheritedOpacity, StylePass& styles,
                            Vec2 paintTranslation) const {
-    const ConstElementObservation observation = observe(element);
+    const ElementObservation observation(element);
     const ComputedStyle& unresolved = styles.style(element);
-    const Element* current = observation.get();
+    Element* current = observation.get();
     if (!current || !observation.layoutValid() || !observation.styleValid()) return;
     if (!current->isVisible(unresolved)) return;
     styles.styleGeneratedPseudoElements(*current, unresolved);
@@ -147,21 +161,21 @@ void Surface::paintElement(const Element& element, PaintContext& context, float 
             context.pushClip(ElementInternalAccess::scrollport(*current), scale, clipAxes);
             context.pushTranslation(contentTranslation);
         }
-        std::vector<NodeRef> children;
-        children.reserve(current->mChildren.size());
-        for (const auto& childNode : current->mChildren) children.emplace_back(childNode.get());
-        for (const NodeRef& childRef : children) {
+        const auto children = styles.orderedChildren(*current);
+        for (const OrderedChildRef& childRef : *children) {
             if (!isParentStillValid()) break;
-            const Node* childNode = childRef.get();
-            if (!childNode) continue;
-            if (const Text* text = childNode->asText()) {
+            if (const Text* text = childRef.text()) {
                 const Element* parent = observation.get();
                 if (!parent) break;
                 text->paint(context, *painted, parent->styleSheet(), *parent);
                 continue;
             }
-            const Element* child = childNode->asElement();
-            if (child && child->parentElement() == observation.get() && isRootedInSurface(child))
+            if (childRef.pseudoElement) continue;
+            Element* child = childRef.element();
+            if (child
+                && child->parentElement() == observation.get()
+                && isRootedInSurface(child)
+                && styles.style(*child).position != PositionMode::Fixed)
                 paintElement(*child, context, scale, childOpacity, styles, paintTranslation + contentTranslation);
         }
         if (clipsChildren) {

@@ -26,6 +26,7 @@ struct TextPaintStyle {
     std::optional<LightDarkColor> colorLightDark;
     TextDecoration textDecoration = TextDecoration::NoneValue;
     TextAlign textAlign = TextAlign::Left;
+    LayoutDirection direction = LayoutDirection::LeftToRight;
 };
 } // namespace radia::ui
 

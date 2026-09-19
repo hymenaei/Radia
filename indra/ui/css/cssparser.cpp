@@ -206,8 +206,8 @@ void parsePseudoClasses(std::string& token, StyleSelector& result) {
     }
 
     for (std::size_t index = 1; index < ranges.size(); ++index) {
-        const std::string pseudoClass = normalizeCSSKeyword(stream, ranges[index]);
-        if (pseudoClass == "root") {
+        const std::string pseudoClass = trim(detail::serializeCSSRange(stream, ranges[index]));
+        if (normalizeCSSKeyword(pseudoClass) == "root") {
             result.root = true;
             ++result.rootSpecificity;
             continue;
@@ -235,6 +235,17 @@ void parsePseudoClasses(std::string& token, StyleSelector& result) {
                 } else result.directionSyntaxInvalid = true;
                 continue;
             }
+            if ((functionName == "is" || functionName == "where") && close != detail::kNoMatchingCSSToken && close == last) {
+                auto selectorFunction = std::make_shared<StyleSelectorFunction>();
+                selectorFunction->kind = functionName == "is" ? StyleSelectorFunctionKind::Is : StyleSelectorFunctionKind::Where;
+                for (const detail::CSSTokenRange argumentRange : detail::splitCSSOnDelimiter(pseudoStream, {function + 1, close}, ',')) {
+                    if (argumentRange.begin == argumentRange.end) continue;
+                    StyleRule argument = detail::parseSelector(pseudoStream, argumentRange);
+                    if (!argument.selectors.empty()) selectorFunction->arguments.push_back(std::move(argument));
+                }
+                result.selectorFunctions.push_back(std::move(selectorFunction));
+                continue;
+            }
             if (!functionName.empty()) {
                 result.functionSyntaxUnsupported = true;
                 continue;
@@ -244,7 +255,7 @@ void parsePseudoClasses(std::string& token, StyleSelector& result) {
             result.directionSyntaxInvalid = true;
             continue;
         }
-        appendSelectorState(result, pseudoClass);
+        appendSelectorState(result, normalizeCSSKeyword(pseudoClass));
     }
 }
 
@@ -436,6 +447,8 @@ StyleSelector mergeSelector(const StyleSelector& parent, const StyleSelector& ch
         parent.pseudoElementSyntaxInvalid || child.pseudoElementSyntaxInvalid || (!parent.pseudoElement.empty() && !child.pseudoElement.empty());
     result.direction = child.direction ? child.direction : parent.direction;
     result.directionSpecificity = parent.directionSpecificity + child.directionSpecificity;
+    result.selectorFunctions = parent.selectorFunctions;
+    result.selectorFunctions.insert(result.selectorFunctions.end(), child.selectorFunctions.begin(), child.selectorFunctions.end());
     if (child.stateMask != 0) {
         if (parent.pseudoElement.empty()) result.stateMask |= child.stateMask;
         else result.pseudoElementSyntaxInvalid = true;
@@ -1013,8 +1026,9 @@ std::vector<detail::CSSTokenRange> splitSelectorList(const CSSTokenStream& strea
 }
 
 bool validateSelector(StyleRule& rule, const std::string& selector, StyleSheetLoadResult& result, std::string_view source, std::size_t sourceOffset,
-                      const std::string& sourceName) {
+                      const std::string& sourceName, bool forgiving = false) {
     const auto warning = [&](std::string code, std::string message) {
+        if (forgiving) return;
         const auto [line, column] = detail::cssSourcePosition(source, sourceOffset);
         result.warning(std::move(code), std::move(message), sourceName, line, column);
     };
@@ -1049,6 +1063,17 @@ bool validateSelector(StyleRule& rule, const std::string& selector, StyleSheetLo
             warning("stylesheet.selector.function_unsupported", "Selector functions are not supported: " + selector + ".");
             return false;
         }
+        for (const std::shared_ptr<StyleSelectorFunction>& selectorFunction : component.selectorFunctions) {
+            std::vector<StyleRule> validArguments;
+            validArguments.reserve(selectorFunction->arguments.size());
+            for (StyleRule& argument : selectorFunction->arguments) {
+                StyleSheetLoadResult ignored;
+                if (validateSelector(argument, selector, ignored, source, sourceOffset, sourceName, true))
+                    validArguments.push_back(std::move(argument));
+            }
+            selectorFunction->arguments = std::move(validArguments);
+        }
+        if (forgiving && !component.pseudoElement.empty()) return false;
         if (!declarationComponent && !component.pseudoElement.empty()) {
             warning("stylesheet.selector.pseudo_element_structural",
                     "Pseudo-elements cannot participate in structural combinators: " + selector + ".");

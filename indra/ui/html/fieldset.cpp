@@ -21,7 +21,7 @@ using detail::HTMLElementFactory;
 HTMLLegendElement::HTMLLegendElement() : HTMLElement(kLegendTag.localName) {}
 
 void HTMLLegendElement::constrainResolvedStyle(ComputedStyle& style) const {
-    if (style.alignSelf == AlignSelf::Auto) style.alignSelf = AlignSelf::Start;
+    if (style.alignSelf.position == ItemPosition::Auto) style.alignSelf.position = ItemPosition::Start;
 }
 
 HTMLFieldsetElement::HTMLFieldsetElement() : HTMLElement(kFieldsetTag.localName) {}

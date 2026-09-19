@@ -50,7 +50,8 @@ void Text::preparePaint(const TextMetrics& metrics, const StyleSheet& styleSheet
 }
 
 void Text::paint(PaintContext& context, const ComputedStyle& parentStyle, const StyleSheet* styleSheet, const Element& owner) const {
-    const TextPaintStyle paintStyle{parentStyle.color, parentStyle.colorLightDark, parentStyle.textDecorationPropagation, parentStyle.textAlign};
+    const TextPaintStyle paintStyle{parentStyle.color, parentStyle.colorLightDark, parentStyle.textDecorationPropagation, parentStyle.textAlign,
+                                    parentStyle.direction};
     mLayout->paintPrepared(context, insetRect(mRect, mLayoutStyle.padding), mLayoutStyle, paintStyle, styleSheet, owner);
 }
 } // namespace radia::ui

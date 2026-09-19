@@ -25,6 +25,8 @@ class LayoutPass;
 
 class StylePass {
 public:
+    using OrderedChildSnapshot = ::radia::ui::OrderedChildSnapshot;
+
     class TraversalScope {
     public:
         explicit TraversalScope(StylePass& pass) : mPass(&pass) { mPass->beginTraversal(); }
@@ -37,7 +39,7 @@ public:
     };
 
     StylePass(const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction = LayoutDirection::LeftToRight,
-              NativeLayoutMetrics nativeMetrics = defaultNativeLayoutMetrics());
+              NativeLayoutMetrics nativeMetrics = defaultNativeLayoutMetrics(), ColorSchemeContext colorSchemeContext = {});
     StylePass(const StylePass&) = delete;
     StylePass& operator=(const StylePass&) = delete;
     StylePass(StylePass&&) = delete;
@@ -46,9 +48,13 @@ public:
     void invalidate() {
         mInvalidated = true;
         mResetStorageAtBoundary = true;
-        mTree.invalidateOrdering();
+        invalidateOrdering();
     }
-    void invalidateOrdering() { mTree.invalidateOrdering(); }
+    void invalidateOrdering() {
+        mTree.invalidateOrdering();
+        mOrderedPseudoChildren.clear();
+        ++mOrderingGeneration;
+    }
     void beginTraversal();
     void endTraversal();
     TraversalScope enterTraversal() { return TraversalScope(*this); }
@@ -57,14 +63,22 @@ public:
     ComputedStyle style(PseudoElement& pseudoElement);
     void styleGeneratedPseudoElements(const Element& element, const ComputedStyle& ownerStyle);
     bool matches(const StyleSheet& styleSheet, const TextMetrics& textMetrics, LayoutDirection direction = LayoutDirection::LeftToRight,
-                 NativeLayoutMetrics nativeMetrics = defaultNativeLayoutMetrics()) const;
+                 NativeLayoutMetrics nativeMetrics = defaultNativeLayoutMetrics(), ColorSchemeContext colorSchemeContext = {}) const;
     const StyleSheet& styleSheet() const { return mStyleSheet; }
     const TextMetrics& textMetrics() const { return mTextMetrics; }
     LayoutDirection direction() const { return mDirection; }
+    const ColorSchemeContext& colorSchemeContext() const { return mColorSchemeContext; }
 
 private:
     friend class Surface;
     friend class LayoutPass;
+
+    struct OrderedChildrenEntry {
+        OrderedChildSnapshot snapshot;
+        std::weak_ptr<char> lifetime;
+        std::uint64_t childRevision = 0;
+        std::uint64_t orderingGeneration = 0;
+    };
 
     struct CachedStyle {
         std::size_t storageIndex = 0;
@@ -72,20 +86,33 @@ private:
         std::uint64_t contextRevision = 0;
     };
 
+    struct OrderedPseudoChildrenEntry {
+        OrderedChildSnapshot snapshot;
+        std::weak_ptr<char> lifetime;
+        std::uint64_t orderingGeneration = 0;
+    };
+
     void compactStyles();
+    void compactOrderingCaches();
     const detail::LayoutContextKey& contextKey() const { return mContext; }
     TreeTraversalCache::ChildSnapshot sourceChildren(Element& parent);
+    OrderedChildSnapshot orderedChildren(Element& parent);
+    OrderedChildSnapshot orderedChildren(PseudoElement& parent);
 
     StyleSheet mStyleSheet;
     const TextMetrics& mTextMetrics;
     LayoutDirection mDirection = LayoutDirection::LeftToRight;
     NativeLayoutMetrics mNativeMetrics;
+    ColorSchemeContext mColorSchemeContext;
     detail::LayoutContextKey mContext;
     bool mInvalidated = false;
     bool mResetStorageAtBoundary = false;
     std::size_t mTraversalDepth = 0;
     std::deque<ComputedStyle> mStyleStorage;
     std::unordered_map<const Element*, CachedStyle> mStyles;
+    std::unordered_map<const Element*, OrderedChildrenEntry> mOrderedChildren;
+    std::unordered_map<const PseudoElement*, OrderedPseudoChildrenEntry> mOrderedPseudoChildren;
+    std::uint64_t mOrderingGeneration = 1;
     TreeTraversalCache mTree;
 };
 } // namespace radia::ui

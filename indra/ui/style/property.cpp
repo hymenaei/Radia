@@ -158,23 +158,20 @@ std::optional<float> StyleModel::parseFontWeightValue(detail::CSSValueRange valu
     return std::isfinite(parsed) && parsed >= 1.f && parsed <= 1000.f && std::floor(parsed) == parsed ? std::optional<float>(parsed) : std::nullopt;
 }
 
-std::optional<LineHeight> StyleModel::parseLineHeightValue(detail::CSSValueRange value) {
+std::optional<StyleValue> StyleModel::parseLineHeightValue(detail::CSSValueRange value) {
     const std::string keyword = normalizeCSSKeyword(value.stream, value.range);
-    if (keyword == "normal") return LineHeight{LineHeight::Kind::Normal, 0.f};
+    if (keyword == "normal") return StyleValue(LineHeight{LineHeight::Kind::Normal, 0.f});
     if (hasDimensionUnit(value.stream, value.range, "px")) {
         const std::optional<Length> parsed = parseLengthValue(value);
-        return parsed && parsed->pixels >= 0.f && parsed->percent == 0.f
-            ? std::optional<LineHeight>(LineHeight{LineHeight::Kind::Length, parsed->pixels})
-            : std::nullopt;
+        return parsed && parsed->pixels >= 0.f && parsed->percent == 0.f ? std::optional<StyleValue>(LengthPercentage{*parsed}) : std::nullopt;
     }
     if (endsWith(keyword, "%")) {
         const std::optional<Length> parsed = parseLengthValue(value);
-        return parsed && parsed->percent >= 0.f && parsed->pixels == 0.f
-            ? std::optional<LineHeight>(LineHeight{LineHeight::Kind::Percentage, parsed->percent})
-            : std::nullopt;
+        return parsed && parsed->percent >= 0.f && parsed->pixels == 0.f ? std::optional<StyleValue>(LengthPercentage{Percentage{parsed->percent}})
+                                                                         : std::nullopt;
     }
     const float parsed = parseNumberValue(value, std::numeric_limits<float>::quiet_NaN());
-    return std::isfinite(parsed) && parsed >= 0.f ? std::optional<LineHeight>(LineHeight{LineHeight::Kind::Number, parsed}) : std::nullopt;
+    return std::isfinite(parsed) && parsed >= 0.f ? std::optional<StyleValue>(LineHeight{LineHeight::Kind::Number, parsed}) : std::nullopt;
 }
 
 std::optional<std::vector<StyleDeclaration>> StyleModel::parseFontShorthand(detail::CSSValueRange value) {
@@ -184,7 +181,7 @@ std::optional<std::vector<StyleDeclaration>> StyleModel::parseFontShorthand(deta
     if (family != "sans-serif" && family != "monospace") return std::nullopt;
     tokens.pop_back();
 
-    LineHeight lineHeight;
+    StyleValue lineHeight = LineHeight{};
     std::size_t sizeIndex = tokens.size() - 1;
     const auto slash =
         std::find_if(tokens.begin(), tokens.end(), [&](detail::CSSTokenRange token) { return normalizeCSSKeyword(value.stream, token) == "/"; });
@@ -194,7 +191,7 @@ std::optional<std::vector<StyleDeclaration>> StyleModel::parseFontShorthand(deta
             std::find_if(slash + 1, tokens.end(), [&](detail::CSSTokenRange token) { return normalizeCSSKeyword(value.stream, token) == "/"; });
         if (slashIndex == 0 || slashIndex + 2 != tokens.size() || secondSlash != tokens.end()) return std::nullopt;
         sizeIndex = slashIndex - 1;
-        const std::optional<LineHeight> parsedLineHeight = parseLineHeightValue({value.stream, tokens.back()});
+        const std::optional<StyleValue> parsedLineHeight = parseLineHeightValue({value.stream, tokens.back()});
         if (!parsedLineHeight) return std::nullopt;
         lineHeight = *parsedLineHeight;
     }
@@ -1112,36 +1109,61 @@ CompileResult compileGapLonghand(detail::StyleCompileContext& context) {
     return context.compiled(GapValue::fromLength(*parsed));
 }
 
-CompileResult compileMinimumLength(detail::StyleCompileContext& context) {
-    if (context.keyword() == "auto") return context.compiled(std::optional<Length>{});
+std::optional<Dimension> parseDimension(detail::StyleCompileContext& context, detail::CSSTokenRange raw, bool allowContent);
+
+CompileResult compileMinimumDimension(detail::StyleCompileContext& context) {
     const std::vector<detail::CSSTokenRange> tokens = context.ranges(false);
     if (tokens.size() != 1) return context.invalid();
-    const std::optional<Length> parsed = context.nonnegativeLength({context.value.stream, tokens.front()});
-    return parsed ? context.compiled(std::optional<Length>(*parsed)) : context.invalid();
+    const std::optional<Dimension> parsed = parseDimension(context, tokens.front(), false);
+    if (!parsed) return context.invalid();
+    return context.compiled(parsed->isAuto() ? std::optional<Dimension>{} : std::optional<Dimension>(*parsed));
+}
+
+CompileResult compileMaximumDimension(detail::StyleCompileContext& context) {
+    if (context.keyword() == "none") return context.compiled(std::optional<Dimension>{});
+    const std::vector<detail::CSSTokenRange> tokens = context.ranges(false);
+    if (tokens.size() != 1) return context.invalid();
+    const std::optional<Dimension> parsed = parseDimension(context, tokens.front(), false);
+    if (!parsed || parsed->isAuto()) return context.invalid();
+    return context.compiled(std::optional<Dimension>(*parsed));
 }
 
 CompileResult compileSize(detail::StyleCompileContext& context) {
     auto& [property, value, selector, result, sourceName] = context;
     const std::vector<detail::CSSTokenRange> tokens = context.ranges();
     if (tokens.empty() || tokens.size() > 2) return context.invalid();
-    const auto dimension = [&context, &value](detail::CSSTokenRange raw) -> std::optional<Dimension> {
-        if (normalizeCSSKeyword(value.stream, raw) == "auto") return Dimension();
-        const auto parsed = context.nonnegativeLength({value.stream, raw});
-        return parsed ? std::optional<Dimension>(Dimension::fromLength(*parsed)) : std::nullopt;
-    };
+    const auto dimension = [&context](detail::CSSTokenRange raw) { return parseDimension(context, raw, false); };
     const auto height = dimension(tokens[0]);
     const auto width = dimension(tokens.size() == 1 ? tokens[0] : tokens[1]);
-    return height && width ? context.compiled(StyleSize{*height, *width}) : context.invalid();
+    return height && width ? makeDeclarations({{"height", *height}, {"width", *width}}) : context.invalid();
 }
 
 CompileResult compileMinSize(detail::StyleCompileContext& context) {
     auto& [property, value, selector, result, sourceName] = context;
     const std::vector<detail::CSSTokenRange> tokens = context.ranges();
     if (tokens.empty() || tokens.size() > 2) return context.invalid();
-    const auto height = context.nonnegativeLength({value.stream, tokens[0]});
-    const auto width = context.nonnegativeLength({value.stream, tokens.size() == 1 ? tokens[0] : tokens[1]});
+    const auto height = parseDimension(context, tokens[0], false);
+    const auto width = parseDimension(context, tokens.size() == 1 ? tokens[0] : tokens[1], false);
     if (!height || !width) return context.invalid();
-    return makeDeclarations({{"min-height", std::optional<Length>(*height)}, {"min-width", std::optional<Length>(*width)}});
+    const std::optional<Dimension> minimumHeight = height->isAuto() ? std::optional<Dimension>{} : std::optional<Dimension>(*height);
+    const std::optional<Dimension> minimumWidth = width->isAuto() ? std::optional<Dimension>{} : std::optional<Dimension>(*width);
+    return makeDeclarations({{"min-height", minimumHeight}, {"min-width", minimumWidth}});
+}
+
+CompileResult compileMaxSize(detail::StyleCompileContext& context) {
+    auto& [property, value, selector, result, sourceName] = context;
+    const std::vector<detail::CSSTokenRange> tokens = context.ranges();
+    if (tokens.empty() || tokens.size() > 2) return context.invalid();
+    const auto dimension = [&context, &value](detail::CSSTokenRange raw) -> std::optional<std::optional<Dimension>> {
+        if (normalizeCSSKeyword(value.stream, raw) == "none") return std::optional<Dimension>{};
+        const auto parsed = parseDimension(context, raw, false);
+        if (!parsed || parsed->isAuto()) return std::nullopt;
+        return std::optional<Dimension>(*parsed);
+    };
+    const auto height = dimension(tokens[0]);
+    const auto width = dimension(tokens.size() == 1 ? tokens[0] : tokens[1]);
+    if (!height || !width) return context.invalid();
+    return makeDeclarations({{"max-height", *height}, {"max-width", *width}});
 }
 
 CompileResult compileStrokeLinecap(detail::StyleCompileContext& context) {
@@ -1194,6 +1216,9 @@ CompileResult compileTextAlign(detail::StyleCompileContext& context) {
     else if (alignment == "center") parsed = TextAlign::Center;
     else if (alignment == "right") parsed = TextAlign::Right;
     else if (alignment == "end") parsed = TextAlign::End;
+    else if (alignment == "justify") parsed = TextAlign::Justify;
+    else if (alignment == "match-parent") parsed = TextAlign::MatchParent;
+    else if (alignment == "justify-all") parsed = TextAlign::JustifyAll;
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
@@ -1208,57 +1233,315 @@ CompileResult compileTextOverflow(detail::StyleCompileContext& context) {
 
 CompileResult compileTextWrap(detail::StyleCompileContext& context) {
     auto& [property, value, selector, result, sourceName] = context;
-    const std::string wrap = context.keyword();
-    if (wrap == "wrap") return context.compiled(TextWrap::Wrap);
-    if (wrap == "nowrap") return context.compiled(TextWrap::NoWrap);
+    const std::vector<detail::CSSTokenRange> tokens = context.ranges();
+    if (tokens.empty() || tokens.size() > 2) return context.invalid();
+    TextWrap mode = TextWrap::Wrap;
+    TextWrapStyle style = TextWrapStyle::Auto;
+    bool modeSet = false;
+    bool styleSet = false;
+    for (const detail::CSSTokenRange token : tokens) {
+        const std::string valueText = normalizeCSSKeyword(value.stream, token);
+        if (valueText == "wrap" || valueText == "nowrap") {
+            if (modeSet) return context.invalid();
+            mode = valueText == "wrap" ? TextWrap::Wrap : TextWrap::NoWrap;
+            modeSet = true;
+        } else if (valueText == "auto"
+                   || valueText == "balance"
+                   || valueText == "stable"
+                   || valueText == "pretty"
+                   || valueText == "avoid-short-last-line") {
+            if (styleSet) return context.invalid();
+            if (valueText == "balance") style = TextWrapStyle::Balance;
+            else if (valueText == "stable") style = TextWrapStyle::Stable;
+            else if (valueText == "pretty") style = TextWrapStyle::Pretty;
+            else if (valueText == "avoid-short-last-line") style = TextWrapStyle::AvoidShortLastLine;
+            styleSet = true;
+        } else return context.invalid();
+    }
+    return makeDeclarations({{"text-wrap-mode", mode}, {"text-wrap-style", style}});
+}
+
+CompileResult compileTextWrapMode(detail::StyleCompileContext& context) {
+    const std::string mode = context.keyword();
+    if (mode == "wrap") return context.compiled(TextWrap::Wrap);
+    if (mode == "nowrap") return context.compiled(TextWrap::NoWrap);
+    return context.invalid();
+}
+
+CompileResult compileTextWrapStyle(detail::StyleCompileContext& context) {
+    const std::string style = context.keyword();
+    if (style == "auto") return context.compiled(TextWrapStyle::Auto);
+    if (style == "balance") return context.compiled(TextWrapStyle::Balance);
+    if (style == "stable") return context.compiled(TextWrapStyle::Stable);
+    if (style == "pretty") return context.compiled(TextWrapStyle::Pretty);
+    if (style == "avoid-short-last-line") return context.compiled(TextWrapStyle::AvoidShortLastLine);
     return context.invalid();
 }
 
 CompileResult compileVerticalAlign(detail::StyleCompileContext& context) {
     auto& [property, value, selector, result, sourceName] = context;
     const std::string alignment = context.keyword();
-    std::optional<VerticalAlign> parsed;
-    if (alignment == "top") parsed = VerticalAlign::Top;
-    else if (alignment == "middle") parsed = VerticalAlign::Middle;
-    else if (alignment == "bottom") parsed = VerticalAlign::Bottom;
-    return parsed ? context.compiled(*parsed) : context.invalid();
+    VerticalAlignValue parsed;
+    if (alignment == "baseline") parsed.value = VerticalAlign::Baseline;
+    else if (alignment == "sub") parsed.value = VerticalAlign::Sub;
+    else if (alignment == "super") parsed.value = VerticalAlign::Super;
+    else if (alignment == "text-top") parsed.value = VerticalAlign::TextTop;
+    else if (alignment == "text-bottom") parsed.value = VerticalAlign::TextBottom;
+    else if (alignment == "top") parsed.value = VerticalAlign::Top;
+    else if (alignment == "middle") parsed.value = VerticalAlign::Middle;
+    else if (alignment == "bottom") parsed.value = VerticalAlign::Bottom;
+    else if (const auto offset = context.length()) {
+        parsed.value = endsWith(alignment, "%") ? VerticalAlign::Percentage : VerticalAlign::Length;
+        parsed.offset = *offset;
+    } else return context.invalid();
+    return context.compiled(parsed);
 }
 
 CompileResult compileFlexDirection(detail::StyleCompileContext& context) {
     const std::string direction = context.keyword();
     if (direction == "row") return context.compiled(FlexDirection::Row);
+    if (direction == "row-reverse") return context.compiled(FlexDirection::RowReverse);
     if (direction == "column") return context.compiled(FlexDirection::Column);
+    if (direction == "column-reverse") return context.compiled(FlexDirection::ColumnReverse);
     return context.invalid();
 }
 
-template<typename Enum, std::size_t Size> CompileResult compileAlignment(const detail::StyleCompileContext& context, std::string_view value,
-                                                                         const std::array<std::pair<std::string_view, Enum>, Size>& values) {
-    const auto found = std::find_if(values.begin(), values.end(), [value](const auto& entry) { return entry.first == value; });
-    return found == values.end() ? context.invalid() : context.compiled(found->second);
+template<std::size_t Size>
+std::optional<SelfAlignmentData> parseAlignment(const detail::StyleCompileContext& context, const std::vector<detail::CSSTokenRange>& tokens,
+                                                const std::array<std::pair<std::string_view, ItemPosition>, Size>& values) {
+    if (tokens.empty() || tokens.size() > 3) return std::nullopt;
+    OverflowAlignment safety = OverflowAlignment::Default;
+    std::optional<ItemPosition> keyword;
+    for (std::size_t index = 0; index < tokens.size(); ++index) {
+        std::string value = normalizeCSSKeyword(context.value.stream, tokens[index]);
+        if ((value == "first" || value == "last")
+            && index + 1 < tokens.size()
+            && normalizeCSSKeyword(context.value.stream, tokens[index + 1]) == "baseline") {
+            if (safety != OverflowAlignment::Default || keyword) return std::nullopt;
+            keyword = value == "last" ? ItemPosition::LastBaseline : ItemPosition::Baseline;
+            ++index;
+            continue;
+        }
+        if (value == "safe" || value == "unsafe") {
+            if (safety != OverflowAlignment::Default) return std::nullopt;
+            if (keyword) return std::nullopt;
+            safety = value == "safe" ? OverflowAlignment::Safe : OverflowAlignment::Unsafe;
+            continue;
+        }
+        if ((value == "baseline" || value == "normal" || value == "stretch" || value == "auto") && safety != OverflowAlignment::Default)
+            return std::nullopt;
+        const auto found = std::find_if(values.begin(), values.end(), [value](const auto& entry) { return entry.first == value; });
+        if (found == values.end() || keyword) return std::nullopt;
+        keyword = found->second;
+    }
+    return keyword ? std::optional<SelfAlignmentData>(SelfAlignmentData{*keyword, safety}) : std::nullopt;
+}
+
+template<std::size_t Size>
+std::optional<SelfAlignmentData> parseAlignment(const detail::StyleCompileContext& context,
+                                                const std::array<std::pair<std::string_view, ItemPosition>, Size>& values) {
+    return parseAlignment(context, context.ranges(), values);
+}
+
+template<std::size_t Size>
+CompileResult compileAlignment(detail::StyleCompileContext& context, const std::array<std::pair<std::string_view, ItemPosition>, Size>& values) {
+    const auto parsed = parseAlignment(context, values);
+    return parsed ? context.compiled(*parsed) : context.invalid();
+}
+
+constexpr std::array<std::pair<std::string_view, ItemPosition>, 11> kAlignItemsValues{{
+    {"normal", ItemPosition::Normal},
+    {"start", ItemPosition::Start},
+    {"self-start", ItemPosition::SelfStart},
+    {"center", ItemPosition::Center},
+    {"self-end", ItemPosition::SelfEnd},
+    {"end", ItemPosition::End},
+    {"flex-start", ItemPosition::FlexStart},
+    {"flex-end", ItemPosition::FlexEnd},
+    {"stretch", ItemPosition::Stretch},
+    {"baseline", ItemPosition::Baseline},
+    {"anchor-center", ItemPosition::AnchorCenter},
+}};
+constexpr std::array<std::pair<std::string_view, ItemPosition>, 12> kAlignSelfValues{{
+    {"auto", ItemPosition::Auto},
+    {"normal", ItemPosition::Normal},
+    {"start", ItemPosition::Start},
+    {"self-start", ItemPosition::SelfStart},
+    {"flex-start", ItemPosition::FlexStart},
+    {"center", ItemPosition::Center},
+    {"self-end", ItemPosition::SelfEnd},
+    {"end", ItemPosition::End},
+    {"flex-end", ItemPosition::FlexEnd},
+    {"stretch", ItemPosition::Stretch},
+    {"baseline", ItemPosition::Baseline},
+    {"anchor-center", ItemPosition::AnchorCenter},
+}};
+constexpr std::array<std::pair<std::string_view, ItemPosition>, 11> kJustifyItemsValues{{
+    {"normal", ItemPosition::Normal},
+    {"start", ItemPosition::Start},
+    {"self-start", ItemPosition::SelfStart},
+    {"center", ItemPosition::Center},
+    {"self-end", ItemPosition::SelfEnd},
+    {"end", ItemPosition::End},
+    {"flex-start", ItemPosition::FlexStart},
+    {"flex-end", ItemPosition::FlexEnd},
+    {"stretch", ItemPosition::Stretch},
+    {"baseline", ItemPosition::Baseline},
+    {"anchor-center", ItemPosition::AnchorCenter},
+}};
+constexpr std::array<std::pair<std::string_view, ItemPosition>, 14> kJustifySelfValues{{
+    {"auto", ItemPosition::Auto},
+    {"normal", ItemPosition::Normal},
+    {"start", ItemPosition::Start},
+    {"self-start", ItemPosition::SelfStart},
+    {"center", ItemPosition::Center},
+    {"self-end", ItemPosition::SelfEnd},
+    {"end", ItemPosition::End},
+    {"flex-start", ItemPosition::FlexStart},
+    {"flex-end", ItemPosition::FlexEnd},
+    {"left", ItemPosition::Left},
+    {"right", ItemPosition::Right},
+    {"stretch", ItemPosition::Stretch},
+    {"baseline", ItemPosition::Baseline},
+    {"anchor-center", ItemPosition::AnchorCenter},
+}};
+constexpr std::array<std::pair<std::string_view, ContentPosition>, 7> kAlignContentPositions{{
+    {"normal", ContentPosition::Normal},
+    {"center", ContentPosition::Center},
+    {"start", ContentPosition::Start},
+    {"end", ContentPosition::End},
+    {"flex-start", ContentPosition::FlexStart},
+    {"flex-end", ContentPosition::FlexEnd},
+    {"baseline", ContentPosition::Baseline},
+}};
+constexpr std::array<std::pair<std::string_view, ContentPosition>, 8> kJustifyContentPositions{{
+    {"normal", ContentPosition::Normal},
+    {"center", ContentPosition::Center},
+    {"start", ContentPosition::Start},
+    {"end", ContentPosition::End},
+    {"flex-start", ContentPosition::FlexStart},
+    {"flex-end", ContentPosition::FlexEnd},
+    {"left", ContentPosition::Left},
+    {"right", ContentPosition::Right},
+}};
+constexpr std::array<std::pair<std::string_view, ContentDistribution>, 4> kContentDistributions{{
+    {"stretch", ContentDistribution::Stretch},
+    {"space-between", ContentDistribution::SpaceBetween},
+    {"space-around", ContentDistribution::SpaceAround},
+    {"space-evenly", ContentDistribution::SpaceEvenly},
+}};
+
+template<std::size_t PositionSize, std::size_t DistributionSize> std::optional<ContentAlignmentData> parseContentAlignment(
+    const detail::StyleCompileContext& context, const std::vector<detail::CSSTokenRange>& tokens,
+    const std::array<std::pair<std::string_view, ContentPosition>, PositionSize>& positions,
+    const std::array<std::pair<std::string_view, ContentDistribution>, DistributionSize>& distributions) {
+    if (tokens.empty() || tokens.size() > 3) return std::nullopt;
+    OverflowAlignment safety = OverflowAlignment::Default;
+    std::optional<ContentPosition> position;
+    std::optional<ContentDistribution> distribution;
+    for (std::size_t index = 0; index < tokens.size(); ++index) {
+        std::string value = normalizeCSSKeyword(context.value.stream, tokens[index]);
+        if ((value == "first" || value == "last")
+            && index + 1 < tokens.size()
+            && normalizeCSSKeyword(context.value.stream, tokens[index + 1]) == "baseline") {
+            const auto baseline = std::find_if(positions.begin(), positions.end(), [](const auto& entry) { return entry.first == "baseline"; });
+            if (baseline == positions.end() || safety != OverflowAlignment::Default || position || distribution) return std::nullopt;
+            position = value == "last" ? ContentPosition::LastBaseline : ContentPosition::Baseline;
+            ++index;
+            continue;
+        }
+        if (value == "safe" || value == "unsafe") {
+            if (safety != OverflowAlignment::Default || position || distribution) return std::nullopt;
+            safety = value == "safe" ? OverflowAlignment::Safe : OverflowAlignment::Unsafe;
+            continue;
+        }
+        if (const auto found = std::find_if(positions.begin(), positions.end(), [value](const auto& entry) { return entry.first == value; });
+            found != positions.end()) {
+            if (position || distribution || ((value == "baseline" || value == "normal") && safety != OverflowAlignment::Default)) return std::nullopt;
+            position = found->second;
+            continue;
+        }
+        const auto found = std::find_if(distributions.begin(), distributions.end(), [value](const auto& entry) { return entry.first == value; });
+        if (found == distributions.end() || position || distribution || safety != OverflowAlignment::Default) return std::nullopt;
+        distribution = found->second;
+    }
+    return ContentAlignmentData{position.value_or(ContentPosition::Normal), distribution.value_or(ContentDistribution::Default), safety};
+}
+
+template<std::size_t PositionSize, std::size_t DistributionSize> std::optional<ContentAlignmentData> parseContentAlignment(
+    const detail::StyleCompileContext& context, const std::array<std::pair<std::string_view, ContentPosition>, PositionSize>& positions,
+    const std::array<std::pair<std::string_view, ContentDistribution>, DistributionSize>& distributions) {
+    return parseContentAlignment(context, context.ranges(), positions, distributions);
 }
 
 CompileResult compileJustifyContent(detail::StyleCompileContext& context) {
-    auto& [property, value, selector, result, sourceName] = context;
-    static constexpr std::array<std::pair<std::string_view, JustifyContent>, 5> sJustifyContentValues{{
-        {"start", JustifyContent::Start},
-        {"left", JustifyContent::Left},
-        {"center", JustifyContent::Center},
-        {"end", JustifyContent::End},
-        {"right", JustifyContent::Right},
-    }};
-    return compileAlignment(context, context.keyword(), sJustifyContentValues);
+    const auto parsed = parseContentAlignment(context, kJustifyContentPositions, kContentDistributions);
+    return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileAlignItems(detail::StyleCompileContext& context) {
-    auto& [property, value, selector, result, sourceName] = context;
-    static constexpr std::array<std::pair<std::string_view, AlignItems>, 5> sAlignItemsValues{{
-        {"normal", AlignItems::Normal},
-        {"start", AlignItems::Start},
-        {"center", AlignItems::Center},
-        {"end", AlignItems::End},
-        {"stretch", AlignItems::Stretch},
-    }};
-    return compileAlignment(context, context.keyword(), sAlignItemsValues);
+    return compileAlignment(context, kAlignItemsValues);
+}
+
+CompileResult compileAlignContent(detail::StyleCompileContext& context) {
+    const auto parsed = parseContentAlignment(context, kAlignContentPositions, kContentDistributions);
+    return parsed ? context.compiled(*parsed) : context.invalid();
+}
+
+CompileResult compileFlexWrap(detail::StyleCompileContext& context) {
+    const std::vector<detail::CSSTokenRange> tokens = context.ranges();
+    if (tokens.empty() || tokens.size() > 2) return context.invalid();
+    bool balance = false;
+    bool wrapSet = false;
+    bool wrapReverse = false;
+    bool nowrap = false;
+    for (const detail::CSSTokenRange token : tokens) {
+        const std::string value = normalizeCSSKeyword(context.value.stream, token);
+        if (value == "balance") {
+            if (balance) return context.invalid();
+            balance = true;
+        } else if (value == "nowrap") {
+            if (wrapSet || tokens.size() != 1) return context.invalid();
+            wrapSet = true;
+            nowrap = true;
+        } else if (value == "wrap" || value == "wrap-reverse") {
+            if (wrapSet) return context.invalid();
+            wrapSet = true;
+            wrapReverse = value == "wrap-reverse";
+        } else return context.invalid();
+    }
+    return context.compiled(FlexWrapValue{nowrap ? FlexWrap::Nowrap : (wrapReverse ? FlexWrap::WrapReverse : FlexWrap::Wrap), balance});
+}
+
+CompileResult compileFlexFlow(detail::StyleCompileContext& context) {
+    const std::vector<detail::CSSTokenRange> tokens = context.ranges();
+    if (tokens.empty() || tokens.size() > 3) return context.invalid();
+    FlexDirection direction = FlexDirection::Row;
+    FlexWrap wrap = FlexWrap::Nowrap;
+    bool directionSet = false;
+    bool wrapSet = false;
+    bool balanceSet = false;
+    for (const detail::CSSTokenRange token : tokens) {
+        const std::string value = normalizeCSSKeyword(context.value.stream, token);
+        if (value == "row" || value == "row-reverse" || value == "column" || value == "column-reverse") {
+            if (directionSet) return context.invalid();
+            directionSet = true;
+            if (value == "row-reverse") direction = FlexDirection::RowReverse;
+            else if (value == "column") direction = FlexDirection::Column;
+            else if (value == "column-reverse") direction = FlexDirection::ColumnReverse;
+        } else if (value == "balance") {
+            if (balanceSet) return context.invalid();
+            balanceSet = true;
+        } else if (value == "nowrap" || value == "wrap" || value == "wrap-reverse") {
+            if (wrapSet) return context.invalid();
+            wrapSet = true;
+            if (value == "wrap") wrap = FlexWrap::Wrap;
+            else if (value == "wrap-reverse") wrap = FlexWrap::WrapReverse;
+        } else return context.invalid();
+    }
+    if (balanceSet && wrapSet && wrap == FlexWrap::Nowrap) return context.invalid();
+    if (balanceSet && !wrapSet) wrap = FlexWrap::Wrap;
+    return makeDeclarations({{"flex-direction", direction}, {"flex-wrap", FlexWrapValue{wrap, balanceSet}}});
 }
 
 CompileResult compileInternalAlignContentBlock(detail::StyleCompileContext& context) {
@@ -1269,27 +1552,74 @@ CompileResult compileInternalAlignContentBlock(detail::StyleCompileContext& cont
 }
 
 CompileResult compileAlignSelf(detail::StyleCompileContext& context) {
-    auto& [property, value, selector, result, sourceName] = context;
-    static constexpr std::array<std::pair<std::string_view, AlignSelf>, 5> sAlignSelfValues{{
-        {"auto", AlignSelf::Auto},
-        {"start", AlignSelf::Start},
-        {"center", AlignSelf::Center},
-        {"end", AlignSelf::End},
-        {"stretch", AlignSelf::Stretch},
-    }};
-    return compileAlignment(context, context.keyword(), sAlignSelfValues);
+    return compileAlignment(context, kAlignSelfValues);
 }
 
 CompileResult compileJustifySelf(detail::StyleCompileContext& context) {
-    auto& [property, value, selector, result, sourceName] = context;
-    static constexpr std::array<std::pair<std::string_view, JustifySelf>, 5> sJustifySelfValues{{
-        {"auto", JustifySelf::Auto},
-        {"start", JustifySelf::Start},
-        {"center", JustifySelf::Center},
-        {"end", JustifySelf::End},
-        {"stretch", JustifySelf::Stretch},
-    }};
-    return compileAlignment(context, context.keyword(), sJustifySelfValues);
+    return compileAlignment(context, kJustifySelfValues);
+}
+
+CompileResult compileJustifyItems(detail::StyleCompileContext& context) {
+    return compileAlignment(context, kJustifyItemsValues);
+}
+
+CompileResult compilePlaceContent(detail::StyleCompileContext& context) {
+    const std::vector<detail::CSSTokenRange> tokens = context.ranges();
+    if (tokens.empty() || tokens.size() > 6) return context.invalid();
+    if (const auto single = parseContentAlignment(context, kAlignContentPositions, kContentDistributions))
+        if (const auto same = parseContentAlignment(context, kJustifyContentPositions, kContentDistributions))
+            return makeDeclarations({{"align-content", *single}, {"justify-content", *same}});
+    for (std::size_t split = 1; split < tokens.size(); ++split) {
+        const std::vector<detail::CSSTokenRange> first(tokens.begin(), tokens.begin() + split);
+        const std::vector<detail::CSSTokenRange> second(tokens.begin() + split, tokens.end());
+        const auto align = parseContentAlignment(context, first, kAlignContentPositions, kContentDistributions);
+        const auto justify = parseContentAlignment(context, second, kJustifyContentPositions, kContentDistributions);
+        if (align && justify) return makeDeclarations({{"align-content", *align}, {"justify-content", *justify}});
+    }
+    return context.invalid();
+}
+
+CompileResult compilePlaceItems(detail::StyleCompileContext& context) {
+    const std::vector<detail::CSSTokenRange> tokens = context.ranges();
+    if (tokens.empty() || tokens.size() > 6) return context.invalid();
+    if (const auto single = parseAlignment(context, kAlignItemsValues))
+        if (const auto same = parseAlignment(context, kJustifyItemsValues))
+            return makeDeclarations({{"align-items", *single}, {"justify-items", *same}});
+    for (std::size_t split = 1; split < tokens.size(); ++split) {
+        const std::vector<detail::CSSTokenRange> first(tokens.begin(), tokens.begin() + split);
+        const std::vector<detail::CSSTokenRange> second(tokens.begin() + split, tokens.end());
+        const auto align = parseAlignment(context, first, kAlignItemsValues);
+        const auto justify = parseAlignment(context, second, kJustifyItemsValues);
+        if (align && justify) return makeDeclarations({{"align-items", *align}, {"justify-items", *justify}});
+    }
+    return context.invalid();
+}
+
+CompileResult compilePlaceSelf(detail::StyleCompileContext& context) {
+    const std::vector<detail::CSSTokenRange> tokens = context.ranges();
+    if (tokens.empty() || tokens.size() > 6) return context.invalid();
+    if (const auto single = parseAlignment(context, kAlignSelfValues))
+        if (const auto same = parseAlignment(context, kJustifySelfValues))
+            return makeDeclarations({{"align-self", *single}, {"justify-self", *same}});
+    for (std::size_t split = 1; split < tokens.size(); ++split) {
+        const std::vector<detail::CSSTokenRange> first(tokens.begin(), tokens.begin() + split);
+        const std::vector<detail::CSSTokenRange> second(tokens.begin() + split, tokens.end());
+        const auto align = parseAlignment(context, first, kAlignSelfValues);
+        const auto justify = parseAlignment(context, second, kJustifySelfValues);
+        if (align && justify) return makeDeclarations({{"align-self", *align}, {"justify-self", *justify}});
+    }
+    return context.invalid();
+}
+
+std::optional<Dimension> parseDimension(detail::StyleCompileContext& context, detail::CSSTokenRange raw, bool allowContent) {
+    const std::string value = normalizeCSSKeyword(context.value.stream, raw);
+    if (value == "auto") return Dimension();
+    if (allowContent && value == "content") return Dimension::fromKeyword(DimensionKeyword::Content);
+    if (value == "min-content") return Dimension::fromKeyword(DimensionKeyword::MinContent);
+    if (value == "max-content") return Dimension::fromKeyword(DimensionKeyword::MaxContent);
+    if (value == "fit-content") return Dimension::fromKeyword(DimensionKeyword::FitContent);
+    const auto parsed = context.nonnegativeLength({context.value.stream, raw});
+    return parsed ? std::optional<Dimension>(Dimension::fromLength(*parsed)) : std::nullopt;
 }
 
 CompileResult compileFlex(detail::StyleCompileContext& context) {
@@ -1306,11 +1636,7 @@ CompileResult compileFlex(detail::StyleCompileContext& context) {
         const auto parsed = context.number({value.stream, raw});
         return parsed && *parsed >= 0.f ? parsed : std::nullopt;
     };
-    const auto basis = [&context, &value](detail::CSSTokenRange raw) -> std::optional<Dimension> {
-        if (normalizeCSSKeyword(value.stream, raw) == "auto") return Dimension();
-        const auto parsed = context.nonnegativeLength({value.stream, raw});
-        return parsed ? std::optional<Dimension>(Dimension::fromLength(*parsed)) : std::nullopt;
-    };
+    const auto basis = [&context, &value](detail::CSSTokenRange raw) -> std::optional<Dimension> { return parseDimension(context, raw, true); };
 
     float grow = 1.f;
     float shrink = 1.f;
@@ -1339,13 +1665,14 @@ CompileResult compileFlex(detail::StyleCompileContext& context) {
 }
 
 CompileResult compilePointerEvents(detail::StyleCompileContext& context) {
-    auto& [property, value, selector, result, sourceName] = context;
-    static constexpr std::array<std::pair<std::string_view, PointerEvents>, 3> sPointerEventsValues{{
+    static constexpr std::array<std::pair<std::string_view, PointerEvents>, 2> sPointerEventsValues{{
         {"auto", PointerEvents::Auto},
-        {"none", PointerEvents::PassThrough},
-        {"default", PointerEvents::Default},
+        {"none", PointerEvents::NoneValue},
     }};
-    return compileAlignment(context, context.keyword(), sPointerEventsValues);
+    const std::string value = context.keyword();
+    const auto found =
+        std::find_if(sPointerEventsValues.begin(), sPointerEventsValues.end(), [value](const auto& entry) { return entry.first == value; });
+    return found == sPointerEventsValues.end() ? context.invalid() : context.compiled(found->second);
 }
 
 CompileResult compileDisplay(detail::StyleCompileContext& context) {
@@ -1365,7 +1692,7 @@ CompileResult compileAppearance(detail::StyleCompileContext& context) {
     const std::string appearance = context.keyword();
     if (appearance == "auto") return context.compiled(AppearanceMode::Auto);
     if (appearance == "base") return context.compiled(AppearanceMode::Base);
-    if (appearance == "none") return context.compiled(AppearanceMode::Unstyled);
+    if (appearance == "none") return context.compiled(AppearanceMode::NoneValue);
     return context.invalid();
 }
 
@@ -1379,17 +1706,41 @@ CompileResult compileBoxSizing(detail::StyleCompileContext& context) {
 CompileResult compileColorScheme(detail::StyleCompileContext& context) {
     const auto& value = context.value;
     const std::vector<detail::CSSTokenRange> tokens = context.ranges();
-    if (tokens.size() == 1) {
-        const std::string scheme = normalizeCSSKeyword(value.stream, tokens.front());
-        if (scheme == "auto" || scheme == "normal") return context.compiled(ColorScheme::Auto);
-        if (scheme == "light") return context.compiled(ColorScheme::Light);
-        if (scheme == "dark") return context.compiled(ColorScheme::Dark);
-    } else if (tokens.size() == 2) {
-        const std::string first = normalizeCSSKeyword(value.stream, tokens[0]);
-        const std::string second = normalizeCSSKeyword(value.stream, tokens[1]);
-        if ((first == "light" && second == "dark") || (first == "dark" && second == "light")) return context.compiled(ColorScheme::LightDark);
+    if (tokens.empty()) return context.invalid();
+    if (tokens.size() == 1 && normalizeCSSKeyword(value.stream, tokens.front()) == "normal") return context.compiled(ColorSchemeValue{});
+
+    ColorSchemeValue parsed;
+    parsed.normal = false;
+    const auto isCustomIdentifier = [&value](detail::CSSTokenRange token) {
+        token = detail::trimCSSRange(value.stream, token);
+        return token.end == token.begin + 1 && value.stream.tokens()[token.begin].kind == detail::CSSTokenKind::Ident;
+    };
+    for (const detail::CSSTokenRange token : tokens) {
+        const std::string scheme = normalizeCSSKeyword(value.stream, token);
+        if (scheme == "only") {
+            if (parsed.only) return context.invalid();
+            parsed.only = true;
+        } else if (scheme == "light") {
+            if (std::find(parsed.schemes.begin(), parsed.schemes.end(), ColorScheme::Light) == parsed.schemes.end())
+                parsed.schemes.push_back(ColorScheme::Light);
+        } else if (scheme == "dark") {
+            if (std::find(parsed.schemes.begin(), parsed.schemes.end(), ColorScheme::Dark) == parsed.schemes.end())
+                parsed.schemes.push_back(ColorScheme::Dark);
+        } else if (scheme == "normal"
+                   || scheme == "default"
+                   || scheme == "inherit"
+                   || scheme == "initial"
+                   || scheme == "unset"
+                   || scheme == "revert"
+                   || scheme == "revert-layer")
+            return context.invalid();
+        else {
+            if (!isCustomIdentifier(token)) return context.invalid();
+            parsed.customIdentifiers.push_back(detail::decodeCSSIdentifier(value.stream.text(token.begin)));
+        }
     }
-    return context.invalid();
+    if (parsed.schemes.empty() && parsed.customIdentifiers.empty()) return context.invalid();
+    return context.compiled(parsed);
 }
 
 CompileResult compileGridArea(detail::StyleCompileContext& context) {
@@ -1413,6 +1764,9 @@ CompileResult compilePositionMode(detail::StyleCompileContext& context) {
     const std::string position = context.keyword();
     if (position == "static") return context.compiled(PositionMode::Static);
     if (position == "relative") return context.compiled(PositionMode::Relative);
+    if (position == "absolute") return context.compiled(PositionMode::Absolute);
+    if (position == "fixed") return context.compiled(PositionMode::Fixed);
+    if (position == "sticky") return context.compiled(PositionMode::Sticky);
     return context.invalid();
 }
 
@@ -1595,10 +1949,13 @@ CompileResult compileCursor(detail::StyleCompileContext& context) {
 
 CompileResult compileDimension(detail::StyleCompileContext& context) {
     auto& [property, value, selector, result, sourceName] = context;
-    if (context.keyword() == "auto") return context.compiled(Dimension());
-    const auto parsed = context.length();
-    if (!parsed || parsed->pixels < 0.f || parsed->percent < 0.f) return context.invalid();
-    return context.compiled(Dimension::fromLength(*parsed));
+    const auto parsed = parseDimension(context, value.range, false);
+    return parsed ? context.compiled(*parsed) : context.invalid();
+}
+
+CompileResult compileFlexBasis(detail::StyleCompileContext& context) {
+    const auto parsed = parseDimension(context, context.value.range, true);
+    return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compilePosition(detail::StyleCompileContext& context) {
@@ -1693,6 +2050,20 @@ template<auto Member> void copyMember(ComputedStyle& style, const ComputedStyle&
     style.*Member = parent.*Member;
 }
 
+void resetPointerEvents(ComputedStyle& style) {
+    style.pointerEvents = PointerEvents::Auto;
+    style.pointerEventsSpecified = false;
+}
+
+void specifyPointerEvents(ComputedStyle& style) {
+    style.pointerEventsSpecified = true;
+}
+
+void copyPointerEvents(ComputedStyle& style, const ComputedStyle& parent) {
+    style.pointerEvents = parent.pointerEvents;
+    style.pointerEventsSpecified = parent.pointerEventsSpecified;
+}
+
 void copyBackgroundColor(ComputedStyle& style, const ComputedStyle& parent) {
     style.backgroundColor = parent.backgroundColor;
     style.backgroundColorLightDark = parent.backgroundColorLightDark;
@@ -1752,18 +2123,45 @@ void copyFlexDirection(ComputedStyle& style, const ComputedStyle& parent) {
     style.flexDirectionSet = parent.flexDirectionSet;
 }
 
+void copyFlexWrap(ComputedStyle& style, const ComputedStyle& parent) {
+    style.flexWrap = parent.flexWrap;
+    style.flexWrapBalance = parent.flexWrapBalance;
+}
+
 void copyJustifyContent(ComputedStyle& style, const ComputedStyle& parent) {
     style.justifyContent = parent.justifyContent;
     style.justifyContentSet = parent.justifyContentSet;
 }
 
-void copyOutlineOffset(ComputedStyle& style, const ComputedStyle& parent) {
-    style.outline.offset = parent.outline.offset;
+void copyJustifySelf(ComputedStyle& style, const ComputedStyle& parent) {
+    style.justifySelf = parent.justifySelf;
 }
 
-void copySize(ComputedStyle& style, const ComputedStyle& parent) {
-    style.height = parent.height;
-    style.width = parent.width;
+void copyJustifyItems(ComputedStyle& style, const ComputedStyle& parent) {
+    style.justifyItems = parent.justifyItems;
+}
+
+void copyAlignItems(ComputedStyle& style, const ComputedStyle& parent) {
+    style.alignItems = parent.alignItems;
+}
+
+void copyAlignSelf(ComputedStyle& style, const ComputedStyle& parent) {
+    style.alignSelf = parent.alignSelf;
+}
+
+void copyAlignContent(ComputedStyle& style, const ComputedStyle& parent) {
+    style.alignContent = parent.alignContent;
+}
+
+void copyTextWrap(ComputedStyle& style, const ComputedStyle& parent) {
+    const auto modeFlag = static_cast<InheritedStyleProperties>(InheritedStyleProperty::TextWrapMode);
+    const auto styleFlag = static_cast<InheritedStyleProperties>(InheritedStyleProperty::TextWrapStyle);
+    if ((style.specifiedInheritedProperties & modeFlag) == 0) style.textWrap = parent.textWrap;
+    if ((style.specifiedInheritedProperties & styleFlag) == 0) style.textWrapStyle = parent.textWrapStyle;
+}
+
+void copyOutlineOffset(ComputedStyle& style, const ComputedStyle& parent) {
+    style.outline.offset = parent.outline.offset;
 }
 
 void copyStroke(ComputedStyle& style, const ComputedStyle& parent) {
@@ -1780,7 +2178,18 @@ void copyStrokeLinecap(ComputedStyle& style, const ComputedStyle& parent) {
 
 void copyVerticalAlign(ComputedStyle& style, const ComputedStyle& parent) {
     style.verticalAlign = parent.verticalAlign;
+    style.verticalAlignOffset = parent.verticalAlignOffset;
     style.verticalAlignSet = parent.verticalAlignSet;
+}
+
+void copyLineHeight(ComputedStyle& style, const ComputedStyle& parent) {
+    style.lineHeight = parent.lineHeight;
+    style.lineHeightPercentage.reset();
+}
+
+void inheritLineHeight(ComputedStyle& style, const ComputedStyle& parent) {
+    const auto flag = static_cast<InheritedStyleProperties>(InheritedStyleProperty::LineHeight);
+    if ((style.specifiedInheritedProperties & flag) == 0) copyLineHeight(style, parent);
 }
 
 template<auto Member> void resetMember(ComputedStyle& style) {
@@ -1805,16 +2214,46 @@ void resetFlexDirection(ComputedStyle& style) {
     style.flexDirectionSet = true;
 }
 
+void resetLineHeight(ComputedStyle& style) {
+    style.lineHeight = {};
+    style.lineHeightPercentage.reset();
+}
+
 void resetJustifyContent(ComputedStyle& style) {
     const ComputedStyle initial;
     style.justifyContent = initial.justifyContent;
     style.justifyContentSet = true;
 }
 
-void resetSize(ComputedStyle& style) {
+void resetJustifySelf(ComputedStyle& style) {
     const ComputedStyle initial;
-    style.height = initial.height;
-    style.width = initial.width;
+    style.justifySelf = initial.justifySelf;
+}
+
+void resetJustifyItems(ComputedStyle& style) {
+    const ComputedStyle initial;
+    style.justifyItems = initial.justifyItems;
+}
+
+void resetAlignItems(ComputedStyle& style) {
+    const ComputedStyle initial;
+    style.alignItems = initial.alignItems;
+}
+
+void resetAlignSelf(ComputedStyle& style) {
+    const ComputedStyle initial;
+    style.alignSelf = initial.alignSelf;
+}
+
+void resetAlignContent(ComputedStyle& style) {
+    const ComputedStyle initial;
+    style.alignContent = initial.alignContent;
+}
+
+void resetFlexWrap(ComputedStyle& style) {
+    const ComputedStyle initial;
+    style.flexWrap = initial.flexWrap;
+    style.flexWrapBalance = initial.flexWrapBalance;
 }
 
 void resetBorderWidth(ComputedStyle& style) {
@@ -1927,6 +2366,7 @@ void resetStrokeLinecap(ComputedStyle& style) {
 void resetVerticalAlign(ComputedStyle& style) {
     const ComputedStyle initial;
     style.verticalAlign = initial.verticalAlign;
+    style.verticalAlignOffset = initial.verticalAlignOffset;
     style.verticalAlignSet = true;
 }
 
@@ -2003,11 +2443,6 @@ void applyOutline(ComputedStyle& style, const StyleValue& value) {
 void applyOutlineOffset(ComputedStyle& style, const StyleValue& value) {
     style.outline.offset = std::get<Length>(value).pixels;
 }
-void applySize(ComputedStyle& style, const StyleValue& value) {
-    const StyleSize& size = std::get<StyleSize>(value);
-    style.height = size.height;
-    style.width = size.width;
-}
 void applyDisplay(ComputedStyle& style, const StyleValue& value) {
     style.display = std::get<DisplayMode>(value);
     style.displaySet = true;
@@ -2016,12 +2451,49 @@ void applyFlexDirection(ComputedStyle& style, const StyleValue& value) {
     style.flexDirection = std::get<FlexDirection>(value);
     style.flexDirectionSet = true;
 }
+void applyFlexWrap(ComputedStyle& style, const StyleValue& value) {
+    const FlexWrapValue parsed = std::get<FlexWrapValue>(value);
+    style.flexWrap = parsed.mode;
+    style.flexWrapBalance = parsed.balance;
+}
 void applyJustifyContent(ComputedStyle& style, const StyleValue& value) {
-    style.justifyContent = std::get<JustifyContent>(value);
+    const ContentAlignmentData parsed = std::get<ContentAlignmentData>(value);
+    style.justifyContent = parsed;
     style.justifyContentSet = true;
 }
+
+void applyJustifySelf(ComputedStyle& style, const StyleValue& value) {
+    const SelfAlignmentData parsed = std::get<SelfAlignmentData>(value);
+    style.justifySelf = parsed;
+}
+
+void applyJustifyItems(ComputedStyle& style, const StyleValue& value) {
+    const SelfAlignmentData parsed = std::get<SelfAlignmentData>(value);
+    style.justifyItems = parsed;
+}
+
+void applyAlignItems(ComputedStyle& style, const StyleValue& value) {
+    const SelfAlignmentData parsed = std::get<SelfAlignmentData>(value);
+    style.alignItems = parsed;
+}
+
+void applyAlignSelf(ComputedStyle& style, const StyleValue& value) {
+    const SelfAlignmentData parsed = std::get<SelfAlignmentData>(value);
+    style.alignSelf = parsed;
+}
+
+void applyAlignContent(ComputedStyle& style, const StyleValue& value) {
+    const ContentAlignmentData parsed = std::get<ContentAlignmentData>(value);
+    style.alignContent = parsed;
+}
+
+void applyTextWrapStyle(ComputedStyle& style, const StyleValue& value) {
+    style.textWrapStyle = std::get<TextWrapStyle>(value);
+}
 void applyVerticalAlign(ComputedStyle& style, const StyleValue& value) {
-    style.verticalAlign = std::get<VerticalAlign>(value);
+    const VerticalAlignValue parsed = std::get<VerticalAlignValue>(value);
+    style.verticalAlign = parsed.value;
+    style.verticalAlignOffset = parsed.offset;
     style.verticalAlignSet = true;
 }
 void applyFontWeight(ComputedStyle& style, const StyleValue& value) {
@@ -2031,6 +2503,17 @@ void applyFontWeight(ComputedStyle& style, const StyleValue& value) {
     }
     style.fontWeightAdjustment.reset();
     style.fontWeight = static_cast<U16>(std::get<float>(value));
+}
+
+void applyLineHeight(ComputedStyle& style, const StyleValue& value) {
+    style.lineHeightPercentage.reset();
+    if (const auto lengthPercentage = std::get_if<LengthPercentage>(&value)) {
+        if (const auto length = std::get_if<Length>(&lengthPercentage->value)) style.lineHeight = {LineHeight::Kind::Length, length->pixels};
+        else {
+            style.lineHeight = {};
+            style.lineHeightPercentage = std::get<Percentage>(lengthPercentage->value).value;
+        }
+    } else style.lineHeight = std::get<LineHeight>(value);
 }
 void applyStrokeLinecap(ComputedStyle& style, const StyleValue& value) {
     style.svgStrokeCap = std::get<StrokeCap>(value);
@@ -2045,9 +2528,16 @@ void applyStroke(ComputedStyle& style, const StyleValue& value) {
 }
 
 constexpr std::array<std::string_view, 2> kOverflowLonghands{"overflow-x", "overflow-y"};
+constexpr std::array<std::string_view, 2> kSizeLonghands{"height", "width"};
 constexpr std::array<std::string_view, 2> kMinSizeLonghands{"min-height", "min-width"};
+constexpr std::array<std::string_view, 2> kMaxSizeLonghands{"max-height", "max-width"};
 constexpr std::array<std::string_view, 2> kGapLonghands{"row-gap", "column-gap"};
 constexpr std::array<std::string_view, 3> kFlexLonghands{"flex-grow", "flex-shrink", "flex-basis"};
+constexpr std::array<std::string_view, 2> kFlexFlowLonghands{"flex-direction", "flex-wrap"};
+constexpr std::array<std::string_view, 2> kPlaceContentLonghands{"align-content", "justify-content"};
+constexpr std::array<std::string_view, 2> kPlaceItemsLonghands{"align-items", "justify-items"};
+constexpr std::array<std::string_view, 2> kPlaceSelfLonghands{"align-self", "justify-self"};
+constexpr std::array<std::string_view, 2> kTextWrapLonghands{"text-wrap-mode", "text-wrap-style"};
 constexpr std::array<std::string_view, 5> kFontLonghands{"font-style", "font-weight", "font-size", "line-height", "font-family"};
 constexpr std::array<std::string_view, 8> kBackgroundLonghands{"background-color", "background-image",     "background-position",
                                                                "background-size",  "background-repeat",    "background-origin",
@@ -2111,12 +2601,18 @@ const detail::StylePropertyDefinition kPropertyDefinitions[] = {
     {"left", compilePosition, applyLengthToOptional<&ComputedStyle::left>, resetMember<&ComputedStyle::left>, nullptr,
      copyMember<&ComputedStyle::left>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"margin", compileMargin, applyMember<&ComputedStyle::margin>, resetMember<&ComputedStyle::margin>, nullptr, copyMember<&ComputedStyle::margin>},
-    {"min-height", compileMinimumLength, applyMember<&ComputedStyle::minHeight>, resetMember<&ComputedStyle::minHeight>, nullptr,
+    {"min-height", compileMinimumDimension, applyMember<&ComputedStyle::minHeight>, resetMember<&ComputedStyle::minHeight>, nullptr,
      copyMember<&ComputedStyle::minHeight>},
     {"min-size", compileMinSize, nullptr, nullptr, nullptr, nullptr, StylePropertyImpact::Layout, false, InheritedStyleProperty::NotInherited,
      std::span<const std::string_view>(kMinSizeLonghands)},
-    {"min-width", compileMinimumLength, applyMember<&ComputedStyle::minWidth>, resetMember<&ComputedStyle::minWidth>, nullptr,
+    {"min-width", compileMinimumDimension, applyMember<&ComputedStyle::minWidth>, resetMember<&ComputedStyle::minWidth>, nullptr,
      copyMember<&ComputedStyle::minWidth>},
+    {"max-height", compileMaximumDimension, applyMember<&ComputedStyle::maxHeight>, resetMember<&ComputedStyle::maxHeight>, nullptr,
+     copyMember<&ComputedStyle::maxHeight>},
+    {"max-size", compileMaxSize, nullptr, nullptr, nullptr, nullptr, StylePropertyImpact::Layout, false, InheritedStyleProperty::NotInherited,
+     std::span<const std::string_view>(kMaxSizeLonghands)},
+    {"max-width", compileMaximumDimension, applyMember<&ComputedStyle::maxWidth>, resetMember<&ComputedStyle::maxWidth>, nullptr,
+     copyMember<&ComputedStyle::maxWidth>},
     {"opacity", compileOpacity, applyMember<&ComputedStyle::opacity>, resetMember<&ComputedStyle::opacity>, nullptr,
      copyMember<&ComputedStyle::opacity>, StylePropertyImpact::Paint},
     {"mask", compileMask, nullptr, nullptr, nullptr, nullptr, StylePropertyImpact::Paint, false, InheritedStyleProperty::NotInherited,
@@ -2143,8 +2639,8 @@ const detail::StylePropertyDefinition kPropertyDefinitions[] = {
      copyMember<&ComputedStyle::overflowY>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"padding", compileEdges, applyMember<&ComputedStyle::padding>, resetMember<&ComputedStyle::padding>, nullptr,
      copyMember<&ComputedStyle::padding>},
-    {"pointer-events", compilePointerEvents, applyMember<&ComputedStyle::pointerEvents>, resetMember<&ComputedStyle::pointerEvents>, nullptr,
-     copyMember<&ComputedStyle::pointerEvents>, StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"pointer-events", compilePointerEvents, applyMember<&ComputedStyle::pointerEvents>, resetPointerEvents, specifyPointerEvents, copyPointerEvents,
+     StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"position", compilePositionMode, applyMember<&ComputedStyle::position>, resetMember<&ComputedStyle::position>, nullptr,
      copyMember<&ComputedStyle::position>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"right", compilePosition, applyLengthToOptional<&ComputedStyle::right>, resetMember<&ComputedStyle::right>, nullptr,
@@ -2158,15 +2654,25 @@ const detail::StylePropertyDefinition kPropertyDefinitions[] = {
      StylePropertyImpact::Paint | StylePropertyImpact::Inherited, false, InheritedStyleProperty::ScrollbarColor},
     {"box-shadow", compileShadow, applyMember<&ComputedStyle::shadows>, resetMember<&ComputedStyle::shadows>, nullptr,
      copyMember<&ComputedStyle::shadows>, StylePropertyImpact::Paint},
-    {"size", compileSize, applySize, resetSize, nullptr, copySize},
+    {"size", compileSize, nullptr, nullptr, nullptr, nullptr, StylePropertyImpact::Layout, false, InheritedStyleProperty::NotInherited,
+     std::span<const std::string_view>(kSizeLonghands)},
     {"top", compilePosition, applyLengthToOptional<&ComputedStyle::top>, resetMember<&ComputedStyle::top>, nullptr, copyMember<&ComputedStyle::top>,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"translate", compileTranslate, applyMember<&ComputedStyle::translate>, resetMember<&ComputedStyle::translate>, nullptr,
      copyMember<&ComputedStyle::translate>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"width", compileDimension, applyMember<&ComputedStyle::width>, resetMember<&ComputedStyle::width>, nullptr, copyMember<&ComputedStyle::width>},
-    {"align-items", compileAlignItems, applyMember<&ComputedStyle::alignItems>, resetMember<&ComputedStyle::alignItems>, nullptr,
-     copyMember<&ComputedStyle::alignItems>},
+    {"align-items", compileAlignItems, applyAlignItems, resetAlignItems, nullptr, copyAlignItems},
+    {"align-content", compileAlignContent, applyAlignContent, resetAlignContent, nullptr, copyAlignContent},
+    {"place-content", compilePlaceContent, nullptr, nullptr, nullptr, nullptr, StylePropertyImpact::Layout, false,
+     InheritedStyleProperty::NotInherited, std::span<const std::string_view>(kPlaceContentLonghands)},
+    {"place-items", compilePlaceItems, nullptr, nullptr, nullptr, nullptr, StylePropertyImpact::Layout, false, InheritedStyleProperty::NotInherited,
+     std::span<const std::string_view>(kPlaceItemsLonghands)},
+    {"place-self", compilePlaceSelf, nullptr, nullptr, nullptr, nullptr, StylePropertyImpact::Layout, false, InheritedStyleProperty::NotInherited,
+     std::span<const std::string_view>(kPlaceSelfLonghands)},
     {"flex-direction", compileFlexDirection, applyFlexDirection, resetFlexDirection, nullptr, copyFlexDirection},
+    {"flex-wrap", compileFlexWrap, applyFlexWrap, resetFlexWrap, nullptr, copyFlexWrap},
+    {"flex-flow", compileFlexFlow, nullptr, nullptr, nullptr, nullptr, StylePropertyImpact::Layout, false, InheritedStyleProperty::NotInherited,
+     std::span<const std::string_view>(kFlexFlowLonghands)},
     {"gap", compileGap, nullptr, nullptr, nullptr, nullptr, StylePropertyImpact::Layout, false, InheritedStyleProperty::NotInherited,
      std::span<const std::string_view>(kGapLonghands)},
     {"row-gap", compileGapLonghand, applyMember<&ComputedStyle::rowGap>, resetMember<&ComputedStyle::rowGap>, nullptr,
@@ -2177,16 +2683,17 @@ const detail::StylePropertyDefinition kPropertyDefinitions[] = {
      resetMember<&ComputedStyle::gridArea>, nullptr, copyMember<&ComputedStyle::gridArea>,
      StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"justify-content", compileJustifyContent, applyJustifyContent, resetJustifyContent, nullptr, copyJustifyContent},
-    {"justify-self", compileJustifySelf, applyMember<&ComputedStyle::justifySelf>, resetMember<&ComputedStyle::justifySelf>, nullptr,
-     copyMember<&ComputedStyle::justifySelf>, StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"justify-self", compileJustifySelf, applyJustifySelf, resetJustifySelf, nullptr, copyJustifySelf,
+     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
+    {"justify-items", compileJustifyItems, applyJustifyItems, resetJustifyItems, nullptr, copyJustifyItems,
+     StylePropertyImpact::Layout | StylePropertyImpact::Paint | StylePropertyImpact::HitTest},
     {"-internal-align-content-block", compileInternalAlignContentBlock, applyMember<&ComputedStyle::alignContentBlockCenter>,
      resetMember<&ComputedStyle::alignContentBlockCenter>, nullptr, copyMember<&ComputedStyle::alignContentBlockCenter>, StylePropertyImpact::Layout,
      true},
-    {"align-self", compileAlignSelf, applyMember<&ComputedStyle::alignSelf>, resetMember<&ComputedStyle::alignSelf>, nullptr,
-     copyMember<&ComputedStyle::alignSelf>},
+    {"align-self", compileAlignSelf, applyAlignSelf, resetAlignSelf, nullptr, copyAlignSelf},
     {"flex", compileFlex, nullptr, nullptr, nullptr, nullptr, StylePropertyImpact::Layout, false, InheritedStyleProperty::NotInherited,
      std::span<const std::string_view>(kFlexLonghands)},
-    {"flex-basis", compileDimension, applyMember<&ComputedStyle::flexBasis>, resetMember<&ComputedStyle::flexBasis>, nullptr,
+    {"flex-basis", compileFlexBasis, applyMember<&ComputedStyle::flexBasis>, resetMember<&ComputedStyle::flexBasis>, nullptr,
      copyMember<&ComputedStyle::flexBasis>},
     {"flex-grow", compileUnitlessNonnegativeNumber, applyMember<&ComputedStyle::flexGrow>, resetMember<&ComputedStyle::flexGrow>, nullptr,
      copyMember<&ComputedStyle::flexGrow>},
@@ -2212,8 +2719,7 @@ const detail::StylePropertyDefinition kPropertyDefinitions[] = {
     {"font-weight", compileFontWeight, applyFontWeight, resetFontWeight, specifyInherited<InheritedStyleProperty::FontWeight>,
      inheritMember<InheritedStyleProperty::FontWeight, &ComputedStyle::fontWeight>, StylePropertyImpact::Layout | StylePropertyImpact::Inherited,
      false, InheritedStyleProperty::FontWeight},
-    {"line-height", compileLineHeight, applyMember<&ComputedStyle::lineHeight>, resetMember<&ComputedStyle::lineHeight>,
-     specifyInherited<InheritedStyleProperty::LineHeight>, inheritMember<InheritedStyleProperty::LineHeight, &ComputedStyle::lineHeight>,
+    {"line-height", compileLineHeight, applyLineHeight, resetLineHeight, specifyInherited<InheritedStyleProperty::LineHeight>, inheritLineHeight,
      StylePropertyImpact::Layout | StylePropertyImpact::Inherited, false, InheritedStyleProperty::LineHeight},
     {"letter-spacing", compileSpacing, applyMember<&ComputedStyle::letterSpacing>, resetMember<&ComputedStyle::letterSpacing>,
      specifyInherited<InheritedStyleProperty::LetterSpacing>, inheritMember<InheritedStyleProperty::LetterSpacing, &ComputedStyle::letterSpacing>,
@@ -2228,9 +2734,14 @@ const detail::StylePropertyDefinition kPropertyDefinitions[] = {
      StylePropertyImpact::Paint | StylePropertyImpact::Inherited, false, InheritedStyleProperty::Color},
     {"text-overflow", compileTextOverflow, applyMember<&ComputedStyle::textOverflow>, resetMember<&ComputedStyle::textOverflow>, nullptr,
      copyMember<&ComputedStyle::textOverflow>, StylePropertyImpact::Layout | StylePropertyImpact::Paint},
-    {"text-wrap", compileTextWrap, applyMember<&ComputedStyle::textWrap>, resetMember<&ComputedStyle::textWrap>,
-     specifyInherited<InheritedStyleProperty::TextWrap>, inheritMember<InheritedStyleProperty::TextWrap, &ComputedStyle::textWrap>,
-     StylePropertyImpact::Layout | StylePropertyImpact::Inherited, false, InheritedStyleProperty::TextWrap},
+    {"text-wrap", compileTextWrap, nullptr, nullptr, nullptr, nullptr, StylePropertyImpact::Layout, false, InheritedStyleProperty::NotInherited,
+     std::span<const std::string_view>(kTextWrapLonghands)},
+    {"text-wrap-mode", compileTextWrapMode, applyMember<&ComputedStyle::textWrap>, resetMember<&ComputedStyle::textWrap>,
+     specifyInherited<InheritedStyleProperty::TextWrapMode>, copyTextWrap, StylePropertyImpact::Layout | StylePropertyImpact::Inherited, false,
+     InheritedStyleProperty::TextWrapMode},
+    {"text-wrap-style", compileTextWrapStyle, applyTextWrapStyle, resetMember<&ComputedStyle::textWrapStyle>,
+     specifyInherited<InheritedStyleProperty::TextWrapStyle>, copyTextWrap, StylePropertyImpact::Layout | StylePropertyImpact::Inherited, false,
+     InheritedStyleProperty::TextWrapStyle},
     {"vertical-align", compileVerticalAlign, applyVerticalAlign, resetVerticalAlign, nullptr, copyVerticalAlign},
     {"visibility", compileVisibility, applyMember<&ComputedStyle::visibility>, resetMember<&ComputedStyle::visibility>,
      specifyInherited<InheritedStyleProperty::Visibility>, inheritMember<InheritedStyleProperty::Visibility, &ComputedStyle::visibility>,

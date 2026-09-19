@@ -50,6 +50,7 @@ struct LayoutContextKey {
     LayoutDirection direction = LayoutDirection::LeftToRight;
     ScrollbarMode scrollbarMode = ScrollbarMode::Classic;
     NativeLayoutMetrics nativeMetrics;
+    ColorSchemeContext colorSchemeContext;
 
     constexpr bool operator==(const LayoutContextKey& other) const {
         return styleRuleSet == other.styleRuleSet
@@ -58,13 +59,15 @@ struct LayoutContextKey {
             && textMetricsGeneration == other.textMetricsGeneration
             && direction == other.direction
             && scrollbarMode == other.scrollbarMode
-            && nativeMetrics == other.nativeMetrics;
+            && nativeMetrics == other.nativeMetrics
+            && colorSchemeContext == other.colorSchemeContext;
     }
 };
 
 struct ElementLayoutCache {
     Vec2 measuredSize;
     Vec2 intrinsicSize;
+    Vec2 minContentSize;
     float measuredWidth = 0.f;
     float measuredHeight = 0.f;
     LayoutContextKey layoutContext;

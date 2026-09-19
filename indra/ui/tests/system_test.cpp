@@ -162,7 +162,7 @@ TEST(NativeAppearanceTest, KeepsCssAppearanceUnstyled) {
     auto button = makeElementValue<HTMLButtonElement>();
     RecordingPaintContext recording;
     ComputedStyle style;
-    style.appearance = AppearanceMode::Unstyled;
+    style.appearance = AppearanceMode::NoneValue;
 
     button.paint(recording, style, 1.f);
 

@@ -113,10 +113,10 @@ TEST_F(LayoutEngineTest, ResolvesPercentageLineHeightAgainstComputedFontSize) {
     ASSERT_EQ(panelStyle.lineHeight.kind, LineHeight::Kind::Length);
     EXPECT_EQ(panelStyle.lineHeight.value, 30.f);
     const ComputedStyle& inheritedStyle = styles.style(*inheritedPointer);
-    EXPECT_EQ(inheritedStyle.lineHeight.kind, LineHeight::Kind::Length);
+    ASSERT_EQ(inheritedStyle.lineHeight.kind, LineHeight::Kind::Length);
     EXPECT_EQ(inheritedStyle.lineHeight.value, 30.f);
     const ComputedStyle& localStyle = styles.style(*localPointer);
-    EXPECT_EQ(localStyle.lineHeight.kind, LineHeight::Kind::Length);
+    ASSERT_EQ(localStyle.lineHeight.kind, LineHeight::Kind::Length);
     EXPECT_NEAR(localStyle.lineHeight.value, 12.f, 1.0e-4f);
 }
 
@@ -432,7 +432,7 @@ TEST_F(LayoutEngineTest, LeavesUnstyledButtonUncentered) {
     button.append(std::move(label));
 
     const ComputedStyle computed = computedStyle(styleSheet, button);
-    ASSERT_EQ(computed.appearance, radia::ui::AppearanceMode::Unstyled);
+    ASSERT_EQ(computed.appearance, radia::ui::AppearanceMode::NoneValue);
 
     LayoutEngine::layout(button, styleSheet, text);
 
@@ -557,6 +557,180 @@ TEST_F(LayoutEngineTest, PositionsChildByEdges) {
     EXPECT_EQ(root.children()[0]->rect().bottom(), 77.f);
 }
 
+TEST_F(LayoutEngineTest, RemovesAbsoluteAndFixedChildrenFromFlow) {
+    StyleSheet styleSheet;
+    constexpr char kPositionedLayout[] =
+        "panel { position: relative; width: 100px; height: 100px; } label { display: block; width: 10px; height: 10px; } "
+        "#absolute { position: absolute; left: 10px; top: 5px; width: 20px; height: 15px; } "
+        "#fixed { position: fixed; right: 7px; bottom: 9px; width: 12px; height: 11px; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kPositionedLayout).ok());
+
+    auto root = makeElementValue<HTMLPanelElement>();
+    root.setRect({0.f, 0.f, 100.f, 100.f});
+    auto normal = makeElement<HTMLLabelElement>("normal");
+    auto absolute = makeElement<HTMLLabelElement>("absolute");
+    absolute->setId("absolute");
+    auto fixed = makeElement<HTMLLabelElement>("fixed");
+    fixed->setId("fixed");
+    root.append(std::move(normal));
+    root.append(std::move(absolute));
+    root.append(std::move(fixed));
+    root.append(makeElement<HTMLLabelElement>());
+
+    LayoutEngine::layout(root, styleSheet, text);
+    EXPECT_EQ(root.children()[0]->rect().top(), 100.f);
+    EXPECT_EQ(root.children()[3]->rect().top(), 90.f);
+    EXPECT_EQ(root.children()[1]->rect().left(), 10.f);
+    EXPECT_EQ(root.children()[1]->rect().top(), 95.f);
+    EXPECT_EQ(root.children()[2]->rect().right(), 93.f);
+    EXPECT_EQ(root.children()[2]->rect().bottom(), 9.f);
+}
+
+TEST_F(LayoutEngineTest, UsesNearestPositionedContainingBlock) {
+    StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet
+                    .loadRadia("panel { display: block; } panel.positioned { position: relative; width: 100px; height: 60px; left: 20px; } "
+                               "label { width: 10px; height: 10px; } label.absolute { position: absolute; left: 10px; top: 5px; }")
+                    .ok());
+
+    auto root = makeElementValue<HTMLPanelElement>();
+    root.setRect({0.f, 0.f, 200.f, 100.f});
+    auto positioned = makeElement<HTMLPanelElement>();
+    positioned->classList().add("positioned");
+    Element* positionedPtr = positioned.get();
+    auto absolute = makeElement<HTMLLabelElement>();
+    absolute->classList().add("absolute");
+    Element* absolutePtr = absolute.get();
+    positioned->append(std::move(absolute));
+    root.append(std::move(positioned));
+
+    LayoutEngine::layout(root, styleSheet, text);
+
+    EXPECT_EQ(positionedPtr->rect().left(), 20.f);
+    EXPECT_EQ(absolutePtr->rect().left(), 30.f);
+    EXPECT_EQ(absolutePtr->rect().top(), positionedPtr->rect().top() - 5.f);
+}
+
+TEST_F(LayoutEngineTest, KeepsFixedChildrenAtViewportWhenScrolled) {
+    StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet
+                    .loadRadia("panel { display: block; width: 200px; height: 100px; } .scroll { width: 100px; height: 50px; overflow-y: scroll; } "
+                               ".spacer { height: 200px; } .fixed { position: fixed; left: 20px; top: 10px; width: 10px; height: 10px; }")
+                    .ok());
+
+    auto root = makeElementValue<HTMLPanelElement>();
+    root.setRect({0.f, 0.f, 200.f, 100.f});
+    auto scroll = makeElement<HTMLPanelElement>();
+    scroll->classList().add("scroll");
+    Element* scrollPtr = scroll.get();
+    scroll->append(makeElement<HTMLPanelElement>());
+    scroll->children().front()->classList().add("spacer");
+    auto fixed = makeElement<HTMLLabelElement>();
+    fixed->classList().add("fixed");
+    Element* fixedPtr = fixed.get();
+    scroll->append(std::move(fixed));
+    root.append(std::move(scroll));
+
+    LayoutEngine::layout(root, styleSheet, text);
+    ASSERT_GT(scrollPtr->scrollMetrics().maxScrollTop, 20.f);
+    scrollPtr->scrollTo(0.f, 20.f);
+    LayoutEngine::layout(root, styleSheet, text);
+
+    EXPECT_FLOAT_EQ(fixedPtr->rect().left(), 20.f);
+    EXPECT_FLOAT_EQ(fixedPtr->rect().top(), 90.f);
+}
+
+TEST_F(LayoutEngineTest, ExcludesFixedChildrenFromScrollableOverflow) {
+    StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet
+                    .loadRadia("panel { display: block; width: 100px; height: 50px; overflow: auto; } "
+                               ".fixed { position: fixed; left: 20px; top: 500px; width: 10px; height: 10px; }")
+                    .ok());
+
+    auto root = makeElementValue<HTMLPanelElement>();
+    root.setRect({0.f, 0.f, 100.f, 50.f});
+    root.append(makeElement<HTMLLabelElement>());
+    root.children().front()->classList().add("fixed");
+
+    LayoutEngine::layout(root, styleSheet, text);
+
+    EXPECT_FLOAT_EQ(root.scrollWidth(), 100.f);
+    EXPECT_FLOAT_EQ(root.scrollHeight(), 50.f);
+    EXPECT_FLOAT_EQ(root.scrollMetrics().maxScrollTop, 0.f);
+}
+
+TEST_F(LayoutEngineTest, AppliesIntrinsicDimensionKeywords) {
+    StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet
+                    .loadRadia("panel { display: flex; flex-direction: column; align-items: flex-start; width: 20px; height: 100px; } "
+                               "label { display: block; font-size: 10px; line-height: 10px; text-wrap: wrap; } "
+                               "#min { width: min-content; } #max { width: max-content; } #fit { width: fit-content; }")
+                    .ok());
+
+    auto root = makeElementValue<HTMLPanelElement>();
+    root.setRect({0.f, 0.f, 20.f, 100.f});
+    auto min = makeElement<HTMLLabelElement>();
+    min->setId("min").textContent("alpha beta");
+    Element* minPtr = min.get();
+    auto max = makeElement<HTMLLabelElement>();
+    max->setId("max").textContent("alpha beta");
+    Element* maxPtr = max.get();
+    auto fit = makeElement<HTMLLabelElement>();
+    fit->setId("fit").textContent("alpha beta");
+    Element* fitPtr = fit.get();
+    root.append(std::move(min));
+    root.append(std::move(max));
+    root.append(std::move(fit));
+
+    LayoutEngine::layout(root, styleSheet, text);
+
+    EXPECT_FLOAT_EQ(minPtr->rect().w, 29.f);
+    EXPECT_FLOAT_EQ(maxPtr->rect().w, 58.f);
+    EXPECT_FLOAT_EQ(fitPtr->rect().w, 29.f);
+
+    StyleSheet flexBasisSheet;
+    ASSERT_TRUE(flexBasisSheet
+                    .loadRadia("panel { display: flex; width: 100px; height: 20px; } #basis { display: block; flex-basis: min-content; "
+                               "font-size: 10px; line-height: 10px; text-wrap: wrap; }")
+                    .ok());
+    auto flexRoot = makeElementValue<HTMLPanelElement>();
+    flexRoot.setRect({0.f, 0.f, 100.f, 20.f});
+    auto basis = makeElement<HTMLLabelElement>();
+    basis->setId("basis").textContent("alpha beta");
+    Element* basisPtr = basis.get();
+    flexRoot.append(std::move(basis));
+    LayoutEngine::layout(flexRoot, flexBasisSheet, text);
+    EXPECT_FLOAT_EQ(basisPtr->rect().w, 29.f);
+}
+
+TEST_F(LayoutEngineTest, ClampsStickyChildrenToScrollport) {
+    StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet
+                    .loadRadia("panel { display: block; width: 100px; height: 100px; } .scroll { width: 100px; height: 50px; overflow-y: scroll; } "
+                               ".sticky { position: sticky; top: 0px; width: 100px; height: 10px; } .spacer { height: 200px; }")
+                    .ok());
+
+    auto root = makeElementValue<HTMLPanelElement>();
+    root.setRect({0.f, 0.f, 100.f, 100.f});
+    auto scroll = makeElement<HTMLPanelElement>();
+    scroll->classList().add("scroll");
+    Element* scrollPtr = scroll.get();
+    auto sticky = makeElement<HTMLLabelElement>();
+    sticky->classList().add("sticky");
+    Element* stickyPtr = sticky.get();
+    scroll->append(std::move(sticky));
+    auto spacer = makeElement<HTMLPanelElement>();
+    spacer->classList().add("spacer");
+    scroll->append(std::move(spacer));
+    root.append(std::move(scroll));
+
+    LayoutEngine::layout(root, styleSheet, text);
+    scrollPtr->scrollTo(0.f, 20.f);
+    LayoutEngine::layout(root, styleSheet, text);
+
+    EXPECT_FLOAT_EQ(stickyPtr->rect().top(), 80.f);
+}
+
 TEST_F(LayoutEngineTest, LaysOutFloaterParts) {
     StyleSheet styleSheet;
     constexpr char kFloaterLayout[] =
@@ -605,6 +779,27 @@ TEST_F(LayoutEngineTest, DistributesAutoMarginAlongRow) {
     EXPECT_EQ(panel.children()[1]->rect().x, 90.f);
 }
 
+TEST_F(LayoutEngineTest, GrowsFlexItemsBeforeResolvingAutoMargins) {
+    StyleSheet styleSheet;
+    constexpr char kFlexLayout[] = "panel { display: flex; flex-direction: row; } "
+                                   "label { width: 10px; height: 10px; } #growing { flex-grow: 1; } #pushed { margin-left: auto; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kFlexLayout).ok());
+
+    auto panel = makeElementValue<HTMLPanelElement>();
+    panel.setRect({0.f, 0.f, 100.f, 20.f});
+    auto growing = makeElement<HTMLLabelElement>();
+    growing->setId("growing");
+    auto pushed = makeElement<HTMLLabelElement>();
+    pushed->setId("pushed");
+    panel.append(std::move(growing));
+    panel.append(std::move(pushed));
+
+    LayoutEngine::layout(panel, styleSheet, text);
+
+    EXPECT_EQ(panel.children()[0]->rect().w, 90.f);
+    EXPECT_EQ(panel.children()[1]->rect().x, 90.f);
+}
+
 TEST_F(LayoutEngineTest, CentersColumnChildWithAutoMargins) {
     StyleSheet styleSheet;
     constexpr char kCenteredColumnLayout[] = "panel { display: flex; flex-direction: column; } "
@@ -619,7 +814,7 @@ TEST_F(LayoutEngineTest, CentersColumnChildWithAutoMargins) {
 
 TEST_F(LayoutEngineTest, CentersIconInButton) {
     StyleSheet styleSheet;
-    constexpr char kButtonLayout[] = "button { size: 24px; padding: 20px; display: flex; flex-direction: row; justify-content: center; } "
+    constexpr char kButtonLayout[] = "button { size: 24px; padding: 4px; display: flex; flex-direction: row; justify-content: center; } "
                                      "button > i { size: 16px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kButtonLayout).ok());
     auto button = makeElementValue<HTMLButtonElement>();
@@ -828,6 +1023,28 @@ TEST_F(LayoutEngineTest, PositionsSwitchPseudos) {
     EXPECT_EQ(rtlControl.sliderThumb()->rect().y, 18.f);
 }
 
+TEST_F(LayoutEngineTest, PositionsOutOfFlowPseudoChildren) {
+    StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet
+                    .loadRadia("input[switch] { appearance: base; display: block; position: relative; width: 80px; height: 40px; padding: 0; } "
+                               "input[switch]::slider-track { display: block; position: relative; width: 40px; height: 20px; } "
+                               "input[switch]::slider-fill { position: absolute; left: 3px; top: 4px; width: 10px; height: 6px; }")
+                    .ok());
+
+    auto control = makeElementValue<HTMLInputElement>();
+    control.type("checkbox").switchMode(true);
+    control.setRect({0.f, 0.f, 80.f, 40.f});
+
+    LayoutEngine::layout(control, styleSheet, text);
+
+    ASSERT_NE(control.sliderTrack(), nullptr);
+    ASSERT_NE(control.sliderFill(), nullptr);
+    EXPECT_FLOAT_EQ(control.sliderFill()->rect().left(), control.sliderTrack()->rect().left() + 3.f);
+    EXPECT_FLOAT_EQ(control.sliderFill()->rect().top(), control.sliderTrack()->rect().top() - 4.f);
+    EXPECT_FLOAT_EQ(control.sliderFill()->rect().w, 10.f);
+    EXPECT_FLOAT_EQ(control.sliderFill()->rect().h, 6.f);
+}
+
 TEST_F(LayoutEngineTest, PlacesGridAreasInImplicitTracks) {
     StyleSheet styleSheet;
     constexpr char kGridLayout[] = "panel { display: grid; gap: 10px; } label { width: 10px; height: 10px; justify-self: start; } "
@@ -894,6 +1111,64 @@ TEST_F(LayoutEngineTest, AppliesRightToLeftRowDirection) {
     LayoutEngine::layout(panel, styleSheet, text, LayoutDirection::RightToLeft);
     EXPECT_EQ(panel.children()[0]->rect().right(), 100.f);
     EXPECT_EQ(panel.children()[1]->rect().right(), 78.f);
+}
+
+TEST_F(LayoutEngineTest, AppliesReverseFlexStartAndLogicalStart) {
+    StyleSheet styleSheet;
+    constexpr char kDirection[] =
+        "panel { display: flex; flex-direction: row-reverse; gap: 2px; } panel.flex { justify-content: flex-start; } "
+        "panel.logical { justify-content: start; } panel.column { flex-direction: column-reverse; justify-content: flex-start; } "
+        "label { width: 10px; height: 10px; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kDirection).ok());
+
+    auto flex = makeElementValue<HTMLPanelElement>();
+    flex.setRect({0.f, 0.f, 100.f, 20.f});
+    flex.classList().add("flex");
+    flex.append(makeElement<HTMLLabelElement>("first"));
+    flex.append(makeElement<HTMLLabelElement>("second"));
+    LayoutEngine::layout(flex, styleSheet, text);
+    EXPECT_EQ(flex.children()[0]->rect().right(), 100.f);
+    EXPECT_EQ(flex.children()[1]->rect().right(), 88.f);
+
+    auto logical = makeElementValue<HTMLPanelElement>();
+    logical.setRect({0.f, 0.f, 100.f, 20.f});
+    logical.classList().add("logical");
+    logical.append(makeElement<HTMLLabelElement>("first"));
+    logical.append(makeElement<HTMLLabelElement>("second"));
+    LayoutEngine::layout(logical, styleSheet, text);
+    EXPECT_EQ(logical.children()[0]->rect().left(), 12.f);
+    EXPECT_EQ(logical.children()[1]->rect().left(), 0.f);
+
+    LayoutEngine::layout(flex, styleSheet, text, LayoutDirection::RightToLeft);
+    EXPECT_EQ(flex.children()[0]->rect().left(), 0.f);
+    EXPECT_EQ(flex.children()[1]->rect().left(), 12.f);
+
+    auto column = makeElementValue<HTMLPanelElement>();
+    column.setRect({0.f, 0.f, 20.f, 100.f});
+    column.classList().add("column");
+    column.append(makeElement<HTMLLabelElement>("first"));
+    column.append(makeElement<HTMLLabelElement>("second"));
+    LayoutEngine::layout(column, styleSheet, text);
+    EXPECT_EQ(column.children()[0]->rect().bottom(), 0.f);
+    EXPECT_EQ(column.children()[1]->rect().bottom(), 12.f);
+}
+
+TEST_F(LayoutEngineTest, AppliesWrapReverseCrossStart) {
+    StyleSheet styleSheet;
+    constexpr char kWrapLayout[] =
+        "panel { display: flex; flex-direction: row; flex-wrap: wrap-reverse; align-content: flex-start; gap: 2px; } label { size: 10px; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kWrapLayout).ok());
+
+    auto panel = makeElementValue<HTMLPanelElement>();
+    panel.setRect({0.f, 0.f, 22.f, 40.f});
+    panel.append(makeElement<HTMLLabelElement>("first"));
+    panel.append(makeElement<HTMLLabelElement>("second"));
+    panel.append(makeElement<HTMLLabelElement>("third"));
+
+    LayoutEngine::layout(panel, styleSheet, text);
+    EXPECT_EQ(panel.children()[0]->rect().bottom(), 0.f);
+    EXPECT_EQ(panel.children()[1]->rect().bottom(), 0.f);
+    EXPECT_EQ(panel.children()[2]->rect().bottom(), 12.f);
 }
 
 TEST_F(LayoutEngineTest, PreservesNegativeNormalOffsets) {
@@ -1001,6 +1276,32 @@ TEST_F(LayoutEngineTest, AppliesCrossAxisAlignment) {
     LayoutEngine::layout(panel, styleSheet, text, LayoutDirection::RightToLeft);
     EXPECT_EQ(panel.children()[0]->rect().right(), 100.f);
     EXPECT_EQ(panel.children()[2]->rect().left(), 0.f);
+}
+
+TEST_F(LayoutEngineTest, AppliesSafeCrossAxisAlignment) {
+    StyleSheet styleSheet;
+    ASSERT_TRUE(
+        styleSheet
+            .loadRadia(
+                ".safe { display: flex; align-items: safe center; } .unsafe { display: flex; align-items: unsafe center; } label { size: 20px 10px; }")
+            .ok());
+
+    auto safe = makeElementValue<HTMLPanelElement>();
+    safe.classList().add("safe");
+    safe.setRect({0.f, 0.f, 20.f, 10.f});
+    safe.append(makeElement<HTMLLabelElement>());
+    EXPECT_EQ(computedStyle(styleSheet, safe).alignItems.overflow, radia::ui::OverflowAlignment::Safe);
+    LayoutEngine::layout(safe, styleSheet, text);
+
+    auto unsafe = makeElementValue<HTMLPanelElement>();
+    unsafe.classList().add("unsafe");
+    unsafe.setRect({0.f, 0.f, 20.f, 10.f});
+    unsafe.append(makeElement<HTMLLabelElement>());
+    EXPECT_EQ(computedStyle(styleSheet, unsafe).alignItems.overflow, radia::ui::OverflowAlignment::Unsafe);
+    LayoutEngine::layout(unsafe, styleSheet, text);
+
+    EXPECT_EQ(safe.children().front()->rect().top(), safe.rect().top());
+    EXPECT_GT(unsafe.children().front()->rect().top(), unsafe.rect().top());
 }
 
 TEST_F(LayoutEngineTest, StretchesNormalFlexItems) {
@@ -1138,11 +1439,12 @@ TEST_F(LayoutEngineTest, IgnoresVerticalAlignOutsideInlineFlow) {
     EXPECT_EQ(freeBottom.children()[0]->rect().bottom(), 30.f);
 }
 
-TEST_F(LayoutEngineTest, WrapsChildrenAcrossFlowBreaks) {
+TEST_F(LayoutEngineTest, WrapsFlexItemsByAvailableMainSize) {
     StyleSheet styleSheet;
-    constexpr char kFlowBreakLayout[] = "panel { display: flex; flex-direction: row; gap: 2px; } "
-                                        "label { size: 10px; }";
-    ASSERT_TRUE(styleSheet.loadRadia(kFlowBreakLayout).ok());
+    constexpr char kWrapLayout[] = "panel { display: flex; flex-direction: row; flex-wrap: wrap; align-content: start; gap: 2px; } "
+                                   "panel.end { align-content: end; } "
+                                   "label { size: 10px; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kWrapLayout).ok());
 
     auto panel = makeElementValue<HTMLPanelElement>();
     auto first = makeElement<HTMLLabelElement>("first");
@@ -1154,14 +1456,158 @@ TEST_F(LayoutEngineTest, WrapsChildrenAcrossFlowBreaks) {
     panel.append(std::move(third));
 
     LayoutEngine::measure(panel, styleSheet, text);
-    EXPECT_EQ(panel.desiredSize().x, 22.f);
-    EXPECT_EQ(panel.desiredSize().y, 22.f);
+    EXPECT_EQ(panel.desiredSize().x, 34.f);
+    EXPECT_EQ(panel.desiredSize().y, 10.f);
 
-    panel.setRect({0.f, 0.f, 40.f, 40.f});
+    panel.setRect({0.f, 0.f, 22.f, 40.f});
     LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[0]->rect().top(), 40.f);
-    EXPECT_EQ(panel.children()[1]->rect().top(), 28.f);
+    EXPECT_EQ(panel.children()[1]->rect().top(), 40.f);
+    EXPECT_EQ(panel.children()[1]->rect().left(), 12.f);
+    EXPECT_EQ(panel.children()[2]->rect().top(), 28.f);
+    EXPECT_EQ(panel.children()[2]->rect().left(), 0.f);
+
+    panel.classList().add("end");
+    LayoutEngine::layout(panel, styleSheet, text);
+    EXPECT_EQ(panel.children()[0]->rect().top(), 22.f);
+    EXPECT_EQ(panel.children()[1]->rect().top(), 22.f);
+    EXPECT_EQ(panel.children()[2]->rect().top(), 10.f);
+}
+
+TEST_F(LayoutEngineTest, WrapsColumnFlexItems) {
+    StyleSheet styleSheet;
+    constexpr char kWrapLayout[] = "panel { display: flex; flex-direction: column; flex-wrap: wrap; align-content: start; gap: 2px; } "
+                                   "label { size: 10px; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kWrapLayout).ok());
+
+    auto panel = makeElementValue<HTMLPanelElement>();
+    panel.setRect({0.f, 0.f, 40.f, 22.f});
+    panel.append(makeElement<HTMLLabelElement>("first"));
+    panel.append(makeElement<HTMLLabelElement>("second"));
+    panel.append(makeElement<HTMLLabelElement>("third"));
+
+    LayoutEngine::layout(panel, styleSheet, text);
+    EXPECT_EQ(panel.children()[0]->rect().top(), 22.f);
+    EXPECT_EQ(panel.children()[1]->rect().bottom(), 0.f);
+    EXPECT_EQ(panel.children()[2]->rect().top(), 22.f);
     EXPECT_EQ(panel.children()[2]->rect().left(), 12.f);
+}
+
+TEST_F(LayoutEngineTest, BalancesFlexWrapLinesWithoutChangingDirection) {
+    StyleSheet styleSheet;
+    ASSERT_TRUE(
+        styleSheet
+            .loadRadia("panel { display: flex; flex-direction: row; flex-wrap: balance; align-content: start; } label { width: 20px; height: 10px; }")
+            .ok());
+
+    auto panel = makeElementValue<HTMLPanelElement>();
+    panel.setRect({0.f, 0.f, 60.f, 40.f});
+    for (int index = 0; index < 4; ++index) panel.append(makeElement<HTMLLabelElement>());
+
+    LayoutEngine::layout(panel, styleSheet, text);
+
+    EXPECT_EQ(panel.children()[0]->rect().top(), panel.children()[1]->rect().top());
+    EXPECT_EQ(panel.children()[2]->rect().top(), panel.children()[3]->rect().top());
+    EXPECT_NE(panel.children()[0]->rect().top(), panel.children()[2]->rect().top());
+}
+
+TEST_F(LayoutEngineTest, AppliesAlignContentToSingleWrappedLine) {
+    StyleSheet styleSheet;
+    constexpr char kRowLayout[] = "panel { display: flex; flex-direction: row; flex-wrap: wrap; align-content: center; } label { size: 10px; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kRowLayout).ok());
+
+    auto row = makeElementValue<HTMLPanelElement>();
+    row.setRect({0.f, 0.f, 100.f, 40.f});
+    row.append(makeElement<HTMLLabelElement>());
+    LayoutEngine::layout(row, styleSheet, text);
+    EXPECT_EQ(row.children()[0]->rect().top(), 25.f);
+
+    StyleSheet columnStyleSheet;
+    constexpr char kColumnLayout[] = "panel { display: flex; flex-direction: column; flex-wrap: wrap; align-content: center; } label { size: 10px; }";
+    ASSERT_TRUE(columnStyleSheet.loadRadia(kColumnLayout).ok());
+
+    auto column = makeElementValue<HTMLPanelElement>();
+    column.setRect({0.f, 0.f, 40.f, 100.f});
+    column.append(makeElement<HTMLLabelElement>());
+    LayoutEngine::layout(column, columnStyleSheet, text);
+    EXPECT_EQ(column.children()[0]->rect().left(), 15.f);
+}
+
+TEST_F(LayoutEngineTest, PreservesSignedFreeSpaceForOverflowAlignment) {
+    StyleSheet styleSheet;
+    constexpr char kMainAxisLayout[] =
+        "panel { display: flex; flex-direction: row; justify-content: center; } label { width: 40px; height: 10px; flex-shrink: 0; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kMainAxisLayout).ok());
+
+    auto centered = makeElementValue<HTMLPanelElement>();
+    centered.setRect({0.f, 0.f, 20.f, 20.f});
+    centered.append(makeElement<HTMLLabelElement>());
+    LayoutEngine::layout(centered, styleSheet, text);
+    EXPECT_EQ(centered.children()[0]->rect().left(), -10.f);
+
+    StyleSheet crossAxisStyleSheet;
+    constexpr char kCrossAxisLayout[] =
+        "panel { display: flex; flex-direction: row; flex-wrap: wrap; align-content: center; } label { width: 10px; height: 10px; }";
+    ASSERT_TRUE(crossAxisStyleSheet.loadRadia(kCrossAxisLayout).ok());
+
+    auto wrapped = makeElementValue<HTMLPanelElement>();
+    wrapped.setRect({0.f, 0.f, 10.f, 10.f});
+    wrapped.append(makeElement<HTMLLabelElement>());
+    wrapped.append(makeElement<HTMLLabelElement>());
+    LayoutEngine::layout(wrapped, crossAxisStyleSheet, text);
+    EXPECT_EQ(wrapped.children()[0]->rect().top(), 15.f);
+    EXPECT_EQ(wrapped.children()[1]->rect().top(), 5.f);
+}
+
+TEST_F(LayoutEngineTest, FreezesMaxSizeBeforeFlexShrink) {
+    StyleSheet styleSheet;
+    constexpr char kFlexLayout[] =
+        "panel { display: flex; flex-direction: row; } label { flex: 0 1 100px; height: 10px; } label.capped { max-width: 60px; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kFlexLayout).ok());
+
+    auto panel = makeElementValue<HTMLPanelElement>();
+    panel.setRect({0.f, 0.f, 120.f, 20.f});
+    auto capped = makeElement<HTMLLabelElement>();
+    capped->classList().add("capped");
+    panel.append(std::move(capped));
+    panel.append(makeElement<HTMLLabelElement>());
+
+    LayoutEngine::layout(panel, styleSheet, text);
+
+    EXPECT_EQ(panel.children()[0]->rect().w, 60.f);
+    EXPECT_EQ(panel.children()[1]->rect().w, 60.f);
+    EXPECT_EQ(panel.children()[1]->rect().left(), 60.f);
+}
+
+TEST_F(LayoutEngineTest, DistributesFlexContentAndCapsGrowth) {
+    StyleSheet styleSheet;
+    constexpr char kFlexLayout[] =
+        "panel { display: flex; flex-direction: row; justify-content: space-evenly; } panel.growth { justify-content: start; } "
+        "label { width: 10px; height: 10px; } label.growing { flex: 1; max-width: 30px; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kFlexLayout).ok());
+
+    auto distributed = makeElementValue<HTMLPanelElement>();
+    distributed.setRect({0.f, 0.f, 40.f, 20.f});
+    distributed.append(makeElement<HTMLLabelElement>());
+    distributed.append(makeElement<HTMLLabelElement>());
+    distributed.append(makeElement<HTMLLabelElement>());
+    LayoutEngine::layout(distributed, styleSheet, text);
+    EXPECT_FLOAT_EQ(distributed.children()[0]->rect().left(), 2.5f);
+    EXPECT_FLOAT_EQ(distributed.children()[1]->rect().left(), 15.f);
+    EXPECT_FLOAT_EQ(distributed.children()[2]->rect().left(), 27.5f);
+
+    auto capped = makeElementValue<HTMLPanelElement>();
+    capped.setRect({0.f, 0.f, 100.f, 20.f});
+    capped.classList().add("growth");
+    for (int index = 0; index != 2; ++index) {
+        auto child = makeElement<HTMLLabelElement>();
+        child->classList().add("growing");
+        capped.append(std::move(child));
+    }
+    LayoutEngine::layout(capped, styleSheet, text);
+    EXPECT_EQ(capped.children()[0]->rect().w, 30.f);
+    EXPECT_EQ(capped.children()[1]->rect().w, 30.f);
+    EXPECT_EQ(capped.children()[1]->rect().left(), 30.f);
 }
 
 TEST_F(LayoutEngineTest, AppliesFlexShrink) {
@@ -1446,6 +1892,30 @@ TEST_F(LayoutEngineTest, OrdersChildrenBeforeRowLayout) {
     LayoutEngine::layout(panel, styleSheet, text);
     EXPECT_EQ(panel.children()[1]->rect().x, 0.f);
     EXPECT_EQ(panel.children()[0]->rect().x, 10.f);
+}
+
+TEST_F(LayoutEngineTest, PreservesSourceOrderOutsideFlexAndGrid) {
+    StyleSheet styleSheet;
+    constexpr char kNormalLayout[] = "panel { display: block; } "
+                                     "#late { display: block; order: 2; width: 10px; height: 10px; } "
+                                     "#early { display: block; order: -1; width: 10px; height: 10px; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kNormalLayout).ok());
+
+    auto panel = makeElementValue<HTMLPanelElement>();
+    panel.setRect({0.f, 0.f, 100.f, 40.f});
+    auto late = makeElement<HTMLLabelElement>();
+    late->setId("late");
+    auto early = makeElement<HTMLLabelElement>();
+    early->setId("early");
+    panel.append(std::move(late));
+    panel.append(std::move(early));
+
+    LayoutEngine::layout(panel, styleSheet, text);
+
+    EXPECT_EQ(panel.children()[0]->id(), "late");
+    EXPECT_EQ(panel.children()[1]->id(), "early");
+    EXPECT_EQ(panel.children()[0]->rect().top(), 40.f);
+    EXPECT_EQ(panel.children()[1]->rect().top(), 30.f);
 }
 
 TEST_F(LayoutEngineTest, RemeasuresAfterStylesheetChange) {

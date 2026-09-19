@@ -19,10 +19,7 @@ using detail::resizeEdgesAt;
 
 namespace {
 bool blocksPointerEvents(const HTMLFloaterElement& floater, const ComputedStyle& style) {
-    const PointerEvents policy = style.pointerEvents;
-    if (policy == PointerEvents::Auto) return true;
-    if (policy == PointerEvents::PassThrough) return false;
-    return floater.pointerEvents();
+    return style.pointerEvents != PointerEvents::NoneValue && (style.pointerEventsSpecified || floater.pointerEvents());
 }
 } // namespace
 
@@ -35,9 +32,8 @@ Vec2 Surface::minimumFloaterSize(HTMLFloaterElement& floater) {
     if (!currentFloater) return {};
     const ComputedStyle floaterStyle = styles.style(*currentFloater);
     if (!floaterObservation.layoutValid() || !floaterObservation.styleValid()) return {};
-    const Vec2 authoredSize = currentFloater->authoredSize();
-    Vec2 minimum{floaterStyle.minWidth ? floaterStyle.minWidth->resolve(authoredSize.x) : 0.f,
-                 floaterStyle.minHeight ? floaterStyle.minHeight->resolve(authoredSize.y) : 0.f};
+    Vec2 minimum{floaterStyle.minWidth ? floaterStyle.minWidth->resolve(0.f, mViewport.w) : 0.f,
+                 floaterStyle.minHeight ? floaterStyle.minHeight->resolve(0.f, mViewport.h) : 0.f};
 
     if (Element* head = currentFloater->head()) {
         const ElementRef<Element> headRef(head);

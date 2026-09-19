@@ -35,12 +35,22 @@ private:
         std::vector<std::pair<std::size_t, std::size_t>> lines;
         std::vector<MainAxisAllocation> allocations;
         std::vector<float> lineHeights;
+        float crossOffset = 0.f;
+        float crossGap = 0.f;
         bool valid = true;
     };
 
-    static ChildLayout measureChild(Element& parent, layout_detail::LayoutChildRef child, const ComputedStyle& parentStyle,
-                                    FlexDirection flexDirection, std::optional<float> resolvedWidth, std::optional<float> resolvedHeight,
-                                    LayoutPass& pass);
+    struct ColumnSizing {
+        std::vector<std::pair<std::size_t, std::size_t>> lines;
+        std::vector<MainAxisAllocation> allocations;
+        std::vector<float> lineWidths;
+        float crossOffset = 0.f;
+        float crossGap = 0.f;
+        bool valid = true;
+    };
+
+    static ChildLayout measureChild(Element& parent, OrderedChildRef child, const ComputedStyle& parentStyle, FlexDirection flexDirection,
+                                    std::optional<float> resolvedWidth, std::optional<float> resolvedHeight, LayoutPass& pass);
     static std::optional<std::vector<ChildLayout>> measureNormalChildren(Element& parent, std::optional<float> contentWidth,
                                                                          std::optional<float> contentHeight, LayoutPass& pass);
     static std::optional<std::vector<ChildLayout>> measureGridChildren(Element& parent, std::optional<float> contentWidth,
@@ -59,16 +69,19 @@ private:
                                       LayoutPass& pass);
     static RowSizing resolveRowSizes(Element& node, const ComputedStyle& parentStyle, const Rect& available, std::vector<ChildLayout>& children,
                                      LayoutPass& pass);
-    static MainAxisAllocation resolveColumnSizes(Element& node, const ComputedStyle& parentStyle, const Rect& available,
-                                                 std::vector<ChildLayout>& children, LayoutPass& pass);
+    static ColumnSizing resolveColumnSizes(Element& node, const ComputedStyle& parentStyle, const Rect& available, std::vector<ChildLayout>& children,
+                                           LayoutPass& pass);
     static std::optional<std::vector<ChildLayout>> layoutChildren(Element& parent, DisplayMode display, const Rect& content, LayoutPass& pass);
     static Rect scrollableOverflow(Element& node, const ComputedStyle& parentStyle, const Rect& scrollport, LayoutPass& pass);
 
     static void arrangeNode(Element& node, LayoutPass& pass);
-    static void arrangeNode(const layout_detail::LayoutChildRef& node, LayoutPass& pass);
+    static void arrangeNode(const OrderedChildRef& node, LayoutPass& pass);
+    static void arrangeOutOfFlowChild(const OrderedChildRef& node, const ComputedStyle& style, const Rect& containingBlock, LayoutPass& pass);
+    static void arrangeOutOfFlowChildren(Element& node, LayoutPass& pass);
+    static void arrangeOutOfFlowChildren(PseudoElement& node, LayoutPass& pass);
     static void arrangePseudoElement(PseudoElement& node, LayoutPass& pass);
     static void prepareTextPaint(Element& node, LayoutPass& pass);
-    static void setArrangedRect(const layout_detail::LayoutChildRef& node, const Rect& rect);
+    static void setArrangedRect(const OrderedChildRef& node, const Rect& rect, LayoutPass& pass);
     static void arrangeRow(Element& node, const ComputedStyle& parentStyle, const Rect& content, const Rect& available,
                            std::vector<ChildLayout>& children, LayoutPass& pass);
     static void arrangeColumn(Element& node, const ComputedStyle& parentStyle, const Rect& content, const Rect& available,
@@ -79,7 +92,7 @@ private:
                               LayoutPass& pass);
 
     static Vec2 measure(Element& node, LayoutPass& pass, std::optional<float> outerWidth = std::nullopt,
-                        std::optional<float> outerHeight = std::nullopt);
+                        std::optional<float> outerHeight = std::nullopt, bool intrinsicProbe = false);
 
 public:
     static Vec2 measure(Element& node, const StyleSheet& styleSheet, const TextMetrics& textMetrics, std::optional<float> outerWidth = std::nullopt,

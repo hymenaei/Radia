@@ -64,6 +64,13 @@ void Surface::setScrollLayoutOptions(ScrollLayoutOptions options) {
     requestLayout();
 }
 
+void Surface::setColorSchemeContext(ColorSchemeContext context) {
+    if (mColorSchemeContext == context) return;
+    mColorSchemeContext = context;
+    requestLayout();
+    requestPaint();
+}
+
 void Surface::nativeAppearanceChanged() {
     if (!mSystem) return;
     mScrollLayoutOptions.nativeMetrics = mSystem->nativeAppearance().layoutMetrics();
@@ -202,9 +209,9 @@ StylePass& Surface::stylePass() const {
     }
     const LayoutDirection direction = layoutDirection();
     const NativeLayoutMetrics metrics = mScrollLayoutOptions.nativeMetrics;
-    const bool mismatched = !mStylePass || !mStylePass->matches(*mStyleSheet, mTextMetrics, direction, metrics);
+    const bool mismatched = !mStylePass || !mStylePass->matches(*mStyleSheet, mTextMetrics, direction, metrics, mColorSchemeContext);
     if (mismatched && (!mStylePass || !mStylePass->active()))
-        mStylePass = std::make_unique<StylePass>(*mStyleSheet, mTextMetrics, direction, metrics);
+        mStylePass = std::make_unique<StylePass>(*mStyleSheet, mTextMetrics, direction, metrics, mColorSchemeContext);
     return *mStylePass;
 }
 

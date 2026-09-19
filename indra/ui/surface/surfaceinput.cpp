@@ -21,10 +21,7 @@ using detail::resizeCursor;
 using detail::ResizeEdges;
 
 bool Surface::acceptsPointerEvents(const Element& element, const ComputedStyle& style) {
-    const PointerEvents policy = style.pointerEvents;
-    if (policy == PointerEvents::Auto) return true;
-    if (policy == PointerEvents::PassThrough) return false;
-    return element.pointerEvents();
+    return style.pointerEvents != PointerEvents::NoneValue && (style.pointerEventsSpecified || element.pointerEvents());
 }
 
 void Surface::collectFocusable(Element& node, std::vector<ElementRef<Element>>& result, StylePass& styles) const {
@@ -36,6 +33,23 @@ void Surface::collectFocusable(Element& node, std::vector<ElementRef<Element>>& 
     const auto children = styles.sourceChildren(*current);
     for (const ElementRef<Element>& childRef : *children)
         if (Element* child = childRef.get(); child && child->parentElement() == current) collectFocusable(*child, result, styles);
+}
+
+void Surface::collectFixedPositionedElements(Element& node, std::vector<Element*>& result, StylePass& styles) const {
+    const ElementObservation observation(node);
+    const ComputedStyle nodeStyle = styles.style(node);
+    Element* current = observation.get();
+    if (!current || !observation.layoutValid() || !observation.styleValid() || !current->isDisplayed(nodeStyle) || !current->isVisible(nodeStyle))
+        return;
+    if (nodeStyle.position == PositionMode::Fixed) result.push_back(current);
+    const auto children = styles.orderedChildren(*current);
+    for (const OrderedChildRef& childRef : *children) {
+        Element* child = childRef.element();
+        if (!child || child->parentElement() != current) continue;
+        const ComputedStyle childStyle = styles.style(*child);
+        if (!child->isDisplayed(childStyle) || !child->isVisible(childStyle)) continue;
+        collectFixedPositionedElements(*child, result, styles);
+    }
 }
 
 Element* Surface::hitTestNode(Element& node, const Vec2& point, const Rect& inheritedClip, StylePass& styles) const {
@@ -55,15 +69,16 @@ Element* Surface::hitTestNode(Element& node, const Vec2& point, const Rect& inhe
     Rect childClip = clipsChildren ? clipToAxes(inheritedClip, ElementInternalAccess::scrollport(*current), clipAxes) : inheritedClip;
     if (clipsChildren) childClip = {childClip.x + scrollOffset.x, childClip.y + scrollOffset.y, childClip.w, childClip.h};
     const Vec2 childPoint = point + scrollOffset;
-    const auto children = styles.sourceChildren(*current);
+    const auto children = styles.orderedChildren(*current);
     Element* hitResult = nullptr;
     for (auto child = children->rbegin(); child != children->rend(); ++child)
-        if (Element* childElement = child->get())
+        if (Element* childElement = child->element())
             if (childElement->parentElement() == current)
-                if (Element* hit = hitTestNode(*childElement, childPoint, childClip, styles)) {
-                    hitResult = hit;
-                    break;
-                }
+                if (styles.style(*childElement).position != PositionMode::Fixed)
+                    if (Element* hit = hitTestNode(*childElement, childPoint, childClip, styles)) {
+                        hitResult = hit;
+                        break;
+                    }
     current = observation.get();
     if (!current || !observation.layoutValid() || !observation.styleValid() || !isRootedInSurface(current) || !current->isVisible(style))
         return nullptr;
@@ -161,17 +176,33 @@ Element* Surface::hitTestAt(const Vec2& point) {
     const auto hitInLayer = [&](SurfaceLayer layer) -> Element* {
         const MountList& layerMounts = mounts(layer);
         for (auto current = layerMounts.rbegin(); current != layerMounts.rend(); ++current)
-            if (*current && (*current)->root)
+            if (*current && (*current)->root && styles.style(*(*current)->root).position != PositionMode::Fixed)
                 if (Element* hit = hitTestNode(*(*current)->root, point, mViewport, styles)) return hit;
         return nullptr;
     };
-    if (hasActiveModal()) return hitInLayer(SurfaceLayer::Modal);
+    const auto hitFixedInLayer = [&](SurfaceLayer layer) -> Element* {
+        const MountList& layerMounts = mounts(layer);
+        for (auto current = layerMounts.rbegin(); current != layerMounts.rend(); ++current) {
+            if (!*current || !(*current)->root) continue;
+            std::vector<Element*> fixed;
+            collectFixedPositionedElements(*(*current)->root, fixed, styles);
+            for (auto fixedElement = fixed.rbegin(); fixedElement != fixed.rend(); ++fixedElement)
+                if (Element* hit = hitTestNode(**fixedElement, point, mViewport, styles)) return hit;
+        }
+        return nullptr;
+    };
+    if (hasActiveModal()) {
+        if (Element* hit = hitFixedInLayer(SurfaceLayer::Modal)) return hit;
+        return hitInLayer(SurfaceLayer::Modal);
+    }
 
     for (std::size_t index = static_cast<std::size_t>(SurfaceLayer::Modal); index > static_cast<std::size_t>(SurfaceLayer::Base); --index) {
         const SurfaceLayer layer = static_cast<SurfaceLayer>(index);
         if (layer == SurfaceLayer::Tooltip || layer == SurfaceLayer::Drag || layer == SurfaceLayer::Modal) continue;
+        if (Element* hit = hitFixedInLayer(layer)) return hit;
         if (Element* hit = hitInLayer(layer)) return hit;
     }
+    if (Element* hit = hitFixedInLayer(SurfaceLayer::Base)) return hit;
     return hitInLayer(SurfaceLayer::Base);
 }
 

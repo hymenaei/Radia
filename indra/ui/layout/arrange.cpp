@@ -18,29 +18,31 @@ namespace radia::ui {
 using detail::ElementInternalAccess;
 using layout_detail::AdjacentLayout;
 using layout_detail::adjacentLayout;
+using layout_detail::alignSelfOffset;
 using layout_detail::allocateMainAxis;
 using layout_detail::applyCrossAxisSizing;
 using layout_detail::ChildLayout;
-using layout_detail::CrossAlignment;
 using layout_detail::crossAlignment;
+using layout_detail::crossAlignmentSafety;
+using layout_detail::flexLines;
 using layout_detail::gridTrackSizes;
 using layout_detail::isDisplayed;
+using layout_detail::isInlineLevel;
 using layout_detail::isWhitespaceOnlyText;
 using layout_detail::justifySelfOffset;
-using layout_detail::LayoutChildRef;
 using layout_detail::MainAxisAllocation;
 using layout_detail::normalLines;
+using layout_detail::outOfFlowRect;
 using layout_detail::positionedRect;
 using layout_detail::prepareMainAxis;
 using layout_detail::relativeRect;
 using layout_detail::removeChildrenExcludedFromLayout;
-using layout_detail::rowAlignmentOffset;
-using layout_detail::rowLines;
 using layout_detail::setArrangedRect;
 using layout_detail::styledBoxDimension;
 using layout_detail::textAlignmentOffset;
 using layout_detail::translatedRect;
 using layout_detail::verticalAlignmentOffset;
+using ::radia::ui::OrderedChildRef;
 
 namespace {
 constexpr float kScrollEpsilon = 1.0e-4f;
@@ -53,14 +55,106 @@ void includeOverflow(Rect& bounds, const Rect& candidate, bool includeX, bool in
     const float top = includeY ? std::max(bounds.top(), candidate.top()) : bounds.top();
     bounds = {left, bottom, std::max(0.f, right - left), std::max(0.f, top - bottom)};
 }
+
+Rect paddingBox(const Rect& rect, const ComputedStyle& style) {
+    return {rect.x + style.borderWidth.left, rect.y + style.borderWidth.bottom, std::max(0.f, rect.w - style.borderWidth.horizontal()),
+            std::max(0.f, rect.h - style.borderWidth.vertical())};
+}
+
+Rect paddingBox(const Element& node, const ComputedStyle& style) {
+    return paddingBox(node.rect(), style);
+}
+
+Rect containingBlockFor(const Element& parent, PositionMode position, LayoutPass& pass) {
+    if (position == PositionMode::Fixed) return pass.viewport();
+    for (const Element* current = &parent; current; current = current->parentElement()) {
+        const ComputedStyle& style = pass.style(*current);
+        if (style.position != PositionMode::Static) return paddingBox(*current, style);
+    }
+    return pass.viewport();
+}
+
+Rect containingBlockFor(PseudoElement& parent, PositionMode position, LayoutPass& pass) {
+    if (position == PositionMode::Fixed) return pass.viewport();
+    const ComputedStyle parentStyle = pass.style(parent);
+    if (parentStyle.position != PositionMode::Static) return paddingBox(parent.rect(), parentStyle);
+    if (parent.parentPseudoElement()) return containingBlockFor(*parent.parentPseudoElement(), position, pass);
+    return containingBlockFor(parent.originatingElement(), position, pass);
+}
+
+Rect stickyRect(const Element& node, const ComputedStyle& style, const Rect& rect, LayoutPass& pass) {
+    const Element* scrollContainer = node.parentElement();
+    while (scrollContainer) {
+        const ComputedStyle& scrollStyle = pass.style(*scrollContainer);
+        if (scrollStyle.overflowX != Overflow::Visible || scrollStyle.overflowY != Overflow::Visible) break;
+        scrollContainer = scrollContainer->parentElement();
+    }
+    Rect scrollport = scrollContainer ? ElementInternalAccess::scrollport(*scrollContainer) : pass.viewport();
+    if (scrollContainer && scrollport.empty()) scrollport = paddingBox(*scrollContainer, pass.style(*scrollContainer));
+    const float scrollLeft = scrollContainer ? scrollContainer->scrollLeft() : 0.f;
+    const float scrollTop = scrollContainer ? scrollContainer->scrollTop() : 0.f;
+    const float scrollTranslationX = pass.direction() == LayoutDirection::RightToLeft ? scrollLeft : -scrollLeft;
+    const Rect containingBlock = node.parentElement() ? paddingBox(*node.parentElement(), pass.style(*node.parentElement())) : pass.viewport();
+    float offsetX = 0.f;
+    float offsetY = 0.f;
+
+    if (style.top || style.bottom) {
+        const float visibleTop = rect.top() + scrollTop;
+        const float visibleBottom = rect.bottom() + scrollTop;
+        if (style.top) {
+            const float inset = style.top->resolve(scrollport.h);
+            const float target = std::min(scrollport.top() - inset, containingBlock.top());
+            offsetY = std::min(0.f, target - visibleTop);
+        }
+        if (style.bottom) {
+            const float inset = style.bottom->resolve(scrollport.h);
+            const float target = std::max(scrollport.bottom() + inset, containingBlock.bottom());
+            offsetY = std::max(offsetY, target - visibleBottom);
+        }
+    }
+    if (style.left || style.right) {
+        const float visibleLeft = rect.left() + scrollTranslationX;
+        const float visibleRight = rect.right() + scrollTranslationX;
+        if (style.left) {
+            const float inset = style.left->resolve(scrollport.w);
+            const float target = std::max(scrollport.left() + inset, containingBlock.left());
+            offsetX = std::max(0.f, target - visibleLeft);
+        }
+        if (style.right) {
+            const float inset = style.right->resolve(scrollport.w);
+            const float target = std::min(scrollport.right() - inset, containingBlock.right());
+            offsetX = std::min(offsetX, target - visibleRight);
+        }
+    }
+    return {rect.x + offsetX, rect.y + offsetY, rect.w, rect.h};
+}
+
+float flexBaseline(const ChildLayout& child, ItemPosition preference) {
+    const bool inlineLevel = isInlineLevel(child.style.display);
+    if (!inlineLevel) return preference == ItemPosition::LastBaseline ? 0.f : child.measured.y;
+    const float lineHeight =
+        std::ceil(child.style.lineHeight.kind == LineHeight::Kind::Length       ? child.style.lineHeight.value
+                      : child.style.lineHeight.kind == LineHeight::Kind::Normal ? child.style.fontSize
+                                                                                : child.style.fontSize * child.style.lineHeight.value);
+    const float ascent = std::min(lineHeight, child.style.fontSize * .8f);
+    if (preference == ItemPosition::LastBaseline) return std::min(child.measured.y, ascent);
+    return std::max(0.f, child.measured.y - lineHeight + ascent);
+}
+
+ChildLayout arrangedChild(const OrderedChildRef& node, const ComputedStyle& style, const Vec2& measured) {
+    ChildLayout result{node, style, measured, measured, {}};
+    if (const Element* element = node.element()) result.minContent = ElementInternalAccess::layoutCache(*element).minContentSize;
+    return result;
+}
 } // namespace
 
 Rect LayoutEngine::scrollableOverflow(Element& node, const ComputedStyle& parentStyle, const Rect& scrollport, LayoutPass& pass) {
     Rect bounds = scrollport;
-    const std::vector<LayoutChildRef> children = pass.orderedChildrenForLayout(node);
+    const auto childSnapshot = pass.orderedChildrenForLayout(node);
+    const std::vector<OrderedChildRef>& children = *childSnapshot;
     const auto collectPseudoOverflow = [&](PseudoElement& pseudoElement, const auto& collectChildren) -> Rect {
         const ComputedStyle pseudoStyle = pass.style(pseudoElement);
-        if (pseudoStyle.display == DisplayMode::NoneValue || pseudoElement.rect().empty()) return {};
+        if (pseudoStyle.display == DisplayMode::NoneValue || pseudoStyle.position == PositionMode::Fixed || pseudoElement.rect().empty()) return {};
         Rect subtree = pseudoElement.rect();
         const bool clipsX = pseudoStyle.overflowX != Overflow::Visible;
         const bool clipsY = pseudoStyle.overflowY != Overflow::Visible;
@@ -85,9 +179,10 @@ Rect LayoutEngine::scrollableOverflow(Element& node, const ComputedStyle& parent
         return subtree;
     };
     for (std::size_t index = 0; index < children.size(); ++index) {
-        const LayoutChildRef& childRef = children[index];
+        const OrderedChildRef& childRef = children[index];
         if (!childRef.attachedTo(node)) continue;
         const ComputedStyle childStyle = pass.style(childRef, parentStyle);
+        if (childStyle.position == PositionMode::Fixed) continue;
         if (PseudoElement* pseudoElement = childRef.pseudoElement) {
             includeOverflow(bounds, collectPseudoOverflow(*pseudoElement, collectPseudoOverflow), true, true);
         } else if (Element* child = childRef.element()) {
@@ -149,18 +244,20 @@ LayoutEngine::RowSizing LayoutEngine::resolveRowSizes(Element& node, const Compu
     const auto nodeLayoutValid = [&] { return nodeState.layoutValid(); };
     const float availableMain = available.w;
     const float availableCross = available.h;
+    const bool multiLine = isFlexWrapMultiLine(parentStyle.flexWrap) && availableMain >= 0.f;
     prepareMainAxis(children, FlexDirection::Row, availableMain);
     for (ChildLayout& child : children)
-        child.measured.y = styledBoxDimension(child.style, false, child.style.height, child.style.minHeight, child.measured.y, availableCross);
+        child.measured.y = styledBoxDimension(child.style, false, child.style.height, child.style.minHeight, child.style.maxHeight, child.measured.y,
+                                              availableCross, child.minContent.y);
 
     RowSizing sizing;
-    sizing.lines = rowLines(children);
+    sizing.lines = flexLines(node, children, parentStyle, FlexDirection::Row, availableMain);
     const auto& lines = sizing.lines;
     for (const auto& [begin, end] : lines) {
         float preliminaryHeight = 0.f;
         for (std::size_t index = begin; index < end; ++index)
             preliminaryHeight = std::max(preliminaryHeight, children[index].measured.y + children[index].style.margin.vertical());
-        if (lines.size() == 1 && availableCross >= 0.f) preliminaryHeight = availableCross;
+        if (!multiLine && availableCross >= 0.f) preliminaryHeight = availableCross;
         for (std::size_t index = begin; index < end; ++index)
             applyCrossAxisSizing(children[index].measured, children[index].style, FlexDirection::Row, preliminaryHeight,
                                  crossAlignment(parentStyle, children[index].style));
@@ -189,7 +286,16 @@ LayoutEngine::RowSizing LayoutEngine::resolveRowSizes(Element& node, const Compu
         float height = 0.f;
         for (std::size_t index = begin; index < end; ++index)
             height = std::max(height, children[index].measured.y + children[index].style.margin.vertical());
-        sizing.lineHeights.push_back(lines.size() == 1 && availableCross >= 0.f ? availableCross : height);
+        sizing.lineHeights.push_back(!multiLine && availableCross >= 0.f ? availableCross : height);
+    }
+    if (multiLine) {
+        const layout_detail::ContentDistributionResult distribution = layout_detail::alignContentDistribution(
+            parentStyle.alignContent.position, parentStyle.alignContent.distribution, parentStyle.alignContent.overflow, sizing.lineHeights, availableCross,
+            parentStyle.rowGap.fixedPixels());
+        sizing.crossOffset = distribution.offset;
+        sizing.crossGap = distribution.extraGap;
+    } else {
+        sizing.crossGap = parentStyle.rowGap.fixedPixels();
     }
     for (std::size_t line = 0; line < lines.size(); ++line) {
         const auto [begin, end] = lines[line];
@@ -200,22 +306,24 @@ LayoutEngine::RowSizing LayoutEngine::resolveRowSizes(Element& node, const Compu
     return sizing;
 }
 
-MainAxisAllocation LayoutEngine::resolveColumnSizes(Element& node, const ComputedStyle& parentStyle, const Rect& available,
-                                                    std::vector<ChildLayout>& children, LayoutPass& pass) {
+LayoutEngine::ColumnSizing LayoutEngine::resolveColumnSizes(Element& node, const ComputedStyle& parentStyle, const Rect& available,
+                                                            std::vector<ChildLayout>& children, LayoutPass& pass) {
     const NodeSnapshot nodeState(node);
     const auto nodeLayoutValid = [&] { return nodeState.layoutValid(); };
-    MainAxisAllocation allocation;
+    ColumnSizing sizing;
     const float availableMain = available.h;
     const float availableCross = available.w;
+    const bool multiLine = isFlexWrapMultiLine(parentStyle.flexWrap) && availableMain >= 0.f;
     std::vector<Vec2> initialSizes;
     initialSizes.reserve(children.size());
     for (const ChildLayout& child : children) initialSizes.push_back(child.measured);
     for (ChildLayout& child : children) {
         if (!nodeLayoutValid()) {
-            allocation.valid = false;
-            return allocation;
+            sizing.valid = false;
+            return sizing;
         }
-        child.measured.x = styledBoxDimension(child.style, true, child.style.width, child.style.minWidth, child.measured.x, availableCross);
+        child.measured.x = styledBoxDimension(child.style, true, child.style.width, child.style.minWidth, child.style.maxWidth, child.measured.x,
+                                              availableCross, child.minContent.x);
         applyCrossAxisSizing(child.measured, child.style, FlexDirection::Column, availableCross, crossAlignment(parentStyle, child.style));
         if (child.style.height.isAuto() && !child.style.aspectRatio) {
             if (!child.node.attachedTo(node)) continue;
@@ -232,20 +340,55 @@ MainAxisAllocation LayoutEngine::resolveColumnSizes(Element& node, const Compute
             if (!nodeLayoutValid()
                 || !child.node.attachedTo(*nodeState.get())
                 || (childNode && (childNode->mLayoutInvalidationRevision != childRevision || childNode->mSurface != nodeState.surface))) {
-                allocation.valid = false;
-                return allocation;
+                sizing.valid = false;
+                return sizing;
             }
             child.fitSize.y = child.measured.y;
         }
     }
     prepareMainAxis(children, FlexDirection::Column, availableMain);
     if (!nodeLayoutValid()) {
-        allocation.valid = false;
-        return allocation;
+        sizing.valid = false;
+        return sizing;
     }
-    allocation = allocateMainAxis(node, children, 0, children.size(), parentStyle, FlexDirection::Column, availableMain);
-    if (!allocation.valid || !remeasureColumnChildren(node, children, initialSizes, pass)) allocation.valid = false;
-    return allocation;
+    sizing.lines = flexLines(node, children, parentStyle, FlexDirection::Column, availableMain);
+    sizing.allocations.reserve(sizing.lines.size());
+    for (const auto [begin, end] : sizing.lines) {
+        const MainAxisAllocation allocation = allocateMainAxis(node, children, begin, end, parentStyle, FlexDirection::Column, availableMain);
+        sizing.allocations.push_back(allocation);
+        if (!allocation.valid) {
+            sizing.valid = false;
+            return sizing;
+        }
+    }
+    if (!remeasureColumnChildren(node, children, initialSizes, pass)) {
+        sizing.valid = false;
+        return sizing;
+    }
+    sizing.lineWidths.reserve(sizing.lines.size());
+    for (const auto [begin, end] : sizing.lines) {
+        float width = 0.f;
+        for (std::size_t index = begin; index < end; ++index)
+            width = std::max(width, children[index].measured.x + children[index].style.margin.horizontal());
+        sizing.lineWidths.push_back(!multiLine && availableCross >= 0.f ? availableCross : width);
+    }
+    if (multiLine) {
+        const layout_detail::ContentDistributionResult distribution = layout_detail::alignContentDistribution(
+            parentStyle.alignContent.position, parentStyle.alignContent.distribution, parentStyle.alignContent.overflow, sizing.lineWidths, availableCross,
+            parentStyle.columnGap.fixedPixels());
+        sizing.crossOffset = distribution.offset;
+        sizing.crossGap = distribution.extraGap;
+    } else {
+        sizing.crossGap = parentStyle.columnGap.fixedPixels();
+    }
+    for (std::size_t line = 0; line < sizing.lines.size(); ++line) {
+        const auto [begin, end] = sizing.lines[line];
+        for (std::size_t index = begin; index < end; ++index)
+            applyCrossAxisSizing(children[index].measured, children[index].style, FlexDirection::Column, sizing.lineWidths[line],
+                                 crossAlignment(parentStyle, children[index].style));
+    }
+    if (!remeasureColumnChildren(node, children, initialSizes, pass)) sizing.valid = false;
+    return sizing;
 }
 
 std::optional<std::vector<ChildLayout>> LayoutEngine::layoutChildren(Element& parent, DisplayMode display, const Rect& content, LayoutPass& pass) {
@@ -267,8 +410,9 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::layoutChildren(Element& pa
     std::vector<ChildLayout> result;
     result.reserve(parent.mChildren.size() + parent.generatedPseudoElements().size());
     const ComputedStyle parentStyle = pass.style(parent);
-    const std::vector<LayoutChildRef> children = pass.orderedChildrenForLayout(parent);
-    for (const LayoutChildRef& childRef : children) {
+    const auto childSnapshot = pass.orderedChildrenForLayout(parent);
+    const std::vector<OrderedChildRef>& children = *childSnapshot;
+    for (const OrderedChildRef& childRef : children) {
         Element* child = childRef.element();
         if (!childRef.attachedTo(parent)) continue;
         if (isWhitespaceOnlyText(childRef)) continue;
@@ -276,6 +420,7 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::layoutChildren(Element& pa
         const std::uint64_t childRevision = child ? child->mLayoutInvalidationRevision : 0;
         const ComputedStyle style = pass.style(childRef, parentStyle);
         if (child ? !child->isDisplayed(style) : style.display == DisplayMode::NoneValue) continue;
+        if (style.position == PositionMode::Absolute || style.position == PositionMode::Fixed) continue;
         Element* currentParent = parentState.get();
         child = childRef.element();
         if (!parentState.layoutValid()
@@ -296,7 +441,7 @@ std::optional<std::vector<ChildLayout>> LayoutEngine::layoutChildren(Element& pa
         }
         currentParent = parentState.get();
         if (!parentState.layoutValid() || !currentParent || !childRef.attachedTo(*currentParent)) continue;
-        result.push_back({childRef, style, measured, measured});
+        result.push_back(arrangedChild(childRef, style, measured));
     }
     return result;
 }
@@ -343,9 +488,10 @@ void LayoutEngine::arrangeNode(Element& node, LayoutPass& pass) {
     ScrollMetrics metrics;
     const bool flexParent = isFlexDisplay(parentStyle.display);
     const bool gridParent = parentStyle.display == DisplayMode::Grid || parentStyle.display == DisplayMode::InlineGrid;
-    const std::vector<LayoutChildRef> children = pass.orderedChildrenForLayout(node);
+    const auto childSnapshot = pass.orderedChildrenForLayout(node);
+    const std::vector<OrderedChildRef>& children = *childSnapshot;
     for (std::size_t index = 0; index < children.size(); ++index) {
-        const LayoutChildRef& childRef = children[index];
+        const OrderedChildRef& childRef = children[index];
         if (Text* text = childRef.text(); text && isWhitespaceOnlyText(childRef) && !pass.preservesNormalFlowWhitespace(children, index, parentStyle))
             text->setRect({});
     }
@@ -365,10 +511,12 @@ void LayoutEngine::arrangeNode(Element& node, LayoutPass& pass) {
         std::optional<std::vector<ChildLayout>> childrenResult = layoutChildren(node, parentStyle.display, content, pass);
         if (!childrenResult) return;
         std::vector<ChildLayout> children = std::move(*childrenResult);
-        if (flexParent && parentStyle.flexDirection == FlexDirection::Row) arrangeRow(node, parentStyle, content, available, children, pass);
+        if (flexParent && isRowFlexDirection(parentStyle.flexDirection)) arrangeRow(node, parentStyle, content, available, children, pass);
         else if (flexParent) arrangeColumn(node, parentStyle, content, available, children, pass);
         else if (gridParent) arrangeGrid(node, parentStyle, content, children, pass);
         else arrangeNormal(node, parentStyle, content, children, pass);
+
+        arrangeOutOfFlowChildren(node, pass);
 
         Element* currentNode = lifetime.get();
         if (!currentNode
@@ -404,15 +552,61 @@ void LayoutEngine::arrangeNode(Element& node, LayoutPass& pass) {
     current->mInvalidationReasons.remove(LayoutInvalidationReason::Arrange);
 }
 
-void LayoutEngine::setArrangedRect(const LayoutChildRef& node, const Rect& rect) {
+void LayoutEngine::setArrangedRect(const OrderedChildRef& node, const Rect& rect, LayoutPass& pass) {
     if (node.pseudoElement) node.pseudoElement->setRect(rect);
-    else if (Element* element = node.element()) layout_detail::setArrangedRect(*element, rect);
-    else if (Text* text = node.text()) text->setRect(rect);
+    else if (Element* element = node.element()) {
+        const ComputedStyle& style = pass.style(*element);
+        layout_detail::setArrangedRect(*element, style.position == PositionMode::Sticky ? stickyRect(*element, style, rect, pass) : rect);
+    } else if (Text* text = node.text()) text->setRect(rect);
 }
 
-void LayoutEngine::arrangeNode(const LayoutChildRef& node, LayoutPass& pass) {
+void LayoutEngine::arrangeNode(const OrderedChildRef& node, LayoutPass& pass) {
     if (node.pseudoElement) arrangePseudoElement(*node.pseudoElement, pass);
     else if (Element* element = node.element()) arrangeNode(*element, pass);
+}
+
+void LayoutEngine::arrangeOutOfFlowChild(const OrderedChildRef& childRef, const ComputedStyle& style, const Rect& containingBlock, LayoutPass& pass) {
+    Element* element = childRef.element();
+    if (element) {
+        if (!element->isDisplayed(style)) return;
+    } else if (childRef.pseudoElement) {
+        if (style.display == DisplayMode::NoneValue) return;
+    } else {
+        return;
+    }
+
+    std::optional<float> width;
+    std::optional<float> height;
+    if (style.width.isPercentage()) width = styledBoxDimension(style, true, style.width, style.minWidth, style.maxWidth, 0.f, containingBlock.w);
+    if (style.height.isPercentage())
+        height = styledBoxDimension(style, false, style.height, style.minHeight, style.maxHeight, 0.f, containingBlock.h);
+    const Vec2 measured =
+        element ? measure(*element, pass, width, height) : measurePseudoElement(*childRef.pseudoElement, style, width, height, pass);
+    const ChildLayout child{childRef, style, measured, measured, {}, element ? ElementInternalAccess::layoutCache(*element).minContentSize : Vec2{}};
+    const Rect base = outOfFlowRect(child, containingBlock);
+    setArrangedRect(childRef, translatedRect(child, base), pass);
+    arrangeNode(childRef, pass);
+}
+
+void LayoutEngine::arrangeOutOfFlowChildren(Element& node, LayoutPass& pass) {
+    const ComputedStyle parentStyle = pass.style(node);
+    const auto childSnapshot = pass.orderedChildrenForLayout(node);
+    for (const OrderedChildRef& childRef : *childSnapshot) {
+        if (!childRef.attachedTo(node)) continue;
+        const ComputedStyle style = pass.style(childRef, parentStyle);
+        if (style.position != PositionMode::Absolute && style.position != PositionMode::Fixed) continue;
+        arrangeOutOfFlowChild(childRef, style, containingBlockFor(node, style.position, pass), pass);
+    }
+}
+
+void LayoutEngine::arrangeOutOfFlowChildren(PseudoElement& node, LayoutPass& pass) {
+    const auto childSnapshot = pass.orderedChildrenForLayout(node);
+    for (const OrderedChildRef& childRef : *childSnapshot) {
+        if (!childRef.attachedTo(node)) continue;
+        const ComputedStyle style = pass.style(*childRef.pseudoElement);
+        if (style.position != PositionMode::Absolute && style.position != PositionMode::Fixed) continue;
+        arrangeOutOfFlowChild(childRef, style, containingBlockFor(node, style.position, pass), pass);
+    }
 }
 
 void LayoutEngine::arrangePseudoElement(PseudoElement& node, LayoutPass& pass) {
@@ -429,22 +623,27 @@ void LayoutEngine::arrangePseudoElement(PseudoElement& node, LayoutPass& pass) {
         std::max(0.f, borderBox.h - node.style().borderWidth.vertical() - node.style().padding.vertical()),
     };
     std::vector<ChildLayout> children;
-    for (const LayoutChildRef& child : pass.orderedChildrenForLayout(node)) {
+    const auto childSnapshot = pass.orderedChildrenForLayout(node);
+    for (const OrderedChildRef& child : *childSnapshot) {
         if (!child.attachedTo(node) || !child.pseudoElement) continue;
         const ComputedStyle childStyle = pass.style(*child.pseudoElement);
         if (childStyle.display == DisplayMode::NoneValue) {
             child.pseudoElement->setRect({});
             continue;
         }
+        if (childStyle.position == PositionMode::Absolute || childStyle.position == PositionMode::Fixed) continue;
         const Vec2 measured = measurePseudoElement(*child.pseudoElement, childStyle, std::nullopt, std::nullopt, pass);
         children.push_back({child, childStyle, measured, measured});
     }
 
     const auto arrangeChild = [&](ChildLayout& child, const Rect& base) {
-        setArrangedRect(child.node, translatedRect(child, relativeRect(child, base, content)));
+        setArrangedRect(child.node, translatedRect(child, relativeRect(child, base, content)), pass);
         arrangeNode(child.node, pass);
     };
-    if (children.empty()) return;
+    if (children.empty()) {
+        arrangeOutOfFlowChildren(node, pass);
+        return;
+    }
 
     if (node.style().display == DisplayMode::Grid || node.style().display == DisplayMode::InlineGrid) {
         const layout_detail::GridTrackSizes tracks =
@@ -454,11 +653,6 @@ void LayoutEngine::arrangePseudoElement(PseudoElement& node, LayoutPass& pass) {
             for (std::size_t index = 0; index < end; ++index) result += sizes[index];
             result += gap * static_cast<float>(gapCount);
             return result;
-        };
-        const auto alignSelfOffset = [](AlignSelf alignment, float freeSpace) {
-            if (alignment == AlignSelf::Center) return freeSpace * .5f;
-            if (alignment == AlignSelf::End) return freeSpace;
-            return 0.f;
         };
         const LayoutDirection direction = pass.direction();
         for (ChildLayout& child : children) {
@@ -475,23 +669,34 @@ void LayoutEngine::arrangePseudoElement(PseudoElement& node, LayoutPass& pass) {
             const MarginInsets& margin = child.style.margin;
             const float availableWidth = std::max(0.f, cellWidth - margin.horizontal());
             const float availableHeight = std::max(0.f, cellHeight - margin.vertical());
-            const bool stretchWidth = child.style.justifySelf == JustifySelf::Auto || child.style.justifySelf == JustifySelf::Stretch;
-            const bool stretchHeight = child.style.alignSelf == AlignSelf::Auto || child.style.alignSelf == AlignSelf::Stretch;
+            const bool ownJustify = child.style.justifySelf.position != ItemPosition::Auto;
+            const ItemPosition justify = ownJustify ? child.style.justifySelf.position : node.style().justifyItems.position;
+            const OverflowAlignment justifySafety = ownJustify ? child.style.justifySelf.overflow : node.style().justifyItems.overflow;
+            const bool ownAlign = child.style.alignSelf.position != ItemPosition::Auto;
+            const ItemPosition align = ownAlign ? child.style.alignSelf.position : node.style().alignItems.position;
+            const OverflowAlignment alignSafety = ownAlign ? child.style.alignSelf.overflow : node.style().alignItems.overflow;
+            const bool stretchWidth = justify == ItemPosition::Normal || justify == ItemPosition::Stretch;
+            const bool stretchHeight = align == ItemPosition::Normal || align == ItemPosition::Stretch;
             const float widthFallback = child.style.width.isAuto() ? (stretchWidth ? availableWidth : child.measured.x) : child.measured.x;
             const float heightFallback = child.style.height.isAuto() ? (stretchHeight ? availableHeight : child.measured.y) : child.measured.y;
-            const float width = styledBoxDimension(child.style, true, child.style.width, child.style.minWidth, widthFallback, content.w);
-            const float height = styledBoxDimension(child.style, false, child.style.height, child.style.minHeight, heightFallback, content.h);
-            const float horizontalFreeSpace = std::max(0.f, availableWidth - width);
-            const float verticalFreeSpace = std::max(0.f, availableHeight - height);
-            const float x = cellLeft + margin.left.fixedPixels() + justifySelfOffset(child.style.justifySelf, direction, horizontalFreeSpace);
-            const float y = cellTop - margin.top.fixedPixels() - height - alignSelfOffset(child.style.alignSelf, verticalFreeSpace);
+            const float width = styledBoxDimension(child.style, true, child.style.width, child.style.minWidth, child.style.maxWidth, widthFallback,
+                                                   content.w, child.minContent.x);
+            const float height = styledBoxDimension(child.style, false, child.style.height, child.style.minHeight, child.style.maxHeight,
+                                                    heightFallback, content.h, child.minContent.y);
+            const float horizontalFreeSpace = availableWidth - width;
+            const float verticalFreeSpace = availableHeight - height;
+            const float x = cellLeft + margin.left.fixedPixels()
+                + justifySelfOffset(justify, justifySafety, direction, horizontalFreeSpace);
+            const float y =
+                cellTop - margin.top.fixedPixels() - height - alignSelfOffset(align, alignSafety, verticalFreeSpace);
             arrangeChild(child, {x, y, width, height});
         }
+        arrangeOutOfFlowChildren(node, pass);
         return;
     }
 
     if (isFlexDisplay(node.style().display)) {
-        const bool row = node.style().flexDirection == FlexDirection::Row;
+        const bool row = isRowFlexDirection(node.style().flexDirection);
         const LayoutDirection direction = pass.direction();
         const float availableMain = row ? content.w : content.h;
         const float availableCross = row ? content.h : content.w;
@@ -500,41 +705,47 @@ void LayoutEngine::arrangePseudoElement(PseudoElement& node, LayoutPass& pass) {
         const float mainGap = (row ? node.style().columnGap : node.style().rowGap).fixedPixels();
         float usedMain = mainGap * static_cast<float>(children.size() - 1);
         for (ChildLayout& child : children) {
-            const CrossAlignment alignment = crossAlignment(node.style(), child.style);
-            const float widthFallback = !row && child.style.width.isAuto() && alignment == CrossAlignment::Stretch
+            const ItemPosition alignment = crossAlignment(node.style(), child.style);
+            const float widthFallback = !row && child.style.width.isAuto() && alignment == ItemPosition::Stretch
                 ? std::max(0.f, availableCross - child.style.margin.horizontal())
                 : child.measured.x;
-            const float heightFallback = row && child.style.height.isAuto() && alignment == CrossAlignment::Stretch
+            const float heightFallback = row && child.style.height.isAuto() && alignment == ItemPosition::Stretch
                 ? std::max(0.f, availableCross - child.style.margin.vertical())
                 : child.measured.y;
-            const float width = styledBoxDimension(child.style, true, child.style.width, child.style.minWidth, widthFallback, content.w);
-            const float height = styledBoxDimension(child.style, false, child.style.height, child.style.minHeight, heightFallback, content.h);
+            const float width = styledBoxDimension(child.style, true, child.style.width, child.style.minWidth, child.style.maxWidth, widthFallback,
+                                                   content.w, child.minContent.x);
+            const float height = styledBoxDimension(child.style, false, child.style.height, child.style.minHeight, child.style.maxHeight,
+                                                    heightFallback, content.h, child.minContent.y);
             sizes.push_back({width, height});
             usedMain += (row ? width + child.style.margin.horizontal() : height + child.style.margin.vertical());
         }
         const float freeSpace = std::max(0.f, availableMain - usedMain);
-        float mainPosition = row ? (direction == LayoutDirection::RightToLeft ? content.right() : content.left()) : content.top();
-        if (row) {
-            const float offset = rowAlignmentOffset(node.style().justifyContent, direction, freeSpace);
-            mainPosition += direction == LayoutDirection::RightToLeft ? -offset : offset;
-        } else if (node.style().justifyContent == JustifyContent::Center) mainPosition -= freeSpace * .5f;
-        else if (node.style().justifyContent == JustifyContent::End || node.style().justifyContent == JustifyContent::Right)
-            mainPosition -= freeSpace;
+        const bool forward = row ? (direction == LayoutDirection::LeftToRight) != isReverseFlexDirection(node.style().flexDirection)
+                                 : !isReverseFlexDirection(node.style().flexDirection);
+        float mainPosition = row ? (forward ? content.left() : content.right()) : (forward ? content.top() : content.bottom());
+        const layout_detail::ContentDistributionResult distribution = layout_detail::justifyContentDistribution(
+            node.style().justifyContent.position, node.style().justifyContent.distribution, node.style().justifyContent.overflow, direction,
+            node.style().flexDirection, freeSpace, children.size());
+        if (row) mainPosition += forward ? distribution.offset : -distribution.offset;
+        else mainPosition += forward ? -distribution.offset : distribution.offset;
 
         for (std::size_t index = 0; index < children.size(); ++index) {
             ChildLayout& child = children[index];
             const MarginInsets& margin = child.style.margin;
-            if (index != 0) mainPosition += row && direction == LayoutDirection::LeftToRight ? mainGap : -mainGap;
+            if (index != 0) {
+                const float spacing = mainGap + distribution.extraGap;
+                mainPosition += row ? (forward ? spacing : -spacing) : (forward ? -spacing : spacing);
+            }
             const float width = sizes[index].x;
             const float height = sizes[index].y;
-            const CrossAlignment alignment = crossAlignment(node.style(), child.style);
+            const ItemPosition alignment = crossAlignment(node.style(), child.style);
             if (row) {
                 const float crossSpace = std::max(0.f, availableCross - height - margin.vertical());
-                const float crossOffset = alignment == CrossAlignment::Center ? crossSpace * .5f
-                    : alignment == CrossAlignment::End                        ? crossSpace
-                                                                              : 0.f;
+                const float crossOffset = alignment == ItemPosition::Center                    ? crossSpace * .5f
+                    : (alignment == ItemPosition::End || alignment == ItemPosition::FlexEnd) ? crossSpace
+                                                                                                 : 0.f;
                 float x;
-                if (direction == LayoutDirection::RightToLeft) {
+                if (!forward) {
                     mainPosition -= margin.right.fixedPixels() + width;
                     x = mainPosition;
                     mainPosition -= margin.left.fixedPixels();
@@ -544,31 +755,47 @@ void LayoutEngine::arrangePseudoElement(PseudoElement& node, LayoutPass& pass) {
                 }
                 arrangeChild(child, {x, content.top() - margin.top.fixedPixels() - height - crossOffset, width, height});
             } else {
-                mainPosition -= margin.top.fixedPixels() + height;
+                const bool crossStartRight = direction == LayoutDirection::RightToLeft;
                 const float crossSpace = std::max(0.f, availableCross - width - margin.horizontal());
                 float x = content.left() + margin.left.fixedPixels();
-                if (alignment == CrossAlignment::Center) x += crossSpace * .5f;
+                if (alignment == ItemPosition::Center) x += crossSpace * .5f;
                 else {
-                    const bool logicalStart = alignment == CrossAlignment::Start || alignment == CrossAlignment::Stretch;
-                    const bool alignRight = logicalStart == (direction == LayoutDirection::RightToLeft);
-                    if (alignRight) x = content.right() - margin.right.fixedPixels() - width;
+                    const bool startRight = alignment == ItemPosition::Start ? direction == LayoutDirection::RightToLeft
+                        : alignment == ItemPosition::End                     ? direction == LayoutDirection::LeftToRight
+                        : alignment == ItemPosition::FlexEnd                 ? !crossStartRight
+                                                                               : crossStartRight;
+                    if (startRight) x = content.right() - margin.right.fixedPixels() - width;
                 }
-                arrangeChild(child, {x, mainPosition, width, height});
-                mainPosition -= margin.bottom.fixedPixels();
+                Rect base;
+                if (forward) {
+                    mainPosition -= margin.top.fixedPixels() + height;
+                    base = {x, mainPosition, width, height};
+                    mainPosition -= margin.bottom.fixedPixels();
+                } else {
+                    mainPosition += margin.bottom.fixedPixels();
+                    base = {x, mainPosition, width, height};
+                    mainPosition += height + margin.top.fixedPixels();
+                }
+                arrangeChild(child, base);
             }
         }
+        arrangeOutOfFlowChildren(node, pass);
         return;
     }
 
     float y = content.top();
     for (ChildLayout& child : children) {
         const MarginInsets& margin = child.style.margin;
-        const float width = styledBoxDimension(child.style, true, child.style.width, child.style.minWidth, content.w, content.w);
-        const float height = styledBoxDimension(child.style, false, child.style.height, child.style.minHeight, child.measured.y, content.h);
+        const float widthFallback = child.style.width.isAuto() ? content.w : child.measured.x;
+        const float width = styledBoxDimension(child.style, true, child.style.width, child.style.minWidth, child.style.maxWidth, widthFallback,
+                                               content.w, child.minContent.x);
+        const float height = styledBoxDimension(child.style, false, child.style.height, child.style.minHeight, child.style.maxHeight,
+                                                child.measured.y, content.h, child.minContent.y);
         y -= margin.top.fixedPixels() + height;
         arrangeChild(child, {content.left() + margin.left.fixedPixels(), y, width, height});
         y -= margin.bottom.fixedPixels();
     }
+    arrangeOutOfFlowChildren(node, pass);
 }
 
 void LayoutEngine::arrangeRow(Element& node, const ComputedStyle& parentStyle, const Rect& content, const Rect& available,
@@ -580,37 +807,49 @@ void LayoutEngine::arrangeRow(Element& node, const ComputedStyle& parentStyle, c
     if (!sizing.valid) return;
     const auto& lines = sizing.lines;
     const auto& lineHeights = sizing.lineHeights;
-    const float lineGap = parentStyle.rowGap.fixedPixels();
-    float lineTop = content.top();
+    const bool crossStartTop = !isFlexWrapReverse(parentStyle.flexWrap);
+    float lineTop = crossStartTop ? content.top() - sizing.crossOffset : content.bottom() + sizing.crossOffset;
 
     for (std::size_t line = 0; line < sizing.lines.size(); ++line) {
         const auto [begin, end] = sizing.lines[line];
         const float lineHeight = lineHeights[line];
-        const float lineBottom = lineTop - lineHeight;
+        const float lineBottom = crossStartTop ? lineTop - lineHeight : lineTop;
+        const float lineTopForPlacement = crossStartTop ? lineTop : lineBottom + lineHeight;
         const MainAxisAllocation& allocation = sizing.allocations[line];
         const float gap = allocation.gap;
         const float freeSpace = allocation.freeSpace;
         const float autoMargin = allocation.autoMargin;
-        const bool rtl = direction == LayoutDirection::RightToLeft;
-        float x = rtl ? content.right() : content.left();
-        if (!allocation.hasAutoMargins) {
-            const float offset = rowAlignmentOffset(parentStyle.justifyContent, direction, freeSpace);
-            x += rtl ? -offset : offset;
+        const bool forward = (direction == LayoutDirection::LeftToRight) != isReverseFlexDirection(parentStyle.flexDirection);
+        const layout_detail::ContentDistributionResult distribution = allocation.hasAutoMargins
+            ? layout_detail::ContentDistributionResult{}
+            : layout_detail::justifyContentDistribution(parentStyle.justifyContent.position, parentStyle.justifyContent.distribution,
+                                                        parentStyle.justifyContent.overflow, direction, parentStyle.flexDirection, freeSpace,
+                                                        end - begin);
+        float x = forward ? content.left() : content.right();
+        x += forward ? distribution.offset : -distribution.offset;
+        float firstLineBaseline = 0.f;
+        float lastLineBaseline = 0.f;
+        for (std::size_t index = begin; index < end; ++index) {
+            const ItemPosition alignment = crossAlignment(parentStyle, children[index].style);
+            if (alignment != ItemPosition::Baseline && alignment != ItemPosition::LastBaseline) continue;
+            const float baseline = flexBaseline(children[index], alignment) + children[index].style.margin.bottom.fixedPixels();
+            if (alignment == ItemPosition::LastBaseline) lastLineBaseline = std::max(lastLineBaseline, baseline);
+            else firstLineBaseline = std::max(firstLineBaseline, baseline);
         }
         for (std::size_t index = begin; index < end; ++index) {
             ChildLayout& child = children[index];
-            const LayoutChildRef& current = child.node;
+            const OrderedChildRef& current = child.node;
             Element* currentNode = nodeState.get();
             if (!nodeState.layoutValid()) return;
             if (!current || !current.attachedTo(*currentNode) || !isDisplayed(child)) continue;
-            LayoutChildRef next = index + 1 < end ? children[index + 1].node : LayoutChildRef();
+            OrderedChildRef next = index + 1 < end ? children[index + 1].node : OrderedChildRef();
             if (next && (!next.attachedTo(*currentNode) || !isDisplayed(children[index + 1]))) next = {};
             float adjacencyGap = 0.f;
             float adjacencyOverlap = 0.f;
             if (next) {
                 const std::optional<AdjacentLayout> adjacent = adjacentLayout(nodeState, current, next, parentStyle);
                 if (!adjacent) return;
-                adjacencyGap = adjacent->hasGap ? gap : 0.f;
+                adjacencyGap = (adjacent->hasGap ? gap : 0.f) + distribution.extraGap;
                 adjacencyOverlap = adjacent->overlap;
             }
             const MarginInsets& margin = child.style.margin;
@@ -621,15 +860,31 @@ void LayoutEngine::arrangeRow(Element& node, const ComputedStyle& parentStyle, c
             float y = lineBottom + margin.bottom.fixedPixels();
             if (crossAutoCount) y += margin.bottom.isAuto() ? crossAuto : 0.f;
             else {
-                const CrossAlignment alignment = crossAlignment(parentStyle, child.style);
-                if (alignment == CrossAlignment::Start || alignment == CrossAlignment::Stretch)
-                    y = lineTop - margin.top.fixedPixels() - child.measured.y;
-                else if (alignment == CrossAlignment::Center) y += availableCrossSpace * .5f;
+                ItemPosition alignment = crossAlignment(parentStyle, child.style);
+                if (crossAlignmentSafety(parentStyle, child.style) == OverflowAlignment::Safe && availableCrossSpace < 0.f) {
+                    if (alignment == ItemPosition::Center || alignment == ItemPosition::End) alignment = ItemPosition::Start;
+                    else if (alignment == ItemPosition::FlexEnd) alignment = ItemPosition::FlexStart;
+                }
+                if (alignment == ItemPosition::Baseline || alignment == ItemPosition::LastBaseline) {
+                    const float lineBaseline = alignment == ItemPosition::LastBaseline ? lastLineBaseline : firstLineBaseline;
+                    y += lineBaseline - flexBaseline(child, alignment);
+                } else if (alignment == ItemPosition::Center) y += availableCrossSpace * .5f;
+                else {
+                    const bool startTop = alignment == ItemPosition::Start ? true
+                        : alignment == ItemPosition::End                   ? false
+                        : alignment == ItemPosition::FlexStart             ? crossStartTop
+                        : alignment == ItemPosition::FlexEnd               ? !crossStartTop
+                                                                             : crossStartTop;
+                    if (startTop) y = lineTopForPlacement - margin.top.fixedPixels() - child.measured.y;
+                    else
+                        y = crossStartTop ? lineBottom + margin.bottom.fixedPixels()
+                                          : lineTopForPlacement - margin.top.fixedPixels() - child.measured.y;
+                }
             }
-            if (rtl) {
+            if (!forward) {
                 x -= margin.right.fixedPixels() + (margin.right.isAuto() ? autoMargin : 0.f);
                 const Rect base{x - child.measured.x, y, child.measured.x, child.measured.y};
-                setArrangedRect(child.node, translatedRect(child, relativeRect(child, base, content)));
+                setArrangedRect(child.node, translatedRect(child, relativeRect(child, base, content)), pass);
                 x -= child.measured.x + margin.left.fixedPixels() + (margin.left.isAuto() ? autoMargin : 0.f);
                 if (next) {
                     x -= adjacencyGap;
@@ -638,7 +893,7 @@ void LayoutEngine::arrangeRow(Element& node, const ComputedStyle& parentStyle, c
             } else {
                 x += margin.left.fixedPixels() + (margin.left.isAuto() ? autoMargin : 0.f);
                 const Rect base{x, y, child.measured.x, child.measured.y};
-                setArrangedRect(child.node, translatedRect(child, relativeRect(child, base, content)));
+                setArrangedRect(child.node, translatedRect(child, relativeRect(child, base, content)), pass);
                 x += child.measured.x + margin.right.fixedPixels() + (margin.right.isAuto() ? autoMargin : 0.f);
                 if (next) {
                     x += adjacencyGap;
@@ -649,7 +904,7 @@ void LayoutEngine::arrangeRow(Element& node, const ComputedStyle& parentStyle, c
             currentNode = nodeState.get();
             if (!nodeState.layoutValid()) return;
         }
-        lineTop = lineBottom - lineGap;
+        lineTop = crossStartTop ? lineBottom - sizing.crossGap : lineTopForPlacement + sizing.crossGap;
     }
 }
 
@@ -658,61 +913,93 @@ void LayoutEngine::arrangeColumn(Element& node, const ComputedStyle& parentStyle
     const LayoutDirection direction = pass.direction();
     const NodeSnapshot nodeState(node);
     removeChildrenExcludedFromLayout(node, children);
-    const MainAxisAllocation allocation = resolveColumnSizes(node, parentStyle, available, children, pass);
-    if (!allocation.valid) return;
-    const float gap = allocation.gap;
-    const float freeSpace = allocation.freeSpace;
-    const float autoMargin = allocation.autoMargin;
-    float y = content.top();
-    if (!allocation.hasAutoMargins) {
-        const JustifyContent alignment = parentStyle.justifyContent;
-        if (alignment == JustifyContent::Center) y -= freeSpace * .5f;
-        else if (alignment == JustifyContent::End || alignment == JustifyContent::Right) y -= freeSpace;
-    }
-    for (std::size_t i = 0; i < children.size(); ++i) {
-        ChildLayout& child = children[i];
-        const LayoutChildRef& current = child.node;
-        Element* currentNode = nodeState.get();
-        if (!nodeState.layoutValid()) return;
-        if (!current || !current.attachedTo(*currentNode) || !isDisplayed(child)) continue;
-        LayoutChildRef previous = i ? children[i - 1].node : LayoutChildRef();
-        if (previous && (!previous.attachedTo(*currentNode) || !isDisplayed(children[i - 1]))) previous = {};
-        float adjacencyGap = 0.f;
-        float adjacencyOverlap = 0.f;
-        if (previous) {
-            const std::optional<AdjacentLayout> adjacent = adjacentLayout(nodeState, previous, current, parentStyle);
-            if (!adjacent) return;
-            adjacencyGap = adjacent->hasGap ? gap : 0.f;
-            adjacencyOverlap = adjacent->overlap;
-        }
-        const MarginInsets& margin = child.style.margin;
-        if (previous) {
-            y -= adjacencyGap;
-            y += adjacencyOverlap;
-        }
-        y -= margin.top.fixedPixels() + (margin.top.isAuto() ? autoMargin : 0.f);
-        const int horizontalAutoCount = margin.horizontalAutoCount();
-        const float width = child.measured.x;
-        const float horizontalSpace = std::max(0.f, content.w - width - margin.horizontal());
-        const float horizontalAuto = horizontalAutoCount ? horizontalSpace / static_cast<float>(horizontalAutoCount) : 0.f;
-        float x = content.left() + margin.left.fixedPixels();
-        if (horizontalAutoCount) x += margin.left.isAuto() ? horizontalAuto : 0.f;
-        else {
-            const CrossAlignment alignment = crossAlignment(parentStyle, child.style);
-            if (alignment == CrossAlignment::Center) x += horizontalSpace * .5f;
-            else {
-                const bool logicalStart = alignment == CrossAlignment::Start || alignment == CrossAlignment::Stretch;
-                const bool alignRight = logicalStart == (direction == LayoutDirection::RightToLeft);
-                if (alignRight) x = content.right() - margin.right.fixedPixels() - width;
+    const ColumnSizing sizing = resolveColumnSizes(node, parentStyle, available, children, pass);
+    if (!sizing.valid) return;
+    const bool crossStartRight = (direction == LayoutDirection::RightToLeft) != isFlexWrapReverse(parentStyle.flexWrap);
+    float crossPosition = crossStartRight ? content.right() - sizing.crossOffset : content.left() + sizing.crossOffset;
+    const bool forwardDown = !isReverseFlexDirection(parentStyle.flexDirection);
+    for (std::size_t line = 0; line < sizing.lines.size(); ++line) {
+        const auto [begin, end] = sizing.lines[line];
+        const MainAxisAllocation& allocation = sizing.allocations[line];
+        const float lineWidth = sizing.lineWidths[line];
+        const float crossLeft = crossStartRight ? crossPosition - lineWidth : crossPosition;
+        const float crossRight = crossLeft + lineWidth;
+        const layout_detail::ContentDistributionResult distribution = allocation.hasAutoMargins
+            ? layout_detail::ContentDistributionResult{}
+            : layout_detail::justifyContentDistribution(parentStyle.justifyContent.position, parentStyle.justifyContent.distribution,
+                                                        parentStyle.justifyContent.overflow, direction, parentStyle.flexDirection,
+                                                        allocation.freeSpace, end - begin);
+        float y = forwardDown ? content.top() - distribution.offset : content.bottom() + distribution.offset;
+        for (std::size_t index = begin; index < end; ++index) {
+            ChildLayout& child = children[index];
+            const OrderedChildRef& current = child.node;
+            Element* currentNode = nodeState.get();
+            if (!nodeState.layoutValid()) return;
+            if (!current || !current.attachedTo(*currentNode) || !isDisplayed(child)) continue;
+            OrderedChildRef previous = index > begin ? children[index - 1].node : OrderedChildRef();
+            if (previous && (!previous.attachedTo(*currentNode) || !isDisplayed(children[index - 1]))) previous = {};
+            if (previous) {
+                const std::optional<AdjacentLayout> adjacent = adjacentLayout(nodeState, previous, current, parentStyle);
+                if (!adjacent) return;
+                const float spacing = (adjacent->hasGap ? allocation.gap : 0.f) + distribution.extraGap;
+                if (forwardDown) {
+                    y -= spacing;
+                    y += adjacent->overlap;
+                } else {
+                    y += spacing;
+                    y -= adjacent->overlap;
+                }
             }
+            const MarginInsets& margin = child.style.margin;
+            const float width = styledBoxDimension(child.style, true, child.style.width, child.style.minWidth, child.style.maxWidth, child.measured.x,
+                                                   lineWidth, child.minContent.x);
+            const float availableHorizontalSpace = lineWidth - width - margin.horizontal();
+            const float horizontalSpace = std::max(0.f, availableHorizontalSpace);
+            const int horizontalAutoCount = margin.horizontalAutoCount();
+            const float horizontalAuto = horizontalAutoCount ? horizontalSpace / static_cast<float>(horizontalAutoCount) : 0.f;
+            float x = crossLeft + margin.left.fixedPixels();
+            if (horizontalAutoCount) {
+                if (crossStartRight) x = crossRight - margin.right.fixedPixels() - width - (margin.right.isAuto() ? horizontalAuto : 0.f);
+                else x += margin.left.isAuto() ? horizontalAuto : 0.f;
+            } else {
+                ItemPosition alignment = crossAlignment(parentStyle, child.style);
+                const OverflowAlignment alignmentSafety = crossAlignmentSafety(parentStyle, child.style);
+                if (alignmentSafety == OverflowAlignment::Safe && availableHorizontalSpace < 0.f) {
+                    if (alignment == ItemPosition::Center || alignment == ItemPosition::End) alignment = ItemPosition::Start;
+                    else if (alignment == ItemPosition::FlexEnd) alignment = ItemPosition::FlexStart;
+                }
+                const float distributableSpace = alignmentSafety == OverflowAlignment::Safe ? horizontalSpace : availableHorizontalSpace;
+                if (alignment == ItemPosition::Center) x += distributableSpace * .5f;
+                else {
+                    if (alignment == ItemPosition::Baseline || alignment == ItemPosition::LastBaseline) {
+                        const bool startRight = alignment == ItemPosition::LastBaseline ? direction == LayoutDirection::LeftToRight
+                                                                                           : direction == LayoutDirection::RightToLeft;
+                        x = startRight ? crossRight - margin.right.fixedPixels() - width : crossLeft + margin.left.fixedPixels();
+                    } else {
+                        const bool startRight = alignment == ItemPosition::Start ? direction == LayoutDirection::RightToLeft
+                            : alignment == ItemPosition::End                     ? direction == LayoutDirection::LeftToRight
+                            : alignment == ItemPosition::FlexEnd                 ? !crossStartRight
+                                                                                   : crossStartRight;
+                        x = startRight ? crossRight - margin.right.fixedPixels() - width : crossLeft + margin.left.fixedPixels();
+                    }
+                }
+            }
+            Rect base;
+            if (forwardDown) {
+                y -= margin.top.fixedPixels() + (margin.top.isAuto() ? allocation.autoMargin : 0.f) + child.measured.y;
+                base = {x, y, width, child.measured.y};
+            } else {
+                y += margin.bottom.fixedPixels() + (margin.bottom.isAuto() ? allocation.autoMargin : 0.f);
+                base = {x, y, width, child.measured.y};
+            }
+            setArrangedRect(child.node, translatedRect(child, relativeRect(child, base, content)), pass);
+            arrangeNode(child.node, pass);
+            currentNode = nodeState.get();
+            if (!nodeState.layoutValid()) return;
+            if (forwardDown) y -= margin.bottom.fixedPixels() + (margin.bottom.isAuto() ? allocation.autoMargin : 0.f);
+            else y += child.measured.y + margin.top.fixedPixels() + (margin.top.isAuto() ? allocation.autoMargin : 0.f);
         }
-        y -= child.measured.y;
-        const Rect base{x, y, width, child.measured.y};
-        setArrangedRect(child.node, translatedRect(child, relativeRect(child, base, content)));
-        arrangeNode(child.node, pass);
-        currentNode = nodeState.get();
-        if (!nodeState.layoutValid()) return;
-        y -= margin.bottom.fixedPixels() + (margin.bottom.isAuto() ? autoMargin : 0.f);
+        crossPosition += crossStartRight ? -(lineWidth + sizing.crossGap) : lineWidth + sizing.crossGap;
     }
 }
 
@@ -720,14 +1007,52 @@ void LayoutEngine::arrangeGrid(Element& node, const ComputedStyle& style, const 
     const LayoutDirection direction = pass.direction();
     const NodeSnapshot nodeState(node);
     removeChildrenExcludedFromLayout(node, children);
-    const layout_detail::GridTrackSizes tracks =
-        gridTrackSizes(children, content.w, content.h, style.columnGap.fixedPixels(), style.rowGap.fixedPixels());
+    layout_detail::GridTrackSizes tracks = gridTrackSizes(children, content.w, content.h, style.columnGap.fixedPixels(), style.rowGap.fixedPixels());
     const auto sumBefore = [](const std::vector<float>& sizes, std::size_t end, std::size_t gapCount, float gap) {
         float result = 0.f;
         for (std::size_t index = 0; index < end; ++index) result += sizes[index];
         result += gap * static_cast<float>(gapCount);
         return result;
     };
+    const auto total = [](const std::vector<float>& sizes) {
+        float result = 0.f;
+        for (const float size : sizes) result += size;
+        return result;
+    };
+    const float columnGap = style.columnGap.fixedPixels();
+    const float rowGap = style.rowGap.fixedPixels();
+    const float columnFreeSpace = content.w - total(tracks.columns) - columnGap * static_cast<float>(tracks.columns.size() - 1);
+    const layout_detail::ContentDistributionResult columnDistribution =
+        layout_detail::justifyContentDistribution(style.justifyContent.position, style.justifyContent.distribution, style.justifyContent.overflow,
+                                                  direction, FlexDirection::Row, columnFreeSpace, tracks.columns.size(), true);
+    if (columnDistribution.stretch && !tracks.columns.empty()) {
+        const float extra = std::max(0.f, columnFreeSpace) / static_cast<float>(tracks.columns.size());
+        for (float& size : tracks.columns) size += extra;
+    }
+    const layout_detail::ContentDistributionResult rowDistribution = layout_detail::alignContentDistribution(
+        style.alignContent.position, style.alignContent.distribution, style.alignContent.overflow, tracks.rows, content.h, rowGap);
+    const float columnTrackGap = columnGap + columnDistribution.extraGap;
+    const float rowTrackGap = rowDistribution.extraGap;
+
+    struct GridPlacement {
+        ChildLayout* child = nullptr;
+        std::size_t column = 0;
+        std::size_t row = 0;
+        Rect cell;
+        MarginInsets margin;
+        ItemPosition justify = ItemPosition::Normal;
+        ItemPosition align = ItemPosition::Normal;
+        OverflowAlignment justifySafety = OverflowAlignment::Default;
+        OverflowAlignment alignSafety = OverflowAlignment::Default;
+        Vec2 size;
+    };
+
+    std::vector<GridPlacement> placements;
+    placements.reserve(children.size());
+    std::vector<float> firstBaselines(tracks.rows.size(), 0.f);
+    std::vector<float> lastBaselines(tracks.rows.size(), 0.f);
+    std::vector<bool> hasFirstBaseline(tracks.rows.size(), false);
+    std::vector<bool> hasLastBaseline(tracks.rows.size(), false);
     for (ChildLayout& child : children) {
         Element* currentNode = nodeState.get();
         if (!nodeState.layoutValid()) return;
@@ -736,27 +1061,71 @@ void LayoutEngine::arrangeGrid(Element& node, const ComputedStyle& style, const 
         const GridArea area = child.style.gridArea.value_or(GridArea{});
         const std::size_t column = static_cast<std::size_t>(std::max(1, area.column)) - 1;
         const std::size_t row = static_cast<std::size_t>(std::max(1, area.row)) - 1;
+        if (column >= tracks.columns.size() || row >= tracks.rows.size()) continue;
         const float cellLeft = direction == LayoutDirection::RightToLeft
-            ? content.right() - sumBefore(tracks.columns, column + 1, column, style.columnGap.fixedPixels())
-            : content.left() + sumBefore(tracks.columns, column, column, style.columnGap.fixedPixels());
-        const float cellTop = content.top() - sumBefore(tracks.rows, row, row, style.rowGap.fixedPixels());
+            ? content.right() - columnDistribution.offset - sumBefore(tracks.columns, column + 1, column, columnTrackGap)
+            : content.left() + columnDistribution.offset + sumBefore(tracks.columns, column, column, columnTrackGap);
+        const float cellTop = content.top() - rowDistribution.offset - sumBefore(tracks.rows, row, row, rowTrackGap);
         const float cellWidth = tracks.columns[column];
         const float cellHeight = tracks.rows[row];
         const MarginInsets& margin = child.style.margin;
         const float availableWidth = std::max(0.f, cellWidth - margin.horizontal());
         const float availableHeight = std::max(0.f, cellHeight - margin.vertical());
-        const bool stretch = child.style.justifySelf == JustifySelf::Auto || child.style.justifySelf == JustifySelf::Stretch;
-        const float widthFallback = child.style.width.isAuto() ? (stretch ? availableWidth : child.measured.x) : child.measured.x;
-        const float heightFallback = child.style.height.isAuto() ? availableHeight : child.measured.y;
-        const float width = styledBoxDimension(child.style, true, child.style.width, child.style.minWidth, widthFallback, content.w);
-        const float height = styledBoxDimension(child.style, false, child.style.height, child.style.minHeight, heightFallback, content.h);
+        const bool ownJustify = child.style.justifySelf.position != ItemPosition::Auto;
+        const ItemPosition justify = ownJustify ? child.style.justifySelf.position : style.justifyItems.position;
+        const OverflowAlignment justifySafety = ownJustify ? child.style.justifySelf.overflow : style.justifyItems.overflow;
+        const bool ownAlign = child.style.alignSelf.position != ItemPosition::Auto;
+        const ItemPosition align = ownAlign ? child.style.alignSelf.position : style.alignItems.position;
+        const OverflowAlignment alignSafety = ownAlign ? child.style.alignSelf.overflow : style.alignItems.overflow;
+        const bool stretchWidth = justify == ItemPosition::Normal || justify == ItemPosition::Stretch;
+        const bool stretchHeight = align == ItemPosition::Normal || align == ItemPosition::Stretch;
+        const float widthFallback = child.style.width.isAuto() ? (stretchWidth ? availableWidth : child.measured.x) : child.measured.x;
+        const float heightFallback = child.style.height.isAuto() ? (stretchHeight ? availableHeight : child.measured.y) : child.measured.y;
+        const float width = styledBoxDimension(child.style, true, child.style.width, child.style.minWidth, child.style.maxWidth, widthFallback,
+                                               content.w, child.minContent.x);
+        const float height = styledBoxDimension(child.style, false, child.style.height, child.style.minHeight, child.style.maxHeight, heightFallback,
+                                                content.h, child.minContent.y);
+        GridPlacement placement{&child,      column,         row,   {cellLeft, cellTop - cellHeight, cellWidth, cellHeight},
+                                margin,      justify,        align, justifySafety,
+                                alignSafety, {width, height}};
+        const ItemPosition preference = crossAlignment(style, child.style);
+        if (preference == ItemPosition::Baseline || preference == ItemPosition::LastBaseline) {
+            const float baseline =
+                placement.cell.top() - margin.top.fixedPixels() - height + margin.bottom.fixedPixels() + flexBaseline(child, preference);
+            if (preference == ItemPosition::LastBaseline) {
+                lastBaselines[row] = std::max(lastBaselines[row], baseline);
+                hasLastBaseline[row] = true;
+            } else {
+                firstBaselines[row] = std::max(firstBaselines[row], baseline);
+                hasFirstBaseline[row] = true;
+            }
+        }
+        placements.push_back(placement);
+    }
 
-        const float freeSpace = std::max(0.f, availableWidth - width);
-        const float x = cellLeft + margin.left.fixedPixels() + justifySelfOffset(child.style.justifySelf, direction, freeSpace);
-        const Rect item{x, cellTop - margin.top.fixedPixels() - height, width, height};
-        setArrangedRect(child.node, translatedRect(child, relativeRect(child, item, content)));
+    for (GridPlacement& placement : placements) {
+        ChildLayout& child = *placement.child;
+        const float freeWidth = placement.cell.w - placement.size.x - placement.margin.horizontal();
+        const float x = placement.cell.left()
+            + placement.margin.left.fixedPixels()
+            + justifySelfOffset(placement.justify, placement.justifySafety, direction, freeWidth);
+        const ItemPosition preference = crossAlignment(style, child.style);
+        float y;
+        if (preference == ItemPosition::Baseline && hasFirstBaseline[placement.row]) {
+            y = firstBaselines[placement.row] - placement.margin.bottom.fixedPixels() - flexBaseline(child, preference);
+        } else if (preference == ItemPosition::LastBaseline && hasLastBaseline[placement.row]) {
+            y = lastBaselines[placement.row] - placement.margin.bottom.fixedPixels() - flexBaseline(child, preference);
+        } else {
+            const float freeHeight = placement.cell.h - placement.size.y - placement.margin.vertical();
+            y = placement.cell.top()
+                - placement.margin.top.fixedPixels()
+                - placement.size.y
+                - alignSelfOffset(placement.align, placement.alignSafety, freeHeight);
+        }
+        const Rect item{x, y, placement.size.x, placement.size.y};
+        setArrangedRect(child.node, translatedRect(child, relativeRect(child, item, content)), pass);
         arrangeNode(child.node, pass);
-        currentNode = nodeState.get();
+        Element* currentNode = nodeState.get();
         if (!nodeState.layoutValid()) return;
     }
 }
@@ -781,14 +1150,16 @@ void LayoutEngine::arrangeNormal(Element& node, const ComputedStyle& parentStyle
         float x = rtl ? content.right() - alignmentOffset : content.left() + alignmentOffset;
         for (std::size_t index = line.begin; index < line.end; ++index) {
             ChildLayout& child = children[index];
-            const LayoutChildRef& childNode = child.node;
+            const OrderedChildRef& childNode = child.node;
             Element* currentNode = nodeState.get();
             if (!nodeState.layoutValid()) return;
             if (!childNode || !childNode.attachedTo(*currentNode) || !isDisplayed(child)) continue;
 
             const MarginInsets& margin = child.style.margin;
-            const float width = child.measured.x;
-            const float height = child.measured.y;
+            const float width = styledBoxDimension(child.style, true, child.style.width, child.style.minWidth, child.style.maxWidth, child.measured.x,
+                                                   content.w, child.minContent.x);
+            const float height = styledBoxDimension(child.style, false, child.style.height, child.style.minHeight, child.style.maxHeight,
+                                                    child.measured.y, content.h, child.minContent.y);
             const float horizontalSpace = std::max(0.f, content.w - width - margin.horizontal());
             float childX;
             if (rtl) {
@@ -805,12 +1176,12 @@ void LayoutEngine::arrangeNormal(Element& node, const ComputedStyle& parentStyle
                 childY = lineTop - margin.top.fixedPixels() - height;
             } else {
                 const float freeSpace = std::max(0.f, line.height - height - margin.vertical());
-                childY = lineBottom + margin.bottom.fixedPixels() + verticalAlignmentOffset(child.style.verticalAlign, freeSpace);
+                childY = lineBottom + margin.bottom.fixedPixels() + verticalAlignmentOffset(child.style, freeSpace);
             }
             Rect base;
             if (Element* element = childNode.element(); element && element->mRectExplicit) base = positionedRect(child, content);
             else base = {childX, childY, width, height};
-            setArrangedRect(child.node, translatedRect(child, relativeRect(child, base, content)));
+            setArrangedRect(child.node, translatedRect(child, relativeRect(child, base, content)), pass);
             arrangeNode(child.node, pass);
             currentNode = nodeState.get();
             if (!nodeState.layoutValid()) return;

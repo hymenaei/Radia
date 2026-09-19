@@ -972,7 +972,7 @@ TEST(SurfaceTest, PagesScrollbarByPolicy) {
 
 TEST(SurfaceTest, AppliesScrollbarPointerPolicy) {
     StyleSheet styleSheet;
-    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: scroll; pointer-events: default; }").ok());
+    ASSERT_TRUE(styleSheet.loadRadia("#viewport { display: block; overflow: scroll; pointer-events: none; }").ok());
     Surface surface(styleSheet);
     surface.setViewport(200.f, 200.f);
 
@@ -2237,6 +2237,35 @@ TEST(SurfaceTest, PaintsNestedScrollers) {
     EXPECT_FLOAT_EQ(contentPtr->rect().h, contentLayoutRect.h);
 }
 
+TEST(SurfaceTest, KeepsFixedDescendantsInViewport) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet
+                    .loadRadia("#root { display: block; width: 100px; height: 50px; overflow-y: scroll; } #content { height: 200px; } "
+                               ".fixed { position: fixed; left: 20px; top: 10px; width: 20px; height: 20px; }")
+                    .ok());
+    Surface surface(stylesheet);
+    surface.setViewport(200.f, 100.f);
+
+    auto root = makeElement<HTMLPanelElement>();
+    root->setId("root").setRect({40.f, 20.f, 100.f, 50.f});
+    auto content = makeElement<HTMLPanelElement>();
+    content->setId("content");
+    root->append(std::move(content));
+    auto fixed = std::make_unique<PaintProbe>();
+    PaintProbe* fixedPtr = fixed.get();
+    fixed->classList().add("fixed");
+    fixed->setOnActivate([](Element&) {});
+    root->append(std::move(fixed));
+    surface.mount(std::move(root));
+
+    RecordingPaintContext recording;
+    surface.paint(recording);
+    ASSERT_EQ(fixedPtr->paints, 1);
+    EXPECT_FLOAT_EQ(fixedPtr->rect().left(), 20.f);
+    EXPECT_FLOAT_EQ(fixedPtr->rect().top(), 90.f);
+    EXPECT_TRUE(surface.pointerDown({{30.f, 80.f}, PointerButton::Left}));
+}
+
 TEST(SurfaceTest, TransfersMountedElements) {
     Surface first;
     Surface second;
@@ -2427,7 +2456,7 @@ TEST(SurfaceTest, ReflowsAfterTextAlign) {
     EXPECT_FLOAT_EQ(childTarget->rect().left(), 40.f);
 }
 
-TEST(SurfaceTest, PreservesPaintHitTestOrder) {
+TEST(SurfaceTest, UsesVisualOrderForPaintAndHitTesting) {
     StyleSheet styleSheet;
     constexpr char kOrderedOverlap[] = "panel { display: flex; flex-direction: row; width: 40px; height: 20px; } "
                                        "#early { order: -1; width: 20px; height: 20px; } "
@@ -2436,23 +2465,39 @@ TEST(SurfaceTest, PreservesPaintHitTestOrder) {
     Surface surface(styleSheet);
     surface.setViewport(40.f, 20.f);
     auto panel = makeElement<HTMLPanelElement>();
+    HTMLPanelElement* panelTarget = panel.get();
     std::vector<std::string> paintOrder;
+    std::vector<std::string> eventRoute;
     auto early = std::make_unique<OrderedPaintProbe>("early", paintOrder);
     auto late = std::make_unique<OrderedPaintProbe>("late", paintOrder);
     early->setId("early");
     late->setId("late");
     OrderedPaintProbe* earlyTarget = early.get();
     OrderedPaintProbe* lateTarget = late.get();
+    const auto recordPhase = [&](const char* name, Event& event) {
+        const char* phase = event.phase() == EventPhase::Capture ? "capture" : event.phase() == EventPhase::Target ? "target" : "bubble";
+        eventRoute.push_back(std::string(name) + ":" + phase);
+    };
+    panel->addEventListener(kPointerDownEvent, [&, recordPhase](Event& event) { recordPhase("panel", event); }, true);
+    late->addEventListener(kPointerDownEvent, [&, recordPhase](Event& event) { recordPhase("late", event); });
+    panel->addEventListener(kPointerDownEvent, [&, recordPhase](Event& event) { recordPhase("panel", event); });
     panel->append(std::move(late));
     panel->append(std::move(early));
     surface.mount(std::move(panel));
 
+    ASSERT_EQ(panelTarget->children()[0]->id(), "late");
+    ASSERT_EQ(panelTarget->children()[1]->id(), "early");
+
     RecordingPaintContext recording;
     surface.paint(recording);
-    const std::vector<std::string> expectedInitialPaintOrder{"late", "early"};
+    const std::vector<std::string> expectedInitialPaintOrder{"early", "late"};
     EXPECT_EQ(paintOrder, expectedInitialPaintOrder);
     EXPECT_TRUE(surface.pointerDown({{5.f, 5.f}, PointerButton::Left}));
-    EXPECT_TRUE(earlyTarget->hasState(ElementState::Active));
+    EXPECT_TRUE(lateTarget->hasState(ElementState::Active));
+    ASSERT_EQ(eventRoute.size(), std::size_t(3));
+    EXPECT_EQ(eventRoute[0], "panel:capture");
+    EXPECT_EQ(eventRoute[1], "late:target");
+    EXPECT_EQ(eventRoute[2], "panel:bubble");
     surface.pointerUp({{5.f, 5.f}, PointerButton::Left});
     surface.clearInteractionState();
     EXPECT_TRUE(surface.keyDown({kKeyTab}));

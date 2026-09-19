@@ -27,30 +27,32 @@ bool explicitlyInherits(const ComputedStyle& style, std::string_view propertyNam
 }
 } // namespace
 
-void resolveLightDarkColors(ComputedStyle& style) {
-    resolveLightDarkColor(style.backgroundColor, style.backgroundColorLightDark, style.colorScheme);
-    resolveLightDarkColor(style.borderColor, style.borderColorLightDark, style.colorScheme);
-    resolveLightDarkColor(style.color, style.colorLightDark, style.colorScheme);
-    resolveLightDarkColor(style.strokeColor, style.strokeColorLightDark, style.colorScheme);
-    if (style.accentColor.lightDarkColor) style.accentColor.color = resolveLightDarkColor(*style.accentColor.lightDarkColor, style.colorScheme);
+void resolveLightDarkColors(ComputedStyle& style, const ColorSchemeContext& context) {
+    const ColorScheme scheme = style.colorScheme.used(context);
+    style.usedColorScheme = scheme;
+    resolveLightDarkColor(style.backgroundColor, style.backgroundColorLightDark, scheme);
+    resolveLightDarkColor(style.borderColor, style.borderColorLightDark, scheme);
+    resolveLightDarkColor(style.color, style.colorLightDark, scheme);
+    resolveLightDarkColor(style.strokeColor, style.strokeColorLightDark, scheme);
+    if (style.accentColor.lightDarkColor) style.accentColor.color = resolveLightDarkColor(*style.accentColor.lightDarkColor, scheme);
     if (style.scrollbarColor.thumbLightDarkColor)
-        style.scrollbarColor.thumb = resolveLightDarkColor(*style.scrollbarColor.thumbLightDarkColor, style.colorScheme);
+        style.scrollbarColor.thumb = resolveLightDarkColor(*style.scrollbarColor.thumbLightDarkColor, scheme);
     if (style.scrollbarColor.trackLightDarkColor)
-        style.scrollbarColor.track = resolveLightDarkColor(*style.scrollbarColor.trackLightDarkColor, style.colorScheme);
+        style.scrollbarColor.track = resolveLightDarkColor(*style.scrollbarColor.trackLightDarkColor, scheme);
     if (style.backgroundGradient)
-        for (GradientStop& stop : style.backgroundGradient->stops) resolveLightDarkColor(stop.color, stop.lightDarkColor, style.colorScheme);
+        for (GradientStop& stop : style.backgroundGradient->stops) resolveLightDarkColor(stop.color, stop.lightDarkColor, scheme);
     if (style.strokeGradient)
-        for (GradientStop& stop : style.strokeGradient->stops) resolveLightDarkColor(stop.color, stop.lightDarkColor, style.colorScheme);
+        for (GradientStop& stop : style.strokeGradient->stops) resolveLightDarkColor(stop.color, stop.lightDarkColor, scheme);
     for (BackgroundLayer& layer : style.backgroundLayers)
         if (layer.gradient)
-            for (GradientStop& stop : layer.gradient->stops) resolveLightDarkColor(stop.color, stop.lightDarkColor, style.colorScheme);
+            for (GradientStop& stop : layer.gradient->stops) resolveLightDarkColor(stop.color, stop.lightDarkColor, scheme);
     for (MaskLayer& layer : style.maskLayers)
         if (layer.image.gradient)
-            for (GradientStop& stop : layer.image.gradient->stops) resolveLightDarkColor(stop.color, stop.lightDarkColor, style.colorScheme);
+            for (GradientStop& stop : layer.image.gradient->stops) resolveLightDarkColor(stop.color, stop.lightDarkColor, scheme);
     if (style.borderGradient)
-        for (GradientStop& stop : style.borderGradient->stops) resolveLightDarkColor(stop.color, stop.lightDarkColor, style.colorScheme);
-    for (BoxShadow& shadow : style.shadows) resolveLightDarkColor(shadow.color, shadow.lightDarkColor, style.colorScheme);
-    resolveLightDarkColor(style.outline.color, style.outline.lightDarkColor, style.colorScheme);
+        for (GradientStop& stop : style.borderGradient->stops) resolveLightDarkColor(stop.color, stop.lightDarkColor, scheme);
+    for (BoxShadow& shadow : style.shadows) resolveLightDarkColor(shadow.color, shadow.lightDarkColor, scheme);
+    resolveLightDarkColor(style.outline.color, style.outline.lightDarkColor, scheme);
 }
 
 void resolveCurrentColors(ComputedStyle& style) {
@@ -89,8 +91,9 @@ void resolveRelativeFontWeight(ComputedStyle& style, U16 inheritedWeight) {
 }
 
 void resolvePercentageLineHeight(ComputedStyle& style) {
-    if (style.lineHeight.kind != LineHeight::Kind::Percentage) return;
-    style.lineHeight = {LineHeight::Kind::Length, style.fontSize * style.lineHeight.value};
+    if (!style.lineHeightPercentage) return;
+    style.lineHeight = {LineHeight::Kind::Length, style.fontSize * *style.lineHeightPercentage};
+    style.lineHeightPercentage.reset();
 }
 
 void inheritStyle(ComputedStyle& style, const ComputedStyle& parent) {

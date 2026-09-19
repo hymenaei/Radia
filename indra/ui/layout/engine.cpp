@@ -49,6 +49,8 @@ void LayoutEngine::prepareTextPaint(Element& node, LayoutPass& pass) {
 
 LayoutStatistics LayoutEngine::runWithPass(Element& node, LayoutPass& pass) {
     const NodeSnapshot state(node);
+    const Surface* surface = node.surface();
+    pass.setViewport(surface ? Rect{0.f, 0.f, surface->width(), surface->height()} : node.rect());
     measure(node, pass);
     Element* current = state.get();
     if (!state.layoutValid()) return pass.statistics();

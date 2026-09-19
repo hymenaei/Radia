@@ -211,7 +211,6 @@ const LLFontGL& fontForStyle(const ComputedStyle& style) {
 float textLineHeight(const ComputedStyle& style) {
     if (style.lineHeight.kind == LineHeight::Kind::Length) return std::ceil(style.lineHeight.value);
     if (style.lineHeight.kind == LineHeight::Kind::Number) return std::ceil(style.fontSize * style.lineHeight.value);
-    if (style.lineHeight.kind == LineHeight::Kind::Percentage) return std::ceil(style.fontSize * style.lineHeight.value);
     if (style.fontSize <= 0.f) return 0.f;
     return static_cast<float>(fontForStyle(style).getLineHeight());
 }

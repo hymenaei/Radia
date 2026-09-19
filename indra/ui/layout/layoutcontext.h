@@ -31,11 +31,13 @@ class LayoutPass {
     LayoutPass(LayoutPass&&) = delete;
     LayoutPass& operator=(LayoutPass&&) = delete;
 
+public:
     const StyleSheet& styleSheet() const { return mStyles.styleSheet(); }
     const TextMetrics& textMetrics() const { return mStyles.textMetrics(); }
     LayoutDirection direction() const { return mStyles.direction(); }
     const ScrollLayoutOptions& scrollLayoutOptions() const { return mScrollOptions; }
     const NativeLayoutMetrics& nativeMetrics() const { return mScrollOptions.nativeMetrics; }
+    const Rect& viewport() const { return mViewport; }
     NativeScrollbarMetrics scrollbarMetrics(ScrollbarMode mode) const { return nativeMetrics().scrollbarMetrics(mode); }
     void recordMeasured(bool constrained) {
         ++mStatistics.measuredNodes;
@@ -49,41 +51,18 @@ class LayoutPass {
     ComputedStyle style(PseudoElement& node) { return mStyles.style(node); }
 
 private:
+    void setViewport(const Rect& viewport) { mViewport = viewport; }
+
     detail::LayoutContextKey contextKey() const {
         detail::LayoutContextKey result = mStyles.contextKey();
         result.scrollbarMode = mScrollOptions.scrollbarMode;
         result.nativeMetrics = mScrollOptions.nativeMetrics;
         return result;
     }
-    std::vector<layout_detail::LayoutChildRef> orderedChildrenForLayout(Element& parent) {
-        std::vector<layout_detail::LayoutChildRef> result;
-        const ComputedStyle& parentStyle = style(parent);
-        const bool includesPseudoElements = parentStyle.appearance != AppearanceMode::Auto;
-        result.reserve(detail::nodes(parent).size() + (includesPseudoElements ? parent.generatedPseudoElements().size() : 0));
-        for (detail::Node& node : detail::nodes(parent)) result.emplace_back(&node);
-        if (includesPseudoElements)
-            for (PseudoElement* pseudoElement : parent.generatedPseudoElements())
-                if (pseudoElement) result.emplace_back(pseudoElement);
-        std::stable_sort(result.begin(), result.end(), [this](const layout_detail::LayoutChildRef& left, const layout_detail::LayoutChildRef& right) {
-            const int leftOrder = left.pseudoElement ? style(*left.pseudoElement).order : left.element() ? style(*left.element()).order : 0;
-            const int rightOrder = right.pseudoElement ? style(*right.pseudoElement).order : right.element() ? style(*right.element()).order : 0;
-            return leftOrder < rightOrder;
-        });
-        return result;
-    }
+    StylePass::OrderedChildSnapshot orderedChildrenForLayout(Element& parent) { return mStyles.orderedChildren(parent); }
+    StylePass::OrderedChildSnapshot orderedChildrenForLayout(PseudoElement& parent) { return mStyles.orderedChildren(parent); }
 
-    std::vector<layout_detail::LayoutChildRef> orderedChildrenForLayout(PseudoElement& parent) {
-        std::vector<layout_detail::LayoutChildRef> result;
-        result.reserve(parent.generatedPseudoElements().size());
-        for (PseudoElement* pseudoElement : parent.generatedPseudoElements())
-            if (pseudoElement) result.emplace_back(pseudoElement);
-        std::stable_sort(result.begin(), result.end(), [this](const layout_detail::LayoutChildRef& left, const layout_detail::LayoutChildRef& right) {
-            return style(*left.pseudoElement).order < style(*right.pseudoElement).order;
-        });
-        return result;
-    }
-
-    ComputedStyle style(const layout_detail::LayoutChildRef& node, const ComputedStyle& parentStyle) {
+    ComputedStyle style(const OrderedChildRef& node, const ComputedStyle& parentStyle) {
         if (node.pseudoElement) return style(*node.pseudoElement);
         if (const Element* element = node.element()) return mStyles.style(*element);
         if (Text* text = node.text()) {
@@ -95,13 +74,11 @@ private:
         return Text::styleForParent(parentStyle);
     }
 
-    bool preservesNormalFlowWhitespace(const std::vector<layout_detail::LayoutChildRef>& children, std::size_t index,
-                                       const ComputedStyle& parentStyle) {
-        if (isFlexDisplay(parentStyle.display) || parentStyle.display == DisplayMode::Grid || parentStyle.display == DisplayMode::InlineGrid)
-            return false;
+    bool preservesNormalFlowWhitespace(const std::vector<OrderedChildRef>& children, std::size_t index, const ComputedStyle& parentStyle) {
+        if (isOrderModifiedContainer(parentStyle.display)) return false;
         if (index == 0 || index + 1 >= children.size() || !layout_detail::isWhitespaceOnlyText(children[index])) return false;
 
-        const auto isDisplayedInline = [&](const layout_detail::LayoutChildRef& child) {
+        const auto isDisplayedInline = [&](const OrderedChildRef& child) {
             const Element* element = child.element();
             const ComputedStyle childStyle = style(child, parentStyle);
             if (element) {
@@ -117,6 +94,7 @@ private:
     std::optional<StylePass> mOwnedStyles;
     StylePass& mStyles;
     ScrollLayoutOptions mScrollOptions;
+    Rect mViewport;
     LayoutStatistics mStatistics;
 };
 } // namespace radia::ui

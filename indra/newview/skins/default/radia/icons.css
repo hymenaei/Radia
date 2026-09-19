@@ -1,4 +1,4 @@
-i[class*="i-"] {
+:where(i[class*="i-"]) {
     display: inline-block;
     size: 16px;
     stroke-width: 1px;

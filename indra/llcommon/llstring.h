@@ -87,6 +87,15 @@ public:
     static bool isSpace(char elem) { return isspace((unsigned char)elem) != 0; }
     static bool isSpace(llwchar elem) { return iswspace(static_cast<wint_t>(elem)) != 0; }
 
+    static bool isWordSeparator(llwchar elem) { return elem == U'\t'
+                                                    || elem == U' '
+                                                    || elem == 0x00a0
+                                                    || elem == 0x1680
+                                                    || (elem >= 0x2000 && elem <= 0x200a)
+                                                    || elem == 0x202f
+                                                    || elem == 0x205f
+                                                    || elem == 0x3000; }
+
     static bool isUpper(char elem) { return isupper((unsigned char)elem) != 0; }
     static bool isUpper(llwchar elem) { return iswupper(static_cast<wint_t>(elem)) != 0; }
 

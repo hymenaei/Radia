@@ -1516,6 +1516,7 @@ bool LLAppViewer::doFrame()
                 gGLActive = true;
 
                 display();
+                gViewerWindow->idleUIRuntime();
 
                 {
                     LLPerfStats::RecordSceneTime T(LLPerfStats::StatType_t::RENDER_IDLE);

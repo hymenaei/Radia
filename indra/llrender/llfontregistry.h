@@ -126,7 +126,11 @@ public:
 
     bool operator==(const LLFontDescriptor& rhs) const
     {
-        return mName == rhs.mName && mStyle == rhs.mStyle && mSize == rhs.mSize;
+        return mName == rhs.mName
+            && mStyle == rhs.mStyle
+            && mSize == rhs.mSize
+            && mPointSize == rhs.mPointSize
+            && mWeight == rhs.mWeight;
     }
 
     friend std::size_t hash_value(LLFontDescriptor const& font)
@@ -135,6 +139,8 @@ public:
         boost::hash_combine(seed, font.mName);
         boost::hash_combine(seed, font.mStyle);
         boost::hash_combine(seed, font.mSize);
+        boost::hash_combine(seed, font.mPointSize);
+        boost::hash_combine(seed, font.mWeight);
         return seed;
     }
 
@@ -145,6 +151,12 @@ public:
     void setName(const std::string& name) { mName = name; }
     const std::string& getSize() const { return mSize; }
     void setSize(const std::string& size) { mSize = size; }
+    bool hasPointSize() const { return mPointSize > 0.f; }
+    F32 getPointSize() const { return mPointSize; }
+    void setPointSize(F32 point_size);
+    bool hasWeight() const { return mWeight != 0; }
+    U16 getWeight() const { return mWeight; }
+    void setWeight(U16 weight) { mWeight = weight; }
 
     void addFontFile(const std::string& file_name, EFontHinting hinting, S32 flags, F32 size_delta, const std::function<bool(llwchar)>& char_functor = nullptr, bool monospace_ligatures = false, bool load_collection = false, const ALFontVarAxes& var_axes = {});
     const font_file_info_vec_t & getFontFiles() const { return mFontFiles; }
@@ -159,8 +171,7 @@ public:
     {
         for (auto& f : mFontFiles)
         {
-            if (f.mSourceFamily.empty())
-                f.mSourceFamily = family;
+            if (f.mSourceFamily.empty()) f.mSourceFamily = family;
         }
     }
 
@@ -172,6 +183,8 @@ private:
     std::string mSize;
     font_file_info_vec_t mFontFiles;
     U8 mStyle;
+    F32 mPointSize = 0.f;
+    U16 mWeight = 0;
 };
 
 class LLFontRegistry
@@ -240,7 +253,7 @@ public:
     // GL cleanup
     void destroyGL();
 
-    LLFontGL *getFont(const LLFontDescriptor& desc);
+    LLFontGL *getFont(const LLFontDescriptor& desc, bool prewarm_ascii = true);
     const LLFontDescriptor *getMatchingFontDesc(const LLFontDescriptor& desc);
     const LLFontDescriptor *getClosestFontTemplate(const LLFontDescriptor& desc);
 

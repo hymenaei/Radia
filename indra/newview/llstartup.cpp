@@ -2635,6 +2635,7 @@ bool idle_startup()
         gFocusMgr.setKeyboardFocus(NULL);
 
         LLAppViewer::instance()->handleLoginComplete();
+        if (gViewerWindow) gViewerWindow->restoreUIWorkspace();
 
         LLAgentPicksInfo::getInstance()->requestNumberOfPicks();
 
@@ -3362,6 +3363,7 @@ void LLStartUp::postStartupState()
 
 void reset_login()
 {
+    if (gViewerWindow) gViewerWindow->endUIAccountSession();
     gAgentWearables.cleanup();
     gAgentCamera.cleanup();
     gAgent.cleanup();
@@ -4247,4 +4249,3 @@ void handleLoadChatAlertSounds()
     }
 }
 // [/SL:KB]
-

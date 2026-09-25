@@ -134,22 +134,19 @@ struct LLDir_Dummy : public LLDir {
 
     void clear_checked() { mChecked.clear(); }
     void ensure_checked(const std::string& pathname) const {
-        EXPECT_TRUE(mChecked.find(pathname) != mChecked.end()) << pathname << " was not checked but should have been";
+        EXPECT_NE(mChecked.find(pathname), mChecked.end()) << pathname << " was not checked but should have been";
     }
     void ensure_not_checked(const std::string& pathname) const {
-        EXPECT_TRUE(mChecked.find(pathname) == mChecked.end()) << pathname << " was checked but should not have been";
+        EXPECT_EQ(mChecked.find(pathname), mChecked.end()) << pathname << " was checked but should not have been";
     }
 
     std::set<std::string> mFilesystem;
     mutable std::set<std::string> mChecked;
 };
 
-TEST(LLDirIntegration, GetDirDelimiter) {
-    EXPECT_TRUE(!gDirUtilp->getDirDelimiter().empty()) << "getDirDelimiter";
-}
-
 TEST(LLDirIntegration, GetBaseFileName) {
     std::string delim = gDirUtilp->getDirDelimiter();
+    ASSERT_FALSE(delim.empty()) << "getDirDelimiter";
     std::string rawFile = "foo";
     std::string rawFileExt = "foo.bAr";
     std::string rawFileNullExt = "foo.";
@@ -282,28 +279,41 @@ TEST(LLDirIntegration, GetExtension) {
     EXPECT_EQ(gDirUtilp->getExtension(dottedPathExt), "ext") << "getExtension/d-ext";
 }
 
-std::string makeTestFile(const std::string& dir, const std::string& file) {
-    std::string path = dir + file;
+class TestDirectory {
+public:
+    TestDirectory() : mPath(NamedTempFile::temp_path()), mName(mPath.string()), mCreated(std::filesystem::create_directories(mPath)) {
+        // There's an implicit assumption all over this code that the returned path ends with "/" (or "\")
+        if (!mName.empty() && mName.back() != std::filesystem::path::preferred_separator) mName += std::filesystem::path::preferred_separator;
+    }
+
+    ~TestDirectory() {
+        if (mCreated) {
+            std::error_code error;
+            std::filesystem::remove_all(mPath, error);
+        }
+    }
+
+    TestDirectory(const TestDirectory&) = delete;
+    TestDirectory& operator=(const TestDirectory&) = delete;
+
+    const std::string& name() const { return mName; }
+
+private:
+    std::filesystem::path mPath;
+    std::string mName;
+    bool mCreated;
+};
+
+bool makeTestFile(const std::string& dir, const std::string& file) {
+    const std::string path = dir + file;
     LLFILE* handle = LLFile::fopen(path, LLFILE_MODE("w"));
-    EXPECT_TRUE(handle != NULL) << "failed to open test file '" + path + "'";
+    if (handle == nullptr) return false;
+
     // Harbison & Steele, 4th ed., p. 366: "If an error occurs, fputs
     // returns EOF; otherwise, it returns some other, nonnegative value."
-    EXPECT_TRUE(EOF != fputs("test file", handle)) << "failed to write to test file '" + path + "'";
-    fclose(handle);
-    return path;
-}
-
-std::string makeTestDir() {
-    auto p = NamedTempFile::temp_path();
-    std::filesystem::create_directories(p.native());
-
-    std::string ret = p.string();
-
-    // There's an implicit assumtion all over this code that the returned path ends with "/" (or "\")
-
-    if (ret.size() >= 1 && ret[ret.size() - 1] != std::filesystem::path::preferred_separator) ret += std::filesystem::path::preferred_separator;
-
-    return ret;
+    const bool writeSucceeded = EOF != fputs("test file", handle);
+    const bool closeSucceeded = fclose(handle) == 0;
+    return writeSucceeded && closeSucceeded;
 }
 
 static const char* DirScanFilename[5] = {"file1.abc", "file2.abc", "file1.xyz", "file2.xyz", "file1.mno"};
@@ -323,7 +333,7 @@ void scanTest(const std::string& directory, const std::string& pattern, bool cor
         for (check = 0; check < 5 && !(scanResult == DirScanFilename[check]); check++) {}
         // check is now either 5 (not found) or the index of the matching name
         if (check < 5) {
-            EXPECT_TRUE(!filesFound[check]) << "found file '" + (std::string)DirScanFilename[check] + "' twice";
+            EXPECT_FALSE(filesFound[check]) << "found file '" + (std::string)DirScanFilename[check] + "' twice";
             filesFound[check] = true;
         } else // check is 5 - should not happen
         {
@@ -331,89 +341,78 @@ void scanTest(const std::string& directory, const std::string& pattern, bool cor
         }
     }
     for (int i = 0; i < 5; i++)
-        if (correctResult[i])
-            EXPECT_TRUE(filesFound[i]) << "scan of '" + directory + "' using '" + pattern + "' did not return '" + DirScanFilename[i] + "'";
-        else EXPECT_TRUE(!filesFound[i]) << "scan of '" + directory + "' using '" + pattern + "' incorrectly returned '" + DirScanFilename[i] + "'";
+        EXPECT_EQ(filesFound[i], correctResult[i])
+            << "scan of '" + directory + "' using '" + pattern + "' returned an unexpected result for '" + DirScanFilename[i] + "'";
 }
 
 TEST(LLDirIntegration, LLDirIteratorNext) {
     // Create the same 5 file names of the two directories
 
-    std::string dir1 = makeTestDir();
-    std::string dir2 = makeTestDir();
+    TestDirectory dir1;
+    TestDirectory dir2;
 
-    std::string dir1files[5];
-    std::string dir2files[5];
     for (int i = 0; i < 5; i++) {
-        dir1files[i] = makeTestFile(dir1, DirScanFilename[i]);
-        dir2files[i] = makeTestFile(dir2, DirScanFilename[i]);
+        ASSERT_TRUE(makeTestFile(dir1.name(), DirScanFilename[i])) << "failed to create test file '" + dir1.name() + DirScanFilename[i] + "'";
+        ASSERT_TRUE(makeTestFile(dir2.name(), DirScanFilename[i])) << "failed to create test file '" + dir2.name() + DirScanFilename[i] + "'";
     }
 
     // Scan dir1 and see if each of the 5 files is found exactly once
     bool expected1[5] = {true, true, true, true, true};
-    scanTest(dir1, "*", expected1);
+    scanTest(dir1.name(), "*", expected1);
 
     // Scan dir2 and see if only the 2 *.xyz files are found
     bool expected2[5] = {false, false, true, true, false};
-    scanTest(dir1, "*.xyz", expected2);
+    scanTest(dir1.name(), "*.xyz", expected2);
 
     // Scan dir2 and see if only the 1 *.mno file is found
     bool expected3[5] = {false, false, false, false, true};
-    scanTest(dir2, "*.mno", expected3);
+    scanTest(dir2.name(), "*.mno", expected3);
 
     // Scan dir1 and see if any *.foo files are found
     bool expected4[5] = {false, false, false, false, false};
-    scanTest(dir1, "*.foo", expected4);
+    scanTest(dir1.name(), "*.foo", expected4);
 
     // Scan dir1 and see if any file1.* files are found
     bool expected5[5] = {true, false, true, false, true};
-    scanTest(dir1, "file1.*", expected5);
+    scanTest(dir1.name(), "file1.*", expected5);
 
     // Scan dir1 and see if any file1.* files are found
     bool expected6[5] = {true, true, false, false, false};
-    scanTest(dir1, "file?.abc", expected6);
+    scanTest(dir1.name(), "file?.abc", expected6);
 
     // Scan dir2 and see if any file?.x?z files are found
     bool expected7[5] = {false, false, true, true, false};
-    scanTest(dir2, "file?.x?z", expected7);
+    scanTest(dir2.name(), "file?.x?z", expected7);
 
     // Scan dir2 and see if any file?.??c files are found
     bool expected8[5] = {true, true, false, false, false};
-    scanTest(dir2, "file?.??c", expected8);
-    scanTest(dir2, "*.??c", expected8);
+    scanTest(dir2.name(), "file?.??c", expected8);
+    scanTest(dir2.name(), "*.??c", expected8);
 
     // Scan dir1 and see if any *.?n? files are found
     bool expected9[5] = {false, false, false, false, true};
-    scanTest(dir1, "*.?n?", expected9);
+    scanTest(dir1.name(), "*.?n?", expected9);
 
     // Scan dir1 and see if any *.???? files are found
     bool expected10[5] = {false, false, false, false, false};
-    scanTest(dir1, "*.????", expected10);
+    scanTest(dir1.name(), "*.????", expected10);
 
     // Scan dir1 and see if any ?????.* files are found
     bool expected11[5] = {true, true, true, true, true};
-    scanTest(dir1, "?????.*", expected11);
+    scanTest(dir1.name(), "?????.*", expected11);
 
     // Scan dir1 and see if any ??l??.xyz files are found
     bool expected12[5] = {false, false, true, true, false};
-    scanTest(dir1, "??l??.xyz", expected12);
+    scanTest(dir1.name(), "??l??.xyz", expected12);
 
     bool expected13[5] = {true, false, true, false, false};
-    scanTest(dir1, "file1.{abc,xyz}", expected13);
+    scanTest(dir1.name(), "file1.{abc,xyz}", expected13);
 
     bool expected14[5] = {true, true, false, false, false};
-    scanTest(dir1, "file[0-9].abc", expected14);
+    scanTest(dir1.name(), "file[0-9].abc", expected14);
 
     bool expected15[5] = {true, true, false, false, false};
-    scanTest(dir1, "file[!a-z].abc", expected15);
-
-    // clean up all test files and directories
-    for (int i = 0; i < 5; i++) {
-        LLFile::remove(dir1files[i]);
-        LLFile::remove(dir2files[i]);
-    }
-    LLFile::remove(dir1);
-    LLFile::remove(dir2);
+    scanTest(dir1.name(), "file[!a-z].abc", expected15);
 }
 
 TEST(LLDirIntegration, FindSkinnedFilenames) {

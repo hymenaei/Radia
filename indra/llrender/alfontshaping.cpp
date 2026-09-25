@@ -1,6 +1,6 @@
 /**
  * @file alfontshaping.cpp
- * @brief HarfBuzz shaping for multi-codepoint emoji sequences.
+ * @brief FriBidi paragraph layout and HarfBuzz text shaping.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Alchemy Viewer Source Code
@@ -32,17 +32,27 @@
 #include <boost/functional/hash.hpp>
 #include <boost/unordered_map.hpp>
 
+#include <fribidi.h>
 #include <hb.h>
 
+#include <algorithm>
+#include <iterator>
 #include <list>
+#include <limits>
 #include <string>
 #include <string_view>
+
+bool ALFontShapeLayout::valid() const
+{
+    return mutation_snapshot == ALFontShaping::cacheMutationCount();
+}
 
 namespace
 {
     // LRU cache for shaped runs. Keyed by the codepoint sequence plus the
-    // owning face — direction/script/language are fixed in shapeRun(), so
-    // they don't need to participate in the key. Clusters in the cached
+    // owning face — direction and script are derived deterministically from
+    // the codepoints, and language is fixed in shapeRun(), so they don't
+    // need to participate in the key. Clusters in the cached
     // glyphs are stored in *slice-local* coordinates (begin=0) and rebased
     // to original-wstr coords at copy-out time, so the same codepoint
     // sequence in different wstring positions can share an entry.
@@ -59,6 +69,7 @@ namespace
         // therefore the shaped output for a given slice; per-codepoint face
         // selection is deterministic downstream.
         const LLFontFreetype* root_face;
+        bool disable_optional_ligatures;
     };
 
     // Borrowed counterpart used for cache lookup so hits don't allocate a
@@ -67,6 +78,7 @@ namespace
     {
         std::u32string_view   codepoints;
         const LLFontFreetype* root_face;
+        bool disable_optional_ligatures;
     };
 
     struct ShapeCacheKeyHash
@@ -77,21 +89,22 @@ namespace
 
         size_t operator()(const ShapeCacheKey& k) const noexcept
         {
-            return hash_impl(std::u32string_view(k.codepoints), k.root_face);
+            return hash_impl(std::u32string_view(k.codepoints), k.root_face, k.disable_optional_ligatures);
         }
         size_t operator()(const ShapeCacheKeyView& k) const noexcept
         {
-            return hash_impl(k.codepoints, k.root_face);
+            return hash_impl(k.codepoints, k.root_face, k.disable_optional_ligatures);
         }
     private:
         // Always hash through the string_view path so both overloads agree
         // bit-for-bit — std::hash<u32string> and std::hash<u32string_view>
         // are required to produce the same value, but routing both through
         // the view variant removes any platform doubt.
-        static size_t hash_impl(std::u32string_view sv, const LLFontFreetype* face) noexcept
+        static size_t hash_impl(std::u32string_view sv, const LLFontFreetype* face, bool disable_optional_ligatures) noexcept
         {
             size_t h = std::hash<std::u32string_view>{}(sv);
             boost::hash_combine(h, face);
+            boost::hash_combine(h, disable_optional_ligatures);
             return h;
         }
     };
@@ -102,17 +115,18 @@ namespace
 
         bool operator()(const ShapeCacheKey& a, const ShapeCacheKey& b) const noexcept
         {
-            return a.root_face == b.root_face && a.codepoints == b.codepoints;
+            return a.root_face == b.root_face && a.disable_optional_ligatures == b.disable_optional_ligatures
+                                              && a.codepoints == b.codepoints;
         }
         bool operator()(const ShapeCacheKey& a, const ShapeCacheKeyView& b) const noexcept
         {
-            return a.root_face == b.root_face
-                   && std::u32string_view(a.codepoints) == b.codepoints;
+            return a.root_face == b.root_face && a.disable_optional_ligatures == b.disable_optional_ligatures
+                                              && std::u32string_view(a.codepoints) == b.codepoints;
         }
         bool operator()(const ShapeCacheKeyView& a, const ShapeCacheKey& b) const noexcept
         {
-            return a.root_face == b.root_face
-                   && a.codepoints == std::u32string_view(b.codepoints);
+            return a.root_face == b.root_face && a.disable_optional_ligatures == b.disable_optional_ligatures
+                                              && a.codepoints == std::u32string_view(b.codepoints);
         }
     };
 
@@ -130,8 +144,7 @@ namespace
         ShapeLru::iterator         lru_pos;
     };
 
-    using ShapeIndex = boost::unordered_map<ShapeCacheKey, ShapeEntry,
-                                            ShapeCacheKeyHash, ShapeCacheKeyEqual>;
+    using ShapeIndex = boost::unordered_map<ShapeCacheKey, ShapeEntry, ShapeCacheKeyHash, ShapeCacheKeyEqual>;
 
     // Rough order-of-magnitude for an active chat window: a few dozen visible
     // lines each with 1-3 shaping runs, plus a few editor buffers. 8192
@@ -159,17 +172,17 @@ namespace
                        size_t                       sub_begin_in_slice,
                        size_t                       sub_end_in_slice,
                        hb_script_t                  script,
+                       hb_direction_t               direction,
+                       bool disable_optional_ligatures,
                        std::vector<ALShapedGlyph>&  out_glyphs)
     {
-        if (!face || sub_begin_in_slice >= sub_end_in_slice)
-            return;
+        if (!face || sub_begin_in_slice >= sub_end_in_slice) return;
 
         // Early-bail when the chosen face has no hb_font (allocation failure /
         // unloaded face). The retry loop below also rejects null hb_font per
         // candidate, so an empty primary face still produces an empty output
         // rather than dereffing a null pointer.
-        if (!face->getHbFont())
-            return;
+        if (!face->getHbFont()) return;
 
         // Persistent shaping buffer reused across every sub-run. HarfBuzz
         // buffers retain their internal allocations across clear_contents,
@@ -229,9 +242,40 @@ namespace
         static const hb_feature_t kFixedWidthLigaturesOk[] = {
             { HB_TAG('k','e','r','n'), 0, 0, (unsigned)-1 },
         };
+        static const hb_feature_t kLetterSpaced[] = {
+            { HB_TAG('l','i','g','a'), 0, 0, (unsigned)-1 },
+            { HB_TAG('c','l','i','g'), 0, 0, (unsigned)-1 },
+            { HB_TAG('d','l','i','g'), 0, 0, (unsigned)-1 },
+            { HB_TAG('h','l','i','g'), 0, 0, (unsigned)-1 },
+            { HB_TAG('c','a','l','t'), 0, 0, (unsigned)-1 },
+        };
+        static const hb_feature_t kFixedWidthLetterSpaced[] = {
+            { HB_TAG('k','e','r','n'), 0, 0, (unsigned)-1 },
+            { HB_TAG('l','i','g','a'), 0, 0, (unsigned)-1 },
+            { HB_TAG('c','l','i','g'), 0, 0, (unsigned)-1 },
+            { HB_TAG('d','l','i','g'), 0, 0, (unsigned)-1 },
+            { HB_TAG('h','l','i','g'), 0, 0, (unsigned)-1 },
+            { HB_TAG('c','a','l','t'), 0, 0, (unsigned)-1 },
+        };
         const hb_feature_t* features = nullptr;
         unsigned int num_features = 0;
-        if (face->isFixedWidth())
+        if (disable_optional_ligatures)
+        {
+            if (face->isFixedWidth())
+            {
+                features = kFixedWidthLetterSpaced;
+                num_features = (unsigned int)(
+                    sizeof(kFixedWidthLetterSpaced)
+                    / sizeof(kFixedWidthLetterSpaced[0]));
+            }
+            else
+            {
+                features = kLetterSpaced;
+                num_features = (unsigned int)(
+                    sizeof(kLetterSpaced) / sizeof(kLetterSpaced[0]));
+            }
+        }
+        else if (face->isFixedWidth())
         {
             if (face->getAllowMonospaceLigatures())
             {
@@ -274,8 +318,7 @@ namespace
         auto do_shape = [&](const LLFontFreetype* shape_face) -> unsigned int
         {
             hb_font_t* hbf = shape_face ? shape_face->getHbFont() : nullptr;
-            if (!hbf)
-                return 0;
+            if (!hbf) return 0;
 
             const uint32_t* in_cps = codepoints;
             int             in_len = len;
@@ -299,9 +342,7 @@ namespace
                 cluster_back_map.reserve(len);
                 for (int k = 0; k < len; ++k)
                 {
-                    if ((strip_vs15 && codepoints[k] == 0xFE0E)
-                     || (strip_vs16 && codepoints[k] == 0xFE0F))
-                        continue;
+                    if ((strip_vs15 && codepoints[k] == 0xFE0E) || (strip_vs16 && codepoints[k] == 0xFE0F)) continue;
                     stripped_buf.push_back(codepoints[k]);
                     cluster_back_map.push_back(k);
                 }
@@ -317,7 +358,10 @@ namespace
             // offset=0 so HB cluster values come back local to this sub-run;
             // we rebase below to the slice's coordinate system.
             hb_buffer_add_utf32(buf, in_cps, in_len, 0, in_len);
-            hb_buffer_set_direction(buf, HB_DIRECTION_LTR);
+            // FriBidi resolves the direction of this embedding-level run.
+            // HarfBuzz then performs contextual shaping and emits glyphs in
+            // visual order within the run while preserving logical clusters.
+            hb_buffer_set_direction(buf, direction);
             hb_buffer_set_script(buf, script);
             hb_buffer_set_language(buf, hb_language_get_default());
             hb_shape(hbf, buf, features, num_features);
@@ -355,12 +399,9 @@ namespace
             {
                 const LLFontFreetype* cand = entry.first.get();
                 const auto& functor        = entry.second;
-                if (!cand || cand == face)
-                    continue;
-                if (!functor || !functor((llwchar)codepoints[0]))
-                    continue;
-                if (!cand->faceHasGlyph((llwchar)codepoints[0]))
-                    continue;
+                if (!cand || cand == face) continue;
+                if (!functor || !functor((llwchar)codepoints[0])) continue;
+                if (!cand->faceHasGlyph((llwchar)codepoints[0])) continue;
                 const unsigned int cand_count = do_shape(cand);
                 any_candidate_ran = true;
                 if (cand_count > 0 && cand_count < best_count)
@@ -449,10 +490,8 @@ namespace
             for (size_t k = cb; k < ce; ++k)
             {
                 const llwchar c = slice[k];
-                if (c == 0xFE0E || c == 0xFE0F)
-                    continue; // VS-15/16 strippable in shape_sub_run
-                if (!f->faceHasGlyph(c))
-                    return false;
+                if (c == 0xFE0E || c == 0xFE0F) continue; // VS-15/16 strippable in shape_sub_run
+                if (!f->faceHasGlyph(c)) return false;
             }
             return true;
         };
@@ -462,14 +501,12 @@ namespace
         {
             U32 unused = 0;
             const LLFontFreetype* f = root_face->selectShapingFace(slice[k], unused);
-            if (f && f != root_face && covers_non_strippable(f))
-                return f;
+            if (f && f != root_face && covers_non_strippable(f)) return f;
         }
         // Root may itself cover the cluster (e.g. when the head IS an
         // emoji-aware font, or when the cluster is BMP-only and the
         // text font has the relevant glyphs).
-        if (covers_non_strippable(root_face))
-            return root_face;
+        if (covers_non_strippable(root_face)) return root_face;
         // No face has full coverage. Returning root keeps the base
         // codepoints visible and lets HB produce notdef for the rest;
         // the alternative (routing to a face that lacks the base)
@@ -477,8 +514,51 @@ namespace
         return root_face;
     }
 
+    struct BidiParagraph
+    {
+        std::vector<FriBidiLevel> levels;
+        std::vector<FriBidiStrIndex> logical_to_visual;
+        bool resolved = false;
+    };
+
+    BidiParagraph resolve_bidi(std::u32string_view slice)
+    {
+        BidiParagraph result;
+        const size_t n = slice.size();
+        result.levels.assign(n, 0);
+        result.logical_to_visual.resize(n);
+        for (size_t i = 0; i < n; ++i) result.logical_to_visual[i] = static_cast<FriBidiStrIndex>(i);
+        if (n == 0 || n > static_cast<size_t>(std::numeric_limits<FriBidiStrIndex>::max())) return result;
+
+        // LLWString is UTF-32, as is FriBidi, but copy rather than aliasing
+        // char32_t storage as FriBidiChar. This runs only on a shape-cache
+        // miss and keeps the C++ strict-aliasing contract intact.
+        std::vector<FriBidiChar> logical;
+        logical.reserve(n);
+        for (char32_t codepoint : slice) logical.push_back(static_cast<FriBidiChar>(codepoint));
+
+        FriBidiParType base_direction = FRIBIDI_PAR_ON;
+        result.resolved = fribidi_log2vis(logical.data(), static_cast<FriBidiStrIndex>(n),
+                                          &base_direction, nullptr,
+                                          result.logical_to_visual.data(), nullptr,
+                                          result.levels.data()) != 0;
+        if (!result.resolved)
+        {
+            std::fill(result.levels.begin(), result.levels.end(), 0);
+            for (size_t i = 0; i < n; ++i) result.logical_to_visual[i] = static_cast<FriBidiStrIndex>(i);
+        }
+        return result;
+    }
+
+    struct ShapedVisualRun
+    {
+        FriBidiStrIndex visual_start = 0;
+        std::vector<ALShapedGlyph> glyphs;
+    };
+
     // Itemize [begin, end) into contiguous sub-runs whose codepoints share
-    // both an owning face and a Unicode script. Within an emoji cluster
+    // an embedding level, owning face, and Unicode script. Within an emoji
+    // cluster
     // (per wstring_find_emoji_clusters) the whole cluster rides on one
     // face chosen by pick_cluster_face — that's what keeps a keycap like
     // 9️⃣ on the emoji face that can compose '9' + U+FE0F + U+20E3 into
@@ -490,16 +570,19 @@ namespace
     // (spaces, punctuation, VS selectors, ZWJ) inherit the surrounding
     // script and never trigger a boundary by themselves; this keeps
     // "Hello, world!" as one run with script LATIN rather than fragmenting
-    // at every comma.
+    // at every comma. Once shaped, FriBidi's logical-to-visual map orders the
+    // runs for painting; glyph clusters remain logical source indices.
     void shape_all_sub_runs(const LLFontFreetype* root_face,
                             std::u32string_view   slice,
+                            bool disable_optional_ligatures,
                             std::vector<ALShapedGlyph>& out_glyphs)
     {
         const size_t n = slice.size();
-        if (!root_face || n == 0)
-            return;
+        if (!root_face || n == 0) return;
 
         hb_unicode_funcs_t* uf = hb_unicode_funcs_get_default();
+        const BidiParagraph bidi = resolve_bidi(slice);
+        std::vector<ShapedVisualRun> shaped_runs;
 
         // Authoritative emoji cluster boundaries — the single source of truth
         // for "what counts as one emoji glyph in this slice" (see
@@ -510,6 +593,7 @@ namespace
 
         const LLFontFreetype* cur_face   = nullptr;
         hb_script_t           cur_script = HB_SCRIPT_INVALID;  // unknown until first non-neutral cp
+        FriBidiLevel          cur_level  = 0;
         size_t                cur_begin  = 0;
         // True when the current run is (or begins with) an emoji cluster.
         // Drives the keeper's decision to retain emoji extenders on cur_face
@@ -527,9 +611,17 @@ namespace
         auto emit = [&](size_t end_excl) {
             // INVALID surfaces only when a run consists entirely of neutral
             // codepoints (e.g. a string of spaces); fall back to COMMON.
-            const hb_script_t script = (cur_script == HB_SCRIPT_INVALID) ? HB_SCRIPT_COMMON
-                                                                         : cur_script;
-            shape_sub_run(cur_face, root_face, slice, cur_begin, end_excl, script, out_glyphs);
+            const hb_script_t script = (cur_script == HB_SCRIPT_INVALID) ? HB_SCRIPT_COMMON : cur_script;
+            const hb_direction_t direction = bidi.resolved ? ((cur_level & 1) ? HB_DIRECTION_RTL : HB_DIRECTION_LTR) : hb_script_get_horizontal_direction(script);
+
+            ShapedVisualRun run;
+            run.visual_start = bidi.logical_to_visual[cur_begin];
+            for (size_t k = cur_begin + 1; k < end_excl; ++k) run.visual_start = std::min(run.visual_start, bidi.logical_to_visual[k]);
+            shape_sub_run(
+                cur_face, root_face, slice, cur_begin, end_excl,
+                script, direction, disable_optional_ligatures,
+                run.glyphs);
+            if (!run.glyphs.empty()) shaped_runs.push_back(std::move(run));
         };
 
         for (size_t i = 0; i < n; ++i)
@@ -546,15 +638,13 @@ namespace
             // across cluster boundaries — e.g. "3️⃣🏳️‍🌈" (keycap +
             // pride flag) on Noto-COLRv1 produced spurious matches that
             // flickered the pride flag down to a bare white flag.
-            if (next_cluster_idx < clusters.size()
-                && clusters[next_cluster_idx].first == i)
+            if (next_cluster_idx < clusters.size() && clusters[next_cluster_idx].first == i)
             {
                 const size_t cb = clusters[next_cluster_idx].first;
                 const size_t ce = clusters[next_cluster_idx].second;
                 ++next_cluster_idx;
 
-                const LLFontFreetype* cluster_face =
-                    pick_cluster_face(root_face, slice, cb, ce);
+                const LLFontFreetype* cluster_face = pick_cluster_face(root_face, slice, cb, ce);
 
                 // First non-neutral script in the cluster, COMMON otherwise.
                 hb_script_t cluster_script = HB_SCRIPT_COMMON;
@@ -569,10 +659,7 @@ namespace
                 }
 
                 // Flush any in-progress non-cluster run before the cluster.
-                if (cur_face != nullptr)
-                {
-                    emit(cb);
-                }
+                if (cur_face != nullptr) emit(cb);
 
                 // Emit the cluster as its own sub-run. Reset cur_face so
                 // the next codepoint (whether ASCII or another cluster)
@@ -585,6 +672,7 @@ namespace
                 cur_face  = cluster_face;
                 cur_begin = cb;
                 cur_script = cluster_script;
+                cur_level = bidi.levels[cb];
                 emit(ce);
                 cur_face = nullptr;
                 cur_script = HB_SCRIPT_INVALID;
@@ -595,17 +683,16 @@ namespace
 
             U32 unused = 0;
             const LLFontFreetype* face = root_face->selectShapingFace(slice[i], unused);
-            if (!face)
-                face = root_face; // selectShapingFace never returns null, but defensive
+            if (!face) face = root_face; // selectShapingFace never returns null, but defensive
 
             const hb_script_t cp_script = hb_unicode_script(uf, slice[i]);
-            const bool is_neutral = (cp_script == HB_SCRIPT_COMMON
-                                  || cp_script == HB_SCRIPT_INHERITED);
+            const bool is_neutral = (cp_script == HB_SCRIPT_COMMON || cp_script == HB_SCRIPT_INHERITED);
 
             if (cur_face == nullptr)
             {
                 cur_face  = face;
                 cur_begin = i;
+                cur_level = bidi.levels[i];
                 cur_run_is_emoji = LLStringOps::isPictographBase(slice[i]);
                 set_cur_script_from(cp_script, is_neutral);
                 continue;
@@ -643,23 +730,8 @@ namespace
                                         || LLStringOps::isEmojiClusterExtender(wch);
             if ((is_mark || is_emoji_extender) && face != cur_face)
             {
-                if (cur_face->faceHasGlyph(wch))
-                {
-                    // cur_face covers the joiner — shape it inline with the base.
-                    face = cur_face;
-                }
-                else if (is_emoji_extender && cur_run_is_emoji)
-                {
-                    // Orphan extender after a non-cluster pictograph base:
-                    // the run started on an isolated pictograph (single-
-                    // codepoint emoji that the walker didn't promote to a
-                    // cluster), and a malformed extender follows. Keep
-                    // the extender on cur_face so it doesn't split off
-                    // onto root and render as a bare combining mark.
-                    // shape_sub_run handles VS-16 stripping when cur_face's
-                    // cmap lacks it, so the buffer reaches GSUB cleanly.
-                    face = cur_face;
-                }
+                if (cur_face->faceHasGlyph(wch)) face = cur_face;
+                else if (is_emoji_extender && cur_run_is_emoji) face = cur_face;
                 else if (is_mark)
                 {
                     // cur_face lacks the mark glyph. Migrate the in-progress
@@ -685,8 +757,7 @@ namespace
                             break;
                         }
                     }
-                    if (mark_face_covers_sub_run)
-                        cur_face = face;
+                    if (mark_face_covers_sub_run) cur_face = face;
                     // else: neither face covers everything — fall through to
                     // the face_change path. Mark will still render standalone,
                     // but with no better option available the split is the
@@ -698,12 +769,14 @@ namespace
             const bool script_change = !is_neutral
                                        && cur_script != HB_SCRIPT_INVALID
                                        && cp_script != cur_script;
+            const bool level_change  = bidi.levels[i] != cur_level;
 
-            if (face_change || script_change)
+            if (face_change || script_change || level_change)
             {
                 emit(i);
                 cur_face  = face;
                 cur_begin = i;
+                cur_level = bidi.levels[i];
                 cur_run_is_emoji = LLStringOps::isPictographBase(slice[i]);
                 set_cur_script_from(cp_script, is_neutral);
             }
@@ -714,8 +787,20 @@ namespace
                 cur_script = cp_script;
             }
         }
-        if (cur_face != nullptr)
-            emit(n);
+        if (cur_face != nullptr) emit(n);
+
+        std::stable_sort(shaped_runs.begin(), shaped_runs.end(),
+            [](const ShapedVisualRun& left, const ShapedVisualRun& right)
+            {
+                return left.visual_start < right.visual_start;
+            });
+        size_t glyph_count = 0;
+        for (const ShapedVisualRun& run : shaped_runs) glyph_count += run.glyphs.size();
+        out_glyphs.reserve(out_glyphs.size() + glyph_count);
+        for (ShapedVisualRun& run : shaped_runs)
+            out_glyphs.insert(out_glyphs.end(),
+                              std::make_move_iterator(run.glyphs.begin()),
+                              std::make_move_iterator(run.glyphs.end()));
     }
 }
 
@@ -723,7 +808,8 @@ const std::vector<ALShapedGlyph>& ALFontShaping::shapeLine(
     const LLFontFreetype* root_face,
     LLWStringView         wstr,
     size_t                begin,
-    size_t                end)
+    size_t                end,
+    bool disable_optional_ligatures)
 {
     // The shape path mutates global LRU/index state with no synchronization;
     // a stray call from a worker thread would corrupt the cache silently.
@@ -731,14 +817,14 @@ const std::vector<ALShapedGlyph>& ALFontShaping::shapeLine(
 
     static const std::vector<ALShapedGlyph> sEmpty;
 
-    if (!root_face || begin >= end || end > wstr.size())
-        return sEmpty;
+    if (!root_face || begin >= end || end > wstr.size()) return sEmpty;
 
     // Build the lookup view from the slice + root face. Itemization is
     // deterministic given (slice, root_face), so no need to encode the
     // per-codepoint face chain explicitly.
     std::u32string_view slice(wstr.data() + begin, end - begin);
-    ShapeCacheKeyView lookup{slice, root_face};
+    ShapeCacheKeyView lookup{
+        slice, root_face, disable_optional_ligatures};
 
     if (auto it = sShapeIndex.find(lookup); it != sShapeIndex.end())
     {
@@ -750,11 +836,12 @@ const std::vector<ALShapedGlyph>& ALFontShaping::shapeLine(
     // owning face, and concatenate the glyph streams. Empty results are
     // cached so repeat misses don't re-shape on every frame.
     std::vector<ALShapedGlyph> shaped;
-    shape_all_sub_runs(root_face, slice, shaped);
+    shape_all_sub_runs(root_face, slice, disable_optional_ligatures, shaped);
 
     ShapeCacheKey key;
     key.codepoints.assign(slice.data(), slice.size());
     key.root_face = root_face;
+    key.disable_optional_ligatures = disable_optional_ligatures;
 
     // One bump covers the insert and any evictions below — either way,
     // previously returned references may now dangle.
@@ -776,6 +863,22 @@ const std::vector<ALShapedGlyph>& ALFontShaping::shapeLine(
     return ins->second.glyphs;
 }
 
+ALFontShapeLayout ALFontShaping::layoutLine(
+    const LLFontFreetype* root_face,
+    LLWStringView slice,
+    bool disable_optional_ligatures)
+{
+    ALFontShapeLayout out;
+    out.mutation_snapshot = cacheMutationCount();
+    if (!root_face || slice.empty()) return out;
+
+    out.ranges.emplace_back(size_t(0), slice.size());
+    out.glyphs.reserve(out.ranges.size());
+    for (const auto& range : out.ranges) out.glyphs.push_back(&shapeLine(root_face, slice, range.first, range.second, disable_optional_ligatures));
+    out.mutation_snapshot = cacheMutationCount();
+    return out;
+}
+
 void ALFontShaping::shapeRun(const LLFontFreetype* root_face,
                              LLWStringView         wstr,
                              size_t                begin,
@@ -785,8 +888,7 @@ void ALFontShaping::shapeRun(const LLFontFreetype* root_face,
     out_glyphs.clear();
 
     const auto& cached = shapeLine(root_face, wstr, begin, end);
-    if (cached.empty())
-        return;
+    if (cached.empty()) return;
 
     out_glyphs.reserve(cached.size());
     const S32 base = static_cast<S32>(begin);
@@ -800,8 +902,7 @@ void ALFontShaping::shapeRun(const LLFontFreetype* root_face,
 
 void ALFontShaping::clearCache()
 {
-    if (!sShapeIndex.empty())
-        ++sShapeCacheMutations;
+    if (!sShapeIndex.empty()) ++sShapeCacheMutations;
     sShapeIndex.clear();
     sShapeLru.clear();
 }
@@ -818,8 +919,7 @@ size_t ALFontShaping::cacheMutationCount()
 
 void ALFontShaping::clearCacheForFace(const LLFontFreetype* face)
 {
-    if (!face)
-        return;
+    if (!face) return;
 
     // Walk the index — its iterator gives us O(1) erase from the LRU via
     // the back-reference stored in each entry. Walking the LRU instead
@@ -853,11 +953,7 @@ void ALFontShaping::clearCacheForFace(const LLFontFreetype* face)
             it = sShapeIndex.erase(it);
             erased_any = true;
         }
-        else
-        {
-            ++it;
-        }
+        else ++it;
     }
-    if (erased_any)
-        ++sShapeCacheMutations;
+    if (erased_any) ++sShapeCacheMutations;
 }

@@ -767,16 +767,13 @@ bool LLGLSLShader::createShader(U32 variants)
         vector< pair<string, GLenum> >::iterator fileIter = mShaderFiles.begin();
         for (; fileIter != mShaderFiles.end(); fileIter++)
         {
-            GLuint shaderhandle = LLShaderMgr::instance()->loadShaderFile((*fileIter).first, mShaderLevel, (*fileIter).second, &mDefines, mFeatures.mIndexedTextureChannels);
+            const std::string& extra_source = (fileIter->second == GL_VERTEX_SHADER) ? mExtraVertexSource : mExtraFragmentSource;
+            GLuint shaderhandle = LLShaderMgr::instance()->loadShaderFile(
+                (*fileIter).first, mShaderLevel, (*fileIter).second,
+                &mDefines, mFeatures.mIndexedTextureChannels, std::string(), extra_source);
             LL_DEBUGS("ShaderLoading") << "SHADER FILE: " << (*fileIter).first << " mShaderLevel=" << mShaderLevel << LL_ENDL;
-            if (shaderhandle)
-            {
-                attachObject(shaderhandle);
-            }
-            else
-            {
-                success = false;
-            }
+            if (shaderhandle) attachObject(shaderhandle);
+            else success = false;
         }
     }
 
@@ -1142,7 +1139,10 @@ GLint LLGLSLShader::mapUniformTextureChannel(GLint location, GLenum type, GLint 
 
     if ((type >= GL_SAMPLER_1D && type <= GL_SAMPLER_2D_RECT_SHADOW) ||
         type == GL_SAMPLER_2D_MULTISAMPLE ||
-        type == GL_SAMPLER_CUBE_MAP_ARRAY)
+        type == GL_SAMPLER_CUBE_MAP_ARRAY ||
+        type == GL_SAMPLER_BUFFER ||
+        type == GL_INT_SAMPLER_BUFFER ||
+        type == GL_UNSIGNED_INT_SAMPLER_BUFFER)
     {   //this here is a texture
         GLint ret = mActiveTextureChannels;
         if (size == 1)
@@ -1196,9 +1196,8 @@ bool LLGLSLShader::mapUniforms()
     // sensitive to that order -- e.g. "diffuseMap" must win channel 0 so the
     // texture matrix is applied to the right unit. The GLSL compiler does not
     // guarantee any particular ordering of glGetActiveUniform() indices, so we
-    // The analytic font glyph buffer (isamplerBuffer) is now an auto-channeled
-    // diffuseMap still wins texture channel 0 if the compiler orders the buffer
-    // sampler first (it is declared earlier, in the injected lib).
+    // assign each active uniform a deterministic priority:
+    //   [0, mIndexedTextureChannels) -> indexed textures tex0..texN
     //   [mIndexedTextureChannels, ...) -> reserved uniforms, in mReservedUniforms order
     //   UINT_MAX                       -> everything else (order irrelevant; non-samplers)
     const auto& reservedUniforms = LLShaderMgr::instance()->mReservedUniforms;
@@ -2143,6 +2142,92 @@ void LLGLSLShader::uniform1i(const LLStaticHashedString& uniform, GLint v)
         }
     }
 }
+
+void LLGLSLShader::uniform1f(const LLStaticHashedString& uniform, GLfloat v)
+{
+    LL_PROFILE_ZONE_SCOPED_CATEGORY_SHADER;
+    GLint location = getUniformLocation(uniform);
+
+    if (location >= 0)
+    {
+        const auto& iter = mValue.find(location);
+        LLVector4 vec(v, 0.f, 0.f, 0.f);
+        if (iter == mValue.end() || shouldChange(iter->second, vec))
+        {
+            glUniform1f(location, v);
+            mValue[location] = vec;
+        }
+    }
+}
+
+void LLGLSLShader::uniform2f(const LLStaticHashedString& uniform, GLfloat x, GLfloat y)
+{
+    LL_PROFILE_ZONE_SCOPED_CATEGORY_SHADER;
+    GLint location = getUniformLocation(uniform);
+
+    if (location >= 0)
+    {
+        const auto& iter = mValue.find(location);
+        LLVector4 vec(x, y, 0.f, 0.f);
+        if (iter == mValue.end() || shouldChange(iter->second, vec))
+        {
+            glUniform2f(location, x, y);
+            mValue[location] = vec;
+        }
+    }
+}
+
+void LLGLSLShader::uniform4f(const LLStaticHashedString& uniform, GLfloat x, GLfloat y, GLfloat z, GLfloat w)
+{
+    LL_PROFILE_ZONE_SCOPED_CATEGORY_SHADER;
+    GLint location = getUniformLocation(uniform);
+
+    if (location >= 0)
+    {
+        const auto& iter = mValue.find(location);
+        LLVector4 vec(x, y, z, w);
+        if (iter == mValue.end() || shouldChange(iter->second, vec))
+        {
+            glUniform4f(location, x, y, z, w);
+            mValue[location] = vec;
+        }
+    }
+}
+
+void LLGLSLShader::uniform1fv(const LLStaticHashedString& uniform, U32 count, const GLfloat* v)
+{
+    LL_PROFILE_ZONE_SCOPED_CATEGORY_SHADER;
+    GLint location = getUniformLocation(uniform);
+
+    if (location >= 0)
+    {
+        const auto& iter = mValue.find(location);
+        LLVector4 vec(v[0], 0.f, 0.f, 0.f);
+        if (iter == mValue.end() || shouldChange(iter->second, vec) || count != 1)
+        {
+            glUniform1fv(location, count, v);
+            mValue[location] = vec;
+        }
+    }
+}
+
+void LLGLSLShader::uniform4fv(const LLStaticHashedString& uniform, U32 count, const GLfloat* v)
+{
+    LL_PROFILE_ZONE_SCOPED_CATEGORY_SHADER;
+    GLint location = getUniformLocation(uniform);
+
+    if (location >= 0)
+    {
+        const auto& iter = mValue.find(location);
+        LLVector4 vec(v);
+        if (iter == mValue.end() || shouldChange(iter->second, vec) || count != 1)
+        {
+            glUniform4fv(location, count, v);
+            mValue[location] = vec;
+        }
+    }
+}
+
 void LLGLSLShader::vertexAttrib4f(U32 index, GLfloat x, GLfloat y, GLfloat z, GLfloat w)
 {
     if (mAttribute[index] > 0)

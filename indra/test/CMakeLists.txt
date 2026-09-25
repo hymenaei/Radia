@@ -29,5 +29,5 @@ target_link_libraries(lltut_runner_lib PUBLIC llcommon ll::tut)
 
 set_target_properties(lltut_runner_lib
         PROPERTIES
-        FOLDER "Tests"
+        FOLDER "Tests/Support"
         )

@@ -3,6 +3,7 @@
     <key>Include</key>
     <array>
       <string>settings_per_account_alchemy.xml</string>
+      <string>settings_per_account_radia.xml</string>
     </array>
     <key>RLVaLoginLastLocation</key>
         <map>

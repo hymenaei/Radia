@@ -1,0 +1,21 @@
+i[class*="i-"] {
+    display: inline-block;
+    size: 16px;
+    stroke-width: 1px;
+    background: currentColor;
+
+    mask-position: center;
+    mask-repeat: no-repeat;
+    mask-size: contain;
+    mask-mode: alpha;
+}
+
+.xs { size: 12px; }
+.sm { size: 14px; }
+.md { size: 16px; }
+.lg { size: 20px; }
+.xl { size: 24px; }
+
+.i-close { mask-image: url("icons/close.svg"); }
+.i-minimize { mask-image: url("icons/minimize.svg"); }
+.i-search { mask-image: url("icons/search.svg"); }

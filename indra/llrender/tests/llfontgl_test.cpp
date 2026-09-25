@@ -35,6 +35,7 @@
 
 #include "../llfontgl.h"
 #include "../llfontfreetype.h"
+#include "../alfontshaping.h"
 #include "../llfontbitmapcache.h"
 #include "../llimagegl.h"
 
@@ -42,6 +43,7 @@
 
 #include "../test/lltut.h"
 
+#include <cmath>
 #include <cstdio>
 
 namespace
@@ -590,6 +592,162 @@ namespace tut
                       LLFontGL::BOLD | LLFontGL::ITALIC);
     }
 
+    template<> template<>
+    void llfontgl_object::test<19>()
+    {
+        if (!fileExists(kFontsXml))
+            skip("fonts.xml not found");
+        LLFontGL::initClass(96.f, 1.f, 1.f, kAppDir, kFontsXml,
+                            LLSD(), /*create_gl_textures=*/true);
+
+        LLFontGL* regular12 = LLFontGL::getFontAtPixelSize("SansSerif", 12.f, 400);
+        LLFontGL* regular13 = LLFontGL::getFontAtPixelSize("SansSerif", 13.f, 400);
+        LLFontGL* regular13_5 = LLFontGL::getFontAtPixelSize("SansSerif", 13.5f, 400);
+        LLFontGL* medium13  = LLFontGL::getFontAtPixelSize("SansSerif", 13.f, 525);
+        LLFontGL* bold13    = LLFontGL::getFontAtPixelSize("SansSerif", 13.f, 700);
+        ensure("exact-size fonts resolve",
+               regular12 && regular13 && regular13_5 && medium13 && bold13);
+        ensure("different CSS sizes use distinct cached faces", regular12 != regular13);
+        ensure("fractional CSS sizes use distinct cached faces", regular13 != regular13_5);
+        ensure_equals("repeat exact request is pointer-stable",
+                      LLFontGL::getFontAtPixelSize("SansSerif", 13.f, 700), bold13);
+
+        ensure_equals("13 CSS px converts to 9.75 pt",
+                      regular13->getFontDesc().getPointSize(), 9.75f);
+        ensure_equals("numeric weight remains exact",
+                      medium13->getFontDesc().getWeight(), static_cast<U16>(525));
+        ensure("13px metrics exceed 12px metrics",
+               regular13->getAscenderHeight() > regular12->getAscenderHeight());
+
+        const ALFontFace* regular_face = regular13->getFontFreetype()->getFontFace();
+        const U32 glyph_A = regular_face->getCharGlyphIndex(U'A');
+        ensure("analytic exact font does not prewarm the bitmap ASCII atlas",
+               regular_face->findGlyphInfo(glyph_A, EFontGlyphType::Grayscale) == nullptr);
+
+        const ALFontFace* fractional_face = regular13_5->getFontFreetype()->getFontFace();
+        const F32 fractional_em_pixels =
+            fractional_face->designToPixelScale() * fractional_face->unitsPerEm();
+        ensure("uniform analytic scale preserves fractional CSS pixels",
+               std::fabs(fractional_em_pixels - 13.5f) < 0.02f);
+
+        const ALFontVarAxes& medium_axes = medium13->getFontFreetype()->getVarAxes();
+        const ALFontVarAxes& bold_axes = bold13->getFontFreetype()->getVarAxes();
+        ensure("medium request reaches wght variation axis",
+               medium_axes.wght_set && medium_axes.wght == 525.f);
+        ensure("bold request reaches wght variation axis",
+               bold_axes.wght_set && bold_axes.wght == 700.f);
+    }
+
+    template<> template<>
+    void llfontgl_object::test<20>()
+    {
+        if (!fileExists(kFontsXml))
+            skip("fonts.xml not found");
+        LLFontGL::initClass(96.f, 1.f, 1.f, kAppDir, kFontsXml,
+                            LLSD(), /*create_gl_textures=*/true);
+        LLFontGL* font = LLFontGL::getFontSansSerif();
+        ensure("font resolves", font != nullptr);
+
+        LLWString spaced = utf8str_to_wstring("a b");
+        const F32 base = font->getWidthF32(
+            spaced.c_str(), 0, S32_MAX, true);
+        const F32 adjusted = font->getWidthF32(
+            spaced.c_str(), 0, S32_MAX, true,
+            LLFontGL::TextSpacing{2.f, 3.f});
+        ensure_approximately_equals(
+            "letter spacing separates three clusters and word spacing follows one space",
+            adjusted - base, 7.f, 5);
+
+        const llwchar combining_chars[] = {U'a', 0x0301, U'b', 0};
+        LLWString combining(combining_chars, 3);
+        const F32 combining_base = font->getWidthF32(
+            combining.c_str(), 0, S32_MAX, true);
+        const F32 combining_spaced = font->getWidthF32(
+            combining.c_str(), 0, S32_MAX, true,
+            LLFontGL::TextSpacing{2.f, 0.f});
+        ensure_approximately_equals(
+            "letter spacing is inserted between shaped clusters, not combining code points",
+            combining_spaced - combining_base, 2.f, 5);
+
+        const LLWString ligature = utf8str_to_wstring("fi");
+        const auto& ligature_spaced_shape = ALFontShaping::shapeLine(
+            font->getFontFreetype(), ligature, 0, ligature.size(),
+            true);
+        ensure(
+            "letter-spaced shaping disables optional ligatures",
+            ligature_spaced_shape.size() >= 2);
+
+        const llwchar unicode_space_chars[] = {U'a', 0x2003, U'b', 0};
+        LLWString unicode_space(unicode_space_chars, 3);
+        const F32 unicode_space_base = font->getWidthF32(
+            unicode_space.c_str(), 0, S32_MAX, true);
+        const F32 unicode_space_adjusted = font->getWidthF32(
+            unicode_space.c_str(), 0, S32_MAX, true,
+            LLFontGL::TextSpacing{0.f, 3.f});
+        ensure_approximately_equals(
+            "word spacing recognizes Unicode space separators",
+            unicode_space_adjusted - unicode_space_base, 3.f, 5);
+
+        LLWString trailing_space = utf8str_to_wstring("a ");
+        const F32 trailing_base = font->getWidthF32(
+            trailing_space.c_str(), 0, S32_MAX, true);
+        const F32 start_x = 20.f;
+        const S32 max_pixels =
+            static_cast<S32>(std::ceil(trailing_base + 5.f));
+        F32 right_x = start_x;
+        font->render(
+            trailing_space, 0, start_x, 100.f, LLColor4::white,
+            LLFontGL::LEFT, LLFontGL::BASELINE,
+            LLFontGL::NORMAL, LLFontGL::NO_SHADOW,
+            static_cast<S32>(trailing_space.size()),
+            max_pixels, &right_x, false, true,
+            nullptr, nullptr, LLFontGL::TextSpacing{0.f, 10.f});
+        gGL.flush();
+        ensure(
+            "trailing word spacing respects the render pixel limit",
+            right_x <= start_x + max_pixels + 0.01f);
+
+        LLWString limited = utf8str_to_wstring("ab");
+        const F32 first_width = font->getWidthF32(
+            U"a", 0, S32_MAX, true);
+        const S32 letter_limit =
+            static_cast<S32>(std::ceil(first_width + 5.f));
+        right_x = start_x;
+        const S32 rendered = font->render(
+            limited, 0, start_x, 100.f, LLColor4::white,
+            LLFontGL::LEFT, LLFontGL::BASELINE,
+            LLFontGL::NORMAL, LLFontGL::NO_SHADOW,
+            static_cast<S32>(limited.size()),
+            letter_limit, &right_x, false, true,
+            nullptr, nullptr, LLFontGL::TextSpacing{10.f, 0.f});
+        gGL.flush();
+        ensure_equals(
+            "pixel limit rejects the cluster after a letter gap",
+            rendered, 1);
+        ensure(
+            "rejected-cluster letter spacing is rolled back",
+            right_x <= start_x + letter_limit + 0.01f);
+
+        LLWString rejected_separator = utf8str_to_wstring("a ");
+        right_x = start_x;
+        const S32 separator_rendered = font->render(
+            rejected_separator, 0, start_x, 100.f,
+            LLColor4::white, LLFontGL::LEFT,
+            LLFontGL::BASELINE, LLFontGL::NORMAL,
+            LLFontGL::NO_SHADOW,
+            static_cast<S32>(rejected_separator.size()),
+            letter_limit, &right_x, false, true,
+            nullptr, nullptr,
+            LLFontGL::TextSpacing{10.f, 3.f});
+        gGL.flush();
+        ensure_equals(
+            "pixel limit rejects a separator after an oversized gap",
+            separator_rendered, 1);
+        ensure(
+            "rejected separator does not add phantom word spacing",
+            right_x <= start_x + letter_limit + 0.01f);
+    }
+
     // ===================================================================
     // Render-output group: fixture brings up gUIProgram (needs_render=true)
     // so LLFontGL::render() completes end-to-end against the OSMesa
@@ -868,5 +1026,38 @@ namespace tut
             ensure("batch texture is one of the string's atlas pages",
                    entry.mTexName == latin_tex || entry.mTexName == emoji_tex);
         }
+    }
+
+    template<> template<>
+    void llfontgl_render_object::test<7>()
+    {
+#if !LL_HAS_HB_GPU
+        skip("analytic font renderer is not available in this build");
+#else
+        if (!fileExists(kFontsXml))
+            skip("fonts.xml not found");
+        LLFontGL* font = LLFontGL::getFontSansSerif();
+        ensure("font resolves", font != nullptr);
+
+        const F32 start_x = 20.f;
+        constexpr S32 MAX_PIXELS = 10;
+        LLWString spaces(32, U' ');
+        F32 right_x = start_x;
+        LLFontGL::RenderMetadata metadata;
+        const S32 n = font->render(
+            spaces, 0, start_x, 100.f, LLColor4::white,
+            LLFontGL::LEFT, LLFontGL::BASELINE,
+            LLFontGL::NORMAL, LLFontGL::NO_SHADOW,
+            static_cast<S32>(spaces.size()), MAX_PIXELS, &right_x,
+            false, true, nullptr, &metadata);
+        gGL.flush();
+
+        if (!metadata.emitted_analytic_glyph)
+            skip("runtime analytic shader is unavailable");
+        ensure("whitespace run is clipped",
+               n >= 0 && n < static_cast<S32>(spaces.size()));
+        ensure("reported right edge stays within max_pixels",
+               right_x <= start_x + MAX_PIXELS + 0.01f);
+#endif
     }
 }

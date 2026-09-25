@@ -53,6 +53,7 @@ public:
 
     LLKeyFunc       mFunction;
     std::string     mFunctionName;
+    S32             mOrder;
 };
 
 class LLMouseBinding
@@ -63,6 +64,7 @@ public:
 
     LLKeyFunc       mFunction;
     std::string     mFunctionName;
+    S32             mOrder;
 };
 
 
@@ -120,6 +122,7 @@ public:
 
     S32             loadBindingsXML(const std::string& filename);                                       // returns number bound, 0 on error
     EKeyboardMode   getMode() const;
+    U64             getBindingGeneration() const { return mBindingGeneration; }
 
     static bool     modeFromString(const std::string& string, S32 *mode);           // False on failure
     static bool     mouseFromString(const std::string& string, EMouseClickType *mode);// False on failure
@@ -138,6 +141,8 @@ public:
 
     // inherited from LLKeyBindingToStringHandler
     virtual std::string getKeyBindingAsString(const std::string& mode, const std::string& control) const override;
+    std::vector<std::string> getPrimaryKeyBinding(const std::string& mode,
+                                                  const std::string& control) const;
 
 private:
     bool            scanKey(const std::vector<LLKeyboardBinding> &binding,
@@ -166,8 +171,10 @@ private:
                           bool ignore_additional_masks) const;
 
     S32             loadBindingMode(const LLViewerInput::KeyMode& keymode, S32 mode);
-    bool            bindKey(const S32 mode, const KEY key, const MASK mask, const std::string& function_name);
-    bool            bindMouse(const S32 mode, const EMouseClickType mouse, const MASK mask, const std::string& function_name);
+    bool            bindKey(const S32 mode, const KEY key, const MASK mask,
+                            const std::string& function_name, S32 order);
+    bool            bindMouse(const S32 mode, const EMouseClickType mouse, const MASK mask,
+                              const std::string& function_name, S32 order);
     void            resetBindings();
 
     // Hold all the ugly stuff torn out to make LLKeyboard non-viewer-specific here
@@ -182,6 +189,7 @@ private:
     // keybindings that do not consume event and are handled earlier, before floaters
     std::vector<LLKeyboardBinding>  mGlobalKeyBindings[MODE_COUNT];
     std::vector<LLMouseBinding>     mGlobalMouseBindings[MODE_COUNT];
+    U64                             mBindingGeneration = 0;
 
     typedef std::map<U32, U32> key_remap_t;
     key_remap_t     mRemapKeys[MODE_COUNT];

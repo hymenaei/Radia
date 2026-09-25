@@ -34,6 +34,7 @@
 #include "llkeyboardwin32.h"
 #include "lldragdropwin32.h"
 #include "lldxhardware.h"
+#include "llimage.h"
 #include "llpreeditor.h"
 #include "llwindowcallbacks.h"
 
@@ -55,13 +56,20 @@
 // System includes
 #include <commdlg.h>
 #include <WinUser.h>
+#include <algorithm>
+#include <cstdint>
 #include <mapi.h>
 #include <process.h>    // for _spawn
 #include <shellapi.h>
 #include <fstream>
+#include <cmath>
+#include <cstring>
 #include <Imm.h>
 #include <iomanip>
 #include <future>
+#include <limits>
+#include <memory>
+#include <optional>
 #include <sstream>
 #include <utility>                  // std::pair
 
@@ -152,6 +160,147 @@ HGLRC SafeCreateContext(HDC &hdc)
     __except(EXCEPTION_EXECUTE_HANDLER)
     {
         return NULL;
+    }
+}
+
+struct Win32CursorResource {
+    std::vector<U8> bits;
+    int width = 0;
+    int height = 0;
+    U16 hotspotX = 0;
+    U16 hotspotY = 0;
+};
+
+struct CursorHandle {
+    explicit CursorHandle(HCURSOR value) : value(value) {}
+    ~CursorHandle() {
+        if (value) DestroyCursor(value);
+    }
+
+    HCURSOR value;
+};
+
+struct LLWindowWin32::CursorState {
+    std::shared_ptr<CursorHandle> custom;
+};
+
+std::optional<Win32CursorResource> parseCursorResource(const LLCursorImage& image) {
+    if (image.data.size() < 22) return std::nullopt;
+    const U8* bytes = reinterpret_cast<const U8*>(image.data.data());
+    const auto read16 = [](const U8* value) { return static_cast<U16>(value[0] | (static_cast<U16>(value[1]) << 8)); };
+    const auto read32 = [](const U8* value) {
+        return static_cast<std::uint32_t>(value[0] | (static_cast<std::uint32_t>(value[1]) << 8)
+                                           | (static_cast<std::uint32_t>(value[2]) << 16) | (static_cast<std::uint32_t>(value[3]) << 24));
+    };
+    if (read16(bytes) != 0 || read16(bytes + 2) != 2 || read16(bytes + 4) == 0) return std::nullopt;
+    const U8* entry = bytes + 6;
+    const std::size_t imageOffset = read32(entry + 12);
+    const std::size_t imageSize = read32(entry + 8);
+    if (imageOffset > image.data.size() || imageSize > image.data.size() - imageOffset) return std::nullopt;
+
+    Win32CursorResource result;
+    result.width = entry[0] ? entry[0] : 256;
+    result.height = entry[1] ? entry[1] : 256;
+    result.hotspotX = read16(entry + 4);
+    result.hotspotY = read16(entry + 6);
+    result.bits.resize(4 + imageSize);
+    result.bits[0] = static_cast<U8>(result.hotspotX);
+    result.bits[1] = static_cast<U8>(result.hotspotX >> 8);
+    result.bits[2] = static_cast<U8>(result.hotspotY);
+    result.bits[3] = static_cast<U8>(result.hotspotY >> 8);
+    std::memcpy(result.bits.data() + 4, bytes + imageOffset, imageSize);
+    return result;
+}
+
+LLPointer<LLImageRaw> decodeCursorImage(const LLCursorImage& image) {
+    const std::size_t dot = image.sourceName.rfind('.');
+    if (dot == std::string::npos || dot + 1 >= image.sourceName.size()
+        || image.data.size() > static_cast<std::size_t>(std::numeric_limits<S32>::max()))
+        return nullptr;
+
+    std::string extension = image.sourceName.substr(dot + 1);
+    LLStringUtil::toLower(extension);
+    LLPointer<LLImageFormatted> formatted = LLImageFormatted::createFromExtension(extension);
+    if (formatted.isNull()) return nullptr;
+
+    U8* data = formatted->allocateData(static_cast<S32>(image.data.size()));
+    if (!data) return nullptr;
+    std::memcpy(data, image.data.data(), image.data.size());
+    if (!formatted->updateData()) return nullptr;
+
+    LLPointer<LLImageRaw> raw = new LLImageRaw;
+    if (!formatted->decode(raw, 100000.f) || raw->getWidth() == 0 || raw->getHeight() == 0) return nullptr;
+    raw->verticalFlip();
+    return raw;
+}
+
+HCURSOR createCursorFromImage(const LLImageRaw& raw, int hotspotX, int hotspotY) {
+    const int width = raw.getWidth();
+    const int height = raw.getHeight();
+    const int components = raw.getComponents();
+    if (width <= 0 || height <= 0 || (components != 1 && components != 2 && components != 3 && components != 4)) return nullptr;
+
+    BITMAPINFO colorInfo = {};
+    colorInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    colorInfo.bmiHeader.biWidth = width;
+    colorInfo.bmiHeader.biHeight = -height;
+    colorInfo.bmiHeader.biPlanes = 1;
+    colorInfo.bmiHeader.biBitCount = 32;
+    colorInfo.bmiHeader.biCompression = BI_RGB;
+
+    void* colorBits = nullptr;
+    HBITMAP colorBitmap = CreateDIBSection(nullptr, &colorInfo, DIB_RGB_COLORS, &colorBits, nullptr, 0);
+    if (!colorBitmap || !colorBits) {
+        if (colorBitmap) DeleteObject(colorBitmap);
+        return nullptr;
+    }
+
+    const U8* source = raw.getData();
+    U8* destination = static_cast<U8*>(colorBits);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const U8* pixel = source + (static_cast<std::size_t>(y) * width + x) * components;
+            U8* output = destination + (static_cast<std::size_t>(y) * width + x) * 4;
+            const U8 red = pixel[0];
+            const U8 green = components > 2 ? pixel[1] : red;
+            const U8 blue = components > 2 ? pixel[2] : red;
+            const U8 alpha = components == 2 ? pixel[1] : components == 4 ? pixel[3] : 255;
+            output[0] = blue;
+            output[1] = green;
+            output[2] = red;
+            output[3] = alpha;
+        }
+    }
+
+    const std::size_t maskRowBytes = ((static_cast<std::size_t>(width) + 31) / 32) * 4;
+    std::vector<U8> maskBits(maskRowBytes * height, 0);
+    HBITMAP maskBitmap = CreateBitmap(width, height, 1, 1, maskBits.data());
+    if (!maskBitmap) {
+        DeleteObject(colorBitmap);
+        return nullptr;
+    }
+
+    ICONINFO iconInfo = {};
+    iconInfo.fIcon = FALSE;
+    iconInfo.xHotspot = static_cast<DWORD>(std::clamp(hotspotX, 0, width - 1));
+    iconInfo.yHotspot = static_cast<DWORD>(std::clamp(hotspotY, 0, height - 1));
+    iconInfo.hbmMask = maskBitmap;
+    iconInfo.hbmColor = colorBitmap;
+    HCURSOR cursor = CreateIconIndirect(&iconInfo);
+    DeleteObject(maskBitmap);
+    DeleteObject(colorBitmap);
+    return cursor;
+}
+
+namespace
+{
+    int clampCursorHotspot(const float sourceCoordinate, const float scale, const int extent)
+    {
+        if (extent <= 0 || !std::isfinite(sourceCoordinate) || !std::isfinite(scale) || scale <= 0.f) return 0;
+        const float maxSourceCoordinate = static_cast<float>(extent - 1) / scale;
+        const float clampedSourceCoordinate = std::clamp(sourceCoordinate, 0.f, maxSourceCoordinate);
+        const long roundedHotspot = std::lround(clampedSourceCoordinate * scale);
+        return static_cast<int>(std::clamp(roundedHotspot, 0L, static_cast<long>(extent - 1)));
     }
 }
 
@@ -513,6 +662,7 @@ LLWindowWin32::LLWindowWin32(LLWindowCallbacks* callbacks,
                              F32 max_gl_version)
     :
     LLWindow(callbacks, fullscreen, flags),
+    mCursorState(std::make_shared<CursorState>()),
     mAbsoluteCursorPosition(false),
     mMaxGLVersion(max_gl_version),
     mMaxCores(max_cores)
@@ -923,6 +1073,8 @@ LLWindowWin32::~LLWindowWin32()
     delete [] mWindowClassName;
     mWindowClassName = NULL;
 
+    if (mWindowThread) clearCursorImage();
+
     delete mWindowThread;
     mWindowThread = NULL;
 }
@@ -1044,6 +1196,7 @@ void LLWindowWin32::close()
         sWindowHandleForMessageBox = NULL;
     }
 
+    clearCursorImage();
     mhDC = NULL;
     mWindowHandle = NULL;
 
@@ -2185,6 +2338,7 @@ void LLWindowWin32::initCursors()
 
     HMODULE module = GetModuleHandle(NULL);
     mCursor[ UI_CURSOR_TOOLGRAB ]   = LoadCursor(module, TEXT("TOOLGRAB"));
+    mCursor[ UI_CURSOR_TOOLGRABBING ] = LoadCursor(module, TEXT("TOOLGRABBING"));
     mCursor[ UI_CURSOR_TOOLLAND ]   = LoadCursor(module, TEXT("TOOLLAND"));
     mCursor[ UI_CURSOR_TOOLFOCUS ]  = LoadCursor(module, TEXT("TOOLFOCUS"));
     mCursor[ UI_CURSOR_TOOLCREATE ] = LoadCursor(module, TEXT("TOOLCREATE"));
@@ -2235,6 +2389,7 @@ void LLWindowWin32::updateCursor()
 {
     ASSERT_MAIN_THREAD();
     LL_PROFILE_ZONE_SCOPED_CATEGORY_WIN32;
+    if (!mCustomCursorImage.data.empty()) return;
     if (mNextCursor == UI_CURSOR_ARROW
         && mBusyCount > 0)
     {
@@ -2252,6 +2407,66 @@ void LLWindowWin32::updateCursor()
     }
 }
 
+bool LLWindowWin32::setCursorImage(const LLCursorImage& image) {
+    if (!mWindowThread || image.data.empty()) return false;
+    if (!mCustomCursorImage.data.empty() && image == mCustomCursorImage) return true;
+    std::optional<Win32CursorResource> resource = parseCursorResource(image);
+    HCURSOR cursor = nullptr;
+    if (resource) {
+        const float scale = std::max(.0001f, image.scale);
+        const int width = std::max(1, static_cast<int>(std::lround(resource->width * scale)));
+        const int height = std::max(1, static_cast<int>(std::lround(resource->height * scale)));
+        const float hotspotX = image.hotspotXSpecified ? image.hotspotX : static_cast<float>(resource->hotspotX);
+        const float hotspotY = image.hotspotYSpecified ? image.hotspotY : static_cast<float>(resource->hotspotY);
+        const U16 nativeHotspotX = static_cast<U16>(clampCursorHotspot(hotspotX, scale, width));
+        const U16 nativeHotspotY = static_cast<U16>(clampCursorHotspot(hotspotY, scale, height));
+        resource->bits[0] = static_cast<U8>(nativeHotspotX);
+        resource->bits[1] = static_cast<U8>(nativeHotspotX >> 8);
+        resource->bits[2] = static_cast<U8>(nativeHotspotY);
+        resource->bits[3] = static_cast<U8>(nativeHotspotY >> 8);
+        cursor = reinterpret_cast<HCURSOR>(
+            CreateIconFromResourceEx(resource->bits.data(), static_cast<DWORD>(resource->bits.size()), FALSE, 0x00030000, width, height, 0));
+    } else {
+        LLPointer<LLImageRaw> raw = decodeCursorImage(image);
+        if (raw.notNull()) {
+            const float scale = std::max(.0001f, image.scale);
+            const int width = std::max(1, static_cast<int>(std::lround(raw->getWidth() * scale)));
+            const int height = std::max(1, static_cast<int>(std::lround(raw->getHeight() * scale)));
+            if (width != raw->getWidth() || height != raw->getHeight()) raw = raw->scaled(width, height);
+            if (raw.notNull()) {
+                const int hotspotX = clampCursorHotspot(image.hotspotXSpecified ? image.hotspotX : 0.f, scale, width);
+                const int hotspotY = clampCursorHotspot(image.hotspotYSpecified ? image.hotspotY : 0.f, scale, height);
+                cursor = createCursorFromImage(*raw, hotspotX, hotspotY);
+            }
+        }
+    }
+    if (!cursor) return false;
+
+    mCustomCursorImage = image;
+    const std::shared_ptr<CursorState> state = mCursorState;
+    const std::shared_ptr<CursorHandle> next = std::make_shared<CursorHandle>(cursor);
+    mWindowThread->post([state, next]() {
+        state->custom = next;
+        SetCursor(next->value);
+    });
+    kickWindowThread();
+    return true;
+}
+
+void LLWindowWin32::clearCursorImage() {
+    if (mCustomCursorImage.data.empty()) return;
+    mCustomCursorImage = {};
+    const HCURSOR fallback = mCursor[mCurrentCursor];
+    const std::shared_ptr<CursorState> state = mCursorState;
+    if (mWindowThread && state) {
+        mWindowThread->post([state, fallback]() {
+            state->custom.reset();
+            SetCursor(fallback);
+        });
+        kickWindowThread();
+    }
+}
+
 ECursorType LLWindowWin32::getCursor() const
 {
     return mCurrentCursor;
@@ -2260,11 +2475,13 @@ ECursorType LLWindowWin32::getCursor() const
 void LLWindowWin32::captureMouse()
 {
     SetCapture(mWindowHandle);
+    mOwnsMouseCapture = GetCapture() == mWindowHandle;
 }
 
 void LLWindowWin32::releaseMouse()
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_WIN32;
+    mOwnsMouseCapture = false;
     ReleaseCapture();
 }
 
@@ -2472,9 +2689,10 @@ LRESULT CALLBACK LLWindowWin32::mainWindowProc(HWND h_wnd, UINT u_msg, WPARAM w_
 
             // Only take control of cursor over client region of window
             // This allows Windows(tm) to handle resize cursors, etc.
-            if (LOWORD(l_param) == HTCLIENT)
-            {
-                SetCursor(window_imp->mCursor[window_imp->mCurrentCursor]);
+            if (LOWORD(l_param) == HTCLIENT) {
+                const HCURSOR cursor = window_imp->mCursorState && window_imp->mCursorState->custom ? window_imp->mCursorState->custom->value
+                                                                                                    : window_imp->mCursor[window_imp->mCurrentCursor];
+                SetCursor(cursor);
                 return 0;
             }
             break;
@@ -3182,6 +3400,16 @@ LRESULT CALLBACK LLWindowWin32::mainWindowProc(HWND h_wnd, UINT u_msg, WPARAM w_
         {
             LL_PROFILE_ZONE_NAMED_CATEGORY_WIN32("mwp - WM_KILLFOCUS");
             WINDOW_IMP_POST(window_imp->mCallbacks->handleFocusLost(window_imp));
+            return 0;
+        }
+
+        case WM_CAPTURECHANGED:
+        {
+            if (window_imp->mOwnsMouseCapture)
+            {
+                window_imp->mOwnsMouseCapture = false;
+                WINDOW_IMP_POST(window_imp->mCallbacks->handleMouseCaptureLost(window_imp));
+            }
             return 0;
         }
 

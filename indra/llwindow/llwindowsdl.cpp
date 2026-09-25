@@ -42,6 +42,8 @@
 
 #include "SDL3_ttf/SDL_ttf.h"     // LLSplashScreenSDL status text
 #include "SDL3_image/SDL_image.h" // LLSplashScreenSDL branded icon (PNG)
+#include <algorithm>
+#include <cmath>
 
 #if LL_LINUX
 extern "C" {
@@ -3246,8 +3248,71 @@ static SDL_Cursor *makeSDLCursorFromWin32(const char *resource_name)
 }
 #endif // LL_WINDOWS
 
+namespace
+{
+    int clampCursorHotspot(const float sourceCoordinate, const float scale, const int extent)
+    {
+        if (extent <= 0 || !std::isfinite(sourceCoordinate) || !std::isfinite(scale) || scale <= 0.f) return 0;
+        const float maxSourceCoordinate = static_cast<float>(extent - 1) / scale;
+        const float clampedSourceCoordinate = std::clamp(sourceCoordinate, 0.f, maxSourceCoordinate);
+        const long roundedHotspot = std::lround(clampedSourceCoordinate * scale);
+        return static_cast<int>(std::clamp(roundedHotspot, 0L, static_cast<long>(extent - 1)));
+    }
+}
+
+bool LLWindowSDL::setCursorImage(const LLCursorImage& image)
+{
+    if (!mWindow || image.data.empty()) return false;
+    if (mCustomCursor && image == mCustomCursorImage) return true;
+
+    SDL_IOStream* stream = SDL_IOFromConstMem(image.data.data(), image.data.size());
+    if (!stream) return false;
+    SDL_Surface* decoded = IMG_Load_IO(stream, true);
+    if (!decoded) return false;
+    const SDL_PropertiesID properties = SDL_GetSurfaceProperties(decoded);
+    const float embeddedX = static_cast<float>(SDL_GetNumberProperty(properties, SDL_PROP_SURFACE_HOTSPOT_X_NUMBER, 0));
+    const float embeddedY = static_cast<float>(SDL_GetNumberProperty(properties, SDL_PROP_SURFACE_HOTSPOT_Y_NUMBER, 0));
+    SDL_Surface* rgba = SDL_ConvertSurface(decoded, SDL_PIXELFORMAT_RGBA32);
+    SDL_DestroySurface(decoded);
+    if (!rgba) return false;
+    SDL_SetSurfaceBlendMode(rgba, SDL_BLENDMODE_BLEND);
+
+    const int sourceWidth = rgba->w;
+    const int sourceHeight = rgba->h;
+    const float scale = std::max(.0001f, image.scale);
+    SDL_Surface* scaled = SDL_ScaleSurface(rgba, std::max(1, static_cast<int>(std::lround(sourceWidth * scale))),
+                                           std::max(1, static_cast<int>(std::lround(sourceHeight * scale))), SDL_SCALEMODE_LINEAR);
+    SDL_DestroySurface(rgba);
+    if (!scaled) return false;
+
+    const float hotspotX = image.hotspotXSpecified ? image.hotspotX : embeddedX;
+    const float hotspotY = image.hotspotYSpecified ? image.hotspotY : embeddedY;
+    SDL_Cursor* cursor = SDL_CreateColorCursor(scaled, clampCursorHotspot(hotspotX, scale, scaled->w),
+                                               clampCursorHotspot(hotspotY, scale, scaled->h));
+    SDL_DestroySurface(scaled);
+    if (!cursor) return false;
+
+    if (mCustomCursor) SDL_DestroyCursor(mCustomCursor);
+    mCustomCursor = cursor;
+    mCustomCursorImage = image;
+    SDL_SetCursor(mCustomCursor);
+    return true;
+}
+
+void LLWindowSDL::clearCursorImage()
+{
+    if (!mCustomCursor) return;
+    SDL_DestroyCursor(mCustomCursor);
+    mCustomCursor = nullptr;
+    mCustomCursorImage = {};
+    SDL_Cursor* cursor = mCurrentCursor < UI_CURSOR_COUNT ? mSDLCursors[mCurrentCursor] : nullptr;
+    if (!cursor) cursor = mSDLCursors[UI_CURSOR_ARROW];
+    if (cursor) SDL_SetCursor(cursor);
+}
+
 void LLWindowSDL::updateCursor()
 {
+    if (mCustomCursor) return;
     if (mCurrentCursor != mNextCursor)
     {
         if (mNextCursor < UI_CURSOR_COUNT)
@@ -3329,6 +3394,7 @@ void LLWindowSDL::initCursors()
     mSDLCursors[UI_CURSOR_TOOLPATHFINDING_PATH_END] = makeSDLCursorFromMacTIF("UI_CURSOR_PATHFINDING_END.tif", 16, 16);
     mSDLCursors[UI_CURSOR_TOOLPATHFINDING_PATH_END_ADD] = makeSDLCursorFromMacTIF("UI_CURSOR_PATHFINDING_END_ADD.tif", 16, 16);
     mSDLCursors[UI_CURSOR_TOOLNO] = makeSDLCursorFromMacTIF("UI_CURSOR_NO.tif", 8, 8);
+    mSDLCursors[UI_CURSOR_TOOLGRABBING] = makeSDLCursorFromMacTIF("UI_CURSOR_TOOLGRAB.tif", 2, 14);
 #elif LL_WINDOWS
     // Load the branded cursors from the exe's embedded .cur resources — the
     // same resource names LLWindowWin32::initCursors uses. Hot-spots come from
@@ -3365,6 +3431,7 @@ void LLWindowSDL::initCursors()
     mSDLCursors[UI_CURSOR_TOOLPATHFINDING_PATH_END] = makeSDLCursorFromWin32("TOOLPATHFINDINGPATHEND");
     mSDLCursors[UI_CURSOR_TOOLPATHFINDING_PATH_END_ADD] = makeSDLCursorFromWin32("TOOLPATHFINDINGPATHENDADD");
     mSDLCursors[UI_CURSOR_TOOLNO] = makeSDLCursorFromWin32("TOOLNO");
+    mSDLCursors[UI_CURSOR_TOOLGRABBING] = makeSDLCursorFromWin32("TOOLGRABBING");
 #else
     mSDLCursors[UI_CURSOR_TOOLGRAB] = makeSDLCursorFromBMP("lltoolgrab.BMP",2,13);
     mSDLCursors[UI_CURSOR_TOOLLAND] = makeSDLCursorFromBMP("lltoolland.BMP",1,6);
@@ -3398,11 +3465,13 @@ void LLWindowSDL::initCursors()
     mSDLCursors[UI_CURSOR_TOOLPATHFINDING_PATH_END] = makeSDLCursorFromBMP("lltoolpathfindingpathend.BMP", 16, 16);
     mSDLCursors[UI_CURSOR_TOOLPATHFINDING_PATH_END_ADD] = makeSDLCursorFromBMP("lltoolpathfindingpathendadd.BMP", 16, 16);
     mSDLCursors[UI_CURSOR_TOOLNO] = makeSDLCursorFromBMP("llno.BMP",8,8);
+    mSDLCursors[UI_CURSOR_TOOLGRABBING] = makeSDLCursorFromBMP("lltoolgrab.BMP",2,13);
 #endif // LL_DARWIN
 }
 
 void LLWindowSDL::quitCursors()
 {
+    clearCursorImage();
     // SDL3 cursors are owned by the SDL library, not by any window —
     // SDL_DestroyCursor must be called regardless of whether mWindow is
     // still alive. The previous mWindow-guard skipped destruction when
@@ -4357,4 +4426,3 @@ void LLWindowSDL::setUseMultGL(bool use_mult_gl)
     }
 }
 #endif
-

@@ -73,6 +73,7 @@ enum ECursorType {
     UI_CURSOR_TOOLPATHFINDING_PATH_END,
     UI_CURSOR_TOOLPATHFINDING_PATH_END_ADD,
     UI_CURSOR_TOOLNO,
+    UI_CURSOR_TOOLGRABBING,
     UI_CURSOR_COUNT         // Number of elements in this enum (NOT a cursor)
 };
 

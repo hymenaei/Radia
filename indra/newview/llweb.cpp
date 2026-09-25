@@ -180,7 +180,7 @@ std::string LLWeb::expandURLSubstitutions(const std::string &url,
     std::string lang = LLUI::getLanguage();
     if (lang == "en-us")
     {
-        // *HACK: the correct fix is to change English.lproj/language.txt,
+        // *HACK: the correct fix is to change macos_resources/English.lproj/language.txt,
         // but we're late in the release cycle and this is a less risky fix
         lang = "en";
     }

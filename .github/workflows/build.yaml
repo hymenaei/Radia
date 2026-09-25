@@ -206,7 +206,7 @@ jobs:
       VCPKG_ROOT: ${{ github.workspace }}/vcpkg
       VCPKG_USERNAME: ${{ github.repository_owner }}
       VCPKG_FEED_URL: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
-      VCPKG_BINARY_SOURCES: "clear;nuget,https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json,readwrite"
+      VCPKG_BINARY_SOURCES: "clear;nuget,https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json,${{ github.event_name == 'pull_request' && 'read' || 'readwrite' }}"
     steps:
       - name: Linux Dependency Install and Disk Cleanup
         if: runner.os == 'Linux'
@@ -391,7 +391,11 @@ jobs:
             cmake --build --preset $CMAKE_PRESET_NAME-$BUILD_CONFIG --target BUILD_AND_RUN_TESTS
           elif $BUILD_VIEWER
           then
-            cmake --build --preset $CMAKE_PRESET_NAME-$BUILD_CONFIG || fatal "failed building $BUILD_CONFIG viewer"
+            if ! cmake --build --preset $CMAKE_PRESET_NAME-$BUILD_CONFIG
+            then
+              echo "::error::Failed building $BUILD_CONFIG viewer"
+              exit 1
+            fi
           else
             echo "::notice::Skipping build due to both viewer and tests being disabled"
           fi
@@ -469,6 +473,129 @@ jobs:
       #     path: |
       #       ${{ steps.configure.outputs.build_directory }}/llappearanceutility/Release/appearance-utility-bin
       #       ${{ steps.configure.outputs.build_directory }}/llappearanceutility/Release/appearance-utility-headless-bin
+
+  benchmarks:
+    name: build (ubuntu-24.04, release, x64, Benchmarks)
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    needs: setup
+    permissions:
+      packages: write
+    runs-on: ubuntu-24.04
+    env:
+      BUILD_TYPE: ${{ needs.setup.outputs.build_type }}
+      VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+      VCPKG_USERNAME: ${{ github.repository_owner }}
+      VCPKG_FEED_URL: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
+      VCPKG_BINARY_SOURCES: "clear;nuget,https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json,${{ github.event_name == 'pull_request' && 'read' || 'readwrite' }}"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Linux Dependency Install
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            autoconf autoconf-archive automake bison build-essential cmake curl flex gettext \
+            libasound2-dev libaudio-dev libdbus-1-dev libdecor-0-dev libdrm-dev \
+            libegl1-mesa-dev libfribidi-dev libgbm-dev libgl1-mesa-dev libgles2-mesa-dev \
+            libgstreamer-plugins-base1.0-dev libgstreamer1.0-dev libibus-1.0-dev libjack-dev libltdl-dev \
+            libosmesa6-dev libpipewire-0.3-dev libpulse-dev libsndio-dev libtext-unidecode-perl \
+            libthai-dev libtool libudev-dev libunwind-dev liburing-dev libvlc-dev libwayland-dev \
+            libx11-dev libxcursor-dev libxext-dev libxfixes-dev libxft-dev libxi-dev libxinerama-dev \
+            libxkbcommon-dev libxrandr-dev libxss-dev libxtst-dev linux-libc-dev mono-complete \
+            nasm ninja-build pkgconf tar tex-common texinfo unzip zip
+
+          sudo locale-gen en_US.UTF-8
+          sudo locale-gen en_GB.UTF-8
+          sudo locale-gen fr_FR.UTF-8
+
+      - name: Setup python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Install python dependencies
+        run: pip3 install llsd cmake ninja
+
+      - name: Bootstrap vcpkg
+        run: ./vcpkg/bootstrap-vcpkg.sh
+
+      - name: Set up vcpkg nuget caching
+        shell: bash
+        run: |
+          mono $(${VCPKG_ROOT}/vcpkg fetch nuget | tail -n 1) \
+            sources add \
+            -Source "${{ env.VCPKG_FEED_URL }}" \
+            -StorePasswordInClearText \
+            -Name GitHubPackages \
+            -UserName "${{ env.VCPKG_USERNAME }}" \
+            -Password "${{ secrets.GITHUB_TOKEN }}"
+          mono $(${VCPKG_ROOT}/vcpkg fetch nuget | tail -n 1) \
+            setapikey "${{ secrets.GITHUB_TOKEN }}" \
+            -Source "${{ env.VCPKG_FEED_URL }}"
+
+      - name: Configure
+        id: configure
+        shell: bash
+        env:
+          HAVOK: false
+        run: |
+          set -x
+
+          export VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT
+
+          cmake_preset_postfix=""
+          if [[ "$BUILD_TYPE" != "proprietary" ]]
+          then
+            cmake_preset_postfix="-os"
+          fi
+
+          cmake_preset_name="ninja$cmake_preset_postfix"
+          build_directory="build-Linux-$cmake_preset_name"
+
+          echo "build_directory=$build_directory" >> "$GITHUB_OUTPUT"
+          echo "cmake_preset=$cmake_preset_name" >> "$GITHUB_OUTPUT"
+
+          cmake -S indra --preset "$cmake_preset_name" \
+            -DVCPKG_TARGET_TRIPLET="x64-linux-alchemy-release" \
+            -DBUILD_VIEWER:BOOL=OFF \
+            -DBUILD_TESTING:BOOL=OFF \
+            -DBUILD_BENCHMARKING:BOOL=ON \
+            -DPACKAGE:BOOL=OFF \
+            -DUSE_VELOPACK:BOOL=OFF \
+            -DUSE_LTO:BOOL=OFF \
+            -DHAVOK:BOOL="$HAVOK" \
+            -DVIEWER_CHANNEL:STRING="${{ needs.setup.outputs.viewer_channel }}" \
+            -DGRID:STRING="\"agni\""
+
+      - name: Build
+        working-directory: "${{ github.workspace }}/indra"
+        env:
+          CMAKE_PRESET_NAME: ${{ steps.configure.outputs.cmake_preset }}
+        run: cmake --build --preset "$CMAKE_PRESET_NAME-release"
+
+      - name: Run benchmarks
+        env:
+          BUILD_DIRECTORY: ${{ github.workspace }}/${{ steps.configure.outputs.build_directory }}
+        run: |
+          python scripts/bench.py \
+            --build-dir "$BUILD_DIRECTORY" \
+            --config Release \
+            --list \
+            --all
+
+          python scripts/bench.py \
+            --build-dir "$BUILD_DIRECTORY" \
+            --config Release \
+            --markdown-output "$GITHUB_STEP_SUMMARY" \
+            --all \
+            -- \
+            --benchmark_repetitions=1 \
+            --benchmark_min_time=0.05s \
+            --benchmark_counters_tabular=false
 
   sign-and-package-windows:
     needs: [setup, build]

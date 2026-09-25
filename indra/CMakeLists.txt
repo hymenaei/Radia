@@ -23,8 +23,8 @@ option(USE_VELOPACK "Use Velopack for installer packaging" OFF)
 # Build executable options
 option(BUILD_VIEWER "Build the viewer project" ON)
 option(BUILD_APPEARANCE_UTIL "Build the appearance utility project" OFF)
-option(BUILD_TESTING "Build and run unit and integration tests: disable for build timing runs to reduce variation" OFF)
-option(BUILD_BENCHMARKS "Build Google Benchmark targets" OFF)
+option(BUILD_TESTING "Build unit, integration, and system tests" OFF)
+option(BUILD_BENCHMARKING "Build performance benchmark targets" OFF)
 option(BUILD_HEADLESS "Build with support for headless mesa OSR rendering backend" OFF)
 
 # Dullahan build options
@@ -65,17 +65,18 @@ cmake_dependent_option(USE_KDU "Enable support for the Kakadu JPEG2000 decoding 
 
 # TODO: Replace with commented option below once Havok support is added to vcpkg
 option(HAVOK "Use Havok physics library" OFF)
-#cmake_dependent_option(HAVOK "Use Havok physics library" ON "INSTALL_PROPRIETARY" OFF)
+
+# cmake_dependent_option(HAVOK "Use Havok physics library" ON "INSTALL_PROPRIETARY" OFF)
 
 # Uncomment when support for Discord is finalized
-#cmake_dependent_option(USE_DISCORD "Enable Discord SDK and Rich Prescence support" ON "INSTALL_PROPRIETARY" OFF)
+# cmake_dependent_option(USE_DISCORD "Enable Discord SDK and Rich Prescence support" ON "INSTALL_PROPRIETARY" OFF)
 
 # SDL Options
-if (UNIX)
-  option(USE_SDL_WINDOW "Build with SDL based window management and input" ON)
-else ()
-  option(USE_SDL_WINDOW "Build with SDL based window management and input (experimental on Windows)" OFF)
-endif ()
+if(UNIX)
+    option(USE_SDL_WINDOW "Build with SDL based window management and input" ON)
+else()
+    option(USE_SDL_WINDOW "Build with SDL based window management and input (experimental on Windows)" OFF)
+endif()
 
 # Spell checking backend
 cmake_dependent_option(USE_NSSPELLCHECKER "Use the native macOS NSSpellChecker instead of Hunspell" ON "APPLE" OFF)
@@ -86,17 +87,17 @@ option(RELEASE_CRASH_REPORTING "Enable use of crash reporting in release builds"
 option(NON_RELEASE_CRASH_REPORTING "Enable use of crash reporting in developer builds" OFF)
 
 # Bugsplat setup
-if (INSTALL_PROPRIETARY AND (WIN32 OR APPLE))
+if(INSTALL_PROPRIETARY AND(WIN32 OR APPLE))
     # Note that viewer_manifest.py makes decision based on BUGSPLAT_DB and not USE_BUGSPLAT
-    if (BUGSPLAT_DB)
-        set(USE_BUGSPLAT ON  CACHE BOOL "Use the BugSplat crash reporting system")
-    else (BUGSPLAT_DB)
+    if(BUGSPLAT_DB)
+        set(USE_BUGSPLAT ON CACHE BOOL "Use the BugSplat crash reporting system")
+    else(BUGSPLAT_DB)
         set(USE_BUGSPLAT OFF CACHE BOOL "Use the BugSplat crash reporting system")
-    endif (BUGSPLAT_DB)
-else ()
+    endif(BUGSPLAT_DB)
+else()
     set(USE_BUGSPLAT OFF CACHE BOOL "Use the BugSplat crash reporting system")
     set(BUGSPLAT_DB "" CACHE STRING "BugSplat crash database name")
-endif ()
+endif()
 
 # Sentry Setup
 option(USE_SENTRY "Use the Sentry crash reporting system" OFF)
@@ -105,9 +106,11 @@ option(USE_SENTRY "Use the Sentry crash reporting system" OFF)
 # Default Tracy profiling on for test builds, but off for all others
 set(BUILDING_TEST_CHANNEL OFF)
 string(TOLOWER "${VIEWER_CHANNEL}" channel_lower)
+
 if(channel_lower MATCHES "^alchemy test")
-  set(BUILDING_TEST_CHANNEL ON)
+    set(BUILDING_TEST_CHANNEL ON)
 endif()
+
 cmake_dependent_option(USE_TRACY "Enable support for Tracy profiler" ON "BUILDING_TEST_CHANNEL" OFF)
 option(USE_TRACY_ON_DEMAND "Use on-demand Tracy profiling." ON)
 option(USE_TRACY_LOCAL_ONLY "Disallow remote Tracy profiling." ON)
@@ -121,86 +124,85 @@ set(SIGNING_IDENTITY "" CACHE STRING "Specifies the signing identity to use, if 
 # macOS deploy target(must be set BEFORE first project call)
 set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version to target for deployment (at runtime); newer APIs weak linked. Set to empty string for default value.")
 
-if (APPLE)
-  # Disable app-local dependencies on macOS, since we use a custom bundle structure and don't want vcpkg to copy dependencies into the bundle.
-  set(VCPKG_APPLOCAL_DEPS OFF CACHE BOOL "Use app-local dependencies instead of system-installed dependencies")
+if(APPLE)
+    # Disable app-local dependencies on macOS, since we use a custom bundle structure and don't want vcpkg to copy dependencies into the bundle.
+    set(VCPKG_APPLOCAL_DEPS OFF CACHE BOOL "Use app-local dependencies instead of system-installed dependencies")
 endif()
 
 # Set our supported configuration types
 set(CMAKE_CONFIGURATION_TYPES "Debug;OptDebug;RelWithDebInfo;Release" CACHE STRING "Supported build types.")
 
-if (NOT CMAKE_BUILD_TYPE)
-  set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING
-      "Build type.  One of: Debug OptDebug Release RelWithDebInfo")
-endif (NOT CMAKE_BUILD_TYPE)
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING
+        "Build type.  One of: Debug OptDebug Release RelWithDebInfo")
+endif(NOT CMAKE_BUILD_TYPE)
 
-##########################################################################
+# #########################################################################
 # vcpkg feature flags MUST be set before the first project() call below  #
-##########################################################################
-
-if (BUILD_TESTING)
-  list(APPEND VCPKG_MANIFEST_FEATURES "google-test")
+# #########################################################################
+if(BUILD_TESTING)
+    list(APPEND VCPKG_MANIFEST_FEATURES "google-test")
 endif()
 
-if (BUILD_BENCHMARKS)
-  list(APPEND VCPKG_MANIFEST_FEATURES "google-benchmark")
+if(BUILD_BENCHMARKING)
+    list(APPEND VCPKG_MANIFEST_FEATURES "google-benchmark")
 endif()
 
-if (USE_KDU)
-  list(APPEND VCPKG_MANIFEST_FEATURES "kdu")
+if(USE_KDU)
+    list(APPEND VCPKG_MANIFEST_FEATURES "kdu")
 endif()
 
 # Setup Tracy feature flags
-if (USE_TRACY)
-  list(APPEND VCPKG_MANIFEST_FEATURES "tracy")
+if(USE_TRACY)
+    list(APPEND VCPKG_MANIFEST_FEATURES "tracy")
 endif()
 
-if (USE_TRACY_LOCAL_ONLY)
-  list(APPEND VCPKG_MANIFEST_FEATURES "tracy-local")
+if(USE_TRACY_LOCAL_ONLY)
+    list(APPEND VCPKG_MANIFEST_FEATURES "tracy-local")
 endif()
 
 if(USE_TRACY_ON_DEMAND)
-  list(APPEND VCPKG_MANIFEST_FEATURES "tracy-on-demand")
+    list(APPEND VCPKG_MANIFEST_FEATURES "tracy-on-demand")
 endif()
 
 if(USE_TRACY_GUI)
-  list(APPEND VCPKG_MANIFEST_FEATURES "tracy-gui")
+    list(APPEND VCPKG_MANIFEST_FEATURES "tracy-gui")
 endif()
 
 if(USE_OPENXR)
-  list(APPEND VCPKG_MANIFEST_FEATURES "openxr")
+    list(APPEND VCPKG_MANIFEST_FEATURES "openxr")
 endif()
 
 if(USE_BUGSPLAT)
-  list(APPEND VCPKG_MANIFEST_FEATURES "bugsplat")
+    list(APPEND VCPKG_MANIFEST_FEATURES "bugsplat")
 endif()
 
 if(USE_VELOPACK)
-  list(APPEND VCPKG_MANIFEST_FEATURES "velopack")
+    list(APPEND VCPKG_MANIFEST_FEATURES "velopack")
 endif()
 
 if(USE_SENTRY)
-  list(APPEND VCPKG_MANIFEST_FEATURES "sentry")
+    list(APPEND VCPKG_MANIFEST_FEATURES "sentry")
 endif()
 
 if(BUILD_HEADLESS)
-  list(APPEND VCPKG_MANIFEST_FEATURES "offscreen")
+    list(APPEND VCPKG_MANIFEST_FEATURES "offscreen")
 endif()
 
 if(USE_FAUDIO)
-  list(APPEND VCPKG_MANIFEST_FEATURES "faudio")
+    list(APPEND VCPKG_MANIFEST_FEATURES "faudio")
 endif()
 
 if(USE_OPENAL)
-  list(APPEND VCPKG_MANIFEST_FEATURES "openal")
+    list(APPEND VCPKG_MANIFEST_FEATURES "openal")
 endif()
 
 if(BUILD_DULLAHAN_EXAMPLE)
-  list(APPEND VCPKG_MANIFEST_FEATURES "dullahan-example")
+    list(APPEND VCPKG_MANIFEST_FEATURES "dullahan-example")
 endif()
 
-if (NOT USE_NSSPELLCHECKER AND NOT USE_WINSPELLCHECK)
-  list(APPEND VCPKG_MANIFEST_FEATURES "hunspell")
+if(NOT USE_NSSPELLCHECKER AND NOT USE_WINSPELLCHECK)
+    list(APPEND VCPKG_MANIFEST_FEATURES "hunspell")
 endif()
 
 # Export compile_commands.json for ninja and makefile generators
@@ -230,7 +232,7 @@ include(Variables)
 enable_language(C CXX)
 
 if(DARWIN)
-  enable_language(OBJC OBJCXX)
+    enable_language(OBJC OBJCXX)
 endif()
 
 # Set up Python
@@ -243,29 +245,30 @@ include(Linking)
 # Set up version number generation
 include(BuildVersion)
 
-if (BUILD_TESTING)
-  set(CMAKE_SKIP_TEST_ALL_DEPENDENCY FALSE)
-  include(ProcessorCount)
-  ProcessorCount(NUM_CORES)
+if(BUILD_TESTING)
+    set(CMAKE_SKIP_TEST_ALL_DEPENDENCY FALSE)
+    include(ProcessorCount)
+    ProcessorCount(NUM_CORES)
 
-  # Set parallel level to decrease test runtime
-  set(CMAKE_CTEST_ARGUMENTS -j${NUM_CORES} --output-on-failure)
+    # Keep system workflows out of the ordinary build-and-test target. Run
+    # them explicitly with ctest -L system when a real system driver exists.
+    set(CMAKE_CTEST_ARGUMENTS -j${NUM_CORES} --output-on-failure -LE system)
 
-  # Set up our test targets
-  set(CTEST_TEST_TARGET_ALIAS BUILD_AND_RUN_TESTS)
-  include(CTest)
+    # Set up our test targets
+    set(CTEST_TEST_TARGET_ALIAS BUILD_AND_RUN_TESTS)
+    include(CTest)
 
-  set_target_properties(BUILD_AND_RUN_TESTS
+    set_target_properties(BUILD_AND_RUN_TESTS
         PROPERTIES
         FOLDER "CMakePredefinedTargets"
-        )
+    )
 
-  add_custom_target(BUILD_TESTS)
-  set_target_properties(BUILD_TESTS
+    add_custom_target(BUILD_TESTS)
+    set_target_properties(BUILD_TESTS
         PROPERTIES
         FOLDER "CMakePredefinedTargets"
-        )
-endif ()
+    )
+endif()
 
 # Declare All Dependency Includes
 include(APR)
@@ -284,10 +287,12 @@ include(FMODSTUDIO)
 include(FMT)
 include(FontConfig)
 include(FreeType)
+include(FriBidi)
 include(GLEXT)
 include(GLIB)
 include(GLM)
 include(Harfbuzz)
+include(ICU)
 include(Havok)
 include(Hunspell)
 include(JPEG)
@@ -309,6 +314,7 @@ include(PNG)
 include(SDL3)
 include(Sentry)
 include(simdjson)
+include(YamlCpp)
 include(simdutf)
 include(SSE2NEON)
 include(TinyEXR)
@@ -325,14 +331,14 @@ include(xxHash)
 include(ZLIBNG)
 
 # Add our test macros
-if (BUILD_TESTING)
-  include(LLAddBuildTest)
-  include(GTest)
-endif ()
+if(BUILD_TESTING)
+    include(LLAddBuildTest)
+    include(GTest)
+endif()
 
-if (BUILD_BENCHMARKS)
-  include(Benchmark)
-endif ()
+if(BUILD_BENCHMARKING)
+    include(Benchmark)
+endif()
 
 # Third party system library copy step
 include(Copy3rdPartyLibs)
@@ -361,20 +367,21 @@ add_subdirectory(llwebrtc)
 add_subdirectory(llwindow)
 add_subdirectory(llxml)
 add_subdirectory(llplugin)
+add_subdirectory(ui)
 add_subdirectory(llui)
 add_subdirectory(viewer_components)
 
 if(BUILD_TESTING)
-  # Legacy C++ tests.
-  add_subdirectory(test)
+    # Legacy C++ tests.
+    add_subdirectory(test)
 endif()
 
 # viewer media plugins
 add_subdirectory(media_plugins)
 
-if (BUILD_APPEARANCE_UTIL)
-  # Avatar Appearance Utility
-  add_subdirectory(llappearanceutility)
+if(BUILD_APPEARANCE_UTIL)
+    # Avatar Appearance Utility
+    add_subdirectory(llappearanceutility)
 endif()
 
 # Viewer
@@ -384,12 +391,12 @@ add_subdirectory(doxygen EXCLUDE_FROM_ALL)
 
 # sets the 'startup project' for debugging from visual studio.
 set_property(
-        DIRECTORY
-        PROPERTY VS_STARTUP_PROJECT ${VIEWER_BINARY_NAME}
-        )
+    DIRECTORY
+    PROPERTY VS_STARTUP_PROJECT ${VIEWER_BINARY_NAME}
+)
 
-if (BUILD_TESTING)
-  # Define after the custom targets are created so
-  # individual apps can add themselves as dependencies
-  add_subdirectory(integration_tests)
-endif ()
+if(BUILD_TESTING)
+    # Define after the custom targets are created so
+    # individual apps can add themselves as dependencies
+    add_subdirectory(tests)
+endif()

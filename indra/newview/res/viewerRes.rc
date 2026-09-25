@@ -97,6 +97,7 @@ END
 //
 
 TOOLGRAB                CURSOR                  "lltoolgrab.cur"
+TOOLGRABBING            CURSOR                  "lltoolgrab.cur"
 TOOLLAND                CURSOR                  "lltoolland.cur"
 TOOLZOOMIN              CURSOR                  "lltoolzoomin.cur"
 TOOLZOOMOUT             CURSOR                  "lltoolzoomout.cur"
@@ -182,4 +183,3 @@ END
 
 /////////////////////////////////////////////////////////////////////////////
 #endif    // not APSTUDIO_INVOKED
-

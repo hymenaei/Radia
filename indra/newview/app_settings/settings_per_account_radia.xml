@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<llsd xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="llsd.xsd">
+    <map>
+        <key>UIWorkspace</key>
+        <map>
+            <key>Comment</key>
+            <string>Stores per-account UI state restored after login. Each entry reopens one window. The minimized flag restores its minimized state. Keyed entries use instance-key@definititon-id and may override the saved layout.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>LLSD</string>
+            <key>Value</key>
+            <map>
+                <key>floaterDemo</key>
+                <map />
+            </map>
+        </map>
+    </map>
+</llsd>

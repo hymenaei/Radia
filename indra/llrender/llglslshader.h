@@ -347,6 +347,11 @@ public:
     void uniformMatrix3x4fv(U32 index, U32 count, GLboolean transpose, const GLfloat* v);
     void uniformMatrix4fv(U32 index, U32 count, GLboolean transpose, const GLfloat* v);
     void uniform1i(const LLStaticHashedString& uniform, GLint i);
+    void uniform1f(const LLStaticHashedString& uniform, GLfloat v);
+    void uniform2f(const LLStaticHashedString& uniform, GLfloat x, GLfloat y);
+    void uniform4f(const LLStaticHashedString& uniform, GLfloat x, GLfloat y, GLfloat z, GLfloat w);
+    void uniform1fv(const LLStaticHashedString& uniform, U32 count, const GLfloat* v);
+    void uniform4fv(const LLStaticHashedString& uniform, U32 count, const GLfloat* v);
 
     void setMinimumAlpha(F32 minimum);
 
@@ -475,6 +480,9 @@ public:
     // set by addPermutation(s) and cleared by createShader()/unload(); see clearPermutations()
     bool mPermutationsAdded = false;
     static defines_map_t sGlobalDefines;
+    std::string mExtraVertexSource;
+    std::string mExtraFragmentSource;
+    bool        mHasFontGpu = false;
     LLUUID mShaderHash;
     bool mUsingBinaryProgram = false;
 

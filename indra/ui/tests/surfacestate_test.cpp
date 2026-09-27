@@ -20,7 +20,7 @@
 #include "text/metrics.h"
 
 namespace {
-using radia::ui::ElementState;
+using radia::ui::CSSPseudoClass;
 using radia::ui::FixedTextMetrics;
 using radia::ui::HTMLButtonElement;
 using radia::ui::HTMLFloaterElement;
@@ -41,7 +41,7 @@ TEST(SurfaceStateTest, ReflowsOnHover) {
     StyleSheet styleSheet;
     constexpr char kStateLayout[] = "button { width: 20px; height: 10px; } button:hover { width: 40px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kStateLayout).ok());
-    EXPECT_TRUE(styleSheet.stateAffectsLayout(ElementState::Hovered));
+    EXPECT_TRUE(styleSheet.pseudoClassAffectsLayout(CSSPseudoClass::Hover));
     Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
     auto button = makeElement<HTMLButtonElement>();
@@ -52,10 +52,10 @@ TEST(SurfaceStateTest, ReflowsOnHover) {
     surface.updateLayout();
     EXPECT_FLOAT_EQ(target->rect().w, 20.f);
     surface.pointerMove({{5.f, 95.f}});
-    ASSERT_TRUE(target->hasState(ElementState::Hovered));
+    ASSERT_TRUE(target->hovered());
     surface.updateLayout();
     EXPECT_FLOAT_EQ(target->rect().w, 40.f);
-    ElementInternalAccess::setState(*target, ElementState::Hovered, false);
+    ElementInternalAccess::setHovered(*target, false);
     surface.updateLayout();
     EXPECT_FLOAT_EQ(target->rect().w, 20.f);
 }
@@ -79,10 +79,10 @@ TEST(SurfaceStateTest, InvalidatesFollowingSiblingLayout) {
 
     surface.updateLayout();
     EXPECT_FLOAT_EQ(labelTarget->rect().w, 10.f);
-    ElementInternalAccess::setState(*buttonTarget, ElementState::Hovered, true);
+    ElementInternalAccess::setHovered(*buttonTarget, true);
     surface.updateLayout();
     EXPECT_FLOAT_EQ(labelTarget->rect().w, 40.f);
-    ElementInternalAccess::setState(*buttonTarget, ElementState::Hovered, false);
+    ElementInternalAccess::setHovered(*buttonTarget, false);
     surface.updateLayout();
     EXPECT_FLOAT_EQ(labelTarget->rect().w, 10.f);
 }
@@ -102,7 +102,7 @@ TEST(SurfaceStateTest, InvalidatesTextDecorationDescendants) {
 
     StylePass styles(styleSheet, FixedTextMetrics{});
     EXPECT_EQ(styles.style(*labelTarget).textDecorationPropagation, radia::ui::TextDecoration::NoneValue);
-    ElementInternalAccess::setState(*panelTarget, ElementState::Hovered, true);
+    ElementInternalAccess::setHovered(*panelTarget, true);
     EXPECT_EQ(styles.style(*labelTarget).textDecorationPropagation, radia::ui::TextDecoration::Underline);
 }
 
@@ -110,7 +110,7 @@ TEST(SurfaceStateTest, RefreshesHitTestingOnHover) {
     StyleSheet styleSheet;
     constexpr char kStateHitTest[] = "button { pointer-events: auto; } button:hover { pointer-events: none; }";
     ASSERT_TRUE(styleSheet.loadRadia(kStateHitTest).ok());
-    EXPECT_TRUE(styleSheet.stateAffectsHitTesting(ElementState::Hovered));
+    EXPECT_TRUE(styleSheet.pseudoClassAffectsHitTesting(CSSPseudoClass::Hover));
     Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
     auto button = makeElement<HTMLButtonElement>();
@@ -120,12 +120,12 @@ TEST(SurfaceStateTest, RefreshesHitTestingOnHover) {
     surface.mount(std::move(button));
 
     surface.pointerMove({{5.f, 5.f}});
-    ASSERT_TRUE(target->hasState(ElementState::Hovered));
+    ASSERT_TRUE(target->hovered());
     RecordingPaintContext recording;
     surface.paint(recording);
-    EXPECT_FALSE(target->hasState(ElementState::Hovered));
+    EXPECT_FALSE(target->hovered());
     surface.paint(recording);
-    EXPECT_FALSE(target->hasState(ElementState::Hovered));
+    EXPECT_FALSE(target->hovered());
 }
 
 TEST(SurfaceStateTest, InvalidatesDescendantLayout) {
@@ -148,7 +148,7 @@ TEST(SurfaceStateTest, InvalidatesDescendantLayout) {
     surface.updateLayout();
     EXPECT_FLOAT_EQ(target->rect().w, 20.f);
     surface.pointerMove({{5.f, 5.f}});
-    ASSERT_TRUE(parent->hasState(ElementState::Hovered));
+    ASSERT_TRUE(parent->hovered());
     surface.updateLayout();
     EXPECT_FLOAT_EQ(target->rect().w, 40.f);
 }
@@ -182,23 +182,23 @@ TEST(SurfaceStateTest, RemovesUnavailableHitTargets) {
     button->setRect({0.f, 0.f, 20.f, 10.f}).setPointerEvents(true);
     surface.mount(std::move(button));
     surface.pointerMove({{5.f, 5.f}});
-    ASSERT_TRUE(target->hasState(ElementState::Hovered));
+    ASSERT_TRUE(target->hovered());
 
     RecordingPaintContext recording;
     target->setVisibility(Visibility::Hidden);
     surface.paint(recording);
-    EXPECT_FALSE(target->hasState(ElementState::Hovered));
+    EXPECT_FALSE(target->hovered());
 
     target->setVisibility(Visibility::Visible);
     surface.paint(recording);
-    EXPECT_TRUE(target->hasState(ElementState::Hovered));
+    EXPECT_TRUE(target->hovered());
 
     target->disabled(true);
     surface.paint(recording);
-    EXPECT_FALSE(target->hasState(ElementState::Hovered));
+    EXPECT_FALSE(target->hovered());
     target->disabled(false);
     surface.paint(recording);
-    EXPECT_TRUE(target->hasState(ElementState::Hovered));
+    EXPECT_TRUE(target->hovered());
 }
 
 TEST(SurfaceStateTest, RestylesPartsOnOwnerChange) {

@@ -62,7 +62,7 @@ float minimumBoxDimension(const ComputedStyle& style, bool horizontal, const std
 float maximumBoxDimension(const ComputedStyle& style, bool horizontal, const std::optional<Dimension>& maximum, float reference, float fallback = 0.f,
                           float minContent = 0.f);
 float contentBoxDimension(const ComputedStyle& style, bool horizontal, float borderBoxSize);
-bool isInlineLevel(DisplayMode display);
+bool isInlineLevel(Display display);
 const ComputedStyle& emptyChildStyle();
 ChildLayout invalidChildLayout();
 void removeChildrenExcludedFromLayout(Element& parent, std::vector<ChildLayout>& children);

@@ -75,17 +75,17 @@ private:
     }
 
     bool preservesNormalFlowWhitespace(const std::vector<OrderedChildRef>& children, std::size_t index, const ComputedStyle& parentStyle) {
-        if (isOrderModifiedContainer(parentStyle.display)) return false;
+        if (isOrderModifiedContainer(parentStyle.display())) return false;
         if (index == 0 || index + 1 >= children.size() || !layout_detail::isWhitespaceOnlyText(children[index])) return false;
 
         const auto isDisplayedInline = [&](const OrderedChildRef& child) {
             const Element* element = child.element();
             const ComputedStyle childStyle = style(child, parentStyle);
             if (element) {
-                if (element->elementName() == kBrTag.localName) return false;
-                return element->isDisplayed(childStyle) && layout_detail::isInlineLevel(childStyle.display);
+                if (element->elementName() == HTMLTagName(HTMLTag::Br)) return false;
+                return element->isDisplayed(childStyle) && layout_detail::isInlineLevel(childStyle.display());
             }
-            return child.text() && childStyle.display != DisplayMode::NoneValue;
+            return child.text() && childStyle.display() != Display::NoneValue;
         };
         return isDisplayedInline(children[index - 1]) && isDisplayedInline(children[index + 1]);
     }

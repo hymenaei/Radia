@@ -177,6 +177,10 @@ const std::string* System::resourceData(std::string_view reference) const {
     return mSkinGeneration->resourceData(reference);
 }
 
+const std::vector<FontFace>& System::fontFaces() const {
+    return mSkinGeneration->fontFaces();
+}
+
 LocalizedText System::t(std::string id, LocalizationArguments arguments) const {
     return LocalizedText(std::move(id), std::move(arguments));
 }

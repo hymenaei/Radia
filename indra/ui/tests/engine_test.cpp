@@ -5,16 +5,20 @@
 
 #include "linden_common.h"
 #include <gtest/gtest.h>
+#include <variant>
+#include "ComputedStyleProperties.h"
 #include "css/stylesheet.h"
 #include "dom/elementinternal.h"
 #include "dom/text.h"
 #include "floater_test_helpers.h"
+#include "Geometry.h"
 #include "html/button.h"
 #include "html/floater.h"
 #include "html/input.h"
 #include "html/label.h"
 #include "html/panel.h"
 #include "layout/engine.h"
+#include "paint/recordingpaintcontext.h"
 #include "resource/elementdefinition.h"
 #include "style/stylepass.h"
 #include "text/metrics.h"
@@ -22,8 +26,8 @@
 namespace {
 using radia::ui::BoxSizing;
 using radia::ui::ComputedStyle;
-using radia::ui::defaultStylesheetSource;
-using radia::ui::DisplayMode;
+
+using radia::ui::Display;
 using radia::ui::Element;
 using radia::ui::FixedTextMetrics;
 using radia::ui::HTMLButtonElement;
@@ -34,6 +38,9 @@ using radia::ui::HTMLPanelElement;
 using radia::ui::LayoutDirection;
 using radia::ui::LayoutEngine;
 using radia::ui::LineHeight;
+using radia::ui::paddingPixels;
+using radia::ui::PaintCommandKind;
+using radia::ui::RecordingPaintContext;
 using radia::ui::Rect;
 using radia::ui::ScrollbarMode;
 using radia::ui::ScrollLayoutOptions;
@@ -88,9 +95,9 @@ TEST_F(LayoutEngineTest, UsesUnitlessLineHeightAsMultiplier) {
     StyleSheet stylesheet;
     ASSERT_TRUE(stylesheet.loadRadia("p { font-size: 20px; line-height: 1.5; }").ok());
 
-    const ComputedStyle style = stylesheet.resolve("p", "", {}, 0);
-    ASSERT_EQ(style.lineHeight.kind, LineHeight::Kind::Number);
-    EXPECT_EQ(style.lineHeight.value, 1.5f);
+    const ComputedStyle style = stylesheet.resolve("p", "", {}, {});
+    ASSERT_TRUE(std::holds_alternative<LineHeight::Number>(style.lineHeight().mValue));
+    EXPECT_EQ(std::get<LineHeight::Number>(style.lineHeight().mValue).value, 1.5f);
     EXPECT_FLOAT_EQ(text.measureText("line", style).y, 30.f);
 }
 
@@ -110,14 +117,34 @@ TEST_F(LayoutEngineTest, ResolvesPercentageLineHeightAgainstComputedFontSize) {
 
     StylePass styles(stylesheet, text);
     const ComputedStyle& panelStyle = styles.style(panel);
-    ASSERT_EQ(panelStyle.lineHeight.kind, LineHeight::Kind::Length);
-    EXPECT_EQ(panelStyle.lineHeight.value, 30.f);
+    ASSERT_TRUE(std::holds_alternative<LineHeight::Length>(panelStyle.lineHeight().mValue));
+    EXPECT_EQ(std::get<LineHeight::Length>(panelStyle.lineHeight().mValue).pixels, 30.f);
     const ComputedStyle& inheritedStyle = styles.style(*inheritedPointer);
-    ASSERT_EQ(inheritedStyle.lineHeight.kind, LineHeight::Kind::Length);
-    EXPECT_EQ(inheritedStyle.lineHeight.value, 30.f);
+    ASSERT_TRUE(std::holds_alternative<LineHeight::Length>(inheritedStyle.lineHeight().mValue));
+    EXPECT_EQ(std::get<LineHeight::Length>(inheritedStyle.lineHeight().mValue).pixels, 30.f);
     const ComputedStyle& localStyle = styles.style(*localPointer);
-    ASSERT_EQ(localStyle.lineHeight.kind, LineHeight::Kind::Length);
-    EXPECT_NEAR(localStyle.lineHeight.value, 12.f, 1.0e-4f);
+    ASSERT_TRUE(std::holds_alternative<LineHeight::Length>(localStyle.lineHeight().mValue));
+    EXPECT_NEAR(std::get<LineHeight::Length>(localStyle.lineHeight().mValue).pixels, 12.f, 1.0e-4f);
+}
+
+TEST_F(LayoutEngineTest, TranslatePercentages) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(
+        stylesheet
+            .loadRadia("panel { display: block; position: relative; } label { position: absolute; left: 0; top: 0; width: 20px; height: 10px; "
+                       "translate: 50% 100%; }")
+            .ok());
+
+    auto panel = makeElementValue<HTMLPanelElement>();
+    panel.setRect({0.f, 0.f, 100.f, 100.f});
+    auto label = makeElement<HTMLLabelElement>();
+    HTMLLabelElement* labelPointer = label.get();
+    panel.append(std::move(label));
+
+    LayoutEngine::layout(panel, stylesheet, text);
+
+    EXPECT_FLOAT_EQ(labelPointer->rect().x, 10.f);
+    EXPECT_FLOAT_EQ(labelPointer->rect().y, 80.f);
 }
 
 TEST_F(LayoutEngineTest, MeasuresButtonContent) {
@@ -379,16 +406,17 @@ TEST_F(LayoutEngineTest, UsesNormalButtonLayout) {
     button.append(std::move(label));
 
     const ComputedStyle computed = computedStyle(styleSheet, button);
-    ASSERT_EQ(computed.appearance, radia::ui::AppearanceMode::Auto);
-    ASSERT_EQ(computed.display, DisplayMode::InlineBlock);
+    ASSERT_EQ(computed.appearance(), radia::ui::Appearance::Auto);
+    ASSERT_EQ(computed.display(), Display::InlineBlock);
 
     LayoutEngine::layout(button, styleSheet, text);
 
     EXPECT_FLOAT_EQ(labelPtr->rect().h, 18.f);
     EXPECT_EQ(labelPtr->data(), "\n        Apply\n    ");
-    EXPECT_EQ(computedStyle(styleSheet, button).display, DisplayMode::InlineBlock);
-    const float contentLeft = button.rect().left() + computed.borderWidth.left + computed.padding.left;
-    const float contentWidth = button.rect().w - computed.borderWidth.horizontal() - computed.padding.horizontal();
+    EXPECT_EQ(computedStyle(styleSheet, button).display(), Display::InlineBlock);
+    const radia::ui::RectEdges<float> borderInsets = radia::ui::borderWidths(computed);
+    const float contentLeft = button.rect().left() + borderInsets.left + paddingPixels(computed).left;
+    const float contentWidth = button.rect().w - borderInsets.horizontal() - paddingPixels(computed).horizontal();
     const float contentWidthUsed = labelPtr->rect().right() - icon.rect().left();
     EXPECT_FLOAT_EQ(icon.rect().left(), contentLeft + (contentWidth - contentWidthUsed) * 0.5f);
 }
@@ -397,7 +425,7 @@ TEST_F(LayoutEngineTest, CentersButtonContent) {
     StyleSheet styleSheet;
     constexpr char kButtonLayout[] = "button { display: inline-block; width: 100px; height: 40px; padding: 0; line-height: 10px; }";
     const std::vector<StyleLayer> layers{
-        {StyleOrigin::Default, {"defaults.css", std::string(defaultStylesheetSource())}},
+        {StyleOrigin::UserAgent, {"ua.css", std::string(radia::ui::userAgentStyleSheet())}},
         {StyleOrigin::Skin, {"skin.css", kButtonLayout}},
     };
     ASSERT_TRUE(styleSheet.loadRadiaLayers(layers).ok());
@@ -419,7 +447,7 @@ TEST_F(LayoutEngineTest, LeavesUnstyledButtonUncentered) {
     constexpr char kButtonLayout[] =
         "button { display: inline-block; width: 100px; height: 40px; padding: 0; line-height: 10px; } button.unstyled { appearance: none; }";
     const std::vector<StyleLayer> layers{
-        {StyleOrigin::Default, {"defaults.css", std::string(defaultStylesheetSource())}},
+        {StyleOrigin::UserAgent, {"ua.css", std::string(radia::ui::userAgentStyleSheet())}},
         {StyleOrigin::Skin, {"skin.css", kButtonLayout}},
     };
     ASSERT_TRUE(styleSheet.loadRadiaLayers(layers).ok());
@@ -432,7 +460,7 @@ TEST_F(LayoutEngineTest, LeavesUnstyledButtonUncentered) {
     button.append(std::move(label));
 
     const ComputedStyle computed = computedStyle(styleSheet, button);
-    ASSERT_EQ(computed.appearance, radia::ui::AppearanceMode::NoneValue);
+    ASSERT_EQ(computed.appearance(), radia::ui::Appearance::NoneValue);
 
     LayoutEngine::layout(button, styleSheet, text);
 
@@ -469,8 +497,8 @@ TEST_F(LayoutEngineTest, AppliesBoxSizing) {
 
     LayoutEngine::layout(panel, styleSheet, text);
 
-    EXPECT_EQ(computedStyle(styleSheet, *panel.children()[0]).boxSizing, BoxSizing::ContentBox);
-    EXPECT_EQ(computedStyle(styleSheet, *panel.children()[1]).boxSizing, BoxSizing::BorderBox);
+    EXPECT_EQ(computedStyle(styleSheet, *panel.children()[0]).boxSizing(), BoxSizing::ContentBox);
+    EXPECT_EQ(computedStyle(styleSheet, *panel.children()[1]).boxSizing(), BoxSizing::BorderBox);
     EXPECT_FLOAT_EQ(panel.children()[0]->rect().w, 124.f);
     EXPECT_FLOAT_EQ(panel.children()[0]->rect().h, 44.f);
     EXPECT_FLOAT_EQ(panel.children()[1]->rect().w, 100.f);
@@ -924,7 +952,7 @@ TEST_F(LayoutEngineTest, LaysOutSwitchPseudos) {
     control.setRect({10.f, 20.f, 64.f, 32.f});
 
     LayoutEngine::layout(control, styleSheet, text);
-    EXPECT_EQ(computedStyle(styleSheet, control).display, radia::ui::DisplayMode::Flex);
+    EXPECT_EQ(computedStyle(styleSheet, control).display(), radia::ui::Display::Flex);
     ASSERT_NE(control.sliderTrack(), nullptr);
     ASSERT_NE(control.sliderThumb(), nullptr);
     EXPECT_EQ(control.sliderTrack()->rect().bottom(), 23.f);
@@ -933,7 +961,7 @@ TEST_F(LayoutEngineTest, LaysOutSwitchPseudos) {
     EXPECT_EQ(control.sliderThumb()->rect().h, 26.f);
     EXPECT_EQ(control.sliderThumb()->rect().w, 26.f);
     EXPECT_EQ(control.sliderTrack()->rect().left(), control.sliderThumb()->rect().right());
-    EXPECT_EQ(control.sliderThumb()->style().borderRadius.topLeft.horizontal.pixels, 7.f);
+    EXPECT_EQ(control.sliderThumb()->style().borderRadius().topLeft.horizontal.pixels, 7.f);
     EXPECT_EQ(control.sliderFill()->rect().left(), control.sliderTrack()->rect().left());
     EXPECT_EQ(control.sliderFill()->rect().right(), control.sliderFill()->rect().left());
     EXPECT_EQ(control.sliderFill()->rect().bottom(), control.sliderTrack()->rect().bottom());
@@ -994,7 +1022,7 @@ TEST_F(LayoutEngineTest, PositionsSwitchPseudos) {
     control.setRect({10.f, 20.f, 44.f, 20.f});
 
     LayoutEngine::layout(control, styleSheet, text);
-    EXPECT_EQ(computedStyle(styleSheet, control).display, DisplayMode::InlineGrid);
+    EXPECT_EQ(computedStyle(styleSheet, control).display(), Display::InlineGrid);
     ASSERT_NE(control.sliderTrack(), nullptr);
     ASSERT_NE(control.sliderThumb(), nullptr);
     EXPECT_EQ(control.sliderTrack()->rect().x, 10.f);
@@ -1015,12 +1043,48 @@ TEST_F(LayoutEngineTest, PositionsSwitchPseudos) {
 
     auto rtlControl = makeElementValue<HTMLInputElement>();
     rtlControl.type("checkbox").switchMode(true).checked(true);
+    rtlControl.setAttribute("dir", "rtl");
     rtlControl.setRect({10.f, 20.f, 44.f, 20.f});
     LayoutEngine::layout(rtlControl, styleSheet, text, LayoutDirection::RightToLeft);
     ASSERT_NE(rtlControl.sliderTrack(), nullptr);
     ASSERT_NE(rtlControl.sliderThumb(), nullptr);
     EXPECT_EQ(rtlControl.sliderThumb()->rect().x, -13.f);
     EXPECT_EQ(rtlControl.sliderThumb()->rect().y, 18.f);
+}
+
+TEST_F(LayoutEngineTest, PositionsSkinSwitch) {
+    StyleSheet styleSheet;
+    constexpr char kSwitch[] =
+        "input[switch] { appearance: base; display: inline-grid; position: relative; size: 20px 44px; } "
+        "input[switch]::slider-track { display: grid; grid-area: 1 / 1; width: 100%; background-color: #98989d; } "
+        "input[switch]::slider-fill { visibility: hidden; } "
+        "input[switch]::slider-thumb { grid-area: 1 / 1; background-color: #ffffff; size: auto 26px; margin: 2px; justify-self: start; } "
+        "input[switch]:checked::slider-thumb { translate: 14px 0; }";
+    ASSERT_TRUE(styleSheet.loadRadia(kSwitch).ok());
+
+    auto control = makeElementValue<HTMLInputElement>();
+    control.type("checkbox").switchMode(true);
+    control.setRect({10.f, 20.f, 44.f, 20.f});
+    LayoutEngine::layout(control, styleSheet, text);
+
+    ASSERT_NE(control.sliderTrack(), nullptr);
+    ASSERT_NE(control.sliderThumb(), nullptr);
+    ASSERT_TRUE(control.sliderThumb()->style().gridArea.has_value());
+    EXPECT_EQ(control.sliderThumb()->style().gridArea->row, 1);
+    EXPECT_EQ(control.sliderThumb()->style().gridArea->column, 1);
+    EXPECT_FLOAT_EQ(control.sliderTrack()->rect().w, 44.f);
+    EXPECT_FLOAT_EQ(control.sliderTrack()->rect().h, 20.f);
+    EXPECT_GT(control.sliderThumb()->rect().w, 0.f);
+    EXPECT_GT(control.sliderThumb()->rect().h, 0.f);
+    EXPECT_FLOAT_EQ(control.sliderThumb()->rect().left(), control.sliderTrack()->rect().left() + 2.f);
+
+    control.checked(true);
+    LayoutEngine::layout(control, styleSheet, text);
+    EXPECT_FLOAT_EQ(control.sliderThumb()->rect().left(), control.sliderTrack()->rect().left() + 16.f);
+
+    RecordingPaintContext recording;
+    control.paint(recording, computedStyle(styleSheet, control), 1.f);
+    EXPECT_EQ(recording.count(PaintCommandKind::Box), std::size_t{3});
 }
 
 TEST_F(LayoutEngineTest, PositionsOutOfFlowPseudoChildren) {
@@ -1290,14 +1354,14 @@ TEST_F(LayoutEngineTest, AppliesSafeCrossAxisAlignment) {
     safe.classList().add("safe");
     safe.setRect({0.f, 0.f, 20.f, 10.f});
     safe.append(makeElement<HTMLLabelElement>());
-    EXPECT_EQ(computedStyle(styleSheet, safe).alignItems.overflow, radia::ui::OverflowAlignment::Safe);
+    EXPECT_EQ(computedStyle(styleSheet, safe).alignItems().overflow, radia::ui::OverflowAlignment::Safe);
     LayoutEngine::layout(safe, styleSheet, text);
 
     auto unsafe = makeElementValue<HTMLPanelElement>();
     unsafe.classList().add("unsafe");
     unsafe.setRect({0.f, 0.f, 20.f, 10.f});
     unsafe.append(makeElement<HTMLLabelElement>());
-    EXPECT_EQ(computedStyle(styleSheet, unsafe).alignItems.overflow, radia::ui::OverflowAlignment::Unsafe);
+    EXPECT_EQ(computedStyle(styleSheet, unsafe).alignItems().overflow, radia::ui::OverflowAlignment::Unsafe);
     LayoutEngine::layout(unsafe, styleSheet, text);
 
     EXPECT_EQ(safe.children().front()->rect().top(), safe.rect().top());
@@ -2190,6 +2254,32 @@ TEST_F(LayoutEngineTest, NoRangeForVisibleOverflow) {
     panel.append(std::move(content));
 
     LayoutEngine::layout(panel, styleSheet, text);
+
+    EXPECT_FLOAT_EQ(panel.clientWidth(), 100.f);
+    EXPECT_FLOAT_EQ(panel.clientHeight(), 100.f);
+    EXPECT_FLOAT_EQ(panel.scrollWidth(), 180.f);
+    EXPECT_FLOAT_EQ(panel.scrollHeight(), 240.f);
+    EXPECT_FLOAT_EQ(panel.scrollMetrics().maxScrollLeft, 0.f);
+    EXPECT_FLOAT_EQ(panel.scrollMetrics().maxScrollTop, 0.f);
+    panel.scrollTo(50.f, 50.f);
+    EXPECT_FLOAT_EQ(panel.scrollLeft(), 0.f);
+    EXPECT_FLOAT_EQ(panel.scrollTop(), 0.f);
+}
+
+TEST_F(LayoutEngineTest, NoRangeForClip) {
+    StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet.loadRadia("panel#viewport { display: block; overflow: clip; }").ok());
+    auto panel = makeElementValue<HTMLPanelElement>();
+    panel.setId("viewport").setRect({0.f, 0.f, 100.f, 100.f});
+    auto content = makeElement<Element>("content");
+    content->setRect({0.f, 0.f, 180.f, 240.f});
+    panel.append(std::move(content));
+
+    StylePass styles(styleSheet, text);
+    const ComputedStyle& style = styles.style(panel);
+    EXPECT_EQ(style.overflowX(), radia::ui::Overflow::Clip);
+    EXPECT_EQ(style.overflowY(), radia::ui::Overflow::Clip);
+    LayoutEngine::layout(panel, styles);
 
     EXPECT_FLOAT_EQ(panel.clientWidth(), 100.f);
     EXPECT_FLOAT_EQ(panel.clientHeight(), 100.f);

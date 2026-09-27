@@ -14,10 +14,12 @@
 #include "resolver.h"
 #include "resource/resourceprovider.h"
 #include "skin/compiler.h"
+#include "system.h"
 
 namespace {
 using radia::ui::ResourceId;
 using radia::ui::SkinCompiler;
+using radia::ui::System;
 using radia::viewer::ui::SkinResolver;
 using ::testing::Test;
 
@@ -217,6 +219,78 @@ TEST_F(SkinResolverTest, CapturesImportedModules) {
     EXPECT_TRUE(layers.front().modules.contains("radia/styles/panel.css"));
     const auto compiled = SkinCompiler().prepare(result.snapshot);
     ASSERT_TRUE(compiled.ok()) << (compiled.errors.empty() ? "unknown skin preparation error" : compiled.errors.front().formatted());
+}
+
+TEST_F(SkinResolverTest, ResolvesImportedFontURLsWithinAssetsRoot) {
+    const std::filesystem::path selected = makeRoot("font-assets", "test.font-assets");
+    constexpr char kResourcePaths[] =
+        R"("stylesheet": "radia/resources/skin.css","layouts": "radia/xui","localization": "radia/localization.yaml","assets": "radia/resources")";
+    writeFile(selected / "manifest.json", manifest("test.font-assets", "null", kResourcePaths));
+    writeFile(selected / "radia/resources/skin.css", "@import \"typography/fonts.css\";");
+    writeFile(selected / "radia/resources/typography/fonts.css", "@font-face { font-family: Imported; src: url(../typefaces/brand/a.woff2); }");
+    writeFile(selected / "radia/resources/typefaces/brand/a.woff2", "font bytes");
+
+    const auto result = resolver.resolve(selected, {});
+
+    ASSERT_TRUE(result.ok()) << (result.errors.empty() ? "unknown skin resolution error" : result.errors.front().formatted());
+    EXPECT_EQ(result.snapshot.resolve(ResourceId("test.font-assets/radia/resources/typography/fonts.css"), "../typefaces/brand/a.woff2"),
+              ResourceId("resources/typefaces/brand/a.woff2"));
+    const auto compiled = SkinCompiler().prepare(result.snapshot);
+    ASSERT_TRUE(compiled.ok()) << (compiled.errors.empty() ? "unknown skin preparation error" : compiled.errors.front().formatted());
+}
+
+TEST_F(SkinResolverTest, ResolvesFontURLFromSkinStylesheet) {
+    const std::filesystem::path selected = makeRoot("font-assets", "test.font-assets");
+    constexpr char kResourcePaths[] =
+        R"("stylesheet": "radia/skin.css","layouts": "radia/xui","localization": "radia/localization.yaml","assets": "radia/resources")";
+    writeFile(selected / "manifest.json", manifest("test.font-assets", "null", kResourcePaths));
+    writeFile(selected / "radia/skin.css", "@font-face { font-family: Skin; src: url(resources/fonts/test.woff2); }");
+    writeFile(selected / "radia/resources/fonts/test.woff2", "font bytes");
+
+    const auto result = resolver.resolve(selected, {});
+
+    ASSERT_TRUE(result.ok()) << (result.errors.empty() ? "unknown skin resolution error" : result.errors.front().formatted());
+    const auto compiled = SkinCompiler().prepare(result.snapshot);
+    ASSERT_TRUE(compiled.ok()) << (compiled.errors.empty() ? "unknown skin preparation error" : compiled.errors.front().formatted());
+}
+
+TEST_F(SkinResolverTest, ResolvesAssetFontURL) {
+    const std::filesystem::path selected = makeRoot("font-assets", "test.font-assets");
+    constexpr char kResourcePaths[] =
+        R"("stylesheet": "radia/resources/skin.css","layouts": "radia/xui","localization": "radia/localization.yaml","assets": "radia/resources")";
+    writeFile(selected / "manifest.json", manifest("test.font-assets", "null", kResourcePaths));
+    writeFile(selected / "radia/resources/skin.css", "@font-face { font-family: Skin; src: url(fonts/myfont.woff2); }");
+    writeFile(selected / "radia/resources/fonts/myfont.woff2", "font bytes");
+
+    const auto result = resolver.resolve(selected, {});
+
+    ASSERT_TRUE(result.ok()) << (result.errors.empty() ? "unknown skin resolution error" : result.errors.front().formatted());
+    const auto compiled = SkinCompiler().prepare(result.snapshot);
+    ASSERT_TRUE(compiled.ok()) << (compiled.errors.empty() ? "unknown skin preparation error" : compiled.errors.front().formatted());
+    System system;
+    ASSERT_TRUE(system.publish(compiled.generation));
+    ASSERT_EQ(system.fontFaces().size(), 1U);
+    const auto& source = system.fontFaces().front().sources.front();
+    ASSERT_TRUE(std::holds_alternative<radia::ui::FontFaceURL>(source.value));
+    EXPECT_EQ(std::get<radia::ui::FontFaceURL>(source.value).id.value(), "resources/fonts/myfont.woff2");
+}
+
+TEST_F(SkinResolverTest, RejectsFontURLsOutsideAssetsRoot) {
+    const std::filesystem::path selected = makeRoot("font-outside-assets", "test.font-outside-assets");
+    constexpr char kResourcePaths[] =
+        R"("stylesheet": "radia/resources/skin.css","layouts": "radia/xui","localization": "radia/localization.yaml","assets": "radia/resources")";
+    writeFile(selected / "manifest.json", manifest("test.font-outside-assets", "null", kResourcePaths));
+    writeFile(selected / "radia/resources/skin.css", "@import \"typography/fonts.css\";");
+    writeFile(selected / "radia/resources/typography/fonts.css", "@font-face { font-family: Imported; src: url(../../outside/a.woff2); }");
+    writeFile(selected / "radia/outside/a.woff2", "outside font bytes");
+
+    const auto result = resolver.resolve(selected, {});
+
+    ASSERT_TRUE(result.ok()) << (result.errors.empty() ? "unknown skin resolution error" : result.errors.front().formatted());
+    const auto compiled = SkinCompiler().prepare(result.snapshot);
+    ASSERT_FALSE(compiled.ok());
+    ASSERT_FALSE(compiled.errors.empty());
+    EXPECT_EQ(compiled.errors.front().code, "ui.resource.missing");
 }
 
 TEST_F(SkinResolverTest, IsolatesStylesheetModules) {

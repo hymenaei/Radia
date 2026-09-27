@@ -22,29 +22,23 @@ void HTMLInputElement::activateSwitch() {
 }
 
 HTMLInputElement& HTMLInputElement::indeterminate(bool indeterminate) {
-    if (!isCheckboxType() || mIndeterminate == indeterminate) return *this;
-    mIndeterminate = indeterminate;
+    if (!isCheckboxType()) return *this;
     updateIndeterminateState(indeterminate);
     return *this;
 }
 
-void HTMLInputElement::resetIndeterminateState() {
-    mIndeterminate = false;
-    updateIndeterminateState(false);
-}
-
 void HTMLInputElement::refreshIndeterminateState() {
-    updateIndeterminateState(isCheckboxType() && mIndeterminate);
+    if (!isCheckboxType() && !isRadioType()) updateIndeterminateState(false);
 }
 
 bool HTMLInputElement::updateIndeterminateState(bool indeterminate) {
-    const bool changed = hasState(ElementState::Indeterminate) != indeterminate;
-    setState(ElementState::Indeterminate, indeterminate);
-    return changed;
+    if (isCheckboxType()) return setPseudoClassMatch(CSSPseudoClass::Indeterminate, mCheckboxIndeterminate, indeterminate);
+    if (isRadioType()) return setPseudoClassMatch(CSSPseudoClass::Indeterminate, mRadioGroupIndeterminate, indeterminate);
+    return false;
 }
 
 ResourceElementDefinition detail::ElementDefinitions::input() {
-    return defineElement<HTMLInputElement>(kInputTag.localName)
+    return defineElement<HTMLInputElement>(HTMLTagName(HTMLTag::Input))
         .attributes(
             {stringAttribute<HTMLInputElement>("type", &HTMLInputElement::type), stringAttribute<HTMLInputElement>("name", &HTMLInputElement::name),
              booleanAttribute<HTMLInputElement>("switch", [](HTMLInputElement& element, bool enabled) { element.switchMode(enabled); }),
@@ -77,12 +71,9 @@ ResourceElementDefinition detail::ElementDefinitions::input() {
                               setting->source.begin.line, setting->source.begin.column);
         })
         .labelable()
-        .state(ElementState::Checked)
-        .state(ElementState::Indeterminate)
-        .pseudoElement("slider-track")
-        .pseudoElement("slider-fill")
-        .pseudoElement("slider-thumb")
-        .pseudoElement("checkmark")
+        .pseudoClass(CSSPseudoClass::Checked)
+        .pseudoClass(CSSPseudoClass::Indeterminate)
+        .pseudoClass(CSSPseudoClass::Invalid)
         .build();
 }
 } // namespace radia::ui

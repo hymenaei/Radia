@@ -347,7 +347,11 @@ SkinSnapshotResult SkinResolver::resolve(const std::filesystem::path& selectedRo
             error.clear();
             overlayDirectory(*manifest, *manifest->resources.layouts, "", result.snapshot, result);
         }
-        if (manifest->resources.assets) overlayDirectory(*manifest, *manifest->resources.assets, "resources/", result.snapshot, result);
+        if (manifest->resources.assets) {
+            result.snapshot.addPrefixAlias(resourceProvenance(*manifest, *manifest->resources.assets), ResourceId("resources"));
+            error.clear();
+            overlayDirectory(*manifest, *manifest->resources.assets, "resources/", result.snapshot, result);
+        }
     }
 
     if (!styleLayers.empty()) {

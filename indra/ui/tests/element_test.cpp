@@ -17,6 +17,7 @@
 #include "dom/fragment.h"
 #include "dom/text.h"
 #include "event/eventcall.h"
+#include "Geometry.h"
 #include "html/button.h"
 #include "html/element.h"
 #include "html/elementnames.h"
@@ -35,13 +36,14 @@
 namespace {
 using radia::ui::ComputedStyle;
 using radia::ui::ConstElementList;
+using radia::ui::CSSPseudoClass;
 using radia::ui::Dimension;
 using radia::ui::Document;
 using radia::ui::Element;
 using radia::ui::ElementRef;
-using radia::ui::ElementState;
 using radia::ui::ElementVisit;
 using radia::ui::Event;
+using radia::ui::findHTMLTag;
 using radia::ui::FixedTextMetrics;
 using radia::ui::fixedTextMetrics;
 using radia::ui::Fragment;
@@ -57,11 +59,12 @@ using radia::ui::isVoidHTMLTag;
 using radia::ui::kClickEvent;
 using radia::ui::LayoutDirection;
 using radia::ui::Length;
-using radia::ui::lookupHTMLTag;
+using radia::ui::LetterSpacing;
 using radia::ui::Node;
 using radia::ui::NodePtr;
 using radia::ui::NodeType;
 using radia::ui::Overflow;
+using radia::ui::paddingPixels;
 using radia::ui::PaintCommand;
 using radia::ui::PaintCommandKind;
 using radia::ui::PaintContext;
@@ -81,10 +84,11 @@ using radia::ui::TextLayout;
 using radia::ui::TextMetrics;
 using radia::ui::TextOverflow;
 using radia::ui::TextPaintStyle;
-using radia::ui::TextWrap;
+using radia::ui::TextWrapMode;
 using radia::ui::TextWrapStyle;
 using radia::ui::Vec2;
 using radia::ui::Visibility;
+using radia::ui::WordSpacing;
 using radia::ui::detail::appendText;
 using radia::ui::detail::ElementInternalAccess;
 using radia::ui::detail::makeElement;
@@ -105,6 +109,10 @@ static_assert(!std::is_constructible_v<HTMLButtonElement, std::string_view>);
 } // namespace
 
 namespace {
+void resolveTextTestColors(ComputedStyle& style) {
+    radia::ui::resolveStyleColors(style, radia::ui::systemColorValue(radia::ui::CSSKeyword::CanvasText, style.usedColorScheme));
+}
+
 class TextLayoutTestElement final : public Element {
 public:
     explicit TextLayoutTestElement(std::string text = {}) : Element("p"), mLayout(std::move(text)) {}
@@ -117,8 +125,10 @@ public:
     }
 
     void paint(PaintContext& context, const ComputedStyle& style, float scale) const override {
-        context.paintBox(rect(), style);
-        mLayout.paint(context, insetRect(rect(), style.padding), style, styleSheet(), *this);
+        ComputedStyle paintStyle = style;
+        resolveTextTestColors(paintStyle);
+        context.paintBox(rect(), paintStyle);
+        mLayout.paint(context, insetRect(rect(), paddingPixels(paintStyle)), paintStyle, styleSheet(), *this);
     }
 
 private:
@@ -691,8 +701,8 @@ TEST(FragmentTest, AppliesAuthoredEventAttributes) {
     ASSERT_EQ(root.children().size(), 1U);
     const auto* button = dynamic_cast<const HTMLButtonElement*>(root.children().front());
     ASSERT_NE(button, nullptr);
-    ASSERT_NE(radia::ui::authoredEventCall(*button, kClickEvent), nullptr);
-    EXPECT_EQ(radia::ui::authoredEventCall(*button, kClickEvent)->name(), "activate");
+    ASSERT_NE(radia::ui::eventHandlerCall(*button, kClickEvent), nullptr);
+    EXPECT_EQ(radia::ui::eventHandlerCall(*button, kClickEvent)->name(), "activate");
 }
 
 TEST(FragmentTest, RejectsIncompatibleElementAttributes) {
@@ -764,8 +774,8 @@ TEST(HTMLNamesTest, KeepsVoidnessInTheHTMLVocabulary) {
 }
 
 TEST(HTMLNamesTest, UsesIForCSSBackedIcons) {
-    EXPECT_EQ(lookupHTMLTag("i"), HTMLTag::I);
-    EXPECT_EQ(lookupHTMLTag("icon"), HTMLTag::Unknown);
+    EXPECT_EQ(findHTMLTag("i"), HTMLTag::I);
+    EXPECT_EQ(findHTMLTag("icon"), HTMLTag::Unknown);
 }
 
 TEST(ElementTest, ExposesConstChildren) {
@@ -1082,7 +1092,7 @@ TEST(ElementVisitTest, SeparatesMountObservations) {
 TEST(ElementVisitTest, KeepsLayoutObservationCurrent) {
     StyleSheet styleSheet;
     ASSERT_TRUE(styleSheet.loadRadia("panel:hover { color: #ffffff; }").ok());
-    EXPECT_FALSE(styleSheet.stateAffectsLayout(ElementState::Hovered));
+    EXPECT_FALSE(styleSheet.pseudoClassAffectsLayout(CSSPseudoClass::Hover));
 
     Surface surface(styleSheet);
     surface.setViewport(100.f, 100.f);
@@ -1094,7 +1104,7 @@ TEST(ElementVisitTest, KeepsLayoutObservationCurrent) {
 
     const ElementVisit observation(*panel);
     surface.pointerMove({{5.f, 5.f}});
-    ASSERT_TRUE(panel->hasState(ElementState::Hovered));
+    ASSERT_TRUE(panel->hovered());
     EXPECT_TRUE(observation.objectAlive());
     EXPECT_TRUE(observation.mountValid());
     EXPECT_TRUE(observation.topologyValid());
@@ -1206,13 +1216,13 @@ TEST(ElementPaintTest, DoesNotPaintBorderWhenStyleIsOmitted) {
     StylePass styles(stylesheet, fixedTextMetrics());
     const ComputedStyle style = styles.style(label);
 
-    EXPECT_EQ(style.borderWidth.top, 3.f);
-    EXPECT_EQ(style.borderStyle, radia::ui::BorderStyle::NoneValue);
+    EXPECT_EQ(style.borderWidth().top.pixels, 3.f);
+    EXPECT_EQ(style.borderStyle().top, radia::ui::BorderStyle::NoneValue);
     RecordingPaintContext recording;
     label.paint(recording, style, 1.f);
     const PaintCommand* box = recording.last(PaintCommandKind::Box);
     ASSERT_NE(box, nullptr);
-    EXPECT_EQ(box->style.borderStyle, radia::ui::BorderStyle::NoneValue);
+    EXPECT_EQ(box->style.borderStyle().top, radia::ui::BorderStyle::NoneValue);
 }
 
 TEST(ElementPaintTest, PaintsLocalizedResources) {
@@ -1260,10 +1270,10 @@ TEST(ElementPaintTest, PaintsLocalizedResources) {
     ASSERT_NE(iconBox, nullptr);
     ASSERT_NE(effectCommand, nullptr);
     EXPECT_EQ(effectCommand->scale, 2.f);
-    EXPECT_EQ(effectCommand->style.backdropFilter.size(), 1U);
-    EXPECT_EQ(effectCommand->style.filter.size(), 1U);
-    EXPECT_EQ(textCommand->style.color.a, .25f);
-    EXPECT_EQ(textCommand->style.textAlign, TextAlign::Left);
+    EXPECT_EQ(effectCommand->style.backdropFilter().operations.size(), 1U);
+    EXPECT_EQ(effectCommand->style.filter.operations.size(), 1U);
+    EXPECT_EQ(textCommand->style.color().resolvedColor().a, .25f);
+    EXPECT_EQ(textCommand->style.textAlign(), TextAlign::Left);
     EXPECT_EQ(textCommand->rect.x, -8.f);
     EXPECT_EQ(recording.commands().front().kind, PaintCommandKind::BeginFrame);
     EXPECT_EQ(recording.commands().back().kind, PaintCommandKind::EndFrame);
@@ -1322,10 +1332,10 @@ TEST(TextLayoutTest, PreservesFittingShapedLines) {
 TEST(TextLayoutTest, EllipsizesAccordingToTextDirection) {
     const FixedTextMetrics metrics(.5f, .5f);
     ComputedStyle style;
-    style.fontSize = 10.f;
-    style.textWrap = TextWrap::NoWrap;
-    style.textOverflow = TextOverflow::EllipsisCenter;
-    style.overflowX = Overflow::Hidden;
+    style.setFontSize(10.f);
+    style.setTextWrapMode(TextWrapMode::NoWrap);
+    style.setTextOverflow(TextOverflow::EllipsisCenter);
+    style.setOverflowX(Overflow::Hidden);
 
     TextLayoutTestElement inventory("abcdefghij");
     inventory.setRect({0.f, 0.f, 35.f, 10.f});
@@ -1333,7 +1343,7 @@ TEST(TextLayoutTest, EllipsizesAccordingToTextDirection) {
     inventory.paint(centered, style, 1.f);
     EXPECT_EQ(paintedText(centered), "abc\xE2\x80\xA6hij");
 
-    style.textOverflow = TextOverflow::Ellipsis;
+    style.setTextOverflow(TextOverflow::Ellipsis);
     RecordingPaintContext ended(metrics);
     inventory.paint(ended, style, 1.f);
     EXPECT_EQ(paintedText(ended), "abcdef\xE2\x80\xA6");
@@ -1351,10 +1361,10 @@ TEST(TextLayoutTest, EllipsizesAccordingToTextDirection) {
 TEST(TextLayoutTest, PreservesGraphemes) {
     const FixedTextMetrics metrics(.5f, .5f);
     ComputedStyle style;
-    style.fontSize = 10.f;
-    style.textWrap = TextWrap::NoWrap;
-    style.textOverflow = TextOverflow::Ellipsis;
-    style.overflowX = Overflow::Hidden;
+    style.setFontSize(10.f);
+    style.setTextWrapMode(TextWrapMode::NoWrap);
+    style.setTextOverflow(TextOverflow::Ellipsis);
+    style.setOverflowX(Overflow::Hidden);
 
     TextLayoutTestElement combining("a\u0301bcdef");
     combining.setRect({0.f, 0.f, 20.f, 10.f});
@@ -1372,10 +1382,10 @@ TEST(TextLayoutTest, PreservesGraphemes) {
 TEST(TextLayoutTest, ClipsOverflowWithoutRewritingText) {
     const FixedTextMetrics metrics(.5f, .5f);
     ComputedStyle style;
-    style.fontSize = 10.f;
-    style.textWrap = TextWrap::NoWrap;
-    style.textOverflow = TextOverflow::Clip;
-    style.overflowX = Overflow::Hidden;
+    style.setFontSize(10.f);
+    style.setTextWrapMode(TextWrapMode::NoWrap);
+    style.setTextOverflow(TextOverflow::Clip);
+    style.setOverflowX(Overflow::Hidden);
 
     TextLayoutTestElement clipped("abc");
     clipped.setRect({0.f, 0.f, 2.f, 10.f});
@@ -1389,9 +1399,9 @@ TEST(TextLayoutTest, ClipsOverflowWithoutRewritingText) {
 TEST(TextLayoutTest, WrapsAtTextBoundaries) {
     const FixedTextMetrics metrics(.5f, .5f);
     ComputedStyle style;
-    style.fontSize = 10.f;
-    style.textOverflow = TextOverflow::Clip;
-    ASSERT_EQ(style.textWrap, TextWrap::Wrap);
+    style.setFontSize(10.f);
+    style.setTextOverflow(TextOverflow::Clip);
+    ASSERT_EQ(style.textWrapMode(), TextWrapMode::Wrap);
 
     TextLayoutTestElement wrapped("alpha beta");
     wrapped.setRect({0.f, 0.f, 30.f, 20.f});
@@ -1423,29 +1433,29 @@ TEST(TextLayoutTest, WrapsAtTextBoundaries) {
     cjk.paint(cjkWrapping, style, 1.f);
     EXPECT_EQ(cjkWrapping.count(PaintCommandKind::Text), 2U);
 
-    style.textOverflow = TextOverflow::Clip;
-    style.width = Dimension::fromPixels(30.f);
+    style.setTextOverflow(TextOverflow::Clip);
+    style.setWidth(Dimension::fromPixels(30.f));
     EXPECT_EQ(wrapped.intrinsicSize(StyleSheet(), style, metrics).y, 20.f);
 }
 
 TEST(TextLayoutTest, AppliesBalanceAndPrettyWrapStyles) {
     const FixedTextMetrics metrics(.5f, .5f);
     ComputedStyle style;
-    style.fontSize = 10.f;
-    style.textOverflow = TextOverflow::Clip;
+    style.setFontSize(10.f);
+    style.setTextOverflow(TextOverflow::Clip);
 
     TextLayoutTestElement autoWrapped("alpha beta gamma delta epsilon");
     autoWrapped.setRect({0.f, 0.f, 50.f, 100.f});
     RecordingPaintContext autoRecording(metrics);
     autoWrapped.paint(autoRecording, style, 1.f);
 
-    style.textWrapStyle = TextWrapStyle::Balance;
+    style.setTextWrapStyle(TextWrapStyle::Balance);
     TextLayoutTestElement balanced("alpha beta gamma delta epsilon");
     balanced.setRect({0.f, 0.f, 50.f, 100.f});
     RecordingPaintContext balanceRecording(metrics);
     balanced.paint(balanceRecording, style, 1.f);
 
-    style.textWrapStyle = TextWrapStyle::Pretty;
+    style.setTextWrapStyle(TextWrapStyle::Pretty);
     TextLayoutTestElement pretty("alpha beta gamma delta epsilon");
     pretty.setRect({0.f, 0.f, 50.f, 100.f});
     RecordingPaintContext prettyRecording(metrics);
@@ -1480,10 +1490,10 @@ TEST(TextLayoutTest, UsesShapedWidthsForCenterEllipsis) {
     } variableMetrics;
 
     ComputedStyle style;
-    style.fontSize = 10.f;
-    style.textWrap = TextWrap::NoWrap;
-    style.textOverflow = TextOverflow::EllipsisCenter;
-    style.overflowX = Overflow::Hidden;
+    style.setFontSize(10.f);
+    style.setTextWrapMode(TextWrapMode::NoWrap);
+    style.setTextOverflow(TextOverflow::EllipsisCenter);
+    style.setOverflowX(Overflow::Hidden);
     TextLayoutTestElement asymmetric("Wabc");
     asymmetric.setRect({0.f, 0.f, 10.f, 10.f});
     RecordingPaintContext recording(variableMetrics);
@@ -1528,17 +1538,18 @@ TEST(TextLayoutTest, PreparesPaintLayoutBeforePainting) {
     auto owner = makeElement<Element>("p");
     StyleSheet stylesheet;
     ComputedStyle style;
-    style.fontSize = 10.f;
-    style.textWrap = TextWrap::NoWrap;
-    style.textOverflow = TextOverflow::Ellipsis;
-    style.overflowX = Overflow::Hidden;
+    style.setFontSize(10.f);
+    style.setTextWrapMode(TextWrapMode::NoWrap);
+    style.setTextOverflow(TextOverflow::Ellipsis);
+    style.setOverflowX(Overflow::Hidden);
+    resolveTextTestColors(style);
 
     layout.measure(metrics, style, stylesheet, *owner, 20.f);
     layout.preparePaint(metrics, style, stylesheet, *owner, 20.f);
     const std::size_t preparedMeasureCalls = metrics.measureCalls();
 
     RecordingPaintContext recording(metrics);
-    const TextPaintStyle paintStyle{style.color, style.colorLightDark, style.textDecoration, style.textAlign};
+    const TextPaintStyle paintStyle{style.color().resolvedColor(), style.textDecoration(), style.textAlign()};
     layout.paintPrepared(recording, {0.f, 0.f, 20.f, 10.f}, style, paintStyle, &stylesheet, *owner);
 
     EXPECT_EQ(metrics.measureCalls(), preparedMeasureCalls);
@@ -1550,14 +1561,15 @@ TEST(TextLayoutTest, RebuildsAfterContentChange) {
     auto owner = makeElement<Element>("p");
     StyleSheet stylesheet;
     ComputedStyle style;
-    style.fontSize = 10.f;
-    style.textWrap = TextWrap::NoWrap;
+    style.setFontSize(10.f);
+    style.setTextWrapMode(TextWrapMode::NoWrap);
+    resolveTextTestColors(style);
 
     layout.preparePaint(metrics, style, stylesheet, *owner, 100.f);
     layout.setText("new");
 
     RecordingPaintContext recording(metrics);
-    const TextPaintStyle paintStyle{style.color, style.colorLightDark, style.textDecoration, style.textAlign};
+    const TextPaintStyle paintStyle{style.color().resolvedColor(), style.textDecoration(), style.textAlign()};
     layout.paintPrepared(recording, {0.f, 0.f, 100.f, 10.f}, style, paintStyle, &stylesheet, *owner);
 
     EXPECT_EQ(paintedText(recording), "new");
@@ -1570,13 +1582,14 @@ TEST(TextLayoutTest, RebuildsForPaintMetrics) {
     auto owner = makeElement<Element>("p");
     StyleSheet stylesheet;
     ComputedStyle style;
-    style.fontSize = 10.f;
-    style.textWrap = TextWrap::NoWrap;
+    style.setFontSize(10.f);
+    style.setTextWrapMode(TextWrapMode::NoWrap);
+    resolveTextTestColors(style);
 
     layout.preparePaint(narrowMetrics, style, stylesheet, *owner, 100.f);
 
     RecordingPaintContext recording(wideMetrics);
-    const TextPaintStyle paintStyle{style.color, style.colorLightDark, style.textDecoration, style.textAlign};
+    const TextPaintStyle paintStyle{style.color().resolvedColor(), style.textDecoration(), style.textAlign()};
     layout.paintPrepared(recording, {0.f, 0.f, 100.f, 10.f}, style, paintStyle, &stylesheet, *owner);
 
     const PaintCommand* text = recording.last(PaintCommandKind::Text);
@@ -1608,8 +1621,8 @@ TEST(TextLayoutTest, ProjectsPaintColor) {
     const PaintCommand* secondText = second.last(PaintCommandKind::Text);
     ASSERT_NE(firstText, nullptr);
     ASSERT_NE(secondText, nullptr);
-    EXPECT_FLOAT_EQ(firstText->style.color.r, 1.f);
-    EXPECT_FLOAT_EQ(secondText->style.color.b, 1.f);
+    EXPECT_FLOAT_EQ(firstText->style.color().resolvedColor().r, 1.f);
+    EXPECT_FLOAT_EQ(secondText->style.color().resolvedColor().b, 1.f);
     EXPECT_EQ(firstText->rect.x, secondText->rect.x);
     EXPECT_EQ(firstText->rect.y, secondText->rect.y);
     EXPECT_EQ(firstText->rect.w, secondText->rect.w);
@@ -1619,19 +1632,19 @@ TEST(TextLayoutTest, ProjectsPaintColor) {
 TEST(TextLayoutTest, AppliesTextSpacing) {
     const FixedTextMetrics metrics(.5f, .5f);
     ComputedStyle style;
-    style.fontSize = 10.f;
+    style.setFontSize(10.f);
 
-    style.letterSpacing = Length{2.f};
+    style.setLetterSpacing(LetterSpacing{2.f});
     EXPECT_EQ(metrics.measureText("abc", style).x, 19.f);
-    style.letterSpacing = Length{0.f, .5f};
-    EXPECT_EQ(metrics.measureText("abc", style).x, 20.f);
+    style.setLetterSpacing(LetterSpacing{0.f, .5f});
+    EXPECT_EQ(metrics.measureText("abc", style).x, 25.f);
 
-    style.letterSpacing = {};
-    style.wordSpacing = Length{3.f};
+    style.setLetterSpacing({});
+    style.setWordSpacing(WordSpacing{3.f});
     EXPECT_EQ(metrics.measureText("a b", style).x, 18.f);
-    style.wordSpacing = Length{0.f, .5f};
+    style.setWordSpacing(WordSpacing{0.f, .5f});
     EXPECT_EQ(metrics.measureText("a b", style).x, 20.f);
-    style.wordSpacing = Length{3.f};
+    style.setWordSpacing(WordSpacing{3.f});
     EXPECT_EQ(metrics.measureText("a\u2003b", style).x, 18.f);
 }
 

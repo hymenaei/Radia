@@ -7,6 +7,7 @@
 #include "style/stylepass.h"
 #include <algorithm>
 #include <utility>
+#include "ComputedStyleProperties.h"
 #include "css/stylesheet.h"
 #include "dom/element.h"
 #include "paint/nativeappearance.h"
@@ -15,7 +16,7 @@
 namespace radia::ui {
 namespace {
 void resolveMatchParentTextAlign(ComputedStyle& style, const ComputedStyle* parent) {
-    if (style.textAlign == TextAlign::MatchParent) style.textAlign = parent ? parent->textAlign : TextAlign::Start;
+    if (style.textAlign() == TextAlign::MatchParent) style.setTextAlign(parent ? parent->textAlign() : TextAlign::Start);
 }
 
 detail::LayoutContextKey makeContextKey(const StyleRuleSet* ruleSet, const TextMetrics& textMetrics, std::uint64_t styleGeneration,
@@ -80,6 +81,13 @@ void StylePass::compactOrderingCaches() {
         else ++it;
 }
 
+const ComputedStyle& StylePass::rootStyle(const Element& element) const {
+    const Element* root = &element;
+    while (root->parentElement()) root = root->parentElement();
+    const auto found = mStyles.find(root);
+    return found == mStyles.end() ? ComputedStyle::initialStyle() : mStyleStorage[found->second.storageIndex];
+}
+
 void StylePass::endTraversal() {
     llassert(mTraversalDepth != 0);
     if (mTraversalDepth) --mTraversalDepth;
@@ -97,32 +105,32 @@ const ComputedStyle& StylePass::style(const Element& element) {
         return mStyleStorage[found->second.storageIndex];
     if (found != mStyles.end()) mStyles.erase(found);
 
-    const ConstElementVisit elementSnapshot(element);
+    const ConstElementVisit topologySnapshot(element);
     const std::weak_ptr<char> elementLifetime = detail::NodeAccess::lifetime(element);
     const ElementRef<const Element> styledRef(&element);
-    const Element* parent = elementSnapshot.parent;
-    const std::uint64_t contextRevision = element.styleContextRevision();
+    const Element* parent = topologySnapshot.parent;
     std::optional<ComputedStyle> parentStyle;
     if (parent) {
-        const ConstElementVisit parentSnapshot(*parent);
         const ComputedStyle& inherited = style(*parent);
-        if (styledRef.get() && elementSnapshot.styleValid() && parentSnapshot.get() && parentSnapshot.styleValid()) parentStyle = inherited;
+        if (styledRef.get() && topologySnapshot.mountValid() && topologySnapshot.topologyValid()) parentStyle = inherited;
     }
-    ComputedStyle resolved = mStyleSheet.resolveElement(element, mDirection, parentStyle ? &parentStyle->customProperties : nullptr);
+    const ConstElementVisit elementSnapshot(element);
+    const std::uint64_t contextRevision = element.styleContextRevision();
+    ComputedStyle resolved =
+        mStyleSheet.resolveElement(element, parentStyle ? &parentStyle->customProperties : nullptr, mColorSchemeContext,
+                                   parentStyle ? &parentStyle->colorScheme() : nullptr, parentStyle ? &*parentStyle : nullptr, rootStyle(element));
     const Element* current = styledRef.get();
     const auto transient = [&]() -> const ComputedStyle& {
         mStyleStorage.emplace_back(std::move(resolved));
         return mStyleStorage.back();
     };
-    if (!current || !elementSnapshot.styleValid()) return transient();
-    if (parentStyle) inheritStyle(resolved, *parentStyle);
-    else resolved.textDecorationPropagation = resolved.textDecoration;
-    resolveMatchParentTextAlign(resolved, parentStyle ? &*parentStyle : nullptr);
-    resolvePercentageLineHeight(resolved);
+    if (!current || !elementSnapshot.styleValid() || !topologySnapshot.mountValid() || !topologySnapshot.topologyValid()) return transient();
     element.constrainResolvedStyle(resolved);
+    if (parentStyle) inheritStyle(resolved, *parentStyle);
+    else resolved.textDecorationPropagation = resolved.textDecoration();
+    resolveMatchParentTextAlign(resolved, parentStyle ? &*parentStyle : nullptr);
     normalizeOverflow(resolved);
-    resolveLightDarkColors(resolved, mColorSchemeContext);
-    resolveCurrentColors(resolved);
+    resolveStyleColors(resolved, parentStyle ? parentStyle->color().resolvedColor() : Color(0.f, 0.f, 0.f, 1.f));
 
     current = styledRef.get();
     if (!current || !elementSnapshot.styleValid()) return transient();
@@ -137,20 +145,19 @@ ComputedStyle StylePass::style(PseudoElement& pseudoElement) {
     const Element& owner = pseudoElement.originatingElement();
     const ComputedStyle& ownerStyle = style(owner);
     const ComputedStyle& parentStyle = pseudoElement.parentPseudoElement() ? style(*pseudoElement.parentPseudoElement()) : ownerStyle;
-    ComputedStyle resolved = mStyleSheet.resolvePseudoElement(owner, pseudoElement.name(), mDirection, &parentStyle.customProperties);
+    ComputedStyle resolved = mStyleSheet.resolvePseudoElement(owner, pseudoElement.name(), &parentStyle.customProperties, mColorSchemeContext,
+                                                              &parentStyle.colorScheme(), &parentStyle, rootStyle(owner));
     inheritStyle(resolved, parentStyle);
     resolveMatchParentTextAlign(resolved, &parentStyle);
-    resolvePercentageLineHeight(resolved);
-    resolved.appearance = ownerStyle.appearance;
+    resolved.setAppearance(ownerStyle.appearance());
     normalizeOverflow(resolved);
-    resolveLightDarkColors(resolved, mColorSchemeContext);
-    resolveCurrentColors(resolved);
+    resolveStyleColors(resolved, parentStyle.color().resolvedColor());
     pseudoElement.setResolvedStyle(resolved);
     return resolved;
 }
 
 void StylePass::styleGeneratedPseudoElements(const Element& element, const ComputedStyle& ownerStyle) {
-    if (ownerStyle.appearance == AppearanceMode::Auto) return;
+    if (ownerStyle.appearance() == Appearance::Auto) return;
     const auto stylePseudoElementTree = [this](auto&& self, PseudoElement& pseudoElement) -> void {
         style(pseudoElement);
         for (PseudoElement* child : pseudoElement.generatedPseudoElements())
@@ -175,16 +182,20 @@ StylePass::OrderedChildSnapshot StylePass::orderedChildren(Element& parent) {
 
     auto result = std::make_shared<std::vector<OrderedChildRef>>();
     const ComputedStyle& parentStyle = style(parent);
-    const bool includesPseudoElements = parentStyle.appearance != AppearanceMode::Auto;
+    const bool includesPseudoElements = parentStyle.appearance() != Appearance::Auto;
     result->reserve(detail::nodes(parent).size() + (includesPseudoElements ? parent.generatedPseudoElements().size() : 0));
     for (detail::Node& node : detail::nodes(parent)) result->emplace_back(&node);
     if (includesPseudoElements)
         for (PseudoElement* pseudoElement : parent.generatedPseudoElements())
             if (pseudoElement) result->emplace_back(pseudoElement);
-    if (isOrderModifiedContainer(parentStyle.display)) {
+    if (isOrderModifiedContainer(parentStyle.display())) {
         std::stable_sort(result->begin(), result->end(), [this](const auto& left, const auto& right) {
-            const int leftOrder = left.pseudoElement ? style(*left.pseudoElement).order : left.element() ? style(*left.element()).order : 0;
-            const int rightOrder = right.pseudoElement ? style(*right.pseudoElement).order : right.element() ? style(*right.element()).order : 0;
+            const int leftOrder = left.pseudoElement ? style(*left.pseudoElement).order().value
+                : left.element()                     ? style(*left.element()).order().value
+                                                     : 0;
+            const int rightOrder = right.pseudoElement ? style(*right.pseudoElement).order().value
+                : right.element()                      ? style(*right.element()).order().value
+                                                       : 0;
             return leftOrder < rightOrder;
         });
     }
@@ -202,9 +213,9 @@ StylePass::OrderedChildSnapshot StylePass::orderedChildren(PseudoElement& parent
     result->reserve(parent.generatedPseudoElements().size());
     for (PseudoElement* pseudoElement : parent.generatedPseudoElements())
         if (pseudoElement) result->emplace_back(pseudoElement);
-    if (isOrderModifiedContainer(style(parent).display)) {
+    if (isOrderModifiedContainer(style(parent).display())) {
         std::stable_sort(result->begin(), result->end(), [this](const auto& left, const auto& right) {
-            return style(*left.pseudoElement).order < style(*right.pseudoElement).order;
+            return style(*left.pseudoElement).order().value < style(*right.pseudoElement).order().value;
         });
     }
     mOrderedPseudoChildren[&parent] = {result, detail::NodeAccess::lifetime(parent.originatingElement()), mOrderingGeneration};

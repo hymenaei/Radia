@@ -33,12 +33,12 @@
 #include "text/metrics.h"
 
 namespace {
-using radia::ui::authoredEventCall;
 using radia::ui::DiagnosticResult;
 using radia::ui::Document;
 using radia::ui::Element;
 using radia::ui::ElementRef;
 using radia::ui::Event;
+using radia::ui::eventHandlerCall;
 using radia::ui::fixedTextMetrics;
 using radia::ui::HTMLButtonElement;
 using radia::ui::HTMLElement;
@@ -263,7 +263,7 @@ protected:
 
     void SetUp() override {
         const SkinGenerationPrepareResult prepared = prepareGeneration();
-        ASSERT_TRUE(prepared.ok());
+        ASSERT_TRUE(prepared.ok()) << (prepared.errors.empty() ? "No generation or error was reported." : prepared.errors.front().formatted());
         ASSERT_TRUE(system.publish(std::move(prepared.generation)));
         surface = system.createSurface(fixedTextMetrics());
         host.surface = surface.get();
@@ -278,7 +278,7 @@ protected:
                                            "<p id=\"status\"></p>"
                                            "<button id=\"press\" onClick=\"press()\"></button>"
                                            "<button id=\"inspect\" onClick=\"inspect(4, 'settings', true, this, event)\"></button>"
-                                           "<button id=\"events\" onDoubleClick=\"doubleClick(event)\" onPointerDown=\"pointerDown(event)\" "
+                                           "<button id=\"events\" onDblClick=\"doubleClick(event)\" onPointerDown=\"pointerDown(event)\" "
                                            "onPointerUp=\"pointerUp(event)\" onPointerMove=\"pointerMove(event)\" "
                                            "onContextMenu=\"contextMenu(event)\"></button>"
                                            "<input type=\"checkbox\" switch=\"true\" id=\"changed\" checked=\"false\" onChange=\"changed(event)\">"
@@ -293,7 +293,7 @@ protected:
                                               "<body>"
                                               "<button id=\"press\" onClick=\"press()\"></button>"
                                               "<button id=\"inspect\" onClick=\"inspect(4, 'settings', true, this, event)\"></button>"
-                                              "<button id=\"events\" onDoubleClick=\"doubleClick(event)\" onPointerDown=\"pointerDown(event)\" "
+                                              "<button id=\"events\" onDblClick=\"doubleClick(event)\" onPointerDown=\"pointerDown(event)\" "
                                               "onPointerUp=\"pointerUp(event)\" onPointerMove=\"pointerMove(event)\" "
                                               "onContextMenu=\"contextMenu(event)\"></button>"
                                               "<input type=\"checkbox\" switch=\"true\" id=\"changed\" checked=\"false\" onChange=\"changed(event)\">"
@@ -448,11 +448,11 @@ TEST_F(ComponentManagerTest, DispatchesComponentEvents) {
     ASSERT_NE(changed, nullptr);
     ASSERT_NE(status, nullptr);
 
-    EXPECT_TRUE(authoredEventCall(*events, "dblclick"));
-    EXPECT_TRUE(authoredEventCall(*events, "pointerdown"));
-    EXPECT_TRUE(authoredEventCall(*events, "pointerup"));
-    EXPECT_TRUE(authoredEventCall(*events, "pointermove"));
-    EXPECT_TRUE(authoredEventCall(*events, "contextmenu"));
+    EXPECT_TRUE(eventHandlerCall(*events, "dblclick"));
+    EXPECT_TRUE(eventHandlerCall(*events, "pointerdown"));
+    EXPECT_TRUE(eventHandlerCall(*events, "pointerup"));
+    EXPECT_TRUE(eventHandlerCall(*events, "pointermove"));
+    EXPECT_TRUE(eventHandlerCall(*events, "contextmenu"));
 
     press->activate();
     inspect->activate();

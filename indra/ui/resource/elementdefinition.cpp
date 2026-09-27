@@ -7,9 +7,13 @@
 #include "resource/elementdefinition.h"
 #include <algorithm>
 #include <cctype>
+#include <optional>
 #include <unordered_map>
+#include "CSSPseudoSelectors.h"
 #include "event/eventcall.h"
+#include "EventTypes.h"
 #include "html/element.h"
+#include "HTMLNames.h"
 
 namespace radia::ui {
 namespace {
@@ -21,7 +25,7 @@ std::optional<bool> parseBooleanValue(std::string_view value) {
 
 ResourceElementDefinition htmlContentDefinition(HTMLTag tag) {
     ResourceElementDefinition result;
-    result.elementName = htmlTagName(tag);
+    result.elementName = HTMLTagName(tag);
     switch (tag) {
         case HTMLTag::Br: result.contentBehavior.mode = ElementContentMode::Unsupported; break;
         case HTMLTag::Kbd:
@@ -46,21 +50,29 @@ ResourceElementDefinition htmlContentDefinition(HTMLTag tag) {
 }
 
 bool isKnownHTMLAttribute(HTMLTag tag, std::string_view name) {
-    const std::string canonicalName = canonicalizeHTMLName(name);
+    const std::optional<HTMLAttribute> attribute = findHTMLAttribute(canonicalizeHTMLName(name));
+    if (!attribute) return false;
     if (tag == HTMLTag::Br) return false;
-    if (canonicalName == "id" || canonicalName == "class" || canonicalName == "disabled" || canonicalName == "hidden") return true;
-    for (const AuthoredEventDescriptor& descriptor : kAuthoredEventDescriptors)
-        if (canonicalizeHTMLName(descriptor.attribute) == canonicalName) return true;
+    switch (*attribute) {
+        case HTMLAttribute::Id:
+        case HTMLAttribute::Class:
+        case HTMLAttribute::Disabled:
+        case HTMLAttribute::Hidden: return true;
+        default: break;
+    }
+    for (const EventTypeDescriptor& descriptor : eventTypes)
+        if (descriptor.htmlAttribute && *descriptor.htmlAttribute == *attribute) return true;
 
     const ResourceElementDefinition* definition = findElementDefinition(tag);
     if (!definition) return false;
     return std::any_of(definition->attributes.begin(), definition->attributes.end(),
-                       [&](const std::string& attribute) { return canonicalizeHTMLName(attribute) == canonicalName; });
+                       [&](const std::string& name) { return findHTMLAttribute(canonicalizeHTMLName(name)) == attribute; });
 }
 } // namespace
 
-bool producesState(const ResourceElementDefinition& definition, ElementState state) {
-    return std::find(definition.producedStates.begin(), definition.producedStates.end(), state) != definition.producedStates.end();
+bool producesPseudoClass(const ResourceElementDefinition& definition, CSSPseudoClass pseudoClass) {
+    return std::find(definition.producedPseudoClasses.begin(), definition.producedPseudoClasses.end(), pseudoClass)
+        != definition.producedPseudoClasses.end();
 }
 
 bool isRegisteredHTMLAttribute(HTMLTag tag, std::string_view name) {
@@ -72,6 +84,10 @@ bool readElementAttribute(const ElementBuildInput& input, std::string_view name,
     if (!attribute) return false;
     value = attribute->value;
     return true;
+}
+
+bool readElementAttribute(const ElementBuildInput& input, HTMLAttribute name, std::string& value) {
+    return readElementAttribute(input, HTMLAttributeName(name), value);
 }
 
 bool readElementBoolean(const ElementBuildInput& input, std::string_view name, bool& value, ElementBuildContext& context) {
@@ -117,7 +133,7 @@ ResolvedLayoutText localizedLayoutText(std::string value, ElementBuildContext& c
 }
 
 void validateElementAttributes(const ElementBuildInput& input, ElementBuildContext& context) {
-    const std::string elementName = input.authoredName.empty() ? std::string(htmlTagName(input.tag)) : input.authoredName;
+    const std::string elementName = input.authoredName.empty() ? std::string(HTMLTagName(input.tag)) : input.authoredName;
     for (const auto& [attributeName, attribute] : input.attributes)
         if (!isRegisteredHTMLAttribute(input.tag, attributeName))
             context.error("layout.attribute.unknown", "Unknown attribute on <" + elementName + ">: " + attribute.authoredName + ".", input.sourceName,
@@ -149,13 +165,13 @@ void applyCommonElementAttributes(const ElementBuildInput& input, Element& eleme
     if (readElementBoolean(input, "disabled", boolean, context)) element.disabled(boolean);
     if (readElementBoolean(input, "hidden", boolean, context)) element.setHidden(boolean);
 
-    for (const AuthoredEventDescriptor& descriptor : kAuthoredEventDescriptors) {
-        if (!readElementAttribute(input, descriptor.attribute, value)) continue;
-        const ElementAttribute* attribute = input.find(descriptor.attribute);
+    for (const EventTypeDescriptor& descriptor : eventTypes) {
+        if (!descriptor.htmlAttribute || !readElementAttribute(input, *descriptor.htmlAttribute, value)) continue;
+        const ElementAttribute* attribute = input.find(HTMLAttributeName(*descriptor.htmlAttribute));
 
-        AuthoredEventCallParseResult parsed = parseAuthoredEventCall(value);
+        EventHandlerCallParseResult parsed = parseEventHandlerCall(value);
         if (!parsed.ok()) {
-            context.warning(authoredEventCallParseErrorCode(parsed.error), authoredEventCallParseErrorMessage(parsed.error), input.sourceName,
+            context.warning(eventHandlerCallParseErrorCode(parsed.error), eventHandlerCallParseErrorMessage(parsed.error), input.sourceName,
                             attribute->source.begin.line, attribute->source.begin.column + parsed.errorOffset);
             continue;
         }
@@ -165,7 +181,7 @@ void applyCommonElementAttributes(const ElementBuildInput& input, Element& eleme
                             input.sourceName, attribute->source.begin.line, attribute->source.begin.column);
             continue;
         }
-        setAuthoredEventCall(element, descriptor.type, std::move(*parsed.call));
+        setEventHandlerCall(element, descriptor.name, std::move(*parsed.call));
     }
 }
 
@@ -185,31 +201,27 @@ const ResourceElementDefinition* findElementDefinition(HTMLTag tag) {
         add(HTMLTag::Minimize, ElementDefinitions::minimize());
         add(HTMLTag::Close, ElementDefinitions::close());
         add(HTMLTag::Panel, ElementDefinitions::panel());
-        const HTMLTag registeredTags[] = {
-            HTMLTag::Abbr,  HTMLTag::B,     HTMLTag::Button,    HTMLTag::Br,       HTMLTag::Cite,    HTMLTag::Code,  HTMLTag::Dfn,
-            HTMLTag::Del,   HTMLTag::Div,   HTMLTag::Em,        HTMLTag::Fieldset, HTMLTag::Floater, HTMLTag::Head,  HTMLTag::Header,
-            HTMLTag::I,     HTMLTag::Ins,   HTMLTag::Kbd,       HTMLTag::Label,    HTMLTag::Legend,  HTMLTag::Mark,  HTMLTag::Minimize,
-            HTMLTag::Close, HTMLTag::Panel, HTMLTag::Paragraph, HTMLTag::Q,        HTMLTag::S,       HTMLTag::Small, HTMLTag::Strong,
-            HTMLTag::Title, HTMLTag::U,     HTMLTag::Input,     HTMLTag::Body,
-        };
-        for (const HTMLTag tag : registeredTags)
-            if (!result.contains(tag)) add(tag, htmlContentDefinition(tag));
+        for (const auto& descriptor : htmlTags)
+            if (descriptor.tag != HTMLTag::Unknown && !result.contains(descriptor.tag)) add(descriptor.tag, htmlContentDefinition(descriptor.tag));
         return result;
     }();
     const auto found = definitions.find(tag);
     return found == definitions.end() ? nullptr : &found->second;
 }
 
-ElementSelectorMetadata inspectElementSelector(HTMLTag tag, std::string_view pseudoElement, std::optional<ElementState> elementState) {
+ElementSelectorMetadata inspectElementSelector(HTMLTag tag, std::string_view pseudoElement, std::optional<CSSPseudoClass> pseudoClass) {
     ElementSelectorMetadata result;
     const ResourceElementDefinition* owner = findElementDefinition(tag);
     if (!owner) return result;
 
     result.elementName = owner->elementName;
     result.known = true;
-    result.pseudoElementKnown = pseudoElement.empty()
-        || std::find(owner->pseudoElementNames.begin(), owner->pseudoElementNames.end(), pseudoElement) != owner->pseudoElementNames.end();
-    result.elementProducesState = elementState && producesState(*owner, *elementState);
+    result.pseudoElementKnown = pseudoElement.empty();
+    if (!result.pseudoElementKnown) {
+        const std::optional<CSSPseudoElement> generated = findCSSPseudoElement(canonicalizeHTMLName(pseudoElement));
+        result.pseudoElementKnown = generated && tag == HTMLTag::Input;
+    }
+    result.elementProducesPseudoClass = pseudoClass && producesPseudoClass(*owner, *pseudoClass);
     return result;
 }
 } // namespace radia::ui

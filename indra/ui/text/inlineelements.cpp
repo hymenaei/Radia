@@ -152,7 +152,7 @@ void appendText(AppendState& state, const std::string& authored, std::size_t lin
 void appendChildren(AppendState& state, const std::vector<SourceContent>& contentItems);
 
 void appendElement(AppendState& state, const SourceNode& node) {
-    const std::string_view elementName = htmlTagName(node.tag);
+    const std::string_view elementName = HTMLTagName(node.tag);
     if (!accepts(state.acceptedTags, node.tag)) return;
 
     auto element = HTMLElementFactory::create(elementName);

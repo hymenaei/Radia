@@ -5,9 +5,12 @@
 
 #include "linden_common.h"
 #include "css/syntax.h"
+#include <charconv>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <limits>
+#include <string>
 
 namespace radia::ui::detail {
 namespace {
@@ -206,6 +209,15 @@ std::size_t consumeNumber(std::string_view source, std::size_t position) {
     return position;
 }
 
+std::optional<float> parseCSSNumber(std::string_view source) {
+    if (!source.empty() && source.front() == '+') source.remove_prefix(1);
+
+    float value = 0.f;
+    const auto [end, error] = std::from_chars(source.data(), source.data() + source.size(), value, std::chars_format::general);
+    if (error != std::errc{} || end != source.data() + source.size() || !std::isfinite(value)) return std::nullopt;
+    return value;
+}
+
 bool isNonPrintable(std::uint32_t value) {
     return value == 0 || (value >= 0x01 && value <= 0x08) || value == 0x0b || (value >= 0x0e && value <= 0x1f) || (value >= 0x7f && value <= 0x9f);
 }
@@ -304,7 +316,12 @@ CSSTokenStream::CSSTokenStream(std::string_view source) : mSource(preprocessCSS(
     std::vector<OpenBlock> blocks;
     bool commentBeforeNextToken = false;
     const auto addToken = [this, &commentBeforeNextToken](CSSTokenKind kind, std::size_t begin, std::size_t end) {
-        mTokens.push_back({kind, begin, end, kNoMatchingCSSToken, commentBeforeNextToken});
+        std::optional<float> numericValue;
+        if (kind == CSSTokenKind::Number || kind == CSSTokenKind::Dimension || kind == CSSTokenKind::Percentage) {
+            const std::string_view token = mSource.substr(begin, end - begin);
+            numericValue = parseCSSNumber(token.substr(0, consumeNumber(token, 0)));
+        }
+        mTokens.push_back({kind, begin, end, kNoMatchingCSSToken, commentBeforeNextToken, numericValue});
         commentBeforeNextToken = false;
         return mTokens.size() - 1;
     };

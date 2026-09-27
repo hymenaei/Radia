@@ -12,6 +12,7 @@
 #include <set>
 #include <unordered_set>
 #include "dom/elementinternal.h"
+#include "EventTypes.h"
 #include "event/eventcall.h"
 #include "html/element.h"
 #include "html/elementfactory.h"
@@ -117,7 +118,7 @@ ElementBuildInput makeElementInput(const SourceNode& node, const SourceNode* def
 void rejectAuthoredAttributes(const SourceNode& node, ElementBuildContext& context, const std::string& sourceName) {
     for (const auto& [name, attribute] : node.attributes)
         context.error("layout.attribute.unknown",
-                      "Unknown attribute on <" + std::string(htmlTagName(node.tag)) + ">: " + attribute.authoredName + ".", sourceName,
+                      "Unknown attribute on <" + std::string(HTMLTagName(node.tag)) + ">: " + attribute.authoredName + ".", sourceName,
                       attribute.source.begin.line, attribute.source.begin.column);
 }
 
@@ -141,8 +142,9 @@ bool validateDefaultNode(const SourceNode& node, ElementBuildContext& context, c
         context.error("layout.defaults.controller_attribute", "Element Defaults cannot declare IDs, relationships, includes, or controller bindings.",
                       sourceName, node.source.begin.line, node.source.begin.column);
     }
-    for (const AuthoredEventDescriptor& descriptor : kAuthoredEventDescriptors) {
-        if (readElementAttribute(input, descriptor.attribute, ignored)) {
+    for (const EventTypeDescriptor& descriptor : eventTypes) {
+        if (!descriptor.htmlAttribute) continue;
+        if (readElementAttribute(input, *descriptor.htmlAttribute, ignored)) {
             context.error("layout.defaults.controller_attribute", "Element Defaults cannot declare Event Handler Calls.", sourceName,
                           node.source.begin.line, node.source.begin.column);
             break;
@@ -150,7 +152,7 @@ bool validateDefaultNode(const SourceNode& node, ElementBuildContext& context, c
     }
 
     if (definition->attributeBehavior.apply) {
-        if (std::unique_ptr<Element> probe = HTMLElementFactory::create(htmlTagName(node.tag)))
+        if (std::unique_ptr<Element> probe = HTMLElementFactory::create(HTMLTagName(node.tag)))
             definition->attributeBehavior.apply(input, *probe, context);
     }
 
@@ -218,7 +220,7 @@ void ResourceCompiler::validateElementScope(Element& scope, BuildState& state, c
     visit(scope, true);
 
     const ElementScopeContext context(ids, duplicates, [](const Element& element) {
-        const ResourceElementDefinition* definition = findElementDefinition(lookupHTMLTag(element.elementName()));
+        const ResourceElementDefinition* definition = findElementDefinition(findHTMLTag(element.elementName()));
         return definition && definition->labelable;
     });
     for (const BuildState::AuthoredElement* authored : authoredElementRecords) {
@@ -240,7 +242,7 @@ DiagnosticResult ResourceCompiler::validateElementDefaults(const std::string& el
 void ResourceCompiler::loadElementDefaults(const std::string& elementName, BuildState& state) const {
     const std::string lookup = canonicalizeHTMLName(elementName);
     if (state.elementDefaults.find(lookup) != state.elementDefaults.end()) return;
-    const ResourceElementDefinition* definition = findElementDefinition(lookupHTMLTag(elementName));
+    const ResourceElementDefinition* definition = findElementDefinition(findHTMLTag(elementName));
     const std::string canonical = definition ? definition->elementName : elementName;
     const ResourceId defaultId("elements/" + canonical + ".html");
     const SourceNode* defaultRoot = nullptr;
@@ -267,7 +269,7 @@ void ResourceCompiler::loadElementDefaults(const std::string& elementName, Build
     if (document && document->root) {
         defaultRoot = document->root.get();
         const std::size_t errorsBefore = state.result.errors.size();
-        if (canonicalizeHTMLName(htmlTagName(defaultRoot->tag)) != lookup) {
+        if (canonicalizeHTMLName(HTMLTagName(defaultRoot->tag)) != lookup) {
             state.result.error("layout.defaults.root_invalid", "Element Defaults root must be <" + canonical + ">.", document->sourceName,
                                defaultRoot->source.begin.line, defaultRoot->source.begin.column);
             defaultRoot = nullptr;
@@ -396,7 +398,7 @@ bool ResourceCompiler::resolveElementResource(const ElementBuildInput& input, co
                                               std::unique_ptr<Element>& element, const ResourceId& baseId, BuildState& state) const {
     std::string filename;
     if (!readElementAttribute(input, "filename", filename)) {
-        if (!element) element = HTMLElementFactory::create(htmlTagName(input.tag));
+        if (!element) element = HTMLElementFactory::create(HTMLTagName(input.tag));
         return true;
     }
 
@@ -469,7 +471,7 @@ void ResourceCompiler::buildChildren(Element& target, const SourceNode& node, co
         const SourceNode& childNode = *content.node;
         if (consumeFlowBreak(childNode, context) == ChildHandling::Handled) continue;
         if (consumeScopedElement(childNode, context) == ChildHandling::Handled) continue;
-        const auto partAttributes = definition.childrenBehavior.partAttributes.find(std::string(htmlTagName(childNode.tag)));
+        const auto partAttributes = definition.childrenBehavior.partAttributes.find(std::string(HTMLTagName(childNode.tag)));
         if (partAttributes != definition.childrenBehavior.partAttributes.end())
             validateElementAttributes(makeElementInput(childNode, nullptr, sourceName), *state.buildContext);
         if (consumeChildContainer(childNode, context) == ChildHandling::Handled) continue;
@@ -534,7 +536,7 @@ ResourceCompiler::ChildHandling ResourceCompiler::consumeFlowBreak(const SourceN
 }
 
 ResourceCompiler::ChildHandling ResourceCompiler::consumeScopedElement(const SourceNode& childNode, ChildBuildContext& context) const {
-    const auto scopedInline = context.definition.contentBehavior.scopedElements.find(canonicalizeHTMLName(htmlTagName(childNode.tag)));
+        const auto scopedInline = context.definition.contentBehavior.scopedElements.find(canonicalizeHTMLName(HTMLTagName(childNode.tag)));
     if (scopedInline == context.definition.contentBehavior.scopedElements.end()) return ChildHandling::Unhandled;
     const ResourceElementDefinition* scopedDefinition = findElementDefinition(childNode.tag);
     const ElementBuildInput input = makeElementInput(childNode, nullptr, context.sourceName);
@@ -566,7 +568,7 @@ ResourceCompiler::ChildHandling ResourceCompiler::consumeChildContainer(const So
             if (nestedContent.isText()) {
                 if (!trimmedText(nestedContent.text).empty())
                     context.state.result.error("layout.text.unsupported",
-                                               "Text content is not supported in <" + std::string(htmlTagName(childNode.tag)) + ">.",
+                                               "Text content is not supported in <" + std::string(HTMLTagName(childNode.tag)) + ">.",
                                                context.sourceName, nestedContent.source.begin.line, nestedContent.source.begin.column);
                 continue;
             }

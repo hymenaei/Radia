@@ -81,7 +81,7 @@ SkinGenerationPrepareResult SkinCompiler::prepare(ResourceSnapshot resources) co
 
     const std::optional<ResourceSource> localizationYaml = resources.load(ResourceId("localization.yaml"));
     const std::optional<ResourceSource> styleSource = resources.load(ResourceId(kStylesheetId));
-    const std::string defaultStylesheetId(kDefaultStylesheetResourceId);
+    const std::string userAgentStyleSheetId(kUserAgentStyleSheetId);
     if (!localizationYaml) result.error("ui.resource.missing", "Missing UI resource: localization.yaml.", "localization.yaml");
     if (!styleSource) result.error("ui.resource.missing", "Missing UI resource: skin.css.", kStylesheetId);
     if (result.hasErrors()) return result;
@@ -92,11 +92,36 @@ SkinGenerationPrepareResult SkinCompiler::prepare(ResourceSnapshot resources) co
                                              : localization.loadYamlLayers(localizationLayers));
     std::vector<StyleLayer> styleInputs;
     styleInputs.reserve(styleLayers.empty() ? 2 : styleLayers.size() + 1);
-    styleInputs.push_back(StyleLayer{StyleOrigin::Default, ResourceLayer{defaultStylesheetId, std::string(defaultStylesheetSource())}});
+    styleInputs.push_back(StyleLayer{StyleOrigin::UserAgent, ResourceLayer{userAgentStyleSheetId, std::string(userAgentStyleSheet())}});
     if (styleLayers.empty()) styleInputs.push_back(StyleLayer{StyleOrigin::Skin, ResourceLayer{styleSource->provenance, styleSource->content}});
     else
         for (const ResourceLayer& layer : styleLayers) styleInputs.push_back(StyleLayer{StyleOrigin::Skin, layer});
     result.append(styleSheet.loadRadiaLayers(styleInputs));
+
+    for (FontFace& face : styleSheet.mFontFaces) {
+        if (face.origin != StyleOrigin::Skin) continue;
+        for (FontFaceSource& source : face.sources) {
+            FontFaceURL* url = std::get_if<FontFaceURL>(&source.value);
+            if (!url) continue;
+            if (url->url.empty()
+                || url->url.front() == '/'
+                || url->url.front() == '\\'
+                || url->url.find('\\') != std::string::npos
+                || url->url.find(':') != std::string::npos
+                || url->url.find('?') != std::string::npos
+                || url->url.find('#') != std::string::npos) {
+                result.error("ui.resource.missing", "Missing UI resource: " + url->url + ".", source.sourceName, source.line, source.column);
+                continue;
+            }
+
+            const ResourceId resolved = resources.resolve(ResourceId(source.sourceName), url->url);
+            if (!resolved.valid() || resolved.value().rfind("resources/", 0) != 0 || !resources.resources().contains(resolved)) {
+                result.error("ui.resource.missing", "Missing UI resource: " + url->url + ".", source.sourceName, source.line, source.column);
+                continue;
+            }
+            url->id = resolved;
+        }
+    }
 
     for (const StyleResourceReference& reference : styleSheet.resourceReferences()) {
         const ResourceId resolved = detail::resolveSkinResource(resources, reference.value);

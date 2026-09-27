@@ -9,50 +9,6 @@
 #include <limits>
 
 namespace radia::ui {
-namespace {
-struct TagInfo {
-    HTMLTag tag;
-    std::string_view localName;
-    bool isVoid;
-};
-
-constexpr TagInfo kTagInfo[] = {
-    {HTMLTag::Abbr, kAbbrTag.localName, false},
-    {HTMLTag::B, kBTag.localName, false},
-    {HTMLTag::Button, kButtonTag.localName, false},
-    {HTMLTag::Br, kBrTag.localName, true},
-    {HTMLTag::Cite, kCiteTag.localName, false},
-    {HTMLTag::Code, kCodeTag.localName, false},
-    {HTMLTag::Dfn, kDfnTag.localName, false},
-    {HTMLTag::Del, kDelTag.localName, false},
-    {HTMLTag::Div, kDivTag.localName, false},
-    {HTMLTag::Em, kEmTag.localName, false},
-    {HTMLTag::Fieldset, kFieldsetTag.localName, false},
-    {HTMLTag::Floater, kFloaterTag.localName, false},
-    {HTMLTag::Head, kHeadTag.localName, false},
-    {HTMLTag::Header, kHeaderTag.localName, false},
-    {HTMLTag::I, kITag.localName, false},
-    {HTMLTag::Ins, kInsTag.localName, false},
-    {HTMLTag::Kbd, kKbdTag.localName, false},
-    {HTMLTag::Label, kLabelTag.localName, false},
-    {HTMLTag::Legend, kLegendTag.localName, false},
-    {HTMLTag::Mark, kMarkTag.localName, false},
-    {HTMLTag::Minimize, kMinimizeTag.localName, false},
-    {HTMLTag::Close, kCloseTag.localName, false},
-    {HTMLTag::Panel, kPanelTag.localName, false},
-    {HTMLTag::Paragraph, kParagraphTag.localName, false},
-    {HTMLTag::Q, kQTag.localName, false},
-    {HTMLTag::S, kSTag.localName, false},
-    {HTMLTag::Small, kSmallTag.localName, false},
-    {HTMLTag::Strong, kStrongTag.localName, false},
-    {HTMLTag::Title, kTitleTag.localName, false},
-    {HTMLTag::U, kUTag.localName, false},
-    {HTMLTag::Input, kInputTag.localName, true},
-    {HTMLTag::Body, kBodyTag.localName, false},
-};
-
-} // namespace
-
 bool isHTMLNameCharacter(char character) {
     return (character >= 'a' && character <= 'z')
         || (character >= 'A' && character <= 'Z')
@@ -150,22 +106,4 @@ std::string decodeHTMLReferences(std::string_view value) {
     return result;
 }
 
-std::string_view htmlTagName(HTMLTag tag) {
-    for (const TagInfo& info : kTagInfo)
-        if (info.tag == tag) return info.localName;
-    return {};
-}
-
-HTMLTag lookupHTMLTag(std::string_view name) {
-    const std::string canonical = canonicalizeHTMLName(name);
-    for (const TagInfo& info : kTagInfo)
-        if (canonical == info.localName) return info.tag;
-    return HTMLTag::Unknown;
-}
-
-bool isVoidHTMLTag(HTMLTag tag) {
-    for (const TagInfo& info : kTagInfo)
-        if (info.tag == tag) return info.isVoid;
-    return false;
-}
 } // namespace radia::ui

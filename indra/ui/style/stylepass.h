@@ -25,7 +25,7 @@ class LayoutPass;
 
 class StylePass {
 public:
-    using OrderedChildSnapshot = ::radia::ui::OrderedChildSnapshot;
+    using OrderedChildSnapshot = radia::ui::OrderedChildSnapshot;
 
     class TraversalScope {
     public:
@@ -94,6 +94,7 @@ private:
 
     void compactStyles();
     void compactOrderingCaches();
+    const ComputedStyle& rootStyle(const Element& element) const;
     const detail::LayoutContextKey& contextKey() const { return mContext; }
     TreeTraversalCache::ChildSnapshot sourceChildren(Element& parent);
     OrderedChildSnapshot orderedChildren(Element& parent);

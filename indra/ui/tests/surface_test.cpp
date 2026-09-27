@@ -31,20 +31,20 @@
 
 namespace {
 using radia::ui::AAIntent;
-using radia::ui::AuthoredEventCall;
 using radia::ui::BackgroundAttachment;
 using radia::ui::Binder;
 using radia::ui::Binding;
 using radia::ui::ClipAxes;
 using radia::ui::clipsAxis;
 using radia::ui::ComputedStyle;
+using radia::ui::CSSPseudoClass;
 using radia::ui::CursorStyle;
 using radia::ui::defaultNativeAppearance;
 using radia::ui::Element;
 using radia::ui::ElementRef;
-using radia::ui::ElementState;
 using radia::ui::Event;
 using radia::ui::EventHandler;
+using radia::ui::EventHandlerCall;
 using radia::ui::EventPhase;
 using radia::ui::fixedTextMetrics;
 using radia::ui::HTMLButtonElement;
@@ -63,6 +63,9 @@ using radia::ui::kKeyReturn;
 using radia::ui::kKeySpace;
 using radia::ui::kKeyTab;
 using radia::ui::kModifierShift;
+using radia::ui::kMouseDownEvent;
+using radia::ui::kMouseMoveEvent;
+using radia::ui::kMouseUpEvent;
 using radia::ui::kPointerDownEvent;
 using radia::ui::kPointerMoveEvent;
 using radia::ui::kPointerUpEvent;
@@ -83,7 +86,7 @@ using radia::ui::Rect;
 using radia::ui::ResourceSnapshot;
 using radia::ui::ScrollbarMode;
 using radia::ui::ScrollbarPart;
-using radia::ui::setAuthoredEventCall;
+using radia::ui::setEventHandlerCall;
 using radia::ui::SkinCompiler;
 using radia::ui::SkinGenerationPrepareResult;
 using radia::ui::StyleSheet;
@@ -107,19 +110,19 @@ constexpr char kFloaterInteractionLayout[] = "floater { display: flex; flex-dire
                                              "floater > body { flex-grow: 1; } "
                                              "label { height: 20px; }";
 
-const char* noAuthoredEventArguments(const AuthoredEventCall& call) {
+const char* noAuthoredEventArguments(const EventHandlerCall& call) {
     return call.arguments().empty() ? nullptr : "binding.event.arity_mismatch";
 }
 
 template<typename Callback> void bindAction(Binder& binder, std::string name, Callback callback) {
     binder.event(makeEventRegistration(
-        std::move(name), [callback = std::move(callback)](Event&, const AuthoredEventCall&) mutable { callback(); }, noAuthoredEventArguments));
+        std::move(name), [callback = std::move(callback)](Event&, const EventHandlerCall&) mutable { callback(); }, noAuthoredEventArguments));
 }
 
 template<typename Callback> void bindSemanticEvent(Binder& binder, std::string name, Callback callback) {
     binder.event(makeEventRegistration(
         std::move(name),
-        [callback = std::move(callback)](Event& event, const AuthoredEventCall&) mutable { callback(static_cast<const Event&>(event)); },
+        [callback = std::move(callback)](Event& event, const EventHandlerCall&) mutable { callback(static_cast<const Event&>(event)); },
         noAuthoredEventArguments));
 }
 } // namespace
@@ -321,9 +324,9 @@ TEST(SurfaceTest, PaintsBodyBackground) {
             && candidate.rect.y == 0.f
             && candidate.rect.w == 100.f
             && candidate.rect.h == 80.f
-            && candidate.style.backgroundColor.r == 1.f
-            && candidate.style.backgroundColor.g == 0.f
-            && candidate.style.backgroundColor.b == 0.f;
+            && candidate.style.backgroundColor().resolvedColor().r == 1.f
+            && candidate.style.backgroundColor().resolvedColor().g == 0.f
+            && candidate.style.backgroundColor().resolvedColor().b == 0.f;
     });
     ASSERT_NE(command, recording.commands().end());
 }
@@ -380,21 +383,21 @@ TEST(SurfaceTest, HandlesPointerStates) {
     button->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true).setOnActivate([&](Element&) { ++activations; });
     context.mount(std::move(button));
     EXPECT_TRUE(context.pointerMove({{15.f, 15.f}}));
-    EXPECT_TRUE(target->hasState(ElementState::Hovered));
+    EXPECT_TRUE(target->hovered());
     context.pointerDown({{15.f, 15.f}, PointerButton::Left});
-    EXPECT_TRUE(target->hasState(ElementState::Active));
+    EXPECT_TRUE(target->active());
     context.pointerMove({{50.f, 50.f}});
-    EXPECT_FALSE(target->hasState(ElementState::Active));
+    EXPECT_FALSE(target->active());
     context.pointerMove({{15.f, 15.f}});
-    EXPECT_TRUE(target->hasState(ElementState::Active));
+    EXPECT_TRUE(target->active());
     context.pointerUp({{15.f, 15.f}, PointerButton::Left});
     EXPECT_EQ(activations, 1);
     EXPECT_TRUE(context.hasFocus());
-    EXPECT_FALSE(target->hasState(ElementState::FocusVisible));
+    EXPECT_FALSE(target->focusVisible());
 
     context.pointerDown({{15.f, 15.f}, PointerButton::Left});
     context.pointerLeave();
-    EXPECT_FALSE(target->hasState(ElementState::Active));
+    EXPECT_FALSE(target->active());
     context.pointerUp({{50.f, 50.f}, PointerButton::Left});
     EXPECT_EQ(activations, 1);
 }
@@ -415,9 +418,9 @@ TEST(SurfaceTest, ActivatesSwitch) {
     EXPECT_FALSE(context.keyUp({kKeySpace}));
     EXPECT_TRUE(target->checked());
     context.keyDown({kKeySpace});
-    EXPECT_TRUE(target->hasState(ElementState::Active));
+    EXPECT_TRUE(target->active());
     EXPECT_FALSE(context.keyUp({kKeyReturn}));
-    EXPECT_TRUE(target->hasState(ElementState::Active));
+    EXPECT_TRUE(target->active());
     context.keyUp({kKeySpace});
     EXPECT_FALSE(target->checked());
     EXPECT_FALSE(context.keyUp({kKeySpace}));
@@ -473,14 +476,14 @@ TEST(SurfaceTest, DragsFloater) {
     const float expandedTop = floaterPtr->rect().top();
     const float expandedWidth = floaterPtr->rect().w;
     floaterPtr->setMinimized(true);
-    EXPECT_TRUE(floaterPtr->hasState(ElementState::Minimized));
+    EXPECT_TRUE(floaterPtr->minimized());
     EXPECT_EQ(floaterPtr->body()->visibility(), Visibility::Visible);
     EXPECT_EQ(contentNode->visibility(), Visibility::Visible);
     EXPECT_EQ(floaterPtr->rect().top(), expandedTop);
     EXPECT_EQ(floaterPtr->rect().h, 30.f);
     EXPECT_LT(floaterPtr->rect().w, expandedWidth);
     floaterPtr->setMinimized(false);
-    EXPECT_FALSE(floaterPtr->hasState(ElementState::Minimized));
+    EXPECT_FALSE(floaterPtr->minimized());
     EXPECT_EQ(floaterPtr->body()->visibility(), Visibility::Visible);
     EXPECT_EQ(contentNode->visibility(), Visibility::Visible);
     EXPECT_EQ(floaterPtr->rect().h, 100.f);
@@ -510,7 +513,7 @@ TEST(SurfaceTest, IgnoresNonPrimaryPointerButtons) {
     }
     EXPECT_EQ(activations, 0);
     EXPECT_FALSE(context.hasFocus());
-    EXPECT_FALSE(target->hasState(ElementState::Active));
+    EXPECT_FALSE(target->active());
 
     context.pointerDown({{15.f, 15.f}, PointerButton::Left});
     context.pointerUp({{15.f, 15.f}, PointerButton::Left});
@@ -528,7 +531,7 @@ TEST(SurfaceTest, RoutesDoubleClickScroll) {
     EXPECT_TRUE(context.pointerDown({{15.f, 15.f}, PointerButton::Left, 0, 2}));
     EXPECT_EQ(target->lastClickCount, static_cast<uint8_t>(2));
     EXPECT_TRUE(context.pointerUp({{15.f, 15.f}, PointerButton::Left}));
-    EXPECT_FALSE(target->hasState(ElementState::Active));
+    EXPECT_FALSE(target->active());
     EXPECT_TRUE(context.hasFocus());
     EXPECT_TRUE(context.charInput(0x03A9));
     EXPECT_EQ(target->lastCodepoint, 0x03A9u);
@@ -544,7 +547,7 @@ TEST(SurfaceTest, RoutesDoubleClickScroll) {
 
     EXPECT_TRUE(context.pointerMove({{15.f, 15.f}}));
     context.pointerLeave();
-    EXPECT_FALSE(target->hasState(ElementState::Hovered));
+    EXPECT_FALSE(target->hovered());
 }
 
 TEST(SurfaceTest, RoutesWheelInputWithWheelPayload) {
@@ -748,9 +751,9 @@ TEST(SurfaceTest, RecordsScrollbarFallback) {
     EXPECT_TRUE(request.geometry.horizontal.visible);
     EXPECT_TRUE(request.geometry.vertical.visible);
     EXPECT_FALSE(request.colors.automatic);
-    EXPECT_NEAR(request.colors.thumb.r, 0x11 / 255.f, 1.0e-6f);
-    EXPECT_NEAR(request.colors.thumb.g, 0x22 / 255.f, 1.0e-6f);
-    EXPECT_NEAR(request.colors.track.b, 0x66 / 255.f, 1.0e-6f);
+    EXPECT_NEAR(request.colors.thumb.resolvedColor().r, 0x11 / 255.f, 1.0e-6f);
+    EXPECT_NEAR(request.colors.thumb.resolvedColor().g, 0x22 / 255.f, 1.0e-6f);
+    EXPECT_NEAR(request.colors.track.resolvedColor().b, 0x66 / 255.f, 1.0e-6f);
 }
 
 TEST(SurfaceTest, DragsScrollbarThumb) {
@@ -1189,7 +1192,7 @@ TEST(SurfaceTest, ScrollsFocusedAncestorWithKeyboard) {
 
     EXPECT_TRUE(surface.pointerDown({{15.f, 30.f}, PointerButton::Left}));
     EXPECT_TRUE(surface.pointerUp({{15.f, 30.f}, PointerButton::Left}));
-    EXPECT_TRUE(buttonPtr->hasState(ElementState::Focused));
+    EXPECT_TRUE(buttonPtr->focused());
     EXPECT_TRUE(surface.keyDown({kKeyPageDown}));
     EXPECT_FLOAT_EQ(viewportPtr->scrollTop(), viewportPtr->clientHeight() - 40.f);
     EXPECT_TRUE(surface.keyDown({kKeyEnd}));
@@ -1406,23 +1409,23 @@ TEST(SurfaceTest, TraversesFocusableControls) {
     context.mount(std::move(last));
 
     EXPECT_TRUE(context.keyDown({kKeyTab}));
-    EXPECT_TRUE(firstTarget->hasState(ElementState::Focused));
-    EXPECT_TRUE(firstTarget->hasState(ElementState::FocusVisible));
+    EXPECT_TRUE(firstTarget->focused());
+    EXPECT_TRUE(firstTarget->focusVisible());
     EXPECT_TRUE(context.keyUp({kKeyTab}));
 
     context.keyDown({kKeyTab});
-    EXPECT_TRUE(lastTarget->hasState(ElementState::Focused));
-    EXPECT_FALSE(hiddenTarget->hasState(ElementState::Focused));
-    EXPECT_FALSE(disabledTarget->hasState(ElementState::Focused));
+    EXPECT_TRUE(lastTarget->focused());
+    EXPECT_FALSE(hiddenTarget->focused());
+    EXPECT_FALSE(disabledTarget->focused());
 
     context.keyDown({kKeyTab});
-    EXPECT_TRUE(firstTarget->hasState(ElementState::Focused));
+    EXPECT_TRUE(firstTarget->focused());
     context.keyDown({kKeyTab, kModifierShift});
-    EXPECT_TRUE(lastTarget->hasState(ElementState::Focused));
+    EXPECT_TRUE(lastTarget->focused());
 
     context.pointerDown({{15.f, 15.f}, PointerButton::Left});
-    EXPECT_TRUE(firstTarget->hasState(ElementState::Focused));
-    EXPECT_FALSE(firstTarget->hasState(ElementState::FocusVisible));
+    EXPECT_TRUE(firstTarget->focused());
+    EXPECT_FALSE(firstTarget->focusVisible());
     firstTarget->setVisibility(Visibility::Hidden);
     EXPECT_FALSE(context.keyDown({kKeySpace}));
     EXPECT_FALSE(context.hasFocus());
@@ -1434,8 +1437,8 @@ TEST(SurfaceTest, TraversesFocusableControls) {
     firstTarget->disabled(false);
     context.pointerDown({{15.f, 15.f}, PointerButton::Left});
     context.clearInteractionState();
-    EXPECT_FALSE(firstTarget->hasState(ElementState::Focused));
-    EXPECT_FALSE(firstTarget->hasState(ElementState::FocusVisible));
+    EXPECT_FALSE(firstTarget->focused());
+    EXPECT_FALSE(firstTarget->focusVisible());
 }
 
 TEST(SurfaceTest, ClearsInteractionOnRemoval) {
@@ -1454,17 +1457,17 @@ TEST(SurfaceTest, ClearsInteractionOnRemoval) {
     context.pointerDown({{15.f, 15.f}, PointerButton::Left});
     context.pointerUp({{15.f, 15.f}, PointerButton::Left});
     context.keyDown({kKeySpace});
-    EXPECT_TRUE(target->hasState(ElementState::Active));
+    EXPECT_TRUE(target->active());
     context.clearInteractionState();
-    EXPECT_FALSE(target->hasState(ElementState::Hovered));
-    EXPECT_FALSE(target->hasState(ElementState::Active));
+    EXPECT_FALSE(target->hovered());
+    EXPECT_FALSE(target->active());
     EXPECT_FALSE(context.hasFocus());
 
     context.pointerMove({{15.f, 15.f}});
     context.pointerDown({{15.f, 15.f}, PointerButton::Left});
-    EXPECT_TRUE(target->hasState(ElementState::Active));
+    EXPECT_TRUE(target->active());
     context.clearInteractionState();
-    EXPECT_FALSE(target->hasState(ElementState::Active));
+    EXPECT_FALSE(target->active());
 
     context.pointerDown({{15.f, 15.f}, PointerButton::Left});
     parent->setVisibility(Visibility::Hidden);
@@ -1477,16 +1480,16 @@ TEST(SurfaceTest, ClearsInteractionOnRemoval) {
     EXPECT_FALSE(context.hasFocus());
 }
 
-TEST(SurfaceTest, OrdersMouseBindings) {
+TEST(SurfaceTest, OrdersPointerBindings) {
     Surface context;
     context.setViewport(100.f, 100.f);
     auto button = makeElement<HTMLButtonElement>();
     button->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
-    setAuthoredEventCall(*button, kPointerDownEvent, AuthoredEventCall("press"));
-    setAuthoredEventCall(*button, kPointerUpEvent, AuthoredEventCall("release"));
-    setAuthoredEventCall(*button, kClickEvent, AuthoredEventCall("click"));
-    setAuthoredEventCall(*button, kDoubleClickEvent, AuthoredEventCall("doubleClick"));
-    setAuthoredEventCall(*button, kContextMenuEvent, AuthoredEventCall("contextMenu"));
+    setEventHandlerCall(*button, kPointerDownEvent, EventHandlerCall("press"));
+    setEventHandlerCall(*button, kPointerUpEvent, EventHandlerCall("release"));
+    setEventHandlerCall(*button, kClickEvent, EventHandlerCall("click"));
+    setEventHandlerCall(*button, kDoubleClickEvent, EventHandlerCall("doubleClick"));
+    setEventHandlerCall(*button, kContextMenuEvent, EventHandlerCall("contextMenu"));
     HTMLButtonElement* mounted = button.get();
     context.mount(std::move(button));
 
@@ -1539,13 +1542,92 @@ TEST(SurfaceTest, OrdersMouseBindings) {
     EXPECT_EQ(events[11], "double");
 }
 
+TEST(SurfaceTest, DispatchesMouseEventsAfterDistinctPointerEvents) {
+    Surface surface;
+    surface.setViewport(100.f, 100.f);
+    auto button = makeElement<HTMLButtonElement>();
+    button->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
+    HTMLButtonElement* target = button.get();
+
+    std::vector<std::string> events;
+    button->addEventListener(kPointerMoveEvent, [&](Event& event) {
+        EXPECT_EQ(event.type(), kPointerMoveEvent);
+        EXPECT_EQ(event.target(), target);
+        events.emplace_back("pointermove");
+    });
+    button->addEventListener(kMouseMoveEvent, [&](Event& event) {
+        EXPECT_EQ(event.type(), kMouseMoveEvent);
+        EXPECT_EQ(event.target(), target);
+        events.emplace_back("mousemove");
+    });
+    button->addEventListener(kPointerDownEvent, [&](Event& event) {
+        EXPECT_EQ(event.type(), kPointerDownEvent);
+        EXPECT_EQ(event.target(), target);
+        events.emplace_back("pointerdown");
+    });
+    button->addEventListener(kMouseDownEvent, [&](Event& event) {
+        EXPECT_EQ(event.type(), kMouseDownEvent);
+        EXPECT_EQ(event.target(), target);
+        events.emplace_back("mousedown");
+    });
+    button->addEventListener(kPointerUpEvent, [&](Event& event) {
+        EXPECT_EQ(event.type(), kPointerUpEvent);
+        EXPECT_EQ(event.target(), target);
+        events.emplace_back("pointerup");
+    });
+    button->addEventListener(kMouseUpEvent, [&](Event& event) {
+        EXPECT_EQ(event.type(), kMouseUpEvent);
+        EXPECT_EQ(event.target(), target);
+        events.emplace_back("mouseup");
+    });
+    surface.mount(std::move(button));
+
+    EXPECT_TRUE(surface.pointerMove({{15.f, 15.f}}));
+    EXPECT_TRUE(surface.pointerDown({{15.f, 15.f}, PointerButton::Left}));
+    EXPECT_TRUE(surface.pointerUp({{15.f, 15.f}, PointerButton::Left}));
+    const std::vector<std::string> expectedEvents{
+        "pointermove", "mousemove", "pointerdown", "mousedown", "pointerup", "mouseup",
+    };
+    EXPECT_EQ(events, expectedEvents);
+}
+
+TEST(SurfaceTest, CanceledPointerDownSuppressesMouseEventsUntilPointerUp) {
+    Surface surface;
+    surface.setViewport(100.f, 100.f);
+    auto button = makeElement<HTMLButtonElement>();
+    button->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
+
+    std::vector<std::string> events;
+    button->addEventListener(kPointerMoveEvent, [&](Event&) { events.emplace_back("pointermove"); });
+    button->addEventListener(kMouseMoveEvent, [&](Event&) { events.emplace_back("mousemove"); });
+    button->addEventListener(kPointerDownEvent, [&](Event& event) {
+        events.emplace_back("pointerdown");
+        event.preventDefault();
+    });
+    button->addEventListener(kMouseDownEvent, [&](Event&) { events.emplace_back("mousedown"); });
+    button->addEventListener(kPointerUpEvent, [&](Event&) { events.emplace_back("pointerup"); });
+    button->addEventListener(kMouseUpEvent, [&](Event&) { events.emplace_back("mouseup"); });
+    surface.mount(std::move(button));
+
+    surface.pointerMove({{15.f, 15.f}});
+    surface.pointerDown({{15.f, 15.f}, PointerButton::Left});
+    surface.pointerMove({{16.f, 16.f}});
+    surface.pointerUp({{16.f, 16.f}, PointerButton::Left});
+    surface.pointerMove({{17.f, 17.f}});
+
+    const std::vector<std::string> expectedEvents{
+        "pointermove", "mousemove", "pointerdown", "pointermove", "pointerup", "pointermove", "mousemove",
+    };
+    EXPECT_EQ(events, expectedEvents);
+}
+
 TEST(SurfaceTest, ScopesOwnedBindingToMount) {
     Surface surface;
     auto root = makeElement<HTMLPanelElement>();
     HTMLPanelElement* rootPointer = root.get();
     auto button = makeElement<HTMLButtonElement>();
     HTMLButtonElement* target = button.get();
-    setAuthoredEventCall(*button, kClickEvent, AuthoredEventCall("activate"));
+    setEventHandlerCall(*button, kClickEvent, EventHandlerCall("activate"));
     root->append(std::move(button));
 
     int activations = 0;
@@ -1586,7 +1668,7 @@ TEST(SurfaceTest, ScopesBorrowedBindingToMount) {
     auto root = makeElementValue<HTMLPanelElement>();
     auto button = makeElement<HTMLButtonElement>();
     HTMLButtonElement* target = button.get();
-    setAuthoredEventCall(*button, kClickEvent, AuthoredEventCall("activate"));
+    setEventHandlerCall(*button, kClickEvent, EventHandlerCall("activate"));
     root.append(std::move(button));
 
     int activations = 0;
@@ -2357,9 +2439,9 @@ TEST(SurfaceTest, HonorsVisibility) {
 
     surface.clearInteractionState();
     EXPECT_TRUE(surface.keyDown({kKeyTab}));
-    EXPECT_TRUE(visible->hasState(ElementState::Focused));
-    EXPECT_FALSE(hidden->hasState(ElementState::Focused));
-    EXPECT_FALSE(collapsed->hasState(ElementState::Focused));
+    EXPECT_TRUE(visible->focused());
+    EXPECT_FALSE(hidden->focused());
+    EXPECT_FALSE(collapsed->focused());
 }
 
 TEST(SurfaceTest, HonorsVisibilityStyles) {
@@ -2398,10 +2480,10 @@ TEST(SurfaceTest, HonorsVisibilityStyles) {
 
     surface.clearInteractionState();
     EXPECT_TRUE(surface.keyDown({kKeyTab}));
-    EXPECT_TRUE(visible->hasState(ElementState::Focused));
-    EXPECT_FALSE(hidden->hasState(ElementState::Focused));
-    EXPECT_FALSE(collapse->hasState(ElementState::Focused));
-    EXPECT_FALSE(none->hasState(ElementState::Focused));
+    EXPECT_TRUE(visible->focused());
+    EXPECT_FALSE(hidden->focused());
+    EXPECT_FALSE(collapse->focused());
+    EXPECT_FALSE(none->focused());
 }
 
 TEST(SurfaceTest, InvalidatesAncestorLayout) {
@@ -2434,7 +2516,7 @@ TEST(SurfaceTest, ReflowsAfterTextAlign) {
     constexpr char kTextAlignStyles[] = "panel { text-align: left; } panel:hover { text-align: center; } "
                                         ".inline { display: inline; width: 20px; height: 10px; }";
     ASSERT_TRUE(styleSheet.loadRadia(kTextAlignStyles).ok());
-    ASSERT_TRUE(styleSheet.stateAffectsLayout(ElementState::Hovered));
+    ASSERT_TRUE(styleSheet.pseudoClassAffectsLayout(CSSPseudoClass::Hover));
 
     Surface surface(styleSheet);
     surface.setViewport(100.f, 20.f);
@@ -2451,7 +2533,7 @@ TEST(SurfaceTest, ReflowsAfterTextAlign) {
     EXPECT_FLOAT_EQ(childTarget->rect().left(), 0.f);
 
     EXPECT_TRUE(surface.pointerMove({{90.f, 5.f}}));
-    ASSERT_TRUE(panelTarget->hasState(ElementState::Hovered));
+    ASSERT_TRUE(panelTarget->hovered());
     surface.updateLayout();
     EXPECT_FLOAT_EQ(childTarget->rect().left(), 40.f);
 }
@@ -2493,7 +2575,7 @@ TEST(SurfaceTest, UsesVisualOrderForPaintAndHitTesting) {
     const std::vector<std::string> expectedInitialPaintOrder{"early", "late"};
     EXPECT_EQ(paintOrder, expectedInitialPaintOrder);
     EXPECT_TRUE(surface.pointerDown({{5.f, 5.f}, PointerButton::Left}));
-    EXPECT_TRUE(lateTarget->hasState(ElementState::Active));
+    EXPECT_TRUE(lateTarget->active());
     ASSERT_EQ(eventRoute.size(), std::size_t(3));
     EXPECT_EQ(eventRoute[0], "panel:capture");
     EXPECT_EQ(eventRoute[1], "late:target");
@@ -2501,7 +2583,7 @@ TEST(SurfaceTest, UsesVisualOrderForPaintAndHitTesting) {
     surface.pointerUp({{5.f, 5.f}, PointerButton::Left});
     surface.clearInteractionState();
     EXPECT_TRUE(surface.keyDown({kKeyTab}));
-    EXPECT_TRUE(lateTarget->hasState(ElementState::Focused));
+    EXPECT_TRUE(lateTarget->focused());
 
     paintOrder.clear();
     earlyTarget->setVisibility(Visibility::Collapse);
@@ -2528,7 +2610,7 @@ TEST(SurfaceTest, InvalidatesTraversalOnMutation) {
     button->setRect({10.f, 10.f, 20.f, 20.f}).setPointerEvents(true);
     parent->append(std::move(button));
     EXPECT_TRUE(surface.pointerDown({{15.f, 15.f}, PointerButton::Left}));
-    EXPECT_TRUE(target->hasState(ElementState::Focused));
+    EXPECT_TRUE(target->focused());
 
     parent->replaceChildren();
     EXPECT_FALSE(surface.pointerDown({{15.f, 15.f}, PointerButton::Left}));

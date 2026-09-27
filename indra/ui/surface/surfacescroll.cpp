@@ -46,9 +46,9 @@ Vec2 consumeWheelDelta(Element& element, const ComputedStyle& style, const Vec2&
     const float currentLeft = element.scrollLeft();
     const float currentTop = element.scrollTop();
     const float nextLeft =
-        acceptsWheelScrolling(style.overflowX) ? std::clamp(currentLeft + delta.x, 0.f, element.scrollMetrics().maxScrollLeft) : currentLeft;
+        acceptsWheelScrolling(style.overflowX()) ? std::clamp(currentLeft + delta.x, 0.f, element.scrollMetrics().maxScrollLeft) : currentLeft;
     const float nextTop =
-        acceptsWheelScrolling(style.overflowY) ? std::clamp(currentTop + delta.y, 0.f, element.scrollMetrics().maxScrollTop) : currentTop;
+        acceptsWheelScrolling(style.overflowY()) ? std::clamp(currentTop + delta.y, 0.f, element.scrollMetrics().maxScrollTop) : currentTop;
     if (nextLeft != currentLeft || nextTop != currentTop) element.scrollTo(nextLeft, nextTop);
     return {nextLeft - currentLeft, nextTop - currentTop};
 }
@@ -70,8 +70,8 @@ std::optional<Surface::ScrollbarTarget> Surface::hitTestScrollbarNode(Element& n
         if (hit.valid()) return ScrollbarTarget{current, geometry, hit};
     }
 
-    const bool clipsX = style.overflowX != Overflow::Visible;
-    const bool clipsY = style.overflowY != Overflow::Visible;
+    const bool clipsX = style.overflowX() != Overflow::Visible;
+    const bool clipsY = style.overflowY() != Overflow::Visible;
     const ClipAxes clipAxes = (clipsX ? ClipAxes::X : ClipAxes::NoAxes) | (clipsY ? ClipAxes::Y : ClipAxes::NoAxes);
     const bool clipsChildren = clipAxes != ClipAxes::NoAxes;
     const Vec2 scrollTranslation = scrollContentTranslation(layoutDirection(), {current->scrollLeft(), current->scrollTop()});
@@ -83,7 +83,7 @@ std::optional<Surface::ScrollbarTarget> Surface::hitTestScrollbarNode(Element& n
     for (auto child = children->rbegin(); child != children->rend(); ++child)
         if (Element* childElement = child->element())
             if (childElement->parentElement() == current)
-                if (styles.style(*childElement).position != PositionMode::Fixed)
+                if (styles.style(*childElement).position() != Position::Fixed)
                     if (std::optional<ScrollbarTarget> hit = hitTestScrollbarNode(*childElement, childPoint, childClip, styles)) return hit;
 
     current = observation.get();
@@ -99,7 +99,7 @@ std::optional<Surface::ScrollbarTarget> Surface::hitTestScrollbarAt(const Vec2& 
     const auto hitInLayer = [&](SurfaceLayer layer) -> std::optional<ScrollbarTarget> {
         const MountList& layerMounts = mounts(layer);
         for (auto current = layerMounts.rbegin(); current != layerMounts.rend(); ++current)
-            if (*current && (*current)->root && styles.style(*(*current)->root).position != PositionMode::Fixed)
+            if (*current && (*current)->root && styles.style(*(*current)->root).position() != Position::Fixed)
                 if (std::optional<ScrollbarTarget> hit = hitTestScrollbarNode(*(*current)->root, point, mViewport, styles)) return hit;
         return std::nullopt;
     };
@@ -198,7 +198,7 @@ bool Surface::beginScrollbarInteraction(const ScrollbarTarget& target, const Vec
     }
 
     clearKeyboardPress();
-    if (Element* pressed = mPressed) pressed->setState(ElementState::Active, false);
+    if (Element* pressed = mPressed) pressed->setActive(false);
     mPressed = nullptr;
     mPressedClickCount = 0;
     mCaptured = nullptr;
@@ -330,7 +330,7 @@ bool Surface::scrollFocusedElement(const KeyEvent& event, Element& focused) {
         StylePass& styles = stylePass();
         const StylePass::TraversalScope traversal = styles.enterTraversal();
         const auto tryAxis = [&](Element& element, const ComputedStyle& style, ScrollbarAxis axis) {
-            const Overflow overflow = axis == ScrollbarAxis::Horizontal ? style.overflowX : style.overflowY;
+            const Overflow overflow = axis == ScrollbarAxis::Horizontal ? style.overflowX() : style.overflowY();
             if (!acceptsWheelScrolling(overflow)) return false;
             const float current = axis == ScrollbarAxis::Horizontal ? element.scrollLeft() : element.scrollTop();
             const float maximum = axis == ScrollbarAxis::Horizontal ? element.scrollMetrics().maxScrollLeft : element.scrollMetrics().maxScrollTop;

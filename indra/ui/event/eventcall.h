@@ -12,59 +12,46 @@
 #include <string_view>
 #include <variant>
 #include <vector>
-#include "event/event.h"
 
 namespace radia::ui {
-struct SourceElementArgument {};
-struct CurrentAuthoredEventArgument {};
-
-using AuthoredEventArgument = std::variant<std::int64_t, std::string, bool, SourceElementArgument, CurrentAuthoredEventArgument>;
-
-struct AuthoredEventDescriptor {
-    std::string_view attribute;
-    std::string_view type;
+struct CurrentTargetArgument {
+    bool operator==(const CurrentTargetArgument&) const = default;
+};
+struct CurrentEventArgument {
+    bool operator==(const CurrentEventArgument&) const = default;
 };
 
-inline constexpr AuthoredEventDescriptor kAuthoredEventDescriptors[] = {
-    {"onClick", kClickEvent},
-    {"onDoubleClick", kDoubleClickEvent},
-    {"onInput", kInputEvent},
-    {"onChange", kChangeEvent},
-    {"onPointerDown", kPointerDownEvent},
-    {"onPointerUp", kPointerUpEvent},
-    {"onPointerMove", kPointerMoveEvent},
-    {"onContextMenu", kContextMenuEvent},
-    {"onWheel", kWheelEvent},
-};
+using EventCallArgument = std::variant<std::int64_t, std::string, bool, CurrentTargetArgument, CurrentEventArgument>;
 
-class AuthoredEventCall {
+class EventHandlerCall {
 public:
-    explicit AuthoredEventCall(std::string name, std::vector<AuthoredEventArgument> arguments = {});
+    explicit EventHandlerCall(std::string name, std::vector<EventCallArgument> arguments = {});
 
     const std::string& name() const { return mName; }
-    const std::vector<AuthoredEventArgument>& arguments() const { return mArguments; }
+    const std::vector<EventCallArgument>& arguments() const { return mArguments; }
+    bool operator==(const EventHandlerCall&) const = default;
 
 private:
     std::string mName;
-    std::vector<AuthoredEventArgument> mArguments;
+    std::vector<EventCallArgument> mArguments;
 };
 
 class Element;
-Element& setAuthoredEventCall(Element& element, std::string_view type, AuthoredEventCall call);
-const AuthoredEventCall* authoredEventCall(const Element& element, std::string_view type);
+Element& setEventHandlerCall(Element& element, std::string_view type, EventHandlerCall call);
+const EventHandlerCall* eventHandlerCall(const Element& element, std::string_view type);
 
-enum class AuthoredEventCallParseError : std::uint8_t { NoError, CallRequired, NameInvalid, SyntaxInvalid, LiteralUnsupported, IntegerOutOfRange };
+enum class EventHandlerCallParseError : std::uint8_t { NoError, CallRequired, NameInvalid, SyntaxInvalid, LiteralUnsupported, IntegerOutOfRange };
 
-struct AuthoredEventCallParseResult {
-    std::optional<AuthoredEventCall> call;
-    AuthoredEventCallParseError error = AuthoredEventCallParseError::NoError;
+struct EventHandlerCallParseResult {
+    std::optional<EventHandlerCall> call;
+    EventHandlerCallParseError error = EventHandlerCallParseError::NoError;
     std::size_t errorOffset = 0;
 
     bool ok() const { return call.has_value(); }
 };
 
-AuthoredEventCallParseResult parseAuthoredEventCall(std::string_view source);
+EventHandlerCallParseResult parseEventHandlerCall(std::string_view source);
 bool isEventHandlerName(std::string_view value);
-const char* authoredEventCallParseErrorCode(AuthoredEventCallParseError error);
-const char* authoredEventCallParseErrorMessage(AuthoredEventCallParseError error);
+const char* eventHandlerCallParseErrorCode(EventHandlerCallParseError error);
+const char* eventHandlerCallParseErrorMessage(EventHandlerCallParseError error);
 } // namespace radia::ui

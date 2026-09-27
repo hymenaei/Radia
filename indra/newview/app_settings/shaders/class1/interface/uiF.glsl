@@ -60,6 +60,7 @@ uniform int gradientKind;
 uniform int gradientRepeating;
 uniform vec2 gradientStart;
 uniform vec2 gradientEnd;
+uniform vec4 gradientTransform;
 uniform vec2 gradientCenter;
 uniform vec2 gradientRadius;
 uniform float gradientAngle;
@@ -393,6 +394,7 @@ vec4 underlyingGradientIntegral(float amount, vec4 repeatingTotal) {
 }
 
 vec4 filteredGradientColor(vec2 localCoord) {
+    localCoord = localCoord * gradientTransform.xy + gradientTransform.zw;
     float amount = gradientAmount(localCoord);
     float pixelWidth = max(gradientPixelWidth(localCoord, amount), 1.0e-6);
     float start = amount - pixelWidth * 0.5;

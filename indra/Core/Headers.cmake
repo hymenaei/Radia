@@ -1,0 +1,9 @@
+set(Core_HEADERS
+    css/UserAgentStyleSheet.h
+    css/parser/CSSPropertyParser.h
+    css/values/CSSValue.h
+    layout/BorderImageGrid.h
+    layout/Geometry.h
+    platform/graphics/Color.h
+    style/Ref.h
+)

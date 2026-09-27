@@ -179,6 +179,7 @@ void NodeMutation::detachAll(Element& parent) {
         detachElementChild(parent, *child, surface, surfaceLifetime);
     }
     if (!parentLifetime) return;
+    parent.invalidateDirectionalityAncestors();
     parent.onChildrenCleared();
 }
 
@@ -545,6 +546,9 @@ void NodeMutation::setTextData(Text& text, std::string value) {
     if (text.mValue == value) return;
     text.mValue = std::move(value);
     text.mLayout->setText(text.mValue);
-    if (Element* owner = text.parentElement()) owner->invalidateText();
+    if (Element* owner = text.parentElement()) {
+        owner->invalidateText();
+        owner->invalidateDirectionalityAncestors();
+    }
 }
 } // namespace radia::ui::detail

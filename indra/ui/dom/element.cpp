@@ -6,6 +6,8 @@
 #include "linden_common.h"
 #include "dom/element.h"
 #include <algorithm>
+#include <unicode/uchar.h>
+#include <unicode/unistr.h>
 #include "dom/elementinternal.h"
 #include "dom/fragment.h"
 #include "dom/fragmentinternal.h"
@@ -30,6 +32,59 @@ bool isASCIIWhitespace(char character) {
 
 bool isValidClassToken(std::string_view className) {
     return !className.empty() && std::none_of(className.begin(), className.end(), isASCIIWhitespace);
+}
+
+enum class DirectionAttributeState { Undefined, LeftToRight, RightToLeft, Auto };
+
+DirectionAttributeState directionAttributeState(const Element& element) {
+    const Element::Attribute* attribute = element.attribute("dir");
+    if (!attribute || !attribute->value) return DirectionAttributeState::Undefined;
+    const std::string value = canonicalizeHTMLName(*attribute->value);
+    if (value == "ltr") return DirectionAttributeState::LeftToRight;
+    if (value == "rtl") return DirectionAttributeState::RightToLeft;
+    if (value == "auto") return DirectionAttributeState::Auto;
+    return DirectionAttributeState::Undefined;
+}
+
+bool isDirectionalityBoundaryTag(const Element& element) {
+    const std::string& name = element.elementName();
+    return name == "bdi" || name == "script" || name == "style" || name == "textarea";
+}
+
+bool hasDefinedDirectionAttribute(const Element& element) {
+    return directionAttributeState(element) != DirectionAttributeState::Undefined;
+}
+
+bool skipsContainedText(const Element& element) {
+    return hasDefinedDirectionAttribute(element) || isDirectionalityBoundaryTag(element);
+}
+
+const Node* nextAfterSubtree(const Node* node, const Element* root) {
+    while (node && node != root) {
+        if (const Node* sibling = node->nextSibling()) return sibling;
+        node = node->parentNode();
+    }
+    return nullptr;
+}
+
+bool hasAutoDirectionality(const Element& element) {
+    return directionAttributeState(element) == DirectionAttributeState::Auto
+        || (element.elementName() == "bdi" && directionAttributeState(element) == DirectionAttributeState::Undefined);
+}
+
+std::optional<LayoutDirection> textDirectionality(std::string_view value) {
+    const icu::UnicodeString text = icu::UnicodeString::fromUTF8(std::string(value));
+    for (int32_t index = 0; index < text.length();) {
+        const UChar32 codePoint = text.char32At(index);
+        index = text.moveIndex32(index, 1);
+        switch (u_charDirection(codePoint)) {
+            case U_LEFT_TO_RIGHT: return LayoutDirection::LeftToRight;
+            case U_RIGHT_TO_LEFT:
+            case U_RIGHT_TO_LEFT_ARABIC: return LayoutDirection::RightToLeft;
+            default: break;
+        }
+    }
+    return std::nullopt;
 }
 
 std::string serializeClassTokens(const std::vector<std::string>& classes) {
@@ -263,6 +318,48 @@ bool Element::hasAttribute(std::string_view name) const {
     return attribute(name) != nullptr;
 }
 
+LayoutDirection Element::directionality() const {
+    const DirectionAttributeState state = directionAttributeState(*this);
+    if (state == DirectionAttributeState::LeftToRight) return LayoutDirection::LeftToRight;
+    if (state == DirectionAttributeState::RightToLeft) return LayoutDirection::RightToLeft;
+
+    if (state == DirectionAttributeState::Auto || (elementName() == "bdi" && state == DirectionAttributeState::Undefined)) {
+        if (elementName() == "input" && state == DirectionAttributeState::Auto) {
+            const Attribute* type = attribute("type");
+            const std::string inputType = type && type->value ? canonicalizeHTMLName(*type->value) : "text";
+            if (inputType == "text") {
+                const Attribute* value = attribute("value");
+                if (value && value->value && !value->value->empty()) return textDirectionality(*value->value).value_or(LayoutDirection::LeftToRight);
+                return LayoutDirection::LeftToRight;
+            }
+        }
+
+        for (const Node* node = firstChild(); node;) {
+            if (const Element* child = node->asElement()) {
+                if (skipsContainedText(*child)) {
+                    node = nextAfterSubtree(node, this);
+                    continue;
+                }
+                if (child->firstChild()) {
+                    node = child->firstChild();
+                    continue;
+                }
+            } else if (const Text* text = node->asText()) {
+                if (const auto direction = textDirectionality(text->data())) return *direction;
+            }
+            node = nextAfterSubtree(node, this);
+        }
+        return LayoutDirection::LeftToRight;
+    }
+
+    if (elementName() == "input") {
+        const Attribute* type = attribute("type");
+        if (type && type->value && canonicalizeHTMLName(*type->value) == "tel") return LayoutDirection::LeftToRight;
+    }
+    const Element* parent = parentElement();
+    return parent ? parent->directionality() : LayoutDirection::LeftToRight;
+}
+
 void Element::setAttribute(std::string name, std::optional<std::string> value) {
     name = canonicalizeHTMLName(name);
     if (name.empty()) {
@@ -307,17 +404,19 @@ void Element::setAttribute(std::string name, std::optional<std::string> value) {
         return;
     }
     if (name == "disabled") {
-        const bool changed = !disabled();
-        setState(ElementState::Disabled, true);
+        const bool wasDisabled = disabled();
+        const bool changed = setPseudoClassMatch(CSSPseudoClass::Disabled, mDisabled, true);
         setAttributeValue(std::move(name), std::move(value));
-        if (changed) {
+        if (!changed) {
+            invalidateStyleTree();
+            invalidateFollowingSiblingStyleTrees(true, true);
+        }
+        if (wasDisabled != disabled()) {
             if (Surface* currentSurface = surface()) {
                 currentSurface->requestHitTestRefresh();
                 currentSurface->elementBecameUnavailable(*this);
             }
         }
-        if (!changed) invalidateStyleTree();
-        invalidateFollowingSiblingStyleTrees(true, true);
         return;
     }
     if (name == "hidden") {
@@ -335,6 +434,8 @@ void Element::setAttribute(std::string name, std::optional<std::string> value) {
     setAttributeValue(std::move(name), std::move(value));
     invalidateStyleTree();
     invalidateFollowingSiblingStyleTrees(true, true);
+    if (attributeName == "dir" && !isDirectionalityBoundaryTag(*this))
+        if (Element* parent = parentElement()) parent->invalidateDirectionalityAncestors();
     onAttributeSet(attributeName, authoredValue);
 }
 
@@ -361,14 +462,16 @@ void Element::removeAttribute(std::string_view name) {
         return;
     }
     if (name == "disabled") {
-        const bool changed = disabled();
-        setState(ElementState::Disabled, false);
+        const bool wasDisabled = disabled();
+        const bool changed = setPseudoClassMatch(CSSPseudoClass::Disabled, mDisabled, false);
         removeAttributeValue(name);
-        if (changed) {
+        if (!changed) {
+            invalidateStyleTree();
+            invalidateFollowingSiblingStyleTrees(true, true);
+        }
+        if (wasDisabled != disabled()) {
             if (Surface* currentSurface = surface()) currentSurface->requestHitTestRefresh();
         }
-        if (!changed) invalidateStyleTree();
-        invalidateFollowingSiblingStyleTrees(true, true);
         return;
     }
     if (name == "hidden") {
@@ -383,6 +486,8 @@ void Element::removeAttribute(std::string_view name) {
     removeAttributeValue(name);
     invalidateStyleTree();
     invalidateFollowingSiblingStyleTrees(true, true);
+    if (name == "dir" && !isDirectionalityBoundaryTag(*this))
+        if (Element* parent = parentElement()) parent->invalidateDirectionalityAncestors();
     onAttributeRemoved(name);
 }
 
@@ -437,18 +542,18 @@ ConstElementList Element::children() const {
 }
 
 bool Element::disabled() const {
-    if (radia::ui::hasState(mStates, ElementState::Disabled)) return true;
+    if (mDisabled) return true;
 
     for (const Element* ancestor = parentElement(); ancestor; ancestor = ancestor->parentElement()) {
-        if (ancestor->elementName() != kFieldsetTag.localName || !radia::ui::hasState(ancestor->mStates, ElementState::Disabled)) continue;
+        if (ancestor->elementName() != HTMLTagName(HTMLTag::Fieldset) || !ancestor->mDisabled) continue;
 
         const Element* directChild = this;
         while (directChild && directChild->parentElement() != ancestor) directChild = directChild->parentElement();
-        if (!directChild || directChild->elementName() != kLegendTag.localName) return true;
+        if (!directChild || directChild->elementName() != HTMLTagName(HTMLTag::Legend)) return true;
 
         const Element* firstLegend = nullptr;
         for (const Element* child : ancestor->children()) {
-            if (child->elementName() == kLegendTag.localName) {
+            if (child->elementName() == HTMLTagName(HTMLTag::Legend)) {
                 firstLegend = child;
                 break;
             }
@@ -525,16 +630,9 @@ Element& Element::setPointerEvents(bool pointerEvents) {
 }
 
 Element& Element::disabled(bool disabled) {
-    const bool changed = disabled != this->disabled();
-    setState(ElementState::Disabled, disabled);
-    if (disabled) setAttributeValue("disabled", std::nullopt);
-    else removeAttributeValue("disabled");
-    if (changed) {
-        if (Surface* currentSurface = surface()) {
-            currentSurface->requestHitTestRefresh();
-            if (disabled) currentSurface->elementBecameUnavailable(*this);
-        }
-    }
+    if (disabled == mDisabled) return *this;
+    if (disabled) setAttribute("disabled");
+    else removeAttribute("disabled");
     return *this;
 }
 
@@ -628,11 +726,11 @@ std::string Element::textContent() const {
 }
 
 bool Element::isDisplayed(const ComputedStyle& style) const {
-    return style.display != DisplayMode::NoneValue && !mDisplayNoneOverride.value_or(false);
+    return style.display() != Display::NoneValue && !mDisplayNoneOverride.value_or(false);
 }
 
 bool Element::isVisible(const ComputedStyle& style) const {
-    return isDisplayed(style) && mVisibilityOverride.value_or(style.visibility) == Visibility::Visible;
+    return isDisplayed(style) && mVisibilityOverride.value_or(style.visibility()) == Visibility::Visible;
 }
 
 Element& Element::setDisplayNone(bool displayNone) {
@@ -952,6 +1050,17 @@ void Element::invalidateStyleTreesFrom(Node* firstChild, bool layoutAffecting, b
         if (active)
             if (Element* child = childNode->asElement()) child->invalidateStyleTree(layoutAffecting, propagateToDescendants);
     }
+    invalidateDirectionalityAncestors();
+}
+
+void Element::invalidateDirectionalityAncestors() {
+    for (Element* current = this; current; current = current->parentElement()) {
+        if (hasAutoDirectionality(*current)) {
+            current->invalidateStyleTree();
+            return;
+        }
+        if (hasDefinedDirectionAttribute(*current) || isDirectionalityBoundaryTag(*current)) return;
+    }
 }
 
 void Element::invalidatePaint() {
@@ -970,22 +1079,45 @@ const StyleSheet* Element::styleSheet() const {
     return nullptr;
 }
 
-void Element::setState(ElementState state, bool enabled) {
-    if (radia::ui::hasState(mStates, state) == enabled) return;
-    const StyleSheet* styleSheet = this->styleSheet();
-    const bool oldLayoutAffecting = styleSheet && styleSheet->stateAffectsLayout(*this, state);
-    const bool oldDescendants = styleSheet && styleSheet->stateAffectsDescendants(*this, state);
-    const bool oldFollowingSiblings = styleSheet && styleSheet->stateAffectsFollowingSiblings(*this, state);
-    const bool oldHitTesting = styleSheet && styleSheet->stateAffectsHitTesting(*this, state);
-    radia::ui::setState(mStates, state, enabled);
-    const bool layoutAffecting = !styleSheet || oldLayoutAffecting || styleSheet->stateAffectsLayout(*this, state);
-    const bool propagateToDescendants = !styleSheet || oldDescendants || styleSheet->stateAffectsDescendants(*this, state);
+void Element::invalidatePseudoClass(CSSPseudoClass pseudoClass) {
+    const StyleSheet* sheet = styleSheet();
+    if (!sheet) {
+        invalidateStyleTree();
+        return;
+    }
+
+    const bool layoutAffecting = sheet->pseudoClassAffectsLayout(*this, pseudoClass);
+    const bool propagateToDescendants = sheet->pseudoClassAffectsDescendants(*this, pseudoClass);
     invalidateStyleTree(layoutAffecting, propagateToDescendants);
-    if (styleSheet && (oldFollowingSiblings || styleSheet->stateAffectsFollowingSiblings(*this, state)))
-        invalidateFollowingSiblingStyleTrees(layoutAffecting, propagateToDescendants);
-    if (styleSheet && (oldHitTesting || styleSheet->stateAffectsHitTesting(*this, state))) {
+    if (sheet->pseudoClassAffectsFollowingSiblings(*this, pseudoClass)) invalidateFollowingSiblingStyleTrees(layoutAffecting, propagateToDescendants);
+    if (sheet->pseudoClassAffectsHitTesting(*this, pseudoClass)) {
         if (Surface* currentSurface = surface()) currentSurface->requestHitTestRefresh();
     }
+}
+
+bool Element::setPseudoClassMatch(CSSPseudoClass pseudoClass, bool& ownedValue, bool matches) {
+    if (ownedValue == matches) return false;
+    ownedValue = matches;
+    invalidatePseudoClass(pseudoClass);
+    return true;
+}
+
+void Element::setHovered(bool hovered) {
+    setPseudoClassMatch(CSSPseudoClass::Hover, mHovered, hovered);
+}
+
+void Element::setActive(bool active) {
+    setPseudoClassMatch(CSSPseudoClass::Active, mActive, active);
+}
+
+void Element::setFocused(bool focused) {
+    if (mFocused == focused) return;
+    setPseudoClassMatch(CSSPseudoClass::Focus, mFocused, focused);
+    invalidatePseudoClass(CSSPseudoClass::FocusVisible);
+}
+
+void Element::setFocusVisible(bool focusVisible) {
+    setPseudoClassMatch(CSSPseudoClass::FocusVisible, mFocusVisible, focusVisible);
 }
 
 void Element::activate() {
@@ -1006,8 +1138,8 @@ AccessibleSemantics Element::accessibleSemantics() const {
     result.name = textContent();
     result.focusable = focusable();
     result.disabled = disabled();
-    result.focused = hasState(ElementState::Focused);
-    result.focusVisible = hasState(ElementState::FocusVisible);
+    result.focused = focused();
+    result.focusVisible = focusVisible();
     return result;
 }
 
@@ -1073,13 +1205,13 @@ void Element::paint(PaintContext& context, const ComputedStyle& style, float) co
 
 bool Element::defaultKeyDown(const KeyEvent& event) {
     if (disabled() || !focusable() || !isActivationKey(event.key)) return false;
-    setState(ElementState::Active, true);
+    setActive(true);
     return true;
 }
 
 bool Element::defaultKeyUp(const KeyEvent& event) {
     if (disabled() || !focusable() || !isActivationKey(event.key)) return false;
-    setState(ElementState::Active, false);
+    setActive(false);
     activate();
     return true;
 }

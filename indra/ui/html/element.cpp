@@ -24,18 +24,18 @@ void HTMLElement::setKeybinding(std::string keybindingId) {
 
 void HTMLElement::onLocaleChanged(const System& system) {
     Element::onLocaleChanged(system);
-    if (elementName() == kKbdTag.localName && !mKeybindingId.empty()) rebuildKeybindingContent(system);
+    if (elementName() == HTMLTagName(HTMLTag::Kbd) && !mKeybindingId.empty()) rebuildKeybindingContent(system);
 }
 
 void HTMLElement::onKeybindingsChanged(const System& system) {
-    if (elementName() == kKbdTag.localName && !mKeybindingId.empty()) rebuildKeybindingContent(system);
+    if (elementName() == HTMLTagName(HTMLTag::Kbd) && !mKeybindingId.empty()) rebuildKeybindingContent(system);
 }
 
 void HTMLElement::rebuildKeybindingContent(const System& system) {
     replaceChildren();
     const KeybindingPresentation presentation = system.resolveKeybinding(mKeybindingId);
     for (const std::string& key : presentation.keys) {
-        ElementPtr keyElement = HTMLElementFactory::create(kKbdTag.localName);
+    ElementPtr keyElement = HTMLElementFactory::create(HTMLTagName(HTMLTag::Kbd));
         if (!keyElement) continue;
         appendText(*keyElement, key);
         append(std::move(keyElement));

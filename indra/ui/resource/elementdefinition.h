@@ -17,10 +17,12 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include "CSSPseudoSelectors.h"
 #include "diagnostic.h"
 #include "dom/element.h"
 #include "dom/elementinternal.h"
 #include "html/elementnames.h"
+#include "HTMLNames.h"
 #include "llerror.h"
 #include "localization.h"
 #include "resource/buildresult.h"
@@ -178,8 +180,7 @@ struct ResourceElementDefinition {
     ElementChildrenBehavior childrenBehavior;
     ElementContentBehavior contentBehavior;
     std::optional<ResourceRootDefinition> resourceRoot;
-    std::vector<ElementState> producedStates;
-    std::vector<std::string> pseudoElementNames;
+    std::vector<CSSPseudoClass> producedPseudoClasses;
     bool labelable = false;
     bool scopedOnly = false;
 };
@@ -205,16 +206,18 @@ struct ElementSelectorMetadata {
     std::string elementName;
     bool known = false;
     bool pseudoElementKnown = false;
-    bool elementProducesState = false;
+    bool elementProducesPseudoClass = false;
 };
 
 const ResourceElementDefinition* findElementDefinition(HTMLTag tag);
-ElementSelectorMetadata inspectElementSelector(HTMLTag tag, std::string_view pseudoElement, std::optional<ElementState> elementState = std::nullopt);
+ElementSelectorMetadata inspectElementSelector(HTMLTag tag, std::string_view pseudoElement,
+                                               std::optional<CSSPseudoClass> pseudoClass = std::nullopt);
 
 bool isRegisteredHTMLAttribute(HTMLTag tag, std::string_view name);
 bool readElementAttribute(const ElementBuildInput& input, std::string_view name, std::string& value);
+bool readElementAttribute(const ElementBuildInput& input, HTMLAttribute name, std::string& value);
 bool readElementBoolean(const ElementBuildInput& input, std::string_view name, bool& value, ElementBuildContext& context);
-bool producesState(const ResourceElementDefinition& element, ElementState state);
+bool producesPseudoClass(const ResourceElementDefinition& element, CSSPseudoClass pseudoClass);
 
 struct ResolvedLayoutText {
     std::string literal;
@@ -344,8 +347,8 @@ public:
         return std::move(*this);
     }
 
-    ElementDefinitionBuilder&& state(ElementState state) {
-        mDefinition.producedStates.push_back(state);
+    ElementDefinitionBuilder&& pseudoClass(CSSPseudoClass pseudoClass) {
+        mDefinition.producedPseudoClasses.push_back(pseudoClass);
         return std::move(*this);
     }
 
@@ -362,11 +365,6 @@ public:
     ElementDefinitionBuilder&& resourceRoot(std::string expectedElementName = {}) {
         if (expectedElementName.empty()) expectedElementName = mDefinition.elementName;
         mDefinition.resourceRoot = ResourceRootDefinition{std::move(expectedElementName)};
-        return std::move(*this);
-    }
-
-    ElementDefinitionBuilder&& pseudoElement(std::string name) {
-        mDefinition.pseudoElementNames.push_back(canonicalizeHTMLName(name));
         return std::move(*this);
     }
 
@@ -432,7 +430,7 @@ public:
             mDefinition.childrenBehavior.claim = [containers = std::move(mChildContainers)](const ElementBuildInput& input, Element& element,
                                                                                             ElementBuildContext& context) -> ChildClaim {
                 for (const ChildContainer& container : containers) {
-                    if (canonicalizeHTMLName(container.name) != canonicalizeHTMLName(htmlTagName(input.tag))) continue;
+                    if (canonicalizeHTMLName(container.name) != canonicalizeHTMLName(HTMLTagName(input.tag))) continue;
                     Element* target = container.claim(input, static_cast<ElementT&>(element), context);
                     return target ? ChildClaim::routeTo(*target) : ChildClaim::handled();
                 }

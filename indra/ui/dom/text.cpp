@@ -7,6 +7,7 @@
 #include "dom/text.h"
 #include <utility>
 #include "dom/mutation.h"
+#include "Geometry.h"
 #include "text/layout.h"
 
 namespace radia::ui {
@@ -23,14 +24,14 @@ void Text::setData(std::string value) {
 ComputedStyle Text::styleForParent(const ComputedStyle& parentStyle) {
     ComputedStyle result;
     inheritStyle(result, parentStyle);
-    result.textDecoration = parentStyle.textDecorationPropagation;
+    result.setTextDecoration(parentStyle.textDecorationPropagation);
     result.textDecorationPropagation = parentStyle.textDecorationPropagation;
-    result.textOverflow = parentStyle.textOverflow;
-    result.overflowX = parentStyle.overflowX;
-    result.display = DisplayMode::Inline;
+    result.setTextOverflow(parentStyle.textOverflow());
+    result.setOverflowX(parentStyle.overflowX());
+    result.setDisplay(Display::Inline);
     result.displaySet = true;
-    result.margin = {};
-    result.padding = {};
+    result.setMargin(RectEdges<MarginEdge>{});
+    result.setPadding(RectEdges<PaddingEdge>{});
     return result;
 }
 
@@ -50,8 +51,8 @@ void Text::preparePaint(const TextMetrics& metrics, const StyleSheet& styleSheet
 }
 
 void Text::paint(PaintContext& context, const ComputedStyle& parentStyle, const StyleSheet* styleSheet, const Element& owner) const {
-    const TextPaintStyle paintStyle{parentStyle.color, parentStyle.colorLightDark, parentStyle.textDecorationPropagation, parentStyle.textAlign,
+    const TextPaintStyle paintStyle{parentStyle.color().resolvedColor(), parentStyle.textDecorationPropagation, parentStyle.textAlign(),
                                     parentStyle.direction};
-    mLayout->paintPrepared(context, insetRect(mRect, mLayoutStyle.padding), mLayoutStyle, paintStyle, styleSheet, owner);
+    mLayout->paintPrepared(context, insetRect(mRect, paddingPixels(mLayoutStyle)), mLayoutStyle, paintStyle, styleSheet, owner);
 }
 } // namespace radia::ui

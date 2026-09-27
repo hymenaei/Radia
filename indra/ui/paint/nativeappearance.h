@@ -22,8 +22,8 @@ struct NativeScrollbarState {
 struct NativeScrollbarClip {
     bool enabled = false;
     Rect borderBox;
-    BorderRadii borderRadius;
-    EdgeInsets borderWidth;
+    BorderRadius borderRadius;
+    RectEdges<float> borderWidth;
 };
 
 struct NativeScrollbarAxisGeometry {
@@ -47,7 +47,7 @@ struct NativeScrollbarPaintGeometry {
 struct NativeScrollbarPaintRequest {
     NativeScrollbarPaintGeometry geometry;
     NativeScrollbarMetrics metrics{};
-    ScrollbarColors colors;
+    ScrollbarColor colors;
     NativeScrollbarClip clip;
     ScrollbarMode mode = ScrollbarMode::Classic;
     LayoutDirection direction = LayoutDirection::LeftToRight;
@@ -94,7 +94,7 @@ struct NativeInputPaintRequest {
     bool pressed = false;
     float opacity = 1.f;
     std::optional<Color> accentColor;
-    ColorScheme colorScheme = ColorScheme::Dark;
+    ColorSchemeMode colorScheme = ColorSchemeMode::Dark;
     LayoutDirection direction = LayoutDirection::LeftToRight;
     float scale = 1.f;
 };

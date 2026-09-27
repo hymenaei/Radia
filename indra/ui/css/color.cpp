@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 #include "css/syntax.h"
+#include "CSSKeywords.h"
 
 namespace radia::ui {
 namespace {
@@ -149,8 +150,7 @@ Color hsl(float hue, float saturation, float lightness, float alpha) {
 }
 
 float srgb(float linear) {
-    const float encoded = linear <= .0031308f ? 12.92f * linear : 1.055f * std::pow(linear, 1.f / 2.4f) - .055f;
-    return std::clamp(encoded, 0.f, 1.f);
+    return linear <= .0031308f ? 12.92f * linear : 1.055f * std::pow(linear, 1.f / 2.4f) - .055f;
 }
 
 Color linearSrgb(float r, float g, float b, float alpha) {
@@ -387,6 +387,7 @@ std::optional<Color> namedColor(const std::string& value) {
 bool isColorSyntax(const detail::CSSTokenStream& stream, detail::CSSTokenRange range) {
     range = detail::trimCSSRange(stream, range);
     const std::string value = normalizeCSSKeyword(stream, range);
+    if (const auto keyword = findCSSKeyword(value); keyword && (*keyword == CSSKeyword::CurrentColor || isSystemColorKeyword(*keyword))) return true;
     if ((!value.empty() && value.front() == '#') || value == "transparent" || namedColor(value).has_value()) return true;
     const auto function = detail::parseCSSFunction(stream, range);
     if (!function) return false;
@@ -405,7 +406,7 @@ bool isColorSyntax(const std::string& raw) {
     return isColorSyntax(stream, {0, stream.tokens().size()});
 }
 
-std::optional<Color> parseColor(const detail::CSSTokenStream& stream, detail::CSSTokenRange range) {
+std::optional<Color> consumeColor(const detail::CSSTokenStream& stream, detail::CSSTokenRange range) {
     range = detail::trimCSSRange(stream, range);
     const std::string value = normalizeCSSKeyword(stream, range);
     if (value == "transparent") return Color(0.f, 0.f, 0.f, 0.f);
@@ -457,8 +458,8 @@ std::optional<Color> parseColor(const detail::CSSTokenStream& stream, detail::CS
     return okSpace ? oklab(lightness, first, second, alpha) : lab(lightness, first, second, alpha);
 }
 
-std::optional<Color> parseColor(const std::string& raw) {
+std::optional<Color> consumeColor(const std::string& raw) {
     const detail::CSSTokenStream stream(raw);
-    return parseColor(stream, {0, stream.tokens().size()});
+    return consumeColor(stream, {0, stream.tokens().size()});
 }
 } // namespace radia::ui

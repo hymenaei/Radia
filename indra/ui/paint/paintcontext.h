@@ -35,6 +35,7 @@ public:
 
     virtual void beginFrame(const PaintTarget&) {}
     virtual void endFrame() {}
+    virtual void destroyGL() {}
     virtual void pushClip(const Rect& rect, float scale, ClipAxes axes = ClipAxes::Both) = 0;
     virtual void popClip() = 0;
     virtual void pushTranslation(const Vec2& translation) = 0;

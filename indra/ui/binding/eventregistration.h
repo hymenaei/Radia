@@ -13,8 +13,8 @@
 
 namespace radia::ui {
 struct EventRegistrationDescriptor {
-    using Invoke = std::function<void(Event&, const AuthoredEventCall&)>;
-    using ArgumentError = std::function<const char*(const AuthoredEventCall&)>;
+    using Invoke = std::function<void(Event&, const EventHandlerCall&)>;
+    using ArgumentError = std::function<const char*(const EventHandlerCall&)>;
 
     std::string name;
     Invoke invoke;

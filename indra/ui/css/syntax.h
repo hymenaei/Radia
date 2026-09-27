@@ -50,6 +50,7 @@ struct CSSToken {
     std::size_t end = 0;
     std::size_t matching = kNoMatchingCSSToken;
     bool precededByComment = false;
+    std::optional<float> numericValue;
 };
 
 struct CSSTokenRange {

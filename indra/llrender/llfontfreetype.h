@@ -30,18 +30,21 @@
 #ifndef LL_LLFONTFREETYPE_H
 #define LL_LLFONTFREETYPE_H
 
-#include "llpointer.h"
-#include "llstl.h"
-
-#include "llimagegl.h"
-#include "llfontbitmapcache.h"
-#include "alfontface.h"
-
 #include <array>
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <string>
+#include <string_view>
 #include <boost/functional/hash.hpp>
 #include <boost/unordered/unordered_flat_map.hpp>
 #include <boost/unordered/unordered_flat_set.hpp>
 #include <boost/unordered_map.hpp>
+#include "alfontface.h"
+#include "llfontbitmapcache.h"
+#include "llimagegl.h"
+#include "llpointer.h"
+#include "llstl.h"
 
 // ALFT_Face / hb_font_t / EFontHinting come in via alfontface.h.
 struct FT_StreamRec_;
@@ -63,6 +66,11 @@ public:
 
     U8 const *loadFont( std::string const &aFilename, long &a_Size );
 
+    // Register owned font bytes and return a unique source key for loadFace.
+    // Register each resource generation and again if collection removes an
+    // unused source; live faces keep their bytes through collectGarbage().
+    std::string registerFontBytes(std::string_view sourceName, std::string bytes);
+
     // Resolve a key to a refcounted, shared ALFontFace. Loads the face on
     // miss and caches it; returns null if FreeType refuses the file or the
     // requested size. Cached entries persist until cleanupClass(), or until
@@ -82,6 +90,7 @@ private:
     void unloadAllFonts();
     std::map< std::string, std::shared_ptr<ll::fonts::LoadedFont> > m_LoadedFonts;
     boost::unordered_map<ALFontFaceKey, LLPointer<ALFontFace>> mFaceCache;
+    std::uint64_t mNextMemoryFontSourceId = 1;
 };
 
 struct LLFontGlyphInfo
@@ -325,7 +334,7 @@ private:
     // FreeType actually delivered (which can differ from the requested one —
     // e.g. color requested but mono returned).
     LLFontGlyphInfo* renderAndCreateGlyph(const LLFontFreetype* fontp, U32 glyph_index, EFontGlyphType requested_glyph_type, EFontGlyphType& out_bitmap_glyph_type) const;
-    bool hasFallbackPath(const std::string& path) const; // Is a fallback font with this file path already attached?
+    bool hasFallbackPath(const std::string& path, S32 face_index) const;
     // Last resort for a codepoint no face in the chain covers: ask the OS
     // for a font that does, load it and append it to the fallback chain.
     // Returns the (face, glyph index) it resolved to, or (nullptr, 0) when

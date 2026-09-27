@@ -14,6 +14,7 @@
 #include "html/elementfactory.h"
 #include "html/elementnames.h"
 #include "layout/engine.h"
+#include "Geometry.h"
 #include "resource/elementdefinition.h"
 #include "style/computedstyle.h"
 #include "style/stylepass.h"
@@ -37,19 +38,19 @@ private:
 };
 } // namespace
 
-HTMLMinimizeButtonElement::HTMLMinimizeButtonElement() : HTMLButtonElement(kMinimizeTag.localName) {}
+HTMLMinimizeButtonElement::HTMLMinimizeButtonElement() : HTMLButtonElement(HTMLTagName(HTMLTag::Minimize)) {}
 
-HTMLCloseButtonElement::HTMLCloseButtonElement() : HTMLButtonElement(kCloseTag.localName) {}
+HTMLCloseButtonElement::HTMLCloseButtonElement() : HTMLButtonElement(HTMLTagName(HTMLTag::Close)) {}
 
 namespace {
 void findAuthoredHeadElements(Element& root, Element*& title, HTMLButtonElement*& minimize, HTMLButtonElement*& close) {
     for (Element* child : root.children()) {
         if (child->idScopeRoot()) continue;
-        if (child->elementName() == kTitleTag.localName) {
+        if (child->elementName() == HTMLTagName(HTMLTag::Title)) {
             if (!title) title = child;
-        } else if (child->elementName() == kMinimizeTag.localName) {
+        } else if (child->elementName() == HTMLTagName(HTMLTag::Minimize)) {
             if (!minimize) minimize = dynamic_cast<HTMLButtonElement*>(child);
-        } else if (child->elementName() == kCloseTag.localName) {
+        } else if (child->elementName() == HTMLTagName(HTMLTag::Close)) {
             if (!close) close = dynamic_cast<HTMLButtonElement*>(child);
         }
 
@@ -69,12 +70,12 @@ std::size_t countAuthoredElements(const Element& root, std::string_view elementN
 
 void clearAuthoredCallbacks(Element& root, const Element& scopeRoot) {
     if (&root != &scopeRoot && root.idScopeRoot()) return;
-    if (root.elementName() == kCloseTag.localName || root.elementName() == kMinimizeTag.localName) root.setOnActivate({});
+    if (root.elementName() == HTMLTagName(HTMLTag::Close) || root.elementName() == HTMLTagName(HTMLTag::Minimize)) root.setOnActivate({});
     for (Element* child : root.children()) clearAuthoredCallbacks(*child, scopeRoot);
 }
 } // namespace
 
-HTMLFloaterElement::HTMLFloaterElement() : HTMLElement(kFloaterTag.localName) {}
+HTMLFloaterElement::HTMLFloaterElement() : HTMLElement(HTMLTagName(HTMLTag::Floater)) {}
 
 void HTMLFloaterElement::onAttributeSet(std::string_view name, const std::optional<std::string>&) {
     if (!mUpdatingAttribute && name == "resizable") mResizable = true;
@@ -108,11 +109,11 @@ void HTMLFloaterElement::refreshAuthoredStructure() {
     mMinimizeButton = nullptr;
 
     for (Element* child : children()) {
-        if (child->elementName() == kHeadTag.localName) {
+        if (child->elementName() == HTMLTagName(HTMLTag::Head)) {
             if (!mHead) mHead = child;
             continue;
         }
-        if (child->elementName() == kBodyTag.localName) {
+        if (child->elementName() == HTMLTagName(HTMLTag::Body)) {
             if (!mBody) mBody = child;
             continue;
         }
@@ -128,16 +129,16 @@ void HTMLFloaterElement::refreshAuthoredStructure() {
 }
 
 ResourceElementDefinition detail::ElementDefinitions::floater() {
-    return defineElement<HTMLFloaterElement>(kFloaterTag.localName)
+    return defineElement<HTMLFloaterElement>(HTMLTagName(HTMLTag::Floater))
         .attributes({booleanAttribute("resizable", &HTMLFloaterElement::setResizable)})
         .composition([](const ElementBuildInput& input, HTMLFloaterElement& floater, const ElementScopeContext&, ElementBuildContext& context) {
-            const std::size_t headCount = countAuthoredElements(floater, kHeadTag.localName);
-            const std::size_t bodyCount = countAuthoredElements(floater, kBodyTag.localName);
+            const std::size_t headCount = countAuthoredElements(floater, HTMLTagName(HTMLTag::Head));
+            const std::size_t bodyCount = countAuthoredElements(floater, HTMLTagName(HTMLTag::Body));
             std::size_t directHeadCount = 0;
             std::size_t directBodyCount = 0;
             for (Element* child : floater.children())
-                if (child->elementName() == kHeadTag.localName) ++directHeadCount;
-                else if (child->elementName() == kBodyTag.localName) ++directBodyCount;
+                if (child->elementName() == HTMLTagName(HTMLTag::Head)) ++directHeadCount;
+                else if (child->elementName() == HTMLTagName(HTMLTag::Body)) ++directBodyCount;
                 else
                     context.error("layout.floater.child_invalid", "A floater may contain only one <head> and one <body>.", input.sourceName,
                                   input.source.begin.line, input.source.begin.column);
@@ -155,9 +156,9 @@ ResourceElementDefinition detail::ElementDefinitions::floater() {
                               input.source.begin.column);
 
             if (!floater.head()) return;
-            const std::size_t titleCount = countAuthoredElements(*floater.head(), kTitleTag.localName);
-            const std::size_t minimizeCount = countAuthoredElements(*floater.head(), kMinimizeTag.localName);
-            const std::size_t closeCount = countAuthoredElements(*floater.head(), kCloseTag.localName);
+            const std::size_t titleCount = countAuthoredElements(*floater.head(), HTMLTagName(HTMLTag::Title));
+            const std::size_t minimizeCount = countAuthoredElements(*floater.head(), HTMLTagName(HTMLTag::Minimize));
+            const std::size_t closeCount = countAuthoredElements(*floater.head(), HTMLTagName(HTMLTag::Close));
             if (titleCount > 1)
                 context.error("layout.floater.title_duplicate", "A floater may contain only one <title>.", input.sourceName, input.source.begin.line,
                               input.source.begin.column);
@@ -168,13 +169,13 @@ ResourceElementDefinition detail::ElementDefinitions::floater() {
                 context.error("layout.floater.close_duplicate", "A floater may contain only one <close>.", input.sourceName, input.source.begin.line,
                               input.source.begin.column);
             if (floater.body()) {
-                if (countAuthoredElements(*floater.body(), kTitleTag.localName) > 0)
+                if (countAuthoredElements(*floater.body(), HTMLTagName(HTMLTag::Title)) > 0)
                     context.error("layout.floater.head_only", "<title> must be inside a floater <head>.", input.sourceName, input.source.begin.line,
                                   input.source.begin.column);
-                if (countAuthoredElements(*floater.body(), kMinimizeTag.localName) > 0)
+                if (countAuthoredElements(*floater.body(), HTMLTagName(HTMLTag::Minimize)) > 0)
                     context.error("layout.floater.head_only", "<minimize> must be inside a floater <head>.", input.sourceName,
                                   input.source.begin.line, input.source.begin.column);
-                if (countAuthoredElements(*floater.body(), kCloseTag.localName) > 0)
+                if (countAuthoredElements(*floater.body(), HTMLTagName(HTMLTag::Close)) > 0)
                     context.error("layout.floater.head_only", "<close> must be inside a floater <head>.", input.sourceName, input.source.begin.line,
                                   input.source.begin.column);
             }
@@ -182,16 +183,16 @@ ResourceElementDefinition detail::ElementDefinitions::floater() {
                 context.error("layout.floater.title_required", "A minimizable floater requires a non-empty <title>.", input.sourceName,
                               input.source.begin.line, input.source.begin.column);
         })
-        .state(ElementState::Minimized)
+        .pseudoClass(CSSPseudoClass::Minimized)
         .build();
 }
 
 ResourceElementDefinition detail::ElementDefinitions::minimize() {
-    return defineElement<HTMLMinimizeButtonElement>(kMinimizeTag.localName).build();
+    return defineElement<HTMLMinimizeButtonElement>(HTMLTagName(HTMLTag::Minimize)).build();
 }
 
 ResourceElementDefinition detail::ElementDefinitions::close() {
-    return defineElement<HTMLCloseButtonElement>(kCloseTag.localName).build();
+    return defineElement<HTMLCloseButtonElement>(HTMLTagName(HTMLTag::Close)).build();
 }
 
 void HTMLFloaterElement::onChildAdded(Element&) {
@@ -275,17 +276,15 @@ void HTMLFloaterElement::setMinimized(bool minimized) {
             StylePass styles(*styleSheet, textMetrics(), surface() ? surface()->layoutDirection() : LayoutDirection::LeftToRight);
             const ComputedStyle floaterStyle = styles.style(*this);
             const ComputedStyle headStyle = styles.style(*head);
-            width = headSize.x + headStyle.margin.horizontal() + floaterStyle.padding.horizontal();
-            height = headSize.y + headStyle.margin.vertical() + floaterStyle.padding.vertical();
+            width = headSize.x + horizontalMargin(headStyle.margin()) + paddingPixels(floaterStyle).horizontal();
+            height = headSize.y + verticalMargin(headStyle.margin()) + paddingPixels(floaterStyle).vertical();
         }
         if (mMovementBounds.w > 0.f) width = std::min(width, mMovementBounds.w);
         mExpandedRect = rect();
-        mMinimized = true;
-        setState(ElementState::Minimized, true);
+        setPseudoClassMatch(CSSPseudoClass::Minimized, mMinimized, true);
         setRect({rect().x, rect().top() - height, width, height});
     } else {
-        mMinimized = false;
-        setState(ElementState::Minimized, false);
+        setPseudoClassMatch(CSSPseudoClass::Minimized, mMinimized, false);
         setRect(mExpandedRect);
         clampToMovementBounds();
     }
@@ -309,8 +308,7 @@ void HTMLFloaterElement::clampToMovementBounds() {
 
 void HTMLFloaterElement::normalizeMinimizedState() {
     const bool wasMinimized = mMinimized;
-    mMinimized = false;
-    setState(ElementState::Minimized, false);
+    if (wasMinimized) setPseudoClassMatch(CSSPseudoClass::Minimized, mMinimized, false);
     if (wasMinimized) {
         setRect(mExpandedRect);
         clampToMovementBounds();

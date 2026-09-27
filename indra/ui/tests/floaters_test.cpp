@@ -667,8 +667,8 @@ TEST(FloatersTest, RoutesThroughTransparentFloater) {
 
 TEST(FloatersTest, KeepsVisibleDescendantTarget) {
     StyleSheet styleSheet;
-    constexpr char kOverflowVisiblePassThroughStyle[] = "floater.pass-through { pointer-events: none; "
-                                                        "overflow: visible; }";
+    constexpr char kOverflowVisiblePassThroughStyle[] = "floater.pass-through { pointer-events: none; overflow: visible; } "
+                                                        "button { pointer-events: auto; }";
     ASSERT_TRUE(styleSheet.loadRadia(kOverflowVisiblePassThroughStyle).ok());
     Surface surface(styleSheet);
     surface.setViewport(200.f, 160.f);

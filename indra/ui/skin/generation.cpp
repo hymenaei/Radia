@@ -37,10 +37,13 @@ std::string SkinGeneration::resolveText(const std::string& locale, const Localiz
 const StyleSheet& SkinGeneration::styleSheet() const {
     return mImpl->styleSheet;
 }
+const std::vector<FontFace>& SkinGeneration::fontFaces() const {
+    return mImpl->styleSheet.fontFaces();
+}
 
 std::shared_ptr<const SkinGeneration> SkinGeneration::empty() {
     StyleSheet styleSheet;
-    (void)styleSheet.loadRadia(std::string(defaultStylesheetSource()), std::string(kDefaultStylesheetResourceId));
+    (void)styleSheet.loadRadia(std::string(userAgentStyleSheet()), std::string(kUserAgentStyleSheetId));
     return std::shared_ptr<const SkinGeneration>(new SkinGeneration(
         std::make_unique<Impl>(ResourceSnapshot(), LocalizationCatalog(), std::move(styleSheet), std::unordered_map<std::string, SvgImage>())));
 }

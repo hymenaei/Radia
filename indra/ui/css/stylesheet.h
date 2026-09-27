@@ -5,23 +5,29 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <map>
 #include <memory>
 #include <set>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
+#include "CSSPseudoSelectors.h"
 #include "diagnostic.h"
 #include "resource/resourceprovider.h"
 #include "style/computedstyle.h"
+#include "UserAgentStyleSheet.h"
 
 namespace radia::ui {
 class Element;
+class SkinCompiler;
 class StylePass;
 struct StyleRuleSet;
 
-enum class StyleOrigin : std::uint8_t { Default = 0, Skin = 1 };
+enum class StyleOrigin : std::uint8_t { UserAgent = 0, Skin = 1 };
 
 struct StyleLayer {
     StyleOrigin origin;
@@ -34,9 +40,36 @@ struct StyleResourceReference {
     bool cursor = false;
 };
 
-inline constexpr std::string_view kDefaultStylesheetResourceId = "style/defaults.css";
+struct FontFaceURL {
+    std::string url;
+    ResourceId id;
+};
 
-std::string_view defaultStylesheetSource() noexcept;
+struct FontFaceLocal {
+    std::string name;
+};
+
+struct FontFaceSource {
+    std::variant<FontFaceURL, FontFaceLocal> value;
+    std::string sourceName;
+    std::size_t line = 1;
+    std::size_t column = 1;
+};
+
+struct FontFace {
+    std::string family;
+    FontSelectionRequest selection;
+    std::vector<FontFaceSource> sources;
+    StyleOrigin origin = StyleOrigin::Skin;
+    std::string sourceName;
+    std::size_t line = 1;
+    std::size_t column = 1;
+};
+
+std::vector<const FontFace*> fontFacesInMatchOrder(const std::vector<FontFace>& faces, const std::string& family,
+                                                   const FontSelectionRequest& request);
+
+inline constexpr std::string_view kUserAgentStyleSheetId = "style/ua.css";
 
 struct StyleSheetLoadResult : DiagnosticResult {
     bool ok() const { return !hasErrors(); }
@@ -56,33 +89,36 @@ public:
     StyleSheetLoadResult loadRadia(const std::string& stylesheetSource, const std::string& sourceName = {});
     StyleSheetLoadResult loadRadiaLayers(const std::vector<StyleLayer>& layers);
     std::uint64_t generation() const;
+    const std::vector<FontFace>& fontFaces() const;
     const DependencyMap& dependencies() const;
     const std::vector<StyleResourceReference>& resourceReferences() const;
-    bool stateAffectsLayout(ElementState state) const;
-    bool stateAffectsLayout(const Element& element, ElementState state) const;
-    bool stateAffectsHitTesting(ElementState state) const;
-    bool stateAffectsHitTesting(const Element& element, ElementState state) const;
-    bool stateAffectsDescendants(const Element& element, ElementState state) const;
-    bool stateAffectsFollowingSiblings(const Element& element, ElementState state) const;
+    bool pseudoClassAffectsLayout(CSSPseudoClass pseudoClass) const;
+    bool pseudoClassAffectsLayout(const Element& element, CSSPseudoClass pseudoClass) const;
+    bool pseudoClassAffectsHitTesting(CSSPseudoClass pseudoClass) const;
+    bool pseudoClassAffectsHitTesting(const Element& element, CSSPseudoClass pseudoClass) const;
+    bool pseudoClassAffectsDescendants(const Element& element, CSSPseudoClass pseudoClass) const;
+    bool pseudoClassAffectsFollowingSiblings(const Element& element, CSSPseudoClass pseudoClass) const;
 
-    ComputedStyle resolve(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t states,
-                          LayoutDirection direction = LayoutDirection::LeftToRight) const;
-    ComputedStyle resolveElement(const Element& element, LayoutDirection direction = LayoutDirection::LeftToRight) const;
-    ComputedStyle resolvePseudoElement(const Element& owner, std::string_view pseudoElementName,
-                                       LayoutDirection direction = LayoutDirection::LeftToRight) const;
-    ComputedStyle resolveInline(const Element& owner, const std::string& element, const std::vector<std::string>& inlineAncestors = {},
-                                LayoutDirection direction = LayoutDirection::LeftToRight) const;
+    ComputedStyle resolve(const std::string& element, const std::string& id, const std::set<std::string>& classes,
+                          std::initializer_list<CSSPseudoClass> matchingPseudoClasses = {}) const;
+    ComputedStyle resolveElement(const Element& element) const;
+    ComputedStyle resolvePseudoElement(const Element& owner, std::string_view pseudoElementName) const;
+    ComputedStyle resolveInline(const Element& owner, const std::string& element, const std::vector<std::string>& inlineAncestors = {}) const;
 
 private:
+    friend class SkinCompiler;
     friend class StylePass;
 
-    ComputedStyle resolveElement(const Element& element, LayoutDirection direction, const CustomPropertyMap* inheritedCustomProperties) const;
-    ComputedStyle resolvePseudoElement(const Element& owner, std::string_view pseudoElementName, LayoutDirection direction,
-                                       const CustomPropertyMap* inheritedCustomProperties) const;
+    ComputedStyle resolveElement(const Element& element, const CustomPropertyMap* inheritedCustomProperties, ColorSchemeContext colorSchemeContext,
+                                 const ColorScheme* inheritedColorScheme, const ComputedStyle* parentStyle, const ComputedStyle& rootStyle) const;
+    ComputedStyle resolvePseudoElement(const Element& owner, std::string_view pseudoElementName, const CustomPropertyMap* inheritedCustomProperties,
+                                       ColorSchemeContext colorSchemeContext, const ColorScheme* inheritedColorScheme,
+                                       const ComputedStyle* parentStyle, const ComputedStyle& rootStyle) const;
 
     struct Impl;
     static std::shared_ptr<Impl> makeEmptyImpl();
     const StyleRuleSet* ruleSetIdentity() const;
     std::shared_ptr<Impl> mImpl;
+    std::vector<FontFace> mFontFaces;
 };
 } // namespace radia::ui

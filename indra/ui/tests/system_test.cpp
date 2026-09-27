@@ -11,6 +11,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include "ComputedStyleProperties.h"
 #include "dom/elementinternal.h"
 #include "dom/text.h"
 #include "html/button.h"
@@ -21,6 +22,7 @@
 #include "paint/image.h"
 #include "paint/nativeappearance.h"
 #include "paint/recordingpaintcontext.h"
+#include "resource/compiler.h"
 #include "resource/resourceprovider.h"
 #include "skin/compiler.h"
 #include "surface/surface.h"
@@ -28,7 +30,7 @@
 #include "text/metrics.h"
 
 namespace {
-using radia::ui::AppearanceMode;
+using radia::ui::Appearance;
 using radia::ui::ComputedStyle;
 using radia::ui::Element;
 using radia::ui::fixedTextMetrics;
@@ -144,7 +146,7 @@ TEST(NativeAppearanceTest, UsesNativeButtonAppearance) {
     auto button = makeElementValue<HTMLButtonElement>();
     RecordingPaintContext recording;
     ComputedStyle style;
-    style.appearance = AppearanceMode::Auto;
+    style.setAppearance(Appearance::Auto);
 
     button.paint(recording, style, 1.25f);
 
@@ -162,7 +164,7 @@ TEST(NativeAppearanceTest, KeepsCssAppearanceUnstyled) {
     auto button = makeElementValue<HTMLButtonElement>();
     RecordingPaintContext recording;
     ComputedStyle style;
-    style.appearance = AppearanceMode::NoneValue;
+    style.setAppearance(Appearance::NoneValue);
 
     button.paint(recording, style, 1.f);
 
@@ -367,14 +369,21 @@ TEST(SystemTest, UsesSurfaceScrollbarMode) {
 }
 
 TEST(SystemTest, PreservesLiveGenerationOnFailure) {
-    constexpr char kLiveStyles[] = "label { width: 40px; }";
+    constexpr char kLiveStyles[] = "@font-face { font-family: Live; src: url(resources/fonts/live.woff2); } label { width: 40px; }";
     constexpr char kInvalidLocalization[] = "defaultLocale: [";
     constexpr char kInvalidStyles[] = "label { display: sideways; width: 90px; }";
 
     System system;
-    const SkinGenerationPrepareResult live = SkinCompiler().prepare(skinSnapshot(singleStringLocalization("message", "Live"), kLiveStyles));
+    ResourceSnapshot liveSnapshot = skinSnapshot(singleStringLocalization("message", "Live"), kLiveStyles);
+    liveSnapshot.add("resources/fonts/live.woff2", "live font bytes");
+    const SkinGenerationPrepareResult live = SkinCompiler().prepare(std::move(liveSnapshot));
     ASSERT_TRUE(live.ok());
     ASSERT_TRUE(system.publish(live.generation));
+    ASSERT_EQ(system.fontFaces().size(), 1U);
+    ASSERT_EQ(system.fontFaces().front().sources.size(), 1U);
+    EXPECT_EQ(std::get<radia::ui::FontFaceURL>(system.fontFaces().front().sources.front().value).id.value(), "resources/fonts/live.woff2");
+    ASSERT_NE(system.resourceData("fonts/live.woff2"), nullptr);
+    EXPECT_EQ(*system.resourceData("fonts/live.woff2"), "live font bytes");
 
     const SkinGenerationPrepareResult rejected = SkinCompiler().prepare(skinSnapshot(kInvalidLocalization, kInvalidStyles));
     ASSERT_FALSE(rejected.ok());
@@ -384,6 +393,29 @@ TEST(SystemTest, PreservesLiveGenerationOnFailure) {
     EXPECT_EQ(system.generation(), 1ULL);
     EXPECT_EQ(system.resolveText("message"), "Live");
     EXPECT_EQ(resolvedLabelWidth(system), 40.f);
+
+    const SkinGenerationPrepareResult missingFont = SkinCompiler().prepare(skinSnapshot(
+        singleStringLocalization("message", "Rejected"), "@font-face { font-family: Missing; src: url(resources/fonts/missing.woff2); }"));
+    ASSERT_FALSE(missingFont.ok());
+    ASSERT_FALSE(missingFont.errors.empty());
+    EXPECT_EQ(missingFont.errors.front().code, "ui.resource.missing");
+    EXPECT_FALSE(missingFont.generation);
+    EXPECT_EQ(system.generation(), 1ULL);
+    ASSERT_EQ(system.fontFaces().size(), 1U);
+    EXPECT_EQ(system.fontFaces().front().family, "Live");
+    ASSERT_NE(system.resourceData("fonts/live.woff2"), nullptr);
+    EXPECT_EQ(*system.resourceData("fonts/live.woff2"), "live font bytes");
+
+    const SkinGenerationPrepareResult unsupportedFont = SkinCompiler().prepare(
+        skinSnapshot(singleStringLocalization("message", "Rejected"),
+                     "@font-face { font-family: Unsupported; src: url(resources/fonts/unsupported.woff2) format(\"future-format\"); }"));
+    ASSERT_FALSE(unsupportedFont.ok());
+    ASSERT_FALSE(unsupportedFont.errors.empty());
+    EXPECT_EQ(unsupportedFont.errors.front().code, "stylesheet.font_face.source_unsupported");
+    EXPECT_FALSE(unsupportedFont.generation);
+    EXPECT_EQ(system.generation(), 1ULL);
+    ASSERT_EQ(system.fontFaces().size(), 1U);
+    EXPECT_EQ(system.fontFaces().front().family, "Live");
 }
 
 TEST(SystemTest, IgnoresEmptyOptionalMaskSVGAssets) {
@@ -536,6 +568,21 @@ TEST(SystemTest, LoadsRasterBackgroundResources) {
     EXPECT_EQ(image->rgba[6], 0U);
 }
 
+TEST(SystemTest, LoadsRasterBorderImageResources) {
+    ResourceSnapshot snapshot = skinSnapshot({}, "i { border-image-source: url(borders/frame.bmp); }");
+    snapshot.add("resources/borders/frame.bmp", onePixelBmp());
+
+    const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(std::move(snapshot));
+
+    ASSERT_TRUE(prepared.ok()) << (prepared.errors.empty() ? "unknown border image preparation error" : prepared.errors.front().formatted());
+    System system;
+    ASSERT_TRUE(system.publish(prepared.generation));
+    const radia::ui::RasterImage* image = system.resourceRaster("borders/frame.bmp");
+    ASSERT_NE(image, nullptr);
+    EXPECT_EQ(image->width, 1U);
+    EXPECT_EQ(image->height, 1U);
+}
+
 TEST(SystemTest, RejectsUnsupportedRequiredBackgroundFormats) {
     ResourceSnapshot snapshot = skinSnapshot({}, "i { background-image: url(backgrounds/pattern.gif); }");
     snapshot.add("resources/backgrounds/pattern.gif", "gif bytes");
@@ -549,15 +596,31 @@ TEST(SystemTest, RejectsUnsupportedRequiredBackgroundFormats) {
 }
 
 TEST(SystemTest, RejectsMissingRequiredStyleResources) {
-    const SkinGenerationPrepareResult rejected = SkinCompiler().prepare(
-        skinSnapshot({}, "button { background-image: url(backgrounds/missing.svg); cursor: url(cursors/missing.png), pointer; }"));
+    const SkinGenerationPrepareResult rejected =
+        SkinCompiler().prepare(skinSnapshot({},
+                                            "button { background-image: url(backgrounds/missing.svg); cursor: url(cursors/missing.png), pointer; "
+                                            "border-image-source: url(borders/missing.png); }"));
 
     ASSERT_FALSE(rejected.ok());
-    ASSERT_EQ(rejected.errors.size(), 2U);
+    ASSERT_EQ(rejected.errors.size(), 3U);
     EXPECT_EQ(rejected.errors[0].code, "ui.resource.missing");
     EXPECT_EQ(rejected.errors[1].code, "ui.resource.missing");
+    EXPECT_EQ(rejected.errors[2].code, "ui.resource.missing");
     EXPECT_EQ(rejected.errors[0].source, "skin.css");
     EXPECT_EQ(rejected.errors[1].source, "skin.css");
+    EXPECT_EQ(rejected.errors[2].source, "skin.css");
+}
+
+TEST(SystemTest, RejectsUnsupportedBorderImageFormat) {
+    ResourceSnapshot snapshot = skinSnapshot({}, "i { border-image-source: url(borders/frame.gif); }");
+    snapshot.add("resources/borders/frame.gif", "gif bytes");
+
+    const SkinGenerationPrepareResult rejected = SkinCompiler().prepare(std::move(snapshot));
+
+    ASSERT_FALSE(rejected.ok());
+    ASSERT_EQ(rejected.errors.size(), 1U);
+    EXPECT_EQ(rejected.errors.front().code, "ui.resource.unsupported");
+    EXPECT_EQ(rejected.errors.front().source, "skin.css");
 }
 
 TEST(SystemTest, RejectsMissingDeferredStyleResources) {
@@ -617,11 +680,12 @@ TEST(SystemTest, ResolvesImportedIconStylesAndAssets) {
     const PaintCommand* command = recording.last(PaintCommandKind::Box);
     ASSERT_NE(command, nullptr);
     ASSERT_EQ(command->style.maskLayers.size(), 1U);
-    EXPECT_EQ(command->style.maskLayers.front().image.resource, "icons/search.svg");
+    ASSERT_NE(command->style.maskLayers.front().image.image.resource(), nullptr);
+    EXPECT_EQ(*command->style.maskLayers.front().image.image.resource(), "icons/search.svg");
     EXPECT_EQ(command->style.maskLayers.front().mode, MaskMode::Alpha);
     ASSERT_EQ(command->style.backgroundLayers.size(), 1U);
-    EXPECT_TRUE(command->style.backgroundLayers.front().resource.empty());
-    EXPECT_GT(command->style.backgroundColor.a, 0.f);
+    EXPECT_EQ(command->style.backgroundLayers.front().image.value.index(), 0U);
+    EXPECT_GT(command->style.backgroundColor().resolvedColor().a, 0.f);
     EXPECT_EQ(iconPtr->rect().w, 16.f);
     EXPECT_EQ(iconPtr->rect().h, 16.f);
 }
@@ -676,6 +740,84 @@ TEST(SystemTest, RejectsMalformedSVGAssetsOutsideIconDirectory) {
     ASSERT_FALSE(rejected.errors.empty());
     EXPECT_EQ(rejected.errors.front().code, "svg.path.arguments_invalid");
     EXPECT_EQ(rejected.errors.front().source, "skin/resources/backgrounds/pattern.svg");
+}
+
+TEST(SystemTest, FontAsset) {
+    ResourceSnapshot snapshot = skinSnapshot();
+    snapshot.addPrefixAlias("skin/assets", ResourceId("resources"));
+    snapshot.setLayers("skin.css",
+                       {radia::ui::ResourceLayer{"skin/assets/skin.css",
+                                                 "@font-face { font-family: \"Radia Test\"; src: url(typefaces/brand/regular.woff2), "
+                                                 "url(typefaces/brand/regular.bin); font-weight: 600; }",
+                                                 "assets/skin.css",
+                                                 {}}});
+    snapshot.add("resources/typefaces/brand/regular.woff2", "font bytes", "skin/resources/typefaces/brand/regular.woff2");
+    snapshot.add("resources/typefaces/brand/regular.bin", "font bytes", "skin/resources/typefaces/brand/regular.bin");
+
+    const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(std::move(snapshot));
+
+    ASSERT_TRUE(prepared.ok()) << (prepared.errors.empty() ? "unknown font preparation error" : prepared.errors.front().formatted());
+}
+
+TEST(SystemTest, ReplacesFontAsset) {
+    System system;
+    for (const auto& [family, bytes] : {std::pair{"First", "first font bytes"}, std::pair{"Second", "second font bytes"}}) {
+        ResourceSnapshot snapshot =
+            skinSnapshot({}, "@font-face { font-family: " + std::string(family) + "; src: url(resources/fonts/live.woff2); }");
+        snapshot.add("resources/fonts/live.woff2", bytes);
+        const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(std::move(snapshot));
+        ASSERT_TRUE(prepared.ok()) << (prepared.errors.empty() ? "unknown font preparation error" : prepared.errors.front().formatted());
+        ASSERT_TRUE(system.publish(prepared.generation));
+        ASSERT_EQ(system.fontFaces().size(), 1U);
+        EXPECT_EQ(system.fontFaces().front().family, family);
+        ASSERT_NE(system.resourceData("fonts/live.woff2"), nullptr);
+        EXPECT_EQ(*system.resourceData("fonts/live.woff2"), bytes);
+    }
+    EXPECT_EQ(system.generation(), 2ULL);
+}
+
+TEST(SystemTest, LocalFontAsset) {
+    ResourceSnapshot snapshot = skinSnapshot();
+    snapshot.addPrefixAlias("skin/assets", ResourceId("resources"));
+    snapshot.setLayers("skin.css",
+                       {radia::ui::ResourceLayer{
+                           "skin/assets/skin.css", "@font-face { font-family: Local; src: local(\"Installed Face\"); }", "assets/skin.css", {}}});
+
+    const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(std::move(snapshot));
+
+    ASSERT_TRUE(prepared.ok()) << (prepared.errors.empty() ? "unknown local font preparation error" : prepared.errors.front().formatted());
+}
+
+TEST(SystemTest, MissingFontAsset) {
+    ResourceSnapshot snapshot = skinSnapshot();
+    snapshot.addPrefixAlias("skin/assets", ResourceId("resources"));
+    snapshot.setLayers("skin.css",
+                       {radia::ui::ResourceLayer{
+                           "skin/assets/skin.css", "@font-face { font-family: Missing; src: url(typefaces/missing.bin); }", "assets/skin.css", {}}});
+    snapshot.add("typefaces/missing.bin", "outside the assets root");
+
+    const SkinGenerationPrepareResult rejected = SkinCompiler().prepare(std::move(snapshot));
+
+    ASSERT_FALSE(rejected.ok());
+    ASSERT_EQ(rejected.errors.size(), 1U);
+    EXPECT_EQ(rejected.errors.front().code, "ui.resource.missing");
+    EXPECT_EQ(rejected.errors.front().source, "skin/assets/skin.css");
+}
+
+TEST(SystemTest, ImportedFontAsset) {
+    ResourceSnapshot snapshot = skinSnapshot();
+    snapshot.addPrefixAlias("skin/assets", ResourceId("resources"));
+    snapshot.setLayers(
+        "skin.css",
+        {radia::ui::ResourceLayer{"skin/assets/skin.css",
+                                  "@import \"typography/fonts.css\";",
+                                  "assets/skin.css",
+                                  {{"assets/typography/fonts.css", "@font-face { font-family: Imported; src: url(../typefaces/brand/a.woff2); }"}}}});
+    snapshot.add("resources/typefaces/brand/a.woff2", "font bytes", "skin/resources/typefaces/brand/a.woff2");
+
+    const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(std::move(snapshot));
+
+    ASSERT_TRUE(prepared.ok()) << (prepared.errors.empty() ? "unknown font preparation error" : prepared.errors.front().formatted());
 }
 
 TEST(SystemTest, PreservesLayoutProvenance) {
@@ -813,7 +955,7 @@ TEST(SystemTest, KeepsAppearanceUpdateStable) {
     EXPECT_FALSE(added->needsPaint());
 }
 
-TEST(SystemTest, ResolvesDirectionOnLocaleChange) {
+TEST(SystemTest, DirLocale) {
     constexpr char kDirectionStyles[] = "input[switch] { appearance: base; display: inline-grid; width: 44px; height: 20px; } "
                                         "input[switch]::slider-track { grid-area: 1 / 1; width: 100%; } "
                                         "input[switch]::slider-thumb { grid-area: 1 / 1; width: 24px; height: 24px; margin: -2px -1px; } "
@@ -834,6 +976,7 @@ TEST(SystemTest, ResolvesDirectionOnLocaleChange) {
     auto control = makeElement<HTMLInputElement>();
     HTMLInputElement* controlPtr = control.get();
     control->type("checkbox").switchMode(true).checked(true);
+    control->setAttribute("dir", "rtl");
     control->setRect({10.f, 0.f, 44.f, 20.f});
     surface->mount(std::move(control));
     surface->updateLayout();
@@ -844,7 +987,7 @@ TEST(SystemTest, ResolvesDirectionOnLocaleChange) {
     ASSERT_TRUE(system.setLocale("en"));
     surface->updateLayout();
     ASSERT_NE(controlPtr->sliderThumb(), nullptr);
-    EXPECT_FLOAT_EQ(controlPtr->sliderThumb()->rect().x, 31.f);
+    EXPECT_FLOAT_EQ(controlPtr->sliderThumb()->rect().x, -13.f);
 }
 
 TEST(SystemTest, SeparatesLocalizedContent) {
@@ -954,6 +1097,48 @@ TEST(SystemTest, RebuildsTranslatedMarkup) {
     auto* portugueseInput = dynamic_cast<HTMLInputElement*>(portugueseContainer->children()[1]);
     ASSERT_NE(portugueseInput, nullptr);
     EXPECT_TRUE(portugueseInput->switchMode());
+}
+
+TEST(SystemTest, PaintsSwitch) {
+    constexpr char kSwitchStyles[] =
+        "input[switch] { appearance: base; display: inline-grid; position: relative; size: 20px 44px; "
+        "&::slider-track { display: grid; grid-area: 1 / 1; height: 100%; background-color: #98989d; } "
+        "&::slider-fill { visibility: hidden; } "
+        "&::slider-thumb { grid-area: 1 / 1; align-self: stretch; background-color: #ffffff; size: auto 26px; margin: 2px; } }";
+
+    System system;
+    const SkinGenerationPrepareResult prepared = SkinCompiler().prepare(skinSnapshot(kEmptyLocalization, kSwitchStyles));
+    ASSERT_TRUE(prepared.ok()) << (prepared.errors.empty() ? "unknown skin preparation error" : prepared.errors.front().formatted());
+    ASSERT_TRUE(system.publish(prepared.generation));
+
+    ResourceBuildResult built = radia::ui::ResourceCompiler().buildElementTreeFromString("<div><input type=checkbox switch></div>", "switch.html");
+    ASSERT_TRUE(built.ok()) << (built.errors.empty() ? "unknown resource build error" : built.errors.front().formatted());
+    Element* root = built.rootAs<Element>();
+    ASSERT_NE(root, nullptr);
+    ASSERT_EQ(root->children().size(), 1U);
+    auto* input = dynamic_cast<HTMLInputElement*>(root->children().front());
+    ASSERT_NE(input, nullptr);
+    ASSERT_TRUE(input->switchMode());
+
+    std::unique_ptr<Surface> surface = system.createSurface(fixedTextMetrics());
+    ASSERT_NE(surface, nullptr);
+    surface->setViewport(200.f, 60.f);
+    surface->mount(*built.document);
+    surface->updateLayout();
+
+    ASSERT_NE(input->sliderTrack(), nullptr);
+    ASSERT_NE(input->sliderThumb(), nullptr);
+    EXPECT_GT(input->rect().w, 0.f);
+    EXPECT_GT(input->rect().h, 0.f);
+    EXPECT_GT(input->sliderTrack()->rect().w, 0.f);
+    EXPECT_GT(input->sliderTrack()->rect().h, 0.f);
+    EXPECT_GT(input->sliderThumb()->rect().w, 0.f);
+    EXPECT_GT(input->sliderThumb()->rect().h, 0.f);
+
+    RecordingPaintContext recording;
+    surface->paint(recording);
+    EXPECT_EQ(recording.count(PaintCommandKind::Box), 4U);
+    EXPECT_EQ(recording.count(PaintCommandKind::NativeInput), 0U);
 }
 
 TEST(SystemTest, PreservesLocaleOnRemoval) {

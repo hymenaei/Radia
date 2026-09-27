@@ -5,10 +5,9 @@
 
 #pragma once
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
+#include <initializer_list>
 #include <map>
 #include <memory>
 #include <optional>
@@ -21,21 +20,12 @@
 #include <vector>
 #include "css/stylesheet.h"
 #include "css/syntax.h"
+#include "CSSPseudoSelectors.h"
+#include "CSSValue.h"
+#include "style/computedstyle.h"
+#include "types.h"
 
 namespace radia::ui {
-struct StylePaint {
-    Color color;
-    std::optional<Gradient> gradient;
-    std::optional<LightDarkColor> lightDarkColor;
-    bool currentColor = false;
-};
-
-struct StyleBorder {
-    float width = 0.f;
-    StylePaint paint;
-    BorderStyle style = BorderStyle::NoneValue;
-};
-
 enum class StyleImageComponent : std::uint8_t { All, Image, Position, Size, Repeat, Origin, Clip, Attachment, Mode, Composite, Type };
 
 struct StyleImageLayers {
@@ -61,25 +51,19 @@ struct StyleRuleSet;
 struct StyleRule;
 struct StyleSelectorFunction;
 
-namespace detail { struct StylePropertyDefinition; }
-
-using StyleValue =
-    std::variant<InitialStyleValue, DeferredStyleValue, StyleWideKeyword, Color, LightDarkColor, AccentColor, ColorSchemeValue, StylePaint,
-                 StyleBorder, StyleImageLayers, StyleMaskLayers, Dimension, Length, LengthPercentage, std::optional<Length>, std::optional<Dimension>,
-                 EdgeInsets, MarginInsets, BorderRadii, GapValue, LineHeight, RelativeFontWeight, GridArea, Translate, CursorValue, ScrollbarColors,
-                 std::vector<BoxShadow>, FilterOperations, Outline, std::optional<std::string>, float, int, bool, AppearanceMode, BoxSizing,
-                 BorderStyle, DisplayMode, PositionMode, Visibility, FlexDirection, ItemPosition, ContentPosition, ContentDistribution, Overflow,
-                 ScrollbarWidth, ScrollbarGutter, FontFamily, TextAlign, TextOverflow, TextWrap, TextWrapStyle, VerticalAlign, TextDecoration,
-                 PointerEvents, CursorStyle, StrokeCap, SelfAlignmentData, ContentAlignmentData, FlexWrapValue, VerticalAlignValue>;
-
-using StyleColorValue = std::variant<Color, LightDarkColor>;
+using StyleValue = std::variant<InitialStyleValue, DeferredStyleValue, StyleWideKeyword, CSSValue, StyleColor, StyleImage, ColorScheme,
+                                StyleImageLayers, StyleMaskLayers, Dimension, Length, InsetEdge, std::optional<Dimension>, RectEdges<float>,
+                                RectEdges<LineWidth>, RectEdges<MarginEdge>, CornerRadius, BorderRadius, GapGutter, GridArea, Translate, CursorValue,
+                                ScrollbarColor, BoxShadows, Filter, Outline, std::optional<std::string>, float, Order, bool, BoxSizing, BorderStyle,
+                                Display, Position, Visibility, FlexDirection, ItemPosition, ContentPosition, ContentDistribution, Overflow,
+                                ScrollbarWidth, ScrollbarGutter, FontFamilies, TextAlign, TextOverflow, TextWrapMode, TextWrapStyle, VerticalAlign,
+                                TextDecoration, PointerEvents, CursorStyle, StrokeCap, SelfAlignmentData, ContentAlignmentData, VerticalAlignValue>;
 
 struct StyleDeclaration {
-    std::reference_wrapper<const detail::StylePropertyDefinition> property;
+    std::string property;
     StyleValue value;
 
-    StyleDeclaration(const detail::StylePropertyDefinition& definition, StyleValue declarationValue)
-        : property(definition), value(std::move(declarationValue)) {}
+    StyleDeclaration(std::string_view propertyName, StyleValue declarationValue) : property(propertyName), value(std::move(declarationValue)) {}
 };
 
 namespace detail {
@@ -88,7 +72,6 @@ StyleRule parseSelector(const CSSTokenStream& stream, CSSTokenRange range);
 } // namespace detail
 
 enum class SelectorCombinator { Descendant, Child, NextSibling, SubsequentSibling, Column };
-enum class StyleParsePass : std::uint8_t { Tokens, Rules };
 
 struct StyleAttributeSelector {
     enum class Match { Exact, IncludesWord, IncludesHyphen, Prefix, Suffix, Substring };
@@ -108,55 +91,49 @@ struct CustomPropertyDeclaration {
 
 struct StyleSpecificity {
     std::uint32_t ids = 0;
-    std::uint32_t classesAttributesAndStates = 0;
+    std::uint32_t classesAttributesAndPseudoClasses = 0;
     std::uint32_t elements = 0;
 
     friend bool operator==(const StyleSpecificity&, const StyleSpecificity&) = default;
     friend bool operator<(const StyleSpecificity& left, const StyleSpecificity& right) {
         if (left.ids != right.ids) return left.ids < right.ids;
-        if (left.classesAttributesAndStates != right.classesAttributesAndStates)
-            return left.classesAttributesAndStates < right.classesAttributesAndStates;
+        if (left.classesAttributesAndPseudoClasses != right.classesAttributesAndPseudoClasses)
+            return left.classesAttributesAndPseudoClasses < right.classesAttributesAndPseudoClasses;
         return left.elements < right.elements;
     }
 };
 
 struct StyleSelector {
     bool universal = false;
-    bool root = false;
     bool attributeSyntaxInvalid = false;
     bool idSyntaxInvalid = false;
     bool classSyntaxInvalid = false;
     bool pseudoElementSyntaxInvalid = false;
-    bool directionSyntaxInvalid = false;
-    bool stateSyntaxInvalid = false;
+    bool pseudoClassSyntaxInvalid = false;
+    bool pseudoClassArgumentSyntaxInvalid = false;
     bool functionSyntaxUnsupported = false;
-    std::string invalidState;
+    std::string invalidPseudoClass;
     std::string element;
     std::vector<StyleAttributeSelector> attributes;
     std::vector<std::string> ids;
     std::vector<std::string> classNames;
-    std::uint16_t stateMask = 0;
-    std::uint32_t stateSpecificity = 0;
-    std::uint32_t rootSpecificity = 0;
-    std::optional<LayoutDirection> direction;
-    std::uint32_t directionSpecificity = 0;
+    std::vector<CSSPseudoClass> pseudoClasses;
     std::string pseudoElement;
     std::vector<std::shared_ptr<StyleSelectorFunction>> selectorFunctions;
 };
 
 struct StyleRule {
-    StyleOrigin origin = StyleOrigin::Default;
+    StyleOrigin origin = StyleOrigin::UserAgent;
     std::vector<StyleSelector> selectors;
     std::vector<SelectorCombinator> combinators;
     std::vector<CustomPropertyDeclaration> customProperties;
     std::vector<StyleDeclaration> declarations;
-    int sourceOrder = 0;
+    std::size_t sourceOrder = 0;
 };
 
-enum class StyleSelectorFunctionKind : std::uint8_t { Is, Where };
-
 struct StyleSelectorFunction {
-    StyleSelectorFunctionKind kind = StyleSelectorFunctionKind::Is;
+    CSSPseudoClass pseudoClass = CSSPseudoClass::Is;
+    std::optional<std::string> identifier;
     std::vector<StyleRule> arguments;
 };
 
@@ -164,27 +141,19 @@ struct StyleModel {
     void addRule(const StyleRule& rule);
     StyleRuleSet build() &&;
 
-    static Color parseColorValue(detail::CSSValueRange value, const Color& fallback);
-    static std::optional<StyleColorValue> parseColorChoiceValue(detail::CSSValueRange value);
+    static std::optional<CSS::Color> consumeCSSColor(detail::CSSValueRange value);
     static float parseNumberValue(detail::CSSValueRange value, float fallback);
     static std::optional<Length> parseLengthValue(detail::CSSValueRange value);
-    static std::optional<BorderRadii> parseBorderRadius(detail::CSSValueRange value);
-    static std::optional<Gradient> parseGradient(detail::CSSValueRange value);
-    static std::optional<std::vector<BoxShadow>> parseShadows(detail::CSSValueRange value);
-    static std::optional<FilterOperations> parseFilter(detail::CSSValueRange value);
-    static std::optional<Outline> parseOutline(detail::CSSValueRange value);
-    static std::optional<bool> parseFontStyleValue(detail::CSSValueRange value);
-    static std::optional<float> parseFontWeightValue(detail::CSSValueRange value);
-    static std::optional<StyleValue> parseLineHeightValue(detail::CSSValueRange value);
-    static std::optional<std::vector<StyleDeclaration>> parseFontShorthand(detail::CSSValueRange value);
-    static EdgeInsets parseEdgeInsets(detail::CSSValueRange value, const EdgeInsets& fallback);
-    static std::optional<MarginInsets> parseMargin(detail::CSSValueRange value);
-    static std::optional<std::vector<StyleDeclaration>> compileDeclaration(const detail::StylePropertyDefinition& property,
-                                                                           const detail::CSSTokenStream& stream, detail::CSSTokenRange valueRange,
-                                                                           const std::string& selector, StyleSheetLoadResult& result,
-                                                                           const std::string& sourceName);
+    static std::optional<Gradient> parseGradient(detail::CSSValueRange value, ColorSchemeMode scheme);
+    static std::optional<Filter> parseFilter(detail::CSSValueRange value);
+    static std::optional<Outline> parseOutline(detail::CSSValueRange value, ColorSchemeMode scheme);
+    static std::optional<std::vector<StyleDeclaration>> compileDeclaration(std::string_view property, const detail::CSSTokenStream& stream,
+                                                                           detail::CSSTokenRange valueRange, const std::string& selector,
+                                                                           StyleSheetLoadResult& result, const std::string& sourceName,
+                                                                           ColorSchemeMode scheme = ColorSchemeMode::Dark,
+                                                                           bool resolveColorFunctions = false);
     void parseBlock(const detail::CSSTokenStream& stream, detail::CSSTokenRange selectorRange, detail::CSSTokenRange bodyRange,
-                    const StyleRule& parent, StyleOrigin origin, StyleParsePass pass, StyleSheetLoadResult& result, const std::string& sourceName);
+                    const StyleRule& parent, StyleOrigin origin, StyleSheetLoadResult& result, const std::string& sourceName);
 
     StyleSheet::DependencyMap dependencies;
     std::vector<StyleRule> rules;
@@ -201,17 +170,19 @@ struct StyleRuleSet {
     const StyleSheet::DependencyMap& dependencies() const { return mDependencies; }
     const std::vector<StyleResourceReference>& resourceReferences() const { return mResourceReferences; }
 
-    bool stateAffectsLayout(ElementState state) const;
-    bool stateAffectsLayout(const Element& element, ElementState state) const;
-    bool stateAffectsHitTesting(ElementState state) const;
-    bool stateAffectsHitTesting(const Element& element, ElementState state) const;
-    bool stateAffectsDescendants(const Element& element, ElementState state) const;
-    bool stateAffectsFollowingSiblings(const Element& element, ElementState state) const;
+    bool pseudoClassAffectsLayout(CSSPseudoClass pseudoClass) const;
+    bool pseudoClassAffectsLayout(const Element& element, CSSPseudoClass pseudoClass) const;
+    bool pseudoClassAffectsHitTesting(CSSPseudoClass pseudoClass) const;
+    bool pseudoClassAffectsHitTesting(const Element& element, CSSPseudoClass pseudoClass) const;
+    bool pseudoClassAffectsDescendants(const Element& element, CSSPseudoClass pseudoClass) const;
+    bool pseudoClassAffectsFollowingSiblings(const Element& element, CSSPseudoClass pseudoClass) const;
 
-    ComputedStyle resolveInternal(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t ownerStates,
-                                  std::string_view pseudoElement, const Element* target = nullptr,
-                                  const std::vector<std::string>* inlineAncestors = nullptr, LayoutDirection direction = LayoutDirection::LeftToRight,
-                                  const CustomPropertyMap* inheritedCustomProperties = nullptr) const;
+    ComputedStyle resolveInternal(const std::string& element, const std::string& id, const std::set<std::string>& classes,
+                                  std::initializer_list<CSSPseudoClass> matchingPseudoClasses, std::string_view pseudoElement,
+                                  const Element* target = nullptr, const std::vector<std::string>* inlineAncestors = nullptr,
+                                  const CustomPropertyMap* inheritedCustomProperties = nullptr, ColorSchemeContext colorSchemeContext = {},
+                                  const ColorScheme* inheritedColorScheme = nullptr, const ComputedStyle* parentStyle = nullptr,
+                                  const ComputedStyle& rootStyle = ComputedStyle::initialStyle()) const;
 
 private:
     void buildIndexes();
@@ -219,11 +190,9 @@ private:
     StyleSheet::DependencyMap mDependencies;
     std::vector<StyleRule> mRules;
     std::vector<StyleResourceReference> mResourceReferences;
-    std::uint16_t mLayoutStateMask = 0;
-    std::array<std::vector<std::size_t>, 9> mLayoutStateRules;
-    std::uint16_t mHitTestStateMask = 0;
-    std::array<std::vector<std::size_t>, 9> mHitTestStateRules;
-    std::array<std::vector<std::size_t>, 9> mDescendantStateRules;
+    std::map<CSSPseudoClass, std::vector<std::size_t>> mLayoutPseudoClassRules;
+    std::map<CSSPseudoClass, std::vector<std::size_t>> mHitTestPseudoClassRules;
+    std::map<CSSPseudoClass, std::vector<std::size_t>> mDescendantPseudoClassRules;
     std::vector<std::size_t> mUniversalRuleIndices;
     std::unordered_map<std::string, std::vector<std::size_t>> mElementRuleIndices;
     std::unordered_map<std::string, std::vector<std::size_t>> mIdRuleIndices;

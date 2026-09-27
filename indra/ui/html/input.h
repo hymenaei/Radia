@@ -43,9 +43,11 @@ public:
     bool switchMode() const { return mSwitchMode; }
     HTMLInputElement& switchMode(bool enabled);
     HTMLInputElement& checked(bool checked);
-    bool checked() const { return hasState(ElementState::Checked); }
+    bool checked() const { return isCheckableType(mType) && mValueState.value; }
     HTMLInputElement& indeterminate(bool indeterminate);
-    bool indeterminate() const { return isCheckboxType() && hasState(ElementState::Indeterminate); }
+    bool indeterminate() const { return isCheckboxType() && mCheckboxIndeterminate; }
+    bool radioGroupIsIndeterminate() const { return isRadioType() && mRadioGroupIndeterminate; }
+    bool invalid() const { return mValueState.validationStatus() == ValueValidationStatus::Invalid; }
     HTMLInputElement& setOnCheckedChanged(std::function<void(bool)> callback);
     PseudoElement* sliderTrack() { return isSwitchType() ? &mSliderTrack : nullptr; }
     const PseudoElement* sliderTrack() const { return isSwitchType() ? &mSliderTrack : nullptr; }
@@ -97,7 +99,6 @@ private:
     void updateRadioGroup();
     void refreshRadioGroup();
     void refreshRadioGroup(std::string_view name, const HTMLInputElement* excluded = nullptr);
-    void resetIndeterminateState();
     void refreshIndeterminateState();
     bool updateIndeterminateState(bool indeterminate);
     void setCheckedFromRadioGroup(bool checked);
@@ -108,7 +109,8 @@ private:
     std::string mType = "text";
     std::string mName;
     bool mSwitchMode = false;
-    bool mIndeterminate = false;
+    bool mCheckboxIndeterminate = false;
+    bool mRadioGroupIndeterminate = false;
     mutable PseudoElement mSliderTrack;
     mutable PseudoElement mSliderFill;
     mutable PseudoElement mSliderThumb;

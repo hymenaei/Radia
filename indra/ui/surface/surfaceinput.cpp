@@ -21,7 +21,7 @@ using detail::resizeCursor;
 using detail::ResizeEdges;
 
 bool Surface::acceptsPointerEvents(const Element& element, const ComputedStyle& style) {
-    return style.pointerEvents != PointerEvents::NoneValue && (style.pointerEventsSpecified || element.pointerEvents());
+    return style.pointerEvents() != PointerEvents::NoneValue && (style.pointerEventsSpecified || element.pointerEvents());
 }
 
 void Surface::collectFocusable(Element& node, std::vector<ElementRef<Element>>& result, StylePass& styles) const {
@@ -41,7 +41,7 @@ void Surface::collectFixedPositionedElements(Element& node, std::vector<Element*
     Element* current = observation.get();
     if (!current || !observation.layoutValid() || !observation.styleValid() || !current->isDisplayed(nodeStyle) || !current->isVisible(nodeStyle))
         return;
-    if (nodeStyle.position == PositionMode::Fixed) result.push_back(current);
+    if (nodeStyle.position() == Position::Fixed) result.push_back(current);
     const auto children = styles.orderedChildren(*current);
     for (const OrderedChildRef& childRef : *children) {
         Element* child = childRef.element();
@@ -60,8 +60,8 @@ Element* Surface::hitTestNode(Element& node, const Vec2& point, const Rect& inhe
     Element* current = observation.get();
     if (!current || !observation.layoutValid() || !observation.styleValid() || !isRootedInSurface(current) || !current->isVisible(style))
         return nullptr;
-    const bool clipsX = style.overflowX != Overflow::Visible;
-    const bool clipsY = style.overflowY != Overflow::Visible;
+    const bool clipsX = style.overflowX() != Overflow::Visible;
+    const bool clipsY = style.overflowY() != Overflow::Visible;
     const ClipAxes clipAxes = (clipsX ? ClipAxes::X : ClipAxes::NoAxes) | (clipsY ? ClipAxes::Y : ClipAxes::NoAxes);
     const bool clipsChildren = clipAxes != ClipAxes::NoAxes;
     const Vec2 scrollTranslation = scrollContentTranslation(layoutDirection(), {current->scrollLeft(), current->scrollTop()});
@@ -74,7 +74,7 @@ Element* Surface::hitTestNode(Element& node, const Vec2& point, const Rect& inhe
     for (auto child = children->rbegin(); child != children->rend(); ++child)
         if (Element* childElement = child->element())
             if (childElement->parentElement() == current)
-                if (styles.style(*childElement).position != PositionMode::Fixed)
+                if (styles.style(*childElement).position() != Position::Fixed)
                     if (Element* hit = hitTestNode(*childElement, childPoint, childClip, styles)) {
                         hitResult = hit;
                         break;
@@ -176,7 +176,7 @@ Element* Surface::hitTestAt(const Vec2& point) {
     const auto hitInLayer = [&](SurfaceLayer layer) -> Element* {
         const MountList& layerMounts = mounts(layer);
         for (auto current = layerMounts.rbegin(); current != layerMounts.rend(); ++current)
-            if (*current && (*current)->root && styles.style(*(*current)->root).position != PositionMode::Fixed)
+            if (*current && (*current)->root && styles.style(*(*current)->root).position() != Position::Fixed)
                 if (Element* hit = hitTestNode(*(*current)->root, point, mViewport, styles)) return hit;
         return nullptr;
     };
@@ -216,12 +216,12 @@ void Surface::clearInteractionState() {
     mPressed = nullptr;
     mFocused = nullptr;
     mCaptured = nullptr;
-    if (hovered) hovered->setState(ElementState::Hovered, false);
-    if (pressed) pressed->setState(ElementState::Active, false);
+    if (hovered) hovered->setHovered(false);
+    if (pressed) pressed->setActive(false);
     clearKeyboardPress();
     if (focused) {
-        focused->setState(ElementState::Focused, false);
-        focused->setState(ElementState::FocusVisible, false);
+        focused->setFocused(false);
+        focused->setFocusVisible(false);
     }
     if (captured) captured->endPointerInteraction({mPointerPosition});
     if (surfaceLifetime.expired()) return;
@@ -273,10 +273,16 @@ bool Surface::pointerMove(const PointerEvent& event) {
         Event routed(kPointerMoveEvent, *captured, event);
         const bool routedHandled = routeEvent(routed);
         captured = capturedRef.get();
+        bool mouseHandled = false;
+        if (captured && !mSuppressMouseEventsUntilPointerUp) {
+            Event mouse(kMouseMoveEvent, *captured, event);
+            mouseHandled = routeEvent(mouse);
+        }
+        captured = capturedRef.get();
         if (!captured || captured->parentElement() != capturedParent || !isRootedInSurface(captured) || !isEnabledInTree(captured))
-            return routedHandled;
+            return routedHandled || mouseHandled;
         const bool handled = !routed.defaultPrevented() && captured->updatePointerInteraction(event);
-        return routedHandled || handled;
+        return routedHandled || mouseHandled || handled;
     }
     updateResizeCursor(event.position);
     refreshHover();
@@ -285,6 +291,12 @@ bool Surface::pointerMove(const PointerEvent& event) {
         if (isEnabledInTree(hovered)) {
             Event routed(kPointerMoveEvent, *hovered, event);
             routeEvent(routed);
+            if (!mSuppressMouseEventsUntilPointerUp) {
+                if (Element* mouseTarget = hoveredRef.get()) {
+                    Event mouse(kMouseMoveEvent, *mouseTarget, event);
+                    routeEvent(mouse);
+                }
+            }
         }
     }
     return mHovered != nullptr || mPressed != nullptr || mScrollbarHover.has_value() || mResizeCursor != CursorStyle::Auto;
@@ -320,7 +332,7 @@ bool Surface::pointerDown(const PointerEvent& event) {
         };
         mPressedClickCount = 0;
         clearKeyboardPress();
-        if (Element* pressed = mPressed) pressed->setState(ElementState::Active, false);
+        if (Element* pressed = mPressed) pressed->setActive(false);
         mPressed = nullptr;
         resizeFloater = resizeRef.get();
         if (!isResizeFloaterStillAttached()) return false;
@@ -349,7 +361,7 @@ bool Surface::pointerDown(const PointerEvent& event) {
     Element* hit = hitRef.get();
     if (!hit && hasActiveModal()) {
         clearKeyboardPress();
-        if (Element* pressed = mPressed) pressed->setState(ElementState::Active, false);
+        if (Element* pressed = mPressed) pressed->setActive(false);
         mPressed = nullptr;
         setFocused(nullptr, false);
         setHovered(nullptr);
@@ -362,12 +374,19 @@ bool Surface::pointerDown(const PointerEvent& event) {
         Event routed(kPointerDownEvent, *hit, event);
         routeEvent(routed);
         defaultPrevented = routed.defaultPrevented();
+        if (defaultPrevented) mSuppressMouseEventsUntilPointerUp = true;
+        if (!mSuppressMouseEventsUntilPointerUp) {
+            if (Element* mouseTarget = hitRef.get()) {
+                Event mouse(kMouseDownEvent, *mouseTarget, event);
+                routeEvent(mouse);
+            }
+        }
         hit = hitRef.get();
     }
     if (event.button != PointerButton::Left) return hitRef.get() && isRootedInSurface(hitRef.get());
     mPressedClickCount = 0;
     clearKeyboardPress();
-    if (Element* pressed = mPressed) pressed->setState(ElementState::Active, false);
+    if (Element* pressed = mPressed) pressed->setActive(false);
     mPressed = nullptr;
     hit = hitRef.get();
     const bool hitEnabledBeforeInteraction = isEnabledInTree(hit);
@@ -417,16 +436,24 @@ bool Surface::pointerUp(const PointerEvent& event) {
         if (isEnabledInTree(hit.get())) {
             Event routed(kPointerUpEvent, *hit, event);
             routeEvent(routed);
+            if (!mSuppressMouseEventsUntilPointerUp) {
+                if (Element* mouseTarget = hit.get()) {
+                    Event mouse(kMouseUpEvent, *mouseTarget, event);
+                    routeEvent(mouse);
+                }
+            }
             if (hit && event.button == PointerButton::Right && isRootedInSurface(hit.get()) && isEnabledInTree(hit.get())) {
                 Event contextMenu(kContextMenuEvent, *hit, event);
                 routeEvent(contextMenu);
             }
         }
+        mSuppressMouseEventsUntilPointerUp = false;
         return hadHit || hasActiveModal();
     }
     if (mScrollbarCapture) {
         mScrollbarCapture.reset();
         refreshHover();
+        mSuppressMouseEventsUntilPointerUp = false;
         return true;
     }
     ElementRef<Element> capturedRef(mCaptured);
@@ -437,13 +464,20 @@ bool Surface::pointerUp(const PointerEvent& event) {
         Event routed(kPointerUpEvent, *captured, event);
         const bool routedHandled = routeEvent(routed);
         captured = capturedRef.get();
+        bool mouseHandled = false;
+        if (captured && !mSuppressMouseEventsUntilPointerUp) {
+            Event mouse(kMouseUpEvent, *captured, event);
+            mouseHandled = routeEvent(mouse);
+        }
+        mSuppressMouseEventsUntilPointerUp = false;
+        captured = capturedRef.get();
         if (!captured || captured->parentElement() != capturedParent || !isRootedInSurface(captured) || !isEnabledInTree(captured)) {
             refreshHover();
-            return routedHandled;
+            return routedHandled || mouseHandled;
         }
         const bool handled = !routed.defaultPrevented() && captured->endPointerInteraction(event);
         refreshHover();
-        return routedHandled || handled;
+        return routedHandled || mouseHandled || handled;
     }
     ElementRef<Element> released(mPressed);
     ElementRef<Element> hit(hitTestAt(event.position));
@@ -452,9 +486,16 @@ bool Surface::pointerUp(const PointerEvent& event) {
         Event routed(kPointerUpEvent, *target, event);
         routeEvent(routed);
         defaultPrevented = routed.defaultPrevented();
+        if (!mSuppressMouseEventsUntilPointerUp) {
+            if (Element* mouseTarget = routed.target()) {
+                Event mouse(kMouseUpEvent, *mouseTarget, event);
+                routeEvent(mouse);
+            }
+        }
     }
+    mSuppressMouseEventsUntilPointerUp = false;
     const uint8_t clickCount = mPressedClickCount;
-    if (Element* pressed = mPressed) pressed->setState(ElementState::Active, false);
+    if (Element* pressed = mPressed) pressed->setActive(false);
     mPressed = nullptr;
     setHovered(hit.get());
     mPressedClickCount = 0;
@@ -565,25 +606,25 @@ void Surface::refreshHoverState() {
 
 void Surface::setHovered(Element* node) {
     if (mHovered == node) return;
-    if (Element* hovered = mHovered) hovered->setState(ElementState::Hovered, false);
+    if (Element* hovered = mHovered) hovered->setHovered(false);
     mHovered = node;
-    if (Element* hovered = mHovered) hovered->setState(ElementState::Hovered, true);
+    if (Element* hovered = mHovered) hovered->setHovered(true);
 }
 
 void Surface::setFocused(Element* node, bool focusVisible) {
     if (mFocused == node) {
-        if (node) node->setState(ElementState::FocusVisible, focusVisible);
+        if (node) node->setFocusVisible(focusVisible);
         return;
     }
     if (Element* focused = mFocused) {
         clearKeyboardPress();
-        focused->setState(ElementState::Focused, false);
-        focused->setState(ElementState::FocusVisible, false);
+        focused->setFocused(false);
+        focused->setFocusVisible(false);
     }
     mFocused = node;
     if (Element* focused = mFocused) {
-        focused->setState(ElementState::Focused, true);
-        focused->setState(ElementState::FocusVisible, focusVisible);
+        focused->setFocused(true);
+        focused->setFocusVisible(focusVisible);
     }
 }
 
@@ -618,13 +659,13 @@ void Surface::validateFocus() {
 }
 
 void Surface::clearKeyboardPress() {
-    if (Element* pressed = mKeyPressed) pressed->setState(ElementState::Active, false);
+    if (Element* pressed = mKeyPressed) pressed->setActive(false);
     mKeyPressed = nullptr;
     mPressedKey = 0;
 }
 
 void Surface::updatePressedState() {
-    if (Element* pressed = mPressed) pressed->setState(ElementState::Active, mHovered == pressed);
+    if (Element* pressed = mPressed) pressed->setActive(mHovered == pressed);
 }
 
 void Surface::elementBecameUnavailable(Element&) {
@@ -641,7 +682,7 @@ void Surface::elementBecameUnavailable(Element&) {
         mResizeCursor = CursorStyle::Auto;
     }
     if (Element* pressed = mPressed; pressed && !isEnabledInTree(pressed)) {
-        pressed->setState(ElementState::Active, false);
+        pressed->setActive(false);
         mPressed = nullptr;
     }
     if (Element* hovered = mHovered; hovered && !isEnabledInTree(hovered)) setHovered(nullptr);

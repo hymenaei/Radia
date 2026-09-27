@@ -5,13 +5,14 @@
 
 #include "linden_common.h"
 #include "html/button.h"
+#include "ComputedStyleProperties.h"
 #include "html/elementnames.h"
 #include "paint/paintcontext.h"
 #include "resource/elementdefinition.h"
 #include "style/computedstyle.h"
 
 namespace radia::ui {
-HTMLButtonElement::HTMLButtonElement() : HTMLButtonElement(kButtonTag.localName) {}
+HTMLButtonElement::HTMLButtonElement() : HTMLButtonElement(HTMLTagName(HTMLTag::Button)) {}
 
 HTMLButtonElement::HTMLButtonElement(std::string_view elementName) : HTMLElement(elementName) {}
 
@@ -22,19 +23,19 @@ AccessibleSemantics HTMLButtonElement::accessibleSemantics() const {
 }
 
 void HTMLButtonElement::constrainResolvedStyle(ComputedStyle& style) const {
-    style.alignContentBlockCenter = style.appearance == AppearanceMode::Auto && style.display == DisplayMode::InlineBlock;
+    style.alignContentBlockCenter = style.appearance() == Appearance::Auto && style.display() == Display::InlineBlock;
 }
 
 void HTMLButtonElement::paint(PaintContext& context, const ComputedStyle& style, float scale) const {
-    if (style.appearance == AppearanceMode::Auto) {
+    if (style.appearance() == Appearance::Auto) {
         NativeButtonPaintRequest request;
         request.bounds = rect();
         request.style = style;
         request.disabled = disabled();
-        request.hovered = hasState(ElementState::Hovered);
-        request.pressed = hasState(ElementState::Active);
-        request.focused = hasState(ElementState::Focused);
-        request.focusVisible = hasState(ElementState::FocusVisible);
+        request.hovered = hovered();
+        request.pressed = active();
+        request.focused = focused();
+        request.focusVisible = focusVisible();
         request.scale = scale;
         context.paintNativeButton(request);
         return;
@@ -43,7 +44,7 @@ void HTMLButtonElement::paint(PaintContext& context, const ComputedStyle& style,
 }
 
 ResourceElementDefinition detail::ElementDefinitions::button() {
-    return defineElement<HTMLButtonElement>(kButtonTag.localName)
+    return defineElement<HTMLButtonElement>(HTMLTagName(HTMLTag::Button))
         .attributes({allowedAttribute("type")})
         .validate([](const ElementBuildInput& input, HTMLButtonElement& button, ElementBuildContext& context) {
             const ElementAttribute* type = input.find("type");

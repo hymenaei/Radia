@@ -9,7 +9,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
-#include "css/color.h"
 #include "css/rules.h"
 #include "css/syntax.h"
 
@@ -33,39 +32,14 @@ bool parseFiniteFloat(const std::string& value, float& result) {
     return end != value.c_str() && *end == '\0' && std::isfinite(result);
 }
 
-void assignColorValue(const StyleColorValue& value, Color& color, std::optional<LightDarkColor>& lightDarkColor) {
-    if (const auto solid = std::get_if<Color>(&value)) {
-        color = *solid;
-        lightDarkColor.reset();
-    } else {
-        const LightDarkColor& themed = std::get<LightDarkColor>(value);
-        color = themed.dark;
-        lightDarkColor = themed;
-    }
-}
 } // namespace
 
-Color StyleModel::parseColorValue(detail::CSSValueRange value, const Color& fallback) {
+std::optional<CSS::Color> StyleModel::consumeCSSColor(detail::CSSValueRange value) {
     value.range = detail::trimCSSRange(value.stream, value.range);
-    if (const std::optional<Color> parsed = parseColor(value.stream, value.range)) return *parsed;
-    return fallback;
-}
-
-std::optional<StyleColorValue> StyleModel::parseColorChoiceValue(detail::CSSValueRange value) {
-    value.range = detail::trimCSSRange(value.stream, value.range);
-    if (const auto function = detail::parseCSSFunction(value.stream, value.range); function && function->name == "light-dark") {
-        const std::vector<detail::CSSTokenRange> choices = detail::splitCSSOnDelimiter(value.stream, function->body, ',');
-        if (choices.size() != 2 || choices[0].begin == choices[0].end || choices[1].begin == choices[1].end) return std::nullopt;
-        const Color marker(-1.f, -1.f, -1.f, -1.f);
-        const Color light = parseColorValue(subValue(value, choices[0]), marker);
-        const Color dark = parseColorValue(subValue(value, choices[1]), marker);
-        if (light.a < 0.f || dark.a < 0.f) return std::nullopt;
-        return LightDarkColor{light, dark};
-    }
-
-    const Color marker(-1.f, -1.f, -1.f, -1.f);
-    const Color color = parseColorValue(value, marker);
-    return color.a < 0.f ? std::nullopt : std::optional<StyleColorValue>(color);
+    auto copy = value;
+    const auto parsed = CSSValueDetail::consumeColor(copy);
+    if (!parsed || CSSValueDetail::nextToken(copy)) return std::nullopt;
+    return parsed;
 }
 
 float StyleModel::parseNumberValue(detail::CSSValueRange value, float fallback) {
@@ -93,55 +67,7 @@ std::optional<Length> StyleModel::parseLengthValue(detail::CSSValueRange value) 
     return percentage ? Length{0.f, parsed / 100.f} : Length{parsed};
 }
 
-std::optional<BorderRadii> StyleModel::parseBorderRadius(detail::CSSValueRange value) {
-    const std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, detail::trimCSSRange(value.stream, value.range), true);
-    if (tokens.empty()) return std::nullopt;
-
-    std::vector<detail::CSSTokenRange> horizontalTokens;
-    std::vector<detail::CSSTokenRange> verticalTokens;
-    bool sawSlash = false;
-    for (const detail::CSSTokenRange token : tokens) {
-        if (valueText(subValue(value, token)) == "/") {
-            if (sawSlash || horizontalTokens.empty()) return std::nullopt;
-            sawSlash = true;
-        } else if (sawSlash) verticalTokens.push_back(token);
-        else horizontalTokens.push_back(token);
-    }
-    if (horizontalTokens.empty() || horizontalTokens.size() > 4 || (sawSlash && (verticalTokens.empty() || verticalTokens.size() > 4)))
-        return std::nullopt;
-
-    const auto expand = [&value](const std::vector<detail::CSSTokenRange>& values) -> std::optional<std::array<Length, 4>> {
-        std::array<Length, 4> expanded;
-        std::vector<Length> parsed;
-        parsed.reserve(values.size());
-        for (const detail::CSSTokenRange range : values) {
-            const std::optional<Length> length = parseLengthValue(subValue(value, range));
-            if (!length || length->pixels < 0.f || length->percent < 0.f) return std::nullopt;
-            parsed.push_back(*length);
-        }
-        switch (parsed.size()) {
-            case 1: expanded = {parsed[0], parsed[0], parsed[0], parsed[0]}; break;
-            case 2: expanded = {parsed[0], parsed[1], parsed[0], parsed[1]}; break;
-            case 3: expanded = {parsed[0], parsed[1], parsed[2], parsed[1]}; break;
-            case 4: expanded = {parsed[0], parsed[1], parsed[2], parsed[3]}; break;
-            default: return std::nullopt;
-        }
-        return expanded;
-    };
-
-    const std::optional<std::array<Length, 4>> horizontal = expand(horizontalTokens);
-    const std::optional<std::array<Length, 4>> vertical = sawSlash ? expand(verticalTokens) : horizontal;
-    if (!horizontal || !vertical) return std::nullopt;
-
-    return BorderRadii{
-        {horizontal->at(0), vertical->at(0)},
-        {horizontal->at(1), vertical->at(1)},
-        {horizontal->at(2), vertical->at(2)},
-        {horizontal->at(3), vertical->at(3)},
-    };
-}
-
-std::optional<Gradient> StyleModel::parseGradient(detail::CSSValueRange value) {
+std::optional<Gradient> StyleModel::parseGradient(detail::CSSValueRange value, ColorSchemeMode scheme) {
     value.range = detail::trimCSSRange(value.stream, value.range);
     const auto function = detail::parseCSSFunction(value.stream, value.range);
     if (!function) return std::nullopt;
@@ -182,7 +108,7 @@ std::optional<Gradient> StyleModel::parseGradient(detail::CSSValueRange value) {
 
     auto parseCenter = [&](const std::vector<detail::CSSTokenRange>& tokens, Vec2& center) {
         if (tokens.empty() || tokens.size() > 2) return false;
-        auto parsePercentage = [&](detail::CSSTokenRange tokenRange, float& percentage) {
+        auto consumePercentage = [&](detail::CSSTokenRange tokenRange, float& percentage) {
             const std::string token = valueText(subValue(value, tokenRange));
             if (token.empty() || token.back() != '%') return false;
             if (!parseFiniteFloat(token.substr(0, token.size() - 1), percentage) || percentage < 0.f || percentage > 100.f) return false;
@@ -194,7 +120,7 @@ std::optional<Gradient> StyleModel::parseGradient(detail::CSSValueRange value) {
             if (token == "left") result = 0.f;
             else if (token == "center") result = .5f;
             else if (token == "right") result = 1.f;
-            else if (!parsePercentage(rawToken, result)) return false;
+            else if (!consumePercentage(rawToken, result)) return false;
             return true;
         };
         auto vertical = [&](detail::CSSTokenRange rawToken, float& result) {
@@ -203,7 +129,7 @@ std::optional<Gradient> StyleModel::parseGradient(detail::CSSValueRange value) {
             else if (token == "center") result = .5f;
             else if (token == "top") result = 1.f;
             else {
-                if (!parsePercentage(rawToken, result)) return false;
+                if (!consumePercentage(rawToken, result)) return false;
                 result = 1.f - result;
             }
             return true;
@@ -234,7 +160,7 @@ std::optional<Gradient> StyleModel::parseGradient(detail::CSSValueRange value) {
     auto parsesAsColorStop = [&](detail::CSSTokenRange argument) {
         const std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, argument);
         if (tokens.empty()) return false;
-        return parseColorChoiceValue(subValue(value, tokens.front())).has_value();
+        return consumeCSSColor(subValue(value, tokens.front())).has_value();
     };
 
     std::size_t firstStop = 0;
@@ -314,17 +240,18 @@ std::optional<Gradient> StyleModel::parseGradient(detail::CSSValueRange value) {
     for (std::size_t index = firstStop; index < arguments.size(); ++index) {
         const std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, arguments[index]);
         if (tokens.empty() || tokens.size() > 3) return std::nullopt;
-        const std::optional<StyleColorValue> color = parseColorChoiceValue(subValue(value, tokens.front()));
+        const auto specifiedColor = consumeCSSColor(subValue(value, tokens.front()));
+        const auto color = specifiedColor ? StyleColor::fromCSS(*specifiedColor, scheme) : std::nullopt;
         if (!color) return std::nullopt;
         float position = unspecified;
         if (tokens.size() >= 2 && !parseStopPosition(tokens[1], position)) return std::nullopt;
         gradient.stops.emplace_back();
-        assignColorValue(*color, gradient.stops.back().color, gradient.stops.back().lightDarkColor);
+        gradient.stops.back().color = *color;
         gradient.stops.back().position = position;
         if (tokens.size() == 3) {
             if (!parseStopPosition(tokens[2], position)) return std::nullopt;
             gradient.stops.emplace_back();
-            assignColorValue(*color, gradient.stops.back().color, gradient.stops.back().lightDarkColor);
+            gradient.stops.back().color = *color;
             gradient.stops.back().position = position;
         }
         if (gradient.stops.size() > 8) return std::nullopt;
@@ -348,64 +275,9 @@ std::optional<Gradient> StyleModel::parseGradient(detail::CSSValueRange value) {
     return gradient;
 }
 
-std::optional<std::vector<BoxShadow>> StyleModel::parseShadows(detail::CSSValueRange value) {
-    const std::vector<detail::CSSTokenRange> entries = detail::splitCSSOnDelimiter(value.stream, value.range, ',');
-    if (entries.empty()) return std::nullopt;
-    if (entries.size() == 1 && normalizeCSSKeyword(value.stream, entries.front()) == "none") return std::vector<BoxShadow>();
-    std::vector<BoxShadow> shadows;
-    shadows.reserve(entries.size());
-    for (const detail::CSSTokenRange entry : entries) {
-        const std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, entry);
-        if (tokens.size() < 2 || tokens.size() > 6) return std::nullopt;
-        BoxShadow shadow;
-        std::vector<float> lengths;
-        std::optional<StyleColorValue> color;
-        for (const detail::CSSTokenRange token : tokens) {
-            const std::string keyword = normalizeCSSKeyword(value.stream, token);
-            if (keyword == "inset") {
-                if (shadow.inset) return std::nullopt;
-                shadow.inset = true;
-                continue;
-            }
-            if (keyword == "outset") return std::nullopt;
-            if (keyword == "currentcolor") {
-                if (color) return std::nullopt;
-                shadow.currentColor = true;
-                color = Color();
-                continue;
-            }
-            if (const std::optional<StyleColorValue> parsedColor = parseColorChoiceValue(subValue(value, token))) {
-                if (color || shadow.currentColor) return std::nullopt;
-                color = *parsedColor;
-                continue;
-            }
-            const std::optional<Length> parsed = parseLengthValue(subValue(value, token));
-            const detail::CSSTokenRange trimmed = detail::trimCSSRange(value.stream, token);
-            const detail::CSSToken& sourceToken = value.stream.tokens()[trimmed.begin];
-            if (!parsed || sourceToken.kind == detail::CSSTokenKind::Percentage || parsed->percent != 0.f) return std::nullopt;
-            if (sourceToken.kind == detail::CSSTokenKind::Number && parsed->pixels != 0.f) return std::nullopt;
-            if (sourceToken.kind == detail::CSSTokenKind::Dimension) {
-                const auto dimension = detail::parseCSSDimension(value.stream, trimmed);
-                if (!dimension || dimension->unit != "px") return std::nullopt;
-            }
-            lengths.push_back(parsed->pixels);
-        }
-        if (lengths.size() < 2 || lengths.size() > 4) return std::nullopt;
-        shadow.horizontal = lengths[0];
-        shadow.vertical = lengths[1];
-        if (lengths.size() > 2) shadow.blur = lengths[2];
-        if (lengths.size() > 3) shadow.spread = lengths[3];
-        if (shadow.blur < 0.f) return std::nullopt;
-        if (color && !shadow.currentColor) assignColorValue(*color, shadow.color, shadow.lightDarkColor);
-        else if (!color) shadow.currentColor = true;
-        shadows.push_back(shadow);
-    }
-    return shadows;
-}
-
-std::optional<FilterOperations> StyleModel::parseFilter(detail::CSSValueRange value) {
+std::optional<Filter> StyleModel::parseFilter(detail::CSSValueRange value) {
     value.range = detail::trimCSSRange(value.stream, value.range);
-    if (normalizeCSSKeyword(value.stream, value.range) == "none") return FilterOperations();
+    if (normalizeCSSKeyword(value.stream, value.range) == "none") return Filter{};
     const std::vector<detail::CSSTokenRange> functions = detail::splitCSSComponents(value.stream, value.range);
     if (functions.empty()) return std::nullopt;
 
@@ -469,7 +341,8 @@ std::optional<FilterOperations> StyleModel::parseFilter(detail::CSSValueRange va
         return stop;
     };
 
-    FilterOperations operations;
+    Filter filter;
+    std::vector<FilterOperation>& operations = filter.operations;
     operations.reserve(functions.size());
     for (const detail::CSSTokenRange function : functions) {
         const auto parsedFunction = detail::parseCSSFunction(value.stream, function);
@@ -512,10 +385,10 @@ std::optional<FilterOperations> StyleModel::parseFilter(detail::CSSValueRange va
             operations.emplace_back(std::move(linearBlur));
         } else return std::nullopt;
     }
-    return operations;
+    return filter;
 }
 
-std::optional<Outline> StyleModel::parseOutline(detail::CSSValueRange value) {
+std::optional<Outline> StyleModel::parseOutline(detail::CSSValueRange value, ColorSchemeMode scheme) {
     const std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, value.range);
     if (tokens.size() < 2 || tokens.size() > 3) return std::nullopt;
     Outline outline;
@@ -543,52 +416,13 @@ std::optional<Outline> StyleModel::parseOutline(detail::CSSValueRange value) {
             continue;
         }
 
-        const std::optional<StyleColorValue> color = parseColorChoiceValue(subValue(value, rawToken));
+        const auto specifiedColor = consumeCSSColor(subValue(value, rawToken));
+        const auto color = specifiedColor ? StyleColor::fromCSS(*specifiedColor, scheme) : std::nullopt;
         if (!color || hasColor) return std::nullopt;
-        assignColorValue(*color, outline.color, outline.lightDarkColor);
+        outline.color = *color;
         hasColor = true;
     }
     return hasWidth && hasColor ? std::optional<Outline>(outline) : std::nullopt;
 }
 
-EdgeInsets StyleModel::parseEdgeInsets(detail::CSSValueRange value, const EdgeInsets& fallback) {
-    const std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(value.stream, value.range);
-    std::vector<float> values;
-    for (const detail::CSSTokenRange token : tokens) {
-        const float parsed = parseNumberValue(subValue(value, token), -1.f);
-        if (!std::isfinite(parsed) || parsed < 0.f || values.size() == 4) return fallback;
-        values.push_back(parsed);
-    }
-    if (values.empty()) return fallback;
-    EdgeInsets result;
-    if (values.size() == 1) result.top = result.right = result.bottom = result.left = values[0];
-    else if (values.size() == 2) result.top = result.bottom = values[0], result.right = result.left = values[1];
-    else if (values.size() == 3) result.top = values[0], result.right = result.left = values[1], result.bottom = values[2];
-    else result.top = values[0], result.right = values[1], result.bottom = values[2], result.left = values[3];
-    return result;
-}
-
-std::optional<MarginInsets> StyleModel::parseMargin(detail::CSSValueRange input) {
-    const std::vector<detail::CSSTokenRange> tokens = detail::splitCSSComponents(input.stream, input.range);
-    std::vector<MarginValue> values;
-    for (const detail::CSSTokenRange token : tokens) {
-        MarginValue margin;
-        if (normalizeCSSKeyword(input.stream, token) == "auto") margin = MarginValue::automatic();
-        else {
-            const float number = parseNumberValue(subValue(input, token), std::numeric_limits<float>::quiet_NaN());
-            if (!std::isfinite(number)) return std::nullopt;
-            margin = MarginValue::fromPixels(number);
-        }
-        if (values.size() == 4) return std::nullopt;
-        values.push_back(margin);
-    }
-    if (values.empty()) return std::nullopt;
-
-    MarginValue top = values[0], right = values[0], bottom = values[0], left = values[0];
-    if (values.size() == 2) right = left = values[1];
-    else if (values.size() == 3) right = left = values[1], bottom = values[2];
-    else if (values.size() == 4) right = values[1], bottom = values[2], left = values[3];
-
-    return MarginInsets{top, right, bottom, left};
-}
 } // namespace radia::ui

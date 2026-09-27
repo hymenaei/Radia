@@ -6,6 +6,7 @@
 #include "linden_common.h"
 #include "paint/nativeappearance.h"
 #include <algorithm>
+#include <utility>
 #include "paint/paintcontext.h"
 
 namespace radia::ui {
@@ -17,40 +18,6 @@ const NativeInputMetrics kSwitchMetrics{{36.f, 20.f}};
 
 const Color kDefaultScrollbarTrackColor(0.08f, 0.09f, 0.1f, 0.52f);
 const Color kDefaultScrollbarThumbColor(0.55f, 0.58f, 0.62f, 0.88f);
-
-struct NativeInputPalette {
-    Color accent;
-    Color disabledAccent;
-    Color controlBackground;
-    Color disabledControlBackground;
-    Color controlBorder;
-    Color hoveredControlBorder;
-    Color pressedControlBorder;
-    Color disabledControlBorder;
-    Color checkboxMark;
-    Color disabledCheckboxMark;
-};
-
-const NativeInputPalette kLightInputPalette{
-    {0.f, 117.f / 255.f, 1.f},
-    {118.f / 255.f, 118.f / 255.f, 118.f / 255.f, 77.f / 255.f},
-    {1.f, 1.f, 1.f},
-    {1.f, 1.f, 1.f, .6f},
-    {118.f / 255.f, 118.f / 255.f, 118.f / 255.f},
-    {79.f / 255.f, 79.f / 255.f, 79.f / 255.f},
-    {141.f / 255.f, 141.f / 255.f, 141.f / 255.f},
-    {118.f / 255.f, 118.f / 255.f, 118.f / 255.f, 77.f / 255.f},
-    {1.f, 1.f, 1.f},
-    {1.f, 1.f, 1.f, 153.f / 255.f},
-};
-
-const NativeInputPalette kDarkInputPalette{
-    {153.f / 255.f, 200.f / 255.f, 1.f},           {154.f / 255.f, 161.f / 255.f, 172.f / 255.f, .55f},
-    {43.f / 255.f, 47.f / 255.f, 55.f / 255.f},    {43.f / 255.f, 47.f / 255.f, 55.f / 255.f, .55f},
-    {154.f / 255.f, 160.f / 255.f, 168.f / 255.f}, {195.f / 255.f, 200.f / 255.f, 208.f / 255.f},
-    {225.f / 255.f, 229.f / 255.f, 235.f / 255.f}, {154.f / 255.f, 160.f / 255.f, 168.f / 255.f, .5f},
-    {59.f / 255.f, 59.f / 255.f, 59.f / 255.f},    {59.f / 255.f, 59.f / 255.f, 59.f / 255.f},
-};
 
 struct HslColor {
     float h = 0.f;
@@ -94,30 +61,25 @@ Color fromHsl(const HslColor& hsl, float alpha) {
     return {hueToRgb(p, q, hsl.h + 1.f / 3.f), hueToRgb(p, q, hsl.h), hueToRgb(p, q, hsl.h - 1.f / 3.f), alpha};
 }
 
-ColorScheme effectiveColorScheme(const NativeInputPaintRequest& request) {
-    return request.colorScheme;
-}
-
-const NativeInputPalette& inputPalette(const NativeInputPaintRequest& request) {
-    return effectiveColorScheme(request) == ColorScheme::Light ? kLightInputPalette : kDarkInputPalette;
-}
-
 Color inputAccent(const NativeInputPaintRequest& request) {
-    const NativeInputPalette& palette = inputPalette(request);
-    if (request.disabled) return palette.disabledAccent;
-
-    const Color accent = request.accentColor.value_or(palette.accent);
+    if (request.disabled) {
+        Color color = systemColorValue(CSSKeyword::GrayText, request.colorScheme);
+        color.a = .55f;
+        return color;
+    }
+    const Color accent = request.accentColor.value_or(systemColorValue(CSSKeyword::AccentColor, request.colorScheme));
     if (!request.pressed && !request.hovered) return accent;
     HslColor adjusted = toHsl(accent);
     float lightnessAdjustment = request.pressed ? .11f : -.11f;
-    if (effectiveColorScheme(request) == ColorScheme::Dark) lightnessAdjustment = -lightnessAdjustment;
+    if (request.colorScheme == ColorSchemeMode::Dark) lightnessAdjustment = -lightnessAdjustment;
     adjusted.l = std::clamp(adjusted.l + lightnessAdjustment, 0.f, 1.f);
     return fromHsl(adjusted, accent.a);
 }
 
 Color inputMarkColor(const NativeInputPaintRequest& request) {
-    const NativeInputPalette& palette = inputPalette(request);
-    return request.disabled ? palette.disabledCheckboxMark : palette.checkboxMark;
+    Color color = systemColorValue(request.disabled ? CSSKeyword::GrayText : CSSKeyword::AccentColorText, request.colorScheme);
+    if (request.disabled) color.a = .6f;
+    return color;
 }
 
 Color scrollbarStateColor(Color color, const NativeScrollbarState& state, ScrollbarPart part) {
@@ -129,16 +91,23 @@ Color scrollbarStateColor(Color color, const NativeScrollbarState& state, Scroll
 }
 
 Color nativeControlBackground(const NativeInputPaintRequest& request) {
-    const NativeInputPalette& palette = inputPalette(request);
-    return request.disabled ? palette.disabledControlBackground : palette.controlBackground;
+    Color color = systemColorValue(CSSKeyword::Field, request.colorScheme);
+    if (request.disabled) color.a = .6f;
+    return color;
 }
 
 Color nativeControlBorder(const NativeInputPaintRequest& request) {
-    const NativeInputPalette& palette = inputPalette(request);
-    if (request.disabled) return palette.disabledControlBorder;
-    if (request.pressed) return palette.pressedControlBorder;
-    if (request.hovered) return palette.hoveredControlBorder;
-    return palette.controlBorder;
+    Color color = systemColorValue(request.disabled ? CSSKeyword::GrayText : CSSKeyword::ButtonBorder, request.colorScheme);
+    if (request.disabled) {
+        color.a = .6f;
+        return color;
+    }
+    if (!request.pressed && !request.hovered) return color;
+
+    HslColor adjusted = toHsl(color);
+    const float contrastAdjustment = (request.colorScheme == ColorSchemeMode::Dark ? 1.f : -1.f) * (request.pressed ? .2f : .12f);
+    adjusted.l = std::clamp(adjusted.l + contrastAdjustment, 0.f, 1.f);
+    return fromHsl(adjusted, color.a);
 }
 
 Color switchTrack(const NativeInputPaintRequest& request) {
@@ -149,25 +118,28 @@ Color switchThumb(const NativeInputPaintRequest& request) {
     return nativeControlBackground(request);
 }
 
-ComputedStyle nativeControlStyle(Color background, Color border, float radius, bool bordered = true) {
+ComputedStyle nativeControlStyle(Color background, Color border, float radius, ColorSchemeMode colorScheme, bool bordered = true) {
     ComputedStyle result;
-    result.backgroundColor = background;
-    result.borderColor = border;
-    result.borderStyle = bordered ? BorderStyle::Solid : BorderStyle::NoneValue;
-    result.borderWidth = bordered ? EdgeInsets{1.f, 1.f, 1.f, 1.f} : EdgeInsets{};
-    result.borderRadius = BorderRadii::uniform(Length{radius});
+    result.usedColorScheme = colorScheme;
+    result.setBackgroundColor(std::move(background));
+    result.setBorderColor(std::move(border));
+    result.setBorderStyle(bordered ? BorderStyle::Solid : BorderStyle::NoneValue);
+    result.setBorderWidth(LineWidth{bordered ? 1.f : 0.f});
+    result.setBorderRadius(BorderRadius::uniform(Length{radius}));
     return result;
 }
 
-ComputedStyle nativeMarkStyle(Color color, float radius = 0.f) {
+ComputedStyle nativeMarkStyle(Color color, ColorSchemeMode colorScheme, float radius = 0.f) {
     ComputedStyle result;
-    result.backgroundColor = color;
-    result.borderColor = color;
-    result.borderRadius = BorderRadii::uniform(Length{radius});
+    result.usedColorScheme = colorScheme;
+    result.setBackgroundColor(Color{color});
+    result.setBorderColor(std::move(color));
+    result.setBorderRadius(BorderRadius::uniform(Length{radius}));
     return result;
 }
 
 void paintNativeInputBox(NativeControlPaintContext& context, const Rect& rect, ComputedStyle style, float opacity) {
+    resolveStyleColors(style, systemColorValue(CSSKeyword::CanvasText, style.usedColorScheme));
     applyOpacity(style, opacity);
     context.paintNativeBox(rect, style);
 }
@@ -178,15 +150,15 @@ Rect centeredSquare(const Rect& bounds) {
 }
 
 void paintInputBase(NativeControlPaintContext& context, const Rect& bounds, Color background, Color border, float radius, bool drawBorder,
-                    float opacity) {
+                    float opacity, ColorSchemeMode colorScheme) {
     const Rect backgroundBounds = insetRect(bounds, {.2f, .2f, .2f, .2f});
-    paintNativeInputBox(context, backgroundBounds, nativeMarkStyle(background, std::max(0.f, radius - .2f)), opacity);
+    paintNativeInputBox(context, backgroundBounds, nativeMarkStyle(background, colorScheme, std::max(0.f, radius - .2f)), opacity);
     if (!drawBorder) return;
 
-    ComputedStyle borderStyle = nativeMarkStyle(Color(0.f, 0.f, 0.f, 0.f), radius);
-    borderStyle.borderColor = border;
-    borderStyle.borderStyle = BorderStyle::Solid;
-    borderStyle.borderWidth = {1.f, 1.f, 1.f, 1.f};
+    ComputedStyle borderStyle = nativeMarkStyle(Color(0.f, 0.f, 0.f, 0.f), colorScheme, radius);
+    borderStyle.setBorderColor(std::move(border));
+    borderStyle.setBorderStyle(BorderStyle::Solid);
+    borderStyle.setBorderWidth(LineWidth{1.f});
     paintNativeInputBox(context, bounds, borderStyle, opacity);
 }
 
@@ -194,14 +166,14 @@ void paintSwitch(NativeControlPaintContext& context, const NativeInputPaintReque
     const Rect bounds = request.bounds;
     const float radius = std::max(0.f, bounds.h * .5f);
     const Color track = switchTrack(request);
-    paintNativeInputBox(context, bounds, nativeControlStyle(track, track, radius), request.opacity);
+    paintNativeInputBox(context, bounds, nativeControlStyle(track, track, radius, request.colorScheme), request.opacity);
 
     const float inset = std::min(2.f, std::max(0.f, std::min(bounds.w, bounds.h) * .5f));
     const float thumbSize = std::max(0.f, bounds.h - inset * 2.f);
     const bool thumbAtRight = request.direction == LayoutDirection::LeftToRight ? request.checked : !request.checked;
     const float thumbLeft = thumbAtRight ? bounds.right() - inset - thumbSize : bounds.left() + inset;
     const Rect thumb{thumbLeft, bounds.y + inset, thumbSize, thumbSize};
-    paintNativeInputBox(context, thumb, nativeMarkStyle(switchThumb(request), thumbSize * .5f), request.opacity);
+    paintNativeInputBox(context, thumb, nativeMarkStyle(switchThumb(request), request.colorScheme, thumbSize * .5f), request.opacity);
 }
 
 void paintCheckbox(NativeControlPaintContext& context, const NativeInputPaintRequest& request) {
@@ -209,8 +181,9 @@ void paintCheckbox(NativeControlPaintContext& context, const NativeInputPaintReq
     const Rect bounds = centeredSquare(request.bounds);
     const float radius = std::min(2.f, std::min(bounds.w, bounds.h) * .5f);
     const Color accent = inputAccent(request);
-    paintInputBase(context, bounds, nativeControlBackground(request), nativeControlBorder(request), radius, !selected, request.opacity);
-    if (selected) paintNativeInputBox(context, bounds, nativeMarkStyle(accent, radius), request.opacity);
+    paintInputBase(context, bounds, nativeControlBackground(request), nativeControlBorder(request), radius, !selected, request.opacity,
+                   request.colorScheme);
+    if (selected) paintNativeInputBox(context, bounds, nativeMarkStyle(accent, request.colorScheme, radius), request.opacity);
     if (!selected) return;
 
     NativeInputMarkPaintRequest mark;
@@ -238,13 +211,13 @@ void paintRadio(NativeControlPaintContext& context, const NativeInputPaintReques
     const float radius = std::min(bounds.w, bounds.h) * .5f;
     const Color accent = inputAccent(request);
     paintInputBase(context, bounds, nativeControlBackground(request), request.checked ? accent : nativeControlBorder(request), radius, true,
-                   request.opacity);
+                   request.opacity, request.colorScheme);
     if (!request.checked) return;
 
     const float inset = std::min(bounds.w, bounds.h) * .2f;
     const float size = std::max(0.f, std::min(bounds.w, bounds.h) - inset * 2.f);
     const Rect dot{bounds.x + (bounds.w - size) * .5f, bounds.y + (bounds.h - size) * .5f, size, size};
-    paintNativeInputBox(context, dot, nativeMarkStyle(accent, size * .5f), request.opacity);
+    paintNativeInputBox(context, dot, nativeMarkStyle(accent, request.colorScheme, size * .5f), request.opacity);
 }
 } // namespace
 
@@ -266,8 +239,8 @@ NativeScrollbarMetrics NativeAppearanceBase::scrollbarMetrics(ScrollbarMode) con
 }
 
 NativeScrollbarPaintStyle NativeAppearanceBase::scrollbarPaintStyle(const NativeScrollbarPaintRequest& request, ScrollbarAxis axis) const {
-    const Color track = request.colors.automatic ? kDefaultScrollbarTrackColor : request.colors.track;
-    const Color baseThumb = request.colors.automatic ? kDefaultScrollbarThumbColor : request.colors.thumb;
+    const Color track = request.colors.automatic ? kDefaultScrollbarTrackColor : request.colors.track.resolvedColor();
+    const Color baseThumb = request.colors.automatic ? kDefaultScrollbarThumbColor : request.colors.thumb.resolvedColor();
     const NativeScrollbarState& state = axis == ScrollbarAxis::Vertical ? request.vertical : request.horizontal;
     const NativeScrollbarAxisGeometry& geometry = axis == ScrollbarAxis::Vertical ? request.geometry.vertical : request.geometry.horizontal;
     const Color glyph = baseThumb.withAlpha(std::min(1.f, baseThumb.a + .05f));

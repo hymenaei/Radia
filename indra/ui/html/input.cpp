@@ -6,10 +6,15 @@
 #include "linden_common.h"
 #include "html/input.h"
 #include <algorithm>
+#include <array>
+#include <optional>
 #include "binding/binder.h"
+#include "ComputedStyleProperties.h"
 #include "dom/elementinternal.h"
+#include "Geometry.h"
 #include "html/elementnames.h"
 #include "html/label.h"
+#include "InputTypes.h"
 #include "paint/nativeappearance.h"
 #include "paint/paintcontext.h"
 #include "resource/elementdefinition.h"
@@ -53,25 +58,25 @@ void appendLabelName(const Element& root, const HTMLInputElement& input, std::st
 }
 
 void paintInputOutline(PaintContext& context, const Rect& bounds, const ComputedStyle& style) {
-    if (style.outline.width <= 0.f || style.outline.color.a <= 0.f) return;
+    if (style.outline().width <= 0.f || style.outline().color.resolvedColor().a <= 0.f) return;
     ComputedStyle outlineStyle;
-    outlineStyle.borderRadius = style.borderRadius;
-    outlineStyle.outline = style.outline;
+    outlineStyle.setBorderRadius(BorderRadius{style.borderRadius()});
+    outlineStyle.outline() = style.outline();
     context.paintBox(bounds, outlineStyle);
 }
 } // namespace
 
 bool HTMLInputElement::isCheckableType(std::string_view type) {
-    const std::string key = canonicalizeHTMLName(type);
-    return key == "checkbox" || key == "radio";
+    const std::optional<InputType> inputType = findInputType(canonicalizeHTMLName(type));
+    return inputType == InputType::Checkbox || inputType == InputType::Radio;
 }
 
 bool HTMLInputElement::isCheckboxType() const {
-    return canonicalizeHTMLName(mType) == "checkbox";
+    return findInputType(canonicalizeHTMLName(mType)) == InputType::Checkbox;
 }
 
 bool HTMLInputElement::isRadioType() const {
-    return canonicalizeHTMLName(mType) == "radio";
+    return findInputType(canonicalizeHTMLName(mType)) == InputType::Radio;
 }
 
 bool HTMLInputElement::isSwitchType() const {
@@ -79,9 +84,9 @@ bool HTMLInputElement::isSwitchType() const {
 }
 
 HTMLInputElement::HTMLInputElement()
-    : HTMLElement(kInputTag.localName), mSliderTrack(PseudoElementType::SliderTrack, *this),
-      mSliderFill(PseudoElementType::SliderFill, *this, &mSliderTrack), mSliderThumb(PseudoElementType::SliderThumb, *this),
-      mCheckmark(PseudoElementType::Checkmark, *this) {
+    : HTMLElement(HTMLTagName(HTMLTag::Input)), mSliderTrack(CSSPseudoElement::SliderTrack, *this),
+      mSliderFill(CSSPseudoElement::SliderFill, *this, &mSliderTrack), mSliderThumb(CSSPseudoElement::SliderThumb, *this),
+      mCheckmark(CSSPseudoElement::Checkmark, *this) {
     AttributeUpdateGuard guard(mUpdatingAttribute);
     mSliderTrack.addGeneratedPseudoElement(mSliderFill);
     setAttribute("type", mType);
@@ -132,26 +137,38 @@ AccessibleSemantics HTMLInputElement::accessibleSemantics() const {
 }
 
 void HTMLInputElement::constrainResolvedStyle(ComputedStyle& style) const {
-    if (style.appearance != AppearanceMode::Base || !isCheckableType(mType) || isSwitchType() || style.borderWidthSet) return;
-    style.borderWidth = {1.f, 1.f, 1.f, 1.f};
-    style.borderStyle = BorderStyle::Solid;
-    if (!style.borderColorSet) {
-        style.borderColor = {};
-        style.borderColorLightDark.reset();
-        style.borderGradient.reset();
-        style.borderColorCurrent = true;
-    }
+    if (style.appearance() != Appearance::Base || !isCheckableType(mType) || isSwitchType()) return;
+
+    const auto wasSpecified = [&style](CSSProperty property) {
+        const std::string_view name = cssPropertyName(property);
+        return std::find(style.specifiedProperties.begin(), style.specifiedProperties.end(), name) != style.specifiedProperties.end();
+    };
+
+    RectEdges<LineWidth> widths = style.borderWidth();
+    if (!wasSpecified(CSSProperty::BorderTopWidth)) widths.top = LineWidth{1.f};
+    if (!wasSpecified(CSSProperty::BorderRightWidth)) widths.right = LineWidth{1.f};
+    if (!wasSpecified(CSSProperty::BorderBottomWidth)) widths.bottom = LineWidth{1.f};
+    if (!wasSpecified(CSSProperty::BorderLeftWidth)) widths.left = LineWidth{1.f};
+    style.setBorderWidth(std::move(widths));
+
+    RectEdges<BorderStyle> styles = style.borderStyle();
+    if (!wasSpecified(CSSProperty::BorderTopStyle)) styles.top = BorderStyle::Solid;
+    if (!wasSpecified(CSSProperty::BorderRightStyle)) styles.right = BorderStyle::Solid;
+    if (!wasSpecified(CSSProperty::BorderBottomStyle)) styles.bottom = BorderStyle::Solid;
+    if (!wasSpecified(CSSProperty::BorderLeftStyle)) styles.left = BorderStyle::Solid;
+    style.setBorderStyle(std::move(styles));
 }
 
 Vec2 HTMLInputElement::intrinsicSize(const StyleSheet&, const ComputedStyle& style, const TextMetrics&,
                                      const IntrinsicSizeConstraints& constraints) const {
     if (!isCheckableType(mType)) return {};
-    if (style.appearance != AppearanceMode::Auto && !isSwitchType()) {
-        const float size = std::max(24.f, style.fontSize);
-        return {std::max(0.f, size - style.padding.horizontal() - style.borderWidth.horizontal()),
-                std::max(0.f, size - style.padding.vertical() - style.borderWidth.vertical())};
+    if (style.appearance() != Appearance::Auto && !isSwitchType()) {
+        const RectEdges<float> borderInsets = borderWidths(style);
+        const float size = std::max(24.f, style.fontSize());
+        return {std::max(0.f, size - paddingPixels(style).horizontal() - borderInsets.horizontal()),
+                std::max(0.f, size - paddingPixels(style).vertical() - borderInsets.vertical())};
     }
-    if (style.appearance != AppearanceMode::Auto) return {};
+    if (style.appearance() != Appearance::Auto) return {};
     NativeInputControl control = NativeInputControl::Checkbox;
     if (isRadioType()) control = NativeInputControl::Radio;
     else if (isSwitchType()) control = NativeInputControl::Switch;
@@ -161,46 +178,47 @@ Vec2 HTMLInputElement::intrinsicSize(const StyleSheet&, const ComputedStyle& sty
 }
 
 void HTMLInputElement::paint(PaintContext& context, const ComputedStyle& style, float scale) const {
-    if (style.appearance != AppearanceMode::Auto || !isCheckableType(mType)) {
+    if (style.appearance() != Appearance::Auto || !isCheckableType(mType)) {
         Element::paint(context, style, scale);
-        if (style.appearance != AppearanceMode::Auto) {
-            const bool clipsX = style.overflowX != Overflow::Visible;
-            const bool clipsY = style.overflowY != Overflow::Visible;
+        if (style.appearance() != Appearance::Auto) {
+            const bool clipsX = style.overflowX() != Overflow::Visible;
+            const bool clipsY = style.overflowY() != Overflow::Visible;
             const ClipAxes clipAxes = (clipsX ? ClipAxes::X : ClipAxes::NoAxes) | (clipsY ? ClipAxes::Y : ClipAxes::NoAxes);
             if (clipsX || clipsY) context.pushClip(ElementInternalAccess::scrollport(*this), scale, clipAxes);
             const auto paintPseudoElement = [&context, scale](const PseudoElement& pseudoElement, float inheritedOpacity,
                                                               const auto& paintChildren) -> void {
                 const ComputedStyle& pseudoStyle = pseudoElement.style();
-                if (pseudoStyle.display == DisplayMode::NoneValue || pseudoElement.rect().empty()) return;
+                if (pseudoStyle.display() == Display::NoneValue || pseudoElement.rect().empty()) return;
                 ComputedStyle paintedStyle = pseudoStyle;
                 applyOpacity(paintedStyle, inheritedOpacity);
-                const bool clipsX = paintedStyle.overflowX != Overflow::Visible;
-                const bool clipsY = paintedStyle.overflowY != Overflow::Visible;
+                const bool clipsX = paintedStyle.overflowX() != Overflow::Visible;
+                const bool clipsY = paintedStyle.overflowY() != Overflow::Visible;
                 const ClipAxes clipAxes = (clipsX ? ClipAxes::X : ClipAxes::NoAxes) | (clipsY ? ClipAxes::Y : ClipAxes::NoAxes);
                 if (clipsX || clipsY) context.pushClip(pseudoElement.rect(), scale, clipAxes);
-                if (paintedStyle.visibility == Visibility::Visible) {
+                if (paintedStyle.visibility() == Visibility::Visible) {
                     context.paintBox(pseudoElement.rect(), paintedStyle);
                     if (paintedStyle.content && !paintedStyle.content->empty()) {
-                        const EdgeInsets contentInsets{
-                            paintedStyle.padding.top + paintedStyle.borderWidth.top,
-                            paintedStyle.padding.right + paintedStyle.borderWidth.right,
-                            paintedStyle.padding.bottom + paintedStyle.borderWidth.bottom,
-                            paintedStyle.padding.left + paintedStyle.borderWidth.left,
+                        const RectEdges<float> borderInsets = borderWidths(paintedStyle);
+                        const RectEdges<float> contentInsets{
+                            paddingPixels(paintedStyle).top + borderInsets.top,
+                            paddingPixels(paintedStyle).right + borderInsets.right,
+                            paddingPixels(paintedStyle).bottom + borderInsets.bottom,
+                            paddingPixels(paintedStyle).left + borderInsets.left,
                         };
                         context.paintText(*paintedStyle.content, insetRect(pseudoElement.rect(), contentInsets), paintedStyle);
                     }
                 }
                 for (const PseudoElement* child : pseudoElement.generatedPseudoElements())
-                    if (child) paintChildren(*child, paintedStyle.opacity, paintChildren);
+                    if (child) paintChildren(*child, paintedStyle.opacity().value, paintChildren);
                 if (clipsX || clipsY) context.popClip();
             };
             if (isSwitchType()) {
                 if (const PseudoElement* sliderTrack = this->sliderTrack(); sliderTrack)
-                    paintPseudoElement(*sliderTrack, style.opacity, paintPseudoElement);
+                    paintPseudoElement(*sliderTrack, style.opacity().value, paintPseudoElement);
                 if (const PseudoElement* sliderThumb = this->sliderThumb(); sliderThumb)
-                    paintPseudoElement(*sliderThumb, style.opacity, paintPseudoElement);
+                    paintPseudoElement(*sliderThumb, style.opacity().value, paintPseudoElement);
             } else if (const PseudoElement* checkmark = this->checkmark()) {
-                paintPseudoElement(*checkmark, style.opacity, paintPseudoElement);
+                paintPseudoElement(*checkmark, style.opacity().value, paintPseudoElement);
             }
             if (clipsX || clipsY) context.popClip();
         }
@@ -215,11 +233,14 @@ void HTMLInputElement::paint(PaintContext& context, const ComputedStyle& style, 
     request.checked = checked();
     request.indeterminate = indeterminate();
     request.disabled = disabled();
-    request.hovered = hasState(ElementState::Hovered);
-    request.pressed = hasState(ElementState::Active);
-    request.opacity = style.opacity;
-    if (style.accentColor.kind == AccentColor::Kind::CurrentColor) request.accentColor = style.color;
-    else if (style.accentColor.kind == AccentColor::Kind::Color) request.accentColor = style.accentColor.color;
+    request.hovered = hovered();
+    request.pressed = active();
+    request.opacity = style.opacity().value;
+    const AccentColor& accent = style.accentColor();
+    if (!accent.isKeyword()) {
+        const StyleColor& value = accent.value();
+        request.accentColor = value.resolvedColor();
+    }
     request.colorScheme = style.usedColorScheme;
     request.direction = style.direction;
     request.scale = scale;
@@ -242,10 +263,11 @@ HTMLInputElement& HTMLInputElement::type(std::string type) {
 
     clearValueBinding();
     mValueBindingRequest.reset();
-    mValueState = {};
+    const bool wasInvalid = invalid();
     updateCheckedState(false);
-    mIndeterminate = false;
     updateIndeterminateState(false);
+    mValueState = {};
+    if (wasInvalid) invalidatePseudoClass(CSSPseudoClass::Invalid);
     mSwitchMode = false;
     removeAttribute("checked");
     removeAttribute("switch");
@@ -291,7 +313,6 @@ HTMLInputElement& HTMLInputElement::checked(bool checked) {
     if (!isCheckableType(mType)) return *this;
     const ElementRef<HTMLInputElement> self(this);
     const bool changed = updateCheckedState(checked);
-    mValueState.value = checked;
     if (checked) setAttribute("checked");
     else removeAttribute("checked");
     if (isRadioType()) updateRadioGroup();
@@ -305,8 +326,11 @@ void HTMLInputElement::initializeChecked(bool checked) {
     const bool updateAttribute = !mUpdatingAttribute;
     AttributeUpdateGuard guard(mUpdatingAttribute);
     if (!isCheckableType(mType)) return;
-    mValueState = {checked, checked, std::nullopt};
+    const bool wasInvalid = invalid();
     updateCheckedState(checked);
+    mValueState.baseline = checked;
+    mValueState.validation.reset();
+    if (wasInvalid) invalidatePseudoClass(CSSPseudoClass::Invalid);
     if (updateAttribute) {
         if (checked) setAttribute("checked");
         else removeAttribute("checked");
@@ -316,8 +340,8 @@ void HTMLInputElement::initializeChecked(bool checked) {
 }
 
 bool HTMLInputElement::updateCheckedState(bool checked) {
-    const bool changed = checked != this->checked();
-    setState(ElementState::Checked, checked);
+    if (!isCheckableType(mType)) return false;
+    const bool changed = setPseudoClassMatch(CSSPseudoClass::Checked, mValueState.value, checked);
     if (changed) invalidateArrange();
     return changed;
 }
@@ -365,8 +389,14 @@ void HTMLInputElement::notifyValueState() {
 void HTMLInputElement::applyValueState(ValueState<bool> state) {
     const ElementRef<HTMLInputElement> self(this);
     const bool changed = mValueState != state;
+    const bool checkedChanged = isCheckableType(mType) && mValueState.value != state.value;
+    const bool invalidChanged = invalid() != (state.validationStatus() == ValueValidationStatus::Invalid);
     mValueState = std::move(state);
-    updateCheckedState(mValueState.value);
+    if (checkedChanged) {
+        invalidatePseudoClass(CSSPseudoClass::Checked);
+        invalidateArrange();
+    }
+    if (invalidChanged) invalidatePseudoClass(CSSPseudoClass::Invalid);
     if (isRadioType()) updateRadioGroup();
     else refreshIndeterminateState();
     if (!self) return;
@@ -438,7 +468,6 @@ void HTMLInputElement::activateChecked(bool checked) {
         if (!current || current->mBinding.shared() != provider) return;
         current->applyValueState(provider->state());
     } else {
-        mValueState.value = checked;
         updateCheckedState(checked);
         if (isRadioType()) updateRadioGroup();
         else refreshIndeterminateState();

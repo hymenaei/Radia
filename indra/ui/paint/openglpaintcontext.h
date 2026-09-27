@@ -23,6 +23,7 @@ public:
 
     void beginFrame(const PaintTarget& target) override;
     void endFrame() override;
+    void destroyGL() override;
     Vec2 measureText(const std::string& text, const ComputedStyle& style) const override;
     float usedLetterSpacing(const ComputedStyle& style) const override;
     std::uint64_t generation() const noexcept override;

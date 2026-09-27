@@ -36,24 +36,21 @@
 namespace {
 using radia::ui::AccessibleRole;
 using radia::ui::AccessibleSemantics;
-using radia::ui::AuthoredEventCall;
+using radia::ui::EventHandlerCall;
 using radia::ui::Binder;
 using radia::ui::Binding;
 using radia::ui::ComputedStyle;
 using radia::ui::Document;
 using radia::ui::Element;
 using radia::ui::ElementRef;
-using radia::ui::ElementState;
 using radia::ui::Event;
 using radia::ui::FixedTextMetrics;
 using radia::ui::HTMLButtonElement;
 using radia::ui::HTMLInputElement;
 using radia::ui::HTMLLabelElement;
 using radia::ui::HTMLPanelElement;
-using radia::ui::kBrTag;
-using radia::ui::kBTag;
-using radia::ui::kITag;
-using radia::ui::kKbdTag;
+using radia::ui::HTMLTag;
+using radia::ui::HTMLTagName;
 using radia::ui::kKeySpace;
 using radia::ui::LayoutDirection;
 using radia::ui::LayoutEngine;
@@ -86,8 +83,8 @@ ComputedStyle computedStyle(const StyleSheet& stylesheet, const Element& element
 
 void bindChangeEvent(Binder& binder, std::string name, std::function<void(const Event&)> callback) {
     binder.event(makeEventRegistration(
-        std::move(name), [callback = std::move(callback)](Event& event, const AuthoredEventCall&) { callback(event); },
-        [](const AuthoredEventCall& call) { return call.arguments().empty() ? nullptr : "binding.event.arity_mismatch"; }));
+        std::move(name), [callback = std::move(callback)](Event& event, const EventHandlerCall&) { callback(event); },
+        [](const EventHandlerCall& call) { return call.arguments().empty() ? nullptr : "binding.event.arity_mismatch"; }));
 }
 
 class FieldsetTest : public Test {
@@ -221,7 +218,7 @@ TEST_F(FieldsetTest, PreservesLocalizedBreaks) {
     for (radia::ui::Node& node : nodes(*paragraph)) {
         if (const Element* element = node.asElement()) {
             nodeNames.push_back(element->elementName());
-            if (element->elementName() == kBrTag.localName) sawBreak = true;
+            if (element->elementName() == HTMLTagName(HTMLTag::Br)) sawBreak = true;
         } else {
             nodeNames.push_back("#text");
             if (sawBreak && !postBreakText) postBreakText = &node;
@@ -235,9 +232,9 @@ TEST_F(FieldsetTest, PreservesLocalizedBreaks) {
     const Element* italic = nullptr;
     const Element* shortcut = nullptr;
     for (const auto& child : paragraph->children()) {
-        if (child->elementName() == kBTag.localName) bold = child;
-        if (child->elementName() == kITag.localName) italic = child;
-        if (child->elementName() == kKbdTag.localName) shortcut = child;
+        if (child->elementName() == HTMLTagName(HTMLTag::B)) bold = child;
+        if (child->elementName() == HTMLTagName(HTMLTag::I)) italic = child;
+        if (child->elementName() == HTMLTagName(HTMLTag::Kbd)) shortcut = child;
     }
     ASSERT_NE(bold, nullptr);
     ASSERT_NE(italic, nullptr);
@@ -302,7 +299,7 @@ TEST_F(FieldsetTest, ActivatesInteractiveLabel) {
     surface.mount(*result.document);
     label->activate();
     EXPECT_TRUE(target->checked());
-    EXPECT_TRUE(target->hasState(ElementState::Focused));
+    EXPECT_TRUE(target->focused());
     EXPECT_EQ(changes, 1);
 
     target->disabled(true);
@@ -354,7 +351,7 @@ TEST_F(FieldsetTest, ComputesDisabledFieldsetDescendants) {
     EXPECT_TRUE(surface.pointerDown({{15.f, 55.f}, radia::ui::PointerButton::Left}));
     EXPECT_TRUE(surface.pointerUp({{15.f, 55.f}, radia::ui::PointerButton::Left}));
     EXPECT_EQ(normalActivations, 1);
-    EXPECT_TRUE(normalButton->hasState(ElementState::Focused));
+    EXPECT_TRUE(normalButton->focused());
 
     fieldset->disabled(true);
     EXPECT_TRUE(normalButton->disabled());

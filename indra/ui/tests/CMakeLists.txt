@@ -1,8 +1,7 @@
-# -*- cmake -*-
-
 if(BUILD_TESTING)
     add_executable(ui_test
         binder_test.cpp
+        borderimagegrid_test.cpp
         color_test.cpp
         compiler_test.cpp
         element_test.cpp
@@ -11,6 +10,7 @@ if(BUILD_TESTING)
         fieldset_test.cpp
         floaterresize_test.cpp
         floaters_test.cpp
+        generatedstyle_test.cpp
         input_test.cpp
         localization_test.cpp
         paintprotocol_test.cpp
@@ -22,6 +22,7 @@ if(BUILD_TESTING)
         surface_test.cpp
         surfacestate_test.cpp
         svg_test.cpp
+        fontprovider_test.cpp
         system_test.cpp
         tessellator_test.cpp
     )

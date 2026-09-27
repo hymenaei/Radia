@@ -71,7 +71,7 @@ private:
                                      LayoutPass& pass);
     static ColumnSizing resolveColumnSizes(Element& node, const ComputedStyle& parentStyle, const Rect& available, std::vector<ChildLayout>& children,
                                            LayoutPass& pass);
-    static std::optional<std::vector<ChildLayout>> layoutChildren(Element& parent, DisplayMode display, const Rect& content, LayoutPass& pass);
+    static std::optional<std::vector<ChildLayout>> layoutChildren(Element& parent, Display display, const Rect& content, LayoutPass& pass);
     static Rect scrollableOverflow(Element& node, const ComputedStyle& parentStyle, const Rect& scrollport, LayoutPass& pass);
 
     static void arrangeNode(Element& node, LayoutPass& pass);

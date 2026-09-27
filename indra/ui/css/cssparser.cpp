@@ -11,10 +11,13 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <variant>
 #include "css/color.h"
 #include "css/rules.h"
 #include "css/stylesheet.h"
 #include "css/syntax.h"
+#include "CSSProperties.h"
+#include "CSSPseudoSelectors.h"
 #include "html/elementnames.h"
 #include "resource/elementdefinition.h"
 #include "style/property.h"
@@ -33,39 +36,6 @@ using detail::skipCSSComponent;
 using detail::startsWith;
 using detail::trim;
 using detail::trimCSSRange;
-
-std::optional<ElementState> stateBit(std::string_view state) {
-    if (state == "hover") return ElementState::Hovered;
-    if (state == "active") return ElementState::Active;
-    if (state == "focus") return ElementState::Focused;
-    if (state == "focus-visible") return ElementState::FocusVisible;
-    if (state == "disabled") return ElementState::Disabled;
-    if (state == "checked") return ElementState::Checked;
-    if (state == "minimized") return ElementState::Minimized;
-    if (state == "invalid") return ElementState::Invalid;
-    if (state == "indeterminate") return ElementState::Indeterminate;
-    return std::nullopt;
-}
-
-std::string stateName(ElementState state) {
-    switch (state) {
-        case ElementState::Hovered: return "hover";
-        case ElementState::Active: return "active";
-        case ElementState::Focused: return "focus";
-        case ElementState::Disabled: return "disabled";
-        case ElementState::Checked: return "checked";
-        case ElementState::FocusVisible: return "focus-visible";
-        case ElementState::Minimized: return "minimized";
-        case ElementState::Invalid: return "invalid";
-        case ElementState::Indeterminate: return "indeterminate";
-        case ElementState::Default: break;
-    }
-    return {};
-}
-
-bool isSupportedState(const std::string& state) {
-    return state.empty() || stateBit(state).has_value();
-}
 
 std::size_t findUnescaped(std::string_view value, char target, std::size_t start = 0) {
     const CSSTokenStream stream(value);
@@ -166,30 +136,19 @@ bool isValidCSSIdentifier(std::string_view value) {
     return token.kind == CSSTokenKind::Ident && token.begin == 0 && token.end == stream.source().size();
 }
 
-bool isExactRootSelector(const CSSTokenStream& stream, detail::CSSTokenRange range) {
-    std::size_t first = detail::kNoMatchingCSSToken;
-    std::size_t second = detail::kNoMatchingCSSToken;
-    for (std::size_t index = range.begin; index < range.end; ++index) {
-        if (isCSSTrivia(stream.tokens()[index].kind)) continue;
-        if (first == detail::kNoMatchingCSSToken) first = index;
-        else if (second == detail::kNoMatchingCSSToken) second = index;
-        else return false;
-    }
-    return first != detail::kNoMatchingCSSToken
-        && second != detail::kNoMatchingCSSToken
-        && stream.tokens()[first].kind == CSSTokenKind::Colon
-        && stream.tokens()[second].kind == CSSTokenKind::Ident
-        && lower(decodeCSSIdentifier(stream.text(second))) == "root";
-}
-
-void appendSelectorState(StyleSelector& selector, const std::string& state) {
-    if (const std::optional<ElementState> bit = stateBit(state)) {
-        selector.stateMask |= static_cast<std::uint16_t>(*bit);
-        ++selector.stateSpecificity;
+void appendPseudoClass(StyleSelector& selector, const std::string& name) {
+    const std::optional<CSSPseudoClass> pseudoClass = findCSSPseudoClass(name);
+    if (!pseudoClass) {
+        selector.pseudoClassSyntaxInvalid = true;
+        selector.invalidPseudoClass = name;
         return;
     }
-    selector.stateSyntaxInvalid = true;
-    selector.invalidState = state;
+    const CSSPseudoClassDescriptor* descriptor = cssPseudoClassDescriptor(*pseudoClass);
+    if (descriptor && descriptor->argumentRequirement != CSSPseudoClassArgumentRequirement::Required) {
+        selector.pseudoClasses.push_back(*pseudoClass);
+        return;
+    }
+    selector.pseudoClassArgumentSyntaxInvalid = true;
 }
 
 void parsePseudoClasses(std::string& token, StyleSelector& result) {
@@ -201,17 +160,12 @@ void parsePseudoClasses(std::string& token, StyleSelector& result) {
     const CSSTokenStream stream(pseudoClasses);
     const std::vector<detail::CSSTokenRange> ranges = detail::splitCSSOnDelimiter(stream, {0, stream.tokens().size()}, ':');
     if (ranges.empty()) {
-        appendSelectorState(result, normalizeCSSKeyword(pseudoClasses.substr(1)));
+        appendPseudoClass(result, normalizeCSSKeyword(pseudoClasses.substr(1)));
         return;
     }
 
     for (std::size_t index = 1; index < ranges.size(); ++index) {
         const std::string pseudoClass = trim(detail::serializeCSSRange(stream, ranges[index]));
-        if (normalizeCSSKeyword(pseudoClass) == "root") {
-            result.root = true;
-            ++result.rootSpecificity;
-            continue;
-        }
         const CSSTokenStream pseudoStream(pseudoClass);
         const auto& pseudoTokens = pseudoStream.tokens();
         std::vector<std::size_t> significant;
@@ -226,24 +180,57 @@ void parsePseudoClasses(std::string& token, StyleSelector& result) {
             const std::string functionName = functionText.empty() || functionText.back() != '('
                 ? std::string()
                 : lower(decodeCSSIdentifier(functionText.substr(0, functionText.size() - 1)));
-            if (functionName == "dir" && close != detail::kNoMatchingCSSToken && close == last) {
-                const std::string value = normalizeCSSKeyword(pseudoStream, {function + 1, close});
-                const LayoutDirection parsed = value == "rtl" ? LayoutDirection::RightToLeft : LayoutDirection::LeftToRight;
-                if ((value == "ltr" || value == "rtl") && (!result.direction || *result.direction == parsed)) {
-                    result.direction = parsed;
-                    ++result.directionSpecificity;
-                } else result.directionSyntaxInvalid = true;
-                continue;
-            }
-            if ((functionName == "is" || functionName == "where") && close != detail::kNoMatchingCSSToken && close == last) {
-                auto selectorFunction = std::make_shared<StyleSelectorFunction>();
-                selectorFunction->kind = functionName == "is" ? StyleSelectorFunctionKind::Is : StyleSelectorFunctionKind::Where;
-                for (const detail::CSSTokenRange argumentRange : detail::splitCSSOnDelimiter(pseudoStream, {function + 1, close}, ',')) {
-                    if (argumentRange.begin == argumentRange.end) continue;
-                    StyleRule argument = detail::parseSelector(pseudoStream, argumentRange);
-                    if (!argument.selectors.empty()) selectorFunction->arguments.push_back(std::move(argument));
+            const auto functionId = findCSSPseudoClass(functionName);
+            const CSSPseudoClassDescriptor* descriptor = functionId ? cssPseudoClassDescriptor(*functionId) : nullptr;
+            if (descriptor) {
+                if (close == detail::kNoMatchingCSSToken || close != last || descriptor->argumentSyntax == CSSPseudoClassArgumentSyntax::None) {
+                    result.pseudoClassArgumentSyntaxInvalid = true;
+                    continue;
                 }
-                result.selectorFunctions.push_back(std::move(selectorFunction));
+
+                switch (descriptor->argumentSyntax) {
+                    case CSSPseudoClassArgumentSyntax::Ident: {
+                        const std::string value = normalizeCSSKeyword(pseudoStream, {function + 1, close});
+                        if (functionId != CSSPseudoClass::Dir || !isValidCSSIdentifier(value)) {
+                            result.pseudoClassArgumentSyntaxInvalid = true;
+                            break;
+                        }
+                        auto selectorFunction = std::make_shared<StyleSelectorFunction>();
+                        selectorFunction->pseudoClass = *functionId;
+                        selectorFunction->identifier = value;
+                        result.selectorFunctions.push_back(std::move(selectorFunction));
+                        break;
+                    }
+                    case CSSPseudoClassArgumentSyntax::ForgivingSelectorList: {
+                        auto selectorFunction = std::make_shared<StyleSelectorFunction>();
+                        selectorFunction->pseudoClass = *functionId;
+                        for (const detail::CSSTokenRange argumentRange : detail::splitCSSOnDelimiter(pseudoStream, {function + 1, close}, ',')) {
+                            if (argumentRange.begin == argumentRange.end) continue;
+                            StyleRule argument = detail::parseSelector(pseudoStream, argumentRange);
+                            if (!argument.selectors.empty()) selectorFunction->arguments.push_back(std::move(argument));
+                        }
+                        result.selectorFunctions.push_back(std::move(selectorFunction));
+                        break;
+                    }
+                    case CSSPseudoClassArgumentSyntax::CompoundSelector: {
+                        const std::vector<detail::CSSTokenRange> arguments = detail::splitCSSOnDelimiter(pseudoStream, {function + 1, close}, ',');
+                        if (arguments.size() != 1 || arguments.front().begin == arguments.front().end) {
+                            result.pseudoClassArgumentSyntaxInvalid = true;
+                            break;
+                        }
+                        StyleRule argument = detail::parseSelector(pseudoStream, arguments.front());
+                        if (argument.selectors.size() != 1 || !argument.combinators.empty()) {
+                            result.pseudoClassArgumentSyntaxInvalid = true;
+                            break;
+                        }
+                        auto selectorFunction = std::make_shared<StyleSelectorFunction>();
+                        selectorFunction->pseudoClass = *functionId;
+                        selectorFunction->arguments.push_back(std::move(argument));
+                        result.selectorFunctions.push_back(std::move(selectorFunction));
+                        break;
+                    }
+                    case CSSPseudoClassArgumentSyntax::None: break;
+                }
                 continue;
             }
             if (!functionName.empty()) {
@@ -252,16 +239,17 @@ void parsePseudoClasses(std::string& token, StyleSelector& result) {
             }
         }
         if (pseudoClass.empty()) {
-            result.directionSyntaxInvalid = true;
+            result.pseudoClassArgumentSyntaxInvalid = true;
             continue;
         }
-        appendSelectorState(result, normalizeCSSKeyword(pseudoClass));
+        appendPseudoClass(result, normalizeCSSKeyword(pseudoClass));
     }
 }
 
-std::optional<ElementState> targetSpecificState(std::uint16_t stateMask) {
-    for (const ElementState state : {ElementState::Checked, ElementState::Minimized, ElementState::Invalid, ElementState::Indeterminate})
-        if ((stateMask & static_cast<std::uint16_t>(state)) != 0) return state;
+std::optional<CSSPseudoClass> targetSpecificPseudoClass(const std::vector<CSSPseudoClass>& pseudoClasses) {
+    for (const CSSPseudoClass pseudoClass :
+         {CSSPseudoClass::Checked, CSSPseudoClass::Minimized, CSSPseudoClass::Invalid, CSSPseudoClass::Indeterminate})
+        if (std::find(pseudoClasses.begin(), pseudoClasses.end(), pseudoClass) != pseudoClasses.end()) return pseudoClass;
     return std::nullopt;
 }
 
@@ -374,12 +362,15 @@ std::optional<std::size_t> nextQualifiedRuleBoundary(const CSSTokenStream& strea
     return std::nullopt;
 }
 
-enum class CSSAtRuleID : std::uint8_t { Unknown, Import };
+enum class CSSAtRuleID : std::uint8_t { Unknown, Import, FontFace };
 
 CSSAtRuleID cssAtRuleID(std::string_view name) {
     if (name.empty() || name.front() != '@') return CSSAtRuleID::Unknown;
     name.remove_prefix(1);
-    return lower(decodeCSSIdentifier(name)) == "import" ? CSSAtRuleID::Import : CSSAtRuleID::Unknown;
+    const std::string decoded = lower(decodeCSSIdentifier(name));
+    if (decoded == "import") return CSSAtRuleID::Import;
+    if (decoded == "font-face") return CSSAtRuleID::FontFace;
+    return CSSAtRuleID::Unknown;
 }
 
 struct ParsedImportTarget {
@@ -425,12 +416,10 @@ std::optional<ParsedImportTarget> parseImportTarget(const CSSTokenStream& stream
 StyleSelector mergeSelector(const StyleSelector& parent, const StyleSelector& child) {
     StyleSelector result;
     result.universal = child.universal ? true : parent.universal;
-    result.root = parent.root || child.root;
-    result.rootSpecificity = parent.rootSpecificity + child.rootSpecificity;
     result.attributeSyntaxInvalid = parent.attributeSyntaxInvalid || child.attributeSyntaxInvalid;
     result.idSyntaxInvalid = parent.idSyntaxInvalid || child.idSyntaxInvalid;
     result.classSyntaxInvalid = parent.classSyntaxInvalid || child.classSyntaxInvalid;
-    result.directionSyntaxInvalid = parent.directionSyntaxInvalid || child.directionSyntaxInvalid;
+    result.pseudoClassArgumentSyntaxInvalid = parent.pseudoClassArgumentSyntaxInvalid || child.pseudoClassArgumentSyntaxInvalid;
     result.functionSyntaxUnsupported = parent.functionSyntaxUnsupported || child.functionSyntaxUnsupported;
     result.element = child.element.empty() ? parent.element : child.element;
     result.attributes = parent.attributes;
@@ -439,21 +428,17 @@ StyleSelector mergeSelector(const StyleSelector& parent, const StyleSelector& ch
     result.ids.insert(result.ids.end(), child.ids.begin(), child.ids.end());
     result.classNames = parent.classNames;
     result.classNames.insert(result.classNames.end(), child.classNames.begin(), child.classNames.end());
-    result.stateMask = parent.stateMask;
-    result.stateSpecificity = parent.stateSpecificity;
-    result.stateSyntaxInvalid = parent.stateSyntaxInvalid || child.stateSyntaxInvalid;
-    result.invalidState = parent.stateSyntaxInvalid ? parent.invalidState : child.invalidState;
+    result.pseudoClasses = parent.pseudoClasses;
+    result.pseudoClasses.insert(result.pseudoClasses.end(), child.pseudoClasses.begin(), child.pseudoClasses.end());
+    result.pseudoClassSyntaxInvalid = parent.pseudoClassSyntaxInvalid || child.pseudoClassSyntaxInvalid;
+    result.invalidPseudoClass = parent.pseudoClassSyntaxInvalid ? parent.invalidPseudoClass : child.invalidPseudoClass;
     result.pseudoElementSyntaxInvalid =
         parent.pseudoElementSyntaxInvalid || child.pseudoElementSyntaxInvalid || (!parent.pseudoElement.empty() && !child.pseudoElement.empty());
-    result.direction = child.direction ? child.direction : parent.direction;
-    result.directionSpecificity = parent.directionSpecificity + child.directionSpecificity;
     result.selectorFunctions = parent.selectorFunctions;
     result.selectorFunctions.insert(result.selectorFunctions.end(), child.selectorFunctions.begin(), child.selectorFunctions.end());
-    if (child.stateMask != 0) {
-        if (parent.pseudoElement.empty()) result.stateMask |= child.stateMask;
-        else result.pseudoElementSyntaxInvalid = true;
+    if (!child.pseudoClasses.empty()) {
+        if (!parent.pseudoElement.empty()) result.pseudoElementSyntaxInvalid = true;
     }
-    result.stateSpecificity += child.stateSpecificity;
     result.pseudoElement = child.pseudoElement.empty() ? parent.pseudoElement : child.pseudoElement;
     return result;
 }
@@ -631,15 +616,18 @@ StyleSelector parseSimpleSelector(const std::string& selectorText) {
 
     if (const std::size_t separator = findUnescapedSequence(token, "::"); separator != std::string::npos) {
         std::string pseudoElement = trim(token.substr(separator + 2));
-        std::string pseudoElementState;
-        if (const std::size_t stateSeparator = findUnescaped(pseudoElement, ':'); stateSeparator != std::string::npos) {
-            const std::string rawState = trim(pseudoElement.substr(stateSeparator + 1));
-            pseudoElementState = normalizeCSSKeyword(rawState);
-            pseudoElement.erase(stateSeparator);
-            if (pseudoElementState.empty()
-                || findUnescaped(pseudoElementState, ':') != std::string::npos
-                || !isValidCSSIdentifier(rawState)
-                || !isSupportedState(pseudoElementState))
+        std::string pseudoElementPseudoClass;
+        if (const std::size_t pseudoClassSeparator = findUnescaped(pseudoElement, ':'); pseudoClassSeparator != std::string::npos) {
+            const std::string rawPseudoClass = trim(pseudoElement.substr(pseudoClassSeparator + 1));
+            pseudoElementPseudoClass = normalizeCSSKeyword(rawPseudoClass);
+            pseudoElement.erase(pseudoClassSeparator);
+            const auto pseudoClass = findCSSPseudoClass(pseudoElementPseudoClass);
+            const CSSPseudoClassDescriptor* descriptor = pseudoClass ? cssPseudoClassDescriptor(*pseudoClass) : nullptr;
+            if (pseudoElementPseudoClass.empty()
+                || findUnescaped(pseudoElementPseudoClass, ':') != std::string::npos
+                || !isValidCSSIdentifier(rawPseudoClass)
+                || !descriptor
+                || descriptor->argumentRequirement == CSSPseudoClassArgumentRequirement::Required)
                 result.pseudoElementSyntaxInvalid = true;
         }
         if (pseudoElement.empty() || findUnescapedSequence(pseudoElement, "::") != std::string::npos) result.pseudoElementSyntaxInvalid = true;
@@ -647,7 +635,7 @@ StyleSelector parseSimpleSelector(const std::string& selectorText) {
         else {
             result.pseudoElement = lower(decodeCSSIdentifier(pseudoElement));
             token.erase(separator);
-            if (!pseudoElementState.empty() && !result.pseudoElementSyntaxInvalid) token += ":" + pseudoElementState;
+            if (!pseudoElementPseudoClass.empty() && !result.pseudoElementSyntaxInvalid) token += ":" + pseudoElementPseudoClass;
         }
         if (result.pseudoElementSyntaxInvalid) token.erase(separator);
     }
@@ -688,6 +676,13 @@ struct ParsedRuleBlock {
     detail::CSSTokenRange body;
 };
 
+struct ParsedFontFaceBlock {
+    detail::CSSTokenRange body;
+    std::size_t sourceOffset = 0;
+};
+
+using ParsedStyleEntry = std::variant<ParsedRuleBlock, ParsedFontFaceBlock>;
+
 struct ParsedImport {
     std::string id;
     std::string requestedPath;
@@ -700,7 +695,7 @@ struct ParsedModule {
     std::string sourceName;
     CSSTokenStream stream;
     std::vector<ParsedImport> imports;
-    std::vector<ParsedRuleBlock> rules;
+    std::vector<ParsedStyleEntry> entries;
 };
 
 class StyleSheetModuleGraph {
@@ -718,21 +713,18 @@ public:
         std::vector<VisitEntry> moduleVisits;
         collectModules(id, importStack, moduleVisits);
 
-        const auto emit = [&](const VisitEntry& entry, StyleParsePass pass) {
-            for (const ParsedRuleBlock& rule : entry.module->rules) {
-                if (pass == StyleParsePass::Tokens && !isExactRootSelector(entry.module->stream, rule.selector)) continue;
+        for (const VisitEntry& entry : moduleVisits) {
+            for (const ParsedStyleEntry& styleEntry : entry.module->entries) {
                 const std::size_t firstWarning = mResult.warnings.size();
                 const std::size_t firstError = mResult.errors.size();
-                callback(entry.module->stream, rule, entry.module->sourceName, pass);
+                callback(entry.module->stream, styleEntry, entry.module->sourceName);
                 if (entry.importChain.size() > 1) {
                     const std::string chain = importChain(entry.importChain);
                     annotateImportDiagnostics(mResult.warnings, firstWarning, chain);
                     annotateImportDiagnostics(mResult.errors, firstError, chain);
                 }
             }
-        };
-        for (const VisitEntry& entry : moduleVisits) emit(entry, StyleParsePass::Tokens);
-        for (const VisitEntry& entry : moduleVisits) emit(entry, StyleParsePass::Rules);
+        }
     }
 
 private:
@@ -812,6 +804,24 @@ private:
                         position = *boundary + 1;
                         continue;
                     }
+                    case CSSAtRuleID::FontFace: {
+                        sawRule = true;
+                        const std::optional<std::size_t> boundary = nextAtRuleBoundary(stream, position + 1, tokens.size());
+                        if (!boundary || tokens[*boundary].kind != CSSTokenKind::OpenBrace) {
+                            mResult.warning("stylesheet.font_face.syntax", "@font-face requires a declaration block.", sourceName, line, column);
+                            position = boundary ? *boundary + 1 : tokens.size();
+                            continue;
+                        }
+                        if (tokens[*boundary].matching == detail::kNoMatchingCSSToken) {
+                            mResult.warning("stylesheet.syntax.unclosed_block", "@font-face block is not closed.", sourceName, line, column);
+                            position = tokens.size();
+                            continue;
+                        }
+                        const std::size_t close = tokens[*boundary].matching;
+                        module.entries.push_back(ParsedFontFaceBlock{{*boundary + 1, close}, offset});
+                        position = close + 1;
+                        continue;
+                    }
                     case CSSAtRuleID::Unknown: break;
                 }
                 sawRule = true;
@@ -854,14 +864,14 @@ private:
                 const detail::CSSTokenRange selector = {position, *boundary};
                 if (trim(serializeCSSRange(stream, selector)).empty())
                     mResult.warning("stylesheet.selector.empty", "Rule selector is empty.", sourceName, line, column);
-                else module.rules.push_back({selector, {*boundary + 1, tokens.size()}});
+                else module.entries.push_back(ParsedRuleBlock{selector, {*boundary + 1, tokens.size()}});
                 break;
             }
             const std::size_t close = tokens[*boundary].matching;
             const detail::CSSTokenRange selector = {position, *boundary};
             if (trim(serializeCSSRange(stream, selector)).empty())
                 mResult.warning("stylesheet.selector.empty", "Rule selector is empty.", sourceName, line, column);
-            else module.rules.push_back({selector, {*boundary + 1, close}});
+            else module.entries.push_back(ParsedRuleBlock{selector, {*boundary + 1, close}});
             position = close + 1;
         }
         return module;
@@ -920,6 +930,235 @@ private:
     StyleSheetLoadResult& mResult;
     std::map<std::string, ParsedModule> mModules;
 };
+
+std::optional<std::string> parseFontFaceFamily(const CSSTokenStream& stream, detail::CSSTokenRange range) {
+    range = trimCSSRange(stream, range);
+    std::vector<std::size_t> significant;
+    for (std::size_t index = range.begin; index < range.end; ++index)
+        if (!isCSSTrivia(stream.tokens()[index].kind)) significant.push_back(index);
+    if (significant.size() == 1 && stream.tokens()[significant.front()].kind == CSSTokenKind::String) {
+        std::optional<std::string> family = detail::decodeCSSString(stream.text(significant.front()));
+        if (family && !family->empty()) return family;
+        return std::nullopt;
+    }
+    if (significant.empty()) return std::nullopt;
+    for (const std::size_t index : significant)
+        if (stream.tokens()[index].kind != CSSTokenKind::Ident) return std::nullopt;
+    const std::string family = trim(decodeCSSIdentifier(detail::serializeCSSRange(stream, range)));
+    return family.empty() ? std::nullopt : std::optional<std::string>(family);
+}
+
+using ParsedFontFaceSource = std::variant<FontFaceURL, FontFaceLocal>;
+
+std::optional<std::vector<ParsedFontFaceSource>> parseFontFaceSources(const CSSTokenStream& stream, detail::CSSTokenRange range) {
+    std::vector<ParsedFontFaceSource> sources;
+    for (const detail::CSSTokenRange sourceRange : detail::splitCSSOnDelimiter(stream, range, ',')) {
+        const std::vector<detail::CSSTokenRange> components = detail::splitCSSComponents(stream, sourceRange);
+        if (components.empty()) continue;
+
+        if (const std::optional<detail::CSSFunctionRange> function = detail::parseCSSFunction(stream, components.front());
+            function && function->name == "local") {
+            if (components.size() != 1) continue;
+            if (const std::optional<std::string> name = parseFontFaceFamily(stream, function->body)) sources.emplace_back(FontFaceLocal{*name});
+            continue;
+        }
+
+        const std::optional<std::string> url = detail::parseCSSUrl(stream, components.front());
+        if (!url) continue;
+
+        bool supported = true;
+        bool hasFormat = false;
+        bool hasTech = false;
+        for (std::size_t index = 1; index < components.size(); ++index) {
+            const std::optional<detail::CSSFunctionRange> function = detail::parseCSSFunction(stream, components[index]);
+            if (!function) {
+                supported = false;
+                break;
+            }
+
+            const auto parseHint = [&](detail::CSSTokenRange hintRange) -> std::optional<std::string> {
+                hintRange = trimCSSRange(stream, hintRange);
+                if (hintRange.end != hintRange.begin + 1) return std::nullopt;
+                const CSSToken& token = stream.tokens()[hintRange.begin];
+                if (token.kind == CSSTokenKind::Ident) return lower(decodeCSSIdentifier(stream.text(hintRange.begin)));
+                if (token.kind == CSSTokenKind::String) {
+                    const std::optional<std::string> decoded = detail::decodeCSSString(stream.text(hintRange.begin));
+                    if (decoded) return lower(*decoded);
+                }
+                return std::nullopt;
+            };
+
+            if (function->name == "format") {
+                if (hasFormat) {
+                    supported = false;
+                    break;
+                }
+                hasFormat = true;
+                const std::optional<std::string> format = parseHint(function->body);
+                supported = format && (*format == "opentype" || *format == "truetype" || *format == "woff2");
+            } else if (function->name == "tech") {
+                if (hasTech) {
+                    supported = false;
+                    break;
+                }
+                hasTech = true;
+                for (const detail::CSSTokenRange hintRange : detail::splitCSSOnDelimiter(stream, function->body, ',')) {
+                    const std::optional<std::string> technology = parseHint(hintRange);
+                    if (!technology || (*technology != "features-opentype" && *technology != "color-colrv1")) {
+                        supported = false;
+                        break;
+                    }
+                }
+            } else supported = false;
+
+            if (!supported) break;
+        }
+        if (supported) sources.emplace_back(FontFaceURL{*url, {}});
+    }
+    return sources.empty() ? std::nullopt : std::optional<std::vector<ParsedFontFaceSource>>(std::move(sources));
+}
+
+std::optional<FontWeight> parseFontFaceWeight(const CSSTokenStream& stream, detail::CSSTokenRange range) {
+    range = trimCSSRange(stream, range);
+    const auto& tokens = stream.tokens();
+    std::vector<std::size_t> significant;
+    for (std::size_t index = range.begin; index < range.end; ++index)
+        if (!isCSSTrivia(tokens[index].kind)) significant.push_back(index);
+    if (significant.size() != 1) return std::nullopt;
+    const CSSToken& token = tokens[significant.front()];
+    if (token.kind == CSSTokenKind::Number
+        && token.numericValue
+        && std::isfinite(*token.numericValue)
+        && *token.numericValue >= 1.f
+        && *token.numericValue <= 1000.f)
+        return FontWeight{*token.numericValue};
+    if (token.kind != CSSTokenKind::Ident) return std::nullopt;
+    const std::string keyword = lower(decodeCSSIdentifier(stream.text(significant.front())));
+    if (keyword == "normal") return FontWeight{400.f};
+    if (keyword == "bold") return FontWeight{700.f};
+    return std::nullopt;
+}
+
+std::optional<FontStyle> parseFontFaceStyle(const CSSTokenStream& stream, detail::CSSTokenRange range) {
+    range = trimCSSRange(stream, range);
+    const auto& tokens = stream.tokens();
+    std::vector<std::size_t> significant;
+    for (std::size_t index = range.begin; index < range.end; ++index)
+        if (!isCSSTrivia(tokens[index].kind)) significant.push_back(index);
+    if (significant.size() != 1 || tokens[significant.front()].kind != CSSTokenKind::Ident) return std::nullopt;
+    const std::string keyword = lower(decodeCSSIdentifier(stream.text(significant.front())));
+    if (keyword == "normal") return FontStyle::Normal;
+    if (keyword == "italic") return FontStyle::Italic;
+    if (keyword == "oblique") return FontStyle::Oblique;
+    return std::nullopt;
+}
+
+std::optional<FontWidth> parseFontFaceWidth(const CSSTokenStream& stream, detail::CSSTokenRange range) {
+    range = trimCSSRange(stream, range);
+    const auto& tokens = stream.tokens();
+    std::vector<std::size_t> significant;
+    for (std::size_t index = range.begin; index < range.end; ++index)
+        if (!isCSSTrivia(tokens[index].kind)) significant.push_back(index);
+    if (significant.size() != 1) return std::nullopt;
+    const CSSToken& token = tokens[significant.front()];
+    if (token.kind == CSSTokenKind::Percentage && token.numericValue && std::isfinite(*token.numericValue) && *token.numericValue >= 0.f)
+        return FontWidth{*token.numericValue};
+    if (token.kind != CSSTokenKind::Ident) return std::nullopt;
+    const std::string keyword = lower(decodeCSSIdentifier(stream.text(significant.front())));
+    if (keyword == "normal") return FontWidth{100.f};
+    if (keyword == "ultra-condensed") return FontWidth{50.f};
+    if (keyword == "extra-condensed") return FontWidth{62.5f};
+    if (keyword == "condensed") return FontWidth{75.f};
+    if (keyword == "semi-condensed") return FontWidth{87.5f};
+    if (keyword == "semi-expanded") return FontWidth{112.5f};
+    if (keyword == "expanded") return FontWidth{125.f};
+    if (keyword == "extra-expanded") return FontWidth{150.f};
+    if (keyword == "ultra-expanded") return FontWidth{200.f};
+    return std::nullopt;
+}
+
+void parseFontFace(const CSSTokenStream& stream, const ParsedFontFaceBlock& block, const std::string& sourceName, StyleOrigin origin,
+                   StyleSheetLoadResult& result, std::vector<FontFace>& fontFaces) {
+    const auto [faceLine, faceColumn] = detail::cssSourcePosition(stream.source(), block.sourceOffset);
+    FontFace face;
+    face.origin = origin;
+    face.sourceName = sourceName;
+    face.line = faceLine;
+    face.column = faceColumn;
+    bool hasFamily = false;
+    bool hasSources = false;
+
+    for (const detail::CSSTokenRange declarationRange : detail::splitCSSOnDelimiter(stream, block.body, ';')) {
+        if (declarationRange.begin == declarationRange.end) continue;
+        const auto& tokens = stream.tokens();
+        std::size_t propertyIndex = declarationRange.begin;
+        while (propertyIndex < declarationRange.end && isCSSTrivia(tokens[propertyIndex].kind)) ++propertyIndex;
+        const std::size_t declarationOffset = propertyIndex < declarationRange.end ? tokens[propertyIndex].begin : block.sourceOffset;
+        const auto [line, column] = detail::cssSourcePosition(stream.source(), declarationOffset);
+        std::size_t colon = propertyIndex;
+        if (colon >= declarationRange.end || tokens[colon].kind != CSSTokenKind::Ident) {
+            result.warning("stylesheet.font_face.descriptor_invalid", "Invalid @font-face descriptor.", sourceName, line, column);
+            continue;
+        }
+        const std::string property = lower(decodeCSSIdentifier(stream.text(colon)));
+        ++colon;
+        while (colon < declarationRange.end && isCSSTrivia(tokens[colon].kind)) ++colon;
+        if (colon >= declarationRange.end || tokens[colon].kind != CSSTokenKind::Colon) {
+            result.warning("stylesheet.font_face.descriptor_invalid", "Invalid @font-face descriptor: " + property + ".", sourceName, line, column);
+            continue;
+        }
+        const detail::CSSTokenRange valueRange = trimCSSRange(stream, {colon + 1, declarationRange.end});
+        bool valid = false;
+        if (property == "font-family") {
+            const std::optional<std::string> family = parseFontFaceFamily(stream, valueRange);
+            if (family) {
+                face.family = *family;
+                hasFamily = true;
+                valid = true;
+            }
+        } else if (property == "src") {
+            hasSources = false;
+            face.sources.clear();
+            const std::optional<std::vector<ParsedFontFaceSource>> sources = parseFontFaceSources(stream, valueRange);
+            if (sources) {
+                for (const ParsedFontFaceSource& source : *sources) face.sources.push_back(FontFaceSource{source, sourceName, line, column});
+                hasSources = true;
+                valid = true;
+            } else {
+                result.error("stylesheet.font_face.source_unsupported", "@font-face src has no supported source.", sourceName, line, column);
+                continue;
+            }
+        } else if (property == "font-style") {
+            if (const std::optional<FontStyle> style = parseFontFaceStyle(stream, valueRange)) {
+                face.selection.style = *style;
+                valid = true;
+            }
+        } else if (property == "font-weight") {
+            if (const std::optional<FontWeight> weight = parseFontFaceWeight(stream, valueRange)) {
+                face.selection.weight = *weight;
+                valid = true;
+            }
+        } else if (property == "font-width") {
+            if (const std::optional<FontWidth> width = parseFontFaceWidth(stream, valueRange)) {
+                face.selection.width = *width;
+                valid = true;
+            }
+        } else {
+            result.warning("stylesheet.font_face.descriptor_unsupported", "Unsupported @font-face descriptor: " + property + ".", sourceName, line,
+                           column);
+            continue;
+        }
+        if (!valid)
+            result.warning("stylesheet.font_face.descriptor_invalid", "Invalid @font-face descriptor: " + property + ".", sourceName, line, column);
+    }
+
+    if (!hasFamily || !hasSources) {
+        result.warning("stylesheet.font_face.invalid", "@font-face requires valid font-family and src descriptors.", sourceName, faceLine,
+                       faceColumn);
+        return;
+    }
+    fontFaces.push_back(std::move(face));
+}
 } // namespace
 
 StyleRule detail::parseSelector(const std::string& selector) {
@@ -985,12 +1224,13 @@ StyleRule detail::parseSelector(const CSSTokenStream& stream, detail::CSSTokenRa
 }
 
 StyleSheetLoadResult StyleSheet::loadRadia(const std::string& stylesheetSource, const std::string& sourceName) {
-    return loadRadiaLayers({StyleLayer{StyleOrigin::Default, ResourceLayer{sourceName, stylesheetSource}}});
+    return loadRadiaLayers({StyleLayer{StyleOrigin::UserAgent, ResourceLayer{sourceName, stylesheetSource}}});
 }
 
 StyleSheetLoadResult StyleSheet::loadRadiaLayers(const std::vector<StyleLayer>& layers) {
     StyleModel candidate;
     StyleSheetLoadResult result;
+    std::vector<FontFace> fontFaces;
     if (layers.empty()) {
         result.error("stylesheet.layers.empty", "No stylesheet layers were provided.");
         return result;
@@ -1006,8 +1246,10 @@ StyleSheetLoadResult StyleSheet::loadRadiaLayers(const std::vector<StyleLayer>& 
         graph.build(entrypoint);
         if (result.hasErrors()) continue;
 
-        auto compileModule = [&](const CSSTokenStream& stream, const ParsedRuleBlock& rule, const std::string& sourceName, StyleParsePass pass) {
-            candidate.parseBlock(stream, rule.selector, rule.body, {}, styleLayer.origin, pass, result, sourceName);
+        auto compileModule = [&](const CSSTokenStream& stream, const ParsedStyleEntry& entry, const std::string& sourceName) {
+            if (const auto* rule = std::get_if<ParsedRuleBlock>(&entry))
+                candidate.parseBlock(stream, rule->selector, rule->body, {}, styleLayer.origin, result, sourceName);
+            else parseFontFace(stream, std::get<ParsedFontFaceBlock>(entry), sourceName, styleLayer.origin, result, fontFaces);
         };
         graph.visit(entrypoint, compileModule);
     }
@@ -1015,6 +1257,7 @@ StyleSheetLoadResult StyleSheet::loadRadiaLayers(const std::vector<StyleLayer>& 
         auto replacement = std::make_shared<Impl>(std::move(candidate).build());
         replacement->generation = mImpl->generation + 1;
         mImpl = std::move(replacement);
+        mFontFaces = std::move(fontFaces);
     }
     return result;
 }
@@ -1051,12 +1294,12 @@ bool validateSelector(StyleRule& rule, const std::string& selector, StyleSheetLo
             warning("stylesheet.selector.class_invalid", "Element classes in selectors must use CSS identifier syntax: " + selector + ".");
             return false;
         }
-        if (component.directionSyntaxInvalid) {
-            warning("stylesheet.selector.state_unknown", "Invalid :dir() selector: " + selector + ".");
+        if (component.pseudoClassArgumentSyntaxInvalid) {
+            warning("stylesheet.selector.pseudo_class_invalid", "Invalid pseudo-class function syntax: " + selector + ".");
             return false;
         }
-        if (component.stateSyntaxInvalid) {
-            warning("stylesheet.selector.state_unknown", "Unknown selector state: " + component.invalidState + ".");
+        if (component.pseudoClassSyntaxInvalid) {
+            warning("stylesheet.selector.pseudo_class_unknown", "Unknown selector pseudo-class: " + component.invalidPseudoClass + ".");
             return false;
         }
         if (component.functionSyntaxUnsupported) {
@@ -1066,10 +1309,14 @@ bool validateSelector(StyleRule& rule, const std::string& selector, StyleSheetLo
         for (const std::shared_ptr<StyleSelectorFunction>& selectorFunction : component.selectorFunctions) {
             std::vector<StyleRule> validArguments;
             validArguments.reserve(selectorFunction->arguments.size());
+            const CSSPseudoClassDescriptor* descriptor = cssPseudoClassDescriptor(selectorFunction->pseudoClass);
+            const bool forgiving = descriptor && descriptor->argumentSyntax == CSSPseudoClassArgumentSyntax::ForgivingSelectorList;
             for (StyleRule& argument : selectorFunction->arguments) {
                 StyleSheetLoadResult ignored;
-                if (validateSelector(argument, selector, ignored, source, sourceOffset, sourceName, true))
+                StyleSheetLoadResult& argumentResult = forgiving ? ignored : result;
+                if (validateSelector(argument, selector, argumentResult, source, sourceOffset, sourceName, forgiving))
                     validArguments.push_back(std::move(argument));
+                else if (!forgiving) return false;
             }
             selectorFunction->arguments = std::move(validArguments);
         }
@@ -1091,24 +1338,28 @@ bool validateSelector(StyleRule& rule, const std::string& selector, StyleSheetLo
             }
             continue;
         }
-        if (canonicalizeHTMLName(component.element) == kKbdTag.localName) {
+        if (canonicalizeHTMLName(component.element) == HTMLTagName(HTMLTag::Kbd)) {
             if (!component.attributes.empty() || !component.ids.empty() || !component.classNames.empty()) {
                 warning("stylesheet.selector.inline_identity_unsupported",
                         "Inline style elements do not have Element IDs, classes, or attributes: " + selector + ".");
                 return false;
             }
-            component.element = kKbdTag.localName;
+            component.element = HTMLTagName(HTMLTag::Kbd);
             if (!component.pseudoElement.empty()) {
                 warning("stylesheet.selector.pseudo_element_unknown", "Unknown pseudo-element for " + component.element + ".");
                 return false;
             }
             continue;
         }
-        const HTMLTag componentTag = lookupHTMLTag(component.element);
-        const std::optional<ElementState> targetedState = targetSpecificState(component.stateMask);
-        const ElementSelectorMetadata metadata = inspectElementSelector(componentTag, component.pseudoElement, targetedState);
+        const HTMLTag componentTag = findHTMLTag(component.element);
+        if (componentTag == HTMLTag::Unknown && component.pseudoElement.empty()) {
+            warning("stylesheet.selector.element_unknown", "Unknown element in selector: " + component.element + ".");
+            return false;
+        }
+        const std::optional<CSSPseudoClass> targetedPseudoClass = targetSpecificPseudoClass(component.pseudoClasses);
+        const ElementSelectorMetadata metadata = inspectElementSelector(componentTag, component.pseudoElement, targetedPseudoClass);
         if (!metadata.known) {
-            warning("stylesheet.selector.element_unknown", "Unknown element element: " + component.element + ".");
+            warning("stylesheet.selector.element_unknown", "Unknown element in selector: " + component.element + ".");
             return false;
         }
         component.element = metadata.elementName;
@@ -1117,9 +1368,9 @@ bool validateSelector(StyleRule& rule, const std::string& selector, StyleSheetLo
                     "Unknown pseudo-element for " + component.element + ": " + component.pseudoElement + ".");
             return false;
         }
-        if (targetedState && !metadata.elementProducesState)
-            warning("stylesheet.selector.state_never_matches",
-                    "State :" + stateName(*targetedState) + " is never produced by " + component.element + ".");
+        if (targetedPseudoClass && !metadata.elementProducesPseudoClass)
+            warning("stylesheet.selector.pseudo_class_never_matches",
+                    "Pseudo-class :" + std::string(cssPseudoClassName(*targetedPseudoClass)) + " never matches " + component.element + ".");
     }
     return true;
 }
@@ -1183,7 +1434,7 @@ bool containsCSSFunction(const CSSTokenStream& stream, detail::CSSTokenRange ran
 }
 
 void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& selector, const CSSTokenStream& stream, detail::CSSTokenRange bodyRange,
-                   bool rootRule, StyleParsePass pass, StyleSheetLoadResult& result, const std::string& sourceName) {
+                   StyleSheetLoadResult& result, const std::string& sourceName) {
     const auto& tokens = stream.tokens();
     const auto warning = [&](std::string code, std::string message, std::size_t tokenIndex) {
         const std::size_t offset = tokenIndex < tokens.size() ? tokens[tokenIndex].begin : stream.source().size();
@@ -1206,20 +1457,16 @@ void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& select
         if (range.begin == range.end) return;
         const std::optional<std::size_t> colon = declarationColon(stream, range);
         if (!colon) {
-            if (pass == StyleParsePass::Tokens) return;
             warning("stylesheet.declaration.invalid",
                     "Declaration requires a property and value: " + trim(detail::serializeCSSRange(stream, range)) + ".", range.begin);
             return;
         }
         const detail::CSSTokenRange nameRange = trimCSSRange(stream, {range.begin, *colon});
         const std::string serializedName = trim(detail::serializeCSSRange(stream, nameRange));
-        const bool tokenLikeName = startsWith(serializedName, "--");
         const bool validName = nameRange.end == nameRange.begin + 1
             && nameRange.begin < stream.tokens().size()
             && stream.tokens()[nameRange.begin].kind == CSSTokenKind::Ident;
         if (!validName) {
-            if (pass == StyleParsePass::Tokens && !tokenLikeName) return;
-            if (pass == StyleParsePass::Rules && rootRule && tokenLikeName) return;
             warning("stylesheet.declaration.invalid", "Declaration property name must be one CSS identifier: " + serializedName + ".", range.begin);
             return;
         }
@@ -1231,8 +1478,6 @@ void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& select
             return;
         }
         const std::string name = tokenDeclaration ? decodedName : lower(decodedName);
-        if (pass == StyleParsePass::Tokens && !tokenDeclaration) return;
-        if (pass == StyleParsePass::Rules && rootRule && tokenDeclaration) return;
         if (hasInvalidCSSComponent(stream, range)) {
             warning("stylesheet.declaration.invalid", "Declaration contains invalid CSS syntax.", range.begin);
             return;
@@ -1244,23 +1489,22 @@ void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& select
             return;
         }
         if (tokenDeclaration) {
-            if ((pass == StyleParsePass::Tokens) != rootRule) return;
             customProperties.push_back({name, CustomPropertyValue{value}});
             return;
         }
-        if (pass == StyleParsePass::Tokens) return;
-        const detail::StylePropertyDefinition* descriptor = detail::findStyleProperty(name);
-        if (!descriptor) {
+        const auto id = findProperty(name);
+        const detail::StylePropertyDefinition* legacy = detail::findLegacyProperty(name);
+        if (!id && !legacy) {
             warning("stylesheet.property.unknown", "Unknown property: " + name + ".", range.begin);
             return;
         }
-        if (descriptor->defaultOnly && rule.origin != StyleOrigin::Default) {
-            warning("stylesheet.property.ua_only", "Ignoring UA-only property outside the default stylesheet: " + name + ".", range.begin);
+        if (legacy && legacy->userAgentOnly && rule.origin != StyleOrigin::UserAgent) {
+            warning("stylesheet.property.ua_only", "Ignoring UA-only property outside the user-agent stylesheet: " + name + ".", range.begin);
             return;
         }
         StyleSheetLoadResult declarationResult;
-        if (containsCSSFunction(stream, valueRange, "var")) declarations.emplace_back(*descriptor, DeferredStyleValue{value});
-        else if (auto compiled = StyleModel::compileDeclaration(*descriptor, stream, valueRange, selector, declarationResult, sourceName))
+        if (containsCSSFunction(stream, valueRange, "var")) declarations.emplace_back(name, DeferredStyleValue{value});
+        else if (auto compiled = StyleModel::compileDeclaration(name, stream, valueRange, selector, declarationResult, sourceName))
             declarations.insert(declarations.end(), std::make_move_iterator(compiled->begin()), std::make_move_iterator(compiled->end()));
         result.append(std::move(declarationResult));
     };
@@ -1292,11 +1536,9 @@ void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& select
             const std::size_t close = tokens[index].matching;
             const detail::CSSTokenRange nestedSelectorRange = trimCSSRange(stream, {start, index});
             const std::string nestedSelector = trim(detail::serializeCSSRange(stream, nestedSelectorRange));
-            if (pass == StyleParsePass::Rules) {
-                flushDeclarations();
-                if (nestedSelector.empty()) warning("stylesheet.selector.empty", "Nested rule selector is empty.", index);
-                else model.parseBlock(stream, nestedSelectorRange, {index + 1, close}, rule, rule.origin, pass, result, sourceName);
-            }
+            flushDeclarations();
+            if (nestedSelector.empty()) warning("stylesheet.selector.empty", "Nested rule selector is empty.", index);
+            else model.parseBlock(stream, nestedSelectorRange, {index + 1, close}, rule, rule.origin, result, sourceName);
             start = close + 1;
             index = close + 1;
             continue;
@@ -1315,8 +1557,7 @@ void parseRuleBody(StyleModel& model, StyleRule& rule, const std::string& select
 } // namespace
 
 void StyleModel::parseBlock(const CSSTokenStream& stream, detail::CSSTokenRange selectorRange, detail::CSSTokenRange bodyRange,
-                            const StyleRule& parent, StyleOrigin origin, StyleParsePass pass, StyleSheetLoadResult& result,
-                            const std::string& sourceName) {
+                            const StyleRule& parent, StyleOrigin origin, StyleSheetLoadResult& result, const std::string& sourceName) {
     const std::vector<detail::CSSTokenRange> selectorRanges = splitSelectorList(stream, selectorRange);
     const auto selectorOffset = [&](detail::CSSTokenRange range) {
         return range.begin < stream.tokens().size() ? stream.tokens()[range.begin].begin : stream.source().size();
@@ -1342,7 +1583,7 @@ void StyleModel::parseBlock(const CSSTokenStream& stream, detail::CSSTokenRange 
                 return;
             }
         }
-        for (const detail::CSSTokenRange range : selectorRanges) parseBlock(stream, range, bodyRange, parent, origin, pass, result, sourceName);
+        for (const detail::CSSTokenRange range : selectorRanges) parseBlock(stream, range, bodyRange, parent, origin, result, sourceName);
         return;
     }
 
@@ -1350,7 +1591,6 @@ void StyleModel::parseBlock(const CSSTokenStream& stream, detail::CSSTokenRange 
     const bool nested = !parent.selectors.empty();
     StyleRule rule = nested ? expandNestedSelector(parent, selector) : detail::parseSelector(stream, selectorRange);
     rule.origin = origin;
-    const bool rootRule = !nested && isExactRootSelector(stream, selectorRange);
     if (rule.selectors.empty()) {
         const auto [line, column] = detail::cssSourcePosition(stream.source(), selectorOffset(selectorRange));
         result.warning("stylesheet.selector.empty", "Rule selector is empty.", sourceName, line, column);
@@ -1359,6 +1599,6 @@ void StyleModel::parseBlock(const CSSTokenStream& stream, detail::CSSTokenRange 
 
     if (!validateSelector(rule, selector, result, stream.source(), selectorOffset(selectorRange), sourceName)) return;
 
-    parseRuleBody(*this, rule, selector, stream, bodyRange, rootRule, pass, result, sourceName);
+    parseRuleBody(*this, rule, selector, stream, bodyRange, result, sourceName);
 }
 } // namespace radia::ui

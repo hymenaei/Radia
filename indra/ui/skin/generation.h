@@ -43,6 +43,7 @@ private:
     std::string resolveHTML(const std::string& locale, const LocalizedText& text) const;
     std::string resolveText(const std::string& locale, const LocalizedText& text) const;
     const StyleSheet& styleSheet() const;
+    const std::vector<FontFace>& fontFaces() const;
     const SvgImage* resourceSvg(std::string_view reference) const;
     const RasterImage* resourceRaster(std::string_view reference) const;
     const std::string* resourceData(std::string_view reference) const;

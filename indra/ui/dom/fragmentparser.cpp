@@ -49,11 +49,11 @@ bool hasLayoutText(std::string_view value) {
 }
 
 bool isLineBreakElement(const Element& element) {
-    return element.elementName() == kBrTag.localName;
+    return element.elementName() == HTMLTagName(HTMLTag::Br);
 }
 
 bool isVoidElement(const Element& element) {
-    return isVoidHTMLTag(lookupHTMLTag(element.elementName()));
+    return isVoidHTMLTag(findHTMLTag(element.elementName()));
 }
 
 bool isFragmentBooleanAttribute(HTMLTag tag, std::string_view name) {
@@ -215,7 +215,7 @@ private:
         ++mOffset;
         std::string name;
         if (!readName(name)) return nullptr;
-        const HTMLTag tag = lookupHTMLTag(name);
+        const HTMLTag tag = findHTMLTag(name);
         ElementPtr element = HTMLElementFactory::create(name);
         if (!element) return nullptr;
 

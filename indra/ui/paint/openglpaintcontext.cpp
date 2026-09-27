@@ -10,13 +10,21 @@
 #include <cmath>
 #include <deque>
 #include <limits>
+#include <map>
 #include <numbers>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
+#include <fmt/format.h>
+#include "BorderImageGrid.h"
+#include "Geometry.h"
+#include "llfontfreetype.h"
 #include "llfontgl.h"
 #include "llgl.h"
 #include "llglslshader.h"
@@ -30,6 +38,7 @@
 #include "paint/openglpaintstate.h"
 #include "paint/svg.h"
 #include "paint/tessellator.h"
+#include "platform/fonts/SystemFontProvider.h"
 #include "system.h"
 #include "v4color.h"
 
@@ -62,7 +71,12 @@ Rect snappedScrollbarArrow(const NativeScrollbarAxisGeometry& axis, bool start) 
 }
 
 bool hasVisibleBorder(const ComputedStyle& style) {
-    return style.borderStyle != BorderStyle::NoneValue && style.borderWidth.any() && (style.borderGradient.has_value() || style.borderColor.a > 0.f);
+    const RectEdges<float> widths = borderWidths(style);
+    const RectEdges<StyleColor> colors = style.borderColor();
+    return (widths.top > 0.f && colors.top.resolvedColor().a > 0.f)
+        || (widths.right > 0.f && colors.right.resolvedColor().a > 0.f)
+        || (widths.bottom > 0.f && colors.bottom.resolvedColor().a > 0.f)
+        || (widths.left > 0.f && colors.left.resolvedColor().a > 0.f);
 }
 
 Color shade(Color source, Color target, float amount) {
@@ -70,18 +84,18 @@ Color shade(Color source, Color target, float amount) {
             source.a};
 }
 
-struct ResolvedBorderRadii {
+struct ResolvedBorderRadius {
     Vec2 topLeft;
     Vec2 topRight;
     Vec2 bottomRight;
     Vec2 bottomLeft;
 };
 
-Vec2 resolveCornerRadius(const BorderRadius& radius, float width, float height) {
+Vec2 resolveCornerRadius(const CornerRadius& radius, float width, float height) {
     return {std::max(0.f, radius.horizontal.resolve(width)), std::max(0.f, radius.vertical.resolve(height))};
 }
 
-ResolvedBorderRadii normalizeBorderRadii(ResolvedBorderRadii radii, float width, float height) {
+ResolvedBorderRadius normalizeBorderRadius(ResolvedBorderRadius radii, float width, float height) {
     float scale = 1.f;
     const auto limit = [&scale](float available, float sum) {
         if (sum > 0.f) scale = std::min(scale, std::max(0.f, available) / sum);
@@ -97,16 +111,16 @@ ResolvedBorderRadii normalizeBorderRadii(ResolvedBorderRadii radii, float width,
     return radii;
 }
 
-ResolvedBorderRadii resolveBorderRadii(const Rect& rect, const BorderRadii& source) {
+ResolvedBorderRadius resolveBorderRadius(const Rect& rect, const BorderRadius& source) {
     const float width = std::max(0.f, rect.w);
     const float height = std::max(0.f, rect.h);
-    return normalizeBorderRadii({resolveCornerRadius(source.topLeft, width, height), resolveCornerRadius(source.topRight, width, height),
-                                 resolveCornerRadius(source.bottomRight, width, height), resolveCornerRadius(source.bottomLeft, width, height)},
-                                width, height);
+    return normalizeBorderRadius({resolveCornerRadius(source.topLeft, width, height), resolveCornerRadius(source.topRight, width, height),
+                                  resolveCornerRadius(source.bottomRight, width, height), resolveCornerRadius(source.bottomLeft, width, height)},
+                                 width, height);
 }
 
-ResolvedBorderRadii insetBorderRadii(const ResolvedBorderRadii& radii, const EdgeInsets& inset, float width, float height) {
-    return normalizeBorderRadii(
+ResolvedBorderRadius insetBorderRadius(const ResolvedBorderRadius& radii, const RectEdges<float>& inset, float width, float height) {
+    return normalizeBorderRadius(
         {
             {std::max(0.f, radii.topLeft.x - inset.left), std::max(0.f, radii.topLeft.y - inset.top)},
             {std::max(0.f, radii.topRight.x - inset.right), std::max(0.f, radii.topRight.y - inset.top)},
@@ -116,28 +130,28 @@ ResolvedBorderRadii insetBorderRadii(const ResolvedBorderRadii& radii, const Edg
         width, height);
 }
 
-ResolvedBorderRadii expandedBorderRadii(const ResolvedBorderRadii& radii, float amount, float width, float height) {
-    return normalizeBorderRadii({radii.topLeft + Vec2(amount, amount), radii.topRight + Vec2(amount, amount),
-                                 radii.bottomRight + Vec2(amount, amount), radii.bottomLeft + Vec2(amount, amount)},
-                                width, height);
+ResolvedBorderRadius expandedBorderRadius(const ResolvedBorderRadius& radii, float amount, float width, float height) {
+    return normalizeBorderRadius({radii.topLeft + Vec2(amount, amount), radii.topRight + Vec2(amount, amount),
+                                  radii.bottomRight + Vec2(amount, amount), radii.bottomLeft + Vec2(amount, amount)},
+                                 width, height);
 }
 
-ResolvedBorderRadii uniformBorderRadii(float radius) {
+ResolvedBorderRadius uniformBorderRadius(float radius) {
     const Vec2 corner(std::max(0.f, radius), std::max(0.f, radius));
     return {corner, corner, corner, corner};
 }
 
 struct ResolvedScrollbarClip {
     Rect rect;
-    ResolvedBorderRadii radii;
+    ResolvedBorderRadius radii;
 };
 
 std::optional<ResolvedScrollbarClip> resolveScrollbarClip(const NativeScrollbarClip& source) {
     if (!source.enabled || source.borderBox.empty()) return std::nullopt;
     const Rect innerBox = insetRect(source.borderBox, source.borderWidth);
     if (innerBox.empty()) return std::nullopt;
-    const ResolvedBorderRadii outerRadii = resolveBorderRadii(source.borderBox, source.borderRadius);
-    return ResolvedScrollbarClip{innerBox, insetBorderRadii(outerRadii, source.borderWidth, innerBox.w, innerBox.h)};
+    const ResolvedBorderRadius outerRadii = resolveBorderRadius(source.borderBox, source.borderRadius);
+    return ResolvedScrollbarClip{innerBox, insetBorderRadius(outerRadii, source.borderWidth, innerBox.w, innerBox.h)};
 }
 
 Rect expandedRect(const Rect& rect, float amount) {
@@ -146,18 +160,19 @@ Rect expandedRect(const Rect& rect, float amount) {
 
 Rect backgroundBox(const Rect& borderBox, const ComputedStyle& style, BackgroundBox box) {
     if (box == BackgroundBox::BorderBox) return borderBox;
-    const Rect paddingBox = insetRect(borderBox, style.borderWidth);
-    return box == BackgroundBox::PaddingBox ? paddingBox : insetRect(paddingBox, style.padding);
+    const Rect paddingBox = insetRect(borderBox, borderWidths(style));
+    return box == BackgroundBox::PaddingBox ? paddingBox : insetRect(paddingBox, paddingPixels(style));
 }
 
-ResolvedBorderRadii backgroundBoxRadii(const Rect& borderBox, const ComputedStyle& style, BackgroundBox box) {
-    const ResolvedBorderRadii borderRadii = resolveBorderRadii(borderBox, style.borderRadius);
+ResolvedBorderRadius backgroundBoxRadii(const Rect& borderBox, const ComputedStyle& style, BackgroundBox box) {
+    const ResolvedBorderRadius borderRadii = resolveBorderRadius(borderBox, style.borderRadius());
     if (box == BackgroundBox::BorderBox) return borderRadii;
-    const Rect paddingBox = insetRect(borderBox, style.borderWidth);
-    const ResolvedBorderRadii paddingRadii = insetBorderRadii(borderRadii, style.borderWidth, paddingBox.w, paddingBox.h);
+    const RectEdges<float> borderInsets = borderWidths(style);
+    const Rect paddingBox = insetRect(borderBox, borderInsets);
+    const ResolvedBorderRadius paddingRadii = insetBorderRadius(borderRadii, borderInsets, paddingBox.w, paddingBox.h);
     if (box == BackgroundBox::PaddingBox) return paddingRadii;
-    const Rect contentBox = insetRect(paddingBox, style.padding);
-    return insetBorderRadii(paddingRadii, style.padding, contentBox.w, contentBox.h);
+    const Rect contentBox = insetRect(paddingBox, paddingPixels(style));
+    return insetBorderRadius(paddingRadii, paddingPixels(style), contentBox.w, contentBox.h);
 }
 
 float coverageFringeWidth(float scale) {
@@ -182,7 +197,7 @@ bool ensureTarget(LLRenderTarget& target, U32 width, U32 height) {
 }
 
 LLFontGL::HAlign horizontalAlignment(const ComputedStyle& style) {
-    return style.textAlign == TextAlign::Center ? LLFontGL::HCENTER : style.textAlign == TextAlign::Right ? LLFontGL::RIGHT : LLFontGL::LEFT;
+    return style.textAlign() == TextAlign::Center ? LLFontGL::HCENTER : style.textAlign() == TextAlign::Right ? LLFontGL::RIGHT : LLFontGL::LEFT;
 }
 
 float textX(const Rect& rect, LLFontGL::HAlign align) {
@@ -201,37 +216,46 @@ float textBaseline(const Rect& rect, LLFontGL::VAlign align, const LLFontGL& fon
     return anchor;
 }
 
-const LLFontGL& fontForStyle(const ComputedStyle& style) {
-    const char* family = style.fontFamily == FontFamily::Monospace ? "Monospace" : "SansSerif";
-    LLFontGL* font = LLFontGL::getFontAtPixelSize(family, style.fontSize, style.fontWeight, style.fontItalic);
-    if (!font) LL_ERRS("UI") << "OpenGL text adapter used before viewer fonts were initialized." << LL_ENDL;
-    return *font;
-}
-
-float textLineHeight(const ComputedStyle& style) {
-    if (style.lineHeight.kind == LineHeight::Kind::Length) return std::ceil(style.lineHeight.value);
-    if (style.lineHeight.kind == LineHeight::Kind::Number) return std::ceil(style.fontSize * style.lineHeight.value);
-    if (style.fontSize <= 0.f) return 0.f;
-    return static_cast<float>(fontForStyle(style).getLineHeight());
-}
-
-LLFontGL::TextSpacing usedTextSpacing(const ComputedStyle& style, const LLFontGL& font) {
-    static const LLWString sSpace(U" ");
-    const float spaceAdvance = std::max(0.f, font.getWidthF32(sSpace.c_str(), 0, 1, true));
+LLFontGL::TextSpacing usedTextSpacing(const ComputedStyle& style) {
     return {
-        style.letterSpacing.resolve(spaceAdvance),
-        style.wordSpacing.resolve(style.fontSize),
+        style.letterSpacing().resolve(style.fontSize()),
+        style.wordSpacing().resolve(style.fontSize()),
     };
 }
 
-Vec2 measureOpenGLText(const std::string& text, const ComputedStyle& style) {
-    if (style.fontSize <= 0.f) return {0.f, textLineHeight(style)};
-    if (text.empty()) return {0.f, textLineHeight(style)};
-    const LLWString wide = utf8str_to_wstring(text);
-    const LLFontGL& font = fontForStyle(style);
-    const LLFontGL::TextSpacing spacing = usedTextSpacing(style, font);
-    const float width = font.getWidthF32(wide.c_str(), 0, S32_MAX, true, spacing);
-    return {std::ceil(std::max(0.f, width)), textLineHeight(style)};
+const char* genericFontFamilyName(GenericFontFamily family) {
+    switch (family) {
+        case GenericFontFamily::Serif: return "serif";
+        case GenericFontFamily::SansSerif: return "sans-serif";
+        case GenericFontFamily::SystemUI: return "system-ui";
+        case GenericFontFamily::Cursive: return "cursive";
+        case GenericFontFamily::Fantasy: return "fantasy";
+        case GenericFontFamily::Math: return "math";
+        case GenericFontFamily::Monospace: return "monospace";
+        case GenericFontFamily::UISerif: return "ui-serif";
+        case GenericFontFamily::UISansSerif: return "ui-sans-serif";
+        case GenericFontFamily::UIMonospace: return "ui-monospace";
+        case GenericFontFamily::UIRounded: return "ui-rounded";
+        case GenericFontFamily::Fangsong: return "fangsong";
+        case GenericFontFamily::Kai: return "kai";
+        case GenericFontFamily::KhmerMul: return "khmer-mul";
+        case GenericFontFamily::Nastaliq: return "nastaliq";
+    }
+    return "unknown";
+}
+
+std::string describeFontFamily(const FontFamily& family) {
+    if (const auto* name = std::get_if<std::string>(&family)) return "'" + *name + "'";
+    return genericFontFamilyName(std::get<GenericFontFamily>(family));
+}
+
+std::string describeFontFamilies(const FontFamilies& families) {
+    std::string result;
+    for (const FontFamily& family : families) {
+        if (!result.empty()) result += ", ";
+        result += describeFontFamily(family);
+    }
+    return result;
 }
 
 void drawTexturedQuad(const Rect& rect, float u0 = 0.f, float v0 = 0.f, float u1 = 1.f, float v1 = 1.f) {
@@ -304,6 +328,7 @@ struct PaintShaderUniforms {
     LLStaticHashedString gradientRepeating{"gradientRepeating"};
     LLStaticHashedString gradientStart{"gradientStart"};
     LLStaticHashedString gradientEnd{"gradientEnd"};
+    LLStaticHashedString gradientTransform{"gradientTransform"};
     LLStaticHashedString gradientCenter{"gradientCenter"};
     LLStaticHashedString gradientRadius{"gradientRadius"};
     LLStaticHashedString gradientAngle{"gradientAngle"};
@@ -370,7 +395,7 @@ void setClipCoverageUniforms(LLGLSLShader& program, const std::optional<Rect>& b
     program.uniform4f(uniforms.clipCoverageRect, bounds->x, bounds->y, bounds->w, bounds->h);
 }
 
-void setBorderRadiusUniforms(LLGLSLShader& program, const PaintShaderUniforms& uniforms, const ResolvedBorderRadii& radii, bool inner) {
+void setBorderRadiusUniforms(LLGLSLShader& program, const PaintShaderUniforms& uniforms, const ResolvedBorderRadius& radii, bool inner) {
     const LLStaticHashedString& radiusX = inner ? uniforms.innerRadiusX : uniforms.shapeRadiusX;
     const LLStaticHashedString& radiusY = inner ? uniforms.innerRadiusY : uniforms.shapeRadiusY;
     program.uniform4f(radiusX, radii.topLeft.x, radii.topRight.x, radii.bottomRight.x, radii.bottomLeft.x);
@@ -390,7 +415,8 @@ void setScrollbarClipUniforms(LLGLSLShader& program, const PaintShaderUniforms& 
                       clip->radii.bottomLeft.y);
 }
 
-void setGradientUniforms(LLGLSLShader& program, const PaintShaderUniforms& uniforms, const Rect& rect, const Gradient& gradient) {
+void setGradientUniforms(LLGLSLShader& program, const PaintShaderUniforms& uniforms, const Rect& rect, const Gradient& gradient, float scaleX = 1.f,
+                         float scaleY = 1.f, float offsetX = 0.f, float offsetY = 0.f) {
     constexpr float kRadiansPerDegree = std::numbers::pi_v<float> / 180.f;
     const float angle = gradient.angleDegrees * kRadiansPerDegree;
     Vec2 direction(std::sin(angle), std::cos(angle));
@@ -415,10 +441,11 @@ void setGradientUniforms(LLGLSLShader& program, const PaintShaderUniforms& unifo
     std::array<GLfloat, kMaxGradientStops> stops{};
     for (std::size_t index = 0; index < gradient.stops.size(); ++index) {
         const GradientStop& stop = gradient.stops[index];
-        colors[index * 4] = stop.color.r;
-        colors[index * 4 + 1] = stop.color.g;
-        colors[index * 4 + 2] = stop.color.b;
-        colors[index * 4 + 3] = stop.color.a;
+        const Color& color = stop.color.resolvedColor();
+        colors[index * 4] = color.r;
+        colors[index * 4 + 1] = color.g;
+        colors[index * 4 + 2] = color.b;
+        colors[index * 4 + 3] = color.a;
         stops[index] = stop.position;
     }
 
@@ -426,6 +453,7 @@ void setGradientUniforms(LLGLSLShader& program, const PaintShaderUniforms& unifo
     program.uniform1i(uniforms.gradientRepeating, gradient.repeating ? 1 : 0);
     program.uniform2f(uniforms.gradientStart, start.x, start.y);
     program.uniform2f(uniforms.gradientEnd, end.x, end.y);
+    program.uniform4f(uniforms.gradientTransform, scaleX, scaleY, offsetX, offsetY);
     program.uniform2f(uniforms.gradientCenter, gradientCenterValue.x, gradientCenterValue.y);
     program.uniform2f(uniforms.gradientRadius, radialRadius.x, radialRadius.y);
     program.uniform1f(uniforms.gradientAngle, gradient.angleDegrees);
@@ -448,14 +476,18 @@ struct GeometryPainter {
     }
     void drawMesh(const Mesh& mesh);
     void drawGradientMesh(const Mesh& mesh, const Rect& rect, const Gradient& gradient);
+    void drawBorderImageGradientTile(const Rect& tile, const Rect& source, float imageWidth, float imageHeight, const Gradient& gradient,
+                                     float opacity);
     void drawArrow(const Rect& rect, ScrollbarAxis axis, bool pointsPositive, const Color& color, const ResolvedScrollbarClip* clip = nullptr);
     void drawNativeInputMark(const NativeInputMarkPaintRequest& request);
-    void drawRoundedShape(PaintOp op, const Rect& rect, const ResolvedBorderRadii& radii, float borderWidth, const Color& color,
+    void drawRoundedShape(PaintOp op, const Rect& rect, const ResolvedBorderRadius& radii, float borderWidth, const Color& color,
                           OutlineStyle outlineStyle = OutlineStyle::Solid, std::optional<TopBorderGap> topBorderGap = std::nullopt,
-                          const ResolvedBorderRadii* innerRadii = nullptr, const ResolvedScrollbarClip* clip = nullptr);
-    void drawRoundedGradient(const Rect& rect, const ResolvedBorderRadii& radii, const Gradient& gradient, const EdgeInsets* borderWidths = nullptr,
-                             std::optional<TopBorderGap> topBorderGap = std::nullopt, const ResolvedBorderRadii* innerRadii = nullptr);
-    void drawShadow(const Rect& rect, const ResolvedBorderRadii& radii, const BoxShadow& shadow);
+                          const ResolvedBorderRadius* innerRadii = nullptr, const ResolvedScrollbarClip* clip = nullptr);
+    void drawRoundedGradient(const Rect& rect, const ResolvedBorderRadius& radii, const Gradient& gradient,
+                             const RectEdges<float>* borderWidths = nullptr, std::optional<TopBorderGap> topBorderGap = std::nullopt,
+                             const ResolvedBorderRadius* innerRadii = nullptr);
+    void drawShadow(const Rect& rect, const ResolvedBorderRadius& radii, const BoxShadow& shadow);
+    bool drawBorderImage(const Rect& rect, const ComputedStyle& style);
     void drawBorder(const Rect& rect, const ComputedStyle& style, std::optional<TopBorderGap> topBorderGap = std::nullopt);
     void drawOutline(const Rect& rect, const ComputedStyle& style);
     void paintImageLayers(const Rect& rect, const ComputedStyle& style, std::span<const BackgroundLayer> layers, const Color& vectorColor,
@@ -466,7 +498,7 @@ struct GeometryPainter {
                   const BackgroundPaintContext* backgroundContext = nullptr);
     void prepareVectorDraw();
     void applyClipCoverage(::LLGLSLShader& target) const { setClipCoverageUniforms(target, clips.coverageBounds()); }
-    void setRoundedClip(const ResolvedBorderRadii& radii);
+    void setRoundedClip(const ResolvedBorderRadius& radii);
     void clearRoundedClip();
     const SvgImage* resourceSvg(const BackgroundLayer& layer) const;
     const RasterImage* resourceRaster(const BackgroundLayer& layer) const;
@@ -483,14 +515,48 @@ struct GeometryPainter {
 };
 
 struct TextPainter {
+    struct FontInstanceKey {
+        std::string source;
+        S32 faceIndex;
+        float pixelSize;
+        float weight;
+        float width;
+        FontStyle style;
+        FontFamilies familyList;
+        bool isFallback;
+
+        bool operator<(const FontInstanceKey& other) const {
+            return std::tie(source, faceIndex, pixelSize, weight, width, style, familyList, isFallback) < std::tie(
+                       other.source, other.faceIndex, other.pixelSize, other.weight, other.width, other.style, other.familyList, other.isFallback);
+        }
+    };
+
     explicit TextPainter(GeometryPainter& geometryPainter) : geometry(geometryPainter) {}
 
-    Vec2 measureText(const std::string& text, const ComputedStyle& style) const;
+    Vec2 measureText(const std::string& text, const ComputedStyle& style);
     float usedLetterSpacing(const ComputedStyle& style) const;
     void paintText(const std::string& text, const Rect& rect, const ComputedStyle& style);
+    void destroyGL();
     static void prepareTextDraw();
 
+    const LLFontGL* fontForStyle(const ComputedStyle& style);
+    float lineHeight(const ComputedStyle& style, const LLFontGL* font = nullptr);
+    const LLFontGL* fontForFace(const FontFace& face, float pixelSize, const FontSelectionRequest& request, bool isFallback,
+                                const FontFamilies& familyList);
+    const LLFontGL* fontForSource(const detail::SystemFontMatch& source, float pixelSize, const FontSelectionRequest& request, bool isFallback,
+                                  const FontFamilies& familyList, std::string_view selectedFamily, std::string_view sourceKind,
+                                  std::string_view sourceName, std::string_view reason);
+    std::optional<detail::SystemFontMatch> systemFont(const FontFamily& family, const FontSelectionRequest& request);
+    std::optional<detail::SystemFontMatch> localFont(std::string_view name);
+    void clearFonts();
+
     GeometryPainter& geometry;
+    std::unordered_map<std::string, std::string> memoryFontKeys;
+    std::map<std::string, std::optional<detail::SystemFontMatch>> localFontMatches;
+    std::map<std::tuple<FontFamily, float, float, FontStyle>, std::optional<detail::SystemFontMatch>> systemFontMatches;
+    std::map<FontInstanceKey, std::unique_ptr<LLFontGL>> fontInstances;
+    std::uint64_t resourceGeneration = 0;
+    S32 resolutionGeneration = -1;
 };
 
 struct BlurProfile {
@@ -522,7 +588,7 @@ class EffectRenderer final {
     struct EffectLayer {
         std::array<LLRenderTarget, 3> targets;
         LLRenderTarget maskTarget;
-        FilterOperations filterOperations;
+        Filter filter;
         std::vector<MaskLayer> maskLayers;
         ComputedStyle maskStyle;
         Rect effectRect;
@@ -549,7 +615,7 @@ private:
     bool captureFramebuffer(const Rect& capture, float scale, LLRenderTarget& target);
     LLRenderTarget* applyBlur(LLRenderTarget& source, LLRenderTarget& horizontalTarget, LLRenderTarget& verticalTarget, const Rect& capture,
                               const Rect& effectRect, const FilterOperation& operation, float scale);
-    void compositeEffect(LLRenderTarget& source, const Rect& capture, const Rect& destination, const ResolvedBorderRadii& radii, bool roundedMask);
+    void compositeEffect(LLRenderTarget& source, const Rect& capture, const Rect& destination, const ResolvedBorderRadius& radii, bool roundedMask);
     void compositeMaskedEffect(LLRenderTarget& source, LLRenderTarget& mask, const Rect& capture);
 
     ::LLGLSLShader& mProgram;
@@ -566,7 +632,7 @@ struct OpenGLPaintContext::Impl {
 
     void beginFrame(const PaintTarget& target);
     void endFrame();
-    Vec2 measureText(const std::string& text, const ComputedStyle& style) const;
+    Vec2 measureText(const std::string& text, const ComputedStyle& style);
     float usedLetterSpacing(const ComputedStyle& style) const;
     void pushClip(const Rect& rect, float scale, ClipAxes axes);
     void popClip();
@@ -584,11 +650,22 @@ struct OpenGLPaintContext::Impl {
     std::unique_ptr<LLGLSUIDefault> uiState;
     std::optional<LLGLSColorMask> colorMask;
     const System& system;
+    mutable std::optional<std::pair<std::uint64_t, S32>> observedTextGeneration;
+    mutable std::uint64_t textGeneration = 0;
     const NativeAppearance* mFrameNativeAppearance = nullptr;
     paint::ClipStack clipStack;
     GeometryPainter geometry;
     TextPainter text;
     EffectRenderer effects;
+
+    std::uint64_t generation() const noexcept {
+        const auto current = std::pair{system.generation(), LLFontGL::sResolutionGeneration};
+        if (!observedTextGeneration || *observedTextGeneration != current) {
+            observedTextGeneration = current;
+            ++textGeneration;
+        }
+        return textGeneration;
+    }
 };
 
 OpenGLPaintContext::OpenGLPaintContext(::LLGLSLShader& shapeProgram, const System& system) : mImpl(std::make_unique<Impl>(shapeProgram, system)) {}
@@ -611,8 +688,12 @@ float OpenGLPaintContext::usedLetterSpacing(const ComputedStyle& style) const {
     return mImpl->usedLetterSpacing(style);
 }
 
+void OpenGLPaintContext::destroyGL() {
+    mImpl->text.destroyGL();
+}
+
 std::uint64_t OpenGLPaintContext::generation() const noexcept {
-    return mImpl->system.generation();
+    return mImpl->generation();
 }
 
 void OpenGLPaintContext::pushClip(const Rect& rect, float scale, ClipAxes axes) {
@@ -664,14 +745,198 @@ void OpenGLPaintContext::paintText(const std::string& text, const Rect& rect, co
     mImpl->paintText(text, rect, style);
 }
 
-Vec2 TextPainter::measureText(const std::string& text, const ComputedStyle& style) const {
-    return measureOpenGLText(text, style);
+Vec2 TextPainter::measureText(const std::string& text, const ComputedStyle& style) {
+    const LLFontGL* font = style.fontSize() > 0.f ? fontForStyle(style) : nullptr;
+    if (style.fontSize() <= 0.f || text.empty()) return {0.f, lineHeight(style, font)};
+    if (!font) return {0.f, lineHeight(style)};
+    const LLWString wide = utf8str_to_wstring(text);
+    const float width = font->getWidthF32(wide.c_str(), 0, S32_MAX, true, usedTextSpacing(style));
+    return {std::ceil(std::max(0.f, width)), lineHeight(style, font)};
 }
 
 float TextPainter::usedLetterSpacing(const ComputedStyle& style) const {
-    if (style.fontSize <= 0.f) return 0.f;
-    const LLFontGL& font = fontForStyle(style);
-    return usedTextSpacing(style, font).letter;
+    if (style.fontSize() <= 0.f) return 0.f;
+    return style.letterSpacing().resolve(style.fontSize());
+}
+
+const LLFontGL* TextPainter::fontForStyle(const ComputedStyle& style) {
+    const std::uint64_t currentGeneration = geometry.system.generation();
+    const S32 currentResolutionGeneration = LLFontGL::sResolutionGeneration;
+    if (resourceGeneration != currentGeneration || resolutionGeneration != currentResolutionGeneration) {
+        LL_DEBUGS("UI")
+            << "Invalidating font cache for System generation "
+            << currentGeneration
+            << " (previous resource generation "
+            << resourceGeneration
+            << ") at resolution generation "
+            << currentResolutionGeneration
+            << " (previous resolution generation "
+            << resolutionGeneration
+            << ")"
+            << LL_ENDL;
+        clearFonts();
+        resourceGeneration = currentGeneration;
+        resolutionGeneration = currentResolutionGeneration;
+    }
+
+    FontSelectionRequest request{style.fontWeight(), style.fontWidth(), style.fontStyle()};
+    const float pixelSize = style.fontSize();
+    const FontFamilies& familyList = style.fontFamily();
+    const FontFamilies noFamilyList;
+    const LLFontGL* primaryFont = nullptr;
+    bool firstFamily = true;
+    for (const FontFamily& family : familyList) {
+        const bool isNextFamily = !firstFamily;
+        firstFamily = false;
+        const bool isFallback = primaryFont != nullptr;
+        const FontFamilies& cascade = isFallback ? noFamilyList : familyList;
+        const LLFontGL* font = nullptr;
+        if (const auto* name = std::get_if<std::string>(&family)) {
+            const std::vector<const FontFace*> candidates = fontFacesInMatchOrder(geometry.system.fontFaces(), *name, request);
+            for (const FontFace* candidate : candidates) {
+                if (candidate->origin != StyleOrigin::Skin) continue;
+                if (const LLFontGL* candidateFont = fontForFace(*candidate, pixelSize, request, isFallback, cascade)) {
+                    font = candidateFont;
+                    break;
+                }
+            }
+            if (!font && !candidates.empty()) continue;
+        }
+
+        if (!font) {
+            if (const auto source = systemFont(family, request)) {
+                const std::string selectedFamily = describeFontFamily(family);
+                font = fontForSource(*source, pixelSize, request, isFallback, cascade, selectedFamily, "system", source->familyName,
+                                     isNextFamily ? "next family" : "installed family");
+            }
+        }
+        if (!font) continue;
+        if (!primaryFont) primaryFont = font;
+        else primaryFont->addFallbackFont(*font);
+    }
+
+    const FontFamily fallbackFamily{GenericFontFamily::SansSerif};
+    const auto fallback = systemFont(fallbackFamily, request);
+    if (!fallback) return primaryFont;
+    const FontFamilies& cascade = primaryFont ? noFamilyList : familyList;
+    const LLFontGL* fallbackFont = fontForSource(*fallback, pixelSize, request, primaryFont != nullptr, cascade, describeFontFamily(fallbackFamily),
+                                                 "generic", "sans-serif", "final generic");
+    if (!fallbackFont) return primaryFont;
+    if (!primaryFont) return fallbackFont;
+    primaryFont->addFallbackFont(*fallbackFont);
+    return primaryFont;
+}
+
+const LLFontGL* TextPainter::fontForFace(const FontFace& face, float pixelSize, const FontSelectionRequest& request, bool isFallback,
+                                         const FontFamilies& familyList) {
+    if (!std::isfinite(pixelSize) || pixelSize <= 0.f) return nullptr;
+    for (const FontFaceSource& source : face.sources) {
+        if (const auto* local = std::get_if<FontFaceLocal>(&source.value)) {
+            if (const auto match = localFont(local->name)) {
+                if (const LLFontGL* font = fontForSource(*match, pixelSize, request, isFallback, familyList, face.family, "local", local->name,
+                                                         isFallback ? "next family" : "authored @font-face")) {
+                    return font;
+                }
+            }
+            continue;
+        }
+
+        const FontFaceURL& url = std::get<FontFaceURL>(source.value);
+        if (!url.id.valid() || !gFontManagerp) continue;
+        const auto* bytes = geometry.system.resourceData(url.id.value());
+        if (!bytes || bytes->empty()) continue;
+        auto [fontKey, inserted] = memoryFontKeys.try_emplace(url.id.value());
+        if (inserted) fontKey->second = gFontManagerp->registerFontBytes(source.sourceName, *bytes);
+        if (fontKey->second.empty()) continue;
+        if (const LLFontGL* font = fontForSource(detail::SystemFontMatch{fontKey->second}, pixelSize, request, isFallback, familyList, face.family,
+                                                 "resource", url.url, isFallback ? "next family" : "authored @font-face")) {
+            return font;
+        }
+    }
+    return nullptr;
+}
+
+const LLFontGL* TextPainter::fontForSource(const detail::SystemFontMatch& source, float pixelSize, const FontSelectionRequest& request,
+                                           bool isFallback, const FontFamilies& familyList, std::string_view selectedFamily,
+                                           std::string_view sourceKind, std::string_view sourceName, std::string_view reason) {
+    if (source.path.empty() || !gFontManagerp || !std::isfinite(pixelSize) || pixelSize <= 0.f) return nullptr;
+    const FontInstanceKey key{source.path,   source.faceIndex, pixelSize, request.weight.value, request.width.percentage,
+                              request.style, familyList,       isFallback};
+    auto [cached, inserted] = fontInstances.try_emplace(key, nullptr);
+    if (!inserted) return cached->second.get();
+
+    ALFontVarAxes axes;
+    axes.wght = std::clamp(request.weight.value, 1.f, 1000.f);
+    axes.wght_set = true;
+    axes.wdth = std::clamp(request.width.percentage, 50.f, 200.f);
+    axes.wdth_set = true;
+    if (request.style == FontStyle::Italic) {
+        axes.ital = 1.f;
+        axes.ital_set = true;
+    } else if (request.style == FontStyle::Oblique) {
+        axes.slnt = -14.f;
+        axes.slnt_set = true;
+    }
+
+    auto font = std::make_unique<LLFontGL>();
+    constexpr float pointsPerCssPixel = 72.f / 96.f;
+    constexpr float cssDPI = 96.f;
+    if (!font->loadFace(source.path, pixelSize * pointsPerCssPixel, cssDPI, cssDPI, isFallback, source.faceIndex, EFontHinting::DEFAULT,
+                        LLFontGL::NORMAL, axes)) {
+        font->destroyGL();
+        return nullptr;
+    }
+    cached->second = std::move(font);
+    const std::string_view selectedFace = source.fullName.empty() ? selectedFamily : source.fullName;
+    LL_DEBUGS("UI")
+        << fmt::format(
+               "Resolved UI font: requested-css-families=[{}], css-family={}, selected-face={} ({}, {}), source={}:{} [{}#{}], role={}, reason={}, "
+               "System generation={}, resource generation={}",
+               describeFontFamilies(familyList), selectedFamily, selectedFace, source.familyName, source.postScriptName, sourceKind, sourceName,
+               source.path, source.faceIndex, isFallback ? "fallback" : "primary", reason, geometry.system.generation(), resourceGeneration)
+        << LL_ENDL;
+    return cached->second.get();
+}
+
+std::optional<detail::SystemFontMatch> TextPainter::systemFont(const FontFamily& family, const FontSelectionRequest& request) {
+    const auto key = std::tuple{family, request.weight.value, request.width.percentage, request.style};
+    auto [match, inserted] = systemFontMatches.try_emplace(key);
+    if (inserted) match->second = detail::matchSystemFont(family, request);
+    return match->second;
+}
+
+std::optional<detail::SystemFontMatch> TextPainter::localFont(std::string_view name) {
+    const std::string key(name);
+    auto [match, inserted] = localFontMatches.try_emplace(key);
+    if (inserted) match->second = detail::matchLocalFont(name);
+    return match->second;
+}
+
+float TextPainter::lineHeight(const ComputedStyle& style, const LLFontGL* font) {
+    const auto& lineHeightValue = style.lineHeight().mValue;
+    if (const auto* length = std::get_if<LineHeight::Length>(&lineHeightValue)) return std::ceil(length->pixels);
+    if (const auto* number = std::get_if<LineHeight::Number>(&lineHeightValue)) return std::ceil(style.fontSize() * number->value);
+    if (style.fontSize() <= 0.f) return 0.f;
+    if (!font) font = fontForStyle(style);
+    return font ? static_cast<float>(font->getLineHeight()) : 0.f;
+}
+
+void TextPainter::clearFonts() {
+    for (auto& [key, font] : fontInstances) {
+        (void)key;
+        if (font) font->destroyGL();
+    }
+    fontInstances.clear();
+    memoryFontKeys.clear();
+    localFontMatches.clear();
+    systemFontMatches.clear();
+    if (gFontManagerp) gFontManagerp->collectGarbage();
+}
+
+void TextPainter::destroyGL() {
+    clearFonts();
+    resourceGeneration = geometry.system.generation();
+    resolutionGeneration = LLFontGL::sResolutionGeneration;
 }
 
 void OpenGLPaintContext::Impl::beginFrame(const PaintTarget& target) {
@@ -702,7 +967,7 @@ void OpenGLPaintContext::Impl::endFrame() {
     mFrameNativeAppearance = nullptr;
 }
 
-Vec2 OpenGLPaintContext::Impl::measureText(const std::string& textValue, const ComputedStyle& style) const {
+Vec2 OpenGLPaintContext::Impl::measureText(const std::string& textValue, const ComputedStyle& style) {
     return text.measureText(textValue, style);
 }
 
@@ -741,8 +1006,8 @@ void OpenGLPaintContext::Impl::paintNativeScrollbar(const NativeScrollbarPaintRe
     const auto paint = [this, clip](const Rect& rect, Color color, float radius) {
         if (rect.empty() || color.a <= 0.f) return;
         const Rect box = snapped(rect);
-        geometry.drawRoundedShape(PaintOp::Fill, box, resolveBorderRadii(box, BorderRadii::uniform(Length{radius})), 0.f, color, OutlineStyle::Solid,
-                                  std::nullopt, nullptr, clip);
+        geometry.drawRoundedShape(PaintOp::Fill, box, resolveBorderRadius(box, BorderRadius::uniform(Length{radius})), 0.f, color,
+                                  OutlineStyle::Solid, std::nullopt, nullptr, clip);
     };
     const auto paintArrow = [this, clip](const Rect& rect, ScrollbarAxis axis, bool pointsPositive, Color color) {
         geometry.drawArrow(rect, axis, pointsPositive, color, clip);
@@ -847,7 +1112,7 @@ LLRenderTarget* EffectRenderer::applyBlur(LLRenderTarget& source, LLRenderTarget
     return &verticalTarget;
 }
 
-void EffectRenderer::compositeEffect(LLRenderTarget& source, const Rect& capture, const Rect& destination, const ResolvedBorderRadii& radii,
+void EffectRenderer::compositeEffect(LLRenderTarget& source, const Rect& capture, const Rect& destination, const ResolvedBorderRadius& radii,
                                      bool roundedMask) {
     const Rect visible = intersectRects(capture, destination);
     if (!mProgram.mProgramObject || visible.empty() || capture.empty()) return;
@@ -892,7 +1157,7 @@ void EffectRenderer::compositeMaskedEffect(LLRenderTarget& source, LLRenderTarge
 void EffectRenderer::begin(const Rect& rect, const ComputedStyle& style, float scale) {
     if (mEffectDepth == mEffectLayers.size()) mEffectLayers.emplace_back();
     EffectLayer& frame = mEffectLayers[mEffectDepth++];
-    frame.filterOperations.clear();
+    frame.filter.operations.clear();
     frame.maskLayers.clear();
     frame.hasMask = mGeometry.hasRenderableMask(style.maskLayers);
     if (frame.hasMask) {
@@ -914,10 +1179,10 @@ void EffectRenderer::begin(const Rect& rect, const ComputedStyle& style, float s
         return intersectRects(expanded, visible);
     };
 
-    if (!style.backdropFilter.empty()) {
+    if (!style.backdropFilter().isNone()) {
         float padding = 1.f / frame.scale;
         bool hasBlur = false;
-        for (const FilterOperation& operation : style.backdropFilter) {
+        for (const FilterOperation& operation : style.backdropFilter().operations) {
             const std::optional<float> stdDeviation = maximumBlurDeviation(operation);
             if (!stdDeviation || *stdDeviation <= 0.f) continue;
             hasBlur = true;
@@ -927,22 +1192,22 @@ void EffectRenderer::begin(const Rect& rect, const ComputedStyle& style, float s
             const Rect capture = captureBounds(padding);
             if (!capture.empty() && captureFramebuffer(capture, frame.scale, mBackgroundTargets[0])) {
                 LLRenderTarget* source = &mBackgroundTargets[0];
-                for (const FilterOperation& operation : style.backdropFilter) {
+                for (const FilterOperation& operation : style.backdropFilter().operations) {
                     const std::optional<float> stdDeviation = maximumBlurDeviation(operation);
                     if (!stdDeviation || *stdDeviation <= 0.f) continue;
                     LLRenderTarget& horizontal = mBackgroundTargets[1];
                     LLRenderTarget& vertical = source == &mBackgroundTargets[0] ? mBackgroundTargets[2] : mBackgroundTargets[0];
                     source = applyBlur(*source, horizontal, vertical, capture, rect, operation, frame.scale);
                 }
-                compositeEffect(*source, capture, rect, resolveBorderRadii(rect, style.borderRadius), true);
+                compositeEffect(*source, capture, rect, resolveBorderRadius(rect, style.borderRadius()), true);
             }
         }
     }
 
-    frame.filterOperations = style.filter;
-    if (frame.filterOperations.empty() && !frame.hasMask) return;
+    frame.filter = style.filter;
+    if (frame.filter.isNone() && !frame.hasMask) return;
     float padding = 1.f / frame.scale;
-    for (const FilterOperation& operation : frame.filterOperations) {
+    for (const FilterOperation& operation : frame.filter.operations) {
         const std::optional<float> stdDeviation = maximumBlurDeviation(operation);
         if (stdDeviation) padding = std::min(padding + *stdDeviation * 2.f, maximumPadding);
     }
@@ -971,20 +1236,20 @@ void EffectRenderer::end() {
     mClips.reapply();
 
     LLRenderTarget* source = &frame.targets[0];
-    for (const FilterOperation& operation : frame.filterOperations) {
+    for (const FilterOperation& operation : frame.filter.operations) {
         LLRenderTarget& horizontal = frame.targets[1];
         LLRenderTarget& vertical = source == &frame.targets[0] ? frame.targets[2] : frame.targets[0];
         source = applyBlur(*source, horizontal, vertical, frame.captureRect, frame.effectRect, operation, frame.scale);
     }
     if (!frame.hasMask) {
-        compositeEffect(*source, frame.captureRect, frame.captureRect, uniformBorderRadii(0.f), false);
+        compositeEffect(*source, frame.captureRect, frame.captureRect, uniformBorderRadius(0.f), false);
         return;
     }
 
     const U32 width = static_cast<U32>(std::max(1.f, std::round(frame.captureRect.w * frame.scale)));
     const U32 height = static_cast<U32>(std::max(1.f, std::round(frame.captureRect.h * frame.scale)));
     if (!ensureTarget(frame.maskTarget, width, height)) {
-        compositeEffect(*source, frame.captureRect, frame.captureRect, uniformBorderRadii(0.f), false);
+        compositeEffect(*source, frame.captureRect, frame.captureRect, uniformBorderRadius(0.f), false);
         return;
     }
     {
@@ -1042,7 +1307,25 @@ void GeometryPainter::drawGradientMesh(const Mesh& mesh, const Rect& rect, const
     setPaintOp(program, PaintOp::Direct);
 }
 
-void GeometryPainter::setRoundedClip(const ResolvedBorderRadii& radii) {
+void GeometryPainter::drawBorderImageGradientTile(const Rect& tile, const Rect& source, float imageWidth, float imageHeight, const Gradient& gradient,
+                                                  float opacity) {
+    if (!program.mProgramObject || tile.empty() || source.empty()) return;
+    const PaintShaderUniforms& uniforms = shaderUniforms();
+    prepareVectorDraw();
+    program.bind();
+    setPaintOp(program, PaintOp::Gradient);
+    program.uniform4f(uniforms.shapeRect, tile.x, tile.y, tile.w, tile.h);
+    setBorderRadiusUniforms(program, uniforms, uniformBorderRadius(0.f), false);
+    setBorderRadiusUniforms(program, uniforms, uniformBorderRadius(0.f), true);
+    program.uniform2f(uniforms.shapeOffset, 0.f, 0.f);
+    setScrollbarClipUniforms(program, uniforms, tile, nullptr);
+    setGradientUniforms(program, uniforms, {0.f, 0.f, imageWidth, imageHeight}, gradient, source.w / tile.w, source.h / tile.h, source.x, source.y);
+    drawShapeQuad(tile, opacity);
+    gGL.flush();
+    setPaintOp(program, PaintOp::Direct);
+}
+
+void GeometryPainter::setRoundedClip(const ResolvedBorderRadius& radii) {
     if (!program.mProgramObject) return;
     const PaintShaderUniforms& uniforms = shaderUniforms();
     const Rect clip = clips.pixelRect();
@@ -1087,7 +1370,7 @@ void GeometryPainter::drawNativeInputMark(const NativeInputMarkPaintRequest& req
 
     if (request.mark == NativeInputMark::Dash) {
         const float radius = std::min(request.radius, std::min(bounds.w, bounds.h) * .5f);
-        drawRoundedShape(PaintOp::Fill, bounds, uniformBorderRadii(radius), 0.f, request.color);
+        drawRoundedShape(PaintOp::Fill, bounds, uniformBorderRadius(radius), 0.f, request.color);
         return;
     }
 
@@ -1097,35 +1380,41 @@ void GeometryPainter::drawNativeInputMark(const NativeInputMarkPaintRequest& req
 }
 
 void TextPainter::paintText(const std::string& text, const Rect& rect, const ComputedStyle& style) {
-    if (text.empty() || style.fontSize <= 0.f || style.color.a <= 0.f) return;
-    const LLFontGL& font = fontForStyle(style);
+    if (text.empty() || style.fontSize() <= 0.f || style.color().resolvedColor().a <= 0.f) return;
+    const LLFontGL* resolvedFont = fontForStyle(style);
+    if (!resolvedFont) return;
+    const LLFontGL& font = *resolvedFont;
     prepareTextDraw();
     geometry.applyClipCoverage(gUIProgram);
     const LLVector3 uiTranslation = gGL.getUITranslation();
     const Rect glyphRect{rect.x + uiTranslation.mV[VX], rect.y + uiTranslation.mV[VY], rect.w, rect.h};
     const LLFontGL::HAlign horizontal = horizontalAlignment(style);
     constexpr LLFontGL::VAlign vertical = LLFontGL::VCENTER;
-    const LLColor4 color(style.color.r, style.color.g, style.color.b, style.color.a);
-    const LLFontGL::TextSpacing spacing = usedTextSpacing(style, font);
-    const U8 fontStyle = hasTextDecoration(style.textDecoration, TextDecoration::Underline) ? LLFontGL::UNDERLINE : LLFontGL::NORMAL;
+    const Color& styleColor = style.color().resolvedColor();
+    const LLColor4 color(styleColor.r, styleColor.g, styleColor.b, styleColor.a);
+    const LLFontGL::TextSpacing spacing = usedTextSpacing(style);
+    U8 fontStyle = style.fontWeight().value >= 600.f ? LLFontGL::BOLD : LLFontGL::NORMAL;
+    if (style.fontStyle() != FontStyle::Normal) fontStyle |= LLFontGL::ITALIC;
+    if (hasTextDecoration(style.textDecoration(), TextDecoration::Underline)) fontStyle |= LLFontGL::UNDERLINE;
     font.renderUTF8(text, 0, textX(glyphRect, horizontal), textY(glyphRect, vertical), color, horizontal, vertical, fontStyle, LLFontGL::NO_SHADOW,
                     S32_MAX, S32_MAX, nullptr, false, true, spacing);
-    if (hasTextDecoration(style.textDecoration, TextDecoration::LineThrough)) {
-        const float width = measureOpenGLText(text, style).x;
+    if (hasTextDecoration(style.textDecoration(), TextDecoration::LineThrough)) {
+        const float width = measureText(text, style).x;
         const float anchor = textX(rect, horizontal);
         const float left = horizontal == LLFontGL::RIGHT ? anchor - width : horizontal == LLFontGL::HCENTER ? anchor - width * .5f : anchor;
         const float thickness = std::max(1.f, std::round(font.getLineHeight() / 14.f));
         const float y = textBaseline(rect, vertical, font) + font.getAscenderHeight() * .3f;
-        geometry.drawRoundedShape(PaintOp::Fill, {left, y - thickness * .5f, width, thickness}, uniformBorderRadii(0.f), 0.f, style.color);
+        geometry.drawRoundedShape(PaintOp::Fill, {left, y - thickness * .5f, width, thickness}, uniformBorderRadius(0.f), 0.f,
+                                  style.color().resolvedColor());
     }
 }
 
-void GeometryPainter::drawRoundedShape(PaintOp op, const Rect& rect, const ResolvedBorderRadii& radii, float borderWidth, const Color& color,
-                                       OutlineStyle outlineStyle, std::optional<TopBorderGap> topBorderGap, const ResolvedBorderRadii* innerRadii,
+void GeometryPainter::drawRoundedShape(PaintOp op, const Rect& rect, const ResolvedBorderRadius& radii, float borderWidth, const Color& color,
+                                       OutlineStyle outlineStyle, std::optional<TopBorderGap> topBorderGap, const ResolvedBorderRadius* innerRadii,
                                        const ResolvedScrollbarClip* clip) {
     if (!program.mProgramObject || rect.empty() || color.a <= 0.f || (op == PaintOp::Border && borderWidth <= 0.f)) return;
     const PaintShaderUniforms& uniforms = shaderUniforms();
-    const ResolvedBorderRadii& inner = innerRadii ? *innerRadii : radii;
+    const ResolvedBorderRadius& inner = innerRadii ? *innerRadii : radii;
     const float padding = coverageFringe();
     const Rect quad = {rect.x - padding, rect.y - padding, rect.w + padding * 2.f, rect.h + padding * 2.f};
     prepareVectorDraw();
@@ -1147,13 +1436,13 @@ void GeometryPainter::drawRoundedShape(PaintOp op, const Rect& rect, const Resol
     setPaintOp(program, PaintOp::Direct);
 }
 
-void GeometryPainter::drawRoundedGradient(const Rect& rect, const ResolvedBorderRadii& radii, const Gradient& gradient,
-                                          const EdgeInsets* borderWidths, std::optional<TopBorderGap> topBorderGap,
-                                          const ResolvedBorderRadii* innerRadii) {
+void GeometryPainter::drawRoundedGradient(const Rect& rect, const ResolvedBorderRadius& radii, const Gradient& gradient,
+                                          const RectEdges<float>* borderWidths, std::optional<TopBorderGap> topBorderGap,
+                                          const ResolvedBorderRadius* innerRadii) {
     if (!program.mProgramObject || rect.empty() || gradient.stops.size() < 2 || gradient.stops.size() > 8 || (borderWidths && !borderWidths->any()))
         return;
     const PaintShaderUniforms& uniforms = shaderUniforms();
-    const ResolvedBorderRadii& inner = innerRadii ? *innerRadii : radii;
+    const ResolvedBorderRadius& inner = innerRadii ? *innerRadii : radii;
 
     const float padding = coverageFringe();
     const Rect quad = {rect.x - padding, rect.y - padding, rect.w + padding * 2.f, rect.h + padding * 2.f};
@@ -1193,7 +1482,7 @@ void GeometryPainter::paintImageLayers(const Rect& rect, const ComputedStyle& st
 
         const SvgImage* svg = resourceSvg(*layer);
         const RasterImage* raster = resourceRaster(*layer);
-        if (!layer->gradient && !svg && !raster) continue;
+        if (!layer->image.gradient() && !svg && !raster) continue;
 
         const Rect source = svg ? svg->viewBox
             : raster            ? Rect{0.f, 0.f, static_cast<float>(raster->width), static_cast<float>(raster->height)}
@@ -1202,13 +1491,13 @@ void GeometryPainter::paintImageLayers(const Rect& rect, const ComputedStyle& st
         const float sourceHeight = std::max(.0001f, source.h);
         float imageWidth = sourceWidth;
         float imageHeight = sourceHeight;
-        if (layer->size.mode == BackgroundSizeMode::Cover || layer->size.mode == BackgroundSizeMode::Contain) {
+        if (layer->size.mode == BackgroundSizeType::Cover || layer->size.mode == BackgroundSizeType::Contain) {
             const float widthScale = origin.w / sourceWidth;
             const float heightScale = origin.h / sourceHeight;
-            const float scale = layer->size.mode == BackgroundSizeMode::Cover ? std::max(widthScale, heightScale) : std::min(widthScale, heightScale);
+            const float scale = layer->size.mode == BackgroundSizeType::Cover ? std::max(widthScale, heightScale) : std::min(widthScale, heightScale);
             imageWidth *= scale;
             imageHeight *= scale;
-        } else if (layer->size.mode == BackgroundSizeMode::Explicit) {
+        } else if (layer->size.mode == BackgroundSizeType::Explicit) {
             if (layer->size.width) imageWidth = std::max(0.f, layer->size.width->resolve(origin.w));
             if (layer->size.height) imageHeight = std::max(0.f, layer->size.height->resolve(origin.h));
             if (!layer->size.width && layer->size.height) imageWidth = imageHeight * sourceWidth / sourceHeight;
@@ -1226,19 +1515,19 @@ void GeometryPainter::paintImageLayers(const Rect& rect, const ComputedStyle& st
         const int lastY = repeatY ? static_cast<int>(std::ceil((clip.top() - image.bottom()) / image.h)) : 0;
 
         clips.push(clip, mTargetScale, ClipAxes::Both);
-        setRoundedClip(normalizeBorderRadii(backgroundBoxRadii(rect, style, layer->clip), clip.w, clip.h));
-        if (layer->gradient) {
+        setRoundedClip(normalizeBorderRadius(backgroundBoxRadii(rect, style, layer->clip), clip.w, clip.h));
+        if (const Gradient* gradient = layer->image.gradient()) {
             for (int y = firstY; y <= lastY; ++y)
                 for (int x = firstX; x <= lastX; ++x)
                     drawRoundedGradient({image.x + image.w * static_cast<float>(x), image.y + image.h * static_cast<float>(y), image.w, image.h},
-                                        uniformBorderRadii(0.f), *layer->gradient);
+                                        uniformBorderRadius(0.f), *gradient);
             clearRoundedClip();
             clips.pop();
             continue;
         }
 
         if (raster) {
-            LLGLTexture* texture = rasterTexture(layer->resource);
+            LLGLTexture* texture = rasterTexture(*layer->image.resource());
             if (texture) {
                 const PaintShaderUniforms& uniforms = shaderUniforms();
                 for (int y = firstY; y <= lastY; ++y)
@@ -1249,7 +1538,7 @@ void GeometryPainter::paintImageLayers(const Rect& rect, const ComputedStyle& st
                         setPaintOp(program, PaintOp::Image);
                         program.uniform4f(uniforms.shapeRect, tile.x, tile.y, tile.w, tile.h);
                         program.bindTexture(LLShaderMgr::DIFFUSE_MAP, texture, ALSamplers::BilinearClamp);
-                        drawShapeQuad(tile, style.opacity);
+                        drawShapeQuad(tile, style.opacity().value);
                         gGL.flush();
                         program.unbindTexture(LLShaderMgr::DIFFUSE_MAP);
                         setPaintOp(program, PaintOp::Direct);
@@ -1279,14 +1568,16 @@ void GeometryPainter::paintImageLayers(const Rect& rect, const ComputedStyle& st
 }
 
 const SvgImage* GeometryPainter::resourceSvg(const BackgroundLayer& layer) const {
-    if (layer.resource.empty()) return nullptr;
-    const SvgImage* image = system.resourceSvg(layer.resource);
+    const std::string* resource = layer.image.resource();
+    if (!resource) return nullptr;
+    const SvgImage* image = system.resourceSvg(*resource);
     return image && !image->empty() ? image : nullptr;
 }
 
 const RasterImage* GeometryPainter::resourceRaster(const BackgroundLayer& layer) const {
-    if (layer.resource.empty()) return nullptr;
-    const RasterImage* image = system.resourceRaster(layer.resource);
+    const std::string* resource = layer.image.resource();
+    if (!resource) return nullptr;
+    const RasterImage* image = system.resourceRaster(*resource);
     return image && !image->empty() ? image : nullptr;
 }
 
@@ -1310,7 +1601,7 @@ LLGLTexture* GeometryPainter::rasterTexture(std::string_view reference) {
 
 bool GeometryPainter::hasRenderableMask(std::span<const MaskLayer> layers) const {
     return std::any_of(layers.begin(), layers.end(), [this](const MaskLayer& layer) {
-        if (layer.image.gradient) return true;
+        if (layer.image.image.gradient()) return true;
         return resourceSvg(layer.image) != nullptr || resourceRaster(layer.image) != nullptr;
     });
 }
@@ -1318,8 +1609,8 @@ bool GeometryPainter::hasRenderableMask(std::span<const MaskLayer> layers) const
 void GeometryPainter::paintMaskLayers(const Rect& rect, const ComputedStyle& style, std::span<const MaskLayer> layers) {
     if (!program.mProgramObject || layers.empty()) return;
     ComputedStyle maskStyle = style;
-    maskStyle.color = Color(1.f, 1.f, 1.f, 1.f);
-    maskStyle.opacity = 1.f;
+    maskStyle.setColor(Color(1.f, 1.f, 1.f, 1.f));
+    maskStyle.setOpacity(Opacity{1.f});
     for (auto layer = layers.rbegin(); layer != layers.rend(); ++layer) {
         program.bind();
         program.uniform1i(shaderUniforms().maskMode,
@@ -1340,37 +1631,37 @@ void GeometryPainter::paintMaskLayers(const Rect& rect, const ComputedStyle& sty
                               LLRender::BF_ONE_MINUS_SOURCE_ALPHA);
                 break;
         }
-        paintImageLayers(rect, maskStyle, std::span<const BackgroundLayer>(&layer->image, 1), maskStyle.color, nullptr);
+        paintImageLayers(rect, maskStyle, std::span<const BackgroundLayer>(&layer->image, 1), maskStyle.color().resolvedColor(), nullptr);
     }
     program.bind();
     program.uniform1i(shaderUniforms().maskMode, 0);
     gGL.blendFunc(LLRender::BF_SOURCE_ALPHA, LLRender::BF_ONE_MINUS_SOURCE_ALPHA, LLRender::BF_ONE, LLRender::BF_ONE_MINUS_SOURCE_ALPHA);
 }
 
-void GeometryPainter::drawShadow(const Rect& rect, const ResolvedBorderRadii& radii, const BoxShadow& shadow) {
-    if (!program.mProgramObject || rect.empty() || shadow.color.a <= 0.f) return;
+void GeometryPainter::drawShadow(const Rect& rect, const ResolvedBorderRadius& radii, const BoxShadow& shadow) {
+    if (!program.mProgramObject || rect.empty() || shadow.color.resolvedColor().a <= 0.f) return;
     const PaintShaderUniforms& uniforms = shaderUniforms();
 
     const Rect box = rect;
     Rect shape = box;
     Rect quad = box;
     Vec2 localShapeOffset;
-    ResolvedBorderRadii shapeRadii = radii;
-    ResolvedBorderRadii innerRadii = radii;
+    ResolvedBorderRadius shapeRadii = radii;
+    ResolvedBorderRadius innerRadii = radii;
     PaintOp op = PaintOp::InsetShadow;
     if (!shadow.inset) {
         op = PaintOp::OuterShadow;
         shape = {box.x + shadow.horizontal - shadow.spread, box.y - shadow.vertical - shadow.spread, std::max(0.f, box.w + shadow.spread * 2.f),
                  std::max(0.f, box.h + shadow.spread * 2.f)};
         if (shape.empty()) return;
-        shapeRadii = expandedBorderRadii(radii, shadow.spread, shape.w, shape.h);
+        shapeRadii = expandedBorderRadius(radii, shadow.spread, shape.w, shape.h);
         innerRadii = shapeRadii;
         const float padding = shadow.blur * 2.f + coverageFringe();
         quad = {shape.x - padding, shape.y - padding, shape.w + padding * 2.f, shape.h + padding * 2.f};
         localShapeOffset = {padding, padding};
     } else {
         const Rect hole = {0.f, 0.f, std::max(0.f, box.w - shadow.spread * 2.f), std::max(0.f, box.h - shadow.spread * 2.f)};
-        innerRadii = insetBorderRadii(radii, {shadow.spread, shadow.spread, shadow.spread, shadow.spread}, hole.w, hole.h);
+        innerRadii = insetBorderRadius(radii, {shadow.spread, shadow.spread, shadow.spread, shadow.spread}, hole.w, hole.h);
         const float padding = coverageFringe();
         quad = expandedRect(box, padding);
         localShapeOffset = {padding, padding};
@@ -1382,7 +1673,8 @@ void GeometryPainter::drawShadow(const Rect& rect, const ResolvedBorderRadii& ra
     program.uniform4f(uniforms.shapeRect, shape.x, shape.y, shape.w, shape.h);
     setBorderRadiusUniforms(program, uniforms, shapeRadii, false);
     setBorderRadiusUniforms(program, uniforms, innerRadii, true);
-    program.uniform4f(uniforms.shapeColor, shadow.color.r, shadow.color.g, shadow.color.b, shadow.color.a);
+    const Color& color = shadow.color.resolvedColor();
+    program.uniform4f(uniforms.shapeColor, color.r, color.g, color.b, color.a);
     program.uniform2f(uniforms.shapeOffset, localShapeOffset.x, localShapeOffset.y);
     program.uniform2f(uniforms.shadowOffset, shadow.horizontal, -shadow.vertical);
     program.uniform1f(uniforms.shadowBlur, shadow.blur);
@@ -1411,9 +1703,21 @@ void GeometryPainter::drawShapeQuad(const Rect& rect, float alpha) {
 }
 
 void GeometryPainter::drawBorder(const Rect& rect, const ComputedStyle& style, std::optional<TopBorderGap> topBorderGap) {
-    if (!style.borderWidth.any() || style.borderStyle == BorderStyle::NoneValue) return;
+    const RectEdges<float> width = borderWidths(style);
+    if (!width.any()) return;
+
+    const RectEdges<BorderStyle> borderStyles = style.borderStyle();
+    const RectEdges<StyleColor> borderColors = style.borderColor();
+    const auto sideColor = [](BorderStyle borderStyle, const StyleColor& styleColor, bool leadingSide) {
+        const Color& color = styleColor.resolvedColor();
+        if (borderStyle == BorderStyle::Solid || borderStyle == BorderStyle::NoneValue) return color;
+        const bool highlight = (borderStyle == BorderStyle::Outset) == leadingSide;
+        const Color tint = highlight ? Color(1.f, 1.f, 1.f, color.a) : Color(0.f, 0.f, 0.f, color.a);
+        return shade(color, tint, .45f);
+    };
+    const bool uniformPaint = width.isUniform() && borderStyles.isUniform() && borderColors.isUniform();
     const Rect box = rect;
-    const ResolvedBorderRadii borderRadii = resolveBorderRadii(box, style.borderRadius);
+    const ResolvedBorderRadius borderRadii = resolveBorderRadius(box, style.borderRadius());
     const bool square = borderRadii.topLeft.x == 0.f
         && borderRadii.topLeft.y == 0.f
         && borderRadii.topRight.x == 0.f
@@ -1422,84 +1726,193 @@ void GeometryPainter::drawBorder(const Rect& rect, const ComputedStyle& style, s
         && borderRadii.bottomRight.y == 0.f
         && borderRadii.bottomLeft.x == 0.f
         && borderRadii.bottomLeft.y == 0.f;
-    if (style.borderStyle != BorderStyle::Solid
-        && style.borderWidth.isUniform()
-        && !style.borderGradient
-        && square
-        && (!topBorderGap || topBorderGap->empty())) {
-        const float width = style.borderWidth.top;
-        const Color highlight = shade(style.borderColor, Color(1.f, 1.f, 1.f, style.borderColor.a), .45f);
-        const Color shadow = shade(style.borderColor, Color(0.f, 0.f, 0.f, style.borderColor.a), .45f);
-        const bool outset = style.borderStyle == BorderStyle::Outset;
-        const Color topLeft = outset ? highlight : shadow;
-        const Color bottomRight = outset ? shadow : highlight;
-        const ResolvedBorderRadii zeroRadii = uniformBorderRadii(0.f);
-        drawRoundedShape(PaintOp::Fill, {box.left(), box.top() - width, box.w, width}, zeroRadii, 0.f, topLeft);
-        drawRoundedShape(PaintOp::Fill, {box.left(), box.bottom(), box.w, width}, zeroRadii, 0.f, bottomRight);
-        const float height = std::max(0.f, box.h - width * 2.f);
-        drawRoundedShape(PaintOp::Fill, {box.left(), box.bottom() + width, width, height}, zeroRadii, 0.f, topLeft);
-        drawRoundedShape(PaintOp::Fill, {box.right() - width, box.bottom() + width, width, height}, zeroRadii, 0.f, bottomRight);
+    if (uniformPaint) {
+        const BorderStyle borderStyle = borderStyles.top;
+        const Color& borderColor = borderColors.top.resolvedColor();
+        if (borderStyle == BorderStyle::NoneValue || borderColor.a <= 0.f) return;
+
+        if (borderStyle != BorderStyle::Solid && square && (!topBorderGap || topBorderGap->empty())) {
+            const float uniformWidth = width.top;
+            const Color topLeft = sideColor(borderStyle, borderColors.top, true);
+            const Color bottomRight = sideColor(borderStyle, borderColors.bottom, false);
+            const ResolvedBorderRadius zeroRadii = uniformBorderRadius(0.f);
+            drawRoundedShape(PaintOp::Fill, {box.left(), box.top() - uniformWidth, box.w, uniformWidth}, zeroRadii, 0.f, topLeft);
+            drawRoundedShape(PaintOp::Fill, {box.left(), box.bottom(), box.w, uniformWidth}, zeroRadii, 0.f, bottomRight);
+            const float height = std::max(0.f, box.h - uniformWidth * 2.f);
+            drawRoundedShape(PaintOp::Fill, {box.left(), box.bottom() + uniformWidth, uniformWidth, height}, zeroRadii, 0.f, topLeft);
+            drawRoundedShape(PaintOp::Fill, {box.right() - uniformWidth, box.bottom() + uniformWidth, uniformWidth, height}, zeroRadii, 0.f,
+                             bottomRight);
+            return;
+        }
+
+        const Rect innerBox = insetRect(box, width);
+        const ResolvedBorderRadius innerRadii = insetBorderRadius(borderRadii, width, innerBox.w, innerBox.h);
+        drawRoundedShape(PaintOp::Border, box, borderRadii, width.top, borderColor, OutlineStyle::Solid, topBorderGap, &innerRadii);
         return;
     }
-    const Rect innerBox = insetRect(box, style.borderWidth);
-    const ResolvedBorderRadii innerRadii = insetBorderRadii(borderRadii, style.borderWidth, innerBox.w, innerBox.h);
-    if (style.borderGradient) {
-        drawRoundedGradient(box, borderRadii, *style.borderGradient, &style.borderWidth, topBorderGap, &innerRadii);
-        return;
-    }
-    if (style.borderColor.a <= 0.f) return;
-    if (style.borderWidth.isUniform()) {
-        drawRoundedShape(PaintOp::Border, box, borderRadii, style.borderWidth.top, style.borderColor, OutlineStyle::Solid, topBorderGap, &innerRadii);
-        return;
-    }
-    const EdgeInsets& width = style.borderWidth;
-    const ResolvedBorderRadii zeroRadii = uniformBorderRadii(0.f);
+
+    const Color topColor = sideColor(borderStyles.top, borderColors.top, true);
+    const Color rightColor = sideColor(borderStyles.right, borderColors.right, false);
+    const Color bottomColor = sideColor(borderStyles.bottom, borderColors.bottom, false);
+    const Color leftColor = sideColor(borderStyles.left, borderColors.left, true);
+    const ResolvedBorderRadius zeroRadii = uniformBorderRadius(0.f);
     if (topBorderGap && !topBorderGap->empty()) {
         const float gapLeft = std::clamp(topBorderGap->left, box.left(), box.right());
         const float gapRight = std::clamp(topBorderGap->right, gapLeft, box.right());
         drawRoundedShape(PaintOp::Fill, {box.left(), box.top() - width.top, std::max(0.f, gapLeft - box.left()), width.top}, zeroRadii, 0.f,
-                         style.borderColor);
+                         topColor);
         drawRoundedShape(PaintOp::Fill, {gapRight, box.top() - width.top, std::max(0.f, box.right() - gapRight), width.top}, zeroRadii, 0.f,
-                         style.borderColor);
-    } else drawRoundedShape(PaintOp::Fill, {box.left(), box.top() - width.top, box.w, width.top}, zeroRadii, 0.f, style.borderColor);
-    drawRoundedShape(PaintOp::Fill, {box.left(), box.bottom(), box.w, width.bottom}, zeroRadii, 0.f, style.borderColor);
+                         topColor);
+    } else drawRoundedShape(PaintOp::Fill, {box.left(), box.top() - width.top, box.w, width.top}, zeroRadii, 0.f, topColor);
+    drawRoundedShape(PaintOp::Fill, {box.left(), box.bottom(), box.w, width.bottom}, zeroRadii, 0.f, bottomColor);
     drawRoundedShape(PaintOp::Fill, {box.left(), box.bottom() + width.bottom, width.left, box.h - width.top - width.bottom}, zeroRadii, 0.f,
-                     style.borderColor);
+                     leftColor);
     drawRoundedShape(PaintOp::Fill, {box.right() - width.right, box.bottom() + width.bottom, width.right, box.h - width.top - width.bottom},
-                     zeroRadii, 0.f, style.borderColor);
+                     zeroRadii, 0.f, rightColor);
+}
+
+bool GeometryPainter::drawBorderImage(const Rect& rect, const ComputedStyle& style) {
+    const StyleImage& source = style.borderImageSource();
+    const std::string* resource = source.resource();
+    const RasterImage* image = resource ? system.resourceRaster(*resource) : nullptr;
+    if (image && image->empty()) image = nullptr;
+    const SvgImage* svg = resource ? system.resourceSvg(*resource) : nullptr;
+    if (svg && svg->empty()) svg = nullptr;
+    const Gradient* gradient = source.gradient();
+    if (!image && !svg && !gradient) return false;
+
+    const RectEdges<LineWidth> computedWidths = style.borderWidth();
+    const RectEdges<float> widths{computedWidths.top.pixels, computedWidths.right.pixels, computedWidths.bottom.pixels, computedWidths.left.pixels};
+    const auto area = resolveBorderImageArea(rect, style.borderImageOutset(), widths);
+    if (!area) return false;
+    const float imageWidth = image ? static_cast<float>(image->width) : svg ? svg->viewBox.w : area->w;
+    const float imageHeight = image ? static_cast<float>(image->height) : svg ? svg->viewBox.h : area->h;
+    const auto grid = resolveBorderImageGrid(style.borderImageSlice(), style.borderImageWidth(), style.borderImageOutset(), style.borderImageRepeat(),
+                                             rect, imageWidth, imageHeight, widths);
+    if (!grid) return false;
+
+    LLGLTexture* texture = image && resource ? rasterTexture(*resource) : nullptr;
+    if (image && !texture) return false;
+    if (!image) {
+        const Color& vectorColor = style.color().resolvedColor();
+        for (const BorderImagePatch& patch : grid->pieces) {
+            if (patch.source.empty() || patch.destination.empty()) continue;
+            const auto horizontal = borderImageTilePlan(patch.repeatX, patch.destination.left(), patch.destination.w, patch.tileSize.x);
+            const auto vertical = borderImageTilePlan(patch.repeatY, patch.destination.bottom(), patch.destination.h, patch.tileSize.y);
+            if (!horizontal || !vertical) continue;
+
+            clips.push(patch.destination, mTargetScale, ClipAxes::Both);
+            for (std::size_t y = 0; y < vertical->count; ++y) {
+                for (std::size_t x = 0; x < horizontal->count; ++x) {
+                    const Rect tile{horizontal->position(x), vertical->position(y), horizontal->size, vertical->size};
+                    if (gradient) {
+                        drawBorderImageGradientTile(tile, patch.source, imageWidth, imageHeight, *gradient, style.opacity().value);
+                        continue;
+                    }
+
+                    const float scale = std::min(tile.w / patch.source.w, tile.h / patch.source.h);
+                    const float strokeWidth = style.svgStrokeWidth ? style.svgStrokeWidth->pixels : svg->strokeWidth * scale;
+                    const StrokeCap cap = style.svgStrokeCapSet ? style.svgStrokeCap : svg->strokeCap;
+                    const Rect svgTarget{tile.x - patch.source.x * tile.w / patch.source.w, tile.y - patch.source.y * tile.h / patch.source.h,
+                                         imageWidth * tile.w / patch.source.w, imageHeight * tile.h / patch.source.h};
+                    for (const Path& path : svg->paths) {
+                        const Mesh mesh =
+                            tessellateStroke(transformSvgPath(path, svg->viewBox, svgTarget), vectorColor, strokeWidth, coverageFringe(), cap);
+                        drawMesh(mesh);
+                    }
+                }
+            }
+            clips.pop();
+        }
+        return true;
+    }
+
+    prepareVectorDraw();
+    program.bind();
+    program.bindTexture(LLShaderMgr::DIFFUSE_MAP, texture, ALSamplers::BilinearClamp);
+    setPaintOp(program, PaintOp::Image);
+
+    for (const BorderImagePatch& patch : grid->pieces) {
+        if (patch.source.empty() || patch.destination.empty()) continue;
+        const auto horizontal = borderImageTilePlan(patch.repeatX, patch.destination.left(), patch.destination.w, patch.tileSize.x);
+        const auto vertical = borderImageTilePlan(patch.repeatY, patch.destination.bottom(), patch.destination.h, patch.tileSize.y);
+        if (!horizontal || !vertical) continue;
+
+        const float insetX = std::min(.5f, patch.source.w * .5f) / static_cast<float>(image->width);
+        const float insetY = std::min(.5f, patch.source.h * .5f) / static_cast<float>(image->height);
+        const float leftU = (patch.source.left() + insetX * static_cast<float>(image->width)) / static_cast<float>(image->width);
+        const float rightU = (patch.source.right() - insetX * static_cast<float>(image->width)) / static_cast<float>(image->width);
+        const float bottomV = (patch.source.bottom() + insetY * static_cast<float>(image->height)) / static_cast<float>(image->height);
+        const float topV = (patch.source.top() - insetY * static_cast<float>(image->height)) / static_cast<float>(image->height);
+        const Rect& area = patch.destination;
+        const PaintShaderUniforms& uniforms = shaderUniforms();
+        program.uniform4f(uniforms.shapeRect, area.x, area.y, area.w, area.h);
+        clips.push(area, mTargetScale, ClipAxes::Both);
+        gGL.begin(LLRender::TRIANGLES);
+        const auto vertex = [&](float x, float y, float u, float v) {
+            gGL.color4f(1.f, 1.f, 1.f, style.opacity().value);
+            gGL.texCoord2f(u * area.w, v * area.h);
+            gGL.vertex2f(x, y);
+        };
+        for (std::size_t y = 0; y < vertical->count; ++y) {
+            for (std::size_t x = 0; x < horizontal->count; ++x) {
+                const Rect tile{horizontal->position(x), vertical->position(y), horizontal->size, vertical->size};
+                vertex(tile.left(), tile.bottom(), leftU, bottomV);
+                vertex(tile.right(), tile.bottom(), rightU, bottomV);
+                vertex(tile.right(), tile.top(), rightU, topV);
+                vertex(tile.left(), tile.bottom(), leftU, bottomV);
+                vertex(tile.right(), tile.top(), rightU, topV);
+                vertex(tile.left(), tile.top(), leftU, topV);
+            }
+        }
+        gGL.end();
+        gGL.flush();
+        clips.pop();
+    }
+
+    program.unbindTexture(LLShaderMgr::DIFFUSE_MAP);
+    setPaintOp(program, PaintOp::Direct);
+    return true;
 }
 
 void GeometryPainter::drawOutline(const Rect& rect, const ComputedStyle& style) {
-    if (style.outline.width <= 0.f || style.outline.color.a <= 0.f) return;
-    const float width = style.outline.width;
-    const float expansion = width + style.outline.offset;
+    if (style.outline().width <= 0.f || style.outline().color.resolvedColor().a <= 0.f) return;
+    const float width = style.outline().width;
+    const float expansion = width + style.outline().offset.pixels;
     const Rect box = rect;
     const Rect outlineBox = {box.x - expansion, box.y - expansion, box.w + expansion * 2.f, box.h + expansion * 2.f};
-    const ResolvedBorderRadii outlineRadii = expandedBorderRadii(resolveBorderRadii(box, style.borderRadius), expansion, outlineBox.w, outlineBox.h);
+    const ResolvedBorderRadius outlineRadii =
+        expandedBorderRadius(resolveBorderRadius(box, style.borderRadius()), expansion, outlineBox.w, outlineBox.h);
     const Rect innerBox = insetRect(outlineBox, {width, width, width, width});
-    const ResolvedBorderRadii innerRadii = insetBorderRadii(outlineRadii, {width, width, width, width}, innerBox.w, innerBox.h);
-    drawRoundedShape(PaintOp::Border, outlineBox, outlineRadii, width, style.outline.color, style.outline.style, std::nullopt, &innerRadii);
+    const ResolvedBorderRadius innerRadii = insetBorderRadius(outlineRadii, {width, width, width, width}, innerBox.w, innerBox.h);
+    drawRoundedShape(PaintOp::Border, outlineBox, outlineRadii, width, style.outline().color.resolvedColor(), style.outline().style, std::nullopt,
+                     &innerRadii);
 }
 
 void GeometryPainter::paintBox(const Rect& rect, const ComputedStyle& style, std::optional<TopBorderGap> topBorderGap,
                                const BackgroundPaintContext* backgroundContext) {
     const Rect box = rect;
-    const ResolvedBorderRadii borderRadii = resolveBorderRadii(box, style.borderRadius);
-    for (auto shadow = style.shadows.rbegin(); shadow != style.shadows.rend(); ++shadow)
+    const ResolvedBorderRadius borderRadii = resolveBorderRadius(box, style.borderRadius());
+    const BoxShadows& shadows = style.boxShadow();
+    for (auto shadow = shadows.rbegin(); shadow != shadows.rend(); ++shadow)
         if (!shadow->inset) drawShadow(rect, borderRadii, *shadow);
 
     const bool bordered = hasVisibleBorder(style);
     const BackgroundBox backgroundClip = style.backgroundLayers.empty() ? BackgroundBox::BorderBox : style.backgroundLayers.back().clip;
     const Rect fillBox = backgroundBox(box, style, backgroundClip);
-    const ResolvedBorderRadii fillRadii = backgroundBoxRadii(box, style, backgroundClip);
-    if (style.backgroundColor.a > 0.f) drawRoundedShape(PaintOp::Fill, fillBox, fillRadii, 0.f, style.backgroundColor);
-    if (style.backgroundGradient) drawRoundedGradient(fillBox, fillRadii, *style.backgroundGradient);
-    paintImageLayers(box, style, style.backgroundLayers, style.strokeColor, style.strokeGradient ? &*style.strokeGradient : nullptr,
-                     backgroundContext);
-    if (bordered) drawBorder(rect, style, topBorderGap);
-    const Rect insetBox = insetRect(box, style.borderWidth);
-    const ResolvedBorderRadii insetRadii = insetBorderRadii(borderRadii, style.borderWidth, insetBox.w, insetBox.h);
-    for (auto shadow = style.shadows.rbegin(); shadow != style.shadows.rend(); ++shadow)
+    const ResolvedBorderRadius fillRadii = backgroundBoxRadii(box, style, backgroundClip);
+    if (style.backgroundColor().resolvedColor().a > 0.f)
+        drawRoundedShape(PaintOp::Fill, fillBox, fillRadii, 0.f, style.backgroundColor().resolvedColor());
+    const auto* strokeColor = std::get_if<StyleColor>(&style.stroke);
+    const auto* strokeImage = std::get_if<StyleImage>(&style.stroke);
+    const Color transparent(0.f, 0.f, 0.f, 0.f);
+    paintImageLayers(box, style, style.backgroundLayers, strokeColor ? strokeColor->resolvedColor() : transparent,
+                     strokeImage ? strokeImage->gradient() : nullptr, backgroundContext);
+    if (!drawBorderImage(rect, style) && bordered) drawBorder(rect, style, topBorderGap);
+    const RectEdges<float> borderInsets = borderWidths(style);
+    const Rect insetBox = insetRect(box, borderInsets);
+    const ResolvedBorderRadius insetRadii = insetBorderRadius(borderRadii, borderInsets, insetBox.w, insetBox.h);
+    for (auto shadow = shadows.rbegin(); shadow != shadows.rend(); ++shadow)
         if (shadow->inset) drawShadow(insetBox, insetRadii, *shadow);
     drawOutline(rect, style);
 }

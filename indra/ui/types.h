@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include "platform/graphics/Color.h"
 
 namespace radia::ui {
 enum class LayoutDirection { LeftToRight, RightToLeft };
@@ -30,6 +31,8 @@ struct Vec2 {
     Vec2 operator+(const Vec2& rhs) const { return Vec2(x + rhs.x, y + rhs.y); }
     Vec2 operator-(const Vec2& rhs) const { return Vec2(x - rhs.x, y - rhs.y); }
     Vec2 operator*(float s) const { return Vec2(x * s, y * s); }
+
+    friend constexpr bool operator==(const Vec2&, const Vec2&) = default;
 };
 
 struct NativeScrollbarMetrics {
@@ -140,35 +143,21 @@ inline Rect clipToAxes(const Rect& inherited, const Rect& bounds, ClipAxes axes)
     return intersectRects(inherited, axisBounds);
 }
 
-struct Color {
-    float r = 1.f;
-    float g = 1.f;
-    float b = 1.f;
-    float a = 1.f;
+template<typename T> struct RectEdges {
+    T top{};
+    T right{};
+    T bottom{};
+    T left{};
 
-    Color() = default;
-    Color(float pr, float pg, float pb, float pa = 1.f) : r(pr), g(pg), b(pb), a(pa) {}
-
-    Color withAlpha(float alpha) const { return Color(r, g, b, alpha); }
-};
-
-struct EdgeInsets {
-    float top = 0.f;
-    float right = 0.f;
-    float bottom = 0.f;
-    float left = 0.f;
-
+    auto horizontal() const { return left + right; }
+    auto vertical() const { return top + bottom; }
     bool isUniform() const { return top == right && right == bottom && bottom == left; }
+    bool any() const { return top != T{} || right != T{} || bottom != T{} || left != T{}; }
 
-    float horizontal() const { return left + right; }
-    float vertical() const { return top + bottom; }
-
-    float maxValue() const { return std::max(std::max(top, right), std::max(bottom, left)); }
-
-    bool any() const { return maxValue() > 0.f; }
+    friend bool operator==(const RectEdges&, const RectEdges&) = default;
 };
 
-inline Rect insetRect(const Rect& rect, const EdgeInsets& insets) {
+inline Rect insetRect(const Rect& rect, const RectEdges<float>& insets) {
     return {
         rect.x + insets.left,
         rect.y + insets.bottom,
@@ -179,29 +168,4 @@ inline Rect insetRect(const Rect& rect, const EdgeInsets& insets) {
 
 enum class StrokeCap { Butt, Round, Square };
 
-enum class ElementState : uint16_t {
-    Default = 0,
-    Hovered = 1 << 0,
-    Active = 1 << 1,
-    Focused = 1 << 2,
-    Disabled = 1 << 3,
-    Checked = 1 << 4,
-    FocusVisible = 1 << 5,
-    Minimized = 1 << 6,
-    Invalid = 1 << 7,
-    Indeterminate = 1 << 8
-};
-
-inline uint16_t operator|(ElementState lhs, ElementState rhs) {
-    return static_cast<uint16_t>(lhs) | static_cast<uint16_t>(rhs);
-}
-
-inline bool hasState(uint16_t states, ElementState state) {
-    return (states & static_cast<uint16_t>(state)) != 0;
-}
-
-inline void setState(uint16_t& states, ElementState state, bool enabled) {
-    const uint16_t bit = static_cast<uint16_t>(state);
-    states = enabled ? static_cast<uint16_t>(states | bit) : static_cast<uint16_t>(states & ~bit);
-}
 } // namespace radia::ui

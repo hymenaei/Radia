@@ -10,6 +10,7 @@
 #include "dom/document.h"
 #include "dom/elementinternal.h"
 #include "dom/text.h"
+#include "Geometry.h"
 #include "html/element.h"
 #include "html/elementnames.h"
 #include "html/floater.h"
@@ -100,8 +101,8 @@ NativeScrollbarMetrics Surface::scrollbarMetrics(ScrollbarMode mode) const {
 ScrollGeometry Surface::scrollbarGeometry(const Element& element, const ComputedStyle& style) const {
     const ScrollbarMode mode = mScrollLayoutOptions.scrollbarMode;
     const NativeScrollbarMetrics metrics = scrollbarMetrics(mode);
-    const float widthScale = style.scrollbarWidth == ScrollbarWidth::Thin ? .5f : 1.f;
-    const bool enabled = style.scrollbarWidth != ScrollbarWidth::NoneValue;
+    const float widthScale = style.scrollbarWidth() == ScrollbarWidth::Thin ? .5f : 1.f;
+    const bool enabled = style.scrollbarWidth() != ScrollbarWidth::NoneValue;
     const auto visible = [enabled](Overflow overflow, float maximum) {
         return enabled && (overflow == Overflow::Scroll || (overflow == Overflow::Auto && maximum > 0.f));
     };
@@ -115,9 +116,9 @@ ScrollGeometry Surface::scrollbarGeometry(const Element& element, const Computed
     input.minimumThumbLength = metrics.minimumThumbLength;
     input.thumbPadding = metrics.thumbPadding * widthScale;
     input.horizontal = {element.scrollLeft(), element.scrollWidth(), element.clientWidth(),
-                        visible(style.overflowX, element.scrollMetrics().maxScrollLeft)};
+                        visible(style.overflowX(), element.scrollMetrics().maxScrollLeft)};
     input.vertical = {element.scrollTop(), element.scrollHeight(), element.clientHeight(),
-                      visible(style.overflowY, element.scrollMetrics().maxScrollTop)};
+                      visible(style.overflowY(), element.scrollMetrics().maxScrollTop)};
     return makeScrollGeometry(input);
 }
 
@@ -270,24 +271,28 @@ bool Surface::updateLayoutIfNeeded() {
 
         const ComputedStyle& rootStyle = styles.style(root);
         if (!root.isDisplayed(rootStyle)) return;
-        const bool bodyRoot = root.elementName() == kBodyTag.localName;
+        const bool bodyRoot = root.elementName() == HTMLTagName(HTMLTag::Body);
         const Vec2 desired = root.desiredSize();
-        const float width = rootStyle.width.isAuto() ? ((rootStyle.display == DisplayMode::Inline
-                                                         || rootStyle.display == DisplayMode::InlineBlock
-                                                         || rootStyle.display == DisplayMode::InlineFlex
-                                                         || rootStyle.display == DisplayMode::InlineGrid)
-                                                            ? desired.x
-                                                            : bodyRoot ? std::max(0.f, mViewport.w - rootStyle.margin.horizontal())
-                                                                       : mViewport.w)
-                                                     : rootStyle.width.resolve(desired.x, mViewport.w);
-        const float height = rootStyle.height.isAuto() ? (bodyRoot ? std::max(0.f, mViewport.h - rootStyle.margin.vertical()) : desired.y)
-                                                       : rootStyle.height.resolve(desired.y, mViewport.h);
-        const float x = rootStyle.left ? rootStyle.left->resolve(mViewport.w)
-            : rootStyle.right          ? mViewport.w - rootStyle.right->resolve(mViewport.w) - width
-                                       : rootStyle.margin.left.fixedPixels();
-        const float y = rootStyle.top ? mViewport.h - rootStyle.top->resolve(mViewport.h) - height
-            : rootStyle.bottom        ? rootStyle.bottom->resolve(mViewport.h)
-                                      : mViewport.h - height - rootStyle.margin.top.fixedPixels();
+        const float width = rootStyle.width().isAuto() ? ((rootStyle.display() == Display::Inline
+                                                           || rootStyle.display() == Display::InlineBlock
+                                                           || rootStyle.display() == Display::InlineFlex
+                                                           || rootStyle.display() == Display::InlineGrid)
+                                                              ? desired.x
+                                                              : bodyRoot ? std::max(0.f, mViewport.w - horizontalMargin(rootStyle.margin()))
+                                                                         : mViewport.w)
+                                                       : rootStyle.width().resolve(desired.x, mViewport.w);
+        const float height = rootStyle.height().isAuto() ? (bodyRoot ? std::max(0.f, mViewport.h - verticalMargin(rootStyle.margin())) : desired.y)
+                                                         : rootStyle.height().resolve(desired.y, mViewport.h);
+        const auto& left = rootStyle.left();
+        const auto& right = rootStyle.right();
+        const auto& top = rootStyle.top();
+        const auto& bottom = rootStyle.bottom();
+        const float x = left ? left->resolve(mViewport.w)
+            : right          ? mViewport.w - right->resolve(mViewport.w) - width
+                             : rootStyle.margin().left.fixedPixels();
+        const float y = top ? mViewport.h - top->resolve(mViewport.h) - height
+            : bottom        ? bottom->resolve(mViewport.h)
+                            : mViewport.h - height - rootStyle.margin().top.fixedPixels();
         layout_detail::setArrangedRect(root, {x, y, width, height});
         LayoutEngine::layout(root, styles, mScrollLayoutOptions);
     };

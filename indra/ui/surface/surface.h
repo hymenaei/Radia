@@ -237,7 +237,7 @@ private:
     const TextMetrics& mTextMetrics;
     mutable std::unique_ptr<StylePass> mStylePass;
     ScrollLayoutOptions mScrollLayoutOptions;
-    ColorSchemeContext mColorSchemeContext{ColorScheme::Dark};
+    ColorSchemeContext mColorSchemeContext{ColorSchemeMode::Dark};
     Rect mViewport;
     Element* mHovered = nullptr;
     Element* mPressed = nullptr;
@@ -248,6 +248,7 @@ private:
     int mPressedKey = 0;
     uint8_t mPressedClickCount = 0;
     bool mPointerPositionKnown = false;
+    bool mSuppressMouseEventsUntilPointerUp = false;
     bool mHitTestDirty = false;
     bool mTabKeyHandled = false;
     bool mDispatchingScrollNotifications = false;

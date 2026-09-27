@@ -5,10 +5,10 @@
 
 #pragma once
 
-#include <cstdint>
 #include <string_view>
 #include <utility>
 #include <vector>
+#include "CSSPseudoSelectors.h"
 #include "style/computedstyle.h"
 #include "types.h"
 
@@ -18,25 +18,13 @@ class HTMLInputElement;
 class LayoutEngine;
 class StylePass;
 
-enum class PseudoElementType : uint8_t { Checkmark, SliderTrack, SliderFill, SliderThumb };
-
-constexpr std::string_view pseudoElementName(PseudoElementType type) {
-    switch (type) {
-        case PseudoElementType::Checkmark: return "checkmark";
-        case PseudoElementType::SliderTrack: return "slider-track";
-        case PseudoElementType::SliderFill: return "slider-fill";
-        case PseudoElementType::SliderThumb: return "slider-thumb";
-    }
-    return {};
-}
-
 class PseudoElement final {
 public:
-    PseudoElement(PseudoElementType type, Element& originatingElement, PseudoElement* parent = nullptr)
+    PseudoElement(CSSPseudoElement type, Element& originatingElement, PseudoElement* parent = nullptr)
         : mType(type), mOriginatingElement(&originatingElement), mParent(parent) {}
 
-    PseudoElementType type() const noexcept { return mType; }
-    std::string_view name() const noexcept { return pseudoElementName(mType); }
+    CSSPseudoElement type() const noexcept { return mType; }
+    std::string_view name() const noexcept { return cssPseudoElementName(mType); }
     const Element& originatingElement() const noexcept { return *mOriginatingElement; }
     PseudoElement* parentPseudoElement() noexcept { return mParent; }
     const PseudoElement* parentPseudoElement() const noexcept { return mParent; }
@@ -61,7 +49,7 @@ private:
         for (PseudoElement* pseudoElement : mGenerated)
             if (pseudoElement) pseudoElement->translate(delta);
     }
-    PseudoElementType mType;
+    CSSPseudoElement mType;
     Element* mOriginatingElement = nullptr;
     PseudoElement* mParent = nullptr;
     std::vector<PseudoElement*> mGenerated;

@@ -108,6 +108,7 @@ if(WINDOWS)
         llkeyboardwin32.cpp
         lldragdropwin32.cpp
     )
+    target_link_libraries(llwindow dwrite)
   endif()
   target_sources(llwindow
     PRIVATE

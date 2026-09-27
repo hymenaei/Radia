@@ -9,6 +9,7 @@
 #include "html/elementfactory.h"
 #include "html/elementnames.h"
 #include "layout/engine.h"
+#include "Geometry.h"
 #include "paint/paintcontext.h"
 #include "resource/elementdefinition.h"
 #include "style/stylepass.h"
@@ -18,13 +19,17 @@
 namespace radia::ui {
 using detail::HTMLElementFactory;
 
-HTMLLegendElement::HTMLLegendElement() : HTMLElement(kLegendTag.localName) {}
+HTMLLegendElement::HTMLLegendElement() : HTMLElement(HTMLTagName(HTMLTag::Legend)) {}
 
 void HTMLLegendElement::constrainResolvedStyle(ComputedStyle& style) const {
-    if (style.alignSelf.position == ItemPosition::Auto) style.alignSelf.position = ItemPosition::Start;
+    SelfAlignmentData alignSelf = style.alignSelf();
+    if (alignSelf.position == ItemPosition::Auto) {
+        alignSelf.position = ItemPosition::Start;
+        style.setAlignSelf(alignSelf);
+    }
 }
 
-HTMLFieldsetElement::HTMLFieldsetElement() : HTMLElement(kFieldsetTag.localName) {}
+HTMLFieldsetElement::HTMLFieldsetElement() : HTMLElement(HTMLTagName(HTMLTag::Fieldset)) {}
 
 void HTMLFieldsetElement::paint(PaintContext& context, const ComputedStyle& style, float) const {
     context.paintBox(rect(), style, topBorderGap());
@@ -37,7 +42,7 @@ bool HTMLFieldsetElement::hasLayoutGapBetween(const Element& first, const Elemen
 float HTMLFieldsetElement::layoutOverlapBetween(const Element& first, const Element&, const ComputedStyle& style) const {
     if (!isDirectLegend(first)) return 0.f;
 
-    return std::max(0.f, style.padding.top + first.desiredSize().y * 0.5f - style.borderWidth.top * 0.5f);
+    return std::max(0.f, paddingPixels(style).top + first.desiredSize().y * 0.5f - borderWidths(style).top * 0.5f);
 }
 
 void HTMLFieldsetElement::onArranged(const ComputedStyle& style) {
@@ -45,13 +50,13 @@ void HTMLFieldsetElement::onArranged(const ComputedStyle& style) {
     if (!legend || !isLegendVisible(*legend)) return;
 
     const float legendCenter = (legend->rect().top() + legend->rect().bottom()) * 0.5f;
-    const float borderCenter = rect().top() - style.borderWidth.top * 0.5f;
+    const float borderCenter = rect().top() - borderWidths(style).top * 0.5f;
     const float topDelta = borderCenter - legendCenter;
     if (topDelta != 0.f) translateChild(*legend, {0.f, topDelta});
 }
 
 bool HTMLFieldsetElement::isDirectLegend(const Element& element) {
-    return element.elementName() == kLegendTag.localName;
+    return element.elementName() == HTMLTagName(HTMLTag::Legend);
 }
 
 Element* HTMLFieldsetElement::directLegend() {
@@ -85,10 +90,10 @@ std::optional<TopBorderGap> HTMLFieldsetElement::topBorderGap() const {
 
 ResourceElementDefinition detail::ElementDefinitions::fieldset() {
     ResourceElementDefinition definition;
-    definition.elementName = kFieldsetTag.localName;
+    definition.elementName = HTMLTagName(HTMLTag::Fieldset);
 
     ScopedElementDefinition legend;
-    legend.elementName = kLegendTag.localName;
+    legend.elementName = HTMLTagName(HTMLTag::Legend);
     legend.acceptedTags = {
         HTMLTag::Abbr, HTMLTag::B,  HTMLTag::Br, HTMLTag::Button, HTMLTag::Cite,   HTMLTag::Code, HTMLTag::Dfn,
         HTMLTag::Del,  HTMLTag::Em, HTMLTag::I,  HTMLTag::Input,  HTMLTag::Ins,    HTMLTag::Kbd,  HTMLTag::Label,
@@ -97,23 +102,23 @@ ResourceElementDefinition detail::ElementDefinitions::fieldset() {
     legend.create = [](Element& fieldset, ElementBuildContext& context, const std::string& sourceName, std::size_t line,
                        std::size_t column) -> Element* {
         for (Element* child : fieldset.children()) {
-            if (child->elementName() != kLegendTag.localName) continue;
+            if (child->elementName() != HTMLTagName(HTMLTag::Legend)) continue;
             context.error("layout.fieldset.legend_duplicate", "A fieldset accepts only one direct legend.", sourceName, line, column);
             return child;
         }
 
-        auto legend = HTMLElementFactory::create(kLegendTag.localName);
+        auto legend = HTMLElementFactory::create(HTMLTagName(HTMLTag::Legend));
         Element* resultElement = legend.get();
         fieldset.append(std::move(legend));
         return resultElement;
     };
-    definition.contentBehavior.scopedElements.emplace(kLegendTag.localName, std::move(legend));
+    definition.contentBehavior.scopedElements.emplace(HTMLTagName(HTMLTag::Legend), std::move(legend));
     return definition;
 }
 
 ResourceElementDefinition detail::ElementDefinitions::legend() {
     ResourceElementDefinition definition;
-    definition.elementName = kLegendTag.localName;
+    definition.elementName = HTMLTagName(HTMLTag::Legend);
     definition.scopedOnly = true;
     return definition;
 }

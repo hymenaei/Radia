@@ -17,7 +17,7 @@
 
 namespace radia::ui::detail {
 std::unique_ptr<Element> HTMLElementFactory::create(std::string_view localName) {
-    const HTMLTag tag = lookupHTMLTag(localName);
+    const HTMLTag tag = findHTMLTag(localName);
     switch (tag) {
         case HTMLTag::Button: return std::unique_ptr<HTMLButtonElement>(new HTMLButtonElement());
         case HTMLTag::Fieldset: return std::unique_ptr<HTMLFieldsetElement>(new HTMLFieldsetElement());
@@ -29,7 +29,7 @@ std::unique_ptr<Element> HTMLElementFactory::create(std::string_view localName) 
         case HTMLTag::Close: return std::unique_ptr<HTMLCloseButtonElement>(new HTMLCloseButtonElement());
         case HTMLTag::Panel: return std::unique_ptr<HTMLPanelElement>(new HTMLPanelElement());
         case HTMLTag::Unknown: return nullptr;
-        default: return std::unique_ptr<HTMLElement>(new HTMLElement(htmlTagName(tag)));
+        default: return std::unique_ptr<HTMLElement>(new HTMLElement(HTMLTagName(tag)));
     }
 }
 } // namespace radia::ui::detail

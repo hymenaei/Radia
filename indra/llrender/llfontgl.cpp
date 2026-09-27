@@ -132,6 +132,10 @@ bool LLFontGL::loadFace(const std::string& filename, F32 point_size, const F32 v
     return mFontFreetype->loadFace(filename, point_size, vert_dpi, horz_dpi, is_fallback, face_n, hinting, flags, var_axes);
 }
 
+void LLFontGL::addFallbackFont(const LLFontGL& fallback) const {
+    if (mFontFreetype.notNull() && fallback.mFontFreetype.notNull()) mFontFreetype->addFallbackFont(fallback.mFontFreetype);
+}
+
 S32 LLFontGL::getNumFaces(const std::string& filename)
 {
     // Pure file probe — no instance state involved, so don't allocate a

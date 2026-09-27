@@ -149,6 +149,7 @@ input[switch] {
     &::slider-track {
         display: grid;
         grid-area: 1/1;
+        height: 100%;
         background-color: #98989d;
         border-radius: var(--radius-full);
     }
@@ -156,6 +157,8 @@ input[switch] {
     &:checked::slider-track { background-color: var(--accent); }
     &::slider-fill { visibility: hidden; }
     &::slider-thumb {
+        grid-area: 1/1;
+        align-self: stretch;
         background-color: #ffffff;
         size: auto 26px;
         margin: 2px;

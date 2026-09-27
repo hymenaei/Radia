@@ -136,7 +136,7 @@ private:
         if (mNodeStack.empty() && (mDocument->root || mRootClosed)) return fail("Radia UI HTML must contain exactly one root element.", tagStart);
 
         auto node = std::make_unique<MutableSourceNode>();
-        node->tag = lookupHTMLTag(authoredName);
+        node->tag = findHTMLTag(authoredName);
         node->authoredName = authoredName;
         node->source.begin = tagLocation;
         if (node->tag == HTMLTag::Unknown)
@@ -219,7 +219,7 @@ private:
             mNodeStack.back()->content.push_back(std::move(content));
         }
 
-        if (!selfClosing && !isVoidHTMLTag(lookupHTMLTag(authoredName))) mNodeStack.push_back(next);
+        if (!selfClosing && !isVoidHTMLTag(findHTMLTag(authoredName))) mNodeStack.push_back(next);
         else if (mNodeStack.empty()) mRootClosed = true;
         consumeTo(cursor);
         return true;

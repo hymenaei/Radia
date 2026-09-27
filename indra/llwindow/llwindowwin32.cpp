@@ -57,6 +57,8 @@
 #include <commdlg.h>
 #include <WinUser.h>
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <mapi.h>
 #include <process.h>    // for _spawn
@@ -69,12 +71,15 @@
 #include <future>
 #include <limits>
 #include <memory>
+#include <new>
 #include <optional>
 #include <sstream>
+#include <string>
 #include <utility>                  // std::pair
 
 #include <d3d9.h>
 #include <d3d11.h>
+#include <dwrite_2.h>
 #include <dxgi1_4.h>
 #include <timeapi.h>
 
@@ -87,6 +92,7 @@
 #include <Uxtheme.h>
 #include <dwmapi.h> // needed for DwmSetWindowAttribute to set window theme
 #include <shellscalingapi.h>
+#include <wrl/client.h>
 
 const S32   MAX_MESSAGE_PER_UPDATE = 20;
 const S32   BITS_PER_PIXEL = 32;
@@ -5293,10 +5299,158 @@ std::vector<std::string> LLWindowWin32::getDynamicFallbackFontList()
     return std::vector<std::string>();
 }
 
-LLFontFallbackMatch LLWindowWin32::findFallbackFontForChar(llwchar wch)
-{
-    // Not implemented on Windows; would use DirectWrite (IDWriteFontFallback::MapCharacters).
-    return LLFontFallbackMatch();
+namespace {
+using Microsoft::WRL::ComPtr;
+
+class SingleCharacterTextSource final : public IDWriteTextAnalysisSource {
+public:
+    SingleCharacterTextSource(const WCHAR* text, UINT32 length) : mText(text, text + length) {
+        std::array<WCHAR, LOCALE_NAME_MAX_LENGTH> localeName{};
+        const int localeLength = GetUserDefaultLocaleName(localeName.data(), static_cast<int>(localeName.size()));
+        mLocaleName = localeLength > 1 ? std::wstring(localeName.data(), static_cast<std::size_t>(localeLength - 1)) : L"en-us";
+    }
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
+        if (!object) return E_POINTER;
+        *object = nullptr;
+        if (iid != __uuidof(IUnknown) && iid != __uuidof(IDWriteTextAnalysisSource)) return E_NOINTERFACE;
+        *object = static_cast<IDWriteTextAnalysisSource*>(this);
+        AddRef();
+        return S_OK;
+    }
+
+    ULONG STDMETHODCALLTYPE AddRef() override { return mReferenceCount.fetch_add(1, std::memory_order_relaxed) + 1; }
+
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG referenceCount = mReferenceCount.fetch_sub(1, std::memory_order_acq_rel) - 1;
+        if (referenceCount == 0) delete this;
+        return referenceCount;
+    }
+
+    HRESULT STDMETHODCALLTYPE GetTextAtPosition(UINT32 position, const WCHAR** text, UINT32* length) override {
+        if (!text || !length) return E_POINTER;
+        if (position >= mText.size()) {
+            *text = nullptr;
+            *length = 0;
+            return S_OK;
+        }
+        *text = mText.data() + position;
+        *length = static_cast<UINT32>(mText.size() - position);
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE GetTextBeforePosition(UINT32 position, const WCHAR** text, UINT32* length) override {
+        if (!text || !length) return E_POINTER;
+        const UINT32 beforeLength = std::min(position, static_cast<UINT32>(mText.size()));
+        *text = beforeLength == 0 ? nullptr : mText.data();
+        *length = beforeLength;
+        return S_OK;
+    }
+
+    DWRITE_READING_DIRECTION STDMETHODCALLTYPE GetParagraphReadingDirection() override { return DWRITE_READING_DIRECTION_LEFT_TO_RIGHT; }
+
+    HRESULT STDMETHODCALLTYPE GetLocaleName(UINT32 position, UINT32* length, const WCHAR** localeName) override {
+        if (!length || !localeName) return E_POINTER;
+        if (position >= mText.size()) {
+            *length = 0;
+            *localeName = nullptr;
+            return S_OK;
+        }
+        *length = static_cast<UINT32>(mText.size() - position);
+        *localeName = mLocaleName.c_str();
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE GetNumberSubstitution(UINT32 position, UINT32* length, IDWriteNumberSubstitution** substitution) override {
+        if (!length || !substitution) return E_POINTER;
+        *length = position >= mText.size() ? 0 : static_cast<UINT32>(mText.size() - position);
+        *substitution = nullptr;
+        return S_OK;
+    }
+
+private:
+    std::atomic<ULONG> mReferenceCount{1};
+    std::wstring mText;
+    std::wstring mLocaleName;
+};
+} // namespace
+
+LLFontFallbackMatch LLWindowWin32::findFallbackFontForChar(llwchar wch) {
+    LLFontFallbackMatch result;
+    const U32 codepoint = static_cast<U32>(wch);
+    if (codepoint == 0 || codepoint > 0x10FFFF || (codepoint >= 0xD800 && codepoint <= 0xDFFF)) return result;
+
+    std::array<WCHAR, 2> text{};
+    UINT32 textLength = 1;
+    if (codepoint <= 0xFFFF) {
+        text[0] = static_cast<WCHAR>(codepoint);
+    } else {
+        const U32 supplementary = codepoint - 0x10000;
+        text[0] = static_cast<WCHAR>(0xD800 + (supplementary >> 10));
+        text[1] = static_cast<WCHAR>(0xDC00 + (supplementary & 0x3FF));
+        textLength = 2;
+    }
+
+    ComPtr<IUnknown> factoryUnknown;
+    if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory2), factoryUnknown.GetAddressOf()))) return result;
+
+    ComPtr<IDWriteFactory2> factory;
+    if (FAILED(factoryUnknown.As(&factory))) return result;
+
+    ComPtr<IDWriteFontFallback> fallback;
+    if (FAILED(factory->GetSystemFontFallback(&fallback))) return result;
+
+    ComPtr<IDWriteTextAnalysisSource> analysisSource;
+    analysisSource.Attach(new (std::nothrow) SingleCharacterTextSource(text.data(), textLength));
+    if (!analysisSource) return result;
+
+    UINT32 mappedLength = 0;
+    FLOAT scale = 1.f;
+    ComPtr<IDWriteFont> font;
+    if (FAILED(fallback->MapCharacters(analysisSource.Get(), 0, textLength, nullptr, nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+                                       DWRITE_FONT_STRETCH_NORMAL, &mappedLength, &font, &scale))
+        || mappedLength != textLength
+        || !font)
+        return result;
+
+    ComPtr<IDWriteFontFace> face;
+    if (FAILED(font->CreateFontFace(&face)) || !face || face->GetIndex() > static_cast<UINT32>(std::numeric_limits<S32>::max())) return result;
+
+    UINT32 fileCount = 0;
+    if (FAILED(face->GetFiles(&fileCount, nullptr)) || fileCount != 1) return result;
+
+    ComPtr<IDWriteFontFile> file;
+    if (FAILED(face->GetFiles(&fileCount, file.GetAddressOf())) || !file) return result;
+
+    ComPtr<IDWriteFontFileLoader> loader;
+    if (FAILED(file->GetLoader(&loader))) return result;
+    ComPtr<IDWriteLocalFontFileLoader> localLoader;
+    if (FAILED(loader.As(&localLoader))) return result;
+
+    const void* referenceKey = nullptr;
+    UINT32 referenceKeySize = 0;
+    if (FAILED(file->GetReferenceKey(&referenceKey, &referenceKeySize))) return result;
+
+    UINT32 pathLength = 0;
+    if (FAILED(localLoader->GetFilePathLengthFromKey(referenceKey, referenceKeySize, &pathLength))
+        || pathLength == 0
+        || pathLength >= static_cast<UINT32>(std::numeric_limits<int>::max()))
+        return result;
+
+    std::wstring widePath(static_cast<std::size_t>(pathLength) + 1, L'\0');
+    if (FAILED(localLoader->GetFilePathFromKey(referenceKey, referenceKeySize, widePath.data(), pathLength + 1))) return result;
+
+    const int utf8Length =
+        WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, widePath.data(), static_cast<int>(pathLength), nullptr, 0, nullptr, nullptr);
+    if (utf8Length <= 0) return result;
+
+    result.mPath.resize(static_cast<std::size_t>(utf8Length));
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, widePath.data(), static_cast<int>(pathLength), result.mPath.data(), utf8Length, nullptr,
+                            nullptr)
+        != utf8Length)
+        return LLFontFallbackMatch();
+    result.mFaceIndex = static_cast<S32>(face->GetIndex());
+    return result;
 }
 #endif // LL_WINDOWS
 

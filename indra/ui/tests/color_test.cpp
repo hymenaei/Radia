@@ -10,14 +10,14 @@
 
 namespace {
 using radia::ui::Color;
-using radia::ui::parseColor;
+using radia::ui::consumeColor;
 using ::testing::Message;
 
 void expectColor(const std::string& source, const Color& expected) {
     constexpr float kColorComponentTolerance = 1.0e-4f;
     SCOPED_TRACE(Message() << "color notation: " << source);
 
-    const auto parsed = parseColor(source);
+    const auto parsed = consumeColor(source);
     ASSERT_TRUE(parsed.has_value());
 
     EXPECT_NEAR(parsed->r, expected.r, kColorComponentTolerance);
@@ -88,6 +88,6 @@ TEST(ColorTest, RejectsInvalidSyntax) {
     for (const char* source : {"##ff880080", "rgba(255 128 0 / 50%)", "hsla(120 100% 50% / .5)", "#ggg", "rgb(1, 2, 3 / .5)", "rgb(1, 2, 3,)",
                                "hsl(1, 2%, 3%,)", "hsl(0 1 1)", "color(1 2 3)", "lab(50%, 0, 0)"}) {
         SCOPED_TRACE(Message() << "unsupported color notation: " << source);
-        EXPECT_FALSE(parseColor(source).has_value());
+        EXPECT_FALSE(consumeColor(source).has_value());
     }
 }

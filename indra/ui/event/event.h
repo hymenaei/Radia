@@ -14,6 +14,7 @@
 #include <type_traits>
 #include <utility>
 #include <variant>
+#include "EventTypes.h"
 #include "types.h"
 
 namespace radia::ui {
@@ -48,19 +49,22 @@ struct KeyEvent {
     bool repeated = false;
 };
 
-inline constexpr std::string_view kClickEvent = "click";
-inline constexpr std::string_view kDoubleClickEvent = "dblclick";
-inline constexpr std::string_view kInputEvent = "input";
-inline constexpr std::string_view kChangeEvent = "change";
-inline constexpr std::string_view kPointerDownEvent = "pointerdown";
-inline constexpr std::string_view kPointerUpEvent = "pointerup";
-inline constexpr std::string_view kPointerMoveEvent = "pointermove";
-inline constexpr std::string_view kContextMenuEvent = "contextmenu";
-inline constexpr std::string_view kWheelEvent = "wheel";
-inline constexpr std::string_view kScrollEvent = "scroll";
-inline constexpr std::string_view kKeyDownEvent = "keydown";
-inline constexpr std::string_view kKeyUpEvent = "keyup";
-inline constexpr std::string_view kCharacterInputEvent = "characterinput";
+inline constexpr std::string_view kClickEvent = eventTypeName(EventType::Click);
+inline constexpr std::string_view kDoubleClickEvent = eventTypeName(EventType::DoubleClick);
+inline constexpr std::string_view kMouseDownEvent = eventTypeName(EventType::MouseDown);
+inline constexpr std::string_view kMouseUpEvent = eventTypeName(EventType::MouseUp);
+inline constexpr std::string_view kMouseMoveEvent = eventTypeName(EventType::MouseMove);
+inline constexpr std::string_view kInputEvent = eventTypeName(EventType::Input);
+inline constexpr std::string_view kChangeEvent = eventTypeName(EventType::Change);
+inline constexpr std::string_view kPointerDownEvent = eventTypeName(EventType::PointerDown);
+inline constexpr std::string_view kPointerUpEvent = eventTypeName(EventType::PointerUp);
+inline constexpr std::string_view kPointerMoveEvent = eventTypeName(EventType::PointerMove);
+inline constexpr std::string_view kContextMenuEvent = eventTypeName(EventType::ContextMenu);
+inline constexpr std::string_view kWheelEvent = eventTypeName(EventType::Wheel);
+inline constexpr std::string_view kScrollEvent = eventTypeName(EventType::Scroll);
+inline constexpr std::string_view kKeyDownEvent = eventTypeName(EventType::KeyDown);
+inline constexpr std::string_view kKeyUpEvent = eventTypeName(EventType::KeyUp);
+inline constexpr std::string_view kCharacterInputEvent = eventTypeName(EventType::CharacterInput);
 
 class EventHandler final {
 public:
@@ -146,6 +150,9 @@ private:
             || mType == kPointerDownEvent
             || mType == kPointerUpEvent
             || mType == kPointerMoveEvent
+            || mType == kMouseDownEvent
+            || mType == kMouseUpEvent
+            || mType == kMouseMoveEvent
             || mType == kContextMenuEvent)
             return std::holds_alternative<PointerEvent>(mPayload);
         if (mType == kInputEvent || mType == kChangeEvent) return std::holds_alternative<bool>(mPayload);
@@ -154,7 +161,6 @@ private:
         if (mType == kCharacterInputEvent) return std::holds_alternative<unsigned int>(mPayload);
         return true;
     }
-
     void setPhase(EventPhase phase) noexcept { mPhase = phase; }
     void setCurrentTarget(Element* target) noexcept {
         mCurrentTarget = target;

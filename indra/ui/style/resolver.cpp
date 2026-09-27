@@ -15,27 +15,60 @@
 #include "css/syntax.h"
 #include "dom/element.h"
 #include "html/elementnames.h"
+#include "html/floater.h"
+#include "html/input.h"
 #include "style/property.h"
 
 namespace radia::ui {
 namespace {
-bool matchesState(ElementState state, uint16_t states, const Element* target) {
-    if (state == ElementState::Disabled) return target ? target->disabled() : hasState(states, state);
-    return hasState(states, state);
+bool isChecked(const Element& element) {
+    const auto* input = dynamic_cast<const HTMLInputElement*>(&element);
+    return input && input->checked();
 }
 
-bool matchesStateMask(std::uint16_t mask, uint16_t states, const Element* target) {
-    if ((mask & static_cast<std::uint16_t>(ElementState::FocusVisible)) != 0
-        && (!hasState(states, ElementState::Focused) || !hasState(states, ElementState::FocusVisible)))
-        return false;
-    for (const ElementState state : {ElementState::Hovered, ElementState::Active, ElementState::Focused, ElementState::Disabled,
-                                     ElementState::Checked, ElementState::Minimized, ElementState::Invalid, ElementState::Indeterminate})
-        if ((mask & static_cast<std::uint16_t>(state)) != 0 && !matchesState(state, states, target)) return false;
-    return true;
+bool isIndeterminate(const Element& element) {
+    const auto* input = dynamic_cast<const HTMLInputElement*>(&element);
+    return input && (input->indeterminate() || input->radioGroupIsIndeterminate());
 }
 
-bool matchesDirection(const std::optional<LayoutDirection>& selectorDirection, LayoutDirection direction) {
-    return !selectorDirection || *selectorDirection == direction;
+bool isInvalid(const Element& element) {
+    const auto* input = dynamic_cast<const HTMLInputElement*>(&element);
+    return input && input->invalid();
+}
+
+bool isMinimized(const Element& element) {
+    const auto* floater = dynamic_cast<const HTMLFloaterElement*>(&element);
+    return floater && floater->minimized();
+}
+
+bool matchesPseudoClass(CSSPseudoClass pseudoClass, const Element* element, std::initializer_list<CSSPseudoClass> matchingPseudoClasses) {
+    if (pseudoClass == CSSPseudoClass::Host) return false;
+    const auto wasRequested = [matchingPseudoClasses](CSSPseudoClass candidate) {
+        return std::find(matchingPseudoClasses.begin(), matchingPseudoClasses.end(), candidate) != matchingPseudoClasses.end();
+    };
+    if (!element) {
+        if (pseudoClass == CSSPseudoClass::Root) return true;
+        if (pseudoClass == CSSPseudoClass::FocusVisible) return wasRequested(CSSPseudoClass::Focus) && wasRequested(pseudoClass);
+        return wasRequested(pseudoClass);
+    }
+    if (wasRequested(pseudoClass)) return true;
+    switch (pseudoClass) {
+        case CSSPseudoClass::Active: return element->active();
+        case CSSPseudoClass::Checked: return isChecked(*element);
+        case CSSPseudoClass::Disabled: return element->disabled();
+        case CSSPseudoClass::Dir: return false;
+        case CSSPseudoClass::Focus: return element->focused();
+        case CSSPseudoClass::FocusVisible: return element->focused() && element->focusVisible();
+        case CSSPseudoClass::Hover: return element->hovered();
+        case CSSPseudoClass::Indeterminate: return isIndeterminate(*element);
+        case CSSPseudoClass::Invalid: return isInvalid(*element);
+        case CSSPseudoClass::Minimized: return isMinimized(*element);
+        case CSSPseudoClass::Root: return element->parentElement() == nullptr || element->idScopeRoot();
+        case CSSPseudoClass::Is:
+        case CSSPseudoClass::Where: return false;
+        case CSSPseudoClass::Host: return false;
+    }
+    return false;
 }
 
 bool matchesAttribute(const StyleSelector& selector, const Element* element) {
@@ -76,39 +109,20 @@ bool matchesAttribute(const StyleSelector& selector, const Element* element) {
     });
 }
 
-bool matchesRoot(const StyleSelector& selector, const Element* element) {
-    return !selector.root || !element || element->parentElement() == nullptr || element->idScopeRoot();
-}
-
 bool matchesSelector(const StyleSelector& selector, const std::string& element, const std::string& id, const std::set<std::string>& classes,
-                     uint16_t ownerStates, std::string_view pseudoElement, const Element* target, const std::vector<std::string>* inlineAncestors,
-                     LayoutDirection direction);
+                     std::initializer_list<CSSPseudoClass> matchingPseudoClasses, std::string_view pseudoElement, const Element* target,
+                     const std::vector<std::string>* inlineAncestors);
 
-bool matchesRule(const StyleRule& rule, const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t ownerStates,
-                 std::string_view pseudoElement, const Element* target, const std::vector<std::string>* inlineAncestors, LayoutDirection direction);
+bool matchesRule(const StyleRule& rule, const std::string& element, const std::string& id, const std::set<std::string>& classes,
+                 std::initializer_list<CSSPseudoClass> matchingPseudoClasses, std::string_view pseudoElement, const Element* target,
+                 const std::vector<std::string>* inlineAncestors);
 
-std::uint16_t selectorStateMask(const StyleSelector& selector);
+bool selectorHasPseudoClass(const StyleSelector& selector, CSSPseudoClass pseudoClass);
 
-bool selectorCanBeOwnedBy(const StyleSelector& selector, const Element& element, ElementState state) {
-    const std::uint16_t stateBit = static_cast<std::uint16_t>(state);
-    if ((selector.stateMask & stateBit) != 0
-        && matchesSelector(selector, element.elementName(), element.id(), element.classes(), element.states(), selector.pseudoElement, &element,
-                           nullptr, LayoutDirection::LeftToRight))
-        return true;
-
-    for (const auto& selectorFunction : selector.selectorFunctions)
-        for (const StyleRule& argument : selectorFunction->arguments)
-            for (const StyleSelector& component : argument.selectors)
-                if ((selectorStateMask(component) & stateBit) != 0 && selectorCanBeOwnedBy(component, element, state)) return true;
-    return false;
-}
-
-std::optional<std::size_t> stateIndex(ElementState state) {
-    const std::uint16_t bit = static_cast<std::uint16_t>(state);
-    if (bit == 0 || (bit & static_cast<std::uint16_t>(bit - 1)) != 0) return std::nullopt;
-    std::size_t index = 0;
-    for (std::uint16_t value = bit; value > 1; value >>= 1) ++index;
-    return index;
+bool selectorCanBeOwnedBy(const StyleSelector& selector, const Element& element, CSSPseudoClass pseudoClass) {
+    return selectorHasPseudoClass(selector, pseudoClass)
+        && matchesSelector(selector, element.elementName(), element.id(), element.classes(), {pseudoClass}, selector.pseudoElement, &element,
+                           nullptr);
 }
 
 StyleSpecificity specificity(const StyleRule& rule);
@@ -116,21 +130,21 @@ StyleSpecificity specificity(const StyleRule& rule);
 StyleSpecificity specificity(const StyleSelector& selector) {
     StyleSpecificity result{
         static_cast<std::uint32_t>(selector.ids.size()),
-        static_cast<std::uint32_t>(selector.classNames.size()
-                                   + selector.attributes.size()
-                                   + selector.stateSpecificity
-                                   + selector.rootSpecificity
-                                   + selector.directionSpecificity),
+        static_cast<std::uint32_t>(selector.classNames.size() + selector.attributes.size() + selector.pseudoClasses.size()),
         static_cast<std::uint32_t>((selector.element.empty() || selector.universal ? 0 : 1) + (!selector.pseudoElement.empty() ? 1 : 0))};
     for (const auto& selectorFunction : selector.selectorFunctions) {
-        if (selectorFunction->kind == StyleSelectorFunctionKind::Where) continue;
+        const CSSPseudoClassSpecificity mode = cssPseudoClassDescriptor(selectorFunction->pseudoClass)->specificity;
+        if (mode == CSSPseudoClassSpecificity::Zero) continue;
+        if (mode == CSSPseudoClassSpecificity::Class || mode == CSSPseudoClassSpecificity::ClassPlusArgument)
+            ++result.classesAttributesAndPseudoClasses;
+        if (mode == CSSPseudoClassSpecificity::Class) continue;
         StyleSpecificity argumentSpecificity;
         for (const StyleRule& argument : selectorFunction->arguments) {
             const StyleSpecificity candidate = specificity(argument);
             if (argumentSpecificity < candidate) argumentSpecificity = candidate;
         }
         result.ids += argumentSpecificity.ids;
-        result.classesAttributesAndStates += argumentSpecificity.classesAttributesAndStates;
+        result.classesAttributesAndPseudoClasses += argumentSpecificity.classesAttributesAndPseudoClasses;
         result.elements += argumentSpecificity.elements;
     }
     return result;
@@ -141,94 +155,115 @@ StyleSpecificity specificity(const StyleRule& rule) {
     for (const StyleSelector& selector : rule.selectors) {
         const StyleSpecificity value = specificity(selector);
         result.ids += value.ids;
-        result.classesAttributesAndStates += value.classesAttributesAndStates;
+        result.classesAttributesAndPseudoClasses += value.classesAttributesAndPseudoClasses;
         result.elements += value.elements;
     }
     return result;
 }
 
-std::uint16_t selectorStateMask(const StyleSelector& selector) {
-    std::uint16_t result = selector.stateMask;
-    for (const auto& selectorFunction : selector.selectorFunctions)
+bool selectorHasPseudoClass(const StyleSelector& selector, CSSPseudoClass pseudoClass) {
+    if (std::find(selector.pseudoClasses.begin(), selector.pseudoClasses.end(), pseudoClass) != selector.pseudoClasses.end()) return true;
+    for (const auto& selectorFunction : selector.selectorFunctions) {
+        if (selectorFunction->pseudoClass == CSSPseudoClass::Dir && pseudoClass == CSSPseudoClass::Dir) return true;
         for (const StyleRule& argument : selectorFunction->arguments)
-            for (const StyleSelector& component : argument.selectors) result |= selectorStateMask(component);
+            for (const StyleSelector& component : argument.selectors)
+                if (selectorHasPseudoClass(component, pseudoClass)) return true;
+    }
+    return false;
+}
+
+std::set<CSSPseudoClass> selectorPseudoClasses(const StyleSelector& selector) {
+    std::set<CSSPseudoClass> result(selector.pseudoClasses.begin(), selector.pseudoClasses.end());
+    for (const auto& selectorFunction : selector.selectorFunctions) {
+        if (selectorFunction->pseudoClass == CSSPseudoClass::Dir) result.insert(CSSPseudoClass::Dir);
+        for (const StyleRule& argument : selectorFunction->arguments)
+            for (const StyleSelector& component : argument.selectors) {
+                const std::set<CSSPseudoClass> nested = selectorPseudoClasses(component);
+                result.insert(nested.begin(), nested.end());
+            }
+    }
     return result;
 }
 
-bool selectorStateAffectsDescendants(const StyleSelector& selector, ElementState state) {
-    const std::uint16_t stateBit = static_cast<std::uint16_t>(state);
+bool selectorPseudoClassAffectsDescendants(const StyleSelector& selector, CSSPseudoClass pseudoClass) {
     for (const auto& selectorFunction : selector.selectorFunctions)
         for (const StyleRule& argument : selectorFunction->arguments) {
             for (std::size_t index = 0; index < argument.selectors.size(); ++index) {
                 const StyleSelector& component = argument.selectors[index];
-                if ((selectorStateMask(component) & stateBit) != 0 && index + 1 < argument.selectors.size()) return true;
-                if (selectorStateAffectsDescendants(component, state)) return true;
+                if (selectorHasPseudoClass(component, pseudoClass) && index + 1 < argument.selectors.size()) return true;
+                if (selectorPseudoClassAffectsDescendants(component, pseudoClass)) return true;
             }
         }
     return false;
 }
 
-bool selectorStateAffectsFollowingSiblings(const StyleSelector& selector, ElementState state) {
-    const std::uint16_t stateBit = static_cast<std::uint16_t>(state);
+bool selectorPseudoClassAffectsFollowingSiblings(const StyleSelector& selector, CSSPseudoClass pseudoClass) {
     for (const auto& selectorFunction : selector.selectorFunctions)
         for (const StyleRule& argument : selectorFunction->arguments) {
             for (std::size_t index = 0; index + 1 < argument.selectors.size(); ++index) {
                 const SelectorCombinator combinator = argument.combinators[index];
                 if ((combinator == SelectorCombinator::NextSibling || combinator == SelectorCombinator::SubsequentSibling)
-                    && (selectorStateMask(argument.selectors[index]) & stateBit) != 0)
+                    && selectorHasPseudoClass(argument.selectors[index], pseudoClass))
                     return true;
-                if (selectorStateAffectsFollowingSiblings(argument.selectors[index], state)) return true;
+                if (selectorPseudoClassAffectsFollowingSiblings(argument.selectors[index], pseudoClass)) return true;
             }
         }
     return false;
 }
 
-bool selectorHasNestedDescendantState(const StyleSelector& selector) {
+bool selectorHasNestedDescendantPseudoClass(const StyleSelector& selector) {
     for (const auto& selectorFunction : selector.selectorFunctions)
         for (const StyleRule& argument : selectorFunction->arguments)
             for (std::size_t index = 0; index < argument.selectors.size(); ++index) {
-                if (index + 1 < argument.selectors.size() && selectorStateMask(argument.selectors[index]) != 0) return true;
-                if (selectorHasNestedDescendantState(argument.selectors[index])) return true;
+                if (index + 1 < argument.selectors.size() && !selectorPseudoClasses(argument.selectors[index]).empty()) return true;
+                if (selectorHasNestedDescendantPseudoClass(argument.selectors[index])) return true;
             }
     return false;
 }
 
-bool selectorHasNestedFollowingSiblingState(const StyleSelector& selector) {
+bool selectorHasNestedFollowingSiblingPseudoClass(const StyleSelector& selector) {
     for (const auto& selectorFunction : selector.selectorFunctions)
         for (const StyleRule& argument : selectorFunction->arguments)
             for (std::size_t index = 0; index + 1 < argument.selectors.size(); ++index) {
                 const SelectorCombinator combinator = argument.combinators[index];
                 if ((combinator == SelectorCombinator::NextSibling || combinator == SelectorCombinator::SubsequentSibling)
-                    && selectorStateMask(argument.selectors[index]) != 0)
+                    && !selectorPseudoClasses(argument.selectors[index]).empty())
                     return true;
-                if (selectorHasNestedFollowingSiblingState(argument.selectors[index])) return true;
+                if (selectorHasNestedFollowingSiblingPseudoClass(argument.selectors[index])) return true;
             }
     return false;
 }
 
 bool matchesSelectorFunction(const StyleSelectorFunction& selectorFunction, const std::string& element, const std::string& id,
-                             const std::set<std::string>& classes, uint16_t ownerStates, std::string_view pseudoElement, const Element* target,
-                             const std::vector<std::string>* inlineAncestors, LayoutDirection direction) {
+                             const std::set<std::string>& classes, std::initializer_list<CSSPseudoClass> matchingPseudoClasses,
+                             std::string_view pseudoElement, const Element* target, const std::vector<std::string>* inlineAncestors) {
+    if (selectorFunction.pseudoClass == CSSPseudoClass::Host) return false;
+    if (selectorFunction.pseudoClass == CSSPseudoClass::Dir) {
+        if (!target || !selectorFunction.identifier) return false;
+        if (*selectorFunction.identifier == "ltr") return target->directionality() == LayoutDirection::LeftToRight;
+        if (*selectorFunction.identifier == "rtl") return target->directionality() == LayoutDirection::RightToLeft;
+        return false;
+    }
     return std::any_of(selectorFunction.arguments.begin(), selectorFunction.arguments.end(), [&](const StyleRule& argument) {
-        return matchesRule(argument, element, id, classes, ownerStates, pseudoElement, target, inlineAncestors, direction);
+        return matchesRule(argument, element, id, classes, matchingPseudoClasses, pseudoElement, target, inlineAncestors);
     });
 }
 
 bool matchesSelector(const StyleSelector& selector, const std::string& element, const std::string& id, const std::set<std::string>& classes,
-                     uint16_t ownerStates, std::string_view pseudoElement, const Element* target, const std::vector<std::string>* inlineAncestors,
-                     LayoutDirection direction) {
+                     std::initializer_list<CSSPseudoClass> matchingPseudoClasses, std::string_view pseudoElement, const Element* target,
+                     const std::vector<std::string>* inlineAncestors) {
     return (selector.element.empty() || selector.element == element)
-        && matchesRoot(selector, target)
         && matchesAttribute(selector, target)
         && std::all_of(selector.ids.begin(), selector.ids.end(), [&id](const std::string& selectorId) { return selectorId == id; })
         && std::all_of(selector.classNames.begin(), selector.classNames.end(),
                        [&classes](const std::string& className) { return classes.find(className) != classes.end(); })
-        && matchesDirection(selector.direction, direction)
-        && matchesStateMask(selector.stateMask, ownerStates, target)
+        && std::all_of(
+               selector.pseudoClasses.begin(), selector.pseudoClasses.end(),
+               [target, matchingPseudoClasses](CSSPseudoClass pseudoClass) { return matchesPseudoClass(pseudoClass, target, matchingPseudoClasses); })
         && std::all_of(selector.selectorFunctions.begin(), selector.selectorFunctions.end(),
                        [&](const auto& selectorFunction) {
-                           return matchesSelectorFunction(*selectorFunction, element, id, classes, ownerStates, pseudoElement, target,
-                                                          inlineAncestors, direction);
+                           return matchesSelectorFunction(*selectorFunction, element, id, classes, matchingPseudoClasses, pseudoElement, target,
+                                                          inlineAncestors);
                        })
         && selector.pseudoElement == pseudoElement;
 }
@@ -238,8 +273,8 @@ const Element* structuralParent(const Element* element) {
     return element->parentElement();
 }
 
-bool matchesStructuralSelector(const StyleSelector& selector, const Element& element, LayoutDirection direction) {
-    return matchesSelector(selector, element.elementName(), element.id(), element.classes(), element.states(), {}, &element, nullptr, direction);
+bool matchesStructuralSelector(const StyleSelector& selector, const Element& element) {
+    return matchesSelector(selector, element.elementName(), element.id(), element.classes(), {}, {}, &element, nullptr);
 }
 
 const Element* previousElementSibling(const Element* element) {
@@ -248,10 +283,11 @@ const Element* previousElementSibling(const Element* element) {
     return nullptr;
 }
 
-bool matchesRule(const StyleRule& rule, const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t ownerStates,
-                 std::string_view pseudoElement, const Element* target, const std::vector<std::string>* inlineAncestors, LayoutDirection direction) {
+bool matchesRule(const StyleRule& rule, const std::string& element, const std::string& id, const std::set<std::string>& classes,
+                 std::initializer_list<CSSPseudoClass> matchingPseudoClasses, std::string_view pseudoElement, const Element* target,
+                 const std::vector<std::string>* inlineAncestors) {
     if (rule.selectors.empty()
-        || !matchesSelector(rule.selectors.back(), element, id, classes, ownerStates, pseudoElement, target, inlineAncestors, direction))
+        || !matchesSelector(rule.selectors.back(), element, id, classes, matchingPseudoClasses, pseudoElement, target, inlineAncestors))
         return false;
     if (rule.selectors.size() == 1) return true;
     if (!target || rule.combinators.size() + 1 != rule.selectors.size()) return false;
@@ -266,20 +302,20 @@ bool matchesRule(const StyleRule& rule, const std::string& element, const std::s
             case SelectorCombinator::Child:
                 if (inlineAncestors && inlineIndex) {
                     const std::string& inlineElement = (*inlineAncestors)[inlineIndex - 1];
-                    if (!matchesSelector(selector, inlineElement, {}, sNoClasses, 0, {}, nullptr, inlineAncestors, direction)) return false;
+                    if (!matchesSelector(selector, inlineElement, {}, sNoClasses, {}, {}, nullptr, inlineAncestors)) return false;
                     return self(self, selectorIndex - 1, current, ancestor, inlineIndex - 1);
                 }
-                if (!ancestor || !matchesStructuralSelector(selector, *ancestor, direction)) return false;
+                if (!ancestor || !matchesStructuralSelector(selector, *ancestor)) return false;
                 return self(self, selectorIndex - 1, ancestor, structuralParent(ancestor), inlineIndex);
 
             case SelectorCombinator::Descendant:
                 if (inlineAncestors && inlineIndex) {
                     const std::string& inlineElement = (*inlineAncestors)[inlineIndex - 1];
-                    if (!matchesSelector(selector, inlineElement, {}, sNoClasses, 0, {}, nullptr, inlineAncestors, direction)) return false;
+                    if (!matchesSelector(selector, inlineElement, {}, sNoClasses, {}, {}, nullptr, inlineAncestors)) return false;
                     return self(self, selectorIndex - 1, current, ancestor, inlineIndex - 1);
                 }
                 for (const Element* candidate = ancestor; candidate; candidate = structuralParent(candidate)) {
-                    if (!matchesStructuralSelector(selector, *candidate, direction)) continue;
+                    if (!matchesStructuralSelector(selector, *candidate)) continue;
                     if (self(self, selectorIndex - 1, candidate, structuralParent(candidate), inlineIndex)) return true;
                 }
                 return false;
@@ -287,14 +323,14 @@ bool matchesRule(const StyleRule& rule, const std::string& element, const std::s
             case SelectorCombinator::NextSibling: {
                 if (inlineAncestors) return false;
                 const Element* sibling = previousElementSibling(current);
-                if (!sibling || !matchesStructuralSelector(selector, *sibling, direction)) return false;
+                if (!sibling || !matchesStructuralSelector(selector, *sibling)) return false;
                 return self(self, selectorIndex - 1, sibling, structuralParent(sibling), inlineIndex);
             }
 
             case SelectorCombinator::SubsequentSibling: {
                 if (inlineAncestors) return false;
                 for (const Element* sibling = previousElementSibling(current); sibling; sibling = previousElementSibling(sibling)) {
-                    if (!matchesStructuralSelector(selector, *sibling, direction)) continue;
+                    if (!matchesStructuralSelector(selector, *sibling)) continue;
                     if (self(self, selectorIndex - 1, sibling, structuralParent(sibling), inlineIndex)) return true;
                 }
                 return false;
@@ -455,7 +491,7 @@ struct ResourceUsage {
 };
 
 std::optional<ResourceUsage> resourceUsage(std::string_view property) {
-    if (property == "background" || property == "background-image") return ResourceUsage{false, false};
+    if (property == "background" || property == "background-image" || property == "border-image-source") return ResourceUsage{false, false};
     if (property == "mask" || property == "mask-image") return ResourceUsage{true, false};
     if (property == "cursor") return ResourceUsage{false, true};
     return std::nullopt;
@@ -464,7 +500,7 @@ std::optional<ResourceUsage> resourceUsage(std::string_view property) {
 
 void StyleModel::addRule(const StyleRule& rule) {
     StyleRule copy = rule;
-    copy.sourceOrder = static_cast<int>(rules.size());
+    copy.sourceOrder = rules.size();
     rules.push_back(std::move(copy));
 }
 
@@ -525,18 +561,26 @@ StyleRuleSet::StyleRuleSet(StyleModel&& model) : mDependencies(std::move(model.d
             }
         }
     };
-    for (const StyleRule& rule : mRules)
+    for (const StyleRule& rule : mRules) {
         for (const StyleDeclaration& declaration : rule.declarations) {
-            if (const auto* images = std::get_if<StyleImageLayers>(&declaration.value))
-                for (const BackgroundLayer& layer : images->layers) addResource(layer.resource, false, false);
-            else if (const auto* masks = std::get_if<StyleMaskLayers>(&declaration.value))
-                for (const MaskLayer& layer : masks->layers) addResource(layer.image.resource, true, false);
-            else if (const auto* cursor = std::get_if<CursorValue>(&declaration.value))
+            if (const auto* images = std::get_if<StyleImageLayers>(&declaration.value)) {
+                for (const BackgroundLayer& layer : images->layers)
+                    if (const std::string* resource = layer.image.resource()) addResource(*resource, false, false);
+            } else if (const auto* image = std::get_if<StyleImage>(&declaration.value)) {
+                if (declaration.property == "border-image-source") {
+                    if (const std::string* resource = image->resource()) addResource(*resource, false, false);
+                }
+            } else if (const auto* masks = std::get_if<StyleMaskLayers>(&declaration.value)) {
+                for (const MaskLayer& layer : masks->layers)
+                    if (const std::string* resource = layer.image.image.resource()) addResource(*resource, true, false);
+            } else if (const auto* cursor = std::get_if<CursorValue>(&declaration.value)) {
                 for (const CursorImage& image : cursor->images) addResource(image.resource, false, true);
-            else if (const auto* deferred = std::get_if<DeferredStyleValue>(&declaration.value))
-                if (const std::optional<ResourceUsage> usage = resourceUsage(declaration.property.get().name))
+            } else if (const auto* deferred = std::get_if<DeferredStyleValue>(&declaration.value)) {
+                if (const std::optional<ResourceUsage> usage = resourceUsage(declaration.property))
                     collectDeferredResources(deferred->source, *usage);
+            }
         }
+    }
     for (std::size_t index = 0; index < pendingNames.size(); ++index) {
         const std::string& name = pendingNames[index];
         const auto found = customPropertyValues.find(name);
@@ -553,25 +597,8 @@ void StyleRuleSet::buildIndexes() {
     const auto addUnique = [](auto& values, std::size_t value) {
         if (std::find(values.begin(), values.end(), value) == values.end()) values.push_back(value);
     };
-    const auto addStateRule = [&](std::uint16_t stateMask, auto& mask, auto& buckets, std::size_t ruleIndex) {
-        for (const ElementState state :
-             {ElementState::Hovered, ElementState::Active, ElementState::Focused, ElementState::Disabled, ElementState::Checked,
-              ElementState::FocusVisible, ElementState::Minimized, ElementState::Invalid, ElementState::Indeterminate}) {
-            if ((stateMask & static_cast<std::uint16_t>(state)) == 0) continue;
-            const std::optional<std::size_t> index = stateIndex(state);
-            if (!index) continue;
-            mask |= static_cast<std::uint16_t>(state);
-            addUnique(buckets[*index], ruleIndex);
-        }
-    };
-    const auto addStateBucket = [&](std::uint16_t stateMask, auto& buckets, std::size_t ruleIndex) {
-        for (const ElementState state :
-             {ElementState::Hovered, ElementState::Active, ElementState::Focused, ElementState::Disabled, ElementState::Checked,
-              ElementState::FocusVisible, ElementState::Minimized, ElementState::Invalid, ElementState::Indeterminate}) {
-            if ((stateMask & static_cast<std::uint16_t>(state)) == 0) continue;
-            const std::optional<std::size_t> index = stateIndex(state);
-            if (index) addUnique(buckets[*index], ruleIndex);
-        }
+    const auto addPseudoClassRules = [&](const std::set<CSSPseudoClass>& pseudoClasses, auto& buckets, std::size_t ruleIndex) {
+        for (const CSSPseudoClass pseudoClass : pseudoClasses) addUnique(buckets[pseudoClass], ruleIndex);
     };
 
     for (std::size_t ruleIndex = 0; ruleIndex < mRules.size(); ++ruleIndex) {
@@ -586,23 +613,23 @@ void StyleRuleSet::buildIndexes() {
 
         const bool layoutDeclaration = !rule.customProperties.empty()
             || std::any_of(rule.declarations.begin(), rule.declarations.end(),
-                           [](const StyleDeclaration& declaration) { return !declaration.property.get().isPaintOnly(); });
+                           [](const StyleDeclaration& declaration) { return !detail::isPropertyPaintOnly(declaration.property); });
         const bool hitTestDeclaration = !rule.customProperties.empty()
             || std::any_of(rule.declarations.begin(), rule.declarations.end(),
-                           [](const StyleDeclaration& declaration) { return declaration.property.get().affectsHitTesting(); });
+                           [](const StyleDeclaration& declaration) { return detail::propertyAffectsHitTesting(declaration.property); });
         const bool inherits = !rule.customProperties.empty()
             || std::any_of(rule.declarations.begin(), rule.declarations.end(),
-                           [](const StyleDeclaration& declaration) { return declaration.property.get().propagatesToDescendants(); });
+                           [](const StyleDeclaration& declaration) { return detail::propertyPropagatesToDescendants(declaration.property); });
         for (std::size_t selectorIndex = 0; selectorIndex < rule.selectors.size(); ++selectorIndex) {
             const StyleSelector& selector = rule.selectors[selectorIndex];
-            const std::uint16_t stateMask = selectorStateMask(selector);
-            if (layoutDeclaration) addStateRule(stateMask, mLayoutStateMask, mLayoutStateRules, ruleIndex);
-            if (hitTestDeclaration) addStateRule(stateMask, mHitTestStateMask, mHitTestStateRules, ruleIndex);
+            const std::set<CSSPseudoClass> pseudoClasses = selectorPseudoClasses(selector);
+            if (layoutDeclaration) addPseudoClassRules(pseudoClasses, mLayoutPseudoClassRules, ruleIndex);
+            if (hitTestDeclaration) addPseudoClassRules(pseudoClasses, mHitTestPseudoClassRules, ruleIndex);
             if (selectorIndex + 1 < rule.selectors.size()
                 || inherits
-                || selectorHasNestedDescendantState(selector)
-                || selectorHasNestedFollowingSiblingState(selector))
-                addStateBucket(stateMask, mDescendantStateRules, ruleIndex);
+                || selectorHasNestedDescendantPseudoClass(selector)
+                || selectorHasNestedFollowingSiblingPseudoClass(selector))
+                addPseudoClassRules(pseudoClasses, mDescendantPseudoClassRules, ruleIndex);
         }
     }
 
@@ -616,151 +643,140 @@ void StyleRuleSet::buildIndexes() {
     sortUnique(mElementRuleIndices);
     sortUnique(mIdRuleIndices);
     sortUnique(mClassRuleIndices);
-    for (auto& candidates : mDescendantStateRules) {
-        std::sort(candidates.begin(), candidates.end());
-        candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
-    }
+    sortUnique(mLayoutPseudoClassRules);
+    sortUnique(mHitTestPseudoClassRules);
+    sortUnique(mDescendantPseudoClassRules);
 }
 
-bool StyleRuleSet::stateAffectsLayout(ElementState state) const {
-    return (mLayoutStateMask & static_cast<std::uint16_t>(state)) != 0;
+bool StyleRuleSet::pseudoClassAffectsLayout(CSSPseudoClass pseudoClass) const {
+    return mLayoutPseudoClassRules.contains(pseudoClass);
 }
 
-bool StyleRuleSet::stateAffectsLayout(const Element& element, ElementState state) const {
-    if (state == ElementState::Disabled && element.elementName() == kFieldsetTag.localName) return stateAffectsLayout(state);
-    if (!stateAffectsLayout(state)) return false;
-    const std::optional<std::size_t> index = stateIndex(state);
-    if (!index) return false;
+bool StyleRuleSet::pseudoClassAffectsLayout(const Element& element, CSSPseudoClass pseudoClass) const {
+    if (pseudoClass == CSSPseudoClass::Disabled && element.elementName() == HTMLTagName(HTMLTag::Fieldset))
+        return pseudoClassAffectsLayout(pseudoClass);
+    const auto candidates = mLayoutPseudoClassRules.find(pseudoClass);
+    if (candidates == mLayoutPseudoClassRules.end()) return false;
     const auto hasLayoutDeclaration = [](const StyleRule& rule) {
         return !rule.customProperties.empty()
             || std::any_of(rule.declarations.begin(), rule.declarations.end(),
-                           [](const StyleDeclaration& declaration) { return !declaration.property.get().isPaintOnly(); });
+                           [](const StyleDeclaration& declaration) { return !detail::isPropertyPaintOnly(declaration.property); });
     };
-    for (const std::size_t ruleIndex : mLayoutStateRules[*index]) {
+    for (const std::size_t ruleIndex : candidates->second) {
         const StyleRule& rule = mRules[ruleIndex];
         if (!hasLayoutDeclaration(rule)) continue;
         for (const StyleSelector& selector : rule.selectors)
-            if ((selectorStateMask(selector) & static_cast<std::uint16_t>(state)) != 0 && selectorCanBeOwnedBy(selector, element, state)) return true;
+            if (selectorHasPseudoClass(selector, pseudoClass) && selectorCanBeOwnedBy(selector, element, pseudoClass)) return true;
     }
     return false;
 }
 
-bool StyleRuleSet::stateAffectsHitTesting(ElementState state) const {
-    return (mHitTestStateMask & static_cast<std::uint16_t>(state)) != 0;
+bool StyleRuleSet::pseudoClassAffectsHitTesting(CSSPseudoClass pseudoClass) const {
+    return mHitTestPseudoClassRules.contains(pseudoClass);
 }
 
-bool StyleRuleSet::stateAffectsHitTesting(const Element& element, ElementState state) const {
-    if (state == ElementState::Disabled && element.elementName() == kFieldsetTag.localName) return stateAffectsHitTesting(state);
-    if (!stateAffectsHitTesting(state)) return false;
-    const std::optional<std::size_t> index = stateIndex(state);
-    if (!index) return false;
-    for (const std::size_t ruleIndex : mHitTestStateRules[*index]) {
-        const StyleRule& rule = mRules[ruleIndex];
-        for (const StyleSelector& selector : rule.selectors)
-            if ((selectorStateMask(selector) & static_cast<std::uint16_t>(state)) != 0 && selectorCanBeOwnedBy(selector, element, state)) return true;
-    }
+bool StyleRuleSet::pseudoClassAffectsHitTesting(const Element& element, CSSPseudoClass pseudoClass) const {
+    if (pseudoClass == CSSPseudoClass::Disabled && element.elementName() == HTMLTagName(HTMLTag::Fieldset))
+        return pseudoClassAffectsHitTesting(pseudoClass);
+    const auto candidates = mHitTestPseudoClassRules.find(pseudoClass);
+    if (candidates == mHitTestPseudoClassRules.end()) return false;
+    for (const std::size_t ruleIndex : candidates->second)
+        for (const StyleSelector& selector : mRules[ruleIndex].selectors)
+            if (selectorHasPseudoClass(selector, pseudoClass) && selectorCanBeOwnedBy(selector, element, pseudoClass)) return true;
     return false;
 }
 
-bool StyleRuleSet::stateAffectsDescendants(const Element& element, ElementState state) const {
-    if (state == ElementState::Disabled && element.elementName() == kFieldsetTag.localName) return true;
-    const std::optional<std::size_t> index = stateIndex(state);
-    if (!index) return false;
-    for (const std::size_t ruleIndex : mDescendantStateRules[*index]) {
+bool StyleRuleSet::pseudoClassAffectsDescendants(const Element& element, CSSPseudoClass pseudoClass) const {
+    if (pseudoClass == CSSPseudoClass::Disabled && element.elementName() == HTMLTagName(HTMLTag::Fieldset)) return true;
+    const auto candidates = mDescendantPseudoClassRules.find(pseudoClass);
+    if (candidates == mDescendantPseudoClassRules.end()) return false;
+    for (const std::size_t ruleIndex : candidates->second) {
         const StyleRule& rule = mRules[ruleIndex];
         const bool inherits = !rule.customProperties.empty()
             || std::any_of(rule.declarations.begin(), rule.declarations.end(),
-                           [](const StyleDeclaration& declaration) { return declaration.property.get().propagatesToDescendants(); });
+                           [](const StyleDeclaration& declaration) { return detail::propertyPropagatesToDescendants(declaration.property); });
         for (std::size_t selectorIndex = 0; selectorIndex < rule.selectors.size(); ++selectorIndex) {
             const StyleSelector& selector = rule.selectors[selectorIndex];
-            if ((selectorStateMask(selector) & static_cast<std::uint16_t>(state)) != 0
-                && selectorCanBeOwnedBy(selector, element, state)
-                && (selectorIndex + 1 < rule.selectors.size() || inherits || selectorStateAffectsDescendants(selector, state)))
+            if (selectorHasPseudoClass(selector, pseudoClass)
+                && selectorCanBeOwnedBy(selector, element, pseudoClass)
+                && (selectorIndex + 1 < rule.selectors.size() || inherits || selectorPseudoClassAffectsDescendants(selector, pseudoClass)))
                 return true;
         }
     }
     return false;
 }
 
-bool StyleRuleSet::stateAffectsFollowingSiblings(const Element& element, ElementState state) const {
-    const std::optional<std::size_t> index = stateIndex(state);
-    if (!index) return false;
-    const std::uint16_t stateBit = static_cast<std::uint16_t>(state);
-    for (const std::size_t ruleIndex : mDescendantStateRules[*index]) {
+bool StyleRuleSet::pseudoClassAffectsFollowingSiblings(const Element& element, CSSPseudoClass pseudoClass) const {
+    const auto candidates = mDescendantPseudoClassRules.find(pseudoClass);
+    if (candidates == mDescendantPseudoClassRules.end()) return false;
+    for (const std::size_t ruleIndex : candidates->second) {
         const StyleRule& rule = mRules[ruleIndex];
         for (const StyleSelector& selector : rule.selectors)
-            if ((selectorStateMask(selector) & stateBit) != 0
-                && selectorCanBeOwnedBy(selector, element, state)
-                && selectorStateAffectsFollowingSiblings(selector, state))
+            if (selectorHasPseudoClass(selector, pseudoClass)
+                && selectorCanBeOwnedBy(selector, element, pseudoClass)
+                && selectorPseudoClassAffectsFollowingSiblings(selector, pseudoClass))
                 return true;
         for (std::size_t selectorIndex = 0; selectorIndex + 1 < rule.selectors.size(); ++selectorIndex) {
             const StyleSelector& selector = rule.selectors[selectorIndex];
-            if ((selectorStateMask(selector) & stateBit) == 0 || !selectorCanBeOwnedBy(selector, element, state)) continue;
+            if (!selectorHasPseudoClass(selector, pseudoClass) || !selectorCanBeOwnedBy(selector, element, pseudoClass)) continue;
             const SelectorCombinator combinator = rule.combinators[selectorIndex];
             if (combinator == SelectorCombinator::NextSibling
                 || combinator == SelectorCombinator::SubsequentSibling
-                || selectorStateAffectsFollowingSiblings(selector, state))
+                || selectorPseudoClassAffectsFollowingSiblings(selector, pseudoClass))
                 return true;
         }
     }
     return false;
 }
 
-ComputedStyle StyleSheet::resolve(const std::string& element, const std::string& id, const std::set<std::string>& classes, uint16_t states,
-                                  LayoutDirection direction) const {
-    ComputedStyle style = mImpl->ruleSet.resolveInternal(element, id, classes, states, {}, nullptr, nullptr, direction, nullptr);
-    resolveRelativeFontWeight(style);
-    resolvePercentageLineHeight(style);
-    style.textDecorationPropagation = style.textDecoration;
+ComputedStyle StyleSheet::resolve(const std::string& element, const std::string& id, const std::set<std::string>& classes,
+                                  std::initializer_list<CSSPseudoClass> matchingPseudoClasses) const {
+    ComputedStyle style = mImpl->ruleSet.resolveInternal(element, id, classes, matchingPseudoClasses, {}, nullptr, nullptr, nullptr, {}, nullptr);
+    style.textDecorationPropagation = style.textDecoration();
     return style;
 }
 
-ComputedStyle StyleSheet::resolveElement(const Element& element, LayoutDirection direction) const {
-    return resolveElement(element, direction, nullptr);
+ComputedStyle StyleSheet::resolveElement(const Element& element) const {
+    return resolveElement(element, nullptr, {}, nullptr, nullptr, ComputedStyle::initialStyle());
 }
 
-ComputedStyle StyleSheet::resolveElement(const Element& element, LayoutDirection direction,
-                                         const CustomPropertyMap* inheritedCustomProperties) const {
-    ComputedStyle style = mImpl->ruleSet.resolveInternal(element.elementName(), element.id(), element.classes(), element.states(), {}, &element,
-                                                         nullptr, direction, inheritedCustomProperties);
-    if (!inheritedCustomProperties) resolveRelativeFontWeight(style);
-    if (!inheritedCustomProperties) {
-        resolvePercentageLineHeight(style);
-        style.textDecorationPropagation = style.textDecoration;
-    }
+ComputedStyle StyleSheet::resolveElement(const Element& element, const CustomPropertyMap* inheritedCustomProperties,
+                                         ColorSchemeContext colorSchemeContext, const ColorScheme* inheritedColorScheme,
+                                         const ComputedStyle* parentStyle, const ComputedStyle& rootStyle) const {
+    ComputedStyle style = mImpl->ruleSet.resolveInternal(element.elementName(), element.id(), element.classes(), {}, {}, &element, nullptr,
+                                                         inheritedCustomProperties, colorSchemeContext, inheritedColorScheme, parentStyle, rootStyle);
+    if (!inheritedCustomProperties) style.textDecorationPropagation = style.textDecoration();
     return style;
 }
 
-ComputedStyle StyleSheet::resolvePseudoElement(const Element& owner, std::string_view pseudoElementName, LayoutDirection direction) const {
-    return resolvePseudoElement(owner, pseudoElementName, direction, nullptr);
+ComputedStyle StyleSheet::resolvePseudoElement(const Element& owner, std::string_view pseudoElementName) const {
+    return resolvePseudoElement(owner, pseudoElementName, nullptr, {}, nullptr, nullptr, ComputedStyle::initialStyle());
 }
 
-ComputedStyle StyleSheet::resolvePseudoElement(const Element& owner, std::string_view pseudoElementName, LayoutDirection direction,
-                                               const CustomPropertyMap* inheritedCustomProperties) const {
-    ComputedStyle style = mImpl->ruleSet.resolveInternal(owner.elementName(), owner.id(), owner.classes(), owner.states(), pseudoElementName, &owner,
-                                                         nullptr, direction, inheritedCustomProperties);
-    if (!inheritedCustomProperties) resolveRelativeFontWeight(style);
-    if (!inheritedCustomProperties) {
-        resolvePercentageLineHeight(style);
-        style.textDecorationPropagation = style.textDecoration;
-    }
+ComputedStyle StyleSheet::resolvePseudoElement(const Element& owner, std::string_view pseudoElementName,
+                                               const CustomPropertyMap* inheritedCustomProperties, ColorSchemeContext colorSchemeContext,
+                                               const ColorScheme* inheritedColorScheme, const ComputedStyle* parentStyle,
+                                               const ComputedStyle& rootStyle) const {
+    ComputedStyle style = mImpl->ruleSet.resolveInternal(owner.elementName(), owner.id(), owner.classes(), {}, pseudoElementName, &owner, nullptr,
+                                                         inheritedCustomProperties, colorSchemeContext, inheritedColorScheme, parentStyle, rootStyle);
+    if (!inheritedCustomProperties) style.textDecorationPropagation = style.textDecoration();
     return style;
 }
 
-ComputedStyle StyleSheet::resolveInline(const Element& owner, const std::string& element, const std::vector<std::string>& inlineAncestors,
-                                        LayoutDirection direction) const {
+ComputedStyle StyleSheet::resolveInline(const Element& owner, const std::string& element, const std::vector<std::string>& inlineAncestors) const {
     static const std::set<std::string> sNoClasses;
-    ComputedStyle style = mImpl->ruleSet.resolveInternal(element, {}, sNoClasses, 0, {}, &owner, &inlineAncestors, direction, nullptr);
-    resolveRelativeFontWeight(style);
-    resolvePercentageLineHeight(style);
-    style.textDecorationPropagation = style.textDecoration;
+    ComputedStyle style = mImpl->ruleSet.resolveInternal(element, {}, sNoClasses, {}, {}, &owner, &inlineAncestors, nullptr, {}, nullptr, nullptr,
+                                                         ComputedStyle::initialStyle());
+    style.textDecorationPropagation = style.textDecoration();
     return style;
 }
 
 ComputedStyle StyleRuleSet::resolveInternal(const std::string& element, const std::string& id, const std::set<std::string>& classes,
-                                            uint16_t ownerStates, std::string_view pseudoElement, const Element* target,
-                                            const std::vector<std::string>* inlineAncestors, LayoutDirection direction,
-                                            const CustomPropertyMap* inheritedCustomProperties) const {
+                                            std::initializer_list<CSSPseudoClass> matchingPseudoClasses, std::string_view pseudoElement,
+                                            const Element* target, const std::vector<std::string>* inlineAncestors,
+                                            const CustomPropertyMap* inheritedCustomProperties, ColorSchemeContext colorSchemeContext,
+                                            const ColorScheme* inheritedColorScheme, const ComputedStyle* parentStyle,
+                                            const ComputedStyle& rootStyle) const {
     std::vector<std::size_t> candidates = mUniversalRuleIndices;
     if (const auto found = mElementRuleIndices.find(element); found != mElementRuleIndices.end())
         candidates.insert(candidates.end(), found->second.begin(), found->second.end());
@@ -777,35 +793,41 @@ ComputedStyle StyleRuleSet::resolveInternal(const std::string& element, const st
     matchedRules.reserve(candidates.size());
     for (const std::size_t ruleIndex : candidates) {
         const StyleRule& rule = mRules[ruleIndex];
-        if (matchesRule(rule, element, id, classes, ownerStates, pseudoElement, target, inlineAncestors, direction)) matchedRules.push_back(&rule);
+        if (matchesRule(rule, element, id, classes, matchingPseudoClasses, pseudoElement, target, inlineAncestors)) matchedRules.push_back(&rule);
     }
 
     ComputedStyle style;
+    StyleBuilderState builderState{style, parentStyle, rootStyle};
+    if (inheritedColorScheme) style.setColorScheme(*inheritedColorScheme);
     style.customProperties = resolveCustomProperties(inheritedCustomProperties, matchedRules);
-    for (const StyleRule* rule : matchedRules) {
-        for (const StyleDeclaration& declaration : rule->declarations) {
-            if (const auto* deferred = std::get_if<DeferredStyleValue>(&declaration.value)) {
-                CustomPropertyResolver customProperties(style.customProperties);
-                const std::optional<CustomPropertyValue> substituted = customProperties.substituteValue(deferred->source);
-                // CSS computed-value invalidity discards lower cascaded values; reset only this property.
-                if (!substituted) {
-                    detail::applyInvalidStyleDeclaration(style, declaration.property.get());
-                    continue;
-                }
-                const detail::CSSTokenStream stream(substituted->source);
-                StyleSheetLoadResult ignored;
-                const auto compiled =
-                    StyleModel::compileDeclaration(declaration.property.get(), stream, {0, stream.tokens().size()}, {}, ignored, {});
-                if (!compiled) {
-                    detail::applyInvalidStyleDeclaration(style, declaration.property.get());
-                    continue;
-                }
-                for (const StyleDeclaration& resolved : *compiled) detail::applyStyleDeclaration(style, resolved);
-            } else detail::applyStyleDeclaration(style, declaration);
+    const auto applyDeclarations = [&](bool colorSchemeFirst) {
+        for (const StyleRule* rule : matchedRules) {
+            for (const StyleDeclaration& declaration : rule->declarations) {
+                if ((declaration.property == "color-scheme") != colorSchemeFirst) continue;
+                if (const auto* deferred = std::get_if<DeferredStyleValue>(&declaration.value)) {
+                    CustomPropertyResolver customProperties(style.customProperties);
+                    const std::optional<CustomPropertyValue> substituted = customProperties.substituteValue(deferred->source);
+                    if (!substituted) {
+                        detail::applyInvalidStyleDeclaration(builderState, declaration.property);
+                        continue;
+                    }
+                    const detail::CSSTokenStream stream(substituted->source);
+                    StyleSheetLoadResult ignored;
+                    const auto compiled = StyleModel::compileDeclaration(declaration.property, stream, {0, stream.tokens().size()}, {}, ignored, {},
+                                                                         style.usedColorScheme, true);
+                    if (!compiled) {
+                        detail::applyInvalidStyleDeclaration(builderState, declaration.property);
+                        continue;
+                    }
+                    for (const StyleDeclaration& resolved : *compiled) detail::applyStyleDeclaration(builderState, resolved);
+                } else detail::applyStyleDeclaration(builderState, declaration);
+            }
         }
-    }
+    };
+    applyDeclarations(true);
+    style.usedColorScheme = style.colorScheme().used(colorSchemeContext);
+    applyDeclarations(false);
     normalizeOverflow(style);
-    resolveLightDarkColors(style);
     return style;
 }
 } // namespace radia::ui

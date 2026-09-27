@@ -6,6 +6,7 @@
 #include "linden_common.h"
 #include <algorithm>
 #include "dom/elementinternal.h"
+#include "Geometry.h"
 #include "html/floater.h"
 #include "layout/engine.h"
 #include "style/stylepass.h"
@@ -19,7 +20,7 @@ using detail::resizeEdgesAt;
 
 namespace {
 bool blocksPointerEvents(const HTMLFloaterElement& floater, const ComputedStyle& style) {
-    return style.pointerEvents != PointerEvents::NoneValue && (style.pointerEventsSpecified || floater.pointerEvents());
+    return style.pointerEvents() != PointerEvents::NoneValue && (style.pointerEventsSpecified || floater.pointerEvents());
 }
 } // namespace
 
@@ -32,8 +33,8 @@ Vec2 Surface::minimumFloaterSize(HTMLFloaterElement& floater) {
     if (!currentFloater) return {};
     const ComputedStyle floaterStyle = styles.style(*currentFloater);
     if (!floaterObservation.layoutValid() || !floaterObservation.styleValid()) return {};
-    Vec2 minimum{floaterStyle.minWidth ? floaterStyle.minWidth->resolve(0.f, mViewport.w) : 0.f,
-                 floaterStyle.minHeight ? floaterStyle.minHeight->resolve(0.f, mViewport.h) : 0.f};
+    Vec2 minimum{floaterStyle.minWidth() ? floaterStyle.minWidth()->resolve(0.f, mViewport.w) : 0.f,
+                 floaterStyle.minHeight() ? floaterStyle.minHeight()->resolve(0.f, mViewport.h) : 0.f};
 
     if (Element* head = currentFloater->head()) {
         const ElementRef<Element> headRef(head);
@@ -61,8 +62,8 @@ Vec2 Surface::minimumFloaterSize(HTMLFloaterElement& floater) {
             || head->parentElement() != currentFloater
             || currentFloater->head() != head)
             return {};
-        minimum.x = std::max(minimum.x, measured.x + headStyle.margin.horizontal() + floaterStyle.padding.horizontal());
-        minimum.y = std::max(minimum.y, measured.y + headStyle.margin.vertical() + floaterStyle.padding.vertical());
+        minimum.x = std::max(minimum.x, measured.x + horizontalMargin(headStyle.margin()) + paddingPixels(floaterStyle).horizontal());
+        minimum.y = std::max(minimum.y, measured.y + verticalMargin(headStyle.margin()) + paddingPixels(floaterStyle).vertical());
     }
     return minimum;
 }

@@ -29,7 +29,10 @@
 
 #include "linden_common.h"
 
+#include <limits>
+#include <new>
 #include <unordered_set>
+#include <utility>
 
 #include "llfontfreetype.h"
 #include "llfontgl.h"
@@ -50,6 +53,7 @@
 
 #include "lldir.h"
 #include "llerror.h"
+#include "llfile.h"
 #include "llimage.h"
 #include "llimagepng.h"
 //#include "llimagej2c.h"
@@ -476,9 +480,15 @@ S32 LLFontFreetype::getNumFaces(const std::string& filename)
     return num_faces;
 }
 
-void LLFontFreetype::addFallbackFont(const LLPointer<LLFontFreetype>& fallback_font,
-                                     const char_functor_t& functor) const
-{
+void LLFontFreetype::addFallbackFont(const LLPointer<LLFontFreetype>& fallback_font, const char_functor_t& functor) const {
+    if (!fallback_font.notNull()
+        || !mFace
+        || !fallback_font->mFace
+        || (mName == fallback_font->mName && mFaceIndex == fallback_font->mFaceIndex)
+        || hasFallbackPath(fallback_font->mName, fallback_font->mFaceIndex)) {
+        return;
+    }
+
     mFallbackFonts.emplace_back(fallback_font, functor);
     // Both caches encode the previous fallback list; the new fallback may win
     // for codepoints that previously resolved to a later face or to notdef on
@@ -498,15 +508,9 @@ void LLFontFreetype::addFallbackFont(const LLPointer<LLFontFreetype>& fallback_f
     ALFontShaping::clearCacheForFace(this);
 }
 
-bool LLFontFreetype::hasFallbackPath(const std::string& path) const
-{
+bool LLFontFreetype::hasFallbackPath(const std::string& path, S32 face_index) const {
     for (const fallback_font_t& pair : mFallbackFonts)
-    {
-        if (pair.first->getName() == path)
-        {
-            return true;
-        }
-    }
+        if (pair.first->getName() == path && pair.first->mFaceIndex == face_index) return true;
     return false;
 }
 
@@ -528,8 +532,7 @@ std::pair<const LLFontFreetype*, U32> LLFontFreetype::attachOsFallbackFor(llwcha
         return { nullptr, 0u };
 
     LLFontFallbackMatch match = LLWindow::findFallbackFontForChar(wch);
-    if (match.mPath.empty() || hasFallbackPath(match.mPath))
-        return { nullptr, 0u };
+    if (match.mPath.empty() || hasFallbackPath(match.mPath, match.mFaceIndex)) return {nullptr, 0u};
 
     // Open at this font's size and DPI so the lazily-discovered face lines
     // up with the head's metrics.
@@ -1340,19 +1343,13 @@ namespace ll
 {
     namespace fonts
     {
-        class LoadedFont
-        {
-            public:
-            LoadedFont( std::string aName , std::string const &aAddress, std::size_t aSize )
-            : mAddress( aAddress )
-            {
-                mName = aName;
-                mSize = aSize;
-            }
-            std::string mName;
-            std::string mAddress;
-            std::size_t mSize;
-        };
+    class LoadedFont {
+    public:
+        LoadedFont(std::string name, std::string address, std::size_t size) : mName(std::move(name)), mAddress(std::move(address)), mSize(size) {}
+        std::string mName;
+        std::string mAddress;
+        std::size_t mSize;
+    };
     }
 }
 
@@ -1369,6 +1366,10 @@ U8 const* LLFontManager::loadFont( std::string const &aFilename, long &a_Size)
             return reinterpret_cast<U8 const*>(itr->second->mAddress.c_str());
         }
 
+        // These keys are valid only while their registered byte buffers are
+        // cached. Never interpret an expired reserved key as a filesystem path.
+        if (aFilename.starts_with("radia://font/")) return nullptr;
+
         auto strContent = LLFile::getContents(aFilename);
 
         if (strContent.empty())
@@ -1379,7 +1380,7 @@ U8 const* LLFontManager::loadFont( std::string const &aFilename, long &a_Size)
 
         a_Size = static_cast<long>(strContent.size());
 
-        auto pCache = std::make_shared<ll::fonts::LoadedFont>(aFilename, strContent, a_Size);
+        auto pCache = std::make_shared<ll::fonts::LoadedFont>(aFilename, std::move(strContent), a_Size);
         itr = m_LoadedFonts.insert(std::make_pair(aFilename, pCache)).first;
 
         return reinterpret_cast<U8 const*>(itr->second->mAddress.c_str());
@@ -1390,6 +1391,25 @@ U8 const* LLFontManager::loadFont( std::string const &aFilename, long &a_Size)
         LL_ERRS() << "Failed to load font. Out of memory." << LL_ENDL;
     }
     return nullptr;
+}
+
+std::string LLFontManager::registerFontBytes(std::string_view sourceName, std::string bytes) {
+    if (sourceName.empty() || bytes.empty()) return {};
+    if (bytes.size() >= static_cast<std::size_t>(std::numeric_limits<long>::max())) return {};
+    const std::size_t byteCount = bytes.size();
+
+    try {
+        if (mNextMemoryFontSourceId == 0) return {};
+        std::string sourceKey = "radia://font/" + std::to_string(mNextMemoryFontSourceId++);
+
+        auto loadedFont = std::make_shared<ll::fonts::LoadedFont>(std::string(sourceName), std::move(bytes), byteCount);
+        m_LoadedFonts.emplace(sourceKey, std::move(loadedFont));
+        return sourceKey;
+    } catch (const std::bad_alloc&) {
+        LLError::LLUserWarningMsg::showOutOfMemory();
+        LL_ERRS() << "Failed to register in-memory font. Out of memory." << LL_ENDL;
+    }
+    return {};
 }
 
 LLPointer<ALFontFace> LLFontManager::getOrCreateFace(const ALFontFaceKey& key)

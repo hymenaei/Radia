@@ -27,7 +27,7 @@ const Element* scopeRootForLabel(const HTMLLabelElement& label) {
 }
 
 bool isLabelable(const Element& element) {
-    const ResourceElementDefinition* definition = findElementDefinition(lookupHTMLTag(element.elementName()));
+    const ResourceElementDefinition* definition = findElementDefinition(findHTMLTag(element.elementName()));
     return definition && definition->labelable;
 }
 
@@ -73,7 +73,7 @@ template<typename LabelT, typename IndexT> auto findLabelTarget(LabelT& label) {
 }
 } // namespace
 
-HTMLLabelElement::HTMLLabelElement(std::string text) : HTMLElement(kLabelTag.localName) {
+HTMLLabelElement::HTMLLabelElement(std::string text) : HTMLElement(HTMLTagName(HTMLTag::Label)) {
     if (!text.empty()) textContent(std::move(text));
 }
 
@@ -104,7 +104,7 @@ void HTMLLabelElement::onActivate() {
 }
 
 ResourceElementDefinition detail::ElementDefinitions::label() {
-    return defineElement<HTMLLabelElement>(kLabelTag.localName)
+    return defineElement<HTMLLabelElement>(HTMLTagName(HTMLTag::Label))
         .attributes({allowedAttribute("for")})
         .validate([](const ElementBuildInput& input, HTMLLabelElement& label, ElementBuildContext& context) {
             std::string targetId;

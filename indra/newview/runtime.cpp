@@ -249,6 +249,10 @@ public:
         surface().paint(*mSurfaceState.paintContext, std::max(paintScale, .0001f), {paintOriginX, paintOriginY});
     }
 
+    void destroyGL() {
+        mSurfaceState.paintContext->destroyGL();
+    }
+
     InputDispatchResult pointerMove(const PointerEvent& event) {
         if (!isInteractive()) return {};
         const bool handled = surface().pointerMove(event);
@@ -555,6 +559,10 @@ void Runtime::setVisibility(bool visible) {
 
 void Runtime::frame(S32 width, S32 height, F32 paintScale, F32 paintOriginX, F32 paintOriginY) {
     mImpl->frame(width, height, paintScale, paintOriginX, paintOriginY);
+}
+
+void Runtime::destroyGL() {
+    mImpl->destroyGL();
 }
 
 void Runtime::idle() {

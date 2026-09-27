@@ -1,12 +1,4 @@
-# -*- cmake -*-
-
-add_library(ui STATIC)
-
-include(GenerateDefaultStylesheet)
-
-set(default_stylesheet_source "${CMAKE_CURRENT_SOURCE_DIR}/css/defaults.css")
-set(default_stylesheet_output "${CMAKE_CURRENT_BINARY_DIR}/css/defaults.inc")
-generate_default_stylesheet(SOURCE "${default_stylesheet_source}" OUTPUT "${default_stylesheet_output}")
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../Core" "${CMAKE_CURRENT_BINARY_DIR}/core")
 
 set(private_sources
     localization.cpp
@@ -17,7 +9,6 @@ set(private_sources
 
     css/color.cpp
     css/cssparser.cpp
-    css/defaults.css
     css/rules.h
     css/stylesheet.cpp
     css/syntax.cpp
@@ -161,28 +152,19 @@ set(public_sources
     text/metrics.h
 )
 
-target_sources(ui
+target_sources(Core
     PRIVATE ${private_sources}
     PUBLIC
     FILE_SET HEADERS
     FILES ${public_sources}
 )
 
-target_include_directories(ui
-    PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}"
-    PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
-
-target_link_libraries(ui
+target_include_directories(Core
     PUBLIC
-    llcommon
-    llmath
-    llrender
-    llxml
-    ll::icu
-    ll::yaml-cpp
-)
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_BINARY_DIR}")
 
-target_precompile_headers(ui REUSE_FROM llprecompiled)
+target_precompile_headers(Core REUSE_FROM llprecompiled)
 
 if(BUILD_TESTING OR BUILD_BENCHMARKING)
     add_subdirectory(tests)

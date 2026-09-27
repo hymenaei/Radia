@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 #include "binding/valuebinding.h"
+#include "ComputedStyleProperties.h"
 #include "css/stylesheet.h"
 #include "dom/elementinternal.h"
 #include "event/event.h"
@@ -28,13 +29,14 @@
 
 namespace {
 using radia::ui::AccentColor;
-using radia::ui::AppearanceMode;
+using radia::ui::Appearance;
 using radia::ui::BorderStyle;
 using radia::ui::Color;
 using radia::ui::ColorScheme;
+using radia::ui::ColorSchemeMode;
 using radia::ui::ComputedStyle;
+using radia::ui::CSSKeyword;
 using radia::ui::ElementRef;
-using radia::ui::ElementState;
 using radia::ui::Event;
 using radia::ui::fixedTextMetrics;
 using radia::ui::HTMLInputElement;
@@ -48,15 +50,18 @@ using radia::ui::NativeInputControl;
 using radia::ui::NativeInputMark;
 using radia::ui::NativeInputMetrics;
 using radia::ui::NativeInputPaintRequest;
+using radia::ui::Opacity;
 using radia::ui::PaintCommand;
 using radia::ui::PaintCommandKind;
 using radia::ui::PathVerb;
 using radia::ui::RecordingPaintContext;
 using radia::ui::ScrollbarMode;
 using radia::ui::ScrollLayoutOptions;
+using radia::ui::StyleColor;
 using radia::ui::StylePass;
 using radia::ui::StyleSheet;
 using radia::ui::Surface;
+using radia::ui::systemColorValue;
 using radia::ui::ValueBinding;
 using radia::ui::ValueBindingSubscription;
 using radia::ui::ValueState;
@@ -185,6 +190,29 @@ TEST(InputTest, PreservesElementIdentity) {
     EXPECT_EQ(input.checkmark()->name(), "checkmark");
 }
 
+TEST(InputTest, KeepsUnknownInputTypesRawAndNonCheckable) {
+    auto input = makeElementValue<HTMLInputElement>();
+
+    input.type("custom-mode");
+
+    EXPECT_EQ(input.type(), "custom-mode");
+    ASSERT_NE(input.attribute("type"), nullptr);
+    ASSERT_TRUE(input.attribute("type")->value.has_value());
+    EXPECT_EQ(*input.attribute("type")->value, "custom-mode");
+    EXPECT_EQ(input.checkmark(), nullptr);
+    EXPECT_FALSE(input.checked());
+    EXPECT_FALSE(input.indeterminate());
+}
+
+TEST(InputTest, MatchesKnownTypesWithoutChangingTheirAuthoredSpelling) {
+    auto input = makeElementValue<HTMLInputElement>();
+
+    input.type("CHECKBOX");
+
+    EXPECT_EQ(input.type(), "CHECKBOX");
+    ASSERT_NE(input.checkmark(), nullptr);
+}
+
 TEST(InputTest, RejectsSwitchModeForNonCheckbox) {
     auto input = makeElementValue<HTMLInputElement>();
 
@@ -258,7 +286,7 @@ TEST(InputTest, SelectsNativeAppearance) {
     auto input = makeElementValue<HTMLInputElement>();
     RecordingPaintContext recording;
     ComputedStyle style;
-    style.appearance = AppearanceMode::Auto;
+    style.setAppearance(Appearance::Auto);
 
     input.type("checkbox").setRect({0.f, 0.f, 13.f, 13.f});
     input.paint(recording, style, 1.f);
@@ -268,18 +296,18 @@ TEST(InputTest, SelectsNativeAppearance) {
     EXPECT_EQ(recording.last(PaintCommandKind::NativeInput)->nativeInput->control, NativeInputControl::Checkbox);
 
     recording.clear();
-    style.appearance = AppearanceMode::NoneValue;
-    style.backgroundColor = {0.2f, 0.3f, 0.4f, 1.f};
+    style.setAppearance(Appearance::NoneValue);
+    style.setBackgroundColor(Color{0.2f, 0.3f, 0.4f, 1.f});
     input.paint(recording, style, 1.f);
     ASSERT_EQ(recording.count(PaintCommandKind::Box), std::size_t{1});
     ASSERT_NE(recording.last(PaintCommandKind::Box), nullptr);
-    EXPECT_FLOAT_EQ(recording.last(PaintCommandKind::Box)->style.backgroundColor.r, 0.2f);
+    EXPECT_FLOAT_EQ(recording.last(PaintCommandKind::Box)->style.backgroundColor().resolvedColor().r, 0.2f);
 
     auto control = makeElementValue<HTMLInputElement>();
     control.type("checkbox").switchMode(true).setRect({0.f, 0.f, 36.f, 20.f});
     recording.clear();
     ComputedStyle nativeStyle;
-    nativeStyle.appearance = AppearanceMode::Auto;
+    nativeStyle.setAppearance(Appearance::Auto);
     control.paint(recording, nativeStyle, 1.f);
     ASSERT_EQ(recording.count(PaintCommandKind::NativeInput), std::size_t{1});
     ASSERT_NE(recording.last(PaintCommandKind::NativeInput), nullptr);
@@ -330,8 +358,8 @@ TEST(InputTest, CarriesAccentColor) {
     input.type("checkbox").setRect({0.f, 0.f, 13.f, 13.f});
     RecordingPaintContext recording;
     ComputedStyle style;
-    style.appearance = AppearanceMode::Auto;
-    style.accentColor = AccentColor::fromColor({.2f, .4f, .6f, .8f});
+    style.setAppearance(Appearance::Auto);
+    style.setAccentColor(AccentColor{StyleColor::fromColor({.2f, .4f, .6f, .8f})});
 
     input.paint(recording, style, 1.f);
 
@@ -350,8 +378,8 @@ TEST(InputTest, CarriesOpacityToNativeAppearance) {
     input.type("checkbox").setRect({0.f, 0.f, 13.f, 13.f});
     RecordingPaintContext recording;
     ComputedStyle style;
-    style.appearance = AppearanceMode::Auto;
-    style.opacity = .4f;
+    style.setAppearance(Appearance::Auto);
+    style.setOpacity(Opacity{.4f});
 
     input.paint(recording, style, 1.f);
 
@@ -366,17 +394,19 @@ TEST(InputTest, CarriesColorScheme) {
     input.type("checkbox").setRect({0.f, 0.f, 13.f, 13.f});
     RecordingPaintContext recording;
     ComputedStyle style;
-    style.appearance = AppearanceMode::Auto;
-    style.colorScheme.normal = false;
-    style.colorScheme.schemes = {ColorScheme::Light};
-    style.usedColorScheme = style.colorScheme.used({});
+    style.setAppearance(Appearance::Auto);
+    ColorScheme colorScheme;
+    colorScheme.normal = false;
+    colorScheme.schemes = {ColorSchemeMode::Light};
+    style.setColorScheme(colorScheme);
+    style.usedColorScheme = style.colorScheme().used({});
 
     input.paint(recording, style, 1.f);
 
     const PaintCommand* command = recording.last(PaintCommandKind::NativeInput);
     ASSERT_NE(command, nullptr);
     ASSERT_TRUE(command->nativeInput.has_value());
-    EXPECT_EQ(command->nativeInput->colorScheme, ColorScheme::Light);
+    EXPECT_EQ(command->nativeInput->colorScheme, ColorSchemeMode::Light);
 }
 
 TEST(InputTest, PaintsNativeCheckbox) {
@@ -436,13 +466,13 @@ TEST(InputTest, PaintsNativeInputBorders) {
     request.control = NativeInputControl::Checkbox;
     appearance.paintInput(recording, request);
     ASSERT_EQ(recording.count(PaintCommandKind::Box), std::size_t{2});
-    EXPECT_EQ(recording.commands().back().style.borderStyle, BorderStyle::Solid);
+    EXPECT_EQ(recording.commands().back().style.borderStyle().top, BorderStyle::Solid);
 
     request.control = NativeInputControl::Radio;
     recording.clear();
     appearance.paintInput(recording, request);
     ASSERT_EQ(recording.count(PaintCommandKind::Box), std::size_t{2});
-    EXPECT_EQ(recording.commands().back().style.borderStyle, BorderStyle::Solid);
+    EXPECT_EQ(recording.commands().back().style.borderStyle().top, BorderStyle::Solid);
 }
 
 TEST(InputTest, BaseCheckableAppearanceHasDefaultSolidBorder) {
@@ -453,8 +483,26 @@ TEST(InputTest, BaseCheckableAppearanceHasDefaultSolidBorder) {
     checkbox.type("checkbox");
     const ComputedStyle style = computedStyle(stylesheet, checkbox);
 
-    EXPECT_EQ(style.borderWidth.top, 1.f);
-    EXPECT_EQ(style.borderStyle, BorderStyle::Solid);
+    EXPECT_EQ(style.borderWidth().top.pixels, 1.f);
+    EXPECT_EQ(style.borderStyle().top, BorderStyle::Solid);
+}
+
+TEST(InputTest, BaseCheckableAppearanceFillsOnlyUnspecifiedBorderSides) {
+    StyleSheet stylesheet;
+    ASSERT_TRUE(stylesheet.loadRadia("input[type=checkbox] { appearance: base; border-top-style: none; border-right-width: 5px; }").ok());
+
+    auto checkbox = makeElementValue<HTMLInputElement>();
+    checkbox.type("checkbox");
+    const ComputedStyle style = computedStyle(stylesheet, checkbox);
+
+    EXPECT_FLOAT_EQ(style.borderTopWidth().pixels, 1.f);
+    EXPECT_FLOAT_EQ(style.borderRightWidth().pixels, 5.f);
+    EXPECT_FLOAT_EQ(style.borderBottomWidth().pixels, 1.f);
+    EXPECT_FLOAT_EQ(style.borderLeftWidth().pixels, 1.f);
+    EXPECT_EQ(style.borderTopStyle(), BorderStyle::NoneValue);
+    EXPECT_EQ(style.borderRightStyle(), BorderStyle::Solid);
+    EXPECT_EQ(style.borderBottomStyle(), BorderStyle::Solid);
+    EXPECT_EQ(style.borderLeftStyle(), BorderStyle::Solid);
 }
 
 TEST(InputTest, PaintsResolvedCssOutlineForNativeInput) {
@@ -463,8 +511,8 @@ TEST(InputTest, PaintsResolvedCssOutlineForNativeInput) {
 
     auto input = makeElementValue<HTMLInputElement>();
     input.type("checkbox").setRect({0.f, 0.f, 13.f, 13.f});
-    ElementInternalAccess::setState(input, ElementState::Focused, true);
-    ElementInternalAccess::setState(input, ElementState::FocusVisible, true);
+    ElementInternalAccess::setFocused(input, true);
+    ElementInternalAccess::setFocusVisible(input, true);
     const ComputedStyle style = computedStyle(stylesheet, input);
     RecordingPaintContext recording;
 
@@ -473,10 +521,10 @@ TEST(InputTest, PaintsResolvedCssOutlineForNativeInput) {
     ASSERT_EQ(recording.count(PaintCommandKind::NativeInput), std::size_t{1});
     const PaintCommand* outline = recording.last(PaintCommandKind::Box);
     ASSERT_NE(outline, nullptr);
-    EXPECT_FLOAT_EQ(outline->style.outline.width, 1.f);
-    EXPECT_FLOAT_EQ(outline->style.outline.color.r, 1.f);
-    EXPECT_FLOAT_EQ(outline->style.outline.color.g, 1.f);
-    EXPECT_FLOAT_EQ(outline->style.outline.color.b, 1.f);
+    EXPECT_FLOAT_EQ(outline->style.outline().width, 1.f);
+    EXPECT_FLOAT_EQ(outline->style.outline().color.resolvedColor().r, 1.f);
+    EXPECT_FLOAT_EQ(outline->style.outline().color.resolvedColor().g, 1.f);
+    EXPECT_FLOAT_EQ(outline->style.outline().color.resolvedColor().b, 1.f);
 }
 
 TEST(InputTest, AppliesNativeInputOpacity) {
@@ -490,8 +538,8 @@ TEST(InputTest, AppliesNativeInputOpacity) {
     appearance.paintInput(recording, request);
 
     ASSERT_EQ(recording.count(PaintCommandKind::Box), std::size_t{2});
-    EXPECT_FLOAT_EQ(recording.commands()[0].style.backgroundColor.a, .5f);
-    EXPECT_FLOAT_EQ(recording.commands()[1].style.borderColor.a, .5f);
+    EXPECT_FLOAT_EQ(recording.commands()[0].style.backgroundColor().resolvedColor().a, .5f);
+    EXPECT_FLOAT_EQ(recording.commands()[1].style.borderColor().top.resolvedColor().a, .5f);
 
     request.checked = true;
     recording.clear();
@@ -516,32 +564,36 @@ TEST(InputTest, PaintsRoundRadioDot) {
     ASSERT_EQ(recording.count(PaintCommandKind::Box), std::size_t{3});
     const PaintCommand* dot = recording.last(PaintCommandKind::Box);
     ASSERT_NE(dot, nullptr);
-    EXPECT_EQ(recording.commands()[1].style.borderStyle, BorderStyle::Solid);
+    EXPECT_EQ(recording.commands()[1].style.borderStyle().top, BorderStyle::Solid);
     EXPECT_FLOAT_EQ(dot->rect.w, 7.8f);
     EXPECT_FLOAT_EQ(dot->rect.h, 7.8f);
-    EXPECT_FLOAT_EQ(dot->style.borderRadius.topLeft.horizontal.pixels, 3.9f);
-    EXPECT_FLOAT_EQ(dot->style.borderRadius.topLeft.vertical.pixels, 3.9f);
+    EXPECT_FLOAT_EQ(dot->style.borderRadius().topLeft.horizontal.pixels, 3.9f);
+    EXPECT_FLOAT_EQ(dot->style.borderRadius().topLeft.vertical.pixels, 3.9f);
 }
 
-TEST(InputTest, UsesSchemeInputPalette) {
+TEST(InputTest, UsesSystemColors) {
     NativeAppearanceBase appearance;
     NativeInputPaintRequest request;
     request.control = NativeInputControl::Checkbox;
     request.bounds = {0.f, 0.f, 13.f, 13.f};
     RecordingPaintContext recording;
 
-    request.colorScheme = ColorScheme::Light;
+    request.colorScheme = ColorSchemeMode::Light;
     appearance.paintInput(recording, request);
     ASSERT_EQ(recording.commands().size(), std::size_t{2});
-    const Color lightBackground = recording.commands().front().style.backgroundColor;
-    const Color lightBorder = recording.commands().back().style.borderColor;
+    const Color lightBackground = recording.commands().front().style.backgroundColor().resolvedColor();
+    const Color lightBorder = recording.commands().back().style.borderColor().top.resolvedColor();
+    EXPECT_EQ(lightBackground, systemColorValue(CSSKeyword::Field, ColorSchemeMode::Light));
+    EXPECT_EQ(lightBorder, systemColorValue(CSSKeyword::ButtonBorder, ColorSchemeMode::Light));
 
-    request.colorScheme = ColorScheme::Dark;
+    request.colorScheme = ColorSchemeMode::Dark;
     recording.clear();
     appearance.paintInput(recording, request);
     ASSERT_EQ(recording.commands().size(), std::size_t{2});
-    const Color darkBackground = recording.commands().front().style.backgroundColor;
-    const Color darkBorder = recording.commands().back().style.borderColor;
+    const Color darkBackground = recording.commands().front().style.backgroundColor().resolvedColor();
+    const Color darkBorder = recording.commands().back().style.borderColor().top.resolvedColor();
+    EXPECT_EQ(darkBackground, systemColorValue(CSSKeyword::Field, ColorSchemeMode::Dark));
+    EXPECT_EQ(darkBorder, systemColorValue(CSSKeyword::ButtonBorder, ColorSchemeMode::Dark));
 
     EXPECT_GT(lightBackground.r, darkBackground.r);
     EXPECT_GT(lightBackground.g, darkBackground.g);
@@ -609,7 +661,7 @@ TEST(InputTest, UsesSurfaceMetricsForIntrinsicSize) {
     surface.mount(input);
 
     ComputedStyle nativeStyle;
-    nativeStyle.appearance = AppearanceMode::Auto;
+    nativeStyle.setAppearance(Appearance::Auto);
     const Vec2 size = input.intrinsicSize(styleSheet, nativeStyle, fixedTextMetrics());
     EXPECT_FLOAT_EQ(size.x, 21.f);
     EXPECT_FLOAT_EQ(size.y, 22.f);
@@ -667,13 +719,13 @@ TEST(InputTest, ClearsIndeterminateState) {
     checkbox.type("checkbox").indeterminate(true);
 
     EXPECT_TRUE(checkbox.indeterminate());
-    EXPECT_TRUE(checkbox.hasState(ElementState::Indeterminate));
+    EXPECT_TRUE(checkbox.indeterminate());
 
     checkbox.activate();
 
     EXPECT_TRUE(checkbox.checked());
     EXPECT_FALSE(checkbox.indeterminate());
-    EXPECT_FALSE(checkbox.hasState(ElementState::Indeterminate));
+    EXPECT_FALSE(checkbox.indeterminate());
 }
 
 TEST(InputTest, DispatchesInputBeforeChange) {
@@ -714,20 +766,20 @@ TEST(InputTest, GroupsRadioInputsByName) {
     firstPtr->checked(true);
     EXPECT_TRUE(firstPtr->checked());
     EXPECT_FALSE(secondPtr->checked());
-    EXPECT_FALSE(firstPtr->hasState(ElementState::Indeterminate));
-    EXPECT_FALSE(secondPtr->hasState(ElementState::Indeterminate));
+    EXPECT_FALSE(firstPtr->radioGroupIsIndeterminate());
+    EXPECT_FALSE(secondPtr->radioGroupIsIndeterminate());
 
     secondPtr->checked(true);
     EXPECT_FALSE(firstPtr->checked());
     EXPECT_TRUE(secondPtr->checked());
 
     secondPtr->checked(false);
-    EXPECT_TRUE(firstPtr->hasState(ElementState::Indeterminate));
-    EXPECT_TRUE(secondPtr->hasState(ElementState::Indeterminate));
+    EXPECT_TRUE(firstPtr->radioGroupIsIndeterminate());
+    EXPECT_TRUE(secondPtr->radioGroupIsIndeterminate());
 
     secondPtr->checked(true);
     secondPtr->name("other");
-    EXPECT_TRUE(firstPtr->hasState(ElementState::Indeterminate));
+    EXPECT_TRUE(firstPtr->radioGroupIsIndeterminate());
 }
 
 TEST(InputTest, RadioTraversalSurvivesRemoval) {
@@ -790,7 +842,7 @@ TEST(InputTest, RefreshesRadioGroupOnRemoval) {
     auto detached = checkedPointer->remove();
 
     ASSERT_NE(detached, nullptr);
-    EXPECT_TRUE(remainingPointer->hasState(ElementState::Indeterminate));
+    EXPECT_TRUE(remainingPointer->radioGroupIsIndeterminate());
 }
 
 TEST(InputTest, RefreshesRadioGroupAfterWrapper) {
@@ -810,7 +862,7 @@ TEST(InputTest, RefreshesRadioGroupAfterWrapper) {
     auto detached = root.firstChild()->remove();
 
     ASSERT_NE(detached, nullptr);
-    EXPECT_TRUE(remainingPointer->hasState(ElementState::Indeterminate));
+    EXPECT_TRUE(remainingPointer->radioGroupIsIndeterminate());
 }
 
 TEST(SwitchTest, NotifiesCheckedChange) {

@@ -15,6 +15,10 @@
 #include <utility>
 #include <variant>
 #include <vector>
+#include "CSSKeywords.h"
+#include "CSSValue.h"
+#include "platform/graphics/Color.h"
+#include "Ref.h"
 #include "types.h"
 
 namespace radia::ui {
@@ -26,70 +30,146 @@ struct CustomPropertyValue {
 
 using CustomPropertyMap = std::map<std::string, CustomPropertyValue>;
 
-struct Length {
-    float pixels = 0.f;
-    float percent = 0.f;
+namespace CSS {
+struct Nonnegative {};
+struct UnitInterval {};
+}
 
-    float resolve(float reference) const { return pixels + percent * reference; }
+enum class ColorSchemeMode : std::uint8_t { Light, Dark };
+Color systemColorValue(CSSKeyword keyword, ColorSchemeMode scheme);
+
+namespace Style {
+template<typename Constraint, typename T> struct Number {
+    T value = 0;
+
+    constexpr Number() = default;
+    constexpr explicit Number(T value) : value(value) {}
+    constexpr Number(CSS::Number value) : value(value.value) {}
+
+    friend bool operator==(const Number&, const Number&) = default;
+};
+
+template<typename Constraint, typename T> struct Length {
+    T pixels = 0;
+    T percent = 0;
+
+    T resolve(T reference) const { return pixels + percent * reference; }
     bool isPercentage() const { return percent != 0.f; }
+
+    friend bool operator==(const Length&, const Length&) = default;
 };
 
-struct Percentage {
-    float value = 0.f;
-};
+inline std::optional<float> absolutePixels(CSS::Length length) {
+    switch (length.unit) {
+        case CSS::LengthUnit::Px: return length.value;
+        case CSS::LengthUnit::In: return length.value * 96.f;
+        case CSS::LengthUnit::Cm: return length.value * (96.f / 2.54f);
+        case CSS::LengthUnit::Mm: return length.value * (96.f / 25.4f);
+        case CSS::LengthUnit::Q: return length.value * (96.f / 101.6f);
+        case CSS::LengthUnit::Pt: return length.value * (96.f / 72.f);
+        case CSS::LengthUnit::Pc: return length.value * 16.f;
+        default: return std::nullopt;
+    }
+}
+} // namespace Style
 
-struct LengthPercentage {
-    std::variant<Length, Percentage> value;
+using LengthPercentage = Style::Length<CSS::Nonnegative, float>;
+using Length = LengthPercentage;
+using InsetEdge = std::optional<Length>;
+
+struct LetterSpacingTag {};
+using LetterSpacing = Style::Length<LetterSpacingTag, float>;
+struct WordSpacingTag {};
+using WordSpacing = Style::Length<WordSpacingTag, float>;
+
+struct CornerRadius {
+    LengthPercentage horizontal;
+    LengthPercentage vertical;
+
+    CornerRadius() = default;
+    CornerRadius(CSS::Length value) : horizontal{value.value}, vertical{value.value} {}
+    CornerRadius(LengthPercentage horizontal, LengthPercentage vertical) : horizontal(horizontal), vertical(vertical) {}
+
+    static CornerRadius uniform(LengthPercentage radius) { return {radius, radius}; }
+
+    friend bool operator==(const CornerRadius&, const CornerRadius&) = default;
 };
 
 struct BorderRadius {
-    Length horizontal;
-    Length vertical;
+    CornerRadius topLeft;
+    CornerRadius topRight;
+    CornerRadius bottomRight;
+    CornerRadius bottomLeft;
 
-    static BorderRadius uniform(Length radius) { return {radius, radius}; }
-};
-
-struct BorderRadii {
-    BorderRadius topLeft;
-    BorderRadius topRight;
-    BorderRadius bottomRight;
-    BorderRadius bottomLeft;
-
-    static BorderRadii uniform(Length radius) {
-        const BorderRadius corner = BorderRadius::uniform(radius);
+    BorderRadius() = default;
+    BorderRadius(CornerRadius topLeft, CornerRadius topRight, CornerRadius bottomRight, CornerRadius bottomLeft);
+    static BorderRadius uniform(LengthPercentage radius) {
+        const CornerRadius corner = CornerRadius::uniform(radius);
         return {corner, corner, corner, corner};
     }
+
+    friend bool operator==(const BorderRadius&, const BorderRadius&) = default;
 };
 
-struct LightDarkColor {
-    Color light;
-    Color dark;
+class StyleColor {
+public:
+    StyleColor() = default;
+    StyleColor(Color value) : mValue(value) {}
+    StyleColor(CSS::Keyword::CurrentColor) : mValue(CSSKeyword::CurrentColor) {}
+    StyleColor(CSS::Keyword::Transparent) : mValue(Color{0.f, 0.f, 0.f, 0.f}) {}
+
+    static StyleColor fromColor(Color value) { return StyleColor(value); }
+    static StyleColor current();
+    static StyleColor fromKeyword(CSSKeyword keyword);
+    static std::optional<StyleColor> fromCSS(const CSS::Color&, ColorSchemeMode);
+
+    bool isResolved() const { return std::holds_alternative<Color>(mValue); }
+    bool isCurrentColor() const;
+    bool isSystemColor() const;
+    const Color& resolvedColor() const { return std::get<Color>(mValue); }
+    Color& resolvedColor() { return std::get<Color>(mValue); }
+    void resolve(const Color& currentColor, ColorSchemeMode scheme);
+
+    friend bool operator==(const StyleColor&, const StyleColor&) = default;
+
+private:
+    explicit StyleColor(CSSKeyword keyword) : mValue(keyword) {}
+
+    std::variant<Color, CSSKeyword> mValue{Color{}};
 };
 
-struct ScrollbarColors {
+struct ScrollbarColor {
     bool automatic = true;
-    Color thumb;
-    Color track;
-    std::optional<LightDarkColor> thumbLightDarkColor;
-    std::optional<LightDarkColor> trackLightDarkColor;
+    StyleColor thumb;
+    StyleColor track;
+
+    friend bool operator==(const ScrollbarColor&, const ScrollbarColor&) = default;
 };
 
-struct AccentColor {
-    enum class Kind : uint8_t { Auto, CurrentColor, Color };
+template<typename ValueType, typename KeywordType> struct ValueOrKeyword {
+    using Value = ValueType;
+    using Keyword = KeywordType;
 
-    Kind kind = Kind::Auto;
-    Color color;
-    std::optional<LightDarkColor> lightDarkColor;
+    std::variant<Keyword, Value> mValue;
 
-    static AccentColor currentColor() { return {Kind::CurrentColor, {}}; }
-    static AccentColor fromColor(Color value) { return {Kind::Color, value}; }
-    static AccentColor fromLightDark(LightDarkColor value) { return {Kind::Color, value.dark, std::move(value)}; }
+    ValueOrKeyword(Keyword value) : mValue(value) {}
+    ValueOrKeyword(Value value) : mValue(std::move(value)) {}
+
+    bool isKeyword() const { return std::holds_alternative<Keyword>(mValue); }
+    const Value& value() const { return std::get<Value>(mValue); }
+    Value& value() { return std::get<Value>(mValue); }
+
+    friend bool operator==(const ValueOrKeyword&, const ValueOrKeyword&) = default;
 };
+
+using AccentColor = ValueOrKeyword<StyleColor, CSS::Keyword::Auto>;
 
 enum class DimensionKeyword { Content, MinContent, MaxContent, FitContent };
 
 class Dimension {
 public:
+    constexpr Dimension() = default;
+
     static Dimension fromPixels(float pixels) {
         Dimension result;
         result.mLength = Length{pixels};
@@ -99,6 +179,14 @@ public:
     static Dimension fromLength(Length length) {
         Dimension result;
         result.mLength = length;
+        result.mPercentage = length.percent != 0.f;
+        return result;
+    }
+
+    static Dimension fromPercentage(float percent) {
+        Dimension result;
+        result.mLength = Length{0.f, percent};
+        result.mPercentage = true;
         return result;
     }
 
@@ -112,74 +200,74 @@ public:
     bool isIntrinsic() const { return mKeyword.has_value(); }
     DimensionKeyword intrinsicKeyword() const { return mKeyword.value(); }
     float pixels() const { return mLength.value().pixels; }
-    bool isPercentage() const { return mLength && mLength->isPercentage(); }
+    bool isPercentage() const { return mLength && mPercentage; }
     float resolve(float fallback, float reference = 0.f) const { return mLength ? mLength->resolve(reference) : fallback; }
+
+    friend bool operator==(const Dimension&, const Dimension&) = default;
 
 private:
     std::optional<Length> mLength;
     std::optional<DimensionKeyword> mKeyword;
+    bool mPercentage = false;
 };
 
-class MarginValue {
-public:
-    MarginValue() = default;
+using PreferredSize = Dimension;
+using FlexBasis = Dimension;
+using OptionalDimension = std::optional<Dimension>;
+using MaximumSize = OptionalDimension;
+using MinimumSize = OptionalDimension;
+struct PaddingEdgeTag {};
+using PaddingEdge = Style::Length<PaddingEdgeTag, float>;
 
-    static MarginValue automatic() {
-        MarginValue result;
+class MarginEdge {
+public:
+    MarginEdge() = default;
+
+    static MarginEdge automatic() {
+        MarginEdge result;
         result.mAutomatic = true;
         return result;
     }
 
-    static MarginValue fromPixels(float pixels) { return MarginValue(Length{pixels}); }
+    static MarginEdge fromPixels(float pixels) { return MarginEdge(Length{pixels}); }
+    static MarginEdge fromLength(Length length) { return MarginEdge(length); }
 
     bool isAuto() const { return mAutomatic; }
     float fixedPixels() const { return mAutomatic ? 0.f : mLength.pixels; }
+    float resolve(float reference) const { return mAutomatic ? 0.f : mLength.resolve(reference); }
+
+    friend bool operator==(const MarginEdge&, const MarginEdge&) = default;
 
 private:
-    explicit MarginValue(Length length) : mLength(length) {}
+    explicit MarginEdge(Length length) : mLength(length) {}
 
     bool mAutomatic = false;
     Length mLength;
 };
 
-class GapValue {
+class GapGutter {
 public:
-    GapValue() = default;
+    GapGutter() = default;
 
-    static GapValue fromPixels(float pixels) {
-        GapValue result;
+    static GapGutter fromPixels(float pixels) {
+        GapGutter result;
         result.mLength = Length{pixels};
-        return result;
-    }
-
-    static GapValue fromLength(Length length) {
-        GapValue result;
-        result.mLength = length;
         return result;
     }
 
     float fixedPixels() const { return mLength.pixels; }
 
+    friend bool operator==(const GapGutter&, const GapGutter&) = default;
+
 private:
     Length mLength;
 };
 
-struct MarginInsets {
-    MarginValue top;
-    MarginValue right;
-    MarginValue bottom;
-    MarginValue left;
-
-    float horizontal() const { return left.fixedPixels() + right.fixedPixels(); }
-    float vertical() const { return top.fixedPixels() + bottom.fixedPixels(); }
-    int horizontalAutoCount() const { return static_cast<int>(left.isAuto()) + static_cast<int>(right.isAuto()); }
-    int verticalAutoCount() const { return static_cast<int>(top.isAuto()) + static_cast<int>(bottom.isAuto()); }
-};
-
 struct GradientStop {
-    Color color;
+    StyleColor color;
     float position = 0.f;
-    std::optional<LightDarkColor> lightDarkColor;
+
+    friend bool operator==(const GradientStop&, const GradientStop&) = default;
 };
 
 enum class GradientKind { Linear, Radial, Conic };
@@ -194,12 +282,102 @@ struct Gradient {
     Vec2 center = {.5f, .5f};
     RadialGradientShape radialShape = RadialGradientShape::Ellipse;
     std::vector<GradientStop> stops;
+
+    friend bool operator==(const Gradient&, const Gradient&) = default;
+};
+
+struct StyleImage {
+    using Value = std::variant<std::monostate, std::string, Gradient>;
+
+    Value value;
+
+    friend bool operator==(const StyleImage&, const StyleImage&) = default;
+
+    std::string* resource() { return std::get_if<std::string>(&value); }
+    const std::string* resource() const { return std::get_if<std::string>(&value); }
+    Gradient* gradient() { return std::get_if<Gradient>(&value); }
+    const Gradient* gradient() const { return std::get_if<Gradient>(&value); }
+};
+
+struct BorderImageSliceValue {
+    float value;
+    bool percentage;
+
+    friend bool operator==(const BorderImageSliceValue&, const BorderImageSliceValue&) = default;
+};
+
+struct BorderImageSlice {
+    RectEdges<BorderImageSliceValue> edges;
+    bool fill;
+
+    BorderImageSlice() = default;
+    BorderImageSlice(CSS::Number value)
+        : edges{{value.value, false}, {value.value, false}, {value.value, false}, {value.value, false}}, fill(false) {}
+    BorderImageSlice(CSS::Percentage value)
+        : edges{{value.value, true}, {value.value, true}, {value.value, true}, {value.value, true}}, fill(false) {}
+
+    friend bool operator==(const BorderImageSlice&, const BorderImageSlice&) = default;
+};
+
+enum class BorderImageValueUnit : std::uint8_t { Number, Length, Percentage, Auto };
+
+struct BorderImageWidthValue {
+    float value;
+    BorderImageValueUnit unit;
+
+    friend bool operator==(const BorderImageWidthValue&, const BorderImageWidthValue&) = default;
+};
+
+struct BorderImageWidth {
+    RectEdges<BorderImageWidthValue> edges;
+
+    constexpr BorderImageWidth() = default;
+    constexpr BorderImageWidth(CSS::Number value)
+        : edges{{value.value, BorderImageValueUnit::Number},
+                {value.value, BorderImageValueUnit::Number},
+                {value.value, BorderImageValueUnit::Number},
+                {value.value, BorderImageValueUnit::Number}} {}
+
+    friend bool operator==(const BorderImageWidth&, const BorderImageWidth&) = default;
+};
+
+struct BorderImageOutsetValue {
+    float value;
+    bool multiplier;
+
+    friend bool operator==(const BorderImageOutsetValue&, const BorderImageOutsetValue&) = default;
+};
+
+struct BorderImageOutset {
+    RectEdges<BorderImageOutsetValue> edges;
+
+    constexpr BorderImageOutset() = default;
+    constexpr BorderImageOutset(CSS::Number value) : edges{{value.value, true}, {value.value, true}, {value.value, true}, {value.value, true}} {}
+
+    friend bool operator==(const BorderImageOutset&, const BorderImageOutset&) = default;
+};
+
+enum class BorderImageRepeatMode : std::uint8_t { Stretch, Repeat, Round, Space };
+
+struct BorderImageRepeat {
+    BorderImageRepeatMode horizontal;
+    BorderImageRepeatMode vertical;
+
+    friend bool operator==(const BorderImageRepeat&, const BorderImageRepeat&) = default;
+};
+
+struct BorderImage {
+    StyleImage source;
+    BorderImageSlice slice;
+    BorderImageWidth width;
+    BorderImageOutset outset;
+    BorderImageRepeat repeat;
 };
 
 enum class BackgroundRepeat { Repeat, NoRepeat, RepeatX, RepeatY };
 enum class BackgroundBox { BorderBox, PaddingBox, ContentBox };
 enum class BackgroundAttachment { Scroll, Fixed, Local };
-enum class BackgroundSizeMode { Auto, Cover, Contain, Explicit };
+enum class BackgroundSizeType { Auto, Cover, Contain, Explicit };
 
 struct BackgroundPosition {
     Length x{0.f, 0.f};
@@ -207,14 +385,13 @@ struct BackgroundPosition {
 };
 
 struct BackgroundSize {
-    BackgroundSizeMode mode = BackgroundSizeMode::Auto;
+    BackgroundSizeType mode = BackgroundSizeType::Auto;
     std::optional<Length> width;
     std::optional<Length> height;
 };
 
 struct BackgroundLayer {
-    std::string resource;
-    std::optional<Gradient> gradient;
+    StyleImage image;
     BackgroundPosition position;
     BackgroundSize size;
     BackgroundRepeat repeat = BackgroundRepeat::Repeat;
@@ -241,38 +418,53 @@ struct BoxShadow {
     float vertical = 0.f;
     float blur = 0.f;
     float spread = 0.f;
-    Color color;
-    bool currentColor = false;
+    StyleColor color = StyleColor::current();
     bool inset = false;
-    std::optional<LightDarkColor> lightDarkColor;
+
+    friend bool operator==(const BoxShadow&, const BoxShadow&) = default;
 };
+
+using BoxShadows = std::vector<BoxShadow>;
 
 enum class OutlineStyle { Solid, Dashed };
 
 struct Outline {
     float width = 0.f;
-    float offset = 0.f;
-    Color color;
+    Length offset;
+    StyleColor color;
     OutlineStyle style = OutlineStyle::Solid;
-    std::optional<LightDarkColor> lightDarkColor;
 };
+using OutlineOffset = Length;
 
 struct BlurFilter {
     float stdDeviation = 0.f;
+
+    friend bool operator==(const BlurFilter&, const BlurFilter&) = default;
 };
 
 struct BlurStop {
     float stdDeviation = 0.f;
     float position = 0.f;
+
+    friend bool operator==(const BlurStop&, const BlurStop&) = default;
 };
 
 struct LinearBlurFilter {
     float angleDegrees = 180.f;
     std::vector<BlurStop> stops{{0.f, 0.f}, {0.f, 1.f}};
+
+    friend bool operator==(const LinearBlurFilter&, const LinearBlurFilter&) = default;
 };
 
 using FilterOperation = std::variant<BlurFilter, LinearBlurFilter>;
-using FilterOperations = std::vector<FilterOperation>;
+
+struct Filter {
+    std::vector<FilterOperation> operations;
+
+    bool isNone() const { return operations.empty(); }
+
+    friend bool operator==(const Filter&, const Filter&) = default;
+};
 
 struct GridArea {
     int row = 1;
@@ -280,29 +472,32 @@ struct GridArea {
 };
 
 struct Translate {
-    float x = 0.f;
-    float y = 0.f;
+    Length x;
+    Length y;
+    Length z;
+    bool isNone = true;
+
+    friend bool operator==(const Translate&, const Translate&) = default;
 };
 
-enum class AppearanceMode { Auto, Base, NoneValue };
-enum class ColorScheme { Light, Dark };
+enum class Appearance { Auto, Base, NoneValue };
 
 struct ColorSchemeContext {
-    std::optional<ColorScheme> page;
-    std::optional<ColorScheme> preference;
+    std::optional<ColorSchemeMode> page;
+    std::optional<ColorSchemeMode> preference;
     bool preferenceOverriding = false;
-    ColorScheme defaultScheme = ColorScheme::Dark;
+    ColorSchemeMode defaultScheme = ColorSchemeMode::Dark;
 
     friend bool operator==(const ColorSchemeContext&, const ColorSchemeContext&) = default;
 };
 
-struct ColorSchemeValue {
+struct ColorScheme {
     bool normal = true;
     bool only = false;
-    std::vector<ColorScheme> schemes;
+    std::vector<ColorSchemeMode> schemes;
     std::vector<std::string> customIdentifiers;
 
-    ColorScheme used(const ColorSchemeContext& context) const {
+    ColorSchemeMode used(const ColorSchemeContext& context) const {
         if (normal) return context.page.value_or(context.defaultScheme);
         if (context.preference) {
             if (std::find(schemes.begin(), schemes.end(), *context.preference) != schemes.end()) return *context.preference;
@@ -311,21 +506,21 @@ struct ColorSchemeValue {
         return schemes.empty() ? context.defaultScheme : schemes.front();
     }
 
-    friend bool operator==(const ColorSchemeValue&, const ColorSchemeValue&) = default;
+    friend bool operator==(const ColorScheme&, const ColorScheme&) = default;
 };
 enum class BoxSizing { ContentBox, BorderBox };
-enum class DisplayMode { Inline, InlineBlock, Block, Flex, InlineFlex, Grid, InlineGrid, NoneValue };
+enum class Display { Inline, InlineBlock, Block, Flex, InlineFlex, Grid, InlineGrid, NoneValue };
 
-inline constexpr bool isFlexDisplay(DisplayMode display) noexcept {
-    return display == DisplayMode::Flex || display == DisplayMode::InlineFlex;
+inline constexpr bool isFlexDisplay(Display display) noexcept {
+    return display == Display::Flex || display == Display::InlineFlex;
 }
 
-inline constexpr bool isOrderModifiedContainer(DisplayMode display) noexcept {
-    return isFlexDisplay(display) || display == DisplayMode::Grid || display == DisplayMode::InlineGrid;
+inline constexpr bool isOrderModifiedContainer(Display display) noexcept {
+    return isFlexDisplay(display) || display == Display::Grid || display == Display::InlineGrid;
 }
 enum class BorderStyle { NoneValue, Solid, Outset, Inset };
 enum class FlexDirection { Row, RowReverse, Column, ColumnReverse };
-enum class PositionMode { Static, Relative, Absolute, Fixed, Sticky };
+enum class Position { Static, Relative, Absolute, Fixed, Sticky };
 enum class OverflowAlignment : uint8_t { Default, Unsafe, Safe };
 enum class ItemPosition : uint8_t {
     Auto,
@@ -350,21 +545,45 @@ enum class ContentDistribution : uint8_t { Default, SpaceBetween, SpaceAround, S
 struct SelfAlignmentData {
     ItemPosition position;
     OverflowAlignment overflow;
+
+    friend bool operator==(const SelfAlignmentData&, const SelfAlignmentData&) = default;
+};
+
+struct JustifyItems : SelfAlignmentData {
+    constexpr JustifyItems(ItemPosition position = ItemPosition::Normal, OverflowAlignment overflow = OverflowAlignment::Default, bool legacy = false)
+        : SelfAlignmentData{position, overflow}, legacy(legacy) {}
+
+    bool legacy;
+
+    friend bool operator==(const JustifyItems&, const JustifyItems&) = default;
 };
 
 struct ContentAlignmentData {
     ContentPosition position;
     ContentDistribution distribution;
     OverflowAlignment overflow;
+
+    friend bool operator==(const ContentAlignmentData&, const ContentAlignmentData&) = default;
 };
-enum class FlexWrap { Nowrap, Wrap, WrapReverse };
+enum class FlexWrapMode : std::uint8_t { Nowrap, Wrap, WrapReverse };
+
+struct FlexWrap {
+    FlexWrapMode mode = FlexWrapMode::Nowrap;
+    bool balance = false;
+
+    static constexpr FlexWrap fromRaw(unsigned raw) { return {static_cast<FlexWrapMode>(raw & 0x3u), (raw & 0x4u) != 0}; }
+
+    constexpr unsigned toRaw() const { return static_cast<unsigned>(mode) | (balance ? 0x4u : 0u); }
+
+    friend constexpr bool operator==(const FlexWrap&, const FlexWrap&) = default;
+};
 
 inline constexpr bool isFlexWrapMultiLine(FlexWrap wrap) noexcept {
-    return wrap != FlexWrap::Nowrap;
+    return wrap.mode != FlexWrapMode::Nowrap;
 }
 
 inline constexpr bool isFlexWrapReverse(FlexWrap wrap) noexcept {
-    return wrap == FlexWrap::WrapReverse;
+    return wrap.mode == FlexWrapMode::WrapReverse;
 }
 
 inline constexpr bool isRowFlexDirection(FlexDirection direction) noexcept {
@@ -374,7 +593,7 @@ inline constexpr bool isRowFlexDirection(FlexDirection direction) noexcept {
 inline constexpr bool isReverseFlexDirection(FlexDirection direction) noexcept {
     return direction == FlexDirection::RowReverse || direction == FlexDirection::ColumnReverse;
 }
-enum class Overflow { Visible, Hidden, Scroll, Auto };
+enum class Overflow { Visible, Hidden, Scroll, Auto, Clip };
 enum class ScrollbarWidth { Auto, Thin, NoneValue };
 enum class ScrollbarGutter { Auto, Stable, StableBothEdges };
 enum class PointerEvents { Auto, NoneValue };
@@ -424,173 +643,405 @@ struct CursorValue {
 };
 enum class TextAlign { Left, Center, Right, Start, End, Justify, MatchParent, JustifyAll };
 enum class TextOverflow { Clip, Ellipsis, EllipsisCenter };
-enum class TextWrap { Wrap, NoWrap };
+enum class TextWrapMode { Wrap, NoWrap };
 enum class TextWrapStyle { Auto, Balance, Stable, Pretty, AvoidShortLastLine };
+
 enum class TextDecoration : uint8_t { NoneValue = 0, Underline = 1 << 0, LineThrough = 1 << 1 };
 
 inline constexpr bool hasTextDecoration(TextDecoration value, TextDecoration flag) {
     return (static_cast<uint8_t>(value) & static_cast<uint8_t>(flag)) != 0;
 }
 enum class VerticalAlign { Baseline, Sub, Super, TextTop, TextBottom, Top, Middle, Bottom, Length, Percentage };
-enum class FontFamily { SansSerif, Monospace };
-
-struct RelativeFontWeight {
-    bool lighter = false;
+enum class GenericFontFamily : std::uint8_t {
+    Serif,
+    SansSerif,
+    SystemUI,
+    Cursive,
+    Fantasy,
+    Math,
+    Monospace,
+    UISerif,
+    UISansSerif,
+    UIMonospace,
+    UIRounded,
+    Fangsong,
+    Kai,
+    KhmerMul,
+    Nastaliq
 };
 
-using FontWeightValue = std::variant<float, RelativeFontWeight>;
-
-struct LineHeight {
-    enum class Kind { Normal, Number, Length };
-
-    Kind kind = Kind::Normal;
-    float value = 0.f;
-};
-
-struct FlexWrapValue {
-    FlexWrap mode = FlexWrap::Nowrap;
-    bool balance = false;
-};
+using FontFamily = std::variant<std::string, GenericFontFamily>;
+using FontFamilies = std::vector<FontFamily>;
+enum class FontStyle { Normal, Italic, Oblique };
 
 struct VerticalAlignValue {
-    VerticalAlign value = VerticalAlign::Top;
+    VerticalAlign value = VerticalAlign::Baseline;
     Length offset;
+
+    friend bool operator==(const VerticalAlignValue&, const VerticalAlignValue&) = default;
 };
 
-enum class InheritedStyleProperty : uint32_t {
-    NotInherited = 0,
-    FontFamily = 1 << 0,
-    FontSize = 1 << 1,
-    FontWeight = 1 << 2,
-    FontStyle = 1 << 3,
-    TextDecoration = 1 << 4,
-    LineHeight = 1 << 5,
-    Color = 1 << 6,
-    TextAlign = 1 << 7,
-    CursorPresentation = 1 << 8,
-    LetterSpacing = 1 << 9,
-    WordSpacing = 1 << 10,
-    TextWrapMode = 1 << 11,
-    TextWrapStyle = 1 << 12,
-    Visibility = 1 << 13,
-    ScrollbarColor = 1 << 14,
-    AccentColor = 1 << 15,
-    ColorScheme = 1 << 16
+struct FontWidth {
+    float percentage = 100.f;
+
+    constexpr FontWidth() = default;
+    constexpr FontWidth(float percentage) : percentage(percentage) {}
+    constexpr operator float() const { return percentage; }
+
+    friend bool operator==(const FontWidth&, const FontWidth&) = default;
 };
 
-using InheritedStyleProperties = uint32_t;
+struct FontWeight {
+    float value = 400.f;
+
+    constexpr FontWeight() = default;
+    constexpr explicit FontWeight(float value) : value(value) {}
+
+    friend bool operator==(const FontWeight&, const FontWeight&) = default;
+};
+
+struct FontSelectionRequest {
+    FontWeight weight;
+    FontWidth width;
+    FontStyle style = FontStyle::Normal;
+
+    friend bool operator==(const FontSelectionRequest&, const FontSelectionRequest&) = default;
+};
+
+struct LineHeight {
+    using Number = Style::Number<CSS::Nonnegative, float>;
+    using Length = Style::Length<CSS::Nonnegative, float>;
+
+    constexpr LineHeight(CSS::Keyword::Normal keyword) : mValue(keyword) {}
+    constexpr LineHeight(Number number) : mValue(number) {}
+    constexpr LineHeight(Length length) : mValue(length) {}
+
+    std::variant<CSS::Keyword::Normal, Number, Length> mValue;
+
+    friend bool operator==(const LineHeight&, const LineHeight&) = default;
+};
+
+using AlignContent = ContentAlignmentData;
+using AlignItems = SelfAlignmentData;
+using AlignSelf = SelfAlignmentData;
+using JustifyContent = ContentAlignmentData;
+using JustifySelf = SelfAlignmentData;
+
+struct LineWidth {
+    float pixels = 0.f;
+
+    constexpr LineWidth() = default;
+    constexpr explicit LineWidth(float pixels) : pixels(pixels) {}
+    constexpr LineWidth(CSS::Keyword::Thin) : pixels(1.f) {}
+    constexpr LineWidth(CSS::Keyword::Medium) : pixels(3.f) {}
+    constexpr LineWidth(CSS::Keyword::Thick) : pixels(5.f) {}
+
+    static constexpr std::optional<LineWidth> fromCSSKeyword(CSSKeyword keyword) {
+        switch (keyword) {
+            case CSSKeyword::Thin: return LineWidth{CSS::Keyword::Thin{}};
+            case CSSKeyword::Medium: return LineWidth{CSS::Keyword::Medium{}};
+            case CSSKeyword::Thick: return LineWidth{CSS::Keyword::Thick{}};
+            default: return std::nullopt;
+        }
+    }
+
+    static std::optional<LineWidth> fromCSSValue(const CSSValue& value) {
+        if (const auto* length = std::get_if<CSS::Length>(&value)) {
+            const auto pixels = Style::absolutePixels(*length);
+            if (!pixels) return std::nullopt;
+            return LineWidth{*pixels};
+        }
+        if (const auto* keyword = std::get_if<CSS::Keyword>(&value)) return fromCSSKeyword(keyword->id);
+        return std::nullopt;
+    }
+
+    friend bool operator==(const LineWidth&, const LineWidth&) = default;
+};
+
+struct BorderData {
+    RectEdges<LineWidth> widths;
+    RectEdges<unsigned> styles;
+    RectEdges<StyleColor> colors;
+    BorderRadius radii;
+    BorderImage borderImage;
+
+    BorderData();
+};
+
+struct NonInheritedFlags {
+    bool internalAlignContentBlock;
+    unsigned boxSizing : 1;
+    unsigned display : 3;
+    unsigned overflowX : 3;
+    unsigned overflowY : 3;
+    unsigned position : 3;
+};
+
+struct InheritedFlags {
+    unsigned textAlign : 3;
+    unsigned visibility : 2;
+    unsigned pointerEvents : 1;
+    unsigned textWrapMode : 1;
+    unsigned textWrapStyle : 3;
+};
+
+using FlexGrow = Style::Number<CSS::Nonnegative, float>;
+using FlexShrink = Style::Number<CSS::Nonnegative, float>;
+using Opacity = Style::Number<CSS::UnitInterval, float>;
+
+struct Order {
+    int value = 0;
+
+    friend constexpr bool operator==(const Order&, const Order&) = default;
+};
+
+struct FlexibleBoxData : RefCounted<FlexibleBoxData> {
+    static Ref<FlexibleBoxData> create() { return adoptRef(*new FlexibleBoxData); }
+    Ref<FlexibleBoxData> copy() const;
+
+    FlexGrow flexGrow;
+    FlexShrink flexShrink;
+    FlexBasis flexBasis;
+    unsigned flexDirection : 2;
+    unsigned flexWrap : 3;
+
+private:
+    FlexibleBoxData();
+    FlexibleBoxData(const FlexibleBoxData&);
+};
+
+struct BoxData {
+    PreferredSize width;
+    PreferredSize height;
+    MinimumSize minWidth;
+    MinimumSize minHeight;
+    MaximumSize maxWidth;
+    MaximumSize maxHeight;
+    VerticalAlignValue verticalAlign;
+
+    BoxData();
+};
+
+struct NonInheritedMiscData : RefCounted<NonInheritedMiscData> {
+    static Ref<NonInheritedMiscData> create() { return adoptRef(*new NonInheritedMiscData); }
+    Ref<NonInheritedMiscData> copy() const;
+
+    AlignContent alignContent;
+    AlignItems alignItems;
+    AlignSelf alignSelf;
+    JustifyContent justifyContent;
+    JustifyItems justifyItems;
+    JustifySelf justifySelf;
+    Ref<FlexibleBoxData> flexibleBox;
+    Opacity opacity;
+    Order order;
+    GapGutter rowGap;
+    GapGutter columnGap;
+    Translate translate;
+    BoxShadows shadows;
+    unsigned textDecoration : 2;
+    unsigned textOverflow : 2;
+    unsigned appearance : 2;
+
+private:
+    NonInheritedMiscData();
+    NonInheritedMiscData(const NonInheritedMiscData&);
+};
+
+struct NonInheritedRareData : RefCounted<NonInheritedRareData> {
+    static Ref<NonInheritedRareData> create() { return adoptRef(*new NonInheritedRareData); }
+    Ref<NonInheritedRareData> copy() const;
+
+    Filter backdropFilter;
+    ScrollbarGutter scrollbarGutter;
+    unsigned scrollbarWidth : 2;
+
+private:
+    NonInheritedRareData();
+    NonInheritedRareData(const NonInheritedRareData&);
+};
+
+struct FontDescription {
+    static constexpr float cssMediumSize = 13.f;
+
+    FontDescription();
+
+    float fontSize() const;
+    void setFontSize(float);
+    FontStyle fontStyle() const;
+    void setFontStyle(FontStyle);
+    FontWeight fontWeight() const;
+    void setFontWeight(FontWeight);
+    FontWidth fontWidth() const;
+    void setFontWidth(FontWidth);
+
+    bool operator==(const FontDescription&) const = default;
+
+private:
+    void setFontSize(CSS::Keyword::Medium);
+    void setFontWeight(CSS::Keyword::Normal);
+    void setFontWidth(CSS::Keyword::Normal);
+
+    float mFontSize = 0.f;
+    FontSelectionRequest mSelection;
+};
+
+struct FontCascadeDescription : FontDescription {
+    FontCascadeDescription();
+
+    const FontFamilies& families() const;
+    void setFamilies(FontFamilies);
+
+    bool operator==(const FontCascadeDescription&) const = default;
+
+private:
+    FontFamilies mFamilies;
+};
+
+struct FontData : RefCounted<FontData> {
+    static Ref<FontData> create() { return adoptRef(*new FontData); }
+    Ref<FontData> copy() const;
+
+    FontCascadeDescription fontCascade;
+    LetterSpacing letterSpacing;
+    WordSpacing wordSpacing;
+
+    bool operator==(const FontData&) const;
+
+private:
+    FontData();
+    FontData(const FontData&);
+};
+
+struct InheritedData : RefCounted<InheritedData> {
+    static Ref<InheritedData> create() { return adoptRef(*new InheritedData); }
+    Ref<InheritedData> copy() const;
+
+    Ref<FontData> fontData;
+    StyleColor color;
+    LineHeight lineHeight;
+
+private:
+    friend struct ComputedStyle;
+    InheritedData();
+    InheritedData(const InheritedData&);
+};
+
+struct InheritedRareData : RefCounted<InheritedRareData> {
+    static Ref<InheritedRareData> create() { return adoptRef(*new InheritedRareData); }
+    Ref<InheritedRareData> copy() const;
+
+    AccentColor accentColor;
+    ColorScheme colorScheme;
+    ScrollbarColor scrollbarColor;
+
+private:
+    friend struct ComputedStyle;
+    InheritedRareData();
+    InheritedRareData(const InheritedRareData&);
+};
+
+struct BackgroundData : RefCounted<BackgroundData> {
+    static Ref<BackgroundData> create() { return adoptRef(*new BackgroundData); }
+    Ref<BackgroundData> copy() const;
+
+    StyleColor backgroundColor;
+    Outline outline;
+
+private:
+    BackgroundData();
+    BackgroundData(const BackgroundData&);
+};
+
+struct SurroundData : RefCounted<SurroundData> {
+    static Ref<SurroundData> create() { return adoptRef(*new SurroundData); }
+    Ref<SurroundData> copy() const;
+
+    BorderData border;
+    RectEdges<MarginEdge> margin;
+    RectEdges<PaddingEdge> padding;
+    RectEdges<InsetEdge> inset;
+
+private:
+    SurroundData();
+    SurroundData(const SurroundData&);
+};
+
+struct NonInheritedData : RefCounted<NonInheritedData> {
+    static Ref<NonInheritedData> create() { return adoptRef(*new NonInheritedData); }
+    Ref<NonInheritedData> copy() const;
+
+    Ref<BackgroundData> backgroundData;
+    Ref<SurroundData> surroundData;
+    Ref<NonInheritedMiscData> miscData;
+    Ref<NonInheritedRareData> rareData;
+    BoxData boxData;
+
+private:
+    NonInheritedData();
+    NonInheritedData(const NonInheritedData&);
+};
 
 struct ComputedStyle {
-    AppearanceMode appearance = AppearanceMode::NoneValue;
-    ColorSchemeValue colorScheme;
-    ColorScheme usedColorScheme = ColorScheme::Dark;
-    BoxSizing boxSizing = BoxSizing::ContentBox;
-    DisplayMode display = DisplayMode::Inline;
+public:
+    ComputedStyle();
+    static const ComputedStyle& initialStyle();
+
+#include "ComputedStylePropertiesInlines.h"
+
+    const Outline& outline() const { return mNonInheritedData->backgroundData->outline; }
+    Outline& outline() { return mNonInheritedData.access().backgroundData.access().outline; }
+
+    ColorSchemeMode usedColorScheme = ColorSchemeMode::Dark;
     bool displaySet = false;
-    FlexDirection flexDirection = FlexDirection::Row;
-    PositionMode position = PositionMode::Static;
     std::optional<GridArea> gridArea;
-    Translate translate;
-    Visibility visibility = Visibility::Visible;
-    Color backgroundColor = Color(0.f, 0.f, 0.f, 0.f);
-    std::optional<LightDarkColor> backgroundColorLightDark;
-    bool backgroundColorCurrent = false;
-    Color borderColor = Color(0.f, 0.f, 0.f, 1.f);
-    std::optional<LightDarkColor> borderColorLightDark;
-    bool borderColorCurrent = false;
-    BorderStyle borderStyle = BorderStyle::NoneValue;
-    Color color = Color(0.f, 0.f, 0.f, 1.f);
-    std::optional<LightDarkColor> colorLightDark;
-    AccentColor accentColor;
-    Color strokeColor = Color(0.f, 0.f, 0.f, 1.f);
-    std::optional<LightDarkColor> strokeColorLightDark;
-    bool strokeColorCurrent = false;
-    std::optional<Gradient> strokeGradient;
-    std::optional<Gradient> backgroundGradient;
+    std::variant<StyleColor, StyleImage> stroke = StyleColor::fromColor(Color(0.f, 0.f, 0.f, 1.f));
     std::vector<BackgroundLayer> backgroundLayers;
     std::vector<MaskLayer> maskLayers;
-    std::optional<Gradient> borderGradient;
-    std::vector<BoxShadow> shadows;
-    FilterOperations filter;
-    FilterOperations backdropFilter;
-    Outline outline;
-    BorderRadii borderRadius;
-    EdgeInsets borderWidth;
-    bool borderWidthSet = false;
-    bool borderColorSet = false;
+    Filter filter;
     std::optional<Length> svgStrokeWidth;
     StrokeCap svgStrokeCap = StrokeCap::Butt;
     bool svgStrokeCapSet = false;
-    float fontSize = 13.f;
-    LineHeight lineHeight;
-    std::optional<float> lineHeightPercentage;
-    Length letterSpacing;
-    Length wordSpacing;
-    float opacity = 1.f;
-    Dimension width;
-    Dimension height;
-    std::optional<Dimension> minWidth;
-    std::optional<Dimension> minHeight;
-    std::optional<Dimension> maxWidth;
-    std::optional<Dimension> maxHeight;
-    std::optional<Length> left;
-    std::optional<Length> right;
-    std::optional<Length> top;
-    std::optional<Length> bottom;
-    MarginInsets margin;
-    EdgeInsets padding;
-    GapValue rowGap;
-    GapValue columnGap;
-    float flexGrow = 0.f;
-    float flexShrink = 1.f;
-    Dimension flexBasis;
-    int order = 0;
-    FontFamily fontFamily = FontFamily::SansSerif;
-    U16 fontWeight = 400;
-    std::optional<RelativeFontWeight> fontWeightAdjustment;
-    bool fontItalic = false;
-    TextDecoration textDecoration = TextDecoration::NoneValue;
     TextDecoration textDecorationPropagation = TextDecoration::NoneValue;
     std::optional<std::string> content;
-    TextAlign textAlign = TextAlign::Start;
-    TextOverflow textOverflow = TextOverflow::Clip;
-    TextWrap textWrap = TextWrap::Wrap;
-    TextWrapStyle textWrapStyle = TextWrapStyle::Auto;
-    VerticalAlign verticalAlign = VerticalAlign::Top;
-    Length verticalAlignOffset;
-    bool verticalAlignSet = false;
     LayoutDirection direction = LayoutDirection::LeftToRight;
-    bool flexDirectionSet = false;
-    ContentAlignmentData justifyContent{ContentPosition::Normal, ContentDistribution::Default, OverflowAlignment::Default};
-    bool justifyContentSet = false;
-    SelfAlignmentData justifySelf{ItemPosition::Auto, OverflowAlignment::Default};
-    SelfAlignmentData justifyItems{ItemPosition::Normal, OverflowAlignment::Default};
-    SelfAlignmentData alignItems{ItemPosition::Normal, OverflowAlignment::Default};
-    ContentAlignmentData alignContent{ContentPosition::Normal, ContentDistribution::Default, OverflowAlignment::Default};
-    FlexWrap flexWrap = FlexWrap::Nowrap;
-    bool flexWrapBalance = false;
     bool alignContentBlockCenter = false;
-    SelfAlignmentData alignSelf{ItemPosition::Auto, OverflowAlignment::Default};
     std::optional<float> aspectRatio;
-    Overflow overflowX = Overflow::Visible;
-    Overflow overflowY = Overflow::Visible;
-    ScrollbarWidth scrollbarWidth = ScrollbarWidth::Auto;
-    ScrollbarGutter scrollbarGutter = ScrollbarGutter::Auto;
-    ScrollbarColors scrollbarColor;
-    PointerEvents pointerEvents = PointerEvents::Auto;
     bool pointerEventsSpecified = false;
     CursorStyle cursor = CursorStyle::Auto;
     std::vector<CursorImage> cursorImages;
-    InheritedStyleProperties specifiedInheritedProperties = 0;
-    std::vector<std::string_view> explicitlyInheritedProperties;
+    std::vector<std::string> specifiedProperties;
+    std::vector<std::string> explicitlyInheritedProperties;
     CustomPropertyMap customProperties;
+
+private:
+    InheritedFlags mInheritedFlags;
+    NonInheritedFlags mNonInheritedFlags;
+    Ref<InheritedData> mInheritedData;
+    Ref<InheritedRareData> mInheritedRareData;
+    Ref<NonInheritedData> mNonInheritedData;
 };
 
-void resolveLightDarkColors(ComputedStyle& style, const ColorSchemeContext& context = {});
-void resolveCurrentColors(ComputedStyle& style);
+struct StyleBuilderContext {
+    const ComputedStyle& style;
+    const ComputedStyle* parentStyle;
+    const ComputedStyle& rootStyle;
+
+    StyleBuilderContext(const ComputedStyle& style, const ComputedStyle* parentStyle = nullptr,
+                        const ComputedStyle& rootStyle = ComputedStyle::initialStyle());
+};
+
+struct StyleBuilderState {
+    ComputedStyle& style;
+    const ComputedStyle* parentStyle;
+    StyleBuilderContext context;
+
+    StyleBuilderState(ComputedStyle& style, const ComputedStyle* parentStyle = nullptr,
+                      const ComputedStyle& rootStyle = ComputedStyle::initialStyle());
+};
+
+void resolveStyleColors(ComputedStyle& style, const Color& inheritedColor);
 void normalizeOverflow(ComputedStyle& style);
 void inheritStyle(ComputedStyle& style, const ComputedStyle& parent);
-void resolveRelativeFontWeight(ComputedStyle& style, U16 inheritedWeight = 400);
-void resolvePercentageLineHeight(ComputedStyle& style);
 void applyOpacity(ComputedStyle& style, float inheritedOpacity);
 } // namespace radia::ui

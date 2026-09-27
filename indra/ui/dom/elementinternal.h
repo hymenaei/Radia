@@ -114,7 +114,10 @@ public:
     static const Rect& scrollableOverflow(const Element& element) { return element.mScrollableOverflow; }
     static const Rect& scrollport(const Element& element) { return element.mScrollport; }
     static void setIdScopeRoot(Element& element) { element.setIdScopeRoot(true); }
-    static void setState(Element& element, ElementState state, bool enabled) { element.setState(state, enabled); }
+    static void setHovered(Element& element, bool hovered) { element.setHovered(hovered); }
+    static void setActive(Element& element, bool active) { element.setActive(active); }
+    static void setFocused(Element& element, bool focused) { element.setFocused(focused); }
+    static void setFocusVisible(Element& element, bool focusVisible) { element.setFocusVisible(focusVisible); }
 };
 
 class NodeRef {

@@ -61,7 +61,6 @@ void HTMLInputElement::activateRadio() {
 
 void HTMLInputElement::setCheckedFromRadioGroup(bool checked) {
     if (!isRadioType() || this->checked() == checked) return;
-    mValueState.value = checked;
     updateCheckedState(checked);
     notifyValueState();
 }

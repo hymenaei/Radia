@@ -94,6 +94,7 @@ public:
     void requestSkinReload();
     void setVisibility(bool visible);
     void frame(S32 width, S32 height, F32 paintScale = 1.f, F32 paintOriginX = 0.f, F32 paintOriginY = 0.f);
+    void destroyGL();
     void idle();
     bool hasPointerCapture() const;
     std::optional<CursorStyle> pointerCursor();

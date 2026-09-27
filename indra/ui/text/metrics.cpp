@@ -7,30 +7,29 @@
 #include "text/metrics.h"
 #include <algorithm>
 #include <cmath>
+#include <variant>
 #include "llstring.h"
 #include "style/computedstyle.h"
 #include "text/layout.h"
 
 namespace radia::ui {
 float TextMetrics::usedLetterSpacing(const ComputedStyle& style) const {
-    ComputedStyle unspacedStyle = style;
-    unspacedStyle.letterSpacing = {};
-    unspacedStyle.wordSpacing = {};
-    return style.letterSpacing.resolve(measureText(" ", unspacedStyle).x);
+    return style.letterSpacing().resolve(style.fontSize());
 }
 
 Vec2 FixedTextMetrics::measureText(const std::string& text, const ComputedStyle& style) const {
-    const float lineHeight = std::ceil(style.lineHeight.kind == LineHeight::Kind::Length       ? style.lineHeight.value
-                                           : style.lineHeight.kind == LineHeight::Kind::Normal ? style.fontSize
-                                                                                               : style.fontSize * style.lineHeight.value);
+    const auto& lineHeightValue = style.lineHeight().mValue;
+    const auto* length = std::get_if<LineHeight::Length>(&lineHeightValue);
+    const auto* number = std::get_if<LineHeight::Number>(&lineHeightValue);
+    const float lineHeight = std::ceil(length ? length->pixels : number ? style.fontSize() * number->value : style.fontSize());
     if (text.empty()) return {0.f, lineHeight};
     const LLWString wide = utf8str_to_wstring(text);
     const std::size_t codepointCount = wide.size();
-    const float weightBlend = std::clamp((static_cast<float>(style.fontWeight) - 400.f) / 300.f, 0.f, 1.f);
+    const float weightBlend = std::clamp((style.fontWeight().value - 400.f) / 300.f, 0.f, 1.f);
     const float widthFactor = mRegularWidthFactor + (mBoldWidthFactor - mRegularWidthFactor) * weightBlend;
-    const float averageCharacterWidth = style.fontSize * widthFactor;
-    const float letterSpacing = style.letterSpacing.resolve(averageCharacterWidth);
-    const float wordSpacing = style.wordSpacing.resolve(style.fontSize);
+    const float averageCharacterWidth = style.fontSize() * widthFactor;
+    const float letterSpacing = style.letterSpacing().resolve(style.fontSize());
+    const float wordSpacing = style.wordSpacing().resolve(style.fontSize());
     const std::vector<std::size_t> graphemeBoundaries = detail::graphemeBoundaries(wide);
     const std::size_t graphemeCount = graphemeBoundaries.empty() ? codepointCount : graphemeBoundaries.size() - 1;
     const float letterSpacingWidth = graphemeCount > 1 ? letterSpacing * static_cast<float>(graphemeCount - 1) : 0.f;
@@ -44,9 +43,9 @@ Vec2 FixedTextMetrics::measureText(const std::string& text, const ComputedStyle&
 }
 
 float FixedTextMetrics::usedLetterSpacing(const ComputedStyle& style) const {
-    const float weightBlend = std::clamp((static_cast<float>(style.fontWeight) - 400.f) / 300.f, 0.f, 1.f);
+    const float weightBlend = std::clamp((style.fontWeight().value - 400.f) / 300.f, 0.f, 1.f);
     const float widthFactor = mRegularWidthFactor + (mBoldWidthFactor - mRegularWidthFactor) * weightBlend;
-    return style.letterSpacing.resolve(style.fontSize * widthFactor);
+    return style.letterSpacing().resolve(style.fontSize() * widthFactor);
 }
 
 const TextMetrics& fixedTextMetrics() {

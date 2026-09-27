@@ -23,7 +23,6 @@ class TextMetrics;
 
 struct TextPaintStyle {
     Color color;
-    std::optional<LightDarkColor> colorLightDark;
     TextDecoration textDecoration = TextDecoration::NoneValue;
     TextAlign textAlign = TextAlign::Left;
     LayoutDirection direction = LayoutDirection::LeftToRight;

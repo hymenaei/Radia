@@ -12,12 +12,12 @@
 #include "event/eventcall.h"
 
 namespace radia::ui::detail {
-class AuthoredEventStore final {
+class EventHandlerCallStore final {
 public:
-    static void set(Element& element, std::string_view type, AuthoredEventCall call);
-    static const AuthoredEventCall* find(const Element& element, std::string_view type);
+    static void set(Element& element, std::string_view type, EventHandlerCall call);
+    static const EventHandlerCall* find(const Element& element, std::string_view type);
 
 private:
-    std::map<std::string, AuthoredEventCall, std::less<>> mCalls;
+    std::map<std::string, EventHandlerCall, std::less<>> mCalls;
 };
 } // namespace radia::ui::detail

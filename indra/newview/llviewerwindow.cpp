@@ -6567,6 +6567,7 @@ void LLViewerWindow::stopGL()
         gBumpImageList.destroyGL();
         stop_glerror();
 
+        if (mUIRuntime) mUIRuntime->destroyGL();
         LLFontGL::destroyAllGL();
         stop_glerror();
 

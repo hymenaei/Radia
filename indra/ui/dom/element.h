@@ -18,6 +18,7 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+#include "CSSPseudoSelectors.h"
 #include "dom/node.h"
 #include "event/event.h"
 #include "localizedtext.h"
@@ -100,7 +101,7 @@ struct AccessibleSemantics {
 
 namespace detail {
 struct ElementPrivateData;
-class AuthoredEventStore;
+class EventHandlerCallStore;
 class ElementInternalAccess;
 class ElementConstructionAccess;
 
@@ -168,7 +169,7 @@ class Element : public Node {
     friend class layout_detail::ElementLayoutAccess;
     friend class detail::ElementConstructionAccess;
     friend class detail::NodeMutation;
-    friend class detail::AuthoredEventStore;
+    friend class detail::EventHandlerCallStore;
     friend Node& detail::appendText(Element&, std::string);
     friend Node& detail::appendLocalizedText(Element&, LocalizedText, std::string);
     friend detail::NodeChildren detail::nodes(Element&);
@@ -241,17 +242,20 @@ public:
     void scrollBy(float deltaLeft, float deltaTop);
     ElementList children();
     ConstElementList children() const;
-    uint16_t states() const { return mStates; }
     std::uint64_t styleContextRevision() const;
     bool pointerEvents() const { return mPointerEvents.value_or(defaultPointerEvents()); }
     Visibility visibility() const { return mVisibilityOverride.value_or(Visibility::Visible); }
     bool isDisplayed(const ComputedStyle& style) const;
     bool isVisible(const ComputedStyle& style) const;
     bool disabled() const;
+    bool hovered() const { return mHovered; }
+    bool active() const { return mActive; }
+    bool focused() const { return mFocused; }
+    bool focusVisible() const { return mFocusVisible; }
     bool idScopeRoot() const { return mIdScopeRoot; }
+    LayoutDirection directionality() const;
     bool flowBreakBefore() const;
 
-    bool hasState(ElementState state) const { return radia::ui::hasState(mStates, state); }
     void activate();
     void activateFromLabel();
 
@@ -304,7 +308,8 @@ protected:
     virtual float layoutOverlapBetween(const Element&, const Element&, const ComputedStyle&) const { return 0.f; }
     virtual std::vector<PseudoElement*> generatedPseudoElements() const { return {}; }
     void translateChild(Element& child, const Vec2& delta);
-    void setState(ElementState state, bool enabled);
+    bool setPseudoClassMatch(CSSPseudoClass pseudoClass, bool& ownedValue, bool matches);
+    void invalidatePseudoClass(CSSPseudoClass pseudoClass);
     Element& setDisplayNone(bool displayNone);
 
 private:
@@ -341,12 +346,17 @@ private:
     void invalidateTextTree();
     void invalidateStyleTree(bool layoutAffecting = true, bool propagateToDescendants = true);
     void invalidateStyleTreesFrom(Node* firstChild, bool layoutAffecting, bool propagateToDescendants);
+    void invalidateDirectionalityAncestors();
     void invalidateFollowingSiblingStyleTrees(bool layoutAffecting, bool propagateToDescendants);
     void clearPaintInvalidationTree();
     void notifyTreeAttached();
     void notifyTreeWillBeDetached();
     void notifyTreeDetached();
     void setSurface(Surface* surface);
+    void setHovered(bool hovered);
+    void setActive(bool active);
+    void setFocused(bool focused);
+    void setFocusVisible(bool focusVisible);
     void setAttributeValue(std::string name, std::optional<std::string> value);
     void removeAttributeValue(std::string_view name);
     void rebuildTextContent();
@@ -376,11 +386,15 @@ private:
     std::uint64_t mChildSnapshotRevision = 1;
     std::uint64_t mChildTopologyRevision = 1;
     std::function<void(Element&)> mOnActivate;
-    std::unique_ptr<detail::AuthoredEventStore> mAuthoredEventStore;
+    std::unique_ptr<detail::EventHandlerCallStore> mEventHandlerCallStore;
     std::vector<EventListener> mEventListeners;
     Surface* mSurface = nullptr;
     std::weak_ptr<char> mSurfaceLifetime;
-    uint16_t mStates = 0;
+    bool mHovered = false;
+    bool mActive = false;
+    bool mFocused = false;
+    bool mFocusVisible = false;
+    bool mDisabled = false;
     std::optional<bool> mPointerEvents;
     std::optional<Visibility> mVisibilityOverride;
     std::optional<bool> mDisplayNoneOverride;

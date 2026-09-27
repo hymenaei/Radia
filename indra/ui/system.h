@@ -74,6 +74,7 @@ public:
     LocalizedText t(std::string id, LocalizationArguments arguments = {}) const;
     std::string resolveHTML(const LocalizedText& text) const;
     const std::string* resourceData(std::string_view reference) const;
+    const std::vector<FontFace>& fontFaces() const;
     const SvgImage* resourceSvg(std::string_view reference) const;
     const RasterImage* resourceRaster(std::string_view reference) const;
     std::uint64_t generation() const { return mGenerationNumber; }

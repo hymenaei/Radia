@@ -10,6 +10,7 @@
 #include "dom/document.h"
 #include "dom/elementinternal.h"
 #include "dom/text.h"
+#include "Geometry.h"
 #include "html/element.h"
 #include "html/elementnames.h"
 #include "html/floater.h"
@@ -29,18 +30,18 @@ using detail::NodeRef;
 namespace {
 void applyDirection(ComputedStyle& style, LayoutDirection direction) {
     style.direction = direction;
-    if (style.textAlign == TextAlign::Start) style.textAlign = direction == LayoutDirection::RightToLeft ? TextAlign::Right : TextAlign::Left;
-    else if (style.textAlign == TextAlign::End) style.textAlign = direction == LayoutDirection::RightToLeft ? TextAlign::Left : TextAlign::Right;
+    if (style.textAlign() == TextAlign::Start) style.setTextAlign(direction == LayoutDirection::RightToLeft ? TextAlign::Right : TextAlign::Left);
+    else if (style.textAlign() == TextAlign::End) style.setTextAlign(direction == LayoutDirection::RightToLeft ? TextAlign::Left : TextAlign::Right);
 }
 
-bool hasBorderRadius(const BorderRadii& radii) {
-    const auto hasRadius = [](const BorderRadius& radius) {
+bool hasBorderRadius(const BorderRadius& radii) {
+    const auto hasRadius = [](const CornerRadius& radius) {
         return radius.horizontal.pixels != 0.f || radius.horizontal.percent != 0.f || radius.vertical.pixels != 0.f || radius.vertical.percent != 0.f;
     };
     return hasRadius(radii.topLeft) || hasRadius(radii.topRight) || hasRadius(radii.bottomRight) || hasRadius(radii.bottomLeft);
 }
 const Element* scrollbarClipOwner(const Element& element, const ComputedStyle& style) {
-    if (style.borderWidth.any() || hasBorderRadius(style.borderRadius)) return &element;
+    if (borderWidths(style).any() || hasBorderRadius(style.borderRadius())) return &element;
     for (const Element* ancestor = element.parentElement(); ancestor; ancestor = ancestor->parentElement())
         if (dynamic_cast<const HTMLFloaterElement*>(ancestor)) return ancestor;
     return nullptr;
@@ -71,7 +72,7 @@ void Surface::paint(PaintContext& context, float scale, Vec2 pixelOrigin) {
     context.pushClip(mViewport, scale);
     for (const MountList& layerMounts : mMounts) {
         for (const MountPtr& mount : layerMounts)
-            if (mount && mount->root && styles.style(*mount->root).position != PositionMode::Fixed)
+            if (mount && mount->root && styles.style(*mount->root).position() != Position::Fixed)
                 paintElement(*mount->root, context, scale, 1.f, styles, {});
         for (const MountPtr& mount : layerMounts) {
             if (!mount || !mount->root) continue;
@@ -81,7 +82,7 @@ void Surface::paint(PaintContext& context, float scale, Vec2 pixelOrigin) {
                 if (fixedElement) {
                     float inheritedOpacity = 1.f;
                     for (const Element* ancestor = fixedElement->parentElement(); ancestor; ancestor = ancestor->parentElement())
-                        inheritedOpacity *= styles.style(*ancestor).opacity;
+                        inheritedOpacity *= styles.style(*ancestor).opacity().value;
                     paintElement(*fixedElement, context, scale, inheritedOpacity, styles, {});
                 }
         }
@@ -101,11 +102,11 @@ void Surface::paintElement(Element& element, PaintContext& context, float scale,
     styles.styleGeneratedPseudoElements(*current, unresolved);
     current = observation.get();
     if (!current || !observation.layoutValid() || !observation.styleValid()) return;
-    const float childOpacity = inheritedOpacity * unresolved.opacity;
+    const float childOpacity = inheritedOpacity * unresolved.opacity().value;
     const LayoutDirection direction = layoutDirection();
-    const bool needsOpacity = inheritedOpacity != 1.f || unresolved.opacity != 1.f;
+    const bool needsOpacity = inheritedOpacity != 1.f || unresolved.opacity().value != 1.f;
     const bool needsDirection =
-        unresolved.direction != direction || unresolved.textAlign == TextAlign::Start || unresolved.textAlign == TextAlign::End;
+        unresolved.direction != direction || unresolved.textAlign() == TextAlign::Start || unresolved.textAlign() == TextAlign::End;
     std::optional<ComputedStyle> paintedStorage;
     const ComputedStyle* painted = &unresolved;
     if (needsOpacity || needsDirection) {
@@ -114,11 +115,11 @@ void Surface::paintElement(Element& element, PaintContext& context, float scale,
         if (needsDirection) applyDirection(*paintedStorage, direction);
         painted = &*paintedStorage;
     }
-    const bool paintsBodyCanvasBackground = current->elementName() == kBodyTag.localName
+    const bool paintsBodyCanvasBackground = current->elementName() == HTMLTagName(HTMLTag::Body)
         && !observation.parent
-        && (painted->backgroundColor.a > 0.f || painted->backgroundGradient.has_value() || !painted->backgroundLayers.empty());
-    const bool clipsX = unresolved.overflowX != Overflow::Visible;
-    const bool clipsY = unresolved.overflowY != Overflow::Visible;
+        && (painted->backgroundColor().resolvedColor().a > 0.f || !painted->backgroundLayers.empty());
+    const bool clipsX = unresolved.overflowX() != Overflow::Visible;
+    const bool clipsY = unresolved.overflowY() != Overflow::Visible;
     const bool clipsChildren = clipsX || clipsY;
     const ClipAxes clipAxes = (clipsX ? ClipAxes::X : ClipAxes::NoAxes) | (clipsY ? ClipAxes::Y : ClipAxes::NoAxes);
     const std::optional<BackgroundPaintContext> previousBackgroundContext = context.backgroundPaintContext();
@@ -128,18 +129,16 @@ void Surface::paintElement(Element& element, PaintContext& context, float scale,
     backgroundContext.viewport = mViewport;
     backgroundContext.scrollport = ElementInternalAccess::scrollport(*current);
     context.setBackgroundPaintContext(backgroundContext);
-    if (!painted->filter.empty() || !painted->backdropFilter.empty() || !painted->maskLayers.empty())
+    if (!painted->filter.isNone() || !painted->backdropFilter().isNone() || !painted->maskLayers.empty())
         context.beginEffects(current->paintBounds(), *painted, scale);
     if (paintsBodyCanvasBackground) {
         ComputedStyle canvasBackground;
-        canvasBackground.backgroundColor = painted->backgroundColor;
-        canvasBackground.backgroundGradient = painted->backgroundGradient;
+        canvasBackground.setBackgroundColor(painted->backgroundColor().resolvedColor());
         canvasBackground.backgroundLayers = painted->backgroundLayers;
         context.paintBox(mViewport, canvasBackground);
 
         ComputedStyle bodyStyle = *painted;
-        bodyStyle.backgroundColor = Color(0.f, 0.f, 0.f, 0.f);
-        bodyStyle.backgroundGradient.reset();
+        bodyStyle.setBackgroundColor(Color(0.f, 0.f, 0.f, 0.f));
         bodyStyle.backgroundLayers.clear();
         current->paint(context, bodyStyle, scale);
     } else current->paint(context, *painted, scale);
@@ -175,7 +174,7 @@ void Surface::paintElement(Element& element, PaintContext& context, float scale,
             if (child
                 && child->parentElement() == observation.get()
                 && isRootedInSurface(child)
-                && styles.style(*child).position != PositionMode::Fixed)
+                && styles.style(*child).position() != Position::Fixed)
                 paintElement(*child, context, scale, childOpacity, styles, paintTranslation + contentTranslation);
         }
         if (clipsChildren) {
@@ -189,7 +188,7 @@ void Surface::paintElement(Element& element, PaintContext& context, float scale,
         if (geometry.horizontal.visible || geometry.vertical.visible || geometry.hasCorner) {
             NativeScrollbarPaintRequest request;
             request.geometry = projectScrollbarGeometry(geometry);
-            request.colors = painted->scrollbarColor;
+            request.colors = painted->scrollbarColor();
             request.mode = mScrollLayoutOptions.scrollbarMode;
             request.metrics = scrollbarMetrics(request.mode);
             request.direction = painted->direction;
@@ -199,8 +198,8 @@ void Surface::paintElement(Element& element, PaintContext& context, float scale,
                 const ComputedStyle* clipStyle = clipOwner == current ? painted : &styles.style(*clipOwner);
                 request.clip.enabled = true;
                 request.clip.borderBox = clipOwner->rect();
-                request.clip.borderRadius = clipStyle->borderRadius;
-                request.clip.borderWidth = clipStyle->borderWidth;
+                request.clip.borderRadius = clipStyle->borderRadius();
+                request.clip.borderWidth = borderWidths(*clipStyle);
             }
             if (mScrollbarHover) {
                 if (scrollbarTargetMatches(*mScrollbarHover, *current, ScrollbarAxis::Horizontal, ScrollbarPart::NoneValue))
@@ -221,6 +220,6 @@ void Surface::paintElement(Element& element, PaintContext& context, float scale,
             context.popClip();
         }
     }
-    if (!painted->filter.empty() || !painted->backdropFilter.empty() || !painted->maskLayers.empty()) context.endEffects();
+    if (!painted->filter.isNone() || !painted->backdropFilter().isNone() || !painted->maskLayers.empty()) context.endEffects();
 }
 } // namespace radia::ui

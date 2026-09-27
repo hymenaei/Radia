@@ -174,8 +174,8 @@ Vec2 Surface::preferredFloaterSize(HTMLFloaterElement& floater) {
                                   const std::optional<Dimension>& maximum, float fallback, float reference) {
         return layout_detail::styledBoxDimension(style, horizontal, value, minimum, maximum, fallback, reference);
     };
-    return {resolve(true, style.width, style.minWidth, style.maxWidth, measured.x, mViewport.w),
-            resolve(false, style.height, style.minHeight, style.maxHeight, measured.y, mViewport.h)};
+    return {resolve(true, style.width(), style.minWidth(), style.maxWidth(), measured.x, mViewport.w),
+            resolve(false, style.height(), style.minHeight(), style.maxHeight(), measured.y, mViewport.h)};
 }
 
 std::optional<Rect> Surface::initialFloaterRect(HTMLFloaterElement& floater) {
@@ -186,12 +186,16 @@ std::optional<Rect> Surface::initialFloaterRect(HTMLFloaterElement& floater) {
     const StylePass::TraversalScope traversal = styles.enterTraversal();
     const ComputedStyle& style = styles.style(floater);
     if (!floaterObservation.layoutValid() || !floaterObservation.styleValid()) return std::nullopt;
-    const float x = style.left ? style.left->resolve(mViewport.w)
-        : style.right          ? mViewport.w - style.right->resolve(mViewport.w) - size.x
-                               : std::max(0.f, (mViewport.w - size.x) * .5f);
-    const float y = style.top ? mViewport.h - style.top->resolve(mViewport.h) - size.y
-        : style.bottom        ? style.bottom->resolve(mViewport.h)
-                              : std::max(0.f, (mViewport.h - size.y) * .5f);
+    const InsetEdge left = style.left();
+    const InsetEdge right = style.right();
+    const InsetEdge top = style.top();
+    const InsetEdge bottom = style.bottom();
+    const float x = left ? left->resolve(mViewport.w)
+        : right          ? mViewport.w - right->resolve(mViewport.w) - size.x
+                         : std::max(0.f, (mViewport.w - size.x) * .5f);
+    const float y = top ? mViewport.h - top->resolve(mViewport.h) - size.y
+        : bottom        ? bottom->resolve(mViewport.h)
+                        : std::max(0.f, (mViewport.h - size.y) * .5f);
     return Rect{x, y, size.x, size.y};
 }
 

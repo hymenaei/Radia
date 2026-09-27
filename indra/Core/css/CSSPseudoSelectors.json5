@@ -1,0 +1,40 @@
+{
+  "pseudo-classes": {
+    "active": {},
+    "checked": {},
+    "dir": {
+      "argument_requirement": "required",
+      "argument_syntax": "ident"
+    },
+    "disabled": {},
+    "focus": {},
+    "focus-visible": {},
+    "host": {
+      "argument_requirement": "optional",
+      "argument_syntax": "compound-selector",
+      "specificity": "class-plus-argument"
+    },
+    "hover": {},
+    "indeterminate": {},
+    "invalid": {},
+    "is": {
+      "argument_requirement": "required",
+      "argument_syntax": "forgiving-selector-list",
+      "specificity": "argument"
+    },
+    "minimized": {},
+    "root": {},
+    "where": {
+      "argument_requirement": "required",
+      "argument_syntax": "forgiving-selector-list",
+      "specificity": "zero"
+    }
+  },
+
+  "pseudo-elements": {
+    "checkmark": {"user_agent": true},
+    "slider-fill": {"user_agent": true},
+    "slider-thumb": {"user_agent": true},
+    "slider-track": {"user_agent": true}
+  }
+}

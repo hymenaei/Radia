@@ -9,9 +9,9 @@
 #include "resource/elementdefinition.h"
 
 namespace radia::ui {
-HTMLPanelElement::HTMLPanelElement() : HTMLElement(kPanelTag.localName) {}
+HTMLPanelElement::HTMLPanelElement() : HTMLElement(HTMLTagName(HTMLTag::Panel)) {}
 
 ResourceElementDefinition detail::ElementDefinitions::panel() {
-    return defineElement<HTMLPanelElement>(kPanelTag.localName).attributes({allowedAttribute("filename")}).resourceRoot().build();
+    return defineElement<HTMLPanelElement>(HTMLTagName(HTMLTag::Panel)).attributes({allowedAttribute("filename")}).resourceRoot().build();
 }
 } // namespace radia::ui

@@ -12,11 +12,13 @@
 #include <limits>
 #include <memory>
 #include <utility>
+#include <variant>
 #include <fribidi.h>
 #include <unicode/ubrk.h>
 #include <unicode/utf16.h>
 #include "css/stylesheet.h"
 #include "dom/element.h"
+#include "Geometry.h"
 #include "llstring.h"
 #include "paint/paintcontext.h"
 #include "style/computedstyle.h"
@@ -462,7 +464,7 @@ TextLine visualRuns(const TextLine& line, LayoutDirection direction, const TextM
 
 TextLine truncateLine(const TextLine& line, float available, float fallbackHeight, const ComputedStyle& style, const TextMetrics& metrics) {
     if (lineSize(line, fallbackHeight, metrics).x <= available) return line;
-    if (style.textOverflow == TextOverflow::Clip) return line;
+    if (style.textOverflow() == TextOverflow::Clip) return line;
     const std::vector<TextChunk> clusters = characterClusters(line, metrics);
     if (clusters.empty()) return {};
 
@@ -480,7 +482,7 @@ TextLine truncateLine(const TextLine& line, float available, float fallbackHeigh
 
     std::size_t prefixCount = 0;
     std::size_t suffixBegin = clusters.size();
-    if (style.textOverflow == TextOverflow::Ellipsis) {
+    if (style.textOverflow() == TextOverflow::Ellipsis) {
         std::size_t firstFailing = clusters.size() + 1;
         while (prefixCount + 1 < firstFailing) {
             const std::size_t candidate = prefixCount + (firstFailing - prefixCount) / 2;
@@ -544,16 +546,16 @@ LaidOutText layoutText(const std::vector<TextLine>& hardLines, const ComputedSty
     const float fallbackHeight = metrics.measureText({}, style).y;
     for (const TextLine& hardLine : hardLines) {
         std::vector<TextLine> visualLines;
-        if (availableWidth && style.textWrap == TextWrap::Wrap)
-            if (style.textWrapStyle == TextWrapStyle::Balance) visualLines = balancedWrapLine(hardLine, *availableWidth, fallbackHeight, metrics);
-            else if (style.textWrapStyle == TextWrapStyle::Pretty) visualLines = prettyWrapLine(hardLine, *availableWidth, fallbackHeight, metrics);
-            else if (style.textWrapStyle == TextWrapStyle::AvoidShortLastLine)
+        if (availableWidth && style.textWrapMode() == TextWrapMode::Wrap)
+            if (style.textWrapStyle() == TextWrapStyle::Balance) visualLines = balancedWrapLine(hardLine, *availableWidth, fallbackHeight, metrics);
+            else if (style.textWrapStyle() == TextWrapStyle::Pretty) visualLines = prettyWrapLine(hardLine, *availableWidth, fallbackHeight, metrics);
+            else if (style.textWrapStyle() == TextWrapStyle::AvoidShortLastLine)
                 visualLines = avoidShortLastLine(hardLine, *availableWidth, fallbackHeight, metrics);
             else visualLines = wrapLine(hardLine, *availableWidth, fallbackHeight, metrics);
         else visualLines.push_back(hardLine);
 
         for (TextLine& line : visualLines) {
-            if (availableWidth && applyOverflow && style.textWrap == TextWrap::NoWrap && style.overflowX == Overflow::Hidden)
+            if (availableWidth && applyOverflow && style.textWrapMode() == TextWrapMode::NoWrap && style.overflowX() == Overflow::Hidden)
                 line = truncateLine(line, *availableWidth, fallbackHeight, style, metrics);
             if (visualOrder) line = visualRuns(line, style.direction, metrics);
 
@@ -621,31 +623,41 @@ void mixStyleValue(std::size_t& hash, float value) {
     mixStyleValue(hash, std::hash<float>{}(value));
 }
 
-void mixLength(std::size_t& hash, const Length& value) {
+template<typename Constraint> void mixLength(std::size_t& hash, const Style::Length<Constraint, float>& value) {
     mixStyleValue(hash, value.pixels);
     mixStyleValue(hash, value.percent);
 }
 
 std::size_t textStyleFingerprint(const ComputedStyle& style) {
     std::size_t hash = 0;
-    mixStyleValue(hash, static_cast<std::size_t>(style.fontFamily));
-    mixStyleValue(hash, style.fontSize);
-    mixStyleValue(hash, static_cast<std::size_t>(style.fontWeight));
-    mixStyleValue(hash, static_cast<std::size_t>(style.fontItalic));
-    mixStyleValue(hash, static_cast<std::size_t>(style.lineHeight.kind));
-    mixStyleValue(hash, style.lineHeight.value);
-    mixLength(hash, style.letterSpacing);
-    mixLength(hash, style.wordSpacing);
+    for (const FontFamily& family : style.fontFamily()) {
+        mixStyleValue(hash, family.index());
+        if (const auto* name = std::get_if<std::string>(&family)) mixStyleValue(hash, std::hash<std::string>{}(*name));
+        else mixStyleValue(hash, static_cast<std::size_t>(std::get<GenericFontFamily>(family)));
+    }
+    mixStyleValue(hash, style.fontSize());
+    mixStyleValue(hash, style.fontWeight().value);
+    mixStyleValue(hash, style.fontWidth().percentage);
+    mixStyleValue(hash, static_cast<std::size_t>(style.fontStyle()));
+    const auto& lineHeightValue = style.lineHeight().mValue;
+    mixStyleValue(hash, lineHeightValue.index());
+    if (const auto* number = std::get_if<LineHeight::Number>(&lineHeightValue)) mixStyleValue(hash, number->value);
+    if (const auto* length = std::get_if<LineHeight::Length>(&lineHeightValue)) {
+        mixStyleValue(hash, length->pixels);
+        mixStyleValue(hash, length->percent);
+    }
+    mixLength(hash, style.letterSpacing());
+    mixLength(hash, style.wordSpacing());
     return hash;
 }
 
 std::size_t textLayoutFingerprint(const ComputedStyle& style, bool visualOrder, bool applyOverflow) {
     std::size_t hash = 0;
-    mixStyleValue(hash, static_cast<std::size_t>(style.textWrap));
-    mixStyleValue(hash, static_cast<std::size_t>(style.textWrapStyle));
+    mixStyleValue(hash, static_cast<std::size_t>(style.textWrapMode()));
+    mixStyleValue(hash, static_cast<std::size_t>(style.textWrapStyle()));
     if (applyOverflow) {
-        mixStyleValue(hash, static_cast<std::size_t>(style.textOverflow));
-        mixStyleValue(hash, static_cast<std::size_t>(style.overflowX));
+        mixStyleValue(hash, static_cast<std::size_t>(style.textOverflow()));
+        mixStyleValue(hash, static_cast<std::size_t>(style.overflowX()));
     }
     if (visualOrder) mixStyleValue(hash, static_cast<std::size_t>(style.direction));
     return hash;
@@ -660,9 +672,9 @@ void TextLayout::setText(std::string text) {
 Vec2 TextLayout::measure(const TextMetrics& metrics, const ComputedStyle& style, const StyleSheet& styleSheet, const Element& owner,
                          std::optional<float> resolvedWidth) const {
     std::optional<float> availableWidth;
-    if (resolvedWidth) availableWidth = std::max(0.f, *resolvedWidth - style.padding.horizontal());
-    else if (!style.width.isAuto() && !style.width.isPercentage() && !style.width.isIntrinsic())
-        availableWidth = std::max(0.f, style.width.pixels() - style.padding.horizontal());
+    if (resolvedWidth) availableWidth = std::max(0.f, *resolvedWidth - paddingPixels(style).horizontal());
+    else if (!style.width().isAuto() && !style.width().isPercentage() && !style.width().isIntrinsic())
+        availableWidth = std::max(0.f, style.width().pixels() - paddingPixels(style).horizontal());
     return cachedLayout(metrics, style, &styleSheet, owner, availableWidth, false, false).size;
 }
 
@@ -675,10 +687,10 @@ void TextLayout::paint(PaintContext& context, const Rect& rect, const ComputedSt
                        const Element& owner) const {
     const TextMetrics& metrics = context.textMetrics();
     const detail::LaidOutText& layout = cachedLayout(metrics, style, styleSheet, owner, rect.w, true, true);
-    const TextPaintStyle paintStyle{style.color, style.colorLightDark,
-                                    style.textDecorationPropagation == TextDecoration::NoneValue ? style.textDecoration
+    const TextPaintStyle paintStyle{style.color().resolvedColor(),
+                                    style.textDecorationPropagation == TextDecoration::NoneValue ? style.textDecoration()
                                                                                                  : style.textDecorationPropagation,
-                                    style.textAlign, style.direction};
+                                    style.textAlign(), style.direction};
     paintLayout(context, rect, paintStyle, layout, metrics);
 }
 
@@ -724,10 +736,9 @@ void TextLayout::paintLayout(PaintContext& context, const Rect& rect, const Text
             const TextRun& run = line.runs[runIndex];
             const auto paintRun = [&](const std::string& value, float width) {
                 ComputedStyle runStyle = run.style;
-                runStyle.color = style.color;
-                runStyle.colorLightDark = style.colorLightDark;
-                runStyle.textDecoration = style.textDecoration;
-                runStyle.textAlign = TextAlign::Left;
+                runStyle.setColor(style.color);
+                runStyle.setTextDecoration(style.textDecoration);
+                runStyle.setTextAlign(TextAlign::Left);
                 context.paintText(value, {x, y, width, line.size.y}, runStyle);
                 x += width;
             };

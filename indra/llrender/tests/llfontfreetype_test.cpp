@@ -41,14 +41,19 @@
 #include "../llfontgl.h"        // sUseDarkEmojiPalette static for palette test
 
 #include "../test/lltut.h"
+#include "llfile.h"
+#include "llwindow.h"
 
 #if LL_MESA_HEADLESS
 #  include "../llfontbitmapcache.h"
 #  include "llheadlessgl_fixture.h"
 #endif
 
+#include <array>
 #include <cstdio>
 #include <string>
+#include <string_view>
+#include <utility>
 
 namespace
 {
@@ -429,6 +434,91 @@ namespace tut
         idx = 0;
         ensure_equals("emoji codepoint passes functor and resolves to Twemoji",
                       head->selectShapingFace(0x1F525, idx), emo.get());
+    }
+
+    // Registered font bytes outlive the caller buffer and use a distinct
+    // face-cache identity for each resource generation, even at the same URL.
+    template<> template<> void llfontfreetype_object::test<13>() {
+        const std::string regularPath = std::string(kFontDir) + "DejaVuSans.woff2";
+        const std::string boldPath = std::string(kFontDir) + "DejaVuSans-Bold.woff2";
+        if (!fileExists(regularPath) || !fileExists(boldPath)) skip("DejaVuSans and DejaVuSans-Bold required");
+
+        constexpr std::string_view sourceName = "skins/test/fonts/chat.woff2";
+        std::string regularKey;
+        {
+            std::string bytes = LLFile::getContents(regularPath);
+            ensure("regular font bytes loaded", !bytes.empty());
+            regularKey = gFontManagerp->registerFontBytes(sourceName, std::move(bytes));
+        }
+
+        std::string boldKey;
+        {
+            std::string bytes = LLFile::getContents(boldPath);
+            ensure("bold font bytes loaded", !bytes.empty());
+            boldKey = gFontManagerp->registerFontBytes(sourceName, std::move(bytes));
+        }
+
+        ensure("registered source keys are valid", !regularKey.empty() && !boldKey.empty());
+        ensure("same URL gets a new source key per generation", regularKey != boldKey);
+        ensure("source keys use the reserved font URI namespace", regularKey.starts_with("radia://font/") && boldKey.starts_with("radia://font/"));
+
+        LLPointer<LLFontFreetype> regular = loadFt(regularKey);
+        LLPointer<LLFontFreetype> regularAgain = loadFt(regularKey);
+        LLPointer<LLFontFreetype> bold = loadFt(boldKey);
+        ensure("memory fonts load after caller buffers are destroyed", regular.notNull() && regularAgain.notNull() && bold.notNull());
+        ensure("regular face has glyphs", regular->getCharGlyphIndex(L'A') != 0);
+        ensure_equals("same source key shares its cached face", regular->getFontFace(), regularAgain->getFontFace());
+        ensure_not_equals("new generation does not reuse the old face", regular->getFontFace(), bold->getFontFace());
+        ensure("second generation loaded its bold contents", (bold->getStyle() & LLFontGL::BOLD) != 0);
+
+        gFontManagerp->collectGarbage();
+        ensure("live faces keep their registered bytes through collection",
+               regular->getCharGlyphIndex(L'B') != 0 && bold->getCharGlyphIndex(L'B') != 0);
+
+        const ALFontFace* oldRegularFace = regular->getFontFace();
+        regular->reset(/*vert_dpi=*/120.f, /*horz_dpi=*/120.f);
+        ensure_not_equals("DPI reset reloads through the same memory source", regular->getFontFace(), oldRegularFace);
+        ensure("DPI-reset face still resolves glyphs", regular->getCharGlyphIndex(L'C') != 0);
+    }
+
+    // LLFontGL exposes the same ordered fallback lookup used by its renderer.
+    template<> template<> void llfontfreetype_object::test<14>() {
+        const std::string head_path = std::string(kFontDir) + "DejaVuSans.woff2";
+        const std::string fallback_path = std::string(kFontDir) + "SourceHanSans-Regular.woff2";
+        if (!fileExists(head_path) || !fileExists(fallback_path)) skip("DejaVuSans + SourceHanSans required");
+
+        LLFontGL head;
+        LLFontGL fallback;
+        ensure("head font loaded", head.loadFace(head_path, 14.f, 96.f, 96.f, true, 0, EFontHinting::DEFAULT, 0));
+        ensure("fallback font loaded", fallback.loadFace(fallback_path, 14.f, 96.f, 96.f, true, 0, EFontHinting::DEFAULT, 0));
+        head.addFallbackFont(fallback);
+        head.addFallbackFont(fallback);
+        ensure_equals("repeated LLFontGL attachment stays idempotent", head.getFontFreetype()->getFallbackFonts().size(), 1u);
+
+        U32 glyph_index = 0;
+        ensure_equals("CJK resolves to the LLFontGL-attached fallback", head.getFontFreetype()->selectShapingFace(0x4F60, glyph_index),
+                      fallback.getFontFreetype());
+        ensure_not_equals("fallback supplied a non-zero glyph index", glyph_index, 0u);
+    }
+
+    // The native Windows provider returns a system-installed face that can
+    // be reopened by FreeType with the selected collection face index.
+    template<> template<> void llfontfreetype_object::test<15>() {
+#if LL_WINDOWS && !LL_SDL_WINDOW && !LL_MESA_HEADLESS
+        constexpr std::array<llwchar, 4> samples{U'A', U'\u0301', U'\u4F60', U'\U0001F600'};
+        for (const llwchar character : samples) {
+            const LLFontFallbackMatch match = LLWindow::findFallbackFontForChar(character);
+            ensure("DirectWrite returned an installed font path", !match.mPath.empty());
+            ensure("DirectWrite returned a valid face index", match.mFaceIndex >= 0);
+
+            LLPointer<LLFontFreetype> fallback = new LLFontFreetype;
+            ensure("FreeType reopened the DirectWrite-selected face",
+                   fallback->loadFace(match.mPath, 14.f, 96.f, 96.f, true, match.mFaceIndex, EFontHinting::DEFAULT, 0));
+            ensure("selected face contains the requested character", fallback->faceHasGlyph(character));
+        }
+#else
+        skip("native Windows DirectWrite provider only");
+#endif
     }
 
     // -------------------------------------------------------------

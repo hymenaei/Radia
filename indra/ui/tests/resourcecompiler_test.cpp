@@ -33,7 +33,7 @@
 #include "text/metrics.h"
 
 namespace {
-using radia::ui::authoredEventCall;
+using radia::ui::eventHandlerCall;
 using radia::ui::ComputedStyle;
 using radia::ui::Diagnostic;
 using radia::ui::DiagnosticResult;
@@ -51,6 +51,7 @@ using radia::ui::kClickEvent;
 using radia::ui::kContextMenuEvent;
 using radia::ui::kDoubleClickEvent;
 using radia::ui::kInputEvent;
+using radia::ui::kMouseDownEvent;
 using radia::ui::kPointerDownEvent;
 using radia::ui::kWheelEvent;
 using radia::ui::ResourceBuildResult;
@@ -173,8 +174,9 @@ TEST_F(ResourceCompilerTest, BuildsFloaterEvents) {
     resources["elements/close.html"] = "<close><i class=\"i-close md\"></i></close>";
     constexpr char kFloaterLayout[] = "<floater resizable><head><title>title</title><minimize></minimize><close></close></head><body>"
                                       "<p id=\"status\">Ready</p>"
-                                      "<button id=\"go\" onClick=\"demoGo()\" onDoubleClick=\"demoDouble()\" "
-                                      "onPointerDown=\"demoPress()\" onContextMenu=\"demoMenu()\" onWheel=\"demoWheel()\">"
+                                      "<button id=\"go\" onClick=\"demoGo()\" onDblClick=\"demoDouble()\" "
+                                      "onMouseDown=\"demoMousePress()\" onPointerDown=\"demoPointerPress()\" "
+                                      "onContextMenu=\"demoMenu()\" onWheel=\"demoWheel()\">"
                                       "<i class=\"i-search md\"></i>Go</button><input type=\"checkbox\" switch=\"true\" name=\"mode\" id=\"toggle\" "
                                       "checked=\"true\" onInput=\"demoInput()\" onChange=\"demoChanged()\"></body></floater>";
     ResourceBuildResult result = factory.buildElementTreeFromString(kFloaterLayout, "floater.html");
@@ -196,21 +198,23 @@ TEST_F(ResourceCompilerTest, BuildsFloaterEvents) {
     EXPECT_TRUE(toggle->checked());
     EXPECT_EQ(toggle->name(), "mode");
 
-    ASSERT_NE(authoredEventCall(*go, kClickEvent), nullptr);
-    ASSERT_NE(authoredEventCall(*go, kDoubleClickEvent), nullptr);
-    ASSERT_NE(authoredEventCall(*go, kPointerDownEvent), nullptr);
-    ASSERT_NE(authoredEventCall(*go, kContextMenuEvent), nullptr);
-    ASSERT_NE(authoredEventCall(*go, kWheelEvent), nullptr);
-    EXPECT_EQ(authoredEventCall(*go, kClickEvent)->name(), "demoGo");
-    EXPECT_EQ(authoredEventCall(*go, kDoubleClickEvent)->name(), "demoDouble");
-    EXPECT_EQ(authoredEventCall(*go, kPointerDownEvent)->name(), "demoPress");
-    EXPECT_EQ(authoredEventCall(*go, kContextMenuEvent)->name(), "demoMenu");
-    EXPECT_EQ(authoredEventCall(*go, kWheelEvent)->name(), "demoWheel");
+    ASSERT_NE(eventHandlerCall(*go, kClickEvent), nullptr);
+    ASSERT_NE(eventHandlerCall(*go, kDoubleClickEvent), nullptr);
+    ASSERT_NE(eventHandlerCall(*go, kMouseDownEvent), nullptr);
+    ASSERT_NE(eventHandlerCall(*go, kPointerDownEvent), nullptr);
+    ASSERT_NE(eventHandlerCall(*go, kContextMenuEvent), nullptr);
+    ASSERT_NE(eventHandlerCall(*go, kWheelEvent), nullptr);
+    EXPECT_EQ(eventHandlerCall(*go, kClickEvent)->name(), "demoGo");
+    EXPECT_EQ(eventHandlerCall(*go, kDoubleClickEvent)->name(), "demoDouble");
+    EXPECT_EQ(eventHandlerCall(*go, kMouseDownEvent)->name(), "demoMousePress");
+    EXPECT_EQ(eventHandlerCall(*go, kPointerDownEvent)->name(), "demoPointerPress");
+    EXPECT_EQ(eventHandlerCall(*go, kContextMenuEvent)->name(), "demoMenu");
+    EXPECT_EQ(eventHandlerCall(*go, kWheelEvent)->name(), "demoWheel");
 
-    ASSERT_NE(authoredEventCall(*toggle, kChangeEvent), nullptr);
-    EXPECT_EQ(authoredEventCall(*toggle, kChangeEvent)->name(), "demoChanged");
-    ASSERT_NE(authoredEventCall(*toggle, kInputEvent), nullptr);
-    EXPECT_EQ(authoredEventCall(*toggle, kInputEvent)->name(), "demoInput");
+    ASSERT_NE(eventHandlerCall(*toggle, kChangeEvent), nullptr);
+    EXPECT_EQ(eventHandlerCall(*toggle, kChangeEvent)->name(), "demoChanged");
+    ASSERT_NE(eventHandlerCall(*toggle, kInputEvent), nullptr);
+    EXPECT_EQ(eventHandlerCall(*toggle, kInputEvent)->name(), "demoInput");
 }
 
 TEST_F(ResourceCompilerTest, IgnoresNestedResourceFloaterParts) {
@@ -453,7 +457,7 @@ TEST_F(ResourceCompilerTest, RejectsUnknownTags) {
     ASSERT_EQ(known.document->root->tag, HTMLTag::Panel);
     ASSERT_EQ(known.document->root->content.size(), 2U);
     ASSERT_EQ(known.document->root->content[0].node->tag, HTMLTag::Button);
-    ASSERT_EQ(known.document->root->content[1].node->tag, HTMLTag::Paragraph);
+    ASSERT_EQ(known.document->root->content[1].node->tag, HTMLTag::P);
 
     const SourceDocumentParseResult unknown = SourceDocumentParser().parse("<panel>\n  <madeUp></madeUp>\n</panel>", "unknown.html");
     ASSERT_FALSE(unknown.ok());
@@ -700,8 +704,8 @@ TEST_F(ResourceCompilerTest, ValidatesElementEvents) {
     ASSERT_TRUE(universalEvent.ok());
     ASSERT_TRUE(universalEvent.document);
     EXPECT_TRUE(universalEvent.warnings.empty());
-    ASSERT_NE(authoredEventCall(*universalEvent.document->documentElement(), kClickEvent), nullptr);
-    EXPECT_EQ(authoredEventCall(*universalEvent.document->documentElement(), kClickEvent)->name(), "click");
+    ASSERT_NE(eventHandlerCall(*universalEvent.document->documentElement(), kClickEvent), nullptr);
+    EXPECT_EQ(eventHandlerCall(*universalEvent.document->documentElement(), kClickEvent)->name(), "click");
 
     const ResourceBuildResult expressionCall = factory.buildElementTreeFromString(kExpressionCallLayout, "expression.html");
     ASSERT_TRUE(expressionCall.ok());
@@ -1060,8 +1064,8 @@ TEST_F(ResourceCompilerTest, AcceptsCaseInsensitiveHTMLNames) {
     ASSERT_EQ(button->children().size(), 1U);
     ASSERT_NE(button->children().front(), nullptr);
     EXPECT_EQ(button->elementName(), "button");
-    ASSERT_NE(authoredEventCall(*button, kClickEvent), nullptr);
-    EXPECT_EQ(authoredEventCall(*button, kClickEvent)->name(), "saveFile");
+    ASSERT_NE(eventHandlerCall(*button, kClickEvent), nullptr);
+    EXPECT_EQ(eventHandlerCall(*button, kClickEvent)->name(), "saveFile");
 }
 
 TEST_F(ResourceCompilerTest, RejectsMalformedAttributes) {
@@ -1116,9 +1120,9 @@ TEST_F(ResourceCompilerTest, ValidatesAuthoredEvents) {
     ASSERT_NE(inspect.get(), nullptr);
     ASSERT_NE(bare.get(), nullptr);
     ASSERT_NE(lifecycle.get(), nullptr);
-    ASSERT_NE(authoredEventCall(*inspect, kClickEvent), nullptr);
-    EXPECT_EQ(authoredEventCall(*inspect, kClickEvent)->name(), "inspect");
-    EXPECT_EQ(authoredEventCall(*inspect, kClickEvent)->arguments().size(), 5U);
-    EXPECT_EQ(authoredEventCall(*bare, kClickEvent), nullptr);
-    EXPECT_EQ(authoredEventCall(*lifecycle, kClickEvent), nullptr);
+    ASSERT_NE(eventHandlerCall(*inspect, kClickEvent), nullptr);
+    EXPECT_EQ(eventHandlerCall(*inspect, kClickEvent)->name(), "inspect");
+    EXPECT_EQ(eventHandlerCall(*inspect, kClickEvent)->arguments().size(), 5U);
+    EXPECT_EQ(eventHandlerCall(*bare, kClickEvent), nullptr);
+    EXPECT_EQ(eventHandlerCall(*lifecycle, kClickEvent), nullptr);
 }

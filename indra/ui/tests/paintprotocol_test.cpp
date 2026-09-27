@@ -125,6 +125,7 @@ TEST(PaintProtocolTest, MatchesShaderProtocol) {
                 && contains(fragmentSource, "uniform sampler2D altDiffuseMap;")
                 && contains(fragmentSource, "uniform int maskMode;")
                 && contains(fragmentSource, "uniform int gradientKind;")
+                && contains(fragmentSource, "uniform vec4 gradientTransform;")
                 && contains(fragmentSource, "uniform int outlineStyle;"));
     EXPECT_TRUE(contains(fragmentSource, "kPaintOpBorder = 2")
                 && contains(fragmentSource, "paintOp == kPaintOpBorder")
@@ -146,7 +147,8 @@ TEST(PaintProtocolTest, MatchesShaderProtocol) {
     EXPECT_TRUE(contains(fragmentSource, "gradientKind") && contains(fragmentSource, "atan(delta.x, delta.y)"));
     EXPECT_TRUE(contains(fragmentSource, "gradientRepeating")
                 && contains(fragmentSource, "underlyingGradientIntegral")
-                && contains(fragmentSource, "cycles * repeatingTotal"));
+                && contains(fragmentSource, "cycles * repeatingTotal")
+                && contains(fragmentSource, "localCoord = localCoord * gradientTransform.xy + gradientTransform.zw"));
     EXPECT_TRUE(contains(fragmentSource, "gradientPixelWidth")
                 && contains(fragmentSource, "filteredGradientColor")
                 && contains(fragmentSource, "gradientIntervalIntegral")

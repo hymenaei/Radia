@@ -52,6 +52,27 @@ bool hasLayoutText(std::string_view value) {
 
 bool isLineBreakElement(const Element& element) { return element.elementName() == HTMLTagName(HTMLTag::Br); }
 
+bool trackFlowBreak(Node& child, bool& hasLayoutChild, bool& pendingFlowBreak) {
+    const Element* element = child.asElement();
+    if (element && isLineBreakElement(*element)) {
+        if (!hasLayoutChild || pendingFlowBreak)
+            return false;
+        pendingFlowBreak = true;
+        return true;
+    }
+
+    const Text* text = child.asText();
+    const bool contributesLayout = !text || hasLayoutText(text->data());
+    if (contributesLayout) {
+        if (pendingFlowBreak) {
+            NodeAccess::setFlowBreakBefore(child, true);
+            pendingFlowBreak = false;
+        }
+        hasLayoutChild = true;
+    }
+    return true;
+}
+
 bool isVoidElement(const Element& element) { return isVoidHTMLTag(findHTMLTag(element.elementName())); }
 
 bool isFragmentBooleanAttribute(HTMLTag tag, std::string_view name) {
@@ -60,7 +81,8 @@ bool isFragmentBooleanAttribute(HTMLTag tag, std::string_view name) {
     return (tag == HTMLTag::Input && (name == "switch" || name == "checked")) || (tag == HTMLTag::Floater && name == "resizable");
 }
 
-bool applyFragmentAttributes(Element& element, HTMLTag tag, std::string_view elementName, const std::vector<Attribute>& attributes) {
+bool applyFragmentAttributes(Element& element, HTMLTag tag, std::string_view elementName, const std::vector<Attribute>& attributes,
+    bool scoped) {
     ResourceBuildResult result;
     ElementBuildContext context(result, nullptr);
     ElementBuildInput input;
@@ -80,11 +102,52 @@ bool applyFragmentAttributes(Element& element, HTMLTag tag, std::string_view ele
     }
 
     const ResourceElementDefinition* definition = findElementDefinition(tag);
-    if (!definition || definition->scopedOnly)
+    if (!definition || (definition->scopedOnly && !scoped))
         return false;
     applyCommonElementAttributes(input, element, context);
     applyElementDefinitionAttributes(*definition, input, element, context);
     return result.warnings.empty() && !result.hasErrors();
+}
+
+const ScopedElementDefinition* scopedChildDefinition(const Element& parent, HTMLTag tag) {
+    const ResourceElementDefinition* definition = findElementDefinition(findHTMLTag(parent.elementName()));
+    if (!definition)
+        return nullptr;
+    const auto child = definition->contentBehavior.scopedElements.find(canonicalizeHTMLName(HTMLTagName(tag)));
+    return child == definition->contentBehavior.scopedElements.end() ? nullptr : &child->second;
+}
+
+const std::vector<HTMLTag>* scopedContentTags(std::string_view elementName) {
+    const std::string name = canonicalizeHTMLName(elementName);
+    for (const auto& descriptor : htmlTags) {
+        const ResourceElementDefinition* owner = findElementDefinition(descriptor.tag);
+        if (!owner)
+            continue;
+        const auto scoped = owner->contentBehavior.scopedElements.find(name);
+        if (scoped != owner->contentBehavior.scopedElements.end())
+            return &scoped->second.acceptedTags;
+    }
+    return nullptr;
+}
+
+const std::vector<HTMLTag>* scopedContentTags(const Element& context) {
+    for (const Element* current = &context; current; current = current->parentElement()) {
+        const ResourceElementDefinition* definition = findElementDefinition(findHTMLTag(current->elementName()));
+        if (definition && definition->scopedOnly)
+            return scopedContentTags(current->elementName());
+    }
+    return nullptr;
+}
+
+bool acceptsScopedContent(const std::vector<HTMLTag>* acceptedTags, HTMLTag tag) {
+    return !acceptedTags || std::find(acceptedTags->begin(), acceptedTags->end(), tag) != acceptedTags->end();
+}
+
+void appendNode(Node& parent, NodePtr child) {
+    if (Element* element = parent.asElement())
+        element->append(std::move(child));
+    else
+        parent.asFragment()->append(std::move(child));
 }
 } // namespace
 
@@ -127,12 +190,26 @@ public:
 
 class FragmentParser final {
 public:
-    explicit FragmentParser(std::string_view html)
-        : mHTML(html) {}
+    FragmentParser(std::string_view html, const Element* context)
+        : mHTML(html)
+        , mContext(context) {}
 
     FragmentPtr parse() {
         auto result = std::make_unique<Fragment>();
+        ElementPtr contextElement;
+        Node* parent = result.get();
+        const std::vector<HTMLTag>* acceptedTags = mContext ? scopedContentTags(*mContext) : nullptr;
+        if (mContext) {
+            const ResourceElementDefinition* definition = findElementDefinition(findHTMLTag(mContext->elementName()));
+            if (definition && !definition->contentBehavior.scopedElements.empty()) {
+                contextElement = HTMLElementFactory::create(mContext->elementName());
+                if (!contextElement)
+                    return nullptr;
+                parent = contextElement.get();
+            }
+        }
         bool pendingFlowBreak = false;
+        bool hasLayoutChild = false;
         while (mOffset < mHTML.size()) {
             if (mHTML.compare(mOffset, 4, "<!--") == 0) {
                 if (!skipComment())
@@ -142,26 +219,27 @@ public:
             if (mHTML[mOffset] == '<') {
                 if (mHTML.compare(mOffset, 2, "</") == 0)
                     return nullptr;
-                NodePtr child = parseElement();
+                Node* child = parseElement(*parent, acceptedTags);
                 if (!child)
                     return nullptr;
-                Node* added = child.get();
-                result->append(std::move(child));
-                if (added->asElement() && isLineBreakElement(*added->asElement()))
-                    pendingFlowBreak = true;
-                else if (pendingFlowBreak) {
-                    NodeAccess::setFlowBreakBefore(*added, true);
-                    pendingFlowBreak = false;
-                }
+                if (!trackFlowBreak(*child, hasLayoutChild, pendingFlowBreak))
+                    return nullptr;
                 continue;
             }
             const std::string text = parseText();
-            Node* added = appendFragmentText(*result, text);
-            if (added && hasLayoutText(text) && pendingFlowBreak) {
-                NodeAccess::setFlowBreakBefore(*added, true);
-                pendingFlowBreak = false;
-            }
+            Node* added = nullptr;
+            if (Element* element = parent->asElement())
+                added = &appendText(*element, text);
+            else
+                added = appendFragmentText(*result, text);
+            if (added && !trackFlowBreak(*added, hasLayoutChild, pendingFlowBreak))
+                return nullptr;
         }
+        if (pendingFlowBreak)
+            return nullptr;
+        if (contextElement)
+            while (Node* child = contextElement->firstChild())
+                result->append(child->remove());
         return result;
     }
 
@@ -222,6 +300,9 @@ private:
                 return false;
             attribute.value = std::string(mHTML.substr(begin, mOffset - begin));
             ++mOffset;
+            const bool selfClosingTerminator = mOffset + 1 < mHTML.size() && mHTML[mOffset] == '/' && mHTML[mOffset + 1] == '>';
+            if (mOffset < mHTML.size() && !isHTMLWhitespace(mHTML[mOffset]) && mHTML[mOffset] != '>' && !selfClosingTerminator)
+                return false;
         } else {
             const std::size_t begin = mOffset;
             while (mOffset < mHTML.size() && !isHTMLWhitespace(mHTML[mOffset]) && mHTML[mOffset] != '>')
@@ -232,14 +313,18 @@ private:
         return true;
     }
 
-    NodePtr parseElement() {
+    Node* parseElement(Node& parentNode, const std::vector<HTMLTag>* acceptedTags) {
         ++mOffset;
         std::string name;
         if (!readName(name))
             return nullptr;
         const HTMLTag tag = findHTMLTag(name);
-        ElementPtr element = HTMLElementFactory::create(name);
-        if (!element)
+        if (!acceptsScopedContent(acceptedTags, tag))
+            return nullptr;
+        Element* parent = parentNode.asElement();
+        const ScopedElementDefinition* scoped = parent ? scopedChildDefinition(*parent, tag) : nullptr;
+        const ResourceElementDefinition* definition = findElementDefinition(tag);
+        if (!definition || (definition->scopedOnly && !scoped))
             return nullptr;
 
         std::vector<Attribute> attributes;
@@ -275,12 +360,32 @@ private:
             return nullptr;
         if (selfClosing && !isVoidHTMLTag(tag))
             return nullptr;
-        if (!applyFragmentAttributes(*element, tag, name, attributes))
+
+        ElementPtr owner;
+        Element* element = nullptr;
+        if (scoped) {
+            if (!parent || !scoped->create)
+                return nullptr;
+            ResourceBuildResult result;
+            ElementBuildContext context(result, nullptr);
+            element = scoped->create(*parent, context, "<fragment>", 0, 0);
+            if (!element || result.hasErrors())
+                return nullptr;
+        } else {
+            owner = HTMLElementFactory::create(name);
+            element = owner.get();
+        }
+        if (!element || !applyFragmentAttributes(*element, tag, name, attributes, scoped != nullptr))
             return nullptr;
+        if (!scoped)
+            appendNode(parentNode, std::move(owner));
         if (isVoidHTMLTag(tag))
-            return NodePtr(std::move(element));
+            return element;
 
         bool pendingFlowBreak = false;
+        bool hasLayoutChild = false;
+        const std::vector<HTMLTag>* childAcceptedTags = scoped ? &scoped->acceptedTags : acceptedTags;
+        const bool unsupportedContent = definition->contentBehavior.mode == ElementContentMode::Unsupported;
         while (mOffset < mHTML.size()) {
             if (mHTML.compare(mOffset, 4, "<!--") == 0) {
                 if (!skipComment())
@@ -295,37 +400,36 @@ private:
                 skipWhitespace();
                 if (mOffset >= mHTML.size() || mHTML[mOffset++] != '>' || closingName != name)
                     return nullptr;
-                return NodePtr(std::move(element));
+                if (pendingFlowBreak)
+                    return nullptr;
+                return element;
             }
             if (mHTML[mOffset] == '<') {
-                NodePtr child = parseElement();
+                if (unsupportedContent)
+                    return nullptr;
+                Node* child = parseElement(*element, childAcceptedTags);
                 if (!child)
                     return nullptr;
-                Node* added = child.get();
-                element->append(std::move(child));
-                if (added->asElement() && isLineBreakElement(*added->asElement()))
-                    pendingFlowBreak = true;
-                else if (pendingFlowBreak) {
-                    NodeAccess::setFlowBreakBefore(*added, true);
-                    pendingFlowBreak = false;
-                }
+                if (!trackFlowBreak(*child, hasLayoutChild, pendingFlowBreak))
+                    return nullptr;
             } else {
                 const std::string text = parseText();
+                if (unsupportedContent && hasLayoutText(text))
+                    return nullptr;
                 Node& added = appendText(*element, text);
-                if (hasLayoutText(text) && pendingFlowBreak) {
-                    NodeAccess::setFlowBreakBefore(added, true);
-                    pendingFlowBreak = false;
-                }
+                if (!trackFlowBreak(added, hasLayoutChild, pendingFlowBreak))
+                    return nullptr;
             }
         }
         return nullptr;
     }
 
     std::string_view mHTML;
+    const Element* mContext = nullptr;
     std::size_t mOffset = 0;
 };
 
-FragmentPtr parseFragment(std::string_view html) { return FragmentParser(html).parse(); }
+FragmentPtr parseFragment(std::string_view html, const Element* context) { return FragmentParser(html, context).parse(); }
 
 std::string serializeChildren(const Node& parent) {
     std::string result;

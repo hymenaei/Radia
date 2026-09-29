@@ -15,6 +15,7 @@
 #include "Element.h"
 #include "ElementInternal.h"
 #include "NativeAppearance.h"
+#include "OrderedChild.h"
 #include "PseudoElement.h"
 #include "StyleSheet.h"
 #include "TreeTraversalCache.h"

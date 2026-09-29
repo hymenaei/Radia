@@ -599,6 +599,8 @@ struct TextPainter {
     S32 resolutionGeneration = -1;
 };
 
+constexpr float kBlurKernelExtentInStandardDeviations = 3.f;
+
 struct BlurProfile {
     float angleDegrees = 180.f;
     Style::BlurStop start;
@@ -628,6 +630,16 @@ std::optional<float> maximumBlurDeviation(const Style::FilterOperation& operatio
     if (!profile)
         return std::nullopt;
     return std::max(profile->start.stdDeviation, profile->end.stdDeviation);
+}
+
+float blurKernelExtent(const Style::Filter& filter) {
+    float extent = 0.f;
+    for (const Style::FilterOperation& operation : filter.operations) {
+        const std::optional<float> stdDeviation = maximumBlurDeviation(operation);
+        if (stdDeviation && *stdDeviation > 0.f)
+            extent += *stdDeviation * kBlurKernelExtentInStandardDeviations;
+    }
+    return extent;
 }
 
 class EffectRenderer final {
@@ -1138,8 +1150,9 @@ LLRenderTarget* EffectRenderer::applyBlur(LLRenderTarget& source, LLRenderTarget
         setClipCoverageUniforms(mProgram, std::nullopt);
         mProgram.uniform2f(uniforms.effectTextureSize, static_cast<float>(width), static_cast<float>(height));
         mProgram.uniform2f(uniforms.effectBlurAxis, axisX, axisY);
-        mProgram.uniform2f(uniforms.effectBlurRadii, std::min(profile->start.stdDeviation * scale, maximumRadius),
-            std::min(profile->end.stdDeviation * scale, maximumRadius));
+        mProgram.uniform2f(uniforms.effectBlurRadii,
+            std::min(profile->start.stdDeviation * kBlurKernelExtentInStandardDeviations * scale, maximumRadius),
+            std::min(profile->end.stdDeviation * kBlurKernelExtentInStandardDeviations * scale, maximumRadius));
         mProgram.uniform2f(uniforms.effectGradientStart, gradientStart.x, gradientStart.y);
         mProgram.uniform2f(uniforms.effectGradientEnd, gradientEnd.x, gradientEnd.y);
         mProgram.bindTexture(LLShaderMgr::DIFFUSE_MAP, &input, ALSamplers::BilinearClamp);
@@ -1226,16 +1239,9 @@ void EffectRenderer::begin(const Layout::Rect& rect, const Style::ComputedStyle&
     };
 
     if (!style.backdropFilter().isNone()) {
-        float padding = 1.f / frame.scale;
-        bool hasBlur = false;
-        for (const Style::FilterOperation& operation : style.backdropFilter().operations) {
-            const std::optional<float> stdDeviation = maximumBlurDeviation(operation);
-            if (!stdDeviation || *stdDeviation <= 0.f)
-                continue;
-            hasBlur = true;
-            padding = std::min(padding + *stdDeviation * 2.f, maximumPadding);
-        }
-        if (hasBlur) {
+        const float blurExtent = blurKernelExtent(style.backdropFilter());
+        if (blurExtent > 0.f) {
+            const float padding = std::min(1.f / frame.scale + blurExtent, maximumPadding);
             const Layout::Rect capture = captureBounds(padding);
             if (!capture.empty() && captureFramebuffer(capture, frame.scale, mBackgroundTargets[0])) {
                 LLRenderTarget* source = &mBackgroundTargets[0];
@@ -1255,12 +1261,7 @@ void EffectRenderer::begin(const Layout::Rect& rect, const Style::ComputedStyle&
     frame.filter = style.filter;
     if (frame.filter.isNone() && !frame.hasMask)
         return;
-    float padding = 1.f / frame.scale;
-    for (const Style::FilterOperation& operation : frame.filter.operations) {
-        const std::optional<float> stdDeviation = maximumBlurDeviation(operation);
-        if (stdDeviation)
-            padding = std::min(padding + *stdDeviation * 2.f, maximumPadding);
-    }
+    const float padding = std::min(1.f / frame.scale + blurKernelExtent(frame.filter), maximumPadding);
     frame.captureRect = captureBounds(padding);
     if (frame.captureRect.empty())
         return;

@@ -37,6 +37,7 @@ public:
     void replaceChildren(FragmentPtr fragment);
 
 private:
+    friend class Node;
     friend class Document;
     friend class detail::NodeMutation;
 

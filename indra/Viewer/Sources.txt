@@ -5,7 +5,7 @@ FloaterHost.cpp
 InputBridge.cpp
 interface/FloaterDemo.cpp
 ReloadCoordinator.cpp
-Resolver.cpp
+SkinResolver.cpp
 Resources.cpp
 Runtime.cpp
 SettingsAdapter.cpp

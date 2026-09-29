@@ -18,6 +18,9 @@ set(TestCore_SOURCES
     Core/ScrollGeometry.cpp
     Core/SkinCompiler.cpp
     Core/StyleSheet.cpp
+    Core/StyleSheetParsing.cpp
+    Core/StyleSheetResources.cpp
+    Core/StyleSheetSelectors.cpp
     Core/Surface.cpp
     Core/SurfaceState.cpp
     Core/SVG.cpp
@@ -34,7 +37,7 @@ set(TestViewer_SOURCES
     Viewer/FloaterHost.cpp
     Viewer/InputBridge.cpp
     Viewer/ReloadCoordinator.cpp
-    Viewer/Resolver.cpp
+    Viewer/SkinResolver.cpp
     Viewer/Runtime.cpp
     Viewer/SettingsAdapter.cpp
     Viewer/SkinPreparation.cpp

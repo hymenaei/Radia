@@ -49,6 +49,13 @@ namespace {
 constexpr float kScrollEpsilon = 1.0e-4f;
 constexpr std::size_t kMaxScrollLayoutIterations = 4;
 
+float trackOffsetBefore(const std::vector<float>& sizes, std::size_t end, std::size_t gapCount, float gap) {
+    float offset = 0.f;
+    for (std::size_t index = 0; index < end; ++index)
+        offset += sizes[index];
+    return offset + gap * static_cast<float>(gapCount);
+}
+
 void includeOverflow(Rect& bounds, const Rect& candidate, bool includeX, bool includeY) {
     const float left = includeX ? std::min(bounds.left(), candidate.left()) : bounds.left();
     const float right = includeX ? std::max(bounds.right(), candidate.right()) : bounds.right();
@@ -721,13 +728,6 @@ void Engine::arrangePseudoElement(Style::PseudoElement& node, Pass& pass) {
     if (node.style().display() == Style::Display::Grid || node.style().display() == Style::Display::InlineGrid) {
         const detail::GridTrackSizes tracks =
             gridTrackSizes(children, content.w, content.h, node.style().columnGap().fixedPixels(), node.style().rowGap().fixedPixels());
-        const auto sumBefore = [](const std::vector<float>& sizes, std::size_t end, std::size_t gapCount, float gap) {
-            float result = 0.f;
-            for (std::size_t index = 0; index < end; ++index)
-                result += sizes[index];
-            result += gap * static_cast<float>(gapCount);
-            return result;
-        };
         const Direction direction = pass.direction();
         for (ChildLayout& child : children) {
             const Style::GridArea area = child.style.gridArea.value_or(Style::GridArea {});
@@ -736,9 +736,9 @@ void Engine::arrangePseudoElement(Style::PseudoElement& node, Pass& pass) {
             if (column >= tracks.columns.size() || row >= tracks.rows.size())
                 continue;
             const float cellLeft = direction == Direction::RightToLeft
-                ? content.right() - sumBefore(tracks.columns, column + 1, column, node.style().columnGap().fixedPixels())
-                : content.left() + sumBefore(tracks.columns, column, column, node.style().columnGap().fixedPixels());
-            const float cellTop = content.top() - sumBefore(tracks.rows, row, row, node.style().rowGap().fixedPixels());
+                ? content.right() - trackOffsetBefore(tracks.columns, column + 1, column, node.style().columnGap().fixedPixels())
+                : content.left() + trackOffsetBefore(tracks.columns, column, column, node.style().columnGap().fixedPixels());
+            const float cellTop = content.top() - trackOffsetBefore(tracks.rows, row, row, node.style().rowGap().fixedPixels());
             const float cellWidth = tracks.columns[column];
             const float cellHeight = tracks.rows[row];
             const RectEdges<Style::MarginEdge>& margin = child.style.margin();
@@ -1117,13 +1117,6 @@ void Engine::arrangeGrid(Element& node, const Style::ComputedStyle& style, const
     removeChildrenExcludedFromLayout(node, children);
     detail::GridTrackSizes tracks =
         gridTrackSizes(children, content.w, content.h, style.columnGap().fixedPixels(), style.rowGap().fixedPixels());
-    const auto sumBefore = [](const std::vector<float>& sizes, std::size_t end, std::size_t gapCount, float gap) {
-        float result = 0.f;
-        for (std::size_t index = 0; index < end; ++index)
-            result += sizes[index];
-        result += gap * static_cast<float>(gapCount);
-        return result;
-    };
     const auto total = [](const std::vector<float>& sizes) {
         float result = 0.f;
         for (const float size : sizes)
@@ -1179,9 +1172,9 @@ void Engine::arrangeGrid(Element& node, const Style::ComputedStyle& style, const
         if (column >= tracks.columns.size() || row >= tracks.rows.size())
             continue;
         const float cellLeft = direction == Direction::RightToLeft
-            ? content.right() - columnDistribution.offset - sumBefore(tracks.columns, column + 1, column, columnTrackGap)
-            : content.left() + columnDistribution.offset + sumBefore(tracks.columns, column, column, columnTrackGap);
-        const float cellTop = content.top() - rowDistribution.offset - sumBefore(tracks.rows, row, row, rowTrackGap);
+            ? content.right() - columnDistribution.offset - trackOffsetBefore(tracks.columns, column + 1, column, columnTrackGap)
+            : content.left() + columnDistribution.offset + trackOffsetBefore(tracks.columns, column, column, columnTrackGap);
+        const float cellTop = content.top() - rowDistribution.offset - trackOffsetBefore(tracks.rows, row, row, rowTrackGap);
         const float cellWidth = tracks.columns[column];
         const float cellHeight = tracks.rows[row];
         const RectEdges<Style::MarginEdge>& margin = child.style.margin();

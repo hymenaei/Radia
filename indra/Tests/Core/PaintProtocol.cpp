@@ -17,19 +17,24 @@ using ::testing::Message;
 TEST(PaintProtocol, MatchesShaderProtocol) {
     const std::filesystem::path sourceRoot = RADIA_SOURCE_ROOT;
     const std::filesystem::path newviewSourceRoot = sourceRoot / "newview";
+    std::ifstream paintContextFile(sourceRoot / "Core/platform/graphics/OpenGLPaintContext.cpp");
     std::ifstream vertexFile(newviewSourceRoot / "app_settings/shaders/class1/interface/uiV.glsl");
     std::ifstream fragmentFile(newviewSourceRoot / "app_settings/shaders/class1/interface/uiF.glsl");
     std::ifstream paintProtocolFile(sourceRoot / "Core/rendering/PaintProtocol.def");
+    ASSERT_TRUE(paintContextFile.good());
     ASSERT_TRUE(vertexFile.good());
     ASSERT_TRUE(fragmentFile.good());
     ASSERT_TRUE(paintProtocolFile.good());
 
+    std::ostringstream paintContext;
     std::ostringstream vertex;
     std::ostringstream fragment;
     std::ostringstream paintProtocol;
+    paintContext << paintContextFile.rdbuf();
     vertex << vertexFile.rdbuf();
     fragment << fragmentFile.rdbuf();
     paintProtocol << paintProtocolFile.rdbuf();
+    const std::string paintContextSource = paintContext.str();
     const std::string vertexSource = vertex.str();
     const std::string fragmentSource = fragment.str();
     const std::string paintProtocolSource = paintProtocol.str();
@@ -144,6 +149,13 @@ TEST(PaintProtocol, MatchesShaderProtocol) {
         && contains(fragmentSource, "vec4 result = vec4(image.rgb, image.a * vertexColor.a)")
         && contains(fragmentSource, "maskCoverageColor(image)") && contains(fragmentSource, "blurredEffectColor")
         && contains(fragmentSource, "maxSamplesPerSide") && contains(fragmentSource, "totalWeight"));
+    EXPECT_TRUE(contains(paintContextSource, "kBlurKernelExtentInStandardDeviations = 3.f;"));
+    EXPECT_TRUE(contains(paintContextSource, "profile->start.stdDeviation * kBlurKernelExtentInStandardDeviations * scale"));
+    EXPECT_TRUE(contains(paintContextSource, "profile->end.stdDeviation * kBlurKernelExtentInStandardDeviations * scale"));
+    EXPECT_TRUE(contains(paintContextSource, "extent += *stdDeviation * kBlurKernelExtentInStandardDeviations"));
+    EXPECT_TRUE(contains(paintContextSource, "blurKernelExtent(style.backdropFilter())"));
+    EXPECT_TRUE(contains(paintContextSource, "blurKernelExtent(frame.filter)"));
+    EXPECT_TRUE(contains(fragmentSource, "float sigma = max(radius / 3.0, 0.5);"));
     EXPECT_TRUE(contains(fragmentSource, "return vec4(color.rgb, mask);") && !contains(fragmentSource, "color.a * mask"));
 }
 } // namespace

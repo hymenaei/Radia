@@ -126,12 +126,14 @@ bool isWhitespaceOnlyText(const Core::detail::NodeRef& node) {
 
 bool isWhitespaceOnlyText(const OrderedChildRef& node) { return !node.pseudoElement && isWhitespaceOnlyText(node.node); }
 
-bool flowBreakBefore(const ChildLayout& child) {
-    if (child.node.pseudoElement)
+bool flowBreakBefore(const OrderedChildRef& child) {
+    if (child.pseudoElement)
         return false;
-    const Node* node = child.node.get();
+    const Node* node = child.get();
     return node && Core::detail::NodeAccess::flowBreakBefore(*node);
 }
+
+bool flowBreakBefore(const ChildLayout& child) { return child.flowBreakBefore || flowBreakBefore(child.node); }
 
 void removeChildrenExcludedFromLayout(Element& parent, std::vector<ChildLayout>& children) {
     if (std::all_of(children.begin(), children.end(), [&parent](const ChildLayout& child) {

@@ -6,7 +6,7 @@
 #pragma once
 
 #include <Core/SkinCompiler.h>
-#include "Resolver.h"
+#include "SkinSnapshot.h"
 
 namespace Viewer {
 Core::SkinGenerationPrepareResult prepareSkinGeneration(SkinSnapshotResult captured);

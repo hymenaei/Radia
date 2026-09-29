@@ -4,7 +4,7 @@
  */
 
 #include "linden_common.h"
-#include "Resolver.h"
+#include "SkinResolver.h"
 #include <algorithm>
 #include <fstream>
 #include <initializer_list>
@@ -12,6 +12,7 @@
 #include <map>
 #include <optional>
 #include <unordered_set>
+#include <utility>
 #include "llsd.h"
 #include "llsdjson.h"
 
@@ -229,17 +230,17 @@ std::string resourceProvenance(const SkinManifest& manifest, const std::filesyst
 
 void addLayer(const SkinManifest& manifest, const std::filesystem::path& path, std::vector<ResourceLayer>& layers,
     SkinSnapshotResult& result) {
-    const std::optional<std::string> content = readFile(path);
+    std::optional<std::string> content = readFile(path);
     if (!content) {
         result.error("skin.resource.read_failed", "Could not read declared Skin resource.", resourceProvenance(manifest, path));
         return;
     }
-    layers.push_back({resourceProvenance(manifest, path), *content});
+    layers.push_back({resourceProvenance(manifest, path), std::move(*content)});
 }
 
 void addStyleLayer(const SkinManifest& manifest, const std::filesystem::path& entrypoint, std::vector<ResourceLayer>& layers,
     SkinSnapshotResult& result) {
-    const std::optional<std::string> content = readFile(entrypoint);
+    std::optional<std::string> content = readFile(entrypoint);
     if (!content) {
         result.error("skin.resource.read_failed", "Could not read declared Skin resource.", resourceProvenance(manifest, entrypoint));
         return;
@@ -253,7 +254,7 @@ void addStyleLayer(const SkinManifest& manifest, const std::filesystem::path& en
         return;
     }
 
-    ResourceLayer layer {resourceProvenance(manifest, entrypoint), *content};
+    ResourceLayer layer {resourceProvenance(manifest, entrypoint), std::move(*content)};
     layer.entrypoint = relativeEntrypoint.generic_string();
     for (std::filesystem::recursive_directory_iterator iterator(manifest.root, error), end; iterator != end && !error;
         iterator.increment(error)) {
@@ -268,9 +269,9 @@ void addStyleLayer(const SkinManifest& manifest, const std::filesystem::path& en
             continue;
         if (relative == relativeEntrypoint)
             continue;
-        const std::optional<std::string> module = readFile(canonicalFile);
+        std::optional<std::string> module = readFile(canonicalFile);
         if (module)
-            layer.modules.insert_or_assign(relative.generic_string(), *module);
+            layer.modules.insert_or_assign(relative.generic_string(), std::move(*module));
     }
     if (error) {
         result.error("skin.resource.discovery_failed", "Could not enumerate stylesheet modules inside the Skin.",
@@ -283,25 +284,25 @@ void addStyleLayer(const SkinManifest& manifest, const std::filesystem::path& en
 void overlayDirectory(const SkinManifest& manifest, const std::filesystem::path& root, const std::string& logicalPrefix,
     ResourceSnapshot& snapshot, SkinSnapshotResult& result) {
     std::error_code error;
-    const std::filesystem::path& skinRoot = manifest.root;
     for (std::filesystem::recursive_directory_iterator iterator(root, error), end; iterator != end && !error; iterator.increment(error)) {
         if (!iterator->is_regular_file(error) || error)
             continue;
         const std::filesystem::path canonicalFile = std::filesystem::canonical(iterator->path(), error);
-        if (error || !inside(canonicalFile, skinRoot)) {
-            result.error("skin.resource.path_invalid", "Discovered resource escapes its Skin.", iterator->path().generic_string());
+        if (error || !inside(canonicalFile, root)) {
+            result.error("skin.resource.path_invalid", "Discovered resource escapes its declared directory.",
+                iterator->path().generic_string());
             error.clear();
             continue;
         }
         const std::filesystem::path relative = std::filesystem::relative(iterator->path(), root, error);
         if (error)
             break;
-        const std::optional<std::string> content = readFile(iterator->path());
+        std::optional<std::string> content = readFile(iterator->path());
         if (!content) {
             result.error("skin.resource.read_failed", "Could not read Skin resource.", resourceProvenance(manifest, iterator->path()));
             continue;
         }
-        snapshot.add(logicalPrefix + relative.generic_string(), *content, resourceProvenance(manifest, canonicalFile));
+        snapshot.add(logicalPrefix + relative.generic_string(), std::move(*content), resourceProvenance(manifest, canonicalFile));
     }
     if (error)
         result.error("skin.resource.discovery_failed", "Could not enumerate declared Skin resource directory.", root.generic_string());

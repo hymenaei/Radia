@@ -12,7 +12,7 @@
 #include "ComputedStyle.h"
 #include "Element.h"
 #include "ElementInternal.h"
-#include "TreeTraversalCache.h"
+#include "OrderedChild.h"
 
 namespace Core::Layout::detail {
 class ElementLayoutAccess {
@@ -32,6 +32,7 @@ struct ChildLayout {
     Vec2 measured;
     Vec2 flexBase;
     Vec2 minContent;
+    bool flowBreakBefore = false;
 };
 
 struct NormalLine {
@@ -72,6 +73,7 @@ void removeChildrenExcludedFromLayout(Element& parent, std::vector<ChildLayout>&
 bool isDisplayed(const ChildLayout& child);
 bool isWhitespaceOnlyText(const Core::detail::NodeRef& node);
 bool isWhitespaceOnlyText(const OrderedChildRef& node);
+bool flowBreakBefore(const OrderedChildRef& child);
 bool flowBreakBefore(const ChildLayout& child);
 float& mainSize(ChildLayout& child, Style::FlexDirection flexDirection);
 float mainSize(const ChildLayout& child, Style::FlexDirection flexDirection);

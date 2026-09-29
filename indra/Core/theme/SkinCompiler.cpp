@@ -7,6 +7,7 @@
 #include "SkinCompiler.h"
 #include <limits>
 #include <unordered_map>
+#include <utility>
 #include "CSSTokenStream.h"
 #include "RasterImage.h"
 #include "ResourceProvider.h"
@@ -22,25 +23,21 @@ constexpr const char* kStylesheetId = "skin.css";
 constexpr const char* kLayoutExtension = ".html";
 constexpr std::size_t kLayoutExtensionSize = sizeof(".html") - 1;
 
-bool endsWith(const std::string& value, const std::string& suffix) {
-    return value.size() >= suffix.size() && value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
-}
-
-bool isSvgResource(const std::string& value) { return endsWith(CSS::detail::lower(value), ".svg"); }
+bool isSvgResource(const std::string& value) { return CSS::detail::lower(value).ends_with(".svg"); }
 
 std::string imageMimeType(const std::string& value) {
     const std::string lowerValue = CSS::detail::lower(value);
-    if (endsWith(lowerValue, ".bmp"))
+    if (lowerValue.ends_with(".bmp"))
         return "image/bmp";
-    if (endsWith(lowerValue, ".jpg") || endsWith(lowerValue, ".jpeg"))
+    if (lowerValue.ends_with(".jpg") || lowerValue.ends_with(".jpeg"))
         return "image/jpeg";
-    if (endsWith(lowerValue, ".png"))
+    if (lowerValue.ends_with(".png"))
         return "image/png";
-    if (endsWith(lowerValue, ".tga"))
+    if (lowerValue.ends_with(".tga"))
         return "image/tga";
-    if (endsWith(lowerValue, ".webp"))
+    if (lowerValue.ends_with(".webp"))
         return "image/webp";
-    if (endsWith(lowerValue, ".avif"))
+    if (lowerValue.ends_with(".avif"))
         return "image/avif";
     return {};
 }
@@ -163,9 +160,9 @@ SkinGenerationPrepareResult SkinCompiler::prepare(ResourceSnapshot resources) co
         }
 
         const ResourceSource& resource = resources.resources().at(resolved);
-        const std::optional<RasterImage> image = decodeRasterImage(resource, resolved.value());
+        std::optional<RasterImage> image = decodeRasterImage(resource, resolved.value());
         if (image) {
-            rasterResources.emplace(resolved.value(), *image);
+            rasterResources.emplace(resolved.value(), std::move(*image));
         } else if (reference.optional) {
             result.warning("ui.resource.unsupported",
                 "Optional mask image could not be decoded; the element will remain unmasked: " + reference.value + ".", kStylesheetId);
@@ -221,7 +218,7 @@ SkinGenerationPrepareResult SkinCompiler::prepare(ResourceSnapshot resources) co
         const std::string& path = id.value();
         if (path == "localization.yaml" || path == kStylesheetId || path.rfind(kResourcePrefix, 0) == 0)
             continue;
-        if (!endsWith(path, kLayoutExtension)) {
+        if (!path.ends_with(kLayoutExtension)) {
             result.error("ui.layout.unsupported", "Unsupported UI layout resource: " + path + ".", resource.provenance);
             continue;
         }

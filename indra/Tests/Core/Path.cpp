@@ -100,6 +100,40 @@ TEST(Path, ReportsPathLocation) {
     EXPECT_EQ(diagnostic.line, std::size_t {7}) << "diagnostic line retained";
 }
 
+TEST(Path, RejectsHexadecimalFloatNotation) {
+    const PathCompileResult compiled = compileSvgPathData("M0x1p0 2");
+
+    EXPECT_FALSE(compiled.ok());
+    EXPECT_FALSE(compiled.path.has_value());
+    EXPECT_FALSE(compiled.errors.empty());
+}
+
+TEST(Path, RejectsRepeatedCoordinateSigns) {
+    const PathCompileResult compiled = compileSvgPathData("M+-1 2");
+
+    EXPECT_FALSE(compiled.ok());
+    EXPECT_FALSE(compiled.path.has_value());
+    EXPECT_FALSE(compiled.errors.empty());
+}
+
+TEST(Path, ParsesSignedDecimalExponents) {
+    const PathCompileResult compiled = compileSvgPathData("M+1e+2-2.5e-1");
+
+    ASSERT_TRUE(compiled.ok());
+    ASSERT_EQ(compiled.path->commands().size(), std::size_t {1});
+    EXPECT_FLOAT_EQ(compiled.path->commands().front().p0.x, 100.f);
+    EXPECT_FLOAT_EQ(compiled.path->commands().front().p0.y, -0.25f);
+}
+
+TEST(Path, RoundsUnderflowingCoordinatesToZero) {
+    const PathCompileResult compiled = compileSvgPathData("M1e-100 1e-999");
+
+    ASSERT_TRUE(compiled.ok());
+    ASSERT_EQ(compiled.path->commands().size(), std::size_t {1});
+    EXPECT_FLOAT_EQ(compiled.path->commands().front().p0.x, 0.f);
+    EXPECT_FLOAT_EQ(compiled.path->commands().front().p0.y, 0.f);
+}
+
 TEST(Path, RejectsEmptyPathData) {
     const PathCompileResult compiled = compileSvgPathData("  ", "empty.svg", 3);
     EXPECT_FALSE(compiled.ok()) << "empty path rejected";

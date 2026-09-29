@@ -138,7 +138,7 @@ bool ComponentManager::Impl::unmountOrRetain(std::unique_ptr<Document> document,
 
 bool ComponentManager::Impl::discardMountedInstance(std::map<ComponentInstanceKey, Instance>::iterator found) {
     Instance& instance = found->second;
-    const ComponentInstanceKey componentKey = instance.componentKey;
+    const ComponentInstanceKey componentKey = found->first;
     HTMLFloaterElement* root = instance.root;
     if (!root || !instance.document || !instance.controller)
         LL_ERRS("UI") << "Mounted component instance lost an owner before rollback." << LL_ENDL;
@@ -383,15 +383,11 @@ ComponentOpenResult ComponentManager::open(const std::string& definitionId, cons
         return result;
     }
 
-    Impl::Instance instance(component, definition->second.resource, std::move(document), std::move(controller));
-    instance.root = floater;
-    result.floater = instance.root;
-
     auto [inserted, insertedNew] =
-        mImpl->instances.try_emplace(component, component, instance.resource, std::move(instance.document), std::move(instance.controller));
+        mImpl->instances.try_emplace(component, definition->second.resource, std::move(document), std::move(controller));
     if (!insertedNew) {
-        instance.controller->deactivate();
-        mImpl->unmountOrRetain(std::move(instance.document), std::move(instance.controller), *floater);
+        controller->deactivate();
+        mImpl->unmountOrRetain(std::move(document), std::move(controller), *floater);
         result.floater = nullptr;
         result.error("floater.transaction.identity_conflict", "The component identity was claimed during mount: " + persistenceKey + ".");
         return result;
@@ -399,6 +395,7 @@ ComponentOpenResult ComponentManager::open(const std::string& definitionId, cons
 
     Impl::Instance& live = inserted->second;
     live.root = floater;
+    result.floater = floater;
     if (!mImpl->rootKeys.emplace(floater, component).second) {
         live.controller->deactivate();
         mImpl->discardMountedInstance(inserted);

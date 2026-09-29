@@ -29,7 +29,6 @@ public:
 
 private:
     LLRender::eMatrixMode mPreviousMode;
-    float mScale = 1.f;
 };
 
 class RenderTargetGuard final {

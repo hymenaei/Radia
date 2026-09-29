@@ -7,8 +7,8 @@
 #include "CSSColor.h"
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <numbers>
+#include <optional>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -19,9 +19,6 @@ namespace Core::CSS {
 namespace {
 constexpr float kPi = std::numbers::pi_v<float>;
 using detail::normalizeKeyword;
-using detail::trim;
-
-std::string tokenValue(const detail::TokenStream& stream, detail::TokenRange range) { return trim(detail::serializeRange(stream, range)); }
 
 bool isOpeningToken(detail::TokenKind kind) {
     return kind == detail::TokenKind::Function || kind == detail::TokenKind::OpenParen || kind == detail::TokenKind::OpenBracket
@@ -43,87 +40,105 @@ bool hasTopLevelDelimiter(const detail::TokenStream& stream, detail::TokenRange 
     return false;
 }
 
-bool parseFloat(const std::string& token, float& result) {
-    char* end = nullptr;
-    result = std::strtof(token.c_str(), &end);
-    return end != token.c_str() && *end == '\0' && std::isfinite(result);
+const detail::Token* singleToken(const detail::TokenStream& stream, detail::TokenRange range) {
+    range = detail::trimRange(stream, range);
+    if (range.end - range.begin != 1)
+        return nullptr;
+    return &stream.tokens()[range.begin];
 }
 
-bool parsePercent(const std::string& token, float& result) {
-    if (token.empty() || token.back() != '%')
+bool parseNumericToken(const detail::TokenStream& stream, detail::TokenRange range, detail::TokenKind kind, float& result) {
+    const detail::Token* token = singleToken(stream, range);
+    if (!token || token->kind != kind || !token->numericValue)
         return false;
-    if (!parseFloat(token.substr(0, token.size() - 1), result))
+
+    result = *token->numericValue;
+    return true;
+}
+
+bool parsePercent(const detail::TokenStream& stream, detail::TokenRange range, float& result) {
+    if (!parseNumericToken(stream, range, detail::TokenKind::Percentage, result))
         return false;
     result = std::clamp(result / 100.f, 0.f, 1.f);
     return true;
 }
 
-bool parseNumberOrPercent(const std::string& token, float percentScale, float& result) {
-    if (!token.empty() && token.back() == '%') {
-        if (!parseFloat(token.substr(0, token.size() - 1), result))
-            return false;
-        result *= percentScale / 100.f;
+bool parseNumberOrPercent(const detail::TokenStream& stream, detail::TokenRange range, float percentScale, float& result) {
+    if (parseNumericToken(stream, range, detail::TokenKind::Number, result))
         return true;
-    }
-    return parseFloat(token, result);
+    if (!parseNumericToken(stream, range, detail::TokenKind::Percentage, result))
+        return false;
+    result *= percentScale / 100.f;
+    return true;
 }
 
-bool parseRgbChannel(const std::string& token, float& result) {
-    if (parsePercent(token, result))
+bool parseRgbChannel(const detail::TokenStream& stream, detail::TokenRange range, float& result) {
+    if (parsePercent(stream, range, result))
         return true;
-    if (!parseFloat(token, result))
+    if (!parseNumericToken(stream, range, detail::TokenKind::Number, result))
         return false;
     result = std::clamp(result / 255.f, 0.f, 1.f);
     return true;
 }
 
-bool parseAlpha(const std::string& token, float& result) {
-    if (parsePercent(token, result))
+bool parseAlpha(const detail::TokenStream& stream, detail::TokenRange range, float& result) {
+    if (parsePercent(stream, range, result))
         return true;
-    if (!parseFloat(token, result))
+    if (!parseNumericToken(stream, range, detail::TokenKind::Number, result))
         return false;
     result = std::clamp(result, 0.f, 1.f);
     return true;
 }
 
-bool parseHue(std::string token, float& degrees) {
-    float scale = 1.f;
-    if (token.size() >= 4 && token.compare(token.size() - 4, 4, "turn") == 0) {
-        token.erase(token.size() - 4);
-        scale = 360.f;
-    } else if (token.size() >= 4 && token.compare(token.size() - 4, 4, "grad") == 0) {
-        token.erase(token.size() - 4);
-        scale = .9f;
-    } else if (token.size() >= 3 && token.compare(token.size() - 3, 3, "deg") == 0)
-        token.erase(token.size() - 3);
-    else if (token.size() >= 3 && token.compare(token.size() - 3, 3, "rad") == 0) {
-        token.erase(token.size() - 3);
-        scale = 180.f / kPi;
-    }
-    if (!parseFloat(token, degrees))
+bool parseHue(const detail::TokenStream& stream, detail::TokenRange range, float& degrees) {
+    const detail::Token* token = singleToken(stream, range);
+    if (!token || !token->numericValue)
         return false;
-    degrees = std::fmod(degrees * scale, 360.f);
-    if (degrees < 0.f)
-        degrees += 360.f;
+
+    double scale = 1.0;
+    if (token->kind == detail::TokenKind::Dimension) {
+        const std::optional<detail::Dimension> dimension = detail::parseDimension(stream, range);
+        if (!dimension)
+            return false;
+        if (dimension->unit == "turn")
+            scale = 360.0;
+        else if (dimension->unit == "grad")
+            scale = .9;
+        else if (dimension->unit == "rad")
+            scale = 180.0 / std::numbers::pi_v<double>;
+        else if (dimension->unit != "deg")
+            return false;
+    } else if (token->kind != detail::TokenKind::Number)
+        return false;
+
+    double normalizedDegrees = std::fmod(static_cast<double>(*token->numericValue) * scale, 360.0);
+    if (normalizedDegrees < 0.0)
+        normalizedDegrees += 360.0;
+    degrees = static_cast<float>(normalizedDegrees);
     return true;
 }
 
-bool functionArguments(const detail::TokenStream& stream, detail::TokenRange body, std::vector<std::string>& channels, std::string& alpha) {
-    if (hasTopLevelDelimiter(stream, body, ',')) {
+bool isSlash(const detail::TokenStream& stream, detail::TokenRange range) {
+    range = detail::trimRange(stream, range);
+    return range.end - range.begin == 1 && stream.tokens()[range.begin].kind == detail::TokenKind::Delim && stream.text(range.begin) == "/";
+}
+
+bool functionArguments(const detail::TokenStream& stream, detail::TokenRange body, std::vector<detail::TokenRange>& channels,
+    std::optional<detail::TokenRange>& alpha, bool& commaSyntax) {
+    commaSyntax = hasTopLevelDelimiter(stream, body, ',');
+    if (commaSyntax) {
         if (hasTopLevelDelimiter(stream, body, '/'))
             return false;
         std::vector<detail::TokenRange> arguments = detail::splitOnDelimiter(stream, body, ',');
         if (arguments.size() == 4) {
-            alpha = tokenValue(stream, arguments.back());
-            if (alpha.empty())
-                return false;
+            alpha = arguments.back();
             arguments.pop_back();
         }
-        for (const detail::TokenRange argument : arguments) {
-            const std::string value = tokenValue(stream, argument);
-            if (value.empty())
+        for (detail::TokenRange argument : arguments) {
+            argument = detail::trimRange(stream, argument);
+            if (argument.begin == argument.end)
                 return false;
-            channels.push_back(value);
+            channels.push_back(argument);
         }
         return channels.size() == 3;
     }
@@ -131,7 +146,7 @@ bool functionArguments(const detail::TokenStream& stream, detail::TokenRange bod
     const std::vector<detail::TokenRange> components = detail::splitComponents(stream, body, true);
     std::size_t slash = detail::kNoMatchingToken;
     for (std::size_t index = 0; index < components.size(); ++index) {
-        if (tokenValue(stream, components[index]) == "/") {
+        if (isSlash(stream, components[index])) {
             if (slash != detail::kNoMatchingToken)
                 return false;
             slash = index;
@@ -140,11 +155,10 @@ bool functionArguments(const detail::TokenStream& stream, detail::TokenRange bod
     const std::size_t channelEnd = slash == detail::kNoMatchingToken ? components.size() : slash;
     if (channelEnd != 3 || (slash != detail::kNoMatchingToken && slash + 2 != components.size()))
         return false;
-    for (std::size_t index = 0; index < channelEnd; ++index)
-        channels.push_back(tokenValue(stream, components[index]));
+    channels.assign(components.begin(), components.begin() + channelEnd);
     if (slash != detail::kNoMatchingToken)
-        alpha = tokenValue(stream, components[slash + 1]);
-    return alpha.empty() == (slash == detail::kNoMatchingToken);
+        alpha = components[slash + 1];
+    return true;
 }
 
 Color hsl(float hue, float saturation, float lightness, float alpha) {
@@ -421,8 +435,9 @@ bool isColorSyntax(const detail::TokenStream& stream, detail::TokenRange range) 
     const auto function = detail::parseFunction(stream, range);
     if (!function)
         return false;
-    return function->name == "rgb" || function->name == "hsl" || function->name == "hwb" || function->name == "lab"
-        || function->name == "lch" || function->name == "oklab" || function->name == "oklch" || function->name == "light-dark";
+    return function->name == "rgb" || function->name == "rgba" || function->name == "hsl" || function->name == "hsla"
+        || function->name == "hwb" || function->name == "lab" || function->name == "lch" || function->name == "oklab"
+        || function->name == "oklch" || function->name == "light-dark";
 }
 
 bool isColorSyntax(const std::string& raw) {
@@ -443,7 +458,11 @@ std::optional<Color> consumeColor(const detail::TokenStream& stream, detail::Tok
     const auto function = detail::parseFunction(stream, range);
     if (!function)
         return std::nullopt;
-    const std::string& name = function->name;
+    std::string_view name = function->name;
+    if (name == "rgba")
+        name = "rgb";
+    else if (name == "hsla")
+        name = "hsl";
     const bool supportedFunction =
         name == "rgb" || name == "hsl" || name == "hwb" || name == "lab" || name == "lch" || name == "oklab" || name == "oklch";
     if (!supportedFunction)
@@ -452,17 +471,28 @@ std::optional<Color> consumeColor(const detail::TokenStream& stream, detail::Tok
     if (name != "rgb" && name != "hsl" && hasTopLevelDelimiter(stream, function->body, ','))
         return std::nullopt;
 
-    std::vector<std::string> channels;
-    std::string alphaToken;
-    if (!functionArguments(stream, function->body, channels, alphaToken))
+    std::vector<detail::TokenRange> channels;
+    std::optional<detail::TokenRange> alphaRange;
+    bool commaSyntax = false;
+    if (!functionArguments(stream, function->body, channels, alphaRange, commaSyntax))
         return std::nullopt;
+
+    if (name == "rgb" && commaSyntax) {
+        const detail::Token* first = singleToken(stream, channels[0]);
+        const detail::Token* second = singleToken(stream, channels[1]);
+        const detail::Token* third = singleToken(stream, channels[2]);
+        if (!first || !second || !third || first->kind != second->kind || first->kind != third->kind)
+            return std::nullopt;
+    }
+
     float alpha = 1.f;
-    if (!alphaToken.empty() && !parseAlpha(alphaToken, alpha))
+    if (alphaRange && !parseAlpha(stream, *alphaRange, alpha))
         return std::nullopt;
 
     if (name == "rgb") {
         Color result;
-        if (!parseRgbChannel(channels[0], result.r) || !parseRgbChannel(channels[1], result.g) || !parseRgbChannel(channels[2], result.b))
+        if (!parseRgbChannel(stream, channels[0], result.r) || !parseRgbChannel(stream, channels[1], result.g)
+            || !parseRgbChannel(stream, channels[2], result.b))
             return std::nullopt;
         result.a = alpha;
         return result;
@@ -470,26 +500,26 @@ std::optional<Color> consumeColor(const detail::TokenStream& stream, detail::Tok
 
     if (name == "hsl" || name == "hwb") {
         float hue = 0.f, first = 0.f, second = 0.f;
-        if (!parseHue(channels[0], hue) || !parsePercent(channels[1], first) || !parsePercent(channels[2], second))
+        if (!parseHue(stream, channels[0], hue) || !parsePercent(stream, channels[1], first) || !parsePercent(stream, channels[2], second))
             return std::nullopt;
         return name == "hsl" ? hsl(hue, first, second, alpha) : hwb(hue, first, second, alpha);
     }
 
     float lightness = 0.f, first = 0.f, second = 0.f;
     const bool okSpace = name == "oklab" || name == "oklch";
-    if (!parseNumberOrPercent(channels[0], okSpace ? 1.f : 100.f, lightness))
+    if (!parseNumberOrPercent(stream, channels[0], okSpace ? 1.f : 100.f, lightness))
         return std::nullopt;
     lightness = std::clamp(lightness, 0.f, okSpace ? 1.f : 100.f);
 
     const bool cylindrical = name == "lch" || name == "oklch";
-    if (!parseNumberOrPercent(channels[1], okSpace ? .4f : (cylindrical ? 150.f : 125.f), first))
+    if (!parseNumberOrPercent(stream, channels[1], okSpace ? .4f : (cylindrical ? 150.f : 125.f), first))
         return std::nullopt;
     if (cylindrical) {
         float hue = 0.f;
-        if (!parseHue(channels[2], hue))
+        if (!parseHue(stream, channels[2], hue))
             return std::nullopt;
         polarCoordinates(std::max(0.f, first), hue, first, second);
-    } else if (!parseNumberOrPercent(channels[2], okSpace ? .4f : 125.f, second))
+    } else if (!parseNumberOrPercent(stream, channels[2], okSpace ? .4f : 125.f, second))
         return std::nullopt;
 
     return okSpace ? oklab(lightness, first, second, alpha) : lab(lightness, first, second, alpha);

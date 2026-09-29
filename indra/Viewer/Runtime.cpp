@@ -202,6 +202,7 @@ public:
         mSystem.setKeybindingResolver({});
         clearDragCursorState();
         mLayoutInitialized.clear();
+        mPendingFloaterLayout = false;
         mWorkspaceRestored = false;
         mPersistenceDirty = false;
         mInitialization = InitializationState::Failed;
@@ -261,6 +262,7 @@ public:
         mPersistenceDirty = false;
         mUnrestoredWorkspace.clear();
         mLayoutInitialized.clear();
+        mPendingFloaterLayout = false;
     }
 
     void requestSkinReload() {
@@ -277,14 +279,23 @@ public:
     }
 
     void frame(int width, int height, float paintScale, float paintOriginX, float paintOriginY) {
-        if (!isInteractive() || width <= 0 || height <= 0)
+        if (width <= 0 || height <= 0)
             return;
+        if (!isInteractive()) {
+            if (mState == RuntimeState::Running && mInitialization == InitializationState::Ready
+                && (width != mSurfaceState.width || height != mSurfaceState.height)) {
+                mSurfaceState.width = width;
+                mSurfaceState.height = height;
+                mPendingFloaterLayout = true;
+            }
+            return;
+        }
         const TimePoint frameTime = currentTime();
         const float deltaSeconds =
             mPreviousFrameTime ? std::max(0.f, std::chrono::duration<float>(frameTime - *mPreviousFrameTime).count()) : 0.f;
         mPreviousFrameTime = frameTime;
         surface().advanceScrollbarInteraction(deltaSeconds);
-        if (width != mSurfaceState.width || height != mSurfaceState.height)
+        if (width != mSurfaceState.width || height != mSurfaceState.height || mPendingFloaterLayout)
             layout(width, height);
         surface().refreshHover();
         surface().paint(*mSurfaceState.paintContext, std::max(paintScale, .0001f), {paintOriginX, paintOriginY});
@@ -544,15 +555,23 @@ private:
     void layout(int width, int height) {
         mSurfaceState.width = width;
         mSurfaceState.height = height;
+        mPendingFloaterLayout = false;
         surface().setViewport(static_cast<float>(width), static_cast<float>(height));
         mComponents.forEachOpen([&](const ComponentInstanceKey& componentKey, HTMLFloaterElement& floater) {
             auto found = mLayoutInitialized.find(componentKey);
             if (found != mLayoutInitialized.end() && found->second.get() == &floater)
                 return;
             mLayoutInitialized[componentKey].set(&floater);
-            if (const std::optional<Rect> prepared = surface().prepareFloater(floater))
+            const std::optional<Rect> prepared = surface().prepareFloater(floater);
+            if (prepared)
                 surface().placeFloater(floater, *prepared);
             restorePlacement(componentKey, floater);
+            if (!prepared) {
+                mPendingFloaterLayout = true;
+                const auto initialized = mLayoutInitialized.find(componentKey);
+                if (initialized != mLayoutInitialized.end() && initialized->second.get() == &floater)
+                    mLayoutInitialized.erase(initialized);
+            }
         });
         surface().updateLayout();
         surface().refreshHover();
@@ -581,6 +600,7 @@ private:
     std::set<ComponentInstanceKey> mUnrestoredWorkspace;
     std::optional<RuntimeKeybindingState> mObservedBindingState;
     std::map<ComponentInstanceKey, ElementRef<HTMLFloaterElement>> mLayoutInitialized;
+    bool mPendingFloaterLayout = false;
     RuntimeState mState = RuntimeState::Running;
     bool mTabKeyOwned = false;
 };

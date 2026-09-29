@@ -12,7 +12,7 @@
 #include <Viewer/ControllerRegistration.h>
 #include <Viewer/DocumentController.h>
 #include <Viewer/ReloadCoordinator.h>
-#include <Viewer/Resolver.h>
+#include <Viewer/SkinSnapshot.h>
 #include <chrono>
 #include <gtest/gtest.h>
 #include <map>

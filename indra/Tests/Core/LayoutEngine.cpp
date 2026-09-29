@@ -1548,6 +1548,40 @@ TEST_F(LayoutEngineFixture, WrapsFlexItemsByAvailableMainSize) {
     EXPECT_EQ(panel.children()[2]->rect().top(), 10.f);
 }
 
+TEST_F(LayoutEngineFixture, CarriesFlowBreakPastHiddenInlineChildren) {
+    StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet
+            .loadRadia("panel { display: block; width: 100px; height: 30px; } "
+                       "span { display: inline; font-size: 10px; line-height: 10px; } "
+                       ".hidden { display: none; }")
+            .ok());
+
+    auto panel = makeElementValue<HTMLPanelElement>();
+    panel.setRect({0.f, 0.f, 100.f, 30.f});
+    panel.innerHTML("<span>before</span><br><span class=hidden></span><span>after</span>");
+    ASSERT_EQ(panel.children().size(), 4U);
+
+    Engine::layout(panel, styleSheet, text);
+
+    EXPECT_LT(panel.children()[3]->rect().top(), panel.children()[0]->rect().top());
+}
+
+TEST_F(LayoutEngineFixture, DoesNotTurnFlowBreaksIntoFlexLines) {
+    StyleSheet styleSheet;
+    ASSERT_TRUE(styleSheet.loadRadia("panel { display: flex; flex-wrap: wrap; align-content: start; width: 100px; height: 30px; } "
+                                     "span { display: block; width: 10px; height: 10px; } .hidden { display: none; }")
+                    .ok());
+
+    auto panel = makeElementValue<HTMLPanelElement>();
+    panel.setRect({0.f, 0.f, 100.f, 30.f});
+    panel.innerHTML("<span>before</span><br><span class=hidden></span><span>after</span>");
+    ASSERT_EQ(panel.children().size(), 4U);
+
+    Engine::layout(panel, styleSheet, text);
+
+    EXPECT_EQ(panel.children()[3]->rect().top(), panel.children()[0]->rect().top());
+}
+
 TEST_F(LayoutEngineFixture, WrapsColumnFlexItems) {
     StyleSheet styleSheet;
     constexpr char kWrapLayout[] = "panel { display: flex; flex-direction: column; flex-wrap: wrap; align-content: start; gap: 2px; } "

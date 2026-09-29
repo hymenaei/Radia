@@ -22,18 +22,18 @@ void applyScissor(const Layout::Rect& rect, float scale, const Layout::Vec2& ren
 } // namespace
 
 MatrixGuard::MatrixGuard(const Layout::Rect& bounds, float scale)
-    : mPreviousMode(gGL.getMatrixMode())
-    , mScale(std::max(scale, .0001f)) {
+    : mPreviousMode(gGL.getMatrixMode()) {
+    const float resolvedScale = std::max(scale, .0001f);
     gGL.matrixMode(LLRender::MM_PROJECTION);
     gGL.pushMatrix();
     gGL.loadIdentity();
-    gGL.ortho(0.f, bounds.w * mScale, 0.f, bounds.h * mScale, -1.f, 1.f);
+    gGL.ortho(0.f, bounds.w * resolvedScale, 0.f, bounds.h * resolvedScale, -1.f, 1.f);
     gGL.matrixMode(LLRender::MM_MODELVIEW);
     gGL.pushMatrix();
     gGL.loadIdentity();
     gGL.pushUIMatrix();
     gGL.loadUIIdentity();
-    gGL.scaleUI(mScale, mScale, 1.f);
+    gGL.scaleUI(resolvedScale, resolvedScale, 1.f);
     gGL.translateUI(-bounds.x, -bounds.y, 0.f);
 }
 

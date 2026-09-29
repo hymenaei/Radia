@@ -7,8 +7,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstdlib>
 #include <limits>
+#include <numbers>
 #include "CSSRules.h"
 #include "CSSTokenStream.h"
 
@@ -16,18 +16,60 @@ namespace Core::CSS {
 namespace {
 using detail::endsWith;
 using detail::normalizeKeyword;
-using detail::trim;
-
-std::string valueText(detail::ValueRange value) {
-    return trim(detail::serializeRange(value.stream, detail::trimRange(value.stream, value.range)));
-}
 
 detail::ValueRange subValue(detail::ValueRange value, detail::TokenRange range) { return {value.stream, range}; }
 
-bool parseFiniteFloat(const std::string& value, float& result) {
-    char* end = nullptr;
-    result = std::strtof(value.c_str(), &end);
-    return end != value.c_str() && *end == '\0' && std::isfinite(result);
+const detail::Token* singleToken(detail::ValueRange value) {
+    value.range = detail::trimRange(value.stream, value.range);
+    const auto index = detail::nextToken(value);
+    if (!index || detail::nextToken(subValue(value, {*index + 1, value.range.end})))
+        return nullptr;
+    return &value.stream.tokens()[*index];
+}
+
+std::optional<float> percentageValue(detail::ValueRange value) {
+    const detail::Token* token = singleToken(value);
+    if (!token || token->kind != detail::TokenKind::Percentage || !token->numericValue || !std::isfinite(*token->numericValue))
+        return std::nullopt;
+    return token->numericValue;
+}
+
+bool parseAngleDegrees(detail::ValueRange value, double& degrees) {
+    value.range = detail::trimRange(value.stream, value.range);
+    const detail::Token* token = singleToken(value);
+    if (!token || !token->numericValue || !std::isfinite(*token->numericValue))
+        return false;
+    if (token->kind == detail::TokenKind::Number) {
+        if (*token->numericValue != 0.f)
+            return false;
+        degrees = 0.f;
+        return true;
+    }
+
+    const auto dimension = detail::parseDimension(value.stream, value.range);
+    if (!dimension)
+        return false;
+    double scale;
+    if (dimension->unit == "deg")
+        scale = 1.0;
+    else if (dimension->unit == "grad")
+        scale = .9;
+    else if (dimension->unit == "rad")
+        scale = 180.0 / std::numbers::pi_v<double>;
+    else if (dimension->unit == "turn")
+        scale = 360.0;
+    else
+        return false;
+
+    degrees = static_cast<double>(*token->numericValue) * scale;
+    return true;
+}
+
+float normalizedAngleDegrees(double degrees) {
+    double normalized = std::fmod(degrees, 360.0);
+    if (normalized < 0.0)
+        normalized += 360.0;
+    return static_cast<float>(normalized);
 }
 
 } // namespace
@@ -42,30 +84,27 @@ std::optional<Color> StyleModel::consumeColor(detail::ValueRange value) {
 }
 
 float StyleModel::parseNumberValue(detail::ValueRange value, float fallback) {
-    value.range = detail::trimRange(value.stream, value.range);
-    std::string scalar = valueText(value);
-    if (const auto dimension = detail::parseDimension(value.stream, value.range); dimension && dimension->unit == "px")
-        scalar = dimension->number;
-    char* end = nullptr;
-    const float parsed = std::strtof(scalar.c_str(), &end);
-    return end != scalar.c_str() && *end == '\0' ? parsed : fallback;
+    const detail::Token* token = singleToken(value);
+    if (!token)
+        return fallback;
+    if (token->kind == detail::TokenKind::Number)
+        return token->numericValue.value_or(fallback);
+    const auto dimension = detail::parseDimension(value.stream, value.range);
+    return dimension && dimension->unit == "px" ? token->numericValue.value_or(fallback) : fallback;
 }
 
 std::optional<Style::Length> StyleModel::parseLengthValue(detail::ValueRange value) {
-    value.range = detail::trimRange(value.stream, value.range);
-    std::string scalar = valueText(value);
-    bool percentage = false;
-    if (!scalar.empty() && scalar.back() == '%') {
-        percentage = true;
-        scalar = trim(scalar.substr(0, scalar.size() - 1));
-    } else if (const auto dimension = detail::parseDimension(value.stream, value.range); dimension && dimension->unit == "px")
-        scalar = dimension->number;
-
-    char* end = nullptr;
-    const float parsed = std::strtof(scalar.c_str(), &end);
-    if (end == scalar.c_str() || *end != '\0' || !std::isfinite(parsed))
+    const detail::Token* token = singleToken(value);
+    if (!token || !token->numericValue || !std::isfinite(*token->numericValue))
         return std::nullopt;
-    return percentage ? Style::Length {0.f, parsed / 100.f} : Style::Length {parsed};
+    if (token->kind == detail::TokenKind::Percentage)
+        return Style::Length {0.f, *token->numericValue / 100.f};
+    if (token->kind == detail::TokenKind::Number)
+        return Style::Length {*token->numericValue};
+    const auto dimension = detail::parseDimension(value.stream, value.range);
+    if (!dimension || dimension->unit != "px")
+        return std::nullopt;
+    return Style::Length {*token->numericValue};
 }
 
 std::optional<Style::Gradient> StyleModel::parseGradient(detail::ValueRange value, Style::ColorSchemeMode scheme) {
@@ -93,39 +132,17 @@ std::optional<Style::Gradient> StyleModel::parseGradient(detail::ValueRange valu
         return std::nullopt;
 
     const std::vector<detail::TokenRange> arguments = detail::splitOnDelimiter(value.stream, function->body, ',');
-    if (arguments.size() < 2)
+    if (arguments.empty())
         return std::nullopt;
-
-    auto parseAngle = [&](detail::TokenRange token, float& degrees) {
-        const auto dimension = detail::parseDimension(value.stream, token);
-        if (!dimension)
-            return false;
-        const std::string& number = dimension->number;
-        float scale;
-        if (dimension->unit == "deg")
-            scale = 1.f;
-        else if (dimension->unit == "turn")
-            scale = 360.f;
-        else if (dimension->unit == "rad")
-            scale = 57.2957795131f;
-        else
-            return false;
-        if (!parseFiniteFloat(trim(number), degrees))
-            return false;
-        degrees *= scale;
-        return true;
-    };
 
     auto parseCenter = [&](const std::vector<detail::TokenRange>& tokens, Layout::Vec2& center) {
         if (tokens.empty() || tokens.size() > 2)
             return false;
         auto consumePercentage = [&](detail::TokenRange tokenRange, float& percentage) {
-            const std::string token = valueText(subValue(value, tokenRange));
-            if (token.empty() || token.back() != '%')
+            const auto parsed = percentageValue(subValue(value, tokenRange));
+            if (!parsed)
                 return false;
-            if (!parseFiniteFloat(token.substr(0, token.size() - 1), percentage) || percentage < 0.f || percentage > 100.f)
-                return false;
-            percentage /= 100.f;
+            percentage = *parsed / 100.f;
             return true;
         };
         auto horizontal = [&](detail::TokenRange rawToken, float& result) {
@@ -214,8 +231,12 @@ std::optional<Style::Gradient> StyleModel::parseGradient(detail::ValueRange valu
                 else if (left)
                     gradient.angleDegrees = 270.f;
                 gradient.cornerDirection = top != bottom && right != left;
-            } else if (!parseAngle(arguments.front(), gradient.angleDegrees))
-                return std::nullopt;
+            } else {
+                double degrees;
+                if (!parseAngleDegrees(subValue(value, arguments.front()), degrees))
+                    return std::nullopt;
+                gradient.angleDegrees = normalizedAngleDegrees(degrees);
+            }
         } else if (gradient.kind == Style::GradientKind::Radial) {
             const auto at = std::find_if(tokens.begin(), tokens.end(), [&](detail::TokenRange token) {
                 return normalizeKeyword(value.stream, token) == "at";
@@ -238,8 +259,12 @@ std::optional<Style::Gradient> StyleModel::parseGradient(detail::ValueRange valu
         } else {
             std::size_t index = 0;
             if (index < tokens.size() && normalizeKeyword(value.stream, tokens[index]) == "from") {
-                if (++index == tokens.size() || !parseAngle(tokens[index++], gradient.angleDegrees))
+                if (++index == tokens.size())
                     return std::nullopt;
+                double degrees;
+                if (!parseAngleDegrees(subValue(value, tokens[index++]), degrees))
+                    return std::nullopt;
+                gradient.angleDegrees = normalizedAngleDegrees(degrees);
             }
             if (index < tokens.size() && normalizeKeyword(value.stream, tokens[index]) == "at") {
                 const std::vector<detail::TokenRange> centerTokens(tokens.begin() + index + 1, tokens.end());
@@ -253,22 +278,19 @@ std::optional<Style::Gradient> StyleModel::parseGradient(detail::ValueRange valu
         firstStop = 1;
     }
 
-    if (arguments.size() - firstStop < 2)
+    if (arguments.size() == firstStop)
         return std::nullopt;
     const float unspecified = std::numeric_limits<float>::quiet_NaN();
     auto parseStopPosition = [&](detail::TokenRange rawPosition, float& position) {
-        const std::string token = normalizeKeyword(value.stream, rawPosition);
-        if (!token.empty() && token.back() == '%') {
-            if (!parseFiniteFloat(token.substr(0, token.size() - 1), position))
-                return false;
-            position /= 100.f;
+        if (const auto percentage = percentageValue(subValue(value, rawPosition))) {
+            position = *percentage / 100.f;
         } else {
-            float degrees = 0.f;
-            if (gradient.kind != Style::GradientKind::Conic || !parseAngle(rawPosition, degrees))
+            double degrees = 0.0;
+            if (gradient.kind != Style::GradientKind::Conic || !parseAngleDegrees(subValue(value, rawPosition), degrees))
                 return false;
-            position = degrees / 360.f;
+            position = static_cast<float>(degrees / 360.0);
         }
-        return position >= 0.f && position <= 1.f;
+        return std::isfinite(position);
     };
     for (std::size_t index = firstStop; index < arguments.size(); ++index) {
         const std::vector<detail::TokenRange> tokens = detail::splitComponents(value.stream, arguments[index]);
@@ -295,20 +317,30 @@ std::optional<Style::Gradient> StyleModel::parseGradient(detail::ValueRange valu
             return std::nullopt;
     }
 
-    if (gradient.stops.size() < 2)
-        return std::nullopt;
+    if (gradient.stops.size() == 1) {
+        Style::GradientStop last = gradient.stops.front();
+        gradient.stops.front().position = 0.f;
+        last.position = 1.f;
+        gradient.stops.push_back(last);
+    }
     if (!std::isfinite(gradient.stops.front().position))
         gradient.stops.front().position = 0.f;
     if (!std::isfinite(gradient.stops.back().position))
         gradient.stops.back().position = 1.f;
+    float previousPosition = gradient.stops.front().position;
+    for (std::size_t index = 1; index < gradient.stops.size(); ++index) {
+        float& position = gradient.stops[index].position;
+        if (!std::isfinite(position))
+            continue;
+        position = std::max(position, previousPosition);
+        previousPosition = position;
+    }
     std::size_t runStart = 0;
     while (runStart + 1 < gradient.stops.size()) {
         std::size_t runEnd = runStart + 1;
         while (runEnd < gradient.stops.size() && !std::isfinite(gradient.stops[runEnd].position))
             ++runEnd;
         if (runEnd == gradient.stops.size())
-            return std::nullopt;
-        if (gradient.stops[runEnd].position < gradient.stops[runStart].position)
             return std::nullopt;
         const float step = (gradient.stops[runEnd].position - gradient.stops[runStart].position) / static_cast<float>(runEnd - runStart);
         for (std::size_t index = runStart + 1; index < runEnd; ++index)
@@ -359,21 +391,10 @@ std::optional<Style::Filter> StyleModel::parseFilter(detail::ValueRange value) {
         else if (direction == "to top left" || direction == "to left top")
             degrees = 315.f;
         else {
-            const auto dimension = detail::parseDimension(value.stream, range);
-            if (!dimension)
+            double angle;
+            if (!parseAngleDegrees(subValue(value, range), angle))
                 return false;
-            float scale = 0.f;
-            if (dimension->unit == "deg")
-                scale = 1.f;
-            else if (dimension->unit == "turn")
-                scale = 360.f;
-            else if (dimension->unit == "rad")
-                scale = 57.2957795131f;
-            else
-                return false;
-            if (!parseFiniteFloat(trim(dimension->number), degrees))
-                return false;
-            degrees *= scale;
+            degrees = normalizedAngleDegrees(angle);
         }
         return true;
     };

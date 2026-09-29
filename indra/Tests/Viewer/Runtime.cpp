@@ -10,6 +10,7 @@
 #include <Core/HTMLFloaterElement.h>
 #include <Core/HTMLPanelElement.h>
 #include <Core/RecordingPaintContext.h>
+#include <Core/TextMeasurer.h>
 #include <Viewer/ControllerRegistration.h>
 #include <Viewer/DocumentController.h>
 #include <Viewer/InputBridge.h>
@@ -17,11 +18,13 @@
 #include <Viewer/Runtime.h>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <gtest/gtest.h>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 #include "llcontrol.h"
 #include "llglslshader.h"
@@ -68,6 +71,29 @@ WheelEvent makeWheelEvent(int x, int y, float deltaX, float deltaY, std::uint32_
 }
 
 KeyEvent makeKeyEvent(int key, std::uint32_t modifiers = 0, bool repeated = false) { return {key, modifiers, repeated}; }
+
+class OneShotTextMeasurer final : public Core::TextMeasurer {
+public:
+    Core::Layout::Vec2 measureText(const std::string& text, const Core::Style::ComputedStyle& style) const override {
+        if (mOnNextMeasure) {
+            auto callback = std::move(mOnNextMeasure);
+            mOnNextMeasure = {};
+            callback();
+        }
+        return Core::fixedTextMeasurer().measureText(text, style);
+    }
+
+    float usedLetterSpacing(const Core::Style::ComputedStyle& style) const override {
+        return Core::fixedTextMeasurer().usedLetterSpacing(style);
+    }
+
+    std::uint64_t generation() const noexcept override { return 1; }
+
+    void onNextMeasure(std::function<void()> callback) { mOnNextMeasure = std::move(callback); }
+
+private:
+    mutable std::function<void()> mOnNextMeasure;
+};
 
 SkinSnapshotResult runtimeSkinSnapshot() {
     constexpr char kLocalization[] = "defaultLocale: en\n"
@@ -157,7 +183,7 @@ protected:
                       },
                   .paintContext =
                       [this](LLGLSLShader&, System&) {
-                          auto context = std::make_unique<RecordingPaintContext>();
+                          auto context = std::make_unique<RecordingPaintContext>(textMeasurer);
                           paintContext = context.get();
                           return context;
                       },
@@ -190,6 +216,7 @@ protected:
     std::chrono::steady_clock::time_point now;
     RuntimeControllerState controllerState;
     bool failTeardown = false;
+    OneShotTextMeasurer textMeasurer;
     RecordingPaintContext* paintContext = nullptr;
     Runtime runtime;
 };
@@ -326,6 +353,42 @@ TEST_F(RuntimeFixture, RoutesAttachedInput) {
     EXPECT_TRUE(runtime.keyDown(makeKeyEvent(kKeyTab)).handled);
     EXPECT_TRUE(runtime.keyUp(makeKeyEvent(kKeyTab)).handled);
     EXPECT_FALSE(runtime.keyUp(makeKeyEvent(kKeyTab, kModifierControl)).handled);
+}
+
+TEST_F(RuntimeFixture, RetriesFloaterPreparationAfterLayoutInvalidation) {
+    ASSERT_TRUE(runtime.initialize());
+    ASSERT_TRUE(registerTestFloater());
+    HTMLFloaterElement* floater = runtime.openFloater("runtimeTest");
+    ASSERT_NE(floater, nullptr);
+
+    bool invalidatedLayout = false;
+    textMeasurer.onNextMeasure([&] {
+        invalidatedLayout = true;
+        floater->setRect({0.f, 0.f, 1.f, 1.f});
+    });
+
+    runtime.frame(800, 600);
+    ASSERT_TRUE(invalidatedLayout);
+    EXPECT_FLOAT_EQ(floater->rect().w, 1.f);
+
+    runtime.frame(800, 600);
+    EXPECT_GT(floater->rect().w, 1.f);
+    EXPECT_GT(floater->rect().h, 1.f);
+}
+
+TEST_F(RuntimeFixture, UsesCurrentViewportAfterHiddenResize) {
+    ASSERT_TRUE(runtime.initialize());
+    ASSERT_TRUE(registerTestFloater());
+    ASSERT_NE(runtime.openFloater("runtimeTest"), nullptr);
+    runtime.frame(800, 600);
+
+    runtime.setVisibility(false);
+    runtime.frame(1200, 800);
+
+    HTMLFloaterElement* floater = runtime.openFloater("runtimeTest", "after-resize");
+    ASSERT_NE(floater, nullptr);
+    EXPECT_FLOAT_EQ(floater->rect().x + floater->rect().w * .5f, 600.f);
+    EXPECT_FLOAT_EQ(floater->rect().y + floater->rect().h * .5f, 400.f);
 }
 
 TEST_F(RuntimeFixture, UpdatesCursorAcrossFramesAndClearsOnMiss) {

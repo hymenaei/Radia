@@ -525,7 +525,7 @@ TEST(GeneratedStyle, ParsesCommaSeparatedGeneratedList) {
     EXPECT_EQ(invalidRange.range.begin, 0u);
 }
 
-TEST(GeneratedStyle, Layered) {
+TEST(GeneratedStyle, ParsesLayeredShorthand) {
     Core::CSS::detail::TokenStream stream("solid, 2px");
     ValueRange range {stream, {0, stream.tokens().size()}};
     using Longhands = PropertyList<Property::BorderTopStyle, Property::BorderTopWidth>;
@@ -551,7 +551,7 @@ TEST(GeneratedStyle, Layered) {
     EXPECT_EQ(invalidRange.range.begin, 0u);
 }
 
-TEST(GeneratedStyle, SpaceSeparated) {
+TEST(GeneratedStyle, ParsesSpaceSeparatedShorthand) {
     using Longhands = PropertyList<Property::BorderTopStyle, Property::BorderRightStyle>;
     Core::CSS::detail::TokenStream stream("solid none");
     ValueRange range {stream, {0, stream.tokens().size()}};
@@ -579,7 +579,7 @@ TEST(GeneratedStyle, SpaceSeparated) {
     EXPECT_EQ(invalidRange.range.begin, 0u);
 }
 
-TEST(GeneratedStyle, SlashSeparated) {
+TEST(GeneratedStyle, ParsesSlashSeparatedShorthand) {
     using Longhands = PropertyList<Property::BorderTopWidth, Property::BorderTopStyle>;
     Core::CSS::detail::TokenStream stream("2px / solid");
     ValueRange range {stream, {0, stream.tokens().size()}};

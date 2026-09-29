@@ -524,16 +524,20 @@ TEST(Fragment, PreservesChildOrder) {
     auto first = makeElement<HTMLLabelElement>("first");
     Node* firstPtr = first.get();
     fragment->append(std::move(first));
-    fragment->append(std::make_unique<Text>("middle"));
+    Node* middle = fragment->append(std::make_unique<Text>("middle"));
     Node* last = fragment->append(makeElement<HTMLLabelElement>("last"));
 
     EXPECT_EQ(fragment->nodeType(), NodeType::Fragment);
     EXPECT_EQ(fragment->firstChild(), firstPtr);
     EXPECT_EQ(fragment->lastChild(), last);
     EXPECT_EQ(firstPtr->previousSibling(), nullptr);
+    EXPECT_EQ(firstPtr->nextSibling(), middle);
+    EXPECT_EQ(middle->previousSibling(), firstPtr);
+    EXPECT_EQ(middle->nextSibling(), last);
     ASSERT_NE(last->previousSibling(), nullptr);
     ASSERT_NE(last->previousSibling()->asText(), nullptr);
     EXPECT_EQ(last->previousSibling()->asText()->data(), "middle");
+    EXPECT_EQ(last->nextSibling(), nullptr);
     root.append(std::move(fragment));
 
     ASSERT_EQ(root.childNodes().size(), 3U);
@@ -647,6 +651,18 @@ TEST(Fragment, RoundTripsBoundedHTML) {
     EXPECT_EQ(root.children()[1]->elementName(), "input");
 }
 
+TEST(Fragment, DefersFlowBreakUntilNextLayoutChild) {
+    auto root = makeElementValue<HTMLPanelElement>();
+
+    root.innerHTML("<span>before</span><br> \n <span>after</span>");
+
+    const auto children = root.children();
+    ASSERT_EQ(children.size(), 3U);
+    EXPECT_FALSE(children[0]->flowBreakBefore());
+    EXPECT_EQ(children[1]->elementName(), "br");
+    EXPECT_TRUE(children[2]->flowBreakBefore());
+}
+
 TEST(Fragment, RejectsScopedElementsWithoutOwner) {
     auto root = makeElementValue<HTMLPanelElement>();
     constexpr char kInvalidHTML[] = "<legend>Orphan</legend>";
@@ -655,6 +671,43 @@ TEST(Fragment, RejectsScopedElementsWithoutOwner) {
 
     ASSERT_EQ(root.childNodes().size(), 1U);
     EXPECT_EQ(root.textContent(), kInvalidHTML);
+}
+
+TEST(Fragment, ParsesLegendWithinFieldset) {
+    auto root = makeElementValue<HTMLPanelElement>();
+
+    root.innerHTML("<fieldset><legend id='title'>Settings <b>basic</b></legend><button>Save</button></fieldset>");
+
+    ASSERT_EQ(root.children().size(), 1U);
+    const Element* fieldset = root.children().front();
+    ASSERT_EQ(fieldset->children().size(), 2U);
+    EXPECT_EQ(fieldset->children()[0]->elementName(), "legend");
+    EXPECT_EQ(fieldset->children()[0]->id(), "title");
+    EXPECT_EQ(fieldset->children()[0]->textContent(), "Settings basic");
+    EXPECT_EQ(fieldset->children()[1]->elementName(), "button");
+
+    auto fieldsetContext = makeElementValue<Element>("fieldset");
+    fieldsetContext.innerHTML("<legend>Title <strong>text</strong></legend>");
+    ASSERT_EQ(fieldsetContext.children().size(), 1U);
+    EXPECT_EQ(fieldsetContext.children().front()->elementName(), "legend");
+    EXPECT_EQ(fieldsetContext.children().front()->textContent(), "Title text");
+
+    constexpr char kDuplicateLegends[] = "<legend>One</legend><legend>Two</legend>";
+    fieldsetContext.innerHTML(kDuplicateLegends);
+    EXPECT_EQ(fieldsetContext.textContent(), kDuplicateLegends);
+
+    constexpr char kInvalidHTML[] = "<legend><div>Invalid</div></legend>";
+    fieldsetContext.innerHTML(kInvalidHTML);
+    EXPECT_EQ(fieldsetContext.textContent(), kInvalidHTML);
+
+    auto legendContext = makeElementValue<Element>("legend");
+    legendContext.innerHTML("<strong>Allowed</strong>");
+    ASSERT_EQ(legendContext.children().size(), 1U);
+    EXPECT_EQ(legendContext.children().front()->elementName(), "strong");
+
+    constexpr char kInvalidLegendContent[] = "<div>Invalid</div>";
+    legendContext.innerHTML(kInvalidLegendContent);
+    EXPECT_EQ(legendContext.textContent(), kInvalidLegendContent);
 }
 
 TEST(Fragment, InnerHTMLReplacesExistingChildren) {
@@ -766,6 +819,29 @@ TEST(Fragment, TreatsMalformedHTMLAsLiteralText) {
 
     EXPECT_EQ(root.textContent(), "<p/>");
     EXPECT_EQ(root.innerHTML(), "&lt;p/&gt;");
+
+    root.innerHTML("<input checked=\"true\"type=checkbox>");
+
+    EXPECT_EQ(root.textContent(), "<input checked=\"true\"type=checkbox>");
+    EXPECT_EQ(root.innerHTML(), "&lt;input checked=\"true\"type=checkbox&gt;");
+
+    constexpr const char* kInvalidFlowBreaks[] = {
+        "<br>leading",
+        " \n<br>leading",
+        "before<br><br>after",
+        "before<br>",
+        "<span><br>leading</span>",
+        "<span>before<br><br>after</span>",
+        "<span>before<br></span>",
+    };
+    for (const char* html : kInvalidFlowBreaks) {
+        SCOPED_TRACE(html);
+        root.innerHTML(html);
+
+        ASSERT_EQ(root.childNodes().size(), 1U);
+        ASSERT_NE(root.childNodes().front()->asText(), nullptr);
+        EXPECT_EQ(root.textContent(), html);
+    }
 }
 
 TEST(Element, RejectsAmbiguousLabelTarget) {

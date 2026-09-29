@@ -68,14 +68,11 @@ struct ComponentManager::Impl final {
     };
 
     struct Instance {
-        Instance(ComponentInstanceKey componentKey, Core::ResourceId resource, std::unique_ptr<Document> document,
-            std::unique_ptr<DocumentController> controller)
-            : componentKey(std::move(componentKey))
-            , resource(std::move(resource))
+        Instance(Core::ResourceId resource, std::unique_ptr<Document> document, std::unique_ptr<DocumentController> controller)
+            : resource(std::move(resource))
             , document(std::move(document))
             , controller(std::move(controller)) {}
 
-        ComponentInstanceKey componentKey;
         Core::ResourceId resource;
         std::unique_ptr<Document> document;
         std::unique_ptr<DocumentController> controller;

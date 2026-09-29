@@ -10,7 +10,10 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <locale>
+#include <sstream>
 #include <string>
+#include <system_error>
 
 namespace Core::CSS::detail {
 namespace {
@@ -232,6 +235,19 @@ std::optional<float> parseNumber(std::string_view source) {
 
     float value = 0.f;
     const auto [end, error] = std::from_chars(source.data(), source.data() + source.size(), value, std::chars_format::general);
+    if (error == std::errc::result_out_of_range) {
+        std::istringstream fallback {std::string(source)};
+        fallback.imbue(std::locale::classic());
+        fallback >> value;
+        if (fallback.fail()) {
+            if (value != 0.f)
+                return std::nullopt;
+            fallback.clear();
+        }
+        if (fallback.peek() != std::char_traits<char>::eof() || !std::isfinite(value))
+            return std::nullopt;
+        return value;
+    }
     if (error != std::errc {} || end != source.data() + source.size() || !std::isfinite(value))
         return std::nullopt;
     return value;
@@ -304,11 +320,20 @@ std::size_t trimTokenEnd(const TokenStream& stream, std::size_t begin, std::size
     return end;
 }
 
-bool hasBalancedRange(const TokenStream& stream, TokenRange range) {
+std::size_t skipTrailingTrivia(const TokenStream& stream, std::size_t end) {
+    while (end < stream.tokens().size() && isTrivia(stream.tokens()[end].kind))
+        ++end;
+    return end;
+}
+
+bool hasBalancedRange(const TokenStream& stream, TokenRange range, bool allowUnclosedAtEOF = false) {
     if (range.begin > range.end || range.end > stream.tokens().size())
         return false;
+    const bool endsAtEOF = allowUnclosedAtEOF && skipTrailingTrivia(stream, range.end) == stream.tokens().size();
     for (std::size_t index = range.begin; index < range.end; ++index) {
         const Token& token = stream.tokens()[index];
+        if (isOpeningBlock(token.kind) && token.matching == kNoMatchingToken && endsAtEOF)
+            continue;
         if ((isOpeningBlock(token.kind) || isClosingBlock(token.kind))
             && (token.matching == kNoMatchingToken || token.matching < range.begin || token.matching >= range.end))
             return false;
@@ -745,28 +770,37 @@ std::string serializeRange(const TokenStream& stream, TokenRange range) {
 }
 
 std::optional<FunctionRange> parseFunction(const TokenStream& stream, TokenRange range) {
-    range = trimRange(stream, range);
-    if (!hasBalancedRange(stream, range))
+    if (!hasBalancedRange(stream, range, true))
         return std::nullopt;
+    const std::size_t rangeEnd = skipTrailingTrivia(stream, range.end);
+    const bool endsAtEOF = rangeEnd == stream.tokens().size();
+    range = trimRange(stream, {range.begin, rangeEnd});
 
     std::vector<std::size_t> significant;
     for (std::size_t index = range.begin; index < range.end; ++index)
         if (!isTrivia(stream.tokens()[index].kind))
             significant.push_back(index);
-    if (significant.size() < 2)
+    if (significant.empty())
         return std::nullopt;
 
     const std::size_t function = significant.front();
     const std::size_t close = significant.back();
     const Token& functionToken = stream.tokens()[function];
-    if (functionToken.kind != TokenKind::Function || functionToken.matching != close
-        || stream.tokens()[close].kind != TokenKind::CloseParen)
+    if (functionToken.kind != TokenKind::Function)
+        return std::nullopt;
+
+    TokenRange body {function + 1, close};
+    if (functionToken.matching == kNoMatchingToken) {
+        if (!endsAtEOF)
+            return std::nullopt;
+        body.end = rangeEnd;
+    } else if (functionToken.matching != close || stream.tokens()[close].kind != TokenKind::CloseParen)
         return std::nullopt;
 
     const std::string_view functionText = stream.text(function);
     if (functionText.empty() || functionText.back() != '(')
         return std::nullopt;
-    return FunctionRange {lower(decodeIdentifier(functionText.substr(0, functionText.size() - 1))), {function + 1, close}};
+    return FunctionRange {lower(decodeIdentifier(functionText.substr(0, functionText.size() - 1))), body};
 }
 
 std::optional<std::string> parseUrl(const TokenStream& stream, TokenRange range) {

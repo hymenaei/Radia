@@ -10,6 +10,7 @@
 #include <string_view>
 #include <utility>
 #include "llcontrol.h"
+#include "llsd.h"
 #include "llsdutil.h"
 
 namespace Viewer {
@@ -20,6 +21,28 @@ constexpr std::string_view kUILayout = "UILayout";
 constexpr std::string_view kUIWorkspace = "UIWorkspace";
 
 LLSD normalizedMap(LLSD value) { return value.isMap() ? value : LLSD::emptyMap(); }
+
+LLSD readLayout(LLControlGroup& layout) {
+    if (!layout.controlExists(std::string(kUILayout)))
+        return LLSD::emptyMap();
+    return normalizedMap(layout.getLLSD(kUILayout));
+}
+
+LLSD readWorkspace(LLControlGroup& workspace) {
+    if (!workspace.controlExists(std::string(kUIWorkspace)))
+        return LLSD::emptyMap();
+    return normalizedMap(workspace.getLLSD(kUIWorkspace));
+}
+
+void writeLayout(LLControlGroup& layout, const LLSD& value) {
+    if (layout.controlExists(std::string(kUILayout)))
+        layout.setLLSD(kUILayout, value);
+}
+
+void writeWorkspace(LLControlGroup& workspace, const LLSD& value) {
+    if (workspace.controlExists(std::string(kUIWorkspace)))
+        workspace.setLLSD(kUIWorkspace, value);
+}
 
 bool isNumber(const LLSD& value) { return value.isInteger() || value.isReal(); }
 
@@ -102,7 +125,7 @@ WorkspacePersistence::WorkspacePersistence(LLControlGroup& layout, LLControlGrou
 
 std::vector<ComponentInstanceKey> WorkspacePersistence::openComponentKeys() const {
     std::vector<ComponentInstanceKey> result;
-    const LLSD workspace = readWorkspace();
+    const LLSD workspace = readWorkspace(mWorkspace);
     for (LLSD::map_const_iterator entry = workspace.beginMap(); entry != workspace.endMap(); ++entry) {
         if (!entry->second.isMap())
             continue;
@@ -114,7 +137,7 @@ std::vector<ComponentInstanceKey> WorkspacePersistence::openComponentKeys() cons
 
 void WorkspacePersistence::saveWorkspace(const std::vector<ComponentInstanceState>& states,
     const std::vector<ComponentInstanceKey>& preserved) {
-    const LLSD previousWorkspace = readWorkspace();
+    const LLSD previousWorkspace = readWorkspace(mWorkspace);
     LLSD workspace = LLSD::emptyMap();
     auto retain = [&](const ComponentInstanceKey& component) {
         if (!component.valid())
@@ -145,14 +168,14 @@ void WorkspacePersistence::saveWorkspace(const std::vector<ComponentInstanceStat
 
     if (workspace == previousWorkspace)
         return;
-    writeWorkspace(workspace);
+    writeWorkspace(mWorkspace, workspace);
 }
 
 std::optional<FloaterPlacement> WorkspacePersistence::restorePlacement(const ComponentInstanceKey& componentKey) const {
     if (!componentKey.valid())
         return std::nullopt;
-    const LLSD layout = readLayout();
-    const LLSD workspace = readWorkspace();
+    const LLSD layout = readLayout(mLayout);
+    const LLSD workspace = readWorkspace(mWorkspace);
     return decodePlacement(mergedPlacement(layout[componentKey.definitionId], workspace[componentKey.persistenceKey()]));
 }
 
@@ -169,8 +192,8 @@ void WorkspacePersistence::savePlacement(const ComponentInstanceKey& componentKe
     if (!componentKey.valid())
         return;
 
-    LLSD layout = readLayout();
-    LLSD workspace = readWorkspace();
+    LLSD layout = readLayout(mLayout);
+    LLSD workspace = readWorkspace(mWorkspace);
     const LLSD previousLayout = layout;
     const LLSD previousWorkspace = workspace;
     const std::string key = componentKey.persistenceKey();
@@ -203,30 +226,8 @@ void WorkspacePersistence::savePlacement(const ComponentInstanceKey& componentKe
     }
 
     if (layout != previousLayout)
-        writeLayout(layout);
+        writeLayout(mLayout, layout);
     if (workspace != previousWorkspace)
-        writeWorkspace(workspace);
-}
-
-LLSD WorkspacePersistence::readLayout() const {
-    if (!mLayout.controlExists(std::string(kUILayout)))
-        return LLSD::emptyMap();
-    return normalizedMap(mLayout.getLLSD(kUILayout));
-}
-
-LLSD WorkspacePersistence::readWorkspace() const {
-    if (!mWorkspace.controlExists(std::string(kUIWorkspace)))
-        return LLSD::emptyMap();
-    return normalizedMap(mWorkspace.getLLSD(kUIWorkspace));
-}
-
-void WorkspacePersistence::writeLayout(const LLSD& layout) {
-    if (mLayout.controlExists(std::string(kUILayout)))
-        mLayout.setLLSD(kUILayout, layout);
-}
-
-void WorkspacePersistence::writeWorkspace(const LLSD& workspace) {
-    if (mWorkspace.controlExists(std::string(kUIWorkspace)))
-        mWorkspace.setLLSD(kUIWorkspace, workspace);
+        writeWorkspace(mWorkspace, workspace);
 }
 } // namespace Viewer

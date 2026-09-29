@@ -46,7 +46,6 @@ private:
     bool valid() const noexcept {
         return !mDescriptor.name.empty() && static_cast<bool>(mDescriptor.invoke) && static_cast<bool>(mDescriptor.argumentError);
     }
-    const std::string& name() const noexcept { return mDescriptor.name; }
     std::string takeName() && { return std::move(mDescriptor.name); }
     Invoke takeInvoke() && { return std::move(mDescriptor.invoke); }
     ArgumentError takeArgumentError() && { return std::move(mDescriptor.argumentError); }

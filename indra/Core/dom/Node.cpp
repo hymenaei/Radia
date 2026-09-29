@@ -14,50 +14,67 @@
 namespace Core {
 using detail::NodeMutation;
 
+namespace {
+enum class SiblingDirection {
+    Previous,
+    Next
+};
+
+template<typename NodeType> NodeType* siblingIn(const std::vector<NodePtr>& children, NodeType* node, SiblingDirection direction) {
+    const auto found = std::find_if(children.begin(), children.end(), [node](const NodePtr& child) {
+        return child.get() == node;
+    });
+    if (found == children.end())
+        return nullptr;
+    if (direction == SiblingDirection::Previous)
+        return found == children.begin() ? nullptr : std::prev(found)->get();
+    const auto next = std::next(found);
+    return next == children.end() ? nullptr : next->get();
+}
+} // namespace
+
 Node* Node::previousSibling() noexcept {
     Node* parent = parentNode();
     if (!parent)
         return nullptr;
-    const NodeSnapshot siblings = parent->childNodes();
-    const auto found = std::find(siblings.begin(), siblings.end(), this);
-    if (found == siblings.end() || found == siblings.begin())
-        return nullptr;
-    return *std::prev(found);
+    if (Element* element = parent->asElement())
+        return siblingIn(element->mChildren, this, SiblingDirection::Previous);
+    if (Fragment* fragment = parent->asFragment())
+        return siblingIn(fragment->mChildren, this, SiblingDirection::Previous);
+    return nullptr;
 }
 
 const Node* Node::previousSibling() const noexcept {
     const Node* parent = parentNode();
     if (!parent)
         return nullptr;
-    const ConstNodeSnapshot siblings = parent->childNodes();
-    const auto found = std::find(siblings.begin(), siblings.end(), this);
-    if (found == siblings.end() || found == siblings.begin())
-        return nullptr;
-    return *std::prev(found);
+    if (const Element* element = parent->asElement())
+        return siblingIn(element->mChildren, this, SiblingDirection::Previous);
+    if (const Fragment* fragment = parent->asFragment())
+        return siblingIn(fragment->mChildren, this, SiblingDirection::Previous);
+    return nullptr;
 }
 
 Node* Node::nextSibling() noexcept {
     Node* parent = parentNode();
     if (!parent)
         return nullptr;
-    const NodeSnapshot siblings = parent->childNodes();
-    const auto found = std::find(siblings.begin(), siblings.end(), this);
-    if (found == siblings.end())
-        return nullptr;
-    const auto next = std::next(found);
-    return next == siblings.end() ? nullptr : *next;
+    if (Element* element = parent->asElement())
+        return siblingIn(element->mChildren, this, SiblingDirection::Next);
+    if (Fragment* fragment = parent->asFragment())
+        return siblingIn(fragment->mChildren, this, SiblingDirection::Next);
+    return nullptr;
 }
 
 const Node* Node::nextSibling() const noexcept {
     const Node* parent = parentNode();
     if (!parent)
         return nullptr;
-    const ConstNodeSnapshot siblings = parent->childNodes();
-    const auto found = std::find(siblings.begin(), siblings.end(), this);
-    if (found == siblings.end())
-        return nullptr;
-    const auto next = std::next(found);
-    return next == siblings.end() ? nullptr : *next;
+    if (const Element* element = parent->asElement())
+        return siblingIn(element->mChildren, this, SiblingDirection::Next);
+    if (const Fragment* fragment = parent->asFragment())
+        return siblingIn(fragment->mChildren, this, SiblingDirection::Next);
+    return nullptr;
 }
 
 Node* Node::before(NodePtr node) {

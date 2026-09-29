@@ -30,17 +30,13 @@ TreeTraversalCache::ChildSnapshot TreeTraversalCache::build(Element& parent) {
     SnapshotCache& activeCache = mActiveSource;
     const auto lifetime = Core::detail::NodeAccess::lifetime(parent).lock();
     const std::uint64_t revision = parent.mChildSnapshotRevision;
-    const auto found = cache.snapshots.find(&parent);
-    const auto cachedLifetime = cache.lifetimes.find(&parent);
-    const auto activeFound = activeCache.snapshots.find(&parent);
-    const auto activeLifetime = activeCache.lifetimes.find(&parent);
-    const auto cachedRevision = cache.revisions.find(&parent);
-    if (mResetAtBoundary && active() && activeFound != activeCache.snapshots.end() && activeLifetime != activeCache.lifetimes.end()
-        && activeLifetime->second.lock() == lifetime)
-        return activeFound->second;
-    if (!mResetAtBoundary && found != cache.snapshots.end() && cachedLifetime != cache.lifetimes.end()
-        && cachedRevision != cache.revisions.end() && cachedLifetime->second.lock() == lifetime && cachedRevision->second == revision)
-        return found->second;
+    const auto found = cache.entries.find(&parent);
+    const auto activeFound = activeCache.entries.find(&parent);
+    if (mResetAtBoundary && active() && activeFound != activeCache.entries.end() && activeFound->second.lifetime.lock() == lifetime)
+        return activeFound->second.snapshot;
+    if (!mResetAtBoundary && found != cache.entries.end() && found->second.lifetime.lock() == lifetime
+        && found->second.revision == revision)
+        return found->second.snapshot;
 
     const ConstElementVisit parentState(parent);
     auto result = std::make_shared<std::vector<ElementRef<Element>>>();
@@ -49,23 +45,16 @@ TreeTraversalCache::ChildSnapshot TreeTraversalCache::build(Element& parent) {
     for (Element* child : children)
         result->emplace_back(child);
 
-    const auto commit = [&] {
-        if (mResetAtBoundary) {
-            if (active()) {
-                activeCache.snapshots[&parent] = result;
-                activeCache.lifetimes[&parent] = Core::detail::NodeAccess::lifetime(parent);
-                activeCache.revisions[&parent] = revision;
-            }
-            return;
-        }
-        cache.snapshots[&parent] = result;
-        cache.lifetimes[&parent] = Core::detail::NodeAccess::lifetime(parent);
-        cache.revisions[&parent] = revision;
-    };
-
     if (!parentState.layoutValid())
         return std::make_shared<std::vector<ElementRef<Element>>>();
-    commit();
+
+    const SnapshotCacheEntry entry {result, Core::detail::NodeAccess::lifetime(parent), revision};
+    if (mResetAtBoundary) {
+        if (active())
+            activeCache.entries[&parent] = entry;
+    } else {
+        cache.entries[&parent] = entry;
+    }
     return result;
 }
 

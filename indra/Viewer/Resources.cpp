@@ -7,6 +7,7 @@
 #include "Resources.h"
 #include <filesystem>
 #include <vector>
+#include "SkinResolver.h"
 #include "lldir.h"
 
 namespace {

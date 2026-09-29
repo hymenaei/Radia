@@ -320,15 +320,14 @@ bool ComponentManager::PreparedReplacement::State::commit() {
     const std::weak_ptr<ComponentManager::Impl> weakManager = impl;
     for (PendingComponent& component : components) {
         ComponentManager::Impl::Instance& instance = *component.instance;
-        instance.controller = std::move(component.controller);
-        instance.document = std::move(component.replacement);
-        HTMLFloaterElement* current = instance.root;
         HTMLFloaterElement* root = component.candidate;
-        impl->rootKeys.erase(current);
-        impl->rootKeys[root] = instance.componentKey;
+        const ComponentInstanceKey closedComponentKey = component.componentKey;
+        instance.controller = std::move(component.controller);
+        impl->rootKeys.erase(component.current);
+        instance.document = std::move(component.replacement);
+        impl->rootKeys[root] = closedComponentKey;
         instance.root = root;
         instance.closeNotified = false;
-        const ComponentInstanceKey closedComponentKey = instance.componentKey;
         attachRootLifecycle(*root, [weakManager, closedComponentKey, root] {
             if (const std::shared_ptr<ComponentManager::Impl> impl = weakManager.lock())
                 impl->rootClosed(closedComponentKey, root);

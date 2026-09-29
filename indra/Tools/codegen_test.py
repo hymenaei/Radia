@@ -349,6 +349,37 @@ class CodegenTests(unittest.TestCase):
             with self.subTest(syntax=syntax):
                 self.assertEqual(codegen.parse_syntax(syntax).render(), syntax)
 
+    def test_property_parsers_reject_invalid_range_annotations(self) -> None:
+        cases = (
+            ("invalid-number-range", "<number [0, nope]>", {}, (), "invalid numeric range bound"),
+            ("color-range", "<color [0, 1]>", {}, (), "range bounds are unsupported for <color>"),
+            (
+                "keyword-range",
+                "<sample-size [0, 1]>",
+                {"<sample-size>": "small | large"},
+                ("small", "large"),
+                "range bounds are unsupported for <sample-size>",
+            ),
+            ("reversed-number-range", "<number [2, 1]>", {}, (), "range lower bound 2 exceeds upper bound 1"),
+            ("precision-reversed-number-range", "<number [1.0000000000000001, 1]>", {}, (), "range lower bound"),
+            ("out-of-range-number", "<number [0, 1e300]>", {}, (), "outside the generated float range"),
+            ("underflowing-number", "<number [0, 1e-300]>", {}, (), "outside the generated float range"),
+            ("trailing-decimal-range", "<number [1., 2]>", {}, (), "invalid numeric range bound '1.'"),
+        )
+        for name, syntax, data_types, keywords, message in cases:
+            with self.subTest(syntax=syntax):
+                property = _property(name, syntax, initial="0")
+                catalogs = _catalogs((property,), data_types=data_types, css_keywords=keywords)
+                with self.assertRaisesRegex(codegen.GenerationError, message):
+                    codegen.generate_property_parsing(catalogs)
+
+    def test_property_parser_generates_float_range(self) -> None:
+        property = _property("bounded-number", "<number [1, 1000]>", initial="0")
+        _, source = codegen.generate_property_parsing(_catalogs((property,)))
+
+        parser = _function_body(source, "std::optional<Value> parseBoundedNumber")
+        self.assertIn("return consumeNumber<{1.0f, 1000.0f}>(range);", parser)
+
     def test_property_references_and_data_types_resolve(self) -> None:
         catalogs = _catalogs(
             (

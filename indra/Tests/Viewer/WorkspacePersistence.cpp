@@ -11,6 +11,7 @@
 #include <tuple>
 #include <vector>
 #include "llcontrol.h"
+#include "llsd.h"
 
 namespace {
 using Viewer::ComponentInstanceKey;

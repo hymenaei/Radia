@@ -16,7 +16,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
-#include "Resolver.h"
+#include "SkinSnapshot.h"
 #include "stdtypes.h"
 
 class LLControlGroup;

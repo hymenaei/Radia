@@ -30,7 +30,7 @@
 #include <string>
 #include <type_traits>
 #include "FloaterTestHelpers.h"
-#include "LayoutTestHelpers.h"
+#include "ResourceCompilerTestHelpers.h"
 
 namespace {
 using Core::Diagnostic;

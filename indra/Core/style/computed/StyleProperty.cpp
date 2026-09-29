@@ -991,14 +991,8 @@ template<> std::optional<LineHeight> toStyle<LineHeight>(const BuilderContext& c
     if (const auto* number = std::get_if<CSS::Number>(&value))
         return LineHeight {LineHeight::Number {number->value}};
 
-    if (const auto* lengthPercentage = std::get_if<CSS::LengthPercentage>(&value)) {
-        if (const auto* length = std::get_if<CSS::Length>(lengthPercentage)) {
-            if (length->unit == CSS::LengthUnit::Px)
-                return LineHeight {LineHeight::Length {length->value}};
-        }
-        if (const auto* percentage = std::get_if<CSS::Percentage>(lengthPercentage))
-            return LineHeight {LineHeight::Length {context.style.fontSize() * percentage->value / 100.f}};
-    }
+    if (const auto length = toStyle<Length>(context, value))
+        return LineHeight {LineHeight::Length {length->resolve(context.style.fontSize())}};
 
     return std::nullopt;
 }
@@ -1105,15 +1099,6 @@ static std::vector<StyleDeclaration> makeDeclarations(std::initializer_list<std:
     declarations.reserve(values.size());
     for (auto& value : values)
         declarations.push_back(makeDeclaration(value.first, std::move(value.second)));
-    return declarations;
-}
-
-static std::vector<StyleDeclaration> makeDeclarations(const std::vector<ParsedLonghand>& values) {
-    std::vector<StyleDeclaration> declarations;
-    declarations.reserve(values.size());
-    for (const ParsedLonghand& value : values)
-        if (value.property)
-            declarations.emplace_back(CSS::propertyName(*value.property), value.value);
     return declarations;
 }
 
@@ -1262,7 +1247,6 @@ struct CompileValue {
 struct detail::CompileContext {
     std::string_view property;
     CompileValue value;
-    const std::string& selector;
     StyleSheetLoadResult& result;
     const std::string& sourceName;
 
@@ -1354,13 +1338,13 @@ CompileResult compileContent(detail::CompileContext& context) {
 }
 
 CompileResult compileFilter(detail::CompileContext& context) {
-    auto& [property, value, selector, result, sourceName] = context;
+    const CompileValue& value = context.value;
     const auto parsed = StyleModel::parseFilter({value.stream, value.range});
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileOutline(detail::CompileContext& context) {
-    auto& [property, value, selector, result, sourceName] = context;
+    const CompileValue& value = context.value;
     const auto parsed = StyleModel::parseOutline({value.stream, value.range}, value.scheme);
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
@@ -2083,7 +2067,7 @@ CompileResult compileMask(detail::CompileContext& context) {
 }
 
 CompileResult compilePaint(detail::CompileContext& context) {
-    auto& [property, value, selector, result, sourceName] = context;
+    const CompileValue& value = context.value;
     if (const std::optional<Gradient> gradient = StyleModel::parseGradient({value.stream, value.range}, value.scheme))
         return context.compiled(Image {*gradient});
     const auto parsed = context.specifiedColorValue();
@@ -2093,7 +2077,6 @@ CompileResult compilePaint(detail::CompileContext& context) {
 }
 
 CompileResult compileStrokeLinecap(detail::CompileContext& context) {
-    auto& [property, value, selector, result, sourceName] = context;
     StrokeCap cap;
     return parseStrokeCap({context.value.stream, context.value.range}, cap) ? context.compiled(cap) : context.invalid();
 }
@@ -2167,7 +2150,7 @@ CompileResult compileGridArea(detail::CompileContext& context) {
 }
 
 CompileResult compileCursor(detail::CompileContext& context) {
-    auto& [property, value, selector, result, sourceName] = context;
+    const CompileValue& value = context.value;
     static constexpr std::array<std::pair<std::string_view, CursorStyle>, 35> kCursorValues {{
         {"auto", CursorStyle::Auto},
         {"default", CursorStyle::Default},
@@ -2247,19 +2230,17 @@ CompileResult compileCursor(detail::CompileContext& context) {
 }
 
 CompileResult compileNonnegativeLength(detail::CompileContext& context) {
-    auto& [property, value, selector, result, sourceName] = context;
     const auto parsed = context.nonnegativeLength();
     return parsed ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileNonnegativeNumber(detail::CompileContext& context) {
-    auto& [property, value, selector, result, sourceName] = context;
     const auto parsed = context.number();
     return parsed && *parsed >= 0.f ? context.compiled(*parsed) : context.invalid();
 }
 
 CompileResult compileUnitlessNonnegativeNumber(detail::CompileContext& context) {
-    auto& [property, value, selector, result, sourceName] = context;
+    const CompileValue& value = context.value;
     const std::string raw = context.keyword();
     if (hasDimensionUnit(value.stream, value.range, "px") || endsWith(raw, "%"))
         return context.invalid();
@@ -2268,7 +2249,6 @@ CompileResult compileUnitlessNonnegativeNumber(detail::CompileContext& context) 
 }
 
 CompileResult compileStrokeWidth(detail::CompileContext& context) {
-    auto& [property, value, selector, result, sourceName] = context;
     const auto parsed = context.number();
     return parsed && *parsed >= 0.f ? context.compiled(Length {*parsed}) : context.invalid();
 }
@@ -2309,7 +2289,7 @@ std::optional<std::vector<StyleDeclaration>> StyleModel::compileDeclaration(std:
             return std::nullopt;
         return std::vector<StyleDeclaration> {Style::makeDeclaration(property, DeferredStyleValue {value})};
     }
-    Style::detail::CompileContext context {property, Style::CompileValue {value, stream, valueRange, scheme}, selector, result, sourceName};
+    Style::detail::CompileContext context {property, Style::CompileValue {value, stream, valueRange, scheme}, result, sourceName};
     if (const auto id = CSS::findProperty(property)) {
         detail::ValueRange range {stream, valueRange};
         ParsedProperties parsed;

@@ -561,6 +561,8 @@ void HTMLInputElement::activateChecked(bool checked) {
             updateRadioGroup();
         else
             refreshIndeterminateState();
+        if (!self)
+            return;
         notifyValueState();
     }
     HTMLInputElement* current = self.get();

@@ -11,9 +11,10 @@
 
 namespace Core {
 class Fragment;
+class Element;
 
 namespace detail {
-FragmentPtr parseFragment(std::string_view html);
+FragmentPtr parseFragment(std::string_view html, const Element* context = nullptr);
 std::string serializeChildren(const Node& parent);
 } // namespace detail
 } // namespace Core

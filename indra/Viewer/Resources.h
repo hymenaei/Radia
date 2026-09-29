@@ -5,7 +5,7 @@
 
 #pragma once
 
-#include "Resolver.h"
+#include "SkinSnapshot.h"
 
 namespace Viewer {
 class SkinResources final : public SkinSnapshotSource {

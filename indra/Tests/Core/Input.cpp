@@ -811,6 +811,32 @@ TEST(Input, RadioTraversalSurvivesRemoval) {
     EXPECT_FALSE(firstPointer->checked());
 }
 
+TEST(Input, ActivationStopsWhenRadioObserverRemovesIt) {
+    auto root = makeElementValue<HTMLPanelElement>();
+    auto selected = makeElement<HTMLInputElement>();
+    auto activated = makeElement<HTMLInputElement>();
+    HTMLInputElement* selectedPointer = selected.get();
+    HTMLInputElement* activatedPointer = activated.get();
+    selected->type("radio").name("choice").checked(true);
+    activated->type("radio").name("choice");
+    root.append(std::move(selected));
+    root.append(std::move(activated));
+
+    const ElementRef<HTMLInputElement> activatedReference(activatedPointer);
+    int valueStateNotifications = 0;
+    const ValueBindingSubscription removeActivated = selectedPointer->observeValueState([activatedPointer](const auto&) {
+        activatedPointer->remove();
+    });
+    const ValueBindingSubscription observeActivated = activatedPointer->observeValueState([&](const auto&) {
+        ++valueStateNotifications;
+    });
+
+    activatedPointer->activate();
+
+    EXPECT_EQ(activatedReference.get(), nullptr);
+    EXPECT_EQ(valueStateNotifications, 0);
+}
+
 TEST(Input, SeparatesRadioGroupsByName) {
     auto root = makeElementValue<HTMLPanelElement>();
     auto named = makeElement<HTMLInputElement>();

@@ -4,10 +4,13 @@ from __future__ import annotations
 import argparse
 import json
 import json5
+import math
 import re
+import struct
 import sys
 import tempfile
 from dataclasses import dataclass
+from decimal import Decimal, DecimalException
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -39,6 +42,7 @@ SYSTEM_COLORS = (
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 PATH_MEMBER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
 INITIAL_VALUE = re.compile(r"^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)([A-Za-z]+|%)?$")
+RANGE_BOUND = re.compile(r"^[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$")
 CSS_INITIAL_UNITS = {
     "%": "Percentage",
     "px": "Px",
@@ -377,7 +381,6 @@ class SyntaxNode:
 
 class SyntaxParser:
     def __init__(self, source: str) -> None:
-        self.source = source
         self.tokens = SyntaxLexer(source).lex()
         self.index = 0
 
@@ -1412,16 +1415,40 @@ using enum CSS::KeywordName;
     return header, cpp, inline_header
 
 
-def _primitive_parser(node: SyntaxNode) -> str | None:
+def _primitive_parser(node: SyntaxNode, owner: str) -> str | None:
     if node.kind != "type":
         return None
     name = node.value.lower()
+    if name == "color":
+        if node.bounds is not None:
+            raise GenerationError(f"{owner}: range bounds are unsupported for <color>")
+        return "consumeColor"
     if node.bounds is None:
         constraint = "kAnyRange"
     elif node.bounds == ("0", "inf"):
         constraint = "kNonnegative"
     else:
         minimum, maximum = node.bounds
+
+        def range_value(value: str) -> Decimal:
+            if value == "-inf":
+                return Decimal("-Infinity")
+            if value == "inf":
+                return Decimal("Infinity")
+            if not RANGE_BOUND.fullmatch(value):
+                raise GenerationError(f"{owner}: invalid numeric range bound {value!r}")
+            try:
+                number = Decimal(value)
+                float_value = struct.unpack("f", struct.pack("f", float(number)))[0]
+            except (DecimalException, OverflowError) as error:
+                raise GenerationError(f"{owner}: numeric range bound is outside the generated float range: {value!r}") from error
+            if not math.isfinite(float_value) or (number != 0 and float_value == 0.0):
+                raise GenerationError(f"{owner}: numeric range bound is outside the generated float range: {value!r}")
+            return number
+
+        if range_value(minimum) > range_value(maximum):
+            raise GenerationError(f"{owner}: range lower bound {minimum} exceeds upper bound {maximum}")
+
         def float_literal(value: str) -> str:
             if value == "-inf":
                 return "-Range::infinity"
@@ -1432,7 +1459,6 @@ def _primitive_parser(node: SyntaxNode) -> str | None:
             return f"{value}f"
         constraint = f"{{{float_literal(minimum)}, {float_literal(maximum)}}}"
     mapping = {
-        "color": "consumeColor",
         "integer": f"consumeInteger<{constraint}>",
         "number": f"consumeNumber<{constraint}>",
         "length": f"consumeLength<{constraint}>",
@@ -1533,6 +1559,12 @@ def _parser_arguments(
 
 def _parser_expression(property: PropertyDefinition | str, node: SyntaxNode, catalogs: Catalogs) -> str | None:
     owner = property.name if isinstance(property, PropertyDefinition) else property
+    if node.kind == "type" and node.bounds is not None:
+        parser = _primitive_parser(node, owner)
+        if parser is None:
+            raise GenerationError(f"{owner}: range bounds are unsupported for <{node.value}>")
+        return parser
+
     reference = _property_reference(node)
     if reference is not None:
         referenced = next((item for item in catalogs.properties if item.name == reference), None)
@@ -1587,7 +1619,7 @@ def _parser_expression(property: PropertyDefinition | str, node: SyntaxNode, cat
         if len(parsers) == 1:
             return parsers[0]
         return f"{combinators[node.kind]}<\n        " + _format_parser_template_arguments(parsers) + ">"
-    return _primitive_parser(node)
+    return _primitive_parser(node, owner)
 
 
 def _parser_call(property: PropertyDefinition, node: SyntaxNode, catalogs: Catalogs, range_name: str) -> str:

@@ -8,7 +8,8 @@ set(Viewer_HEADERS
     interface/FloaterDemo.h
     NativeInput.h
     ReloadCoordinator.h
-    Resolver.h
+    SkinSnapshot.h
+    SkinResolver.h
     Resources.h
     Runtime.h
     SettingsAdapter.h

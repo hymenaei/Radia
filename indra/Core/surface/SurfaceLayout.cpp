@@ -27,8 +27,6 @@ using detail::ElementInternalAccess;
 using detail::MountEpoch;
 using detail::NodeRef;
 
-namespace {} // namespace
-
 Layout::Direction Surface::layoutDirection() const { return mSystem ? mSystem->layoutDirection() : Layout::Direction::LeftToRight; }
 
 void Surface::generationChanged(const CSS::StyleSheet& styleSheet) {

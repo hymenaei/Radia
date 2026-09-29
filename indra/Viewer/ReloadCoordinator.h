@@ -6,7 +6,6 @@
 #pragma once
 
 #include <Core/Diagnostic.h>
-#include <Core/ResourceProvider.h>
 #include <chrono>
 #include <cstdint>
 #include <memory>

@@ -10,7 +10,6 @@
 #include <Core/ResourceProvider.h>
 #include <map>
 #include <string>
-#include <utility>
 
 namespace CoreTests {
 using Core::DiagnosticResult;

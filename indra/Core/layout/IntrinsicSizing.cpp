@@ -6,6 +6,7 @@
 #include "linden_common.h"
 #include <algorithm>
 #include <cmath>
+#include <utility>
 #include "Element.h"
 #include "HTMLName.h"
 #include "IntrinsicSizeConstraints.h"
@@ -447,11 +448,13 @@ std::optional<std::vector<ChildLayout>> Engine::measureNormalChildren(Element& p
     const Style::ComputedStyle parentStyle = pass.style(parent);
     const auto childSnapshot = pass.orderedChildrenForLayout(parent);
     const std::vector<OrderedChildRef>& children = *childSnapshot;
+    bool pendingFlowBreak = false;
     for (std::size_t index = 0; index < children.size(); ++index) {
         const OrderedChildRef& childRef = children[index];
         Element* childPtr = childRef.element();
         if (!childRef.attachedTo(parent))
             continue;
+        pendingFlowBreak = pendingFlowBreak || detail::flowBreakBefore(childRef);
         if (isWhitespaceOnlyText(childRef) && !pass.preservesNormalFlowWhitespace(children, index, parentStyle))
             continue;
         if (childPtr && childPtr->elementName() == HTMLTagName(HTMLTag::Br))
@@ -520,7 +523,10 @@ std::optional<std::vector<ChildLayout>> Engine::measureNormalChildren(Element& p
             if (!isCurrent())
                 return std::nullopt;
         }
-        layouts.push_back(measuredChild(childRef, childStyle, childSize));
+        ChildLayout measured = measuredChild(childRef, childStyle, childSize);
+        measured.flowBreakBefore = pendingFlowBreak;
+        pendingFlowBreak = false;
+        layouts.push_back(std::move(measured));
     }
     return layouts;
 }

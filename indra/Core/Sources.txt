@@ -1,6 +1,7 @@
 bindings/Binder.cpp
 css/StyleSheet.cpp
 css/parser/CSSParser.cpp
+css/parser/CSSSelectorParser.cpp
 css/parser/CSSTokenStream.cpp
 css/parser/CSSValueParser.cpp
 css/values/CSSColor.cpp

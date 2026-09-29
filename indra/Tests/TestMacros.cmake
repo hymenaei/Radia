@@ -7,12 +7,6 @@ function(_RADIA_REGISTER_GTEST_TARGET target)
         message(FATAL_ERROR "_RADIA_REGISTER_GTEST_TARGET requires a declared target: ${target}")
     endif()
 
-    set(test_properties)
-
-    if(ARGC GREATER 1 AND ARGV1)
-        set(test_properties PROPERTIES LABELS "${ARGV1}")
-    endif()
-
     target_include_directories(${target} PRIVATE ${INDRA_SOURCE_DIR}/test)
 
     LL_TEST_LIBRARY_PATH(test_library_path)
@@ -25,6 +19,7 @@ function(_RADIA_REGISTER_GTEST_TARGET target)
     endif()
 
     set(runtime_environment_variable PATH)
+
     if(DARWIN OR LINUX)
         set(runtime_environment_variable LD_LIBRARY_PATH)
     endif()
@@ -37,13 +32,21 @@ function(_RADIA_REGISTER_GTEST_TARGET target)
             ";${runtime_environment_variable}=path_list_prepend:${path}")
     endforeach()
 
+    set(test_properties)
+    list(APPEND test_properties PROPERTIES
+        ENVIRONMENT_MODIFICATION "${runtime_environment_modification}"
+        ENVIRONMENT "GTEST_BRIEF=1"
+    )
+
+    if(ARGC GREATER 1 AND ARGV1)
+        list(APPEND test_properties LABELS "${ARGV1}")
+    endif()
+
     gtest_discover_tests(${target}
         DISCOVERY_MODE POST_BUILD
         DISCOVERY_TIMEOUT 30
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
         ${test_properties}
-        ENVIRONMENT_MODIFICATION "${runtime_environment_modification}"
-        ENVIRONMENT "GTEST_BRIEF=1"
     )
 endfunction()
 

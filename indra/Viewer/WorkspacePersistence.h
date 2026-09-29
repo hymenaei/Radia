@@ -8,7 +8,6 @@
 #include <optional>
 #include <vector>
 #include "ComponentInstanceKey.h"
-#include "llsd.h"
 
 class LLControlGroup;
 namespace Core {
@@ -49,11 +48,6 @@ public:
     void savePlacement(const ComponentInstanceKey& componentKey, FloaterPlacement placement, ComponentOpenState state);
 
 private:
-    LLSD readLayout() const;
-    LLSD readWorkspace() const;
-    void writeLayout(const LLSD& layout);
-    void writeWorkspace(const LLSD& workspace);
-
     LLControlGroup& mLayout;
     LLControlGroup& mWorkspace;
 };

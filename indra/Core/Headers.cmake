@@ -35,6 +35,7 @@ set(Core_HEADERS
     layout/LayoutGeometry.h
     layout/LayoutPass.h
     layout/LayoutPrimitives.h
+    layout/OrderedChild.h
     layout/ScrollLayoutOptions.h
     layout/TextLayout.h
     layout/TreeTraversalCache.h
@@ -73,6 +74,7 @@ set(Core_HEADERS
 )
 
 set(Core_PRIVATE_HEADERS
+    css/parser/CSSSelectorParserInternal.h
     dom/EventHandlerCallInternal.h
     dom/FragmentInternal.h
     dom/NodeMutation.h

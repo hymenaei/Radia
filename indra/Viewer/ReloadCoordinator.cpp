@@ -8,8 +8,8 @@
 #include <Core/System.h>
 #include <utility>
 #include "ComponentManager.h"
-#include "Resolver.h"
 #include "SkinPreparation.h"
+#include "SkinSnapshot.h"
 
 namespace Viewer {
 using Core::ResourceSnapshot;

@@ -35,20 +35,10 @@
 namespace Core {
 
 namespace {
-class StringValue {
-public:
-    StringValue(std::string pattern, std::string sourceName, std::size_t sourceLine)
-        : mPattern(std::move(pattern))
-        , source(std::move(sourceName))
-        , line(sourceLine) {}
-
-    const std::string& pattern() const { return mPattern; }
-
+struct StringValue {
+    std::string pattern;
     std::string source;
     std::size_t line = 0;
-
-private:
-    std::string mPattern;
 };
 
 using StringMap = std::unordered_map<std::string, StringValue>;
@@ -458,7 +448,7 @@ private:
             return std::nullopt;
         if (!parseLocalizedHTML(*text, mResult, mSourceName, lineOf(node)))
             return std::nullopt;
-        return StringValue(*text, mSourceName, lineOf(keyNode));
+        return StringValue {*text, mSourceName, lineOf(keyNode)};
     }
 
     const std::string& mYaml;
@@ -572,7 +562,7 @@ std::string argumentToken(std::size_t index) { return "\xEE\x80\x80radia" + std:
 std::optional<FormattedMessage> formatMessage(const LocaleRecord& locale, const StringValue& value, const LocalizedText& localizedText) {
     UParseError parseError {};
     UErrorCode status = U_ZERO_ERROR;
-    const icu::UnicodeString pattern = icu::UnicodeString::fromUTF8(value.pattern());
+    const icu::UnicodeString pattern = icu::UnicodeString::fromUTF8(value.pattern);
     icu::MessageFormat formatter(pattern, locale.locale, parseError, status);
     if (U_FAILURE(status))
         return std::nullopt;
@@ -672,7 +662,7 @@ void deriveLocaleInfo(LocaleRecord& locale) {
 void validateMessageFormat(const StringValue& value, const LocaleRecord& locale, const std::string& key, DiagnosticResult& result) {
     UParseError parseError {};
     UErrorCode status = U_ZERO_ERROR;
-    const icu::UnicodeString pattern = icu::UnicodeString::fromUTF8(value.pattern());
+    const icu::UnicodeString pattern = icu::UnicodeString::fromUTF8(value.pattern);
     const icu::MessageFormat format(pattern, locale.locale, parseError, status);
     (void)format;
     if (U_FAILURE(status)) {

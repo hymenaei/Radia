@@ -222,8 +222,8 @@ using detail::parseFragment;
 using detail::serializeChildren;
 
 namespace {
-FragmentPtr parseOrLiteralText(std::string html) {
-    FragmentPtr fragment = parseFragment(html);
+FragmentPtr parseOrLiteralText(std::string html, const Element& context) {
+    FragmentPtr fragment = parseFragment(html, &context);
     if (!fragment) {
         fragment = std::make_unique<Fragment>();
         fragment->append(std::make_unique<Text>(std::move(html)));
@@ -231,8 +231,8 @@ FragmentPtr parseOrLiteralText(std::string html) {
     return fragment;
 }
 
-FragmentPtr parseResolvedHTML(std::string html) {
-    FragmentPtr fragment = parseOrLiteralText(std::move(html));
+FragmentPtr parseResolvedHTML(std::string html, const Element& context) {
+    FragmentPtr fragment = parseOrLiteralText(std::move(html), context);
     if (fragment && !fragment->firstChild())
         fragment->append(std::make_unique<Text>(std::string()));
     return fragment;
@@ -754,7 +754,7 @@ std::string Element::innerHTML() const { return serializeChildren(*this); }
 
 Element& Element::innerHTML(std::string html) {
     mLocalizedContent.reset();
-    NodeMutation::replaceChildren(*this, parseOrLiteralText(std::move(html)));
+    NodeMutation::replaceChildren(*this, parseOrLiteralText(std::move(html), *this));
     return *this;
 }
 
@@ -939,14 +939,14 @@ void Element::rebuildTextContent() {
     }
 }
 
-void Element::rebuildResolvedHTML(std::string html) { append(parseResolvedHTML(std::move(html))); }
+void Element::rebuildResolvedHTML(std::string html) { append(parseResolvedHTML(std::move(html), *this)); }
 
 void Element::replaceResolvedHTML(std::string html) {
     const ElementRef<Element> self(this);
     mTextContentSlots.clear();
     const bool previousSuppress = mSuppressTextSlots;
     mSuppressTextSlots = true;
-    NodeMutation::replaceChildren(*this, parseResolvedHTML(std::move(html)));
+    NodeMutation::replaceChildren(*this, parseResolvedHTML(std::move(html), *this));
     if (!self)
         return;
     mSuppressTextSlots = previousSuppress;
@@ -971,7 +971,7 @@ bool Element::refreshTextContentSlots() {
 
         const bool flowBreakBefore = NodeAccess::flowBreakBefore(*(*first));
         const std::string html = system() ? system()->resolveHTML(slot.text) : slot.text.key();
-        FragmentPtr replacement = parseResolvedHTML(html);
+        FragmentPtr replacement = parseResolvedHTML(html, *this);
         NodeRef replacementFirst(replacement->firstChild());
         NodeRef replacementLast(replacement->lastChild());
         NodeAccess::setFlowBreakBefore(*replacementFirst.get(), flowBreakBefore);

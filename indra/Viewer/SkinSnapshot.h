@@ -7,9 +7,7 @@
 
 #include <Core/Diagnostic.h>
 #include <Core/ResourceProvider.h>
-#include <filesystem>
 #include <string>
-#include <vector>
 
 namespace Viewer {
 struct SkinSnapshotResult : Core::DiagnosticResult {
@@ -23,10 +21,5 @@ class SkinSnapshotSource {
 public:
     virtual ~SkinSnapshotSource() = default;
     virtual SkinSnapshotResult capture() const = 0;
-};
-
-class SkinResolver final {
-public:
-    SkinSnapshotResult resolve(const std::filesystem::path& selectedRoot, const std::vector<std::filesystem::path>& installedRoots) const;
 };
 } // namespace Viewer

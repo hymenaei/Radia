@@ -136,8 +136,6 @@ bool parseStrokeCap(LLXMLNode* node, Style::StrokeCap& cap, SVGCompileResult& re
     }
     return true;
 }
-
-void appendPathDiagnostics(SVGCompileResult& result, PathCompileResult&& pathResult) { result.append(std::move(pathResult)); }
 } // namespace
 
 SVGCompileResult compileSVGImage(const std::string& svg, const std::string& source) {
@@ -202,7 +200,7 @@ SVGCompileResult compileSVGImage(const std::string& svg, const std::string& sour
             PathCompileResult pathResult = compileSvgPathData(raw, source, lineOf(child.get()));
             if (pathResult.ok())
                 candidate.paths.push_back(std::move(*pathResult.path));
-            appendPathDiagnostics(result, std::move(pathResult));
+            result.append(std::move(pathResult));
         } else if (name == "circle") {
             validateAttributes(child.get(), {"cx", "cy", "r"}, result, source);
             if (hasNonWhitespaceText(child.get()))

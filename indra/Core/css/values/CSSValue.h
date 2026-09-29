@@ -307,7 +307,7 @@ inline std::optional<Color> parseColor(ValueRange& range) {
     }
 
     const std::size_t close = range.stream.tokens()[*tokenIndex].matching;
-    const TokenRange functionRange {*tokenIndex, close == kNoMatchingToken ? *tokenIndex + 1 : close + 1};
+    const TokenRange functionRange {*tokenIndex, close == kNoMatchingToken ? range.range.end : close + 1};
     const auto function = parseFunction(range.stream, functionRange);
     if (function && function->name == "light-dark") {
         const std::vector<TokenRange> choices = splitOnDelimiter(range.stream, function->body, ',');

@@ -7,7 +7,7 @@
 #include <Core/ResourceProvider.h>
 #include <Core/SkinCompiler.h>
 #include <Core/System.h>
-#include <Viewer/Resolver.h>
+#include <Viewer/SkinResolver.h>
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -200,6 +200,25 @@ TEST_F(SkinResolverFixture, RejectsManifestResourceTraversal) {
     }));
 }
 
+TEST_F(SkinResolverFixture, RejectsAssetsOutsideDeclaredDirectory) {
+    const std::filesystem::path selected = makeRoot("asset-symlink", "test.asset-symlink");
+    const std::filesystem::path outsideAssets = selected / "radia/private/hidden.dat";
+    const std::filesystem::path link = selected / "radia/resources/hidden.dat";
+    writeFile(outsideAssets, "private skin data");
+    std::error_code error;
+    std::filesystem::create_symlink(outsideAssets, link, error);
+    if (error)
+        GTEST_SKIP() << "File symlinks are unavailable: " << error.message();
+
+    const auto result = resolver.resolve(selected, {});
+
+    ASSERT_FALSE(result.ok());
+    EXPECT_FALSE(result.snapshot.load(ResourceId("resources/hidden.dat")).has_value());
+    EXPECT_TRUE(std::any_of(result.errors.begin(), result.errors.end(), [](const Core::Diagnostic& diagnostic) {
+        return diagnostic.code == "skin.resource.path_invalid";
+    }));
+}
+
 TEST_F(SkinResolverFixture, CapturesImportedModules) {
     const std::filesystem::path selected = makeRoot("selected", "test.selected");
     writeFile(selected / "radia/skin.css", "@import \"styles/panel.css\";\nfloater { height: 220px; }");
@@ -218,9 +237,8 @@ TEST_F(SkinResolverFixture, CapturesImportedModules) {
 
 TEST_F(SkinResolverFixture, ResolvesImportedFontURLsWithinAssetsRoot) {
     const std::filesystem::path selected = makeRoot("font-assets", "test.font-assets");
-    constexpr char kResourcePaths[] =
-        R"("stylesheet": "radia/resources/skin.css",)"
-        R"("layouts": "radia/xui","localization": "radia/localization.yaml","assets": "radia/resources")";
+    constexpr char kResourcePaths[] = R"("stylesheet": "radia/resources/skin.css",)"
+                                      R"("layouts": "radia/xui","localization": "radia/localization.yaml","assets": "radia/resources")";
     writeFile(selected / "manifest.json", manifest("test.font-assets", "null", kResourcePaths));
     writeFile(selected / "radia/resources/skin.css", "@import \"typography/fonts.css\";");
     writeFile(selected / "radia/resources/typography/fonts.css",
@@ -253,9 +271,8 @@ TEST_F(SkinResolverFixture, ResolvesFontURLFromSkinStylesheet) {
 
 TEST_F(SkinResolverFixture, ResolvesAssetFontURL) {
     const std::filesystem::path selected = makeRoot("font-assets", "test.font-assets");
-    constexpr char kResourcePaths[] =
-        R"("stylesheet": "radia/resources/skin.css",)"
-        R"("layouts": "radia/xui","localization": "radia/localization.yaml","assets": "radia/resources")";
+    constexpr char kResourcePaths[] = R"("stylesheet": "radia/resources/skin.css",)"
+                                      R"("layouts": "radia/xui","localization": "radia/localization.yaml","assets": "radia/resources")";
     writeFile(selected / "manifest.json", manifest("test.font-assets", "null", kResourcePaths));
     writeFile(selected / "radia/resources/skin.css", "@font-face { font-family: Skin; src: url(fonts/myfont.woff2); }");
     writeFile(selected / "radia/resources/fonts/myfont.woff2", "font bytes");
@@ -275,9 +292,8 @@ TEST_F(SkinResolverFixture, ResolvesAssetFontURL) {
 
 TEST_F(SkinResolverFixture, RejectsFontURLsOutsideAssetsRoot) {
     const std::filesystem::path selected = makeRoot("font-outside-assets", "test.font-outside-assets");
-    constexpr char kResourcePaths[] =
-        R"("stylesheet": "radia/resources/skin.css",)"
-        R"("layouts": "radia/xui","localization": "radia/localization.yaml","assets": "radia/resources")";
+    constexpr char kResourcePaths[] = R"("stylesheet": "radia/resources/skin.css",)"
+                                      R"("layouts": "radia/xui","localization": "radia/localization.yaml","assets": "radia/resources")";
     writeFile(selected / "manifest.json", manifest("test.font-outside-assets", "null", kResourcePaths));
     writeFile(selected / "radia/resources/skin.css", "@import \"typography/fonts.css\";");
     writeFile(selected / "radia/resources/typography/fonts.css", "@font-face { font-family: Imported; src: url(../../outside/a.woff2); }");

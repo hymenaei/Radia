@@ -31,7 +31,7 @@
 #include <memory>
 #include <string>
 #include <utility>
-#include "LayoutTestHelpers.h"
+#include "ResourceCompilerTestHelpers.h"
 
 namespace {
 using Core::AccessibleRole;
@@ -165,6 +165,17 @@ TEST_F(Fieldset, LocalizesInlineElements) {
     ASSERT_EQ(localized->children().size(), 1U);
     EXPECT_EQ(localized->children()[0]->elementName(), "b");
     EXPECT_EQ(localized->children()[0]->textContent(), "Second");
+
+    const ResourceBuildResult localizedLegend = ResourceCompiler().buildElementTreeFromString(
+        "<fieldset><legend>{{inlineExample}}</legend></fieldset>", "localized-legend.html", &context);
+    ASSERT_TRUE(localizedLegend.ok());
+    const Element* fieldset = localizedLegend.rootAs<Element>();
+    ASSERT_NE(fieldset, nullptr);
+    ASSERT_EQ(fieldset->children().size(), 1U);
+    EXPECT_EQ(fieldset->children().front()->elementName(), "legend");
+    ASSERT_EQ(fieldset->children().front()->children().size(), 1U);
+    EXPECT_EQ(fieldset->children().front()->children().front()->elementName(), "b");
+    EXPECT_EQ(fieldset->children().front()->textContent(), "First Second");
 
     const ResourceBuildResult decoration = factory.buildElementTreeFromString(kDecorationLayout, "decoration.html");
     ASSERT_TRUE(decoration.ok());

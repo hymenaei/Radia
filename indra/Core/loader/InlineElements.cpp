@@ -7,6 +7,7 @@
 #include "InlineElements.h"
 #include <algorithm>
 #include <iterator>
+#include <utility>
 #include "Element.h"
 #include "ElementInternal.h"
 #include "HTMLElement.h"
@@ -125,6 +126,8 @@ void appendValidationDiagnostics(const InlineValidationResult& validation, Eleme
 }
 
 void appendLiteral(AppendState& state, const std::string& authored) {
+    std::string normalized;
+    normalized.reserve(authored.size());
     for (const unsigned char character : authored) {
         if (isHTMLWhitespace(static_cast<char>(character))) {
             if (state.hasEmittedContent)
@@ -132,12 +135,14 @@ void appendLiteral(AppendState& state, const std::string& authored) {
             continue;
         }
         if (state.hasPendingSpace) {
-            appendText(state.target, " ");
+            normalized.push_back(' ');
             state.hasPendingSpace = false;
         }
-        appendText(state.target, std::string(1, static_cast<char>(character)));
+        normalized.push_back(static_cast<char>(character));
         state.hasEmittedContent = true;
     }
+    if (!normalized.empty())
+        appendText(state.target, std::move(normalized));
 }
 
 void appendText(AppendState& state, const std::string& authored, std::size_t line) {

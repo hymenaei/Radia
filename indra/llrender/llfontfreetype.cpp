@@ -28,13 +28,13 @@
  */
 
 #include "linden_common.h"
+#include "llfontfreetype.h"
 
 #include <limits>
 #include <new>
 #include <unordered_set>
 #include <utility>
 
-#include "llfontfreetype.h"
 #include "llfontgl.h"
 
 // Freetype stuff
@@ -480,16 +480,13 @@ S32 LLFontFreetype::getNumFaces(const std::string& filename)
     return num_faces;
 }
 
-void LLFontFreetype::addFallbackFont(const LLPointer<LLFontFreetype>& fallback_font, const char_functor_t& functor) const {
-    if (!fallback_font.notNull()
-        || !mFace
-        || !fallback_font->mFace
-        || (mName == fallback_font->mName && mFaceIndex == fallback_font->mFaceIndex)
-        || hasFallbackPath(fallback_font->mName, fallback_font->mFaceIndex)) {
+void LLFontFreetype::addFallbackFont(const LLPointer<LLFontFreetype>& fallbackFont, const char_functor_t& functor) const {
+    if (!fallbackFont.notNull() || !mFace || !fallbackFont->mFace
+        || (mName == fallbackFont->mName && mFaceIndex == fallbackFont->mFaceIndex)
+        || hasFallbackPath(fallbackFont->mName, fallbackFont->mFaceIndex))
         return;
-    }
 
-    mFallbackFonts.emplace_back(fallback_font, functor);
+    mFallbackFonts.emplace_back(fallbackFont, functor);
     // Both caches encode the previous fallback list; the new fallback may win
     // for codepoints that previously resolved to a later face or to notdef on
     // this face. Clear both:
@@ -508,9 +505,12 @@ void LLFontFreetype::addFallbackFont(const LLPointer<LLFontFreetype>& fallback_f
     ALFontShaping::clearCacheForFace(this);
 }
 
-bool LLFontFreetype::hasFallbackPath(const std::string& path, S32 face_index) const {
-    for (const fallback_font_t& pair : mFallbackFonts)
-        if (pair.first->getName() == path && pair.first->mFaceIndex == face_index) return true;
+bool LLFontFreetype::hasFallbackPath(const std::string& path, S32 faceIndex) const {
+    for (const fallback_font_t& pair : mFallbackFonts) {
+        const LLPointer<LLFontFreetype>& fallbackFont = pair.first;
+        if (fallbackFont->getName() == path && fallbackFont->mFaceIndex == faceIndex)
+            return true;
+    }
     return false;
 }
 
@@ -532,7 +532,8 @@ std::pair<const LLFontFreetype*, U32> LLFontFreetype::attachOsFallbackFor(llwcha
         return { nullptr, 0u };
 
     LLFontFallbackMatch match = LLWindow::findFallbackFontForChar(wch);
-    if (match.mPath.empty() || hasFallbackPath(match.mPath, match.mFaceIndex)) return {nullptr, 0u};
+    if (match.mPath.empty() || hasFallbackPath(match.mPath, match.mFaceIndex))
+        return { nullptr, 0u };
 
     // Open at this font's size and DPI so the lazily-discovered face lines
     // up with the head's metrics.
@@ -1339,54 +1340,53 @@ U8 LLFontFreetype::getStyle() const
 // they operate purely on the atlas, which now lives on the face wrapper.)
 // (setVariationAxis moved to ALFontFace::setVariationAxis — face state.)
 
-namespace ll
-{
-    namespace fonts
-    {
-    class LoadedFont {
-    public:
-        LoadedFont(std::string name, std::string address, std::size_t size) : mName(std::move(name)), mAddress(std::move(address)), mSize(size) {}
-        std::string mName;
-        std::string mAddress;
-        std::size_t mSize;
-    };
-    }
-}
+namespace ll {
+namespace fonts {
+struct LoadedFont {
+    LoadedFont(std::string name, std::string address, std::size_t size)
+        : mName(std::move(name))
+        , mAddress(std::move(address))
+        , mSize(size) {}
 
-U8 const* LLFontManager::loadFont( std::string const &aFilename, long &a_Size)
-{
-    try
-    {
-        a_Size = 0;
-        std::map< std::string, std::shared_ptr<ll::fonts::LoadedFont> >::iterator itr = m_LoadedFonts.find(aFilename);
-        if (itr != m_LoadedFonts.end())
-        {
-            // A possible overflow cannot happen here, as it is asserted that the size is less than std::numeric_limits<long>::max() a few lines below.
-            a_Size = static_cast<long>(itr->second->mSize);
-            return reinterpret_cast<U8 const*>(itr->second->mAddress.c_str());
+    std::string mName;
+    std::string mAddress;
+    std::size_t mSize;
+};
+} // namespace fonts
+} // namespace ll
+
+U8 const* LLFontManager::loadFont(const std::string& filename, long& size) {
+    try {
+        size = 0;
+        auto loadedFont = m_LoadedFonts.find(filename);
+        if (loadedFont != m_LoadedFonts.end()) {
+            // A possible overflow cannot happen here, as it is asserted that the size is less than std::numeric_limits<long>::max() a few
+            // lines below.
+            size = static_cast<long>(loadedFont->second->mSize);
+            return reinterpret_cast<U8 const*>(loadedFont->second->mAddress.c_str());
         }
 
         // These keys are valid only while their registered byte buffers are
         // cached. Never interpret an expired reserved key as a filesystem path.
-        if (aFilename.starts_with("radia://font/")) return nullptr;
-
-        auto strContent = LLFile::getContents(aFilename);
-
-        if (strContent.empty())
+        if (filename.starts_with("radia://font/"))
             return nullptr;
 
-        // For fontconfig a type of long is required, std::string::size() returns size_t. I think it is safe to limit this to 2GiB and not support fonts that huge (can that even be a thing?)
-        llassert_always(strContent.size() < std::numeric_limits<long>::max());
+        auto contents = LLFile::getContents(filename);
 
-        a_Size = static_cast<long>(strContent.size());
+        if (contents.empty())
+            return nullptr;
 
-        auto pCache = std::make_shared<ll::fonts::LoadedFont>(aFilename, std::move(strContent), a_Size);
-        itr = m_LoadedFonts.insert(std::make_pair(aFilename, pCache)).first;
+        // For fontconfig a type of long is required, std::string::size() returns size_t. I think it is safe to limit this to 2GiB and not
+        // support fonts that huge (can that even be a thing?)
+        llassert_always(contents.size() < std::numeric_limits<long>::max());
 
-        return reinterpret_cast<U8 const*>(itr->second->mAddress.c_str());
-    }
-    catch (const std::bad_alloc&)
-    {
+        size = static_cast<long>(contents.size());
+
+        auto loadedFontData = std::make_shared<ll::fonts::LoadedFont>(filename, std::move(contents), size);
+        const auto loadedFontEntry = m_LoadedFonts.emplace(filename, std::move(loadedFontData)).first;
+
+        return reinterpret_cast<U8 const*>(loadedFontEntry->second->mAddress.c_str());
+    } catch (const std::bad_alloc&) {
         LLError::LLUserWarningMsg::showOutOfMemory();
         LL_ERRS() << "Failed to load font. Out of memory." << LL_ENDL;
     }
@@ -1394,13 +1394,16 @@ U8 const* LLFontManager::loadFont( std::string const &aFilename, long &a_Size)
 }
 
 std::string LLFontManager::registerFontBytes(std::string_view sourceName, std::string bytes) {
-    if (sourceName.empty() || bytes.empty()) return {};
-    if (bytes.size() >= static_cast<std::size_t>(std::numeric_limits<long>::max())) return {};
+    if (sourceName.empty() || bytes.empty())
+        return {};
+    if (bytes.size() >= static_cast<std::size_t>(std::numeric_limits<long>::max()))
+        return {};
     const std::size_t byteCount = bytes.size();
 
     try {
-        if (mNextMemoryFontSourceId == 0) return {};
-        std::string sourceKey = "radia://font/" + std::to_string(mNextMemoryFontSourceId++);
+        if (mNextMemoryFontSourceId == 0)
+            return {};
+        const std::string sourceKey = "radia://font/" + std::to_string(mNextMemoryFontSourceId++);
 
         auto loadedFont = std::make_shared<ll::fonts::LoadedFont>(std::string(sourceName), std::move(bytes), byteCount);
         m_LoadedFonts.emplace(sourceKey, std::move(loadedFont));

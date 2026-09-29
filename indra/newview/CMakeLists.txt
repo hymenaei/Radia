@@ -146,29 +146,7 @@ if (HAVOK)
    endif()
 endif ()
 
-set(viewer_controllers_SOURCE_FILES
-    controllers/floaterdemo.cpp
-    )
-
-set(viewer_controllers_HEADER_FILES
-    controllers/floaterdemo.h
-    )
-
 set(viewer_SOURCE_FILES
-    componentmanager.cpp
-    componentmanagerreplacement.cpp
-    documentcontroller.cpp
-    floaterhost.cpp
-    inputbridge.cpp
-    reloadcoordinator.cpp
-    resources.cpp
-    resolver.cpp
-    runtime.cpp
-    settingsadapter.cpp
-    skinpreparation.cpp
-    workspacepersistence.cpp
-    ${viewer_controllers_SOURCE_FILES}
-
     ao.cpp
     aoengine.cpp
     aoset.cpp
@@ -940,25 +918,6 @@ set(viewer_SOURCE_FILES
 
 set(viewer_HEADER_FILES
     ViewerInstall.cmake
-
-    componentinstancekey.h
-    componentmanager.h
-    componentmanagerinternal.h
-    controllerregistration.h
-    documentcontroller.h
-    documentcontrollerinternal.h
-    floaterhost.h
-    inputbridge.h
-    nativeinput.h
-    reloadcoordinator.h
-    resources.h
-    resolver.h
-    runtime.h
-    settingsadapter.h
-    skinpreparation.h
-    workspacepersistence.h
-    ${viewer_controllers_HEADER_FILES}
-
     ao.h
     aoengine.h
     aoset.h
@@ -1727,8 +1686,6 @@ set(viewer_HEADER_FILES
     )
 
 source_group("CMake Rules" FILES ViewerInstall.cmake)
-source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/controllers PREFIX "Skin Files"
-             FILES ${viewer_controllers_SOURCE_FILES} ${viewer_controllers_HEADER_FILES})
 
 #build_data.json creation moved to viewer_manifest.py MAINT-6413
 # the viewer_version.txt file created here is for passing to viewer_manifest and autobuild
@@ -2040,7 +1997,7 @@ target_link_libraries(${VIEWER_BINARY_NAME}
         ll::tinygltf
         ll::tinyexr
         ll::minizip
-        ui
+        Viewer
         )
 
 if (TARGET ll::velopack)
@@ -2413,8 +2370,6 @@ target_include_directories(${VIEWER_BINARY_NAME} PUBLIC ${CMAKE_CURRENT_BINARY_D
 endif(BUILD_VIEWER)
 
 if (BUILD_TESTING)
-  add_subdirectory(tests)
-
   # To add a viewer unit test, just add the test .cpp file below
   # This creates a separate test project per file listed.
 
@@ -2449,7 +2404,7 @@ if (BUILD_TESTING)
 #  )
 
   set(test_libs
-    ui
+    Viewer
     llfilesystem
     llmath
     llcommon

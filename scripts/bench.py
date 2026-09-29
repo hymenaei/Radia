@@ -76,7 +76,7 @@ def _benchmark_path(benchmark_dir: Path, name: str) -> Path:
 
 
 def _is_benchmark_executable(path: Path) -> bool:
-    if not path.is_file() or not path.stem.endswith("_benchmarks"):
+    if not path.is_file() or not path.stem.startswith("Benchmark"):
         return False
     return os.name != "nt" or path.suffix.lower() == ".exe"
 
@@ -662,7 +662,7 @@ def _query_history(
 ) -> int:
     history_directory = repository_root / "benchmarks" / "history"
     if run_all:
-        paths = sorted(history_directory.glob("*_benchmarks.json"), key=lambda path: path.name.lower())
+        paths = sorted(history_directory.glob("Benchmark*.json"), key=lambda path: path.name.lower())
     else:
         paths = [_history_path(repository_root, name) for name in names]
 
@@ -888,7 +888,7 @@ def _parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument(
         "--all",
         action="store_true",
-        help="Run every *_benchmarks executable in the build directory.",
+        help="Run every Benchmark* executable in the build directory.",
     )
     parser.add_argument(
         "--list",
@@ -962,7 +962,7 @@ def _parse_args() -> tuple[argparse.Namespace, list[str]]:
         "benchmarks",
         nargs="*",
         metavar="BENCHMARK",
-        help="Benchmark target names, for example llfilesystem_benchmarks.",
+        help="Benchmark target names, for example BenchmarkCore.",
     )
     args = parser.parse_args(runner_argv)
 
@@ -1059,7 +1059,7 @@ def main() -> int:
 
     if not benchmarks:
         print(
-            f"error: no *_benchmarks executable found under "
+            "error: no Benchmark* executable found under "
             f"{build_dir / 'sharedlibs' / args.config}",
             file=sys.stderr,
         )

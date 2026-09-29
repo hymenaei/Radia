@@ -28,6 +28,7 @@ endif()
 set(ADDRESS_SIZE 64)
 
 # Determine build platform
+set(PORT "${CMAKE_SYSTEM_NAME}")
 if (${CMAKE_SYSTEM_NAME} MATCHES "Windows")
   set(WINDOWS ON CACHE INTERNAL "Windows Build" FORCE)
 elseif (${CMAKE_SYSTEM_NAME} MATCHES "Linux")

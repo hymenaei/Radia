@@ -1,104 +1,6 @@
 ---
-# Canonical first-party C++ style. Requires clang-format 22 or newer.
-Language: Cpp
-BasedOnStyle: LLVM
-
-# Indentation
-UseTab: Never
-IndentWidth: 4
-TabWidth: 4
-ContinuationIndentWidth: 4
-ConstructorInitializerIndentWidth: 4
 AccessModifierOffset: -4
-IndentAccessModifiers: false
-IndentCaseLabels: true
-IndentExportBlock: true
-IndentCaseBlocks: false
-IndentPPDirectives: None
-PPIndentWidth: 4
-NamespaceIndentation: None
-
-# Line length and wrapping
-ColumnLimit: 150
-AlignAfterOpenBracket: Align
-AlignOperands: DontAlign
-AllowAllArgumentsOnNextLine: true
-AllowAllParametersOfDeclarationOnNextLine: true
-AllowBreakBeforeNoexceptSpecifier: OnlyWithParen
-BinPackArguments: true
-BinPackLongBracedList: true
-BinPackParameters: BinPack
-PackConstructorInitializers: BinPack
-BreakConstructorInitializers: BeforeColon
-AlwaysBreakBeforeMultilineStrings: false
-PenaltyReturnTypeOnItsOwnLine: 1000
-BreakTemplateDeclarations: No
-BreakBeforeBinaryOperators: NonAssignment
-BreakBinaryOperations: RespectPrecedence
-BreakBeforeTernaryOperators: true
-BreakFunctionDefinitionParameters: false
-BreakStringLiterals: false
-
-# Braces and short constructs
-BreakAfterOpenBracketBracedList: false
-BreakAfterOpenBracketFunction: false
-BreakAfterOpenBracketIf: false
-BreakAfterOpenBracketLoop: false
-BreakAfterOpenBracketSwitch: false
-BreakAfterReturnType: Automatic
-BreakArrays: false
-BreakBeforeBraces: Attach
-BreakBeforeCloseBracketBracedList: false
-BreakBeforeCloseBracketFunction: false
-BreakBeforeCloseBracketIf: false
-BreakBeforeCloseBracketLoop: false
-BreakBeforeCloseBracketSwitch: false
-BreakBeforeConceptDeclarations: Never
-BreakBeforeInlineASMColon: Never
-BreakBeforeTemplateCloser: false
-InsertBraces: false
-RemoveBracesLLVM: true
-RemoveEmptyLinesInUnwrappedLines: true
-RemoveParentheses: ReturnStatement
-
-AllowShortBlocksOnASingleLine: Always
-AllowShortCaseExpressionOnASingleLine: true
-AllowShortCaseLabelsOnASingleLine: true
-AllowShortCompoundRequirementOnASingleLine: true
-AllowShortEnumsOnASingleLine: true
-AllowShortFunctionsOnASingleLine: Inline
-AllowShortIfStatementsOnASingleLine: AllIfsAndElse
-AllowShortLambdasOnASingleLine: All
-AllowShortLoopsOnASingleLine: true
-AllowShortNamespacesOnASingleLine: true
-
-# C++ syntax
-Cpp11BracedListStyle: true
-PointerAlignment: Left
-ReferenceAlignment: Pointer
-DerivePointerAlignment: false
-SpaceAroundPointerQualifiers: Default
-Standard: Latest
-EnumTrailingComma: Remove
-
-# Spacing
-SpaceAfterCStyleCast: false
-SpaceAfterLogicalNot: false
-SpaceAfterTemplateKeyword: false
-SpaceBeforeAssignmentOperators: true
-SpaceBeforeCpp11BracedList: false
-SpaceBeforeCtorInitializerColon: true
-SpaceBeforeInheritanceColon: true
-SpaceBeforeParens: ControlStatements
-SpaceBeforeRangeBasedForLoopColon: true
-SpaceBeforeSquareBrackets: false
-SpaceInEmptyBlock: false
-SpacesInAngles: Never
-SpacesInParens: Never
-SpacesInSquareBrackets: false
-EmptyLineBeforeAccessModifier: LogicalBlock
-
-# Vertical alignment
+AlignAfterOpenBracket: DontAlign
 AlignArrayOfStructures: None
 AlignConsecutiveAssignments: false
 AlignConsecutiveDeclarations: false
@@ -106,56 +8,143 @@ AlignConsecutiveMacros: false
 AlignConsecutiveShortCaseStatements:
     Enabled: false
 AlignEscapedNewlines: Right
-AlignTrailingComments:
-    Kind: Always
-    OverEmptyLines: 0
-
-# Includes: precompiled header, matching header, standard/system,
-# third-party, then project headers.
-SortIncludes: CaseInsensitive
-IncludeBlocks: Merge
-IncludeIsMainRegex: "(Test)?$"
-IncludeIsMainSourceRegex: ""
-IncludeCategories:
-    - Regex: '^"(\.\./)?(linden_common|llviewerprecompiledheaders)\.h"$'
-      Priority: -1
-      SortPriority: -1
-      CaseSensitive: false
-    - Regex: '^[<"](AL|EGL|GL|GLES2|OpenGL|SDL3|apr|avif|boost|curl|fast_float|fmt|fontconfig|freetype|fribidi|glad|glm|gst|hb|hunspell|libxml|meshoptimizer|minizip|openssl|plutosvg|pulse|simdjson|simdutf|spa|tiny_gltf|tracy|tut|unicode|websocketpp|yaml-cpp|zlib)(/|\.|[>"])'
-      Priority: 2
-      SortPriority: 2
-      CaseSensitive: false
-    - Regex: "^<"
-      Priority: 1
-      SortPriority: 1
-      CaseSensitive: false
-    - Regex: '^"'
-      Priority: 3
-      SortPriority: 3
-      CaseSensitive: false
-    - Regex: ".*"
-      Priority: 4
-      SortPriority: 4
-      CaseSensitive: false
-SortUsingDeclarations: LexicographicNumeric
-
-# Comments and blank lines
-ReflowComments: false
-SpacesBeforeTrailingComments: 1
-MaxEmptyLinesToKeep: 1
-KeepEmptyLines:
-    AtEndOfFile: false
-    AtStartOfBlock: false
-    AtStartOfFile: false
-SeparateDefinitionBlocks: Leave
-ShortNamespaceLines: 8
-FixNamespaceComments: true
-
-# Viewer macros
+AlignOperands: DontAlign
+AlignTrailingComments: false
+AllowAllArgumentsOnNextLine: false
+AllowAllParametersOfDeclarationOnNextLine: true
+AllowBreakBeforeNoexceptSpecifier: Never
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseExpressionOnASingleLine: true
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortCompoundRequirementOnASingleLine: true
+AllowShortEnumsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLambdasOnASingleLine: Empty
+AllowShortLoopsOnASingleLine: false
+AllowShortNamespacesOnASingleLine: false
+AllowShortRecordOnASingleLine: Empty
+AlwaysBreakBeforeMultilineStrings: false
 AttributeMacros:
     - ALCH_ADDON_API
     - LL_COMMON_API
     - LLSYMEXPORT
+BasedOnStyle: LLVM
+BinPackLongBracedList: true
+BitFieldColonSpacing: Both
+BreakAfterAttributes: Never
+BreakAfterOpenBracketBracedList: false
+BreakAfterOpenBracketFunction: false
+BreakAfterOpenBracketIf: false
+BreakAfterOpenBracketLoop: false
+BreakAfterOpenBracketSwitch: false
+BreakAfterReturnType: Automatic
+BreakArrays: false
+BreakBeforeBinaryOperators: NonAssignment
+BreakBeforeBraces: Attach
+BreakBeforeCloseBracketBracedList: true
+BreakBeforeCloseBracketFunction: false
+BreakBeforeCloseBracketIf: false
+BreakBeforeCloseBracketLoop: false
+BreakBeforeCloseBracketSwitch: false
+BreakBeforeConceptDeclarations: Allowed
+BreakBeforeInlineASMColon: OnlyMultiline
+BreakBeforeTemplateCloser: false
+BreakBeforeTernaryOperators: true
+BreakBinaryOperations: Never
+BreakConstructorInitializers: BeforeComma
+BreakFunctionDefinitionParameters: false
+BreakStringLiterals: true
+BreakTemplateDeclarations: MultiLine
+ColumnLimit: 140
+ConstructorInitializerIndentWidth: 4
+ContinuationIndentWidth: 4
+Cpp11BracedListStyle: FunctionCall
+DerivePointerAlignment: false
+EmptyLineBeforeAccessModifier: LogicalBlock
+EnumTrailingComma: Leave
+FixNamespaceComments: true
+ForEachMacros:
+    - BOOST_FOREACH
+    - LL_FOREACH
+    - LL_FOREACH_CONST
+IncludeBlocks: Merge
+IncludeCategories:
+    - CaseSensitive: false
+      Priority: -1
+      Regex: '^"(\.\./)?(linden_common|llviewerprecompiledheaders)\.h"$'
+      SortPriority: -1
+    - CaseSensitive: false
+      Priority: 2
+      Regex: '^[<"](AL|EGL|GL|GLES2|OpenGL|SDL3|apr|avif|boost|curl|fast_float|fmt|fontconfig|freetype|fribidi|glad|glm|gst|hb|hunspell|libxml|meshoptimizer|minizip|openssl|plutosvg|pulse|simdjson|simdutf|spa|tiny_gltf|tracy|tut|unicode|websocketpp|yaml-cpp|zlib)(/|\.|[>"])'
+      SortPriority: 2
+    - CaseSensitive: false
+      Priority: 1
+      Regex: "^<"
+      SortPriority: 1
+    - CaseSensitive: false
+      Priority: 3
+      Regex: '^"'
+      SortPriority: 3
+    - CaseSensitive: false
+      Priority: 4
+      Regex: ".*"
+      SortPriority: 4
+IncludeIsMainRegex: "(Test)?$"
+IncludeIsMainSourceRegex: ""
+IndentAccessModifiers: false
+IndentCaseBlocks: false
+IndentCaseLabels: false
+IndentExportBlock: true
+IndentPPDirectives: None
+IndentWidth: 4
+InsertBraces: false
+InsertNewlineAtEOF: true
+KeepEmptyLines:
+    AtEndOfFile: false
+    AtStartOfBlock: true
+    AtStartOfFile: true
+Language: Cpp
+LineEnding: LF
+MaxEmptyLinesToKeep: 1
+NamespaceIndentation: None
+PackConstructorInitializers: BinPack
+PackArguments:
+    BinPack: BinPack
+PackParameters:
+    BinPack: BinPack
+PenaltyReturnTypeOnItsOwnLine: 1000
+PointerAlignment: Left
+PPIndentWidth: -1
+ReferenceAlignment: Pointer
+ReflowComments: Always
+RemoveBracesLLVM: true
+RemoveEmptyLinesInUnwrappedLines: true
+RemoveParentheses: Leave
+SeparateDefinitionBlocks: Leave
+ShortNamespaceLines: 1
+SortIncludes:
+    Enabled: true
+    IgnoreCase: false
+    IgnoreExtension: false
+SortUsingDeclarations: LexicographicNumeric
+SpaceAfterCStyleCast: false
+SpaceAfterLogicalNot: false
+SpaceAfterTemplateKeyword: false
+SpaceAroundPointerQualifiers: Default
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeCpp11BracedList: true
+SpaceBeforeCtorInitializerColon: true
+SpaceBeforeInheritanceColon: true
+SpaceBeforeParens: ControlStatements
+SpaceBeforeRangeBasedForLoopColon: true
+SpaceBeforeSquareBrackets: false
+SpaceInEmptyBraces: Never
+SpacesBeforeTrailingComments: 1
+SpacesInAngles: Never
+SpacesInParens: Never
+SpacesInSquareBrackets: false
+Standard: c++20
 StatementMacros:
     - llassert
     - llassert_always
@@ -167,12 +156,6 @@ StatementMacros:
     - LL_PROFILE_ZONE_NUM
     - LL_PROFILE_ZONE_TEXT
     - LL_RECORD_BLOCK_TIME
-ForEachMacros:
-    - BOOST_FOREACH
-    - LL_FOREACH
-    - LL_FOREACH_CONST
-
-# Files
-LineEnding: LF
-InsertNewlineAtEOF: true
+TabWidth: 4
+UseTab: Never
 ...

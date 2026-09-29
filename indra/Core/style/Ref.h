@@ -8,7 +8,7 @@
 #include <atomic>
 #include <utility>
 
-namespace radia::ui {
+namespace Core::Style {
 template<typename T> class Ref;
 
 template<typename T> Ref<T> adoptRef(T&);
@@ -16,13 +16,15 @@ template<typename T> Ref<T> adoptRef(T&);
 template<typename T> class RefCounted {
 public:
     RefCounted() = default;
-    RefCounted(const RefCounted&) noexcept : mRefCount(1) {}
+    RefCounted(const RefCounted&) noexcept
+        : mRefCount(1) {}
     RefCounted& operator=(const RefCounted&) noexcept { return *this; }
 
     void ref() const noexcept { mRefCount.fetch_add(1, std::memory_order_relaxed); }
 
     void deref() const noexcept {
-        if (mRefCount.fetch_sub(1, std::memory_order_acq_rel) == 1) delete static_cast<const T*>(this);
+        if (mRefCount.fetch_sub(1, std::memory_order_acq_rel) == 1)
+            delete static_cast<const T*>(this);
     }
 
     bool hasOneRef() const noexcept { return mRefCount.load(std::memory_order_acquire) == 1; }
@@ -31,17 +33,22 @@ protected:
     ~RefCounted() = default;
 
 private:
-    mutable std::atomic<unsigned> mRefCount{1};
+    mutable std::atomic<unsigned> mRefCount {1};
 };
 
 template<typename T> class Ref {
 public:
-    Ref(const Ref& other) noexcept : mPtr(other.mPtr) { mPtr->ref(); }
+    Ref(const Ref& other) noexcept
+        : mPtr(other.mPtr) {
+        mPtr->ref();
+    }
 
-    Ref(Ref&& other) noexcept : mPtr(std::exchange(other.mPtr, nullptr)) {}
+    Ref(Ref&& other) noexcept
+        : mPtr(std::exchange(other.mPtr, nullptr)) {}
 
     ~Ref() {
-        if (mPtr) mPtr->deref();
+        if (mPtr)
+            mPtr->deref();
     }
 
     Ref& operator=(Ref other) noexcept {
@@ -65,19 +72,19 @@ private:
     struct AdoptTag {};
 
     void ensureUnique() {
-        if (!mPtr->hasOneRef()) *this = copyRef();
+        if (!mPtr->hasOneRef())
+            *this = copyRef();
     }
 
     Ref copyRef() const { return mPtr->copy(); }
 
-    explicit Ref(T* ptr, AdoptTag) : mPtr(ptr) {}
+    explicit Ref(T* ptr, AdoptTag)
+        : mPtr(ptr) {}
 
     friend Ref<T> adoptRef<T>(T&);
 
     T* mPtr;
 };
 
-template<typename T> Ref<T> adoptRef(T& value) {
-    return Ref<T>(&value, typename Ref<T>::AdoptTag{});
-}
-} // namespace radia::ui
+template<typename T> Ref<T> adoptRef(T& value) { return Ref<T>(&value, typename Ref<T>::AdoptTag {}); }
+} // namespace Core::Style

@@ -133,7 +133,10 @@ bool LLFontGL::loadFace(const std::string& filename, F32 point_size, const F32 v
 }
 
 void LLFontGL::addFallbackFont(const LLFontGL& fallback) const {
-    if (mFontFreetype.notNull() && fallback.mFontFreetype.notNull()) mFontFreetype->addFallbackFont(fallback.mFontFreetype);
+    if (!mFontFreetype.notNull() || !fallback.mFontFreetype.notNull())
+        return;
+
+    mFontFreetype->addFallbackFont(fallback.mFontFreetype);
 }
 
 S32 LLFontGL::getNumFaces(const std::string& filename)

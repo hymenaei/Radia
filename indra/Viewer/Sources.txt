@@ -1,0 +1,13 @@
+ComponentManager.cpp
+ComponentManagerReplacement.cpp
+DocumentController.cpp
+FloaterHost.cpp
+InputBridge.cpp
+interface/FloaterDemo.cpp
+ReloadCoordinator.cpp
+Resolver.cpp
+Resources.cpp
+Runtime.cpp
+SettingsAdapter.cpp
+SkinPreparation.cpp
+WorkspacePersistence.cpp

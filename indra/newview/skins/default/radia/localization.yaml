@@ -86,9 +86,9 @@ locales:
       demo.inlineHeading: "محتوى مضمّن"
       demo.inlineContent: 'نص Text عادي <b>نص B عريض</b><br><i>نص I مائل</i> <s>نص S مشطوب</s><br>اختصار الطيران <kbd shortcut="toggle-fly"></kbd>'
       demo.textProperties: "خصائص النص"
-      demo.fontShorthand: "اختصار الخط · مائل · وزن 525 · 15/21"
-      demo.letterSpacing: "تباعد الأحرف بنسبة 8% من عرض مسافة الخط"
-      demo.wordSpacing: "يضيف تباعد الكلمات 4 بكسل بعد كل فاصل"
+      demo.fontShorthand: "اختصار الخط · مائل · وزن ٥٢٥ · ١٥/٢١"
+      demo.letterSpacing: "تباعد الأحرف بنسبة ٨٪ من عرض مسافة الخط"
+      demo.wordSpacing: "يضيف تباعد الكلمات ٤ بكسل بعد كل فاصل"
       demo.wrapping: "يحافظ التفاف النص على هذه الجملة الطويلة داخل مربع نص ضيق."
       demo.ellipsisEndInventory: "حذف في النهاية: عنصر المخزون - تلسكوب نحاسي مصقول مع حامل ثلاثي - نسخة"
       demo.ellipsisCenterInventory: "حذف في الوسط: عنصر المخزون - تلسكوب نحاسي مصقول مع حامل ثلاثي - نسخة"

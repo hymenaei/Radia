@@ -2,7 +2,6 @@ set(cmake_SOURCE_FILES
     00-Common.cmake
     APR.cmake
     AVIF.cmake
-    Benchmark.cmake
     Boost.cmake
     BootstrapVcpkg.cmake
     bugsplat.cmake
@@ -22,12 +21,9 @@ set(cmake_SOURCE_FILES
     FontConfig.cmake
     FreeType.cmake
     GLEXT.cmake
-    GTest.cmake
     GLIB.cmake
     GLM.cmake
     GStreamer10Plugin.cmake
-    RadiaFS.cmake
-    RadiaMacros.cmake
     Havok.cmake
     Hunspell.cmake
     JPEG.cmake
@@ -50,6 +46,8 @@ set(cmake_SOURCE_FILES
     PluginAPI.cmake
     PNG.cmake
     Python.cmake
+    RadiaFS.cmake
+    RadiaMacros.cmake
     run_build_test.py
     SDL3.cmake
     SSE2NEON.cmake

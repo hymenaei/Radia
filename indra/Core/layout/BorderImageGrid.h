@@ -8,18 +8,28 @@
 #include <array>
 #include <cstddef>
 #include <optional>
-#include "style/computedstyle.h"
-#include "types.h"
+#include "ComputedStyle.h"
+#include "LayoutGeometry.h"
 
-namespace radia::ui {
-enum class BorderImageGridPiece : std::size_t { TopLeft, Top, TopRight, Left, Center, Right, BottomLeft, Bottom, BottomRight };
+namespace Core::Layout {
+enum class BorderImageGridPiece : std::size_t {
+    TopLeft,
+    Top,
+    TopRight,
+    Left,
+    Center,
+    Right,
+    BottomLeft,
+    Bottom,
+    BottomRight
+};
 
 struct BorderImagePatch {
     Rect source;
     Rect destination;
     Vec2 tileSize;
-    BorderImageRepeatMode repeatX = BorderImageRepeatMode::Stretch;
-    BorderImageRepeatMode repeatY = BorderImageRepeatMode::Stretch;
+    Style::BorderImageRepeatMode repeatX = Style::BorderImageRepeatMode::Stretch;
+    Style::BorderImageRepeatMode repeatY = Style::BorderImageRepeatMode::Stretch;
 };
 
 struct BorderImageGrid {
@@ -35,9 +45,10 @@ struct BorderImageTilePlan {
     float position(std::size_t index) const { return first + static_cast<float>(index) * (size + gap); }
 };
 
-std::optional<BorderImageTilePlan> borderImageTilePlan(BorderImageRepeatMode mode, float start, float extent, float preferredSize);
-std::optional<Rect> resolveBorderImageArea(const Rect& borderBox, const BorderImageOutset& outset, const RectEdges<float>& computedBorderWidths);
-std::optional<BorderImageGrid> resolveBorderImageGrid(const BorderImageSlice& slice, const BorderImageWidth& width, const BorderImageOutset& outset,
-                                                      const BorderImageRepeat& repeat, const Rect& borderBox, float imageWidth, float imageHeight,
-                                                      const RectEdges<float>& computedBorderWidths);
-} // namespace radia::ui
+std::optional<BorderImageTilePlan> borderImageTilePlan(Style::BorderImageRepeatMode mode, float start, float extent, float preferredSize);
+std::optional<Rect> resolveBorderImageArea(const Rect& borderBox, const Style::BorderImageOutset& outset,
+    const RectEdges<float>& computedBorderWidths);
+std::optional<BorderImageGrid> resolveBorderImageGrid(const Style::BorderImageSlice& slice, const Style::BorderImageWidth& width,
+    const Style::BorderImageOutset& outset, const Style::BorderImageRepeat& repeat, const Rect& borderBox, float imageWidth,
+    float imageHeight, const RectEdges<float>& computedBorderWidths);
+} // namespace Core::Layout

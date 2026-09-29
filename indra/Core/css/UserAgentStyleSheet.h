@@ -7,4 +7,6 @@
 
 #include <string_view>
 
-namespace radia::ui { std::string_view userAgentStyleSheet() noexcept; } // namespace radia::ui
+namespace Core::CSS {
+std::string_view userAgentStyleSheet() noexcept;
+} // namespace Core::CSS

@@ -1,5 +1,3 @@
-# -*- cmake -*-
-
 # cmake_minimum_required should appear before any
 # other commands to guarantee full compatibility
 # with the version specified
@@ -54,7 +52,7 @@ option(USE_SSE4_2 "Use SSE4.2/x86-64-v2 instruction sets (x86_64 only)" OFF)
 option(USE_AVX "Use AVX/x86-64-v2+avx instruction sets (x86_64 only)" OFF)
 option(USE_AVX2 "Use AVX2/x86_64-v3 instruction sets (x86_64 only)" OFF)
 
-# Sanitizers (Mac and Linux Only)
+# Sanitizers (Darwin and Linux Only)
 option(ENABLE_ASAN "Enable Address Sanitizer" OFF)
 option(ENABLE_UBSAN "Enable Undefined Behavior Sanitizer" OFF)
 option(ENABLE_THREADSAN "Enable Thread Sanitizer" OFF)
@@ -330,14 +328,17 @@ include(WinSpellCheck)
 include(xxHash)
 include(ZLIBNG)
 
-# Add our test macros
 if(BUILD_TESTING)
     include(LLAddBuildTest)
-    include(GTest)
+    find_package(GTest CONFIG REQUIRED)
 endif()
 
 if(BUILD_BENCHMARKING)
-    include(Benchmark)
+    find_package(benchmark CONFIG REQUIRED)
+endif()
+
+if(BUILD_TESTING OR BUILD_BENCHMARKING)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/Tests/TestMacros.cmake")
 endif()
 
 # Third party system library copy step
@@ -346,6 +347,7 @@ include(Copy3rdPartyLibs)
 # Add our cmake modules to cmake
 add_subdirectory(cmake)
 
+add_subdirectory(Core)
 add_subdirectory(dullahan)
 add_subdirectory(llprecompiled)
 add_subdirectory(llaudio)
@@ -367,7 +369,6 @@ add_subdirectory(llwebrtc)
 add_subdirectory(llwindow)
 add_subdirectory(llxml)
 add_subdirectory(llplugin)
-add_subdirectory(ui)
 add_subdirectory(llui)
 add_subdirectory(viewer_components)
 
@@ -386,7 +387,7 @@ endif()
 
 # Viewer
 add_subdirectory(newview)
-
+add_subdirectory(Viewer)
 add_subdirectory(doxygen EXCLUDE_FROM_ALL)
 
 # sets the 'startup project' for debugging from visual studio.
@@ -395,8 +396,6 @@ set_property(
     PROPERTY VS_STARTUP_PROJECT ${VIEWER_BINARY_NAME}
 )
 
-if(BUILD_TESTING)
-    # Define after the custom targets are created so
-    # individual apps can add themselves as dependencies
-    add_subdirectory(tests)
+if(BUILD_TESTING OR BUILD_BENCHMARKING)
+    add_subdirectory(Tests)
 endif()

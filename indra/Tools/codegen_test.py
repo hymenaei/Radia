@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import codegen
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _property(
@@ -86,7 +86,8 @@ def _function_body(source: str, signature: str) -> str:
 
 def _enum_members(source: str, enum_name: str) -> list[str]:
     match = re.search(
-        rf"enum class {re.escape(enum_name)}(?:\s*:\s*[\w:]+)?\s*\{{(.*?)\n\}};",
+        rf"enum(?: class)? {re.escape(enum_name)}"
+        r"(?:\s*:\s*[\w:]+)?\s*\{(.*?)\n\};",
         source,
         re.DOTALL,
     )
@@ -104,7 +105,8 @@ def _descriptor_rows(source: str, enum_name: str, table_name: str) -> list[tuple
     if table is None:
         raise AssertionError(f"missing {table_name} descriptor table")
     rows = re.findall(
-        rf'^\s*\{{\s*{re.escape(enum_name)}::([A-Za-z_]\w*)\s*,\s*("(?:\\.|[^"\\])*")',
+        rf'^\s*\{{\s*(?:{re.escape(enum_name)}::)?'
+        r'([A-Za-z_]\w*)\s*,\s*("(?:\\.|[^"\\])*")',
         table.group(1),
         re.MULTILINE,
     )
@@ -113,15 +115,15 @@ def _descriptor_rows(source: str, enum_name: str, table_name: str) -> list[tuple
 
 def _write_synthetic_catalogs(root: Path) -> None:
     directories = (
-        root / "indra" / "Core" / "css" / "values",
-        root / "indra" / "Core" / "html",
-        root / "indra" / "Core" / "dom",
+        root / "Core" / "css" / "values",
+        root / "Core" / "html",
+        root / "Core" / "dom",
     )
     for directory in directories:
         directory.mkdir(parents=True, exist_ok=True)
 
     catalogs = {
-        Path("indra/Core/css/CSSProperties.json5"): {
+        Path("Core/css/CSSProperties.json5"): {
             "data_types": {},
             "properties": {
                 "sample-value": {
@@ -134,14 +136,14 @@ def _write_synthetic_catalogs(root: Path) -> None:
                 }
             },
         },
-        Path("indra/Core/css/values/CSSKeywords.json5"): [*codegen.SYSTEM_COLORS, "auto"],
-        Path("indra/Core/html/HTMLTags.json5"): {
+        Path("Core/css/values/CSSKeywords.json5"): [*codegen.SYSTEM_COLORS, "auto"],
+        Path("Core/html/HTMLTags.json5"): {
             "x-sample": {"interface": "HTMLSampleElement"},
         },
-        Path("indra/Core/html/HTMLAttributes.json5"): ["data-mode", "onready"],
-        Path("indra/Core/html/InputTypes.json5"): ["text"],
-        Path("indra/Core/dom/EventTypes.json5"): {"ready": {"interface": "Event"}},
-        Path("indra/Core/css/CSSPseudoSelectors.json5"): {
+        Path("Core/html/HTMLAttributes.json5"): ["data-mode", "onready"],
+        Path("Core/html/InputTypes.json5"): ["text"],
+        Path("Core/dom/EventTypes.json5"): {"ready": {"interface": "Event"}},
+        Path("Core/css/CSSPseudoSelectors.json5"): {
             "pseudo-classes": {"focus": {}},
             "pseudo-elements": {"before": {"user_agent": True}},
         },
@@ -199,8 +201,8 @@ class CodegenTests(unittest.TestCase):
         _, _, inline = codegen.generate_computed_style(catalogs)
 
         expected = (
-            "float sampleValue() const {\n    return mData.metrics.sampleValue;",
-            "const SampleReference& sampleReference() const {\n    return mData.font.sampleReference;",
+            "float sampleValue() const { return mData.metrics.sampleValue; }",
+            "const SampleReference& sampleReference() const { return mData.font.sampleReference; }",
             "if (value != mData.font.sampleReference)",
             "static_cast<SampleMode>(mData.flags.sampleMode)",
             "mData.flags.sampleMode = static_cast<unsigned>(value);",
@@ -227,26 +229,55 @@ class CodegenTests(unittest.TestCase):
         self.assertIn("static constexpr float initialSampleValue()", inline)
         self.assertIn("return 3.0f;", inline)
         self.assertIn(
-            "static bool applyValueSampleValue(StyleBuilderState& builderState, const StyleValue& value)",
+            "static bool applyValueSampleValue(BuilderState& builderState, const CSS::StyleValue& value)",
             source,
         )
         self.assertIn("auto parsedValue = toStyle<float>(builderState, value);", source)
-        self.assertIn("if (!parsedValue) return false;", source)
+        self.assertIn("if (!parsedValue)\n        return false;", source)
         self.assertIn("builderState.style.setSampleValue(std::move(*parsedValue));", source)
-        self.assertIn("static bool applyInitialSampleValue(StyleBuilderState& builderState)", source)
+        self.assertIn("static bool applyInitialSampleValue(BuilderState& builderState)", source)
         self.assertIn("builderState.style.setSampleValue(ComputedStyle::initialSampleValue());", source)
-        self.assertIn("static bool applyInheritSampleValue(StyleBuilderState& builderState)", source)
-        self.assertIn("if (!builderState.parentStyle) return false;", source)
+        self.assertIn("static bool applyInheritSampleValue(BuilderState& builderState)", source)
+        self.assertIn("if (!builderState.parentStyle)\n        return false;", source)
         self.assertIn("builderState.parentStyle->sampleValue()", source)
         self.assertIn("specifiedValue && applyValueSampleValue(builderState, *specifiedValue)", source)
-        self.assertIn("case ApplyType::Initial: return applyInitialSampleValue(builderState);", source)
-        self.assertIn("case ApplyType::Inherit: return applyInheritSampleValue(builderState);", source)
-        property_case = source.split("case CSSProperty::SampleValue:", 1)[1].split(
-            "        default: return false;", 1
+        self.assertIn(
+            "case ApplyType::Initial:\n"
+            "            return applyInitialSampleValue(builderState);",
+            source,
+        )
+        self.assertIn(
+            "case ApplyType::Inherit:\n"
+            "            return applyInheritSampleValue(builderState);",
+            source,
+        )
+        property_case = source.split("case CSS::Property::SampleValue:", 1)[1].split(
+            "    default:", 1
         )[0]
         self.assertNotIn("default:", property_case)
-        self.assertIn("case CSSProperty::SampleValue:\n            return true;", source)
-        self.assertIn("enum class ApplyType : std::uint8_t { Value, Initial, Inherit };", header)
+        self.assertIn("case CSS::Property::SampleValue:\n        return true;", source)
+        self.assertIn(
+            "enum class ApplyType : std::uint8_t {\n"
+            "    Value,\n"
+            "    Initial,\n"
+            "    Inherit\n"
+            "};",
+            header,
+        )
+
+    def test_style_color_initial_uses_css_keyword_namespace(self) -> None:
+        property = _property(
+            "color",
+            "<color>",
+            type_name="Color",
+            initial="canvastext",
+            storage_path=("mInheritedData", "paint"),
+        )
+        _, _, inline = codegen.generate_computed_style(
+            _catalogs((property,), css_keywords=("canvastext",))
+        )
+
+        self.assertIn("Color::fromKeyword(KeywordCanvasText)", inline)
 
     def test_parser_combinators_generate_parser_structure(self) -> None:
         properties = tuple(
@@ -266,34 +297,34 @@ class CodegenTests(unittest.TestCase):
             ("any-order-value", "parseOneOrMoreAnyOrder<"),
             ("all-order-value", "parseAllAnyOrder<"),
             ("sequence-value", "parseSequence<"),
-            ("function-value", 'parseFunction<"calc", consumeNumber<AnyRange>>'),
+            ("function-value", 'parseFunction<"calc", consumeNumber<kAnyRange>>'),
             ("required-value", "parseRequired<parseSequence<"),
         )
         for name, parser in cases:
             with self.subTest(property=name):
                 body = _function_body(
                     source,
-                    f"std::optional<CSSValue> parse{codegen._pascal_name(name)}(CSSValueRange& range) {{",
+                    f"std::optional<Value> parse{codegen._pascal_name(name)}(ValueRange& range) {{",
                 )
                 self.assertIn(parser, body)
 
         sequence = _function_body(
             source,
-            "std::optional<CSSValue> parseSequenceValue(CSSValueRange& range) {",
+            "std::optional<Value> parseSequenceValue(ValueRange& range) {",
         )
         self.assertIn("consumeLiteral<'/'>", sequence)
-        self.assertIn("consumePercentage<AnyRange>", sequence)
+        self.assertIn("consumePercentage<kAnyRange>", sequence)
 
     def test_repetition_bounds_generate_parser_calls(self) -> None:
         patterns = (
-            ("zero-or-more", "<number>*", "parseStar<consumeNumber<AnyRange>>(range)"),
-            ("one-or-more", "<number>+", "parsePlus<consumeNumber<AnyRange>>(range)"),
-            ("optional-value", "<number>?", "parseOptional<consumeNumber<AnyRange>>(range)"),
-            ("bounded-values", "<number>{1,3}", "parseRange<{1, 3}, consumeNumber<AnyRange>>(range)"),
-            ("open-values", "<number>{2,}", "parseRange<{2, Infinite}, consumeNumber<AnyRange>>(range)"),
-            ("comma-values", "<number>#", "parseHash<consumeNumber<AnyRange>>(range)"),
-            ("two-comma-values", "<number>#{2}", "parseHash<2, consumeNumber<AnyRange>>(range)"),
-            ("bounded-comma-values", "<number>#{2,4}", "parseHash<{2, 4}, consumeNumber<AnyRange>>(range)"),
+            ("zero-or-more", "<number>*", "parseStar<consumeNumber<kAnyRange>>(range)"),
+            ("one-or-more", "<number>+", "parsePlus<consumeNumber<kAnyRange>>(range)"),
+            ("optional-value", "<number>?", "parseOptional<consumeNumber<kAnyRange>>(range)"),
+            ("bounded-values", "<number>{1,3}", "parseRange<{1, 3}, consumeNumber<kAnyRange>>(range)"),
+            ("open-values", "<number>{2,}", "parseRange<{2, Infinite}, consumeNumber<kAnyRange>>(range)"),
+            ("comma-values", "<number>#", "parseHash<consumeNumber<kAnyRange>>(range)"),
+            ("two-comma-values", "<number>#{2}", "parseHash<2, consumeNumber<kAnyRange>>(range)"),
+            ("bounded-comma-values", "<number>#{2,4}", "parseHash<{2, 4}, consumeNumber<kAnyRange>>(range)"),
         )
         properties = tuple(_property(name, syntax, initial="0") for name, syntax, _ in patterns)
         _, source = codegen.generate_property_parsing(_catalogs(properties))
@@ -302,7 +333,7 @@ class CodegenTests(unittest.TestCase):
             with self.subTest(property=name):
                 body = _function_body(
                     source,
-                    f"std::optional<CSSValue> parse{codegen._pascal_name(name)}(CSSValueRange& range) {{",
+                    f"std::optional<Value> parse{codegen._pascal_name(name)}(ValueRange& range) {{",
                 )
                 self.assertIn(expected, body)
 
@@ -329,12 +360,15 @@ class CodegenTests(unittest.TestCase):
         )
         header, source = codegen.generate_property_parsing(catalogs)
 
-        self.assertIn("std::optional<CSSValue> consumeRatioValue(CSSValueRange&);", header)
-        self.assertIn("std::optional<CSSValue> parseMeasure(CSSValueRange&);", header)
-        scaled_parser = _function_body(source, "std::optional<CSSValue> parseScaledMeasure")
+        self.assertIn("std::optional<Value> consumeRatioValue(ValueRange&);", header)
+        self.assertIn("std::optional<Value> parseMeasure(ValueRange&);", header)
+        scaled_parser = _function_body(source, "std::optional<Value> parseScaledMeasure")
         self.assertIn("return parseMeasure(range);", scaled_parser)
-        self.assertIn("return consumeRatioValue(range);", _function_body(source, "std::optional<CSSValue> parseRatio"))
-        self.assertIn("return parseOneOf<", _function_body(source, "std::optional<CSSValue> consumeRatioValue"))
+        self.assertIn(
+            "return consumeRatioValue(range);",
+            _function_body(source, "std::optional<Value> parseRatio"),
+        )
+        self.assertIn("return parseOneOf<", _function_body(source, "std::optional<Value> consumeRatioValue"))
 
         invalid = _catalogs((_property("bad-value", "<'missing-value'>"),))
         with self.assertRaisesRegex(codegen.GenerationError, "needs a generated longhand parser"):
@@ -362,10 +396,11 @@ class CodegenTests(unittest.TestCase):
         _, source = codegen.generate_property_parsing(
             _catalogs((property,), css_keywords=("compact", "roomy"))
         )
-        self.assertIn(
-            "consumeKeyword<\n        CSSKeyword::Compact,\n        CSSKeyword::Roomy>(range);",
-            source,
+        expected = (
+            "std::optional<Value> parseSampleMode(ValueRange& range) { "
+            "return consumeKeyword<Keyword::Compact, Keyword::Roomy>(range); }"
         )
+        self.assertIn(expected, source)
 
     def test_shorthand_patterns_are_inferred(self) -> None:
         cases = (
@@ -386,7 +421,7 @@ class CodegenTests(unittest.TestCase):
                 header, source = codegen.generate_property_parsing(_catalogs((*components, shorthand)))
                 self.assertIn(f"using ShorthandPattern = {expected};", header)
                 self.assertIn(
-                    "case CSSProperty::Combined: return parseShorthand<CSSProperty::Combined>(range, result);",
+                    "case Property::Combined:\n        return parseShorthand<Property::Combined>(range, result);",
                     source,
                 )
 
@@ -412,14 +447,14 @@ class CodegenTests(unittest.TestCase):
         codegen._validate_shorthand(shorthand, {item.name: item for item in properties}, Path("CSSProperties.json5"))
         header, source = codegen.generate_property_parsing(_catalogs(properties, css_keywords=("none",)))
 
-        shorthand_traits = header.split("PropertyTraits<CSSProperty::Combined>", 1)[1].split("};", 1)[0]
-        self.assertIn("CSSProperty::FirstPart", shorthand_traits)
-        self.assertIn("CSSProperty::SecondPart", shorthand_traits)
+        shorthand_traits = header.split("PropertyTraits<Property::Combined>", 1)[1].split("};", 1)[0]
+        self.assertIn("Property::FirstPart", shorthand_traits)
+        self.assertIn("Property::SecondPart", shorthand_traits)
         self.assertIn("using ResetLonghands = PropertyList<", shorthand_traits)
-        self.assertIn("CSSProperty::ResetPart", shorthand_traits)
+        self.assertIn("Property::ResetPart", shorthand_traits)
         self.assertIn("using SyntaxParser = ParseFlex;", shorthand_traits)
-        reset_traits = header.split("PropertyTraits<CSSProperty::ResetPart>", 1)[1].split("};", 1)[0]
-        self.assertIn("initial = CSSKeyword::NoneValue;", reset_traits)
+        reset_traits = header.split("PropertyTraits<Property::ResetPart>", 1)[1].split("};", 1)[0]
+        self.assertIn("initial = KeywordNone;", reset_traits)
         self.assertNotIn("resetLonghands{{", header + source)
 
         invalid_reset = _property("reset-part", "none", initial="none")
@@ -451,9 +486,9 @@ class CodegenTests(unittest.TestCase):
         codegen._validate_property_groups({item.name: item for item in properties}, Path("CSSProperties.json5"))
         _, _, inline = codegen.generate_computed_style(_catalogs(properties))
 
-        self.assertIn("RectEdges<EdgeLength> edges() const", inline)
+        self.assertIn("Layout::RectEdges<EdgeLength> edges() const", inline)
         self.assertIn("return {northEdge(), eastEdge(), southEdge(), westEdge()};", inline)
-        self.assertIn("void setEdges(RectEdges<EdgeLength> value)", inline)
+        self.assertIn("void setEdges(Layout::RectEdges<EdgeLength> value)", inline)
         self.assertIn("void setEdges(EdgeLength value)", inline)
         self.assertIn("value.top", inline)
         self.assertIn("value.right", inline)
@@ -591,11 +626,11 @@ class CodegenTests(unittest.TestCase):
         html_header, _ = codegen.generate_html_names(catalogs)
         event_header, _ = codegen.generate_events(catalogs)
 
-        self.assertIn('{ HTMLTag::XWidget, "x-widget", HTMLInterface::HTMLWidgetElement, true }', html_header)
+        self.assertIn('{HTMLTag::XWidget, "x-widget", HTMLInterface::HTMLWidgetElement, true}', html_header)
         self.assertIn("OnDoubleClick,", html_header)
         self.assertIn("OnPointerDown,", html_header)
-        self.assertIn('{ EventType::DoubleClick, "dblclick", HTMLAttribute::OnDoubleClick }', event_header)
-        self.assertIn('{ EventType::PointerDown, "pointerdown", HTMLAttribute::OnPointerDown }', event_header)
+        self.assertIn('{EventType::DoubleClick, "dblclick", HTMLAttribute::OnDoubleClick}', event_header)
+        self.assertIn('{EventType::PointerDown, "pointerdown", HTMLAttribute::OnPointerDown}', event_header)
 
     def test_json5_comments_and_duplicate_keys(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -644,14 +679,113 @@ class CodegenTests(unittest.TestCase):
                 self.assertTrue(contents.startswith("// Automatically generated from "))
                 self.assertTrue(contents.endswith("\n"))
 
+    def test_generated_cpp_uses_repository_layout(self) -> None:
+        outputs = codegen.generate_outputs(codegen.load_catalogs(ROOT))
+
+        apply_type = (
+            "enum class ApplyType : std::uint8_t {\n"
+            "    Value,\n"
+            "    Initial,\n"
+            "    Inherit\n"
+            "};"
+        )
+        self.assertIn(apply_type, outputs["ComputedStyleProperties.h"])
+        self.assertIn("const AccentColor& accentColor() const { return", outputs["ComputedStylePropertiesInlines.h"])
+        self.assertIn("const Color& color() const { return", outputs["ComputedStylePropertiesInlines.h"])
+        self.assertIn(
+            "static Color initialColor() { return Color::fromKeyword(KeywordCanvasText); }",
+            outputs["ComputedStylePropertiesInlines.h"],
+        )
+        self.assertIn("case CSS::Property::AccentColor:\n        switch (type) {", outputs["ComputedStyleProperties.cpp"])
+        self.assertIn("initial = Value {Px(0.f)};", outputs["CSSPropertyParsing.h"])
+        self.assertIn(
+            "static Image initialBorderImageSource() { return Image {std::monostate {}}; }",
+            outputs["ComputedStylePropertiesInlines.h"],
+        )
+        self.assertTrue(
+            all(
+                len(line) <= 140
+                for contents in outputs.values()
+                for line in contents.splitlines()
+            )
+        )
+        system_color_function = outputs["CSSKeywords.h"].split(
+            "constexpr bool isSystemColorKeyword", 1
+        )[1].split("std::optional<KeywordName>", 1)[0]
+        self.assertEqual(system_color_function.count("return true;"), 1)
+        self.assertIn("case KeywordVisitedText:\n        return true;", system_color_function)
+
+    def test_generated_namespaces_and_includes_follow_core_ownership(self) -> None:
+        outputs = codegen.generate_outputs(codegen.load_catalogs(ROOT))
+        css_outputs = (
+            "CSSProperties.h",
+            "CSSProperties.cpp",
+            "CSSKeywords.h",
+            "CSSKeywords.cpp",
+            "CSSPropertyParsing.h",
+            "CSSPropertyParsing.cpp",
+            "CSSPseudoSelectors.h",
+            "CSSPseudoSelectors.cpp",
+        )
+        for name in css_outputs:
+            with self.subTest(output=name):
+                self.assertIn("namespace Core::CSS {", outputs[name])
+                self.assertNotIn("radia::ui", outputs[name])
+        self.assertIn("enum class Property", outputs["CSSProperties.h"])
+        self.assertIn("struct PropertyDescriptor", outputs["CSSProperties.h"])
+        self.assertIn("propertyName(Property", outputs["CSSProperties.h"])
+        self.assertIn("enum KeywordName : std::uint16_t", outputs["CSSKeywords.h"])
+        self.assertIn("struct Keyword {", outputs["CSSKeywords.h"])
+        self.assertIn("struct Keyword {\n    KeywordName keyword;", outputs["CSSKeywords.h"])
+        self.assertIn("KeywordNone,", outputs["CSSKeywords.h"])
+        self.assertIn("using Normal = Constant<KeywordNormal>;", outputs["CSSKeywords.h"])
+        self.assertNotIn("KeywordValue", outputs["CSSKeywords.h"])
+        self.assertNotIn("KeywordNoneValue", outputs["CSSKeywords.h"])
+        self.assertIn("findKeyword(std::string_view)", outputs["CSSKeywords.h"])
+        self.assertIn("std::optional<Value>", outputs["CSSPropertyParsing.h"])
+        self.assertIn("detail::parseColor", outputs["CSSPropertyParsing.cpp"])
+
+        self.assertIn("namespace Core::Style {", outputs["ComputedStyleProperties.h"])
+        self.assertIn("CSS::Property", outputs["ComputedStyleProperties.h"])
+        self.assertIn("Traits::Longhands::kProperties", outputs["ComputedStyleProperties.h"])
+        self.assertNotIn("using CSS::", outputs["ComputedStyleProperties.h"])
+        self.assertIn('#include <Core/CSSRules.h>', outputs["ComputedStyleProperties.h"])
+        self.assertIn('#include <Core/CSSPropertyParser.h>', outputs["CSSPropertyParsing.h"])
+        self.assertIn('#include "ComputedStyle.h"', outputs["ComputedStyleProperties.cpp"])
+        self.assertIn('#include "StyleProperty.h"', outputs["ComputedStyleProperties.cpp"])
+        self.assertIn("enum class PseudoElement", outputs["CSSPseudoSelectors.h"])
+
+        core_outputs = (
+            "HTMLNames.h",
+            "HTMLNames.cpp",
+            "EventTypes.h",
+            "EventTypes.cpp",
+            "InputTypes.h",
+            "InputTypes.cpp",
+        )
+        for name in core_outputs:
+            with self.subTest(output=name):
+                self.assertIn("namespace Core {", outputs[name])
+                self.assertNotIn("radia::ui", outputs[name])
+        self.assertIn('#include "HTMLName.h"', outputs["HTMLNames.cpp"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "ua.css"
+            source.write_text("body {}", encoding="utf-8")
+            output = codegen.generate_user_agent_stylesheet(source, Path(directory) / "generated")
+            contents = output.read_text(encoding="utf-8")
+            self.assertIn("namespace Core::CSS {", contents)
+            self.assertIn('#include "UserAgentStyleSheet.h"', contents)
+            self.assertNotIn("radia::ui", contents)
+
     def test_current_descriptor_tables_match_their_enums(self) -> None:
         outputs = codegen.generate_outputs(codegen.load_catalogs(ROOT))
         tables = (
             (
-                "CSSProperties.h", "CSSProperty", "cssProperties",
-                "CSSPropertyDescriptor", "cssPropertyDescriptor", "property",
+                "CSSProperties.h", "Property", "properties",
+                "PropertyDescriptor", "propertyDescriptor", "property",
             ),
-            ("CSSKeywords.h", "CSSKeyword", "cssKeywords", "CSSKeywordDescriptor", "cssKeywordDescriptor", "keyword"),
+            ("CSSKeywords.h", "KeywordName", "keywords", "KeywordDescriptor", "keywordDescriptor", "keyword"),
             ("HTMLNames.h", "HTMLTag", "htmlTags", "HTMLTagDescriptor", "htmlTagDescriptor", "tag"),
             (
                 "HTMLNames.h", "HTMLAttribute", "htmlAttributes",
@@ -660,12 +794,12 @@ class CodegenTests(unittest.TestCase):
             ("EventTypes.h", "EventType", "eventTypes", "EventTypeDescriptor", "eventTypeDescriptor", "type"),
             ("InputTypes.h", "InputType", "inputTypes", "InputTypeDescriptor", "inputTypeDescriptor", "type"),
             (
-                "CSSPseudoSelectors.h", "CSSPseudoClass", "cssPseudoClasses",
-                "CSSPseudoClassDescriptor", "cssPseudoClassDescriptor", "pseudoClass",
+                "CSSPseudoSelectors.h", "PseudoClass", "pseudoClasses",
+                "PseudoClassDescriptor", "pseudoClassDescriptor", "pseudoClass",
             ),
             (
-                "CSSPseudoSelectors.h", "CSSPseudoElement", "cssPseudoElements",
-                "CSSPseudoElementDescriptor", "cssPseudoElementDescriptor", "pseudoElement",
+                "CSSPseudoSelectors.h", "PseudoElement", "pseudoElements",
+                "PseudoElementDescriptor", "pseudoElementDescriptor", "pseudoElement",
             ),
         )
 

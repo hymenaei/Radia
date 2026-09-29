@@ -142,7 +142,7 @@
         "syntax": "<color>",
         "storage_path": ["mNonInheritedData", "backgroundData"],
         "storage_kind": "reference",
-        "type": "StyleColor"
+        "type": "Color"
       }
     },
 
@@ -239,7 +239,7 @@
         "syntax": "<color>",
         "storage_path": ["mNonInheritedData", "surroundData", "border.colors"],
         "storage_kind": "reference",
-        "type": "StyleColor"
+        "type": "Color"
       }
     },
 
@@ -378,7 +378,7 @@
         "storage_path": ["mNonInheritedData", "surroundData", "border.borderImage"],
         "storage_name": "source",
         "storage_kind": "reference",
-        "type": "StyleImage"
+        "type": "Image"
       }
     },
 
@@ -417,7 +417,7 @@
         "syntax": "<color>",
         "storage_path": ["mNonInheritedData", "surroundData", "border.colors"],
         "storage_kind": "reference",
-        "type": "StyleColor"
+        "type": "Color"
       }
     },
 
@@ -490,7 +490,7 @@
         "syntax": "<color>",
         "storage_path": ["mNonInheritedData", "surroundData", "border.colors"],
         "storage_kind": "reference",
-        "type": "StyleColor"
+        "type": "Color"
       }
     },
 
@@ -561,7 +561,7 @@
         "syntax": "<color>",
         "storage_path": ["mNonInheritedData", "surroundData", "border.colors"],
         "storage_kind": "reference",
-        "type": "StyleColor"
+        "type": "Color"
       }
     },
 
@@ -690,7 +690,7 @@
         "syntax": "<color>",
         "storage_path": ["mInheritedData"],
         "storage_kind": "reference",
-        "type": "StyleColor"
+        "type": "Color"
       }
     },
 

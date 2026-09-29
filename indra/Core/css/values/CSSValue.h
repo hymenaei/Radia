@@ -15,15 +15,12 @@
 #include <utility>
 #include <variant>
 #include <vector>
-#include "css/color.h"
-#include "css/syntax.h"
+#include "CSSColor.h"
 #include "CSSKeywords.h"
-#include "platform/graphics/Color.h"
+#include "CSSTokenStream.h"
+#include "Color.h"
 
-namespace radia::ui {
-struct StyleBuilderContext;
-
-namespace CSS {
+namespace Core::CSS {
 struct String {
     std::string value;
 
@@ -35,18 +32,20 @@ struct LightDarkColor;
 class Color {
 public:
     Color() = default;
-    Color(radia::ui::Color value) : mValue(value) {}
-    Color(Keyword value) : mValue(value) {}
+    Color(Core::Color value)
+        : mValue(value) {}
+    Color(Keyword value)
+        : mValue(value) {}
     Color(LightDarkColor value);
 
-    const radia::ui::Color* solidColor() const { return std::get_if<radia::ui::Color>(&mValue); }
+    const Core::Color* solidColor() const { return std::get_if<Core::Color>(&mValue); }
     const Keyword* keyword() const { return std::get_if<Keyword>(&mValue); }
     const LightDarkColor* lightDark() const;
 
     friend bool operator==(const Color&, const Color&);
 
 private:
-    std::variant<radia::ui::Color, Keyword, std::shared_ptr<const LightDarkColor>> mValue;
+    std::variant<Core::Color, Keyword, std::shared_ptr<const LightDarkColor>> mValue;
 };
 
 struct LightDarkColor {
@@ -56,7 +55,8 @@ struct LightDarkColor {
     friend bool operator==(const LightDarkColor&, const LightDarkColor&) = default;
 };
 
-inline Color::Color(LightDarkColor value) : mValue(std::make_shared<const LightDarkColor>(std::move(value))) {}
+inline Color::Color(LightDarkColor value)
+    : mValue(std::make_shared<const LightDarkColor>(std::move(value))) {}
 
 inline const LightDarkColor* Color::lightDark() const {
     const auto* value = std::get_if<std::shared_ptr<const LightDarkColor>>(&mValue);
@@ -64,9 +64,12 @@ inline const LightDarkColor* Color::lightDark() const {
 }
 
 inline bool operator==(const Color& left, const Color& right) {
-    if (left.mValue.index() != right.mValue.index()) return false;
-    if (const auto* solid = left.solidColor()) return *solid == *right.solidColor();
-    if (const auto* keyword = left.keyword()) return *keyword == *right.keyword();
+    if (left.mValue.index() != right.mValue.index())
+        return false;
+    if (const auto* solid = left.solidColor())
+        return *solid == *right.solidColor();
+    if (const auto* keyword = left.keyword())
+        return *keyword == *right.keyword();
     const LightDarkColor* leftLightDark = left.lightDark();
     const LightDarkColor* rightLightDark = right.lightDark();
     return leftLightDark && rightLightDark && *leftLightDark == *rightLightDark;
@@ -119,134 +122,59 @@ struct Length {
     LengthUnit unit = LengthUnit::Px;
 
     constexpr Length() = default;
-    constexpr Length(float value, LengthUnit unit) : value(value), unit(unit) {}
+    constexpr Length(float value, LengthUnit unit)
+        : value(value)
+        , unit(unit) {}
 
     constexpr bool operator==(const Length&) const = default;
 };
 
-constexpr Length Px(float value = 0.f) {
-    return {value, LengthUnit::Px};
-}
-constexpr Length Em(float value = 0.f) {
-    return {value, LengthUnit::Em};
-}
-constexpr Length Rem(float value = 0.f) {
-    return {value, LengthUnit::Rem};
-}
-constexpr Length Ch(float value = 0.f) {
-    return {value, LengthUnit::Ch};
-}
-constexpr Length Ex(float value = 0.f) {
-    return {value, LengthUnit::Ex};
-}
-constexpr Length Cap(float value = 0.f) {
-    return {value, LengthUnit::Cap};
-}
-constexpr Length Ic(float value = 0.f) {
-    return {value, LengthUnit::Ic};
-}
-constexpr Length Lh(float value = 0.f) {
-    return {value, LengthUnit::Lh};
-}
-constexpr Length Rlh(float value = 0.f) {
-    return {value, LengthUnit::Rlh};
-}
-constexpr Length Vw(float value = 0.f) {
-    return {value, LengthUnit::Vw};
-}
-constexpr Length Vh(float value = 0.f) {
-    return {value, LengthUnit::Vh};
-}
-constexpr Length Vmin(float value = 0.f) {
-    return {value, LengthUnit::Vmin};
-}
-constexpr Length Vmax(float value = 0.f) {
-    return {value, LengthUnit::Vmax};
-}
-constexpr Length Vi(float value = 0.f) {
-    return {value, LengthUnit::Vi};
-}
-constexpr Length Vb(float value = 0.f) {
-    return {value, LengthUnit::Vb};
-}
-constexpr Length Svw(float value = 0.f) {
-    return {value, LengthUnit::Svw};
-}
-constexpr Length Svh(float value = 0.f) {
-    return {value, LengthUnit::Svh};
-}
-constexpr Length Svmin(float value = 0.f) {
-    return {value, LengthUnit::Svmin};
-}
-constexpr Length Svmax(float value = 0.f) {
-    return {value, LengthUnit::Svmax};
-}
-constexpr Length Svi(float value = 0.f) {
-    return {value, LengthUnit::Svi};
-}
-constexpr Length Svb(float value = 0.f) {
-    return {value, LengthUnit::Svb};
-}
-constexpr Length Lvw(float value = 0.f) {
-    return {value, LengthUnit::Lvw};
-}
-constexpr Length Lvh(float value = 0.f) {
-    return {value, LengthUnit::Lvh};
-}
-constexpr Length Lvmin(float value = 0.f) {
-    return {value, LengthUnit::Lvmin};
-}
-constexpr Length Lvmax(float value = 0.f) {
-    return {value, LengthUnit::Lvmax};
-}
-constexpr Length Lvi(float value = 0.f) {
-    return {value, LengthUnit::Lvi};
-}
-constexpr Length Lvb(float value = 0.f) {
-    return {value, LengthUnit::Lvb};
-}
-constexpr Length Dvw(float value = 0.f) {
-    return {value, LengthUnit::Dvw};
-}
-constexpr Length Dvh(float value = 0.f) {
-    return {value, LengthUnit::Dvh};
-}
-constexpr Length Dvmin(float value = 0.f) {
-    return {value, LengthUnit::Dvmin};
-}
-constexpr Length Dvmax(float value = 0.f) {
-    return {value, LengthUnit::Dvmax};
-}
-constexpr Length Dvi(float value = 0.f) {
-    return {value, LengthUnit::Dvi};
-}
-constexpr Length Dvb(float value = 0.f) {
-    return {value, LengthUnit::Dvb};
-}
-constexpr Length Cm(float value = 0.f) {
-    return {value, LengthUnit::Cm};
-}
-constexpr Length Mm(float value = 0.f) {
-    return {value, LengthUnit::Mm};
-}
-constexpr Length Q(float value = 0.f) {
-    return {value, LengthUnit::Q};
-}
-constexpr Length Inches(float value = 0.f) {
-    return {value, LengthUnit::In};
-}
-constexpr Length Pt(float value = 0.f) {
-    return {value, LengthUnit::Pt};
-}
-constexpr Length Pc(float value = 0.f) {
-    return {value, LengthUnit::Pc};
-}
+constexpr Length Px(float value = 0.f) { return {value, LengthUnit::Px}; }
+constexpr Length Em(float value = 0.f) { return {value, LengthUnit::Em}; }
+constexpr Length Rem(float value = 0.f) { return {value, LengthUnit::Rem}; }
+constexpr Length Ch(float value = 0.f) { return {value, LengthUnit::Ch}; }
+constexpr Length Ex(float value = 0.f) { return {value, LengthUnit::Ex}; }
+constexpr Length Cap(float value = 0.f) { return {value, LengthUnit::Cap}; }
+constexpr Length Ic(float value = 0.f) { return {value, LengthUnit::Ic}; }
+constexpr Length Lh(float value = 0.f) { return {value, LengthUnit::Lh}; }
+constexpr Length Rlh(float value = 0.f) { return {value, LengthUnit::Rlh}; }
+constexpr Length Vw(float value = 0.f) { return {value, LengthUnit::Vw}; }
+constexpr Length Vh(float value = 0.f) { return {value, LengthUnit::Vh}; }
+constexpr Length Vmin(float value = 0.f) { return {value, LengthUnit::Vmin}; }
+constexpr Length Vmax(float value = 0.f) { return {value, LengthUnit::Vmax}; }
+constexpr Length Vi(float value = 0.f) { return {value, LengthUnit::Vi}; }
+constexpr Length Vb(float value = 0.f) { return {value, LengthUnit::Vb}; }
+constexpr Length Svw(float value = 0.f) { return {value, LengthUnit::Svw}; }
+constexpr Length Svh(float value = 0.f) { return {value, LengthUnit::Svh}; }
+constexpr Length Svmin(float value = 0.f) { return {value, LengthUnit::Svmin}; }
+constexpr Length Svmax(float value = 0.f) { return {value, LengthUnit::Svmax}; }
+constexpr Length Svi(float value = 0.f) { return {value, LengthUnit::Svi}; }
+constexpr Length Svb(float value = 0.f) { return {value, LengthUnit::Svb}; }
+constexpr Length Lvw(float value = 0.f) { return {value, LengthUnit::Lvw}; }
+constexpr Length Lvh(float value = 0.f) { return {value, LengthUnit::Lvh}; }
+constexpr Length Lvmin(float value = 0.f) { return {value, LengthUnit::Lvmin}; }
+constexpr Length Lvmax(float value = 0.f) { return {value, LengthUnit::Lvmax}; }
+constexpr Length Lvi(float value = 0.f) { return {value, LengthUnit::Lvi}; }
+constexpr Length Lvb(float value = 0.f) { return {value, LengthUnit::Lvb}; }
+constexpr Length Dvw(float value = 0.f) { return {value, LengthUnit::Dvw}; }
+constexpr Length Dvh(float value = 0.f) { return {value, LengthUnit::Dvh}; }
+constexpr Length Dvmin(float value = 0.f) { return {value, LengthUnit::Dvmin}; }
+constexpr Length Dvmax(float value = 0.f) { return {value, LengthUnit::Dvmax}; }
+constexpr Length Dvi(float value = 0.f) { return {value, LengthUnit::Dvi}; }
+constexpr Length Dvb(float value = 0.f) { return {value, LengthUnit::Dvb}; }
+constexpr Length Cm(float value = 0.f) { return {value, LengthUnit::Cm}; }
+constexpr Length Mm(float value = 0.f) { return {value, LengthUnit::Mm}; }
+constexpr Length Q(float value = 0.f) { return {value, LengthUnit::Q}; }
+constexpr Length Inches(float value = 0.f) { return {value, LengthUnit::In}; }
+constexpr Length Pt(float value = 0.f) { return {value, LengthUnit::Pt}; }
+constexpr Length Pc(float value = 0.f) { return {value, LengthUnit::Pc}; }
 
 struct Percentage {
     float value = 0.f;
 
     constexpr Percentage() = default;
-    constexpr explicit Percentage(float value) : value(value) {}
+    constexpr explicit Percentage(float value)
+        : value(value) {}
 
     constexpr bool operator==(const Percentage&) const = default;
 };
@@ -255,7 +183,8 @@ struct Number {
     float value = 0.f;
 
     constexpr Number() = default;
-    constexpr explicit Number(float value) : value(value) {}
+    constexpr explicit Number(float value)
+        : value(value) {}
 
     constexpr bool operator==(const Number&) const = default;
 };
@@ -265,17 +194,19 @@ using LengthPercentage = std::variant<Length, Percentage>;
 struct Function;
 struct Block;
 struct List;
-} // namespace CSS
 
-using CSSValueComponent = std::variant<CSS::Keyword, CSS::String, CSS::Number, CSS::Length, CSS::Percentage, CSS::Color, CSS::LengthPercentage,
-                                       std::shared_ptr<const CSS::Function>, std::shared_ptr<const CSS::Block>, std::shared_ptr<const CSS::List>>;
+using ValueComponent = std::variant<Keyword, String, Number, Length, Percentage, Color, LengthPercentage, std::shared_ptr<const Function>,
+    std::shared_ptr<const Block>, std::shared_ptr<const List>>;
 
-namespace CSS {
 struct List {
-    std::vector<CSSValueComponent> values;
+    std::vector<ValueComponent> values;
 };
 
-enum class BlockType { Parentheses, Brackets, Braces };
+enum class BlockType {
+    Parentheses,
+    Brackets,
+    Braces
+};
 
 struct Function {
     std::string name;
@@ -286,226 +217,296 @@ struct Block {
     BlockType type;
     List values;
 };
-} // namespace CSS
 
-using CSSValue = std::variant<CSS::Keyword, CSS::String, CSS::Number, CSS::Length, CSS::Percentage, CSS::Color, CSS::LengthPercentage, CSS::List,
-                              std::shared_ptr<const CSS::Function>, std::shared_ptr<const CSS::Block>>;
-using CSSValueRange = detail::CSSValueRange;
+using Value = std::variant<Keyword, String, Number, Length, Percentage, Color, LengthPercentage, List, std::shared_ptr<const Function>,
+    std::shared_ptr<const Block>>;
+using ValueRange = detail::ValueRange;
 
 template<typename T, typename Variant> struct VariantContains : std::false_type {};
 
-template<typename T, typename... Values> struct VariantContains<T, std::variant<Values...>> : std::bool_constant<(std::is_same_v<T, Values> || ...)> {
-};
+template<typename T, typename... Values>
+struct VariantContains<T, std::variant<Values...>> : std::bool_constant<(std::is_same_v<T, Values> || ...)> {};
 
 struct Range {
-    static constexpr float infinity = std::numeric_limits<float>::infinity();
+    static constexpr float kInfinity = std::numeric_limits<float>::infinity();
 
     float minimum;
     float maximum;
 };
 
-inline constexpr Range AnyRange{-Range::infinity, Range::infinity};
-inline constexpr Range Nonnegative{0.f, Range::infinity};
+inline constexpr Range kAnyRange {-Range::kInfinity, Range::kInfinity};
+inline constexpr Range kNonnegative {0.f, Range::kInfinity};
 
-namespace CSSValueDetail {
-inline std::optional<std::size_t> nextToken(const CSSValueRange& value) {
+namespace detail {
+inline std::optional<std::size_t> nextToken(const ValueRange& value) {
     std::size_t token = value.range.begin;
-    while (token < value.range.end && detail::isCSSTrivia(value.stream.tokens()[token].kind)) ++token;
-    if (token == value.range.end) return std::nullopt;
+    while (token < value.range.end && isTrivia(value.stream.tokens()[token].kind))
+        ++token;
+    if (token == value.range.end)
+        return std::nullopt;
     return token;
 }
 
-inline bool inRange(float value, Range bounds) {
-    return value >= bounds.minimum && value <= bounds.maximum;
-}
+inline bool inRange(float value, Range bounds) { return value >= bounds.minimum && value <= bounds.maximum; }
 
-inline void consume(CSSValueRange& range, detail::CSSTokenRange component) {
+inline void consume(ValueRange& range, TokenRange component) {
     range.range.begin = component.end;
-    while (range.range.begin < range.range.end && detail::isCSSTrivia(range.stream.tokens()[range.range.begin].kind)) ++range.range.begin;
+    while (range.range.begin < range.range.end && isTrivia(range.stream.tokens()[range.range.begin].kind))
+        ++range.range.begin;
 }
 
-inline void consume(CSSValueRange& range, std::size_t token) {
-    consume(range, {token, token + 1});
-}
+inline void consume(ValueRange& range, std::size_t token) { consume(range, {token, token + 1}); }
 
-inline std::optional<CSS::Color> consumeColor(CSSValueRange& range);
+inline std::optional<Color> parseColor(ValueRange& range);
 
-inline std::optional<CSS::Color> consumeColorArm(const detail::CSSTokenStream& stream, detail::CSSTokenRange component) {
-    CSSValueRange range{stream, component};
-    const auto color = consumeColor(range);
-    if (!color || nextToken(range)) return std::nullopt;
+inline std::optional<Color> consumeColorArm(const TokenStream& stream, TokenRange component) {
+    ValueRange range {stream, component};
+    const auto color = parseColor(range);
+    if (!color || nextToken(range))
+        return std::nullopt;
     return color;
 }
 
-inline bool isDelimiter(const CSSValueRange& range, std::size_t token, char delimiter) {
+inline bool isDelimiter(const ValueRange& range, std::size_t token, char delimiter) {
     const auto kind = range.stream.tokens()[token].kind;
-    if (delimiter == ',' && kind == detail::CSSTokenKind::Comma) return true;
-    if (delimiter == ':' && kind == detail::CSSTokenKind::Colon) return true;
-    if (delimiter == ';' && kind == detail::CSSTokenKind::Semicolon) return true;
-    return kind == detail::CSSTokenKind::Delim && range.stream.text(token).size() == 1 && range.stream.text(token)[0] == delimiter;
+    if (delimiter == ',' && kind == TokenKind::Comma)
+        return true;
+    if (delimiter == ':' && kind == TokenKind::Colon)
+        return true;
+    if (delimiter == ';' && kind == TokenKind::Semicolon)
+        return true;
+    return kind == TokenKind::Delim && range.stream.text(token).size() == 1 && range.stream.text(token)[0] == delimiter;
 }
 
-template<typename Value> void appendListValue(CSS::List& list, Value&& value) {
-    using Type = std::remove_cvref_t<Value>;
-    if constexpr (std::is_same_v<Type, CSSValue> || std::is_same_v<Type, CSSValueComponent>)
-        std::visit([&list](auto&& item) { appendListValue(list, std::forward<decltype(item)>(item)); }, std::forward<Value>(value));
-    else if constexpr (std::is_same_v<Type, CSS::List>)
+template<typename Item> void appendListValue(List& list, Item&& value) {
+    using Type = std::remove_cvref_t<Item>;
+    if constexpr (std::is_same_v<Type, Value> || std::is_same_v<Type, ValueComponent>)
+        std::visit(
+            [&list](auto&& item) {
+                appendListValue(list, std::forward<decltype(item)>(item));
+            },
+            std::forward<Item>(value));
+    else if constexpr (std::is_same_v<Type, List>)
         list.values.insert(list.values.end(), std::make_move_iterator(value.values.begin()), std::make_move_iterator(value.values.end()));
-    else list.values.emplace_back(std::forward<Value>(value));
+    else
+        list.values.emplace_back(std::forward<Item>(value));
 }
 
-inline std::optional<CSS::Color> consumeColor(CSSValueRange& range) {
+inline std::optional<Color> parseColor(ValueRange& range) {
     const std::optional<std::size_t> tokenIndex = nextToken(range);
-    if (!tokenIndex) return std::nullopt;
+    if (!tokenIndex)
+        return std::nullopt;
 
-    const detail::CSSTokenRange tokenRange{*tokenIndex, *tokenIndex + 1};
-    if (range.stream.tokens()[*tokenIndex].kind == detail::CSSTokenKind::Ident) {
-        const auto keyword = findCSSKeyword(detail::normalizeCSSKeyword(range.stream, tokenRange));
-        if (keyword && (*keyword == CSSKeyword::CurrentColor || isSystemColorKeyword(*keyword))) {
+    const TokenRange tokenRange {*tokenIndex, *tokenIndex + 1};
+    if (range.stream.tokens()[*tokenIndex].kind == TokenKind::Ident) {
+        const auto keyword = findKeyword(normalizeKeyword(range.stream, tokenRange));
+        if (keyword && (*keyword == KeywordCurrentColor || isSystemColorKeyword(*keyword))) {
             consume(range, *tokenIndex);
-            return CSS::Color{CSS::Keyword{*keyword}};
+            return Color {Keyword {*keyword}};
         }
     }
 
     const std::size_t close = range.stream.tokens()[*tokenIndex].matching;
-    const detail::CSSTokenRange functionRange{*tokenIndex, close == detail::kNoMatchingCSSToken ? *tokenIndex + 1 : close + 1};
-    const auto function = detail::parseCSSFunction(range.stream, functionRange);
+    const TokenRange functionRange {*tokenIndex, close == kNoMatchingToken ? *tokenIndex + 1 : close + 1};
+    const auto function = parseFunction(range.stream, functionRange);
     if (function && function->name == "light-dark") {
-        const std::vector<detail::CSSTokenRange> choices = detail::splitCSSOnDelimiter(range.stream, function->body, ',');
-        if (choices.size() != 2) return std::nullopt;
+        const std::vector<TokenRange> choices = splitOnDelimiter(range.stream, function->body, ',');
+        if (choices.size() != 2)
+            return std::nullopt;
         const auto light = consumeColorArm(range.stream, choices[0]);
         const auto dark = consumeColorArm(range.stream, choices[1]);
-        if (!light || !dark) return std::nullopt;
+        if (!light || !dark)
+            return std::nullopt;
         consume(range, functionRange);
-        return CSS::Color{CSS::LightDarkColor{*light, *dark}};
+        return Color {LightDarkColor {*light, *dark}};
     }
 
-    const auto color = radia::ui::consumeColor(range.stream, function ? functionRange : tokenRange);
-    if (!color) return std::nullopt;
+    const auto color = CSS::consumeColor(range.stream, function ? functionRange : tokenRange);
+    if (!color)
+        return std::nullopt;
     consume(range, function ? functionRange : tokenRange);
-    return CSS::Color{*color};
+    return Color {*color};
 }
 
-inline std::optional<CSS::Length> makeLength(std::string_view unit, float value) {
-    if (unit == "px") return CSS::Px(value);
-    if (unit == "em") return CSS::Em(value);
-    if (unit == "rem") return CSS::Rem(value);
-    if (unit == "ch") return CSS::Ch(value);
-    if (unit == "ex") return CSS::Ex(value);
-    if (unit == "cap") return CSS::Cap(value);
-    if (unit == "ic") return CSS::Ic(value);
-    if (unit == "lh") return CSS::Lh(value);
-    if (unit == "rlh") return CSS::Rlh(value);
-    if (unit == "vw") return CSS::Vw(value);
-    if (unit == "vh") return CSS::Vh(value);
-    if (unit == "vmin") return CSS::Vmin(value);
-    if (unit == "vmax") return CSS::Vmax(value);
-    if (unit == "vi") return CSS::Vi(value);
-    if (unit == "vb") return CSS::Vb(value);
-    if (unit == "svw") return CSS::Svw(value);
-    if (unit == "svh") return CSS::Svh(value);
-    if (unit == "svmin") return CSS::Svmin(value);
-    if (unit == "svmax") return CSS::Svmax(value);
-    if (unit == "svi") return CSS::Svi(value);
-    if (unit == "svb") return CSS::Svb(value);
-    if (unit == "lvw") return CSS::Lvw(value);
-    if (unit == "lvh") return CSS::Lvh(value);
-    if (unit == "lvmin") return CSS::Lvmin(value);
-    if (unit == "lvmax") return CSS::Lvmax(value);
-    if (unit == "lvi") return CSS::Lvi(value);
-    if (unit == "lvb") return CSS::Lvb(value);
-    if (unit == "dvw") return CSS::Dvw(value);
-    if (unit == "dvh") return CSS::Dvh(value);
-    if (unit == "dvmin") return CSS::Dvmin(value);
-    if (unit == "dvmax") return CSS::Dvmax(value);
-    if (unit == "dvi") return CSS::Dvi(value);
-    if (unit == "dvb") return CSS::Dvb(value);
-    if (unit == "cm") return CSS::Cm(value);
-    if (unit == "mm") return CSS::Mm(value);
-    if (unit == "q") return CSS::Q(value);
-    if (unit == "in") return CSS::Inches(value);
-    if (unit == "pt") return CSS::Pt(value);
-    if (unit == "pc") return CSS::Pc(value);
+inline std::optional<Length> makeLength(std::string_view unit, float value) {
+    if (unit == "px")
+        return Px(value);
+    if (unit == "em")
+        return Em(value);
+    if (unit == "rem")
+        return Rem(value);
+    if (unit == "ch")
+        return Ch(value);
+    if (unit == "ex")
+        return Ex(value);
+    if (unit == "cap")
+        return Cap(value);
+    if (unit == "ic")
+        return Ic(value);
+    if (unit == "lh")
+        return Lh(value);
+    if (unit == "rlh")
+        return Rlh(value);
+    if (unit == "vw")
+        return Vw(value);
+    if (unit == "vh")
+        return Vh(value);
+    if (unit == "vmin")
+        return Vmin(value);
+    if (unit == "vmax")
+        return Vmax(value);
+    if (unit == "vi")
+        return Vi(value);
+    if (unit == "vb")
+        return Vb(value);
+    if (unit == "svw")
+        return Svw(value);
+    if (unit == "svh")
+        return Svh(value);
+    if (unit == "svmin")
+        return Svmin(value);
+    if (unit == "svmax")
+        return Svmax(value);
+    if (unit == "svi")
+        return Svi(value);
+    if (unit == "svb")
+        return Svb(value);
+    if (unit == "lvw")
+        return Lvw(value);
+    if (unit == "lvh")
+        return Lvh(value);
+    if (unit == "lvmin")
+        return Lvmin(value);
+    if (unit == "lvmax")
+        return Lvmax(value);
+    if (unit == "lvi")
+        return Lvi(value);
+    if (unit == "lvb")
+        return Lvb(value);
+    if (unit == "dvw")
+        return Dvw(value);
+    if (unit == "dvh")
+        return Dvh(value);
+    if (unit == "dvmin")
+        return Dvmin(value);
+    if (unit == "dvmax")
+        return Dvmax(value);
+    if (unit == "dvi")
+        return Dvi(value);
+    if (unit == "dvb")
+        return Dvb(value);
+    if (unit == "cm")
+        return Cm(value);
+    if (unit == "mm")
+        return Mm(value);
+    if (unit == "q")
+        return Q(value);
+    if (unit == "in")
+        return Inches(value);
+    if (unit == "pt")
+        return Pt(value);
+    if (unit == "pc")
+        return Pc(value);
     return std::nullopt;
 }
-} // namespace CSSValueDetail
+} // namespace detail
 
-inline std::optional<CSSValue> consumeColor(CSSValueRange& range) {
-    auto color = CSSValueDetail::consumeColor(range);
-    if (!color) return std::nullopt;
-    return CSSValue{std::move(*color)};
+inline std::optional<Value> consumeColor(ValueRange& range) {
+    auto color = detail::parseColor(range);
+    if (!color)
+        return std::nullopt;
+    return Value {std::move(*color)};
 }
 
-template<CSSKeyword... allowed> std::optional<CSS::Keyword> consumeKeyword(CSSValueRange& range) {
-    const std::optional<std::size_t> tokenIndex = CSSValueDetail::nextToken(range);
-    if (!tokenIndex || range.stream.tokens()[*tokenIndex].kind != detail::CSSTokenKind::Ident) return std::nullopt;
+template<typename... allowed> std::optional<Keyword> consumeKeyword(ValueRange& range) {
+    const std::optional<std::size_t> tokenIndex = detail::nextToken(range);
+    if (!tokenIndex || range.stream.tokens()[*tokenIndex].kind != detail::TokenKind::Ident)
+        return std::nullopt;
 
-    const auto keyword = findCSSKeyword(detail::normalizeCSSKeyword(range.stream, {*tokenIndex, *tokenIndex + 1}));
-    if (!keyword || !((*keyword == allowed) || ...)) return std::nullopt;
-    CSSValueDetail::consume(range, *tokenIndex);
-    return CSS::Keyword{*keyword};
+    const auto keyword = findKeyword(detail::normalizeKeyword(range.stream, {*tokenIndex, *tokenIndex + 1}));
+    if (!keyword || !((*keyword == allowed::value) || ...))
+        return std::nullopt;
+    detail::consume(range, *tokenIndex);
+    return Keyword {*keyword};
 }
 
-template<Range bounds> std::optional<CSS::Number> consumeNumber(CSSValueRange& range) {
-    const std::optional<std::size_t> tokenIndex = CSSValueDetail::nextToken(range);
-    if (!tokenIndex || range.stream.tokens()[*tokenIndex].kind != detail::CSSTokenKind::Number) return std::nullopt;
+template<Range bounds> std::optional<Number> consumeNumber(ValueRange& range) {
+    const std::optional<std::size_t> tokenIndex = detail::nextToken(range);
+    if (!tokenIndex || range.stream.tokens()[*tokenIndex].kind != detail::TokenKind::Number)
+        return std::nullopt;
     const std::optional<float> value = range.stream.tokens()[*tokenIndex].numericValue;
-    if (!value || !CSSValueDetail::inRange(*value, bounds)) return std::nullopt;
-    CSSValueDetail::consume(range, *tokenIndex);
-    return CSS::Number{*value};
+    if (!value || !detail::inRange(*value, bounds))
+        return std::nullopt;
+    detail::consume(range, *tokenIndex);
+    return Number {*value};
 }
 
-template<Range bounds> std::optional<CSS::Number> consumeInteger(CSSValueRange& range) {
-    const auto tokenIndex = CSSValueDetail::nextToken(range);
-    if (!tokenIndex || range.stream.tokens()[*tokenIndex].kind != detail::CSSTokenKind::Number) return std::nullopt;
+template<Range bounds> std::optional<Number> consumeInteger(ValueRange& range) {
+    const auto tokenIndex = detail::nextToken(range);
+    if (!tokenIndex || range.stream.tokens()[*tokenIndex].kind != detail::TokenKind::Number)
+        return std::nullopt;
 
     std::string_view token = range.stream.text(*tokenIndex);
-    if (token.starts_with('+') || token.starts_with('-')) token.remove_prefix(1);
-    if (token.empty()) return std::nullopt;
+    if (token.starts_with('+') || token.starts_with('-'))
+        token.remove_prefix(1);
+    if (token.empty())
+        return std::nullopt;
     for (const char digit : token)
-        if (digit < '0' || digit > '9') return std::nullopt;
+        if (digit < '0' || digit > '9')
+            return std::nullopt;
 
     const std::optional<float> value = range.stream.tokens()[*tokenIndex].numericValue;
-    if (!value || !CSSValueDetail::inRange(*value, bounds)) return std::nullopt;
-    CSSValueDetail::consume(range, *tokenIndex);
-    return CSS::Number{*value};
+    if (!value || !detail::inRange(*value, bounds))
+        return std::nullopt;
+    detail::consume(range, *tokenIndex);
+    return Number {*value};
 }
 
-template<Range bounds> std::optional<CSS::Percentage> consumePercentage(CSSValueRange& range) {
-    const std::optional<std::size_t> tokenIndex = CSSValueDetail::nextToken(range);
-    if (!tokenIndex || range.stream.tokens()[*tokenIndex].kind != detail::CSSTokenKind::Percentage) return std::nullopt;
+template<Range bounds> std::optional<Percentage> consumePercentage(ValueRange& range) {
+    const std::optional<std::size_t> tokenIndex = detail::nextToken(range);
+    if (!tokenIndex || range.stream.tokens()[*tokenIndex].kind != detail::TokenKind::Percentage)
+        return std::nullopt;
     const std::optional<float> value = range.stream.tokens()[*tokenIndex].numericValue;
-    if (!value || !CSSValueDetail::inRange(*value, bounds)) return std::nullopt;
-    CSSValueDetail::consume(range, *tokenIndex);
-    return CSS::Percentage{*value};
+    if (!value || !detail::inRange(*value, bounds))
+        return std::nullopt;
+    detail::consume(range, *tokenIndex);
+    return Percentage {*value};
 }
 
-template<Range bounds> std::optional<CSS::Length> consumeLength(CSSValueRange& range) {
-    const std::optional<std::size_t> tokenIndex = CSSValueDetail::nextToken(range);
-    if (!tokenIndex) return std::nullopt;
+template<Range bounds> std::optional<Length> consumeLength(ValueRange& range) {
+    const std::optional<std::size_t> tokenIndex = detail::nextToken(range);
+    if (!tokenIndex)
+        return std::nullopt;
 
-    const detail::CSSToken& token = range.stream.tokens()[*tokenIndex];
-    if (token.kind == detail::CSSTokenKind::Dimension) {
-        const auto dimension = detail::parseCSSDimension(range.stream, {*tokenIndex, *tokenIndex + 1});
-        if (!dimension) return std::nullopt;
+    const detail::Token& token = range.stream.tokens()[*tokenIndex];
+    if (token.kind == detail::TokenKind::Dimension) {
+        const auto dimension = detail::parseDimension(range.stream, {*tokenIndex, *tokenIndex + 1});
+        if (!dimension)
+            return std::nullopt;
         const std::optional<float> value = token.numericValue;
-        if (!value || !CSSValueDetail::inRange(*value, bounds)) return std::nullopt;
-        const std::optional<CSS::Length> length = CSSValueDetail::makeLength(dimension->unit, *value);
-        if (!length) return std::nullopt;
-        CSSValueDetail::consume(range, *tokenIndex);
+        if (!value || !detail::inRange(*value, bounds))
+            return std::nullopt;
+        const std::optional<Length> length = detail::makeLength(dimension->unit, *value);
+        if (!length)
+            return std::nullopt;
+        detail::consume(range, *tokenIndex);
         return length;
     }
 
-    if (token.kind != detail::CSSTokenKind::Number) return std::nullopt;
+    if (token.kind != detail::TokenKind::Number)
+        return std::nullopt;
     const std::optional<float> value = token.numericValue;
-    if (!value || *value != 0.f || !CSSValueDetail::inRange(*value, bounds)) return std::nullopt;
-    CSSValueDetail::consume(range, *tokenIndex);
-    return CSS::Px();
+    if (!value || *value != 0.f || !detail::inRange(*value, bounds))
+        return std::nullopt;
+    detail::consume(range, *tokenIndex);
+    return Px();
 }
 
-template<Range bounds> std::optional<CSS::LengthPercentage> consumeLengthPercentage(CSSValueRange& range) {
-    if (const auto percentage = consumePercentage<bounds>(range)) return CSS::LengthPercentage{*percentage};
-    if (const auto length = consumeLength<bounds>(range)) return CSS::LengthPercentage{*length};
+template<Range bounds> std::optional<LengthPercentage> consumeLengthPercentage(ValueRange& range) {
+    if (const auto percentage = consumePercentage<bounds>(range))
+        return LengthPercentage {*percentage};
+    if (const auto length = consumeLength<bounds>(range))
+        return LengthPercentage {*length};
     return std::nullopt;
 }
-} // namespace radia::ui
+} // namespace Core::CSS

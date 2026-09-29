@@ -1,0 +1,42 @@
+/**
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
+ */
+
+#pragma once
+
+#include <string>
+#include <string_view>
+#include "Element.h"
+
+namespace Core {
+namespace detail {
+class ElementDefinitions;
+class HTMLElementFactory;
+} // namespace detail
+
+namespace dom_detail {
+class FragmentParser;
+}
+
+class HTMLElement : public Element {
+    friend class Surface;
+    friend class detail::HTMLElementFactory;
+    friend class dom_detail::FragmentParser;
+
+protected:
+    explicit HTMLElement(std::string_view localName);
+
+public:
+    void setKeybinding(std::string keybindingId);
+
+protected:
+    void onLocaleChanged(const System& system) override;
+    virtual void onKeybindingsChanged(const System& system);
+
+private:
+    void rebuildKeybindingContent(const System& system);
+
+    std::string mKeybindingId;
+};
+} // namespace Core

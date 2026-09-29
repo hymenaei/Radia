@@ -34,11 +34,17 @@
  */
 
 #include "linden_common.h"
-
 #include "../llfontfreetype.h"
+
+#include <array>
+#include <cstdio>
+#include <string>
+#include <string_view>
+#include <utility>
+
 #include "../alfontface.h"
-#include "../llfontregistry.h"  // EFontHinting full definition
 #include "../llfontgl.h"        // sUseDarkEmojiPalette static for palette test
+#include "../llfontregistry.h"  // EFontHinting full definition
 
 #include "../test/lltut.h"
 #include "llfile.h"
@@ -48,12 +54,6 @@
 #  include "../llfontbitmapcache.h"
 #  include "llheadlessgl_fixture.h"
 #endif
-
-#include <array>
-#include <cstdio>
-#include <string>
-#include <string_view>
-#include <utility>
 
 namespace
 {
@@ -441,7 +441,8 @@ namespace tut
     template<> template<> void llfontfreetype_object::test<13>() {
         const std::string regularPath = std::string(kFontDir) + "DejaVuSans.woff2";
         const std::string boldPath = std::string(kFontDir) + "DejaVuSans-Bold.woff2";
-        if (!fileExists(regularPath) || !fileExists(boldPath)) skip("DejaVuSans and DejaVuSans-Bold required");
+        if (!fileExists(regularPath) || !fileExists(boldPath))
+            skip("DejaVuSans and DejaVuSans-Bold required");
 
         constexpr std::string_view sourceName = "skins/test/fonts/chat.woff2";
         std::string regularKey;
@@ -460,7 +461,8 @@ namespace tut
 
         ensure("registered source keys are valid", !regularKey.empty() && !boldKey.empty());
         ensure("same URL gets a new source key per generation", regularKey != boldKey);
-        ensure("source keys use the reserved font URI namespace", regularKey.starts_with("radia://font/") && boldKey.starts_with("radia://font/"));
+        ensure("source keys use the reserved font URI namespace",
+            regularKey.starts_with("radia://font/") && boldKey.starts_with("radia://font/"));
 
         LLPointer<LLFontFreetype> regular = loadFt(regularKey);
         LLPointer<LLFontFreetype> regularAgain = loadFt(regularKey);
@@ -483,22 +485,23 @@ namespace tut
 
     // LLFontGL exposes the same ordered fallback lookup used by its renderer.
     template<> template<> void llfontfreetype_object::test<14>() {
-        const std::string head_path = std::string(kFontDir) + "DejaVuSans.woff2";
-        const std::string fallback_path = std::string(kFontDir) + "SourceHanSans-Regular.woff2";
-        if (!fileExists(head_path) || !fileExists(fallback_path)) skip("DejaVuSans + SourceHanSans required");
+        const std::string headPath = std::string(kFontDir) + "DejaVuSans.woff2";
+        const std::string fallbackPath = std::string(kFontDir) + "SourceHanSans-Regular.woff2";
+        if (!fileExists(headPath) || !fileExists(fallbackPath))
+            skip("DejaVuSans + SourceHanSans required");
 
         LLFontGL head;
         LLFontGL fallback;
-        ensure("head font loaded", head.loadFace(head_path, 14.f, 96.f, 96.f, true, 0, EFontHinting::DEFAULT, 0));
-        ensure("fallback font loaded", fallback.loadFace(fallback_path, 14.f, 96.f, 96.f, true, 0, EFontHinting::DEFAULT, 0));
+        ensure("head font loaded", head.loadFace(headPath, 14.f, 96.f, 96.f, true, 0, EFontHinting::DEFAULT, 0));
+        ensure("fallback font loaded", fallback.loadFace(fallbackPath, 14.f, 96.f, 96.f, true, 0, EFontHinting::DEFAULT, 0));
         head.addFallbackFont(fallback);
         head.addFallbackFont(fallback);
         ensure_equals("repeated LLFontGL attachment stays idempotent", head.getFontFreetype()->getFallbackFonts().size(), 1u);
 
-        U32 glyph_index = 0;
-        ensure_equals("CJK resolves to the LLFontGL-attached fallback", head.getFontFreetype()->selectShapingFace(0x4F60, glyph_index),
-                      fallback.getFontFreetype());
-        ensure_not_equals("fallback supplied a non-zero glyph index", glyph_index, 0u);
+        U32 glyphIndex = 0;
+        ensure_equals("CJK resolves to the LLFontGL-attached fallback", head.getFontFreetype()->selectShapingFace(0x4F60, glyphIndex),
+            fallback.getFontFreetype());
+        ensure_not_equals("fallback supplied a non-zero glyph index", glyphIndex, 0u);
     }
 
     // The native Windows provider returns a system-installed face that can

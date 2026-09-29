@@ -32,10 +32,13 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 #include <boost/functional/hash.hpp>
 #include <boost/unordered/unordered_flat_map.hpp>
 #include <boost/unordered/unordered_flat_set.hpp>
@@ -54,7 +57,7 @@ namespace ll
 {
     namespace fonts
     {
-        class LoadedFont;
+        struct LoadedFont;
     }
 }
 
@@ -64,7 +67,7 @@ public:
     static void initClass();
     static void cleanupClass();
 
-    U8 const *loadFont( std::string const &aFilename, long &a_Size );
+    U8 const* loadFont(const std::string& filename, long& size);
 
     // Register owned font bytes and return a unique source key for loadFace.
     // Register each resource generation and again if collection removes an
@@ -170,7 +173,7 @@ public:
     static S32 getNumFaces(const std::string& filename);
 
     typedef std::function<bool(llwchar)> char_functor_t;
-    void addFallbackFont(const LLPointer<LLFontFreetype>& fallback_font, const char_functor_t& functor = nullptr) const;
+    void addFallbackFont(const LLPointer<LLFontFreetype>& fallbackFont, const char_functor_t& functor = nullptr) const;
     typedef std::pair<LLPointer<LLFontFreetype>, char_functor_t> fallback_font_t;
     typedef std::vector<fallback_font_t> fallback_font_vector_t;
     const fallback_font_vector_t& getFallbackFonts() const { return mFallbackFonts; }
@@ -334,7 +337,7 @@ private:
     // FreeType actually delivered (which can differ from the requested one —
     // e.g. color requested but mono returned).
     LLFontGlyphInfo* renderAndCreateGlyph(const LLFontFreetype* fontp, U32 glyph_index, EFontGlyphType requested_glyph_type, EFontGlyphType& out_bitmap_glyph_type) const;
-    bool hasFallbackPath(const std::string& path, S32 face_index) const;
+    bool hasFallbackPath(const std::string& path, S32 faceIndex) const;
     // Last resort for a codepoint no face in the chain covers: ask the OS
     // for a font that does, load it and append it to the fallback chain.
     // Returns the (face, glyph index) it resolved to, or (nullptr, 0) when

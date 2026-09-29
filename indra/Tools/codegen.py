@@ -765,7 +765,10 @@ def _infer_shorthand_pattern(
             first = property.longhands[0]
             first_syntax = _longhand_component_syntax(properties[first], properties)
             matches_first = component_reference == first or (component_reference is None and component == first_syntax)
-            if matches_first and all(_longhand_component_syntax(properties[name], properties) == first_syntax for name in property.longhands):
+            if matches_first and all(
+                _longhand_component_syntax(properties[name], properties) == first_syntax
+                for name in property.longhands
+            ):
                 return "CoalescingQuad"
         if len(property.longhands) == 2 and (minimum, maximum) == (1, 2):
             first = property.longhands[0]
@@ -945,7 +948,7 @@ def _validate_pseudo_selectors(data: dict[str, dict[str, dict[str, Any]]], path:
 
 
 def load_catalogs(source_root: Path) -> Catalogs:
-    core_dir = source_root / "indra" / "Core"
+    core_dir = source_root / "Core"
     css_dir = core_dir / "css"
     css_values_dir = css_dir / "values"
     html_dir = core_dir / "html"
@@ -1001,6 +1004,13 @@ def _banner(source: str) -> str:
     return "// Automatically generated from " + source + ", do not edit.\n\n"
 
 
+def _single_statement_function(signature: str, statement: str) -> str:
+    line = f"{signature} {{ {statement} }}"
+    if "\n" not in statement and len(line) <= 140:
+        return line
+    return f"{signature} {{\n    {statement}\n}}"
+
+
 def _enum_header(
     enum_name: str,
     items: Iterable[str],
@@ -1021,66 +1031,117 @@ def _enum_header(
 
 def generate_property_names(catalogs: Catalogs) -> tuple[str, str]:
     names = [property.name for property in catalogs.properties]
-    header = _banner("CSSProperties.json5") + "#pragma once\n\n#include <cstddef>\n#include <cstdint>\n#include <iterator>\n#include <optional>\n#include <string_view>\n\nnamespace radia::ui {\n"
-    header += _enum_header("CSSProperty", names)
-    header += "\n\nstruct CSSPropertyDescriptor {\n    CSSProperty property;\n    std::string_view name;\n};\n"
-    header += "\ninline constexpr CSSPropertyDescriptor cssProperties[] {\n"
+    header = _banner("CSSProperties.json5") + (
+        "#pragma once\n\n"
+        "#include <cstddef>\n"
+        "#include <cstdint>\n"
+        "#include <iterator>\n"
+        "#include <optional>\n"
+        "#include <string_view>\n\n"
+        "namespace Core::CSS {\n"
+    )
+    header += _enum_header("Property", names)
+    header += "\n\nstruct PropertyDescriptor {\n    Property property;\n    std::string_view name;\n};\n"
+    header += "\ninline constexpr PropertyDescriptor properties[] {\n"
     for name in names:
-        header += f"    {{ CSSProperty::{_pascal_name(name)}, {_cpp_string(name)} }},\n"
+        header += f"    {{Property::{_pascal_name(name)}, {_cpp_string(name)}}},\n"
     header += "};\n\n"
-    header += "constexpr const CSSPropertyDescriptor* cssPropertyDescriptor(CSSProperty property) {\n"
+    header += "constexpr const PropertyDescriptor* propertyDescriptor(Property property) {\n"
     header += "    const auto index = static_cast<std::size_t>(property);\n"
-    header += "    return index < std::size(cssProperties) ? &cssProperties[index] : nullptr;\n"
+    header += "    return index < std::size(properties) ? &properties[index] : nullptr;\n"
     header += "}\n\n"
-    header += "constexpr std::string_view cssPropertyName(CSSProperty property) {\n"
-    header += "    if (const auto* descriptor = cssPropertyDescriptor(property)) return descriptor->name;\n"
+    header += "constexpr std::string_view propertyName(Property property) {\n"
+    header += (
+        "    if (const auto* descriptor = propertyDescriptor(property))\n"
+        "        return descriptor->name;\n"
+    )
     header += "    return {};\n"
-    header += "}\n\nstd::optional<CSSProperty> findProperty(std::string_view);\n} // namespace radia::ui\n"
+    header += "}\n\nstd::optional<Property> findProperty(std::string_view);\n} // namespace Core::CSS\n"
 
-    cpp = _banner("CSSProperties.json5") + '#include "CSSProperties.h"\n\nnamespace radia::ui {\n'
-    cpp += "std::optional<CSSProperty> findProperty(std::string_view name) {\n"
-    cpp += "    for (const auto& descriptor : cssProperties)\n"
-    cpp += "        if (descriptor.name == name) return descriptor.property;\n"
+    cpp = _banner("CSSProperties.json5") + '#include "CSSProperties.h"\n\nnamespace Core::CSS {\n'
+    cpp += "std::optional<Property> findProperty(std::string_view name) {\n"
+    cpp += "    for (const auto& descriptor : properties)\n"
+    cpp += (
+        "        if (descriptor.name == name)\n"
+        "            return descriptor.property;\n"
+    )
     cpp += "    return std::nullopt;\n"
-    cpp += "}\n} // namespace radia::ui\n"
+    cpp += "}\n} // namespace Core::CSS\n"
     return header, cpp
 
 
 def generate_keyword_names(catalogs: Catalogs) -> tuple[str, str]:
     names = list(catalogs.css_keywords)
+    enum_names = {
+        name: f"Keyword{_pascal_name(name, reserved=False)}"
+        for name in names
+    }
     system_color_names = SYSTEM_COLORS
     missing_system_colors = set(system_color_names) - set(names)
     if missing_system_colors:
-        raise GenerationError(f"system color keywords are missing from CSSKeywords.json5: {sorted(missing_system_colors)}")
-    header = _banner("CSSKeywords.json5") + "#pragma once\n\n#include <cstddef>\n#include <cstdint>\n#include <iterator>\n#include <optional>\n#include <string_view>\n\nnamespace radia::ui {\n"
-    header += _enum_header("CSSKeyword", names, include_count=False)
-    header += "\n\ntemplate<CSSKeyword C> struct Constant {\n    static constexpr auto value = C;\n    constexpr bool operator==(const Constant&) const = default;\n};\n\nnamespace CSS {\nstruct Keyword {\n    CSSKeyword id;\n\n    constexpr bool operator==(const Keyword&) const = default;\n    constexpr bool operator==(CSSKeyword other) const { return id == other; }\n\n"
-    header += "\n".join(f"    using {_pascal_name(name)} = Constant<CSSKeyword::{_pascal_name(name)}>;" for name in names)
-    header += "\n};\n} // namespace CSS"
-    header += "\n\nstruct CSSKeywordDescriptor {\n    CSSKeyword keyword;\n    std::string_view name;\n};\n"
-    header += "\ninline constexpr CSSKeywordDescriptor cssKeywords[] {\n"
+        raise GenerationError(
+            "system color keywords are missing from CSSKeywords.json5: "
+            f"{sorted(missing_system_colors)}"
+        )
+    header = _banner("CSSKeywords.json5") + (
+        "#pragma once\n\n"
+        "#include <cstddef>\n"
+        "#include <cstdint>\n"
+        "#include <iterator>\n"
+        "#include <optional>\n"
+        "#include <string_view>\n\n"
+        "namespace Core::CSS {\n"
+    )
+    header += "enum KeywordName : std::uint16_t {\n"
+    header += "".join(f"    {name},\n" for name in enum_names.values())
+    header += "};"
+    header += (
+        "\n\ntemplate<KeywordName C> struct Constant {\n"
+        "    static constexpr auto value = C;\n"
+        "    constexpr operator KeywordName() const { return C; }\n"
+        "    constexpr bool operator==(const Constant&) const = default;\n"
+        "};\n\n"
+        "struct Keyword {\n"
+        "    KeywordName keyword;\n\n"
+        "    constexpr bool operator==(const Keyword&) const = default;\n"
+        "    constexpr bool operator==(KeywordName other) const { return keyword == other; }\n\n"
+    )
+    header += "\n".join(
+        f"    using {_pascal_name(name)} = Constant<{enum_names[name]}>;"
+        for name in names
+    )
+    header += "\n};"
+    header += "\n\nstruct KeywordDescriptor {\n    KeywordName keyword;\n    std::string_view name;\n};\n"
+    header += "\ninline constexpr KeywordDescriptor keywords[] {\n"
     for name in names:
-        header += f"    {{ CSSKeyword::{_pascal_name(name)}, {_cpp_string(name)} }},\n"
+        header += f"    {{{enum_names[name]}, {_cpp_string(name)}}},\n"
     header += "};\n\n"
-    header += "constexpr const CSSKeywordDescriptor* cssKeywordDescriptor(CSSKeyword keyword) {\n"
+    header += "constexpr const KeywordDescriptor* keywordDescriptor(KeywordName keyword) {\n"
     header += "    const auto index = static_cast<std::size_t>(keyword);\n"
-    header += "    return index < std::size(cssKeywords) ? &cssKeywords[index] : nullptr;\n"
+    header += "    return index < std::size(keywords) ? &keywords[index] : nullptr;\n"
     header += "}\n\n"
-    header += "constexpr std::string_view cssKeywordName(CSSKeyword keyword) {\n"
-    header += "    if (const auto* descriptor = cssKeywordDescriptor(keyword)) return descriptor->name;\n"
+    header += "constexpr std::string_view keywordName(KeywordName keyword) {\n"
+    header += (
+        "    if (const auto* descriptor = keywordDescriptor(keyword))\n"
+        "        return descriptor->name;\n"
+    )
     header += "    return {};\n"
     header += "}\n\n"
-    header += "constexpr bool isSystemColorKeyword(CSSKeyword keyword) {\n    switch (keyword) {\n"
+    header += "constexpr bool isSystemColorKeyword(KeywordName keyword) {\n    switch (keyword) {\n"
     for name in system_color_names:
-        header += f"        case CSSKeyword::{_pascal_name(name)}: return true;\n"
-    header += "        default: return false;\n    }\n}\n\n"
-    header += "std::optional<CSSKeyword> findCSSKeyword(std::string_view);\n} // namespace radia::ui\n"
-    cpp = _banner("CSSKeywords.json5") + '#include "CSSKeywords.h"\n\nnamespace radia::ui {\n'
-    cpp += "std::optional<CSSKeyword> findCSSKeyword(std::string_view name) {\n"
-    cpp += "    for (const auto& descriptor : cssKeywords)\n"
-    cpp += "        if (descriptor.name == name) return descriptor.keyword;\n"
+        header += f"    case {enum_names[name]}:\n"
+    header += "        return true;\n"
+    header += "    default:\n        return false;\n    }\n}\n\n"
+    header += "std::optional<KeywordName> findKeyword(std::string_view);\n} // namespace Core::CSS\n"
+    cpp = _banner("CSSKeywords.json5") + '#include "CSSKeywords.h"\n\nnamespace Core::CSS {\n'
+    cpp += "std::optional<KeywordName> findKeyword(std::string_view name) {\n"
+    cpp += "    for (const auto& descriptor : keywords)\n"
+    cpp += (
+        "        if (descriptor.name == name)\n"
+        "            return descriptor.keyword;\n"
+    )
     cpp += "    return std::nullopt;\n"
-    cpp += "}\n} // namespace radia::ui\n"
+    cpp += "}\n} // namespace Core::CSS\n"
     return header, cpp
 
 
@@ -1142,7 +1203,7 @@ def _property_group_lines(catalogs: Catalogs) -> list[str]:
         members = {property.group[1]: property for property in properties}
         if set(members) == set(edge_members):
             member_order = edge_members
-            group_type = f"RectEdges<{properties[0].type_name}>"
+            group_type = f"Layout::RectEdges<{properties[0].type_name}>"
         elif set(members) == set(corner_members):
             member_order = corner_members
             group_type = "BorderRadius"
@@ -1151,14 +1212,10 @@ def _property_group_lines(catalogs: Catalogs) -> list[str]:
 
         setter_name = _pascal_name(group_name, reserved=False)
         getter_name = setter_name[0].lower() + setter_name[1:]
-        getter_values = ", ".join(
-            f"{_property_member_name(members[member])}()" for member in member_order
-        )
+        getter_values = ", ".join(f"{_property_member_name(members[member])}()" for member in member_order)
         lines.extend(
             [
-                f"{group_type} {getter_name}() const {{",
-                f"    return {{{getter_values}}};",
-                "}",
+                _single_statement_function(f"{group_type} {getter_name}() const", f"return {{{getter_values}}};"),
                 "",
                 f"void set{setter_name}({group_type} value) {{",
                 *(
@@ -1174,9 +1231,10 @@ def _property_group_lines(catalogs: Catalogs) -> list[str]:
             lines.extend(
                 [
                     "",
-                    f"void set{setter_name}({value_type} value) {{",
-                    f"    set{setter_name}({group_type}{{{uniform_values}}});",
-                    "}",
+                    _single_statement_function(
+                        f"void set{setter_name}({value_type} value)",
+                        f"set{setter_name}({group_type} {{{uniform_values}}});",
+                    ),
                 ]
             )
         lines.append("")
@@ -1238,7 +1296,7 @@ def _initial_member_specifier(property: PropertyDefinition) -> str:
 def _initial_keyword(property: PropertyDefinition) -> str | None:
     if property.name == "font-size" and property.initial == "medium":
         return property.initial
-    if property.type_name == "StyleColor" and property.initial in {"currentcolor", "transparent"}:
+    if property.type_name == "Color" and property.initial in {"currentcolor", "transparent"}:
         return property.initial
     if property.type_name in {"FontWeight", "FontWidth"} and property.initial == "normal":
         return property.initial
@@ -1263,9 +1321,10 @@ def _inline_property_operations(catalogs: Catalogs) -> str:
         read_expression = _storage_read_expression(property, expression)
         lines.extend(
             [
-                f"{_accessor_return_type(property)} {member_name}() const {{",
-                f"    return {read_expression};",
-                "}",
+                _single_statement_function(
+                    f"{_accessor_return_type(property)} {member_name}() const",
+                    f"return {read_expression};",
+                ),
                 "",
                 f"void set{name}({property.type_name} value) {{",
                 *_storage_setter_lines(property, expression),
@@ -1275,9 +1334,10 @@ def _inline_property_operations(catalogs: Catalogs) -> str:
         )
         lines.extend(
             [
-                f"{_initial_member_specifier(property)} {_initial_return_type(property)} initial{name}() {{",
-                _initial_expression(property, catalogs.css_keywords),
-                "}",
+                _single_statement_function(
+                    f"{_initial_member_specifier(property)} {_initial_return_type(property)} initial{name}()",
+                    _initial_expression(property, catalogs.css_keywords).strip(),
+                ),
                 "",
             ]
         )
@@ -1288,56 +1348,67 @@ def _inline_property_operations(catalogs: Catalogs) -> str:
 def generate_computed_style(catalogs: Catalogs) -> tuple[str, str, str]:
     header = _banner("CSSProperties.json5") + """#pragma once
 
+#include <Core/CSSRules.h>
 #include <cstdint>
 #include <optional>
 #include <span>
-#include "css/rules.h"
 #include "CSSProperties.h"
 #include "CSSPropertyParsing.h"
 
-namespace radia::ui {
+namespace Core::Style {
 struct ComputedStyle;
-struct StyleBuilderState;
+struct BuilderState;
 struct ShorthandDescriptor {
-    CSSProperty property;
-    std::span<const CSSProperty> properties;
+    CSS::Property property;
+    std::span<const CSS::Property> properties;
 };
 
-template<CSSProperty property> constexpr ShorthandDescriptor shorthand() {
-    using Traits = PropertyTraits<property>;
-    return {property, Traits::Longhands::properties};
+template<CSS::Property property> constexpr ShorthandDescriptor shorthand() {
+    using Traits = CSS::PropertyTraits<property>;
+    return {property, Traits::Longhands::kProperties};
 }
 
-enum class ApplyType : std::uint8_t { Value, Initial, Inherit };
+enum class ApplyType : std::uint8_t {
+    Value,
+    Initial,
+    Inherit
+};
 
-bool isInheritedProperty(CSSProperty);
-bool applyProperty(CSSProperty, StyleBuilderState&, ApplyType, const StyleValue* specifiedValue = nullptr);
+bool isInheritedProperty(CSS::Property);
+bool applyProperty(CSS::Property, BuilderState&, ApplyType, const CSS::StyleValue* specifiedValue = nullptr);
     """
     header = header.rstrip() + "\n"
     shorthands = [property for property in catalogs.properties if property.longhands]
     if shorthands:
-        header += "std::optional<ShorthandDescriptor> shorthand(CSSProperty);\n"
-    header += "} // namespace radia::ui\n"
+        header += "std::optional<ShorthandDescriptor> shorthand(CSS::Property);\n"
+    header += "} // namespace Core::Style\n"
 
-    inline_header = _banner("CSSProperties.json5") + _inline_property_operations(catalogs) + "\n"
+    inline_header = (
+        _banner("CSSProperties.json5")
+        + "using enum CSS::KeywordName;\n\n"
+        + _inline_property_operations(catalogs)
+        + "\n"
+    )
 
     cpp = _banner("CSSProperties.json5") + """#include "ComputedStyleProperties.h"
 #include <utility>
 #include <variant>
-#include "style/computedstyle.h"
-#include "style/property.h"
+#include "ComputedStyle.h"
+#include "StyleProperty.h"
 
-namespace radia::ui {
+namespace Core::Style {
+using enum CSS::KeywordName;
+
 """
     keyword_converters = _keyword_enum_converters(catalogs)
-    cpp += "bool isInheritedProperty(CSSProperty property) {\n    switch (property) {\n"
+    cpp += "bool isInheritedProperty(CSS::Property property) {\n    switch (property) {\n"
     inherited_properties = [property for property in catalogs.properties if property.inherited]
     for property in inherited_properties:
-        cpp += f"        case CSSProperty::{_pascal_name(property.name)}:\n"
+        cpp += f"    case CSS::Property::{_pascal_name(property.name)}:\n"
     if inherited_properties:
-        cpp += "            return true;\n"
-    cpp += "        default: return false;\n    }\n}\n\n"
-    cpp += _property_operations(catalogs, keyword_converters) + "\n} // namespace radia::ui\n"
+        cpp += "        return true;\n"
+    cpp += "    default:\n        return false;\n    }\n}\n\n"
+    cpp += _property_operations(catalogs, keyword_converters) + "\n} // namespace Core::Style\n"
     return header, cpp, inline_header
 
 
@@ -1346,9 +1417,9 @@ def _primitive_parser(node: SyntaxNode) -> str | None:
         return None
     name = node.value.lower()
     if node.bounds is None:
-        constraint = "AnyRange"
+        constraint = "kAnyRange"
     elif node.bounds == ("0", "inf"):
-        constraint = "Nonnegative"
+        constraint = "kNonnegative"
     else:
         minimum, maximum = node.bounds
         def float_literal(value: str) -> str:
@@ -1385,7 +1456,7 @@ def _repeat_parser_expression(node: SyntaxNode, catalogs: Catalogs, owner: str) 
     if parser is None or node.minimum is None:
         return None
     if parser == "consumeColor":
-        parser = "CSSValueDetail::consumeColor"
+        parser = "detail::parseColor"
 
     minimum, maximum = node.minimum, node.maximum
     if node.value == "comma":
@@ -1410,8 +1481,12 @@ def _repeat_parser_expression(node: SyntaxNode, catalogs: Catalogs, owner: str) 
 def _keyword_parser_expression(keywords: Iterable[str]) -> str:
     names = tuple(keywords)
     if len(names) == 1:
-        return f"consumeKeyword<CSSKeyword::{_pascal_name(names[0])}>"
-    return "consumeKeyword<\n        " + ",\n        ".join(f"CSSKeyword::{_pascal_name(name)}" for name in names) + ">"
+        return f"consumeKeyword<Keyword::{_pascal_name(names[0])}>"
+    arguments = [f"Keyword::{_pascal_name(name)}" for name in names]
+    expression = "consumeKeyword<" + ", ".join(arguments) + ">"
+    if len(expression) <= 120:
+        return expression
+    return "consumeKeyword<\n        " + ",\n        ".join(arguments) + ">"
 
 
 def _data_type_key(node: SyntaxNode) -> str | None:
@@ -1453,7 +1528,7 @@ def _parser_arguments(
             return None
         parsers.append(parser)
         index += 1
-    return ["CSSValueDetail::consumeColor" if parser == "consumeColor" else parser for parser in parsers]
+    return ["detail::parseColor" if parser == "consumeColor" else parser for parser in parsers]
 
 
 def _parser_expression(property: PropertyDefinition | str, node: SyntaxNode, catalogs: Catalogs) -> str | None:
@@ -1532,7 +1607,7 @@ def _data_type_parser_lines(catalogs: Catalogs, data_type: str) -> list[str]:
         raise GenerationError(f"{data_type}: generated data type consumer has no alternatives")
     if len(parsers) == 1:
         parser = parsers[0]
-        if parser == "CSSValueDetail::consumeColor":
+        if parser == "detail::parseColor":
             parser = "consumeColor"
         return [f"return {parser}(range);"]
     return ["return parseOneOf<\n        " + _format_parser_template_arguments(parsers) + ">(range);"]
@@ -1600,13 +1675,15 @@ def _keyword_enum_converters(catalogs: Catalogs) -> dict[str, tuple[str, ...]]:
 
 def _keyword_enum_converter_lines(type_name: str, keywords: tuple[str, ...]) -> list[str]:
     return [
-        f"template<> constexpr std::optional<{type_name}> fromCSSKeyword<{type_name}>(CSSKeyword keyword) {{",
+        f"template<> constexpr std::optional<{type_name}> "
+        f"fromCSSKeyword<{type_name}>(CSS::KeywordName keyword) {{",
         "    switch (keyword) {",
         *[
-            f"        case CSSKeyword::{_pascal_name(keyword)}: return {type_name}::{_enum_member_name(keyword)};"
+            f"    case Keyword{_pascal_name(keyword, reserved=False)}:\n"
+            f"        return {type_name}::{_enum_member_name(keyword)};"
             for keyword in keywords
         ],
-        "        default: return std::nullopt;",
+        "    default:\n        return std::nullopt;",
         "    }",
         "}",
     ]
@@ -1620,8 +1697,8 @@ def _initial_css_value_expression(
     if not initial or len(initial.split()) != 1:
         raise GenerationError(f"{property.name}: shorthand component needs a single-value initial")
     if initial in css_keywords:
-        return f"CSSKeyword::{_pascal_name(initial)}"
-    return f"CSSValue{{{_initial_atom(initial, css_keywords, property.name)}}}"
+        return f"Keyword{_pascal_name(initial, reserved=False)}"
+    return f"Value {{{_initial_atom(initial, css_keywords, property.name, css_namespace='')}}}"
 
 
 def _syntax_nodes(node: SyntaxNode) -> Iterable[SyntaxNode]:
@@ -1700,19 +1777,19 @@ def generate_property_parsing(catalogs: Catalogs) -> tuple[str, str]:
 
     header = _banner("CSSProperties.json5") + """#pragma once
 
-#include "CSSPropertyParser.h"
+#include <Core/CSSPropertyParser.h>
 
-namespace radia::ui {
+namespace Core::CSS {
 """
     for parser_name in sorted(data_type_parsers):
-        header += f"std::optional<CSSValue> {parser_name}(CSSValueRange&);\n"
+        header += f"std::optional<Value> {parser_name}(ValueRange&);\n"
     for property in longhand_parsers:
         if property.syntax_parser is None:
-            header += f"std::optional<CSSValue> parse{_pascal_name(property.name)}(CSSValueRange&);\n"
+            header += f"std::optional<Value> parse{_pascal_name(property.name)}(ValueRange&);\n"
 
     for property in longhand_parsers:
         name = _pascal_name(property.name)
-        header += f"template<> struct PropertyTraits<CSSProperty::{name}> {{\n"
+        header += f"template<> struct PropertyTraits<Property::{name}> {{\n"
         parser_name = property.syntax_parser or f"parse{name}"
         header += f"    static constexpr LonghandParser parser = {parser_name};\n"
         if property.name in initial_properties:
@@ -1732,11 +1809,16 @@ namespace radia::ui {
                 emit_shorthand_trait(component)
 
         name = _pascal_name(property.name)
-        longhands = ",\n        ".join(f"CSSProperty::{_pascal_name(longhand)}" for longhand in property.longhands)
-        header += f"template<> struct PropertyTraits<CSSProperty::{name}> {{\n"
+        longhands = ",\n        ".join(
+            f"Property::{_pascal_name(longhand)}" for longhand in property.longhands
+        )
+        header += f"template<> struct PropertyTraits<Property::{name}> {{\n"
         header += f"    using Longhands = PropertyList<\n        {longhands}>;\n"
         if property.reset_longhands:
-            reset_longhands = ",\n        ".join(f"CSSProperty::{_pascal_name(longhand)}" for longhand in property.reset_longhands)
+            reset_longhands = ",\n        ".join(
+                f"Property::{_pascal_name(longhand)}"
+                for longhand in property.reset_longhands
+            )
             header += f"    using ResetLonghands = PropertyList<\n        {reset_longhands}>;\n"
         if property.syntax_parser in SHORTHAND_SYNTAX_PARSERS:
             header += f"    using SyntaxParser = {_pascal_name(property.syntax_parser)};\n"
@@ -1751,36 +1833,53 @@ namespace radia::ui {
     for property in sorted((item for item in catalogs.properties if item.longhands), key=lambda item: item.name):
         emit_shorthand_trait(property)
 
-    header += "bool parseProperty(CSSProperty, CSSValueRange&, ParsedProperties&);\n"
-    header += "} // namespace radia::ui\n"
+    header += "bool parseProperty(Property, ValueRange&, ParsedProperties&);\n"
+    header += "} // namespace Core::CSS\n"
 
     cpp = _banner("CSSProperties.json5") + """#include "CSSPropertyParsing.h"
 #include "CSSKeywords.h"
 
-namespace radia::ui {
+namespace Core::CSS {
 """
 
     for parser_name, data_type in sorted(data_type_parsers.items()):
-        cpp += f"std::optional<CSSValue> {parser_name}(CSSValueRange& range) {{\n"
-        cpp += "".join(f"    {line}\n" for line in _data_type_parser_lines(catalogs, data_type))
-        cpp += "}\n\n"
+        parser_lines = _data_type_parser_lines(catalogs, data_type)
+        if len(parser_lines) == 1 and parser_lines[0].startswith("return "):
+            cpp += _single_statement_function(
+                f"std::optional<Value> {parser_name}(ValueRange& range)", parser_lines[0]
+            ) + "\n\n"
+        else:
+            cpp += f"std::optional<Value> {parser_name}(ValueRange& range) {{\n"
+            cpp += "".join(f"    {line}\n" for line in parser_lines)
+            cpp += "}\n\n"
 
     for property in longhand_parsers:
         if property.syntax is None:
             continue
         call = _parser_call(property, property.syntax, catalogs, "range")
-        cpp += f"std::optional<CSSValue> parse{_pascal_name(property.name)}(CSSValueRange& range) {{\n"
-        cpp += f"    return {call};\n}}\n\n"
+        cpp += _single_statement_function(
+            f"std::optional<Value> parse{_pascal_name(property.name)}(ValueRange& range)", f"return {call};"
+        ) + "\n\n"
 
-    cpp += "bool parseProperty(CSSProperty property, CSSValueRange& range, ParsedProperties& result) {\n    switch (property) {\n"
+    cpp += (
+        "bool parseProperty(Property property, ValueRange& range, "
+        "ParsedProperties& result) {\n"
+        "    switch (property) {\n"
+    )
     for property in property_parsers:
         name = _pascal_name(property.name)
         if property.longhands:
-            cpp += f"        case CSSProperty::{name}: return parseShorthand<CSSProperty::{name}>(range, result);\n"
+            cpp += (
+                f"    case Property::{name}:\n"
+                f"        return parseShorthand<Property::{name}>(range, result);\n"
+            )
         else:
-            cpp += f"        case CSSProperty::{name}: return parseLonghand<CSSProperty::{name}>(range, result);\n"
-    cpp += "        default: return false;\n    }\n}\n"
-    cpp = cpp.rstrip("\n") + "\n} // namespace radia::ui\n"
+            cpp += (
+                f"    case Property::{name}:\n"
+                f"        return parseLonghand<Property::{name}>(range, result);\n"
+            )
+    cpp += "    default:\n        return false;\n    }\n}\n"
+    cpp = cpp.rstrip("\n") + "\n} // namespace Core::CSS\n"
     return header, cpp
 
 
@@ -1788,9 +1887,16 @@ def _typed_properties(catalogs: Catalogs) -> list[PropertyDefinition]:
     return [property for property in catalogs.properties if property.type_name and property.storage_path]
 
 
-def _initial_atom(value: str, css_keywords: Iterable[str], property_name: str) -> str:
+def _initial_atom(
+    value: str,
+    css_keywords: Iterable[str],
+    property_name: str,
+    *,
+    css_namespace: str = "CSS",
+) -> str:
+    css_prefix = f"{css_namespace}::" if css_namespace else ""
     if value in css_keywords:
-        return f"CSS::Keyword::{_pascal_name(value)}{{}}"
+        return f"{css_prefix}Keyword::{_pascal_name(value)} {{}}"
 
     match = INITIAL_VALUE.fullmatch(value)
     if not match:
@@ -1801,18 +1907,12 @@ def _initial_atom(value: str, css_keywords: Iterable[str], property_name: str) -
         number += "."
     number += "f"
     if unit is None:
-        return f"CSS::Number({number})"
+        return f"{css_prefix}Number({number})"
 
     unit_name = CSS_INITIAL_UNITS.get(unit.lower())
     if unit_name is None:
         raise GenerationError(f"{property_name}: unsupported initial unit {unit!r}")
-    return f"CSS::{unit_name}({number})"
-
-
-def _css_value_initial_atom(value: str, css_keywords: Iterable[str], property_name: str) -> str:
-    if value in css_keywords:
-        return f"CSS::Keyword{{CSSKeyword::{_pascal_name(value)}}}"
-    return _initial_atom(value, css_keywords, property_name)
+    return f"{css_prefix}{unit_name}({number})"
 
 
 def _initial_value_expression(initial: str, css_keywords: Iterable[str], property_name: str) -> str:
@@ -1827,8 +1927,8 @@ def _initial_value_expression(initial: str, css_keywords: Iterable[str], propert
 
 
 def _initial_expression(property: PropertyDefinition, css_keywords: Iterable[str]) -> str:
-    if property.type_name == "StyleImage" and property.initial == "none":
-        return "    return StyleImage{std::monostate{}};"
+    if property.type_name == "Image" and property.initial == "none":
+        return "    return Image {std::monostate {}};"
     if property.type_name == "BorderImageSlice":
         initial = INITIAL_VALUE.fullmatch(property.initial)
         if initial is None or initial.group(2) not in {None, "%"}:
@@ -1843,7 +1943,7 @@ def _initial_expression(property: PropertyDefinition, css_keywords: Iterable[str
         if property.initial not in {"stretch", "repeat", "round", "space"}:
             raise GenerationError(f"{property.name}: unsupported BorderImageRepeat initial {property.initial!r}")
         mode = f"BorderImageRepeatMode::{_enum_member_name(property.initial)}"
-        return f"    return BorderImageRepeat{{{mode}, {mode}}};"
+        return f"    return BorderImageRepeat {{{mode}, {mode}}};"
     if property.type_name == "FlexWrap" and property.initial == "nowrap":
         return "    return {};"
     if property.type_name in {"Length", "OutlineOffset"} and property.initial == "0px":
@@ -1870,7 +1970,7 @@ def _initial_expression(property: PropertyDefinition, css_keywords: Iterable[str
         return "    return {};"
     keyword = _initial_keyword(property)
     if keyword:
-        return f"    return CSS::Keyword::{_pascal_name(keyword)}{{}};"
+        return f"    return CSS::Keyword::{_pascal_name(keyword)} {{}};"
     if property.type_name == "float":
         initial = INITIAL_VALUE.fullmatch(property.initial)
         if initial is None or (initial.group(2) is not None and not (initial.group(2).lower() == "px" and float(initial.group(1)) == 0)):
@@ -1882,7 +1982,7 @@ def _initial_expression(property: PropertyDefinition, css_keywords: Iterable[str
     if property.type_name == "Order":
         if not re.fullmatch(r"[+-]?\d+", property.initial):
             raise GenerationError(f"{property.name}: Order initial value must be an integer")
-        return f"    return Order{{{int(property.initial)}}};"
+        return f"    return Order {{{int(property.initial)}}};"
     if property.type_name == "ScrollbarGutter" and property.initial == "auto":
         return "    return ScrollbarGutter::Auto;"
     if property.type_name == "Filter" and property.initial == "none":
@@ -1895,12 +1995,12 @@ def _initial_expression(property: PropertyDefinition, css_keywords: Iterable[str
         if len(property.initial.split()) != 1:
             raise GenerationError(f"{property.name}: BorderStyle initial value must be one keyword")
         return f"    return BorderStyle::{_enum_member_name(property.initial)};"
-    if property.type_name == "StyleColor":
+    if property.type_name == "Color":
         if len(property.initial.split()) != 1 or property.initial not in css_keywords:
-            raise GenerationError(f"{property.name}: StyleColor initial value must be one CSS keyword")
-        return f"    return StyleColor::fromKeyword(CSSKeyword::{_pascal_name(property.initial)});"
+            raise GenerationError(f"{property.name}: Color initial value must be one CSS keyword")
+        return f"    return Color::fromKeyword(Keyword{_pascal_name(property.initial, reserved=False)});"
     if property.type_name == "FontFamilies":
-        return "    return FontFamilies{GenericFontFamily::SansSerif};"
+        return "    return FontFamilies {GenericFontFamily::SansSerif};"
     if property.type_name == "FontFamily":
         return f"    return FontFamily::{_enum_member_name(property.initial)};"
     if property.type_name == "FontStyle":
@@ -1931,9 +2031,10 @@ def _property_operations(catalogs: Catalogs, keyword_converters: dict[str, tuple
         member_name = _property_member_name(property)
         lines.extend(
             [
-                f"static bool applyValue{name}(StyleBuilderState& builderState, const StyleValue& value) {{",
+                f"static bool applyValue{name}(BuilderState& builderState, const CSS::StyleValue& value) {{",
                 f"    auto parsedValue = toStyle<{property.type_name}>(builderState, value);",
-                "    if (!parsedValue) return false;",
+                "    if (!parsedValue)",
+                "        return false;",
                 f"    builderState.style.set{name}(std::move(*parsedValue));",
                 "    return true;",
                 "}",
@@ -1942,9 +2043,10 @@ def _property_operations(catalogs: Catalogs, keyword_converters: dict[str, tuple
         )
         if _initial_keyword(property) and property.type_name in {"float", "FontWeight", "FontWidth"}:
             initial_value = [
-                f"    const CSSValue initialValue{{CSS::Keyword{{ComputedStyle::initial{name}().value}}}};",
+                f"    const CSS::Value initialValue {{CSS::Keyword {{ComputedStyle::initial{name}().value}}}};",
                 f"    auto parsedValue = toStyle<{property.type_name}>(builderState, initialValue);",
-                "    if (!parsedValue) return false;",
+                "    if (!parsedValue)",
+                "        return false;",
                 f"    builderState.style.set{name}(std::move(*parsedValue));",
             ]
         else:
@@ -1953,13 +2055,14 @@ def _property_operations(catalogs: Catalogs, keyword_converters: dict[str, tuple
             ]
         lines.extend(
             [
-                f"static bool applyInitial{name}(StyleBuilderState& builderState) {{",
+                f"static bool applyInitial{name}(BuilderState& builderState) {{",
                 *initial_value,
                 "    return true;",
                 "}",
                 "",
-                f"static bool applyInherit{name}(StyleBuilderState& builderState) {{",
-                "    if (!builderState.parentStyle) return false;",
+                f"static bool applyInherit{name}(BuilderState& builderState) {{",
+                "    if (!builderState.parentStyle)",
+                "        return false;",
                 f"    builderState.style.set{name}(builderState.parentStyle->{member_name}());",
                 "    return true;",
                 "}",
@@ -1968,7 +2071,7 @@ def _property_operations(catalogs: Catalogs, keyword_converters: dict[str, tuple
         )
     lines.extend(
         [
-            "bool applyProperty(CSSProperty property, StyleBuilderState& builderState, ApplyType type, const StyleValue* specifiedValue) {",
+        "bool applyProperty(CSS::Property property, BuilderState& builderState, ApplyType type, const CSS::StyleValue* specifiedValue) {",
             "    switch (property) {",
         ]
     )
@@ -1977,31 +2080,35 @@ def _property_operations(catalogs: Catalogs, keyword_converters: dict[str, tuple
         enum_name = _pascal_name(property.name)
         lines.extend(
             [
-                f"        case CSSProperty::{enum_name}:",
-                "            switch (type) {",
-                f"                case ApplyType::Value: return specifiedValue && applyValue{name}(builderState, *specifiedValue);",
-                f"                case ApplyType::Initial: return applyInitial{name}(builderState);",
-                f"                case ApplyType::Inherit: return applyInherit{name}(builderState);",
-                "            }",
-                "            return false;",
+                f"    case CSS::Property::{enum_name}:",
+                "        switch (type) {",
+                "        case ApplyType::Value:",
+                f"            return specifiedValue && applyValue{name}(builderState, *specifiedValue);",
+                "        case ApplyType::Initial:",
+                f"            return applyInitial{name}(builderState);",
+                "        case ApplyType::Inherit:",
+                f"            return applyInherit{name}(builderState);",
+                "        }",
+                "        return false;",
             ]
         )
-    lines.extend(["        default: return false;", "    }", "}", ""])
+    lines.extend(["    default:", "        return false;", "    }", "}", ""])
     shorthands = [property for property in catalogs.properties if property.longhands]
     if shorthands:
         lines.extend(
             [
-                "std::optional<ShorthandDescriptor> shorthand(CSSProperty property) {",
+                "std::optional<ShorthandDescriptor> shorthand(CSS::Property property) {",
                 "    switch (property) {",
             ]
         )
         for property in shorthands:
             lines.append(
-                f"        case CSSProperty::{_pascal_name(property.name)}: return shorthand<CSSProperty::{_pascal_name(property.name)}>();"
+                f"    case CSS::Property::{_pascal_name(property.name)}:\n"
+                f"        return shorthand<CSS::Property::{_pascal_name(property.name)}>();"
             )
         lines.extend(
             [
-                "        default: return std::nullopt;",
+                "    default:\n        return std::nullopt;",
                 "    }",
                 "}",
                 "",
@@ -2014,87 +2121,157 @@ def generate_html_names(catalogs: Catalogs) -> tuple[str, str]:
     tags = list(catalogs.html_tags)
     attributes = list(catalogs.html_attributes)
     interfaces = sorted({metadata["interface"] for metadata in catalogs.html_tags.values()})
-    header = _banner("HTMLTags.json5 and HTMLAttributes.json5") + "#pragma once\n\n#include <cstddef>\n#include <cstdint>\n#include <iterator>\n#include <optional>\n#include <string_view>\n\nnamespace radia::ui {\n"
+    header = _banner("HTMLTags.json5 and HTMLAttributes.json5") + (
+        "#pragma once\n\n"
+        "#include <cstddef>\n"
+        "#include <cstdint>\n"
+        "#include <iterator>\n"
+        "#include <optional>\n"
+        "#include <string_view>\n\n"
+        "namespace Core {\n"
+    )
     header += _enum_header("HTMLInterface", interfaces, underlying="std::uint8_t", prefix=("Unknown",)) + "\n\n"
     header += _enum_header("HTMLTag", tags, underlying="std::uint8_t", prefix=("Unknown",))
     header += "\n\nenum class HTMLAttribute : std::uint16_t {\n"
     header += "".join(f"    {_html_attribute_cpp_name(name)},\n" for name in attributes)
     header += "    Count\n};"
-    header += "\n\nstruct HTMLTagDescriptor {\n    HTMLTag tag;\n    std::string_view name;\n    HTMLInterface interface;\n    bool isVoid;\n};\n"
+    header += (
+        "\n\nstruct HTMLTagDescriptor {\n"
+        "    HTMLTag tag;\n"
+        "    std::string_view name;\n"
+        "    HTMLInterface interface;\n"
+        "    bool isVoid;\n"
+        "};\n"
+    )
     header += "\ninline constexpr HTMLTagDescriptor htmlTags[] {\n"
-    header += "    { HTMLTag::Unknown, \"\", HTMLInterface::Unknown, false },\n"
+    header += "    {HTMLTag::Unknown, \"\", HTMLInterface::Unknown, false},\n"
     for name in tags:
         metadata = catalogs.html_tags[name]
         is_void = "true" if metadata.get("void", False) else "false"
-        header += f"    {{ HTMLTag::{_pascal_name(name)}, {_cpp_string(name)}, HTMLInterface::{_pascal_name(metadata['interface'])}, {is_void} }},\n"
+        header += (
+            f"    {{HTMLTag::{_pascal_name(name)}, {_cpp_string(name)}, "
+            f"HTMLInterface::{_pascal_name(metadata['interface'])}, {is_void}}},\n"
+        )
     header += "};\n\n"
     header += "constexpr const HTMLTagDescriptor* htmlTagDescriptor(HTMLTag tag) {\n"
     header += "    const auto index = static_cast<std::size_t>(tag);\n"
     header += "    return index < std::size(htmlTags) ? &htmlTags[index] : nullptr;\n"
     header += "}\n\n"
     header += "constexpr HTMLInterface HTMLTagInterface(HTMLTag tag) {\n"
-    header += "    if (const auto* descriptor = htmlTagDescriptor(tag)) return descriptor->interface;\n"
+    header += (
+        "    if (const auto* descriptor = htmlTagDescriptor(tag))\n"
+        "        return descriptor->interface;\n"
+    )
     header += "    return HTMLInterface::Unknown;\n"
     header += "}\n\n"
     header += "constexpr std::string_view HTMLTagName(HTMLTag tag) {\n"
-    header += "    if (const auto* descriptor = htmlTagDescriptor(tag)) return descriptor->name;\n"
+    header += (
+        "    if (const auto* descriptor = htmlTagDescriptor(tag))\n"
+        "        return descriptor->name;\n"
+    )
     header += "    return {};\n"
     header += "}\n\n"
     header += "constexpr bool isVoidHTMLTag(HTMLTag tag) {\n"
-    header += "    if (const auto* descriptor = htmlTagDescriptor(tag)) return descriptor->isVoid;\n"
+    header += (
+        "    if (const auto* descriptor = htmlTagDescriptor(tag))\n"
+        "        return descriptor->isVoid;\n"
+    )
     header += "    return false;\n"
     header += "}\n\n"
     header += "struct HTMLAttributeDescriptor {\n    HTMLAttribute attribute;\n    std::string_view name;\n};\n"
     header += "\ninline constexpr HTMLAttributeDescriptor htmlAttributes[] {\n"
     for name in attributes:
-        header += f"    {{ HTMLAttribute::{_html_attribute_cpp_name(name)}, {_cpp_string(name)} }},\n"
+        header += f"    {{HTMLAttribute::{_html_attribute_cpp_name(name)}, {_cpp_string(name)}}},\n"
     header += "};\n\n"
     header += "constexpr const HTMLAttributeDescriptor* htmlAttributeDescriptor(HTMLAttribute attribute) {\n"
     header += "    const auto index = static_cast<std::size_t>(attribute);\n"
     header += "    return index < std::size(htmlAttributes) ? &htmlAttributes[index] : nullptr;\n"
     header += "}\n\n"
     header += "constexpr std::string_view HTMLAttributeName(HTMLAttribute attribute) {\n"
-    header += "    if (const auto* descriptor = htmlAttributeDescriptor(attribute)) return descriptor->name;\n"
+    header += (
+        "    if (const auto* descriptor = htmlAttributeDescriptor(attribute))\n"
+        "        return descriptor->name;\n"
+    )
     header += "    return {};\n"
     header += "}\n\n"
-    header += "HTMLTag findHTMLTag(std::string_view);\nstd::optional<HTMLAttribute> findHTMLAttribute(std::string_view);\n} // namespace radia::ui\n"
-    cpp = _banner("HTMLTags.json5 and HTMLAttributes.json5") + '#include "HTMLNames.h"\n#include <string>\n#include "html/elementnames.h"\n\nnamespace radia::ui {\n'
+    header += (
+        "HTMLTag findHTMLTag(std::string_view);\n"
+        "std::optional<HTMLAttribute> findHTMLAttribute(std::string_view);\n"
+        "} // namespace Core\n"
+    )
+    cpp = _banner("HTMLTags.json5 and HTMLAttributes.json5") + (
+        '#include "HTMLNames.h"\n'
+        "#include <string>\n"
+        '#include "HTMLName.h"\n\n'
+        "namespace Core {\n"
+    )
     cpp += "HTMLTag findHTMLTag(std::string_view name) {\n"
     cpp += "    const std::string canonical = canonicalizeHTMLName(name);\n"
     cpp += "    for (const auto& descriptor : htmlTags)\n"
-    cpp += "        if (descriptor.tag != HTMLTag::Unknown && canonical == descriptor.name) return descriptor.tag;\n"
+    cpp += "        if (descriptor.tag != HTMLTag::Unknown && canonical == descriptor.name)\n            return descriptor.tag;\n"
     cpp += "    return HTMLTag::Unknown;\n"
     cpp += "}\n\n"
     cpp += "std::optional<HTMLAttribute> findHTMLAttribute(std::string_view name) {\n"
     cpp += "    for (const auto& descriptor : htmlAttributes)\n"
-    cpp += "        if (descriptor.name == name) return descriptor.attribute;\n"
+    cpp += "        if (descriptor.name == name)\n            return descriptor.attribute;\n"
     cpp += "    return std::nullopt;\n"
-    cpp += "}\n} // namespace radia::ui\n"
+    cpp += "}\n} // namespace Core\n"
     return header, cpp
 
 
 def generate_events(catalogs: Catalogs) -> tuple[str, str]:
     names = list(catalogs.events)
     cpp_names = {name: _event_cpp_name(name) for name in names}
-    header = _banner("EventTypes.json5") + "#pragma once\n\n#include <cstddef>\n#include <cstdint>\n#include <iterator>\n#include <optional>\n#include <string_view>\n#include \"HTMLNames.h\"\n\nnamespace radia::ui {\nenum class EventType : std::uint16_t {\n"
+    header = _banner("EventTypes.json5") + (
+        "#pragma once\n\n"
+        "#include <cstddef>\n"
+        "#include <cstdint>\n"
+        "#include <iterator>\n"
+        "#include <optional>\n"
+        "#include <string_view>\n"
+        '#include "HTMLNames.h"\n\n'
+        "namespace Core {\n"
+        "enum class EventType : std::uint16_t {\n"
+    )
     header += "".join(f"    {cpp_names[name]},\n" for name in names)
-    header += "    Count\n};\n\nstruct EventTypeDescriptor {\n    EventType type;\n    std::string_view name;\n    std::optional<HTMLAttribute> htmlAttribute;\n};\n\n"
+    header += (
+        "    Count\n};\n\n"
+        "struct EventTypeDescriptor {\n"
+        "    EventType type;\n"
+        "    std::string_view name;\n"
+        "    std::optional<HTMLAttribute> htmlAttribute;\n"
+        "};\n\n"
+    )
     header += "inline constexpr EventTypeDescriptor eventTypes[] {\n"
     for name in names:
         attribute = "on" + name
-        html_attribute = f"HTMLAttribute::{_html_attribute_cpp_name(attribute)}" if attribute in catalogs.html_attributes else "std::nullopt"
-        header += f"    {{ EventType::{cpp_names[name]}, {_cpp_string(name)}, {html_attribute} }},\n"
+        html_attribute = (
+            f"HTMLAttribute::{_html_attribute_cpp_name(attribute)}"
+            if attribute in catalogs.html_attributes
+            else "std::nullopt"
+        )
+        header += f"    {{EventType::{cpp_names[name]}, {_cpp_string(name)}, {html_attribute}}},\n"
     header += "};\n\n"
     header += "constexpr const EventTypeDescriptor* eventTypeDescriptor(EventType type) {\n"
     header += "    const auto index = static_cast<std::size_t>(type);\n"
     header += "    return index < std::size(eventTypes) ? &eventTypes[index] : nullptr;\n"
     header += "}\n\n"
     header += "constexpr std::string_view eventTypeName(EventType type) {\n"
-    header += "    if (const auto* descriptor = eventTypeDescriptor(type)) return descriptor->name;\n"
+    header += "    if (const auto* descriptor = eventTypeDescriptor(type))\n        return descriptor->name;\n"
     header += "    return {};\n"
     header += "}\n\n"
-    header += "std::optional<EventType> findEventType(std::string_view);\n} // namespace radia::ui\n"
-    cpp = _banner("EventTypes.json5") + '#include "EventTypes.h"\n\nnamespace radia::ui {\nstd::optional<EventType> findEventType(std::string_view name) {\n    for (const auto& descriptor : eventTypes)\n        if (descriptor.name == name) return descriptor.type;\n    return std::nullopt;\n}\n} // namespace radia::ui\n'
+    header += "std::optional<EventType> findEventType(std::string_view);\n} // namespace Core\n"
+    cpp = _banner("EventTypes.json5") + (
+        '#include "EventTypes.h"\n\n'
+        "namespace Core {\n"
+        "std::optional<EventType> findEventType(std::string_view name) {\n"
+        "    for (const auto& descriptor : eventTypes)\n"
+        "        if (descriptor.name == name)\n"
+        "            return descriptor.type;\n"
+        "    return std::nullopt;\n"
+        "}\n"
+        "} // namespace Core\n"
+    )
     return header, cpp
 
 
@@ -2103,16 +2280,39 @@ def generate_pseudo_selectors(catalogs: Catalogs) -> tuple[str, str]:
     pseudo_elements = catalogs.pseudo_selectors["pseudo-elements"]
     class_names = list(pseudo_classes)
     element_names = list(pseudo_elements)
-    header = _banner("CSSPseudoSelectors.json5") + "#pragma once\n\n#include <cstddef>\n#include <cstdint>\n#include <iterator>\n#include <optional>\n#include <string_view>\n\nnamespace radia::ui {\n"
-    header += _enum_header("CSSPseudoClass", class_names, underlying="std::uint8_t", include_count=False)
-    header += "\n\nenum class CSSPseudoClassArgumentRequirement : std::uint8_t {\n    None,\n    Optional,\n    Required,\n};\n"
-    header += "\nenum class CSSPseudoClassArgumentSyntax : std::uint8_t {\n    None,\n    Ident,\n    CompoundSelector,\n    ForgivingSelectorList,\n};\n"
-    header += "\nenum class CSSPseudoClassSpecificity : std::uint8_t {\n    Class,\n    Argument,\n    ClassPlusArgument,\n    Zero,\n};\n"
-    header += "\nusing ArgumentRequirement = CSSPseudoClassArgumentRequirement;\n"
-    header += "using ArgumentSyntax = CSSPseudoClassArgumentSyntax;\n"
-    header += "using Specificity = CSSPseudoClassSpecificity;\n"
-    header += "\nstruct CSSPseudoClassDescriptor {\n    CSSPseudoClass pseudoClass;\n    std::string_view name;\n    ArgumentRequirement argumentRequirement;\n    ArgumentSyntax argumentSyntax;\n    Specificity specificity;\n};\n"
-    header += "\ninline constexpr CSSPseudoClassDescriptor cssPseudoClasses[] {\n"
+    header = _banner("CSSPseudoSelectors.json5") + (
+        "#pragma once\n\n"
+        "#include <cstddef>\n"
+        "#include <cstdint>\n"
+        "#include <iterator>\n"
+        "#include <optional>\n"
+        "#include <string_view>\n\n"
+        "namespace Core::CSS {\n"
+    )
+    header += _enum_header("PseudoClass", class_names, underlying="std::uint8_t", include_count=False)
+    header += "\n\nenum class PseudoClassArgumentRequirement : std::uint8_t {\n    None,\n    Optional,\n    Required,\n};\n"
+    header += (
+        "\nenum class PseudoClassArgumentSyntax : std::uint8_t {\n"
+        "    None,\n"
+        "    Ident,\n"
+        "    CompoundSelector,\n"
+        "    ForgivingSelectorList,\n"
+        "};\n"
+    )
+    header += "\nenum class PseudoClassSpecificity : std::uint8_t {\n    Class,\n    Argument,\n    ClassPlusArgument,\n    Zero,\n};\n"
+    header += "\nusing ArgumentRequirement = PseudoClassArgumentRequirement;\n"
+    header += "using ArgumentSyntax = PseudoClassArgumentSyntax;\n"
+    header += "using Specificity = PseudoClassSpecificity;\n"
+    header += (
+        "\nstruct PseudoClassDescriptor {\n"
+        "    PseudoClass pseudoClass;\n"
+        "    std::string_view name;\n"
+        "    ArgumentRequirement argumentRequirement;\n"
+        "    ArgumentSyntax argumentSyntax;\n"
+        "    Specificity specificity;\n"
+        "};\n"
+    )
+    header += "\ninline constexpr PseudoClassDescriptor pseudoClasses[] {\n"
     for name in class_names:
         metadata = pseudo_classes[name]
         requirement = {"optional": "Optional", "required": "Required"}.get(metadata.get("argument_requirement"), "None")
@@ -2128,76 +2328,101 @@ def generate_pseudo_selectors(catalogs: Catalogs) -> tuple[str, str]:
             "class-plus-argument": "ClassPlusArgument",
             "zero": "Zero",
         }.get(metadata.get("specificity"), "Class")
-        header += f"    {{ CSSPseudoClass::{_pascal_name(name)}, {_cpp_string(name)}, ArgumentRequirement::{requirement}, ArgumentSyntax::{syntax}, Specificity::{specificity} }},\n"
+        header += (
+            f"    {{PseudoClass::{_pascal_name(name)}, {_cpp_string(name)}, "
+            f"ArgumentRequirement::{requirement}, ArgumentSyntax::{syntax}, "
+            f"Specificity::{specificity}}},\n"
+        )
     header += "};\n\n"
-    header += "constexpr const CSSPseudoClassDescriptor* cssPseudoClassDescriptor(CSSPseudoClass pseudoClass) {\n"
+    header += "constexpr const PseudoClassDescriptor* pseudoClassDescriptor(PseudoClass pseudoClass) {\n"
     header += "    const auto index = static_cast<std::size_t>(pseudoClass);\n"
-    header += "    return index < std::size(cssPseudoClasses) ? &cssPseudoClasses[index] : nullptr;\n"
+    header += "    return index < std::size(pseudoClasses) ? &pseudoClasses[index] : nullptr;\n"
     header += "}\n\n"
-    header += "std::optional<CSSPseudoClass> findCSSPseudoClass(std::string_view);\n\n"
-    header += "constexpr std::string_view cssPseudoClassName(CSSPseudoClass pseudoClass) {\n"
-    header += "    if (const auto* descriptor = cssPseudoClassDescriptor(pseudoClass)) return descriptor->name;\n"
+    header += "std::optional<PseudoClass> findPseudoClass(std::string_view);\n\n"
+    header += "constexpr std::string_view pseudoClassName(PseudoClass pseudoClass) {\n"
+    header += "    if (const auto* descriptor = pseudoClassDescriptor(pseudoClass))\n        return descriptor->name;\n"
     header += "    return {};\n"
     header += "}\n\n"
 
-    header += _enum_header("CSSPseudoElement", element_names, underlying="std::uint8_t", include_count=False)
-    header += "\n\nstruct CSSPseudoElementDescriptor {\n    CSSPseudoElement pseudoElement;\n    std::string_view name;\n    bool userAgent;\n};\n"
-    header += "\ninline constexpr CSSPseudoElementDescriptor cssPseudoElements[] {\n"
+    header += _enum_header("PseudoElement", element_names, underlying="std::uint8_t", include_count=False)
+    header += (
+        "\n\nstruct PseudoElementDescriptor {\n"
+        "    PseudoElement pseudoElement;\n"
+        "    std::string_view name;\n"
+        "    bool userAgent;\n"
+        "};\n"
+    )
+    header += "\ninline constexpr PseudoElementDescriptor pseudoElements[] {\n"
     for name in element_names:
         metadata = pseudo_elements[name]
         user_agent = "true" if metadata.get("user_agent", False) else "false"
-        header += f"    {{ CSSPseudoElement::{_pascal_name(name)}, {_cpp_string(name)}, {user_agent} }},\n"
+        header += f"    {{PseudoElement::{_pascal_name(name)}, {_cpp_string(name)}, {user_agent}}},\n"
     header += "};\n\n"
-    header += "constexpr const CSSPseudoElementDescriptor* cssPseudoElementDescriptor(CSSPseudoElement pseudoElement) {\n"
+    header += "constexpr const PseudoElementDescriptor* pseudoElementDescriptor(PseudoElement pseudoElement) {\n"
     header += "    const auto index = static_cast<std::size_t>(pseudoElement);\n"
-    header += "    return index < std::size(cssPseudoElements) ? &cssPseudoElements[index] : nullptr;\n"
+    header += "    return index < std::size(pseudoElements) ? &pseudoElements[index] : nullptr;\n"
     header += "}\n\n"
-    header += "std::optional<CSSPseudoElement> findCSSPseudoElement(std::string_view);\n\n"
-    header += "constexpr std::string_view cssPseudoElementName(CSSPseudoElement pseudoElement) {\n"
-    header += "    if (const auto* descriptor = cssPseudoElementDescriptor(pseudoElement)) return descriptor->name;\n"
+    header += "std::optional<PseudoElement> findPseudoElement(std::string_view);\n\n"
+    header += "constexpr std::string_view pseudoElementName(PseudoElement pseudoElement) {\n"
+    header += "    if (const auto* descriptor = pseudoElementDescriptor(pseudoElement))\n        return descriptor->name;\n"
     header += "    return {};\n"
     header += "}\n\n"
-    header += "constexpr bool isUserAgentCSSPseudoElement(CSSPseudoElement pseudoElement) {\n"
-    header += "    if (const auto* descriptor = cssPseudoElementDescriptor(pseudoElement)) return descriptor->userAgent;\n"
+    header += "constexpr bool isUserAgentPseudoElement(PseudoElement pseudoElement) {\n"
+    header += "    if (const auto* descriptor = pseudoElementDescriptor(pseudoElement))\n        return descriptor->userAgent;\n"
     header += "    return false;\n"
-    header += "}\n} // namespace radia::ui\n"
+    header += "}\n} // namespace Core::CSS\n"
 
-    cpp = _banner("CSSPseudoSelectors.json5") + '#include "CSSPseudoSelectors.h"\n\nnamespace radia::ui {\n'
-    cpp += "std::optional<CSSPseudoClass> findCSSPseudoClass(std::string_view name) {\n"
-    cpp += "    for (const auto& descriptor : cssPseudoClasses)\n"
-    cpp += "        if (descriptor.name == name) return descriptor.pseudoClass;\n"
+    cpp = _banner("CSSPseudoSelectors.json5") + (
+        '#include "CSSPseudoSelectors.h"\n\n'
+        "namespace Core::CSS {\n"
+    )
+    cpp += "std::optional<PseudoClass> findPseudoClass(std::string_view name) {\n"
+    cpp += "    for (const auto& descriptor : pseudoClasses)\n"
+    cpp += "        if (descriptor.name == name)\n            return descriptor.pseudoClass;\n"
     cpp += "    return std::nullopt;\n"
     cpp += "}\n\n"
-    cpp += "std::optional<CSSPseudoElement> findCSSPseudoElement(std::string_view name) {\n"
-    cpp += "    for (const auto& descriptor : cssPseudoElements)\n"
-    cpp += "        if (descriptor.name == name) return descriptor.pseudoElement;\n"
+    cpp += "std::optional<PseudoElement> findPseudoElement(std::string_view name) {\n"
+    cpp += "    for (const auto& descriptor : pseudoElements)\n"
+    cpp += "        if (descriptor.name == name)\n            return descriptor.pseudoElement;\n"
     cpp += "    return std::nullopt;\n"
-    cpp += "}\n} // namespace radia::ui\n"
+    cpp += "}\n} // namespace Core::CSS\n"
     return header, cpp
 
 
 def generate_input_types(catalogs: Catalogs) -> tuple[str, str]:
     names = list(catalogs.input_types)
-    header = _banner("InputTypes.json5") + "#pragma once\n\n#include <cstddef>\n#include <cstdint>\n#include <iterator>\n#include <optional>\n#include <string_view>\n\nnamespace radia::ui {\n"
+    header = _banner("InputTypes.json5") + (
+        "#pragma once\n\n"
+        "#include <cstddef>\n"
+        "#include <cstdint>\n"
+        "#include <iterator>\n"
+        "#include <optional>\n"
+        "#include <string_view>\n\n"
+        "namespace Core {\n"
+    )
     header += _enum_header("InputType", names)
     header += "\n\nstruct InputTypeDescriptor {\n    InputType type;\n    std::string_view name;\n};\n"
     header += "\ninline constexpr InputTypeDescriptor inputTypes[] {\n"
     for name in names:
-        header += f"    {{ InputType::{_pascal_name(name)}, {_cpp_string(name)} }},\n"
+        header += f"    {{InputType::{_pascal_name(name)}, {_cpp_string(name)}}},\n"
     header += "};\n\n"
     header += "constexpr const InputTypeDescriptor* inputTypeDescriptor(InputType type) {\n"
     header += "    const auto index = static_cast<std::size_t>(type);\n"
     header += "    return index < std::size(inputTypes) ? &inputTypes[index] : nullptr;\n"
     header += "}\n\n"
     header += "constexpr std::string_view inputTypeName(InputType type) {\n"
-    header += "    if (const auto* descriptor = inputTypeDescriptor(type)) return descriptor->name;\n"
+    header += "    if (const auto* descriptor = inputTypeDescriptor(type))\n        return descriptor->name;\n"
     header += "    return {};\n"
-    header += "}\n\nstd::optional<InputType> findInputType(std::string_view);\n} // namespace radia::ui\n"
-    cpp = _banner("InputTypes.json5") + '#include "InputTypes.h"\n\nnamespace radia::ui {\nstd::optional<InputType> findInputType(std::string_view name) {\n'
+    header += "}\n\nstd::optional<InputType> findInputType(std::string_view);\n} // namespace Core\n"
+    cpp = _banner("InputTypes.json5") + (
+        '#include "InputTypes.h"\n\n'
+        "namespace Core {\n"
+        "std::optional<InputType> findInputType(std::string_view name) {\n"
+    )
     cpp += "    for (const auto& descriptor : inputTypes)\n"
-    cpp += "        if (descriptor.name == name) return descriptor.type;\n"
+    cpp += "        if (descriptor.name == name)\n            return descriptor.type;\n"
     cpp += "    return std::nullopt;\n"
-    cpp += "}\n} // namespace radia::ui\n"
+    cpp += "}\n} // namespace Core\n"
     return header, cpp
 
 
@@ -2210,7 +2435,7 @@ def generate_outputs(catalogs: Catalogs) -> dict[str, str]:
     event_header, event_cpp = generate_events(catalogs)
     pseudo_header, pseudo_cpp = generate_pseudo_selectors(catalogs)
     input_header, input_cpp = generate_input_types(catalogs)
-    return {
+    outputs = {
         "CSSProperties.h": property_header,
         "CSSProperties.cpp": property_cpp,
         "CSSKeywords.h": keyword_header,
@@ -2229,6 +2454,7 @@ def generate_outputs(catalogs: Catalogs) -> dict[str, str]:
         "InputTypes.h": input_header,
         "InputTypes.cpp": input_cpp,
     }
+    return outputs
 
 
 def generate(source_root: Path, output_root: Path) -> list[Path]:
@@ -2258,13 +2484,13 @@ def generate_user_agent_stylesheet(source_path: Path, output_root: Path) -> Path
     source = (
         "// Generated automatically from ua.css, do not edit.\n\n"
         "#include \"UserAgentStyleSheet.h\"\n\n"
-        "namespace radia::ui {\n"
+        "namespace Core::CSS {\n"
         "std::string_view userAgentStyleSheet() noexcept {\n"
         '    return R"__RADIA__(\n'
         + stylesheet
         + ')__RADIA__";\n'
         "}\n"
-        "} // namespace radia::ui\n"
+        "} // namespace Core::CSS\n"
     )
     with output_path.open("w", encoding="utf-8", newline="\n") as stream:
         stream.write(source)
@@ -2292,7 +2518,7 @@ def _check_output(source_root: Path, output_root: Path) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate Radia UI catalog C++ files")
-    default_root = Path(__file__).resolve().parents[2]
+    default_root = Path(__file__).resolve().parents[1]
     parser.add_argument("--source-root", type=Path, default=default_root)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--user-agent-stylesheet", type=Path)

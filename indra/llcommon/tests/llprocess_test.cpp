@@ -18,6 +18,7 @@
 #include <list>
 // std headers
 #include <fstream>
+#include <ostream>
 // external library headers
 #include "llapr.h"
 #include "apr_thread_proc.h"
@@ -1244,19 +1245,32 @@ namespace tut
         set_test_name("setLimit()");
         PythonProcessLauncher py(get_test_name(),
                                  "import sys\n"
-                                 "sys.stdout.write(sys.argv[1])\n");
+                                 "sys.stdin.readline()\n"
+                                 "sys.stdout.write(sys.argv[1])\n"
+                                 "sys.stdout.flush()\n"
+                                 "sys.stdin.readline()\n");
         std::string abc("abcdefghijklmnopqrstuvwxyz");
         py.mParams.args.add(abc);
-        py.mParams.files.add(LLProcess::FileParam()); // stdin
+        py.mParams.files.add(LLProcess::FileParam("pipe")); // stdin
         py.mParams.files.add(LLProcess::FileParam("pipe")); // stdout
         py.launch();
-        LLProcess::ReadPipe& childout(py.mPy->getReadPipe(LLProcess::STDOUT));
-        // listen for incoming data on childout
-        EventListener listener(childout.getPump());
+        std::ostream& childIn = py.mPy->getWritePipe(LLProcess::STDIN).get_ostream();
+        LLProcess::ReadPipe& childOut = py.mPy->getReadPipe(LLProcess::STDOUT);
+        // listen for incoming data on childOut
+        EventListener listener(childOut.getPump());
         // but set limit
-        childout.setLimit(10);
-        ensure_equals("getLimit() after setlimit(10)", childout.getLimit(), 10);
-        // okay, pump I/O to pick up output from child
+        childOut.setLimit(10);
+        ensure_equals("getLimit() after setlimit(10)", childOut.getLimit(), 10);
+        childIn << "go" << std::endl;
+        // Keep the child alive until its output event reaches the listener.
+        constexpr int timeoutSeconds = 60;
+        int elapsedSeconds = 0;
+        for (; elapsedSeconds < timeoutSeconds && listener.mHistory.empty(); ++elapsedSeconds) {
+            yield();
+        }
+        ensure("no output event", elapsedSeconds < timeoutSeconds);
+        childIn << "continue" << std::endl;
+        // Continue pumping so the child can process the reply and reach EOF.
         waitfor(*py.mPy);
         listener.checkHistory(
             [abc](const EventListener::Listory& history)

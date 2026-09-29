@@ -46,9 +46,9 @@
 #include "llsetkeybinddialog.h"
 #include "llviewerinput.h"
 #include "llviewermenu.h"
-#include "controllers/floaterdemo.h"
-#include "inputbridge.h"
-#include "runtime.h"
+#include <Viewer/FloaterDemo.h>
+#include <Viewer/InputBridge.h>
+#include <Viewer/Runtime.h>
 
 #include "llviewquery.h"
 #include "llxmltree.h"
@@ -229,22 +229,23 @@
 #include "llwindowwin32.h" // For AltGr handling
 #endif
 
-using radia::ui::CursorStyle;
-using radia::ui::CursorValue;
-using radia::ui::KeybindingPresentation;
-using radia::ui::Vec2;
-using radia::viewer::ui::InputDispatchResult;
-using radia::viewer::ui::NativeKeyInput;
-using radia::viewer::ui::NativePointerButton;
-using radia::viewer::ui::NativePointerInput;
-using radia::viewer::ui::NativeScrollInput;
-using radia::viewer::ui::registerFloaterDemo;
-using radia::viewer::ui::Runtime;
-using radia::viewer::ui::RuntimeKeybindingState;
-using radia::viewer::ui::translateKeyInput;
-using radia::viewer::ui::translatePointerInput;
-using radia::viewer::ui::translateScrollInput;
-using radia::viewer::ui::translateCursor;
+using Core::KeybindingPresentation;
+using Core::Layout::Vec2;
+using Core::Style::CursorImage;
+using Core::Style::CursorStyle;
+using Core::Style::CursorValue;
+using Viewer::InputDispatchResult;
+using Viewer::NativeKeyInput;
+using Viewer::NativePointerButton;
+using Viewer::NativePointerInput;
+using Viewer::NativeScrollInput;
+using Viewer::registerFloaterDemo;
+using Viewer::Runtime;
+using Viewer::RuntimeKeybindingState;
+using Viewer::translateCursor;
+using Viewer::translateKeyInput;
+using Viewer::translatePointerInput;
+using Viewer::translateScrollInput;
 
 //
 // Globals
@@ -4368,7 +4369,7 @@ void LLViewerWindow::updateUI()
         mLastRadiaCursorScale = cursorScale;
         mLastRadiaCursorImage.reset();
         if (radiaCursor) {
-            for (const radia::ui::CursorImage& image : radiaCursor->images) {
+            for (const CursorImage& image : radiaCursor->images) {
                 const std::string* resource = mUIRuntime->resourceData(image.resource);
                 if (!resource) continue;
                 LLCursorImage native;

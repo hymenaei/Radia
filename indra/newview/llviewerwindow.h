@@ -48,8 +48,8 @@
 #include "llinitparam.h"
 #include "lltrace.h"
 #include "llsnapshotmodel.h"
-#include "nativeinput.h"
-#include "style/computedstyle.h"
+#include <Core/ComputedStyle.h>
+#include <Viewer/NativeInput.h>
 
 #include <boost/signals2.hpp>
 
@@ -58,9 +58,9 @@
 #include <memory>
 #include <optional>
 
-namespace radia::viewer::ui {
-    class Runtime;
-}
+namespace Viewer {
+class Runtime;
+} // namespace Viewer
 
 class LLView;
 class LLViewerObject;
@@ -514,7 +514,7 @@ private:
 
 private:
     LLWindow*       mWindow;                        // graphical window object
-    std::unique_ptr<radia::viewer::ui::Runtime> mUIRuntime;
+    std::unique_ptr<Viewer::Runtime> mUIRuntime;
     bool            mActive;
     bool            mUIVisible;
 
@@ -535,13 +535,13 @@ private:
     LLPanel*        mChicletContainer = nullptr;
     LLPanel*        mTopInfoContainer = nullptr;
     LLVector2       mDisplayScale;
-    std::optional<radia::ui::CursorValue> mLastRadiaCursor;
+    std::optional<Core::Style::CursorValue> mLastRadiaCursor;
     std::optional<LLCursorImage> mLastRadiaCursorImage;
     std::uint64_t mLastRadiaCursorGeneration = 0;
     F32 mLastRadiaCursorScale = 0.f;
 
     LLCoordGL       mCurrentMousePoint;         // last mouse position in GL coords
-    std::optional<radia::viewer::ui::NativePointerInput> mPendingPointerMove;
+    std::optional<Viewer::NativePointerInput> mPendingPointerMove;
     LLCoordGL       mLastMousePoint;        // Mouse point at last frame.
     LLCoordGL       mCurrentMouseDelta;     //amount mouse moved this frame
     LLCoordGL       mCurrentRawMouseDelta;

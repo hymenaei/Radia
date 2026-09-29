@@ -1,0 +1,366 @@
+/**
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
+ */
+
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <iterator>
+#include <map>
+#include <memory>
+#include <set>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+#include <vector>
+#include "ComputedStyle.h"
+#include "Element.h"
+#include "LayoutGeometry.h"
+#include "NativeAppearance.h"
+#include "StyleSheet.h"
+#include "Text.h"
+#include "TextMeasurer.h"
+
+namespace Core::detail {
+
+class ElementConstructionAccess {
+public:
+    template<typename ElementT, typename... Args> static std::unique_ptr<ElementT> create(Args&&... args) {
+        return std::unique_ptr<ElementT>(new ElementT(std::forward<Args>(args)...));
+    }
+
+    template<typename ElementT, typename... Args> static ElementT createValue(Args&&... args) {
+        return ElementT(std::forward<Args>(args)...);
+    }
+};
+
+template<typename ElementT, typename... Args> std::unique_ptr<ElementT> makeElement(Args&&... args) {
+    return ElementConstructionAccess::create<ElementT>(std::forward<Args>(args)...);
+}
+
+template<typename ElementT, typename... Args> ElementT makeElementValue(Args&&... args) {
+    return ElementConstructionAccess::createValue<ElementT>(std::forward<Args>(args)...);
+}
+
+struct LayoutContextKey {
+    const CSS::StyleRuleSet* styleRuleSet = nullptr;
+    const TextMeasurer* textMetrics = nullptr;
+    std::uint64_t styleGeneration = 0;
+    std::uint64_t textMetricsGeneration = 0;
+    Layout::Direction direction = Layout::Direction::LeftToRight;
+    ScrollbarMode scrollbarMode = ScrollbarMode::Classic;
+    NativeLayoutMetrics nativeMetrics;
+    Style::ColorSchemeContext colorSchemeContext;
+
+    constexpr bool operator==(const LayoutContextKey& other) const {
+        return styleRuleSet == other.styleRuleSet && textMetrics == other.textMetrics && styleGeneration == other.styleGeneration
+            && textMetricsGeneration == other.textMetricsGeneration && direction == other.direction && scrollbarMode == other.scrollbarMode
+            && nativeMetrics == other.nativeMetrics && colorSchemeContext == other.colorSchemeContext;
+    }
+};
+
+struct ElementLayoutCache {
+    Layout::Vec2 measuredSize;
+    Layout::Vec2 intrinsicSize;
+    Layout::Vec2 minContentSize;
+    float measuredWidth = 0.f;
+    float measuredHeight = 0.f;
+    LayoutContextKey layoutContext;
+    bool measuredWidthSet = false;
+    bool measuredHeightSet = false;
+    bool measuredRectExplicit = false;
+    bool measuredRectConstraintSet = false;
+    float measuredRectWidth = 0.f;
+    float measuredRectHeight = 0.f;
+    bool measureValid = false;
+    bool intrinsicValid = false;
+    bool arrangeValid = false;
+};
+
+struct ElementPrivateData {
+    std::shared_ptr<char> lifetime = std::make_shared<char>(0);
+    MountEpoch mountEpoch;
+    ElementLayoutCache layoutCache;
+};
+
+class NodeAccess {
+public:
+    static std::weak_ptr<char> lifetime(const Node& node) { return node.mLifetime; }
+    static void setParent(Node& node, Node* parent) {
+        node.mParentNode = parent;
+        node.mParent = parent ? parent->asElement() : nullptr;
+    }
+    static void setOwnerDocument(Node& node, Document* document) { node.mOwnerDocument = document; }
+    static bool flowBreakBefore(const Node& node) { return node.mFlowBreakBefore; }
+    static void setFlowBreakBefore(Node& node, bool enabled) { node.mFlowBreakBefore = enabled; }
+};
+
+class ElementInternalAccess {
+public:
+    using NodeOwners = std::vector<std::unique_ptr<Node>>;
+
+    static std::weak_ptr<char> lifetime(const Element& element) { return element.mPrivate->lifetime; }
+    static MountEpoch& mountEpoch(Element& element) { return element.mPrivate->mountEpoch; }
+    static const MountEpoch& mountEpoch(const Element& element) { return element.mPrivate->mountEpoch; }
+    static std::uint64_t topologyEpoch(const Element& element) { return element.mChildTopologyRevision; }
+    static bool isMounted(const Element& element) { return element.surface() != nullptr; }
+    static ElementLayoutCache& layoutCache(Element& element) { return element.mPrivate->layoutCache; }
+    static const ElementLayoutCache& layoutCache(const Element& element) { return element.mPrivate->layoutCache; }
+    static const Layout::Rect& scrollableOverflow(const Element& element) { return element.mScrollableOverflow; }
+    static const Layout::Rect& scrollport(const Element& element) { return element.mScrollport; }
+    static void setIdScopeRoot(Element& element) { element.setIdScopeRoot(true); }
+    static void setHovered(Element& element, bool hovered) { element.setHovered(hovered); }
+    static void setActive(Element& element, bool active) { element.setActive(active); }
+    static void setFocused(Element& element, bool focused) { element.setFocused(focused); }
+    static void setFocusVisible(Element& element, bool focusVisible) { element.setFocusVisible(focusVisible); }
+};
+
+class NodeRef {
+public:
+    NodeRef() = default;
+    NodeRef(Node* node) { set(node); }
+
+    Node* get() const noexcept { return mLifetime.expired() ? nullptr : mNode; }
+    Element* element() const noexcept {
+        Node* node = get();
+        return node ? node->asElement() : nullptr;
+    }
+    Text* text() const noexcept {
+        Node* node = get();
+        return node ? node->asText() : nullptr;
+    }
+    explicit operator bool() const noexcept { return get() != nullptr; }
+
+    void set(Node* node) {
+        mNode = node;
+        mLifetime = node ? NodeAccess::lifetime(*node) : std::weak_ptr<char>();
+    }
+
+private:
+    Node* mNode = nullptr;
+    std::weak_ptr<char> mLifetime;
+};
+
+class NodeChildren {
+public:
+    class Iterator {
+    public:
+        using iterator_category = std::forward_iterator_tag;
+        using value_type = Node;
+        using difference_type = std::ptrdiff_t;
+        using pointer = Node*;
+        using reference = Node&;
+
+        Iterator() = default;
+        explicit Iterator(const ElementInternalAccess::NodeOwners* nodes, std::size_t index)
+            : mNodes(nodes)
+            , mIndex(index) {}
+
+        Node& operator*() const { return *(*mNodes)[mIndex]; }
+        Node* operator->() const { return (*mNodes)[mIndex].get(); }
+        Iterator& operator++() {
+            ++mIndex;
+            return *this;
+        }
+        friend bool operator==(const Iterator& left, const Iterator& right) {
+            return left.mNodes == right.mNodes && left.mIndex == right.mIndex;
+        }
+        friend bool operator!=(const Iterator& left, const Iterator& right) { return !(left == right); }
+
+    private:
+        const ElementInternalAccess::NodeOwners* mNodes = nullptr;
+        std::size_t mIndex = 0;
+    };
+
+    Iterator begin() const { return Iterator(mNodes, 0); }
+    Iterator end() const { return Iterator(mNodes, mNodes ? mNodes->size() : 0); }
+    std::size_t size() const { return mNodes ? mNodes->size() : 0; }
+    bool empty() const { return begin() == end(); }
+
+private:
+    explicit NodeChildren(const ElementInternalAccess::NodeOwners* nodes)
+        : mNodes(nodes) {}
+
+    friend NodeChildren nodes(Element& element);
+    const ElementInternalAccess::NodeOwners* mNodes = nullptr;
+};
+
+class ConstNodeChildren {
+public:
+    class Iterator {
+    public:
+        using iterator_category = std::forward_iterator_tag;
+        using value_type = Node;
+        using difference_type = std::ptrdiff_t;
+        using pointer = const Node*;
+        using reference = const Node&;
+
+        Iterator() = default;
+        explicit Iterator(const ElementInternalAccess::NodeOwners* nodes, std::size_t index)
+            : mNodes(nodes)
+            , mIndex(index) {}
+
+        const Node& operator*() const { return *(*mNodes)[mIndex]; }
+        const Node* operator->() const { return (*mNodes)[mIndex].get(); }
+        Iterator& operator++() {
+            ++mIndex;
+            return *this;
+        }
+        friend bool operator==(const Iterator& left, const Iterator& right) {
+            return left.mNodes == right.mNodes && left.mIndex == right.mIndex;
+        }
+        friend bool operator!=(const Iterator& left, const Iterator& right) { return !(left == right); }
+
+    private:
+        const ElementInternalAccess::NodeOwners* mNodes = nullptr;
+        std::size_t mIndex = 0;
+    };
+
+    Iterator begin() const { return Iterator(mNodes, 0); }
+    Iterator end() const { return Iterator(mNodes, mNodes ? mNodes->size() : 0); }
+    std::size_t size() const { return mNodes ? mNodes->size() : 0; }
+    bool empty() const { return begin() == end(); }
+
+private:
+    explicit ConstNodeChildren(const ElementInternalAccess::NodeOwners* nodes)
+        : mNodes(nodes) {}
+
+    friend ConstNodeChildren nodes(const Element& element);
+    const ElementInternalAccess::NodeOwners* mNodes = nullptr;
+};
+
+Element* findElementInScope(Element& element, std::string_view id);
+const Element* findElementInScope(const Element& element, std::string_view id);
+struct ElementIdIndex {
+    using ElementPointer = Element*;
+
+    std::map<std::string, Element*> first;
+    std::set<std::string> ambiguous;
+
+    void add(Element& element) {
+        if (element.id().empty())
+            return;
+        if (!first.emplace(element.id(), &element).second)
+            ambiguous.emplace(element.id());
+    }
+};
+struct ConstElementIdIndex {
+    using ElementPointer = const Element*;
+
+    std::map<std::string, const Element*> first;
+    std::set<std::string> ambiguous;
+
+    void add(const Element& element) {
+        if (element.id().empty())
+            return;
+        if (!first.emplace(element.id(), &element).second)
+            ambiguous.emplace(element.id());
+    }
+};
+void indexElementsInScope(Element& element, ElementIdIndex& index);
+void indexElementsInScope(const Element& element, ConstElementIdIndex& index);
+Node& appendText(Element& parent, std::string text);
+Node& appendLocalizedText(Element& parent, LocalizedText text, std::string html);
+NodeChildren nodes(Element& element);
+ConstNodeChildren nodes(const Element& element);
+
+template<typename ElementT> class ElementVisit;
+} // namespace Core::detail
+
+namespace Core {
+template<typename ElementT> class ElementRef {
+    using ElementInternalAccess = detail::ElementInternalAccess;
+    using Lifetime = std::weak_ptr<char>;
+    using MountEpoch = detail::MountEpoch;
+
+public:
+    ElementRef() = default;
+    ElementRef(ElementT* element) { set(element); }
+
+    ElementT* get() const { return mLifetime.expired() ? nullptr : mElement; }
+    ElementT* getMounted() const {
+        ElementT* element = get();
+        return element && ElementInternalAccess::isMounted(*element) && ElementInternalAccess::mountEpoch(*element) == mMountEpoch
+            ? element
+            : nullptr;
+    }
+    ElementT* operator->() const { return get(); }
+    ElementT& operator*() const { return *get(); }
+    explicit operator bool() const { return get() != nullptr; }
+
+    void set(ElementT* element) {
+        mElement = element;
+        mLifetime = element ? ElementInternalAccess::lifetime(*element) : Lifetime {};
+        mMountEpoch = element ? ElementInternalAccess::mountEpoch(*element) : MountEpoch {};
+    }
+
+private:
+    ElementT* mElement = nullptr;
+    Lifetime mLifetime;
+    MountEpoch mMountEpoch;
+};
+
+namespace detail {
+template<typename ElementT> class ElementVisit {
+public:
+    static_assert(std::is_same_v<ElementT, Core::Element> || std::is_same_v<ElementT, const Core::Element>);
+
+    ElementVisit() = default;
+    explicit ElementVisit(ElementT& element)
+        : lifetime(&element)
+        , parentLifetime(element.parentElement())
+        , surface(element.surface())
+        , parentNode(element.parentNode())
+        , parent(element.parentElement())
+        , layoutRevision(element.mLayoutInvalidationRevision)
+        , childTopologyRevision(element.mChildTopologyRevision)
+        , parentChildTopologyRevision(parent ? parent->mChildTopologyRevision : 0)
+        , styleRevision(element.mStyleRevision)
+        , mountEpoch(ElementInternalAccess::mountEpoch(element)) {}
+
+    ElementT* get() const { return lifetime.get(); }
+    bool objectAlive() const { return get() != nullptr; }
+    bool mountValid() const {
+        const ElementT* element = get();
+        return element && element->surface() == surface && ElementInternalAccess::mountEpoch(*element) == mountEpoch;
+    }
+    bool topologyValid() const {
+        const ElementT* element = get();
+        const Element* currentParent = parentLifetime.get();
+        return element && currentParent == parent && element->parentNode() == parentNode && element->parentElement() == parent
+            && element->mChildTopologyRevision == childTopologyRevision
+            && (!parent || currentParent->mChildTopologyRevision == parentChildTopologyRevision);
+    }
+    bool layoutValid() const {
+        const ElementT* element = get();
+        return mountValid() && topologyValid() && element->mLayoutInvalidationRevision == layoutRevision;
+    }
+    bool styleValid() const {
+        const ElementT* element = get();
+        return mountValid() && topologyValid() && element->mStyleRevision == styleRevision;
+    }
+    bool attachedTo(const Element& expectedParent) const {
+        const ElementT* element = get();
+        return element && element->parentElement() == &expectedParent;
+    }
+
+    ElementRef<ElementT> lifetime;
+    ElementRef<const Element> parentLifetime;
+    const Surface* surface = nullptr;
+    const Node* parentNode = nullptr;
+    const Element* parent = nullptr;
+    std::uint64_t layoutRevision = 0;
+    std::uint64_t childTopologyRevision = 0;
+    std::uint64_t parentChildTopologyRevision = 0;
+    std::uint64_t styleRevision = 0;
+    MountEpoch mountEpoch;
+};
+} // namespace detail
+
+using ElementVisit = detail::ElementVisit<Element>;
+using ConstElementVisit = detail::ElementVisit<const Element>;
+} // namespace Core

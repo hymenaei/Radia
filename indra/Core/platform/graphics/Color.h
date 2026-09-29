@@ -5,7 +5,7 @@
 
 #pragma once
 
-namespace radia::ui {
+namespace Core {
 struct Color {
     float r = 1.f;
     float g = 1.f;
@@ -13,10 +13,14 @@ struct Color {
     float a = 1.f;
 
     Color() = default;
-    Color(float red, float green, float blue, float alpha = 1.f) : r(red), g(green), b(blue), a(alpha) {}
+    Color(float red, float green, float blue, float alpha = 1.f)
+        : r(red)
+        , g(green)
+        , b(blue)
+        , a(alpha) {}
 
     Color withAlpha(float alpha) const { return Color(r, g, b, alpha); }
 
     friend bool operator==(const Color&, const Color&) = default;
 };
-} // namespace radia::ui
+} // namespace Core

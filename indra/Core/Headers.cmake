@@ -1,9 +1,80 @@
 set(Core_HEADERS
+    bindings/Binder.h
+    bindings/EventRegistration.h
+    bindings/KeybindingPresentation.h
+    bindings/SettingResolver.h
+    bindings/ValueBinding.h
+    css/CSSRules.h
+    css/StyleSheet.h
     css/UserAgentStyleSheet.h
     css/parser/CSSPropertyParser.h
+    css/parser/CSSTokenStream.h
+    css/values/CSSColor.h
     css/values/CSSValue.h
+    dom/Document.h
+    dom/Element.h
+    dom/ElementInternal.h
+    dom/Event.h
+    dom/EventHandlerCall.h
+    dom/Fragment.h
+    dom/Node.h
+    dom/Text.h
+    html/HTMLButtonElement.h
+    html/HTMLElement.h
+    html/HTMLElementFactory.h
+    html/HTMLFieldsetElement.h
+    html/HTMLFloaterElement.h
+    html/HTMLInputElement.h
+    html/HTMLLabelElement.h
+    html/HTMLName.h
+    html/HTMLPanelElement.h
+    inspector/Diagnostic.h
     layout/BorderImageGrid.h
-    layout/Geometry.h
+    layout/IntrinsicSizeConstraints.h
+    layout/LayoutEngine.h
+    layout/LayoutGeometry.h
+    layout/LayoutPass.h
+    layout/LayoutPrimitives.h
+    layout/ScrollLayoutOptions.h
+    layout/TextLayout.h
+    layout/TreeTraversalCache.h
+    loader/InlineElements.h
+    loader/ResourceBuildResult.h
+    loader/ResourceCompiler.h
+    loader/ResourceElementDefinition.h
+    loader/ResourceProvider.h
+    loader/SourceDocument.h
+    localization/LocalizationCatalog.h
+    localization/LocalizedText.h
     platform/graphics/Color.h
+    platform/graphics/NativeAppearance.h
+    platform/graphics/OpenGLPaintContext.h
+    platform/graphics/OpenGLPaintState.h
+    platform/graphics/SystemFontProvider.h
+    platform/graphics/TextMeasurer.h
+    rendering/PaintContext.h
+    rendering/PaintTarget.h
+    rendering/Path.h
+    rendering/RasterImage.h
+    rendering/RecordingPaintContext.h
+    rendering/Tessellator.h
+    runtime/System.h
     style/Ref.h
+    style/computed/ComputedStyle.h
+    style/computed/PseudoElement.h
+    style/computed/StylePass.h
+    style/computed/StyleProperty.h
+    surface/FloaterResize.h
+    surface/ScrollGeometry.h
+    surface/Surface.h
+    svg/graphics/SVGImage.h
+    theme/SkinCompiler.h
+    theme/SkinGeneration.h
+)
+
+set(Core_PRIVATE_HEADERS
+    dom/EventHandlerCallInternal.h
+    dom/FragmentInternal.h
+    dom/NodeMutation.h
+    theme/SkinGenerationInternal.h
 )

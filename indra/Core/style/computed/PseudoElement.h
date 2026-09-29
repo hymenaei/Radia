@@ -42,8 +42,8 @@ public:
     const ComputedStyle& style() const noexcept { return mStyle; }
 
 private:
-    friend class Element;
-    friend class HTMLInputElement;
+    friend class Core::Element;
+    friend class Core::HTMLInputElement;
     friend class Layout::Engine;
     friend class Pass;
 

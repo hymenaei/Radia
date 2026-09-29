@@ -911,7 +911,7 @@ struct FontSelectionRequest {
 };
 
 struct LineHeight {
-    using Number = Number<Nonnegative, float>;
+    using Number = Style::Number<Nonnegative, float>;
     using Length = LengthValue<Nonnegative, float>;
 
     constexpr LineHeight(CSS::Keyword::Normal keyword)

@@ -140,26 +140,26 @@ std::optional<SystemFontMatch> match(std::string_view familyName, const Style::F
     int faceIndex = 0;
     const bool hasPath = FcPatternGetString(font, FC_FILE, 0, &path) == FcResultMatch;
     FcPatternGetInteger(font, FC_INDEX, 0, &faceIndex);
-    FcChar8* familyName = nullptr;
+    FcChar8* matchedFamilyName = nullptr;
     FcChar8* fullName = nullptr;
     FcChar8* postScriptName = nullptr;
-    FcPatternGetString(font, FC_FAMILY, 0, &familyName);
+    FcPatternGetString(font, FC_FAMILY, 0, &matchedFamilyName);
     FcPatternGetString(font, FC_FULLNAME, 0, &fullName);
     FcPatternGetString(font, FC_POSTSCRIPT_NAME, 0, &postScriptName);
     std::optional<SystemFontMatch> match;
     if (hasPath && path)
         match.emplace(SystemFontMatch {reinterpret_cast<const char*>(path), faceIndex,
-            familyName ? std::string(reinterpret_cast<const char*>(familyName)) : std::string {},
+            matchedFamilyName ? std::string(reinterpret_cast<const char*>(matchedFamilyName)) : std::string {},
             fullName ? std::string(reinterpret_cast<const char*>(fullName)) : std::string {},
             postScriptName ? std::string(reinterpret_cast<const char*>(postScriptName)) : std::string {}});
     FcPatternDestroy(font);
     return match;
 }
 
-bool exactName(FcPattern* font, FcObject object, std::string_view expected) {
+bool exactName(FcPattern* font, const char* propertyName, std::string_view expected) {
     const std::string folded = lowerASCII(expected);
     FcChar8* value = nullptr;
-    for (int index = 0; FcPatternGetString(font, object, index, &value) == FcResultMatch; ++index)
+    for (int index = 0; FcPatternGetString(font, propertyName, index, &value) == FcResultMatch; ++index)
         if (lowerASCII(reinterpret_cast<const char*>(value)) == folded)
             return true;
     return false;

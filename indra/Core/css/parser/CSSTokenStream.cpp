@@ -233,24 +233,36 @@ std::optional<float> parseNumber(std::string_view source) {
     if (!source.empty() && source.front() == '+')
         source.remove_prefix(1);
 
-    float value = 0.f;
-    const auto [end, error] = std::from_chars(source.data(), source.data() + source.size(), value, std::chars_format::general);
-    if (error == std::errc::result_out_of_range) {
+    if (source.empty())
+        return std::nullopt;
+
+    const auto parseWithStream = [&source]() -> std::optional<float> {
+        float parsedValue = 0.f;
         std::istringstream fallback {std::string(source)};
         fallback.imbue(std::locale::classic());
-        fallback >> value;
+        fallback >> parsedValue;
         if (fallback.fail()) {
-            if (value != 0.f)
+            if (parsedValue != 0.f)
                 return std::nullopt;
             fallback.clear();
         }
-        if (fallback.peek() != std::char_traits<char>::eof() || !std::isfinite(value))
+        if (fallback.peek() != std::char_traits<char>::eof() || !std::isfinite(parsedValue))
             return std::nullopt;
-        return value;
-    }
+        return parsedValue;
+    };
+
+// Apple's floating-point from_chars requires macOS 26.
+#if defined(__APPLE__)
+    return parseWithStream();
+#else
+    float value = 0.f;
+    const auto [end, error] = std::from_chars(source.data(), source.data() + source.size(), value, std::chars_format::general);
+    if (error == std::errc::result_out_of_range)
+        return parseWithStream();
     if (error != std::errc {} || end != source.data() + source.size() || !std::isfinite(value))
         return std::nullopt;
     return value;
+#endif
 }
 
 bool isNonPrintable(std::uint32_t value) {
@@ -303,9 +315,9 @@ bool isClosingBlock(TokenKind kind) {
 }
 
 bool isMatchingBlock(TokenKind open, TokenKind close) {
-    return (open == TokenKind::Function || open == TokenKind::OpenParen) && close == TokenKind::CloseParen
-        || open == TokenKind::OpenBracket && close == TokenKind::CloseBracket
-        || open == TokenKind::OpenBrace && close == TokenKind::CloseBrace;
+    return ((open == TokenKind::Function || open == TokenKind::OpenParen) && close == TokenKind::CloseParen)
+        || (open == TokenKind::OpenBracket && close == TokenKind::CloseBracket)
+        || (open == TokenKind::OpenBrace && close == TokenKind::CloseBrace);
 }
 
 std::size_t trimTokenBegin(const TokenStream& stream, std::size_t begin, std::size_t end) {
@@ -373,7 +385,7 @@ TokenStream::TokenStream(std::string_view source)
     const auto addToken = [this, &commentBeforeNextToken](TokenKind kind, std::size_t begin, std::size_t end) {
         std::optional<float> numericValue;
         if (kind == TokenKind::Number || kind == TokenKind::Dimension || kind == TokenKind::Percentage) {
-            const std::string_view token = mSource.substr(begin, end - begin);
+            const std::string_view token = std::string_view(mSource).substr(begin, end - begin);
             numericValue = parseNumber(token.substr(0, consumeNumber(token, 0)));
         }
         mTokens.push_back({kind, begin, end, kNoMatchingToken, commentBeforeNextToken, numericValue});

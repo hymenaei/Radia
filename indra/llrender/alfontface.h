@@ -46,6 +46,7 @@ typedef struct FT_FaceRec_* ALFT_Face;
 struct hb_font_t;
 struct LLFontGlyphInfo;
 class  LLFontFreetype;
+class  LLFontGpuGlyphCache;
 // Defined in llfontregistry.h; forward-declared here to keep this header
 // independent of the registry. Translation units that need the values
 // (e.g. alfontface.cpp) include llfontregistry.h directly.
@@ -100,6 +101,7 @@ struct ALFontFaceKey
     EFontHinting  hinting;
     S32           flags;
     ALFontVarAxes var_axes;     // wght/opsz/ital/wdth/slnt (each independently optional)
+    bool          gpu_linear = false;
 
     bool operator==(const ALFontFaceKey& o) const noexcept
     {
@@ -110,6 +112,7 @@ struct ALFontFaceKey
             && horz_dpi == o.horz_dpi
             && hinting == o.hinting
             && flags == o.flags
+            && gpu_linear == o.gpu_linear
             && var_axes == o.var_axes;
     }
 
@@ -123,6 +126,7 @@ struct ALFontFaceKey
         boost::hash_combine(seed, k.horz_dpi);
         boost::hash_combine(seed, static_cast<S32>(k.hinting));
         boost::hash_combine(seed, k.flags);
+        boost::hash_combine(seed, k.gpu_linear);
         // Axis values participate in the hash only when set; an unset
         // axis must not perturb the bucket from a key with no axes set
         // (so the common no-axes-configured path keeps a stable hash).
@@ -153,11 +157,14 @@ public:
     bool load(const std::string& filename, S32 face_index,
               F32 point_size, F32 vert_dpi, F32 horz_dpi,
               EFontHinting hinting, S32 flags,
-              const ALFontVarAxes& var_axes = {});
+              const ALFontVarAxes& var_axes = {},
+              bool gpu_linear = false);
 
     ALFT_Face face() const { return mFTFace; }
     bool      isValid() const { return mFTFace != nullptr; }
     EFontHinting hinting() const { return mHinting; }
+    U16 unitsPerEm() const        { return mUnitsPerEm; }
+    F32 designToPixelScale() const { return mDesignToPixelScale; }
 
     // Codepoint -> FT glyph index, cached. Equivalent to FT_Get_Char_Index
     // but skips the cmap binary search on repeated lookups. A cached value
@@ -174,6 +181,10 @@ public:
     bool useSubpixelPen() const { return mUseSubpixelPen; }
     bool hasColor() const       { return mHasColor; }
     bool hasSvg() const         { return mHasSvg; }
+    bool useLinearMetrics() const
+    {
+        return mGpuLinear && mUnitsPerEm > 0 && !mHasColor && !mHasSvg;
+    }
     // True iff the face carries a COLR table whose version >= 1. FT_HAS_COLOR
     // is true for any color table (sbix / CBDT / COLRv0 / COLRv1 / SVG); only
     // COLRv1 needs the hb-raster paint walker — FT itself rasterizes the
@@ -210,6 +221,12 @@ public:
     // primary face share the atlas; the same Twemoji face used as a fallback
     // by N heads writes its emoji glyphs into ONE atlas instead of N.
     LLFontBitmapCache* getBitmapCache() const { return mFontBitmapCachep; }
+
+    // Size-independent analytic glyph data. COLRv1 gets a separate paint
+    // cache; bitmap/SVG color formats intentionally remain on the atlas path.
+    LLFontGpuGlyphCache* getGpuGlyphCache() const;
+    LLFontGpuGlyphCache* getGpuColorGlyphCache() const;
+    U64 getGpuCacheGeneration() const;
 
     // Per-face glyph cache, keyed on FT glyph index. Used by both the
     // codepoint path (which resolves wch -> glyph_index before the lookup)
@@ -301,8 +318,12 @@ private:
     // these stay at the load-time values and the assert in getHbFont fires.
     U16                mLoadedXPpem = 0;
     U16                mLoadedYPpem = 0;
+    U16                mUnitsPerEm  = 0;
+    F32                mDesignToPixelScale = 0.f;
 
     LLFontBitmapCache* mFontBitmapCachep = nullptr;
+    mutable LLFontGpuGlyphCache* mGpuGlyphCachep      = nullptr;
+    mutable LLFontGpuGlyphCache* mGpuColorGlyphCachep = nullptr;
     mutable glyph_info_map_t mGlyphInfoMap;
 
     // Earliest wall-clock time (seconds) at which collectGarbage() should
@@ -312,6 +333,7 @@ private:
     mutable F64 mNextGcTime = 0.0;
 
     bool mUseSubpixelPen = false;
+    bool mGpuLinear      = false;
     bool mHasColor       = false;
     bool mHasSvg         = false;
     bool mHasColrV1      = false;
@@ -336,9 +358,6 @@ void ALFontFace::erase_glyph_entries(Pred should_erase) const
             destroyGlyphInfo(it->second);
             it = mGlyphInfoMap.erase(it);
         }
-        else
-        {
-            ++it;
-        }
+        else ++it;
     }
 }

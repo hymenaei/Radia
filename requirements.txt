@@ -1,2 +1,3 @@
 # Python modules required by the viewer build and test suite
+json5>=0.13.0
 llsd

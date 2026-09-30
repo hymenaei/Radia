@@ -1,0 +1,130 @@
+/**
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
+ */
+
+#pragma once
+
+#include <cstdint>
+#include <functional>
+#include <optional>
+#include "HTMLButtonElement.h"
+#include "HTMLElement.h"
+
+namespace Core {
+class HTMLMinimizeButtonElement final : public HTMLButtonElement {
+    friend class detail::ElementConstructionAccess;
+    friend class detail::HTMLElementFactory;
+
+private:
+    HTMLMinimizeButtonElement();
+};
+
+class HTMLCloseButtonElement final : public HTMLButtonElement {
+    friend class detail::ElementConstructionAccess;
+    friend class detail::HTMLElementFactory;
+
+private:
+    HTMLCloseButtonElement();
+};
+
+class HTMLFloaterElement : public HTMLElement {
+    friend class Surface;
+    friend class detail::ElementConstructionAccess;
+    friend class detail::HTMLElementFactory;
+
+public:
+    std::string title() const;
+    bool closable() const { return mClosable; }
+    bool minimizable() const { return mMinimizable; }
+    bool resizable() const { return mResizable; }
+    bool closed() const { return mClosed; }
+    bool minimized() const { return mMinimized; }
+    bool dragging() const { return mInteraction == FloaterInteraction::Move; }
+    const Layout::Rect& expandedRect() const { return mExpandedRect; }
+    Layout::Vec2 authoredSize() const;
+    Layout::Vec2 authoredContentSize() const { return mAuthoredContentSize; }
+
+    Element* head() { return mHead; }
+    const Element* head() const { return mHead; }
+    Element* body() { return mBody; }
+    const Element* body() const { return mBody; }
+    HTMLButtonElement* closeButton() { return mCloseButton; }
+    const HTMLButtonElement* closeButton() const { return mCloseButton; }
+    HTMLButtonElement* minimizeButton() { return mMinimizeButton; }
+    const HTMLButtonElement* minimizeButton() const { return mMinimizeButton; }
+
+    HTMLFloaterElement& setLifecycleCallbacks(std::function<void()> onOpen, std::function<void()> onClose);
+    void open();
+    void close();
+    void setMinimized(bool minimized);
+    void toggleMinimized();
+    HTMLFloaterElement& setResizable(bool value);
+
+    bool defaultPointerEvents() const override { return true; }
+
+protected:
+    void onAttributeSet(std::string_view name, const std::optional<std::string>& value) override;
+    void onAttributeRemoved(std::string_view name) override;
+    bool beginPointerInteraction(const PointerEvent& event) override;
+    bool updatePointerInteraction(const PointerEvent& event) override;
+    bool endPointerInteraction(const PointerEvent& event) override;
+    void onChildWillBeRemoved(Element& child) override;
+    void onChildAdded(Element& child) override;
+    void onChildRemoved(Element& child) override;
+    void onDescendantAdded(Element& child) override;
+    void onDescendantWillBeRemoved(Element& child) override;
+    void onDescendantRemoved(Element& child) override;
+    void onChildrenCleared() override;
+    void onLocaleChanged(const System& system) override;
+
+private:
+    HTMLFloaterElement();
+
+    enum class FloaterInteraction : std::uint8_t {
+        Idle,
+        Move,
+        Resize
+    };
+
+    struct ResizeInteraction {
+        std::uint8_t edges = 0;
+        Layout::Vec2 initialPointer;
+        Layout::Rect initialRect;
+        Layout::Vec2 minimum;
+        std::optional<Layout::Rect> bounds;
+    };
+
+    bool overChromeButton(const Layout::Vec2& point) const;
+    Layout::Vec2 clampedPosition(const Layout::Vec2& position) const;
+    bool beginResizeInteraction(const PointerEvent& event, std::uint8_t edges, const Layout::Vec2& minimum,
+        const std::optional<Layout::Rect>& bounds);
+    void setAuthoredSize(const Layout::Vec2& size, const Layout::Vec2& contentSize);
+    void refreshAuthoredStructure();
+    void setMovementBounds(const Layout::Rect& bounds);
+    void clampToMovementBounds();
+    void normalizeMinimizedState();
+
+    Layout::Rect mMovementBounds;
+    Layout::Rect mExpandedRect;
+    Layout::Vec2 mDragOffset;
+    Layout::Vec2 mAuthoredSize;
+    Layout::Vec2 mAuthoredContentSize;
+    ResizeInteraction mResizeInteraction;
+    Element* mHead = nullptr;
+    Element* mBody = nullptr;
+    Element* mTitleElement = nullptr;
+    HTMLButtonElement* mCloseButton = nullptr;
+    HTMLButtonElement* mMinimizeButton = nullptr;
+    bool mClosable = false;
+    bool mMinimizable = false;
+    bool mResizable = false;
+    bool mUpdatingAttribute = false;
+    bool mClosed = false;
+    bool mMinimized = false;
+    FloaterInteraction mInteraction = FloaterInteraction::Idle;
+    bool mAuthoredSizeCaptured = false;
+    std::function<void()> mOnOpen;
+    std::function<void()> mOnClose;
+};
+} // namespace Core

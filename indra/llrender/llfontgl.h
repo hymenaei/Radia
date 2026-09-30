@@ -38,6 +38,8 @@
 #include "llrect.h"
 #include "v2math.h"
 
+#include <vector>
+
 class LLColor4;
 // Key used to request a font.
 class LLFontDescriptor;
@@ -82,6 +84,29 @@ public:
         DROP_SHADOW_SOFT
     };
 
+    struct ShadowParameters
+    {
+        ShadowType type = NO_SHADOW;
+        U8 alpha = 0;
+    };
+
+    struct RenderMetadata
+    {
+        bool emitted_fixed_color_glyph = false;
+        bool emitted_analytic_glyph = false;
+    };
+
+    struct TextSpacing
+    {
+        constexpr TextSpacing() noexcept : letter(0.f), word(0.f) {}
+        constexpr TextSpacing(F32 letter_spacing, F32 word_spacing) noexcept : letter(letter_spacing), word(word_spacing) {}
+
+        F32 letter;
+        F32 word;
+
+        bool any() const { return letter != 0.f || word != 0.f; }
+    };
+
     LLFontGL();
     ~LLFontGL();
 
@@ -91,6 +116,8 @@ public:
     void destroyGL();
 
     bool loadFace(const std::string& filename, F32 point_size, const F32 vert_dpi, const F32 horz_dpi, bool is_fallback, S32 face_n, EFontHinting hinting, S32 flags, const ALFontVarAxes& var_axes = {});
+    // Appends a loaded fallback retained by the chain; repeated attachment is a no-op.
+    void addFallbackFont(const LLFontGL& fallback) const;
 
     S32 getNumFaces(const std::string& filename);
     // U64: the stamp is a SUM of per-face S32 generations; a 64-bit unsigned
@@ -135,12 +162,14 @@ public:
                 F32* right_x=NULL,
                 bool use_ellipses = false,
                 bool use_color = true,
-                pass_boundary_cb_t on_pass_boundary = nullptr) const;
+                pass_boundary_cb_t on_pass_boundary = nullptr,
+                RenderMetadata* metadata = nullptr,
+                TextSpacing spacing = {}) const;
 
     S32 render(const LLWString &text, S32 begin_offset, F32 x, F32 y, const LLColor4 &color) const;
 
     // renderUTF8 does a conversion, so is slower!
-    S32 renderUTF8(const std::string &text, S32 begin_offset, F32 x, F32 y, const LLColor4 &color, HAlign halign,  VAlign valign, U8 style, ShadowType shadow, S32 max_chars = S32_MAX, S32 max_pixels = S32_MAX,  F32* right_x = NULL, bool use_ellipses = false, bool use_color = true) const;
+    S32 renderUTF8(const std::string &text, S32 begin_offset, F32 x, F32 y, const LLColor4 &color, HAlign halign,  VAlign valign, U8 style, ShadowType shadow, S32 max_chars = S32_MAX, S32 max_pixels = S32_MAX,  F32* right_x = NULL, bool use_ellipses = false, bool use_color = true, TextSpacing spacing = {}) const;
     S32 renderUTF8(const std::string &text, S32 begin_offset, S32 x, S32 y, const LLColor4 &color) const;
     S32 renderUTF8(const std::string &text, S32 begin_offset, S32 x, S32 y, const LLColor4 &color, HAlign halign, VAlign valign, U8 style = NORMAL, ShadowType shadow = NO_SHADOW) const;
 
@@ -158,7 +187,7 @@ public:
     F32 getWidthF32(const std::string& utf8text) const;
     F32 getWidthF32(const llwchar* wchars) const;
     F32 getWidthF32(const std::string& text, S32 offset, S32 max_chars) const;
-    F32 getWidthF32(const llwchar* wchars, S32 offset, S32 max_chars, bool no_padding = false) const;
+    F32 getWidthF32(const llwchar* wchars, S32 offset, S32 max_chars, bool no_padding = false, TextSpacing spacing = {}) const;
 
     // The following are called often, frequently with large buffers, so do not use a string interface
 
@@ -284,6 +313,10 @@ public:
     static LLFontGL* getFontSansSerifHuge();
     static LLFontGL* getFontSansSerifBold();
     static LLFontGL* getFont(const LLFontDescriptor& desc);
+    // Resolve an exact CSS pixel size (96 px/in) and OpenType/CSS weight.
+    // The registry canonicalizes and caches the resulting sized variable
+    // face, so repeated layout/paint requests are pointer-stable and cheap.
+    static LLFontGL* getFontAtPixelSize(const std::string& family, F32 pixel_size, U16 weight = 400, bool italic = false);
     // Use with legacy names like "SANSSERIF_SMALL" or "OCRA"
     static LLFontGL* getFontByName(const std::string& name);
     static LLFontGL* getFontDefault(); // default fallback font
@@ -296,6 +329,7 @@ public:
     static std::vector<std::pair<LLCoordGL, F32> > sOriginStack;
 
     static LLColor4 sShadowColor;
+    static ShadowParameters deriveShadowParameters(const LLColor4& foreground, ShadowType requested);
 
     // Shader-based shadow expansion: emit 1 dilated shadow quad per glyph and
     // let the fragment shader take 5 atlas taps instead of emitting 5 quads
@@ -305,6 +339,11 @@ public:
     // text+emoji strings; flip via LLFontGL::enableShaderShadow().
     static bool sEnableShaderShadow;
     static void enableShaderShadow(bool enable) { sEnableShaderShadow = enable; }
+
+    // Primary resolution-independent outline path. Unsupported color formats
+    // and hardware fall back to the legacy atlas renderer.
+    static bool sEnableFontGpu;
+    static void enableFontGpu(bool enable) { sEnableFontGpu = enable; }
 
     static F32 sVertDPI;
     static F32 sHorizDPI;

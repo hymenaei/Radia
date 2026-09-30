@@ -48,8 +48,10 @@
         "zlib"
       ]
     },
+    "fribidi",
     "glm",
     "harfbuzz",
+    "icu",
     {
       "name": "libavif",
       "features": [
@@ -138,6 +140,7 @@
     "secondlife-emoji-shortcodes",
     "simdjson",
     "simdutf",
+    "yaml-cpp",
     {
       "name": "sse2neon",
       "platform": "osx"

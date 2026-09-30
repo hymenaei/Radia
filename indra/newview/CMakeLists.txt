@@ -1704,11 +1704,11 @@ if (DARWIN)
   set(viewer_RESOURCE_FILES
     alchemy.icns
     # CMake doesn't seem to support Xcode language variants well just yet
-    English.lproj/InfoPlist.strings
-    English.lproj/language.txt
-    German.lproj/language.txt
-    Japanese.lproj/language.txt
-    Korean.lproj/language.txt
+    macos_resources/English.lproj/InfoPlist.strings
+    macos_resources/English.lproj/language.txt
+    macos_resources/German.lproj/language.txt
+    macos_resources/Japanese.lproj/language.txt
+    macos_resources/Korean.lproj/language.txt
     )
 
   LIST(APPEND viewer_SOURCE_FILES llappviewersdl.cpp)
@@ -1839,19 +1839,15 @@ endif (WINDOWS)
 
 # Add the xui files. This is handy for searching for xui elements
 # from within the IDE.
-file(GLOB_RECURSE viewer_XUI_FILES LIST_DIRECTORIES FALSE
-    ${CMAKE_CURRENT_SOURCE_DIR}/skins/*.xml)
-source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/skins PREFIX "XUI Files" FILES ${viewer_XUI_FILES})
-set_source_files_properties(${viewer_XUI_FILES}
-                            PROPERTIES HEADER_FILE_ONLY TRUE)
-list(APPEND viewer_SOURCE_FILES ${viewer_XUI_FILES})
+file(GLOB_RECURSE viewer_SKIN_FILES CONFIGURE_DEPENDS LIST_DIRECTORIES FALSE ${CMAKE_CURRENT_SOURCE_DIR}/skins/*)
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/skins PREFIX "Skin Files" FILES ${viewer_SKIN_FILES})
+set_source_files_properties(${viewer_SKIN_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
+list(APPEND viewer_SOURCE_FILES ${viewer_SKIN_FILES})
 
 # Add the shader sources
-file(GLOB_RECURSE viewer_SHADER_FILES LIST_DIRECTORIES FALSE
-    ${CMAKE_CURRENT_SOURCE_DIR}/app_settings/shaders/*.glsl)
-source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/app_settings/shaders PREFIX "Shaders" FILES ${viewer_SHADER_FILES})
-set_source_files_properties(${viewer_SHADER_FILES}
-                            PROPERTIES HEADER_FILE_ONLY TRUE)
+file(GLOB_RECURSE viewer_SHADER_FILES LIST_DIRECTORIES FALSE ${CMAKE_CURRENT_SOURCE_DIR}/app_settings/shaders/*.glsl)
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/app_settings/shaders PREFIX "Shader Files" FILES ${viewer_SHADER_FILES})
+set_source_files_properties(${viewer_SHADER_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
 list(APPEND viewer_SOURCE_FILES ${viewer_SHADER_FILES})
 
 # note that the scripts which publish these files are sensitive to the file
@@ -1869,10 +1865,12 @@ set(viewer_APPSETTINGS_FILES
     app_settings/logcontrol.xml
     app_settings/settings.xml
     app_settings/settings_alchemy.xml
+    app_settings/settings_radia.xml
     app_settings/settings_crash_behavior.xml
     app_settings/settings_files.xml
     app_settings/settings_per_account.xml
     app_settings/settings_per_account_alchemy.xml
+    app_settings/settings_per_account_radia.xml
     app_settings/std_bump.ini
     app_settings/toolbars.xml
     app_settings/trees.xml
@@ -1899,7 +1897,7 @@ set(viewer_CHARACTER_FILES
     character/genepool.xml
     )
 
-source_group("Character File" FILES ${viewer_CHARACTER_FILES})
+source_group("Character Files" FILES ${viewer_CHARACTER_FILES})
 
 set_source_files_properties(${viewer_CHARACTER_FILES}
                             PROPERTIES HEADER_FILE_ONLY TRUE)
@@ -1935,7 +1933,10 @@ add_executable(${VIEWER_BINARY_NAME}
 
 check_message_template(${VIEWER_BINARY_NAME})
 
-target_include_directories(${VIEWER_BINARY_NAME} PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
+target_include_directories(${VIEWER_BINARY_NAME}
+    PUBLIC ${CMAKE_CURRENT_BINARY_DIR}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    )
 
 target_precompile_headers(${VIEWER_BINARY_NAME} PRIVATE llviewerprecompiledheaders.h)
 
@@ -1996,6 +1997,7 @@ target_link_libraries(${VIEWER_BINARY_NAME}
         ll::tinygltf
         ll::tinyexr
         ll::minizip
+        Viewer
         )
 
 if (TARGET ll::velopack)
@@ -2359,9 +2361,6 @@ if (PACKAGE AND (RELEASE_CRASH_REPORTING OR NON_RELEASE_CRASH_REPORTING))
   endif (USE_BUGSPLAT)
 endif ()
 
-add_custom_target(viewer)
-add_dependencies(viewer ${VIEWER_BINARY_NAME})
-
 elseif(BUILD_TESTING)
 
 # Create a dummy executable for test projects to generate against when viewer build is disabled
@@ -2405,6 +2404,7 @@ if (BUILD_TESTING)
 #  )
 
   set(test_libs
+    Viewer
     llfilesystem
     llmath
     llcommon

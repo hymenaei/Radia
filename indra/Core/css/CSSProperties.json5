@@ -1,0 +1,1719 @@
+// TODO: Resolve anchor-size() in sizing and margin, percentage margin and padding during layout, and the third translate value in 3D rendering.
+// TODO: Convert width/height values stretch, contain, fit-content(<length-percentage>), and calc-size().
+// TODO: Support the full <line-style> list.
+// TODO: Support the full modern display syntax.
+// TODO: Support the actual vertical-align syntax.
+// TODO: Model text-decoration as a shorthand.
+{
+  "data_types": {
+    "<absolute-size>": "xx-small | x-small | small | medium | large | x-large | xx-large | xxx-large",
+    "<baseline-position>": "[ first | last ]? && baseline",
+    "<box-size>": "<length-percentage [0, inf]> | stretch | contain | min-content | max-content | fit-content | fit-content(<length-percentage [0, inf]>) | <calc-size()>",
+    "<content-distribution>": "space-between | space-around | space-evenly | stretch",
+    "<content-position>": "center | start | end | flex-start | flex-end",
+    "<gap-gutter>": "normal | <length-percentage [0, inf]> | <line-width>",
+    "<line-style>": "none | solid | outset | inset",
+    "<line-width>": "<length [0, inf]> | thin | medium | thick",
+    "<opacity-value>": "<number> | <percentage>",
+    "<overflow-position>": "safe | unsafe",
+    "<relative-size>": "smaller | larger",
+    "<self-position>": "center | start | end | self-start | self-end | flex-start | flex-end",
+    // TODO: Implement level 4 box-shadow <spread-shadow># "<'box-shadow-color'>? && [ [ none | <length>{2} ] [ <'box-shadow-blur'> <'box-shadow-spread'>? ]? ] && <'box-shadow-position'>?"
+    "<shadow>": "<color>? && [ <length>{2} [ <length [0, inf]> <length>? ]? ] && inset?",
+    "<sizing-value>": "min-content | max-content | fit-content | <length-percentage [0, inf]>"
+  },
+
+  "properties": {
+    "accent-color": {
+      "inherited": true,
+      "initial": "auto",
+      "codegen": {
+        "syntax": "auto | <color>",
+        "storage_path": ["mInheritedRareData"],
+        "storage_kind": "reference",
+        "type": "AccentColor"
+      }
+    },
+
+    "align-content": {
+      "inherited": false,
+      "initial": "normal",
+      "codegen": {
+        "syntax": "normal | <baseline-position> | <content-distribution> | <overflow-position>? <content-position>",
+        "storage_path": ["mNonInheritedData", "miscData"],
+        "storage_kind": "value",
+        "type": "AlignContent"
+      }
+    },
+
+    "align-items": {
+      "inherited": false,
+      "initial": "normal",
+      "codegen": {
+        "syntax": "normal | stretch | <baseline-position> | <overflow-position>? <self-position>",
+        "storage_path": ["mNonInheritedData", "miscData"],
+        "storage_kind": "value",
+        "type": "AlignItems"
+      }
+    },
+
+    "align-self": {
+      "inherited": false,
+      "initial": "auto",
+      "codegen": {
+        "syntax": "auto | <overflow-position>? [ normal | <self-position> ] | stretch | <baseline-position> | anchor-center",
+        "storage_path": ["mNonInheritedData", "miscData"],
+        "storage_kind": "value",
+        "type": "AlignSelf"
+      }
+    },
+
+    "appearance": {
+      "inherited": false,
+      "initial": "none",
+      "values": [
+        "auto",
+        "base",
+        "none"
+      ],
+      "codegen": {
+        "syntax": "<<values>>",
+        "storage_path": ["mNonInheritedData", "miscData"],
+        "storage_kind": "enum",
+        "type": "Appearance"
+      }
+    },
+
+    "backdrop-filter": {
+      "inherited": false,
+      "initial": "none",
+      "codegen": {
+        "syntax_unused": "none | <filter-value-list>",
+        "syntax_parser": "parseBackdropFilter",
+        "storage_path": ["mNonInheritedData", "rareData", "backdropFilter"],
+        "storage_kind": "reference",
+        "type": "Filter"
+      }
+    },
+
+    "background": {
+      "longhands": [
+        "background-color",
+        "background-image",
+        "background-position",
+        "background-size",
+        "background-repeat",
+        "background-origin",
+        "background-clip",
+        "background-attachment"
+      ],
+      "codegen": {
+        "syntax_unused": "<bg-layer>#? , <final-bg-layer>",
+        "syntax_parser": "parseBackground"
+      }
+    },
+
+    "background-attachment": {
+      "inherited": false,
+      "initial": "scroll",
+      "codegen": {
+        "disables_native_appearance": true,
+        "syntax_unused": "<attachment>#",
+        "syntax_parser": "parseBackgroundAttachment",
+        "storage_path": ["mNonInheritedData", "backgroundData", "background"]
+      }
+    },
+
+    "background-clip": {
+      "inherited": false,
+      "initial": "border-box",
+      "codegen": {
+        "disables_native_appearance": true,
+        "syntax_unused": "<bg-clip>#",
+        "syntax_parser": "parseBackgroundClip",
+        "storage_path": ["mNonInheritedData", "backgroundData", "background"]
+      }
+    },
+
+    "background-color": {
+      "inherited": false,
+      "initial": "transparent",
+      "codegen": {
+        "syntax": "<color>",
+        "storage_path": ["mNonInheritedData", "backgroundData"],
+        "storage_kind": "reference",
+        "type": "Color"
+      }
+    },
+
+    "background-image": {
+      "inherited": false,
+      "initial": "none",
+      "codegen": {
+        "disables_native_appearance": true,
+        "syntax_unused": "<image>#",
+        "syntax_parser": "parseBackgroundImage",
+        "storage_path": ["mNonInheritedData", "backgroundData", "background"]
+      }
+    },
+
+    "background-origin": {
+      "inherited": false,
+      "initial": "padding-box",
+      "codegen": {
+        "disables_native_appearance": true,
+        "syntax_unused": "<visual-box>#",
+        "syntax_parser": "parseBackgroundOrigin",
+        "storage_path": ["mNonInheritedData", "backgroundData", "background"]
+      }
+    },
+
+    "background-position": {
+      "inherited": false,
+      "initial": "0% 0%",
+      "codegen": {
+        "syntax_unused": "<bg-position>#",
+        "syntax_parser": "parseBackgroundPosition",
+        "storage_path": ["mNonInheritedData", "backgroundData", "background"]
+      }
+    },
+
+    "background-repeat": {
+      "inherited": false,
+      "initial": "repeat",
+      "codegen": {
+        "syntax_unused": "<repeat-style>#",
+        "syntax_parser": "parseBackgroundRepeat",
+        "storage_path": ["mNonInheritedData", "backgroundData", "background"]
+      }
+    },
+
+    "background-size": {
+      "inherited": false,
+      "initial": "auto",
+      "codegen": {
+        "syntax_unused": "<bg-size>#",
+        "syntax_parser": "parseBackgroundSize",
+        "storage_path": ["mNonInheritedData", "backgroundData", "background"]
+      }
+    },
+
+    "border": {
+      "longhands": [
+        "border-width",
+        "border-style",
+        "border-color"
+      ],
+      "reset_longhands": [
+        "border-image-source",
+        "border-image-slice",
+        "border-image-width",
+        "border-image-outset",
+        "border-image-repeat"
+      ],
+      "codegen": {
+        "syntax": "<line-width> || <line-style> || <color>"
+      }
+    },
+
+    "border-bottom": {
+      "longhands": [
+        "border-bottom-width",
+        "border-bottom-style",
+        "border-bottom-color"
+      ],
+      "codegen": {
+        "syntax": "<line-width> || <line-style> || <color>"
+      }
+    },
+
+    "border-bottom-color": {
+      "inherited": false,
+      "initial": "currentcolor",
+      "codegen": {
+        "group": {
+          "name": "border-color",
+          "member": "bottom"
+        },
+        "disables_native_appearance": true,
+        "syntax": "<color>",
+        "storage_path": ["mNonInheritedData", "surroundData", "border.colors"],
+        "storage_kind": "reference",
+        "type": "Color"
+      }
+    },
+
+    "border-bottom-left-radius": {
+      "inherited": false,
+      "initial": "0px",
+      "codegen": {
+        "group": {
+          "name": "border-radius",
+          "member": "bottom-left"
+        },
+        "disables_native_appearance": true,
+        "syntax": "<length-percentage [0, inf]> [ / <length-percentage [0, inf]> ]?",
+        "storage_path": ["mNonInheritedData", "surroundData", "border.radii"],
+        "storage_kind": "reference",
+        "type": "CornerRadius"
+      }
+    },
+
+    "border-bottom-right-radius": {
+      "inherited": false,
+      "initial": "0px",
+      "codegen": {
+        "group": {
+          "name": "border-radius",
+          "member": "bottom-right"
+        },
+        "disables_native_appearance": true,
+        "syntax": "<length-percentage [0, inf]> [ / <length-percentage [0, inf]> ]?",
+        "storage_path": ["mNonInheritedData", "surroundData", "border.radii"],
+        "storage_kind": "reference",
+        "type": "CornerRadius"
+      }
+    },
+
+    "border-bottom-style": {
+      "inherited": false,
+      "initial": "none",
+      "codegen": {
+        "group": {
+          "name": "border-style",
+          "member": "bottom"
+        },
+        "disables_native_appearance": true,
+        "syntax": "<line-style>",
+        "storage_path": ["mNonInheritedData", "surroundData", "border.styles"],
+        "storage_kind": "enum",
+        "type": "BorderStyle"
+      }
+    },
+
+    "border-bottom-width": {
+      "inherited": false,
+      "initial": "medium",
+      "codegen": {
+        "group": {
+          "name": "border-width",
+          "member": "bottom"
+        },
+        "disables_native_appearance": true,
+        "syntax": "<line-width>",
+        "storage_path": ["mNonInheritedData", "surroundData", "border.widths"],
+        "storage_kind": "reference",
+        "type": "LineWidth"
+      }
+    },
+
+    "border-color": {
+      "longhands": [
+        "border-top-color",
+        "border-right-color",
+        "border-bottom-color",
+        "border-left-color"
+      ],
+      "codegen": {
+        "syntax": "<color>{1,4}"
+      }
+    },
+
+    "border-image": {
+      "longhands": [
+        "border-image-source",
+        "border-image-slice",
+        "border-image-width",
+        "border-image-outset",
+        "border-image-repeat"
+      ],
+      "codegen": {
+        "syntax_unused": "<'border-image-source'> || <'border-image-slice'> [ / <'border-image-width'> | / <'border-image-width'>? / <'border-image-outset'> ]? || <'border-image-repeat'>",
+        "syntax_parser": "parseBorderImage"
+      }
+    },
+
+    "border-image-outset": {
+      "inherited": false,
+      "initial": "0",
+      "codegen": {
+        "syntax": "[ <length [0, inf]> | <number [0, inf]> ]{1,4}",
+        "storage_path": ["mNonInheritedData", "surroundData", "border.borderImage"],
+        "storage_name": "outset",
+        "storage_kind": "reference",
+        "type": "BorderImageOutset"
+      }
+    },
+
+    "border-image-repeat": {
+      "inherited": false,
+      "initial": "stretch",
+      "codegen": {
+        "syntax": "[ stretch | repeat | round | space ]{1,2}",
+        "storage_path": ["mNonInheritedData", "surroundData", "border.borderImage"],
+        "storage_name": "repeat",
+        "storage_kind": "reference",
+        "type": "BorderImageRepeat"
+      }
+    },
+
+    "border-image-slice": {
+      "inherited": false,
+      "initial": "100%",
+      "codegen": {
+        "syntax": "[ <number [0, inf]> | <percentage [0, inf]> ]{1,4} && fill?",
+        "storage_path": ["mNonInheritedData", "surroundData", "border.borderImage"],
+        "storage_name": "slice",
+        "storage_kind": "reference",
+        "type": "BorderImageSlice"
+      }
+    },
+
+    "border-image-source": {
+      "inherited": false,
+      "initial": "none",
+      "codegen": {
+        "syntax_unused": "none | <image>",
+        "syntax_parser": "parseBorderImageSource",
+        "storage_path": ["mNonInheritedData", "surroundData", "border.borderImage"],
+        "storage_name": "source",
+        "storage_kind": "reference",
+        "type": "Image"
+      }
+    },
+
+    "border-image-width": {
+      "inherited": false,
+      "initial": "1",
+      "codegen": {
+        "syntax": "[ <length-percentage [0, inf]> | <number [0, inf]> | auto ]{1,4}",
+        "storage_path": ["mNonInheritedData", "surroundData", "border.borderImage"],
+        "storage_name": "width",
+        "storage_kind": "reference",
+        "type": "BorderImageWidth"
+      }
+    },
+
+    "border-left": {
+      "longhands": [
+        "border-left-width",
+        "border-left-style",
+        "border-left-color"
+      ],
+      "codegen": {
+        "syntax": "<line-width> || <line-style> || <color>"
+      }
+    },
+
+    "border-left-color": {
+      "inherited": false,
+      "initial": "currentcolor",
+      "codegen": {
+        "group": {
+          "name": "border-color",
+          "member": "left"
+        },
+        "disables_native_appearance": true,
+        "syntax": "<color>",
+        "storage_path": ["mNonInheritedData", "surroundData", "border.colors"],
+        "storage_kind": "reference",
+        "type": "Color"
+      }
+    },
+
+    "border-left-style": {
+      "inherited": false,
+      "initial": "none",
+      "codegen": {
+        "group": {
+          "name": "border-style",
+          "member": "left"
+        },
+        "disables_native_appearance": true,
+        "syntax": "<line-style>",
+        "storage_path": ["mNonInheritedData", "surroundData", "border.styles"],
+        "storage_kind": "enum",
+        "type": "BorderStyle"
+      }
+    },
+
+    "border-left-width": {
+      "inherited": false,
+      "initial": "medium",
+      "codegen": {
+        "group": {
+          "name": "border-width",
+          "member": "left"
+        },
+        "disables_native_appearance": true,
+        "syntax": "<line-width>",
+        "storage_path": ["mNonInheritedData", "surroundData", "border.widths"],
+        "storage_kind": "reference",
+        "type": "LineWidth"
+      }
+    },
+
+    "border-radius": {
+      "longhands": [
+        "border-top-left-radius",
+        "border-top-right-radius",
+        "border-bottom-right-radius",
+        "border-bottom-left-radius"
+      ],
+      "codegen": {
+        "syntax_unused": "<length-percentage [0, inf]>{1,4} [ / <length-percentage [0, inf]>{1,4} ]?",
+        "syntax_unused_reason": "The slash couples separately expanded horizontal and vertical corner radii.",
+        "syntax_parser": "parseBorderRadius"
+      }
+    },
+
+    "border-right": {
+      "longhands": [
+        "border-right-width",
+        "border-right-style",
+        "border-right-color"
+      ],
+      "codegen": {
+        "syntax": "<line-width> || <line-style> || <color>"
+      }
+    },
+
+    "border-right-color": {
+      "inherited": false,
+      "initial": "currentcolor",
+      "codegen": {
+        "group": {
+          "name": "border-color",
+          "member": "right"
+        },
+        "disables_native_appearance": true,
+        "syntax": "<color>",
+        "storage_path": ["mNonInheritedData", "surroundData", "border.colors"],
+        "storage_kind": "reference",
+        "type": "Color"
+      }
+    },
+
+    "border-right-style": {
+      "inherited": false,
+      "initial": "none",
+      "codegen": {
+        "group": {
+          "name": "border-style",
+          "member": "right"
+        },
+        "disables_native_appearance": true,
+        "syntax": "<line-style>",
+        "storage_path": ["mNonInheritedData", "surroundData", "border.styles"],
+        "storage_kind": "enum",
+        "type": "BorderStyle"
+      }
+    },
+
+    "border-right-width": {
+      "inherited": false,
+      "initial": "medium",
+      "codegen": {
+        "group": {
+          "name": "border-width",
+          "member": "right"
+        },
+        "disables_native_appearance": true,
+        "syntax": "<line-width>",
+        "storage_path": ["mNonInheritedData", "surroundData", "border.widths"],
+        "storage_kind": "reference",
+        "type": "LineWidth"
+      }
+    },
+
+    "border-style": {
+      "longhands": [
+        "border-top-style",
+        "border-right-style",
+        "border-bottom-style",
+        "border-left-style"
+      ],
+      "codegen": {
+        "syntax": "<line-style>{1,4}"
+      }
+    },
+
+    "border-top": {
+      "longhands": [
+        "border-top-width",
+        "border-top-style",
+        "border-top-color"
+      ],
+      "codegen": {
+        "syntax": "<line-width> || <line-style> || <color>"
+      }
+    },
+
+    "border-top-color": {
+      "inherited": false,
+      "initial": "currentcolor",
+      "codegen": {
+        "group": {
+          "name": "border-color",
+          "member": "top"
+        },
+        "disables_native_appearance": true,
+        "syntax": "<color>",
+        "storage_path": ["mNonInheritedData", "surroundData", "border.colors"],
+        "storage_kind": "reference",
+        "type": "Color"
+      }
+    },
+
+    "border-top-left-radius": {
+      "inherited": false,
+      "initial": "0px",
+      "codegen": {
+        "group": {
+          "name": "border-radius",
+          "member": "top-left"
+        },
+        "disables_native_appearance": true,
+        "syntax": "<length-percentage [0, inf]> [ / <length-percentage [0, inf]> ]?",
+        "storage_path": ["mNonInheritedData", "surroundData", "border.radii"],
+        "storage_kind": "reference",
+        "type": "CornerRadius"
+      }
+    },
+
+    "border-top-right-radius": {
+      "inherited": false,
+      "initial": "0px",
+      "codegen": {
+        "group": {
+          "name": "border-radius",
+          "member": "top-right"
+        },
+        "disables_native_appearance": true,
+        "syntax": "<length-percentage [0, inf]> [ / <length-percentage [0, inf]> ]?",
+        "storage_path": ["mNonInheritedData", "surroundData", "border.radii"],
+        "storage_kind": "reference",
+        "type": "CornerRadius"
+      }
+    },
+
+    "border-top-style": {
+      "inherited": false,
+      "initial": "none",
+      "codegen": {
+        "group": {
+          "name": "border-style",
+          "member": "top"
+        },
+        "disables_native_appearance": true,
+        "syntax": "<line-style>",
+        "storage_path": ["mNonInheritedData", "surroundData", "border.styles"],
+        "storage_kind": "enum",
+        "type": "BorderStyle"
+      }
+    },
+
+    "border-top-width": {
+      "inherited": false,
+      "initial": "medium",
+      "codegen": {
+        "group": {
+          "name": "border-width",
+          "member": "top"
+        },
+        "disables_native_appearance": true,
+        "syntax": "<line-width>",
+        "storage_path": ["mNonInheritedData", "surroundData", "border.widths"],
+        "storage_kind": "reference",
+        "type": "LineWidth"
+      }
+    },
+
+    "border-width": {
+      "longhands": [
+        "border-top-width",
+        "border-right-width",
+        "border-bottom-width",
+        "border-left-width"
+      ],
+      "codegen": {
+        "syntax": "<line-width>{1,4}"
+      }
+    },
+
+    "bottom": {
+      "inherited": false,
+      "initial": "auto",
+      "codegen": {
+        "group": {
+          "name": "inset",
+          "member": "bottom"
+        },
+        "syntax": "auto | <length-percentage>",
+        "storage_path": ["mNonInheritedData", "surroundData", "inset"],
+        "storage_kind": "reference",
+        "type": "InsetEdge"
+      }
+    },
+
+    "box-shadow": {
+      "inherited": false,
+      "initial": "none",
+      "codegen": {
+        "syntax": "none | <shadow>#",
+        "storage_path": ["mNonInheritedData", "miscData"],
+        "storage_kind": "reference",
+        "storage_name": "shadows",
+        "type": "BoxShadows"
+      }
+    },
+
+    "box-sizing": {
+      "inherited": false,
+      "initial": "content-box",
+      "values": [
+        "content-box",
+        "border-box"
+      ],
+      "codegen": {
+        "syntax": "<<values>>",
+        "storage_path": ["mNonInheritedFlags"],
+        "storage_kind": "enum",
+        "type": "BoxSizing"
+      }
+    },
+
+    "color": {
+      "inherited": true,
+      "initial": "canvastext",
+      "codegen": {
+        "syntax": "<color>",
+        "storage_path": ["mInheritedData"],
+        "storage_kind": "reference",
+        "type": "Color"
+      }
+    },
+
+    "color-scheme": {
+      "inherited": true,
+      "initial": "normal",
+      "codegen": {
+        "syntax_unused": "normal | [ light | dark | <custom-ident> ]+ && only?",
+        "syntax_unused_reason": "The property keeps an ordered color-scheme value and filters repeated keywords.",
+        "syntax_parser": "parseColorScheme",
+        "storage_path": ["mInheritedRareData"],
+        "storage_kind": "reference",
+        "type": "ColorScheme"
+      }
+    },
+
+    "column-gap": {
+      "inherited": false,
+      "initial": "normal",
+      "codegen": {
+        "syntax": "<gap-gutter>",
+        "storage_path": ["mNonInheritedData", "miscData"],
+        "storage_kind": "reference",
+        "type": "GapGutter"
+      }
+    },
+
+    "display": {
+      "inherited": false,
+      "initial": "inline",
+      "values": [
+        "inline",
+        "inline-block",
+        "block",
+        "flex",
+        "inline-flex",
+        "grid",
+        "inline-grid",
+        "none"
+      ],
+      "codegen": {
+        "syntax": "<<values>>",
+        "storage_path": ["mNonInheritedFlags"],
+        "storage_kind": "enum",
+        "type": "Display"
+      }
+    },
+
+    "flex": {
+      "longhands": [
+        "flex-grow",
+        "flex-shrink",
+        "flex-basis"
+      ],
+      "codegen": {
+        "syntax_unused": "none | [ <'flex-grow'> <'flex-shrink'>? || <'flex-basis'> ]",
+        "syntax_unused_reason": "The special none value and omitted component defaults need custom parsing.",
+        "syntax_parser": "parseFlex"
+      }
+    },
+
+    "flex-basis": {
+      "inherited": false,
+      "initial": "auto",
+      "codegen": {
+        "syntax": "auto | content | <sizing-value>",
+        "storage_path": ["mNonInheritedData", "miscData", "flexibleBox"],
+        "storage_kind": "reference",
+        "type": "FlexBasis"
+      }
+    },
+
+    "flex-direction": {
+      "inherited": false,
+      "initial": "row",
+      "values": [
+        "row",
+        "row-reverse",
+        "column",
+        "column-reverse"
+      ],
+      "codegen": {
+        "syntax": "<<values>>",
+        "storage_path": ["mNonInheritedData", "miscData", "flexibleBox"],
+        "storage_kind": "enum",
+        "type": "FlexDirection"
+      }
+    },
+
+    "flex-flow": {
+      "longhands": [
+        "flex-direction",
+        "flex-wrap"
+      ],
+      "codegen": {
+        "syntax": "<'flex-direction'> || <'flex-wrap'>"
+      }
+    },
+
+    "flex-grow": {
+      "inherited": false,
+      "initial": "0",
+      "codegen": {
+        "syntax": "<number [0, inf]>",
+        "storage_path": ["mNonInheritedData", "miscData", "flexibleBox"],
+        "storage_kind": "value",
+        "type": "FlexGrow"
+      }
+    },
+
+    "flex-shrink": {
+      "inherited": false,
+      "initial": "1",
+      "codegen": {
+        "syntax": "<number [0, inf]>",
+        "storage_path": ["mNonInheritedData", "miscData", "flexibleBox"],
+        "storage_kind": "value",
+        "type": "FlexShrink"
+      }
+    },
+
+    "flex-wrap": {
+      "inherited": false,
+      "initial": "nowrap",
+      "codegen": {
+        "syntax": "nowrap | [ wrap | wrap-reverse ] || balance",
+        "storage_path": ["mNonInheritedData", "miscData", "flexibleBox"],
+        "storage_kind": "raw",
+        "type": "FlexWrap"
+      }
+    },
+
+    "font": {
+      "longhands": [
+        "font-style",
+        "font-weight",
+        "font-width",
+        "font-size",
+        "line-height",
+        "font-family"
+      ],
+      "codegen": {
+        "syntax_unused": "[ [ <'font-style'> || <'font-weight'> || <'font-width'> ]? <'font-size'> [ / <'line-height'> ]? <'font-family'> ]",
+        "syntax_unused_reason": "Optional font selection, line-height, and family parsing need the custom shorthand parser.",
+        "syntax_parser": "parseFont"
+      }
+    },
+
+    "font-family": {
+      "inherited": true,
+      "initial": "sans-serif",
+      "codegen": {
+        "syntax_unused": "[ <font-family-name> | <generic-font-family> ]#",
+        "syntax_parser": "parseFontFamily",
+        "storage_path": ["mInheritedData", "fontData", "fontCascade"],
+        "storage_kind": "reference",
+        "storage_name": "families",
+        "type": "FontFamilies"
+      }
+    },
+
+    "font-size": {
+      "inherited": true,
+      "initial": "medium",
+      "codegen": {
+        "syntax": "<absolute-size> | <relative-size> | <length-percentage [0, inf]>",
+        "storage_path": ["mInheritedData", "fontData", "fontCascade"],
+        "storage_kind": "value",
+        "type": "float"
+      }
+    },
+
+    "font-style": {
+      "inherited": true,
+      "initial": "normal",
+      "values": [
+        "normal",
+        "italic",
+        "oblique"
+      ],
+      "codegen": {
+        "syntax": "<<values>>",
+        "storage_path": ["mInheritedData", "fontData", "fontCascade"],
+        "storage_kind": "value",
+        "type": "FontStyle"
+      }
+    },
+
+    "font-weight": {
+      "inherited": true,
+      "initial": "normal",
+      "values": [
+        "normal",
+        "bold",
+        "bolder",
+        "lighter"
+      ],
+      "codegen": {
+        "syntax": "<<values>> | <number [1, 1000]>",
+        "storage_path": ["mInheritedData", "fontData", "fontCascade"],
+        "storage_kind": "value",
+        "type": "FontWeight"
+      }
+    },
+
+    "font-width": {
+      "inherited": true,
+      "initial": "normal",
+      "codegen": {
+        "syntax": "normal | <percentage [0, inf]> | ultra-condensed | extra-condensed | condensed | semi-condensed | semi-expanded | expanded | extra-expanded | ultra-expanded",
+        "storage_path": ["mInheritedData", "fontData", "fontCascade"],
+        "storage_kind": "value",
+        "type": "FontWidth"
+      }
+    },
+
+    "gap": {
+      "longhands": [
+        "row-gap",
+        "column-gap"
+      ],
+      "codegen": {
+        "syntax": "<'row-gap'>{1,2}"
+      }
+    },
+
+    "height": {
+      "inherited": false,
+      "initial": "auto",
+      "codegen": {
+        "syntax": "auto | <box-size> | <anchor-size()>",
+        "storage_path": ["mNonInheritedData", "boxData"],
+        "storage_kind": "reference",
+        "type": "PreferredSize"
+      }
+    },
+
+    "inset": {
+      "longhands": [
+        "top",
+        "right",
+        "bottom",
+        "left"
+      ],
+      "codegen": {
+        "syntax": "<'top'>{1,4}"
+      }
+    },
+
+    "justify-content": {
+      "inherited": false,
+      "initial": "normal",
+      "codegen": {
+        "syntax": "normal | <content-distribution> | <overflow-position>? [ <content-position> | left | right ]",
+        "storage_path": ["mNonInheritedData", "miscData"],
+        "storage_kind": "value",
+        "type": "JustifyContent"
+      }
+    },
+
+    "justify-items": {
+      "inherited": false,
+      "initial": "legacy",
+      "codegen": {
+        "syntax": "normal | stretch | <baseline-position> | <overflow-position>? [ <self-position> | left | right ] | legacy | legacy && [ left | right | center ]",
+        "storage_path": ["mNonInheritedData", "miscData"],
+        "storage_kind": "value",
+        "type": "JustifyItems"
+      }
+    },
+
+    "justify-self": {
+      "inherited": false,
+      "initial": "auto",
+      "codegen": {
+        "syntax": "auto | <overflow-position>? [ normal | <self-position> | left | right ] | stretch | <baseline-position> | anchor-center",
+        "storage_path": ["mNonInheritedData", "miscData"],
+        "storage_kind": "value",
+        "type": "JustifySelf"
+      }
+    },
+
+    "left": {
+      "inherited": false,
+      "initial": "auto",
+      "codegen": {
+        "group": {
+          "name": "inset",
+          "member": "left"
+        },
+        "syntax": "auto | <length-percentage>",
+        "storage_path": ["mNonInheritedData", "surroundData", "inset"],
+        "storage_kind": "reference",
+        "type": "InsetEdge"
+      }
+    },
+
+    "letter-spacing": {
+      "inherited": true,
+      "initial": "normal",
+      "codegen": {
+        "syntax": "normal | <length-percentage>",
+        "storage_path": ["mInheritedData", "fontData"],
+        "storage_kind": "reference",
+        "type": "LetterSpacing"
+      }
+    },
+
+    "line-height": {
+      "inherited": true,
+      "initial": "normal",
+      "codegen": {
+        "syntax": "normal | <number [0, inf]> | <length-percentage [0, inf]>",
+        "storage_path": ["mInheritedData"],
+        "storage_kind": "reference",
+        "type": "LineHeight"
+      }
+    },
+
+    "margin": {
+      "longhands": [
+        "margin-top",
+        "margin-right",
+        "margin-bottom",
+        "margin-left"
+      ],
+      "codegen": {
+        "syntax": "<'margin-top'>{1,4}"
+      }
+    },
+
+    "margin-bottom": {
+      "inherited": false,
+      "initial": "0px",
+      "codegen": {
+        "group": {
+          "name": "margin",
+          "member": "bottom"
+        },
+        "syntax": "<length-percentage> | auto | <anchor-size()>",
+        "storage_path": ["mNonInheritedData", "surroundData", "margin"],
+        "storage_kind": "reference",
+        "type": "MarginEdge"
+      }
+    },
+
+    "margin-left": {
+      "inherited": false,
+      "initial": "0px",
+      "codegen": {
+        "group": {
+          "name": "margin",
+          "member": "left"
+        },
+        "syntax": "<length-percentage> | auto | <anchor-size()>",
+        "storage_path": ["mNonInheritedData", "surroundData", "margin"],
+        "storage_kind": "reference",
+        "type": "MarginEdge"
+      }
+    },
+
+    "margin-right": {
+      "inherited": false,
+      "initial": "0px",
+      "codegen": {
+        "group": {
+          "name": "margin",
+          "member": "right"
+        },
+        "syntax": "<length-percentage> | auto | <anchor-size()>",
+        "storage_path": ["mNonInheritedData", "surroundData", "margin"],
+        "storage_kind": "reference",
+        "type": "MarginEdge"
+      }
+    },
+
+    "margin-top": {
+      "inherited": false,
+      "initial": "0px",
+      "codegen": {
+        "group": {
+          "name": "margin",
+          "member": "top"
+        },
+        "syntax": "<length-percentage> | auto | <anchor-size()>",
+        "storage_path": ["mNonInheritedData", "surroundData", "margin"],
+        "storage_kind": "reference",
+        "type": "MarginEdge"
+      }
+    },
+
+    "mask": {
+      "longhands": [
+        "mask-image",
+        "mask-mode",
+        "mask-position",
+        "mask-size",
+        "mask-repeat",
+        "mask-origin",
+        "mask-clip",
+        "mask-composite",
+        "mask-type"
+      ],
+      "codegen": {
+        "syntax_unused": "<mask-layer>#? , <final-mask-layer>",
+        "syntax_parser": "parseMask"
+      }
+    },
+
+    "mask-clip": {
+      "inherited": false,
+      "initial": "border-box",
+      "codegen": {
+        "syntax_unused": "[ <coord-box> | no-clip ]#",
+        "syntax_parser": "parseMaskClip"
+      }
+    },
+
+    "mask-composite": {
+      "inherited": false,
+      "initial": "add",
+      "codegen": {
+        "syntax_unused": "<compositing-operator>#",
+        "syntax_parser": "parseMaskComposite"
+      }
+    },
+
+    "mask-image": {
+      "inherited": false,
+      "initial": "none",
+      "codegen": {
+        "syntax_unused": "<mask-reference>#",
+        "syntax_parser": "parseMaskImage"
+      }
+    },
+
+    "mask-mode": {
+      "initial": "match-source",
+      "codegen": {
+        "syntax_unused": "<masking-mode>#",
+        "syntax_parser": "parseMaskMode"
+      }
+    },
+
+    "mask-origin": {
+      "inherited": false,
+      "initial": "border-box",
+      "codegen": {
+        "syntax_unused": "<coord-box>#",
+        "syntax_parser": "parseMaskOrigin"
+      }
+    },
+
+    "mask-position": {
+      "inherited": false,
+      "initial": "0% 0%",
+      "codegen": {
+        "syntax_unused": "<position>#",
+        "syntax_parser": "parseMaskPosition"
+      }
+    },
+
+    "mask-repeat": {
+      "inherited": false,
+      "initial": "repeat",
+      "codegen": {
+        "syntax_unused": "<repeat-style>#",
+        "syntax_parser": "parseMaskRepeat"
+      }
+    },
+
+    "mask-size": {
+      "inherited": false,
+      "initial": "auto",
+      "codegen": {
+        "syntax_unused": "<bg-size>#",
+        "syntax_parser": "parseMaskSize"
+      }
+    },
+
+    "mask-type": {
+      "inherited": false,
+      "initial": "luminance",
+      "codegen": {
+        "syntax_unused": "luminance | alpha",
+        "syntax_parser": "parseMaskType"
+      }
+    },
+
+    "max-height": {
+      "inherited": false,
+      "initial": "none",
+      "codegen": {
+        "syntax": "none | <box-size> | <anchor-size()>",
+        "storage_path": ["mNonInheritedData", "boxData"],
+        "storage_kind": "reference",
+        "type": "MaximumSize"
+      }
+    },
+
+    "max-size": {
+      "longhands": [
+        "max-height",
+        "max-width"
+      ],
+      "codegen": {
+        "syntax": "<'max-height'>{1,2}"
+      }
+    },
+
+    "max-width": {
+      "inherited": false,
+      "initial": "none",
+      "codegen": {
+        "syntax": "none | <box-size> | <anchor-size()>",
+        "storage_path": ["mNonInheritedData", "boxData"],
+        "storage_kind": "reference",
+        "type": "MaximumSize"
+      }
+    },
+
+    "min-height": {
+      "inherited": false,
+      "initial": "auto",
+      "codegen": {
+        "syntax": "auto | <box-size> | <anchor-size()>",
+        "storage_path": ["mNonInheritedData", "boxData"],
+        "storage_kind": "reference",
+        "type": "MinimumSize"
+      }
+    },
+
+    "min-size": {
+      "longhands": [
+        "min-height",
+        "min-width"
+      ],
+      "codegen": {
+        "syntax": "<'min-height'>{1,2}"
+      }
+    },
+
+    "min-width": {
+      "inherited": false,
+      "initial": "auto",
+      "codegen": {
+        "syntax": "auto | <box-size> | <anchor-size()>",
+        "storage_path": ["mNonInheritedData", "boxData"],
+        "storage_kind": "reference",
+        "type": "MinimumSize"
+      }
+    },
+
+    "opacity": {
+      "inherited": false,
+      "initial": "1",
+      "codegen": {
+        "syntax": "<opacity-value>",
+        "storage_path": ["mNonInheritedData", "miscData"],
+        "storage_kind": "value",
+        "type": "Opacity"
+      }
+    },
+
+    "order": {
+      "inherited": false,
+      "initial": "0",
+      "codegen": {
+        "syntax": "<integer>",
+        "storage_path": ["mNonInheritedData", "miscData"],
+        "storage_kind": "value",
+        "type": "Order"
+      }
+    },
+
+    "outline-offset": {
+      "inherited": false,
+      "initial": "0px",
+      "codegen": {
+        "syntax": "<length>",
+        "storage_path": ["mNonInheritedData", "backgroundData", "outline"],
+        "storage_kind": "reference",
+        "storage_name": "offset",
+        "type": "OutlineOffset"
+      }
+    },
+
+    "overflow": {
+      "longhands": [
+        "overflow-x",
+        "overflow-y"
+      ],
+      "codegen": {
+        "syntax": "<'overflow-x'>{1,2}"
+      }
+    },
+
+    "overflow-x": {
+      "inherited": false,
+      "initial": "visible",
+      "values": [
+        "visible",
+        "hidden",
+        "clip",
+        "scroll",
+        "auto"
+      ],
+      "codegen": {
+        "syntax": "<<values>>",
+        "storage_path": ["mNonInheritedFlags"],
+        "storage_kind": "enum",
+        "type": "Overflow"
+      }
+    },
+
+    "overflow-y": {
+      "inherited": false,
+      "initial": "visible",
+      "values": [
+        "visible",
+        "hidden",
+        "clip",
+        "scroll",
+        "auto"
+      ],
+      "codegen": {
+        "syntax": "<<values>>",
+        "storage_path": ["mNonInheritedFlags"],
+        "storage_kind": "enum",
+        "type": "Overflow"
+      }
+    },
+
+    "padding": {
+      "longhands": [
+        "padding-top",
+        "padding-right",
+        "padding-bottom",
+        "padding-left"
+      ],
+      "codegen": {
+        "syntax": "<'padding-top'>{1,4}"
+      }
+    },
+
+    "padding-bottom": {
+      "inherited": false,
+      "initial": "0px",
+      "codegen": {
+        "group": {
+          "name": "padding",
+          "member": "bottom"
+        },
+        "syntax": "<length-percentage [0, inf]>",
+        "storage_path": ["mNonInheritedData", "surroundData", "padding"],
+        "storage_kind": "reference",
+        "type": "PaddingEdge"
+      }
+    },
+
+    "padding-left": {
+      "inherited": false,
+      "initial": "0px",
+      "codegen": {
+        "group": {
+          "name": "padding",
+          "member": "left"
+        },
+        "syntax": "<length-percentage [0, inf]>",
+        "storage_path": ["mNonInheritedData", "surroundData", "padding"],
+        "storage_kind": "reference",
+        "type": "PaddingEdge"
+      }
+    },
+
+    "padding-right": {
+      "inherited": false,
+      "initial": "0px",
+      "codegen": {
+        "group": {
+          "name": "padding",
+          "member": "right"
+        },
+        "syntax": "<length-percentage [0, inf]>",
+        "storage_path": ["mNonInheritedData", "surroundData", "padding"],
+        "storage_kind": "reference",
+        "type": "PaddingEdge"
+      }
+    },
+
+    "padding-top": {
+      "inherited": false,
+      "initial": "0px",
+      "codegen": {
+        "group": {
+          "name": "padding",
+          "member": "top"
+        },
+        "syntax": "<length-percentage [0, inf]>",
+        "storage_path": ["mNonInheritedData", "surroundData", "padding"],
+        "storage_kind": "reference",
+        "type": "PaddingEdge"
+      }
+    },
+
+    "place-content": {
+      "longhands": [
+        "align-content",
+        "justify-content"
+      ],
+      "codegen": {
+        "syntax_unused": "<'align-content'> <'justify-content'>?",
+        "syntax_unused_reason": "A single baseline value maps to a custom justify-content value.",
+        "syntax_parser": "parsePlaceContent"
+      }
+    },
+
+    "place-items": {
+      "longhands": [
+        "align-items",
+        "justify-items"
+      ],
+      "codegen": {
+        "syntax": "<'align-items'> <'justify-items'>?"
+      }
+    },
+
+    "place-self": {
+      "longhands": [
+        "align-self",
+        "justify-self"
+      ],
+      "codegen": {
+        "syntax": "<'align-self'> <'justify-self'>?"
+      }
+    },
+
+    "pointer-events": {
+      "inherited": true,
+      "initial": "auto",
+      "values": [
+        "auto",
+        "none"
+      ],
+      "codegen": {
+        "syntax": "<<values>>",
+        "storage_path": ["mInheritedFlags"],
+        "storage_kind": "enum",
+        "type": "PointerEvents"
+      }
+    },
+
+    "position": {
+      "inherited": false,
+      "initial": "static",
+      "values": [
+        "static",
+        "relative",
+        "absolute",
+        "fixed",
+        "sticky"
+      ],
+      "codegen": {
+        "syntax": "<<values>>",
+        "storage_path": ["mNonInheritedFlags"],
+        "storage_kind": "enum",
+        "type": "Position"
+      }
+    },
+
+    "right": {
+      "inherited": false,
+      "initial": "auto",
+      "codegen": {
+        "group": {
+          "name": "inset",
+          "member": "right"
+        },
+        "syntax": "auto | <length-percentage>",
+        "storage_path": ["mNonInheritedData", "surroundData", "inset"],
+        "storage_kind": "reference",
+        "type": "InsetEdge"
+      }
+    },
+
+    "row-gap": {
+      "inherited": false,
+      "initial": "normal",
+      "codegen": {
+        "syntax": "<gap-gutter>",
+        "storage_path": ["mNonInheritedData", "miscData"],
+        "storage_kind": "reference",
+        "type": "GapGutter"
+      }
+    },
+
+    "scrollbar-color": {
+      "inherited": true,
+      "initial": "auto",
+      "codegen": {
+        "syntax": "auto | <color>{2}",
+        "storage_path": ["mInheritedRareData"],
+        "storage_kind": "reference",
+        "type": "ScrollbarColor"
+      }
+    },
+
+    "scrollbar-gutter": {
+      "inherited": false,
+      "initial": "auto",
+      "codegen": {
+        "syntax": "auto | stable && both-edges?",
+        "storage_path": ["mNonInheritedData", "rareData"],
+        "storage_kind": "reference",
+        "type": "ScrollbarGutter"
+      }
+    },
+
+    "scrollbar-width": {
+      "inherited": false,
+      "initial": "auto",
+      "values": [
+        "auto",
+        "thin",
+        "none"
+      ],
+      "codegen": {
+        "syntax": "<<values>>",
+        "storage_path": ["mNonInheritedData", "rareData"],
+        "storage_kind": "enum",
+        "type": "ScrollbarWidth"
+      }
+    },
+
+    "size": {
+      "longhands": [
+        "height",
+        "width"
+      ],
+      "codegen": {
+        "syntax": "<'height'>{1,2}"
+      }
+    },
+
+    "text-align": {
+      "inherited": true,
+      "initial": "start",
+      "values": [
+        "left",
+        "center",
+        "right",
+        "start",
+        "end",
+        "justify",
+        "match-parent",
+        "justify-all"
+      ],
+      "codegen": {
+        "syntax": "<<values>>",
+        "storage_path": ["mInheritedFlags"],
+        "storage_kind": "enum",
+        "type": "TextAlign"
+      }
+    },
+
+    "text-decoration": {
+      "inherited": false,
+      "initial": "none",
+      "values": [
+        "line-through",
+        "none",
+        "underline"
+      ],
+      "codegen": {
+        "syntax": "<<values>>",
+        "storage_path": ["mNonInheritedData", "miscData"],
+        "storage_kind": "enum",
+        "type": "TextDecoration"
+      }
+    },
+
+    "text-overflow": {
+      "inherited": false,
+      "initial": "clip",
+      "values": [
+        "clip",
+        "ellipsis",
+        "ellipsis-center"
+      ],
+      "codegen": {
+        "syntax": "<<values>>",
+        "storage_path": ["mNonInheritedData", "miscData"],
+        "storage_kind": "enum",
+        "type": "TextOverflow"
+      }
+    },
+
+    "text-wrap": {
+      "longhands": [
+        "text-wrap-mode",
+        "text-wrap-style"
+      ],
+      "codegen": {
+        "syntax": "<'text-wrap-mode'> || <'text-wrap-style'>"
+      }
+    },
+
+    "text-wrap-mode": {
+      "inherited": true,
+      "initial": "wrap",
+      "values": [
+        "wrap",
+        "nowrap"
+      ],
+      "codegen": {
+        "syntax": "<<values>>",
+        "storage_path": ["mInheritedFlags"],
+        "storage_kind": "enum",
+        "type": "TextWrapMode"
+      }
+    },
+
+    "text-wrap-style": {
+      "inherited": true,
+      "initial": "auto",
+      "values": [
+        "auto",
+        "balance",
+        "stable",
+        "pretty",
+        "avoid-short-last-line"
+      ],
+      "codegen": {
+        "syntax": "<<values>>",
+        "storage_path": ["mInheritedFlags"],
+        "storage_kind": "enum",
+        "type": "TextWrapStyle"
+      }
+    },
+
+    "top": {
+      "inherited": false,
+      "initial": "auto",
+      "codegen": {
+        "group": {
+          "name": "inset",
+          "member": "top"
+        },
+        "syntax": "auto | <length-percentage>",
+        "storage_path": ["mNonInheritedData", "surroundData", "inset"],
+        "storage_kind": "reference",
+        "type": "InsetEdge"
+      }
+    },
+
+    "translate": {
+      "inherited": false,
+      "initial": "none",
+      "codegen": {
+        "syntax": "none | <length-percentage> [ <length-percentage> <length>? ]?",
+        "storage_path": ["mNonInheritedData", "miscData"],
+        "storage_kind": "reference",
+        "type": "Translate"
+      }
+    },
+
+    "vertical-align": {
+      "inherited": false,
+      "initial": "baseline",
+      "values": [
+        "baseline",
+        "sub",
+        "super",
+        "text-top",
+        "text-bottom",
+        "top",
+        "middle",
+        "bottom"
+      ],
+      "codegen": {
+        "syntax": "<<values>> | <length-percentage>",
+        "storage_path": ["mNonInheritedData", "boxData"],
+        "storage_kind": "reference",
+        "type": "VerticalAlignValue"
+      }
+    },
+
+    "visibility": {
+      "inherited": true,
+      "initial": "visible",
+      "values": [
+        "visible",
+        "hidden",
+        "collapse"
+      ],
+      "codegen": {
+        "syntax": "<<values>>",
+        "storage_path": ["mInheritedFlags"],
+        "storage_kind": "enum",
+        "type": "Visibility"
+      }
+    },
+
+    "width": {
+      "inherited": false,
+      "initial": "auto",
+      "codegen": {
+        "syntax": "auto | <box-size> | <anchor-size()>",
+        "storage_path": ["mNonInheritedData", "boxData"],
+        "storage_kind": "reference",
+        "type": "PreferredSize"
+      }
+    },
+
+    "word-spacing": {
+      "inherited": true,
+      "initial": "normal",
+      "codegen": {
+        "syntax": "normal | <length-percentage>",
+        "storage_path": ["mInheritedData", "fontData"],
+        "storage_kind": "reference",
+        "type": "WordSpacing"
+      }
+    }
+  }
+}

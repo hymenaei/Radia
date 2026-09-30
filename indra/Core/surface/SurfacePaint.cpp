@@ -1,0 +1,236 @@
+/**
+ * Copyright (C) 2026 Radia Viewer
+ * SPDX-License-Identifier: LGPL-2.1-only
+ */
+
+#include "linden_common.h"
+#include <algorithm>
+#include <optional>
+#include "Binder.h"
+#include "Document.h"
+#include "ElementInternal.h"
+#include "HTMLElement.h"
+#include "HTMLFloaterElement.h"
+#include "HTMLName.h"
+#include "LayoutEngine.h"
+#include "LayoutGeometry.h"
+#include "LayoutPrimitives.h"
+#include "PaintContext.h"
+#include "StylePass.h"
+#include "Surface.h"
+#include "System.h"
+#include "Text.h"
+#include "TextMeasurer.h"
+
+namespace Core {
+using detail::ElementInternalAccess;
+using detail::MountEpoch;
+using detail::NodeRef;
+
+namespace {
+void applyDirection(Style::ComputedStyle& style, Layout::Direction direction) {
+    style.direction = direction;
+    if (style.textAlign() == Style::TextAlign::Start)
+        style.setTextAlign(direction == Layout::Direction::RightToLeft ? Style::TextAlign::Right : Style::TextAlign::Left);
+    else if (style.textAlign() == Style::TextAlign::End)
+        style.setTextAlign(direction == Layout::Direction::RightToLeft ? Style::TextAlign::Left : Style::TextAlign::Right);
+}
+
+bool hasBorderRadius(const Style::BorderRadius& radii) {
+    const auto hasRadius = [](const Style::CornerRadius& radius) {
+        return radius.horizontal.pixels != 0.f || radius.horizontal.percent != 0.f || radius.vertical.pixels != 0.f
+            || radius.vertical.percent != 0.f;
+    };
+    return hasRadius(radii.topLeft) || hasRadius(radii.topRight) || hasRadius(radii.bottomRight) || hasRadius(radii.bottomLeft);
+}
+const Element* scrollbarClipOwner(const Element& element, const Style::ComputedStyle& style) {
+    if (Layout::borderWidths(style).any() || hasBorderRadius(style.borderRadius()))
+        return &element;
+    for (const Element* ancestor = element.parentElement(); ancestor; ancestor = ancestor->parentElement())
+        if (dynamic_cast<const HTMLFloaterElement*>(ancestor))
+            return ancestor;
+    return nullptr;
+}
+
+NativeScrollbarAxisGeometry projectScrollbarAxis(const ScrollbarAxisGeometry& geometry) {
+    return {geometry.axis, geometry.bounds, geometry.track, geometry.thumb, geometry.startArrow, geometry.endArrow, geometry.visible,
+        geometry.reversed};
+}
+
+NativeScrollbarPaintGeometry projectScrollbarGeometry(const ScrollGeometry& geometry) {
+    return {projectScrollbarAxis(geometry.horizontal), projectScrollbarAxis(geometry.vertical), geometry.corner, geometry.hasCorner};
+}
+} // namespace
+
+void Surface::paint(PaintContext& context, float scale, Layout::Vec2 pixelOrigin) {
+    updateLayout();
+    const std::uint64_t paintedGeneration = mPaintRequestGeneration;
+    Style::Pass& styles = stylePass();
+    const Style::Pass::TraversalScope traversal = styles.enterTraversal();
+    PaintTarget target;
+    target.bounds = mViewport;
+    target.pixelOrigin = pixelOrigin;
+    target.scale = scale;
+    target.nativeAppearance = &effectiveNativeAppearance();
+    target.clipAA = AAIntent::Coverage;
+    context.beginFrame(target);
+    context.pushClip(mViewport, scale);
+    for (const MountList& layerMounts : mMounts) {
+        for (const MountPtr& mount : layerMounts)
+            if (mount && mount->root && styles.style(*mount->root).position() != Style::Position::Fixed)
+                paintElement(*mount->root, context, scale, 1.f, styles, {});
+        for (const MountPtr& mount : layerMounts) {
+            if (!mount || !mount->root)
+                continue;
+            std::vector<Element*> fixed;
+            collectFixedPositionedElements(*mount->root, fixed, styles);
+            for (Element* fixedElement : fixed)
+                if (fixedElement) {
+                    float inheritedOpacity = 1.f;
+                    for (const Element* ancestor = fixedElement->parentElement(); ancestor; ancestor = ancestor->parentElement())
+                        inheritedOpacity *= styles.style(*ancestor).opacity().value;
+                    paintElement(*fixedElement, context, scale, inheritedOpacity, styles, {});
+                }
+        }
+    }
+    context.popClip();
+    context.endFrame();
+    didPaint(paintedGeneration);
+}
+
+void Surface::paintElement(Element& element, PaintContext& context, float scale, float inheritedOpacity, Style::Pass& styles,
+    Layout::Vec2 paintTranslation) const {
+    const ElementObservation observation(element);
+    const Style::ComputedStyle& unresolved = styles.style(element);
+    Element* current = observation.get();
+    if (!current || !observation.layoutValid() || !observation.styleValid())
+        return;
+    if (!current->isVisible(unresolved))
+        return;
+    styles.styleGeneratedPseudoElements(*current, unresolved);
+    current = observation.get();
+    if (!current || !observation.layoutValid() || !observation.styleValid())
+        return;
+    const float childOpacity = inheritedOpacity * unresolved.opacity().value;
+    const Layout::Direction direction = layoutDirection();
+    const bool needsOpacity = inheritedOpacity != 1.f || unresolved.opacity().value != 1.f;
+    const bool needsDirection = unresolved.direction != direction || unresolved.textAlign() == Style::TextAlign::Start
+        || unresolved.textAlign() == Style::TextAlign::End;
+    std::optional<Style::ComputedStyle> paintedStorage;
+    const Style::ComputedStyle* painted = &unresolved;
+    if (needsOpacity || needsDirection) {
+        paintedStorage.emplace(unresolved);
+        if (needsOpacity)
+            applyOpacity(*paintedStorage, inheritedOpacity);
+        if (needsDirection)
+            applyDirection(*paintedStorage, direction);
+        painted = &*paintedStorage;
+    }
+    const bool paintsBodyCanvasBackground = current->elementName() == HTMLTagName(HTMLTag::Body) && !observation.parent
+        && (painted->backgroundColor().resolvedColor().a > 0.f || !painted->backgroundLayers.empty());
+    const bool clipsX = unresolved.overflowX() != Style::Overflow::Visible;
+    const bool clipsY = unresolved.overflowY() != Style::Overflow::Visible;
+    const bool clipsChildren = clipsX || clipsY;
+    const Layout::ClipAxes clipAxes =
+        (clipsX ? Layout::ClipAxes::X : Layout::ClipAxes::NoAxes) | (clipsY ? Layout::ClipAxes::Y : Layout::ClipAxes::NoAxes);
+    const std::optional<BackgroundPaintContext> previousBackgroundContext = context.backgroundPaintContext();
+    BackgroundPaintContext backgroundContext;
+    backgroundContext.localScrollTranslation = scrollContentTranslation(layoutDirection(), {current->scrollLeft(), current->scrollTop()});
+    backgroundContext.paintTranslation = paintTranslation;
+    backgroundContext.viewport = mViewport;
+    backgroundContext.scrollport = ElementInternalAccess::scrollport(*current);
+    context.setBackgroundPaintContext(backgroundContext);
+    if (!painted->filter.isNone() || !painted->backdropFilter().isNone() || !painted->maskLayers.empty())
+        context.beginEffects(current->paintBounds(), *painted, scale);
+    if (paintsBodyCanvasBackground) {
+        Style::ComputedStyle canvasBackground;
+        canvasBackground.setBackgroundColor(painted->backgroundColor().resolvedColor());
+        canvasBackground.backgroundLayers = painted->backgroundLayers;
+        context.paintBox(mViewport, canvasBackground);
+
+        Style::ComputedStyle bodyStyle = *painted;
+        bodyStyle.setBackgroundColor(Color(0.f, 0.f, 0.f, 0.f));
+        bodyStyle.backgroundLayers.clear();
+        current->paint(context, bodyStyle, scale);
+    } else
+        current->paint(context, *painted, scale);
+    context.setBackgroundPaintContext(previousBackgroundContext);
+    const auto isParentStillValid = [&] {
+        const Element* currentElement = observation.get();
+        return currentElement && observation.layoutValid() && observation.styleValid() && currentElement->isVisible(unresolved)
+            && isRootedInSurface(currentElement)
+            && (currentElement->parentElement() == observation.parent || (!observation.parent && isSurfaceRoot(currentElement)));
+    };
+    if (isParentStillValid()) {
+        current = observation.get();
+        const Layout::Vec2 contentTranslation =
+            clipsChildren ? scrollContentTranslation(layoutDirection(), {current->scrollLeft(), current->scrollTop()}) : Layout::Vec2 {};
+        if (clipsChildren) {
+            context.pushClip(ElementInternalAccess::scrollport(*current), scale, clipAxes);
+            context.pushTranslation(contentTranslation);
+        }
+        const auto children = styles.orderedChildren(*current);
+        for (const Layout::OrderedChildRef& childRef : *children) {
+            if (!isParentStillValid())
+                break;
+            if (const Text* text = childRef.text()) {
+                const Element* parent = observation.get();
+                if (!parent)
+                    break;
+                text->paint(context, *painted, parent->styleSheet(), *parent);
+                continue;
+            }
+            if (childRef.pseudoElement)
+                continue;
+            Element* child = childRef.element();
+            if (child && child->parentElement() == observation.get() && isRootedInSurface(child)
+                && styles.style(*child).position() != Style::Position::Fixed)
+                paintElement(*child, context, scale, childOpacity, styles, paintTranslation + contentTranslation);
+        }
+        if (clipsChildren) {
+            context.popTranslation();
+            context.popClip();
+        }
+    }
+    if (isParentStillValid()) {
+        current = observation.get();
+        const ScrollGeometry geometry = scrollbarGeometry(*current, *painted);
+        if (geometry.horizontal.visible || geometry.vertical.visible || geometry.hasCorner) {
+            NativeScrollbarPaintRequest request;
+            request.geometry = projectScrollbarGeometry(geometry);
+            request.colors = painted->scrollbarColor();
+            request.mode = mScrollLayoutOptions.scrollbarMode;
+            request.metrics = scrollbarMetrics(request.mode);
+            request.direction = painted->direction;
+            request.scale = scale;
+            request.appearanceRevision = effectiveNativeAppearance().revision();
+            if (const Element* clipOwner = scrollbarClipOwner(*current, *painted)) {
+                const Style::ComputedStyle* clipStyle = clipOwner == current ? painted : &styles.style(*clipOwner);
+                request.clip.enabled = true;
+                request.clip.borderBox = clipOwner->rect();
+                request.clip.borderRadius = clipStyle->borderRadius();
+                request.clip.borderWidth = Layout::borderWidths(*clipStyle);
+            }
+            if (mScrollbarHover) {
+                if (scrollbarTargetMatches(*mScrollbarHover, *current, ScrollbarAxis::Horizontal, ScrollbarPart::NoneValue))
+                    request.horizontal.hoveredPart = mScrollbarHover->hit.part;
+                if (scrollbarTargetMatches(*mScrollbarHover, *current, ScrollbarAxis::Vertical, ScrollbarPart::NoneValue))
+                    request.vertical.hoveredPart = mScrollbarHover->hit.part;
+            }
+            if (mScrollbarCapture) {
+                if (scrollbarTargetMatches(*mScrollbarCapture, *current, ScrollbarAxis::Horizontal, ScrollbarPart::NoneValue))
+                    request.horizontal.pressedPart = mScrollbarCapture->hit.part;
+                if (scrollbarTargetMatches(*mScrollbarCapture, *current, ScrollbarAxis::Vertical, ScrollbarPart::NoneValue))
+                    request.vertical.pressedPart = mScrollbarCapture->hit.part;
+            }
+            request.horizontal.disabled = geometry.horizontal.visible && geometry.horizontal.maxScrollOffset <= 0.f;
+            request.vertical.disabled = geometry.vertical.visible && geometry.vertical.maxScrollOffset <= 0.f;
+            context.pushClip(current->rect(), scale);
+            context.paintNativeScrollbar(request);
+            context.popClip();
+        }
+    }
+    if (!painted->filter.isNone() || !painted->backdropFilter().isNone() || !painted->maskLayers.empty())
+        context.endEffects();
+}
+} // namespace Core

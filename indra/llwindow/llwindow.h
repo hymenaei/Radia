@@ -45,6 +45,19 @@ struct LLFontFallbackMatch
     S32 mFaceIndex = 0;
 };
 
+struct LLCursorImage
+{
+    std::string data;
+    std::string sourceName;
+    F32 hotspotX = 0.f;
+    F32 hotspotY = 0.f;
+    bool hotspotXSpecified = false;
+    bool hotspotYSpecified = false;
+    F32 scale = 1.f;
+
+    bool operator==(const LLCursorImage&) const = default;
+};
+
 // Refer to llwindow_test in test/common/llwindow for usage example
 
 class LLWindow
@@ -157,8 +170,14 @@ public:
     virtual void resetBusyCount();
     virtual S32 getBusyCount() const;
 
+    virtual bool setCursorImage(const LLCursorImage&) { return false; }
+    virtual void clearCursorImage() {}
+
     // Sets cursor, may set to arrow+hourglass
-    virtual void setCursor(ECursorType cursor) { mNextCursor = cursor; };
+    virtual void setCursor(ECursorType cursor) {
+        clearCursorImage();
+        mNextCursor = cursor;
+    };
     virtual ECursorType getCursor() const;
     virtual ECursorType getNextCursor() const { return mNextCursor; };
     virtual void updateCursor() = 0;

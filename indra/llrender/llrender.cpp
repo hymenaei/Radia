@@ -123,7 +123,8 @@ bool LLRender::sGBufferNormHDR = true;
 bool LLRender::s10bitBackBuffer = false;
 
 
-const U32 immediate_mask = LLVertexBuffer::MAP_VERTEX | LLVertexBuffer::MAP_COLOR | LLVertexBuffer::MAP_TEXCOORD0;
+const U32 immediate_mask = LLVertexBuffer::MAP_VERTEX | LLVertexBuffer::MAP_COLOR |
+                           LLVertexBuffer::MAP_TEXCOORD0 | LLVertexBuffer::MAP_GLYPH_LOC;
 
 static const GLenum sGLBlendFactor[] =
 {
@@ -412,6 +413,8 @@ void LLRender::initVertexBuffer()
     mBuffer->getVertexStrider(mVerticesp);
     mBuffer->getTexCoord0Strider(mTexcoordsp);
     mBuffer->getColorStrider(mColorsp);
+    mBuffer->getGlyphLocStrider(mGlyphLocp);
+    mGlyphLocp[0] = LLVertexBuffer::GLYPH_LOC_QUAD;
     stop_glerror();
 }
 
@@ -1038,6 +1041,11 @@ ALTextureSlot* LLRender::getTextureSlot(U32 index)
     }
 }
 
+void LLRender::activateTextureUnit(U32 index)
+{
+    getTextureSlot(index)->activate();
+}
+
 LLLightState* LLRender::getLight(U32 index)
 {
     if (index < mLightState.size())
@@ -1085,7 +1093,7 @@ void LLRender::beginList(std::list<LLVertexBufferData> *list)
     {
         LL_ERRS() << "beginList called while another list is open." << LL_ENDL;
     }
-    llassert(LLGLSLShader::sCurBoundShaderPtr == &gUIProgram);
+    llassert(LLGLSLShader::sCurBoundShaderPtr == &gUIProgram || (LLGLSLShader::sCurBoundShaderPtr && LLGLSLShader::sCurBoundShaderPtr->mHasFontGpu));
     flush();
     mBufferDataList = list;
 }
@@ -1194,7 +1202,8 @@ void LLRender::flush()
                     gGL.getTextureSlot(0)->mCurrSampler,
                     mMatrix[MM_MODELVIEW][mMatIdx[MM_MODELVIEW]],
                     mMatrix[MM_PROJECTION][mMatIdx[MM_PROJECTION]],
-                    mMatrix[MM_TEXTURE0][mMatIdx[MM_TEXTURE0]]
+                    mMatrix[MM_TEXTURE0][mMatIdx[MM_TEXTURE0]],
+                    mGlyphLocp[0] != LLVertexBuffer::GLYPH_LOC_QUAD
                     );
             }
             else
@@ -1231,6 +1240,10 @@ LLVertexBuffer* LLRender::bufferfromCache(U32 attribute_mask, U32 count)
         if (attribute_mask & LLVertexBuffer::MAP_COLOR)
         {
             hash.update((U8*)mColorsp.get(), count * sizeof(LLColor4U));
+        }
+        if (attribute_mask & LLVertexBuffer::MAP_GLYPH_LOC)
+        {
+            hash.update((U8*)mGlyphLocp.get(), count * sizeof(U32));
         }
 
         hash.finalize();
@@ -1315,6 +1328,10 @@ LLVertexBuffer* LLRender::genBuffer(U32 attribute_mask, S32 count)
     {
         vb->setColorData(mColorsp.get());
     }
+    if (attribute_mask & LLVertexBuffer::MAP_GLYPH_LOC)
+    {
+        vb->setGlyphLocData(mGlyphLocp.get());
+    }
 
 #if LL_DARWIN
     // unmapBuffer creates the GL buffer, uploads, and leaves it bound;
@@ -1338,6 +1355,7 @@ void LLRender::resetStriders(S32 count)
     mVerticesp[0] = mVerticesp[count];
     mTexcoordsp[0] = mTexcoordsp[count];
     mColorsp[0] = mColorsp[count];
+    mGlyphLocp[0] = mGlyphLocp[count];
 
     mCount = 0;
 }
@@ -1377,10 +1395,13 @@ void LLRender::vertex3f(const GLfloat& x, const GLfloat& y, const GLfloat& z)
     mVerticesp[mCount] = mVerticesp[mCount-1];
     mColorsp[mCount] = mColorsp[mCount-1];
     mTexcoordsp[mCount] = mTexcoordsp[mCount-1];
+    mGlyphLocp[mCount] = mGlyphLocp[mCount-1];
 }
 
 void LLRender::vertexBatchPreTransformed(LLVector4a* verts, S32 vert_count)
 {
+    if (mCount > 0 && mGlyphLocp[0] != LLVertexBuffer::GLYPH_LOC_QUAD) flush();
+
     if (mCount + vert_count > 4094)
     {
         //  LL_WARNS() << "GL immediate mode overflow.  Some geometry not drawn." << LL_ENDL;
@@ -1394,6 +1415,7 @@ void LLRender::vertexBatchPreTransformed(LLVector4a* verts, S32 vert_count)
         mCount++;
         mTexcoordsp[mCount] = mTexcoordsp[mCount-1];
         mColorsp[mCount] = mColorsp[mCount-1];
+        mGlyphLocp[mCount] = mGlyphLocp[mCount-1];
     }
 
     if( mCount > 0 ) // ND: Guard against crashes if mCount is zero, yes it can happen
@@ -1402,6 +1424,8 @@ void LLRender::vertexBatchPreTransformed(LLVector4a* verts, S32 vert_count)
 
 void LLRender::vertexBatchPreTransformed(LLVector4a* verts, LLVector2* uvs, S32 vert_count)
 {
+    if (mCount > 0 && mGlyphLocp[0] != LLVertexBuffer::GLYPH_LOC_QUAD) flush();
+
     if (mCount + vert_count > 4094)
     {
         //  LL_WARNS() << "GL immediate mode overflow.  Some geometry not drawn." << LL_ENDL;
@@ -1415,6 +1439,7 @@ void LLRender::vertexBatchPreTransformed(LLVector4a* verts, LLVector2* uvs, S32 
 
         mCount++;
         mColorsp[mCount] = mColorsp[mCount-1];
+        mGlyphLocp[mCount] = mGlyphLocp[mCount-1];
     }
 
     if (mCount > 0)
@@ -1426,6 +1451,8 @@ void LLRender::vertexBatchPreTransformed(LLVector4a* verts, LLVector2* uvs, S32 
 
 void LLRender::vertexBatchPreTransformed(LLVector4a* verts, LLVector2* uvs, LLColor4U* colors, S32 vert_count)
 {
+    if (mCount > 0 && mGlyphLocp[0] != LLVertexBuffer::GLYPH_LOC_QUAD) flush();
+
     if (mCount + vert_count > 4094)
     {
         //  LL_WARNS() << "GL immediate mode overflow.  Some geometry not drawn." << LL_ENDL;
@@ -1439,6 +1466,7 @@ void LLRender::vertexBatchPreTransformed(LLVector4a* verts, LLVector2* uvs, LLCo
         mColorsp[mCount] = colors[i];
 
         mCount++;
+        mGlyphLocp[mCount] = mGlyphLocp[mCount-1];
     }
 
     if (mCount > 0)
@@ -1446,6 +1474,29 @@ void LLRender::vertexBatchPreTransformed(LLVector4a* verts, LLVector2* uvs, LLCo
         mVerticesp[mCount] = mVerticesp[mCount - 1];
         mTexcoordsp[mCount] = mTexcoordsp[mCount - 1];
         mColorsp[mCount] = mColorsp[mCount - 1];
+    }
+}
+
+void LLRender::vertexBatchPreTransformed(LLVector4a* verts, LLVector2* uvs, LLColor4U* colors, U32* glyph_locs, S32 vert_count)
+{
+    if (mCount > 0 && mGlyphLocp[0] == LLVertexBuffer::GLYPH_LOC_QUAD) flush();
+    if (mCount + vert_count > 4094) return;
+
+    for (S32 i = 0; i < vert_count; ++i)
+    {
+        mVerticesp[mCount] = verts[i];
+        mTexcoordsp[mCount] = uvs[i];
+        mColorsp[mCount] = colors[i];
+        mGlyphLocp[mCount] = glyph_locs[i];
+        ++mCount;
+    }
+
+    if (mCount > 0)
+    {
+        mVerticesp[mCount] = mVerticesp[mCount - 1];
+        mTexcoordsp[mCount] = mTexcoordsp[mCount - 1];
+        mColorsp[mCount] = mColorsp[mCount - 1];
+        mGlyphLocp[mCount] = LLVertexBuffer::GLYPH_LOC_QUAD;
     }
 }
 

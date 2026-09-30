@@ -5,6 +5,7 @@
     <key>Include</key>
     <array>
       <string>settings_alchemy.xml</string>
+      <string>settings_radia.xml</string>
     </array>
     <key>RestrainedLove</key>
     <map>

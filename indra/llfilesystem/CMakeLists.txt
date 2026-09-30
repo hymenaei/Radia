@@ -76,19 +76,6 @@ target_link_libraries(llfilesystem
 target_include_directories( llfilesystem  INTERFACE   ${CMAKE_CURRENT_SOURCE_DIR})
 target_precompile_headers(llfilesystem REUSE_FROM llprecompiled)
 
-# Add tests
 if (BUILD_TESTING)
-    # UNIT TESTS
-    SET(llfilesystem_TEST_SOURCE_FILES
-      lldiriterator.cpp
-    )
-
-    RD_ADD_UNIT_TESTS(llfilesystem "${llfilesystem_TEST_SOURCE_FILES}")
-
-    # INTEGRATION TESTS
-    set(test_libs llmath llcommon llfilesystem )
-    set(test_project llfilesystem)
-
-    # TODO: Some of these need refactoring to be proper Unit tests rather than Integration tests.
-    RD_ADD_INTEGRATION_TEST(lldir "" "${test_libs}" "${test_project}")
+  add_subdirectory(tests)
 endif ()

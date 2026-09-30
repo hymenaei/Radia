@@ -487,6 +487,19 @@ static bool handleForceMonochromeEmojiChanged(const LLSD& newvalue)
     return true;
 }
 
+static bool handleFontRenderGpuChanged(const LLSD& newvalue)
+{
+    LLFontGL::sEnableFontGpu = newvalue.asBoolean();
+    // Linear metrics are chosen with the face, not per draw.
+    LLFontGL::schedulePendingReload();
+    // The normal UI shader only carries the hb-gpu fragment library while the
+    // feature is enabled. Rebuild it now so disabling the setting removes the
+    // extra varying/fragment branch, and enabling it gets a compile-tested
+    // analytic program with automatic atlas fallback.
+    if (gPipeline.isInit()) LLViewerShaderMgr::instance()->setShaders();
+    return true;
+}
+
 static bool handleConsoleMaxLinesChanged(const LLSD& newvalue)
 {
     if(gConsole)
@@ -1067,6 +1080,7 @@ void settings_setup_listeners()
     setting_setup_signal_listener(gSavedSettings, "AlchemyUIFontOverrides", handleUIFontOverridesChanged);
     setting_setup_signal_listener(gSavedSettings, "EmojiUseDarkPalette", handleEmojiUseDarkPaletteChanged);
     setting_setup_signal_listener(gSavedSettings, "AlchemyForceMonochromeEmoji", handleForceMonochromeEmojiChanged);
+    setting_setup_signal_listener(gSavedSettings, "AlchemyFontRenderGPU", handleFontRenderGpuChanged);
     setting_setup_signal_listener(gSavedSettings, "ConsoleMaxLines", handleConsoleMaxLinesChanged);
     setting_setup_signal_listener(gSavedSettings, "UploadBakedTexOld", handleUploadBakedTexOldChanged);
     setting_setup_signal_listener(gSavedSettings, "UseOcclusion", handleUseOcclusionChanged);
@@ -1251,4 +1265,3 @@ void test_cached_control()
 //There's no LLSD comparsion for LLCC yet. TEST_LLCC(LLSD, test_llsd);
 }
 #endif // TEST_CACHED_CONTROL
-

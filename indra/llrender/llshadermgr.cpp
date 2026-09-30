@@ -45,6 +45,12 @@ using std::pair;
 using std::make_pair;
 using std::string;
 
+namespace
+{
+constexpr char kEngineBlockMarker[] = "[ENGINE_BLOCK ";
+constexpr size_t kEngineBlockMarkerLength = sizeof(kEngineBlockMarker) - 1;
+}
+
 LLShaderMgr * LLShaderMgr::sInstance = NULL;
 
 LLShaderMgr::LLShaderMgr()
@@ -92,6 +98,88 @@ std::string LLShaderMgr::variantObjectKey(const std::string& path, U32 axes, con
     const std::string key = path + suffix;
     const auto& objects = (stage == GL_VERTEX_SHADER) ? mVertexShaderObjects : mFragmentShaderObjects;
     return objects.count(key) ? key : path;
+}
+
+std::string LLShaderMgr::getEngineBlockSource(const std::string& block_name)
+{
+    std::string snippet_rel = block_name;
+    if (!snippet_rel.empty())
+    {
+        snippet_rel[0] = (char)tolower((unsigned char)snippet_rel[0]);
+    }
+
+    if (snippet_rel.empty() || !gDirUtilp)
+    {
+        return std::string();
+    }
+
+    const std::string snippet_path = getShaderDirPrefix() + "1" + gDirUtilp->getDirDelimiter()
+        + "deferred" + gDirUtilp->getDirDelimiter() + snippet_rel + "Block.glsl";
+    std::error_code ec;
+    const std::string snippet = LLFile::getContents(snippet_path, ec);
+    return ec ? std::string() : snippet;
+}
+
+std::optional<std::string> LLShaderMgr::expandEngineBlocks(const std::string& source,
+                                                            const std::string& source_name)
+{
+    if (source.find(kEngineBlockMarker) == std::string::npos)
+    {
+        return source;
+    }
+
+    std::string expanded;
+    expanded.reserve(source.size());
+    bool success = true;
+
+    size_t start = 0;
+    while (start < source.size())
+    {
+        const size_t newline = source.find('\n', start);
+        const size_t end = newline == std::string::npos ? source.size() : newline + 1;
+        const std::string line = source.substr(start, end - start);
+        const size_t marker = line.find(kEngineBlockMarker);
+
+        if (marker == std::string::npos)
+        {
+            expanded += line;
+        }
+        else
+        {
+            std::string block_name = line.substr(marker + kEngineBlockMarkerLength);
+            const size_t close = block_name.find(']');
+            const std::string snippet = close == std::string::npos
+                ? std::string()
+                : getEngineBlockSource(block_name.substr(0, close));
+
+            if (snippet.empty())
+            {
+                const std::string display_name = source_name.empty()
+                    ? std::string("<generated shader>")
+                    : source_name;
+                LL_WARNS("ShaderLoading") << "Engine block snippet missing for marker '"
+                                          << line << "' in " << display_name << LL_ENDL;
+                expanded += line;
+                success = false;
+            }
+            else
+            {
+                expanded += snippet;
+                if (snippet.back() != '\n')
+                {
+                    expanded += '\n';
+                }
+            }
+        }
+
+        if (newline == std::string::npos)
+        {
+            break;
+        }
+        start = newline + 1;
+    }
+
+    return success ? std::optional<std::string>(std::move(expanded)) : std::nullopt;
 }
 
 bool LLShaderMgr::attachShaderFeatures(LLGLSLShader * shader)
@@ -500,7 +588,11 @@ void LLShaderMgr::dumpObjectLog(GLuint ret, bool warns, const std::string& filen
     }
 }
 
-GLuint LLShaderMgr::loadShaderFile(const std::string& filename, S32 & shader_level, GLenum type, std::map<std::string, std::string>* defines, S32 texture_index_channels, const std::string& cache_key)
+GLuint LLShaderMgr::loadShaderFile(const std::string& filename, S32 & shader_level, GLenum type,
+                                   std::map<std::string, std::string>* defines,
+                                   S32 texture_index_channels,
+                                   const std::string& cache_key,
+                                   const std::string& extra_source)
 {
     GLenum error = GL_NO_ERROR;
 
@@ -828,6 +920,8 @@ GLuint LLShaderMgr::loadShaderFile(const std::string& filename, S32 & shader_lev
     // Master definition can be found in deferredUtil.glsl
     extra_code_text[extra_code_count++] = strdup("struct GBufferInfo { vec4 albedo; vec4 specular; vec3 normal; vec3 geoNormal; vec4 emissive; float gbufferFlag; float envIntensity; };\n");
 
+    if (!extra_source.empty()) extra_code_text[extra_code_count++] = strdup(extra_source.c_str());
+
     //copy file into memory
     enum {
           flag_write_to_out_of_extra_block_area = 0x01
@@ -870,13 +964,30 @@ GLuint LLShaderMgr::loadShaderFile(const std::string& filename, S32 & shader_lev
         ++shader_code_count;
     };
 
+    auto append_source = [&](const std::string& source)
+    {
+        size_t start = 0;
+        while (start < source.size())
+        {
+            const size_t newline = source.find('\n', start);
+            const size_t end = newline == std::string::npos ? source.size() : newline + 1;
+            const std::string line = source.substr(start, end - start);
+            append_line(line.c_str());
+
+            if (newline == std::string::npos)
+            {
+                break;
+            }
+            start = newline + 1;
+        }
+    };
+
     while(NULL != fgets((char *)buff, 1024, file)
           && shader_code_count < (LL_ARRAY_SIZE(shader_code_text) - LL_ARRAY_SIZE(extra_code_text)))
     {
         file_lines_count++;
 
         bool extra_block_area_found = NULL != strstr((const char*)buff, "[EXTRA_CODE_HERE]");
-        const char* engine_block_marker = strstr((const char*)buff, "[ENGINE_BLOCK ");
 
 #if TOUCH_SHADERS
         if (NULL != strstr((const char*)buff, marker))
@@ -911,59 +1022,11 @@ GLuint LLShaderMgr::loadShaderFile(const std::string& filename, S32 & shader_lev
             flags &= ~flag_write_to_out_of_extra_block_area;
             flags |= flag_extra_block_marker_was_found;
         }
-        else if (engine_block_marker)
+        else if (strstr((const char*)buff, kEngineBlockMarker))
         {
-            // Shared engine-block declaration splice: a "//[ENGINE_BLOCK <Name>]" line
-            // expands to the ONE canonical std140 declaration for that block
-            // (class1/deferred/<name>Block.glsl). Every file that reads the block gets a
-            // byte-identical copy -- required, since helper sources are separate compilation
-            // units whose matching blocks must unify at link -- and none of them can drift
-            // from each other or from the C++ mirror struct.
-            std::string block_name(engine_block_marker + strlen("[ENGINE_BLOCK "));
-            const size_t close = block_name.find(']');
-            std::string snippet;
-            if (close != std::string::npos)
-            {
-                block_name.resize(close);
-                std::string snippet_rel = block_name;
-                if (!snippet_rel.empty())
-                {
-                    snippet_rel[0] = (char)tolower((unsigned char)snippet_rel[0]);
-                }
-                const std::string snippet_path = getShaderDirPrefix() + "1" + gDirUtilp->getDirDelimiter()
-                    + "deferred" + gDirUtilp->getDirDelimiter() + snippet_rel + "Block.glsl";
-                std::error_code ec;
-                snippet = LLFile::getContents(snippet_path, ec);
-                if (ec)
-                {
-                    snippet.clear();
-                }
-            }
-
-            if (snippet.empty())
-            {
-                // Loud but non-fatal: the compile that follows fails with
-                // undefined-member errors right next to this warning.
-                LL_WARNS("ShaderLoading") << "Engine block snippet missing for marker '"
-                                          << (const char*)buff << "' in " << open_file_name << LL_ENDL;
-                append_line((const char*)buff);
-            }
-            else
-            {
-                size_t start = 0;
-                while (start < snippet.size())
-                {
-                    size_t nl = snippet.find('\n', start);
-                    std::string line = (nl == std::string::npos) ? snippet.substr(start) + "\n"
-                                                                 : snippet.substr(start, nl - start + 1);
-                    append_line(line.c_str());
-                    if (nl == std::string::npos)
-                    {
-                        break;
-                    }
-                    start = nl + 1;
-                }
-            }
+            const std::string source_line(buff);
+            const std::optional<std::string> expanded = expandEngineBlocks(source_line, open_file_name);
+            append_source(expanded ? *expanded : source_line);
         }
         else
         {
@@ -1097,7 +1160,7 @@ GLuint LLShaderMgr::loadShaderFile(const std::string& filename, S32 & shader_lev
         if (shader_level > 1)
         {
             shader_level--;
-            return loadShaderFile(filename, shader_level, type, defines, texture_index_channels, cache_key);
+            return loadShaderFile(filename, shader_level, type, defines, texture_index_channels, cache_key, extra_source);
         }
         LL_WARNS("ShaderLoading") << "Failed to load " << filename << LL_ENDL;
     }
@@ -1433,6 +1496,7 @@ void LLShaderMgr::initAttribsAndUniforms()
     mReservedAttribs.push_back("weight4");
     mReservedAttribs.push_back("clothing");
     mReservedAttribs.push_back("joint");
+    mReservedAttribs.push_back("glyph_loc");
     mReservedAttribs.push_back("texture_index");
 
     //matrix state
@@ -1941,6 +2005,7 @@ void LLShaderMgr::initAttribsAndUniforms()
 
     // End Alchemy Effects Stack
 
+    mReservedUniforms.push_back("hb_gpu_atlas");
     // The enum and this list are parallel, and an entry added or removed on one side only
     // shifts every later uniform index for every shader in the viewer -- silently, since a
     // wrong index still resolves to some other real uniform. Fatal, like the duplicate check
@@ -1963,4 +2028,3 @@ void LLShaderMgr::initAttribsAndUniforms()
         dupe_check.insert(mReservedUniforms[i]);
     }
 }
-

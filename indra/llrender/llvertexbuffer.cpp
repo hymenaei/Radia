@@ -709,6 +709,7 @@ const U32 LLVertexBuffer::sTypeSize[LLVertexBuffer::TYPE_MAX] =
     sizeof(LLVector4), // TYPE_WEIGHT4,
     sizeof(LLVector4), // TYPE_CLOTHWEIGHT,
     sizeof(U64),       // TYPE_JOINT,
+    sizeof(U32),       // TYPE_GLYPH_LOC
     sizeof(LLVector4), // TYPE_TEXTURE_INDEX (actually exists as position.w), no extra data, but stride is 16 bytes
 };
 
@@ -726,7 +727,8 @@ static const std::string vb_type_name[] =
     "TYPE_WEIGHT",
     "TYPE_WEIGHT4",
     "TYPE_CLOTHWEIGHT",
-    "TYPE_JOINT"
+    "TYPE_JOINT",
+    "TYPE_GLYPH_LOC",
     "TYPE_TEXTURE_INDEX",
     "TYPE_MAX",
     "TYPE_INDEX",
@@ -1635,6 +1637,10 @@ bool LLVertexBuffer::getColorStrider(LLStrider<LLColor4U>& strider, U32 index, S
 {
     return VertexBufferStrider<LLColor4U,TYPE_COLOR>::get(*this, strider, index, count);
 }
+bool LLVertexBuffer::getGlyphLocStrider(LLStrider<U32>& strider, U32 index, S32 count)
+{
+    return VertexBufferStrider<U32,TYPE_GLYPH_LOC>::get(*this, strider, index, count);
+}
 bool LLVertexBuffer::getEmissiveStrider(LLStrider<LLColor4U>& strider, U32 index, S32 count)
 {
     return VertexBufferStrider<LLColor4U,TYPE_EMISSIVE>::get(*this, strider, index, count);
@@ -1786,6 +1792,12 @@ void LLVertexBuffer::setupVertexBuffer()
         void* ptr = (void*)(base + mOffsets[TYPE_JOINT]);
         glVertexAttribIPointer(loc, 4, GL_UNSIGNED_SHORT, LLVertexBuffer::sTypeSize[TYPE_JOINT], ptr);
     }
+    if (data_mask & MAP_GLYPH_LOC)
+    {
+        AttributeType loc = TYPE_GLYPH_LOC;
+        void* ptr = (void*)(base + mOffsets[TYPE_GLYPH_LOC]);
+        glVertexAttribIPointer(loc, 1, GL_UNSIGNED_INT, LLVertexBuffer::sTypeSize[TYPE_GLYPH_LOC], ptr);
+    }
     if (data_mask & MAP_CLOTHWEIGHT)
     {
         AttributeType loc = TYPE_CLOTHWEIGHT;
@@ -1825,6 +1837,13 @@ void LLVertexBuffer::setTexCoord1Data(const LLVector2* data)
 void LLVertexBuffer::setColorData(const LLColor4U* data)
 {
     flush_vbo(GL_ARRAY_BUFFER, mOffsets[TYPE_COLOR], mOffsets[TYPE_COLOR] + sTypeSize[TYPE_COLOR] * getNumVerts() - 1, (U8*) data, mMappedData);
+}
+
+void LLVertexBuffer::setGlyphLocData(const U32* data)
+{
+    flush_vbo(GL_ARRAY_BUFFER, mOffsets[TYPE_GLYPH_LOC],
+              mOffsets[TYPE_GLYPH_LOC] + sTypeSize[TYPE_GLYPH_LOC] * getNumVerts() - 1,
+              (U8*)data, mMappedData);
 }
 
 void LLVertexBuffer::setNormalData(const LLVector4a* data)
@@ -1918,7 +1937,6 @@ void LLVertexBuffer::setIndexData(const U32* data, U32 offset, U32 count)
     }
     flush_vbo(GL_ELEMENT_ARRAY_BUFFER, offset * sizeof(U32), (offset + count) * sizeof(U32) - 1, (U8*)data, mMappedIndexData);
 }
-
 
 
 

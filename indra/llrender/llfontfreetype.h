@@ -30,18 +30,24 @@
 #ifndef LL_LLFONTFREETYPE_H
 #define LL_LLFONTFREETYPE_H
 
-#include "llpointer.h"
-#include "llstl.h"
-
-#include "llimagegl.h"
-#include "llfontbitmapcache.h"
-#include "alfontface.h"
-
 #include <array>
+#include <cstdint>
+#include <functional>
+#include <map>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 #include <boost/functional/hash.hpp>
 #include <boost/unordered/unordered_flat_map.hpp>
 #include <boost/unordered/unordered_flat_set.hpp>
 #include <boost/unordered_map.hpp>
+#include "alfontface.h"
+#include "llfontbitmapcache.h"
+#include "llimagegl.h"
+#include "llpointer.h"
+#include "llstl.h"
 
 // ALFT_Face / hb_font_t / EFontHinting come in via alfontface.h.
 struct FT_StreamRec_;
@@ -51,7 +57,7 @@ namespace ll
 {
     namespace fonts
     {
-        class LoadedFont;
+        struct LoadedFont;
     }
 }
 
@@ -61,7 +67,12 @@ public:
     static void initClass();
     static void cleanupClass();
 
-    U8 const *loadFont( std::string const &aFilename, long &a_Size );
+    U8 const* loadFont(const std::string& filename, long& size);
+
+    // Register owned font bytes and return a unique source key for loadFace.
+    // Register each resource generation and again if collection removes an
+    // unused source; live faces keep their bytes through collectGarbage().
+    std::string registerFontBytes(std::string_view sourceName, std::string bytes);
 
     // Resolve a key to a refcounted, shared ALFontFace. Loads the face on
     // miss and caches it; returns null if FreeType refuses the file or the
@@ -82,6 +93,7 @@ private:
     void unloadAllFonts();
     std::map< std::string, std::shared_ptr<ll::fonts::LoadedFont> > m_LoadedFonts;
     boost::unordered_map<ALFontFaceKey, LLPointer<ALFontFace>> mFaceCache;
+    std::uint64_t mNextMemoryFontSourceId = 1;
 };
 
 struct LLFontGlyphInfo
@@ -161,7 +173,7 @@ public:
     static S32 getNumFaces(const std::string& filename);
 
     typedef std::function<bool(llwchar)> char_functor_t;
-    void addFallbackFont(const LLPointer<LLFontFreetype>& fallback_font, const char_functor_t& functor = nullptr) const;
+    void addFallbackFont(const LLPointer<LLFontFreetype>& fallbackFont, const char_functor_t& functor = nullptr) const;
     typedef std::pair<LLPointer<LLFontFreetype>, char_functor_t> fallback_font_t;
     typedef std::vector<fallback_font_t> fallback_font_vector_t;
     const fallback_font_vector_t& getFallbackFonts() const { return mFallbackFonts; }
@@ -281,6 +293,8 @@ public:
     LLFontBitmapCache* getBitmapCache() const { return mFace ? mFace->getBitmapCache() : nullptr; }
 
     U8 getStyle() const;
+    F32 getPointSize() const { return mPointSize; }
+    const ALFontVarAxes& getVarAxes() const { return mVarAxes; }
 
     // Run a maintenance pass that releases bitmap atlas sheets which haven't
     // been read or written within the idle threshold, recovering their CPU
@@ -323,7 +337,7 @@ private:
     // FreeType actually delivered (which can differ from the requested one —
     // e.g. color requested but mono returned).
     LLFontGlyphInfo* renderAndCreateGlyph(const LLFontFreetype* fontp, U32 glyph_index, EFontGlyphType requested_glyph_type, EFontGlyphType& out_bitmap_glyph_type) const;
-    bool hasFallbackPath(const std::string& path) const; // Is a fallback font with this file path already attached?
+    bool hasFallbackPath(const std::string& path, S32 faceIndex) const;
     // Last resort for a codepoint no face in the chain covers: ask the OS
     // for a font that does, load it and append it to the fallback chain.
     // Returns the (face, glyph index) it resolved to, or (nullptr, 0) when

@@ -1280,12 +1280,11 @@ bool LLViewerInput::handleGlobalBindsMouse(EMouseClickType clicktype, MASK mask,
     return res;
 }
 
-bool LLViewerInput::bindKey(const S32 mode, const KEY key, const MASK mask, const std::string& function_name)
+bool LLViewerInput::bindKey(const S32 mode, const KEY key, const MASK mask,
+                            const std::string& function_name, S32 order)
 {
-    size_t index;
     typedef std::function<bool(EKeystate)> function_t;
     function_t function = nullptr;
-    std::string name;
 
     // Allow remapping of F2-F12
     if (function_name[0] == 'F')
@@ -1326,30 +1325,18 @@ bool LLViewerInput::bindKey(const S32 mode, const KEY key, const MASK mask, cons
         return false;
     }
 
-    // check for duplicate first and overwrite
-    if (result->mIsGlobal)
-    {
-        auto size = mGlobalKeyBindings[mode].size();
-        for (index = 0; index < size; index++)
+    auto& bindings = result->mIsGlobal ? mGlobalKeyBindings[mode] : mKeyBindings[mode];
+    const auto existing = std::find_if(bindings.begin(), bindings.end(),
+        [key, mask](const LLKeyboardBinding& binding)
         {
-            if (key == mGlobalKeyBindings[mode][index].mKey && mask == mGlobalKeyBindings[mode][index].mMask)
-            {
-                mGlobalKeyBindings[mode][index].mFunction = function;
-                return true;
-            }
-        }
-    }
-    else
+            return key == binding.mKey && mask == binding.mMask;
+        });
+    if (existing != bindings.end())
     {
-        auto size = mKeyBindings[mode].size();
-        for (index = 0; index < size; index++)
-        {
-            if (key == mKeyBindings[mode][index].mKey && mask == mKeyBindings[mode][index].mMask)
-            {
-                mKeyBindings[mode][index].mFunction = function;
-                return true;
-            }
-        }
+        existing->mFunction = function;
+        existing->mFunctionName = function_name;
+        existing->mOrder = order;
+        return true;
     }
 
     LLKeyboardBinding bind;
@@ -1357,22 +1344,15 @@ bool LLViewerInput::bindKey(const S32 mode, const KEY key, const MASK mask, cons
     bind.mMask = mask;
     bind.mFunction = function;
     bind.mFunctionName = function_name;
-
-    if (result->mIsGlobal)
-    {
-        mGlobalKeyBindings[mode].push_back(bind);
-    }
-    else
-    {
-        mKeyBindings[mode].push_back(bind);
-    }
+    bind.mOrder = order;
+    bindings.push_back(std::move(bind));
 
     return true;
 }
 
-bool LLViewerInput::bindMouse(const S32 mode, const EMouseClickType mouse, const MASK mask, const std::string& function_name)
+bool LLViewerInput::bindMouse(const S32 mode, const EMouseClickType mouse, const MASK mask,
+                              const std::string& function_name, S32 order)
 {
-    size_t index;
     typedef std::function<bool(EKeystate)> function_t;
     function_t function = nullptr;
 
@@ -1408,30 +1388,18 @@ bool LLViewerInput::bindMouse(const S32 mode, const EMouseClickType mouse, const
         return false;
     }
 
-    // check for duplicate first and overwrite
-    if (result->mIsGlobal)
-    {
-        auto size = mGlobalMouseBindings[mode].size();
-        for (index = 0; index < size; index++)
+    auto& bindings = result->mIsGlobal ? mGlobalMouseBindings[mode] : mMouseBindings[mode];
+    const auto existing = std::find_if(bindings.begin(), bindings.end(),
+        [mouse, mask](const LLMouseBinding& binding)
         {
-            if (mouse == mGlobalMouseBindings[mode][index].mMouse && mask == mGlobalMouseBindings[mode][index].mMask)
-            {
-                mGlobalMouseBindings[mode][index].mFunction = function;
-                return true;
-            }
-        }
-    }
-    else
+            return mouse == binding.mMouse && mask == binding.mMask;
+        });
+    if (existing != bindings.end())
     {
-        auto size = mMouseBindings[mode].size();
-        for (index = 0; index < size; index++)
-        {
-            if (mouse == mMouseBindings[mode][index].mMouse && mask == mMouseBindings[mode][index].mMask)
-            {
-                mMouseBindings[mode][index].mFunction = function;
-                return true;
-            }
-        }
+        existing->mFunction = function;
+        existing->mFunctionName = function_name;
+        existing->mOrder = order;
+        return true;
     }
 
     LLMouseBinding bind;
@@ -1439,15 +1407,8 @@ bool LLViewerInput::bindMouse(const S32 mode, const EMouseClickType mouse, const
     bind.mMask = mask;
     bind.mFunction = function;
     bind.mFunctionName = function_name;
-
-    if (result->mIsGlobal)
-    {
-        mGlobalMouseBindings[mode].push_back(bind);
-    }
-    else
-    {
-        mMouseBindings[mode].push_back(bind);
-    }
+    bind.mOrder = order;
+    bindings.push_back(std::move(bind));
 
     return true;
 }
@@ -1558,6 +1519,7 @@ S32 LLViewerInput::loadBindingsXML(const std::string& filename)
             }
         }
     }
+    ++mBindingGeneration;
     return binding_count;
 }
 
@@ -1607,7 +1569,7 @@ S32 LLViewerInput::loadBindingMode(const LLViewerInput::KeyMode& keymode, S32 mo
             {
                 MASK mask;
                 LLKeyboard::maskFromString(it->mask, &mask);
-                bindKey(mode, key, mask, it->command);
+                bindKey(mode, key, mask, it->command, binding_count);
                 processed = true;
             }
             else
@@ -1623,7 +1585,7 @@ S32 LLViewerInput::loadBindingMode(const LLViewerInput::KeyMode& keymode, S32 mo
             {
                 MASK mask;
                 LLKeyboard::maskFromString(it->mask, &mask);
-                bindMouse(mode, mouse, mask, it->command);
+                bindMouse(mode, mouse, mask, it->command, binding_count);
                 processed = true;
             }
             else
@@ -1982,4 +1944,73 @@ std::string LLViewerInput::getKeyBindingAsString(const std::string& mode, const 
     }
 
     return res;
+}
+
+std::vector<std::string> LLViewerInput::getPrimaryKeyBinding(const std::string& mode,
+                                                              const std::string& control) const
+{
+    S32 keyboard_mode;
+    if (!modeFromString(mode, &keyboard_mode)) keyboard_mode = getMode();
+
+    const LLKeyboardBinding* primary_key = nullptr;
+    const auto consider_keys = [&](const std::vector<LLKeyboardBinding>& bindings)
+    {
+        for (const LLKeyboardBinding& binding : bindings)
+        {
+            if (binding.mFunctionName != control
+                || (primary_key && primary_key->mOrder <= binding.mOrder)) continue;
+            primary_key = &binding;
+        }
+    };
+    consider_keys(mKeyBindings[keyboard_mode]);
+    consider_keys(mGlobalKeyBindings[keyboard_mode]);
+
+    const auto modifier = [](MASK mask)
+    {
+        std::string value = LLKeyboard::stringFromAccelerator(mask);
+        while (!value.empty() && (value.back() == '+' || std::isspace(static_cast<unsigned char>(value.back()))))
+            value.pop_back();
+        return value;
+    };
+    const auto appendModifiers = [&modifier](std::vector<std::string>& keys, MASK mask)
+    {
+        if (mask & MASK_CONTROL)
+        {
+#ifdef LL_DARWIN
+            keys.push_back(modifier(mask & MASK_MAC_CONTROL
+                ? MASK_CONTROL | MASK_MAC_CONTROL : MASK_CONTROL));
+#else
+            keys.push_back(modifier(MASK_CONTROL));
+#endif
+        }
+        if (mask & MASK_ALT) keys.push_back(modifier(MASK_ALT));
+        if (mask & MASK_SHIFT) keys.push_back(modifier(MASK_SHIFT));
+    };
+
+    std::vector<std::string> keys;
+    if (primary_key)
+    {
+        appendModifiers(keys, primary_key->mMask);
+        keys.push_back(LLKeyboard::stringFromKey(primary_key->mKey));
+        return keys;
+    }
+
+    const LLMouseBinding* primary_mouse = nullptr;
+    const auto consider_mouse = [&](const std::vector<LLMouseBinding>& bindings)
+    {
+        for (const LLMouseBinding& binding : bindings)
+        {
+            if (binding.mFunctionName != control
+                || (primary_mouse && primary_mouse->mOrder <= binding.mOrder)) continue;
+            primary_mouse = &binding;
+        }
+    };
+    consider_mouse(mMouseBindings[keyboard_mode]);
+    consider_mouse(mGlobalMouseBindings[keyboard_mode]);
+    if (primary_mouse)
+    {
+        appendModifiers(keys, primary_mouse->mMask);
+        keys.push_back(LLKeyboard::stringFromMouse(primary_mouse->mMouse));
+    }
+    return keys;
 }

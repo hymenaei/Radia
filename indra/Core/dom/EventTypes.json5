@@ -1,0 +1,20 @@
+{
+  "blur": {"interface": "FocusEvent", "bubbles": false, "cancelable": false},
+  "change": {"interface": "Event", "bubbles": true, "cancelable": false},
+  "characterinput": {"interface": "Event", "bubbles": true, "cancelable": true},
+  "click": {"interface": "MouseEvent", "bubbles": true, "cancelable": true},
+  "contextmenu": {"interface": "MouseEvent", "bubbles": true, "cancelable": true},
+  "dblclick": {"interface": "MouseEvent", "bubbles": true, "cancelable": true},
+  "focus": {"interface": "FocusEvent", "bubbles": false, "cancelable": false},
+  "input": {"interface": "InputEvent", "bubbles": true, "cancelable": false},
+  "keydown": {"interface": "KeyboardEvent", "bubbles": true, "cancelable": true},
+  "keyup": {"interface": "KeyboardEvent", "bubbles": true, "cancelable": true},
+  "mousedown": {"interface": "MouseEvent", "bubbles": true, "cancelable": true},
+  "mousemove": {"interface": "MouseEvent", "bubbles": true, "cancelable": true},
+  "mouseup": {"interface": "MouseEvent", "bubbles": true, "cancelable": true},
+  "pointerdown": {"interface": "PointerEvent", "bubbles": true, "cancelable": true},
+  "pointermove": {"interface": "PointerEvent", "bubbles": true, "cancelable": true},
+  "pointerup": {"interface": "PointerEvent", "bubbles": true, "cancelable": true},
+  "scroll": {"interface": "Event", "bubbles": false, "cancelable": false},
+  "wheel": {"interface": "WheelEvent", "bubbles": true, "cancelable": true}
+}

@@ -128,6 +128,8 @@ public:
 
     void showCursorFromMouseMove() override;
     void hideCursorUntilMouseMove() override;
+    bool setCursorImage(const LLCursorImage& image) override;
+    void clearCursorImage() override;
 
     void updateCursor() override;
 
@@ -303,6 +305,8 @@ protected:
     SDL_Window *mWindow = nullptr;
     SDL_GLContext mContext = nullptr;
     SDL_Cursor *mSDLCursors[UI_CURSOR_COUNT];
+    SDL_Cursor *mCustomCursor = nullptr;
+    LLCursorImage mCustomCursorImage;
 
     std::string mWindowTitle;
     F32 mNativeAspectRatio = 0.0f;

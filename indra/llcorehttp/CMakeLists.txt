@@ -141,7 +141,7 @@ if (BUILD_TESTING AND LLCOREHTTP_TESTS)
   set_target_properties(http_texture_load
                         PROPERTIES
                         RUNTIME_OUTPUT_DIRECTORY "${EXE_STAGING_DIR}"
-                        FOLDER "Tests/llcorehttp"
+                        FOLDER "Examples"
                         )
 
   target_link_libraries(http_texture_load ${example_libs})

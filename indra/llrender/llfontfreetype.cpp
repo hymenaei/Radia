@@ -28,10 +28,13 @@
  */
 
 #include "linden_common.h"
-
-#include <unordered_set>
-
 #include "llfontfreetype.h"
+
+#include <limits>
+#include <new>
+#include <unordered_set>
+#include <utility>
+
 #include "llfontgl.h"
 
 // Freetype stuff
@@ -50,6 +53,7 @@
 
 #include "lldir.h"
 #include "llerror.h"
+#include "llfile.h"
 #include "llimage.h"
 #include "llimagepng.h"
 //#include "llimagej2c.h"
@@ -348,7 +352,7 @@ bool LLFontFreetype::loadFace(const std::string& filename, F32 point_size, F32 v
     // Resolve the (file, sized + variable axis) state via the manager's
     // shared face cache. Heads and fallbacks alike consult the cache; same
     // params yield the same wrapper.
-    ALFontFaceKey key{filename, face_n, point_size, vert_dpi, horz_dpi, hinting, flags, var_axes};
+    ALFontFaceKey key{filename, face_n, point_size, vert_dpi, horz_dpi, hinting, flags, var_axes, LLFontGL::sEnableFontGpu};
     mFace = gFontManagerp->getOrCreateFace(key);
     if (!mFace || !mFace->isValid())
     {
@@ -374,9 +378,18 @@ bool LLFontFreetype::loadFace(const std::string& filename, F32 point_size, F32 v
     // sub-pixel due to FreeType's internal 16.16 y_scale rounding.
     constexpr F32 INV_64 = 1.f / 64.f;
     const FT_Size_Metrics& metrics = ft->size->metrics;
-    mAscender   =  metrics.ascender  * INV_64;
-    mDescender  = -metrics.descender * INV_64;  // FT descender is negative; flip to positive depth.
-    mLineHeight =  metrics.height    * INV_64;
+    if (mFace->useLinearMetrics())
+    {
+        mAscender   =  FT_MulFix(ft->ascender,  metrics.y_scale) * INV_64;
+        mDescender  = -FT_MulFix(ft->descender, metrics.y_scale) * INV_64;
+        mLineHeight =  FT_MulFix(ft->height,    metrics.y_scale) * INV_64;
+    }
+    else
+    {
+        mAscender   =  metrics.ascender  * INV_64;
+        mDescender  = -metrics.descender * INV_64;
+        mLineHeight =  metrics.height    * INV_64;
+    }
 
     // The atlas (LLFontBitmapCache) is owned by mFace and was initialized
     // inside ALFontFace::load; nothing to do here for atlas setup.
@@ -467,10 +480,13 @@ S32 LLFontFreetype::getNumFaces(const std::string& filename)
     return num_faces;
 }
 
-void LLFontFreetype::addFallbackFont(const LLPointer<LLFontFreetype>& fallback_font,
-                                     const char_functor_t& functor) const
-{
-    mFallbackFonts.emplace_back(fallback_font, functor);
+void LLFontFreetype::addFallbackFont(const LLPointer<LLFontFreetype>& fallbackFont, const char_functor_t& functor) const {
+    if (!fallbackFont.notNull() || !mFace || !fallbackFont->mFace
+        || (mName == fallbackFont->mName && mFaceIndex == fallbackFont->mFaceIndex)
+        || hasFallbackPath(fallbackFont->mName, fallbackFont->mFaceIndex))
+        return;
+
+    mFallbackFonts.emplace_back(fallbackFont, functor);
     // Both caches encode the previous fallback list; the new fallback may win
     // for codepoints that previously resolved to a later face or to notdef on
     // this face. Clear both:
@@ -489,14 +505,11 @@ void LLFontFreetype::addFallbackFont(const LLPointer<LLFontFreetype>& fallback_f
     ALFontShaping::clearCacheForFace(this);
 }
 
-bool LLFontFreetype::hasFallbackPath(const std::string& path) const
-{
-    for (const fallback_font_t& pair : mFallbackFonts)
-    {
-        if (pair.first->getName() == path)
-        {
+bool LLFontFreetype::hasFallbackPath(const std::string& path, S32 faceIndex) const {
+    for (const fallback_font_t& pair : mFallbackFonts) {
+        const LLPointer<LLFontFreetype>& fallbackFont = pair.first;
+        if (fallbackFont->getName() == path && fallbackFont->mFaceIndex == faceIndex)
             return true;
-        }
     }
     return false;
 }
@@ -519,7 +532,7 @@ std::pair<const LLFontFreetype*, U32> LLFontFreetype::attachOsFallbackFor(llwcha
         return { nullptr, 0u };
 
     LLFontFallbackMatch match = LLWindow::findFallbackFontForChar(wch);
-    if (match.mPath.empty() || hasFallbackPath(match.mPath))
+    if (match.mPath.empty() || hasFallbackPath(match.mPath, match.mFaceIndex))
         return { nullptr, 0u };
 
     // Open at this font's size and DPI so the lazily-discovered face lines
@@ -798,9 +811,16 @@ LLFontGlyphInfo* LLFontFreetype::renderAndCreateGlyph(const LLFontFreetype* font
             // Keep them so inter-glyph spacing can be corrected in getXKerning().
             gi->mLsbDelta = (S32)fontp->getFTFace()->glyph->lsb_delta;
             gi->mRsbDelta = (S32)fontp->getFTFace()->glyph->rsb_delta;
-            // Convert these from 26.6 units to float pixels.
-            gi->mXAdvance = fontp->getFTFace()->glyph->advance.x / 64.f;
-            gi->mYAdvance = fontp->getFTFace()->glyph->advance.y / 64.f;
+            if (fontp->mFace->useLinearMetrics())
+            {
+                gi->mXAdvance = fontp->getFTFace()->glyph->linearHoriAdvance / 65536.f;
+                gi->mYAdvance = fontp->getFTFace()->glyph->linearVertAdvance / 65536.f;
+            }
+            else
+            {
+                gi->mXAdvance = fontp->getFTFace()->glyph->advance.x / 64.f;
+                gi->mYAdvance = fontp->getFTFace()->glyph->advance.y / 64.f;
+            }
         }
 
         // Copy the rasterized bitmap into the per-phase atlas slot.
@@ -1320,60 +1340,79 @@ U8 LLFontFreetype::getStyle() const
 // they operate purely on the atlas, which now lives on the face wrapper.)
 // (setVariationAxis moved to ALFontFace::setVariationAxis — face state.)
 
-namespace ll
-{
-    namespace fonts
-    {
-        class LoadedFont
-        {
-            public:
-            LoadedFont( std::string aName , std::string const &aAddress, std::size_t aSize )
-            : mAddress( aAddress )
-            {
-                mName = aName;
-                mSize = aSize;
-            }
-            std::string mName;
-            std::string mAddress;
-            std::size_t mSize;
-        };
-    }
-}
+namespace ll {
+namespace fonts {
+struct LoadedFont {
+    LoadedFont(std::string name, std::string address, std::size_t size)
+        : mName(std::move(name))
+        , mAddress(std::move(address))
+        , mSize(size) {}
 
-U8 const* LLFontManager::loadFont( std::string const &aFilename, long &a_Size)
-{
-    try
-    {
-        a_Size = 0;
-        std::map< std::string, std::shared_ptr<ll::fonts::LoadedFont> >::iterator itr = m_LoadedFonts.find(aFilename);
-        if (itr != m_LoadedFonts.end())
-        {
-            // A possible overflow cannot happen here, as it is asserted that the size is less than std::numeric_limits<long>::max() a few lines below.
-            a_Size = static_cast<long>(itr->second->mSize);
-            return reinterpret_cast<U8 const*>(itr->second->mAddress.c_str());
+    std::string mName;
+    std::string mAddress;
+    std::size_t mSize;
+};
+} // namespace fonts
+} // namespace ll
+
+U8 const* LLFontManager::loadFont(const std::string& filename, long& size) {
+    try {
+        size = 0;
+        auto loadedFont = m_LoadedFonts.find(filename);
+        if (loadedFont != m_LoadedFonts.end()) {
+            // A possible overflow cannot happen here, as it is asserted that the size is less than std::numeric_limits<long>::max() a few
+            // lines below.
+            size = static_cast<long>(loadedFont->second->mSize);
+            return reinterpret_cast<U8 const*>(loadedFont->second->mAddress.c_str());
         }
 
-        auto strContent = LLFile::getContents(aFilename);
-
-        if (strContent.empty())
+        // These keys are valid only while their registered byte buffers are
+        // cached. Never interpret an expired reserved key as a filesystem path.
+        if (filename.starts_with("radia://font/"))
             return nullptr;
 
-        // For fontconfig a type of long is required, std::string::size() returns size_t. I think it is safe to limit this to 2GiB and not support fonts that huge (can that even be a thing?)
-        llassert_always(strContent.size() < std::numeric_limits<long>::max());
+        auto contents = LLFile::getContents(filename);
 
-        a_Size = static_cast<long>(strContent.size());
+        if (contents.empty())
+            return nullptr;
 
-        auto pCache = std::make_shared<ll::fonts::LoadedFont>(aFilename, strContent, a_Size);
-        itr = m_LoadedFonts.insert(std::make_pair(aFilename, pCache)).first;
+        // For fontconfig a type of long is required, std::string::size() returns size_t. I think it is safe to limit this to 2GiB and not
+        // support fonts that huge (can that even be a thing?)
+        llassert_always(contents.size() < std::numeric_limits<long>::max());
 
-        return reinterpret_cast<U8 const*>(itr->second->mAddress.c_str());
-    }
-    catch (const std::bad_alloc&)
-    {
+        size = static_cast<long>(contents.size());
+
+        auto loadedFontData = std::make_shared<ll::fonts::LoadedFont>(filename, std::move(contents), size);
+        const auto loadedFontEntry = m_LoadedFonts.emplace(filename, std::move(loadedFontData)).first;
+
+        return reinterpret_cast<U8 const*>(loadedFontEntry->second->mAddress.c_str());
+    } catch (const std::bad_alloc&) {
         LLError::LLUserWarningMsg::showOutOfMemory();
         LL_ERRS() << "Failed to load font. Out of memory." << LL_ENDL;
     }
     return nullptr;
+}
+
+std::string LLFontManager::registerFontBytes(std::string_view sourceName, std::string bytes) {
+    if (sourceName.empty() || bytes.empty())
+        return {};
+    if (bytes.size() >= static_cast<std::size_t>(std::numeric_limits<long>::max()))
+        return {};
+    const std::size_t byteCount = bytes.size();
+
+    try {
+        if (mNextMemoryFontSourceId == 0)
+            return {};
+        const std::string sourceKey = "radia://font/" + std::to_string(mNextMemoryFontSourceId++);
+
+        auto loadedFont = std::make_shared<ll::fonts::LoadedFont>(std::string(sourceName), std::move(bytes), byteCount);
+        m_LoadedFonts.emplace(sourceKey, std::move(loadedFont));
+        return sourceKey;
+    } catch (const std::bad_alloc&) {
+        LLError::LLUserWarningMsg::showOutOfMemory();
+        LL_ERRS() << "Failed to register in-memory font. Out of memory." << LL_ENDL;
+    }
+    return {};
 }
 
 LLPointer<ALFontFace> LLFontManager::getOrCreateFace(const ALFontFaceKey& key)
@@ -1385,7 +1424,7 @@ LLPointer<ALFontFace> LLFontManager::getOrCreateFace(const ALFontFaceKey& key)
     LLPointer<ALFontFace> face = new ALFontFace;
     if (!face->load(key.filename, key.face_index, key.point_size,
                     key.vert_dpi, key.horz_dpi, key.hinting, key.flags,
-                    key.var_axes))
+                    key.var_axes, key.gpu_linear))
     {
         // Don't cache failures — caller handles retry through search paths.
         return nullptr;

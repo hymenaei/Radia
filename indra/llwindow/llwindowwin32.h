@@ -37,6 +37,7 @@
 #include "llthreadsafequeue.h"
 #include "llmutex.h"
 #include "workqueue.h"
+#include <memory>
 
 // Hack for async host by name
 #define LL_WM_HOST_RESOLVED      (WM_APP + 1)
@@ -76,6 +77,8 @@ public:
     void showCursorFromMouseMove() override;
     void hideCursorUntilMouseMove() override;
     bool isCursorHidden() override;
+    bool setCursorImage(const LLCursorImage& image) override;
+    void clearCursorImage() override;
     void updateCursor() override;
     ECursorType getCursor() const override;
     void captureMouse() override;
@@ -214,6 +217,9 @@ protected:
     F32         mNativeAspectRatio;
 
     HCURSOR     mCursor[ UI_CURSOR_COUNT ];  // Array of all mouse cursors
+    struct CursorState;
+    std::shared_ptr<CursorState> mCursorState;
+    LLCursorImage mCustomCursorImage; // Main-thread cache for cursor-image requests.
     LLCoordWindow mCursorPosition;  // mouse cursor position, should only be mutated on main thread
     bool        mAbsoluteCursorPosition; // true if last position was received in absolute coordinates.
     LLMutex mRawMouseMutex;
@@ -261,6 +267,7 @@ protected:
     U32             mRawLParam;
 
     bool            mMouseVanish;
+    bool            mOwnsMouseCapture = false;
 
     static HMODULE sGLDLLHandle;
 

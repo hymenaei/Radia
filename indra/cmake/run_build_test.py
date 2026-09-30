@@ -53,6 +53,66 @@ import signal
 import subprocess
 import logging
 
+
+def _is_gtest_command(arguments):
+    return any(argument.startswith("--gtest_") for argument in arguments)
+
+
+def _suppress_gtest_line(line):
+    stripped = line.strip()
+    return (
+        stripped.startswith("Running main() from ")
+        or stripped.startswith("[  FAILED  ]")
+        or stripped.startswith("[==========]")
+        or stripped.startswith("[  PASSED  ]")
+    )
+
+
+def _format_gtest_failure_line(line):
+    match = re.match(r"^(.*\(\d+\)): error: (.*)$", line)
+    if match is None:
+        return None
+    return match.group(1) + ": Failure", match.group(2)
+
+
+def _run_gtest(command_list):
+    """Run GoogleTest while keeping CTest failure output focused."""
+    process = subprocess.Popen(
+        command_list,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+
+    pending_empty_lines = 0
+    for raw_line in process.stdout:
+        line = raw_line.rstrip("\r\n")
+        if _suppress_gtest_line(line):
+            continue
+        if not line:
+            pending_empty_lines += 1
+            continue
+        failure_line = _format_gtest_failure_line(line)
+        if failure_line is not None:
+            if pending_empty_lines:
+                sys.stdout.write("\n" * pending_empty_lines)
+            location, message = failure_line
+            sys.stdout.write(location + "\n")
+            sys.stdout.write(message + "\n")
+            sys.stdout.flush()
+            pending_empty_lines = 0
+            continue
+        if line == "Google Test trace:":
+            sys.stdout.write("\n")
+        elif pending_empty_lines:
+            sys.stdout.write("\n" * pending_empty_lines)
+        sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+        pending_empty_lines = 0
+
+    process.stdout.close()
+    return process.wait()
+
+
 def main(command, arguments=[], libpath=[], vars={}):
     """Pass:
     command is the command to be executed
@@ -122,6 +182,8 @@ def main(command, arguments=[], libpath=[], vars={}):
     # Make sure we see all relevant output *before* child-process output.
     sys.stdout.flush()
     try:
+        if _is_gtest_command(arguments):
+            return _run_gtest(command_list)
         return subprocess.call(command_list)
     except OSError as err:
         # If the caller is trying to execute a test program that doesn't
@@ -310,14 +372,14 @@ def get_windows_table():
 # Use this instead of logging.basicConfig() because the latter prefixes
 # every line of output with INFO:__main__:...
 log=logging.getLogger()
-log.setLevel(logging.INFO)
+log.setLevel(logging.WARNING)
 log.addHandler(logging.StreamHandler())
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("-d", "--debug", dest="loglevel", action="store_const",
-                        const=logging.DEBUG, default=logging.INFO)
+                        const=logging.DEBUG, default=logging.WARNING)
     parser.add_argument("-D", "--define", dest="vars", default=[], action="append",
                         metavar="VAR=value",
                         help="Add VAR=value to the env variables defined")
@@ -340,6 +402,6 @@ if __name__ == "__main__":
     rc = main(command=args.command, arguments=args.args, libpath=args.libpath,
               vars=dict([(pair.split('=', 1) + [""])[:2] for pair in args.vars]))
     if rc not in (None, 0):
-        log.error("Failure running: %s" % " ".join([args.command] + args.args))
-        log.error("Error %s: %s" % (rc, translate_rc(rc)))
+        log.debug("Failure running: %s" % " ".join([args.command] + args.args))
+        log.debug("Error %s: %s" % (rc, translate_rc(rc)))
     sys.exit((rc < 0) and 255 or rc)

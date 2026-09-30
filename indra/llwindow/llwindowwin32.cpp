@@ -34,6 +34,7 @@
 #include "llkeyboardwin32.h"
 #include "lldragdropwin32.h"
 #include "lldxhardware.h"
+#include "llimage.h"
 #include "llpreeditor.h"
 #include "llwindowcallbacks.h"
 
@@ -55,18 +56,30 @@
 // System includes
 #include <commdlg.h>
 #include <WinUser.h>
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cstdint>
 #include <mapi.h>
 #include <process.h>    // for _spawn
 #include <shellapi.h>
 #include <fstream>
+#include <cmath>
+#include <cstring>
 #include <Imm.h>
 #include <iomanip>
 #include <future>
+#include <limits>
+#include <memory>
+#include <new>
+#include <optional>
 #include <sstream>
+#include <string>
 #include <utility>                  // std::pair
 
 #include <d3d9.h>
 #include <d3d11.h>
+#include <dwrite_2.h>
 #include <dxgi1_4.h>
 #include <timeapi.h>
 
@@ -79,6 +92,7 @@
 #include <Uxtheme.h>
 #include <dwmapi.h> // needed for DwmSetWindowAttribute to set window theme
 #include <shellscalingapi.h>
+#include <wrl/client.h>
 
 const S32   MAX_MESSAGE_PER_UPDATE = 20;
 const S32   BITS_PER_PIXEL = 32;
@@ -152,6 +166,147 @@ HGLRC SafeCreateContext(HDC &hdc)
     __except(EXCEPTION_EXECUTE_HANDLER)
     {
         return NULL;
+    }
+}
+
+struct Win32CursorResource {
+    std::vector<U8> bits;
+    int width = 0;
+    int height = 0;
+    U16 hotspotX = 0;
+    U16 hotspotY = 0;
+};
+
+struct CursorHandle {
+    explicit CursorHandle(HCURSOR value) : value(value) {}
+    ~CursorHandle() {
+        if (value) DestroyCursor(value);
+    }
+
+    HCURSOR value;
+};
+
+struct LLWindowWin32::CursorState {
+    std::shared_ptr<CursorHandle> custom;
+};
+
+std::optional<Win32CursorResource> parseCursorResource(const LLCursorImage& image) {
+    if (image.data.size() < 22) return std::nullopt;
+    const U8* bytes = reinterpret_cast<const U8*>(image.data.data());
+    const auto read16 = [](const U8* value) { return static_cast<U16>(value[0] | (static_cast<U16>(value[1]) << 8)); };
+    const auto read32 = [](const U8* value) {
+        return static_cast<std::uint32_t>(value[0] | (static_cast<std::uint32_t>(value[1]) << 8)
+                                           | (static_cast<std::uint32_t>(value[2]) << 16) | (static_cast<std::uint32_t>(value[3]) << 24));
+    };
+    if (read16(bytes) != 0 || read16(bytes + 2) != 2 || read16(bytes + 4) == 0) return std::nullopt;
+    const U8* entry = bytes + 6;
+    const std::size_t imageOffset = read32(entry + 12);
+    const std::size_t imageSize = read32(entry + 8);
+    if (imageOffset > image.data.size() || imageSize > image.data.size() - imageOffset) return std::nullopt;
+
+    Win32CursorResource result;
+    result.width = entry[0] ? entry[0] : 256;
+    result.height = entry[1] ? entry[1] : 256;
+    result.hotspotX = read16(entry + 4);
+    result.hotspotY = read16(entry + 6);
+    result.bits.resize(4 + imageSize);
+    result.bits[0] = static_cast<U8>(result.hotspotX);
+    result.bits[1] = static_cast<U8>(result.hotspotX >> 8);
+    result.bits[2] = static_cast<U8>(result.hotspotY);
+    result.bits[3] = static_cast<U8>(result.hotspotY >> 8);
+    std::memcpy(result.bits.data() + 4, bytes + imageOffset, imageSize);
+    return result;
+}
+
+LLPointer<LLImageRaw> decodeCursorImage(const LLCursorImage& image) {
+    const std::size_t dot = image.sourceName.rfind('.');
+    if (dot == std::string::npos || dot + 1 >= image.sourceName.size()
+        || image.data.size() > static_cast<std::size_t>(std::numeric_limits<S32>::max()))
+        return nullptr;
+
+    std::string extension = image.sourceName.substr(dot + 1);
+    LLStringUtil::toLower(extension);
+    LLPointer<LLImageFormatted> formatted = LLImageFormatted::createFromExtension(extension);
+    if (formatted.isNull()) return nullptr;
+
+    U8* data = formatted->allocateData(static_cast<S32>(image.data.size()));
+    if (!data) return nullptr;
+    std::memcpy(data, image.data.data(), image.data.size());
+    if (!formatted->updateData()) return nullptr;
+
+    LLPointer<LLImageRaw> raw = new LLImageRaw;
+    if (!formatted->decode(raw, 100000.f) || raw->getWidth() == 0 || raw->getHeight() == 0) return nullptr;
+    raw->verticalFlip();
+    return raw;
+}
+
+HCURSOR createCursorFromImage(const LLImageRaw& raw, int hotspotX, int hotspotY) {
+    const int width = raw.getWidth();
+    const int height = raw.getHeight();
+    const int components = raw.getComponents();
+    if (width <= 0 || height <= 0 || (components != 1 && components != 2 && components != 3 && components != 4)) return nullptr;
+
+    BITMAPINFO colorInfo = {};
+    colorInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    colorInfo.bmiHeader.biWidth = width;
+    colorInfo.bmiHeader.biHeight = -height;
+    colorInfo.bmiHeader.biPlanes = 1;
+    colorInfo.bmiHeader.biBitCount = 32;
+    colorInfo.bmiHeader.biCompression = BI_RGB;
+
+    void* colorBits = nullptr;
+    HBITMAP colorBitmap = CreateDIBSection(nullptr, &colorInfo, DIB_RGB_COLORS, &colorBits, nullptr, 0);
+    if (!colorBitmap || !colorBits) {
+        if (colorBitmap) DeleteObject(colorBitmap);
+        return nullptr;
+    }
+
+    const U8* source = raw.getData();
+    U8* destination = static_cast<U8*>(colorBits);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const U8* pixel = source + (static_cast<std::size_t>(y) * width + x) * components;
+            U8* output = destination + (static_cast<std::size_t>(y) * width + x) * 4;
+            const U8 red = pixel[0];
+            const U8 green = components > 2 ? pixel[1] : red;
+            const U8 blue = components > 2 ? pixel[2] : red;
+            const U8 alpha = components == 2 ? pixel[1] : components == 4 ? pixel[3] : 255;
+            output[0] = blue;
+            output[1] = green;
+            output[2] = red;
+            output[3] = alpha;
+        }
+    }
+
+    const std::size_t maskRowBytes = ((static_cast<std::size_t>(width) + 31) / 32) * 4;
+    std::vector<U8> maskBits(maskRowBytes * height, 0);
+    HBITMAP maskBitmap = CreateBitmap(width, height, 1, 1, maskBits.data());
+    if (!maskBitmap) {
+        DeleteObject(colorBitmap);
+        return nullptr;
+    }
+
+    ICONINFO iconInfo = {};
+    iconInfo.fIcon = FALSE;
+    iconInfo.xHotspot = static_cast<DWORD>(std::clamp(hotspotX, 0, width - 1));
+    iconInfo.yHotspot = static_cast<DWORD>(std::clamp(hotspotY, 0, height - 1));
+    iconInfo.hbmMask = maskBitmap;
+    iconInfo.hbmColor = colorBitmap;
+    HCURSOR cursor = CreateIconIndirect(&iconInfo);
+    DeleteObject(maskBitmap);
+    DeleteObject(colorBitmap);
+    return cursor;
+}
+
+namespace
+{
+    int clampCursorHotspot(const float sourceCoordinate, const float scale, const int extent)
+    {
+        if (extent <= 0 || !std::isfinite(sourceCoordinate) || !std::isfinite(scale) || scale <= 0.f) return 0;
+        const float maxSourceCoordinate = static_cast<float>(extent - 1) / scale;
+        const float clampedSourceCoordinate = std::clamp(sourceCoordinate, 0.f, maxSourceCoordinate);
+        const long roundedHotspot = std::lround(clampedSourceCoordinate * scale);
+        return static_cast<int>(std::clamp(roundedHotspot, 0L, static_cast<long>(extent - 1)));
     }
 }
 
@@ -513,6 +668,7 @@ LLWindowWin32::LLWindowWin32(LLWindowCallbacks* callbacks,
                              F32 max_gl_version)
     :
     LLWindow(callbacks, fullscreen, flags),
+    mCursorState(std::make_shared<CursorState>()),
     mAbsoluteCursorPosition(false),
     mMaxGLVersion(max_gl_version),
     mMaxCores(max_cores)
@@ -923,6 +1079,8 @@ LLWindowWin32::~LLWindowWin32()
     delete [] mWindowClassName;
     mWindowClassName = NULL;
 
+    if (mWindowThread) clearCursorImage();
+
     delete mWindowThread;
     mWindowThread = NULL;
 }
@@ -1044,6 +1202,7 @@ void LLWindowWin32::close()
         sWindowHandleForMessageBox = NULL;
     }
 
+    clearCursorImage();
     mhDC = NULL;
     mWindowHandle = NULL;
 
@@ -2185,6 +2344,7 @@ void LLWindowWin32::initCursors()
 
     HMODULE module = GetModuleHandle(NULL);
     mCursor[ UI_CURSOR_TOOLGRAB ]   = LoadCursor(module, TEXT("TOOLGRAB"));
+    mCursor[ UI_CURSOR_TOOLGRABBING ] = LoadCursor(module, TEXT("TOOLGRABBING"));
     mCursor[ UI_CURSOR_TOOLLAND ]   = LoadCursor(module, TEXT("TOOLLAND"));
     mCursor[ UI_CURSOR_TOOLFOCUS ]  = LoadCursor(module, TEXT("TOOLFOCUS"));
     mCursor[ UI_CURSOR_TOOLCREATE ] = LoadCursor(module, TEXT("TOOLCREATE"));
@@ -2235,6 +2395,7 @@ void LLWindowWin32::updateCursor()
 {
     ASSERT_MAIN_THREAD();
     LL_PROFILE_ZONE_SCOPED_CATEGORY_WIN32;
+    if (!mCustomCursorImage.data.empty()) return;
     if (mNextCursor == UI_CURSOR_ARROW
         && mBusyCount > 0)
     {
@@ -2252,6 +2413,66 @@ void LLWindowWin32::updateCursor()
     }
 }
 
+bool LLWindowWin32::setCursorImage(const LLCursorImage& image) {
+    if (!mWindowThread || image.data.empty()) return false;
+    if (!mCustomCursorImage.data.empty() && image == mCustomCursorImage) return true;
+    std::optional<Win32CursorResource> resource = parseCursorResource(image);
+    HCURSOR cursor = nullptr;
+    if (resource) {
+        const float scale = std::max(.0001f, image.scale);
+        const int width = std::max(1, static_cast<int>(std::lround(resource->width * scale)));
+        const int height = std::max(1, static_cast<int>(std::lround(resource->height * scale)));
+        const float hotspotX = image.hotspotXSpecified ? image.hotspotX : static_cast<float>(resource->hotspotX);
+        const float hotspotY = image.hotspotYSpecified ? image.hotspotY : static_cast<float>(resource->hotspotY);
+        const U16 nativeHotspotX = static_cast<U16>(clampCursorHotspot(hotspotX, scale, width));
+        const U16 nativeHotspotY = static_cast<U16>(clampCursorHotspot(hotspotY, scale, height));
+        resource->bits[0] = static_cast<U8>(nativeHotspotX);
+        resource->bits[1] = static_cast<U8>(nativeHotspotX >> 8);
+        resource->bits[2] = static_cast<U8>(nativeHotspotY);
+        resource->bits[3] = static_cast<U8>(nativeHotspotY >> 8);
+        cursor = reinterpret_cast<HCURSOR>(
+            CreateIconFromResourceEx(resource->bits.data(), static_cast<DWORD>(resource->bits.size()), FALSE, 0x00030000, width, height, 0));
+    } else {
+        LLPointer<LLImageRaw> raw = decodeCursorImage(image);
+        if (raw.notNull()) {
+            const float scale = std::max(.0001f, image.scale);
+            const int width = std::max(1, static_cast<int>(std::lround(raw->getWidth() * scale)));
+            const int height = std::max(1, static_cast<int>(std::lround(raw->getHeight() * scale)));
+            if (width != raw->getWidth() || height != raw->getHeight()) raw = raw->scaled(width, height);
+            if (raw.notNull()) {
+                const int hotspotX = clampCursorHotspot(image.hotspotXSpecified ? image.hotspotX : 0.f, scale, width);
+                const int hotspotY = clampCursorHotspot(image.hotspotYSpecified ? image.hotspotY : 0.f, scale, height);
+                cursor = createCursorFromImage(*raw, hotspotX, hotspotY);
+            }
+        }
+    }
+    if (!cursor) return false;
+
+    mCustomCursorImage = image;
+    const std::shared_ptr<CursorState> state = mCursorState;
+    const std::shared_ptr<CursorHandle> next = std::make_shared<CursorHandle>(cursor);
+    mWindowThread->post([state, next]() {
+        state->custom = next;
+        SetCursor(next->value);
+    });
+    kickWindowThread();
+    return true;
+}
+
+void LLWindowWin32::clearCursorImage() {
+    if (mCustomCursorImage.data.empty()) return;
+    mCustomCursorImage = {};
+    const HCURSOR fallback = mCursor[mCurrentCursor];
+    const std::shared_ptr<CursorState> state = mCursorState;
+    if (mWindowThread && state) {
+        mWindowThread->post([state, fallback]() {
+            state->custom.reset();
+            SetCursor(fallback);
+        });
+        kickWindowThread();
+    }
+}
+
 ECursorType LLWindowWin32::getCursor() const
 {
     return mCurrentCursor;
@@ -2260,11 +2481,13 @@ ECursorType LLWindowWin32::getCursor() const
 void LLWindowWin32::captureMouse()
 {
     SetCapture(mWindowHandle);
+    mOwnsMouseCapture = GetCapture() == mWindowHandle;
 }
 
 void LLWindowWin32::releaseMouse()
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_WIN32;
+    mOwnsMouseCapture = false;
     ReleaseCapture();
 }
 
@@ -2472,9 +2695,10 @@ LRESULT CALLBACK LLWindowWin32::mainWindowProc(HWND h_wnd, UINT u_msg, WPARAM w_
 
             // Only take control of cursor over client region of window
             // This allows Windows(tm) to handle resize cursors, etc.
-            if (LOWORD(l_param) == HTCLIENT)
-            {
-                SetCursor(window_imp->mCursor[window_imp->mCurrentCursor]);
+            if (LOWORD(l_param) == HTCLIENT) {
+                const HCURSOR cursor = window_imp->mCursorState && window_imp->mCursorState->custom ? window_imp->mCursorState->custom->value
+                                                                                                    : window_imp->mCursor[window_imp->mCurrentCursor];
+                SetCursor(cursor);
                 return 0;
             }
             break;
@@ -3182,6 +3406,16 @@ LRESULT CALLBACK LLWindowWin32::mainWindowProc(HWND h_wnd, UINT u_msg, WPARAM w_
         {
             LL_PROFILE_ZONE_NAMED_CATEGORY_WIN32("mwp - WM_KILLFOCUS");
             WINDOW_IMP_POST(window_imp->mCallbacks->handleFocusLost(window_imp));
+            return 0;
+        }
+
+        case WM_CAPTURECHANGED:
+        {
+            if (window_imp->mOwnsMouseCapture)
+            {
+                window_imp->mOwnsMouseCapture = false;
+                WINDOW_IMP_POST(window_imp->mCallbacks->handleMouseCaptureLost(window_imp));
+            }
             return 0;
         }
 
@@ -5065,10 +5299,181 @@ std::vector<std::string> LLWindowWin32::getDynamicFallbackFontList()
     return std::vector<std::string>();
 }
 
-LLFontFallbackMatch LLWindowWin32::findFallbackFontForChar(llwchar wch)
-{
-    // Not implemented on Windows; would use DirectWrite (IDWriteFontFallback::MapCharacters).
-    return LLFontFallbackMatch();
+namespace {
+using Microsoft::WRL::ComPtr;
+
+class SingleCharacterTextSource final : public IDWriteTextAnalysisSource {
+public:
+    SingleCharacterTextSource(const WCHAR* text, UINT32 length) : mText(text, text + length) {
+        std::array<WCHAR, LOCALE_NAME_MAX_LENGTH> localeName{};
+        const int localeLength = GetUserDefaultLocaleName(localeName.data(), static_cast<int>(localeName.size()));
+        mLocaleName = localeLength > 1
+            ? std::wstring(localeName.data(), static_cast<std::size_t>(localeLength - 1))
+            : L"en-us";
+    }
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
+        if (!object)
+            return E_POINTER;
+        *object = nullptr;
+        if (iid != __uuidof(IUnknown) && iid != __uuidof(IDWriteTextAnalysisSource))
+            return E_NOINTERFACE;
+        *object = static_cast<IDWriteTextAnalysisSource*>(this);
+        AddRef();
+        return S_OK;
+    }
+
+    ULONG STDMETHODCALLTYPE AddRef() override { return mReferenceCount.fetch_add(1, std::memory_order_relaxed) + 1; }
+
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG referenceCount = mReferenceCount.fetch_sub(1, std::memory_order_acq_rel) - 1;
+        if (referenceCount == 0)
+            delete this;
+        return referenceCount;
+    }
+
+    HRESULT STDMETHODCALLTYPE GetTextAtPosition(UINT32 position, const WCHAR** text, UINT32* length) override {
+        if (!text || !length)
+            return E_POINTER;
+        if (position >= mText.size()) {
+            *text = nullptr;
+            *length = 0;
+            return S_OK;
+        }
+        *text = mText.data() + position;
+        *length = static_cast<UINT32>(mText.size() - position);
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE GetTextBeforePosition(UINT32 position, const WCHAR** text, UINT32* length) override {
+        if (!text || !length)
+            return E_POINTER;
+        const UINT32 beforeLength = std::min(position, static_cast<UINT32>(mText.size()));
+        *text = beforeLength == 0 ? nullptr : mText.data();
+        *length = beforeLength;
+        return S_OK;
+    }
+
+    DWRITE_READING_DIRECTION STDMETHODCALLTYPE GetParagraphReadingDirection() override { return DWRITE_READING_DIRECTION_LEFT_TO_RIGHT; }
+
+    HRESULT STDMETHODCALLTYPE GetLocaleName(UINT32 position, UINT32* length, const WCHAR** localeName) override {
+        if (!length || !localeName)
+            return E_POINTER;
+        if (position >= mText.size()) {
+            *length = 0;
+            *localeName = nullptr;
+            return S_OK;
+        }
+        *length = static_cast<UINT32>(mText.size() - position);
+        *localeName = mLocaleName.c_str();
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE GetNumberSubstitution(UINT32 position, UINT32* length, IDWriteNumberSubstitution** substitution) override {
+        if (!length || !substitution)
+            return E_POINTER;
+        *length = position >= mText.size() ? 0 : static_cast<UINT32>(mText.size() - position);
+        *substitution = nullptr;
+        return S_OK;
+    }
+
+private:
+    std::atomic<ULONG> mReferenceCount{1};
+    std::wstring mText;
+    std::wstring mLocaleName;
+};
+} // namespace
+
+LLFontFallbackMatch LLWindowWin32::findFallbackFontForChar(llwchar wch) {
+    LLFontFallbackMatch result;
+    const U32 codepoint = static_cast<U32>(wch);
+    const bool isValidCodepoint = codepoint != 0 && codepoint <= 0x10FFFF && (codepoint < 0xD800 || codepoint > 0xDFFF);
+    if (!isValidCodepoint)
+        return result;
+
+    std::array<WCHAR, 2> text{};
+    UINT32 textLength = 1;
+    if (codepoint <= 0xFFFF) {
+        text[0] = static_cast<WCHAR>(codepoint);
+    } else {
+        const U32 supplementary = codepoint - 0x10000;
+        text[0] = static_cast<WCHAR>(0xD800 + (supplementary >> 10));
+        text[1] = static_cast<WCHAR>(0xDC00 + (supplementary & 0x3FF));
+        textLength = 2;
+    }
+
+    ComPtr<IUnknown> factoryUnknown;
+    if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory2), factoryUnknown.GetAddressOf())))
+        return result;
+
+    ComPtr<IDWriteFactory2> factory;
+    if (FAILED(factoryUnknown.As(&factory)))
+        return result;
+
+    ComPtr<IDWriteFontFallback> fallback;
+    if (FAILED(factory->GetSystemFontFallback(&fallback)))
+        return result;
+
+    ComPtr<IDWriteTextAnalysisSource> analysisSource;
+    analysisSource.Attach(new (std::nothrow) SingleCharacterTextSource(text.data(), textLength));
+    if (!analysisSource)
+        return result;
+
+    UINT32 mappedLength = 0;
+    FLOAT scale = 1.f;
+    ComPtr<IDWriteFont> font;
+    if (FAILED(fallback->MapCharacters(
+            analysisSource.Get(), 0, textLength, nullptr, nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL, &mappedLength, &font, &scale))
+        || mappedLength != textLength
+        || !font)
+        return result;
+
+    ComPtr<IDWriteFontFace> face;
+    if (FAILED(font->CreateFontFace(&face)) || !face || face->GetIndex() > static_cast<UINT32>(std::numeric_limits<S32>::max()))
+        return result;
+
+    UINT32 fileCount = 0;
+    if (FAILED(face->GetFiles(&fileCount, nullptr)) || fileCount != 1)
+        return result;
+
+    ComPtr<IDWriteFontFile> file;
+    if (FAILED(face->GetFiles(&fileCount, file.GetAddressOf())) || !file)
+        return result;
+
+    ComPtr<IDWriteFontFileLoader> loader;
+    if (FAILED(file->GetLoader(&loader)))
+        return result;
+    ComPtr<IDWriteLocalFontFileLoader> localLoader;
+    if (FAILED(loader.As(&localLoader)))
+        return result;
+
+    const void* referenceKey = nullptr;
+    UINT32 referenceKeySize = 0;
+    if (FAILED(file->GetReferenceKey(&referenceKey, &referenceKeySize)))
+        return result;
+
+    UINT32 pathLength = 0;
+    if (FAILED(localLoader->GetFilePathLengthFromKey(referenceKey, referenceKeySize, &pathLength)) || pathLength == 0
+        || pathLength >= static_cast<UINT32>(std::numeric_limits<int>::max()))
+        return result;
+
+    std::wstring widePath(static_cast<std::size_t>(pathLength) + 1, L'\0');
+    if (FAILED(localLoader->GetFilePathFromKey(referenceKey, referenceKeySize, widePath.data(), pathLength + 1)))
+        return result;
+
+    const int utf8Length =
+        WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, widePath.data(), static_cast<int>(pathLength), nullptr, 0, nullptr, nullptr);
+    if (utf8Length <= 0)
+        return result;
+
+    result.mPath.resize(static_cast<std::size_t>(utf8Length));
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, widePath.data(), static_cast<int>(pathLength), result.mPath.data(), utf8Length,
+                            nullptr, nullptr)
+        != utf8Length)
+        return {};
+    result.mFaceIndex = static_cast<S32>(face->GetIndex());
+    return result;
 }
 #endif // LL_WINDOWS
 

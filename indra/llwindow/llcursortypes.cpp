@@ -77,6 +77,7 @@ ECursorType getCursorFromString(const std::string& cursor_string)
         cursor_string_table["UI_CURSOR_TOOLPATHFINDINGPATHEND"] = UI_CURSOR_TOOLPATHFINDING_PATH_END;
         cursor_string_table["UI_CURSOR_TOOLPATHFINDINGPATHENDADD"] = UI_CURSOR_TOOLPATHFINDING_PATH_END_ADD;
         cursor_string_table["UI_CURSOR_TOOLNO"] = UI_CURSOR_TOOLNO;
+        cursor_string_table["UI_CURSOR_TOOLGRABBING"] = UI_CURSOR_TOOLGRABBING;
     }
 
     std::map<std::string,U32>::const_iterator iter = cursor_string_table.find(cursor_string);
@@ -88,6 +89,4 @@ ECursorType getCursorFromString(const std::string& cursor_string)
 
     return UI_CURSOR_ARROW;
 }
-
-
 

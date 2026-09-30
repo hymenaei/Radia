@@ -1,0 +1,23 @@
+set(Viewer_HEADERS
+    ComponentInstanceKey.h
+    ComponentManager.h
+    ControllerRegistration.h
+    DocumentController.h
+    FloaterHost.h
+    InputBridge.h
+    interface/FloaterDemo.h
+    NativeInput.h
+    ReloadCoordinator.h
+    SkinSnapshot.h
+    SkinResolver.h
+    Resources.h
+    Runtime.h
+    SettingsAdapter.h
+    SkinPreparation.h
+    WorkspacePersistence.h
+)
+
+set(Viewer_PRIVATE_HEADERS
+    ComponentManagerInternal.h
+    DocumentControllerInternal.h
+)

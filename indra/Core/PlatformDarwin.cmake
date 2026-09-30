@@ -1,0 +1,5 @@
+list(APPEND Core_SOURCES platform/graphics/darwin/DarwinSystemFontProvider.cpp)
+
+find_library(CORETEXT_FRAMEWORK CoreText REQUIRED)
+find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+list(APPEND Core_PRIVATE_LIBRARIES ${CORETEXT_FRAMEWORK} ${COREFOUNDATION_FRAMEWORK})

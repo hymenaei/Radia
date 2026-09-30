@@ -106,7 +106,7 @@ private:
          bool use_ellipses,
          bool use_color);
 
-    void renderBuffers();
+    bool renderBuffers();
 
     // Color-only cache regen path: when only the foreground color changed
     // (geometry-affecting params unchanged), rewrite the captured color
@@ -121,6 +121,9 @@ private:
     // color attribute streams without rebuilding geometry.
     std::list<LLVertexBufferData> mShadowBufferList;
     std::list<LLVertexBufferData> mForegroundBufferList;
+    bool mHasColorGlyphs = false;
+    bool mHasAnalyticGlyphs = false;
+    bool mLastEnableFontGpu = false;
     // Set during genBuffers: did any captured batch render glyphs from the
     // color (RGBA emoji) atlas? Mixed text+emoji strings can't be recolored
     // safely without per-entry glyph-type tracking, since emoji glyphs use a

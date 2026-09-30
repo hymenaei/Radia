@@ -1,7 +1,7 @@
 /**
  * @file alfontshaping_test.cpp
- * @brief Unit tests for ALFontShaping — HarfBuzz wrapper, ZWJ ligature
- *        retry, VS-16 strip, monospace feature plans, LRU cache contract.
+ * @brief Unit tests for ALFontShaping — FriBidi layout, HarfBuzz shaping,
+ *        emoji handling, feature plans, and LRU cache contract.
  *
  * The bulk of the tests are pure-CPU: HB shaping itself doesn't touch
  * the atlas. The GL-backed kerning test at the bottom exercises
@@ -51,9 +51,11 @@
 #include <hb.h>
 #include <hb-ft.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdint>
 #include <cmath>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -1146,12 +1148,6 @@ namespace tut
     // Keeping the gap so the audit's test numbering (23 + 25..31)
     // matches the plan file unchanged.)
 
-    // For an unligatured / unkerned ASCII run, HB's per-glyph
-    // x_advance must equal FT's slot->advance.x for the same glyph
-    // index loaded with the same flags. Catches divergence in HB↔FT
-    // outline scaling or load-flag plumbing. DejaVuSans has no GPOS
-    // kern between adjacent lowercase letters, so HB's GPOS pass is
-    // a no-op and per-glyph advances come straight from FT.
     template<> template<>
     void alfontshaping_object::test<25>()
     {
@@ -1163,7 +1159,9 @@ namespace tut
 
         const ALFontFace* face = ft->getFontFace();
         FT_Face ftf = face->face();
-        const FT_Int32 load_flags = static_cast<FT_Int32>(face->hinting());
+        const FT_Int32 load_flags = face->useLinearMetrics()
+            ? FT_LOAD_NO_HINTING
+            : static_cast<FT_Int32>(face->hinting());
 
         LLWString s = wstr('a','b','c','d','e','f');
         std::vector<ALShapedGlyph> out;
@@ -1174,21 +1172,15 @@ namespace tut
         {
             ensure_equals("FT_Load_Glyph succeeded",
                           FT_Load_Glyph(ftf, out[i].glyph_id, load_flags), 0);
-            const F32 ft_advance = ftf->glyph->advance.x * (1.f / 64.f);
-            // 26.6 -> float; equality in float at this precision
-            // would be exact when no GPOS adjustment fired. Tolerate
-            // 1/64 px to cover HB's internal rounding paths.
+            const F32 ft_advance = face->useLinearMetrics()
+                ? ftf->glyph->linearHoriAdvance * (1.f / 65536.f)
+                : ftf->glyph->advance.x * (1.f / 64.f);
             const F32 delta = std::fabs(out[i].x_advance - ft_advance);
             ensure("HB x_advance matches FT advance for unkerned glyph",
                    delta < (1.f / 64.f) + 1e-5f);
         }
     }
 
-    // HB's reported load flags after construction must equal what the
-    // FT renderGlyph path uses. Both are casts of mHinting; any
-    // refactor that splits the casts asymmetrically breaks shaped vs
-    // codepoint advance consistency. hb_ft_font_get_load_flags has
-    // existed since HB 1.7 — the codebase requires newer than that.
     template<> template<>
     void alfontshaping_object::test<26>()
     {
@@ -1203,14 +1195,11 @@ namespace tut
         ensure("hb_font accessible", hbf != nullptr);
 
         const int hb_flags = hb_ft_font_get_load_flags(hbf);
-        const int expected = static_cast<int>(face->hinting());
-        ensure_equals("HB load flags == (int)mHinting",
+        const int expected = face->useLinearMetrics()
+            ? FT_LOAD_NO_HINTING
+            : static_cast<int>(face->hinting());
+        ensure_equals("HB load flags match the active metric regime",
                       hb_flags, expected);
-        // And confirm the cast equivalence between the two surfaces
-        // (HB takes int, FT takes FT_Int32) hasn't drifted.
-        ensure_equals("(int)mHinting == (FT_Int32)mHinting",
-                      static_cast<int>(face->hinting()),
-                      (int)static_cast<FT_Int32>(face->hinting()));
     }
 
     // HB must see the same OT-VAR design coordinates that FT was
@@ -1536,6 +1525,81 @@ namespace tut
                       post[0].face, b.get());
         ensure_not_equals("post-fallback glyph is real (not notdef)",
                           post[0].glyph_id, 0u);
+    }
+
+    template<> template<>
+    void alfontshaping_object::test<35>()
+    {
+        const std::string path = std::string(kFontDir) + "DejaVuSans.woff2";
+        if (!fileExists(path))
+            skip("DejaVuSans.woff2 not present");
+        LLPointer<LLFontFreetype> ft = loadFt(path);
+        ensure("DejaVuSans loaded", ft.notNull());
+
+         // "اضغط"
+        LLWString text = wstr(0x0627, 0x0636, 0x063A, 0x0637);
+        std::vector<ALShapedGlyph> out;
+        ALFontShaping::shapeRun(ft, text, 0, text.size(), out);
+
+        ensure_equals("Arabic word produces one glyph per letter", out.size(), 4u);
+        ensure_equals("RTL visual stream starts at final logical letter", out.front().cluster, 3);
+        ensure_equals("RTL visual stream ends at first logical letter", out.back().cluster, 0);
+        for (const ALShapedGlyph& glyph : out)
+            ensure("Arabic glyph advance is positive", glyph.x_advance > 0.f);
+        for (size_t i = 1; i < out.size(); ++i)
+        {
+            ensure("Arabic clusters descend in visual order",
+                   out[i - 1].cluster > out[i].cluster);
+        }
+
+        LLWString isolated_ghain = wstr(0x063A);
+        std::vector<ALShapedGlyph> isolated;
+        ALFontShaping::shapeRun(ft, isolated_ghain, 0, isolated_ghain.size(), isolated);
+        ensure_equals("isolated Arabic letter produces one glyph", isolated.size(), 1u);
+        const auto joined_ghain = std::find_if(out.begin(), out.end(),
+            [](const ALShapedGlyph& glyph) { return glyph.cluster == 2; });
+        ensure("joined Arabic letter remains in shaped word", joined_ghain != out.end());
+        ensure_not_equals("Arabic medial form differs from isolated form",
+                          joined_ghain->glyph_id, isolated.front().glyph_id);
+    }
+
+    template<> template<>
+    void alfontshaping_object::test<36>()
+    {
+        const std::string path = std::string(kFontDir) + "DejaVuSans.woff2";
+        if (!fileExists(path))
+            skip("DejaVuSans.woff2 not present");
+        LLPointer<LLFontFreetype> ft = loadFt(path);
+        ensure("DejaVuSans loaded", ft.notNull());
+
+         //"عرض Radia UI التجريبي"
+        LLWString text = wstr(0x0639, 0x0631, 0x0636, ' ',
+                              'R', 'D', 'U', 'I', ' ',
+                              0x0627, 0x0644, 0x062A, 0x062C,
+                              0x0631, 0x064A, 0x0628, 0x064A);
+        std::vector<ALShapedGlyph> out;
+        ALFontShaping::shapeRun(ft, text, 0, text.size(), out);
+        ensure("mixed-direction title shaped", !out.empty());
+
+        auto visual_position = [&](S32 cluster)
+        {
+            const auto found = std::find_if(out.begin(), out.end(),
+                [cluster](const ALShapedGlyph& glyph) { return glyph.cluster == cluster; });
+            ensure(("cluster present: " + std::to_string(cluster)).c_str(), found != out.end());
+            return static_cast<size_t>(std::distance(out.begin(), found));
+        };
+
+        ensure("Arabic suffix is visually before embedded Latin",
+               visual_position(16) < visual_position(4));
+        ensure("embedded Latin is visually before Arabic prefix",
+               visual_position(7) < visual_position(2));
+        ensure("LTR acronym keeps its internal order",
+               visual_position(4) < visual_position(5)
+            && visual_position(5) < visual_position(6)
+            && visual_position(6) < visual_position(7));
+        ensure("RTL prefix keeps visual reverse-cluster order",
+               visual_position(2) < visual_position(1)
+            && visual_position(1) < visual_position(0));
     }
 
 #if LL_MESA_HEADLESS

@@ -6,14 +6,12 @@
 #include "linden_common.h"
 #include "CSSTokenStream.h"
 #include <cctype>
-#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <locale>
 #include <sstream>
 #include <string>
-#include <system_error>
 
 namespace Core::CSS::detail {
 namespace {
@@ -251,18 +249,7 @@ std::optional<float> parseNumber(std::string_view source) {
         return parsedValue;
     };
 
-// Apple's floating-point from_chars requires macOS 26.
-#if defined(__APPLE__)
     return parseWithStream();
-#else
-    float value = 0.f;
-    const auto [end, error] = std::from_chars(source.data(), source.data() + source.size(), value, std::chars_format::general);
-    if (error == std::errc::result_out_of_range)
-        return parseWithStream();
-    if (error != std::errc {} || end != source.data() + source.size() || !std::isfinite(value))
-        return std::nullopt;
-    return value;
-#endif
 }
 
 bool isNonPrintable(std::uint32_t value) {

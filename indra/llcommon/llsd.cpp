@@ -35,10 +35,11 @@
 #include "llsdserialize.h"
 #include "stringize.h"
 
-#include <charconv>
 #include <limits>
+#include <locale>
 
-#include <fast_float/fast_float.h>
+#include <boost/iostreams/device/array.hpp>
+#include <boost/iostreams/stream.hpp>
 #include <fmt/format.h>
 
 // Defend against a caller forcibly passing a negative number into an unsigned
@@ -1312,9 +1313,13 @@ LLSD::Real string_to_real(std::string_view in_string)
     {
         ++first;
     }
-    LLSD::Real v = 0.0;
-    auto [ptr, ec] = fast_float::from_chars(first, last, v);
-    return (ptr == last && ec == std::errc()) ? v : 0.0;
+    boost::iostreams::stream<boost::iostreams::array_source> input(first, last - first);
+    input.imbue(std::locale::classic());
+    input >> std::noskipws;
+    LLSD::Real value = 0.0;
+    if (!(input >> value) || input.peek() != std::char_traits<char>::eof())
+        return 0.0;
+    return value;
 }
 
 U32 allocationCount()                               { return LLSD::Impl::sAllocationCount; }

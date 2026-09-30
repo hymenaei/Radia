@@ -32,11 +32,11 @@
 #include "llstreamtools.h" // for fullread
 
 #include <bit>
-#include <charconv>
+#include <cstdint>
 #include <iostream>
 #include <limits>
+#include <locale>
 
-#include <fast_float/fast_float.h>
 #include <fmt/format.h>
 #include <simdutf.h>
 
@@ -485,6 +485,31 @@ namespace
         return isalnum(c) || c == '.' || c == '+' || c == '-';
     }
 
+    bool parse_integer_token(const char* token, size_t len, S32& value) {
+        if (len == 0)
+            return false;
+
+        const bool negative = token[0] == '-';
+        size_t position = token[0] == '+' || token[0] == '-' ? 1 : 0;
+        if (position == len)
+            return false;
+
+        const std::uint64_t limit = static_cast<std::uint64_t>(std::numeric_limits<S32>::max()) + negative;
+        std::uint64_t magnitude = 0;
+        for (; position < len; ++position) {
+            if (token[position] < '0' || token[position] > '9')
+                return false;
+            const std::uint64_t digit = static_cast<std::uint64_t>(token[position] - '0');
+            if (magnitude > (limit - digit) / 10)
+                return false;
+            magnitude = magnitude * 10 + digit;
+        }
+
+        const std::int64_t signedMagnitude = static_cast<std::int64_t>(magnitude);
+        value = static_cast<S32>(negative ? -signedMagnitude : signedMagnitude);
+        return true;
+    }
+
     // Scan an integer token ([ws][+-]digits) from istr into buf, leaving the
     // terminating character in the stream. Returns the token length.
     size_t scan_integer_token(std::istream& istr, char* buf, size_t cap)
@@ -700,17 +725,10 @@ S32 LLSDNotationParser::doParse(std::istream& istr, LLSD& data, S32 max_depth) c
         c = get(istr);
         char buf[64];
         size_t len = scan_integer_token(istr, buf, sizeof(buf));
-        const char* start = buf;
-        if (len && *start == '+')
-        {
-            ++start; // from_chars does not accept an explicit plus
-        }
         S32 integer = 0;
-        auto [ptr, ec] = std::from_chars(start, buf + len, integer);
+        const bool valid = !numeric_token_truncated(istr, len, sizeof(buf)) && parse_integer_token(buf, len, integer);
         data = integer;
-        if (numeric_token_truncated(istr, len, sizeof(buf)) ||
-            ec != std::errc() || ptr != buf + len)
-        {
+        if (!valid) {
             LL_INFOS() << "STREAM FAILURE reading integer." << LL_ENDL;
             parse_count = PARSE_FAILURE;
         }
@@ -724,14 +742,14 @@ S32 LLSDNotationParser::doParse(std::istream& istr, LLSD& data, S32 max_depth) c
         size_t len = scan_real_token(istr, buf, sizeof(buf));
         const char* start = buf;
         if (len && *start == '+')
-        {
-            ++start; // from_chars does not accept an explicit plus
-        }
+            ++start;
         F64 real = 0.0;
-        auto [ptr, ec] = fast_float::from_chars(start, buf + len, real);
+        boost::iostreams::stream<boost::iostreams::array_source> numberStream(start, buf + len - start);
+        numberStream.imbue(std::locale::classic());
+        numberStream >> std::noskipws >> real;
         data = real;
-        if (numeric_token_truncated(istr, len, sizeof(buf)) ||
-            ec != std::errc() || ptr != buf + len)
+        if (numeric_token_truncated(istr, len, sizeof(buf)) || numberStream.fail()
+            || numberStream.peek() != std::char_traits<char>::eof())
         {
             LL_INFOS() << "STREAM FAILURE reading real." << LL_ENDL;
             parse_count = PARSE_FAILURE;
@@ -2645,4 +2663,3 @@ char* strip_deprecated_header(char* in, llssize& cur_size, llssize* header_size)
 
     return in;
 }
-

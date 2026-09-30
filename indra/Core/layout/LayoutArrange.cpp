@@ -402,7 +402,7 @@ Engine::ColumnSizing Engine::resolveColumnSizes(Element& node, const Style::Comp
     }
     sizing.lines = flexLines(node, children, parentStyle, Style::FlexDirection::Column, availableMain);
     sizing.allocations.reserve(sizing.lines.size());
-    for (const auto [begin, end] : sizing.lines) {
+    for (const auto& [begin, end] : sizing.lines) {
         const MainAxisAllocation allocation =
             allocateMainAxis(node, children, begin, end, parentStyle, Style::FlexDirection::Column, availableMain);
         sizing.allocations.push_back(allocation);
@@ -416,7 +416,7 @@ Engine::ColumnSizing Engine::resolveColumnSizes(Element& node, const Style::Comp
         return sizing;
     }
     sizing.lineWidths.reserve(sizing.lines.size());
-    for (const auto [begin, end] : sizing.lines) {
+    for (const auto& [begin, end] : sizing.lines) {
         float width = 0.f;
         for (std::size_t index = begin; index < end; ++index)
             width = std::max(width, children[index].measured.x + horizontalMargin(children[index].style.margin()));

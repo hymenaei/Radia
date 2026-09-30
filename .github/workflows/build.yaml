@@ -476,8 +476,8 @@ jobs:
 
   benchmarks:
     name: build (ubuntu-24.04, release, x64, Benchmarks)
-    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
-    needs: setup
+    if: always() && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+    needs: [setup, build]
     permissions:
       packages: write
     runs-on: ubuntu-24.04
@@ -488,6 +488,12 @@ jobs:
       VCPKG_FEED_URL: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
       VCPKG_BINARY_SOURCES: "clear;nuget,https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json,${{ github.event_name == 'pull_request' && 'read' || 'readwrite' }}"
     steps:
+      - name: Require successful build matrix
+        if: needs.build.result != 'success'
+        run: |
+          echo "::error::Benchmark job requires a successful build matrix; result was ${{ needs.build.result }}"
+          exit 1
+
       - name: Checkout code
         uses: actions/checkout@v7
         with:

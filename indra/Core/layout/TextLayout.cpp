@@ -413,7 +413,7 @@ std::vector<TextLine> optimizedWrapLine(const TextLine& source, float available,
     }
     std::vector<TextLine> result;
     result.reserve(lineCount);
-    for (const auto [begin, rangeEnd] : ranges) {
+    for (const auto& [begin, rangeEnd] : ranges) {
         WrappedLine line(metrics);
         for (std::size_t index = begin; index < rangeEnd; ++index)
             line.append(chunks[index]);

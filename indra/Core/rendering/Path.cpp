@@ -7,11 +7,11 @@
 #include "Path.h"
 #include <algorithm>
 #include <cctype>
-#include <charconv>
 #include <cmath>
-#include <cstdlib>
+#include <locale>
 #include <numbers>
-#include <system_error>
+#include <sstream>
+#include <string>
 
 namespace Core {
 Path& Path::moveTo(float x, float y) {
@@ -83,7 +83,8 @@ void skipWhitespace(const char*& cursor) {
         ++cursor;
 }
 
-bool parseNumber(const char*& cursor, const char* inputEnd, float& value, bool allowComma) {
+bool parseNumber(std::istringstream& numberStream, const char*& cursor, const char* inputStart, const char* inputEnd, float& value,
+    bool allowComma) {
     skipWhitespace(cursor);
     if (*cursor == ',') {
         if (!allowComma)
@@ -94,24 +95,53 @@ bool parseNumber(const char*& cursor, const char* inputEnd, float& value, bool a
             return false;
     }
 
-    const char* numberStart = cursor;
-    if (*numberStart == '+') {
-        ++numberStart;
-        if (*numberStart == '+' || *numberStart == '-')
-            return false;
+    const char* numberEnd = cursor;
+    if (*numberEnd == '+' || *numberEnd == '-')
+        ++numberEnd;
+    bool hasDigits = false;
+    while (*numberEnd >= '0' && *numberEnd <= '9') {
+        ++numberEnd;
+        hasDigits = true;
     }
-    const auto [numberEnd, error] = std::from_chars(numberStart, inputEnd, value, std::chars_format::general);
-    if (numberEnd == numberStart)
-        return false;
-    if (error == std::errc::result_out_of_range) {
-        char* parsedEnd = nullptr;
-        const float parsedValue = std::strtof(cursor, &parsedEnd);
-        if (parsedEnd != numberEnd || !std::isfinite(parsedValue))
-            return false;
-        value = parsedValue;
-    } else if (error != std::errc {} || !std::isfinite(value))
+    if (*numberEnd == '.') {
+        ++numberEnd;
+        const char* const fractionStart = numberEnd;
+        while (*numberEnd >= '0' && *numberEnd <= '9')
+            ++numberEnd;
+        hasDigits = hasDigits || numberEnd != fractionStart;
+    }
+    if (!hasDigits)
         return false;
 
+    if (*numberEnd == 'e' || *numberEnd == 'E') {
+        const char* exponentEnd = numberEnd + 1;
+        if (*exponentEnd == '+' || *exponentEnd == '-')
+            ++exponentEnd;
+        const char* const exponentDigits = exponentEnd;
+        while (*exponentEnd >= '0' && *exponentEnd <= '9')
+            ++exponentEnd;
+        if (exponentEnd != exponentDigits)
+            numberEnd = exponentEnd;
+    }
+
+    numberStream.clear();
+    numberStream.seekg(cursor - inputStart);
+    float parsedValue = 0.f;
+    numberStream >> parsedValue;
+    const bool reachedEnd = numberStream.eof();
+    if (numberStream.fail()) {
+        if (parsedValue != 0.f)
+            return false;
+        numberStream.clear();
+    }
+    if (!std::isfinite(parsedValue))
+        return false;
+
+    const std::streampos streamEnd = reachedEnd ? std::streampos(inputEnd - inputStart) : numberStream.tellg();
+    if (streamEnd == std::streampos(-1) || static_cast<std::streamoff>(streamEnd) != numberEnd - inputStart)
+        return false;
+
+    value = parsedValue;
     cursor = numberEnd;
     return true;
 }
@@ -175,6 +205,9 @@ PathCompileResult compileSvgPathData(const std::string& data, const std::string&
     Path path;
     const char* cursor = data.c_str();
     const char* const inputEnd = cursor + data.size();
+    std::istringstream numberStream {data};
+    numberStream.imbue(std::locale::classic());
+    numberStream >> std::noskipws;
     char command = 0;
     Layout::Vec2 current;
     Layout::Vec2 start;
@@ -223,21 +256,22 @@ PathCompileResult compileSvgPathData(const std::string& data, const std::string&
 
         float x = 0.f, y = 0.f;
         if (op == 'H') {
-            if (!parseNumber(cursor, inputEnd, x, !commandWasRead)) {
+            if (!parseNumber(numberStream, cursor, data.c_str(), inputEnd, x, !commandWasRead)) {
                 fail("svg.path.arguments_invalid", "Horizontal line command requires one finite coordinate.");
                 return result;
             }
             current.x = relative ? current.x + x : x;
             path.lineTo(current.x, current.y);
         } else if (op == 'V') {
-            if (!parseNumber(cursor, inputEnd, y, !commandWasRead)) {
+            if (!parseNumber(numberStream, cursor, data.c_str(), inputEnd, y, !commandWasRead)) {
                 fail("svg.path.arguments_invalid", "Vertical line command requires one finite coordinate.");
                 return result;
             }
             current.y = relative ? current.y + y : y;
             path.lineTo(current.x, current.y);
         } else if (op == 'M' || op == 'L') {
-            if (!parseNumber(cursor, inputEnd, x, !commandWasRead) || !parseNumber(cursor, inputEnd, y, true)) {
+            if (!parseNumber(numberStream, cursor, data.c_str(), inputEnd, x, !commandWasRead)
+                || !parseNumber(numberStream, cursor, data.c_str(), inputEnd, y, true)) {
                 fail("svg.path.arguments_invalid", "Move and line commands require two finite coordinates.");
                 return result;
             }
@@ -251,8 +285,10 @@ PathCompileResult compileSvgPathData(const std::string& data, const std::string&
                 path.lineTo(current.x, current.y);
         } else if (op == 'Q') {
             float cx = 0.f, cy = 0.f;
-            if (!parseNumber(cursor, inputEnd, cx, !commandWasRead) || !parseNumber(cursor, inputEnd, cy, true)
-                || !parseNumber(cursor, inputEnd, x, true) || !parseNumber(cursor, inputEnd, y, true)) {
+            if (!parseNumber(numberStream, cursor, data.c_str(), inputEnd, cx, !commandWasRead)
+                || !parseNumber(numberStream, cursor, data.c_str(), inputEnd, cy, true)
+                || !parseNumber(numberStream, cursor, data.c_str(), inputEnd, x, true)
+                || !parseNumber(numberStream, cursor, data.c_str(), inputEnd, y, true)) {
                 fail("svg.path.arguments_invalid", "Quadratic curve command requires four finite coordinates.");
                 return result;
             }
@@ -262,9 +298,12 @@ PathCompileResult compileSvgPathData(const std::string& data, const std::string&
             current = next;
         } else if (op == 'C') {
             float c0x = 0.f, c0y = 0.f, c1x = 0.f, c1y = 0.f;
-            if (!parseNumber(cursor, inputEnd, c0x, !commandWasRead) || !parseNumber(cursor, inputEnd, c0y, true)
-                || !parseNumber(cursor, inputEnd, c1x, true) || !parseNumber(cursor, inputEnd, c1y, true)
-                || !parseNumber(cursor, inputEnd, x, true) || !parseNumber(cursor, inputEnd, y, true)) {
+            if (!parseNumber(numberStream, cursor, data.c_str(), inputEnd, c0x, !commandWasRead)
+                || !parseNumber(numberStream, cursor, data.c_str(), inputEnd, c0y, true)
+                || !parseNumber(numberStream, cursor, data.c_str(), inputEnd, c1x, true)
+                || !parseNumber(numberStream, cursor, data.c_str(), inputEnd, c1y, true)
+                || !parseNumber(numberStream, cursor, data.c_str(), inputEnd, x, true)
+                || !parseNumber(numberStream, cursor, data.c_str(), inputEnd, y, true)) {
                 fail("svg.path.arguments_invalid", "Cubic curve command requires six finite coordinates.");
                 return result;
             }

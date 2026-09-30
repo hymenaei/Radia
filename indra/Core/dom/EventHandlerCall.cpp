@@ -5,7 +5,7 @@
 
 #include "linden_common.h"
 #include "EventHandlerCall.h"
-#include <charconv>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include "Element.h"
@@ -141,9 +141,9 @@ private:
 
     EventHandlerCallParseResult parseInteger(std::vector<EventCallArgument>& arguments) {
         const std::size_t begin = mOffset;
-        bool positiveSign = false;
+        bool negative = false;
         if (current() == '+' || current() == '-') {
-            positiveSign = current() == '+';
+            negative = current() == '-';
             ++mOffset;
         }
         const std::size_t digits = mOffset;
@@ -154,14 +154,19 @@ private:
         if (!atEnd() && !isArgumentBoundary(current()))
             return failure(EventHandlerCallParseError::LiteralUnsupported, mOffset);
 
-        const std::string_view token =
-            positiveSign ? mSource.substr(begin + 1, mOffset - begin - 1) : mSource.substr(begin, mOffset - begin);
+        const std::uint64_t limit = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) + negative;
+        std::uint64_t magnitude = 0;
+        for (std::size_t i = digits; i < mOffset; ++i) {
+            const std::uint64_t digit = static_cast<std::uint64_t>(mSource[i] - '0');
+            if (magnitude > (limit - digit) / 10)
+                return failure(EventHandlerCallParseError::IntegerOutOfRange, begin);
+            magnitude = magnitude * 10 + digit;
+        }
         std::int64_t value = 0;
-        const auto converted = std::from_chars(token.data(), token.data() + token.size(), value);
-        if (converted.ec == std::errc::result_out_of_range)
-            return failure(EventHandlerCallParseError::IntegerOutOfRange, begin);
-        if (converted.ec != std::errc() || converted.ptr != token.data() + token.size())
-            return failure(EventHandlerCallParseError::LiteralUnsupported, begin);
+        if (negative && magnitude == limit)
+            value = std::numeric_limits<std::int64_t>::min();
+        else
+            value = negative ? -static_cast<std::int64_t>(magnitude) : static_cast<std::int64_t>(magnitude);
         arguments.emplace_back(value);
         return {};
     }

@@ -1,0 +1,515 @@
+//! Load favorite landmarks and resolve their simulator regions.
+
+use std::collections::{HashMap, HashSet};
+
+use base::UUID;
+use futures::{StreamExt, TryStreamExt, stream};
+use llsd::{Map, Value};
+use network::{
+    AgentSession, LoginResponseData, LoginValue,
+    capabilities::{CapabilityUrl, Client},
+};
+use serde::{Deserialize, Serialize};
+
+use crate::world::RegionLookup;
+
+const REQUESTED_CAPABILITIES: [&str; 3] = ["FetchInventoryDescendents2", "FetchInventory2", "ViewerAsset"];
+const ASSET_TYPE_LINK: i32 = 24;
+const ASSET_TYPE_LINK_FOLDER: i32 = 25;
+const ASSET_TYPE_LANDMARK: i32 = 3;
+const INVENTORY_TYPE_LANDMARK: i32 = 3;
+const INVENTORY_TYPE_PERSON: i32 = 24;
+const REGION_LOOKUP_CONCURRENCY: usize = 8;
+const LANDMARK_FETCH_CONCURRENCY: usize = 3;
+
+/// A favorite landmark position stored by the viewer.
+///
+/// Coordinates are integer meters within the named region. Values produced by
+/// the loader have `x` and `y` in `0..=255` and `z` in `0..=4096`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FavoriteLocation {
+    pub name: String,
+    pub region_name: String,
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
+}
+
+/// Position and region identifiers parsed from a simulator landmark asset.
+///
+/// Landmark versions provide different position fields, so unavailable values
+/// are `None`. Position components are in meters and ordered `[x, y, z]`.
+#[derive(Clone, Debug)]
+pub struct FavoriteLandmark {
+    pub name: String,
+    pub region_id: Option<UUID>,
+    pub local_pos: Option<[f64; 3]>,
+    pub global_pos: Option<[f64; 3]>,
+    /// Packed handle for the region origin.
+    pub region_handle: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+struct InventoryItem {
+    item_id: Option<UUID>,
+    asset_id: Option<UUID>,
+    inventory_type: Option<i32>,
+    asset_type: Option<i32>,
+    name: Option<String>,
+}
+
+impl InventoryItem {
+    fn from_llsd(value: &Value) -> Option<Self> {
+        let fields = value.as_map()?;
+        Some(Self {
+            item_id: uuid_field(fields.get("item_id")?),
+            asset_id: fields.get("asset_id").and_then(uuid_field),
+            inventory_type: fields.get("inv_type").and_then(inventory_type_field),
+            asset_type: fields.get("type").and_then(asset_type_field),
+            name: fields.get("name").and_then(string_field),
+        })
+    }
+
+    fn is_link(&self) -> bool {
+        self.asset_type == Some(ASSET_TYPE_LINK)
+    }
+
+    fn is_landmark(&self) -> bool {
+        self.asset_type == Some(ASSET_TYPE_LANDMARK) || self.inventory_type == Some(INVENTORY_TYPE_LANDMARK)
+    }
+}
+
+/// Loads the agent's Favorites landmarks and resolves region names.
+///
+/// Invalid landmarks are skipped; results are sorted by lowercase name.
+///
+/// # Errors
+///
+/// Returns an error if the Favorites folder is missing or invalid, an inventory request fails,
+/// a favorite landmark asset request fails, or no candidate landmark can be read.
+pub async fn load_favorites(
+    capabilities: &Client,
+    region_lookup: &RegionLookup,
+    session: &AgentSession,
+    login_data: &LoginResponseData,
+) -> Result<Vec<FavoriteLocation>, String> {
+    let folder_id = favorite_folder_id(login_data)?;
+    let landmarks = fetch_favorite_landmarks(capabilities, session.agent_id, folder_id).await?;
+    let resolved = stream::iter(landmarks.into_iter().map(|landmark| async move {
+        let (region_name, position) = if let Some(global_pos) = landmark.global_pos {
+            let Some((x, y, position)) = global_position(global_pos) else {
+                return Ok(None);
+            };
+            let region_name = region_lookup
+                .lookup_region_at(x, y)
+                .await
+                .map_err(|error| format!("Could not look up a favorite landmark region: {error}"))?;
+            (region_name, position)
+        } else {
+            let Some(position) = landmark.local_pos else {
+                return Ok(None);
+            };
+            let region_name = if let Some(handle) = landmark.region_handle {
+                let Some((x, y)) = region_grid_coordinates(handle) else {
+                    return Ok(None);
+                };
+                region_lookup
+                    .lookup_region_at(x, y)
+                    .await
+                    .map_err(|error| format!("Could not look up a favorite landmark region: {error}"))?
+            } else {
+                let Some(region_id) = landmark.region_id else {
+                    return Ok(None);
+                };
+                region_lookup
+                    .lookup_region_by_id(region_id)
+                    .await
+                    .map_err(|error| format!("Could not look up a favorite landmark region: {error}"))?
+            };
+            (region_name, position)
+        };
+        Ok(favorite_location(landmark.name, region_name, position))
+    }))
+    .buffer_unordered(REGION_LOOKUP_CONCURRENCY)
+    .collect::<Vec<Result<Option<FavoriteLocation>, String>>>()
+    .await;
+    let mut locations = resolved.into_iter().collect::<Result<Vec<_>, _>>()?.into_iter().flatten().collect::<Vec<_>>();
+    locations.sort_by_key(|location| location.name.to_lowercase());
+    Ok(locations)
+}
+
+/// Finds the first Favorites folder in login data, ignoring case.
+///
+/// # Errors
+///
+/// Returns an error if the inventory skeleton or folder UUID is missing or invalid.
+pub fn favorite_folder_id(login_data: &LoginResponseData) -> Result<UUID, String> {
+    let Some(LoginValue::Array(folders)) = login_data.get("inventory-skeleton") else {
+        return Err("Second Life did not include the Favorites folder in the login response.".into());
+    };
+
+    for folder in folders {
+        let LoginValue::Struct(fields) = folder else {
+            continue;
+        };
+        let Some(LoginValue::String(name)) = fields.get("name") else {
+            continue;
+        };
+        if !name.eq_ignore_ascii_case("favorites") {
+            continue;
+        }
+
+        let Some(LoginValue::String(folder_id)) = fields.get("folder_id") else {
+            return Err("Second Life returned an invalid Favorites folder ID.".into());
+        };
+        return UUID::parse_str(folder_id).map_err(|_| "Second Life returned an invalid Favorites folder ID.".into());
+    }
+
+    Err("Second Life did not include the Favorites folder in the login response.".into())
+}
+
+/// Fetches landmark assets from the Favorites folder.
+///
+/// At most three assets are fetched at once. Malformed asset contents are skipped, and successful results retain candidate order.
+///
+/// # Errors
+///
+/// Returns an error if a required capability or inventory request fails, the response is invalid,
+/// a candidate asset request fails, or every candidate asset is unreadable.
+pub async fn fetch_favorite_landmarks(
+    capabilities: &Client,
+    agent_id: UUID,
+    favorite_folder_id: UUID,
+) -> Result<Vec<FavoriteLandmark>, String> {
+    let capability_urls = capabilities
+        .request_capabilities(&REQUESTED_CAPABILITIES)
+        .await
+        .map_err(|error| format!("Could not request inventory capabilities: {error}"))?;
+    let descendents = capability(&capability_urls, "FetchInventoryDescendents2")?;
+    let fetch_items = capability(&capability_urls, "FetchInventory2")?;
+    let viewer_asset = capability(&capability_urls, "ViewerAsset")?;
+
+    let folder_response = capabilities
+        .post::<_, Value>(&descendents, &folder_request(agent_id, favorite_folder_id))
+        .await
+        .map_err(|error| format!("Could not fetch the Favorites folder: {error}"))?;
+    let items = favorite_folder_items(&folder_response, favorite_folder_id)?;
+    let candidates = resolve_favorite_items(capabilities, &fetch_items, items).await?;
+    let candidate_count = candidates.len();
+
+    let landmarks = stream::iter(candidates.into_iter().map(|(name, asset_id)| {
+        let capabilities = capabilities.clone();
+        let asset_url = viewer_asset.with_query_pair("landmark_id", &asset_id.to_string());
+        async move { fetch_landmark(&capabilities, asset_url, name).await }
+    }))
+    .buffered(LANDMARK_FETCH_CONCURRENCY)
+    .try_collect::<Vec<_>>()
+    .await?
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if candidate_count > 0 && landmarks.is_empty() {
+        return Err("Second Life did not return readable data for any favorite landmark.".into());
+    }
+    Ok(landmarks)
+}
+
+fn capability(capabilities: &HashMap<String, CapabilityUrl>, name: &str) -> Result<CapabilityUrl, String> {
+    capabilities.get(name).cloned().ok_or_else(|| format!("Second Life did not provide the {name} capability."))
+}
+
+fn folder_request(agent_id: UUID, folder_id: UUID) -> Value {
+    Value::Map(Map::from([(
+        "folders".into(),
+        Value::Array(vec![Value::Map(Map::from([
+            ("folder_id".into(), Value::UUID(folder_id)),
+            ("owner_id".into(), Value::UUID(agent_id)),
+            ("sort_order".into(), Value::Integer(0)),
+            ("fetch_folders".into(), Value::Boolean(true)),
+            ("fetch_items".into(), Value::Boolean(true)),
+        ]))]),
+    )]))
+}
+
+fn item_request(item_ids: &[UUID]) -> Value {
+    Value::Map(Map::from([(
+        "items".into(),
+        Value::Array(item_ids.iter().copied().map(|item_id| Value::Map(Map::from([("item_id".into(), Value::UUID(item_id))]))).collect()),
+    )]))
+}
+
+fn favorite_folder_items(response: &Value, requested_folder_id: UUID) -> Result<Vec<InventoryItem>, String> {
+    let folders = response
+        .as_map()
+        .and_then(|fields| fields.get("folders"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Second Life returned an invalid Favorites folder response.".to_string())?;
+    let folder = folders
+        .iter()
+        .find(|folder| folder.as_map().and_then(|fields| fields.get("folder_id")).and_then(uuid_field) == Some(requested_folder_id))
+        .ok_or_else(|| "Second Life did not return the Favorites folder.".to_string())?;
+    let folder_fields = folder.as_map().ok_or_else(|| "Second Life returned an invalid Favorites folder.".to_string())?;
+    let entries = match folder_fields.get("items").and_then(Value::as_array) {
+        Some(entries) => entries,
+        None if folder_fields.get("descendents").and_then(integer_field) == Some(0)
+            && matches!(
+                folder_fields.get("categories"),
+                Some(Value::Array(categories)) if categories.is_empty()
+            ) =>
+        {
+            return Ok(Vec::new());
+        }
+        None => {
+            return Err("Second Life returned an invalid Favorites item list.".into());
+        }
+    };
+
+    Ok(entries.iter().filter_map(InventoryItem::from_llsd).collect())
+}
+
+async fn resolve_favorite_items(
+    capabilities: &Client,
+    fetch_items: &CapabilityUrl,
+    items: Vec<InventoryItem>,
+) -> Result<Vec<(String, UUID)>, String> {
+    let items_by_id: HashMap<UUID, InventoryItem> = items.iter().filter_map(|item| item.item_id.map(|id| (id, item.clone()))).collect();
+    let mut links = Vec::new();
+    let mut linked_item_ids = HashSet::new();
+    for item in &items {
+        if item.is_link()
+            && let (Some(target_id), Some(name)) = (item.asset_id, item.name.as_ref())
+        {
+            linked_item_ids.insert(target_id);
+            links.push((name.clone(), target_id));
+        }
+    }
+
+    let unresolved_ids: Vec<UUID> = links
+        .iter()
+        .map(|(_, item_id)| *item_id)
+        .filter(|item_id| !items_by_id.contains_key(item_id))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let fetched_items = if unresolved_ids.is_empty() {
+        Vec::new()
+    } else {
+        let response = capabilities
+            .post::<_, Value>(fetch_items, &item_request(&unresolved_ids))
+            .await
+            .map_err(|error| format!("Could not resolve favorite landmarks: {error}"))?;
+        let entries = response
+            .as_map()
+            .and_then(|fields| fields.get("items"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| "Second Life returned an invalid linked-item response.".to_string())?;
+        entries.iter().filter_map(InventoryItem::from_llsd).collect()
+    };
+    let mut all_items = items_by_id;
+    all_items.extend(fetched_items.into_iter().filter_map(|item| item.item_id.map(|id| (id, item))));
+
+    let mut candidates = Vec::new();
+    for item in items {
+        if item.is_link() || item.item_id.is_some_and(|id| linked_item_ids.contains(&id)) {
+            continue;
+        }
+        if item.is_landmark()
+            && let (Some(name), Some(asset_id)) = (item.name, item.asset_id)
+        {
+            candidates.push((name, asset_id));
+        }
+    }
+    for (link_name, target_id) in links {
+        if let Some(target) = all_items.get(&target_id)
+            && target.is_landmark()
+            && let Some(asset_id) = target.asset_id
+        {
+            candidates.push((link_name, asset_id));
+        }
+    }
+
+    let mut seen = HashSet::new();
+    candidates.retain(|(name, asset_id)| seen.insert((name.clone(), *asset_id)));
+    Ok(candidates)
+}
+
+async fn fetch_landmark(capabilities: &Client, asset_url: CapabilityUrl, name: String) -> Result<Option<FavoriteLandmark>, String> {
+    let bytes =
+        capabilities.get_bytes(&asset_url).await.map_err(|error| format!("Could not fetch favorite landmark asset {name:?}: {error}"))?;
+    Ok(parse_landmark_asset(&name, &bytes))
+}
+
+fn global_position(position: [f64; 3]) -> Option<(u16, u16, [f64; 3])> {
+    if !position.iter().all(|value| value.is_finite()) || position[0] < 0.0 || position[1] < 0.0 {
+        return None;
+    }
+    let region_x = u16::try_from((position[0] / 256.0).floor() as u64).ok()?;
+    let region_y = u16::try_from((position[1] / 256.0).floor() as u64).ok()?;
+    Some((region_x, region_y, [position[0] % 256.0, position[1] % 256.0, position[2]]))
+}
+
+fn region_grid_coordinates(region_handle: u64) -> Option<(u16, u16)> {
+    let origin_x = region_handle >> 32;
+    let origin_y = region_handle & u64::from(u32::MAX);
+    Some((u16::try_from(origin_x / 256).ok()?, u16::try_from(origin_y / 256).ok()?))
+}
+
+fn favorite_location(name: String, region_name: String, [x, y, z]: [f64; 3]) -> Option<FavoriteLocation> {
+    if ![x, y, z].iter().all(|value| value.is_finite())
+        || !(0.0..256.0).contains(&x)
+        || !(0.0..256.0).contains(&y)
+        || !(0.0..=4096.0).contains(&z)
+    {
+        return None;
+    }
+    Some(FavoriteLocation { name, region_name, x: x.floor() as u32, y: y.floor() as u32, z: z.floor() as u32 })
+}
+
+fn parse_landmark_asset(name: &str, bytes: &[u8]) -> Option<FavoriteLandmark> {
+    let text = std::str::from_utf8(bytes).ok()?.trim_start_matches('\u{feff}').trim_matches('\0');
+    let mut lines = text.lines();
+    let version = lines.next()?.trim();
+    let mut fields = HashMap::new();
+    for line in lines {
+        let mut words = line.split_whitespace();
+        if let Some(key) = words.next() {
+            fields.insert(key, words.collect::<Vec<_>>());
+        }
+    }
+
+    match version {
+        "Landmark version 1" => Some(FavoriteLandmark {
+            name: name.to_owned(),
+            region_id: None,
+            local_pos: None,
+            global_pos: fields.get("global_pos").or_else(|| fields.get("global_position")).and_then(|parts| parse_position(parts)),
+            region_handle: None,
+        })
+        .filter(|landmark| landmark.global_pos.is_some()),
+        "Landmark version 2" => Some(FavoriteLandmark {
+            name: name.to_owned(),
+            region_id: fields.get("region_id").and_then(|parts| parts.first()).and_then(|value| UUID::parse_str(value).ok()),
+            local_pos: fields.get("local_pos").and_then(|parts| parse_position(parts)),
+            global_pos: None,
+            region_handle: fields.get("region_handle").and_then(|parts| parts.first()).and_then(|value| parse_region_handle(value)),
+        })
+        .filter(|landmark| (landmark.region_id.is_some() || landmark.region_handle.is_some()) && landmark.local_pos.is_some()),
+        _ => None,
+    }
+}
+
+fn parse_position(parts: &[&str]) -> Option<[f64; 3]> {
+    let mut parts =
+        parts.iter().flat_map(|part| part.split([',', '<', '>', '(', ')'])).filter(|part| !part.is_empty()).map(str::parse::<f64>);
+    let x = parts.next()?.ok()?;
+    let y = parts.next()?.ok()?;
+    let z = parts.next()?.ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+
+    let position = [x, y, z];
+    position.iter().all(|value| value.is_finite()).then_some(position)
+}
+
+fn parse_region_handle(value: &str) -> Option<u64> {
+    value.parse().ok().or_else(|| value.strip_prefix("0x").and_then(|hex| u64::from_str_radix(hex, 16).ok()))
+}
+
+fn uuid_field(value: &Value) -> Option<UUID> {
+    match value {
+        Value::UUID(uuid) => Some(*uuid),
+        Value::String(value) => UUID::parse_str(value).ok(),
+        _ => None,
+    }
+}
+
+fn integer_field(value: &Value) -> Option<i32> {
+    match value {
+        Value::Integer(value) => Some(*value),
+        _ => None,
+    }
+}
+
+fn inventory_type_field(value: &Value) -> Option<i32> {
+    match value {
+        Value::String(value) => match value.as_str() {
+            "landmark" => Some(INVENTORY_TYPE_LANDMARK),
+            "person" => Some(INVENTORY_TYPE_PERSON),
+            _ => None,
+        },
+        _ => integer_field(value),
+    }
+}
+
+fn asset_type_field(value: &Value) -> Option<i32> {
+    match value {
+        Value::String(value) => match value.as_str() {
+            "landmark" => Some(ASSET_TYPE_LANDMARK),
+            "link" => Some(ASSET_TYPE_LINK),
+            "link_f" => Some(ASSET_TYPE_LINK_FOLDER),
+            _ => None,
+        },
+        _ => integer_field(value),
+    }
+}
+
+fn string_field(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::URI(value) => Some(value.as_str().to_owned()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use base::UUID;
+    use llsd::{Map, Value};
+
+    use super::{InventoryItem, parse_landmark_asset, parse_position};
+
+    fn inventory_item(inventory_type: Value, asset_type: Value) -> InventoryItem {
+        let value = Value::Map(Map::from([
+            ("item_id".into(), Value::UUID(UUID::nil())),
+            ("inv_type".into(), inventory_type),
+            ("type".into(), asset_type),
+        ]));
+        InventoryItem::from_llsd(&value).expect("inventory item fields")
+    }
+
+    #[test]
+    fn identifies_links_by_asset_type_not_inventory_type() {
+        let link = inventory_item(Value::String("landmark".into()), Value::String("link".into()));
+        let person = inventory_item(Value::String("person".into()), Value::String("person".into()));
+        let folder_link = inventory_item(Value::String("category".into()), Value::String("link_f".into()));
+        let landmark = inventory_item(Value::Integer(3), Value::Integer(3));
+        let numeric_link = inventory_item(Value::Integer(3), Value::Integer(24));
+
+        assert!(link.is_link());
+        assert!(!person.is_link());
+        assert!(!folder_link.is_link());
+        assert!(!landmark.is_link());
+        assert!(numeric_link.is_link());
+    }
+
+    #[test]
+    fn parses_handle_only_landmark() {
+        let handle = ((42_u64 * 256) << 32) | (73 * 256);
+        let asset = format!("Landmark version 2\nregion_handle {handle}\nlocal_pos <128, 64, 30>\n");
+
+        let landmark = parse_landmark_asset("Home", asset.as_bytes()).expect("region handle identifies the region");
+
+        assert_eq!(landmark.region_id, None);
+        assert_eq!(landmark.region_handle, Some(handle));
+        assert_eq!(landmark.local_pos, Some([128.0, 64.0, 30.0]));
+        assert!(parse_landmark_asset("Unlocated", b"Landmark version 2\nlocal_pos <128, 64, 30>\n").is_none());
+    }
+
+    #[test]
+    fn position_requires_three_finite_values() {
+        assert_eq!(parse_position(&["<128,", "128,", "30>"]), Some([128.0, 128.0, 30.0]));
+        assert_eq!(parse_position(&["1,2,3,4"]), None);
+        assert_eq!(parse_position(&["1,NaN,3"]), None);
+    }
+}

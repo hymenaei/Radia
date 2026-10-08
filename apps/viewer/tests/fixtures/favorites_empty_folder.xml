@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<llsd>
+  <map>
+    <key>folders</key>
+    <array>
+      <map>
+        <key>folder_id</key>
+        <uuid>11111111-2222-3333-4444-555555555555</uuid>
+        <key>descendents</key>
+        <integer>0</integer>
+        <key>categories</key>
+        <array />
+      </map>
+    </array>
+  </map>
+</llsd>

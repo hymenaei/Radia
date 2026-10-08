@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<llsd>
+  <map>
+    <key>folders</key>
+    <array>
+      <map>
+        <key>folder_id</key>
+        <uuid>11111111-2222-3333-4444-555555555555</uuid>
+        <key>descendents</key>
+        <integer>1</integer>
+        <key>categories</key>
+        <array />
+        <key>items</key>
+        <array>
+          <map>
+            <key>item_id</key>
+            <uuid>22222222-3333-4444-5555-666666666666</uuid>
+            <key>asset_id</key>
+            <uuid>33333333-4444-5555-6666-777777777777</uuid>
+            <key>inv_type</key>
+            <integer>3</integer>
+            <key>type</key>
+            <integer>3</integer>
+            <key>name</key>
+            <string>Test Landmark</string>
+          </map>
+        </array>
+      </map>
+    </array>
+  </map>
+</llsd>

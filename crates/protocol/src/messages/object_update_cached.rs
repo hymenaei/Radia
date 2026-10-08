@@ -1,0 +1,27 @@
+use crate::{codec::Reader, error::UdpError, messages::object_data::ObjectRegionData};
+
+/// Cache keys advertised by the simulator for one region.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObjectUpdateCached {
+    pub region_data: ObjectRegionData,
+    /// Cached object records in packet order.
+    pub objects: Vec<CachedObjectReference>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CachedObjectReference {
+    /// Region-local simulator ID.
+    pub local_id: u32,
+    pub crc: u32,
+    pub update_flags: u32,
+}
+
+pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<ObjectUpdateCached, UdpError> {
+    let region_data = ObjectRegionData::decode(reader)?;
+    let count = reader.terminal_variable_count()?;
+    let mut objects = Vec::with_capacity(count);
+    for _ in 0..count {
+        objects.push(CachedObjectReference { local_id: reader.u32()?, crc: reader.u32()?, update_flags: reader.u32()? });
+    }
+    Ok(ObjectUpdateCached { region_data, objects })
+}

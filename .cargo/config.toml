@@ -1,0 +1,8 @@
+[alias]
+xtest = "nextest run"
+lint = "clippy --all-targets --all-features"
+profile = "run --profile profiling --features tracy"
+
+[env]
+# Tracy spans do not need native callstacks, which repeat Rust's DbgHelp initialization on Windows.
+TRACY_CLIENT_SYS_CXXFLAGS = { value = "-DTRACY_NO_CALLSTACK", force = false }

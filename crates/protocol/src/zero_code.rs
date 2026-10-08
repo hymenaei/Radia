@@ -1,0 +1,104 @@
+use crate::error::UdpError;
+
+pub(crate) fn encode(input: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(input.len());
+    let mut cursor = 0;
+    while cursor < input.len() {
+        if input[cursor] != 0 {
+            output.push(input[cursor]);
+            cursor += 1;
+            continue;
+        }
+
+        let start = cursor;
+        while cursor < input.len() && input[cursor] == 0 && cursor - start < u8::MAX as usize {
+            cursor += 1;
+        }
+        output.extend_from_slice(&[0, (cursor - start) as u8]);
+    }
+    output
+}
+
+fn read_zero_count(input: &[u8], cursor: &mut usize) -> Result<usize, UdpError> {
+    let count = *input.get(*cursor).ok_or(UdpError::InvalidZeroCode)?;
+    *cursor += 1;
+    if count != 0 {
+        return Ok(usize::from(count));
+    }
+
+    let extension = *input.get(*cursor).ok_or(UdpError::InvalidZeroCode)?;
+    *cursor += 1;
+    Ok(usize::from(u8::MAX) + usize::from(extension))
+}
+
+pub(crate) fn decode_prefix(input: &[u8], output: &mut [u8]) -> Result<usize, UdpError> {
+    let mut input_cursor = 0;
+    let mut output_cursor = 0;
+    while output_cursor < output.len() && input_cursor < input.len() {
+        let byte = input[input_cursor];
+        input_cursor += 1;
+        if byte == 0 {
+            let count = read_zero_count(input, &mut input_cursor)?.min(output.len() - output_cursor);
+            output[output_cursor..output_cursor + count].fill(0);
+            output_cursor += count;
+        } else {
+            output[output_cursor] = byte;
+            output_cursor += 1;
+        }
+    }
+    Ok(output_cursor)
+}
+
+pub(crate) fn decode(input: &[u8], max_output_size: usize) -> Result<Vec<u8>, UdpError> {
+    let mut output = Vec::with_capacity(input.len());
+    let mut cursor = 0;
+    while cursor < input.len() {
+        let byte = input[cursor];
+        cursor += 1;
+        if byte == 0 {
+            let count = read_zero_count(input, &mut cursor)?;
+            let output_size = output.len().checked_add(count).ok_or(UdpError::InvalidZeroCode)?;
+            if output_size > max_output_size {
+                return Err(UdpError::InvalidZeroCode);
+            }
+            output.resize(output_size, 0);
+        } else {
+            if output.len() == max_output_size {
+                return Err(UdpError::InvalidZeroCode);
+            }
+            output.push(byte);
+        }
+    }
+    Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_runs_split_at_limit() {
+        let input = vec![0; 256];
+        let encoded = encode(&input);
+        assert_eq!(encoded, [0, 255, 0, 1]);
+        assert_eq!(decode(&encoded, input.len()), Ok(input));
+        assert_eq!(decode(&[0], usize::MAX), Err(UdpError::InvalidZeroCode));
+        assert_eq!(decode(&[0, 0], usize::MAX), Err(UdpError::InvalidZeroCode));
+        assert_eq!(decode(&[0, 0, 0], 255), Ok(vec![0; 255]));
+        assert_eq!(decode(&[0, 0, 1], 256), Ok(vec![0; 256]));
+        assert_eq!(decode(&[0, 0, 255], 510), Ok(vec![0; 510]));
+        assert_eq!(decode(&[0, 0, 255], 509), Err(UdpError::InvalidZeroCode));
+        assert_eq!(decode(&[0, u8::MAX], usize::from(u8::MAX) - 1), Err(UdpError::InvalidZeroCode));
+        assert_eq!(decode(&[1, 2], 1), Err(UdpError::InvalidZeroCode));
+    }
+
+    #[test]
+    fn prefix_decode_is_bounded() {
+        let mut output = [0; 4];
+        assert_eq!(decode_prefix(&[0, u8::MAX, 0], &mut output), Ok(4));
+        assert_eq!(output, [0; 4]);
+        assert_eq!(decode_prefix(&[0], &mut output), Err(UdpError::InvalidZeroCode));
+        assert_eq!(decode_prefix(&[0, 0], &mut output), Err(UdpError::InvalidZeroCode));
+        assert_eq!(decode_prefix(&[0, 0, 1], &mut output), Ok(4));
+    }
+}

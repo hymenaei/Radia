@@ -1,0 +1,74 @@
+name: Checks
+
+on:
+    pull_request:
+    push:
+        branches: [main]
+    workflow_dispatch:
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+jobs:
+    checks:
+        name: ${{ matrix.platform }}
+        runs-on: ${{ matrix.os }}
+        timeout-minutes: 60
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - os: windows-latest
+                      platform: Windows
+                    - os: macos-latest
+                      platform: macOS
+                    - os: ubuntu-latest
+                      platform: Linux
+
+        steps:
+            - uses: actions/checkout@v7
+
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  components: rustfmt, clippy
+
+            - uses: Swatinem/rust-cache@v2
+
+            - name: Install Linux system dependencies
+              if: runner.os == 'Linux'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install --yes --no-install-recommends \
+                    build-essential \
+                    cmake \
+                    libfontconfig1-dev \
+                    libvulkan-dev \
+                    libwayland-dev \
+                    libx11-xcb-dev \
+                    libxkbcommon-x11-dev \
+                    pkg-config
+
+            - uses: taiki-e/install-action@v2
+              with:
+                  tool: nextest@0.9
+
+            - name: Check formatting
+              if: matrix.platform == 'Linux'
+              run: cargo fmt --all -- --check
+
+            - name: Lint workspace
+              run: cargo clippy --workspace --all-targets --all-features --locked
+
+            - name: Build workspace
+              run: cargo build --workspace --all-features --locked
+
+            - name: Test workspace
+              run: cargo xtest --workspace --all-features --locked
+
+            - name: Test documentation
+              if: matrix.platform == 'Linux'
+              run: cargo test --doc --workspace --all-features --locked

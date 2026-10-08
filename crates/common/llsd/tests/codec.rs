@@ -210,12 +210,12 @@ fn viewer_fixtures() {
     let uri = Value::URI(URI::from("https://secondlife.com/login"));
     assert_eq!(llsd::xml::from_slice::<Value>(uri_xml).expect("decode viewer URI XML"), uri);
     let encoded = llsd::xml::to_vec(&uri).expect("encode viewer URI XML");
-    let uri_xml = uri_xml.strip_suffix(b"\n").unwrap_or(uri_xml);
+    let uri_xml = without_final_line_ending(uri_xml);
     assert_eq!(encoded.strip_prefix(XML_DECLARATION).expect("XML declaration"), uri_xml);
 
     let uri_notation = include_bytes!("fixtures/viewer_uri.notation");
     let uri = Value::URI(URI::from("http://www.google.com"));
-    let uri_notation = uri_notation.strip_suffix(b"\n").unwrap_or(uri_notation);
+    let uri_notation = without_final_line_ending(uri_notation);
     assert_eq!(llsd::notation::from_slice::<Value>(uri_notation).expect("decode viewer URI notation"), uri);
     let encoded = llsd::notation::to_vec(&uri).expect("encode viewer URI notation");
     assert_eq!(encoded.strip_prefix(NOTATION_DECLARATION).expect("notation declaration"), uri_notation);
@@ -226,11 +226,11 @@ fn viewer_fixtures() {
     assert!(matches!(decoded, Value::Date(value) if (value.unix_seconds() - date.unix_seconds()).abs() < 0.000_001));
     let date = Value::Date(date);
     let encoded = llsd::xml::to_vec(&date).expect("encode viewer date XML");
-    let date_xml = date_xml.strip_suffix(b"\n").unwrap_or(date_xml);
+    let date_xml = without_final_line_ending(date_xml);
     assert_eq!(encoded.strip_prefix(XML_DECLARATION).expect("XML declaration"), date_xml);
 
     let date_notation = include_bytes!("fixtures/viewer_date.notation");
-    let date_notation = date_notation.strip_suffix(b"\n").unwrap_or(date_notation);
+    let date_notation = without_final_line_ending(date_notation);
     let expected = llsd_date("2007-12-28T09:22:53.10Z");
     let decoded = llsd::notation::from_slice::<Value>(date_notation).expect("decode viewer date notation");
     assert!(matches!(decoded, Value::Date(value) if (value.unix_seconds() - expected.unix_seconds()).abs() < 0.000_001));

@@ -699,6 +699,7 @@ async fn object_local_ids_are_scoped_to_simulators() {
 #[tokio::test]
 async fn neighbor_targets_and_replacements() {
     let mut harness = Box::pin(connected_neighbor()).await;
+    receive_ack(&harness.primary, 23).await;
     send_targeted(&harness.commands, harness.neighbor_id, object_request())
         .await
         .expect("route an object request to the selected simulator");

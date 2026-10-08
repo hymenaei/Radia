@@ -149,6 +149,17 @@ fn binary_dates_match_official_little_endian_fixture() {
     assert_eq!(llsd::binary::to_vec(&1.0_f64).expect("encode network-order real"), real_fixture);
 }
 
+fn without_final_line_ending(bytes: &[u8]) -> &[u8] {
+    bytes.strip_suffix(b"\r\n").or_else(|| bytes.strip_suffix(b"\n")).unwrap_or(bytes)
+}
+
+#[test]
+fn fixture_line_ending_is_ignored() {
+    assert_eq!(without_final_line_ending(b"fixture\n"), b"fixture");
+    assert_eq!(without_final_line_ending(b"fixture\r\n"), b"fixture");
+    assert_eq!(without_final_line_ending(b"fixture"), b"fixture");
+}
+
 #[test]
 fn notation_fixture_matches() {
     let mut map = Map::new();
@@ -156,7 +167,7 @@ fn notation_fixture_matches() {
     let encoded = llsd::notation::to_vec(&map).expect("encode notation fixture");
     let value = encoded.strip_prefix(b"<?llsd/notation?>\n").expect("notation declaration");
     let fixture = include_bytes!("fixtures/map_foo_bar.notation");
-    assert_eq!(value, fixture.strip_suffix(b"\n").unwrap_or(fixture));
+    assert_eq!(value, without_final_line_ending(fixture));
 }
 
 #[test]
@@ -167,7 +178,7 @@ fn xml_fixture_matches() {
     let fixture = include_bytes!("fixtures/map_foo_bar.xml");
     let declaration_end = fixture.windows(2).position(|part| part == b"?>").expect("fixture declaration") + 2;
     let encoded_body = encoded.windows(2).position(|part| part == b"?>").map(|index| &encoded[index + 2..]).expect("encoded declaration");
-    let fixture_body = fixture[declaration_end..].strip_suffix(b"\n").unwrap_or(&fixture[declaration_end..]);
+    let fixture_body = without_final_line_ending(&fixture[declaration_end..]);
     assert_eq!(encoded_body, fixture_body);
 }
 

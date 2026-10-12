@@ -8,7 +8,7 @@ mod login;
 mod remembered_login;
 mod secondary_windows;
 mod session;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod window_chrome;
 mod window_geometry;
 

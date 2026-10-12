@@ -94,7 +94,6 @@ impl ChatScreen {
             .flex()
             .items_center()
             .gap_3()
-            .px_3()
             .child(div().text_sm().font_semibold().text_color(theme.foreground).child("Nearby Chat"))
             .into_any_element()
     }

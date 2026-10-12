@@ -12,6 +12,8 @@ use crate::inventory::{
     favorite_store::{self, FavoriteStore},
 };
 use gpui::{Context, IntoElement, Render, SharedString, Window, div, prelude::*, px};
+#[cfg(target_os = "linux")]
+use gpui_component::StyledExt;
 use gpui_component::{
     Disableable, Icon, IconName, IndexPath, Theme,
     button::{Button, ButtonVariant, ButtonVariants as _},
@@ -25,6 +27,8 @@ use network::{AgentSession, CaptureConfig, Grid, LoginCredentials, MfaChallenge,
 #[cfg(target_os = "windows")]
 use crate::secondary_windows::install_main_window_z_order_guard;
 use crate::secondary_windows::raise_above_main_if_active;
+#[cfg(target_os = "linux")]
+use crate::window_chrome::linux_titlebar;
 #[cfg(target_os = "windows")]
 use crate::window_chrome::windows_titlebar;
 use crate::{
@@ -704,6 +708,17 @@ impl Render for LoginScreen {
                 (div().into_any_element(), div().into_any_element())
             };
             content.child(windows_titlebar(window.is_maximized(), titlebar_content, titlebar_action, theme))
+        };
+
+        #[cfg(target_os = "linux")]
+        let content = {
+            let (titlebar_content, titlebar_action) = if self.session.is_some() {
+                self.chat_screen.update(cx, |chat, cx| (chat.titlebar_content(cx), chat.titlebar_action(cx)))
+            } else {
+                (div().text_sm().font_semibold().text_color(theme.foreground).child("Radia").into_any_element(), div().into_any_element())
+            };
+
+            if let Some(titlebar) = linux_titlebar(window, titlebar_content, titlebar_action) { content.child(titlebar) } else { content }
         };
 
         let login_body = div().id("login-scroll").flex_1().min_h_0().overflow_y_scroll().child(

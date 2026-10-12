@@ -23,6 +23,8 @@ use math::{Quat, Vec3};
 use world::{self, Kind, LocalAddress, Parent, Region, World, WorldRevision};
 
 use crate::session::SharedWorldState;
+#[cfg(target_os = "linux")]
+use crate::window_chrome::linux_titlebar;
 #[cfg(target_os = "windows")]
 use crate::window_chrome::windows_titlebar;
 use crate::window_geometry::observe;
@@ -508,16 +510,22 @@ impl Render for DeveloperFloater {
             let theme = Theme::global(cx).colors;
             content.child(windows_titlebar(
                 window.is_maximized(),
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .px_3()
-                    .child(div().text_sm().font_semibold().child("Developer Tools"))
-                    .into_any_element(),
+                div().flex().items_center().gap_3().child(div().text_sm().font_semibold().child("Developer Tools")).into_any_element(),
                 div().into_any_element(),
                 theme,
             ))
+        };
+
+        #[cfg(target_os = "linux")]
+        let content = {
+            let titlebar_content =
+                div().flex().items_center().gap_3().child(div().text_sm().font_semibold().child("Developer Tools")).into_any_element();
+
+            if let Some(titlebar) = linux_titlebar(window, titlebar_content, div().into_any_element()) {
+                content.child(titlebar)
+            } else {
+                content
+            }
         };
         content.child(self.render_header(&p, cx)).child(self.render_body(&p, cx)).child(self.render_bottom(&p, cx))
     }

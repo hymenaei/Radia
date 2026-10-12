@@ -13,7 +13,9 @@ use std::{
 use ::world::{
     AgentHandoff,
     ApplyOutcome::{AgentHandedOff, Introduced},
-    Kind, LocalAddress, ObjectObservation, OrderEvidence, RegionHandle, UpdateSource,
+    Kind, LocalAddress, ObjectObservation, OrderEvidence,
+    OrderEvidence::Ordered,
+    RegionHandle, UpdateSource,
 };
 use base::UUID;
 use futures::{
@@ -585,10 +587,19 @@ fn apply_world_event_with_handoff(
                                 handoff_observations.insert(*simulator_id, observation);
                             }
                         }
-                        Some(operation)
-                            if handoff_observations.get(simulator_id).is_some_and(|observation| {
-                                operation.address() == LocalAddress::new(agent_region, observation.local_id)
-                            }) => {}
+                        Some(operation) => match handoff_observations.get(simulator_id).copied() {
+                            Some(observation)
+                                if operation.address() == LocalAddress::new(agent_region, observation.local_id)
+                                    && conflicts_with_handoff_observation(operation, observation) =>
+                            {
+                                if operation_is_newer(operation.source(), observation.source) {
+                                    handoff_observations.remove(simulator_id);
+                                }
+                                retained.push(Some(operation));
+                            }
+                            Some(observation) if operation.address() == LocalAddress::new(agent_region, observation.local_id) => {}
+                            _ => retained.push(Some(operation)),
+                        },
                         operation => retained.push(operation),
                     }
                 }
@@ -618,6 +629,23 @@ fn apply_world_event_with_handoff(
             None
         }
         _ => None,
+    }
+}
+
+fn conflicts_with_handoff_observation(operation: ObjectOperation, observation: ObjectObservation) -> bool {
+    match operation {
+        ObjectOperation::Observe(candidate) => candidate.id != observation.id,
+        ObjectOperation::Remove { .. } => true,
+        ObjectOperation::Patch(_) | ObjectOperation::Cached { .. } => false,
+    }
+}
+
+fn operation_is_newer(candidate: UpdateSource, current: UpdateSource) -> bool {
+    match (candidate.order(), current.order()) {
+        (Ordered(candidate_order), Ordered(current_order)) => {
+            (candidate_order, candidate.block_ordinal()) > (current_order, current.block_ordinal())
+        }
+        _ => false,
     }
 }
 
@@ -825,6 +853,7 @@ mod tests {
             CacheMissType::Full,
             ChatFromSimulator, RequestAgentData,
             chat_from_simulator::ChatData,
+            kill_object,
             region_handshake::{RegionHandshake, RegionInfo1},
         },
     };
@@ -1050,6 +1079,102 @@ mod tests {
         let state = state.read().unwrap();
         let agent = state.object(state.entity(agent_id).expect("promoted agent remains present")).expect("agent object");
         assert_eq!(agent.address().region(), destination_region);
+    }
+
+    #[test]
+    fn newer_handoff_conflicts_invalidate_observation() {
+        let agent_id = UUID::from_u128(0x1234);
+        let replacement_id = UUID::from_u128(0x5678);
+        let source_id = simulator_id();
+        let destination_id = simulator_id();
+        let source_handle = RegionHandle::new(0x1111_0000_0000_0001);
+        let destination_handle = RegionHandle::new(0x2222_0000_0000_0002);
+        let mut intake = SessionWorld::new(viewer_world_limits());
+        intake.set_self_agent(agent_id);
+        let source_region = intake.register_simulator(source_id, Some(source_handle)).expect("register source");
+        let destination_region = intake.register_simulator(destination_id, Some(destination_handle)).expect("register destination");
+        let mut world_primary = Some(source_id);
+        let mut promoted_target = None;
+        let mut observations = HashMap::new();
+
+        apply_world_event_with_handoff(
+            &mut intake,
+            &simulator_message_at_order(source_id, 1, Ordered(1), agent_update(agent_id, 10, source_handle.get())),
+            &mut world_primary,
+            &mut promoted_target,
+            &mut observations,
+            Some(agent_id),
+        )
+        .expect("apply source agent");
+        apply_world_event_with_handoff(
+            &mut intake,
+            &simulator_message_at_order(destination_id, 2, Ordered(20), agent_update(agent_id, 20, destination_handle.get())),
+            &mut world_primary,
+            &mut promoted_target,
+            &mut observations,
+            Some(agent_id),
+        )
+        .expect("buffer destination agent");
+
+        let removed_address = LocalAddress::new(destination_region, NonZeroU32::new(20).expect("nonzero local ID"));
+        let removal = Message::KillObject(kill_object::KillObject { object_data: vec![kill_object::ObjectData { local_id: 20 }] });
+        let (_, summary) = apply_world_event_with_handoff(
+            &mut intake,
+            &simulator_message_at_order(destination_id, 3, Ordered(19), removal.clone()),
+            &mut world_primary,
+            &mut promoted_target,
+            &mut observations,
+            Some(agent_id),
+        )
+        .expect("apply stale kill");
+        let result = summary.blocks[0].result.as_ref().expect("valid kill").as_ref().expect("recorded kill");
+        assert!(matches!(&result.outcome, TombstoneRecorded(address) if *address == removed_address));
+        assert!(observations.contains_key(&destination_id));
+
+        apply_world_event_with_handoff(
+            &mut intake,
+            &simulator_message_at_order(destination_id, 4, Ordered(21), removal),
+            &mut world_primary,
+            &mut promoted_target,
+            &mut observations,
+            Some(agent_id),
+        )
+        .expect("apply newer kill");
+        assert!(!observations.contains_key(&destination_id));
+
+        apply_world_event_with_handoff(
+            &mut intake,
+            &simulator_message_at_order(destination_id, 5, Ordered(22), agent_update(agent_id, 21, destination_handle.get())),
+            &mut world_primary,
+            &mut promoted_target,
+            &mut observations,
+            Some(agent_id),
+        )
+        .expect("buffer replacement-address agent");
+        let replacement = agent_update(replacement_id, 21, destination_handle.get());
+        let (_, summary) = apply_world_event_with_handoff(
+            &mut intake,
+            &simulator_message_at_order(destination_id, 6, Ordered(23), replacement),
+            &mut world_primary,
+            &mut promoted_target,
+            &mut observations,
+            Some(agent_id),
+        )
+        .expect("apply newer replacement");
+        assert!(summary.blocks[0].result.as_ref().expect("valid replacement").is_ok());
+        assert!(!observations.contains_key(&destination_id));
+
+        assert!(begin_world_handoff(&mut world_primary, &mut promoted_target, source_id, destination_id));
+        assert_eq!(world_primary, Some(source_id));
+        assert_eq!(promoted_target, Some(super::PendingWorldHandoff { source: source_id, target: destination_id }));
+        let state = intake.shared_state();
+        let state = state.read().unwrap();
+        let agent = state.object(state.entity(agent_id).expect("source agent remains present")).expect("agent object");
+        assert_eq!(agent.address().region(), source_region);
+        assert_eq!(
+            state.object(state.entity(replacement_id).expect("replacement was applied")).unwrap().address(),
+            LocalAddress::new(destination_region, NonZeroU32::new(21).unwrap())
+        );
     }
 
     #[test]

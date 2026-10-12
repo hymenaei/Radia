@@ -31,6 +31,14 @@ pub(crate) enum ObjectOperation {
 }
 
 impl ObjectOperation {
+    pub(crate) fn source(self) -> UpdateSource {
+        match self {
+            Self::Observe(observation) => observation.source,
+            Self::Patch(patch) => patch.source,
+            Self::Remove { source, .. } | Self::Cached { source, .. } => source,
+        }
+    }
+
     pub(crate) fn address(self) -> LocalAddress {
         let (source, local_id) = match self {
             Self::Observe(observation) => (observation.source, observation.local_id),

@@ -25,6 +25,7 @@ use network::{AgentSession, CaptureConfig, Grid, LoginCredentials, MfaChallenge,
 #[cfg(target_os = "windows")]
 use crate::secondary_windows::install_main_window_z_order_guard;
 use crate::secondary_windows::raise_above_main_if_active;
+#[cfg(target_os = "windows")]
 use crate::window_chrome::windows_titlebar;
 use crate::{
     remembered_login::{self, RememberedLogin},

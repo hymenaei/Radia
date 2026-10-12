@@ -365,6 +365,7 @@ fn raise_macos_without_activating(window: &Window) {
     use objc::{
         msg_send,
         runtime::{NO, Object, YES},
+        sel,
     };
     use raw_window_handle::RawWindowHandle;
     use std::ptr::null_mut;

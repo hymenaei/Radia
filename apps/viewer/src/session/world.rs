@@ -17,7 +17,6 @@ use super::{
 };
 
 const MAX_WORLD_ENTITIES: usize = 65_536;
-const MAX_WORLD_ENTITIES_PER_REGION: usize = 10_000;
 const MAX_WORLD_TOMBSTONES_PER_REGION: usize = 4_096;
 const MAX_WORLD_TOMBSTONES: usize = 16_384;
 const MAX_WORLD_JOURNAL_ENTRIES: usize = 4_096;
@@ -303,7 +302,7 @@ pub(super) fn viewer_world_limits() -> WorldLimits {
     WorldLimits {
         max_region_registrations: MAX_WORLD_ENTITIES,
         max_entities: MAX_WORLD_ENTITIES,
-        max_entities_per_region: MAX_WORLD_ENTITIES_PER_REGION,
+        max_entities_per_region: MAX_WORLD_ENTITIES,
         max_tombstones_per_region: MAX_WORLD_TOMBSTONES_PER_REGION,
         max_tombstones: MAX_WORLD_TOMBSTONES,
         max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(MAX_WORLD_TOMBSTONES_PER_REGION),
@@ -328,7 +327,7 @@ mod tests {
 
     use crate::session::inbound::{ObjectBatch, ObjectOperation};
 
-    use super::{SessionWorld, viewer_world_limits};
+    use super::{MAX_WORLD_ENTITIES, SessionWorld, viewer_world_limits};
 
     fn observation(region: Region, order: u32, id: u128, local_id: NonZeroU32, parent: ParentUpdate) -> ObjectObservation {
         ObjectObservation {
@@ -349,6 +348,32 @@ mod tests {
         world
             .apply_object_batch(simulator_id, ObjectBatch { region, region_handle: None, blocks: vec![Some(operation)], invalid_blocks: 0 })
             .expect("registered simulator")
+    }
+
+    #[test]
+    fn dense_region_fits_world_budget() {
+        let simulator_id = simulator_id();
+        let mut world = SessionWorld::new(viewer_world_limits());
+        let region = world.register_simulator(simulator_id, None).expect("register simulator");
+        let blocks = (1..=10_001u32)
+            .map(|local_id| {
+                Some(ObjectOperation::Observe(observation(
+                    region,
+                    local_id,
+                    u128::from(local_id),
+                    NonZeroU32::new(local_id).expect("nonzero local ID"),
+                    ParentUpdate::Root,
+                )))
+            })
+            .collect();
+
+        let summary = world
+            .apply_object_batch(simulator_id, ObjectBatch { region, region_handle: None, blocks, invalid_blocks: 0 })
+            .expect("registered simulator");
+
+        assert!(summary.blocks.iter().all(|block| block.result.as_ref().is_some_and(|result| result.is_ok())));
+        assert_eq!(world.shared_state().read().unwrap().objects().count(), 10_001);
+        assert_eq!(viewer_world_limits().max_entities_per_region, MAX_WORLD_ENTITIES);
     }
 
     #[test]

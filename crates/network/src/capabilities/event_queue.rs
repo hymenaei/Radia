@@ -1,9 +1,15 @@
 //! Simulator EventQueueGet polling, batch decoding, and retry policy.
 
-use std::{mem::size_of, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    mem::{size_of, take},
+    net::SocketAddr,
+    str::from_utf8,
+    sync::Arc,
+    time::Duration,
+};
 
-use llsd::{Binary, Map, URI, Value};
-use reqwest::Url;
+use llsd::{Binary, Map, URI, Value, xml};
+use reqwest::{StatusCode, Url};
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch},
     time,
@@ -11,13 +17,13 @@ use tokio::{
 
 use super::{
     LookupError, MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES, MAX_SEED_CAPABILITY_RESPONSE_BYTES, decode_capabilities, decode_llsd_xml,
-    request_capabilities_response,
+    request_capabilities_response, wait_for_session_close,
 };
 #[cfg(test)]
 use super::{MAX_CONCURRENT_EVENT_QUEUES, MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES};
 use crate::{
     event::{Event, EventEnvelope, EventSendOutcome, SimulatorId},
-    http::{Client as HttpClient, Error, Response},
+    http::{self, Error, Response},
     status::NetworkStatusHandle,
 };
 
@@ -69,7 +75,7 @@ async fn acquire_budget_permit(
     tokio::select! {
         biased;
         _ = wait_for_watch_true(shutdown.clone()) => None,
-        _ = super::wait_for_session_close(session_closed.clone()) => None,
+        _ = wait_for_session_close(session_closed.clone()) => None,
         permit = budget.acquire_owned() => permit.ok(),
     }
 }
@@ -86,7 +92,7 @@ async fn acquire_event_batch_reservation(
     tokio::select! {
         biased;
         _ = wait_for_watch_true(shutdown.clone()) => None,
-        _ = super::wait_for_session_close(session_closed.clone()) => None,
+        _ = wait_for_session_close(session_closed.clone()) => None,
         permit = budget.acquire_many_owned(MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES as u32) => permit.ok(),
     }
 }
@@ -124,7 +130,7 @@ async fn send_event_queue_batch(
         let outcome = tokio::select! {
             biased;
             _ = wait_for_watch_true(shutdown.clone()) => EventSendOutcome::Shutdown,
-            _ = super::wait_for_session_close(session_closed.clone()) => EventSendOutcome::Shutdown,
+            _ = wait_for_session_close(session_closed.clone()) => EventSendOutcome::Shutdown,
             result = events.send(envelope) => {
                 match result {
                     Ok(()) => EventSendOutcome::Sent,
@@ -145,7 +151,7 @@ pub(super) async fn run_event_queue(
     simulator_id: SimulatorId,
     source: SocketAddr,
     seed: Url,
-    http: HttpClient,
+    http: http::Client,
     events: mpsc::Sender<EventEnvelope>,
     mut shutdown: watch::Receiver<bool>,
     status: NetworkStatusHandle,
@@ -167,7 +173,7 @@ pub(super) async fn run_event_queue(
         let requested = tokio::select! {
             biased;
             _ = wait_for_watch_true(shutdown.clone()) => return EventQueueExit::Stopped,
-            _ = super::wait_for_session_close(session_closed.clone()) => return EventQueueExit::Stopped,
+            _ = wait_for_session_close(session_closed.clone()) => return EventQueueExit::Stopped,
             result = request_capabilities_response(&http, &seed, &names, MAX_SEED_CAPABILITY_RESPONSE_BYTES) => result,
         };
         let requested = match requested {
@@ -254,12 +260,12 @@ pub(super) async fn run_event_queue(
         let response = tokio::select! {
             biased;
             _ = wait_for_watch_true(shutdown.clone()) => return EventQueueExit::Stopped,
-            _ = super::wait_for_session_close(session_closed.clone()) => return EventQueueExit::Stopped,
+            _ = wait_for_session_close(session_closed.clone()) => return EventQueueExit::Stopped,
             result = post_event_queue(&http, &event_capability, &acknowledge, MAX_EVENT_QUEUE_RESPONSE_BYTES) => result,
         };
 
         match response {
-            Ok(response) if response.status == reqwest::StatusCode::NOT_FOUND => {
+            Ok(response) if response.status == StatusCode::NOT_FOUND => {
                 drop(response);
                 drop(event_queue_permit);
                 status.record_error("EventQueueGet returned HTTP 404.");
@@ -355,14 +361,13 @@ pub(super) async fn run_event_queue(
 }
 
 pub(crate) async fn post_event_queue(
-    client: &HttpClient,
+    client: &http::Client,
     url: &Url,
     acknowledge: &Value,
     max_response_bytes: usize,
 ) -> Result<Response, Error> {
     let payload = Value::Map(Map::from([("ack".to_owned(), acknowledge.clone()), ("done".to_owned(), Value::Boolean(false))]));
-    let body =
-        llsd::xml::to_string(&payload).map_err(|error| Error::Message(format!("Could not encode an EventQueueGet request: {error}")))?;
+    let body = xml::to_string(&payload).map_err(|error| Error::Message(format!("Could not encode an EventQueueGet request: {error}")))?;
     client
         .post_operation_bounded_classified(
             "event_queue",
@@ -380,7 +385,7 @@ pub(crate) fn decode_event_batch(body: &[u8]) -> Result<(Value, Vec<QueuedCapabi
     if body.len() > MAX_EVENT_QUEUE_RESPONSE_BYTES {
         return Err(format!("EventQueueGet response exceeded the {MAX_EVENT_QUEUE_RESPONSE_BYTES}-byte limit."));
     }
-    let body = std::str::from_utf8(body).map_err(|error| format!("EventQueueGet response was not UTF-8: {error}"))?;
+    let body = from_utf8(body).map_err(|error| format!("EventQueueGet response was not UTF-8: {error}"))?;
     let Value::Map(mut fields) = decode_llsd_xml(body, "Could not decode an EventQueueGet response")? else {
         return Err("EventQueueGet returned a non-map response.".to_string());
     };
@@ -436,13 +441,13 @@ fn llsd_heap_size(value: &mut Value) -> usize {
     match value {
         Value::String(value) => value.capacity(),
         Value::URI(uri) => {
-            let text = std::mem::take(uri).into_string();
+            let text = take(uri).into_string();
             let capacity = text.capacity();
             *uri = URI::from(text);
             capacity
         }
         Value::Binary(binary) => {
-            let bytes = std::mem::take(binary).into_vec();
+            let bytes = take(binary).into_vec();
             let capacity = bytes.capacity();
             *binary = Binary::from(bytes);
             capacity
@@ -538,7 +543,7 @@ async fn wait_for_retry(delay: Duration, shutdown: &watch::Receiver<bool>, sessi
     tokio::select! {
         biased;
         _ = wait_for_watch_true(shutdown.clone()) => RetryOutcome::Stopped,
-        _ = super::wait_for_session_close(session_closed.clone()) => RetryOutcome::Stopped,
+        _ = wait_for_session_close(session_closed.clone()) => RetryOutcome::Stopped,
         _ = time::sleep(delay) => RetryOutcome::Retry,
     }
 }
@@ -556,7 +561,7 @@ async fn send_event_queue_error(
     tokio::select! {
         biased;
         _ = wait_for_watch_true(shutdown.clone()) => EventSendOutcome::Shutdown,
-        _ = super::wait_for_session_close(session_closed.clone()) => EventSendOutcome::Shutdown,
+        _ = wait_for_session_close(session_closed.clone()) => EventSendOutcome::Shutdown,
         result = events.send(EventEnvelope::new(event)) => match result {
             Ok(()) => EventSendOutcome::Sent,
             Err(_) => EventSendOutcome::ReceiverClosed,
@@ -568,13 +573,10 @@ pub(crate) fn event_queue_retry_delay(error_count: u32) -> Duration {
     EVENT_QUEUE_RETRY_DELAY + EVENT_QUEUE_RETRY_INCREMENT * error_count
 }
 
-pub(crate) fn expected_empty_poll(status: reqwest::StatusCode, elapsed: Duration) -> bool {
+pub(crate) fn expected_empty_poll(status: StatusCode, elapsed: Duration) -> bool {
     elapsed >= MIN_EMPTY_POLL_DURATION
         && (status.as_u16() == LINDEN_HTTP_INTERNAL_ERROR
-            || matches!(
-                status,
-                reqwest::StatusCode::BAD_GATEWAY | reqwest::StatusCode::SERVICE_UNAVAILABLE | reqwest::StatusCode::GATEWAY_TIMEOUT
-            ))
+            || matches!(status, StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT))
 }
 
 pub(crate) fn seed_capability_retry_delay(retry_count: u32) -> Duration {
@@ -589,6 +591,7 @@ pub(crate) fn seed_retry_delay(retry_count: u32, retry_after: Option<Duration>) 
 mod retry_tests {
     use super::*;
     use std::{future::Future, net::SocketAddr};
+    use tokio::task::yield_now;
     use tokio::time::timeout;
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -601,7 +604,7 @@ mod retry_tests {
         tokio::select! {
             biased;
             outcome = &mut future => return outcome,
-            _ = tokio::task::yield_now() => {}
+            _ = yield_now() => {}
         }
         session_closed.send_replace(true);
         timeout(TEST_TIMEOUT, &mut future).await.expect("session close cancels retry")
@@ -739,6 +742,7 @@ mod retained_size_tests {
 #[cfg(test)]
 mod event_queue_batch_tests {
     use super::*;
+    use tokio::{spawn, task::yield_now};
 
     #[tokio::test]
     async fn closed_session_or_shutdown_skips_batch_reservation() {
@@ -842,7 +846,7 @@ mod event_queue_batch_tests {
             queued_event_bytes.clone().acquire_many_owned(MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES as u32).await.expect("reserve a batch");
         let event_queue_budget = Arc::new(Semaphore::new(1));
         let event_queue_permit = event_queue_budget.clone().acquire_owned().await.expect("acquire event queue permit");
-        let task = tokio::spawn(async move {
+        let task = spawn(async move {
             send_event_queue_batch(
                 &events,
                 SimulatorId::new(1),
@@ -856,7 +860,7 @@ mod event_queue_batch_tests {
             .await
         });
 
-        tokio::task::yield_now().await;
+        yield_now().await;
         assert!(!task.is_finished());
         assert_eq!(event_queue_budget.available_permits(), 0);
 
@@ -888,8 +892,8 @@ mod event_queue_batch_tests {
         let shutdown = shutdown_receiver.clone();
         let session_closed = session_closed_receiver.clone();
         let byte_budget = Arc::clone(&queued_event_bytes);
-        let pending = tokio::spawn(async move { acquire_event_batch_reservation(byte_budget, &shutdown, &session_closed).await });
-        tokio::task::yield_now().await;
+        let pending = spawn(async move { acquire_event_batch_reservation(byte_budget, &shutdown, &session_closed).await });
+        yield_now().await;
         assert!(!pending.is_finished(), "the session-wide budget must include every simulator queue");
 
         drop(reservations.pop());
@@ -917,8 +921,8 @@ mod event_queue_batch_tests {
         let shutdown_receiver = shutdown_receiver.clone();
         let session_closed = session_closed_receiver.clone();
         let byte_budget = Arc::clone(&queued_event_bytes);
-        let pending = tokio::spawn(async move { acquire_event_batch_reservation(byte_budget, &shutdown_receiver, &session_closed).await });
-        tokio::task::yield_now().await;
+        let pending = spawn(async move { acquire_event_batch_reservation(byte_budget, &shutdown_receiver, &session_closed).await });
+        yield_now().await;
         assert!(!pending.is_finished());
 
         shutdown.send_replace(true);
@@ -947,8 +951,8 @@ mod event_queue_batch_tests {
         let session_closed_receiver = session_closed_receiver.clone();
         let byte_budget = Arc::clone(&queued_event_bytes);
         let pending =
-            tokio::spawn(async move { acquire_event_batch_reservation(byte_budget, &shutdown_receiver, &session_closed_receiver).await });
-        tokio::task::yield_now().await;
+            spawn(async move { acquire_event_batch_reservation(byte_budget, &shutdown_receiver, &session_closed_receiver).await });
+        yield_now().await;
         assert!(!pending.is_finished());
 
         session_closed.send_replace(true);
@@ -976,7 +980,7 @@ mod event_queue_batch_tests {
         let batch_reservation =
             queued_event_bytes.clone().acquire_many_owned(MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES as u32).await.expect("reserve a batch");
         let event_queue_permit = Arc::new(Semaphore::new(1)).acquire_owned().await.expect("reserve the queue");
-        let task = tokio::spawn(async move {
+        let task = spawn(async move {
             send_event_queue_batch(
                 &events,
                 SimulatorId::new(1),
@@ -989,7 +993,7 @@ mod event_queue_batch_tests {
             )
             .await
         });
-        tokio::task::yield_now().await;
+        yield_now().await;
         drop(received);
 
         assert!(matches!(task.await.expect("forwarding task"), EventSendOutcome::ReceiverClosed));

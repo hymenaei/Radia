@@ -1,16 +1,23 @@
-use crate::{codec::Reader, error::UdpError};
+use crate::{codec::Reader, error::LLUdpError};
 
-/// Simulator removal notification containing local object IDs.
+/// Simulator removal notification containing object IDs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KillObject {
-    pub local_ids: Vec<u32>,
+    pub object_data: Vec<ObjectData>,
 }
 
-pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<KillObject, UdpError> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObjectData {
+    pub local_id: u32,
+}
+
+pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<KillObject, LLUdpError> {
     let count = reader.terminal_variable_count()?;
-    let mut local_ids = Vec::with_capacity(count);
+    let mut object_data = Vec::with_capacity(count);
+
     for _ in 0..count {
-        local_ids.push(reader.u32()?);
+        object_data.push(ObjectData { local_id: reader.u32()? });
     }
-    Ok(KillObject { local_ids })
+
+    Ok(KillObject { object_data })
 }

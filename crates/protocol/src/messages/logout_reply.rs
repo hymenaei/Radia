@@ -4,7 +4,6 @@ use base::UUID;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LogoutReply {
     pub agent_data: AgentData,
-    /// Inventory item IDs to update, in wire order; the block has a one-byte count.
     pub inventory_data: Vec<InventoryData>,
 }
 
@@ -16,6 +15,5 @@ pub struct AgentData {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct InventoryData {
-    /// Inventory item UUID to update; a null UUID is the legacy empty-list sentinel.
     pub item_id: UUID,
 }

@@ -1,15 +1,16 @@
 use base::UUID;
+use math::{Quat, Vec3};
 use protocol::{
-    ChatType, Quaternion, UdpError, Vector3,
+    ChatType, LLUdpError,
+    lludp::{Message, MessageId, Packet},
     messages::{AgentUpdate, agent_update::AgentData},
     messages::{
-        ChatFromViewer, RegionHandshake,
-        chat_from_viewer::{AgentData as ChatAgentData, ChatData},
+        ChatFromViewer, RegionHandshake, chat_from_viewer,
+        chat_from_viewer::ChatData,
         region_handshake::{RegionInfo1, RegionInfo2, RegionInfo3, RegionInfo4},
     },
-    udp::{Message, MessageId, Packet},
 };
-use test_support::{parse_hex_fixture, udp::vectors};
+use test_support::{lludp::vectors, parse_hex_fixture};
 
 fn fixture(hex: &str) -> Vec<u8> {
     parse_hex_fixture(hex).expect("valid protocol fixture")
@@ -17,7 +18,7 @@ fn fixture(hex: &str) -> Vec<u8> {
 
 fn chat_message() -> Message {
     Message::ChatFromViewer(ChatFromViewer {
-        agent_data: ChatAgentData { agent_id: UUID::nil(), session_id: UUID::nil() },
+        agent_data: chat_from_viewer::AgentData { agent_id: UUID::nil(), session_id: UUID::nil() },
         chat_data: ChatData { message: "hello".into(), chat_type: ChatType::Normal, channel: 42 },
     })
 }
@@ -53,7 +54,7 @@ fn region_handshake_zerocode() {
 
     let mut truncated = packet_bytes;
     truncated.truncate(truncated.len() - 2);
-    assert_eq!(Packet::decode(&truncated), Err(UdpError::TruncatedPacket));
+    assert_eq!(Packet::decode(&truncated), Err(LLUdpError::TruncatedPacket));
 }
 
 #[test]
@@ -98,7 +99,7 @@ fn region_handshake_info4() {
 fn region_handshake_invalid_utf8() {
     let bytes = fixture(vectors::REGION_HANDSHAKE_INVALID_UTF8);
 
-    assert_eq!(Packet::decode(&bytes), Err(UdpError::InvalidUtf8));
+    assert_eq!(Packet::decode(&bytes), Err(LLUdpError::InvalidUtf8));
 }
 
 #[test]
@@ -122,7 +123,7 @@ fn handshake_blocks_pair() {
             region_info4: Vec::new(),
         }),
     );
-    assert_eq!(packet.encode(), Err(UdpError::InvalidMessage));
+    assert_eq!(packet.encode(), Err(LLUdpError::InvalidMessage));
 }
 
 #[test]
@@ -132,13 +133,13 @@ fn agent_update_zero_coding() {
         agent_data: AgentData {
             agent_id: UUID::nil(),
             session_id: UUID::nil(),
-            body_rotation: Quaternion::default(),
-            head_rotation: Quaternion::default(),
+            body_rotation: Quat::IDENTITY,
+            head_rotation: Quat::IDENTITY,
             state: 0,
-            camera_center: Vector3::default(),
-            camera_at_axis: Vector3::default(),
-            camera_left_axis: Vector3::default(),
-            camera_up_axis: Vector3::default(),
+            camera_center: Vec3::ZERO,
+            camera_at_axis: Vec3::ZERO,
+            camera_left_axis: Vec3::ZERO,
+            camera_up_axis: Vec3::ZERO,
             far: 0.0,
             control_flags: 0,
             flags: 0,
@@ -165,13 +166,13 @@ fn initial_agent_update() {
             agent_data: AgentData {
                 agent_id: agent_id(),
                 session_id: session_id(),
-                body_rotation: Quaternion::default(),
-                head_rotation: Quaternion::default(),
+                body_rotation: Quat::IDENTITY,
+                head_rotation: Quat::IDENTITY,
                 state: 0,
-                camera_center: Vector3 { x: 128.0, y: 128.0, z: 30.0 },
-                camera_at_axis: Vector3 { x: 1.0, y: 0.0, z: 0.0 },
-                camera_left_axis: Vector3 { x: 0.0, y: 1.0, z: 0.0 },
-                camera_up_axis: Vector3 { x: 0.0, y: 0.0, z: 1.0 },
+                camera_center: Vec3::new(128.0, 128.0, 30.0),
+                camera_at_axis: Vec3::new(1.0, 0.0, 0.0),
+                camera_left_axis: Vec3::new(0.0, 1.0, 0.0),
+                camera_up_axis: Vec3::new(0.0, 0.0, 1.0),
                 far: 128.0,
                 control_flags: 0,
                 flags: 0,
@@ -212,14 +213,14 @@ fn invalid_zerocoded_id() {
     datagram.push(1);
 
     assert!(datagram.len() < 0x2000);
-    assert_eq!(Packet::decode(&datagram), Err(UdpError::InvalidMessageId));
+    assert_eq!(Packet::decode(&datagram), Err(LLUdpError::InvalidMessageId));
 }
 
 #[test]
 fn large_expansion_rejected() {
     let bytes = fixture(vectors::TRANSFER_REQUEST_LARGE_ZEROCODED);
     assert!(bytes.len() < 0x2000);
-    assert_eq!(Packet::decode(&bytes), Err(UdpError::InvalidZeroCode));
+    assert_eq!(Packet::decode(&bytes), Err(LLUdpError::InvalidZeroCode));
 }
 
 #[test]

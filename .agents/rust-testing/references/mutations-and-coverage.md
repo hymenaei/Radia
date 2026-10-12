@@ -36,12 +36,9 @@ First inspect and honor the project's existing `.cargo/mutants.toml` (or explici
 
 ## cargo-llvm-cov workflow
 
-```sh
-cargo llvm-cov -p protocol
-cargo llvm-cov nextest --workspace  # Optional: with Nextest installed
-```
+In Radia, use the commands in [Test coverage](../../../docs/TOOLING.md#test-coverage). Start with the affected package for routine gap analysis; reserve workspace reports for broader audits. Use text output with `--show-missing-lines` to inspect uncovered source lines. Use JSON when a script needs structured coverage data.
 
-Look at uncovered error branches, critical state transitions, and integration seams. Coverage counts execution, not correctness. Don't write valueless tests for branch coverage alone. Remember doctest coverage has special restrictions and may not be included by default in `cargo-llvm-cov`; read current tool documentation before interpreting a number.
+Review uncovered error branches, critical state transitions, and integration seams. Coverage counts execution, not correctness. Don't write valueless tests for branch coverage alone. Remember doctest coverage has special restrictions and may not be included by default in `cargo-llvm-cov`; read current tool documentation before interpreting a number.
 
 ## Suggested cadence
 

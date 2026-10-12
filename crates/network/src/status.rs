@@ -3,7 +3,7 @@ use std::{
     fmt,
     net::SocketAddr,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, PoisonError,
         atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
 };
@@ -142,16 +142,16 @@ impl NetworkStatusHandle {
     pub fn snapshot(&self) -> NetworkStatusSnapshot {
         NetworkStatusSnapshot {
             lifecycle: lifecycle_from_u8(self.state.lifecycle.load(Ordering::Relaxed)),
-            simulator_endpoint: *self.state.simulator_endpoint.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            simulator_endpoint: *self.state.simulator_endpoint.lock().unwrap_or_else(PoisonError::into_inner),
             circuit_established: self.state.circuit_established.load(Ordering::Relaxed) != 0,
             udp_packets_sent: self.state.udp_packets_sent.load(Ordering::Relaxed),
             udp_packets_received: self.state.udp_packets_received.load(Ordering::Relaxed),
             http_requests: self.state.http_requests.load(Ordering::Relaxed),
             http_responses: self.state.http_responses.load(Ordering::Relaxed),
-            capability_count: self.state.capabilities.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(),
+            capability_count: self.state.capabilities.lock().unwrap_or_else(PoisonError::into_inner).len(),
             reliable_packets_pending: self.state.reliable_packets_pending.load(Ordering::Relaxed),
             reliable_retransmits: self.state.reliable_retransmits.load(Ordering::Relaxed),
-            last_error: self.state.last_error.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone(),
+            last_error: self.state.last_error.lock().unwrap_or_else(PoisonError::into_inner).clone(),
         }
     }
 
@@ -164,11 +164,11 @@ impl NetworkStatusHandle {
     }
 
     pub(crate) fn set_simulator_endpoint(&self, endpoint: SocketAddr) {
-        *self.state.simulator_endpoint.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(endpoint);
+        *self.state.simulator_endpoint.lock().unwrap_or_else(PoisonError::into_inner) = Some(endpoint);
     }
 
     pub(crate) fn clear_simulator(&self) {
-        *self.state.simulator_endpoint.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        *self.state.simulator_endpoint.lock().unwrap_or_else(PoisonError::into_inner) = None;
         self.state.circuit_established.store(0, Ordering::Relaxed);
         self.set_reliable_packets_pending(0);
     }
@@ -194,7 +194,7 @@ impl NetworkStatusHandle {
     }
 
     pub(crate) fn note_capabilities<'a>(&self, names: impl IntoIterator<Item = &'a str>) {
-        let mut capabilities = self.state.capabilities.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut capabilities = self.state.capabilities.lock().unwrap_or_else(PoisonError::into_inner);
         capabilities.extend(names.into_iter().map(str::to_owned));
     }
 
@@ -214,7 +214,7 @@ impl NetworkStatusHandle {
     pub(crate) fn record_error(&self, error: impl Into<String>) {
         let error = error.into();
         let sanitized = redact_urls(&error, MAX_STATUS_ERROR_CHARS);
-        *self.state.last_error.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sanitized);
+        *self.state.last_error.lock().unwrap_or_else(PoisonError::into_inner) = Some(sanitized);
     }
 }
 
@@ -364,5 +364,40 @@ mod tests {
         status.record_error("request failed at https://cap.example/secret-token?auth=private\nsecond line");
 
         assert_eq!(status.snapshot().last_error.as_deref(), Some("request failed at [redacted URL] second line"));
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::{NetworkLifecycle, NetworkStatusHandle, NetworkStatusSnapshot};
+
+    #[test]
+    fn status_debug_redacts_secrets() {
+        let snapshot = NetworkStatusSnapshot {
+            lifecycle: NetworkLifecycle::Connected,
+            simulator_endpoint: Some("192.0.2.77:13000".parse().expect("valid endpoint")),
+            circuit_established: true,
+            udp_packets_sent: 1,
+            udp_packets_received: 2,
+            http_requests: 3,
+            http_responses: 3,
+            capability_count: 4,
+            reliable_packets_pending: 0,
+            reliable_retransmits: 1,
+            last_error: Some("server-error-secret".into()),
+        };
+
+        let debug = format!("{snapshot:?}");
+
+        assert!(!debug.contains("192.0.2.77"));
+        assert!(!debug.contains("server-error-secret"));
+        assert!(format!("{snapshot}").contains("server-error-secret"));
+
+        let status = NetworkStatusHandle::new();
+        status.set_simulator_endpoint("192.0.2.78:13000".parse().expect("valid endpoint"));
+        status.record_error("server-handle-error-secret");
+        let debug = format!("{status:?}");
+        assert!(!debug.contains("192.0.2.78"));
+        assert!(!debug.contains("server-handle-error-secret"));
     }
 }

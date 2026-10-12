@@ -16,7 +16,6 @@ pub struct AgentData {
     pub godlike: bool,
 }
 
-/// Requested grid-cell bounds measured in region widths.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PositionData {
     pub min_x: u16,

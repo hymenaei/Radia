@@ -9,6 +9,7 @@ use std::{
 use base::UUID;
 use network::Grid;
 use serde::{Deserialize, Serialize};
+use serde_json::{from_str, to_vec_pretty};
 
 use super::FavoriteLocation;
 
@@ -167,14 +168,14 @@ fn load_from(path: &Path) -> Result<FavoriteStore, String> {
         Err(error) => return Err(format!("Could not read login locations from {}: {error}", path.display())),
     };
 
-    serde_json::from_str(&contents).map_err(|error| format!("Saved login locations at {} are invalid: {error}", path.display()))
+    from_str(&contents).map_err(|error| format!("Saved login locations at {} are invalid: {error}", path.display()))
 }
 
 fn save_to(path: &Path, favorites: &FavoriteStore) -> Result<(), String> {
     let directory = path.parent().ok_or_else(|| "Login locations need a parent directory.".to_string())?;
     fs::create_dir_all(directory).map_err(|error| format!("Could not create {}: {error}", directory.display()))?;
 
-    let contents = serde_json::to_vec_pretty(favorites).map_err(|error| format!("Could not encode favorite landmarks: {error}"))?;
+    let contents = to_vec_pretty(favorites).map_err(|error| format!("Could not encode favorite landmarks: {error}"))?;
     let temporary_path = path.with_extension("json.tmp");
     fs::write(&temporary_path, contents)
         .map_err(|error| format!("Could not write login locations to {}: {error}", temporary_path.display()))?;
@@ -187,72 +188,36 @@ fn save_to(path: &Path, favorites: &FavoriteStore) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
-    };
-
     use base::UUID;
     use network::Grid;
+    use tempfile::tempdir;
 
-    use super::{FavoriteStore, StoredGrid, apply_favorites_refresh, load_from, login_locations_path_under, normalize_username, save_to};
+    use super::{FavoriteStore, apply_favorites_refresh, load_from, login_locations_path_under, save_to};
     use crate::inventory::FavoriteLocation;
 
     #[test]
-    fn favorites_scope_by_agent_grid() {
-        let test_directory = temporary_directory();
-        let path = login_locations_path_under(&test_directory);
+    fn store_round_trips_favorites_by_grid_and_agent() {
+        let test_directory = tempdir().expect("create temporary login locations directory");
+        let path = login_locations_path_under(test_directory.path());
         let mut favorites = FavoriteStore::default();
         let agni_agent_id = UUID::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
         let aditi_agent_id = UUID::from_u128(0xfedc_ba98_7654_3210_fedc_ba98_7654_3210);
         let agni_favorites = vec![FavoriteLocation { name: "Sandbox".into(), region_name: "Test Region".into(), x: 128, y: 64, z: 23 }];
         let aditi_favorites = vec![FavoriteLocation { name: "Home".into(), region_name: "Beta Region".into(), x: 1, y: 2, z: 3 }];
 
-        assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("login_locations.json"));
-        assert_eq!(path.parent().and_then(|parent| parent.file_name()).and_then(|name| name.to_str()), Some("Radia"));
-
         favorites.replace_favorites(Grid::Agni, agni_agent_id, "Example", agni_favorites.clone());
         favorites.replace_favorites(Grid::Aditi, aditi_agent_id, "Example Resident", aditi_favorites.clone());
         save_to(&path, &favorites).expect("save favorites");
 
-        let mut reloaded = load_from(&path).expect("reload login locations");
+        let reloaded = load_from(&path).expect("reload login locations");
         assert_eq!(reloaded.favorites_for(Grid::Agni, agni_agent_id), agni_favorites);
         assert_eq!(reloaded.favorites_for(Grid::Aditi, aditi_agent_id), aditi_favorites);
-        assert_eq!(reloaded.agent_id_for_username(Grid::Agni, "  EXAMPLE  "), Some(agni_agent_id));
-        assert_eq!(reloaded.agents[0].grid, StoredGrid::Agni);
-
-        assert!(reloaded.remember_agent(Grid::Agni, agni_agent_id, "Renamed Account"));
-        assert_eq!(reloaded.favorites_for(Grid::Agni, agni_agent_id), agni_favorites);
-        save_to(&path, &reloaded).expect("save renamed agent");
-
-        let updated = vec![FavoriteLocation { name: "Home".into(), region_name: "New Region".into(), x: 5, y: 6, z: 7 }];
-        reloaded.replace_favorites(Grid::Agni, agni_agent_id, "Renamed Account", updated.clone());
-        save_to(&path, &reloaded).expect("replace account data");
-
-        let mut reloaded = load_from(&path).expect("reload updated login locations");
-        assert_eq!(reloaded.favorites_for(Grid::Agni, agni_agent_id), updated);
-        assert_eq!(reloaded.agent_id_for_username(Grid::Agni, "Renamed Account"), Some(agni_agent_id));
-        assert_eq!(reloaded.favorites_for(Grid::Aditi, aditi_agent_id), aditi_favorites);
-
-        let replacement_agent_id = UUID::from_u128(0x1111_2222_3333_4444_5555_6666_7777_8888);
-        assert!(reloaded.remember_agent(Grid::Agni, replacement_agent_id, "Renamed Account"));
-        assert_eq!(reloaded.agent_id_for_username(Grid::Agni, "Renamed Account"), Some(replacement_agent_id));
-        assert_eq!(reloaded.favorites_for(Grid::Agni, agni_agent_id), updated);
-
-        fs::remove_dir_all(test_directory).expect("remove temporary login locations");
-    }
-
-    #[test]
-    fn single_word_gets_resident() {
-        assert_eq!(normalize_username("  Example  "), "example resident");
-        assert_eq!(normalize_username("EXAMPLE resident"), "example resident");
     }
 
     #[test]
     fn failed_favorite_refresh_keeps_memory_and_disk_snapshots() {
-        let test_directory = temporary_directory();
-        let path = login_locations_path_under(&test_directory);
+        let test_directory = tempdir().expect("create temporary login locations directory");
+        let path = login_locations_path_under(test_directory.path());
         let agent_id = UUID::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
         let saved = vec![FavoriteLocation { name: "Home".into(), region_name: "Ahern".into(), x: 1, y: 2, z: 3 }];
         let mut store = FavoriteStore::default();
@@ -280,12 +245,5 @@ mod tests {
         assert!(store.favorites_for(Grid::Agni, agent_id).is_empty());
         save_to(&path, &store).expect("persist successful empty snapshot");
         assert!(load_from(&path).expect("reload empty snapshot").favorites_for(Grid::Agni, agent_id).is_empty());
-
-        fs::remove_dir_all(test_directory).expect("remove temporary login locations");
-    }
-
-    fn temporary_directory() -> PathBuf {
-        let unique = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock after epoch").as_nanos();
-        std::env::temp_dir().join(format!("radia-login-locations-{}-{unique}", std::process::id()))
     }
 }

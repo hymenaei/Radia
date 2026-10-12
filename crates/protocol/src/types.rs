@@ -1,4 +1,5 @@
-use crate::error::UdpError;
+use crate::error::LLUdpError;
+use math::{Quat, Vec3};
 
 /// LLUDP message frequency determines the on-wire message-ID width.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,7 +44,7 @@ impl MessageId {
         Self { frequency: Frequency::Fixed, number }
     }
 
-    pub(crate) fn encode(self, output: &mut Vec<u8>) -> Result<(), UdpError> {
+    pub(crate) fn encode(self, output: &mut Vec<u8>) -> Result<(), LLUdpError> {
         match self.frequency {
             Frequency::High if (1..=0xfe).contains(&self.number) => {
                 output.push(self.number as u8);
@@ -58,30 +59,30 @@ impl MessageId {
             Frequency::Fixed if (0xffff_fffa..=0xffff_ffff).contains(&self.number) => {
                 output.extend_from_slice(&self.number.to_be_bytes());
             }
-            _ => return Err(UdpError::InvalidMessageId),
+            _ => return Err(LLUdpError::InvalidMessageId),
         }
         Ok(())
     }
 
-    pub(crate) fn decode(input: &[u8]) -> Result<(Self, usize), UdpError> {
-        let first = *input.first().ok_or(UdpError::TruncatedPacket)?;
+    pub(crate) fn decode(input: &[u8]) -> Result<(Self, usize), LLUdpError> {
+        let first = *input.first().ok_or(LLUdpError::TruncatedPacket)?;
         if first != 0xff {
             if first == 0 {
-                return Err(UdpError::InvalidMessageId);
+                return Err(LLUdpError::InvalidMessageId);
             }
             return Ok((Self::high(u32::from(first)), 1));
         }
 
-        let second = *input.get(1).ok_or(UdpError::TruncatedPacket)?;
+        let second = *input.get(1).ok_or(LLUdpError::TruncatedPacket)?;
         if second != 0xff {
             if second == 0 {
-                return Err(UdpError::InvalidMessageId);
+                return Err(LLUdpError::InvalidMessageId);
             }
             return Ok((Self::medium(u32::from(second)), 2));
         }
 
-        let third = *input.get(2).ok_or(UdpError::TruncatedPacket)?;
-        let fourth = *input.get(3).ok_or(UdpError::TruncatedPacket)?;
+        let third = *input.get(2).ok_or(LLUdpError::TruncatedPacket)?;
+        let fourth = *input.get(3).ok_or(LLUdpError::TruncatedPacket)?;
         let number = u32::from_be_bytes([first, second, third, fourth]);
         if (0xffff_fffa..=0xffff_ffff).contains(&number) {
             return Ok((Self::fixed(number), 4));
@@ -89,26 +90,80 @@ impl MessageId {
 
         let number = u32::from(u16::from_be_bytes([third, fourth]));
         if !(1..=0xfff9).contains(&number) {
-            return Err(UdpError::InvalidMessageId);
+            return Err(LLUdpError::InvalidMessageId);
         }
         Ok((Self::low(number), 4))
     }
 }
 
-/// A three-component vector encoded as X, Y, and Z little-endian `f32`s.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Vector3 {
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
+pub(crate) fn quaternion_from_xyz(value: Vec3) -> Result<Quat, LLUdpError> {
+    if !value.is_finite() {
+        return Err(LLUdpError::InvalidMessage);
+    }
+
+    let squared = value.x * value.x + value.y * value.y + value.z * value.z;
+    let remainder = 1.0 - squared;
+    let w = if remainder > 0.0 { remainder.sqrt() } else { 0.0 };
+    Ok(Quat::from_xyzw(value.x, value.y, value.z, w))
 }
 
-/// A quaternion whose UDP representation stores X, Y, and Z as little-endian `f32`s and derives W.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Quaternion {
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use math::{Quat, Vec3};
+
+    #[test]
+    fn quaternion_default_is_identity() {
+        assert_eq!(Quat::default(), Quat::IDENTITY);
+    }
+
+    #[test]
+    fn quaternion_w_uses_second_life_xyz_unpack_rule() {
+        let identity = quaternion_from_xyz(Vec3::ZERO).expect("finite XYZ components");
+        assert_eq!(identity, Quat::IDENTITY);
+
+        let positive_w = quaternion_from_xyz(Vec3::new(0.6, 0.0, 0.0)).expect("finite XYZ components");
+        assert!((positive_w.w - 0.8).abs() < f32::EPSILON);
+
+        let outside_unit_sphere = quaternion_from_xyz(Vec3::new(0.6, 0.8, 0.0)).expect("finite XYZ components");
+        assert_eq!(outside_unit_sphere.w, 0.0);
+    }
+
+    #[test]
+    fn message_ids_use_frequency_specific_wire_format() {
+        let cases = [
+            (MessageId::high(4), vec![0x04]),
+            (MessageId::medium(5), vec![0xff, 0x05]),
+            (MessageId::low(0x0123), vec![0xff, 0xff, 0x01, 0x23]),
+            (MessageId::low(0xfff9), vec![0xff, 0xff, 0xff, 0xf9]),
+            (MessageId::fixed(0xffff_fffb), vec![0xff, 0xff, 0xff, 0xfb]),
+        ];
+        for (id, expected) in cases {
+            let mut encoded = Vec::new();
+            id.encode(&mut encoded).expect("valid message ID");
+            assert_eq!(encoded, expected);
+            assert_eq!(MessageId::decode(&expected), Ok((id, expected.len())));
+        }
+    }
+
+    #[test]
+    fn reserved_ids_are_rejected() {
+        for id in [
+            MessageId::high(0),
+            MessageId::high(0xff),
+            MessageId::medium(0),
+            MessageId::medium(0xff),
+            MessageId::low(0),
+            MessageId::low(0xfffa),
+            MessageId::fixed(0xffff_fff9),
+        ] {
+            let mut encoded = Vec::new();
+            assert_eq!(id.encode(&mut encoded), Err(LLUdpError::InvalidMessageId));
+        }
+        assert_eq!(MessageId::decode(&[0xff]), Err(LLUdpError::TruncatedPacket));
+        assert_eq!(MessageId::decode(&[0xff, 0xff, 0x00]), Err(LLUdpError::TruncatedPacket));
+        assert_eq!(MessageId::decode(&[0xff, 0xff, 0x00, 0x00]), Err(LLUdpError::InvalidMessageId));
+    }
 }
 
 /// Chat values defined by the Second Life message template.
@@ -233,46 +288,5 @@ impl Audible {
             Self::Fully => 1,
             Self::Unknown(value) => value,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn message_ids_use_frequency_specific_wire_format() {
-        let cases = [
-            (MessageId::high(4), vec![0x04]),
-            (MessageId::medium(5), vec![0xff, 0x05]),
-            (MessageId::low(0x0123), vec![0xff, 0xff, 0x01, 0x23]),
-            (MessageId::low(0xfff9), vec![0xff, 0xff, 0xff, 0xf9]),
-            (MessageId::fixed(0xffff_fffb), vec![0xff, 0xff, 0xff, 0xfb]),
-        ];
-        for (id, expected) in cases {
-            let mut encoded = Vec::new();
-            id.encode(&mut encoded).expect("valid message ID");
-            assert_eq!(encoded, expected);
-            assert_eq!(MessageId::decode(&expected), Ok((id, expected.len())));
-        }
-    }
-
-    #[test]
-    fn reserved_ids_are_rejected() {
-        for id in [
-            MessageId::high(0),
-            MessageId::high(0xff),
-            MessageId::medium(0),
-            MessageId::medium(0xff),
-            MessageId::low(0),
-            MessageId::low(0xfffa),
-            MessageId::fixed(0xffff_fff9),
-        ] {
-            let mut encoded = Vec::new();
-            assert_eq!(id.encode(&mut encoded), Err(UdpError::InvalidMessageId));
-        }
-        assert_eq!(MessageId::decode(&[0xff]), Err(UdpError::TruncatedPacket));
-        assert_eq!(MessageId::decode(&[0xff, 0xff, 0x00]), Err(UdpError::TruncatedPacket));
-        assert_eq!(MessageId::decode(&[0xff, 0xff, 0x00, 0x00]), Err(UdpError::InvalidMessageId));
     }
 }

@@ -1,4 +1,7 @@
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::{
+    io::ErrorKind,
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
+};
 
 use tokio::net::UdpSocket;
 
@@ -44,14 +47,11 @@ impl UdpTransport {
     )]
     pub(crate) async fn send(&self, bytes: &[u8]) -> Result<(), std::io::Error> {
         if bytes.len() > self.max_payload_size {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "UDP datagram exceeds the address family's maximum payload size.",
-            ));
+            return Err(std::io::Error::new(ErrorKind::InvalidInput, "UDP datagram exceeds the address family's maximum payload size."));
         }
         let sent = self.socket.send(bytes).await?;
         if sent != bytes.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "UDP socket sent an incomplete datagram."));
+            return Err(std::io::Error::new(ErrorKind::WriteZero, "UDP socket sent an incomplete datagram."));
         }
         self.status.note_udp_sent();
         if let Some(capture) = &self.capture {

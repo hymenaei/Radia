@@ -1,7 +1,10 @@
 [alias]
-xtest = "nextest run"
-lint = "clippy --all-targets --all-features"
+xtest = "nextest run --all-features"
+lint = "clippy --workspace --all-targets --all-features -- -D warnings"
 profile = "run --profile profiling --features tracy"
+perf = "bench --workspace --benches -- --sample-size 200 --warm-up-time 5 --measurement-time 15"
+perf-quick = "bench --workspace --benches -- --sample-size 30 --warm-up-time 1 --measurement-time 3 --noplot"
+docs = "doc --workspace --no-deps --document-private-items --open"
 
 [env]
 # Tracy spans do not need native callstacks, which repeat Rust's DbgHelp initialization on Windows.

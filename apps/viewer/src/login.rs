@@ -1,7 +1,7 @@
 use crate::chat::ChatScreen;
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, PoisonError,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
@@ -11,22 +11,28 @@ use crate::inventory::{
     FavoriteLocation,
     favorite_store::{self, FavoriteStore},
 };
-use gpui::{Context, IntoElement, Render, SharedString, Window, WindowControlArea, div, prelude::*, px, rgb};
+use gpui::{Context, IntoElement, Render, SharedString, Window, div, prelude::*, px};
 use gpui_component::{
-    Disableable, IndexPath,
+    Disableable, Icon, IconName, IndexPath, Theme,
     button::{Button, ButtonVariant, ButtonVariants as _},
     checkbox::Checkbox,
     input::{Input, InputEvent, InputState},
     select::{Select, SelectEvent, SelectItem, SelectState},
 };
+use network::Delivery::Unreliable;
 use network::{AgentSession, CaptureConfig, Grid, LoginCredentials, MfaChallenge, SessionHandle, StartLocation};
 
+#[cfg(target_os = "windows")]
+use crate::secondary_windows::install_main_window_z_order_guard;
+use crate::secondary_windows::raise_above_main_if_active;
+use crate::window_chrome::windows_titlebar;
 use crate::{
-    network_intake::{
-        self, AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionReadyUpdate, ViewerUpdate,
-    },
     remembered_login::{self, RememberedLogin},
-    world::RegionLookup,
+    session::{
+        AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, RegionLookup, Session, SessionReadyUpdate,
+        ViewerUpdate, WriteLock, agent, drain_session, save_favorite_store, write_lock,
+    },
+    window_geometry::observe,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -87,12 +93,14 @@ pub struct LoginScreen {
     credential_load_generation: u64,
     session_cancel: Option<futures::channel::oneshot::Sender<()>>,
     presentation_mailbox: Option<PresentationMailbox>,
-    credential_write_lock: network_intake::WriteLock,
-    favorite_store_write_lock: network_intake::WriteLock,
+    credential_write_lock: WriteLock,
+    favorite_store_write_lock: WriteLock,
     favorite_store_save_generation: Arc<AtomicU64>,
     shutdown_session: Arc<Mutex<Option<SessionHandle>>>,
     _spawn_subscription: gpui::Subscription,
     _username_subscription: gpui::Subscription,
+    _window_activation_subscription: gpui::Subscription,
+    _window_geometry_subscription: gpui::Subscription,
 }
 
 impl LoginScreen {
@@ -121,6 +129,14 @@ impl LoginScreen {
                 screen.refresh_favorites(cx);
             }
         });
+        #[cfg(target_os = "windows")]
+        if !install_main_window_z_order_guard(window, cx) {
+            tracing::warn!("could not install the main-window secondary z-order guard");
+        }
+        let window_activation_subscription = cx.observe_window_activation(window, |_, window, cx| {
+            raise_above_main_if_active(window, cx);
+        });
+        let window_geometry_subscription = observe("main", window, cx);
         let chat_screen = cx.new(|cx| ChatScreen::new(window, cx));
 
         let screen = Self {
@@ -155,12 +171,14 @@ impl LoginScreen {
             credential_load_generation: 0,
             session_cancel: None,
             presentation_mailbox: None,
-            credential_write_lock: network_intake::write_lock(),
-            favorite_store_write_lock: network_intake::write_lock(),
+            credential_write_lock: write_lock(),
+            favorite_store_write_lock: write_lock(),
             favorite_store_save_generation: Arc::new(AtomicU64::new(0)),
             shutdown_session,
             _spawn_subscription: spawn_subscription,
             _username_subscription: username_subscription,
+            _window_activation_subscription: window_activation_subscription,
+            _window_geometry_subscription: window_geometry_subscription,
         };
 
         let background = cx.background_executor().clone();
@@ -315,16 +333,12 @@ impl LoginScreen {
         self.awaiting_mfa = false;
         self.mfa_challenge = None;
         self.session_handle = None;
-        *self.shutdown_session.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        *self.shutdown_session.lock().unwrap_or_else(PoisonError::into_inner) = None;
         self.capture_notice = None;
         self.current_region_name = None;
         self.region_lookup = None;
         let capture_enabled = self.capture_on_login.swap(false, Ordering::AcqRel);
-        self.status = Some(if capture_enabled {
-            "Capture enabled. Raw data will be saved locally when capture stops.".into()
-        } else {
-            "Connecting…".into()
-        });
+        self.status = capture_enabled.then(|| "Capture enabled. Raw data will be saved locally when capture stops.".into());
 
         let credentials = LoginCredentials {
             first_name,
@@ -338,9 +352,9 @@ impl LoginScreen {
         let remembered_username = username.trim().to_owned();
         let remembered_password = password.to_string();
         let network_session = match if capture_enabled {
-            capture_config().and_then(|config| network::Session::start_with_capture(credentials, config).map_err(|error| error.to_string()))
+            capture_config().and_then(|config| Session::start_with_capture(credentials, config).map_err(|error| error.to_string()))
         } else {
-            network::Session::start(credentials).map_err(|error| error.to_string())
+            Session::start(credentials).map_err(|error| error.to_string())
         } {
             Ok(session) => session,
             Err(error) => {
@@ -352,7 +366,7 @@ impl LoginScreen {
         };
         let session_handle = network_session.handle();
         self.session_handle = Some(session_handle.clone());
-        *self.shutdown_session.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session_handle.clone());
+        *self.shutdown_session.lock().unwrap_or_else(PoisonError::into_inner) = Some(session_handle.clone());
         self.chat_screen.update(cx, |chat, cx| chat.set_session_handle(session_handle.clone(), cx));
 
         let generation = self.session_generation;
@@ -384,7 +398,7 @@ impl LoginScreen {
         .detach();
 
         background
-            .spawn(network_intake::drain_session(
+            .spawn(drain_session(
                 network_session,
                 session_handle,
                 background.clone(),
@@ -441,7 +455,7 @@ impl LoginScreen {
         }
 
         if let Some(ready) = session_ready {
-            let SessionReadyUpdate { session, region_lookup } = ready;
+            let SessionReadyUpdate { session, region_lookup, world_state } = ready;
             self.is_connecting = false;
             self.awaiting_mfa = false;
             self.mfa_challenge = None;
@@ -465,6 +479,7 @@ impl LoginScreen {
             let initial_region_name = self.current_region_name.clone();
             self.chat_screen.update(cx, |chat, cx| {
                 chat.set_session(session.clone(), cx);
+                chat.set_world_state(world_state.clone(), cx);
                 if let Some(region_name) = initial_region_name {
                     chat.set_region_name(region_name, cx);
                 }
@@ -489,10 +504,7 @@ impl LoginScreen {
                         if !active {
                             break;
                         }
-                        let _ = heartbeat_handle.send(
-                            crate::world::agent_update::idle(update_session.agent_id, update_session.session_id),
-                            network::Delivery::Unreliable,
-                        );
+                        let _ = heartbeat_handle.send(agent::idle(update_session.agent_id, update_session.session_id), Unreliable);
                     }
                 })
                 .detach();
@@ -528,8 +540,8 @@ impl LoginScreen {
                 Ok(()) => self.favorite_storage_warning = None,
                 Err(error) => {
                     let warning = format!("Could not save favorite landmarks: {error}");
-                    self.favorite_storage_warning = Some(warning.clone());
-                    self.chat_screen.update(cx, |chat, cx| chat.report_favorite_status(warning, cx));
+                    self.favorite_storage_warning = Some(warning);
+                    tracing::warn!(%error, "could not save favorite landmarks");
                 }
             }
         }
@@ -541,7 +553,7 @@ impl LoginScreen {
             self.mfa_challenge = None;
             self.session = None;
             self.session_handle = None;
-            self.shutdown_session.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+            self.shutdown_session.lock().unwrap_or_else(PoisonError::into_inner).take();
             self.region_lookup = None;
             self.current_region_name = None;
             self.session_cancel = None;
@@ -574,25 +586,14 @@ impl LoginScreen {
             &update.username,
             update.result,
         ) {
-            self.chat_screen.update(cx, |chat, cx| chat.report_favorite_status(format!("Could not load favorite landmarks: {error}"), cx));
+            tracing::warn!(%error, "could not apply favorite inventory refresh");
             return;
         }
 
-        let mut favorite_status = if self.favorite_locations.is_empty() {
-            "No landmarks were found in the Favorites folder.".to_owned()
-        } else {
-            format!("Loaded {} favorite landmarks for the next login.", self.favorite_locations.len())
-        };
         if self.favorite_store_loaded {
             self.favorite_storage_warning = None;
             self.schedule_favorite_store_save(self.favorite_store.clone(), cx);
-        } else {
-            favorite_status = self
-                .favorite_storage_warning
-                .clone()
-                .unwrap_or_else(|| format!("{favorite_status} Saved favorite landmarks are unavailable."));
         }
-        self.chat_screen.update(cx, |chat, cx| chat.report_favorite_status(favorite_status, cx));
     }
 
     fn schedule_favorite_store_save(&self, store: FavoriteStore, cx: &mut Context<Self>) {
@@ -604,7 +605,7 @@ impl LoginScreen {
         let generation = save_generation.fetch_add(1, Ordering::AcqRel) + 1;
         cx.background_executor()
             .spawn(async move {
-                if let Some(result) = network_intake::save_favorite_store(store, write_lock, save_generation, generation).await {
+                if let Some(result) = save_favorite_store(store, write_lock, save_generation, generation).await {
                     mailbox.publish(ViewerUpdate::FavoriteStoreSaved { generation, result });
                 }
             })
@@ -627,7 +628,7 @@ impl LoginScreen {
         };
 
         self.is_connecting = true;
-        self.status = Some("Verifying code…".into());
+        self.status = None;
         let result = challenge.complete(&code);
         self.mfa_code.update(cx, |input, cx| input.set_value("", window, cx));
         match result {
@@ -691,201 +692,223 @@ impl Render for LoginScreen {
         };
         let form_disabled = self.storage_loading || self.is_connecting || self.awaiting_mfa;
 
-        let content = div().size_full().flex().flex_col().bg(rgb(0x202020)).text_color(rgb(0xe7edf2));
+        let theme = Theme::global(cx).colors;
+        let content = div().size_full().flex().flex_col().bg(theme.background).text_color(theme.foreground);
 
         #[cfg(target_os = "windows")]
-        let content = content.child(windows_titlebar(window.is_maximized()));
+        let content = {
+            let (titlebar_content, titlebar_action) = if self.session.is_some() {
+                self.chat_screen.update(cx, |chat, cx| (chat.titlebar_content(cx), chat.titlebar_action(cx)))
+            } else {
+                (div().into_any_element(), div().into_any_element())
+            };
+            content.child(windows_titlebar(window.is_maximized(), titlebar_content, titlebar_action, theme))
+        };
 
-        let login_body = div().flex_1().flex().items_center().justify_center().p_6().child(
-            div()
-                .w(px(420.))
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(div().text_size(px(13.)).text_color(rgb(0xa0a0a0)).child("RADIA"))
-                        .child(div().text_size(px(24.)).text_color(rgb(0xf0f0f0)).child("Sign in to Second Life")),
-                )
-                .child(div().h(px(26.)))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_4()
-                        .child(
+        let login_body = div().id("login-scroll").flex_1().min_h_0().overflow_y_scroll().child(
+            div().w_full().flex().justify_center().px_4().py_6().child(
+                div()
+                    .w_full()
+                    .max_w(px(420.))
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.muted)
+                    .p_5()
+                    .child(
+                        div().flex().items_center().gap_3().child(Icon::new(IconName::Globe).size_5().text_color(theme.primary)).child(
                             div()
                                 .flex()
                                 .flex_col()
-                                .gap_2()
-                                .child(div().text_size(px(13.)).text_color(rgb(0xc8c8c8)).child("Username"))
-                                .child(Input::new(&self.username).w_full().h(px(42.)).disabled(form_disabled)),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(div().text_size(px(13.)).text_color(rgb(0xc8c8c8)).child("Password"))
-                                .child(Input::new(&self.password).w_full().h(px(42.)).disabled(form_disabled)),
-                        )
-                        .when(self.awaiting_mfa, |this| {
-                            this.child(
+                                .gap_1()
+                                .child(div().text_size(px(22.)).text_color(theme.foreground).child("Sign in"))
+                                .child(
+                                    div()
+                                        .text_size(px(13.))
+                                        .text_color(theme.muted_foreground)
+                                        .child("Connect to your Second Life account."),
+                                ),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(
                                 div()
                                     .flex()
                                     .flex_col()
                                     .gap_2()
-                                    .child(div().text_size(px(13.)).text_color(rgb(0xc8c8c8)).child("Authentication code"))
-                                    .child(Input::new(&self.mfa_code).w_full().h(px(42.)).disabled(self.is_connecting)),
+                                    .child(div().text_size(px(13.)).text_color(theme.foreground).child("Username"))
+                                    .child(Input::new(&self.username).w_full().h(px(42.)).focus_bordered(false).disabled(form_disabled)),
                             )
-                        })
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(div().text_size(px(13.)).text_color(rgb(0xc8c8c8)).child("Start at"))
-                                .child(Select::new(&self.spawn_location).w_full().h(px(40.)).disabled(form_disabled)),
-                        )
-                        .when(show_region_input, |this| {
-                            this.child(Input::new(&self.region_name).w_full().h(px(42.)).disabled(form_disabled))
-                        })
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(div().text_size(px(13.)).text_color(rgb(0xc8c8c8)).child("Grid"))
-                                .child(
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(div().text_size(px(13.)).text_color(theme.foreground).child("Password"))
+                                    .child(Input::new(&self.password).w_full().h(px(42.)).focus_bordered(false).disabled(form_disabled)),
+                            )
+                            .when(self.awaiting_mfa, |this| {
+                                this.child(
                                     div()
                                         .flex()
+                                        .flex_col()
                                         .gap_2()
+                                        .child(div().text_size(px(13.)).text_color(theme.foreground).child("Authentication code"))
                                         .child(
-                                            Button::new("grid-agni")
-                                                .label("Main grid")
-                                                .with_variant(if self.grid == Grid::Agni {
-                                                    ButtonVariant::Primary
-                                                } else {
-                                                    ButtonVariant::Secondary
-                                                })
-                                                .h(px(34.))
-                                                .disabled(form_disabled)
-                                                .on_click(cx.listener(|this, _event, window, cx| {
-                                                    this.select_grid(Grid::Agni, window, cx);
-                                                })),
-                                        )
-                                        .child(
-                                            Button::new("grid-aditi")
-                                                .label("Beta grid")
-                                                .with_variant(if self.grid == Grid::Aditi {
-                                                    ButtonVariant::Primary
-                                                } else {
-                                                    ButtonVariant::Secondary
-                                                })
-                                                .h(px(34.))
-                                                .disabled(form_disabled)
-                                                .on_click(cx.listener(|this, _event, window, cx| {
-                                                    this.select_grid(Grid::Aditi, window, cx);
-                                                })),
+                                            Input::new(&self.mfa_code)
+                                                .w_full()
+                                                .h(px(42.))
+                                                .focus_bordered(false)
+                                                .disabled(self.is_connecting),
                                         ),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .relative()
-                                .child(
-                                    Checkbox::new("remember-login")
-                                        .checked(self.remember_login)
-                                        .label("Remember username, password and MFA")
-                                        .disabled(form_disabled)
-                                        .on_click({
-                                            let screen = cx.entity().downgrade();
-                                            move |checked, window, app| {
-                                                let _ = screen.update(app, |this, cx| {
-                                                    this.remember_login = *checked;
-                                                    if !*checked {
-                                                        this.remembered_login = None;
-                                                        this.spawn_choice = SpawnChoice::Last;
-                                                        this.spawn_location.update(cx, |state, cx| {
-                                                            state.set_items(spawn_options(&[]), window, cx);
-                                                            state.set_selected_value(&SpawnChoice::Last, window, cx);
-                                                        });
-                                                        let grid = this.grid;
-                                                        let generation = this.session_generation;
-                                                        let write_lock = this.credential_write_lock.clone();
-                                                        let background = cx.background_executor().clone();
-                                                        cx.spawn(async move |this, cx| {
-                                                            let result = background
-                                                                .spawn(async move {
-                                                                    let _guard = write_lock.lock().await;
-                                                                    remembered_login::clear(grid)
-                                                                })
-                                                                .await;
-                                                            if let Err(error) = result {
-                                                                let _ = this.update(cx, |view, cx| {
-                                                                    if view.session_generation == generation {
-                                                                        view.status = Some(error);
-                                                                        cx.notify();
-                                                                    }
-                                                                });
-                                                            }
-                                                        })
-                                                        .detach();
-                                                    }
-                                                    cx.notify();
-                                                });
-                                            }
-                                        }),
                                 )
-                                .when(self.remember_login, |this| {
-                                    this.child(
+                            })
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(div().text_size(px(13.)).text_color(theme.foreground).child("Start at"))
+                                    .child(Select::new(&self.spawn_location).w_full().h(px(40.)).disabled(form_disabled)),
+                            )
+                            .when(show_region_input, |this| {
+                                this.child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .child(div().text_size(px(13.)).text_color(theme.foreground).child("Region name"))
+                                        .child(
+                                            Input::new(&self.region_name).w_full().h(px(42.)).focus_bordered(false).disabled(form_disabled),
+                                        ),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(div().text_size(px(13.)).text_color(theme.foreground).child("Grid"))
+                                    .child(
                                         div()
-                                            .absolute()
-                                            .left(px(0.))
-                                            .top(px(0.))
-                                            .w(px(16.))
-                                            .h(px(16.))
                                             .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .text_size(px(14.))
-                                            .text_color(rgb(0x202020))
-                                            .child("✓"),
-                                    )
-                                }),
-                        ),
-                )
-                .child(div().h(px(20.)))
-                .child(
-                    Button::new("login")
-                        .label(if self.is_connecting {
-                            if self.awaiting_mfa { "Verifying…" } else { "Connecting…" }
-                        } else if self.awaiting_mfa {
-                            "Verify"
+                                            .gap_2()
+                                            .child(
+                                                Button::new("grid-agni")
+                                                    .label("Main grid")
+                                                    .with_variant(if self.grid == Grid::Agni {
+                                                        ButtonVariant::Primary
+                                                    } else {
+                                                        ButtonVariant::Secondary
+                                                    })
+                                                    .h(px(34.))
+                                                    .disabled(form_disabled)
+                                                    .on_click(cx.listener(|this, _event, window, cx| {
+                                                        this.select_grid(Grid::Agni, window, cx);
+                                                    })),
+                                            )
+                                            .child(
+                                                Button::new("grid-aditi")
+                                                    .label("Beta grid")
+                                                    .with_variant(if self.grid == Grid::Aditi {
+                                                        ButtonVariant::Primary
+                                                    } else {
+                                                        ButtonVariant::Secondary
+                                                    })
+                                                    .h(px(34.))
+                                                    .disabled(form_disabled)
+                                                    .on_click(cx.listener(|this, _event, window, cx| {
+                                                        this.select_grid(Grid::Aditi, window, cx);
+                                                    })),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                Checkbox::new("remember-login")
+                                    .checked(self.remember_login)
+                                    .label("Remember username, password and MFA")
+                                    .items_center()
+                                    .disabled(form_disabled)
+                                    .on_click({
+                                        let screen = cx.entity().downgrade();
+                                        move |checked, window, app| {
+                                            let _ = screen.update(app, |this, cx| {
+                                                this.remember_login = *checked;
+                                                if !*checked {
+                                                    this.remembered_login = None;
+                                                    this.spawn_choice = SpawnChoice::Last;
+                                                    this.spawn_location.update(cx, |state, cx| {
+                                                        state.set_items(spawn_options(&[]), window, cx);
+                                                        state.set_selected_value(&SpawnChoice::Last, window, cx);
+                                                    });
+                                                    let grid = this.grid;
+                                                    let generation = this.session_generation;
+                                                    let write_lock = this.credential_write_lock.clone();
+                                                    let background = cx.background_executor().clone();
+                                                    cx.spawn(async move |this, cx| {
+                                                        let result = background
+                                                            .spawn(async move {
+                                                                let _guard = write_lock.lock().await;
+                                                                remembered_login::clear(grid)
+                                                            })
+                                                            .await;
+                                                        if let Err(error) = result {
+                                                            let _ = this.update(cx, |view, cx| {
+                                                                if view.session_generation == generation {
+                                                                    view.status = Some(error);
+                                                                    cx.notify();
+                                                                }
+                                                            });
+                                                        }
+                                                    })
+                                                    .detach();
+                                                }
+                                                cx.notify();
+                                            });
+                                        }
+                                    }),
+                            ),
+                    )
+                    .when_some(self.status.clone(), |this, status| {
+                        let color = if self.session.is_some() {
+                            theme.success
+                        } else if self.storage_loading || self.is_connecting || self.awaiting_mfa {
+                            theme.muted_foreground
                         } else {
-                            "Log in"
-                        })
-                        .primary()
-                        .w_full()
-                        .h(px(42.))
-                        .disabled(!can_submit)
-                        .on_click(cx.listener(|this, _event, window, cx| this.submit(window, cx))),
-                )
-                .when_some(self.status.clone(), |this, status| {
-                    let color = if self.session.is_some() {
-                        rgb(0xb3d9b0)
-                    } else if self.storage_loading || self.is_connecting || self.awaiting_mfa {
-                        rgb(0xa0a0a0)
-                    } else {
-                        rgb(0xf0a0a0)
-                    };
-                    this.child(div().text_size(px(13.)).text_color(color).child(status))
-                }),
+                            theme.danger
+                        };
+                        this.child(div().text_size(px(13.)).text_color(color).child(status))
+                    })
+                    .child(
+                        Button::new("login")
+                            .label(if self.is_connecting {
+                                if self.awaiting_mfa { "Verifying…" } else { "Connecting…" }
+                            } else if self.awaiting_mfa {
+                                "Verify"
+                            } else {
+                                "Log in"
+                            })
+                            .primary()
+                            .w_full()
+                            .h(px(42.))
+                            .disabled(!can_submit)
+                            .on_click(cx.listener(|this, _event, window, cx| this.submit(window, cx))),
+                    ),
+            ),
         );
 
-        if self.session.is_some() { content.child(self.chat_screen.clone()) } else { content.child(login_body) }
+        if self.session.is_some() {
+            content.child(div().flex_1().min_h_0().child(self.chat_screen.clone()))
+        } else {
+            content.child(login_body)
+        }
     }
 }
 
@@ -895,50 +918,40 @@ pub(super) fn capture_config() -> Result<CaptureConfig, String> {
     Ok(CaptureConfig::new(root))
 }
 
-#[cfg(target_os = "windows")]
-fn windows_titlebar(maximized: bool) -> impl IntoElement {
-    div()
-        .w_full()
-        .h(px(32.))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .bg(rgb(0x202020))
-        .child(div().flex_1().h_full().window_control_area(WindowControlArea::Drag))
-        .child(
-            div()
-                .flex()
-                .h_full()
-                .flex()
-                .items_center()
-                .font_family("Segoe Fluent Icons")
-                .child(windows_caption_button("minimize", WindowControlArea::Min, "\u{e921}", false))
-                .child(windows_caption_button(
-                    if maximized { "restore" } else { "maximize" },
-                    WindowControlArea::Max,
-                    if maximized { "\u{e923}" } else { "\u{e922}" },
-                    false,
-                ))
-                .child(windows_caption_button("close", WindowControlArea::Close, "\u{e8bb}", true)),
-        )
-}
+#[cfg(test)]
+mod tests {
+    use gpui::{Context, IntoElement, Render, TestAppContext, Window, point, px};
 
-#[cfg(target_os = "windows")]
-fn windows_caption_button(id: &'static str, area: WindowControlArea, glyph: &'static str, is_close: bool) -> impl IntoElement {
-    let (hover, active) = if is_close { (rgb(0xe81120), rgb(0xc50f1f)) } else { (rgb(0x3a3a3a), rgb(0x303030)) };
+    use super::*;
 
-    div()
-        .id(id)
-        .w(px(46.))
-        .h_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(px(10.))
-        .text_color(rgb(0xe6e6e6))
-        .hover(move |style| style.bg(hover))
-        .active(move |style| style.bg(active))
-        .occlude()
-        .window_control_area(area)
-        .child(glyph)
+    struct CheckboxHarness {
+        checked: bool,
+    }
+
+    impl Render for CheckboxHarness {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let screen = cx.entity().downgrade();
+            div().debug_selector(|| "remember-login-checkbox".into()).child(
+                Checkbox::new("remember-login-test").checked(self.checked).label("Remember me").on_click(move |checked, _, app| {
+                    let _ = screen.update(app, |this, cx| {
+                        this.checked = *checked;
+                        cx.notify();
+                    });
+                }),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn remember_checkbox_toggles(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (checkbox, cx) = cx.add_window_view(|_, _| CheckboxHarness { checked: true });
+        cx.update(|window, cx| _ = window.draw(cx));
+
+        let bounds = cx.debug_bounds("remember-login-checkbox").expect("remember checkbox should render");
+        assert!(bounds.size.width > px(0.) && bounds.size.height > px(0.));
+        cx.simulate_click(point(bounds.origin.x + px(8.), bounds.origin.y + px(8.)), Default::default());
+
+        assert!(!cx.update(|_, app| checkbox.read(app).checked));
+    }
 }

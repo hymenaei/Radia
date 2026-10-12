@@ -4,7 +4,10 @@ use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{EnumAccess, VariantAccess, Visitor},
 };
-use time::OffsetDateTime;
+use time::{
+    Date as CalendarDate, OffsetDateTime, Time as TimeOfDay, UtcOffset,
+    format_description::{parse_borrowed, well_known::Rfc3339},
+};
 
 use crate::Error;
 use base::UUID;
@@ -165,22 +168,18 @@ impl Date {
     }
 
     pub(crate) fn parse(value: &str) -> Result<Self, Error> {
-        let datetime = if let Ok(datetime) = OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339) {
+        let datetime = if let Ok(datetime) = OffsetDateTime::parse(value, &Rfc3339) {
             datetime
         } else {
-            let format = time::format_description::parse_borrowed::<3>("[year]-[month]-[day]")
-                .map_err(|error| Error::InvalidValue(error.to_string()))?;
-            let date = time::Date::parse(value, &format).map_err(|error| Error::InvalidValue(error.to_string()))?;
-            date.with_time(time::Time::MIDNIGHT).assume_utc()
+            let format = parse_borrowed::<3>("[year]-[month]-[day]").map_err(|error| Error::InvalidValue(error.to_string()))?;
+            let date = CalendarDate::parse(value, &format).map_err(|error| Error::InvalidValue(error.to_string()))?;
+            date.with_time(TimeOfDay::MIDNIGHT).assume_utc()
         };
-        Ok(Self(datetime.to_offset(time::UtcOffset::UTC)))
+        Ok(Self(datetime.to_offset(UtcOffset::UTC)))
     }
 
     pub(crate) fn format(self) -> Result<String, Error> {
-        self.0
-            .to_offset(time::UtcOffset::UTC)
-            .format(&time::format_description::well_known::Rfc3339)
-            .map_err(|error| Error::InvalidValue(error.to_string()))
+        self.0.to_offset(UtcOffset::UTC).format(&Rfc3339).map_err(|error| Error::InvalidValue(error.to_string()))
     }
 }
 
@@ -338,7 +337,7 @@ impl<'de> Visitor<'de> for URIVisitor {
 
 impl Serialize for Date {
     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-        let value = self.0.format(&time::format_description::well_known::Rfc3339).map_err(serde::ser::Error::custom)?;
+        let value = self.0.format(&Rfc3339).map_err(serde::ser::Error::custom)?;
         serializer.serialize_newtype_struct(DATE_NEWTYPE, &value)
     }
 }

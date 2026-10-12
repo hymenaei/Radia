@@ -4,7 +4,6 @@ use base::UUID;
 #[derive(Clone, Debug, PartialEq)]
 pub struct MapBlockReply {
     pub agent_data: AgentData,
-    /// Region entries in packet order.
     pub data: Vec<Data>,
 }
 
@@ -21,7 +20,6 @@ pub struct Data {
     pub name: String,
     pub access: u8,
     pub region_flags: u32,
-    /// Water height in meters.
     pub water_height: u8,
     pub agents: u8,
     pub map_image_id: UUID,

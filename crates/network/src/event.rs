@@ -1,6 +1,6 @@
 use crate::{AgentSession, LoginResponseData, capabilities::Client, client::MfaChallenge};
 use llsd::Value;
-use protocol::udp::Message;
+use protocol::lludp::Message;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::{
@@ -20,6 +20,10 @@ static NEXT_SIMULATOR_ID: AtomicU64 = AtomicU64::new(1);
 pub struct SimulatorId(u64);
 
 impl SimulatorId {
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
     #[cfg(test)]
     pub(crate) const fn new(generation: u64) -> Self {
         Self(generation)
@@ -28,6 +32,19 @@ impl SimulatorId {
     pub(crate) fn allocate() -> Option<Self> {
         NEXT_SIMULATOR_ID.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| value.checked_add(1)).ok().map(Self)
     }
+}
+
+/// Ordering evidence for an LLUDP packet within one simulator connection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PacketOrder {
+    /// The raw sequence maps to this extended sequence within 2^30 packets of the trusted anchor.
+    Ordered(u64),
+    /// This packet cannot be mapped safely, but the connection's ordering anchor remains usable.
+    /// This includes half-range ambiguity and old packets outside the 2^30-packet reorder window.
+    Ambiguous,
+    /// A forward jump exceeded the supported progression window or the extended counter overflowed.
+    /// Later packet arrivals cannot restore ordering authority for this connection.
+    Degraded,
 }
 
 pub(crate) enum EventSendOutcome {
@@ -184,11 +201,23 @@ pub enum Event {
         source: SocketAddr,
         capabilities: Client,
     },
-    /// Message received from a simulator; `sequence` is its LLUDP packet sequence number.
+    /// The gaining simulator completed the authenticated agent movement handshake.
+    ///
+    /// Default outbound messages now route to `simulator_id`. The viewer uses the session and
+    /// capabilities to update its region-scoped work after applying the explicit world handoff.
+    SimulatorPromoted {
+        previous_simulator_id: SimulatorId,
+        simulator_id: SimulatorId,
+        session: Box<AgentSession>,
+        capabilities: Client,
+    },
     SimulatorMessage {
         simulator_id: SimulatorId,
         source: SocketAddr,
+        /// Raw LLUDP packet sequence for protocol diagnostics.
         sequence: u32,
+        /// Extended sequence evidence produced by the connection's LLUDP circuit.
+        packet_order: PacketOrder,
         message: Message,
     },
     /// Capture recording stopped. `path` is empty if packaging failed.
@@ -266,6 +295,13 @@ impl fmt::Debug for Event {
                 .field("source", &"[REDACTED]")
                 .field("capabilities", &"[OMITTED]")
                 .finish(),
+            Self::SimulatorPromoted { .. } => formatter
+                .debug_struct("SimulatorPromoted")
+                .field("previous_simulator_id", &"[SESSION LOCAL]")
+                .field("simulator_id", &"[SESSION LOCAL]")
+                .field("session", &"[REDACTED]")
+                .field("capabilities", &"[OMITTED]")
+                .finish(),
             Self::SimulatorMessage { sequence, .. } => formatter
                 .debug_struct("SimulatorMessage")
                 .field("simulator_id", &"[SESSION LOCAL]")
@@ -285,6 +321,74 @@ impl fmt::Debug for Event {
                 .finish(),
             Self::SendFailed(_) => formatter.debug_tuple("SendFailed").field(&"[REDACTED]").finish(),
             Self::Failed(_) => formatter.debug_tuple("Failed").field(&"[REDACTED]").finish(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use std::path::PathBuf;
+
+    use llsd::Value;
+
+    use super::{Event, SimulatorId};
+
+    #[test]
+    fn event_debug_hides_server_errors_and_endpoints() {
+        let event = Event::Failed("server-session-secret".into());
+        assert!(!format!("{event:?}").contains("server-session-secret"));
+
+        let event = Event::CapabilityEvent {
+            simulator_id: SimulatorId::new(1),
+            source: "192.0.2.90:13000".parse().expect("valid endpoint"),
+            message: "session-event-secret".into(),
+            body: Value::String("event-body-secret".into()),
+        };
+        let debug = format!("{event:?}");
+        assert!(!debug.contains("192.0.2.90"));
+        assert!(!debug.contains("session-event-secret"));
+        assert!(!debug.contains("event-body-secret"));
+
+        let event = Event::CapabilityError {
+            simulator_id: SimulatorId::new(2),
+            source: "192.0.2.91:13000".parse().expect("valid endpoint"),
+            capability: "private-capability-name".into(),
+            reason: "origin-error-secret".into(),
+        };
+        let debug = format!("{event:?}");
+        for secret in ["192.0.2.91", "private-capability-name", "origin-error-secret"] {
+            assert!(!debug.contains(secret));
+        }
+        assert!(matches!(&event, Event::CapabilityError { reason, .. } if reason == "origin-error-secret"));
+
+        let event = Event::SimulatorFailed {
+            simulator_id: SimulatorId::new(3),
+            region_handle: Some(0x1234),
+            endpoint: "192.0.2.92:13000".parse().expect("valid endpoint"),
+            reason: "simulator-error-secret".into(),
+        };
+        let debug = format!("{event:?}");
+        for secret in ["192.0.2.92", "4660", "simulator-error-secret"] {
+            assert!(!debug.contains(secret));
+        }
+    }
+
+    #[test]
+    fn capture_event_debug_redacts_local_details() {
+        let finished = Event::CaptureFinished {
+            path: PathBuf::from("C:/users/alice/captures/private-session.vcap"),
+            error: Some("could not write private-session-token".into()),
+        };
+        let interrupted = Event::CaptureInterrupted {
+            path: PathBuf::from("C:/users/alice/captures/private-session.vcap"),
+            error: Some("could not write private-session-token".into()),
+        };
+
+        for debug in [format!("{finished:?}"), format!("{interrupted:?}")] {
+            assert!(!debug.contains("alice"));
+            assert!(!debug.contains("private-session"));
+            assert!(!debug.contains("private-session-token"));
+            assert!(debug.contains("[REDACTED]"));
         }
     }
 }

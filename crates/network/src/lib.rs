@@ -32,10 +32,16 @@ pub use capture::CaptureConfig;
 pub use circuit::Delivery;
 pub use client::{MfaChallenge, OutboundMessage, Session, SessionHandle};
 pub use error::Error;
-pub use event::{Event, SimulatorId};
+pub use event::{Event, PacketOrder, SimulatorId};
 pub use login::{AgentSession, Grid, LoginCredentials, LoginResponseData, LoginValue, StartLocation};
 pub use status::{NetworkLifecycle, NetworkStatusHandle, NetworkStatusSnapshot};
 
-#[cfg(test)]
-#[path = "../tests/unit/mod.rs"]
-mod unit_tests;
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod test_support {
+    use crate::SimulatorId;
+
+    pub fn simulator_id() -> SimulatorId {
+        SimulatorId::allocate().expect("simulator ID space is available during tests")
+    }
+}

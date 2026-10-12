@@ -1,19 +1,23 @@
 use base::UUID;
+use math::{Quat, Vec3};
 use protocol::{
-    Audible, BlockInstance, BlockValues, ChatSourceType, ChatType, FieldValue, Frequency, SchemaMessage, UdpError, Vector3,
+    Audible, BlockInstance, BlockValues, ChatSourceType, ChatType, FieldValue, Frequency, LLUdpError, SchemaMessage,
+    lludp::{Message, Packet},
     messages::{
-        AgentMovementComplete, ChatFromSimulator, ChatFromViewer, ConfirmEnableSimulator, DisableSimulator, EnableSimulator, LogoutReply,
+        AgentMovementComplete, AgentUpdate, ChatFromSimulator, ChatFromViewer, ConfirmEnableSimulator, DisableSimulator, EnableSimulator,
+        LogoutReply,
         agent_movement_complete::{AgentData, Data, SimData},
+        agent_update,
         chat_from_simulator::ChatData,
-        chat_from_viewer::{AgentData as ViewerAgentData, ChatData as ViewerChatData},
-        confirm_enable_simulator::AgentData as ConfirmAgentData,
+        chat_from_viewer, confirm_enable_simulator,
         enable_simulator::SimulatorInfo,
-        logout_reply::{AgentData as LogoutReplyAgentData, InventoryData},
+        logout_reply,
+        logout_reply::InventoryData,
     },
     schema::{MessageEncoding, MessageTrust},
-    udp::{Message, Packet},
 };
-use test_support::{parse_hex_fixture, udp::vectors};
+use std::net::Ipv4Addr;
+use test_support::{lludp::vectors, parse_hex_fixture};
 
 fn fixture(hex: &str) -> Vec<u8> {
     parse_hex_fixture(hex).expect("valid protocol fixture")
@@ -38,8 +42,8 @@ fn movement_complete_fields() {
         &Message::AgentMovementComplete(AgentMovementComplete {
             agent_data: AgentData { agent_id: agent_id(), session_id: session_id() },
             data: Data {
-                position: Vector3 { x: 128.25, y: 64.5, z: 23.0 },
-                look_at: Vector3 { x: 0.0, y: 1.0, z: 0.0 },
+                position: Vec3::new(128.25, 64.5, 23.0),
+                look_at: Vec3::new(0.0, 1.0, 0.0),
                 region_handle: 0x1122_3344_5566_7788,
                 timestamp: 0x0102_0304,
             },
@@ -47,6 +51,45 @@ fn movement_complete_fields() {
         })
     );
     assert_eq!(decoded.encode().expect("re-encode movement fixture"), packet_bytes);
+}
+
+#[test]
+fn agent_update_quaternions_use_canonical_xyz() {
+    fn message(rotation: Quat) -> Message {
+        Message::AgentUpdate(AgentUpdate {
+            agent_data: agent_update::AgentData {
+                agent_id: agent_id(),
+                session_id: session_id(),
+                body_rotation: rotation,
+                head_rotation: rotation,
+                state: 0,
+                camera_center: Vec3::ZERO,
+                camera_at_axis: Vec3::ZERO,
+                camera_left_axis: Vec3::ZERO,
+                camera_up_axis: Vec3::ZERO,
+                far: 0.0,
+                control_flags: 0,
+                flags: 0,
+            },
+        })
+    }
+
+    let rotation = Quat::from_xyzw(0.2, -0.3, 0.4, -0.84);
+    let equivalent = Quat::from_xyzw(-rotation.x, -rotation.y, -rotation.z, -rotation.w);
+    let encoded = Packet::new(1, message(rotation)).encode().expect("encode negative-W rotation");
+    let encoded_equivalent = Packet::new(1, message(equivalent)).encode().expect("encode equivalent rotation");
+    assert_eq!(encoded, encoded_equivalent);
+
+    let decoded = Packet::decode(&encoded).expect("decode canonical rotation");
+    let Message::AgentUpdate(decoded) = decoded.message() else {
+        panic!("expected AgentUpdate");
+    };
+    for decoded_rotation in [decoded.agent_data.body_rotation, decoded.agent_data.head_rotation] {
+        assert!(decoded_rotation.w >= 0.0);
+        assert!((rotation.normalize().dot(decoded_rotation.normalize()).abs() - 1.0).abs() < 1.0e-5);
+    }
+
+    assert_eq!(Packet::new(1, message(Quat::from_xyzw(0.0, 0.0, 0.0, 0.0))).encode(), Err(LLUdpError::InvalidMessage));
 }
 
 #[test]
@@ -59,7 +102,7 @@ fn logout_reply_fields() {
     assert_eq!(
         decoded.message(),
         &Message::LogoutReply(LogoutReply {
-            agent_data: LogoutReplyAgentData { agent_id: agent_id(), session_id: session_id() },
+            agent_data: logout_reply::AgentData { agent_id: agent_id(), session_id: session_id() },
             inventory_data: vec![InventoryData {
                 item_id: UUID::parse_str("12345678-90ab-cdef-0123-456789abcdef").expect("valid item UUID"),
             }],
@@ -71,7 +114,7 @@ fn logout_reply_fields() {
 
     let mut truncated = expected;
     truncated.pop();
-    assert!(matches!(Packet::decode(&truncated), Err(UdpError::TruncatedPacket)));
+    assert!(matches!(Packet::decode(&truncated), Err(LLUdpError::TruncatedPacket)));
 }
 
 #[test]
@@ -83,7 +126,7 @@ fn enable_simulator_fields() {
     assert_eq!(
         decoded.message(),
         &Message::EnableSimulator(EnableSimulator {
-            simulator_info: SimulatorInfo { handle: 0x1122_3344_5566_7788, ip: [192, 0, 2, 10], port: [0x32, 0xc8] },
+            simulator_info: SimulatorInfo { handle: 0x1122_3344_5566_7788, ip: Ipv4Addr::new(192, 0, 2, 10), port: 0x32c8 },
         })
     );
     assert!(decoded.message().is_inbound_only());
@@ -110,7 +153,7 @@ fn confirm_enable_simulator_fields() {
     assert_eq!(
         decoded.message(),
         &Message::ConfirmEnableSimulator(ConfirmEnableSimulator {
-            agent_data: ConfirmAgentData { agent_id: agent_id(), session_id: session_id() },
+            agent_data: confirm_enable_simulator::AgentData { agent_id: agent_id(), session_id: session_id() },
         })
     );
     assert_eq!(decoded.encode().expect("re-encode ConfirmEnableSimulator fixture"), expected);
@@ -118,7 +161,7 @@ fn confirm_enable_simulator_fields() {
 
 #[test]
 fn confirm_enable_simulator_is_inbound_only() {
-    let message = Message::ConfirmEnableSimulator(ConfirmEnableSimulator { agent_data: ConfirmAgentData::default() });
+    let message = Message::ConfirmEnableSimulator(ConfirmEnableSimulator { agent_data: confirm_enable_simulator::AgentData::default() });
 
     assert!(message.is_inbound_only());
 }
@@ -140,7 +183,7 @@ fn chat_from_simulator_fields() {
                 source_type: ChatSourceType::Agent,
                 chat_type: ChatType::Shout,
                 audible: Audible::Fully,
-                position: Vector3 { x: 1.0, y: -2.5, z: 0.25 },
+                position: Vec3::new(1.0, -2.5, 0.25),
                 message: "Hi".into(),
             },
         })
@@ -151,13 +194,13 @@ fn chat_from_simulator_fields() {
 #[test]
 fn invalid_utf8_message() {
     let expected = fixture(vectors::CHAT_FROM_SIMULATOR_INVALID_UTF8_MESSAGE);
-    assert_eq!(Packet::decode(&expected), Err(UdpError::InvalidUtf8));
+    assert_eq!(Packet::decode(&expected), Err(LLUdpError::InvalidUtf8));
 }
 
 #[test]
 fn invalid_utf8_name() {
     let expected = fixture(vectors::CHAT_FROM_SIMULATOR_INVALID_UTF8_NAME);
-    assert_eq!(Packet::decode(&expected), Err(UdpError::InvalidUtf8));
+    assert_eq!(Packet::decode(&expected), Err(LLUdpError::InvalidUtf8));
 }
 
 #[test]
@@ -198,7 +241,7 @@ fn outbound_strings_reject_nul() {
                 source_type: ChatSourceType::Agent,
                 chat_type: ChatType::Normal,
                 audible: Audible::Fully,
-                position: Vector3::default(),
+                position: Vec3::ZERO,
                 message: "text".into(),
             },
         }),
@@ -210,18 +253,18 @@ fn outbound_strings_reject_nul() {
                 source_type: ChatSourceType::Agent,
                 chat_type: ChatType::Normal,
                 audible: Audible::Fully,
-                position: Vector3::default(),
+                position: Vec3::ZERO,
                 message: "A\0B".into(),
             },
         }),
         Message::ChatFromViewer(ChatFromViewer {
-            agent_data: ViewerAgentData { agent_id: UUID::nil(), session_id: UUID::nil() },
-            chat_data: ViewerChatData { message: "A\0B".into(), chat_type: ChatType::Normal, channel: 0 },
+            agent_data: chat_from_viewer::AgentData { agent_id: UUID::nil(), session_id: UUID::nil() },
+            chat_data: chat_from_viewer::ChatData { message: "A\0B".into(), chat_type: ChatType::Normal, channel: 0 },
         }),
     ];
 
     for message in messages {
-        assert_eq!(Packet::new(1, message).encode(), Err(UdpError::InvalidMessage));
+        assert_eq!(Packet::new(1, message).encode(), Err(LLUdpError::InvalidMessage));
     }
 }
 
@@ -241,7 +284,7 @@ fn inaudible_empty_chat() {
                 source_type: ChatSourceType::Object,
                 chat_type: ChatType::Normal,
                 audible: Audible::Barely,
-                position: Vector3::default(),
+                position: Vec3::ZERO,
                 message: String::new(),
             },
         })
@@ -310,7 +353,7 @@ fn coarse_location_fixture() {
 #[test]
 fn compressed_update_requires_packed_identity() {
     let packet = fixture(vectors::OBJECT_UPDATE_COMPRESSED);
-    assert_eq!(Packet::decode(&packet), Err(UdpError::TruncatedPacket));
+    assert_eq!(Packet::decode(&packet), Err(LLUdpError::TruncatedPacket));
 
     let schema = SchemaMessage::schema_by_name("ObjectUpdateCompressed").expect("generated schema remains available");
     assert_eq!(schema.id.frequency, Frequency::High);

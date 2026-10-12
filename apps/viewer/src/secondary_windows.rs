@@ -365,7 +365,7 @@ fn raise_macos_without_activating(window: &Window) {
     use objc::{
         msg_send,
         runtime::{NO, Object, YES},
-        sel,
+        sel, sel_impl,
     };
     use raw_window_handle::RawWindowHandle;
     use std::ptr::null_mut;
@@ -406,10 +406,17 @@ fn raise_x11_without_activating(window: &Window) {
     };
 
     unsafe {
-        xcb_raise_window(connection.as_ptr(), native.window.get());
+        let stack_mode = [XCB_STACK_MODE_ABOVE];
+        xcb_configure_window(connection.as_ptr(), native.window.get(), XCB_CONFIG_WINDOW_STACK_MODE, stack_mode.as_ptr().cast());
         xcb_flush(connection.as_ptr());
     }
 }
+
+#[cfg(target_os = "linux")]
+const XCB_CONFIG_WINDOW_STACK_MODE: u16 = 1 << 6;
+
+#[cfg(target_os = "linux")]
+const XCB_STACK_MODE_ABOVE: u32 = 0;
 
 #[cfg(target_os = "linux")]
 #[repr(C)]
@@ -420,7 +427,7 @@ struct XcbVoidCookie {
 #[cfg(target_os = "linux")]
 #[link(name = "xcb")]
 unsafe extern "C" {
-    fn xcb_raise_window(connection: *mut c_void, window: u32) -> XcbVoidCookie;
+    fn xcb_configure_window(connection: *mut c_void, window: u32, value_mask: u16, value_list: *const c_void) -> XcbVoidCookie;
     fn xcb_flush(connection: *mut std::ffi::c_void) -> i32;
 }
 

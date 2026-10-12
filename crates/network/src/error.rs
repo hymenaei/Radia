@@ -1,4 +1,4 @@
-use std::{error::Error as StdError, fmt, io};
+use std::{fmt, io};
 
 /// Errors returned by the public network API.
 #[non_exhaustive]
@@ -85,11 +85,28 @@ impl fmt::Display for Error {
     }
 }
 
-impl StdError for Error {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::WorkerStart(error) => Some(error),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::Error;
+    use crate::http;
+
+    #[test]
+    fn error_debug_redacts_messages_but_display_preserves_them() {
+        let error = Error::Capability("capability-secret".into());
+        assert!(!format!("{error:?}").contains("capability-secret"));
+        assert!(format!("{error}").contains("capability-secret"));
+
+        let error = http::Error::Message("http-response-secret".into());
+        assert!(!format!("{error:?}").contains("http-response-secret"));
+        assert!(format!("{error}").contains("http-response-secret"));
     }
 }

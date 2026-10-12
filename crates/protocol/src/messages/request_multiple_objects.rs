@@ -1,12 +1,11 @@
 use base::UUID;
 
-use crate::{codec::Reader, error::UdpError};
+use crate::{codec::Reader, error::LLUdpError};
 
 /// Viewer request for full object data after a cache miss.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestMultipleObjects {
     pub agent_data: RequestAgentData,
-    /// Cache misses and CRC refreshes requested in packet order.
     pub objects: Vec<ObjectRequest>,
 }
 
@@ -20,7 +19,6 @@ pub struct RequestAgentData {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObjectRequest {
     pub cache_miss_type: CacheMissType,
-    /// Region-local simulator ID of the object to request.
     pub local_id: u32,
 }
 
@@ -36,7 +34,6 @@ pub enum CacheMissType {
 }
 
 impl CacheMissType {
-    /// Converts a wire value while retaining values this version does not know.
     pub const fn from_wire(value: u8) -> Self {
         match value {
             0 => Self::Full,
@@ -45,7 +42,6 @@ impl CacheMissType {
         }
     }
 
-    /// Returns the wire value for this cache-miss kind.
     pub const fn to_wire(self) -> u8 {
         match self {
             Self::Full => 0,
@@ -55,7 +51,7 @@ impl CacheMissType {
     }
 }
 
-pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<RequestMultipleObjects, UdpError> {
+pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<RequestMultipleObjects, LLUdpError> {
     let agent_data = RequestAgentData { agent_id: reader.uuid()?, session_id: reader.uuid()? };
     let count = reader.terminal_variable_count()?;
     let mut objects = Vec::with_capacity(count);

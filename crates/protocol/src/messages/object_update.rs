@@ -1,58 +1,60 @@
 use base::UUID;
 
 use crate::{
-    Vector3,
-    codec::Reader,
-    error::UdpError,
-    messages::object_data::{
-        ObjectMotion, ObjectRegionData, ObjectRotation, preserve_fixed, preserve_variable1, preserve_variable2, read_finite_array4,
-        read_finite_vector3, read_variable1,
+    codec::{Reader, Writer},
+    error::LLUdpError,
+    messages::common::{
+        ExtraParameter, ObjectMotion, ObjectShape, ObjectSound, ObjectText, RegionData, decode_extra_parameters, encode_extra_parameters,
+        read_variable1, read_variable2, read_vector4, rotation_from_vector3, write_finite_vector3, write_finite_vector4, write_variable1,
+        write_variable2,
     },
 };
+use math::{Vec3, Vec4};
 
 /// A full simulator object update.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObjectUpdate {
-    pub region_data: ObjectRegionData,
-    /// Full object records in packet order.
-    pub objects: Vec<FullObjectUpdate>,
+    pub region_data: RegionData,
+    pub objects: Vec<ObjectData>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct FullObjectUpdate {
-    /// Region-local simulator ID. The simulator can reuse it after an object leaves.
+pub struct ObjectData {
     pub local_id: u32,
     pub state: u8,
     pub id: UUID,
     pub crc: u32,
-    /// Raw object-type protocol code.
     pub pcode: u8,
     pub material: u8,
     pub click_action: u8,
-    /// Object dimensions in meters along each axis.
-    pub scale: Vector3,
-    /// Position and motion values. Full-update encoding writes only rotation x, y, and z. It ignores w.
-    /// Decoding rebuilds w as `sqrt(1 - x² - y² - z²)` when the result is nonnegative, or zero otherwise.
+    pub scale: Vec3,
     pub motion: ObjectMotion,
-    pub avatar_collision_plane: Option<[f32; 4]>,
-    /// Parent's region-local ID, or zero when the object has no parent.
+    pub collision_plane: Option<Vec4>,
     pub parent_local_id: u32,
     pub update_flags: u32,
-    /// Uninterpreted full-update fields after the flags, retained in wire order for re-encoding.
-    pub opaque_data: Vec<u8>,
-    /// The 64-byte motion extension in extended layouts, retained in wire order.
-    /// This is empty in the 60-byte and 76-byte layouts.
-    pub opaque_motion_data: Vec<u8>,
+    pub shape: ObjectShape,
+    pub texture_entry: Vec<u8>,
+    pub texture_anim: Vec<u8>,
+    pub name_value: Vec<u8>,
+    pub data: Vec<u8>,
+    pub text: ObjectText,
+    pub media_url: String,
+    pub particle_system: Vec<u8>,
+    pub extra_parameters: Vec<ExtraParameter>,
+    pub sound: ObjectSound,
+    pub owner_id: UUID,
+    pub joint_type: u8,
+    pub joint_pivot: Vec3,
+    pub joint_axis_or_anchor: Vec3,
 }
 
 struct DecodedMotion {
     motion: ObjectMotion,
-    avatar_collision_plane: Option<[f32; 4]>,
-    opaque_motion_data: Vec<u8>,
+    avatar_collision_plane: Option<Vec4>,
 }
 
-pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<ObjectUpdate, UdpError> {
-    let region_data = ObjectRegionData::decode(reader)?;
+pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<ObjectUpdate, LLUdpError> {
+    let region_data = RegionData::decode(reader)?;
     let count = reader.terminal_variable_count()?;
     let mut objects = Vec::with_capacity(count);
 
@@ -64,27 +66,37 @@ pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<ObjectUpdate, UdpError> 
         let pcode = reader.u8()?;
         let material = reader.u8()?;
         let click_action = reader.u8()?;
-        let scale = read_finite_vector3(reader)?;
+        let scale = reader.vector3()?;
         let packed_motion = read_variable1(reader)?;
-        let DecodedMotion { motion, avatar_collision_plane, opaque_motion_data } = decode_motion(packed_motion)?;
+        let DecodedMotion { motion, avatar_collision_plane } = decode_motion(packed_motion)?;
         let parent_local_id = reader.u32()?;
         let update_flags = reader.u32()?;
 
-        let mut opaque_data = Vec::new();
-        preserve_fixed(reader, 23, &mut opaque_data)?;
-        preserve_variable2(reader, &mut opaque_data)?; // TextureEntry
-        preserve_variable1(reader, &mut opaque_data)?; // TextureAnim
-        preserve_variable2(reader, &mut opaque_data)?; // NameValue
-        preserve_variable2(reader, &mut opaque_data)?; // Data
-        preserve_variable1(reader, &mut opaque_data)?; // Text
-        preserve_fixed(reader, 4, &mut opaque_data)?; // TextColor
-        preserve_variable1(reader, &mut opaque_data)?; // MediaURL
-        preserve_variable1(reader, &mut opaque_data)?; // PSBlock
-        preserve_variable1(reader, &mut opaque_data)?; // ExtraParams
-        preserve_fixed(reader, 41, &mut opaque_data)?; // Sound, OwnerID, Gain, Flags, Radius
-        preserve_fixed(reader, 25, &mut opaque_data)?; // JointType and two vectors
+        let shape = ObjectShape::decode(reader)?;
+        let texture_entry = read_variable2(reader)?.to_vec();
+        let texture_anim = read_variable1(reader)?.to_vec();
+        let name_value = read_variable2(reader)?.to_vec();
+        let data = read_variable2(reader)?.to_vec();
+        let text = ObjectText { text: reader.variable1_string()?, color: reader.take(4)?.try_into().expect("four bytes requested") };
+        let media_url = reader.variable1_string()?;
+        let particle_system = read_variable1(reader)?.to_vec();
+        let extra_param_bytes = read_variable1(reader)?;
+        let mut extra_param_reader = Reader::new(extra_param_bytes);
+        let extra_parameters = if extra_param_bytes.is_empty() { Vec::new() } else { decode_extra_parameters(&mut extra_param_reader)? };
+        if !extra_param_reader.is_empty() {
+            return Err(LLUdpError::InvalidMessage);
+        }
+        let sound_id = reader.uuid()?;
+        let owner_id = reader.uuid()?;
+        let gain = reader.f32()?;
+        let flags = reader.u8()?;
+        let radius = reader.f32()?;
+        let sound = ObjectSound { sound_id, gain, flags, radius };
+        let joint_type = reader.u8()?;
+        let joint_pivot = reader.vector3()?;
+        let joint_axis_or_anchor = reader.vector3()?;
 
-        objects.push(FullObjectUpdate {
+        objects.push(ObjectData {
             local_id,
             state,
             id,
@@ -94,36 +106,106 @@ pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<ObjectUpdate, UdpError> 
             click_action,
             scale,
             motion,
-            avatar_collision_plane,
+            collision_plane: avatar_collision_plane,
             parent_local_id,
             update_flags,
-            opaque_data,
-            opaque_motion_data,
+            shape,
+            texture_entry,
+            texture_anim,
+            name_value,
+            data,
+            text,
+            media_url,
+            particle_system,
+            extra_parameters,
+            sound,
+            owner_id,
+            joint_type,
+            joint_pivot,
+            joint_axis_or_anchor,
         });
     }
 
     Ok(ObjectUpdate { region_data, objects })
 }
 
-fn decode_motion(bytes: &[u8]) -> Result<DecodedMotion, UdpError> {
-    let (has_collision_plane, tail_len) = match bytes.len() {
+pub(crate) fn encode_fields(object: &ObjectData, writer: &mut Writer<'_>) -> Result<(), LLUdpError> {
+    writer.u32(object.local_id);
+    writer.u8(object.state);
+    writer.uuid(object.id);
+    writer.u32(object.crc);
+    writer.u8(object.pcode);
+    writer.u8(object.material);
+    writer.u8(object.click_action);
+    write_finite_vector3(writer, object.scale)?;
+    encode_motion(object, writer)?;
+    writer.u32(object.parent_local_id);
+    writer.u32(object.update_flags);
+    object.shape.encode(writer);
+    write_variable2(writer, &object.texture_entry)?;
+    write_variable1(writer, &object.texture_anim)?;
+    write_variable2(writer, &object.name_value)?;
+    write_variable2(writer, &object.data)?;
+    writer.variable1_string(&object.text.text)?;
+    writer.bytes(&object.text.color);
+    writer.variable1_string(&object.media_url)?;
+    write_variable1(writer, &object.particle_system)?;
+    let mut extra_parameters = Vec::new();
+    let mut extra_writer = Writer::with_limit(&mut extra_parameters, usize::MAX);
+    encode_extra_parameters(&object.extra_parameters, &mut extra_writer)?;
+    extra_writer.finish()?;
+    write_variable1(writer, &extra_parameters)?;
+    writer.uuid(object.sound.sound_id);
+    writer.uuid(object.owner_id);
+    write_finite_f32(writer, object.sound.gain)?;
+    writer.u8(object.sound.flags);
+    write_finite_f32(writer, object.sound.radius)?;
+    writer.u8(object.joint_type);
+    write_finite_vector3(writer, object.joint_pivot)?;
+    write_finite_vector3(writer, object.joint_axis_or_anchor)?;
+    Ok(())
+}
+
+fn encode_motion(object: &ObjectData, writer: &mut Writer<'_>) -> Result<(), LLUdpError> {
+    let has_collision_plane = object.collision_plane.is_some();
+    let has_plane = usize::from(has_collision_plane) * 16;
+    let len = 60 + has_plane;
+    writer.u8(u8::try_from(len).map_err(|_| LLUdpError::VariableFieldTooLong)?);
+    if let Some(plane) = object.collision_plane {
+        write_finite_vector4(writer, plane)?;
+    }
+    write_finite_vector3(writer, object.motion.position)?;
+    write_finite_vector3(writer, object.motion.velocity)?;
+    write_finite_vector3(writer, object.motion.acceleration)?;
+    writer.quaternion_xyz(object.motion.rotation)?;
+    write_finite_vector3(writer, object.motion.angular_velocity)?;
+    Ok(())
+}
+
+fn write_finite_f32(writer: &mut Writer<'_>, value: f32) -> Result<(), LLUdpError> {
+    if value.is_finite() {
+        writer.f32(value);
+        Ok(())
+    } else {
+        Err(LLUdpError::InvalidMessage)
+    }
+}
+
+fn decode_motion(bytes: &[u8]) -> Result<DecodedMotion, LLUdpError> {
+    let (has_collision_plane, ignored_extension_len) = match bytes.len() {
         60 => (false, 0),
         76 => (true, 0),
         124 => (false, 64),
         140 => (true, 64),
-        _ => return Err(UdpError::InvalidMessage),
+        _ => return Err(LLUdpError::InvalidMessage),
     };
     let mut reader = Reader::new(bytes);
-    let avatar_collision_plane = if has_collision_plane { Some(read_finite_array4(&mut reader)?) } else { None };
-    let position = read_finite_vector3(&mut reader)?;
-    let velocity = read_finite_vector3(&mut reader)?;
-    let acceleration = read_finite_vector3(&mut reader)?;
-    let rotation = ObjectRotation::from_vector3(read_finite_vector3(&mut reader)?)?;
-    let angular_velocity = read_finite_vector3(&mut reader)?;
-    let opaque_motion_data = reader.take(tail_len)?.to_vec();
-    Ok(DecodedMotion {
-        motion: ObjectMotion { position, velocity, acceleration, rotation, angular_velocity },
-        avatar_collision_plane,
-        opaque_motion_data,
-    })
+    let avatar_collision_plane = if has_collision_plane { Some(read_vector4(&mut reader)?) } else { None };
+    let position = reader.vector3()?;
+    let velocity = reader.vector3()?;
+    let acceleration = reader.vector3()?;
+    let rotation = rotation_from_vector3(reader.vector3()?);
+    let angular_velocity = reader.vector3()?;
+    reader.take(ignored_extension_len)?;
+    Ok(DecodedMotion { motion: ObjectMotion { position, velocity, acceleration, rotation, angular_velocity }, avatar_collision_plane })
 }

@@ -57,6 +57,10 @@ fn test_bug_158() { /* no behavior */ }
 fn test_process_packet_should_work_properly_in_the_case_of_some_error() { /* vague and verbose */ }
 ```
 
+Treat a name that lists several outcomes as a cue to look for their shared contract. In `state::object`, if one test checks how updates appear in recent changes, name that contract `recent_changes_track_updates`. This is clearer than `recent_changes_track_parent_lifecycle_and_ignored_object_updates` because the module already supplies the object context.
+
+Keep one test when the outcomes support the same contract. Split it when assertions protect independent contracts.
+
 Property tests name the _property_, not the generator: `encode_decode_preserves_payload`, `canonicalize_is_idempotent`, `discarding_an_item_never_increases_queue_length`.
 
 ## Concrete assertion patterns

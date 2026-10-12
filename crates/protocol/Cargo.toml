@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 base.workspace = true
+math.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo xtest --workspace --locked

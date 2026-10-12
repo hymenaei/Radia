@@ -1,6 +1,6 @@
-use proptest::{prelude::*, test_runner::Config as ProptestConfig};
-use protocol::{UdpError, udp::Packet};
-use test_support::{parse_hex_fixture, udp::vectors};
+use proptest::{prelude::*, test_runner::Config};
+use protocol::{LLUdpError, lludp::Packet};
+use test_support::{lludp::vectors, parse_hex_fixture};
 
 const MAX_DATAGRAM_BYTES: usize = 0x2000;
 
@@ -39,9 +39,9 @@ fn object_payload() -> impl Strategy<Value = Vec<u8>> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig {
+    #![proptest_config(Config {
         cases: 64,
-        ..ProptestConfig::default()
+        ..Config::default()
     })]
 
     #[test]
@@ -62,5 +62,5 @@ proptest! {
 #[test]
 fn packet_rejects_oversized_input() {
     let bytes = vec![0; MAX_DATAGRAM_BYTES + 1];
-    assert_eq!(Packet::decode(&bytes), Err(UdpError::DatagramTooLarge));
+    assert_eq!(Packet::decode(&bytes), Err(LLUdpError::DatagramTooLarge));
 }

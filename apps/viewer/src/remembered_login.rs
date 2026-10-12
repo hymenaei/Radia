@@ -1,5 +1,6 @@
 use network::Grid;
 use serde::{Deserialize, Serialize};
+use serde_json::{from_str, to_string};
 
 const SERVICE: &str = "radia.login";
 
@@ -17,7 +18,7 @@ pub fn load(grid: Grid) -> Result<Option<RememberedLogin>, String> {
         keyring::Entry::new(SERVICE, grid_key(grid)).map_err(|error| format!("Could not open Windows Credential Manager: {error}"))?;
 
     match entry.get_password() {
-        Ok(value) => serde_json::from_str(&value).map(Some).map_err(|error| format!("Saved login data is invalid: {error}")),
+        Ok(value) => from_str(&value).map(Some).map_err(|error| format!("Saved login data is invalid: {error}")),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(error) => Err(format!("Could not read saved login: {error}")),
     }
@@ -27,7 +28,7 @@ pub fn load(grid: Grid) -> Result<Option<RememberedLogin>, String> {
 pub fn save(grid: Grid, login: &RememberedLogin) -> Result<(), String> {
     let entry =
         keyring::Entry::new(SERVICE, grid_key(grid)).map_err(|error| format!("Could not open Windows Credential Manager: {error}"))?;
-    let value = serde_json::to_string(login).map_err(|error| format!("Could not encode saved login: {error}"))?;
+    let value = to_string(login).map_err(|error| format!("Could not encode saved login: {error}"))?;
     entry.set_password(&value).map_err(|error| format!("Could not save login to Windows Credential Manager: {error}"))
 }
 

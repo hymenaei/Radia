@@ -2,10 +2,11 @@ use base::UUID;
 
 use crate::{
     codec::{Reader, Writer},
-    error::UdpError,
+    error::LLUdpError,
     schema::{self, BlockMode, FieldKind, FieldSchema, MessageSchema},
-    types::{MessageId, Quaternion, Vector3},
+    types::MessageId,
 };
+use math::{DVec3, Quat, Vec3, Vec4};
 
 /// A typed value for one schema field.
 ///
@@ -22,13 +23,14 @@ pub enum FieldValue {
     IpPort([u8; 2]),
     /// Encodes as a zero-length field with no payload bytes.
     Null,
-    /// Quaternion encoded as three little-endian `f32` components; the fourth is derived.
-    Quaternion(Quaternion),
+    /// Encodes normalized XYZ as three little-endian `f32` values with canonical nonnegative W.
+    /// Zero or non-finite quaternions fail encoding.
+    Quaternion(Quat),
     /// UUID bytes in the order returned by `UUID::as_bytes`.
     UUID(UUID),
-    Vector3(Vector3),
-    Vector3d([f64; 3]),
-    Vector4([f32; 4]),
+    Vector3(Vec3),
+    Vector3d(DVec3),
+    Vector4(Vec4),
     S8(i8),
     S16(i16),
     S32(i32),
@@ -90,9 +92,9 @@ impl SchemaMessage {
     ///
     /// # Errors
     ///
-    /// Returns [`UdpError::InvalidSchemaMessage`] when the blocks, instance counts, or field
+    /// Returns [`LLUdpError::InvalidSchemaMessage`] when the blocks, instance counts, or field
     /// values do not match the schema.
-    pub fn new(schema: &'static MessageSchema, blocks: Vec<BlockValues>) -> Result<Self, UdpError> {
+    pub fn new(schema: &'static MessageSchema, blocks: Vec<BlockValues>) -> Result<Self, LLUdpError> {
         let message = Self { schema, blocks, encoded_schema_len: None, trailing_bytes: Vec::new() };
         message.validate()?;
         Ok(message)
@@ -134,13 +136,13 @@ impl SchemaMessage {
         self.schema.trust == schema::MessageTrust::Trusted
     }
 
-    pub(crate) fn encode_payload(&self, writer: &mut Writer<'_>) -> Result<(), UdpError> {
+    pub(crate) fn encode_payload(&self, writer: &mut Writer<'_>) -> Result<(), LLUdpError> {
         self.validate()?;
         let start = writer.len();
 
         for (block_schema, block_values) in self.schema.blocks.iter().zip(&self.blocks) {
             if matches!(block_schema.mode, BlockMode::Variable) {
-                let count = u8::try_from(block_values.instances.len()).map_err(|_| UdpError::InvalidSchemaMessage)?;
+                let count = u8::try_from(block_values.instances.len()).map_err(|_| LLUdpError::InvalidSchemaMessage)?;
                 writer.u8(count);
             }
 
@@ -157,7 +159,7 @@ impl SchemaMessage {
         Ok(())
     }
 
-    pub(crate) fn decode(schema: &'static MessageSchema, payload: &[u8]) -> Result<Self, UdpError> {
+    pub(crate) fn decode(schema: &'static MessageSchema, payload: &[u8]) -> Result<Self, LLUdpError> {
         let mut reader = Reader::new(payload);
         let mut blocks = Vec::with_capacity(schema.blocks.len());
         let mut encoded_schema_len = None;
@@ -176,7 +178,7 @@ impl SchemaMessage {
 
             let count = match block_schema.mode {
                 BlockMode::Single => 1,
-                BlockMode::Multiple(count) => usize::try_from(count).map_err(|_| UdpError::InvalidSchemaMessage)?,
+                BlockMode::Multiple(count) => usize::try_from(count).map_err(|_| LLUdpError::InvalidSchemaMessage)?,
                 BlockMode::Variable => usize::from(reader.u8()?),
             };
 
@@ -200,25 +202,25 @@ impl SchemaMessage {
         Ok(Self { schema, blocks, encoded_schema_len, trailing_bytes: reader.remaining().to_vec() })
     }
 
-    fn validate(&self) -> Result<(), UdpError> {
+    fn validate(&self) -> Result<(), LLUdpError> {
         if self.blocks.len() != self.schema.blocks.len() {
-            return Err(UdpError::InvalidSchemaMessage);
+            return Err(LLUdpError::InvalidSchemaMessage);
         }
 
         for (block_schema, block_values) in self.schema.blocks.iter().zip(&self.blocks) {
             let expected_count = match block_schema.mode {
                 BlockMode::Single => Some(1),
-                BlockMode::Multiple(count) => Some(usize::try_from(count).map_err(|_| UdpError::InvalidSchemaMessage)?),
+                BlockMode::Multiple(count) => Some(usize::try_from(count).map_err(|_| LLUdpError::InvalidSchemaMessage)?),
                 BlockMode::Variable if block_values.instances.len() <= usize::from(u8::MAX) => None,
-                BlockMode::Variable => return Err(UdpError::InvalidSchemaMessage),
+                BlockMode::Variable => return Err(LLUdpError::InvalidSchemaMessage),
             };
             if expected_count.is_some_and(|count| count != block_values.instances.len()) {
-                return Err(UdpError::InvalidSchemaMessage);
+                return Err(LLUdpError::InvalidSchemaMessage);
             }
 
             for instance in &block_values.instances {
                 if instance.fields.len() != block_schema.fields.len() {
-                    return Err(UdpError::InvalidSchemaMessage);
+                    return Err(LLUdpError::InvalidSchemaMessage);
                 }
                 for (field_schema, value) in block_schema.fields.iter().zip(&instance.fields) {
                     validate_field(field_schema, value)?;
@@ -229,7 +231,7 @@ impl SchemaMessage {
     }
 }
 
-fn validate_field(schema: &FieldSchema, value: &FieldValue) -> Result<(), UdpError> {
+fn validate_field(schema: &FieldSchema, value: &FieldValue) -> Result<(), LLUdpError> {
     let valid = match (schema.kind, value) {
         (FieldKind::Bool, FieldValue::Bool(_))
         | (FieldKind::F32, FieldValue::F32(_))
@@ -259,10 +261,10 @@ fn validate_field(schema: &FieldSchema, value: &FieldValue) -> Result<(), UdpErr
         _ => false,
     };
 
-    if valid { Ok(()) } else { Err(UdpError::InvalidSchemaMessage) }
+    if valid { Ok(()) } else { Err(LLUdpError::InvalidSchemaMessage) }
 }
 
-fn encode_field(writer: &mut Writer<'_>, schema: &FieldSchema, value: &FieldValue) -> Result<(), UdpError> {
+fn encode_field(writer: &mut Writer<'_>, schema: &FieldSchema, value: &FieldValue) -> Result<(), LLUdpError> {
     validate_field(schema, value)?;
     match (schema.kind, value) {
         (FieldKind::Bool, FieldValue::Bool(value)) => writer.u8(u8::from(*value)),
@@ -271,18 +273,15 @@ fn encode_field(writer: &mut Writer<'_>, schema: &FieldSchema, value: &FieldValu
         (FieldKind::IpAddr, FieldValue::IpAddr(value)) => writer.bytes(value),
         (FieldKind::IpPort, FieldValue::IpPort(value)) => writer.bytes(value),
         (FieldKind::Null, FieldValue::Null) => {}
-        (FieldKind::Quaternion, FieldValue::Quaternion(value)) => writer.quaternion(*value),
+        (FieldKind::Quaternion, FieldValue::Quaternion(value)) => writer.quaternion_xyz(*value)?,
         (FieldKind::UUID, FieldValue::UUID(value)) => writer.uuid(*value),
         (FieldKind::Vector3, FieldValue::Vector3(value)) => writer.vector3(*value),
-        (FieldKind::Vector3d, FieldValue::Vector3d(value)) => {
-            for component in value {
-                writer.f64(*component);
-            }
-        }
+        (FieldKind::Vector3d, FieldValue::Vector3d(value)) => writer.vector3d(*value),
         (FieldKind::Vector4, FieldValue::Vector4(value)) => {
-            for component in value {
-                writer.f32(*component);
-            }
+            writer.f32(value.x);
+            writer.f32(value.y);
+            writer.f32(value.z);
+            writer.f32(value.w);
         }
         (FieldKind::S8, FieldValue::S8(value)) => writer.i8(*value),
         (FieldKind::S16, FieldValue::S16(value)) => writer.i16(*value),
@@ -295,18 +294,18 @@ fn encode_field(writer: &mut Writer<'_>, schema: &FieldSchema, value: &FieldValu
         (FieldKind::Fixed(_), FieldValue::Bytes(value)) => writer.bytes(value),
         (FieldKind::Variable(prefix), FieldValue::Bytes(value)) => {
             match prefix {
-                1 => writer.u8(u8::try_from(value.len()).map_err(|_| UdpError::VariableFieldTooLong)?),
-                2 => writer.u16(u16::try_from(value.len()).map_err(|_| UdpError::VariableFieldTooLong)?),
-                _ => return Err(UdpError::InvalidSchemaMessage),
+                1 => writer.u8(u8::try_from(value.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?),
+                2 => writer.u16(u16::try_from(value.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?),
+                _ => return Err(LLUdpError::InvalidSchemaMessage),
             }
             writer.bytes(value);
         }
-        _ => return Err(UdpError::InvalidSchemaMessage),
+        _ => return Err(LLUdpError::InvalidSchemaMessage),
     }
     Ok(())
 }
 
-fn decode_field(reader: &mut Reader<'_>, schema: &FieldSchema) -> Result<(FieldValue, bool), UdpError> {
+fn decode_field(reader: &mut Reader<'_>, schema: &FieldSchema) -> Result<(FieldValue, bool), LLUdpError> {
     let incomplete_fixed_field = fixed_field_size(schema.kind)?.is_some_and(|size| reader.remaining().len() < size);
     if incomplete_fixed_field {
         reader.skip_remaining();
@@ -317,14 +316,14 @@ fn decode_field(reader: &mut Reader<'_>, schema: &FieldSchema) -> Result<(FieldV
         FieldKind::Bool => FieldValue::Bool(reader.u8()? != 0),
         FieldKind::F32 => FieldValue::F32(reader.f32()?),
         FieldKind::F64 => FieldValue::F64(reader.f64()?),
-        FieldKind::IpAddr => FieldValue::IpAddr(reader.take(4)?.try_into().map_err(|_| UdpError::TruncatedPacket)?),
-        FieldKind::IpPort => FieldValue::IpPort(reader.take(2)?.try_into().map_err(|_| UdpError::TruncatedPacket)?),
+        FieldKind::IpAddr => FieldValue::IpAddr(reader.take(4)?.try_into().map_err(|_| LLUdpError::TruncatedPacket)?),
+        FieldKind::IpPort => FieldValue::IpPort(reader.take(2)?.try_into().map_err(|_| LLUdpError::TruncatedPacket)?),
         FieldKind::Null => FieldValue::Null,
         FieldKind::Quaternion => FieldValue::Quaternion(reader.quaternion()?),
         FieldKind::UUID => FieldValue::UUID(reader.uuid()?),
         FieldKind::Vector3 => FieldValue::Vector3(reader.vector3()?),
-        FieldKind::Vector3d => FieldValue::Vector3d([reader.f64()?, reader.f64()?, reader.f64()?]),
-        FieldKind::Vector4 => FieldValue::Vector4([reader.f32()?, reader.f32()?, reader.f32()?, reader.f32()?]),
+        FieldKind::Vector3d => FieldValue::Vector3d(reader.vector3d()?),
+        FieldKind::Vector4 => FieldValue::Vector4(Vec4::new(reader.f32()?, reader.f32()?, reader.f32()?, reader.f32()?)),
         FieldKind::S8 => FieldValue::S8(reader.i8()?),
         FieldKind::S16 => FieldValue::S16(reader.i16()?),
         FieldKind::S32 => FieldValue::S32(reader.i32()?),
@@ -334,22 +333,22 @@ fn decode_field(reader: &mut Reader<'_>, schema: &FieldSchema) -> Result<(FieldV
         FieldKind::U32 => FieldValue::U32(reader.u32()?),
         FieldKind::U64 => FieldValue::U64(reader.u64()?),
         FieldKind::Fixed(size) => {
-            let size = usize::try_from(size).map_err(|_| UdpError::InvalidSchemaMessage)?;
+            let size = usize::try_from(size).map_err(|_| LLUdpError::InvalidSchemaMessage)?;
             FieldValue::Bytes(reader.take(size)?.to_vec())
         }
         FieldKind::Variable(prefix) => {
             let prefix_size = match prefix {
                 1 => 1,
                 2 => 2,
-                _ => return Err(UdpError::InvalidSchemaMessage),
+                _ => return Err(LLUdpError::InvalidSchemaMessage),
             };
             if reader.remaining().len() < prefix_size {
-                return Err(UdpError::TruncatedPacket);
+                return Err(LLUdpError::TruncatedPacket);
             }
             let len = match prefix {
                 1 => usize::from(reader.u8()?),
                 2 => usize::from(reader.u16()?),
-                _ => return Err(UdpError::InvalidSchemaMessage),
+                _ => return Err(LLUdpError::InvalidSchemaMessage),
             };
             FieldValue::Bytes(reader.take(len)?.to_vec())
         }
@@ -357,7 +356,7 @@ fn decode_field(reader: &mut Reader<'_>, schema: &FieldSchema) -> Result<(FieldV
     Ok((value, true))
 }
 
-fn fixed_field_size(kind: FieldKind) -> Result<Option<usize>, UdpError> {
+fn fixed_field_size(kind: FieldKind) -> Result<Option<usize>, LLUdpError> {
     let size = match kind {
         FieldKind::Bool | FieldKind::S8 | FieldKind::U8 => 1,
         FieldKind::IpPort | FieldKind::S16 | FieldKind::U16 => 2,
@@ -368,13 +367,13 @@ fn fixed_field_size(kind: FieldKind) -> Result<Option<usize>, UdpError> {
         FieldKind::Vector3d => 24,
         FieldKind::Vector4 => 16,
         FieldKind::Null => 0,
-        FieldKind::Fixed(size) => usize::try_from(size).map_err(|_| UdpError::InvalidSchemaMessage)?,
+        FieldKind::Fixed(size) => usize::try_from(size).map_err(|_| LLUdpError::InvalidSchemaMessage)?,
         FieldKind::Variable(_) => return Ok(None),
     };
     Ok(Some(size))
 }
 
-fn zero_field(kind: FieldKind) -> Result<FieldValue, UdpError> {
+fn zero_field(kind: FieldKind) -> Result<FieldValue, LLUdpError> {
     Ok(match kind {
         FieldKind::Bool => FieldValue::Bool(false),
         FieldKind::F32 => FieldValue::F32(0.0),
@@ -382,11 +381,11 @@ fn zero_field(kind: FieldKind) -> Result<FieldValue, UdpError> {
         FieldKind::IpAddr => FieldValue::IpAddr([0; 4]),
         FieldKind::IpPort => FieldValue::IpPort([0; 2]),
         FieldKind::Null => FieldValue::Null,
-        FieldKind::Quaternion => FieldValue::Quaternion(Quaternion { x: 0.0, y: 0.0, z: 0.0 }),
+        FieldKind::Quaternion => FieldValue::Quaternion(Quat::IDENTITY),
         FieldKind::UUID => FieldValue::UUID(UUID::from_bytes([0; 16])),
-        FieldKind::Vector3 => FieldValue::Vector3(Vector3 { x: 0.0, y: 0.0, z: 0.0 }),
-        FieldKind::Vector3d => FieldValue::Vector3d([0.0; 3]),
-        FieldKind::Vector4 => FieldValue::Vector4([0.0; 4]),
+        FieldKind::Vector3 => FieldValue::Vector3(Vec3::ZERO),
+        FieldKind::Vector3d => FieldValue::Vector3d(DVec3::ZERO),
+        FieldKind::Vector4 => FieldValue::Vector4(Vec4::ZERO),
         FieldKind::S8 => FieldValue::S8(0),
         FieldKind::S16 => FieldValue::S16(0),
         FieldKind::S32 => FieldValue::S32(0),
@@ -395,8 +394,8 @@ fn zero_field(kind: FieldKind) -> Result<FieldValue, UdpError> {
         FieldKind::U16 => FieldValue::U16(0),
         FieldKind::U32 => FieldValue::U32(0),
         FieldKind::U64 => FieldValue::U64(0),
-        FieldKind::Fixed(size) => FieldValue::Bytes(vec![0; usize::try_from(size).map_err(|_| UdpError::InvalidSchemaMessage)?]),
-        FieldKind::Variable(_) => return Err(UdpError::InvalidSchemaMessage),
+        FieldKind::Fixed(size) => FieldValue::Bytes(vec![0; usize::try_from(size).map_err(|_| LLUdpError::InvalidSchemaMessage)?]),
+        FieldKind::Variable(_) => return Err(LLUdpError::InvalidSchemaMessage),
     })
 }
 
@@ -493,11 +492,11 @@ mod tests {
             FieldValue::IpAddr([1, 2, 3, 4]),
             FieldValue::IpPort([0x1f, 0x90]),
             FieldValue::Null,
-            FieldValue::Quaternion(Quaternion { x: 1.0, y: 2.0, z: 3.0 }),
+            FieldValue::Quaternion(Quat::from_xyzw(1.0, 0.0, 0.0, 0.0)),
             FieldValue::UUID(UUID::from_bytes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])),
-            FieldValue::Vector3(Vector3 { x: 1.0, y: -2.0, z: 0.5 }),
-            FieldValue::Vector3d([1.0, -2.0, 0.5]),
-            FieldValue::Vector4([1.0, -2.0, 0.5, 4.0]),
+            FieldValue::Vector3(Vec3::new(1.0, -2.0, 0.5)),
+            FieldValue::Vector3d(DVec3::new(1.0, -2.0, 0.5)),
+            FieldValue::Vector4(Vec4::new(1.0, -2.0, 0.5, 4.0)),
             FieldValue::S8(-2),
             FieldValue::S16(-3),
             FieldValue::S32(-4),
@@ -525,7 +524,7 @@ mod tests {
             0x01, 0x02, 0x03, 0x04, // IPADDR
             0x1f, 0x90, // IPPORT
             // NULL: no bytes
-            0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x40, 0x40, // Quaternion
+            0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Quaternion
             0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, // UUID
             0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x3f, // Vector3
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -552,7 +551,9 @@ mod tests {
 
     #[test]
     fn variable_2_little_endian() {
-        let payload = vec![0x02, 0x01].into_iter().chain(std::iter::repeat_n(0xaa, 258)).collect::<Vec<_>>();
+        use std::iter::repeat_n;
+
+        let payload = vec![0x02, 0x01].into_iter().chain(repeat_n(0xaa, 258)).collect::<Vec<_>>();
         let schema = FieldSchema { name: "Data", kind: FieldKind::Variable(2) };
         let (decoded, complete) = decode_field(&mut Reader::new(&payload), &schema).expect("decode 258-byte Variable(2)");
         assert!(complete);
@@ -602,7 +603,7 @@ mod tests {
             flags: &[],
             blocks: NONTERMINAL_BLOCKS,
         };
-        assert_eq!(SchemaMessage::decode(&NONTERMINAL_SCHEMA, &[]).err(), Some(UdpError::TruncatedPacket));
+        assert_eq!(SchemaMessage::decode(&NONTERMINAL_SCHEMA, &[]).err(), Some(LLUdpError::TruncatedPacket));
     }
 
     #[test]
@@ -621,7 +622,7 @@ mod tests {
 
     #[test]
     fn missing_middle_count_fails() {
-        assert_eq!(SchemaMessage::decode(&VARIABLE_SUFFIX_SCHEMA, &[0x11]).err(), Some(UdpError::TruncatedPacket));
+        assert_eq!(SchemaMessage::decode(&VARIABLE_SUFFIX_SCHEMA, &[0x11]).err(), Some(LLUdpError::TruncatedPacket));
     }
 
     #[test]
@@ -655,15 +656,15 @@ mod tests {
     #[test]
     fn variable_truncation_fails() {
         let one_byte_prefix = FieldSchema { name: "Data", kind: FieldKind::Variable(1) };
-        assert_eq!(decode_field(&mut Reader::new(&[0x02, 0xaa]), &one_byte_prefix).err(), Some(UdpError::TruncatedPacket));
+        assert_eq!(decode_field(&mut Reader::new(&[0x02, 0xaa]), &one_byte_prefix).err(), Some(LLUdpError::TruncatedPacket));
 
         let two_byte_prefix = FieldSchema { name: "Data", kind: FieldKind::Variable(2) };
-        assert_eq!(decode_field(&mut Reader::new(&[0x01]), &two_byte_prefix).err(), Some(UdpError::TruncatedPacket));
+        assert_eq!(decode_field(&mut Reader::new(&[0x01]), &two_byte_prefix).err(), Some(LLUdpError::TruncatedPacket));
     }
 
     #[test]
     fn bad_shapes_rejected() {
-        assert_eq!(SchemaMessage::new(&BLOCK_MODES_SCHEMA, Vec::new()).err(), Some(UdpError::InvalidSchemaMessage));
+        assert_eq!(SchemaMessage::new(&BLOCK_MODES_SCHEMA, Vec::new()).err(), Some(LLUdpError::InvalidSchemaMessage));
         assert_eq!(
             SchemaMessage::new(
                 &BLOCK_MODES_SCHEMA,
@@ -674,7 +675,7 @@ mod tests {
                 ],
             )
             .err(),
-            Some(UdpError::InvalidSchemaMessage)
+            Some(LLUdpError::InvalidSchemaMessage)
         );
     }
 
@@ -682,11 +683,11 @@ mod tests {
     fn length_overflow_rejected() {
         let mut fields = all_field_values();
         fields[17] = FieldValue::Bytes(vec![0; 3]);
-        assert_eq!(SchemaMessage::new(&ALL_FIELDS_SCHEMA, vec![BlockValues::single(fields)]).err(), Some(UdpError::InvalidSchemaMessage));
+        assert_eq!(SchemaMessage::new(&ALL_FIELDS_SCHEMA, vec![BlockValues::single(fields)]).err(), Some(LLUdpError::InvalidSchemaMessage));
 
         let mut fields = all_field_values();
         fields[18] = FieldValue::Bytes(vec![0; 256]);
-        assert_eq!(SchemaMessage::new(&ALL_FIELDS_SCHEMA, vec![BlockValues::single(fields)]).err(), Some(UdpError::InvalidSchemaMessage));
+        assert_eq!(SchemaMessage::new(&ALL_FIELDS_SCHEMA, vec![BlockValues::single(fields)]).err(), Some(LLUdpError::InvalidSchemaMessage));
 
         let variable_instances = (0..=u8::MAX).map(|_| BlockInstance::new(vec![FieldValue::U32(1)])).collect();
         let blocks = vec![
@@ -694,7 +695,7 @@ mod tests {
             BlockValues::new(vec![BlockInstance::new(vec![FieldValue::U16(1)]), BlockInstance::new(vec![FieldValue::U16(2)])]),
             BlockValues::new(variable_instances),
         ];
-        assert_eq!(SchemaMessage::new(&BLOCK_MODES_SCHEMA, blocks).err(), Some(UdpError::InvalidSchemaMessage));
+        assert_eq!(SchemaMessage::new(&BLOCK_MODES_SCHEMA, blocks).err(), Some(LLUdpError::InvalidSchemaMessage));
     }
 
     fn sample_value(kind: FieldKind) -> FieldValue {
@@ -705,11 +706,11 @@ mod tests {
             FieldKind::IpAddr => FieldValue::IpAddr([192, 0, 2, 1]),
             FieldKind::IpPort => FieldValue::IpPort([0x12, 0x34]),
             FieldKind::Null => FieldValue::Null,
-            FieldKind::Quaternion => FieldValue::Quaternion(Quaternion { x: 1.0, y: -2.0, z: 0.5 }),
+            FieldKind::Quaternion => FieldValue::Quaternion(Quat::from_xyzw(1.0, 0.0, 0.0, 0.0)),
             FieldKind::UUID => FieldValue::UUID(UUID::from_bytes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])),
-            FieldKind::Vector3 => FieldValue::Vector3(Vector3 { x: 1.0, y: -2.0, z: 0.5 }),
-            FieldKind::Vector3d => FieldValue::Vector3d([1.0, -2.0, 0.5]),
-            FieldKind::Vector4 => FieldValue::Vector4([1.0, -2.0, 0.5, 4.0]),
+            FieldKind::Vector3 => FieldValue::Vector3(Vec3::new(1.0, -2.0, 0.5)),
+            FieldKind::Vector3d => FieldValue::Vector3d(DVec3::new(1.0, -2.0, 0.5)),
+            FieldKind::Vector4 => FieldValue::Vector4(Vec4::new(1.0, -2.0, 0.5, 4.0)),
             FieldKind::S8 => FieldValue::S8(-2),
             FieldKind::S16 => FieldValue::S16(-3),
             FieldKind::S32 => FieldValue::S32(-4),

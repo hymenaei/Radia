@@ -1,4 +1,4 @@
-use crate::error::UdpError;
+use crate::error::LLUdpError;
 
 pub(crate) fn encode(input: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity(input.len());
@@ -19,19 +19,19 @@ pub(crate) fn encode(input: &[u8]) -> Vec<u8> {
     output
 }
 
-fn read_zero_count(input: &[u8], cursor: &mut usize) -> Result<usize, UdpError> {
-    let count = *input.get(*cursor).ok_or(UdpError::InvalidZeroCode)?;
+fn read_zero_count(input: &[u8], cursor: &mut usize) -> Result<usize, LLUdpError> {
+    let count = *input.get(*cursor).ok_or(LLUdpError::InvalidZeroCode)?;
     *cursor += 1;
     if count != 0 {
         return Ok(usize::from(count));
     }
 
-    let extension = *input.get(*cursor).ok_or(UdpError::InvalidZeroCode)?;
+    let extension = *input.get(*cursor).ok_or(LLUdpError::InvalidZeroCode)?;
     *cursor += 1;
     Ok(usize::from(u8::MAX) + usize::from(extension))
 }
 
-pub(crate) fn decode_prefix(input: &[u8], output: &mut [u8]) -> Result<usize, UdpError> {
+pub(crate) fn decode_prefix(input: &[u8], output: &mut [u8]) -> Result<usize, LLUdpError> {
     let mut input_cursor = 0;
     let mut output_cursor = 0;
     while output_cursor < output.len() && input_cursor < input.len() {
@@ -49,7 +49,7 @@ pub(crate) fn decode_prefix(input: &[u8], output: &mut [u8]) -> Result<usize, Ud
     Ok(output_cursor)
 }
 
-pub(crate) fn decode(input: &[u8], max_output_size: usize) -> Result<Vec<u8>, UdpError> {
+pub(crate) fn decode(input: &[u8], max_output_size: usize) -> Result<Vec<u8>, LLUdpError> {
     let mut output = Vec::with_capacity(input.len());
     let mut cursor = 0;
     while cursor < input.len() {
@@ -57,14 +57,14 @@ pub(crate) fn decode(input: &[u8], max_output_size: usize) -> Result<Vec<u8>, Ud
         cursor += 1;
         if byte == 0 {
             let count = read_zero_count(input, &mut cursor)?;
-            let output_size = output.len().checked_add(count).ok_or(UdpError::InvalidZeroCode)?;
+            let output_size = output.len().checked_add(count).ok_or(LLUdpError::InvalidZeroCode)?;
             if output_size > max_output_size {
-                return Err(UdpError::InvalidZeroCode);
+                return Err(LLUdpError::InvalidZeroCode);
             }
             output.resize(output_size, 0);
         } else {
             if output.len() == max_output_size {
-                return Err(UdpError::InvalidZeroCode);
+                return Err(LLUdpError::InvalidZeroCode);
             }
             output.push(byte);
         }
@@ -82,14 +82,14 @@ mod tests {
         let encoded = encode(&input);
         assert_eq!(encoded, [0, 255, 0, 1]);
         assert_eq!(decode(&encoded, input.len()), Ok(input));
-        assert_eq!(decode(&[0], usize::MAX), Err(UdpError::InvalidZeroCode));
-        assert_eq!(decode(&[0, 0], usize::MAX), Err(UdpError::InvalidZeroCode));
+        assert_eq!(decode(&[0], usize::MAX), Err(LLUdpError::InvalidZeroCode));
+        assert_eq!(decode(&[0, 0], usize::MAX), Err(LLUdpError::InvalidZeroCode));
         assert_eq!(decode(&[0, 0, 0], 255), Ok(vec![0; 255]));
         assert_eq!(decode(&[0, 0, 1], 256), Ok(vec![0; 256]));
         assert_eq!(decode(&[0, 0, 255], 510), Ok(vec![0; 510]));
-        assert_eq!(decode(&[0, 0, 255], 509), Err(UdpError::InvalidZeroCode));
-        assert_eq!(decode(&[0, u8::MAX], usize::from(u8::MAX) - 1), Err(UdpError::InvalidZeroCode));
-        assert_eq!(decode(&[1, 2], 1), Err(UdpError::InvalidZeroCode));
+        assert_eq!(decode(&[0, 0, 255], 509), Err(LLUdpError::InvalidZeroCode));
+        assert_eq!(decode(&[0, u8::MAX], usize::from(u8::MAX) - 1), Err(LLUdpError::InvalidZeroCode));
+        assert_eq!(decode(&[1, 2], 1), Err(LLUdpError::InvalidZeroCode));
     }
 
     #[test]
@@ -97,8 +97,8 @@ mod tests {
         let mut output = [0; 4];
         assert_eq!(decode_prefix(&[0, u8::MAX, 0], &mut output), Ok(4));
         assert_eq!(output, [0; 4]);
-        assert_eq!(decode_prefix(&[0], &mut output), Err(UdpError::InvalidZeroCode));
-        assert_eq!(decode_prefix(&[0, 0], &mut output), Err(UdpError::InvalidZeroCode));
+        assert_eq!(decode_prefix(&[0], &mut output), Err(LLUdpError::InvalidZeroCode));
+        assert_eq!(decode_prefix(&[0, 0], &mut output), Err(LLUdpError::InvalidZeroCode));
         assert_eq!(decode_prefix(&[0, 0, 1], &mut output), Ok(4));
     }
 }

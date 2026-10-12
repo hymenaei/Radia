@@ -2,59 +2,28 @@ use std::{
     collections::HashSet,
     env,
     error::Error,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
-use base::UUID;
 use network::capture::{
     CaptureEvent, CaptureEventKind, CaptureManifest, CapturePayloadRef, CaptureState, MAX_CAPTURE_ENTRY_BYTES, MAX_CAPTURE_EVENT_LINE_BYTES,
 };
-use protocol::udp::{Message, Packet};
+use protocol::lludp::{Message, Packet};
+use serde_json::{from_slice, from_str, to_writer};
+use tempfile::{Builder, NamedTempFile};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 const CAPTURE_ENTRIES: [&str; 3] = ["manifest.json", "events.jsonl", "payloads.bin"];
 const MAX_PACKET_BYTES: u64 = 64 * 1024 * 1024;
 
-struct TempPayload {
-    file: File,
-    path: PathBuf,
-}
-
-struct TempCapture(PathBuf);
-
-impl TempCapture {
-    fn create() -> io::Result<(Self, File)> {
-        for _ in 0..32 {
-            let path = env::temp_dir().join(format!("radia-capture-test-{}-{}.capture", std::process::id(), UUID::new_v4()));
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(file) => return Ok((Self(path), file)),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error),
-            }
-        }
-        Err(io::Error::new(io::ErrorKind::AlreadyExists, "could not create a temporary capture archive"))
-    }
-}
-
-impl Drop for TempCapture {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
-}
-
-impl Drop for TempPayload {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
 struct Summary {
     events: u64,
     udp: u64,
-    decoded_udp: u64,
-    malformed_udp: u64,
+    decoded_lludp: u64,
+    malformed_lludp: u64,
     http_requests: u64,
     http_responses: u64,
 }
@@ -77,8 +46,8 @@ fn saved_captures_are_valid() -> Result<(), Box<dyn Error>> {
         };
         completed += 1;
         println!(
-            "{name}: {} events, {} UDP ({} decoded, {} malformed), {} HTTP requests, {} responses",
-            summary.events, summary.udp, summary.decoded_udp, summary.malformed_udp, summary.http_requests, summary.http_responses
+            "{name}: {} events, {} UDP datagrams ({} decoded LLUDP, {} malformed), {} HTTP requests, {} responses",
+            summary.events, summary.udp, summary.decoded_lludp, summary.malformed_lludp, summary.http_requests, summary.http_responses
         );
     }
     if completed == 0 {
@@ -89,8 +58,8 @@ fn saved_captures_are_valid() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn rejects_oversized_event_line() -> Result<(), Box<dyn Error>> {
-    let (capture, file) = TempCapture::create()?;
-    let mut archive = ZipWriter::new(file);
+    let capture = Builder::new().prefix("capture-test-").suffix(".capture").tempfile()?;
+    let mut archive = ZipWriter::new(capture.reopen()?);
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     let manifest = CaptureManifest {
         schema_version: 1,
@@ -104,14 +73,14 @@ fn rejects_oversized_event_line() -> Result<(), Box<dyn Error>> {
     };
 
     archive.start_file(CAPTURE_ENTRIES[0], options)?;
-    serde_json::to_writer(&mut archive, &manifest)?;
+    to_writer(&mut archive, &manifest)?;
     archive.start_file(CAPTURE_ENTRIES[1], options)?;
     let oversized_line = vec![b' '; MAX_CAPTURE_EVENT_LINE_BYTES + 1];
     archive.write_all(&oversized_line)?;
     archive.start_file(CAPTURE_ENTRIES[2], options)?;
     archive.finish()?;
 
-    let error = inspect(&capture.0).err().ok_or("oversized event line was accepted")?;
+    let error = inspect(capture.path()).err().ok_or("oversized event line was accepted")?;
     assert!(error.to_string().contains("event line exceeds"));
     Ok(())
 }
@@ -168,14 +137,14 @@ fn inspect(path: &Path) -> Result<Option<Summary>, Box<dyn Error>> {
     if manifest.dropped_events != 0 {
         return Err("Complete capture reports dropped events".into());
     }
-    let started = time::OffsetDateTime::parse(&manifest.started_at, &time::format_description::well_known::Rfc3339)?;
-    let ended = time::OffsetDateTime::parse(&manifest.ended_at, &time::format_description::well_known::Rfc3339)?;
+    let started = OffsetDateTime::parse(&manifest.started_at, &Rfc3339)?;
+    let ended = OffsetDateTime::parse(&manifest.ended_at, &Rfc3339)?;
     if ended < started {
         return Err("Capture end time precedes its start time".into());
     }
 
     let payload_file = extract_payloads(&mut archive)?;
-    if payload_file.file.metadata()?.len() != manifest.payload_bytes {
+    if payload_file.as_file().metadata()?.len() != manifest.payload_bytes {
         return Err("Payload_bytes does not match payloads.bin".into());
     }
 
@@ -184,7 +153,7 @@ fn inspect(path: &Path) -> Result<Option<Summary>, Box<dyn Error>> {
         return Err("Events.jsonl is encrypted or exceeds the entry size limit".into());
     }
     let mut events = BufReader::new(&mut event_file);
-    let mut summary = Summary { events: 0, udp: 0, decoded_udp: 0, malformed_udp: 0, http_requests: 0, http_responses: 0 };
+    let mut summary = Summary { events: 0, udp: 0, decoded_lludp: 0, malformed_lludp: 0, http_requests: 0, http_responses: 0 };
     let mut elapsed_ns = 0;
     let mut request_ids = HashSet::new();
     let mut line = String::new();
@@ -200,7 +169,7 @@ fn inspect(path: &Path) -> Result<Option<Summary>, Box<dyn Error>> {
         if line.trim().is_empty() {
             return Err("Events.jsonl contains a blank line".into());
         }
-        let event: CaptureEvent = serde_json::from_str(&line)?;
+        let event: CaptureEvent = from_str(&line)?;
         if event.index != summary.events || event.elapsed_ns < elapsed_ns {
             return Err("Event indexes or elapsed times are invalid".into());
         }
@@ -208,9 +177,9 @@ fn inspect(path: &Path) -> Result<Option<Summary>, Box<dyn Error>> {
         check_payload_ranges(&event, manifest.payload_bytes)?;
 
         match &event.kind {
-            CaptureEventKind::UdpSend { .. } | CaptureEventKind::UdpReceive { .. } => {
+            CaptureEventKind::LLUdpSend { .. } | CaptureEventKind::LLUdpReceive { .. } => {
                 summary.udp += 1;
-                inspect_datagram(&event, &payload_file.file, &mut summary)?;
+                inspect_datagram(&event, payload_file.as_file(), &mut summary)?;
             }
             CaptureEventKind::HttpRequest { request_id, .. } => {
                 if !request_ids.insert(*request_id) {
@@ -253,35 +222,26 @@ fn read_json_entry<T: serde::de::DeserializeOwned>(archive: &mut ZipArchive<File
     }
     let mut bytes = Vec::new();
     entry.read_to_end(&mut bytes)?;
-    Ok(serde_json::from_slice(&bytes)?)
+    Ok(from_slice(&bytes)?)
 }
 
-fn extract_payloads(archive: &mut ZipArchive<File>) -> Result<TempPayload, Box<dyn Error>> {
+fn extract_payloads(archive: &mut ZipArchive<File>) -> Result<NamedTempFile, Box<dyn Error>> {
     let mut entry = archive.by_name("payloads.bin")?;
     if entry.encrypted() || entry.size() > MAX_CAPTURE_ENTRY_BYTES {
         return Err("Payloads.bin is encrypted or exceeds the entry size limit".into());
     }
     let expected_bytes = entry.size();
-    let (path, file) = create_temp_payload()?;
-    let mut file = file;
-    let copied_bytes = io::copy(&mut entry, &mut file)?;
+    let mut file = create_temp_payload()?;
+    let copied_bytes = io::copy(&mut entry, file.as_file_mut())?;
     if copied_bytes != expected_bytes {
         return Err("Payloads.bin length does not match its ZIP entry".into());
     }
-    file.seek(SeekFrom::Start(0))?;
-    Ok(TempPayload { file, path })
+    file.as_file_mut().seek(SeekFrom::Start(0))?;
+    Ok(file)
 }
 
-fn create_temp_payload() -> Result<(PathBuf, File), Box<dyn Error>> {
-    for _ in 0..32 {
-        let path = env::temp_dir().join(format!("radia-capture-check-{}-{}.bin", std::process::id(), UUID::new_v4()));
-        match OpenOptions::new().write(true).read(true).create_new(true).open(&path) {
-            Ok(file) => return Ok((path, file)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Err("could not create a temporary capture payload file".into())
+fn create_temp_payload() -> Result<NamedTempFile, Box<dyn Error>> {
+    Ok(Builder::new().prefix("capture-check-").suffix(".bin").tempfile()?)
 }
 
 fn check_payload_ranges(event: &CaptureEvent, payload_bytes: u64) -> Result<(), Box<dyn Error>> {
@@ -292,7 +252,7 @@ fn check_payload_ranges(event: &CaptureEvent, payload_bytes: u64) -> Result<(), 
         }
     }
     match &event.kind {
-        CaptureEventKind::UdpSend { .. } | CaptureEventKind::UdpReceive { .. } => {
+        CaptureEventKind::LLUdpSend { .. } | CaptureEventKind::LLUdpReceive { .. } => {
             if event.payloads.len() != 1 || event.payloads[0].role != "datagram" {
                 return Err("UDP event must reference one datagram".into());
             }
@@ -323,8 +283,8 @@ fn inspect_datagram(event: &CaptureEvent, payload_file: &File, summary: &mut Sum
     payload_file.read_exact(&mut bytes)?;
 
     let (sequence, reliable, resent, zerocoded, appended_acks, packet_acks, message) = match &event.kind {
-        CaptureEventKind::UdpSend { sequence, reliable, resent, zerocoded, appended_acks, packet_acks, message, .. }
-        | CaptureEventKind::UdpReceive { sequence, reliable, resent, zerocoded, appended_acks, packet_acks, message, .. } => {
+        CaptureEventKind::LLUdpSend { sequence, reliable, resent, zerocoded, appended_acks, packet_acks, message, .. }
+        | CaptureEventKind::LLUdpReceive { sequence, reliable, resent, zerocoded, appended_acks, packet_acks, message, .. } => {
             (sequence, reliable, resent, zerocoded, appended_acks, packet_acks, message)
         }
         _ => return Err("Expected UDP event".into()),
@@ -332,14 +292,14 @@ fn inspect_datagram(event: &CaptureEvent, payload_file: &File, summary: &mut Sum
 
     match Packet::decode(&bytes) {
         Ok(packet) => {
-            summary.decoded_udp += 1;
+            summary.decoded_lludp += 1;
             if *sequence != Some(packet.sequence())
                 || *reliable != Some(packet.is_reliable())
                 || *resent != Some(packet.is_resent())
                 || *zerocoded != Some(packet.is_zerocoded()?)
                 || appended_acks.as_slice() != packet.appended_acks()
             {
-                return Err("UDP event metadata disagrees with its datagram".into());
+                return Err("LLUDP metadata disagrees with its UDP datagram".into());
             }
             let decoded_acks = match packet.message() {
                 Message::PacketAck(message) => message.packets.iter().map(|ack| ack.id).collect::<Vec<_>>(),
@@ -349,11 +309,11 @@ fn inspect_datagram(event: &CaptureEvent, payload_file: &File, summary: &mut Sum
                 return Err("Packet ACK metadata disagrees with its datagram".into());
             }
             if message.is_some() && matches!(packet.message(), Message::Unknown { .. }) {
-                return Err("UDP message name is present for an unknown message".into());
+                return Err("LLUDP message name is present for an unknown message".into());
             }
         }
         Err(_) => {
-            summary.malformed_udp += 1;
+            summary.malformed_lludp += 1;
             if sequence.is_some()
                 || reliable.is_some()
                 || resent.is_some()
@@ -362,7 +322,7 @@ fn inspect_datagram(event: &CaptureEvent, payload_file: &File, summary: &mut Sum
                 || !packet_acks.is_empty()
                 || message.is_some()
             {
-                return Err("Undecodable UDP event has decoded metadata".into());
+                return Err("Undecodable UDP datagram has decoded LLUDP metadata".into());
             }
         }
     }

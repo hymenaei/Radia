@@ -1,10 +1,14 @@
-use crate::{error::UdpError, message::Message, schema, types::MessageId, zero_code};
+use std::ops::BitOr;
+
+use tracing::Span;
+
+use crate::{error::LLUdpError, message::Message, schema, types::MessageId, zero_code};
 
 const FLAG_ZEROCODED: u8 = 0x80;
 const FLAG_RELIABLE: u8 = 0x40;
 const FLAG_RESENT: u8 = 0x20;
 const FLAG_APPENDED_ACKS: u8 = 0x10;
-const MAX_UDP_PAYLOAD_SIZE: usize = 0x2000;
+const MAX_LLUDP_PACKET_SIZE: usize = 0x2000;
 
 /// The bit flags carried in an LLUDP packet header.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -40,7 +44,7 @@ impl PacketFlags {
     }
 }
 
-impl std::ops::BitOr for PacketFlags {
+impl BitOr for PacketFlags {
     type Output = Self;
 
     fn bitor(self, rhs: Self) -> Self::Output {
@@ -121,9 +125,9 @@ impl Packet {
     /// With automatic zero coding, returns an error if encoding the message
     /// fails or the packet exceeds LLUDP limits. Also returns an error when
     /// the extra header or appended ACK count cannot be represented on wire.
-    pub fn header(&self) -> Result<PacketHeader, UdpError> {
-        let _: u8 = self.header.extra_header.len().try_into().map_err(|_| UdpError::ExtraHeaderTooLong)?;
-        let _: u8 = self.appended_acks.len().try_into().map_err(|_| UdpError::TooManyAcks)?;
+    pub fn header(&self) -> Result<PacketHeader, LLUdpError> {
+        let _: u8 = self.header.extra_header.len().try_into().map_err(|_| LLUdpError::ExtraHeaderTooLong)?;
+        let _: u8 = self.appended_acks.len().try_into().map_err(|_| LLUdpError::TooManyAcks)?;
         let flags = match self.zero_coding {
             ZeroCoding::Received => self.header.flags,
             ZeroCoding::Automatic(_) => self.encoded_message()?.1,
@@ -168,7 +172,7 @@ impl Packet {
     /// # Errors
     ///
     /// Returns the same errors as [`Self::header`].
-    pub fn is_zerocoded(&self) -> Result<bool, UdpError> {
+    pub fn is_zerocoded(&self) -> Result<bool, LLUdpError> {
         self.header().map(|header| header.flags.contains(PacketFlags::ZEROCODED))
     }
 
@@ -208,7 +212,7 @@ impl Packet {
     /// Sets bytes between the fixed header and message ID.
     ///
     /// The bytes are preserved as supplied. Encoding returns
-    /// [`UdpError::ExtraHeaderTooLong`] if they exceed 255 bytes.
+    /// [`LLUdpError::ExtraHeaderTooLong`] if they exceed 255 bytes.
     pub fn with_extra_header(mut self, bytes: Vec<u8>) -> Self {
         self.header.extra_header = bytes;
         self
@@ -218,7 +222,7 @@ impl Packet {
     ///
     /// The ACK flag is cleared when `packet_ids` is empty and set otherwise.
     /// Each ID is encoded as a little-endian `u32`. Encoding rejects more than
-    /// 255 IDs with [`UdpError::TooManyAcks`].
+    /// 255 IDs with [`LLUdpError::TooManyAcks`].
     pub fn with_appended_acks(mut self, packet_ids: Vec<u32>) -> Self {
         self.appended_acks = packet_ids;
         if self.appended_acks.is_empty() {
@@ -235,7 +239,7 @@ impl Packet {
     ///
     /// Returns an error if packet flags conflict, header or ACK limits are
     /// exceeded, the message cannot be encoded, or the datagram exceeds 8 KiB.
-    pub fn encode(&self) -> Result<Vec<u8>, UdpError> {
+    pub fn encode(&self) -> Result<Vec<u8>, LLUdpError> {
         let mut packet = Vec::new();
         self.encode_into(&mut packet)?;
         Ok(packet)
@@ -251,13 +255,13 @@ impl Packet {
         name = "protocol.packet.encode", level = "debug", skip_all,
         fields(sequence = self.header.sequence, message = tracing::field::Empty, datagram_bytes = tracing::field::Empty)
     )]
-    pub fn encode_into(&self, output: &mut Vec<u8>) -> Result<(), UdpError> {
+    pub fn encode_into(&self, output: &mut Vec<u8>) -> Result<(), LLUdpError> {
         let output_start = output.len();
         if self.is_resent() && !self.is_reliable() {
-            return Err(UdpError::InvalidPacketFlags);
+            return Err(LLUdpError::InvalidPacketFlags);
         }
-        let extra_len = u8::try_from(self.header.extra_header.len()).map_err(|_| UdpError::ExtraHeaderTooLong)?;
-        let ack_count = u8::try_from(self.appended_acks.len()).map_err(|_| UdpError::TooManyAcks)?;
+        let extra_len = u8::try_from(self.header.extra_header.len()).map_err(|_| LLUdpError::ExtraHeaderTooLong)?;
+        let ack_count = u8::try_from(self.appended_acks.len()).map_err(|_| LLUdpError::TooManyAcks)?;
 
         let (message_bytes, flags) = self.encoded_message()?;
 
@@ -266,9 +270,9 @@ impl Packet {
             .and_then(|length| length.checked_add(message_bytes.len()))
             .and_then(|length| length.checked_add(self.appended_acks.len() * 4))
             .and_then(|length| length.checked_add(usize::from(flags.contains(PacketFlags::APPENDED_ACKS))))
-            .ok_or(UdpError::DatagramTooLarge)?;
-        if packet_len > MAX_UDP_PAYLOAD_SIZE {
-            return Err(UdpError::DatagramTooLarge);
+            .ok_or(LLUdpError::DatagramTooLarge)?;
+        if packet_len > MAX_LLUDP_PACKET_SIZE {
+            return Err(LLUdpError::DatagramTooLarge);
         }
 
         output.reserve(packet_len);
@@ -284,17 +288,17 @@ impl Packet {
             output.push(ack_count);
         }
         let message_name = schema::find_by_id(self.message.id()).map_or("Unknown", |metadata| metadata.name);
-        tracing::Span::current().record("message", message_name);
-        tracing::Span::current().record("datagram_bytes", output.len() - output_start);
+        Span::current().record("message", message_name);
+        Span::current().record("datagram_bytes", output.len() - output_start);
         Ok(())
     }
 
-    fn encoded_message(&self) -> Result<(Vec<u8>, PacketFlags), UdpError> {
+    fn encoded_message(&self) -> Result<(Vec<u8>, PacketFlags), LLUdpError> {
         let mut message_bytes = Vec::new();
         self.message.id().encode(&mut message_bytes)?;
-        self.message.encode_payload(&mut message_bytes, MAX_UDP_PAYLOAD_SIZE)?;
-        if self.trailing_message_bytes.len() > MAX_UDP_PAYLOAD_SIZE.saturating_sub(message_bytes.len()) {
-            return Err(UdpError::DatagramTooLarge);
+        self.message.encode_payload(&mut message_bytes, MAX_LLUDP_PACKET_SIZE)?;
+        if self.trailing_message_bytes.len() > MAX_LLUDP_PACKET_SIZE.saturating_sub(message_bytes.len()) {
+            return Err(LLUdpError::DatagramTooLarge);
         }
         message_bytes.extend_from_slice(&self.trailing_message_bytes);
 
@@ -304,9 +308,9 @@ impl Packet {
             .and_then(|length| length.checked_add(message_bytes.len()))
             .and_then(|length| length.checked_add(self.appended_acks.len() * 4))
             .and_then(|length| length.checked_add(usize::from(has_ack_section)))
-            .ok_or(UdpError::DatagramTooLarge)?;
-        if uncompressed_packet_len > MAX_UDP_PAYLOAD_SIZE {
-            return Err(UdpError::DatagramTooLarge);
+            .ok_or(LLUdpError::DatagramTooLarge)?;
+        if uncompressed_packet_len > MAX_LLUDP_PACKET_SIZE {
+            return Err(LLUdpError::DatagramTooLarge);
         }
 
         let mut flags = self.header.flags;
@@ -351,39 +355,40 @@ impl Packet {
     ///
     /// Returns an error for a truncated or malformed header, message ID,
     /// payload, zero-coded body, or appended ACK list.
-    pub fn decode(bytes: &[u8]) -> Result<Self, UdpError> {
-        if bytes.len() > MAX_UDP_PAYLOAD_SIZE {
-            return Err(UdpError::DatagramTooLarge);
+    pub fn decode(bytes: &[u8]) -> Result<Self, LLUdpError> {
+        if bytes.len() > MAX_LLUDP_PACKET_SIZE {
+            return Err(LLUdpError::DatagramTooLarge);
         }
         if bytes.len() < 6 {
-            return Err(UdpError::TruncatedPacket);
+            return Err(LLUdpError::TruncatedPacket);
         }
         let flags = PacketFlags::from_bits_retain(bytes[0]);
         if flags.contains(PacketFlags::RESENT) && !flags.contains(PacketFlags::RELIABLE) {
-            return Err(UdpError::InvalidPacketFlags);
+            return Err(LLUdpError::InvalidPacketFlags);
         }
         let sequence = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-        tracing::Span::current().record("sequence", sequence);
-        tracing::Span::current().record("reliable", flags.contains(PacketFlags::RELIABLE));
+        Span::current().record("sequence", sequence);
+        Span::current().record("reliable", flags.contains(PacketFlags::RELIABLE));
         let extra_len = usize::from(bytes[5]);
-        let body_start = 6usize.checked_add(extra_len).ok_or(UdpError::TruncatedPacket)?;
+        let body_start = 6usize.checked_add(extra_len).ok_or(LLUdpError::TruncatedPacket)?;
         if bytes.len() < body_start {
-            return Err(UdpError::TruncatedPacket);
+            return Err(LLUdpError::TruncatedPacket);
         }
 
         let mut body_end = bytes.len();
         let mut appended_acks = Vec::new();
         if flags.contains(PacketFlags::APPENDED_ACKS) {
-            let count = usize::from(*bytes.last().ok_or(UdpError::InvalidAcknowledgementList)?);
-            let trailer_len = count.checked_mul(4).and_then(|length| length.checked_add(1)).ok_or(UdpError::InvalidAcknowledgementList)?;
+            let count = usize::from(*bytes.last().ok_or(LLUdpError::InvalidAcknowledgementList)?);
+            let trailer_len =
+                count.checked_mul(4).and_then(|length| length.checked_add(1)).ok_or(LLUdpError::InvalidAcknowledgementList)?;
             if bytes.len() < body_start + trailer_len {
-                return Err(UdpError::InvalidAcknowledgementList);
+                return Err(LLUdpError::InvalidAcknowledgementList);
             }
             body_end -= trailer_len;
             let ids = &bytes[body_end..bytes.len() - 1];
             let (chunks, trailing) = ids.as_chunks::<4>();
             if !trailing.is_empty() {
-                return Err(UdpError::InvalidAcknowledgementList);
+                return Err(LLUdpError::InvalidAcknowledgementList);
             }
             for chunk in chunks {
                 appended_acks.push(u32::from_le_bytes(*chunk));
@@ -396,7 +401,7 @@ impl Packet {
             let prefix_len = zero_code::decode_prefix(wire_body, &mut message_id_prefix)?;
             let (id, id_len) = MessageId::decode(&message_id_prefix[..prefix_len])?;
             let packet_overhead = body_start + (bytes.len() - body_end);
-            let max_decoded_body_size = MAX_UDP_PAYLOAD_SIZE.saturating_sub(packet_overhead);
+            let max_decoded_body_size = MAX_LLUDP_PACKET_SIZE.saturating_sub(packet_overhead);
             (id, id_len, zero_code::decode(wire_body, max_decoded_body_size)?)
         } else {
             let (id, id_len) = MessageId::decode(wire_body)?;
@@ -404,7 +409,7 @@ impl Packet {
         };
         let (message, trailing_message_bytes) = Message::decode(id, &message_bytes[id_len..])?;
         let message_name = schema::find_by_id(id).map_or("Unknown", |metadata| metadata.name);
-        tracing::Span::current().record("message", message_name);
+        Span::current().record("message", message_name);
 
         Ok(Self {
             header: PacketHeader { sequence, flags, extra_header: bytes[6..body_start].to_vec() },
@@ -418,52 +423,52 @@ impl Packet {
 
 #[cfg(test)]
 mod tests {
-    use crate::messages::{CompletePingCheck, complete_ping_check::PingID};
+    use crate::messages::{CompletePingCheck, PingId};
 
     use super::*;
 
     #[test]
     fn resent_requires_reliable() {
-        let mut packet = Packet::new(1, Message::CompletePingCheck(CompletePingCheck { ping_id: PingID { ping_id: 1 } }));
+        let mut packet = Packet::new(1, Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: 1 } }));
         packet.header.flags.insert(PacketFlags::RESENT);
-        assert_eq!(packet.encode(), Err(UdpError::InvalidPacketFlags));
+        assert_eq!(packet.encode(), Err(LLUdpError::InvalidPacketFlags));
     }
 
     #[test]
     fn packet_size_limit() {
         let id = MessageId::low(0xfff9);
-        let payload = vec![0x55; MAX_UDP_PAYLOAD_SIZE - 10];
+        let payload = vec![0x55; MAX_LLUDP_PACKET_SIZE - 10];
         let valid = Packet::new(1, Message::Unknown { id, payload: payload.clone() }).encode().expect("maximum-sized packet");
-        assert_eq!(valid.len(), MAX_UDP_PAYLOAD_SIZE);
+        assert_eq!(valid.len(), MAX_LLUDP_PACKET_SIZE);
         assert_eq!(Packet::decode(&valid).expect("decode maximum-sized packet").message(), &Message::Unknown { id, payload });
 
-        let oversized = Packet::new(1, Message::Unknown { id, payload: vec![0x55; MAX_UDP_PAYLOAD_SIZE - 9] });
-        assert_eq!(oversized.encode(), Err(UdpError::DatagramTooLarge));
+        let oversized = Packet::new(1, Message::Unknown { id, payload: vec![0x55; MAX_LLUDP_PACKET_SIZE - 9] });
+        assert_eq!(oversized.encode(), Err(LLUdpError::DatagramTooLarge));
 
         let mut oversized_datagram = valid;
         oversized_datagram.push(0x55);
-        assert_eq!(Packet::decode(&oversized_datagram), Err(UdpError::DatagramTooLarge));
+        assert_eq!(Packet::decode(&oversized_datagram), Err(LLUdpError::DatagramTooLarge));
     }
 
     #[test]
     fn oversized_unknown_payload() {
-        let packet = Packet::new(1, Message::Unknown { id: MessageId::high(1), payload: vec![0x55; MAX_UDP_PAYLOAD_SIZE * 128] });
+        let packet = Packet::new(1, Message::Unknown { id: MessageId::high(1), payload: vec![0x55; MAX_LLUDP_PACKET_SIZE * 128] });
 
-        assert_eq!(packet.encode(), Err(UdpError::DatagramTooLarge));
+        assert_eq!(packet.encode(), Err(LLUdpError::DatagramTooLarge));
     }
 
     #[test]
     fn encoded_expansion_limit() {
         let packet =
-            Packet::new(1, Message::Unknown { id: MessageId::high(1), payload: vec![0; MAX_UDP_PAYLOAD_SIZE] }).with_zero_coding(true);
+            Packet::new(1, Message::Unknown { id: MessageId::high(1), payload: vec![0; MAX_LLUDP_PACKET_SIZE] }).with_zero_coding(true);
 
-        assert_eq!(packet.encode(), Err(UdpError::DatagramTooLarge));
+        assert_eq!(packet.encode(), Err(LLUdpError::DatagramTooLarge));
     }
 
     #[test]
     fn bad_id_precedes_expansion() {
         let datagram = [0x80, 0, 0, 0, 1, 0, 0, 4, 0];
-        assert_eq!(Packet::decode(&datagram), Err(UdpError::InvalidMessageId));
+        assert_eq!(Packet::decode(&datagram), Err(LLUdpError::InvalidMessageId));
     }
 
     #[test]

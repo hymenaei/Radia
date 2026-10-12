@@ -22,16 +22,16 @@ Unit tests within `src/` may access private implementation details, but should s
 ## Everyday commands
 
 ```sh
-cargo test -p [package] [filter]               # Named test/filter in package
-cargo test -p [package] --lib                  # Library unit tests only
-cargo test -p [package] --test [test-target]    # One integration test target
-cargo test -p [package] --doc                  # Doctests
-cargo test --workspace                        # All selected workspace members
-cargo test -p [package] -- --nocapture         # Debug output
-cargo test -p [package] -- --include-ignored   # Include #[ignore] cases
-cargo nextest run -p [package]                 # Fast process-isolated suite
-cargo nextest run --workspace                  # Nextest across workspace
-cargo nextest run --run-ignored=only           # Only ignored tests
+cargo test -p <crate> <filter>               # Named test/filter in package
+cargo test -p <crate> --lib                  # Library unit tests only
+cargo test -p <crate> --test <test-target>   # One integration test target
+cargo test -p <crate> --doc                  # Doctests
+cargo test --workspace                       # All selected workspace members
+cargo test -p <crate> -- --nocapture         # Debug output
+cargo test -p <crate> -- --include-ignored   # Include #[ignore] cases
+cargo nextest run -p <crate>                 # Fast process-isolated suite
+cargo nextest run --workspace                # Nextest across workspace
+cargo nextest run --run-ignored=only         # Only ignored tests
 ```
 
 `cargo test` compiles and runs unit, integration, and documentation tests (depending on target options). Nextest currently does **not** run doctests: explicitly run `cargo test --doc`. Nextest provides timeout controls and optional retries. Avoid enabling retries to mask flaky failures.

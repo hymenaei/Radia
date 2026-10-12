@@ -1,10 +1,8 @@
-# Radia
-
 Radia is a modern third party Second Life viewer written in Rust, focused on rethinking and improving the architecture, performance, usability, and maintainability of existing Second Life viewers.
 
 The project aims to preserve compatibility with the Second Life platform while replacing legacy systems with a cleaner, more modular, and modern implementation. Areas of focus include networking, rendering, user interface, asset handling, and the overall viewer architecture.
 
-## Build and run
+### Build and run
 
 Install the stable Rust toolchain through rustup. On Windows, install the Visual Studio C++ Build Tools as well, since some dependencies may require a native compiler and Windows SDK.
 
@@ -16,7 +14,7 @@ cargo run
 
 Cargo will download the required dependencies, build Radia, and launch the application.
 
-## Profile with Tracy
+### Profile with Tracy
 
 Start Tracy Profiler, then run Radia from the workspace root with the optional Tracy layer:
 

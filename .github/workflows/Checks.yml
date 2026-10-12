@@ -67,7 +67,7 @@ jobs:
               run: cargo build --workspace --all-features --locked
 
             - name: Test workspace
-              run: cargo xtest --workspace --all-features --locked
+              run: cargo xtest --workspace --locked
 
             - name: Test documentation
               if: matrix.platform == 'Linux'

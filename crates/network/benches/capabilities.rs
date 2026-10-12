@@ -1,7 +1,8 @@
 use std::{
     hint::black_box,
     io::{self, Read, Write},
-    net::{TcpListener, TcpStream},
+    net::{SocketAddr, TcpListener, TcpStream},
+    str::from_utf8,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -10,21 +11,22 @@ use std::{
     time::Duration,
 };
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use network::capabilities::{CapabilityUrl, Client};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
+use tokio::runtime::Builder;
 
 const REQUESTED_CAPABILITIES: &[&str] = &["EventQueueGet", "FetchInventory2", "GetTexture"];
 
 struct LoopbackServer {
-    address: std::net::SocketAddr,
+    address: SocketAddr,
     running: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl LoopbackServer {
-    fn start(response_body: impl FnOnce(std::net::SocketAddr) -> String) -> io::Result<Self> {
+    fn start(response_body: impl FnOnce(SocketAddr) -> String) -> io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let address = listener.local_addr()?;
@@ -95,7 +97,7 @@ fn serve_connection(mut stream: TcpStream, response_body: &str, running: &Atomic
 
 fn complete_request_len(request: &[u8]) -> Option<usize> {
     let header_end = request.windows(4).position(|window| window == b"\r\n\r\n")? + 4;
-    let header = std::str::from_utf8(&request[..header_end]).ok()?;
+    let header = from_utf8(&request[..header_end]).ok()?;
     let content_length = header
         .lines()
         .find_map(|line| {
@@ -114,7 +116,7 @@ fn bench_seed_discovery(c: &mut Criterion) {
         )
     })
     .expect("start local seed capability server");
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("build Tokio runtime");
+    let runtime = Builder::new_current_thread().enable_all().build().expect("build Tokio runtime");
     let seed = Url::parse(&format!("http://{}/seed", server.address)).expect("parse local seed URL");
     let client = runtime.block_on(async { Client::new(seed).expect("create capability client") });
     let warmup = runtime.block_on(client.request_capabilities(REQUESTED_CAPABILITIES)).expect("warm up capability discovery");
@@ -122,7 +124,7 @@ fn bench_seed_discovery(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("network/capability_discovery");
     group.throughput(Throughput::Elements(1));
-    group.bench_function(BenchmarkId::new("loopback", "three_capabilities"), |b| {
+    group.bench_function("three_capabilities", |b| {
         b.iter(|| black_box(runtime.block_on(client.request_capabilities(REQUESTED_CAPABILITIES)).expect("discover capabilities")));
     });
     group.finish();
@@ -145,7 +147,7 @@ fn bench_capability_post(c: &mut Criterion) {
             .to_owned()
     })
     .expect("start local capability server");
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("build Tokio runtime");
+    let runtime = Builder::new_current_thread().enable_all().build().expect("build Tokio runtime");
     let seed = Url::parse(&format!("http://{}/seed", server.address)).expect("parse local seed URL");
     let capability = CapabilityUrl::parse(&format!("http://{}/inventory", server.address)).expect("parse local capability URL");
     let client = runtime.block_on(async { Client::new(seed).expect("create capability client") });
@@ -156,7 +158,7 @@ fn bench_capability_post(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("network/capability_post");
     group.throughput(Throughput::Elements(1));
-    group.bench_function(BenchmarkId::new("loopback", "xml_request_and_response_decode"), |b| {
+    group.bench_function("xml_request_response", |b| {
         b.iter(|| black_box(runtime.block_on(client.post::<_, CapabilityResponse>(&capability, &request)).expect("post capability")));
     });
     group.finish();

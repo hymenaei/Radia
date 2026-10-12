@@ -1,6 +1,9 @@
 //! Load favorite landmarks and resolve their simulator regions.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    str::from_utf8,
+};
 
 use base::UUID;
 use futures::{StreamExt, TryStreamExt, stream};
@@ -10,8 +13,9 @@ use network::{
     capabilities::{CapabilityUrl, Client},
 };
 use serde::{Deserialize, Serialize};
+use world::RegionHandle;
 
-use crate::world::RegionLookup;
+use crate::session::{RegionGridCell, RegionLookup, map_request_coordinates};
 
 const REQUESTED_CAPABILITIES: [&str; 3] = ["FetchInventoryDescendents2", "FetchInventory2", "ViewerAsset"];
 const ASSET_TYPE_LINK: i32 = 24;
@@ -97,11 +101,11 @@ pub async fn load_favorites(
     let landmarks = fetch_favorite_landmarks(capabilities, session.agent_id, folder_id).await?;
     let resolved = stream::iter(landmarks.into_iter().map(|landmark| async move {
         let (region_name, position) = if let Some(global_pos) = landmark.global_pos {
-            let Some((x, y, position)) = global_position(global_pos) else {
+            let Some((cell, position)) = global_position(global_pos) else {
                 return Ok(None);
             };
             let region_name = region_lookup
-                .lookup_region_at(x, y)
+                .lookup_region_at(cell)
                 .await
                 .map_err(|error| format!("Could not look up a favorite landmark region: {error}"))?;
             (region_name, position)
@@ -110,11 +114,15 @@ pub async fn load_favorites(
                 return Ok(None);
             };
             let region_name = if let Some(handle) = landmark.region_handle {
-                let Some((x, y)) = region_grid_coordinates(handle) else {
+                let origin = RegionHandle::new(handle).origin();
+                let Some(cell) = RegionGridCell::containing(origin.x, origin.y) else {
                     return Ok(None);
                 };
+                if map_request_coordinates(cell).is_none() {
+                    return Ok(None);
+                }
                 region_lookup
-                    .lookup_region_at(x, y)
+                    .lookup_region_at(cell)
                     .await
                     .map_err(|error| format!("Could not look up a favorite landmark region: {error}"))?
             } else {
@@ -339,19 +347,15 @@ async fn fetch_landmark(capabilities: &Client, asset_url: CapabilityUrl, name: S
     Ok(parse_landmark_asset(&name, &bytes))
 }
 
-fn global_position(position: [f64; 3]) -> Option<(u16, u16, [f64; 3])> {
-    if !position.iter().all(|value| value.is_finite()) || position[0] < 0.0 || position[1] < 0.0 {
+fn global_position(position: [f64; 3]) -> Option<(RegionGridCell, [f64; 3])> {
+    if !position.iter().all(|value| value.is_finite()) {
         return None;
     }
-    let region_x = u16::try_from((position[0] / 256.0).floor() as u64).ok()?;
-    let region_y = u16::try_from((position[1] / 256.0).floor() as u64).ok()?;
-    Some((region_x, region_y, [position[0] % 256.0, position[1] % 256.0, position[2]]))
-}
-
-fn region_grid_coordinates(region_handle: u64) -> Option<(u16, u16)> {
-    let origin_x = region_handle >> 32;
-    let origin_y = region_handle & u64::from(u32::MAX);
-    Some((u16::try_from(origin_x / 256).ok()?, u16::try_from(origin_y / 256).ok()?))
+    let cell = RegionGridCell::containing(position[0], position[1])?;
+    map_request_coordinates(cell)?;
+    let local_x = position[0] - f64::from(cell.x() * RegionGridCell::METERS_PER_CELL);
+    let local_y = position[1] - f64::from(cell.y() * RegionGridCell::METERS_PER_CELL);
+    Some((cell, [local_x, local_y, position[2]]))
 }
 
 fn favorite_location(name: String, region_name: String, [x, y, z]: [f64; 3]) -> Option<FavoriteLocation> {
@@ -366,7 +370,7 @@ fn favorite_location(name: String, region_name: String, [x, y, z]: [f64; 3]) -> 
 }
 
 fn parse_landmark_asset(name: &str, bytes: &[u8]) -> Option<FavoriteLandmark> {
-    let text = std::str::from_utf8(bytes).ok()?.trim_start_matches('\u{feff}').trim_matches('\0');
+    let text = from_utf8(bytes).ok()?.trim_start_matches('\u{feff}').trim_matches('\0');
     let mut lines = text.lines();
     let version = lines.next()?.trim();
     let mut fields = HashMap::new();
@@ -467,7 +471,7 @@ mod tests {
     use base::UUID;
     use llsd::{Map, Value};
 
-    use super::{InventoryItem, parse_landmark_asset, parse_position};
+    use super::{InventoryItem, RegionGridCell, global_position, parse_landmark_asset, parse_position};
 
     fn inventory_item(inventory_type: Value, asset_type: Value) -> InventoryItem {
         let value = Value::Map(Map::from([
@@ -511,5 +515,15 @@ mod tests {
         assert_eq!(parse_position(&["<128,", "128,", "30>"]), Some([128.0, 128.0, 30.0]));
         assert_eq!(parse_position(&["1,2,3,4"]), None);
         assert_eq!(parse_position(&["1,NaN,3"]), None);
+    }
+
+    #[test]
+    fn global_landmark_position_uses_world_grid_cells() {
+        let (cell, position) = global_position([512.5, 769.0, 30.0]).expect("finite positive location");
+        assert_eq!(cell, RegionGridCell::new(2, 3));
+        assert_eq!(position, [0.5, 1.0, 30.0]);
+        assert!(global_position([-1.0, 0.0, 0.0]).is_none());
+        assert!(global_position([f64::INFINITY, 0.0, 0.0]).is_none());
+        assert!(global_position([f64::from(u32::from(u16::MAX) + 1) * f64::from(RegionGridCell::METERS_PER_CELL), 0.0, 0.0]).is_none());
     }
 }

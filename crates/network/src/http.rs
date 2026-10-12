@@ -1,11 +1,12 @@
 use std::{
-    fmt,
+    fmt::{Debug, Display, Formatter},
     time::{Duration, Instant, SystemTime},
 };
 
 use reqwest::{
-    Client as ReqwestClient, StatusCode, Url,
-    header::{HeaderMap, RETRY_AFTER},
+    StatusCode, Url,
+    header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, RETRY_AFTER},
+    redirect::Policy,
 };
 
 use crate::{capture::CaptureRecorder, status::NetworkStatusHandle};
@@ -15,7 +16,7 @@ const MAX_HTTP_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct Client {
-    client: ReqwestClient,
+    client: reqwest::Client,
     capture: Option<CaptureRecorder>,
     status: Option<NetworkStatusHandle>,
 }
@@ -52,8 +53,8 @@ pub(crate) enum Error {
     Message(String),
 }
 
-impl fmt::Debug for Response {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Debug for Response {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Response")
             .field("status", &self.status)
@@ -65,8 +66,8 @@ impl fmt::Debug for Response {
     }
 }
 
-impl fmt::Debug for Error {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Debug for Error {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Request(_) => formatter.debug_tuple("Request").field(&"[REDACTED]").finish(),
             Self::Timeout { elapsed, .. } => {
@@ -103,8 +104,8 @@ impl Error {
     }
 }
 
-impl std::fmt::Display for Error {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for Error {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Request(error) => write!(formatter, "{error}"),
             Self::Timeout { message, .. } => formatter.write_str(message),
@@ -115,7 +116,7 @@ impl std::fmt::Display for Error {
 
 impl Client {
     pub(crate) fn new(timeout: Option<Duration>, http1_only: bool, user_agent: Option<&str>) -> Result<Self, reqwest::Error> {
-        let mut builder = ReqwestClient::builder().redirect(reqwest::redirect::Policy::none());
+        let mut builder = reqwest::Client::builder().redirect(Policy::none());
         if let Some(timeout) = timeout {
             builder = builder.timeout(timeout);
         }
@@ -199,9 +200,9 @@ impl Client {
         record_errors: bool,
     ) -> Result<Response, Error> {
         validate_http_url(url).map_err(Error::Message)?;
-        let mut request = self.client.post(url.clone()).header(reqwest::header::CONTENT_TYPE, content_type);
+        let mut request = self.client.post(url.clone()).header(CONTENT_TYPE, content_type);
         if let Some(accept) = accept {
-            request = request.header(reqwest::header::ACCEPT, accept);
+            request = request.header(ACCEPT, accept);
         }
         let mut request_headers = vec![("content-type".to_owned(), content_type.to_owned())];
         if let Some(accept) = accept {
@@ -333,7 +334,7 @@ impl Client {
 
 fn capture_headers(headers: &HeaderMap) -> Vec<(String, String)> {
     let mut captured = Vec::new();
-    for name in [reqwest::header::CONTENT_TYPE, reqwest::header::CONTENT_LENGTH, reqwest::header::RETRY_AFTER] {
+    for name in [CONTENT_TYPE, CONTENT_LENGTH, RETRY_AFTER] {
         for value in headers.get_all(&name).iter().filter_map(|value| value.to_str().ok()) {
             captured.push((name.as_str().to_owned(), value.to_owned()));
         }
@@ -377,7 +378,7 @@ mod tests {
 
     use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 
-    use super::{capture_headers, retry_after_delay};
+    use super::{RETRY_AFTER, Response, StatusCode, Url, capture_headers, retry_after_delay};
 
     #[test]
     fn duplicate_headers() {
@@ -404,11 +405,11 @@ mod tests {
     #[test]
     fn response_retry_after() {
         let mut headers = HeaderMap::new();
-        headers.insert(super::RETRY_AFTER, HeaderValue::from_static("0"));
-        let response = super::Response {
-            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("0"));
+        let response = Response {
+            status: StatusCode::TOO_MANY_REQUESTS,
             headers,
-            url: super::Url::parse("http://127.0.0.1/").expect("valid local URL"),
+            url: Url::parse("http://127.0.0.1/").expect("valid local URL"),
             body: Vec::new(),
             elapsed: Duration::ZERO,
         };
@@ -420,5 +421,248 @@ mod tests {
     fn invalid_retry_after_is_ignored() {
         assert_eq!(retry_after_delay("soon", UNIX_EPOCH), None);
         assert_eq!(retry_after_delay("", UNIX_EPOCH), None);
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::{
+        io::{ErrorKind, Read, Write},
+        net::{SocketAddr, TcpListener, TcpStream},
+        str::from_utf8,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    use crate::http::{Client, read_bounded_body, validate_http_url};
+    use reqwest::StatusCode;
+    use url::Url;
+
+    pub(crate) struct LocalServer {
+        address: SocketAddr,
+        worker: thread::JoinHandle<Vec<Vec<u8>>>,
+    }
+
+    impl LocalServer {
+        pub(crate) fn start(responses: Vec<Vec<u8>>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind local HTTP server");
+            listener.set_nonblocking(true).expect("set local listener nonblocking");
+            let address = listener.local_addr().expect("read local listener address");
+            let worker = thread::spawn(move || {
+                responses
+                    .into_iter()
+                    .map(|response| {
+                        let (mut stream, _) = accept_with_timeout(&listener);
+                        stream.set_nonblocking(false).expect("set local stream blocking");
+                        stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set local request timeout");
+                        let request = read_request(&mut stream);
+                        stream.write_all(&response).expect("write local response");
+                        request
+                    })
+                    .collect()
+            });
+
+            Self { address, worker }
+        }
+
+        pub(crate) fn url(&self, path: &str) -> Url {
+            Url::parse(&format!("http://{}{path}", self.address)).expect("valid local HTTP URL")
+        }
+
+        pub(crate) fn finish(self) -> Vec<Vec<u8>> {
+            self.worker.join().expect("local HTTP server should finish")
+        }
+    }
+
+    pub(crate) fn response(status: u16, reason: &str, content_type: &str, retry_after: Option<&str>, body: &str) -> Vec<u8> {
+        let retry_after = retry_after.map(|value| format!("Retry-After: {value}\r\n")).unwrap_or_default();
+        format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n{retry_after}\r\n{body}",
+        body.len()
+    )
+    .into_bytes()
+    }
+
+    fn accept_with_timeout(listener: &TcpListener) -> (TcpStream, SocketAddr) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok(connection) => return connection,
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "no request reached local HTTP server");
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("accept local HTTP request: {error}"),
+            }
+        }
+    }
+
+    fn read_request(stream: &mut TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut chunk = [0; 4096];
+        loop {
+            let size = stream.read(&mut chunk).expect("read local HTTP request");
+            if size == 0 {
+                return request;
+            }
+            request.extend_from_slice(&chunk[..size]);
+            if let Some(body_start) = header_body_start(&request) {
+                let content_length = request[..body_start]
+                    .split(|byte| *byte == b'\n')
+                    .filter_map(|line| from_utf8(line).ok())
+                    .find_map(|line| {
+                        let (name, value) = line.trim().split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().ok()).flatten()
+                    })
+                    .unwrap_or(0);
+                if request.len() >= body_start + 4 + content_length {
+                    return request;
+                }
+            }
+        }
+    }
+
+    fn header_body_start(request: &[u8]) -> Option<usize> {
+        request.windows(4).position(|window| window == b"\r\n\r\n")
+    }
+
+    #[tokio::test]
+    async fn redirects_are_not_followed() {
+        let redirect = "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:0/redirected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let server = LocalServer::start(vec![redirect.as_bytes().to_vec()]);
+        let client = Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
+
+        let response = client.get(&server.url("/start")).await.expect("return redirect response without following it");
+        let requests = server.finish();
+
+        assert_eq!(response.status, StatusCode::FOUND);
+        assert_eq!(requests.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn body_at_limit_is_accepted() {
+        let server = LocalServer::start(vec![response(200, "OK", "text/plain", None, "12345")]);
+        let response = reqwest::Client::new().get(server.url("/body")).send().await.expect("receive local HTTP response");
+
+        assert_eq!(read_bounded_body(response, 5).await.expect("body at limit"), b"12345");
+        server.finish();
+    }
+
+    #[tokio::test]
+    async fn content_length_is_bounded() {
+        let server = LocalServer::start(vec![response(200, "OK", "text/plain", None, "123456")]);
+        let response = reqwest::Client::new().get(server.url("/body")).send().await.expect("receive local HTTP response");
+
+        let error = read_bounded_body(response, 5).await.expect_err("declared body exceeds limit");
+        assert!(error.to_string().contains("5-byte limit"));
+        server.finish();
+    }
+
+    #[tokio::test]
+    async fn chunked_body_limit() {
+        let response = concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "Connection: close\r\n\r\n",
+            "3\r\nabc\r\n",
+            "3\r\ndef\r\n",
+            "0\r\n\r\n"
+        );
+        let server = LocalServer::start(vec![response.as_bytes().to_vec()]);
+        let response = reqwest::Client::new().get(server.url("/body")).send().await.expect("receive local HTTP response");
+
+        let error = read_bounded_body(response, 5).await.expect_err("chunked body exceeds limit");
+        assert!(error.to_string().contains("5-byte limit"));
+        server.finish();
+    }
+
+    #[tokio::test]
+    async fn post_limit_is_enforced() {
+        let server = LocalServer::start(vec![response(200, "OK", "text/plain", None, "123456")]);
+        let client = Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
+
+        let error = match client.post_bounded(&server.url("/login"), "text/xml", None, Vec::new(), 5).await {
+            Err(error) => error,
+            Ok(_) => panic!("login response exceeded the configured limit"),
+        };
+
+        assert!(error.contains("5-byte limit"));
+        assert_eq!(server.finish().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn transport_errors_hide_urls() {
+        let url = "http://127.0.0.1:0/cap?token=secret-token";
+        let client = Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
+
+        let error = match client.get(&Url::parse(url).expect("parse capability URL")).await {
+            Err(error) => error,
+            Ok(_) => panic!("closed port should fail"),
+        };
+
+        assert!(!error.contains("secret-token"));
+        assert!(!error.contains(url));
+    }
+
+    #[test]
+    fn unsafe_urls_are_rejected() {
+        for url in [
+            Url::parse("ftp://example.com/cap").expect("parse FTP URL"),
+            Url::parse("http://user:password@example.com/cap").expect("parse credential URL"),
+            Url::parse("https://example.com/cap#fragment").expect("parse fragment URL"),
+            Url::parse("file:///tmp/cap").expect("parse file URL"),
+        ] {
+            assert!(validate_http_url(&url).is_err(), "accepted {url}");
+        }
+
+        for url in [
+            Url::parse("http://127.0.0.1:9000/cap?token=opaque").expect("parse local HTTP URL"),
+            Url::parse("https://caps.example.net:8443/arbitrary/path").expect("parse HTTPS URL"),
+        ] {
+            assert!(validate_http_url(&url).is_ok(), "rejected {url}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use std::time::Duration;
+
+    use reqwest::{
+        StatusCode, Url,
+        header::{HeaderMap, HeaderValue},
+    };
+
+    use super::Response;
+
+    #[test]
+    fn response_debug_hides_private_details() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", HeaderValue::from_static("Bearer header-secret"));
+        headers.insert("cookie", HeaderValue::from_static("session=cookie-secret"));
+        let response = Response {
+            status: StatusCode::OK,
+            headers,
+            url: Url::parse("https://private-grid.example.test/private-capability?token=url-secret").expect("valid URL"),
+            body: b"body-session-secret".to_vec(),
+            elapsed: Duration::from_millis(12),
+        };
+
+        let debug = format!("{response:?}");
+
+        for secret in [
+            "private-grid.example.test",
+            "private-capability",
+            "url-secret",
+            "authorization",
+            "header-secret",
+            "cookie",
+            "cookie-secret",
+            "body-session-secret",
+        ] {
+            assert!(!debug.contains(secret));
+        }
+        assert!(debug.contains("body_bytes"));
+        assert!(debug.contains("header_count"));
     }
 }

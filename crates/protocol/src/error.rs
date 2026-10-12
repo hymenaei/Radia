@@ -1,6 +1,8 @@
+use std::fmt::{Display, Formatter};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// An LLUDP packet or message could not be decoded or encoded.
-pub enum UdpError {
+pub enum LLUdpError {
     /// The packet header, message ID, or typed message body ended early.
     TruncatedPacket,
     /// The message ID's frequency prefix or ID value is invalid.
@@ -29,8 +31,8 @@ pub enum UdpError {
     InboundMessage,
 }
 
-impl std::fmt::Display for UdpError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for LLUdpError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::TruncatedPacket => "truncated LLUDP packet or message",
             Self::InvalidMessageId => "invalid LLUDP message ID",
@@ -49,4 +51,4 @@ impl std::fmt::Display for UdpError {
     }
 }
 
-impl std::error::Error for UdpError {}
+impl std::error::Error for LLUdpError {}

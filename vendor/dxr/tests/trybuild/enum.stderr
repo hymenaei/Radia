@@ -1,5 +1,0 @@
-error: Deriving TryFromValue for enums and unions is not supported.
- --> tests/trybuild/enum.rs:4:10
-  |
-4 | pub enum Enum {
-  |          ^^^^

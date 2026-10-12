@@ -4,9 +4,11 @@ members = [
     "apps/viewer",
     "crates/common/base",
     "crates/common/llsd",
+    "crates/common/math",
     "crates/network",
     "crates/protocol",
     "crates/test-support",
+    "crates/world",
 ]
 default-members = ["apps/viewer"]
 
@@ -18,10 +20,12 @@ license = "LGPL-2.1-only"
 [workspace.dependencies]
 criterion = "0.8"
 futures = "0.3"
+hecs = "0.11"
 gpui = { package = "gpui-ce", version = "=0.2.2" }
 gpui-component = { package = "gpui_ce_components", version = "=0.2.0" }
+gpui-component-assets = { package = "gpui_ce_components_assets", version = "=0.2.0" }
 gpui-platform = { package = "gpui_ce_platform", version = "=0.1.0" }
-quick-xml = "=0.41.0"
+quick-xml = "=0.42.0"
 proptest = "=1.11.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -29,23 +33,23 @@ reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-
 httpdate = "=1.0.3"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
+glam = "0.34.1"
 tracing-subscriber = { version = "0.3", features = ["chrono"] }
 tracing-log = "0.2"
 tracing-tracy = { version = "=0.12.0", default-features = false, features = ["enable", "ondemand", "only-localhost"] }
 url = "2"
 uuid = "1"
+tempfile = "3"
 time = { version = "=0.3.55", features = ["formatting", "parsing"] }
 test-support = { path = "crates/test-support" }
 base = { path = "crates/common/base" }
 llsd = { path = "crates/common/llsd" }
+math = { path = "crates/common/math" }
 network = { path = "crates/network" }
 protocol = { path = "crates/protocol" }
+world = { path = "crates/world" }
 base64 = "=0.22.1"
 zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
-
-# dxr 0.8.0 pins vulnerable quick-xml 0.37, so keep this patched copy until upstream updates.
-[patch.crates-io]
-dxr = { path = "vendor/dxr" }
 
 [workspace.lints.clippy]
 correctness = { level = "deny", priority = -1 }

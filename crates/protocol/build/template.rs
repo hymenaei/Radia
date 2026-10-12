@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fmt::Write as _};
+use std::{collections::HashSet, fmt::Write as _, mem::take};
 
 #[derive(Debug)]
 pub struct Template {
@@ -39,8 +39,8 @@ pub enum Encoding {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Flag {
     Deprecated,
-    UdpBlacklisted,
-    UdpDeprecated,
+    LLUdpBlacklisted,
+    LLUdpDeprecated,
 }
 
 #[derive(Debug)]
@@ -132,7 +132,8 @@ pub fn parse(path: &str, source: &str) -> Result<Template, String> {
 
 pub fn generate(template: &Template) -> String {
     let mut output = String::new();
-    output.push_str("use crate::types::MessageId;\n\n");
+    output.push_str("use crate::types::{Frequency, MessageId};\n");
+    output.push_str("use crate::types::Frequency::{Fixed, High, Low, Medium};\n\n");
     output.push_str("/// Trust classification declared by an LLUDP message template.\n");
     output.push_str("#[derive(Clone, Copy, Debug, Eq, PartialEq)]\n");
     output.push_str(
@@ -143,10 +144,10 @@ pub fn generate(template: &Template) -> String {
     output.push_str(
         "pub enum MessageEncoding {\n    /// The datagram's message bytes use LLUDP zero coding.\n    Zerocoded,\n    /// The datagram's message bytes are sent without zero coding.\n    Unencoded,\n}\n\n",
     );
-    output.push_str("/// Flags describing template status or UDP policy for a message.\n");
+    output.push_str("/// Flags describing template status or LLUDP policy for a message.\n");
     output.push_str("#[derive(Clone, Copy, Debug, Eq, PartialEq)]\n");
     output.push_str(
-        "pub enum MessageFlag {\n    /// The template marks the message as deprecated.\n    Deprecated,\n    /// The message is blacklisted for UDP transport.\n    UdpBlacklisted,\n    /// The template marks UDP use of the message as deprecated.\n    UdpDeprecated,\n}\n\n",
+        "pub enum MessageFlag {\n    /// The template marks the message as deprecated.\n    Deprecated,\n    /// The template blacklists the message for LLUDP.\n    LLUdpBlacklisted,\n    /// The template marks LLUDP use of the message as deprecated.\n    LLUdpDeprecated,\n}\n\n",
     );
     output.push_str("/// Repetition mode of a message block in the wire payload.\n");
     output.push_str("#[derive(Clone, Copy, Debug, Eq, PartialEq)]\n");
@@ -184,7 +185,7 @@ pub fn generate(template: &Template) -> String {
         "    /// Message name from the template.\n    pub name: &'static str,\n    /// Frequency and number used by the wire protocol.\n    pub id: MessageId,\n    /// Trust classification from the template.\n    pub trust: MessageTrust,\n",
     );
     output.push_str(
-        "    /// Default zero-coding mode from the template.\n    pub encoding: MessageEncoding,\n    /// Status and UDP-policy flags from the template.\n    pub flags: &'static [MessageFlag],\n",
+        "    /// Default zero-coding mode from the template.\n    pub encoding: MessageEncoding,\n    /// Status and LLUDP-policy flags from the template.\n    pub flags: &'static [MessageFlag],\n",
     );
     output.push_str("    /// Blocks in wire order.\n    pub blocks: &'static [BlockSchema],\n}\n\n");
     output.push_str("/// Number of messages in the compiled template.\n");
@@ -245,12 +246,12 @@ pub fn generate(template: &Template) -> String {
         writeln!(&mut output, "    {index},").expect("write generated source");
     }
     output.push_str("];\n\n");
-    output.push_str("fn frequency_rank(frequency: crate::types::Frequency) -> u8 {\n");
+    output.push_str("fn frequency_rank(frequency: Frequency) -> u8 {\n");
     output.push_str("    match frequency {\n");
-    output.push_str("        crate::types::Frequency::High => 0,\n");
-    output.push_str("        crate::types::Frequency::Medium => 1,\n");
-    output.push_str("        crate::types::Frequency::Low => 2,\n");
-    output.push_str("        crate::types::Frequency::Fixed => 3,\n");
+    output.push_str("        High => 0,\n");
+    output.push_str("        Medium => 1,\n");
+    output.push_str("        Low => 2,\n");
+    output.push_str("        Fixed => 3,\n");
     output.push_str("    }\n}\n\n");
     output.push_str(
         "/// Find the schema for an exact message frequency and number.\n///\n/// Returns `None` when the template has no matching ID.\npub fn find_by_id(id: MessageId) -> Option<&'static MessageSchema> {\n",
@@ -290,7 +291,7 @@ fn tokenize(source: &str) -> Vec<Token> {
         let mut word_start = line_index + 1;
         let flush = |word: &mut String, tokens: &mut Vec<Token>, line: usize| {
             if !word.is_empty() {
-                tokens.push(Token { text: std::mem::take(word), line });
+                tokens.push(Token { text: take(word), line });
             }
         };
         for character in line.chars() {
@@ -468,8 +469,8 @@ impl Parser<'_> {
     fn parse_flag(&self, token: &Token) -> Result<Flag, String> {
         match token.text.as_str() {
             "Deprecated" => Ok(Flag::Deprecated),
-            "UDPBlackListed" => Ok(Flag::UdpBlacklisted),
-            "UDPDeprecated" => Ok(Flag::UdpDeprecated),
+            "UDPBlackListed" => Ok(Flag::LLUdpBlacklisted),
+            "UDPDeprecated" => Ok(Flag::LLUdpDeprecated),
             _ => Err(self.error(token, "unknown message flag")),
         }
     }

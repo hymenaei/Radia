@@ -14,12 +14,10 @@ pub struct RegionHandshake {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RegionInfo1 {
     pub region_flags: u32,
-    /// Region access-level code.
     pub sim_access: u8,
     pub sim_name: String,
-    pub owner_id: UUID,
+    pub sim_owner: UUID,
     pub is_estate_manager: bool,
-    /// Water surface height in region-local meters.
     pub water_height: f32,
     pub billable_factor: f32,
     pub cache_id: UUID,

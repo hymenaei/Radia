@@ -1,6 +1,6 @@
 //! Literal LLUDP fixtures and parsing helpers for tests.
 /// Independently assembled LLUDP packet fixtures for protocol tests.
-pub mod udp;
+pub mod lludp;
 
 /// Parses whitespace-separated hexadecimal bytes from a fixture.
 ///
@@ -32,7 +32,7 @@ pub fn parse_hex_fixture(source: &str) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_hex_fixture, udp::vectors::ALL};
+    use super::{lludp::vectors::ALL, parse_hex_fixture};
 
     #[test]
     fn parses_hex_bytes() {
@@ -46,7 +46,7 @@ mod tests {
     }
 
     #[test]
-    fn udp_vectors_are_hex() {
+    fn lludp_vectors_are_hex() {
         for (name, source) in ALL {
             let bytes = parse_hex_fixture(source).unwrap_or_else(|error| panic!("{name} is invalid: {error}"));
             assert!(!bytes.is_empty(), "{name} must not be empty");

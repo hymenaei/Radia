@@ -1,26 +1,24 @@
 use base::UUID;
 use protocol::{
-    BlockInstance, BlockValues, ChatType, FieldValue, SchemaMessage, UdpError,
+    BlockInstance, BlockValues, ChatType, FieldValue, LLUdpError, SchemaMessage,
+    lludp::{Message, MessageId, Packet, PacketFlags},
     messages::{
         ChatFromViewer, CompleteAgentMovement, CompletePingCheck, LogoutReply, LogoutRequest, MapBlockReply, MapBlockRequest, PacketAck,
-        RegionHandleRequest, RegionHandshakeReply, RegionIDAndHandleReply, StartPingCheck, UseCircuitCode,
+        PingId, RegionHandleRequest, RegionHandshakeReply, RegionIdAndHandleReply, StartPingCheck, UseCircuitCode,
         chat_from_viewer::{AgentData, ChatData},
-        complete_agent_movement::AgentData as MovementAgentData,
-        complete_ping_check::PingID as CompletePingID,
-        logout_reply::{AgentData as LogoutReplyAgentData, InventoryData},
-        logout_request::AgentData as LogoutRequestAgentData,
-        map_block_reply::AgentData as MapReplyAgentData,
-        map_block_request::{AgentData as MapAgentData, PositionData},
+        complete_agent_movement,
+        logout_reply::{self, InventoryData},
+        logout_request, map_block_reply,
+        map_block_request::{self, PositionData},
         packet_ack::Packets,
         region_handle_request::RequestBlock,
-        region_handshake_reply::{AgentData as ReplyAgentData, RegionInfo as ReplyRegionInfo},
+        region_handshake_reply,
         region_id_and_handle_reply::ReplyBlock,
-        start_ping_check::PingID as StartPingID,
         use_circuit_code::CircuitCode,
     },
-    udp::{Message, MessageId, Packet, PacketFlags},
+    schema::MessageEncoding,
 };
-use test_support::{parse_hex_fixture, udp::vectors};
+use test_support::{lludp::vectors, parse_hex_fixture};
 
 fn fixture(hex: &str) -> Vec<u8> {
     parse_hex_fixture(hex).expect("valid protocol fixture")
@@ -42,11 +40,11 @@ fn chat_message(message: String, chat_type: ChatType, channel: i32) -> Message {
 }
 
 fn complete_ping(ping_id: u8) -> Message {
-    Message::CompletePingCheck(CompletePingCheck { ping_id: CompletePingID { ping_id } })
+    Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id } })
 }
 
 fn start_ping(ping_id: u8, oldest_unacked: u32) -> Message {
-    Message::StartPingCheck(StartPingCheck { ping_id: StartPingID { ping_id, oldest_unacked } })
+    Message::StartPingCheck(StartPingCheck { ping_id: PingId { ping_id }, oldest_unacked })
 }
 
 fn packet_ack(packet_ids: &[u32]) -> Message {
@@ -102,8 +100,8 @@ fn replacement_handles_trailing_bytes() {
 fn handshake_reply_bytes() {
     let expected = fixture(vectors::REGION_HANDSHAKE_REPLY);
     let message = Message::RegionHandshakeReply(RegionHandshakeReply {
-        agent_data: ReplyAgentData { agent_id: agent_id(), session_id: session_id() },
-        region_info: ReplyRegionInfo { flags: 0 },
+        agent_data: region_handshake_reply::AgentData { agent_id: agent_id(), session_id: session_id() },
+        region_info: region_handshake_reply::RegionInfo { flags: 0 },
     });
     let packet = Packet::new(0x0102_0304, message.clone()).with_reliable();
 
@@ -120,7 +118,7 @@ fn handshake_reply_bytes() {
 fn movement_round_trip() {
     let expected = fixture(vectors::COMPLETE_AGENT_MOVEMENT);
     let message = Message::CompleteAgentMovement(CompleteAgentMovement {
-        agent_data: MovementAgentData { agent_id: agent_id(), session_id: session_id(), circuit_code: 0x0102_0304 },
+        agent_data: complete_agent_movement::AgentData { agent_id: agent_id(), session_id: session_id(), circuit_code: 0x0102_0304 },
     });
     let packet = Packet::new(0x0102_0304, message.clone()).with_reliable();
 
@@ -134,7 +132,7 @@ fn movement_round_trip() {
 fn logout_request_round_trip() {
     let expected = fixture(vectors::LOGOUT_REQUEST);
     let message =
-        Message::LogoutRequest(LogoutRequest { agent_data: LogoutRequestAgentData { agent_id: agent_id(), session_id: session_id() } });
+        Message::LogoutRequest(LogoutRequest { agent_data: logout_request::AgentData { agent_id: agent_id(), session_id: session_id() } });
     let packet = Packet::new(0x0102_0304, message.clone()).with_reliable();
 
     assert_eq!(packet.encode().expect("encode packet"), expected);
@@ -146,10 +144,7 @@ fn logout_request_round_trip() {
 #[test]
 fn viewer_chat_round_trip() {
     let expected = fixture(vectors::CHAT_FROM_VIEWER);
-    assert_eq!(
-        SchemaMessage::schema_by_name("ChatFromViewer").expect("ChatFromViewer schema").encoding,
-        protocol::schema::MessageEncoding::Zerocoded
-    );
+    assert_eq!(SchemaMessage::schema_by_name("ChatFromViewer").expect("ChatFromViewer schema").encoding, MessageEncoding::Zerocoded);
     assert_eq!(expected[0] & 0x80, 0, "ChatFromViewer is sent unencoded despite its template flag");
     let message = chat_message("abc".into(), ChatType::Shout, 42);
     let packet = Packet::new(0x0102_0304, message.clone()).with_reliable();
@@ -184,7 +179,13 @@ fn map_request_fixture() {
     let packet = Packet::new(
         0x0102_0304,
         MapBlockRequest {
-            agent_data: MapAgentData { agent_id: agent_id(), session_id: session_id(), flags: 0, estate_id: 0, godlike: false },
+            agent_data: map_block_request::AgentData {
+                agent_id: agent_id(),
+                session_id: session_id(),
+                flags: 0,
+                estate_id: 0,
+                godlike: false,
+            },
             position_data: PositionData { min_x: 32, max_x: 32, min_y: 44, max_y: 44 },
         }
         .into(),
@@ -223,7 +224,7 @@ fn empty_ack_omits_count() {
         fixture(concat!("00 01 02 03 04 00 ff ff 01 99 ", "ff ee dd cc bb aa 99 88 77 66 55 44 33 22 11 00 ", "00 00 00 00"));
     assert_eq!(
         Packet::decode(&map_block_reply).expect("decode empty MapBlockReply").message(),
-        &Message::MapBlockReply(MapBlockReply { agent_data: MapReplyAgentData { agent_id: agent_id(), flags: 0 }, data: vec![] })
+        &Message::MapBlockReply(MapBlockReply { agent_data: map_block_reply::AgentData { agent_id: agent_id(), flags: 0 }, data: vec![] })
     );
 }
 
@@ -234,7 +235,7 @@ fn logout_reply_empty_forms() {
         assert_eq!(
             decoded.message(),
             &Message::LogoutReply(LogoutReply {
-                agent_data: LogoutReplyAgentData { agent_id: agent_id(), session_id: session_id() },
+                agent_data: logout_reply::AgentData { agent_id: agent_id(), session_id: session_id() },
                 inventory_data: vec![],
             })
         );
@@ -249,7 +250,7 @@ fn logout_reply_nil_item() {
     assert_eq!(
         decoded.message(),
         &Message::LogoutReply(LogoutReply {
-            agent_data: LogoutReplyAgentData { agent_id: agent_id(), session_id: session_id() },
+            agent_data: logout_reply::AgentData { agent_id: agent_id(), session_id: session_id() },
             inventory_data: vec![InventoryData { item_id: UUID::nil() }],
         })
     );
@@ -268,7 +269,7 @@ fn truncated_entries_rejected() {
         )),
         fixture(concat!("00 01 02 03 04 00 ff ff 01 99 ", "ff ee dd cc bb aa 99 88 77 66 55 44 33 22 11 00 ", "00 00 00 00 01")),
     ] {
-        assert_eq!(Packet::decode(&bytes), Err(UdpError::TruncatedPacket));
+        assert_eq!(Packet::decode(&bytes), Err(LLUdpError::TruncatedPacket));
     }
 }
 
@@ -282,7 +283,7 @@ fn region_handle_fixtures() {
     let decoded = Packet::decode(&reply_bytes).expect("decode region handle reply");
     assert!(matches!(
         decoded.message(),
-        Message::RegionIDAndHandleReply(RegionIDAndHandleReply {
+        Message::RegionIdAndHandleReply(RegionIdAndHandleReply {
             reply_block: ReplyBlock { region_id: id, region_handle: 0x0000_2000_0000_2c00 }
         }) if *id == region_id
     ));
@@ -306,17 +307,17 @@ fn packet_ack_limit() {
     let packets = (0..=u8::MAX).map(|id| Packets { id: u32::from(id) }).collect();
     let message = Message::PacketAck(PacketAck { packets });
 
-    assert_eq!(Packet::new(1, message).encode(), Err(UdpError::TooManyAcks));
+    assert_eq!(Packet::new(1, message).encode(), Err(LLUdpError::TooManyAcks));
 }
 
 #[test]
 fn header_rejects_unrepresentable_fields() {
     let too_many_acks = Packet::new(1, complete_ping(1)).with_appended_acks(vec![0; usize::from(u8::MAX) + 1]);
-    assert_eq!(too_many_acks.header(), Err(UdpError::TooManyAcks));
-    assert_eq!(too_many_acks.is_zerocoded(), Err(UdpError::TooManyAcks));
+    assert_eq!(too_many_acks.header(), Err(LLUdpError::TooManyAcks));
+    assert_eq!(too_many_acks.is_zerocoded(), Err(LLUdpError::TooManyAcks));
 
     let long_extra_header = Packet::new(1, complete_ping(1)).with_extra_header(vec![0; usize::from(u8::MAX) + 1]);
-    assert_eq!(long_extra_header.header(), Err(UdpError::ExtraHeaderTooLong));
+    assert_eq!(long_extra_header.header(), Err(LLUdpError::ExtraHeaderTooLong));
 }
 
 #[test]
@@ -336,7 +337,7 @@ fn encode_into_preserves_output_on_error() {
     let packet = Packet::new(1, chat_message("x".repeat(usize::from(u16::MAX) + 1), ChatType::Normal, 0));
     let mut output = b"prefix".to_vec();
 
-    assert_eq!(packet.encode_into(&mut output), Err(UdpError::VariableFieldTooLong));
+    assert_eq!(packet.encode_into(&mut output), Err(LLUdpError::VariableFieldTooLong));
     assert_eq!(output, b"prefix");
 }
 
@@ -368,14 +369,14 @@ fn header_bits_survive_round_trip() {
 fn header_flags_match_wire() {
     assert_eq!(
         SchemaMessage::schema_by_name("RegionHandshakeReply").expect("RegionHandshakeReply schema").encoding,
-        protocol::schema::MessageEncoding::Zerocoded
+        MessageEncoding::Zerocoded
     );
     let id = UUID::from_bytes([0x11; 16]);
     let packet = Packet::new(
         1,
         Message::RegionHandshakeReply(RegionHandshakeReply {
-            agent_data: ReplyAgentData { agent_id: id, session_id: id },
-            region_info: ReplyRegionInfo { flags: u32::MAX },
+            agent_data: region_handshake_reply::AgentData { agent_id: id, session_id: id },
+            region_info: region_handshake_reply::RegionInfo { flags: u32::MAX },
         }),
     );
 
@@ -404,7 +405,7 @@ fn empty_appended_ack_section_survives() {
 fn resent_requires_reliable() {
     let bytes = [0x20, 0x01, 0x02, 0x03, 0x04, 0x00];
 
-    assert_eq!(Packet::decode(&bytes), Err(UdpError::InvalidPacketFlags));
+    assert_eq!(Packet::decode(&bytes), Err(LLUdpError::InvalidPacketFlags));
 }
 
 #[test]
@@ -510,13 +511,13 @@ fn trust_keeps_unreliable() {
 
 #[test]
 fn malformed_packets_rejected() {
-    assert!(matches!(Packet::decode(&[]), Err(UdpError::TruncatedPacket)));
-    assert!(matches!(Packet::decode(&[0, 0, 0, 0, 1]), Err(UdpError::TruncatedPacket)));
-    assert!(matches!(Packet::decode(&[0, 0, 0, 0, 1, 1]), Err(UdpError::TruncatedPacket)));
-    assert!(matches!(Packet::decode(&[0, 0, 0, 0, 1, 0, 0xff, 0xff, 0x00]), Err(UdpError::TruncatedPacket)));
-    assert!(matches!(Packet::decode(&[0, 0, 0, 0, 1, 0, 0xff, 0xff, 0x00, 0x00]), Err(UdpError::InvalidMessageId)));
-    assert!(matches!(Packet::decode(&[0x80, 0, 0, 0, 1, 0, 0x04, 0]), Err(UdpError::InvalidZeroCode)));
-    assert!(matches!(Packet::decode(&[0x10, 0, 0, 0, 1, 0, 0x04, 1, 2, 3, 4, 2]), Err(UdpError::InvalidAcknowledgementList)));
+    assert!(matches!(Packet::decode(&[]), Err(LLUdpError::TruncatedPacket)));
+    assert!(matches!(Packet::decode(&[0, 0, 0, 0, 1]), Err(LLUdpError::TruncatedPacket)));
+    assert!(matches!(Packet::decode(&[0, 0, 0, 0, 1, 1]), Err(LLUdpError::TruncatedPacket)));
+    assert!(matches!(Packet::decode(&[0, 0, 0, 0, 1, 0, 0xff, 0xff, 0x00]), Err(LLUdpError::TruncatedPacket)));
+    assert!(matches!(Packet::decode(&[0, 0, 0, 0, 1, 0, 0xff, 0xff, 0x00, 0x00]), Err(LLUdpError::InvalidMessageId)));
+    assert!(matches!(Packet::decode(&[0x80, 0, 0, 0, 1, 0, 0x04, 0]), Err(LLUdpError::InvalidZeroCode)));
+    assert!(matches!(Packet::decode(&[0x10, 0, 0, 0, 1, 0, 0x04, 1, 2, 3, 4, 2]), Err(LLUdpError::InvalidAcknowledgementList)));
 }
 
 #[test]
@@ -525,7 +526,7 @@ fn message_id_boundaries() {
     for &id in invalid_ids {
         let mut packet = vec![0, 0, 0, 0, 1, 0];
         packet.extend_from_slice(id);
-        assert_eq!(Packet::decode(&packet).expect_err("reserved ID must fail"), UdpError::InvalidMessageId);
+        assert_eq!(Packet::decode(&packet).expect_err("reserved ID must fail"), LLUdpError::InvalidMessageId);
     }
 
     let mut low_packet = vec![0, 0, 0, 0, 1, 0];
@@ -538,9 +539,9 @@ fn message_id_boundaries() {
 fn rejects_oversize_inputs() {
     let ping = complete_ping(1);
 
-    assert_eq!(Packet::new(1, ping.clone()).with_extra_header(vec![0; 256]).encode(), Err(UdpError::ExtraHeaderTooLong));
-    assert_eq!(Packet::new(1, ping).with_appended_acks(vec![0; 256]).encode(), Err(UdpError::TooManyAcks));
+    assert_eq!(Packet::new(1, ping.clone()).with_extra_header(vec![0; 256]).encode(), Err(LLUdpError::ExtraHeaderTooLong));
+    assert_eq!(Packet::new(1, ping).with_appended_acks(vec![0; 256]).encode(), Err(LLUdpError::TooManyAcks));
 
     let oversized_chat = chat_message("x".repeat(65_535), ChatType::Normal, 0);
-    assert_eq!(Packet::new(1, oversized_chat).encode(), Err(UdpError::VariableFieldTooLong));
+    assert_eq!(Packet::new(1, oversized_chat).encode(), Err(LLUdpError::VariableFieldTooLong));
 }

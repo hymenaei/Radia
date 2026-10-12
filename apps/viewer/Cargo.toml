@@ -24,9 +24,12 @@ dirs = "=5.0.1"
 futures.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
+gpui-component-assets.workspace = true
 gpui-platform.workspace = true
+raw-window-handle = "=0.6.2"
 llsd.workspace = true
 base.workspace = true
+math.workspace = true
 network.workspace = true
 protocol.workspace = true
 serde.workspace = true
@@ -36,12 +39,20 @@ tracing-subscriber.workspace = true
 tracing-log.workspace = true
 tracing-tracy = { workspace = true, optional = true }
 url.workspace = true
+world.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "=3.6.3", default-features = false, features = ["windows-native"] }
+windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "=0.2.7"
 
 [dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+network = { workspace = true, features = ["test-support"] }
 test-support.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 time.workspace = true
 zip.workspace = true

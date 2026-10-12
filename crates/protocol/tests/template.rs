@@ -1,11 +1,13 @@
 #[path = "../build/template.rs"]
 mod parser;
 
-use protocol::udp::MessageId;
+use std::collections::HashSet;
+
+use protocol::lludp::MessageId;
 use protocol::{
-    Frequency,
+    Frequency, SchemaMessage,
     schema::{
-        BlockMode, FieldKind, MESSAGE_COUNT, MESSAGES,
+        BlockMode, FieldKind, MESSAGE_COUNT, MESSAGES, MessageFlag,
         ids::{
             AGENT_MOVEMENT_COMPLETE, AGENT_UPDATE, CHAT_FROM_SIMULATOR, CHAT_FROM_VIEWER, COMPLETE_AGENT_MOVEMENT, COMPLETE_PING_CHECK,
             LOGOUT_REPLY, LOGOUT_REQUEST, MAP_BLOCK_REPLY, MAP_BLOCK_REQUEST, PACKET_ACK, REGION_HANDLE_REQUEST, REGION_HANDSHAKE,
@@ -20,7 +22,7 @@ fn schema_covers_messages() {
     assert_eq!(MESSAGES.len(), MESSAGE_COUNT);
 
     let names = MESSAGES.iter().map(|message| message.name).collect::<Vec<_>>();
-    let unique = names.iter().copied().collect::<std::collections::HashSet<_>>();
+    let unique = names.iter().copied().collect::<HashSet<_>>();
     assert_eq!(unique.len(), names.len());
 }
 
@@ -67,12 +69,22 @@ fn schema_block_layouts() {
 }
 
 #[test]
+fn lludp_flags_match_template_tokens() {
+    let blacklisted = MESSAGES.iter().find(|message| message.name == "OpenCircuit").expect("OpenCircuit is in the template");
+    assert_eq!(blacklisted.flags, &[MessageFlag::LLUdpBlacklisted]);
+
+    let deprecated =
+        MESSAGES.iter().find(|message| message.name == "SetSimPresenceInDatabase").expect("SetSimPresenceInDatabase is in the template");
+    assert_eq!(deprecated.flags, &[MessageFlag::LLUdpDeprecated]);
+}
+
+#[test]
 fn lookup_covers_messages() {
     for schema in MESSAGES {
-        assert_eq!(protocol::SchemaMessage::schema_by_id(schema.id), Some(schema));
-        assert_eq!(protocol::SchemaMessage::schema_by_name(schema.name), Some(schema));
+        assert_eq!(SchemaMessage::schema_by_id(schema.id), Some(schema));
+        assert_eq!(SchemaMessage::schema_by_name(schema.name), Some(schema));
     }
-    assert_eq!(protocol::SchemaMessage::schema_by_name("missing"), None);
+    assert_eq!(SchemaMessage::schema_by_name("missing"), None);
 }
 
 #[test]

@@ -1,13 +1,15 @@
 use base::UUID;
+use math::{Quat, Vec3, Vec4};
 use protocol::{
-    UdpError,
+    LLUdpError,
+    lludp::{Message, Packet},
     messages::{
-        CacheMissType, CachedObjectReference, KillObject, ObjectRegionData, ObjectRequest, ObjectRotation, ObjectUpdateCached,
-        RequestAgentData, RequestMultipleObjects,
+        CacheMissType, CachedObjectReference, ExtraParameter, KillObject, ObjectData, ObjectMotion, ObjectRequest, ObjectShape,
+        ObjectSound, ObjectSpecificData, ObjectText, ObjectUpdate, ObjectUpdateCached, RegionData, RequestAgentData,
+        RequestMultipleObjects, kill_object,
     },
-    udp::{Message, Packet},
 };
-use test_support::{parse_hex_fixture, udp::vectors};
+use test_support::{lludp::vectors, parse_hex_fixture};
 
 fn fixture(hex: &str) -> Vec<u8> {
     parse_hex_fixture(hex).expect("valid protocol fixture")
@@ -16,7 +18,7 @@ fn fixture(hex: &str) -> Vec<u8> {
 fn unique_offset(bytes: &[u8], needle: &[u8]) -> usize {
     let mut offsets = bytes.windows(needle.len()).enumerate().filter_map(|(offset, candidate)| (candidate == needle).then_some(offset));
     let offset = offsets.next().expect("fixture field is present");
-    assert!(offsets.next().is_none(), "fixture field is unique");
+    assert!(offsets.next().is_none(), "fixture field {needle:02x?} is unique");
     offset
 }
 
@@ -66,20 +68,189 @@ fn full_update_fixture() {
 
     assert_eq!(packet.sequence(), 0x0102_0304);
     assert!(packet.is_zerocoded().expect("read zero-code flag"));
-    assert_eq!(update.region_data, ObjectRegionData { region_handle: 0x1122_3344_5566_7788, time_dilation: 0x8000 });
+    assert_eq!(update.region_data, RegionData { region_handle: 0x1122_3344_5566_7788, time_dilation: 0x8000 });
     assert_eq!(update.objects.len(), 2);
     assert_eq!(update.objects[0].local_id, 0x1020_3040);
     assert_eq!(update.objects[0].id, uuid("12345678-90ab-cdef-0123-456789abcdef"));
-    assert_eq!(update.objects[0].avatar_collision_plane, None);
-    assert!(update.objects[0].opaque_motion_data.is_empty());
-    assert!(!update.objects[0].opaque_data.is_empty());
-    assert_eq!(update.objects[1].avatar_collision_plane, Some([0.0, 0.0, 1.0, 0.0]));
-    assert!(update.objects[1].opaque_motion_data.is_empty());
+    assert_eq!(update.objects[0].collision_plane, None);
+    assert!(!update.objects[0].texture_entry.is_empty());
+    assert_eq!(update.objects[1].collision_plane, Some(Vec4::new(0.0, 0.0, 1.0, 0.0)));
     assert_reencodes(&packet, &bytes);
 }
 
 #[test]
-fn full_update_extended_motion_is_preserved() {
+fn full_update_typed_fields_round_trip() {
+    let object = ObjectData {
+        local_id: 0x0102_0304,
+        state: 0x05,
+        id: uuid("12345678-90ab-cdef-0123-456789abcdef"),
+        crc: 0x1122_3344,
+        pcode: 9,
+        material: 3,
+        click_action: 2,
+        scale: Vec3::new(1.0, 2.0, 3.0),
+        motion: ObjectMotion {
+            position: Vec3::new(10.0, 20.0, 30.0),
+            velocity: Vec3::new(0.5, -1.5, 2.5),
+            acceleration: Vec3::new(-0.25, 0.75, 1.25),
+            rotation: Quat::from_xyzw(0.1, 0.2, 0.3, 0.927_361_85),
+            angular_velocity: Vec3::new(3.0, 2.0, 1.0),
+        },
+        collision_plane: Some(Vec4::new(1.0, 2.0, 3.0, 4.0)),
+        parent_local_id: 0x0506_0708,
+        update_flags: 0xaabb_ccdd,
+        shape: ObjectShape {
+            path_curve: 1,
+            profile_curve: 2,
+            path_begin: 0x0304,
+            path_end: 0x0506,
+            path_scale_x: 7,
+            path_scale_y: 8,
+            path_shear_x: 9,
+            path_shear_y: 10,
+            path_twist: -11,
+            path_twist_begin: -12,
+            path_radius_offset: -13,
+            path_taper_x: -14,
+            path_taper_y: -15,
+            path_revolutions: 16,
+            path_skew: -17,
+            profile_begin: 0x1213,
+            profile_end: 0x1415,
+            profile_hollow: 0x1617,
+        },
+        texture_entry: vec![0x10, 0x20, 0x30],
+        texture_anim: vec![0x40, 0x50],
+        name_value: vec![b'n', b'a', b'm', b'e', 0],
+        data: vec![0x60, 0x70, 0x80],
+        text: ObjectText { text: "hover".to_owned(), color: [0x11, 0x22, 0x33, 0x44] },
+        media_url: "https://example.invalid".to_owned(),
+        particle_system: vec![0x90, 0xa0],
+        extra_parameters: vec![
+            ExtraParameter { parameter_type: 0x1234, data: vec![0xb0, 0xc0, 0xd0] },
+            ExtraParameter { parameter_type: 0x5678, data: vec![0xe0] },
+        ],
+        sound: ObjectSound { sound_id: uuid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"), gain: 0.75, flags: 0x03, radius: 16.5 },
+        owner_id: uuid("11111111-2222-3333-4444-555555555555"),
+        joint_type: 4,
+        joint_pivot: Vec3::new(41.5, 42.5, 43.5),
+        joint_axis_or_anchor: Vec3::new(51.5, 52.5, 53.5),
+    };
+    let message = Message::ObjectUpdate(ObjectUpdate {
+        region_data: RegionData { region_handle: 0x1122_3344_5566_7788, time_dilation: 0x8000 },
+        objects: vec![object],
+    });
+    let sequence = 0x9988_7766;
+    let encoded = Packet::new(sequence, message.clone()).with_zero_coding(false).encode().expect("encode typed full update");
+    let decoded = Packet::decode(&encoded).expect("decode typed full update");
+
+    assert_eq!(decoded.message(), &message);
+    assert_eq!(decoded.encode().expect("re-encode typed full update"), encoded);
+
+    let source = match &message {
+        Message::ObjectUpdate(update) => &update.objects[0],
+        _ => unreachable!(),
+    };
+    let id_offset = unique_offset(&encoded, &source.local_id.to_le_bytes());
+    let mut fields_offset = id_offset + 40;
+    fields_offset += 1 + usize::from(encoded[fields_offset]);
+    fields_offset += 8 + 23;
+    for (prefix, length) in [
+        (2, source.texture_entry.len()),
+        (1, source.texture_anim.len()),
+        (2, source.name_value.len()),
+        (2, source.data.len()),
+        (1, source.text.text.len() + 1),
+    ] {
+        fields_offset += prefix + length;
+    }
+    fields_offset += 4;
+    let extra_parameters_len = 1 + source.extra_parameters.iter().map(|parameter| 2 + 4 + parameter.data.len()).sum::<usize>();
+    for (prefix, length) in [(1, source.media_url.len() + 1), (1, source.particle_system.len()), (1, extra_parameters_len)] {
+        fields_offset += prefix + length;
+    }
+    fields_offset += 32;
+    let gain_offset = fields_offset;
+    let radius_offset = gain_offset + 5;
+    let joint_pivot_offset = radius_offset + 5;
+    let joint_axis_offset = joint_pivot_offset + 12;
+    let collision_plane_offset = id_offset + 41;
+    for (field, offset) in
+        [gain_offset, radius_offset, joint_pivot_offset, joint_axis_offset, collision_plane_offset].into_iter().enumerate()
+    {
+        let mut malformed = encoded.clone();
+        write_nan(&mut malformed, offset);
+        let decoded = Packet::decode(&malformed).expect("decode non-finite semantic object values");
+        let Message::ObjectUpdate(decoded) = decoded.message() else { panic!("expected full object update") };
+        let object = &decoded.objects[0];
+        let value_is_nan = match field {
+            0 => object.sound.gain.is_nan(),
+            1 => object.sound.radius.is_nan(),
+            2 => object.joint_pivot.x.is_nan(),
+            3 => object.joint_axis_or_anchor.x.is_nan(),
+            _ => object.collision_plane.expect("collision plane remains present").x.is_nan(),
+        };
+        assert!(value_is_nan, "field {field} should retain its NaN value");
+    }
+
+    for field in 0..5 {
+        let mut invalid = match message.clone() {
+            Message::ObjectUpdate(update) => update,
+            _ => unreachable!(),
+        };
+        match field {
+            0 => invalid.objects[0].sound.gain = f32::NAN,
+            1 => invalid.objects[0].sound.radius = f32::NAN,
+            2 => invalid.objects[0].joint_pivot.x = f32::NAN,
+            3 => invalid.objects[0].joint_axis_or_anchor.x = f32::NAN,
+            _ => invalid.objects[0].collision_plane.as_mut().expect("fixture has a collision plane").x = f32::NAN,
+        }
+        assert_eq!(Packet::new(sequence, Message::ObjectUpdate(invalid)).with_zero_coding(false).encode(), Err(LLUdpError::InvalidMessage));
+    }
+}
+
+#[test]
+fn object_update_quaternions_use_canonical_xyz() {
+    let rotation = Quat::from_xyzw(0.2, -0.3, 0.4, -0.84);
+
+    let (_, packet) = decode(vectors::OBJECT_UPDATE);
+    let Message::ObjectUpdate(mut update) = packet.message().clone() else {
+        panic!("expected full object update");
+    };
+    update.objects[0].motion.rotation = rotation;
+    let encoded = Packet::new(packet.sequence(), Message::ObjectUpdate(update.clone())).encode().expect("encode full rotation");
+    let decoded = Packet::decode(&encoded).expect("decode full rotation");
+    let Message::ObjectUpdate(decoded) = decoded.message() else {
+        panic!("expected full object update");
+    };
+    let decoded_rotation = decoded.objects[0].motion.rotation;
+    assert!(decoded_rotation.w >= 0.0);
+    assert!((rotation.normalize().dot(decoded_rotation.normalize()).abs() - 1.0).abs() < 1.0e-5);
+
+    update.objects[0].motion.rotation = Quat::from_xyzw(0.0, 0.0, 0.0, 0.0);
+    assert_eq!(Packet::new(packet.sequence(), Message::ObjectUpdate(update)).encode(), Err(LLUdpError::InvalidMessage));
+
+    let (_, packet) = decode(vectors::OBJECT_UPDATE_COMPRESSED_TYPED);
+    let Message::ObjectUpdateCompressed(mut update) = packet.message().clone() else {
+        panic!("expected compressed full object update");
+    };
+    update.objects[0].rotation = rotation;
+    let encoded =
+        Packet::new(packet.sequence(), Message::ObjectUpdateCompressed(update.clone())).encode().expect("encode compressed rotation");
+    let decoded = Packet::decode(&encoded).expect("decode compressed rotation");
+    let Message::ObjectUpdateCompressed(decoded) = decoded.message() else {
+        panic!("expected compressed full object update");
+    };
+    let decoded_rotation = decoded.objects[0].rotation;
+    assert!(decoded_rotation.w >= 0.0);
+    assert!((rotation.normalize().dot(decoded_rotation.normalize()).abs() - 1.0).abs() < 1.0e-5);
+
+    update.objects[0].rotation = Quat::from_xyzw(0.0, 0.0, 0.0, 0.0);
+    assert_eq!(Packet::new(packet.sequence(), Message::ObjectUpdateCompressed(update)).encode(), Err(LLUdpError::InvalidMessage));
+}
+
+#[test]
+fn full_update_extended_motion_is_accepted() {
     let (_, packet) = decode(vectors::OBJECT_UPDATE);
     let Message::ObjectUpdate(update) = packet.message() else {
         panic!("expected full object update");
@@ -100,29 +271,36 @@ fn full_update_extended_motion_is_preserved() {
             extended.objects.iter().find(|candidate| candidate.local_id == object.local_id).expect("object remains present");
 
         assert_eq!(extended_object.motion, object.motion);
-        assert_eq!(extended_object.avatar_collision_plane, object.avatar_collision_plane);
-        assert_eq!(extended_object.opaque_motion_data, extension);
-        assert_eq!(extended_object.opaque_data, object.opaque_data);
-        assert_reencodes(&extended_packet, &extended_wire);
+        assert_eq!(extended_object.collision_plane, object.collision_plane);
+        assert_eq!(extended_object, object);
+
+        let canonical_wire = extended_packet.encode().expect("encode canonical motion layout");
+        assert_ne!(canonical_wire, extended_wire);
+        let canonical_packet = Packet::decode(&canonical_wire).expect("decode canonical motion layout");
+        let Message::ObjectUpdate(canonical) = canonical_packet.message() else {
+            panic!("expected full object update");
+        };
+        assert_eq!(canonical.objects.iter().find(|candidate| candidate.local_id == object.local_id), Some(object));
+        assert_reencodes(&canonical_packet, &canonical_wire);
     }
 }
 
 #[test]
-fn full_update_rejects_opaque_motion_lengths_that_change_the_layout() {
+fn full_update_rejects_unsupported_motion_lengths() {
     let (_, packet) = decode(vectors::OBJECT_UPDATE);
-    let Message::ObjectUpdate(mut update) = packet.message().clone() else {
+    let Message::ObjectUpdate(update) = packet.message().clone() else {
         panic!("expected full object update");
     };
 
-    update.objects[0].opaque_motion_data.resize(16, 0xaa);
-    assert_eq!(Packet::new(packet.sequence(), Message::ObjectUpdate(update)).encode(), Err(UdpError::InvalidMessage));
+    let mut wire =
+        Packet::new(packet.sequence(), Message::ObjectUpdate(update.clone())).with_zero_coding(false).encode().expect("encode full update");
+    let first_id_offset = unique_offset(&wire, &update.objects[0].local_id.to_le_bytes());
+    let motion_length_offset = first_id_offset + 40;
 
-    let (_, packet) = decode(vectors::OBJECT_UPDATE);
-    let Message::ObjectUpdate(mut update) = packet.message().clone() else {
-        panic!("expected full object update");
-    };
-    update.objects[1].opaque_motion_data.resize(48, 0xaa);
-    assert_eq!(Packet::new(packet.sequence(), Message::ObjectUpdate(update)).encode(), Err(UdpError::InvalidMessage));
+    for length in [59, 61, 75, 77, 123, 125, 139, 141] {
+        wire[motion_length_offset] = length;
+        assert_eq!(Packet::decode(&wire), Err(LLUdpError::InvalidMessage), "motion length {length}");
+    }
 }
 
 #[test]
@@ -137,10 +315,31 @@ fn compressed_update_fixture() {
     assert_eq!(update.region_data.time_dilation, 0x8000);
     assert_eq!(object.local_id, 0x0102_0304);
     assert_eq!(object.id, uuid("12345678-90ab-cdef-0123-456789abcdef"));
-    assert_eq!(object.angular_velocity, Some(protocol::Vector3 { x: 0.5, y: 0.0, z: -0.5 }));
-    assert_eq!(object.parent_local_id, Some(0x0506_0708));
-    assert_eq!(object.opaque_data, [0xde, 0xad, 0, 0xbe, 0xef]);
+    assert_eq!(object.position, Vec3::new(4.0, 5.0, 6.0));
+    assert_eq!(object.angular_velocity, Some(Vec3::new(0.5, 0.0, -0.5)));
+    assert_eq!(object.parent_local_id, 0x0506_0708);
+    assert_eq!(object.data, Some(ObjectSpecificData::Tree { species: 3 }));
+    assert_eq!(object.text.as_ref().map(|text| text.text.as_str()), Some("hello"));
+    assert_eq!(object.media_url.as_deref(), Some("https://example.invalid"));
+    assert_eq!(object.legacy_particle_system.as_ref().map(Vec::len), Some(86));
+    assert_eq!(object.extra_parameters.len(), 2);
+    assert_eq!(object.sound.map(|sound| sound.sound_id), Some(uuid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")));
+    assert_eq!(object.name_value.as_deref(), Some("Name=Crate\nDesc=Typed"));
+    assert_eq!(object.texture_entry.as_deref(), Some(&[0xde, 0xad, 0, 0xbe, 0xef][..]));
+    assert_eq!(object.texture_animation.as_ref().map(Vec::len), Some(16));
+    assert!(object.particle_system.is_some());
     assert_reencodes(&packet, &bytes);
+
+    let mut malformed_sound = bytes;
+    let sound_id = object.sound.expect("fixture sound").sound_id;
+    let sound_offset = unique_offset(&malformed_sound, sound_id.as_bytes());
+    write_nan(&mut malformed_sound, sound_offset + 16);
+    write_nan(&mut malformed_sound, sound_offset + 21);
+    let decoded = Packet::decode(&malformed_sound).expect("decode non-finite compressed sound values");
+    let Message::ObjectUpdateCompressed(decoded) = decoded.message() else { panic!("expected compressed object update") };
+    let sound = decoded.objects[0].sound.expect("sound remains present");
+    assert!(sound.gain.is_nan());
+    assert!(sound.radius.is_nan());
 }
 
 #[test]
@@ -151,8 +350,15 @@ fn terse_update_fixtures_are_partial() {
     };
     assert_eq!(update.objects.len(), 1);
     assert_eq!(update.objects[0].local_id, 0x1020_3040);
-    assert_eq!(update.objects[0].avatar_collision_plane, None);
-    assert_eq!(update.objects[0].texture_entry.as_deref(), Some(&[0x11, 0, 0x22][..]));
+    assert_eq!(update.objects[0].state, 5);
+    assert!(!update.objects[0].avatar);
+    assert_eq!(update.objects[0].collision_plane, None);
+    assert_eq!(update.objects[0].motion.position, Vec3::new(5.0, 6.0, 7.0));
+    assert_eq!(update.objects[0].motion.velocity, Vec3::new(-128.0, 0.0, 128.0));
+    assert_eq!(update.objects[0].motion.acceleration, Vec3::new(-64.0, 0.0, 64.0));
+    assert_eq!(update.objects[0].motion.rotation, Quat::from_xyzw(-1.0, 0.0, 1.0, 0.0));
+    assert_eq!(update.objects[0].motion.angular_velocity, Vec3::new(-64.0, 0.0, 64.0));
+    assert_eq!(update.objects[0].texture_entry.as_slice(), &[0x11, 0, 0x22]);
     let canonical = packet.encode().expect("re-encode terse object update");
     assert_ne!(canonical, bytes, "zero snap canonicalizes the near-zero quantized value");
     assert_eq!(Packet::decode(&canonical).expect("decode canonical terse update").message(), packet.message());
@@ -161,9 +367,35 @@ fn terse_update_fixtures_are_partial() {
     let Message::ImprovedTerseObjectUpdate(avatar_update) = avatar_packet.message() else {
         panic!("expected terse avatar update");
     };
-    assert_eq!(avatar_update.objects[0].agent_data_flag, 1);
-    assert_eq!(avatar_update.objects[0].avatar_collision_plane, Some([0.0, 0.0, 1.0, 0.0]));
+    assert!(avatar_update.objects[0].avatar);
+    assert_eq!(avatar_update.objects[0].collision_plane, Some(Vec4::new(0.0, 0.0, 1.0, 0.0)));
     assert_reencodes(&avatar_packet, &avatar_bytes);
+}
+
+#[test]
+fn terse_avatar_plane_and_empty_texture_entry_are_consistent() {
+    let (_, packet) = decode(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
+    let Message::ImprovedTerseObjectUpdate(mut update) = packet.message().clone() else {
+        panic!("expected terse object update");
+    };
+    update.objects[0].texture_entry.clear();
+    let encoded =
+        Packet::new(packet.sequence(), Message::ImprovedTerseObjectUpdate(update.clone())).encode().expect("encode empty texture entry");
+    let decoded = Packet::decode(&encoded).expect("decode empty texture entry");
+    let Message::ImprovedTerseObjectUpdate(decoded) = decoded.message() else {
+        panic!("expected terse object update");
+    };
+    assert!(decoded.objects[0].texture_entry.is_empty());
+
+    update.objects[0].avatar = true;
+    assert_eq!(
+        Packet::new(packet.sequence(), Message::ImprovedTerseObjectUpdate(update.clone())).encode(),
+        Err(LLUdpError::InvalidMessage),
+    );
+
+    update.objects[0].avatar = false;
+    update.objects[0].collision_plane = Some(Vec4::ZERO);
+    assert_eq!(Packet::new(packet.sequence(), Message::ImprovedTerseObjectUpdate(update)).encode(), Err(LLUdpError::InvalidMessage));
 }
 
 #[test]
@@ -178,20 +410,20 @@ fn terse_quantized_midpoint_decodes_as_exact_zero() {
         panic!("expected terse object update");
     };
     let motion = &update.objects[0].motion;
-    assert_eq!(motion.velocity, protocol::Vector3::default());
-    assert_eq!(motion.acceleration, protocol::Vector3::default());
-    assert_eq!(motion.rotation, ObjectRotation::default());
-    assert_eq!(motion.angular_velocity, protocol::Vector3::default());
+    assert_eq!(motion.velocity, Vec3::ZERO);
+    assert_eq!(motion.acceleration, Vec3::ZERO);
+    assert_eq!(motion.rotation, Quat::from_xyzw(0.0, 0.0, 0.0, 0.0));
+    assert_eq!(motion.angular_velocity, Vec3::ZERO);
 
     let encoded = Packet::new(packet.sequence(), packet.message().clone()).encode().expect("re-encode zero motion");
     let decoded = Packet::decode(&encoded).expect("decode re-encoded zero motion");
     let Message::ImprovedTerseObjectUpdate(update) = decoded.message() else {
         panic!("expected terse object update");
     };
-    assert_eq!(update.objects[0].motion.velocity, protocol::Vector3::default());
-    assert_eq!(update.objects[0].motion.acceleration, protocol::Vector3::default());
-    assert_eq!(update.objects[0].motion.rotation, ObjectRotation::default());
-    assert_eq!(update.objects[0].motion.angular_velocity, protocol::Vector3::default());
+    assert_eq!(update.objects[0].motion.velocity, Vec3::ZERO);
+    assert_eq!(update.objects[0].motion.acceleration, Vec3::ZERO);
+    assert_eq!(update.objects[0].motion.rotation, Quat::from_xyzw(0.0, 0.0, 0.0, 0.0));
+    assert_eq!(update.objects[0].motion.angular_velocity, Vec3::ZERO);
 }
 
 #[test]
@@ -200,7 +432,7 @@ fn cached_and_kill_fixtures() {
     assert_eq!(
         cache_packet.message(),
         &Message::ObjectUpdateCached(ObjectUpdateCached {
-            region_data: ObjectRegionData { region_handle: 0x1122_3344_5566_7788, time_dilation: 0x8000 },
+            region_data: RegionData { region_handle: 0x1122_3344_5566_7788, time_dilation: 0x8000 },
             objects: vec![
                 CachedObjectReference { local_id: 0x0102_0304, crc: 0x1122_3344, update_flags: 0x5566_7788 },
                 CachedObjectReference { local_id: 0x1020_3040, crc: 0xaabb_ccdd, update_flags: 0x8765_4321 },
@@ -210,7 +442,12 @@ fn cached_and_kill_fixtures() {
     assert_reencodes(&cache_packet, &cache_bytes);
 
     let (kill_bytes, kill_packet) = decode(vectors::KILL_OBJECT);
-    assert_eq!(kill_packet.message(), &Message::KillObject(KillObject { local_ids: vec![0x0102_0304, 0x5566_7788] }));
+    assert_eq!(
+        kill_packet.message(),
+        &Message::KillObject(KillObject {
+            object_data: vec![kill_object::ObjectData { local_id: 0x0102_0304 }, kill_object::ObjectData { local_id: 0x5566_7788 },],
+        })
+    );
     assert_reencodes(&kill_packet, &kill_bytes);
 }
 
@@ -291,7 +528,7 @@ fn empty_object_message(message: &Message) -> Message {
         }
         Message::KillObject(update) => {
             let mut update = update.clone();
-            update.local_ids.clear();
+            update.object_data.clear();
             Message::KillObject(update)
         }
         Message::RequestMultipleObjects(update) => {
@@ -310,14 +547,7 @@ fn malformed_object_transforms_and_optional_data_fail() {
         panic!("expected full object update");
     };
     update.objects[0].scale.x = f32::NAN;
-    assert_eq!(Packet::new(packet.sequence(), Message::ObjectUpdate(update)).encode(), Err(UdpError::InvalidMessage));
-
-    let (_, packet) = decode(vectors::OBJECT_UPDATE);
-    let Message::ObjectUpdate(mut update) = packet.message().clone() else {
-        panic!("expected full object update");
-    };
-    update.objects[0].opaque_motion_data.push(0xaa);
-    assert_eq!(Packet::new(packet.sequence(), Message::ObjectUpdate(update)).encode(), Err(UdpError::InvalidMessage));
+    assert_eq!(Packet::new(packet.sequence(), Message::ObjectUpdate(update)).encode(), Err(LLUdpError::InvalidMessage));
 
     let (_, packet) = decode(vectors::OBJECT_UPDATE);
     let Message::ObjectUpdate(update) = packet.message().clone() else {
@@ -326,16 +556,16 @@ fn malformed_object_transforms_and_optional_data_fail() {
     let mut malformed =
         Packet::new(packet.sequence(), Message::ObjectUpdate(update)).with_zero_coding(false).encode().expect("encode full update");
     malformed[58] = 61;
-    assert_eq!(Packet::decode(&malformed), Err(UdpError::InvalidMessage));
+    assert_eq!(Packet::decode(&malformed), Err(LLUdpError::InvalidMessage));
 
     let mut truncated = fixture(vectors::OBJECT_UPDATE_COMPRESSED_TYPED);
     truncated[22..24].copy_from_slice(&84u16.to_le_bytes());
     truncated.truncate(24 + 84);
-    assert_eq!(Packet::decode(&truncated), Err(UdpError::TruncatedPacket));
+    assert_eq!(Packet::decode(&truncated), Err(LLUdpError::TruncatedPacket));
 }
 
 #[test]
-fn decoder_rejects_non_finite_spatial_values() {
+fn decoder_keeps_non_finite_values() {
     let (_, packet) = decode(vectors::OBJECT_UPDATE);
     let Message::ObjectUpdate(update) = packet.message().clone() else {
         panic!("expected full object update");
@@ -347,19 +577,25 @@ fn decoder_rejects_non_finite_spatial_values() {
         .expect("encode uncompressed full update");
     let local_id_offset = unique_offset(&full, &local_id);
     write_nan(&mut full, local_id_offset + 28);
-    assert_eq!(Packet::decode(&full), Err(UdpError::InvalidMessage));
+    let decoded = Packet::decode(&full).expect("decode full update with a rejected world field");
+    let Message::ObjectUpdate(decoded) = decoded.message() else { panic!("expected full object update") };
+    assert!(decoded.objects[0].scale.x.is_nan());
 
     let mut compressed = fixture(vectors::OBJECT_UPDATE_COMPRESSED_TYPED);
     let local_id = 0x0102_0304_u32.to_le_bytes();
     let local_id_offset = unique_offset(&compressed, &local_id);
     write_nan(&mut compressed, local_id_offset + 24);
-    assert_eq!(Packet::decode(&compressed), Err(UdpError::InvalidMessage));
+    let decoded = Packet::decode(&compressed).expect("decode compressed update with a rejected world field");
+    let Message::ObjectUpdateCompressed(decoded) = decoded.message() else { panic!("expected compressed object update") };
+    assert!(decoded.objects[0].position.x.is_nan());
 
     let mut terse = fixture(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
     let local_id = 0x1020_3040_u32.to_le_bytes();
     let local_id_offset = unique_offset(&terse, &local_id);
     write_nan(&mut terse, local_id_offset + 6);
-    assert_eq!(Packet::decode(&terse), Err(UdpError::InvalidMessage));
+    let decoded = Packet::decode(&terse).expect("decode terse update with a rejected world field");
+    let Message::ImprovedTerseObjectUpdate(decoded) = decoded.message() else { panic!("expected terse object update") };
+    assert!(decoded.objects[0].motion.position.x.is_nan());
 
     let (_, avatar_packet) = decode(vectors::IMPROVED_TERSE_OBJECT_UPDATE_AVATAR);
     let Message::ImprovedTerseObjectUpdate(avatar_update) = avatar_packet.message() else {
@@ -370,21 +606,57 @@ fn decoder_rejects_non_finite_spatial_values() {
     let local_id_offset =
         avatar.windows(local_id.len()).rposition(|candidate| candidate == local_id.as_slice()).expect("avatar local ID is present");
     write_nan(&mut avatar, local_id_offset + 6);
-    assert_eq!(Packet::decode(&avatar), Err(UdpError::InvalidMessage));
+    let decoded = Packet::decode(&avatar).expect("decode avatar update with a non-world collision field");
+    let Message::ImprovedTerseObjectUpdate(decoded) = decoded.message() else { panic!("expected terse object update") };
+    assert!(decoded.objects[0].collision_plane.unwrap().x.is_nan());
+}
+
+#[test]
+fn invalid_scale_preserves_sibling_blocks() {
+    let (_, packet) = decode(vectors::OBJECT_UPDATE);
+    let Message::ObjectUpdate(update) = packet.message().clone() else { panic!("expected full object update") };
+    assert_eq!(update.objects.len(), 2);
+    let mut bytes =
+        Packet::new(packet.sequence(), Message::ObjectUpdate(update)).with_zero_coding(false).encode().expect("encode full update");
+    let first_local_id = unique_offset(&bytes, &0x1020_3040_u32.to_le_bytes());
+    write_nan(&mut bytes, first_local_id + 28);
+
+    let decoded = Packet::decode(&bytes).expect("decode both framed object blocks");
+    let Message::ObjectUpdate(decoded) = decoded.message() else { panic!("expected full object update") };
+    assert_eq!(decoded.objects.len(), 2);
+    assert!(decoded.objects[0].scale.x.is_nan());
+    assert!(decoded.objects[1].scale.is_finite());
 }
 
 #[test]
 fn unknown_wire_values_round_trip() {
-    let mut compressed = fixture(vectors::OBJECT_UPDATE_COMPRESSED_TYPED);
-    let local_id = 0x0102_0304_u32.to_le_bytes();
-    let local_id_offset = unique_offset(&compressed, &local_id);
-    compressed[local_id_offset + 4] = u8::MAX;
-    let packet = Packet::decode(&compressed).expect("decode unknown PCode");
+    let (_, packet) = decode(vectors::OBJECT_UPDATE_COMPRESSED_TYPED);
+    let Message::ObjectUpdateCompressed(mut update) = packet.message().clone() else {
+        panic!("expected compressed full object update");
+    };
+    let object = &mut update.objects[0];
+    object.pcode = u8::MAX;
+    object.special_code = 0;
+    object.angular_velocity = None;
+    object.parent_local_id = 0;
+    object.data = None;
+    object.text = None;
+    object.media_url = None;
+    object.legacy_particle_system = None;
+    object.extra_parameters.clear();
+    object.sound = None;
+    object.name_value = None;
+    object.shape = None;
+    object.texture_entry = None;
+    object.texture_animation = None;
+    object.particle_system = None;
+    let encoded = Packet::new(packet.sequence(), Message::ObjectUpdateCompressed(update)).encode().expect("encode unknown PCode");
+    let packet = Packet::decode(&encoded).expect("decode unknown PCode");
     let Message::ObjectUpdateCompressed(update) = packet.message() else {
         panic!("expected compressed full object update");
     };
     assert_eq!(update.objects[0].pcode, u8::MAX);
-    assert_reencodes(&packet, &compressed);
+    assert_eq!(packet.encode().expect("re-encode unknown PCode"), encoded);
 
     let (_, packet) = decode(vectors::REQUEST_MULTIPLE_OBJECTS);
     let Message::RequestMultipleObjects(request) = packet.message() else {
@@ -403,44 +675,64 @@ fn unknown_wire_values_round_trip() {
 }
 
 #[test]
-fn terse_suffix_and_unknown_compressed_flags_are_owned() {
+fn terse_rejects_undocumented_data_suffix() {
     let (_, packet) = decode(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
-    let Message::ImprovedTerseObjectUpdate(mut update) = packet.message().clone() else {
+    let mut wire = Packet::new(packet.sequence(), packet.message().clone()).with_zero_coding(false).encode().expect("encode terse fixture");
+    let data_start = unique_offset(&wire, &0x1020_3040_u32.to_le_bytes());
+    wire[data_start - 1] += 1;
+    wire.insert(data_start + 44, 0xaa);
+    assert_eq!(Packet::decode(&wire), Err(LLUdpError::InvalidMessage));
+}
+
+#[test]
+fn terse_texture_entry_is_owned() {
+    let (_, packet) = decode(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
+    let Message::ImprovedTerseObjectUpdate(update) = packet.message().clone() else {
         panic!("expected terse object update");
     };
-    update.objects[0].opaque_data.extend_from_slice(&[0xaa, 0xbb]);
-    let encoded = Packet::new(packet.sequence(), Message::ImprovedTerseObjectUpdate(update)).encode().expect("encode opaque suffix");
-    let decoded = Packet::decode(&encoded).expect("decode opaque suffix");
+    let encoded = Packet::new(packet.sequence(), Message::ImprovedTerseObjectUpdate(update)).encode().expect("encode texture entry");
+    let decoded = Packet::decode(&encoded).expect("decode texture entry");
     let Message::ImprovedTerseObjectUpdate(update) = decoded.message() else {
         panic!("expected terse object update");
     };
-    assert!(update.objects[0].opaque_data.ends_with(&[0xaa, 0xbb]));
+    assert_eq!(update.objects[0].texture_entry, [0x11, 0, 0x22]);
+}
 
+#[test]
+fn compressed_update_retains_unknown_flags() {
     let (_, packet) = decode(vectors::OBJECT_UPDATE_COMPRESSED_TYPED);
     let Message::ObjectUpdateCompressed(mut update) = packet.message().clone() else {
         panic!("expected compressed full object update");
     };
-    update.objects[0].special_flags = 0x4000_00a0;
+    update.objects[0].special_code |= 0x4000_0000;
     let encoded = Packet::new(packet.sequence(), Message::ObjectUpdateCompressed(update)).encode().expect("encode unknown flags");
     let decoded = Packet::decode(&encoded).expect("decode unknown packed flags");
     let Message::ObjectUpdateCompressed(update) = decoded.message() else {
         panic!("expected compressed full object update");
     };
-    assert_eq!(update.objects[0].special_flags, 0x4000_00a0);
-    assert_eq!(update.objects[0].angular_velocity, Some(protocol::Vector3 { x: 0.5, y: 0.0, z: -0.5 }));
-    assert_eq!(update.objects[0].parent_local_id, Some(0x0506_0708));
+    assert_eq!(update.objects[0].special_code, 0x4000_07fe);
+    assert_eq!(update.objects[0].angular_velocity, Some(Vec3::new(0.5, 0.0, -0.5)));
+    assert_eq!(update.objects[0].parent_local_id, 0x0506_0708);
 }
 
 #[test]
-fn optional_packed_fields_can_be_absent() {
+fn compressed_optional_fields_can_be_absent() {
     let (_, packet) = decode(vectors::OBJECT_UPDATE_COMPRESSED_TYPED);
     let Message::ObjectUpdateCompressed(mut update) = packet.message().clone() else {
         panic!("expected compressed full object update");
     };
-    update.objects[0].special_flags = 0;
+    update.objects[0].special_code = 0;
     update.objects[0].angular_velocity = None;
-    update.objects[0].parent_local_id = None;
-    update.objects[0].opaque_data.clear();
+    update.objects[0].parent_local_id = 0;
+    update.objects[0].data = None;
+    update.objects[0].text = None;
+    update.objects[0].media_url = None;
+    update.objects[0].legacy_particle_system = None;
+    update.objects[0].extra_parameters.clear();
+    update.objects[0].sound = None;
+    update.objects[0].name_value = None;
+    update.objects[0].texture_animation = None;
+    update.objects[0].particle_system = None;
 
     let encoded = Packet::new(packet.sequence(), Message::ObjectUpdateCompressed(update)).encode().expect("encode absent packed fields");
     let decoded = Packet::decode(&encoded).expect("decode absent packed fields");
@@ -448,7 +740,17 @@ fn optional_packed_fields_can_be_absent() {
         panic!("expected compressed full object update");
     };
     assert_eq!(update.objects[0].angular_velocity, None);
-    assert_eq!(update.objects[0].parent_local_id, None);
+    assert_eq!(update.objects[0].parent_local_id, 0);
+    assert_eq!(update.objects[0].special_code, 0);
+    assert_eq!(update.objects[0].text, None);
+}
+
+#[test]
+fn extra_parameter_lengths_must_be_nonnegative() {
+    let mut bytes = fixture(vectors::OBJECT_UPDATE_COMPRESSED_TYPED);
+    let offset = unique_offset(&bytes, &[0x34, 0x12, 0x03, 0x00, 0x00, 0x00]);
+    bytes[offset + 2..offset + 6].copy_from_slice(&(-1i32).to_le_bytes());
+    assert_eq!(Packet::decode(&bytes), Err(LLUdpError::InvalidMessage));
 }
 
 #[test]
@@ -459,7 +761,7 @@ fn typed_update_kinds_reach_consumer() {
             Message::ObjectUpdateCompressed(update) if !update.objects.is_empty() => Some("full"),
             Message::ImprovedTerseObjectUpdate(update) if !update.objects.is_empty() => Some("partial"),
             Message::ObjectUpdateCached(update) if !update.objects.is_empty() => Some("cached"),
-            Message::KillObject(update) if !update.local_ids.is_empty() => Some("removed"),
+            Message::KillObject(update) if !update.object_data.is_empty() => Some("removed"),
             _ => None,
         }
     }

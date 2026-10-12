@@ -1,12 +1,12 @@
-use llsd::{Binary, Error, Limits, Value};
+use llsd::{Binary, Error, Limits, Value, notation};
 
 #[test]
 fn raw_binary() {
-    let spec_vector = llsd::notation::from_slice::<Value>(br#"b(10)"0123456789""#).expect("decode spec binary vector");
+    let spec_vector = notation::from_slice::<Value>(br#"b(10)"0123456789""#).expect("decode spec binary vector");
     assert_eq!(spec_vector, Value::Binary(Binary::from(b"0123456789".to_vec())));
 
     let encoded = b"[b(0)\"\",b(3)\"a\x00\xff\",b(3)\"a\"b\"]";
-    let decoded = llsd::notation::from_slice::<Value>(encoded).expect("decode raw binary values");
+    let decoded = notation::from_slice::<Value>(encoded).expect("decode raw binary values");
 
     assert_eq!(
         decoded,
@@ -20,9 +20,9 @@ fn raw_binary() {
 
 #[test]
 fn raw_binary_length() {
-    assert!(llsd::notation::from_slice::<Value>(b"b(2)\"x\"").is_err());
+    assert!(notation::from_slice::<Value>(b"b(2)\"x\"").is_err());
     assert!(matches!(
-        llsd::notation::from_slice_with_limits::<Value>(b"b(3)\"abc\"", Limits { max_binary_bytes: 2, ..Limits::default() }),
+        notation::from_slice_with_limits::<Value>(b"b(3)\"abc\"", Limits { max_binary_bytes: 2, ..Limits::default() }),
         Err(Error::LimitExceeded("binary bytes"))
     ));
 }
@@ -31,29 +31,26 @@ fn raw_binary_length() {
 fn raw_length_prefixed_strings_preserve_payload_bytes() {
     let expected = "a\"b\\c,}:# é";
     let encoded = format!("s({})\"{expected}\"", expected.len());
-    assert_eq!(llsd::notation::from_str::<String>(&encoded).expect("decode raw notation string"), expected);
+    assert_eq!(notation::from_str::<String>(&encoded).expect("decode raw notation string"), expected);
 
-    assert!(llsd::notation::from_slice::<String>(b"s(1)\"ab\"").is_err());
+    assert!(notation::from_slice::<String>(b"s(1)\"ab\"").is_err());
     assert!(matches!(
-        llsd::notation::from_slice_with_limits::<String>(b"s(3)\"abc\"", Limits { max_string_bytes: 2, ..Limits::default() }),
+        notation::from_slice_with_limits::<String>(b"s(3)\"abc\"", Limits { max_string_bytes: 2, ..Limits::default() }),
         Err(Error::LimitExceeded("string bytes"))
     ));
-    assert!(matches!(llsd::notation::from_slice::<String>(b"s(1)\"\xff\""), Err(Error::InvalidUtf8)));
+    assert!(matches!(notation::from_slice::<String>(b"s(1)\"\xff\""), Err(Error::InvalidUtf8)));
 }
 
 #[test]
 fn hex_binary_is_ascii_and_byte_aligned() {
     let expected = Value::Binary(Binary::from(vec![0, 255]));
     for input in [b"b16\"00ff\"".as_slice(), b"b16\"00FF\""] {
-        assert_eq!(llsd::notation::from_slice::<Value>(input).expect("decode hexadecimal binary"), expected);
+        assert_eq!(notation::from_slice::<Value>(input).expect("decode hexadecimal binary"), expected);
     }
 
-    assert_eq!(
-        llsd::notation::from_slice::<Value>(b"b16\"\"").expect("decode empty hexadecimal binary"),
-        Value::Binary(Binary::from(vec![]))
-    );
+    assert_eq!(notation::from_slice::<Value>(b"b16\"\"").expect("decode empty hexadecimal binary"), Value::Binary(Binary::from(vec![])));
     for input in [b"b16\"0\"".as_slice(), b"b16\"0g\"", "b16\"€0\"".as_bytes(), br#"b16"\u20ac0""#] {
-        assert!(llsd::notation::from_slice::<Value>(input).is_err(), "{input:?}");
+        assert!(notation::from_slice::<Value>(input).is_err(), "{input:?}");
     }
 }
 
@@ -63,14 +60,14 @@ fn binary_text_uses_binary_limit() {
     let expected = Value::Binary(Binary::from(vec![0, 255]));
 
     for input in [b"b16\"00FF\"".as_slice(), b"b16\"\\x30\\x30\\x46\\x46\"", b"b64\"AP8=\"", b"b(2)\"\x00\xff\""] {
-        assert_eq!(llsd::notation::from_slice_with_limits::<Value>(input, limits).expect("binary fits its limit"), expected);
+        assert_eq!(notation::from_slice_with_limits::<Value>(input, limits).expect("binary fits its limit"), expected);
     }
 
     for input in [b"b16\"000102\"".as_slice(), b"b64\"AAEC\"", b"b(3)\"abc\""] {
-        assert!(matches!(llsd::notation::from_slice_with_limits::<Value>(input, limits), Err(Error::LimitExceeded("binary bytes"))));
+        assert!(matches!(notation::from_slice_with_limits::<Value>(input, limits), Err(Error::LimitExceeded("binary bytes"))));
     }
 
-    assert!(matches!(llsd::notation::from_slice_with_limits::<Value>(b"'ab'", limits), Err(Error::LimitExceeded("string bytes"))));
+    assert!(matches!(notation::from_slice_with_limits::<Value>(b"'ab'", limits), Err(Error::LimitExceeded("string bytes"))));
 }
 
 #[test]
@@ -87,20 +84,20 @@ fn boolean_spellings() {
         (b"false", false),
         (b"FALSE", false),
     ] {
-        assert_eq!(llsd::notation::from_slice::<Value>(encoded).expect("decode boolean spelling"), Value::Boolean(expected), "{encoded:?}");
+        assert_eq!(notation::from_slice::<Value>(encoded).expect("decode boolean spelling"), Value::Boolean(expected), "{encoded:?}");
     }
 }
 
 #[test]
 fn control_escapes() {
-    let decoded = llsd::notation::from_slice::<Value>(br#""\a\v""#).expect("decode control escapes");
+    let decoded = notation::from_slice::<Value>(br#""\a\v""#).expect("decode control escapes");
     assert_eq!(decoded, Value::String("\u{0007}\u{000b}".into()));
 }
 
 #[test]
 fn string_limit() {
     assert!(matches!(
-        llsd::notation::from_slice_with_limits::<Value>(b"'ab'", Limits { max_string_bytes: 1, ..Limits::default() }),
+        notation::from_slice_with_limits::<Value>(b"'ab'", Limits { max_string_bytes: 1, ..Limits::default() }),
         Err(Error::LimitExceeded("string bytes"))
     ));
 }

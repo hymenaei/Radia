@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, hint::black_box};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use llsd::{Binary, Map, URI, Value};
+use llsd::{Binary, Map, URI, Value, binary, notation, xml};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 #[derive(Deserialize, Serialize)]
@@ -117,10 +117,10 @@ fn bench_format<T>(
     T: Serialize + DeserializeOwned,
 {
     group.throughput(Throughput::Bytes(input.len() as u64));
-    group.bench_with_input(BenchmarkId::new(name, "encode"), value, |b, value| {
+    group.bench_with_input(BenchmarkId::new("encode", name), value, |b, value| {
         b.iter(|| black_box(encode(black_box(value)).expect("encode LLSD")));
     });
-    group.bench_with_input(BenchmarkId::new(name, "decode"), input, |b, input| {
+    group.bench_with_input(BenchmarkId::new("decode", name), input, |b, input| {
         b.iter(|| black_box(decode(black_box(input)).expect("decode LLSD")));
     });
 }
@@ -129,119 +129,88 @@ fn bench_xml<T>(group: &mut criterion::BenchmarkGroup<'_, criterion::measurement
 where
     T: Serialize + DeserializeOwned,
 {
-    bench_format(group, name, value, input, llsd::xml::to_vec, llsd::xml::from_slice::<T>);
+    bench_format(group, name, value, input, xml::to_vec, xml::from_slice::<T>);
 
     group.throughput(Throughput::Bytes(input.len() as u64));
-    group.bench_with_input(BenchmarkId::new(name, "bounded_encode"), value, |b, value| {
-        b.iter(|| black_box(llsd::xml::to_vec_with_max_bytes(black_box(value), input.len()).expect("bounded LLSD XML encode")));
+    group.bench_with_input(BenchmarkId::new("bounded_encode", name), value, |b, value| {
+        b.iter(|| black_box(xml::to_vec_with_max_bytes(black_box(value), input.len()).expect("bounded LLSD XML encode")));
     });
+}
+
+fn bench_value_formats(c: &mut Criterion, name: &str, value: &Value, xml_input: &[u8], binary_input: &[u8], notation_input: &[u8]) {
+    let mut group = c.benchmark_group(format!("{name}/xml"));
+    bench_xml(&mut group, "value", value, xml_input);
+    group.finish();
+
+    let mut group = c.benchmark_group(format!("{name}/binary"));
+    bench_format(&mut group, "value", value, binary_input, binary::to_vec, binary::from_slice::<Value>);
+    group.finish();
+
+    let mut group = c.benchmark_group(format!("{name}/notation"));
+    bench_format(&mut group, "value", value, notation_input, notation::to_vec, notation::from_slice::<Value>);
+    group.finish();
 }
 
 fn bench_codec(c: &mut Criterion) {
     let capabilities = capabilities();
     let capability_value = capability_value(&capabilities);
-    let typed_capability_xml = llsd::xml::to_vec(&capabilities).expect("encode capability fixture");
-    let dynamic_capability_xml = llsd::xml::to_vec(&capability_value).expect("encode dynamic capability fixture");
-    let typed_capability_binary = llsd::binary::to_vec(&capabilities).expect("encode binary capability fixture");
-    let dynamic_capability_binary = llsd::binary::to_vec(&capability_value).expect("encode dynamic binary capability fixture");
-    let typed_capability_notation = llsd::notation::to_vec(&capabilities).expect("encode notation capability fixture");
-    let dynamic_capability_notation = llsd::notation::to_vec(&capability_value).expect("encode dynamic notation capability fixture");
+    let typed_capability_xml = xml::to_vec(&capabilities).expect("encode capability fixture");
+    let dynamic_capability_xml = xml::to_vec(&capability_value).expect("encode dynamic capability fixture");
+    let typed_capability_binary = binary::to_vec(&capabilities).expect("encode binary capability fixture");
+    let dynamic_capability_binary = binary::to_vec(&capability_value).expect("encode dynamic binary capability fixture");
+    let typed_capability_notation = notation::to_vec(&capabilities).expect("encode notation capability fixture");
+    let dynamic_capability_notation = notation::to_vec(&capability_value).expect("encode dynamic notation capability fixture");
 
-    let mut group = c.benchmark_group("llsd/capabilities");
+    let mut group = c.benchmark_group("llsd/capabilities/xml");
     bench_xml(&mut group, "typed", &capabilities, &typed_capability_xml);
     bench_xml(&mut group, "value", &capability_value, &dynamic_capability_xml);
-    bench_format(
-        &mut group,
-        "binary_typed",
-        &capabilities,
-        &typed_capability_binary,
-        llsd::binary::to_vec,
-        llsd::binary::from_slice::<CapabilityMap>,
-    );
-    bench_format(
-        &mut group,
-        "binary_value",
-        &capability_value,
-        &dynamic_capability_binary,
-        llsd::binary::to_vec,
-        llsd::binary::from_slice::<Value>,
-    );
-    bench_format(
-        &mut group,
-        "notation_typed",
-        &capabilities,
-        &typed_capability_notation,
-        llsd::notation::to_vec,
-        llsd::notation::from_slice::<CapabilityMap>,
-    );
-    bench_format(
-        &mut group,
-        "notation_value",
-        &capability_value,
-        &dynamic_capability_notation,
-        llsd::notation::to_vec,
-        llsd::notation::from_slice::<Value>,
-    );
+    group.finish();
+
+    let mut group = c.benchmark_group("llsd/capabilities/binary");
+    bench_format(&mut group, "typed", &capabilities, &typed_capability_binary, binary::to_vec, binary::from_slice::<CapabilityMap>);
+    bench_format(&mut group, "value", &capability_value, &dynamic_capability_binary, binary::to_vec, binary::from_slice::<Value>);
+    group.finish();
+
+    let mut group = c.benchmark_group("llsd/capabilities/notation");
+    bench_format(&mut group, "typed", &capabilities, &typed_capability_notation, notation::to_vec, notation::from_slice::<CapabilityMap>);
+    bench_format(&mut group, "value", &capability_value, &dynamic_capability_notation, notation::to_vec, notation::from_slice::<Value>);
     group.finish();
 
     let batch = event_batch();
     let batch_value = event_batch_value(&batch);
-    let typed_batch_xml = llsd::xml::to_vec(&batch).expect("encode event batch fixture");
-    let dynamic_batch_xml = llsd::xml::to_vec(&batch_value).expect("encode dynamic event batch fixture");
-    let typed_batch_binary = llsd::binary::to_vec(&batch).expect("encode binary event batch fixture");
-    let dynamic_batch_binary = llsd::binary::to_vec(&batch_value).expect("encode dynamic binary event batch fixture");
-    let typed_batch_notation = llsd::notation::to_vec(&batch).expect("encode notation event batch fixture");
-    let dynamic_batch_notation = llsd::notation::to_vec(&batch_value).expect("encode dynamic notation event batch fixture");
+    let typed_batch_xml = xml::to_vec(&batch).expect("encode event batch fixture");
+    let dynamic_batch_xml = xml::to_vec(&batch_value).expect("encode dynamic event batch fixture");
+    let typed_batch_binary = binary::to_vec(&batch).expect("encode binary event batch fixture");
+    let dynamic_batch_binary = binary::to_vec(&batch_value).expect("encode dynamic binary event batch fixture");
+    let typed_batch_notation = notation::to_vec(&batch).expect("encode notation event batch fixture");
+    let dynamic_batch_notation = notation::to_vec(&batch_value).expect("encode dynamic notation event batch fixture");
 
-    let mut group = c.benchmark_group("llsd/event_batch");
+    let mut group = c.benchmark_group("llsd/event_batch/xml");
     bench_xml(&mut group, "typed", &batch, &typed_batch_xml);
     bench_xml(&mut group, "value", &batch_value, &dynamic_batch_xml);
-    bench_format(&mut group, "binary_typed", &batch, &typed_batch_binary, llsd::binary::to_vec, llsd::binary::from_slice::<EventBatch>);
-    bench_format(&mut group, "binary_value", &batch_value, &dynamic_batch_binary, llsd::binary::to_vec, llsd::binary::from_slice::<Value>);
-    bench_format(
-        &mut group,
-        "notation_typed",
-        &batch,
-        &typed_batch_notation,
-        llsd::notation::to_vec,
-        llsd::notation::from_slice::<EventBatch>,
-    );
-    bench_format(
-        &mut group,
-        "notation_value",
-        &batch_value,
-        &dynamic_batch_notation,
-        llsd::notation::to_vec,
-        llsd::notation::from_slice::<Value>,
-    );
+    group.finish();
+
+    let mut group = c.benchmark_group("llsd/event_batch/binary");
+    bench_format(&mut group, "typed", &batch, &typed_batch_binary, binary::to_vec, binary::from_slice::<EventBatch>);
+    bench_format(&mut group, "value", &batch_value, &dynamic_batch_binary, binary::to_vec, binary::from_slice::<Value>);
+    group.finish();
+
+    let mut group = c.benchmark_group("llsd/event_batch/notation");
+    bench_format(&mut group, "typed", &batch, &typed_batch_notation, notation::to_vec, notation::from_slice::<EventBatch>);
+    bench_format(&mut group, "value", &batch_value, &dynamic_batch_notation, notation::to_vec, notation::from_slice::<Value>);
     group.finish();
 
     let inventory = inventory_batch();
-    let inventory_xml = llsd::xml::to_vec(&inventory).expect("encode inventory-like fixture");
-    let inventory_binary = llsd::binary::to_vec(&inventory).expect("encode binary inventory-like fixture");
-    let inventory_notation = llsd::notation::to_vec(&inventory).expect("encode notation inventory-like fixture");
-    let mut group = c.benchmark_group("llsd/inventory_batch");
-    bench_xml(&mut group, "value", &inventory, &inventory_xml);
-    bench_format(&mut group, "binary_value", &inventory, &inventory_binary, llsd::binary::to_vec, llsd::binary::from_slice::<Value>);
-    bench_format(
-        &mut group,
-        "notation_value",
-        &inventory,
-        &inventory_notation,
-        llsd::notation::to_vec,
-        llsd::notation::from_slice::<Value>,
-    );
-    group.finish();
+    let inventory_xml = xml::to_vec(&inventory).expect("encode inventory-like fixture");
+    let inventory_binary = binary::to_vec(&inventory).expect("encode binary inventory-like fixture");
+    let inventory_notation = notation::to_vec(&inventory).expect("encode notation inventory-like fixture");
+    bench_value_formats(c, "llsd/inventory_batch", &inventory, &inventory_xml, &inventory_binary, &inventory_notation);
 
     let nested = nested_array_value(60);
-    let nested_xml = llsd::xml::to_vec(&nested).expect("encode nested fixture");
-    let nested_binary = llsd::binary::to_vec(&nested).expect("encode nested binary fixture");
-    let nested_notation = llsd::notation::to_vec(&nested).expect("encode nested notation fixture");
-    let mut group = c.benchmark_group("llsd/nested_near_default_limit");
-    bench_xml(&mut group, "value", &nested, &nested_xml);
-    bench_format(&mut group, "binary_value", &nested, &nested_binary, llsd::binary::to_vec, llsd::binary::from_slice::<Value>);
-    bench_format(&mut group, "notation_value", &nested, &nested_notation, llsd::notation::to_vec, llsd::notation::from_slice::<Value>);
-    group.finish();
+    let nested_xml = xml::to_vec(&nested).expect("encode nested fixture");
+    let nested_binary = binary::to_vec(&nested).expect("encode nested binary fixture");
+    let nested_notation = notation::to_vec(&nested).expect("encode nested notation fixture");
+    bench_value_formats(c, "llsd/nested_near_default_limit", &nested, &nested_xml, &nested_binary, &nested_notation);
 }
 
 fn inventory_batch() -> Value {

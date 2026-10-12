@@ -9,14 +9,18 @@ use std::{
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD};
-use quick_xml::{Reader, events::Event};
+use quick_xml::{
+    Reader, XmlVersion,
+    escape::unescape,
+    events::{BytesStart, Event},
+};
 use serde::de::{
     self, DeserializeOwned, DeserializeSeed, EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor,
     value::{BytesDeserializer, StringDeserializer},
 };
 
 use crate::{
-    Error, Limits, Result,
+    Date, Error, Limits, Result, base64_decoded_len,
     ser::{self, Format},
     value::{BINARY_NEWTYPE, DATE_NEWTYPE, URI_NEWTYPE, UUID_NEWTYPE, VALUE_ENUM},
 };
@@ -102,37 +106,35 @@ fn tokenize(input: &[u8], limits: Limits) -> Result<Vec<Token>> {
     loop {
         match reader.read_event() {
             Ok(Event::Start(element)) => {
-                let name = tag_name(element.name().as_ref())?;
+                let name = element.name().as_ref().to_owned();
                 if name == "binary" {
-                    validate_binary_encoding(&element, reader.decoder())?;
+                    validate_binary_encoding(&element)?;
                 }
                 element_context.push((name == "binary", !matches!(name.as_str(), "llsd" | "array" | "map")));
                 push_token(&mut tokens, Token::Start(name), limits)?;
             }
             Ok(Event::Empty(element)) => {
-                let name = tag_name(element.name().as_ref())?;
+                let name = element.name().as_ref().to_owned();
                 if name == "binary" {
-                    validate_binary_encoding(&element, reader.decoder())?;
+                    validate_binary_encoding(&element)?;
                 }
                 push_token(&mut tokens, Token::Empty(name), limits)?;
             }
             Ok(Event::End(element)) => {
                 element_context.pop();
-                push_token(&mut tokens, Token::End(tag_name(element.name().as_ref())?), limits)?;
+                push_token(&mut tokens, Token::End(element.name().as_ref().to_owned()), limits)?;
             }
             Ok(Event::Text(text)) => {
-                let decoded = text.decode().map_err(|error| Error::InvalidValue(error.to_string()))?;
-                let value = quick_xml::escape::unescape(&decoded).map_err(|error| Error::InvalidValue(error.to_string()))?.into_owned();
+                let value = unescape(text.as_ref()).map_err(|error| Error::InvalidValue(error.to_string()))?.into_owned();
                 push_text(&mut tokens, value, &element_context, limits)?;
             }
             Ok(Event::GeneralRef(reference)) => {
-                let reference = reference.decode().map_err(|error| Error::InvalidValue(error.to_string()))?;
-                let reference = format!("&{reference};");
-                let value = quick_xml::escape::unescape(&reference).map_err(|error| Error::InvalidValue(error.to_string()))?.into_owned();
+                let reference = format!("&{};", reference.as_ref());
+                let value = unescape(&reference).map_err(|error| Error::InvalidValue(error.to_string()))?.into_owned();
                 push_text(&mut tokens, value, &element_context, limits)?;
             }
             Ok(Event::CData(text)) => {
-                let value = text.decode().map_err(|error| Error::InvalidValue(error.to_string()))?.into_owned();
+                let value = text.as_ref().to_owned();
                 push_text(&mut tokens, value, &element_context, limits)?;
             }
             Ok(Event::DocType(_)) => return Err(Error::InvalidValue("XML document types are not allowed in LLSD".into())),
@@ -175,20 +177,14 @@ fn push_text(tokens: &mut Vec<Token>, value: String, element_context: &[(bool, b
     Ok(())
 }
 
-fn tag_name(name: &[u8]) -> Result<String> {
-    str::from_utf8(name).map(str::to_owned).map_err(|_| Error::InvalidUtf8)
-}
-
-fn validate_binary_encoding(element: &quick_xml::events::BytesStart<'_>, decoder: quick_xml::encoding::Decoder) -> Result<()> {
+fn validate_binary_encoding(element: &BytesStart<'_>) -> Result<()> {
     for attribute in element.attributes().with_checks(true) {
         let attribute = attribute.map_err(|error| Error::InvalidValue(error.to_string()))?;
-        if attribute.key.as_ref() != b"encoding" {
+        if attribute.key.as_ref() != "encoding" {
             continue;
         }
 
-        let encoding = attribute
-            .decoded_and_normalized_value(quick_xml::XmlVersion::Implicit1_0, decoder)
-            .map_err(|error| Error::InvalidValue(error.to_string()))?;
+        let encoding = attribute.normalized_value(XmlVersion::Implicit1_0).map_err(|error| Error::InvalidValue(error.to_string()))?;
         if encoding != "base64" {
             return Err(Error::InvalidValue(format!("unsupported LLSD binary encoding {encoding:?}")));
         }
@@ -360,7 +356,7 @@ impl Deserializer {
             }
             compact.push(byte);
         }
-        if crate::base64_decoded_len(&compact)? > self.limits.max_binary_bytes {
+        if base64_decoded_len(&compact)? > self.limits.max_binary_bytes {
             return Err(Error::LimitExceeded("binary bytes"));
         }
         STANDARD.decode(compact).map_err(|error| Error::InvalidValue(error.to_string()))
@@ -531,7 +527,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer {
             URI_NEWTYPE => visitor.visit_newtype_struct(StringDeserializer::<Error>::new(self.scalar_for_wrapper("uri")?)),
             DATE_NEWTYPE => {
                 let text = self.scalar_for_wrapper("date")?;
-                crate::Date::parse(&text)?;
+                Date::parse(&text)?;
                 visitor.visit_newtype_struct(StringDeserializer::<Error>::new(text))
             }
             BINARY_NEWTYPE => {

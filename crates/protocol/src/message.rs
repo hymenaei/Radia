@@ -1,16 +1,22 @@
+use std::net::Ipv4Addr;
+
+use math::Vec3;
+
 use crate::{
     codec::{Reader, Writer},
-    error::UdpError,
-    messages::object_data::{encode_quantized, write_finite_array4, write_finite_vector3},
+    error::LLUdpError,
+    messages::common::{encode_quantized, write_finite_vector3, write_finite_vector4},
     messages::{
         AgentMovementComplete, AgentUpdate, ChatFromSimulator, ChatFromViewer, CompleteAgentMovement, CompletePingCheck,
         ConfirmEnableSimulator, DisableSimulator, EnableSimulator, ImprovedTerseObjectUpdate, KillObject, LogoutReply, LogoutRequest,
-        MapBlockReply, MapBlockRequest, ObjectUpdate, ObjectUpdateCached, ObjectUpdateCompressed, PacketAck, RegionHandleRequest,
-        RegionHandshake, RegionHandshakeReply, RegionIDAndHandleReply, RequestMultipleObjects, StartPingCheck, UseCircuitCode,
+        MapBlockReply, MapBlockRequest, ObjectUpdate, ObjectUpdateCached, ObjectUpdateCompressed, PacketAck, PingId, RegionHandleRequest,
+        RegionHandshake, RegionHandshakeReply, RegionIdAndHandleReply, RequestMultipleObjects, StartPingCheck, UseCircuitCode,
     },
     messages::{
-        agent_movement_complete, complete_agent_movement, complete_ping_check, confirm_enable_simulator, logout_reply, logout_request,
-        packet_ack, region_handshake, region_handshake_reply, region_id_and_handle_reply, start_ping_check, use_circuit_code,
+        agent_movement_complete, agent_update, chat_from_simulator, chat_from_viewer, complete_agent_movement, confirm_enable_simulator,
+        enable_simulator, improved_terse_object_update, kill_object, logout_reply, logout_request, map_block_reply, map_block_request,
+        object_update, object_update_cached, object_update_compressed, packet_ack, region_handle_request, region_handshake,
+        region_handshake_reply, region_id_and_handle_reply, request_multiple_objects, use_circuit_code,
     },
     schema::{self, ids::*},
     schema_message::SchemaMessage,
@@ -34,7 +40,7 @@ pub enum Message {
     ChatFromViewer(ChatFromViewer),
     ChatFromSimulator(ChatFromSimulator),
     RegionHandleRequest(RegionHandleRequest),
-    RegionIDAndHandleReply(RegionIDAndHandleReply),
+    RegionIdAndHandleReply(RegionIdAndHandleReply),
     MapBlockRequest(MapBlockRequest),
     MapBlockReply(MapBlockReply),
     EnableSimulator(EnableSimulator),
@@ -94,7 +100,7 @@ impl Message {
                 | Self::AgentMovementComplete(_)
                 | Self::LogoutReply(_)
                 | Self::ChatFromSimulator(_)
-                | Self::RegionIDAndHandleReply(_)
+                | Self::RegionIdAndHandleReply(_)
                 | Self::MapBlockReply(_)
                 | Self::EnableSimulator(_)
                 | Self::DisableSimulator(_)
@@ -123,7 +129,7 @@ impl Message {
             Self::ChatFromViewer(_) => CHAT_FROM_VIEWER,
             Self::ChatFromSimulator(_) => CHAT_FROM_SIMULATOR,
             Self::RegionHandleRequest(_) => REGION_HANDLE_REQUEST,
-            Self::RegionIDAndHandleReply(_) => REGION_ID_AND_HANDLE_REPLY,
+            Self::RegionIdAndHandleReply(_) => REGION_ID_AND_HANDLE_REPLY,
             Self::MapBlockRequest(_) => MAP_BLOCK_REQUEST,
             Self::MapBlockReply(_) => MAP_BLOCK_REPLY,
             Self::EnableSimulator(_) => ENABLE_SIMULATOR,
@@ -153,7 +159,7 @@ impl Message {
         schema::find_by_id(self.id()).is_some_and(|metadata| metadata.trust == schema::MessageTrust::Trusted)
     }
 
-    pub(crate) fn encode_payload(&self, output: &mut Vec<u8>, limit: usize) -> Result<(), UdpError> {
+    pub(crate) fn encode_payload(&self, output: &mut Vec<u8>, limit: usize) -> Result<(), LLUdpError> {
         let mut writer = Writer::with_limit(output, limit);
         match self {
             Self::UseCircuitCode(message) => {
@@ -171,7 +177,7 @@ impl Message {
                 writer.u32(info.region_flags);
                 writer.u8(info.sim_access);
                 writer.variable1_string(&info.sim_name)?;
-                writer.uuid(info.owner_id);
+                writer.uuid(info.sim_owner);
                 writer.u8(u8::from(info.is_estate_manager));
                 writer.f32(info.water_height);
                 writer.f32(info.billable_factor);
@@ -196,7 +202,7 @@ impl Message {
                         writer.variable1_string(&region_info3.colo_name)?;
                         writer.variable1_string(&region_info3.product_sku)?;
                         writer.variable1_string(&region_info3.product_name)?;
-                        let count = u8::try_from(message.region_info4.len()).map_err(|_| UdpError::VariableFieldTooLong)?;
+                        let count = u8::try_from(message.region_info4.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?;
                         writer.u8(count);
                         for info in &message.region_info4 {
                             writer.u64(info.region_flags_extended);
@@ -204,7 +210,7 @@ impl Message {
                         }
                     }
                     (None, None) if message.region_info4.is_empty() => {}
-                    _ => return Err(UdpError::InvalidMessage),
+                    _ => return Err(LLUdpError::InvalidMessage),
                 }
             }
             Self::RegionHandshakeReply(message) => {
@@ -225,8 +231,8 @@ impl Message {
                 let block = &message.agent_data;
                 writer.uuid(block.agent_id);
                 writer.uuid(block.session_id);
-                writer.quaternion(block.body_rotation);
-                writer.quaternion(block.head_rotation);
+                writer.quaternion_xyz(block.body_rotation)?;
+                writer.quaternion_xyz(block.head_rotation)?;
                 writer.u8(block.state);
                 writer.vector3(block.camera_center);
                 writer.vector3(block.camera_at_axis);
@@ -238,11 +244,11 @@ impl Message {
             }
             Self::StartPingCheck(message) => {
                 writer.u8(message.ping_id.ping_id);
-                writer.u32(message.ping_id.oldest_unacked);
+                writer.u32(message.oldest_unacked);
             }
             Self::CompletePingCheck(message) => writer.u8(message.ping_id.ping_id),
             Self::PacketAck(message) => {
-                let count = u8::try_from(message.packets.len()).map_err(|_| UdpError::TooManyAcks)?;
+                let count = u8::try_from(message.packets.len()).map_err(|_| LLUdpError::TooManyAcks)?;
                 writer.u8(count);
                 for packet in &message.packets {
                     writer.u32(packet.id);
@@ -253,7 +259,7 @@ impl Message {
                 writer.uuid(message.agent_data.session_id);
             }
             Self::LogoutReply(message) => {
-                let count = u8::try_from(message.inventory_data.len()).map_err(|_| UdpError::VariableFieldTooLong)?;
+                let count = u8::try_from(message.inventory_data.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?;
                 writer.uuid(message.agent_data.agent_id);
                 writer.uuid(message.agent_data.session_id);
                 writer.u8(count);
@@ -280,7 +286,7 @@ impl Message {
                 writer.variable2_string(&block.message)?;
             }
             Self::RegionHandleRequest(message) => writer.uuid(message.request_block.region_id),
-            Self::RegionIDAndHandleReply(message) => {
+            Self::RegionIdAndHandleReply(message) => {
                 writer.uuid(message.reply_block.region_id);
                 writer.u64(message.reply_block.region_handle);
             }
@@ -296,7 +302,7 @@ impl Message {
                 writer.u16(message.position_data.max_y);
             }
             Self::MapBlockReply(message) => {
-                let count = u8::try_from(message.data.len()).map_err(|_| UdpError::VariableFieldTooLong)?;
+                let count = u8::try_from(message.data.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?;
                 writer.uuid(message.agent_data.agent_id);
                 writer.u32(message.agent_data.flags);
                 writer.u8(count);
@@ -313,8 +319,8 @@ impl Message {
             }
             Self::EnableSimulator(message) => {
                 writer.u64(message.simulator_info.handle);
-                writer.bytes(&message.simulator_info.ip);
-                writer.bytes(&message.simulator_info.port);
+                writer.bytes(&message.simulator_info.ip.octets());
+                writer.bytes(&message.simulator_info.port.to_be_bytes());
             }
             Self::DisableSimulator(_) => {}
             Self::ConfirmEnableSimulator(message) => {
@@ -323,104 +329,36 @@ impl Message {
             }
             Self::ObjectUpdate(message) => {
                 message.region_data.encode(&mut writer);
-                let count = u8::try_from(message.objects.len()).map_err(|_| UdpError::VariableFieldTooLong)?;
+                let count = u8::try_from(message.objects.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?;
                 writer.u8(count);
                 for object in &message.objects {
-                    writer.u32(object.local_id);
-                    writer.u8(object.state);
-                    writer.uuid(object.id);
-                    writer.u32(object.crc);
-                    writer.u8(object.pcode);
-                    writer.u8(object.material);
-                    writer.u8(object.click_action);
-                    write_finite_vector3(&mut writer, object.scale)?;
-                    let has_collision_plane = object.avatar_collision_plane.is_some();
-                    if !matches!((has_collision_plane, object.opaque_motion_data.len()), (false, 0 | 64) | (true, 0 | 64)) {
-                        return Err(UdpError::InvalidMessage);
-                    }
-                    let has_plane = usize::from(has_collision_plane) * 16;
-                    let len = 60usize
-                        .checked_add(has_plane)
-                        .and_then(|length| length.checked_add(object.opaque_motion_data.len()))
-                        .ok_or(UdpError::VariableFieldTooLong)?;
-                    writer.u8(u8::try_from(len).map_err(|_| UdpError::VariableFieldTooLong)?);
-                    if let Some(plane) = object.avatar_collision_plane {
-                        write_finite_array4(&mut writer, plane)?;
-                    }
-                    write_finite_vector3(&mut writer, object.motion.position)?;
-                    write_finite_vector3(&mut writer, object.motion.velocity)?;
-                    write_finite_vector3(&mut writer, object.motion.acceleration)?;
-                    write_finite_vector3(
-                        &mut writer,
-                        crate::Vector3 { x: object.motion.rotation.x, y: object.motion.rotation.y, z: object.motion.rotation.z },
-                    )?;
-                    write_finite_vector3(&mut writer, object.motion.angular_velocity)?;
-                    writer.bytes(&object.opaque_motion_data);
-                    writer.u32(object.parent_local_id);
-                    writer.u32(object.update_flags);
-                    writer.bytes(&object.opaque_data);
+                    object_update::encode_fields(object, &mut writer)?;
                 }
             }
             Self::ObjectUpdateCompressed(message) => {
                 message.region_data.encode(&mut writer);
-                let count = u8::try_from(message.objects.len()).map_err(|_| UdpError::VariableFieldTooLong)?;
+                let count = u8::try_from(message.objects.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?;
                 writer.u8(count);
                 for object in &message.objects {
                     writer.u32(object.update_flags);
-                    let has_angular_velocity = object.angular_velocity.is_some();
-                    let has_parent = object.parent_local_id.is_some();
-                    let len = 84usize
-                        .checked_add(usize::from(has_angular_velocity) * 12)
-                        .and_then(|length| length.checked_add(usize::from(has_parent) * 4))
-                        .and_then(|length| length.checked_add(object.opaque_data.len()))
-                        .ok_or(UdpError::VariableFieldTooLong)?;
-                    writer.u16(u16::try_from(len).map_err(|_| UdpError::VariableFieldTooLong)?);
-                    writer.uuid(object.id);
-                    writer.u32(object.local_id);
-                    writer.u8(object.pcode);
-                    writer.u8(object.state);
-                    writer.u32(object.crc);
-                    writer.u8(object.material);
-                    writer.u8(object.click_action);
-                    write_finite_vector3(&mut writer, object.scale)?;
-                    write_finite_vector3(&mut writer, object.position)?;
-                    write_finite_vector3(&mut writer, crate::Vector3 { x: object.rotation.x, y: object.rotation.y, z: object.rotation.z })?;
-                    let mut special_flags = object.special_flags & !0xa0;
-                    if has_angular_velocity {
-                        special_flags |= 0x80;
-                    }
-                    if has_parent {
-                        special_flags |= 0x20;
-                    }
-                    writer.u32(special_flags);
-                    writer.uuid(object.owner_id);
-                    if let Some(angular_velocity) = object.angular_velocity {
-                        write_finite_vector3(&mut writer, angular_velocity)?;
-                    }
-                    if let Some(parent_local_id) = object.parent_local_id {
-                        writer.u32(parent_local_id);
-                    }
-                    writer.bytes(&object.opaque_data);
+                    object_update_compressed::encode_fields(object, &mut writer)?;
                 }
             }
             Self::ImprovedTerseObjectUpdate(message) => {
                 message.region_data.encode(&mut writer);
-                let count = u8::try_from(message.objects.len()).map_err(|_| UdpError::VariableFieldTooLong)?;
+                let count = u8::try_from(message.objects.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?;
                 writer.u8(count);
                 for object in &message.objects {
-                    if (object.agent_data_flag != 0) != object.avatar_collision_plane.is_some() {
-                        return Err(UdpError::InvalidMessage);
+                    if object.avatar != object.collision_plane.is_some() {
+                        return Err(LLUdpError::InvalidMessage);
                     }
-                    let data_len = 44usize
-                        .checked_add(usize::from(object.avatar_collision_plane.is_some()) * 16)
-                        .and_then(|length| length.checked_add(object.opaque_data.len()))
-                        .ok_or(UdpError::VariableFieldTooLong)?;
-                    writer.u8(u8::try_from(data_len).map_err(|_| UdpError::VariableFieldTooLong)?);
+                    let data_len = if object.collision_plane.is_some() { 60 } else { 44 };
+                    writer.u8(data_len);
                     writer.u32(object.local_id);
                     writer.u8(object.state);
-                    writer.u8(object.agent_data_flag);
-                    if let Some(plane) = object.avatar_collision_plane {
-                        write_finite_array4(&mut writer, plane)?;
+                    writer.u8(u8::from(object.avatar));
+                    if let Some(plane) = object.collision_plane {
+                        write_finite_vector4(&mut writer, plane)?;
                     }
                     write_finite_vector3(&mut writer, object.motion.position)?;
                     write_quantized_vector3(&mut writer, object.motion.velocity, -128.0, 128.0)?;
@@ -429,16 +367,15 @@ impl Message {
                         writer.u16(encode_quantized(value, -1.0, 1.0)?);
                     }
                     write_quantized_vector3(&mut writer, object.motion.angular_velocity, -64.0, 64.0)?;
-                    writer.bytes(&object.opaque_data);
-                    let texture_entry = object.texture_entry.as_deref().unwrap_or_default();
-                    let texture_len = u16::try_from(texture_entry.len()).map_err(|_| UdpError::VariableFieldTooLong)?;
+                    let texture_entry = object.texture_entry.as_slice();
+                    let texture_len = u16::try_from(texture_entry.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?;
                     writer.u16(texture_len);
                     writer.bytes(texture_entry);
                 }
             }
             Self::ObjectUpdateCached(message) => {
                 message.region_data.encode(&mut writer);
-                let count = u8::try_from(message.objects.len()).map_err(|_| UdpError::VariableFieldTooLong)?;
+                let count = u8::try_from(message.objects.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?;
                 writer.u8(count);
                 for object in &message.objects {
                     writer.u32(object.local_id);
@@ -447,16 +384,16 @@ impl Message {
                 }
             }
             Self::KillObject(message) => {
-                let count = u8::try_from(message.local_ids.len()).map_err(|_| UdpError::VariableFieldTooLong)?;
+                let count = u8::try_from(message.object_data.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?;
                 writer.u8(count);
-                for local_id in &message.local_ids {
-                    writer.u32(*local_id);
+                for object in &message.object_data {
+                    writer.u32(object.local_id);
                 }
             }
             Self::RequestMultipleObjects(message) => {
                 writer.uuid(message.agent_data.agent_id);
                 writer.uuid(message.agent_data.session_id);
-                let count = u8::try_from(message.objects.len()).map_err(|_| UdpError::VariableFieldTooLong)?;
+                let count = u8::try_from(message.objects.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?;
                 writer.u8(count);
                 for object in &message.objects {
                     writer.u8(object.cache_miss_type.to_wire());
@@ -469,7 +406,7 @@ impl Message {
         writer.finish()
     }
 
-    pub(crate) fn decode(id: MessageId, payload: &[u8]) -> Result<(Self, Vec<u8>), UdpError> {
+    pub(crate) fn decode(id: MessageId, payload: &[u8]) -> Result<(Self, Vec<u8>), LLUdpError> {
         let mut reader = Reader::new(payload);
         let message = match id {
             USE_CIRCUIT_CODE => Self::UseCircuitCode(UseCircuitCode {
@@ -487,7 +424,7 @@ impl Message {
                     region_flags: reader.u32()?,
                     sim_access: reader.u8()?,
                     sim_name: reader.variable1_string()?,
-                    owner_id: reader.uuid()?,
+                    sim_owner: reader.uuid()?,
                     is_estate_manager: reader.u8()? != 0,
                     water_height: reader.f32()?,
                     billable_factor: reader.f32()?,
@@ -533,7 +470,7 @@ impl Message {
                 sim_data: agent_movement_complete::SimData { channel_version: reader.variable2_string()? },
             }),
             AGENT_UPDATE => Self::AgentUpdate(AgentUpdate {
-                agent_data: crate::messages::agent_update::AgentData {
+                agent_data: agent_update::AgentData {
                     agent_id: reader.uuid()?,
                     session_id: reader.uuid()?,
                     body_rotation: reader.quaternion()?,
@@ -548,12 +485,10 @@ impl Message {
                     flags: reader.u8()?,
                 },
             }),
-            START_PING_CHECK => Self::StartPingCheck(StartPingCheck {
-                ping_id: start_ping_check::PingID { ping_id: reader.u8()?, oldest_unacked: reader.u32()? },
-            }),
-            COMPLETE_PING_CHECK => {
-                Self::CompletePingCheck(CompletePingCheck { ping_id: complete_ping_check::PingID { ping_id: reader.u8()? } })
+            START_PING_CHECK => {
+                Self::StartPingCheck(StartPingCheck { ping_id: PingId { ping_id: reader.u8()? }, oldest_unacked: reader.u32()? })
             }
+            COMPLETE_PING_CHECK => Self::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: reader.u8()? } }),
             PACKET_ACK => {
                 let count = reader.terminal_variable_count()?;
                 let mut packets = Vec::with_capacity(count);
@@ -575,15 +510,15 @@ impl Message {
                 Self::LogoutReply(LogoutReply { agent_data, inventory_data })
             }
             CHAT_FROM_VIEWER => Self::ChatFromViewer(ChatFromViewer {
-                agent_data: crate::messages::chat_from_viewer::AgentData { agent_id: reader.uuid()?, session_id: reader.uuid()? },
-                chat_data: crate::messages::chat_from_viewer::ChatData {
+                agent_data: chat_from_viewer::AgentData { agent_id: reader.uuid()?, session_id: reader.uuid()? },
+                chat_data: chat_from_viewer::ChatData {
                     message: reader.variable2_string()?,
                     chat_type: ChatType::from_wire(reader.u8()?),
                     channel: reader.i32()?,
                 },
             }),
             CHAT_FROM_SIMULATOR => Self::ChatFromSimulator(ChatFromSimulator {
-                chat_data: crate::messages::chat_from_simulator::ChatData {
+                chat_data: chat_from_simulator::ChatData {
                     from_name: reader.variable1_string()?,
                     source_id: reader.uuid()?,
                     owner_id: reader.uuid()?,
@@ -594,21 +529,21 @@ impl Message {
                     message: reader.variable2_string()?,
                 },
             }),
-            REGION_HANDLE_REQUEST => Self::RegionHandleRequest(crate::messages::region_handle_request::RegionHandleRequest {
-                request_block: crate::messages::region_handle_request::RequestBlock { region_id: reader.uuid()? },
+            REGION_HANDLE_REQUEST => Self::RegionHandleRequest(region_handle_request::RegionHandleRequest {
+                request_block: region_handle_request::RequestBlock { region_id: reader.uuid()? },
             }),
-            REGION_ID_AND_HANDLE_REPLY => Self::RegionIDAndHandleReply(RegionIDAndHandleReply {
+            REGION_ID_AND_HANDLE_REPLY => Self::RegionIdAndHandleReply(RegionIdAndHandleReply {
                 reply_block: region_id_and_handle_reply::ReplyBlock { region_id: reader.uuid()?, region_handle: reader.u64()? },
             }),
-            MAP_BLOCK_REQUEST => Self::MapBlockRequest(crate::messages::map_block_request::MapBlockRequest {
-                agent_data: crate::messages::map_block_request::AgentData {
+            MAP_BLOCK_REQUEST => Self::MapBlockRequest(map_block_request::MapBlockRequest {
+                agent_data: map_block_request::AgentData {
                     agent_id: reader.uuid()?,
                     session_id: reader.uuid()?,
                     flags: reader.u32()?,
                     estate_id: reader.u32()?,
                     godlike: reader.u8()? != 0,
                 },
-                position_data: crate::messages::map_block_request::PositionData {
+                position_data: map_block_request::PositionData {
                     min_x: reader.u16()?,
                     max_x: reader.u16()?,
                     min_y: reader.u16()?,
@@ -621,7 +556,7 @@ impl Message {
                 let count = reader.terminal_variable_count()?;
                 let mut blocks = Vec::with_capacity(count);
                 for _ in 0..count {
-                    blocks.push(crate::messages::map_block_reply::Data {
+                    blocks.push(map_block_reply::Data {
                         x: reader.u16()?,
                         y: reader.u16()?,
                         name: reader.variable1_string()?,
@@ -632,30 +567,25 @@ impl Message {
                         map_image_id: reader.uuid()?,
                     });
                 }
-                Self::MapBlockReply(MapBlockReply {
-                    agent_data: crate::messages::map_block_reply::AgentData { agent_id, flags },
-                    data: blocks,
-                })
+                Self::MapBlockReply(MapBlockReply { agent_data: map_block_reply::AgentData { agent_id, flags }, data: blocks })
             }
             ENABLE_SIMULATOR => Self::EnableSimulator(EnableSimulator {
-                simulator_info: crate::messages::enable_simulator::SimulatorInfo {
+                simulator_info: enable_simulator::SimulatorInfo {
                     handle: reader.u64()?,
-                    ip: reader.take(4)?.try_into().map_err(|_| UdpError::TruncatedPacket)?,
-                    port: reader.take(2)?.try_into().map_err(|_| UdpError::TruncatedPacket)?,
+                    ip: Ipv4Addr::from([reader.u8()?, reader.u8()?, reader.u8()?, reader.u8()?]),
+                    port: u16::from_be_bytes(reader.take(2)?.try_into().map_err(|_| LLUdpError::TruncatedPacket)?),
                 },
             }),
             DISABLE_SIMULATOR => Self::DisableSimulator(DisableSimulator),
             CONFIRM_ENABLE_SIMULATOR => Self::ConfirmEnableSimulator(ConfirmEnableSimulator {
                 agent_data: confirm_enable_simulator::AgentData { agent_id: reader.uuid()?, session_id: reader.uuid()? },
             }),
-            OBJECT_UPDATE => Self::ObjectUpdate(crate::messages::object_update::decode(&mut reader)?),
-            OBJECT_UPDATE_COMPRESSED => Self::ObjectUpdateCompressed(crate::messages::object_update_compressed::decode(&mut reader)?),
-            IMPROVED_TERSE_OBJECT_UPDATE => {
-                Self::ImprovedTerseObjectUpdate(crate::messages::improved_terse_object_update::decode(&mut reader)?)
-            }
-            OBJECT_UPDATE_CACHED => Self::ObjectUpdateCached(crate::messages::object_update_cached::decode(&mut reader)?),
-            KILL_OBJECT => Self::KillObject(crate::messages::kill_object::decode(&mut reader)?),
-            REQUEST_MULTIPLE_OBJECTS => Self::RequestMultipleObjects(crate::messages::request_multiple_objects::decode(&mut reader)?),
+            OBJECT_UPDATE => Self::ObjectUpdate(object_update::decode(&mut reader)?),
+            OBJECT_UPDATE_COMPRESSED => Self::ObjectUpdateCompressed(object_update_compressed::decode(&mut reader)?),
+            IMPROVED_TERSE_OBJECT_UPDATE => Self::ImprovedTerseObjectUpdate(improved_terse_object_update::decode(&mut reader)?),
+            OBJECT_UPDATE_CACHED => Self::ObjectUpdateCached(object_update_cached::decode(&mut reader)?),
+            KILL_OBJECT => Self::KillObject(kill_object::decode(&mut reader)?),
+            REQUEST_MULTIPLE_OBJECTS => Self::RequestMultipleObjects(request_multiple_objects::decode(&mut reader)?),
             _ => {
                 if let Some(metadata) = schema::find_by_id(id) {
                     return Ok((Self::Schema(SchemaMessage::decode(metadata, payload)?), Vec::new()));
@@ -667,7 +597,7 @@ impl Message {
     }
 }
 
-fn write_quantized_vector3(writer: &mut Writer<'_>, value: crate::Vector3, lower: f32, upper: f32) -> Result<(), UdpError> {
+fn write_quantized_vector3(writer: &mut Writer<'_>, value: Vec3, lower: f32, upper: f32) -> Result<(), LLUdpError> {
     writer.u16(encode_quantized(value.x, lower, upper)?);
     writer.u16(encode_quantized(value.y, lower, upper)?);
     writer.u16(encode_quantized(value.z, lower, upper)?);

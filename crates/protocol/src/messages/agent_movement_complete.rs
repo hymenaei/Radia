@@ -1,6 +1,6 @@
 use base::UUID;
 
-use crate::Vector3;
+use math::Vec3;
 
 /// The simulator's completed movement update for this agent.
 #[derive(Clone, Debug, PartialEq)]
@@ -18,17 +18,13 @@ pub struct AgentData {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Data {
-    /// Agent position in region-local coordinates.
-    pub position: Vector3,
-    /// Region-local look-at vector.
-    pub look_at: Vector3,
-    /// Global handle of the region containing the agent.
+    pub position: Vec3,
+    pub look_at: Vec3,
     pub region_handle: u64,
     pub timestamp: u32,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SimData {
-    /// Simulator channel and version string, encoded as a NUL-terminated Variable 2 field.
     pub channel_version: String,
 }

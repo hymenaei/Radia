@@ -2,7 +2,7 @@ use base::UUID;
 
 /// Returns a region UUID and its global handle.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct RegionIDAndHandleReply {
+pub struct RegionIdAndHandleReply {
     pub reply_block: ReplyBlock,
 }
 

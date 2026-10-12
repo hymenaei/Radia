@@ -1,7 +1,8 @@
 use std::{
     collections::BTreeMap,
-    io::{Read, Write},
+    io::{ErrorKind, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
+    str::from_utf8,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -11,7 +12,7 @@ use std::{
 };
 
 use base::UUID;
-use llsd::Value;
+use llsd::{Value, xml};
 use network::{LoginResponseData, LoginValue, capabilities::Client};
 use tokio::runtime::Runtime;
 use url::Url;
@@ -131,7 +132,7 @@ fn landmark_asset_request_failure_rejects_partial_results() {
 }
 
 #[test]
-fn malformed_landmark_asset_is_skipped_when_another_asset_is_valid() {
+fn malformed_landmark_is_skipped_with_valid_peer() {
     let runtime = Runtime::new().expect("create local Tokio runtime");
     let server = LocalServer::start_with_asset_responses(
         landmark_folder_response(2),
@@ -179,8 +180,8 @@ fn landmark_fetches_are_bounded_and_keep_folder_order() {
 
 fn parse_request_body(request: &[u8]) -> Value {
     let body_start = request.windows(4).position(|window| window == b"\r\n\r\n").expect("HTTP request headers");
-    let body = std::str::from_utf8(&request[body_start + 4..]).expect("LLSD request is UTF-8");
-    llsd::xml::from_str(body).expect("request is valid LLSD XML")
+    let body = from_utf8(&request[body_start + 4..]).expect("LLSD request is UTF-8");
+    xml::from_str(body).expect("request is valid LLSD XML")
 }
 
 fn landmark_folder_response(asset_count: usize) -> String {
@@ -293,10 +294,10 @@ fn accept_request(listener: &TcpListener, deadline: Instant) -> Option<TcpStream
                 stream.set_nonblocking(false).expect("blocking accepted connection");
                 return Some(stream);
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+            Err(error) if error.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
                 thread::sleep(Duration::from_millis(5));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return None,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => return None,
             Err(error) => panic!("accept local request: {error}"),
         }
     }
@@ -370,7 +371,7 @@ fn read_request(stream: &mut TcpStream) -> Vec<u8> {
         }
         request.extend_from_slice(&chunk[..size]);
         if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
-            let headers = std::str::from_utf8(&request[..header_end]).expect("HTTP headers UTF-8");
+            let headers = from_utf8(&request[..header_end]).expect("HTTP headers UTF-8");
             let content_length = headers
                 .lines()
                 .find_map(|line| {

@@ -43,9 +43,10 @@ These are heuristics, not blanket bans: test private helpers, formatting, memory
 
 ## Naming and structure
 
-- Use the shortest name that uniquely communicates the behavior being tested. Write it in **snake_case**, describing the behavior and condition when needed, e.g. `truncated_header_returns_incomplete`, `canceled_request_releases_permit`, `duplicate_disconnect_is_idempotent`.
-- Use `behavior_when_condition_expected_result` when extra context helps, but do not force a rigid template or extremely long names.
-- Prefer names that distinguish failures in the test runner. Avoid `it_works`, `test1`, `basic`, issue IDs alone, and redundant `test_` prefixes when the module already supplies context.
+- Use the shortest **snake_case** name that identifies the behavior under test. Let the module path supply context instead of repeating it in the test name.
+- When a test covers related outcomes, name their shared contract instead of listing each outcome. Split only when the assertions protect independent contracts. Add a condition only when it distinguishes this case.
+- Use `behavior_when_condition_expected_result` only when each part adds information. Avoid names that narrate setup.
+- Avoid vague names such as `it_works`, `test1`, or `basic`, issue IDs alone, and redundant `test_` prefixes.
 - Group by behavior/module and use a short, consistent local convention. Parameter cases must remain distinguishable in failures.
 - Put close-to-implementation unit tests in `#[cfg(test)] mod tests`; external API tests in `tests/`; reusable fixtures in `tests/common/mod.rs` or a dedicated test-support module; doctests on useful public APIs. Never expose production APIs solely for tests without a concrete design justification.
 
@@ -85,12 +86,12 @@ Read these only when relevant: [proptest](references/proptest.md), [async and co
 ## Quick validation guide
 
 ```sh
-cargo test -p <package> <test_name>               # Focused test filter
-cargo xtest -p <package>                           # Package suite with the configured runner
+cargo test -p <crate> <test_name>               # Focused test filter
+cargo xtest -p <crate>                           # Package suite with the configured runner
 cargo test --doc --workspace                       # Nextest does not run doctests
-cargo llvm-cov -p <package>                        # Targeted coverage (optional)
-cargo mutants -p <package> --list                  # Inspect scope before mutation testing
-cargo mutants -p <package> --file 'src/parser.rs'  # Targeted; respects mutants.toml config
+cargo llvm-cov -p <crate>                        # Targeted coverage (optional)
+cargo mutants -p <crate> --list                  # Inspect scope before mutation testing
+cargo mutants -p <crate> --file 'src/parser.rs'  # Targeted; respects mutants.toml config
 ```
 
 Commands are examples: replace placeholders with actual package/test names, honor the repository's `.cargo/mutants.toml` configuration (including the test runner), and check installed tool versions. Consult [tooling](references/tooling.md) for exact caveats and scoped workflows.

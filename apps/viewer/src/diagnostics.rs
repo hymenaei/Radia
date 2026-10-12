@@ -1,29 +1,29 @@
 use tracing_subscriber::{
     filter::{LevelFilter, Targets},
-    fmt::time::ChronoLocal,
+    fmt::{
+        FmtContext,
+        format::{FormatEvent, FormatFields, Writer},
+        time::{ChronoLocal, FormatTime},
+    },
     layer::{Layer, SubscriberExt},
+    registry::LookupSpan,
     util::SubscriberInitExt,
 };
 
+use tracing::{Event, Level, Subscriber};
 use tracing_log::NormalizeEvent;
 
 struct ConsoleFormat {
-    timer: tracing_subscriber::fmt::time::ChronoLocal,
+    timer: ChronoLocal,
 }
 
-impl<S, N> tracing_subscriber::fmt::format::FormatEvent<S, N> for ConsoleFormat
+impl<S, N> FormatEvent<S, N> for ConsoleFormat
 where
-    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
-    N: for<'writer> tracing_subscriber::fmt::format::FormatFields<'writer> + 'static,
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'writer> FormatFields<'writer> + 'static,
 {
-    fn format_event(
-        &self,
-        context: &tracing_subscriber::fmt::FmtContext<'_, S, N>,
-        mut writer: tracing_subscriber::fmt::format::Writer<'_>,
-        event: &tracing::Event<'_>,
-    ) -> std::fmt::Result {
+    fn format_event(&self, context: &FmtContext<'_, S, N>, mut writer: Writer<'_>, event: &Event<'_>) -> std::fmt::Result {
         use tracing_subscriber::fmt::FormatFields as _;
-        use tracing_subscriber::fmt::time::FormatTime as _;
 
         let normalized_metadata = event.normalized_metadata();
         let metadata = normalized_metadata.as_ref().unwrap_or_else(|| event.metadata());
@@ -40,11 +40,11 @@ where
         }
         writer.write_char(' ')?;
         let (level, color) = match *metadata.level() {
-            tracing::Level::TRACE => ("TRACE", "\x1b[35m"),
-            tracing::Level::DEBUG => ("DEBUG", "\x1b[34m"),
-            tracing::Level::INFO => ("INFO", "\x1b[32m"),
-            tracing::Level::WARN => ("WARN", "\x1b[33m"),
-            tracing::Level::ERROR => ("ERROR", "\x1b[31m"),
+            Level::TRACE => ("TRACE", "\x1b[35m"),
+            Level::DEBUG => ("DEBUG", "\x1b[34m"),
+            Level::INFO => ("INFO", "\x1b[32m"),
+            Level::WARN => ("WARN", "\x1b[33m"),
+            Level::ERROR => ("ERROR", "\x1b[31m"),
         };
         if has_ansi {
             writer.write_str(color)?;

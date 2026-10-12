@@ -15,7 +15,7 @@ use serde::de::{
 };
 
 use crate::{
-    Error, Limits, Result,
+    Date, Error, Limits, Result, base64_decoded_len,
     ser::{self, Format},
     value::{BINARY_NEWTYPE, DATE_NEWTYPE, URI_NEWTYPE, UUID_NEWTYPE, VALUE_ENUM},
 };
@@ -346,7 +346,7 @@ impl<'de> Deserializer<'de> {
             self.limits.max_binary_bytes.div_ceil(3).saturating_mul(4)
         };
         let value = self.quoted_with_limit(max_encoded_len, "binary bytes")?;
-        let decoded_len = if base16 { value.len().div_ceil(2) } else { crate::base64_decoded_len(value.as_bytes())? };
+        let decoded_len = if base16 { value.len().div_ceil(2) } else { base64_decoded_len(value.as_bytes())? };
         if decoded_len > self.limits.max_binary_bytes {
             return Err(Error::LimitExceeded("binary bytes"));
         }
@@ -415,7 +415,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
             b'd' => {
                 self.offset += 1;
                 let text = self.quoted()?;
-                let date = crate::Date::parse(&text)?;
+                let date = Date::parse(&text)?;
                 visitor.visit_f64(date.unix_seconds())
             }
             b'l' => {

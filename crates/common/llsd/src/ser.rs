@@ -1,7 +1,7 @@
-use std::{cell::Cell, fmt, io::Write, rc::Rc};
+use std::{cell::Cell, fmt, io::Write, rc::Rc, str::from_utf8};
 
 use crate::{
-    Error, Result,
+    Date, Error, Limits, Result,
     value::{BINARY_NEWTYPE, DATE_NEWTYPE, URI_NEWTYPE, UUID_NEWTYPE},
 };
 use base::UUID;
@@ -89,18 +89,7 @@ impl Serializer {
                     Ok(binary_fixed(b'i', &value.to_be_bytes()))
                 }
                 "real" => Ok(binary_fixed(b'r', &parse_real(text)?.to_bits().to_be_bytes())),
-                "date" => {
-                    let value = crate::Date::parse(text)?.unix_seconds();
-                    Ok(binary_fixed(b'd', &value.to_bits().to_le_bytes()))
-                }
-                "uuid" => {
-                    let uuid = UUID::parse_str(text).map_err(|error| Error::InvalidValue(error.to_string()))?;
-                    let mut output = vec![b'u'];
-                    output.extend_from_slice(uuid.as_bytes());
-                    Ok(output)
-                }
                 "string" => binary_sized(b's', text.as_bytes()),
-                "uri" => binary_sized(b'l', text.as_bytes()),
                 _ => Err(Error::InvalidValue(format!("unsupported LLSD scalar tag '{tag}'"))),
             },
             Format::Notation => match tag {
@@ -108,10 +97,7 @@ impl Serializer {
                 "boolean" => Ok(text.as_bytes().to_vec()),
                 "integer" => Ok(format!("i{text}").into_bytes()),
                 "real" => Ok(format!("r{text}").into_bytes()),
-                "date" => Ok(notation_typed_quoted(b'd', text)),
-                "uuid" => Ok(format!("u{text}").into_bytes()),
                 "string" => Ok(notation_string(text)),
-                "uri" => Ok(notation_typed_quoted(b'l', text)),
                 _ => Err(Error::InvalidValue(format!("unsupported LLSD scalar tag '{tag}'"))),
             },
         }
@@ -185,7 +171,7 @@ impl Serializer {
             };
         }
         if name == DATE_NEWTYPE {
-            let date = crate::Date::parse(&text)?;
+            let date = Date::parse(&text)?;
             return match self.format {
                 Format::Xml => self.scalar("date", &date.format()?),
                 Format::Binary => Ok(binary_fixed(b'd', &date.unix_seconds().to_bits().to_le_bytes())),
@@ -204,7 +190,7 @@ impl Serializer {
             return Ok(None);
         };
         let depth = nesting.get().checked_add(1).ok_or(Error::LimitExceeded("nesting depth"))?;
-        if depth > crate::Limits::default().max_depth {
+        if depth > Limits::default().max_depth {
             return Err(Error::LimitExceeded("nesting depth"));
         }
         nesting.set(depth);
@@ -1137,7 +1123,7 @@ fn extract_xml_string(bytes: &[u8]) -> Result<String> {
     if !bytes.starts_with(prefix) || !bytes.ends_with(suffix) {
         return Err(Error::InvalidValue("expected a string payload".into()));
     }
-    let value = std::str::from_utf8(&bytes[prefix.len()..bytes.len() - suffix.len()]).map_err(|_| Error::InvalidUtf8)?;
+    let value = from_utf8(&bytes[prefix.len()..bytes.len() - suffix.len()]).map_err(|_| Error::InvalidUtf8)?;
     let mut decoded = value.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'");
     decoded = decoded.replace("&amp;", "&");
     Ok(decoded)
@@ -1175,7 +1161,7 @@ fn extract_notation_string(bytes: &[u8]) -> Result<String> {
                 b'x' => {
                     let hex = bytes.get(index..index + 2).ok_or(Error::UnexpectedEof)?;
                     output.push(
-                        u8::from_str_radix(std::str::from_utf8(hex).map_err(|_| Error::InvalidUtf8)?, 16)
+                        u8::from_str_radix(from_utf8(hex).map_err(|_| Error::InvalidUtf8)?, 16)
                             .map_err(|_| Error::InvalidValue("invalid string escape".into()))?,
                     );
                     index += 2;

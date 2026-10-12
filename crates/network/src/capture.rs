@@ -3,12 +3,13 @@
 //! Archives may contain raw datagrams and capability bodies; treat them as session data.
 
 use std::{
+    fmt,
     fs::{self, File, OpenOptions},
-    io::{BufWriter, Write},
+    io::{BufWriter, ErrorKind, Write, copy},
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, PoisonError,
         atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, SyncSender, TrySendError},
     },
@@ -17,8 +18,10 @@ use std::{
 };
 
 use base::UUID;
-use protocol::udp::{Message, Packet, PacketFlags};
+use protocol::lludp::{Message, Packet, PacketFlags};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use tokio::sync::oneshot;
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 pub(crate) const CAPTURE_SCHEMA_VERSION: u16 = 1;
@@ -110,7 +113,8 @@ pub enum CaptureEventKind {
         circuit_id: u32,
     },
     NetworkFailed,
-    UdpSend {
+    #[serde(rename = "lludp_send", alias = "udp_send")]
+    LLUdpSend {
         circuit_id: u32,
         endpoint: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -128,7 +132,8 @@ pub enum CaptureEventKind {
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
-    UdpReceive {
+    #[serde(rename = "lludp_receive", alias = "udp_receive")]
+    LLUdpReceive {
         circuit_id: u32,
         endpoint: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -222,8 +227,8 @@ pub(crate) struct CaptureRecorder {
     registry: Arc<RecorderRegistry>,
 }
 
-impl std::fmt::Debug for CaptureRecorder {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for CaptureRecorder {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("CaptureRecorder").field("active", &self.status().is_some()).finish()
     }
 }
@@ -285,17 +290,17 @@ impl CapturePublication {
     }
 
     #[cfg(test)]
-    pub(crate) fn pause_before_claim(&self, reached: tokio::sync::oneshot::Sender<()>, release: std::sync::mpsc::Receiver<()>) {
+    pub(crate) fn pause_before_claim(&self, reached: oneshot::Sender<()>, release: mpsc::Receiver<()>) {
         let hook = Box::new(move || {
             let _ = reached.send(());
             let _ = release.recv();
         });
-        *self.0.before_claim.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+        *self.0.before_claim.lock().unwrap_or_else(PoisonError::into_inner) = Some(hook);
     }
 
     #[cfg(test)]
     fn before_claim(&self) {
-        if let Some(hook) = self.0.before_claim.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+        if let Some(hook) = self.0.before_claim.lock().unwrap_or_else(PoisonError::into_inner).take() {
             hook();
         }
     }
@@ -417,7 +422,7 @@ impl CaptureSession {
 
     fn stop_writer(&mut self, command: WriterCommand) -> CaptureSummary {
         let should_finish = {
-            let _serial = self.state.serial.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _serial = self.state.serial.lock().unwrap_or_else(PoisonError::into_inner);
             // Close under the record lock so accepted events precede the terminal command.
             !self.state.closed.swap(true, Ordering::AcqRel)
         };
@@ -463,7 +468,7 @@ impl CaptureRecorder {
     }
 
     fn current_state(&self) -> Option<Arc<RecorderState>> {
-        self.registry.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+        self.registry.active.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     fn active_state(&self) -> Option<Arc<RecorderState>> {
@@ -475,7 +480,7 @@ impl CaptureRecorder {
     }
 
     fn install(&self, state: Arc<RecorderState>) -> bool {
-        let mut active = self.registry.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut active = self.registry.active.lock().unwrap_or_else(PoisonError::into_inner);
         if active.is_some() {
             return false;
         }
@@ -484,7 +489,7 @@ impl CaptureRecorder {
     }
 
     fn uninstall(&self, state: &Arc<RecorderState>) {
-        let mut active = self.registry.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut active = self.registry.active.lock().unwrap_or_else(PoisonError::into_inner);
         if active.as_ref().is_some_and(|current| Arc::ptr_eq(current, state)) {
             active.take();
         }
@@ -539,7 +544,7 @@ impl CaptureRecorder {
             Err(_) => (None, None, None, None, Vec::new(), Vec::new(), None),
         };
         let event = match direction {
-            "in" => CaptureEventKind::UdpReceive {
+            "in" => CaptureEventKind::LLUdpReceive {
                 circuit_id,
                 endpoint: remote.to_string(),
                 sequence,
@@ -550,7 +555,7 @@ impl CaptureRecorder {
                 packet_acks,
                 message,
             },
-            "out" => CaptureEventKind::UdpSend {
+            "out" => CaptureEventKind::LLUdpSend {
                 circuit_id,
                 endpoint: remote.to_string(),
                 sequence,
@@ -584,7 +589,7 @@ impl CaptureRecorder {
         request_id: u64,
         status: Option<u16>,
         headers: Vec<(String, String)>,
-        duration: std::time::Duration,
+        duration: Duration,
         outcome: &str,
         body: Option<&[u8]>,
     ) {
@@ -627,10 +632,10 @@ impl CaptureRecorder {
     }
 
     fn record_state(state: &RecorderState, event: CaptureEventKind, payloads: Vec<Vec<u8>>) -> Option<()> {
-        let is_udp = matches!(&event, CaptureEventKind::UdpSend { .. } | CaptureEventKind::UdpReceive { .. });
+        let is_lludp = matches!(&event, CaptureEventKind::LLUdpSend { .. } | CaptureEventKind::LLUdpReceive { .. });
         let is_http_request = matches!(&event, CaptureEventKind::HttpRequest { .. });
         let is_http_response = matches!(&event, CaptureEventKind::HttpResponse { .. });
-        let payloads = payloads.into_iter().filter(|payload| is_udp || !payload.is_empty()).collect::<Vec<_>>();
+        let payloads = payloads.into_iter().filter(|payload| is_lludp || !payload.is_empty()).collect::<Vec<_>>();
         let Some(reserved_bytes) = payloads.iter().try_fold(0usize, |total, bytes| total.checked_add(bytes.len())) else {
             state.dropped_records.fetch_add(1, Ordering::Relaxed);
             return None;
@@ -658,7 +663,7 @@ impl CaptureRecorder {
             return None;
         }
         state.recorded_events.fetch_add(1, Ordering::Relaxed);
-        if is_udp {
+        if is_lludp {
             state.udp_packets.fetch_add(1, Ordering::Relaxed);
         }
         if is_http_request {
@@ -731,7 +736,7 @@ impl<W: Write> Write for SizeLimitedWriter<W> {
         }
         if bytes.len() as u64 > self.remaining {
             self.exceeded_limit = true;
-            return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "capture archive entry size limit exceeded"));
+            return Err(std::io::Error::new(ErrorKind::WriteZero, "capture archive entry size limit exceeded"));
         }
         let written = self.writer.write(bytes)?;
         self.remaining -= written as u64;
@@ -869,7 +874,7 @@ fn write_records(
 
 fn payload_role(event: &CaptureEventKind) -> Option<&'static str> {
     match event {
-        CaptureEventKind::UdpSend { .. } | CaptureEventKind::UdpReceive { .. } => Some("datagram"),
+        CaptureEventKind::LLUdpSend { .. } | CaptureEventKind::LLUdpReceive { .. } => Some("datagram"),
         CaptureEventKind::HttpRequest { .. } | CaptureEventKind::HttpResponse { .. } => Some("body"),
         _ => None,
     }
@@ -877,7 +882,7 @@ fn payload_role(event: &CaptureEventKind) -> Option<&'static str> {
 
 fn valid_payload_count(event: &CaptureEventKind, payload_count: usize) -> bool {
     match event {
-        CaptureEventKind::UdpSend { .. } | CaptureEventKind::UdpReceive { .. } => payload_count == 1,
+        CaptureEventKind::LLUdpSend { .. } | CaptureEventKind::LLUdpReceive { .. } => payload_count == 1,
         CaptureEventKind::HttpRequest { .. } | CaptureEventKind::HttpResponse { .. } => payload_count <= 1,
         _ => payload_count == 0,
     }
@@ -938,7 +943,7 @@ fn message_name(message: &Message) -> &'static str {
         Message::ChatFromViewer(_) => "ChatFromViewer",
         Message::ChatFromSimulator(_) => "ChatFromSimulator",
         Message::RegionHandleRequest(_) => "RegionHandleRequest",
-        Message::RegionIDAndHandleReply(_) => "RegionIDAndHandleReply",
+        Message::RegionIdAndHandleReply(_) => "RegionIdAndHandleReply",
         Message::MapBlockRequest(_) => "MapBlockRequest",
         Message::MapBlockReply(_) => "MapBlockReply",
         Message::EnableSimulator(_) => "EnableSimulator",
@@ -966,7 +971,7 @@ fn create_capture_paths(root: &Path) -> Result<(PathBuf, PathBuf, PathBuf), Stri
         }
         let lock_file = match OpenOptions::new().write(true).create_new(true).open(&lock) {
             Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(format!("Could not reserve a capture name: {error}")),
         };
         drop(lock_file);
@@ -979,7 +984,7 @@ fn create_capture_paths(root: &Path) -> Result<(PathBuf, PathBuf, PathBuf), Stri
                 }
                 return Ok((capture_archive, workspace, lock));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
                 let _ = fs::remove_file(&lock);
                 continue;
             }
@@ -1014,7 +1019,7 @@ pub(crate) fn write_capture_archive(source: &Path, destination: &Path) -> Result
     for name in CAPTURE_ENTRIES {
         archive.start_file(name, options).map_err(|error| format!("Could not write capture archive: {error}"))?;
         let mut input = File::open(source.join(name)).map_err(|error| format!("Could not read capture {name}: {error}"))?;
-        std::io::copy(&mut input, &mut archive).map_err(|error| format!("Could not write capture {name}: {error}"))?;
+        copy(&mut input, &mut archive).map_err(|error| format!("Could not write capture {name}: {error}"))?;
     }
     let file = archive.finish().map_err(|error| format!("Could not finish capture archive: {error}"))?;
     file.sync_all().map_err(|error| format!("Could not sync capture archive: {error}"))?;
@@ -1076,7 +1081,7 @@ fn create_archive_temp_path(parent: &Path) -> Result<PathBuf, String> {
                 let _ = fs::remove_file(&path);
                 return Ok(path);
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(format!("Could not reserve a capture archive path: {error}")),
         }
     }
@@ -1103,7 +1108,10 @@ fn try_create_private_dir(path: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CaptureRecorder, CaptureSession, CaptureState, CaptureSummary, RecorderState, SizeLimitedWriter, WriterCommand};
+    use super::{
+        CaptureRecorder, CaptureSession, CaptureState, CaptureSummary, RecorderState, SizeLimitedWriter, WriterCommand, message_name,
+    };
+    use protocol::{lludp::Message, messages::RegionIdAndHandleReply};
     use std::{
         io::Write,
         path::PathBuf,
@@ -1117,6 +1125,13 @@ mod tests {
     };
 
     #[test]
+    fn region_reply_capture_name_uses_rust_identifier_casing() {
+        let message = Message::RegionIdAndHandleReply(RegionIdAndHandleReply::default());
+
+        assert_eq!(message_name(&message), "RegionIdAndHandleReply");
+    }
+
+    #[test]
     fn capture_entry_writer_enforces_size_limit() {
         let mut writer = SizeLimitedWriter::new(Vec::new(), 3);
 
@@ -1127,7 +1142,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_finalization_releases_record_lock_while_writer_finishes() {
+    fn capture_finalization_releases_lock_during_write() {
         let (sender, receiver) = sync_channel(1);
         let writer_entered = Arc::new(Barrier::new(2));
         let writer_continue = Arc::new(Barrier::new(2));
@@ -1172,5 +1187,365 @@ mod tests {
 
         assert!(record_lock_available, "recording must not remain locked while the writer is joining");
         assert!(state.closed.load(Ordering::Acquire));
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use crate::http::test_support::{LocalServer, response};
+    use std::{
+        fs,
+        io::{BufRead, BufReader, Cursor, Read, Write},
+        net::{SocketAddr, TcpListener},
+        path::{Path, PathBuf},
+        sync::mpsc,
+        thread,
+        time::Duration,
+    };
+    use zip::ZipArchive;
+
+    use llsd::Value;
+    use protocol::lludp::{Message, Packet};
+    use serde_json::{from_slice, from_str, from_value, json, to_value};
+    use test_support::{lludp::vectors, parse_hex_fixture};
+    use tokio::{spawn, task::spawn_blocking, time::timeout};
+    use url::Url;
+
+    use crate::{
+        capabilities,
+        capabilities::CapabilityUrl,
+        capture::{
+            CaptureConfig, CaptureEvent, CaptureEventKind, CaptureManifest, CapturePublication, CaptureRecorder, CaptureSession,
+            CaptureState, MAX_CAPTURE_EVENT_LINE_BYTES,
+        },
+        http::Client,
+    };
+    use tempfile::{TempDir, tempdir};
+
+    fn start_capture(directory: &TempDir, recorder: &CaptureRecorder) -> CaptureSession {
+        CaptureSession::start(CaptureConfig::new(directory.path().join("captures")), recorder.clone()).expect("start capture")
+    }
+
+    fn finish_capture(session: CaptureSession) -> PathBuf {
+        let summary = session.finish_recording(&CapturePublication::default());
+        assert_eq!(summary.state, CaptureState::Complete, "capture failed: {:?}", summary.error);
+        summary.capture_path.unwrap_or_else(|| panic!("finished capture path: {:?}", summary.error))
+    }
+
+    fn archive_entry(path: &Path, name: &str) -> Vec<u8> {
+        let file = fs::File::open(path).expect("open capture archive");
+        let mut archive = ZipArchive::new(file).expect("decode ZIP container");
+        let mut entry = archive.by_name(name).expect("find capture entry");
+        let mut contents = Vec::new();
+        entry.read_to_end(&mut contents).expect("read capture entry");
+        contents
+    }
+
+    fn archive_entries(path: &Path) -> Vec<String> {
+        let file = fs::File::open(path).expect("open capture archive");
+        let mut archive = ZipArchive::new(file).expect("decode ZIP container");
+        (0..archive.len()).map(|index| archive.by_index(index).expect("read capture entry").name().to_owned()).collect()
+    }
+
+    fn capture_events(path: &Path) -> Vec<CaptureEvent> {
+        BufReader::new(Cursor::new(archive_entry(path, "events.jsonl")))
+            .lines()
+            .map(|line| from_str(&line.expect("read capture event")).expect("parse capture event"))
+            .collect()
+    }
+
+    fn payload<'a>(payloads: &'a [u8], event: &CaptureEvent) -> &'a [u8] {
+        let reference = event.payloads.first().expect("capture event payload reference");
+        let start = usize::try_from(reference.offset).expect("payload offset");
+        let end = start + usize::try_from(reference.length).expect("payload length");
+        &payloads[start..end]
+    }
+
+    fn check_capture(path: &Path) -> (CaptureManifest, Vec<CaptureEvent>, Vec<u8>, usize) {
+        assert_eq!(archive_entries(path), ["manifest.json", "events.jsonl", "payloads.bin"]);
+        let manifest: CaptureManifest = from_slice(&archive_entry(path, "manifest.json")).expect("parse capture manifest");
+        let events = capture_events(path);
+        let payloads = archive_entry(path, "payloads.bin");
+
+        assert_eq!(manifest.schema_version, 1);
+        assert!(!manifest.viewer_version.is_empty());
+        assert_ne!(manifest.state, CaptureState::Recording);
+        assert_eq!(manifest.event_count, events.len() as u64);
+        assert_eq!(manifest.payload_bytes, payloads.len() as u64);
+
+        let mut elapsed_ns = 0;
+        let mut decoded_packets = 0;
+        for (index, event) in events.iter().enumerate() {
+            assert_eq!(event.index, index as u64);
+            assert!(event.elapsed_ns >= elapsed_ns);
+            elapsed_ns = event.elapsed_ns;
+
+            for reference in &event.payloads {
+                let end = reference.offset.checked_add(reference.length).expect("payload range does not overflow");
+                assert!(end <= manifest.payload_bytes, "payload range exceeds payloads.bin");
+            }
+
+            match &event.kind {
+                CaptureEventKind::LLUdpSend { sequence, reliable, resent, zerocoded, appended_acks, packet_acks, .. }
+                | CaptureEventKind::LLUdpReceive { sequence, reliable, resent, zerocoded, appended_acks, packet_acks, .. } => {
+                    assert_eq!(event.payloads.len(), 1);
+                    assert_eq!(event.payloads[0].role, "datagram");
+                    match Packet::decode(payload(&payloads, event)) {
+                        Ok(packet) => {
+                            decoded_packets += 1;
+                            assert_eq!(*sequence, Some(packet.sequence()));
+                            assert_eq!(*reliable, Some(packet.is_reliable()));
+                            assert_eq!(*resent, Some(packet.is_resent()));
+                            assert_eq!(*zerocoded, Some(packet.is_zerocoded().expect("read packet zero-code flag")));
+                            assert_eq!(appended_acks.as_slice(), packet.appended_acks());
+                            let actual_packet_acks = match packet.message() {
+                                Message::PacketAck(message) => message.packets.iter().map(|ack| ack.id).collect::<Vec<_>>(),
+                                _ => Vec::new(),
+                            };
+                            assert_eq!(*packet_acks, actual_packet_acks);
+                        }
+                        Err(_) => {
+                            assert!(sequence.is_none() && reliable.is_none() && resent.is_none() && zerocoded.is_none());
+                            assert!(appended_acks.is_empty() && packet_acks.is_empty());
+                        }
+                    }
+                }
+                CaptureEventKind::HttpRequest { .. } | CaptureEventKind::HttpResponse { .. } => {
+                    assert!(event.payloads.len() <= 1);
+                    assert!(event.payloads.iter().all(|reference| reference.role == "body"));
+                }
+                _ => assert!(event.payloads.is_empty()),
+            }
+        }
+
+        (manifest, events, payloads, decoded_packets)
+    }
+
+    #[test]
+    fn lludp_capture_kind_names_keep_legacy_read_support() {
+        let legacy = json!({ "kind": "udp_receive", "circuit_id": 3, "endpoint": "127.0.0.1:13000" });
+        let event: CaptureEventKind = from_value(legacy).expect("read legacy UDP capture kind");
+        assert!(matches!(event, CaptureEventKind::LLUdpReceive { circuit_id: 3, .. }));
+
+        let event = CaptureEventKind::LLUdpSend {
+            circuit_id: 3,
+            endpoint: "127.0.0.1:13000".into(),
+            sequence: None,
+            reliable: None,
+            resent: None,
+            zerocoded: None,
+            appended_acks: Vec::new(),
+            packet_acks: Vec::new(),
+            message: None,
+        };
+        let encoded = to_value(event).expect("write LLUDP capture kind");
+        assert_eq!(encoded["kind"], "lludp_send");
+    }
+
+    #[test]
+    fn capture_stop() {
+        let directory = tempdir().expect("create capture test directory");
+        let recorder = CaptureRecorder::new();
+        let session = start_capture(&directory, &recorder);
+        let request_body = b"<login><username>private-user</username><password>private-password-931</password></login>";
+        let response_body = b"<response><session>private-session-822</session></response>";
+        let request_id = recorder.http_request("login", "POST", vec![("content-type".into(), "text/xml".into())], request_body);
+        recorder.http_response(
+            request_id,
+            Some(200),
+            vec![("content-type".into(), "text/xml".into())],
+            Duration::from_millis(11),
+            "complete",
+            Some(response_body),
+        );
+        recorder.lifecycle("login_completed");
+        let datagram = parse_hex_fixture(vectors::CHAT_FROM_SIMULATOR).expect("parse independent chat vector");
+        let local: SocketAddr = "127.0.0.1:50000".parse().expect("local endpoint");
+        let remote: SocketAddr = "198.51.100.44:13000".parse().expect("simulator endpoint");
+        recorder.udp(512347, "in", local, remote, &datagram);
+
+        let capture = finish_capture(session);
+        let (manifest, events, payloads, decoded_packets) = check_capture(&capture);
+        assert_eq!(manifest.state, CaptureState::Complete);
+        assert_eq!(decoded_packets, 1);
+        assert!(payloads.windows(request_body.len()).any(|part| part == request_body));
+        assert!(payloads.windows(response_body.len()).any(|part| part == response_body));
+        assert!(events.iter().any(|event| matches!(event.kind, CaptureEventKind::LoginCompleted)));
+
+        let request = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                CaptureEventKind::HttpRequest { request_id, .. } => Some(*request_id),
+                _ => None,
+            })
+            .expect("captured HTTP request");
+        assert!(
+            events.iter().any(|event| matches!(event.kind, CaptureEventKind::HttpResponse { request_id, .. } if request_id == request))
+        );
+        let lludp_receive =
+            events.iter().find(|event| matches!(event.kind, CaptureEventKind::LLUdpReceive { .. })).expect("captured LLUDP receive");
+        assert_eq!(payload(&payloads, lludp_receive), datagram);
+    }
+
+    #[test]
+    fn oversized_event_is_omitted_and_marks_capture_incomplete() {
+        let directory = tempdir().expect("create capture test directory");
+        let recorder = CaptureRecorder::new();
+        let session = start_capture(&directory, &recorder);
+        recorder.http_request("test", "GET", vec![("x-large".into(), "x".repeat(MAX_CAPTURE_EVENT_LINE_BYTES))], &[]);
+
+        let summary = session.finish_recording(&CapturePublication::default());
+        assert_eq!(summary.state, CaptureState::Incomplete);
+        assert_eq!(summary.error.as_deref(), Some("Capture event exceeds the per-event line size limit."));
+
+        let path = summary.capture_path.expect("incomplete capture archive");
+        let (manifest, events, _, _) = check_capture(&path);
+        assert_eq!(manifest.state, CaptureState::Incomplete);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn large_http_body_does_not_count_toward_event_line_limit() {
+        let directory = tempdir().expect("create capture test directory");
+        let recorder = CaptureRecorder::new();
+        let session = start_capture(&directory, &recorder);
+        let body = vec![b'x'; MAX_CAPTURE_EVENT_LINE_BYTES + 1];
+        recorder.http_request("test", "POST", Vec::new(), &body);
+
+        let capture = finish_capture(session);
+        let (_, events, payloads, _) = check_capture(&capture);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(payload(&payloads, &events[0]), body);
+        assert!(archive_entry(&capture, "events.jsonl").len() <= MAX_CAPTURE_EVENT_LINE_BYTES);
+    }
+
+    #[tokio::test]
+    async fn capability_endpoints_are_captured() {
+        let directory = tempdir().expect("create capture test directory");
+        let recorder = CaptureRecorder::new();
+        let session = start_capture(&directory, &recorder);
+        let capability_server = LocalServer::start(vec![
+            response(200, "OK", "application/llsd+xml", None, "<llsd><integer>9</integer></llsd>"),
+            response(200, "OK", "application/octet-stream", None, "named"),
+            response(200, "OK", "application/octet-stream", None, "unsafe"),
+            response(200, "OK", "application/octet-stream", None, "manual"),
+        ]);
+        let named_url = capability_server.url("/named-secret-token");
+        let unsafe_url = capability_server.url("/unsafe-secret-token");
+        let seed_body =
+            format!("<llsd><map><key>TestCapability</key><uri>{named_url}</uri><key>bad/name</key><uri>{unsafe_url}</uri></map></llsd>");
+        let seed_server = LocalServer::start(vec![response(200, "OK", "application/llsd+xml", None, &seed_body)]);
+        let client = capabilities::Client::new_with_capture(seed_server.url("/seed"), Some(recorder.clone())).expect("capability client");
+        let capabilities = client.request_capabilities(&["TestCapability", "bad/name"]).await.expect("capability discovery");
+
+        let named = capabilities.get("TestCapability").expect("named capability").with_query_pair("request", "private-value");
+        let unsafe_name = capabilities.get("bad/name").expect("capability with non-label name");
+        assert_eq!(client.post::<_, Value>(&named, &Value::Undefined).await.expect("named POST"), Value::Integer(9));
+        assert_eq!(client.get_bytes(&named).await.expect("named request"), b"named");
+        assert_eq!(client.get_bytes(unsafe_name).await.expect("unsafe-name request"), b"unsafe");
+        let manual = CapabilityUrl::parse(capability_server.url("/manual-secret-token").as_str()).expect("manual URL handle");
+        assert_eq!(client.get_bytes(&manual).await.expect("manual request"), b"manual");
+        client.close_session();
+
+        assert_eq!(seed_server.finish().len(), 1);
+        assert_eq!(capability_server.finish().len(), 4);
+        let capture = finish_capture(session);
+        let (_, events, _, _) = check_capture(&capture);
+        let endpoints = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                CaptureEventKind::HttpRequest { endpoint, .. } => Some(endpoint.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(endpoints, ["seed_capability", "TestCapability", "TestCapability", "capability_get", "capability_get"]);
+        assert!(endpoints.iter().all(|endpoint| !endpoint.contains("secret-token")));
+        assert!(endpoints.iter().all(|endpoint| !endpoint.contains("127.0.0.1")));
+    }
+
+    #[test]
+    fn capture_interrupt() {
+        let directory = tempdir().expect("create capture test directory");
+        let recorder = CaptureRecorder::new();
+        let session = start_capture(&directory, &recorder);
+        let path = session.path().to_path_buf();
+        recorder.lifecycle("login_completed");
+
+        let summary = session.interrupt();
+        assert_eq!(summary.state, CaptureState::Interrupted);
+        assert_eq!(summary.capture_path.as_deref(), Some(path.as_path()));
+        let (manifest, events, _, _) = check_capture(&path);
+        assert_eq!(manifest.state, CaptureState::Interrupted);
+        assert!(events.iter().any(|event| matches!(event.kind, CaptureEventKind::LoginCompleted)));
+    }
+
+    #[test]
+    fn http_errors() {
+        let directory = tempdir().expect("create capture test directory");
+        let recorder = CaptureRecorder::new();
+        let session = start_capture(&directory, &recorder);
+        let request_id = recorder.http_request(
+            "capability_get",
+            "GET",
+            vec![("accept".into(), "application/llsd+xml".into()), ("accept".into(), "application/llsd+xml".into())],
+            &[],
+        );
+        recorder.http_response(request_id, None, Vec::new(), Duration::from_millis(3), "send_error", None);
+
+        let capture = finish_capture(session);
+        let (_, events, _, _) = check_capture(&capture);
+        assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        CaptureEventKind::HttpRequest { request_id: id, headers, .. }
+            if *id == request_id && headers == &[("accept".into(), "application/llsd+xml".into()), ("accept".into(), "application/llsd+xml".into())]
+    )));
+        assert!(events.iter().any(|event| matches!(event.kind, CaptureEventKind::HttpError { request_id: id, .. } if id == request_id)));
+        assert!(!events.iter().any(|event| matches!(event.kind, CaptureEventKind::HttpResponse { .. })));
+    }
+
+    #[tokio::test]
+    async fn pending_http() {
+        let directory = tempdir().expect("create capture test directory");
+        let recorder = CaptureRecorder::new();
+        let session = start_capture(&directory, &recorder);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local HTTP server");
+        let address = listener.local_addr().expect("read local HTTP address");
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept local HTTP request");
+            let mut request = Vec::new();
+            let mut chunk = [0; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut chunk).expect("read local HTTP request");
+                assert_ne!(count, 0, "client closed before sending HTTP headers");
+                request.extend_from_slice(&chunk[..count]);
+            }
+            accepted_tx.send(()).expect("signal accepted request");
+            release_rx.recv_timeout(Duration::from_secs(10)).expect("release held HTTP response");
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").expect("send local HTTP response");
+        });
+        let client = Client::new(Some(Duration::from_secs(5)), true, None).expect("build HTTP client").with_capture(Some(recorder));
+        let request_url = format!("http://{address}/capability");
+        let request = spawn(async move { client.get(&Url::parse(&request_url).expect("local HTTP URL")).await });
+
+        spawn_blocking(move || accepted_rx.recv_timeout(Duration::from_secs(5)).expect("HTTP request reached local server"))
+            .await
+            .expect("wait for local HTTP server");
+        let capture = finish_capture(session);
+        release_tx.send(()).expect("release local HTTP response");
+        let response = timeout(Duration::from_secs(5), request)
+            .await
+            .expect("HTTP request should finish")
+            .expect("HTTP task should finish")
+            .expect("receive held HTTP response");
+        assert_eq!(response.body, b"ok");
+        server.join().expect("local HTTP server should finish");
+
+        let (_, events, _, _) = check_capture(&capture);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0].kind, CaptureEventKind::HttpRequest { .. }));
     }
 }

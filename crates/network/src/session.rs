@@ -2303,14 +2303,18 @@ mod tests {
         simulator.send_to(&server_ack(23, reply.sequence()), peer).await.expect("ack RegionHandshakeReply");
         simulator.send_to(&reliable_fixture("agent_movement_complete.hex", 24), peer).await.expect("send AgentMovementComplete");
 
-        loop {
+        let mut session_ready = false;
+        let mut movement_complete_received = false;
+        while !session_ready || !movement_complete_received {
             match next_event(&mut session.events).await {
-                Event::SessionReady { .. } => break,
-                Event::Failed(error) => panic!("client failed before session readiness: {error}"),
+                Event::SessionReady { .. } => session_ready = true,
+                Event::SimulatorMessage { sequence: 24, message: Message::AgentMovementComplete(_), .. } => {
+                    movement_complete_received = true;
+                }
+                Event::Failed(error) => panic!("client failed before initial movement completed: {error}"),
                 _ => {}
             }
         }
-        while session.events.try_recv().is_ok() {}
         timeout(CLIENT_TIMEOUT, poll_started).await.expect("EventQueueGet should start").expect("EventQueueGet request");
 
         let mut rejected = lludp::fixture("improved_terse_object_update.hex");

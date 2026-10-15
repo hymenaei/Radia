@@ -50,8 +50,8 @@ objc = "=0.2.7"
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
-network = { workspace = true, features = ["test-support"] }
-test-support.workspace = true
+network = { workspace = true, features = ["testing"] }
+testing.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 time.workspace = true

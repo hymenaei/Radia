@@ -3,8 +3,8 @@
 use base::UUID;
 
 use crate::{
-    codec::{Reader, Writer},
-    error::LLUdpError,
+    LLUdpError,
+    lludp::codec::{Reader, Writer},
 };
 use math::{Quat, Vec3, Vec4};
 
@@ -244,11 +244,25 @@ pub(crate) fn decode_extra_parameters(reader: &mut Reader<'_>) -> Result<Vec<Ext
     let count = usize::from(reader.u8()?);
     let mut parameters = Vec::with_capacity(count);
     for _ in 0..count {
-        let parameter_type = reader.u16()?;
-        let len = usize::try_from(reader.i32()?).map_err(|_| LLUdpError::InvalidMessage)?;
+        let (parameter_type, len) = read_extra_parameter_header(reader)?;
         parameters.push(ExtraParameter { parameter_type, data: reader.take(len)?.to_vec() });
     }
     Ok(parameters)
+}
+
+pub(crate) fn skip_extra_parameters(reader: &mut Reader<'_>) -> Result<usize, LLUdpError> {
+    let count = usize::from(reader.u8()?);
+    for _ in 0..count {
+        let (_, len) = read_extra_parameter_header(reader)?;
+        reader.take(len)?;
+    }
+    Ok(count)
+}
+
+fn read_extra_parameter_header(reader: &mut Reader<'_>) -> Result<(u16, usize), LLUdpError> {
+    let parameter_type = reader.u16()?;
+    let len = usize::try_from(reader.i32()?).map_err(|_| LLUdpError::InvalidMessage)?;
+    Ok((parameter_type, len))
 }
 
 pub(crate) fn encode_extra_parameters(parameters: &[ExtraParameter], writer: &mut Writer<'_>) -> Result<(), LLUdpError> {

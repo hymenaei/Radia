@@ -21,8 +21,6 @@ use protocol::lludp::{Message, Packet};
 use protocol::messages::{CacheMissType::Full, ObjectRequest, RequestAgentData, RequestMultipleObjects};
 use world::LocalAddress;
 
-use super::coordinator::{PresentationMailbox, ViewerUpdate};
-
 pub(super) const RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 pub(super) const RECOVERY_MAX_SENDS: u8 = 4;
 const RECOVERY_IDLE_WAIT: Duration = Duration::from_secs(60);
@@ -264,7 +262,6 @@ pub(super) async fn run_recovery_retries(
     mut wake_receiver: mpsc::Receiver<()>,
     queue: Arc<Mutex<RecoveryRetryQueue>>,
     session_handle: SessionHandle,
-    mailbox: PresentationMailbox,
     background: gpui::BackgroundExecutor,
     cancellation: impl Future<Output = ()> + Clone + Send + 'static,
 ) {
@@ -316,7 +313,7 @@ pub(super) async fn run_recovery_retries(
             for recovery in recoveries {
                 queue.finish(recovery);
             }
-            mailbox.publish(ViewerUpdate::SendError("Could not request object updates: recovery packet exceeded its byte budget.".into()));
+            tracing::error!("object recovery request exceeded its byte budget");
             continue;
         }
 
@@ -354,7 +351,7 @@ pub(super) async fn run_recovery_retries(
                         queue.finish(recovery);
                     }
                 }
-                mailbox.publish(ViewerUpdate::SendError(format!("Could not request object updates: {error}")));
+                tracing::warn!(%error, "could not request object updates");
             }
         }
     }
@@ -381,7 +378,7 @@ mod tests {
     };
 
     use base::UUID;
-    use network::test_support::simulator_id;
+    use network::testing::simulator_id;
     use protocol::lludp::{Message, Packet};
     use protocol::messages::{CacheMissType::Full, RequestAgentData};
     use world::{LocalAddress, Region};

@@ -25,7 +25,10 @@ use futures::{
     stream::StreamExt,
 };
 use gpui::BackgroundExecutor;
-use network::{AgentSession, Delivery, Event, Grid, MfaChallenge, PacketOrder, SimulatorId};
+use network::{
+    AgentSession, CoverageLoss, CoverageLossReason, CoverageSource, CoverageWatermark, Delivery, Event, Grid, MfaChallenge, PacketOrder,
+    SimulatorId,
+};
 use protocol::lludp::Message;
 
 use crate::{
@@ -41,6 +44,7 @@ use crate::{
 
 const MAX_PENDING_CHAT_MESSAGES: usize = 64;
 const MAX_PENDING_CHAT_BYTES: usize = 256 * 1024;
+const MAX_SESSION_COVERAGE_SCOPES: usize = 256;
 const MAX_HANDOFF_OBSERVATIONS: usize = 32;
 const PRESENTATION_WAKE_BUFFER: usize = 0;
 
@@ -55,6 +59,7 @@ pub(crate) type WriteLock = Arc<futures::lock::Mutex<()>>;
 #[derive(Clone)]
 pub(crate) struct PresentationMailbox {
     state: Arc<Mutex<PendingPresentation>>,
+    coverage: SessionCoverageState,
     wake_sender: Arc<Mutex<mpsc::Sender<()>>>,
 }
 
@@ -70,8 +75,6 @@ pub(crate) struct PresentationSnapshot {
     pub(crate) session_ready: Option<SessionReadyUpdate>,
     pub(crate) region_name: Option<String>,
     pub(crate) chat_messages: VecDeque<ChatMessage>,
-    pub(crate) capture_notice: Option<String>,
-    pub(crate) send_error: Option<String>,
     pub(crate) failure: Option<String>,
     pub(crate) favorites: Option<FavoritesUpdate>,
     pub(crate) favorite_store_saved: Option<(u64, Result<(), String>)>,
@@ -96,6 +99,12 @@ pub(crate) struct FavoritesUpdate {
     pub(crate) result: Result<Vec<FavoriteLocation>, String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionCoverageLoss {
+    Source { watermark: CoverageWatermark, reason: CoverageLossReason },
+    SessionOverflow { generation: u64 },
+}
+
 #[derive(Default)]
 struct PendingPresentation {
     authentication: Option<AuthenticationUpdate>,
@@ -103,11 +112,25 @@ struct PendingPresentation {
     region_name: Option<String>,
     chat_messages: VecDeque<ChatMessage>,
     chat_bytes: usize,
-    capture_notice: Option<String>,
-    send_error: Option<String>,
     failure: Option<String>,
     favorites: Option<FavoritesUpdate>,
     favorite_store_saved: Option<(u64, Result<(), String>)>,
+}
+
+/// Retains coverage uncertainty for the authenticated session.
+#[derive(Clone, Default)]
+struct SessionCoverageState(Arc<Mutex<SessionCoverage>>);
+
+#[derive(Default)]
+struct SessionCoverage {
+    losses: Vec<SessionCoverageLoss>,
+    overflow_generation: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CoverageRetention {
+    Retained,
+    FailClosed,
 }
 
 pub(crate) enum ViewerUpdate {
@@ -115,8 +138,6 @@ pub(crate) enum ViewerUpdate {
     SessionReady(SessionReadyUpdate),
     RegionName(String),
     ChatMessage(ChatMessage),
-    CaptureNotice(String),
-    SendError(String),
     Failed(String),
     Favorites(FavoritesUpdate),
     FavoriteStoreSaved { generation: u64, result: Result<(), String> },
@@ -131,9 +152,10 @@ enum SimulatorScope {
 impl PresentationMailbox {
     pub(crate) fn new(generation: u64) -> (Self, PresentationReceiver) {
         let state = Arc::new(Mutex::new(PendingPresentation::default()));
+        let coverage = SessionCoverageState::default();
         let (wake_sender, wake_receiver) = mpsc::channel(PRESENTATION_WAKE_BUFFER);
         (
-            Self { state: state.clone(), wake_sender: Arc::new(Mutex::new(wake_sender)) },
+            Self { state: state.clone(), coverage, wake_sender: Arc::new(Mutex::new(wake_sender)) },
             PresentationReceiver { generation, state, wake_receiver },
         )
     }
@@ -146,8 +168,6 @@ impl PresentationMailbox {
                 ViewerUpdate::SessionReady(update) => state.session_ready = Some(update),
                 ViewerUpdate::RegionName(name) => state.region_name = Some(name),
                 ViewerUpdate::ChatMessage(message) => state.push_chat(message),
-                ViewerUpdate::CaptureNotice(notice) => state.capture_notice = Some(notice),
-                ViewerUpdate::SendError(error) => state.send_error = Some(error),
                 ViewerUpdate::Failed(error) => {
                     state.chat_messages.clear();
                     state.chat_bytes = 0;
@@ -162,8 +182,72 @@ impl PresentationMailbox {
             }
         }
 
+        self.wake();
+    }
+}
+
+impl SessionCoverageState {
+    fn retain_source_then_acknowledge(
+        &self,
+        watermark: CoverageWatermark,
+        reason: CoverageLossReason,
+        acknowledge: impl FnOnce(&Self, CoverageWatermark),
+    ) -> CoverageRetention {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let source_loss = SessionCoverageLoss::Source { watermark, reason };
+        let existing = state.losses.iter_mut().find(|current| {
+            matches!(current, SessionCoverageLoss::Source { watermark: current, .. }
+                if current.simulator_id == watermark.simulator_id && current.source == watermark.source)
+        });
+        if let Some(current) = existing {
+            let SessionCoverageLoss::Source { watermark: current_watermark, .. } = current else { unreachable!() };
+            let overflow_generation = current_watermark.overflow_generation.max(watermark.overflow_generation);
+            if watermark.generation > current_watermark.generation {
+                *current = SessionCoverageLoss::Source { watermark: CoverageWatermark { overflow_generation, ..watermark }, reason };
+            } else {
+                current_watermark.overflow_generation = overflow_generation;
+            }
+        } else if state.losses.len() < MAX_SESSION_COVERAGE_SCOPES {
+            state.losses.push(source_loss);
+        } else {
+            state.record_local_overflow();
+            return CoverageRetention::FailClosed;
+        }
+        drop(state);
+
+        acknowledge(self, watermark);
+        CoverageRetention::Retained
+    }
+
+    fn record_overflow(&self, generation: u64) {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).record_overflow(generation);
+    }
+
+    fn snapshot(&self) -> Vec<SessionCoverageLoss> {
+        let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut losses = state.losses.clone();
+        if let Some(generation) = state.overflow_generation {
+            losses.push(SessionCoverageLoss::SessionOverflow { generation });
+        }
+        losses
+    }
+}
+
+impl PresentationMailbox {
+    fn wake(&self) {
         let mut wake_sender = self.wake_sender.lock().unwrap_or_else(PoisonError::into_inner);
         let _ = wake_sender.try_send(());
+    }
+}
+
+impl SessionCoverage {
+    fn record_local_overflow(&mut self) {
+        let generation = self.overflow_generation.unwrap_or_default().saturating_add(1).max(1);
+        self.record_overflow(generation);
+    }
+
+    fn record_overflow(&mut self, generation: u64) {
+        self.overflow_generation = Some(self.overflow_generation.unwrap_or_default().max(generation));
     }
 }
 
@@ -206,29 +290,9 @@ impl PendingPresentation {
 impl PresentationSnapshot {
     fn from_pending(generation: u64, pending: PendingPresentation) -> Self {
         let PendingPresentation {
-            authentication,
-            session_ready,
-            region_name,
-            chat_messages,
-            capture_notice,
-            send_error,
-            failure,
-            favorites,
-            favorite_store_saved,
-            ..
+            authentication, session_ready, region_name, chat_messages, failure, favorites, favorite_store_saved, ..
         } = pending;
-        Self {
-            generation,
-            authentication,
-            session_ready,
-            region_name,
-            chat_messages,
-            capture_notice,
-            send_error,
-            failure,
-            favorites,
-            favorite_store_saved,
-        }
+        Self { generation, authentication, session_ready, region_name, chat_messages, failure, favorites, favorite_store_saved }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -236,8 +300,6 @@ impl PresentationSnapshot {
             && self.session_ready.is_none()
             && self.region_name.is_none()
             && self.chat_messages.is_empty()
-            && self.capture_notice.is_none()
-            && self.send_error.is_none()
             && self.failure.is_none()
             && self.favorites.is_none()
             && self.favorite_store_saved.is_none()
@@ -258,9 +320,9 @@ pub(crate) async fn drain_session(
 ) {
     use Delivery::Reliable;
     use Event::{
-        CapabilityError, CapabilityEvent, CaptureFinished, CaptureInterrupted, Failed, LoginAccepted, MfaRequired, SendFailed,
-        SessionReady, SimulatorCapabilities, SimulatorConnectFailed, SimulatorConnected, SimulatorDisconnected, SimulatorFailed,
-        SimulatorMessage, SimulatorPromoted,
+        CapabilityError, CapabilityEvent, CapabilityEventBatch, CaptureFinished, CaptureInterrupted, CoverageLost, EventQueueCoverageLost,
+        Failed, LoginAccepted, MfaRequired, SendFailed, SessionReady, SimulatorCapabilities, SimulatorConnectFailed, SimulatorConnected,
+        SimulatorDisconnected, SimulatorFailed, SimulatorMessage, SimulatorPromoted,
     };
 
     let cancellation = async move {
@@ -269,6 +331,7 @@ pub(crate) async fn drain_session(
     .shared();
     let world_limits = viewer_world_limits();
     let mut session_world = SessionWorld::new(world_limits);
+    let coverage = mailbox.coverage.clone();
     let mut primary_simulator_id = None;
     let mut world_primary_simulator_id = None;
     let mut promoted_world_target = None;
@@ -285,7 +348,6 @@ pub(crate) async fn drain_session(
             recovery_wake_receiver,
             Arc::clone(&recovery_queue),
             session_handle.clone(),
-            mailbox.clone(),
             background.clone(),
             cancellation.clone(),
         ))
@@ -294,220 +356,238 @@ pub(crate) async fn drain_session(
     loop {
         let cancelled = cancellation.clone().fuse();
         pin_mut!(cancelled);
-        let event = session.recv_event().fuse();
-        pin_mut!(event);
-        futures::select! {
-            _ = cancelled => break,
-            event = event => {
-                let Some(event) = event else {
-                    mailbox.publish(ViewerUpdate::Failed("The network session ended.".into()));
-                    break;
+        let event = {
+            let event = session.recv_event().fuse();
+            pin_mut!(event);
+            futures::select! {
+                _ = cancelled => break,
+                event = event => event,
+            }
+        };
+        let Some(event) = event else {
+            mailbox.publish(ViewerUpdate::Failed("The network session ended.".into()));
+            break;
+        };
+
+        let event = match event {
+            CoverageLost { loss } => {
+                let retention = match loss {
+                    CoverageLoss::Source(record) => {
+                        let source = match record.watermark.source {
+                            CoverageSource::Lludp => "lludp",
+                            CoverageSource::EventQueue { .. } => "event_queue",
+                        };
+                        tracing::warn!(source, reason = ?record.reason, "World data may be incomplete");
+                        coverage.retain_source_then_acknowledge(record.watermark, record.reason, |_, watermark| {
+                            session.acknowledge_coverage_loss(watermark)
+                        })
+                    }
+                    CoverageLoss::SessionOverflow { generation } => {
+                        coverage.record_overflow(generation);
+                        CoverageRetention::FailClosed
+                    }
                 };
-
-                if let Some((simulator_id, summary)) = apply_world_event_with_handoff(
-                    &mut session_world,
-                    &event,
-                    &mut world_primary_simulator_id,
-                    &mut promoted_world_target,
-                    &mut handoff_observations,
-                    active_session.as_ref().map(|session: &AgentSession| session.agent_id),
-                ) {
-                    recovery::schedule_recovery_requests(
-                        simulator_id,
-                        summary.recovery_targets().collect(),
-                        summary.recovery_cancellation_addresses().collect(),
-                        active_session.as_ref(),
-                        Arc::clone(&recovery_queue),
-                        &mut recovery_wake,
-                    );
+                if retention == CoverageRetention::FailClosed {
+                    let coverage_record_count = coverage.snapshot().len();
+                    tracing::error!(coverage_record_count, "World data may be incomplete because coverage-loss records overflowed");
+                    mailbox.publish(ViewerUpdate::Failed(
+                        "The viewer could not retain all network loss records. Simulator state may be incomplete; reconnect to restore coverage.".into(),
+                    ));
+                    break;
                 }
+                continue;
+            }
+            event => event,
+        };
 
-                if let SimulatorDisconnected { simulator_id, .. } | SimulatorFailed { simulator_id, .. } = &event {
-                    recovery_queue
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .cancel_simulator(*simulator_id);
-                }
+        if let Some((simulator_id, summary)) = apply_world_event_with_handoff(
+            &mut session_world,
+            &event,
+            &mut world_primary_simulator_id,
+            &mut promoted_world_target,
+            &mut handoff_observations,
+            active_session.as_ref().map(|session: &AgentSession| session.agent_id),
+        ) {
+            recovery::schedule_recovery_requests(
+                simulator_id,
+                summary.recovery_targets().collect(),
+                summary.recovery_cancellation_addresses().collect(),
+                active_session.as_ref(),
+                Arc::clone(&recovery_queue),
+                &mut recovery_wake,
+            );
+        }
 
-                match event {
-                    MfaRequired { challenge } => {
-                        mailbox.publish(ViewerUpdate::Authentication(AuthenticationUpdate::MfaRequired(challenge)));
-                    }
-                    LoginAccepted { mfa_hash } => {
-                        let mailbox = mailbox.clone();
-                        let write_lock = credential_write_lock.clone();
-                        let username = username.clone();
-                        let password = password.clone();
-                        background.spawn(async move {
-                            let _guard = write_lock.lock().await;
-                            let mut warning = None;
-                            let remembered_login = if remember_login {
-                                let saved = RememberedLogin { username, password, mfa_hash: mfa_hash.unwrap_or_default() };
-                                match remembered_login::save(grid, &saved) {
-                                    Ok(()) => Some(saved),
-                                    Err(error) => {
-                                        warning = Some(error);
-                                        None
-                                    }
-                                }
-                            } else {
-                                if let Err(error) = remembered_login::clear(grid) {
+        if let SimulatorDisconnected { simulator_id, .. } | SimulatorFailed { simulator_id, .. } = &event {
+            recovery_queue.lock().unwrap_or_else(PoisonError::into_inner).cancel_simulator(*simulator_id);
+        }
+
+        match event {
+            MfaRequired { challenge } => {
+                mailbox.publish(ViewerUpdate::Authentication(AuthenticationUpdate::MfaRequired(challenge)));
+            }
+            LoginAccepted { mfa_hash } => {
+                let mailbox = mailbox.clone();
+                let write_lock = credential_write_lock.clone();
+                let username = username.clone();
+                let password = password.clone();
+                background
+                    .spawn(async move {
+                        let _guard = write_lock.lock().await;
+                        let mut warning = None;
+                        let remembered_login = if remember_login {
+                            let saved = RememberedLogin { username, password, mfa_hash: mfa_hash.unwrap_or_default() };
+                            match remembered_login::save(grid, &saved) {
+                                Ok(()) => Some(saved),
+                                Err(error) => {
                                     warning = Some(error);
+                                    None
                                 }
-                                None
-                            };
-                            mailbox.publish(ViewerUpdate::Authentication(AuthenticationUpdate::CredentialsUpdated {
-                                remembered_login,
-                                warning,
-                            }));
-                        }).detach();
+                            }
+                        } else {
+                            if let Err(error) = remembered_login::clear(grid) {
+                                warning = Some(error);
+                            }
+                            None
+                        };
+                        mailbox
+                            .publish(ViewerUpdate::Authentication(AuthenticationUpdate::CredentialsUpdated { remembered_login, warning }));
+                    })
+                    .detach();
+            }
+            SessionReady { simulator_id, session, capabilities, login_data } => {
+                let session = *session;
+                primary_simulator_id = Some(simulator_id);
+                active_session = Some(session.clone());
+                active_login_data = Some(login_data.clone());
+                let lookup = RegionLookup::new(session_handle.clone(), simulator_id, &session, background.clone());
+                region_lookup = Some(lookup.clone());
+                mailbox.publish(ViewerUpdate::SessionReady(SessionReadyUpdate {
+                    session: session.clone(),
+                    region_lookup: lookup.clone(),
+                    world_state: session_world.shared_state(),
+                }));
+
+                let _ = session_handle.send(agent::idle(session.agent_id, session.session_id), Reliable);
+
+                let mailbox = mailbox.clone();
+                let username = username.clone();
+                let background = background.clone();
+                let cancelled = cancellation.clone();
+                background
+                    .spawn(async move {
+                        let load = load_favorites(&capabilities, &lookup, &session, &login_data).fuse();
+                        pin_mut!(load);
+                        let cancelled = cancelled.fuse();
+                        pin_mut!(cancelled);
+                        futures::select! {
+                            result = load => mailbox.publish(ViewerUpdate::Favorites(FavoritesUpdate {
+                                grid: session.grid,
+                                agent_id: session.agent_id,
+                                session_id: session.session_id,
+                                username,
+                                result,
+                            })),
+                            _ = cancelled => {}
+                        }
+                    })
+                    .detach();
+            }
+            SimulatorPromoted { previous_simulator_id, simulator_id, session, capabilities } => {
+                let session = *session;
+                primary_simulator_id = Some(simulator_id);
+                active_session = Some(session.clone());
+                let lookup = RegionLookup::new(session_handle.clone(), simulator_id, &session, background.clone());
+                region_lookup = Some(lookup.clone());
+                let previous_target = promoted_world_target.map(|handoff| handoff.target);
+                if begin_world_handoff(&mut world_primary_simulator_id, &mut promoted_world_target, previous_simulator_id, simulator_id) {
+                    if let Some(previous_target) = previous_target.filter(|target| *target != simulator_id) {
+                        handoff_observations.remove(&previous_target);
                     }
-                    SessionReady { simulator_id, session, capabilities, login_data } => {
-                        let session = *session;
-                        primary_simulator_id = Some(simulator_id);
-                        active_session = Some(session.clone());
-                        active_login_data = Some(login_data.clone());
-                        let lookup = RegionLookup::new(session_handle.clone(), &session, background.clone());
-                        region_lookup = Some(lookup.clone());
-                        mailbox.publish(ViewerUpdate::SessionReady(SessionReadyUpdate {
-                            session: session.clone(),
-                            region_lookup: lookup.clone(),
-                            world_state: session_world.shared_state(),
-                        }));
-
-                        let _ = session_handle.send(
-                            agent::idle(session.agent_id, session.session_id),
-                            Reliable,
-                        );
-
-                        let mailbox = mailbox.clone();
-                        let username = username.clone();
-                        let background = background.clone();
-                        let cancelled = cancellation.clone();
-                        background.spawn(async move {
-                            let load = load_favorites(&capabilities, &lookup, &session, &login_data).fuse();
+                    if let Some(observation) = handoff_observations.get(&simulator_id).copied()
+                        && complete_promoted_world_handoff(
+                            &mut session_world,
+                            &mut world_primary_simulator_id,
+                            &mut promoted_world_target,
+                            simulator_id,
+                            observation,
+                        )
+                    {
+                        handoff_observations.remove(&simulator_id);
+                    }
+                }
+                let favorites_session = session.clone();
+                let favorites_lookup = lookup.clone();
+                mailbox.publish(ViewerUpdate::SessionReady(SessionReadyUpdate {
+                    session: session.clone(),
+                    region_lookup: lookup,
+                    world_state: session_world.shared_state(),
+                }));
+                if let Some(login_data) = active_login_data.clone() {
+                    let mailbox = mailbox.clone();
+                    let username = username.clone();
+                    let cancelled = cancellation.clone();
+                    background
+                        .clone()
+                        .spawn(async move {
+                            let load = load_favorites(&capabilities, &favorites_lookup, &favorites_session, &login_data).fuse();
                             pin_mut!(load);
                             let cancelled = cancelled.fuse();
                             pin_mut!(cancelled);
                             futures::select! {
                                 result = load => mailbox.publish(ViewerUpdate::Favorites(FavoritesUpdate {
-                                    grid: session.grid,
-                                    agent_id: session.agent_id,
-                                    session_id: session.session_id,
+                                    grid: favorites_session.grid,
+                                    agent_id: favorites_session.agent_id,
+                                    session_id: favorites_session.session_id,
                                     username,
                                     result,
                                 })),
                                 _ = cancelled => {}
                             }
-                        }).detach();
-                    }
-                    SimulatorPromoted { previous_simulator_id, simulator_id, session, capabilities } => {
-                        let session = *session;
-                        primary_simulator_id = Some(simulator_id);
-                        active_session = Some(session.clone());
-                        let lookup = RegionLookup::new(session_handle.clone(), &session, background.clone());
-                        region_lookup = Some(lookup.clone());
-                        let previous_target = promoted_world_target.map(|handoff| handoff.target);
-                        if begin_world_handoff(
-                            &mut world_primary_simulator_id,
-                            &mut promoted_world_target,
-                            previous_simulator_id,
-                            simulator_id,
-                        )
-                        {
-                            if let Some(previous_target) = previous_target.filter(|target| *target != simulator_id) {
-                                handoff_observations.remove(&previous_target);
-                            }
-                            if let Some(observation) = handoff_observations.get(&simulator_id).copied()
-                                && complete_promoted_world_handoff(
-                                    &mut session_world,
-                                    &mut world_primary_simulator_id,
-                                    &mut promoted_world_target,
-                                    simulator_id,
-                                    observation,
-                                )
-                            {
-                                handoff_observations.remove(&simulator_id);
-                            }
-                        }
-                        let favorites_session = session.clone();
-                        let favorites_lookup = lookup.clone();
-                        mailbox.publish(ViewerUpdate::SessionReady(SessionReadyUpdate {
-                            session: session.clone(),
-                            region_lookup: lookup,
-                            world_state: session_world.shared_state(),
-                        }));
-                        if let Some(login_data) = active_login_data.clone() {
-                            let mailbox = mailbox.clone();
-                            let username = username.clone();
-                            let cancelled = cancellation.clone();
-                            background.clone().spawn(async move {
-                                let load = load_favorites(&capabilities, &favorites_lookup, &favorites_session, &login_data).fuse();
-                                pin_mut!(load);
-                                let cancelled = cancelled.fuse();
-                                pin_mut!(cancelled);
-                                futures::select! {
-                                    result = load => mailbox.publish(ViewerUpdate::Favorites(FavoritesUpdate {
-                                        grid: favorites_session.grid,
-                                        agent_id: favorites_session.agent_id,
-                                        session_id: favorites_session.session_id,
-                                        username,
-                                        result,
-                                    })),
-                                    _ = cancelled => {}
-                                }
-                            }).detach();
-                        }
-                    }
-                    SimulatorConnected { simulator_id, region_handle, .. } => {
-                        if region_handle.is_none() {
-                            primary_simulator_id = Some(simulator_id);
-                        }
-                    }
-                    SimulatorMessage { simulator_id, source, message, .. } => {
-                        let scope = if Some(simulator_id) == primary_simulator_id {
-                            SimulatorScope::Primary
-                        } else {
-                            SimulatorScope::Neighbor
-                        };
-                        handle_simulator_message(scope, source, message, active_session.as_ref(), region_lookup.as_ref(), &mailbox);
-                    }
-                    CaptureFinished { path, error } => {
-                        let notice = match error {
-                            Some(error) => format!("Could not complete capture: {error}"),
-                            None => format!("Capture saved to {}", path.display()),
-                        };
-                        mailbox.publish(ViewerUpdate::CaptureNotice(notice));
-                    }
-                    CaptureInterrupted { path, error } => {
-                        let notice = match error {
-                            Some(error) => format!("Capture interrupted; saved to {}. {error}", path.display()),
-                            None => format!("Capture interrupted and saved to {}.", path.display()),
-                        };
-                        mailbox.publish(ViewerUpdate::CaptureNotice(notice));
-                    }
-                    SendFailed(error) => mailbox.publish(ViewerUpdate::SendError(error)),
-                    Failed(error) => {
-                        mailbox.publish(ViewerUpdate::Failed(error));
-                        break;
-                    }
-                    SimulatorDisconnected { simulator_id, .. } => {
-                        if Some(simulator_id) == primary_simulator_id {
-                            primary_simulator_id = None;
-                        }
-                    }
-                    SimulatorFailed { simulator_id, .. } => {
-                        if Some(simulator_id) == primary_simulator_id {
-                            primary_simulator_id = None;
-                        }
-                    }
-                    CapabilityEvent { .. }
-                    | CapabilityError { .. }
-                    | SimulatorConnectFailed { .. }
-                    | SimulatorCapabilities { .. }
-                    => {}
+                        })
+                        .detach();
                 }
             }
+            SimulatorConnected { simulator_id, region_handle, .. } => {
+                if region_handle.is_none() {
+                    primary_simulator_id = Some(simulator_id);
+                }
+            }
+            SimulatorMessage { simulator_id, source, message, .. } => {
+                let scope = if Some(simulator_id) == primary_simulator_id { SimulatorScope::Primary } else { SimulatorScope::Neighbor };
+                handle_simulator_message(scope, source, message, active_session.as_ref(), region_lookup.as_ref(), &mailbox);
+            }
+            CaptureFinished { .. } => {}
+            CaptureInterrupted { error, .. } => {
+                tracing::warn!(operation = "capture_stop", outcome = "interrupted", error = ?error, "Capture interrupted")
+            }
+            SendFailed(error) => tracing::warn!(operation = "simulator_send", outcome = "failed", %error, "Send failed"),
+            EventQueueCoverageLost { reason, .. } => tracing::warn!(
+                operation = "event_queue",
+                outcome = "coverage_lost",
+                reason = ?reason,
+                "Simulator event delivery may have a gap; world data may be incomplete"
+            ),
+            Failed(error) => {
+                mailbox.publish(ViewerUpdate::Failed(error));
+                break;
+            }
+            SimulatorDisconnected { simulator_id, .. } => {
+                if Some(simulator_id) == primary_simulator_id {
+                    primary_simulator_id = None;
+                }
+            }
+            SimulatorFailed { simulator_id, .. } => {
+                if Some(simulator_id) == primary_simulator_id {
+                    primary_simulator_id = None;
+                }
+            }
+            CapabilityEvent { .. }
+            | CapabilityEventBatch { .. }
+            | CapabilityError { .. }
+            | SimulatorConnectFailed { .. }
+            | SimulatorCapabilities { .. } => {}
+            CoverageLost { .. } => unreachable!("coverage loss events are reconciled before world intake"),
         }
     }
 
@@ -777,15 +857,13 @@ fn handle_simulator_message(
 ) {
     use Message::{ChatFromSimulator, RegionHandshake};
 
-    if matches!(scope, SimulatorScope::Neighbor) {
-        return;
-    }
-
-    if let Some(region_lookup) = region_lookup {
-        region_lookup.handle_message(source, &message);
-    }
-    if let RegionHandshake(message) = &message {
-        mailbox.publish(ViewerUpdate::RegionName(message.region_info1.sim_name.clone()));
+    if matches!(scope, SimulatorScope::Primary) {
+        if let Some(region_lookup) = region_lookup {
+            region_lookup.handle_message(source, &message);
+        }
+        if let RegionHandshake(message) = &message {
+            mailbox.publish(ViewerUpdate::RegionName(message.region_info1.sim_name.clone()));
+        }
     }
     if let ChatFromSimulator(message) = message
         && let Some(chat_message) = display_message(message.chat_data, session)
@@ -838,12 +916,12 @@ mod tests {
     use base::UUID;
     use math::{Quat, Vec3};
     use network::{
-        Event,
+        CoverageLossReason, CoverageSource, CoverageWatermark, Event,
         Event::{SimulatorConnected, SimulatorDisconnected, SimulatorMessage},
         Grid, PacketOrder,
         PacketOrder::{Ambiguous, Ordered},
         SimulatorId,
-        test_support::simulator_id,
+        testing::simulator_id,
     };
     use protocol::{
         Audible, ChatSourceType, ChatType,
@@ -858,7 +936,7 @@ mod tests {
         },
     };
     use tempfile::tempdir;
-    use test_support::{lludp::vectors, parse_hex_fixture};
+    use testing::{lludp::vectors, parse_hex_fixture};
 
     use crate::inventory::{FavoriteLocation, favorite_store::FavoriteStore};
 
@@ -869,9 +947,9 @@ mod tests {
     };
 
     use super::{
-        MAX_PENDING_CHAT_BYTES, MAX_PENDING_CHAT_MESSAGES, PresentationMailbox, SimulatorScope, ViewerUpdate, apply_world_event,
-        apply_world_event_with_handoff, begin_world_handoff, complete_promoted_world_handoff, handle_simulator_message, save_if_current,
-        write_lock,
+        CoverageRetention, MAX_PENDING_CHAT_BYTES, MAX_PENDING_CHAT_MESSAGES, MAX_SESSION_COVERAGE_SCOPES, PresentationMailbox,
+        SessionCoverageLoss, SessionCoverageState, SimulatorScope, ViewerUpdate, apply_world_event, apply_world_event_with_handoff,
+        begin_world_handoff, complete_promoted_world_handoff, handle_simulator_message, save_if_current, write_lock,
     };
 
     fn region_handshake(name: &str) -> Message {
@@ -923,6 +1001,23 @@ mod tests {
         })
     }
 
+    fn session_coverage_loss(
+        simulator_id: SimulatorId,
+        source: CoverageSource,
+        generation: u64,
+        overflow_generation: u64,
+        reason: CoverageLossReason,
+    ) -> SessionCoverageLoss {
+        SessionCoverageLoss::Source { watermark: CoverageWatermark { simulator_id, source, generation, overflow_generation }, reason }
+    }
+
+    fn retain_coverage_loss(state: &SessionCoverageState, loss: SessionCoverageLoss) -> CoverageRetention {
+        let SessionCoverageLoss::Source { watermark, reason } = loss else {
+            panic!("source loss expected");
+        };
+        state.retain_source_then_acknowledge(watermark, reason, |_, _| {})
+    }
+
     #[test]
     fn mailbox_coalesces_state_and_bounds_chat() {
         let (mailbox, mut receiver) = PresentationMailbox::new(7);
@@ -941,6 +1036,89 @@ mod tests {
         let bytes = snapshot.chat_messages.iter().map(|message| message.from_name.len() + message.message.len()).sum::<usize>();
         assert!(bytes <= MAX_PENDING_CHAT_BYTES);
         assert!(receiver.wake_receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn session_coverage_is_retained_before_network_acknowledgement() {
+        let simulator_id = simulator_id();
+        let loss = session_coverage_loss(simulator_id, CoverageSource::Lludp, 7, 0, CoverageLossReason::DecodeAdmission);
+        let SessionCoverageLoss::Source { watermark, reason } = loss else { unreachable!() };
+        let coverage = SessionCoverageState::default();
+        let mut acknowledged = None;
+
+        let retention = coverage.retain_source_then_acknowledge(watermark, reason, |state, watermark| {
+            assert_eq!(state.snapshot(), [loss], "the Viewer must retain uncertainty before Network acknowledges it");
+            acknowledged = Some(watermark);
+        });
+
+        assert_eq!(retention, CoverageRetention::Retained);
+        assert_eq!(acknowledged, Some(watermark));
+    }
+
+    #[test]
+    fn session_coverage_coalesces_only_matching_simulator_and_source_watermarks() {
+        let first_simulator = simulator_id();
+        let second_simulator = simulator_id();
+        let state = SessionCoverageState::default();
+
+        for loss in [
+            session_coverage_loss(first_simulator, CoverageSource::Lludp, 4, 1, CoverageLossReason::DecodeAdmission),
+            session_coverage_loss(first_simulator, CoverageSource::Lludp, 3, 5, CoverageLossReason::DecodeRejected),
+            session_coverage_loss(first_simulator, CoverageSource::Lludp, 9, 3, CoverageLossReason::DecodeLimit),
+            session_coverage_loss(first_simulator, CoverageSource::EventQueue { incarnation: 1 }, 2, 1, CoverageLossReason::EventAdmission),
+            session_coverage_loss(
+                first_simulator,
+                CoverageSource::EventQueue { incarnation: 2 },
+                1,
+                1,
+                CoverageLossReason::EventQueueAdmission,
+            ),
+            session_coverage_loss(second_simulator, CoverageSource::Lludp, 1, 1, CoverageLossReason::PreflightRejected),
+        ] {
+            assert_eq!(retain_coverage_loss(&state, loss), CoverageRetention::Retained);
+        }
+
+        assert_eq!(
+            state.snapshot(),
+            [
+                session_coverage_loss(first_simulator, CoverageSource::Lludp, 9, 5, CoverageLossReason::DecodeLimit),
+                session_coverage_loss(
+                    first_simulator,
+                    CoverageSource::EventQueue { incarnation: 1 },
+                    2,
+                    1,
+                    CoverageLossReason::EventAdmission
+                ),
+                session_coverage_loss(
+                    first_simulator,
+                    CoverageSource::EventQueue { incarnation: 2 },
+                    1,
+                    1,
+                    CoverageLossReason::EventQueueAdmission
+                ),
+                session_coverage_loss(second_simulator, CoverageSource::Lludp, 1, 1, CoverageLossReason::PreflightRejected),
+            ]
+        );
+    }
+
+    #[test]
+    fn coverage_scope_limit_records_overflow_and_refuses_acknowledgement() {
+        let state = SessionCoverageState::default();
+        for _ in 0..MAX_SESSION_COVERAGE_SCOPES {
+            let loss = session_coverage_loss(simulator_id(), CoverageSource::Lludp, 1, 0, CoverageLossReason::EventAdmission);
+            assert_eq!(retain_coverage_loss(&state, loss), CoverageRetention::Retained);
+        }
+
+        let overflow = session_coverage_loss(simulator_id(), CoverageSource::Lludp, 1, 0, CoverageLossReason::EventAdmission);
+        let SessionCoverageLoss::Source { watermark, reason } = overflow else { unreachable!() };
+        let mut acknowledged = false;
+        let retention = state.retain_source_then_acknowledge(watermark, reason, |_, _| acknowledged = true);
+
+        assert_eq!(retention, CoverageRetention::FailClosed);
+        assert!(!acknowledged, "Network must not acknowledge a source that Viewer could not retain");
+        let losses = state.snapshot();
+        assert_eq!(losses.len(), MAX_SESSION_COVERAGE_SCOPES + 1);
+        assert!(matches!(losses.last(), Some(SessionCoverageLoss::SessionOverflow { generation: 1 })));
     }
 
     #[test]
@@ -1501,7 +1679,7 @@ mod tests {
     }
 
     #[test]
-    fn primary_burst_survives_neighbor_backpressure() {
+    fn neighbor_chat_is_preserved_without_applying_neighbor_region_state() {
         let (mailbox, mut receiver) = PresentationMailbox::new(1);
         let source = "127.0.0.1:13000".parse().expect("simulator address");
 
@@ -1522,7 +1700,8 @@ mod tests {
         let snapshot = futures::executor::block_on(receiver.next()).expect("presentation wake");
         assert_eq!(snapshot.region_name.as_deref(), Some("Primary 99"));
         assert_eq!(snapshot.chat_messages.len(), MAX_PENDING_CHAT_MESSAGES);
-        assert!(snapshot.chat_messages.iter().all(|message| message.from_name == "Primary"));
+        assert!(snapshot.chat_messages.iter().any(|message| message.from_name == "Neighbor"));
+        assert!(snapshot.chat_messages.iter().any(|message| message.from_name == "Primary"));
         assert!(receiver.wake_receiver.try_recv().is_err());
     }
 }

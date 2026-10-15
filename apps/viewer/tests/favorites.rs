@@ -1,3 +1,5 @@
+use protocol::login;
+use protocol::login::ResponseData;
 use std::{
     collections::BTreeMap,
     io::{ErrorKind, Read, Write},
@@ -13,7 +15,7 @@ use std::{
 
 use base::UUID;
 use llsd::{Value, xml};
-use network::{LoginResponseData, LoginValue, capabilities::Client};
+use network::capabilities::Client;
 use tokio::runtime::Runtime;
 use url::Url;
 use viewer::inventory::favorites::{favorite_folder_id, fetch_favorite_landmarks};
@@ -23,16 +25,16 @@ const FAVORITES_FOLDER_ID: &str = "11111111-2222-3333-4444-555555555555";
 
 #[test]
 fn folder_uses_login_data() {
-    let login_data = LoginResponseData::from_fields(BTreeMap::from([(
+    let login_data = ResponseData::from_fields(BTreeMap::from([(
         "inventory-skeleton".into(),
-        LoginValue::Array(vec![
-            LoginValue::Struct(BTreeMap::from([
-                ("folder_id".into(), LoginValue::String("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into())),
-                ("name".into(), LoginValue::String("My Inventory".into())),
+        login::Value::Array(vec![
+            login::Value::Struct(BTreeMap::from([
+                ("folder_id".into(), login::Value::String("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into())),
+                ("name".into(), login::Value::String("My Inventory".into())),
             ])),
-            LoginValue::Struct(BTreeMap::from([
-                ("folder_id".into(), LoginValue::String(FAVORITES_FOLDER_ID.into())),
-                ("name".into(), LoginValue::String("Favorites".into())),
+            login::Value::Struct(BTreeMap::from([
+                ("folder_id".into(), login::Value::String(FAVORITES_FOLDER_ID.into())),
+                ("name".into(), login::Value::String("Favorites".into())),
             ])),
         ]),
     )]));

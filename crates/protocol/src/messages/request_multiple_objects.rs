@@ -1,6 +1,6 @@
 use base::UUID;
 
-use crate::{codec::Reader, error::LLUdpError};
+use crate::{LLUdpError, lludp::codec::Reader};
 
 /// Viewer request for full object data after a cache miss.
 #[derive(Clone, Debug, Eq, PartialEq)]

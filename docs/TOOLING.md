@@ -101,7 +101,7 @@ cargo +nightly fuzz add <target>
 - Failures: `fuzz/artifacts/<target>/`
 - Coverage: `fuzz/coverage/<target>/`
 
-Corpus inputs are reused across runs. Back up the corpus before minimization. Use sanitized LLUDP fixtures as seeds; never commit raw captures. The current targets are `packet` and `world_state`.
+Corpus inputs are reused across runs. Back up the corpus before minimization. Use sanitized LLUDP fixtures as seeds; never commit raw captures.
 
 Dictionaries contain protocol-specific byte sequences that guide mutations. Create and commit curated dictionaries using verified protocol constants. Pass `-dict=<file-path>` explicitly when running with a dictionary.
 

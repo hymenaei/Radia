@@ -1,7 +1,14 @@
-//! LLUDP message types and packet codecs for the Second Life wire protocol.
+//! Login XML-RPC and LLUDP types and codecs for the Second Life wire protocol.
 //!
-//! Decode datagrams with [`lludp::Packet::decode`], inspect their typed [`lludp::Message`], and encode replies with [`lludp::Packet::encode`].
-//! Object messages expose checked semantic fields and retain sections this crate does not interpret.
+//! The vendored Linden Lab template generates message IDs and ordered schema metadata. The supported typed message structs and codecs are handwritten.
+//!
+//! Packet decoding uses typed codecs for supported messages. Other known IDs return [`SchemaMessage`], while unknown IDs and payloads remain in [`lludp::Message::Unknown`].
+//!
+//! Packet decoding normalizes supported typed IDs to their typed variant, even when the packet was encoded from a [`SchemaMessage`]. Direct schema-message decoding remains generic.
+//!
+//! Schema-backed decoding zero-fills missing fixed fields, rejects truncated variable prefixes and bodies, and accepts a missing final count for a variable block after earlier fields.
+//!
+//! Typed codecs handle semantic and packed fields that the template cannot describe.
 //!
 //! # Examples
 //!
@@ -17,19 +24,12 @@
 //! # Ok::<(), protocol::LLUdpError>(())
 //! ```
 
-mod codec;
-mod error;
 /// LLUDP packet, header, flag, and message types.
 pub mod lludp;
-mod message;
-/// Typed message structs generated from the checked-in Second Life message template.
+pub mod login;
+/// Handwritten typed message structs and codecs for supported LLUDP messages.
 pub mod messages;
-mod packet;
 pub mod schema;
-mod schema_message;
-mod types;
-mod zero_code;
 
-pub use error::LLUdpError;
-pub use schema_message::{BlockInstance, BlockValues, FieldValue, SchemaMessage};
-pub use types::{Audible, ChatSourceType, ChatType, Frequency};
+pub use lludp::{Audible, ChatSourceType, ChatType, Frequency, LLUdpError};
+pub use lludp::{BlockInstance, BlockValues, FieldValue, SchemaMessage};

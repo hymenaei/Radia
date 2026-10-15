@@ -21,7 +21,6 @@ use relationships::Tombstones;
 struct Binding {
     address: LocalAddress,
     fence: Stamp,
-    // Reused local ids need a newer child declaration before linking to this binding.
     parent_resolution_fence: Option<Stamp>,
 }
 

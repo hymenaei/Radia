@@ -5,9 +5,9 @@ members = [
     "crates/common/base",
     "crates/common/llsd",
     "crates/common/math",
+    "crates/common/testing",
     "crates/network",
     "crates/protocol",
-    "crates/test-support",
     "crates/world",
 ]
 default-members = ["apps/viewer"]
@@ -41,7 +41,7 @@ url = "2"
 uuid = "1"
 tempfile = "3"
 time = { version = "=0.3.55", features = ["formatting", "parsing"] }
-test-support = { path = "crates/test-support" }
+testing = { path = "crates/common/testing" }
 base = { path = "crates/common/base" }
 llsd = { path = "crates/common/llsd" }
 math = { path = "crates/common/math" }

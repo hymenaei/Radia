@@ -4222,18 +4222,15 @@ version = "0.0.1"
 dependencies = [
  "base",
  "criterion",
- "dxr",
  "httpdate",
  "llsd",
  "math",
- "md-5",
  "protocol",
- "quick-xml 0.42.0",
  "reqwest",
  "serde",
  "serde_json",
  "tempfile",
- "test-support",
+ "testing",
  "time",
  "tokio",
  "tracing",
@@ -5390,9 +5387,13 @@ version = "0.0.1"
 dependencies = [
  "base",
  "criterion",
+ "dxr",
  "math",
+ "md-5",
  "proptest",
- "test-support",
+ "quick-xml 0.42.0",
+ "sha2 0.10.9",
+ "testing",
  "tracing",
 ]
 
@@ -7118,7 +7119,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "test-support"
+name = "testing"
 version = "0.0.1"
 
 [[package]]
@@ -7911,7 +7912,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "test-support",
+ "testing",
  "time",
  "tokio",
  "tracing",

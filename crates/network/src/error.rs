@@ -32,6 +32,8 @@ pub enum Error {
     CapabilityRequestCanceled,
     /// The capability client belongs to a simulator session that has closed.
     CapabilitySessionClosed,
+    /// The capability request failed with a classified HTTP error.
+    CapabilityHttp(crate::capabilities::HttpError),
     Capability(String),
     Capture(String),
 }
@@ -55,6 +57,7 @@ impl fmt::Debug for Error {
             Self::CaptureStopCanceled => formatter.write_str("CaptureStopCanceled"),
             Self::CapabilityRequestCanceled => formatter.write_str("CapabilityRequestCanceled"),
             Self::CapabilitySessionClosed => formatter.write_str("CapabilitySessionClosed"),
+            Self::CapabilityHttp(error) => formatter.debug_tuple("CapabilityHttp").field(error).finish(),
             Self::Capability(_) => formatter.debug_tuple("Capability").field(&"[REDACTED]").finish(),
             Self::Capture(_) => formatter.debug_tuple("Capture").field(&"[REDACTED]").finish(),
         }
@@ -80,6 +83,7 @@ impl fmt::Display for Error {
             Self::CaptureStopCanceled => formatter.write_str("The network session stopped before capture could finish."),
             Self::CapabilityRequestCanceled => formatter.write_str("The capability request ended unexpectedly."),
             Self::CapabilitySessionClosed => formatter.write_str("The capability connection has closed."),
+            Self::CapabilityHttp(error) => write!(formatter, "{error}"),
             Self::Capability(message) | Self::Capture(message) => formatter.write_str(message),
         }
     }
@@ -89,6 +93,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::WorkerStart(error) => Some(error),
+            Self::CapabilityHttp(error) => Some(error),
             _ => None,
         }
     }
@@ -106,6 +111,10 @@ mod redaction_tests {
         assert!(format!("{error}").contains("capability-secret"));
 
         let error = http::Error::Message("http-response-secret".into());
+        assert!(!format!("{error:?}").contains("http-response-secret"));
+        assert!(format!("{error}").contains("http-response-secret"));
+
+        let error = Error::CapabilityHttp(http::Error::Message("http-response-secret".into()));
         assert!(!format!("{error:?}").contains("http-response-secret"));
         assert!(format!("{error}").contains("http-response-secret"));
     }

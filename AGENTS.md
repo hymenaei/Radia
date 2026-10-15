@@ -95,15 +95,15 @@ Do not claim a check passed unless it was actually run.
 - Keep Tracy opt-in and prefer feeding existing tracing spans into Tracy rather than maintaining separate instrumentation.
 - Keep credentials, session-specific identifiers, capability URLs, and user content out of trace fields. Avoid per-packet, per-frame, and other high-volume events by default.
 
-## Linear workflow
+## Versioning
 
-- For work with a Linear issue ID or link, fetch the issue before editing and use its description and comments as task context.
-- For a planned feature, bug fix, or multi-step change without an issue, search Linear first. Reuse a matching issue or create one if none exists. Skip issue creation for questions, small edits, and direct follow-ups.
-- Move the issue to the team's active status when work starts. Update it when scope, blockers, or important implementation decisions change.
-- Use the Linear issue ID in the branch and pull request so the work remains linked to the issue.
-- When implementation is ready, comment with a concise summary and the checks run. Move the issue to the appropriate review status when applicable, and only move it to the team's completed status once the work is actually complete or merged.
-- Leave the issue open when work is incomplete, blocked, awaiting review, or awaiting user input.
-- Use the team's configured status names. If Linear is unavailable, continue the work and report that limitation.
+- Follow Semantic Versioning (SemVer).
+- Before finalizing each PR, evaluate whether it completes a release-worthy milestone or otherwise establishes a release boundary.
+- At release boundaries, autonomously determine the appropriate version bump from changes since the previous release.
+- Do not bump versions for routine merges, individual issues, or internal refactors unless they constitute a release.
+- Maintain the shared Cargo workspace version and update `Cargo.lock` consistently.
+- Include version changes in the relevant PR, verify the workspace, and explain the bump in the PR description.
+- Do not create Git tags, publish packages, or create GitHub releases without explicit approval.
 
 ## Agent Instructions
 

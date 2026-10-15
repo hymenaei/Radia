@@ -18,7 +18,7 @@ use protocol::{
     },
     schema::MessageEncoding,
 };
-use test_support::{lludp::vectors, parse_hex_fixture};
+use testing::{lludp::vectors, parse_hex_fixture};
 
 fn fixture(hex: &str) -> Vec<u8> {
     parse_hex_fixture(hex).expect("valid protocol fixture")
@@ -176,22 +176,26 @@ fn schema_chat_uses_unencoded_override() {
 #[test]
 fn map_request_fixture() {
     let expected = fixture(vectors::MAP_BLOCK_REQUEST);
-    let packet = Packet::new(
-        0x0102_0304,
-        MapBlockRequest {
-            agent_data: map_block_request::AgentData {
-                agent_id: agent_id(),
-                session_id: session_id(),
-                flags: 0,
-                estate_id: 0,
-                godlike: false,
-            },
-            position_data: PositionData { min_x: 32, max_x: 32, min_y: 44, max_y: 44 },
-        }
-        .into(),
-    );
+    let message = MapBlockRequest {
+        agent_data: map_block_request::AgentData { agent_id: agent_id(), session_id: session_id(), flags: 0, estate_id: 0, godlike: false },
+        position_data: PositionData { min_x: 32, max_x: 32, min_y: 44, max_y: 44 },
+    };
+    let packet = Packet::new(0x0102_0304, message.into());
 
     assert_eq!(packet.encode().expect("encode map request"), expected);
+    let decoded = Packet::decode(&expected).expect("decode map request fixture");
+    let Message::MapBlockRequest(decoded_message) = decoded.message() else {
+        panic!("expected MapBlockRequest");
+    };
+    assert_eq!(decoded_message.agent_data.agent_id, agent_id());
+    assert_eq!(decoded_message.agent_data.session_id, session_id());
+    assert_eq!(decoded_message.agent_data.flags, 0);
+    assert_eq!(decoded_message.agent_data.estate_id, 0);
+    assert!(!decoded_message.agent_data.godlike);
+    assert_eq!(decoded_message.position_data.min_x, 32);
+    assert_eq!(decoded_message.position_data.max_x, 32);
+    assert_eq!(decoded_message.position_data.min_y, 44);
+    assert_eq!(decoded_message.position_data.max_y, 44);
 }
 
 #[test]
@@ -210,7 +214,9 @@ fn map_block_reply_fixture() {
                 && message.data[0].y == 44
                 && message.data[0].name == "Test"
                 && message.data[0].access == 13
+                && message.data[0].region_flags == 0
                 && message.data[0].water_height == 20
+                && message.data[0].agents == 1
                 && message.data[0].map_image_id.is_nil()
     ));
 }
@@ -276,8 +282,18 @@ fn truncated_entries_rejected() {
 #[test]
 fn region_handle_fixtures() {
     let region_id = UUID::parse_str("12345678-1234-5678-1234-567812345678").expect("valid fixture region UUID");
-    let request = Packet::new(0x0102_0304, RegionHandleRequest { request_block: RequestBlock { region_id } }.into());
-    assert_eq!(request.encode().expect("encode region handle request"), fixture(vectors::REGION_HANDLE_REQUEST));
+    let request_message = RegionHandleRequest { request_block: RequestBlock { region_id } };
+    let request = Packet::new(0x0102_0304, request_message.into());
+    let request_bytes = fixture(vectors::REGION_HANDLE_REQUEST);
+    assert_eq!(request.encode().expect("encode region handle request"), request_bytes);
+    let decoded_request = Packet::decode(&request_bytes).expect("decode region handle request fixture");
+    let Message::RegionHandleRequest(decoded_request) = decoded_request.message() else {
+        panic!("expected RegionHandleRequest");
+    };
+    assert_eq!(
+        decoded_request.request_block.region_id,
+        UUID::parse_str("12345678-1234-5678-1234-567812345678").expect("valid fixture region UUID")
+    );
 
     let reply_bytes = fixture(vectors::REGION_ID_AND_HANDLE_REPLY);
     let decoded = Packet::decode(&reply_bytes).expect("decode region handle reply");
@@ -422,6 +438,14 @@ fn ack_trailer_round_trip() {
 }
 
 #[test]
+fn appended_ack_encoder_uses_network_byte_order() {
+    let expected = [0x50, 0x01, 0x02, 0x03, 0x04, 0x00, 0x02, 0x07, 0x11, 0x22, 0x33, 0x44, 0xa1, 0xb2, 0xc3, 0xd4, 0x02];
+    let packet = Packet::new(0x0102_0304, complete_ping(7)).with_reliable().with_appended_acks(vec![0x1122_3344, 0xa1b2_c3d4]);
+
+    assert_eq!(packet.encode().expect("encode appended ACK trailer"), expected);
+}
+
+#[test]
 fn start_ping_check_fixture() {
     let expected = fixture(vectors::START_PING_CHECK);
     let message = start_ping(7, 0x0506_0708);
@@ -430,6 +454,22 @@ fn start_ping_check_fixture() {
     assert_eq!(packet.encode().expect("encode ping check"), expected);
     let decoded = Packet::decode(&expected).expect("decode ping check fixture");
     assert_eq!(decoded.message(), &message);
+    let Message::StartPingCheck(decoded_message) = decoded.message() else {
+        panic!("expected StartPingCheck");
+    };
+    assert_eq!(decoded_message.ping_id.ping_id, 7);
+    assert_eq!(decoded_message.oldest_unacked, 0x0506_0708);
+}
+
+#[test]
+fn complete_ping_check_fixture() {
+    let expected = fixture(vectors::COMPLETE_PING_CHECK);
+    let decoded = Packet::decode(&expected).expect("decode CompletePingCheck fixture");
+
+    let Message::CompletePingCheck(message) = decoded.message() else {
+        panic!("expected CompletePingCheck");
+    };
+    assert_eq!(message.ping_id.ping_id, 0x5a);
 }
 
 #[test]

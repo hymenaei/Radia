@@ -5,7 +5,7 @@ use protocol::{
     lludp::{Message, Packet},
     messages::{
         AgentMovementComplete, AgentUpdate, ChatFromSimulator, ChatFromViewer, ConfirmEnableSimulator, DisableSimulator, EnableSimulator,
-        LogoutReply,
+        LogoutReply, TeleportCancel,
         agent_movement_complete::{AgentData, Data, SimData},
         agent_update,
         chat_from_simulator::ChatData,
@@ -17,10 +17,24 @@ use protocol::{
     schema::{MessageEncoding, MessageTrust},
 };
 use std::net::Ipv4Addr;
-use test_support::{lludp::vectors, parse_hex_fixture};
+use testing::{lludp::vectors, parse_hex_fixture};
 
 fn fixture(hex: &str) -> Vec<u8> {
     parse_hex_fixture(hex).expect("valid protocol fixture")
+}
+
+#[test]
+fn teleport_cancel_wire() {
+    let expected = fixture(vectors::TELEPORT_CANCEL);
+    let message = TeleportCancel { agent_id: agent_id(), session_id: session_id() };
+    assert_eq!(Packet::new(0x0102_0304, message.clone().into()).with_reliable().encode().expect("encode cancellation"), expected);
+    let packet = Packet::decode(&expected).expect("decode cancellation");
+    assert_eq!(packet.message(), &Message::TeleportCancel(message));
+    assert_eq!(packet.message().name(), "TeleportCancel");
+    assert!(!packet.message().is_inbound_only());
+    for length in 0..expected.len() {
+        assert!(Packet::decode(&expected[..length]).is_err(), "truncated cancellation at {length}");
+    }
 }
 
 fn session_id() -> UUID {

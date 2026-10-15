@@ -91,8 +91,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
- "cpufeatures",
+ "cpufeatures 0.3.1",
  "rand_core",
+]
+
+[[package]]
+name = "cpufeatures"
+version = "0.2.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -630,12 +639,9 @@ name = "network"
 version = "0.0.1"
 dependencies = [
  "base",
- "dxr",
  "httpdate",
  "llsd",
- "md-5",
  "protocol",
- "quick-xml",
  "reqwest",
  "serde",
  "serde_json",
@@ -699,7 +705,11 @@ name = "protocol"
 version = "0.0.1"
 dependencies = [
  "base",
+ "dxr",
  "math",
+ "md-5",
+ "quick-xml",
+ "sha2",
  "tracing",
 ]
 
@@ -968,6 +978,17 @@ dependencies = [
  "itoa",
  "ryu",
  "serde",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest",
 ]
 
 [[package]]

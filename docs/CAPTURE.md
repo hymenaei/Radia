@@ -24,7 +24,7 @@ Pass `--capture` at launch, as in `cargo run -- --capture`, to start recording w
 | `viewer_version`         | Radia version that produced the capture.                                                                 |
 | `started_at`, `ended_at` | RFC 3339 timestamps for the capture interval.                                                            |
 | `event_count`            | Number of lines in `events.jsonl`.                                                                       |
-| `dropped_events`         | Event records dropped when the bounded writer queue was full.                                            |
+| `dropped_events`         | Capture records dropped or non-empty HTTP bodies omitted because capture memory was unavailable.          |
 | `payload_bytes`          | Size of `payloads.bin` in bytes.                                                                         |
 
 The manifest includes a `state` field that describes recording completion or interruption. Counts and byte lengths describe the files in the archive.

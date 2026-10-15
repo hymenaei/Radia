@@ -1,30 +1,25 @@
 use std::{
-    collections::BTreeMap,
     fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::from_utf8,
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 
 use base::UUID;
-use dxr::{FaultResponse, MethodCall, MethodResponse, Value};
-use md5::{Digest, Md5};
-use quick_xml::{Reader, events::Event};
-use reqwest::{
-    StatusCode,
-    header::{CONTENT_TYPE, RETRY_AFTER},
-};
-use tokio::time::sleep;
+use protocol::login::{self, ResponseData};
+use reqwest::{StatusCode, header::CONTENT_TYPE};
+use tokio::{sync::Semaphore, time};
 use url::Url;
 
 use crate::{
+    capabilities::spawn_blocking_with_permit,
     capture::CaptureRecorder,
     http::{Client, validate_http_url},
     status::{NetworkLifecycle, NetworkStatusHandle},
 };
 
-/// LLXML-RPC value returned in a login response.
-pub use dxr::Value as LoginValue;
+pub use protocol::login::StartLocation;
 
 /// Account and simulator data returned after a successful login.
 #[derive(Clone)]
@@ -57,32 +52,11 @@ impl fmt::Debug for AgentSession {
     }
 }
 
-#[derive(Clone, Default)]
-/// Additional fields returned by the grid's login response.
-pub struct LoginResponseData {
-    fields: BTreeMap<String, LoginValue>,
-}
-
-impl LoginResponseData {
-    pub fn from_fields(fields: BTreeMap<String, LoginValue>) -> Self {
-        Self { fields }
-    }
-
-    pub fn get(&self, name: &str) -> Option<&LoginValue> {
-        self.fields.get(name)
-    }
-}
-
-impl fmt::Debug for LoginResponseData {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("LoginResponseData").field("field_names", &self.fields.keys().collect::<Vec<_>>()).finish()
-    }
-}
-
-const LOGIN_RETRY_ATTEMPTS: u8 = 3;
 const LOGIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_LOGIN_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_LOGIN_XML_DEPTH: usize = 64;
+const MAX_CONCURRENT_LOGIN_OPERATIONS: usize = 2;
+static LOGIN_OPERATION_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 /// Second Life grid selected for login.
@@ -136,33 +110,8 @@ impl fmt::Debug for LoginCredentials {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-/// Initial region and position requested during login.
-pub enum StartLocation {
-    Last,
-    Home,
-    /// Start in a named region at the supplied meter coordinates.
-    Region {
-        name: String,
-        x: u32,
-        y: u32,
-        z: u32,
-    },
-}
-
-impl StartLocation {
-    /// Encodes this location in the login protocol's start-location parameter.
-    pub fn login_parameter(&self) -> String {
-        match self {
-            Self::Last => "last".into(),
-            Self::Home => "home".into(),
-            Self::Region { name, x, y, z } => format!("uri:{name}&{x}&{y}&{z}"),
-        }
-    }
-}
-
 pub(crate) enum LoginResponse {
-    Authenticated { session: Box<AgentSession>, mfa_hash: Option<String>, data: LoginResponseData },
+    Authenticated { session: Box<AgentSession>, mfa_hash: Option<String>, data: ResponseData },
     MfaChallenge,
 }
 
@@ -234,155 +183,109 @@ async fn login_at_with_capture(
     status: NetworkStatusHandle,
 ) -> Result<LoginResponse, String> {
     validate_http_url(login_url).map_err(|_| "The login server URL is invalid.".to_string())?;
-    let call = MethodCall { name: "login_to_simulator".into(), params: vec![login_parameters(credentials, mfa_token, mfa_hash)] };
-    let body =
-        format!("<?xml version=\"1.0\"?>\n{}\n", call.to_xml().map_err(|_| "Could not encode the Second Life login request.".to_string())?);
+    let body = login::Request {
+        first_name: &credentials.first_name,
+        last_name: &credentials.last_name,
+        password: &credentials.password,
+        start: &credentials.start_location,
+        channel: "Radia",
+        version: "0.0.1.0",
+        platform: platform_name(),
+        mac: "00:00:00:00:00:00",
+        id0: "00000000-0000-0000-0000-000000000000",
+        viewer_digest: "00000000-0000-0000-0000-000000000000",
+        agree_to_tos: "",
+        read_critical: "",
+        token: mfa_token,
+        mfa_hash,
+        options: &["inventory-skeleton"],
+    }
+    .to_xml()
+    .map_err(|error| error.to_string())?;
+    let deadline = time::Instant::now() + LOGIN_REQUEST_TIMEOUT;
+    let operation_permit = time::timeout_at(
+        deadline,
+        Arc::clone(LOGIN_OPERATION_SLOTS.get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_LOGIN_OPERATIONS)))).acquire_owned(),
+    )
+    .await
+    .map_err(|_| "Could not contact Second Life: the login operation exceeded its deadline while waiting for admission.".to_string())?
+    .map_err(|_| "Could not prepare the login request: login operation admission is unavailable.".to_string())?;
     let client = Client::new(Some(LOGIN_REQUEST_TIMEOUT), true, Some(concat!("Radia/", env!("CARGO_PKG_VERSION"))))
         .map_err(|error| format!("Could not prepare the login request: {error}"))?
         .with_capture(capture.clone())
         .with_status(status);
-    let mut attempt = 1;
-    let response = loop {
-        tracing::debug!(attempt, "Login request started");
-        let response = client
-            .post_operation_bounded("login", None, login_url, "text/xml", None, body.clone().into_bytes(), MAX_LOGIN_RESPONSE_BYTES)
-            .await
-            .map_err(|error| format!("Could not contact Second Life: {error}"))?;
-        let status = response.status;
+    tracing::debug!("Login request started");
+    let response = time::timeout_at(
+        deadline,
+        client.post_operation_bounded("login", None, login_url, "text/xml", None, body.into_bytes(), MAX_LOGIN_RESPONSE_BYTES),
+    )
+    .await
+    .map_err(|_| "Could not contact Second Life: the login operation exceeded its deadline.".to_string())?
+    .map_err(|error| format!("Could not contact Second Life: {error}"))?;
+    let status = response.status;
+    let content_type = response.headers.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default().to_owned();
+    let crate::http::Response { body, memory, extra_memory, .. } = response;
+    let parse = spawn_blocking_with_permit(operation_permit, move || {
+        let parsed = from_utf8(&body)
+            .map_err(|_| "Second Life returned an XML-RPC login response that is not valid UTF-8.".to_string())
+            .and_then(|body| parse_login_response(body, status, &content_type));
+        drop(memory);
+        drop(extra_memory);
+        parsed
+    });
+    let (response, _operation_permit) = time::timeout_at(deadline, parse)
+        .await
+        .map_err(|_| "Second Life's login response exceeded the processing deadline.".to_string())?
+        .map_err(|error| format!("Could not parse the Second Life login response: {error}"))?;
+    let response = response?;
 
-        if is_retryable_gateway_status(status) {
-            tracing::warn!(attempt, http_status = status.as_u16(), "Login gateway retry");
-            if attempt == LOGIN_RETRY_ATTEMPTS {
-                let host = response.url.host_str().unwrap_or("the login server");
-                return Err(format!(
-                    "Second Life's login gateway at {host} remained unavailable (HTTP {status}) after {LOGIN_RETRY_ATTEMPTS} attempts. Try again shortly."
-                ));
-            }
-            if let Some(capture) = &capture {
-                capture.lifecycle("login_retry");
-            }
-            let retry_after =
-                response.headers.get(RETRY_AFTER).and_then(|value| value.to_str().ok()).and_then(|value| value.parse::<u64>().ok());
-            sleep(login_retry_delay(retry_after, attempt)).await;
-            attempt += 1;
-            continue;
-        }
-
-        let content_type = response.headers.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default().to_owned();
-        let body =
-            from_utf8(&response.body).map_err(|_| "Second Life returned an XML-RPC login response that is not valid UTF-8.".to_string())?;
-        break parse_login_response(body, status, &content_type)?;
-    };
-
-    let fields = match response {
-        Value::Struct(fields) => fields,
-        _ => return Err("Second Life returned an invalid login response.".into()),
-    };
-
-    if string_field(&fields, "reason").as_deref() == Some("mfa_challenge") {
-        return Ok(LoginResponse::MfaChallenge);
-    }
-
-    if !login_succeeded(&fields) {
-        let message = string_field(&fields, "message").unwrap_or_default();
-        let reason = string_field(&fields, "reason").unwrap_or_default();
-        return Err(match (message.is_empty(), reason.is_empty()) {
+    match response {
+        login::Response::MfaChallenge => Ok(LoginResponse::MfaChallenge),
+        login::Response::Rejected { message, reason } => Err(match (message.is_empty(), reason.is_empty()) {
             (false, false) => format!("{message} ({reason})"),
             (false, true) => message,
             (true, false) => reason,
             (true, true) => "Second Life rejected the login.".into(),
-        });
+        }),
+        login::Response::Authenticated(value) => authenticated_response(*value, credentials),
     }
-
-    let session = parse_agent_session(&fields, credentials)?;
-    let mfa_hash = string_field(&fields, "mfa_hash");
-    Ok(LoginResponse::Authenticated { session: Box::new(session), mfa_hash, data: LoginResponseData::from_fields(fields) })
 }
 
-fn parse_login_response(body: &str, status: StatusCode, content_type: &str) -> Result<Value, String> {
-    let normalized_body = body.trim_start().to_ascii_lowercase();
-    let is_html = normalized_body.starts_with("<!doctype html")
-        || normalized_body.starts_with("<html")
-        || content_type.to_ascii_lowercase().contains("text/html");
-    if is_html && body.to_ascii_lowercase().contains("errors.edgesuite.net") {
+fn parse_login_response(body: &str, status: StatusCode, content_type: &str) -> Result<login::Response, String> {
+    let body_start = body.trim_start();
+    let is_html = has_ascii_prefix(body_start, b"<!doctype html")
+        || has_ascii_prefix(body_start, b"<html")
+        || content_type.split(';').next().is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("text/html"));
+    if is_html && contains_ascii_case_insensitive(body.as_bytes(), b"errors.edgesuite.net") {
         return Err(format!("Second Life's login gateway returned an HTML error (HTTP {status}). Retry in a few minutes."));
     }
     if is_html {
         return Err(format!("Second Life returned an HTML page instead of an XML-RPC login response (HTTP {status})."));
     }
-    if login_xml_exceeds_depth(body) {
-        return Err(format!("Second Life returned an XML-RPC login response with excessive nesting (HTTP {status})."));
+    match login::Response::from_xml(body, MAX_LOGIN_XML_DEPTH) {
+        Err(login::Error::Fault(fault)) => return Err(fault.to_string()),
+        Err(login::Error::DepthExceeded) => {
+            return Err(format!("Second Life returned an XML-RPC login response with excessive nesting (HTTP {status})."));
+        }
+        Err(login::Error::ElementLimitExceeded) => {
+            return Err(format!("Second Life returned an XML-RPC login response with too many elements (HTTP {status})."));
+        }
+        Ok(response) if status.is_success() => return Ok(response),
+        Err(error) if status.is_success() && !matches!(error, login::Error::InvalidXml) => return Err(error.to_string()),
+        _ => {}
     }
-
-    if let Ok(response) = FaultResponse::from_xml(body) {
-        return Err(response.fault.to_string());
-    }
-
-    if status.is_success()
-        && let Ok(response) = MethodResponse::from_xml(body)
-    {
-        return Ok(response.value);
-    }
-
     Err(format!(
         "Second Life returned an invalid XML-RPC login response (HTTP {status}, {}).",
         if content_type.is_empty() { "no content type" } else { content_type }
     ))
 }
 
-fn login_xml_exceeds_depth(body: &str) -> bool {
-    let mut reader = Reader::from_str(body);
-    let mut depth = 0;
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(_)) => {
-                depth += 1;
-                if depth > MAX_LOGIN_XML_DEPTH {
-                    return true;
-                }
-            }
-            Ok(Event::End(_)) => depth = depth.saturating_sub(1),
-            Ok(Event::Eof) | Err(_) => return false,
-            _ => {}
-        }
-    }
+fn has_ascii_prefix(value: &str, prefix: &[u8]) -> bool {
+    value.as_bytes().get(..prefix.len()).is_some_and(|start| start.eq_ignore_ascii_case(prefix))
 }
 
-fn is_retryable_gateway_status(status: StatusCode) -> bool {
-    matches!(status.as_u16(), 502..=504)
-}
-
-fn login_retry_delay(retry_after: Option<u64>, attempt: u8) -> Duration {
-    Duration::from_secs(retry_after.unwrap_or(u64::from(attempt) * 2).min(30))
-}
-
-fn login_parameters(credentials: &LoginCredentials, mfa_token: &str, mfa_hash: &str) -> Value {
-    let mut fields = BTreeMap::new();
-    insert_string(&mut fields, "first", credentials.first_name.clone());
-    insert_string(&mut fields, "last", credentials.last_name.clone());
-    insert_string(&mut fields, "passwd", password_hash(&credentials.password));
-    insert_string(&mut fields, "start", credentials.start_location.login_parameter());
-    insert_string(&mut fields, "channel", "Radia".into());
-    insert_string(&mut fields, "version", "0.0.1.0".into());
-    insert_string(&mut fields, "platform", platform_name().into());
-    insert_string(&mut fields, "mac", "00:00:00:00:00:00".into());
-    insert_string(&mut fields, "id0", "00000000-0000-0000-0000-000000000000".into());
-    insert_string(&mut fields, "viewer_digest", "00000000-0000-0000-0000-000000000000".into());
-    insert_string(&mut fields, "agree_to_tos", String::new());
-    insert_string(&mut fields, "read_critical", String::new());
-    insert_string(&mut fields, "token", mfa_token.into());
-    insert_string(&mut fields, "mfa_hash", mfa_hash.into());
-    fields.insert("options".into(), Value::Array(vec![Value::String("inventory-skeleton".into())]));
-    Value::Struct(fields)
-}
-
-fn insert_string(fields: &mut BTreeMap<String, Value>, key: &str, value: String) {
-    fields.insert(key.into(), Value::String(value));
-}
-
-fn password_hash(password: &str) -> String {
-    let digest = Md5::digest(password.as_bytes());
-    format!("$1${digest:x}")
+fn contains_ascii_case_insensitive(value: &[u8], needle: &[u8]) -> bool {
+    value.windows(needle.len()).any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 fn platform_name() -> &'static str {
@@ -395,95 +298,42 @@ fn platform_name() -> &'static str {
     }
 }
 
-fn login_succeeded(fields: &BTreeMap<String, Value>) -> bool {
-    match fields.get("login") {
-        Some(Value::Boolean(value)) => *value,
-        Some(Value::String(value)) => value.eq_ignore_ascii_case("true"),
-        Some(Value::Integer(value)) => *value != 0,
-        _ => false,
-    }
-}
-
-fn parse_agent_session(fields: &BTreeMap<String, Value>, credentials: &LoginCredentials) -> Result<AgentSession, String> {
-    let first_name = string_field(fields, "first_name").unwrap_or_else(|| credentials.first_name.clone());
-    let last_name = string_field(fields, "last_name").unwrap_or_else(|| credentials.last_name.clone());
-    let message = string_field(fields, "message").unwrap_or_default();
-    let ip = ip_field(fields, "sim_ip")?;
+fn authenticated_response(value: login::Authenticated, credentials: &LoginCredentials) -> Result<LoginResponse, String> {
+    let ip = value.simulator_address.ip();
     if ip.is_unspecified() || ip.is_multicast() || ip == IpAddr::V4(Ipv4Addr::BROADCAST) {
         return Err("Second Life returned an invalid sim_ip address.".into());
     }
-    let port: u16 =
-        integer_field(fields, "sim_port")?.try_into().map_err(|_| "Second Life returned an invalid simulator port.".to_string())?;
-    if port == 0 {
+    if value.simulator_address.port() == 0 {
         return Err("Second Life returned an invalid simulator port.".into());
     }
-    let circuit_code =
-        integer_field(fields, "circuit_code")?.try_into().map_err(|_| "Second Life returned an invalid circuit code.".to_string())?;
-    let agent_id = uuid_field(fields, "agent_id")?;
-    let session_id = uuid_field(fields, "session_id")?;
-    let seed_capability = Url::parse(
-        &string_field(fields, "seed_capability").ok_or_else(|| "Second Life omitted the simulator capability URL.".to_string())?,
-    )
-    .map_err(|_| "Second Life returned an invalid simulator capability URL.".to_string())?;
+    let seed_capability =
+        Url::parse(&value.seed_capability).map_err(|_| "Second Life returned an invalid simulator capability URL.".to_string())?;
     validate_http_url(&seed_capability).map_err(|_| "Second Life returned an invalid simulator capability URL.".to_string())?;
-
-    Ok(AgentSession {
-        first_name,
-        last_name,
+    let session = AgentSession {
+        first_name: value.first_name.unwrap_or_else(|| credentials.first_name.clone()),
+        last_name: value.last_name.unwrap_or_else(|| credentials.last_name.clone()),
         grid: credentials.grid,
-        message,
-        simulator_address: SocketAddr::new(ip, port),
-        agent_id,
-        session_id,
-        circuit_code,
+        message: value.message,
+        simulator_address: value.simulator_address,
+        agent_id: value.agent_id,
+        session_id: value.session_id,
+        circuit_code: value.circuit_code,
         seed_capability,
-    })
-}
-
-fn string_field(fields: &BTreeMap<String, Value>, key: &str) -> Option<String> {
-    match fields.get(key) {
-        Some(Value::String(value)) => Some(value.clone()),
-        _ => None,
-    }
-}
-
-fn ip_field(fields: &BTreeMap<String, Value>, key: &str) -> Result<IpAddr, String> {
-    let invalid = || format!("Second Life returned an invalid {key} address.");
-    match fields.get(key) {
-        Some(Value::String(value)) => value.parse().map_err(|_| invalid()),
-        Some(Value::Integer(value)) => Ok(IpAddr::V4(Ipv4Addr::from((*value as u32).to_be_bytes()))),
-        Some(Value::Long(value)) if (i64::from(i32::MIN)..=i64::from(u32::MAX)).contains(value) => {
-            Ok(IpAddr::V4(Ipv4Addr::from((*value as u32).to_be_bytes())))
-        }
-        Some(Value::Long(_)) => Err(invalid()),
-        _ => Err(invalid()),
-    }
-}
-
-fn integer_field(fields: &BTreeMap<String, Value>, key: &str) -> Result<i64, String> {
-    match fields.get(key) {
-        Some(Value::Integer(value)) => Ok(i64::from(*value)),
-        Some(Value::Long(value)) => Ok(*value),
-        Some(Value::String(value)) => value.parse().map_err(|_| format!("Second Life returned an invalid {key}.")),
-        _ => Err(format!("Second Life omitted {key}.")),
-    }
-}
-
-fn uuid_field(fields: &BTreeMap<String, Value>, key: &str) -> Result<UUID, String> {
-    let value = string_field(fields, key).ok_or_else(|| format!("Second Life omitted {key}."))?;
-    UUID::parse_str(&value).map_err(|_| format!("Second Life returned an invalid {key}."))
+    };
+    Ok(LoginResponse::Authenticated { session: Box::new(session), mfa_hash: value.mfa_hash, data: value.data })
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{AgentSession, Event, Grid, LoginCredentials, LoginValue, PacketOrder::Ordered, StartLocation, event::SimulatorId};
+    use crate::{AgentSession, Event, Grid, LoginCredentials, PacketOrder::Ordered, StartLocation, event::SimulatorId};
 
-    use crate::http::test_support::{LocalServer, response};
+    use crate::http::testing::{LocalServer, response};
     use crate::login::{LoginResponse, login_at};
     use math::Vec3;
     use protocol::{
         Audible, ChatSourceType, ChatType,
         lludp::Message,
+        login,
         messages::{ChatFromSimulator, chat_from_simulator::ChatData},
     };
     use std::net::SocketAddr;
@@ -550,17 +400,18 @@ mod tests {
                 assert_eq!(session.session_id.to_string(), SESSION_ID);
                 assert_eq!(session.simulator_address.port(), 13000);
                 assert_eq!(mfa_hash.as_deref(), Some("remembered-mfa"));
-                let LoginValue::Array(inventory_skeleton) = data.get("inventory-skeleton").expect("login metadata retains unparsed fields")
+                let login::Value::Array(inventory_skeleton) =
+                    data.get("inventory-skeleton").expect("login metadata retains unparsed fields")
                 else {
                     panic!("expected the raw inventory skeleton");
                 };
                 assert_eq!(inventory_skeleton.len(), 1);
-                let LoginValue::Struct(folder) = &inventory_skeleton[0] else {
+                let login::Value::Struct(folder) = &inventory_skeleton[0] else {
                     panic!("expected a raw XML-RPC folder map");
                 };
-                assert_eq!(folder.get("folder_id"), Some(&LoginValue::String(FOLDER_ID.into())));
-                assert_eq!(folder.get("name"), Some(&LoginValue::String("Favorites".into())));
-                assert_eq!(folder.get("type_default"), Some(&LoginValue::Integer(23)));
+                assert_eq!(folder.get("folder_id"), Some(&login::Value::String(FOLDER_ID.into())));
+                assert_eq!(folder.get("name"), Some(&login::Value::String("Favorites".into())));
+                assert_eq!(folder.get("type_default"), Some(&login::Value::Integer(23)));
             }
             LoginResponse::MfaChallenge => panic!("expected an authenticated session"),
         }
@@ -580,6 +431,21 @@ mod tests {
         server.finish();
 
         assert_eq!(error, "Credentials were rejected (login)");
+    }
+
+    #[tokio::test]
+    async fn xmlrpc_fault_and_http_status() {
+        let fault = "<methodResponse><fault><value><struct><member><name>faultCode</name><value><int>7</int></value></member><member><name>faultString</name><value><string>Denied</string></value></member></struct></value></fault></methodResponse>";
+        let server = LocalServer::start(vec![response(500, "Error", "text/xml", None, fault)]);
+        let error = login_at(&credentials(), "", "", &server.url("/login.cgi")).await.expect_err("XML-RPC fault on HTTP error");
+        assert_eq!(error, "Server Fault 7: Denied");
+        assert_eq!(server.finish().len(), 1);
+
+        let body = successful_response("<string>127.0.0.1</string>");
+        let server = LocalServer::start(vec![response(500, "Error", "text/xml", None, &body)]);
+        let error = login_at(&credentials(), "", "", &server.url("/login.cgi")).await.expect_err("HTTP failure cannot authenticate");
+        assert!(error.contains("invalid XML-RPC login response (HTTP 500"));
+        assert_eq!(server.finish().len(), 1);
     }
 
     #[tokio::test]
@@ -613,7 +479,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flat_inventory() {
+    async fn crowded_login_memory() {
         let folders = (0..1024)
             .map(|_| {
                 format!(
@@ -632,6 +498,20 @@ mod tests {
             ("seed_capability", "<string>http://127.0.0.1:9000/cap/seed</string>"),
             ("inventory-skeleton", &inventory),
         ]);
+
+        let (parsed, retained_bytes, peak_bytes, elapsed_ns): (Result<login::Response, String>, i128, i128, u128) =
+            crate::capabilities::measure_allocations(|| super::parse_login_response(&body, reqwest::StatusCode::OK, "text/xml"));
+        let parsed = parsed.expect("crowded login response should decode");
+        let login::Response::Authenticated(parsed) = parsed else { panic!("expected authenticated response") };
+        let login::Value::Array(parsed_inventory) = parsed.data.get("inventory-skeleton").expect("inventory should be retained") else {
+            panic!("expected inventory array");
+        };
+        assert_eq!(parsed_inventory.len(), 1024);
+        assert!(retained_bytes > 0, "decoded inventory should retain allocations");
+        assert!(peak_bytes >= retained_bytes, "parse peak must include retained output allocations");
+        eprintln!("crowded login parse: input={} B, retained={retained_bytes} B, peak={peak_bytes} B, parse={elapsed_ns} ns", body.len());
+        drop(parsed);
+
         let server = LocalServer::start(vec![response(200, "OK", "text/xml", None, &body)]);
         let result = login_at(&credentials(), "", "", &server.url("/login.cgi")).await;
         server.finish();
@@ -639,7 +519,7 @@ mod tests {
         let LoginResponse::Authenticated { data, .. } = result.expect("large shallow inventory should be accepted") else {
             panic!("expected authenticated session");
         };
-        let LoginValue::Array(inventory) = data.get("inventory-skeleton").expect("inventory metadata should be retained") else {
+        let login::Value::Array(inventory) = data.get("inventory-skeleton").expect("inventory metadata should be retained") else {
             panic!("expected inventory array");
         };
         assert_eq!(inventory.len(), 1024);
@@ -709,19 +589,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gateway_503_limit() {
+    async fn gateway_503_is_not_replayed() {
         let body = "<!doctype html><html><body>errors.edgesuite.net</body></html>";
-        let responses = (0..3).map(|_| response(503, "Service Unavailable", "text/html", Some("0"), body)).collect();
-        let server = LocalServer::start(responses);
+        let server = LocalServer::start(vec![response(503, "Service Unavailable", "text/html", Some("0"), body)]);
         let url = server.url("/login.cgi");
 
-        let error = login_at(&credentials(), "", "", &url).await.expect_err("local gateway should remain unavailable");
+        let error = login_at(&credentials(), "mfa-token", "mfa-hash", &url).await.expect_err("local gateway should remain unavailable");
         let requests = server.finish();
 
-        assert_eq!(requests.len(), 3);
+        assert_eq!(requests.len(), 1, "an ambiguous gateway response must not replay login or MFA credentials");
         assert!(error.contains("HTTP 503"));
-        assert!(error.contains("after 3 attempts"));
+        assert!(!error.contains("after 3 attempts"));
         assert!(!error.contains("<html>"));
+    }
+
+    #[test]
+    fn gateway_html_detection_is_ascii_case_insensitive() {
+        let error = super::parse_login_response(
+            " \t<!DOCTYPE HTML><HTML>Errors.EdgeSuite.Net</HTML>",
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "TEXT/HTML; charset=utf-8",
+        )
+        .expect_err("gateway HTML should be identified without normalizing the whole body");
+
+        assert!(error.contains("login gateway returned an HTML error (HTTP 503"));
+    }
+
+    #[test]
+    fn login_xml_element_limit_is_reported() {
+        let body = "<value/>".repeat(262_145);
+        let error = super::parse_login_response(&body, reqwest::StatusCode::OK, "text/xml")
+            .expect_err("excessive element counts are rejected before XML-RPC deserialization");
+
+        assert!(error.contains("too many elements"), "unexpected parser error: {error}");
     }
 
     #[test]

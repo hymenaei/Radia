@@ -9,7 +9,7 @@ use protocol::{
         RequestMultipleObjects, kill_object,
     },
 };
-use test_support::{lludp::vectors, parse_hex_fixture};
+use testing::{lludp::vectors, parse_hex_fixture};
 
 fn fixture(hex: &str) -> Vec<u8> {
     parse_hex_fixture(hex).expect("valid protocol fixture")
@@ -70,11 +70,118 @@ fn full_update_fixture() {
     assert!(packet.is_zerocoded().expect("read zero-code flag"));
     assert_eq!(update.region_data, RegionData { region_handle: 0x1122_3344_5566_7788, time_dilation: 0x8000 });
     assert_eq!(update.objects.len(), 2);
-    assert_eq!(update.objects[0].local_id, 0x1020_3040);
-    assert_eq!(update.objects[0].id, uuid("12345678-90ab-cdef-0123-456789abcdef"));
-    assert_eq!(update.objects[0].collision_plane, None);
-    assert!(!update.objects[0].texture_entry.is_empty());
-    assert_eq!(update.objects[1].collision_plane, Some(Vec4::new(0.0, 0.0, 1.0, 0.0)));
+    assert_eq!(
+        update.objects[0],
+        ObjectData {
+            local_id: 0x1020_3040,
+            state: 7,
+            id: uuid("12345678-90ab-cdef-0123-456789abcdef"),
+            crc: 0x7856_3412,
+            pcode: 9,
+            material: 4,
+            click_action: 2,
+            scale: Vec3::new(1.5, 2.0, 3.0),
+            motion: ObjectMotion {
+                position: Vec3::new(10.0, 20.0, 30.0),
+                velocity: Vec3::new(1.0, 2.0, 3.0),
+                acceleration: Vec3::new(-1.0, -2.0, -3.0),
+                rotation: Quat::IDENTITY,
+                angular_velocity: Vec3::new(0.5, 0.25, 0.0),
+            },
+            collision_plane: None,
+            parent_local_id: 0x5566_7788,
+            update_flags: 0x1234,
+            shape: ObjectShape {
+                path_curve: 16,
+                profile_curve: 1,
+                path_begin: 0x1000,
+                path_end: 0xf000,
+                path_scale_x: 128,
+                path_scale_y: 129,
+                path_shear_x: 1,
+                path_shear_y: 255,
+                path_twist: 2,
+                path_twist_begin: -2,
+                path_radius_offset: 3,
+                path_taper_x: -3,
+                path_taper_y: 4,
+                path_revolutions: 252,
+                path_skew: 18,
+                profile_begin: 0x10fb,
+                profile_end: 0x3020,
+                profile_hollow: 0x5040,
+            },
+            texture_entry: vec![0xaa, 0x41, 0xbb],
+            texture_anim: vec![0x10, 0x41],
+            name_value: b"key\0value\0".to_vec(),
+            data: vec![0xde, 0x41, 0x00, 0xbe],
+            text: ObjectText { text: "hi".to_owned(), color: [1, 2, 3, 4] },
+            media_url: "https://example".to_owned(),
+            particle_system: vec![5, 0x41],
+            extra_parameters: Vec::new(),
+            sound: ObjectSound { sound_id: uuid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"), gain: 0.5, flags: 1, radius: 20.0 },
+            owner_id: uuid("ffeeddcc-bbaa-9988-7766-554433221100"),
+            joint_type: 3,
+            joint_pivot: Vec3::new(1.0, 2.0, 3.0),
+            joint_axis_or_anchor: Vec3::new(-1.0, -2.0, -3.0),
+        }
+    );
+    assert_eq!(
+        update.objects[1],
+        ObjectData {
+            local_id: 0x0102_0304,
+            state: 3,
+            id: uuid("fedcba98-7654-3210-fedc-ba9876543210"),
+            crc: 0xa1b2_c3d4,
+            pcode: 47,
+            material: 1,
+            click_action: 0,
+            scale: Vec3::new(0.5, 0.5, 1.0),
+            motion: ObjectMotion {
+                position: Vec3::new(10.0, 20.0, 30.0),
+                velocity: Vec3::new(1.0, 2.0, 3.0),
+                acceleration: Vec3::new(-1.0, -2.0, -3.0),
+                rotation: Quat::IDENTITY,
+                angular_velocity: Vec3::new(0.5, 0.25, 0.0),
+            },
+            collision_plane: Some(Vec4::new(0.0, 0.0, 1.0, 0.0)),
+            parent_local_id: 0,
+            update_flags: 0x8000_0000,
+            shape: ObjectShape {
+                path_curve: 16,
+                profile_curve: 1,
+                path_begin: 0x1000,
+                path_end: 0xf000,
+                path_scale_x: 128,
+                path_scale_y: 129,
+                path_shear_x: 1,
+                path_shear_y: 255,
+                path_twist: 2,
+                path_twist_begin: -2,
+                path_radius_offset: 3,
+                path_taper_x: -3,
+                path_taper_y: 4,
+                path_revolutions: 252,
+                path_skew: 18,
+                profile_begin: 0x10fb,
+                profile_end: 0x3020,
+                profile_hollow: 0x5040,
+            },
+            texture_entry: vec![0xaa, 0x52, 0xbb],
+            texture_anim: vec![0x10, 0x52],
+            name_value: b"key\0value\0".to_vec(),
+            data: vec![0xde, 0x52, 0x00, 0xbe],
+            text: ObjectText { text: "hi".to_owned(), color: [1, 2, 3, 4] },
+            media_url: "https://example".to_owned(),
+            particle_system: vec![5, 0x52],
+            extra_parameters: Vec::new(),
+            sound: ObjectSound { sound_id: uuid("11111111-2222-3333-4444-555555555555"), gain: 0.5, flags: 1, radius: 20.0 },
+            owner_id: uuid("ffeeddcc-bbaa-9988-7766-554433221100"),
+            joint_type: 3,
+            joint_pivot: Vec3::new(1.0, 2.0, 3.0),
+            joint_axis_or_anchor: Vec3::new(-1.0, -2.0, -3.0),
+        }
+    );
     assert_reencodes(&packet, &bytes);
 }
 
@@ -309,25 +416,70 @@ fn compressed_update_fixture() {
     let Message::ObjectUpdateCompressed(update) = packet.message() else {
         panic!("expected compressed full object update");
     };
-
     assert_eq!(update.objects.len(), 1);
     let object = &update.objects[0];
-    assert_eq!(update.region_data.time_dilation, 0x8000);
+    assert_eq!(update.region_data, RegionData { region_handle: 0x1122_3344_5566_7788, time_dilation: 0x8000 });
+    assert_eq!(object.update_flags, 0x1234_5678);
     assert_eq!(object.local_id, 0x0102_0304);
     assert_eq!(object.id, uuid("12345678-90ab-cdef-0123-456789abcdef"));
+    assert_eq!(object.pcode, 9);
+    assert_eq!(object.state, 3);
+    assert_eq!(object.crc, 0x1122_3344);
+    assert_eq!(object.material, 2);
+    assert_eq!(object.click_action, 1);
+    assert_eq!(object.scale, Vec3::new(1.0, 2.0, 3.0));
     assert_eq!(object.position, Vec3::new(4.0, 5.0, 6.0));
+    assert_eq!(object.rotation, Quat::IDENTITY);
     assert_eq!(object.angular_velocity, Some(Vec3::new(0.5, 0.0, -0.5)));
+    assert_eq!(object.special_code, 0x07fe);
+    assert_eq!(object.owner_id, uuid("00112233-4455-6677-8899-aabbccddeeff"));
     assert_eq!(object.parent_local_id, 0x0506_0708);
     assert_eq!(object.data, Some(ObjectSpecificData::Tree { species: 3 }));
-    assert_eq!(object.text.as_ref().map(|text| text.text.as_str()), Some("hello"));
+    assert_eq!(object.text, Some(ObjectText { text: "hello".into(), color: [1, 2, 3, 4] }));
     assert_eq!(object.media_url.as_deref(), Some("https://example.invalid"));
-    assert_eq!(object.legacy_particle_system.as_ref().map(Vec::len), Some(86));
-    assert_eq!(object.extra_parameters.len(), 2);
-    assert_eq!(object.sound.map(|sound| sound.sound_id), Some(uuid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")));
+    assert_eq!(object.legacy_particle_system.as_deref(), Some(&[0x5a; 86][..]));
+    assert_eq!(
+        object.extra_parameters,
+        [
+            ExtraParameter { parameter_type: 0x1234, data: vec![0xaa, 0xbb, 0xcc] },
+            ExtraParameter { parameter_type: 0x5678, data: Vec::new() },
+        ]
+    );
+    assert_eq!(
+        object.sound,
+        Some(ObjectSound { sound_id: uuid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"), gain: 0.75, flags: 3, radius: 16.5 })
+    );
     assert_eq!(object.name_value.as_deref(), Some("Name=Crate\nDesc=Typed"));
+    assert_eq!(
+        object.shape,
+        Some(ObjectShape {
+            path_curve: 1,
+            profile_curve: 16,
+            path_begin: 258,
+            path_end: 772,
+            path_scale_x: 5,
+            path_scale_y: 6,
+            path_shear_x: 7,
+            path_shear_y: 8,
+            path_twist: -9,
+            path_twist_begin: -10,
+            path_radius_offset: -11,
+            path_taper_x: -12,
+            path_taper_y: -13,
+            path_revolutions: 14,
+            path_skew: -15,
+            profile_begin: 4370,
+            profile_end: 4884,
+            profile_hollow: 5398,
+        })
+    );
     assert_eq!(object.texture_entry.as_deref(), Some(&[0xde, 0xad, 0, 0xbe, 0xef][..]));
-    assert_eq!(object.texture_animation.as_ref().map(Vec::len), Some(16));
-    assert!(object.particle_system.is_some());
+    assert_eq!(object.texture_animation.as_deref(), Some(&(0u8..16).collect::<Vec<_>>()[..]));
+    let mut particle_system = vec![0x44, 0, 0, 0];
+    particle_system.extend([0x11; 68]);
+    particle_system.extend([0x12, 0, 0, 0]);
+    particle_system.extend([0x22; 18]);
+    assert_eq!(object.particle_system.as_deref(), Some(particle_system.as_slice()));
     assert_reencodes(&packet, &bytes);
 
     let mut malformed_sound = bytes;
@@ -343,11 +495,45 @@ fn compressed_update_fixture() {
 }
 
 #[test]
+fn compressed_update_ignores_unknown_object_suffix() {
+    let (_, packet) = decode(vectors::OBJECT_UPDATE_COMPRESSED_TYPED);
+    let Message::ObjectUpdateCompressed(update) = packet.message().clone() else {
+        panic!("expected compressed full object update");
+    };
+    let mut wire = Packet::new(packet.sequence(), Message::ObjectUpdateCompressed(update.clone()))
+        .with_zero_coding(false)
+        .encode()
+        .expect("encode compressed object update");
+
+    let local_id_offset = unique_offset(&wire, &update.objects[0].local_id.to_le_bytes());
+    let object_data_start = local_id_offset - 16;
+    let object_data_len_offset = object_data_start - 2;
+    let object_data_len =
+        usize::from(u16::from_le_bytes(wire[object_data_len_offset..object_data_start].try_into().expect("object data length")));
+    let object_data_end = object_data_start + object_data_len;
+    let extension = [0xde, 0xad, 0xbe, 0xef];
+    wire.splice(object_data_end..object_data_end, extension);
+    let new_object_data_len = u16::try_from(object_data_len + extension.len()).expect("object data length fits wire field");
+    wire[object_data_len_offset..object_data_start].copy_from_slice(&new_object_data_len.to_le_bytes());
+
+    let preflight = Packet::preflight(&wire).expect("preflight ignores unknown object suffix");
+    let decoded = Packet::decode(&wire).expect("decode ignores unknown object suffix");
+    assert!(preflight.retained_capacity_upper_bound() >= decoded.retained_capacity_bytes());
+    let Message::ObjectUpdateCompressed(decoded) = decoded.message() else {
+        panic!("expected compressed full object update");
+    };
+    assert_eq!(decoded.objects.len(), 1);
+    assert_eq!(decoded.objects[0].local_id, update.objects[0].local_id);
+    assert_eq!(decoded.objects[0].shape, update.objects[0].shape);
+}
+
+#[test]
 fn terse_update_fixtures_are_partial() {
     let (bytes, packet) = decode(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
     let Message::ImprovedTerseObjectUpdate(update) = packet.message() else {
         panic!("expected terse object update");
     };
+    assert_eq!(update.region_data, RegionData { region_handle: 0x1122_3344_5566_7788, time_dilation: 0x8000 });
     assert_eq!(update.objects.len(), 1);
     assert_eq!(update.objects[0].local_id, 0x1020_3040);
     assert_eq!(update.objects[0].state, 5);
@@ -367,8 +553,19 @@ fn terse_update_fixtures_are_partial() {
     let Message::ImprovedTerseObjectUpdate(avatar_update) = avatar_packet.message() else {
         panic!("expected terse avatar update");
     };
-    assert!(avatar_update.objects[0].avatar);
-    assert_eq!(avatar_update.objects[0].collision_plane, Some(Vec4::new(0.0, 0.0, 1.0, 0.0)));
+    assert_eq!(avatar_update.region_data, RegionData { region_handle: 0x1122_3344_5566_7788, time_dilation: 0x8000 });
+    assert_eq!(avatar_update.objects.len(), 1);
+    let avatar = &avatar_update.objects[0];
+    assert_eq!(avatar.local_id, 0x5566_7788);
+    assert_eq!(avatar.state, 9);
+    assert!(avatar.avatar);
+    assert_eq!(avatar.collision_plane, Some(Vec4::new(0.0, 0.0, 1.0, 0.0)));
+    assert_eq!(avatar.motion.position, Vec3::new(8.0, 9.0, 10.0));
+    assert_eq!(avatar.motion.velocity, Vec3::new(-128.0, 0.0, 128.0));
+    assert_eq!(avatar.motion.acceleration, Vec3::new(-64.0, 0.0, 64.0));
+    assert_eq!(avatar.motion.rotation, Quat::IDENTITY);
+    assert_eq!(avatar.motion.angular_velocity, Vec3::new(-64.0, 0.0, 64.0));
+    assert!(avatar.texture_entry.is_empty());
     assert_reencodes(&avatar_packet, &avatar_bytes);
 }
 

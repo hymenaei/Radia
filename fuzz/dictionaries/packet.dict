@@ -1,0 +1,14 @@
+# Packet flag bytes present in LLUDP fixtures: zerocoded, reliable, and reliable with appended ACKs.
+"\x80"
+"\x40"
+"\x50"
+
+# Message IDs from complete_ping_check, confirm_enable_simulator, chat_from_simulator, and packet_ack fixtures.
+"\x02"
+"\xff\x08"
+"\xff\xff\x00\x8b"
+"\xff\xff\xff\xfb"
+
+# Zero-code run encodings at the extended and 255-byte boundaries.
+"\x00\x00\x01"
+"\x00\xff"

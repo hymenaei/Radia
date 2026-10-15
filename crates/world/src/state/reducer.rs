@@ -962,8 +962,6 @@ fn validate_vec3(value: Option<Vec3>, field: &'static str) -> Result<(), FieldRe
 }
 
 fn normalized_rotation(value: Quat) -> Result<Quat, FieldRejectionReason> {
-    // Quantization contributes the first-order bound. Zero-snapping adds only a quadratic term because it affects
-    // components within two steps of zero; the float allowance covers that term and XYZ reconstruction rounding.
     const U16_SQUARED_NORM_ERROR: f32 = 4.0 / 65_535.0 + 48.0 / (65_535.0 * 65_535.0);
     const F32_ROUNDING_ERROR: f32 = 8.0 * f32::EPSILON;
     const NORM_SQUARED_TOLERANCE: f32 = U16_SQUARED_NORM_ERROR + F32_ROUNDING_ERROR;
@@ -1274,7 +1272,6 @@ mod tests {
     fn rotation_validation_enforces_tolerance() {
         let f32_overshoot = Quat::from_xyzw(1.0 + f32::EPSILON, 0.0, 0.0, 0.0);
         assert!(normalized_rotation(f32_overshoot).is_ok());
-        // Adjacent representable magnitudes straddle the decoder tolerance bound.
         let edge = f32::from_bits(1.0_f32.to_bits() + 260);
         let outside_edge = f32::from_bits(1.0_f32.to_bits() + 261);
         assert!(normalized_rotation(Quat::from_xyzw(0.0, 0.0, 0.0, edge)).is_ok());

@@ -190,7 +190,7 @@ mod tests {
         messages::StartPingCheck,
     };
     use std::num::{NonZeroU8, NonZeroU32};
-    use test_support::{lludp::vectors, parse_hex_fixture};
+    use testing::{lludp::vectors, parse_hex_fixture};
     use world::{
         ApplyOutcome::{Introduced, RegionAdopted},
         AttachmentPoint,

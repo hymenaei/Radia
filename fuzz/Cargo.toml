@@ -33,3 +33,10 @@ path = "fuzz_targets/world_state.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "llsd"
+path = "fuzz_targets/llsd.rs"
+test = false
+doc = false
+bench = false

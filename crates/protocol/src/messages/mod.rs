@@ -1,6 +1,7 @@
 //! Typed structures for the supported LLUDP messages.
 
 pub mod agent_movement_complete;
+pub mod agent_throttle;
 pub mod agent_update;
 pub mod chat_from_simulator;
 pub mod chat_from_viewer;
@@ -26,9 +27,11 @@ pub mod region_handshake_reply;
 pub mod region_id_and_handle_reply;
 pub mod request_multiple_objects;
 pub mod start_ping_check;
+pub mod teleport_cancel;
 pub mod use_circuit_code;
 
 pub use agent_movement_complete::AgentMovementComplete;
+pub use agent_throttle::{AgentThrottle, ThrottleRates};
 pub use agent_update::AgentUpdate;
 pub use chat_from_simulator::ChatFromSimulator;
 pub use chat_from_viewer::ChatFromViewer;
@@ -54,4 +57,5 @@ pub use region_handshake_reply::RegionHandshakeReply;
 pub use region_id_and_handle_reply::RegionIdAndHandleReply;
 pub use request_multiple_objects::{CacheMissType, ObjectRequest, RequestAgentData, RequestMultipleObjects};
 pub use start_ping_check::StartPingCheck;
+pub use teleport_cancel::TeleportCancel;
 pub use use_circuit_code::UseCircuitCode;

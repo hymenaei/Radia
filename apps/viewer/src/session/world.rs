@@ -320,7 +320,7 @@ mod tests {
 
     use base::UUID;
     use math::Vec3;
-    use network::{SimulatorId, test_support::simulator_id};
+    use network::{SimulatorId, testing::simulator_id};
     use world::{
         Kind, LocalAddress, ObjectObservation, ObjectPatch, OrderEvidence, Parent, ParentUpdate, Pose, Region, RegionHandle, UpdateSource,
     };

@@ -196,7 +196,6 @@ impl World {
             }
             if self.would_cycle(child, parent) {
                 if expected_uuid.is_none() {
-                    // Keep a rejected cyclic link from attaching to an unrelated later occupant of this address.
                     self.set_parent(child, Parent::Pending { address, expected_uuid: Some(parent_uuid) });
                     changes.push(EntityUpdated(uuid));
                     self.invalidate_subtree(child, changes);

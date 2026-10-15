@@ -5,7 +5,6 @@ use super::{
     WorldTransformState,
 };
 
-// Normal SL chains combine shallow seating, avatar-attachment, and linkset relationships.
 const MAX_PARENT_EDGES: usize = 16;
 
 impl World {

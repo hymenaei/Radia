@@ -1,6 +1,8 @@
+use std::mem::size_of;
+
 use crate::{
-    codec::Reader,
-    error::LLUdpError,
+    LLUdpError,
+    lludp::codec::Reader,
     messages::common::{ObjectMotion, RegionData, decode_quantized, read_variable1, read_variable2, read_vector4, rotation_from_u16},
 };
 use math::{Vec3, Vec4};
@@ -54,6 +56,30 @@ pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<ImprovedTerseObjectUpdat
     }
 
     Ok(ImprovedTerseObjectUpdate { region_data, objects })
+}
+
+pub(crate) fn preflight_allocation_bytes(payload: &[u8]) -> Result<usize, LLUdpError> {
+    let mut reader = Reader::new(payload);
+    RegionData::decode(&mut reader)?;
+    let count = reader.terminal_variable_count()?;
+    let allocation_bytes = count.checked_mul(size_of::<ObjectData>()).ok_or(LLUdpError::AllocationBoundOverflow)?;
+
+    for _ in 0..count {
+        let packed_data = read_variable1(&mut reader)?;
+        read_variable2(&mut reader)?;
+        let mut data = Reader::new(packed_data);
+        data.take(4 + 1)?;
+        let avatar = data.u8()? != 0;
+        if avatar {
+            data.take(16)?;
+        }
+        data.take(12 + 6 + 6 + 8 + 6)?;
+        if !data.is_empty() {
+            return Err(LLUdpError::InvalidMessage);
+        }
+    }
+
+    Ok(allocation_bytes)
 }
 
 fn decode_vector3(reader: &mut Reader<'_>, lower: f32, upper: f32) -> Result<Vec3, LLUdpError> {

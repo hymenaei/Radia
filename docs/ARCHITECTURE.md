@@ -1,53 +1,66 @@
-Radia currently has one GPUI viewer application and seven supporting workspace crates. The application owns user-facing workflows and network-to-world adaptation. The `network` crate owns communication with Second Life. The `protocol` crate owns Second Life wire formats. The `llsd` crate owns the generic LLSD data format and codecs. The `math` crate owns shared linear algebra. The `world` crate owns the queryable state observed from simulators and exposes it to diagnostic tools and later scene presentation. The `base` crate owns small primitives shared across unrelated subsystems.
+Radia is a GPUI viewer for Second Life. Package ownership and Cargo dependencies define its architecture.
 
 ## Current workspace
 
 ```text
-apps/viewer/          # package `viewer`, executable `radia`
-crates/common/base/   # package `base`
-crates/common/llsd/   # package `llsd`
-crates/common/math/   # package `math`
-crates/network/       # package `network`
-crates/protocol/      # package `protocol`
-crates/test-support/  # package `test-support`
-crates/world/         # package `world`
+apps/viewer/           # package `viewer`, executable `radia`
+crates/common/base/    # package `base`
+crates/common/llsd/    # package `llsd`
+crates/common/math/    # package `math`
+crates/common/testing/ # package `testing`
+crates/network/        # package `network`
+crates/protocol/       # package `protocol`
+crates/world/          # package `world`
 ```
 
 ## Package ownership
 
 ### `apps/viewer` (`viewer`, executable `radia`)
 
-Owns the GPUI application and its current workflows: login, nearby chat, inventory favorites, region-name lookup, default agent updates, and remembered-login settings. It calls `network` for login, simulator, and capability services. It owns session lifetimes, maps network simulator identities to world region lifetimes, converts protocol messages into world events, and runs background world intake. UI and future rendering consume world read APIs; they do not handle packets.
-
-### `crates/network` (`network`)
-
-Owns login, capability HTTP, UDP transport, simulator connections, LLUDP circuit sequencing and reliability, event-queue polling, and the session API. Login responses are capped at 16 MiB and XML nesting at 64 elements before XML-RPC decoding. It handles the required circuit and simulator handshake, then forwards application messages through generic `Event` values. The event channel holds at most 32 events. The simulator keeps at most 16 more events while that channel is full. Simulator capability events received before their matching `SimulatorConnected` are held in a separate 64-event session buffer. At the ordinary queue limit, the simulator starts logout and drops application delivery, while continuing circuit sequence, duplicate, and reliable-ACK bookkeeping for received packets. It flushes queued ACKs when the event channel is full and otherwise uses the normal ACK timer. After logout, it reports the overload through `Event::Failed` so the viewer clears the closed session. The EventQueue parser caps XML responses at 32 MiB, batches at 1,024 events, nesting at 64 containers, estimated data per event at 256 KiB, and estimated decoded data per batch at 8 MiB. `Session::start` runs a Tokio runtime on a named `network` thread. `Session` owns the sole event receiver and provides `recv_event` and `send`; a cloneable `SessionHandle` supports concurrent sends, capture control, status queries, and shutdown. `Event::MfaRequired` carries an `MfaChallenge` continuation that submits the authenticator code. Public operations return `network::Error` with matchable variants for queue saturation, closed sessions, capture failures, and capability failures. Asynchronous login and simulator failures arrive through `Event::Failed`. Capability URLs use opaque `capabilities::CapabilityUrl` handles. `capabilities::Client` provides typed LLSD `get` and `post` operations and raw `get_bytes` for binary resources; debug output redacts URLs. Outbound messages use the sealed typed-message boundary.
-
-All simulator capability clients in one session share four ordinary request slots, nine EventQueue polling slots, and a 72 MiB retained-capability-event budget. Each EventQueue batch reserves up to 8 MiB before LLSD decoding, then transfers byte permits with events through the network queues; `Session::recv_event` releases each permit when the caller receives the event. Ordinary capability request bodies are capped at 1 MiB, and each ordinary or EventQueue response is capped at 32 MiB. The per-response caps allow up to 128 MiB of ordinary response bodies and 288 MiB of EventQueue response bodies at once, before decoded LLSD values, XML tokens, or capture copies. The 256-entry outbound command queue also caps caller-controlled chat storage at 7,121 bytes and object-request vectors at 255 entries per message before admission. These limits bound input growth but do not establish an acceptable peak RSS. Measure peak and live memory with representative traffic before tuning them.
-
-### `crates/protocol` (`protocol`)
-
-Owns packet framing, message IDs, field codecs, zero coding, protocol enums, and LLUDP wire types. Its `build.rs` parses the checked-in message template offline and generates message IDs and schema metadata. The runtime message type keeps hand-written variants for messages with current clients and uses schema-backed messages for other definitions in the template. This crate has no network I/O or viewer behavior.
+Owns the GPUI application and workflows such as login, chat, inventory favorites, and region lookup. It calls `network` for grid services and adapts simulator events into world events. It owns session lifetimes and background world intake; UI and rendering read world APIs rather than packets.
 
 ### `crates/common/base` (`base`)
 
-Owns foundational primitives used across otherwise unrelated crates. It currently re-exports `uuid::Uuid` as `UUID`. It does not depend on LLSD or any higher-level subsystem. The `common` directory is only a grouping; it is not a Cargo package.
-
-### `crates/common/math` (`math`)
-
-Owns shared linear algebra types and operations through `glam`, including vectors, matrices, quaternions, and affine transforms. It has no dependency on viewer, protocol, network, or world concepts.
-
-### `crates/world` (`world`)
-
-Owns the persistent in-memory model of observed regions and entities, their identities and lifetimes, relationships, transforms, indexes, recent metadata, bounded change publication, and query/read APIs. It applies world-owned events and has no dependency on GPUI, viewer, network, protocol, or LLSD. Its production dependencies are `base` for UUID values and `math` for linear algebra. A developer floater and later scene presentation read the same world data.
+Owns primitives shared across subsystems and re-exports `uuid::Uuid` as `UUID`. It has no LLSD or higher-level dependencies. `common` is a directory grouping, not a Cargo package.
 
 ### `crates/common/llsd` (`llsd`)
 
-Owns the generic LLSD data model and XML, binary, and notation codecs. LLSD uses `base::UUID` directly; UUID remains a core type rather than an LLSD-specific wrapper.
+Owns the generic LLSD model and XML, binary, and notation codecs. It uses `base::UUID` directly.
 
-### `crates/test-support` (`test-support`)
+### `crates/common/math` (`math`)
 
-Owns fixtures and helpers shared by tests. `network`, `protocol`, and `viewer` use it as a dev-dependency. Production code does not depend on it.
+Owns shared `glam` vectors, matrices, quaternions, and affine transforms. It has no viewer, protocol, network, or world concepts.
+
+### `crates/common/testing` (`testing`)
+
+Owns fixtures and helpers used by `network`, `protocol`, and `viewer` tests. Production code does not depend on it.
+
+### `crates/network` (`network`)
+
+Owns login orchestration, capability HTTP, UDP transport, simulator connections, LLUDP circuit sequencing and reliability, EventQueue polling, and the session API. It supplies metadata and XML depth limits to `protocol::login`, while handling login HTTP, status, retries, response limits, capture, grid selection, credentials, MFA, endpoint validation, and session setup.
+
+Each connection task owns its UDP socket, Circuit, handshake, and reliability state, then forwards application messages as generic `Event` values. The session event channel holds 32 events; each simulator can buffer 16 more, and a separate session buffer holds 64 capability events that arrive before `SimulatorConnected`. On saturation, the simulator records coverage loss and starts bounded logout while continuing control and ACK processing. It admits an event before committing receive history or acknowledging its reliable packet, leaving rejected packets eligible for retransmission until teardown. ACKs, retries, handshakes, keepalives, logout, and application sends use one session-wide byte budget. Each connection keeps its own bounded send queue; ACKs preempt deferred non-ACK sends, and logout has a dedicated slot outside that queue. Overload is reported through `Event::Failed` so the viewer clears the closed session.
+
+Current resource limits:
+
+| Path | Limits and ownership |
+| --- | --- |
+| Login | 16 MiB response; 64 nested XML elements. |
+| EventQueue | 32 MiB XML; 1,024 events per batch; 64 nested containers; estimated 256 KiB per event and 8 MiB per batch. Preflight and reserve the computed LLSD plus conversion bound before decoding; release decoder memory after conversion, and hold a separate retained-event permit until `Session::recv_event` returns the batch. |
+| Capability clients | Per session: four ordinary request slots, nine EventQueue polling slots, and a 72 MiB retained-event budget. Ordinary request bodies are limited to 1 MiB; ordinary and EventQueue response bodies to 32 MiB each. Concurrent raw bodies could reach 128 MiB and 288 MiB respectively, before decoded values, XML tokens, or capture copies. These limits bound input growth but do not establish an acceptable peak RSS; measure live and peak memory under representative traffic before tuning them. |
+| Inbound LLUDP | Eight concurrent packet decodes; 32 MiB shared retained-event ceiling, with neighbors limited to 24 MiB together and 4 MiB each. The coordinator reclassifies retained packet bytes synchronously on promotion; a demoted connection over neighbor limits remains charged and blocks new neighbor admission until its events drain. The coordinator allows up to 32 neighbors. |
+| Outbound commands | A 256-entry queue; caller-controlled chat storage is limited to 7,121 bytes and object-request vectors to 255 entries per message before admission. |
+| Outbound LLUDP | A session-wide token bucket defaults to 64,000 bytes per second and an 8 KiB burst. `SessionOptions` sets the rate. Each simulator queues at most eight datagrams, charged at 8 KiB each, for up to five seconds. Control traffic precedes deadline and fair traffic; the active primary receives twice a neighbor's scheduling weight. The default remains a starting value pending multi-simulator benchmark results. |
+
+`Session::start` runs a Tokio runtime on a named `network` thread. `Session` owns the only event receiver and exposes `recv_event` and `send`; cloneable `SessionHandle`s support concurrent sends, capture control, status, and shutdown. MFA uses an `MfaChallenge` continuation. Operations return typed `network::Error` variants for queue saturation, closed sessions, capture failures, and capability failures; asynchronous login and simulator failures arrive through `Event::Failed`. Capability URLs use opaque `capabilities::CapabilityUrl` handles. `capabilities::Client` provides typed LLSD `get` and `post`, raw `get_bytes` for binary resources, and redacted debug output. Outbound messages use the sealed typed-message boundary.
+
+### `crates/protocol` (`protocol`)
+
+Owns Second Life login XML-RPC and LLUDP wire formats. `login.rs` uses `dxr` to encode and parse `login_to_simulator`, exposes typed wire results, and preserves additional response fields. It enforces the caller's XML depth limit without choosing transport policy. Login metadata and values are `protocol::login::{ResponseData, Value}`; Network re-exports `StartLocation` for `LoginCredentials`. LLUDP framing, IDs, codecs, zero coding, and protocol types also live here. `build.rs` parses the message template offline and generates IDs and schema metadata. `Message` uses handwritten variants for supported messages and schema-backed values for the rest. Protocol has no network I/O or viewer behavior.
+
+### `crates/world` (`world`)
+
+Owns observed regions and entities, their identities, lifetimes, relationships, transforms, indexes, recent metadata, and bounded change/read APIs. It applies world events and depends only on `base` for UUIDs and `math` for linear algebra. It has no GPUI, viewer, network, protocol, or LLSD dependency.
 
 ## Dependency direction
 
@@ -63,30 +76,16 @@ viewer -> world -> math
 protocol -> math
 network -> llsd
 network -> base
-network --dev--> test-support
-protocol --dev--> test-support
-viewer --dev--> test-support
+network --dev--> testing
+protocol --dev--> testing
+viewer --dev--> testing
 ```
 
-`base` stays near the bottom of the graph and contains no subsystem-specific behavior. `protocol` stays independent of login, transport, and UI concepts. `llsd` stays independent of Second Life protocol and viewer concepts.
-`world` stays independent of message decoding, simulator transport, and presentation. The viewer is the adapter between network events and world-owned events; future scene consumers and tools can depend on `world` directly.
-
-## Where new code belongs
-
-- Put wire layouts and packet encoding or decoding in `protocol`.
-- Put generic LLSD data types and codecs in `crates/common/llsd`; keep capability and viewer-specific structures in their current owners.
-- Put small primitives shared across otherwise unrelated crates in `crates/common/base`.
-- Put reusable linear algebra in `crates/common/math`. Keep simulator coordinates and transforms in `world`, wire layouts in `protocol`, and renderer-specific behavior in presentation code.
-- Put login, HTTP and UDP transport, LLUDP circuit state, and simulator session state in `network`.
-- Put observed world state, identity, relationships, transforms, and read/query contracts in `crates/world`. Keep region-name resolution, agent movement policy, session ownership, and network-to-world adaptation in the viewer; `network` transports protocol messages without choosing world behavior.
-- Put screens, user workflows, and local viewer state in `apps/viewer`.
-- Put shared fixtures and test helpers in `test-support`.
-
-Extract a crate when a responsibility needs its own dependency boundary or multiple workspace packages need to share it. Otherwise, keep the code in its current owner.
+`protocol` has no Tokio or reqwest dependency, and `llsd` has no Second Life concepts. The viewer adapts network events to world events, keeping `world` usable by tools and scene consumers.
 
 ## Proposed architecture
 
-The current crate graph is the viewer's starting point. Keep application workflows and transport adapters in the viewer. The world model has its own crate so inspection tools and later scene presentation use the same state without inheriting viewer, transport, or UI dependencies.
+The table shows how future presentation and supporting services fit around the current crate graph.
 
 | Area                | Responsibility                                                                                                                                                     | Likely module names                                     |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
@@ -95,5 +94,3 @@ The current crate graph is the viewer's starting point. Keep application workflo
 | Presentation        | Owns UI interaction, scene rendering, audio, media, and voice.                                                                                                     | `gui`, `renderer`, `audio`, `media`, `voice`            |
 | Supporting services | Fetches and decodes assets, stores local data, manages settings, and isolates operating-system integration.                                                        | `assets`, `storage`, `settings`, `platform`             |
 | Grid communication  | Handles login, capability requests, simulator transport, and wire formats.                                                                                         | Existing `network` and `protocol` crates                |
-
-The viewer application coordinates feature state with services. Its background adapter turns network events into world-owned events and applies them to the `world` model. UI and rendering consume world read APIs rather than packets or transport types. Asset loading, decoding, and local storage run outside the UI and render paths, then provide ready data or handles to presentation code.

@@ -34,8 +34,7 @@ mod tests {
         let agent_id = UUID::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("fixture agent UUID");
         let session_id = UUID::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("fixture session UUID");
         let packet = Packet::new(3, idle(agent_id, session_id).into()).with_reliable().encode().expect("encode default update");
-        let expected =
-            test_support::parse_hex_fixture(test_support::lludp::vectors::AGENT_UPDATE_INITIAL).expect("valid AgentUpdate fixture");
+        let expected = testing::parse_hex_fixture(testing::lludp::vectors::AGENT_UPDATE_INITIAL).expect("valid AgentUpdate fixture");
         assert_eq!(packet, expected);
     }
 }

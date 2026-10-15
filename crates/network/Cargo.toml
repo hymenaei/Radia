@@ -8,15 +8,12 @@ license.workspace = true
 workspace = true
 
 [features]
-test-support = []
+testing = []
 
 [dependencies]
-dxr = { version = "=0.9.0", features = ["i8"] }
 llsd.workspace = true
-md-5 = "=0.10.6"
 base = { workspace = true, features = ["v4"] }
 protocol.workspace = true
-quick-xml.workspace = true
 reqwest.workspace = true
 httpdate.workspace = true
 serde.workspace = true
@@ -30,7 +27,7 @@ zip.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 math.workspace = true
-test-support.workspace = true
+testing.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 

@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use gpui::{Context, IntoElement, Render, TitlebarOptions, Window, WindowBounds, WindowKind, WindowOptions, div, prelude::*, px, size};
 use gpui_component::{
-    Root, StyledExt, Theme,
+    Disableable, IconName, Root, StyledExt, Theme,
     button::{Button, ButtonVariants as _},
     input::{Input, InputState},
 };
@@ -33,8 +33,8 @@ pub struct ChatScreen {
     message_bytes: usize,
     transcript_scroll: gpui::ScrollHandle,
     message_input: gpui::Entity<InputState>,
-    send_error: Option<String>,
-    connection_error: Option<String>,
+    capture_stop_pending: bool,
+    capture_generation: u64,
     world_source: WorldSource,
     developer_window: Option<gpui::WindowHandle<Root>>,
 }
@@ -51,8 +51,8 @@ impl ChatScreen {
             message_bytes: 0,
             transcript_scroll: gpui::ScrollHandle::new(),
             message_input,
-            send_error: None,
-            connection_error: None,
+            capture_stop_pending: false,
+            capture_generation: 0,
             world_source: WorldSource::new(),
             developer_window: None,
         }
@@ -61,20 +61,18 @@ impl ChatScreen {
     pub fn set_session(&mut self, session: AgentSession, cx: &mut Context<Self>) {
         self.session = Some(session);
         self.region_name = None;
-        self.send_error = None;
-        self.connection_error = None;
         cx.notify();
     }
 
     pub fn clear_session(&mut self, cx: &mut Context<Self>) {
+        self.capture_generation = self.capture_generation.wrapping_add(1);
+        self.capture_stop_pending = false;
         self.session = None;
         self.region_name = None;
         self.session_handle = None;
         self.messages.clear();
         self.message_bytes = 0;
         self.transcript_scroll = gpui::ScrollHandle::new();
-        self.send_error = None;
-        self.connection_error = None;
         self.world_source.set(None);
         if let Some(window) = self.developer_window.take() {
             let _ = window.update(cx, |_, window, _| window.remove_window());
@@ -99,15 +97,40 @@ impl ChatScreen {
     }
 
     pub(crate) fn titlebar_action(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        Button::new("open-developer-tools")
-            .ghost()
-            .compact()
-            .h(px(24.))
-            .relative()
-            .top(px(-1.))
-            .accessibility_label("Developer Tools")
-            .child(div().text_sm().child("Developer Tools"))
-            .on_click(cx.listener(|this, _event, window, cx| this.open_developer_tools(window, cx)))
+        let theme = Theme::global(cx).colors;
+        let capture_status = self.session_handle.as_ref().and_then(SessionHandle::capture_status);
+        let capture_visible = capture_status.is_some_and(|status| status.active || status.finalizing);
+        let capture_saving = self.capture_stop_pending || capture_status.is_some_and(|status| status.finalizing);
+
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .when(capture_visible, |this| {
+                this.child(
+                    Button::new("stop-capture")
+                        .ghost()
+                        .compact()
+                        .h(px(24.))
+                        .w(px(24.))
+                        .when(capture_saving, |this| this.icon(IconName::LoaderCircle).loading(true))
+                        .when(!capture_saving, |this| this.child(div().size(px(8.)).rounded(px(1.)).bg(theme.danger)))
+                        .disabled(capture_saving)
+                        .accessibility_label(if capture_saving { "Saving capture" } else { "Stop capture" })
+                        .on_click(cx.listener(|this, _event, _window, cx| this.stop_capture(cx))),
+                )
+            })
+            .child(
+                Button::new("open-developer-tools")
+                    .ghost()
+                    .compact()
+                    .h(px(24.))
+                    .relative()
+                    .top(px(-1.))
+                    .accessibility_label("Developer Tools")
+                    .child(div().text_sm().child("Developer Tools"))
+                    .on_click(cx.listener(|this, _event, window, cx| this.open_developer_tools(window, cx))),
+            )
             .into_any_element()
     }
 
@@ -167,8 +190,42 @@ impl ChatScreen {
     }
 
     pub fn set_session_handle(&mut self, session_handle: SessionHandle, cx: &mut Context<Self>) {
+        self.capture_generation = self.capture_generation.wrapping_add(1);
+        self.capture_stop_pending = false;
         self.session_handle = Some(session_handle);
         cx.notify();
+    }
+
+    fn stop_capture(&mut self, cx: &mut Context<Self>) {
+        if self.capture_stop_pending {
+            return;
+        }
+
+        let Some(session_handle) = self.session_handle.clone() else { return };
+        if !session_handle.capture_status().is_some_and(|status| status.active) {
+            return;
+        }
+
+        self.capture_stop_pending = true;
+        let generation = self.capture_generation;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            match session_handle.stop_capture().await {
+                Ok(path) => {
+                    tracing::info!(operation = "capture_stop", outcome = "saved", capture_path = %path.display(), "Capture finished")
+                }
+                Err(error) => tracing::error!(operation = "capture_stop", outcome = "failed", %error, "Could not stop capture"),
+            }
+            let _ = this.update(cx, |this, cx| {
+                if this.capture_generation != generation {
+                    return;
+                }
+                this.capture_stop_pending = false;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn add_chat_messages(&mut self, messages: impl IntoIterator<Item = ChatMessage>, cx: &mut Context<Self>) {
@@ -179,16 +236,6 @@ impl ChatScreen {
         if added_message {
             cx.notify();
         }
-    }
-
-    pub fn report_send_error(&mut self, error: impl Into<String>, cx: &mut Context<Self>) {
-        self.send_error = Some(error.into());
-        cx.notify();
-    }
-
-    pub fn report_connection_error(&mut self, error: impl Into<String>, cx: &mut Context<Self>) {
-        self.connection_error = Some(error.into());
-        cx.notify();
     }
 
     fn send_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -219,11 +266,12 @@ impl ChatScreen {
                     .unwrap_or_else(|| "You".into());
                 self.push_message(ChatMessage { from_name, message });
                 self.message_input.update(cx, |input, cx| input.set_value("", window, cx));
-                self.send_error = None;
+                cx.notify();
             }
-            Err(error) => self.send_error = Some(error),
+            Err(error) => {
+                tracing::warn!(operation = "nearby_chat_send", %error, "Send failed");
+            }
         }
-        cx.notify();
     }
 
     fn push_message(&mut self, message: ChatMessage) -> bool {
@@ -322,13 +370,7 @@ impl Render for ChatScreen {
                                     .h(px(32.))
                                     .on_click(cx.listener(|this, _event, window, cx| this.send_message(window, cx))),
                             ),
-                    )
-                    .when_some(self.send_error.clone(), |this, error| {
-                        this.child(div().text_xs().text_color(theme.danger).child(format!("Send failed: {error}")))
-                    })
-                    .when_some(self.connection_error.clone(), |this, error| {
-                        this.child(div().text_xs().text_color(theme.danger).child(format!("Disconnected: {error}")))
-                    }),
+                    ),
             )
     }
 }

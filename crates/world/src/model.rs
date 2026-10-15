@@ -6,7 +6,6 @@ use math::{DVec3, Quat, Vec3};
 
 static NEXT_WORLD_ID: AtomicU64 = AtomicU64::new(1);
 
-// hecs generations are local to one storage instance, so public handles need a World tag.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Entity(pub(super) hecs::Entity, pub(super) WorldId);
 

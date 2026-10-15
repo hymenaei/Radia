@@ -12,9 +12,10 @@ use std::{
 };
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use llsd::Value;
 use network::capabilities::{CapabilityUrl, Client};
 use reqwest::Url;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::runtime::Builder;
 
 const REQUESTED_CAPABILITIES: &[&str] = &["EventQueueGet", "FetchInventory2", "GetTexture"];
@@ -135,12 +136,6 @@ struct CapabilityRequest {
     item_id: &'static str,
 }
 
-#[derive(Deserialize)]
-struct CapabilityResponse {
-    accepted: bool,
-    revision: u32,
-}
-
 fn bench_capability_post(c: &mut Criterion) {
     let server = LoopbackServer::start(|_| {
         "<?xml version=\"1.0\"?><llsd><map><key>accepted</key><boolean>true</boolean><key>revision</key><integer>42</integer></map></llsd>"
@@ -152,14 +147,15 @@ fn bench_capability_post(c: &mut Criterion) {
     let capability = CapabilityUrl::parse(&format!("http://{}/inventory", server.address)).expect("parse local capability URL");
     let client = runtime.block_on(async { Client::new(seed).expect("create capability client") });
     let request = CapabilityRequest { item_id: "benchmark-item" };
-    let warmup: CapabilityResponse = runtime.block_on(client.post(&capability, &request)).expect("warm up capability POST");
-    assert!(warmup.accepted);
-    assert_eq!(warmup.revision, 42);
+    let warmup: Value = runtime.block_on(client.post(&capability, &request)).expect("warm up capability POST");
+    let fields = warmup.as_map().expect("response LLSD map");
+    assert_eq!(fields.get("accepted").and_then(Value::as_bool), Some(true));
+    assert_eq!(fields.get("revision").and_then(Value::as_integer), Some(42));
 
     let mut group = c.benchmark_group("network/capability_post");
     group.throughput(Throughput::Elements(1));
     group.bench_function("xml_request_response", |b| {
-        b.iter(|| black_box(runtime.block_on(client.post::<_, CapabilityResponse>(&capability, &request)).expect("post capability")));
+        b.iter(|| black_box(runtime.block_on(client.post(&capability, &request)).expect("post capability")));
     });
     group.finish();
 }

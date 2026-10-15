@@ -1,10 +1,12 @@
 use std::{
+    cmp::Reverse,
     collections::HashSet,
     env,
     error::Error,
     fs::{self, File},
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 use network::capture::{
@@ -32,23 +34,34 @@ struct Summary {
 #[ignore]
 fn saved_captures_are_valid() -> Result<(), Box<dyn Error>> {
     let root = capture_root()?;
-    let captures = capture_files(&root)?;
+    let mut captures = capture_files(&root)?;
     if captures.is_empty() {
         return Err("No captures found".into());
     }
+    captures.sort_by_key(|path| Reverse(path.metadata().and_then(|metadata| metadata.modified()).unwrap_or(SystemTime::UNIX_EPOCH)));
 
     let mut completed = 0;
-    for path in captures {
-        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("capture");
-        let Some(summary) = inspect(&path)? else {
-            println!("{name}: skipped (capture is not complete)");
-            continue;
+    let mut failures = Vec::new();
+    for (capture_index, path) in captures.into_iter().enumerate() {
+        let summary = match inspect(&path) {
+            Ok(Some(summary)) => summary,
+            Ok(None) => {
+                println!("capture #{capture_index}: skipped (capture is not complete)");
+                continue;
+            }
+            Err(error) => {
+                failures.push(format!("capture #{capture_index}: {error}"));
+                continue;
+            }
         };
         completed += 1;
         println!(
-            "{name}: {} events, {} UDP datagrams ({} decoded LLUDP, {} malformed), {} HTTP requests, {} responses",
+            "capture #{capture_index}: {} events, {} UDP datagrams ({} decoded LLUDP, {} malformed), {} HTTP requests, {} responses",
             summary.events, summary.udp, summary.decoded_lludp, summary.malformed_lludp, summary.http_requests, summary.http_responses
         );
+    }
+    if !failures.is_empty() {
+        return Err(failures.join("\n").into());
     }
     if completed == 0 {
         return Err("No complete captures found".into());
@@ -82,6 +95,39 @@ fn rejects_oversized_event_line() -> Result<(), Box<dyn Error>> {
 
     let error = inspect(capture.path()).err().ok_or("oversized event line was accepted")?;
     assert!(error.to_string().contains("event line exceeds"));
+    Ok(())
+}
+
+#[test]
+fn allows_unrecorded_metadata() -> Result<(), Box<dyn Error>> {
+    let bytes = testing::parse_hex_fixture(testing::lludp::vectors::START_PING_CHECK)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    assert!(Packet::decode(&bytes).is_ok(), "fixture must decode as LLUDP");
+
+    let mut payload_file = NamedTempFile::new()?;
+    payload_file.as_file_mut().write_all(&bytes)?;
+    let event = CaptureEvent {
+        index: 0,
+        elapsed_ns: 0,
+        kind: CaptureEventKind::LLUdpReceive {
+            circuit_id: 1,
+            endpoint: "simulator".into(),
+            sequence: None,
+            reliable: None,
+            resent: None,
+            zerocoded: None,
+            appended_acks: Vec::new(),
+            packet_acks: Vec::new(),
+            message: None,
+        },
+        payloads: vec![CapturePayloadRef { role: "datagram".into(), offset: 0, length: bytes.len() as u64 }],
+    };
+    let mut summary = Summary { events: 0, udp: 1, decoded_lludp: 0, malformed_lludp: 0, http_requests: 0, http_responses: 0 };
+
+    inspect_datagram(&event, payload_file.as_file(), &mut summary)?;
+
+    assert_eq!(summary.decoded_lludp, 1);
+    assert_eq!(summary.malformed_lludp, 0);
     Ok(())
 }
 
@@ -179,7 +225,13 @@ fn inspect(path: &Path) -> Result<Option<Summary>, Box<dyn Error>> {
         match &event.kind {
             CaptureEventKind::LLUdpSend { .. } | CaptureEventKind::LLUdpReceive { .. } => {
                 summary.udp += 1;
-                inspect_datagram(&event, payload_file.as_file(), &mut summary)?;
+                let direction = if matches!(&event.kind, CaptureEventKind::LLUdpSend { .. }) { "send" } else { "receive" };
+                inspect_datagram(&event, payload_file.as_file(), &mut summary).map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("viewer version {} event {} {direction}: {error}", manifest.viewer_version, event.index),
+                    )
+                })?;
             }
             CaptureEventKind::HttpRequest { request_id, .. } => {
                 if !request_ids.insert(*request_id) {
@@ -289,17 +341,38 @@ fn inspect_datagram(event: &CaptureEvent, payload_file: &File, summary: &mut Sum
         }
         _ => return Err("Expected UDP event".into()),
     };
+    let has_metadata = sequence.is_some()
+        || reliable.is_some()
+        || resent.is_some()
+        || zerocoded.is_some()
+        || !appended_acks.is_empty()
+        || !packet_acks.is_empty()
+        || message.is_some();
 
     match Packet::decode(&bytes) {
         Ok(packet) => {
             summary.decoded_lludp += 1;
-            if *sequence != Some(packet.sequence())
-                || *reliable != Some(packet.is_reliable())
-                || *resent != Some(packet.is_resent())
-                || *zerocoded != Some(packet.is_zerocoded()?)
-                || appended_acks.as_slice() != packet.appended_acks()
-            {
-                return Err("LLUDP metadata disagrees with its UDP datagram".into());
+            if !has_metadata {
+                return Ok(());
+            }
+            let mut mismatches = Vec::new();
+            if *sequence != Some(packet.sequence()) {
+                mismatches.push(format!("sequence {}", if sequence.is_none() { "missing" } else { "different" }));
+            }
+            if *reliable != Some(packet.is_reliable()) {
+                mismatches.push(format!("reliable {}", if reliable.is_none() { "missing" } else { "different" }));
+            }
+            if *resent != Some(packet.is_resent()) {
+                mismatches.push(format!("resent {}", if resent.is_none() { "missing" } else { "different" }));
+            }
+            if *zerocoded != Some(packet.is_zerocoded()?) {
+                mismatches.push(format!("zerocoded {}", if zerocoded.is_none() { "missing" } else { "different" }));
+            }
+            if appended_acks.as_slice() != packet.appended_acks() {
+                mismatches.push("appended_acks different".into());
+            }
+            if !mismatches.is_empty() {
+                return Err(format!("LLUDP metadata disagrees with its UDP datagram: {}", mismatches.join(", ")).into());
             }
             let decoded_acks = match packet.message() {
                 Message::PacketAck(message) => message.packets.iter().map(|ack| ack.id).collect::<Vec<_>>(),
@@ -314,14 +387,7 @@ fn inspect_datagram(event: &CaptureEvent, payload_file: &File, summary: &mut Sum
         }
         Err(_) => {
             summary.malformed_lludp += 1;
-            if sequence.is_some()
-                || reliable.is_some()
-                || resent.is_some()
-                || zerocoded.is_some()
-                || !appended_acks.is_empty()
-                || !packet_acks.is_empty()
-                || message.is_some()
-            {
+            if has_metadata {
                 return Err("Undecodable UDP datagram has decoded LLUDP metadata".into());
             }
         }

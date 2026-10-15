@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt};
+use std::{collections::BTreeMap, fmt, io::Cursor};
 
 use base::UUID;
 use llsd::{Binary, Date, Error, Limits, Map, URI, Value, binary, notation, xml};
@@ -12,6 +12,9 @@ struct Profile {
     name: String,
     score: i32,
 }
+
+#[derive(Debug, Deserialize)]
+struct IgnoreUnknown {}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 struct UUIDField {
@@ -106,6 +109,18 @@ fn profile() -> Profile {
     Profile { active: true, name: "A&B <viewer>".into(), score: -17 }
 }
 
+fn assert_ignored_limit(inputs: [&[u8]; 3], limits: Limits, expected: &'static str) {
+    let results = [
+        ("XML", xml::from_slice_with_limits::<IgnoreUnknown>(inputs[0], limits)),
+        ("notation", notation::from_slice_with_limits::<IgnoreUnknown>(inputs[1], limits)),
+        ("binary", binary::from_slice_with_limits::<IgnoreUnknown>(inputs[2], limits)),
+    ];
+
+    for (format, result) in results {
+        assert!(matches!(result, Err(Error::LimitExceeded(actual)) if actual == expected), "{format}: expected {expected}, got {result:?}");
+    }
+}
+
 fn llsd_date(value: &str) -> Date {
     Date::from_datetime(OffsetDateTime::parse(value, &Rfc3339).expect("valid LLSD date"))
 }
@@ -124,6 +139,181 @@ fn python_fixtures_decode() {
     ] {
         assert_eq!(decoded.get("foo"), Some(&Value::String("bar".into())));
     }
+}
+
+#[test]
+fn unknown_fields_are_ignored() {
+    let mut fields = BTreeMap::new();
+    fields.insert("active".into(), Value::Boolean(true));
+    fields.insert("name".into(), Value::String("A&B <viewer>".into()));
+    fields.insert("score".into(), Value::Integer(-17));
+    fields.insert(
+        "future".into(),
+        Value::Array(vec![
+            Value::Map(BTreeMap::from([("nested".into(), Value::Binary(Binary::from(vec![0, 255])))])),
+            Value::String("additional data".into()),
+        ]),
+    );
+    let payload = Value::Map(fields);
+    let expected = profile();
+
+    assert_eq!(xml::from_slice::<Profile>(&xml::to_vec(&payload).expect("encode XML")).expect("decode XML"), expected);
+    assert_eq!(notation::from_slice::<Profile>(&notation::to_vec(&payload).expect("encode notation")).expect("decode notation"), expected);
+    assert_eq!(binary::from_slice::<Profile>(&binary::to_vec(&payload).expect("encode binary")).expect("decode binary"), expected);
+}
+
+#[test]
+fn ignored_values_keep_limits() {
+    let payload = Value::Map(BTreeMap::from([(
+        "x".into(),
+        Value::Array(vec![Value::Map(BTreeMap::from([
+            ("nested".into(), Value::String("long".into())),
+            ("other".into(), Value::Binary(Binary::from(vec![0, 255]))),
+        ]))]),
+    )]));
+    let inputs = [
+        xml::to_vec(&payload).expect("encode XML"),
+        notation::to_vec(&payload).expect("encode notation"),
+        binary::to_vec(&payload).expect("encode binary"),
+    ];
+    let cases = [
+        (Limits { max_depth: 1, ..Limits::default() }, "nesting depth"),
+        (Limits { max_values: 3, ..Limits::default() }, "value count"),
+        (Limits { max_container_items: 1, ..Limits::default() }, "container items"),
+        (Limits { max_string_bytes: 3, ..Limits::default() }, "string bytes"),
+        (Limits { max_map_key_bytes: 1, ..Limits::default() }, "map key bytes"),
+        (Limits { max_binary_bytes: 1, ..Limits::default() }, "binary bytes"),
+    ];
+
+    for (limits, expected) in cases {
+        assert_ignored_limit([&inputs[0], &inputs[1], &inputs[2]], limits, expected);
+    }
+}
+
+#[test]
+fn xml_accepts_doctype() {
+    let input = b"<!DOCTYPE llsd [<!ELEMENT llsd (undef)><!ELEMENT undef EMPTY>]><llsd><undef/></llsd>";
+
+    assert_eq!(xml::from_slice::<Value>(input).expect("decode LLSD with its DTD"), Value::Undefined);
+    assert!(xml::value_allocation_bound(input, Limits::default()).is_ok());
+    assert!(xml::from_str::<Value>("<!DOCTYPE llsd [<!ENTITY custom 'value'>]><llsd><string>&custom;</string></llsd>").is_err());
+}
+
+#[test]
+fn notation_unicode_escapes() {
+    let value = notation::from_str::<String>(r#""\u00E9\U0001F642""#).expect("decode BMP and supplementary escapes");
+
+    assert_eq!(value, "é🙂");
+    assert!(notation::from_str::<String>(r#""\U00110000""#).is_err(), "reject a codepoint above Unicode's maximum");
+}
+
+#[test]
+fn value_accessors_match_variants() {
+    let uuid = UUID::parse_str("12345678-90ab-cdef-0123-456789abcdef").expect("valid UUID");
+    let values = [
+        Value::Boolean(true),
+        Value::Integer(42),
+        Value::Real(1.5),
+        Value::UUID(uuid),
+        Value::String("plain text".into()),
+        Value::URI(URI::from("https://example.invalid/resource")),
+        Value::Array(vec![Value::Undefined]),
+        Value::Map(BTreeMap::from([("key".into(), Value::Undefined)])),
+    ];
+    let binary = Binary::from(vec![0, 1, 255]);
+
+    assert_eq!(values[0].as_bool(), Some(true));
+    assert_eq!(values[1].as_integer(), Some(42));
+    assert_eq!(values[2].as_real(), Some(1.5));
+    assert_eq!(values[3].as_uuid(), Some(uuid));
+    assert_eq!(values[4].as_str(), Some("plain text"));
+    assert_eq!(values[5].as_str(), Some("https://example.invalid/resource"));
+    assert_eq!(values[6].as_array(), Some(&[Value::Undefined][..]));
+    assert_eq!(values[7].as_map().and_then(|map| map.get("key")), Some(&Value::Undefined));
+    assert_eq!(binary.as_slice(), &[0, 1, 255]);
+
+    let undefined = Value::Undefined;
+    assert_eq!(undefined.as_bool(), None);
+    assert_eq!(undefined.as_integer(), None);
+    assert_eq!(undefined.as_real(), None);
+    assert_eq!(undefined.as_uuid(), None);
+    assert_eq!(undefined.as_str(), None);
+    assert_eq!(undefined.as_array(), None);
+    assert_eq!(undefined.as_map(), None);
+}
+
+#[test]
+fn reader_and_writer_apis_match_slice_codecs() {
+    let value = Value::Array(vec![Value::Integer(42), Value::String("reader".into()), Value::Binary(Binary::from(vec![0, 255]))]);
+
+    let xml_bytes = xml::to_vec(&value).expect("encode XML");
+    let mut xml_writer = Vec::new();
+    xml::to_writer(&mut xml_writer, &value).expect("write XML");
+    assert_eq!(xml_writer, xml_bytes);
+    assert_eq!(xml::from_reader::<Value, _>(Cursor::new(xml_bytes)).expect("read XML"), value);
+
+    let notation_bytes = notation::to_vec(&value).expect("encode notation");
+    let mut notation_writer = Vec::new();
+    notation::to_writer(&mut notation_writer, &value).expect("write notation");
+    assert_eq!(notation_writer, notation_bytes);
+    assert_eq!(notation::from_reader::<Value, _>(Cursor::new(notation_bytes)).expect("read notation"), value);
+
+    let binary_bytes = binary::to_vec(&value).expect("encode binary");
+    let mut binary_writer = Vec::new();
+    binary::to_writer(&mut binary_writer, &value).expect("write binary");
+    assert_eq!(binary_writer, binary_bytes);
+    assert_eq!(binary::from_reader::<Value, _>(Cursor::new(binary_bytes)).expect("read binary"), value);
+}
+
+#[test]
+fn serde_integer_conversions_check_signedness_and_range() {
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct IntegerWidths {
+        signed: i8,
+        unsigned: u8,
+    }
+
+    let value = Value::Map(BTreeMap::from([("signed".into(), Value::Integer(-128)), ("unsigned".into(), Value::Integer(255))]));
+    let expected = IntegerWidths { signed: -128, unsigned: 255 };
+    let xml_bytes = xml::to_vec(&value).expect("encode in-range integer widths");
+    let notation_bytes = notation::to_vec(&value).expect("encode in-range integer widths");
+    let binary_bytes = binary::to_vec(&value).expect("encode in-range integer widths");
+    assert_eq!(xml::from_slice::<IntegerWidths>(&xml_bytes).expect("decode XML integer widths"), expected);
+    assert_eq!(notation::from_slice::<IntegerWidths>(&notation_bytes).expect("decode notation integer widths"), expected);
+    assert_eq!(binary::from_slice::<IntegerWidths>(&binary_bytes).expect("decode binary integer widths"), expected);
+
+    let out_of_range = [
+        Value::Map(BTreeMap::from([("signed".into(), Value::Integer(128)), ("unsigned".into(), Value::Integer(0))])),
+        Value::Map(BTreeMap::from([("signed".into(), Value::Integer(0)), ("unsigned".into(), Value::Integer(-1))])),
+    ];
+    for value in out_of_range {
+        assert!(xml::from_slice::<IntegerWidths>(&xml::to_vec(&value).expect("encode out-of-range value")).is_err());
+        assert!(notation::from_slice::<IntegerWidths>(&notation::to_vec(&value).expect("encode out-of-range value")).is_err());
+        assert!(binary::from_slice::<IntegerWidths>(&binary::to_vec(&value).expect("encode out-of-range value")).is_err());
+    }
+}
+
+#[test]
+fn reader_limits_stop_after_one_extra_byte() {
+    const MAX_INPUT: usize = 4;
+    let input = b"not a valid LLSD document";
+    let limits = Limits { max_input_bytes: MAX_INPUT, ..Limits::default() };
+    let expected_position = (MAX_INPUT + 1) as u64;
+
+    let mut xml_reader = Cursor::new(input);
+    assert!(matches!(xml::from_reader_with_limits::<Value, _>(&mut xml_reader, limits), Err(Error::LimitExceeded("input bytes"))));
+    assert_eq!(xml_reader.position(), expected_position);
+
+    let mut notation_reader = Cursor::new(input);
+    assert!(matches!(
+        notation::from_reader_with_limits::<Value, _>(&mut notation_reader, limits),
+        Err(Error::LimitExceeded("input bytes"))
+    ));
+    assert_eq!(notation_reader.position(), expected_position);
+
+    let mut binary_reader = Cursor::new(input);
+    assert!(matches!(binary::from_reader_with_limits::<Value, _>(&mut binary_reader, limits), Err(Error::LimitExceeded("input bytes"))));
+    assert_eq!(binary_reader.position(), expected_position);
 }
 
 #[test]
@@ -187,6 +377,141 @@ fn xml_entity_references() {
     let value = xml::from_str::<Value>("<llsd><string>A&amp;&#60;&#x42;</string></llsd>").expect("decode XML entities");
     assert_eq!(value, Value::String("A&<B".into()));
     assert!(xml::from_str::<Value>("<llsd><string>&custom;</string></llsd>").is_err());
+}
+
+#[test]
+fn xml_carriage_returns_are_character_references() {
+    let value = Value::String("before\rafter".into());
+    let encoded = xml::to_vec(&value).expect("encode carriage return");
+    assert!(encoded.windows(b"before&#13;after".len()).any(|window| window == b"before&#13;after"));
+    assert_eq!(xml::from_slice::<Value>(&encoded).expect("decode carriage return"), value);
+
+    let map = BTreeMap::from([("key\rname".to_owned(), Value::Undefined)]);
+    let encoded = xml::to_vec(&map).expect("encode carriage return in map key");
+    assert!(encoded.windows(b"key&#13;name".len()).any(|window| window == b"key&#13;name"));
+    assert_eq!(xml::from_slice::<Value>(&encoded).expect("decode carriage return map key"), Value::Map(map));
+}
+
+#[test]
+fn xml_uri_carriage_returns_and_entity_text_roundtrip() {
+    let values = [Value::URI(URI::new("before\r\nafter")), Value::URI(URI::new("literal &#13; &amp; <tag>"))];
+
+    for value in values {
+        let encoded = xml::to_vec(&value).expect("encode URI");
+        let decoded = xml::from_slice::<Value>(&encoded).expect("decode URI");
+        assert_eq!(decoded, value);
+    }
+}
+
+#[test]
+fn xml_text_and_cdata_content_is_combined() {
+    let value = xml::from_str::<String>("<llsd><string>plain<!--split--><?split text?><![CDATA[<raw>&text]]>&amp;tail</string></llsd>")
+        .expect("decode adjacent XML text events");
+
+    assert_eq!(value, "plain<raw>&text&tail");
+}
+
+#[test]
+fn xml_normalizes_literal_line_endings_but_preserves_character_references() {
+    let input = "<llsd><array><string>crlf\r\ncr\rlf</string><string>ref&#13;char</string><string><![CDATA[crlf\r\ncr\rlf]]></string></array></llsd>";
+    let value = xml::from_str::<Value>(input).expect("decode XML line endings");
+    assert!(xml::value_allocation_bound(input.as_bytes(), Limits::default()).is_ok());
+
+    assert_eq!(
+        value,
+        Value::Array(vec![Value::String("crlf\ncr\nlf".into()), Value::String("ref\rchar".into()), Value::String("crlf\ncr\nlf".into()),])
+    );
+}
+
+#[test]
+fn xml_document_boundaries() {
+    assert_eq!(xml::from_str::<Value>("\u{00a0}<llsd><undef/></llsd>\u{00a0}").expect("preserve whitespace tolerance"), Value::Undefined);
+    for input in
+        ["<llsd><undef/>", "<llsd><undef/><undef/></llsd>", "<llsd><undef/></llsd><llsd><undef/></llsd>", "<llsd><undef/></llsd>trailing"]
+    {
+        assert!(xml::from_str::<Value>(input).is_err(), "reject incomplete or extra data: {input}");
+    }
+    assert_eq!(xml::from_str::<[i32; 1]>("<llsd><array><integer>1</integer></array></llsd>").expect("read complete tuple"), [1]);
+    assert!(xml::from_str::<[i32; 1]>("<llsd><array><integer>1</integer><integer>2</integer></array></llsd>").is_err());
+}
+
+#[test]
+fn xml_decode_limits() {
+    let nested = b"<llsd><array><array/></array></llsd>";
+    assert!(matches!(
+        xml::from_slice_with_limits::<Value>(nested, Limits { max_depth: 0, ..Limits::default() }),
+        Err(Error::LimitExceeded("nesting depth"))
+    ));
+    let array = b"<llsd><array><undef/><undef/></array></llsd>";
+    assert!(matches!(
+        xml::from_slice_with_limits::<Value>(array, Limits { max_container_items: 1, ..Limits::default() }),
+        Err(Error::LimitExceeded("container items"))
+    ));
+    assert!(matches!(
+        xml::from_slice_with_limits::<Value>(array, Limits { max_input_bytes: array.len() - 1, ..Limits::default() }),
+        Err(Error::LimitExceeded("input bytes"))
+    ));
+}
+
+#[test]
+fn resource_limits_match_across_formats() {
+    type Decoder = fn(&[u8], Limits) -> llsd::Result<Value>;
+    let decoders: [(&str, Decoder); 3] = [
+        ("XML", |input, limits| xml::from_slice_with_limits(input, limits)),
+        ("notation", |input, limits| notation::from_slice_with_limits(input, limits)),
+        ("binary", |input, limits| binary::from_slice_with_limits(input, limits)),
+    ];
+
+    let array = Value::Array(vec![Value::Undefined]);
+    let array_inputs = [
+        xml::to_vec(&array).expect("encode XML array"),
+        notation::to_vec(&array).expect("encode notation array"),
+        binary::to_vec(&array).expect("encode binary array"),
+    ];
+    let exact = Limits { max_depth: 1, max_values: 2, max_container_items: 1, ..Limits::default() };
+    let constrained = [
+        ("nesting depth", Limits { max_depth: 0, ..exact }),
+        ("value count", Limits { max_values: 1, ..exact }),
+        ("container items", Limits { max_container_items: 0, ..exact }),
+    ];
+    for ((format, decode), input) in decoders.iter().zip(&array_inputs) {
+        assert_eq!(decode(input, exact).expect("decode exactly at array limits"), array, "{format}");
+        for (limit_name, limits) in constrained {
+            assert!(
+                matches!(decode(input, limits), Err(Error::LimitExceeded(actual)) if actual == limit_name),
+                "{format} must enforce {limit_name}"
+            );
+        }
+    }
+
+    let string = Value::String("ab".into());
+    let string_inputs = [
+        xml::to_vec(&string).expect("encode XML string"),
+        notation::to_vec(&string).expect("encode notation string"),
+        binary::to_vec(&string).expect("encode binary string"),
+    ];
+    for ((format, decode), input) in decoders.iter().zip(&string_inputs) {
+        assert_eq!(decode(input, Limits { max_string_bytes: 2, ..Limits::default() }).expect("decode at string limit"), string, "{format}");
+        assert!(
+            matches!(decode(input, Limits { max_string_bytes: 1, ..Limits::default() }), Err(Error::LimitExceeded("string bytes"))),
+            "{format}"
+        );
+    }
+
+    let map = Value::Map(BTreeMap::from([("key".into(), Value::Undefined)]));
+    let map_inputs = [
+        xml::to_vec(&map).expect("encode XML map"),
+        notation::to_vec(&map).expect("encode notation map"),
+        binary::to_vec(&map).expect("encode binary map"),
+    ];
+    let map_limits = Limits { max_values: 2, max_container_items: 1, max_map_key_bytes: 3, ..Limits::default() };
+    for ((format, decode), input) in decoders.iter().zip(&map_inputs) {
+        assert_eq!(decode(input, map_limits).expect("decode at map-key limit"), map, "{format}");
+        assert!(
+            matches!(decode(input, Limits { max_map_key_bytes: 2, ..map_limits }), Err(Error::LimitExceeded("map key bytes"))),
+            "{format} must enforce the map-key limit"
+        );
+    }
 }
 
 #[test]
@@ -371,6 +696,13 @@ fn date_forms() {
 }
 
 #[test]
+fn date_rejects_non_finite_and_unrepresentable_timestamps() {
+    for seconds in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX, f64::MIN] {
+        assert_eq!(Date::from_unix_seconds(seconds), None, "accepted timestamp {seconds}");
+    }
+}
+
+#[test]
 fn text_date_codecs_preserve_nanoseconds() {
     let expected = llsd_date("2025-02-03T04:05:06.123456789Z");
     let xml = xml::to_vec(&expected).expect("encode exact XML date");
@@ -398,6 +730,17 @@ fn typed_uuid_roundtrips() {
     assert_eq!(xml::from_slice::<UUIDField>(&xml).expect("decode XML"), expected);
     assert_eq!(notation::from_slice::<UUIDField>(&notation).expect("decode notation"), expected);
     assert_eq!(binary::from_slice::<UUIDField>(&binary).expect("decode binary"), expected);
+}
+
+#[test]
+fn invalid_typed_scalars_are_rejected() {
+    let invalid_uuid_xml = b"<llsd><map><key>id</key><uuid>not-a-uuid</uuid></map></llsd>";
+    let invalid_uuid_notation = br#"{'id':unot-a-uuid}"#;
+    assert!(matches!(xml::from_slice::<UUIDField>(invalid_uuid_xml), Err(Error::InvalidValue(_))));
+    assert!(matches!(notation::from_slice::<UUIDField>(invalid_uuid_notation), Err(Error::InvalidValue(_))));
+
+    assert!(matches!(xml::from_str::<Date>("<llsd><date>2025-02-30</date></llsd>"), Err(Error::InvalidValue(_))));
+    assert!(matches!(notation::from_str::<Date>("d\"2025-02-30\""), Err(Error::InvalidValue(_))));
 }
 
 #[test]
@@ -521,6 +864,10 @@ fn base64_binary_limit() {
 
     let encoded = binary::to_vec(&expected).expect("encode binary LLSD");
     assert_eq!(binary::from_slice_with_limits::<Value>(&encoded, two_byte_limits).expect("decode binary within binary limit"), expected);
+    assert!(matches!(
+        binary::from_slice_with_limits::<Value>(&encoded, Limits { max_binary_bytes: 1, ..two_byte_limits }),
+        Err(Error::LimitExceeded("binary bytes"))
+    ));
 }
 
 #[test]

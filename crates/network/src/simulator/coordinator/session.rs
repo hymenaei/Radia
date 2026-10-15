@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, time::Duration};
+use std::{collections::HashMap, future::pending, net::SocketAddr, time::Duration};
 
 use crate::{
     AgentSession, Error, Grid,
@@ -29,9 +29,9 @@ use protocol::{
 use tokio::{
     net::UdpSocket,
     spawn,
-    sync::{mpsc, watch},
+    sync::{mpsc, oneshot, watch},
     task::yield_now,
-    time::{Instant, timeout},
+    time::{self, Instant, timeout},
 };
 use url::Url;
 
@@ -110,9 +110,9 @@ async fn root_disconnect_skips_remote_logout_wait() {
 
 #[tokio::test(start_paused = true)]
 async fn logout_deadline_reports_unsent() {
-    let send = spawn(send_logout_with_deadline(std::future::pending::<Result<(), LogoutAttemptError>>(), LogoutUnavailable::Deadline));
+    let send = spawn(send_logout_with_deadline(pending::<Result<(), LogoutAttemptError>>(), LogoutUnavailable::Deadline));
     yield_now().await;
-    tokio::time::advance(LOGOUT_TIMEOUT).await;
+    time::advance(LOGOUT_TIMEOUT).await;
 
     assert_eq!(
         send.await.expect("logout deadline task should not panic").expect_err("pending local send should time out"),
@@ -175,13 +175,13 @@ async fn disconnect_logout_respects_deadline() {
     .expect("connect root simulator circuit");
     receive(&simulator).await;
     let (logout, _logout_receiver) = mpsc::channel(1);
-    let (queued_logout, _queued_response) = tokio::sync::oneshot::channel();
+    let (queued_logout, _queued_response) = oneshot::channel();
     logout.try_send(queued_logout).expect("fill the destination logout queue");
     connection.primary.logout = logout;
     let disconnect = spawn(async move { connection.disconnect_once(false).await });
 
     yield_now().await;
-    tokio::time::advance(LOGOUT_TIMEOUT).await;
+    time::advance(LOGOUT_TIMEOUT).await;
 
     assert_eq!(
         disconnect.await.expect("disconnect task should not panic").expect("deadline is an unavailable logout"),

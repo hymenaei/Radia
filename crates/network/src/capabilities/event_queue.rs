@@ -15,8 +15,9 @@ use std::{
 use llsd::{Binary, Map, URI, Value, xml};
 use reqwest::{StatusCode, Url};
 use tokio::{
+    runtime::Handle,
     sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch},
-    task::JoinHandle,
+    task::{JoinError, JoinHandle},
     time,
 };
 
@@ -38,6 +39,10 @@ use crate::{
     simulator::EventRetention,
     status::NetworkStatusHandle,
 };
+#[cfg(test)]
+use std::slice::from_ref;
+#[cfg(test)]
+use std::sync;
 
 const EVENT_QUEUE_RETRY_DELAY: Duration = Duration::from_secs(1);
 const EVENT_QUEUE_RETRY_INCREMENT: Duration = Duration::from_secs(3);
@@ -314,7 +319,7 @@ impl Drop for PendingEventQueueLoss {
                 .reason
                 .clone()
                 .unwrap_or_else(|| "EventQueueGet polling was canceled before its response could be admitted safely.".into());
-            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            if let Ok(runtime) = Handle::try_current() {
                 runtime.spawn(async move {
                     let _ = notifier.notify(reason).await;
                 });
@@ -879,7 +884,7 @@ enum BatchDecodeError {
     Preflight(xml::BoundError),
     Resource(Error),
     Decode(String),
-    Task(tokio::task::JoinError),
+    Task(JoinError),
 }
 
 impl fmt::Display for BatchDecodeError {
@@ -1501,7 +1506,7 @@ mod event_queue_batch_tests {
         let ledger = CoverageLossLedger::new();
         let mut at_limit = event("limit");
         at_limit.retained_bytes = MAX_QUEUED_CAPABILITY_EVENT_BYTES;
-        let expected_bytes = capability_event_batch_retained_size(std::slice::from_ref(&at_limit), 1);
+        let expected_bytes = capability_event_batch_retained_size(from_ref(&at_limit), 1);
 
         assert!(matches!(
             send_batch(
@@ -1669,7 +1674,7 @@ mod event_queue_batch_tests {
         let event_queues = Arc::new(Semaphore::new(1));
         let event_queue_permit = Arc::clone(&event_queues).acquire_owned().await.expect("EventQueue slot");
         let (entered, entered_rx) = oneshot::channel();
-        let (release, release_rx) = std::sync::mpsc::channel();
+        let (release, release_rx) = sync::mpsc::channel();
         let task =
             spawn(decode_admitted_event_batch_with(body, Some(raw_memory), Some(decoded_memory), event_queue_permit, move |bytes| {
                 let _ = entered.send(());
@@ -1688,7 +1693,7 @@ mod event_queue_batch_tests {
         assert_eq!(event_queues.available_permits(), 0, "cancellation cannot admit a replacement poll before decode ends");
 
         release.send(()).expect("unblock decoder");
-        tokio::time::timeout(Duration::from_secs(1), async {
+        time::timeout(Duration::from_secs(1), async {
             loop {
                 let memory_released = match budget.try_reserve(ResponseMemoryClass::EventQueue, reserved_bytes) {
                     Ok(permit) => {

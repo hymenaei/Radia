@@ -7,6 +7,7 @@ use tokio::{
     runtime::Handle,
     sync::{Mutex, OwnedSemaphorePermit, mpsc, oneshot, watch},
     task::{AbortHandle, JoinHandle},
+    time,
 };
 
 use crate::{
@@ -188,11 +189,11 @@ impl Client {
         permit: OwnedSemaphorePermit,
     ) -> Result<HashMap<String, CapabilityUrl>, Error> {
         let (reply, response) = oneshot::channel();
-        tokio::time::timeout_at(deadline.at, self.commands.send(Command::RequestCapabilities { names, reply, deadline, _permit: permit }))
+        time::timeout_at(deadline.at, self.commands.send(Command::RequestCapabilities { names, reply, deadline, _permit: permit }))
             .await
             .map_err(|_| deadline.error())?
             .map_err(|_| Error::CapabilitySessionClosed)?;
-        let response = tokio::time::timeout_at(deadline.at, response)
+        let response = time::timeout_at(deadline.at, response)
             .await
             .map_err(|_| deadline.error())?
             .map_err(|_| self.request_ended_error())?
@@ -243,11 +244,11 @@ impl Client {
         permit: OwnedSemaphorePermit,
     ) -> Result<AdmittedResponse, Error> {
         let (reply, response) = oneshot::channel();
-        tokio::time::timeout_at(deadline.at, self.commands.send(Command::Post { url, body, reply, deadline, _permit: permit }))
+        time::timeout_at(deadline.at, self.commands.send(Command::Post { url, body, reply, deadline, _permit: permit }))
             .await
             .map_err(|_| deadline.error())?
             .map_err(|_| Error::CapabilitySessionClosed)?;
-        tokio::time::timeout_at(deadline.at, response)
+        time::timeout_at(deadline.at, response)
             .await
             .map_err(|_| deadline.error())?
             .map_err(|_| self.request_ended_error())?
@@ -304,11 +305,11 @@ impl Client {
         permit: OwnedSemaphorePermit,
     ) -> Result<AdmittedResponse, Error> {
         let (reply, response) = oneshot::channel();
-        tokio::time::timeout_at(deadline.at, self.commands.send(Command::GetBytes { url, reply, deadline, _permit: permit }))
+        time::timeout_at(deadline.at, self.commands.send(Command::GetBytes { url, reply, deadline, _permit: permit }))
             .await
             .map_err(|_| deadline.error())?
             .map_err(|_| Error::CapabilitySessionClosed)?;
-        tokio::time::timeout_at(deadline.at, response)
+        time::timeout_at(deadline.at, response)
             .await
             .map_err(|_| deadline.error())?
             .map_err(|_| self.request_ended_error())?
@@ -323,7 +324,7 @@ impl Client {
                 biased;
                 _ = wait_for_session_close(session_closed) => Err(Error::CapabilitySessionClosed),
                 permit = budget.acquire_owned() => permit.map_err(|_| Error::CapabilityRequestCanceled),
-                _ = tokio::time::sleep_until(deadline.at) => Err(deadline.error()),
+                _ = time::sleep_until(deadline.at) => Err(deadline.error()),
             }
         })
         .await
@@ -470,7 +471,7 @@ fn admit_capability_decode_memory(body: &[u8], http: &http::Client) -> Result<ht
 
 async fn decode_admitted_response(response: AdmittedResponse, http: http::Client, deadline: RequestDeadline) -> Result<llsd::Value, Error> {
     let AdmittedResponse { body, _memory: raw_memory, _request: request } = response;
-    let (decoded, request) = tokio::time::timeout_at(
+    let (decoded, request) = time::timeout_at(
         deadline.at,
         spawn_blocking_with_permit(request, move || {
             let decoded = if deadline.expired() {
@@ -505,14 +506,15 @@ async fn decode_admitted_response(response: AdmittedResponse, http: http::Client
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{RequestDeadline, admit_capability_decode_memory, decode_admitted_response};
-    use std::io::ErrorKind;
     use std::{
+        collections::HashSet,
+        fs,
         future::Future,
-        io::{Read, Write},
+        io::{self, ErrorKind, Read, Write},
         net::{SocketAddr, SocketAddrV4, TcpListener, TcpStream},
         str,
         sync::{
-            Arc,
+            self, Arc, OnceLock, PoisonError,
             atomic::{AtomicUsize, Ordering},
         },
         task::{Context, Poll, Wake, Waker},
@@ -542,8 +544,6 @@ pub(crate) mod tests {
         coverage::CoverageLossLedger,
         event::{CLIENT_EVENT_CAPACITY, EventEnvelope, EventReceiver, PRIMARY_TERMINAL_EVENT_CAPACITY, SimulatorId},
         http,
-        http::Error,
-        http::Error as HttpError,
         session::{COMMAND_CAPACITY, Command},
         simulator::run_session,
         transport::lludp::Delivery,
@@ -565,41 +565,42 @@ pub(crate) mod tests {
     use serde::Serialize;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
-        net::UdpSocket,
-        sync::{Mutex as AsyncMutex, mpsc, watch},
-        task::JoinSet,
-        task::{spawn, yield_now},
-        time::{sleep, timeout},
+        net::{self, UdpSocket},
+        runtime,
+        sync::{Mutex, MutexGuard, Semaphore, mpsc, oneshot, watch},
+        task::{JoinSet, spawn, yield_now},
+        time::{self, sleep, timeout},
     };
     use url::Url;
+    use zip::ZipArchive;
 
     fn available_event_queue_permits(budget: &CapabilityBudget) -> usize {
         budget.primary_event_queues.available_permits() + budget.neighbor_event_queues.available_permits()
     }
 
     struct DecodeGate {
-        entered: std::sync::mpsc::Sender<()>,
-        released: std::sync::Mutex<bool>,
-        release: std::sync::Condvar,
+        entered: sync::mpsc::Sender<()>,
+        released: sync::Mutex<bool>,
+        release: sync::Condvar,
     }
 
     impl DecodeGate {
-        fn new() -> (Arc<Self>, std::sync::mpsc::Receiver<()>) {
-            let (entered, entered_rx) = std::sync::mpsc::channel();
-            (Arc::new(Self { entered, released: std::sync::Mutex::new(false), release: std::sync::Condvar::new() }), entered_rx)
+        fn new() -> (Arc<Self>, sync::mpsc::Receiver<()>) {
+            let (entered, entered_rx) = sync::mpsc::channel();
+            (Arc::new(Self { entered, released: sync::Mutex::new(false), release: sync::Condvar::new() }), entered_rx)
         }
 
         fn release(&self) {
-            *self.released.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            *self.released.lock().unwrap_or_else(PoisonError::into_inner) = true;
             self.release.notify_all();
         }
     }
 
-    static DECODE_GATE: std::sync::OnceLock<std::sync::Mutex<Option<Arc<DecodeGate>>>> = std::sync::OnceLock::new();
-    static DECODE_GATE_TEST_LOCK: std::sync::OnceLock<AsyncMutex<()>> = std::sync::OnceLock::new();
+    static DECODE_GATE: OnceLock<sync::Mutex<Option<Arc<DecodeGate>>>> = OnceLock::new();
+    static DECODE_GATE_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-    fn lock_decode_gate_test() -> tokio::sync::MutexGuard<'static, ()> {
-        let lock = DECODE_GATE_TEST_LOCK.get_or_init(|| AsyncMutex::new(()));
+    fn lock_decode_gate_test() -> MutexGuard<'static, ()> {
+        let lock = DECODE_GATE_TEST_LOCK.get_or_init(|| Mutex::new(()));
         loop {
             if let Ok(guard) = lock.try_lock() {
                 return guard;
@@ -612,9 +613,9 @@ pub(crate) mod tests {
         let gate = DECODE_GATE.get_or_init(Default::default).lock().expect("decode gate lock").clone();
         if let Some(gate) = gate {
             let _ = gate.entered.send(());
-            let mut released = gate.released.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut released = gate.released.lock().unwrap_or_else(PoisonError::into_inner);
             while !*released {
-                let (next, result) = gate.release.wait_timeout(released, TEST_TIMEOUT).unwrap_or_else(std::sync::PoisonError::into_inner);
+                let (next, result) = gate.release.wait_timeout(released, TEST_TIMEOUT).unwrap_or_else(PoisonError::into_inner);
                 released = next;
                 if !*released && result.timed_out() {
                     drop(released);
@@ -630,7 +631,7 @@ pub(crate) mod tests {
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
-    async fn read_request_headers(stream: &mut tokio::net::TcpStream) -> std::io::Result<()> {
+    async fn read_request_headers(stream: &mut net::TcpStream) -> io::Result<()> {
         let mut request = Vec::new();
         let mut chunk = [0; 1024];
         loop {
@@ -645,14 +646,14 @@ pub(crate) mod tests {
         }
     }
 
-    async fn write_empty_response(stream: &mut tokio::net::TcpStream) -> std::io::Result<()> {
+    async fn write_empty_response(stream: &mut net::TcpStream) -> io::Result<()> {
         stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await
     }
 
     #[test]
     fn requests_run_outside_tokio() {
         let server = LocalServer::start(vec![response(200, "OK", "application/octet-stream", None, "body")]);
-        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("Tokio runtime");
+        let runtime = runtime::Builder::new_multi_thread().enable_all().build().expect("Tokio runtime");
         let client = runtime.block_on(async { Client::new(server.url("/seed")) }).expect("active Tokio runtime");
         let url = CapabilityUrl::parse(server.url("/resource").as_str()).expect("valid capability URL");
 
@@ -665,9 +666,9 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn capability_clients_share_the_session_http_connection_pool() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind local HTTP listener");
+        let listener = net::TcpListener::bind("127.0.0.1:0").await.expect("bind local HTTP listener");
         let address = listener.local_addr().expect("read listener address");
-        let server = tokio::spawn(async move {
+        let server = spawn(async move {
             let (mut first, first_peer) = listener.accept().await.expect("accept first capability request");
             read_request_headers(&mut first).await.expect("read first request");
             write_empty_response(&mut first).await.expect("write first response");
@@ -745,7 +746,7 @@ pub(crate) mod tests {
         let memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body_len).expect("reserve raw response memory");
         let (gate, entered_rx) = DecodeGate::new();
         *DECODE_GATE.get_or_init(Default::default).lock().expect("decode gate lock") = Some(gate.clone());
-        let requests = Arc::new(tokio::sync::Semaphore::new(1));
+        let requests = Arc::new(Semaphore::new(1));
         let request = Arc::clone(&requests).try_acquire_owned().expect("reserve request slot");
         let response = AdmittedResponse { body, _memory: Some(memory), _request: request };
         let http = http::Client::new(Some(TEST_TIMEOUT), false, None)
@@ -777,7 +778,7 @@ pub(crate) mod tests {
         let memory_limit = malformed_len + LLSD_SCAN_WORKING_BYTES;
         let budget = http::ResponseMemoryBudget::new(memory_limit, 0, 0, 0);
         let memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, malformed_len).expect("reserve malformed response memory");
-        let requests = Arc::new(tokio::sync::Semaphore::new(1));
+        let requests = Arc::new(Semaphore::new(1));
         let request = Arc::clone(&requests).try_acquire_owned().expect("reserve request slot");
         let response = AdmittedResponse { body: malformed, _memory: Some(memory), _request: request };
         let http = http::Client::new(Some(TEST_TIMEOUT), false, None)
@@ -802,7 +803,7 @@ pub(crate) mod tests {
         let memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body.capacity()).expect("reserve raw response memory");
         let (gate, entered_rx) = DecodeGate::new();
         *DECODE_GATE.get_or_init(Default::default).lock().expect("decode gate lock") = Some(gate.clone());
-        let requests = Arc::new(tokio::sync::Semaphore::new(1));
+        let requests = Arc::new(Semaphore::new(1));
         let request = Arc::clone(&requests).try_acquire_owned().expect("reserve request slot");
         let response = AdmittedResponse { body, _memory: Some(memory), _request: request };
         let http = http::Client::new(Some(TEST_TIMEOUT), false, None)
@@ -875,7 +876,7 @@ pub(crate) mod tests {
                 Ok(_) => panic!("preflight must reject a configured LLSD limit"),
                 Err(error) => error,
             };
-            assert!(matches!(error, CapabilityHttp(HttpError::ResourceExhausted { .. })));
+            assert!(matches!(error, CapabilityHttp(http::Error::ResourceExhausted { .. })));
             drop(raw);
             drop(budget.try_reserve(http::ResponseMemoryClass::Ordinary, memory_limit).expect("failed preflight releases workspace"));
         }
@@ -898,7 +899,7 @@ pub(crate) mod tests {
                 Ok(_) => panic!("preflight must reject insufficient memory"),
                 Err(error) => error,
             };
-            assert!(matches!(error, CapabilityHttp(HttpError::ResourceExhausted { .. })));
+            assert!(matches!(error, CapabilityHttp(http::Error::ResourceExhausted { .. })));
             drop(raw);
             drop(budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit).expect("failed admission returns all memory"));
         }
@@ -910,10 +911,10 @@ pub(crate) mod tests {
         let body_len = body.len();
         let budget = http::ResponseMemoryBudget::new(body_len, 0, 0, 0);
         let memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body_len).expect("reserve response memory");
-        let requests = Arc::new(tokio::sync::Semaphore::new(1));
+        let requests = Arc::new(Semaphore::new(1));
         let request = Arc::clone(&requests).try_acquire_owned().expect("reserve request slot");
         let response = AdmittedResponse { body, _memory: Some(memory), _request: request };
-        let (reply, waiting) = tokio::sync::oneshot::channel();
+        let (reply, waiting) = oneshot::channel();
 
         assert!(reply.send(response).is_ok(), "caller should be able to retain the admitted reply");
         assert_eq!(requests.available_permits(), 0);
@@ -1030,7 +1031,7 @@ pub(crate) mod tests {
 
         assert!(matches!(
             &error,
-            CapabilityHttp(HttpError::HttpStatus {
+            CapabilityHttp(http::Error::HttpStatus {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 retry_after: Some(retry_after),
                 elapsed,
@@ -1080,7 +1081,7 @@ pub(crate) mod tests {
         let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
 
         let error = client.request_capabilities(&["TestCapability"]).await.expect_err("oversized seed response should fail");
-        assert!(matches!(&error, CapabilityHttp(HttpError::ResourceExhausted { status: Some(StatusCode::OK), .. })));
+        assert!(matches!(&error, CapabilityHttp(http::Error::ResourceExhausted { status: Some(StatusCode::OK), .. })));
 
         assert_eq!(server.finish().len(), 1);
     }
@@ -1092,7 +1093,7 @@ pub(crate) mod tests {
 
         let url = CapabilityUrl::parse(server.url("/capability").as_str()).expect("valid capability URL");
         let error = client.post(&url, &Value::Undefined).await.expect_err("oversized LLSD response should fail");
-        assert!(matches!(&error, CapabilityHttp(HttpError::ResourceExhausted { status: Some(StatusCode::OK), .. })));
+        assert!(matches!(&error, CapabilityHttp(http::Error::ResourceExhausted { status: Some(StatusCode::OK), .. })));
 
         assert_eq!(server.finish().len(), 1);
     }
@@ -1329,7 +1330,7 @@ pub(crate) mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn shared_budget_covers_event_queue_and_capture() {
-        let _decode_gate_test = DECODE_GATE_TEST_LOCK.get_or_init(|| AsyncMutex::new(())).lock().await;
+        let _decode_gate_test = DECODE_GATE_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().await;
         let event_server = EventQueueTestServer::start(|base| {
             let mut event_url = base.clone();
             event_url.set_path("/event-queue");
@@ -1428,8 +1429,7 @@ pub(crate) mod tests {
         let summary = capture.finish_recording(&CapturePublication::default());
         assert_eq!(summary.state, CaptureState::Complete, "capture should finish: {:?}", summary.error);
         let capture_path = summary.capture_path.unwrap_or_else(|| panic!("capture archive path: {:?}", summary.error));
-        let mut archive =
-            zip::ZipArchive::new(std::fs::File::open(capture_path).expect("open capture archive")).expect("decode capture archive");
+        let mut archive = ZipArchive::new(fs::File::open(capture_path).expect("open capture archive")).expect("decode capture archive");
         let mut manifest_bytes = Vec::new();
         archive.by_name("manifest.json").expect("capture manifest").read_to_end(&mut manifest_bytes).expect("read capture manifest");
         let manifest: CaptureManifest = serde_json::from_slice(&manifest_bytes).expect("decode capture manifest");
@@ -1449,7 +1449,7 @@ pub(crate) mod tests {
                 CaptureEventKind::HttpRequest { request_id, .. } => Some(*request_id),
                 _ => None,
             })
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<HashSet<_>>();
         let mut ordinary_response_captured = false;
         let mut event_queue_response_captured = false;
         for event in &events {
@@ -1486,7 +1486,7 @@ pub(crate) mod tests {
         const EVENT_PAYLOAD_BYTES: usize = MAX_QUEUED_CAPABILITY_EVENT_BYTES - 16 * 1024;
         const ORDINARY_PAYLOAD_BYTES: usize = 64 * 1024;
 
-        let _decode_gate_test = DECODE_GATE_TEST_LOCK.get_or_init(|| AsyncMutex::new(())).lock().await;
+        let _decode_gate_test = DECODE_GATE_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().await;
         let event_payload = "e".repeat(EVENT_PAYLOAD_BYTES);
         let mut event_body = String::from("<llsd><map><key>id</key><integer>6</integer><key>events</key><array>");
         for _ in 0..EVENT_COUNT {
@@ -2056,7 +2056,7 @@ pub(crate) mod tests {
         let seed_request = server.next_request();
         let first_poll = server.next_request();
         sleep(Duration::from_millis(100)).await;
-        assert!(matches!(server.requests.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)), "ack must wait for batch admission");
+        assert!(matches!(server.requests.try_recv(), Err(sync::mpsc::TryRecvError::Empty)), "ack must wait for batch admission");
 
         assert!(matches!(received_events.recv().await, Some(Event::Failed(_))));
         let batch = timeout(TEST_TIMEOUT, received_events.recv())
@@ -2399,10 +2399,10 @@ pub(crate) mod tests {
         let poll_request = server.next_request();
         assert!(request_line(&seed_request).starts_with("POST /seed HTTP/1.1"));
         assert!(request_line(&poll_request).starts_with("POST /event-queue HTTP/1.1"));
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
-        while tokio::time::Instant::now() < deadline {
+        let deadline = time::Instant::now() + Duration::from_millis(100);
+        while time::Instant::now() < deadline {
             assert!(
-                matches!(server.requests.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
+                matches!(server.requests.try_recv(), Err(sync::mpsc::TryRecvError::Empty)),
                 "poller requested another batch while blocked"
             );
             sleep(Duration::from_millis(10)).await;
@@ -2443,7 +2443,7 @@ pub(crate) mod tests {
         let seed_request = server.next_request();
         let first_poll = server.next_request();
         sleep(Duration::from_millis(100)).await;
-        assert!(matches!(server.requests.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)), "a fast 502 should use retry backoff");
+        assert!(matches!(server.requests.try_recv(), Err(sync::mpsc::TryRecvError::Empty)), "a fast 502 should use retry backoff");
 
         shutdown.send_replace(true);
         timeout(TEST_TIMEOUT, task.wait()).await.expect("retry backoff should stop on shutdown");
@@ -2614,7 +2614,7 @@ pub(crate) mod tests {
             EventQueueExit::Stopped
         );
         assert!(
-            matches!(server.requests.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
+            matches!(server.requests.try_recv(), Err(sync::mpsc::TryRecvError::Empty)),
             "the unadmitted batch must not advance the ACK or start another poll"
         );
         assert!(matches!(
@@ -2789,13 +2789,19 @@ pub(crate) mod tests {
         for status in [StatusCode::BAD_REQUEST, StatusCode::UNAUTHORIZED, StatusCode::NOT_FOUND] {
             assert!(!retryable_event_queue_error(status), "HTTP {status} should stop this poll incarnation");
         }
-        let fast_timeout = Error::Timeout { elapsed: Duration::from_secs(9), status: None, retry_after: None, message: String::new() };
-        let long_timeout = Error::Timeout { elapsed: Duration::from_secs(10), status: None, retry_after: None, message: String::new() };
+        let fast_timeout =
+            http::Error::Timeout { elapsed: Duration::from_secs(9), status: None, retry_after: None, message: String::new() };
+        let long_timeout =
+            http::Error::Timeout { elapsed: Duration::from_secs(10), status: None, retry_after: None, message: String::new() };
         assert!(!fast_timeout.is_timeout_after(Duration::from_secs(10)));
         assert!(long_timeout.is_timeout_after(Duration::from_secs(10)));
 
-        let partial_body_timeout =
-            Error::Timeout { elapsed: Duration::from_secs(10), status: Some(StatusCode::OK), retry_after: None, message: String::new() };
+        let partial_body_timeout = http::Error::Timeout {
+            elapsed: Duration::from_secs(10),
+            status: Some(StatusCode::OK),
+            retry_after: None,
+            message: String::new(),
+        };
         assert!(!partial_body_timeout.is_timeout_after(Duration::from_secs(10)));
     }
 
@@ -3076,7 +3082,7 @@ pub(crate) mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn primary_event_queue_404_keeps_active_session_connected() {
-        let (response_sender, response_receiver) = std::sync::mpsc::channel();
+        let (response_sender, response_receiver) = sync::mpsc::channel();
         let server = EventQueueTestServer::start(|base| {
             let mut event_url = base.clone();
             event_url.set_path("/event-queue");
@@ -3637,9 +3643,9 @@ pub(crate) mod tests {
 
     struct EventQueueBudgetTestServer {
         base: Url,
-        seeds: std::sync::mpsc::Receiver<()>,
-        polls: std::sync::mpsc::Receiver<TcpStream>,
-        stop: std::sync::mpsc::Sender<()>,
+        seeds: sync::mpsc::Receiver<()>,
+        polls: sync::mpsc::Receiver<TcpStream>,
+        stop: sync::mpsc::Sender<()>,
         worker: Option<thread::JoinHandle<()>>,
     }
 
@@ -3652,9 +3658,9 @@ pub(crate) mod tests {
             let mut event_url = base.clone();
             event_url.set_path("/event-queue");
             let seed_response = response(200, "OK", "application/llsd+xml", None, &seed_response(&event_url));
-            let (seed_sender, seeds) = std::sync::mpsc::channel();
-            let (poll_sender, polls) = std::sync::mpsc::channel();
-            let (stop, stop_receiver) = std::sync::mpsc::channel();
+            let (seed_sender, seeds) = sync::mpsc::channel();
+            let (poll_sender, polls) = sync::mpsc::channel();
+            let (stop, stop_receiver) = sync::mpsc::channel();
             let worker = thread::spawn(move || {
                 while let Some((mut stream, _)) = accept_until_stopped(&listener, &stop_receiver) {
                     stream.set_nonblocking(false).expect("set budget stream blocking");
@@ -3700,14 +3706,14 @@ pub(crate) mod tests {
     pub(crate) enum EventServerResponse {
         Response(Vec<u8>),
         Hold,
-        Controlled(std::sync::mpsc::Receiver<Vec<u8>>),
+        Controlled(sync::mpsc::Receiver<Vec<u8>>),
         DropConnection,
     }
 
     pub(crate) struct EventQueueTestServer {
         base: Url,
-        requests: std::sync::mpsc::Receiver<Vec<u8>>,
-        stop: std::sync::mpsc::Sender<()>,
+        requests: sync::mpsc::Receiver<Vec<u8>>,
+        stop: sync::mpsc::Sender<()>,
         worker: Option<thread::JoinHandle<()>>,
     }
 
@@ -3718,8 +3724,8 @@ pub(crate) mod tests {
             let address = listener.local_addr().expect("read test server address");
             let base = Url::parse(&format!("http://{address}/")).expect("valid local test URL");
             let responses = responses(&base);
-            let (request_sender, requests) = std::sync::mpsc::channel();
-            let (stop, stop_receiver) = std::sync::mpsc::channel();
+            let (request_sender, requests) = sync::mpsc::channel();
+            let (stop, stop_receiver) = sync::mpsc::channel();
             let worker = thread::spawn(move || {
                 for response in responses {
                     let Some((mut stream, _)) = accept_until_stopped(&listener, &stop_receiver) else {
@@ -3770,7 +3776,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn accept_until_stopped(listener: &TcpListener, stop: &std::sync::mpsc::Receiver<()>) -> Option<(TcpStream, SocketAddr)> {
+    fn accept_until_stopped(listener: &TcpListener, stop: &sync::mpsc::Receiver<()>) -> Option<(TcpStream, SocketAddr)> {
         let deadline = Instant::now() + TEST_TIMEOUT;
         loop {
             if stop.try_recv().is_ok() {

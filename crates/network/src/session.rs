@@ -1,7 +1,9 @@
 //! Session API, command admission, and worker lifecycle for one logged-in viewer.
 
+#[cfg(test)]
+use std::time::Instant;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt,
     future::Future,
     net::SocketAddr,
@@ -484,7 +486,7 @@ impl Session {
                 CoverageLoss::Source(record) => Some((record.watermark.simulator_id, record.watermark.source)),
                 CoverageLoss::SessionOverflow { .. } => None,
             })
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<HashSet<_>>();
         self.surfaced_coverage.retain(|scope, _| pending_sources.contains(scope));
         if pending.overflow_generation.is_none() {
             self.surfaced_overflow_generation = 0;
@@ -697,7 +699,7 @@ pub(crate) enum Command {
         delivery: Delivery,
         completed: oneshot::Sender<Result<(), Error>>,
         #[cfg(test)]
-        dispatch_probe: Option<oneshot::Sender<std::time::Instant>>,
+        dispatch_probe: Option<oneshot::Sender<Instant>>,
     },
 }
 
@@ -1037,7 +1039,7 @@ mod tests {
         net::SocketAddr,
         path::Path,
         str::from_utf8,
-        sync::{Arc, Mutex},
+        sync::{self, Arc, Mutex},
         thread,
         time::Duration,
     };
@@ -1068,7 +1070,7 @@ mod tests {
         runtime::Builder,
         spawn,
         sync::Semaphore,
-        task::{JoinHandle, spawn_blocking},
+        task::{JoinHandle, spawn_blocking, yield_now},
     };
     use zip::ZipArchive;
 
@@ -2343,7 +2345,7 @@ mod tests {
 
         timeout(CLIENT_TIMEOUT, async {
             while session.events.is_empty() {
-                tokio::task::yield_now().await;
+                yield_now().await;
             }
         })
         .await
@@ -2974,7 +2976,7 @@ mod tests {
         let session = CaptureSession::start(CaptureConfig::new(&capture_root), recorder.clone()).expect("start capture");
         let capture_path = session.path().to_path_buf();
         let (publication_reached, at_publication) = oneshot::channel();
-        let (continue_publication, release_publication) = std::sync::mpsc::channel();
+        let (continue_publication, release_publication) = sync::mpsc::channel();
         let publication = CapturePublication::default();
         publication.pause_before_claim(publication_reached, release_publication);
 

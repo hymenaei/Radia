@@ -8,13 +8,16 @@ use std::{
 
 use llsd::{Limits, Value, xml};
 use reqwest::{StatusCode, Url};
-use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot, watch};
-use tokio::task::JoinSet;
+use tokio::{
+    sync::{OwnedSemaphorePermit, mpsc, oneshot, watch},
+    task::JoinSet,
+    time,
+};
 
 use crate::{
     capture::CaptureRecorder,
     error::Error,
-    http::{self, Error as HttpError, Response, validate_http_url},
+    http::{self, Response, validate_http_url},
     status::NetworkStatusHandle,
 };
 
@@ -72,21 +75,21 @@ pub(super) fn validate_capability_names(names: &[&str]) -> Result<(), Error> {
 #[derive(Clone, Copy)]
 pub(super) struct RequestDeadline {
     started: Instant,
-    pub(super) at: tokio::time::Instant,
+    pub(super) at: time::Instant,
 }
 
 impl RequestDeadline {
     pub(super) fn new(timeout: Duration) -> Self {
-        Self { started: Instant::now(), at: tokio::time::Instant::now() + timeout }
+        Self { started: Instant::now(), at: time::Instant::now() + timeout }
     }
 
     pub(super) fn expired(self) -> bool {
-        tokio::time::Instant::now() >= self.at
+        time::Instant::now() >= self.at
     }
 
-    fn http_error(self) -> HttpError {
+    fn http_error(self) -> http::Error {
         let elapsed = self.started.elapsed();
-        HttpError::Timeout {
+        http::Error::Timeout {
             elapsed,
             status: None,
             retry_after: None,
@@ -122,7 +125,7 @@ pub(super) enum Command {
 }
 
 pub(super) enum CapabilityFailure {
-    Http(HttpError),
+    Http(http::Error),
     Message(String),
     SessionClosed,
 }
@@ -183,7 +186,7 @@ pub(super) async fn run(
                         biased;
                         _ = wait_for_session_close(session_closed) => Err(CapabilityFailure::SessionClosed),
                         _ = reply.closed() => return,
-                        _ = tokio::time::sleep_until(deadline.at) => Err(CapabilityFailure::Http(deadline.http_error())),
+                        _ = time::sleep_until(deadline.at) => Err(CapabilityFailure::Http(deadline.http_error())),
                         result = request_capabilities(&client, &seed, &names, _permit) => result,
                     };
                     match &result {
@@ -208,7 +211,7 @@ pub(super) async fn run(
                         biased;
                         _ = wait_for_session_close(session_closed) => Err(CapabilityFailure::SessionClosed),
                         _ = reply.closed() => return,
-                        _ = tokio::time::sleep_until(deadline.at) => Err(CapabilityFailure::Http(deadline.http_error())),
+                        _ = time::sleep_until(deadline.at) => Err(CapabilityFailure::Http(deadline.http_error())),
                         result = post(&client, &url.url, url.capture_endpoint.as_deref(), body, "Capability request", MAX_CAPABILITY_RESPONSE_BYTES)
                             => result.map_err(CapabilityFailure::Http),
                     };
@@ -225,7 +228,7 @@ pub(super) async fn run(
                         biased;
                         _ = wait_for_session_close(session_closed) => Err(CapabilityFailure::SessionClosed),
                         _ = reply.closed() => return,
-                        _ = tokio::time::sleep_until(deadline.at) => Err(CapabilityFailure::Http(deadline.http_error())),
+                        _ = time::sleep_until(deadline.at) => Err(CapabilityFailure::Http(deadline.http_error())),
                         result = get_bytes(&client, &url.url, url.capture_endpoint.as_deref()) => result.map_err(CapabilityFailure::Http),
                     };
                     if let Err(error) = &result
@@ -533,16 +536,16 @@ fn seed_capability_llsd_limits() -> Limits {
 }
 
 pub(super) enum LookupError {
-    Http { error: HttpError, transient: bool },
+    Http { error: http::Error, transient: bool },
     Permanent(String),
 }
 
 impl LookupError {
-    fn transient(error: HttpError) -> Self {
+    fn transient(error: http::Error) -> Self {
         Self::Http { error, transient: true }
     }
 
-    fn permanent_http(error: HttpError) -> Self {
+    fn permanent_http(error: http::Error) -> Self {
         Self::Http { error, transient: false }
     }
 
@@ -674,8 +677,16 @@ mod admission_tests {
     use super::*;
     use reqwest::header::HeaderMap;
     use std::future::poll_fn;
-    use std::{sync::Arc, task::Poll};
-    use tokio::{sync::Semaphore, task::yield_now, time::timeout};
+    use std::{
+        sync::{self, Arc},
+        task::Poll,
+    };
+    use tokio::{
+        spawn,
+        sync::{Semaphore, oneshot},
+        task::yield_now,
+        time::timeout,
+    };
 
     use super::super::{
         budget::{COMMAND_CAPACITY, CapabilityBudget, LLSD_SCAN_WORKING_BYTES},
@@ -711,9 +722,9 @@ mod admission_tests {
         let response = response(body, memory);
         let slots = Arc::new(Semaphore::new(1));
         let request_permit = Arc::clone(&slots).acquire_owned().await.expect("ordinary request slot");
-        let (entered, entered_rx) = tokio::sync::oneshot::channel();
-        let (release, release_rx) = std::sync::mpsc::channel();
-        let task = tokio::spawn(spawn_blocking_with_permit(request_permit, move || {
+        let (entered, entered_rx) = oneshot::channel();
+        let (release, release_rx) = sync::mpsc::channel();
+        let task = spawn(spawn_blocking_with_permit(request_permit, move || {
             let _ = entered.send(());
             release_rx.recv().expect("release seed decoder");
             decode_requested_capabilities(response, &names)
@@ -941,7 +952,7 @@ mod admission_tests {
 
         assert!(matches!(
             &error,
-            Error::CapabilityHttp(HttpError::Timeout { elapsed, status: None, .. })
+            Error::CapabilityHttp(http::Error::Timeout { elapsed, status: None, .. })
                 if elapsed.as_millis() >= 20 && *elapsed < Duration::from_millis(500)
         ));
         assert!(started.elapsed() < Duration::from_millis(500), "the admission wait should be bounded by the configured deadline");
@@ -1044,7 +1055,7 @@ pub(crate) mod allocation_measurement {
             count.set(state);
             state.live
         });
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let value = operation();
         let elapsed = started.elapsed().as_nanos();
         let (live, peak) = ALLOCATION_COUNT.with(|count| {
@@ -1058,7 +1069,7 @@ pub(crate) mod allocation_measurement {
 
     pub(crate) struct ProcessMeasurement {
         baseline: usize,
-        started: std::time::Instant,
+        started: Instant,
         active: bool,
     }
 
@@ -1067,7 +1078,7 @@ pub(crate) mod allocation_measurement {
         let baseline = PROCESS_LIVE_BYTES.load(Ordering::Relaxed);
         PROCESS_PEAK_BYTES.store(baseline, Ordering::Relaxed);
         PROCESS_MEASUREMENT_ACTIVE.store(true, Ordering::Release);
-        ProcessMeasurement { baseline, started: std::time::Instant::now(), active: true }
+        ProcessMeasurement { baseline, started: Instant::now(), active: true }
     }
 
     impl ProcessMeasurement {

@@ -155,7 +155,7 @@ async fn neighbor_logout_bypasses_full_queues() {
     commands.send(NeighborCommand::CancelHandoff).await.expect("queue a command behind the application message");
     timeout(WAIT, async {
         while commands.capacity() == 0 {
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         }
     })
     .await

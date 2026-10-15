@@ -15,7 +15,7 @@
 
 use std::{
     collections::BTreeMap,
-    fmt,
+    error, fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
 };
 
@@ -270,7 +270,7 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+impl error::Error for Error {}
 
 fn preflight_xml(input: &str, max_depth: usize, max_elements: usize) -> Result<(), Error> {
     let mut reader = Reader::from_str(input);

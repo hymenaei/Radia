@@ -1,7 +1,7 @@
 //! Allocation admission estimates for the built-in XML value decoder.
 
 use std::{
-    fmt,
+    error, fmt,
     mem::{align_of, size_of},
 };
 
@@ -31,7 +31,7 @@ impl fmt::Display for BoundError {
     }
 }
 
-impl std::error::Error for BoundError {}
+impl error::Error for BoundError {}
 
 impl From<Error> for BoundError {
     fn from(error: Error) -> Self {

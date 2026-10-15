@@ -1,12 +1,14 @@
 //! The single-owner simulator session runtime.
 
+#[cfg(test)]
+use std::time::Instant;
 use std::{collections::VecDeque, pin::Pin};
 
 use protocol::lludp::Message;
 use tokio::{
     sync::{mpsc, watch},
     task::JoinSet,
-    time::{self, Instant, Interval, Sleep},
+    time::{self, Interval, Sleep},
 };
 
 use crate::{
@@ -186,7 +188,7 @@ impl<'a> CoordinatorRuntime<'a> {
                     }
                     return Err("Timed out while establishing the simulator session.".into());
                 }
-                _ = time::sleep_until(run_state.logout_deadline.unwrap_or_else(|| Instant::now() + LOGOUT_TIMEOUT)), if run_state.logout_deadline.is_some() => {
+                _ = time::sleep_until(run_state.logout_deadline.unwrap_or_else(|| time::Instant::now() + LOGOUT_TIMEOUT)), if run_state.logout_deadline.is_some() => {
                     coordinator.finish_pending_logout().await?;
                     if *disconnect_requested.borrow() {
                         coordinator.neighbor_cancellation.send_replace(true);
@@ -696,7 +698,7 @@ impl<'a> CoordinatorRuntime<'a> {
                             if let Some(event) = run_state.pending_events.pop_front() {
                                 permit.send(event);
                             }
-                            coordinator.event_backlog.update_pending(run_state.pending_events.len(), Instant::now());
+                            coordinator.event_backlog.update_pending(run_state.pending_events.len(), time::Instant::now());
                         }
                         Err(_) if run_state.logout_deadline.is_none() => {
                             coordinator.disconnect_once(false).await?;
@@ -835,7 +837,7 @@ impl<'a> CoordinatorRuntime<'a> {
                         }) => {
                             #[cfg(test)]
                             if let Some(dispatch_probe) = dispatch_probe {
-                                let _ = dispatch_probe.send(std::time::Instant::now());
+                                let _ = dispatch_probe.send(Instant::now());
                             }
                             let cancel_handoff = simulator_id == coordinator.primary.simulator_id
                                 && is_teleport_cancel(&message, coordinator.session.agent_id, coordinator.session.session_id);

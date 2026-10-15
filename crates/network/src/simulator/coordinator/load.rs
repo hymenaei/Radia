@@ -1,4 +1,5 @@
 use super::*;
+use std::{mem::replace, time::Instant};
 
 #[tokio::test]
 #[ignore = "manual loopback latency measurement; run with --release --ignored --nocapture"]
@@ -10,7 +11,7 @@ async fn connection_latency() {
     let mut direct = Vec::with_capacity(1024);
     let mut coordinated = Vec::with_capacity(1024);
     for index in 0..1088 {
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         direct_circuit.send(&direct_socket, object_request(), Delivery::Unreliable).await.expect("direct send");
         let elapsed = started.elapsed();
         receive_message(&direct_server, |message| matches!(message, Message::RequestMultipleObjects(_))).await;
@@ -19,7 +20,7 @@ async fn connection_latency() {
         }
 
         let (completed, response) = oneshot::channel();
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         harness
             .commands
             .send(Command::SendTo {
@@ -44,7 +45,7 @@ async fn connection_latency() {
         let mut chat = fixture("chat_from_simulator.hex");
         chat[0] |= 0x40;
         set_sequence(&mut chat, sequence);
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         harness.neighbor.send_to(&chat, harness.neighbor_peer).await.expect("send measured reliable data");
         loop {
             if matches!(next_raw_event(&mut harness.events).await, Event::SimulatorMessage { simulator_id, sequence: received, .. } if simulator_id == harness.neighbor_id && received == sequence)
@@ -116,10 +117,10 @@ async fn five_simulator_load() {
 
     let warmup = Duration::from_secs(1);
     let duration = Duration::from_secs(10);
-    let measurement_start = Instant::now() + warmup;
+    let measurement_start = time::Instant::now() + warmup;
     let measurement_end = measurement_start + duration;
     let drain_end = measurement_end + Duration::from_secs(1);
-    let mut events = std::mem::replace(&mut harness.events, mpsc::channel(1).1);
+    let mut events = replace(&mut harness.events, mpsc::channel(1).1);
     let event_drain = spawn(async move {
         let mut drained = 0usize;
         while events.recv().await.is_some() {
@@ -128,7 +129,7 @@ async fn five_simulator_load() {
         drained
     });
     let process_memory = begin_process_measurement();
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     let (
         primary_load,
         first_neighbor_load,
@@ -182,7 +183,7 @@ async fn five_simulator_load() {
     );
 
     if let Some(probe) = &harness.pacer_probe {
-        let snapshot = probe.snapshot(measurement_start.into(), measurement_end.into());
+        let snapshot = probe.snapshot(measurement_start, measurement_end);
         let all_fair_flows =
             snapshot.pending_duration.get(&TrafficClass::Fair).and_then(|counts| counts.get(&5)).copied().unwrap_or_default();
         eprintln!("five-simulator scheduler window: all-five-fair-backlogged={all_fair_flows:?}");
@@ -254,7 +255,7 @@ async fn five_simulator_load() {
         );
     }
 
-    let timer_start = Instant::now() + Duration::from_millis(100);
+    let timer_start = time::Instant::now() + Duration::from_millis(100);
     let timer_end = timer_start + Duration::from_secs(3);
     let timer_drain_end = timer_end + Duration::from_millis(500);
     let (timer_acknowledgements, first_neighbor_sends, second_neighbor_sends, third_neighbor_sends, fourth_neighbor_sends) = tokio::join!(
@@ -300,7 +301,7 @@ async fn five_simulator_load() {
     eprintln!("five-simulator burst setup: prior datagrams drained={drained:?}");
 
     const BURST_SENDS_PER_SIMULATOR: usize = 6;
-    let burst_start = Instant::now();
+    let burst_start = time::Instant::now();
     let burst_barrier = Arc::new(Barrier::new(5));
     let (primary_burst, first_neighbor_burst, second_neighbor_burst, third_neighbor_burst, fourth_neighbor_burst) = tokio::join!(
         run_burst_on_simulator(
@@ -370,7 +371,7 @@ async fn five_simulator_load() {
         assert_eq!(report.sent.successful, report.received.requests, "{name} burst sends should arrive at its loopback simulator");
     }
     if let Some(probe) = &harness.pacer_probe {
-        let snapshot = probe.snapshot(burst_start.into(), Instant::now().into());
+        let snapshot = probe.snapshot(burst_start, time::Instant::now());
         for (simulator_id, connection) in snapshot.connections {
             let fair = connection.classes.get(&TrafficClass::Fair).copied().unwrap_or_default();
             eprintln!(
@@ -538,7 +539,7 @@ async fn receive_burst(socket: &UdpSocket, mut expected: oneshot::Receiver<usize
                         Message::RequestMultipleObjects(_) => {
                             report.requests += 1;
                             report.bytes = report.bytes.saturating_add(size);
-                            let at = Instant::now();
+                            let at = time::Instant::now();
                             first.get_or_insert(at);
                             last = Some(at);
                         }
@@ -568,35 +569,35 @@ async fn run_load_receiver(
     socket: &UdpSocket,
     peer: SocketAddr,
     simulator_index: u32,
-    measurement_start: Instant,
-    measurement_end: Instant,
-    drain_end: Instant,
+    measurement_start: time::Instant,
+    measurement_end: time::Instant,
+    drain_end: time::Instant,
 ) -> LoadReceiverReport {
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut heartbeat = time::interval(Duration::from_secs(1));
+    heartbeat.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     heartbeat.tick().await;
     let mut sequence = 100;
     let mut ping_id = 0;
     let mut reliable_sequence = 100_000 + simulator_index * 10_000;
     let reliable_period = Duration::from_millis(25);
-    let mut reliable_send = tokio::time::interval_at((measurement_start + reliable_period).into(), reliable_period);
-    reliable_send.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut reliable_send = time::interval_at(measurement_start + reliable_period, reliable_period);
+    reliable_send.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     let mut buffer = vec![0; 65_535];
     let mut fair_bytes = 0usize;
     let mut pending_acknowledgements = HashMap::with_capacity(512);
     let mut acknowledgements = LoadAcknowledgements::default();
     loop {
-        let remaining = drain_end.saturating_duration_since(Instant::now());
+        let remaining = drain_end.saturating_duration_since(time::Instant::now());
         if remaining == Duration::ZERO {
             acknowledgements.outstanding = pending_acknowledgements.len();
             return LoadReceiverReport { fair_bytes, acknowledgements };
         }
         let received = tokio::select! {
-            _ = reliable_send.tick(), if Instant::now() < measurement_end => {
+            _ = reliable_send.tick(), if time::Instant::now() < measurement_end => {
                 let mut packet = fixture("chat_from_simulator.hex");
                 packet[0] |= 0x40;
                 set_sequence(&mut packet, reliable_sequence);
-                let sent_at = Instant::now();
+                let sent_at = time::Instant::now();
                 pending_acknowledgements.insert(reliable_sequence, sent_at);
                 socket.send_to(&packet, peer).await.expect("send reliable load sample");
                 acknowledgements.sent += 1;
@@ -613,7 +614,7 @@ async fn run_load_receiver(
         };
         match received {
             Ok(Ok((size, _))) => {
-                let received_at = Instant::now();
+                let received_at = time::Instant::now();
                 let packet = Packet::decode(&buffer[..size]).expect("decode outgoing simulator packet");
                 if received_at >= measurement_start
                     && received_at < measurement_end
@@ -634,13 +635,13 @@ async fn run_load_receiver(
 async fn run_timer_ack_receiver(
     socket: &UdpSocket,
     peer: SocketAddr,
-    measurement_start: Instant,
-    measurement_end: Instant,
-    drain_end: Instant,
+    measurement_start: time::Instant,
+    measurement_end: time::Instant,
+    drain_end: time::Instant,
 ) -> LoadAcknowledgements {
     let reliable_period = Duration::from_millis(25);
-    let mut reliable_send = tokio::time::interval_at((measurement_start + reliable_period).into(), reliable_period);
-    reliable_send.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut reliable_send = time::interval_at(measurement_start + reliable_period, reliable_period);
+    reliable_send.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     let mut buffer = vec![0; 65_535];
     let mut reliable_sequence = 120_000;
     let mut server_sequence = 20_000;
@@ -648,18 +649,18 @@ async fn run_timer_ack_receiver(
     let mut acknowledgements = LoadAcknowledgements::default();
 
     loop {
-        let remaining = drain_end.saturating_duration_since(Instant::now());
+        let remaining = drain_end.saturating_duration_since(time::Instant::now());
         if remaining == Duration::ZERO {
             acknowledgements.outstanding = pending_acknowledgements.len();
             return acknowledgements;
         }
 
         let received = tokio::select! {
-            _ = reliable_send.tick(), if Instant::now() < measurement_end => {
+            _ = reliable_send.tick(), if time::Instant::now() < measurement_end => {
                 let mut packet = fixture("chat_from_simulator.hex");
                 packet[0] |= 0x40;
                 set_sequence(&mut packet, reliable_sequence);
-                pending_acknowledgements.insert(reliable_sequence, Instant::now());
+                pending_acknowledgements.insert(reliable_sequence, time::Instant::now());
                 socket.send_to(&packet, peer).await.expect("send timer-only reliable sample");
                 acknowledgements.sent += 1;
                 reliable_sequence = reliable_sequence.wrapping_add(1);
@@ -673,7 +674,7 @@ async fn run_timer_ack_receiver(
             return acknowledgements;
         };
 
-        let received_at = Instant::now();
+        let received_at = time::Instant::now();
         let packet = Packet::decode(&buffer[..size]).expect("decode timer-only ACK phase packet");
         record_load_acknowledgements(&packet, received_at, &mut pending_acknowledgements, &mut acknowledgements);
         if let Message::StartPingCheck(ping) = packet.message() {
@@ -688,8 +689,8 @@ async fn run_timer_ack_receiver(
 
 fn record_load_acknowledgements(
     packet: &Packet,
-    received_at: Instant,
-    pending: &mut HashMap<u32, Instant>,
+    received_at: time::Instant,
+    pending: &mut HashMap<u32, time::Instant>,
     report: &mut LoadAcknowledgements,
 ) {
     for acknowledged_sequence in packet.appended_acks() {
@@ -709,8 +710,8 @@ fn record_load_acknowledgements(
 async fn loaded_send_window(
     commands: &mpsc::Sender<Command>,
     simulator_id: SimulatorId,
-    measurement_start: Instant,
-    measurement_end: Instant,
+    measurement_start: time::Instant,
+    measurement_end: time::Instant,
 ) -> (Vec<Duration>, Vec<Duration>, HashMap<String, usize>) {
     const SEND_WINDOW: usize = 8;
 
@@ -719,7 +720,7 @@ async fn loaded_send_window(
     let mut queue_residence = Vec::with_capacity(1024);
     let mut errors = HashMap::new();
     loop {
-        while pending.len() < SEND_WINDOW && Instant::now() < measurement_end {
+        while pending.len() < SEND_WINDOW && time::Instant::now() < measurement_end {
             let (completed, response) = oneshot::channel();
             let (dispatch_probe, dispatched) = oneshot::channel();
             let started_at = Instant::now();
@@ -731,7 +732,7 @@ async fn loaded_send_window(
                 }
             };
             let enqueued_at = Instant::now();
-            let in_measurement = enqueued_at >= measurement_start;
+            let in_measurement = time::Instant::from_std(enqueued_at) >= measurement_start;
             permit.send(Command::SendTo {
                 simulator_id,
                 message: object_request(),

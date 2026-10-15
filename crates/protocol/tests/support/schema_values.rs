@@ -1,3 +1,5 @@
+use std::array::from_fn;
+
 use base::UUID;
 use math::{DVec3, Quat, Vec3, Vec4};
 use protocol::{
@@ -55,7 +57,7 @@ fn generated_field_value(kind: FieldKind, name: &str, seed: u64) -> FieldValue {
             FieldValue::Quaternion(rotation)
         }
         FieldKind::UUID => {
-            let bytes = std::array::from_fn(|index| seed.wrapping_add(index as u64 * 31) as u8);
+            let bytes = from_fn(|index| seed.wrapping_add(index as u64 * 31) as u8);
             FieldValue::UUID(UUID::from_bytes(bytes))
         }
         FieldKind::Vector3 => FieldValue::Vector3(Vec3::new(component(0), component(67), component(134))),
@@ -76,7 +78,7 @@ fn generated_field_value(kind: FieldKind, name: &str, seed: u64) -> FieldValue {
         FieldKind::Fixed(size) => FieldValue::Bytes(vec![seed as u8; usize::try_from(size).expect("field size fits usize")]),
         FieldKind::Variable(_) if name == "ChannelVersion" => FieldValue::Bytes(b"v2\0".to_vec()),
         FieldKind::Variable(_) if name == "Throttles" => FieldValue::Bytes(
-            std::array::from_fn::<_, 7, _>(|index| ((seed.wrapping_add(index as u64) % 10_000) as f32 + 1.0).to_le_bytes())
+            from_fn::<_, 7, _>(|index| ((seed.wrapping_add(index as u64) % 10_000) as f32 + 1.0).to_le_bytes())
                 .into_iter()
                 .flatten()
                 .collect(),

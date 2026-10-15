@@ -1,6 +1,6 @@
 //! Bounded loss accounting for simulator state sources.
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::watch;
 
@@ -262,7 +262,7 @@ impl CoverageLossLedger {
     }
 
     fn lock(&self) -> MutexGuard<'_, LedgerState> {
-        self.inner.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.inner.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn notify(&self) {

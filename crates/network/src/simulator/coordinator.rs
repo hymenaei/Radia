@@ -19,7 +19,7 @@ use tokio::{
 use url::Url;
 
 #[cfg(test)]
-use tokio::task::JoinError;
+use tokio::task::{self, JoinError};
 
 #[cfg(test)]
 use super::admission::{

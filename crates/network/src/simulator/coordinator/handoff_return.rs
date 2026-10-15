@@ -1,3 +1,5 @@
+use std::sync;
+
 use super::*;
 
 #[test]
@@ -109,7 +111,7 @@ async fn run_stale_cancel() {
     };
     use llsd::{Map, xml};
 
-    let (release, poll_response) = std::sync::mpsc::channel();
+    let (release, poll_response) = sync::mpsc::channel();
     let server = EventQueueTestServer::start(|base| {
         let seed = format!("<llsd><map><key>EventQueueGet</key><uri>{base}events</uri></map></llsd>");
         vec![

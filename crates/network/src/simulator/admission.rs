@@ -2,7 +2,7 @@
 
 use std::{
     mem::size_of,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
 use protocol::lludp::{MAX_PACKET_RETAINED_CAPACITY_BYTES, Packet, PacketPreflight};
@@ -285,7 +285,7 @@ impl Drop for PacketMemoryReservation {
 }
 
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn subtract_bytes(counter: &mut usize, bytes: usize) {

@@ -1,5 +1,5 @@
 use std::{
-    io::ErrorKind,
+    io::{self, ErrorKind},
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
 };
 
@@ -81,21 +81,21 @@ impl UdpTransport {
         fields(datagram_bytes = bytes.len())
     )]
     #[cfg(test)]
-    pub(crate) async fn send(&self, bytes: &[u8]) -> Result<(), std::io::Error> {
+    pub(crate) async fn send(&self, bytes: &[u8]) -> Result<(), io::Error> {
         if bytes.len() > self.max_payload_size {
-            return Err(std::io::Error::new(ErrorKind::InvalidInput, "UDP datagram exceeds the address family's maximum payload size."));
+            return Err(io::Error::new(ErrorKind::InvalidInput, "UDP datagram exceeds the address family's maximum payload size."));
         }
         #[cfg(test)]
         if let Some(send_gate) = &self.send_gate {
             let mut paused = send_gate.paused.clone();
             while *paused.borrow() {
                 send_gate.entered.notify_one();
-                paused.changed().await.map_err(|_| std::io::Error::new(ErrorKind::BrokenPipe, "UDP test send gate closed"))?;
+                paused.changed().await.map_err(|_| io::Error::new(ErrorKind::BrokenPipe, "UDP test send gate closed"))?;
             }
         }
         let sent = self.socket.send(bytes).await?;
         if sent != bytes.len() {
-            return Err(std::io::Error::new(ErrorKind::WriteZero, "UDP socket sent an incomplete datagram."));
+            return Err(io::Error::new(ErrorKind::WriteZero, "UDP socket sent an incomplete datagram."));
         }
         self.status.note_udp_sent();
         if let Some(capture) = &self.capture {
@@ -104,32 +104,32 @@ impl UdpTransport {
         Ok(())
     }
 
-    pub(crate) async fn writable(&self) -> Result<(), std::io::Error> {
+    pub(crate) async fn writable(&self) -> Result<(), io::Error> {
         #[cfg(test)]
         if let Some(send_gate) = &self.send_gate {
             let mut paused = send_gate.paused.clone();
             while *paused.borrow() {
                 send_gate.entered.notify_one();
-                paused.changed().await.map_err(|_| std::io::Error::new(ErrorKind::BrokenPipe, "UDP test send gate closed"))?;
+                paused.changed().await.map_err(|_| io::Error::new(ErrorKind::BrokenPipe, "UDP test send gate closed"))?;
             }
         }
         self.socket.writable().await
     }
 
-    pub(crate) fn try_send(&self, bytes: &[u8]) -> Result<(), std::io::Error> {
+    pub(crate) fn try_send(&self, bytes: &[u8]) -> Result<(), io::Error> {
         if bytes.len() > self.max_payload_size {
-            return Err(std::io::Error::new(ErrorKind::InvalidInput, "UDP datagram exceeds the address family's maximum payload size."));
+            return Err(io::Error::new(ErrorKind::InvalidInput, "UDP datagram exceeds the address family's maximum payload size."));
         }
         #[cfg(test)]
         if let Some(send_gate) = &self.send_gate
             && *send_gate.paused.borrow()
         {
             send_gate.entered.notify_one();
-            return Err(std::io::Error::from(ErrorKind::WouldBlock));
+            return Err(io::Error::from(ErrorKind::WouldBlock));
         }
         let sent = self.socket.try_send(bytes)?;
         if sent != bytes.len() {
-            return Err(std::io::Error::new(ErrorKind::WriteZero, "UDP socket sent an incomplete datagram."));
+            return Err(io::Error::new(ErrorKind::WriteZero, "UDP socket sent an incomplete datagram."));
         }
         self.status.note_udp_sent();
         if let Some(capture) = &self.capture {
@@ -138,7 +138,7 @@ impl UdpTransport {
         Ok(())
     }
 
-    pub(crate) async fn recv(&self, buffer: &mut [u8]) -> Result<usize, std::io::Error> {
+    pub(crate) async fn recv(&self, buffer: &mut [u8]) -> Result<usize, io::Error> {
         let received = self.socket.recv(buffer).await?;
         self.status.note_udp_received();
         Ok(received)

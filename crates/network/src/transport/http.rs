@@ -1,5 +1,6 @@
 use std::{
-    fmt::{Debug, Display, Formatter},
+    error,
+    fmt::{self, Debug, Display, Formatter},
     future::Future,
     sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant, SystemTime},
@@ -10,6 +11,7 @@ use reqwest::{
     header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, RETRY_AFTER},
     redirect::Policy,
 };
+use tokio::time;
 
 use crate::{capture::CaptureRecorder, status::NetworkStatusHandle};
 
@@ -196,7 +198,7 @@ impl Drop for ResponseMemoryPermit {
 }
 
 impl Debug for Response {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Response")
             .field("status", &self.status)
@@ -208,7 +210,7 @@ impl Debug for Response {
 }
 
 impl Debug for Error {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Transport { elapsed, status, retry_after, .. } => formatter
                 .debug_struct("Transport")
@@ -303,7 +305,7 @@ impl Error {
 }
 
 impl Display for Error {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Transport { message, .. }
             | Self::Timeout { message, .. }
@@ -315,7 +317,7 @@ impl Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+impl error::Error for Error {}
 
 impl Client {
     pub(crate) fn new(timeout: Option<Duration>, http1_only: bool, user_agent: Option<&str>) -> Result<Self, reqwest::Error> {
@@ -453,10 +455,10 @@ impl Client {
     ) -> Result<Response, Error> {
         validate_http_url(url).map_err(Error::Message)?;
         let started = Instant::now();
-        let deadline = self.timeout.map(|timeout| tokio::time::Instant::now() + timeout);
+        let deadline = self.timeout.map(|timeout| time::Instant::now() + timeout);
         let mut request = self.client.post(url.clone()).header(CONTENT_TYPE, content_type);
         if let Some(deadline) = deadline {
-            request = request.timeout(deadline.saturating_duration_since(tokio::time::Instant::now()));
+            request = request.timeout(deadline.saturating_duration_since(time::Instant::now()));
         }
         if let Some(accept) = accept {
             request = request.header(ACCEPT, accept);
@@ -581,13 +583,13 @@ impl Client {
             .as_ref()
             .map(|capture| capture.http_request_with_memory(capture_endpoint.unwrap_or(operation), "GET", Vec::new(), &[], None));
         let started = Instant::now();
-        let deadline = self.timeout.map(|timeout| tokio::time::Instant::now() + timeout);
+        let deadline = self.timeout.map(|timeout| time::Instant::now() + timeout);
         if let Some(status) = &self.status {
             status.note_http_request();
         }
         let mut request = self.client.get(url.clone());
         if let Some(deadline) = deadline {
-            request = request.timeout(deadline.saturating_duration_since(tokio::time::Instant::now()));
+            request = request.timeout(deadline.saturating_duration_since(time::Instant::now()));
         }
         let response = match send_with_deadline(request.send(), deadline, started).await {
             Ok(response) => response,
@@ -680,12 +682,12 @@ fn response_retry_after(headers: &HeaderMap) -> Option<Duration> {
     retry_after_delay(value, SystemTime::now())
 }
 
-async fn send_with_deadline<F>(send: F, deadline: Option<tokio::time::Instant>, started: Instant) -> Result<reqwest::Response, Error>
+async fn send_with_deadline<F>(send: F, deadline: Option<time::Instant>, started: Instant) -> Result<reqwest::Response, Error>
 where
     F: Future<Output = Result<reqwest::Response, reqwest::Error>>,
 {
     let result = if let Some(deadline) = deadline {
-        tokio::time::timeout_at(deadline, send).await.map_err(|_| Error::Timeout {
+        time::timeout_at(deadline, send).await.map_err(|_| Error::Timeout {
             elapsed: started.elapsed(),
             status: None,
             retry_after: None,
@@ -752,7 +754,7 @@ async fn read_bounded_body_admitted(
     memory_budget: Option<&ResponseMemoryBudget>,
     memory_class: ResponseMemoryClass,
     extra_memory: Option<ResponseMemoryPermit>,
-    deadline: Option<tokio::time::Instant>,
+    deadline: Option<time::Instant>,
     started: Instant,
 ) -> Result<AdmittedBody, Error> {
     let status = response.status();
@@ -793,7 +795,7 @@ async fn read_bounded_body_admitted(
 
     loop {
         let next = if let Some(deadline) = deadline {
-            tokio::time::timeout_at(deadline, response.chunk()).await.map_err(|_| Error::Timeout {
+            time::timeout_at(deadline, response.chunk()).await.map_err(|_| Error::Timeout {
                 elapsed: started.elapsed(),
                 status: Some(status),
                 retry_after,

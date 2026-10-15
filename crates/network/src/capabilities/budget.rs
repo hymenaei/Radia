@@ -1,11 +1,12 @@
 use std::{
+    mem::size_of,
     sync::{Arc, OnceLock},
     time::Duration,
 };
 
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore},
-    task::JoinError,
+    task::{JoinError, spawn_blocking},
 };
 
 use crate::http;
@@ -21,7 +22,7 @@ pub(crate) const MAX_CAPABILITY_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 pub(super) const MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES: usize = 8 * 1024 * 1024;
 pub(super) const MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES: usize = MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES * MAX_CONCURRENT_EVENT_QUEUES;
 pub(super) const MAX_LLSD_NESTING_DEPTH: usize = 64;
-pub(super) const LLSD_SCAN_WORKING_BYTES: usize = 8 * MAX_LLSD_NESTING_DEPTH * std::mem::size_of::<llsd::Value>();
+pub(super) const LLSD_SCAN_WORKING_BYTES: usize = 8 * MAX_LLSD_NESTING_DEPTH * size_of::<llsd::Value>();
 pub(crate) const MAX_LLSD_XML_ELEMENTS: usize = 262_144;
 pub(crate) const MAX_CONCURRENT_CAPABILITY_REQUESTS: usize = 4;
 pub(crate) const MAX_CONCURRENT_EVENT_QUEUES: usize = 9;
@@ -81,14 +82,18 @@ pub(crate) async fn spawn_blocking_with_permit<T>(
 where
     T: Send + 'static,
 {
-    tokio::task::spawn_blocking(move || (work(), permit)).await
+    spawn_blocking(move || (work(), permit)).await
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::mpsc, time::Duration};
+    use std::{
+        sync::{Arc, mpsc},
+        time::Duration,
+    };
 
     use tokio::{
+        spawn,
         sync::{Semaphore, oneshot},
         task::yield_now,
         time::timeout,
@@ -98,11 +103,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn cancellation_keeps_permit_until_blocking_work_finishes() {
-        let slots = std::sync::Arc::new(Semaphore::new(1));
-        let permit = std::sync::Arc::clone(&slots).acquire_owned().await.expect("request slot");
+        let slots = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&slots).acquire_owned().await.expect("request slot");
         let (entered, entered_rx) = oneshot::channel();
         let (release, release_rx) = mpsc::channel();
-        let task = tokio::spawn(spawn_blocking_with_permit(permit, move || {
+        let task = spawn(spawn_blocking_with_permit(permit, move || {
             let _ = entered.send(());
             release_rx.recv().expect("release blocking work");
         }));
@@ -115,7 +120,7 @@ mod tests {
         release.send(()).expect("unblock running work");
         timeout(Duration::from_secs(1), async {
             loop {
-                if let Ok(permit) = std::sync::Arc::clone(&slots).try_acquire_owned() {
+                if let Ok(permit) = Arc::clone(&slots).try_acquire_owned() {
                     drop(permit);
                     break;
                 }

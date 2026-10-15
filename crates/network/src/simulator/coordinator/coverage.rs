@@ -143,7 +143,7 @@ async fn backlog_logout_drops_covered_application_events_but_keeps_lifecycle_eve
 
     let (events, mut received_events) = mpsc::channel(2);
     let mut pending_events = VecDeque::new();
-    let mut logout_deadline = Some(tokio::time::Instant::now() + LOGOUT_TIMEOUT);
+    let mut logout_deadline = Some(time::Instant::now() + LOGOUT_TIMEOUT);
     let mut disconnect_reason = Some(EVENT_BACKLOG_DISCONNECT_REASON);
     let simulator_id = connection.primary.simulator_id;
     let source = CoverageSource::EventQueue { incarnation: 42 };
@@ -200,7 +200,7 @@ async fn terminal_logout_skips_capability_events_that_start_neighbor_work() {
     let (application_events, _application_event_rx) = mpsc::channel(1);
     let (neighbor_events, _neighbor_event_rx) = mpsc::channel(1);
     let (_shutdown, shutdown) = watch::channel(false);
-    run_state.logout_deadline = Some(tokio::time::Instant::now() + LOGOUT_TIMEOUT);
+    run_state.logout_deadline = Some(time::Instant::now() + LOGOUT_TIMEOUT);
     run_state.disconnect_reason = Some(EVENT_BACKLOG_DISCONNECT_REASON);
     let (capability_events, _capability_event_rx) = mpsc::channel(1);
     let mut setup =

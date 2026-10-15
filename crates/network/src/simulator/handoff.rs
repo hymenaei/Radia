@@ -3,6 +3,7 @@
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
+    mem::replace,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroU64,
     str::from_utf8,
@@ -131,7 +132,7 @@ impl HandoffState {
     }
 
     pub(super) fn take_pending(&mut self) -> Option<PendingPromotion> {
-        match std::mem::replace(self, Self::Idle) {
+        match replace(self, Self::Idle) {
             Self::Preparing(pending) => Some(pending),
             state => {
                 *self = state;

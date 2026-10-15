@@ -6,6 +6,7 @@ use std::{
     io::ErrorKind,
     net::SocketAddr,
     sync::Arc,
+    thread,
     time::{Duration, Instant},
 };
 
@@ -46,7 +47,7 @@ use protocol::{
 use tokio::{
     io::AsyncReadExt,
     net::{TcpListener, UdpSocket},
-    spawn,
+    runtime, spawn,
     sync::{Barrier, Notify, Semaphore, mpsc, oneshot, watch},
     task::JoinHandle,
     time::{advance, sleep, timeout},
@@ -113,11 +114,11 @@ fn fill_neighbor_budget(budget: &SimulatorMemoryBudget) -> Vec<EventRetention> {
 }
 
 fn run_large_stack_test<F: Future<Output = ()> + 'static>(test: fn() -> F) {
-    std::thread::Builder::new()
+    thread::Builder::new()
         .name("network-handoff-test".into())
         .stack_size(NETWORK_THREAD_STACK_SIZE)
         .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("handoff runtime");
+            let runtime = runtime::Builder::new_current_thread().enable_all().build().expect("handoff runtime");
             runtime.block_on(test());
         })
         .expect("handoff test thread")

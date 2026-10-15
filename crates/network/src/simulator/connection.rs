@@ -23,6 +23,7 @@ use protocol::{
 };
 use tokio::{
     sync::{mpsc, oneshot, watch},
+    task::yield_now,
     time::{self, Instant},
 };
 
@@ -100,7 +101,7 @@ struct QueuedMessage {
     message: Message,
     delivery: Delivery,
     class: TrafficClass,
-    queued_at: tokio::time::Instant,
+    queued_at: Instant,
     completion: Option<oneshot::Sender<Result<(), Error>>>,
     cancel_target: Option<super::HandoffCancellation>,
     report_failure: bool,
@@ -244,7 +245,7 @@ impl OutboundQueue {
         self.pop_next_matching(|_| true)
     }
 
-    fn expire(&mut self, now: tokio::time::Instant) -> Vec<QueuedMessage> {
+    fn expire(&mut self, now: Instant) -> Vec<QueuedMessage> {
         #[cfg(test)]
         self.record_probe();
         let mut expired = Vec::new();
@@ -1958,7 +1959,7 @@ impl NeighborConnection {
                         );
                     }
                 }
-                _ = tokio::task::yield_now(), if !event_delivery_turn && (!pending_notifications.is_empty() || !pending_events.is_empty()) => {
+                _ = yield_now(), if !event_delivery_turn && (!pending_notifications.is_empty() || !pending_events.is_empty()) => {
                     event_delivery_turn = true;
                 }
             }
@@ -2009,6 +2010,8 @@ fn preflight_loss_reason(error: LLUdpError, message_id: MessageId) -> CoverageLo
 mod tests {
     use std::{
         collections::HashSet,
+        future, io,
+        iter::once,
         net::SocketAddr,
         num::NonZeroU64,
         sync::{
@@ -2030,6 +2033,7 @@ mod tests {
     use testing::{lludp::vectors, parse_hex_fixture};
     use tokio::{
         net::UdpSocket,
+        spawn,
         sync::{mpsc, oneshot, watch},
         task::JoinHandle,
         time::{advance, timeout},
@@ -2085,14 +2089,8 @@ mod tests {
         let (requests, _requests) = mpsc::channel(1);
         let (_commands, command_receiver) = mpsc::channel(1);
         let (_logout, logout_receiver) = mpsc::channel(1);
-        let worker = tokio::spawn(connection.run(
-            events,
-            shutdown_receiver,
-            requests,
-            command_receiver,
-            logout_receiver,
-            SimulatorMemoryBudget::new(),
-        ));
+        let worker =
+            spawn(connection.run(events, shutdown_receiver, requests, command_receiver, logout_receiver, SimulatorMemoryBudget::new()));
 
         let (use_circuit, peer) = receive_packet(&simulator).await;
         send_ack(&simulator, peer, use_circuit.sequence()).await;
@@ -2159,7 +2157,7 @@ mod tests {
         let (_logout, logout) = mpsc::channel(1);
         primary_state.send_replace(PrimaryState::demoted(1));
         drop(primary_state);
-        let worker = tokio::spawn(connection.run(events, shutdown, requests, command_receiver, logout, SimulatorMemoryBudget::new()));
+        let worker = spawn(connection.run(events, shutdown, requests, command_receiver, logout, SimulatorMemoryBudget::new()));
 
         let (circuit, peer) = receive_packet(&simulator).await;
         send_ack(&simulator, peer, circuit.sequence()).await;
@@ -2225,14 +2223,8 @@ mod tests {
         let (requests, _requests) = mpsc::channel(1);
         let (commands, command_receiver) = mpsc::channel(16);
         let (logout_commands, logout_receiver) = mpsc::channel(1);
-        let worker = tokio::spawn(connection.run(
-            events,
-            shutdown_receiver,
-            requests,
-            command_receiver,
-            logout_receiver,
-            SimulatorMemoryBudget::new(),
-        ));
+        let worker =
+            spawn(connection.run(events, shutdown_receiver, requests, command_receiver, logout_receiver, SimulatorMemoryBudget::new()));
 
         let (use_circuit, peer) = receive_packet(&simulator).await;
         send_ack(&simulator, peer, use_circuit.sequence()).await;
@@ -2356,7 +2348,7 @@ mod tests {
         let (neighbor_requests, _neighbor_requests_receiver) = mpsc::channel(1);
         let (commands, command_receiver) = mpsc::channel(1);
         let (_logout, logout) = mpsc::channel(1);
-        let task = tokio::spawn(connection.run(
+        let task = spawn(connection.run(
             events.clone(),
             shutdown_receiver,
             neighbor_requests,
@@ -2414,7 +2406,7 @@ mod tests {
         reliable_chat[1..5].copy_from_slice(&reliable_sequence.to_be_bytes());
         simulator.send_to(&reliable_chat, peer).await.expect("send reliable simulator event");
         for _ in 0..16 {
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
         advance(ACK_INTERVAL).await;
         receive_ack(&simulator, reliable_sequence).await;
@@ -2466,7 +2458,7 @@ mod tests {
         let (neighbor_requests, _neighbor_requests_receiver) = mpsc::channel(1);
         let (commands, command_receiver) = mpsc::channel(1);
         let (_logout, logout) = mpsc::channel(1);
-        let task = tokio::spawn(connection.run(
+        let task = spawn(connection.run(
             events.clone(),
             shutdown_receiver,
             neighbor_requests,
@@ -2507,7 +2499,7 @@ mod tests {
         reliable_chat[1..5].copy_from_slice(&reliable_sequence.to_be_bytes());
         simulator.send_to(&reliable_chat, peer).await.expect("send reliable simulator event while notification is buffered");
         for _ in 0..16 {
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
         advance(ACK_INTERVAL).await;
         receive_ack(&simulator, reliable_sequence).await;
@@ -2593,7 +2585,7 @@ mod tests {
     fn pending_for_test(circuit: &Circuit, queued: QueuedMessage, class: TrafficClass) -> PendingSend {
         let prepared = circuit.prepare_message(queued.message.clone(), queued.delivery).expect("prepare test datagram");
         let meta = PreparedMeta::from(&prepared);
-        let result: PendingSendFuture = Box::pin(std::future::pending());
+        let result: PendingSendFuture = Box::pin(future::pending());
         PendingSend { meta, prepared, result, class, queued_message: Some(queued), retry_deadline: None, probe: None }
     }
 
@@ -2702,7 +2694,7 @@ mod tests {
 
         let started_at = Instant::now();
         let meta = PreparedMeta::from(&prepared);
-        let result: PendingSendFuture = Box::pin(std::future::pending());
+        let result: PendingSendFuture = Box::pin(future::pending());
         let mut pending = Some(PendingSend {
             meta,
             prepared,
@@ -2769,7 +2761,7 @@ mod tests {
             active_circuit.prepare_retransmission(Instant::now()).expect("prepare active retry").expect("reliable packet is due for retry");
         let active_started_at = Instant::now();
         let meta = PreparedMeta::from(&active_retry);
-        let result: PendingSendFuture = Box::pin(std::future::pending());
+        let result: PendingSendFuture = Box::pin(future::pending());
         let mut active_pending = Some(PendingSend {
             meta,
             prepared: active_retry,
@@ -3038,7 +3030,7 @@ mod tests {
             let pacer = pacers[neighbor + 1].handle();
             let sent = Arc::new(AtomicUsize::new(0));
             let sent_by_worker = Arc::clone(&sent);
-            retry_workers.push(tokio::spawn(async move {
+            retry_workers.push(spawn(async move {
                 for (mut circuit, retry) in retries {
                     let pending = begin_retry_send(Arc::clone(&socket), pacer.clone(), retry, Instant::now() + MAX_SEND_AGE, None);
                     let PendingSend { result, .. } = pending;
@@ -3055,7 +3047,7 @@ mod tests {
             Packet::new(90_001, Message::PacketAck(PacketAck { packets: vec![Packets { id: 42 }] })).encode().expect("encode primary ACK");
         let control_pacer = pacers[0].handle();
         let control_socket = Arc::clone(&transports[0]);
-        let control = tokio::spawn(async move { control_pacer.send(&control_socket, &control_bytes, TrafficClass::Control).await });
+        let control = spawn(async move { control_pacer.send(&control_socket, &control_bytes, TrafficClass::Control).await });
 
         for _ in 0..100 {
             if control.is_finished() {
@@ -3063,7 +3055,7 @@ mod tests {
             }
             advance(Duration::from_millis(10)).await;
             for _ in 0..8 {
-                tokio::task::yield_now().await;
+                yield_now().await;
             }
         }
         assert!(control.is_finished(), "primary control must pass the queued neighbor retry load");
@@ -3073,7 +3065,7 @@ mod tests {
         assert!(matches!(Packet::decode(&deadline_bytes).expect("decode AgentUpdate fixture").message(), Message::AgentUpdate(_)));
         let deadline_pacer = pacers[0].handle();
         let deadline_socket = Arc::clone(&transports[0]);
-        let deadline = tokio::spawn(async move { deadline_pacer.send(&deadline_socket, &deadline_bytes, TrafficClass::Deadline).await });
+        let deadline = spawn(async move { deadline_pacer.send(&deadline_socket, &deadline_bytes, TrafficClass::Deadline).await });
 
         for _ in 0..100 {
             if deadline.is_finished() {
@@ -3081,7 +3073,7 @@ mod tests {
             }
             advance(Duration::from_millis(10)).await;
             for _ in 0..8 {
-                tokio::task::yield_now().await;
+                yield_now().await;
             }
         }
         assert!(deadline.is_finished(), "primary deadline traffic must pass the queued neighbor retry load");
@@ -3090,7 +3082,7 @@ mod tests {
         for _ in 0..100 {
             advance(Duration::from_millis(10)).await;
             for _ in 0..8 {
-                tokio::task::yield_now().await;
+                yield_now().await;
             }
         }
 
@@ -3302,7 +3294,7 @@ mod tests {
         let (_commands, commands) = mpsc::channel(1);
         let (_logout, logout) = mpsc::channel::<oneshot::Sender<Result<(), Error>>>(1);
         let task: JoinHandle<Result<(), String>> =
-            tokio::spawn(connection.run(events, shutdown_receiver, neighbor_requests, commands, logout, packet_memory));
+            spawn(connection.run(events, shutdown_receiver, neighbor_requests, commands, logout, packet_memory));
 
         let (use_circuit_code, peer) = receive_packet(&simulator).await;
         send_ack(&simulator, peer, use_circuit_code.sequence()).await;
@@ -3407,7 +3399,7 @@ mod tests {
         let (neighbor_requests, _neighbor_requests_receiver) = mpsc::channel(1);
         let (_commands, commands) = mpsc::channel(1);
         let (_logout, logout) = mpsc::channel::<oneshot::Sender<Result<(), Error>>>(1);
-        let task = tokio::spawn(connection.run(events, shutdown_receiver, neighbor_requests, commands, logout, packet_memory));
+        let task = spawn(connection.run(events, shutdown_receiver, neighbor_requests, commands, logout, packet_memory));
 
         let (use_circuit_code, peer) = receive_packet(&simulator).await;
         send_ack(&simulator, peer, use_circuit_code.sequence()).await;
@@ -3481,7 +3473,7 @@ mod tests {
         let (neighbor_requests, _neighbor_requests_receiver) = mpsc::channel(1);
         let (_commands, commands) = mpsc::channel(1);
         let (_logout, logout) = mpsc::channel::<oneshot::Sender<Result<(), Error>>>(1);
-        let task = tokio::spawn(connection.run(events, shutdown_receiver, neighbor_requests, commands, logout, packet_memory));
+        let task = spawn(connection.run(events, shutdown_receiver, neighbor_requests, commands, logout, packet_memory));
 
         let (use_circuit_code, peer) = receive_packet(&simulator).await;
         send_ack(&simulator, peer, use_circuit_code.sequence()).await;
@@ -3551,7 +3543,7 @@ mod tests {
         let (neighbor_requests, _neighbor_requests_receiver) = mpsc::channel(1);
         let (_commands, commands) = mpsc::channel(1);
         let (_logout, logout) = mpsc::channel::<oneshot::Sender<Result<(), Error>>>(1);
-        let task = tokio::spawn(connection.run(events, shutdown_receiver, neighbor_requests, commands, logout, packet_memory));
+        let task = spawn(connection.run(events, shutdown_receiver, neighbor_requests, commands, logout, packet_memory));
 
         let (use_circuit_code, peer) = receive_packet(&simulator).await;
         send_ack(&simulator, peer, use_circuit_code.sequence()).await;
@@ -3584,7 +3576,7 @@ mod tests {
                 .expect("encode reliable ping response");
             simulator.send_to(&bytes, peer).await.expect("send reliable ping response");
             if sequence % 128 == 0 {
-                tokio::task::yield_now().await;
+                yield_now().await;
             }
         }
         let mut rejected = parse_hex_fixture(vectors::CHAT_FROM_SIMULATOR).expect("parse chat fixture");
@@ -3606,7 +3598,7 @@ mod tests {
             if overflow_recorded {
                 break;
             }
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
         assert!(overflow_recorded, "full ACK capacity must leave the reliable packet unaccepted");
 
@@ -3619,7 +3611,7 @@ mod tests {
 
         let mut buffer = [0; 2048];
         assert!(
-            matches!(simulator.try_recv_from(&mut buffer), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            matches!(simulator.try_recv_from(&mut buffer), Err(error) if error.kind() == io::ErrorKind::WouldBlock),
             "no queued ACK should be sent before its timer or another outbound packet"
         );
 
@@ -3686,7 +3678,7 @@ mod tests {
         let (_commands, commands) = mpsc::channel(1);
         let (_logout, logout) = mpsc::channel::<oneshot::Sender<Result<(), Error>>>(1);
         let task: JoinHandle<Result<(), String>> =
-            tokio::spawn(connection.run(events, shutdown_receiver, neighbor_requests, commands, logout, packet_memory.clone()));
+            spawn(connection.run(events, shutdown_receiver, neighbor_requests, commands, logout, packet_memory.clone()));
 
         let (use_circuit_code, peer) = receive_packet(&simulator).await;
         let _decode_slots = packet_memory
@@ -3715,13 +3707,13 @@ mod tests {
                 {
                     break;
                 }
-                tokio::task::yield_now().await;
+                yield_now().await;
             }
         })
         .await
         .expect("malformed ACK should be rejected");
 
-        let packets = std::iter::once(Packets { id: use_circuit_code.sequence() }).chain((0..254).map(|id| Packets { id })).collect();
+        let packets = once(Packets { id: use_circuit_code.sequence() }).chain((0..254).map(|id| Packets { id })).collect();
         let ack = Packet::new(701, Message::PacketAck(PacketAck { packets })).encode().expect("encode maximum-sized circuit ACK");
         simulator.send_to(&ack, peer).await.expect("send circuit ACK under memory pressure");
         receive_connected(&mut received_events).await;

@@ -29,12 +29,12 @@ use protocol::{
         agent_movement_complete::{AgentData, Data, SimData},
     },
 };
-use std::{collections::HashMap, future::pending, net::SocketAddr, time::Duration};
+use std::{collections::HashMap, future::pending, net::SocketAddr, num::NonZeroU64, time::Duration};
 use tokio::{
     net::UdpSocket,
     sync::{mpsc, watch},
     task::JoinSet,
-    time::timeout,
+    time::{self, timeout},
 };
 use url::Url;
 
@@ -104,7 +104,7 @@ fn handoff(region_handle: u64, endpoint: &str, seed: &str) -> HandoffTarget {
 }
 
 fn generation(value: u64) -> HandoffGeneration {
-    HandoffGeneration::new(std::num::NonZeroU64::new(value).expect("nonzero generation"))
+    HandoffGeneration::new(NonZeroU64::new(value).expect("nonzero generation"))
 }
 
 #[test]
@@ -262,8 +262,8 @@ async fn full_handoff_queue_recovers() {
     assert_eq!(setup.state.neighbor_connections.get(&0x1234).expect("neighbor remains tracked").commands.capacity(), 0);
     assert!(setup.state.neighbor_connections.get(&0x1234).expect("neighbor remains tracked").pending_handoff_command.is_some());
 
-    let mut retry = tokio::time::interval(HANDOFF_COMMAND_RETRY_INTERVAL);
-    retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut retry = time::interval(HANDOFF_COMMAND_RETRY_INTERVAL);
+    retry.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
     retry_pending_handoff_commands(&mut retry, &mut setup.state.neighbor_connections).await;
     assert!(setup.state.neighbor_connections.get(&0x1234).expect("neighbor remains tracked").pending_handoff_command.is_some());
 
@@ -274,7 +274,7 @@ async fn full_handoff_queue_recovers() {
         "deferred handoff should remain pending until its retry tick"
     );
     assert!(setup.state.neighbor_connections.get(&0x1234).expect("neighbor remains tracked").pending_handoff_command.is_some());
-    tokio::time::advance(Duration::from_millis(1)).await;
+    time::advance(Duration::from_millis(1)).await;
     retry_pending_handoff_commands(&mut retry, &mut setup.state.neighbor_connections).await;
     assert!(setup.state.neighbor_connections.get(&0x1234).expect("neighbor remains tracked").pending_handoff_command.is_none());
     let mut prepare_sent = false;

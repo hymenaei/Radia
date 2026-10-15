@@ -1,4 +1,5 @@
 //! Literal LLUDP fixtures and parsing helpers for tests.
+
 /// Independently assembled LLUDP packet fixtures for protocol tests.
 pub mod lludp;
 
@@ -33,6 +34,7 @@ pub fn parse_hex_fixture(source: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::{lludp::vectors::ALL, parse_hex_fixture};
+    use std::fs::read_dir;
     use std::path::Path;
 
     #[test]
@@ -57,7 +59,7 @@ mod tests {
     #[test]
     fn lludp_vector_index_covers_every_checked_in_fixture() {
         let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/lludp");
-        let mut files: Vec<_> = std::fs::read_dir(directory)
+        let mut files: Vec<_> = read_dir(directory)
             .expect("read LLUDP fixtures")
             .map(|entry| entry.expect("read LLUDP fixture entry").file_name().into_string().expect("fixture filename is UTF-8"))
             .filter(|name| name.ends_with(".hex"))

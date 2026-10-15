@@ -12,12 +12,12 @@ use std::{
 };
 
 #[cfg(test)]
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, env};
 
 use tokio::{
     sync::{mpsc, oneshot},
-    task::JoinHandle,
-    time::Instant,
+    task::{self, JoinHandle, spawn},
+    time::{self, Instant},
 };
 
 use super::UdpTransport;
@@ -231,8 +231,8 @@ impl OutboundBudget {
         let bucket = Arc::new(Mutex::new(Bucket::new(rate_bytes_per_second.max(1), Instant::now())));
         let worker_bucket = Arc::clone(&bucket);
         #[cfg(test)]
-        let probe = std::env::var_os("RADIA_PACER_PROBE").map(|_| Arc::new(Mutex::new(ProbeStats::default())));
-        let worker = tokio::spawn(run_arbiter(
+        let probe = env::var_os("RADIA_PACER_PROBE").map(|_| Arc::new(Mutex::new(ProbeStats::default())));
+        let worker = spawn(run_arbiter(
             receiver,
             worker_bucket,
             #[cfg(test)]
@@ -946,7 +946,7 @@ async fn run_arbiter(
         );
 
         if dispatched {
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         }
         while let Ok(command) = commands.try_recv() {
             if !handle_command(command, &mut connections, &mut order, &mut pending, &mut connection_cursor, &virtual_time) {
@@ -961,7 +961,7 @@ async fn run_arbiter(
         let command = if pending.is_empty() {
             commands.recv().await
         } else {
-            match tokio::time::timeout(next_wait, commands.recv()).await {
+            match time::timeout(next_wait, commands.recv()).await {
                 Ok(command) => command,
                 Err(_) => continue,
             }
@@ -1362,6 +1362,7 @@ mod tests {
     use tokio::{
         net::UdpSocket,
         sync::{mpsc, oneshot},
+        task::{self, spawn},
         time::{Instant, advance, timeout},
     };
 
@@ -1551,27 +1552,27 @@ mod tests {
 
         let mut primary_request = queue_worker_request(&primary_handle, 1_000).await;
         let mut neighbor_request = queue_worker_request(&neighbor_handle, 1_000).await;
-        tokio::task::yield_now().await;
+        task::yield_now().await;
         assert!(primary_request.try_recv().is_err());
         assert!(neighbor_request.try_recv().is_err());
 
         advance(Duration::from_millis(199)).await;
-        tokio::task::yield_now().await;
+        task::yield_now().await;
         assert!(primary_request.try_recv().is_err());
         assert!(neighbor_request.try_recv().is_err());
 
         advance(Duration::from_millis(1)).await;
-        tokio::task::yield_now().await;
+        task::yield_now().await;
         let first_grants = usize::from(consume_ready(&mut primary_request)) + usize::from(consume_ready(&mut neighbor_request));
         assert_eq!(first_grants, 1, "the configured 5,000-byte rate yields one 1,000-byte send every 200 ms");
 
         advance(Duration::from_millis(199)).await;
-        tokio::task::yield_now().await;
+        task::yield_now().await;
         assert!(primary_request.try_recv().is_err());
         assert!(neighbor_request.try_recv().is_err());
 
         advance(Duration::from_millis(1)).await;
-        tokio::task::yield_now().await;
+        task::yield_now().await;
         let second_grants = usize::from(consume_ready(&mut primary_request)) + usize::from(consume_ready(&mut neighbor_request));
         assert_eq!(second_grants, 1, "both simulators share the session's configured byte budget");
 
@@ -1601,7 +1602,7 @@ mod tests {
             let mut counts = [0; 5];
             for _ in 0..90 {
                 advance(Duration::from_millis(100)).await;
-                tokio::task::yield_now().await;
+                task::yield_now().await;
 
                 let mut granted = None;
                 for (index, request) in requests.iter_mut().enumerate() {
@@ -1626,7 +1627,7 @@ mod tests {
             if phase == 0 {
                 pacers[1].set_primary(false).await.expect("demote the former primary");
                 pacers[2].set_primary(true).await.expect("promote the selected neighbor");
-                tokio::task::yield_now().await;
+                task::yield_now().await;
             }
         }
 
@@ -1656,7 +1657,7 @@ mod tests {
             let handle = pacer.handle();
             let count = Arc::new(AtomicUsize::new(0));
             let task_count = Arc::clone(&count);
-            tasks.push(tokio::spawn(async move {
+            tasks.push(spawn(async move {
                 loop {
                     let Ok(lease) = queue_worker_request(&handle, PACKET_BYTES).await.await else {
                         break;
@@ -1671,7 +1672,7 @@ mod tests {
         for _ in 0..20 {
             advance(Duration::from_millis(100)).await;
             for _ in 0..8 {
-                tokio::task::yield_now().await;
+                task::yield_now().await;
             }
         }
 
@@ -1863,13 +1864,13 @@ mod tests {
         let flowing_connection = budget.register(2, false).await.expect("register flowing connection");
         let blocked_pacer = blocked_connection.handle();
         let flowing_pacer = flowing_connection.handle();
-        let blocked = tokio::spawn(async move {
+        let blocked = spawn(async move {
             let bytes = [0; MAX_BURST_BYTES as usize];
             blocked_pacer.send_with_kind(&blocked_socket, &bytes, TrafficClass::Fair, false).await
         });
         timeout(Duration::from_secs(1), send_entered.notified()).await.expect("blocked socket should report backpressure");
 
-        let flowing = tokio::spawn(async move {
+        let flowing = spawn(async move {
             let bytes = [1; 100];
             flowing_pacer.send_with_kind(&flowing_socket, &bytes, TrafficClass::Fair, false).await
         });
@@ -1932,11 +1933,11 @@ mod tests {
         let delayed_request = queue_worker_request(&first_handle, MAX_BURST_BYTES as usize).await;
         let delayed_lease = delayed_request.await.expect("grant the initial burst");
         let mut next_request = queue_worker_request(&second_handle, 1).await;
-        tokio::task::yield_now().await;
+        task::yield_now().await;
 
         advance(Duration::from_secs(1)).await;
         for _ in 0..8 {
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         }
         assert!(
             matches!(next_request.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
@@ -1946,7 +1947,7 @@ mod tests {
         delayed_lease.consume();
         advance(Duration::from_millis(1)).await;
         for _ in 0..8 {
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         }
         next_request.await.expect("the next request gets newly earned credit").consume();
 
@@ -1979,7 +1980,7 @@ mod tests {
         for _ in 0..4 {
             advance(Duration::from_secs(1)).await;
             for _ in 0..8 {
-                tokio::task::yield_now().await;
+                task::yield_now().await;
             }
             if let Ok(lease) = pending.try_recv() {
                 granted = Some(lease);

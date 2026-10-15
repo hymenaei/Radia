@@ -21,6 +21,8 @@ use protocol::{
         region_handle_request::RequestBlock,
     },
 };
+#[cfg(test)]
+use tokio::spawn;
 use world::RegionHandle;
 
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -379,7 +381,7 @@ impl RegionLookup {
                 make_timeout: Arc::new(make_timeout),
                 send_message: Arc::new(send_message),
                 spawn_background: Arc::new(|future| {
-                    drop(tokio::spawn(future));
+                    drop(spawn(future));
                 }),
                 state: Mutex::new(State::default()),
                 timeout,
@@ -496,7 +498,11 @@ mod tests {
         lludp::Message::MapBlockReply,
         messages::{RegionIdAndHandleReply, map_block_reply, region_id_and_handle_reply::ReplyBlock},
     };
-    use tokio::task::JoinHandle;
+    use tokio::{
+        spawn,
+        task::{JoinHandle, yield_now},
+        time::timeout,
+    };
 
     use super::*;
 
@@ -548,13 +554,13 @@ mod tests {
     }
 
     async fn wait_for_requests(sent: &Arc<Mutex<Vec<RegionLookupRequest>>>, count: usize) -> Vec<RegionLookupRequest> {
-        tokio::time::timeout(Duration::from_secs(1), async {
+        timeout(Duration::from_secs(1), async {
             loop {
                 let requests = requests(sent);
                 if requests.len() >= count {
                     return requests;
                 }
-                tokio::task::yield_now().await;
+                yield_now().await;
             }
         })
         .await
@@ -562,7 +568,7 @@ mod tests {
     }
 
     async fn assert_pending(task: &JoinHandle<Result<String, String>>) {
-        tokio::task::yield_now().await;
+        yield_now().await;
         assert!(!task.is_finished());
     }
 
@@ -570,9 +576,9 @@ mod tests {
     async fn coalesces_and_checks_replies() {
         let (lookup, sent) = lookup();
         let first_lookup = lookup.clone();
-        let first = tokio::spawn(async move { first_lookup.lookup_region_at(RegionGridCell::new(12, 34)).await });
+        let first = spawn(async move { first_lookup.lookup_region_at(RegionGridCell::new(12, 34)).await });
         let second_lookup = lookup.clone();
-        let second = tokio::spawn(async move { second_lookup.lookup_region_at(RegionGridCell::new(12, 34)).await });
+        let second = spawn(async move { second_lookup.lookup_region_at(RegionGridCell::new(12, 34)).await });
 
         let requests = wait_for_requests(&sent, 1).await;
         assert_eq!(requests.len(), 1);
@@ -596,9 +602,9 @@ mod tests {
     async fn id_lookup_coalesces_requests() {
         let (lookup, sent) = lookup();
         let first_lookup = lookup.clone();
-        let first = tokio::spawn(async move { first_lookup.lookup_region_by_id(REGION_ID).await });
+        let first = spawn(async move { first_lookup.lookup_region_by_id(REGION_ID).await });
         let second_lookup = lookup.clone();
-        let second = tokio::spawn(async move { second_lookup.lookup_region_by_id(REGION_ID).await });
+        let second = spawn(async move { second_lookup.lookup_region_by_id(REGION_ID).await });
 
         let requests = wait_for_requests(&sent, 1).await;
         assert_eq!(requests.len(), 1);
@@ -791,7 +797,7 @@ mod tests {
     async fn map_range_rejects_region_handle() {
         let (lookup, sent) = lookup();
         let request_lookup = lookup.clone();
-        let pending = tokio::spawn(async move { request_lookup.lookup_region_by_id(REGION_ID).await });
+        let pending = spawn(async move { request_lookup.lookup_region_by_id(REGION_ID).await });
         let initial_requests = wait_for_requests(&sent, 1).await;
         assert!(matches!(&initial_requests[0], RegionLookupRequest::RegionHandle(_)));
 

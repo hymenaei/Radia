@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Instant;
 
 #[tokio::test]
 async fn handoff_waits_for_matching_movement() {
@@ -176,7 +177,7 @@ async fn run_overload_logout_promotion_test() {
     set_sequence(&mut barrier, 45);
     harness.neighbor.send_to(&barrier, harness.neighbor_peer).await.expect("send post-movement barrier");
     receive_ack(&harness.neighbor, 45).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    time::sleep(Duration::from_millis(50)).await;
 
     assert_eq!(
         harness.status.snapshot().simulator_endpoint,
@@ -325,7 +326,7 @@ async fn run_teleport_finish_scenario(probe_sends: usize) -> (Vec<Duration>, Vec
 
     harness.pause_sends.send_replace(true);
     let (completed, mut held_send) = oneshot::channel();
-    let held_send_queued_at = std::time::Instant::now();
+    let held_send_queued_at = Instant::now();
     harness
         .commands
         .send(Command::SendTo {
@@ -355,7 +356,7 @@ async fn run_teleport_finish_scenario(probe_sends: usize) -> (Vec<Duration>, Vec
     for index in 0..probe_sends {
         let (completed, completion) = oneshot::channel();
         let (dispatched, dispatch) = oneshot::channel();
-        let queued_at = std::time::Instant::now();
+        let queued_at = Instant::now();
         let message = if index < control_probe_count {
             Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: u8::try_from(index).expect("ping ID fits u8") } })
         } else {
@@ -416,7 +417,7 @@ async fn run_teleport_finish_scenario(probe_sends: usize) -> (Vec<Duration>, Vec
         let dispatched_at = timeout(WAIT, dispatch).await.expect("coordinator dispatches handoff send").expect("dispatch probe");
         dispatch_latencies.push(dispatched_at.duration_since(queued_at));
         timeout(WAIT, completion).await.expect("handoff send reaches local socket").expect("send completion").expect("local send");
-        completion_latencies.push(std::time::Instant::now().duration_since(queued_at));
+        completion_latencies.push(Instant::now().duration_since(queued_at));
     }
     let expected_fair_sends = queued_commands - control_probe_count;
     let mut fair_sends_received = 0;
@@ -458,7 +459,7 @@ async fn run_teleport_finish_scenario(probe_sends: usize) -> (Vec<Duration>, Vec
     }
     timeout(WAIT, async {
         while harness.packet_memory.neighbor_available_bytes() != neighbor_available - retained_primary_bytes {
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         }
     })
     .await

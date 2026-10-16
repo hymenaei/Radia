@@ -53,6 +53,10 @@ fn observation(source: UpdateSource, id: u128, local_id: u32) -> ObjectObservati
         angular_velocity: None,
         scale: None,
         attachment_point: None,
+        shape: None,
+        appearance: None,
+        surface_appearance: None,
+        render_materials: None,
     }
 }
 

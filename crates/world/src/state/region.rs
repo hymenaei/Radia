@@ -15,6 +15,7 @@ impl World {
         self.ensure_revision_available()?;
         self.registration_count += 1;
         self.regions.insert(region, RegionInfo::default());
+        assert!(self.region_ids.insert(region), "region ordering index already contains a new region");
         Ok(self.finish(ApplyOutcome::RegionAdopted, vec![RegionAdopted(region)], None))
     }
 
@@ -51,9 +52,10 @@ impl World {
                 &mut changes,
                 &mut Vec::new(),
                 &mut recovery_cancellations,
-            )?;
+            );
         }
         self.regions.remove(&region);
+        assert!(self.region_ids.remove(&region), "region ordering index is missing an active region");
         self.retired.insert(region);
         self.tombstones.remove_region(region);
         self.floors.remove(&region);

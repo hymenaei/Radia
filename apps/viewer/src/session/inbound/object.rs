@@ -4,14 +4,36 @@ use base::UUID;
 use protocol::{
     lludp::{
         Message,
-        Message::{ImprovedTerseObjectUpdate, KillObject, ObjectUpdate, ObjectUpdateCached, ObjectUpdateCompressed},
+        Message::{
+            GenericStreamingMessage, ImprovedTerseObjectUpdate, KillObject, ObjectExtraParams, ObjectUpdate, ObjectUpdateCached,
+            ObjectUpdateCompressed,
+        },
     },
-    messages::{CachedObjectReference, ObjectData, improved_terse_object_update, object_update_compressed},
+    messages::{
+        CachedObjectReference, ExtraParamUpdate, ExtraParameter, ObjectData, improved_terse_object_update, object_update,
+        object_update_compressed,
+    },
+    types::{TextureEntry, TextureFace, decode_render_material_bindings},
 };
 use world::{
-    AttachmentPoint, Kind, LinearMotion, LocalAddress, MotionPatch, ObjectObservation, ObjectPatch, OrderEvidence, ParentUpdate, Pose,
-    Region, RegionHandle, UpdateSource,
+    Appearance, AssetId, AttachmentPoint, FaceAppearance, Kind, LinearMotion, LocalAddress, MotionPatch, ObjectObservation, ObjectPatch,
+    OrderEvidence, ParentUpdate, Pose, Region, RegionHandle, RenderMaterials, SculptFlags, SculptType, Shape, SurfaceAppearance,
+    UpdateSource,
 };
+
+use super::super::object_media::media_version;
+
+const VOLUME_PCODE: u8 = 9;
+const LEGACY_AVATAR_PCODE: u8 = 47;
+const SCULPT_EXTRA_PARAM_TYPE: u16 = 0x0030;
+const MESH_EXTRA_PARAM_TYPE: u16 = 0x0060;
+const RENDER_MATERIAL_EXTRA_PARAM_TYPE: u16 = 0x0080;
+const SCULPT_EXTRA_PARAM_LEN: usize = 17;
+const SCULPT_TYPE_MASK: u8 = 0x07;
+const SCULPT_RESERVED_TYPE_MASK: u8 = 0x38;
+const SCULPT_FLAG_INVERT: u8 = 0x40;
+const SCULPT_FLAG_MIRROR: u8 = 0x80;
+const SCULPT_DEFAULT_TEXTURE: u128 = 0xbe29_3869_d0d9_0a69_5989_ad27_f194_6fd4;
 
 /// Object operations decoded from one simulator message, in packet block order.
 #[derive(Clone, Debug, PartialEq)]
@@ -22,28 +44,37 @@ pub(crate) struct ObjectBatch {
     pub(crate) invalid_blocks: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ObjectOperation {
     Observe(ObjectObservation),
     Patch(ObjectPatch),
+    RenderMaterialsPatch(ObjectPatch),
     Remove { source: UpdateSource, local_id: NonZeroU32 },
     Cached { source: UpdateSource, local_id: NonZeroU32 },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::session) struct ObjectMediaRequest {
+    pub(in crate::session) source: UpdateSource,
+    pub(in crate::session) object_id: UUID,
+    pub(in crate::session) local_id: NonZeroU32,
+    pub(in crate::session) version: u32,
+}
+
 impl ObjectOperation {
-    pub(crate) fn source(self) -> UpdateSource {
+    pub(crate) fn source(&self) -> UpdateSource {
         match self {
             Self::Observe(observation) => observation.source,
-            Self::Patch(patch) => patch.source,
-            Self::Remove { source, .. } | Self::Cached { source, .. } => source,
+            Self::Patch(patch) | Self::RenderMaterialsPatch(patch) => patch.source,
+            Self::Remove { source, .. } | Self::Cached { source, .. } => *source,
         }
     }
 
-    pub(crate) fn address(self) -> LocalAddress {
+    pub(crate) fn address(&self) -> LocalAddress {
         let (source, local_id) = match self {
             Self::Observe(observation) => (observation.source, observation.local_id),
-            Self::Patch(patch) => (patch.source, patch.local_id),
-            Self::Remove { source, local_id } | Self::Cached { source, local_id } => (source, local_id),
+            Self::Patch(patch) | Self::RenderMaterialsPatch(patch) => (patch.source, patch.local_id),
+            Self::Remove { source, local_id } | Self::Cached { source, local_id } => (*source, *local_id),
         };
         LocalAddress::new(source.region(), local_id)
     }
@@ -60,6 +91,14 @@ pub(crate) fn decode_object_message(region: Region, sequence: u32, order: OrderE
         ObjectUpdateCompressed(update) => map_blocks(region, sequence, order, &update.objects, compressed_observation, &mut invalid_blocks),
         ImprovedTerseObjectUpdate(update) => map_blocks(region, sequence, order, &update.objects, terse_patch, &mut invalid_blocks),
         ObjectUpdateCached(update) => map_blocks(region, sequence, order, &update.objects, cached_patch, &mut invalid_blocks),
+        ObjectExtraParams(update) => map_blocks(
+            region,
+            sequence,
+            order,
+            update.object_data.iter().filter(|parameter| parameter.parameter_type == RENDER_MATERIAL_EXTRA_PARAM_TYPE),
+            render_material_patch,
+            &mut invalid_blocks,
+        ),
         KillObject(update) => map_blocks(
             region,
             sequence,
@@ -68,10 +107,81 @@ pub(crate) fn decode_object_message(region: Region, sequence: u32, order: OrderE
             |object, source| Ok(ObjectOperation::Remove { source, local_id: local_id(object.local_id)? }),
             &mut invalid_blocks,
         ),
+        GenericStreamingMessage(message) => match super::gltf::decode_message(message) {
+            Some(Ok(decoded)) => {
+                let source = UpdateSource::new(region, sequence, order, 0);
+                let mut patch = ObjectPatch::new(source, decoded.local_id);
+                patch.gltf_material_overrides = Some(decoded.overrides);
+                vec![Some(ObjectOperation::Patch(patch))]
+            }
+            Some(Err(())) => {
+                invalid_blocks = 1;
+                vec![None]
+            }
+            None => return None,
+        },
         _ => return None,
     };
 
     Some(ObjectBatch { region, region_handle: object_region_handle(message), blocks, invalid_blocks })
+}
+
+pub(in crate::session) fn object_media_requests(
+    region: Region,
+    sequence: u32,
+    order: OrderEvidence,
+    message: &Message,
+) -> Vec<ObjectMediaRequest> {
+    match message {
+        ObjectUpdate(update) => update
+            .objects
+            .iter()
+            .enumerate()
+            .filter_map(|(index, object)| {
+                media_request(region, sequence, order, index, object.pcode, object.id, object.local_id, &object.media_url)
+            })
+            .collect(),
+        ObjectUpdateCompressed(update) => update
+            .objects
+            .iter()
+            .enumerate()
+            .filter_map(|(index, object)| {
+                media_request(
+                    region,
+                    sequence,
+                    order,
+                    index,
+                    object.pcode,
+                    object.id,
+                    object.local_id,
+                    object.media_url.as_deref().unwrap_or_default(),
+                )
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn media_request(
+    region: Region,
+    sequence: u32,
+    order: OrderEvidence,
+    index: usize,
+    pcode: u8,
+    object_id: UUID,
+    raw_local_id: u32,
+    media_url: &str,
+) -> Option<ObjectMediaRequest> {
+    if pcode != VOLUME_PCODE || object_id.is_nil() {
+        return None;
+    }
+    let version = media_version(media_url)?;
+    let local_id = local_id(raw_local_id).ok()?;
+    let source = UpdateSource::new(region, sequence, order, u32::try_from(index).ok()?);
+    if !matches!(order, OrderEvidence::Ordered(_)) {
+        return None;
+    }
+    Some(ObjectMediaRequest { source, object_id, local_id, version })
 }
 
 fn object_region_handle(message: &Message) -> Option<RegionHandle> {
@@ -85,16 +195,16 @@ fn object_region_handle(message: &Message) -> Option<RegionHandle> {
     Some(RegionHandle::new(raw_handle))
 }
 
-fn map_blocks<T>(
+fn map_blocks<'a, T: 'a>(
     region: Region,
     sequence: u32,
     order: OrderEvidence,
-    blocks: &[T],
+    blocks: impl IntoIterator<Item = &'a T>,
     mut to_operation: impl FnMut(&T, UpdateSource) -> Result<ObjectOperation, InvalidBlock>,
     invalid_blocks: &mut usize,
 ) -> Vec<Option<ObjectOperation>> {
     blocks
-        .iter()
+        .into_iter()
         .enumerate()
         .map(|(index, block)| {
             let source = u32::try_from(index).ok().map(|ordinal| UpdateSource::new(region, sequence, order, ordinal));
@@ -113,32 +223,52 @@ struct InvalidBlock;
 fn full_observation(block: &ObjectData, source: UpdateSource) -> Result<ObjectOperation, InvalidBlock> {
     let id = non_nil_uuid(block.id)?;
     let local_id = local_id(block.local_id)?;
+    let classification = object_classification(block.pcode, &block.extra_parameters);
     Ok(ObjectOperation::Observe(ObjectObservation {
         source,
         id,
         local_id,
-        kind: object_kind(block.pcode),
+        kind: classification.kind,
         parent: parent(block.parent_local_id)?,
         pose: Some(Pose { position: Some(block.motion.position), rotation: Some(block.motion.rotation) }),
         linear_motion: Some(LinearMotion { velocity: Some(block.motion.velocity), acceleration: Some(block.motion.acceleration) }),
         angular_velocity: Some(block.motion.angular_velocity),
         scale: Some(block.scale),
         attachment_point: attachment_point(block.state),
+        shape: classification.shape,
+        appearance: classification.appearance,
+        surface_appearance: (block.pcode == VOLUME_PCODE)
+            .then(|| object_update::decode_texture_entry(&block.texture_entry).ok().flatten().and_then(surface_appearance))
+            .flatten(),
+        render_materials: render_materials(block.pcode, &block.extra_parameters),
     }))
 }
 
 fn compressed_observation(block: &object_update_compressed::ObjectData, source: UpdateSource) -> Result<ObjectOperation, InvalidBlock> {
+    let classification = object_classification(block.pcode, &block.extra_parameters);
     Ok(ObjectOperation::Observe(ObjectObservation {
         source,
         id: non_nil_uuid(block.id)?,
         local_id: local_id(block.local_id)?,
-        kind: object_kind(block.pcode),
+        kind: classification.kind,
         parent: parent(block.parent_local_id)?,
         pose: Some(Pose { position: Some(block.position), rotation: Some(block.rotation) }),
         linear_motion: None,
         angular_velocity: block.angular_velocity,
         scale: Some(block.scale),
         attachment_point: attachment_point(block.state),
+        shape: classification.shape,
+        appearance: classification.appearance,
+        surface_appearance: (block.pcode == VOLUME_PCODE)
+            .then(|| {
+                block
+                    .texture_entry
+                    .as_deref()
+                    .and_then(|bytes| object_update_compressed::decode_texture_entry(bytes).ok().flatten())
+                    .and_then(surface_appearance)
+            })
+            .flatten(),
+        render_materials: render_materials(block.pcode, &block.extra_parameters),
     }))
 }
 
@@ -148,7 +278,60 @@ fn terse_patch(block: &improved_terse_object_update::ObjectData, source: UpdateS
     patch.linear_motion = MotionPatch { velocity: Some(block.motion.velocity), acceleration: Some(block.motion.acceleration) };
     patch.angular_velocity = Some(block.motion.angular_velocity);
     patch.attachment_point = attachment_point(block.state);
+    patch.surface_appearance = (!block.avatar)
+        .then(|| improved_terse_object_update::decode_texture_entry(&block.texture_entry).ok().flatten().and_then(surface_appearance))
+        .flatten();
     Ok(ObjectOperation::Patch(patch))
+}
+
+fn surface_appearance(entry: TextureEntry) -> Option<SurfaceAppearance> {
+    let default_face = face_appearance(entry.default_face());
+    let overrides = entry.overrides().map(|(index, face)| (index, face_appearance(face))).collect();
+    SurfaceAppearance::new(default_face, overrides).ok()
+}
+
+fn render_materials(pcode: u8, extra_parameters: &[ExtraParameter]) -> Option<RenderMaterials> {
+    if pcode != VOLUME_PCODE {
+        return (object_kind(pcode) == Kind::Object).then(RenderMaterials::default);
+    }
+
+    let mut materials = None;
+    for extra_parameter in extra_parameters.iter().filter(|p| p.parameter_type == RENDER_MATERIAL_EXTRA_PARAM_TYPE) {
+        materials = Some(decode_render_material_bindings(&extra_parameter.data).ok().and_then(|bindings| {
+            RenderMaterials::new(bindings.into_iter().map(|binding| (binding.face_index, AssetId::new(binding.material_id))).collect()).ok()
+        }));
+    }
+
+    materials.unwrap_or_else(|| Some(RenderMaterials::default()))
+}
+
+fn render_material_patch(block: &ExtraParamUpdate, source: UpdateSource) -> Result<ObjectOperation, InvalidBlock> {
+    let materials = if block.in_use {
+        let bindings = decode_render_material_bindings(&block.data).map_err(|_| InvalidBlock)?;
+        RenderMaterials::new(bindings.into_iter().map(|binding| (binding.face_index, AssetId::new(binding.material_id))).collect())
+            .map_err(|_| InvalidBlock)?
+    } else {
+        RenderMaterials::default()
+    };
+    let mut patch = ObjectPatch::new(source, local_id(block.local_id)?);
+    patch.render_materials = Some(materials);
+    Ok(ObjectOperation::RenderMaterialsPatch(patch))
+}
+
+fn face_appearance(face: &TextureFace) -> FaceAppearance {
+    FaceAppearance {
+        texture_id: face.texture_id,
+        color: face.color,
+        scale_s: face.scale_s,
+        scale_t: face.scale_t,
+        offset_s: face.offset_s,
+        offset_t: face.offset_t,
+        rotation: face.rotation,
+        bump_shiny_fullbright: face.bump_shiny_fullbright,
+        media_texgen: face.media_texgen,
+        glow: face.glow,
+        material_id: face.material_id,
+    }
 }
 
 fn cached_patch(block: &CachedObjectReference, source: UpdateSource) -> Result<ObjectOperation, InvalidBlock> {
@@ -174,262 +357,68 @@ fn parent(raw_local_id: u32) -> Result<ParentUpdate, InvalidBlock> {
 
 fn object_kind(pcode: u8) -> Kind {
     match pcode {
-        47 => Kind::Avatar,
+        LEGACY_AVATAR_PCODE => Kind::Avatar,
         1..=63 if matches!(pcode & 0x0f, 1..=9) => Kind::Object,
         14 | 15 | 95 | 111 | 143 | 159 | 239 | 255 => Kind::Object,
         _ => Kind::Unknown(pcode),
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use base::UUID;
-    use math::{Quat, Vec3};
-    use protocol::{
-        lludp::{Message, Message::ImprovedTerseObjectUpdate, Message::ObjectUpdate, Message::ObjectUpdateCompressed, Packet},
-        messages::StartPingCheck,
-    };
-    use std::num::{NonZeroU8, NonZeroU32};
-    use testing::{lludp::vectors, parse_hex_fixture};
-    use world::{
-        ApplyOutcome::{Introduced, RegionAdopted},
-        AttachmentPoint,
-        FieldRejectionReason::InvalidRotation,
-        Kind, ObjectObservation, ObjectPatch, OrderEvidence, ParentUpdate, Pose, Region, UpdateSource, World, WorldLimits,
-    };
+#[derive(Clone, Copy)]
+struct ObjectClassification {
+    kind: Kind,
+    shape: Option<Option<Shape>>,
+    appearance: Option<Option<Appearance>>,
+}
 
-    use super::{ObjectOperation, attachment_point, decode_object_message};
-
-    const REGION: Region = Region::new(11);
-
-    fn packet(fixture: &str) -> Packet {
-        let bytes = parse_hex_fixture(fixture).expect("valid LLUDP fixture");
-        Packet::decode(&bytes).expect("decode LLUDP fixture")
-    }
-
-    fn xyz_packet(fixture: &str, z: f32) -> Packet {
-        let fixture_packet = packet(fixture);
-        let mut message = fixture_packet.message().clone();
-        let marker = Quat::from_xyzw(0.137, 0.293, 0.419, 0.846);
-        match &mut message {
-            ObjectUpdate(update) => update.objects[0].motion.rotation = marker,
-            ObjectUpdateCompressed(update) => update.objects[0].rotation = marker,
-            _ => panic!("expected XYZ object update"),
+fn object_classification(pcode: u8, extra_parameters: &[ExtraParameter]) -> ObjectClassification {
+    match pcode {
+        LEGACY_AVATAR_PCODE => {
+            ObjectClassification { kind: Kind::Avatar, shape: Some(Some(Shape::Avatar)), appearance: Some(Some(Appearance::Avatar)) }
         }
-        let mut bytes = Packet::new(fixture_packet.sequence(), message).with_zero_coding(false).encode().expect("encode marker packet");
-        let marker_packet = Packet::decode(&bytes).expect("decode marker packet");
-        let rotation = match marker_packet.message() {
-            ObjectUpdate(update) => update.objects[0].motion.rotation,
-            ObjectUpdateCompressed(update) => update.objects[0].rotation,
-            _ => panic!("expected XYZ object update"),
-        };
-        let mut needle = Vec::with_capacity(12);
-        for component in [rotation.x, rotation.y, rotation.z] {
-            needle.extend_from_slice(&component.to_le_bytes());
+        VOLUME_PCODE => {
+            let mut sculpt_parameter = None;
+            for parameter in extra_parameters {
+                if matches!(parameter.parameter_type, SCULPT_EXTRA_PARAM_TYPE | MESH_EXTRA_PARAM_TYPE) {
+                    sculpt_parameter = Some(parameter);
+                }
+            }
+
+            let shape = match sculpt_parameter {
+                Some(parameter) if parameter.data.len() != SCULPT_EXTRA_PARAM_LEN => None,
+                Some(parameter) => {
+                    let raw_type = parameter.data[16];
+                    let sculpt_type = raw_type & SCULPT_TYPE_MASK;
+                    if raw_type & SCULPT_RESERVED_TYPE_MASK != 0 || sculpt_type > 6 {
+                        Some(Some(Shape::Sculpt {
+                            asset_id: AssetId::new(UUID::from_u128(SCULPT_DEFAULT_TEXTURE)),
+                            sculpt_type: SculptType::Sphere,
+                            flags: SculptFlags::default(),
+                        }))
+                    } else {
+                        let flags = SculptFlags { invert: raw_type & SCULPT_FLAG_INVERT != 0, mirror: raw_type & SCULPT_FLAG_MIRROR != 0 };
+                        let asset_id =
+                            AssetId::new(UUID::from_slice(&parameter.data[..16]).expect("sculpt parameter contains a complete asset UUID"));
+                        match sculpt_type {
+                            0 => Some(Some(Shape::Prim)),
+                            1 => Some(Some(Shape::Sculpt { asset_id, sculpt_type: SculptType::Sphere, flags })),
+                            2 => Some(Some(Shape::Sculpt { asset_id, sculpt_type: SculptType::Torus, flags })),
+                            3 => Some(Some(Shape::Sculpt { asset_id, sculpt_type: SculptType::Plane, flags })),
+                            4 => Some(Some(Shape::Sculpt { asset_id, sculpt_type: SculptType::Cylinder, flags })),
+                            5 => Some(Some(Shape::Mesh { asset_id, flags })),
+                            6 => Some(None),
+                            _ => None,
+                        }
+                    }
+                }
+                None => Some(Some(Shape::Prim)),
+            };
+
+            ObjectClassification { kind: Kind::Object, shape, appearance: Some(Some(Appearance::Surface)) }
         }
-        let mut offsets = bytes.windows(needle.len()).enumerate().filter_map(|(offset, window)| (window == needle).then_some(offset));
-        let offset = offsets.next().expect("marker rotation is in encoded message");
-        assert!(offsets.next().is_none(), "marker rotation is unique in encoded message");
-        bytes[offset..offset + 4].copy_from_slice(&z.to_le_bytes());
-        bytes[offset + 4..offset + 12].fill(0);
-        Packet::decode(&bytes).expect("decode raw XYZ rotation")
-    }
-
-    fn terse_patch(rotation: Quat, order: u64) -> ObjectPatch {
-        let fixture_packet = packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
-        let mut message = fixture_packet.message().clone();
-        let ImprovedTerseObjectUpdate(update) = &mut message else { panic!("expected terse fixture") };
-        update.objects[0].motion.rotation = rotation;
-        let encoded = Packet::new(fixture_packet.sequence(), message).with_zero_coding(false).encode().expect("encode terse rotation");
-        let packet = Packet::decode(&encoded).expect("decode terse rotation");
-        let batch = decode_object_message(REGION, packet.sequence(), OrderEvidence::Ordered(order), packet.message())
-            .expect("terse fixture has an object message");
-        let Some(ObjectOperation::Patch(patch)) = batch.blocks.first().copied().flatten() else { panic!("expected terse object patch") };
-        patch
-    }
-
-    fn assert_xyz_rotation(fixture: &str, z: f32, accepted: bool) {
-        let packet = xyz_packet(fixture, z);
-        let batch = decode_object_message(REGION, packet.sequence(), OrderEvidence::Ordered(1), packet.message())
-            .expect("XYZ fixture has an object message");
-        let Some(ObjectOperation::Observe(observation)) = batch.blocks.first().copied().flatten() else {
-            panic!("expected full object observation")
-        };
-        let id = observation.id;
-        let mut world = world();
-        let applied = world.observe_object(observation).expect("decoded object is accepted");
-        let rejected = applied.rejections.iter().any(|rejection| rejection.reason == InvalidRotation);
-        assert_eq!(rejected, !accepted);
-        let Introduced(entity) = applied.outcome else { panic!("expected object introduction") };
-        let rotation = world.object(entity).expect("introduced object exists").rotation();
-        if accepted {
-            assert!(rotation.is_some());
-            assert!((rotation.unwrap().length_squared() - 1.0).abs() <= 8.0 * f32::EPSILON);
-        } else {
-            assert!(rotation.is_none());
-        }
-        assert_eq!(world.entity(id), Some(entity));
-    }
-
-    fn world() -> World {
-        let limits = WorldLimits {
-            max_region_registrations: 1,
-            max_entities: 8,
-            max_entities_per_region: 8,
-            max_tombstones_per_region: 8,
-            max_tombstones: 8,
-            max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(8),
-            max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(8),
-            max_journal_entries: 8,
-            max_journal_changes: 32,
-            max_region_name_bytes: 64,
-            max_recovery_targets: 8,
-        };
-        let mut world = World::new(limits);
-        assert_eq!(world.adopt_region(REGION).unwrap().outcome, RegionAdopted);
-        world
-    }
-
-    fn assert_observed_rotation_is_valid(fixture: &str) {
-        let packet = packet(fixture);
-        let batch = decode_object_message(REGION, packet.sequence(), OrderEvidence::Ordered(1), packet.message())
-            .expect("fixture has an object message");
-        let Some(ObjectOperation::Observe(observation)) = batch.blocks.first().copied().flatten() else {
-            panic!("expected full object observation")
-        };
-        let id = observation.id;
-        let mut world = world();
-        let applied = world.observe_object(observation).expect("decoded rotation is valid");
-        assert!(!applied.rejections.iter().any(|rejection| rejection.reason == InvalidRotation), "rejections: {:?}", applied.rejections);
-        let Introduced(entity) = applied.outcome else { panic!("expected object introduction") };
-        let rotation = world.object(entity).expect("introduced object exists").rotation().expect("decoded rotation is stored");
-        assert!((rotation.length_squared() - 1.0).abs() <= 8.0 * f32::EPSILON);
-        assert_eq!(world.entity(id), Some(entity));
-    }
-
-    #[test]
-    fn decoded_xyz_rotations_are_accepted_by_world() {
-        assert_observed_rotation_is_valid(vectors::OBJECT_UPDATE);
-        assert_observed_rotation_is_valid(vectors::OBJECT_UPDATE_COMPRESSED_TYPED);
-    }
-
-    #[test]
-    fn xyz_decoder_tolerance_matches_world() {
-        let inside = f32::from_bits(1.0_f32.to_bits() + 260);
-        let outside = f32::from_bits(1.0_f32.to_bits() + 261);
-        for fixture in [vectors::OBJECT_UPDATE, vectors::OBJECT_UPDATE_COMPRESSED_TYPED] {
-            assert_xyz_rotation(fixture, inside, true);
-            assert_xyz_rotation(fixture, outside, false);
-        }
-    }
-
-    #[test]
-    fn terse_rotation_roundoff_is_accepted() {
-        let patch = terse_patch(Quat::from_xyzw(-0.54654974, 0.48178887, 0.47275522, -0.4956464), 2);
-        let decoded_rotation = patch.pose.expect("terse patch includes pose").rotation.expect("terse patch includes rotation");
-        let norm_error = decoded_rotation.length_squared() - 1.0;
-        assert!((0.00005..0.00006).contains(&norm_error), "unexpected quantized norm error: {norm_error}");
-        let mut world = world();
-        let base = ObjectObservation {
-            source: UpdateSource::new(REGION, 1, OrderEvidence::Ordered(1), 0),
-            id: UUID::from_u128(0xdead),
-            local_id: patch.local_id,
-            kind: Kind::Object,
-            parent: ParentUpdate::Root,
-            pose: Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) }),
-            linear_motion: None,
-            angular_velocity: None,
-            scale: None,
-            attachment_point: None,
-        };
-        let introduced = world.observe_object(base).expect("valid base object");
-        let Introduced(entity) = introduced.outcome else { panic!("expected base object introduction") };
-
-        let applied = world.patch_object(patch).expect("decoded terse rotation is valid");
-        assert!(!applied.rejections.iter().any(|rejection| rejection.reason == InvalidRotation));
-        let rotation = world.object(entity).expect("object remains present").rotation().expect("terse rotation is stored");
-        assert!((rotation.length_squared() - 1.0).abs() <= 8.0 * f32::EPSILON);
-    }
-
-    #[test]
-    fn invalid_terse_rotation_is_rejected_by_world() {
-        let patch = terse_patch(Quat::from_xyzw(1.0, 1.0, 1.0, 1.0), 2);
-        let decoded_rotation = patch.pose.expect("terse patch includes pose").rotation.expect("terse patch includes rotation");
-        assert!(decoded_rotation.length_squared() > 3.9);
-        let mut world = world();
-        let base = ObjectObservation {
-            source: UpdateSource::new(REGION, 1, OrderEvidence::Ordered(1), 0),
-            id: UUID::from_u128(0xdead),
-            local_id: patch.local_id,
-            kind: Kind::Object,
-            parent: ParentUpdate::Root,
-            pose: Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) }),
-            linear_motion: None,
-            angular_velocity: None,
-            scale: None,
-            attachment_point: None,
-        };
-        let Introduced(entity) = world.observe_object(base).expect("valid base object").outcome else {
-            panic!("expected base object introduction")
-        };
-
-        let applied = world.patch_object(patch).expect("invalid rotation is rejected as a field group");
-
-        assert!(applied.rejections.iter().any(|rejection| rejection.reason == InvalidRotation));
-        assert_eq!(world.object(entity).expect("base object remains").rotation(), Some(Quat::IDENTITY));
-    }
-
-    #[test]
-    fn fixture_mapping_preserves_packet_order() {
-        let packet = packet(vectors::OBJECT_UPDATE);
-        let batch = decode_object_message(REGION, packet.sequence(), OrderEvidence::Ordered(17), packet.message()).expect("object batch");
-
-        assert_eq!(batch.invalid_blocks, 0);
-        assert_eq!(batch.blocks.len(), 2);
-        let Some(ObjectOperation::Observe(observation)) = batch.blocks[0] else { panic!("expected valid observation") };
-        assert_eq!(observation.source.region(), REGION);
-        assert_eq!(observation.source.sequence(), packet.sequence());
-        assert_eq!(observation.source.order(), OrderEvidence::Ordered(17));
-        assert_eq!(observation.kind, Kind::Object);
-    }
-
-    #[test]
-    fn compressed_update_keeps_parent_and_angular() {
-        let packet = packet(vectors::OBJECT_UPDATE_COMPRESSED_TYPED);
-        let batch = decode_object_message(REGION, packet.sequence(), OrderEvidence::Ordered(18), packet.message())
-            .expect("compressed object batch");
-
-        let Some(ObjectOperation::Observe(observation)) = batch.blocks[0] else { panic!("expected compressed observation") };
-        assert_eq!(observation.parent, ParentUpdate::Local(NonZeroU32::new(0x0506_0708).expect("nonzero parent ID")));
-        assert_eq!(observation.angular_velocity, Some(Vec3::new(0.5, 0.0, -0.5)));
-        assert_eq!(observation.linear_motion, None);
-    }
-
-    #[test]
-    fn invalid_blocks_keep_their_packet_position() {
-        let mut message = packet(vectors::OBJECT_UPDATE).message().clone();
-        let ObjectUpdate(update) = &mut message else { panic!("expected full object fixture") };
-        update.objects.truncate(2);
-        update.objects[0].id = UUID::nil();
-        let batch = decode_object_message(REGION, 1, OrderEvidence::Ambiguous, &message).expect("object batch");
-
-        assert_eq!(batch.invalid_blocks, 1);
-        assert!(batch.blocks[0].is_none());
-        assert!(matches!(batch.blocks[1], Some(ObjectOperation::Observe(observation)) if observation.parent == ParentUpdate::Root));
-    }
-
-    #[test]
-    fn non_object_messages_are_ignored() {
-        let message = Message::StartPingCheck(StartPingCheck::default());
-        assert!(decode_object_message(REGION, 1, OrderEvidence::Ordered(1), &message).is_none());
-    }
-
-    #[test]
-    fn attachment_state_decodes_wire_nibbles() {
-        assert_eq!(attachment_point(0), Some(None));
-        assert_eq!(attachment_point(0x10), Some(Some(AttachmentPoint::new(NonZeroU8::new(1).unwrap()))));
-        assert_eq!(attachment_point(0x18), Some(Some(AttachmentPoint::new(NonZeroU8::new(1).unwrap()))));
-        assert_eq!(attachment_point(0x80), Some(Some(AttachmentPoint::new(NonZeroU8::new(8).unwrap()))));
-        assert_eq!(attachment_point(0x88), Some(Some(AttachmentPoint::new(NonZeroU8::new(8).unwrap()))));
+        _ => ObjectClassification { kind: object_kind(pcode), shape: Some(None), appearance: Some(None) },
     }
 }
+#[cfg(test)]
+#[path = "object_tests.rs"]
+mod tests;

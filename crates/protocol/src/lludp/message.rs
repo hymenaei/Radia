@@ -12,17 +12,17 @@ use crate::{
     messages::common::{encode_quantized, write_finite_vector3, write_finite_vector4},
     messages::{
         AgentMovementComplete, AgentThrottle, AgentUpdate, ChatFromSimulator, ChatFromViewer, CompleteAgentMovement, CompletePingCheck,
-        ConfirmEnableSimulator, DisableSimulator, EnableSimulator, ImprovedTerseObjectUpdate, KillObject, LogoutReply, LogoutRequest,
-        MapBlockReply, MapBlockRequest, ObjectUpdate, ObjectUpdateCached, ObjectUpdateCompressed, PacketAck, PingId, RegionHandleRequest,
-        RegionHandshake, RegionHandshakeReply, RegionIdAndHandleReply, RequestMultipleObjects, StartPingCheck, TeleportCancel,
-        UseCircuitCode,
+        ConfirmEnableSimulator, DisableSimulator, EnableSimulator, ExtraParamUpdate, GenericStreamingMessage, ImprovedTerseObjectUpdate,
+        KillObject, LogoutReply, LogoutRequest, MapBlockReply, MapBlockRequest, ObjectExtraParams, ObjectUpdate, ObjectUpdateCached,
+        ObjectUpdateCompressed, PacketAck, PingId, RegionHandleRequest, RegionHandshake, RegionHandshakeReply, RegionIdAndHandleReply,
+        RequestMultipleObjects, StartPingCheck, TeleportCancel, UseCircuitCode,
     },
     messages::{
         agent_movement_complete, agent_throttle, agent_update, chat_from_simulator, chat_from_viewer, complete_agent_movement,
-        confirm_enable_simulator, enable_simulator, improved_terse_object_update, kill_object, logout_reply, logout_request,
-        map_block_reply, map_block_request, object_update, object_update_cached, object_update_compressed, packet_ack,
-        region_handle_request, region_handshake, region_handshake_reply, region_id_and_handle_reply, request_multiple_objects,
-        teleport_cancel, use_circuit_code,
+        confirm_enable_simulator, enable_simulator, generic_streaming_message, improved_terse_object_update, kill_object, logout_reply,
+        logout_request, map_block_reply, map_block_request, object_extra_params, object_update, object_update_cached,
+        object_update_compressed, packet_ack, region_handle_request, region_handshake, region_handshake_reply, region_id_and_handle_reply,
+        request_multiple_objects, teleport_cancel, use_circuit_code,
     },
     schema::{self, ids::*},
 };
@@ -39,6 +39,7 @@ const _: () = {
     assert!(size_of::<object_update_cached::CachedObjectReference>() <= 512);
     assert!(size_of::<kill_object::ObjectData>() <= 512);
     assert!(size_of::<request_multiple_objects::ObjectRequest>() <= 512);
+    assert!(size_of::<object_extra_params::ExtraParamUpdate>() <= 512);
     assert!(size_of::<packet_ack::Packets>() <= size_of::<BlockInstance>() + size_of::<FieldValue>());
     assert!(size_of::<logout_reply::InventoryData>() <= size_of::<BlockInstance>() + size_of::<FieldValue>());
     assert!(size_of::<map_block_reply::Data>() <= size_of::<BlockInstance>() + 9 * size_of::<FieldValue>());
@@ -90,6 +91,8 @@ enum TypedMessageId {
     ObjectUpdateCached,
     KillObject,
     RequestMultipleObjects,
+    ObjectExtraParams,
+    GenericStreamingMessage,
 }
 
 impl TypedMessageId {
@@ -123,6 +126,8 @@ impl TypedMessageId {
             OBJECT_UPDATE_CACHED => Self::ObjectUpdateCached,
             KILL_OBJECT => Self::KillObject,
             REQUEST_MULTIPLE_OBJECTS => Self::RequestMultipleObjects,
+            OBJECT_EXTRA_PARAMS => Self::ObjectExtraParams,
+            GENERIC_STREAMING_MESSAGE => Self::GenericStreamingMessage,
             _ => return None,
         })
     }
@@ -143,9 +148,12 @@ impl TypedMessageId {
             | Self::EnableSimulator
             | Self::DisableSimulator
             | Self::ConfirmEnableSimulator => AllocationStrategy::NoAlloc,
-            Self::RegionHandshake | Self::ObjectUpdate | Self::ObjectUpdateCompressed | Self::ImprovedTerseObjectUpdate => {
-                AllocationStrategy::Specialized
-            }
+            Self::RegionHandshake
+            | Self::ObjectUpdate
+            | Self::ObjectUpdateCompressed
+            | Self::ImprovedTerseObjectUpdate
+            | Self::ObjectExtraParams
+            | Self::GenericStreamingMessage => AllocationStrategy::Specialized,
             Self::TeleportCancel
             | Self::AgentMovementComplete
             | Self::PacketAck
@@ -193,6 +201,10 @@ pub enum Message {
     ObjectUpdateCached(ObjectUpdateCached),
     KillObject(KillObject),
     RequestMultipleObjects(RequestMultipleObjects),
+    /// Incremental ExtraParams changes for simulator-local objects.
+    ObjectExtraParams(ObjectExtraParams),
+    /// Method-tagged data streamed to the viewer.
+    GenericStreamingMessage(GenericStreamingMessage),
     Schema(SchemaMessage),
     /// Unrecognized message ID and payload bytes retained without decoding.
     Unknown {
@@ -240,6 +252,18 @@ impl From<TeleportCancel> for Message {
 impl From<RequestMultipleObjects> for Message {
     fn from(message: RequestMultipleObjects) -> Self {
         Self::RequestMultipleObjects(message)
+    }
+}
+
+impl From<ObjectExtraParams> for Message {
+    fn from(message: ObjectExtraParams) -> Self {
+        Self::ObjectExtraParams(message)
+    }
+}
+
+impl From<GenericStreamingMessage> for Message {
+    fn from(message: GenericStreamingMessage) -> Self {
+        Self::GenericStreamingMessage(message)
     }
 }
 
@@ -328,6 +352,13 @@ impl Message {
             Self::RequestMultipleObjects(message) => {
                 add_capacity(&mut bytes, message.objects.capacity(), size_of::<request_multiple_objects::ObjectRequest>());
             }
+            Self::ObjectExtraParams(message) => {
+                add_capacity(&mut bytes, message.object_data.capacity(), size_of::<ExtraParamUpdate>());
+                for update in &message.object_data {
+                    add_capacity(&mut bytes, update.data.capacity(), size_of::<u8>());
+                }
+            }
+            Self::GenericStreamingMessage(message) => add_capacity(&mut bytes, message.data.capacity(), size_of::<u8>()),
             Self::Schema(message) => add_schema_capacity(&mut bytes, message),
             Self::Unknown { payload, .. } => add_capacity(&mut bytes, payload.capacity(), size_of::<u8>()),
             Self::UseCircuitCode(_)
@@ -366,6 +397,7 @@ impl Message {
                 | Self::ImprovedTerseObjectUpdate(_)
                 | Self::ObjectUpdateCached(_)
                 | Self::KillObject(_)
+                | Self::ObjectExtraParams(_)
         )
     }
 
@@ -404,6 +436,8 @@ impl Message {
             Self::ObjectUpdateCached(_) => OBJECT_UPDATE_CACHED,
             Self::KillObject(_) => KILL_OBJECT,
             Self::RequestMultipleObjects(_) => REQUEST_MULTIPLE_OBJECTS,
+            Self::ObjectExtraParams(_) => OBJECT_EXTRA_PARAMS,
+            Self::GenericStreamingMessage(_) => GENERIC_STREAMING_MESSAGE,
             Self::Schema(message) => message.id(),
             Self::Unknown { id, .. } => *id,
         }
@@ -678,6 +712,8 @@ impl Message {
                     writer.u32(object.local_id);
                 }
             }
+            Self::ObjectExtraParams(message) => object_extra_params::encode(message, &mut writer)?,
+            Self::GenericStreamingMessage(message) => generic_streaming_message::encode(message, &mut writer)?,
             Self::Schema(message) => message.encode_payload(&mut writer)?,
             Self::Unknown { payload, .. } => writer.bytes(payload),
         }
@@ -887,6 +923,8 @@ impl Message {
             Some(TypedMessageId::ObjectUpdateCached) => Self::ObjectUpdateCached(object_update_cached::decode(&mut reader)?),
             Some(TypedMessageId::KillObject) => Self::KillObject(kill_object::decode(&mut reader)?),
             Some(TypedMessageId::RequestMultipleObjects) => Self::RequestMultipleObjects(request_multiple_objects::decode(&mut reader)?),
+            Some(TypedMessageId::ObjectExtraParams) => Self::ObjectExtraParams(object_extra_params::decode(&mut reader)?),
+            Some(TypedMessageId::GenericStreamingMessage) => Self::GenericStreamingMessage(generic_streaming_message::decode(&mut reader)?),
             None => {
                 if let Some(metadata) = schema::find_by_id(id) {
                     return Ok((Self::Schema(SchemaMessage::decode(metadata, payload)?), Vec::new()));
@@ -931,6 +969,12 @@ fn specialized_allocation_bound(id: MessageId, payload: &[u8]) -> Result<usize, 
         }
         IMPROVED_TERSE_OBJECT_UPDATE => {
             add_allocation_bytes(&mut allocation_bytes, improved_terse_object_update::preflight_allocation_bytes(payload)?)?;
+        }
+        OBJECT_EXTRA_PARAMS => {
+            add_allocation_bytes(&mut allocation_bytes, object_extra_params::preflight_allocation_bytes(payload)?)?;
+        }
+        GENERIC_STREAMING_MESSAGE => {
+            add_allocation_bytes(&mut allocation_bytes, generic_streaming_message::preflight_allocation_bytes(payload)?)?;
         }
         _ => return Err(LLUdpError::InvalidMessageId),
     }

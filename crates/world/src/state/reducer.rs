@@ -1,19 +1,22 @@
-use std::{collections::HashSet, num::NonZeroU32};
+use std::{collections::HashSet, num::NonZeroU32, sync::Arc};
 
 use base::UUID;
 use math::{Quat, Vec3};
 
 use super::journal::Change::{EntityAdded, EntityRebound, EntityTransferred, EntityUpdated};
+use super::journal::ChangeClasses;
 use super::{
-    AgentHandoff, Applied, ApplyError, ApplyOutcome, Binding, DeferredReason, Entity, EntityRemovalReason, Fences, FieldGroup,
-    FieldRejection, FieldRejectionReason, FieldStamp, Identity, Kind, LinearMotion, LocalAddress, MotionPatch, ObjectData,
-    ObjectObservation, ObjectPatch, Parent, ParentRejectionBarrier, ParentUpdate::Local, Pose, PoseState, Properties, PropertiesPatch,
-    Recovery, Region, RegionalStamp, Rejections, SitTarget, Stamp, Transform, UpdateAuthority, UpdateSource, World, newer_field,
-    newer_region_field, remove_index,
+    AgentHandoff, Appearance, Applied, ApplyError, ApplyOutcome, AvatarAppearance, Binding, DeferredReason, Entity, EntityRemovalReason,
+    Fences, FieldGroup, FieldRejection, FieldRejectionReason, FieldStamp, Identity, Kind, LinearMotion, LocalAddress, MotionPatch,
+    ObjectData, ObjectMedia, ObjectObservation, ObjectPatch, Parent, ParentRejectionBarrier, ParentUpdate::Local, Pose, PoseState,
+    Properties, PropertiesPatch, Recovery, Region, RegionalStamp, Rejections, RenderMaterials, SitTarget, Stamp, SurfaceAppearance,
+    Transform, UpdateAuthority, UpdateSource, World, newer_field, newer_region_field, remove_index,
 };
 
 use FieldRejectionReason::{InvalidRotation, ParentCycle, ParentDependsOnRejectedParent, UntrustedSource};
 use UpdateAuthority::{Tracked, Untracked};
+
+const UNKNOWN_COF_VERSION: i32 = -1;
 
 #[cfg(test)]
 use super::WorldLimits;
@@ -142,25 +145,26 @@ impl World {
             observation.pose = None;
         }
         reject_untrusted_observation_groups(&observation, existing, self, source.authority(), &mut rejections);
-        let current_data = existing.and_then(|entity| self.object(entity)).map(|object| *object.data);
-        let is_transfer = current_data.is_some_and(|data| data.binding.address.region != source.region);
-        let current_parent = current_data.map_or(Parent::Unknown, |data| data.parent);
+        let current_data = existing.and_then(|entity| self.object(entity)).map(|object| (*object.data).clone());
+        let is_transfer = current_data.as_ref().is_some_and(|data| data.binding.address.region != source.region);
+        let current_parent = current_data.as_ref().map_or(Parent::Unknown, |data| data.parent);
         let accepted_parent = apply_parent && !parent_cycle;
         let next_parent = if accepted_parent { parent } else { current_parent };
         let attachment_update_is_newer = observation.attachment_point.is_some()
-            && current_data.is_none_or(|data| newer_field(field_stamp, data.fences.attachment_point));
+            && current_data.as_ref().is_none_or(|data| newer_field(field_stamp, data.fences.attachment_point));
         let next_attachment_point = if attachment_update_is_newer {
             observation.attachment_point.expect("accepted attachment point update is present")
         } else {
-            current_data.and_then(|data| data.attachment_point)
+            current_data.as_ref().and_then(|data| data.attachment_point)
         };
         let attachment_frame = |parent: Parent| matches!(parent, Parent::Resolved(parent) if self.object(parent).is_some_and(|object| object.kind() == Kind::Avatar));
         let frame_changed = is_transfer
             || (accepted_parent && parent_frame_identity_changed(self, current_parent, next_parent))
             || (attachment_update_is_newer
-                && next_attachment_point != current_data.and_then(|data| data.attachment_point)
+                && next_attachment_point != current_data.as_ref().and_then(|data| data.attachment_point)
                 && (attachment_frame(current_parent) || attachment_frame(next_parent)));
         let next_frame_generation = current_data
+            .as_ref()
             .map(|data| {
                 if frame_changed {
                     data.frame_generation.checked_add(1).ok_or(ApplyError::FrameGenerationExhausted)
@@ -170,7 +174,7 @@ impl World {
             })
             .transpose()?;
         let pose_is_accepted = observation.pose.is_some_and(|pose| pose.position.is_some() || pose.rotation.is_some())
-            && (is_transfer || current_data.is_none_or(|data| newer_field(field_stamp, data.fences.pose)));
+            && (is_transfer || current_data.as_ref().is_none_or(|data| newer_field(field_stamp, data.fences.pose)));
         let pose_affects_descendants = existing.is_some_and(|entity| {
             self.object(entity)
                 .is_some_and(|object| pose_update_changes_observable(&object.data, object.transform(), observation.pose, field_stamp))
@@ -205,7 +209,7 @@ impl World {
                 &mut changes,
                 &mut recovery_targets,
                 &mut recovery_cancellations,
-            )?;
+            );
         }
 
         let (entity, was_transfer) = match existing {
@@ -218,9 +222,9 @@ impl World {
                 if old_binding.address != address {
                     recovery_cancellations.push(old_binding.address);
                     changes.push(if transfer {
-                        EntityTransferred { id: observation.id, from: old_binding.address, to: address }
+                        EntityTransferred { id: observation.id, entity, from: old_binding.address, to: address }
                     } else {
-                        EntityRebound { id: observation.id, from: old_binding.address, to: address }
+                        EntityRebound { id: observation.id, entity, from: old_binding.address, to: address }
                     });
                     self.addresses.remove(&old_binding.address);
                     if old_binding.address.region != address.region {
@@ -264,6 +268,11 @@ impl World {
                     angular_velocity: None,
                     shape: None,
                     appearance: None,
+                    surface_appearance: None,
+                    render_materials: None,
+                    gltf_material_overrides: None,
+                    object_media: None,
+                    avatar_appearance: None,
                     attachment_point: None,
                     sit_target: None,
                     frame_generation: 0,
@@ -273,7 +282,9 @@ impl World {
                     properties: Properties::default(),
                     fences: Fences::default(),
                 };
-                apply_observation_values(&mut data, &mut transform, &observation, source, stamp);
+                let surface_appearance = observation.surface_appearance.take();
+                let render_materials = observation.render_materials.take();
+                apply_observation_values(&mut data, &mut transform, &observation, surface_appearance, render_materials, source, stamp);
                 if let Some(pose) = observation.pose {
                     mark_pose_components(&mut data, pose);
                 }
@@ -281,6 +292,7 @@ impl World {
                 self.tombstones.remove(&address);
                 let entity = Entity(self.ecs.spawn((identity, observation.kind, transform, data)), self.id);
                 self.entities.insert(observation.id, entity);
+                assert!(self.object_ids.insert(observation.id), "UUID ordering index already contains a new entity ID");
                 self.addresses.insert(address, entity);
                 self.region_entities.entry(source.region).or_default().insert(entity);
                 self.apply_parent(entity, parent, &mut recovery_targets);
@@ -292,7 +304,7 @@ impl World {
                     &mut recovery_targets,
                     &mut recovery_cancellations,
                 );
-                changes.push(EntityAdded { id: observation.id, address });
+                changes.push(EntityAdded { id: observation.id, entity, address });
                 return Ok(self
                     .finish(ApplyOutcome::Introduced(entity), changes, recovery(recovery_targets, self.limits.max_recovery_targets))
                     .with_recovery_cancellations(recovery_cancellations)
@@ -319,7 +331,9 @@ impl World {
         } else if parent_cycle && source.authority() == Tracked {
             data.parent_rejection_barrier = Some(ParentRejectionBarrier { region: source.region, stamp });
         }
-        apply_observation_values(&mut data, &mut transform, &observation, source, stamp);
+        let surface_appearance = observation.surface_appearance.take();
+        let render_materials = observation.render_materials.take();
+        apply_observation_values(&mut data, &mut transform, &observation, surface_appearance, render_materials, source, stamp);
         if pose_is_accepted {
             if let Some(pose) = observation.pose {
                 mark_pose_components(&mut data, pose);
@@ -349,9 +363,12 @@ impl World {
         if frame_changed || parent_changed || pose_affects_descendants {
             self.invalidate_subtree(entity, &mut changes);
         }
-        let object_changed = before_observable.is_none_or(|before| self.observable_state(entity) != before);
-        if object_changed {
-            changes.push(EntityUpdated(observation.id));
+        if let Some(before) = before_observable {
+            let next = self.observable_state(entity);
+            let classes = before.changes_to(&next);
+            if !classes.is_empty() {
+                changes.push(EntityUpdated { id: observation.id, entity, classes });
+            }
         }
         let visible_change = !changes.is_empty();
         Ok(self
@@ -393,6 +410,10 @@ impl World {
                 angular_velocity: handoff.angular_velocity,
                 scale: handoff.scale,
                 attachment_point: None,
+                shape: None,
+                appearance: None,
+                surface_appearance: None,
+                render_materials: None,
             },
             true,
         )
@@ -418,14 +439,52 @@ impl World {
             || patch.angular_velocity.is_some()
             || patch.scale.is_some()
             || patch.parent.is_some()
-            || patch.attachment_point.is_some();
-        let (data, transform, kind, object_parent) = {
+            || patch.attachment_point.is_some()
+            || patch.shape.is_some()
+            || patch.appearance.is_some()
+            || patch.surface_appearance.is_some()
+            || patch.render_materials.is_some()
+            || patch.gltf_material_overrides.is_some()
+            || patch.avatar_appearance.is_some();
+        let before_observable = self.observable_state(entity);
+        let (data, transform, kind, object_parent, object_id) = {
             let object = self.object(entity).expect("address index contains a live entity");
-            (*object.data, object.transform(), object.kind(), object.parent())
+            ((*object.data).clone(), object.transform(), object.kind(), object.parent(), object.identity().id())
         };
         let incoming_rotation = patch.pose.and_then(|pose| pose.rotation);
         let current_rotation = transform.rotation();
         let (mut patch, mut rejections) = validate_patch(patch);
+        if patch.object_media.is_some() && (kind != Kind::Object || data.appearance != Some(Appearance::Surface)) {
+            rejections.push(FieldRejection {
+                group: FieldGroup::ObjectMedia,
+                reason: FieldRejectionReason::InvalidValue { field: "object_media" },
+            });
+            patch.object_media = None;
+        }
+        if patch.avatar_appearance.is_some() && kind != Kind::Avatar {
+            rejections.push(FieldRejection {
+                group: FieldGroup::AvatarAppearance,
+                reason: FieldRejectionReason::InvalidValue { field: "avatar_appearance" },
+            });
+            patch.avatar_appearance = None;
+        }
+        if patch.gltf_material_overrides.is_some() && (kind != Kind::Object || data.appearance != Some(Appearance::Surface)) {
+            rejections.push(FieldRejection {
+                group: FieldGroup::GltfMaterialOverrides,
+                reason: FieldRejectionReason::InvalidValue { field: "gltf_material_overrides" },
+            });
+            patch.gltf_material_overrides = None;
+        }
+        let stale_avatar_appearance = self.self_agent == Some(object_id)
+            && patch.avatar_appearance.as_ref().is_some_and(|update| {
+                let incoming = update.cof_version().unwrap_or(UNKNOWN_COF_VERSION);
+                let current = data.avatar_appearance.as_deref().and_then(AvatarAppearance::cof_version).unwrap_or(UNKNOWN_COF_VERSION);
+                incoming <= current
+            });
+        if stale_avatar_appearance {
+            rejections.push(FieldRejection { group: FieldGroup::AvatarAppearance, reason: FieldRejectionReason::StaleVersion });
+            patch.avatar_appearance = None;
+        }
         if let Some(pose) = patch.pose.as_mut() {
             retain_stored_orientation(current_rotation, incoming_rotation, &mut pose.rotation);
         }
@@ -474,6 +533,47 @@ impl World {
         let parent_is_newer = parent_candidate && !parent_cycle;
         let next_parent = if parent_is_newer { parent.expect("newer parent update was resolved") } else { data.parent };
         let attachment_update_is_newer = patch.attachment_point.is_some() && newer_field(field_stamp, data.fences.attachment_point);
+        let shape_update_is_newer = patch.shape.is_some() && newer_region_field(source.region, field_stamp, data.fences.shape);
+        let appearance_update_is_newer =
+            patch.appearance.is_some() && newer_region_field(source.region, field_stamp, data.fences.appearance);
+        let texture_entry_update_is_newer = kind != Kind::Avatar
+            && patch.surface_appearance.is_some()
+            && newer_region_field(source.region, field_stamp, data.fences.texture_entry);
+        let render_materials_update_is_newer = kind != Kind::Avatar
+            && patch.render_materials.is_some()
+            && newer_region_field(source.region, field_stamp, data.fences.render_materials);
+        let gltf_material_overrides_update_is_newer =
+            patch.gltf_material_overrides.is_some() && newer_region_field(source.region, field_stamp, data.fences.gltf_material_overrides);
+        let avatar_appearance_update_is_newer =
+            patch.avatar_appearance.is_some() && newer_region_field(source.region, field_stamp, data.fences.avatar_appearance);
+        let mut next_avatar_appearance = avatar_appearance_update_is_newer.then(|| {
+            let mut appearance = data.avatar_appearance.as_deref().cloned().unwrap_or_default();
+            appearance.apply(patch.avatar_appearance.take().expect("newer avatar appearance update is present"));
+            appearance
+        });
+        let mut object_media_update_is_newer = source.authority() == Tracked
+            && patch
+                .object_media
+                .as_ref()
+                .is_some_and(|update| data.object_media.as_deref().is_none_or(|current| update.version() > current.version()));
+        let mut next_object_media = object_media_update_is_newer.then(|| {
+            let mut media = data.object_media.as_deref().cloned().unwrap_or_default();
+            media.apply(patch.object_media.as_ref().expect("newer ObjectMedia update is present"));
+            media
+        });
+        if let Some(next) = next_object_media.as_ref() {
+            let current_bytes = data.object_media.as_deref().map_or(0, ObjectMedia::retained_bytes);
+            let next_total = self.object_media_bytes.saturating_sub(current_bytes).saturating_add(next.retained_bytes());
+            if next_total > super::MAX_OBJECT_MEDIA_BYTES {
+                rejections.push(FieldRejection {
+                    group: FieldGroup::ObjectMedia,
+                    reason: FieldRejectionReason::ResourceLimit { field: "object_media" },
+                });
+                patch.object_media = None;
+                next_object_media = None;
+                object_media_update_is_newer = false;
+            }
+        }
         let next_attachment_point = if attachment_update_is_newer {
             patch.attachment_point.expect("accepted attachment point update is present")
         } else {
@@ -515,11 +615,23 @@ impl World {
                 .is_some_and(|value| newer_field(field_stamp, data.fences.angular_velocity) && data.angular_velocity != Some(value))
             || patch.scale.is_some_and(|value| newer_field(field_stamp, data.fences.scale) && transform.scale() != Some(value))
             || (attachment_update_is_newer && data.attachment_point != next_attachment_point)
+            || (shape_update_is_newer && data.shape != patch.shape.expect("newer shape update is present"))
+            || (appearance_update_is_newer && data.appearance != patch.appearance.expect("newer appearance update is present"))
+            || (texture_entry_update_is_newer && data.surface_appearance.as_deref() != patch.surface_appearance.as_ref())
+            || (render_materials_update_is_newer
+                && data.render_materials.as_deref()
+                    != patch.render_materials.as_ref().and_then(|value| (!value.is_empty()).then_some(value)))
+            || (gltf_material_overrides_update_is_newer
+                && data.gltf_material_overrides.as_deref()
+                    != patch.gltf_material_overrides.as_ref().and_then(|value| (!value.is_empty()).then_some(value)))
+            || (avatar_appearance_update_is_newer && data.avatar_appearance.as_deref() != next_avatar_appearance.as_ref())
+            || (object_media_update_is_newer && next_object_media.as_ref() != data.object_media.as_deref())
             || parent_changed;
         if observable_change {
             self.ensure_revision_available()?;
         }
         let mut changed = false;
+        let mut object_media_size_delta = None;
         let mut transform = *self.transform(entity);
         let mut data = self.data_mut(entity);
         changed |= parent_changed;
@@ -570,6 +682,54 @@ impl World {
             data.attachment_point = value;
             data.fences.attachment_point = Some(field_stamp);
         }
+        if shape_update_is_newer {
+            let value = patch.shape.expect("newer shape update is present");
+            changed |= data.shape != value;
+            data.shape = value;
+            data.fences.shape = Some(RegionalStamp { region: source.region, stamp: field_stamp });
+        }
+        if appearance_update_is_newer {
+            let value = patch.appearance.expect("newer appearance update is present");
+            changed |= data.appearance != value;
+            data.appearance = value;
+            data.fences.appearance = Some(RegionalStamp { region: source.region, stamp: field_stamp });
+        }
+        if texture_entry_update_is_newer {
+            let value = patch.surface_appearance.take().expect("newer TextureEntry update is present");
+            if data.surface_appearance.as_deref() != Some(&value) {
+                changed = true;
+                data.surface_appearance = Some(Arc::new(value));
+            }
+            data.fences.texture_entry = Some(RegionalStamp { region: source.region, stamp: field_stamp });
+        }
+        if render_materials_update_is_newer {
+            let value = patch.render_materials.take().expect("newer RenderMaterials update is present");
+            if data.render_materials.as_deref() != (!value.is_empty()).then_some(&value) {
+                changed = true;
+                data.render_materials = (!value.is_empty()).then(|| Arc::new(value));
+            }
+            data.fences.render_materials = Some(RegionalStamp { region: source.region, stamp: field_stamp });
+        }
+        if gltf_material_overrides_update_is_newer {
+            let value = patch.gltf_material_overrides.take().expect("newer GLTF material override update is present");
+            if data.gltf_material_overrides.as_deref() != (!value.is_empty()).then_some(&value) {
+                changed = true;
+                data.gltf_material_overrides = (!value.is_empty()).then(|| Arc::new(value));
+            }
+            data.fences.gltf_material_overrides = Some(RegionalStamp { region: source.region, stamp: field_stamp });
+        }
+        if avatar_appearance_update_is_newer {
+            let value = next_avatar_appearance.take().expect("newer avatar appearance was merged");
+            changed |= data.avatar_appearance.as_deref() != Some(&value);
+            data.avatar_appearance = Some(Arc::new(value));
+            data.fences.avatar_appearance = Some(RegionalStamp { region: source.region, stamp: field_stamp });
+        }
+        if object_media_update_is_newer {
+            let value = next_object_media.take().expect("newer ObjectMedia update has been applied");
+            changed |= data.object_media.as_deref() != Some(&value);
+            object_media_size_delta = Some((data.object_media.as_deref().map_or(0, ObjectMedia::retained_bytes), value.retained_bytes()));
+            data.object_media = Some(Arc::new(value));
+        }
         if pose_is_accepted {
             if let Some(pose) = patch.pose {
                 mark_pose_components(&mut data, pose);
@@ -588,6 +748,9 @@ impl World {
             data.binding.fence = data.binding.fence.max(stamp);
         }
         drop(data);
+        if let Some((old_bytes, new_bytes)) = object_media_size_delta {
+            self.object_media_bytes = self.object_media_bytes.saturating_sub(old_bytes).saturating_add(new_bytes);
+        }
         *self.transform_mut(entity) = transform;
         let mut changes = Vec::new();
         let mut recovery_targets = Vec::new();
@@ -596,8 +759,10 @@ impl World {
             self.apply_parent(entity, parent, &mut recovery_targets);
         }
         let id = self.object(entity).expect("address index contains a live entity").identity.id;
-        if changed {
-            changes.push(EntityUpdated(id));
+        let next = self.observable_state(entity);
+        let classes = before_observable.changes_to(&next);
+        if !classes.is_empty() {
+            changes.push(EntityUpdated { id, entity, classes });
         }
         if frame_changed || parent_changed || pose_affects_descendants {
             self.invalidate_subtree(entity, &mut changes);
@@ -670,7 +835,7 @@ impl World {
                 data.binding.fence = data.binding.fence.max(stamp);
             }
         }
-        let changes = if changed { vec![EntityUpdated(id)] } else { Vec::new() };
+        let changes = if changed { vec![EntityUpdated { id, entity, classes: ChangeClasses::PROPERTIES }] } else { Vec::new() };
         Ok(self
             .finish(if changed { ApplyOutcome::Updated(entity) } else { ApplyOutcome::Unchanged }, changes, None)
             .with_rejections(rejections))
@@ -738,7 +903,11 @@ impl World {
                 data.binding.fence = data.binding.fence.max(stamp);
             }
         }
-        let changes = if observable_change { vec![EntityUpdated(id)] } else { Vec::new() };
+        let changes = if observable_change {
+            vec![EntityUpdated { id, entity, classes: ChangeClasses::RELATIONSHIP | ChangeClasses::TRANSFORM_MOTION }]
+        } else {
+            Vec::new()
+        };
         Ok(self
             .finish(if observable_change { ApplyOutcome::Updated(entity) } else { ApplyOutcome::Unchanged }, changes, None)
             .with_rejections(rejections))
@@ -749,13 +918,17 @@ impl World {
         if source.authority() == Untracked {
             return Ok(Applied::unchanged());
         }
-        let Some(stamp) = source.stamp() else {
-            return Ok(Applied::deferred(
-                DeferredReason::AmbiguousOrder,
-                recovery(vec![LocalAddress::new(source.region, local_id)], self.limits.max_recovery_targets),
-            ));
-        };
         let address = LocalAddress::new(source.region, local_id);
+        if self
+            .addresses
+            .get(&address)
+            .is_some_and(|entity| self.object(*entity).is_some_and(|object| self.self_agent == Some(object.identity.id)))
+        {
+            return Ok(Applied::unchanged());
+        }
+        let Some(stamp) = source.stamp() else {
+            return Ok(Applied::deferred(DeferredReason::AmbiguousOrder, recovery(vec![address], self.limits.max_recovery_targets)));
+        };
         if let Some(entity) = self.addresses.get(&address).copied() {
             let (id, binding_fence) = {
                 let object = self.object(entity).expect("address index contains a live entity");
@@ -777,7 +950,7 @@ impl World {
                 &mut changes,
                 &mut recovery_targets,
                 &mut recovery_cancellations,
-            )?;
+            );
             return Ok(self
                 .finish(ApplyOutcome::Removed(id), changes, recovery(recovery_targets, self.limits.max_recovery_targets))
                 .with_recovery_cancellations(recovery_cancellations));
@@ -858,7 +1031,7 @@ impl World {
         if object.address() != address {
             return true;
         }
-        let data = *object.data;
+        let data = (*object.data).clone();
         let transform = object.transform();
         let field_stamp = FieldStamp { authority: source.authority(), stamp };
         let observation_changes_fields = pose_update_changes_observable(&data, transform, observation.pose, field_stamp)
@@ -874,7 +1047,23 @@ impl World {
             || observation.scale.is_some_and(|value| newer_field(field_stamp, data.fences.scale) && transform.scale() != Some(value))
             || observation
                 .attachment_point
-                .is_some_and(|value| newer_field(field_stamp, data.fences.attachment_point) && data.attachment_point != value);
+                .is_some_and(|value| newer_field(field_stamp, data.fences.attachment_point) && data.attachment_point != value)
+            || observation
+                .shape
+                .is_some_and(|value| newer_region_field(source.region, field_stamp, data.fences.shape) && data.shape != value)
+            || observation
+                .appearance
+                .is_some_and(|value| newer_region_field(source.region, field_stamp, data.fences.appearance) && data.appearance != value)
+            || (observation.kind != Kind::Avatar
+                && observation.surface_appearance.as_ref().is_some_and(|value| {
+                    newer_region_field(source.region, field_stamp, data.fences.texture_entry)
+                        && data.surface_appearance.as_deref() != Some(value)
+                }))
+            || (observation.kind != Kind::Avatar
+                && observation.render_materials.as_ref().is_some_and(|value| {
+                    newer_region_field(source.region, field_stamp, data.fences.render_materials)
+                        && data.render_materials.as_deref() != (!value.is_empty()).then_some(value)
+                }));
 
         if observation_changes_fields || (apply_parent && object.parent() != parent) {
             return true;
@@ -1045,6 +1234,11 @@ fn validate_patch(mut patch: ObjectPatch) -> (ObjectPatch, Rejections) {
         rejections.push(FieldRejection { group: FieldGroup::Scale, reason });
         patch.scale = None;
     }
+    if patch.object_media.as_ref().is_some_and(|update| update.validate().is_err()) {
+        rejections
+            .push(FieldRejection { group: FieldGroup::ObjectMedia, reason: FieldRejectionReason::InvalidValue { field: "object_media" } });
+        patch.object_media = None;
+    }
     (patch, rejections)
 }
 
@@ -1092,6 +1286,18 @@ fn reject_untrusted_observation_groups(
     if observation.attachment_point.is_some() && field_is_protected(authority, fences.attachment_point) {
         rejections.push(FieldRejection { group: FieldGroup::AttachmentPoint, reason: UntrustedSource });
     }
+    if observation.shape.is_some() && field_is_protected(authority, fences.shape.map(|fence| fence.stamp)) {
+        rejections.push(FieldRejection { group: FieldGroup::Shape, reason: UntrustedSource });
+    }
+    if observation.appearance.is_some() && field_is_protected(authority, fences.appearance.map(|fence| fence.stamp)) {
+        rejections.push(FieldRejection { group: FieldGroup::Appearance, reason: UntrustedSource });
+    }
+    if observation.surface_appearance.is_some() && field_is_protected(authority, fences.texture_entry.map(|fence| fence.stamp)) {
+        rejections.push(FieldRejection { group: FieldGroup::TextureEntry, reason: UntrustedSource });
+    }
+    if observation.render_materials.is_some() && field_is_protected(authority, fences.render_materials.map(|fence| fence.stamp)) {
+        rejections.push(FieldRejection { group: FieldGroup::RenderMaterials, reason: UntrustedSource });
+    }
 }
 
 fn reject_untrusted_patch_groups(patch: &ObjectPatch, fences: Fences, authority: UpdateAuthority, rejections: &mut Rejections) {
@@ -1115,6 +1321,27 @@ fn reject_untrusted_patch_groups(patch: &ObjectPatch, fences: Fences, authority:
     if patch.attachment_point.is_some() && field_is_protected(authority, fences.attachment_point) {
         rejections.push(FieldRejection { group: FieldGroup::AttachmentPoint, reason: UntrustedSource });
     }
+    if patch.shape.is_some() && field_is_protected(authority, fences.shape.map(|fence| fence.stamp)) {
+        rejections.push(FieldRejection { group: FieldGroup::Shape, reason: UntrustedSource });
+    }
+    if patch.appearance.is_some() && field_is_protected(authority, fences.appearance.map(|fence| fence.stamp)) {
+        rejections.push(FieldRejection { group: FieldGroup::Appearance, reason: UntrustedSource });
+    }
+    if patch.surface_appearance.is_some() && field_is_protected(authority, fences.texture_entry.map(|fence| fence.stamp)) {
+        rejections.push(FieldRejection { group: FieldGroup::TextureEntry, reason: UntrustedSource });
+    }
+    if patch.render_materials.is_some() && field_is_protected(authority, fences.render_materials.map(|fence| fence.stamp)) {
+        rejections.push(FieldRejection { group: FieldGroup::RenderMaterials, reason: UntrustedSource });
+    }
+    if patch.gltf_material_overrides.is_some() && field_is_protected(authority, fences.gltf_material_overrides.map(|fence| fence.stamp)) {
+        rejections.push(FieldRejection { group: FieldGroup::GltfMaterialOverrides, reason: UntrustedSource });
+    }
+    if patch.avatar_appearance.is_some() && field_is_protected(authority, fences.avatar_appearance.map(|fence| fence.stamp)) {
+        rejections.push(FieldRejection { group: FieldGroup::AvatarAppearance, reason: UntrustedSource });
+    }
+    if patch.object_media.is_some() && authority == Untracked {
+        rejections.push(FieldRejection { group: FieldGroup::ObjectMedia, reason: UntrustedSource });
+    }
 }
 
 fn is_exact_negation(left: Quat, right: Quat) -> bool {
@@ -1125,6 +1352,8 @@ fn apply_observation_values(
     data: &mut ObjectData,
     transform: &mut Transform,
     observation: &ObjectObservation,
+    surface_appearance: Option<SurfaceAppearance>,
+    render_materials: Option<RenderMaterials>,
     source: UpdateSource,
     stamp: Stamp,
 ) {
@@ -1168,6 +1397,36 @@ fn apply_observation_values(
         data.attachment_point = value;
         data.fences.attachment_point = Some(field_stamp);
     }
+    if let Some(value) = observation.shape
+        && newer_region_field(source.region, field_stamp, data.fences.shape)
+    {
+        data.shape = value;
+        data.fences.shape = Some(RegionalStamp { region: source.region, stamp: field_stamp });
+    }
+    if let Some(value) = observation.appearance
+        && newer_region_field(source.region, field_stamp, data.fences.appearance)
+    {
+        data.appearance = value;
+        data.fences.appearance = Some(RegionalStamp { region: source.region, stamp: field_stamp });
+    }
+    if let Some(value) = surface_appearance
+        && observation.kind != Kind::Avatar
+        && newer_region_field(source.region, field_stamp, data.fences.texture_entry)
+    {
+        if data.surface_appearance.as_deref() != Some(&value) {
+            data.surface_appearance = Some(Arc::new(value));
+        }
+        data.fences.texture_entry = Some(RegionalStamp { region: source.region, stamp: field_stamp });
+    }
+    if let Some(value) = render_materials
+        && observation.kind != Kind::Avatar
+        && newer_region_field(source.region, field_stamp, data.fences.render_materials)
+    {
+        if data.render_materials.as_deref() != (!value.is_empty()).then_some(&value) {
+            data.render_materials = (!value.is_empty()).then(|| Arc::new(value));
+        }
+        data.fences.render_materials = Some(RegionalStamp { region: source.region, stamp: field_stamp });
+    }
 }
 
 fn patch_motion(current: &mut LinearMotion, patch: MotionPatch) -> bool {
@@ -1199,9 +1458,9 @@ mod tests {
     use crate::{
         AgentHandoff,
         ApplyError::RevisionExhausted,
-        ApplyOutcome::{Deferred, RegionAdopted, TombstoneRecorded},
+        ApplyOutcome::{Deferred, Introduced, RegionAdopted, TombstoneRecorded},
         DeferredReason::AmbiguousOrder,
-        LinearMotion, ObjectObservation,
+        LinearMotion, MediaEntry, ObjectMediaUpdate, ObjectObservation,
         OrderEvidence::Ordered,
         ParentUpdate::Root,
         Pose, WorldRevision,
@@ -1244,6 +1503,10 @@ mod tests {
             angular_velocity: None,
             scale: Some(Vec3::splat(2.0)),
             attachment_point: None,
+            shape: None,
+            appearance: None,
+            surface_appearance: None,
+            render_materials: None,
         };
         let introduced = world.observe_object(observation).unwrap();
         let ApplyOutcome::Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };
@@ -1319,10 +1582,15 @@ mod tests {
             angular_velocity: Some(Vec3::Z),
             scale: Some(Vec3::splat(1.5)),
             attachment_point: None,
+            shape: None,
+            appearance: None,
+            surface_appearance: None,
+            render_materials: None,
         };
+        let source_local_id = observation.local_id;
         let introduced = world.observe_object(observation).unwrap();
         let ApplyOutcome::Introduced(agent) = introduced.outcome else { panic!("expected agent introduction") };
-        let source_address = LocalAddress::new(source_region, observation.local_id);
+        let source_address = LocalAddress::new(source_region, source_local_id);
         let destination_address = LocalAddress::new(destination, NonZeroU32::new(9).unwrap());
         world.journal.revision = WorldRevision(u64::MAX);
 
@@ -1388,12 +1656,55 @@ mod tests {
                 angular_velocity: None,
                 scale: None,
                 attachment_point: None,
+                shape: None,
+                appearance: None,
+                surface_appearance: None,
+                render_materials: None,
             })
             .unwrap();
 
         assert_eq!(result.outcome, ApplyOutcome::Unchanged);
         assert_eq!(result.recovery, None);
         assert_eq!(world.entity(UUID::from_u128(20)), None);
+    }
+
+    #[test]
+    fn object_media_respects_retained_budget() {
+        let region = Region::new(24);
+        let mut world = test_world(&[region]);
+        let local_id = NonZeroU32::new(1).unwrap();
+        let object = ObjectObservation {
+            source: UpdateSource::new(region, 1, Ordered(1), 0),
+            id: UUID::from_u128(24),
+            local_id,
+            kind: Kind::Object,
+            parent: Root,
+            pose: None,
+            linear_motion: None,
+            angular_velocity: None,
+            scale: None,
+            attachment_point: None,
+            shape: None,
+            appearance: Some(Some(Appearance::Surface)),
+            surface_appearance: None,
+            render_materials: None,
+        };
+        let introduced = world.observe_object(object).unwrap();
+        let Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };
+        world.object_media_bytes = super::super::MAX_OBJECT_MEDIA_BYTES;
+
+        let update = ObjectMediaUpdate::new(1, vec![Some(MediaEntry::default())]).unwrap();
+        let result = world
+            .patch_object(ObjectPatch {
+                object_media: Some(update),
+                ..ObjectPatch::new(UpdateSource::new(region, 3, Ordered(3), 0), local_id)
+            })
+            .unwrap();
+
+        assert!(result.rejections.iter().any(|rejection| *rejection
+            == FieldRejection { group: FieldGroup::ObjectMedia, reason: FieldRejectionReason::ResourceLimit { field: "object_media" } }));
+        assert_eq!(world.object(entity).unwrap().object_media(), None);
+        assert_eq!(world.object_media_bytes, super::super::MAX_OBJECT_MEDIA_BYTES);
     }
 
     #[test]

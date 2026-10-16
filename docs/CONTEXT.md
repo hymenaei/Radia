@@ -1,4 +1,4 @@
-This file records Second Life domain terms and protocol behavior. `docs/ARCHITECTURE.md` records current crate ownership.
+This file records Second Life domain terms and protocol behavior. `docs/architecture.md` records current crate ownership.
 
 ## Language
 

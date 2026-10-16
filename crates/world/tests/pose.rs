@@ -5,14 +5,14 @@ use math::{DVec3, Quat, Vec3};
 use world::{
     Applied,
     ApplyOutcome::{Introduced, RegionAdopted, RegionPatched, Removed, Unchanged, Updated},
-    AttachmentPoint, CoordinateFrame, Entity, Kind,
+    AttachmentPoint, CoordinateFrame, Entity, FieldGroup, FieldRejectionReason, Kind,
     Kind::{Avatar, Object},
     LocalAddress, ObjectObservation, ObjectPatch,
     OrderEvidence::Ordered,
     Parent, ParentUpdate,
     ParentUpdate::{Local, Root},
-    Pose, PoseError, PoseState, Region, RegionHandle, RegionInfo, SitTarget, UnresolvedReason, UpdateSource, World, WorldLimits, WorldPose,
-    WorldTransformState,
+    Pose, PoseError, PoseState, Region, RegionHandle, RegionInfo, SitTarget, UnresolvedReason, UpdateAuthority, UpdateSource, World,
+    WorldLimits, WorldPose, WorldTransformState,
 };
 
 fn limits(entities: usize) -> WorldLimits {
@@ -59,6 +59,10 @@ fn observation(region: Region, order: u64, id: u128, local: u32, kind: Kind, par
         angular_velocity: None,
         scale: None,
         attachment_point: None,
+        shape: None,
+        appearance: None,
+        surface_appearance: None,
+        render_materials: None,
     }
 }
 
@@ -194,7 +198,7 @@ fn pending_parent_is_first() {
 }
 
 #[test]
-fn linkset_composes_rotation_without_parent_scale() {
+fn linkset_rotation_ignores_parent_scale() {
     let region = Region::new(2);
     let origin = DVec3::new(100.0, 200.0, 0.0);
     let mut world = world_with_origin(region, origin, 4);
@@ -378,7 +382,7 @@ fn parent_change_requires_fresh_pose() {
 }
 
 #[test]
-fn partial_pose_updates_track_frame_independently() {
+fn partial_pose_frames_update_independently() {
     let region = Region::new(40);
     let mut world = world_with_origin(region, DVec3::ZERO, 4);
     let first_parent = introduced(
@@ -448,7 +452,7 @@ fn partial_pose_replaces_detach_snapshot() {
 }
 
 #[test]
-fn removed_seat_keeps_avatar_pose() {
+fn removed_seat_keeps_avatar_pending() {
     let region = Region::new(42);
     let mut world = world_with_origin(region, DVec3::new(100.0, 0.0, 0.0), 3);
     let seat = introduced(
@@ -457,17 +461,52 @@ fn removed_seat_keeps_avatar_pose() {
     let avatar = introduced(
         world.observe_object(with_pose(observation(region, 2, 46, 2, Avatar, Local(local_id(1))), Vec3::X, Quat::IDENTITY)).unwrap(),
     );
-    let PoseState::Resolved(before) = world.object(avatar).unwrap().world_pose().unwrap() else { panic!("expected seated pose") };
-
     assert_eq!(world.remove_object(source(region, 3), local_id(1)).unwrap().outcome, Removed(uuid(45)));
 
     assert!(world.object(seat).is_none());
     let avatar = world.object(avatar).unwrap();
-    assert_eq!(avatar.parent(), Parent::Root);
-    assert_eq!(
-        avatar.world_pose().unwrap(),
-        PoseState::Provisional { pose: before, reason: UnresolvedReason::PoseNotValidForCurrentFrame }
+    assert_eq!(avatar.parent(), Parent::Pending { address: address(region, 1), expected_uuid: Some(uuid(45)) });
+    assert_eq!(avatar.world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::PendingParent));
+}
+
+#[test]
+fn seat_kill_requires_fresh_unseat() {
+    let region = Region::new(42);
+    let mut world = world_with_origin(region, DVec3::new(100.0, 0.0, 0.0), 3);
+    let seat = introduced(
+        world.observe_object(with_pose(observation(region, 1, 45, 1, Object, Root), Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY)).unwrap(),
     );
+    let avatar = introduced(
+        world.observe_object(with_pose(observation(region, 2, 46, 2, Avatar, Local(local_id(1))), Vec3::X, Quat::IDENTITY)).unwrap(),
+    );
+    assert_eq!(world.remove_object(source(region, 3), local_id(1)).unwrap().outcome, Removed(uuid(45)));
+    assert!(world.object(seat).is_none());
+
+    let mut stale_unseat = ObjectPatch::new(source(region, 3), local_id(2));
+    stale_unseat.parent = Some(Root);
+    assert_eq!(world.patch_object(stale_unseat).unwrap().outcome, Unchanged);
+    assert_eq!(world.object(avatar).unwrap().parent(), Parent::Pending { address: address(region, 1), expected_uuid: Some(uuid(45)) });
+    assert_eq!(world.object(avatar).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::PendingParent));
+
+    let untracked_source = source(region, 100).with_authority(UpdateAuthority::Untracked);
+    let mut untracked_unseat = ObjectPatch::new(untracked_source, local_id(2));
+    untracked_unseat.parent = Some(Root);
+    let untracked = world.patch_object(untracked_unseat).unwrap();
+    assert_eq!(untracked.outcome, Unchanged);
+    assert!(
+        untracked
+            .rejections
+            .iter()
+            .any(|rejection| { rejection.group == FieldGroup::Parent && rejection.reason == FieldRejectionReason::UntrustedSource })
+    );
+    assert_eq!(world.object(avatar).unwrap().parent(), Parent::Pending { address: address(region, 1), expected_uuid: Some(uuid(45)) });
+    assert_eq!(world.object(avatar).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::PendingParent));
+
+    let mut fresh_unseat = ObjectPatch::new(source(region, 4), local_id(2));
+    fresh_unseat.parent = Some(Root);
+    assert_eq!(world.patch_object(fresh_unseat).unwrap().outcome, Updated(avatar));
+    assert_eq!(world.object(avatar).unwrap().parent(), Parent::Root);
+    assert_eq!(world.object(avatar).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::PoseNotValidForCurrentFrame));
 }
 
 #[test]

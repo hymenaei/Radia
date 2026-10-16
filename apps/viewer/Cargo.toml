@@ -38,6 +38,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-log.workspace = true
 tracing-tracy = { workspace = true, optional = true }
+tokio.workspace = true
 url.workspace = true
 world.workspace = true
 
@@ -53,6 +54,5 @@ gpui = { workspace = true, features = ["test-support"] }
 network = { workspace = true, features = ["testing"] }
 testing.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
 time.workspace = true
 zip.workspace = true

@@ -1,5 +1,6 @@
 use std::{
     cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
     num::NonZeroU32,
     sync::{Arc, PoisonError, RwLock, TryLockError},
     time::{Duration, Instant},
@@ -20,9 +21,14 @@ use gpui_component::{
     v_flex,
 };
 use math::{Quat, Vec3};
-use world::{self, Kind, LocalAddress, Parent, Region, World, WorldRevision};
+use tokio::sync::watch;
+use world::{
+    Kind, LocalAddress, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_WORLD_CHANGE_PAGE_ITEMS, ObjectDetail, ObjectDetailResult,
+    ObjectListItem, ObjectPageCursor, Parent, Region, RegionPageCursor, RegionSummary, WorldChange, WorldChangeCursor, WorldReadError,
+    WorldRevision,
+};
 
-use crate::session::SharedWorldState;
+use crate::session::{CoverageHealth, CoverageSnapshot, SessionReadBarrier, WorldReader, WorldReaderError};
 #[cfg(target_os = "linux")]
 use crate::window_chrome::linux_titlebar;
 #[cfg(target_os = "windows")]
@@ -35,6 +41,8 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const POLL_TICK: Duration = Duration::from_millis(100);
 /// Let the live view settle before plotting its first sample.
 const CHART_WARMUP: Duration = Duration::from_secs(2);
+/// Maximum cadence of samples added to the activity charts.
+const CHART_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 /// Samples kept for the activity charts (about two minutes at the live cadence).
 const HISTORY_LEN: usize = 120;
 const COPIED_FEEDBACK: Duration = Duration::from_millis(1200);
@@ -43,18 +51,18 @@ const LOCAL_ID_CELL_PADDING: f32 = 16.;
 const PANEL_BORDER_WIDTH: Pixels = px(1.);
 
 #[derive(Clone, Default)]
-pub(crate) struct WorldSource(Arc<RwLock<Option<SharedWorldState>>>);
+pub(crate) struct WorldSource(Arc<RwLock<Option<WorldReader>>>);
 
 impl WorldSource {
     pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    pub(crate) fn set(&self, world: Option<SharedWorldState>) {
-        *self.0.write().unwrap_or_else(PoisonError::into_inner) = world;
+    pub(crate) fn set(&self, world: Option<WorldReader>) {
+        *self.0.write().unwrap_or_else(PoisonError::into_inner) = world.map(|reader| reader.inspector());
     }
 
-    fn try_snapshot(&self) -> Option<Option<SharedWorldState>> {
+    fn try_reader(&self) -> Option<Option<WorldReader>> {
         match self.0.try_read() {
             Ok(world) => Some(world.clone()),
             Err(TryLockError::WouldBlock) => None,
@@ -62,12 +70,12 @@ impl WorldSource {
         }
     }
 
-    fn is_current(&self, expected: &SharedWorldState) -> bool {
-        self.try_snapshot().flatten().is_some_and(|current| Arc::ptr_eq(&current, expected))
+    fn is_current(&self, expected: &WorldReader) -> bool {
+        self.try_reader().flatten().is_some_and(|current| current.same_session(expected))
     }
 
     fn is_disconnected(&self) -> bool {
-        matches!(self.try_snapshot(), Some(None))
+        matches!(self.try_reader(), Some(None))
     }
 }
 
@@ -75,6 +83,7 @@ impl WorldSource {
 enum Connection {
     Offline,
     Live,
+    ResyncFailed,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -181,33 +190,128 @@ impl DeveloperFloater {
         let background = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
             let mut last_refresh = Instant::now().checked_sub(REFRESH_INTERVAL).unwrap_or_else(Instant::now);
+            let mut mirror = WorldMirror::default();
+            let mut revision_watch: Option<(WorldReader, watch::Receiver<WorldRevision>)> = None;
+            let mut coverage_watch: Option<(WorldReader, watch::Receiver<u64>)> = None;
+            let mut resync_failed = false;
             loop {
-                let Ok((selected, paused, forced)) = this.read_with(cx, |view, _| (view.selected, view.paused, view.refresh_requested))
+                let Ok((mut selected, paused, forced)) = this.read_with(cx, |view, _| (view.selected, view.paused, view.refresh_requested))
                 else {
                     break;
                 };
-                let due = forced || (!paused && last_refresh.elapsed() >= REFRESH_INTERVAL);
+
+                let source_changed = refresh_source
+                    .try_reader()
+                    .flatten()
+                    .is_some_and(|reader| mirror.reader.as_ref().is_some_and(|current| !current.same_session(&reader)));
+                if source_changed {
+                    let previous_selection = selected;
+                    selected = None;
+                    mirror.reset();
+                    coverage_watch = None;
+                    resync_failed = false;
+                    let _ = this.update(cx, |view, cx| {
+                        if view.selected == previous_selection {
+                            view.clear_selection(cx);
+                        }
+                    });
+                    last_refresh = Instant::now().checked_sub(REFRESH_INTERVAL).unwrap_or_else(Instant::now);
+                }
+
+                if forced && resync_failed {
+                    mirror.reset();
+                    resync_failed = false;
+                }
+
+                let coverage_changed = coverage_watch.as_mut().is_some_and(|(_, changed)| {
+                    if changed.has_changed().unwrap_or(false) {
+                        let _ = changed.borrow_and_update();
+                        true
+                    } else {
+                        false
+                    }
+                });
+                if paused
+                    && coverage_changed
+                    && !forced
+                    && let Some(world) = refresh_source.try_reader().flatten()
+                {
+                    let source = refresh_source.clone();
+                    let result = background
+                        .spawn(async move {
+                            let barrier = world.barrier().await;
+                            (world, barrier)
+                        })
+                        .await;
+                    if let (world, Ok(barrier)) = result {
+                        let _ = this.update(cx, move |view, cx| {
+                            if view.paused && source.is_current(&world) {
+                                view.snapshot.coverage = Some(barrier.coverage);
+                                cx.notify();
+                            }
+                        });
+                    }
+                }
+
+                let due = forced || (!paused && !resync_failed && (last_refresh.elapsed() >= REFRESH_INTERVAL || coverage_changed));
                 if due {
                     if forced {
                         let _ = this.update(cx, |view, _| view.refresh_requested = false);
                     }
                     last_refresh = Instant::now();
                     let source = refresh_source.clone();
-                    let refresh = background
+                    let current_mirror = std::mem::take(&mut mirror);
+                    let current_watch = revision_watch.take();
+                    let current_coverage_watch = coverage_watch.take();
+                    let (refresh, next_mirror, next_watch, next_coverage_watch) = background
                         .spawn(async move {
                             let started = Instant::now();
-                            let Some(world) = source.try_snapshot() else {
-                                return Refresh::Busy;
+                            let Some(world) = source.try_reader() else {
+                                return (Refresh::Busy, current_mirror, current_watch, current_coverage_watch);
                             };
                             let Some(world) = world else {
-                                return Refresh::Disconnected;
+                                return (Refresh::Disconnected, current_mirror, current_watch, current_coverage_watch);
                             };
-                            match capture_snapshot(&world, selected) {
-                                Some(snapshot) => Refresh::Captured(world, snapshot, started.elapsed()),
-                                None => Refresh::Busy,
-                            }
+                            let mut revision_watch = match current_watch {
+                                Some((current, revisions)) if current.same_session(&world) => revisions,
+                                _ => world.subscribe_revisions(),
+                            };
+                            let mut coverage_watch = match current_coverage_watch {
+                                Some((current, coverage)) if current.same_session(&world) => coverage,
+                                _ => world.subscribe_coverage(),
+                            };
+                            let _ = coverage_watch.borrow_and_update();
+                            let revision_hint = *revision_watch.borrow_and_update();
+                            let mut mirror = current_mirror;
+                            let refresh = match capture_snapshot(&world, &mut mirror, selected, revision_hint).await {
+                                Ok(snapshot) => Refresh::Captured(world.clone(), snapshot, started.elapsed()),
+                                Err(WorldReaderError::Busy) => Refresh::Busy,
+                                Err(WorldReaderError::Gone) => Refresh::Disconnected,
+                                Err(WorldReaderError::Read(
+                                    WorldReadError::ResyncRequired | WorldReadError::InvalidCursor | WorldReadError::StaleSession,
+                                )) => refresh_after_resync(&mut mirror),
+                                Err(error) => {
+                                    tracing::warn!(?error, "could not refresh Developer Tools World view");
+                                    Refresh::Failed
+                                }
+                            };
+                            (refresh, mirror, Some((world.clone(), revision_watch)), Some((world, coverage_watch)))
                         })
                         .await;
+                    mirror = next_mirror;
+                    revision_watch = next_watch;
+                    coverage_watch = next_coverage_watch;
+
+                    if mirror.selection_invalidated {
+                        mirror.selection_invalidated = false;
+                        let previous_selection = selected;
+                        selected = None;
+                        let _ = this.update(cx, |view, cx| {
+                            if view.selected == previous_selection {
+                                view.clear_selection(cx);
+                            }
+                        });
+                    }
 
                     match refresh {
                         Refresh::Busy => {
@@ -216,6 +320,22 @@ impl DeveloperFloater {
                             }
                             last_refresh = Instant::now().checked_sub(REFRESH_INTERVAL).unwrap_or_else(Instant::now);
                         }
+                        Refresh::Resync => {
+                            let _ = this.update(cx, |view, cx| {
+                                view.update_snapshot(WorldSnapshot::default(), None, cx);
+                                view.refresh_requested = true;
+                            });
+                            last_refresh = Instant::now().checked_sub(REFRESH_INTERVAL).unwrap_or_else(Instant::now);
+                        }
+                        Refresh::ResyncFailed => {
+                            resync_failed = true;
+                            let _ = this.update(cx, |view, cx| {
+                                view.connection = Connection::ResyncFailed;
+                                view.refresh_requested = false;
+                                view.update_snapshot(WorldSnapshot::default(), None, cx);
+                            });
+                        }
+                        Refresh::Failed => {}
                         Refresh::Disconnected => {
                             let source = refresh_source.clone();
                             let _ = this.update(cx, move |view, cx| {
@@ -272,6 +392,7 @@ impl DeveloperFloater {
         self.paused = !self.paused;
         let selectable = !self.paused;
         if !self.paused {
+            self.metrics.resume();
             self.refresh_requested = true;
         }
         self.objects.update(cx, |table, cx| {
@@ -290,6 +411,16 @@ impl DeveloperFloater {
             self.refresh_requested = true;
             cx.notify();
         }
+    }
+
+    fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        self.selected = None;
+        self.inspector = inspector_state(&self.snapshot, None);
+        self.objects.update(cx, |table, cx| {
+            table.delegate_mut().selected = None;
+            sync_selection(table, None, cx);
+        });
+        cx.notify();
     }
 
     fn set_bottom_tab(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -343,7 +474,9 @@ impl DeveloperFloater {
     }
 
     fn object_empty_message(&self) -> String {
-        if self.connection == Connection::Offline {
+        if self.connection == Connection::ResyncFailed {
+            "World changes outpaced the inspector. Select Refresh to try again.".into()
+        } else if self.connection == Connection::Offline {
             "Not connected to a session.".into()
         } else if self.filter.is_active() {
             "No objects match the current filter.".into()
@@ -377,13 +510,19 @@ impl DeveloperFloater {
     }
 
     fn update_snapshot(&mut self, snapshot: WorldSnapshot, capture: Option<Duration>, cx: &mut Context<Self>) {
+        let table_changed =
+            !Arc::ptr_eq(&self.snapshot.regions, &snapshot.regions) || !Arc::ptr_eq(&self.snapshot.objects, &snapshot.objects);
         self.snapshot = snapshot;
         if let (Some(took), false) = (capture, self.paused) {
             self.metrics.record(&self.snapshot, took, Instant::now());
         }
 
         self.inspector = inspector_state(&self.snapshot, self.selected);
-        self.refilter(cx);
+        if table_changed {
+            self.refilter(cx);
+        } else {
+            cx.notify();
+        }
     }
 }
 
@@ -403,41 +542,69 @@ struct ChartPoint {
     objects: f64,
     revision_rate: f64,
     capture_ms: f64,
+    capture_peak_ms: f64,
 }
 
 #[derive(Default)]
 struct Metrics {
     chart: Vec<ChartPoint>,
     started_at: Option<Instant>,
-    last_revision: Option<u64>,
-    last_at: Option<Instant>,
+    last_sample_at: Option<Instant>,
+    sampled_revision: Option<u64>,
+    capture_ms_total: f64,
+    capture_peak_ms: f64,
+    capture_count: usize,
+    resume_pending: bool,
 }
 
 impl Metrics {
     fn record(&mut self, snapshot: &WorldSnapshot, capture: Duration, now: Instant) {
         let revision = snapshot.revision.map(|revision| revision.get());
-        let rate = match (revision, self.last_revision, self.last_at) {
-            (Some(current), Some(previous), Some(at)) => revision_rate(previous, current, now.saturating_duration_since(at)),
-            _ => 0.0,
-        };
-        self.last_revision = revision;
-        self.last_at = Some(now);
         let started_at = *self.started_at.get_or_insert(now);
+        if self.last_sample_at.is_none() || self.resume_pending {
+            self.last_sample_at = Some(now);
+            self.sampled_revision = revision;
+            self.capture_ms_total = 0.0;
+            self.capture_peak_ms = 0.0;
+            self.capture_count = 0;
+            self.resume_pending = false;
+        }
+
+        let capture_ms = capture.as_secs_f64() * 1000.0;
+        self.capture_ms_total += capture_ms;
+        self.capture_peak_ms = self.capture_peak_ms.max(capture_ms);
+        self.capture_count += 1;
+
         let elapsed = now.saturating_duration_since(started_at);
-        if elapsed < CHART_WARMUP {
+        let sample_elapsed = now.saturating_duration_since(self.last_sample_at.expect("chart sampling starts on first capture"));
+        if elapsed < CHART_WARMUP || sample_elapsed < CHART_SAMPLE_INTERVAL {
             return;
         }
 
+        let revision_rate = match (self.sampled_revision, revision) {
+            (Some(previous), Some(current)) => revision_rate(previous, current, sample_elapsed),
+            _ => 0.0,
+        };
         self.chart.push(ChartPoint {
             elapsed: elapsed_label(elapsed).into(),
             object_count: snapshot.object_count,
             objects: snapshot.object_count as f64,
-            revision_rate: rate,
-            capture_ms: capture.as_secs_f64() * 1000.0,
+            revision_rate,
+            capture_ms: self.capture_ms_total / self.capture_count as f64,
+            capture_peak_ms: self.capture_peak_ms,
         });
         if self.chart.len() > HISTORY_LEN {
             self.chart.remove(0);
         }
+        self.last_sample_at = Some(now);
+        self.sampled_revision = revision;
+        self.capture_ms_total = 0.0;
+        self.capture_peak_ms = 0.0;
+        self.capture_count = 0;
+    }
+
+    fn resume(&mut self) {
+        self.resume_pending = self.started_at.is_some();
     }
 
     fn latest(&self) -> Option<&ChartPoint> {
@@ -445,7 +612,7 @@ impl Metrics {
     }
 
     fn peak_capture_ms(&self) -> Option<f64> {
-        self.chart.iter().map(|point| point.capture_ms).reduce(f64::max)
+        self.chart.iter().map(|point| point.capture_peak_ms).reduce(f64::max)
     }
 }
 
@@ -736,16 +903,37 @@ impl DeveloperFloater {
 
     fn render_diagnostics(&self, p: &Palette) -> Div {
         let revision = self.snapshot.revision.map_or_else(|| "—".to_owned(), |revision| revision.get().to_string());
+        let coverage = self.snapshot.coverage.as_ref().map_or_else(
+            || "—".to_owned(),
+            |coverage| {
+                let health = match coverage.health {
+                    CoverageHealth::NoKnownLoss => "No known loss",
+                    CoverageHealth::Uncertain => "Uncertain",
+                    CoverageHealth::Degraded => "Degraded",
+                };
+                format!(
+                    "{health} at revision {}; {} pending; {} degraded",
+                    coverage.world_revision.get(),
+                    coverage.recovery.pending + coverage.recovery.in_flight,
+                    coverage.recovery.degraded
+                )
+            },
+        );
         let selected = self.selected.map_or_else(|| "None".to_owned(), |selection| selection.id.to_string());
         let capture = self.metrics.latest().map_or_else(|| "—".to_owned(), |point| format!("{:.2} ms", point.capture_ms));
         let peak_capture = self.metrics.peak_capture_ms().map_or_else(|| "—".to_owned(), |peak| format!("{peak:.2} ms"));
-        let status = if self.connection == Connection::Live { "Connected" } else { "Disconnected" };
+        let status = match self.connection {
+            Connection::Live => "Connected",
+            Connection::Offline => "Disconnected",
+            Connection::ResyncFailed => "Refresh required",
+        };
         let capture_state = if self.paused { "Paused" } else { "Updating" };
         let buffered = format!("{} / {} captures", self.metrics.chart.len(), HISTORY_LEN);
         let diagnostics = [
             ("Connection", status.to_owned()),
             ("Capture", capture_state.to_owned()),
             ("Revision", revision),
+            ("Coverage", coverage),
             ("Regions", self.snapshot.regions.len().to_string()),
             ("Objects", format_count(self.snapshot.object_count)),
             ("Selected object", selected),
@@ -1280,9 +1468,10 @@ fn format_component(value: f32) -> String {
 #[derive(Clone, Default, PartialEq)]
 struct WorldSnapshot {
     revision: Option<WorldRevision>,
-    regions: Vec<RegionRow>,
+    coverage: Option<CoverageSnapshot>,
+    regions: Arc<[RegionRow]>,
     object_count: usize,
-    objects: Vec<ObjectRow>,
+    objects: Arc<[ObjectRow]>,
     details: Option<ObjectDetails>,
 }
 
@@ -1339,67 +1528,390 @@ struct InspectorRow {
     cells: Vec<String>,
 }
 
+const MAX_BOOTSTRAP_PAGES_PER_SYNC: usize = 16;
+const MAX_BOOTSTRAP_RESTARTS: usize = 3;
+const MAX_CHANGE_PAGES_PER_SYNC: usize = 4;
+const MAX_SUMMARY_HYDRATIONS_PER_SYNC: usize = 64;
+const MAX_REGION_HYDRATIONS_PER_SYNC: usize = 32;
+
 enum Refresh {
     Busy,
     Disconnected,
-    Captured(SharedWorldState, WorldSnapshot, Duration),
+    Resync,
+    ResyncFailed,
+    Failed,
+    Captured(WorldReader, WorldSnapshot, Duration),
 }
 
-fn capture_snapshot(shared: &SharedWorldState, selected: Option<ObjectSelection>) -> Option<WorldSnapshot> {
-    let world = match shared.try_read() {
-        Ok(world) => world,
-        Err(TryLockError::WouldBlock) => return None,
-        Err(TryLockError::Poisoned(error)) => error.into_inner(),
-    };
-    let mut regions = Vec::new();
-    for (region, info) in world.regions() {
-        regions.push(RegionRow {
-            region,
-            label: info.name.as_deref().map_or_else(|| format!("Region {}", region.get()), |name| name.to_owned()),
-        });
+#[derive(Default)]
+struct WorldMirror {
+    reader: Option<WorldReader>,
+    selection_invalidated: bool,
+    resync_restarts: usize,
+    change_cursor: Option<WorldChangeCursor>,
+    object_cursor: Option<ObjectPageCursor>,
+    region_cursor: Option<RegionPageCursor>,
+    objects_done: bool,
+    regions_done: bool,
+    bootstrapping: bool,
+    has_more_changes: bool,
+    revision: Option<WorldRevision>,
+    journal_revision: Option<WorldRevision>,
+    coverage: Option<CoverageSnapshot>,
+    object_count: usize,
+    objects: BTreeMap<UUID, ObjectRow>,
+    regions: BTreeMap<Region, RegionSummary>,
+    pending_objects: BTreeMap<UUID, world::Entity>,
+    pending_regions: BTreeSet<Region>,
+    selection: Option<ObjectSelection>,
+    details: Option<ObjectDetails>,
+    details_dirty: bool,
+    snapshot: WorldSnapshot,
+    snapshot_dirty: bool,
+}
+
+impl WorldMirror {
+    fn reset(&mut self) {
+        *self = Self::default();
     }
-    regions.sort_by_key(|row| row.region);
 
-    let object_count = world.object_count();
-    let mut objects = world
-        .objects()
-        .map(|object| ObjectRow {
-            selection: ObjectSelection { entity: object.entity(), id: object.identity().id() },
-            kind: object.kind(),
-            region: object.address().region(),
-            local_id: object.address().local_id(),
-        })
-        .collect::<Vec<_>>();
-    objects.sort_by_key(|object| object.selection.id);
-
-    let details = selected.and_then(|selection| {
-        let object = world.object(selection.entity)?;
-        if object.identity().id() != selection.id {
-            return None;
+    fn restart_after_history_loss(&mut self) -> bool {
+        if self.resync_restarts == MAX_BOOTSTRAP_RESTARTS {
+            return false;
         }
-        let parent = parent_label(&world, object.entity(), object.parent());
-        let motion = object.linear_motion();
-        let properties = object.properties();
-        Some(ObjectDetails {
-            selection,
-            kind: object.kind(),
-            address: object.address(),
-            parent,
-            position: object.position(),
-            rotation: object.rotation(),
-            scale: object.scale(),
-            velocity: motion.velocity,
-            acceleration: motion.acceleration,
-            angular_velocity: object.angular_velocity(),
-            owner: properties.owner_id,
-            creator: properties.creator_id,
-        })
-    });
+        let reader = self.reader.clone();
+        let selection_invalidated = self.selection_invalidated;
+        let resync_restarts = self.resync_restarts + 1;
+        *self = Self::default();
+        self.reader = reader;
+        self.selection_invalidated = selection_invalidated;
+        self.resync_restarts = resync_restarts;
+        true
+    }
 
-    Some(WorldSnapshot { revision: Some(world.revision()), regions, object_count, objects, details })
+    fn begin(&mut self, reader: &WorldReader, barrier: SessionReadBarrier) {
+        self.reader = Some(reader.clone());
+        self.change_cursor = Some(barrier.changes);
+        self.object_count = barrier.object_count;
+        self.revision = Some(barrier.revision);
+        self.journal_revision = Some(barrier.revision);
+        self.coverage = Some(barrier.coverage);
+        self.bootstrapping = true;
+        self.details_dirty = true;
+        self.snapshot_dirty = true;
+    }
+
+    fn is_current(&self, revision_hint: WorldRevision) -> bool {
+        !self.bootstrapping
+            && !self.has_more_changes
+            && self.pending_objects.is_empty()
+            && self.pending_regions.is_empty()
+            && !self.details_dirty
+            && self.journal_revision == Some(revision_hint)
+    }
+
+    fn apply_change(&mut self, change: WorldChange) {
+        match change {
+            WorldChange::EntityAdded { id, entity, .. } => {
+                self.object_count += 1;
+                self.pending_objects.insert(id, entity);
+                if self.selection.is_some_and(|selection| selection.id == id && selection.entity == entity) {
+                    self.details_dirty = true;
+                }
+            }
+            WorldChange::EntityRebound { id, entity, .. } | WorldChange::EntityTransferred { id, entity, .. } => {
+                self.pending_objects.insert(id, entity);
+                if self.selection.is_some_and(|selection| selection.id == id && selection.entity == entity) {
+                    self.details_dirty = true;
+                }
+            }
+            WorldChange::EntityUpdated { id, entity, .. } => {
+                if self.selection.is_some_and(|selection| selection.id == id && selection.entity == entity) {
+                    self.details_dirty = true;
+                }
+            }
+            WorldChange::EntityRemoved { id, entity, .. } => {
+                self.object_count -= 1;
+                if self.objects.get(&id).is_some_and(|row| row.selection.entity == entity) {
+                    self.objects.remove(&id);
+                    self.snapshot_dirty = true;
+                }
+                if self.pending_objects.get(&id).is_some_and(|pending| *pending == entity) {
+                    self.pending_objects.remove(&id);
+                }
+                if self.selection.is_some_and(|selection| selection.id == id && selection.entity == entity) {
+                    self.details_dirty = true;
+                }
+            }
+            WorldChange::SubtreeInvalidated { .. } => {
+                self.details_dirty |= self.selection.is_some();
+            }
+            WorldChange::RegionAdopted(region) => {
+                self.pending_regions.insert(region);
+            }
+            WorldChange::RegionUpdated(region) => {
+                self.pending_regions.insert(region);
+                self.details_dirty |=
+                    self.selection.and_then(|selection| self.objects.get(&selection.id)).is_some_and(|row| row.region == region);
+            }
+            WorldChange::RegionRetired { region, .. } => {
+                self.snapshot_dirty |= self.regions.remove(&region).is_some();
+                self.pending_regions.remove(&region);
+            }
+        }
+    }
+
+    fn snapshot(&mut self) -> WorldSnapshot {
+        if self.snapshot_dirty {
+            self.snapshot.regions = self
+                .regions
+                .values()
+                .map(|region| RegionRow {
+                    region: region.region,
+                    label: region.info.name.as_deref().map_or_else(|| format!("Region {}", region.region.get()), ToOwned::to_owned),
+                })
+                .collect::<Vec<_>>()
+                .into();
+            self.snapshot.objects = self.objects.values().cloned().collect::<Vec<_>>().into();
+            self.snapshot_dirty = false;
+        }
+        self.snapshot.revision = self.revision;
+        self.snapshot.coverage = self.coverage.clone();
+        self.snapshot.object_count = self.object_count;
+        self.snapshot.details = self.details.clone();
+        self.snapshot.clone()
+    }
 }
 
-fn parent_label(world: &World, child: world::Entity, parent: Parent) -> String {
+fn refresh_after_resync(mirror: &mut WorldMirror) -> Refresh {
+    if mirror.restart_after_history_loss() { Refresh::Resync } else { Refresh::ResyncFailed }
+}
+
+async fn capture_snapshot(
+    reader: &WorldReader,
+    mirror: &mut WorldMirror,
+    selected: Option<ObjectSelection>,
+    _revision_hint: WorldRevision,
+) -> Result<WorldSnapshot, WorldReaderError> {
+    let reader_changed = mirror.reader.as_ref().is_some_and(|current| !current.same_session(reader));
+    if reader_changed {
+        mirror.reset();
+        mirror.selection_invalidated = selected.is_some();
+    }
+    let selected = if reader_changed { None } else { selected };
+    let barrier = reader.barrier().await?;
+    let target_revision = barrier.revision;
+    if mirror.reader.is_none() || mirror.change_cursor.is_none() {
+        mirror.begin(reader, barrier);
+    } else {
+        mirror.coverage = Some(barrier.coverage);
+    }
+    if mirror.selection != selected {
+        mirror.selection = selected;
+        mirror.details = None;
+        mirror.details_dirty = true;
+    }
+
+    if mirror.is_current(target_revision) {
+        return Ok(mirror.snapshot());
+    }
+
+    for _ in 0..MAX_BOOTSTRAP_PAGES_PER_SYNC {
+        if !mirror.objects_done {
+            let page = reader.object_list_page(mirror.object_cursor, MAX_OBJECT_PAGE_ITEMS).await?;
+            mirror.objects.extend(page.objects.into_iter().map(|item| (item.id, object_row(item))));
+            mirror.snapshot_dirty = true;
+            mirror.object_cursor = page.next;
+            mirror.objects_done = mirror.object_cursor.is_none();
+        } else if !mirror.regions_done {
+            let page = reader.region_page(mirror.region_cursor, MAX_REGION_PAGE_ITEMS).await?;
+            mirror.regions.extend(page.regions.into_iter().map(|summary| (summary.region, summary)));
+            mirror.snapshot_dirty = true;
+            mirror.region_cursor = page.next;
+            mirror.regions_done = mirror.region_cursor.is_none();
+        }
+        if mirror.objects_done && mirror.regions_done {
+            mirror.bootstrapping = false;
+            break;
+        }
+    }
+
+    if !mirror.bootstrapping {
+        for _ in 0..MAX_CHANGE_PAGES_PER_SYNC {
+            let cursor = mirror.change_cursor.expect("bootstrap establishes a journal cursor");
+            let page = reader.changes(cursor, MAX_WORLD_CHANGE_PAGE_ITEMS).await?;
+            for record in page.records {
+                mirror.apply_change(record.change);
+            }
+            mirror.change_cursor = Some(page.cursor);
+            mirror.has_more_changes = page.has_more;
+            mirror.revision = Some(page.observed_revision);
+            if !page.has_more {
+                mirror.journal_revision = Some(page.observed_revision);
+            }
+            if !page.has_more {
+                break;
+            }
+        }
+    }
+
+    for _ in 0..MAX_SUMMARY_HYDRATIONS_PER_SYNC {
+        let Some((id, entity)) = mirror.pending_objects.first_key_value().map(|(id, entity)| (*id, *entity)) else { break };
+        match reader.object_list_item(entity).await {
+            Ok(read) if read.item.id == id => {
+                mirror.pending_objects.remove(&id);
+                if mirror.objects.insert(id, object_row(read.item)) != Some(object_row(read.item)) {
+                    mirror.snapshot_dirty = true;
+                }
+                mirror.revision = Some(read.hydration_revision);
+            }
+            Err(WorldReaderError::Read(WorldReadError::StaleIdentity)) => {
+                mirror.pending_objects.remove(&id);
+                if mirror.objects.get(&id).is_some_and(|row| row.selection.entity == entity) {
+                    mirror.objects.remove(&id);
+                    mirror.snapshot_dirty = true;
+                }
+            }
+            Err(error) => return Err(error),
+            Ok(_) => {
+                mirror.pending_objects.remove(&id);
+            }
+        }
+    }
+
+    for _ in 0..MAX_REGION_HYDRATIONS_PER_SYNC {
+        let Some(region) = mirror.pending_regions.first().copied() else { break };
+        let summary = reader.region_summary(region).await?;
+        mirror.pending_regions.remove(&region);
+        match summary {
+            Some(read) => {
+                if mirror.regions.insert(region, read.summary.clone()) != Some(read.summary) {
+                    mirror.snapshot_dirty = true;
+                }
+                mirror.revision = Some(read.hydration_revision);
+            }
+            None => {
+                mirror.snapshot_dirty |= mirror.regions.remove(&region).is_some();
+            }
+        }
+    }
+
+    if mirror.details_dirty {
+        mirror.details = match selected {
+            Some(selection) => {
+                let batch = reader.object_details(&[selection.entity]).await?;
+                mirror.revision = Some(batch.hydration_revision);
+                match batch.details.into_iter().next() {
+                    Some(ObjectDetailResult::Found(detail)) if detail.summary.id == selection.id => Some(object_details(selection, detail)),
+                    Some(ObjectDetailResult::Gone(_) | ObjectDetailResult::TooLarge(_)) | Some(ObjectDetailResult::Found(_)) | None => None,
+                }
+            }
+            None => None,
+        };
+        mirror.details_dirty = false;
+    }
+
+    let snapshot = mirror.snapshot();
+    if mirror.is_current(target_revision) {
+        mirror.resync_restarts = 0;
+    }
+    Ok(snapshot)
+}
+
+#[cfg(test)]
+pub(crate) struct WorldSnapshotForTest {
+    pub(crate) objects: Vec<(UUID, world::Entity, Region, NonZeroU32)>,
+    pub(crate) regions: Vec<RegionSummary>,
+    pub(crate) object_count: usize,
+    pub(crate) revision: Option<WorldRevision>,
+    pub(crate) selected_position: Option<Vec3>,
+    pub(crate) selected_parent: Option<String>,
+    pub(crate) selected_id: Option<UUID>,
+}
+
+#[cfg(test)]
+pub(crate) async fn capture_snapshot_for_test(
+    reader: &WorldReader,
+    selected: Option<(UUID, world::Entity)>,
+    revision_hint: WorldRevision,
+) -> Result<WorldSnapshotForTest, WorldReaderError> {
+    let mut mirror = WorldMirror { reader: Some(reader.clone()), ..WorldMirror::default() };
+    assert!(mirror.restart_after_history_loss());
+    let snapshot =
+        capture_snapshot(reader, &mut mirror, selected.map(|(id, entity)| ObjectSelection { id, entity }), revision_hint).await?;
+    let objects = mirror.objects.iter().map(|(id, row)| (*id, row.selection.entity, row.region, row.local_id)).collect();
+    let regions = mirror.regions.values().cloned().collect();
+    Ok(WorldSnapshotForTest {
+        objects,
+        regions,
+        object_count: snapshot.object_count,
+        revision: snapshot.revision,
+        selected_position: snapshot.details.as_ref().and_then(|details| details.position),
+        selected_parent: snapshot.details.as_ref().map(|details| details.parent.clone()),
+        selected_id: mirror.selection.map(|selection| selection.id),
+    })
+}
+
+#[cfg(test)]
+pub(crate) async fn capture_snapshot_after_session_change_for_test(
+    previous_reader: &WorldReader,
+    reader: &WorldReader,
+    selected: (UUID, world::Entity),
+    revision_hint: WorldRevision,
+) -> (Result<WorldSnapshotForTest, WorldReaderError>, bool) {
+    let (id, entity) = selected;
+    let selection = ObjectSelection { id, entity };
+    let mut mirror = WorldMirror { reader: Some(previous_reader.clone()), selection: Some(selection), ..WorldMirror::default() };
+    let capture = capture_snapshot(reader, &mut mirror, Some(selection), revision_hint).await;
+    if matches!(
+        &capture,
+        Err(WorldReaderError::Read(WorldReadError::ResyncRequired | WorldReadError::InvalidCursor | WorldReadError::StaleSession))
+    ) {
+        let _ = refresh_after_resync(&mut mirror);
+    }
+    let result = capture.map(|snapshot| {
+        let objects = mirror.objects.iter().map(|(id, row)| (*id, row.selection.entity, row.region, row.local_id)).collect();
+        let regions = mirror.regions.values().cloned().collect();
+        WorldSnapshotForTest {
+            objects,
+            regions,
+            object_count: snapshot.object_count,
+            revision: snapshot.revision,
+            selected_position: snapshot.details.as_ref().and_then(|details| details.position),
+            selected_parent: snapshot.details.as_ref().map(|details| details.parent.clone()),
+            selected_id: mirror.selection.map(|selection| selection.id),
+        }
+    });
+    (result, mirror.selection_invalidated)
+}
+
+fn object_row(item: ObjectListItem) -> ObjectRow {
+    ObjectRow {
+        selection: ObjectSelection { entity: item.entity, id: item.id },
+        kind: item.kind,
+        region: item.address.region(),
+        local_id: item.address.local_id(),
+    }
+}
+
+fn object_details(selection: ObjectSelection, detail: ObjectDetail) -> ObjectDetails {
+    ObjectDetails {
+        selection,
+        kind: detail.summary.kind,
+        address: detail.summary.address,
+        parent: parent_label(selection.entity, detail.summary.parent, detail.parent_id),
+        position: detail.summary.local_transform.position(),
+        rotation: detail.summary.local_transform.rotation(),
+        scale: detail.summary.local_transform.scale(),
+        velocity: detail.linear_motion.velocity,
+        acceleration: detail.linear_motion.acceleration,
+        angular_velocity: detail.angular_velocity,
+        owner: detail.properties.owner_id,
+        creator: detail.properties.creator_id,
+    }
+}
+
+fn parent_label(child: world::Entity, parent: Parent, parent_id: Option<UUID>) -> String {
     match parent {
         Parent::Unknown => "Unknown".into(),
         Parent::Root => "Root".into(),
@@ -1408,9 +1920,7 @@ fn parent_label(world: &World, child: world::Entity, parent: Parent) -> String {
             format!("Pending {}:{} (expected {expected})", address.region().get(), address.local_id())
         }
         Parent::Resolved(parent) if parent == child => "Invalid self-parent".into(),
-        Parent::Resolved(parent) => {
-            world.object(parent).map_or_else(|| "Resolved object is unavailable".into(), |object| format!("{}", object.identity().id()))
-        }
+        Parent::Resolved(_) => parent_id.map_or_else(|| "Resolved object is unavailable".into(), |id| id.to_string()),
     }
 }
 
@@ -1418,7 +1928,7 @@ fn parent_label(world: &World, child: world::Entity, parent: Parent) -> String {
 mod tests {
     use std::{
         num::NonZeroU32,
-        sync::{Arc, RwLock},
+        sync::Arc,
         time::{Duration, Instant},
     };
 
@@ -1431,19 +1941,19 @@ mod tests {
     };
     use world::{
         ApplyOutcome::{Introduced, RegionAdopted},
-        Kind, LocalAddress, ObjectObservation,
+        Kind, LocalAddress, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, ObjectObservation,
         OrderEvidence::Ordered,
         ParentUpdate::Root,
-        Region, UpdateSource, World, WorldLimits,
+        Region, UpdateSource, World, WorldChange, WorldEntityRemovalReason, WorldLimits,
     };
 
     use math::{Quat, Vec3};
 
     use super::{
-        CHART_WARMUP, HISTORY_LEN, InspectorState, InspectorTable, KindFilter, LOCAL_ID_CELL_PADDING, LOCAL_ID_GLYPH_WIDTH, Metrics,
-        ObjectDetails, ObjectFilter, ObjectRow, ObjectSelection, Palette, PropertyValue, RegionRow, WorldSnapshot, WorldSource,
-        capture_snapshot, inspector_state, local_id_column_width, object_table, object_table_rows, parent_value, property_groups,
-        revision_rate, table_body, table_inner_corner_radius,
+        CHART_WARMUP, HISTORY_LEN, InspectorState, InspectorTable, KindFilter, LOCAL_ID_CELL_PADDING, LOCAL_ID_GLYPH_WIDTH,
+        MAX_BOOTSTRAP_RESTARTS, Metrics, ObjectDetails, ObjectFilter, ObjectRow, ObjectSelection, Palette, PropertyValue, Refresh,
+        RegionRow, WorldMirror, WorldSnapshot, WorldSource, inspector_state, local_id_column_width, object_details, object_table,
+        object_table_rows, parent_value, property_groups, revision_rate, table_body, table_inner_corner_radius,
     };
 
     struct InspectorHarness {
@@ -1527,7 +2037,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_includes_objects_and_selection() {
+    fn mirror_builds_a_sorted_snapshot() {
         let region = Region::new(1);
         let mut world = World::new(limits());
         assert_eq!(world.adopt_region(region).expect("adopt region").outcome, RegionAdopted);
@@ -1546,6 +2056,10 @@ mod tests {
                         angular_velocity: None,
                         scale: None,
                         attachment_point: None,
+                        shape: None,
+                        appearance: None,
+                        surface_appearance: None,
+                        render_materials: None,
                     })
                     .expect("introduce object")
                     .outcome,
@@ -1553,10 +2067,37 @@ mod tests {
             ));
         }
 
-        let shared = Arc::new(RwLock::new(world));
-        let selection =
-            ObjectSelection { entity: shared.read().expect("world read").entity(selected).expect("selected object"), id: selected };
-        let snapshot = capture_snapshot(&shared, Some(selection)).expect("world is not locked");
+        let barrier = world.read_barrier();
+        let selection = ObjectSelection { entity: world.entity(selected).expect("selected object"), id: selected };
+        let detail = world.object_detail(selection.entity).expect("selected detail");
+        let mut mirror = WorldMirror {
+            object_count: barrier.object_count,
+            revision: Some(barrier.revision),
+            selection: Some(selection),
+            details: Some(object_details(selection, detail)),
+            ..WorldMirror::default()
+        };
+
+        let mut object_cursor = None;
+        loop {
+            let page = world.object_list_page(object_cursor, MAX_OBJECT_PAGE_ITEMS).expect("object list page");
+            mirror.objects.extend(page.objects.into_iter().map(|item| (item.id, super::object_row(item))));
+            object_cursor = page.next;
+            if object_cursor.is_none() {
+                break;
+            }
+        }
+        let mut region_cursor = None;
+        loop {
+            let page = world.region_page(region_cursor, MAX_REGION_PAGE_ITEMS).expect("region summary page");
+            mirror.regions.extend(page.regions.into_iter().map(|summary| (summary.region, summary)));
+            region_cursor = page.next;
+            if region_cursor.is_none() {
+                break;
+            }
+        }
+        mirror.snapshot_dirty = true;
+        let snapshot = mirror.snapshot();
         assert_eq!(snapshot.objects.len(), SNAPSHOT_OBJECTS);
         assert_eq!(snapshot.object_count, SNAPSHOT_OBJECTS);
         assert_eq!(snapshot.details.as_ref().map(|details| details.selection.id), Some(selected));
@@ -1564,7 +2105,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_does_not_follow_a_reused_uuid() {
+    fn old_removal_keeps_reused_object() {
         let region = Region::new(1);
         let id = UUID::from_u128(42);
         let local_id = NonZeroU32::new(9).unwrap();
@@ -1581,9 +2122,14 @@ mod tests {
             angular_velocity: None,
             scale: None,
             attachment_point: None,
+            shape: None,
+            appearance: None,
+            surface_appearance: None,
+            render_materials: None,
         };
-        assert!(matches!(world.observe_object(observation).unwrap().outcome, Introduced(_)));
+        assert!(matches!(world.observe_object(observation.clone()).unwrap().outcome, Introduced(_)));
         let old_entity = world.entity(id).unwrap();
+        let old_item = world.object_list_item(old_entity).unwrap().item;
         let selection = ObjectSelection { entity: old_entity, id };
 
         let _ = world.remove_object(UpdateSource::new(region, 2, Ordered(2), 0), local_id).expect("remove selected entity");
@@ -1592,11 +2138,28 @@ mod tests {
         let replacement = ObjectSelection { entity: world.entity(id).unwrap(), id };
         assert_ne!(selection.entity, replacement.entity);
 
-        let shared = Arc::new(RwLock::new(world));
-        let snapshot = capture_snapshot(&shared, Some(selection)).expect("capture current world");
+        let item = world.object_list_item(replacement.entity).unwrap().item;
+        let mut mirror = WorldMirror {
+            object_count: 1,
+            objects: std::collections::BTreeMap::from([(id, super::object_row(old_item))]),
+            selection: Some(selection),
+            ..WorldMirror::default()
+        };
+        mirror.apply_change(WorldChange::EntityRemoved {
+            id,
+            entity: old_entity,
+            address: LocalAddress::new(region, local_id),
+            reason: WorldEntityRemovalReason::Killed,
+        });
+        assert_eq!(mirror.object_count, 0);
+        mirror.apply_change(WorldChange::EntityAdded { id, entity: replacement.entity, address: item.address });
+        mirror.objects.insert(id, super::object_row(item));
+        mirror.snapshot_dirty = true;
+        let snapshot = mirror.snapshot();
         let table = object_table(&snapshot, &ObjectFilter::default());
 
         assert_eq!(replacement.id, selection.id);
+        assert_eq!(snapshot.object_count, 1);
         assert!(snapshot.details.is_none());
         assert!(matches!(inspector_state(&snapshot, Some(selection)), InspectorState::Removed));
         assert_eq!(table.row_for_object(Some(selection)), None);
@@ -1604,30 +2167,61 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_retries_after_world_contention() {
-        let shared = Arc::new(RwLock::new(World::new(limits())));
-        let write_guard = shared.write().expect("hold world for contention");
-        assert!(capture_snapshot(&shared, None).is_none());
+    fn updates_refresh_selected_details() {
+        let selection = sample_snapshot().objects[0].selection;
+        let mut mirror = WorldMirror { selection: Some(selection), ..WorldMirror::default() };
 
-        drop(write_guard);
-        let snapshot = capture_snapshot(&shared, None).expect("world read succeeds after contention");
+        mirror.apply_change(WorldChange::EntityUpdated { id: selection.id, entity: selection.entity, classes: Default::default() });
 
-        assert!(snapshot.regions.is_empty());
-        assert!(snapshot.objects.is_empty());
+        assert!(mirror.pending_objects.is_empty());
+        assert!(mirror.details_dirty);
+    }
+
+    #[test]
+    fn repeated_resync_requires_refresh() {
+        let mut mirror = WorldMirror { object_count: 5, ..WorldMirror::default() };
+
+        for attempt in 1..=MAX_BOOTSTRAP_RESTARTS {
+            assert!(matches!(super::refresh_after_resync(&mut mirror), Refresh::Resync));
+            assert_eq!(mirror.resync_restarts, attempt);
+            assert_eq!(mirror.object_count, 0);
+        }
+
+        mirror.object_count = 7;
+        assert!(matches!(super::refresh_after_resync(&mut mirror), Refresh::ResyncFailed));
+        assert_eq!(mirror.resync_restarts, MAX_BOOTSTRAP_RESTARTS);
+        assert_eq!(mirror.object_count, 7);
+    }
+
+    #[test]
+    fn hydration_does_not_advance_journal() {
+        let region = Region::new(1);
+        let mut world = World::new(limits());
+        let start = world.read_barrier().revision;
+        let mut mirror = WorldMirror { journal_revision: Some(start), revision: Some(start), ..WorldMirror::default() };
+        assert!(mirror.is_current(start));
+
+        assert_eq!(world.adopt_region(region).expect("adopt region").outcome, RegionAdopted);
+        let hydrated = world.region_summary(region).unwrap().expect("region summary").hydration_revision;
+        mirror.revision = Some(hydrated);
+
+        assert!(!mirror.is_current(hydrated));
+        mirror.journal_revision = Some(hydrated);
+        assert!(mirror.is_current(hydrated));
     }
 
     fn sample_snapshot() -> WorldSnapshot {
         WorldSnapshot {
-            regions: vec![
+            regions: Arc::from(vec![
                 RegionRow { region: Region::new(1), label: "Mauve".into() },
                 RegionRow { region: Region::new(2), label: "Ochre".into() },
-            ],
+            ]),
             object_count: 3,
-            objects: vec![
+            objects: Arc::from(vec![
                 object_row(7, Kind::Avatar, Region::new(1), 41),
                 object_row(8, Kind::Object, Region::new(1), 42),
                 object_row(9, Kind::Object, Region::new(2), 43),
-            ],
+            ]),
             ..WorldSnapshot::default()
         }
     }
@@ -1650,6 +2244,10 @@ mod tests {
                     angular_velocity: None,
                     scale: None,
                     attachment_point: None,
+                    shape: None,
+                    appearance: None,
+                    surface_appearance: None,
+                    render_materials: None,
                 })
                 .expect("introduce row object")
                 .outcome,
@@ -1683,13 +2281,13 @@ mod tests {
     fn local_id_sort_survives_refresh() {
         let region = Region::new(1);
         let snapshot = WorldSnapshot {
-            regions: vec![RegionRow { region, label: "Mauve".into() }],
+            regions: Arc::from(vec![RegionRow { region, label: "Mauve".into() }]),
             object_count: 3,
-            objects: vec![
+            objects: Arc::from(vec![
                 object_row(1, Kind::Object, region, 10),
                 object_row(2, Kind::Object, region, 2),
                 object_row(3, Kind::Object, region, 1_000_000_000),
-            ],
+            ]),
             ..WorldSnapshot::default()
         };
         let mut table = object_table(&snapshot, &ObjectFilter::default());
@@ -1761,6 +2359,30 @@ mod tests {
     }
 
     #[test]
+    fn chart_samples_use_one_second_windows() {
+        let start = Instant::now();
+        let snapshot = sample_snapshot();
+        let mut metrics = Metrics::default();
+
+        metrics.record(&snapshot, Duration::from_millis(1), start);
+        metrics.record(&snapshot, Duration::from_millis(3), start + Duration::from_secs(2));
+        assert_eq!(metrics.chart.len(), 1);
+        assert_eq!(metrics.chart[0].capture_ms, 2.0);
+        assert_eq!(metrics.chart[0].capture_peak_ms, 3.0);
+
+        metrics.record(&snapshot, Duration::from_millis(5), start + Duration::from_millis(2100));
+        metrics.record(&snapshot, Duration::from_millis(7), start + Duration::from_millis(2500));
+        assert_eq!(metrics.chart.len(), 1);
+
+        metrics.record(&snapshot, Duration::from_millis(9), start + Duration::from_secs(3));
+        assert_eq!(metrics.chart.len(), 2);
+        assert_eq!(metrics.chart[0].elapsed.as_ref(), "0:02");
+        assert_eq!(metrics.chart[1].elapsed.as_ref(), "0:03");
+        assert_eq!(metrics.chart[1].capture_ms, 7.0);
+        assert_eq!(metrics.chart[1].capture_peak_ms, 9.0);
+    }
+
+    #[test]
     fn metrics_history_is_bounded_and_rate_is_per_second() {
         assert_eq!(revision_rate(10, 40, Duration::from_secs(2)), 15.0);
         assert_eq!(revision_rate(40, 10, Duration::from_secs(1)), 0.0);
@@ -1795,16 +2417,9 @@ mod tests {
     }
 
     #[test]
-    fn world_source_tracks_disconnect_and_replacement() {
+    fn world_source_starts_disconnected() {
         let source = WorldSource::new();
         assert!(source.is_disconnected());
-
-        let first = Arc::new(RwLock::new(World::new(limits())));
-        source.set(Some(Arc::clone(&first)));
-        assert!(source.is_current(&first));
-
-        let replacement = Arc::new(RwLock::new(World::new(limits())));
-        assert!(!source.is_current(&replacement));
         source.set(None);
         assert!(source.is_disconnected());
     }

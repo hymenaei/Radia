@@ -73,7 +73,7 @@ impl World {
                 record_unresolved(&mut unresolved, UnresolvedReason::PoseNotValidForCurrentFrame);
                 break;
             };
-            let data = *object.data;
+            let data = (*object.data).clone();
             let transform = object.transform();
             let local_pose = match (transform.position(), transform.rotation()) {
                 (Some(position), Some(rotation)) => {
@@ -264,6 +264,10 @@ mod tests {
                     angular_velocity: None,
                     scale: None,
                     attachment_point: None,
+                    shape: None,
+                    appearance: None,
+                    surface_appearance: None,
+                    render_materials: None,
                 })
                 .unwrap();
             let Introduced(entity) = result.outcome else { panic!("expected object introduction") };
@@ -312,6 +316,10 @@ mod tests {
                 angular_velocity: None,
                 scale: None,
                 attachment_point: None,
+                shape: None,
+                appearance: None,
+                surface_appearance: None,
+                render_materials: None,
             })
             .unwrap();
         let Introduced(entity) = result.outcome else { panic!("expected object introduction") };

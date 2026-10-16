@@ -1,41 +1,91 @@
-use super::{Applied, ApplyError, ApplyOutcome, LocalAddress, Recovery, Region, Rejections, World, WorldRevision};
+use super::{Applied, ApplyError, ApplyOutcome, Entity, LocalAddress, Recovery, Region, Rejections, World, WorldRevision};
 use base::UUID;
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    ops::{BitOr, BitOrAssign},
+};
 
 #[cfg(test)]
 use super::{OrderEvidence, ParentUpdate};
 
+/// Why an entity left the current World.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
-pub(super) enum EntityRemovalReason {
+pub enum EntityRemovalReason {
     Killed,
     AddressReplaced,
     ParentCascade,
     RegionRetired,
 }
 
-#[derive(Clone, Copy, Debug)]
-#[allow(dead_code)]
-pub(super) enum Change {
+/// Coarse categories used to decide which consumer-side values need hydration.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ChangeClasses(u8);
+
+impl ChangeClasses {
+    pub const TRANSFORM_MOTION: Self = Self(1 << 0);
+    pub const RELATIONSHIP: Self = Self(1 << 1);
+    pub const SHAPE: Self = Self(1 << 2);
+    pub const APPEARANCE: Self = Self(1 << 3);
+    pub const PROPERTIES: Self = Self(1 << 4);
+
+    /// Returns whether no categories are present.
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Returns whether every category in `classes` is present.
+    pub const fn contains(self, classes: Self) -> bool {
+        self.0 & classes.0 == classes.0
+    }
+}
+
+impl BitOr for ChangeClasses {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl BitOrAssign for ChangeClasses {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
+/// Ordered World invalidations and lifecycle facts retained by the journal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Change {
     EntityAdded {
         id: UUID,
+        entity: Entity,
         address: LocalAddress,
     },
-    EntityUpdated(UUID),
-    /// Invalidates the world poses of this entity and its descendants.
-    SubtreeInvalidated(UUID),
+    EntityUpdated {
+        id: UUID,
+        entity: Entity,
+        classes: ChangeClasses,
+    },
+    SubtreeInvalidated {
+        id: UUID,
+        entity: Entity,
+    },
     EntityRemoved {
         id: UUID,
+        entity: Entity,
         address: LocalAddress,
         reason: EntityRemovalReason,
     },
+    /// An entity kept its UUID and moved to a different simulator-local address.
     EntityRebound {
         id: UUID,
+        entity: Entity,
         from: LocalAddress,
         to: LocalAddress,
     },
     EntityTransferred {
         id: UUID,
+        entity: Entity,
         from: LocalAddress,
         to: LocalAddress,
     },
@@ -49,17 +99,17 @@ pub(super) enum Change {
 
 #[derive(Debug)]
 #[allow(dead_code)]
-struct JournalEntry {
-    revision: WorldRevision,
-    changes: Box<[Change]>,
+pub(super) struct JournalEntry {
+    pub(super) revision: WorldRevision,
+    pub(super) changes: Box<[Change]>,
 }
 
 #[derive(Debug)]
 pub(super) struct Journal {
     pub(super) revision: WorldRevision,
-    entries: VecDeque<JournalEntry>,
+    pub(super) entries: VecDeque<JournalEntry>,
     retained_changes: usize,
-    lost_through: Option<WorldRevision>,
+    pub(super) lost_through: Option<WorldRevision>,
 }
 
 impl Journal {
@@ -125,7 +175,10 @@ mod tests {
     use math::Vec3;
 
     use super::*;
-    use crate::{Kind, LocalAddress, ObjectObservation, ObjectPatch, Pose, PropertiesPatch, RegionInfo, UpdateSource, WorldLimits};
+    use crate::{
+        Appearance, AssetId, FaceAppearance, Kind, LocalAddress, ObjectObservation, ObjectPatch, Pose, PropertiesPatch, RegionInfo,
+        RenderMaterials, SculptFlags, Shape, SurfaceAppearance, UpdateSource, WorldLimits,
+    };
 
     fn limits(max_journal_entries: usize) -> WorldLimits {
         WorldLimits {
@@ -155,6 +208,10 @@ mod tests {
             angular_velocity: None,
             scale: None,
             attachment_point: None,
+            shape: None,
+            appearance: None,
+            surface_appearance: None,
+            render_materials: None,
         }
     }
 
@@ -185,6 +242,10 @@ mod tests {
                 angular_velocity: None,
                 scale: None,
                 attachment_point: None,
+                shape: None,
+                appearance: None,
+                surface_appearance: None,
+                render_materials: None,
             })
             .unwrap_err();
 
@@ -216,6 +277,11 @@ mod tests {
                 )
                 .unwrap(),
         );
+        assert!(matches!(
+            last_changes(&world),
+            [EntityUpdated { id, classes, .. }]
+                if *id == UUID::from_u128(270) && classes.contains(ChangeClasses::PROPERTIES)
+        ));
 
         world.journal.revision = WorldRevision(u64::MAX);
         let stale = ObjectPatch {
@@ -242,6 +308,59 @@ mod tests {
         );
         assert_eq!(world.observe_object(observation(region, 3, 270, 1)).unwrap().outcome, ApplyOutcome::Unchanged);
         assert_eq!(world.revision(), WorldRevision(u64::MAX));
+    }
+
+    #[test]
+    fn surface_changes_emit_appearance() {
+        let region = Region::new(28);
+        let mut world = World::new(limits(4));
+        assert_revision(world.adopt_region(region).unwrap());
+        let added = world.observe_object(observation(region, 1, 280, 1)).unwrap();
+        let ApplyOutcome::Introduced(entity) = added.outcome else { panic!("expected object introduction") };
+        let appearance =
+            SurfaceAppearance::new(FaceAppearance { texture_id: UUID::from_u128(281), ..FaceAppearance::default() }, Vec::new()).unwrap();
+
+        let applied = world
+            .patch_object(ObjectPatch {
+                surface_appearance: Some(appearance),
+                ..ObjectPatch::new(UpdateSource::new(region, 2, Ordered(2), 0), NonZeroU32::new(1).unwrap())
+            })
+            .unwrap();
+
+        assert_eq!(applied.outcome, ApplyOutcome::Updated(entity));
+        assert!(matches!(
+            last_changes(&world),
+            [EntityUpdated { id, classes, .. }]
+                if *id == UUID::from_u128(280)
+                    && classes.contains(ChangeClasses::APPEARANCE)
+                    && !classes.contains(ChangeClasses::SHAPE)
+        ));
+    }
+
+    #[test]
+    fn render_material_changes_emit_appearance() {
+        let region = Region::new(28);
+        let mut world = World::new(limits(4));
+        assert_revision(world.adopt_region(region).unwrap());
+        let added = world.observe_object(observation(region, 1, 282, 1)).unwrap();
+        let ApplyOutcome::Introduced(entity) = added.outcome else { panic!("expected object introduction") };
+        let materials = RenderMaterials::new(vec![(3, AssetId::new(UUID::from_u128(283)))]).unwrap();
+
+        let applied = world
+            .patch_object(ObjectPatch {
+                render_materials: Some(materials),
+                ..ObjectPatch::new(UpdateSource::new(region, 2, Ordered(2), 0), NonZeroU32::new(1).unwrap())
+            })
+            .unwrap();
+
+        assert_eq!(applied.outcome, ApplyOutcome::Updated(entity));
+        assert!(matches!(
+            last_changes(&world),
+            [EntityUpdated { id, classes, .. }]
+                if *id == UUID::from_u128(282)
+                    && classes.contains(ChangeClasses::APPEARANCE)
+                    && !classes.contains(ChangeClasses::SHAPE)
+        ));
     }
 
     #[test]
@@ -312,18 +431,20 @@ mod tests {
 
         let first_address = LocalAddress::new(first_region, NonZeroU32::new(1).unwrap());
         assert_revision(world.observe_object(observation(first_region, 1, 230, 1)).unwrap());
-        assert!(matches!(last_changes(&world), [EntityAdded { id, address }] if *id == UUID::from_u128(230) && *address == first_address));
+        assert!(
+            matches!(last_changes(&world), [EntityAdded { id, address, .. }] if *id == UUID::from_u128(230) && *address == first_address)
+        );
 
         let rebound_address = LocalAddress::new(first_region, NonZeroU32::new(2).unwrap());
         assert_revision(world.observe_object(observation(first_region, 2, 230, 2)).unwrap());
         assert!(last_changes(&world).iter().any(|change| {
-            matches!(change, EntityRebound { id, from, to } if *id == UUID::from_u128(230) && *from == first_address && *to == rebound_address)
+            matches!(change, EntityRebound { id, from, to, .. } if *id == UUID::from_u128(230) && *from == first_address && *to == rebound_address)
         }));
 
         let transfer_address = LocalAddress::new(second_region, NonZeroU32::new(3).unwrap());
         assert_revision(world.observe_object(observation(second_region, 1, 230, 3)).unwrap());
         assert!(last_changes(&world).iter().any(|change| {
-            matches!(change, EntityTransferred { id, from, to } if *id == UUID::from_u128(230) && *from == rebound_address && *to == transfer_address)
+            matches!(change, EntityTransferred { id, from, to, .. } if *id == UUID::from_u128(230) && *from == rebound_address && *to == transfer_address)
         }));
     }
 
@@ -336,18 +457,98 @@ mod tests {
         let mut child = observation(region, 2, 251, 2);
         child.parent = Local(NonZeroU32::new(1).unwrap());
         assert_revision(world.observe_object(child).unwrap());
+        let mut avatar = observation(region, 3, 252, 3);
+        avatar.kind = Kind::Avatar;
+        avatar.parent = Local(NonZeroU32::new(1).unwrap());
+        assert_revision(world.observe_object(avatar).unwrap());
+        let mut attachment = observation(region, 4, 253, 4);
+        attachment.parent = Local(NonZeroU32::new(3).unwrap());
+        assert_revision(world.observe_object(attachment).unwrap());
 
-        assert_revision(world.remove_object(UpdateSource::new(region, 3, Ordered(3), 0), NonZeroU32::new(1).unwrap()).unwrap());
+        assert_revision(world.remove_object(UpdateSource::new(region, 5, Ordered(5), 0), NonZeroU32::new(1).unwrap()).unwrap());
 
         let changes = last_changes(&world);
         assert!(changes.iter().any(|change| {
-            matches!(change, EntityRemoved { id, address, reason: EntityRemovalReason::Killed }
+            matches!(change, EntityRemoved { id, address, reason: EntityRemovalReason::Killed, .. }
                 if *id == UUID::from_u128(250) && address.local_id().get() == 1)
         }));
         assert!(changes.iter().any(|change| {
-            matches!(change, EntityRemoved { id, address, reason: EntityRemovalReason::ParentCascade }
+            matches!(change, EntityRemoved { id, address, reason: EntityRemovalReason::ParentCascade, .. }
                 if *id == UUID::from_u128(251) && address.local_id().get() == 2)
         }));
+        assert!(changes.iter().any(|change| {
+            matches!(change, EntityUpdated { id, classes, .. }
+                if *id == UUID::from_u128(252)
+                    && classes.contains(ChangeClasses::RELATIONSHIP | ChangeClasses::TRANSFORM_MOTION))
+        }));
+        assert!(changes.iter().any(|change| matches!(change, SubtreeInvalidated { id, .. } if *id == UUID::from_u128(252))));
+    }
+
+    #[test]
+    fn relationships_invalidate_transform_motion() {
+        let region = Region::new(32);
+        let mut world = World::new(limits(8));
+        assert_revision(world.adopt_region(region).unwrap());
+        assert_revision(world.observe_object(observation(region, 1, 320, 1)).unwrap());
+        assert_revision(world.observe_object(observation(region, 2, 321, 2)).unwrap());
+
+        let mut link = ObjectPatch::new(UpdateSource::new(region, 3, Ordered(3), 0), NonZeroU32::new(2).unwrap());
+        link.parent = Some(Local(NonZeroU32::new(1).unwrap()));
+        assert_revision(world.patch_object(link).unwrap());
+
+        assert!(last_changes(&world).iter().any(|change| {
+            matches!(change, EntityUpdated { id, classes, .. }
+                if *id == UUID::from_u128(321)
+                    && classes.contains(ChangeClasses::RELATIONSHIP | ChangeClasses::TRANSFORM_MOTION))
+        }));
+    }
+
+    #[test]
+    fn shape_and_appearance_journal_separately() {
+        let region = Region::new(34);
+        let mut world = World::new(limits(8));
+        assert_revision(world.adopt_region(region).unwrap());
+        let mut object = observation(region, 1, 340, 1);
+        object.shape = Some(Some(Shape::Prim));
+        object.appearance = Some(Some(Appearance::Surface));
+        assert_revision(world.observe_object(object).unwrap());
+
+        let appearance = ObjectPatch {
+            appearance: Some(Some(Appearance::Avatar)),
+            ..ObjectPatch::new(UpdateSource::new(region, 3, Ordered(3), 0), NonZeroU32::new(1).unwrap())
+        };
+        assert_revision(world.patch_object(appearance).unwrap());
+        assert!(matches!(
+            last_changes(&world),
+            [EntityUpdated { id, classes, .. }]
+                if *id == UUID::from_u128(340) && classes.contains(ChangeClasses::APPEARANCE)
+                    && !classes.contains(ChangeClasses::SHAPE)
+        ));
+
+        let mixed_freshness = ObjectPatch {
+            shape: Some(Some(Shape::Mesh { asset_id: AssetId::new(UUID::from_u128(1)), flags: SculptFlags::default() })),
+            appearance: Some(Some(Appearance::Surface)),
+            ..ObjectPatch::new(UpdateSource::new(region, 2, Ordered(2), 0), NonZeroU32::new(1).unwrap())
+        };
+        assert_revision(world.patch_object(mixed_freshness).unwrap());
+        assert!(matches!(
+            last_changes(&world),
+            [EntityUpdated { id, classes, .. }]
+                if *id == UUID::from_u128(340) && classes.contains(ChangeClasses::SHAPE)
+                    && !classes.contains(ChangeClasses::APPEARANCE)
+        ));
+
+        let asset_change = ObjectPatch {
+            shape: Some(Some(Shape::Mesh { asset_id: AssetId::new(UUID::from_u128(2)), flags: SculptFlags::default() })),
+            ..ObjectPatch::new(UpdateSource::new(region, 4, Ordered(4), 0), NonZeroU32::new(1).unwrap())
+        };
+        assert_revision(world.patch_object(asset_change).unwrap());
+        assert!(matches!(
+            last_changes(&world),
+            [EntityUpdated { id, classes, .. }]
+                if *id == UUID::from_u128(340) && classes.contains(ChangeClasses::SHAPE)
+                    && !classes.contains(ChangeClasses::APPEARANCE)
+        ));
     }
 
     #[test]
@@ -371,7 +572,10 @@ mod tests {
 
         assert!(matches!(
             last_changes(&world),
-            [EntityUpdated(id), SubtreeInvalidated(root)] if *id == UUID::from_u128(310) && *root == UUID::from_u128(310)
+            [EntityUpdated { id, classes, .. }, SubtreeInvalidated { id: root, .. }]
+                if *id == UUID::from_u128(310)
+                    && classes.contains(ChangeClasses::TRANSFORM_MOTION)
+                    && *root == UUID::from_u128(310)
         ));
     }
 
@@ -393,7 +597,7 @@ mod tests {
         assert_revision(world.retire_region(region).unwrap());
         let changes = last_changes(&world);
         assert!(changes.iter().any(|change| {
-            matches!(change, EntityRemoved { id, address, reason: EntityRemovalReason::RegionRetired }
+            matches!(change, EntityRemoved { id, address, reason: EntityRemovalReason::RegionRetired, .. }
                 if *id == UUID::from_u128(261) && *address == entity_address)
         }));
         assert!(changes.iter().any(|change| {

@@ -74,6 +74,10 @@ fn child_first_scene(count: usize) -> (World, Vec<RootCase>) {
                 angular_velocity: None,
                 scale: None,
                 attachment_point: None,
+                shape: None,
+                appearance: None,
+                surface_appearance: None,
+                render_materials: None,
             };
             first_child_id += 1;
             let _ = black_box(world.observe_object(child).expect("pending child introduction"));
@@ -98,5 +102,9 @@ fn root_observation(root: RootCase, order: u64) -> ObjectObservation {
         angular_velocity: None,
         scale: None,
         attachment_point: None,
+        shape: None,
+        appearance: None,
+        surface_appearance: None,
+        render_materials: None,
     }
 }

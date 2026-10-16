@@ -3,7 +3,12 @@ use std::{mem::size_of, num::NonZeroU32};
 use base::UUID;
 use math::Vec3;
 
-use crate::model::{AttachmentPoint, Entity, Kind, LinearMotion, LocalAddress, MotionPatch, ParentUpdate, Pose, Region};
+use crate::AvatarAppearanceUpdate;
+use crate::ObjectMediaUpdate;
+use crate::model::{
+    Appearance, AttachmentPoint, Entity, GltfMaterialOverrides, Kind, LinearMotion, LocalAddress, MotionPatch, ParentUpdate, Pose, Region,
+    RenderMaterials, Shape, SurfaceAppearance,
+};
 
 use OrderEvidence::{Ambiguous, Degraded, Ordered};
 
@@ -90,22 +95,28 @@ pub(crate) struct FieldStamp {
 /// A field group that the reducer validates and accepts atomically.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum FieldGroup {
-    /// Position and rotation.
     Pose,
-    /// Velocity and acceleration.
     LinearMotion,
-    /// Angular velocity.
     AngularVelocity,
-    /// Scale.
     Scale,
-    /// Parent declaration and relationship.
     Parent,
-    /// Avatar attachment-point identity.
     AttachmentPoint,
-    /// Sit-position evidence relative to an object.
+    Shape,
+    /// Surface or avatar appearance category.
+    Appearance,
+    /// Per-face surface appearance values.
+    TextureEntry,
+    /// Per-face PBR RenderMaterials bindings.
+    RenderMaterials,
+    /// Per-face ObjectMedia values and their fetched version.
+    ObjectMedia,
     SitTarget,
     /// Owner and creator properties.
     Properties,
+    /// Avatar texture slots and positional visual-parameter values.
+    AvatarAppearance,
+    /// Per-face GLTF material overrides.
+    GltfMaterialOverrides,
 }
 
 impl FieldGroup {
@@ -117,8 +128,15 @@ impl FieldGroup {
             Self::Scale => 3,
             Self::Parent => 4,
             Self::AttachmentPoint => 5,
-            Self::SitTarget => 6,
-            Self::Properties => 7,
+            Self::Shape => 6,
+            Self::Appearance => 7,
+            Self::TextureEntry => 8,
+            Self::RenderMaterials => 9,
+            Self::ObjectMedia => 10,
+            Self::SitTarget => 11,
+            Self::Properties => 12,
+            Self::AvatarAppearance => 13,
+            Self::GltfMaterialOverrides => 14,
         }
     }
 }
@@ -128,6 +146,8 @@ impl FieldGroup {
 pub enum FieldRejectionReason {
     /// A supplied numeric value was invalid.
     InvalidValue { field: &'static str },
+    /// The field would exceed a World-owned resource budget.
+    ResourceLimit { field: &'static str },
     /// The quaternion was non-finite, degenerate, or outside decoder tolerance.
     InvalidRotation,
     /// Applying the proposed parent would create a cycle.
@@ -136,6 +156,8 @@ pub enum FieldRejectionReason {
     ParentDependsOnRejectedParent,
     /// The update would replace a value established by a tracked source.
     UntrustedSource,
+    /// The self avatar appearance message has an older COF version.
+    StaleVersion,
 }
 
 /// A rejected field group and its cause.
@@ -148,13 +170,13 @@ pub struct FieldRejection {
 /// Rejections from one update, with at most one entry for each field group.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Rejections {
-    entries: [Option<FieldRejection>; 8],
+    entries: [Option<FieldRejection>; 15],
     len: usize,
 }
 
 impl Rejections {
     pub const fn new() -> Self {
-        Self { entries: [None; 8], len: 0 }
+        Self { entries: [None; 15], len: 0 }
     }
 
     pub const fn len(&self) -> usize {
@@ -186,7 +208,7 @@ impl Default for Rejections {
 }
 
 /// Identity-bearing observation. Parent is always declared, including root.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ObjectObservation {
     pub source: UpdateSource,
     pub id: UUID,
@@ -199,10 +221,18 @@ pub struct ObjectObservation {
     pub scale: Option<Vec3>,
     /// `None` leaves this metadata unchanged; `Some(None)` clears it.
     pub attachment_point: Option<Option<AttachmentPoint>>,
+    /// `None` leaves the shape unchanged; `Some(None)` clears it.
+    pub shape: Option<Option<Shape>>,
+    /// `None` leaves the category unchanged; `Some(None)` clears it.
+    pub appearance: Option<Option<Appearance>>,
+    /// `None` leaves face data unchanged; a successful entry replaces all decoded face values.
+    pub surface_appearance: Option<SurfaceAppearance>,
+    /// `None` leaves PBR bindings unchanged; `Some(empty)` clears every face binding.
+    pub render_materials: Option<RenderMaterials>,
 }
 
 /// A source-local patch. It cannot introduce an object.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ObjectPatch {
     pub source: UpdateSource,
     pub local_id: NonZeroU32,
@@ -213,6 +243,21 @@ pub struct ObjectPatch {
     pub parent: Option<ParentUpdate>,
     /// `None` leaves this metadata unchanged; `Some(None)` clears it.
     pub attachment_point: Option<Option<AttachmentPoint>>,
+    /// `None` leaves the shape unchanged; `Some(None)` clears it.
+    pub shape: Option<Option<Shape>>,
+    /// `None` leaves the category unchanged; `Some(None)` clears it.
+    pub appearance: Option<Option<Appearance>>,
+    /// `None` leaves face data unchanged; a successful entry replaces all decoded face values.
+    pub surface_appearance: Option<SurfaceAppearance>,
+    /// `None` leaves PBR bindings unchanged; `Some(empty)` clears every face binding.
+    pub render_materials: Option<RenderMaterials>,
+    /// `None` leaves GLTF overrides unchanged; `Some(empty)` clears the complete snapshot.
+    pub gltf_material_overrides: Option<GltfMaterialOverrides>,
+    /// `None` leaves fetched media unchanged; a newer response patches its supplied face prefix.
+    pub object_media: Option<ObjectMediaUpdate>,
+    /// `None` leaves avatar data unchanged. Positional visual parameters update supplied indices;
+    /// a supplied texture table replaces all 45 avatar slots, with nil textures represented as clears.
+    pub avatar_appearance: Option<AvatarAppearanceUpdate>,
 }
 
 impl ObjectPatch {
@@ -226,6 +271,13 @@ impl ObjectPatch {
             scale: None,
             parent: None,
             attachment_point: None,
+            shape: None,
+            appearance: None,
+            surface_appearance: None,
+            render_materials: None,
+            gltf_material_overrides: None,
+            object_media: None,
+            avatar_appearance: None,
         }
     }
 }

@@ -63,6 +63,10 @@ fn world_with_chain(edge_depth: usize) -> (World, Entity) {
             angular_velocity: None,
             scale: None,
             attachment_point: None,
+            shape: None,
+            appearance: None,
+            surface_appearance: None,
+            render_materials: None,
         };
         let applied = world.observe_object(observation).expect("object observation");
         let Introduced(entity) = applied.outcome else { panic!("expected object introduction") };

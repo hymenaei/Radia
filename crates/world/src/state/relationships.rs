@@ -1,14 +1,17 @@
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap},
     num::NonZeroU32,
 };
 
 use base::UUID;
 
-use super::journal::Change::{EntityRemoved, EntityUpdated, SubtreeInvalidated};
+use super::journal::{
+    Change::{EntityRemoved, EntityUpdated, SubtreeInvalidated},
+    ChangeClasses,
+};
 use super::{
-    ApplyError, Change, Entity, EntityRemovalReason, FieldStamp, Kind, LocalAddress, Parent, ParentUpdate, PoseState, Region, Stamp,
-    UpdateAuthority, World, WorldLimits, WorldPose, newer_field, remove_index,
+    ApplyError, Change, Entity, EntityRemovalReason, FieldStamp, Kind, LocalAddress, ObjectMedia, Parent, ParentUpdate, Region, Stamp,
+    UpdateAuthority, World, WorldLimits, newer_field, remove_index,
 };
 
 #[derive(Debug, Default)]
@@ -66,17 +69,11 @@ impl Tombstones {
     }
 }
 
-#[derive(Clone, Copy)]
-struct AvatarDetach {
-    frame_generation: u64,
-    provisional_pose: Option<WorldPose>,
-}
-
 impl World {
     pub(super) fn invalidate_subtree(&self, root: Entity, changes: &mut Vec<Change>) {
         if self.children.get(&root).is_some_and(|children| !children.is_empty()) {
             let id = self.object(root).expect("a subtree root is live").identity.id;
-            changes.push(SubtreeInvalidated(id));
+            changes.push(SubtreeInvalidated { id, entity: root });
         }
     }
 
@@ -167,7 +164,11 @@ impl World {
 
             self.set_parent(child, Parent::Pending { address: old_address, expected_uuid: Some(parent_uuid) });
             recovery_targets.push(child_address);
-            changes.push(EntityUpdated(child_uuid));
+            changes.push(EntityUpdated {
+                id: child_uuid,
+                entity: child,
+                classes: ChangeClasses::RELATIONSHIP | ChangeClasses::TRANSFORM_MOTION,
+            });
             self.invalidate_subtree(child, changes);
         }
     }
@@ -197,7 +198,11 @@ impl World {
             if self.would_cycle(child, parent) {
                 if expected_uuid.is_none() {
                     self.set_parent(child, Parent::Pending { address, expected_uuid: Some(parent_uuid) });
-                    changes.push(EntityUpdated(uuid));
+                    changes.push(EntityUpdated {
+                        id: uuid,
+                        entity: child,
+                        classes: ChangeClasses::RELATIONSHIP | ChangeClasses::TRANSFORM_MOTION,
+                    });
                     self.invalidate_subtree(child, changes);
                 }
                 recovery_targets.push(child_address);
@@ -206,7 +211,7 @@ impl World {
             self.detach_parent(child);
             self.data_mut(child).parent = Parent::Resolved(parent);
             self.children.entry(parent).or_default().insert(child);
-            changes.push(EntityUpdated(uuid));
+            changes.push(EntityUpdated { id: uuid, entity: child, classes: ChangeClasses::RELATIONSHIP | ChangeClasses::TRANSFORM_MOTION });
             self.invalidate_subtree(child, changes);
             recovery_cancellations.push(child_address);
         }
@@ -236,42 +241,7 @@ impl World {
         changes: &mut Vec<Change>,
         recovery_targets: &mut Vec<LocalAddress>,
         recovery_cancellations: &mut Vec<LocalAddress>,
-    ) -> Result<(), ApplyError> {
-        let mut detachments = HashMap::new();
-        let mut preflight = vec![(entity, invalidation, reason)];
-        let mut visited = HashSet::new();
-        while let Some((parent, invalidation, reason)) = preflight.pop() {
-            if !visited.insert(parent) {
-                continue;
-            }
-            let Some(parent_address) = self.object(parent).map(|object| object.address()) else { continue };
-            let children = self.children.get(&parent).cloned().unwrap_or_default();
-            for child in children {
-                if Some(child) == preserve_child {
-                    continue;
-                }
-                let Some((kind, address, fence)) =
-                    self.object(child).map(|object| (object.kind(), object.address(), object.data.binding.fence))
-                else {
-                    continue;
-                };
-                let can_retire = invalidation.is_some_and(|stamp| parent_address.region == address.region && stamp > fence);
-                if reason == EntityRemovalReason::RegionRetired && address.region == parent_address.region {
-                    preflight.push((child, None, EntityRemovalReason::RegionRetired));
-                } else if can_retire && kind != Kind::Avatar {
-                    preflight.push((child, invalidation, EntityRemovalReason::ParentCascade));
-                } else if can_retire {
-                    let object = self.object(child).expect("avatar child remains live during removal preflight");
-                    let frame_generation = object.data.frame_generation.checked_add(1).ok_or(ApplyError::FrameGenerationExhausted)?;
-                    let provisional_pose = match object.world_pose().ok() {
-                        Some(PoseState::Resolved(pose)) => Some(pose),
-                        Some(PoseState::Unresolved(_) | PoseState::Provisional { .. }) | None => None,
-                    };
-                    detachments.insert(child, AvatarDetach { frame_generation, provisional_pose });
-                }
-            }
-        }
-
+    ) {
         if let Some(child) = preserve_child
             && self.object(child).is_some()
         {
@@ -281,16 +251,23 @@ impl World {
 
         let mut pending = vec![(entity, invalidation, tombstone, reason, false)];
         while let Some((entity, invalidation, tombstone, reason, expanded)) = pending.pop() {
-            let Some((id, address, binding_fence)) =
-                self.object(entity).map(|object| (object.identity.id, object.address(), object.data.binding.fence))
-            else {
+            let Some((id, address, binding_fence, media_bytes)) = self.object(entity).map(|object| {
+                (
+                    object.identity.id,
+                    object.address(),
+                    object.data.binding.fence,
+                    object.data.object_media.as_deref().map_or(0, ObjectMedia::retained_bytes),
+                )
+            }) else {
                 continue;
             };
 
             if expanded {
+                self.object_media_bytes = self.object_media_bytes.saturating_sub(media_bytes);
                 self.detach_parent(entity);
                 self.children.remove(&entity);
                 self.entities.remove(&id);
+                assert!(self.object_ids.remove(&id), "UUID ordering index is missing a live entity ID");
                 remove_index(&mut self.region_entities, address.region, entity);
                 if self.addresses.get(&address) == Some(&entity) {
                     self.addresses.remove(&address);
@@ -299,7 +276,7 @@ impl World {
                     }
                 }
                 let _ = self.ecs.despawn(entity.0);
-                changes.push(EntityRemoved { id, address, reason });
+                changes.push(EntityRemoved { id, entity, address, reason });
                 recovery_cancellations.push(address);
                 continue;
             }
@@ -321,27 +298,19 @@ impl World {
                     pending.push((child, None, false, EntityRemovalReason::RegionRetired, false));
                 } else if can_retire && child_kind != Kind::Avatar {
                     pending.push((child, invalidation, true, EntityRemovalReason::ParentCascade, false));
-                } else if can_retire {
-                    let detach = detachments.remove(&child).expect("avatar detach was checked before removal");
-                    self.apply_parent(child, Parent::Root, recovery_targets);
-                    {
-                        let mut data = self.data_mut(child);
-                        data.frame_generation = detach.frame_generation;
-                        data.provisional_pose = detach.provisional_pose;
-                    }
-                    self.advance_parent_fence(child, invalidation, address.region);
-                    changes.push(EntityUpdated(child_id));
-                    self.invalidate_subtree(child, changes);
                 } else {
                     self.set_parent(child, Parent::Pending { address, expected_uuid: Some(id) });
                     self.advance_parent_fence(child, invalidation, address.region);
                     recovery_targets.push(child_address);
-                    changes.push(EntityUpdated(child_id));
+                    changes.push(EntityUpdated {
+                        id: child_id,
+                        entity: child,
+                        classes: ChangeClasses::RELATIONSHIP | ChangeClasses::TRANSFORM_MOTION,
+                    });
                     self.invalidate_subtree(child, changes);
                 }
             }
         }
-        Ok(())
     }
 
     pub(super) fn tombstone_would_change(&self, address: LocalAddress, stamp: Stamp) -> bool {
@@ -432,7 +401,7 @@ mod tests {
         OrderEvidence::Ordered,
         Parent::Pending,
         ParentUpdate::{Local, Root},
-        Pose, PoseState, RegionInfo, UpdateSource,
+        Pose, RegionInfo, UpdateSource, WorldRevision,
     };
 
     fn test_limits() -> WorldLimits {
@@ -481,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn removal_at_generation_limit_is_atomic() {
+    fn generation_limit_keeps_avatar_pending() {
         let region = Region::new(1);
         let mut world = World::new(test_limits());
         assert_eq!(world.adopt_region(region).unwrap().outcome, RegionAdopted);
@@ -491,32 +460,31 @@ mod tests {
         );
         let seat = observation(&mut world, region, 1, 1, Object, Root);
         let avatar = observation(&mut world, region, 2, 2, Avatar, Local(NonZeroU32::new(1).unwrap()));
-        let PoseState::Resolved(pose) = world.object(avatar).unwrap().world_pose().unwrap() else { panic!("expected seated pose") };
         {
             let mut data = world.data_mut(avatar);
             data.frame_generation = u64::MAX;
             data.position_frame_generation = Some(u64::MAX);
             data.rotation_frame_generation = Some(u64::MAX);
         }
-        let revision = world.revision();
+        let removed = world.remove_object(source(region, 3), NonZeroU32::new(1).unwrap()).unwrap();
 
-        assert_eq!(world.remove_object(source(region, 3), NonZeroU32::new(1).unwrap()), Err(ApplyError::FrameGenerationExhausted));
-
-        assert_eq!(world.revision(), revision);
-        assert_eq!(world.object_count(), 2);
-        assert_eq!(world.object(avatar).unwrap().parent(), Parent::Resolved(seat));
-        assert_eq!(world.object(avatar).unwrap().world_pose().unwrap(), PoseState::Resolved(pose));
+        assert_eq!(removed.outcome, Removed(UUID::from_u128(1)));
+        assert!(world.object(seat).is_none());
+        assert_eq!(world.object_count(), 1);
+        assert_eq!(
+            world.object(avatar).unwrap().parent(),
+            Pending { address: LocalAddress::new(region, NonZeroU32::new(1).unwrap()), expected_uuid: Some(UUID::from_u128(1)) }
+        );
+        assert_eq!(removed.recovery.unwrap().targets, [LocalAddress::new(region, NonZeroU32::new(2).unwrap())]);
     }
 
     #[test]
-    fn equal_child_stamp_keeps_avatar_pending() {
+    fn newer_child_keeps_avatar_pending() {
         let region = Region::new(1);
         let mut world = World::new(test_limits());
         assert_eq!(world.adopt_region(region).unwrap().outcome, RegionAdopted);
         let seat = observation(&mut world, region, 1, 1, Object, Root);
-        let avatar = observation(&mut world, region, 2, 2, Avatar, Local(NonZeroU32::new(1).unwrap()));
-        world.data_mut(avatar).frame_generation = u64::MAX;
-
+        let avatar = observation(&mut world, region, 3, 2, Avatar, Local(NonZeroU32::new(1).unwrap()));
         let removed = world.remove_object(source(region, 2), NonZeroU32::new(1).unwrap()).unwrap();
 
         assert_eq!(removed.outcome, Removed(UUID::from_u128(1)));
@@ -529,19 +497,38 @@ mod tests {
     }
 
     #[test]
-    fn retiring_parent_removes_child_without_recovery() {
+    fn revision_exhaustion_keeps_relationships() {
         let region = Region::new(1);
         let mut world = World::new(test_limits());
         assert_eq!(world.adopt_region(region).unwrap().outcome, RegionAdopted);
         let parent = observation(&mut world, region, 1, 1, Object, Root);
-        let child = observation(&mut world, region, 2, 2, Object, Local(NonZeroU32::new(1).unwrap()));
+        let avatar = observation(&mut world, region, 2, 2, Avatar, Local(NonZeroU32::new(1).unwrap()));
+        let parent_address = LocalAddress::new(region, NonZeroU32::new(1).unwrap());
+
+        world.journal.revision = WorldRevision(u64::MAX);
+        assert_eq!(world.remove_object(source(region, 3), parent_address.local_id()), Err(ApplyError::RevisionExhausted));
+
+        assert_eq!(world.revision(), WorldRevision(u64::MAX));
+        assert_eq!(world.object_count(), 2);
+        assert_eq!(world.entity(UUID::from_u128(1)), Some(parent));
+        assert_eq!(world.entity_at(parent_address), Some(parent));
+        assert_eq!(world.entity(UUID::from_u128(2)), Some(avatar));
+        assert_eq!(world.object(avatar).unwrap().parent(), Parent::Resolved(parent));
+        assert_eq!(world.children(parent).map(|object| object.entity()).collect::<Vec<_>>(), [avatar]);
+    }
+
+    #[test]
+    fn parent_retirement_removes_avatar() {
+        let region = Region::new(1);
+        let mut world = World::new(test_limits());
+        assert_eq!(world.adopt_region(region).unwrap().outcome, RegionAdopted);
+        let parent = observation(&mut world, region, 1, 1, Object, Root);
+        let child = observation(&mut world, region, 2, 2, Avatar, Local(NonZeroU32::new(1).unwrap()));
         let mut changes = Vec::new();
         let mut recovery_targets = Vec::new();
         let mut recovery_cancellations = Vec::new();
 
-        world
-            .remove_entity(parent, None, false, RegionRetired, None, &mut changes, &mut recovery_targets, &mut recovery_cancellations)
-            .unwrap();
+        world.remove_entity(parent, None, false, RegionRetired, None, &mut changes, &mut recovery_targets, &mut recovery_cancellations);
 
         assert!(world.object(parent).is_none());
         assert!(world.object(child).is_none());
@@ -563,6 +550,10 @@ mod tests {
             angular_velocity: None,
             scale: None,
             attachment_point: None,
+            shape: None,
+            appearance: None,
+            surface_appearance: None,
+            render_materials: None,
         };
         let Introduced(entity) = world.observe_object(object).unwrap().outcome else { panic!("expected object introduction") };
         entity

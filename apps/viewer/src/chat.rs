@@ -18,7 +18,7 @@ use protocol::{
 use crate::{
     devtools::{DeveloperFloater, WorldSource},
     secondary_windows,
-    session::{ChatMessage, SharedWorldState, format_avatar_name},
+    session::{ChatMessage, WorldReader, format_avatar_name},
     window_geometry,
 };
 
@@ -80,7 +80,7 @@ impl ChatScreen {
         cx.notify();
     }
 
-    pub fn set_world_state(&mut self, state: SharedWorldState, cx: &mut Context<Self>) {
+    pub fn set_world_state(&mut self, state: WorldReader, cx: &mut Context<Self>) {
         self.world_source.set(Some(state));
         cx.notify();
     }

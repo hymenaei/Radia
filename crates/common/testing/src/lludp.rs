@@ -63,6 +63,10 @@ pub mod vectors {
     /// Avatar `ImprovedTerseObjectUpdate` packet with a collision plane.
     pub const IMPROVED_TERSE_OBJECT_UPDATE_AVATAR: &str = include_str!("../fixtures/lludp/improved_terse_object_update_avatar.hex");
     pub const OBJECT_UPDATE_CACHED: &str = include_str!("../fixtures/lludp/object_update_cached.hex");
+    /// Synthetic `ObjectExtraParams` packet with one in-use parameter block.
+    pub const OBJECT_EXTRA_PARAMS: &str = include_str!("../fixtures/lludp/object_extra_params.hex");
+    /// Synthetic `GenericStreamingMessage` packet containing a method and two payload bytes.
+    pub const GENERIC_STREAMING_MESSAGE: &str = include_str!("../fixtures/lludp/generic_streaming_message.hex");
     pub const KILL_OBJECT: &str = include_str!("../fixtures/lludp/kill_object.hex");
     pub const REQUEST_MULTIPLE_OBJECTS: &str = include_str!("../fixtures/lludp/request_multiple_objects.hex");
     /// `UUIDNameRequest` packet with its final variable-block count omitted.
@@ -118,6 +122,8 @@ pub mod vectors {
         ("improved_terse_object_update.hex", IMPROVED_TERSE_OBJECT_UPDATE),
         ("improved_terse_object_update_avatar.hex", IMPROVED_TERSE_OBJECT_UPDATE_AVATAR),
         ("object_update_cached.hex", OBJECT_UPDATE_CACHED),
+        ("object_extra_params.hex", OBJECT_EXTRA_PARAMS),
+        ("generic_streaming_message.hex", GENERIC_STREAMING_MESSAGE),
         ("kill_object.hex", KILL_OBJECT),
         ("request_multiple_objects.hex", REQUEST_MULTIPLE_OBJECTS),
         ("uuid_name_request_empty.hex", UUID_NAME_REQUEST_EMPTY),

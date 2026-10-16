@@ -124,4 +124,14 @@ typed_message_coverage! {
         ("AgentData", BlockMode::Single, "AgentID SessionID"),
         ("ObjectData", BlockMode::Variable, "CacheMissType ID"),
     ];
+    "ObjectExtraParams" => ObjectExtraParams, OBJECT_EXTRA_PARAMS, vectors::OBJECT_EXTRA_PARAMS,
+        Specialized, SchemaConforming, [
+            ("AgentData", BlockMode::Single, "AgentID SessionID"),
+            ("ObjectData", BlockMode::Variable, "ObjectLocalID ParamType ParamInUse ParamSize ParamData"),
+        ];
+    "GenericStreamingMessage" => GenericStreamingMessage, GENERIC_STREAMING_MESSAGE, vectors::GENERIC_STREAMING_MESSAGE,
+        Specialized, SchemaConforming, [
+            ("MethodData", BlockMode::Single, "Method"),
+            ("DataBlock", BlockMode::Single, "Data"),
+    ];
 }

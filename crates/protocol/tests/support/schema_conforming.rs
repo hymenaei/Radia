@@ -112,6 +112,28 @@ pub(crate) fn schema_conforming_fields(message: &Message) -> Option<Vec<BlockVal
                     .collect(),
             ),
         ]),
+        Message::ObjectExtraParams(message) => Some(vec![
+            one(vec![FieldValue::UUID(message.agent_id), FieldValue::UUID(message.session_id)]),
+            many(
+                message
+                    .object_data
+                    .iter()
+                    .map(|update| {
+                        vec![
+                            FieldValue::U32(update.local_id),
+                            FieldValue::U16(update.parameter_type),
+                            FieldValue::Bool(update.in_use),
+                            FieldValue::U32(u32::try_from(update.data.len()).expect("fixture ParamSize fits")),
+                            FieldValue::Bytes(update.data.clone()),
+                        ]
+                    })
+                    .collect(),
+            ),
+        ]),
+        Message::GenericStreamingMessage(message) => Some(vec![
+            one(vec![FieldValue::U16(message.method)]),
+            one(vec![FieldValue::Bytes(message.data.clone())]),
+        ]),
         Message::Schema(_) | Message::Unknown { .. } => None,
     }
 }

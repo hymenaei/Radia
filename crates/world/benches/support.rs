@@ -96,6 +96,10 @@ pub(super) fn observation_with_pose(row: Row, pose: Pose) -> ObjectObservation {
         angular_velocity: None,
         scale: Some(Vec3::ONE),
         attachment_point: None,
+        shape: None,
+        appearance: None,
+        surface_appearance: None,
+        render_materials: None,
     }
 }
 

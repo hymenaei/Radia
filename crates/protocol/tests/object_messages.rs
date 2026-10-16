@@ -4,10 +4,11 @@ use protocol::{
     LLUdpError,
     lludp::{Message, Packet},
     messages::{
-        CacheMissType, CachedObjectReference, ExtraParameter, KillObject, ObjectData, ObjectMotion, ObjectRequest, ObjectShape,
-        ObjectSound, ObjectSpecificData, ObjectText, ObjectUpdate, ObjectUpdateCached, RegionData, RequestAgentData,
-        RequestMultipleObjects, kill_object,
+        CacheMissType, CachedObjectReference, ExtraParameter, KillObject, ObjectData, ObjectMotion, ObjectRequest, ObjectSound,
+        ObjectSpecificData, ObjectText, ObjectUpdate, ObjectUpdateCached, RegionData, RequestAgentData, RequestMultipleObjects,
+        kill_object,
     },
+    types::ObjectShape,
 };
 use testing::{lludp::vectors, parse_hex_fixture};
 
@@ -570,7 +571,7 @@ fn terse_update_fixtures_are_partial() {
 }
 
 #[test]
-fn terse_avatar_plane_and_empty_texture_entry_are_consistent() {
+fn terse_avatar_payload_constraints() {
     let (_, packet) = decode(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
     let Message::ImprovedTerseObjectUpdate(mut update) = packet.message().clone() else {
         panic!("expected terse object update");
@@ -679,6 +680,7 @@ fn object_fixtures_reject_every_truncated_prefix() {
         vectors::IMPROVED_TERSE_OBJECT_UPDATE_AVATAR,
         vectors::OBJECT_UPDATE_CACHED,
         vectors::KILL_OBJECT,
+        vectors::OBJECT_EXTRA_PARAMS,
         vectors::REQUEST_MULTIPLE_OBJECTS,
     ] {
         let packet = Packet::decode(&fixture(wire)).expect("decode object fixture");
@@ -727,6 +729,11 @@ fn empty_object_message(message: &Message) -> Message {
             let mut update = update.clone();
             update.object_data.clear();
             Message::KillObject(update)
+        }
+        Message::ObjectExtraParams(update) => {
+            let mut update = update.clone();
+            update.object_data.clear();
+            Message::ObjectExtraParams(update)
         }
         Message::RequestMultipleObjects(update) => {
             let mut update = update.clone();

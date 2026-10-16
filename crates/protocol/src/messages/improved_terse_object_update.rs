@@ -4,8 +4,36 @@ use crate::{
     LLUdpError,
     lludp::codec::Reader,
     messages::common::{ObjectMotion, RegionData, decode_quantized, read_variable1, read_variable2, read_vector4, rotation_from_u16},
+    types::{TextureEntry, decode_texture_entry as decode_texture_entry_payload},
 };
 use math::{Vec3, Vec4};
+
+/// Largest improved-terse TextureEntry field copied by the viewer.
+pub const MAX_TEXTURE_ENTRY_FIELD_BYTES: usize = 1024;
+/// Largest TextureEntry payload after unwrapping the improved-terse binary-data value.
+pub const MAX_TEXTURE_ENTRY_BYTES: usize = 1020;
+
+/// Unwraps the improved-terse TextureEntry value and decodes its bounded payload.
+pub fn decode_texture_entry(bytes: &[u8]) -> Result<Option<TextureEntry>, LLUdpError> {
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    if bytes.len() > MAX_TEXTURE_ENTRY_FIELD_BYTES {
+        return Err(LLUdpError::InvalidMessage);
+    }
+    let length_bytes: [u8; 4] = bytes.get(..4).ok_or(LLUdpError::InvalidMessage)?.try_into().expect("four bytes requested");
+    let length = i32::from_le_bytes(length_bytes);
+    if length < 0 {
+        return Err(LLUdpError::InvalidMessage);
+    }
+    let length = usize::try_from(length).map_err(|_| LLUdpError::InvalidMessage)?;
+    if length > MAX_TEXTURE_ENTRY_BYTES {
+        return Err(LLUdpError::InvalidMessage);
+    }
+    let end = 4_usize.checked_add(length).ok_or(LLUdpError::InvalidMessage)?;
+    let payload = bytes.get(4..end).ok_or(LLUdpError::InvalidMessage)?;
+    decode_texture_entry_payload(payload).map_err(|_| LLUdpError::InvalidMessage)
+}
 
 /// A packet of partial object motion updates.
 #[derive(Clone, Debug, PartialEq)]

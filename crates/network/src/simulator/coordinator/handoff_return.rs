@@ -3,6 +3,48 @@ use std::sync;
 use super::*;
 
 #[test]
+fn event_batch_order_survives_forwarding() {
+    run_large_stack_test(run_event_batch_order_survives_forwarding);
+}
+
+async fn run_event_batch_order_survives_forwarding() {
+    use crate::{
+        capabilities::{EventQueueTestServer, EventServerResponse},
+        http::testing::response,
+    };
+
+    let server = EventQueueTestServer::start(|base| {
+        let seed = format!("<llsd><map><key>EventQueueGet</key><uri>{base}events</uri></map></llsd>");
+        let batch = r#"<llsd><map><key>id</key><integer>1</integer><key>events</key><array><map>
+            <key>message</key><string>TestEvent</string><key>body</key><map/>
+        </map></array></map></llsd>"#;
+        vec![
+            EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed)),
+            EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, batch)),
+            EventServerResponse::Hold,
+        ]
+    });
+    let mut harness = Box::pin(connected_neighbor_with_seed(server.url("/seed"))).await;
+    let event = timeout(WAIT, async {
+        loop {
+            if let Event::CapabilityEventBatch { order, events, .. } = next_raw_event(&mut harness.events).await
+                && events.iter().any(|event| event.message == "TestEvent")
+            {
+                break order;
+            }
+        }
+    })
+    .await
+    .expect("EventQueue batch reaches the session event stream");
+
+    assert_eq!(event.ordinal, 0);
+    assert_ne!(event.incarnation, 0);
+
+    harness.shutdown().await;
+    assert_eq!(server.finish().len(), 3);
+}
+
+#[test]
 fn return_handoff_reuses_root_connection() {
     run_large_stack_test(run_return_handoff_reuses_root_connection);
 }

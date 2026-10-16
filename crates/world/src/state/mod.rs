@@ -1,22 +1,33 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     hash::Hash,
+    sync::Arc,
 };
 
 use base::UUID;
 use hecs::Ref;
 use math::{Quat, Vec3};
 
-use crate::{model::*, update::*};
+use crate::{AvatarAppearance, GltfMaterialOverrides, ObjectMedia, model::*, update::*};
 
 mod journal;
 mod pose;
+mod read;
 mod reducer;
 mod region;
 mod relationships;
 
-use journal::{Change, EntityRemovalReason, Journal};
+pub use journal::{Change as WorldChange, ChangeClasses as WorldChangeClasses, EntityRemovalReason as WorldEntityRemovalReason};
+use journal::{Change, ChangeClasses, EntityRemovalReason, Journal};
+pub use read::{
+    MAX_OBJECT_DETAIL_BATCH_BYTES, MAX_OBJECT_DETAIL_BATCH_ITEMS, MAX_OBJECT_DETAIL_BYTES, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_BYTES,
+    MAX_REGION_PAGE_ITEMS, MAX_WORLD_CHANGE_PAGE_ITEMS, ObjectDetail, ObjectDetailBatch, ObjectDetailResult, ObjectListItem,
+    ObjectListItemRead, ObjectListPage, ObjectPage, ObjectPageCursor, ObjectSummary, ObjectSummaryRead, RegionPage, RegionPageCursor,
+    RegionSummary, RegionSummaryRead, WorldChangeCursor, WorldChangePage, WorldChangeRecord, WorldReadBarrier, WorldReadError,
+};
 use relationships::Tombstones;
+
+const MAX_OBJECT_MEDIA_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct Binding {
     address: LocalAddress,
@@ -24,7 +35,7 @@ struct Binding {
     parent_resolution_fence: Option<Stamp>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct ObservableState {
     address: LocalAddress,
     transform: Transform,
@@ -36,9 +47,54 @@ struct ObservableState {
     angular_velocity: Option<Vec3>,
     shape: Option<Shape>,
     appearance: Option<Appearance>,
+    surface_appearance: Option<Arc<SurfaceAppearance>>,
+    render_materials: Option<Arc<RenderMaterials>>,
+    gltf_material_overrides: Option<Arc<GltfMaterialOverrides>>,
+    object_media: Option<Arc<ObjectMedia>>,
+    avatar_appearance: Option<Arc<AvatarAppearance>>,
     attachment_point: Option<AttachmentPoint>,
     sit_target: Option<SitTarget>,
     properties: Properties,
+}
+
+impl ObservableState {
+    fn changes_to(&self, next: &Self) -> ChangeClasses {
+        let mut classes = ChangeClasses::default();
+
+        if self.transform != next.transform
+            || self.position_frame_generation != next.position_frame_generation
+            || self.rotation_frame_generation != next.rotation_frame_generation
+            || self.provisional_pose != next.provisional_pose
+            || self.linear_motion != next.linear_motion
+            || self.angular_velocity != next.angular_velocity
+        {
+            classes |= ChangeClasses::TRANSFORM_MOTION;
+        }
+
+        if self.parent != next.parent || self.attachment_point != next.attachment_point || self.sit_target != next.sit_target {
+            classes |= ChangeClasses::RELATIONSHIP | ChangeClasses::TRANSFORM_MOTION;
+        }
+
+        if self.shape != next.shape {
+            classes |= ChangeClasses::SHAPE;
+        }
+
+        if self.appearance != next.appearance
+            || self.surface_appearance != next.surface_appearance
+            || self.render_materials != next.render_materials
+            || self.gltf_material_overrides != next.gltf_material_overrides
+            || self.object_media != next.object_media
+            || self.avatar_appearance != next.avatar_appearance
+        {
+            classes |= ChangeClasses::APPEARANCE;
+        }
+
+        if self.properties != next.properties {
+            classes |= ChangeClasses::PROPERTIES;
+        }
+
+        classes
+    }
 }
 
 impl Binding {
@@ -59,6 +115,12 @@ struct Fences {
     scale: Option<FieldStamp>,
     parent: Option<FieldStamp>,
     attachment_point: Option<FieldStamp>,
+    shape: Option<RegionalStamp>,
+    appearance: Option<RegionalStamp>,
+    texture_entry: Option<RegionalStamp>,
+    render_materials: Option<RegionalStamp>,
+    gltf_material_overrides: Option<RegionalStamp>,
+    avatar_appearance: Option<RegionalStamp>,
     sit_target: Option<RegionalStamp>,
     properties: Option<RegionalStamp>,
 }
@@ -75,7 +137,7 @@ struct ParentRejectionBarrier {
     stamp: Stamp,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct ObjectData {
     binding: Binding,
     parent: Parent,
@@ -84,6 +146,11 @@ struct ObjectData {
     angular_velocity: Option<Vec3>,
     shape: Option<Shape>,
     appearance: Option<Appearance>,
+    surface_appearance: Option<Arc<SurfaceAppearance>>,
+    render_materials: Option<Arc<RenderMaterials>>,
+    gltf_material_overrides: Option<Arc<GltfMaterialOverrides>>,
+    object_media: Option<Arc<ObjectMedia>>,
+    avatar_appearance: Option<Arc<AvatarAppearance>>,
     attachment_point: Option<AttachmentPoint>,
     sit_target: Option<SitTarget>,
     frame_generation: u64,
@@ -115,6 +182,14 @@ impl ObjectData {
             || observation.angular_velocity.is_some_and(|_| newer_field(field_stamp, self.fences.angular_velocity))
             || observation.scale.is_some_and(|_| newer_field(field_stamp, self.fences.scale))
             || observation.attachment_point.is_some_and(|_| newer_field(field_stamp, self.fences.attachment_point))
+            || observation.shape.is_some_and(|_| newer_region_field(observation.source.region, field_stamp, self.fences.shape))
+            || observation.appearance.is_some_and(|_| newer_region_field(observation.source.region, field_stamp, self.fences.appearance))
+            || (observation.kind != Kind::Avatar
+                && observation.surface_appearance.is_some()
+                && newer_region_field(observation.source.region, field_stamp, self.fences.texture_entry))
+            || (observation.kind != Kind::Avatar
+                && observation.render_materials.is_some()
+                && newer_region_field(observation.source.region, field_stamp, self.fences.render_materials))
             || newer_field(field_stamp, self.fences.parent)
     }
 
@@ -231,6 +306,27 @@ impl Object<'_> {
         self.data.appearance
     }
 
+    pub fn surface_appearance(&self) -> Option<&SurfaceAppearance> {
+        self.data.surface_appearance.as_deref()
+    }
+
+    pub fn render_materials(&self) -> Option<&RenderMaterials> {
+        self.data.render_materials.as_deref()
+    }
+
+    pub fn gltf_material_overrides(&self) -> Option<&GltfMaterialOverrides> {
+        self.data.gltf_material_overrides.as_deref()
+    }
+
+    /// Returns the latest fetched per-face ObjectMedia values.
+    pub fn object_media(&self) -> Option<&ObjectMedia> {
+        self.data.object_media.as_deref()
+    }
+
+    pub fn avatar_appearance(&self) -> Option<&AvatarAppearance> {
+        self.data.avatar_appearance.as_deref()
+    }
+
     pub fn properties(&self) -> Properties {
         self.data.properties
     }
@@ -261,9 +357,11 @@ pub struct World {
     id: WorldId,
     ecs: hecs::World,
     entities: HashMap<UUID, Entity>,
+    object_ids: BTreeSet<UUID>,
     addresses: HashMap<LocalAddress, Entity>,
     region_entities: HashMap<Region, HashSet<Entity>>,
     regions: HashMap<Region, RegionInfo>,
+    region_ids: BTreeSet<Region>,
     retired: HashSet<Region>,
     registration_count: usize,
     self_agent: Option<UUID>,
@@ -271,6 +369,7 @@ pub struct World {
     pending_children: HashMap<LocalAddress, HashSet<Entity>>,
     tombstones: Tombstones,
     floors: HashMap<Region, Stamp>,
+    object_media_bytes: usize,
     limits: WorldLimits,
     journal: Journal,
 }
@@ -281,9 +380,11 @@ impl World {
             id: WorldId::fresh(),
             ecs: hecs::World::new(),
             entities: HashMap::new(),
+            object_ids: BTreeSet::new(),
             addresses: HashMap::new(),
             region_entities: HashMap::new(),
             regions: HashMap::new(),
+            region_ids: BTreeSet::new(),
             retired: HashSet::new(),
             registration_count: 0,
             self_agent: None,
@@ -291,6 +392,7 @@ impl World {
             pending_children: HashMap::new(),
             tombstones: Tombstones::default(),
             floors: HashMap::new(),
+            object_media_bytes: 0,
             limits,
             journal: Journal::new(),
         }
@@ -377,6 +479,11 @@ impl World {
             angular_velocity: object.angular_velocity(),
             shape: object.shape(),
             appearance: object.appearance(),
+            surface_appearance: object.data.surface_appearance.clone(),
+            render_materials: object.data.render_materials.clone(),
+            gltf_material_overrides: object.data.gltf_material_overrides.clone(),
+            object_media: object.data.object_media.clone(),
+            avatar_appearance: object.data.avatar_appearance.clone(),
             attachment_point: object.attachment_point(),
             sit_target: object.sit_target(),
             properties: object.properties(),
@@ -415,5 +522,45 @@ impl Applied {
             recovery_cancellations: Vec::new(),
             rejections: Rejections::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU32;
+
+    use super::*;
+
+    #[test]
+    fn observable_tracks_shape_appearance() {
+        let before = ObservableState {
+            address: LocalAddress::new(Region::new(1), NonZeroU32::new(1).unwrap()),
+            transform: Transform::default(),
+            position_frame_generation: None,
+            rotation_frame_generation: None,
+            provisional_pose: None,
+            parent: Parent::Root,
+            linear_motion: LinearMotion::default(),
+            angular_velocity: None,
+            shape: None,
+            appearance: None,
+            surface_appearance: None,
+            render_materials: None,
+            gltf_material_overrides: None,
+            object_media: None,
+            avatar_appearance: None,
+            attachment_point: None,
+            sit_target: None,
+            properties: Properties::default(),
+        };
+        let mesh_shape = Shape::Mesh { asset_id: AssetId::new(UUID::from_u128(1)), flags: SculptFlags::default() };
+        let shape_only = ObservableState { shape: Some(mesh_shape), ..before.clone() };
+        let appearance_only = ObservableState { appearance: Some(Appearance::Avatar), ..before.clone() };
+        let both = ObservableState { shape: Some(mesh_shape), appearance: Some(Appearance::Avatar), ..before.clone() };
+
+        assert!(before.changes_to(&before).is_empty());
+        assert!(before.changes_to(&shape_only).contains(ChangeClasses::SHAPE));
+        assert!(before.changes_to(&appearance_only).contains(ChangeClasses::APPEARANCE));
+        assert!(before.changes_to(&both).contains(ChangeClasses::SHAPE | ChangeClasses::APPEARANCE));
     }
 }

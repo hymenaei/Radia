@@ -4,7 +4,7 @@ use base::UUID;
 use math::{Quat, Vec3};
 use world::ApplyError::{InvalidValue, KindMismatch};
 use world::ApplyOutcome::{
-    AgentHandedOff, Deferred, Introduced, RegionAdopted, RegionPatched, Removed, TombstoneRecorded, Unchanged, Updated,
+    AgentHandedOff, Deferred, Introduced, RegionAdopted, RegionPatched, RegionRetired, Removed, TombstoneRecorded, Unchanged, Updated,
 };
 use world::DeferredReason::{AmbiguousOrder, UnknownObject};
 use world::FieldGroup;
@@ -16,9 +16,13 @@ use world::Parent;
 use world::Parent::{Pending, Resolved};
 use world::ParentUpdate::{Local, Root};
 use world::{
-    AgentHandoff, FieldRejection, FieldRejectionReason, Kind, LinearMotion, LocalAddress, MotionPatch, ObjectObservation, ObjectPatch,
-    ParentUpdate, Pose, PropertiesPatch, Region, RegionInfo, SitTarget, UpdateAuthority, UpdateSource, World, WorldLimits,
+    AgentHandoff, AssetId, AvatarAppearanceUpdate, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex, FaceAppearance,
+    FieldRejection, FieldRejectionReason, Kind, LinearMotion, LocalAddress, MAX_AVATAR_TEXTURE_SLOTS, MAX_RENDER_MATERIAL_BINDINGS,
+    MediaEntry, MotionPatch, ObjectMediaUpdate, ObjectObservation, ObjectPatch, ParentUpdate, Pose, PropertiesPatch, Region, RegionInfo,
+    RenderMaterials, RenderMaterialsError, SculptFlags, SculptType, SitTarget, SurfaceAppearance, SurfaceAppearanceError, UpdateAuthority,
+    UpdateSource, World, WorldLimits,
 };
+use world::{Appearance, Shape};
 
 fn limits() -> WorldLimits {
     WorldLimits {
@@ -38,6 +42,27 @@ fn limits() -> WorldLimits {
 
 fn uuid(value: u128) -> UUID {
     UUID::from_u128(value)
+}
+
+fn surface(default_texture: u128, face_texture: u128) -> SurfaceAppearance {
+    SurfaceAppearance::new(
+        FaceAppearance { texture_id: uuid(default_texture), ..FaceAppearance::default() },
+        vec![(44, FaceAppearance { texture_id: uuid(face_texture), ..FaceAppearance::default() })],
+    )
+    .expect("valid face overrides")
+}
+
+fn render_materials(default_material: u128, face_material: u128) -> RenderMaterials {
+    RenderMaterials::new(vec![(0, AssetId::new(uuid(default_material))), (44, AssetId::new(uuid(face_material)))])
+        .expect("valid PBR face bindings")
+}
+
+fn sculpt_shape(asset: u128) -> Shape {
+    Shape::Sculpt { asset_id: AssetId::new(uuid(asset)), sculpt_type: SculptType::Sphere, flags: SculptFlags::default() }
+}
+
+fn mesh_shape(asset: u128) -> Shape {
+    Shape::Mesh { asset_id: AssetId::new(uuid(asset)), flags: SculptFlags::default() }
 }
 
 fn local_id(value: u32) -> NonZeroU32 {
@@ -72,6 +97,10 @@ fn object(source: UpdateSource, id: u128, local_id_value: u32, kind: Kind, paren
         angular_velocity: None,
         scale: None,
         attachment_point: None,
+        shape: None,
+        appearance: None,
+        surface_appearance: None,
+        render_materials: None,
     }
 }
 
@@ -304,13 +333,406 @@ fn stale_kind_mismatch_is_rejected() {
 fn shape_and_appearance_are_independent() {
     let region = Region::new(25);
     let mut world = with_region(region);
-    let result = world.observe_object(object(source(region, 1), 207, 1, Unknown(231), Root)).unwrap();
+    let mut observation = object(source(region, 1), 207, 1, Unknown(231), Root);
+    observation.shape = Some(Some(mesh_shape(0x207)));
+    observation.appearance = Some(Some(Appearance::Surface));
+    let result = world.observe_object(observation).unwrap();
     let Introduced(entity) = result.outcome else { panic!("expected object introduction") };
     let object = world.object(entity).unwrap();
 
     assert_eq!(object.kind(), Unknown(231));
-    assert_eq!(object.shape(), None);
-    assert_eq!(object.appearance(), None);
+    assert_eq!(object.shape(), Some(mesh_shape(0x207)));
+    assert_eq!(object.appearance(), Some(Appearance::Surface));
+}
+
+#[test]
+fn shape_appearance_order_and_clear() {
+    let region = Region::new(25);
+    let mut world = with_region(region);
+    let mut observation = object(source(region, 1), 208, 1, Object, Root);
+    observation.shape = Some(Some(sculpt_shape(0x208)));
+    observation.appearance = Some(Some(Appearance::Surface));
+    let result = world.observe_object(observation).unwrap();
+    let Introduced(entity) = result.outcome else { panic!("expected object introduction") };
+
+    let stale = ObjectPatch { shape: Some(None), appearance: Some(None), ..ObjectPatch::new(source(region, 0), local_id(1)) };
+    assert_eq!(world.patch_object(stale).unwrap().outcome, Unchanged);
+    assert_eq!(world.object(entity).unwrap().shape(), Some(sculpt_shape(0x208)));
+    assert_eq!(world.object(entity).unwrap().appearance(), Some(Appearance::Surface));
+
+    let clear_appearance = ObjectPatch { appearance: Some(None), ..ObjectPatch::new(source(region, 2), local_id(1)) };
+    assert_eq!(world.patch_object(clear_appearance).unwrap().outcome, Updated(entity));
+    assert_eq!(world.object(entity).unwrap().shape(), Some(sculpt_shape(0x208)));
+    assert_eq!(world.object(entity).unwrap().appearance(), None);
+
+    let clear_shape = ObjectPatch { shape: Some(None), ..ObjectPatch::new(source(region, 3), local_id(1)) };
+    assert_eq!(world.patch_object(clear_shape).unwrap().outcome, Updated(entity));
+    assert_eq!(world.object(entity).unwrap().shape(), None);
+    assert_eq!(world.object(entity).unwrap().appearance(), None);
+}
+
+#[test]
+fn shape_appearance_fences_are_independent() {
+    let region = Region::new(25);
+    let mut world = with_region(region);
+    let mut observation = object(source(region, 10), 209, 1, Object, Root);
+    observation.shape = Some(Some(Shape::Prim));
+    observation.appearance = Some(Some(Appearance::Surface));
+    let Introduced(entity) = world.observe_object(observation).unwrap().outcome else { panic!("expected object introduction") };
+
+    let newer_appearance = ObjectPatch { appearance: Some(Some(Appearance::Avatar)), ..ObjectPatch::new(source(region, 20), local_id(1)) };
+    assert_eq!(world.patch_object(newer_appearance).unwrap().outcome, Updated(entity));
+
+    let mixed_freshness = ObjectPatch {
+        shape: Some(Some(mesh_shape(0x209))),
+        appearance: Some(Some(Appearance::Surface)),
+        ..ObjectPatch::new(source(region, 15), local_id(1))
+    };
+    assert_eq!(world.patch_object(mixed_freshness).unwrap().outcome, Updated(entity));
+    let current = world.object(entity).unwrap();
+    assert_eq!(current.shape(), Some(mesh_shape(0x209)));
+    assert_eq!(current.appearance(), Some(Appearance::Avatar));
+}
+
+#[test]
+fn texture_entry_has_independent_freshness() {
+    let region = Region::new(25);
+    let mut world = with_region(region);
+    let mut observation = object(source(region, 10), 211, 1, Object, Root);
+    observation.appearance = Some(Some(Appearance::Surface));
+    observation.surface_appearance = Some(surface(0x211, 0x244));
+    let Introduced(entity) = world.observe_object(observation).unwrap().outcome else { panic!("expected object introduction") };
+
+    let category = ObjectPatch { appearance: Some(Some(Appearance::Avatar)), ..ObjectPatch::new(source(region, 20), local_id(1)) };
+    assert_eq!(world.patch_object(category).unwrap().outcome, Updated(entity));
+    let entry = ObjectPatch { surface_appearance: Some(surface(0x212, 0x245)), ..ObjectPatch::new(source(region, 15), local_id(1)) };
+    assert_eq!(world.patch_object(entry).unwrap().outcome, Updated(entity));
+    {
+        let current = world.object(entity).unwrap();
+        assert_eq!(current.appearance(), Some(Appearance::Avatar));
+        assert_eq!(current.surface_appearance().unwrap().default_face().texture_id, uuid(0x212));
+        assert_eq!(current.surface_appearance().unwrap().face(44).unwrap().texture_id, uuid(0x245));
+    }
+
+    let stale = ObjectPatch { surface_appearance: Some(surface(0x213, 0x246)), ..ObjectPatch::new(source(region, 14), local_id(1)) };
+    assert_eq!(world.patch_object(stale).unwrap().outcome, Unchanged);
+    assert_eq!(world.object(entity).unwrap().surface_appearance().unwrap().default_face().texture_id, uuid(0x212));
+}
+
+#[test]
+fn avatar_values_merge() {
+    let region = Region::new(25);
+    let mut world = with_region(region);
+    let mut avatar = object(source(region, 1), 214, 1, Avatar, Root);
+    avatar.appearance = Some(Some(Appearance::Avatar));
+    let Introduced(entity) = world.observe_object(avatar).unwrap().outcome else { panic!("expected avatar introduction") };
+
+    let mut textures = [None; MAX_AVATAR_TEXTURE_SLOTS];
+    textures[usize::from(AvatarTextureSlot::HEAD_BAKED.index())] = Some(AssetId::new(uuid(0x214)));
+    let first = AvatarAppearanceUpdate::new(
+        Some(1),
+        Some(10),
+        vec![(AvatarVisualParamIndex::new(0).unwrap(), 10), (AvatarVisualParamIndex::new(2).unwrap(), 30)],
+        Some(AvatarTextureSlots::new(textures).unwrap()),
+    )
+    .unwrap();
+    let first_patch = ObjectPatch { avatar_appearance: Some(first), ..ObjectPatch::new(source(region, 2), local_id(1)) };
+    assert_eq!(world.patch_object(first_patch).unwrap().outcome, Updated(entity));
+
+    let second = AvatarAppearanceUpdate::new(None, Some(11), vec![(AvatarVisualParamIndex::new(0).unwrap(), 20)], None).unwrap();
+    let second_patch = ObjectPatch { avatar_appearance: Some(second), ..ObjectPatch::new(source(region, 3), local_id(1)) };
+    assert_eq!(world.patch_object(second_patch).unwrap().outcome, Updated(entity));
+
+    let avatar = world.object(entity).unwrap();
+    let appearance = avatar.avatar_appearance().unwrap();
+    assert_eq!(appearance.cof_version(), Some(11));
+    assert_eq!(appearance.visual_param(AvatarVisualParamIndex::new(0).unwrap()), Some(20));
+    assert_eq!(appearance.visual_param(AvatarVisualParamIndex::new(2).unwrap()), Some(30));
+    assert_eq!(appearance.texture_slots().and_then(|slots| slots.texture(AvatarTextureSlot::HEAD_BAKED)), Some(AssetId::new(uuid(0x214))));
+    assert_eq!(avatar.surface_appearance(), None);
+}
+
+#[test]
+fn self_cof_is_stale() {
+    let region = Region::new(25);
+    let mut world = with_region(region);
+    world.set_self_agent(uuid(215)).unwrap();
+    for (id, local_id_value) in [(215, 1), (216, 2)] {
+        let mut avatar = object(source(region, 1), id, local_id_value, Avatar, Root);
+        avatar.appearance = Some(Some(Appearance::Avatar));
+        assert!(matches!(world.observe_object(avatar).unwrap().outcome, Introduced(_)));
+    }
+    let param = AvatarVisualParamIndex::new(0).unwrap();
+    let initial = AvatarAppearanceUpdate::new(Some(1), Some(10), vec![(param, 10)], None).unwrap();
+    let _ = world
+        .patch_object(ObjectPatch { avatar_appearance: Some(initial.clone()), ..ObjectPatch::new(source(region, 2), local_id(1)) })
+        .unwrap();
+    let _ =
+        world.patch_object(ObjectPatch { avatar_appearance: Some(initial), ..ObjectPatch::new(source(region, 2), local_id(2)) }).unwrap();
+
+    let stale = AvatarAppearanceUpdate::new(None, Some(10), vec![(param, 20)], None).unwrap();
+    let rejected = world
+        .patch_object(ObjectPatch { avatar_appearance: Some(stale.clone()), ..ObjectPatch::new(source(region, 3), local_id(1)) })
+        .unwrap();
+    assert_eq!(rejected.outcome, Unchanged);
+    assert_eq!(
+        rejected.rejections.iter().copied().collect::<Vec<_>>(),
+        [FieldRejection { group: FieldGroup::AvatarAppearance, reason: FieldRejectionReason::StaleVersion }]
+    );
+    assert_eq!(world.object(world.entity(uuid(215)).unwrap()).unwrap().avatar_appearance().unwrap().visual_param(param), Some(10));
+
+    let remote =
+        world.patch_object(ObjectPatch { avatar_appearance: Some(stale), ..ObjectPatch::new(source(region, 3), local_id(2)) }).unwrap();
+    assert_eq!(remote.outcome, Updated(world.entity(uuid(216)).unwrap()));
+    assert_eq!(world.object(world.entity(uuid(216)).unwrap()).unwrap().avatar_appearance().unwrap().visual_param(param), Some(20));
+}
+
+#[test]
+fn self_missing_cof_is_stale() {
+    let region = Region::new(25);
+    let mut world = with_region(region);
+    world.set_self_agent(uuid(218)).unwrap();
+    let mut avatar = object(source(region, 1), 218, 1, Avatar, Root);
+    avatar.appearance = Some(Some(Appearance::Avatar));
+    assert!(matches!(world.observe_object(avatar).unwrap().outcome, Introduced(_)));
+
+    let param = AvatarVisualParamIndex::new(0).unwrap();
+    let missing = AvatarAppearanceUpdate::new(None, None, vec![(param, 20)], None).unwrap();
+    let rejected = world
+        .patch_object(ObjectPatch { avatar_appearance: Some(missing.clone()), ..ObjectPatch::new(source(region, 2), local_id(1)) })
+        .unwrap();
+    assert_eq!(rejected.outcome, Unchanged);
+    assert_eq!(
+        rejected.rejections.iter().copied().collect::<Vec<_>>(),
+        [FieldRejection { group: FieldGroup::AvatarAppearance, reason: FieldRejectionReason::StaleVersion }]
+    );
+    assert_eq!(world.object(world.entity(uuid(218)).unwrap()).unwrap().avatar_appearance(), None);
+
+    let initial = AvatarAppearanceUpdate::new(Some(1), Some(10), vec![(param, 10)], None).unwrap();
+    assert_eq!(
+        world
+            .patch_object(ObjectPatch { avatar_appearance: Some(initial), ..ObjectPatch::new(source(region, 3), local_id(1)) })
+            .unwrap()
+            .outcome,
+        Updated(world.entity(uuid(218)).unwrap())
+    );
+
+    let stale =
+        world.patch_object(ObjectPatch { avatar_appearance: Some(missing), ..ObjectPatch::new(source(region, 4), local_id(1)) }).unwrap();
+    assert_eq!(stale.outcome, Unchanged);
+    assert_eq!(world.object(world.entity(uuid(218)).unwrap()).unwrap().avatar_appearance().unwrap().visual_param(param), Some(10));
+}
+
+#[test]
+fn avatar_update_rejects_object() {
+    let region = Region::new(25);
+    let mut world = with_region(region);
+    let Introduced(entity) = world.observe_object(object(source(region, 1), 217, 1, Object, Root)).unwrap().outcome else {
+        panic!("expected object introduction")
+    };
+    let update = AvatarAppearanceUpdate::default();
+    let patch = ObjectPatch { avatar_appearance: Some(update), ..ObjectPatch::new(source(region, 2), local_id(1)) };
+    let applied = world.patch_object(patch).unwrap();
+
+    assert_eq!(applied.outcome, Unchanged);
+    assert_eq!(
+        applied.rejections.iter().copied().collect::<Vec<_>>(),
+        [FieldRejection { group: FieldGroup::AvatarAppearance, reason: FieldRejectionReason::InvalidValue { field: "avatar_appearance" } }]
+    );
+    assert_eq!(world.object(entity).unwrap().avatar_appearance(), None);
+}
+
+#[test]
+fn untracked_texture_entry_cannot_replace() {
+    let region = Region::new(25);
+    let mut world = with_region(region);
+    let mut observation = object(source(region, 1), 212, 1, Object, Root);
+    observation.surface_appearance = Some(surface(0x214, 0x244));
+    let Introduced(entity) = world.observe_object(observation).unwrap().outcome else { panic!("expected object introduction") };
+
+    let patch = ObjectPatch { surface_appearance: Some(surface(0x215, 0x245)), ..ObjectPatch::new(untracked(region, 1_000), local_id(1)) };
+    let applied = world.patch_object(patch).unwrap();
+    assert_eq!(applied.outcome, Unchanged);
+    assert_eq!(
+        applied.rejections.iter().copied().collect::<Vec<_>>(),
+        [FieldRejection { group: FieldGroup::TextureEntry, reason: UntrustedSource }]
+    );
+    assert_eq!(world.object(entity).unwrap().surface_appearance().unwrap().default_face().texture_id, uuid(0x214));
+}
+
+#[test]
+fn render_materials_freshness_and_clears() {
+    let region = Region::new(25);
+    let mut world = with_region(region);
+    let mut observation = object(source(region, 10), 213, 1, Object, Root);
+    observation.appearance = Some(Some(Appearance::Surface));
+    observation.render_materials = Some(render_materials(0x220, 0x244));
+    let Introduced(entity) = world.observe_object(observation).unwrap().outcome else { panic!("expected object introduction") };
+
+    let category = ObjectPatch { appearance: Some(Some(Appearance::Avatar)), ..ObjectPatch::new(source(region, 20), local_id(1)) };
+    assert_eq!(world.patch_object(category).unwrap().outcome, Updated(entity));
+    let materials =
+        ObjectPatch { render_materials: Some(render_materials(0x221, 0x245)), ..ObjectPatch::new(source(region, 15), local_id(1)) };
+    assert_eq!(world.patch_object(materials).unwrap().outcome, Updated(entity));
+    assert_eq!(world.object(entity).unwrap().appearance(), Some(Appearance::Avatar));
+    assert_eq!(world.object(entity).unwrap().render_materials().unwrap().material(44), Some(AssetId::new(uuid(0x245))));
+
+    let stale = ObjectPatch { render_materials: Some(render_materials(0x222, 0x246)), ..ObjectPatch::new(source(region, 14), local_id(1)) };
+    assert_eq!(world.patch_object(stale).unwrap().outcome, Unchanged);
+    assert_eq!(world.object(entity).unwrap().render_materials().unwrap().material(44), Some(AssetId::new(uuid(0x245))));
+    let clear = ObjectPatch { render_materials: Some(RenderMaterials::default()), ..ObjectPatch::new(source(region, 21), local_id(1)) };
+    assert_eq!(world.patch_object(clear).unwrap().outcome, Updated(entity));
+    assert_eq!(world.object(entity).unwrap().render_materials(), None);
+}
+
+#[test]
+fn render_materials_reject_invalid_bindings() {
+    let too_many = vec![(0, AssetId::new(uuid(1))); MAX_RENDER_MATERIAL_BINDINGS + 1];
+    assert_eq!(RenderMaterials::new(too_many), Err(RenderMaterialsError::TooManyBindings));
+    assert_eq!(RenderMaterials::new(vec![(45, AssetId::new(uuid(1)))]), Err(RenderMaterialsError::FaceIndexOutOfRange(45)));
+    assert_eq!(
+        RenderMaterials::new(vec![(1, AssetId::new(uuid(1))), (1, AssetId::new(uuid(2)))]),
+        Err(RenderMaterialsError::DuplicateFaceIndex(1))
+    );
+    assert!(RenderMaterials::new(vec![(1, AssetId::new(UUID::nil()))]).unwrap().is_empty());
+}
+
+#[test]
+fn avatars_ignore_prim_face_data() {
+    let region = Region::new(25);
+    let mut world = with_region(region);
+    let mut observation = object(source(region, 1), 214, 1, Avatar, Root);
+    observation.surface_appearance = Some(surface(0x230, 0x244));
+    observation.render_materials = Some(render_materials(0x231, 0x245));
+    let Introduced(entity) = world.observe_object(observation).unwrap().outcome else { panic!("expected avatar introduction") };
+    let current = world.object(entity).unwrap();
+    assert_eq!(current.surface_appearance(), None);
+    assert_eq!(current.render_materials(), None);
+}
+
+#[test]
+fn surface_appearance_rejects_bad_faces() {
+    let default = FaceAppearance::default();
+    assert_eq!(SurfaceAppearance::new(default, vec![(45, default)]), Err(SurfaceAppearanceError::FaceIndexOutOfRange(45)));
+    assert_eq!(
+        SurfaceAppearance::new(default, vec![(1, default), (1, FaceAppearance { texture_id: uuid(1), ..default })]),
+        Err(SurfaceAppearanceError::DuplicateFaceIndex(1))
+    );
+    assert_eq!(
+        SurfaceAppearance::new(FaceAppearance { scale_s: f32::NAN, ..default }, Vec::new()),
+        Err(SurfaceAppearanceError::NonFiniteValue)
+    );
+}
+
+#[test]
+fn media_prefix_clears_and_preserves_suffix() {
+    let region = Region::new(1);
+    let mut world = with_region(region);
+    let mut observation = object(source(region, 1), 215, 1, Object, Root);
+    observation.appearance = Some(Some(Appearance::Surface));
+    let Introduced(entity) = world.observe_object(observation).unwrap().outcome else { panic!("expected object") };
+
+    let first = MediaEntry { current_url: "https://media.test/first".into(), ..MediaEntry::default() };
+    let second = MediaEntry { current_url: "https://media.test/second".into(), ..MediaEntry::default() };
+    let third = MediaEntry { current_url: "https://media.test/third".into(), ..MediaEntry::default() };
+    let initial = ObjectMediaUpdate::new(3, vec![Some(first), Some(second), Some(third)]).unwrap();
+    assert_eq!(
+        world
+            .patch_object(ObjectPatch { object_media: Some(initial), ..ObjectPatch::new(source(region, 2), local_id(1)) })
+            .unwrap()
+            .outcome,
+        Updated(entity)
+    );
+
+    let clear = ObjectMediaUpdate::new(4, vec![None]).unwrap();
+    assert_eq!(
+        world.patch_object(ObjectPatch { object_media: Some(clear), ..ObjectPatch::new(source(region, 3), local_id(1)) }).unwrap().outcome,
+        Updated(entity)
+    );
+    {
+        let object = world.object(entity).unwrap();
+        let current = object.object_media().unwrap();
+        assert_eq!(current.version(), 4);
+        assert_eq!(current.face(0), None);
+        assert_eq!(current.face(1).unwrap().current_url, "https://media.test/second");
+        assert_eq!(current.face(2).unwrap().current_url, "https://media.test/third");
+    }
+
+    let stale = ObjectMediaUpdate::new(3, vec![Some(MediaEntry::default())]).unwrap();
+    assert_eq!(
+        world.patch_object(ObjectPatch { object_media: Some(stale), ..ObjectPatch::new(source(region, 4), local_id(1)) }).unwrap().outcome,
+        Unchanged
+    );
+    assert_eq!(world.object(entity).unwrap().object_media().unwrap().version(), 4);
+    assert_eq!(world.object(entity).unwrap().object_media().unwrap().face(0), None);
+
+    let replacement = MediaEntry { current_url: "https://media.test/new".into(), ..MediaEntry::default() };
+    let replace_and_clear = ObjectMediaUpdate::new(5, vec![Some(replacement), None]).unwrap();
+    assert_eq!(
+        world
+            .patch_object(ObjectPatch { object_media: Some(replace_and_clear), ..ObjectPatch::new(source(region, 5), local_id(1)) })
+            .unwrap()
+            .outcome,
+        Updated(entity)
+    );
+    let object = world.object(entity).unwrap();
+    let current = object.object_media().unwrap();
+    assert_eq!(current.face(0).unwrap().current_url, "https://media.test/new");
+    assert_eq!(current.face(1), None);
+    assert_eq!(current.face(2).unwrap().current_url, "https://media.test/third");
+}
+
+#[test]
+fn media_requires_tracked_surface() {
+    let region = Region::new(1);
+    let mut world = with_region(region);
+    let observation = object(source(region, 1), 216, 1, Object, Root);
+    let Introduced(entity) = world.observe_object(observation).unwrap().outcome else { panic!("expected object") };
+    let update = ObjectMediaUpdate::new(1, vec![Some(MediaEntry::default())]).unwrap();
+    let result =
+        world.patch_object(ObjectPatch { object_media: Some(update.clone()), ..ObjectPatch::new(source(region, 2), local_id(1)) }).unwrap();
+    assert!(result.rejections.iter().any(|rejection| *rejection
+        == FieldRejection { group: FieldGroup::ObjectMedia, reason: FieldRejectionReason::InvalidValue { field: "object_media" } }));
+    assert_eq!(world.object(entity).unwrap().object_media(), None);
+
+    let mut surface = object(source(region, 3), 217, 2, Object, Root);
+    surface.appearance = Some(Some(Appearance::Surface));
+    let Introduced(surface_entity) = world.observe_object(surface).unwrap().outcome else { panic!("expected surface object") };
+    let result =
+        world.patch_object(ObjectPatch { object_media: Some(update), ..ObjectPatch::new(untracked(region, 4), local_id(2)) }).unwrap();
+    assert!(
+        result.rejections.iter().any(|rejection| *rejection == FieldRejection { group: FieldGroup::ObjectMedia, reason: UntrustedSource })
+    );
+    assert_eq!(world.object(surface_entity).unwrap().object_media(), None);
+}
+
+#[test]
+fn untracked_shape_appearance_rejected() {
+    let region = Region::new(25);
+    let mut world = with_region(region);
+    let mut observation = object(source(region, 2), 210, 1, Object, Root);
+    observation.shape = Some(Some(Shape::Prim));
+    observation.appearance = Some(Some(Appearance::Surface));
+    let Introduced(entity) = world.observe_object(observation).unwrap().outcome else { panic!("expected object introduction") };
+
+    let untracked = ObjectPatch {
+        shape: Some(Some(mesh_shape(0x210))),
+        appearance: Some(Some(Appearance::Avatar)),
+        ..ObjectPatch::new(untracked(region, 1_000), local_id(1))
+    };
+    let applied = world.patch_object(untracked).unwrap();
+
+    assert_eq!(applied.outcome, Unchanged);
+    assert_eq!(
+        applied.rejections.iter().copied().collect::<Vec<_>>(),
+        [
+            FieldRejection { group: FieldGroup::Shape, reason: UntrustedSource },
+            FieldRejection { group: FieldGroup::Appearance, reason: UntrustedSource },
+        ]
+    );
+    let current = world.object(entity).unwrap();
+    assert_eq!(current.shape(), Some(Shape::Prim));
+    assert_eq!(current.appearance(), Some(Appearance::Surface));
 }
 
 #[test]
@@ -436,7 +858,7 @@ fn replacement_stops_at_avatar() {
     let Introduced(replacement) = replacement.outcome else { panic!("expected replacement introduction") };
 
     assert!(world.object(root).is_none());
-    assert_eq!(world.object(avatar).unwrap().parent(), Parent::Root);
+    assert_eq!(world.object(avatar).unwrap().parent(), Pending { address: address(region, 1), expected_uuid: Some(uuid(1)) });
     assert_eq!(world.object(target).unwrap().parent(), Resolved(avatar));
     assert_eq!(world.object(replacement).unwrap().parent(), Resolved(target));
 }
@@ -717,7 +1139,7 @@ fn cycle_barrier_blocks_older_parent() {
 }
 
 #[test]
-fn transfer_ignores_previous_region_cycle_barrier() {
+fn transfer_ignores_old_region_barrier() {
     let first_region = Region::new(70);
     let second_region = Region::new(71);
     let mut world = with_region(first_region);
@@ -869,7 +1291,7 @@ fn tracked_property_overrides_untracked() {
 }
 
 #[test]
-fn untracked_motion_cannot_replace_tracked_motion() {
+fn untracked_motion_cannot_replace_tracked() {
     let region = Region::new(31);
     let mut world = with_region(region);
     let mut initial = object(source(region, 1), 310, 1, Object, Root);
@@ -1048,7 +1470,7 @@ fn property_patch_independent_of_spatial() {
 }
 
 #[test]
-fn property_patch_defers_unknown_and_unordered() {
+fn property_patch_defers_unknown_order() {
     let region = Region::new(50);
     let mut world = with_region(region);
     let patch = PropertiesPatch { owner_id: Some(uuid(501)), creator_id: None };
@@ -1133,7 +1555,7 @@ fn ambiguous_updates_defer_with_recovery() {
     let observation = object(source(region, 1), 2, 7, Object, Root);
 
     let ambiguous = UpdateSource::new(region, 1, Ambiguous, 0);
-    let result = world.observe_object(ObjectObservation { source: ambiguous, ..observation }).unwrap();
+    let result = world.observe_object(ObjectObservation { source: ambiguous, ..observation.clone() }).unwrap();
     assert_eq!(result.outcome, Deferred(AmbiguousOrder));
     assert_eq!(result.recovery.unwrap().targets, [expected_address]);
 
@@ -1167,7 +1589,7 @@ fn unordered_removal_requests_recovery() {
 }
 
 #[test]
-fn parent_cascade_respects_newer_child_evidence() {
+fn parent_cascade_respects_child_order() {
     let region = Region::new(3);
     let mut world = with_region(region);
     let parent_address = address(region, 1);
@@ -1418,7 +1840,7 @@ fn delayed_declaration_keeps_pending_parent() {
 }
 
 #[test]
-fn reused_parent_address_requires_fresh_declaration() {
+fn parent_address_reuse_needs_declaration() {
     let region = Region::new(19);
     let mut world = with_region(region);
     let parent_address = address(region, 1);
@@ -1443,7 +1865,7 @@ fn reused_parent_address_requires_fresh_declaration() {
 }
 
 #[test]
-fn empty_pose_patch_does_not_advance_pose_fence() {
+fn empty_pose_patch_preserves_fence() {
     let region = Region::new(18);
     let mut world = with_region(region);
     let created = world.observe_object(object(source(region, 1), 180, 1, Object, Root)).unwrap();
@@ -1482,7 +1904,7 @@ fn parent_resolution_keeps_parent_fence() {
 }
 
 #[test]
-fn parent_removal_detaches_seated_avatar() {
+fn parent_removal_keeps_seated_avatar_pending() {
     let region = Region::new(15);
     let mut world = with_region(region);
     let parent = world.observe_object(object(source(region, 10), 150, 1, Object, Root)).unwrap();
@@ -1490,10 +1912,12 @@ fn parent_removal_detaches_seated_avatar() {
     let avatar = world.observe_object(object(source(region, 11), 151, 2, Avatar, Local(local_id(1)))).unwrap();
     let Introduced(avatar_entity) = avatar.outcome else { panic!("expected avatar introduction") };
 
-    assert_eq!(world.remove_object(source(region, 12), local_id(1)).unwrap().outcome, Removed(uuid(150)));
+    let removed = world.remove_object(source(region, 12), local_id(1)).unwrap();
+    assert_eq!(removed.outcome, Removed(uuid(150)));
     assert!(world.object(parent_entity).is_none());
     assert_eq!(world.entity(uuid(151)), Some(avatar_entity));
-    assert_eq!(world.object(avatar_entity).unwrap().parent(), Parent::Root);
+    assert_eq!(world.object(avatar_entity).unwrap().parent(), Pending { address: address(region, 1), expected_uuid: Some(uuid(150)) });
+    assert_eq!(removed.recovery.unwrap().targets, [address(region, 2)]);
 }
 
 #[test]
@@ -1520,7 +1944,12 @@ fn agent_region_change_requires_handoff() {
             .outcome,
         Updated(_)
     ));
-    assert_eq!(world.remove_object(source(source_region, 100), local_id(8)).unwrap().outcome, Unchanged);
+    assert_eq!(world.remove_object(source(source_region, 102), local_id(8)).unwrap().outcome, Unchanged);
+    assert_eq!(world.entity(agent_id), Some(agent));
+    let ambiguous_kill = UpdateSource::new(source_region, 103, Ambiguous, 0);
+    let ignored = world.remove_object(ambiguous_kill, local_id(8)).unwrap();
+    assert_eq!(ignored.outcome, Unchanged);
+    assert_eq!(ignored.recovery, None);
     assert_eq!(world.entity(agent_id), Some(agent));
 
     let direct_move = world.observe_object(object(source(destination_region, 1), 40, 8, Avatar, Root));
@@ -1551,7 +1980,7 @@ fn agent_region_change_requires_handoff() {
     drop(current);
 
     let return_handoff = AgentHandoff {
-        source: source(source_region, 102),
+        source: source(source_region, 104),
         local_id: local_id(10),
         parent: Root,
         pose: None,
@@ -1563,6 +1992,10 @@ fn agent_region_change_requires_handoff() {
     let stale_property = PropertiesPatch { owner_id: Some(uuid(42)), creator_id: None };
     assert_eq!(world.patch_properties(source(source_region, 101), agent_id, stale_property).unwrap().outcome, Unchanged);
     assert_eq!(world.object(agent).unwrap().properties().owner_id, Some(uuid(41)));
+
+    assert_eq!(world.retire_region(source_region).unwrap().outcome, RegionRetired { entities_removed: 1 });
+    assert_eq!(world.entity(agent_id), None);
+    assert!(world.region(source_region).is_none());
 }
 
 #[test]

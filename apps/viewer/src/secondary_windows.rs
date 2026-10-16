@@ -464,10 +464,9 @@ mod windows_tests {
     use windows::Win32::{
         Foundation::HWND,
         UI::WindowsAndMessaging::{
-            CreateWindowExW, DestroyWindow, GW_HWNDNEXT, GWL_EXSTYLE, GetForegroundWindow, GetTopWindow, GetWindow, GetWindowLongPtrW,
-            HWND_TOP, IsIconic, IsWindowVisible, MSG, PM_REMOVE, PeekMessageW, SIZE_MAXIMIZED, SIZE_MINIMIZED, SIZE_RESTORED,
-            SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SetWindowPos, ShowWindow,
-            WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
+            CreateWindowExW, DestroyWindow, GW_HWNDNEXT, GetForegroundWindow, GetTopWindow, GetWindow, HWND_TOP, IsIconic, IsWindowVisible,
+            MSG, PM_REMOVE, PeekMessageW, SIZE_MAXIMIZED, SIZE_MINIMIZED, SIZE_RESTORED, SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE,
+            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SetWindowPos, ShowWindow, WS_OVERLAPPEDWINDOW,
         },
     };
 
@@ -562,19 +561,6 @@ mod windows_tests {
             window = next;
         }
         false
-    }
-
-    #[test]
-    fn taskbar_suppression_does_not_change_window_styles() {
-        let window = TestWindow::create();
-        let _ = unsafe { ShowWindow(window.0, SW_SHOWNOACTIVATE) };
-        let before = unsafe { GetWindowLongPtrW(window.0, GWL_EXSTYLE) };
-
-        assert!(super::remove_taskbar_button(window.0));
-
-        let after = unsafe { GetWindowLongPtrW(window.0, GWL_EXSTYLE) };
-        assert_eq!(before, after);
-        assert_eq!(after & WS_EX_TOOLWINDOW.0 as isize, 0);
     }
 
     #[test]

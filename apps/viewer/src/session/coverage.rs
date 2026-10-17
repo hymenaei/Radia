@@ -6,7 +6,6 @@ use std::{
 };
 
 use network::{CoverageLossReason, CoverageWatermark, SimulatorId};
-use tokio::sync::watch;
 use world::{LocalAddress, WorldRevision};
 
 pub(super) const MAX_SESSION_COVERAGE_SCOPES: usize = 256;
@@ -39,6 +38,21 @@ pub(crate) struct SourceCoverage {
     pub(crate) health: CoverageHealth,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LocalCoverageLoss {
+    pub(crate) simulator_id: SimulatorId,
+    pub(crate) reason: LocalCoverageLossReason,
+    pub(crate) count: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum LocalCoverageLossReason {
+    MalformedData,
+    RegionMismatch,
+    ResourceLimit,
+    AuxiliaryDataUnavailable,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct RecoveryKey {
     pub(super) address: LocalAddress,
@@ -65,6 +79,7 @@ pub(crate) struct CoverageSnapshot {
     pub(crate) generation: u64,
     pub(crate) health: CoverageHealth,
     pub(crate) losses: Vec<SourceCoverage>,
+    pub(crate) local_losses: Vec<LocalCoverageLoss>,
     pub(crate) network_overflow_generation: Option<u64>,
     pub(crate) local_overflow_count: u64,
     pub(crate) recovery: RecoveryProgress,
@@ -73,13 +88,13 @@ pub(crate) struct CoverageSnapshot {
 #[derive(Clone)]
 pub(super) struct SessionCoverageState {
     state: Arc<Mutex<CoverageState>>,
-    changed: watch::Sender<u64>,
 }
 
 #[derive(Default)]
 struct CoverageState {
     generation: u64,
     losses: Vec<SourceCoverage>,
+    local_losses: Vec<LocalCoverageLoss>,
     network_overflow_generation: Option<u64>,
     local_overflow_count: u64,
     recovery_dropped: u64,
@@ -107,12 +122,7 @@ impl Default for SessionCoverageState {
 
 impl SessionCoverageState {
     pub(super) fn new() -> Self {
-        let (changed, _) = watch::channel(0);
-        Self { state: Arc::new(Mutex::new(CoverageState::default())), changed }
-    }
-
-    pub(super) fn subscribe(&self) -> watch::Receiver<u64> {
-        self.changed.subscribe()
+        Self { state: Arc::new(Mutex::new(CoverageState::default())) }
     }
 
     pub(super) fn record_source_loss(&self, watermark: CoverageWatermark, reason: CoverageLossReason, retired: bool) {
@@ -142,7 +152,7 @@ impl SessionCoverageState {
             changed = true;
         }
         if changed {
-            state.changed(&self.changed);
+            state.changed();
         }
     }
 
@@ -150,8 +160,23 @@ impl SessionCoverageState {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.network_overflow_generation.is_none_or(|current| generation > current) {
             state.network_overflow_generation = Some(generation);
-            state.changed(&self.changed);
+            state.changed();
         }
+    }
+
+    pub(super) fn record_local_loss(&self, simulator_id: SimulatorId, reason: LocalCoverageLossReason, count: u64) {
+        if count == 0 {
+            return;
+        }
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(loss) = state.local_losses.iter_mut().find(|loss| loss.simulator_id == simulator_id && loss.reason == reason) {
+            loss.count = loss.count.saturating_add(count);
+        } else if state.local_losses.len() < MAX_SESSION_COVERAGE_SCOPES {
+            state.local_losses.push(LocalCoverageLoss { simulator_id, reason, count });
+        } else {
+            state.local_overflow_count = state.local_overflow_count.saturating_add(1);
+        }
+        state.changed();
     }
 
     pub(super) fn can_schedule_recovery(&self, key: RecoveryKey) -> bool {
@@ -174,7 +199,7 @@ impl SessionCoverageState {
                 return;
             }
             state.recoveries.insert(key, RecoveryEntry::new(Some(simulator_id), token, RecoveryHealth::Pending));
-            state.changed(&self.changed);
+            state.changed();
             return;
         }
         if state.recoveries.len() >= MAX_SESSION_RECOVERY_SCOPES {
@@ -182,7 +207,7 @@ impl SessionCoverageState {
         } else {
             state.recoveries.insert(key, RecoveryEntry::new(Some(simulator_id), token, RecoveryHealth::Pending));
         }
-        state.changed(&self.changed);
+        state.changed();
     }
 
     pub(super) fn start_recoveries(&self, keys: impl IntoIterator<Item = (RecoveryKey, u64)>) {
@@ -198,7 +223,7 @@ impl SessionCoverageState {
             }
         }
         if changed {
-            state.changed(&self.changed);
+            state.changed();
         }
     }
 
@@ -215,7 +240,7 @@ impl SessionCoverageState {
             }
         }
         if changed {
-            state.changed(&self.changed);
+            state.changed();
         }
     }
 
@@ -232,7 +257,7 @@ impl SessionCoverageState {
             }
         }
         if changed {
-            state.changed(&self.changed);
+            state.changed();
         }
     }
 
@@ -247,13 +272,13 @@ impl SessionCoverageState {
         } else {
             state.local_overflow_count = state.local_overflow_count.saturating_add(1);
         }
-        state.changed(&self.changed);
+        state.changed();
     }
 
     pub(super) fn cancel_recovery(&self, key: RecoveryKey) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.recoveries.remove(&key).is_some() {
-            state.changed(&self.changed);
+            state.changed();
         }
     }
 
@@ -262,7 +287,7 @@ impl SessionCoverageState {
         let before = state.recoveries.len();
         state.recoveries.retain(|_, entry| entry.simulator_id != Some(simulator_id));
         if state.recoveries.len() != before {
-            state.changed(&self.changed);
+            state.changed();
         }
     }
 
@@ -277,6 +302,7 @@ impl SessionCoverageState {
             }
         }
         let health = if !state.losses.is_empty()
+            || !state.local_losses.is_empty()
             || state.network_overflow_generation.is_some()
             || state.local_overflow_count > 0
             || recovery.degraded > 0
@@ -293,6 +319,7 @@ impl SessionCoverageState {
             generation: state.generation,
             health,
             losses: state.losses.clone(),
+            local_losses: state.local_losses.clone(),
             network_overflow_generation: state.network_overflow_generation,
             local_overflow_count: state.local_overflow_count,
             recovery,
@@ -301,9 +328,8 @@ impl SessionCoverageState {
 }
 
 impl CoverageState {
-    fn changed(&mut self, sender: &watch::Sender<u64>) {
+    fn changed(&mut self) {
         self.generation = self.generation.saturating_add(1);
-        sender.send_replace(self.generation);
     }
 }
 
@@ -318,7 +344,10 @@ mod tests {
     use network::{CoverageLossReason, CoverageSource, CoverageWatermark, SimulatorId, testing::simulator_id};
     use world::{LocalAddress, Region, World, WorldRevision};
 
-    use super::{CoverageHealth, MAX_SESSION_COVERAGE_SCOPES, RecoveryHealth, RecoveryKey, RecoveryKind, SessionCoverageState};
+    use super::{
+        CoverageHealth, LocalCoverageLossReason, MAX_SESSION_COVERAGE_SCOPES, RecoveryHealth, RecoveryKey, RecoveryKind,
+        SessionCoverageState,
+    };
     use crate::session::world::viewer_world_limits;
 
     fn address(region: u64, local_id: u32) -> LocalAddress {
@@ -359,9 +388,8 @@ mod tests {
     }
 
     #[test]
-    fn recovery_changes_publish_without_world_revision() {
+    fn recovery_progress_tracks_world_independently() {
         let coverage = SessionCoverageState::new();
-        let mut changes = coverage.subscribe();
         let revision = revision();
         let simulator_id = simulator_id();
         let key = RecoveryKey { address: address(7, 3), kind: RecoveryKind::Object };
@@ -370,7 +398,7 @@ mod tests {
         assert_eq!(uncertain.health, CoverageHealth::Uncertain);
         assert_eq!(uncertain.recovery.pending, 1);
         assert_eq!(uncertain.world_revision, revision);
-        assert_eq!(*changes.borrow_and_update(), uncertain.generation);
+        assert_eq!(uncertain.generation, 1);
 
         coverage.start_recoveries([(key, 1)]);
         coverage.degrade_recoveries([(key, 1)]);
@@ -472,6 +500,37 @@ mod tests {
 
         let snapshot = coverage.snapshot(revision());
         assert_eq!(snapshot.losses.len(), MAX_SESSION_COVERAGE_SCOPES);
+        assert_eq!(snapshot.local_overflow_count, 1);
+        assert_eq!(snapshot.health, CoverageHealth::Degraded);
+    }
+
+    #[test]
+    fn local_losses_aggregate_by_simulator_and_reason() {
+        let coverage = SessionCoverageState::new();
+        let simulator_id = simulator_id();
+        let before = coverage.snapshot(revision());
+        coverage.record_local_loss(simulator_id, LocalCoverageLossReason::MalformedData, 2);
+        coverage.record_local_loss(simulator_id, LocalCoverageLossReason::MalformedData, 3);
+        coverage.record_local_loss(simulator_id, LocalCoverageLossReason::ResourceLimit, 1);
+
+        let snapshot = coverage.snapshot(revision());
+        assert_eq!(snapshot.health, CoverageHealth::Degraded);
+        assert!(snapshot.generation > before.generation);
+        assert_eq!(snapshot.local_losses.len(), 2);
+        assert_eq!(snapshot.local_losses[0].count, 5);
+        assert_eq!(snapshot.local_losses[1].reason, LocalCoverageLossReason::ResourceLimit);
+        assert_eq!(snapshot.local_losses[1].count, 1);
+    }
+
+    #[test]
+    fn local_loss_scope_overflow_is_bounded_and_visible() {
+        let coverage = SessionCoverageState::new();
+        for _ in 0..=MAX_SESSION_COVERAGE_SCOPES {
+            coverage.record_local_loss(simulator_id(), LocalCoverageLossReason::MalformedData, 1);
+        }
+
+        let snapshot = coverage.snapshot(revision());
+        assert_eq!(snapshot.local_losses.len(), MAX_SESSION_COVERAGE_SCOPES);
         assert_eq!(snapshot.local_overflow_count, 1);
         assert_eq!(snapshot.health, CoverageHealth::Degraded);
     }

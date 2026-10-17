@@ -1,19 +1,21 @@
 # Async, concurrency, and lifecycle tests
 
-Async tests must assert externally observable ordering, completion, cancellation, progress, and bounded resources without relying on lucky scheduling. Use synchronization primitives, mock transports, paused clocks, or a deterministic state-machine runner rather than arbitrary `sleep` calls.
+Test the async guarantees the code actually exposes. Use synchronization primitives, mock transports, paused clocks, or a deterministic state-machine runner to force the smallest interleaving that could violate a guarantee. Avoid arbitrary `sleep` calls.
 
-## Prioritize these cases when relevant
+## Candidate failure modes
 
-| Area              | Meaningful scenarios                                                                                                             |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| Cancellation      | Before admission, after admission, after request enqueue, during response, during cleanup; no leaked permits or retained buffers |
-| State transitions | Connect, replace, disconnect, reconnect, late event for old generation; no resurrection or dropped valid events                  |
-| Backpressure      | Queue at capacity, slow consumer, closed receiver; bounded allocation and predictable rejection/await behavior                   |
-| Ordering          | Events racing with lifecycle notifications; user-observable ordering invariant, not scheduler's exact poll order                 |
-| Retry             | Transient and permanent errors; attempt cap, idempotency, no duplicate effects, correct reset                                    |
-| Shutdown          | In-flight work drains or cancels as specified, tasks joined, channels closed, resources released                                 |
-| Networking        | Partial reads/writes, fragmented frames, EOF, malformed payloads, timeouts, duplicate responses                                  |
-| Locks             | No blocking operations on async executor; lock ordering and progress where correctness requires it                               |
+Use only the rows that match the contract. They are examples, not a checklist.
+
+| Area              | Meaningful scenarios when they are part of the contract                                                      |
+| ----------------- | ------------------------------------------------------------------------------------------------------------- |
+| Cancellation      | Cancel at a state where cleanup differs; check for leaked permits or stale effects                           |
+| State transitions | A late event after replacement or disconnect must not resurrect stale state                                  |
+| Backpressure      | A full queue or closed receiver has the specified bounded outcome                                           |
+| Ordering          | Force an ordering that could change externally visible behavior                                              |
+| Retry             | Check attempt caps, idempotency, or duplicate effects when promised                                          |
+| Shutdown          | In-flight work drains or cancels as specified                                                                |
+| Networking        | Partial I/O, framing, EOF, malformed input, timeouts, or duplicate responses when the boundary requires them |
+| Locks             | Verify progress or lock ordering only when correctness depends on it                                          |
 
 ## Deterministic Tokio timers
 
@@ -45,15 +47,7 @@ async fn request_times_out_at_deadline() {
 
 Replace the `pending` future with the client's operation and assert its timeout error and resource cleanup. Tokio's simulated time does not advance `std::time::Instant`.
 
-## Cancellation example as a scenario (not copy-paste code)
-
-1. Admit a request while the server-side mock deliberately holds its response.
-2. Verify the permit is occupied (or that capacity-relevant public behavior reflects occupancy).
-3. Cancel the initiating task and drive the runtime until cancellation cleanup has occurred.
-4. Submit a new request and verify it is admitted, completes, and produces the correct response.
-5. Verify old/canceled responses cannot mutate current state and buffered payloads are released.
-
-Do not test permit accounting solely by reading a private counter when a later-admission behavior proves the contract; but checking a counter can be useful for debugging.
+For cancellation cleanup, hold a mock response, cancel the request, and verify cleanup through later behavior such as new work being admitted. Assert stale-response effects only when they are a realistic contract risk. Avoid private counters when observable behavior proves the same invariant.
 
 ## Race tests
 
@@ -64,6 +58,6 @@ Do not test permit accounting solely by reading a private counter when a later-a
 - Each test should own its temporary resources and clean up tasks, processes, channels, and files on completion. Beware test executors that spawn background tasks surviving the primary assertion.
 - Avoid blindly increasing timeouts or enabling retries when a race test fails. Investigate dependency on scheduler, timing, global state, and incomplete shutdown.
 
-## Check the negative space
+## Assert absence when it is contractual
 
-Tests should often confirm that _something does not happen_: canceled request never sends a second packet, stale event never changes the new generation, rejected oversized frame never allocates the advertised size, shutdown leaves no inflight tasks. Make such assertions finite: advance a fake clock, close the event source, or exhaust a well-defined queue; don't hang waiting for an event that may never arrive.
+When the contract requires an action not to happen, make the assertion finite: canceled requests send no later packet, stale events leave the current generation unchanged, rejected oversized frames avoid the specified allocation, or shutdown leaves no in-flight tasks. Advance a fake clock, close the event source, or exhaust a bounded queue instead of waiting indefinitely for a missing event.

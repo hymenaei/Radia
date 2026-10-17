@@ -5,7 +5,7 @@ use math::{DVec3, Quat, Vec3};
 use world::{
     Applied,
     ApplyOutcome::{Introduced, RegionAdopted, RegionPatched, Removed, Unchanged, Updated},
-    AttachmentPoint, CoordinateFrame, Entity, FieldGroup, FieldRejectionReason, Kind,
+    AttachmentPoint, CoordinateFrame, Entity, FieldGroup, FieldRejection, FieldRejectionReason, Kind,
     Kind::{Avatar, Object},
     LocalAddress, ObjectObservation, ObjectPatch,
     OrderEvidence::Ordered,
@@ -382,6 +382,61 @@ fn parent_change_requires_fresh_pose() {
 }
 
 #[test]
+fn repeated_parent_update_is_not_a_cycle() {
+    let region = Region::new(65);
+    let mut world = world_with_origin(region, DVec3::ZERO, 3);
+    let parent = introduced(world.observe_object(observation(region, 1, 650, 1, Object, Root)).unwrap());
+    let child = introduced(world.observe_object(observation(region, 2, 651, 2, Object, Local(local_id(1)))).unwrap());
+
+    let mut update = ObjectPatch::new(source(region, 3), local_id(2));
+    update.parent = Some(Local(local_id(1)));
+    let applied = world.patch_object(update).unwrap();
+
+    assert_eq!(applied.outcome, Unchanged);
+    assert!(applied.rejections.is_empty());
+    assert_eq!(world.object(child).unwrap().parent(), Parent::Resolved(parent));
+}
+
+#[test]
+fn delayed_observation_cannot_apply_pose_from_an_old_parent_frame() {
+    let region = Region::new(64);
+    let mut world = world_with_origin(region, DVec3::ZERO, 5);
+    let first_parent = introduced(
+        world.observe_object(with_pose(observation(region, 1, 640, 1, Object, Root), Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY)).unwrap(),
+    );
+    let second_parent = introduced(
+        world.observe_object(with_pose(observation(region, 2, 641, 2, Object, Root), Vec3::new(200.0, 0.0, 0.0), Quat::IDENTITY)).unwrap(),
+    );
+    let child = introduced(world.observe_object(with_pose(observation(region, 3, 642, 3, Object, Root), Vec3::X, Quat::IDENTITY)).unwrap());
+
+    let mut reparent = ObjectPatch::new(source(region, 20), local_id(3));
+    reparent.parent = Some(Local(local_id(2)));
+    assert_eq!(world.patch_object(reparent).unwrap().outcome, Updated(child));
+    assert_eq!(world.object(child).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::PoseNotValidForCurrentFrame));
+
+    let delayed = with_pose(observation(region, 15, 642, 3, Object, Local(local_id(1))), Vec3::new(5.0, 0.0, 0.0), Quat::IDENTITY);
+    let applied = world.observe_object(delayed).unwrap();
+    assert_eq!(
+        applied.rejections.iter().copied().collect::<Vec<_>>(),
+        [FieldRejection { group: FieldGroup::Pose, reason: FieldRejectionReason::StaleFrame }]
+    );
+    assert_eq!(world.object(child).unwrap().parent(), Parent::Resolved(second_parent));
+    assert_eq!(world.object(child).unwrap().position(), Some(Vec3::X));
+    assert_eq!(world.object(child).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::PoseNotValidForCurrentFrame));
+
+    let mut same_update = ObjectPatch::new(source(region, 21), local_id(3));
+    same_update.parent = Some(Local(local_id(1)));
+    same_update.pose = Some(Pose { position: Some(Vec3::new(2.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
+    let applied = world.patch_object(same_update).unwrap();
+    assert!(applied.rejections.is_empty());
+    let PoseState::Resolved(pose) = world.object(child).unwrap().world_pose().unwrap() else {
+        panic!("same-update pose must use the accepted parent frame")
+    };
+    assert_eq!(pose.position, DVec3::new(12.0, 0.0, 0.0));
+    assert_eq!(world.object(child).unwrap().parent(), Parent::Resolved(first_parent));
+}
+
+#[test]
 fn partial_pose_frames_update_independently() {
     let region = Region::new(40);
     let mut world = world_with_origin(region, DVec3::ZERO, 4);
@@ -406,6 +461,17 @@ fn partial_pose_frames_update_independently() {
     reparent.parent = Some(Local(local_id(3)));
     assert_eq!(world.patch_object(reparent).unwrap().outcome, Updated(child));
     assert_eq!(world.object(child).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::PoseNotValidForCurrentFrame));
+
+    for pose in [Pose { position: Some(Vec3::Y), rotation: None }, Pose { position: None, rotation: Some(Quat::from_rotation_z(0.5)) }] {
+        let mut delayed_pose = ObjectPatch::new(source(region, 4), local_id(2));
+        delayed_pose.pose = Some(pose);
+        let applied = world.patch_object(delayed_pose).unwrap();
+        assert_eq!(
+            applied.rejections.iter().copied().collect::<Vec<_>>(),
+            [FieldRejection { group: FieldGroup::Pose, reason: FieldRejectionReason::StaleFrame }]
+        );
+        assert_eq!(world.object(child).unwrap().position(), Some(Vec3::X));
+    }
 
     let mut position = ObjectPatch::new(source(region, 6), local_id(2));
     position.pose = Some(Pose { position: Some(Vec3::X), rotation: None });
@@ -560,7 +626,7 @@ fn attachment_change_stales_pose() {
     let attachment = introduced(world.observe_object(initial).unwrap());
     assert_eq!(world.object(attachment).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::MissingAttachmentJoint));
 
-    let mut change = ObjectPatch::new(source(region, 3), local_id(2));
+    let mut change = ObjectPatch::new(source(region, 4), local_id(2));
     change.attachment_point = Some(NonZeroU8::new(4).map(AttachmentPoint::new));
     assert_eq!(world.patch_object(change).unwrap().outcome, Updated(attachment));
     assert_eq!(
@@ -568,12 +634,21 @@ fn attachment_change_stales_pose() {
         PoseState::Unresolved(UnresolvedReason::PoseNotValidForCurrentFrame)
     );
 
-    let mut fresh_pose = ObjectPatch::new(source(region, 4), local_id(2));
+    let mut delayed_pose = ObjectPatch::new(source(region, 3), local_id(2));
+    delayed_pose.pose = Some(Pose { position: Some(Vec3::new(9.0, 0.0, 0.0)), rotation: None });
+    let applied = world.patch_object(delayed_pose).unwrap();
+    assert_eq!(
+        applied.rejections.iter().copied().collect::<Vec<_>>(),
+        [FieldRejection { group: FieldGroup::Pose, reason: FieldRejectionReason::StaleFrame }]
+    );
+    assert_eq!(world.object(attachment).unwrap().position(), Some(Vec3::X));
+
+    let mut fresh_pose = ObjectPatch::new(source(region, 5), local_id(2));
     fresh_pose.pose = Some(Pose { position: Some(Vec3::X), rotation: Some(Quat::IDENTITY) });
     assert_eq!(world.patch_object(fresh_pose).unwrap().outcome, Updated(attachment));
     assert_eq!(world.object(attachment).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::MissingAttachmentJoint));
 
-    let mut clear = ObjectPatch::new(source(region, 5), local_id(2));
+    let mut clear = ObjectPatch::new(source(region, 6), local_id(2));
     clear.attachment_point = Some(None);
     assert_eq!(world.patch_object(clear).unwrap().outcome, Updated(attachment));
     assert_eq!(

@@ -4,7 +4,7 @@ use base::UUID;
 use criterion::{BatchSize, BenchmarkGroup, BenchmarkId, Criterion, Throughput, measurement::WallTime};
 use world::{
     AgentHandoff,
-    ApplyOutcome::{AgentHandedOff, RegionRetired},
+    ApplyOutcome::{AgentHandedOff, Introduced, RegionRetired, Removed},
     ParentUpdate::Root,
 };
 
@@ -23,6 +23,13 @@ pub(super) fn bench(c: &mut Criterion) {
 fn bench_spawn(group: &mut BenchmarkGroup<'_, WallTime>) {
     for &count in SCENE_SIZES {
         group.throughput(Throughput::Elements(count as u64));
+        let (verification_rows, _) = rows(count, 0);
+        let mut verification = empty_scene(count, false);
+        for row in &verification_rows {
+            assert!(matches!(verification.world.observe_object(observation(*row)).expect("object introduction").outcome, Introduced(_)));
+        }
+        assert_eq!(verification.world.object_count(), count);
+
         group.bench_with_input(BenchmarkId::new("spawn", size_name(count)), &count, |b, &count| {
             let rows = rows(count, 0).0;
             b.iter_batched(
@@ -42,6 +49,19 @@ fn bench_spawn(group: &mut BenchmarkGroup<'_, WallTime>) {
 fn bench_delete(group: &mut BenchmarkGroup<'_, WallTime>) {
     for &count in SCENE_SIZES {
         group.throughput(Throughput::Elements(count as u64));
+        let verification = populated_scene(count, false, false);
+        let mut verification_world = verification.world;
+        for row in &verification.rows {
+            assert_eq!(
+                verification_world
+                    .remove_object(source(row.region, INITIAL_ORDER + PER_REGION as u64 + u64::from(row.local_id.get())), row.local_id,)
+                    .expect("object removal")
+                    .outcome,
+                Removed(row.id)
+            );
+        }
+        assert_eq!(verification_world.object_count(), 0);
+
         group.bench_with_input(BenchmarkId::new("delete", size_name(count)), &count, |b, &count| {
             b.iter_batched(
                 || populated_scene(count, false, false),
@@ -68,6 +88,21 @@ fn bench_delete(group: &mut BenchmarkGroup<'_, WallTime>) {
 fn bench_local_id_reuse(group: &mut BenchmarkGroup<'_, WallTime>) {
     for &count in SCENE_SIZES {
         group.throughput(Throughput::Elements(2));
+        let mut verification = populated_scene(count, false, false);
+        let target = verification.rows[count / 2];
+        let mut order = INITIAL_ORDER + 2 * PER_REGION as u64;
+        let removed = verification.world.remove_object(source(target.region, order), target.local_id).expect("object removal");
+        assert_eq!(removed.outcome, Removed(target.id));
+        order += 1;
+        let new_id = UUID::from_u128(count as u128 + 1);
+        let introduced =
+            verification.world.observe_object(observation(Row { id: new_id, order, ..target })).expect("local ID reintroduction");
+        let Introduced(entity) = introduced.outcome else { panic!("expected local ID reintroduction") };
+        assert_eq!(verification.world.entity(target.id), None);
+        assert_eq!(verification.world.entity(new_id), Some(entity));
+        assert_eq!(verification.world.object(entity).unwrap().address().local_id(), target.local_id);
+        assert_eq!(verification.world.object_count(), count);
+
         group.bench_with_input(BenchmarkId::new("local_id_reuse", size_name(count)), &count, |b, &count| {
             let mut scene = populated_scene(count, false, false);
             let target = scene.rows[count / 2];

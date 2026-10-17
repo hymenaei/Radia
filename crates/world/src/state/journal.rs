@@ -128,6 +128,7 @@ impl World {
     }
 
     pub(super) fn finish(&mut self, outcome: ApplyOutcome, changes: Vec<Change>, recovery: Option<Recovery>) -> Applied {
+        self.update_spatial_state(&changes);
         let revision = if changes.is_empty() {
             None
         } else {
@@ -157,7 +158,14 @@ impl World {
             }
             Some(next)
         };
-        Applied { outcome, revision, recovery, recovery_cancellations: Vec::new(), rejections: Rejections::default() }
+        Applied {
+            outcome,
+            revision,
+            recovery,
+            recovery_cancellations: Vec::new(),
+            rejections: Rejections::default(),
+            parent_update_accepted: false,
+        }
     }
 }
 
@@ -267,11 +275,13 @@ mod tests {
         let mut initial = observation(region, 1, 270, 1);
         initial.pose = Some(Pose { position: Some(Vec3::X), rotation: None });
         assert_revision(world.observe_object(initial).unwrap());
+        let target = world.properties_target(world.entity(UUID::from_u128(270)).unwrap()).unwrap();
         let owner_id = UUID::from_u128(271);
         assert_revision(
             world
                 .patch_properties(
                     UpdateSource::new(region, 1, Ordered(1), 0),
+                    target,
                     UUID::from_u128(270),
                     PropertiesPatch { owner_id: Some(owner_id), creator_id: None },
                 )
@@ -298,7 +308,8 @@ mod tests {
         assert_eq!(
             world
                 .patch_properties(
-                    UpdateSource::new(region, 2, Ordered(2), 0),
+                    UpdateSource::new(region, 1, Ordered(1), 0),
+                    target,
                     UUID::from_u128(270),
                     PropertiesPatch { owner_id: Some(owner_id), creator_id: None },
                 )

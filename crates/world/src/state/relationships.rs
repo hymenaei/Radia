@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
     num::NonZeroU32,
+    time::Instant,
 };
 
 use base::UUID;
@@ -10,8 +11,8 @@ use super::journal::{
     ChangeClasses,
 };
 use super::{
-    ApplyError, Change, Entity, EntityRemovalReason, FieldStamp, Kind, LocalAddress, ObjectMedia, Parent, ParentUpdate, Region, Stamp,
-    UpdateAuthority, World, WorldLimits, newer_field, remove_index,
+    ApplyError, Change, Entity, EntityRemovalReason, FieldStamp, Kind, LocalAddress, ObjectMedia, Parent, ParentUpdate, PoseState,
+    RecentObject, Region, Stamp, UpdateAuthority, World, WorldLimits, newer_field, remove_index, remove_region_index,
 };
 
 #[derive(Debug, Default)]
@@ -218,6 +219,9 @@ impl World {
     }
 
     pub(super) fn would_cycle(&self, child: Entity, mut parent: Entity) -> bool {
+        if self.object(child).is_some_and(|object| object.parent() == Parent::Resolved(parent)) {
+            return false;
+        }
         for _ in 0..self.entities.len() {
             if parent == child {
                 return true;
@@ -251,16 +255,34 @@ impl World {
 
         let mut pending = vec![(entity, invalidation, tombstone, reason, false)];
         while let Some((entity, invalidation, tombstone, reason, expanded)) = pending.pop() {
-            let Some((id, address, binding_fence, media_bytes)) = self.object(entity).map(|object| {
+            let Some((id, address, binding_fence, media_bytes, recent)) = self.object(entity).map(|object| {
+                let recent = (!expanded).then(|| RecentObject {
+                    id: object.identity.id,
+                    kind: object.kind(),
+                    address: object.address(),
+                    attachment_point: object.attachment_point(),
+                    properties: object.properties(),
+                    properties_provenance: object.properties_provenance(),
+                    last_pose: match object.world_pose() {
+                        Ok(PoseState::Resolved(pose)) => Some(pose),
+                        Ok(PoseState::Unresolved(_)) | Ok(PoseState::Provisional { .. }) | Err(_) => None,
+                    },
+                    removal_reason: reason,
+                });
                 (
                     object.identity.id,
                     object.address(),
                     object.data.binding.fence,
                     object.data.object_media.as_deref().map_or(0, ObjectMedia::retained_bytes),
+                    recent,
                 )
             }) else {
                 continue;
             };
+
+            if let Some(recent) = recent {
+                self.recent.insert(recent, Instant::now());
+            }
 
             if expanded {
                 self.object_media_bytes = self.object_media_bytes.saturating_sub(media_bytes);
@@ -268,7 +290,7 @@ impl World {
                 self.children.remove(&entity);
                 self.entities.remove(&id);
                 assert!(self.object_ids.remove(&id), "UUID ordering index is missing a live entity ID");
-                remove_index(&mut self.region_entities, address.region, entity);
+                remove_region_index(&mut self.region_entities, address.region, id);
                 if self.addresses.get(&address) == Some(&entity) {
                     self.addresses.remove(&address);
                     if tombstone {

@@ -14,6 +14,7 @@ use world::{
 
 pub(super) const PER_REGION: usize = 10_000;
 pub(super) const SCENE_SIZES: &[usize] = &[1_000, 10_000, 65_536];
+pub(super) const LOAD_SIZES: &[usize] = &[40_000, 65_536];
 pub(super) const INITIAL_ORDER: u64 = 100_000;
 
 #[derive(Clone, Copy)]
@@ -35,6 +36,7 @@ pub(super) fn size_name(count: usize) -> &'static str {
     match count {
         1_000 => "1k",
         10_000 => "10k",
+        40_000 => "40k",
         65_536 => "65k",
         _ => panic!("unexpected benchmark scene size"),
     }

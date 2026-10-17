@@ -8,6 +8,7 @@ use std::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
 use ::world::{Applied, Entity, LocalAddress, ObjectObservation, OrderEvidence, OrderEvidence::Ordered, RegionHandle, UpdateSource};
@@ -29,7 +30,7 @@ use crate::{
     remembered_login::{self, RememberedLogin},
     session::{
         ChatMessage, RegionLookup, Session, SessionHandle, WorldReader, agent,
-        coverage::SessionCoverageState,
+        coverage::{LocalCoverageLossReason, SessionCoverageState},
         display_message,
         inbound::{
             AvatarAppearanceMessage, ObjectBatch, ObjectOperation, SitTargetUpdate, decode_avatar_appearance_update, decode_object_message,
@@ -50,31 +51,44 @@ const MAX_HANDOFF_OBSERVATIONS: usize = 32;
 const MAX_WAITING_OBJECT_MEDIA: usize = MAX_WORLD_ENTITIES;
 const MAX_MEDIA_FLUSH_BATCH: usize = 64;
 const PRESENTATION_WAKE_BUFFER: usize = 0;
+const QUERY_STATE_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(25);
+
+fn next_query_state_maintenance_delay(elapsed: Duration, has_dirty_pressure: bool) -> Duration {
+    if has_dirty_pressure {
+        return Duration::ZERO;
+    }
+    let elapsed_in_interval = Duration::from_nanos((elapsed.as_nanos() % QUERY_STATE_MAINTENANCE_INTERVAL.as_nanos()) as u64);
+    QUERY_STATE_MAINTENANCE_INTERVAL - elapsed_in_interval
+}
 
 enum DrainInput {
     Cancelled,
     Event(Option<Event>),
     Media(Option<ObjectMediaResult>),
     Read(Option<WorldReadBatch>),
+    QueryStateMaintenance,
 }
 
-async fn select_drain_input<E, M, R, C>(event: E, media: M, read: R, cancellation: C) -> DrainInput
+async fn select_drain_input<E, M, R, C, T>(event: E, media: M, read: R, cancellation: C, maintenance: T) -> DrainInput
 where
     E: std::future::Future<Output = Option<Event>>,
     M: std::future::Future<Output = Option<ObjectMediaResult>>,
     R: std::future::Future<Output = Option<WorldReadBatch>>,
     C: std::future::Future<Output = ()>,
+    T: std::future::Future<Output = ()>,
 {
     let event = event.fuse();
     let media = media.fuse();
     let read = read.fuse();
     let cancellation = cancellation.fuse();
-    pin_mut!(event, media, read, cancellation);
+    let maintenance = maintenance.fuse();
+    pin_mut!(event, media, read, cancellation, maintenance);
     futures::select! {
         _ = cancellation => DrainInput::Cancelled,
         event = event => DrainInput::Event(event),
         result = media => DrainInput::Media(result),
         request = read => DrainInput::Read(request),
+        _ = maintenance => DrainInput::QueryStateMaintenance,
     }
 }
 
@@ -97,12 +111,11 @@ impl WaitingObjectMedia {
 
     fn update(&mut self, target: ObjectMediaTarget) -> bool {
         let Some(current) = self.targets.get_mut(&target.entity) else { return false };
-        if current.simulator_id != target.simulator_id
-            || current.source != target.source
-            || current.local_id != target.local_id
-            || current.object_id != target.object_id
-            || target.is_newer_than(*current)
-        {
+        let same_binding = current.simulator_id == target.simulator_id
+            && current.source.region() == target.source.region()
+            && current.local_id == target.local_id
+            && current.object_id == target.object_id;
+        if !same_binding || target.is_newer_than(*current) {
             *current = target;
         }
         true
@@ -351,6 +364,8 @@ pub(crate) async fn drain_session(
     let mut media_clients = HashMap::<SimulatorId, Client>::new();
     let mut waiting_media = WaitingObjectMedia::default();
     let mut work_since_read = 0usize;
+    let query_state_maintenance_started = background.now();
+    let mut query_state_maintenance = background.timer(Duration::ZERO).fuse();
     let mut media_fetcher = ObjectMediaFetcher::new(background.clone(), cancellation.clone());
     let recovery_queue =
         Arc::new(Mutex::new(RecoveryRetryQueue::new(recovery::MAX_PENDING_RECOVERY_TARGETS, recovery::MAX_PENDING_RECOVERY_BYTES)));
@@ -380,11 +395,22 @@ pub(crate) async fn drain_session(
             }
             work_since_read = 0;
         }
-        let input =
-            select_drain_input(session.recv_event(), media_fetcher.next_result(), session_world.next_read_requests(), cancellation.clone())
-                .await;
+        let input = select_drain_input(
+            session.recv_event(),
+            media_fetcher.next_result(),
+            session_world.next_read_requests(),
+            cancellation.clone(),
+            &mut query_state_maintenance,
+        )
+        .await;
         let event = match input {
             DrainInput::Cancelled => break,
+            DrainInput::QueryStateMaintenance => {
+                let has_dirty_pressure = session_world.maintain_query_state();
+                let elapsed = background.now().duration_since(query_state_maintenance_started);
+                query_state_maintenance = background.timer(next_query_state_maintenance_delay(elapsed, has_dirty_pressure)).fuse();
+                continue;
+            }
             DrainInput::Event(event) => {
                 work_since_read = work_since_read.saturating_add(1);
                 event
@@ -404,12 +430,30 @@ pub(crate) async fn drain_session(
                 } else {
                     match result.update {
                         Ok(update) => {
-                            if let Some(Err(error)) = session_world.apply_object_media(result.target, update) {
-                                tracing::debug!(?error, "ObjectMedia update was rejected by World");
+                            let address = LocalAddress::new(result.target.source.region(), result.target.local_id);
+                            if let Some(applied) = session_world.apply_object_media(result.target, update) {
+                                let mut summary = IngestSummary::new(IngestStatus::Applied);
+                                match applied {
+                                    Ok(applied) => {
+                                        if !applied.rejections.is_empty() {
+                                            tracing::debug!(rejections = ?applied.rejections, "ObjectMedia update contained rejected fields");
+                                        }
+                                        summary.push_applied(applied, Some(address));
+                                    }
+                                    Err(error) => {
+                                        tracing::debug!(?error, "ObjectMedia update was rejected by World");
+                                        summary.push_error(error, Some(address));
+                                    }
+                                }
+                                summary.record_coverage_losses(&coverage, result.target.simulator_id);
                             }
-                            session_world.publish_revision();
                         }
-                        Err(()) => tracing::debug!(simulator_id = ?result.target.simulator_id, "ObjectMedia capability request failed"),
+                        Err(()) if record_object_media_failure(&session_world, &coverage, result.target) => {
+                            tracing::debug!(simulator_id = ?result.target.simulator_id, "ObjectMedia request failed after retries");
+                        }
+                        Err(()) => {
+                            tracing::debug!(simulator_id = ?result.target.simulator_id, "discarded ObjectMedia failure for a stale object target");
+                        }
                     }
                 }
                 if let Some(target) = retry {
@@ -462,6 +506,20 @@ pub(crate) async fn drain_session(
             event => event,
         };
 
+        let mut process_object_chunk = |simulator_id,
+                                        summary: &IngestSummary,
+                                        recovery_targets: Vec<(Option<SimulatorId>, LocalAddress)>,
+                                        updated: Vec<LocalAddress>| {
+            summary.record_coverage_losses(&coverage, simulator_id);
+            recovery::schedule_recovery_requests(
+                recovery_targets,
+                updated,
+                active_session.as_ref(),
+                &coverage,
+                Arc::clone(&recovery_queue),
+                &mut recovery_wake,
+            );
+        };
         if let Some((simulator_id, summary)) = apply_world_event_cooperatively(
             &mut session_world,
             &event,
@@ -469,9 +527,11 @@ pub(crate) async fn drain_session(
             &mut promoted_world_target,
             &mut handoff_observations,
             active_session.as_ref().map(|session: &AgentSession| session.agent_id),
+            &mut process_object_chunk,
         )
         .await
         {
+            summary.record_coverage_losses(&coverage, simulator_id);
             recovery::schedule_recovery_requests(
                 route_recovery_targets(&session_world, simulator_id, summary.recovery_targets()),
                 summary.recovery_cancellation_addresses().collect(),
@@ -481,8 +541,6 @@ pub(crate) async fn drain_session(
                 &mut recovery_wake,
             );
         }
-        session_world.publish_revision();
-
         if let SimulatorMessage { simulator_id, .. } = &event {
             for request in media_requests {
                 if let Some(target) = session_world.prepare_object_media(*simulator_id, request) {
@@ -581,19 +639,18 @@ pub(crate) async fn drain_session(
                         handoff_observations.remove(&previous_target);
                     }
                     if let Some(observation) = handoff_observations.get(&simulator_id).cloned() {
-                        let (completed, applied) = complete_promoted_world_handoff(
+                        let (completed, summary) = complete_promoted_handoff(
                             &mut session_world,
                             &mut world_primary_simulator_id,
                             &mut promoted_world_target,
                             simulator_id,
                             observation.clone(),
+                            &coverage,
                         );
                         if completed {
                             handoff_observations.remove(&simulator_id);
                         }
-                        if let Some(applied) = applied {
-                            let mut summary = IngestSummary::new(IngestStatus::Applied);
-                            summary.push_applied(applied, Some(LocalAddress::new(observation.source.region(), observation.local_id)));
+                        if let Some(summary) = summary {
                             recovery::schedule_recovery_requests(
                                 route_recovery_targets(&session_world, simulator_id, summary.recovery_targets()),
                                 summary.recovery_cancellation_addresses().collect(),
@@ -721,6 +778,14 @@ fn queue_object_media(
     }
 }
 
+fn record_object_media_failure(world: &SessionWorld, coverage: &SessionCoverageState, target: ObjectMediaTarget) -> bool {
+    if !world.object_media_target_is_current(target) {
+        return false;
+    }
+    coverage.record_local_loss(target.simulator_id, LocalCoverageLossReason::AuxiliaryDataUnavailable, 1);
+    true
+}
+
 fn flush_object_media(
     waiting: &mut WaitingObjectMedia,
     clients: &HashMap<SimulatorId, Client>,
@@ -748,6 +813,7 @@ enum DecodedWorldUpdate {
     Object(ObjectBatch),
     AvatarAppearance { source: UpdateSource, update: AvatarAppearanceMessage },
     SitTarget { source: UpdateSource, update: SitTargetUpdate },
+    Malformed { invalid_blocks: usize, invalid_fields: usize },
 }
 
 fn decode_simulator_world_update(
@@ -769,9 +835,13 @@ fn decode_simulator_world_update(
         let source = UpdateSource::new(region, sequence, order_evidence(packet_order), 0);
         return Some(DecodedWorldUpdate::SitTarget { source, update });
     }
-    if let Some(update) = decode_avatar_appearance_update(message) {
-        let source = UpdateSource::new(region, sequence, order_evidence(packet_order), 0);
-        return Some(DecodedWorldUpdate::AvatarAppearance { source, update });
+    match decode_avatar_appearance_update(message) {
+        Ok(Some(update)) => {
+            let source = UpdateSource::new(region, sequence, order_evidence(packet_order), 0);
+            return Some(DecodedWorldUpdate::AvatarAppearance { source, update });
+        }
+        Ok(None) => {}
+        Err(_) => return Some(DecodedWorldUpdate::Malformed { invalid_blocks: 1, invalid_fields: 0 }),
     }
     decode_object_message(region, sequence, order_evidence(packet_order), message).map(DecodedWorldUpdate::Object)
 }
@@ -835,14 +905,20 @@ async fn apply_world_event_cooperatively(
     promoted_target: &mut Option<PendingWorldHandoff>,
     handoff_observations: &mut HashMap<SimulatorId, ObjectObservation>,
     agent_id: Option<UUID>,
+    on_object_chunk: &mut impl FnMut(SimulatorId, &IngestSummary, Vec<(Option<SimulatorId>, LocalAddress)>, Vec<LocalAddress>),
 ) -> Option<(SimulatorId, IngestSummary)> {
     if let Event::SimulatorMessage { simulator_id, sequence, packet_order, message, .. } = event {
         let update = decode_simulator_world_update(world, *simulator_id, *sequence, *packet_order, message)?;
         return match update {
             DecodedWorldUpdate::Object(batch) => {
                 let batch = filter_handoff_batch(world, *simulator_id, *world_primary, agent_id, batch, handoff_observations)?;
-                let summary = world.apply_object_batch_cooperatively(*simulator_id, batch).await;
-                complete_batch_handoff(world, *simulator_id, world_primary, promoted_target, handoff_observations, summary)
+                let _summary = world
+                    .apply_object_batch_cooperatively(*simulator_id, batch, |summary, targets, cancellations| {
+                        on_object_chunk(*simulator_id, summary, targets, cancellations);
+                    })
+                    .await?;
+                complete_handoff_observation(world, *simulator_id, world_primary, promoted_target, handoff_observations)
+                    .map(|summary| (*simulator_id, summary))
             }
             update => {
                 apply_decoded_world_update(world, *simulator_id, update, world_primary, promoted_target, handoff_observations, agent_id)
@@ -881,28 +957,41 @@ fn apply_decoded_world_update(
                 }
                 Some(Err(error)) => {
                     tracing::debug!(?error, "could not apply avatar sit target");
-                    None
+                    let mut summary = IngestSummary::new(IngestStatus::Applied);
+                    summary.push_error(error, address);
+                    Some((simulator_id, summary))
                 }
                 None => None,
             }
         }
-        DecodedWorldUpdate::AvatarAppearance { source, update } => {
+        DecodedWorldUpdate::AvatarAppearance { source, update, .. } => {
             let object_id = update.object_id;
+            let invalid_fields = update.invalid_fields;
             match world.apply_avatar_appearance(simulator_id, source, update) {
                 Some(Ok(applied)) => {
                     if !applied.rejections.is_empty() {
                         tracing::debug!(rejections = ?applied.rejections, "avatar appearance contained rejected fields");
                     }
                     let mut summary = IngestSummary::new(IngestStatus::Applied);
+                    summary.invalid_fields = invalid_fields;
                     summary.push_applied(applied, world.object_address(simulator_id, object_id));
                     Some((simulator_id, summary))
                 }
                 Some(Err(error)) => {
                     tracing::debug!(?error, "could not apply avatar appearance");
-                    None
+                    let mut summary = IngestSummary::new(IngestStatus::Applied);
+                    summary.invalid_fields = invalid_fields;
+                    summary.push_error(error, world.object_address(simulator_id, object_id));
+                    Some((simulator_id, summary))
                 }
                 None => None,
             }
+        }
+        DecodedWorldUpdate::Malformed { invalid_blocks, invalid_fields } => {
+            let mut summary = IngestSummary::new(IngestStatus::Applied);
+            summary.invalid_blocks = invalid_blocks;
+            summary.invalid_fields = invalid_fields;
+            Some((simulator_id, summary))
         }
     }
 }
@@ -965,6 +1054,20 @@ fn complete_batch_handoff(
     summary: Option<IngestSummary>,
 ) -> Option<(SimulatorId, IngestSummary)> {
     let mut summary = summary.map(|summary| (simulator_id, summary));
+    if let Some(extra) = complete_handoff_observation(world, simulator_id, world_primary, promoted_target, handoff_observations) {
+        let summary = summary.get_or_insert_with(|| (simulator_id, IngestSummary::new(IngestStatus::Applied)));
+        summary.1.append(extra);
+    }
+    summary
+}
+
+fn complete_handoff_observation(
+    world: &mut SessionWorld,
+    simulator_id: SimulatorId,
+    world_primary: &mut Option<SimulatorId>,
+    promoted_target: &mut Option<PendingWorldHandoff>,
+    handoff_observations: &mut HashMap<SimulatorId, ObjectObservation>,
+) -> Option<IngestSummary> {
     if let Some(observation) = handoff_observations.get(&simulator_id).cloned() {
         let (completed, applied) =
             complete_promoted_world_handoff(world, world_primary, promoted_target, simulator_id, observation.clone());
@@ -972,11 +1075,12 @@ fn complete_batch_handoff(
             handoff_observations.remove(&simulator_id);
         }
         if let Some(applied) = applied {
-            let summary = summary.get_or_insert_with(|| (simulator_id, IngestSummary::new(IngestStatus::Applied)));
-            summary.1.push_applied(applied, Some(LocalAddress::new(observation.source.region(), observation.local_id)));
+            let mut summary = IngestSummary::new(IngestStatus::Applied);
+            summary.push_applied(applied, Some(LocalAddress::new(observation.source.region(), observation.local_id)));
+            return Some(summary);
         }
     }
-    summary
+    None
 }
 
 fn conflicts_with_handoff_observation(operation: &ObjectOperation, observation: &ObjectObservation) -> bool {
@@ -1061,6 +1165,25 @@ fn complete_promoted_world_handoff(
     (true, applied)
 }
 
+fn complete_promoted_handoff(
+    world: &mut SessionWorld,
+    world_primary: &mut Option<SimulatorId>,
+    pending: &mut Option<PendingWorldHandoff>,
+    target: SimulatorId,
+    observation: ObjectObservation,
+    coverage: &SessionCoverageState,
+) -> (bool, Option<IngestSummary>) {
+    let address = LocalAddress::new(observation.source.region(), observation.local_id);
+    let (completed, applied) = complete_promoted_world_handoff(world, world_primary, pending, target, observation);
+    let summary = applied.map(|applied| {
+        let mut summary = IngestSummary::new(IngestStatus::Applied);
+        summary.push_applied(applied, Some(address));
+        summary.record_coverage_losses(coverage, target);
+        summary
+    });
+    (completed, summary)
+}
+
 fn order_evidence(packet_order: PacketOrder) -> OrderEvidence {
     match packet_order {
         PacketOrder::Ordered(order) => OrderEvidence::Ordered(order),
@@ -1119,6 +1242,15 @@ async fn save_if_current<T>(
 }
 
 #[cfg(test)]
+fn fixture_packet(fixture: &str) -> protocol::lludp::Packet {
+    let bytes = testing::parse_hex_fixture(fixture).expect("valid LLUDP fixture");
+    protocol::lludp::Packet::decode(&bytes).expect("decode LLUDP fixture")
+}
+
+#[cfg(test)]
+mod world_integration;
+
+#[cfg(test)]
 mod tests {
     use std::{
         collections::HashMap,
@@ -1128,16 +1260,18 @@ mod tests {
             Arc,
             atomic::{AtomicU64, Ordering},
         },
+        time::Duration,
     };
 
     use ::world::{
         Appearance,
         ApplyOutcome::{Deferred, Introduced, TombstoneRecorded, Unchanged},
         DeferredReason::AmbiguousOrder,
-        Kind, LocalAddress, ObjectObservation, OrderEvidence, Parent, ParentUpdate, Region, RegionHandle, UpdateSource,
+        Kind, LocalAddress, ObjectObservation, OrderEvidence, Parent, ParentUpdate, Pose, Region, RegionHandle, UpdateSource,
     };
     use base::UUID;
-    use futures::{StreamExt, executor::block_on, stream};
+    use futures::{FutureExt, StreamExt, channel::oneshot, executor::block_on, stream};
+    use gpui::TestAppContext;
     use math::{Quat, Vec3};
     use network::{
         Event,
@@ -1149,8 +1283,8 @@ mod tests {
     };
     use protocol::{
         Audible, ChatSourceType, ChatType,
+        lludp::Message,
         lludp::Message::{ImprovedTerseObjectUpdate, KillObject, ObjectUpdate, ObjectUpdateCached},
-        lludp::{Message, Packet},
         messages::{
             CacheMissType::Full,
             ChatFromSimulator, RequestAgentData,
@@ -1160,20 +1294,22 @@ mod tests {
         },
     };
     use tempfile::tempdir;
-    use testing::{lludp::vectors, parse_hex_fixture};
+    use testing::lludp::vectors;
 
     use crate::inventory::{FavoriteLocation, favorite_store::FavoriteStore};
 
     use crate::session::{
         ChatMessage,
+        coverage::{CoverageHealth, LocalCoverageLossReason, SessionCoverageState},
         recovery::recovery_request,
         world::{IngestStatus, SessionWorld, viewer_world_limits},
     };
 
     use super::{
         MAX_PENDING_CHAT_BYTES, MAX_PENDING_CHAT_MESSAGES, ObjectMediaResult, PresentationMailbox, SimulatorScope, ViewerUpdate,
-        WaitingObjectMedia, apply_world_event, apply_world_event_with_handoff, begin_world_handoff, complete_promoted_world_handoff,
-        handle_simulator_message, save_if_current, select_drain_input, write_lock,
+        WaitingObjectMedia, apply_world_event, apply_world_event_with_handoff, begin_world_handoff, complete_promoted_handoff,
+        complete_promoted_world_handoff, fixture_packet, handle_simulator_message, record_object_media_failure, save_if_current,
+        select_drain_input, write_lock,
     };
     use crate::session::{
         inbound::{ObjectBatch, ObjectOperation},
@@ -1213,7 +1349,13 @@ mod tests {
         let summary = world
             .apply_object_batch(
                 simulator_id,
-                ObjectBatch { region, region_handle: None, blocks: vec![Some(ObjectOperation::Observe(observation))], invalid_blocks: 0 },
+                ObjectBatch {
+                    region,
+                    region_handle: None,
+                    blocks: vec![Some(ObjectOperation::Observe(observation))],
+                    invalid_blocks: 0,
+                    invalid_fields: 0,
+                },
             )
             .expect("object batch applies");
         let result = summary.blocks[0].result.as_ref().expect("object result").as_ref().expect("object is valid");
@@ -1228,13 +1370,49 @@ mod tests {
         let old = object_media_target(&mut world, simulator_id, 1, 1);
         let newer =
             ObjectMediaTarget { source: UpdateSource::new(old.source.region(), 2, OrderEvidence::Ordered(2), 0), version: 2, ..old };
+        let later_marker_with_lower_version =
+            ObjectMediaTarget { source: UpdateSource::new(old.source.region(), 3, OrderEvidence::Ordered(3), 0), version: 1, ..old };
         let mut waiting = WaitingObjectMedia::default();
 
         assert!(waiting.insert(old));
         assert!(waiting.insert(newer));
+        assert!(waiting.insert(later_marker_with_lower_version));
         assert_eq!(waiting.len(), 1);
         assert_eq!(waiting.pop_front(), Some(newer));
         assert_eq!(waiting.pop_front(), None);
+    }
+
+    #[test]
+    fn failed_media_fetch_degrades_only_the_current_object_binding() {
+        let simulator_id = simulator_id();
+        let mut world = SessionWorld::new(viewer_world_limits());
+        let target = object_media_target(&mut world, simulator_id, 1, 1);
+        let coverage = SessionCoverageState::new();
+
+        assert!(record_object_media_failure(&world, &coverage, target));
+        let snapshot = coverage.snapshot(world.world().revision());
+        assert_eq!(snapshot.local_losses.len(), 1);
+        assert_eq!(snapshot.local_losses[0].reason, LocalCoverageLossReason::AuxiliaryDataUnavailable);
+        assert_eq!(snapshot.local_losses[0].count, 1);
+
+        let source = UpdateSource::new(target.source.region(), 2, OrderEvidence::Ordered(2), 0);
+        world
+            .apply_object_batch(
+                simulator_id,
+                ObjectBatch {
+                    region: target.source.region(),
+                    region_handle: None,
+                    blocks: vec![Some(ObjectOperation::Remove { source, local_id: target.local_id })],
+                    invalid_blocks: 0,
+                    invalid_fields: 0,
+                },
+            )
+            .expect("remove object");
+
+        assert!(!record_object_media_failure(&world, &coverage, target));
+        let snapshot = coverage.snapshot(world.world().revision());
+        assert_eq!(snapshot.local_losses.len(), 1);
+        assert_eq!(snapshot.local_losses[0].count, 1);
     }
 
     #[test]
@@ -1242,29 +1420,119 @@ mod tests {
         let simulator_id = simulator_id();
         let mut world = SessionWorld::new(viewer_world_limits());
         let target = object_media_target(&mut world, simulator_id, 1, 1);
-        let mut events = stream::iter(
-            std::iter::repeat_with(|| SimulatorConnected {
-                simulator_id,
-                region_handle: None,
-                endpoint: "127.0.0.1:13000".parse().expect("endpoint"),
-            })
-            .take(128),
-        );
-        let mut media = stream::iter([ObjectMediaResult { target, update: Err(()) }]);
-        let mut reads = stream::pending::<WorldReadBatch>();
+        let expected_entity = target.entity;
+        let (media_ready, media_gate) = oneshot::channel();
+        let media = stream::once(async move {
+            media_gate.await.expect("first event releases the queued media result");
+            ObjectMediaResult { target, update: Err(()) }
+        })
+        .chain(stream::pending());
+        futures::pin_mut!(media);
+        let endpoint = "127.0.0.1:13000".parse().expect("endpoint");
+        let mut media_ready = Some(media_ready);
+        let mut event_count = 0;
 
         let media_serviced = block_on(async {
-            for _ in 0..128 {
-                match select_drain_input(events.next(), media.next(), reads.next(), std::future::pending()).await {
-                    super::DrainInput::Media(Some(_)) => return true,
-                    super::DrainInput::Event(Some(_)) => {}
+            while event_count < 128 {
+                match select_drain_input(
+                    std::future::ready(Some(Event::SimulatorConnected { simulator_id, region_handle: None, endpoint })),
+                    media.next(),
+                    std::future::pending(),
+                    std::future::pending(),
+                    std::future::pending(),
+                )
+                .await
+                {
+                    super::DrainInput::Media(Some(result)) => {
+                        assert_eq!(result.target.entity, expected_entity);
+                        return true;
+                    }
+                    super::DrainInput::Event(Some(_)) => {
+                        event_count += 1;
+                        if event_count == 1 {
+                            media_ready.take().expect("media gate is released once").send(()).expect("media receiver is waiting");
+                        }
+                    }
                     _ => panic!("unexpected intake result"),
                 }
             }
             false
         });
 
-        assert!(media_serviced);
+        assert!(media_serviced, "a queued media response should progress while simulator events remain ready");
+        assert!(event_count < 128, "the event stream must remain ready until media is serviced");
+    }
+
+    #[test]
+    fn dirty_query_repairs_immediately() {
+        let elapsed = Duration::from_millis(15);
+        assert_eq!(super::next_query_state_maintenance_delay(elapsed, false), Duration::from_millis(10));
+        assert_eq!(super::next_query_state_maintenance_delay(elapsed, true), Duration::ZERO);
+    }
+
+    #[gpui::test]
+    async fn query_state_maintenance_keeps_phase(cx: &TestAppContext) {
+        let background = cx.executor();
+        let maintenance_started = background.now();
+        let mut maintenance = background.timer(Duration::ZERO).fuse();
+        assert_eq!(super::next_query_state_maintenance_delay(Duration::ZERO, false), Duration::from_millis(25));
+
+        let result = select_drain_input(
+            std::future::pending(),
+            std::future::pending(),
+            std::future::pending(),
+            std::future::pending(),
+            &mut maintenance,
+        )
+        .await;
+        assert!(matches!(result, super::DrainInput::QueryStateMaintenance));
+
+        background.advance_clock(Duration::from_millis(30));
+        let delay = super::next_query_state_maintenance_delay(background.now().duration_since(maintenance_started), false);
+        assert_eq!(delay, Duration::from_millis(20));
+        maintenance = background.timer(delay).fuse();
+        let simulator_id = simulator_id();
+        let mut events = stream::iter([SimulatorConnected {
+            simulator_id,
+            region_handle: None,
+            endpoint: "127.0.0.1:13000".parse().expect("endpoint"),
+        }]);
+        let result = select_drain_input(
+            events.next(),
+            stream::pending::<ObjectMediaResult>().next(),
+            stream::pending::<WorldReadBatch>().next(),
+            std::future::pending(),
+            &mut maintenance,
+        )
+        .await;
+        assert!(matches!(result, super::DrainInput::Event(Some(_))));
+
+        background.run_until_parked();
+        let result = select_drain_input(
+            std::future::pending(),
+            std::future::pending(),
+            std::future::pending(),
+            std::future::pending(),
+            &mut maintenance,
+        )
+        .await;
+        assert!(matches!(result, super::DrainInput::QueryStateMaintenance));
+
+        background.advance_clock(Duration::from_millis(45));
+        let delay = super::next_query_state_maintenance_delay(background.now().duration_since(maintenance_started), false);
+        assert_eq!(delay, Duration::from_millis(5));
+        maintenance = background.timer(delay).fuse();
+        background.run_until_parked();
+        let result = select_drain_input(
+            std::future::pending(),
+            std::future::pending(),
+            std::future::pending(),
+            std::future::pending(),
+            &mut maintenance,
+        )
+        .await;
+
+        assert!(matches!(result, super::DrainInput::QueryStateMaintenance));
     }
 
     fn agent_update(agent_id: UUID, local_id: u32, region_handle: u64) -> Message {
@@ -1279,9 +1547,23 @@ mod tests {
         message
     }
 
-    fn fixture_packet(fixture: &str) -> Packet {
-        let bytes = parse_hex_fixture(fixture).expect("valid LLUDP fixture");
-        Packet::decode(&bytes).expect("decode LLUDP fixture")
+    fn agent_observation(source: UpdateSource, local_id: u32, agent_id: UUID, pose: Option<Pose>) -> ObjectObservation {
+        ObjectObservation {
+            source,
+            id: agent_id,
+            local_id: NonZeroU32::new(local_id).expect("nonzero local ID"),
+            kind: Kind::Avatar,
+            parent: ParentUpdate::Root,
+            pose,
+            linear_motion: None,
+            angular_velocity: None,
+            scale: None,
+            attachment_point: None,
+            shape: None,
+            appearance: None,
+            surface_appearance: None,
+            render_materials: None,
+        }
     }
 
     fn simulator_message(simulator_id: SimulatorId, sequence: u32, message: Message) -> Event {
@@ -1457,6 +1739,56 @@ mod tests {
         let state = intake.world();
         let agent = state.object(state.entity(agent_id).expect("promoted agent remains present")).expect("agent object");
         assert_eq!(agent.address().region(), destination_region);
+    }
+
+    #[test]
+    fn promoted_handoff_field_rejections_degrade_local_coverage() {
+        let agent_id = UUID::from_u128(0x1234);
+        let source_id = simulator_id();
+        let destination_id = simulator_id();
+        let mut intake = SessionWorld::new(viewer_world_limits());
+        intake.set_self_agent(agent_id);
+        let source_region = intake.register_simulator(source_id, None).expect("register source region");
+        let destination_region = intake.register_simulator(destination_id, None).expect("register destination region");
+        let source_observation =
+            agent_observation(UpdateSource::new(source_region, 1, ::world::OrderEvidence::Ordered(1), 0), 10, agent_id, None);
+        intake
+            .apply_object_batch(
+                source_id,
+                ObjectBatch {
+                    region: source_region,
+                    region_handle: None,
+                    blocks: vec![Some(ObjectOperation::Observe(source_observation))],
+                    invalid_blocks: 0,
+                    invalid_fields: 0,
+                },
+            )
+            .expect("observe source avatar");
+
+        let coverage = SessionCoverageState::new();
+        let mut world_primary = Some(source_id);
+        let mut pending = None;
+        assert!(begin_world_handoff(&mut world_primary, &mut pending, source_id, destination_id));
+        let observation = agent_observation(
+            UpdateSource::new(destination_region, 2, ::world::OrderEvidence::Ordered(2), 0),
+            20,
+            agent_id,
+            Some(Pose { position: None, rotation: Some(Quat::from_xyzw(f32::NAN, 0.0, 0.0, 1.0)) }),
+        );
+
+        let (completed, summary) =
+            complete_promoted_handoff(&mut intake, &mut world_primary, &mut pending, destination_id, observation, &coverage);
+
+        assert!(completed);
+        let summary = summary.expect("promoted handoff produces an ingest summary");
+        let applied = summary.blocks[0].result.as_ref().expect("handoff result is recorded").as_ref().expect("handoff applies");
+        assert!(applied.rejections.iter().any(|rejection| matches!(rejection.reason, ::world::FieldRejectionReason::InvalidRotation)));
+        let snapshot = coverage.snapshot(intake.world().revision());
+        assert_eq!(snapshot.health, CoverageHealth::Degraded);
+        assert_eq!(snapshot.local_losses.len(), 1);
+        assert_eq!(snapshot.local_losses[0].simulator_id, destination_id);
+        assert_eq!(snapshot.local_losses[0].reason, LocalCoverageLossReason::MalformedData);
+        assert_eq!(snapshot.local_losses[0].count, 1);
     }
 
     #[test]
@@ -1686,7 +2018,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_remove_cancels_recovery_without_revision() {
+    fn unknown_removal_cancels_recovery() {
         let simulator_id = simulator_id();
         let endpoint = "127.0.0.1:13000".parse().expect("endpoint");
         let mut intake = SessionWorld::new(viewer_world_limits());
@@ -1711,7 +2043,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_remove_noop_does_not_cancel_recovery() {
+    fn repeated_removal_keeps_recovery() {
         let simulator_id = simulator_id();
         let endpoint = "127.0.0.1:13000".parse().expect("endpoint");
         let mut intake = SessionWorld::new(viewer_world_limits());
@@ -1891,8 +2223,9 @@ mod tests {
         let snapshot = futures::executor::block_on(receiver.next()).expect("presentation wake");
         assert_eq!(snapshot.region_name.as_deref(), Some("Primary 99"));
         assert_eq!(snapshot.chat_messages.len(), MAX_PENDING_CHAT_MESSAGES);
-        assert!(snapshot.chat_messages.iter().any(|message| message.from_name == "Neighbor"));
-        assert!(snapshot.chat_messages.iter().any(|message| message.from_name == "Primary"));
+        let names = snapshot.chat_messages.iter().map(|message| message.from_name.as_str()).collect::<Vec<_>>();
+        let expected = (0..MAX_PENDING_CHAT_MESSAGES / 2).flat_map(|_| ["Neighbor", "Primary"]).collect::<Vec<_>>();
+        assert_eq!(names, expected);
         assert!(receiver.wake_receiver.try_recv().is_err());
     }
 }

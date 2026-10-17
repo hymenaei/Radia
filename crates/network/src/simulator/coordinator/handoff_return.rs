@@ -3,7 +3,7 @@ use std::sync;
 use super::*;
 
 #[test]
-fn event_batch_order_survives_forwarding() {
+fn event_batch_preserves_forwarded_order() {
     run_large_stack_test(run_event_batch_order_survives_forwarding);
 }
 
@@ -13,32 +13,38 @@ async fn run_event_batch_order_survives_forwarding() {
         http::testing::response,
     };
 
-    let server = EventQueueTestServer::start(|base| {
+    let (release, poll_response) = sync::mpsc::channel();
+    let batch = r#"<llsd><map><key>id</key><integer>1</integer><key>events</key><array>
+        <map><key>message</key><string>FirstEvent</string><key>body</key><map/></map>
+        <map><key>message</key><string>SecondEvent</string><key>body</key><map/></map>
+    </array></map></llsd>"#;
+    let server = EventQueueTestServer::start(move |base| {
         let seed = format!("<llsd><map><key>EventQueueGet</key><uri>{base}events</uri></map></llsd>");
-        let batch = r#"<llsd><map><key>id</key><integer>1</integer><key>events</key><array><map>
-            <key>message</key><string>TestEvent</string><key>body</key><map/>
-        </map></array></map></llsd>"#;
         vec![
             EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed)),
-            EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, batch)),
+            EventServerResponse::Controlled(poll_response),
             EventServerResponse::Hold,
         ]
     });
     let mut harness = Box::pin(connected_neighbor_with_seed(server.url("/seed"))).await;
-    let event = timeout(WAIT, async {
+    release.send(response(200, "OK", "application/llsd+xml", None, batch)).expect("release EventQueue batch after session setup");
+    let event = timeout(Duration::from_secs(10), async {
         loop {
-            if let Event::CapabilityEventBatch { order, events, .. } = next_raw_event(&mut harness.events).await
-                && events.iter().any(|event| event.message == "TestEvent")
+            let event = harness.events.recv().await.expect("session event channel remains open").into_event();
+            if let Event::CapabilityEventBatch { order, events, .. } = event
+                && events.iter().any(|event| event.message == "FirstEvent")
             {
-                break order;
+                break (order, events.into_iter().map(|event| event.message).collect::<Vec<_>>());
             }
         }
     })
     .await
     .expect("EventQueue batch reaches the session event stream");
 
-    assert_eq!(event.ordinal, 0);
-    assert_ne!(event.incarnation, 0);
+    let (order, names) = event;
+    assert_eq!(order.ordinal, 0);
+    assert_ne!(order.incarnation, 0);
+    assert_eq!(names, ["FirstEvent", "SecondEvent"]);
 
     harness.shutdown().await;
     assert_eq!(server.finish().len(), 3);

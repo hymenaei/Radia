@@ -172,7 +172,11 @@ fuzz_target!(|data: &[u8]| {
                 let _ = world.remove_object(source, local_id);
             }
             3 => {
-                let _ = world.patch_properties(source, id, Default::default());
+                if let Some(entity) = world.entity(id)
+                    && let Some(target) = world.properties_target(entity)
+                {
+                    let _ = world.patch_properties(source, target, id, Default::default());
+                }
             }
             4 => {
                 let handle = u64::from_le_bytes(bytes[8..16].try_into().expect("fixed handle bytes"));

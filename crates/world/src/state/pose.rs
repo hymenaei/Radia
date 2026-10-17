@@ -5,7 +5,7 @@ use super::{
     WorldTransformState,
 };
 
-const MAX_PARENT_EDGES: usize = 16;
+pub(super) const MAX_PARENT_EDGES: usize = 16;
 
 impl World {
     pub(super) fn coordinate_frame(&self, entity: Entity) -> Result<CoordinateFrame, PoseError> {
@@ -73,7 +73,7 @@ impl World {
                 record_unresolved(&mut unresolved, UnresolvedReason::PoseNotValidForCurrentFrame);
                 break;
             };
-            let data = (*object.data).clone();
+            let data = &*object.data;
             let transform = object.transform();
             let local_pose = match (transform.position(), transform.rotation()) {
                 (Some(position), Some(rotation)) => {

@@ -12,25 +12,37 @@ use crate::{AvatarAppearance, GltfMaterialOverrides, ObjectMedia, model::*, upda
 
 mod journal;
 mod pose;
+mod query;
 mod read;
+mod recent;
 mod reducer;
 mod region;
 mod relationships;
+mod spatial;
 
 pub use journal::{Change as WorldChange, ChangeClasses as WorldChangeClasses, EntityRemovalReason as WorldEntityRemovalReason};
 use journal::{Change, ChangeClasses, EntityRemovalReason, Journal};
+pub use query::{
+    MAX_WORLD_QUERY_RESULTS, MAX_WORLD_QUERY_WORK, QueryCompleteness, QueryIncompleteReason, QueryScope, QueryUnresolved, ValueFilter,
+    WorldQuery, WorldQueryBudget, WorldQueryBuildError, WorldQueryCursor, WorldQueryItem, WorldQueryPage,
+};
 pub use read::{
     MAX_OBJECT_DETAIL_BATCH_BYTES, MAX_OBJECT_DETAIL_BATCH_ITEMS, MAX_OBJECT_DETAIL_BYTES, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_BYTES,
     MAX_REGION_PAGE_ITEMS, MAX_WORLD_CHANGE_PAGE_ITEMS, ObjectDetail, ObjectDetailBatch, ObjectDetailResult, ObjectListItem,
     ObjectListItemRead, ObjectListPage, ObjectPage, ObjectPageCursor, ObjectSummary, ObjectSummaryRead, RegionPage, RegionPageCursor,
     RegionSummary, RegionSummaryRead, WorldChangeCursor, WorldChangePage, WorldChangeRecord, WorldReadBarrier, WorldReadError,
 };
+use recent::RecentStore;
+pub use recent::{MAX_RECENT_OBJECT_BYTES, MAX_RECENT_OBJECTS, RECENT_OBJECT_TTL, RecentObject};
 use relationships::Tombstones;
+use spatial::SpatialIndex;
+pub use spatial::{MAX_QUERY_STATE_MAINTENANCE_WORK, QueryStateMaintenance};
 
 const MAX_OBJECT_MEDIA_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct Binding {
     address: LocalAddress,
+    address_generation: u64,
     fence: Stamp,
     parent_resolution_fence: Option<Stamp>,
 }
@@ -55,6 +67,7 @@ struct ObservableState {
     attachment_point: Option<AttachmentPoint>,
     sit_target: Option<SitTarget>,
     properties: Properties,
+    properties_provenance: PropertiesProvenance,
 }
 
 impl ObservableState {
@@ -89,7 +102,7 @@ impl ObservableState {
             classes |= ChangeClasses::APPEARANCE;
         }
 
-        if self.properties != next.properties {
+        if self.properties != next.properties || self.properties_provenance != next.properties_provenance {
             classes |= ChangeClasses::PROPERTIES;
         }
 
@@ -110,6 +123,7 @@ impl Binding {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct Fences {
     pose: Option<FieldStamp>,
+    frame: Option<FieldStamp>,
     linear_motion: Option<FieldStamp>,
     angular_velocity: Option<FieldStamp>,
     scale: Option<FieldStamp>,
@@ -122,7 +136,8 @@ struct Fences {
     gltf_material_overrides: Option<RegionalStamp>,
     avatar_appearance: Option<RegionalStamp>,
     sit_target: Option<RegionalStamp>,
-    properties: Option<RegionalStamp>,
+    owner_properties: Option<RegionalStamp>,
+    creator_properties: Option<RegionalStamp>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -158,6 +173,7 @@ struct ObjectData {
     rotation_frame_generation: Option<u64>,
     provisional_pose: Option<WorldPose>,
     properties: Properties,
+    properties_provenance: PropertiesProvenance,
     fences: Fences,
 }
 
@@ -195,6 +211,7 @@ impl ObjectData {
 
     fn reset_region_relative(&mut self) {
         self.fences.pose = None;
+        self.fences.frame = None;
         self.fences.linear_motion = None;
         self.fences.angular_velocity = None;
         self.fences.scale = None;
@@ -232,6 +249,15 @@ fn remove_index<K: Copy + Eq + Hash>(map: &mut HashMap<K, HashSet<Entity>>, key:
         entities.remove(&entity);
         if entities.is_empty() {
             map.remove(&key);
+        }
+    }
+}
+
+pub(super) fn remove_region_index(map: &mut HashMap<Region, BTreeSet<UUID>>, region: Region, id: UUID) {
+    if let Some(ids) = map.get_mut(&region) {
+        ids.remove(&id);
+        if ids.is_empty() {
+            map.remove(&region);
         }
     }
 }
@@ -331,6 +357,10 @@ impl Object<'_> {
         self.data.properties
     }
 
+    pub fn properties_provenance(&self) -> PropertiesProvenance {
+        self.data.properties_provenance
+    }
+
     pub fn attachment_point(&self) -> Option<AttachmentPoint> {
         self.data.attachment_point
     }
@@ -359,7 +389,7 @@ pub struct World {
     entities: HashMap<UUID, Entity>,
     object_ids: BTreeSet<UUID>,
     addresses: HashMap<LocalAddress, Entity>,
-    region_entities: HashMap<Region, HashSet<Entity>>,
+    region_entities: HashMap<Region, BTreeSet<UUID>>,
     regions: HashMap<Region, RegionInfo>,
     region_ids: BTreeSet<Region>,
     retired: HashSet<Region>,
@@ -372,6 +402,8 @@ pub struct World {
     object_media_bytes: usize,
     limits: WorldLimits,
     journal: Journal,
+    spatial: SpatialIndex,
+    recent: RecentStore,
 }
 
 impl World {
@@ -395,6 +427,8 @@ impl World {
             object_media_bytes: 0,
             limits,
             journal: Journal::new(),
+            spatial: SpatialIndex::default(),
+            recent: RecentStore::default(),
         }
     }
 
@@ -422,6 +456,28 @@ impl World {
         self.addresses.get(&address).copied()
     }
 
+    /// Captures the current object binding for an asynchronous property request.
+    pub fn properties_target(&self, entity: Entity) -> Option<PropertiesTarget> {
+        let object = self.object(entity)?;
+        Some(PropertiesTarget {
+            entity,
+            id: object.identity().id(),
+            address: object.address(),
+            address_generation: object.data.binding.address_generation,
+        })
+    }
+
+    /// Returns whether a request target still names the same live binding.
+    pub fn properties_target_is_current(&self, target: crate::PropertiesTarget) -> bool {
+        if target.entity.1 != self.id || self.entities.get(&target.id) != Some(&target.entity) {
+            return false;
+        }
+        let Some(object) = self.object(target.entity) else { return false };
+        object.address() == target.address
+            && object.data.binding.address_generation == target.address_generation
+            && self.addresses.get(&target.address) == Some(&target.entity)
+    }
+
     pub fn object(&self, entity: Entity) -> Option<Object<'_>> {
         if entity.1 != self.id {
             return None;
@@ -443,7 +499,12 @@ impl World {
     }
 
     pub fn objects_in_region(&self, region: Region) -> impl Iterator<Item = Object<'_>> {
-        self.region_entities.get(&region).into_iter().flat_map(|entities| entities.iter()).filter_map(|entity| self.object(*entity))
+        self.region_entities
+            .get(&region)
+            .into_iter()
+            .flat_map(|ids| ids.iter())
+            .filter_map(|id| self.entities.get(id).copied())
+            .filter_map(|entity| self.object(entity))
     }
 
     pub fn children(&self, entity: Entity) -> impl Iterator<Item = Object<'_>> {
@@ -487,6 +548,7 @@ impl World {
             attachment_point: object.attachment_point(),
             sit_target: object.sit_target(),
             properties: object.properties(),
+            properties_provenance: object.properties_provenance(),
         }
     }
 
@@ -511,6 +573,7 @@ impl Applied {
             recovery: None,
             recovery_cancellations: Vec::new(),
             rejections: Rejections::default(),
+            parent_update_accepted: false,
         }
     }
 
@@ -521,6 +584,7 @@ impl Applied {
             recovery,
             recovery_cancellations: Vec::new(),
             rejections: Rejections::default(),
+            parent_update_accepted: false,
         }
     }
 }
@@ -552,6 +616,7 @@ mod tests {
             attachment_point: None,
             sit_target: None,
             properties: Properties::default(),
+            properties_provenance: PropertiesProvenance::default(),
         };
         let mesh_shape = Shape::Mesh { asset_id: AssetId::new(UUID::from_u128(1)), flags: SculptFlags::default() };
         let shape_only = ObservableState { shape: Some(mesh_shape), ..before.clone() };

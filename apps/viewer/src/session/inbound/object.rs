@@ -42,6 +42,7 @@ pub(crate) struct ObjectBatch {
     pub(crate) region_handle: Option<RegionHandle>,
     pub(crate) blocks: Vec<Option<ObjectOperation>>,
     pub(crate) invalid_blocks: usize,
+    pub(crate) invalid_fields: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -86,11 +87,20 @@ impl ObjectOperation {
 /// represented by `None` at their original packet index.
 pub(crate) fn decode_object_message(region: Region, sequence: u32, order: OrderEvidence, message: &Message) -> Option<ObjectBatch> {
     let mut invalid_blocks = 0;
+    let mut invalid_fields = 0;
     let blocks = match message {
-        ObjectUpdate(update) => map_blocks(region, sequence, order, &update.objects, full_observation, &mut invalid_blocks),
-        ObjectUpdateCompressed(update) => map_blocks(region, sequence, order, &update.objects, compressed_observation, &mut invalid_blocks),
-        ImprovedTerseObjectUpdate(update) => map_blocks(region, sequence, order, &update.objects, terse_patch, &mut invalid_blocks),
-        ObjectUpdateCached(update) => map_blocks(region, sequence, order, &update.objects, cached_patch, &mut invalid_blocks),
+        ObjectUpdate(update) => {
+            map_blocks(region, sequence, order, &update.objects, full_observation, &mut invalid_blocks, &mut invalid_fields)
+        }
+        ObjectUpdateCompressed(update) => {
+            map_blocks(region, sequence, order, &update.objects, compressed_observation, &mut invalid_blocks, &mut invalid_fields)
+        }
+        ImprovedTerseObjectUpdate(update) => {
+            map_blocks(region, sequence, order, &update.objects, terse_patch, &mut invalid_blocks, &mut invalid_fields)
+        }
+        ObjectUpdateCached(update) => {
+            map_blocks(region, sequence, order, &update.objects, cached_patch, &mut invalid_blocks, &mut invalid_fields)
+        }
         ObjectExtraParams(update) => map_blocks(
             region,
             sequence,
@@ -98,14 +108,16 @@ pub(crate) fn decode_object_message(region: Region, sequence: u32, order: OrderE
             update.object_data.iter().filter(|parameter| parameter.parameter_type == RENDER_MATERIAL_EXTRA_PARAM_TYPE),
             render_material_patch,
             &mut invalid_blocks,
+            &mut invalid_fields,
         ),
         KillObject(update) => map_blocks(
             region,
             sequence,
             order,
             &update.object_data,
-            |object, source| Ok(ObjectOperation::Remove { source, local_id: local_id(object.local_id)? }),
+            |object, source, _| Ok(ObjectOperation::Remove { source, local_id: local_id(object.local_id)? }),
             &mut invalid_blocks,
+            &mut invalid_fields,
         ),
         GenericStreamingMessage(message) => match super::gltf::decode_message(message) {
             Some(Ok(decoded)) => {
@@ -123,7 +135,7 @@ pub(crate) fn decode_object_message(region: Region, sequence: u32, order: OrderE
         _ => return None,
     };
 
-    Some(ObjectBatch { region, region_handle: object_region_handle(message), blocks, invalid_blocks })
+    Some(ObjectBatch { region, region_handle: object_region_handle(message), blocks, invalid_blocks, invalid_fields })
 }
 
 pub(in crate::session) fn object_media_requests(
@@ -200,15 +212,16 @@ fn map_blocks<'a, T: 'a>(
     sequence: u32,
     order: OrderEvidence,
     blocks: impl IntoIterator<Item = &'a T>,
-    mut to_operation: impl FnMut(&T, UpdateSource) -> Result<ObjectOperation, InvalidBlock>,
+    mut to_operation: impl FnMut(&T, UpdateSource, &mut usize) -> Result<ObjectOperation, InvalidBlock>,
     invalid_blocks: &mut usize,
+    invalid_fields: &mut usize,
 ) -> Vec<Option<ObjectOperation>> {
     blocks
         .into_iter()
         .enumerate()
         .map(|(index, block)| {
             let source = u32::try_from(index).ok().map(|ordinal| UpdateSource::new(region, sequence, order, ordinal));
-            let operation = source.and_then(|source| to_operation(block, source).ok());
+            let operation = source.and_then(|source| to_operation(block, source, invalid_fields).ok());
             if operation.is_none() {
                 *invalid_blocks += 1;
             }
@@ -220,10 +233,18 @@ fn map_blocks<'a, T: 'a>(
 #[derive(Clone, Copy)]
 struct InvalidBlock;
 
-fn full_observation(block: &ObjectData, source: UpdateSource) -> Result<ObjectOperation, InvalidBlock> {
+fn full_observation(block: &ObjectData, source: UpdateSource, invalid_fields: &mut usize) -> Result<ObjectOperation, InvalidBlock> {
     let id = non_nil_uuid(block.id)?;
     let local_id = local_id(block.local_id)?;
-    let classification = object_classification(block.pcode, &block.extra_parameters);
+    let classification = object_classification(block.pcode, &block.extra_parameters, invalid_fields);
+    let surface_appearance = if block.pcode == VOLUME_PCODE {
+        let (value, invalid) = decoded_surface_appearance(object_update::decode_texture_entry(&block.texture_entry));
+        *invalid_fields += usize::from(invalid);
+        value
+    } else {
+        None
+    };
+    let render_materials = render_materials(block.pcode, &block.extra_parameters, invalid_fields);
     Ok(ObjectOperation::Observe(ObjectObservation {
         source,
         id,
@@ -237,21 +258,35 @@ fn full_observation(block: &ObjectData, source: UpdateSource) -> Result<ObjectOp
         attachment_point: attachment_point(block.state),
         shape: classification.shape,
         appearance: classification.appearance,
-        surface_appearance: (block.pcode == VOLUME_PCODE)
-            .then(|| object_update::decode_texture_entry(&block.texture_entry).ok().flatten().and_then(surface_appearance))
-            .flatten(),
-        render_materials: render_materials(block.pcode, &block.extra_parameters),
+        surface_appearance,
+        render_materials,
     }))
 }
 
-fn compressed_observation(block: &object_update_compressed::ObjectData, source: UpdateSource) -> Result<ObjectOperation, InvalidBlock> {
-    let classification = object_classification(block.pcode, &block.extra_parameters);
+fn compressed_observation(
+    block: &object_update_compressed::ObjectData,
+    source: UpdateSource,
+    invalid_fields: &mut usize,
+) -> Result<ObjectOperation, InvalidBlock> {
+    let id = non_nil_uuid(block.id)?;
+    let local_id = local_id(block.local_id)?;
+    let parent = parent(block.parent_local_id)?;
+    let classification = object_classification(block.pcode, &block.extra_parameters, invalid_fields);
+    let surface_appearance = if block.pcode == VOLUME_PCODE {
+        let decoded = block.texture_entry.as_deref().map(object_update_compressed::decode_texture_entry).unwrap_or(Ok(None));
+        let (value, invalid) = decoded_surface_appearance(decoded);
+        *invalid_fields += usize::from(invalid);
+        value
+    } else {
+        None
+    };
+    let render_materials = render_materials(block.pcode, &block.extra_parameters, invalid_fields);
     Ok(ObjectOperation::Observe(ObjectObservation {
         source,
-        id: non_nil_uuid(block.id)?,
-        local_id: local_id(block.local_id)?,
+        id,
+        local_id,
         kind: classification.kind,
-        parent: parent(block.parent_local_id)?,
+        parent,
         pose: Some(Pose { position: Some(block.position), rotation: Some(block.rotation) }),
         linear_motion: None,
         angular_velocity: block.angular_velocity,
@@ -259,29 +294,39 @@ fn compressed_observation(block: &object_update_compressed::ObjectData, source: 
         attachment_point: attachment_point(block.state),
         shape: classification.shape,
         appearance: classification.appearance,
-        surface_appearance: (block.pcode == VOLUME_PCODE)
-            .then(|| {
-                block
-                    .texture_entry
-                    .as_deref()
-                    .and_then(|bytes| object_update_compressed::decode_texture_entry(bytes).ok().flatten())
-                    .and_then(surface_appearance)
-            })
-            .flatten(),
-        render_materials: render_materials(block.pcode, &block.extra_parameters),
+        surface_appearance,
+        render_materials,
     }))
 }
 
-fn terse_patch(block: &improved_terse_object_update::ObjectData, source: UpdateSource) -> Result<ObjectOperation, InvalidBlock> {
+fn terse_patch(
+    block: &improved_terse_object_update::ObjectData,
+    source: UpdateSource,
+    invalid_fields: &mut usize,
+) -> Result<ObjectOperation, InvalidBlock> {
     let mut patch = ObjectPatch::new(source, local_id(block.local_id)?);
     patch.pose = Some(Pose { position: Some(block.motion.position), rotation: Some(block.motion.rotation) });
     patch.linear_motion = MotionPatch { velocity: Some(block.motion.velocity), acceleration: Some(block.motion.acceleration) };
     patch.angular_velocity = Some(block.motion.angular_velocity);
     patch.attachment_point = attachment_point(block.state);
-    patch.surface_appearance = (!block.avatar)
-        .then(|| improved_terse_object_update::decode_texture_entry(&block.texture_entry).ok().flatten().and_then(surface_appearance))
-        .flatten();
+    if !block.avatar {
+        let (value, invalid) = decoded_surface_appearance(improved_terse_object_update::decode_texture_entry(&block.texture_entry));
+        *invalid_fields += usize::from(invalid);
+        patch.surface_appearance = value;
+    }
     Ok(ObjectOperation::Patch(patch))
+}
+
+fn decoded_surface_appearance<E>(decoded: Result<Option<TextureEntry>, E>) -> (Option<SurfaceAppearance>, bool) {
+    match decoded {
+        Ok(Some(entry)) => {
+            let value = surface_appearance(entry);
+            let invalid = value.is_none();
+            (value, invalid)
+        }
+        Ok(None) => (None, false),
+        Err(_) => (None, true),
+    }
 }
 
 fn surface_appearance(entry: TextureEntry) -> Option<SurfaceAppearance> {
@@ -290,22 +335,31 @@ fn surface_appearance(entry: TextureEntry) -> Option<SurfaceAppearance> {
     SurfaceAppearance::new(default_face, overrides).ok()
 }
 
-fn render_materials(pcode: u8, extra_parameters: &[ExtraParameter]) -> Option<RenderMaterials> {
+fn render_materials(pcode: u8, extra_parameters: &[ExtraParameter], invalid_fields: &mut usize) -> Option<RenderMaterials> {
     if pcode != VOLUME_PCODE {
         return (object_kind(pcode) == Kind::Object).then(RenderMaterials::default);
     }
 
     let mut materials = None;
+    let mut found = false;
     for extra_parameter in extra_parameters.iter().filter(|p| p.parameter_type == RENDER_MATERIAL_EXTRA_PARAM_TYPE) {
-        materials = Some(decode_render_material_bindings(&extra_parameter.data).ok().and_then(|bindings| {
-            RenderMaterials::new(bindings.into_iter().map(|binding| (binding.face_index, AssetId::new(binding.material_id))).collect()).ok()
-        }));
+        found = true;
+        match decode_render_material_bindings(&extra_parameter.data).map_err(|_| ()).and_then(|bindings| {
+            RenderMaterials::new(bindings.into_iter().map(|binding| (binding.face_index, AssetId::new(binding.material_id))).collect())
+                .map_err(|_| ())
+        }) {
+            Ok(value) => materials = Some(value),
+            Err(()) => {
+                *invalid_fields += 1;
+                materials = None;
+            }
+        }
     }
 
-    materials.unwrap_or_else(|| Some(RenderMaterials::default()))
+    if found { materials } else { Some(RenderMaterials::default()) }
 }
 
-fn render_material_patch(block: &ExtraParamUpdate, source: UpdateSource) -> Result<ObjectOperation, InvalidBlock> {
+fn render_material_patch(block: &ExtraParamUpdate, source: UpdateSource, _: &mut usize) -> Result<ObjectOperation, InvalidBlock> {
     let materials = if block.in_use {
         let bindings = decode_render_material_bindings(&block.data).map_err(|_| InvalidBlock)?;
         RenderMaterials::new(bindings.into_iter().map(|binding| (binding.face_index, AssetId::new(binding.material_id))).collect())
@@ -334,7 +388,7 @@ fn face_appearance(face: &TextureFace) -> FaceAppearance {
     }
 }
 
-fn cached_patch(block: &CachedObjectReference, source: UpdateSource) -> Result<ObjectOperation, InvalidBlock> {
+fn cached_patch(block: &CachedObjectReference, source: UpdateSource, _: &mut usize) -> Result<ObjectOperation, InvalidBlock> {
     Ok(ObjectOperation::Cached { source, local_id: local_id(block.local_id)? })
 }
 
@@ -371,7 +425,7 @@ struct ObjectClassification {
     appearance: Option<Option<Appearance>>,
 }
 
-fn object_classification(pcode: u8, extra_parameters: &[ExtraParameter]) -> ObjectClassification {
+fn object_classification(pcode: u8, extra_parameters: &[ExtraParameter], invalid_fields: &mut usize) -> ObjectClassification {
     match pcode {
         LEGACY_AVATAR_PCODE => {
             ObjectClassification { kind: Kind::Avatar, shape: Some(Some(Shape::Avatar)), appearance: Some(Some(Appearance::Avatar)) }
@@ -380,6 +434,9 @@ fn object_classification(pcode: u8, extra_parameters: &[ExtraParameter]) -> Obje
             let mut sculpt_parameter = None;
             for parameter in extra_parameters {
                 if matches!(parameter.parameter_type, SCULPT_EXTRA_PARAM_TYPE | MESH_EXTRA_PARAM_TYPE) {
+                    if parameter.data.len() != SCULPT_EXTRA_PARAM_LEN {
+                        *invalid_fields += 1;
+                    }
                     sculpt_parameter = Some(parameter);
                 }
             }

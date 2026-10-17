@@ -5,7 +5,7 @@ use ParentUpdate::{Local, Root};
 use base::UUID;
 use math::{DVec3, Quat, Vec3};
 use world::ApplyError::{EntityBudgetExhausted, InvalidValue, RegionRetired, RegistrationBudgetExhausted, StaleRegion};
-use world::ApplyOutcome::{Deferred, Introduced, RegionAdopted, RegionPatched, TombstoneRecorded, Unchanged, Updated};
+use world::ApplyOutcome::{Deferred, IgnoredStale, Introduced, RegionAdopted, RegionPatched, TombstoneRecorded, Unchanged, Updated};
 use world::DeferredReason::AmbiguousOrder;
 use world::Kind::Object;
 use world::{
@@ -511,7 +511,7 @@ fn tombstone_eviction_advances_region_floor() {
     );
     assert_eq!(world.revision(), adopted_revision);
 
-    assert_eq!(world.observe_object(observation(source(region, 9), 90, 2)).unwrap().outcome, Unchanged);
+    assert_eq!(world.observe_object(observation(source(region, 9), 90, 2)).unwrap().outcome, IgnoredStale);
     let stale_evicted = world.observe_object(observation(source(region, 5), 91, 1)).unwrap();
     assert_eq!(stale_evicted.outcome, Deferred(AmbiguousOrder));
     assert_eq!(stale_evicted.recovery.unwrap().targets, [address(region, 1)]);
@@ -549,7 +549,7 @@ fn tombstone_limits_are_per_region_and_evict_oldest() {
     let evicted = world.observe_object(observation(source(region_a, 5), 100, 1)).unwrap();
     assert_eq!(evicted.outcome, Deferred(AmbiguousOrder));
     assert_eq!(evicted.recovery.unwrap().targets, [address(region_a, 1)]);
-    assert_eq!(world.observe_object(observation(source(region_b, 5), 101, 1)).unwrap().outcome, Unchanged);
+    assert_eq!(world.observe_object(observation(source(region_b, 5), 101, 1)).unwrap().outcome, IgnoredStale);
 }
 
 #[test]
@@ -576,7 +576,7 @@ fn tombstone_pressure_only_degrades_affected_region() {
     assert!(matches!(world.remove_object(source(region_b, 5), NonZeroU32::new(1).unwrap()).unwrap().outcome, TombstoneRecorded(_)));
     assert!(matches!(world.remove_object(source(region_b, 10), NonZeroU32::new(2).unwrap()).unwrap().outcome, TombstoneRecorded(_)));
 
-    assert_eq!(world.observe_object(observation(source(region_a, 5), 140, 1)).unwrap().outcome, Unchanged);
+    assert_eq!(world.observe_object(observation(source(region_a, 5), 140, 1)).unwrap().outcome, IgnoredStale);
     let degraded = world.observe_object(observation(source(region_b, 5), 141, 2)).unwrap();
     assert_eq!(degraded.outcome, Deferred(AmbiguousOrder));
     assert_eq!(degraded.recovery.unwrap().targets, [address(region_b, 2)]);

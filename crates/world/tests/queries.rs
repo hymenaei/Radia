@@ -16,8 +16,9 @@ use world::{
     OrderEvidence::Ordered,
     Parent, ParentUpdate,
     ParentUpdate::{Local, Root},
-    Pose, PoseState, PropertiesPatch, Region, RegionHandle, RegionInfo, UnresolvedReason, UpdateSource, World, WorldChange, WorldLimits,
-    WorldPose, WorldReadError, WorldTransform, WorldTransformState,
+    Pose, PoseState, PropertiesPatch, QueryCompleteness, QueryIncompleteReason, Region, RegionHandle, RegionInfo, UnresolvedReason,
+    UpdateSource, World, WorldChange, WorldEntityRemovalReason, WorldLimits, WorldPose, WorldQuery, WorldQueryBudget, WorldQueryItem,
+    WorldReadError, WorldTransform, WorldTransformState,
 };
 
 fn world_limits() -> WorldLimits {
@@ -38,6 +39,17 @@ fn world_limits() -> WorldLimits {
 
 fn uuid(value: u128) -> UUID {
     UUID::from_u128(value)
+}
+
+fn patch_properties_current(
+    world: &mut World,
+    source: UpdateSource,
+    id: UUID,
+    patch: PropertiesPatch,
+) -> Result<world::Applied, world::ApplyError> {
+    let entity = world.entity(id).expect("property patch target is live");
+    let target = world.properties_target(entity).expect("live property target has a current binding");
+    world.patch_properties(source, target, id, patch)
 }
 
 fn source(region: Region, order: u64) -> UpdateSource {
@@ -70,6 +82,10 @@ fn object(region: Region, order: u64, id: u128, local: u32, kind: Kind, parent: 
 fn entity(outcome: Applied) -> Entity {
     let Introduced(entity) = outcome.outcome else { panic!("expected object introduction") };
     entity
+}
+
+fn apply_ok(result: Result<Applied, world::ApplyError>) {
+    let _ = result.expect("World update");
 }
 
 #[test]
@@ -146,10 +162,14 @@ fn borrowed_queries_expose_current_state() {
     drop(view);
 
     assert_eq!(
-        world
-            .patch_properties(source(first, 3), uuid(20), PropertiesPatch { owner_id: Some(uuid(30)), creator_id: Some(uuid(31)) })
-            .unwrap()
-            .outcome,
+        patch_properties_current(
+            &mut world,
+            source(first, 3),
+            uuid(20),
+            PropertiesPatch { owner_id: Some(uuid(30)), creator_id: Some(uuid(31)) }
+        )
+        .unwrap()
+        .outcome,
         Updated(root)
     );
     let properties = world.object(root).unwrap().properties();
@@ -196,7 +216,7 @@ fn object_views_borrow_the_same_identity() {
 }
 
 #[test]
-fn object_pages_reconcile_inserts_behind_the_cursor() {
+fn object_page_skips_insert_behind_cursor() {
     let region = Region::new(5);
     let mut limits = world_limits();
     limits.max_entities = 4;
@@ -274,6 +294,109 @@ fn detail_rejects_a_reused_entity() {
 }
 
 #[test]
+fn result_limits_are_reported() {
+    let region = Region::new(31);
+    let mut world = World::new(world_limits());
+    apply_ok(world.adopt_region(region));
+    apply_ok(world.observe_object(object(region, 1, 310, 1, Object, Root)));
+    apply_ok(world.observe_object(object(region, 2, 311, 2, Object, Root)));
+
+    let page = world.query(WorldQuery::live(), None, WorldQueryBudget { work: 8, results: 1 }).unwrap();
+
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.completeness, QueryCompleteness::Incomplete { reason: QueryIncompleteReason::ResultLimit });
+}
+
+#[test]
+fn recent_records_keep_metadata_and_yield() {
+    let region = Region::new(32);
+    let id = uuid(320);
+    let mut world = World::new(world_limits());
+    apply_ok(world.adopt_region(region));
+    apply_ok(world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }));
+    let mut original = object(region, 1, 320, 1, Object, Root);
+    original.pose = Some(Pose { position: Some(Vec3::X), rotation: Some(Quat::IDENTITY) });
+    apply_ok(world.observe_object(original));
+    apply_ok(world.remove_object(source(region, 2), local_id(1)));
+
+    let recent = world.query(WorldQuery::recent(), None, WorldQueryBudget { work: 8, results: 8 }).unwrap();
+    let [WorldQueryItem::Recent(record)] = recent.items.as_slice() else { panic!("expected the removed object record") };
+    assert_eq!(record.id, id);
+    assert_eq!(record.address.local_id(), local_id(1));
+    assert_eq!(record.removal_reason, WorldEntityRemovalReason::Killed);
+    assert_eq!(record.last_pose.unwrap().position, DVec3::X);
+
+    let mut replacement = object(region, 3, 320, 2, Object, Root);
+    replacement.pose = Some(Pose { position: Some(Vec3::splat(2.0)), rotation: Some(Quat::IDENTITY) });
+    apply_ok(world.observe_object(replacement));
+    let combined = world.query(WorldQuery::live_and_recent(), None, WorldQueryBudget { work: 8, results: 8 }).unwrap();
+
+    assert_eq!(combined.items.len(), 1);
+    assert!(matches!(combined.items.as_slice(), [WorldQueryItem::Live { object, .. }] if object.id == id));
+}
+
+#[test]
+fn recent_and_combined_pages_resume() {
+    let region = Region::new(32);
+    let mut limits = world_limits();
+    limits.max_entities = 4;
+    limits.max_entities_per_region = 4;
+    let mut world = World::new(limits);
+    apply_ok(world.adopt_region(region));
+
+    for (order, id, local_id) in [(1, 10, 1), (2, 15, 2), (3, 20, 3), (4, 25, 4)] {
+        apply_ok(world.observe_object(object(region, order, id, local_id, Object, Root)));
+    }
+    apply_ok(world.remove_object(source(region, 5), local_id(2)));
+    apply_ok(world.remove_object(source(region, 6), local_id(4)));
+
+    let budget = WorldQueryBudget { work: 16, results: 1 };
+    let query = WorldQuery::live_and_recent();
+    let live_first = world.query(query, None, budget).unwrap();
+    assert_eq!(live_first.items.iter().map(|item| item.id()).collect::<Vec<_>>(), [uuid(10)]);
+    assert!(live_first.next.is_some());
+
+    let live_second = world.query(query, live_first.next, budget).unwrap();
+    assert_eq!(live_second.items.iter().map(|item| item.id()).collect::<Vec<_>>(), [uuid(20)]);
+    assert!(live_second.next.is_some());
+    assert!(matches!(live_second.completeness, QueryCompleteness::Incomplete { .. }));
+
+    let combined_recent = world.query(query, live_second.next, budget).unwrap();
+    assert_eq!(combined_recent.items.iter().map(|item| item.id()).collect::<Vec<_>>(), [uuid(15)]);
+    assert!(matches!(combined_recent.items.as_slice(), [WorldQueryItem::Recent(_)]));
+    assert!(combined_recent.next.is_some());
+
+    let combined_last = world.query(query, combined_recent.next, budget).unwrap();
+    assert_eq!(combined_last.items.iter().map(|item| item.id()).collect::<Vec<_>>(), [uuid(25)]);
+    assert!(matches!(combined_last.items.as_slice(), [WorldQueryItem::Recent(_)]));
+    assert_eq!(combined_last.completeness, QueryCompleteness::Exact);
+    assert!(combined_last.next.is_none());
+
+    let recent_first = world.query(WorldQuery::recent(), None, budget).unwrap();
+    assert_eq!(recent_first.items.iter().map(|item| item.id()).collect::<Vec<_>>(), [uuid(15)]);
+    assert!(recent_first.next.is_some());
+    assert_eq!(world.query(WorldQuery::live(), recent_first.next, budget), Err(WorldReadError::InvalidCursor));
+    let recent_last = world.query(WorldQuery::recent(), recent_first.next, budget).unwrap();
+    assert_eq!(recent_last.items.iter().map(|item| item.id()).collect::<Vec<_>>(), [uuid(25)]);
+    assert_eq!(recent_last.completeness, QueryCompleteness::Exact);
+    assert!(recent_last.next.is_none());
+
+    let mut cursor = None;
+    let mut ids = Vec::new();
+    loop {
+        let page = world.query(query, cursor, WorldQueryBudget { work: 1, results: 4 }).expect("continue combined query after work limit");
+        ids.extend(page.items.into_iter().map(WorldQueryItem::id));
+        cursor = page.next;
+        if cursor.is_none() {
+            assert_eq!(page.completeness, QueryCompleteness::Exact);
+            break;
+        }
+        assert_eq!(page.completeness, QueryCompleteness::Incomplete { reason: QueryIncompleteReason::WorkLimit });
+    }
+    assert_eq!(ids, [uuid(10), uuid(20), uuid(15), uuid(25)]);
+}
+
+#[test]
 fn summaries_include_relationship_and_pose() {
     let region = Region::new(17);
     let mut world = World::new(world_limits());
@@ -312,6 +435,27 @@ fn detail_batches_preserve_order() {
         ] if first.summary.entity == other && first.hydration_revision == batch.hydration_revision
             && *gone == original && last.summary.entity == replacement && last.hydration_revision == batch.hydration_revision
     ));
+}
+
+#[test]
+fn detail_pose_matches_its_world_transform() {
+    let region = Region::new(19);
+    let mut world = World::new(world_limits());
+    assert_eq!(world.adopt_region(region).unwrap().outcome, RegionAdopted);
+    assert_eq!(
+        world.patch_region(region, RegionInfo { origin: Some(DVec3::new(256.0, 512.0, 0.0)), ..RegionInfo::default() }).unwrap().outcome,
+        RegionPatched
+    );
+    let pose = Pose { position: Some(Vec3::new(3.0, 4.0, 5.0)), rotation: Some(Quat::IDENTITY) };
+    let mut object = object(region, 1, 190, 1, Object, Root);
+    object.pose = Some(pose);
+    let entity = entity(world.observe_object(object).unwrap());
+    let expected = WorldPose { position: DVec3::new(259.0, 516.0, 5.0), rotation: Quat::IDENTITY };
+
+    let detail = world.object_detail(entity).unwrap();
+
+    assert_eq!(detail.world_transform, Ok(WorldTransformState::MissingScale(expected)));
+    assert_eq!(detail.summary.pose, Ok(PoseState::Resolved(expected)));
 }
 
 #[test]

@@ -195,13 +195,12 @@ impl From<StoredWindowSize> for Size<Pixels> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
-
     use gpui::{Bounds, Point, px, size};
+    use tempfile::tempdir;
 
     use super::{
-        MAX_WINDOW_DIMENSION, StoredWindowGeometry, StoredWindowSize, center_on_display, clamp_size, has_usable_titlebar, id,
-        read_geometries, save_geometry,
+        MAX_WINDOW_DIMENSION, StoredWindowGeometry, StoredWindowSize, center_on_display, clamp_size, has_usable_titlebar, read_geometries,
+        save_geometry,
     };
 
     #[test]
@@ -213,9 +212,9 @@ mod tests {
     }
 
     #[test]
-    fn geometry_shares_one_file_and_updates_by_window_name() {
-        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/window-geometry-tests");
-        let path = directory.join(format!("{}.json", id()));
+    fn named_geometry_shares_file() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("window-sizes.json");
         let main = StoredWindowGeometry { x: Some(-120), y: Some(60), width: 720, height: 480 };
         let resized_main = StoredWindowGeometry { x: Some(340), y: Some(90), width: 900, height: 640 };
         let developer_tools = StoredWindowGeometry { x: Some(920), y: Some(140), width: 1080, height: 760 };
@@ -227,7 +226,6 @@ mod tests {
         let saved = read_geometries(&path).unwrap();
         assert_eq!(saved.get("main"), Some(&resized_main));
         assert_eq!(saved.get("developer-tools"), Some(&developer_tools));
-        fs::remove_file(path).unwrap();
     }
 
     #[test]

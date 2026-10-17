@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use base::UUID;
 use math::{DVec3, Quat, Vec3};
 
+use crate::update::UpdateAuthority;
+
 static NEXT_WORLD_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -40,6 +42,42 @@ impl Region {
 pub struct LocalAddress {
     pub(super) region: Region,
     pub(super) local_id: NonZeroU32,
+}
+
+/// The accepted source that supplied one owner or creator value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PropertyProvenance {
+    pub region: Region,
+    pub authority: UpdateAuthority,
+    pub order: u64,
+    pub block_ordinal: u32,
+    pub source_sequence: u32,
+}
+
+/// Provenance for independently refreshed owner and creator values.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PropertiesProvenance {
+    pub owner: Option<PropertyProvenance>,
+    pub creator: Option<PropertyProvenance>,
+}
+
+/// Request-time identity used to reject property replies for a replaced object binding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PropertiesTarget {
+    pub(super) entity: Entity,
+    pub(super) id: UUID,
+    pub(super) address: LocalAddress,
+    pub(super) address_generation: u64,
+}
+
+impl PropertiesTarget {
+    pub const fn object_id(self) -> UUID {
+        self.id
+    }
+
+    pub const fn address(self) -> LocalAddress {
+        self.address
+    }
 }
 
 impl LocalAddress {

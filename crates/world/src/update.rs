@@ -154,6 +154,8 @@ pub enum FieldRejectionReason {
     ParentCycle,
     /// The pose was supplied with a parent proposal that was rejected for a cycle.
     ParentDependsOnRejectedParent,
+    /// The pose predates the relationship or attachment frame it would describe.
+    StaleFrame,
     /// The update would replace a value established by a tracked source.
     UntrustedSource,
     /// The self avatar appearance message has an older COF version.
@@ -303,6 +305,7 @@ pub enum DeferredReason {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ApplyOutcome {
     Unchanged,
+    IgnoredStale,
     RegionAdopted,
     RegionPatched,
     RegionRetired { entities_removed: usize },
@@ -322,6 +325,7 @@ pub enum ApplyError {
     EntityBudgetExhausted,
     RevisionExhausted,
     FrameGenerationExhausted,
+    AddressGenerationExhausted,
     InvalidValue { field: &'static str },
     KindMismatch { current: Kind, observed: Kind },
 }
@@ -336,6 +340,8 @@ pub struct Applied {
     pub recovery_cancellations: Vec<LocalAddress>,
     /// Bounded diagnostics for rejected groups. Other groups may still apply.
     pub rejections: Rejections,
+    /// Whether the supplied parent declaration passed ordering and validation.
+    pub parent_update_accepted: bool,
 }
 
 impl Applied {
@@ -346,6 +352,11 @@ impl Applied {
 
     pub(crate) fn with_recovery_cancellations(mut self, addresses: Vec<LocalAddress>) -> Self {
         self.recovery_cancellations = addresses;
+        self
+    }
+
+    pub(crate) fn with_parent_update_accepted(mut self, accepted: bool) -> Self {
+        self.parent_update_accepted = accepted;
         self
     }
 }

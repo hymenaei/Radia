@@ -6,7 +6,6 @@ mod devtools;
 mod diagnostics;
 mod login;
 mod remembered_login;
-mod secondary_windows;
 mod session;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod window_chrome;

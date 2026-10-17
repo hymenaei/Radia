@@ -123,11 +123,14 @@ fn bench_mixed(group: &mut BenchmarkGroup<'_, WallTime>) {
                     let _ = black_box(scene.world.patch_object(patch).expect("motion update"));
                 }
                 for row in &scene.rows {
+                    let entity = scene.world.entity(row.id).expect("object identity");
+                    let target = scene.world.properties_target(entity).expect("current object binding");
                     let _ = black_box(
                         scene
                             .world
                             .patch_properties(
                                 source(row.region, row.order),
+                                target,
                                 row.id,
                                 PropertiesPatch { owner_id: Some(owner), creator_id: Some(creator) },
                             )

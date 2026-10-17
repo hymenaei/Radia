@@ -59,7 +59,7 @@ This is a _round-trip example_, not a complete codec specification. Test known-g
 - Construct _valid_ values by construction, preferably with a strategy mapping a constrained domain into a valid type. Avoid excessive `prop_assume!` filtering, which can cause many rejections and poor shrinking.
 - Use `prop_flat_map` for dependent values only when necessary; favor smaller, simpler shrinks. Avoid deeply nested strategies and global `boxed()` abstractions without concrete need.
 - For state machines, generate short command sequences with validity preconditions captured in a simple model. Check the model and the system after each step, including terminal cleanup.
-- For expensive operations, explicitly reduce input sizes/case counts with a rationale; don't lower cases merely to hide a failure. Increase cases in nightly/stress runs for cheap high-risk parsers.
+- Bound input sizes and case counts to the contract and runtime budget. Explain deliberate reductions, keep exact boundaries as named cases, and never shrink the domain just to hide a failure.
 
 ## Failures, shrinking, and reproducibility
 

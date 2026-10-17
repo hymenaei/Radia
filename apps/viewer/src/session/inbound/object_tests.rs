@@ -355,6 +355,8 @@ fn malformed_texture_entries_are_field_local() {
     let batch = decode_object_message(REGION, 34, OrderEvidence::Ordered(34), &full).expect("full object batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected volume observation") };
 
+    assert_eq!(batch.invalid_blocks, 0);
+    assert_eq!(batch.invalid_fields, 1);
     assert_eq!(observation.surface_appearance, None);
     assert!(observation.pose.is_some());
     assert!(observation.scale.is_some());
@@ -582,6 +584,7 @@ fn incremental_materials_replace_and_clear() {
 fn repeated_material_params_replace_in_order() {
     let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
     let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
+    update.objects[0].texture_entry = valid_texture_entry();
     update.objects[0].extra_parameters = vec![
         render_material_parameter(&[(0, UUID::from_u128(0x313))]),
         ExtraParameter { parameter_type: 0x0080, data: vec![1] },
@@ -591,6 +594,7 @@ fn repeated_material_params_replace_in_order() {
     let batch = decode_object_message(REGION, 46, OrderEvidence::Ordered(46), &full).expect("full object batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected volume observation") };
     let materials = observation.render_materials.as_ref().expect("PBR parameter decoded");
+    assert_eq!(batch.invalid_fields, 1);
     assert_eq!(materials.material(0), None);
     assert_eq!(materials.material(44), Some(asset_id(0x314)));
 
@@ -599,6 +603,7 @@ fn repeated_material_params_replace_in_order() {
         vec![render_material_parameter(&[(0, UUID::from_u128(0x313))]), ExtraParameter { parameter_type: 0x0080, data: vec![1] }];
     let batch = decode_object_message(REGION, 47, OrderEvidence::Ordered(47), &full).expect("full object batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected volume observation") };
+    assert_eq!(batch.invalid_fields, 1);
     assert_eq!(observation.render_materials, None);
 }
 

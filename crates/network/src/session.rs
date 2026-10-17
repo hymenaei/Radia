@@ -226,6 +226,21 @@ impl Session {
     }
 
     fn start_inner(credentials: LoginCredentials, capture_config: Option<CaptureConfig>, options: SessionOptions) -> Result<Self, Error> {
+        let login_url = credentials.grid.login_url().to_owned();
+        Self::start_inner_with_login_url(credentials, capture_config, options, login_url)
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn start_with_login_url_for_test(credentials: LoginCredentials, login_url: String) -> Result<Self, Error> {
+        Self::start_inner_with_login_url(credentials, None, SessionOptions::default(), login_url)
+    }
+
+    fn start_inner_with_login_url(
+        credentials: LoginCredentials,
+        capture_config: Option<CaptureConfig>,
+        options: SessionOptions,
+        login_url: String,
+    ) -> Result<Self, Error> {
         let (command_sender, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (event_sender, events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
         let coverage_losses = CoverageLossLedger::new();
@@ -286,7 +301,6 @@ impl Session {
                 };
                 let shutdown_requested = channels.disconnect_requested.clone();
                 let events = channels.events.clone();
-                let login_url = credentials.grid.login_url().to_owned();
                 let run = run_client(credentials, channels, Some(capture.clone()), worker_status.clone(), login_url, options);
                 let result = runtime.block_on(run_with_capture(
                     run,

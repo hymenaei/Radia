@@ -8,9 +8,10 @@ use super::journal::ChangeClasses;
 use super::{
     AgentHandoff, Appearance, Applied, ApplyError, ApplyOutcome, AvatarAppearance, Binding, DeferredReason, Entity, EntityRemovalReason,
     Fences, FieldGroup, FieldRejection, FieldRejectionReason, FieldStamp, Identity, Kind, LinearMotion, LocalAddress, MotionPatch,
-    ObjectData, ObjectMedia, ObjectObservation, ObjectPatch, Parent, ParentRejectionBarrier, ParentUpdate::Local, Pose, PoseState,
-    Properties, PropertiesPatch, Recovery, Region, RegionalStamp, Rejections, RenderMaterials, SitTarget, Stamp, SurfaceAppearance,
-    Transform, UpdateAuthority, UpdateSource, World, newer_field, newer_region_field, remove_index,
+    ObjectData, ObjectMedia, ObjectObservation, ObjectPatch, OrderEvidence, Parent, ParentRejectionBarrier, ParentUpdate::Local, Pose,
+    PoseState, Properties, PropertiesPatch, PropertiesProvenance, PropertiesTarget, PropertyProvenance, Recovery, Region, RegionalStamp,
+    Rejections, RenderMaterials, SitTarget, Stamp, SurfaceAppearance, Transform, UpdateAuthority, UpdateSource, World, newer_field,
+    newer_region_field, remove_region_index,
 };
 
 use FieldRejectionReason::{InvalidRotation, ParentCycle, ParentDependsOnRejectedParent, UntrustedSource};
@@ -41,7 +42,11 @@ impl World {
         if source.authority() == Untracked
             && !existing.is_some_and(|entity| self.object(entity).is_some_and(|object| object.address() == address))
         {
-            return Ok(self.unknown_address(address, stamp));
+            let mut applied = self.unknown_address(address, stamp);
+            if applied.outcome == ApplyOutcome::Unchanged {
+                applied.outcome = ApplyOutcome::IgnoredStale;
+            }
+            return Ok(applied);
         }
         if let Some(t) = self.preflight_address(address, observation.id, stamp) {
             return Ok(t);
@@ -64,10 +69,10 @@ impl World {
                 return Err(ApplyError::InvalidValue { field: "agent_handoff_required" });
             }
             if current_binding.region == source.region && current_binding != address && stamp <= binding_fence {
-                return Ok(Applied::unchanged().with_rejections(rejections));
+                return Ok(self.finish(ApplyOutcome::IgnoredStale, Vec::new(), None).with_rejections(rejections));
             }
             if current_binding == address && !accepts_observation {
-                return Ok(Applied::unchanged().with_rejections(rejections));
+                return Ok(self.finish(ApplyOutcome::IgnoredStale, Vec::new(), None).with_rejections(rejections));
             }
         } else if self.entities.len() >= self.limits.max_entities && !self.addresses.contains_key(&address) {
             return Err(ApplyError::EntityBudgetExhausted);
@@ -78,7 +83,7 @@ impl World {
             existing.and_then(|entity| self.object(entity)).is_some_and(|object| object.address().region == source.region);
         if !already_in_region
             && !self.addresses.contains_key(&address)
-            && self.region_entities.get(&source.region).map_or(0, HashSet::len) >= self.limits.max_entities_per_region
+            && self.region_entities.get(&source.region).map_or(0, |ids| ids.len()) >= self.limits.max_entities_per_region
         {
             return Err(ApplyError::EntityBudgetExhausted);
         }
@@ -146,6 +151,17 @@ impl World {
         }
         reject_untrusted_observation_groups(&observation, existing, self, source.authority(), &mut rejections);
         let current_data = existing.and_then(|entity| self.object(entity)).map(|object| (*object.data).clone());
+        let next_address_generation = current_data
+            .as_ref()
+            .map(|data| {
+                let binding = data.binding;
+                if binding.address == address {
+                    Ok(binding.address_generation)
+                } else {
+                    binding.address_generation.checked_add(1).ok_or(ApplyError::AddressGenerationExhausted)
+                }
+            })
+            .transpose()?;
         let is_transfer = current_data.as_ref().is_some_and(|data| data.binding.address.region != source.region);
         let current_parent = current_data.as_ref().map_or(Parent::Unknown, |data| data.parent);
         let accepted_parent = apply_parent && !parent_cycle;
@@ -163,6 +179,11 @@ impl World {
             || (attachment_update_is_newer
                 && next_attachment_point != current_data.as_ref().and_then(|data| data.attachment_point)
                 && (attachment_frame(current_parent) || attachment_frame(next_parent)));
+        let next_frame_fence = if current_data.is_some() && frame_changed {
+            Some(field_stamp)
+        } else {
+            current_data.as_ref().and_then(|data| data.fences.frame)
+        };
         let next_frame_generation = current_data
             .as_ref()
             .map(|data| {
@@ -173,12 +194,20 @@ impl World {
                 }
             })
             .transpose()?;
-        let pose_is_accepted = observation.pose.is_some_and(|pose| pose.position.is_some() || pose.rotation.is_some())
-            && (is_transfer || current_data.as_ref().is_none_or(|data| newer_field(field_stamp, data.fences.pose)));
-        let pose_affects_descendants = existing.is_some_and(|entity| {
-            self.object(entity)
-                .is_some_and(|object| pose_update_changes_observable(&object.data, object.transform(), observation.pose, field_stamp))
-        });
+        let pose_fences = current_data.as_ref().filter(|_| !is_transfer).map(|data| data.fences);
+        let pose_is_accepted = pose_is_accepted(observation.pose, field_stamp, pose_fences, next_frame_fence);
+        if observation.pose.is_some_and(has_pose)
+            && current_data.as_ref().is_some_and(|data| newer_field(field_stamp, data.fences.pose))
+            && !field_at_or_after(field_stamp, next_frame_fence)
+        {
+            rejections.push(FieldRejection { group: FieldGroup::Pose, reason: FieldRejectionReason::StaleFrame });
+        }
+        let pose_affects_descendants = !is_transfer
+            && existing.is_some_and(|entity| {
+                self.object(entity).is_some_and(|object| {
+                    pose_update_changes_observable(&object.data, object.transform(), observation.pose, field_stamp, next_frame_fence)
+                })
+            });
         let detach_snapshot = if current_data.is_some()
             && !is_transfer
             && accepted_parent
@@ -212,13 +241,14 @@ impl World {
             );
         }
 
-        let (entity, was_transfer) = match existing {
+        let (entity, was_transfer, address_generation) = match existing {
             Some(entity) => {
                 let (old_binding, previous_transform) = {
                     let current = self.object(entity).expect("UUID index contains a live entity");
                     (current.data.binding, current.transform())
                 };
                 let transfer = old_binding.address.region != source.region;
+                let address_generation = next_address_generation.expect("existing entities have an address generation");
                 if old_binding.address != address {
                     recovery_cancellations.push(old_binding.address);
                     changes.push(if transfer {
@@ -228,8 +258,8 @@ impl World {
                     });
                     self.addresses.remove(&old_binding.address);
                     if old_binding.address.region != address.region {
-                        remove_index(&mut self.region_entities, old_binding.address.region, entity);
-                        self.region_entities.entry(address.region).or_default().insert(entity);
+                        remove_region_index(&mut self.region_entities, old_binding.address.region, observation.id);
+                        self.region_entities.entry(address.region).or_default().insert(observation.id);
                     }
                     let invalidation = if transfer { old_binding.fence } else { stamp };
                     self.insert_tombstone(old_binding.address, invalidation);
@@ -247,7 +277,8 @@ impl World {
                         data.reset_region_relative();
                     }
                     let mut data = self.data_mut(entity);
-                    data.binding = Binding { address, fence: stamp, parent_resolution_fence: address_was_reused.then_some(stamp) };
+                    data.binding =
+                        Binding { address, address_generation, fence: stamp, parent_resolution_fence: address_was_reused.then_some(stamp) };
                     if transfer {
                         data.parent = Parent::Unknown;
                     }
@@ -255,13 +286,18 @@ impl World {
                     let mut data = self.data_mut(entity);
                     data.binding.fence = data.binding.fence.max(stamp);
                 }
-                (entity, transfer)
+                (entity, transfer, address_generation)
             }
             None => {
                 let identity = Identity { id: observation.id };
                 let mut transform = Transform::default();
                 let mut data = ObjectData {
-                    binding: Binding { address, fence: stamp, parent_resolution_fence: address_was_reused.then_some(stamp) },
+                    binding: Binding {
+                        address,
+                        address_generation: 0,
+                        fence: stamp,
+                        parent_resolution_fence: address_was_reused.then_some(stamp),
+                    },
                     parent: Parent::Unknown,
                     parent_rejection_barrier: None,
                     linear_motion: LinearMotion::default(),
@@ -280,11 +316,22 @@ impl World {
                     rotation_frame_generation: None,
                     provisional_pose: None,
                     properties: Properties::default(),
+                    properties_provenance: PropertiesProvenance::default(),
                     fences: Fences::default(),
                 };
+                data.fences.frame = next_frame_fence;
                 let surface_appearance = observation.surface_appearance.take();
                 let render_materials = observation.render_materials.take();
-                apply_observation_values(&mut data, &mut transform, &observation, surface_appearance, render_materials, source, stamp);
+                apply_observation_values(
+                    &mut data,
+                    &mut transform,
+                    &observation,
+                    surface_appearance,
+                    render_materials,
+                    source,
+                    stamp,
+                    pose_is_accepted,
+                );
                 if let Some(pose) = observation.pose {
                     mark_pose_components(&mut data, pose);
                 }
@@ -294,7 +341,7 @@ impl World {
                 self.entities.insert(observation.id, entity);
                 assert!(self.object_ids.insert(observation.id), "UUID ordering index already contains a new entity ID");
                 self.addresses.insert(address, entity);
-                self.region_entities.entry(source.region).or_default().insert(entity);
+                self.region_entities.entry(source.region).or_default().insert(observation.id);
                 self.apply_parent(entity, parent, &mut recovery_targets);
                 self.resolve_waiting_children(
                     address,
@@ -308,7 +355,8 @@ impl World {
                 return Ok(self
                     .finish(ApplyOutcome::Introduced(entity), changes, recovery(recovery_targets, self.limits.max_recovery_targets))
                     .with_recovery_cancellations(recovery_cancellations)
-                    .with_rejections(rejections));
+                    .with_rejections(rejections)
+                    .with_parent_update_accepted(!parent_cycle));
             }
         };
 
@@ -316,13 +364,17 @@ impl World {
         let mut data = self.data_mut(entity);
         if was_transfer {
             data.parent = Parent::Unknown;
-            data.binding = Binding { address, fence: stamp, parent_resolution_fence: address_was_reused.then_some(stamp) };
+            data.binding =
+                Binding { address, address_generation, fence: stamp, parent_resolution_fence: address_was_reused.then_some(stamp) };
         }
         if let Some(generation) = next_frame_generation {
             data.frame_generation = generation;
             if frame_changed {
                 data.provisional_pose = None;
             }
+        }
+        if frame_changed {
+            data.fences.frame = next_frame_fence;
         }
         let parent_changed = apply_parent && data.parent != parent;
         if apply_parent {
@@ -333,7 +385,16 @@ impl World {
         }
         let surface_appearance = observation.surface_appearance.take();
         let render_materials = observation.render_materials.take();
-        apply_observation_values(&mut data, &mut transform, &observation, surface_appearance, render_materials, source, stamp);
+        apply_observation_values(
+            &mut data,
+            &mut transform,
+            &observation,
+            surface_appearance,
+            render_materials,
+            source,
+            stamp,
+            pose_is_accepted,
+        );
         if pose_is_accepted {
             if let Some(pose) = observation.pose {
                 mark_pose_components(&mut data, pose);
@@ -384,7 +445,8 @@ impl World {
                 recovery(recovery_targets, self.limits.max_recovery_targets),
             )
             .with_recovery_cancellations(recovery_cancellations)
-            .with_rejections(rejections))
+            .with_rejections(rejections)
+            .with_parent_update_accepted(apply_parent))
     }
 
     pub fn handoff_agent(&mut self, from: Region, handoff: AgentHandoff) -> Result<Applied, ApplyError> {
@@ -584,14 +646,20 @@ impl World {
             || (attachment_update_is_newer
                 && next_attachment_point != data.attachment_point
                 && (attachment_frame(data.parent) || attachment_frame(next_parent)));
+        let next_frame_fence = if frame_changed { Some(field_stamp) } else { data.fences.frame };
         let next_frame_generation = if frame_changed {
             data.frame_generation.checked_add(1).ok_or(ApplyError::FrameGenerationExhausted)?
         } else {
             data.frame_generation
         };
-        let pose_is_accepted =
-            patch.pose.is_some_and(|pose| pose.position.is_some() || pose.rotation.is_some()) && newer_field(field_stamp, data.fences.pose);
-        let pose_affects_descendants = pose_update_changes_observable(&data, transform, patch.pose, field_stamp);
+        let pose_is_accepted = pose_is_accepted(patch.pose, field_stamp, Some(data.fences), next_frame_fence);
+        if patch.pose.is_some_and(has_pose)
+            && newer_field(field_stamp, data.fences.pose)
+            && !field_at_or_after(field_stamp, next_frame_fence)
+        {
+            rejections.push(FieldRejection { group: FieldGroup::Pose, reason: FieldRejectionReason::StaleFrame });
+        }
+        let pose_affects_descendants = pose_update_changes_observable(&data, transform, patch.pose, field_stamp, next_frame_fence);
         let detach_snapshot = if parent_is_newer
             && next_parent == Parent::Root
             && kind == Kind::Avatar
@@ -638,11 +706,9 @@ impl World {
         data.frame_generation = next_frame_generation;
         if frame_changed {
             data.provisional_pose = None;
+            data.fences.frame = next_frame_fence;
         }
-        if let Some(pose) = patch.pose
-            && (pose.position.is_some() || pose.rotation.is_some())
-            && newer_field(field_stamp, data.fences.pose)
-        {
+        if let Some(pose) = patch.pose.filter(|_| pose_is_accepted) {
             if let Some(position) = pose.position {
                 changed |= transform.position != Some(position);
                 transform.position = Some(position);
@@ -773,71 +839,88 @@ impl World {
                 changes,
                 recovery(recovery_targets, self.limits.max_recovery_targets),
             )
-            .with_rejections(rejections))
+            .with_rejections(rejections)
+            .with_parent_update_accepted(parent_is_newer))
     }
 
-    pub fn patch_properties(&mut self, source: UpdateSource, id: UUID, patch: PropertiesPatch) -> Result<Applied, ApplyError> {
+    pub fn patch_properties(
+        &mut self,
+        source: UpdateSource,
+        target: PropertiesTarget,
+        response_id: UUID,
+        patch: PropertiesPatch,
+    ) -> Result<Applied, ApplyError> {
         self.require_active_region(source.region)?;
-        validate_uuid(id, "object_id")?;
-        let Some(stamp) = source.stamp() else {
-            let recovery_address = self
-                .entities
-                .get(&id)
-                .and_then(|entity| self.object(*entity))
-                .map(|object| object.address())
-                .filter(|address| address.region == source.region);
-            return Ok(Applied::deferred(
-                DeferredReason::AmbiguousOrder,
-                recovery_address.and_then(|address| recovery(vec![address], self.limits.max_recovery_targets)),
-            ));
-        };
-        let Some(entity) = self.entities.get(&id).copied() else {
-            return Ok(Applied::deferred(DeferredReason::UnknownObject, None));
-        };
-        let address = self.object(entity).expect("UUID index contains a live entity").address();
-        if address.region != source.region {
-            return Ok(Applied::unchanged());
+        validate_uuid(response_id, "object_id")?;
+        if response_id != target.id || target.address.region != source.region || !self.properties_target_is_current(target) {
+            return Ok(self.finish(ApplyOutcome::IgnoredStale, Vec::new(), None));
         }
+        let Some(stamp) = source.stamp() else {
+            return Ok(Applied::deferred(DeferredReason::AmbiguousOrder, recovery(vec![target.address], self.limits.max_recovery_targets)));
+        };
+        let entity = target.entity;
         let has_property_update = patch.owner_id.is_some() || patch.creator_id.is_some();
-        let (properties, property_fence) = {
-            let object = self.object(entity).expect("UUID index contains a live entity");
-            (object.data.properties, object.data.fences.properties)
+        let (properties, provenance, owner_fence, creator_fence) = {
+            let object = self.object(entity).expect("current properties target names a live entity");
+            (
+                object.data.properties,
+                object.data.properties_provenance,
+                object.data.fences.owner_properties,
+                object.data.fences.creator_properties,
+            )
         };
         let field_stamp = FieldStamp { authority: source.authority(), stamp };
         let mut rejections = Rejections::default();
-        let untrusted_overwrite = source.authority() == Untracked && property_fence.is_some_and(|fence| fence.stamp.authority == Tracked);
-        if has_property_update && untrusted_overwrite {
+        let owner_untrusted = patch.owner_id.is_some()
+            && source.authority() == Untracked
+            && owner_fence.is_some_and(|fence| fence.stamp.authority == Tracked);
+        let creator_untrusted = patch.creator_id.is_some()
+            && source.authority() == Untracked
+            && creator_fence.is_some_and(|fence| fence.stamp.authority == Tracked);
+        if owner_untrusted || creator_untrusted {
             rejections.push(FieldRejection { group: FieldGroup::Properties, reason: UntrustedSource });
         }
-        let properties_is_newer =
-            has_property_update && !untrusted_overwrite && newer_region_field(source.region, field_stamp, property_fence);
-        let observable_change = properties_is_newer
-            && (patch.owner_id.is_some_and(|value| properties.owner_id != Some(value))
-                || patch.creator_id.is_some_and(|value| properties.creator_id != Some(value)));
+        let owner_is_newer = patch.owner_id.is_some() && !owner_untrusted && newer_region_field(source.region, field_stamp, owner_fence);
+        let creator_is_newer =
+            patch.creator_id.is_some() && !creator_untrusted && newer_region_field(source.region, field_stamp, creator_fence);
+        let next_provenance = PropertyProvenance {
+            region: source.region,
+            authority: source.authority(),
+            order: match source.order() {
+                OrderEvidence::Ordered(order) => order,
+                OrderEvidence::Ambiguous | OrderEvidence::Degraded => unreachable!("an ordered stamp was already required"),
+            },
+            block_ordinal: source.block_ordinal(),
+            source_sequence: source.sequence(),
+        };
+        let observable_change = (owner_is_newer && (properties.owner_id != patch.owner_id || provenance.owner != Some(next_provenance)))
+            || (creator_is_newer && (properties.creator_id != patch.creator_id || provenance.creator != Some(next_provenance)));
         if observable_change {
             self.ensure_revision_available()?;
         }
-        let mut changed = false;
         {
             let mut data = self.data_mut(entity);
-            if properties_is_newer {
-                if let Some(value) = patch.owner_id {
-                    changed |= data.properties.owner_id != Some(value);
-                    data.properties.owner_id = Some(value);
-                }
-                if let Some(value) = patch.creator_id {
-                    changed |= data.properties.creator_id != Some(value);
-                    data.properties.creator_id = Some(value);
-                }
-                data.fences.properties = Some(RegionalStamp { region: source.region, stamp: field_stamp });
+            if owner_is_newer && let Some(value) = patch.owner_id {
+                data.properties.owner_id = Some(value);
+                data.properties_provenance.owner = Some(next_provenance);
+                data.fences.owner_properties = Some(RegionalStamp { region: source.region, stamp: field_stamp });
+            }
+            if creator_is_newer && let Some(value) = patch.creator_id {
+                data.properties.creator_id = Some(value);
+                data.properties_provenance.creator = Some(next_provenance);
+                data.fences.creator_properties = Some(RegionalStamp { region: source.region, stamp: field_stamp });
             }
             if has_property_update && source.authority() == Tracked {
                 data.binding.fence = data.binding.fence.max(stamp);
             }
         }
-        let changes = if changed { vec![EntityUpdated { id, entity, classes: ChangeClasses::PROPERTIES }] } else { Vec::new() };
+        let changes = if observable_change {
+            vec![EntityUpdated { id: response_id, entity, classes: ChangeClasses::PROPERTIES }]
+        } else {
+            Vec::new()
+        };
         Ok(self
-            .finish(if changed { ApplyOutcome::Updated(entity) } else { ApplyOutcome::Unchanged }, changes, None)
+            .finish(if observable_change { ApplyOutcome::Updated(entity) } else { ApplyOutcome::Unchanged }, changes, None)
             .with_rejections(rejections))
     }
 
@@ -975,12 +1058,19 @@ impl World {
         if let Some(entity) = self.addresses.get(&address) {
             let object = self.object(*entity).expect("address index contains a live entity");
             if object.identity.id != id && stamp <= object.data.binding.fence {
-                return Some(Applied::unchanged());
+                let mut applied = Applied::unchanged();
+                applied.outcome = ApplyOutcome::IgnoredStale;
+                return Some(applied);
             }
             return None;
         }
         if let Some(tombstone) = self.tombstones.get(&address) {
-            return if stamp <= *tombstone { Some(Applied::unchanged()) } else { None };
+            if stamp <= *tombstone {
+                let mut applied = Applied::unchanged();
+                applied.outcome = ApplyOutcome::IgnoredStale;
+                return Some(applied);
+            }
+            return None;
         }
         if self.floors.get(&address.region).is_some_and(|floor| stamp <= *floor) {
             return Some(Applied::deferred(DeferredReason::AmbiguousOrder, recovery(vec![address], self.limits.max_recovery_targets)));
@@ -1034,7 +1124,8 @@ impl World {
         let data = (*object.data).clone();
         let transform = object.transform();
         let field_stamp = FieldStamp { authority: source.authority(), stamp };
-        let observation_changes_fields = pose_update_changes_observable(&data, transform, observation.pose, field_stamp)
+        let frame_fence = if data.binding.address.region != source.region { Some(field_stamp) } else { data.fences.frame };
+        let observation_changes_fields = pose_update_changes_observable(&data, transform, observation.pose, field_stamp, frame_fence)
             || observation.linear_motion.is_some_and(|motion| {
                 (motion.velocity.is_some() || motion.acceleration.is_some())
                     && newer_field(field_stamp, data.fences.linear_motion)
@@ -1111,9 +1202,31 @@ fn pose_frame_markers_change(data: &ObjectData, pose: Pose) -> bool {
         || (pose.rotation.is_some() && data.rotation_frame_generation != Some(data.frame_generation))
 }
 
-fn pose_update_changes_observable(data: &ObjectData, transform: Transform, pose: Option<Pose>, stamp: FieldStamp) -> bool {
-    let Some(pose) = pose.filter(|pose| pose.position.is_some() || pose.rotation.is_some()) else { return false };
-    if !newer_field(stamp, data.fences.pose) {
+fn has_pose(pose: Pose) -> bool {
+    pose.position.is_some() || pose.rotation.is_some()
+}
+
+fn pose_is_accepted(pose: Option<Pose>, stamp: FieldStamp, fences: Option<Fences>, frame_fence: Option<FieldStamp>) -> bool {
+    pose.is_some_and(has_pose) && fences.is_none_or(|fences| newer_field(stamp, fences.pose)) && field_at_or_after(stamp, frame_fence)
+}
+
+fn field_at_or_after(stamp: FieldStamp, fence: Option<FieldStamp>) -> bool {
+    fence.is_none_or(|fence| match (stamp.authority, fence.authority) {
+        (Tracked, Untracked) => true,
+        (Untracked, Tracked) => false,
+        _ => stamp.stamp >= fence.stamp,
+    })
+}
+
+fn pose_update_changes_observable(
+    data: &ObjectData,
+    transform: Transform,
+    pose: Option<Pose>,
+    stamp: FieldStamp,
+    frame_fence: Option<FieldStamp>,
+) -> bool {
+    let Some(pose) = pose.filter(|pose| has_pose(*pose)) else { return false };
+    if !newer_field(stamp, data.fences.pose) || !field_at_or_after(stamp, frame_fence) {
         return false;
     }
     data.provisional_pose.is_some()
@@ -1356,9 +1469,10 @@ fn apply_observation_values(
     render_materials: Option<RenderMaterials>,
     source: UpdateSource,
     stamp: Stamp,
+    pose_is_accepted: bool,
 ) {
     let field_stamp = FieldStamp { authority: source.authority(), stamp };
-    if let Some(pose) = observation.pose
+    if let Some(pose) = observation.pose.filter(|_| pose_is_accepted)
         && (pose.position.is_some() || pose.rotation.is_some())
         && newer_field(field_stamp, data.fences.pose)
     {
@@ -1623,6 +1737,53 @@ mod tests {
     }
 
     #[test]
+    fn generation_overflow_preserves_bindings() {
+        let region = Region::new(27);
+        let mut world = test_world(&[region]);
+        let ApplyOutcome::Introduced(first) = world.observe_object(observation(region, 27, 1, 1)).unwrap().outcome else {
+            panic!("expected first object introduction")
+        };
+        let ApplyOutcome::Introduced(displaced) = world.observe_object(observation(region, 28, 2, 2)).unwrap().outcome else {
+            panic!("expected second object introduction")
+        };
+        let old_address = LocalAddress::new(region, NonZeroU32::new(1).unwrap());
+        let occupied_address = LocalAddress::new(region, NonZeroU32::new(2).unwrap());
+        world.data_mut(first).binding.address_generation = u64::MAX;
+
+        let revision = world.revision();
+        let journal = world.journal.entries.iter().map(|entry| (entry.revision, entry.changes.clone())).collect::<Vec<_>>();
+        let result = world.observe_object(observation(region, 27, 2, 3));
+
+        assert!(matches!(result, Err(ApplyError::AddressGenerationExhausted)));
+        assert_eq!(world.revision(), revision);
+        assert_eq!(world.journal.entries.iter().map(|entry| (entry.revision, entry.changes.clone())).collect::<Vec<_>>(), journal);
+        assert_eq!(world.entity(UUID::from_u128(27)), Some(first));
+        assert_eq!(world.entity(UUID::from_u128(28)), Some(displaced));
+        assert_eq!(world.entity_at(old_address), Some(first));
+        assert_eq!(world.entity_at(occupied_address), Some(displaced));
+        assert_eq!(world.object_count(), 2);
+    }
+
+    fn observation(region: Region, id: u128, local_id: u32, sequence: u32) -> ObjectObservation {
+        ObjectObservation {
+            source: UpdateSource::new(region, sequence, Ordered(u64::from(sequence)), 0),
+            id: UUID::from_u128(id),
+            local_id: NonZeroU32::new(local_id).unwrap(),
+            kind: Kind::Object,
+            parent: Root,
+            pose: None,
+            linear_motion: None,
+            angular_velocity: None,
+            scale: None,
+            attachment_point: None,
+            shape: None,
+            appearance: None,
+            surface_appearance: None,
+            render_materials: None,
+        }
+    }
+
+    #[test]
     fn tombstone_takes_precedence_over_floor() {
         let region = Region::new(20);
         let mut world = World::new(WorldLimits {
@@ -1663,7 +1824,7 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(result.outcome, ApplyOutcome::Unchanged);
+        assert_eq!(result.outcome, ApplyOutcome::IgnoredStale);
         assert_eq!(result.recovery, None);
         assert_eq!(world.entity(UUID::from_u128(20)), None);
     }

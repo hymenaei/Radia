@@ -24,9 +24,6 @@ use gpui_component::{
 use network::Delivery::Unreliable;
 use network::{AgentSession, CaptureConfig, Grid, LoginCredentials, MfaChallenge, SessionHandle, StartLocation};
 
-#[cfg(target_os = "windows")]
-use crate::secondary_windows::install_main_window_z_order_guard;
-use crate::secondary_windows::raise_above_main_if_active;
 #[cfg(target_os = "linux")]
 use crate::window_chrome::linux_titlebar;
 #[cfg(target_os = "windows")]
@@ -103,7 +100,6 @@ pub struct LoginScreen {
     shutdown_session: Arc<Mutex<Option<SessionHandle>>>,
     _spawn_subscription: gpui::Subscription,
     _username_subscription: gpui::Subscription,
-    _window_activation_subscription: gpui::Subscription,
     _window_geometry_subscription: gpui::Subscription,
 }
 
@@ -132,13 +128,6 @@ impl LoginScreen {
             if matches!(event, InputEvent::Change) {
                 screen.refresh_favorites(cx);
             }
-        });
-        #[cfg(target_os = "windows")]
-        if !install_main_window_z_order_guard(window, cx) {
-            tracing::warn!("could not install the main-window secondary z-order guard");
-        }
-        let window_activation_subscription = cx.observe_window_activation(window, |_, window, cx| {
-            raise_above_main_if_active(window, cx);
         });
         let window_geometry_subscription = observe("main", window, cx);
         let chat_screen = cx.new(|cx| ChatScreen::new(window, cx));
@@ -180,7 +169,6 @@ impl LoginScreen {
             shutdown_session,
             _spawn_subscription: spawn_subscription,
             _username_subscription: username_subscription,
-            _window_activation_subscription: window_activation_subscription,
             _window_geometry_subscription: window_geometry_subscription,
         };
 

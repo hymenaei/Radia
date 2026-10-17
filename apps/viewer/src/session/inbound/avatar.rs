@@ -23,54 +23,82 @@ pub(crate) struct SitTargetUpdate {
 pub(crate) struct AvatarAppearanceMessage {
     pub(crate) object_id: UUID,
     pub(crate) update: AvatarAppearanceUpdate,
+    pub(crate) invalid_fields: usize,
 }
 
-pub(crate) fn decode_avatar_appearance_update(message: &Message) -> Option<AvatarAppearanceMessage> {
-    let Message::Schema(message) = message else { return None };
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DecodeError {
+    InvalidMessage,
+}
+
+pub(crate) fn decode_avatar_appearance_update(message: &Message) -> Result<Option<AvatarAppearanceMessage>, DecodeError> {
+    let Message::Schema(message) = message else { return Ok(None) };
     if message.schema().name != "AvatarAppearance" {
-        return None;
+        return Ok(None);
     }
 
-    let object_id = match schema_field(message, "Sender", "ID")? {
+    let object_id = match schema_field(message, "Sender", "ID").ok_or(DecodeError::InvalidMessage)? {
         FieldValue::UUID(id) if !id.is_nil() => *id,
-        _ => return None,
+        _ => return Err(DecodeError::InvalidMessage),
     };
-    let visual_param_values = schema_block(message, "VisualParam")?
+    let visual_param_values = schema_block(message, "VisualParam")
+        .ok_or(DecodeError::InvalidMessage)?
         .instances
         .iter()
         .map(|instance| match instance.fields.first()? {
             FieldValue::U8(value) => Some(*value),
             _ => None,
         })
-        .collect::<Option<Vec<_>>>()?;
+        .collect::<Option<Vec<_>>>()
+        .ok_or(DecodeError::InvalidMessage)?;
     if visual_param_values.len() <= 1 || visual_param_values.len() > MAX_AVATAR_VISUAL_PARAMS {
-        return None;
+        return Err(DecodeError::InvalidMessage);
     }
     let visual_params = visual_param_values
         .into_iter()
         .enumerate()
         .map(|(index, value)| Some((AvatarVisualParamIndex::new(index as u8)?, value)))
-        .collect::<Option<Vec<_>>>()?;
+        .collect::<Option<Vec<_>>>()
+        .ok_or(DecodeError::InvalidMessage)?;
 
+    let mut invalid_fields = 0;
     let texture_slots = match schema_field(message, "ObjectData", "TextureEntry") {
-        Some(FieldValue::Bytes(bytes)) => decode_avatar_textures(bytes),
-        _ => None,
+        Some(FieldValue::Bytes(bytes)) => match decode_avatar_textures(bytes) {
+            Ok(slots) => slots,
+            Err(()) => {
+                invalid_fields += 1;
+                None
+            }
+        },
+        Some(_) => {
+            invalid_fields += 1;
+            None
+        }
+        None => {
+            invalid_fields += 1;
+            None
+        }
     };
-    let appearance_version = schema_optional_field(message, "AppearanceData", "AppearanceVersion").and_then(|field| match field {
-        FieldValue::U8(version) => Some(*version),
-        _ => None,
-    });
+    let appearance_version = schema_optional_field(message, "AppearanceData", "AppearanceVersion")
+        .map(|field| match field {
+            FieldValue::U8(version) => Ok(*version),
+            _ => Err(DecodeError::InvalidMessage),
+        })
+        .transpose()?;
     let appearance_version = appearance_version.map(|version| version.max(1));
     if appearance_version.is_some_and(|version| version > 1) {
-        return None;
+        return Err(DecodeError::InvalidMessage);
     }
-    let cof_version = schema_optional_field(message, "AppearanceData", "CofVersion").and_then(|field| match field {
-        FieldValue::S32(version) => Some(*version),
-        _ => None,
-    });
+    let cof_version = schema_optional_field(message, "AppearanceData", "CofVersion")
+        .map(|field| match field {
+            FieldValue::S32(version) => Ok(*version),
+            _ => Err(DecodeError::InvalidMessage),
+        })
+        .transpose()?;
 
-    let update = AvatarAppearanceUpdate::new(appearance_version, cof_version, visual_params, texture_slots).ok()?;
-    Some(AvatarAppearanceMessage { object_id, update })
+    let update = AvatarAppearanceUpdate::new(appearance_version, cof_version, visual_params, texture_slots)
+        .map_err(|_| DecodeError::InvalidMessage)?;
+    Ok(Some(AvatarAppearanceMessage { object_id, update, invalid_fields }))
 }
 
 pub(crate) fn decode_sit_target_update(message: &Message) -> Option<SitTargetUpdate> {
@@ -110,21 +138,21 @@ fn schema_block<'a>(message: &'a SchemaMessage, block_name: &str) -> Option<&'a 
     message.schema().blocks.iter().zip(message.blocks()).find(|(schema, _)| schema.name == block_name).map(|(_, values)| values)
 }
 
-fn decode_avatar_textures(bytes: &[u8]) -> Option<AvatarTextureSlots> {
+fn decode_avatar_textures(bytes: &[u8]) -> Result<Option<AvatarTextureSlots>, ()> {
     if bytes.len() > MAX_AVATAR_TEXTURE_ENTRY_BYTES {
-        return None;
+        return Err(());
     }
-    let entry = decode_texture_entry(bytes).ok().flatten()?;
+    let Some(entry) = decode_texture_entry(bytes).map_err(|_| ())? else { return Ok(None) };
     let mut values = [None; MAX_AVATAR_TEXTURE_SLOTS];
     for (index, value) in values.iter_mut().enumerate() {
-        let slot = AvatarTextureSlot::new(index as u8)?;
-        let texture_id = entry.face(slot.index())?.texture_id;
+        let slot = AvatarTextureSlot::new(index as u8).ok_or(())?;
+        let texture_id = entry.face(slot.index()).ok_or(())?.texture_id;
         if !texture_id.is_nil() {
             *value = Some(AssetId::new(texture_id));
         }
     }
     debug_assert_eq!(MAX_AVATAR_TEXTURE_SLOTS, MAX_TEXTURE_FACES);
-    AvatarTextureSlots::new(values).ok()
+    AvatarTextureSlots::new(values).map(Some).map_err(|_| ())
 }
 
 #[cfg(test)]
@@ -206,7 +234,7 @@ mod tests {
     #[test]
     fn visual_params_keep_positions() {
         let message = avatar_message(texture_entry(UUID::from_u128(88)), &[12, 34], Some((1, 50)));
-        let update = decode_avatar_appearance_update(&message).expect("avatar appearance update");
+        let update = decode_avatar_appearance_update(&message).expect("valid avatar message").expect("avatar appearance update");
 
         assert_eq!(update.object_id, UUID::from_u128(7));
         assert_eq!(
@@ -224,22 +252,24 @@ mod tests {
     #[test]
     fn bad_texture_keeps_visual_params() {
         let message = avatar_message(vec![0], &[12, 34], None);
-        let update = decode_avatar_appearance_update(&message).expect("avatar update without textures");
+        let update = decode_avatar_appearance_update(&message).expect("valid visual params").expect("avatar update");
         assert_eq!(update.update.texture_slots(), None);
         assert_eq!(update.update.visual_params().count(), 2);
+        assert_eq!(update.invalid_fields, 1);
     }
 
     #[test]
     fn empty_texture_is_omitted() {
         let message = avatar_message(Vec::new(), &[12, 34], None);
-        let update = decode_avatar_appearance_update(&message).expect("avatar update without textures");
+        let update = decode_avatar_appearance_update(&message).expect("valid avatar message").expect("avatar update");
         assert_eq!(update.update.texture_slots(), None);
+        assert_eq!(update.invalid_fields, 0);
     }
 
     #[test]
     fn nil_texture_clears_slots() {
         let message = avatar_message(texture_entry(UUID::nil()), &[12, 34], None);
-        let update = decode_avatar_appearance_update(&message).expect("avatar update with empty texture slots");
+        let update = decode_avatar_appearance_update(&message).expect("valid avatar message").expect("avatar update");
         let slots = update.update.texture_slots().expect("TextureEntry replaces avatar slots");
         assert_eq!(slots.texture(AvatarTextureSlot::HEAD_BAKED), None);
     }
@@ -254,18 +284,22 @@ mod tests {
         assert!(decode_texture_entry(&bytes).expect("valid TextureEntry").is_some());
 
         let message = avatar_message(bytes, &[12, 34], None);
-        let update = decode_avatar_appearance_update(&message).expect("avatar update without textures");
+        let update = decode_avatar_appearance_update(&message).expect("valid visual params").expect("avatar update");
         assert_eq!(update.update.texture_slots(), None);
         assert_eq!(update.update.visual_params().count(), 2);
+        assert_eq!(update.invalid_fields, 1);
     }
 
     #[test]
     fn short_param_list_is_ignored() {
-        assert_eq!(decode_avatar_appearance_update(&avatar_message(Vec::new(), &[12], None)), None);
+        assert_eq!(decode_avatar_appearance_update(&avatar_message(Vec::new(), &[12], None)), Err(super::DecodeError::InvalidMessage));
     }
 
     #[test]
     fn unsupported_version_is_ignored() {
-        assert_eq!(decode_avatar_appearance_update(&avatar_message(Vec::new(), &[12, 34], Some((2, 50)))), None);
+        assert_eq!(
+            decode_avatar_appearance_update(&avatar_message(Vec::new(), &[12, 34], Some((2, 50)))),
+            Err(super::DecodeError::InvalidMessage)
+        );
     }
 }

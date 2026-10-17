@@ -21,16 +21,19 @@ pub use model::{
     Appearance, AssetId, AttachmentPoint, CoordinateFrame, Entity, FaceAppearance, GLTF_TEXTURE_INFO_COUNT, GltfAlphaMode,
     GltfMaterialOverride, GltfMaterialOverrides, GltfMaterialOverridesError, GltfTextureTransform, Identity, Kind, LinearMotion,
     LocalAddress, LocalTransform, MAX_RENDER_MATERIAL_BINDINGS, MAX_SURFACE_FACES, MotionPatch, Parent, ParentUpdate, Pose, PoseError,
-    PoseState, Properties, PropertiesPatch, Region, RegionHandle, RegionInfo, RenderMaterials, RenderMaterialsError, SculptFlags,
-    SculptType, Shape, SitTarget, SurfaceAppearance, SurfaceAppearanceError, Transform, UnresolvedReason, WorldPose, WorldTransform,
-    WorldTransformState,
+    PoseState, Properties, PropertiesPatch, PropertiesProvenance, PropertiesTarget, PropertyProvenance, Region, RegionHandle, RegionInfo,
+    RenderMaterials, RenderMaterialsError, SculptFlags, SculptType, Shape, SitTarget, SurfaceAppearance, SurfaceAppearanceError, Transform,
+    UnresolvedReason, WorldPose, WorldTransform, WorldTransformState,
 };
 pub use state::{
-    MAX_OBJECT_DETAIL_BATCH_BYTES, MAX_OBJECT_DETAIL_BATCH_ITEMS, MAX_OBJECT_DETAIL_BYTES, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_BYTES,
-    MAX_REGION_PAGE_ITEMS, MAX_WORLD_CHANGE_PAGE_ITEMS, Object, ObjectDetail, ObjectDetailBatch, ObjectDetailResult, ObjectListItem,
-    ObjectListItemRead, ObjectListPage, ObjectPage, ObjectPageCursor, ObjectSummary, ObjectSummaryRead, RegionPage, RegionPageCursor,
-    RegionSummary, RegionSummaryRead, World, WorldChange, WorldChangeClasses, WorldChangeCursor, WorldChangePage, WorldChangeRecord,
-    WorldEntityRemovalReason, WorldReadBarrier, WorldReadError,
+    MAX_OBJECT_DETAIL_BATCH_BYTES, MAX_OBJECT_DETAIL_BATCH_ITEMS, MAX_OBJECT_DETAIL_BYTES, MAX_OBJECT_PAGE_ITEMS,
+    MAX_QUERY_STATE_MAINTENANCE_WORK, MAX_RECENT_OBJECT_BYTES, MAX_RECENT_OBJECTS, MAX_REGION_PAGE_BYTES, MAX_REGION_PAGE_ITEMS,
+    MAX_WORLD_CHANGE_PAGE_ITEMS, MAX_WORLD_QUERY_RESULTS, MAX_WORLD_QUERY_WORK, Object, ObjectDetail, ObjectDetailBatch,
+    ObjectDetailResult, ObjectListItem, ObjectListItemRead, ObjectListPage, ObjectPage, ObjectPageCursor, ObjectSummary, ObjectSummaryRead,
+    QueryCompleteness, QueryIncompleteReason, QueryScope, QueryStateMaintenance, QueryUnresolved, RECENT_OBJECT_TTL, RecentObject,
+    RegionPage, RegionPageCursor, RegionSummary, RegionSummaryRead, ValueFilter, World, WorldChange, WorldChangeClasses, WorldChangeCursor,
+    WorldChangePage, WorldChangeRecord, WorldEntityRemovalReason, WorldQuery, WorldQueryBudget, WorldQueryBuildError, WorldQueryCursor,
+    WorldQueryItem, WorldQueryPage, WorldReadBarrier, WorldReadError,
 };
 pub use update::{
     AgentHandoff, Applied, ApplyError, ApplyOutcome, DeferredReason, FieldGroup, FieldRejection, FieldRejectionReason, ObjectObservation,

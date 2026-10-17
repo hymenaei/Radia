@@ -23,12 +23,17 @@ impl World {
         self.require_active_region(region)?;
         self.validate_region_info(&info)?;
         let current = self.regions.get(&region).expect("active region remains registered");
+        let previous_origin = current.origin.or_else(|| current.handle.map(|handle| handle.origin()));
         let merged = self.merge_region_info(current, &info)?;
         if merged == *current {
             return Ok(Applied::unchanged());
         }
+        let next_origin = merged.origin.or_else(|| merged.handle.map(|handle| handle.origin()));
         self.ensure_revision_available()?;
         self.regions.insert(region, merged);
+        if previous_origin != next_origin {
+            self.mark_spatial_region(region);
+        }
         Ok(self.finish(ApplyOutcome::RegionPatched, vec![RegionUpdated(region)], None))
     }
 
@@ -38,7 +43,7 @@ impl World {
         }
         self.require_active_region(region)?;
         self.ensure_revision_available()?;
-        let entities = self.region_entities.get(&region).cloned().unwrap_or_default();
+        let entities = self.objects_in_region(region).map(|object| object.entity()).collect::<Vec<_>>();
         let removed = entities.len();
         let mut changes = Vec::with_capacity(removed.saturating_add(1));
         let mut recovery_cancellations = Vec::new();

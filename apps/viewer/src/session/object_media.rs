@@ -493,7 +493,7 @@ mod tests {
             world
                 .apply_object_batch(
                     simulator_id,
-                    ObjectBatch { region, region_handle: None, blocks: vec![Some(operation)], invalid_blocks: 0 },
+                    ObjectBatch { region, region_handle: None, blocks: vec![Some(operation)], invalid_blocks: 0, invalid_fields: 0 },
                 )
                 .expect("registered simulator")
         };

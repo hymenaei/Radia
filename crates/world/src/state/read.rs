@@ -11,7 +11,7 @@ use super::{
 };
 use crate::{
     Appearance, AssetId, AttachmentPoint, AvatarAppearance, AvatarVisualParamIndex, FaceAppearance, GltfMaterialOverride, LinearMotion,
-    ObjectMedia, RenderMaterials, SitTarget, SurfaceAppearance, Transform,
+    ObjectMedia, PropertiesProvenance, RenderMaterials, SitTarget, SurfaceAppearance, Transform,
 };
 
 /// Maximum number of objects returned in one page.
@@ -158,6 +158,8 @@ pub struct ObjectDetail {
     pub sit_target: Option<SitTarget>,
     /// Current owner and creator UUIDs.
     pub properties: Properties,
+    /// Sources that supplied the current owner and creator values.
+    pub properties_provenance: PropertiesProvenance,
     /// Current per-face media values.
     pub object_media: Option<ObjectMedia>,
 }
@@ -221,6 +223,8 @@ pub enum WorldReadError {
     StaleIdentity,
     /// The requested journal history has been evicted.
     ResyncRequired,
+    /// A revision-bound query cursor no longer matches the current World revision.
+    StaleRevision,
     /// The cursor is ahead of the World or does not identify a valid continuation.
     InvalidCursor,
     /// The requested item count is zero or exceeds the operation's hard maximum.
@@ -406,6 +410,13 @@ impl World {
             return Err(WorldReadError::StaleSession);
         }
         let object = self.object(entity).ok_or(WorldReadError::StaleIdentity)?;
+        let world_transform = object.world_transform();
+        let pose = match world_transform {
+            Ok(WorldTransformState::Resolved(transform)) => Ok(PoseState::Resolved(transform.pose)),
+            Ok(WorldTransformState::Unresolved(pose)) => Ok(pose),
+            Ok(WorldTransformState::MissingScale(pose)) => Ok(PoseState::Resolved(pose)),
+            Err(error) => Err(error),
+        };
         let summary = ObjectSummary {
             entity,
             id: object.identity().id(),
@@ -413,7 +424,7 @@ impl World {
             address: object.address(),
             parent: object.parent(),
             local_transform: object.transform(),
-            pose: object.world_pose(),
+            pose,
         };
         let parent_id = match summary.parent {
             Parent::Resolved(parent) => self.object(parent).map(|object| object.identity().id()),
@@ -425,7 +436,7 @@ impl World {
         let detail = ObjectDetail {
             summary,
             hydration_revision,
-            world_transform: object.world_transform(),
+            world_transform,
             parent_id,
             linear_motion: object.linear_motion(),
             angular_velocity: object.angular_velocity(),
@@ -438,6 +449,7 @@ impl World {
             attachment_point: object.attachment_point(),
             sit_target: object.sit_target(),
             properties: object.properties(),
+            properties_provenance: object.properties_provenance(),
             object_media: object.object_media().cloned(),
         };
         Ok(detail)

@@ -1,12 +1,9 @@
 use std::{
-    cmp::Reverse,
     collections::HashSet,
-    env,
     error::Error,
     fs::{self, File},
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    time::SystemTime,
 };
 
 use network::capture::{
@@ -14,7 +11,7 @@ use network::capture::{
 };
 use protocol::lludp::{Message, Packet};
 use serde_json::{from_slice, from_str, to_writer};
-use tempfile::{Builder, NamedTempFile};
+use tempfile::{Builder, NamedTempFile, tempdir};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
@@ -31,81 +28,53 @@ struct Summary {
 }
 
 #[test]
-#[ignore]
-fn saved_captures_are_valid() -> Result<(), Box<dyn Error>> {
-    let root = capture_root()?;
-    let mut captures = capture_files(&root)?;
-    if captures.is_empty() {
-        return Err("No captures found".into());
-    }
-    captures.sort_by_key(|path| Reverse(path.metadata().and_then(|metadata| metadata.modified()).unwrap_or(SystemTime::UNIX_EPOCH)));
-
-    let mut completed = 0;
-    let mut failures = Vec::new();
-    for (capture_index, path) in captures.into_iter().enumerate() {
-        let summary = match inspect(&path) {
-            Ok(Some(summary)) => summary,
-            Ok(None) => {
-                println!("capture #{capture_index}: skipped (capture is not complete)");
-                continue;
-            }
-            Err(error) => {
-                failures.push(format!("capture #{capture_index}: {error}"));
-                continue;
-            }
-        };
-        completed += 1;
-        println!(
-            "capture #{capture_index}: {} events, {} UDP datagrams ({} decoded LLUDP, {} malformed), {} HTTP requests, {} responses",
-            summary.events, summary.udp, summary.decoded_lludp, summary.malformed_lludp, summary.http_requests, summary.http_responses
-        );
-    }
-    if !failures.is_empty() {
-        return Err(failures.join("\n").into());
-    }
-    if completed == 0 {
-        return Err("No complete captures found".into());
-    }
-    Ok(())
-}
-
-#[test]
-fn rejects_oversized_event_line() -> Result<(), Box<dyn Error>> {
-    let capture = Builder::new().prefix("capture-test-").suffix(".capture").tempfile()?;
-    let mut archive = ZipWriter::new(capture.reopen()?);
-    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-    let manifest = CaptureManifest {
-        schema_version: 1,
-        viewer_version: "test".into(),
-        started_at: "2025-01-01T00:00:00Z".into(),
-        ended_at: "2025-01-01T00:00:00Z".into(),
-        event_count: 0,
-        dropped_events: 0,
-        payload_bytes: 0,
-        state: CaptureState::Complete,
-    };
-
-    archive.start_file(CAPTURE_ENTRIES[0], options)?;
-    to_writer(&mut archive, &manifest)?;
-    archive.start_file(CAPTURE_ENTRIES[1], options)?;
-    let oversized_line = vec![b' '; MAX_CAPTURE_EVENT_LINE_BYTES + 1];
-    archive.write_all(&oversized_line)?;
-    archive.start_file(CAPTURE_ENTRIES[2], options)?;
-    archive.finish()?;
-
-    let error = inspect(capture.path()).err().ok_or("oversized event line was accepted")?;
-    assert!(error.to_string().contains("event line exceeds"));
-    Ok(())
-}
-
-#[test]
-fn allows_unrecorded_metadata() -> Result<(), Box<dyn Error>> {
+fn valid_capture_decodes_lludp() -> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    let capture_path = directory.path().join("valid.capture");
     let bytes = testing::parse_hex_fixture(testing::lludp::vectors::START_PING_CHECK)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    assert!(Packet::decode(&bytes).is_ok(), "fixture must decode as LLUDP");
+    let event = CaptureEvent {
+        index: 0,
+        elapsed_ns: 0,
+        kind: CaptureEventKind::LLUdpReceive {
+            circuit_id: 1,
+            endpoint: "simulator".into(),
+            sequence: Some(0x0102_0304),
+            reliable: Some(false),
+            resent: Some(false),
+            zerocoded: Some(false),
+            appended_acks: Vec::new(),
+            packet_acks: Vec::new(),
+            message: None,
+        },
+        payloads: vec![CapturePayloadRef { role: "datagram".into(), offset: 0, length: bytes.len() as u64 }],
+    };
+    let mut event_line = Vec::new();
+    to_writer(&mut event_line, &event)?;
+    event_line.push(b'\n');
+    write_capture(&capture_path, 1, &event_line, &bytes)?;
+    fs::write(directory.path().join("notes.txt"), b"not a capture")?;
 
-    let mut payload_file = NamedTempFile::new()?;
-    payload_file.as_file_mut().write_all(&bytes)?;
+    let captures = capture_files(directory.path())?;
+    assert_eq!(captures, [capture_path]);
+    let summary = inspect(&captures[0], directory.path())?.ok_or("complete fixture was skipped")?;
+    assert_eq!(summary.events, 1);
+    assert_eq!(summary.udp, 1);
+    assert_eq!(summary.decoded_lludp, 1);
+    assert_eq!(summary.malformed_lludp, 0);
+    assert_eq!(summary.http_requests, 0);
+    assert_eq!(summary.http_responses, 0);
+    Ok(())
+}
+
+#[test]
+fn accepts_missing_packet_metadata() -> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    let bytes = testing::parse_hex_fixture(testing::lludp::vectors::START_PING_CHECK)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let payload_path = directory.path().join("payloads.bin");
+    File::create(&payload_path)?.write_all(&bytes)?;
+    let payload_file = File::open(payload_path)?;
     let event = CaptureEvent {
         index: 0,
         elapsed_ns: 0,
@@ -124,24 +93,23 @@ fn allows_unrecorded_metadata() -> Result<(), Box<dyn Error>> {
     };
     let mut summary = Summary { events: 0, udp: 1, decoded_lludp: 0, malformed_lludp: 0, http_requests: 0, http_responses: 0 };
 
-    inspect_datagram(&event, payload_file.as_file(), &mut summary)?;
+    inspect_datagram(&event, &payload_file, &mut summary)?;
 
     assert_eq!(summary.decoded_lludp, 1);
     assert_eq!(summary.malformed_lludp, 0);
     Ok(())
 }
 
-fn capture_root() -> Result<PathBuf, Box<dyn Error>> {
-    #[cfg(windows)]
-    let data_dir = env::var_os("LOCALAPPDATA").map(PathBuf::from).ok_or("LOCALAPPDATA is not set")?;
+#[test]
+fn rejects_oversized_event_line() -> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    let capture_path = directory.path().join("oversized.capture");
+    let oversized_line = vec![b' '; MAX_CAPTURE_EVENT_LINE_BYTES + 1];
+    write_capture(&capture_path, 0, &oversized_line, &[])?;
 
-    #[cfg(not(windows))]
-    let data_dir = env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-        .ok_or("No local data directory is available")?;
-
-    Ok(data_dir.join("Radia").join("captures"))
+    let error = inspect(&capture_path, directory.path()).err().ok_or("oversized event line was accepted")?;
+    assert!(error.to_string().contains("event line exceeds"));
+    Ok(())
 }
 
 fn capture_files(root: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
@@ -161,7 +129,7 @@ fn capture_files(root: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     Ok(files)
 }
 
-fn inspect(path: &Path) -> Result<Option<Summary>, Box<dyn Error>> {
+fn inspect(path: &Path, temp_dir: &Path) -> Result<Option<Summary>, Box<dyn Error>> {
     let file = File::open(path)?;
     let mut archive = ZipArchive::new(file)?;
     if archive.len() != CAPTURE_ENTRIES.len() {
@@ -189,7 +157,7 @@ fn inspect(path: &Path) -> Result<Option<Summary>, Box<dyn Error>> {
         return Err("Capture end time precedes its start time".into());
     }
 
-    let payload_file = extract_payloads(&mut archive)?;
+    let payload_file = extract_payloads(&mut archive, temp_dir)?;
     if payload_file.as_file().metadata()?.len() != manifest.payload_bytes {
         return Err("Payload_bytes does not match payloads.bin".into());
     }
@@ -277,13 +245,13 @@ fn read_json_entry<T: serde::de::DeserializeOwned>(archive: &mut ZipArchive<File
     Ok(from_slice(&bytes)?)
 }
 
-fn extract_payloads(archive: &mut ZipArchive<File>) -> Result<NamedTempFile, Box<dyn Error>> {
+fn extract_payloads(archive: &mut ZipArchive<File>, temp_dir: &Path) -> Result<NamedTempFile, Box<dyn Error>> {
     let mut entry = archive.by_name("payloads.bin")?;
     if entry.encrypted() || entry.size() > MAX_CAPTURE_ENTRY_BYTES {
         return Err("Payloads.bin is encrypted or exceeds the entry size limit".into());
     }
     let expected_bytes = entry.size();
-    let mut file = create_temp_payload()?;
+    let mut file = create_temp_payload(temp_dir)?;
     let copied_bytes = io::copy(&mut entry, file.as_file_mut())?;
     if copied_bytes != expected_bytes {
         return Err("Payloads.bin length does not match its ZIP entry".into());
@@ -292,8 +260,31 @@ fn extract_payloads(archive: &mut ZipArchive<File>) -> Result<NamedTempFile, Box
     Ok(file)
 }
 
-fn create_temp_payload() -> Result<NamedTempFile, Box<dyn Error>> {
-    Ok(Builder::new().prefix("capture-check-").suffix(".bin").tempfile()?)
+fn create_temp_payload(temp_dir: &Path) -> Result<NamedTempFile, Box<dyn Error>> {
+    Ok(Builder::new().prefix("capture-check-").suffix(".bin").tempfile_in(temp_dir)?)
+}
+
+fn write_capture(path: &Path, event_count: u64, events: &[u8], payloads: &[u8]) -> Result<(), Box<dyn Error>> {
+    let manifest = CaptureManifest {
+        schema_version: 1,
+        viewer_version: "test".into(),
+        started_at: "2025-01-01T00:00:00Z".into(),
+        ended_at: "2025-01-01T00:00:00Z".into(),
+        event_count,
+        dropped_events: 0,
+        payload_bytes: payloads.len() as u64,
+        state: CaptureState::Complete,
+    };
+    let mut archive = ZipWriter::new(File::create(path)?);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    archive.start_file(CAPTURE_ENTRIES[0], options)?;
+    to_writer(&mut archive, &manifest)?;
+    archive.start_file(CAPTURE_ENTRIES[1], options)?;
+    archive.write_all(events)?;
+    archive.start_file(CAPTURE_ENTRIES[2], options)?;
+    archive.write_all(payloads)?;
+    drop(archive.finish()?);
+    Ok(())
 }
 
 fn check_payload_ranges(event: &CaptureEvent, payload_bytes: u64) -> Result<(), Box<dyn Error>> {

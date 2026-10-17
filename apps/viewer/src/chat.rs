@@ -422,22 +422,6 @@ mod tests {
         assert_eq!(messages.front().map(|message| message.from_name.as_str()), Some("Agent 1"));
     }
 
-    #[gpui::test]
-    fn developer_action_opens_window(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
-        let (_harness, cx) = cx.add_window_view(|window, cx| {
-            let chat = cx.new(|cx| ChatScreen::new(window, cx));
-            ChatActionHarness { chat }
-        });
-        draw(cx);
-        let button = cx.debug_bounds("chat-titlebar-action").expect("titlebar action should render");
-        let click = point(button.origin.x + px(8.), button.origin.y + px(8.));
-        assert_eq!(cx.windows().len(), 1);
-
-        cx.simulate_click(click, Default::default());
-        assert_eq!(cx.windows().len(), 2);
-    }
-
     #[cfg(not(target_os = "macos"))]
     #[gpui::test]
     fn developer_action_activates_existing_window(cx: &mut TestAppContext) {

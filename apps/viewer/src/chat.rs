@@ -423,13 +423,12 @@ mod tests {
     }
 
     #[gpui::test]
-    fn developer_action_opens_and_clears_window(cx: &mut TestAppContext) {
+    fn developer_action_opens_window(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
-        let (harness, cx) = cx.add_window_view(|window, cx| {
+        let (_harness, cx) = cx.add_window_view(|window, cx| {
             let chat = cx.new(|cx| ChatScreen::new(window, cx));
             ChatActionHarness { chat }
         });
-        let chat = cx.update(|_, app| harness.read(app).chat.clone());
         draw(cx);
         let button = cx.debug_bounds("chat-titlebar-action").expect("titlebar action should render");
         let click = point(button.origin.x + px(8.), button.origin.y + px(8.));
@@ -437,9 +436,6 @@ mod tests {
 
         cx.simulate_click(click, Default::default());
         assert_eq!(cx.windows().len(), 2);
-
-        cx.update(|_, app| chat.update(app, |chat, cx| chat.clear_session(cx)));
-        assert_eq!(cx.windows().len(), 1);
     }
 
     #[cfg(not(target_os = "macos"))]

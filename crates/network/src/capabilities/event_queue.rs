@@ -34,7 +34,7 @@ use super::{
 };
 use crate::{
     coverage::{CoverageLossLedger, CoverageLossReason, CoverageSource},
-    event::{CapabilityEvent, Event, EventEnvelope, EventSendOutcome, SimulatorId},
+    event::{CapabilityEvent, Event, EventEnvelope, EventQueueBatchOrder, EventSendOutcome, SimulatorId},
     http::{self, Error, Response, ResponseMemoryPermit},
     simulator::EventRetention,
     status::NetworkStatusHandle,
@@ -231,7 +231,13 @@ async fn send_event_queue_batch(
 
     let retention = EventRetention::from_permits(vec![permit]);
 
-    let event = Event::CapabilityEventBatch { simulator_id, source, events: batch };
+    let CoverageSource::EventQueue { incarnation } = coverage_source else { unreachable!("EventQueue batches use an EventQueue source") };
+    let event = Event::CapabilityEventBatch {
+        simulator_id,
+        source,
+        order: EventQueueBatchOrder { incarnation, ordinal: batch_order },
+        events: batch,
+    };
     let permit = match reserve_event_queue_slot(events, shutdown, session_closed).await {
         Ok(permit) => permit,
         Err(outcome) => {
@@ -240,8 +246,7 @@ async fn send_event_queue_batch(
         }
     };
     let watermark = coverage_losses.watermark(simulator_id, coverage_source);
-    let CoverageSource::EventQueue { incarnation } = coverage_source else { unreachable!("EventQueue batches use an EventQueue source") };
-    permit.send(EventEnvelope::with_retention_and_coverage(event, retention, watermark).with_event_queue_order(incarnation, batch_order));
+    permit.send(EventEnvelope::with_retention_and_coverage(event, retention, watermark));
     pending_loss.commit();
     EventSendOutcome::Sent
 }
@@ -1522,7 +1527,10 @@ mod event_queue_batch_tests {
             EventSendOutcome::Sent
         ));
         let envelope = received.recv().await.expect("one batch envelope");
-        assert!(matches!(&envelope.event, Event::CapabilityEventBatch { events, .. } if events.len() == 1));
+        assert!(matches!(
+            &envelope.event,
+            Event::CapabilityEventBatch { order: EventQueueBatchOrder { incarnation: 42, ordinal: 0 }, events, .. } if events.len() == 1
+        ));
         assert_eq!(queued_event_bytes.available_permits(), MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES - expected_bytes);
         drop(envelope);
         assert_eq!(queued_event_bytes.available_permits(), MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES);

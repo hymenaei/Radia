@@ -226,6 +226,21 @@ impl Session {
     }
 
     fn start_inner(credentials: LoginCredentials, capture_config: Option<CaptureConfig>, options: SessionOptions) -> Result<Self, Error> {
+        let login_url = credentials.grid.login_url().to_owned();
+        Self::start_inner_with_login_url(credentials, capture_config, options, login_url)
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn start_with_login_url_for_test(credentials: LoginCredentials, login_url: String) -> Result<Self, Error> {
+        Self::start_inner_with_login_url(credentials, None, SessionOptions::default(), login_url)
+    }
+
+    fn start_inner_with_login_url(
+        credentials: LoginCredentials,
+        capture_config: Option<CaptureConfig>,
+        options: SessionOptions,
+        login_url: String,
+    ) -> Result<Self, Error> {
         let (command_sender, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (event_sender, events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
         let coverage_losses = CoverageLossLedger::new();
@@ -286,7 +301,6 @@ impl Session {
                 };
                 let shutdown_requested = channels.disconnect_requested.clone();
                 let events = channels.events.clone();
-                let login_url = credentials.grid.login_url().to_owned();
                 let run = run_client(credentials, channels, Some(capture.clone()), worker_status.clone(), login_url, options);
                 let result = runtime.block_on(run_with_capture(
                     run,
@@ -396,8 +410,9 @@ impl Session {
         self.coverage_losses.snapshot()
     }
 
-    /// Acknowledges a surfaced source-local loss after applying recovery through its watermark.
+    /// Releases a surfaced source-local loss after the caller retains it in session state.
     ///
+    /// Acknowledgement transfers the loss fact out of Network; it does not mean recovery succeeded.
     /// Watermarks that have not been surfaced by [`Session::recv_event`] are ignored.
     pub fn acknowledge_coverage_loss(&mut self, watermark: CoverageWatermark) {
         let scope = (watermark.simulator_id, watermark.source);
@@ -407,8 +422,9 @@ impl Session {
         }
     }
 
-    /// Acknowledges a surfaced session-wide ledger overflow after conservative recovery completes.
+    /// Releases a surfaced session-wide ledger overflow after the caller retains it in session state.
     ///
+    /// Acknowledgement transfers the loss fact out of Network; it does not mean recovery succeeded.
     /// Generations that have not been surfaced by [`Session::recv_event`] are ignored.
     pub fn acknowledge_coverage_overflow(&mut self, generation: u64) {
         if generation > 0 && generation <= self.surfaced_overflow_generation {
@@ -1083,8 +1099,8 @@ mod tests {
     use crate::{
         capture::{CaptureConfig, CaptureManifest, CapturePublication, CaptureRecorder, CaptureSession, CaptureState},
         event::{
-            CLIENT_EVENT_CAPACITY, Event, EventEnvelope, EventReceiver, EventSendOutcome, PRIMARY_TERMINAL_EVENT_CAPACITY,
-            send_client_event,
+            CLIENT_EVENT_CAPACITY, CapabilityEvent, Event, EventEnvelope, EventQueueBatchOrder, EventReceiver, EventSendOutcome,
+            PRIMARY_TERMINAL_EVENT_CAPACITY, send_client_event,
         },
     };
     use tokio::{
@@ -2245,6 +2261,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recv_batch_keeps_order() {
+        let (commands, _) = mpsc::channel(COMMAND_CAPACITY);
+        let (disconnect, _) = watch::channel(false);
+        let (events, event_receiver) = mpsc::channel(1);
+        let order = EventQueueBatchOrder { incarnation: 71, ordinal: 9 };
+        events
+            .send(EventEnvelope::new(Event::CapabilityEventBatch {
+                simulator_id: SimulatorId::new(77),
+                source: "127.0.0.1:13000".parse().expect("simulator endpoint"),
+                order,
+                events: vec![CapabilityEvent { message: "TestEvent".into(), body: Value::Undefined, retained_bytes: 0 }],
+            }))
+            .await
+            .expect("queue EventQueue batch");
+        let mut session = Session::new_for_test(targeted_send_handle(commands, disconnect), event_receiver);
+
+        let Some(Event::CapabilityEventBatch { order: received_order, events, .. }) = session.recv_event().await else {
+            panic!("Session returns the queued EventQueue batch")
+        };
+        assert_eq!(received_order, order);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].message, "TestEvent");
+    }
+
+    #[tokio::test]
+    async fn final_loss_wakes_empty_intake() {
+        let (commands, _) = mpsc::channel(COMMAND_CAPACITY);
+        let (disconnect, _) = watch::channel(false);
+        let ledger = CoverageLossLedger::new();
+        let simulator_id = SimulatorId::new(77);
+        let source = CoverageSource::Lludp;
+        let (events, event_receiver) = mpsc::channel(1);
+        let mut session = Session::new_for_test_with_coverage(targeted_send_handle(commands, disconnect), event_receiver, ledger.clone());
+        let mut receive = spawn(async move { session.recv_event().await });
+
+        assert!(timeout(Duration::from_millis(10), &mut receive).await.is_err());
+        let CoverageRecord::Recorded(watermark) = ledger.record(simulator_id, source, CoverageLossReason::EventAdmission) else {
+            panic!("new source has ledger capacity")
+        };
+
+        assert!(matches!(
+            timeout(Duration::from_secs(1), receive).await.expect("source loss wakes empty intake").expect("receive task"),
+            Some(Event::CoverageLost { loss: CoverageLoss::Source(record) }) if record.watermark == watermark
+        ));
+        drop(events);
+    }
+
+    #[tokio::test]
     async fn coverage_loss_precedes_event_and_awaits_ack() {
         let (commands, _) = mpsc::channel(COMMAND_CAPACITY);
         let (disconnect, _) = watch::channel(false);
@@ -2320,8 +2384,8 @@ mod tests {
         let mut rejected = lludp::fixture("improved_terse_object_update.hex");
         rejected[0] |= 0x40;
         set_sequence(&mut rejected, 25);
-        rejected[24] = 1;
-        assert!(Packet::preflight(&rejected).is_err(), "the missing collision plane must fail LLUDP preflight");
+        rejected[18] = u8::MAX;
+        assert!(Packet::preflight(&rejected).is_err(), "an object field exceeding its packet frame must fail LLUDP preflight");
         simulator.send_to(&rejected, peer).await.expect("send preflight-rejected reliable update");
 
         let watermark = match timeout(CLIENT_TIMEOUT, session.recv_event()).await.expect("preflight loss should wake Session") {

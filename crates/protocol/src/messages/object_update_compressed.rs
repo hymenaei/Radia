@@ -6,9 +6,10 @@ use crate::{
     LLUdpError,
     lludp::codec::{Reader, Writer},
     messages::common::{
-        ExtraParameter, ObjectShape, ObjectSound, ObjectText, RegionData, decode_extra_parameters, encode_extra_parameters, read_variable2,
+        ExtraParameter, ObjectSound, ObjectText, RegionData, decode_extra_parameters, encode_extra_parameters, read_variable2,
         rotation_from_vector3, skip_extra_parameters, write_finite_vector3, write_variable2,
     },
+    types::{ObjectShape, TextureEntry, decode_texture_entry as decode_texture_entry_payload},
 };
 use math::{Quat, Vec3};
 
@@ -69,6 +70,17 @@ const SPECIAL_HAS_PARTICLE_SYSTEM: u32 = 0x400;
 const SPECIAL_OBJECT_FIELDS: u32 = 0x7ff;
 const VOLUME_PCODE: u8 = 9;
 const LEGACY_PARTICLE_SYSTEM_SIZE: usize = 86;
+
+/// Largest compressed ObjectUpdate TextureEntry payload decoded by the viewer.
+pub const MAX_TEXTURE_ENTRY_BYTES: usize = 4095;
+
+/// Decodes the bounded TextureEntry payload after the compressed message's binary-data envelope.
+pub fn decode_texture_entry(bytes: &[u8]) -> Result<Option<TextureEntry>, LLUdpError> {
+    if bytes.len() > MAX_TEXTURE_ENTRY_BYTES {
+        return Err(LLUdpError::InvalidMessage);
+    }
+    decode_texture_entry_payload(bytes).map_err(|_| LLUdpError::InvalidMessage)
+}
 
 pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<ObjectUpdateCompressed, LLUdpError> {
     let region_data = RegionData::decode(reader)?;

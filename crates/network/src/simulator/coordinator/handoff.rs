@@ -50,14 +50,18 @@ async fn handoff_waits_for_matching_movement() {
 
     let wrong = movement_complete_packet(42, session.agent_id, UUID::from_u128(99), region_handle);
     neighbor.send_to(&wrong, peer).await.expect("send wrong-session movement completion");
-    assert!(timeout(Duration::from_millis(50), event_receiver.recv()).await.is_err());
-
     let matching = movement_complete_packet(43, session.agent_id, session.session_id, region_handle);
     neighbor.send_to(&matching, peer).await.expect("send matching movement completion");
-    assert!(matches!(
-        next_neighbor_event(&mut event_receiver).await,
-        Event::SimulatorMessage { simulator_id: id, message: Message::AgentMovementComplete(_), .. } if id == simulator_id
-    ));
+    let Event::SimulatorMessage { simulator_id: emitted_simulator, sequence, message: Message::AgentMovementComplete(movement), .. } =
+        next_neighbor_event(&mut event_receiver).await
+    else {
+        panic!("the matching movement completion should be the next simulator event");
+    };
+    assert_eq!(emitted_simulator, simulator_id);
+    assert_eq!(sequence, 43, "the wrong-session packet must not be forwarded first");
+    assert_eq!(movement.agent_data.agent_id, session.agent_id);
+    assert_eq!(movement.agent_data.session_id, session.session_id);
+    assert_eq!(movement.data.region_handle, region_handle);
 
     shutdown_signal.send_replace(true);
     assert!(timeout(Duration::from_millis(200), task).await.expect("destination stops").expect("destination task").is_ok());
@@ -84,7 +88,7 @@ fn overload_logout_keeps_a_pending_promotion_on_the_original_primary() {
 }
 
 async fn run_overload_logout_promotion_test() {
-    use crate::event::Event::{Failed, SimulatorMessage, SimulatorPromoted};
+    use crate::event::Event::{Failed, SimulatorDisconnected, SimulatorMessage, SimulatorPromoted};
     use protocol::lludp::Message::{RegionHandshake, Schema};
 
     let mut harness = connected_neighbor().await;
@@ -177,16 +181,32 @@ async fn run_overload_logout_promotion_test() {
     set_sequence(&mut barrier, 45);
     harness.neighbor.send_to(&barrier, harness.neighbor_peer).await.expect("send post-movement barrier");
     receive_ack(&harness.neighbor, 45).await;
-    time::sleep(Duration::from_millis(50)).await;
+
+    let mut disable = fixture("disable_simulator.hex");
+    set_sequence(&mut disable, 46);
+    harness.neighbor.send_to(&disable, harness.neighbor_peer).await.expect("close destination after movement barrier");
+    timeout(WAIT, async {
+        loop {
+            match next_raw_event(&mut harness.events).await {
+                SimulatorDisconnected { simulator_id, region_handle: Some(region_handle), .. }
+                    if simulator_id == harness.neighbor_id && region_handle == target_region =>
+                {
+                    break;
+                }
+                SimulatorPromoted { .. } => panic!("logout must freeze pending promotion before destination disconnect"),
+                Failed(reason) => panic!("destination disconnect failed: {reason}"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("destination disconnect should drain accepted movement events");
 
     assert_eq!(
         harness.status.snapshot().simulator_endpoint,
         Some(harness.primary.local_addr().expect("primary endpoint")),
         "a promotion received after logout starts must not replace its logout target"
     );
-    while let Ok(event) = harness.events.try_recv() {
-        assert!(!matches!(event.event, SimulatorPromoted { .. }), "logout must freeze pending promotion");
-    }
 
     harness.primary.send_to(&ack(120, logout.sequence()), harness.primary_peer).await.expect("ack primary logout");
     let mut logout_reply = fixture("logout_reply.hex");

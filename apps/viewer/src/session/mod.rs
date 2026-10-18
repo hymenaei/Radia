@@ -1,7 +1,9 @@
 mod coordinator;
 mod inbound;
+mod object_media;
 mod outbound;
 mod recovery;
+mod recovery_state;
 mod region_lookup;
 mod world;
 
@@ -13,4 +15,3 @@ pub(crate) use inbound::{ChatMessage, display_message, format_avatar_name};
 pub(crate) use network::{Session, SessionHandle};
 pub(crate) use outbound::agent;
 pub(crate) use region_lookup::{RegionGridCell, RegionLookup, map_request_coordinates};
-pub(crate) use world::SharedWorldState;

@@ -1154,6 +1154,8 @@ fn message_name(message: &Message) -> &'static str {
         Message::ObjectUpdateCached(_) => "ObjectUpdateCached",
         Message::KillObject(_) => "KillObject",
         Message::RequestMultipleObjects(_) => "RequestMultipleObjects",
+        Message::ObjectExtraParams(_) => "ObjectExtraParams",
+        Message::GenericStreamingMessage(_) => "GenericStreamingMessage",
         Message::Schema(message) => message.schema().name,
         Message::Unknown { .. } => "Unknown",
     }
@@ -1758,7 +1760,7 @@ mod format_tests {
     }
 
     #[test]
-    fn oversized_event_is_omitted_and_marks_capture_incomplete() {
+    fn oversized_event_marks_capture_incomplete() {
         let directory = tempdir().expect("create capture test directory");
         let recorder = CaptureRecorder::new();
         let session = start_capture(&directory, &recorder);
@@ -1815,7 +1817,7 @@ mod format_tests {
     }
 
     #[test]
-    fn empty_http_bodies_remain_complete_without_capture_memory() {
+    fn empty_http_body_preserves_capture() {
         let directory = tempdir().expect("create capture test directory");
         let recorder = CaptureRecorder::new();
         let session = start_capture(&directory, &recorder);

@@ -30,6 +30,8 @@ pub mod login;
 /// Handwritten typed message structs and codecs for supported LLUDP messages.
 pub mod messages;
 pub mod schema;
+/// Typed decoders for payload values shared across LLUDP messages.
+pub mod types;
 
 pub use lludp::{Audible, ChatSourceType, ChatType, Frequency, LLUdpError};
 pub use lludp::{BlockInstance, BlockValues, FieldValue, SchemaMessage};

@@ -22,12 +22,12 @@ use crate::{
 use super::{
     budget::{
         COMMAND_CAPACITY, CapabilityBudget, EVENT_QUEUE_REQUEST_TIMEOUT, LLSD_SCAN_WORKING_BYTES, MAX_CAPABILITY_REQUEST_BODY_BYTES,
-        REQUEST_TIMEOUT, spawn_blocking_with_permit,
+        MAX_CAPABILITY_RESPONSE_BYTES, REQUEST_TIMEOUT, spawn_blocking_with_permit,
     },
     event_queue::{self, EventQueueTask},
     request::{
-        AdmittedCapabilities, AdmittedResponse, Command, RequestDeadline, capability_error, capability_llsd_limits,
-        decode_capability_value, logical_endpoint_label, run, validate_capability_names, wait_for_session_close,
+        AdmittedCapabilities, AdmittedResponse, Command, RequestDeadline, capability_error, capability_llsd_limits_with_response_limit,
+        decode_capability_value_with_response_limit, logical_endpoint_label, run, validate_capability_names, wait_for_session_close,
     },
 };
 
@@ -220,6 +220,35 @@ impl Client {
     where
         Request: Serialize + ?Sized,
     {
+        self.post_with_response_limit(url, payload, MAX_CAPABILITY_RESPONSE_BYTES).await
+    }
+
+    /// Sends an LLSD XML request with a caller-selected response-body limit.
+    ///
+    /// The response limit must be between 1 byte and the built-in 32 MiB capability limit. Network admits the raw response,
+    /// bounded LLSD scan workspace, and the LLSD `Value` decoder's allocation estimate before decoding. This estimate excludes
+    /// allocator metadata and fragmentation. The request slot and decode-memory admission remain held until decoding completes,
+    /// including if the awaiting task is canceled. After this method returns, the caller owns the value; typed conversion and retained
+    /// memory are outside Network's budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the response limit is invalid, encoding exceeds its limit, the capability request fails, response memory
+    /// cannot be admitted, or the LLSD response is malformed or exceeds a decoder limit.
+    pub async fn post_with_response_limit<Request>(
+        &self,
+        url: &CapabilityUrl,
+        payload: &Request,
+        max_response_bytes: usize,
+    ) -> Result<llsd::Value, Error>
+    where
+        Request: Serialize + ?Sized,
+    {
+        if max_response_bytes == 0 || max_response_bytes > MAX_CAPABILITY_RESPONSE_BYTES {
+            return Err(Error::Capability(format!(
+                "Capability response limit must be between 1 and {MAX_CAPABILITY_RESPONSE_BYTES} bytes."
+            )));
+        }
         let deadline = RequestDeadline::new(self.request_timeout);
         let permit = self.acquire_request_permit(deadline).await?;
         let body = xml::to_vec_with_max_bytes(payload, MAX_CAPABILITY_REQUEST_BODY_BYTES)
@@ -230,7 +259,7 @@ impl Client {
         let client = self.clone();
         let url = url.clone();
         self.on_runtime(async move {
-            let response = client.post_admitted(url, body, deadline, permit).await?;
+            let response = client.post_admitted(url, body, max_response_bytes, deadline, permit).await?;
             decode_admitted_response(response, client.http.clone(), deadline).await
         })
         .await
@@ -240,14 +269,18 @@ impl Client {
         &self,
         url: CapabilityUrl,
         body: Vec<u8>,
+        max_response_bytes: usize,
         deadline: RequestDeadline,
         permit: OwnedSemaphorePermit,
     ) -> Result<AdmittedResponse, Error> {
         let (reply, response) = oneshot::channel();
-        time::timeout_at(deadline.at, self.commands.send(Command::Post { url, body, reply, deadline, _permit: permit }))
-            .await
-            .map_err(|_| deadline.error())?
-            .map_err(|_| Error::CapabilitySessionClosed)?;
+        time::timeout_at(
+            deadline.at,
+            self.commands.send(Command::Post { url, body, max_response_bytes, reply, deadline, _permit: permit }),
+        )
+        .await
+        .map_err(|_| deadline.error())?
+        .map_err(|_| Error::CapabilitySessionClosed)?;
         time::timeout_at(deadline.at, response)
             .await
             .map_err(|_| deadline.error())?
@@ -461,23 +494,33 @@ fn capability_preflight_error(error: xml::BoundError) -> Error {
     }
 }
 
+#[cfg(test)]
 fn admit_capability_decode_memory(body: &[u8], http: &http::Client) -> Result<http::ResponseMemoryPermit, Error> {
+    admit_capability_decode_memory_with_response_limit(body, http, MAX_CAPABILITY_RESPONSE_BYTES)
+}
+
+fn admit_capability_decode_memory_with_response_limit(
+    body: &[u8],
+    http: &http::Client,
+    max_response_bytes: usize,
+) -> Result<http::ResponseMemoryPermit, Error> {
     let mut memory =
         http.try_reserve_memory(http::ResponseMemoryClass::Ordinary, LLSD_SCAN_WORKING_BYTES).map_err(Error::CapabilityHttp)?;
-    let bound = xml::value_allocation_bound(body, capability_llsd_limits()).map_err(capability_preflight_error)?;
+    let bound = xml::value_allocation_bound(body, capability_llsd_limits_with_response_limit(max_response_bytes))
+        .map_err(capability_preflight_error)?;
     memory.try_grow(bound).map_err(Error::CapabilityHttp)?;
     Ok(memory)
 }
 
 async fn decode_admitted_response(response: AdmittedResponse, http: http::Client, deadline: RequestDeadline) -> Result<llsd::Value, Error> {
-    let AdmittedResponse { body, _memory: raw_memory, _request: request } = response;
+    let AdmittedResponse { body, max_response_bytes, _memory: raw_memory, _request: request } = response;
     let (decoded, request) = time::timeout_at(
         deadline.at,
         spawn_blocking_with_permit(request, move || {
             let decoded = if deadline.expired() {
                 Err(deadline.error())
             } else {
-                admit_capability_decode_memory(&body, &http).and_then(|memory| {
+                admit_capability_decode_memory_with_response_limit(&body, &http, max_response_bytes).and_then(|memory| {
                     if deadline.expired() {
                         return Err(deadline.error());
                     }
@@ -486,7 +529,7 @@ async fn decode_admitted_response(response: AdmittedResponse, http: http::Client
                     if deadline.expired() {
                         return Err(deadline.error());
                     }
-                    decode_capability_value(&body).map(|value| (value, memory))
+                    decode_capability_value_with_response_limit(&body, max_response_bytes).map(|value| (value, memory))
                 })
             };
             drop(body);
@@ -748,7 +791,8 @@ pub(crate) mod tests {
         *DECODE_GATE.get_or_init(Default::default).lock().expect("decode gate lock") = Some(gate.clone());
         let requests = Arc::new(Semaphore::new(1));
         let request = Arc::clone(&requests).try_acquire_owned().expect("reserve request slot");
-        let response = AdmittedResponse { body, _memory: Some(memory), _request: request };
+        let response =
+            AdmittedResponse { body, max_response_bytes: MAX_CAPABILITY_RESPONSE_BYTES, _memory: Some(memory), _request: request };
         let http = http::Client::new(Some(TEST_TIMEOUT), false, None)
             .expect("build HTTP client")
             .with_memory_budget(budget.clone(), http::ResponseMemoryClass::Ordinary);
@@ -780,7 +824,12 @@ pub(crate) mod tests {
         let memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, malformed_len).expect("reserve malformed response memory");
         let requests = Arc::new(Semaphore::new(1));
         let request = Arc::clone(&requests).try_acquire_owned().expect("reserve request slot");
-        let response = AdmittedResponse { body: malformed, _memory: Some(memory), _request: request };
+        let response = AdmittedResponse {
+            body: malformed,
+            max_response_bytes: MAX_CAPABILITY_RESPONSE_BYTES,
+            _memory: Some(memory),
+            _request: request,
+        };
         let http = http::Client::new(Some(TEST_TIMEOUT), false, None)
             .expect("build HTTP client")
             .with_memory_budget(budget.clone(), http::ResponseMemoryClass::Ordinary);
@@ -805,7 +854,8 @@ pub(crate) mod tests {
         *DECODE_GATE.get_or_init(Default::default).lock().expect("decode gate lock") = Some(gate.clone());
         let requests = Arc::new(Semaphore::new(1));
         let request = Arc::clone(&requests).try_acquire_owned().expect("reserve request slot");
-        let response = AdmittedResponse { body, _memory: Some(memory), _request: request };
+        let response =
+            AdmittedResponse { body, max_response_bytes: MAX_CAPABILITY_RESPONSE_BYTES, _memory: Some(memory), _request: request };
         let http = http::Client::new(Some(TEST_TIMEOUT), false, None)
             .expect("build HTTP client")
             .with_memory_budget(budget.clone(), http::ResponseMemoryClass::Ordinary);
@@ -846,7 +896,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn capability_decode_preflight_rejects_depth_and_element_limits() {
+    fn decode_preflight_enforces_llsd_limits() {
         let max_depth = super::super::budget::MAX_LLSD_NESTING_DEPTH;
         let mut nested = String::from("<llsd>");
         for _ in 0..=max_depth {
@@ -883,7 +933,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn capability_decode_preflight_rejects_memory_budget_exhaustion() {
+    fn decode_preflight_enforces_memory_budget() {
         let body = format!("<llsd><string>{}</string></llsd>", "x".repeat(128 * 1024)).into_bytes();
         let bound = xml::value_allocation_bound(&body, super::super::request::capability_llsd_limits()).expect("bound valid LLSD response");
         let body_capacity = body.capacity();
@@ -913,7 +963,8 @@ pub(crate) mod tests {
         let memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body_len).expect("reserve response memory");
         let requests = Arc::new(Semaphore::new(1));
         let request = Arc::clone(&requests).try_acquire_owned().expect("reserve request slot");
-        let response = AdmittedResponse { body, _memory: Some(memory), _request: request };
+        let response =
+            AdmittedResponse { body, max_response_bytes: MAX_CAPABILITY_RESPONSE_BYTES, _memory: Some(memory), _request: request };
         let (reply, waiting) = oneshot::channel();
 
         assert!(reply.send(response).is_ok(), "caller should be able to retain the admitted reply");
@@ -1003,6 +1054,50 @@ pub(crate) mod tests {
         let payload: Value = xml::from_str(post_body).expect("POST body is valid LLSD XML");
         assert_eq!(payload.as_map().and_then(|map| map.get("count")), Some(&Value::Integer(7)));
         assert!(str::from_utf8(&requests[1]).expect("GET is UTF-8").starts_with("GET /capability HTTP/1.1"));
+    }
+
+    #[tokio::test]
+    async fn post_uses_response_limit_for_decode() {
+        let body = "<llsd><string>media</string></llsd>";
+        let server = LocalServer::start(vec![response(200, "OK", "application/llsd+xml", None, body)]);
+        let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
+        let url = CapabilityUrl::parse(server.url("/object-media").as_str()).expect("valid capability URL");
+
+        let value =
+            client.post_with_response_limit(&url, &Value::Undefined, body.len()).await.expect("body at the selected limit should decode");
+
+        assert_eq!(value, Value::String("media".into()));
+        assert_eq!(server.finish().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn post_rejects_oversized_response_before_reading() {
+        const RESPONSE_LIMIT: usize = 32;
+
+        let server = LocalServer::start(vec![content_length_only_response(RESPONSE_LIMIT + 1)]);
+        let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
+        let url = CapabilityUrl::parse(server.url("/object-media").as_str()).expect("valid capability URL");
+
+        let error = client
+            .post_with_response_limit(&url, &Value::Undefined, RESPONSE_LIMIT)
+            .await
+            .expect_err("declared response over the selected limit should fail");
+
+        assert!(matches!(&error, CapabilityHttp(http::Error::ResourceExhausted { status: Some(StatusCode::OK), .. })));
+        assert_eq!(server.finish().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn post_rejects_invalid_limits_without_sending() {
+        let server = LocalServer::start(vec![]);
+        let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
+        let url = CapabilityUrl::parse(server.url("/object-media").as_str()).expect("valid capability URL");
+
+        for limit in [0, MAX_CAPABILITY_RESPONSE_BYTES + 1] {
+            assert!(matches!(client.post_with_response_limit(&url, &Value::Undefined, limit).await, Err(Capability(_))));
+        }
+
+        assert!(server.finish().is_empty());
     }
 
     #[tokio::test]

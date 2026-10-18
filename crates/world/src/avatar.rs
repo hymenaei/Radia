@@ -1,0 +1,360 @@
+use std::sync::Arc;
+
+use crate::AssetId;
+
+/// Number of avatar texture slots carried by the legacy TextureEntry format.
+pub const MAX_AVATAR_TEXTURE_SLOTS: usize = 45;
+/// Maximum number of positional visual-parameter values in one LLUDP block sequence.
+pub const MAX_AVATAR_VISUAL_PARAMS: usize = u8::MAX as usize;
+
+/// A position in the receiver's avatar visual-parameter catalog.
+///
+/// AvatarAppearance transmits weights by position and omits parameter IDs. This index therefore
+/// identifies a wire position; it is not a stable visual-parameter ID across avatar catalogs.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct AvatarVisualParamIndex(u8);
+
+impl AvatarVisualParamIndex {
+    /// Creates a visual-parameter position that can occur in a U8-counted block sequence.
+    pub const fn new(index: u8) -> Option<Self> {
+        if index < u8::MAX { Some(Self(index)) } else { None }
+    }
+
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
+/// An avatar TextureEntry slot, distinct from a prim face identity.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct AvatarTextureSlot(u8);
+
+impl AvatarTextureSlot {
+    pub const HEAD_BODY_PAINT: Self = Self(0);
+    pub const UPPER_SHIRT: Self = Self(1);
+    pub const LOWER_PANTS: Self = Self(2);
+    pub const EYES_IRIS: Self = Self(3);
+    pub const HAIR: Self = Self(4);
+    pub const UPPER_BODY_PAINT: Self = Self(5);
+    pub const LOWER_BODY_PAINT: Self = Self(6);
+    pub const LOWER_SHOES: Self = Self(7);
+    pub const HEAD_BAKED: Self = Self(8);
+    pub const UPPER_BAKED: Self = Self(9);
+    pub const LOWER_BAKED: Self = Self(10);
+    pub const EYES_BAKED: Self = Self(11);
+    pub const LOWER_SOCKS: Self = Self(12);
+    pub const UPPER_JACKET: Self = Self(13);
+    pub const LOWER_JACKET: Self = Self(14);
+    pub const UPPER_GLOVES: Self = Self(15);
+    pub const UPPER_UNDERSHIRT: Self = Self(16);
+    pub const LOWER_UNDERPANTS: Self = Self(17);
+    pub const SKIRT: Self = Self(18);
+    pub const SKIRT_BAKED: Self = Self(19);
+    pub const HAIR_BAKED: Self = Self(20);
+    pub const LOWER_ALPHA: Self = Self(21);
+    pub const UPPER_ALPHA: Self = Self(22);
+    pub const HEAD_ALPHA: Self = Self(23);
+    pub const EYES_ALPHA: Self = Self(24);
+    pub const HAIR_ALPHA: Self = Self(25);
+    pub const HEAD_TATTOO: Self = Self(26);
+    pub const UPPER_TATTOO: Self = Self(27);
+    pub const LOWER_TATTOO: Self = Self(28);
+    pub const HEAD_UNIVERSAL_TATTOO: Self = Self(29);
+    pub const UPPER_UNIVERSAL_TATTOO: Self = Self(30);
+    pub const LOWER_UNIVERSAL_TATTOO: Self = Self(31);
+    pub const SKIRT_TATTOO: Self = Self(32);
+    pub const HAIR_TATTOO: Self = Self(33);
+    pub const EYES_TATTOO: Self = Self(34);
+    pub const LEFT_ARM_TATTOO: Self = Self(35);
+    pub const LEFT_LEG_TATTOO: Self = Self(36);
+    pub const AUX_TATTOO_1: Self = Self(37);
+    pub const AUX_TATTOO_2: Self = Self(38);
+    pub const AUX_TATTOO_3: Self = Self(39);
+    pub const LEFT_ARM_BAKED: Self = Self(40);
+    pub const LEFT_LEG_BAKED: Self = Self(41);
+    pub const AUX_BAKED_1: Self = Self(42);
+    pub const AUX_BAKED_2: Self = Self(43);
+    pub const AUX_BAKED_3: Self = Self(44);
+
+    /// Creates a slot in the official avatar TextureEntry range 0–44.
+    pub const fn new(index: u8) -> Option<Self> {
+        if index < MAX_AVATAR_TEXTURE_SLOTS as u8 { Some(Self(index)) } else { None }
+    }
+
+    pub const fn index(self) -> u8 {
+        self.0
+    }
+
+    /// Returns the baked output represented by this TextureEntry slot, if any.
+    pub const fn baked_slot(self) -> Option<AvatarBakeSlot> {
+        match self.0 {
+            8 => Some(AvatarBakeSlot::Head),
+            9 => Some(AvatarBakeSlot::Upper),
+            10 => Some(AvatarBakeSlot::Lower),
+            11 => Some(AvatarBakeSlot::Eyes),
+            19 => Some(AvatarBakeSlot::Skirt),
+            20 => Some(AvatarBakeSlot::Hair),
+            40 => Some(AvatarBakeSlot::LeftArm),
+            41 => Some(AvatarBakeSlot::LeftLeg),
+            42 => Some(AvatarBakeSlot::Aux1),
+            43 => Some(AvatarBakeSlot::Aux2),
+            44 => Some(AvatarBakeSlot::Aux3),
+            _ => None,
+        }
+    }
+}
+
+/// A server-baked output slot, separate from its TextureEntry slot number.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum AvatarBakeSlot {
+    Head,
+    Upper,
+    Lower,
+    Eyes,
+    Skirt,
+    Hair,
+    LeftArm,
+    LeftLeg,
+    Aux1,
+    Aux2,
+    Aux3,
+}
+
+impl AvatarBakeSlot {
+    /// Returns the TextureEntry slot that carries this baked output.
+    pub const fn texture_slot(self) -> AvatarTextureSlot {
+        match self {
+            Self::Head => AvatarTextureSlot::HEAD_BAKED,
+            Self::Upper => AvatarTextureSlot::UPPER_BAKED,
+            Self::Lower => AvatarTextureSlot::LOWER_BAKED,
+            Self::Eyes => AvatarTextureSlot::EYES_BAKED,
+            Self::Skirt => AvatarTextureSlot::SKIRT_BAKED,
+            Self::Hair => AvatarTextureSlot::HAIR_BAKED,
+            Self::LeftArm => AvatarTextureSlot::LEFT_ARM_BAKED,
+            Self::LeftLeg => AvatarTextureSlot::LEFT_LEG_BAKED,
+            Self::Aux1 => AvatarTextureSlot::AUX_BAKED_1,
+            Self::Aux2 => AvatarTextureSlot::AUX_BAKED_2,
+            Self::Aux3 => AvatarTextureSlot::AUX_BAKED_3,
+        }
+    }
+}
+
+/// All 45 avatar texture slots from a successfully decoded TextureEntry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AvatarTextureSlots {
+    values: [Option<AssetId>; MAX_AVATAR_TEXTURE_SLOTS],
+}
+
+impl Default for AvatarTextureSlots {
+    fn default() -> Self {
+        Self { values: [None; MAX_AVATAR_TEXTURE_SLOTS] }
+    }
+}
+
+impl AvatarTextureSlots {
+    /// Creates a complete slot table. `None` means the simulator supplied a nil UUID for that slot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AvatarAppearanceError::NilTextureId`] if a non-cleared slot contains a nil asset.
+    pub fn new(values: [Option<AssetId>; MAX_AVATAR_TEXTURE_SLOTS]) -> Result<Self, AvatarAppearanceError> {
+        if values.iter().flatten().any(|asset| asset.uuid().is_nil()) {
+            return Err(AvatarAppearanceError::NilTextureId);
+        }
+        Ok(Self { values })
+    }
+
+    pub fn texture(&self, slot: AvatarTextureSlot) -> Option<AssetId> {
+        self.values[usize::from(slot.index())]
+    }
+
+    /// Returns all slots in TextureEntry order, including cleared slots.
+    pub fn iter(&self) -> impl Iterator<Item = (AvatarTextureSlot, Option<AssetId>)> + '_ {
+        self.values
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, asset)| (AvatarTextureSlot::new(index as u8).expect("slot array has the supported length"), asset))
+    }
+}
+
+/// A complete avatar appearance state retained by World.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AvatarAppearance {
+    appearance_version: Option<u8>,
+    cof_version: Option<i32>,
+    visual_params: Vec<(AvatarVisualParamIndex, u8)>,
+    texture_slots: Option<Arc<AvatarTextureSlots>>,
+}
+
+impl AvatarAppearance {
+    /// Returns the latest supplied AppearanceData version byte.
+    pub const fn appearance_version(&self) -> Option<u8> {
+        self.appearance_version
+    }
+
+    /// Returns the latest supplied COF version.
+    pub const fn cof_version(&self) -> Option<i32> {
+        self.cof_version
+    }
+
+    /// Returns the last received weight for a wire position, if one has been supplied.
+    pub fn visual_param(&self, index: AvatarVisualParamIndex) -> Option<u8> {
+        self.visual_params.binary_search_by_key(&index, |(id, _)| *id).ok().map(|at| self.visual_params[at].1)
+    }
+
+    /// Returns all known wire positions in ascending order.
+    pub fn visual_params(&self) -> impl Iterator<Item = (AvatarVisualParamIndex, u8)> + '_ {
+        self.visual_params.iter().copied()
+    }
+
+    /// Returns the last complete avatar texture table, if one was decoded.
+    pub fn texture_slots(&self) -> Option<&AvatarTextureSlots> {
+        self.texture_slots.as_deref()
+    }
+
+    pub(crate) fn apply(&mut self, update: AvatarAppearanceUpdate) {
+        if let Some(version) = update.appearance_version {
+            self.appearance_version = Some(version);
+        }
+        if let Some(version) = update.cof_version {
+            self.cof_version = Some(version);
+        }
+        for (index, value) in update.visual_params {
+            match self.visual_params.binary_search_by_key(&index, |(id, _)| *id) {
+                Ok(at) => self.visual_params[at].1 = value,
+                Err(at) => self.visual_params.insert(at, (index, value)),
+            }
+        }
+        if let Some(slots) = update.texture_slots {
+            self.texture_slots = Some(slots);
+        }
+    }
+}
+
+/// One decoded AvatarAppearance message, with absent fields represented as no update.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AvatarAppearanceUpdate {
+    appearance_version: Option<u8>,
+    cof_version: Option<i32>,
+    visual_params: Vec<(AvatarVisualParamIndex, u8)>,
+    texture_slots: Option<Arc<AvatarTextureSlots>>,
+}
+
+impl AvatarAppearanceUpdate {
+    /// Creates a partial update, rejecting duplicate visual positions.
+    ///
+    /// Visual positions are sorted before storage. A texture table, when supplied, replaces all
+    /// avatar texture slots; `None` leaves the existing table unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AvatarAppearanceError::DuplicateVisualParam`] for duplicate positions or
+    /// [`AvatarAppearanceError::TooManyVisualParams`] for more values than a U8 count can carry.
+    pub fn new(
+        appearance_version: Option<u8>,
+        cof_version: Option<i32>,
+        mut visual_params: Vec<(AvatarVisualParamIndex, u8)>,
+        texture_slots: Option<AvatarTextureSlots>,
+    ) -> Result<Self, AvatarAppearanceError> {
+        if visual_params.len() > MAX_AVATAR_VISUAL_PARAMS {
+            return Err(AvatarAppearanceError::TooManyVisualParams);
+        }
+        visual_params.sort_unstable_by_key(|(index, _)| *index);
+        if visual_params.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(AvatarAppearanceError::DuplicateVisualParam);
+        }
+        Ok(Self { appearance_version, cof_version, visual_params, texture_slots: texture_slots.map(Arc::new) })
+    }
+
+    pub const fn appearance_version(&self) -> Option<u8> {
+        self.appearance_version
+    }
+
+    pub const fn cof_version(&self) -> Option<i32> {
+        self.cof_version
+    }
+
+    pub fn visual_params(&self) -> impl Iterator<Item = (AvatarVisualParamIndex, u8)> + '_ {
+        self.visual_params.iter().copied()
+    }
+
+    pub fn texture_slots(&self) -> Option<&AvatarTextureSlots> {
+        self.texture_slots.as_deref()
+    }
+}
+
+/// Why a bounded avatar appearance value could not be constructed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AvatarAppearanceError {
+    /// A visual-parameter position was supplied more than once.
+    DuplicateVisualParam,
+    /// A non-cleared texture slot contained a nil UUID.
+    NilTextureId,
+    /// More visual-parameter values were supplied than fit the wire count.
+    TooManyVisualParams,
+}
+
+#[cfg(test)]
+mod tests {
+    use base::UUID;
+
+    use super::{AvatarAppearance, AvatarAppearanceUpdate, AvatarBakeSlot, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex};
+    use crate::AssetId;
+
+    #[test]
+    fn avatar_slot_bounds_hold() {
+        assert_eq!(AvatarTextureSlot::new(44).map(AvatarTextureSlot::index), Some(44));
+        assert_eq!(AvatarTextureSlot::new(45), None);
+        assert_eq!(AvatarVisualParamIndex::new(254).map(AvatarVisualParamIndex::get), Some(254));
+        assert_eq!(AvatarVisualParamIndex::new(255), None);
+    }
+
+    #[test]
+    fn baked_slots_use_avatar_indices() {
+        assert_eq!(AvatarTextureSlot::HEAD_BAKED.baked_slot(), Some(AvatarBakeSlot::Head));
+        assert_eq!(AvatarTextureSlot::AUX_BAKED_3.baked_slot(), Some(AvatarBakeSlot::Aux3));
+        assert_eq!(AvatarTextureSlot::HEAD_BODY_PAINT.baked_slot(), None);
+        assert_eq!(AvatarBakeSlot::Skirt.texture_slot(), AvatarTextureSlot::SKIRT_BAKED);
+    }
+
+    #[test]
+    fn params_merge_by_position() {
+        let first = AvatarAppearanceUpdate::new(
+            None,
+            None,
+            vec![(AvatarVisualParamIndex::new(0).unwrap(), 10), (AvatarVisualParamIndex::new(2).unwrap(), 30)],
+            None,
+        )
+        .expect("valid update");
+        let second =
+            AvatarAppearanceUpdate::new(None, None, vec![(AvatarVisualParamIndex::new(0).unwrap(), 20)], None).expect("valid update");
+        let mut appearance = AvatarAppearance::default();
+
+        appearance.apply(first);
+        appearance.apply(second);
+
+        assert_eq!(appearance.visual_param(AvatarVisualParamIndex::new(0).unwrap()), Some(20));
+        assert_eq!(appearance.visual_param(AvatarVisualParamIndex::new(2).unwrap()), Some(30));
+    }
+
+    #[test]
+    fn texture_slots_replace_and_clear() {
+        let slot = AvatarTextureSlot::HEAD_BAKED;
+        let mut values = [None; super::MAX_AVATAR_TEXTURE_SLOTS];
+        values[usize::from(slot.index())] = Some(AssetId::new(UUID::from_u128(7)));
+        let set = AvatarTextureSlots::new(values).expect("valid slots");
+        let mut appearance = AvatarAppearance::default();
+        appearance.apply(AvatarAppearanceUpdate::new(None, None, Vec::new(), Some(set)).expect("valid update"));
+        assert_eq!(appearance.texture_slots().and_then(|slots| slots.texture(slot)), Some(AssetId::new(UUID::from_u128(7))));
+
+        let retained = appearance.clone();
+        appearance.apply(AvatarAppearanceUpdate::new(None, None, Vec::new(), Some(AvatarTextureSlots::default())).expect("valid clear"));
+        assert_eq!(appearance.texture_slots().and_then(|slots| slots.texture(slot)), None);
+        assert_eq!(retained.texture_slots().and_then(|slots| slots.texture(slot)), Some(AssetId::new(UUID::from_u128(7))));
+
+        appearance.apply(AvatarAppearanceUpdate::new(Some(1), None, Vec::new(), None).expect("partial update"));
+        assert!(appearance.texture_slots().is_some());
+        assert_eq!(appearance.texture_slots().and_then(|slots| slots.texture(slot)), None);
+    }
+}

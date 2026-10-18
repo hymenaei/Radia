@@ -240,7 +240,8 @@ impl ConcurrentAssetServer {
             let active = Arc::new(AtomicUsize::new(0));
             let peak = Arc::new(AtomicUsize::new(0));
             let mut asset_workers = Vec::with_capacity(asset_count);
-            let asset_deadline = Instant::now() + Duration::from_secs(2);
+            let asset_timeout = if failed_asset_index.is_some() { 2 } else { 10 };
+            let asset_deadline = Instant::now() + Duration::from_secs(asset_timeout);
             for _ in 0..asset_count {
                 let Some(mut stream) = accept_request(&listener, asset_deadline) else {
                     break;

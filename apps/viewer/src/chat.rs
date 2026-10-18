@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 
-use gpui::{Context, IntoElement, Render, TitlebarOptions, Window, WindowBounds, WindowKind, WindowOptions, div, prelude::*, px, size};
+use gpui::{Context, IntoElement, Render, Window, div, prelude::*, px};
 use gpui_component::{
-    Disableable, IconName, Root, StyledExt, Theme,
+    Disableable, IconName, StyledExt, Theme,
     button::{Button, ButtonVariants as _},
     input::{Input, InputState},
 };
@@ -15,12 +15,7 @@ use protocol::{
     },
 };
 
-use crate::{
-    devtools::{DeveloperFloater, WorldSource},
-    secondary_windows,
-    session::{ChatMessage, SharedWorldState, format_avatar_name},
-    window_geometry,
-};
+use crate::session::{ChatMessage, format_avatar_name};
 
 const MAX_CHAT_HISTORY_MESSAGES: usize = 500;
 const MAX_CHAT_HISTORY_BYTES: usize = 1024 * 1024;
@@ -35,8 +30,6 @@ pub struct ChatScreen {
     message_input: gpui::Entity<InputState>,
     capture_stop_pending: bool,
     capture_generation: u64,
-    world_source: WorldSource,
-    developer_window: Option<gpui::WindowHandle<Root>>,
 }
 
 impl ChatScreen {
@@ -53,8 +46,6 @@ impl ChatScreen {
             message_input,
             capture_stop_pending: false,
             capture_generation: 0,
-            world_source: WorldSource::new(),
-            developer_window: None,
         }
     }
 
@@ -73,15 +64,6 @@ impl ChatScreen {
         self.messages.clear();
         self.message_bytes = 0;
         self.transcript_scroll = gpui::ScrollHandle::new();
-        self.world_source.set(None);
-        if let Some(window) = self.developer_window.take() {
-            let _ = window.update(cx, |_, window, _| window.remove_window());
-        }
-        cx.notify();
-    }
-
-    pub fn set_world_state(&mut self, state: SharedWorldState, cx: &mut Context<Self>) {
-        self.world_source.set(Some(state));
         cx.notify();
     }
 
@@ -120,68 +102,7 @@ impl ChatScreen {
                         .on_click(cx.listener(|this, _event, _window, cx| this.stop_capture(cx))),
                 )
             })
-            .child(
-                Button::new("open-developer-tools")
-                    .ghost()
-                    .compact()
-                    .h(px(24.))
-                    .relative()
-                    .top(px(-1.))
-                    .accessibility_label("Developer Tools")
-                    .child(div().text_sm().child("Developer Tools"))
-                    .on_click(cx.listener(|this, _event, window, cx| this.open_developer_tools(window, cx))),
-            )
             .into_any_element()
-    }
-
-    fn open_developer_tools(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(existing) = self.developer_window
-            && existing.update(cx, |_, window, _| window.activate_window()).is_ok()
-        {
-            return;
-        }
-
-        let minimum_size = size(px(900.), px(520.));
-        let display = window.display(cx).map(|display| display.id());
-        let bounds = window_geometry::restore_bounds("developer-tools", display, size(px(1080.), px(720.)), minimum_size, cx);
-        let world_source = self.world_source.clone();
-        match cx.open_window(
-            WindowOptions {
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Developer Tools".into()),
-                    appears_transparent: cfg!(target_os = "windows"),
-                    ..Default::default()
-                }),
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(minimum_size),
-                kind: WindowKind::Normal,
-                show: cfg!(not(target_os = "windows")),
-                focus: cfg!(not(target_os = "windows")),
-                ..Default::default()
-            },
-            move |window, cx| {
-                #[cfg(target_os = "windows")]
-                window.on_next_frame(|window, _| {
-                    if !secondary_windows::remove_from_taskbar(window) {
-                        tracing::warn!("could not remove Developer Tools from the Windows taskbar");
-                    }
-                });
-
-                let view = cx.new(|cx| DeveloperFloater::new(world_source, window, cx));
-                cx.new(|cx| Root::new(view, window, cx))
-            },
-        ) {
-            Ok(handle) => match handle.update(cx, |_, window, app| {
-                secondary_windows::register(window, app);
-                window.activate_window();
-            }) {
-                Ok(()) => {
-                    self.developer_window = Some(handle);
-                }
-                Err(error) => tracing::warn!(%error, "could not activate developer tools window"),
-            },
-            Err(error) => tracing::warn!(%error, "could not open developer tools"),
-        }
     }
 
     pub fn set_region_name(&mut self, region_name: String, cx: &mut Context<Self>) {

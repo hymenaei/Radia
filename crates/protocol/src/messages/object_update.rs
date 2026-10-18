@@ -6,12 +6,24 @@ use crate::{
     LLUdpError,
     lludp::codec::{Reader, Writer},
     messages::common::{
-        ExtraParameter, ObjectMotion, ObjectShape, ObjectSound, ObjectText, RegionData, decode_extra_parameters, encode_extra_parameters,
+        ExtraParameter, ObjectMotion, ObjectSound, ObjectText, RegionData, decode_extra_parameters, encode_extra_parameters,
         read_variable1, read_variable2, read_vector4, rotation_from_vector3, skip_extra_parameters, write_finite_vector3,
         write_finite_vector4, write_variable1, write_variable2,
     },
+    types::{ObjectShape, TextureEntry, decode_texture_entry as decode_texture_entry_payload},
 };
 use math::{Vec3, Vec4};
+
+/// Largest full ObjectUpdate TextureEntry payload decoded by the viewer.
+pub const MAX_TEXTURE_ENTRY_BYTES: usize = 4095;
+
+/// Decodes the bounded TextureEntry payload carried by a full ObjectUpdate.
+pub fn decode_texture_entry(bytes: &[u8]) -> Result<Option<TextureEntry>, LLUdpError> {
+    if bytes.len() > MAX_TEXTURE_ENTRY_BYTES {
+        return Err(LLUdpError::InvalidMessage);
+    }
+    decode_texture_entry_payload(bytes).map_err(|_| LLUdpError::InvalidMessage)
+}
 
 /// A full simulator object update.
 #[derive(Clone, Debug, PartialEq)]

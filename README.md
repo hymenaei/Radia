@@ -24,4 +24,4 @@ cargo profile
 
 The Tracy layer accepts profiler connections from localhost and starts collecting when Tracy connects. The normal `cargo run` build keeps Tracy disabled and logs informational messages to the terminal.
 
-For details on recording and inspecting local network captures, see [docs/CAPTURE.md](docs/CAPTURE.md).
+For details on recording and inspecting local network captures, see [docs/capture.md](docs/capture.md).

@@ -205,7 +205,6 @@ impl<'a> CoordinatorRuntime<'a> {
                 capability_event = capability_event_rx.recv(), if !capability_events_closed => {
                     match capability_event {
                         Some(envelope) => {
-                            let event_queue_order = envelope.event_queue_order();
                             let (event, retained_bytes, coverage_watermark) = envelope.into_parts();
                             match event {
                         Event::CapabilityEvent { simulator_id, source, message, mut body } => {
@@ -246,7 +245,7 @@ impl<'a> CoordinatorRuntime<'a> {
                             )
                             .await?;
                         }
-                        Event::CapabilityEventBatch { simulator_id, source, events: mut batch } => {
+                        Event::CapabilityEventBatch { simulator_id, source, order, events: mut batch } => {
                             if !is_current_simulator(simulator_id, coordinator.simulator_id, &run_state.neighbor_connections) {
                                 continue;
                             }
@@ -263,7 +262,7 @@ impl<'a> CoordinatorRuntime<'a> {
                                     simulator_id,
                                     &event.message,
                                     &event.body,
-                                    event_queue_order.map(|(incarnation, batch)| HandoffOrder::EventQueue { incarnation, batch, index }),
+                                    Some(HandoffOrder::EventQueue { incarnation: order.incarnation, batch: order.ordinal, index }),
                                     &mut setup,
                                     &mut handoff_state,
                                 )
@@ -275,7 +274,7 @@ impl<'a> CoordinatorRuntime<'a> {
                             coordinator.publish_simulator_event(
                                 simulator_id,
                                 EventEnvelope::from_parts(
-                                    Event::CapabilityEventBatch { simulator_id, source, events: batch },
+                                    Event::CapabilityEventBatch { simulator_id, source, order, events: batch },
                                     retained_bytes,
                                     coverage_watermark,
                                 ),

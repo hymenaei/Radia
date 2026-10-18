@@ -52,6 +52,15 @@ pub enum PacketOrder {
     Degraded,
 }
 
+/// Identifies one admitted EventQueue response batch within a poll-task incarnation.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct EventQueueBatchOrder {
+    /// EventQueue poll-task incarnation that received the batch.
+    pub incarnation: u64,
+    /// Zero-based order of the batch within that incarnation.
+    pub ordinal: u64,
+}
+
 pub(crate) enum EventSendOutcome {
     Sent,
     ReceiverClosed,
@@ -79,12 +88,11 @@ pub(crate) struct EventEnvelope {
     pub(crate) event: Event,
     retained_bytes: Option<EventRetention>,
     coverage_watermark: Option<CoverageWatermark>,
-    event_queue_order: Option<(u64, u64)>,
 }
 
 impl EventEnvelope {
     pub(crate) fn new(event: Event) -> Self {
-        Self { event, retained_bytes: None, coverage_watermark: None, event_queue_order: None }
+        Self { event, retained_bytes: None, coverage_watermark: None }
     }
 
     #[cfg(test)]
@@ -94,37 +102,28 @@ impl EventEnvelope {
 
     #[cfg(test)]
     pub(crate) fn with_retention(event: Event, retention: EventRetention) -> Self {
-        Self { event, retained_bytes: Some(retention), coverage_watermark: None, event_queue_order: None }
+        Self { event, retained_bytes: Some(retention), coverage_watermark: None }
     }
 
     #[cfg(test)]
     pub(crate) fn with_coverage_watermark(event: Event, coverage_watermark: CoverageWatermark) -> Self {
-        Self { event, retained_bytes: None, coverage_watermark: Some(coverage_watermark), event_queue_order: None }
+        Self { event, retained_bytes: None, coverage_watermark: Some(coverage_watermark) }
     }
 
     pub(crate) fn with_retention_and_coverage(event: Event, retention: EventRetention, coverage_watermark: CoverageWatermark) -> Self {
-        Self { event, retained_bytes: Some(retention), coverage_watermark: Some(coverage_watermark), event_queue_order: None }
-    }
-
-    pub(crate) fn with_event_queue_order(mut self, incarnation: u64, batch: u64) -> Self {
-        self.event_queue_order = Some((incarnation, batch));
-        self
+        Self { event, retained_bytes: Some(retention), coverage_watermark: Some(coverage_watermark) }
     }
 
     pub(crate) fn from_parts(event: Event, retained_bytes: Option<EventRetention>, coverage_watermark: Option<CoverageWatermark>) -> Self {
-        Self { event, retained_bytes, coverage_watermark, event_queue_order: None }
+        Self { event, retained_bytes, coverage_watermark }
     }
 
     pub(crate) fn coverage_watermark(&self) -> Option<CoverageWatermark> {
         self.coverage_watermark
     }
 
-    pub(crate) fn event_queue_order(&self) -> Option<(u64, u64)> {
-        self.event_queue_order
-    }
-
     pub(crate) fn into_parts(self) -> (Event, Option<EventRetention>, Option<CoverageWatermark>) {
-        let Self { event, retained_bytes, coverage_watermark, .. } = self;
+        let Self { event, retained_bytes, coverage_watermark } = self;
         (event, retained_bytes, coverage_watermark)
     }
 
@@ -220,6 +219,7 @@ pub enum Event {
     CapabilityEventBatch {
         simulator_id: SimulatorId,
         source: SocketAddr,
+        order: EventQueueBatchOrder,
         events: Vec<CapabilityEvent>,
     },
     /// A capability request or poll failed for the identified simulator.

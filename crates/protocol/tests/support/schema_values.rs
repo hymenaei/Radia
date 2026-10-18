@@ -20,7 +20,7 @@ pub(crate) fn generated_schema_blocks(message_schema: &MessageSchema, seed: u64)
             };
             let instances = (0..count)
                 .map(|instance_index| {
-                    let fields = block_schema
+                    let mut fields = block_schema
                         .fields
                         .iter()
                         .enumerate()
@@ -31,7 +31,15 @@ pub(crate) fn generated_schema_blocks(message_schema: &MessageSchema, seed: u64)
                                 .wrapping_add(field_index as u64);
                             generated_field_value(field.kind, field.name, field_seed)
                         })
-                        .collect();
+                        .collect::<Vec<_>>();
+                    if message_schema.name == "ObjectExtraParams" && block_schema.name == "ObjectData" {
+                        let size_index = block_schema.fields.iter().position(|field| field.name == "ParamSize").expect("ParamSize field");
+                        let data_index = block_schema.fields.iter().position(|field| field.name == "ParamData").expect("ParamData field");
+                        let FieldValue::Bytes(data) = &fields[data_index] else {
+                            panic!("generated ParamData is variable bytes");
+                        };
+                        fields[size_index] = FieldValue::U32(u32::try_from(data.len()).expect("generated ParamData length fits"));
+                    }
                     BlockInstance::new(fields)
                 })
                 .collect();

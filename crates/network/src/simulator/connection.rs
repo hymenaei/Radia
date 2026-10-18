@@ -3409,13 +3409,13 @@ mod tests {
         let mut malformed = parse_hex_fixture(vectors::IMPROVED_TERSE_OBJECT_UPDATE).expect("parse terse update fixture");
         malformed[0] |= 0x40;
         malformed[1..5].copy_from_slice(&sequence.to_be_bytes());
-        malformed[24] = 1;
+        malformed[18] = u8::MAX;
         assert_eq!(
             protocol::lludp::Packet::preflight(&malformed),
             Err(LLUdpError::TruncatedPacket),
-            "preflight rejects the missing avatar collision plane"
+            "preflight rejects an object field that exceeds its packet frame"
         );
-        assert!(Packet::decode(&malformed).is_err(), "typed decoder must reject the missing avatar collision plane");
+        assert!(Packet::decode(&malformed).is_err(), "decoder must reject malformed object framing");
         simulator.send_to(&malformed, peer).await.expect("send malformed reliable update");
 
         let mut buffer = [0; 2048];

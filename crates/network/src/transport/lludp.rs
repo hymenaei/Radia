@@ -40,6 +40,8 @@ const MAX_ACKS_PER_PACKET: usize = u8::MAX as usize;
 const MAX_NORMAL_DATAGRAM_BYTES: usize = 1_200;
 pub(crate) const MAX_RECEIVED_RELIABLE_PACKETS: usize = 65_536;
 const DUPLICATE_SUPPRESSION_TIMEOUT: Duration = Duration::from_secs(60);
+const SEQUENCE_24_MASK: u32 = 0x00ff_ffff;
+const SEQUENCE_24_HALF_RANGE: u32 = 1 << 23;
 const INITIAL_PING_DELAY: Duration = Duration::from_secs(1);
 const MINIMUM_PING_DELAY: Duration = Duration::from_millis(100);
 const MAXIMUM_PING_DELAY: Duration = Duration::from_secs(2);
@@ -94,6 +96,7 @@ pub(crate) struct Circuit {
     pending_ack_sequences: HashSet<u32>,
     received_sequences: HashMap<u32, Instant>,
     highest_received_sequence: Option<u32>,
+    wide_sequence_seen: bool,
     ordering_anchor: Option<SequenceAnchor>,
     ordering_authority: OrderingAuthority,
     duplicate_history_full: bool,
@@ -193,6 +196,7 @@ impl Circuit {
             pending_ack_sequences: HashSet::new(),
             received_sequences: HashMap::new(),
             highest_received_sequence: None,
+            wide_sequence_seen: false,
             ordering_anchor: None,
             ordering_authority: OrderingAuthority::Trusted,
             duplicate_history_full: false,
@@ -486,11 +490,19 @@ impl Circuit {
             return;
         };
 
-        if highest_received == oldest_unacked || sequence_is_newer(highest_received, oldest_unacked) {
+        if highest_received == oldest_unacked || self.received_sequence_is_newer(highest_received, oldest_unacked) {
             let pending_ack_sequences = &self.pending_ack_sequences;
+            let wide_sequence_seen = self.wide_sequence_seen;
             self.received_sequences.retain(|sequence, received_at| {
                 pending_ack_sequences.contains(sequence)
-                    || sequence_is_at_or_after(*sequence, oldest_unacked)
+                    || matches!(
+                        compare_received_sequence(
+                            *sequence,
+                            oldest_unacked,
+                            wide_sequence_seen || *sequence > SEQUENCE_24_MASK || oldest_unacked > SEQUENCE_24_MASK,
+                        ),
+                        SequenceOrdering::Equal | SequenceOrdering::Newer(_)
+                    )
                     || now.saturating_duration_since(*received_at) <= DUPLICATE_SUPPRESSION_TIMEOUT
             });
         }
@@ -500,6 +512,7 @@ impl Circuit {
     }
 
     pub(crate) fn observe_sequence(&mut self, sequence: u32) -> PacketOrder {
+        self.wide_sequence_seen |= sequence > SEQUENCE_24_MASK;
         self.advance_received_sequence(sequence);
 
         if self.ordering_authority == OrderingAuthority::Degraded {
@@ -512,7 +525,7 @@ impl Circuit {
             return Ordered(order);
         };
 
-        match compare_sequence(sequence, anchor.sequence) {
+        match compare_received_sequence(sequence, anchor.sequence, self.wide_sequence_seen) {
             SequenceOrdering::Equal => Ordered(anchor.order),
             SequenceOrdering::Newer(distance) if distance <= MAX_ORDERED_SEQUENCE_DISTANCE => {
                 let Some(order) = anchor.order.checked_add(u64::from(distance)) else {
@@ -542,7 +555,7 @@ impl Circuit {
             return Ordered(u64::from(sequence));
         };
 
-        match compare_sequence(sequence, anchor.sequence) {
+        match compare_received_sequence(sequence, anchor.sequence, self.wide_sequence_seen || sequence > SEQUENCE_24_MASK) {
             SequenceOrdering::Equal => Ordered(anchor.order),
             SequenceOrdering::Newer(distance) if distance <= MAX_ORDERED_SEQUENCE_DISTANCE => {
                 anchor.order.checked_add(u64::from(distance)).map_or(Degraded, Ordered)
@@ -561,9 +574,20 @@ impl Circuit {
             return;
         };
 
-        if matches!(compare_sequence(sequence, highest_received), SequenceOrdering::Newer(_)) {
+        if matches!(compare_received_sequence(sequence, highest_received, self.wide_sequence_seen), SequenceOrdering::Newer(_)) {
             self.highest_received_sequence = Some(sequence);
         }
+    }
+
+    fn received_sequence_is_newer(&self, sequence: u32, reference: u32) -> bool {
+        matches!(
+            compare_received_sequence(
+                sequence,
+                reference,
+                self.wide_sequence_seen || sequence > SEQUENCE_24_MASK || reference > SEQUENCE_24_MASK
+            ),
+            SequenceOrdering::Newer(_)
+        )
     }
 
     fn acknowledge_outgoing_ids(&mut self, acknowledgements: impl IntoIterator<Item = u32>) {
@@ -666,12 +690,9 @@ pub(crate) fn sequence_age(next_sequence: u32, sequence: u32) -> u32 {
     next_sequence.wrapping_sub(sequence)
 }
 
-pub(crate) fn sequence_is_newer(sequence: u32, reference: u32) -> bool {
+#[cfg(test)]
+fn sequence_is_newer(sequence: u32, reference: u32) -> bool {
     matches!(compare_sequence(sequence, reference), SequenceOrdering::Newer(_))
-}
-
-fn sequence_is_at_or_after(sequence: u32, reference: u32) -> bool {
-    matches!(compare_sequence(sequence, reference), SequenceOrdering::Equal | SequenceOrdering::Newer(_))
 }
 
 fn compare_sequence(sequence: u32, reference: u32) -> SequenceOrdering {
@@ -681,6 +702,21 @@ fn compare_sequence(sequence: u32, reference: u32) -> SequenceOrdering {
         0 => SequenceOrdering::Equal,
         distance if distance == SEQUENCE_32_HALF_RANGE => SequenceOrdering::Ambiguous,
         distance if distance < SEQUENCE_32_HALF_RANGE => SequenceOrdering::Newer(distance),
+        _ => SequenceOrdering::Older(backward),
+    }
+}
+
+fn compare_received_sequence(sequence: u32, reference: u32, wide_sequence_seen: bool) -> SequenceOrdering {
+    if wide_sequence_seen || sequence > SEQUENCE_24_MASK || reference > SEQUENCE_24_MASK {
+        return compare_sequence(sequence, reference);
+    }
+
+    let forward = sequence.wrapping_sub(reference) & SEQUENCE_24_MASK;
+    let backward = reference.wrapping_sub(sequence) & SEQUENCE_24_MASK;
+    match forward {
+        0 => SequenceOrdering::Equal,
+        distance if distance == SEQUENCE_24_HALF_RANGE => SequenceOrdering::Ambiguous,
+        distance if distance < SEQUENCE_24_HALF_RANGE => SequenceOrdering::Newer(distance),
         _ => SequenceOrdering::Older(backward),
     }
 }
@@ -1299,6 +1335,31 @@ mod protocol_tests {
         }
 
         assert_eq!(circuit.observe_sequence(u32::MAX), Ordered(u64::from(u32::MAX)));
+    }
+
+    #[test]
+    fn source_packet_order_tracks_viewer_sequence_wrap() {
+        let mut circuit = Circuit::new();
+        for (sequence, order) in [(0x00ff_fffe, 0x00ff_fffe), (0x00ff_ffff, 0x00ff_ffff), (0, 0x0100_0000), (1, 0x0100_0001)] {
+            assert_eq!(circuit.observe_sequence(sequence), Ordered(order));
+        }
+
+        assert_eq!(circuit.observe_sequence(0x00ff_ffff), Ordered(0x00ff_ffff));
+    }
+
+    #[test]
+    fn received_duplicate_history_uses_the_viewer_sequence_wrap() {
+        let start = Instant::now();
+        let mut circuit = Circuit::new();
+        for sequence in [0x00ff_fffe, 0x00ff_ffff, 0] {
+            circuit.receive_at(&reliable_packet(sequence), start).expect("receive reliable packet");
+        }
+        circuit.pending_acks.clear();
+        circuit.pending_ack_sequences.clear();
+
+        circuit.clear_duplicate_list(0, start + Duration::from_secs(61));
+
+        assert_eq!(circuit.received_sequences.keys().copied().collect::<Vec<_>>(), [0]);
     }
 
     #[test]

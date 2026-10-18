@@ -32,6 +32,7 @@ use super::{
 
 pub(super) struct AdmittedResponse {
     pub(super) body: Vec<u8>,
+    pub(super) max_response_bytes: usize,
     pub(super) _memory: Option<http::ResponseMemoryPermit>,
     pub(super) _request: OwnedSemaphorePermit,
 }
@@ -112,6 +113,7 @@ pub(super) enum Command {
     Post {
         url: CapabilityUrl,
         body: Vec<u8>,
+        max_response_bytes: usize,
         reply: oneshot::Sender<Result<AdmittedResponse, CapabilityFailure>>,
         deadline: RequestDeadline,
         _permit: OwnedSemaphorePermit,
@@ -206,13 +208,13 @@ pub(super) async fn run(
                     });
                     let _ = reply.send(result);
                 }
-                Command::Post { url, body, mut reply, deadline, _permit } => {
+                Command::Post { url, body, max_response_bytes, mut reply, deadline, _permit } => {
                     let result = tokio::select! {
                         biased;
                         _ = wait_for_session_close(session_closed) => Err(CapabilityFailure::SessionClosed),
                         _ = reply.closed() => return,
                         _ = time::sleep_until(deadline.at) => Err(CapabilityFailure::Http(deadline.http_error())),
-                        result = post(&client, &url.url, url.capture_endpoint.as_deref(), body, "Capability request", MAX_CAPABILITY_RESPONSE_BYTES)
+                        result = post(&client, &url.url, url.capture_endpoint.as_deref(), body, "Capability request", max_response_bytes)
                             => result.map_err(CapabilityFailure::Http),
                     };
                     if let Err(error) = &result
@@ -220,7 +222,7 @@ pub(super) async fn run(
                     {
                         status.record_error(error.to_string());
                     }
-                    let result = result.map(|response| into_admitted_response(response, _permit));
+                    let result = result.map(|response| into_admitted_response(response, max_response_bytes, _permit));
                     let _ = reply.send(result);
                 }
                 Command::GetBytes { url, mut reply, deadline, _permit } => {
@@ -236,7 +238,7 @@ pub(super) async fn run(
                     {
                         status.record_error(error.to_string());
                     }
-                    let result = result.map(|response| into_admitted_response(response, _permit));
+                    let result = result.map(|response| into_admitted_response(response, MAX_CAPABILITY_RESPONSE_BYTES, _permit));
                     let _ = reply.send(result);
                 }
             }
@@ -615,8 +617,8 @@ async fn get_bytes(client: &http::Client, url: &Url, capture_endpoint: Option<&s
     Ok(response)
 }
 
-fn into_admitted_response(response: Response, request: OwnedSemaphorePermit) -> AdmittedResponse {
-    AdmittedResponse { body: response.body, _memory: response.memory, _request: request }
+fn into_admitted_response(response: Response, max_response_bytes: usize, request: OwnedSemaphorePermit) -> AdmittedResponse {
+    AdmittedResponse { body: response.body, max_response_bytes, _memory: response.memory, _request: request }
 }
 
 pub(super) fn logical_endpoint_label(name: &str) -> Option<String> {
@@ -638,20 +640,29 @@ pub(super) fn decode_llsd_xml(body: &str, context: &str) -> Result<Value, String
     })
 }
 
+#[cfg(test)]
 pub(super) fn decode_capability_value(body: &[u8]) -> Result<Value, Error> {
-    xml::from_slice_with_limits(body, capability_llsd_limits())
+    decode_capability_value_with_response_limit(body, MAX_CAPABILITY_RESPONSE_BYTES)
+}
+
+pub(super) fn decode_capability_value_with_response_limit(body: &[u8], max_response_bytes: usize) -> Result<Value, Error> {
+    xml::from_slice_with_limits(body, capability_llsd_limits_with_response_limit(max_response_bytes))
         .map_err(|error| Error::Capability(format!("Could not decode an LLSD response: {}", llsd_error(error))))
 }
 
 pub(super) fn capability_llsd_limits() -> Limits {
+    capability_llsd_limits_with_response_limit(MAX_CAPABILITY_RESPONSE_BYTES)
+}
+
+pub(super) fn capability_llsd_limits_with_response_limit(max_response_bytes: usize) -> Limits {
     Limits {
-        max_input_bytes: MAX_CAPABILITY_RESPONSE_BYTES,
+        max_input_bytes: max_response_bytes,
         max_depth: MAX_LLSD_NESTING_DEPTH,
         max_values: MAX_LLSD_XML_ELEMENTS,
         max_container_items: MAX_LLSD_XML_ELEMENTS,
-        max_string_bytes: MAX_CAPABILITY_RESPONSE_BYTES,
-        max_map_key_bytes: MAX_CAPABILITY_RESPONSE_BYTES,
-        max_binary_bytes: MAX_CAPABILITY_RESPONSE_BYTES,
+        max_string_bytes: max_response_bytes,
+        max_map_key_bytes: max_response_bytes,
+        max_binary_bytes: max_response_bytes,
     }
 }
 
@@ -853,7 +864,7 @@ mod admission_tests {
     }
 
     #[test]
-    fn seed_capability_preflight_rejects_malformed_xml_and_returns_raw_admission() {
+    fn malformed_seed_body_releases_admission() {
         let body = b"<llsd><map></llsd>";
         let limit = body.len() + LLSD_SCAN_WORKING_BYTES + 1024;
         let budget = capability_response_budget(limit);
@@ -886,7 +897,7 @@ mod admission_tests {
     }
 
     #[test]
-    fn seed_capability_decode_memory_exhaustion_returns_raw_admission() {
+    fn seed_decode_exhaustion_releases_admission() {
         let body = b"<llsd><map><key>Texture</key><uri>https://cap.example/texture</uri></map></llsd>";
         let bound = xml::value_allocation_bound(body, seed_capability_llsd_limits()).expect("valid seed response bound");
         let limit = body.len() + LLSD_SCAN_WORKING_BYTES.max(bound) - 1;

@@ -7,12 +7,7 @@ use std::{
     },
 };
 
-use crate::{
-    diagnostics,
-    login::LoginScreen,
-    secondary_windows::{initialize, unregister},
-    window_geometry::restore_bounds,
-};
+use crate::{diagnostics, login::LoginScreen, window_geometry::restore_bounds};
 use gpui::{
     App, AppContext, ColorExt, Global, QuitMode, Subscription, TitlebarOptions, WindowBounds, WindowOptions, px, rgb, rgb_to_hsla, size,
 };
@@ -53,13 +48,11 @@ pub fn run() {
 
         gpui_component::init(cx);
         set_dark_theme(cx);
-        initialize(cx);
 
         let session_slot = Arc::clone(&shutdown_session);
         let main_window_id_on_close = Arc::clone(&main_window_id);
         let shutdown_started_on_close = Arc::clone(&shutdown_started);
         let window_closed = cx.on_window_closed(move |cx, closed_window_id| {
-            unregister(closed_window_id, cx);
             let main_window_id = *main_window_id_on_close.lock().unwrap_or_else(PoisonError::into_inner);
             let closing_main_window = main_window_id == Some(closed_window_id.as_u64());
             let open_windows = cx.windows();

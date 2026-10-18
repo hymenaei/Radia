@@ -109,6 +109,6 @@ Do not claim a check passed unless it was actually run.
 
 Keep this file high-signal. Add rules only for recurring, non-obvious project conventions or common mistakes. Do not turn `AGENTS.md` into documentation for the entire codebase.
 
-- Read `docs/CONTEXT.md` when work touches Second Life terminology, simulator lifecycle, entity identity, or protocol and event ordering.
-- Read `docs/ARCHITECTURE.md` when changing workspace membership, internal crate dependencies, or package ownership.
-- Consult `docs/TOOLING.md` for development commands, testing, fuzzing, benchmarks, profiling, and code analysis.
+- Read `docs/context.md` when work touches Second Life terminology, simulator lifecycle, entity identity, or protocol and event ordering.
+- Read `docs/architecture.md` when changing workspace membership, internal crate dependencies, or package ownership.
+- Consult `docs/tooling.md` for development commands, testing, fuzzing, benchmarks, profiling, and code analysis.

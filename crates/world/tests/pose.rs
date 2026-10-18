@@ -4,15 +4,15 @@ use base::UUID;
 use math::{DVec3, Quat, Vec3};
 use world::{
     Applied,
-    ApplyOutcome::{Introduced, RegionAdopted, RegionPatched, Removed, Unchanged, Updated},
-    AttachmentPoint, CoordinateFrame, Entity, Kind,
+    ApplyOutcome::{Introduced, Removed, Unchanged, Updated},
+    AttachmentPoint, CoordinateFrame, Entity, FieldGroup, FieldRejection, FieldRejectionReason, FieldUpdate, Kind,
     Kind::{Avatar, Object},
     LocalAddress, ObjectObservation, ObjectPatch,
     OrderEvidence::Ordered,
     Parent, ParentUpdate,
     ParentUpdate::{Local, Root},
-    Pose, PoseError, PoseState, Region, RegionHandle, RegionInfo, SitTarget, UnresolvedReason, UpdateSource, World, WorldLimits, WorldPose,
-    WorldTransformState,
+    Pose, PoseError, PoseState, Region, RegionHandle, RegionInfo, SitTarget, UnresolvedReason, UpdateAuthority, UpdateSource, World,
+    WorldLimits, WorldPose, WorldTransformState,
 };
 
 fn limits(entities: usize) -> WorldLimits {
@@ -48,18 +48,7 @@ fn address(region: Region, id: u32) -> LocalAddress {
 }
 
 fn observation(region: Region, order: u64, id: u128, local: u32, kind: Kind, parent: ParentUpdate) -> ObjectObservation {
-    ObjectObservation {
-        source: source(region, order),
-        id: uuid(id),
-        local_id: local_id(local),
-        kind,
-        parent,
-        pose: None,
-        linear_motion: None,
-        angular_velocity: None,
-        scale: None,
-        attachment_point: None,
-    }
+    ObjectObservation::new(source(region, order), uuid(id), local_id(local), kind, parent)
 }
 
 fn with_pose(mut object: ObjectObservation, position: Vec3, rotation: Quat) -> ObjectObservation {
@@ -69,8 +58,11 @@ fn with_pose(mut object: ObjectObservation, position: Vec3, rotation: Quat) -> O
 
 fn world_with_origin(region: Region, origin: DVec3, entities: usize) -> World {
     let mut world = World::new(limits(entities));
-    assert_eq!(world.adopt_region(region).unwrap().outcome, RegionAdopted);
-    assert_eq!(world.patch_region(region, RegionInfo { origin: Some(origin), ..RegionInfo::default() }).unwrap().outcome, RegionPatched);
+    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    assert!(matches!(
+        world.patch_region(region, RegionInfo { origin: Some(origin), ..RegionInfo::default() }).unwrap().outcome,
+        world::RegionOutcome::Patched { .. }
+    ));
     world
 }
 
@@ -120,7 +112,7 @@ fn nested_rotations_keep_f64_origin() {
 fn reused_parent_invalidates_pose() {
     let region = Region::new(45);
     let mut world = World::new(limits(3));
-    assert_eq!(world.adopt_region(region).unwrap().outcome, RegionAdopted);
+    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
     let old_parent = with_pose(observation(region, 10, 190, 1, Object, Root), Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY);
     introduced(world.observe_object(old_parent).unwrap());
     assert_eq!(world.remove_object(source(region, 12), local_id(1)).unwrap().outcome, Removed(uuid(190)));
@@ -156,14 +148,14 @@ fn resolved_pose_can_lack_scale() {
 fn late_origin_resolves_existing_pose() {
     let region = Region::new(12);
     let mut world = World::new(limits(2));
-    assert_eq!(world.adopt_region(region).unwrap().outcome, RegionAdopted);
+    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
     let entity = introduced(world.observe_object(with_pose(observation(region, 1, 16, 1, Object, Root), Vec3::X, Quat::IDENTITY)).unwrap());
     assert_eq!(world.object(entity).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::MissingRegionOrigin));
 
-    assert_eq!(
+    assert!(matches!(
         world.patch_region(region, RegionInfo { origin: Some(DVec3::new(20.0, 30.0, 0.0)), ..RegionInfo::default() }).unwrap().outcome,
-        RegionPatched
-    );
+        world::RegionOutcome::Patched { .. }
+    ));
     let PoseState::Resolved(pose) = world.object(entity).unwrap().world_pose().unwrap() else { panic!("expected resolved pose") };
     assert_eq!(pose.position, DVec3::new(21.0, 30.0, 0.0));
 }
@@ -173,8 +165,11 @@ fn handle_origin_resolves_pose() {
     let region = Region::new(15);
     let handle = RegionHandle::new((1024_u64 << 32) | 2048);
     let mut world = World::new(limits(1));
-    assert_eq!(world.adopt_region(region).unwrap().outcome, RegionAdopted);
-    assert_eq!(world.patch_region(region, RegionInfo { handle: Some(handle), ..RegionInfo::default() }).unwrap().outcome, RegionPatched);
+    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    assert!(matches!(
+        world.patch_region(region, RegionInfo { handle: Some(handle), ..RegionInfo::default() }).unwrap().outcome,
+        world::RegionOutcome::Patched { .. }
+    ));
     let entity = introduced(
         world.observe_object(with_pose(observation(region, 1, 18, 1, Object, Root), Vec3::new(3.0, 4.0, 5.0), Quat::IDENTITY)).unwrap(),
     );
@@ -187,14 +182,14 @@ fn handle_origin_resolves_pose() {
 fn pending_parent_is_first() {
     let region = Region::new(16);
     let mut world = World::new(limits(1));
-    assert_eq!(world.adopt_region(region).unwrap().outcome, RegionAdopted);
+    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
     let child = introduced(world.observe_object(observation(region, 1, 19, 1, Object, Local(local_id(2)))).unwrap());
 
     assert_eq!(world.object(child).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::PendingParent));
 }
 
 #[test]
-fn linkset_composes_rotation_without_parent_scale() {
+fn linkset_rotation_ignores_parent_scale() {
     let region = Region::new(2);
     let origin = DVec3::new(100.0, 200.0, 0.0);
     let mut world = world_with_origin(region, origin, 4);
@@ -291,9 +286,13 @@ fn sit_target_does_not_change_pose() {
 fn missing_local_pose_precedes_missing_origin() {
     let region = Region::new(44);
     let mut world = World::new(limits(2));
-    assert_eq!(world.adopt_region(region).unwrap().outcome, RegionAdopted);
+    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
     let no_pose = introduced(world.observe_object(observation(region, 1, 50, 1, Object, Root)).unwrap());
     assert_eq!(world.object(no_pose).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::MissingLocalPose));
+    assert_eq!(
+        world.object(no_pose).unwrap().world_transform().unwrap(),
+        WorldTransformState::Unresolved(UnresolvedReason::MissingLocalPose)
+    );
 
     let pose = with_pose(observation(region, 2, 51, 2, Object, Root), Vec3::X, Quat::IDENTITY);
     let missing_origin = introduced(world.observe_object(pose).unwrap());
@@ -304,7 +303,7 @@ fn missing_local_pose_precedes_missing_origin() {
 fn missing_pose_beats_joint() {
     let region = Region::new(18);
     let mut world = World::new(limits(2));
-    assert_eq!(world.adopt_region(region).unwrap().outcome, RegionAdopted);
+    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
     introduced(world.observe_object(observation(region, 1, 22, 1, Avatar, Root)).unwrap());
     let child = with_pose(observation(region, 2, 23, 2, Object, Local(local_id(1))), Vec3::X, Quat::IDENTITY);
     let child = introduced(world.observe_object(child).unwrap());
@@ -378,7 +377,62 @@ fn parent_change_requires_fresh_pose() {
 }
 
 #[test]
-fn partial_pose_updates_track_frame_independently() {
+fn repeated_parent_update_is_not_a_cycle() {
+    let region = Region::new(65);
+    let mut world = world_with_origin(region, DVec3::ZERO, 3);
+    let parent = introduced(world.observe_object(observation(region, 1, 650, 1, Object, Root)).unwrap());
+    let child = introduced(world.observe_object(observation(region, 2, 651, 2, Object, Local(local_id(1)))).unwrap());
+
+    let mut update = ObjectPatch::new(source(region, 3), local_id(2));
+    update.parent = Some(Local(local_id(1)));
+    let applied = world.patch_object(update).unwrap();
+
+    assert_eq!(applied.outcome, Unchanged);
+    assert!(applied.rejections.is_empty());
+    assert_eq!(world.object(child).unwrap().parent(), Parent::Resolved(parent));
+}
+
+#[test]
+fn delayed_observation_cannot_apply_pose_from_an_old_parent_frame() {
+    let region = Region::new(64);
+    let mut world = world_with_origin(region, DVec3::ZERO, 5);
+    let first_parent = introduced(
+        world.observe_object(with_pose(observation(region, 1, 640, 1, Object, Root), Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY)).unwrap(),
+    );
+    let second_parent = introduced(
+        world.observe_object(with_pose(observation(region, 2, 641, 2, Object, Root), Vec3::new(200.0, 0.0, 0.0), Quat::IDENTITY)).unwrap(),
+    );
+    let child = introduced(world.observe_object(with_pose(observation(region, 3, 642, 3, Object, Root), Vec3::X, Quat::IDENTITY)).unwrap());
+
+    let mut reparent = ObjectPatch::new(source(region, 20), local_id(3));
+    reparent.parent = Some(Local(local_id(2)));
+    assert_eq!(world.patch_object(reparent).unwrap().outcome, Updated(child));
+    assert_eq!(world.object(child).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::PoseNotValidForCurrentFrame));
+
+    let delayed = with_pose(observation(region, 15, 642, 3, Object, Local(local_id(1))), Vec3::new(5.0, 0.0, 0.0), Quat::IDENTITY);
+    let applied = world.observe_object(delayed).unwrap();
+    assert_eq!(
+        applied.rejections.iter().copied().collect::<Vec<_>>(),
+        [FieldRejection { group: FieldGroup::Pose, reason: FieldRejectionReason::StaleFrame }]
+    );
+    assert_eq!(world.object(child).unwrap().parent(), Parent::Resolved(second_parent));
+    assert_eq!(world.object(child).unwrap().position(), Some(Vec3::X));
+    assert_eq!(world.object(child).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::PoseNotValidForCurrentFrame));
+
+    let mut same_update = ObjectPatch::new(source(region, 21), local_id(3));
+    same_update.parent = Some(Local(local_id(1)));
+    same_update.pose = Some(Pose { position: Some(Vec3::new(2.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
+    let applied = world.patch_object(same_update).unwrap();
+    assert!(applied.rejections.is_empty());
+    let PoseState::Resolved(pose) = world.object(child).unwrap().world_pose().unwrap() else {
+        panic!("same-update pose must use the accepted parent frame")
+    };
+    assert_eq!(pose.position, DVec3::new(12.0, 0.0, 0.0));
+    assert_eq!(world.object(child).unwrap().parent(), Parent::Resolved(first_parent));
+}
+
+#[test]
+fn partial_pose_frames_update_independently() {
     let region = Region::new(40);
     let mut world = world_with_origin(region, DVec3::ZERO, 4);
     let first_parent = introduced(
@@ -402,6 +456,17 @@ fn partial_pose_updates_track_frame_independently() {
     reparent.parent = Some(Local(local_id(3)));
     assert_eq!(world.patch_object(reparent).unwrap().outcome, Updated(child));
     assert_eq!(world.object(child).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::PoseNotValidForCurrentFrame));
+
+    for pose in [Pose { position: Some(Vec3::Y), rotation: None }, Pose { position: None, rotation: Some(Quat::from_rotation_z(0.5)) }] {
+        let mut delayed_pose = ObjectPatch::new(source(region, 4), local_id(2));
+        delayed_pose.pose = Some(pose);
+        let applied = world.patch_object(delayed_pose).unwrap();
+        assert_eq!(
+            applied.rejections.iter().copied().collect::<Vec<_>>(),
+            [FieldRejection { group: FieldGroup::Pose, reason: FieldRejectionReason::StaleFrame }]
+        );
+        assert_eq!(world.object(child).unwrap().position(), Some(Vec3::X));
+    }
 
     let mut position = ObjectPatch::new(source(region, 6), local_id(2));
     position.pose = Some(Pose { position: Some(Vec3::X), rotation: None });
@@ -448,7 +513,7 @@ fn partial_pose_replaces_detach_snapshot() {
 }
 
 #[test]
-fn removed_seat_keeps_avatar_pose() {
+fn removed_seat_keeps_avatar_pending() {
     let region = Region::new(42);
     let mut world = world_with_origin(region, DVec3::new(100.0, 0.0, 0.0), 3);
     let seat = introduced(
@@ -457,17 +522,52 @@ fn removed_seat_keeps_avatar_pose() {
     let avatar = introduced(
         world.observe_object(with_pose(observation(region, 2, 46, 2, Avatar, Local(local_id(1))), Vec3::X, Quat::IDENTITY)).unwrap(),
     );
-    let PoseState::Resolved(before) = world.object(avatar).unwrap().world_pose().unwrap() else { panic!("expected seated pose") };
-
     assert_eq!(world.remove_object(source(region, 3), local_id(1)).unwrap().outcome, Removed(uuid(45)));
 
     assert!(world.object(seat).is_none());
     let avatar = world.object(avatar).unwrap();
-    assert_eq!(avatar.parent(), Parent::Root);
-    assert_eq!(
-        avatar.world_pose().unwrap(),
-        PoseState::Provisional { pose: before, reason: UnresolvedReason::PoseNotValidForCurrentFrame }
+    assert_eq!(avatar.parent(), Parent::Pending { address: address(region, 1), expected_uuid: Some(uuid(45)) });
+    assert_eq!(avatar.world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::PendingParent));
+}
+
+#[test]
+fn seat_kill_requires_fresh_unseat() {
+    let region = Region::new(42);
+    let mut world = world_with_origin(region, DVec3::new(100.0, 0.0, 0.0), 3);
+    let seat = introduced(
+        world.observe_object(with_pose(observation(region, 1, 45, 1, Object, Root), Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY)).unwrap(),
     );
+    let avatar = introduced(
+        world.observe_object(with_pose(observation(region, 2, 46, 2, Avatar, Local(local_id(1))), Vec3::X, Quat::IDENTITY)).unwrap(),
+    );
+    assert_eq!(world.remove_object(source(region, 3), local_id(1)).unwrap().outcome, Removed(uuid(45)));
+    assert!(world.object(seat).is_none());
+
+    let mut stale_unseat = ObjectPatch::new(source(region, 3), local_id(2));
+    stale_unseat.parent = Some(Root);
+    assert_eq!(world.patch_object(stale_unseat).unwrap().outcome, Unchanged);
+    assert_eq!(world.object(avatar).unwrap().parent(), Parent::Pending { address: address(region, 1), expected_uuid: Some(uuid(45)) });
+    assert_eq!(world.object(avatar).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::PendingParent));
+
+    let untracked_source = source(region, 100).with_authority(UpdateAuthority::Untracked);
+    let mut untracked_unseat = ObjectPatch::new(untracked_source, local_id(2));
+    untracked_unseat.parent = Some(Root);
+    let untracked = world.patch_object(untracked_unseat).unwrap();
+    assert_eq!(untracked.outcome, Unchanged);
+    assert!(
+        untracked
+            .rejections
+            .iter()
+            .any(|rejection| { rejection.group == FieldGroup::Parent && rejection.reason == FieldRejectionReason::UntrustedSource })
+    );
+    assert_eq!(world.object(avatar).unwrap().parent(), Parent::Pending { address: address(region, 1), expected_uuid: Some(uuid(45)) });
+    assert_eq!(world.object(avatar).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::PendingParent));
+
+    let mut fresh_unseat = ObjectPatch::new(source(region, 4), local_id(2));
+    fresh_unseat.parent = Some(Root);
+    assert_eq!(world.patch_object(fresh_unseat).unwrap().outcome, Updated(avatar));
+    assert_eq!(world.object(avatar).unwrap().parent(), Parent::Root);
+    assert_eq!(world.object(avatar).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::PoseNotValidForCurrentFrame));
 }
 
 #[test]
@@ -475,16 +575,16 @@ fn transfer_accepts_destination_pose() {
     let first = Region::new(5);
     let second = Region::new(6);
     let mut world = World::new(limits(4));
-    assert_eq!(world.adopt_region(first).unwrap().outcome, RegionAdopted);
-    assert_eq!(world.adopt_region(second).unwrap().outcome, RegionAdopted);
-    assert_eq!(
+    assert!(matches!(world.adopt_region(first).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    assert!(matches!(world.adopt_region(second).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    assert!(matches!(
         world.patch_region(first, RegionInfo { origin: Some(DVec3::new(100.0, 0.0, 0.0)), ..RegionInfo::default() }).unwrap().outcome,
-        RegionPatched
-    );
-    assert_eq!(
+        world::RegionOutcome::Patched { .. }
+    ));
+    assert!(matches!(
         world.patch_region(second, RegionInfo { origin: Some(DVec3::new(900.0, 0.0, 0.0)), ..RegionInfo::default() }).unwrap().outcome,
-        RegionPatched
-    );
+        world::RegionOutcome::Patched { .. }
+    ));
     let entity = introduced(world.observe_object(with_pose(observation(first, 100, 8, 1, Object, Root), Vec3::X, Quat::IDENTITY)).unwrap());
 
     let destination = with_pose(observation(second, 1, 8, 1, Object, Root), Vec3::new(3.0, 0.0, 0.0), Quat::IDENTITY);
@@ -501,7 +601,7 @@ fn transfer_accepts_destination_pose() {
 fn attachment_waits_for_joint_pose() {
     let region = Region::new(7);
     let mut world = World::new(limits(4));
-    assert_eq!(world.adopt_region(region).unwrap().outcome, RegionAdopted);
+    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
     let avatar =
         introduced(world.observe_object(with_pose(observation(region, 1, 9, 1, Avatar, Root), Vec3::ZERO, Quat::IDENTITY)).unwrap());
     let attachment = with_pose(observation(region, 2, 10, 2, Object, Local(local_id(1))), Vec3::X, Quat::IDENTITY);
@@ -517,25 +617,34 @@ fn attachment_change_stales_pose() {
     let mut world = world_with_origin(region, DVec3::ZERO, 4);
     introduced(world.observe_object(with_pose(observation(region, 1, 20, 1, Avatar, Root), Vec3::ZERO, Quat::IDENTITY)).unwrap());
     let mut initial = with_pose(observation(region, 2, 21, 2, Object, Local(local_id(1))), Vec3::X, Quat::IDENTITY);
-    initial.attachment_point = Some(NonZeroU8::new(3).map(AttachmentPoint::new));
+    initial.attachment_point = NonZeroU8::new(3).map_or(FieldUpdate::Clear, |value| FieldUpdate::Set(AttachmentPoint::new(value)));
     let attachment = introduced(world.observe_object(initial).unwrap());
     assert_eq!(world.object(attachment).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::MissingAttachmentJoint));
 
-    let mut change = ObjectPatch::new(source(region, 3), local_id(2));
-    change.attachment_point = Some(NonZeroU8::new(4).map(AttachmentPoint::new));
+    let mut change = ObjectPatch::new(source(region, 4), local_id(2));
+    change.attachment_point = NonZeroU8::new(4).map_or(FieldUpdate::Clear, |value| FieldUpdate::Set(AttachmentPoint::new(value)));
     assert_eq!(world.patch_object(change).unwrap().outcome, Updated(attachment));
     assert_eq!(
         world.object(attachment).unwrap().world_pose().unwrap(),
         PoseState::Unresolved(UnresolvedReason::PoseNotValidForCurrentFrame)
     );
 
-    let mut fresh_pose = ObjectPatch::new(source(region, 4), local_id(2));
+    let mut delayed_pose = ObjectPatch::new(source(region, 3), local_id(2));
+    delayed_pose.pose = Some(Pose { position: Some(Vec3::new(9.0, 0.0, 0.0)), rotation: None });
+    let applied = world.patch_object(delayed_pose).unwrap();
+    assert_eq!(
+        applied.rejections.iter().copied().collect::<Vec<_>>(),
+        [FieldRejection { group: FieldGroup::Pose, reason: FieldRejectionReason::StaleFrame }]
+    );
+    assert_eq!(world.object(attachment).unwrap().position(), Some(Vec3::X));
+
+    let mut fresh_pose = ObjectPatch::new(source(region, 5), local_id(2));
     fresh_pose.pose = Some(Pose { position: Some(Vec3::X), rotation: Some(Quat::IDENTITY) });
     assert_eq!(world.patch_object(fresh_pose).unwrap().outcome, Updated(attachment));
     assert_eq!(world.object(attachment).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::MissingAttachmentJoint));
 
-    let mut clear = ObjectPatch::new(source(region, 5), local_id(2));
-    clear.attachment_point = Some(None);
+    let mut clear = ObjectPatch::new(source(region, 6), local_id(2));
+    clear.attachment_point = FieldUpdate::Clear;
     assert_eq!(world.patch_object(clear).unwrap().outcome, Updated(attachment));
     assert_eq!(
         world.object(attachment).unwrap().world_pose().unwrap(),
@@ -549,16 +658,19 @@ fn same_attachment_point_keeps_pose_frame() {
     let mut world = world_with_origin(region, DVec3::ZERO, 4);
     let avatar =
         introduced(world.observe_object(with_pose(observation(region, 1, 15, 1, Avatar, Root), Vec3::ZERO, Quat::IDENTITY)).unwrap());
-    let point = NonZeroU8::new(3).map(AttachmentPoint::new);
+    let point = AttachmentPoint::new(NonZeroU8::new(3).expect("nonzero attachment point"));
     let mut attached = with_pose(observation(region, 2, 16, 2, Object, Local(local_id(1))), Vec3::X, Quat::IDENTITY);
-    attached.attachment_point = Some(point);
+    attached.attachment_point = FieldUpdate::Set(point);
     let attachment = introduced(world.observe_object(attached).unwrap());
     let before = world.object(attachment).unwrap().world_pose().unwrap();
     assert_eq!(before, PoseState::Unresolved(UnresolvedReason::MissingAttachmentJoint));
-    assert_eq!(world.object(attachment).unwrap().coordinate_frame().unwrap(), CoordinateFrame::AttachmentPoint { avatar, point });
+    assert_eq!(
+        world.object(attachment).unwrap().coordinate_frame().unwrap(),
+        CoordinateFrame::AttachmentPoint { avatar, point: Some(point) }
+    );
 
     let mut repeated = observation(region, 3, 16, 2, Object, Local(local_id(1)));
-    repeated.attachment_point = Some(point);
+    repeated.attachment_point = FieldUpdate::Set(point);
     assert_eq!(world.observe_object(repeated).unwrap().outcome, Unchanged);
 
     assert_eq!(world.object(attachment).unwrap().world_pose().unwrap(), before);
@@ -586,10 +698,11 @@ fn detach_keeps_only_resolved_snapshot() {
     };
     assert_eq!(pose.position, origin + DVec3::new(5.0, 7.0, 0.0));
     assert_eq!(reason, UnresolvedReason::PoseNotValidForCurrentFrame);
+    assert_eq!(world.object(avatar).unwrap().world_transform().unwrap(), WorldTransformState::Provisional { pose, reason });
 
     let missing = Region::new(9);
     let mut world = World::new(limits(4));
-    assert_eq!(world.adopt_region(missing).unwrap().outcome, RegionAdopted);
+    assert!(matches!(world.adopt_region(missing).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
     let _seat =
         introduced(world.observe_object(with_pose(observation(missing, 1, 13, 1, Object, Root), Vec3::ZERO, Quat::IDENTITY)).unwrap());
     let avatar = introduced(
@@ -606,8 +719,8 @@ fn transfer_clears_region_sit_target() {
     let first = Region::new(10);
     let second = Region::new(11);
     let mut world = World::new(limits(4));
-    assert_eq!(world.adopt_region(first).unwrap().outcome, RegionAdopted);
-    assert_eq!(world.adopt_region(second).unwrap().outcome, RegionAdopted);
+    assert!(matches!(world.adopt_region(first).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    assert!(matches!(world.adopt_region(second).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
     let entity =
         introduced(world.observe_object(with_pose(observation(first, 10, 15, 1, Avatar, Root), Vec3::ZERO, Quat::IDENTITY)).unwrap());
     assert_eq!(

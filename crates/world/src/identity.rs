@@ -9,6 +9,8 @@ use std::{
 
 static NEXT_WORLD_ID: AtomicU64 = AtomicU64::new(1);
 
+/// A generational handle to one object in the World that created it.
+/// Removing an object invalidates its handle, even if the simulator later reuses its UUID or address.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Entity(pub(super) hecs::Entity, pub(super) WorldId);
 
@@ -100,10 +102,10 @@ impl RegionHandle {
     }
 }
 
-/// Optional, non-authoritative metadata for a registered region.
+/// Observed metadata for a registered region.
 ///
-/// When passed to [`crate::World::patch_region`], `None` leaves the stored value unchanged. Supplied values cannot conflict with metadata already
-/// stored for the region.
+/// Missing fields preserve stored values. [`crate::World::patch_region`] adds non-conflicting
+/// facts; [`crate::World::observe_region_metadata`] also accepts source-ordered name changes.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RegionInfo {
     /// Second Life region UUID, when known.
@@ -112,8 +114,15 @@ pub struct RegionInfo {
     pub handle: Option<RegionHandle>,
     /// Region name, when known.
     pub name: Option<String>,
-    /// Region origin in global meters, when known.
+    /// Explicit region origin in global meters. [`Self::resolved_origin`] also uses a known handle.
     pub origin: Option<DVec3>,
+}
+
+impl RegionInfo {
+    /// Returns the explicit origin, or derives it from the region handle, in global meters.
+    pub fn resolved_origin(&self) -> Option<DVec3> {
+        self.origin.or_else(|| self.handle.map(RegionHandle::origin))
+    }
 }
 
 /// An asset identity, distinct from the identity of an object using that asset.

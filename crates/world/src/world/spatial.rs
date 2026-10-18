@@ -629,7 +629,7 @@ impl World {
                         scope.scan_generation = scope.generation;
                     }
                     let after = scope.cursor;
-                    if let Some(candidates) = self.region_entities.get(&region) {
+                    if let Some(candidates) = self.store.region_ids(region) {
                         let lower = after.map_or(Unbounded, Excluded);
                         ids.extend(candidates.range((lower, Unbounded)).take(remaining).copied());
                     }
@@ -637,7 +637,7 @@ impl World {
                     let cursor = ids.last().copied().or(after);
                     work_used += ids.len();
                     for id in &ids {
-                        let entity = self.entities[id];
+                        let entity = self.entity(*id).expect("object index contains only live entities");
                         self.refresh_spatial_entity(entity);
                     }
                     self.spatial.finish_region_batch(region, cursor, complete);
@@ -690,7 +690,7 @@ mod tests {
     use math::{Quat, Vec3};
 
     use super::*;
-    use crate::{FieldUpdate, ObjectObservation, OrderEvidence::Ordered, Pose, UpdateSource, WorldLimits};
+    use crate::{ObjectObservation, OrderEvidence::Ordered, Pose, UpdateSource, WorldLimits};
 
     fn limits() -> WorldLimits {
         WorldLimits {
@@ -715,20 +715,14 @@ mod tests {
         let _ = world.adopt_region(region).expect("adopt region");
         let _ = world
             .observe_object(ObjectObservation {
-                source: UpdateSource::new(region, 1, Ordered(1), 0),
-                id: UUID::from_u128(1),
-                local_id: NonZeroU32::new(1).expect("nonzero local ID"),
-                kind: crate::Kind::Object,
-                parent: crate::ParentUpdate::Root,
                 pose: Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) }),
-                linear_motion: None,
-                angular_velocity: None,
-                scale: None,
-                attachment_point: FieldUpdate::Keep,
-                shape: FieldUpdate::Keep,
-                appearance: FieldUpdate::Keep,
-                surface_appearance: None,
-                render_materials: None,
+                ..ObjectObservation::new(
+                    UpdateSource::new(region, 1, Ordered(1), 0),
+                    UUID::from_u128(1),
+                    NonZeroU32::new(1).expect("nonzero local ID"),
+                    crate::Kind::Object,
+                    crate::ParentUpdate::Root,
+                )
             })
             .expect("add object");
 

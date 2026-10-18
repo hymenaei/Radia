@@ -2,6 +2,8 @@
 
 use std::{
     collections::{BTreeSet, Bound::Excluded, HashSet},
+    error::Error,
+    fmt::{self, Display, Formatter},
     time::Instant,
 };
 
@@ -70,6 +72,18 @@ pub enum WorldQueryBuildError {
     InvalidRadius,
     OutOfRange,
 }
+
+impl Display for WorldQueryBuildError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidCenter => f.write_str("spatial query center must be finite"),
+            Self::InvalidRadius => f.write_str("spatial query radius must be finite and nonnegative"),
+            Self::OutOfRange => f.write_str("spatial query exceeds the supported coordinate range"),
+        }
+    }
+}
+
+impl Error for WorldQueryBuildError {}
 
 impl WorldQuery {
     pub const fn live() -> Self {
@@ -220,7 +234,7 @@ pub struct WorldQueryPage {
 }
 
 struct QueryRun<'a> {
-    objects: Option<ViewBorrow<'a, (&'a ObjectRecord, &'a ObjectContent)>>,
+    objects: Option<ViewBorrow<'a, (&'a ObjectRecord, Option<&'a ObjectContent>)>>,
     remaining: usize,
     result_limit: usize,
     incomplete: Option<QueryIncompleteReason>,
@@ -233,7 +247,7 @@ struct QueryRun<'a> {
 impl<'a> QueryRun<'a> {
     fn new(budget: WorldQueryBudget, world: Option<&'a World>) -> Self {
         Self {
-            objects: world.map(|world| world.ecs.view::<(&ObjectRecord, &ObjectContent)>()),
+            objects: world.map(|world| world.store.object_view()),
             remaining: budget.work,
             result_limit: budget.results,
             incomplete: None,
@@ -386,7 +400,7 @@ impl World {
             if !run.spend(1) {
                 break;
             }
-            let entity = self.entities[id];
+            let entity = self.entity(*id).expect("object index contains only live entities");
             let Some(item) = self.live_item(entity, query, None, run) else {
                 if run.incomplete.is_some() {
                     break;
@@ -456,10 +470,14 @@ impl World {
 
     fn live_ids(&self, query: WorldQuery) -> Option<&BTreeSet<UUID>> {
         let ids = match query.region {
-            Some(region) => self.region_entities.get(&region)?,
-            None => &self.object_ids,
+            Some(region) => self.store.region_ids(region)?,
+            None => self.store.ids(),
         };
-        Some(if query.kind == Some(ValueFilter::Is(Kind::Avatar)) && self.avatars.len() < ids.len() { &self.avatars } else { ids })
+        Some(if query.kind == Some(ValueFilter::Is(Kind::Avatar)) && self.store.avatar_ids().len() < ids.len() {
+            self.store.avatar_ids()
+        } else {
+            ids
+        })
     }
 
     fn query_spatial_entity_ids(&self, ids: impl Iterator<Item = UUID>, query: WorldQuery, sphere: Sphere, run: &mut QueryRun<'_>) -> bool {
@@ -467,7 +485,7 @@ impl World {
             if !run.spend(1) {
                 return false;
             }
-            let entity = *self.entities.get(&id).expect("object ordering index contains only live entities");
+            let entity = self.entity(id).expect("object ordering index contains only live entities");
             if let Some(item) = self.live_item(entity, query, Some(sphere), run) {
                 if run.items.len() == run.result_limit {
                     run.incomplete = Some(QueryIncompleteReason::ResultLimit);
@@ -563,7 +581,7 @@ impl World {
             }
             return true;
         }
-        let Some(ids) = self.region_entities.get(&region) else { return true };
+        let Some(ids) = self.store.region_ids(region) else { return true };
         let mut ids = ids.iter();
         loop {
             if run.exhaust_work() {
@@ -573,7 +591,7 @@ impl World {
             if !run.spend(1) {
                 return false;
             }
-            let entity = *self.entities.get(id).expect("region index contains only live objects");
+            let entity = self.entity(*id).expect("region index contains only live objects");
             self.check_dirty_entity(entity, query, sphere, run);
             if run.incomplete.is_some() {
                 return false;
@@ -849,20 +867,14 @@ mod tests {
 
     fn add(world: &mut World, region: Region, id: u128, local_id: u32, position: Vec3, kind: Kind) -> Entity {
         let observation = ObjectObservation {
-            source: UpdateSource::new(region, 1, Ordered(id as u64 + 1), 0),
-            id: UUID::from_u128(id),
-            local_id: NonZeroU32::new(local_id).unwrap(),
-            kind,
-            parent: Root,
             pose: Some(Pose { position: Some(position), rotation: Some(Quat::IDENTITY) }),
-            linear_motion: None,
-            angular_velocity: None,
-            scale: None,
-            attachment_point: FieldUpdate::Keep,
-            shape: FieldUpdate::Keep,
-            appearance: FieldUpdate::Keep,
-            surface_appearance: None,
-            render_materials: None,
+            ..ObjectObservation::new(
+                UpdateSource::new(region, 1, Ordered(id as u64 + 1), 0),
+                UUID::from_u128(id),
+                NonZeroU32::new(local_id).unwrap(),
+                kind,
+                Root,
+            )
         };
         let result = world.observe_object(observation).expect("object observation");
         match result.outcome {
@@ -882,20 +894,14 @@ mod tests {
     ) -> Entity {
         let id = UUID::from_u128(id);
         let observation = ObjectObservation {
-            source: UpdateSource::new(region, local_id, Ordered(u64::from(local_id)), 0),
-            id,
-            local_id: NonZeroU32::new(local_id).expect("local ID is nonzero"),
-            kind: Kind::Object,
-            parent: Root,
-            pose: None,
-            linear_motion: None,
-            angular_velocity: None,
-            scale: None,
             attachment_point: attachment_point.map_or(FieldUpdate::Clear, FieldUpdate::Set),
-            shape: FieldUpdate::Keep,
-            appearance: FieldUpdate::Keep,
-            surface_appearance: None,
-            render_materials: None,
+            ..ObjectObservation::new(
+                UpdateSource::new(region, local_id, Ordered(u64::from(local_id)), 0),
+                id,
+                NonZeroU32::new(local_id).expect("local ID is nonzero"),
+                Kind::Object,
+                Root,
+            )
         };
         let result = world.observe_object(observation).expect("query fixture object");
         let crate::ApplyOutcome::Introduced(entity) = result.outcome else { panic!("query fixture object is introduced") };
@@ -1107,20 +1113,14 @@ mod tests {
         add(&mut world, region, 41, 1, Vec3::ZERO, Kind::Object);
         settle(&mut world);
         let moved = ObjectObservation {
-            source: UpdateSource::new(region, 2, Ordered(90), 0),
-            id: UUID::from_u128(41),
-            local_id: NonZeroU32::new(1).unwrap(),
-            kind: Kind::Object,
-            parent: Root,
             pose: Some(Pose { position: Some(Vec3::new(128.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) }),
-            linear_motion: None,
-            angular_velocity: None,
-            scale: None,
-            attachment_point: FieldUpdate::Keep,
-            shape: FieldUpdate::Keep,
-            appearance: FieldUpdate::Keep,
-            surface_appearance: None,
-            render_materials: None,
+            ..ObjectObservation::new(
+                UpdateSource::new(region, 2, Ordered(90), 0),
+                UUID::from_u128(41),
+                NonZeroU32::new(1).unwrap(),
+                Kind::Object,
+                Root,
+            )
         };
         let _ = world.observe_object(moved).unwrap();
         let query = WorldQuery::live().within(DVec3::new(128.0, 0.0, 0.0), 1.0).unwrap();
@@ -1141,20 +1141,14 @@ mod tests {
         for local_id in 1..=CHAIN_LENGTH {
             let parent = if local_id == 1 { Root } else { ParentUpdate::Local(NonZeroU32::new(local_id - 1).unwrap()) };
             let observation = ObjectObservation {
-                source: UpdateSource::new(region, local_id, Ordered(u64::from(local_id)), 0),
-                id: UUID::from_u128(5_000 + u128::from(local_id)),
-                local_id: NonZeroU32::new(local_id).unwrap(),
-                kind: Kind::Object,
-                parent,
                 pose: Some(Pose { position: Some(Vec3::X), rotation: Some(Quat::IDENTITY) }),
-                linear_motion: None,
-                angular_velocity: None,
-                scale: None,
-                attachment_point: FieldUpdate::Keep,
-                shape: FieldUpdate::Keep,
-                appearance: FieldUpdate::Keep,
-                surface_appearance: None,
-                render_materials: None,
+                ..ObjectObservation::new(
+                    UpdateSource::new(region, local_id, Ordered(u64::from(local_id)), 0),
+                    UUID::from_u128(5_000 + u128::from(local_id)),
+                    NonZeroU32::new(local_id).unwrap(),
+                    Kind::Object,
+                    parent,
+                )
             };
             let result = world.observe_object(observation).expect("introduce linkset object");
             assert!(matches!(result.outcome, crate::ApplyOutcome::Introduced(_)));
@@ -1164,20 +1158,14 @@ mod tests {
         let candidate_local_id = NonZeroU32::new(CHAIN_LENGTH + 1).unwrap();
         let candidate = world
             .observe_object(ObjectObservation {
-                source: UpdateSource::new(region, CHAIN_LENGTH + 1, Ordered(u64::from(CHAIN_LENGTH + 1)), 0),
-                id: candidate_id,
-                local_id: candidate_local_id,
-                kind: Kind::Object,
-                parent: Root,
                 pose: Some(Pose { position: Some(Vec3::new(30.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) }),
-                linear_motion: None,
-                angular_velocity: None,
-                scale: None,
-                attachment_point: FieldUpdate::Keep,
-                shape: FieldUpdate::Keep,
-                appearance: FieldUpdate::Keep,
-                surface_appearance: None,
-                render_materials: None,
+                ..ObjectObservation::new(
+                    UpdateSource::new(region, CHAIN_LENGTH + 1, Ordered(u64::from(CHAIN_LENGTH + 1)), 0),
+                    candidate_id,
+                    candidate_local_id,
+                    Kind::Object,
+                    Root,
+                )
             })
             .expect("introduce queryable object");
         let crate::ApplyOutcome::Introduced(candidate) = candidate.outcome else { panic!("object should be introduced") };
@@ -1190,20 +1178,14 @@ mod tests {
 
         let reparented = world
             .observe_object(ObjectObservation {
-                source: UpdateSource::new(region, CHAIN_LENGTH + 2, Ordered(u64::from(CHAIN_LENGTH + 2)), 0),
-                id: candidate_id,
-                local_id: candidate_local_id,
-                kind: Kind::Object,
-                parent: ParentUpdate::Local(NonZeroU32::new(CHAIN_LENGTH).unwrap()),
                 pose: Some(Pose { position: Some(Vec3::X), rotation: Some(Quat::IDENTITY) }),
-                linear_motion: None,
-                angular_velocity: None,
-                scale: None,
-                attachment_point: FieldUpdate::Keep,
-                shape: FieldUpdate::Keep,
-                appearance: FieldUpdate::Keep,
-                surface_appearance: None,
-                render_materials: None,
+                ..ObjectObservation::new(
+                    UpdateSource::new(region, CHAIN_LENGTH + 2, Ordered(u64::from(CHAIN_LENGTH + 2)), 0),
+                    candidate_id,
+                    candidate_local_id,
+                    Kind::Object,
+                    ParentUpdate::Local(NonZeroU32::new(CHAIN_LENGTH).unwrap()),
+                )
             })
             .expect("reparent object below deep linkset");
         assert!(matches!(reparented.outcome, crate::ApplyOutcome::Updated(_)));

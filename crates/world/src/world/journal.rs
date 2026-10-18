@@ -33,6 +33,8 @@ impl WorldChangeClasses {
     pub const SHAPE: Self = Self(1 << 4);
     pub const APPEARANCE: Self = Self(1 << 5);
     pub const PROPERTIES: Self = Self(1 << 6);
+    /// ObjectMedia version or face data changed; hydrate through [`crate::World::object_media`].
+    pub const MEDIA: Self = Self(1 << 7);
 
     /// Returns whether no categories are present.
     pub const fn is_empty(self) -> bool {
@@ -72,6 +74,8 @@ pub enum WorldChange {
         entity: Entity,
         classes: WorldChangeClasses,
     },
+    /// The root and its descendants need pose hydration. Descendants are not enumerated here.
+    /// Consumers must expand their cached dependencies in bounded work or invalidate a broader scope.
     SubtreeInvalidated {
         id: UUID,
         entity: Entity,
@@ -96,6 +100,7 @@ pub enum WorldChange {
         to: LocalAddress,
     },
     RegionAdopted(Region),
+    /// Region metadata changed. A changed origin also invalidates the region's derived poses.
     RegionUpdated(Region),
     RegionRetired {
         region: Region,
@@ -257,22 +262,13 @@ mod tests {
         world.journal.revision = WorldRevision(u64::MAX);
 
         let result = world
-            .observe_object(ObjectObservation {
-                source: UpdateSource::new(region, 1, Ordered(1), 0),
-                id: UUID::from_u128(21),
-                local_id: NonZeroU32::new(1).unwrap(),
-                kind: Kind::Object,
-                parent: Root,
-                pose: None,
-                linear_motion: None,
-                angular_velocity: None,
-                scale: None,
-                attachment_point: FieldUpdate::Keep,
-                shape: FieldUpdate::Keep,
-                appearance: FieldUpdate::Keep,
-                surface_appearance: None,
-                render_materials: None,
-            })
+            .observe_object(ObjectObservation::new(
+                UpdateSource::new(region, 1, Ordered(1), 0),
+                UUID::from_u128(21),
+                NonZeroU32::new(1).unwrap(),
+                Kind::Object,
+                Root,
+            ))
             .unwrap_err();
 
         assert_eq!(result, ApplyError::RevisionExhausted);

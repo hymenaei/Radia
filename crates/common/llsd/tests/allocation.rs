@@ -1,93 +1,16 @@
-use std::{
-    alloc::{GlobalAlloc, Layout, System},
-    cell::Cell,
-    fmt::Write,
-    hint::black_box,
-    time::Instant,
-};
+use std::{fmt::Write, hint::black_box, time::Instant};
 
 use llsd::{Limits, Value, xml};
-
-struct CountingAlloc;
-
-#[derive(Clone, Copy, Default)]
-struct Counter {
-    live: i128,
-    peak: i128,
-    active: bool,
-}
-
-thread_local! {
-    static COUNTER: Cell<Counter> = const { Cell::new(Counter { live: 0, peak: 0, active: false }) };
-}
+use testing::allocation::{self, CountingAllocator, live_bytes};
 
 #[global_allocator]
-static ALLOC: CountingAlloc = CountingAlloc;
-
-// SAFETY: layouts/pointers are forwarded unchanged to System. Const thread-local
-// accounting does not allocate or alter memory returned to the caller.
-unsafe impl GlobalAlloc for CountingAlloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: the caller supplies the GlobalAlloc layout contract.
-        let ptr = unsafe { System.alloc(layout) };
-        if !ptr.is_null() {
-            account(layout.size() as i128);
-        }
-        ptr
-    }
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: the caller supplies the GlobalAlloc layout contract.
-        let ptr = unsafe { System.alloc_zeroed(layout) };
-        if !ptr.is_null() {
-            account(layout.size() as i128);
-        }
-        ptr
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: the original pointer and layout are passed to System.
-        unsafe { System.dealloc(ptr, layout) };
-        account(-(layout.size() as i128));
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        // SAFETY: the live allocation and requested resize are passed unchanged.
-        let resized = unsafe { System.realloc(ptr, layout, new_size) };
-        if !resized.is_null() {
-            account(new_size as i128);
-            account(-(layout.size() as i128));
-        }
-        resized
-    }
-}
-
-fn account(bytes: i128) {
-    let _ = COUNTER.try_with(|counter| {
-        let mut state = counter.get();
-        state.live += bytes;
-        if state.active {
-            state.peak = state.peak.max(state.live);
-        }
-        counter.set(state);
-    });
-}
+static ALLOC: CountingAllocator = CountingAllocator;
 
 fn measure<T>(operation: impl FnOnce() -> T) -> (T, i128, i128, u128) {
-    let baseline = COUNTER.with(|counter| {
-        let mut state = counter.get();
-        state.active = true;
-        state.peak = state.live;
-        counter.set(state);
-        state.live
-    });
     let started = Instant::now();
-    let value = operation();
+    let (value, allocations) = allocation::measure(operation);
     let elapsed = started.elapsed().as_nanos();
-    let (live, peak) = COUNTER.with(|counter| {
-        let mut state = counter.get();
-        state.active = false;
-        counter.set(state);
-        (state.live - baseline, state.peak - baseline)
-    });
-    (value, live, peak, elapsed)
+    (value, allocations.live_bytes, allocations.peak_bytes, elapsed)
 }
 
 #[test]
@@ -125,12 +48,12 @@ fn allocation_bounds() {
     ] {
         let (bound, scan_live, scan_peak, scan_ns) = measure(|| xml::value_allocation_bound(black_box(input.as_bytes()), limits).expect("scan valid XML"));
         assert_eq!(scan_live, 0, "scanner allocations must return for {name}");
-        let baseline = COUNTER.with(|counter| counter.get().live);
+        let baseline = live_bytes();
         let (value, retained, peak, decode_ns) = measure(|| xml::from_slice_with_limits::<Value>(black_box(input.as_bytes()), limits).expect("decode measured XML"));
         assert!(peak >= retained);
         assert!(peak <= bound as i128, "allocation underestimate for {name}: peak={peak}, bound={bound}");
         drop(value);
-        assert_eq!(COUNTER.with(|counter| counter.get().live), baseline, "decoded storage must return for {name}");
+        assert_eq!(live_bytes(), baseline, "decoded storage must return for {name}");
         eprintln!("{name}: input={} B, retained={retained} B, decode_peak={peak} B, bound={bound} B, scan_peak={scan_peak} B, bound/peak={:.2}, scan/decode={:.2} ({scan_ns}/{decode_ns} ns)", input.len(), bound as f64 / peak.max(1) as f64, scan_ns as f64 / decode_ns.max(1) as f64);
     }
 }

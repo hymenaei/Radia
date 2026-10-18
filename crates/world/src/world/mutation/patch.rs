@@ -6,10 +6,8 @@ use base::UUID;
 
 use super::super::journal::WorldChange::EntityUpdated;
 use super::super::journal::WorldChangeClasses;
-use super::super::{
-    Object, ObjectContent, ObjectOrdering, ObjectRecord, ObjectRecordRef, ParentRejectionBarrier, RegionalStamp, World, newer_field,
-    newer_region_field,
-};
+use super::super::relationships::ParentResolution;
+use super::super::{Object, ObjectRecordRef, ParentRejectionBarrier, RegionalStamp, World, newer_field, newer_region_field};
 use crate::update::FieldStamp;
 use crate::{
     Appearance, Applied, ApplyError, ApplyOutcome, AvatarAppearance, DeferredReason, FieldGroup, FieldRejection, FieldRejectionReason,
@@ -22,8 +20,8 @@ use UpdateAuthority::{Tracked, Untracked};
 
 use super::fields::{
     apply_field_update, content_change_classes, field_at_or_after, has_pose, is_exact_negation, mark_pose_components, normalized_rotation,
-    observable_change_classes, parent_frame_identity_changed, patch_motion, pose_is_accepted, pose_update_changes_observable,
-    reject_untrusted_patch_groups, retain_stored_orientation, validate_patch, validate_uuid, validate_vec3,
+    observable_change_classes, patch_motion, pose_is_accepted, pose_update_changes_observable, reject_untrusted_patch_groups,
+    retain_stored_orientation, validate_patch, validate_uuid, validate_vec3,
 };
 
 const UNKNOWN_COF_VERSION: i32 = -1;
@@ -49,7 +47,7 @@ impl World {
             ));
         };
         let address = LocalAddress::new(source.region, local_id);
-        let Some(entity) = self.addresses.get(&address).copied() else {
+        let Some(entity) = self.entity_at(address) else {
             return Ok(self.unknown_address(address, stamp));
         };
         let has_update = patch.pose.is_some_and(|pose| pose.position.is_some() || pose.rotation.is_some())
@@ -65,7 +63,7 @@ impl World {
             || patch.render_materials.is_some()
             || patch.gltf_material_overrides.is_some()
             || patch.avatar_appearance.is_some();
-        let mut read = self.ecs.query_one::<(&ObjectRecord, &ObjectContent, &ObjectOrdering)>(entity.0);
+        let mut read = self.store.read(entity.0);
         let (record, content, ordering) = read.get().expect("address index contains a complete entity");
         let object = Object { entity, record: ObjectRecordRef::Borrowed { record, content }, world: self };
         let data = &record.state;
@@ -115,23 +113,14 @@ impl World {
         let parent_candidate = patch.parent.is_some()
             && newer_field(field_stamp, ordering.fences.parent)
             && ordering.parent_rejection_barrier.is_none_or(|barrier| barrier.admits(source, stamp));
-        let mut parent_cycle = false;
-        let parent = if parent_candidate {
+        let (parent, parent_cycle) = if parent_candidate {
             let update = patch.parent.expect("candidate parent update is present");
             match self.resolve_parent(source.region, local_id, update, field_stamp, Some(entity)) {
-                Ok(Parent::Resolved(parent)) if self.would_cycle(entity, parent) => {
-                    parent_cycle = true;
-                    None
-                }
-                Ok(parent) => Some(parent),
-                Err(ApplyError::InvalidValue { field: "parent_cycle" }) => {
-                    parent_cycle = true;
-                    None
-                }
-                Err(error) => return Err(error),
+                ParentResolution::Accepted(parent) => (Some(parent), false),
+                ParentResolution::Cycle => (None, true),
             }
         } else {
-            None
+            (None, false)
         };
         if parent_cycle {
             rejections.push(FieldRejection { group: FieldGroup::Parent, reason: ParentCycle });
@@ -200,11 +189,7 @@ impl World {
         } else {
             data.attachment_point
         };
-        let attachment_frame = |parent: Parent| matches!(parent, Parent::Resolved(parent) if self.record(parent).is_some_and(|record| record.kind == Kind::Avatar));
-        let frame_changed = (parent_is_newer && parent_frame_identity_changed(self, data.parent, next_parent))
-            || (attachment_update_is_newer
-                && next_attachment_point != data.attachment_point
-                && (attachment_frame(data.parent) || attachment_frame(next_parent)));
+        let frame_changed = self.relationship_frame_changed(data.parent, next_parent, data.attachment_point, next_attachment_point);
         let next_frame_fence = if frame_changed { Some(field_stamp) } else { ordering.fences.frame };
         let next_frame_generation = if frame_changed {
             data.frame_generation.checked_add(1).ok_or(ApplyError::FrameGenerationExhausted)?
@@ -232,7 +217,7 @@ impl World {
             && !avatar_appearance_update_is_newer
             && !object_media_update_is_newer
             && !(parent_cycle && source.authority() == Tracked)
-            && !(has_update && source.authority() == Tracked && stamp > data.binding.fence)
+            && !(has_update && source.authority() == Tracked && stamp > data.binding.fence())
         {
             return Ok(Applied::unchanged().with_rejections(rejections));
         }
@@ -240,7 +225,7 @@ impl World {
         let detach_snapshot = if parent_is_newer
             && next_parent == Parent::Root
             && kind == Kind::Avatar
-            && matches!(data.parent, Parent::Resolved(parent) if self.record(parent).is_some_and(|record| record.kind != Kind::Avatar))
+            && matches!(data.parent, Parent::Resolved(parent) if self.store.record(parent).is_some_and(|record| record.kind != Kind::Avatar))
         {
             match self.resolve_pose(entity).ok() {
                 Some(PoseState::Resolved(pose)) => Some(pose),
@@ -349,8 +334,8 @@ impl World {
         } else if parent_cycle && source.authority() == Tracked {
             ordering.parent_rejection_barrier = Some(ParentRejectionBarrier { region: source.region, stamp });
         }
-        if has_update && source.authority() == Tracked {
-            data.binding.fence = data.binding.fence.max(stamp);
+        if has_update {
+            data.binding.advance_fence(source, stamp);
         }
         let change_classes = observable_change_classes(&object.record.state, object_parent, &data, next_parent);
         let change_classes =
@@ -361,7 +346,7 @@ impl World {
         if observable_change {
             self.ensure_revision_available()?;
         }
-        self.commit_values(entity, data, content, ordering);
+        self.store.commit(entity, data, content, ordering);
         if let Some((old_bytes, new_bytes)) = object_media_size_delta {
             self.object_media_bytes = self.object_media_bytes.saturating_sub(old_bytes).saturating_add(new_bytes);
         }
@@ -415,10 +400,12 @@ impl World {
         };
         let entity = target.entity;
         let has_property_update = patch.owner_id.is_some() || patch.creator_id.is_some();
-        let (properties, provenance) = {
+        let (mut data, mut content, ordering) = {
             let object = self.object(entity).expect("current properties target names a live entity");
-            (object.content().properties, object.content().properties_provenance)
+            (object.record.state, object.content().clone(), *object.ordering())
         };
+        let properties = content.properties;
+        let provenance = content.properties_provenance;
         let owner_fence = provenance.owner.map(RegionalStamp::from);
         let creator_fence = provenance.creator.map(RegionalStamp::from);
         let field_stamp = FieldStamp { authority: source.authority(), stamp };
@@ -447,21 +434,18 @@ impl World {
         if observable_change {
             self.ensure_revision_available()?;
         }
-        {
-            let (record, content) =
-                self.ecs.query_one_mut::<(&mut ObjectRecord, &mut ObjectContent)>(entity.0).expect("property target has state and content");
-            if owner_is_newer && let Some(value) = patch.owner_id {
-                content.properties.owner_id = Some(value);
-                content.properties_provenance.owner = Some(next_provenance);
-            }
-            if creator_is_newer && let Some(value) = patch.creator_id {
-                content.properties.creator_id = Some(value);
-                content.properties_provenance.creator = Some(next_provenance);
-            }
-            if has_property_update && source.authority() == Tracked {
-                record.state.binding.fence = record.state.binding.fence.max(stamp);
-            }
+        if owner_is_newer && let Some(value) = patch.owner_id {
+            content.properties.owner_id = Some(value);
+            content.properties_provenance.owner = Some(next_provenance);
         }
+        if creator_is_newer && let Some(value) = patch.creator_id {
+            content.properties.creator_id = Some(value);
+            content.properties_provenance.creator = Some(next_provenance);
+        }
+        if has_property_update {
+            data.binding.advance_fence(source, stamp);
+        }
+        self.store.commit(entity, data, Some(content), ordering);
         let changes = if observable_change {
             vec![EntityUpdated { id: response_id, entity, classes: WorldChangeClasses::PROPERTIES }]
         } else {
@@ -489,9 +473,8 @@ impl World {
         validate_uuid(id, "object_id")?;
         let Some(stamp) = source.stamp() else {
             let recovery_address = self
-                .entities
-                .get(&id)
-                .and_then(|entity| self.object(*entity))
+                .entity(id)
+                .and_then(|entity| self.object(entity))
                 .map(|object| object.address())
                 .filter(|address| address.region == source.region);
             return Ok(Applied::deferred(
@@ -500,7 +483,7 @@ impl World {
                     .map_or_else(Recovery::default, |address| Recovery::from_targets(vec![address], self.limits.max_recovery_targets)),
             ));
         };
-        let Some(entity) = self.entities.get(&id).copied() else {
+        let Some(entity) = self.entity(id) else {
             return Ok(Applied::deferred(DeferredReason::UnknownObject, Recovery::default()));
         };
         let object = self.object(entity).expect("UUID index contains a live entity");
@@ -539,17 +522,14 @@ impl World {
             return Ok(Applied::unchanged().with_rejections(rejections));
         }
 
-        {
-            let (record, content, ordering) = self
-                .ecs
-                .query_one_mut::<(&mut ObjectRecord, &mut ObjectContent, &mut ObjectOrdering)>(entity.0)
-                .expect("sit target has all components");
-            content.sit_target = target;
-            ordering.fences.sit_target = Some(RegionalStamp { region: source.region, stamp: field_stamp });
-            if source.authority() == Tracked {
-                record.state.binding.fence = record.state.binding.fence.max(stamp);
-            }
-        }
+        let (mut data, mut content, mut ordering) = {
+            let object = self.object(entity).expect("sit target is live");
+            (object.record.state, object.content().clone(), *object.ordering())
+        };
+        content.sit_target = target;
+        ordering.fences.sit_target = Some(RegionalStamp { region: source.region, stamp: field_stamp });
+        data.binding.advance_fence(source, stamp);
+        self.store.commit(entity, data, Some(content), ordering);
         let changes =
             if observable_change { vec![EntityUpdated { id, entity, classes: WorldChangeClasses::RELATIONSHIP }] } else { Vec::new() };
         Ok(self
@@ -584,20 +564,10 @@ mod tests {
         let mut world = test_world(&[region]);
         let source = UpdateSource::new(region, 1, Ordered(1), 0);
         let observation = ObjectObservation {
-            source,
-            id: UUID::from_u128(23),
-            local_id: NonZeroU32::new(1).unwrap(),
-            kind: Kind::Object,
-            parent: Root,
             pose: Some(Pose { position: Some(Vec3::X), rotation: None }),
             linear_motion: Some(LinearMotion::default()),
-            angular_velocity: None,
             scale: Some(Vec3::splat(2.0)),
-            attachment_point: FieldUpdate::Keep,
-            shape: FieldUpdate::Keep,
-            appearance: FieldUpdate::Keep,
-            surface_appearance: None,
-            render_materials: None,
+            ..ObjectObservation::new(source, UUID::from_u128(23), NonZeroU32::new(1).unwrap(), Kind::Object, Root)
         };
         let introduced = world.observe_object(observation).unwrap();
         let ApplyOutcome::Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };
@@ -628,20 +598,8 @@ mod tests {
         let mut world = test_world(&[region]);
         let local_id = NonZeroU32::new(1).unwrap();
         let object = ObjectObservation {
-            source: UpdateSource::new(region, 1, Ordered(1), 0),
-            id: UUID::from_u128(24),
-            local_id,
-            kind: Kind::Object,
-            parent: Root,
-            pose: None,
-            linear_motion: None,
-            angular_velocity: None,
-            scale: None,
-            attachment_point: FieldUpdate::Keep,
-            shape: FieldUpdate::Keep,
             appearance: FieldUpdate::Set(Appearance::Surface),
-            surface_appearance: None,
-            render_materials: None,
+            ..ObjectObservation::new(UpdateSource::new(region, 1, Ordered(1), 0), UUID::from_u128(24), local_id, Kind::Object, Root)
         };
         let introduced = world.observe_object(object).unwrap();
         let Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };

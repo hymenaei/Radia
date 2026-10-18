@@ -6,8 +6,12 @@ use base::UUID;
 use libfuzzer_sys::fuzz_target;
 use math::{Quat, Vec3};
 use world::{
-    AgentHandoff, ApplyError::RegionRetired, Kind, LinearMotion, ObjectObservation, ObjectPatch, OrderEvidence::Ordered, ParentUpdate,
-    Pose, Region, RegionHandle, RegionInfo, UpdateSource, World, WorldLimits,
+    AgentHandoff, Appearance,
+    ApplyError::RegionRetired,
+    FieldUpdate, Kind, LinearMotion, ObjectObservation, ObjectPatch,
+    OrderEvidence::{Ambiguous, Degraded, Ordered},
+    ParentUpdate, Pose, PropertiesPatch, Region, RegionHandle, RegionInfo, Shape, UpdateAuthority, UpdateSource, World, WorldLimits,
+    WorldReadError::ResyncRequired,
 };
 
 const MAX_OPERATIONS: usize = 256;
@@ -31,18 +35,29 @@ fn limits() -> WorldLimits {
 
 fn source(region: Region, step: usize, bytes: &[u8]) -> UpdateSource {
     let order = u64::from(u16::from_le_bytes([bytes[28], bytes[29]]));
-    UpdateSource::new(region, step as u32, Ordered(order), u32::from(bytes[30]))
+    let evidence = match bytes[31] & 15 {
+        1 => Ambiguous,
+        2 => Degraded,
+        _ => Ordered(order),
+    };
+    let source = UpdateSource::new(region, step as u32, evidence, u32::from(bytes[30]));
+    if bytes[31] & 15 == 3 { source.with_authority(UpdateAuthority::Untracked) } else { source }
 }
 
 fn uuid(bytes: &[u8]) -> UUID {
-    let mut value = [0; 16];
-    value.copy_from_slice(&bytes[4..20]);
-    let value = u128::from_le_bytes(value);
+    if bytes[31] & 128 == 0 {
+        return UUID::from_u128(u128::from(bytes[4] % 16) + 2);
+    }
+    let value = u128::from_le_bytes(bytes[4..20].try_into().expect("fixed UUID bytes"));
     UUID::from_u128(value.max(1))
 }
 
 fn local_id(bytes: &[u8]) -> NonZeroU32 {
-    let value = u32::from_le_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]).max(1);
+    let value = if bytes[31] & 128 == 0 {
+        u32::from(bytes[20] % 16) + 1
+    } else {
+        u32::from_le_bytes(bytes[20..24].try_into().expect("fixed local ID bytes")).max(1)
+    };
     NonZeroU32::new(value).expect("local ID is nonzero")
 }
 
@@ -56,9 +71,13 @@ fn pose(bytes: &[u8]) -> Pose {
     Pose { position: Some(position), rotation: Some(Quat::from_rotation_y(angle)) }
 }
 
-fn parent(bytes: &[u8], local_id: NonZeroU32) -> ParentUpdate {
-    let value = u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]);
-    if value == 0 { ParentUpdate::Root } else { ParentUpdate::Local(NonZeroU32::new(value).unwrap_or(local_id)) }
+fn parent(bytes: &[u8]) -> ParentUpdate {
+    let value = if bytes[31] & 128 == 0 {
+        u32::from(bytes[24] % 17)
+    } else {
+        u32::from_le_bytes(bytes[24..28].try_into().expect("fixed parent ID bytes"))
+    };
+    if value == 0 { ParentUpdate::Root } else { ParentUpdate::Local(NonZeroU32::new(value).expect("parent local ID is nonzero")) }
 }
 
 fn assert_world(world: &World) {
@@ -87,6 +106,9 @@ fuzz_target!(|data: &[u8]| {
     initial.linear_motion = Some(LinearMotion::default());
     let _ = world.observe_object(initial);
     assert_world(&world);
+    let barrier = world.read_barrier();
+    let mut changes = barrier.changes;
+    let mut completed_revision = barrier.revision;
 
     for (step, bytes) in data.chunks_exact(32).take(MAX_OPERATIONS).enumerate() {
         let region_index = usize::from(bytes[1]) % regions.len();
@@ -98,12 +120,12 @@ fuzz_target!(|data: &[u8]| {
 
         match operation {
             0 => {
-                let kind = match bytes[2] % 4 {
+                let kind = match (if bytes[31] & 128 == 0 { bytes[4] } else { bytes[2] }) % 4 {
                     0 => Kind::Object,
                     1 => Kind::Avatar,
                     value => Kind::Unknown(value),
                 };
-                let mut observation = ObjectObservation::new(source, id, local_id, kind, parent(bytes, local_id));
+                let mut observation = ObjectObservation::new(source, id, local_id, kind, parent(bytes));
                 observation.pose = (bytes[3] & 1 != 0).then(|| pose(bytes));
                 observation.linear_motion = (bytes[3] & 2 != 0).then_some(LinearMotion {
                     velocity: Some(Vec3::new(f32::from(bytes[24]), f32::from(bytes[25]), f32::from(bytes[26]))),
@@ -122,10 +144,16 @@ fuzz_target!(|data: &[u8]| {
                     patch.linear_motion.acceleration = Some(Vec3::new(f32::from(bytes[27]), f32::from(bytes[28]), f32::from(bytes[29])));
                 }
                 if bytes[3] & 4 != 0 {
-                    patch.parent = Some(parent(bytes, local_id))
+                    patch.parent = Some(parent(bytes))
                 }
                 if bytes[3] & 8 != 0 {
                     patch.scale = Some(Vec3::new(1.0, 1.0, 1.0))
+                }
+                if bytes[3] & 16 != 0 {
+                    patch.shape = if bytes[5] & 1 == 0 { FieldUpdate::Clear } else { FieldUpdate::Set(Shape::Prim(Default::default())) };
+                }
+                if bytes[3] & 32 != 0 {
+                    patch.appearance = if bytes[5] & 2 == 0 { FieldUpdate::Clear } else { FieldUpdate::Set(Appearance::Surface) };
                 }
                 let _ = world.patch_object(patch);
             }
@@ -136,12 +164,21 @@ fuzz_target!(|data: &[u8]| {
                 if let Some(entity) = world.entity(id)
                     && let Some(target) = world.object_binding_target(entity)
                 {
-                    let _ = world.patch_properties(source, target, id, Default::default());
+                    let patch = PropertiesPatch {
+                        owner_id: (bytes[3] & 1 != 0).then(|| UUID::from_u128(u128::from(bytes[8]))),
+                        creator_id: (bytes[3] & 2 != 0).then(|| UUID::from_u128(u128::from(bytes[9]))),
+                    };
+                    let _ = world.patch_properties(source, target, id, patch);
                 }
             }
             4 => {
                 let handle = u64::from_le_bytes(bytes[8..16].try_into().expect("fixed handle bytes"));
-                let _ = world.patch_region(region, RegionInfo { handle: Some(RegionHandle::new(handle)), ..RegionInfo::default() });
+                if bytes[3] & 1 == 0 {
+                    let _ = world.patch_region(region, RegionInfo { handle: Some(RegionHandle::new(handle)), ..RegionInfo::default() });
+                } else {
+                    let name = String::from_utf8_lossy(&bytes[24..32]).into_owned();
+                    let _ = world.observe_region_metadata(source, RegionInfo { name: Some(name), ..RegionInfo::default() });
+                }
             }
             5 => {
                 let from = world.entity(AGENT_ID).and_then(|entity| world.object(entity)).map(|agent| agent.address().region());
@@ -150,7 +187,7 @@ fuzz_target!(|data: &[u8]| {
                         let handoff = AgentHandoff {
                             source: UpdateSource::new(destination, step as u32, Ordered(step as u64 + 1), 0),
                             local_id,
-                            parent: parent(bytes, local_id),
+                            parent: parent(bytes),
                             pose: Some(pose(bytes)),
                             linear_motion: None,
                             angular_velocity: None,
@@ -175,5 +212,31 @@ fuzz_target!(|data: &[u8]| {
         }
 
         assert_world(&world);
+        if bytes[30] & 1 == 0 {
+            let limit = usize::from((bytes[30] >> 1) % 8) + 1;
+            match world.change_page(changes, limit) {
+                Ok(page) => {
+                    assert_eq!(page.observed_revision, world.revision());
+                    assert!(page.completed_revision >= completed_revision);
+                    assert!(page.completed_revision <= page.observed_revision);
+                    assert!(page.records.len() <= limit);
+                    assert!(page.records.iter().all(|record| record.revision > completed_revision));
+                    assert!(page.records.windows(2).all(|pair| pair[0].revision <= pair[1].revision));
+                    if page.has_more {
+                        assert_eq!(page.records.len(), limit);
+                    } else {
+                        assert_eq!(page.completed_revision, page.observed_revision);
+                    }
+                    changes = page.cursor;
+                    completed_revision = page.completed_revision;
+                }
+                Err(ResyncRequired) => {
+                    let barrier = world.read_barrier();
+                    changes = barrier.changes;
+                    completed_revision = barrier.revision;
+                }
+                Err(error) => panic!("valid change cursor failed: {error}"),
+            }
+        }
     }
 });

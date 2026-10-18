@@ -76,13 +76,13 @@ pub(crate) struct ReceiveOutcome {
     pub(crate) packet_order: PacketOrder,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) enum ReceiveAdmission {
     Duplicate(ReceiveOutcome),
     New(ReceiveReservation),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) struct ReceiveReservation {
     sequence: u32,
     reliable: bool,

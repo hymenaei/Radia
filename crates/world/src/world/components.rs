@@ -14,11 +14,25 @@ use std::sync::Arc;
 pub(super) struct Binding {
     pub(super) address: LocalAddress,
     pub(super) address_generation: u64,
-    pub(super) fence: Stamp,
+    fence: Stamp,
     pub(super) parent_resolution_fence: Option<Stamp>,
 }
 
 impl Binding {
+    pub(super) fn new(address: LocalAddress, address_generation: u64, fence: Stamp, parent_resolution_fence: Option<Stamp>) -> Self {
+        Self { address, address_generation, fence, parent_resolution_fence }
+    }
+
+    pub(super) fn fence(self) -> Stamp {
+        self.fence
+    }
+
+    pub(super) fn advance_fence(&mut self, source: UpdateSource, stamp: Stamp) {
+        if source.authority() == UpdateAuthority::Tracked {
+            self.fence = self.fence.max(stamp);
+        }
+    }
+
     pub(super) fn admits_parent_link(self, expected_uuid: Option<UUID>, declared_at: Option<FieldStamp>, parent_uuid: UUID) -> bool {
         match (expected_uuid, self.parent_resolution_fence) {
             (Some(expected), _) if expected == parent_uuid => true,
@@ -97,7 +111,7 @@ pub(super) struct ObjectState {
     pub(super) provisional_pose: Option<WorldPose>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct ObjectContent {
     pub(super) shape: Option<Shape>,
     pub(super) appearance: Option<Appearance>,
@@ -109,6 +123,31 @@ pub(super) struct ObjectContent {
     pub(super) sit_target: Option<SitTarget>,
     pub(super) properties: Properties,
     pub(super) properties_provenance: PropertiesProvenance,
+}
+
+impl ObjectContent {
+    pub(super) const EMPTY: Self = Self {
+        shape: None,
+        appearance: None,
+        surface_appearance: None,
+        render_materials: None,
+        gltf_material_overrides: None,
+        object_media: None,
+        avatar_appearance: None,
+        sit_target: None,
+        properties: Properties { owner_id: None, creator_id: None },
+        properties_provenance: PropertiesProvenance { owner: None, creator: None },
+    };
+
+    pub(super) fn is_empty(&self) -> bool {
+        self == &Self::EMPTY
+    }
+}
+
+impl Default for ObjectContent {
+    fn default() -> Self {
+        Self::EMPTY
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]

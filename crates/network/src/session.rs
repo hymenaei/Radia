@@ -631,6 +631,8 @@ impl SessionHandle {
     /// Sends a message to an active simulator connection.
     ///
     /// Success means the local UDP send succeeded, not that the remote simulator received or acknowledged it. Variable-field limits match [`Self::send`].
+    /// Dropping this future after command admission stops waiting for the result; it does not
+    /// withdraw the command. The message may still be sent and, for reliable delivery, retried.
     ///
     /// # Errors
     ///
@@ -1049,13 +1051,15 @@ mod tests {
     use std::{
         collections::HashMap,
         fs,
-        future::pending,
+        future::{Future, pending},
         io::Read,
         mem::replace,
         net::SocketAddr,
         path::Path,
+        pin::pin,
         str::from_utf8,
         sync::{self, Arc, Mutex},
+        task::{Context, Waker},
         thread,
         time::Duration,
     };
@@ -2219,16 +2223,13 @@ mod tests {
         }
         let (disconnect, mut disconnect_requested) = watch::channel(false);
         let session = Session::new_for_test(targeted_send_handle(commands, disconnect), event_receiver);
-        let events_sender = events.clone();
-        let mut publish =
-            spawn(async move { send_client_event(&events_sender, Event::Failed("pending event".into()), &mut disconnect_requested).await });
-
-        assert!(timeout(Duration::from_millis(10), &mut publish).await.is_err(), "full event queue should block publication");
+        let mut publish = pin!(send_client_event(&events, Event::Failed("pending event".into()), &mut disconnect_requested));
+        assert!(publish.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending(), "full event queue blocks publication");
         let retained_handle = session.handle();
         drop(session);
 
         assert!(matches!(
-            timeout(Duration::from_secs(1), publish).await.expect("session drop should release event publication").expect("publisher task"),
+            timeout(Duration::from_secs(1), publish).await.expect("session drop should release event publication"),
             EventSendOutcome::Shutdown
         ));
         assert!(*retained_handle.disconnect_requested.borrow());
@@ -2287,6 +2288,18 @@ mod tests {
 
     #[tokio::test]
     async fn final_loss_wakes_empty_intake() {
+        use std::{
+            sync::atomic::{AtomicBool, Ordering},
+            task::Wake,
+        };
+
+        struct WakeFlag(AtomicBool);
+        impl Wake for WakeFlag {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
         let (commands, _) = mpsc::channel(COMMAND_CAPACITY);
         let (disconnect, _) = watch::channel(false);
         let ledger = CoverageLossLedger::new();
@@ -2294,15 +2307,17 @@ mod tests {
         let source = CoverageSource::Lludp;
         let (events, event_receiver) = mpsc::channel(1);
         let mut session = Session::new_for_test_with_coverage(targeted_send_handle(commands, disconnect), event_receiver, ledger.clone());
-        let mut receive = spawn(async move { session.recv_event().await });
-
-        assert!(timeout(Duration::from_millis(10), &mut receive).await.is_err());
+        let mut receive = pin!(session.recv_event());
+        let wake = Arc::new(WakeFlag(AtomicBool::new(false)));
+        let waker = Waker::from(Arc::clone(&wake));
+        assert!(receive.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
         let CoverageRecord::Recorded(watermark) = ledger.record(simulator_id, source, CoverageLossReason::EventAdmission) else {
             panic!("new source has ledger capacity")
         };
 
+        assert!(wake.0.load(Ordering::SeqCst), "recording loss wakes an already waiting intake");
         assert!(matches!(
-            timeout(Duration::from_secs(1), receive).await.expect("source loss wakes empty intake").expect("receive task"),
+            timeout(Duration::from_secs(1), receive).await.expect("source loss wakes empty intake"),
             Some(Event::CoverageLost { loss: CoverageLoss::Source(record) }) if record.watermark == watermark
         ));
         drop(events);
@@ -2323,31 +2338,23 @@ mod tests {
             .try_send(EventEnvelope::with_coverage_watermark(Event::Failed("covered event".into()), watermark))
             .expect("fill bounded event queue with covered event");
         let mut session = Session::new_for_test_with_coverage(targeted_send_handle(commands, disconnect), event_receiver, ledger.clone());
-        let (loss_sender, loss_receiver) = oneshot::channel();
-        let (ack_sender, ack_receiver) = oneshot::channel();
-        let (event_sender, mut event_receiver) = oneshot::channel();
-        let receive = spawn(async move {
-            session.acknowledge_coverage_loss(watermark);
-            let loss = session.recv_event().await;
-            let _ = loss_sender.send(loss);
-            let _ = ack_receiver.await;
-            session.acknowledge_coverage_loss(watermark);
-            let event = session.recv_event().await;
-            let _ = event_sender.send(event);
-        });
-
+        session.acknowledge_coverage_loss(watermark);
         assert!(matches!(
-            timeout(Duration::from_secs(1), loss_receiver).await.expect("ledger loss is independently woken").expect("loss receiver"),
+            session.recv_event().await,
             Some(Event::CoverageLost { loss: CoverageLoss::Source(record) }) if record.watermark == watermark
         ));
-        assert!(timeout(Duration::from_millis(10), &mut event_receiver).await.is_err(), "covered event waits for loss acknowledgement");
-
-        ack_sender.send(()).expect("ask Session to acknowledge surfaced loss");
+        {
+            let mut receive = pin!(session.recv_event());
+            assert!(
+                receive.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending(),
+                "covered event waits for loss acknowledgement"
+            );
+        }
+        session.acknowledge_coverage_loss(watermark);
         assert!(matches!(
-            timeout(Duration::from_secs(1), &mut event_receiver).await.expect("acknowledgement releases covered event").expect("event receiver"),
+            session.recv_event().await,
             Some(Event::Failed(message)) if message == "covered event"
         ));
-        receive.await.expect("receive task completes after acknowledgement");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2418,10 +2425,13 @@ mod tests {
         })
         .await
         .expect("later covered event should reach Session intake");
-        assert!(
-            timeout(Duration::from_millis(50), session.recv_event()).await.is_err(),
-            "Session must hold an event covered by an unacknowledged LLUDP loss"
-        );
+        {
+            let mut receive = pin!(session.recv_event());
+            assert!(
+                receive.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending(),
+                "Session holds an event covered by an unacknowledged LLUDP loss"
+            );
+        }
 
         session.acknowledge_coverage_loss(watermark);
         assert!(matches!(
@@ -2669,19 +2679,46 @@ mod tests {
             .expect("second disconnect task");
     }
 
+    fn object_request() -> RequestMultipleObjects {
+        RequestMultipleObjects {
+            agent_data: RequestAgentData {
+                agent_id: UUID::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("agent UUID"),
+                session_id: UUID::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("session UUID"),
+            },
+            objects: vec![ObjectRequest { cache_miss_type: CacheMissType::Full, local_id: 7 }],
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_send_future_keeps_the_admitted_command() {
+        use std::{
+            future::Future,
+            pin::pin,
+            task::{Context, Waker},
+        };
+
+        let (commands, mut command_receiver) = mpsc::channel(1);
+        let (disconnect_requested, _) = watch::channel(false);
+        let handle = targeted_send_handle(commands, disconnect_requested);
+        let simulator_id = SimulatorId::new(42);
+        {
+            let mut send = pin!(handle.send_to(simulator_id, object_request(), Delivery::Reliable));
+            assert!(send.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        }
+
+        let Command::SendTo { completed, .. } = command_receiver.try_recv().expect("admitted command survives cancellation") else {
+            panic!("expected targeted send");
+        };
+        assert!(completed.is_closed(), "only the result receiver is cancelled");
+    }
+
     #[tokio::test]
     async fn targeted_send_keeps_id() {
         let (commands, mut command_receiver) = mpsc::channel(1);
         let (disconnect_requested, _) = watch::channel(false);
         let handle = targeted_send_handle(commands, disconnect_requested);
         let simulator_id = SimulatorId::new(42);
-        let request = RequestMultipleObjects {
-            agent_data: RequestAgentData {
-                agent_id: UUID::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("agent UUID"),
-                session_id: UUID::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("session UUID"),
-            },
-            objects: vec![ObjectRequest { cache_miss_type: CacheMissType::Full, local_id: 7 }],
-        };
+        let request = object_request();
         let send = spawn(async move { handle.send_to(simulator_id, request, Delivery::Reliable).await });
 
         let Some(Command::SendTo { simulator_id: routed_id, message, delivery, completed, .. }) = command_receiver.recv().await else {
@@ -2730,13 +2767,7 @@ mod tests {
         let (commands, mut command_receiver) = mpsc::channel(1);
         let (disconnect_requested, _) = watch::channel(false);
         let handle = targeted_send_handle(commands, disconnect_requested);
-        let request = RequestMultipleObjects {
-            agent_data: RequestAgentData {
-                agent_id: UUID::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("agent UUID"),
-                session_id: UUID::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("session UUID"),
-            },
-            objects: vec![ObjectRequest { cache_miss_type: CacheMissType::Full, local_id: 7 }],
-        };
+        let request = object_request();
         let send = spawn(async move { handle.send_to(SimulatorId::new(42), request, Delivery::Reliable).await });
         let Some(Command::SendTo { completed, .. }) = command_receiver.recv().await else {
             panic!("expected a targeted simulator command");
@@ -2752,13 +2783,7 @@ mod tests {
         let (commands, mut command_receiver) = mpsc::channel(1);
         let (disconnect_signal, _) = watch::channel(false);
         let handle = targeted_send_handle(commands, disconnect_signal.clone());
-        let request = RequestMultipleObjects {
-            agent_data: RequestAgentData {
-                agent_id: UUID::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("agent UUID"),
-                session_id: UUID::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("session UUID"),
-            },
-            objects: vec![ObjectRequest { cache_miss_type: CacheMissType::Full, local_id: 7 }],
-        };
+        let request = object_request();
         let send_handle = handle.clone();
         let send = spawn(async move { send_handle.send_to(SimulatorId::new(42), request, Delivery::Reliable).await });
         let Some(Command::SendTo { completed, .. }) = command_receiver.recv().await else {

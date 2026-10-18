@@ -4,7 +4,8 @@ use math::{DQuat, DVec3, Quat};
 
 use super::World;
 use crate::{
-    CoordinateFrame, Entity, Kind, Parent, PoseError, PoseState, Region, UnresolvedReason, WorldPose, WorldTransform, WorldTransformState,
+    CoordinateFrame, Entity, Kind, Parent, PoseError, PoseState, RegionInfo, UnresolvedReason, WorldPose, WorldTransform,
+    WorldTransformState,
 };
 
 pub(super) const MAX_PARENT_EDGES: usize = 16;
@@ -15,7 +16,7 @@ impl World {
         let mut edges = 0;
 
         loop {
-            let Some(object) = self.record(current) else { return Ok(CoordinateFrame::Unknown) };
+            let Some(object) = self.store.record(current) else { return Ok(CoordinateFrame::Unknown) };
             match object.state.parent {
                 Parent::Unknown => return Ok(CoordinateFrame::Unknown),
                 Parent::Pending { address, expected_uuid } => return Ok(CoordinateFrame::PendingParent { address, expected_uuid }),
@@ -31,7 +32,7 @@ impl World {
                         return Err(PoseError::TraversalLimitExceeded { max_edges: MAX_PARENT_EDGES });
                     }
                     edges += 1;
-                    if self.record(parent).is_some_and(|parent| parent.kind == Kind::Avatar) {
+                    if self.store.record(parent).is_some_and(|parent| parent.kind == Kind::Avatar) {
                         return if current == entity {
                             Ok(CoordinateFrame::AttachmentPoint { avatar: parent, point: object.state.attachment_point })
                         } else {
@@ -47,7 +48,7 @@ impl World {
     pub(super) fn resolve_pose(&self, entity: Entity) -> Result<PoseState, PoseError> {
         let state = self.resolve_pose_without_provisional(entity)?;
         if let PoseState::Unresolved(reason) = state
-            && let Some(object) = self.record(entity)
+            && let Some(object) = self.store.record(entity)
             && object.state.parent == Parent::Root
             && let Some(pose) = object.state.provisional_pose
         {
@@ -64,7 +65,7 @@ impl World {
         let mut unresolved = None;
 
         loop {
-            let Some(object) = self.record(current) else {
+            let Some(object) = self.store.record(current) else {
                 record_unresolved(&mut unresolved, UnresolvedReason::PoseNotValidForCurrentFrame);
                 break;
             };
@@ -106,7 +107,7 @@ impl World {
                 }
                 Parent::Root => {
                     let region = object.state.binding.address.region;
-                    let Some(origin) = self.region_origin(region) else {
+                    let Some(origin) = self.region(region).and_then(RegionInfo::resolved_origin) else {
                         record_unresolved(&mut unresolved, UnresolvedReason::MissingRegionOrigin);
                         break;
                     };
@@ -116,7 +117,7 @@ impl World {
                     break;
                 }
                 Parent::Resolved(parent) => {
-                    let Some(parent_object) = self.record(parent) else {
+                    let Some(parent_object) = self.store.record(parent) else {
                         record_unresolved(&mut unresolved, UnresolvedReason::PoseNotValidForCurrentFrame);
                         break;
                     };
@@ -148,18 +149,13 @@ impl World {
             PoseState::Provisional { pose, reason } => return Ok(WorldTransformState::Provisional { pose, reason }),
             PoseState::Unresolved(reason) => return Ok(WorldTransformState::Unresolved(reason)),
         };
-        let Some(object) = self.record(entity) else {
+        let Some(object) = self.store.record(entity) else {
             return Ok(WorldTransformState::Unresolved(UnresolvedReason::PoseNotValidForCurrentFrame));
         };
         match object.state.transform.scale() {
             Some(scale) => Ok(WorldTransformState::Resolved(WorldTransform { pose, scale })),
             None => Ok(WorldTransformState::MissingScale(pose)),
         }
-    }
-
-    fn region_origin(&self, region: Region) -> Option<DVec3> {
-        let info = self.region(region)?;
-        info.origin.or_else(|| info.handle.map(|handle| handle.origin()))
     }
 }
 
@@ -197,11 +193,10 @@ fn record_unresolved(current: &mut Option<UnresolvedReason>, next: UnresolvedRea
 mod tests {
     use std::num::NonZeroU32;
 
-    use super::super::ObjectRecord;
     use super::*;
     use crate::{
-        ApplyOutcome::Introduced, FieldUpdate, Kind::Object, ObjectObservation, OrderEvidence::Ordered, ParentUpdate::Root, Pose, Region,
-        RegionInfo, UpdateSource, WorldLimits,
+        ApplyOutcome::Introduced, Kind::Object, ObjectObservation, OrderEvidence::Ordered, ParentUpdate::Root, Pose, Region, RegionInfo,
+        UpdateSource, WorldLimits,
     };
     use base::UUID;
     use math::Vec3;
@@ -227,22 +222,13 @@ mod tests {
 
         let mut introduce = |id, local_id, order| {
             let result = world
-                .observe_object(ObjectObservation {
-                    source: UpdateSource::new(region, order, Ordered(u64::from(order)), 0),
-                    id: UUID::from_u128(u128::from(id)),
-                    local_id: NonZeroU32::new(local_id).expect("nonzero local ID"),
-                    kind: Object,
-                    parent: Root,
-                    pose: None,
-                    linear_motion: None,
-                    angular_velocity: None,
-                    scale: None,
-                    attachment_point: FieldUpdate::Keep,
-                    shape: FieldUpdate::Keep,
-                    appearance: FieldUpdate::Keep,
-                    surface_appearance: None,
-                    render_materials: None,
-                })
+                .observe_object(ObjectObservation::new(
+                    UpdateSource::new(region, order, Ordered(u64::from(order)), 0),
+                    UUID::from_u128(u128::from(id)),
+                    NonZeroU32::new(local_id).expect("nonzero local ID"),
+                    Object,
+                    Root,
+                ))
                 .unwrap();
             let Introduced(entity) = result.outcome else { panic!("expected object introduction") };
             entity
@@ -290,24 +276,18 @@ mod tests {
         ));
         let result = world
             .observe_object(ObjectObservation {
-                source: UpdateSource::new(region, 1, Ordered(1), 0),
-                id: UUID::from_u128(3),
-                local_id: NonZeroU32::new(1).unwrap(),
-                kind: Object,
-                parent: Root,
                 pose: Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) }),
-                linear_motion: None,
-                angular_velocity: None,
-                scale: None,
-                attachment_point: FieldUpdate::Keep,
-                shape: FieldUpdate::Keep,
-                appearance: FieldUpdate::Keep,
-                surface_appearance: None,
-                render_materials: None,
+                ..ObjectObservation::new(
+                    UpdateSource::new(region, 1, Ordered(1), 0),
+                    UUID::from_u128(3),
+                    NonZeroU32::new(1).unwrap(),
+                    Object,
+                    Root,
+                )
             })
             .unwrap();
         let Introduced(entity) = result.outcome else { panic!("expected object introduction") };
-        world.ecs.get::<&mut ObjectRecord>(entity.0).unwrap().state.transform.rotation = Some(Quat::from_xyzw(0.0, 0.0, 0.0, 2.0));
+        world.store.record_mut(entity.0).state.transform.rotation = Some(Quat::from_xyzw(0.0, 0.0, 0.0, 2.0));
 
         assert_eq!(world.object(entity).unwrap().world_pose(), Err(PoseError::InvalidRotation { entity }));
     }

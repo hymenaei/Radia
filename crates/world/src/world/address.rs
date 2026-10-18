@@ -1,10 +1,12 @@
 //! Local-address admission, tombstones, and bounded ordering evidence.
 
+#[cfg(feature = "invariants")]
+use super::RegionState;
 use super::World;
+#[cfg(feature = "invariants")]
+use super::storage::ObjectStore;
 use crate::update::Stamp;
 use crate::{Applied, ApplyOutcome, DeferredReason, LocalAddress, Recovery, Region, WorldLimits};
-#[cfg(feature = "invariants")]
-use crate::{Entity, RegionInfo};
 use base::UUID;
 #[cfg(feature = "invariants")]
 use std::collections::BTreeMap;
@@ -68,11 +70,11 @@ impl Tombstones {
     }
 
     #[cfg(feature = "invariants")]
-    pub(super) fn invariants_hold(&self, active_regions: &BTreeMap<Region, RegionInfo>, addresses: &HashMap<LocalAddress, Entity>) -> bool {
+    pub(super) fn invariants_hold(&self, active_regions: &BTreeMap<Region, RegionState>, store: &ObjectStore) -> bool {
         self.by_address.len() == self.oldest_by_region.values().map(BTreeSet::len).sum::<usize>()
             && self.by_address.iter().all(|(address, stamp)| {
                 active_regions.contains_key(&address.region())
-                    && !addresses.contains_key(address)
+                    && store.entity_at(*address).is_none()
                     && self.oldest_by_region.get(&address.region()).is_some_and(|entries| entries.contains(&(*stamp, address.local_id())))
             })
             && self.oldest_by_region.iter().all(|(region, entries)| {
@@ -84,7 +86,7 @@ impl Tombstones {
 
 impl World {
     pub(super) fn tombstone_would_change(&self, address: LocalAddress, stamp: Stamp) -> bool {
-        if self.addresses.contains_key(&address) || self.tombstones.get(&address).is_some_and(|existing| *existing >= stamp) {
+        if self.entity_at(address).is_some() || self.tombstones.get(&address).is_some_and(|existing| *existing >= stamp) {
             return false;
         }
         if self.max_tombstones() == 0 || self.max_tombstones_per_region() == 0 {
@@ -94,7 +96,7 @@ impl World {
     }
 
     pub(super) fn insert_tombstone(&mut self, address: LocalAddress, stamp: Stamp) -> bool {
-        if self.addresses.contains_key(&address) || self.tombstones.get(&address).is_some_and(|existing| *existing >= stamp) {
+        if self.entity_at(address).is_some() || self.tombstones.get(&address).is_some_and(|existing| *existing >= stamp) {
             return false;
         }
         if self.max_tombstones() == 0 || self.max_tombstones_per_region() == 0 {
@@ -145,9 +147,9 @@ impl World {
     }
 
     pub(super) fn preflight_address(&self, address: LocalAddress, id: UUID, stamp: Stamp) -> Option<Applied> {
-        if let Some(entity) = self.addresses.get(&address) {
-            let record = self.record(*entity).expect("address index contains a live entity");
-            if record.id != id && stamp <= record.state.binding.fence {
+        if let Some(entity) = self.entity_at(address) {
+            let record = self.store.record(entity).expect("address index contains a live entity");
+            if record.id != id && stamp <= record.state.binding.fence() {
                 let mut applied = Applied::unchanged();
                 applied.outcome = ApplyOutcome::IgnoredStale;
                 return Some(applied);

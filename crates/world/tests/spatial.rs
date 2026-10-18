@@ -5,7 +5,7 @@ use math::{DVec3, Quat, Vec3};
 use world::{
     Applied,
     ApplyOutcome::{Introduced, Removed, Updated},
-    Entity, FieldUpdate, Kind,
+    Entity, Kind,
     Kind::Object,
     LinearMotion, MAX_QUERY_STATE_MAINTENANCE_WORK, MAX_WORLD_QUERY_RESULTS, MAX_WORLD_QUERY_WORK, MotionPatch, ObjectObservation,
     ObjectPatch,
@@ -46,22 +46,7 @@ fn local_id(value: u32) -> NonZeroU32 {
 }
 
 fn object(region: Region, order: u64, id: u128, local: u32, kind: Kind, parent: ParentUpdate) -> ObjectObservation {
-    ObjectObservation {
-        source: source(region, order),
-        id: uuid(id),
-        local_id: local_id(local),
-        kind,
-        parent,
-        pose: None,
-        linear_motion: None,
-        angular_velocity: None,
-        scale: None,
-        attachment_point: FieldUpdate::Keep,
-        shape: FieldUpdate::Keep,
-        appearance: FieldUpdate::Keep,
-        surface_appearance: None,
-        render_materials: None,
-    }
+    ObjectObservation::new(source(region, order), uuid(id), local_id(local), kind, parent)
 }
 
 fn entity(outcome: Applied) -> Entity {

@@ -31,7 +31,11 @@ pub(super) fn bench(c: &mut Criterion) {
 
         group.throughput(Throughput::Elements(count as u64));
         group.bench_with_input(BenchmarkId::new("iterate_objects", size_name(count)), &count, |b, _| {
-            b.iter(|| black_box(scene.world.objects().iter().fold(0usize, |count, _| count + 1)));
+            b.iter(|| {
+                for object in scene.world.objects().iter() {
+                    black_box(object.entity());
+                }
+            });
         });
         group.bench_with_input(BenchmarkId::new("scan_transforms", size_name(count)), &count, |b, _| {
             b.iter(|| {
@@ -52,7 +56,15 @@ pub(super) fn bench(c: &mut Criterion) {
                 let total = scene
                     .regions
                     .iter()
-                    .map(|region| scene.world.objects_in_region(*region).fold(0usize, |count, _| count + 1))
+                    .map(|region| {
+                        scene
+                            .world
+                            .objects_in_region(*region)
+                            .inspect(|object| {
+                                black_box(object.entity());
+                            })
+                            .count()
+                    })
                     .sum::<usize>();
                 black_box(total);
             });

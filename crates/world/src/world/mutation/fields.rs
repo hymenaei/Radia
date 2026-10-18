@@ -6,7 +6,7 @@ use base::UUID;
 use math::{Quat, Vec3};
 
 use super::super::journal::WorldChangeClasses;
-use super::super::{Fences, ObjectContent, ObjectOrdering, ObjectState, RegionalStamp, World, newer_field, newer_region_field};
+use super::super::{Fences, ObjectContent, ObjectOrdering, ObjectState, RegionalStamp, newer_field, newer_region_field};
 use crate::update::{FieldStamp, Stamp};
 use crate::{
     ApplyError, FieldGroup, FieldRejection, FieldRejectionReason, FieldUpdate, Kind, LinearMotion, MotionPatch, ObjectObservation,
@@ -61,12 +61,14 @@ pub(super) fn content_change_classes(before_content: &ObjectContent, after_conte
         || !same_arc(before_content.surface_appearance.as_ref(), after_content.surface_appearance.as_ref())
         || !same_arc(before_content.render_materials.as_ref(), after_content.render_materials.as_ref())
         || !same_arc(before_content.gltf_material_overrides.as_ref(), after_content.gltf_material_overrides.as_ref())
-        || !same_arc(before_content.object_media.as_ref(), after_content.object_media.as_ref())
         || !same_arc(before_content.avatar_appearance.as_ref(), after_content.avatar_appearance.as_ref())
     {
         classes |= WorldChangeClasses::APPEARANCE;
     }
 
+    if !same_arc(before_content.object_media.as_ref(), after_content.object_media.as_ref()) {
+        classes |= WorldChangeClasses::MEDIA;
+    }
     if before_content.properties != after_content.properties || before_content.properties_provenance != after_content.properties_provenance
     {
         classes |= WorldChangeClasses::PROPERTIES;
@@ -131,20 +133,6 @@ pub(super) fn mark_pose_components(data: &mut ObjectState, pose: Pose) {
     }
     if pose.rotation.is_some() {
         data.rotation_frame_generation = Some(data.frame_generation);
-    }
-}
-
-pub(super) fn parent_frame_identity_changed(world: &World, current: Parent, next: Parent) -> bool {
-    if current == next {
-        return false;
-    }
-    match (current, next) {
-        (Parent::Pending { address, expected_uuid }, Parent::Resolved(entity))
-        | (Parent::Resolved(entity), Parent::Pending { address, expected_uuid }) => world.record(entity).is_none_or(|object| {
-            object.state.binding.address != address
-                || expected_uuid.map_or(object.state.binding.parent_resolution_fence.is_some(), |expected| expected != object.id)
-        }),
-        _ => true,
     }
 }
 

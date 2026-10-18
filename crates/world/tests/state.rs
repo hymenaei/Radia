@@ -82,6 +82,10 @@ fn object_views_support_shared_reads() {
         panic!("expected object introduction");
     };
     let object = world.object(entity).unwrap();
+    let second = world.object(entity).unwrap();
+    assert_eq!(object.id(), uuid(60));
+    assert_eq!(second.entity(), object.entity());
+    assert_eq!(second.id(), object.id());
     let mut scan = world.objects();
     let scanned = scan.iter().next().unwrap();
     assert_eq!(object.id(), scanned.id());
@@ -93,6 +97,7 @@ fn object_views_support_shared_reads() {
     drop(scanned);
     drop(scan);
     drop(object);
+    drop(second);
     assert_eq!(
         world.remove_object(source(region, 2), address(region, 1).local_id()).unwrap().outcome,
         world::ApplyOutcome::Removed(uuid(60))
@@ -201,6 +206,51 @@ fn region_metadata_conflicts_are_atomic() {
         assert_eq!(world.region(region), Some(&original));
         assert_eq!(world.revision(), revision);
     }
+}
+
+#[test]
+fn region_names_follow_source_order_without_revising_duplicate_values() {
+    let region = Region::new(71);
+    let mut world = World::new(limits());
+    let _ = world.adopt_region(region).unwrap();
+    for (source, name, expected, changed) in [
+        (source(region, 10), "First", "First", true),
+        (source(region, 20), "First", "First", false),
+        (source(region, 15), "Stale", "First", false),
+        (source(region, 20), "Replay", "First", false),
+        (UpdateSource::new(region, 20, Ordered(20), 1), "Next", "Next", true),
+        (UpdateSource::new(region, 21, OrderEvidence::Ambiguous, 0), "Unknown", "Next", false),
+        (UpdateSource::new(region, 21, Degraded, 0), "Unknown", "Next", false),
+        (source(region, 100).with_authority(world::UpdateAuthority::Untracked), "Weak", "Next", false),
+        (source(region, 30), "Latest", "Latest", true),
+    ] {
+        let revision = world.revision();
+        let _ = world.observe_region_metadata(source, RegionInfo { name: Some(name.into()), ..RegionInfo::default() }).unwrap();
+        assert_eq!(world.region(region).unwrap().name.as_deref(), Some(expected), "{source:?}");
+        assert_eq!(world.revision() != revision, changed, "{source:?}");
+    }
+    let _ = world.retire_region(region).unwrap();
+    assert_eq!(world.observe_region_metadata(source(region, 40), RegionInfo::default()), Err(StaleRegion));
+}
+
+#[test]
+fn rejected_region_observations_preserve_metadata_and_name_ordering() {
+    let region = Region::new(72);
+    let mut world = World::new(limits());
+    let _ = world.adopt_region(region).unwrap();
+    let original = RegionInfo { region_id: Some(uuid(1)), name: Some("First".into()), ..RegionInfo::default() };
+    let _ = world.observe_region_metadata(source(region, 10), original.clone()).unwrap();
+    let revision = world.revision();
+    for (incoming, error) in [
+        (RegionInfo { region_id: Some(uuid(2)), name: Some("Wrong".into()), ..RegionInfo::default() }, InvalidValue { field: "region_id" }),
+        (RegionInfo { name: Some("Too long name".into()), ..RegionInfo::default() }, InvalidValue { field: "region_name" }),
+    ] {
+        assert_eq!(world.observe_region_metadata(source(region, 30), incoming), Err(error));
+        assert_eq!(world.region(region), Some(&original));
+        assert_eq!(world.revision(), revision);
+    }
+    let _ = world.observe_region_metadata(source(region, 20), RegionInfo { name: Some("Next".into()), ..RegionInfo::default() }).unwrap();
+    assert_eq!(world.region(region).unwrap().name.as_deref(), Some("Next"));
 }
 
 #[test]

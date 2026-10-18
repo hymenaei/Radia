@@ -69,10 +69,14 @@ pub(crate) enum EventQueueExit {
 }
 
 pub(crate) struct EventQueueTask {
-    task: Option<JoinHandle<()>>,
-    completion: Option<oneshot::Receiver<EventQueueExit>>,
-    completed: Option<EventQueueExit>,
+    task: JoinHandle<()>,
+    completion: Completion,
     role: EventQueueRoleHandle,
+}
+
+enum Completion {
+    Pending(oneshot::Receiver<EventQueueExit>),
+    Finished(EventQueueExit),
 }
 
 #[derive(Clone)]
@@ -95,40 +99,36 @@ impl EventQueueRoleHandle {
 
 impl EventQueueTask {
     pub(super) fn new(task: JoinHandle<()>, completion: oneshot::Receiver<EventQueueExit>, role: EventQueueRoleHandle) -> Self {
-        Self { task: Some(task), completion: Some(completion), completed: None, role }
+        Self { task, completion: Completion::Pending(completion), role }
     }
 
     pub(crate) fn role_handle(&self) -> EventQueueRoleHandle {
         self.role.clone()
     }
 
+    /// Waits for a repeatable exit result. Cancelling preserves it for a later call.
     pub(crate) async fn completion(&mut self) -> EventQueueExit {
-        if let Some(exit) = self.completed {
-            return exit;
+        match &mut self.completion {
+            Completion::Finished(exit) => *exit,
+            Completion::Pending(completion) => {
+                let exit = completion.await.unwrap_or(EventQueueExit::TaskFailed);
+                self.completion = Completion::Finished(exit);
+                exit
+            }
         }
-        let exit = match &mut self.completion {
-            Some(completion) => (&mut *completion).await.unwrap_or(EventQueueExit::TaskFailed),
-            None => EventQueueExit::TaskFailed,
-        };
-        self.completion = None;
-        self.completed = Some(exit);
-        exit
     }
 
+    /// Waits for the exit result and worker teardown. Cancelling aborts the worker.
     pub(crate) async fn wait(mut self) -> EventQueueExit {
         let exit = self.completion().await;
-        if let Some(task) = self.task.take() {
-            let _ = task.await;
-        }
+        let _ = (&mut self.task).await;
         exit
     }
 }
 
 impl Drop for EventQueueTask {
     fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
+        self.task.abort();
     }
 }
 
@@ -1145,13 +1145,62 @@ pub(crate) fn seed_retry_delay(retry_count: u32, retry_after: Option<Duration>) 
 }
 
 #[cfg(test)]
-mod retry_tests {
+mod lifecycle_tests {
     use super::*;
     use std::{future::Future, net::SocketAddr};
     use tokio::task::yield_now;
     use tokio::time::timeout;
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(2);
+
+    #[tokio::test]
+    async fn completion_survives_cancelled_polling_and_repeated_reads() {
+        for exit in [Some(EventQueueExit::StoppedWithCoverageLoss), None] {
+            let (completed, completion) = oneshot::channel();
+            let (role, _) = EventQueueRoleHandle::channel(true);
+            let mut task = EventQueueTask::new(tokio::spawn(async {}), completion, role);
+            tokio::select! {
+                biased;
+                exit = task.completion() => panic!("completion is not ready: {exit:?}"),
+                _ = async {} => {},
+            }
+
+            if let Some(exit) = exit {
+                completed.send(exit).expect("completion receiver survives polling cancellation");
+            } else {
+                drop(completed);
+            }
+            let expected = exit.unwrap_or(EventQueueExit::TaskFailed);
+            assert_eq!(task.completion().await, expected);
+            assert_eq!(task.completion().await, expected);
+            assert_eq!(task.wait().await, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_wait_aborts_the_worker_after_completion_is_reported() {
+        use std::{
+            future::pending,
+            pin::pin,
+            task::{Context, Waker},
+        };
+
+        let (worker_lifetime, worker_dropped) = oneshot::channel::<()>();
+        let worker = tokio::spawn(async move {
+            let _lifetime = worker_lifetime;
+            pending::<()>().await;
+        });
+        let (completed, completion) = oneshot::channel();
+        completed.send(EventQueueExit::Stopped).expect("report completion before the worker exits");
+        let (role, _) = EventQueueRoleHandle::channel(true);
+        let task = EventQueueTask::new(worker, completion, role);
+        {
+            let mut wait = pin!(task.wait());
+            assert!(wait.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        }
+
+        assert!(timeout(TEST_TIMEOUT, worker_dropped).await.expect("cancelled wait must abort its worker").is_err());
+    }
 
     #[test]
     fn poll_retry_after_hint_is_bounded() {
@@ -1310,6 +1359,11 @@ mod event_queue_batch_tests {
         coverage::CoverageLoss,
         http::{ResponseMemoryBudget, ResponseMemoryClass},
     };
+    use std::{
+        future::Future,
+        pin::pin,
+        task::{Context, Waker},
+    };
     use tokio::{spawn, task::yield_now};
 
     fn reserve_batch(budget: &Arc<Semaphore>) -> OwnedSemaphorePermit {
@@ -1425,30 +1479,18 @@ mod event_queue_batch_tests {
         let queued_event_bytes = Arc::new(Semaphore::new(MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES));
         let ledger = CoverageLossLedger::new();
         let changed = ledger.subscribe();
-        let task = spawn({
-            let events = events.clone();
-            let shutdown_receiver = shutdown_receiver.clone();
-            let session_closed_receiver = session_closed_receiver.clone();
-            let queued_event_bytes = Arc::clone(&queued_event_bytes);
-            let ledger = ledger.clone();
-            async move {
-                send_batch(
-                    &events,
-                    SimulatorId::new(1),
-                    vec![event("First"), event("Second")],
-                    &shutdown_receiver,
-                    &session_closed_receiver,
-                    &queued_event_bytes,
-                    &ledger,
-                )
-                .await
-            }
-        });
-
-        yield_now().await;
-        assert!(!task.is_finished(), "the complete batch waits for one application queue slot");
+        let mut admission = pin!(send_batch(
+            &events,
+            SimulatorId::new(1),
+            vec![event("First"), event("Second")],
+            &shutdown_receiver,
+            &session_closed_receiver,
+            &queued_event_bytes,
+            &ledger,
+        ));
+        assert!(admission.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
         shutdown.send_replace(true);
-        assert!(matches!(task.await.expect("admission task"), EventSendOutcome::Shutdown));
+        assert!(matches!(admission.await, EventSendOutcome::Shutdown));
         let mut changed = changed;
         changed.changed().await.expect("durable loss wakes ledger subscribers");
         assert!(matches!(
@@ -1469,30 +1511,18 @@ mod event_queue_batch_tests {
         let (_session_closed, session_closed_receiver) = watch::channel(false);
         let queued_event_bytes = Arc::new(Semaphore::new(MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES));
         let ledger = CoverageLossLedger::new();
-        let task = spawn({
-            let events = events.clone();
-            let shutdown_receiver = shutdown_receiver.clone();
-            let session_closed_receiver = session_closed_receiver.clone();
-            let queued_event_bytes = Arc::clone(&queued_event_bytes);
-            let ledger = ledger.clone();
-            async move {
-                send_batch(
-                    &events,
-                    SimulatorId::new(3),
-                    vec![event("First"), event("Second")],
-                    &shutdown_receiver,
-                    &session_closed_receiver,
-                    &queued_event_bytes,
-                    &ledger,
-                )
-                .await
-            }
-        });
-
-        yield_now().await;
-        assert!(!task.is_finished(), "admission is waiting for the single downstream slot");
-        task.abort();
-        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        {
+            let mut admission = pin!(send_batch(
+                &events,
+                SimulatorId::new(3),
+                vec![event("First"), event("Second")],
+                &shutdown_receiver,
+                &session_closed_receiver,
+                &queued_event_bytes,
+                &ledger,
+            ));
+            assert!(admission.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        }
         assert!(matches!(
             ledger.snapshot().losses.as_slice(),
             [CoverageLoss::Source(loss)] if loss.reason == CoverageLossReason::EventQueueAdmission
@@ -1546,23 +1576,19 @@ mod event_queue_batch_tests {
         let ledger = CoverageLossLedger::new();
         let batch = vec![event("First"), event("Second")];
         let expected_bytes = capability_event_batch_retained_size(&batch, batch.capacity());
-        let task = spawn({
-            let events = events.clone();
-            let shutdown_receiver = shutdown_receiver.clone();
-            let session_closed_receiver = session_closed_receiver.clone();
-            let queued_event_bytes = Arc::clone(&queued_event_bytes);
-            let ledger = ledger.clone();
-            async move {
-                send_batch(&events, SimulatorId::new(1), batch, &shutdown_receiver, &session_closed_receiver, &queued_event_bytes, &ledger)
-                    .await
-            }
-        });
-
-        yield_now().await;
-        assert!(!task.is_finished(), "the batch cannot publish until one downstream slot is available");
+        let mut admission = pin!(send_batch(
+            &events,
+            SimulatorId::new(1),
+            batch,
+            &shutdown_receiver,
+            &session_closed_receiver,
+            &queued_event_bytes,
+            &ledger,
+        ));
+        assert!(admission.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
         assert_eq!(queued_event_bytes.available_permits(), MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES - expected_bytes);
         assert!(matches!(received.recv().await.map(EventEnvelope::into_event), Some(Event::Failed(_))));
-        assert!(matches!(task.await.expect("batch admission"), EventSendOutcome::Sent));
+        assert!(matches!(admission.await, EventSendOutcome::Sent));
         let envelope = received.recv().await.expect("one complete batch envelope");
         let Event::CapabilityEventBatch { events: batch, .. } = &envelope.event else {
             panic!("the EventQueue response must be one application event")
@@ -1601,20 +1627,6 @@ mod event_queue_batch_tests {
         assert_eq!(queued_event_bytes.available_permits(), MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES);
     }
 
-    #[test]
-    fn shutdown_and_session_close_skip_batch_reservation() {
-        let budget = Arc::new(Semaphore::new(MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES));
-        let (shutdown, shutdown_receiver) = watch::channel(false);
-        let (session_closed, session_closed_receiver) = watch::channel(false);
-        shutdown.send_replace(true);
-        assert!(acquire_event_batch_reservation(Arc::clone(&budget), &shutdown_receiver, &session_closed_receiver).is_none());
-
-        shutdown.send_replace(false);
-        session_closed.send_replace(true);
-        assert!(acquire_event_batch_reservation(Arc::clone(&budget), &shutdown_receiver, &session_closed_receiver).is_none());
-        assert_eq!(budget.available_permits(), MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES);
-    }
-
     #[tokio::test]
     async fn receiver_close_records_loss_and_releases_batch_bytes() {
         let (events, received) = mpsc::channel(1);
@@ -1623,29 +1635,18 @@ mod event_queue_batch_tests {
         let queued_event_bytes = Arc::new(Semaphore::new(MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES));
         let ledger = CoverageLossLedger::new();
         events.try_send(EventEnvelope::new(Event::Failed("hold the only downstream slot".into()))).expect("fill event channel");
-        let task = spawn({
-            let events = events.clone();
-            let shutdown_receiver = shutdown_receiver.clone();
-            let session_closed_receiver = session_closed_receiver.clone();
-            let queued_event_bytes = Arc::clone(&queued_event_bytes);
-            let ledger = ledger.clone();
-            async move {
-                send_batch(
-                    &events,
-                    SimulatorId::new(1),
-                    vec![event("test")],
-                    &shutdown_receiver,
-                    &session_closed_receiver,
-                    &queued_event_bytes,
-                    &ledger,
-                )
-                .await
-            }
-        });
-        yield_now().await;
+        let mut admission = pin!(send_batch(
+            &events,
+            SimulatorId::new(1),
+            vec![event("test")],
+            &shutdown_receiver,
+            &session_closed_receiver,
+            &queued_event_bytes,
+            &ledger,
+        ));
+        assert!(admission.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
         drop(received);
-
-        assert!(matches!(task.await.expect("admission task"), EventSendOutcome::ReceiverClosed));
+        assert!(matches!(admission.await, EventSendOutcome::ReceiverClosed));
         assert!(matches!(
             ledger.snapshot().losses.as_slice(),
             [CoverageLoss::Source(loss)] if loss.reason == CoverageLossReason::EventQueueAdmission

@@ -2,6 +2,7 @@
 
 use std::{
     collections::{HashMap, VecDeque},
+    future::pending,
     mem,
     net::SocketAddr,
     sync::{
@@ -35,8 +36,7 @@ use crate::{
             decode_sit_target_update, object_media_requests,
         },
         object_media::{ObjectMediaFetcher, ObjectMediaResult, ObjectMediaTarget, response_is_stale},
-        recovery::{self, RecoveryRetryQueue},
-        recovery_state::RecoveryState,
+        recovery::{self, RecoveryScheduler},
         world::{IngestStatus, IngestSummary, MAX_WORLD_ENTITIES, RegistrationError, SessionWorld, viewer_world_limits},
     },
 };
@@ -148,6 +148,85 @@ impl WaitingObjectMedia {
     }
 }
 
+enum ObjectMediaIntake {
+    Enabled { fetcher: ObjectMediaFetcher, clients: HashMap<SimulatorId, Client>, waiting: WaitingObjectMedia },
+    Disabled,
+}
+
+impl ObjectMediaIntake {
+    fn new(fetcher: ObjectMediaFetcher) -> Self {
+        Self::Enabled { fetcher, clients: HashMap::new(), waiting: WaitingObjectMedia::default() }
+    }
+
+    async fn next_result(&mut self) -> Option<ObjectMediaResult> {
+        match self {
+            Self::Enabled { fetcher, .. } => fetcher.next_result().await,
+            Self::Disabled => pending().await,
+        }
+    }
+
+    fn disable(&mut self) {
+        *self = Self::Disabled;
+    }
+
+    fn set_client(&mut self, simulator_id: SimulatorId, client: Client) {
+        if let Self::Enabled { clients, .. } = self {
+            clients.insert(simulator_id, client);
+        }
+    }
+
+    fn finish(&mut self, result: &ObjectMediaResult) -> Option<ObjectMediaTarget> {
+        match self {
+            Self::Enabled { fetcher, .. } => fetcher.finish(result),
+            Self::Disabled => None,
+        }
+    }
+
+    fn forget_simulator(&mut self, simulator_id: SimulatorId) {
+        let Self::Enabled { fetcher, clients, waiting } = self else { return };
+        clients.remove(&simulator_id);
+        fetcher.forget_simulator(simulator_id);
+        waiting.retain_simulator(simulator_id);
+    }
+
+    fn queue(&mut self, target: ObjectMediaTarget, world: &SessionWorld) {
+        let Self::Enabled { fetcher, clients, waiting } = self else { return };
+        if !world.object_media_target_is_current(target) {
+            return;
+        }
+        if waiting.update(target) {
+            return;
+        }
+        if let Some(client) = clients.get(&target.simulator_id)
+            && fetcher.enqueue(target, client.clone())
+        {
+            return;
+        }
+        if !waiting.insert(target) {
+            tracing::error!("ObjectMedia queue reached the live object limit");
+        }
+    }
+
+    fn flush(&mut self, world: &SessionWorld) {
+        let Self::Enabled { fetcher, clients, waiting } = self else { return };
+        let attempts = waiting.len().min(MAX_MEDIA_FLUSH_BATCH);
+        for _ in 0..attempts {
+            let Some(target) = waiting.pop_front() else { break };
+            if !world.object_media_target_is_current(target) {
+                continue;
+            }
+            let Some(client) = clients.get(&target.simulator_id) else {
+                waiting.push_back(target);
+                continue;
+            };
+            if !fetcher.enqueue(target, client.clone()) {
+                waiting.push_front(target);
+                break;
+            }
+        }
+    }
+}
+
 pub(crate) type WriteLock = Arc<futures::lock::Mutex<()>>;
 
 #[derive(Clone)]
@@ -181,6 +260,7 @@ pub(crate) enum AuthenticationUpdate {
 pub(crate) struct SessionReadyUpdate {
     pub(crate) session: AgentSession,
     pub(crate) region_lookup: RegionLookup,
+    pub(crate) region_name: Option<String>,
 }
 
 pub(crate) struct FavoritesUpdate {
@@ -234,7 +314,10 @@ impl PresentationMailbox {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             match update {
                 ViewerUpdate::Authentication(update) => state.authentication = Some(update),
-                ViewerUpdate::SessionReady(update) => state.session_ready = Some(update),
+                ViewerUpdate::SessionReady(update) => {
+                    state.region_name = None;
+                    state.session_ready = Some(update);
+                }
                 ViewerUpdate::RegionName(name) => state.region_name = Some(name),
                 ViewerUpdate::ChatMessage(message) => state.push_chat(message),
                 ViewerUpdate::Failed(error) => {
@@ -341,7 +424,6 @@ pub(crate) async fn drain_session(
     }
     .shared();
     let world_limits = viewer_world_limits();
-    let recovery_state = RecoveryState::new();
     let mut session_world = SessionWorld::new(world_limits);
     let mut primary_simulator_id = None;
     let mut world_primary_simulator_id = None;
@@ -350,13 +432,10 @@ pub(crate) async fn drain_session(
     let mut active_session = None;
     let mut active_login_data = None;
     let mut region_lookup = None;
-    let mut media_clients = HashMap::<SimulatorId, Client>::new();
-    let mut waiting_media = WaitingObjectMedia::default();
     let query_state_maintenance_started = background.now();
     let mut query_state_maintenance = background.timer(Duration::ZERO).fuse();
-    let mut media_fetcher = ObjectMediaFetcher::new(background.clone(), cancellation.clone());
-    let recovery_queue =
-        Arc::new(Mutex::new(RecoveryRetryQueue::new(recovery::MAX_PENDING_RECOVERY_TARGETS, recovery::MAX_PENDING_RECOVERY_BYTES)));
+    let mut media = ObjectMediaIntake::new(ObjectMediaFetcher::new(background.clone(), cancellation.clone()));
+    let recovery_queue = Arc::new(Mutex::new(RecoveryScheduler::new()));
     let (mut recovery_wake, recovery_wake_receiver) = mpsc::channel(1);
     background
         .clone()
@@ -364,16 +443,14 @@ pub(crate) async fn drain_session(
             recovery_wake_receiver,
             Arc::clone(&recovery_queue),
             session_handle.clone(),
-            recovery_state.clone(),
             background.clone(),
             cancellation.clone(),
         ))
         .detach();
 
     loop {
-        flush_object_media(&mut waiting_media, &media_clients, &mut media_fetcher, &session_world);
-        let input =
-            select_drain_input(session.recv_event(), media_fetcher.next_result(), cancellation.clone(), &mut query_state_maintenance).await;
+        media.flush(&session_world);
+        let input = select_drain_input(session.recv_event(), media.next_result(), cancellation.clone(), &mut query_state_maintenance).await;
         let event = match input {
             DrainInput::Cancelled => break,
             DrainInput::QueryStateMaintenance => {
@@ -384,7 +461,7 @@ pub(crate) async fn drain_session(
             }
             DrainInput::Event(event) => event,
             DrainInput::Media(Some(result)) => {
-                let retry = media_fetcher.finish(&result);
+                let retry = media.finish(&result);
                 let requested_version = retry.map_or(result.target.version, |target| target.version);
                 let response_version = result.update.as_ref().as_ref().ok().map(|update| update.version());
                 if response_version.is_some_and(|version| response_is_stale(version, requested_version)) {
@@ -430,11 +507,18 @@ pub(crate) async fn drain_session(
                     }
                 }
                 if let Some(target) = retry {
-                    queue_object_media(target, &media_clients, &mut media_fetcher, &mut waiting_media, &session_world);
+                    media.queue(target, &session_world);
                 }
                 continue;
             }
-            DrainInput::Media(None) => break,
+            DrainInput::Media(None) => {
+                if cancellation.clone().now_or_never().is_some() {
+                    break;
+                }
+                tracing::warn!("ObjectMedia worker stopped; media fetching is disabled for this session");
+                media.disable();
+                continue;
+            }
         };
         let Some(event) = event else {
             mailbox.publish(ViewerUpdate::Failed("The network session ended.".into()));
@@ -474,14 +558,7 @@ pub(crate) async fn drain_session(
                                         _summary: &IngestSummary,
                                         recovery_targets: Vec<(Option<SimulatorId>, LocalAddress)>,
                                         updated: Vec<LocalAddress>| {
-            recovery::schedule_recovery_requests(
-                recovery_targets,
-                updated,
-                active_session.as_ref(),
-                &recovery_state,
-                Arc::clone(&recovery_queue),
-                &mut recovery_wake,
-            );
+            recovery::schedule_recovery_requests(recovery_targets, updated, active_session.as_ref(), &recovery_queue, &mut recovery_wake);
         };
         if let Some((simulator_id, summary)) = apply_world_event_cooperatively(
             &mut session_world,
@@ -496,25 +573,23 @@ pub(crate) async fn drain_session(
         {
             summary.log_incomplete_data(simulator_id);
             recovery::schedule_recovery_requests(
-                route_recovery_targets(&session_world, simulator_id, summary.recovery_targets()),
+                route_recovery_targets(&session_world, summary.recovery_targets()),
                 summary.recovery_cancellation_addresses().collect(),
                 active_session.as_ref(),
-                &recovery_state,
-                Arc::clone(&recovery_queue),
+                &recovery_queue,
                 &mut recovery_wake,
             );
         }
         if let SimulatorMessage { simulator_id, .. } = &event {
             for request in media_requests {
                 if let Some(target) = session_world.prepare_object_media(*simulator_id, request) {
-                    queue_object_media(target, &media_clients, &mut media_fetcher, &mut waiting_media, &session_world);
+                    media.queue(target, &session_world);
                 }
             }
         }
 
         if let SimulatorDisconnected { simulator_id, .. } | SimulatorFailed { simulator_id, .. } = &event {
             recovery_queue.lock().unwrap_or_else(PoisonError::into_inner).cancel_simulator(*simulator_id);
-            recovery_state.cancel_simulator(*simulator_id);
         }
 
         match event {
@@ -552,13 +627,17 @@ pub(crate) async fn drain_session(
             }
             SessionReady { simulator_id, session, capabilities, login_data } => {
                 let session = *session;
-                media_clients.insert(simulator_id, capabilities.clone());
+                media.set_client(simulator_id, capabilities.clone());
                 primary_simulator_id = Some(simulator_id);
                 active_session = Some(session.clone());
                 active_login_data = Some(login_data.clone());
                 let lookup = RegionLookup::new(session_handle.clone(), simulator_id, &session, background.clone());
                 region_lookup = Some(lookup.clone());
-                mailbox.publish(ViewerUpdate::SessionReady(SessionReadyUpdate { session: session.clone(), region_lookup: lookup.clone() }));
+                mailbox.publish(ViewerUpdate::SessionReady(SessionReadyUpdate {
+                    session: session.clone(),
+                    region_lookup: lookup.clone(),
+                    region_name: session_world.region_name(simulator_id).map(str::to_owned),
+                }));
 
                 let _ = session_handle.send(agent::idle(session.agent_id, session.session_id), Reliable);
 
@@ -587,7 +666,7 @@ pub(crate) async fn drain_session(
             }
             SimulatorPromoted { previous_simulator_id, simulator_id, session, capabilities } => {
                 let session = *session;
-                media_clients.insert(simulator_id, capabilities.clone());
+                media.set_client(simulator_id, capabilities.clone());
                 primary_simulator_id = Some(simulator_id);
                 active_session = Some(session.clone());
                 let lookup = RegionLookup::new(session_handle.clone(), simulator_id, &session, background.clone());
@@ -610,11 +689,10 @@ pub(crate) async fn drain_session(
                         }
                         if let Some(summary) = summary {
                             recovery::schedule_recovery_requests(
-                                route_recovery_targets(&session_world, simulator_id, summary.recovery_targets()),
+                                route_recovery_targets(&session_world, summary.recovery_targets()),
                                 summary.recovery_cancellation_addresses().collect(),
                                 active_session.as_ref(),
-                                &recovery_state,
-                                Arc::clone(&recovery_queue),
+                                &recovery_queue,
                                 &mut recovery_wake,
                             );
                         }
@@ -622,7 +700,11 @@ pub(crate) async fn drain_session(
                 }
                 let favorites_session = session.clone();
                 let favorites_lookup = lookup.clone();
-                mailbox.publish(ViewerUpdate::SessionReady(SessionReadyUpdate { session: session.clone(), region_lookup: lookup }));
+                mailbox.publish(ViewerUpdate::SessionReady(SessionReadyUpdate {
+                    session: session.clone(),
+                    region_lookup: lookup,
+                    region_name: session_world.region_name(simulator_id).map(str::to_owned),
+                }));
                 if let Some(login_data) = active_login_data.clone() {
                     let mailbox = mailbox.clone();
                     let username = username.clone();
@@ -655,7 +737,8 @@ pub(crate) async fn drain_session(
             }
             SimulatorMessage { simulator_id, source, message, .. } => {
                 let scope = if Some(simulator_id) == primary_simulator_id { SimulatorScope::Primary } else { SimulatorScope::Neighbor };
-                handle_simulator_message(scope, source, message, active_session.as_ref(), region_lookup.as_ref(), &mailbox);
+                let region_name = session_world.region_name(simulator_id);
+                handle_simulator_message(scope, source, message, active_session.as_ref(), region_lookup.as_ref(), region_name, &mailbox);
             }
             CaptureFinished { .. } => {}
             CaptureInterrupted { error, .. } => {
@@ -673,24 +756,20 @@ pub(crate) async fn drain_session(
                 break;
             }
             SimulatorDisconnected { simulator_id, .. } => {
-                media_clients.remove(&simulator_id);
-                media_fetcher.forget_simulator(simulator_id);
-                waiting_media.retain_simulator(simulator_id);
+                media.forget_simulator(simulator_id);
                 if Some(simulator_id) == primary_simulator_id {
                     primary_simulator_id = None;
                 }
             }
             SimulatorFailed { simulator_id, .. } => {
-                media_clients.remove(&simulator_id);
-                media_fetcher.forget_simulator(simulator_id);
-                waiting_media.retain_simulator(simulator_id);
+                media.forget_simulator(simulator_id);
                 if Some(simulator_id) == primary_simulator_id {
                     primary_simulator_id = None;
                 }
             }
             CapabilityEvent { .. } | CapabilityEventBatch { .. } | CapabilityError { .. } | SimulatorConnectFailed { .. } => {}
             SimulatorCapabilities { simulator_id, capabilities, .. } => {
-                media_clients.insert(simulator_id, capabilities);
+                media.set_client(simulator_id, capabilities);
             }
             CoverageLost { .. } => unreachable!("coverage loss events are reconciled before world intake"),
         }
@@ -701,58 +780,8 @@ pub(crate) async fn drain_session(
     }
 }
 
-fn route_recovery_targets(
-    world: &SessionWorld,
-    preferred: SimulatorId,
-    addresses: impl Iterator<Item = LocalAddress>,
-) -> Vec<(Option<SimulatorId>, LocalAddress)> {
-    addresses.map(|address| (world.simulator_for_region(address.region(), preferred), address)).collect()
-}
-
-fn queue_object_media(
-    target: ObjectMediaTarget,
-    clients: &HashMap<SimulatorId, Client>,
-    fetcher: &mut ObjectMediaFetcher,
-    waiting: &mut WaitingObjectMedia,
-    world: &SessionWorld,
-) {
-    if !world.object_media_target_is_current(target) {
-        return;
-    }
-    if waiting.update(target) {
-        return;
-    }
-    if let Some(client) = clients.get(&target.simulator_id)
-        && fetcher.enqueue(target, client.clone())
-    {
-        return;
-    }
-    if !waiting.insert(target) {
-        tracing::error!("ObjectMedia queue reached the live object limit");
-    }
-}
-
-fn flush_object_media(
-    waiting: &mut WaitingObjectMedia,
-    clients: &HashMap<SimulatorId, Client>,
-    fetcher: &mut ObjectMediaFetcher,
-    world: &SessionWorld,
-) {
-    let attempts = waiting.len().min(MAX_MEDIA_FLUSH_BATCH);
-    for _ in 0..attempts {
-        let Some(target) = waiting.pop_front() else { break };
-        if !world.object_media_target_is_current(target) {
-            continue;
-        }
-        let Some(client) = clients.get(&target.simulator_id) else {
-            waiting.push_back(target);
-            continue;
-        };
-        if !fetcher.enqueue(target, client.clone()) {
-            waiting.push_front(target);
-            break;
-        }
-    }
+fn route_recovery_targets(world: &SessionWorld, addresses: impl Iterator<Item = LocalAddress>) -> Vec<(Option<SimulatorId>, LocalAddress)> {
+    addresses.map(|address| (world.simulator_for_region(address.region()), address)).collect()
 }
 
 enum DecodedWorldUpdate {
@@ -769,14 +798,18 @@ fn decode_simulator_world_update(
     packet_order: PacketOrder,
     message: &Message,
 ) -> Option<DecodedWorldUpdate> {
+    let region = world.region_for(simulator_id)?;
     if let Message::RegionHandshake(handshake) = message {
         let region_id = handshake.region_info2.as_ref().map(|info| info.region_id).filter(|id| !id.is_nil());
-        if let Err(error) = world.update_handshake_metadata(simulator_id, region_id, handshake.region_info1.sim_name.clone()) {
+        if let Err(error) = world.update_handshake_metadata(
+            UpdateSource::new(region, sequence, order_evidence(packet_order), 0),
+            region_id,
+            handshake.region_info1.sim_name.clone(),
+        ) {
             tracing::warn!(?error, "could not update region handshake metadata");
         }
     }
 
-    let region = world.region_for(simulator_id)?;
     if let Some(update) = decode_sit_target_update(message) {
         let source = UpdateSource::new(region, sequence, order_evidence(packet_order), 0);
         return Some(DecodedWorldUpdate::SitTarget { source, update });
@@ -1143,6 +1176,7 @@ fn handle_simulator_message(
     message: Message,
     session: Option<&AgentSession>,
     region_lookup: Option<&RegionLookup>,
+    region_name: Option<&str>,
     mailbox: &PresentationMailbox,
 ) {
     use Message::{ChatFromSimulator, RegionHandshake};
@@ -1151,8 +1185,10 @@ fn handle_simulator_message(
         if let Some(region_lookup) = region_lookup {
             region_lookup.handle_message(source, &message);
         }
-        if let RegionHandshake(message) = &message {
-            mailbox.publish(ViewerUpdate::RegionName(message.region_info1.sim_name.clone()));
+        if matches!(&message, RegionHandshake(_))
+            && let Some(name) = region_name
+        {
+            mailbox.publish(ViewerUpdate::RegionName(name.to_owned()));
         }
     }
     if let ChatFromSimulator(message) = message
@@ -1197,6 +1233,7 @@ mod tests {
     use std::{
         collections::HashMap,
         fs,
+        future::{pending, ready},
         num::NonZeroU32,
         sync::{
             Arc,
@@ -1247,13 +1284,14 @@ mod tests {
     };
 
     use super::{
-        MAX_PENDING_CHAT_BYTES, MAX_PENDING_CHAT_MESSAGES, ObjectMediaResult, PresentationMailbox, SimulatorScope, ViewerUpdate,
-        WaitingObjectMedia, apply_world_event, apply_world_event_with_handoff, begin_world_handoff, complete_promoted_handoff,
-        complete_promoted_world_handoff, fixture_packet, handle_simulator_message, save_if_current, select_drain_input, write_lock,
+        MAX_PENDING_CHAT_BYTES, MAX_PENDING_CHAT_MESSAGES, ObjectMediaIntake, ObjectMediaResult, PresentationMailbox, SimulatorScope,
+        ViewerUpdate, WaitingObjectMedia, apply_world_event, apply_world_event_with_handoff, begin_world_handoff,
+        complete_promoted_handoff, complete_promoted_world_handoff, fixture_packet, handle_simulator_message, save_if_current,
+        select_drain_input, write_lock,
     };
     use crate::session::{
         inbound::{ObjectBatch, ObjectOperation},
-        object_media::{FetchError, ObjectMediaTarget},
+        object_media::{FetchError, ObjectMediaFetcher, ObjectMediaTarget},
     };
 
     fn region_handshake(name: &str) -> Message {
@@ -1270,20 +1308,8 @@ mod tests {
         let local_id = NonZeroU32::new(7).expect("nonzero local ID");
         let source = UpdateSource::new(region, order, OrderEvidence::Ordered(u64::from(order)), 0);
         let observation = ObjectObservation {
-            source,
-            id: UUID::from_u128(7),
-            local_id,
-            kind: Kind::Object,
-            parent: ParentUpdate::Root,
-            pose: None,
-            linear_motion: None,
-            angular_velocity: None,
-            scale: None,
-            attachment_point: FieldUpdate::Keep,
-            shape: FieldUpdate::Keep,
             appearance: FieldUpdate::Set(Appearance::Surface),
-            surface_appearance: None,
-            render_materials: None,
+            ..ObjectObservation::new(source, UUID::from_u128(7), local_id, Kind::Object, ParentUpdate::Root)
         };
         let summary = world
             .apply_object_batch(
@@ -1301,6 +1327,37 @@ mod tests {
         let Introduced(entity) = &result.outcome else { panic!("object is introduced") };
         let binding = world.world().object_binding_target(*entity).expect("current object binding");
         ObjectMediaTarget { simulator_id, binding, source, version }
+    }
+
+    #[gpui::test]
+    async fn media_worker_exit_does_not_stop_world_intake(cx: &TestAppContext) {
+        let simulator = simulator_id();
+        let mut world = SessionWorld::new(viewer_world_limits());
+        let target = object_media_target(&mut world, simulator, 1, 1);
+        let mut media = ObjectMediaIntake::new(ObjectMediaFetcher::new(cx.executor(), ready(())));
+        media.queue(target, &world);
+        assert!(matches!(&media, ObjectMediaIntake::Enabled { waiting, .. } if waiting.len() == 1));
+        assert!(media.next_result().await.is_none());
+
+        media.disable();
+        media.queue(target, &world);
+        assert!(matches!(media, ObjectMediaIntake::Disabled), "disabled fetching releases queued work and rejects new work");
+        let event = simulator_message(
+            simulator,
+            2,
+            KillObject(kill_object::KillObject {
+                object_data: vec![kill_object::ObjectData { local_id: target.binding.address().local_id().get() }],
+            }),
+        );
+        let input = select_drain_input(ready(Some(event)), media.next_result(), pending(), pending()).await;
+        let super::DrainInput::Event(Some(event)) = input else { panic!("network intake continues after media failure") };
+        let _ = apply_world_event(&mut world, &event).expect("object removal is applied");
+        assert!(world.world().object(target.binding.entity()).is_none());
+
+        let input = select_drain_input(pending(), media.next_result(), pending(), ready(())).await;
+        assert!(matches!(input, super::DrainInput::QueryStateMaintenance));
+        let input = select_drain_input(pending(), media.next_result(), ready(()), pending()).await;
+        assert!(matches!(input, super::DrainInput::Cancelled));
     }
 
     #[test]
@@ -1453,20 +1510,14 @@ mod tests {
 
     fn agent_observation(source: UpdateSource, local_id: u32, agent_id: UUID, pose: Option<Pose>) -> ObjectObservation {
         ObjectObservation {
-            source,
-            id: agent_id,
-            local_id: NonZeroU32::new(local_id).expect("nonzero local ID"),
-            kind: Kind::Avatar,
-            parent: ParentUpdate::Root,
             pose,
-            linear_motion: None,
-            angular_velocity: None,
-            scale: None,
-            attachment_point: FieldUpdate::Keep,
-            shape: FieldUpdate::Keep,
-            appearance: FieldUpdate::Keep,
-            surface_appearance: None,
-            render_materials: None,
+            ..ObjectObservation::new(
+                source,
+                agent_id,
+                NonZeroU32::new(local_id).expect("nonzero local ID"),
+                Kind::Avatar,
+                ParentUpdate::Root,
+            )
         }
     }
 
@@ -2099,6 +2150,23 @@ mod tests {
     }
 
     #[test]
+    fn presentation_uses_the_name_accepted_by_world() {
+        let simulator = simulator_id();
+        let mut world = SessionWorld::new(viewer_world_limits());
+        world.register_simulator(simulator, None).unwrap();
+        let (mailbox, mut receiver) = PresentationMailbox::new(1);
+        let address = "127.0.0.1:13000".parse().unwrap();
+        for (order, name) in [(10, "Initial"), (20, "Renamed"), (15, "Stale")] {
+            let message = region_handshake(name);
+            super::decode_simulator_world_update(&mut world, simulator, order, Ordered(u64::from(order)), &message);
+            handle_simulator_message(SimulatorScope::Primary, address, message, None, None, world.region_name(simulator), &mailbox);
+        }
+        let snapshot = futures::executor::block_on(receiver.next()).expect("presentation wake");
+        assert_eq!(snapshot.region_name.as_deref(), Some("Renamed"));
+        assert_eq!(world.region_name(simulator), Some("Renamed"));
+    }
+
+    #[test]
     fn neighbor_chat_survives_primary_updates() {
         let (mailbox, mut receiver) = PresentationMailbox::new(1);
         let source = "127.0.0.1:13000".parse().expect("simulator address");
@@ -2110,11 +2178,20 @@ mod tests {
                 region_handshake(&format!("Neighbor {index}")),
                 None,
                 None,
+                Some("Neighbor"),
                 &mailbox,
             );
-            handle_simulator_message(SimulatorScope::Neighbor, source, chat_message("Neighbor"), None, None, &mailbox);
-            handle_simulator_message(SimulatorScope::Primary, source, region_handshake(&format!("Primary {index}")), None, None, &mailbox);
-            handle_simulator_message(SimulatorScope::Primary, source, chat_message("Primary"), None, None, &mailbox);
+            handle_simulator_message(SimulatorScope::Neighbor, source, chat_message("Neighbor"), None, None, None, &mailbox);
+            handle_simulator_message(
+                SimulatorScope::Primary,
+                source,
+                region_handshake("Unaccepted"),
+                None,
+                None,
+                Some(&format!("Primary {index}")),
+                &mailbox,
+            );
+            handle_simulator_message(SimulatorScope::Primary, source, chat_message("Primary"), None, None, None, &mailbox);
         }
 
         let snapshot = futures::executor::block_on(receiver.next()).expect("presentation wake");

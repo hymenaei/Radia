@@ -31,7 +31,6 @@ This file records Second Life domain terms and protocol behavior. `docs/architec
 - **Root prim**: The primary prim of a linkset, defining its root transform and object identity.
 - **Child prim**: A prim linked to the root, with its transform expressed relative to the root when using linkset-local coordinates.
 - **Linkset**: One root prim and zero or more linked child prims, treated as a single object. Second Life does not support nested prim linking.
-- **Entity**: An internally identified world object or avatar, independent of protocol packets and rendering.
 - **Object id**: The UUID of a rezzed prim, distinct from an asset or inventory item UUID.
 - **Object local id**: A simulator-assigned `u32` identifying an object in a region's active simulation. It can be reused.
 - **Entity**: A World-owned generational handle to one observed object or avatar. Its lifetime is limited to the World that created it.

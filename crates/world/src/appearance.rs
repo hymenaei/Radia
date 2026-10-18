@@ -1,5 +1,10 @@
 //! Bounded surface appearance and per-face material descriptions.
 
+use std::{
+    error::Error,
+    fmt::{self, Display, Formatter},
+};
+
 use crate::AssetId;
 use base::UUID;
 
@@ -138,6 +143,19 @@ pub enum SurfaceAppearanceError {
     NonFiniteValue,
 }
 
+impl Display for SurfaceAppearanceError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FaceIndexOutOfRange(index) => write!(f, "surface face index {index} is out of range"),
+            Self::DuplicateFaceIndex(index) => write!(f, "surface face index {index} is duplicated"),
+            Self::TooManyOverrides => f.write_str("too many surface face overrides"),
+            Self::NonFiniteValue => f.write_str("surface appearance contains a non-finite value"),
+        }
+    }
+}
+
+impl Error for SurfaceAppearanceError {}
+
 /// Sparse PBR material asset bindings for TextureEntry faces.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RenderMaterials {
@@ -194,6 +212,18 @@ pub enum RenderMaterialsError {
     DuplicateFaceIndex(u8),
     TooManyBindings,
 }
+
+impl Display for RenderMaterialsError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FaceIndexOutOfRange(index) => write!(f, "material face index {index} is out of range"),
+            Self::DuplicateFaceIndex(index) => write!(f, "material face index {index} is duplicated"),
+            Self::TooManyBindings => f.write_str("too many material bindings"),
+        }
+    }
+}
+
+impl Error for RenderMaterialsError {}
 
 /// GLTF alpha mode used by a material override.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -294,3 +324,16 @@ pub enum GltfMaterialOverridesError {
     TooManyFaces,
     NonFiniteValue,
 }
+
+impl Display for GltfMaterialOverridesError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FaceIndexOutOfRange(index) => write!(f, "GLTF material face index {index} is out of range"),
+            Self::DuplicateFaceIndex(index) => write!(f, "GLTF material face index {index} is duplicated"),
+            Self::TooManyFaces => f.write_str("too many GLTF material faces"),
+            Self::NonFiniteValue => f.write_str("GLTF material override contains a non-finite value"),
+        }
+    }
+}
+
+impl Error for GltfMaterialOverridesError {}

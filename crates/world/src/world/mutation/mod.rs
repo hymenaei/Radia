@@ -1,14 +1,10 @@
-//! Authoritative simulator mutations and publication of their committed effects.
+//! Ordered simulator mutations and publication.
 //!
-//! Entry points are typed methods on World. Each operation validates its context and ordering,
-//! plans dependent changes, checks revision capacity, then updates storage and indexes before
-//! publishing changes. Field rejections remain independent from whole-operation errors.
-//!
-//! These methods apply simulator evidence. Locally predicted or simulated state needs its own
-//! ownership and reconciliation contract before it can change this authoritative state.
+//! Operations validate and plan changes before committing state, indexes, and one revision.
+//! Field rejections do not invalidate eligible sibling updates.
 
-use super::{ObjectContent, ObjectOrdering, ObjectRecord, ObjectState, World};
-use crate::{Applied, ApplyError, ApplyOutcome, Entity, Recovery, Rejections, WorldChange, WorldRevision};
+use super::World;
+use crate::{Applied, ApplyError, ApplyOutcome, Recovery, Rejections, WorldChange, WorldRevision};
 
 mod fields;
 mod lifecycle;
@@ -17,18 +13,6 @@ mod patch;
 mod region;
 
 impl World {
-    fn commit_values(&mut self, entity: Entity, data: ObjectState, content: Option<ObjectContent>, ordering: ObjectOrdering) {
-        let (record, stored_content, stored_ordering) = self
-            .ecs
-            .query_one_mut::<(&mut ObjectRecord, &mut ObjectContent, &mut ObjectOrdering)>(entity.0)
-            .expect("entity index points to a complete object");
-        record.state = data;
-        if let Some(content) = content {
-            *stored_content = content;
-        }
-        *stored_ordering = ordering;
-    }
-
     fn ensure_revision_available(&self) -> Result<(), ApplyError> {
         self.journal.revision.0.checked_add(1).map(|_| ()).ok_or(ApplyError::RevisionExhausted)
     }
@@ -62,7 +46,7 @@ mod tests {
         ApplyOutcome::{Deferred, TombstoneRecorded},
         DeferredReason,
         DeferredReason::AmbiguousOrder,
-        FieldUpdate, Kind, LocalAddress, ObjectObservation, ObjectPatch,
+        Kind, LocalAddress, ObjectObservation, ObjectPatch,
         OrderEvidence::Ordered,
         ParentUpdate::Root,
         Region, UpdateSource, WorldLimits,
@@ -142,22 +126,13 @@ mod tests {
         world.floors.insert(region, Stamp { order: 200, block_ordinal: 0 });
 
         let result = world
-            .observe_object(ObjectObservation {
-                source: UpdateSource::new(region, 90, Ordered(90), 0),
-                id: UUID::from_u128(20),
-                local_id: NonZeroU32::new(1).unwrap(),
-                kind: Kind::Object,
-                parent: Root,
-                pose: None,
-                linear_motion: None,
-                angular_velocity: None,
-                scale: None,
-                attachment_point: FieldUpdate::Keep,
-                shape: FieldUpdate::Keep,
-                appearance: FieldUpdate::Keep,
-                surface_appearance: None,
-                render_materials: None,
-            })
+            .observe_object(ObjectObservation::new(
+                UpdateSource::new(region, 90, Ordered(90), 0),
+                UUID::from_u128(20),
+                NonZeroU32::new(1).unwrap(),
+                Kind::Object,
+                Root,
+            ))
             .unwrap();
 
         assert_eq!(result.outcome, ApplyOutcome::IgnoredStale);

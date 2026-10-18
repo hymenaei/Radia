@@ -209,10 +209,11 @@ impl Bucket {
 }
 
 /// Owns the pacing worker for one logged-in session.
+/// Dropping the owner, including a cancelled shutdown, aborts the worker.
 pub(crate) struct OutboundBudget {
     commands: mpsc::Sender<Command>,
     bucket: Arc<Mutex<Bucket>>,
-    worker: Option<JoinHandle<()>>,
+    worker: JoinHandle<()>,
     #[cfg(test)]
     probe: Option<Arc<Mutex<ProbeStats>>>,
 }
@@ -241,7 +242,7 @@ impl OutboundBudget {
         Self {
             commands,
             bucket,
-            worker: Some(worker),
+            worker,
             #[cfg(test)]
             probe,
         }
@@ -262,12 +263,10 @@ impl OutboundBudget {
     }
 
     pub(crate) async fn shutdown(mut self) {
-        if let Some(worker) = self.worker.take() {
-            let (completed, response) = oneshot::channel();
-            let _ = self.commands.send(Command::Shutdown(completed)).await;
-            let _ = response.await;
-            let _ = worker.await;
-        }
+        let (completed, response) = oneshot::channel();
+        let _ = self.commands.send(Command::Shutdown(completed)).await;
+        let _ = response.await;
+        let _ = (&mut self.worker).await;
     }
 }
 
@@ -302,10 +301,7 @@ impl Drop for OutboundBudget {
         if let Some(probe) = &self.probe {
             report_probe(probe);
         }
-        if self.worker.is_some() {
-            let (completed, _response) = oneshot::channel();
-            let _ = self.commands.try_send(Command::Shutdown(completed));
-        }
+        self.worker.abort();
     }
 }
 
@@ -1345,8 +1341,8 @@ impl TrafficClass {
 #[cfg(test)]
 mod tests {
     use super::{
-        Bucket, ConnectionRole, MAX_BURST_BYTES, NANOS_PER_SECOND, OutboundBudget, OutboundBudgetHandle, PendingRequest, ProbeStats,
-        TrafficClass, dispatch, dispatch_with_probe, next_dispatch_delay, push_pending_counts, queue_request, record_grant_at,
+        Bucket, Command, ConnectionRole, MAX_BURST_BYTES, NANOS_PER_SECOND, OutboundBudget, OutboundBudgetHandle, PendingRequest,
+        ProbeStats, TrafficClass, dispatch, dispatch_with_probe, next_dispatch_delay, push_pending_counts, queue_request, record_grant_at,
         record_retry_attempt_at, record_wire_send_at,
     };
     use crate::simulator::MAX_NEIGHBOR_SIMULATORS;
@@ -1365,6 +1361,32 @@ mod tests {
         task::{self, spawn},
         time::{Instant, advance, timeout},
     };
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropping_or_cancelling_shutdown_stops_a_saturated_worker() {
+        use std::{
+            future::Future,
+            pin::pin,
+            task::{Context, Waker},
+        };
+
+        for cancel_shutdown in [false, true] {
+            let budget = OutboundBudget::new(1);
+            let handle = budget.handle();
+            for _ in 0..handle.commands.capacity() {
+                handle.commands.try_send(Command::Unregister { id: 1 }).expect("fill worker queue before it runs");
+            }
+            if cancel_shutdown {
+                let mut shutdown = pin!(budget.shutdown());
+                assert!(shutdown.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            } else {
+                drop(budget);
+            }
+            timeout(Duration::from_secs(1), handle.commands.closed())
+                .await
+                .unwrap_or_else(|_| panic!("worker outlived its owner; cancel_shutdown={cancel_shutdown}"));
+        }
+    }
 
     async fn queue_worker_request(pacer: &super::PacerHandle, bytes: usize) -> oneshot::Receiver<super::BudgetLease> {
         let (completed, receiver) = oneshot::channel();

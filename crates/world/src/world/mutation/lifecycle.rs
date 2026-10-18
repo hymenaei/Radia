@@ -8,7 +8,7 @@ use super::super::journal::{
     WorldChange::{EntityRemoved, EntityUpdated},
     WorldChangeClasses,
 };
-use super::super::{RecentBatch, RecentObject, World, WorldChange, WorldEntityRemovalReason, newer_field, remove_region_index};
+use super::super::{RecentBatch, RecentObject, World, WorldChange, WorldEntityRemovalReason, newer_field};
 use crate::update::{FieldStamp, Stamp};
 use crate::{
     Applied, ApplyError, ApplyOutcome, DeferredReason, Entity, Kind, LocalAddress, ObjectMedia, Parent, PoseState, Recovery, Region,
@@ -65,7 +65,7 @@ impl World {
             return Ok(Applied::unchanged());
         }
         let address = LocalAddress::new(source.region, local_id);
-        if self.addresses.get(&address).is_some_and(|entity| self.record(*entity).is_some_and(|record| self.self_agent == Some(record.id)))
+        if self.entity_at(address).is_some_and(|entity| self.store.record(entity).is_some_and(|record| self.self_agent == Some(record.id)))
         {
             return Ok(Applied::unchanged());
         }
@@ -75,10 +75,10 @@ impl World {
                 Recovery::from_targets(vec![address], self.limits.max_recovery_targets),
             ));
         };
-        if let Some(entity) = self.addresses.get(&address).copied() {
+        if let Some(entity) = self.entity_at(address) {
             let (id, binding_fence) = {
-                let record = self.record(entity).expect("address index contains a live entity");
-                (record.id, record.state.binding.fence)
+                let record = self.store.record(entity).expect("address index contains a live entity");
+                (record.id, record.state.binding.fence())
             };
             if stamp <= binding_fence {
                 return Ok(Applied::unchanged());
@@ -173,17 +173,10 @@ impl World {
             if expanded || children.as_ref().is_none_or(|children| children.is_empty()) {
                 self.object_media_bytes = self.object_media_bytes.saturating_sub(media_bytes);
                 self.detach_parent(entity);
-                self.entities.remove(&id);
-                self.avatars.remove(&id);
-                assert!(self.object_ids.remove(&id), "UUID ordering index is missing a live entity ID");
-                remove_region_index(&mut self.region_entities, address.region, id);
-                if self.addresses.get(&address) == Some(&entity) {
-                    self.addresses.remove(&address);
-                    if let Some(stamp) = cause.tombstone_stamp() {
-                        self.insert_tombstone(address, stamp);
-                    }
+                self.store.remove(entity);
+                if let Some(stamp) = cause.tombstone_stamp() {
+                    self.insert_tombstone(address, stamp);
                 }
-                let _ = self.ecs.despawn(entity.0);
                 changes.push(EntityRemoved { id, entity, address, reason });
                 recovery_cancellations.push(address);
                 continue;
@@ -193,12 +186,13 @@ impl World {
             pending.push((entity, cause, true));
             for child in children.into_values() {
                 if Some(child) == preserve_child {
-                    self.detach_parent(child);
-                    self.state_mut(child).parent = Parent::Unknown;
+                    self.set_parent(child, Parent::Unknown);
                     continue;
                 }
-                let Some((child_kind, child_id, child_address, child_fence)) =
-                    self.record(child).map(|record| (record.kind, record.id, record.state.binding.address, record.state.binding.fence))
+                let Some((child_kind, child_id, child_address, child_fence)) = self
+                    .store
+                    .record(child)
+                    .map(|record| (record.kind, record.id, record.state.binding.address, record.state.binding.fence()))
                 else {
                     continue;
                 };
@@ -225,12 +219,12 @@ impl World {
     }
 
     fn advance_parent_fence(&mut self, child: Entity, invalidation: Option<Stamp>, invalidation_region: Region) {
-        let Some(stamp) =
-            invalidation.filter(|_| self.record(child).is_some_and(|record| record.state.binding.address.region == invalidation_region))
+        let Some(stamp) = invalidation
+            .filter(|_| self.store.record(child).is_some_and(|record| record.state.binding.address.region == invalidation_region))
         else {
             return;
         };
-        let ordering = self.ordering_mut(child);
+        let ordering = self.store.ordering_mut(child.0);
         let field_stamp = FieldStamp { authority: UpdateAuthority::Tracked, stamp };
         if newer_field(field_stamp, ordering.fences.parent) {
             ordering.fences.parent = Some(field_stamp);

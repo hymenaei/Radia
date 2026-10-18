@@ -41,20 +41,9 @@ fn snapshot(face: u8, roughness: f32) -> GltfMaterialOverrides {
 
 fn object(source: UpdateSource, id: u128, local_id_value: u32, with_surface: bool) -> ObjectObservation {
     ObjectObservation {
-        source,
-        id: UUID::from_u128(id),
-        local_id: local_id(local_id_value),
-        kind: Kind::Object,
-        parent: ParentUpdate::Root,
-        pose: None,
-        linear_motion: None,
-        angular_velocity: None,
-        scale: None,
-        attachment_point: FieldUpdate::Keep,
-        shape: FieldUpdate::Keep,
         appearance: if with_surface { FieldUpdate::Set(Appearance::Surface) } else { FieldUpdate::Keep },
-        surface_appearance: None,
         render_materials: Some(RenderMaterials::new(vec![(2, AssetId::new(UUID::from_u128(29)))]).expect("valid PBR bindings")),
+        ..ObjectObservation::new(source, UUID::from_u128(id), local_id(local_id_value), Kind::Object, ParentUpdate::Root)
     }
 }
 

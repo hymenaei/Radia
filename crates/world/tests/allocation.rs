@@ -170,14 +170,6 @@ fn world_memory_baseline() {
         assert!(allocations.live_bytes > 0);
         assert!(allocations.peak_bytes >= allocations.live_bytes);
         assert!(allocations.allocation_calls > 0);
-        eprintln!(
-            "{count} linked objects: retained={} B, peak={} B, allocations={}, reallocations={}, retained/object={:.1} B",
-            allocations.live_bytes,
-            allocations.peak_bytes,
-            allocations.allocation_calls,
-            allocations.reallocation_calls,
-            allocations.live_bytes as f64 / count as f64,
-        );
         let mut world = world;
         let (removed, retirement) = measure(|| {
             let mut removed = 0;
@@ -190,11 +182,32 @@ fn world_memory_baseline() {
         });
         assert_eq!(removed, count);
         assert_eq!(world.object_count(), 0);
+        drop(world);
+        let remaining_bytes = ALLOCATIONS.with(|allocations| allocations.get().live_bytes);
+        assert_eq!(
+            remaining_bytes,
+            baseline,
+            "{count} objects left {} B allocated after World drop; retained={} B, peak={} B, allocations={}, reallocations={}, retirement allocations={}, retirement reallocations={}, retirement peak additional={} B",
+            remaining_bytes - baseline,
+            allocations.live_bytes,
+            allocations.peak_bytes,
+            allocations.allocation_calls,
+            allocations.reallocation_calls,
+            retirement.allocation_calls,
+            retirement.reallocation_calls,
+            retirement.peak_bytes,
+        );
+        eprintln!(
+            "{count} linked objects: retained={} B, peak={} B, allocations={}, reallocations={}, retained/object={:.1} B",
+            allocations.live_bytes,
+            allocations.peak_bytes,
+            allocations.allocation_calls,
+            allocations.reallocation_calls,
+            allocations.live_bytes as f64 / count as f64,
+        );
         eprintln!(
             "{count} linked object retirements: allocations={}, reallocations={}, peak additional={} B",
             retirement.allocation_calls, retirement.reallocation_calls, retirement.peak_bytes,
         );
-        drop(world);
-        assert_eq!(ALLOCATIONS.with(|allocations| allocations.get().live_bytes), baseline);
     }
 }

@@ -3,8 +3,8 @@
 use base::UUID;
 
 use crate::{
-    codec::{Reader, Writer},
-    error::LLUdpError,
+    LLUdpError,
+    lludp::codec::{Reader, Writer},
 };
 use math::{Quat, Vec3, Vec4};
 
@@ -51,29 +51,6 @@ pub struct ObjectSound {
     pub radius: f32,
 }
 
-/// Path and profile parameters carried by full and compressed object updates.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ObjectShape {
-    pub path_curve: u8,
-    pub profile_curve: u8,
-    pub path_begin: u16,
-    pub path_end: u16,
-    pub path_scale_x: u8,
-    pub path_scale_y: u8,
-    pub path_shear_x: u8,
-    pub path_shear_y: u8,
-    pub path_twist: i8,
-    pub path_twist_begin: i8,
-    pub path_radius_offset: i8,
-    pub path_taper_x: i8,
-    pub path_taper_y: i8,
-    pub path_revolutions: u8,
-    pub path_skew: i8,
-    pub profile_begin: u16,
-    pub profile_end: u16,
-    pub profile_hollow: u16,
-}
-
 impl RegionData {
     pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<Self, LLUdpError> {
         Ok(Self { region_handle: reader.u64()?, time_dilation: reader.u16()? })
@@ -82,114 +59,6 @@ impl RegionData {
     pub(crate) fn encode(self, writer: &mut Writer<'_>) {
         writer.u64(self.region_handle);
         writer.u16(self.time_dilation);
-    }
-}
-
-impl ObjectShape {
-    pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<Self, LLUdpError> {
-        Ok(Self {
-            path_curve: reader.u8()?,
-            profile_curve: reader.u8()?,
-            path_begin: reader.u16()?,
-            path_end: reader.u16()?,
-            path_scale_x: reader.u8()?,
-            path_scale_y: reader.u8()?,
-            path_shear_x: reader.u8()?,
-            path_shear_y: reader.u8()?,
-            path_twist: reader.i8()?,
-            path_twist_begin: reader.i8()?,
-            path_radius_offset: reader.i8()?,
-            path_taper_x: reader.i8()?,
-            path_taper_y: reader.i8()?,
-            path_revolutions: reader.u8()?,
-            path_skew: reader.i8()?,
-            profile_begin: reader.u16()?,
-            profile_end: reader.u16()?,
-            profile_hollow: reader.u16()?,
-        })
-    }
-
-    pub(crate) fn encode(self, writer: &mut Writer<'_>) {
-        writer.u8(self.path_curve);
-        writer.u8(self.profile_curve);
-        writer.u16(self.path_begin);
-        writer.u16(self.path_end);
-        writer.u8(self.path_scale_x);
-        writer.u8(self.path_scale_y);
-        writer.u8(self.path_shear_x);
-        writer.u8(self.path_shear_y);
-        writer.i8(self.path_twist);
-        writer.i8(self.path_twist_begin);
-        writer.i8(self.path_radius_offset);
-        writer.i8(self.path_taper_x);
-        writer.i8(self.path_taper_y);
-        writer.u8(self.path_revolutions);
-        writer.i8(self.path_skew);
-        writer.u16(self.profile_begin);
-        writer.u16(self.profile_end);
-        writer.u16(self.profile_hollow);
-    }
-
-    pub(crate) fn decode_compressed(reader: &mut Reader<'_>) -> Result<Self, LLUdpError> {
-        let path_curve = reader.u8()?;
-        let path_begin = reader.u16()?;
-        let path_end = reader.u16()?;
-        let path_scale_x = reader.u8()?;
-        let path_scale_y = reader.u8()?;
-        let path_shear_x = reader.u8()?;
-        let path_shear_y = reader.u8()?;
-        let path_twist = reader.i8()?;
-        let path_twist_begin = reader.i8()?;
-        let path_radius_offset = reader.i8()?;
-        let path_taper_x = reader.i8()?;
-        let path_taper_y = reader.i8()?;
-        let path_revolutions = reader.u8()?;
-        let path_skew = reader.i8()?;
-        let profile_curve = reader.u8()?;
-        let profile_begin = reader.u16()?;
-        let profile_end = reader.u16()?;
-        let profile_hollow = reader.u16()?;
-        Ok(Self {
-            path_curve,
-            profile_curve,
-            path_begin,
-            path_end,
-            path_scale_x,
-            path_scale_y,
-            path_shear_x,
-            path_shear_y,
-            path_twist,
-            path_twist_begin,
-            path_radius_offset,
-            path_taper_x,
-            path_taper_y,
-            path_revolutions,
-            path_skew,
-            profile_begin,
-            profile_end,
-            profile_hollow,
-        })
-    }
-
-    pub(crate) fn encode_compressed(self, writer: &mut Writer<'_>) {
-        writer.u8(self.path_curve);
-        writer.u16(self.path_begin);
-        writer.u16(self.path_end);
-        writer.u8(self.path_scale_x);
-        writer.u8(self.path_scale_y);
-        writer.u8(self.path_shear_x);
-        writer.u8(self.path_shear_y);
-        writer.i8(self.path_twist);
-        writer.i8(self.path_twist_begin);
-        writer.i8(self.path_radius_offset);
-        writer.i8(self.path_taper_x);
-        writer.i8(self.path_taper_y);
-        writer.u8(self.path_revolutions);
-        writer.i8(self.path_skew);
-        writer.u8(self.profile_curve);
-        writer.u16(self.profile_begin);
-        writer.u16(self.profile_end);
-        writer.u16(self.profile_hollow);
     }
 }
 
@@ -244,11 +113,25 @@ pub(crate) fn decode_extra_parameters(reader: &mut Reader<'_>) -> Result<Vec<Ext
     let count = usize::from(reader.u8()?);
     let mut parameters = Vec::with_capacity(count);
     for _ in 0..count {
-        let parameter_type = reader.u16()?;
-        let len = usize::try_from(reader.i32()?).map_err(|_| LLUdpError::InvalidMessage)?;
+        let (parameter_type, len) = read_extra_parameter_header(reader)?;
         parameters.push(ExtraParameter { parameter_type, data: reader.take(len)?.to_vec() });
     }
     Ok(parameters)
+}
+
+pub(crate) fn skip_extra_parameters(reader: &mut Reader<'_>) -> Result<usize, LLUdpError> {
+    let count = usize::from(reader.u8()?);
+    for _ in 0..count {
+        let (_, len) = read_extra_parameter_header(reader)?;
+        reader.take(len)?;
+    }
+    Ok(count)
+}
+
+fn read_extra_parameter_header(reader: &mut Reader<'_>) -> Result<(u16, usize), LLUdpError> {
+    let parameter_type = reader.u16()?;
+    let len = usize::try_from(reader.i32()?).map_err(|_| LLUdpError::InvalidMessage)?;
+    Ok((parameter_type, len))
 }
 
 pub(crate) fn encode_extra_parameters(parameters: &[ExtraParameter], writer: &mut Writer<'_>) -> Result<(), LLUdpError> {

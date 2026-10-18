@@ -3,7 +3,7 @@ use std::num::NonZeroU32;
 use base::UUID;
 use math::{Quat, Vec3};
 use world::{
-    ApplyOutcome::{Introduced, RegionAdopted},
+    ApplyOutcome::Introduced,
     Kind,
     Kind::{Avatar, Object},
     ObjectObservation,
@@ -14,6 +14,7 @@ use world::{
 
 pub(super) const PER_REGION: usize = 10_000;
 pub(super) const SCENE_SIZES: &[usize] = &[1_000, 10_000, 65_536];
+pub(super) const LOAD_SIZES: &[usize] = &[40_000, 65_536];
 pub(super) const INITIAL_ORDER: u64 = 100_000;
 
 #[derive(Clone, Copy)]
@@ -35,6 +36,7 @@ pub(super) fn size_name(count: usize) -> &'static str {
     match count {
         1_000 => "1k",
         10_000 => "10k",
+        40_000 => "40k",
         65_536 => "65k",
         _ => panic!("unexpected benchmark scene size"),
     }
@@ -85,18 +87,10 @@ pub(super) fn observation(row: Row) -> ObjectObservation {
 }
 
 pub(super) fn observation_with_pose(row: Row, pose: Pose) -> ObjectObservation {
-    ObjectObservation {
-        source: source(row.region, row.order),
-        id: row.id,
-        local_id: row.local_id,
-        kind: row.kind,
-        parent: Root,
-        pose: Some(pose),
-        linear_motion: None,
-        angular_velocity: None,
-        scale: Some(Vec3::ONE),
-        attachment_point: None,
-    }
+    let mut observation = ObjectObservation::new(source(row.region, row.order), row.id, row.local_id, row.kind, Root);
+    observation.pose = Some(pose);
+    observation.scale = Some(Vec3::ONE);
+    observation
 }
 
 pub(super) fn empty_scene(count: usize, destination: bool) -> Scene {
@@ -106,7 +100,7 @@ pub(super) fn empty_scene(count: usize, destination: bool) -> Scene {
     }
     let mut world = World::new(limits());
     for region in &regions {
-        assert_eq!(world.adopt_region(*region).expect("region adoption").outcome, RegionAdopted);
+        assert!(matches!(world.adopt_region(*region).expect("region adoption").outcome, world::RegionOutcome::Adopted { .. }));
     }
     Scene { world, rows, regions }
 }
@@ -122,7 +116,7 @@ pub(super) fn populated_scene_with_avatars(count: usize, avatar_count: usize, de
     }
     let mut world = World::new(limits());
     for region in &regions {
-        assert_eq!(world.adopt_region(*region).expect("region adoption").outcome, RegionAdopted);
+        assert!(matches!(world.adopt_region(*region).expect("region adoption").outcome, world::RegionOutcome::Adopted { .. }));
     }
     if avatar_count > 0 {
         world.set_self_agent(rows[0].id).expect("agent identity");

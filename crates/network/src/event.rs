@@ -1,13 +1,18 @@
-use crate::{AgentSession, LoginResponseData, capabilities::Client, client::MfaChallenge};
+use crate::{AgentSession, capabilities::Client, coverage::CoverageWatermark, session::MfaChallenge};
 use llsd::Value;
 use protocol::lludp::Message;
+use protocol::login::ResponseData;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::{
     fmt,
     sync::atomic::{AtomicU64, Ordering},
 };
-use tokio::sync::{OwnedSemaphorePermit, mpsc, watch};
+#[cfg(test)]
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::{mpsc, watch};
+
+use crate::simulator::EventRetention;
 
 pub(crate) const CLIENT_EVENT_CAPACITY: usize = 32;
 pub(crate) const PRIMARY_TERMINAL_EVENT_CAPACITY: usize = 1;
@@ -47,38 +52,84 @@ pub enum PacketOrder {
     Degraded,
 }
 
+/// Identifies one admitted EventQueue response batch within a poll-task incarnation.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct EventQueueBatchOrder {
+    /// EventQueue poll-task incarnation that received the batch.
+    pub incarnation: u64,
+    /// Zero-based order of the batch within that incarnation.
+    pub ordinal: u64,
+}
+
 pub(crate) enum EventSendOutcome {
     Sent,
     ReceiverClosed,
     Shutdown,
 }
 
+/// One decoded message from a simulator's capability EventQueue batch.
+///
+/// Event names and bodies are simulator-controlled and are omitted from debug output.
+pub struct CapabilityEvent {
+    /// The simulator-defined event name.
+    pub message: String,
+    /// The decoded LLSD event body.
+    pub body: Value,
+    pub(crate) retained_bytes: usize,
+}
+
+impl fmt::Debug for CapabilityEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("CapabilityEvent").field("message", &"[OMITTED]").field("body", &"[OMITTED]").finish()
+    }
+}
+
 pub(crate) struct EventEnvelope {
     pub(crate) event: Event,
-    retained_capability_bytes: Option<OwnedSemaphorePermit>,
+    retained_bytes: Option<EventRetention>,
+    coverage_watermark: Option<CoverageWatermark>,
 }
 
 impl EventEnvelope {
     pub(crate) fn new(event: Event) -> Self {
-        Self { event, retained_capability_bytes: None }
+        Self { event, retained_bytes: None, coverage_watermark: None }
     }
 
-    pub(crate) fn with_capability_bytes(event: Event, permit: OwnedSemaphorePermit) -> Self {
-        Self { event, retained_capability_bytes: Some(permit) }
+    #[cfg(test)]
+    pub(crate) fn with_retained_bytes(event: Event, permit: OwnedSemaphorePermit) -> Self {
+        Self::with_retention(event, EventRetention::from_permits(vec![permit]))
     }
 
-    pub(crate) fn from_parts(event: Event, retained_capability_bytes: Option<OwnedSemaphorePermit>) -> Self {
-        Self { event, retained_capability_bytes }
+    #[cfg(test)]
+    pub(crate) fn with_retention(event: Event, retention: EventRetention) -> Self {
+        Self { event, retained_bytes: Some(retention), coverage_watermark: None }
     }
 
-    pub(crate) fn into_parts(self) -> (Event, Option<OwnedSemaphorePermit>) {
-        let Self { event, retained_capability_bytes } = self;
-        (event, retained_capability_bytes)
+    #[cfg(test)]
+    pub(crate) fn with_coverage_watermark(event: Event, coverage_watermark: CoverageWatermark) -> Self {
+        Self { event, retained_bytes: None, coverage_watermark: Some(coverage_watermark) }
+    }
+
+    pub(crate) fn with_retention_and_coverage(event: Event, retention: EventRetention, coverage_watermark: CoverageWatermark) -> Self {
+        Self { event, retained_bytes: Some(retention), coverage_watermark: Some(coverage_watermark) }
+    }
+
+    pub(crate) fn from_parts(event: Event, retained_bytes: Option<EventRetention>, coverage_watermark: Option<CoverageWatermark>) -> Self {
+        Self { event, retained_bytes, coverage_watermark }
+    }
+
+    pub(crate) fn coverage_watermark(&self) -> Option<CoverageWatermark> {
+        self.coverage_watermark
+    }
+
+    pub(crate) fn into_parts(self) -> (Event, Option<EventRetention>, Option<CoverageWatermark>) {
+        let Self { event, retained_bytes, coverage_watermark } = self;
+        (event, retained_bytes, coverage_watermark)
     }
 
     pub(crate) fn into_event(self) -> Event {
-        let (event, retained_capability_bytes) = self.into_parts();
-        drop(retained_capability_bytes);
+        let (event, retained_bytes, _) = self.into_parts();
+        drop(retained_bytes);
         event
     }
 }
@@ -153,7 +204,7 @@ pub enum Event {
         simulator_id: SimulatorId,
         session: Box<AgentSession>,
         capabilities: Client,
-        login_data: LoginResponseData,
+        login_data: ResponseData,
     },
     CapabilityEvent {
         simulator_id: SimulatorId,
@@ -161,12 +212,32 @@ pub enum Event {
         message: String,
         body: Value,
     },
+    /// A complete EventQueue response batch admitted as one Network event.
+    ///
+    /// The events retain server order. The batch carries one source-local coverage watermark and one aggregate retained-memory permit.
+    /// The EventQueue ACK advances when Network admits the full batch, not when a downstream consumer applies its events.
+    CapabilityEventBatch {
+        simulator_id: SimulatorId,
+        source: SocketAddr,
+        order: EventQueueBatchOrder,
+        events: Vec<CapabilityEvent>,
+    },
     /// A capability request or poll failed for the identified simulator.
     CapabilityError {
         simulator_id: SimulatorId,
         source: SocketAddr,
         capability: String,
         reason: String,
+    },
+    /// EventQueueGet stopped after an event response could not be admitted safely.
+    EventQueueCoverageLost {
+        simulator_id: SimulatorId,
+        source: SocketAddr,
+        reason: String,
+    },
+    /// A durable source or session-wide coverage loss that must be reconciled before later events.
+    CoverageLost {
+        loss: crate::coverage::CoverageLoss,
     },
     /// A simulator circuit completed its circuit handshake. The primary connection has no region handle.
     ///
@@ -257,6 +328,12 @@ impl fmt::Debug for Event {
                 .field("message", &"[OMITTED]")
                 .field("body", &"[OMITTED]")
                 .finish(),
+            Self::CapabilityEventBatch { events, .. } => formatter
+                .debug_struct("CapabilityEventBatch")
+                .field("simulator_id", &"[SESSION LOCAL]")
+                .field("source", &"[REDACTED]")
+                .field("event_count", &events.len())
+                .finish(),
             Self::CapabilityError { .. } => formatter
                 .debug_struct("CapabilityError")
                 .field("simulator_id", &"[SESSION LOCAL]")
@@ -264,6 +341,13 @@ impl fmt::Debug for Event {
                 .field("capability", &"[REDACTED]")
                 .field("reason", &"[REDACTED]")
                 .finish(),
+            Self::EventQueueCoverageLost { .. } => formatter
+                .debug_struct("EventQueueCoverageLost")
+                .field("simulator_id", &"[SESSION LOCAL]")
+                .field("source", &"[REDACTED]")
+                .field("reason", &"[REDACTED]")
+                .finish(),
+            Self::CoverageLost { loss } => formatter.debug_struct("CoverageLost").field("loss", loss).finish(),
             Self::SimulatorConnected { .. } => formatter
                 .debug_struct("SimulatorConnected")
                 .field("simulator_id", &"[SESSION LOCAL]")

@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fmt::Write as _, mem::take};
+use std::{collections::HashSet, mem::take};
 
 #[derive(Debug)]
 pub struct Template {
@@ -92,6 +92,7 @@ pub enum FieldKind {
 struct Token {
     text: String,
     line: usize,
+    column: usize,
 }
 
 pub fn parse(path: &str, source: &str) -> Result<Template, String> {
@@ -130,190 +131,38 @@ pub fn parse(path: &str, source: &str) -> Result<Template, String> {
     Ok(Template { messages })
 }
 
-pub fn generate(template: &Template) -> String {
-    let mut output = String::new();
-    output.push_str("use crate::types::{Frequency, MessageId};\n");
-    output.push_str("use crate::types::Frequency::{Fixed, High, Low, Medium};\n\n");
-    output.push_str("/// Trust classification declared by an LLUDP message template.\n");
-    output.push_str("#[derive(Clone, Copy, Debug, Eq, PartialEq)]\n");
-    output.push_str(
-        "pub enum MessageTrust {\n    /// The message requires a trusted circuit.\n    Trusted,\n    /// The message does not require a trusted circuit.\n    NotTrusted,\n}\n\n",
-    );
-    output.push_str("/// Payload encoding declared by an LLUDP message template.\n");
-    output.push_str("#[derive(Clone, Copy, Debug, Eq, PartialEq)]\n");
-    output.push_str(
-        "pub enum MessageEncoding {\n    /// The datagram's message bytes use LLUDP zero coding.\n    Zerocoded,\n    /// The datagram's message bytes are sent without zero coding.\n    Unencoded,\n}\n\n",
-    );
-    output.push_str("/// Flags describing template status or LLUDP policy for a message.\n");
-    output.push_str("#[derive(Clone, Copy, Debug, Eq, PartialEq)]\n");
-    output.push_str(
-        "pub enum MessageFlag {\n    /// The template marks the message as deprecated.\n    Deprecated,\n    /// The template blacklists the message for LLUDP.\n    LLUdpBlacklisted,\n    /// The template marks LLUDP use of the message as deprecated.\n    LLUdpDeprecated,\n}\n\n",
-    );
-    output.push_str("/// Repetition mode of a message block in the wire payload.\n");
-    output.push_str("#[derive(Clone, Copy, Debug, Eq, PartialEq)]\n");
-    output.push_str(
-        "pub enum BlockMode {\n    /// Exactly one block instance, with no count prefix.\n    Single,\n    /// A block count followed by that many instances; the count is one byte.\n    Variable,\n    /// A fixed number of instances, with the count stored in the schema rather than the payload.\n    Multiple(\n        /// Number of block instances.\n        u32,\n    ),\n}\n\n",
-    );
-    output.push_str(
-        "/// Wire encoding of one field in an LLUDP message template. `S` and `U` variants are signed and unsigned integers named by bit width; multibyte numeric values use little-endian order.\n",
-    );
-    output.push_str("#[derive(Clone, Copy, Debug, Eq, PartialEq)]\n");
-    output.push_str("pub enum FieldKind {\n");
-    output.push_str(
-        "    /// Boolean encoded as one byte; any nonzero byte decodes as true.\n    Bool,\n    /// 32-bit IEEE-754 float in little-endian order.\n    F32,\n    /// 64-bit IEEE-754 float in little-endian order.\n    F64,\n    /// Four IPv4 address octets in wire order.\n    IpAddr,\n    /// Two port bytes in wire order.\n    IpPort,\n    /// Field with no payload bytes.\n    Null,\n    /// Three little-endian `f32` quaternion components.\n    Quaternion,\n    /// 16-byte UUID in the wire byte order.\n    UUID,\n",
-    );
-    output.push_str(
-        "    /// Three little-endian `f32` components.\n    Vector3,\n    /// Three little-endian `f64` components.\n    Vector3d,\n    /// Four little-endian `f32` components.\n    Vector4,\n    S8,\n    S16,\n    S32,\n    S64,\n    U8,\n    U16,\n    U32,\n    U64,\n",
-    );
-    output.push_str(
-        "    /// Raw bytes whose size is fixed by the template.\n    Fixed(\n        /// Number of field bytes.\n        u32,\n    ),\n    /// Raw bytes with a length prefix.\n    Variable(\n        /// Prefix width in bytes; only 1 and 2 are supported.\n        u8,\n    ),\n}\n\n",
-    );
-    output.push_str("/// Name and wire encoding of one field in a message block.\n");
-    output.push_str("#[derive(Clone, Copy, Debug, Eq, PartialEq)]\n");
-    output.push_str(
-        "pub struct FieldSchema {\n    /// Field name from the message template.\n    pub name: &'static str,\n    /// Wire encoding for this field.\n    pub kind: FieldKind,\n}\n\n",
-    );
-    output.push_str("/// Field definitions and repetition mode for one message block.\n");
-    output.push_str("#[derive(Clone, Copy, Debug, Eq, PartialEq)]\n");
-    output.push_str(
-        "pub struct BlockSchema {\n    /// Block name from the message template.\n    pub name: &'static str,\n    /// Repetition count for this block.\n    pub mode: BlockMode,\n    /// Fields in wire order.\n    pub fields: &'static [FieldSchema],\n}\n\n",
-    );
-    output.push_str("/// Wire ID, policy, encoding, flags, and ordered blocks for one template message.\n");
-    output.push_str("#[derive(Clone, Copy, Debug, Eq, PartialEq)]\n");
-    output.push_str("pub struct MessageSchema {\n");
-    output.push_str(
-        "    /// Message name from the template.\n    pub name: &'static str,\n    /// Frequency and number used by the wire protocol.\n    pub id: MessageId,\n    /// Trust classification from the template.\n    pub trust: MessageTrust,\n",
-    );
-    output.push_str(
-        "    /// Default zero-coding mode from the template.\n    pub encoding: MessageEncoding,\n    /// Status and LLUDP-policy flags from the template.\n    pub flags: &'static [MessageFlag],\n",
-    );
-    output.push_str("    /// Blocks in wire order.\n    pub blocks: &'static [BlockSchema],\n}\n\n");
-    output.push_str("/// Number of messages in the compiled template.\n");
-    writeln!(&mut output, "pub const MESSAGE_COUNT: usize = {};\n", template.messages.len()).expect("write generated source");
-    output.push_str("/// Messages in the order declared by the template.\npub const MESSAGES: &[MessageSchema] = &[\n");
-
-    for message in &template.messages {
-        output.push_str("    MessageSchema {\n");
-        writeln!(&mut output, "        name: {:?},", message.name).expect("write generated source");
-        writeln!(&mut output, "        id: MessageId::{}({}),", frequency_constructor(message.frequency), message.id)
-            .expect("write generated source");
-        writeln!(&mut output, "        trust: MessageTrust::{:?},", message.trust).expect("write generated source");
-        writeln!(&mut output, "        encoding: MessageEncoding::{:?},", message.encoding).expect("write generated source");
-        if message.flags.is_empty() {
-            output.push_str("        flags: &[],\n");
-        } else {
-            output.push_str("        flags: &[\n");
-            for flag in &message.flags {
-                writeln!(&mut output, "            MessageFlag::{flag:?},").expect("write generated source");
-            }
-            output.push_str("        ],\n");
-        }
-        if message.blocks.is_empty() {
-            output.push_str("        blocks: &[],\n");
-        } else {
-            output.push_str("        blocks: &[\n");
-            for block in &message.blocks {
-                output.push_str("            BlockSchema {\n");
-                writeln!(&mut output, "                name: {:?},", block.name).expect("write generated source");
-                writeln!(&mut output, "                mode: {},", block_mode(block.mode)).expect("write generated source");
-                if block.fields.is_empty() {
-                    output.push_str("                fields: &[],\n");
-                } else {
-                    output.push_str("                fields: &[\n");
-                    for field in &block.fields {
-                        output.push_str("                    FieldSchema {\n");
-                        writeln!(&mut output, "                        name: {:?},", field.name).expect("write generated source");
-                        writeln!(&mut output, "                        kind: {},", field_kind(field.kind)).expect("write generated source");
-                        output.push_str("                    },\n");
-                    }
-                    output.push_str("                ],\n");
-                }
-                output.push_str("            },\n");
-            }
-            output.push_str("        ],\n");
-        }
-        output.push_str("    },\n");
-    }
-    let mut id_index = (0..template.messages.len()).collect::<Vec<_>>();
-    id_index.sort_by_key(|index| {
-        let message = &template.messages[*index];
-        (frequency_rank(message.frequency), message.id)
-    });
-    output.push_str("];\n\n");
-    output.push_str("// This sorted indirection keeps ID lookup logarithmic without reordering the readable schema list.\n");
-    output.push_str("const MESSAGE_ID_INDEX: &[usize] = &[\n");
-    for index in id_index {
-        writeln!(&mut output, "    {index},").expect("write generated source");
-    }
-    output.push_str("];\n\n");
-    output.push_str("fn frequency_rank(frequency: Frequency) -> u8 {\n");
-    output.push_str("    match frequency {\n");
-    output.push_str("        High => 0,\n");
-    output.push_str("        Medium => 1,\n");
-    output.push_str("        Low => 2,\n");
-    output.push_str("        Fixed => 3,\n");
-    output.push_str("    }\n}\n\n");
-    output.push_str(
-        "/// Find the schema for an exact message frequency and number.\n///\n/// Returns `None` when the template has no matching ID.\npub fn find_by_id(id: MessageId) -> Option<&'static MessageSchema> {\n",
-    );
-    output.push_str("    let key = (frequency_rank(id.frequency), id.number);\n");
-    output.push_str("    let index = MESSAGE_ID_INDEX.binary_search_by_key(&key, |index| {\n");
-    output.push_str("        let message = &MESSAGES[*index];\n");
-    output.push_str("        (frequency_rank(message.id.frequency), message.id.number)\n");
-    output.push_str("    }).ok()?;\n");
-    output.push_str("    Some(&MESSAGES[MESSAGE_ID_INDEX[index]])\n}\n\n");
-    output.push_str(
-        "/// Find a schema by its exact, case-sensitive template message name.\n///\n/// Returns `None` when the template has no matching name.\npub fn find_by_name(name: &str) -> Option<&'static MessageSchema> {\n",
-    );
-    output.push_str("    MESSAGES.iter().find(|message| message.name == name)\n}\n\n");
-    output.push_str(
-        "/// Named wire identifiers for messages in the checked-in template.\n///\n/// Each value uses the message's template frequency and number.\npub mod ids {\n    use crate::types::MessageId;\n",
-    );
-    for message in &template.messages {
-        writeln!(
-            &mut output,
-            "    pub const {}: MessageId = MessageId::{}({});",
-            rust_constant_name(&message.name),
-            frequency_constructor(message.frequency),
-            message.id
-        )
-        .expect("write generated source");
-    }
-    output.push_str("}\n");
-    output
-}
-
 fn tokenize(source: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
     for (line_index, line) in source.lines().enumerate() {
         let line = line.split_once("//").map_or(line, |(before, _)| before);
         let mut word = String::new();
-        let mut word_start = line_index + 1;
-        let flush = |word: &mut String, tokens: &mut Vec<Token>, line: usize| {
+        let mut word_column = 1;
+        let flush = |word: &mut String, tokens: &mut Vec<Token>, line: usize, column: usize| {
             if !word.is_empty() {
-                tokens.push(Token { text: take(word), line });
+                tokens.push(Token { text: take(word), line, column });
             }
         };
-        for character in line.chars() {
+        for (column_index, character) in line.chars().enumerate() {
+            let column = column_index + 1;
             match character {
                 '{' | '}' => {
-                    flush(&mut word, &mut tokens, word_start);
-                    tokens.push(Token { text: character.to_string(), line: line_index + 1 });
-                    word_start = line_index + 1;
+                    flush(&mut word, &mut tokens, line_index + 1, word_column);
+                    tokens.push(Token { text: character.to_string(), line: line_index + 1, column });
+                    word_column = column + 1;
                 }
                 value if value.is_whitespace() => {
-                    flush(&mut word, &mut tokens, word_start);
-                    word_start = line_index + 1;
+                    flush(&mut word, &mut tokens, line_index + 1, word_column);
+                    word_column = column + 1;
                 }
                 value => {
                     if word.is_empty() {
-                        word_start = line_index + 1;
+                        word_column = column;
                     }
                     word.push(value);
                 }
             }
         }
-        flush(&mut word, &mut tokens, word_start);
+        flush(&mut word, &mut tokens, line_index + 1, word_column);
     }
     tokens
 }
@@ -347,21 +196,25 @@ impl Parser<'_> {
         }
 
         let mut blocks = Vec::new();
+        let mut block_names = HashSet::new();
         while self.peek_text() == Some("{") {
             self.expect_open()?;
-            blocks.push(self.parse_block()?);
+            blocks.push(self.parse_block(&mut block_names)?);
         }
         self.expect_close()?;
 
         Ok(Message { name, frequency, id, trust, encoding, flags, blocks })
     }
 
-    fn parse_block(&mut self) -> Result<Block, String> {
+    fn parse_block(&mut self, block_names: &mut HashSet<String>) -> Result<Block, String> {
         let header = self.take_words_until_brace("block declaration")?;
         if header.len() < 2 {
             return Err(self.error_tokens(&header, "block declaration needs a name and mode"));
         }
         validate_identifier(self.path, &header[0])?;
+        if !block_names.insert(header[0].text.clone()) {
+            return Err(self.error(&header[0], format!("duplicate block name {} in message", header[0].text)));
+        }
         let mode = match header[1].text.as_str() {
             "Single" if header.len() == 2 => BlockMode::Single,
             "Variable" if header.len() == 2 => BlockMode::Variable,
@@ -379,21 +232,25 @@ impl Parser<'_> {
         };
 
         let mut fields = Vec::new();
+        let mut field_names = HashSet::new();
         while self.peek_text() == Some("{") {
             self.expect_open()?;
-            fields.push(self.parse_field()?);
+            fields.push(self.parse_field(&mut field_names)?);
         }
         self.expect_close()?;
 
         Ok(Block { name: header[0].text.clone(), mode, fields })
     }
 
-    fn parse_field(&mut self) -> Result<Field, String> {
+    fn parse_field(&mut self, field_names: &mut HashSet<String>) -> Result<Field, String> {
         let declaration = self.take_words_until_close("field declaration")?;
         if declaration.len() < 2 {
             return Err(self.error_tokens(&declaration, "field declaration needs a name and type"));
         }
         validate_identifier(self.path, &declaration[0])?;
+        if !field_names.insert(declaration[0].text.clone()) {
+            return Err(self.error(&declaration[0], format!("duplicate field name {} in block", declaration[0].text)));
+        }
         let kind = match declaration[1].text.as_str() {
             "BOOL" => FieldKind::Bool,
             "F32" => FieldKind::F32,
@@ -546,7 +403,7 @@ impl Parser<'_> {
     }
 
     fn error(&self, token: &Token, message: impl AsRef<str>) -> String {
-        format!("{}:{}: {}", self.path, token.line, message.as_ref())
+        format!("{}:{}:{}: {}", self.path, token.line, token.column, message.as_ref())
     }
 
     fn error_current(&self, message: impl AsRef<str>) -> String {
@@ -570,7 +427,7 @@ fn validate_identifier(path: &str, token: &Token) -> Result<(), String> {
     if valid_start && characters.all(|value| value.is_ascii_alphanumeric() || value == '_') {
         Ok(())
     } else {
-        Err(format!("{path}:{}: invalid identifier {}", token.line, token.text))
+        Err(format!("{path}:{}:{}: invalid identifier {}", token.line, token.column, token.text))
     }
 }
 
@@ -580,7 +437,7 @@ fn parse_number(path: &str, token: &Token) -> Result<u32, String> {
         .strip_prefix("0x")
         .or_else(|| token.text.strip_prefix("0X"))
         .map_or_else(|| token.text.parse::<u32>(), |value| u32::from_str_radix(value, 16));
-    parsed.map_err(|_| format!("{path}:{}: invalid message ID {}", token.line, token.text))
+    parsed.map_err(|_| format!("{path}:{}:{}: invalid message ID {}", token.line, token.column, token.text))
 }
 
 fn validate_message_id(path: &str, token: &Token, frequency: Frequency, id: u32) -> Result<(), String> {
@@ -589,10 +446,14 @@ fn validate_message_id(path: &str, token: &Token, frequency: Frequency, id: u32)
         Frequency::Low => (1..=0xfff9).contains(&id),
         Frequency::Fixed => (0xffff_fffa..=u32::MAX).contains(&id),
     };
-    if valid { Ok(()) } else { Err(format!("{path}:{}: ID {} is outside the {:?} message range", token.line, token.text, frequency)) }
+    if valid {
+        Ok(())
+    } else {
+        Err(format!("{path}:{}:{}: ID {} is outside the {:?} message range", token.line, token.column, token.text, frequency))
+    }
 }
 
-fn rust_constant_name(name: &str) -> String {
+pub(super) fn rust_constant_name(name: &str) -> String {
     let characters: Vec<char> = name.chars().collect();
     let mut output = String::new();
     for (index, character) in characters.iter().copied().enumerate() {
@@ -616,58 +477,6 @@ fn rust_constant_name(name: &str) -> String {
         output.push(character.to_ascii_uppercase());
     }
     output.trim_matches('_').to_owned()
-}
-
-fn frequency_constructor(frequency: Frequency) -> &'static str {
-    match frequency {
-        Frequency::High => "high",
-        Frequency::Medium => "medium",
-        Frequency::Low => "low",
-        Frequency::Fixed => "fixed",
-    }
-}
-
-fn frequency_rank(frequency: Frequency) -> u8 {
-    match frequency {
-        Frequency::High => 0,
-        Frequency::Medium => 1,
-        Frequency::Low => 2,
-        Frequency::Fixed => 3,
-    }
-}
-
-fn block_mode(mode: BlockMode) -> String {
-    match mode {
-        BlockMode::Single => "BlockMode::Single".into(),
-        BlockMode::Variable => "BlockMode::Variable".into(),
-        BlockMode::Multiple(count) => format!("BlockMode::Multiple({count})"),
-    }
-}
-
-fn field_kind(kind: FieldKind) -> String {
-    match kind {
-        FieldKind::Bool => "FieldKind::Bool".into(),
-        FieldKind::F32 => "FieldKind::F32".into(),
-        FieldKind::F64 => "FieldKind::F64".into(),
-        FieldKind::IpAddr => "FieldKind::IpAddr".into(),
-        FieldKind::IpPort => "FieldKind::IpPort".into(),
-        FieldKind::Null => "FieldKind::Null".into(),
-        FieldKind::Quaternion => "FieldKind::Quaternion".into(),
-        FieldKind::UUID => "FieldKind::UUID".into(),
-        FieldKind::Vector3 => "FieldKind::Vector3".into(),
-        FieldKind::Vector3d => "FieldKind::Vector3d".into(),
-        FieldKind::Vector4 => "FieldKind::Vector4".into(),
-        FieldKind::S8 => "FieldKind::S8".into(),
-        FieldKind::S16 => "FieldKind::S16".into(),
-        FieldKind::S32 => "FieldKind::S32".into(),
-        FieldKind::S64 => "FieldKind::S64".into(),
-        FieldKind::U8 => "FieldKind::U8".into(),
-        FieldKind::U16 => "FieldKind::U16".into(),
-        FieldKind::U32 => "FieldKind::U32".into(),
-        FieldKind::U64 => "FieldKind::U64".into(),
-        FieldKind::Fixed(size) => format!("FieldKind::Fixed({size})"),
-        FieldKind::Variable(size) => format!("FieldKind::Variable({size})"),
-    }
 }
 
 #[cfg(test)]
@@ -701,9 +510,6 @@ mod tests {
         let fields = &template.messages[0].blocks[0].fields;
         assert!(matches!(fields[0].kind, FieldKind::Null));
         assert!(matches!(fields[1].kind, FieldKind::S64));
-        let generated = generate(&template);
-        assert!(generated.contains("FieldKind::Null"));
-        assert!(generated.contains("FieldKind::S64"));
     }
 
     #[test]
@@ -719,5 +525,54 @@ mod tests {
     fn rejects_duplicate_ids() {
         let source = "version 2.0\n{ One Low 1 NotTrusted Unencoded }\n{ Two Low 1 NotTrusted Unencoded }";
         assert!(parse("bad.msg", source).expect_err("duplicate IDs fail").contains("duplicate Low message ID 1"));
+    }
+
+    #[test]
+    fn accepts_fixed_id_range_endpoints() {
+        let source = "version 2.0\n{ First Fixed 0xFFFFFFFA NotTrusted Unencoded }\n{ Last Fixed 0xFFFFFFFF NotTrusted Unencoded }";
+        let template = parse("fixed.msg", source).expect("fixed ID endpoints are valid");
+        assert_eq!(template.messages[0].id, 0xffff_fffa);
+        assert_eq!(template.messages[1].id, u32::MAX);
+
+        let below_range = "version 2.0\n{ Below Fixed 0xFFFFFFF9 NotTrusted Unencoded }";
+        assert!(parse("fixed.msg", below_range).expect_err("fixed ID below range fails").contains("outside the Fixed message range"));
+    }
+
+    #[test]
+    fn rejects_duplicate_blocks_with_source_location() {
+        let source =
+            "version 2.0\n{\nExample Low 1 NotTrusted Unencoded\n{\nData Single\n{ One U8 }\n}\n{\nData Variable\n{ Two U8 }\n}\n}\n";
+        assert_eq!(parse("bad.msg", source).expect_err("duplicate block names fail"), "bad.msg:9:1: duplicate block name Data in message");
+    }
+
+    #[test]
+    fn rejects_duplicate_fields_with_source_location() {
+        let source = "version 2.0\n{\nExample Low 1 NotTrusted Unencoded\n{\nData Single\n{ Value U8 }\n{ Value U16 }\n}\n}\n";
+        assert_eq!(parse("bad.msg", source).expect_err("duplicate field names fail"), "bad.msg:7:3: duplicate field name Value in block");
+    }
+
+    #[test]
+    fn duplicate_names_are_scoped_to_their_parent() {
+        let source = "version 2.0\n{ Example Low 1 NotTrusted Unencoded { First Single { Value U8 } } { Second Single { Value U16 } } }\n{ Other Low 2 NotTrusted Unencoded { First Single { Value U8 } } }";
+        assert_eq!(parse("valid.msg", source).expect("names in separate scopes are valid").messages.len(), 2);
+    }
+
+    #[test]
+    fn invalid_identifiers_report_scope_and_location() {
+        let cases = [
+            ("version 2.0\n{ Bad-Message Low 1 NotTrusted Unencoded }", "bad.msg:2:3: invalid identifier Bad-Message"),
+            (
+                "version 2.0\n{\nExample Low 1 NotTrusted Unencoded\n{\nBad-Block Single\n}\n}\n",
+                "bad.msg:5:1: invalid identifier Bad-Block",
+            ),
+            (
+                "version 2.0\n{\nExample Low 1 NotTrusted Unencoded\n{\nData Single\n{ Bad-Field U8 }\n}\n}\n",
+                "bad.msg:6:3: invalid identifier Bad-Field",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            assert_eq!(parse("bad.msg", source).expect_err("invalid identifiers fail"), expected);
+        }
     }
 }

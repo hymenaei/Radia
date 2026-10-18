@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 autobenches = false
 
+[features]
+invariants = []
+
 [lints]
 workspace = true
 
@@ -15,6 +18,7 @@ math.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+proptest.workspace = true
 
 [[bench]]
 name = "main"

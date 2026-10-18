@@ -1,15 +1,29 @@
+use std::mem::size_of;
+
 use base::UUID;
 
 use crate::{
-    codec::{Reader, Writer},
-    error::LLUdpError,
+    LLUdpError,
+    lludp::codec::{Reader, Writer},
     messages::common::{
-        ExtraParameter, ObjectMotion, ObjectShape, ObjectSound, ObjectText, RegionData, decode_extra_parameters, encode_extra_parameters,
-        read_variable1, read_variable2, read_vector4, rotation_from_vector3, write_finite_vector3, write_finite_vector4, write_variable1,
-        write_variable2,
+        ExtraParameter, ObjectMotion, ObjectSound, ObjectText, RegionData, decode_extra_parameters, encode_extra_parameters,
+        read_variable1, read_variable2, read_vector4, rotation_from_vector3, skip_extra_parameters, write_finite_vector3,
+        write_finite_vector4, write_variable1, write_variable2,
     },
+    types::{ObjectShape, TextureEntry, decode_texture_entry as decode_texture_entry_payload},
 };
 use math::{Vec3, Vec4};
+
+/// Largest full ObjectUpdate TextureEntry payload decoded by the viewer.
+pub const MAX_TEXTURE_ENTRY_BYTES: usize = 4095;
+
+/// Decodes the bounded TextureEntry payload carried by a full ObjectUpdate.
+pub fn decode_texture_entry(bytes: &[u8]) -> Result<Option<TextureEntry>, LLUdpError> {
+    if bytes.len() > MAX_TEXTURE_ENTRY_BYTES {
+        return Err(LLUdpError::InvalidMessage);
+    }
+    decode_texture_entry_payload(bytes).map_err(|_| LLUdpError::InvalidMessage)
+}
 
 /// A full simulator object update.
 #[derive(Clone, Debug, PartialEq)]
@@ -127,6 +141,54 @@ pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<ObjectUpdate, LLUdpError
     }
 
     Ok(ObjectUpdate { region_data, objects })
+}
+
+pub(crate) fn preflight_allocation_bytes(payload: &[u8]) -> Result<usize, LLUdpError> {
+    let mut reader = Reader::new(payload);
+    RegionData::decode(&mut reader)?;
+    let count = reader.terminal_variable_count()?;
+    let mut allocation_bytes = preflight_capacity::<ObjectData>(count)?;
+
+    for _ in 0..count {
+        reader.take(40)?;
+        let motion = read_variable1(&mut reader)?;
+        if !matches!(motion.len(), 60 | 76 | 124 | 140) {
+            return Err(LLUdpError::InvalidMessage);
+        }
+        reader.take(8)?;
+        ObjectShape::decode(&mut reader)?;
+        read_variable2(&mut reader)?;
+        read_variable1(&mut reader)?;
+        read_variable2(&mut reader)?;
+        read_variable2(&mut reader)?;
+        read_variable1(&mut reader)?;
+        reader.take(4)?;
+        read_variable1(&mut reader)?;
+        read_variable1(&mut reader)?;
+
+        let extra_parameter_bytes = read_variable1(&mut reader)?;
+        if !extra_parameter_bytes.is_empty() {
+            let mut extra_parameters = Reader::new(extra_parameter_bytes);
+            let count = skip_extra_parameters(&mut extra_parameters)?;
+            add_preflight_capacity::<ExtraParameter>(&mut allocation_bytes, count)?;
+            if !extra_parameters.is_empty() {
+                return Err(LLUdpError::InvalidMessage);
+            }
+        }
+
+        reader.take(66)?;
+    }
+
+    Ok(allocation_bytes)
+}
+
+fn preflight_capacity<T>(count: usize) -> Result<usize, LLUdpError> {
+    count.checked_mul(size_of::<T>()).ok_or(LLUdpError::AllocationBoundOverflow)
+}
+
+fn add_preflight_capacity<T>(total: &mut usize, count: usize) -> Result<(), LLUdpError> {
+    *total = total.checked_add(preflight_capacity::<T>(count)?).ok_or(LLUdpError::AllocationBoundOverflow)?;
+    Ok(())
 }
 
 pub(crate) fn encode_fields(object: &ObjectData, writer: &mut Writer<'_>) -> Result<(), LLUdpError> {

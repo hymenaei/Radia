@@ -9,9 +9,10 @@ use base::UUID;
 use futures::{StreamExt, TryStreamExt, stream};
 use llsd::{Map, Value};
 use network::{
-    AgentSession, LoginResponseData, LoginValue,
+    AgentSession,
     capabilities::{CapabilityUrl, Client},
 };
+use protocol::login::{self, ResponseData};
 use serde::{Deserialize, Serialize};
 use world::RegionHandle;
 
@@ -23,7 +24,7 @@ const ASSET_TYPE_LINK_FOLDER: i32 = 25;
 const ASSET_TYPE_LANDMARK: i32 = 3;
 const INVENTORY_TYPE_LANDMARK: i32 = 3;
 const INVENTORY_TYPE_PERSON: i32 = 24;
-const REGION_LOOKUP_CONCURRENCY: usize = 8;
+const REGION_LOOKUP_CONCURRENCY: usize = 4;
 const LANDMARK_FETCH_CONCURRENCY: usize = 3;
 
 /// A favorite landmark position stored by the viewer.
@@ -95,7 +96,7 @@ pub async fn load_favorites(
     capabilities: &Client,
     region_lookup: &RegionLookup,
     session: &AgentSession,
-    login_data: &LoginResponseData,
+    login_data: &ResponseData,
 ) -> Result<Vec<FavoriteLocation>, String> {
     let folder_id = favorite_folder_id(login_data)?;
     let landmarks = fetch_favorite_landmarks(capabilities, session.agent_id, folder_id).await?;
@@ -151,23 +152,23 @@ pub async fn load_favorites(
 /// # Errors
 ///
 /// Returns an error if the inventory skeleton or folder UUID is missing or invalid.
-pub fn favorite_folder_id(login_data: &LoginResponseData) -> Result<UUID, String> {
-    let Some(LoginValue::Array(folders)) = login_data.get("inventory-skeleton") else {
+pub fn favorite_folder_id(login_data: &ResponseData) -> Result<UUID, String> {
+    let Some(login::Value::Array(folders)) = login_data.get("inventory-skeleton") else {
         return Err("Second Life did not include the Favorites folder in the login response.".into());
     };
 
     for folder in folders {
-        let LoginValue::Struct(fields) = folder else {
+        let login::Value::Struct(fields) = folder else {
             continue;
         };
-        let Some(LoginValue::String(name)) = fields.get("name") else {
+        let Some(login::Value::String(name)) = fields.get("name") else {
             continue;
         };
         if !name.eq_ignore_ascii_case("favorites") {
             continue;
         }
 
-        let Some(LoginValue::String(folder_id)) = fields.get("folder_id") else {
+        let Some(login::Value::String(folder_id)) = fields.get("folder_id") else {
             return Err("Second Life returned an invalid Favorites folder ID.".into());
         };
         return UUID::parse_str(folder_id).map_err(|_| "Second Life returned an invalid Favorites folder ID.".into());
@@ -198,7 +199,7 @@ pub async fn fetch_favorite_landmarks(
     let viewer_asset = capability(&capability_urls, "ViewerAsset")?;
 
     let folder_response = capabilities
-        .post::<_, Value>(&descendents, &folder_request(agent_id, favorite_folder_id))
+        .post(&descendents, &folder_request(agent_id, favorite_folder_id))
         .await
         .map_err(|error| format!("Could not fetch the Favorites folder: {error}"))?;
     let items = favorite_folder_items(&folder_response, favorite_folder_id)?;
@@ -303,7 +304,7 @@ async fn resolve_favorite_items(
         Vec::new()
     } else {
         let response = capabilities
-            .post::<_, Value>(fetch_items, &item_request(&unresolved_ids))
+            .post(fetch_items, &item_request(&unresolved_ids))
             .await
             .map_err(|error| format!("Could not resolve favorite landmarks: {error}"))?;
         let entries = response

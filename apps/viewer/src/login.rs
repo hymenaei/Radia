@@ -24,9 +24,6 @@ use gpui_component::{
 use network::Delivery::Unreliable;
 use network::{AgentSession, CaptureConfig, Grid, LoginCredentials, MfaChallenge, SessionHandle, StartLocation};
 
-#[cfg(target_os = "windows")]
-use crate::secondary_windows::install_main_window_z_order_guard;
-use crate::secondary_windows::raise_above_main_if_active;
 #[cfg(target_os = "linux")]
 use crate::window_chrome::linux_titlebar;
 #[cfg(target_os = "windows")]
@@ -86,7 +83,6 @@ pub struct LoginScreen {
     chat_screen: gpui::Entity<ChatScreen>,
     session_handle: Option<SessionHandle>,
     status: Option<String>,
-    capture_notice: Option<String>,
     session: Option<AgentSession>,
     is_connecting: bool,
     awaiting_mfa: bool,
@@ -104,7 +100,6 @@ pub struct LoginScreen {
     shutdown_session: Arc<Mutex<Option<SessionHandle>>>,
     _spawn_subscription: gpui::Subscription,
     _username_subscription: gpui::Subscription,
-    _window_activation_subscription: gpui::Subscription,
     _window_geometry_subscription: gpui::Subscription,
 }
 
@@ -134,13 +129,6 @@ impl LoginScreen {
                 screen.refresh_favorites(cx);
             }
         });
-        #[cfg(target_os = "windows")]
-        if !install_main_window_z_order_guard(window, cx) {
-            tracing::warn!("could not install the main-window secondary z-order guard");
-        }
-        let window_activation_subscription = cx.observe_window_activation(window, |_, window, cx| {
-            raise_above_main_if_active(window, cx);
-        });
         let window_geometry_subscription = observe("main", window, cx);
         let chat_screen = cx.new(|cx| ChatScreen::new(window, cx));
 
@@ -164,7 +152,6 @@ impl LoginScreen {
             chat_screen,
             session_handle: None,
             status: Some("Loading saved login…".into()),
-            capture_notice: None,
             session: None,
             is_connecting: false,
             awaiting_mfa: false,
@@ -182,7 +169,6 @@ impl LoginScreen {
             shutdown_session,
             _spawn_subscription: spawn_subscription,
             _username_subscription: username_subscription,
-            _window_activation_subscription: window_activation_subscription,
             _window_geometry_subscription: window_geometry_subscription,
         };
 
@@ -339,7 +325,6 @@ impl LoginScreen {
         self.mfa_challenge = None;
         self.session_handle = None;
         *self.shutdown_session.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        self.capture_notice = None;
         self.current_region_name = None;
         self.region_lookup = None;
         let capture_enabled = self.capture_on_login.swap(false, Ordering::AcqRel);
@@ -426,8 +411,6 @@ impl LoginScreen {
             session_ready,
             region_name,
             chat_messages,
-            capture_notice,
-            send_error,
             failure,
             favorites,
             favorite_store_saved,
@@ -460,7 +443,7 @@ impl LoginScreen {
         }
 
         if let Some(ready) = session_ready {
-            let SessionReadyUpdate { session, region_lookup, world_state } = ready;
+            let SessionReadyUpdate { session, region_lookup } = ready;
             self.is_connecting = false;
             self.awaiting_mfa = false;
             self.mfa_challenge = None;
@@ -484,7 +467,6 @@ impl LoginScreen {
             let initial_region_name = self.current_region_name.clone();
             self.chat_screen.update(cx, |chat, cx| {
                 chat.set_session(session.clone(), cx);
-                chat.set_world_state(world_state.clone(), cx);
                 if let Some(region_name) = initial_region_name {
                     chat.set_region_name(region_name, cx);
                 }
@@ -525,15 +507,6 @@ impl LoginScreen {
             self.chat_screen.update(cx, |chat, cx| chat.add_chat_messages(chat_messages, cx));
         }
 
-        if let Some(notice) = capture_notice {
-            self.capture_notice = Some(notice.clone());
-            self.status = Some(notice);
-        }
-
-        if let Some(error) = send_error {
-            self.chat_screen.update(cx, |chat, cx| chat.report_send_error(error, cx));
-        }
-
         if let Some(update) = favorites {
             self.apply_favorites(update, cx);
         }
@@ -553,6 +526,7 @@ impl LoginScreen {
 
         if let Some(error) = failure {
             let was_connected = self.session.is_some();
+            tracing::warn!(was_connected, %error, "Viewer session ended after a failure");
             self.is_connecting = false;
             self.awaiting_mfa = false;
             self.mfa_challenge = None;
@@ -563,14 +537,8 @@ impl LoginScreen {
             self.current_region_name = None;
             self.session_cancel = None;
             self.presentation_mailbox = None;
-            let status = self.capture_notice.take().map_or_else(|| error.clone(), |capture| format!("{error}\n{capture}"));
-            self.status = Some(status);
-            self.chat_screen.update(cx, |chat, cx| {
-                chat.clear_session(cx);
-                if was_connected {
-                    chat.report_connection_error(error, cx);
-                }
-            });
+            self.status = Some(error);
+            self.chat_screen.update(cx, |chat, cx| chat.clear_session(cx));
         }
 
         cx.notify();

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rust Testing"
+  short_description: "Behavior-first Rust tests, proptest, Nextest and mutants"
+  default_prompt: "Use $rust-testing to design or review purpose-driven Rust tests. Add or change tests only for uncovered contracts or distinct regression risks; use project tools without chasing counts or LOC."

@@ -12,7 +12,7 @@ use std::{
 use base::UUID;
 use futures::{channel::oneshot, future::select, pin_mut};
 use gpui::BackgroundExecutor;
-use network::{AgentSession, Delivery, SessionHandle};
+use network::{AgentSession, Delivery, Error, SessionHandle, SimulatorId};
 use protocol::{
     lludp::Message,
     messages::{
@@ -21,9 +21,13 @@ use protocol::{
         region_handle_request::RequestBlock,
     },
 };
+#[cfg(test)]
+use tokio::spawn;
 use world::RegionHandle;
 
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(15);
+const SEND_RETRY_LIMIT: usize = 4;
+const INITIAL_SEND_RETRY_DELAY: Duration = Duration::from_millis(20);
 const METERS_PER_CELL: f64 = 256.0;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -61,13 +65,17 @@ impl RegionGridCell {
     }
 }
 
-type SendMessage = dyn Fn(RegionLookupRequest, Delivery) -> Result<(), String> + Send + Sync;
+type SendFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
+type SendMessage = dyn Fn(RegionLookupRequest, Delivery) -> SendFuture + Send + Sync;
 type TimeoutFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 type MakeTimeout = dyn Fn(Duration) -> TimeoutFuture + Send + Sync;
+type BackgroundTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+type SpawnBackground = dyn Fn(BackgroundTask) + Send + Sync;
 
 /// Resolves simulator region IDs and grid cells to region names.
 ///
 /// Concurrent lookups for the same key share one request and time out after 15 seconds. Dropping a caller cancels only its waiter.
+/// Queue-full send failures retry the idempotent map request a bounded number of times.
 #[derive(Clone)]
 pub struct RegionLookup {
     inner: Arc<Inner>,
@@ -79,6 +87,7 @@ struct Inner {
     simulator_address: SocketAddr,
     make_timeout: Arc<MakeTimeout>,
     send_message: Arc<SendMessage>,
+    spawn_background: Arc<SpawnBackground>,
     state: Mutex<State>,
     timeout: Duration,
 }
@@ -86,12 +95,13 @@ struct Inner {
 #[derive(Default)]
 struct State {
     next_waiter_id: u64,
+    next_generation: u64,
     by_region_id: HashMap<UUID, PendingLookup>,
     by_map_cell: HashMap<RegionGridCell, PendingLookup>,
 }
 
-#[derive(Default)]
 struct PendingLookup {
+    generation: u64,
     waiters: HashMap<u64, oneshot::Sender<Result<String, String>>>,
 }
 
@@ -119,16 +129,26 @@ impl Drop for WaiterGuard {
 }
 
 impl RegionLookup {
-    /// Creates a lookup for the session's primary simulator.
+    /// Creates a lookup for the session's primary simulator connection.
     ///
     /// Pass session messages to [`handle_message`](Self::handle_message) so replies can complete pending lookups.
-    pub fn new(session_handle: SessionHandle, session: &AgentSession, executor: BackgroundExecutor) -> Self {
-        let send_message = Arc::new(move |request, delivery| match request {
-            RegionLookupRequest::RegionHandle(request) => session_handle.send(request, delivery).map_err(|error| error.to_string()),
-            RegionLookupRequest::MapBlock(request) => session_handle.send(request, delivery).map_err(|error| error.to_string()),
+    /// `simulator_id` must identify the same primary simulator as `session`.
+    pub fn new(session_handle: SessionHandle, simulator_id: SimulatorId, session: &AgentSession, executor: BackgroundExecutor) -> Self {
+        let send_message = Arc::new(move |request, delivery| -> SendFuture {
+            let session_handle = session_handle.clone();
+            Box::pin(async move {
+                match request {
+                    RegionLookupRequest::RegionHandle(request) => session_handle.send_to(simulator_id, request, delivery).await,
+                    RegionLookupRequest::MapBlock(request) => session_handle.send_to(simulator_id, request, delivery).await,
+                }
+            })
         });
-        let make_timeout = Arc::new(move |timeout| Box::pin(executor.timer(timeout)) as TimeoutFuture);
-        Self::new_inner(session, make_timeout, send_message, LOOKUP_TIMEOUT)
+        let timer_executor = executor.clone();
+        let make_timeout = Arc::new(move |timeout| Box::pin(timer_executor.timer(timeout)) as TimeoutFuture);
+        let spawn_background = Arc::new(move |future| {
+            executor.spawn(future).detach();
+        });
+        Self::new_inner(session, make_timeout, send_message, spawn_background, LOOKUP_TIMEOUT)
     }
 
     /// # Errors
@@ -169,38 +189,41 @@ impl RegionLookup {
         }
     }
 
-    fn lookup(&self, key: LookupKey, request: RegionLookupRequest) -> impl Future<Output = Result<String, String>> + 'static {
+    async fn lookup(&self, key: LookupKey, request: RegionLookupRequest) -> Result<String, String> {
         let (sender, receiver) = oneshot::channel();
-        let (waiter_id, should_send) = {
+        let (waiter_id, generation, should_send) = {
             let mut state = self.lock_state();
             let waiter_id = state.allocate_waiter_id();
-            let pending = state.pending_mut(key);
+            let Some(pending) = state.pending_mut(key) else {
+                return Err("The region lookup generation space is exhausted.".into());
+            };
             let should_send = pending.waiters.is_empty();
+            let generation = pending.generation;
             pending.waiters.insert(waiter_id, sender);
-            (waiter_id, should_send)
+            (waiter_id, generation, should_send)
         };
-
-        if should_send && let Err(error) = (self.inner.send_message)(request, Delivery::Reliable) {
-            self.complete(key, Err(error));
-        }
 
         let timeout = self.inner.timeout;
         let timeout_factory = self.inner.make_timeout.clone();
+        let send_request = should_send.then_some(request);
         let guard = WaiterGuard { lookup: self.clone(), waiter_id };
-        let lookup = async move { receiver.await.map_err(|_| "The region lookup was canceled.".to_string())? };
-        async move {
-            pin_mut!(lookup);
-            let timer = timeout_factory(timeout);
-            pin_mut!(timer);
-            match select(lookup, timer).await {
-                futures::future::Either::Left((result, _)) => {
-                    drop(guard);
-                    result
-                }
-                futures::future::Either::Right(((), _)) => {
-                    drop(guard);
-                    Err("Timed out looking up the region name.".into())
-                }
+        let result = async move { receiver.await.map_err(|_| "The region lookup was canceled.".to_string())? };
+        let dispatch = self.clone();
+        if let Some(request) = send_request {
+            dispatch.dispatch(key, generation, request);
+        }
+
+        pin_mut!(result);
+        let timer = timeout_factory(timeout);
+        pin_mut!(timer);
+        match select(result, timer).await {
+            futures::future::Either::Left((result, _)) => {
+                drop(guard);
+                result
+            }
+            futures::future::Either::Right(((), _)) => {
+                drop(guard);
+                Err("Timed out looking up the region name.".into())
             }
         }
     }
@@ -216,22 +239,23 @@ impl RegionLookup {
             return;
         };
 
-        let should_request_cell = {
+        let dispatch_generation = {
             let mut state = self.lock_state();
             let Some(mut pending) = state.by_region_id.remove(&region_id) else {
                 return;
             };
             if let Some(existing) = state.by_map_cell.get_mut(&cell) {
                 existing.waiters.extend(pending.waiters.drain());
-                false
+                None
             } else {
+                let generation = pending.generation;
                 state.by_map_cell.insert(cell, pending);
-                true
+                Some(generation)
             }
         };
 
-        if should_request_cell && let Err(error) = (self.inner.send_message)(request, Delivery::Reliable) {
-            self.complete(LookupKey::MapCell(cell), Err(error));
+        if let Some(generation) = dispatch_generation {
+            self.dispatch(LookupKey::MapCell(cell), generation, request);
         }
     }
 
@@ -269,12 +293,34 @@ impl RegionLookup {
     }
 
     fn complete(&self, key: LookupKey, result: Result<String, String>) {
+        let pending = self.lock_state().remove_pending(key);
+        if let Some(pending) = pending {
+            finish(pending, result);
+        }
+    }
+
+    fn dispatch(&self, key: LookupKey, generation: u64, request: RegionLookupRequest) {
+        let lookup = self.clone();
+        let send_message = self.inner.send_message.clone();
+        let make_timeout = self.inner.make_timeout.clone();
+        (self.inner.spawn_background)(Box::pin(async move {
+            let active_lookup = lookup.clone();
+            if let Err(error) =
+                send_with_retry(send_message, make_timeout, request, move || active_lookup.is_pending(key, generation)).await
+            {
+                lookup.complete_if_generation(key, generation, Err(error.to_string()));
+            }
+        }));
+    }
+
+    fn is_pending(&self, key: LookupKey, generation: u64) -> bool {
+        self.lock_state().pending(key).is_some_and(|pending| pending.generation == generation && !pending.waiters.is_empty())
+    }
+
+    fn complete_if_generation(&self, key: LookupKey, generation: u64, result: Result<String, String>) {
         let pending = {
             let mut state = self.lock_state();
-            match key {
-                LookupKey::RegionId(region_id) => state.by_region_id.remove(&region_id),
-                LookupKey::MapCell(cell) => state.by_map_cell.remove(&cell),
-            }
+            if state.pending(key).is_some_and(|pending| pending.generation == generation) { state.remove_pending(key) } else { None }
         };
         if let Some(pending) = pending {
             finish(pending, result);
@@ -297,7 +343,13 @@ impl RegionLookup {
         self.inner.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn new_inner(session: &AgentSession, make_timeout: Arc<MakeTimeout>, send_message: Arc<SendMessage>, timeout: Duration) -> Self {
+    fn new_inner(
+        session: &AgentSession,
+        make_timeout: Arc<MakeTimeout>,
+        send_message: Arc<SendMessage>,
+        spawn_background: Arc<SpawnBackground>,
+        timeout: Duration,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 agent_id: session.agent_id,
@@ -305,6 +357,7 @@ impl RegionLookup {
                 simulator_address: session.simulator_address,
                 make_timeout,
                 send_message,
+                spawn_background,
                 state: Mutex::new(State::default()),
                 timeout,
             }),
@@ -318,7 +371,7 @@ impl RegionLookup {
         simulator_address: SocketAddr,
         make_timeout: impl Fn(Duration) -> TimeoutFuture + Send + Sync + 'static,
         timeout: Duration,
-        send_message: impl Fn(RegionLookupRequest, Delivery) -> Result<(), String> + Send + Sync + 'static,
+        send_message: impl Fn(RegionLookupRequest, Delivery) -> SendFuture + Send + Sync + 'static,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -327,6 +380,9 @@ impl RegionLookup {
                 simulator_address,
                 make_timeout: Arc::new(make_timeout),
                 send_message: Arc::new(send_message),
+                spawn_background: Arc::new(|future| {
+                    drop(spawn(future));
+                }),
                 state: Mutex::new(State::default()),
                 timeout,
             }),
@@ -351,10 +407,42 @@ impl State {
         }
     }
 
-    fn pending_mut(&mut self, key: LookupKey) -> &mut PendingLookup {
+    fn allocate_generation(&mut self) -> Option<u64> {
+        let generation = self.next_generation.checked_add(1)?;
+        self.next_generation = generation;
+        Some(generation)
+    }
+
+    fn pending(&self, key: LookupKey) -> Option<&PendingLookup> {
         match key {
-            LookupKey::RegionId(region_id) => self.by_region_id.entry(region_id).or_default(),
-            LookupKey::MapCell(cell) => self.by_map_cell.entry(cell).or_default(),
+            LookupKey::RegionId(region_id) => self.by_region_id.get(&region_id),
+            LookupKey::MapCell(cell) => self.by_map_cell.get(&cell),
+        }
+    }
+
+    fn remove_pending(&mut self, key: LookupKey) -> Option<PendingLookup> {
+        match key {
+            LookupKey::RegionId(region_id) => self.by_region_id.remove(&region_id),
+            LookupKey::MapCell(cell) => self.by_map_cell.remove(&cell),
+        }
+    }
+
+    fn pending_mut(&mut self, key: LookupKey) -> Option<&mut PendingLookup> {
+        let missing = self.pending(key).is_none();
+        let generation = if missing { Some(self.allocate_generation()?) } else { None };
+        match key {
+            LookupKey::RegionId(region_id) => {
+                if let Some(generation) = generation {
+                    self.by_region_id.insert(region_id, PendingLookup { generation, waiters: HashMap::new() });
+                }
+                self.by_region_id.get_mut(&region_id)
+            }
+            LookupKey::MapCell(cell) => {
+                if let Some(generation) = generation {
+                    self.by_map_cell.insert(cell, PendingLookup { generation, waiters: HashMap::new() });
+                }
+                self.by_map_cell.get_mut(&cell)
+            }
         }
     }
 }
@@ -365,19 +453,56 @@ fn finish(pending: PendingLookup, result: Result<String, String>) {
     }
 }
 
+async fn send_with_retry(
+    send_message: Arc<SendMessage>,
+    make_timeout: Arc<MakeTimeout>,
+    request: RegionLookupRequest,
+    mut is_pending: impl FnMut() -> bool,
+) -> Result<(), Error> {
+    let mut retry_delay = INITIAL_SEND_RETRY_DELAY;
+    for attempt in 1..=SEND_RETRY_LIMIT {
+        if !is_pending() {
+            return Ok(());
+        }
+        match send_message(request.clone(), Delivery::Reliable).await {
+            Ok(()) => return Ok(()),
+            Err(error) if retryable_queue_error(&error) && attempt < SEND_RETRY_LIMIT => {
+                if !is_pending() {
+                    return Ok(());
+                }
+                make_timeout(retry_delay).await;
+                retry_delay = retry_delay.saturating_mul(2);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the final send attempt always returns")
+}
+
+fn retryable_queue_error(error: &Error) -> bool {
+    matches!(error, Error::CommandQueueFull | Error::SimulatorCommandQueueFull)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
         future::{pending, ready},
         net::{IpAddr, Ipv4Addr},
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
     };
 
     use protocol::{
         lludp::Message::MapBlockReply,
         messages::{RegionIdAndHandleReply, map_block_reply, region_id_and_handle_reply::ReplyBlock},
     };
-    use tokio::task::JoinHandle;
+    use tokio::{
+        spawn,
+        task::{JoinHandle, yield_now},
+        time::timeout,
+    };
 
     use super::*;
 
@@ -398,8 +523,11 @@ mod tests {
             |_| Box::pin(pending()) as TimeoutFuture,
             TEST_TIMEOUT,
             move |message, _| {
-                capture.lock().unwrap().push(message);
-                Ok(())
+                let capture = capture.clone();
+                Box::pin(async move {
+                    capture.lock().unwrap().push(message);
+                    Ok(())
+                }) as SendFuture
             },
         );
         (lookup, sent)
@@ -426,13 +554,13 @@ mod tests {
     }
 
     async fn wait_for_requests(sent: &Arc<Mutex<Vec<RegionLookupRequest>>>, count: usize) -> Vec<RegionLookupRequest> {
-        tokio::time::timeout(Duration::from_secs(1), async {
+        timeout(Duration::from_secs(1), async {
             loop {
                 let requests = requests(sent);
                 if requests.len() >= count {
                     return requests;
                 }
-                tokio::task::yield_now().await;
+                yield_now().await;
             }
         })
         .await
@@ -440,7 +568,7 @@ mod tests {
     }
 
     async fn assert_pending(task: &JoinHandle<Result<String, String>>) {
-        tokio::task::yield_now().await;
+        yield_now().await;
         assert!(!task.is_finished());
     }
 
@@ -448,9 +576,9 @@ mod tests {
     async fn coalesces_and_checks_replies() {
         let (lookup, sent) = lookup();
         let first_lookup = lookup.clone();
-        let first = tokio::spawn(async move { first_lookup.lookup_region_at(RegionGridCell::new(12, 34)).await });
+        let first = spawn(async move { first_lookup.lookup_region_at(RegionGridCell::new(12, 34)).await });
         let second_lookup = lookup.clone();
-        let second = tokio::spawn(async move { second_lookup.lookup_region_at(RegionGridCell::new(12, 34)).await });
+        let second = spawn(async move { second_lookup.lookup_region_at(RegionGridCell::new(12, 34)).await });
 
         let requests = wait_for_requests(&sent, 1).await;
         assert_eq!(requests.len(), 1);
@@ -474,9 +602,9 @@ mod tests {
     async fn id_lookup_coalesces_requests() {
         let (lookup, sent) = lookup();
         let first_lookup = lookup.clone();
-        let first = tokio::spawn(async move { first_lookup.lookup_region_by_id(REGION_ID).await });
+        let first = spawn(async move { first_lookup.lookup_region_by_id(REGION_ID).await });
         let second_lookup = lookup.clone();
-        let second = tokio::spawn(async move { second_lookup.lookup_region_by_id(REGION_ID).await });
+        let second = spawn(async move { second_lookup.lookup_region_by_id(REGION_ID).await });
 
         let requests = wait_for_requests(&sent, 1).await;
         assert_eq!(requests.len(), 1);
@@ -509,10 +637,167 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queue_full_retries_region_id_request_before_timing_out() {
+        let lookup_slot = Arc::new(Mutex::new(None::<RegionLookup>));
+        let send_attempts = Arc::new(AtomicUsize::new(0));
+        let slot = lookup_slot.clone();
+        let attempts = send_attempts.clone();
+        let lookup = RegionLookup::for_test(
+            AGENT_ID,
+            SESSION_ID,
+            SIMULATOR,
+            |duration| {
+                if duration == TEST_TIMEOUT { Box::pin(pending()) as TimeoutFuture } else { Box::pin(ready(())) as TimeoutFuture }
+            },
+            TEST_TIMEOUT,
+            move |request, _| {
+                if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Box::pin(async { Err(Error::SimulatorCommandQueueFull) }) as SendFuture;
+                }
+                let lookup = slot.lock().unwrap().as_ref().cloned();
+                Box::pin(async move {
+                    if let Some(lookup) = lookup {
+                        match request {
+                            RegionLookupRequest::RegionHandle(_) => {
+                                let region_handle = (u64::from(12 * RegionGridCell::METERS_PER_CELL) << 32)
+                                    | u64::from(34 * RegionGridCell::METERS_PER_CELL);
+                                lookup.handle_message(
+                                    SIMULATOR,
+                                    &Message::RegionIdAndHandleReply(RegionIdAndHandleReply {
+                                        reply_block: ReplyBlock { region_id: REGION_ID, region_handle },
+                                    }),
+                                );
+                            }
+                            RegionLookupRequest::MapBlock(_) => {
+                                lookup.handle_message(SIMULATOR, &map_reply(AGENT_ID, 12, 34, "Queued Region"));
+                            }
+                        }
+                    }
+                    Ok(())
+                }) as SendFuture
+            },
+        );
+        *lookup_slot.lock().unwrap() = Some(lookup.clone());
+
+        assert_eq!(lookup.lookup_region_by_id(REGION_ID).await, Ok("Queued Region".into()));
+        assert_eq!(send_attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn queue_full_region_lookup_retries_are_bounded() {
+        let send_attempts = Arc::new(AtomicUsize::new(0));
+        let attempts = send_attempts.clone();
+        let lookup = RegionLookup::for_test(
+            AGENT_ID,
+            SESSION_ID,
+            SIMULATOR,
+            |duration| {
+                if duration == TEST_TIMEOUT { Box::pin(pending()) as TimeoutFuture } else { Box::pin(ready(())) as TimeoutFuture }
+            },
+            TEST_TIMEOUT,
+            move |_, _| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Err(Error::SimulatorCommandQueueFull) }) as SendFuture
+            },
+        );
+
+        assert_eq!(lookup.lookup_region_at(RegionGridCell::new(12, 34)).await, Err(Error::SimulatorCommandQueueFull.to_string()));
+        assert_eq!(send_attempts.load(Ordering::SeqCst), SEND_RETRY_LIMIT);
+        assert!(lookup.lock_state().by_map_cell.is_empty());
+    }
+
+    #[tokio::test]
+    async fn permanent_send_error_is_not_retried() {
+        let send_attempts = Arc::new(AtomicUsize::new(0));
+        let attempts = send_attempts.clone();
+        let lookup = RegionLookup::for_test(
+            AGENT_ID,
+            SESSION_ID,
+            SIMULATOR,
+            |_| Box::pin(pending()) as TimeoutFuture,
+            TEST_TIMEOUT,
+            move |_, _| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Err(Error::SessionClosed) }) as SendFuture
+            },
+        );
+
+        assert_eq!(lookup.lookup_region_at(RegionGridCell::new(12, 34)).await, Err(Error::SessionClosed.to_string()));
+        assert_eq!(send_attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_send_failure_does_not_complete_a_replacement_lookup() {
+        let (lookup, _) = lookup();
+        let key = LookupKey::MapCell(RegionGridCell::new(12, 34));
+        let (old_sender, _old_receiver) = oneshot::channel();
+        let old_generation = {
+            let mut state = lookup.lock_state();
+            let pending = state.pending_mut(key).expect("allocate old lookup");
+            pending.waiters.insert(1, old_sender);
+            pending.generation
+        };
+
+        lookup.cancel_waiter(1);
+
+        let (replacement_sender, replacement_receiver) = oneshot::channel();
+        let replacement_generation = {
+            let mut state = lookup.lock_state();
+            let pending = state.pending_mut(key).expect("allocate replacement lookup");
+            pending.waiters.insert(2, replacement_sender);
+            pending.generation
+        };
+        assert_ne!(old_generation, replacement_generation);
+
+        lookup.complete_if_generation(key, old_generation, Err(Error::SessionClosed.to_string()));
+        lookup.handle_map_block_reply(&[map_block_reply::Data {
+            x: 12,
+            y: 34,
+            name: "Replacement Region".into(),
+            access: 0,
+            region_flags: 0,
+            water_height: 0,
+            agents: 0,
+            map_image_id: UUID::nil(),
+        }]);
+
+        assert_eq!(replacement_receiver.await.expect("replacement waiter"), Ok("Replacement Region".into()));
+    }
+
+    #[tokio::test]
+    async fn queue_full_retry_stops_after_the_last_waiter_leaves() {
+        let send_attempts = Arc::new(AtomicUsize::new(0));
+        let retry_timers = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicBool::new(true));
+        let send_attempts_for_send = send_attempts.clone();
+        let active_for_send = active.clone();
+        let retry_timers_for_timeout = retry_timers.clone();
+        let send_message = Arc::new(move |_, _| {
+            send_attempts_for_send.fetch_add(1, Ordering::SeqCst);
+            let active = active_for_send.clone();
+            Box::pin(async move {
+                active.store(false, Ordering::SeqCst);
+                Err(Error::SimulatorCommandQueueFull)
+            }) as SendFuture
+        });
+        let make_timeout = Arc::new(move |_| {
+            retry_timers_for_timeout.fetch_add(1, Ordering::SeqCst);
+            Box::pin(ready(())) as TimeoutFuture
+        });
+        let request = lookup().0.map_block_request(RegionGridCell::new(12, 34)).expect("valid map request");
+
+        let result = send_with_retry(send_message, make_timeout, request, move || active.load(Ordering::SeqCst)).await;
+
+        assert!(result.is_ok());
+        assert_eq!(send_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(retry_timers.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn map_range_rejects_region_handle() {
         let (lookup, sent) = lookup();
         let request_lookup = lookup.clone();
-        let pending = tokio::spawn(async move { request_lookup.lookup_region_by_id(REGION_ID).await });
+        let pending = spawn(async move { request_lookup.lookup_region_by_id(REGION_ID).await });
         let initial_requests = wait_for_requests(&sent, 1).await;
         assert!(matches!(&initial_requests[0], RegionLookupRequest::RegionHandle(_)));
 
@@ -536,7 +821,7 @@ mod tests {
             SIMULATOR,
             |_| Box::pin(ready(())) as TimeoutFuture,
             Duration::from_millis(20),
-            |_, _| Ok(()),
+            |_, _| Box::pin(async { Ok(()) }) as SendFuture,
         );
         assert_eq!(lookup.lookup_region_at(RegionGridCell::new(1, 2)).await, Err("Timed out looking up the region name.".into()));
         assert!(lookup.lock_state().by_map_cell.is_empty());

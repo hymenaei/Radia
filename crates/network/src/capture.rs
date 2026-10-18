@@ -9,7 +9,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, PoisonError,
+        Arc, Condvar, Mutex, PoisonError,
         atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, SyncSender, TrySendError},
     },
@@ -24,6 +24,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
+use crate::http::ResponseMemoryPermit;
+#[cfg(test)]
+use crate::http::{ResponseMemoryBudget, ResponseMemoryClass};
+
 pub(crate) const CAPTURE_SCHEMA_VERSION: u16 = 1;
 const CAPTURE_ENTRIES: [&str; 3] = ["manifest.json", "events.jsonl", "payloads.bin"];
 /// Maximum uncompressed size of any one capture archive entry, in bytes.
@@ -31,7 +35,7 @@ pub const MAX_CAPTURE_ENTRY_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 /// Maximum encoded size of one `events.jsonl` record, including its newline.
 pub const MAX_CAPTURE_EVENT_LINE_BYTES: usize = 1024 * 1024;
 const WRITER_QUEUE_CAPACITY: usize = 1024;
-const QUEUED_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_CAPTURE_QUEUED_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 
 /// Configuration for storing network capture archives.
 #[derive(Clone, Debug)]
@@ -68,7 +72,7 @@ pub struct CaptureManifest {
 pub enum CaptureState {
     Recording,
     Complete,
-    /// Recording finished with dropped events or a writer error.
+    /// Recording finished after data was dropped or a writer error occurred.
     Incomplete,
     /// Recording stopped because the network session shut down.
     Interrupted,
@@ -201,12 +205,15 @@ struct QueuedRecord {
     event: CaptureEventKind,
     payloads: Vec<Vec<u8>>,
     reserved_bytes: usize,
+    _memory: Option<ResponseMemoryPermit>,
 }
 
 struct RecorderState {
     sender: SyncSender<WriterCommand>,
     started: Instant,
     serial: Mutex<()>,
+    pending_records: Mutex<usize>,
+    records_idle: Condvar,
     first_request_id: u64,
     queued_bytes: Arc<AtomicUsize>,
     dropped_records: Arc<AtomicU64>,
@@ -354,6 +361,8 @@ impl CaptureSession {
             sender,
             started: Instant::now(),
             serial: Mutex::new(()),
+            pending_records: Mutex::new(0),
+            records_idle: Condvar::new(),
             first_request_id: recorder.registry.next_request_id.load(Ordering::Acquire),
             queued_bytes: recorder_queued_bytes,
             dropped_records,
@@ -379,7 +388,8 @@ impl CaptureSession {
     pub(crate) fn finish_recording(mut self, publication: &CapturePublication) -> CaptureSummary {
         let mut summary = self.stop_with(WriterCommand::Finish, publication);
         if summary.state == CaptureState::Incomplete && summary.error.is_none() {
-            summary.error = Some(format!("Capture is incomplete: {} events were dropped.", summary.dropped_records));
+            summary.error =
+                Some(format!("Capture is incomplete: {} capture records or HTTP bodies were dropped.", summary.dropped_records));
         }
         self.remove_workspace();
         summary
@@ -421,11 +431,7 @@ impl CaptureSession {
     }
 
     fn stop_writer(&mut self, command: WriterCommand) -> CaptureSummary {
-        let should_finish = {
-            let _serial = self.state.serial.lock().unwrap_or_else(PoisonError::into_inner);
-            // Close under the record lock so accepted events precede the terminal command.
-            !self.state.closed.swap(true, Ordering::AcqRel)
-        };
+        let should_finish = close_capture_records(&self.state);
         if should_finish {
             let _ = self.state.sender.send(command);
         }
@@ -475,7 +481,7 @@ impl CaptureRecorder {
         self.current_state().filter(|state| !state.closed.load(Ordering::Acquire))
     }
 
-    fn is_active(&self) -> bool {
+    pub(crate) fn is_active(&self) -> bool {
         self.current_state().is_some()
     }
 
@@ -511,13 +517,13 @@ impl CaptureRecorder {
 
     pub(crate) fn lifecycle(&self, name: &'static str) {
         if let Some(event) = lifecycle_event(name) {
-            self.record(event, Vec::new());
+            self.record(event);
         }
     }
 
     pub(crate) fn circuit_lifecycle(&self, name: &'static str, circuit_id: u32) {
         if let Some(event) = circuit_lifecycle_event(name, circuit_id) {
-            self.record(event, Vec::new());
+            self.record(event);
         }
     }
 
@@ -525,8 +531,27 @@ impl CaptureRecorder {
         let Some(state) = self.active_state() else {
             return;
         };
-        let (sequence, reliable, resent, zerocoded, appended_acks, packet_acks, message) = match Packet::decode(bytes) {
-            Ok(packet) => {
+        let packet = Packet::decode(bytes).ok();
+        Self::record_udp_state(&state, circuit_id, direction, remote, bytes, packet.as_ref());
+    }
+
+    pub(crate) fn received_udp(&self, circuit_id: u32, remote: SocketAddr, bytes: &[u8], packet: Option<&Packet>) {
+        let Some(state) = self.active_state() else {
+            return;
+        };
+        Self::record_udp_state(&state, circuit_id, "in", remote, bytes, packet);
+    }
+
+    fn record_udp_state(
+        state: &RecorderState,
+        circuit_id: u32,
+        direction: &str,
+        remote: SocketAddr,
+        bytes: &[u8],
+        packet: Option<&Packet>,
+    ) {
+        let (sequence, reliable, resent, zerocoded, appended_acks, packet_acks, message) = match packet {
+            Some(packet) => {
                 let packet_acks = match packet.message() {
                     Message::PacketAck(message) => message.packets.iter().map(|packet| packet.id).collect(),
                     _ => Vec::new(),
@@ -541,7 +566,7 @@ impl CaptureRecorder {
                     (message_name(packet.message()) != "Unknown").then(|| message_name(packet.message()).to_owned()),
                 )
             }
-            Err(_) => (None, None, None, None, Vec::new(), Vec::new(), None),
+            None => (None, None, None, None, Vec::new(), Vec::new(), None),
         };
         let event = match direction {
             "in" => CaptureEventKind::LLUdpReceive {
@@ -568,22 +593,43 @@ impl CaptureRecorder {
             },
             _ => return,
         };
-        Self::record_state(&state, event, vec![bytes.to_vec()]);
+        Self::record_state_with_payload(state, event, Some(bytes), None);
     }
 
+    #[cfg(test)]
     pub(crate) fn http_request(&self, operation: &str, method: &str, headers: Vec<(String, String)>, body: &[u8]) -> u64 {
+        self.http_request_with_memory(operation, method, headers, body, Some(Self::test_memory_permit(body.len())))
+    }
+
+    #[cfg(test)]
+    fn test_memory_permit(bytes: usize) -> ResponseMemoryPermit {
+        let budget = ResponseMemoryBudget::new(0, 0, bytes, 0);
+        budget.try_reserve(ResponseMemoryClass::Capture, bytes).expect("reserve capture test memory")
+    }
+
+    pub(crate) fn http_request_with_memory(
+        &self,
+        operation: &str,
+        method: &str,
+        headers: Vec<(String, String)>,
+        body: &[u8],
+        memory: Option<ResponseMemoryPermit>,
+    ) -> u64 {
         let Some(state) = self.active_state() else {
             return 0;
         };
         let request_id = self.registry.next_request_id.fetch_add(1, Ordering::Relaxed);
-        Self::record_state(
+        let payload = (!body.is_empty()).then_some(body);
+        Self::record_state_with_payload(
             &state,
             CaptureEventKind::HttpRequest { request_id, method: method.into(), endpoint: operation.into(), headers },
-            vec![body.to_vec()],
+            payload,
+            memory,
         );
         request_id
     }
 
+    #[cfg(test)]
     pub(crate) fn http_response(
         &self,
         request_id: u64,
@@ -592,6 +638,20 @@ impl CaptureRecorder {
         duration: Duration,
         outcome: &str,
         body: Option<&[u8]>,
+    ) {
+        let memory = body.map(|body| Self::test_memory_permit(body.len()));
+        self.http_response_with_memory(request_id, status, headers, duration, outcome, body, memory);
+    }
+
+    pub(crate) fn http_response_with_memory(
+        &self,
+        request_id: u64,
+        status: Option<u16>,
+        headers: Vec<(String, String)>,
+        duration: Duration,
+        outcome: &str,
+        body: Option<&[u8]>,
+        memory: Option<ResponseMemoryPermit>,
     ) {
         let Some(state) = self.active_state() else {
             return;
@@ -602,66 +662,143 @@ impl CaptureRecorder {
         let duration_ns = duration.as_nanos().min(u128::from(u64::MAX)) as u64;
         match (status, outcome) {
             (Some(status), "complete") => {
-                Self::record_state(
+                let payload = body.filter(|body| !body.is_empty());
+                Self::record_state_with_payload(
                     &state,
                     CaptureEventKind::HttpResponse { request_id, status, duration_ns, headers },
-                    body.map(|body| vec![body.to_vec()]).unwrap_or_default(),
+                    payload,
+                    memory,
                 );
             }
             (Some(status), "body_error") => {
-                Self::record_state(&state, CaptureEventKind::HttpResponse { request_id, status, duration_ns, headers }, Vec::new());
-                Self::record_state(
+                Self::record_state_with_payload(
+                    &state,
+                    CaptureEventKind::HttpResponse { request_id, status, duration_ns, headers },
+                    None,
+                    None,
+                );
+                Self::record_state_with_payload(
                     &state,
                     CaptureEventKind::HttpError { request_id, phase: HttpErrorPhase::Body, duration_ns },
-                    Vec::new(),
+                    None,
+                    None,
                 );
             }
             _ => {
-                Self::record_state(
+                Self::record_state_with_payload(
                     &state,
                     CaptureEventKind::HttpError { request_id, phase: HttpErrorPhase::Request, duration_ns },
-                    Vec::new(),
+                    None,
+                    None,
                 );
             }
         }
     }
 
-    fn record(&self, event: CaptureEventKind, payloads: Vec<Vec<u8>>) -> Option<()> {
+    fn record(&self, event: CaptureEventKind) -> Option<()> {
         let state = self.active_state()?;
-        Self::record_state(&state, event, payloads)
+        Self::record_state_with_payload(&state, event, None, None)
     }
 
-    fn record_state(state: &RecorderState, event: CaptureEventKind, payloads: Vec<Vec<u8>>) -> Option<()> {
+    fn record_state_with_payload(
+        state: &RecorderState,
+        event: CaptureEventKind,
+        payload: Option<&[u8]>,
+        memory: Option<ResponseMemoryPermit>,
+    ) -> Option<()> {
+        let is_lludp = matches!(&event, CaptureEventKind::LLUdpSend { .. } | CaptureEventKind::LLUdpReceive { .. });
+        let is_http_body = matches!(&event, CaptureEventKind::HttpRequest { .. } | CaptureEventKind::HttpResponse { .. });
+        let payload_omitted = is_http_body && payload.is_some_and(|bytes| !bytes.is_empty()) && memory.is_none();
+        let payload = payload.filter(|bytes| is_lludp || !bytes.is_empty()).filter(|_| !payload_omitted);
+        let payload_len = payload.map(<[u8]>::len);
+        Self::record_state_with_lazy_payload(
+            state,
+            event,
+            payload_len,
+            |len| {
+                let source = payload?;
+                let mut bytes = Vec::new();
+                bytes.try_reserve_exact(len).ok()?;
+                bytes.extend_from_slice(source);
+                Some(bytes)
+            },
+            memory,
+            payload_omitted,
+        )
+    }
+
+    fn record_state_with_lazy_payload(
+        state: &RecorderState,
+        event: CaptureEventKind,
+        payload_len: Option<usize>,
+        make_payload: impl FnOnce(usize) -> Option<Vec<u8>>,
+        memory: Option<ResponseMemoryPermit>,
+        payload_omitted: bool,
+    ) -> Option<()> {
         let is_lludp = matches!(&event, CaptureEventKind::LLUdpSend { .. } | CaptureEventKind::LLUdpReceive { .. });
         let is_http_request = matches!(&event, CaptureEventKind::HttpRequest { .. });
         let is_http_response = matches!(&event, CaptureEventKind::HttpResponse { .. });
-        let payloads = payloads.into_iter().filter(|payload| is_lludp || !payload.is_empty()).collect::<Vec<_>>();
-        let Some(reserved_bytes) = payloads.iter().try_fold(0usize, |total, bytes| total.checked_add(bytes.len())) else {
-            state.dropped_records.fetch_add(1, Ordering::Relaxed);
-            return None;
-        };
-        let Ok(_serial) = state.serial.lock() else {
+        let reserved_bytes = payload_len.unwrap_or_default();
+        let Ok(serial) = state.serial.lock() else {
             state.dropped_records.fetch_add(1, Ordering::Relaxed);
             return None;
         };
         if state.closed.load(Ordering::Acquire) {
             return None;
         }
-        if !reserve_payload_bytes(&state.queued_bytes, reserved_bytes) {
+        let Some(reservation) = PayloadReservation::new(&state.queued_bytes, reserved_bytes) else {
             state.dropped_records.fetch_add(1, Ordering::Relaxed);
             return None;
+        };
+        let pending_record = PendingCaptureRecord::new(state);
+        drop(serial);
+
+        let mut payloads = Vec::new();
+        if let Some(payload_len) = payload_len {
+            if payloads.try_reserve_exact(1).is_err() {
+                state.dropped_records.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+            let Some(payload) = make_payload(payload_len).filter(|payload| payload.len() == payload_len) else {
+                state.dropped_records.fetch_add(1, Ordering::Relaxed);
+                return None;
+            };
+            payloads.push(payload);
         }
 
+        let Ok(_serial) = state.serial.lock() else {
+            state.dropped_records.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
+
+        let result =
+            Self::enqueue_record(state, event, payloads, reservation, memory, is_lludp, is_http_request, is_http_response, payload_omitted);
+        drop(pending_record);
+        result
+    }
+
+    fn enqueue_record(
+        state: &RecorderState,
+        event: CaptureEventKind,
+        payloads: Vec<Vec<u8>>,
+        reservation: PayloadReservation,
+        memory: Option<ResponseMemoryPermit>,
+        is_lludp: bool,
+        is_http_request: bool,
+        is_http_response: bool,
+        payload_omitted: bool,
+    ) -> Option<()> {
         let elapsed_ns = state.started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
-        let queued = QueuedRecord { elapsed_ns, event, payloads, reserved_bytes };
+        let reserved_bytes = reservation.bytes;
+        let queued = QueuedRecord { elapsed_ns, event, payloads, reserved_bytes, _memory: memory };
         if let Err(error) = state.sender.try_send(WriterCommand::Record(Box::new(queued))) {
-            state.queued_bytes.fetch_sub(reserved_bytes, Ordering::AcqRel);
             state.dropped_records.fetch_add(1, Ordering::Relaxed);
             if matches!(error, TrySendError::Disconnected(_)) {
                 state.closed.store(true, Ordering::Release);
             }
             return None;
         }
+        reservation.commit();
         state.recorded_events.fetch_add(1, Ordering::Relaxed);
         if is_lludp {
             state.udp_packets.fetch_add(1, Ordering::Relaxed);
@@ -671,6 +808,9 @@ impl CaptureRecorder {
         }
         if is_http_response {
             state.http_responses.fetch_add(1, Ordering::Relaxed);
+        }
+        if payload_omitted {
+            state.dropped_records.fetch_add(1, Ordering::Relaxed);
         }
         Some(())
     }
@@ -702,17 +842,74 @@ fn circuit_lifecycle_event(name: &str, circuit_id: u32) -> Option<CaptureEventKi
 }
 
 fn reserve_payload_bytes(queued_bytes: &AtomicUsize, amount: usize) -> bool {
-    if amount > QUEUED_PAYLOAD_BYTES {
+    if amount > MAX_CAPTURE_QUEUED_PAYLOAD_BYTES {
         return false;
     }
     let mut current = queued_bytes.load(Ordering::Acquire);
     loop {
-        let Some(next) = current.checked_add(amount).filter(|next| *next <= QUEUED_PAYLOAD_BYTES) else {
+        let Some(next) = current.checked_add(amount).filter(|next| *next <= MAX_CAPTURE_QUEUED_PAYLOAD_BYTES) else {
             return false;
         };
         match queued_bytes.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
             Ok(_) => return true,
             Err(actual) => current = actual,
+        }
+    }
+}
+
+struct PayloadReservation {
+    queued_bytes: Arc<AtomicUsize>,
+    bytes: usize,
+    committed: bool,
+}
+
+struct PendingCaptureRecord<'a> {
+    state: &'a RecorderState,
+}
+
+impl<'a> PendingCaptureRecord<'a> {
+    fn new(state: &'a RecorderState) -> Self {
+        *state.pending_records.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+        Self { state }
+    }
+}
+
+impl Drop for PendingCaptureRecord<'_> {
+    fn drop(&mut self) {
+        let mut pending = self.state.pending_records.lock().unwrap_or_else(PoisonError::into_inner);
+        *pending -= 1;
+        if *pending == 0 {
+            self.state.records_idle.notify_all();
+        }
+    }
+}
+
+fn close_capture_records(state: &RecorderState) -> bool {
+    let should_finish = {
+        let _serial = state.serial.lock().unwrap_or_else(PoisonError::into_inner);
+        !state.closed.swap(true, Ordering::AcqRel)
+    };
+    let mut pending = state.pending_records.lock().unwrap_or_else(PoisonError::into_inner);
+    while *pending > 0 {
+        pending = state.records_idle.wait(pending).unwrap_or_else(PoisonError::into_inner);
+    }
+    should_finish
+}
+
+impl PayloadReservation {
+    fn new(queued_bytes: &Arc<AtomicUsize>, bytes: usize) -> Option<Self> {
+        reserve_payload_bytes(queued_bytes, bytes).then(|| Self { queued_bytes: Arc::clone(queued_bytes), bytes, committed: false })
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for PayloadReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.queued_bytes.fetch_sub(self.bytes, Ordering::AcqRel);
         }
     }
 }
@@ -937,7 +1134,9 @@ fn message_name(message: &Message) -> &'static str {
         Message::AgentUpdate(_) => "AgentUpdate",
         Message::StartPingCheck(_) => "StartPingCheck",
         Message::CompletePingCheck(_) => "CompletePingCheck",
+        Message::AgentThrottle(_) => "AgentThrottle",
         Message::PacketAck(_) => "PacketAck",
+        Message::TeleportCancel(_) => "TeleportCancel",
         Message::LogoutRequest(_) => "LogoutRequest",
         Message::LogoutReply(_) => "LogoutReply",
         Message::ChatFromViewer(_) => "ChatFromViewer",
@@ -955,6 +1154,8 @@ fn message_name(message: &Message) -> &'static str {
         Message::ObjectUpdateCached(_) => "ObjectUpdateCached",
         Message::KillObject(_) => "KillObject",
         Message::RequestMultipleObjects(_) => "RequestMultipleObjects",
+        Message::ObjectExtraParams(_) => "ObjectExtraParams",
+        Message::GenericStreamingMessage(_) => "GenericStreamingMessage",
         Message::Schema(message) => message.schema().name,
         Message::Unknown { .. } => "Unknown",
     }
@@ -1109,19 +1310,20 @@ fn try_create_private_dir(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CaptureRecorder, CaptureSession, CaptureState, CaptureSummary, RecorderState, SizeLimitedWriter, WriterCommand, message_name,
+        CaptureEventKind, CaptureRecorder, CaptureSession, CaptureState, CaptureSummary, MAX_CAPTURE_QUEUED_PAYLOAD_BYTES, RecorderState,
+        SizeLimitedWriter, WriterCommand, close_capture_records, message_name,
     };
     use protocol::{lludp::Message, messages::RegionIdAndHandleReply};
     use std::{
         io::Write,
         path::PathBuf,
         sync::{
-            Arc, Barrier, Mutex,
+            Arc, Barrier, Condvar, Mutex,
             atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
             mpsc::sync_channel,
         },
         thread,
-        time::Instant,
+        time::{Duration, Instant},
     };
 
     #[test]
@@ -1129,6 +1331,174 @@ mod tests {
         let message = Message::RegionIdAndHandleReply(RegionIdAndHandleReply::default());
 
         assert_eq!(message_name(&message), "RegionIdAndHandleReply");
+    }
+
+    #[test]
+    fn full_capture_byte_budget_skips_payload_copy() {
+        let (sender, _receiver) = sync_channel(1);
+        let state = RecorderState {
+            sender,
+            started: Instant::now(),
+            serial: Mutex::new(()),
+            pending_records: Mutex::new(0),
+            records_idle: Condvar::new(),
+            first_request_id: 1,
+            queued_bytes: Arc::new(AtomicUsize::new(MAX_CAPTURE_QUEUED_PAYLOAD_BYTES)),
+            dropped_records: Arc::new(AtomicU64::new(0)),
+            recorded_events: AtomicU64::new(0),
+            udp_packets: AtomicU64::new(0),
+            http_requests: AtomicU64::new(0),
+            http_responses: AtomicU64::new(0),
+            closed: AtomicBool::new(false),
+        };
+        let copied = AtomicBool::new(false);
+        let event = CaptureEventKind::LLUdpSend {
+            circuit_id: 1,
+            endpoint: "127.0.0.1:13000".into(),
+            sequence: None,
+            reliable: None,
+            resent: None,
+            zerocoded: None,
+            appended_acks: Vec::new(),
+            packet_acks: Vec::new(),
+            message: None,
+        };
+
+        let result = CaptureRecorder::record_state_with_lazy_payload(
+            &state,
+            event,
+            Some(1),
+            |_| {
+                copied.store(true, Ordering::Relaxed);
+                Some(vec![0])
+            },
+            None,
+            false,
+        );
+
+        assert!(result.is_none());
+        assert!(!copied.load(Ordering::Relaxed), "a full byte budget must reject before copying the payload");
+        assert_eq!(state.dropped_records.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn capture_payload_copy_does_not_hold_serial_lock() {
+        let (sender, _receiver) = sync_channel(1);
+        let state = RecorderState {
+            sender,
+            started: Instant::now(),
+            serial: Mutex::new(()),
+            pending_records: Mutex::new(0),
+            records_idle: Condvar::new(),
+            first_request_id: 1,
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
+            dropped_records: Arc::new(AtomicU64::new(0)),
+            recorded_events: AtomicU64::new(0),
+            udp_packets: AtomicU64::new(0),
+            http_requests: AtomicU64::new(0),
+            http_responses: AtomicU64::new(0),
+            closed: AtomicBool::new(false),
+        };
+        let event = CaptureEventKind::LLUdpSend {
+            circuit_id: 1,
+            endpoint: "127.0.0.1:13000".into(),
+            sequence: None,
+            reliable: None,
+            resent: None,
+            zerocoded: None,
+            appended_acks: Vec::new(),
+            packet_acks: Vec::new(),
+            message: None,
+        };
+
+        let result = CaptureRecorder::record_state_with_lazy_payload(
+            &state,
+            event,
+            Some(1),
+            |_| {
+                assert!(state.serial.try_lock().is_ok(), "payload allocation must happen outside the recorder lock");
+                Some(vec![0])
+            },
+            None,
+            false,
+        );
+
+        assert!(result.is_some());
+        assert_eq!(state.queued_bytes.load(Ordering::Relaxed), 1, "enqueued payload keeps its byte charge");
+    }
+
+    #[test]
+    fn capture_finalization_waits_for_admitted_payload_copy() {
+        let (sender, receiver) = sync_channel(2);
+        let state = Arc::new(RecorderState {
+            sender,
+            started: Instant::now(),
+            serial: Mutex::new(()),
+            pending_records: Mutex::new(0),
+            records_idle: Condvar::new(),
+            first_request_id: 1,
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
+            dropped_records: Arc::new(AtomicU64::new(0)),
+            recorded_events: AtomicU64::new(0),
+            udp_packets: AtomicU64::new(0),
+            http_requests: AtomicU64::new(0),
+            http_responses: AtomicU64::new(0),
+            closed: AtomicBool::new(false),
+        });
+        let copy_started = Arc::new(Barrier::new(2));
+        let copy_continue = Arc::new(Barrier::new(2));
+        let copy_state = Arc::clone(&state);
+        let started = Arc::clone(&copy_started);
+        let continue_copy = Arc::clone(&copy_continue);
+        let copy = thread::spawn(move || {
+            CaptureRecorder::record_state_with_lazy_payload(
+                &copy_state,
+                CaptureEventKind::LLUdpSend {
+                    circuit_id: 1,
+                    endpoint: "127.0.0.1:13000".into(),
+                    sequence: None,
+                    reliable: None,
+                    resent: None,
+                    zerocoded: None,
+                    appended_acks: Vec::new(),
+                    packet_acks: Vec::new(),
+                    message: None,
+                },
+                Some(1),
+                |_| {
+                    started.wait();
+                    continue_copy.wait();
+                    Some(vec![0])
+                },
+                None,
+                false,
+            )
+        });
+
+        copy_started.wait();
+        let final_state = Arc::clone(&state);
+        let finalizer = thread::spawn(move || {
+            assert!(close_capture_records(&final_state));
+            final_state.sender.send(WriterCommand::Finish).expect("send finish after pending capture records");
+        });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !state.closed.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline, "capture finalization should close the recorder");
+            thread::yield_now();
+        }
+        assert_eq!(*state.pending_records.lock().expect("read pending captures"), 1);
+        assert!(receiver.try_recv().is_err(), "Finish must wait until the admitted payload is enqueued");
+
+        copy_continue.wait();
+        assert!(copy.join().expect("finish payload copy").is_some());
+        finalizer.join().expect("finish capture finalization");
+
+        let WriterCommand::Record(record) = receiver.try_recv().expect("receive recorded datagram") else {
+            panic!("the admitted datagram must precede Finish");
+        };
+        assert_eq!(record.payloads, vec![vec![0]]);
+        assert_eq!(state.queued_bytes.load(Ordering::Acquire), 1, "the writer owns the payload charge after enqueue");
+        assert!(matches!(receiver.try_recv().expect("receive Finish"), WriterCommand::Finish));
     }
 
     #[test]
@@ -1158,6 +1528,8 @@ mod tests {
             sender,
             started: Instant::now(),
             serial: Mutex::new(()),
+            pending_records: Mutex::new(0),
+            records_idle: Condvar::new(),
             first_request_id: 1,
             queued_bytes: Arc::new(AtomicUsize::new(0)),
             dropped_records: Arc::new(AtomicU64::new(0)),
@@ -1192,7 +1564,7 @@ mod tests {
 
 #[cfg(test)]
 mod format_tests {
-    use crate::http::test_support::{LocalServer, response};
+    use crate::http::testing::{LocalServer, response};
     use std::{
         fs,
         io::{BufRead, BufReader, Cursor, Read, Write},
@@ -1204,10 +1576,10 @@ mod format_tests {
     };
     use zip::ZipArchive;
 
+    use ::testing::{lludp::vectors, parse_hex_fixture};
     use llsd::Value;
     use protocol::lludp::{Message, Packet};
     use serde_json::{from_slice, from_str, from_value, json, to_value};
-    use test_support::{lludp::vectors, parse_hex_fixture};
     use tokio::{spawn, task::spawn_blocking, time::timeout};
     use url::Url;
 
@@ -1360,9 +1732,9 @@ mod format_tests {
         );
         recorder.lifecycle("login_completed");
         let datagram = parse_hex_fixture(vectors::CHAT_FROM_SIMULATOR).expect("parse independent chat vector");
-        let local: SocketAddr = "127.0.0.1:50000".parse().expect("local endpoint");
         let remote: SocketAddr = "198.51.100.44:13000".parse().expect("simulator endpoint");
-        recorder.udp(512347, "in", local, remote, &datagram);
+        let packet = Packet::decode(&datagram).expect("decode inbound LLUDP datagram");
+        recorder.received_udp(512347, remote, &datagram, Some(&packet));
 
         let capture = finish_capture(session);
         let (manifest, events, payloads, decoded_packets) = check_capture(&capture);
@@ -1388,7 +1760,7 @@ mod format_tests {
     }
 
     #[test]
-    fn oversized_event_is_omitted_and_marks_capture_incomplete() {
+    fn oversized_event_marks_capture_incomplete() {
         let directory = tempdir().expect("create capture test directory");
         let recorder = CaptureRecorder::new();
         let session = start_capture(&directory, &recorder);
@@ -1420,6 +1792,52 @@ mod format_tests {
         assert!(archive_entry(&capture, "events.jsonl").len() <= MAX_CAPTURE_EVENT_LINE_BYTES);
     }
 
+    #[test]
+    fn omitted_nonempty_http_bodies_mark_capture_incomplete() {
+        let directory = tempdir().expect("create capture test directory");
+        let recorder = CaptureRecorder::new();
+        let session = start_capture(&directory, &recorder);
+        let body_request = recorder.http_request_with_memory("test", "POST", Vec::new(), b"request body", None);
+        recorder.http_response_with_memory(body_request, Some(200), Vec::new(), Duration::ZERO, "complete", Some(b"response body"), None);
+
+        let summary = session.finish_recording(&CapturePublication::default());
+        assert_eq!(summary.state, CaptureState::Incomplete);
+        assert_eq!(summary.dropped_records, 2);
+        assert_eq!(summary.error.as_deref(), Some("Capture is incomplete: 2 capture records or HTTP bodies were dropped."));
+
+        let path = summary.capture_path.expect("incomplete capture archive");
+        let (manifest, events, payloads, _) = check_capture(&path);
+        assert_eq!(manifest.state, CaptureState::Incomplete);
+        assert_eq!(manifest.dropped_events, 2);
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().any(|event| matches!(event.kind, CaptureEventKind::HttpRequest { .. })));
+        assert!(events.iter().any(|event| matches!(event.kind, CaptureEventKind::HttpResponse { .. })));
+        assert!(events.iter().all(|event| event.payloads.is_empty()));
+        assert!(payloads.is_empty());
+    }
+
+    #[test]
+    fn empty_http_body_preserves_capture() {
+        let directory = tempdir().expect("create capture test directory");
+        let recorder = CaptureRecorder::new();
+        let session = start_capture(&directory, &recorder);
+        let request = recorder.http_request_with_memory("test", "POST", Vec::new(), b"", None);
+        recorder.http_response_with_memory(request, Some(200), Vec::new(), Duration::ZERO, "complete", Some(b""), None);
+
+        let summary = session.finish_recording(&CapturePublication::default());
+        assert_eq!(summary.state, CaptureState::Complete);
+        assert_eq!(summary.dropped_records, 0);
+        assert_eq!(summary.error, None);
+
+        let path = summary.capture_path.expect("complete capture archive");
+        let (manifest, events, payloads, _) = check_capture(&path);
+        assert_eq!(manifest.state, CaptureState::Complete);
+        assert_eq!(manifest.dropped_events, 0);
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| event.payloads.is_empty()));
+        assert!(payloads.is_empty());
+    }
+
     #[tokio::test]
     async fn capability_endpoints_are_captured() {
         let directory = tempdir().expect("create capture test directory");
@@ -1441,7 +1859,7 @@ mod format_tests {
 
         let named = capabilities.get("TestCapability").expect("named capability").with_query_pair("request", "private-value");
         let unsafe_name = capabilities.get("bad/name").expect("capability with non-label name");
-        assert_eq!(client.post::<_, Value>(&named, &Value::Undefined).await.expect("named POST"), Value::Integer(9));
+        assert_eq!(client.post(&named, &Value::Undefined).await.expect("named POST"), Value::Integer(9));
         assert_eq!(client.get_bytes(&named).await.expect("named request"), b"named");
         assert_eq!(client.get_bytes(unsafe_name).await.expect("unsafe-name request"), b"unsafe");
         let manual = CapabilityUrl::parse(capability_server.url("/manual-secret-token").as_str()).expect("manual URL handle");

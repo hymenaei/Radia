@@ -1,12 +1,15 @@
+use std::mem::size_of;
+
 use base::UUID;
 
 use crate::{
-    codec::{Reader, Writer},
-    error::LLUdpError,
+    LLUdpError,
+    lludp::codec::{Reader, Writer},
     messages::common::{
-        ExtraParameter, ObjectShape, ObjectSound, ObjectText, RegionData, decode_extra_parameters, encode_extra_parameters, read_variable2,
-        rotation_from_vector3, write_finite_vector3, write_variable2,
+        ExtraParameter, ObjectSound, ObjectText, RegionData, decode_extra_parameters, encode_extra_parameters, read_variable2,
+        rotation_from_vector3, skip_extra_parameters, write_finite_vector3, write_variable2,
     },
+    types::{ObjectShape, TextureEntry, decode_texture_entry as decode_texture_entry_payload},
 };
 use math::{Quat, Vec3};
 
@@ -67,6 +70,17 @@ const SPECIAL_HAS_PARTICLE_SYSTEM: u32 = 0x400;
 const SPECIAL_OBJECT_FIELDS: u32 = 0x7ff;
 const VOLUME_PCODE: u8 = 9;
 const LEGACY_PARTICLE_SYSTEM_SIZE: usize = 86;
+
+/// Largest compressed ObjectUpdate TextureEntry payload decoded by the viewer.
+pub const MAX_TEXTURE_ENTRY_BYTES: usize = 4095;
+
+/// Decodes the bounded TextureEntry payload after the compressed message's binary-data envelope.
+pub fn decode_texture_entry(bytes: &[u8]) -> Result<Option<TextureEntry>, LLUdpError> {
+    if bytes.len() > MAX_TEXTURE_ENTRY_BYTES {
+        return Err(LLUdpError::InvalidMessage);
+    }
+    decode_texture_entry_payload(bytes).map_err(|_| LLUdpError::InvalidMessage)
+}
 
 pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<ObjectUpdateCompressed, LLUdpError> {
     let region_data = RegionData::decode(reader)?;
@@ -138,10 +152,6 @@ pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<ObjectUpdateCompressed, 
             (None, None, None, None)
         };
 
-        if !data.is_empty() {
-            return Err(LLUdpError::InvalidMessage);
-        }
-
         objects.push(ObjectData {
             update_flags,
             local_id,
@@ -173,6 +183,98 @@ pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<ObjectUpdateCompressed, 
     }
 
     Ok(ObjectUpdateCompressed { region_data, objects })
+}
+
+pub(crate) fn preflight_allocation_bytes(payload: &[u8]) -> Result<usize, LLUdpError> {
+    let mut reader = Reader::new(payload);
+    RegionData::decode(&mut reader)?;
+    let count = reader.terminal_variable_count()?;
+    let mut allocation_bytes = preflight_capacity::<ObjectData>(count)?;
+
+    for _ in 0..count {
+        reader.take(4)?;
+        let packed_data = read_variable2(&mut reader)?;
+        let mut data = Reader::new(packed_data);
+        data.take(16)?;
+        data.take(4)?;
+        let pcode = data.u8()?;
+        data.take(1 + 4 + 1 + 1 + 36)?;
+        let special_code = data.u32()?;
+        data.take(16)?;
+
+        if special_code & SPECIAL_HAS_ANGULAR_VELOCITY != 0 {
+            data.take(12)?;
+        }
+        if special_code & SPECIAL_HAS_PARENT != 0 {
+            data.take(4)?;
+        }
+        if special_code & SPECIAL_HAS_TREE_DATA != 0 {
+            data.take(1)?;
+        } else if special_code & SPECIAL_HAS_SCRATCH_PAD != 0 {
+            let declared_size = usize::try_from(data.u32()?).map_err(|_| LLUdpError::InvalidMessage)?;
+            let bytes = read_binary_data(&mut data)?;
+            if bytes.len() > declared_size {
+                return Err(LLUdpError::InvalidMessage);
+            }
+        }
+        if special_code & SPECIAL_HAS_TEXT != 0 {
+            skip_c_string(&mut data)?;
+            data.take(4)?;
+        }
+        if special_code & SPECIAL_HAS_MEDIA_URL != 0 {
+            skip_c_string(&mut data)?;
+        }
+        if special_code & SPECIAL_HAS_LEGACY_PARTICLE_SYSTEM != 0 {
+            data.take(LEGACY_PARTICLE_SYSTEM_SIZE)?;
+        }
+
+        let extra_parameter_count = skip_extra_parameters(&mut data)?;
+        add_preflight_capacity::<ExtraParameter>(&mut allocation_bytes, extra_parameter_count)?;
+
+        if special_code & SPECIAL_HAS_SOUND != 0 {
+            data.take(16 + 4 + 1 + 4)?;
+        }
+        if special_code & SPECIAL_HAS_NAME_VALUE != 0 {
+            skip_c_string(&mut data)?;
+        }
+        if pcode == VOLUME_PCODE {
+            ObjectShape::decode_compressed(&mut data)?;
+            read_binary_data(&mut data)?;
+            if special_code & SPECIAL_HAS_TEXTURE_ANIMATION != 0 {
+                read_binary_data(&mut data)?;
+            }
+            if special_code & SPECIAL_HAS_PARTICLE_SYSTEM != 0 {
+                skip_particle_system(&mut data)?;
+            }
+        }
+    }
+
+    Ok(allocation_bytes)
+}
+
+fn preflight_capacity<T>(count: usize) -> Result<usize, LLUdpError> {
+    count.checked_mul(size_of::<T>()).ok_or(LLUdpError::AllocationBoundOverflow)
+}
+
+fn add_preflight_capacity<T>(total: &mut usize, count: usize) -> Result<(), LLUdpError> {
+    *total = total.checked_add(preflight_capacity::<T>(count)?).ok_or(LLUdpError::AllocationBoundOverflow)?;
+    Ok(())
+}
+
+fn skip_c_string(reader: &mut Reader<'_>) -> Result<(), LLUdpError> {
+    let len = reader.remaining().iter().position(|byte| *byte == 0).ok_or(LLUdpError::TruncatedPacket)?;
+    reader.take(len.checked_add(1).ok_or(LLUdpError::AllocationBoundOverflow)?)?;
+    Ok(())
+}
+
+fn skip_particle_system(reader: &mut Reader<'_>) -> Result<(), LLUdpError> {
+    let mut data = Reader::new(reader.remaining());
+    let system_size = usize::try_from(data.i32()?).map_err(|_| LLUdpError::InvalidMessage)?;
+    data.take(system_size)?;
+    let particle_size = usize::try_from(data.i32()?).map_err(|_| LLUdpError::InvalidMessage)?;
+    data.take(particle_size)?;
+    reader.take(data.position())?;
+    Ok(())
 }
 
 pub(crate) fn encode_fields(object: &ObjectData, writer: &mut Writer<'_>) -> Result<(), LLUdpError> {

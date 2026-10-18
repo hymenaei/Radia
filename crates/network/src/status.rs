@@ -9,6 +9,8 @@ use std::{
 };
 
 const MAX_STATUS_ERROR_CHARS: usize = 512;
+const MAX_STATUS_CAPABILITY_NAMES: usize = 256;
+const MAX_STATUS_CAPABILITY_NAME_BYTES: usize = 128;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(u8)]
@@ -41,6 +43,8 @@ pub struct NetworkStatusSnapshot {
     pub http_requests: u64,
     pub http_responses: u64,
     pub capability_count: usize,
+    /// True when at least one observed capability name was omitted from bounded tracking.
+    pub capability_count_is_lower_bound: bool,
     pub reliable_packets_pending: usize,
     pub reliable_retransmits: u64,
     pub last_error: Option<String>,
@@ -58,6 +62,7 @@ impl fmt::Debug for NetworkStatusSnapshot {
             .field("http_requests", &self.http_requests)
             .field("http_responses", &self.http_responses)
             .field("capability_count", &self.capability_count)
+            .field("capability_count_is_lower_bound", &self.capability_count_is_lower_bound)
             .field("reliable_packets_pending", &self.reliable_packets_pending)
             .field("reliable_retransmits", &self.reliable_retransmits)
             .field("last_error", &self.last_error.as_ref().map(|_| "[REDACTED]"))
@@ -76,7 +81,11 @@ impl fmt::Display for NetworkStatusSnapshot {
             "UDP: {} sent, {} received; HTTP: {} requests, {} responses",
             self.udp_packets_sent, self.udp_packets_received, self.http_requests, self.http_responses
         )?;
-        writeln!(formatter, "Capabilities: {}", self.capability_count)?;
+        if self.capability_count_is_lower_bound {
+            writeln!(formatter, "Capabilities: at least {}", self.capability_count)?;
+        } else {
+            writeln!(formatter, "Capabilities: {}", self.capability_count)?;
+        }
         writeln!(formatter, "Reliable packets: {} pending, {} retransmits", self.reliable_packets_pending, self.reliable_retransmits)?;
         if let Some(error) = &self.last_error {
             write!(formatter, "Last error: {error}")?;
@@ -128,10 +137,16 @@ struct NetworkStatus {
     udp_packets_received: AtomicU64,
     http_requests: AtomicU64,
     http_responses: AtomicU64,
-    capabilities: Mutex<HashSet<String>>,
+    capabilities: Mutex<CapabilityNames>,
     reliable_packets_pending: AtomicUsize,
     reliable_retransmits: AtomicU64,
     last_error: Mutex<Option<String>>,
+}
+
+#[derive(Default)]
+struct CapabilityNames {
+    names: HashSet<String>,
+    is_lower_bound: bool,
 }
 
 impl NetworkStatusHandle {
@@ -140,6 +155,10 @@ impl NetworkStatusHandle {
     }
 
     pub fn snapshot(&self) -> NetworkStatusSnapshot {
+        let (capability_count, capability_count_is_lower_bound) = {
+            let capabilities = self.state.capabilities.lock().unwrap_or_else(PoisonError::into_inner);
+            (capabilities.names.len(), capabilities.is_lower_bound)
+        };
         NetworkStatusSnapshot {
             lifecycle: lifecycle_from_u8(self.state.lifecycle.load(Ordering::Relaxed)),
             simulator_endpoint: *self.state.simulator_endpoint.lock().unwrap_or_else(PoisonError::into_inner),
@@ -148,7 +167,8 @@ impl NetworkStatusHandle {
             udp_packets_received: self.state.udp_packets_received.load(Ordering::Relaxed),
             http_requests: self.state.http_requests.load(Ordering::Relaxed),
             http_responses: self.state.http_responses.load(Ordering::Relaxed),
-            capability_count: self.state.capabilities.lock().unwrap_or_else(PoisonError::into_inner).len(),
+            capability_count,
+            capability_count_is_lower_bound,
             reliable_packets_pending: self.state.reliable_packets_pending.load(Ordering::Relaxed),
             reliable_retransmits: self.state.reliable_retransmits.load(Ordering::Relaxed),
             last_error: self.state.last_error.lock().unwrap_or_else(PoisonError::into_inner).clone(),
@@ -161,6 +181,13 @@ impl NetworkStatusHandle {
 
     pub(crate) fn set_lifecycle(&self, lifecycle: NetworkLifecycle) {
         self.state.lifecycle.store(lifecycle as u8, Ordering::Relaxed);
+    }
+
+    pub(crate) fn mark_disconnecting(&self) {
+        let _ = self.state.lifecycle.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| match lifecycle_from_u8(current) {
+            NetworkLifecycle::Disconnected | NetworkLifecycle::Failed => Some(current),
+            _ => Some(NetworkLifecycle::Disconnecting as u8),
+        });
     }
 
     pub(crate) fn set_simulator_endpoint(&self, endpoint: SocketAddr) {
@@ -195,7 +222,20 @@ impl NetworkStatusHandle {
 
     pub(crate) fn note_capabilities<'a>(&self, names: impl IntoIterator<Item = &'a str>) {
         let mut capabilities = self.state.capabilities.lock().unwrap_or_else(PoisonError::into_inner);
-        capabilities.extend(names.into_iter().map(str::to_owned));
+        for name in names {
+            if name.len() > MAX_STATUS_CAPABILITY_NAME_BYTES {
+                capabilities.is_lower_bound = true;
+                continue;
+            }
+            if capabilities.names.contains(name) {
+                continue;
+            }
+            if capabilities.names.len() == MAX_STATUS_CAPABILITY_NAMES {
+                capabilities.is_lower_bound = true;
+                continue;
+            }
+            capabilities.names.insert(name.to_owned());
+        }
     }
 
     pub(crate) fn set_reliable_packets_pending(&self, count: usize) {
@@ -299,11 +339,25 @@ mod tests {
         assert_eq!(snapshot.http_requests, 1);
         assert_eq!(snapshot.http_responses, 1);
         assert_eq!(snapshot.capability_count, 2);
+        assert!(!snapshot.capability_count_is_lower_bound);
         assert_eq!(snapshot.simulator_endpoint, Some("127.0.0.1:13000".parse().expect("loopback endpoint")));
         assert!(snapshot.circuit_established);
         assert_eq!(snapshot.reliable_packets_pending, 2);
         assert_eq!(snapshot.reliable_retransmits, 1);
         assert_eq!(snapshot.last_error.as_deref(), Some("fixture failure"));
+    }
+
+    #[test]
+    fn capability_name_tracking_has_a_fixed_bound_and_reports_truncation() {
+        let status = NetworkStatusHandle::new();
+        let names = (0..=super::MAX_STATUS_CAPABILITY_NAMES).map(|index| format!("Capability{index}")).collect::<Vec<_>>();
+        status.note_capabilities(names.iter().map(String::as_str));
+        status.note_capabilities(["x".repeat(super::MAX_STATUS_CAPABILITY_NAME_BYTES + 1).as_str()]);
+
+        let snapshot = status.snapshot();
+        assert_eq!(snapshot.capability_count, super::MAX_STATUS_CAPABILITY_NAMES);
+        assert!(snapshot.capability_count_is_lower_bound);
+        assert!(format!("{snapshot}").contains(&format!("at least {}", super::MAX_STATUS_CAPABILITY_NAMES)));
     }
 
     #[test]
@@ -382,6 +436,7 @@ mod redaction_tests {
             http_requests: 3,
             http_responses: 3,
             capability_count: 4,
+            capability_count_is_lower_bound: false,
             reliable_packets_pending: 0,
             reliable_retransmits: 1,
             last_error: Some("server-error-secret".into()),

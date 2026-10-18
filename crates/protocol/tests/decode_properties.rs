@@ -1,6 +1,9 @@
-use proptest::{prelude::*, test_runner::Config};
+use proptest::{
+    prelude::*,
+    test_runner::{Config, TestCaseResult},
+};
 use protocol::{LLUdpError, lludp::Packet};
-use test_support::{lludp::vectors, parse_hex_fixture};
+use testing::{lludp::vectors, parse_hex_fixture};
 
 const MAX_DATAGRAM_BYTES: usize = 0x2000;
 
@@ -38,6 +41,15 @@ fn object_payload() -> impl Strategy<Value = Vec<u8>> {
     prop::collection::vec(any::<u8>(), 0..=(MAX_DATAGRAM_BYTES - max_prefix_len))
 }
 
+fn check_preflight(bytes: &[u8]) -> TestCaseResult {
+    if let Ok(packet) = Packet::decode(bytes) {
+        let preflight = Packet::preflight(bytes)?;
+        prop_assert!(packet.retained_capacity_bytes() <= preflight.retained_capacity_upper_bound());
+        prop_assert!(preflight.retained_capacity_upper_bound() <= preflight.peak_decode_allocation_bytes());
+    }
+    Ok(())
+}
+
 proptest! {
     #![proptest_config(Config {
         cases: 64,
@@ -46,7 +58,28 @@ proptest! {
 
     #[test]
     fn packet_decode_arbitrary(bytes in prop::collection::vec(any::<u8>(), 0..=MAX_DATAGRAM_BYTES)) {
-        let _ = Packet::decode(&bytes);
+        check_preflight(&bytes)?;
+    }
+
+    #[test]
+    fn object_mutation_bound(index in 0..OBJECT_FIXTURES.len(), offset in any::<usize>(), byte in any::<u8>()) {
+        let mut bytes = parse_hex_fixture(OBJECT_FIXTURES[index]).expect("valid object fixture");
+        let at = offset % bytes.len();
+        bytes[at] = byte;
+        check_preflight(&bytes)?;
+    }
+
+    #[test]
+    fn padded_record_bound(count in any::<u8>(), suffix in prop::collection::vec(any::<u8>(), 0..1024), zero_code in any::<bool>()) {
+        let mut bytes = vec![0, 0, 0, 0, 1, 0, 0xff, 0xff, 0, 98];
+        bytes.extend_from_slice(&[0; 32]);
+        bytes.push(count);
+        bytes.extend_from_slice(&suffix);
+        check_preflight(&bytes)?;
+        if zero_code && let Ok(packet) = Packet::decode(&bytes) {
+                let bytes = packet.with_zero_coding(true).encode()?;
+                check_preflight(&bytes)?;
+        }
     }
 
     #[test]
@@ -54,7 +87,7 @@ proptest! {
         for mut packet in object_packet_prefixes() {
             packet.extend_from_slice(&payload);
             prop_assert!(packet.len() <= MAX_DATAGRAM_BYTES);
-            let _ = Packet::decode(&packet);
+            check_preflight(&packet)?;
         }
     }
 }

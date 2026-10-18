@@ -4,6 +4,7 @@
 //! Binary elements accept omitted encoding declarations or `encoding="base64"`.
 
 use std::{
+    borrow::Cow,
     io::{Read, Write},
     str,
 };
@@ -11,7 +12,7 @@ use std::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use quick_xml::{
     Reader, XmlVersion,
-    escape::unescape,
+    escape::resolve_predefined_entity,
     events::{BytesStart, Event},
 };
 use serde::de::{
@@ -25,12 +26,26 @@ use crate::{
     value::{BINARY_NEWTYPE, DATE_NEWTYPE, URI_NEWTYPE, UUID_NEWTYPE, VALUE_ENUM},
 };
 
+mod bound;
+
+pub use bound::{BoundError, value_allocation_bound};
+
 #[derive(Debug)]
-enum Token {
-    Start(String),
-    Empty(String),
-    End(String),
-    Text(String),
+enum Token<'a> {
+    Start(&'static str),
+    Empty(&'static str),
+    End(&'static str),
+    Text(Cow<'a, str>),
+    CharacterReference(Cow<'a, str>),
+}
+
+impl Token<'_> {
+    fn text(&self) -> Option<&str> {
+        match self {
+            Self::Text(text) | Self::CharacterReference(text) => Some(text),
+            _ => None,
+        }
+    }
 }
 
 /// Decodes one complete XML LLSD document from UTF-8 bytes using default limits.
@@ -45,7 +60,7 @@ pub fn from_slice_with_limits<T: DeserializeOwned>(input: &[u8], limits: Limits)
     if input.len() > limits.max_input_bytes {
         return Err(Error::LimitExceeded("input bytes"));
     }
-    let tokens = tokenize(input, limits)?;
+    let tokens = Tokens::new(input, limits)?;
     let mut de = Deserializer::new(tokens, limits)?;
     let value = T::deserialize(&mut de)?;
     de.finish()?;
@@ -97,84 +112,156 @@ pub fn to_writer<T: serde::Serialize + ?Sized, W: Write>(mut writer: W, value: &
     ser::to_writer(&mut writer, value, Format::Xml)
 }
 
-fn tokenize(input: &[u8], limits: Limits) -> Result<Vec<Token>> {
-    let text = str::from_utf8(input).map_err(|_| Error::InvalidUtf8)?;
-    let mut reader = Reader::from_str(text);
-    reader.config_mut().trim_text(false);
-    let mut tokens = Vec::new();
-    let mut element_context = Vec::new();
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(element)) => {
-                let name = element.name().as_ref().to_owned();
-                if name == "binary" {
-                    validate_binary_encoding(&element)?;
-                }
-                element_context.push((name == "binary", !matches!(name.as_str(), "llsd" | "array" | "map")));
-                push_token(&mut tokens, Token::Start(name), limits)?;
-            }
-            Ok(Event::Empty(element)) => {
-                let name = element.name().as_ref().to_owned();
-                if name == "binary" {
-                    validate_binary_encoding(&element)?;
-                }
-                push_token(&mut tokens, Token::Empty(name), limits)?;
-            }
-            Ok(Event::End(element)) => {
-                element_context.pop();
-                push_token(&mut tokens, Token::End(element.name().as_ref().to_owned()), limits)?;
-            }
-            Ok(Event::Text(text)) => {
-                let value = unescape(text.as_ref()).map_err(|error| Error::InvalidValue(error.to_string()))?.into_owned();
-                push_text(&mut tokens, value, &element_context, limits)?;
-            }
-            Ok(Event::GeneralRef(reference)) => {
-                let reference = format!("&{};", reference.as_ref());
-                let value = unescape(&reference).map_err(|error| Error::InvalidValue(error.to_string()))?.into_owned();
-                push_text(&mut tokens, value, &element_context, limits)?;
-            }
-            Ok(Event::CData(text)) => {
-                let value = text.as_ref().to_owned();
-                push_text(&mut tokens, value, &element_context, limits)?;
-            }
-            Ok(Event::DocType(_)) => return Err(Error::InvalidValue("XML document types are not allowed in LLSD".into())),
-            Ok(Event::Eof) => break,
-            Ok(Event::Decl(_) | Event::PI(_) | Event::Comment(_)) => {}
-            Err(error) => return Err(Error::InvalidValue(error.to_string())),
-        }
-    }
-    Ok(tokens)
+struct Tokens<'input> {
+    reader: Reader<&'input [u8]>,
+    pending: Option<Token<'input>>,
+    context: Vec<(bool, bool)>,
+    limits: Limits,
+    count: usize,
+    text_run: bool,
+    ended: bool,
+    check_binary_encoding: bool,
+    binary_attribute_bytes: usize,
 }
 
-fn push_token(tokens: &mut Vec<Token>, token: Token, limits: Limits) -> Result<()> {
-    let max_tokens = limits.max_values.saturating_mul(8).saturating_add(16);
-    if tokens.len() >= max_tokens {
-        return Err(Error::LimitExceeded("XML token count"));
+impl<'input> Tokens<'input> {
+    fn new(input: &'input [u8], limits: Limits) -> Result<Self> {
+        let input = str::from_utf8(input).map_err(|_| Error::InvalidUtf8)?;
+        let mut reader = Reader::from_str(input);
+        reader.config_mut().trim_text(false);
+        Ok(Self {
+            reader,
+            pending: None,
+            context: Vec::new(),
+            limits,
+            count: 0,
+            text_run: false,
+            ended: false,
+            check_binary_encoding: true,
+            binary_attribute_bytes: 0,
+        })
     }
-    tokens.push(token);
-    Ok(())
+    fn for_bound(input: &'input [u8], limits: Limits) -> Result<Self> {
+        let mut tokens = Self::new(input, limits)?;
+        tokens.check_binary_encoding = false;
+        tokens.reader.config_mut().check_end_names = false;
+        Ok(tokens)
+    }
+    fn peek(&mut self) -> Result<Option<&Token<'input>>> {
+        if self.pending.is_none() && !self.ended {
+            self.pending = self.read()?;
+        }
+        Ok(self.pending.as_ref())
+    }
+    fn take(&mut self) -> Result<Option<Token<'input>>> {
+        self.peek()?;
+        Ok(self.pending.take())
+    }
+    fn check_next_name(&self) -> Result<()> {
+        let remaining = self.reader.get_ref().strip_prefix(b"\xef\xbb\xbf").unwrap_or(self.reader.get_ref());
+        let Some(markup) = remaining.strip_prefix(b"<") else {
+            return Ok(());
+        };
+        if markup.starts_with(b"!") || markup.starts_with(b"?") {
+            return Ok(());
+        }
+        let name = markup.strip_prefix(b"/").unwrap_or(markup);
+        let len = name.iter().position(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n' | b'/' | b'>')).unwrap_or(name.len());
+        tag_name(str::from_utf8(&name[..len]).map_err(|_| Error::InvalidUtf8)?)?;
+        Ok(())
+    }
+
+    fn read(&mut self) -> Result<Option<Token<'input>>> {
+        loop {
+            self.binary_attribute_bytes = 0;
+            self.check_next_name()?;
+            let token = match self.reader.read_event() {
+                Ok(Event::Start(element)) => {
+                    let name = tag_name(element.name().as_ref())?;
+                    if name == "binary" {
+                        self.binary_attribute_bytes = element.as_ref().len();
+                        if self.check_binary_encoding {
+                            validate_binary_encoding(&element)?;
+                        }
+                    }
+                    self.context.push((name == "binary", !matches!(name, "llsd" | "array" | "map")));
+                    Token::Start(name)
+                }
+                Ok(Event::Empty(element)) => {
+                    let name = tag_name(element.name().as_ref())?;
+                    if name == "binary" {
+                        self.binary_attribute_bytes = element.as_ref().len();
+                        if self.check_binary_encoding {
+                            validate_binary_encoding(&element)?;
+                        }
+                    }
+                    Token::Empty(name)
+                }
+                Ok(Event::End(element)) => {
+                    self.context.pop();
+                    Token::End(tag_name(element.name().as_ref())?)
+                }
+                Ok(Event::Text(text)) => Token::Text(text.into_inner()),
+                Ok(Event::GeneralRef(reference)) => {
+                    let text =
+                        match reference.resolve_char_ref().map_err(|_| Error::InvalidValue("invalid XML character reference".into()))? {
+                            Some(ch) => Cow::Owned(ch.to_string()),
+                            None => Cow::Borrowed(
+                                resolve_predefined_entity(reference.as_ref())
+                                    .ok_or_else(|| Error::InvalidValue("unknown XML entity".into()))?,
+                            ),
+                        };
+                    Token::CharacterReference(text)
+                }
+                Ok(Event::CData(text)) => Token::Text(text.into_inner()),
+                Ok(Event::DocType(_)) => continue,
+                Ok(Event::Eof) => {
+                    self.ended = true;
+                    return Ok(None);
+                }
+                Ok(Event::Decl(_) | Event::PI(_) | Event::Comment(_)) => continue,
+                Err(_) if !self.check_binary_encoding => return Err(Error::InvalidValue("malformed XML".into())),
+                Err(error) => return Err(Error::InvalidValue(error.to_string())),
+            };
+            if let Some(value) = token.text() {
+                let (binary, preserve) = self.context.last().copied().unwrap_or_default();
+                if !preserve && value.bytes().all(|byte| byte.is_ascii_whitespace()) {
+                    continue;
+                }
+                if !binary && value.len() > self.limits.max_string_bytes {
+                    return Err(Error::LimitExceeded("string bytes"));
+                }
+            }
+            let text = token.text().is_some();
+            if !text || !self.text_run {
+                if self.count >= self.limits.max_values.saturating_mul(8).saturating_add(16) {
+                    return Err(Error::LimitExceeded("XML token count"));
+                }
+                self.count += 1;
+            }
+            self.text_run = text;
+            return Ok(Some(token));
+        }
+    }
 }
 
-fn push_text(tokens: &mut Vec<Token>, value: String, element_context: &[(bool, bool)], limits: Limits) -> Result<()> {
-    let binary = element_context.last().is_some_and(|(binary, _)| *binary);
-    let preserve_whitespace = element_context.last().is_some_and(|(_, preserve)| *preserve);
-    if !preserve_whitespace && value.bytes().all(|byte| byte.is_ascii_whitespace()) {
-        return Ok(());
+fn tag_name(name: &str) -> Result<&'static str> {
+    match name {
+        "llsd" => Ok("llsd"),
+        "array" => Ok("array"),
+        "map" => Ok("map"),
+        "key" => Ok("key"),
+        "undef" => Ok("undef"),
+        "boolean" => Ok("boolean"),
+        "integer" => Ok("integer"),
+        "real" => Ok("real"),
+        "uuid" => Ok("uuid"),
+        "string" => Ok("string"),
+        "uri" => Ok("uri"),
+        "date" => Ok("date"),
+        "binary" => Ok("binary"),
+        _ => Err(Error::InvalidValue("unknown LLSD XML element".into())),
     }
-
-    if !binary && value.len() > limits.max_string_bytes {
-        return Err(Error::LimitExceeded("string bytes"));
-    }
-    if let Some(Token::Text(existing)) = tokens.last_mut() {
-        let length = existing.len().checked_add(value.len()).ok_or(Error::LimitExceeded("string bytes"))?;
-        if !binary && length > limits.max_string_bytes {
-            return Err(Error::LimitExceeded("string bytes"));
-        }
-        existing.push_str(&value);
-    } else {
-        push_token(tokens, Token::Text(value), limits)?;
-    }
-    Ok(())
 }
 
 fn validate_binary_encoding(element: &BytesStart<'_>) -> Result<()> {
@@ -192,56 +279,51 @@ fn validate_binary_encoding(element: &BytesStart<'_>) -> Result<()> {
     Ok(())
 }
 
-struct Deserializer {
-    tokens: Vec<Token>,
-    index: usize,
+struct Deserializer<'input> {
+    tokens: Tokens<'input>,
     limits: Limits,
     values: usize,
     depth: usize,
 }
 
-impl Deserializer {
-    fn new(tokens: Vec<Token>, limits: Limits) -> Result<Self> {
-        let mut index = 0;
-        while matches!(tokens.get(index), Some(Token::Text(value)) if value.trim().is_empty()) {
-            index += 1;
-        }
-        if !matches!(tokens.get(index), Some(Token::Start(tag)) if tag == "llsd") {
+impl<'input> Deserializer<'input> {
+    fn new(tokens: Tokens<'input>, limits: Limits) -> Result<Self> {
+        let mut de = Self { tokens, limits, values: 0, depth: 0 };
+        de.skip_space()?;
+        if !matches!(de.tokens.take()?, Some(Token::Start(tag)) if tag == "llsd") {
             return Err(Error::InvalidValue("expected an LLSD XML root element".into()));
         }
-        Ok(Self { tokens, index: index + 1, limits, values: 0, depth: 0 })
+        Ok(de)
     }
-
     fn finish(&mut self) -> Result<()> {
-        self.skip_space();
-        if !matches!(self.tokens.get(self.index), Some(Token::End(tag)) if tag == "llsd") {
+        self.skip_space()?;
+        if !matches!(self.tokens.take()?, Some(Token::End(tag)) if tag == "llsd") {
             return Err(Error::InvalidValue("LLSD XML root element was not closed".into()));
         }
-        self.index += 1;
-        self.skip_space();
-        if self.index != self.tokens.len() {
+        self.skip_space()?;
+        if self.tokens.peek()?.is_some() {
             return Err(Error::TrailingData);
         }
         Ok(())
     }
-
-    fn skip_space(&mut self) {
-        while matches!(self.tokens.get(self.index), Some(Token::Text(value)) if value.trim().is_empty()) {
-            self.index += 1;
+    fn skip_space(&mut self) -> Result<()> {
+        while matches!(self.tokens.peek()?, Some(Token::Text(value) | Token::CharacterReference(value)) if value.trim().is_empty()) {
+            self.tokens.take()?;
         }
+        Ok(())
     }
 
-    fn next_tag(&mut self) -> Result<(String, bool)> {
-        self.skip_space();
-        match self.tokens.get(self.index) {
+    fn next_tag(&mut self) -> Result<(&'static str, bool)> {
+        self.skip_space()?;
+        match self.tokens.peek()? {
             Some(Token::Start(tag)) => {
-                let tag = tag.clone();
-                self.index += 1;
+                let tag = *tag;
+                self.tokens.take()?;
                 Ok((tag, false))
             }
             Some(Token::Empty(tag)) => {
-                let tag = tag.clone();
-                self.index += 1;
+                let tag = *tag;
+                self.tokens.take()?;
                 Ok((tag, true))
             }
             Some(Token::End(_)) => Err(Error::UnexpectedEof),
@@ -259,21 +341,28 @@ impl Deserializer {
         }
         let mut value = String::new();
         loop {
-            match self.tokens.get(self.index) {
+            match self.tokens.peek()? {
                 Some(Token::Text(text)) => {
-                    value.push_str(text);
-                    self.index += 1;
+                    if value.len().checked_add(text.len()).is_none_or(|length| length > limit) {
+                        return Err(Error::LimitExceeded(limit_name));
+                    }
+                    append_normalized_xml_text(&mut value, text);
+                    self.tokens.take()?;
                 }
-                Some(Token::End(end)) if end == tag => {
-                    self.index += 1;
+                Some(Token::CharacterReference(text)) => {
+                    if value.len().checked_add(text.len()).is_none_or(|length| length > limit) {
+                        return Err(Error::LimitExceeded(limit_name));
+                    }
+                    value.push_str(text);
+                    self.tokens.take()?;
+                }
+                Some(Token::End(end)) if *end == tag => {
+                    self.tokens.take()?;
                     break;
                 }
                 Some(Token::Start(_)) | Some(Token::Empty(_)) => return Err(Error::InvalidValue("nested elements in LLSD scalar".into())),
                 Some(Token::End(_)) => return Err(Error::InvalidValue("mismatched LLSD XML element".into())),
                 None => return Err(Error::UnexpectedEof),
-            }
-            if value.len() > limit {
-                return Err(Error::LimitExceeded(limit_name));
             }
         }
         Ok(value)
@@ -309,30 +398,30 @@ impl Deserializer {
             "date" => "1970-01-01T00:00:00Z",
             _ => "",
         };
-        let text = self.text_value(&tag, empty)?;
+        let text = self.text_value(tag, empty)?;
         if text.is_empty() { Ok(default.to_owned()) } else { Ok(text) }
     }
 
     fn deserialize_plain_enum<'de, V: Visitor<'de>>(&mut self, visitor: V) -> Result<V::Value> {
-        self.skip_space();
-        match self.tokens.get(self.index) {
-            Some(Token::Empty(tag) | Token::Start(tag)) if tag == "string" => {
+        self.skip_space()?;
+        match self.tokens.peek()? {
+            Some(Token::Empty(tag) | Token::Start(tag)) if *tag == "string" => {
                 let variant = self.scalar_for_wrapper("string")?;
                 visitor.visit_enum(StringDeserializer::<Error>::new(variant))
             }
-            Some(Token::Start(tag)) if tag == "map" => {
+            Some(Token::Start(tag)) if *tag == "map" => {
                 self.count_value()?;
                 let (tag, empty) = self.next_tag()?;
                 if tag != "map" || empty {
                     return Err(Error::InvalidValue("LLSD enum map must contain exactly one entry".into()));
                 }
                 self.container(|de| {
-                    de.skip_space();
+                    de.skip_space()?;
                     let (key_tag, key_empty) = de.next_tag()?;
                     if key_tag != "key" {
                         return Err(Error::InvalidValue("expected LLSD enum map key".into()));
                     }
-                    let variant = de.text_value(&key_tag, key_empty)?;
+                    let variant = de.text_value(key_tag, key_empty)?;
                     if variant.len() > de.limits.max_map_key_bytes {
                         return Err(Error::LimitExceeded("map key bytes"));
                     }
@@ -363,18 +452,43 @@ impl Deserializer {
     }
 }
 
-impl<'de> de::Deserializer<'de> for &mut Deserializer {
+fn append_normalized_xml_text(output: &mut String, text: &str) {
+    if !text.as_bytes().contains(&b'\r') {
+        output.push_str(text);
+        return;
+    }
+
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\r' {
+            output.push_str(&text[start..index]);
+            output.push('\n');
+            index += 1;
+            if bytes.get(index) == Some(&b'\n') {
+                index += 1;
+            }
+            start = index;
+        } else {
+            index += 1;
+        }
+    }
+    output.push_str(&text[start..]);
+}
+
+impl<'de, 'input> de::Deserializer<'de> for &mut Deserializer<'input> {
     type Error = Error;
     fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
         self.count_value()?;
         let (tag, empty) = self.next_tag()?;
-        match tag.as_str() {
+        match tag {
             "undef" => {
-                self.text_value(&tag, empty)?;
+                self.text_value(tag, empty)?;
                 visitor.visit_unit()
             }
             "boolean" => {
-                let value = self.text_value(&tag, empty)?;
+                let value = self.text_value(tag, empty)?;
                 match value.trim() {
                     "" | "0" | "false" => visitor.visit_bool(false),
                     "1" | "true" => visitor.visit_bool(true),
@@ -382,7 +496,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer {
                 }
             }
             "integer" => {
-                let value = self.text_value(&tag, empty)?;
+                let value = self.text_value(tag, empty)?;
                 let number = if value.trim().is_empty() {
                     0
                 } else {
@@ -391,20 +505,20 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer {
                 visitor.visit_i32(number)
             }
             "real" => {
-                let value = self.text_value(&tag, empty)?;
+                let value = self.text_value(tag, empty)?;
                 let number = if value.trim().is_empty() { 0.0 } else { parse_real(value.trim())? };
                 visitor.visit_f64(number)
             }
             "uuid" | "string" | "uri" | "date" => {
-                let default = match tag.as_str() {
+                let default = match tag {
                     "uuid" => "00000000-0000-0000-0000-000000000000",
                     "date" => "1970-01-01T00:00:00Z",
                     _ => "",
                 };
-                let text = self.text_value(&tag, empty)?;
+                let text = self.text_value(tag, empty)?;
                 visitor.visit_string(if text.is_empty() { default.to_owned() } else { text })
             }
-            "binary" => visitor.visit_byte_buf(self.parse_binary(&tag, empty)?),
+            "binary" => visitor.visit_byte_buf(self.parse_binary(tag, empty)?),
             "array" => {
                 if empty {
                     return visitor.visit_seq(EmptySeqAccess);
@@ -488,7 +602,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer {
         if tag != "binary" {
             return Err(Error::InvalidValue("expected LLSD binary".into()));
         }
-        let bytes = self.parse_binary(&tag, empty)?;
+        let bytes = self.parse_binary(tag, empty)?;
         visitor.visit_bytes(&bytes)
     }
     fn deserialize_byte_buf<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
@@ -497,13 +611,13 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer {
         if tag != "binary" {
             return Err(Error::InvalidValue("expected LLSD binary".into()));
         }
-        visitor.visit_byte_buf(self.parse_binary(&tag, empty)?)
+        visitor.visit_byte_buf(self.parse_binary(tag, empty)?)
     }
     fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        if matches!(self.tokens.get(self.index), Some(Token::Empty(tag) | Token::Start(tag)) if tag == "undef") {
+        if matches!(self.tokens.peek()?, Some(Token::Empty(tag) | Token::Start(tag)) if *tag == "undef") {
             self.count_value()?;
             let (tag, empty) = self.next_tag()?;
-            self.text_value(&tag, empty)?;
+            self.text_value(tag, empty)?;
             visitor.visit_none()
         } else {
             visitor.visit_some(self)
@@ -515,7 +629,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer {
         if tag != "undef" {
             return Err(Error::InvalidValue("expected LLSD undefined".into()));
         }
-        self.text_value(&tag, empty)?;
+        self.text_value(tag, empty)?;
         visitor.visit_unit()
     }
     fn deserialize_unit_struct<V: Visitor<'de>>(self, _: &'static str, v: V) -> Result<V::Value> {
@@ -536,7 +650,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer {
                 if tag != "binary" {
                     return Err(Error::InvalidValue("expected LLSD binary".into()));
                 }
-                let bytes = self.parse_binary(&tag, empty)?;
+                let bytes = self.parse_binary(tag, empty)?;
                 visitor.visit_newtype_struct(BytesDeserializer::<Error>::new(&bytes))
             }
             _ => visitor.visit_newtype_struct(self),
@@ -558,10 +672,10 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer {
         self.deserialize_map(v)
     }
     fn deserialize_enum<V: Visitor<'de>>(self, name: &'static str, _: &'static [&'static str], visitor: V) -> Result<V::Value> {
-        self.skip_space();
+        self.skip_space()?;
         if name == VALUE_ENUM {
-            let variant = match self.tokens.get(self.index) {
-                Some(Token::Empty(tag) | Token::Start(tag)) => match tag.as_str() {
+            let variant = match self.tokens.peek()? {
+                Some(Token::Empty(tag) | Token::Start(tag)) => match *tag {
                     "undef" => "Undefined",
                     "boolean" => "Boolean",
                     "integer" => "Integer",
@@ -618,20 +732,20 @@ impl<'de> MapAccess<'de> for EmptyMapAccess {
     }
 }
 
-struct XmlSeqAccess<'a> {
-    de: &'a mut Deserializer,
+struct XmlSeqAccess<'a, 'input> {
+    de: &'a mut Deserializer<'input>,
     ended: bool,
     count: usize,
 }
-impl XmlSeqAccess<'_> {
+impl<'a, 'input> XmlSeqAccess<'a, 'input> {
     fn finish(&mut self, tag: &str) -> Result<()> {
         if self.ended {
             return Ok(());
         }
-        self.de.skip_space();
-        match self.de.tokens.get(self.de.index) {
-            Some(Token::End(end)) if end == tag => {
-                self.de.index += 1;
+        self.de.skip_space()?;
+        match self.de.tokens.peek()? {
+            Some(Token::End(end)) if *end == tag => {
+                self.de.tokens.take()?;
                 self.ended = true;
                 Ok(())
             }
@@ -639,12 +753,12 @@ impl XmlSeqAccess<'_> {
         }
     }
 }
-impl<'de> SeqAccess<'de> for XmlSeqAccess<'_> {
+impl<'de, 'a, 'input> SeqAccess<'de> for XmlSeqAccess<'a, 'input> {
     type Error = Error;
     fn next_element_seed<T: DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>> {
-        self.de.skip_space();
-        if matches!(self.de.tokens.get(self.de.index), Some(Token::End(tag)) if tag == "array") {
-            self.de.index += 1;
+        self.de.skip_space()?;
+        if matches!(self.de.tokens.peek()?, Some(Token::End(tag)) if *tag == "array") {
+            self.de.tokens.take()?;
             self.ended = true;
             return Ok(None);
         }
@@ -659,13 +773,13 @@ impl<'de> SeqAccess<'de> for XmlSeqAccess<'_> {
     }
 }
 
-struct XmlMapAccess<'a> {
-    de: &'a mut Deserializer,
+struct XmlMapAccess<'a, 'input> {
+    de: &'a mut Deserializer<'input>,
     ended: bool,
     expects_value: bool,
     count: usize,
 }
-impl XmlMapAccess<'_> {
+impl<'a, 'input> XmlMapAccess<'a, 'input> {
     fn finish(&mut self) -> Result<()> {
         if self.ended {
             return Ok(());
@@ -673,10 +787,10 @@ impl XmlMapAccess<'_> {
         if self.expects_value {
             return Err(Error::InvalidValue("LLSD map is missing a value".into()));
         }
-        self.de.skip_space();
-        match self.de.tokens.get(self.de.index) {
-            Some(Token::End(tag)) if tag == "map" => {
-                self.de.index += 1;
+        self.de.skip_space()?;
+        match self.de.tokens.peek()? {
+            Some(Token::End(tag)) if *tag == "map" => {
+                self.de.tokens.take()?;
                 self.ended = true;
                 Ok(())
             }
@@ -684,15 +798,15 @@ impl XmlMapAccess<'_> {
         }
     }
 }
-impl<'de> MapAccess<'de> for XmlMapAccess<'_> {
+impl<'de, 'a, 'input> MapAccess<'de> for XmlMapAccess<'a, 'input> {
     type Error = Error;
     fn next_key_seed<K: DeserializeSeed<'de>>(&mut self, seed: K) -> Result<Option<K::Value>> {
-        self.de.skip_space();
+        self.de.skip_space()?;
         if self.expects_value {
             return Err(Error::InvalidValue("LLSD map value was not read".into()));
         }
-        if matches!(self.de.tokens.get(self.de.index), Some(Token::End(tag)) if tag == "map") {
-            self.de.index += 1;
+        if matches!(self.de.tokens.peek()?, Some(Token::End(tag)) if *tag == "map") {
+            self.de.tokens.take()?;
             self.ended = true;
             return Ok(None);
         }
@@ -704,7 +818,7 @@ impl<'de> MapAccess<'de> for XmlMapAccess<'_> {
         if tag != "key" {
             return Err(Error::InvalidValue("expected LLSD map key".into()));
         }
-        let key = self.de.text_value(&tag, empty)?;
+        let key = self.de.text_value(tag, empty)?;
         if key.len() > self.de.limits.max_map_key_bytes {
             return Err(Error::LimitExceeded("map key bytes"));
         }
@@ -723,27 +837,27 @@ impl<'de> MapAccess<'de> for XmlMapAccess<'_> {
     }
 }
 
-struct XmlDynamicEnumAccess<'a> {
-    de: &'a mut Deserializer,
+struct XmlDynamicEnumAccess<'a, 'input> {
+    de: &'a mut Deserializer<'input>,
     variant: &'static str,
 }
-impl<'a, 'de> EnumAccess<'de> for XmlDynamicEnumAccess<'a> {
+impl<'a, 'input, 'de> EnumAccess<'de> for XmlDynamicEnumAccess<'a, 'input> {
     type Error = Error;
-    type Variant = XmlDynamicVariantAccess<'a>;
+    type Variant = XmlDynamicVariantAccess<'a, 'input>;
     fn variant_seed<V: DeserializeSeed<'de>>(self, seed: V) -> Result<(V::Value, Self::Variant)> {
         let variant = seed.deserialize(StringDeserializer::<Error>::new(self.variant.to_owned()))?;
         Ok((variant, XmlDynamicVariantAccess { de: self.de }))
     }
 }
 
-struct XmlSerdeEnumAccess<'a> {
-    de: &'a mut Deserializer,
+struct XmlSerdeEnumAccess<'a, 'input> {
+    de: &'a mut Deserializer<'input>,
     variant: String,
 }
 
-impl<'a, 'de> EnumAccess<'de> for XmlSerdeEnumAccess<'a> {
+impl<'a, 'input, 'de> EnumAccess<'de> for XmlSerdeEnumAccess<'a, 'input> {
     type Error = Error;
-    type Variant = XmlSerdeVariantAccess<'a>;
+    type Variant = XmlSerdeVariantAccess<'a, 'input>;
 
     fn variant_seed<V: DeserializeSeed<'de>>(self, seed: V) -> Result<(V::Value, Self::Variant)> {
         let variant = seed.deserialize(StringDeserializer::<Error>::new(self.variant))?;
@@ -751,16 +865,16 @@ impl<'a, 'de> EnumAccess<'de> for XmlSerdeEnumAccess<'a> {
     }
 }
 
-struct XmlSerdeVariantAccess<'a> {
-    de: &'a mut Deserializer,
+struct XmlSerdeVariantAccess<'a, 'input> {
+    de: &'a mut Deserializer<'input>,
 }
 
-impl XmlSerdeVariantAccess<'_> {
+impl<'a, 'input> XmlSerdeVariantAccess<'a, 'input> {
     fn finish(self) -> Result<()> {
-        self.de.skip_space();
-        match self.de.tokens.get(self.de.index) {
-            Some(Token::End(tag)) if tag == "map" => {
-                self.de.index += 1;
+        self.de.skip_space()?;
+        match self.de.tokens.peek()? {
+            Some(Token::End(tag)) if *tag == "map" => {
+                self.de.tokens.take()?;
                 Ok(())
             }
             _ => Err(Error::InvalidValue("LLSD enum map must contain exactly one entry".into())),
@@ -768,7 +882,7 @@ impl XmlSerdeVariantAccess<'_> {
     }
 }
 
-impl<'de> VariantAccess<'de> for XmlSerdeVariantAccess<'_> {
+impl<'de, 'a, 'input> VariantAccess<'de> for XmlSerdeVariantAccess<'a, 'input> {
     type Error = Error;
 
     fn unit_variant(self) -> Result<()> {
@@ -777,7 +891,7 @@ impl<'de> VariantAccess<'de> for XmlSerdeVariantAccess<'_> {
         if tag != "undef" {
             return Err(Error::InvalidValue("expected LLSD undefined".into()));
         }
-        self.de.text_value(&tag, empty)?;
+        self.de.text_value(tag, empty)?;
         self.finish()
     }
 
@@ -800,10 +914,10 @@ impl<'de> VariantAccess<'de> for XmlSerdeVariantAccess<'_> {
     }
 }
 
-struct XmlDynamicVariantAccess<'a> {
-    de: &'a mut Deserializer,
+struct XmlDynamicVariantAccess<'a, 'input> {
+    de: &'a mut Deserializer<'input>,
 }
-impl<'de> VariantAccess<'de> for XmlDynamicVariantAccess<'_> {
+impl<'de, 'a, 'input> VariantAccess<'de> for XmlDynamicVariantAccess<'a, 'input> {
     type Error = Error;
     fn unit_variant(self) -> Result<()> {
         self.de.count_value()?;
@@ -811,7 +925,7 @@ impl<'de> VariantAccess<'de> for XmlDynamicVariantAccess<'_> {
         if tag != "undef" {
             return Err(Error::InvalidValue("expected LLSD undefined".into()));
         }
-        self.de.text_value(&tag, empty).map(|_| ())
+        self.de.text_value(tag, empty).map(|_| ())
     }
     fn newtype_variant_seed<T: DeserializeSeed<'de>>(self, seed: T) -> Result<T::Value> {
         seed.deserialize(&mut *self.de)
@@ -870,5 +984,29 @@ impl<'de> Visitor<'de> for IgnoredVisitor {
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> std::result::Result<(), A::Error> {
         while map.next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?.is_some() {}
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+
+    use super::{Token, Tokens};
+    use crate::Limits;
+
+    #[test]
+    fn unescaped_text_tokens_borrow_input() {
+        let input = b"<llsd><string>ordinary text</string></llsd>";
+        let mut stream = Tokens::new(input, Limits::default()).expect("read XML");
+        let mut tokens = Vec::new();
+        while let Some(token) = stream.take().expect("read token") {
+            tokens.push(token);
+        }
+        let text = tokens.iter().find_map(|token| match token {
+            Token::Text(text) => Some(text),
+            _ => None,
+        });
+
+        assert!(matches!(text, Some(Cow::Borrowed("ordinary text"))));
     }
 }

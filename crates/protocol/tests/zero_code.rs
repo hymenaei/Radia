@@ -10,7 +10,7 @@ use protocol::{
         region_handshake::{RegionInfo1, RegionInfo2, RegionInfo3, RegionInfo4},
     },
 };
-use test_support::{lludp::vectors, parse_hex_fixture};
+use testing::{lludp::vectors, parse_hex_fixture};
 
 fn fixture(hex: &str) -> Vec<u8> {
     parse_hex_fixture(hex).expect("valid protocol fixture")

@@ -1,0 +1,483 @@
+High:1 StartPingCheck | PingID:Single PingID:U8 OldestUnacked:U32
+High:2 CompletePingCheck | PingID:Single PingID:U8
+High:3 NeighborList | NeighborBlock:Multiple(4) IP:IPADDR Port:IPPORT PublicIP:IPADDR PublicPort:IPPORT RegionID:LLUUID Name:Variable(1) SimAccess:U8
+High:4 AgentUpdate | AgentData:Single AgentID:LLUUID SessionID:LLUUID BodyRotation:LLQuaternion HeadRotation:LLQuaternion State:U8 CameraCenter:LLVector3 CameraAtAxis:LLVector3 CameraLeftAxis:LLVector3 CameraUpAxis:LLVector3 Far:F32 ControlFlags:U32 Flags:U8
+High:5 AgentAnimation | AgentData:Single AgentID:LLUUID SessionID:LLUUID | AnimationList:Variable AnimID:LLUUID StartAnim:BOOL | PhysicalAvatarEventList:Variable TypeData:Variable(1)
+High:6 AgentRequestSit | AgentData:Single AgentID:LLUUID SessionID:LLUUID | TargetObject:Single TargetID:LLUUID Offset:LLVector3
+High:7 AgentSit | AgentData:Single AgentID:LLUUID SessionID:LLUUID
+High:8 RequestImage | AgentData:Single AgentID:LLUUID SessionID:LLUUID | RequestImage:Variable Image:LLUUID DiscardLevel:S8 DownloadPriority:F32 Packet:U32 Type:U8
+High:9 ImageData | ImageID:Single ID:LLUUID Codec:U8 Size:U32 Packets:U16 | ImageData:Single Data:Variable(2)
+High:10 ImagePacket | ImageID:Single ID:LLUUID Packet:U16 | ImageData:Single Data:Variable(2)
+High:11 LayerData | LayerID:Single Type:U8 | LayerData:Single Data:Variable(2)
+High:12 ObjectUpdate | RegionData:Single RegionHandle:U64 TimeDilation:U16 | ObjectData:Variable ID:U32 State:U8 FullID:LLUUID CRC:U32 PCode:U8 Material:U8 ClickAction:U8 Scale:LLVector3 ObjectData:Variable(1) ParentID:U32 UpdateFlags:U32 PathCurve:U8 ProfileCurve:U8 PathBegin:U16 PathEnd:U16 PathScaleX:U8 PathScaleY:U8 PathShearX:U8 PathShearY:U8 PathTwist:S8 PathTwistBegin:S8 PathRadiusOffset:S8 PathTaperX:S8 PathTaperY:S8 PathRevolutions:U8 PathSkew:S8 ProfileBegin:U16 ProfileEnd:U16 ProfileHollow:U16 TextureEntry:Variable(2) TextureAnim:Variable(1) NameValue:Variable(2) Data:Variable(2) Text:Variable(1) TextColor:Fixed(4) MediaURL:Variable(1) PSBlock:Variable(1) ExtraParams:Variable(1) Sound:LLUUID OwnerID:LLUUID Gain:F32 Flags:U8 Radius:F32 JointType:U8 JointPivot:LLVector3 JointAxisOrAnchor:LLVector3
+High:13 ObjectUpdateCompressed | RegionData:Single RegionHandle:U64 TimeDilation:U16 | ObjectData:Variable UpdateFlags:U32 Data:Variable(2)
+High:14 ObjectUpdateCached | RegionData:Single RegionHandle:U64 TimeDilation:U16 | ObjectData:Variable ID:U32 CRC:U32 UpdateFlags:U32
+High:15 ImprovedTerseObjectUpdate | RegionData:Single RegionHandle:U64 TimeDilation:U16 | ObjectData:Variable Data:Variable(1) TextureEntry:Variable(2)
+High:16 KillObject | ObjectData:Variable ID:U32
+High:17 TransferPacket | TransferData:Single TransferID:LLUUID ChannelType:S32 Packet:S32 Status:S32 Data:Variable(2)
+High:18 SendXferPacket | XferID:Single ID:U64 Packet:U32 | DataPacket:Single Data:Variable(2)
+High:19 ConfirmXferPacket | XferID:Single ID:U64 Packet:U32
+High:20 AvatarAnimation | Sender:Single ID:LLUUID | AnimationList:Variable AnimID:LLUUID AnimSequenceID:S32 | AnimationSourceList:Variable ObjectID:LLUUID | PhysicalAvatarEventList:Variable TypeData:Variable(1)
+High:21 AvatarSitResponse | SitObject:Single ID:LLUUID | SitTransform:Single AutoPilot:BOOL SitPosition:LLVector3 SitRotation:LLQuaternion CameraEyeOffset:LLVector3 CameraAtOffset:LLVector3 ForceMouselook:BOOL
+High:22 CameraConstraint | CameraCollidePlane:Single Plane:LLVector4
+High:23 ParcelProperties | ParcelData:Single RequestResult:S32 SequenceID:S32 SnapSelection:BOOL SelfCount:S32 OtherCount:S32 PublicCount:S32 LocalID:S32 OwnerID:LLUUID IsGroupOwned:BOOL AuctionID:U32 ClaimDate:S32 ClaimPrice:S32 RentPrice:S32 AABBMin:LLVector3 AABBMax:LLVector3 Bitmap:Variable(2) Area:S32 Status:U8 SimWideMaxPrims:S32 SimWideTotalPrims:S32 MaxPrims:S32 TotalPrims:S32 OwnerPrims:S32 GroupPrims:S32 OtherPrims:S32 SelectedPrims:S32 ParcelPrimBonus:F32 OtherCleanTime:S32 ParcelFlags:U32 SalePrice:S32 Name:Variable(1) Desc:Variable(1) MusicURL:Variable(1) MediaURL:Variable(1) MediaID:LLUUID MediaAutoScale:U8 GroupID:LLUUID PassPrice:S32 PassHours:F32 Category:U8 AuthBuyerID:LLUUID SnapshotID:LLUUID UserLocation:LLVector3 UserLookAt:LLVector3 LandingType:U8 RegionPushOverride:BOOL RegionDenyAnonymous:BOOL RegionDenyIdentified:BOOL RegionDenyTransacted:BOOL | AgeVerificationBlock:Single RegionDenyAgeUnverified:BOOL | RegionAllowAccessBlock:Single RegionAllowAccessOverride:BOOL | ParcelEnvironmentBlock:Single ParcelEnvironmentVersion:S32 RegionAllowEnvironmentOverride:BOOL
+High:24 EdgeDataPacket | EdgeData:Single LayerType:U8 Direction:U8 LayerData:Variable(2)
+High:25 ChildAgentUpdate | AgentData:Single RegionHandle:U64 ViewerCircuitCode:U32 AgentID:LLUUID SessionID:LLUUID AgentPos:LLVector3 AgentVel:LLVector3 Center:LLVector3 Size:LLVector3 AtAxis:LLVector3 LeftAxis:LLVector3 UpAxis:LLVector3 ChangedGrid:BOOL Far:F32 Aspect:F32 Throttles:Variable(1) LocomotionState:U32 HeadRotation:LLQuaternion BodyRotation:LLQuaternion ControlFlags:U32 EnergyLevel:F32 GodLevel:U8 AlwaysRun:BOOL PreyAgent:LLUUID AgentAccess:U8 AgentTextures:Variable(2) ActiveGroupID:LLUUID | GroupData:Variable GroupID:LLUUID GroupPowers:U64 AcceptNotices:BOOL | AnimationData:Variable Animation:LLUUID ObjectID:LLUUID | GranterBlock:Variable GranterID:LLUUID | NVPairData:Variable NVPairs:Variable(2) | VisualParam:Variable ParamValue:U8 | AgentAccess:Variable AgentLegacyAccess:U8 AgentMaxAccess:U8 | AgentInfo:Variable Flags:U32 | AgentInventoryHost:Variable InventoryHost:Variable(1)
+High:26 ChildAgentAlive | AgentData:Single RegionHandle:U64 ViewerCircuitCode:U32 AgentID:LLUUID SessionID:LLUUID
+High:27 ChildAgentPositionUpdate | AgentData:Single RegionHandle:U64 ViewerCircuitCode:U32 AgentID:LLUUID SessionID:LLUUID AgentPos:LLVector3 AgentVel:LLVector3 Center:LLVector3 Size:LLVector3 AtAxis:LLVector3 LeftAxis:LLVector3 UpAxis:LLVector3 ChangedGrid:BOOL
+High:28 AtomicPassObject | TaskData:Single TaskID:LLUUID AttachmentNeedsSave:BOOL
+High:29 SoundTrigger | SoundData:Single SoundID:LLUUID OwnerID:LLUUID ObjectID:LLUUID ParentID:LLUUID Handle:U64 Position:LLVector3 Gain:F32
+High:30 ObjectAnimation | Sender:Single ID:LLUUID | AnimationList:Variable AnimID:LLUUID AnimSequenceID:S32
+High:31 GenericStreamingMessage | MethodData:Single Method:U16 | DataBlock:Single Data:Variable(2)
+High:32 GameControlInput | AgentData:Single AgentID:LLUUID SessionID:LLUUID | AxisData:Variable Index:U8 Value:S16 | ButtonData:Variable Data:Variable(1)
+Medium:1 ObjectAdd | AgentData:Single AgentID:LLUUID SessionID:LLUUID GroupID:LLUUID | ObjectData:Single PCode:U8 Material:U8 AddFlags:U32 PathCurve:U8 ProfileCurve:U8 PathBegin:U16 PathEnd:U16 PathScaleX:U8 PathScaleY:U8 PathShearX:U8 PathShearY:U8 PathTwist:S8 PathTwistBegin:S8 PathRadiusOffset:S8 PathTaperX:S8 PathTaperY:S8 PathRevolutions:U8 PathSkew:S8 ProfileBegin:U16 ProfileEnd:U16 ProfileHollow:U16 BypassRaycast:U8 RayStart:LLVector3 RayEnd:LLVector3 RayTargetID:LLUUID RayEndIsIntersection:U8 Scale:LLVector3 Rotation:LLQuaternion State:U8
+Medium:2 MultipleObjectUpdate | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Variable ObjectLocalID:U32 Type:U8 Data:Variable(1)
+Medium:3 RequestMultipleObjects | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Variable CacheMissType:U8 ID:U32
+Medium:4 ObjectPosition | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Variable ObjectLocalID:U32 Position:LLVector3
+Medium:5 RequestObjectPropertiesFamily | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Single RequestFlags:U32 ObjectID:LLUUID
+Medium:6 CoarseLocationUpdate | Location:Variable X:U8 Y:U8 Z:U8 | Index:Single You:S16 Prey:S16 | AgentData:Variable AgentID:LLUUID
+Medium:7 CrossedRegion | AgentData:Single AgentID:LLUUID SessionID:LLUUID | RegionData:Single SimIP:IPADDR SimPort:IPPORT RegionHandle:U64 SeedCapability:Variable(2) | Info:Single Position:LLVector3 LookAt:LLVector3
+Medium:8 ConfirmEnableSimulator | AgentData:Single AgentID:LLUUID SessionID:LLUUID
+Medium:9 ObjectProperties | ObjectData:Variable ObjectID:LLUUID CreatorID:LLUUID OwnerID:LLUUID GroupID:LLUUID CreationDate:U64 BaseMask:U32 OwnerMask:U32 GroupMask:U32 EveryoneMask:U32 NextOwnerMask:U32 OwnershipCost:S32 SaleType:U8 SalePrice:S32 AggregatePerms:U8 AggregatePermTextures:U8 AggregatePermTexturesOwner:U8 Category:U32 InventorySerial:S16 ItemID:LLUUID FolderID:LLUUID FromTaskID:LLUUID LastOwnerID:LLUUID Name:Variable(1) Description:Variable(1) TouchName:Variable(1) SitName:Variable(1) TextureID:Variable(1)
+Medium:10 ObjectPropertiesFamily | ObjectData:Single RequestFlags:U32 ObjectID:LLUUID OwnerID:LLUUID GroupID:LLUUID BaseMask:U32 OwnerMask:U32 GroupMask:U32 EveryoneMask:U32 NextOwnerMask:U32 OwnershipCost:S32 SaleType:U8 SalePrice:S32 Category:U32 LastOwnerID:LLUUID Name:Variable(1) Description:Variable(1)
+Medium:11 ParcelPropertiesRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ParcelData:Single SequenceID:S32 West:F32 South:F32 East:F32 North:F32 SnapSelection:BOOL
+Medium:12 SimStatus | SimStatus:Single CanAcceptAgents:BOOL CanAcceptTasks:BOOL | SimFlags:Single Flags:U64
+Medium:13 AttachedSound | DataBlock:Single SoundID:LLUUID ObjectID:LLUUID OwnerID:LLUUID Gain:F32 Flags:U8
+Medium:14 AttachedSoundGainChange | DataBlock:Single ObjectID:LLUUID Gain:F32
+Medium:15 PreloadSound | DataBlock:Variable ObjectID:LLUUID OwnerID:LLUUID SoundID:LLUUID
+Medium:16 InternalScriptMail | DataBlock:Single From:Variable(1) To:LLUUID Subject:Variable(1) Body:Variable(2)
+Medium:17 ViewerEffect | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Effect:Variable ID:LLUUID AgentID:LLUUID Type:U8 Duration:F32 Color:Fixed(4) TypeData:Variable(1)
+Low:1 TestMessage | TestBlock1:Single Test1:U32 | NeighborBlock:Multiple(4) Test0:U32 Test1:U32 Test2:U32
+Low:2 AddCircuitCode | CircuitCode:Single Code:U32 SessionID:LLUUID AgentID:LLUUID
+Low:3 UseCircuitCode | CircuitCode:Single Code:U32 SessionID:LLUUID ID:LLUUID
+Low:4 AvatarTextureUpdate | AgentData:Single AgentID:LLUUID TexturesChanged:BOOL | WearableData:Variable CacheID:LLUUID TextureIndex:U8 HostName:Variable(1) | TextureData:Variable TextureID:LLUUID
+Low:5 SimulatorMapUpdate | MapData:Single Flags:U32
+Low:6 SimulatorSetMap | MapData:Single RegionHandle:U64 Type:S32 MapImage:LLUUID
+Low:7 SubscribeLoad
+Low:8 UnsubscribeLoad
+Low:9 SimulatorReady | SimulatorBlock:Single SimName:Variable(1) SimAccess:U8 RegionFlags:U32 RegionID:LLUUID EstateID:U32 ParentEstateID:U32 | TelehubBlock:Single HasTelehub:BOOL TelehubPos:LLVector3
+Low:10 TelehubInfo | TelehubBlock:Single ObjectID:LLUUID ObjectName:Variable(1) TelehubPos:LLVector3 TelehubRot:LLQuaternion | SpawnPointBlock:Variable SpawnPointPos:LLVector3
+Low:11 SimulatorPresentAtLocation | SimulatorPublicHostBlock:Single Port:IPPORT SimulatorIP:IPADDR GridX:U32 GridY:U32 | NeighborBlock:Multiple(4) IP:IPADDR Port:IPPORT | SimulatorBlock:Single SimName:Variable(1) SimAccess:U8 RegionFlags:U32 RegionID:LLUUID EstateID:U32 ParentEstateID:U32 | TelehubBlock:Variable HasTelehub:BOOL TelehubPos:LLVector3
+Low:12 SimulatorLoad | SimulatorLoad:Single TimeDilation:F32 AgentCount:S32 CanAcceptAgents:BOOL | AgentList:Variable CircuitCode:U32 X:U8 Y:U8
+Low:13 SimulatorShutdownRequest
+Low:14 RegionPresenceRequestByRegionID | RegionData:Variable RegionID:LLUUID
+Low:15 RegionPresenceRequestByHandle | RegionData:Variable RegionHandle:U64
+Low:16 RegionPresenceResponse | RegionData:Variable RegionID:LLUUID RegionHandle:U64 InternalRegionIP:IPADDR ExternalRegionIP:IPADDR RegionPort:IPPORT ValidUntil:F64 Message:Variable(1)
+Low:17 UpdateSimulator | SimulatorInfo:Single RegionID:LLUUID SimName:Variable(1) EstateID:U32 SimAccess:U8
+Low:18 LogDwellTime | DwellInfo:Single AgentID:LLUUID SessionID:LLUUID Duration:F32 SimName:Variable(1) RegionX:U32 RegionY:U32 AvgAgentsInView:U8 AvgViewerFPS:U8
+Low:19 FeatureDisabled | FailureInfo:Single ErrorMessage:Variable(1) AgentID:LLUUID TransactionID:LLUUID
+Low:20 LogFailedMoneyTransaction | TransactionData:Single TransactionID:LLUUID TransactionTime:U32 TransactionType:S32 SourceID:LLUUID DestID:LLUUID Flags:U8 Amount:S32 SimulatorIP:IPADDR GridX:U32 GridY:U32 FailureType:U8
+Low:21 UserReportInternal | ReportData:Single ReportType:U8 Category:U8 ReporterID:LLUUID ViewerPosition:LLVector3 AgentPosition:LLVector3 ScreenshotID:LLUUID ObjectID:LLUUID OwnerID:LLUUID LastOwnerID:LLUUID CreatorID:LLUUID RegionID:LLUUID AbuserID:LLUUID AbuseRegionName:Variable(1) AbuseRegionID:LLUUID Summary:Variable(1) Details:Variable(2) VersionString:Variable(1)
+Low:22 SetSimStatusInDatabase | Data:Single RegionID:LLUUID HostName:Variable(1) X:S32 Y:S32 PID:S32 AgentCount:S32 TimeToLive:S32 Status:Variable(1)
+Low:23 SetSimPresenceInDatabase | SimData:Single RegionID:LLUUID HostName:Variable(1) GridX:U32 GridY:U32 PID:S32 AgentCount:S32 TimeToLive:S32 Status:Variable(1)
+Low:24 EconomyDataRequest
+Low:25 EconomyData | Info:Single ObjectCapacity:S32 ObjectCount:S32 PriceEnergyUnit:S32 PriceObjectClaim:S32 PricePublicObjectDecay:S32 PricePublicObjectDelete:S32 PriceParcelClaim:S32 PriceParcelClaimFactor:F32 PriceUpload:S32 PriceRentLight:S32 TeleportMinPrice:S32 TeleportPriceExponent:F32 EnergyEfficiency:F32 PriceObjectRent:F32 PriceObjectScaleFactor:F32 PriceParcelRent:S32 PriceGroupCreate:S32
+Low:26 AvatarPickerRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID QueryID:LLUUID | Data:Single Name:Variable(1)
+Low:27 AvatarPickerRequestBackend | AgentData:Single AgentID:LLUUID SessionID:LLUUID QueryID:LLUUID GodLevel:U8 | Data:Single Name:Variable(1)
+Low:28 AvatarPickerReply | AgentData:Single AgentID:LLUUID QueryID:LLUUID | Data:Variable AvatarID:LLUUID FirstName:Variable(1) LastName:Variable(1)
+Low:29 PlacesQuery | AgentData:Single AgentID:LLUUID SessionID:LLUUID QueryID:LLUUID | TransactionData:Single TransactionID:LLUUID | QueryData:Single QueryText:Variable(1) QueryFlags:U32 Category:S8 SimName:Variable(1)
+Low:30 PlacesReply | AgentData:Single AgentID:LLUUID QueryID:LLUUID | TransactionData:Single TransactionID:LLUUID | QueryData:Variable OwnerID:LLUUID Name:Variable(1) Desc:Variable(1) ActualArea:S32 BillableArea:S32 Flags:U8 GlobalX:F32 GlobalY:F32 GlobalZ:F32 SimName:Variable(1) SnapshotID:LLUUID Dwell:F32 Price:S32
+Low:31 DirFindQuery | AgentData:Single AgentID:LLUUID SessionID:LLUUID | QueryData:Single QueryID:LLUUID QueryText:Variable(1) QueryFlags:U32 QueryStart:S32
+Low:32 DirFindQueryBackend | AgentData:Single AgentID:LLUUID | QueryData:Single QueryID:LLUUID QueryText:Variable(1) QueryFlags:U32 QueryStart:S32 EstateID:U32 Godlike:BOOL
+Low:33 DirPlacesQuery | AgentData:Single AgentID:LLUUID SessionID:LLUUID | QueryData:Single QueryID:LLUUID QueryText:Variable(1) QueryFlags:U32 Category:S8 SimName:Variable(1) QueryStart:S32
+Low:34 DirPlacesQueryBackend | AgentData:Single AgentID:LLUUID | QueryData:Single QueryID:LLUUID QueryText:Variable(1) QueryFlags:U32 Category:S8 SimName:Variable(1) EstateID:U32 Godlike:BOOL QueryStart:S32
+Low:35 DirPlacesReply | AgentData:Single AgentID:LLUUID | QueryData:Variable QueryID:LLUUID | QueryReplies:Variable ParcelID:LLUUID Name:Variable(1) ForSale:BOOL Auction:BOOL Dwell:F32 | StatusData:Variable Status:U32
+Low:36 DirPeopleReply | AgentData:Single AgentID:LLUUID | QueryData:Single QueryID:LLUUID | QueryReplies:Variable AgentID:LLUUID FirstName:Variable(1) LastName:Variable(1) Group:Variable(1) Online:BOOL Reputation:S32
+Low:37 DirEventsReply | AgentData:Single AgentID:LLUUID | QueryData:Single QueryID:LLUUID | QueryReplies:Variable OwnerID:LLUUID Name:Variable(1) EventID:U32 Date:Variable(1) UnixTime:U32 EventFlags:U32 | StatusData:Variable Status:U32
+Low:38 DirGroupsReply | AgentData:Single AgentID:LLUUID | QueryData:Single QueryID:LLUUID | QueryReplies:Variable GroupID:LLUUID GroupName:Variable(1) Members:S32 SearchOrder:F32
+Low:39 DirClassifiedQuery | AgentData:Single AgentID:LLUUID SessionID:LLUUID | QueryData:Single QueryID:LLUUID QueryText:Variable(1) QueryFlags:U32 Category:U32 QueryStart:S32
+Low:40 DirClassifiedQueryBackend | AgentData:Single AgentID:LLUUID | QueryData:Single QueryID:LLUUID QueryText:Variable(1) QueryFlags:U32 Category:U32 EstateID:U32 Godlike:BOOL QueryStart:S32
+Low:41 DirClassifiedReply | AgentData:Single AgentID:LLUUID | QueryData:Single QueryID:LLUUID | QueryReplies:Variable ClassifiedID:LLUUID Name:Variable(1) ClassifiedFlags:U8 CreationDate:U32 ExpirationDate:U32 PriceForListing:S32 | StatusData:Variable Status:U32
+Low:42 AvatarClassifiedReply | AgentData:Single AgentID:LLUUID TargetID:LLUUID | Data:Variable ClassifiedID:LLUUID Name:Variable(1)
+Low:43 ClassifiedInfoRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single ClassifiedID:LLUUID
+Low:44 ClassifiedInfoReply | AgentData:Single AgentID:LLUUID | Data:Single ClassifiedID:LLUUID CreatorID:LLUUID CreationDate:U32 ExpirationDate:U32 Category:U32 Name:Variable(1) Desc:Variable(2) ParcelID:LLUUID ParentEstate:U32 SnapshotID:LLUUID SimName:Variable(1) PosGlobal:LLVector3d ParcelName:Variable(1) ClassifiedFlags:U8 PriceForListing:S32
+Low:45 ClassifiedInfoUpdate | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single ClassifiedID:LLUUID Category:U32 Name:Variable(1) Desc:Variable(2) ParcelID:LLUUID ParentEstate:U32 SnapshotID:LLUUID PosGlobal:LLVector3d ClassifiedFlags:U8 PriceForListing:S32
+Low:46 ClassifiedDelete | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single ClassifiedID:LLUUID
+Low:47 ClassifiedGodDelete | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single ClassifiedID:LLUUID QueryID:LLUUID
+Low:48 DirLandQuery | AgentData:Single AgentID:LLUUID SessionID:LLUUID | QueryData:Single QueryID:LLUUID QueryFlags:U32 SearchType:U32 Price:S32 Area:S32 QueryStart:S32
+Low:49 DirLandQueryBackend | AgentData:Single AgentID:LLUUID | QueryData:Single QueryID:LLUUID QueryFlags:U32 SearchType:U32 Price:S32 Area:S32 QueryStart:S32 EstateID:U32 Godlike:BOOL
+Low:50 DirLandReply | AgentData:Single AgentID:LLUUID | QueryData:Single QueryID:LLUUID | QueryReplies:Variable ParcelID:LLUUID Name:Variable(1) Auction:BOOL ForSale:BOOL SalePrice:S32 ActualArea:S32
+Low:51 DirPopularQuery | AgentData:Single AgentID:LLUUID SessionID:LLUUID | QueryData:Single QueryID:LLUUID QueryFlags:U32
+Low:52 DirPopularQueryBackend | AgentData:Single AgentID:LLUUID | QueryData:Single QueryID:LLUUID QueryFlags:U32 EstateID:U32 Godlike:BOOL
+Low:53 DirPopularReply | AgentData:Single AgentID:LLUUID | QueryData:Single QueryID:LLUUID | QueryReplies:Variable ParcelID:LLUUID Name:Variable(1) Dwell:F32
+Low:54 ParcelInfoRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single ParcelID:LLUUID
+Low:55 ParcelInfoReply | AgentData:Single AgentID:LLUUID | Data:Single ParcelID:LLUUID OwnerID:LLUUID Name:Variable(1) Desc:Variable(1) ActualArea:S32 BillableArea:S32 Flags:U8 GlobalX:F32 GlobalY:F32 GlobalZ:F32 SimName:Variable(1) SnapshotID:LLUUID Dwell:F32 SalePrice:S32 AuctionID:S32
+Low:56 ParcelObjectOwnersRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ParcelData:Single LocalID:S32
+Low:57 ParcelObjectOwnersReply | Data:Variable OwnerID:LLUUID IsGroupOwned:BOOL Count:S32 OnlineStatus:BOOL
+Low:58 GroupNoticesListRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single GroupID:LLUUID
+Low:59 GroupNoticesListReply | AgentData:Single AgentID:LLUUID GroupID:LLUUID | Data:Variable NoticeID:LLUUID Timestamp:U32 FromName:Variable(2) Subject:Variable(2) HasAttachment:BOOL AssetType:U8
+Low:60 GroupNoticeRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single GroupNoticeID:LLUUID
+Low:61 GroupNoticeAdd | AgentData:Single AgentID:LLUUID | MessageBlock:Single ToGroupID:LLUUID ID:LLUUID Dialog:U8 FromAgentName:Variable(1) Message:Variable(2) BinaryBucket:Variable(2)
+Low:62 TeleportRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Info:Single RegionID:LLUUID Position:LLVector3 LookAt:LLVector3
+Low:63 TeleportLocationRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Info:Single RegionHandle:U64 Position:LLVector3 LookAt:LLVector3
+Low:64 TeleportLocal | Info:Single AgentID:LLUUID LocationID:U32 Position:LLVector3 LookAt:LLVector3 TeleportFlags:U32
+Low:65 TeleportLandmarkRequest | Info:Single AgentID:LLUUID SessionID:LLUUID LandmarkID:LLUUID
+Low:66 TeleportProgress | AgentData:Single AgentID:LLUUID | Info:Single TeleportFlags:U32 Message:Variable(1)
+Low:67 DataHomeLocationRequest | Info:Single AgentID:LLUUID KickedFromEstateID:U32 | AgentInfo:Single AgentEffectiveMaturity:U32
+Low:68 DataHomeLocationReply | Info:Single AgentID:LLUUID RegionHandle:U64 Position:LLVector3 LookAt:LLVector3
+Low:69 TeleportFinish | Info:Single AgentID:LLUUID LocationID:U32 SimIP:IPADDR SimPort:IPPORT RegionHandle:U64 SeedCapability:Variable(2) SimAccess:U8 TeleportFlags:U32
+Low:70 StartLure | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Info:Single LureType:U8 Message:Variable(1) | TargetData:Variable TargetID:LLUUID
+Low:71 TeleportLureRequest | Info:Single AgentID:LLUUID SessionID:LLUUID LureID:LLUUID TeleportFlags:U32
+Low:72 TeleportCancel | Info:Single AgentID:LLUUID SessionID:LLUUID
+Low:73 TeleportStart | Info:Single TeleportFlags:U32
+Low:74 TeleportFailed | Info:Single AgentID:LLUUID Reason:Variable(1) | AlertInfo:Variable Message:Variable(1) ExtraParams:Variable(1)
+Low:75 Undo | AgentData:Single AgentID:LLUUID SessionID:LLUUID GroupID:LLUUID | ObjectData:Variable ObjectID:LLUUID
+Low:76 Redo | AgentData:Single AgentID:LLUUID SessionID:LLUUID GroupID:LLUUID | ObjectData:Variable ObjectID:LLUUID
+Low:77 UndoLand | AgentData:Single AgentID:LLUUID SessionID:LLUUID
+Low:78 AgentPause | AgentData:Single AgentID:LLUUID SessionID:LLUUID SerialNum:U32
+Low:79 AgentResume | AgentData:Single AgentID:LLUUID SessionID:LLUUID SerialNum:U32
+Low:80 ChatFromViewer | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ChatData:Single Message:Variable(2) Type:U8 Channel:S32
+Low:81 AgentThrottle | AgentData:Single AgentID:LLUUID SessionID:LLUUID CircuitCode:U32 | Throttle:Single GenCounter:U32 Throttles:Variable(1)
+Low:82 AgentFOV | AgentData:Single AgentID:LLUUID SessionID:LLUUID CircuitCode:U32 | FOVBlock:Single GenCounter:U32 VerticalAngle:F32
+Low:83 AgentHeightWidth | AgentData:Single AgentID:LLUUID SessionID:LLUUID CircuitCode:U32 | HeightWidthBlock:Single GenCounter:U32 Height:U16 Width:U16
+Low:84 AgentSetAppearance | AgentData:Single AgentID:LLUUID SessionID:LLUUID SerialNum:U32 Size:LLVector3 | WearableData:Variable CacheID:LLUUID TextureIndex:U8 | ObjectData:Single TextureEntry:Variable(2) | VisualParam:Variable ParamValue:U8
+Low:85 AgentQuitCopy | AgentData:Single AgentID:LLUUID SessionID:LLUUID | FuseBlock:Single ViewerCircuitCode:U32
+Low:86 ImageNotInDatabase | ImageID:Single ID:LLUUID
+Low:87 RebakeAvatarTextures | TextureData:Single TextureID:LLUUID
+Low:88 SetAlwaysRun | AgentData:Single AgentID:LLUUID SessionID:LLUUID AlwaysRun:BOOL
+Low:89 ObjectDelete | AgentData:Single AgentID:LLUUID SessionID:LLUUID Force:BOOL | ObjectData:Variable ObjectLocalID:U32
+Low:90 ObjectDuplicate | AgentData:Single AgentID:LLUUID SessionID:LLUUID GroupID:LLUUID | SharedData:Single Offset:LLVector3 DuplicateFlags:U32 | ObjectData:Variable ObjectLocalID:U32
+Low:91 ObjectDuplicateOnRay | AgentData:Single AgentID:LLUUID SessionID:LLUUID GroupID:LLUUID RayStart:LLVector3 RayEnd:LLVector3 BypassRaycast:BOOL RayEndIsIntersection:BOOL CopyCenters:BOOL CopyRotates:BOOL RayTargetID:LLUUID DuplicateFlags:U32 | ObjectData:Variable ObjectLocalID:U32
+Low:92 ObjectScale | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Variable ObjectLocalID:U32 Scale:LLVector3
+Low:93 ObjectRotation | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Variable ObjectLocalID:U32 Rotation:LLQuaternion
+Low:94 ObjectFlagUpdate | AgentData:Single AgentID:LLUUID SessionID:LLUUID ObjectLocalID:U32 UsePhysics:BOOL IsTemporary:BOOL IsPhantom:BOOL CastsShadows:BOOL | ExtraPhysics:Variable PhysicsShapeType:U8 Density:F32 Friction:F32 Restitution:F32 GravityMultiplier:F32
+Low:95 ObjectClickAction | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Variable ObjectLocalID:U32 ClickAction:U8
+Low:96 ObjectImage | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Variable ObjectLocalID:U32 MediaURL:Variable(1) TextureEntry:Variable(2)
+Low:97 ObjectMaterial | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Variable ObjectLocalID:U32 Material:U8
+Low:98 ObjectShape | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Variable ObjectLocalID:U32 PathCurve:U8 ProfileCurve:U8 PathBegin:U16 PathEnd:U16 PathScaleX:U8 PathScaleY:U8 PathShearX:U8 PathShearY:U8 PathTwist:S8 PathTwistBegin:S8 PathRadiusOffset:S8 PathTaperX:S8 PathTaperY:S8 PathRevolutions:U8 PathSkew:S8 ProfileBegin:U16 ProfileEnd:U16 ProfileHollow:U16
+Low:99 ObjectExtraParams | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Variable ObjectLocalID:U32 ParamType:U16 ParamInUse:BOOL ParamSize:U32 ParamData:Variable(1)
+Low:100 ObjectOwner | AgentData:Single AgentID:LLUUID SessionID:LLUUID | HeaderData:Single Override:BOOL OwnerID:LLUUID GroupID:LLUUID | ObjectData:Variable ObjectLocalID:U32
+Low:101 ObjectGroup | AgentData:Single AgentID:LLUUID SessionID:LLUUID GroupID:LLUUID | ObjectData:Variable ObjectLocalID:U32
+Low:102 ObjectBuy | AgentData:Single AgentID:LLUUID SessionID:LLUUID GroupID:LLUUID CategoryID:LLUUID | ObjectData:Variable ObjectLocalID:U32 SaleType:U8 SalePrice:S32
+Low:103 BuyObjectInventory | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single ObjectID:LLUUID ItemID:LLUUID FolderID:LLUUID
+Low:104 DerezContainer | Data:Single ObjectID:LLUUID Delete:BOOL
+Low:105 ObjectPermissions | AgentData:Single AgentID:LLUUID SessionID:LLUUID | HeaderData:Single Override:BOOL | ObjectData:Variable ObjectLocalID:U32 Field:U8 Set:U8 Mask:U32
+Low:106 ObjectSaleInfo | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Variable LocalID:U32 SaleType:U8 SalePrice:S32
+Low:107 ObjectName | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Variable LocalID:U32 Name:Variable(1)
+Low:108 ObjectDescription | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Variable LocalID:U32 Description:Variable(1)
+Low:109 ObjectCategory | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Variable LocalID:U32 Category:U32
+Low:110 ObjectSelect | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Variable ObjectLocalID:U32
+Low:111 ObjectDeselect | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Variable ObjectLocalID:U32
+Low:112 ObjectAttach | AgentData:Single AgentID:LLUUID SessionID:LLUUID AttachmentPoint:U8 | ObjectData:Variable ObjectLocalID:U32 Rotation:LLQuaternion
+Low:113 ObjectDetach | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Variable ObjectLocalID:U32
+Low:114 ObjectDrop | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Variable ObjectLocalID:U32
+Low:115 ObjectLink | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Variable ObjectLocalID:U32
+Low:116 ObjectDelink | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Variable ObjectLocalID:U32
+Low:117 ObjectGrab | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Single LocalID:U32 GrabOffset:LLVector3 | SurfaceInfo:Variable UVCoord:LLVector3 STCoord:LLVector3 FaceIndex:S32 Position:LLVector3 Normal:LLVector3 Binormal:LLVector3
+Low:118 ObjectGrabUpdate | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Single ObjectID:LLUUID GrabOffsetInitial:LLVector3 GrabPosition:LLVector3 TimeSinceLast:U32 | SurfaceInfo:Variable UVCoord:LLVector3 STCoord:LLVector3 FaceIndex:S32 Position:LLVector3 Normal:LLVector3 Binormal:LLVector3
+Low:119 ObjectDeGrab | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Single LocalID:U32 | SurfaceInfo:Variable UVCoord:LLVector3 STCoord:LLVector3 FaceIndex:S32 Position:LLVector3 Normal:LLVector3 Binormal:LLVector3
+Low:120 ObjectSpinStart | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Single ObjectID:LLUUID
+Low:121 ObjectSpinUpdate | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Single ObjectID:LLUUID Rotation:LLQuaternion
+Low:122 ObjectSpinStop | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Single ObjectID:LLUUID
+Low:123 ObjectExportSelected | AgentData:Single AgentID:LLUUID RequestID:LLUUID VolumeDetail:S16 | ObjectData:Variable ObjectID:LLUUID
+Low:124 ModifyLand | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ModifyBlock:Single Action:U8 BrushSize:U8 Seconds:F32 Height:F32 | ParcelData:Variable LocalID:S32 West:F32 South:F32 East:F32 North:F32 | ModifyBlockExtended:Variable BrushSize:F32
+Low:125 VelocityInterpolateOn | AgentData:Single AgentID:LLUUID SessionID:LLUUID
+Low:126 VelocityInterpolateOff | AgentData:Single AgentID:LLUUID SessionID:LLUUID
+Low:127 StateSave | AgentData:Single AgentID:LLUUID SessionID:LLUUID | DataBlock:Single Filename:Variable(1)
+Low:128 ReportAutosaveCrash | AutosaveData:Single PID:S32 Status:S32
+Low:129 SimWideDeletes | AgentData:Single AgentID:LLUUID SessionID:LLUUID | DataBlock:Single TargetID:LLUUID Flags:U32
+Low:130 TrackAgent | AgentData:Single AgentID:LLUUID SessionID:LLUUID | TargetData:Single PreyID:LLUUID
+Low:131 ViewerStats | AgentData:Single AgentID:LLUUID SessionID:LLUUID IP:IPADDR StartTime:U32 RunTime:F32 SimFPS:F32 FPS:F32 AgentsInView:U8 Ping:F32 MetersTraveled:F64 RegionsVisited:S32 SysRAM:U32 SysOS:Variable(1) SysCPU:Variable(1) SysGPU:Variable(1) | DownloadTotals:Single World:U32 Objects:U32 Textures:U32 | NetStats:Multiple(2) Bytes:U32 Packets:U32 Compressed:U32 Savings:U32 | FailStats:Single SendPacket:U32 Dropped:U32 Resent:U32 FailedResends:U32 OffCircuit:U32 Invalid:U32 | MiscStats:Variable Type:U32 Value:F64
+Low:132 ScriptAnswerYes | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single TaskID:LLUUID ItemID:LLUUID Questions:S32
+Low:133 UserReport | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ReportData:Single ReportType:U8 Category:U8 Position:LLVector3 CheckFlags:U8 ScreenshotID:LLUUID ObjectID:LLUUID AbuserID:LLUUID AbuseRegionName:Variable(1) AbuseRegionID:LLUUID Summary:Variable(1) Details:Variable(2) VersionString:Variable(1)
+Low:134 AlertMessage | AlertData:Single Message:Variable(1) | AlertInfo:Variable Message:Variable(1) ExtraParams:Variable(1) | AgentInfo:Variable AgentID:LLUUID
+Low:135 AgentAlertMessage | AgentData:Single AgentID:LLUUID | AlertData:Single Modal:BOOL Message:Variable(1)
+Low:136 MeanCollisionAlert | MeanCollision:Variable Victim:LLUUID Perp:LLUUID Time:U32 Mag:F32 Type:U8
+Low:137 ViewerFrozenMessage | FrozenData:Single Data:BOOL
+Low:138 HealthMessage | HealthData:Single Health:F32
+Low:139 ChatFromSimulator | ChatData:Single FromName:Variable(1) SourceID:LLUUID OwnerID:LLUUID SourceType:U8 ChatType:U8 Audible:U8 Position:LLVector3 Message:Variable(2)
+Low:140 SimStats | Region:Single RegionX:U32 RegionY:U32 RegionFlags:U32 ObjectCapacity:U32 | Stat:Variable StatID:U32 StatValue:F32 | PidStat:Single PID:S32 | RegionInfo:Variable RegionFlagsExtended:U64
+Low:141 RequestRegionInfo | AgentData:Single AgentID:LLUUID SessionID:LLUUID
+Low:142 RegionInfo | AgentData:Single AgentID:LLUUID SessionID:LLUUID | RegionInfo:Single SimName:Variable(1) EstateID:U32 ParentEstateID:U32 RegionFlags:U32 SimAccess:U8 MaxAgents:U8 BillableFactor:F32 ObjectBonusFactor:F32 WaterHeight:F32 TerrainRaiseLimit:F32 TerrainLowerLimit:F32 PricePerMeter:S32 RedirectGridX:S32 RedirectGridY:S32 UseEstateSun:BOOL SunHour:F32 | RegionInfo2:Single ProductSKU:Variable(1) ProductName:Variable(1) MaxAgents32:U32 HardMaxAgents:U32 HardMaxObjects:U32 | RegionInfo3:Variable RegionFlagsExtended:U64 | RegionInfo5:Variable ChatWhisperRange:F32 ChatNormalRange:F32 ChatShoutRange:F32 ChatWhisperOffset:F32 ChatNormalOffset:F32 ChatShoutOffset:F32 ChatFlags:U32 | CombatSettings:Variable CombatFlags:U32 OnDeath:U8 DamageThrottle:F32 RegenerationRate:F32 InvulnerabilyTime:F32 DamageLimit:F32
+Low:143 GodUpdateRegionInfo | AgentData:Single AgentID:LLUUID SessionID:LLUUID | RegionInfo:Single SimName:Variable(1) EstateID:U32 ParentEstateID:U32 RegionFlags:U32 BillableFactor:F32 PricePerMeter:S32 RedirectGridX:S32 RedirectGridY:S32 | RegionInfo2:Variable RegionFlagsExtended:U64
+Low:144 NearestLandingRegionRequest | RequestingRegionData:Single RegionHandle:U64
+Low:145 NearestLandingRegionReply | LandingRegionData:Single RegionHandle:U64
+Low:146 NearestLandingRegionUpdated | RegionData:Single RegionHandle:U64
+Low:147 TeleportLandingStatusChanged | RegionData:Single RegionHandle:U64
+Low:148 RegionHandshake | RegionInfo:Single RegionFlags:U32 SimAccess:U8 SimName:Variable(1) SimOwner:LLUUID IsEstateManager:BOOL WaterHeight:F32 BillableFactor:F32 CacheID:LLUUID TerrainBase0:LLUUID TerrainBase1:LLUUID TerrainBase2:LLUUID TerrainBase3:LLUUID TerrainDetail0:LLUUID TerrainDetail1:LLUUID TerrainDetail2:LLUUID TerrainDetail3:LLUUID TerrainStartHeight00:F32 TerrainStartHeight01:F32 TerrainStartHeight10:F32 TerrainStartHeight11:F32 TerrainHeightRange00:F32 TerrainHeightRange01:F32 TerrainHeightRange10:F32 TerrainHeightRange11:F32 | RegionInfo2:Single RegionID:LLUUID | RegionInfo3:Single CPUClassID:S32 CPURatio:S32 ColoName:Variable(1) ProductSKU:Variable(1) ProductName:Variable(1) | RegionInfo4:Variable RegionFlagsExtended:U64 RegionProtocols:U64
+Low:149 RegionHandshakeReply | AgentData:Single AgentID:LLUUID SessionID:LLUUID | RegionInfo:Single Flags:U32
+Low:150 SimulatorViewerTimeMessage | TimeInfo:Single UsecSinceStart:U64 SecPerDay:U32 SecPerYear:U32 SunDirection:LLVector3 SunPhase:F32 SunAngVelocity:LLVector3
+Low:151 EnableSimulator | SimulatorInfo:Single Handle:U64 IP:IPADDR Port:IPPORT
+Low:152 DisableSimulator
+Low:153 TransferRequest | TransferInfo:Single TransferID:LLUUID ChannelType:S32 SourceType:S32 Priority:F32 Params:Variable(2)
+Low:154 TransferInfo | TransferInfo:Single TransferID:LLUUID ChannelType:S32 TargetType:S32 Status:S32 Size:S32 Params:Variable(2)
+Low:155 TransferAbort | TransferInfo:Single TransferID:LLUUID ChannelType:S32
+Low:156 RequestXfer | XferID:Single ID:U64 Filename:Variable(1) FilePath:U8 DeleteOnCompletion:BOOL UseBigPackets:BOOL VFileID:LLUUID VFileType:S16
+Low:157 AbortXfer | XferID:Single ID:U64 Result:S32
+Low:158 AvatarAppearance | Sender:Single ID:LLUUID IsTrial:BOOL | ObjectData:Single TextureEntry:Variable(2) | VisualParam:Variable ParamValue:U8 | AppearanceData:Variable AppearanceVersion:U8 CofVersion:S32 Flags:U32 | AppearanceHover:Variable HoverHeight:LLVector3 | AttachmentBlock:Variable ID:LLUUID AttachmentPoint:U8
+Low:159 SetFollowCamProperties | ObjectData:Single ObjectID:LLUUID | CameraProperty:Variable Type:S32 Value:F32
+Low:160 ClearFollowCamProperties | ObjectData:Single ObjectID:LLUUID
+Low:161 RequestPayPrice | ObjectData:Single ObjectID:LLUUID
+Low:162 PayPriceReply | ObjectData:Single ObjectID:LLUUID DefaultPayPrice:S32 | ButtonData:Variable PayButton:S32
+Low:163 KickUser | TargetBlock:Single TargetIP:IPADDR TargetPort:IPPORT | UserInfo:Single AgentID:LLUUID SessionID:LLUUID Reason:Variable(2)
+Low:164 KickUserAck | UserInfo:Single SessionID:LLUUID Flags:U32
+Low:165 GodKickUser | UserInfo:Single GodID:LLUUID GodSessionID:LLUUID AgentID:LLUUID KickFlags:U32 Reason:Variable(2)
+Low:166 SystemKickUser | AgentInfo:Variable AgentID:LLUUID
+Low:167 EjectUser | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single TargetID:LLUUID Flags:U32
+Low:168 FreezeUser | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single TargetID:LLUUID Flags:U32
+Low:169 AvatarPropertiesRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID AvatarID:LLUUID
+Low:170 AvatarPropertiesRequestBackend | AgentData:Single AgentID:LLUUID AvatarID:LLUUID GodLevel:U8 WebProfilesDisabled:BOOL
+Low:171 AvatarPropertiesReply | AgentData:Single AgentID:LLUUID AvatarID:LLUUID | PropertiesData:Single ImageID:LLUUID FLImageID:LLUUID PartnerID:LLUUID AboutText:Variable(2) FLAboutText:Variable(1) BornOn:Variable(1) ProfileURL:Variable(1) CharterMember:Variable(1) Flags:U32
+Low:172 AvatarInterestsReply | AgentData:Single AgentID:LLUUID AvatarID:LLUUID | PropertiesData:Single WantToMask:U32 WantToText:Variable(1) SkillsMask:U32 SkillsText:Variable(1) LanguagesText:Variable(1)
+Low:173 AvatarGroupsReply | AgentData:Single AgentID:LLUUID AvatarID:LLUUID | GroupData:Variable GroupPowers:U64 AcceptNotices:BOOL GroupTitle:Variable(1) GroupID:LLUUID GroupName:Variable(1) GroupInsigniaID:LLUUID | NewGroupData:Single ListInProfile:BOOL
+Low:174 AvatarPropertiesUpdate | AgentData:Single AgentID:LLUUID SessionID:LLUUID | PropertiesData:Single ImageID:LLUUID FLImageID:LLUUID AboutText:Variable(2) FLAboutText:Variable(1) AllowPublish:BOOL MaturePublish:BOOL ProfileURL:Variable(1)
+Low:175 AvatarInterestsUpdate | AgentData:Single AgentID:LLUUID SessionID:LLUUID | PropertiesData:Single WantToMask:U32 WantToText:Variable(1) SkillsMask:U32 SkillsText:Variable(1) LanguagesText:Variable(1)
+Low:176 AvatarNotesReply | AgentData:Single AgentID:LLUUID | Data:Single TargetID:LLUUID Notes:Variable(2)
+Low:177 AvatarNotesUpdate | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single TargetID:LLUUID Notes:Variable(2)
+Low:178 AvatarPicksReply | AgentData:Single AgentID:LLUUID TargetID:LLUUID | Data:Variable PickID:LLUUID PickName:Variable(1)
+Low:179 EventInfoRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | EventData:Single EventID:U32
+Low:180 EventInfoReply | AgentData:Single AgentID:LLUUID | EventData:Single EventID:U32 Creator:Variable(1) Name:Variable(1) Category:Variable(1) Desc:Variable(2) Date:Variable(1) DateUTC:U32 Duration:U32 Cover:U32 Amount:U32 SimName:Variable(1) GlobalPos:LLVector3d EventFlags:U32
+Low:181 EventNotificationAddRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | EventData:Single EventID:U32
+Low:182 EventNotificationRemoveRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | EventData:Single EventID:U32
+Low:183 EventGodDelete | AgentData:Single AgentID:LLUUID SessionID:LLUUID | EventData:Single EventID:U32 | QueryData:Single QueryID:LLUUID QueryText:Variable(1) QueryFlags:U32 QueryStart:S32
+Low:184 PickInfoReply | AgentData:Single AgentID:LLUUID | Data:Single PickID:LLUUID CreatorID:LLUUID TopPick:BOOL ParcelID:LLUUID Name:Variable(1) Desc:Variable(2) SnapshotID:LLUUID User:Variable(1) OriginalName:Variable(1) SimName:Variable(1) PosGlobal:LLVector3d SortOrder:S32 Enabled:BOOL
+Low:185 PickInfoUpdate | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single PickID:LLUUID CreatorID:LLUUID TopPick:BOOL ParcelID:LLUUID Name:Variable(1) Desc:Variable(2) SnapshotID:LLUUID PosGlobal:LLVector3d SortOrder:S32 Enabled:BOOL
+Low:186 PickDelete | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single PickID:LLUUID
+Low:187 PickGodDelete | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single PickID:LLUUID QueryID:LLUUID
+Low:188 ScriptQuestion | Data:Single TaskID:LLUUID ItemID:LLUUID ObjectName:Variable(1) ObjectOwner:Variable(1) Questions:S32 | Experience:Single ExperienceID:LLUUID
+Low:189 ScriptControlChange | Data:Variable TakeControls:BOOL Controls:U32 PassToAgent:BOOL
+Low:190 ScriptDialog | Data:Single ObjectID:LLUUID FirstName:Variable(1) LastName:Variable(1) ObjectName:Variable(1) Message:Variable(2) ChatChannel:S32 ImageID:LLUUID | Buttons:Variable ButtonLabel:Variable(1) | OwnerData:Variable OwnerID:LLUUID
+Low:191 ScriptDialogReply | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single ObjectID:LLUUID ChatChannel:S32 ButtonIndex:S32 ButtonLabel:Variable(1)
+Low:192 ForceScriptControlRelease | AgentData:Single AgentID:LLUUID SessionID:LLUUID
+Low:193 RevokePermissions | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single ObjectID:LLUUID ObjectPermissions:U32
+Low:194 LoadURL | Data:Single ObjectName:Variable(1) ObjectID:LLUUID OwnerID:LLUUID OwnerIsGroup:BOOL Message:Variable(1) URL:Variable(1)
+Low:195 ScriptTeleportRequest | Data:Single ObjectName:Variable(1) SimName:Variable(1) SimPosition:LLVector3 LookAt:LLVector3 | Options:Variable Flags:U32
+Low:196 ParcelOverlay | ParcelData:Single SequenceID:S32 Data:Variable(2)
+Low:197 ParcelPropertiesRequestByID | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ParcelData:Single SequenceID:S32 LocalID:S32
+Low:198 ParcelPropertiesUpdate | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ParcelData:Single LocalID:S32 Flags:U32 ParcelFlags:U32 SalePrice:S32 Name:Variable(1) Desc:Variable(1) MusicURL:Variable(1) MediaURL:Variable(1) MediaID:LLUUID MediaAutoScale:U8 GroupID:LLUUID PassPrice:S32 PassHours:F32 Category:U8 AuthBuyerID:LLUUID SnapshotID:LLUUID UserLocation:LLVector3 UserLookAt:LLVector3 LandingType:U8
+Low:199 ParcelReturnObjects | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ParcelData:Single LocalID:S32 ReturnType:U32 | TaskIDs:Variable TaskID:LLUUID | OwnerIDs:Variable OwnerID:LLUUID
+Low:200 ParcelSetOtherCleanTime | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ParcelData:Single LocalID:S32 OtherCleanTime:S32
+Low:201 ParcelDisableObjects | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ParcelData:Single LocalID:S32 ReturnType:U32 | TaskIDs:Variable TaskID:LLUUID | OwnerIDs:Variable OwnerID:LLUUID
+Low:202 ParcelSelectObjects | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ParcelData:Single LocalID:S32 ReturnType:U32 | ReturnIDs:Variable ReturnID:LLUUID
+Low:203 EstateCovenantRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID
+Low:204 EstateCovenantReply | Data:Single CovenantID:LLUUID CovenantTimestamp:U32 EstateName:Variable(1) EstateOwnerID:LLUUID
+Low:205 ForceObjectSelect | Header:Single ResetList:BOOL | Data:Variable LocalID:U32
+Low:206 ParcelBuyPass | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ParcelData:Single LocalID:S32
+Low:207 ParcelDeedToGroup | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single GroupID:LLUUID LocalID:S32
+Low:208 ParcelReclaim | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single LocalID:S32
+Low:209 ParcelClaim | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single GroupID:LLUUID IsGroupOwned:BOOL Final:BOOL | ParcelData:Variable West:F32 South:F32 East:F32 North:F32
+Low:210 ParcelJoin | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ParcelData:Single West:F32 South:F32 East:F32 North:F32
+Low:211 ParcelDivide | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ParcelData:Single West:F32 South:F32 East:F32 North:F32
+Low:212 ParcelRelease | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single LocalID:S32
+Low:213 ParcelBuy | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single GroupID:LLUUID IsGroupOwned:BOOL RemoveContribution:BOOL LocalID:S32 Final:BOOL | ParcelData:Single Price:S32 Area:S32
+Low:214 ParcelGodForceOwner | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single OwnerID:LLUUID LocalID:S32
+Low:215 ParcelAccessListRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single SequenceID:S32 Flags:U32 LocalID:S32
+Low:216 ParcelAccessListReply | Data:Single AgentID:LLUUID SequenceID:S32 Flags:U32 LocalID:S32 | List:Variable ID:LLUUID Time:S32 Flags:U32
+Low:217 ParcelAccessListUpdate | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single Flags:U32 LocalID:S32 TransactionID:LLUUID SequenceID:S32 Sections:S32 | List:Variable ID:LLUUID Time:S32 Flags:U32
+Low:218 ParcelDwellRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single LocalID:S32 ParcelID:LLUUID
+Low:219 ParcelDwellReply | AgentData:Single AgentID:LLUUID | Data:Single LocalID:S32 ParcelID:LLUUID Dwell:F32
+Low:220 RequestParcelTransfer | Data:Single TransactionID:LLUUID TransactionTime:U32 SourceID:LLUUID DestID:LLUUID OwnerID:LLUUID Flags:U8 TransactionType:S32 Amount:S32 BillableArea:S32 ActualArea:S32 Final:BOOL | RegionData:Single RegionID:LLUUID GridX:U32 GridY:U32
+Low:221 UpdateParcel | ParcelData:Single ParcelID:LLUUID RegionHandle:U64 OwnerID:LLUUID GroupOwned:BOOL Status:U8 Name:Variable(1) Description:Variable(1) MusicURL:Variable(1) RegionX:F32 RegionY:F32 ActualArea:S32 BillableArea:S32 ShowDir:BOOL IsForSale:BOOL Category:U8 SnapshotID:LLUUID UserLocation:LLVector3 SalePrice:S32 AuthorizedBuyerID:LLUUID AllowPublish:BOOL MaturePublish:BOOL
+Low:222 RemoveParcel | ParcelData:Variable ParcelID:LLUUID
+Low:223 MergeParcel | MasterParcelData:Single MasterID:LLUUID | SlaveParcelData:Variable SlaveID:LLUUID
+Low:224 LogParcelChanges | AgentData:Single AgentID:LLUUID | RegionData:Single RegionHandle:U64 | ParcelData:Variable ParcelID:LLUUID OwnerID:LLUUID IsOwnerGroup:BOOL ActualArea:S32 Action:S8 TransactionID:LLUUID
+Low:225 CheckParcelSales | RegionData:Variable RegionHandle:U64
+Low:226 ParcelSales | ParcelData:Variable ParcelID:LLUUID BuyerID:LLUUID
+Low:227 ParcelGodMarkAsContent | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ParcelData:Single LocalID:S32
+Low:228 ViewerStartAuction | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ParcelData:Single LocalID:S32 SnapshotID:LLUUID
+Low:229 StartAuction | AgentData:Single AgentID:LLUUID | ParcelData:Single ParcelID:LLUUID SnapshotID:LLUUID Name:Variable(1)
+Low:230 ConfirmAuctionStart | AuctionData:Single ParcelID:LLUUID AuctionID:U32
+Low:231 CompleteAuction | ParcelData:Variable ParcelID:LLUUID
+Low:232 CancelAuction | ParcelData:Variable ParcelID:LLUUID
+Low:233 CheckParcelAuctions | RegionData:Variable RegionHandle:U64
+Low:234 ParcelAuctions | ParcelData:Variable ParcelID:LLUUID WinnerID:LLUUID
+Low:235 UUIDNameRequest | UUIDNameBlock:Variable ID:LLUUID
+Low:236 UUIDNameReply | UUIDNameBlock:Variable ID:LLUUID FirstName:Variable(1) LastName:Variable(1)
+Low:237 UUIDGroupNameRequest | UUIDNameBlock:Variable ID:LLUUID
+Low:238 UUIDGroupNameReply | UUIDNameBlock:Variable ID:LLUUID GroupName:Variable(1)
+Low:239 ChatPass | ChatData:Single Channel:S32 Position:LLVector3 ID:LLUUID OwnerID:LLUUID Name:Variable(1) SourceType:U8 Type:U8 Radius:F32 SimAccess:U8 Message:Variable(2)
+Low:240 ChildAgentDying | AgentData:Single AgentID:LLUUID SessionID:LLUUID
+Low:241 ChildAgentUnknown | AgentData:Single AgentID:LLUUID SessionID:LLUUID
+Low:242 KillChildAgents | IDBlock:Single AgentID:LLUUID
+Low:243 GetScriptRunning | Script:Single ObjectID:LLUUID ItemID:LLUUID
+Low:244 ScriptRunningReply | Script:Single ObjectID:LLUUID ItemID:LLUUID Running:BOOL
+Low:245 SetScriptRunning | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Script:Single ObjectID:LLUUID ItemID:LLUUID Running:BOOL
+Low:246 ScriptReset | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Script:Single ObjectID:LLUUID ItemID:LLUUID
+Low:247 ScriptSensorRequest | Requester:Single SourceID:LLUUID RequestID:LLUUID SearchID:LLUUID SearchPos:LLVector3 SearchDir:LLQuaternion SearchName:Variable(1) Type:S32 Range:F32 Arc:F32 RegionHandle:U64 SearchRegions:U8
+Low:248 ScriptSensorReply | Requester:Single SourceID:LLUUID | SensedData:Variable ObjectID:LLUUID OwnerID:LLUUID GroupID:LLUUID Position:LLVector3 Velocity:LLVector3 Rotation:LLQuaternion Name:Variable(1) Type:S32 Range:F32
+Low:249 CompleteAgentMovement | AgentData:Single AgentID:LLUUID SessionID:LLUUID CircuitCode:U32
+Low:250 AgentMovementComplete | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single Position:LLVector3 LookAt:LLVector3 RegionHandle:U64 Timestamp:U32 | SimData:Single ChannelVersion:Variable(2)
+Low:251 DataServerLogout | UserData:Single AgentID:LLUUID ViewerIP:IPADDR Disconnect:BOOL SessionID:LLUUID
+Low:252 LogoutRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID
+Low:253 LogoutReply | AgentData:Single AgentID:LLUUID SessionID:LLUUID | InventoryData:Variable ItemID:LLUUID
+Low:254 ImprovedInstantMessage | AgentData:Single AgentID:LLUUID SessionID:LLUUID | MessageBlock:Single FromGroup:BOOL ToAgentID:LLUUID ParentEstateID:U32 RegionID:LLUUID Position:LLVector3 Offline:U8 Dialog:U8 ID:LLUUID Timestamp:U32 FromAgentName:Variable(1) Message:Variable(2) BinaryBucket:Variable(2) | EstateBlock:Single EstateID:U32 | MetaData:Variable Data:Variable(2)
+Low:255 RetrieveInstantMessages | AgentData:Single AgentID:LLUUID SessionID:LLUUID
+Low:256 FindAgent | AgentBlock:Single Hunter:LLUUID Prey:LLUUID SpaceIP:IPADDR | LocationBlock:Variable GlobalX:F64 GlobalY:F64
+Low:257 RequestGodlikePowers | AgentData:Single AgentID:LLUUID SessionID:LLUUID | RequestBlock:Single Godlike:BOOL Token:LLUUID
+Low:258 GrantGodlikePowers | AgentData:Single AgentID:LLUUID SessionID:LLUUID | GrantData:Single GodLevel:U8 Token:LLUUID
+Low:259 GodlikeMessage | AgentData:Single AgentID:LLUUID SessionID:LLUUID TransactionID:LLUUID | MethodData:Single Method:Variable(1) Invoice:LLUUID | ParamList:Variable Parameter:Variable(1)
+Low:260 EstateOwnerMessage | AgentData:Single AgentID:LLUUID SessionID:LLUUID TransactionID:LLUUID | MethodData:Single Method:Variable(1) Invoice:LLUUID | ParamList:Variable Parameter:Variable(1)
+Low:261 GenericMessage | AgentData:Single AgentID:LLUUID SessionID:LLUUID TransactionID:LLUUID | MethodData:Single Method:Variable(1) Invoice:LLUUID | ParamList:Variable Parameter:Variable(1)
+Low:262 MuteListRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | MuteData:Single MuteCRC:U32
+Low:263 UpdateMuteListEntry | AgentData:Single AgentID:LLUUID SessionID:LLUUID | MuteData:Single MuteID:LLUUID MuteName:Variable(1) MuteType:S32 MuteFlags:U32
+Low:264 RemoveMuteListEntry | AgentData:Single AgentID:LLUUID SessionID:LLUUID | MuteData:Single MuteID:LLUUID MuteName:Variable(1)
+Low:265 CopyInventoryFromNotecard | AgentData:Single AgentID:LLUUID SessionID:LLUUID | NotecardData:Single NotecardItemID:LLUUID ObjectID:LLUUID | InventoryData:Variable ItemID:LLUUID FolderID:LLUUID
+Low:266 UpdateInventoryItem | AgentData:Single AgentID:LLUUID SessionID:LLUUID TransactionID:LLUUID | InventoryData:Variable ItemID:LLUUID FolderID:LLUUID CallbackID:U32 CreatorID:LLUUID OwnerID:LLUUID GroupID:LLUUID BaseMask:U32 OwnerMask:U32 GroupMask:U32 EveryoneMask:U32 NextOwnerMask:U32 GroupOwned:BOOL TransactionID:LLUUID Type:S8 InvType:S8 Flags:U32 SaleType:U8 SalePrice:S32 Name:Variable(1) Description:Variable(1) CreationDate:S32 CRC:U32
+Low:267 UpdateCreateInventoryItem | AgentData:Single AgentID:LLUUID SimApproved:BOOL TransactionID:LLUUID | InventoryData:Variable ItemID:LLUUID FolderID:LLUUID CallbackID:U32 CreatorID:LLUUID OwnerID:LLUUID GroupID:LLUUID BaseMask:U32 OwnerMask:U32 GroupMask:U32 EveryoneMask:U32 NextOwnerMask:U32 GroupOwned:BOOL AssetID:LLUUID Type:S8 InvType:S8 Flags:U32 SaleType:U8 SalePrice:S32 Name:Variable(1) Description:Variable(1) CreationDate:S32 CRC:U32
+Low:268 MoveInventoryItem | AgentData:Single AgentID:LLUUID SessionID:LLUUID Stamp:BOOL | InventoryData:Variable ItemID:LLUUID FolderID:LLUUID NewName:Variable(1)
+Low:269 CopyInventoryItem | AgentData:Single AgentID:LLUUID SessionID:LLUUID | InventoryData:Variable CallbackID:U32 OldAgentID:LLUUID OldItemID:LLUUID NewFolderID:LLUUID NewName:Variable(1)
+Low:270 RemoveInventoryItem | AgentData:Single AgentID:LLUUID SessionID:LLUUID | InventoryData:Variable ItemID:LLUUID
+Low:271 ChangeInventoryItemFlags | AgentData:Single AgentID:LLUUID SessionID:LLUUID | InventoryData:Variable ItemID:LLUUID Flags:U32
+Low:272 SaveAssetIntoInventory | AgentData:Single AgentID:LLUUID | InventoryData:Single ItemID:LLUUID NewAssetID:LLUUID
+Low:273 CreateInventoryFolder | AgentData:Single AgentID:LLUUID SessionID:LLUUID | FolderData:Single FolderID:LLUUID ParentID:LLUUID Type:S8 Name:Variable(1)
+Low:274 UpdateInventoryFolder | AgentData:Single AgentID:LLUUID SessionID:LLUUID | FolderData:Variable FolderID:LLUUID ParentID:LLUUID Type:S8 Name:Variable(1)
+Low:275 MoveInventoryFolder | AgentData:Single AgentID:LLUUID SessionID:LLUUID Stamp:BOOL | InventoryData:Variable FolderID:LLUUID ParentID:LLUUID
+Low:276 RemoveInventoryFolder | AgentData:Single AgentID:LLUUID SessionID:LLUUID | FolderData:Variable FolderID:LLUUID
+Low:277 FetchInventoryDescendents | AgentData:Single AgentID:LLUUID SessionID:LLUUID | InventoryData:Single FolderID:LLUUID OwnerID:LLUUID SortOrder:S32 FetchFolders:BOOL FetchItems:BOOL
+Low:278 InventoryDescendents | AgentData:Single AgentID:LLUUID FolderID:LLUUID OwnerID:LLUUID Version:S32 Descendents:S32 | FolderData:Variable FolderID:LLUUID ParentID:LLUUID Type:S8 Name:Variable(1) | ItemData:Variable ItemID:LLUUID FolderID:LLUUID CreatorID:LLUUID OwnerID:LLUUID GroupID:LLUUID BaseMask:U32 OwnerMask:U32 GroupMask:U32 EveryoneMask:U32 NextOwnerMask:U32 GroupOwned:BOOL AssetID:LLUUID Type:S8 InvType:S8 Flags:U32 SaleType:U8 SalePrice:S32 Name:Variable(1) Description:Variable(1) CreationDate:S32 CRC:U32
+Low:279 FetchInventory | AgentData:Single AgentID:LLUUID SessionID:LLUUID | InventoryData:Variable OwnerID:LLUUID ItemID:LLUUID
+Low:280 FetchInventoryReply | AgentData:Single AgentID:LLUUID | InventoryData:Variable ItemID:LLUUID FolderID:LLUUID CreatorID:LLUUID OwnerID:LLUUID GroupID:LLUUID BaseMask:U32 OwnerMask:U32 GroupMask:U32 EveryoneMask:U32 NextOwnerMask:U32 GroupOwned:BOOL AssetID:LLUUID Type:S8 InvType:S8 Flags:U32 SaleType:U8 SalePrice:S32 Name:Variable(1) Description:Variable(1) CreationDate:S32 CRC:U32
+Low:281 BulkUpdateInventory | AgentData:Single AgentID:LLUUID TransactionID:LLUUID | FolderData:Variable FolderID:LLUUID ParentID:LLUUID Type:S8 Name:Variable(1) | ItemData:Variable ItemID:LLUUID CallbackID:U32 FolderID:LLUUID CreatorID:LLUUID OwnerID:LLUUID GroupID:LLUUID BaseMask:U32 OwnerMask:U32 GroupMask:U32 EveryoneMask:U32 NextOwnerMask:U32 GroupOwned:BOOL AssetID:LLUUID Type:S8 InvType:S8 Flags:U32 SaleType:U8 SalePrice:S32 Name:Variable(1) Description:Variable(1) CreationDate:S32 CRC:U32
+Low:282 RequestInventoryAsset | QueryData:Single QueryID:LLUUID AgentID:LLUUID OwnerID:LLUUID ItemID:LLUUID
+Low:283 InventoryAssetResponse | QueryData:Single QueryID:LLUUID AssetID:LLUUID IsReadable:BOOL
+Low:284 RemoveInventoryObjects | AgentData:Single AgentID:LLUUID SessionID:LLUUID | FolderData:Variable FolderID:LLUUID | ItemData:Variable ItemID:LLUUID
+Low:285 PurgeInventoryDescendents | AgentData:Single AgentID:LLUUID SessionID:LLUUID | InventoryData:Single FolderID:LLUUID
+Low:286 UpdateTaskInventory | AgentData:Single AgentID:LLUUID SessionID:LLUUID | UpdateData:Single LocalID:U32 Key:U8 | InventoryData:Single ItemID:LLUUID FolderID:LLUUID CreatorID:LLUUID OwnerID:LLUUID GroupID:LLUUID BaseMask:U32 OwnerMask:U32 GroupMask:U32 EveryoneMask:U32 NextOwnerMask:U32 GroupOwned:BOOL TransactionID:LLUUID Type:S8 InvType:S8 Flags:U32 SaleType:U8 SalePrice:S32 Name:Variable(1) Description:Variable(1) CreationDate:S32 CRC:U32
+Low:287 RemoveTaskInventory | AgentData:Single AgentID:LLUUID SessionID:LLUUID | InventoryData:Single LocalID:U32 ItemID:LLUUID
+Low:288 MoveTaskInventory | AgentData:Single AgentID:LLUUID SessionID:LLUUID FolderID:LLUUID | InventoryData:Single LocalID:U32 ItemID:LLUUID
+Low:289 RequestTaskInventory | AgentData:Single AgentID:LLUUID SessionID:LLUUID | InventoryData:Single LocalID:U32
+Low:290 ReplyTaskInventory | InventoryData:Single TaskID:LLUUID Serial:S16 Filename:Variable(1)
+Low:291 DeRezObject | AgentData:Single AgentID:LLUUID SessionID:LLUUID | AgentBlock:Single GroupID:LLUUID Destination:U8 DestinationID:LLUUID TransactionID:LLUUID PacketCount:U8 PacketNumber:U8 | ObjectData:Variable ObjectLocalID:U32
+Low:292 DeRezAck | TransactionData:Single TransactionID:LLUUID Success:BOOL
+Low:293 RezObject | AgentData:Single AgentID:LLUUID SessionID:LLUUID GroupID:LLUUID | RezData:Single FromTaskID:LLUUID BypassRaycast:U8 RayStart:LLVector3 RayEnd:LLVector3 RayTargetID:LLUUID RayEndIsIntersection:BOOL RezSelected:BOOL RemoveItem:BOOL ItemFlags:U32 GroupMask:U32 EveryoneMask:U32 NextOwnerMask:U32 | InventoryData:Single ItemID:LLUUID FolderID:LLUUID CreatorID:LLUUID OwnerID:LLUUID GroupID:LLUUID BaseMask:U32 OwnerMask:U32 GroupMask:U32 EveryoneMask:U32 NextOwnerMask:U32 GroupOwned:BOOL TransactionID:LLUUID Type:S8 InvType:S8 Flags:U32 SaleType:U8 SalePrice:S32 Name:Variable(1) Description:Variable(1) CreationDate:S32 CRC:U32
+Low:294 RezObjectFromNotecard | AgentData:Single AgentID:LLUUID SessionID:LLUUID GroupID:LLUUID | RezData:Single FromTaskID:LLUUID BypassRaycast:U8 RayStart:LLVector3 RayEnd:LLVector3 RayTargetID:LLUUID RayEndIsIntersection:BOOL RezSelected:BOOL RemoveItem:BOOL ItemFlags:U32 GroupMask:U32 EveryoneMask:U32 NextOwnerMask:U32 | NotecardData:Single NotecardItemID:LLUUID ObjectID:LLUUID | InventoryData:Variable ItemID:LLUUID
+Low:295 TransferInventory | InfoBlock:Single SourceID:LLUUID DestID:LLUUID TransactionID:LLUUID | InventoryBlock:Variable InventoryID:LLUUID Type:S8 | ValidationBlock:Single NeedsValidation:BOOL EstateID:U32
+Low:296 TransferInventoryAck | InfoBlock:Single TransactionID:LLUUID InventoryID:LLUUID
+Low:297 AcceptFriendship | AgentData:Single AgentID:LLUUID SessionID:LLUUID | TransactionBlock:Single TransactionID:LLUUID | FolderData:Variable FolderID:LLUUID
+Low:298 DeclineFriendship | AgentData:Single AgentID:LLUUID SessionID:LLUUID | TransactionBlock:Single TransactionID:LLUUID
+Low:299 FormFriendship | AgentBlock:Single SourceID:LLUUID DestID:LLUUID
+Low:300 TerminateFriendship | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ExBlock:Single OtherID:LLUUID
+Low:301 OfferCallingCard | AgentData:Single AgentID:LLUUID SessionID:LLUUID | AgentBlock:Single DestID:LLUUID TransactionID:LLUUID
+Low:302 AcceptCallingCard | AgentData:Single AgentID:LLUUID SessionID:LLUUID | TransactionBlock:Single TransactionID:LLUUID | FolderData:Variable FolderID:LLUUID
+Low:303 DeclineCallingCard | AgentData:Single AgentID:LLUUID SessionID:LLUUID | TransactionBlock:Single TransactionID:LLUUID
+Low:304 RezScript | AgentData:Single AgentID:LLUUID SessionID:LLUUID GroupID:LLUUID | UpdateBlock:Single ObjectLocalID:U32 Enabled:BOOL | InventoryBlock:Single ItemID:LLUUID FolderID:LLUUID CreatorID:LLUUID OwnerID:LLUUID GroupID:LLUUID BaseMask:U32 OwnerMask:U32 GroupMask:U32 EveryoneMask:U32 NextOwnerMask:U32 GroupOwned:BOOL TransactionID:LLUUID Type:S8 InvType:S8 Flags:U32 SaleType:U8 SalePrice:S32 Name:Variable(1) Description:Variable(1) CreationDate:S32 CRC:U32 | NewScriptInfo:Variable TemplateID:LLUUID
+Low:305 CreateInventoryItem | AgentData:Single AgentID:LLUUID SessionID:LLUUID | InventoryBlock:Single CallbackID:U32 FolderID:LLUUID TransactionID:LLUUID NextOwnerMask:U32 Type:S8 InvType:S8 WearableType:U8 Name:Variable(1) Description:Variable(1)
+Low:306 CreateLandmarkForEvent | AgentData:Single AgentID:LLUUID SessionID:LLUUID | EventData:Single EventID:U32 | InventoryBlock:Single FolderID:LLUUID Name:Variable(1)
+Low:307 EventLocationRequest | QueryData:Single QueryID:LLUUID | EventData:Single EventID:U32
+Low:308 EventLocationReply | QueryData:Single QueryID:LLUUID | EventData:Single Success:BOOL RegionID:LLUUID RegionPos:LLVector3
+Low:309 RegionHandleRequest | RequestBlock:Single RegionID:LLUUID
+Low:310 RegionIDAndHandleReply | ReplyBlock:Single RegionID:LLUUID RegionHandle:U64
+Low:311 MoneyTransferRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | MoneyData:Single SourceID:LLUUID DestID:LLUUID Flags:U8 Amount:S32 AggregatePermNextOwner:U8 AggregatePermInventory:U8 TransactionType:S32 Description:Variable(1)
+Low:312 MoneyTransferBackend | MoneyData:Single TransactionID:LLUUID TransactionTime:U32 SourceID:LLUUID DestID:LLUUID Flags:U8 Amount:S32 AggregatePermNextOwner:U8 AggregatePermInventory:U8 TransactionType:S32 RegionID:LLUUID GridX:U32 GridY:U32 Description:Variable(1)
+Low:313 MoneyBalanceRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | MoneyData:Single TransactionID:LLUUID
+Low:314 MoneyBalanceReply | MoneyData:Single AgentID:LLUUID TransactionID:LLUUID TransactionSuccess:BOOL MoneyBalance:S32 SquareMetersCredit:S32 SquareMetersCommitted:S32 Description:Variable(1) | TransactionInfo:Single TransactionType:S32 SourceID:LLUUID IsSourceGroup:BOOL DestID:LLUUID IsDestGroup:BOOL Amount:S32 ItemDescription:Variable(1)
+Low:315 RoutedMoneyBalanceReply | TargetBlock:Single TargetIP:IPADDR TargetPort:IPPORT | MoneyData:Single AgentID:LLUUID TransactionID:LLUUID TransactionSuccess:BOOL MoneyBalance:S32 SquareMetersCredit:S32 SquareMetersCommitted:S32 Description:Variable(1) | TransactionInfo:Single TransactionType:S32 SourceID:LLUUID IsSourceGroup:BOOL DestID:LLUUID IsDestGroup:BOOL Amount:S32 ItemDescription:Variable(1)
+Low:316 ActivateGestures | AgentData:Single AgentID:LLUUID SessionID:LLUUID Flags:U32 | Data:Variable ItemID:LLUUID AssetID:LLUUID GestureFlags:U32
+Low:317 DeactivateGestures | AgentData:Single AgentID:LLUUID SessionID:LLUUID Flags:U32 | Data:Variable ItemID:LLUUID GestureFlags:U32
+Low:318 MuteListUpdate | MuteData:Single AgentID:LLUUID Filename:Variable(1)
+Low:319 UseCachedMuteList | AgentData:Single AgentID:LLUUID
+Low:320 GrantUserRights | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Rights:Variable AgentRelated:LLUUID RelatedRights:S32
+Low:321 ChangeUserRights | AgentData:Single AgentID:LLUUID | Rights:Variable AgentRelated:LLUUID RelatedRights:S32
+Low:322 OnlineNotification | AgentBlock:Variable AgentID:LLUUID
+Low:323 OfflineNotification | AgentBlock:Variable AgentID:LLUUID
+Low:324 SetStartLocationRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | StartLocationData:Single SimName:Variable(1) LocationID:U32 LocationPos:LLVector3 LocationLookAt:LLVector3
+Low:325 SetStartLocation | StartLocationData:Single AgentID:LLUUID RegionID:LLUUID LocationID:U32 RegionHandle:U64 LocationPos:LLVector3 LocationLookAt:LLVector3
+Low:326 NetTest | NetBlock:Single Port:IPPORT
+Low:327 SetCPURatio | Data:Single Ratio:U8
+Low:328 SimCrashed | Data:Single RegionX:U32 RegionY:U32 | Users:Variable AgentID:LLUUID
+Low:329 NameValuePair | TaskData:Single ID:LLUUID | NameValueData:Variable NVPair:Variable(2)
+Low:330 RemoveNameValuePair | TaskData:Single ID:LLUUID | NameValueData:Variable NVPair:Variable(2)
+Low:331 UpdateAttachment | AgentData:Single AgentID:LLUUID SessionID:LLUUID | AttachmentBlock:Single AttachmentPoint:U8 | OperationData:Single AddItem:BOOL UseExistingAsset:BOOL | InventoryData:Single ItemID:LLUUID FolderID:LLUUID CreatorID:LLUUID OwnerID:LLUUID GroupID:LLUUID BaseMask:U32 OwnerMask:U32 GroupMask:U32 EveryoneMask:U32 NextOwnerMask:U32 GroupOwned:BOOL AssetID:LLUUID Type:S8 InvType:S8 Flags:U32 SaleType:U8 SalePrice:S32 Name:Variable(1) Description:Variable(1) CreationDate:S32 CRC:U32
+Low:332 RemoveAttachment | AgentData:Single AgentID:LLUUID SessionID:LLUUID | AttachmentBlock:Single AttachmentPoint:U8 ItemID:LLUUID
+Low:333 AssetUploadRequest | AssetBlock:Single TransactionID:LLUUID Type:S8 Tempfile:BOOL StoreLocal:BOOL AssetData:Variable(2)
+Low:334 AssetUploadComplete | AssetBlock:Single UUID:LLUUID Type:S8 Success:BOOL
+Low:335 EmailMessageRequest | DataBlock:Single ObjectID:LLUUID FromAddress:Variable(1) Subject:Variable(1)
+Low:336 EmailMessageReply | DataBlock:Single ObjectID:LLUUID More:U32 Time:U32 FromAddress:Variable(1) Subject:Variable(1) Data:Variable(2) MailFilter:Variable(1)
+Low:337 ScriptDataRequest | DataBlock:Variable Hash:U64 RequestType:S8 Request:Variable(2)
+Low:338 ScriptDataReply | DataBlock:Variable Hash:U64 Reply:Variable(2)
+Low:339 CreateGroupRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | GroupData:Single Name:Variable(1) Charter:Variable(2) ShowInList:BOOL InsigniaID:LLUUID MembershipFee:S32 OpenEnrollment:BOOL AllowPublish:BOOL MaturePublish:BOOL
+Low:340 CreateGroupReply | AgentData:Single AgentID:LLUUID | ReplyData:Single GroupID:LLUUID Success:BOOL Message:Variable(1)
+Low:341 UpdateGroupInfo | AgentData:Single AgentID:LLUUID SessionID:LLUUID | GroupData:Single GroupID:LLUUID Charter:Variable(2) ShowInList:BOOL InsigniaID:LLUUID MembershipFee:S32 OpenEnrollment:BOOL AllowPublish:BOOL MaturePublish:BOOL
+Low:342 GroupRoleChanges | AgentData:Single AgentID:LLUUID SessionID:LLUUID GroupID:LLUUID | RoleChange:Variable RoleID:LLUUID MemberID:LLUUID Change:U32
+Low:343 JoinGroupRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | GroupData:Single GroupID:LLUUID
+Low:344 JoinGroupReply | AgentData:Single AgentID:LLUUID | GroupData:Single GroupID:LLUUID Success:BOOL
+Low:345 EjectGroupMemberRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | GroupData:Single GroupID:LLUUID | EjectData:Variable EjecteeID:LLUUID
+Low:346 EjectGroupMemberReply | AgentData:Single AgentID:LLUUID | GroupData:Single GroupID:LLUUID | EjectData:Single Success:BOOL
+Low:347 LeaveGroupRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | GroupData:Single GroupID:LLUUID
+Low:348 LeaveGroupReply | AgentData:Single AgentID:LLUUID | GroupData:Single GroupID:LLUUID Success:BOOL
+Low:349 InviteGroupRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | GroupData:Single GroupID:LLUUID | InviteData:Variable InviteeID:LLUUID RoleID:LLUUID
+Low:350 InviteGroupResponse | InviteData:Single AgentID:LLUUID InviteeID:LLUUID GroupID:LLUUID RoleID:LLUUID MembershipFee:S32 | GroupData:Single GroupLimit:S32
+Low:351 GroupProfileRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | GroupData:Single GroupID:LLUUID
+Low:352 GroupProfileReply | AgentData:Single AgentID:LLUUID | GroupData:Single GroupID:LLUUID Name:Variable(1) Charter:Variable(2) ShowInList:BOOL MemberTitle:Variable(1) PowersMask:U64 InsigniaID:LLUUID FounderID:LLUUID MembershipFee:S32 OpenEnrollment:BOOL Money:S32 GroupMembershipCount:S32 GroupRolesCount:S32 AllowPublish:BOOL MaturePublish:BOOL OwnerRole:LLUUID
+Low:353 GroupAccountSummaryRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID GroupID:LLUUID | MoneyData:Single RequestID:LLUUID IntervalDays:S32 CurrentInterval:S32
+Low:354 GroupAccountSummaryReply | AgentData:Single AgentID:LLUUID GroupID:LLUUID | MoneyData:Single RequestID:LLUUID IntervalDays:S32 CurrentInterval:S32 StartDate:Variable(1) Balance:S32 TotalCredits:S32 TotalDebits:S32 ObjectTaxCurrent:S32 LightTaxCurrent:S32 LandTaxCurrent:S32 GroupTaxCurrent:S32 ParcelDirFeeCurrent:S32 ObjectTaxEstimate:S32 LightTaxEstimate:S32 LandTaxEstimate:S32 GroupTaxEstimate:S32 ParcelDirFeeEstimate:S32 NonExemptMembers:S32 LastTaxDate:Variable(1) TaxDate:Variable(1)
+Low:355 GroupAccountDetailsRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID GroupID:LLUUID | MoneyData:Single RequestID:LLUUID IntervalDays:S32 CurrentInterval:S32
+Low:356 GroupAccountDetailsReply | AgentData:Single AgentID:LLUUID GroupID:LLUUID | MoneyData:Single RequestID:LLUUID IntervalDays:S32 CurrentInterval:S32 StartDate:Variable(1) | HistoryData:Variable Description:Variable(1) Amount:S32
+Low:357 GroupAccountTransactionsRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID GroupID:LLUUID | MoneyData:Single RequestID:LLUUID IntervalDays:S32 CurrentInterval:S32
+Low:358 GroupAccountTransactionsReply | AgentData:Single AgentID:LLUUID GroupID:LLUUID | MoneyData:Single RequestID:LLUUID IntervalDays:S32 CurrentInterval:S32 StartDate:Variable(1) | HistoryData:Variable Time:Variable(1) User:Variable(1) Type:S32 Item:Variable(1) Amount:S32
+Low:359 GroupActiveProposalsRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | GroupData:Single GroupID:LLUUID | TransactionData:Single TransactionID:LLUUID
+Low:360 GroupActiveProposalItemReply | AgentData:Single AgentID:LLUUID GroupID:LLUUID | TransactionData:Single TransactionID:LLUUID TotalNumItems:U32 | ProposalData:Variable VoteID:LLUUID VoteInitiator:LLUUID TerseDateID:Variable(1) StartDateTime:Variable(1) EndDateTime:Variable(1) AlreadyVoted:BOOL VoteCast:Variable(1) Majority:F32 Quorum:S32 ProposalText:Variable(1)
+Low:361 GroupVoteHistoryRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | GroupData:Single GroupID:LLUUID | TransactionData:Single TransactionID:LLUUID
+Low:362 GroupVoteHistoryItemReply | AgentData:Single AgentID:LLUUID GroupID:LLUUID | TransactionData:Single TransactionID:LLUUID TotalNumItems:U32 | HistoryItemData:Single VoteID:LLUUID TerseDateID:Variable(1) StartDateTime:Variable(1) EndDateTime:Variable(1) VoteInitiator:LLUUID VoteType:Variable(1) VoteResult:Variable(1) Majority:F32 Quorum:S32 ProposalText:Variable(2) | VoteItem:Variable CandidateID:LLUUID VoteCast:Variable(1) NumVotes:S32
+Low:363 StartGroupProposal | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ProposalData:Single GroupID:LLUUID Quorum:S32 Majority:F32 Duration:S32 ProposalText:Variable(1)
+Low:364 GroupProposalBallot | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ProposalData:Single ProposalID:LLUUID GroupID:LLUUID VoteCast:Variable(1)
+Low:365 TallyVotes
+Low:366 GroupMembersRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | GroupData:Single GroupID:LLUUID RequestID:LLUUID
+Low:367 GroupMembersReply | AgentData:Single AgentID:LLUUID | GroupData:Single GroupID:LLUUID RequestID:LLUUID MemberCount:S32 | MemberData:Variable AgentID:LLUUID Contribution:S32 OnlineStatus:Variable(1) AgentPowers:U64 Title:Variable(1) IsOwner:BOOL
+Low:368 ActivateGroup | AgentData:Single AgentID:LLUUID SessionID:LLUUID GroupID:LLUUID
+Low:369 SetGroupContribution | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single GroupID:LLUUID Contribution:S32
+Low:370 SetGroupAcceptNotices | AgentData:Single AgentID:LLUUID SessionID:LLUUID | Data:Single GroupID:LLUUID AcceptNotices:BOOL | NewData:Single ListInProfile:BOOL
+Low:371 GroupRoleDataRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | GroupData:Single GroupID:LLUUID RequestID:LLUUID
+Low:372 GroupRoleDataReply | AgentData:Single AgentID:LLUUID | GroupData:Single GroupID:LLUUID RequestID:LLUUID RoleCount:S32 | RoleData:Variable RoleID:LLUUID Name:Variable(1) Title:Variable(1) Description:Variable(1) Powers:U64 Members:U32
+Low:373 GroupRoleMembersRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | GroupData:Single GroupID:LLUUID RequestID:LLUUID
+Low:374 GroupRoleMembersReply | AgentData:Single AgentID:LLUUID GroupID:LLUUID RequestID:LLUUID TotalPairs:U32 | MemberData:Variable RoleID:LLUUID MemberID:LLUUID
+Low:375 GroupTitlesRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID GroupID:LLUUID RequestID:LLUUID
+Low:376 GroupTitlesReply | AgentData:Single AgentID:LLUUID GroupID:LLUUID RequestID:LLUUID | GroupData:Variable Title:Variable(1) RoleID:LLUUID Selected:BOOL
+Low:377 GroupTitleUpdate | AgentData:Single AgentID:LLUUID SessionID:LLUUID GroupID:LLUUID TitleRoleID:LLUUID
+Low:378 GroupRoleUpdate | AgentData:Single AgentID:LLUUID SessionID:LLUUID GroupID:LLUUID | RoleData:Variable RoleID:LLUUID Name:Variable(1) Description:Variable(1) Title:Variable(1) Powers:U64 UpdateType:U8
+Low:379 LiveHelpGroupRequest | RequestData:Single RequestID:LLUUID AgentID:LLUUID
+Low:380 LiveHelpGroupReply | ReplyData:Single RequestID:LLUUID GroupID:LLUUID Selection:Variable(1)
+Low:381 AgentWearablesRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID
+Low:382 AgentWearablesUpdate | AgentData:Single AgentID:LLUUID SessionID:LLUUID SerialNum:U32 | WearableData:Variable ItemID:LLUUID AssetID:LLUUID WearableType:U8
+Low:383 AgentIsNowWearing | AgentData:Single AgentID:LLUUID SessionID:LLUUID | WearableData:Variable ItemID:LLUUID WearableType:U8
+Low:384 AgentCachedTexture | AgentData:Single AgentID:LLUUID SessionID:LLUUID SerialNum:S32 | WearableData:Variable ID:LLUUID TextureIndex:U8
+Low:385 AgentCachedTextureResponse | AgentData:Single AgentID:LLUUID SessionID:LLUUID SerialNum:S32 | WearableData:Variable TextureID:LLUUID TextureIndex:U8 HostName:Variable(1)
+Low:386 AgentDataUpdateRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID
+Low:387 AgentDataUpdate | AgentData:Single AgentID:LLUUID FirstName:Variable(1) LastName:Variable(1) GroupTitle:Variable(1) ActiveGroupID:LLUUID GroupPowers:U64 GroupName:Variable(1)
+Low:388 GroupDataUpdate | AgentGroupData:Variable AgentID:LLUUID GroupID:LLUUID AgentPowers:U64 GroupTitle:Variable(1)
+Low:389 AgentGroupDataUpdate | AgentData:Single AgentID:LLUUID | GroupData:Variable GroupID:LLUUID GroupPowers:U64 AcceptNotices:BOOL GroupInsigniaID:LLUUID Contribution:S32 GroupName:Variable(1)
+Low:390 AgentDropGroup | AgentData:Single AgentID:LLUUID GroupID:LLUUID
+Low:391 LogTextMessage | DataBlock:Variable FromAgentId:LLUUID ToAgentId:LLUUID GlobalX:F64 GlobalY:F64 Time:U32 Message:Variable(2)
+Low:392 CreateTrustedCircuit | DataBlock:Single EndPointID:LLUUID Digest:Fixed(32)
+Low:393 DenyTrustedCircuit | DataBlock:Single EndPointID:LLUUID
+Low:394 RequestTrustedCircuit
+Low:395 RezSingleAttachmentFromInv | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Single ItemID:LLUUID OwnerID:LLUUID AttachmentPt:U8 ItemFlags:U32 GroupMask:U32 EveryoneMask:U32 NextOwnerMask:U32 Name:Variable(1) Description:Variable(1)
+Low:396 RezMultipleAttachmentsFromInv | AgentData:Single AgentID:LLUUID SessionID:LLUUID | HeaderData:Single CompoundMsgID:LLUUID TotalObjects:U8 FirstDetachAll:BOOL | ObjectData:Variable ItemID:LLUUID OwnerID:LLUUID AttachmentPt:U8 ItemFlags:U32 GroupMask:U32 EveryoneMask:U32 NextOwnerMask:U32 Name:Variable(1) Description:Variable(1)
+Low:397 DetachAttachmentIntoInv | ObjectData:Single AgentID:LLUUID ItemID:LLUUID
+Low:398 CreateNewOutfitAttachments | AgentData:Single AgentID:LLUUID SessionID:LLUUID | HeaderData:Single NewFolderID:LLUUID | ObjectData:Variable OldItemID:LLUUID OldFolderID:LLUUID
+Low:399 UserInfoRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID
+Low:400 UserInfoReply | AgentData:Single AgentID:LLUUID | UserData:Single IMViaEMail:BOOL DirectoryVisibility:Variable(1) EMail:Variable(2)
+Low:401 UpdateUserInfo | AgentData:Single AgentID:LLUUID SessionID:LLUUID | UserData:Single IMViaEMail:BOOL DirectoryVisibility:Variable(1)
+Low:402 ParcelRename | ParcelData:Variable ParcelID:LLUUID NewName:Variable(1)
+Low:403 InitiateDownload | AgentData:Single AgentID:LLUUID | FileData:Single SimFilename:Variable(1) ViewerFilename:Variable(1)
+Low:404 SystemMessage | MethodData:Single Method:Variable(1) Invoice:LLUUID Digest:Fixed(32) | ParamList:Variable Parameter:Variable(1)
+Low:405 MapLayerRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID Flags:U32 EstateID:U32 Godlike:BOOL
+Low:406 MapLayerReply | AgentData:Single AgentID:LLUUID Flags:U32 | LayerData:Variable Left:U32 Right:U32 Top:U32 Bottom:U32 ImageID:LLUUID
+Low:407 MapBlockRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID Flags:U32 EstateID:U32 Godlike:BOOL | PositionData:Single MinX:U16 MaxX:U16 MinY:U16 MaxY:U16
+Low:408 MapNameRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID Flags:U32 EstateID:U32 Godlike:BOOL | NameData:Single Name:Variable(1)
+Low:409 MapBlockReply | AgentData:Single AgentID:LLUUID Flags:U32 | Data:Variable X:U16 Y:U16 Name:Variable(1) Access:U8 RegionFlags:U32 WaterHeight:U8 Agents:U8 MapImageID:LLUUID
+Low:410 MapItemRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID Flags:U32 EstateID:U32 Godlike:BOOL | RequestData:Single ItemType:U32 RegionHandle:U64
+Low:411 MapItemReply | AgentData:Single AgentID:LLUUID Flags:U32 | RequestData:Single ItemType:U32 | Data:Variable X:U32 Y:U32 ID:LLUUID Extra:S32 Extra2:S32 Name:Variable(1)
+Low:412 SendPostcard | AgentData:Single AgentID:LLUUID SessionID:LLUUID AssetID:LLUUID PosGlobal:LLVector3d To:Variable(1) From:Variable(1) Name:Variable(1) Subject:Variable(1) Msg:Variable(2) AllowPublish:BOOL MaturePublish:BOOL
+Low:413 RpcChannelRequest | DataBlock:Single GridX:U32 GridY:U32 TaskID:LLUUID ItemID:LLUUID
+Low:414 RpcChannelReply | DataBlock:Single TaskID:LLUUID ItemID:LLUUID ChannelID:LLUUID
+Low:415 RpcScriptRequestInbound | TargetBlock:Single GridX:U32 GridY:U32 | DataBlock:Single TaskID:LLUUID ItemID:LLUUID ChannelID:LLUUID IntValue:U32 StringValue:Variable(2)
+Low:416 RpcScriptRequestInboundForward | DataBlock:Single RPCServerIP:IPADDR RPCServerPort:IPPORT TaskID:LLUUID ItemID:LLUUID ChannelID:LLUUID IntValue:U32 StringValue:Variable(2)
+Low:417 RpcScriptReplyInbound | DataBlock:Single TaskID:LLUUID ItemID:LLUUID ChannelID:LLUUID IntValue:U32 StringValue:Variable(2)
+Low:418 ScriptMailRegistration | DataBlock:Single TargetIP:Variable(1) TargetPort:IPPORT TaskID:LLUUID Flags:U32
+Low:419 ParcelMediaCommandMessage | CommandBlock:Single Flags:U32 Command:U32 Time:F32
+Low:420 ParcelMediaUpdate | DataBlock:Single MediaURL:Variable(1) MediaID:LLUUID MediaAutoScale:U8 | DataBlockExtended:Single MediaType:Variable(1) MediaDesc:Variable(1) MediaWidth:S32 MediaHeight:S32 MediaLoop:U8
+Low:421 LandStatRequest | AgentData:Single AgentID:LLUUID SessionID:LLUUID | RequestData:Single ReportType:U32 RequestFlags:U32 Filter:Variable(1) ParcelLocalID:S32
+Low:422 LandStatReply | RequestData:Single ReportType:U32 RequestFlags:U32 TotalObjectCount:U32 | ReportData:Variable TaskLocalID:U32 TaskID:LLUUID LocationX:F32 LocationY:F32 LocationZ:F32 Score:F32 TaskName:Variable(1) OwnerName:Variable(1)
+Low:423 Error | AgentData:Single AgentID:LLUUID | Data:Single Code:S32 Token:Variable(1) ID:LLUUID System:Variable(1) Message:Variable(2) Data:Variable(2)
+Low:424 ObjectIncludeInSearch | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Variable ObjectLocalID:U32 IncludeInSearch:BOOL
+Low:425 RezRestoreToWorld | AgentData:Single AgentID:LLUUID SessionID:LLUUID | InventoryData:Single ItemID:LLUUID FolderID:LLUUID CreatorID:LLUUID OwnerID:LLUUID GroupID:LLUUID BaseMask:U32 OwnerMask:U32 GroupMask:U32 EveryoneMask:U32 NextOwnerMask:U32 GroupOwned:BOOL TransactionID:LLUUID Type:S8 InvType:S8 Flags:U32 SaleType:U8 SalePrice:S32 Name:Variable(1) Description:Variable(1) CreationDate:S32 CRC:U32
+Low:426 LinkInventoryItem | AgentData:Single AgentID:LLUUID SessionID:LLUUID | InventoryBlock:Single CallbackID:U32 FolderID:LLUUID TransactionID:LLUUID OldItemID:LLUUID Type:S8 InvType:S8 Name:Variable(1) Description:Variable(1)
+Low:427 RetrieveIMsExtended | AgentData:Single AgentID:LLUUID SessionID:LLUUID IsPremium:BOOL
+Low:428 JoinGroupRequestExtended | AgentData:Single AgentID:LLUUID SessionID:LLUUID GroupLimit:S32 | GroupData:Single GroupID:LLUUID
+Low:429 CreateGroupRequestExtended | AgentData:Single AgentID:LLUUID SessionID:LLUUID GroupLimit:S32 | GroupData:Single Name:Variable(1) Charter:Variable(2) ShowInList:BOOL InsigniaID:LLUUID MembershipFee:S32 OpenEnrollment:BOOL AllowPublish:BOOL MaturePublish:BOOL
+Low:430 LargeGenericMessage | AgentData:Single AgentID:LLUUID SessionID:LLUUID TransactionID:LLUUID | MethodData:Single Method:Variable(1) Invoice:LLUUID | ParamList:Variable Parameter:Variable(2)
+Low:431 ObjectBypassModUpdate | AgentData:Single AgentID:LLUUID SessionID:LLUUID | ObjectData:Variable ObjectLocalID:U32 PropertyID:U8 Value:Variable(2)
+Fixed:4294967291 PacketAck | Packets:Variable ID:U32
+Fixed:4294967292 OpenCircuit | CircuitInfo:Single IP:IPADDR Port:IPPORT
+Fixed:4294967293 CloseCircuit

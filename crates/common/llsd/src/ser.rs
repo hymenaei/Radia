@@ -6,6 +6,7 @@ use crate::{
 };
 use base::UUID;
 use base64::{Engine, engine::general_purpose::STANDARD};
+use quick_xml::escape::unescape;
 use serde::ser::{
     self, Impossible, Serialize, SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant, SerializeTuple, SerializeTupleStruct,
     SerializeTupleVariant,
@@ -889,6 +890,7 @@ fn xml_escaped_len(text: &str) -> Result<usize> {
             '&' => 5,
             '<' | '>' => 4,
             '"' | '\'' => 6,
+            '\r' => 5,
             value => value.len_utf8(),
         };
         length = length.checked_add(escaped_len).ok_or(Error::LimitExceeded("encoded length"))?;
@@ -983,6 +985,7 @@ fn escape_xml(text: &str, output: &mut Vec<u8>) {
             '>' => output.extend_from_slice(b"&gt;"),
             '\"' => output.extend_from_slice(b"&quot;"),
             '\'' => output.extend_from_slice(b"&apos;"),
+            '\r' => output.extend_from_slice(b"&#13;"),
             value => {
                 let mut bytes = [0; 4];
                 output.extend_from_slice(value.encode_utf8(&mut bytes).as_bytes());
@@ -1124,9 +1127,7 @@ fn extract_xml_string(bytes: &[u8]) -> Result<String> {
         return Err(Error::InvalidValue("expected a string payload".into()));
     }
     let value = from_utf8(&bytes[prefix.len()..bytes.len() - suffix.len()]).map_err(|_| Error::InvalidUtf8)?;
-    let mut decoded = value.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'");
-    decoded = decoded.replace("&amp;", "&");
-    Ok(decoded)
+    unescape(value).map(|decoded| decoded.into_owned()).map_err(|error| Error::InvalidValue(error.to_string()))
 }
 
 fn extract_binary_string(bytes: &[u8]) -> Result<String> {

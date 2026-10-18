@@ -1,5 +1,6 @@
 .vs
 .vscode
+.idea
 .cache
 .zed
 .claude
@@ -28,3 +29,6 @@ rustc-ice-*.txt
 *.capture
 
 flamegraph.svg
+
+**/*.proptest-regressions
+**/proptest-regressions/

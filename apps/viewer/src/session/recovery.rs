@@ -21,7 +21,7 @@ use protocol::lludp::{Message, Packet};
 use protocol::messages::{CacheMissType::Full, ObjectRequest, RequestAgentData, RequestMultipleObjects};
 use world::LocalAddress;
 
-use super::coordinator::{PresentationMailbox, ViewerUpdate};
+use super::recovery_state::RecoveryState;
 
 pub(super) const RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 pub(super) const RECOVERY_MAX_SENDS: u8 = 4;
@@ -30,21 +30,17 @@ const RECOVERY_REQUEST_INTERVAL: Duration = Duration::from_millis(100);
 const RECOVERY_MAX_AGE: Duration = Duration::from_secs(60);
 const RECOVERY_MAX_BACKOFF: Duration = Duration::from_secs(30);
 const RECOVERY_OVERFLOW_LOG_INTERVAL: Duration = Duration::from_secs(5);
+const MAX_RECOVERY_DIAGNOSTIC_ADDRESSES: usize = 8;
 pub(super) const MAX_RECOVERY_OBJECTS_PER_REQUEST: usize = 255;
 pub(super) const MAX_PENDING_RECOVERY_TARGETS: usize = 65_536;
 pub(super) const MAX_PENDING_RECOVERY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RECOVERY_REQUEST_BYTES: usize = 2 * 1024;
-const RECOVERY_QUEUE_ENTRY_BYTES: usize = size_of::<(RecoveryKey, ScheduledRecovery)>() + 64;
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(super) struct RecoveryKey {
-    pub(super) simulator_id: SimulatorId,
-    pub(super) address: LocalAddress,
-}
+const RECOVERY_QUEUE_ENTRY_BYTES: usize = size_of::<(LocalAddress, ScheduledRecovery)>() + 64;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ScheduledRecovery {
-    pub(super) key: RecoveryKey,
+    pub(super) key: LocalAddress,
+    pub(super) simulator_id: SimulatorId,
     pub(super) token: u64,
     pub(super) agent_data: RequestAgentData,
     pub(super) retry: RecoveryRetryState,
@@ -53,7 +49,7 @@ pub(super) struct ScheduledRecovery {
 
 impl ScheduledRecovery {
     fn new(simulator_id: SimulatorId, token: u64, agent_data: RequestAgentData, address: LocalAddress, now: Instant) -> Self {
-        Self { key: RecoveryKey { simulator_id, address }, token, agent_data, retry: RecoveryRetryState::new(now), in_flight: false }
+        Self { key: address, simulator_id, token, agent_data, retry: RecoveryRetryState::new(now), in_flight: false }
     }
 }
 
@@ -97,7 +93,7 @@ impl RecoveryRetryState {
 }
 
 pub(super) struct RecoveryRetryQueue {
-    pub(super) pending: HashMap<RecoveryKey, ScheduledRecovery>,
+    pub(super) pending: HashMap<LocalAddress, ScheduledRecovery>,
     max_targets: usize,
     max_bytes: usize,
     pending_bytes: usize,
@@ -125,29 +121,38 @@ impl RecoveryRetryQueue {
         agent_data: RequestAgentData,
         address: LocalAddress,
         now: Instant,
-    ) -> bool {
-        let key = RecoveryKey { simulator_id, address };
+    ) -> Option<u64> {
+        let key = address;
         if let Some(recovery) = self.pending.get_mut(&key) {
-            recovery.agent_data = agent_data;
-            return true;
+            if recovery.simulator_id == simulator_id {
+                recovery.agent_data = agent_data;
+                return Some(recovery.token);
+            }
+            let token = self.next_token.checked_add(1)?;
+            self.next_token = token;
+            *recovery = ScheduledRecovery::new(simulator_id, token, agent_data, address, now);
+            return Some(token);
         }
         if self.pending.len() >= self.max_targets || self.pending_bytes.saturating_add(RECOVERY_QUEUE_ENTRY_BYTES) > self.max_bytes {
-            return false;
+            return None;
         }
-        let Some(token) = self.next_token.checked_add(1) else { return false };
+        let token = self.next_token.checked_add(1)?;
         self.next_token = token;
         self.pending.insert(key, ScheduledRecovery::new(simulator_id, token, agent_data, address, now));
         self.pending_bytes += RECOVERY_QUEUE_ENTRY_BYTES;
-        true
+        Some(token)
     }
 
-    pub(super) fn cancel_simulator(&mut self, simulator_id: SimulatorId) {
-        self.pending.retain(|key, _| key.simulator_id != simulator_id);
+    pub(super) fn cancel_simulator(&mut self, simulator_id: SimulatorId) -> Vec<ScheduledRecovery> {
+        let keys =
+            self.pending.iter().filter(|(_, recovery)| recovery.simulator_id == simulator_id).map(|(key, _)| *key).collect::<Vec<_>>();
+        let cancelled = keys.into_iter().filter_map(|key| self.pending.remove(&key)).collect();
         self.update_pending_bytes();
+        cancelled
     }
 
-    pub(super) fn cancel(&mut self, simulator_id: SimulatorId, address: LocalAddress) {
-        self.remove(RecoveryKey { simulator_id, address });
+    pub(super) fn cancel(&mut self, address: LocalAddress) {
+        self.remove(address);
     }
 
     pub(super) fn next_deadline(&self) -> Option<Instant> {
@@ -159,21 +164,15 @@ impl RecoveryRetryQueue {
     }
 
     pub(super) fn take_due(&mut self, now: Instant) -> Vec<ScheduledRecovery> {
-        self.pending.retain(|_, recovery| !recovery.retry.is_expired(now));
-        self.update_pending_bytes();
-
-        let Some(simulator_id) = self
-            .pending
-            .values()
-            .find(|recovery| !recovery.in_flight && recovery.retry.is_due(now))
-            .map(|recovery| recovery.key.simulator_id)
+        let Some(simulator_id) =
+            self.pending.values().find(|recovery| !recovery.in_flight && recovery.retry.is_due(now)).map(|recovery| recovery.simulator_id)
         else {
             return Vec::new();
         };
         let due_keys = self
             .pending
             .iter()
-            .filter(|(_, recovery)| recovery.key.simulator_id == simulator_id && !recovery.in_flight && recovery.retry.is_due(now))
+            .filter(|(_, recovery)| recovery.simulator_id == simulator_id && !recovery.in_flight && recovery.retry.is_due(now))
             .take(MAX_RECOVERY_OBJECTS_PER_REQUEST)
             .map(|(key, _)| *key)
             .collect::<Vec<_>>();
@@ -185,6 +184,19 @@ impl RecoveryRetryQueue {
                 Some(*recovery)
             })
             .collect()
+    }
+
+    pub(super) fn take_expired(&mut self, now: Instant) -> Vec<ScheduledRecovery> {
+        let keys = self
+            .pending
+            .iter()
+            .filter(|(_, recovery)| !recovery.in_flight && recovery.retry.is_expired(now))
+            .take(MAX_RECOVERY_OBJECTS_PER_REQUEST)
+            .map(|(key, _)| *key)
+            .collect::<Vec<_>>();
+        let expired = keys.into_iter().filter_map(|key| self.pending.remove(&key)).collect();
+        self.update_pending_bytes();
+        expired
     }
 
     pub(super) fn mark_sent(&mut self, recovery: ScheduledRecovery, now: Instant) {
@@ -207,7 +219,7 @@ impl RecoveryRetryQueue {
         }
     }
 
-    fn remove(&mut self, key: RecoveryKey) {
+    fn remove(&mut self, key: LocalAddress) {
         if self.pending.remove(&key).is_some() {
             self.pending_bytes = self.pending_bytes.saturating_sub(RECOVERY_QUEUE_ENTRY_BYTES);
         }
@@ -231,27 +243,52 @@ impl RecoveryRetryQueue {
 }
 
 pub(super) fn schedule_recovery_requests(
-    simulator_id: SimulatorId,
-    targets: Vec<LocalAddress>,
+    targets: Vec<(Option<SimulatorId>, LocalAddress)>,
     updated: Vec<LocalAddress>,
     session: Option<&AgentSession>,
+    state: &RecoveryState,
     queue: Arc<Mutex<RecoveryRetryQueue>>,
     wake_sender: &mut mpsc::Sender<()>,
 ) {
     if targets.is_empty() && updated.is_empty() {
         return;
     }
-    let Some(session) = session else {
-        return;
-    };
-    let agent_data = RequestAgentData { agent_id: session.agent_id, session_id: session.session_id };
+    let agent_data = session.map(|session| RequestAgentData { agent_id: session.agent_id, session_id: session.session_id });
     let now = Instant::now();
+    let mut dropped = 0;
     let overflow_warning = {
         let mut queue = queue.lock().unwrap_or_else(PoisonError::into_inner);
         for address in updated {
-            queue.cancel(simulator_id, address);
+            queue.cancel(address);
+            state.cancel(address);
         }
-        let dropped = targets.into_iter().filter(|address| !queue.schedule(simulator_id, agent_data, *address, now)).count();
+        for (simulator_id, address) in targets {
+            if !state.can_schedule(address) {
+                if !state.is_degraded(address) {
+                    state.mark_degraded(address, simulator_id);
+                    dropped += 1;
+                }
+                continue;
+            }
+            let Some(simulator_id) = simulator_id else {
+                queue.cancel(address);
+                state.mark_degraded(address, None);
+                dropped += 1;
+                continue;
+            };
+            let Some(agent_data) = agent_data else {
+                state.mark_degraded(address, Some(simulator_id));
+                dropped += 1;
+                continue;
+            };
+            match queue.schedule(simulator_id, agent_data, address, now) {
+                Some(token) => state.schedule(address, simulator_id, token),
+                None => {
+                    state.mark_degraded(address, Some(simulator_id));
+                    dropped += 1;
+                }
+            }
+        }
         (dropped > 0).then(|| queue.record_overflow(dropped, now)).flatten()
     };
     if let Some(dropped) = overflow_warning {
@@ -264,7 +301,7 @@ pub(super) async fn run_recovery_retries(
     mut wake_receiver: mpsc::Receiver<()>,
     queue: Arc<Mutex<RecoveryRetryQueue>>,
     session_handle: SessionHandle,
-    mailbox: PresentationMailbox,
+    state: RecoveryState,
     background: gpui::BackgroundExecutor,
     cancellation: impl Future<Output = ()> + Clone + Send + 'static,
 ) {
@@ -273,10 +310,7 @@ pub(super) async fn run_recovery_retries(
     let mut next_send_at = None;
     loop {
         let now = Instant::now();
-        let queue_deadline = {
-            let queue = queue.lock().unwrap_or_else(PoisonError::into_inner);
-            queue.next_deadline()
-        };
+        let queue_deadline = recovery_deadline(&queue);
         let deadline = queue_deadline.map(|deadline| next_send_at.map_or(deadline, |send_at| deadline.max(send_at)));
         let wait = deadline.map_or(RECOVERY_IDLE_WAIT, |deadline| deadline.saturating_duration_since(now));
         let can_wake_early = next_send_at.is_none_or(|send_at| now >= send_at);
@@ -290,33 +324,31 @@ pub(super) async fn run_recovery_retries(
             wake = wake => if wake.is_none() { break; },
         }
 
-        let due = {
-            let mut queue = queue.lock().unwrap_or_else(PoisonError::into_inner);
-            queue.take_due(Instant::now())
-        };
+        let aged_out = take_expired_recoveries(&queue, Instant::now());
+        state.degrade(aged_out.iter().map(|recovery| (recovery.key, recovery.token)));
+        warn_unrecovered("age_limit", &aged_out);
+
+        let due = take_due_recoveries(&queue, Instant::now());
         if due.is_empty() {
             continue;
         }
-        let (expired, recoveries): (Vec<_>, Vec<_>) = due.into_iter().partition(|recovery| recovery.retry.is_exhausted());
-        {
-            let mut queue = queue.lock().unwrap_or_else(PoisonError::into_inner);
-            for recovery in expired {
-                queue.finish(recovery);
-            }
-        }
+        state.start(due.iter().map(|recovery| (recovery.key, recovery.token)));
+        let (exhausted, recoveries): (Vec<_>, Vec<_>) = due.into_iter().partition(|recovery| recovery.retry.is_exhausted());
+        state.degrade(exhausted.iter().map(|recovery| (recovery.key, recovery.token)));
+        finish_recoveries(&queue, &exhausted);
+        warn_unrecovered("send_limit", &exhausted);
         let Some(first) = recoveries.first() else {
             continue;
         };
-        let simulator_id = first.key.simulator_id;
-        let addresses = recoveries.iter().map(|recovery| recovery.key.address).collect::<Vec<_>>();
+        let simulator_id = first.simulator_id;
+        let addresses = recoveries.iter().map(|recovery| recovery.key).collect::<Vec<_>>();
+        let recovery_keys = recoveries.iter().map(|recovery| (recovery.key, recovery.token)).collect::<Vec<_>>();
         let request = recovery_request(first.agent_data, &addresses);
         let packet_size = Packet::new(0, Message::RequestMultipleObjects(request.clone())).encode().map(|packet| packet.len());
         if !packet_size.is_ok_and(|size| size <= MAX_RECOVERY_REQUEST_BYTES) {
-            let mut queue = queue.lock().unwrap_or_else(PoisonError::into_inner);
-            for recovery in recoveries {
-                queue.finish(recovery);
-            }
-            mailbox.publish(ViewerUpdate::SendError("Could not request object updates: recovery packet exceeded its byte budget.".into()));
+            finish_recoveries(&queue, &recoveries);
+            state.degrade(recovery_keys);
+            tracing::error!("object recovery request exceeded its byte budget");
             continue;
         }
 
@@ -333,31 +365,76 @@ pub(super) async fn run_recovery_retries(
 
         match result {
             Ok(()) => {
-                let mut queue = queue.lock().unwrap_or_else(PoisonError::into_inner);
-                for recovery in recoveries {
-                    queue.mark_sent(recovery, now);
-                }
+                mark_recoveries_sent(&queue, &recoveries, now);
+                state.retry(recoveries.iter().map(|recovery| (recovery.key, recovery.token)));
             }
             Err(error) if retryable_send_error(&error) => {
-                let mut queue = queue.lock().unwrap_or_else(PoisonError::into_inner);
-                for recovery in recoveries {
-                    queue.defer(recovery, now);
-                }
+                defer_recoveries(&queue, &recoveries, now);
+                state.retry(recoveries.iter().map(|recovery| (recovery.key, recovery.token)));
                 tracing::debug!(%error, "object recovery send deferred");
             }
             Err(error) => {
-                let mut queue = queue.lock().unwrap_or_else(PoisonError::into_inner);
                 if simulator_lost_error(&error) {
-                    queue.cancel_simulator(simulator_id);
+                    let cancelled = cancel_simulator_recoveries(&queue, simulator_id);
+                    state.degrade(cancelled.iter().map(|recovery| (recovery.key, recovery.token)));
                 } else {
-                    for recovery in recoveries {
-                        queue.finish(recovery);
-                    }
+                    finish_recoveries(&queue, &recoveries);
+                    state.degrade(recoveries.iter().map(|recovery| (recovery.key, recovery.token)));
                 }
-                mailbox.publish(ViewerUpdate::SendError(format!("Could not request object updates: {error}")));
+                tracing::warn!(%error, "could not request object updates");
             }
         }
     }
+}
+
+fn warn_unrecovered(reason: &'static str, recoveries: &[ScheduledRecovery]) {
+    if recoveries.is_empty() {
+        return;
+    }
+    let addresses = recoveries.iter().take(MAX_RECOVERY_DIAGNOSTIC_ADDRESSES).map(|recovery| recovery.key).collect::<Vec<_>>();
+    tracing::warn!(
+        reason,
+        count = recoveries.len(),
+        addresses = ?addresses,
+        "Object recovery stopped; objects may remain missing"
+    );
+}
+
+fn recovery_deadline(queue: &Mutex<RecoveryRetryQueue>) -> Option<Instant> {
+    queue.lock().unwrap_or_else(PoisonError::into_inner).next_deadline()
+}
+
+fn take_expired_recoveries(queue: &Mutex<RecoveryRetryQueue>, now: Instant) -> Vec<ScheduledRecovery> {
+    queue.lock().unwrap_or_else(PoisonError::into_inner).take_expired(now)
+}
+
+fn take_due_recoveries(queue: &Mutex<RecoveryRetryQueue>, now: Instant) -> Vec<ScheduledRecovery> {
+    queue.lock().unwrap_or_else(PoisonError::into_inner).take_due(now)
+}
+
+fn finish_recoveries(queue: &Mutex<RecoveryRetryQueue>, recoveries: &[ScheduledRecovery]) {
+    let mut queue = queue.lock().unwrap_or_else(PoisonError::into_inner);
+    for recovery in recoveries {
+        queue.finish(*recovery);
+    }
+}
+
+fn mark_recoveries_sent(queue: &Mutex<RecoveryRetryQueue>, recoveries: &[ScheduledRecovery], now: Instant) {
+    let mut queue = queue.lock().unwrap_or_else(PoisonError::into_inner);
+    for recovery in recoveries {
+        queue.mark_sent(*recovery, now);
+    }
+}
+
+fn defer_recoveries(queue: &Mutex<RecoveryRetryQueue>, recoveries: &[ScheduledRecovery], now: Instant) {
+    let mut queue = queue.lock().unwrap_or_else(PoisonError::into_inner);
+    for recovery in recoveries {
+        queue.defer(*recovery, now);
+    }
+}
+
+fn cancel_simulator_recoveries(queue: &Mutex<RecoveryRetryQueue>, simulator_id: SimulatorId) -> Vec<ScheduledRecovery> {
+    queue.lock().unwrap_or_else(PoisonError::into_inner).cancel_simulator(simulator_id)
 }
 
 fn retryable_send_error(error: &Error) -> bool {
@@ -381,15 +458,14 @@ mod tests {
     };
 
     use base::UUID;
-    use network::test_support::simulator_id;
+    use network::testing::simulator_id;
     use protocol::lludp::{Message, Packet};
     use protocol::messages::{CacheMissType::Full, RequestAgentData};
     use world::{LocalAddress, Region};
 
     use super::{
         MAX_PENDING_RECOVERY_BYTES, MAX_PENDING_RECOVERY_TARGETS, MAX_RECOVERY_OBJECTS_PER_REQUEST, MAX_RECOVERY_REQUEST_BYTES,
-        RECOVERY_MAX_AGE, RECOVERY_MAX_SENDS, RECOVERY_QUEUE_ENTRY_BYTES, RECOVERY_RETRY_INTERVAL, RecoveryKey, RecoveryRetryQueue,
-        recovery_request,
+        RECOVERY_MAX_AGE, RECOVERY_MAX_SENDS, RECOVERY_QUEUE_ENTRY_BYTES, RECOVERY_RETRY_INTERVAL, RecoveryRetryQueue, recovery_request,
     };
 
     fn address(region: u64, local_id: u32) -> LocalAddress {
@@ -404,15 +480,15 @@ mod tests {
         let agent_data = RequestAgentData { agent_id: UUID::from_u128(1), session_id: UUID::from_u128(2) };
         let mut now = Instant::now();
         let mut queue = RecoveryRetryQueue::new(1, RECOVERY_QUEUE_ENTRY_BYTES);
-        assert!(queue.schedule(simulator_id, agent_data, target, now));
-        assert!(queue.schedule(simulator_id, agent_data, target, now + Duration::from_secs(1)));
-        assert!(!queue.schedule(simulator_id, agent_data, other_target, now));
+        assert!(queue.schedule(simulator_id, agent_data, target, now).is_some());
+        assert!(queue.schedule(simulator_id, agent_data, target, now + Duration::from_secs(1)).is_some());
+        assert!(queue.schedule(simulator_id, agent_data, other_target, now).is_none());
         assert_eq!(queue.pending.len(), 1);
 
         for _ in 0..RECOVERY_MAX_SENDS {
             let due = queue.take_due(now);
             let [recovery] = due.as_slice() else { panic!("expected one due recovery") };
-            assert_eq!(recovery.key.address, target);
+            assert_eq!(recovery.key, target);
             assert!(!recovery.retry.is_exhausted());
             queue.mark_sent(*recovery, now);
             assert!(queue.take_due(now + RECOVERY_RETRY_INTERVAL - Duration::from_nanos(1)).is_empty());
@@ -433,23 +509,47 @@ mod tests {
         let agent_data = RequestAgentData { agent_id: UUID::from_u128(1), session_id: UUID::from_u128(2) };
         let now = Instant::now();
         let mut queue = RecoveryRetryQueue::new(1, RECOVERY_QUEUE_ENTRY_BYTES);
-        assert!(queue.schedule(simulator_id, agent_data, target, now));
+        assert!(queue.schedule(simulator_id, agent_data, target, now).is_some());
         let due = queue.take_due(now);
         let [stale] = due.as_slice() else { panic!("expected in-flight recovery") };
         let stale = *stale;
 
-        queue.cancel(simulator_id, target);
-        assert!(queue.schedule(simulator_id, agent_data, target, now));
-        let replacement = queue.pending.get(&RecoveryKey { simulator_id, address: target }).copied().expect("replacement recovery");
+        queue.cancel(target);
+        assert!(queue.schedule(simulator_id, agent_data, target, now).is_some());
+        let replacement = queue.pending.get(&target).copied().expect("replacement recovery");
         assert_ne!(stale.token, replacement.token);
 
         queue.mark_sent(stale, now);
         queue.finish(stale);
 
-        let current = queue.pending.get(&RecoveryKey { simulator_id, address: target }).expect("replacement remains queued");
+        let current = queue.pending.get(&target).expect("replacement remains queued");
         assert_eq!(current.token, replacement.token);
         assert_eq!(current.retry.sends, 0);
         assert!(!current.in_flight);
+    }
+
+    #[test]
+    fn recovery_retargets_in_flight() {
+        let source_simulator = simulator_id();
+        let destination_simulator = simulator_id();
+        let target = address(source_simulator.get(), 11);
+        let agent_data = RequestAgentData { agent_id: UUID::from_u128(1), session_id: UUID::from_u128(2) };
+        let now = Instant::now();
+        let mut queue = RecoveryRetryQueue::new(1, RECOVERY_QUEUE_ENTRY_BYTES);
+        assert!(queue.schedule(source_simulator, agent_data, target, now).is_some());
+        let due = queue.take_due(now);
+        let [stale] = due.as_slice() else { panic!("expected in-flight recovery") };
+        let stale = *stale;
+
+        assert!(queue.schedule(destination_simulator, agent_data, target, now).is_some());
+        let key = target;
+        let current = queue.pending.get(&key).expect("routed recovery");
+        assert_eq!(current.simulator_id, destination_simulator);
+        assert_ne!(current.token, stale.token);
+
+        queue.finish(stale);
+        assert_eq!(queue.pending.len(), 1);
+        assert_eq!(queue.pending[&key].simulator_id, destination_simulator);
     }
 
     #[test]
@@ -459,11 +559,11 @@ mod tests {
         let agent_data = RequestAgentData { agent_id: UUID::from_u128(1), session_id: UUID::from_u128(2) };
         let mut queue =
             RecoveryRetryQueue::new(MAX_RECOVERY_OBJECTS_PER_REQUEST, MAX_RECOVERY_OBJECTS_PER_REQUEST * RECOVERY_QUEUE_ENTRY_BYTES);
-        queue.schedule(simulator_id, agent_data, target, Instant::now());
-        queue.cancel(simulator_id, target);
+        let _ = queue.schedule(simulator_id, agent_data, target, Instant::now());
+        queue.cancel(target);
         assert!(queue.next_deadline().is_none());
 
-        queue.schedule(simulator_id, agent_data, target, Instant::now());
+        let _ = queue.schedule(simulator_id, agent_data, target, Instant::now());
         queue.cancel_simulator(simulator_id);
         assert!(queue.next_deadline().is_none());
     }
@@ -476,7 +576,7 @@ mod tests {
         let mut queue = RecoveryRetryQueue::new(MAX_PENDING_RECOVERY_TARGETS, MAX_PENDING_RECOVERY_BYTES);
 
         for local_id in 1..=MAX_RECOVERY_OBJECTS_PER_REQUEST + 1 {
-            assert!(queue.schedule(simulator_id, agent_data, address(simulator_id.get(), local_id as u32), now));
+            assert!(queue.schedule(simulator_id, agent_data, address(simulator_id.get(), local_id as u32), now).is_some());
         }
 
         assert_eq!(queue.pending.len(), MAX_RECOVERY_OBJECTS_PER_REQUEST + 1);
@@ -489,12 +589,12 @@ mod tests {
         let now = Instant::now();
         let mut queue = RecoveryRetryQueue::new(300, 300 * RECOVERY_QUEUE_ENTRY_BYTES);
         for local_id in 1..=MAX_RECOVERY_OBJECTS_PER_REQUEST + 1 {
-            assert!(queue.schedule(simulator_id, agent_data, address(simulator_id.get(), local_id as u32), now));
+            assert!(queue.schedule(simulator_id, agent_data, address(simulator_id.get(), local_id as u32), now).is_some());
         }
 
         let first_batch = queue.take_due(now);
         assert_eq!(first_batch.len(), MAX_RECOVERY_OBJECTS_PER_REQUEST);
-        assert!(first_batch.iter().all(|recovery| recovery.key.simulator_id == simulator_id));
+        assert!(first_batch.iter().all(|recovery| recovery.simulator_id == simulator_id));
         for recovery in first_batch {
             queue.mark_sent(recovery, now);
         }
@@ -510,7 +610,7 @@ mod tests {
         let agent_data = RequestAgentData { agent_id: UUID::from_u128(1), session_id: UUID::from_u128(2) };
         let now = Instant::now();
         let mut queue = RecoveryRetryQueue::new(1, RECOVERY_QUEUE_ENTRY_BYTES);
-        assert!(queue.schedule(simulator_id, agent_data, target, now));
+        assert!(queue.schedule(simulator_id, agent_data, target, now).is_some());
 
         let due = queue.take_due(now);
         let [recovery] = due.as_slice() else { panic!("expected one due recovery") };
@@ -532,8 +632,9 @@ mod tests {
         let agent_data = RequestAgentData { agent_id: UUID::from_u128(1), session_id: UUID::from_u128(2) };
         let now = Instant::now();
         let mut queue = RecoveryRetryQueue::new(1, RECOVERY_QUEUE_ENTRY_BYTES);
-        assert!(queue.schedule(simulator_id, agent_data, target, now));
+        assert!(queue.schedule(simulator_id, agent_data, target, now).is_some());
 
+        assert_eq!(queue.take_expired(now + RECOVERY_MAX_AGE).len(), 1);
         assert!(queue.take_due(now + RECOVERY_MAX_AGE).is_empty());
         assert!(queue.pending.is_empty());
         assert_eq!(queue.pending_bytes, 0);
@@ -545,9 +646,9 @@ mod tests {
         let agent_data = RequestAgentData { agent_id: UUID::from_u128(1), session_id: UUID::from_u128(2) };
         let now = Instant::now();
         let mut queue = RecoveryRetryQueue::new(3, 2 * RECOVERY_QUEUE_ENTRY_BYTES);
-        assert!(queue.schedule(simulator_id, agent_data, address(simulator_id.get(), 1), now));
-        assert!(queue.schedule(simulator_id, agent_data, address(simulator_id.get(), 2), now));
-        assert!(!queue.schedule(simulator_id, agent_data, address(simulator_id.get(), 3), now));
+        assert!(queue.schedule(simulator_id, agent_data, address(simulator_id.get(), 1), now).is_some());
+        assert!(queue.schedule(simulator_id, agent_data, address(simulator_id.get(), 2), now).is_some());
+        assert!(queue.schedule(simulator_id, agent_data, address(simulator_id.get(), 3), now).is_none());
         assert_eq!(queue.pending_bytes, 2 * RECOVERY_QUEUE_ENTRY_BYTES);
 
         assert_eq!(queue.record_overflow(2, now), Some(2));

@@ -1,4 +1,4 @@
-use crate::{codec::Reader, error::LLUdpError};
+use crate::{LLUdpError, lludp::codec::Reader};
 
 /// Simulator removal notification containing object IDs.
 #[derive(Clone, Debug, Eq, PartialEq)]

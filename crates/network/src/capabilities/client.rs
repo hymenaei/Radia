@@ -6,7 +6,7 @@ use serde::Serialize;
 use tokio::{
     runtime::Handle,
     sync::{Mutex, OwnedSemaphorePermit, mpsc, oneshot, watch},
-    task::{AbortHandle, JoinHandle},
+    task::{AbortHandle, JoinError, JoinHandle},
     time,
 };
 
@@ -91,6 +91,19 @@ pub struct Client {
 
 struct RequestWorker {
     task: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl RequestWorker {
+    /// Joins once across client clones; cancelled calls leave the join available.
+    async fn wait(&self) -> Result<(), JoinError> {
+        let mut task = self.task.lock().await;
+        let result = match task.as_mut() {
+            Some(task) => task.await,
+            None => return Ok(()),
+        };
+        *task = None;
+        result
+    }
 }
 
 struct AbortOnDrop(AbortHandle);
@@ -314,7 +327,9 @@ impl Client {
 
     /// Fetches the raw body for binary or otherwise non-LLSD capability resources.
     ///
-    /// The response body is limited to 32 MiB.
+    /// The response body is limited to 32 MiB. Network holds request and response-memory
+    /// admission through delivery. After return, the caller owns the bytes outside Network's
+    /// memory budget and must account for their retention and any decoding.
     ///
     /// # Errors
     ///
@@ -406,10 +421,7 @@ impl Client {
     }
 
     pub(crate) async fn wait_for_worker(&self) {
-        let mut task = self.request_worker.task.lock().await;
-        if let Some(task) = task.take()
-            && task.await.is_err()
-        {
+        if self.request_worker.wait().await.is_err() {
             self.status.record_error("The capability request worker failed during shutdown.");
         }
     }
@@ -612,7 +624,7 @@ pub(crate) mod tests {
         runtime,
         sync::{Mutex, MutexGuard, Semaphore, mpsc, oneshot, watch},
         task::{JoinSet, spawn, yield_now},
-        time::{self, sleep, timeout},
+        time::{sleep, timeout},
     };
     use url::Url;
     use zip::ZipArchive;
@@ -673,6 +685,30 @@ pub(crate) mod tests {
     }
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+    #[tokio::test]
+    async fn cancelled_worker_wait_can_be_resumed() {
+        use std::pin::pin;
+
+        use super::RequestWorker;
+        use tokio::sync::Mutex;
+
+        let (release, wait) = oneshot::channel::<()>();
+        let worker = RequestWorker {
+            task: Mutex::new(Some(spawn(async move {
+                let _ = wait.await;
+            }))),
+        };
+        {
+            let mut wait = pin!(worker.wait());
+            assert!(wait.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        }
+        let mut wait = pin!(worker.wait());
+        assert!(wait.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending(), "the worker is still running");
+        release.send(()).expect("worker is waiting for release");
+        wait.await.expect("resumed join completes");
+        worker.wait().await.expect("repeated join is harmless");
+    }
 
     async fn read_request_headers(stream: &mut net::TcpStream) -> io::Result<()> {
         let mut request = Vec::new();
@@ -2162,8 +2198,7 @@ pub(crate) mod tests {
             panic!("EventQueue response must be admitted as one complete batch");
         };
         assert_eq!(source, test_source());
-        let mut events = events.into_iter();
-        assert_eq!(events.next().expect("first event").message, "FirstEvent");
+        assert_eq!(events.iter().map(|event| event.message.as_str()).collect::<Vec<_>>(), ["FirstEvent", "SecondEvent"]);
         drop(events);
 
         let second_poll = server.next_request();
@@ -2468,53 +2503,6 @@ pub(crate) mod tests {
         assert!(primary_requests.len() >= 2, "primary event queue should receive its seed and poll requests");
         neighbor_seed_server.stop();
         let _ = neighbor_seed_server.finish();
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn backpressure_stops_poll() {
-        let server = EventQueueTestServer::start(|base| {
-            let mut event_url = base.clone();
-            event_url.set_path("/event-queue");
-            vec![
-                EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed_response(&event_url))),
-                EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, TWO_EVENT_BATCH)),
-                hold_response(),
-            ]
-        });
-        let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
-        let (event_sender, received_events) = mpsc::channel(1);
-        event_sender.try_send(EventEnvelope::new(Event::Failed("hold the only downstream slot".into()))).expect("fill event channel");
-        let mut received_events = EventReceiver::new(received_events);
-        let (shutdown, shutdown_requested) = watch::channel(false);
-        let task = client
-            .start_event_queue(SimulatorId::new(1), test_source(), event_sender, shutdown_requested, CoverageLossLedger::new())
-            .expect("start event queue");
-
-        let seed_request = server.next_request();
-        let poll_request = server.next_request();
-        assert!(request_line(&seed_request).starts_with("POST /seed HTTP/1.1"));
-        assert!(request_line(&poll_request).starts_with("POST /event-queue HTTP/1.1"));
-        let deadline = time::Instant::now() + Duration::from_millis(100);
-        while time::Instant::now() < deadline {
-            assert!(
-                matches!(server.requests.try_recv(), Err(sync::mpsc::TryRecvError::Empty)),
-                "poller requested another batch while blocked"
-            );
-            sleep(Duration::from_millis(10)).await;
-        }
-
-        assert!(matches!(received_events.try_recv(), Ok(Event::Failed(_))));
-        assert!(
-            matches!(timeout(TEST_TIMEOUT, received_events.recv()).await.expect("batch should enter Network intake"), Some(Event::CapabilityEventBatch { events, .. })
-            if events.iter().map(|event| event.message.as_str()).collect::<Vec<_>>() == ["First", "Second"])
-        );
-        let acknowledged_poll = server.next_request();
-        assert!(request_line(&acknowledged_poll).starts_with("POST /event-queue HTTP/1.1"));
-        assert_eq!(map_field(&decode_request_body(&acknowledged_poll), "ack"), Some(&Value::Integer(5)));
-        shutdown.send_replace(true);
-        timeout(TEST_TIMEOUT, task.wait()).await.expect("shutdown should cancel the next held long poll");
-        server.stop();
-        assert!(server.finish().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

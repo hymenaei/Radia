@@ -1,4 +1,8 @@
-use std::sync::Arc;
+use std::{
+    error::Error,
+    fmt::{self, Display, Formatter},
+    sync::Arc,
+};
 
 use crate::AssetId;
 
@@ -294,6 +298,18 @@ pub enum AvatarAppearanceError {
     /// More visual-parameter values were supplied than fit the wire count.
     TooManyVisualParams,
 }
+
+impl Display for AvatarAppearanceError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateVisualParam => f.write_str("avatar visual parameter is duplicated"),
+            Self::NilTextureId => f.write_str("avatar texture identifier is nil"),
+            Self::TooManyVisualParams => f.write_str("too many avatar visual parameters"),
+        }
+    }
+}
+
+impl Error for AvatarAppearanceError {}
 
 #[cfg(test)]
 mod tests {

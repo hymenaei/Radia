@@ -7,7 +7,6 @@ use world::{
     ApplyOutcome::Introduced,
     Entity, FieldGroup, FieldRejection,
     FieldRejectionReason::ParentCycle,
-    FieldUpdate,
     Kind::Object,
     ObjectObservation, ObjectPatch,
     OrderEvidence::Ordered,
@@ -54,20 +53,8 @@ fn world_with_chain(edge_depth: usize) -> (World, Entity) {
         let parent = if index == 0 { Root } else { Local(NonZeroU32::new(index).expect("parent local ID is nonzero")) };
         let source = UpdateSource::new(region, index + 1, Ordered(u64::from(index) + 1), 0);
         let observation = ObjectObservation {
-            source,
-            id: UUID::from_u128(u128::from(index) + 1),
-            local_id,
-            kind: Object,
-            parent,
             pose: Some(Pose { position: Some(Vec3::X), rotation: Some(Quat::IDENTITY) }),
-            linear_motion: None,
-            angular_velocity: None,
-            scale: None,
-            attachment_point: FieldUpdate::Keep,
-            shape: FieldUpdate::Keep,
-            appearance: FieldUpdate::Keep,
-            surface_appearance: None,
-            render_materials: None,
+            ..ObjectObservation::new(source, UUID::from_u128(u128::from(index) + 1), local_id, Object, parent)
         };
         let applied = world.observe_object(observation).expect("object observation");
         let Introduced(entity) = applied.outcome else { panic!("expected object introduction") };

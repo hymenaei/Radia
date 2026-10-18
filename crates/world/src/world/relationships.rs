@@ -8,9 +8,16 @@ use super::journal::{
     WorldChange::{EntityUpdated, SubtreeInvalidated},
     WorldChangeClasses,
 };
-use super::{Binding, ObjectOrdering, ObjectRecord, World, WorldChange};
+use super::{Binding, World, WorldChange};
 use crate::update::{FieldStamp, Stamp};
-use crate::{ApplyError, Entity, Kind, LocalAddress, Parent, ParentUpdate, Region};
+use crate::{AttachmentPoint, Entity, Kind, LocalAddress, Parent, ParentUpdate, Region};
+
+pub(super) enum ParentResolution {
+    Accepted(Parent),
+    Cycle,
+}
+
+use ParentResolution::{Accepted, Cycle};
 
 impl World {
     pub(super) fn waiting_children_will_change(
@@ -21,7 +28,7 @@ impl World {
         parent_binding: Binding,
     ) -> bool {
         let Some(waiting) = self.pending_children.get(&address) else { return false };
-        let records = self.ecs.view::<(&ObjectRecord, &ObjectOrdering)>();
+        let records = self.store.ordered_records();
         waiting.iter().any(|child| {
             let Some((record, ordering)) = records.get(child.0) else { return false };
             match record.state.parent {
@@ -35,11 +42,11 @@ impl World {
     }
 
     pub(super) fn parent_will_be_cascaded(&self, root: Entity, target: Entity, stamp: Stamp) -> bool {
-        let Some(root_region) = self.record(root).map(|record| record.state.binding.address.region()) else { return false };
+        let Some(root_region) = self.store.record(root).map(|record| record.state.binding.address.region()) else { return false };
         let mut current = target;
-        let records = self.ecs.view::<&ObjectRecord>();
+        let records = self.store.records();
 
-        for _ in 0..=self.entities.len() {
+        for _ in 0..=self.store.len() {
             if current == root {
                 return true;
             }
@@ -48,7 +55,7 @@ impl World {
                 return false;
             }
             let Some(record) = records.get(current.0) else { return false };
-            if record.kind == Kind::Avatar || record.state.binding.address.region != root_region || stamp <= record.state.binding.fence {
+            if record.kind == Kind::Avatar || record.state.binding.address.region != root_region || stamp <= record.state.binding.fence() {
                 return false;
             }
 
@@ -61,12 +68,13 @@ impl World {
 
     pub(super) fn invalidate_subtree(&self, root: Entity, changes: &mut Vec<WorldChange>) {
         if self.children.get(&root).is_some_and(|children| !children.is_empty()) {
-            let id = self.record(root).expect("a subtree root is live").id;
+            let id = self.store.record(root).expect("a subtree root is live").id;
             changes.push(SubtreeInvalidated { id, entity: root });
         }
     }
 
-    /// Resolves an accepted parent declaration; only a current occupant can replace an expectation.
+    /// Resolves a parent declaration without changing the graph. Cycles reject the declaration;
+    /// an absent or ineligible occupant preserves a pending identity expectation.
     pub(super) fn resolve_parent(
         &self,
         region: Region,
@@ -74,31 +82,62 @@ impl World {
         update: ParentUpdate,
         stamp: FieldStamp,
         child: Option<Entity>,
-    ) -> Result<Parent, ApplyError> {
+    ) -> ParentResolution {
         match update {
-            ParentUpdate::Root => Ok(Parent::Root),
+            ParentUpdate::Root => Accepted(Parent::Root),
             ParentUpdate::Local(parent_local_id) => {
                 let address = LocalAddress::new(region, parent_local_id);
-                if child.is_some_and(|entity| self.record(entity).is_some_and(|obj| obj.state.binding.address == address))
+                if child.is_some_and(|entity| self.store.record(entity).is_some_and(|obj| obj.state.binding.address == address))
                     || local_id == parent_local_id
                 {
-                    return Err(ApplyError::InvalidValue { field: "parent_cycle" });
+                    return Cycle;
                 }
-                let expected_uuid = child.and_then(|entity| self.record(entity)).and_then(|object| match object.state.parent {
+                let expected_uuid = child.and_then(|entity| self.store.record(entity)).and_then(|object| match object.state.parent {
                     Parent::Pending { address: pending_address, expected_uuid } if pending_address == address => expected_uuid,
                     _ => None,
                 });
-                if let Some(parent) = self.addresses.get(&address).copied() {
-                    let object = self.record(parent).expect("address index contains a live parent");
+                if let Some(parent) = self.entity_at(address) {
+                    let object = self.store.record(parent).expect("address index contains a live parent");
                     if object.state.binding.admits_parent_link(expected_uuid, Some(stamp), object.id) {
-                        Ok(Parent::Resolved(parent))
+                        if child.is_some_and(|child| self.would_cycle(child, parent)) { Cycle } else { Accepted(Parent::Resolved(parent)) }
                     } else {
-                        Ok(Parent::Pending { address, expected_uuid })
+                        Accepted(Parent::Pending { address, expected_uuid })
                     }
                 } else {
-                    Ok(Parent::Pending { address, expected_uuid })
+                    Accepted(Parent::Pending { address, expected_uuid })
                 }
             }
+        }
+    }
+
+    /// Parent resolution alone preserves a frame when it confirms the same identity.
+    /// Attachment-point changes affect coordinates only in an avatar-relative frame.
+    pub(super) fn relationship_frame_changed(
+        &self,
+        current: Parent,
+        next: Parent,
+        current_attachment: Option<AttachmentPoint>,
+        next_attachment: Option<AttachmentPoint>,
+    ) -> bool {
+        self.parent_frame_identity_changed(current, next)
+            || (current_attachment != next_attachment && (self.is_avatar_parent(current) || self.is_avatar_parent(next)))
+    }
+
+    fn is_avatar_parent(&self, parent: Parent) -> bool {
+        matches!(parent, Parent::Resolved(entity) if self.store.record(entity).is_some_and(|record| record.kind == Kind::Avatar))
+    }
+
+    fn parent_frame_identity_changed(&self, current: Parent, next: Parent) -> bool {
+        if current == next {
+            return false;
+        }
+        match (current, next) {
+            (Parent::Pending { address, expected_uuid }, Parent::Resolved(entity))
+            | (Parent::Resolved(entity), Parent::Pending { address, expected_uuid }) => self.store.record(entity).is_none_or(|object| {
+                object.state.binding.address != address
+                    || expected_uuid.map_or(object.state.binding.parent_resolution_fence.is_some(), |expected| expected != object.id)
+            }),
+            _ => true,
         }
     }
 
@@ -111,14 +150,14 @@ impl World {
 
     pub(super) fn set_parent(&mut self, child: Entity, parent: Parent) {
         let child_uuid = {
-            let record = self.record(child).expect("a parented child is live");
+            let record = self.store.record(child).expect("a parented child is live");
             if record.state.parent == parent {
                 return;
             }
             record.id
         };
         self.detach_parent(child);
-        self.state_mut(child).parent = parent;
+        self.store.set_parent(child, parent);
         match parent {
             Parent::Resolved(parent) => {
                 self.children.entry(parent).or_default().insert(child_uuid, child);
@@ -131,7 +170,7 @@ impl World {
     }
 
     pub(super) fn detach_parent(&mut self, child: Entity) {
-        let Some((parent, child_uuid)) = self.record(child).map(|object| (object.state.parent, object.id)) else {
+        let Some((parent, child_uuid)) = self.store.record(child).map(|object| (object.state.parent, object.id)) else {
             return;
         };
         match parent {
@@ -166,7 +205,7 @@ impl World {
         let children = self.children.remove(&parent).unwrap_or_default();
         for child in children.into_values() {
             let Some((child_parent, child_address, child_uuid)) =
-                self.record(child).map(|object| (object.state.parent, object.state.binding.address, object.id))
+                self.store.record(child).map(|object| (object.state.parent, object.state.binding.address, object.id))
             else {
                 continue;
             };
@@ -195,10 +234,10 @@ impl World {
         recovery_cancellations: &mut Vec<LocalAddress>,
     ) {
         let waiting = self.pending_children.get(&address).cloned().unwrap_or_default();
-        let binding = self.record(parent).expect("address index contains a live parent").state.binding;
+        let binding = self.store.record(parent).expect("address index contains a live parent").state.binding;
         for child in waiting {
             let (parent_state, child_address, uuid, parent_stamp) = {
-                let mut read = self.ecs.query_one::<(&ObjectRecord, &ObjectOrdering)>(child.0);
+                let mut read = self.store.read_ordered(child.0);
                 let Ok((record, ordering)) = read.get() else { continue };
                 (record.state.parent, record.state.binding.address, record.id, ordering.fences.parent)
             };
@@ -220,9 +259,7 @@ impl World {
                 recovery_targets.push(child_address);
                 continue;
             }
-            self.detach_parent(child);
-            self.state_mut(child).parent = Parent::Resolved(parent);
-            self.children.entry(parent).or_default().insert(uuid, child);
+            self.set_parent(child, Parent::Resolved(parent));
             changes.push(EntityUpdated { id: uuid, entity: child, classes: WorldChangeClasses::RELATIONSHIP | WorldChangeClasses::POSE });
             self.invalidate_subtree(child, changes);
             recovery_cancellations.push(child_address);
@@ -230,16 +267,16 @@ impl World {
     }
 
     pub(super) fn would_cycle(&self, child: Entity, mut parent: Entity) -> bool {
-        if self.record(child).is_some_and(|object| object.state.parent == Parent::Resolved(parent)) {
+        if self.store.record(child).is_some_and(|object| object.state.parent == Parent::Resolved(parent)) {
             return false;
         }
         if parent == child {
             return true;
         }
-        let Some(Parent::Resolved(next)) = self.record(parent).map(|object| object.state.parent) else { return false };
+        let Some(Parent::Resolved(next)) = self.store.record(parent).map(|object| object.state.parent) else { return false };
         parent = next;
-        let records = self.ecs.view::<&ObjectRecord>();
-        for _ in 1..self.entities.len() {
+        let records = self.store.records();
+        for _ in 1..self.store.len() {
             if parent == child {
                 return true;
             }
@@ -258,14 +295,13 @@ impl World {
 
 #[cfg(test)]
 mod tests {
-    use crate::WorldLimits;
+    use crate::{ApplyError, WorldLimits};
     use base::UUID;
     use math::{DVec3, Quat, Vec3};
 
     use super::*;
     use crate::{
         ApplyOutcome::{Introduced, Removed},
-        FieldUpdate,
         Kind::{Avatar, Object},
         ObjectObservation,
         OrderEvidence::Ordered,
@@ -374,20 +410,14 @@ mod tests {
 
     fn observation(world: &mut World, region: Region, order: u64, local_id: u32, kind: Kind, parent: ParentUpdate) -> Entity {
         let object = ObjectObservation {
-            source: source(region, order),
-            id: UUID::from_u128(u128::from(local_id)),
-            local_id: NonZeroU32::new(local_id).unwrap(),
-            kind,
-            parent,
             pose: Some(Pose { position: Some(Vec3::X), rotation: Some(Quat::IDENTITY) }),
-            linear_motion: None,
-            angular_velocity: None,
-            scale: None,
-            attachment_point: FieldUpdate::Keep,
-            shape: FieldUpdate::Keep,
-            appearance: FieldUpdate::Keep,
-            surface_appearance: None,
-            render_materials: None,
+            ..ObjectObservation::new(
+                source(region, order),
+                UUID::from_u128(u128::from(local_id)),
+                NonZeroU32::new(local_id).unwrap(),
+                kind,
+                parent,
+            )
         };
         let Introduced(entity) = world.observe_object(object).unwrap().outcome else { panic!("expected object introduction") };
         entity

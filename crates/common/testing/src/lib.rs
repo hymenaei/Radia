@@ -1,4 +1,6 @@
-//! Literal LLUDP fixtures and parsing helpers for tests.
+//! Independent protocol fixtures and small test utilities.
+
+pub mod allocation;
 
 /// Independently assembled LLUDP packet fixtures for protocol tests.
 pub mod lludp;

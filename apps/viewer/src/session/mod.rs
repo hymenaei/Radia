@@ -3,7 +3,6 @@ mod inbound;
 mod object_media;
 mod outbound;
 mod recovery;
-mod recovery_state;
 mod region_lookup;
 mod world;
 

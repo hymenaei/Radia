@@ -1,9 +1,10 @@
 //! Registration, metadata, and atomic retirement of simulator region lifetimes.
 
 use super::super::journal::WorldChange::{RegionAdopted, RegionRetired, RegionUpdated};
-use super::super::{RecentBatch, World};
+use super::super::{RecentBatch, RegionState, World, newer_field};
 use super::lifecycle::RemovalCause;
-use crate::{ApplyError, Region, RegionApplied, RegionInfo, RegionOutcome};
+use crate::update::FieldStamp;
+use crate::{ApplyError, Region, RegionApplied, RegionInfo, RegionOutcome, UpdateSource};
 
 impl World {
     /// Registers a simulator connection lifetime before accepting its object updates.
@@ -24,7 +25,7 @@ impl World {
             return Err(ApplyError::RegistrationBudgetExhausted);
         }
         self.ensure_revision_available()?;
-        self.regions.insert(region, RegionInfo::default());
+        self.regions.insert(region, RegionState::default());
         let revision = self.publish_changes(vec![RegionAdopted(region)]).expect("adopting a region journals a change");
         Ok(RegionApplied { outcome: RegionOutcome::Adopted { revision }, recovery_cancellations: Vec::new() })
     }
@@ -32,7 +33,8 @@ impl World {
     /// Adds non-conflicting metadata to an active simulator region lifetime.
     ///
     /// Missing fields leave stored metadata unchanged. Changing the resolved origin invalidates
-    /// derived spatial state for the region.
+    /// derived spatial state for the region. Names supplied here seed unknown metadata; use
+    /// [`Self::observe_region_metadata`] to apply source-ordered name changes.
     ///
     /// # Errors
     /// Returns an [`ApplyError`] for invalid or conflicting metadata, an inactive region, or
@@ -41,15 +43,53 @@ impl World {
         self.require_active_region(region)?;
         self.validate_region_info(&info)?;
         let current = self.regions.get(&region).expect("active region remains registered");
-        let previous_origin = current.origin.or_else(|| current.handle.map(|handle| handle.origin()));
-        let merged = self.merge_region_info(current, &info)?;
-        if merged == *current {
+        let merged = self.merge_region_info(&current.info, &info)?;
+        self.commit_region_metadata(region, merged, current.name_fence)
+    }
+
+    /// Applies observed region metadata, accepting name changes in source order.
+    ///
+    /// UUID, handle, and origin must remain consistent within the region lifetime. Missing fields
+    /// preserve stored values. A supplied name replaces the current name only with newer ordered
+    /// evidence; ambiguous or degraded evidence cannot change it. Source authority follows
+    /// [`crate::UpdateAuthority`]. Repeating a name can advance ordering without a new revision.
+    ///
+    /// # Errors
+    /// Returns an [`ApplyError`] for invalid or conflicting metadata, an inactive region, or
+    /// exhausted revision capacity. Neither metadata nor ordering evidence changes on error.
+    pub fn observe_region_metadata(&mut self, source: UpdateSource, mut info: RegionInfo) -> Result<RegionApplied, ApplyError> {
+        let region = source.region();
+        self.require_active_region(region)?;
+        self.validate_region_info(&info)?;
+        let current = self.regions.get(&region).expect("active region remains registered");
+        let name = info.name.take();
+        let mut merged = self.merge_region_info(&current.info, &info)?;
+        let mut name_fence = current.name_fence;
+        if let (Some(name), Some(stamp)) = (name, source.stamp()) {
+            let stamp = FieldStamp { authority: source.authority(), stamp };
+            if newer_field(stamp, name_fence) {
+                merged.name = Some(name);
+                name_fence = Some(stamp);
+            }
+        }
+        self.commit_region_metadata(region, merged, name_fence)
+    }
+
+    fn commit_region_metadata(
+        &mut self,
+        region: Region,
+        info: RegionInfo,
+        name_fence: Option<FieldStamp>,
+    ) -> Result<RegionApplied, ApplyError> {
+        let current = self.regions.get(&region).expect("metadata commit requires an active region");
+        if info == current.info {
+            self.regions.get_mut(&region).expect("active region remains registered").name_fence = name_fence;
             return Ok(RegionApplied { outcome: RegionOutcome::Unchanged, recovery_cancellations: Vec::new() });
         }
-        let next_origin = merged.origin.or_else(|| merged.handle.map(|handle| handle.origin()));
+        let origin_changed = current.info.resolved_origin() != info.resolved_origin();
         self.ensure_revision_available()?;
-        self.regions.insert(region, merged);
-        if previous_origin != next_origin {
+        self.regions.insert(region, RegionState { info, name_fence });
+        if origin_changed {
             self.mark_spatial_region(region);
         }
         let revision = self.publish_changes(vec![RegionUpdated(region)]).expect("patching a region journals a change");
@@ -71,12 +111,12 @@ impl World {
         }
         self.require_active_region(region)?;
         self.ensure_revision_available()?;
-        let removed = self.region_entities.get(&region).map_or(0, |ids| ids.len());
+        let removed = self.store.region_ids(region).map_or(0, |ids| ids.len());
         let mut changes = Vec::with_capacity(removed.saturating_add(1));
         let mut recovery_cancellations = Vec::new();
         let mut recent = RecentBatch::default();
-        while let Some(id) = self.region_entities.get(&region).and_then(|ids| ids.first()).copied() {
-            let entity = self.entities[&id];
+        while let Some(id) = self.store.region_ids(region).and_then(|ids| ids.first()).copied() {
+            let entity = self.entity(id).expect("object index contains only live entities");
             self.remove_entity(
                 entity,
                 RemovalCause::RegionRetired,
@@ -155,6 +195,23 @@ mod tests {
             max_region_name_bytes: 16,
             max_recovery_targets: 2,
         }
+    }
+
+    #[test]
+    fn failed_name_commit_does_not_advance_ordering() {
+        let region = Region::new(1);
+        let mut world = World::new(limits());
+        let _ = world.adopt_region(region).unwrap();
+        let source = |order| UpdateSource::new(region, order as u32, crate::OrderEvidence::Ordered(order), 0);
+        let name = |name: &str| RegionInfo { name: Some(name.into()), ..RegionInfo::default() };
+        let _ = world.observe_region_metadata(source(10), name("First")).unwrap();
+        let revision = world.revision();
+        world.journal.revision = WorldRevision(u64::MAX);
+        assert_eq!(world.observe_region_metadata(source(30), name("Rejected")), Err(RevisionExhausted));
+        assert_eq!(world.region(region).unwrap().name.as_deref(), Some("First"));
+        world.journal.revision = revision;
+        let _ = world.observe_region_metadata(source(20), name("Next")).unwrap();
+        assert_eq!(world.region(region).unwrap().name.as_deref(), Some("Next"));
     }
 
     #[test]

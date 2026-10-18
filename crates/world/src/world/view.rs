@@ -1,6 +1,6 @@
 //! Borrowed object views for point reads and bulk scans.
 
-use super::{ObjectContent, ObjectOrdering, ObjectRecord, World};
+use super::{ObjectContent, ObjectOrdering, ObjectRecord, ObjectRecordRef, World};
 use crate::{
     Appearance, AttachmentPoint, AvatarAppearance, CoordinateFrame, Entity, GltfMaterialOverrides, Kind, LinearMotion, LocalAddress,
     LocalTransform, ObjectMedia, Parent, PoseError, PoseState, Properties, PropertiesProvenance, RenderMaterials, Shape, SitTarget,
@@ -9,7 +9,6 @@ use crate::{
 use base::UUID;
 use hecs::{QueryBorrow, Ref};
 use math::{Quat, Vec3};
-use std::ops::Deref;
 
 /// A read-only view of one live object.
 ///
@@ -19,23 +18,6 @@ pub struct Object<'a> {
     pub(super) entity: Entity,
     pub(super) record: ObjectRecordRef<'a>,
     pub(super) world: &'a World,
-}
-
-#[derive(Clone)]
-pub(super) enum ObjectRecordRef<'a> {
-    Owned { record: Ref<'a, ObjectRecord>, content: Ref<'a, ObjectContent> },
-    Borrowed { record: &'a ObjectRecord, content: &'a ObjectContent },
-}
-
-impl Deref for ObjectRecordRef<'_> {
-    type Target = ObjectRecord;
-
-    fn deref(&self) -> &Self::Target {
-        match self {
-            Self::Owned { record, .. } => record,
-            Self::Borrowed { record, .. } => record,
-        }
-    }
 }
 
 /// A shared borrow for scanning live objects in unspecified storage order.
@@ -53,7 +35,7 @@ impl Deref for ObjectRecordRef<'_> {
 /// # }
 /// ```
 pub struct Objects<'a> {
-    pub(super) records: QueryBorrow<'a, (hecs::Entity, &'a ObjectRecord, &'a ObjectContent)>,
+    pub(super) records: QueryBorrow<'a, (hecs::Entity, &'a ObjectRecord, Option<&'a ObjectContent>)>,
     pub(super) world: &'a World,
 }
 
@@ -70,14 +52,11 @@ impl Objects<'_> {
 
 impl<'a> Object<'a> {
     pub(super) fn content(&self) -> &ObjectContent {
-        match &self.record {
-            ObjectRecordRef::Owned { content, .. } => content,
-            ObjectRecordRef::Borrowed { content, .. } => content,
-        }
+        self.record.content()
     }
 
     pub(super) fn ordering(&self) -> Ref<'a, ObjectOrdering> {
-        self.world.ecs.get::<&ObjectOrdering>(self.entity.0).expect("every object stores ordering")
+        self.world.store.ordering(self.entity.0)
     }
 
     pub const fn entity(&self) -> Entity {

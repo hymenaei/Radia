@@ -38,7 +38,8 @@ async fn primary_intro_precedes_early_udp_data() {
     chat[0] |= 0x40;
     set_sequence(&mut chat, 19);
     simulator.send_to(&chat, peer).await.expect("send data before circuit acknowledgement");
-    sleep(Duration::from_millis(50)).await;
+    receive_message(&simulator, |message| matches!(message, Message::PacketAck(acks) if acks.packets.iter().any(|packet| packet.id == 19)))
+        .await;
     assert!(events.try_recv().is_err(), "primary application data must wait for the simulator introduction");
 
     simulator.send_to(&ack(20, 1), peer).await.expect("ack primary circuit");

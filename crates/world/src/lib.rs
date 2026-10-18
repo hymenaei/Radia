@@ -1,27 +1,12 @@
-//! Renderer-independent state for one simulator session.
+//! Authoritative world state for one login session.
 //!
-//! The world owns entity identity, region lifetimes, and source-ordered updates. It does not
-//! depend on the network or rendering crates. A caller supplies explicit limits when creating it.
+//! [`World`] owns simulator-object identities, region lifetimes, relationships, and observed state.
+//! Callers provide decoded updates and ordering evidence; World validates and commits them
+//! through methods such as [`World::observe_object`] and [`World::patch_object`].
 //!
-//! Each live entity has private spatial state, content, and ordering components with one shared
-//! lifetime. World plans dependent changes before committing them and maintains identity,
-//! relationship, and query indexes together. Consumers cannot mutate the ECS directly.
-//! [`WorldChange`] records describe committed domain changes rather than individual component
-//! writes. Bounded pages and read barriers support consumers that retain their own derived state.
-//!
-//! Simulator state changes through typed methods such as [`World::observe_object`],
-//! [`World::patch_object`], and [`World::retire_region`]. Callers supply decoded values and source
-//! evidence; World owns acceptance, dependent changes, revisions, and recovery intents. An
-//! [`Applied`] result can include both accepted changes and rejected field groups. An [`ApplyError`]
-//! rejects the operation without changing World. An unchanged result can still advance internal
-//! ordering evidence, so consumers should use the returned revision to detect observable changes.
-//!
-//! Prediction and local simulation are separate responsibilities. Their state needs an explicit
-//! ownership and reconciliation contract before it can affect authoritative simulator state.
-//!
-//! Use [`World::object`] for a point read and [`World::objects`] with [`Objects::iter`] for a scan
-//! that borrows component storage once. [`Shape::Prim`] carries lossless [`PrimShape`] parameters;
-//! geometry consumers must constrain observed parameters before generating meshes.
+//! Read live state through [`World::object`] and [`World::objects`], or use bounded pages and
+//! [`WorldChange`] records to maintain an independent consumer. World has no network or renderer
+//! dependency.
 
 mod appearance;
 mod avatar;
@@ -59,12 +44,13 @@ pub use update::{
     WorldLimits, WorldRevision,
 };
 pub use world::{
-    MAX_OBJECT_DETAIL_BATCH_BYTES, MAX_OBJECT_DETAIL_BATCH_ITEMS, MAX_OBJECT_DETAIL_BYTES, MAX_OBJECT_PAGE_ITEMS,
-    MAX_QUERY_STATE_MAINTENANCE_WORK, MAX_RECENT_OBJECT_BYTES, MAX_RECENT_OBJECTS, MAX_REGION_PAGE_BYTES, MAX_REGION_PAGE_ITEMS,
-    MAX_WORLD_CHANGE_PAGE_ITEMS, MAX_WORLD_QUERY_RESULTS, MAX_WORLD_QUERY_WORK, Object, ObjectDetail, ObjectDetailBatch,
-    ObjectDetailResult, ObjectListItem, ObjectListItemRead, ObjectListPage, ObjectPage, ObjectPageCursor, ObjectSummary, ObjectSummaryRead,
-    Objects, QueryCompleteness, QueryIncompleteReason, QueryScope, QueryStateMaintenance, QueryUnresolved, RECENT_OBJECT_TTL, RecentObject,
-    RegionPage, RegionPageCursor, RegionSummary, RegionSummaryRead, ValueFilter, World, WorldChange, WorldChangeClasses, WorldChangeCursor,
-    WorldChangePage, WorldChangeRecord, WorldEntityRemovalReason, WorldQuery, WorldQueryBudget, WorldQueryBuildError, WorldQueryCursor,
-    WorldQueryItem, WorldQueryPage, WorldReadBarrier, WorldReadError,
+    MAX_OBJECT_DETAIL_BATCH_BYTES, MAX_OBJECT_DETAIL_BATCH_ITEMS, MAX_OBJECT_DETAIL_BYTES, MAX_OBJECT_MEDIA_READ_BYTES,
+    MAX_OBJECT_PAGE_ITEMS, MAX_QUERY_STATE_MAINTENANCE_WORK, MAX_RECENT_OBJECT_BYTES, MAX_RECENT_OBJECTS, MAX_REGION_PAGE_BYTES,
+    MAX_REGION_PAGE_ITEMS, MAX_WORLD_CHANGE_PAGE_ITEMS, MAX_WORLD_QUERY_RESULTS, MAX_WORLD_QUERY_WORK, Object, ObjectDetail,
+    ObjectDetailBatch, ObjectDetailResult, ObjectListItem, ObjectListItemRead, ObjectListPage, ObjectMediaRead, ObjectPage,
+    ObjectPageCursor, ObjectSummary, ObjectSummaryRead, Objects, QueryCompleteness, QueryIncompleteReason, QueryScope,
+    QueryStateMaintenance, QueryUnresolved, RECENT_OBJECT_TTL, RecentObject, RegionPage, RegionPageCursor, RegionSummary,
+    RegionSummaryRead, ValueFilter, World, WorldChange, WorldChangeClasses, WorldChangeCursor, WorldChangePage, WorldChangeRecord,
+    WorldEntityRemovalReason, WorldQuery, WorldQueryBudget, WorldQueryBuildError, WorldQueryCursor, WorldQueryItem, WorldQueryPage,
+    WorldReadBarrier, WorldReadError,
 };

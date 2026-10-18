@@ -1,4 +1,10 @@
-use std::{collections::HashSet, mem::size_of, num::NonZeroU32};
+use std::{
+    collections::HashSet,
+    error::Error,
+    fmt::{self, Display, Formatter},
+    mem::size_of,
+    num::NonZeroU32,
+};
 
 use base::UUID;
 use math::Vec3;
@@ -355,6 +361,24 @@ pub enum ApplyError {
     InvalidValue { field: &'static str },
     KindMismatch { current: Kind, observed: Kind },
 }
+
+impl Display for ApplyError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StaleRegion => f.write_str("region is not registered"),
+            Self::RegionRetired => f.write_str("region lifetime is retired"),
+            Self::RegistrationBudgetExhausted => f.write_str("region registration budget is exhausted"),
+            Self::EntityBudgetExhausted => f.write_str("object budget is exhausted"),
+            Self::RevisionExhausted => f.write_str("World revision space is exhausted"),
+            Self::FrameGenerationExhausted => f.write_str("coordinate-frame generation space is exhausted"),
+            Self::AddressGenerationExhausted => f.write_str("object address generation space is exhausted"),
+            Self::InvalidValue { field } => write!(f, "invalid value for {field}"),
+            Self::KindMismatch { current, observed } => write!(f, "object kind mismatch: stored {current:?}, observed {observed:?}"),
+        }
+    }
+}
+
+impl Error for ApplyError {}
 
 /// Effects and diagnostics from one authoritative object mutation.
 ///

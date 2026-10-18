@@ -50,7 +50,7 @@ use tokio::{
     runtime, spawn,
     sync::{Barrier, Notify, Semaphore, mpsc, oneshot, watch},
     task::JoinHandle,
-    time::{advance, sleep, timeout},
+    time::{advance, timeout},
 };
 use url::Url;
 

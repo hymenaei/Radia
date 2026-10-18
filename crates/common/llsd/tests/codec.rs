@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, fmt, io::Cursor};
 
 use base::UUID;
 use llsd::{Binary, Date, Error, Limits, Map, URI, Value, binary, notation, xml};
-use serde::ser::SerializeSeq;
+use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserialize, Serialize, Serializer};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -31,6 +31,41 @@ impl Serialize for OversizedSequence {
 }
 
 struct NestedSequence(usize);
+
+struct UnknownLengthContainers;
+
+impl Serialize for UnknownLengthContainers {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        struct Sequence;
+        impl Serialize for Sequence {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let mut seq = serializer.serialize_seq(None)?;
+                seq.serialize_element(&17_i32)?;
+                seq.serialize_element(&"x")?;
+                seq.end()
+            }
+        }
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("items", &Sequence)?;
+        map.serialize_entry("empty", &Vec::<i32>::new())?;
+        map.end()
+    }
+}
+
+#[test]
+fn unknown_container_lengths_use_the_emitted_item_counts() {
+    let value = UnknownLengthContainers;
+    let binary = binary::to_vec(&value).expect("encode unknown lengths");
+    assert_eq!(binary, b"<?llsd/binary?>\n{\x00\x00\x00\x02k\x00\x00\x00\x05items[\x00\x00\x00\x02i\x00\x00\x00\x11s\x00\x00\x00\x01x]k\x00\x00\x00\x05empty[\x00\x00\x00\x00]}");
+    let expected = Value::Map(Map::from([
+        ("items".into(), Value::Array(vec![Value::Integer(17), Value::String("x".into())])),
+        ("empty".into(), Value::Array(Vec::new())),
+    ]));
+    assert_eq!(binary::from_slice::<Value>(&binary).unwrap(), expected);
+    assert_eq!(xml::from_slice::<Value>(&xml::to_vec(&value).unwrap()).unwrap(), expected);
+    assert_eq!(notation::to_vec(&value).unwrap(), b"<?llsd/notation?>\n{'items':[i17,'x'],'empty':[]}");
+    assert_xml_limit(&value);
+}
 
 impl Serialize for NestedSequence {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {

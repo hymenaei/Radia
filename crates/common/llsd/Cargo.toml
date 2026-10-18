@@ -15,6 +15,7 @@ time.workspace = true
 base.workspace = true
 
 [dev-dependencies]
+testing.workspace = true
 criterion.workspace = true
 proptest.workspace = true
 

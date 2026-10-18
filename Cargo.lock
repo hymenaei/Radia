@@ -3838,6 +3838,7 @@ dependencies = [
  "proptest",
  "quick-xml 0.42.0",
  "serde",
+ "testing",
  "time",
 ]
 
@@ -9068,6 +9069,7 @@ dependencies = [
  "hecs",
  "math",
  "proptest",
+ "testing",
 ]
 
 [[package]]

@@ -115,20 +115,18 @@ fn render_material_parameter(bindings: &[(u8, UUID)]) -> ExtraParameter {
 
 fn media_observation(region: Region, id: UUID, initial_material: u128) -> ObjectObservation {
     ObjectObservation {
-        source: UpdateSource::new(region, 1, OrderEvidence::Ordered(1), 0),
-        id,
-        local_id: NonZeroU32::new(0x0102_0304).expect("nonzero local ID"),
-        kind: Kind::Object,
-        parent: ParentUpdate::Root,
         pose: Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) }),
-        linear_motion: None,
-        angular_velocity: None,
         scale: Some(Vec3::ONE),
-        attachment_point: FieldUpdate::Keep,
         shape: FieldUpdate::Set(Shape::Prim(Default::default())),
         appearance: FieldUpdate::Set(Appearance::Surface),
-        surface_appearance: None,
         render_materials: Some(RenderMaterials::new(vec![(0, asset_id(initial_material))]).expect("valid initial material")),
+        ..ObjectObservation::new(
+            UpdateSource::new(region, 1, OrderEvidence::Ordered(1), 0),
+            id,
+            NonZeroU32::new(0x0102_0304).expect("nonzero local ID"),
+            Kind::Object,
+            ParentUpdate::Root,
+        )
     }
 }
 
@@ -278,20 +276,14 @@ fn terse_rotation_roundoff_is_accepted() {
     assert!((0.00005..0.00006).contains(&norm_error), "unexpected quantized norm error: {norm_error}");
     let mut world = world();
     let base = ObjectObservation {
-        source: UpdateSource::new(REGION, 1, OrderEvidence::Ordered(1), 0),
-        id: UUID::from_u128(0xdead),
-        local_id: patch.local_id,
-        kind: Kind::Object,
-        parent: ParentUpdate::Root,
         pose: Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) }),
-        linear_motion: None,
-        angular_velocity: None,
-        scale: None,
-        attachment_point: FieldUpdate::Keep,
-        shape: FieldUpdate::Keep,
-        appearance: FieldUpdate::Keep,
-        surface_appearance: None,
-        render_materials: None,
+        ..ObjectObservation::new(
+            UpdateSource::new(REGION, 1, OrderEvidence::Ordered(1), 0),
+            UUID::from_u128(0xdead),
+            patch.local_id,
+            Kind::Object,
+            ParentUpdate::Root,
+        )
     };
     let introduced = world.observe_object(base).expect("valid base object");
     let Introduced(entity) = introduced.outcome else { panic!("expected base object introduction") };
@@ -309,20 +301,14 @@ fn bad_terse_rotation_is_rejected() {
     assert!(decoded_rotation.length_squared() > 3.9);
     let mut world = world();
     let base = ObjectObservation {
-        source: UpdateSource::new(REGION, 1, OrderEvidence::Ordered(1), 0),
-        id: UUID::from_u128(0xdead),
-        local_id: patch.local_id,
-        kind: Kind::Object,
-        parent: ParentUpdate::Root,
         pose: Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) }),
-        linear_motion: None,
-        angular_velocity: None,
-        scale: None,
-        attachment_point: FieldUpdate::Keep,
-        shape: FieldUpdate::Keep,
-        appearance: FieldUpdate::Keep,
-        surface_appearance: None,
-        render_materials: None,
+        ..ObjectObservation::new(
+            UpdateSource::new(REGION, 1, OrderEvidence::Ordered(1), 0),
+            UUID::from_u128(0xdead),
+            patch.local_id,
+            Kind::Object,
+            ParentUpdate::Root,
+        )
     };
     let Introduced(entity) = world.observe_object(base).expect("valid base object").outcome else {
         panic!("expected base object introduction")

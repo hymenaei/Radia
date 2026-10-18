@@ -13,6 +13,7 @@ use serde::{
         self, DeserializeOwned, DeserializeSeed, EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor,
         value::{BytesDeserializer, F64Deserializer, StringDeserializer},
     },
+    forward_to_deserialize_any,
 };
 
 use crate::{
@@ -273,47 +274,8 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         }
     }
 
-    fn deserialize_bool<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_i8<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_i16<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_i32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_i64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_u8<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_u16<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_u32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_u64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_f32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_f64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_char<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_str<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_string<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        self.deserialize_any(visitor)
+    forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 char str string
     }
     fn deserialize_bytes<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
         self.count_value()?;

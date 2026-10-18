@@ -95,22 +95,7 @@ fn untracked(region: Region, order: u64) -> UpdateSource {
 }
 
 fn object(source: UpdateSource, id: u128, local_id_value: u32, kind: Kind, parent: ParentUpdate) -> ObjectObservation {
-    ObjectObservation {
-        source,
-        id: uuid(id),
-        local_id: local_id(local_id_value),
-        kind,
-        parent,
-        pose: None,
-        linear_motion: None,
-        angular_velocity: None,
-        scale: None,
-        attachment_point: FieldUpdate::Keep,
-        shape: FieldUpdate::Keep,
-        appearance: FieldUpdate::Keep,
-        surface_appearance: None,
-        render_materials: None,
-    }
+    ObjectObservation::new(source, uuid(id), local_id(local_id_value), kind, parent)
 }
 
 fn with_region(region: Region) -> World {
@@ -403,6 +388,23 @@ fn shape_appearance_fences_are_independent() {
     let current = world.object(entity).unwrap();
     assert_eq!(current.shape(), Some(mesh_shape(0x209)));
     assert_eq!(current.appearance(), Some(Appearance::Avatar));
+    drop(current);
+
+    let clear =
+        ObjectPatch { shape: FieldUpdate::Clear, appearance: FieldUpdate::Clear, ..ObjectPatch::new(source(region, 30), local_id(1)) };
+    assert_eq!(world.patch_object(clear).unwrap().outcome, Updated(entity));
+    assert_eq!(world.objects().iter().map(|object| object.entity()).collect::<Vec<_>>(), [entity]);
+    assert_eq!(world.object(entity).unwrap().shape(), None);
+    assert_eq!(world.object(entity).unwrap().appearance(), None);
+
+    let stale = ObjectPatch {
+        shape: FieldUpdate::Set(mesh_shape(0x209)),
+        appearance: FieldUpdate::Set(Appearance::Surface),
+        ..ObjectPatch::new(source(region, 25), local_id(1))
+    };
+    assert_eq!(world.patch_object(stale).unwrap().outcome, Unchanged);
+    assert_eq!(world.object(entity).unwrap().shape(), None);
+    assert_eq!(world.entity_at(address(region, 1)), Some(entity));
 }
 
 #[test]
@@ -1134,48 +1136,57 @@ fn equal_packet_blocks_keep_order() {
 }
 
 #[test]
-fn cycle_barrier_blocks_older_parent() {
-    let region = Region::new(29);
-    let mut world = with_region(region);
-    let mut first = object(source(region, 1), 290, 1, Object, Root);
-    first.pose = Some(Pose { position: Some(Vec3::X), rotation: None });
-    let introduced = world.observe_object(first).unwrap();
-    let Introduced(first_entity) = introduced.outcome else { panic!("expected first object") };
-    let second = world.observe_object(object(source(region, 2), 291, 2, Object, Local(local_id(1)))).unwrap();
-    let Introduced(second_entity) = second.outcome else { panic!("expected second object") };
-    let third = world.observe_object(object(source(region, 3), 292, 3, Object, Root)).unwrap();
-    let Introduced(third_entity) = third.outcome else { panic!("expected third object") };
+fn cyclic_parent_rejects_pose_but_preserves_siblings_and_blocks_older_declarations() {
+    for use_observation in [false, true] {
+        let region = Region::new(29);
+        let mut world = with_region(region);
+        let mut first = object(source(region, 1), 290, 1, Object, Root);
+        first.pose = Some(Pose { position: Some(Vec3::X), rotation: None });
+        let introduced = world.observe_object(first).unwrap();
+        let Introduced(first_entity) = introduced.outcome else { panic!("expected first object") };
+        let second = world.observe_object(object(source(region, 2), 291, 2, Object, Local(local_id(1)))).unwrap();
+        let Introduced(second_entity) = second.outcome else { panic!("expected second object") };
+        let third = world.observe_object(object(source(region, 3), 292, 3, Object, Root)).unwrap();
+        let Introduced(third_entity) = third.outcome else { panic!("expected third object") };
 
-    let revision = world.revision();
-    let cyclic = ObjectPatch {
-        parent: Some(Local(local_id(2))),
-        pose: Some(Pose { position: Some(Vec3::Y), rotation: None }),
-        scale: Some(Vec3::splat(2.0)),
-        ..ObjectPatch::new(source(region, 50), local_id(1))
-    };
-    let applied = world.patch_object(cyclic).unwrap();
-    assert_eq!(applied.outcome, Updated(first_entity));
-    assert_eq!(applied.revision.unwrap().get(), revision.get() + 1);
-    assert_eq!(
-        applied.rejections.iter().copied().collect::<Vec<_>>(),
-        [
-            FieldRejection { group: FieldGroup::Pose, reason: ParentDependsOnRejectedParent },
-            FieldRejection { group: FieldGroup::Parent, reason: ParentCycle },
-        ]
-    );
-    assert_eq!(world.object(first_entity).unwrap().parent(), Parent::Root);
-    assert_eq!(world.object(first_entity).unwrap().position(), Some(Vec3::X));
-    assert_eq!(world.object(first_entity).unwrap().scale(), Some(Vec3::splat(2.0)));
-    assert_eq!(world.object(second_entity).unwrap().parent(), Resolved(first_entity));
+        let revision = world.revision();
+        let cyclic = ObjectPatch {
+            parent: Some(Local(local_id(2))),
+            pose: Some(Pose { position: Some(Vec3::Y), rotation: None }),
+            scale: Some(Vec3::splat(2.0)),
+            ..ObjectPatch::new(source(region, 50), local_id(1))
+        };
+        let applied = if use_observation {
+            let mut observation = object(source(region, 50), 290, 1, Object, Local(local_id(2)));
+            observation.pose = cyclic.pose;
+            observation.scale = cyclic.scale;
+            world.observe_object(observation).unwrap()
+        } else {
+            world.patch_object(cyclic).unwrap()
+        };
+        assert_eq!(applied.outcome, Updated(first_entity), "use_observation={use_observation}");
+        assert_eq!(applied.revision.unwrap().get(), revision.get() + 1);
+        assert_eq!(
+            applied.rejections.iter().copied().collect::<Vec<_>>(),
+            [
+                FieldRejection { group: FieldGroup::Pose, reason: ParentDependsOnRejectedParent },
+                FieldRejection { group: FieldGroup::Parent, reason: ParentCycle },
+            ]
+        );
+        assert_eq!(world.object(first_entity).unwrap().parent(), Parent::Root);
+        assert_eq!(world.object(first_entity).unwrap().position(), Some(Vec3::X));
+        assert_eq!(world.object(first_entity).unwrap().scale(), Some(Vec3::splat(2.0)));
+        assert_eq!(world.object(second_entity).unwrap().parent(), Resolved(first_entity));
 
-    let delayed = ObjectPatch { parent: Some(Local(local_id(3))), ..ObjectPatch::new(source(region, 40), local_id(1)) };
-    let applied = world.patch_object(delayed).unwrap();
-    assert_eq!(applied.outcome, Unchanged);
-    assert_eq!(world.object(first_entity).unwrap().parent(), Parent::Root);
+        let delayed = ObjectPatch { parent: Some(Local(local_id(3))), ..ObjectPatch::new(source(region, 40), local_id(1)) };
+        let applied = world.patch_object(delayed).unwrap();
+        assert_eq!(applied.outcome, Unchanged);
+        assert_eq!(world.object(first_entity).unwrap().parent(), Parent::Root);
 
-    let fresh = ObjectPatch { parent: Some(Local(local_id(3))), ..ObjectPatch::new(source(region, 60), local_id(1)) };
-    assert_eq!(world.patch_object(fresh).unwrap().outcome, Updated(first_entity));
-    assert_eq!(world.object(first_entity).unwrap().parent(), Resolved(third_entity));
+        let fresh = ObjectPatch { parent: Some(Local(local_id(3))), ..ObjectPatch::new(source(region, 60), local_id(1)) };
+        assert_eq!(world.patch_object(fresh).unwrap().outcome, Updated(first_entity));
+        assert_eq!(world.object(first_entity).unwrap().parent(), Resolved(third_entity));
+    }
 }
 
 #[test]
@@ -1208,26 +1219,6 @@ fn transfer_ignores_old_region_barrier() {
         world.object(parent_entity).unwrap().parent(),
         Pending { address: address(first_region, 1), expected_uuid: Some(uuid(first_id)) }
     );
-}
-
-#[test]
-fn observed_parent_cycle_is_rejected() {
-    let region = Region::new(30);
-    let mut world = with_region(region);
-    let first = world.observe_object(object(source(region, 1), 300, 1, Object, Root)).unwrap();
-    let Introduced(first_entity) = first.outcome else { panic!("expected first object") };
-    let second = world.observe_object(object(source(region, 2), 301, 2, Object, Local(local_id(1)))).unwrap();
-    let Introduced(second_entity) = second.outcome else { panic!("expected second object") };
-    let revision = world.revision();
-
-    let cyclic = world.observe_object(object(source(region, 3), 300, 1, Object, Local(local_id(2)))).unwrap();
-
-    assert_eq!(cyclic.outcome, Unchanged);
-    assert_eq!(cyclic.revision, None);
-    assert_eq!(cyclic.rejections.iter().copied().collect::<Vec<_>>(), [FieldRejection { group: FieldGroup::Parent, reason: ParentCycle }]);
-    assert_eq!(world.revision(), revision);
-    assert_eq!(world.object(first_entity).unwrap().parent(), Parent::Root);
-    assert_eq!(world.object(second_entity).unwrap().parent(), Resolved(first_entity));
 }
 
 #[test]
@@ -1306,6 +1297,11 @@ fn untracked_updates_respect_field_authority() {
     assert_eq!(world.object(entity).unwrap().properties().creator_id, Some(uuid(323)));
     assert_eq!(world.remove_object(untracked(region, 1_001), local_id(1)).unwrap().outcome, Unchanged);
     assert_eq!(world.entity(uuid(320)), Some(entity));
+    assert_eq!(world.observe_object(object(source(region, 4), 320, 2, Object, Root)).unwrap().outcome, Updated(entity));
+    assert_eq!(world.entity_at(address(region, 1)), None);
+    assert_eq!(world.entity_at(address(region, 2)), Some(entity));
+    assert_eq!(world.remove_object(source(region, 5), local_id(2)).unwrap().outcome, Removed(uuid(320)));
+    assert_eq!(world.object(entity).map(|object| object.id()), None);
 }
 
 #[test]
@@ -2224,23 +2220,4 @@ fn cycle_checks_follow_parents_beyond_the_pose_limit() {
         #[cfg(feature = "invariants")]
         assert_eq!(world.check_invariants(), Ok(()));
     }
-}
-
-#[test]
-fn cycles_are_rejected_without_graph_changes() {
-    let region = Region::new(6);
-    let mut world = with_region(region);
-    let first = world.observe_object(object(source(region, 1), 60, 1, Object, Root)).unwrap();
-    let Introduced(first_entity) = first.outcome else { panic!("expected introduction") };
-    let second = world.observe_object(object(source(region, 2), 61, 2, Object, Local(local_id(1)))).unwrap();
-    let Introduced(second_entity) = second.outcome else { panic!("expected introduction") };
-
-    let revision = world.revision();
-    let cycle = ObjectPatch { parent: Some(Local(local_id(2))), ..ObjectPatch::new(source(region, 4), local_id(1)) };
-    let applied = world.patch_object(cycle).unwrap();
-    assert_eq!(applied.outcome, Unchanged);
-    assert_eq!(applied.rejections.iter().copied().collect::<Vec<_>>(), [FieldRejection { group: FieldGroup::Parent, reason: ParentCycle }]);
-    assert_eq!(world.revision(), revision);
-    assert_eq!(world.object(first_entity).unwrap().parent(), Parent::Root);
-    assert_eq!(world.object(second_entity).unwrap().parent(), Resolved(first_entity));
 }

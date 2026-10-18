@@ -1,47 +1,32 @@
 //! Cross-checks authoritative storage and every derived World index.
 
-use super::{ObjectContent, ObjectOrdering, ObjectRecord, World};
-use crate::{Entity, Kind, LocalAddress, ObjectMedia, Parent, Region};
+use super::World;
+use crate::{Entity, LocalAddress, ObjectMedia, Parent};
 use base::UUID;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 impl World {
     /// Checks the World storage and all derived indexes when the `invariants` feature is enabled.
     pub fn check_invariants(&self) -> Result<(), &'static str> {
-        if self.ecs.query::<(&ObjectRecord, &ObjectContent, &ObjectOrdering)>().iter().count() != self.entities.len()
-            || self.ecs.len() as usize != self.entities.len()
-            || self.object_ids.len() != self.entities.len()
+        self.store.check_invariants()?;
+        if self.store.len() > self.limits.max_entities
+            || self.regions.len().saturating_add(self.retired.len()) > self.limits.max_region_registrations
+            || self
+                .regions
+                .keys()
+                .any(|region| self.store.region_ids(*region).is_some_and(|ids| ids.len() > self.limits.max_entities_per_region))
         {
-            return Err("entity storage and UUID indexes have different lengths");
+            return Err("World storage exceeds its configured limits");
         }
-
-        if self.object_ids.iter().any(|id| !self.entities.contains_key(id)) || self.entities.keys().any(|id| !self.object_ids.contains(id))
-        {
-            return Err("UUID indexes do not match live ECS entities");
-        }
-
-        if self.addresses.len() != self.entities.len() {
-            return Err("address index and live entity counts differ");
-        }
-        let mut ecs_entities = HashSet::with_capacity(self.entities.len());
-        let mut expected_by_region = HashMap::<Region, BTreeSet<UUID>>::new();
         let mut expected_children = HashMap::<Entity, BTreeMap<UUID, Entity>>::new();
         let mut expected_pending_children = HashMap::<LocalAddress, HashSet<Entity>>::new();
-        let mut expected_avatars = BTreeSet::new();
         let mut object_media_bytes = 0_usize;
-        for (id, entity) in &self.entities {
-            if !ecs_entities.insert(*entity) {
-                return Err("UUID index contains the same ECS entity more than once");
-            }
-            let object = self.object(*entity).ok_or("UUID index points to an incomplete or dead ECS entity")?;
+        for (id, entity) in self.store.entities() {
+            let object = self.object(entity).ok_or("UUID index points to an incomplete or dead ECS entity")?;
             let address = object.address();
-            if object.kind() == Kind::Avatar {
-                expected_avatars.insert(*id);
+            if !self.regions.contains_key(&address.region()) {
+                return Err("live object belongs to an inactive region");
             }
-            if object.record.id != *id || self.addresses.get(&address) != Some(entity) || !self.regions.contains_key(&address.region()) {
-                return Err("live entity identity or address index is inconsistent");
-            }
-            expected_by_region.entry(address.region()).or_default().insert(*id);
             object_media_bytes =
                 object_media_bytes.saturating_add(object.content().object_media.as_deref().map_or(0, ObjectMedia::retained_bytes));
             match object.parent() {
@@ -50,26 +35,23 @@ impl World {
                     if parent_object.address().region() != address.region() {
                         return Err("resolved parent and child belong to different regions");
                     }
-                    expected_children.entry(parent).or_default().insert(*id, *entity);
+                    expected_children.entry(parent).or_default().insert(id, entity);
                 }
                 Parent::Pending { address, .. } => {
-                    expected_pending_children.entry(address).or_default().insert(*entity);
+                    if address.region() != object.address().region() {
+                        return Err("pending parent and child belong to different regions");
+                    }
+                    expected_pending_children.entry(address).or_default().insert(entity);
                 }
                 Parent::Unknown | Parent::Root => {}
             };
         }
-        if self.region_entities != expected_by_region
-            || self.children != expected_children
-            || self.pending_children != expected_pending_children
-        {
-            return Err("region or parent relationship indexes are inconsistent");
+        if self.children != expected_children || self.pending_children != expected_pending_children {
+            return Err("parent relationship indexes are inconsistent");
         }
-        if self.avatars != expected_avatars {
-            return Err("avatar index does not match live avatar records");
-        }
-        let mut checked = HashSet::with_capacity(self.entities.len());
+        let mut checked = HashSet::with_capacity(self.store.len());
         let mut path = HashSet::new();
-        for entity in self.entities.values().copied() {
+        for entity in self.store.entities().map(|(_, entity)| entity) {
             path.clear();
             let mut current = entity;
             while !checked.contains(&current) {
@@ -90,7 +72,7 @@ impl World {
         if self.object_media_bytes != object_media_bytes {
             return Err("ObjectMedia byte accounting is inconsistent");
         }
-        if !self.tombstones.invariants_hold(&self.regions, &self.addresses) {
+        if !self.tombstones.invariants_hold(&self.regions, &self.store) {
             return Err("tombstone indexes are inconsistent");
         }
         if let Some(error) = self.spatial.invariant_error(self) {
@@ -99,7 +81,7 @@ impl World {
         if !self.journal.invariants_hold() {
             return Err("change journal accounting is inconsistent");
         }
-        if !self.recent.invariants_hold() || self.recent.iter_after(None).any(|(id, _)| self.entities.contains_key(&id)) {
+        if !self.recent.invariants_hold() || self.recent.iter_after(None).any(|(id, _)| self.entity(id).is_some()) {
             return Err("recent-object indexes overlap live entities or are inconsistent");
         }
         Ok(())

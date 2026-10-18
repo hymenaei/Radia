@@ -2,6 +2,8 @@
 
 use std::{
     collections::Bound::{Excluded, Unbounded},
+    error::Error,
+    fmt::{self, Display, Formatter},
     mem::size_of,
 };
 
@@ -27,6 +29,8 @@ pub const MAX_REGION_PAGE_BYTES: usize = 1024 * 1024;
 pub const MAX_WORLD_CHANGE_PAGE_ITEMS: usize = 256;
 /// Maximum estimated owned data returned by one detail query.
 pub const MAX_OBJECT_DETAIL_BYTES: usize = 64 * 1024;
+/// Maximum estimated owned data returned by one ObjectMedia read.
+pub const MAX_OBJECT_MEDIA_READ_BYTES: usize = 256 * 1024;
 /// Maximum number of object details copied by one request.
 pub const MAX_OBJECT_DETAIL_BATCH_ITEMS: usize = 8;
 
@@ -138,7 +142,9 @@ pub struct RegionPageCursor {
     after: Region,
 }
 
-/// Owned details for one object, copied from a single World revision.
+/// Owned object state and appearance, copied from a single World revision.
+///
+/// Media URLs and whitelists are read separately through [`World::object_media`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObjectDetail {
     /// Current object identity and simulator address.
@@ -163,8 +169,16 @@ pub struct ObjectDetail {
     pub properties: Properties,
     /// Sources that supplied the current owner and creator values.
     pub properties_provenance: PropertiesProvenance,
-    /// Current per-face media values.
-    pub object_media: Option<ObjectMedia>,
+}
+
+/// An owned media snapshot for one object incarnation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObjectMediaRead {
+    pub entity: Entity,
+    /// Revision at which `media` was copied.
+    pub hydration_revision: WorldRevision,
+    /// `None` means no media snapshot has been observed. A known empty snapshot retains its version.
+    pub media: Option<ObjectMedia>,
 }
 
 /// Outcome for one entity in an [`ObjectDetailBatch`].
@@ -199,6 +213,15 @@ pub struct WorldChangeCursor {
     next_change: Option<usize>,
 }
 
+impl WorldChangeCursor {
+    fn completed_revision(self) -> WorldRevision {
+        match self.next_change {
+            Some(_) => WorldRevision(self.through_revision.0.checked_sub(1).expect("a partial revision is nonzero")),
+            None => self.through_revision,
+        }
+    }
+}
+
 /// One ordered World invalidation or lifecycle fact.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorldChangeRecord {
@@ -211,9 +234,14 @@ pub struct WorldChangeRecord {
 /// A bounded page of journal changes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorldChangePage {
+    /// Current World revision when this page was read.
     pub observed_revision: WorldRevision,
+    /// All changes through this revision have been consumed through `cursor`, including prior pages.
+    /// Records at a later revision belong to one incomplete mutation batch.
+    pub completed_revision: WorldRevision,
     pub records: Vec<WorldChangeRecord>,
     pub cursor: WorldChangeCursor,
+    /// More retained changes existed at `observed_revision`. New changes can arrive after this read.
     pub has_more: bool,
 }
 
@@ -236,8 +264,27 @@ pub enum WorldReadError {
     TooLarge,
 }
 
+impl Display for WorldReadError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StaleSession => f.write_str("cursor or entity belongs to another World session"),
+            Self::StaleIdentity => f.write_str("object incarnation is no longer live"),
+            Self::ResyncRequired => f.write_str("journal history was evicted; rebuild from a fresh read barrier"),
+            Self::StaleRevision => f.write_str("query cursor no longer matches the World revision"),
+            Self::InvalidCursor => f.write_str("invalid World read cursor"),
+            Self::InvalidLimit => f.write_str("read limit is zero or exceeds the operation maximum"),
+            Self::TooLarge => f.write_str("read result exceeds the byte limit"),
+        }
+    }
+}
+
+impl Error for WorldReadError {}
+
 impl World {
-    /// Captures counts and a cursor that can replay all later mutations.
+    /// Captures counts and a cursor for subsequent journal changes.
+    ///
+    /// Start enumeration after capturing the barrier, then reconcile changes from its cursor.
+    /// If history is evicted, discard the incomplete mirror and restart with a fresh barrier.
     pub fn read_barrier(&self) -> WorldReadBarrier {
         let revision = self.revision();
         WorldReadBarrier {
@@ -262,8 +309,8 @@ impl World {
 
         let hydration_revision = self.revision();
         let mut ids = match cursor {
-            Some(cursor) => self.object_ids.range((Excluded(cursor.after), Unbounded)),
-            None => self.object_ids.range(..),
+            Some(cursor) => self.store.ids().range((Excluded(cursor.after), Unbounded)),
+            None => self.store.ids().range(..),
         };
         let mut objects = Vec::with_capacity(limit);
         for id in ids.by_ref().take(limit) {
@@ -290,8 +337,8 @@ impl World {
 
         let hydration_revision = self.revision();
         let mut ids = match cursor {
-            Some(cursor) => self.object_ids.range((Excluded(cursor.after), Unbounded)),
-            None => self.object_ids.range(..),
+            Some(cursor) => self.store.ids().range((Excluded(cursor.after), Unbounded)),
+            None => self.store.ids().range(..),
         };
         let mut objects = Vec::with_capacity(limit);
         for id in ids.by_ref().take(limit) {
@@ -337,7 +384,8 @@ impl World {
         };
         let mut bytes = 0usize;
         let mut oversized_item = false;
-        for (region, info) in iter.by_ref().take(limit) {
+        for (region, state) in iter.by_ref().take(limit) {
+            let info = &state.info;
             let charge = region_summary_bytes(info);
             if bytes.saturating_add(charge) > MAX_REGION_PAGE_BYTES {
                 if regions.is_empty() {
@@ -362,14 +410,28 @@ impl World {
     /// Returns [`WorldReadError::TooLarge`] when the summary exceeds
     /// [`MAX_REGION_PAGE_BYTES`].
     pub fn region_summary(&self, region: Region) -> Result<Option<RegionSummaryRead>, WorldReadError> {
-        let Some(info) = self.regions.get(&region) else { return Ok(None) };
+        let Some(info) = self.region(region) else { return Ok(None) };
         if region_summary_bytes(info) > MAX_REGION_PAGE_BYTES {
             return Err(WorldReadError::TooLarge);
         }
         Ok(Some(RegionSummaryRead { hydration_revision: self.revision(), summary: RegionSummary { region, info: info.clone() } }))
     }
 
-    /// Copies a complete object detail value at the current revision.
+    /// Copies object state and appearance at the current revision.
+    ///
+    /// Media data has a separate copy budget; use [`Self::object_media`] to read it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::error::Error;
+    /// use world::{Entity, PoseState, World};
+    ///
+    /// fn read_pose(world: &World, entity: Entity) -> Result<PoseState, Box<dyn Error>> {
+    ///     let detail = world.object_detail(entity)?;
+    ///     Ok(detail.summary.pose?)
+    /// }
+    /// ```
     pub fn object_detail(&self, entity: Entity) -> Result<ObjectDetail, WorldReadError> {
         self.object_detail_at(entity, self.revision())
     }
@@ -405,6 +467,29 @@ impl World {
         }
 
         Ok(ObjectDetailBatch { hydration_revision, details })
+    }
+
+    /// Copies the latest observed media snapshot without hydrating other object state.
+    ///
+    /// The result owns its data and retains the object's incarnation and hydration revision.
+    /// Later edits, removal, or address reuse cannot change this snapshot.
+    ///
+    /// # Errors
+    /// Returns [`WorldReadError::StaleSession`] for an entity from another World,
+    /// [`WorldReadError::StaleIdentity`] for a removed incarnation, or
+    /// [`WorldReadError::TooLarge`] when the copy estimate exceeds [`MAX_OBJECT_MEDIA_READ_BYTES`].
+    pub fn object_media(&self, entity: Entity) -> Result<ObjectMediaRead, WorldReadError> {
+        if entity.1 != self.id {
+            return Err(WorldReadError::StaleSession);
+        }
+        let object = self.object(entity).ok_or(WorldReadError::StaleIdentity)?;
+        let media = object.object_media();
+        let bytes = size_of::<ObjectMediaRead>()
+            .saturating_add(media.map_or(0, |media| media.retained_bytes().saturating_sub(size_of::<ObjectMedia>())));
+        if bytes > MAX_OBJECT_MEDIA_READ_BYTES {
+            return Err(WorldReadError::TooLarge);
+        }
+        Ok(ObjectMediaRead { entity, hydration_revision: self.revision(), media: media.cloned() })
     }
 
     fn object_detail_at(&self, entity: Entity, hydration_revision: WorldRevision) -> Result<ObjectDetail, WorldReadError> {
@@ -453,12 +538,16 @@ impl World {
             sit_target: object.sit_target(),
             properties: object.properties(),
             properties_provenance: object.properties_provenance(),
-            object_media: object.object_media().cloned(),
         };
         Ok(detail)
     }
 
     /// Pulls a bounded ordered page of changes after `cursor`.
+    ///
+    /// One mutation can span pages. Use [`WorldChangePage::completed_revision`] to identify
+    /// complete batches. These records invalidate consumer state; they do not contain historical
+    /// object values. Hydration returns current state at its own revision, which may be newer than
+    /// a change. Reconcile removals by entity incarnation so an old removal cannot erase a replacement.
     pub fn change_page(&self, cursor: WorldChangeCursor, limit: usize) -> Result<WorldChangePage, WorldReadError> {
         if limit == 0 || limit > MAX_WORLD_CHANGE_PAGE_ITEMS {
             return Err(WorldReadError::InvalidLimit);
@@ -512,7 +601,13 @@ impl World {
                     } else {
                         WorldChangeCursor { world: self.id, through_revision: entry.revision, next_change: None }
                     };
-                    return Ok(WorldChangePage { observed_revision: self.revision(), records, cursor: next_cursor, has_more });
+                    return Ok(WorldChangePage {
+                        observed_revision: self.revision(),
+                        completed_revision: next_cursor.completed_revision(),
+                        records,
+                        cursor: next_cursor,
+                        has_more,
+                    });
                 }
             }
             next_cursor = WorldChangeCursor { world: self.id, through_revision: entry.revision, next_change: None };
@@ -520,16 +615,22 @@ impl World {
             change_index = 0;
         }
 
-        Ok(WorldChangePage { observed_revision: self.revision(), records, cursor: next_cursor, has_more: false })
+        Ok(WorldChangePage {
+            observed_revision: self.revision(),
+            completed_revision: next_cursor.completed_revision(),
+            records,
+            cursor: next_cursor,
+            has_more: false,
+        })
     }
 
     fn summary_for_id(&self, id: UUID) -> ObjectSummary {
-        let entity = self.entities.get(&id).copied().expect("object ordering index contains only live object IDs");
+        let entity = self.entity(id).expect("object ordering index contains only live object IDs");
         self.summary_for_entity(entity).expect("UUID index contains only live entities")
     }
 
     fn list_item_for_id(&self, id: UUID) -> ObjectListItem {
-        let entity = self.entities.get(&id).copied().expect("object ordering index contains only live object IDs");
+        let entity = self.entity(id).expect("object ordering index contains only live object IDs");
         self.list_item_for_entity(entity).expect("UUID index contains only live entities")
     }
 
@@ -537,7 +638,7 @@ impl World {
         if entity.1 != self.id {
             return Err(WorldReadError::StaleSession);
         }
-        let object = self.record(entity).ok_or(WorldReadError::StaleIdentity)?;
+        let object = self.store.record(entity).ok_or(WorldReadError::StaleIdentity)?;
         Ok(ObjectListItem { entity, id: object.id, kind: object.kind, address: object.state.binding.address })
     }
 
@@ -545,7 +646,7 @@ impl World {
         if entity.1 != self.id {
             return Err(WorldReadError::StaleSession);
         }
-        let object = self.record(entity).ok_or(WorldReadError::StaleIdentity)?;
+        let object = self.store.record(entity).ok_or(WorldReadError::StaleIdentity)?;
         Ok(ObjectSummary {
             entity,
             id: object.id,
@@ -583,5 +684,4 @@ fn object_detail_bytes(object: &Object<'_>) -> usize {
         .saturating_add(render_bytes)
         .saturating_add(gltf_bytes)
         .saturating_add(avatar_bytes)
-        .saturating_add(object.object_media().map_or(0, |media| media.retained_bytes().saturating_sub(size_of::<ObjectMedia>())))
 }

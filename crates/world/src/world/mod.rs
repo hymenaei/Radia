@@ -1,12 +1,11 @@
 //! Authoritative World ownership, coherent mutations, and bounded read models.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use base::UUID;
-use hecs::Ref;
 
 use crate::identity::WorldId;
-use crate::update::Stamp;
+use crate::update::{FieldStamp, Stamp};
 use crate::{ApplyError, Entity, LocalAddress, ObjectBindingTarget, Region, RegionInfo, WorldLimits, WorldRevision};
 
 mod address;
@@ -21,6 +20,7 @@ mod read;
 mod recent;
 mod relationships;
 mod spatial;
+mod storage;
 mod view;
 
 use address::Tombstones;
@@ -35,38 +35,32 @@ pub use query::{
     WorldQuery, WorldQueryBudget, WorldQueryBuildError, WorldQueryCursor, WorldQueryItem, WorldQueryPage,
 };
 pub use read::{
-    MAX_OBJECT_DETAIL_BATCH_BYTES, MAX_OBJECT_DETAIL_BATCH_ITEMS, MAX_OBJECT_DETAIL_BYTES, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_BYTES,
-    MAX_REGION_PAGE_ITEMS, MAX_WORLD_CHANGE_PAGE_ITEMS, ObjectDetail, ObjectDetailBatch, ObjectDetailResult, ObjectListItem,
-    ObjectListItemRead, ObjectListPage, ObjectPage, ObjectPageCursor, ObjectSummary, ObjectSummaryRead, RegionPage, RegionPageCursor,
-    RegionSummary, RegionSummaryRead, WorldChangeCursor, WorldChangePage, WorldChangeRecord, WorldReadBarrier, WorldReadError,
+    MAX_OBJECT_DETAIL_BATCH_BYTES, MAX_OBJECT_DETAIL_BATCH_ITEMS, MAX_OBJECT_DETAIL_BYTES, MAX_OBJECT_MEDIA_READ_BYTES,
+    MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_BYTES, MAX_REGION_PAGE_ITEMS, MAX_WORLD_CHANGE_PAGE_ITEMS, ObjectDetail, ObjectDetailBatch,
+    ObjectDetailResult, ObjectListItem, ObjectListItemRead, ObjectListPage, ObjectMediaRead, ObjectPage, ObjectPageCursor, ObjectSummary,
+    ObjectSummaryRead, RegionPage, RegionPageCursor, RegionSummary, RegionSummaryRead, WorldChangeCursor, WorldChangePage,
+    WorldChangeRecord, WorldReadBarrier, WorldReadError,
 };
 pub use recent::{MAX_RECENT_OBJECT_BYTES, MAX_RECENT_OBJECTS, RECENT_OBJECT_TTL, RecentObject};
 use recent::{RecentBatch, RecentStore};
 use spatial::SpatialIndex;
 pub use spatial::{MAX_QUERY_STATE_MAINTENANCE_WORK, QueryStateMaintenance};
-use view::ObjectRecordRef;
+use storage::{ObjectRecordRef, ObjectStore};
 pub use view::{Object, Objects};
 
-const MAX_OBJECT_MEDIA_BYTES: usize = 64 * 1024 * 1024;
-pub(super) fn remove_region_index(map: &mut HashMap<Region, BTreeSet<UUID>>, region: Region, id: UUID) {
-    if let Some(ids) = map.get_mut(&region) {
-        ids.remove(&id);
-        if ids.is_empty() {
-            map.remove(&region);
-        }
-    }
+#[derive(Default)]
+struct RegionState {
+    info: RegionInfo,
+    name_fence: Option<FieldStamp>,
 }
+
+const MAX_OBJECT_MEDIA_BYTES: usize = 64 * 1024 * 1024;
 
 /// One authoritative world for a login session.
 pub struct World {
     id: WorldId,
-    ecs: hecs::World,
-    entities: HashMap<UUID, Entity>,
-    avatars: BTreeSet<UUID>,
-    object_ids: BTreeSet<UUID>,
-    addresses: HashMap<LocalAddress, Entity>,
-    region_entities: HashMap<Region, BTreeSet<UUID>>,
-    regions: BTreeMap<Region, RegionInfo>,
+    store: ObjectStore,
+    regions: BTreeMap<Region, RegionState>,
     retired: HashSet<Region>,
     self_agent: Option<UUID>,
     children: HashMap<Entity, BTreeMap<UUID, Entity>>,
@@ -82,14 +76,10 @@ pub struct World {
 
 impl World {
     pub fn new(limits: WorldLimits) -> Self {
+        let id = WorldId::fresh();
         Self {
-            id: WorldId::fresh(),
-            ecs: hecs::World::new(),
-            entities: HashMap::new(),
-            avatars: BTreeSet::new(),
-            object_ids: BTreeSet::new(),
-            addresses: HashMap::new(),
-            region_entities: HashMap::new(),
+            id,
+            store: ObjectStore::new(id),
             regions: BTreeMap::new(),
             retired: HashSet::new(),
             self_agent: None,
@@ -117,21 +107,22 @@ impl World {
         Ok(())
     }
 
+    /// The latest committed observable change. Updates that only advance ordering evidence do not increment the revision.
     pub const fn revision(&self) -> WorldRevision {
         self.journal.revision
     }
 
     pub fn entity(&self, id: UUID) -> Option<Entity> {
-        self.entities.get(&id).copied()
+        self.store.entity(id)
     }
 
     pub fn entity_at(&self, address: LocalAddress) -> Option<Entity> {
-        self.addresses.get(&address).copied()
+        self.store.entity_at(address)
     }
 
     /// Captures the current object binding for an asynchronous operation.
     pub fn object_binding_target(&self, entity: Entity) -> Option<ObjectBindingTarget> {
-        let object = self.record(entity)?;
+        let object = self.store.record(entity)?;
         Some(ObjectBindingTarget {
             entity,
             id: object.id,
@@ -142,49 +133,35 @@ impl World {
 
     /// Returns whether a target still names the same live object binding.
     pub fn object_binding_target_is_current(&self, target: ObjectBindingTarget) -> bool {
-        if target.entity.1 != self.id || self.entities.get(&target.id) != Some(&target.entity) {
+        if target.entity.1 != self.id || self.entity(target.id) != Some(target.entity) {
             return false;
         }
-        let Some(object) = self.record(target.entity) else { return false };
+        let Some(object) = self.store.record(target.entity) else { return false };
         object.state.binding.address == target.address
             && object.state.binding.address_generation == target.address_generation
-            && self.addresses.get(&target.address) == Some(&target.entity)
-    }
-
-    fn record(&self, entity: Entity) -> Option<Ref<'_, ObjectRecord>> {
-        if entity.1 != self.id {
-            return None;
-        }
-        self.ecs.get::<&ObjectRecord>(entity.0).ok()
+            && self.entity_at(target.address) == Some(target.entity)
     }
 
     pub fn object(&self, entity: Entity) -> Option<Object<'_>> {
-        if entity.1 != self.id {
-            return None;
-        }
-        let entry = self.ecs.entity(entity.0).ok()?;
-        let record = entry.get::<&ObjectRecord>()?;
-        let content = entry.get::<&ObjectContent>()?;
-        Some(Object { entity, record: ObjectRecordRef::Owned { record, content }, world: self })
+        let record = self.store.object(entity)?;
+        Some(Object { entity, record, world: self })
     }
 
     /// Borrows live object state for scans in unspecified storage order.
     pub fn objects(&self) -> Objects<'_> {
-        Objects { records: self.ecs.query::<(hecs::Entity, &ObjectRecord, &ObjectContent)>(), world: self }
+        Objects { records: self.store.objects(), world: self }
     }
 
     /// Returns the number of live objects in the world.
     pub fn object_count(&self) -> usize {
-        self.entities.len()
+        self.store.len()
     }
 
     pub fn objects_in_region(&self, region: Region) -> impl Iterator<Item = Object<'_>> {
-        self.region_entities
-            .get(&region)
-            .into_iter()
-            .flat_map(|ids| ids.iter())
-            .filter_map(|id| self.entities.get(id).copied())
-            .filter_map(|entity| self.object(entity))
+        self.store.region_ids(region).into_iter().flat_map(|ids| ids.iter()).map(|id| {
+            let entity = self.entity(*id).expect("region index contains only live objects");
+            self.object(entity).expect("region index contains only complete objects")
+        })
     }
 
     pub fn children(&self, entity: Entity) -> impl Iterator<Item = Object<'_>> {
@@ -193,26 +170,26 @@ impl World {
 
     /// Iterates live avatars in unspecified order without scanning other objects.
     pub fn avatars(&self) -> impl Iterator<Item = Object<'_>> {
-        self.avatars.iter().map(|id| self.object(self.entities[id]).expect("avatar index contains only live entities"))
+        self.store.avatar_ids().iter().map(|id| {
+            let entity = self.entity(*id).expect("avatar index contains only live entities");
+            self.object(entity).expect("avatar index contains only complete objects")
+        })
     }
 
     pub fn regions(&self) -> impl Iterator<Item = (Region, &RegionInfo)> {
-        self.regions.iter().map(|(region, info)| (*region, info))
+        self.regions.iter().map(|(region, info)| (*region, &info.info))
     }
 
     pub fn region(&self, region: Region) -> Option<&RegionInfo> {
-        self.regions.get(&region)
+        self.regions.get(&region).map(|state| &state.info)
     }
 
     fn require_active_region(&self, region: Region) -> Result<(), ApplyError> {
         if self.regions.contains_key(&region) { Ok(()) } else { Err(ApplyError::StaleRegion) }
     }
 
+    #[cfg(test)]
     fn state_mut(&mut self, entity: Entity) -> &mut ObjectState {
-        &mut self.ecs.query_one_mut::<&mut ObjectRecord>(entity.0).expect("entity index points to live state").state
-    }
-
-    fn ordering_mut(&mut self, entity: Entity) -> &mut ObjectOrdering {
-        self.ecs.query_one_mut::<&mut ObjectOrdering>(entity.0).expect("entity index points to live ordering")
+        &mut self.store.record_mut(entity.0).state
     }
 }

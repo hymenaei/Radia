@@ -1,16 +1,16 @@
-use std::{cell::Cell, fmt, io::Write, rc::Rc, str::from_utf8};
+//! Serde encoding into one output buffer shared by all LLSD formats.
 
 use crate::{
     Date, Error, Limits, Result,
-    value::{BINARY_NEWTYPE, DATE_NEWTYPE, URI_NEWTYPE, UUID_NEWTYPE},
+    value::{DATE_NEWTYPE, URI_NEWTYPE, UUID_NEWTYPE},
 };
 use base::UUID;
 use base64::{Engine, engine::general_purpose::STANDARD};
-use quick_xml::escape::unescape;
 use serde::ser::{
     self, Impossible, Serialize, SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant, SerializeTuple, SerializeTupleStruct,
     SerializeTupleVariant,
 };
+use std::{fmt, io::Write};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Format {
@@ -19,629 +19,640 @@ pub(crate) enum Format {
     Notation,
 }
 
+const XML_PREFIX: &[u8] = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><llsd>";
+const XML_SUFFIX: &[u8] = b"</llsd>";
+
 pub(crate) fn to_vec<T: Serialize + ?Sized>(value: &T, format: Format) -> Result<Vec<u8>> {
-    let value = value.serialize(Serializer { format, budget: None, nesting: None })?;
-    match format {
-        Format::Xml => {
-            let mut output = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><llsd>".to_vec();
-            output.extend_from_slice(&value);
-            output.extend_from_slice(b"</llsd>");
-            Ok(output)
-        }
-        Format::Binary => {
-            let mut output = b"<?llsd/binary?>\n".to_vec();
-            output.extend_from_slice(&value);
-            Ok(output)
-        }
-        Format::Notation => {
-            let mut output = b"<?llsd/notation?>\n".to_vec();
-            output.extend_from_slice(&value);
-            Ok(output)
-        }
-    }
+    encode(value, format, None)
 }
-
 pub(crate) fn to_vec_with_max_bytes<T: Serialize + ?Sized>(value: &T, max_bytes: usize) -> Result<Vec<u8>> {
-    const PREFIX: &[u8] = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><llsd>";
-    const SUFFIX: &[u8] = b"</llsd>";
-
-    let envelope_len = PREFIX.len() + SUFFIX.len();
-    let remaining = max_bytes.checked_sub(envelope_len).ok_or(Error::LimitExceeded("encoded length"))?;
-    let budget = Rc::new(Cell::new(remaining));
-    let value = value.serialize(Serializer { format: Format::Xml, budget: Some(budget), nesting: Some(Rc::new(Cell::new(0))) })?;
-
-    let mut output = Vec::with_capacity(envelope_len + value.len());
-    output.extend_from_slice(PREFIX);
-    output.extend_from_slice(&value);
-    output.extend_from_slice(SUFFIX);
-    Ok(output)
+    encode(value, Format::Xml, Some(max_bytes))
 }
-
+fn encode<T: Serialize + ?Sized>(value: &T, format: Format, max_bytes: Option<usize>) -> Result<Vec<u8>> {
+    let max_bytes = max_bytes.map(|max| max.checked_sub(XML_SUFFIX.len()).ok_or(Error::LimitExceeded("encoded length"))).transpose()?;
+    let mut serializer = Serializer { output: Vec::new(), format, max_bytes, depth: 0 };
+    serializer.append(match format {
+        Format::Xml => XML_PREFIX,
+        Format::Binary => b"<?llsd/binary?>\n",
+        Format::Notation => b"<?llsd/notation?>\n",
+    })?;
+    value.serialize(&mut serializer)?;
+    if format == Format::Xml {
+        serializer.output.extend_from_slice(XML_SUFFIX);
+    }
+    Ok(serializer.output)
+}
 pub(crate) fn to_writer<T: Serialize + ?Sized, W: Write>(mut writer: W, value: &T, format: Format) -> Result<()> {
     writer.write_all(&to_vec(value, format)?)?;
     Ok(())
 }
 
 struct Serializer {
+    output: Vec<u8>,
     format: Format,
-    budget: Option<Rc<Cell<usize>>>,
-    nesting: Option<Rc<Cell<usize>>>,
+    max_bytes: Option<usize>,
+    depth: usize,
 }
-
 impl Serializer {
-    fn scalar(&self, tag: &str, text: &str) -> Result<Vec<u8>> {
-        if !matches!(tag, "undef" | "boolean" | "integer" | "real" | "uuid" | "string" | "date" | "uri") {
-            return Err(Error::InvalidValue(format!("unsupported LLSD scalar tag '{tag}'")));
-        }
-        if tag == "boolean" && !matches!(text, "true" | "false") {
-            return Err(Error::InvalidValue("invalid LLSD boolean".into()));
-        }
-
-        match self.format {
-            Format::Xml => match &self.budget {
-                Some(budget) => xml_scalar_bounded(tag, text, budget),
-                None => xml_scalar(tag, text),
-            },
-            Format::Binary => match tag {
-                "undef" => Ok(vec![b'!']),
-                "boolean" => Ok(vec![if text == "true" { b'1' } else { b'0' }]),
-                "integer" => {
-                    let value = text.parse::<i32>().map_err(|error| Error::InvalidValue(format!("invalid LLSD integer: {error}")))?;
-                    Ok(binary_fixed(b'i', &value.to_be_bytes()))
-                }
-                "real" => Ok(binary_fixed(b'r', &parse_real(text)?.to_bits().to_be_bytes())),
-                "string" => binary_sized(b's', text.as_bytes()),
-                _ => Err(Error::InvalidValue(format!("unsupported LLSD scalar tag '{tag}'"))),
-            },
-            Format::Notation => match tag {
-                "undef" => Ok(b"!".to_vec()),
-                "boolean" => Ok(text.as_bytes().to_vec()),
-                "integer" => Ok(format!("i{text}").into_bytes()),
-                "real" => Ok(format!("r{text}").into_bytes()),
-                "string" => Ok(notation_string(text)),
-                _ => Err(Error::InvalidValue(format!("unsupported LLSD scalar tag '{tag}'"))),
-            },
-        }
+    fn remaining(&self) -> Option<usize> {
+        self.max_bytes.map(|max| max.saturating_sub(self.output.len()))
     }
-
-    fn bytes(&self, bytes: &[u8]) -> Result<Vec<u8>> {
-        match self.format {
-            Format::Xml => match &self.budget {
-                Some(budget) => xml_binary_bounded(bytes, budget),
-                None => xml_scalar("binary", &STANDARD.encode(bytes)),
-            },
-            Format::Binary => binary_sized(b'b', bytes),
-            Format::Notation => {
-                let mut output = b"b64\"".to_vec();
-                output.extend_from_slice(STANDARD.encode(bytes).as_bytes());
-                output.push(b'"');
-                Ok(output)
-            }
-        }
-    }
-
-    fn compound(&self, kind: CompoundKind, values: Vec<Vec<u8>>, keys: Vec<String>) -> Result<Vec<u8>> {
-        match (self.format, kind) {
-            (Format::Xml, CompoundKind::Array) => match &self.budget {
-                Some(budget) => xml_container_bounded("array", values, budget),
-                None => Ok(xml_container("array", values)),
-            },
-            (Format::Xml, CompoundKind::Map) => match &self.budget {
-                Some(budget) => xml_map_bounded(values, keys, budget),
-                None => xml_map(values, keys),
-            },
-            (Format::Binary, CompoundKind::Array) => binary_container(b'[', b']', values),
-            (Format::Binary, CompoundKind::Map) => binary_map(values, keys),
-            (Format::Notation, CompoundKind::Array) => Ok(notation_container(b'[', b']', values)),
-            (Format::Notation, CompoundKind::Map) => Ok(notation_map(values, keys)),
-        }
-    }
-
-    fn special_newtype(&self, name: &str, value: Vec<u8>, charged_to_budget: bool) -> Result<Vec<u8>> {
-        if name == BINARY_NEWTYPE {
-            return Ok(value);
-        }
-        if !matches!(name, UUID_NEWTYPE | URI_NEWTYPE | DATE_NEWTYPE) {
-            return Ok(value);
-        }
-        let text = match self.format {
-            Format::Xml => extract_xml_string(&value)?,
-            Format::Binary => extract_binary_string(&value)?,
-            Format::Notation => extract_notation_string(&value)?,
-        };
-        if charged_to_budget && self.budget.is_some() {
-            self.refund(value.len())?;
-        }
-        if name == UUID_NEWTYPE {
-            let uuid = UUID::parse_str(&text).map_err(|error| Error::InvalidValue(error.to_string()))?;
-            return match self.format {
-                Format::Xml => self.scalar("uuid", &uuid.to_string()),
-                Format::Binary => {
-                    let mut output = vec![b'u'];
-                    output.extend_from_slice(uuid.as_bytes());
-                    Ok(output)
-                }
-                Format::Notation => Ok(format!("u{uuid}").into_bytes()),
-            };
-        }
-        if name == URI_NEWTYPE {
-            return match self.format {
-                Format::Xml => self.scalar("uri", &text),
-                Format::Binary => binary_sized(b'l', text.as_bytes()),
-                Format::Notation => Ok(notation_typed_quoted(b'l', &text)),
-            };
-        }
-        if name == DATE_NEWTYPE {
-            let date = Date::parse(&text)?;
-            return match self.format {
-                Format::Xml => self.scalar("date", &date.format()?),
-                Format::Binary => Ok(binary_fixed(b'd', &date.unix_seconds().to_bits().to_le_bytes())),
-                Format::Notation => Ok(notation_typed_quoted(b'd', &date.format()?)),
-            };
-        }
-        Ok(value)
-    }
-
-    fn child(&self) -> Self {
-        Self { format: self.format, budget: self.budget.clone(), nesting: self.nesting.clone() }
-    }
-
-    fn enter_container(&self) -> Result<Option<NestingGuard>> {
-        let Some(nesting) = &self.nesting else {
-            return Ok(None);
-        };
-        let depth = nesting.get().checked_add(1).ok_or(Error::LimitExceeded("nesting depth"))?;
-        if depth > Limits::default().max_depth {
-            return Err(Error::LimitExceeded("nesting depth"));
-        }
-        nesting.set(depth);
-        Ok(Some(NestingGuard(Rc::clone(nesting))))
-    }
-
-    fn refund(&self, length: usize) -> Result<()> {
-        if let Some(budget) = &self.budget {
-            let remaining = budget.get().checked_add(length).ok_or(Error::LimitExceeded("encoded length"))?;
-            budget.set(remaining);
+    fn check_space(&self, length: usize) -> Result<()> {
+        if self.remaining().is_some_and(|remaining| length > remaining) {
+            return Err(Error::LimitExceeded("encoded length"));
         }
         Ok(())
     }
-}
-
-struct NestingGuard(Rc<Cell<usize>>);
-
-impl Drop for NestingGuard {
-    fn drop(&mut self) {
-        self.0.set(self.0.get().saturating_sub(1));
+    fn append(&mut self, bytes: &[u8]) -> Result<()> {
+        self.check_space(bytes.len())?;
+        self.output.extend_from_slice(bytes);
+        Ok(())
+    }
+    fn xml_text(&mut self, tag: &str, text: &str) -> Result<()> {
+        let length = xml_tag_overhead(tag).checked_add(xml_escaped_len(text)?).ok_or(Error::LimitExceeded("encoded length"))?;
+        self.check_space(length)?;
+        self.output.reserve(length);
+        self.output.push(b'<');
+        self.output.extend_from_slice(tag.as_bytes());
+        self.output.push(b'>');
+        escape_xml(text, &mut self.output);
+        self.output.extend_from_slice(b"</");
+        self.output.extend_from_slice(tag.as_bytes());
+        self.output.push(b'>');
+        Ok(())
+    }
+    fn binary_sized(&mut self, tag: u8, bytes: &[u8]) -> Result<()> {
+        let length = binary_length(bytes.len())?;
+        self.append(&[tag])?;
+        self.append(&length)?;
+        self.append(bytes)
+    }
+    fn quoted(&mut self, text: &str, quote: u8) -> Result<()> {
+        self.append(&[quote])?;
+        for &byte in text.as_bytes() {
+            match byte {
+                b'\\' => self.append(b"\\\\")?,
+                b'\n' => self.append(b"\\n")?,
+                b'\r' => self.append(b"\\r")?,
+                b'\t' => self.append(b"\\t")?,
+                byte if byte == quote => self.append(&[b'\\', byte])?,
+                0..=0x1f | 0x7f => {
+                    const HEX: &[u8] = b"0123456789abcdef";
+                    self.append(&[b'\\', b'x', HEX[(byte >> 4) as usize], HEX[(byte & 15) as usize]])?;
+                }
+                byte => self.append(&[byte])?,
+            }
+        }
+        self.append(&[quote])
+    }
+    fn string(&mut self, text: &str, kind: TextKind) -> Result<()> {
+        match kind {
+            TextKind::Uuid => {
+                let uuid = UUID::parse_str(text).map_err(|e| Error::InvalidValue(e.to_string()))?;
+                match self.format {
+                    Format::Xml => self.xml_text("uuid", &uuid.to_string()),
+                    Format::Binary => {
+                        self.append(b"u")?;
+                        self.append(uuid.as_bytes())
+                    }
+                    Format::Notation => {
+                        self.append(b"u")?;
+                        self.append(uuid.to_string().as_bytes())
+                    }
+                }
+            }
+            TextKind::Date => {
+                let date = Date::parse(text)?;
+                match self.format {
+                    Format::Xml => self.xml_text("date", &date.format()?),
+                    Format::Binary => {
+                        self.append(b"d")?;
+                        self.append(&date.unix_seconds().to_le_bytes())
+                    }
+                    Format::Notation => {
+                        self.append(b"d")?;
+                        self.quoted(&date.format()?, b'"')
+                    }
+                }
+            }
+            TextKind::String | TextKind::Uri => match self.format {
+                Format::Xml => self.xml_text(if matches!(kind, TextKind::Uri) { "uri" } else { "string" }, text),
+                Format::Binary => self.binary_sized(if matches!(kind, TextKind::Uri) { b'l' } else { b's' }, text.as_bytes()),
+                Format::Notation => {
+                    if matches!(kind, TextKind::Uri) {
+                        self.append(b"l")?;
+                        self.quoted(text, b'"')
+                    } else {
+                        self.quoted(text, b'\'')
+                    }
+                }
+            },
+        }
+    }
+    fn bytes(&mut self, bytes: &[u8]) -> Result<()> {
+        if self.format == Format::Binary {
+            return self.binary_sized(b'b', bytes);
+        }
+        let encoded_len = bytes
+            .len()
+            .checked_add(2)
+            .and_then(|n| n.checked_div(3))
+            .and_then(|n| n.checked_mul(4))
+            .ok_or(Error::LimitExceeded("encoded length"))?;
+        let (prefix, suffix): (&[u8], &[u8]) = if self.format == Format::Xml { (b"<binary>", b"</binary>") } else { (b"b64\"", b"\"") };
+        let length = prefix
+            .len()
+            .checked_add(encoded_len)
+            .and_then(|n| n.checked_add(suffix.len()))
+            .ok_or(Error::LimitExceeded("encoded length"))?;
+        self.check_space(length)?;
+        self.output.reserve(length);
+        self.output.extend_from_slice(prefix);
+        let start = self.output.len();
+        self.output.resize(start + encoded_len, 0);
+        STANDARD.encode_slice(bytes, &mut self.output[start..]).map_err(|e| Error::InvalidValue(e.to_string()))?;
+        self.output.extend_from_slice(suffix);
+        Ok(())
+    }
+    fn open(&mut self, kind: Container, hint: Option<usize>) -> Result<usize> {
+        if self.max_bytes.is_some() && self.depth >= Limits::default().max_depth {
+            return Err(Error::LimitExceeded("nesting depth"));
+        }
+        if self.format == Format::Binary {
+            binary_length(hint.unwrap_or(0))?;
+        }
+        let offset = self.output.len();
+        match self.format {
+            Format::Xml => self.append(match kind {
+                Container::Array => b"<array>",
+                Container::Map => b"<map>",
+            })?,
+            Format::Binary => {
+                self.append(&[kind.start()])?;
+                self.append(&[0; 4])?;
+            }
+            Format::Notation => self.append(&[kind.start()])?,
+        }
+        self.depth += 1;
+        Ok(offset)
+    }
+    fn close(&mut self, kind: Container, offset: usize, count: usize) -> Result<()> {
+        match self.format {
+            Format::Xml => self.append(match kind {
+                Container::Array => b"</array>",
+                Container::Map => b"</map>",
+            }),
+            Format::Binary => {
+                let length = binary_length(count)?;
+                self.output[offset + 1..offset + 5].copy_from_slice(&length);
+                self.append(&[kind.end()])
+            }
+            Format::Notation => self.append(&[kind.end()]),
+        }
+    }
+    fn key(&mut self, key: &str) -> Result<()> {
+        match self.format {
+            Format::Xml => self.xml_text("key", key),
+            Format::Binary => self.binary_sized(b'k', key.as_bytes()),
+            Format::Notation => {
+                self.quoted(key, b'\'')?;
+                self.append(b":")
+            }
+        }
+    }
+    fn compound(&mut self, kind: Container, hint: Option<usize>) -> Result<Compound<'_>> {
+        let offset = self.open(kind, hint)?;
+        Ok(Compound { serializer: self, kind, offset, count: 0, pending_key: false, outer_map: None })
+    }
+    fn variant(&mut self, name: &str, kind: Container, hint: usize) -> Result<Compound<'_>> {
+        let outer = self.open(Container::Map, Some(1))?;
+        let result = self.key(name).and_then(|()| self.open(kind, Some(hint)));
+        match result {
+            Ok(offset) => Ok(Compound { serializer: self, kind, offset, count: 0, pending_key: false, outer_map: Some(outer) }),
+            Err(error) => {
+                self.depth -= 1;
+                Err(error)
+            }
+        }
     }
 }
+#[derive(Clone, Copy)]
+enum TextKind {
+    String,
+    Uuid,
+    Uri,
+    Date,
+}
 
-impl ser::Serializer for Serializer {
-    type Ok = Vec<u8>;
+impl<'a> ser::Serializer for &'a mut Serializer {
+    type Ok = ();
     type Error = Error;
-    type SerializeSeq = Compound;
-    type SerializeTuple = Compound;
-    type SerializeTupleStruct = Compound;
-    type SerializeTupleVariant = VariantCompound;
-    type SerializeMap = Compound;
-    type SerializeStruct = Compound;
-    type SerializeStructVariant = VariantCompound;
+    type SerializeSeq = Compound<'a>;
+    type SerializeTuple = Compound<'a>;
+    type SerializeTupleStruct = Compound<'a>;
+    type SerializeTupleVariant = Compound<'a>;
+    type SerializeMap = Compound<'a>;
+    type SerializeStruct = Compound<'a>;
+    type SerializeStructVariant = Compound<'a>;
 
-    fn serialize_bool(self, value: bool) -> Result<Self::Ok> {
-        self.scalar("boolean", if value { "true" } else { "false" })
+    fn serialize_bool(self, value: bool) -> Result<()> {
+        match self.format {
+            Format::Xml => self.xml_text("boolean", if value { "true" } else { "false" }),
+            Format::Binary => self.append(if value { b"1" } else { b"0" }),
+            Format::Notation => self.append(if value { b"true" } else { b"false" }),
+        }
     }
-
-    fn serialize_i8(self, value: i8) -> Result<Self::Ok> {
+    fn serialize_i8(self, value: i8) -> Result<()> {
         self.serialize_i32(i32::from(value))
     }
-
-    fn serialize_i16(self, value: i16) -> Result<Self::Ok> {
+    fn serialize_i16(self, value: i16) -> Result<()> {
         self.serialize_i32(i32::from(value))
     }
-
-    fn serialize_i32(self, value: i32) -> Result<Self::Ok> {
-        self.scalar("integer", &value.to_string())
+    fn serialize_i32(self, value: i32) -> Result<()> {
+        match self.format {
+            Format::Xml => self.xml_text("integer", &value.to_string()),
+            Format::Binary => {
+                self.append(b"i")?;
+                self.append(&value.to_be_bytes())
+            }
+            Format::Notation => {
+                self.append(b"i")?;
+                self.append(value.to_string().as_bytes())
+            }
+        }
     }
-
-    fn serialize_i64(self, value: i64) -> Result<Self::Ok> {
+    fn serialize_i64(self, value: i64) -> Result<()> {
         self.serialize_i32(i32::try_from(value).map_err(|_| Error::InvalidValue("integer is outside the LLSD i32 range".into()))?)
     }
-
-    fn serialize_u8(self, value: u8) -> Result<Self::Ok> {
+    fn serialize_u8(self, value: u8) -> Result<()> {
         self.serialize_i32(i32::from(value))
     }
-
-    fn serialize_u16(self, value: u16) -> Result<Self::Ok> {
+    fn serialize_u16(self, value: u16) -> Result<()> {
         self.serialize_i32(i32::from(value))
     }
-
-    fn serialize_u32(self, value: u32) -> Result<Self::Ok> {
+    fn serialize_u32(self, value: u32) -> Result<()> {
+        self.serialize_u64(u64::from(value))
+    }
+    fn serialize_u64(self, value: u64) -> Result<()> {
         self.serialize_i32(i32::try_from(value).map_err(|_| Error::InvalidValue("integer is outside the LLSD i32 range".into()))?)
     }
-
-    fn serialize_u64(self, value: u64) -> Result<Self::Ok> {
-        self.serialize_i32(i32::try_from(value).map_err(|_| Error::InvalidValue("integer is outside the LLSD i32 range".into()))?)
-    }
-
-    fn serialize_f32(self, value: f32) -> Result<Self::Ok> {
+    fn serialize_f32(self, value: f32) -> Result<()> {
         self.serialize_f64(f64::from(value))
     }
-
-    fn serialize_f64(self, value: f64) -> Result<Self::Ok> {
-        self.scalar("real", &real_text(value))
+    fn serialize_f64(self, value: f64) -> Result<()> {
+        match self.format {
+            Format::Xml => self.xml_text("real", &real_text(value)),
+            Format::Binary => {
+                self.append(b"r")?;
+                self.append(&value.to_be_bytes())
+            }
+            Format::Notation => {
+                self.append(b"r")?;
+                self.append(real_text(value).as_bytes())
+            }
+        }
     }
-
-    fn serialize_char(self, value: char) -> Result<Self::Ok> {
-        self.serialize_str(&value.to_string())
+    fn serialize_char(self, value: char) -> Result<()> {
+        self.serialize_str(value.encode_utf8(&mut [0; 4]))
     }
-
-    fn serialize_str(self, value: &str) -> Result<Self::Ok> {
-        self.scalar("string", value)
+    fn serialize_str(self, value: &str) -> Result<()> {
+        self.string(value, TextKind::String)
     }
-
-    fn serialize_bytes(self, value: &[u8]) -> Result<Self::Ok> {
+    fn serialize_bytes(self, value: &[u8]) -> Result<()> {
         self.bytes(value)
     }
-
-    fn serialize_none(self) -> Result<Self::Ok> {
+    fn serialize_none(self) -> Result<()> {
         self.serialize_unit()
     }
-
-    fn serialize_some<T: Serialize + ?Sized>(self, value: &T) -> Result<Self::Ok> {
+    fn serialize_some<T: Serialize + ?Sized>(self, value: &T) -> Result<()> {
         value.serialize(self)
     }
-
-    fn serialize_unit(self) -> Result<Self::Ok> {
-        self.scalar("undef", "")
+    fn serialize_unit(self) -> Result<()> {
+        match self.format {
+            Format::Xml => self.xml_text("undef", ""),
+            _ => self.append(b"!"),
+        }
     }
-
-    fn serialize_unit_struct(self, _: &'static str) -> Result<Self::Ok> {
+    fn serialize_unit_struct(self, _: &'static str) -> Result<()> {
         self.serialize_unit()
     }
-
-    fn serialize_unit_variant(self, _: &'static str, _: u32, variant: &'static str) -> Result<Self::Ok> {
+    fn serialize_unit_variant(self, _: &'static str, _: u32, variant: &'static str) -> Result<()> {
         self.serialize_str(variant)
     }
-
-    fn serialize_newtype_struct<T: Serialize + ?Sized>(self, name: &'static str, value: &T) -> Result<Self::Ok> {
-        if self.format == Format::Xml
-            && matches!(name, UUID_NEWTYPE | URI_NEWTYPE | DATE_NEWTYPE)
-            && let Some(budget) = &self.budget
-        {
-            let scratch_limit = budget.get().saturating_add(xml_tag_overhead("string"));
-            let scratch = Rc::new(Cell::new(scratch_limit));
-            let encoded = value.serialize(Serializer { format: self.format, budget: Some(scratch), nesting: self.nesting.clone() })?;
-            return self.special_newtype(name, encoded, false);
-        }
-        let encoded = value.serialize(self.child())?;
-        self.special_newtype(name, encoded, true)
+    fn serialize_newtype_struct<T: Serialize + ?Sized>(self, name: &'static str, value: &T) -> Result<()> {
+        let kind = match name {
+            UUID_NEWTYPE => TextKind::Uuid,
+            URI_NEWTYPE => TextKind::Uri,
+            DATE_NEWTYPE => TextKind::Date,
+            _ => return value.serialize(self),
+        };
+        value.serialize(TextSerializer { serializer: self, kind })
     }
-
-    fn serialize_newtype_variant<T: Serialize + ?Sized>(
-        self,
-        _: &'static str,
-        _: u32,
-        variant: &'static str,
-        value: &T,
-    ) -> Result<Self::Ok> {
-        let depth = self.enter_container()?;
-        let mut compound = Compound::map(self.format, 1, self.budget.clone(), self.nesting.clone(), depth);
-        if let Some(budget) = &self.budget {
-            charge_xml_key(variant, budget)?;
-        }
-        compound.push(variant.to_owned(), value.serialize(self.child())?);
-        compound.finish()
+    fn serialize_newtype_variant<T: Serialize + ?Sized>(self, _: &'static str, _: u32, variant: &'static str, value: &T) -> Result<()> {
+        let mut map = self.compound(Container::Map, Some(1))?;
+        SerializeMap::serialize_entry(&mut map, variant, value)?;
+        SerializeMap::end(map)
     }
-
     fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq> {
-        let depth = self.enter_container()?;
-        let capacity = len.unwrap_or(0);
-        validate_binary_length(self.format, capacity)?;
-        Ok(Compound::sequence(self.format, capacity, self.budget, self.nesting, depth))
+        self.compound(Container::Array, len)
     }
-
     fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple> {
-        let depth = self.enter_container()?;
-        validate_binary_length(self.format, len)?;
-        Ok(Compound::sequence(self.format, len, self.budget, self.nesting, depth))
+        self.serialize_seq(Some(len))
     }
-
     fn serialize_tuple_struct(self, _: &'static str, len: usize) -> Result<Self::SerializeTupleStruct> {
-        self.serialize_tuple(len)
+        self.serialize_seq(Some(len))
     }
-
     fn serialize_tuple_variant(self, _: &'static str, _: u32, variant: &'static str, len: usize) -> Result<Self::SerializeTupleVariant> {
-        let map_depth = self.enter_container()?;
-        let value_depth = self.enter_container()?;
-        validate_binary_length(self.format, len)?;
-        Ok(VariantCompound {
-            format: self.format,
-            name: variant,
-            values: bounded_capacity(self.budget.as_ref(), len),
-            keys: Vec::new(),
-            kind: CompoundKind::Array,
-            budget: self.budget,
-            nesting: self.nesting,
-            _map_depth: map_depth,
-            _value_depth: value_depth,
-        })
+        self.variant(variant, Container::Array, len)
     }
-
     fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap> {
-        let depth = self.enter_container()?;
-        let capacity = len.unwrap_or(0);
-        validate_binary_length(self.format, capacity)?;
-        Ok(Compound::map(self.format, capacity, self.budget, self.nesting, depth))
+        self.compound(Container::Map, len)
     }
-
     fn serialize_struct(self, _: &'static str, len: usize) -> Result<Self::SerializeStruct> {
-        let depth = self.enter_container()?;
-        validate_binary_length(self.format, len)?;
-        Ok(Compound::map(self.format, len, self.budget, self.nesting, depth))
+        self.serialize_map(Some(len))
     }
-
     fn serialize_struct_variant(self, _: &'static str, _: u32, variant: &'static str, len: usize) -> Result<Self::SerializeStructVariant> {
-        let map_depth = self.enter_container()?;
-        let value_depth = self.enter_container()?;
-        validate_binary_length(self.format, len)?;
-        Ok(VariantCompound {
-            format: self.format,
-            name: variant,
-            values: bounded_capacity(self.budget.as_ref(), len),
-            keys: bounded_capacity(self.budget.as_ref(), len),
-            kind: CompoundKind::Map,
-            budget: self.budget,
-            nesting: self.nesting,
-            _map_depth: map_depth,
-            _value_depth: value_depth,
-        })
+        self.variant(variant, Container::Map, len)
     }
-
-    fn collect_str<T: fmt::Display + ?Sized>(self, value: &T) -> Result<Self::Ok> {
-        match &self.budget {
-            Some(budget) => {
-                let max_text_len = budget.get().saturating_sub(xml_tag_overhead("string"));
-                let text = bounded_display(value, max_text_len)?;
-                self.serialize_str(&text)
-            }
-            None => self.serialize_str(&value.to_string()),
-        }
+    fn collect_str<T: fmt::Display + ?Sized>(self, value: &T) -> Result<()> {
+        let text = match self.remaining() {
+            Some(remaining) => bounded_display(value, remaining.saturating_sub(xml_tag_overhead("string")))?,
+            None => value.to_string(),
+        };
+        self.serialize_str(&text)
     }
-
     fn is_human_readable(&self) -> bool {
         self.format != Format::Binary
     }
 }
-
 #[derive(Clone, Copy)]
-enum CompoundKind {
+enum Container {
     Array,
     Map,
 }
-
-pub(crate) struct Compound {
-    format: Format,
-    kind: CompoundKind,
-    values: Vec<Vec<u8>>,
-    keys: Vec<String>,
-    pending_key: Option<String>,
-    budget: Option<Rc<Cell<usize>>>,
-    nesting: Option<Rc<Cell<usize>>>,
-    depth: Option<NestingGuard>,
-}
-
-impl Compound {
-    fn sequence(
-        format: Format,
-        capacity: usize,
-        budget: Option<Rc<Cell<usize>>>,
-        nesting: Option<Rc<Cell<usize>>>,
-        depth: Option<NestingGuard>,
-    ) -> Self {
-        Self {
-            format,
-            kind: CompoundKind::Array,
-            values: bounded_capacity(budget.as_ref(), capacity),
-            keys: Vec::new(),
-            pending_key: None,
-            budget,
-            nesting,
-            depth,
+impl Container {
+    fn start(self) -> u8 {
+        match self {
+            Self::Array => b'[',
+            Self::Map => b'{',
         }
     }
-
-    fn map(
-        format: Format,
-        capacity: usize,
-        budget: Option<Rc<Cell<usize>>>,
-        nesting: Option<Rc<Cell<usize>>>,
-        depth: Option<NestingGuard>,
-    ) -> Self {
-        Self {
-            format,
-            kind: CompoundKind::Map,
-            values: bounded_capacity(budget.as_ref(), capacity),
-            keys: bounded_capacity(budget.as_ref(), capacity),
-            pending_key: None,
-            budget,
-            nesting,
-            depth,
+    fn end(self) -> u8 {
+        match self {
+            Self::Array => b']',
+            Self::Map => b'}',
         }
     }
-
-    fn push(&mut self, key: String, value: Vec<u8>) {
-        self.keys.push(key);
-        self.values.push(value);
-    }
-
-    fn finish(self) -> Result<Vec<u8>> {
-        let Self { format, kind, values, keys, budget, nesting, depth, .. } = self;
-        let result = Serializer { format, budget, nesting }.compound(kind, values, keys);
-        drop(depth);
-        result
-    }
 }
-
-impl SerializeSeq for Compound {
-    type Ok = Vec<u8>;
-    type Error = Error;
-
-    fn serialize_element<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<()> {
-        self.values.push(value.serialize(Serializer {
-            format: self.format,
-            budget: self.budget.clone(),
-            nesting: self.nesting.clone(),
-        })?);
+struct Compound<'a> {
+    serializer: &'a mut Serializer,
+    kind: Container,
+    offset: usize,
+    count: usize,
+    pending_key: bool,
+    outer_map: Option<usize>,
+}
+impl Compound<'_> {
+    fn separator(&mut self) -> Result<()> {
+        if self.serializer.format == Format::Notation && self.count > 0 {
+            self.serializer.append(b",")?;
+        }
         Ok(())
     }
-
-    fn end(self) -> Result<Self::Ok> {
-        self.finish()
+    fn element<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<()> {
+        self.separator()?;
+        value.serialize(&mut *self.serializer)?;
+        self.count = self.count.checked_add(1).ok_or(Error::LimitExceeded("encoded length"))?;
+        Ok(())
+    }
+    fn finish(self) -> Result<()> {
+        if self.pending_key {
+            return Err(Error::InvalidValue("map key has no value".into()));
+        }
+        self.serializer.close(self.kind, self.offset, self.count)?;
+        if let Some(offset) = self.outer_map {
+            self.serializer.close(Container::Map, offset, 1)?;
+        }
+        Ok(())
     }
 }
-
-impl SerializeTuple for Compound {
-    type Ok = Vec<u8>;
+impl Drop for Compound<'_> {
+    fn drop(&mut self) {
+        self.serializer.depth -= 1 + usize::from(self.outer_map.is_some());
+    }
+}
+impl SerializeSeq for Compound<'_> {
+    type Ok = ();
     type Error = Error;
-
     fn serialize_element<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<()> {
-        SerializeSeq::serialize_element(self, value)
+        self.element(value)
     }
-
-    fn end(self) -> Result<Self::Ok> {
+    fn end(self) -> Result<()> {
         self.finish()
     }
 }
-
-impl SerializeTupleStruct for Compound {
-    type Ok = Vec<u8>;
+impl SerializeTuple for Compound<'_> {
+    type Ok = ();
     type Error = Error;
-
+    fn serialize_element<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<()> {
+        self.element(value)
+    }
+    fn end(self) -> Result<()> {
+        self.finish()
+    }
+}
+impl SerializeTupleStruct for Compound<'_> {
+    type Ok = ();
+    type Error = Error;
     fn serialize_field<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<()> {
-        SerializeSeq::serialize_element(self, value)
+        self.element(value)
     }
-
-    fn end(self) -> Result<Self::Ok> {
+    fn end(self) -> Result<()> {
         self.finish()
     }
 }
-
-impl SerializeMap for Compound {
-    type Ok = Vec<u8>;
+impl SerializeTupleVariant for Compound<'_> {
+    type Ok = ();
     type Error = Error;
-
+    fn serialize_field<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<()> {
+        self.element(value)
+    }
+    fn end(self) -> Result<()> {
+        self.finish()
+    }
+}
+impl SerializeMap for Compound<'_> {
+    type Ok = ();
+    type Error = Error;
     fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<()> {
-        if self.pending_key.is_some() {
+        if self.pending_key {
             return Err(Error::InvalidValue("map key has no value".into()));
         }
-        self.pending_key =
-            Some(key.serialize(KeySerializer { budget: self.budget.clone(), human_readable: self.format != Format::Binary })?);
+        self.separator()?;
+        let key =
+            key.serialize(KeySerializer { budget: self.serializer.remaining(), human_readable: self.serializer.format != Format::Binary })?;
+        self.serializer.key(&key)?;
+        self.pending_key = true;
         Ok(())
     }
-
     fn serialize_value<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<()> {
-        let key = self.pending_key.take().ok_or_else(|| Error::InvalidValue("map value has no key".into()))?;
-        self.push(key, value.serialize(Serializer { format: self.format, budget: self.budget.clone(), nesting: self.nesting.clone() })?);
+        if !self.pending_key {
+            return Err(Error::InvalidValue("map value has no key".into()));
+        }
+        value.serialize(&mut *self.serializer)?;
+        self.pending_key = false;
+        self.count = self.count.checked_add(1).ok_or(Error::LimitExceeded("encoded length"))?;
         Ok(())
     }
-
-    fn end(self) -> Result<Self::Ok> {
-        if self.pending_key.is_some() {
-            return Err(Error::InvalidValue("map key has no value".into()));
-        }
+    fn end(self) -> Result<()> {
         self.finish()
     }
 }
-
-impl SerializeStruct for Compound {
-    type Ok = Vec<u8>;
+impl SerializeStruct for Compound<'_> {
+    type Ok = ();
     type Error = Error;
-
     fn serialize_field<T: Serialize + ?Sized>(&mut self, key: &'static str, value: &T) -> Result<()> {
-        if let Some(budget) = &self.budget {
-            charge_xml_key(key, budget)?;
-        }
-        self.push(
-            key.to_owned(),
-            value.serialize(Serializer { format: self.format, budget: self.budget.clone(), nesting: self.nesting.clone() })?,
-        );
+        self.separator()?;
+        self.serializer.key(key)?;
+        value.serialize(&mut *self.serializer)?;
+        self.count = self.count.checked_add(1).ok_or(Error::LimitExceeded("encoded length"))?;
         Ok(())
     }
-
-    fn end(self) -> Result<Self::Ok> {
+    fn end(self) -> Result<()> {
         self.finish()
     }
 }
-
-pub(crate) struct VariantCompound {
-    format: Format,
-    name: &'static str,
-    values: Vec<Vec<u8>>,
-    keys: Vec<String>,
-    kind: CompoundKind,
-    budget: Option<Rc<Cell<usize>>>,
-    nesting: Option<Rc<Cell<usize>>>,
-    _map_depth: Option<NestingGuard>,
-    _value_depth: Option<NestingGuard>,
-}
-
-impl VariantCompound {
-    fn finish(self) -> Result<Vec<u8>> {
-        let Self { format, name, values, keys, kind, budget, nesting, _map_depth, _value_depth } = self;
-        let value = Serializer { format, budget: budget.clone(), nesting: nesting.clone() }.compound(kind, values, keys)?;
-        if let Some(budget) = &budget {
-            charge_xml_key(name, budget)?;
-        }
-        let mut map = Compound::map(format, 1, budget, nesting, None);
-        map.push(name.to_owned(), value);
-        let result = map.finish();
-        drop(_value_depth);
-        drop(_map_depth);
-        result
-    }
-}
-
-impl SerializeTupleVariant for VariantCompound {
-    type Ok = Vec<u8>;
+impl SerializeStructVariant for Compound<'_> {
+    type Ok = ();
     type Error = Error;
-
-    fn serialize_field<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<()> {
-        self.values.push(value.serialize(Serializer {
-            format: self.format,
-            budget: self.budget.clone(),
-            nesting: self.nesting.clone(),
-        })?);
-        Ok(())
-    }
-
-    fn end(self) -> Result<Self::Ok> {
-        self.finish()
-    }
-}
-
-impl SerializeStructVariant for VariantCompound {
-    type Ok = Vec<u8>;
-    type Error = Error;
-
     fn serialize_field<T: Serialize + ?Sized>(&mut self, key: &'static str, value: &T) -> Result<()> {
-        if let Some(budget) = &self.budget {
-            charge_xml_key(key, budget)?;
-        }
-        self.keys.push(key.to_owned());
-        self.values.push(value.serialize(Serializer {
-            format: self.format,
-            budget: self.budget.clone(),
-            nesting: self.nesting.clone(),
-        })?);
-        Ok(())
+        SerializeStruct::serialize_field(self, key, value)
     }
-
-    fn end(self) -> Result<Self::Ok> {
+    fn end(self) -> Result<()> {
         self.finish()
     }
 }
 
+struct TextSerializer<'a> {
+    serializer: &'a mut Serializer,
+    kind: TextKind,
+}
+impl ser::Serializer for TextSerializer<'_> {
+    type Ok = ();
+    type Error = Error;
+    type SerializeSeq = Impossible<(), Error>;
+    type SerializeTuple = Impossible<(), Error>;
+    type SerializeTupleStruct = Impossible<(), Error>;
+    type SerializeTupleVariant = Impossible<(), Error>;
+    type SerializeMap = Impossible<(), Error>;
+    type SerializeStruct = Impossible<(), Error>;
+    type SerializeStructVariant = Impossible<(), Error>;
+    fn serialize_str(self, value: &str) -> Result<()> {
+        self.serializer.string(value, self.kind)
+    }
+    fn serialize_char(self, value: char) -> Result<()> {
+        self.serialize_str(value.encode_utf8(&mut [0; 4]))
+    }
+    fn serialize_unit(self) -> Result<()> {
+        Err(Error::InvalidValue("expected a string payload".into()))
+    }
+    fn serialize_unit_struct(self, _: &'static str) -> Result<()> {
+        Err(Error::InvalidValue("expected a string payload".into()))
+    }
+    fn serialize_unit_variant(self, _: &'static str, _: u32, variant: &'static str) -> Result<()> {
+        self.serialize_str(variant)
+    }
+    fn serialize_newtype_struct<T: Serialize + ?Sized>(self, name: &'static str, value: &T) -> Result<()> {
+        if matches!(name, UUID_NEWTYPE | URI_NEWTYPE | DATE_NEWTYPE) {
+            return Err(Error::InvalidValue("expected a string payload".into()));
+        }
+        value.serialize(self)
+    }
+    fn serialize_bool(self, _: bool) -> Result<()> {
+        Err(Error::InvalidValue("expected a string payload".into()))
+    }
+    fn serialize_i8(self, _: i8) -> Result<()> {
+        Err(Error::InvalidValue("expected a string payload".into()))
+    }
+    fn serialize_i16(self, _: i16) -> Result<()> {
+        Err(Error::InvalidValue("expected a string payload".into()))
+    }
+    fn serialize_i32(self, _: i32) -> Result<()> {
+        Err(Error::InvalidValue("expected a string payload".into()))
+    }
+    fn serialize_i64(self, _: i64) -> Result<()> {
+        Err(Error::InvalidValue("expected a string payload".into()))
+    }
+    fn serialize_u8(self, _: u8) -> Result<()> {
+        Err(Error::InvalidValue("expected a string payload".into()))
+    }
+    fn serialize_u16(self, _: u16) -> Result<()> {
+        Err(Error::InvalidValue("expected a string payload".into()))
+    }
+    fn serialize_u32(self, _: u32) -> Result<()> {
+        Err(Error::InvalidValue("expected a string payload".into()))
+    }
+    fn serialize_u64(self, _: u64) -> Result<()> {
+        Err(Error::InvalidValue("expected a string payload".into()))
+    }
+    fn serialize_f32(self, _: f32) -> Result<()> {
+        Err(Error::InvalidValue("expected a string payload".into()))
+    }
+    fn serialize_f64(self, _: f64) -> Result<()> {
+        Err(Error::InvalidValue("expected a string payload".into()))
+    }
+    fn serialize_bytes(self, _: &[u8]) -> Result<()> {
+        Err(Error::InvalidValue("expected a string payload".into()))
+    }
+    fn serialize_none(self) -> Result<()> {
+        Err(Error::InvalidValue("expected a string payload".into()))
+    }
+    fn serialize_some<T: Serialize + ?Sized>(self, value: &T) -> Result<()> {
+        value.serialize(self)
+    }
+    fn serialize_newtype_variant<T: Serialize + ?Sized>(self, _: &'static str, _: u32, _: &'static str, _: &T) -> Result<()> {
+        Err(Error::InvalidValue("expected a string payload".into()))
+    }
+    fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq> {
+        Err(Error::InvalidValue("expected a string payload".into()))
+    }
+    fn serialize_tuple(self, _: usize) -> Result<Self::SerializeTuple> {
+        Err(Error::InvalidValue("expected a string payload".into()))
+    }
+    fn serialize_tuple_struct(self, _: &'static str, _: usize) -> Result<Self::SerializeTupleStruct> {
+        Err(Error::InvalidValue("expected a string payload".into()))
+    }
+    fn serialize_tuple_variant(self, _: &'static str, _: u32, _: &'static str, _: usize) -> Result<Self::SerializeTupleVariant> {
+        Err(Error::InvalidValue("expected a string payload".into()))
+    }
+    fn serialize_map(self, _: Option<usize>) -> Result<Self::SerializeMap> {
+        Err(Error::InvalidValue("expected a string payload".into()))
+    }
+    fn serialize_struct(self, _: &'static str, _: usize) -> Result<Self::SerializeStruct> {
+        Err(Error::InvalidValue("expected a string payload".into()))
+    }
+    fn serialize_struct_variant(self, _: &'static str, _: u32, _: &'static str, _: usize) -> Result<Self::SerializeStructVariant> {
+        Err(Error::InvalidValue("expected a string payload".into()))
+    }
+    fn collect_str<T: fmt::Display + ?Sized>(self, value: &T) -> Result<()> {
+        let tag = match self.kind {
+            TextKind::String => "string",
+            TextKind::Uuid => "uuid",
+            TextKind::Uri => "uri",
+            TextKind::Date => "date",
+        };
+        let text = match self.serializer.remaining() {
+            Some(remaining) => bounded_display(value, remaining.saturating_sub(xml_tag_overhead(tag)))?,
+            None => value.to_string(),
+        };
+        self.serializer.string(&text, self.kind)
+    }
+    fn is_human_readable(&self) -> bool {
+        self.serializer.format != Format::Binary
+    }
+}
 struct KeySerializer {
-    budget: Option<Rc<Cell<usize>>>,
+    budget: Option<usize>,
     human_readable: bool,
 }
 
@@ -758,7 +769,7 @@ impl ser::Serializer for KeySerializer {
     fn collect_str<T: fmt::Display + ?Sized>(self, value: &T) -> Result<String> {
         match &self.budget {
             Some(budget) => {
-                let max_text_len = budget.get().saturating_sub(xml_tag_overhead("key"));
+                let max_text_len = budget.saturating_sub(xml_tag_overhead("key"));
                 self.owned(bounded_display(value, max_text_len)?)
             }
             None => Ok(value.to_string()),
@@ -769,117 +780,19 @@ impl ser::Serializer for KeySerializer {
     }
 }
 
-fn xml_scalar(tag: &str, text: &str) -> Result<Vec<u8>> {
-    let length = xml_tag_overhead(tag).checked_add(xml_escaped_len(text)?).ok_or(Error::LimitExceeded("encoded length"))?;
-    let mut output = Vec::with_capacity(length);
-    output.push(b'<');
-    output.extend_from_slice(tag.as_bytes());
-    output.push(b'>');
-    escape_xml(text, &mut output);
-    output.extend_from_slice(b"</");
-    output.extend_from_slice(tag.as_bytes());
-    output.push(b'>');
-    Ok(output)
+fn binary_length(length: usize) -> Result<[u8; 4]> {
+    u32::try_from(length).map(u32::to_be_bytes).map_err(|_| Error::LimitExceeded("encoded length"))
 }
-
-fn xml_scalar_bounded(tag: &str, text: &str, budget: &Cell<usize>) -> Result<Vec<u8>> {
-    let length = xml_tag_overhead(tag).checked_add(xml_escaped_len(text)?).ok_or(Error::LimitExceeded("encoded length"))?;
-    charge_budget(budget, length)?;
-
-    let mut output = Vec::with_capacity(length);
-    output.push(b'<');
-    output.extend_from_slice(tag.as_bytes());
-    output.push(b'>');
-    escape_xml(text, &mut output);
-    output.extend_from_slice(b"</");
-    output.extend_from_slice(tag.as_bytes());
-    output.push(b'>');
-    Ok(output)
-}
-
-fn xml_binary_bounded(bytes: &[u8], budget: &Cell<usize>) -> Result<Vec<u8>> {
-    let encoded_len = bytes
-        .len()
-        .checked_add(2)
-        .and_then(|length| length.checked_div(3))
-        .and_then(|groups| groups.checked_mul(4))
-        .ok_or(Error::LimitExceeded("encoded length"))?;
-    let prefix = b"<binary>";
-    let suffix = b"</binary>";
-    let length = prefix
-        .len()
-        .checked_add(encoded_len)
-        .and_then(|length| length.checked_add(suffix.len()))
-        .ok_or(Error::LimitExceeded("encoded length"))?;
-    charge_budget(budget, length)?;
-
-    let mut output = vec![0; length];
-    output[..prefix.len()].copy_from_slice(prefix);
-    let encoded_end = prefix.len() + encoded_len;
-    STANDARD.encode_slice(bytes, &mut output[prefix.len()..encoded_end]).map_err(|error| Error::InvalidValue(error.to_string()))?;
-    output[encoded_end..].copy_from_slice(suffix);
-    Ok(output)
-}
-
-fn xml_container_bounded(tag: &str, values: Vec<Vec<u8>>, budget: &Cell<usize>) -> Result<Vec<u8>> {
-    let overhead = xml_tag_overhead(tag);
-    let content_len =
-        values.iter().try_fold(0usize, |length, value| length.checked_add(value.len())).ok_or(Error::LimitExceeded("encoded length"))?;
-    let length = overhead.checked_add(content_len).ok_or(Error::LimitExceeded("encoded length"))?;
-    charge_budget(budget, overhead)?;
-
-    let mut output = Vec::with_capacity(length);
-    output.push(b'<');
-    output.extend_from_slice(tag.as_bytes());
-    output.push(b'>');
-    for value in values {
-        output.extend_from_slice(&value);
-    }
-    output.extend_from_slice(b"</");
-    output.extend_from_slice(tag.as_bytes());
-    output.push(b'>');
-    Ok(output)
-}
-
-fn xml_map_bounded(values: Vec<Vec<u8>>, keys: Vec<String>, budget: &Cell<usize>) -> Result<Vec<u8>> {
-    if values.len() != keys.len() {
-        return Err(Error::InvalidValue("LLSD map key and value counts differ".into()));
-    }
-    let overhead = xml_tag_overhead("map");
-    let content_len = keys.iter().zip(&values).try_fold(0usize, |length, (key, value)| {
-        let key_len = xml_tag_overhead("key").checked_add(xml_escaped_len(key)?).ok_or(Error::LimitExceeded("encoded length"))?;
-        length.checked_add(key_len).and_then(|length| length.checked_add(value.len())).ok_or(Error::LimitExceeded("encoded length"))
-    })?;
-    let length = overhead.checked_add(content_len).ok_or(Error::LimitExceeded("encoded length"))?;
-    charge_budget(budget, overhead)?;
-
-    let mut output = Vec::with_capacity(length);
-    output.extend_from_slice(b"<map>");
-    for (key, value) in keys.into_iter().zip(values) {
-        output.extend_from_slice(b"<key>");
-        escape_xml(&key, &mut output);
-        output.extend_from_slice(b"</key>");
-        output.extend_from_slice(&value);
-    }
-    output.extend_from_slice(b"</map>");
-    Ok(output)
-}
-
-fn charge_xml_key(key: &str, budget: &Cell<usize>) -> Result<()> {
-    let length = xml_tag_overhead("key").checked_add(xml_escaped_len(key)?).ok_or(Error::LimitExceeded("encoded length"))?;
-    charge_budget(budget, length)
-}
-
-fn charge_budget(budget: &Cell<usize>, length: usize) -> Result<()> {
-    let remaining = budget.get().checked_sub(length).ok_or(Error::LimitExceeded("encoded length"))?;
-    budget.set(remaining);
-    Ok(())
-}
-
 fn xml_tag_overhead(tag: &str) -> usize {
     5 + tag.len() * 2
 }
-
+fn charge_xml_key(key: &str, budget: &usize) -> Result<()> {
+    let length = xml_tag_overhead("key").checked_add(xml_escaped_len(key)?).ok_or(Error::LimitExceeded("encoded length"))?;
+    if length > *budget {
+        return Err(Error::LimitExceeded("encoded length"));
+    }
+    Ok(())
+}
 fn xml_escaped_len(text: &str) -> Result<usize> {
     let mut length = 0usize;
     for character in text.chars() {
@@ -896,10 +809,6 @@ fn xml_escaped_len(text: &str) -> Result<usize> {
         length = length.checked_add(escaped_len).ok_or(Error::LimitExceeded("encoded length"))?;
     }
     Ok(length)
-}
-
-fn bounded_capacity<T>(budget: Option<&Rc<Cell<usize>>>, capacity: usize) -> Vec<T> {
-    if budget.is_some() { Vec::new() } else { Vec::with_capacity(capacity) }
 }
 
 fn bounded_display<T: fmt::Display + ?Sized>(value: &T, max_encoded_len: usize) -> Result<String> {
@@ -944,39 +853,6 @@ impl fmt::Write for BoundedDisplay {
     }
 }
 
-fn xml_container(tag: &str, values: Vec<Vec<u8>>) -> Vec<u8> {
-    let mut output = format!("<{tag}>").into_bytes();
-    for value in values {
-        output.extend_from_slice(&value);
-    }
-    output.extend_from_slice(format!("</{tag}>").as_bytes());
-    output
-}
-
-fn xml_map(values: Vec<Vec<u8>>, keys: Vec<String>) -> Result<Vec<u8>> {
-    if values.len() != keys.len() {
-        return Err(Error::InvalidValue("LLSD map key and value counts differ".into()));
-    }
-
-    let overhead = xml_tag_overhead("map");
-    let content_len = keys.iter().zip(&values).try_fold(0usize, |length, (key, value)| {
-        let key_len = xml_tag_overhead("key").checked_add(xml_escaped_len(key)?).ok_or(Error::LimitExceeded("encoded length"))?;
-        length.checked_add(key_len).and_then(|length| length.checked_add(value.len())).ok_or(Error::LimitExceeded("encoded length"))
-    })?;
-    let length = overhead.checked_add(content_len).ok_or(Error::LimitExceeded("encoded length"))?;
-
-    let mut output = Vec::with_capacity(length);
-    output.extend_from_slice(b"<map>");
-    for (key, value) in keys.into_iter().zip(values) {
-        output.extend_from_slice(b"<key>");
-        escape_xml(&key, &mut output);
-        output.extend_from_slice(b"</key>");
-        output.extend_from_slice(&value);
-    }
-    output.extend_from_slice(b"</map>");
-    Ok(output)
-}
-
 fn escape_xml(text: &str, output: &mut Vec<u8>) {
     for character in text.chars() {
         match character {
@@ -994,111 +870,6 @@ fn escape_xml(text: &str, output: &mut Vec<u8>) {
     }
 }
 
-fn binary_fixed(tag: u8, value: &[u8]) -> Vec<u8> {
-    let mut output = vec![tag];
-    output.extend_from_slice(value);
-    output
-}
-
-fn binary_length(length: usize) -> Result<[u8; 4]> {
-    u32::try_from(length).map(u32::to_be_bytes).map_err(|_| Error::LimitExceeded("encoded length"))
-}
-
-fn validate_binary_length(format: Format, length: usize) -> Result<()> {
-    if format == Format::Binary { binary_length(length).map(|_| ()) } else { Ok(()) }
-}
-
-fn binary_sized(tag: u8, value: &[u8]) -> Result<Vec<u8>> {
-    let mut output = vec![tag];
-    output.extend_from_slice(&binary_length(value.len())?);
-    output.extend_from_slice(value);
-    Ok(output)
-}
-
-fn binary_container(start: u8, end: u8, values: Vec<Vec<u8>>) -> Result<Vec<u8>> {
-    let mut output = vec![start];
-    output.extend_from_slice(&binary_length(values.len())?);
-    for value in values {
-        output.extend_from_slice(&value);
-    }
-    output.push(end);
-    Ok(output)
-}
-
-fn binary_map(values: Vec<Vec<u8>>, keys: Vec<String>) -> Result<Vec<u8>> {
-    if values.len() != keys.len() {
-        return Err(Error::InvalidValue("LLSD map key and value counts differ".into()));
-    }
-    let mut output = vec![b'{'];
-    output.extend_from_slice(&binary_length(values.len())?);
-    for (key, value) in keys.into_iter().zip(values) {
-        output.extend_from_slice(&binary_sized(b'k', key.as_bytes())?);
-        output.extend_from_slice(&value);
-    }
-    output.push(b'}');
-    Ok(output)
-}
-
-fn notation_container(start: u8, end: u8, values: Vec<Vec<u8>>) -> Vec<u8> {
-    let mut output = vec![start];
-    for (index, value) in values.into_iter().enumerate() {
-        if index > 0 {
-            output.push(b',');
-        }
-        output.extend_from_slice(&value);
-    }
-    output.push(end);
-    output
-}
-
-fn notation_map(values: Vec<Vec<u8>>, keys: Vec<String>) -> Vec<u8> {
-    let mut output = vec![b'{'];
-    for (index, (key, value)) in keys.into_iter().zip(values).enumerate() {
-        if index > 0 {
-            output.push(b',');
-        }
-        output.extend_from_slice(&notation_string(&key));
-        output.push(b':');
-        output.extend_from_slice(&value);
-    }
-    output.push(b'}');
-    output
-}
-
-fn notation_string(value: &str) -> Vec<u8> {
-    let mut output = vec![b'\''];
-    for byte in value.as_bytes() {
-        match byte {
-            b'\\' => output.extend_from_slice(b"\\\\"),
-            b'\'' => output.extend_from_slice(b"\\'"),
-            b'\n' => output.extend_from_slice(b"\\n"),
-            b'\r' => output.extend_from_slice(b"\\r"),
-            b'\t' => output.extend_from_slice(b"\\t"),
-            0..=0x1f | 0x7f => output.extend_from_slice(format!("\\x{byte:02x}").as_bytes()),
-            _ => output.push(*byte),
-        }
-    }
-    output.push(b'\'');
-    output
-}
-
-fn notation_typed_quoted(tag: u8, value: &str) -> Vec<u8> {
-    let mut output = vec![tag, b'\"'];
-    for byte in value.as_bytes() {
-        match byte {
-            b'\\' => output.extend_from_slice(b"\\\\"),
-            b'\"' => output.extend_from_slice(b"\\\""),
-            b'\n' => output.extend_from_slice(b"\\n"),
-            b'\r' => output.extend_from_slice(b"\\r"),
-            b'\t' => output.extend_from_slice(b"\\t"),
-            0..=0x1f | 0x7f => output.extend_from_slice(format!("\\x{byte:02x}").as_bytes()),
-            _ => output.push(*byte),
-        }
-    }
-    output.push(b'\"');
-    output
-}
-
 fn real_text(value: f64) -> String {
     if value.is_nan() {
         "nan".into()
@@ -1108,94 +879,5 @@ fn real_text(value: f64) -> String {
         "-inf".into()
     } else {
         value.to_string()
-    }
-}
-
-fn parse_real(value: &str) -> Result<f64> {
-    match value.to_ascii_lowercase().as_str() {
-        "nan" => Ok(f64::NAN),
-        "inf" | "+inf" | "infinity" | "+infinity" => Ok(f64::INFINITY),
-        "-inf" | "-infinity" => Ok(f64::NEG_INFINITY),
-        _ => value.parse().map_err(|error| Error::InvalidValue(format!("invalid LLSD real: {error}"))),
-    }
-}
-
-fn extract_xml_string(bytes: &[u8]) -> Result<String> {
-    let prefix = b"<string>";
-    let suffix = b"</string>";
-    if !bytes.starts_with(prefix) || !bytes.ends_with(suffix) {
-        return Err(Error::InvalidValue("expected a string payload".into()));
-    }
-    let value = from_utf8(&bytes[prefix.len()..bytes.len() - suffix.len()]).map_err(|_| Error::InvalidUtf8)?;
-    unescape(value).map(|decoded| decoded.into_owned()).map_err(|error| Error::InvalidValue(error.to_string()))
-}
-
-fn extract_binary_string(bytes: &[u8]) -> Result<String> {
-    if bytes.first() != Some(&b's') || bytes.len() < 5 {
-        return Err(Error::InvalidValue("expected a string payload".into()));
-    }
-    let length = u32::from_be_bytes(bytes[1..5].try_into().map_err(|_| Error::UnexpectedEof)?) as usize;
-    if bytes.len() != 5 + length {
-        return Err(Error::InvalidValue("invalid string payload length".into()));
-    }
-    String::from_utf8(bytes[5..].to_vec()).map_err(|_| Error::InvalidUtf8)
-}
-
-fn extract_notation_string(bytes: &[u8]) -> Result<String> {
-    if bytes.len() < 2 || !matches!(bytes.first(), Some(b'\'' | b'\"')) || bytes.last() != bytes.first() {
-        return Err(Error::InvalidValue("expected a string payload".into()));
-    }
-    let quote = bytes[0];
-    let mut output = Vec::new();
-    let mut index = 1;
-    while index + 1 < bytes.len() {
-        let byte = bytes[index];
-        index += 1;
-        if byte == b'\\' {
-            let escape = *bytes.get(index).ok_or(Error::UnexpectedEof)?;
-            index += 1;
-            match escape {
-                b'\\' | b'\'' | b'\"' => output.push(escape),
-                b'n' => output.push(b'\n'),
-                b'r' => output.push(b'\r'),
-                b't' => output.push(b'\t'),
-                b'x' => {
-                    let hex = bytes.get(index..index + 2).ok_or(Error::UnexpectedEof)?;
-                    output.push(
-                        u8::from_str_radix(from_utf8(hex).map_err(|_| Error::InvalidUtf8)?, 16)
-                            .map_err(|_| Error::InvalidValue("invalid string escape".into()))?,
-                    );
-                    index += 2;
-                }
-                _ => return Err(Error::InvalidValue("invalid string escape".into())),
-            }
-        } else if byte == quote {
-            return Err(Error::InvalidValue("unescaped string delimiter".into()));
-        } else {
-            output.push(byte);
-        }
-    }
-    String::from_utf8(output).map_err(|_| Error::InvalidUtf8)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Format, Serializer};
-    use crate::Error;
-
-    #[test]
-    fn invalid_binary_scalars_fail() {
-        let serializer = Serializer { format: Format::Binary, budget: None, nesting: None };
-
-        for (tag, text) in [
-            ("boolean", "invalid"),
-            ("integer", "invalid"),
-            ("real", "invalid"),
-            ("date", "invalid"),
-            ("uuid", "invalid"),
-            ("unknown", "value"),
-        ] {
-            assert!(matches!(serializer.scalar(tag, text), Err(Error::InvalidValue(_))));
-        }
     }
 }

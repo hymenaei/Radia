@@ -3,7 +3,11 @@
 use crate::{Entity, LocalAddress, Region};
 use base::UUID;
 use math::{DVec3, Quat, Vec3};
-use std::num::NonZeroU8;
+use std::{
+    error::Error,
+    fmt::{self, Display, Formatter},
+    num::NonZeroU8,
+};
 
 /// A world-space position and orientation in meters.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -76,6 +80,17 @@ pub enum PoseError {
     InvalidRotation { entity: Entity },
     TraversalLimitExceeded { max_edges: usize },
 }
+
+impl Display for PoseError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidRotation { entity } => write!(f, "invalid rotation for entity {entity:?}"),
+            Self::TraversalLimitExceeded { max_edges } => write!(f, "parent traversal exceeds {max_edges} edges"),
+        }
+    }
+}
+
+impl Error for PoseError {}
 
 /// A full transform query can be unavailable even when its pose is valid.
 #[derive(Clone, Copy, Debug, PartialEq)]

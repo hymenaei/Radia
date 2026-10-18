@@ -30,6 +30,7 @@ pub(super) enum IngestStatus {
     Applied,
     RegionHandleMismatch,
     RegionContextMismatch,
+    RegionMetadataRejected(ApplyError),
 }
 
 #[derive(Debug)]
@@ -133,6 +134,10 @@ impl IngestSummary {
             StaleVersion, UntrustedSource,
         };
 
+        if let IngestStatus::RegionMetadataRejected(error) = self.status {
+            tracing::warn!(?simulator_id, ?error, "could not apply object batch region metadata");
+            return;
+        }
         let region_mismatch = matches!(self.status, IngestStatus::RegionHandleMismatch | IngestStatus::RegionContextMismatch);
         let mut malformed = (self.invalid_blocks as u64).saturating_add(self.invalid_fields as u64);
         let mut resource_limits = 0_u64;
@@ -195,17 +200,10 @@ impl IngestSummary {
     }
 }
 
-#[derive(Clone, Copy)]
-struct SimulatorRegion {
-    region: Region,
-    pinned_handle: Option<RegionHandle>,
-    observed_handle: Option<RegionHandle>,
-}
-
 /// Owns the observed World and the simulator connection lifetimes for one session.
 pub(super) struct SessionWorld {
     world: World,
-    regions: HashMap<SimulatorId, SimulatorRegion>,
+    regions: HashMap<SimulatorId, Region>,
 }
 
 impl SessionWorld {
@@ -235,56 +233,44 @@ impl SessionWorld {
         }
     }
 
+    /// Records a connection lifetime, then applies any supplied handle through World.
+    /// A metadata failure retains the adopted lifetime so it can be retried or retired.
     pub(super) fn register_simulator(
         &mut self,
         simulator_id: SimulatorId,
         handle: Option<RegionHandle>,
     ) -> Result<Region, RegistrationError> {
-        if let Some(source) = self.regions.get_mut(&simulator_id) {
-            if handle.is_some_and(|handle| source.pinned_handle.is_some_and(|pinned| pinned != handle))
-                || handle.is_some_and(|handle| source.observed_handle.is_some_and(|observed| observed != handle))
-            {
-                return Err(RegistrationError::HandleChanged);
-            }
-            source.pinned_handle = source.pinned_handle.or(handle);
-            let region = source.region;
-            let current_handle = source.pinned_handle.or(source.observed_handle);
-            if let Some(handle) = current_handle
-                && let Err(error) = self.update_region_metadata(
-                    region,
-                    RegionInfo { handle: Some(handle), origin: Some(handle.origin()), ..RegionInfo::default() },
-                )
-            {
-                tracing::warn!(?error, "could not update registered simulator region metadata");
-            }
+        if let Some(region) = self.region_for(simulator_id) {
+            let current = self.world.region(region).expect("registered simulator has a live World region").handle;
+            resolve_region_handle(handle, current).map_err(|_| RegistrationError::HandleChanged)?;
+            self.update_region_handle(region, handle).map_err(RegistrationError::Apply)?;
             return Ok(region);
         }
 
         let region = Region::new(simulator_id.get());
         self.world.adopt_region(region).map(|_| ()).map_err(RegistrationError::Apply)?;
-        self.regions.insert(simulator_id, SimulatorRegion { region, pinned_handle: handle, observed_handle: None });
-        if let Some(handle) = handle
-            && let Err(error) = self
-                .update_region_metadata(region, RegionInfo { handle: Some(handle), origin: Some(handle.origin()), ..RegionInfo::default() })
-        {
-            tracing::warn!(?error, "could not update registered simulator region metadata");
-        }
+        self.regions.insert(simulator_id, region);
+        self.update_region_handle(region, handle).map_err(RegistrationError::Apply)?;
         Ok(region)
     }
 
-    pub(super) fn region_for(&self, simulator_id: SimulatorId) -> Option<Region> {
-        self.regions.get(&simulator_id).map(|source| source.region)
+    fn update_region_handle(&mut self, region: Region, handle: Option<RegionHandle>) -> Result<(), ApplyError> {
+        if let Some(handle) = handle {
+            self.update_region_metadata(region, RegionInfo { handle: Some(handle), ..RegionInfo::default() })?;
+        }
+        Ok(())
     }
 
-    pub(super) fn simulator_for_region(&self, region: Region, preferred: SimulatorId) -> Option<SimulatorId> {
-        if self.region_for(preferred) == Some(region) {
-            return Some(preferred);
-        }
-        self.regions
-            .iter()
-            .filter(|(_, source)| source.region == region)
-            .map(|(simulator_id, _)| *simulator_id)
-            .min_by_key(|simulator_id| simulator_id.get())
+    pub(super) fn region_for(&self, simulator_id: SimulatorId) -> Option<Region> {
+        self.regions.get(&simulator_id).copied()
+    }
+
+    pub(super) fn region_name(&self, simulator_id: SimulatorId) -> Option<&str> {
+        self.world.region(self.region_for(simulator_id)?).and_then(|info| info.name.as_deref())
+    }
+
+    pub(super) fn simulator_for_region(&self, region: Region) -> Option<SimulatorId> {
+        self.regions.iter().find_map(|(simulator_id, known)| (*known == region).then_some(*simulator_id))
     }
 
     pub(super) fn update_region_metadata(&mut self, region: Region, info: RegionInfo) -> Result<(), ApplyError> {
@@ -293,32 +279,32 @@ impl SessionWorld {
 
     pub(super) fn update_handshake_metadata(
         &mut self,
-        simulator_id: SimulatorId,
+        source: UpdateSource,
         region_id: Option<UUID>,
         name: String,
     ) -> Result<(), ApplyError> {
-        let Some(source) = self.regions.get(&simulator_id).copied() else {
-            return Ok(());
-        };
-        let handle = source.pinned_handle.or(source.observed_handle);
-        self.update_region_metadata(
-            source.region,
-            RegionInfo { region_id, handle, name: Some(name), origin: handle.map(RegionHandle::origin) },
-        )
+        self.world.observe_region_metadata(source, RegionInfo { region_id, name: Some(name), ..RegionInfo::default() }).map(|_| ())
     }
 
     pub(super) fn apply_object_batch(&mut self, simulator_id: SimulatorId, batch: ObjectBatch) -> Option<IngestSummary> {
-        let source = *self.regions.get(&simulator_id)?;
-        if source.region != batch.region {
+        let region = self.region_for(simulator_id)?;
+        if region != batch.region {
             return Some(IngestSummary::new(IngestStatus::RegionContextMismatch));
         }
-        let accepted_handle = match resolve_region_handle(batch.region_handle, source) {
+        let current_handle = self.world.region(region).expect("registered simulator has a live World region").handle;
+        let accepted_handle = match resolve_region_handle(batch.region_handle, current_handle) {
             Ok(handle) => handle,
             Err(status) => return Some(IngestSummary::new(status)),
         };
 
         let mut summary = IngestSummary::new(IngestStatus::Applied);
-        summary.accepted_region_handle = accepted_handle;
+        if batch.blocks.is_empty() || batch.blocks.iter().any(Option::is_some) {
+            if let Err(error) = self.update_region_handle(region, accepted_handle) {
+                summary.status = IngestStatus::RegionMetadataRejected(error);
+                return Some(summary);
+            }
+            summary.accepted_region_handle = accepted_handle;
+        }
         summary.invalid_blocks = batch.invalid_blocks;
         summary.invalid_fields = batch.invalid_fields;
         for (index, operation) in batch.blocks.into_iter().enumerate() {
@@ -336,25 +322,6 @@ impl SessionWorld {
                 None => (None, None, None, false, false),
             };
             summary.blocks.push(BlockResult { index, address, result, recovery_target, recovery_satisfied, valid });
-        }
-        if !summary.blocks.is_empty() && summary.blocks.iter().all(|block| !block.valid) {
-            summary.accepted_region_handle = None;
-        }
-        if let Some(handle) = summary.accepted_region_handle {
-            let metadata = self.regions.get_mut(&simulator_id).and_then(|source| {
-                let previous_handle = source.pinned_handle.or(source.observed_handle);
-                source.observed_handle = Some(handle);
-                let current_handle = source.pinned_handle.or(source.observed_handle);
-                (previous_handle != current_handle).then_some((
-                    source.region,
-                    RegionInfo { handle: current_handle, origin: current_handle.map(RegionHandle::origin), ..RegionInfo::default() },
-                ))
-            });
-            if let Some((region, info)) = metadata
-                && let Err(error) = self.update_region_metadata(region, info)
-            {
-                tracing::warn!(?error, "could not update object region handle");
-            }
         }
         Some(summary)
     }
@@ -385,8 +352,7 @@ impl SessionWorld {
                     invalid_fields: if summary.is_none() { invalid_fields } else { 0 },
                 },
             )?;
-            let recovery_targets =
-                part.recovery_targets().map(|address| (self.simulator_for_region(address.region(), simulator_id), address)).collect();
+            let recovery_targets = part.recovery_targets().map(|address| (self.simulator_for_region(address.region()), address)).collect();
             let recovery_cancellations = part.recovery_cancellation_addresses().collect();
             on_chunk(&part, recovery_targets, recovery_cancellations);
             match &mut summary {
@@ -408,11 +374,11 @@ impl SessionWorld {
     }
 
     pub(super) fn prepare_object_media(&self, simulator_id: SimulatorId, request: ObjectMediaRequest) -> Option<ObjectMediaTarget> {
-        let simulator = self.regions.get(&simulator_id)?;
-        if simulator.region != request.source.region() || !matches!(request.source.order(), OrderEvidence::Ordered(_)) {
+        let region = self.region_for(simulator_id)?;
+        if region != request.source.region() || !matches!(request.source.order(), OrderEvidence::Ordered(_)) {
             return None;
         }
-        let address = LocalAddress::new(simulator.region, request.local_id);
+        let address = LocalAddress::new(region, request.local_id);
         let entity = self.world.entity_at(address)?;
         let object = self.world.object(entity)?;
         if object.id() != request.object_id
@@ -427,11 +393,11 @@ impl SessionWorld {
     }
 
     pub(super) fn object_media_target_is_current(&self, target: ObjectMediaTarget) -> bool {
-        let Some(simulator) = self.regions.get(&target.simulator_id) else { return false };
-        if simulator.region != target.source.region() || !matches!(target.source.order(), OrderEvidence::Ordered(_)) {
+        let Some(region) = self.region_for(target.simulator_id) else { return false };
+        if region != target.source.region() || !matches!(target.source.order(), OrderEvidence::Ordered(_)) {
             return false;
         }
-        if target.binding.address().region() != simulator.region || !self.world.object_binding_target_is_current(target.binding) {
+        if target.binding.address().region() != region || !self.world.object_binding_target_is_current(target.binding) {
             return false;
         }
         self.world.object(target.binding.entity()).is_some_and(|object| {
@@ -461,8 +427,8 @@ impl SessionWorld {
         source: UpdateSource,
         update: SitTargetUpdate,
     ) -> Option<Result<Applied, ApplyError>> {
-        let simulator = self.regions.get(&simulator_id)?;
-        if simulator.region != source.region() {
+        let region = self.region_for(simulator_id)?;
+        if region != source.region() {
             return None;
         }
         let result = self.world.patch_sit_target(source, update.object_id, Some(update.target));
@@ -475,13 +441,13 @@ impl SessionWorld {
         source: UpdateSource,
         update: AvatarAppearanceMessage,
     ) -> Option<Result<Applied, ApplyError>> {
-        let simulator = self.regions.get(&simulator_id)?;
-        if simulator.region != source.region() {
+        let region = self.region_for(simulator_id)?;
+        if region != source.region() {
             return None;
         }
         let entity = self.world.entity(update.object_id)?;
         let object = self.world.object(entity)?;
-        if object.id() != update.object_id || object.kind() != Kind::Avatar || object.address().region() != simulator.region {
+        if object.id() != update.object_id || object.kind() != Kind::Avatar || object.address().region() != region {
             return None;
         }
         let local_id = object.address().local_id();
@@ -549,8 +515,10 @@ impl SessionWorld {
     }
 
     pub(super) fn retire_simulator(&mut self, simulator_id: SimulatorId) -> Result<(), ApplyError> {
-        let Some(source) = self.regions.remove(&simulator_id) else { return Ok(()) };
-        self.world.retire_region(source.region).map(|_| ())
+        let Some(region) = self.region_for(simulator_id) else { return Ok(()) };
+        let _ = self.world.retire_region(region)?;
+        self.regions.remove(&simulator_id);
+        Ok(())
     }
 
     pub(super) fn retire_all(&mut self) -> Vec<(SimulatorId, ApplyError)> {
@@ -565,20 +533,17 @@ impl SessionWorld {
     }
 }
 
-fn resolve_region_handle(message_handle: Option<RegionHandle>, source: SimulatorRegion) -> Result<Option<RegionHandle>, IngestStatus> {
-    if source.pinned_handle.is_some() && source.observed_handle.is_some() && source.pinned_handle != source.observed_handle {
-        return Err(IngestStatus::RegionContextMismatch);
-    }
-
+fn resolve_region_handle(
+    message_handle: Option<RegionHandle>,
+    current_handle: Option<RegionHandle>,
+) -> Result<Option<RegionHandle>, IngestStatus> {
     if let Some(handle) = message_handle {
-        if source.pinned_handle.is_some_and(|pinned| pinned != handle) || source.observed_handle.is_some_and(|observed| observed != handle)
-        {
+        if current_handle.is_some_and(|current| current != handle) {
             return Err(IngestStatus::RegionHandleMismatch);
         }
         return Ok(Some(handle));
     }
-
-    Ok(source.pinned_handle.or(source.observed_handle))
+    Ok(current_handle)
 }
 
 fn apply_operation(world: &mut World, operation: ObjectOperation) -> Result<Applied, ApplyError> {
@@ -627,36 +592,102 @@ mod tests {
     };
 
     use base::UUID;
-    use math::Vec3;
+    use math::{DVec3, Vec3};
     use network::{SimulatorId, testing::simulator_id};
     use tokio::sync::oneshot::channel;
     use world::{
         Appearance, AssetId, AvatarAppearanceUpdate, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex, FieldUpdate, Kind,
         LocalAddress, MAX_AVATAR_TEXTURE_SLOTS, MediaEntry, ObjectMediaUpdate, ObjectObservation, ObjectPatch, OrderEvidence, Parent,
-        ParentUpdate, Pose, Region, RenderMaterials, Shape, UpdateSource,
+        ParentUpdate, Pose, Region, RegionHandle, RegionInfo, RenderMaterials, Shape, UpdateSource,
     };
 
     use crate::session::inbound::{AvatarAppearanceMessage, ObjectBatch, ObjectMediaRequest, ObjectOperation};
 
-    use super::{IngestSummary, MAX_OBJECTS_PER_INTAKE_QUANTUM, MAX_WORLD_ENTITIES, SessionWorld, viewer_world_limits};
+    use super::{
+        IngestStatus, IngestSummary, MAX_OBJECTS_PER_INTAKE_QUANTUM, MAX_WORLD_ENTITIES, RegistrationError, SessionWorld,
+        viewer_world_limits,
+    };
+    use world::ApplyError::InvalidValue;
+
+    #[test]
+    fn packet_handle_is_checked_against_committed_world_metadata() {
+        let simulator = simulator_id();
+        let mut world = SessionWorld::new(viewer_world_limits());
+        let region = world.register_simulator(simulator, None).unwrap();
+        let handle = RegionHandle::new(1 << 32);
+        let _ = world.world.patch_region(region, RegionInfo { handle: Some(handle), ..RegionInfo::default() }).unwrap();
+        let revision = world.world.revision();
+        let summary = world
+            .apply_object_batch(
+                simulator,
+                ObjectBatch {
+                    region,
+                    region_handle: Some(RegionHandle::new(0)),
+                    blocks: vec![Some(ObjectOperation::Observe(observation(
+                        region,
+                        1,
+                        1,
+                        NonZeroU32::new(1).unwrap(),
+                        ParentUpdate::Root,
+                    )))],
+                    invalid_blocks: 0,
+                    invalid_fields: 0,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(summary.status, IngestStatus::RegionHandleMismatch);
+        assert_eq!(summary.accepted_region_handle, None);
+        assert_eq!(world.world.object_count(), 0);
+        assert_eq!(world.world.revision(), revision);
+    }
+
+    #[test]
+    fn rejected_handle_metadata_does_not_admit_object_blocks() {
+        let simulator = simulator_id();
+        let mut world = SessionWorld::new(viewer_world_limits());
+        let region = world.register_simulator(simulator, None).unwrap();
+        let _ = world.world.patch_region(region, RegionInfo { origin: Some(DVec3::X), ..RegionInfo::default() }).unwrap();
+        let revision = world.world.revision();
+        assert!(matches!(
+            world.register_simulator(simulator, Some(RegionHandle::new(0))),
+            Err(RegistrationError::Apply(InvalidValue { field: "region_origin" }))
+        ));
+        let summary = world
+            .apply_object_batch(
+                simulator,
+                ObjectBatch {
+                    region,
+                    region_handle: Some(RegionHandle::new(0)),
+                    blocks: vec![Some(ObjectOperation::Observe(observation(
+                        region,
+                        1,
+                        1,
+                        NonZeroU32::new(1).unwrap(),
+                        ParentUpdate::Root,
+                    )))],
+                    invalid_blocks: 0,
+                    invalid_fields: 0,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(summary.status, IngestStatus::RegionMetadataRejected(InvalidValue { field: "region_origin" }));
+        assert_eq!(summary.accepted_region_handle, None);
+        assert_eq!(world.world.object_count(), 0);
+        assert_eq!(world.world.revision(), revision);
+        assert_eq!(world.world.region(region).unwrap().handle, None);
+        assert_eq!(world.region_for(simulator), Some(region));
+    }
 
     fn observation(region: Region, order: u32, id: u128, local_id: NonZeroU32, parent: ParentUpdate) -> ObjectObservation {
-        ObjectObservation {
-            source: UpdateSource::new(region, order, OrderEvidence::Ordered(u64::from(order)), 0),
-            id: UUID::from_u128(id),
+        ObjectObservation::new(
+            UpdateSource::new(region, order, OrderEvidence::Ordered(u64::from(order)), 0),
+            UUID::from_u128(id),
             local_id,
-            kind: Kind::Object,
+            Kind::Object,
             parent,
-            pose: None,
-            linear_motion: None,
-            angular_velocity: None,
-            scale: None,
-            attachment_point: FieldUpdate::Keep,
-            shape: FieldUpdate::Keep,
-            appearance: FieldUpdate::Keep,
-            surface_appearance: None,
-            render_materials: None,
-        }
+        )
     }
 
     fn apply_one(world: &mut SessionWorld, simulator_id: SimulatorId, region: Region, operation: ObjectOperation) -> IngestSummary {
@@ -751,16 +782,24 @@ mod tests {
     }
 
     #[test]
-    fn recovery_routes_follow_the_address_region() {
+    fn recovery_routes_follow_active_region_lifetimes() {
         let mut session = SessionWorld::new(viewer_world_limits());
         let source_simulator = simulator_id();
         let destination_simulator = simulator_id();
         let source_region = session.register_simulator(source_simulator, None).expect("source simulator");
         let destination_region = session.register_simulator(destination_simulator, None).expect("destination simulator");
 
-        assert_eq!(session.simulator_for_region(source_region, destination_simulator), Some(source_simulator));
-        assert_eq!(session.simulator_for_region(destination_region, destination_simulator), Some(destination_simulator));
-        assert_eq!(session.simulator_for_region(Region::new(u64::MAX), destination_simulator), None);
+        assert_eq!(session.simulator_for_region(source_region), Some(source_simulator));
+        assert_eq!(session.simulator_for_region(destination_region), Some(destination_simulator));
+        assert_eq!(session.simulator_for_region(Region::new(u64::MAX)), None);
+
+        session.retire_simulator(source_simulator).expect("retire source simulator");
+        assert_eq!(session.region_for(source_simulator), None);
+        assert_eq!(session.simulator_for_region(source_region), None);
+        assert_eq!(session.simulator_for_region(destination_region), Some(destination_simulator));
+        let revision = session.world().revision();
+        session.retire_simulator(source_simulator).expect("repeated retirement");
+        assert_eq!(session.world().revision(), revision);
     }
 
     #[test]

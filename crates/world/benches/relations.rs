@@ -4,7 +4,6 @@ use base::UUID;
 use criterion::{BatchSize, BenchmarkGroup, BenchmarkId, Criterion, Throughput, measurement::WallTime};
 use world::{
     ApplyOutcome::Introduced,
-    FieldUpdate,
     Kind::Object,
     ObjectObservation, ObjectPatch,
     ParentUpdate::{Local, Root},
@@ -65,22 +64,13 @@ fn child_first_scene(count: usize) -> (World, Vec<RootCase>) {
         let child_count = entity_count - 1;
         for local_index in 0..child_count {
             let local_id = NonZeroU32::new(local_index as u32 + 2).expect("child local ID is nonzero");
-            let child = ObjectObservation {
-                source: source(region, first_child_id as u64),
-                id: UUID::from_u128(first_child_id),
+            let child = ObjectObservation::new(
+                source(region, first_child_id as u64),
+                UUID::from_u128(first_child_id),
                 local_id,
-                kind: Object,
-                parent: Local(NonZeroU32::new(1).expect("root local ID is nonzero")),
-                pose: None,
-                linear_motion: None,
-                angular_velocity: None,
-                scale: None,
-                attachment_point: FieldUpdate::Keep,
-                shape: FieldUpdate::Keep,
-                appearance: FieldUpdate::Keep,
-                surface_appearance: None,
-                render_materials: None,
-            };
+                Object,
+                Local(NonZeroU32::new(1).expect("root local ID is nonzero")),
+            );
             first_child_id += 1;
             let _ = black_box(world.observe_object(child).expect("pending child introduction"));
         }
@@ -93,22 +83,7 @@ fn child_first_scene(count: usize) -> (World, Vec<RootCase>) {
 }
 
 fn root_observation(root: RootCase, order: u64) -> ObjectObservation {
-    ObjectObservation {
-        source: source(root.region, order),
-        id: root.id,
-        local_id: NonZeroU32::new(1).expect("root local ID is nonzero"),
-        kind: Object,
-        parent: Root,
-        pose: None,
-        linear_motion: None,
-        angular_velocity: None,
-        scale: None,
-        attachment_point: FieldUpdate::Keep,
-        shape: FieldUpdate::Keep,
-        appearance: FieldUpdate::Keep,
-        surface_appearance: None,
-        render_materials: None,
-    }
+    ObjectObservation::new(source(root.region, order), root.id, NonZeroU32::new(1).expect("root local ID is nonzero"), Object, Root)
 }
 
 fn bench_deep_reparent(group: &mut BenchmarkGroup<'_, WallTime>) {

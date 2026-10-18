@@ -1,4 +1,8 @@
-use std::mem::size_of;
+use std::{
+    error::Error,
+    fmt::{self, Display, Formatter},
+    mem::size_of,
+};
 
 use crate::MAX_SURFACE_FACES;
 
@@ -191,3 +195,17 @@ pub enum ObjectMediaError {
     /// A permission mask contains unsupported bits.
     InvalidPermissions,
 }
+
+impl Display for ObjectMediaError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooManyFaces => f.write_str("too many media faces"),
+            Self::UrlTooLong => f.write_str("media URL exceeds the byte limit"),
+            Self::WhitelistTooLarge => f.write_str("media whitelist exceeds its entry or byte limit"),
+            Self::DimensionTooLarge => f.write_str("media dimensions exceed the pixel limit"),
+            Self::InvalidPermissions => f.write_str("media permissions contain unsupported bits"),
+        }
+    }
+}
+
+impl Error for ObjectMediaError {}

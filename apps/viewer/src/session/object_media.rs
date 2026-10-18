@@ -489,20 +489,15 @@ mod tests {
         let other_local_id = NonZeroU32::new(8).expect("nonzero replacement local ID");
         let object_id = UUID::from_u128(7);
         let observation = |order, local_id| ObjectObservation {
-            source: UpdateSource::new(region, order, OrderEvidence::Ordered(u64::from(order)), 0),
-            id: object_id,
-            local_id,
-            kind: Kind::Object,
-            parent: ParentUpdate::Root,
-            pose: None,
-            linear_motion: None,
-            angular_velocity: None,
-            scale: None,
-            attachment_point: FieldUpdate::Keep,
             shape: FieldUpdate::Set(Shape::Prim(Default::default())),
             appearance: FieldUpdate::Set(Appearance::Surface),
-            surface_appearance: None,
-            render_materials: None,
+            ..ObjectObservation::new(
+                UpdateSource::new(region, order, OrderEvidence::Ordered(u64::from(order)), 0),
+                object_id,
+                local_id,
+                Kind::Object,
+                ParentUpdate::Root,
+            )
         };
         let apply = |world: &mut SessionWorld, operation| {
             world

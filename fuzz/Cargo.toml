@@ -15,7 +15,7 @@ libfuzzer-sys = "0.4"
 protocol = { path = "../crates/protocol" }
 llsd = { path = "../crates/common/llsd" }
 network = { path = "../crates/network" }
-world = { path = "../crates/world" }
+world = { path = "../crates/world", features = ["invariants"] }
 
 [workspace]
 members = ["."]

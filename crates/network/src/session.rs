@@ -2384,8 +2384,8 @@ mod tests {
         let mut rejected = lludp::fixture("improved_terse_object_update.hex");
         rejected[0] |= 0x40;
         set_sequence(&mut rejected, 25);
-        rejected[24] = 1;
-        assert!(Packet::preflight(&rejected).is_err(), "the missing collision plane must fail LLUDP preflight");
+        rejected[18] = u8::MAX;
+        assert!(Packet::preflight(&rejected).is_err(), "an object field exceeding its packet frame must fail LLUDP preflight");
         simulator.send_to(&rejected, peer).await.expect("send preflight-rejected reliable update");
 
         let watermark = match timeout(CLIENT_TIMEOUT, session.recv_event()).await.expect("preflight loss should wake Session") {

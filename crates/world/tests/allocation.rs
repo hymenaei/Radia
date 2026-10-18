@@ -146,22 +146,15 @@ fn world_memory_baseline() {
                 let region_index = index / 10_000;
                 let local_id = NonZeroU32::new((index % 10_000 + 1) as u32).expect("nonzero local ID");
                 let parent = if local_id.get() == 1 { Root } else { Local(NonZeroU32::new(1).expect("root local ID")) };
-                let observation = ObjectObservation {
-                    source: UpdateSource::new(regions[region_index], 100_001 + index as u32, Ordered(100_001 + index as u64), 0),
-                    id: UUID::from_u128(index as u128 + 1),
+                let mut observation = ObjectObservation::new(
+                    UpdateSource::new(regions[region_index], 100_001 + index as u32, Ordered(100_001 + index as u64), 0),
+                    UUID::from_u128(index as u128 + 1),
                     local_id,
-                    kind: Object,
+                    Object,
                     parent,
-                    pose: Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) }),
-                    linear_motion: None,
-                    angular_velocity: None,
-                    scale: Some(Vec3::ONE),
-                    attachment_point: None,
-                    shape: None,
-                    appearance: None,
-                    surface_appearance: None,
-                    render_materials: None,
-                };
+                );
+                observation.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) });
+                observation.scale = Some(Vec3::ONE);
                 assert!(matches!(world.observe_object(observation).expect("insert benchmark object").outcome, Introduced(_)));
             }
             loop {
@@ -177,9 +170,6 @@ fn world_memory_baseline() {
         assert!(allocations.live_bytes > 0);
         assert!(allocations.peak_bytes >= allocations.live_bytes);
         assert!(allocations.allocation_calls > 0);
-        drop(world);
-        assert_eq!(ALLOCATIONS.with(|allocations| allocations.get().live_bytes), baseline);
-
         eprintln!(
             "{count} linked objects: retained={} B, peak={} B, allocations={}, reallocations={}, retained/object={:.1} B",
             allocations.live_bytes,
@@ -188,5 +178,23 @@ fn world_memory_baseline() {
             allocations.reallocation_calls,
             allocations.live_bytes as f64 / count as f64,
         );
+        let mut world = world;
+        let (removed, retirement) = measure(|| {
+            let mut removed = 0;
+            for region in &regions {
+                let applied = world.retire_region(*region).expect("retire benchmark region");
+                let world::RegionOutcome::Retired { entities_removed, .. } = applied.outcome else { panic!("expected region retirement") };
+                removed += entities_removed;
+            }
+            removed
+        });
+        assert_eq!(removed, count);
+        assert_eq!(world.object_count(), 0);
+        eprintln!(
+            "{count} linked object retirements: allocations={}, reallocations={}, peak additional={} B",
+            retirement.allocation_calls, retirement.reallocation_calls, retirement.peak_bytes,
+        );
+        drop(world);
+        assert_eq!(ALLOCATIONS.with(|allocations| allocations.get().live_bytes), baseline);
     }
 }

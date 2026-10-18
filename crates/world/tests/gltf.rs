@@ -3,9 +3,9 @@ use std::num::NonZeroU32;
 use base::UUID;
 use world::{
     Appearance,
-    ApplyOutcome::{Introduced, RegionAdopted, Unchanged, Updated},
-    AssetId, FieldGroup, FieldRejectionReason, GltfMaterialOverride, GltfMaterialOverrides, Kind, ObjectObservation, ObjectPatch,
-    OrderEvidence, ParentUpdate, Region, RenderMaterials, UpdateAuthority, UpdateSource, World, WorldLimits,
+    ApplyOutcome::{Introduced, Unchanged, Updated},
+    AssetId, FieldGroup, FieldRejectionReason, FieldUpdate, GltfMaterialOverride, GltfMaterialOverrides, Kind, ObjectObservation,
+    ObjectPatch, OrderEvidence, ParentUpdate, Region, RenderMaterials, UpdateAuthority, UpdateSource, World, WorldLimits,
 };
 
 fn source(region: Region, order: u64) -> UpdateSource {
@@ -30,7 +30,7 @@ fn with_region(region: Region) -> World {
         max_region_name_bytes: 64,
         max_recovery_targets: 4,
     });
-    assert_eq!(world.adopt_region(region).unwrap().outcome, RegionAdopted);
+    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
     world
 }
 
@@ -50,9 +50,9 @@ fn object(source: UpdateSource, id: u128, local_id_value: u32, with_surface: boo
         linear_motion: None,
         angular_velocity: None,
         scale: None,
-        attachment_point: None,
-        shape: None,
-        appearance: with_surface.then_some(Some(Appearance::Surface)),
+        attachment_point: FieldUpdate::Keep,
+        shape: FieldUpdate::Keep,
+        appearance: if with_surface { FieldUpdate::Set(Appearance::Surface) } else { FieldUpdate::Keep },
         surface_appearance: None,
         render_materials: Some(RenderMaterials::new(vec![(2, AssetId::new(UUID::from_u128(29)))]).expect("valid PBR bindings")),
     }
@@ -164,7 +164,7 @@ fn local_id_is_scoped_to_region() {
     let first_region = Region::new(11);
     let second_region = Region::new(12);
     let mut world = with_region(first_region);
-    assert_eq!(world.adopt_region(second_region).unwrap().outcome, RegionAdopted);
+    assert!(matches!(world.adopt_region(second_region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
     let first = world.observe_object(object(source(first_region, 1), 17, 7, true)).unwrap();
     let Introduced(first_entity) = first.outcome else { panic!("expected first object") };
     let second = world.observe_object(object(source(second_region, 1), 18, 7, true)).unwrap();

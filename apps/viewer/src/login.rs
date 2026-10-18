@@ -443,7 +443,7 @@ impl LoginScreen {
         }
 
         if let Some(ready) = session_ready {
-            let SessionReadyUpdate { session, region_lookup, world_state } = ready;
+            let SessionReadyUpdate { session, region_lookup } = ready;
             self.is_connecting = false;
             self.awaiting_mfa = false;
             self.mfa_challenge = None;
@@ -467,7 +467,6 @@ impl LoginScreen {
             let initial_region_name = self.current_region_name.clone();
             self.chat_screen.update(cx, |chat, cx| {
                 chat.set_session(session.clone(), cx);
-                chat.set_world_state(world_state.clone(), cx);
                 if let Some(region_name) = initial_region_name {
                     chat.set_region_name(region_name, cx);
                 }

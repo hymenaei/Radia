@@ -1,3 +1,5 @@
+//! Bounded snapshots and revision-checked pages for external consumers.
+
 use std::{
     collections::Bound::{Excluded, Unbounded},
     mem::size_of,
@@ -5,13 +7,14 @@ use std::{
 
 use base::UUID;
 
-use super::{
-    Change, Entity, GltfMaterialOverrides, Journal, Kind, LocalAddress, Object, Parent, PoseError, PoseState, Properties, Region,
-    RegionInfo, Shape, World, WorldId, WorldRevision, WorldTransformState,
+use super::{Object, World, WorldChange, WorldId};
+use crate::{
+    Appearance, AssetId, AttachmentPoint, AvatarAppearance, AvatarTextureSlots, AvatarVisualParamIndex, FaceAppearance,
+    GltfMaterialOverride, LinearMotion, ObjectMedia, PropertiesProvenance, RenderMaterials, SitTarget, SurfaceAppearance, Transform,
 };
 use crate::{
-    Appearance, AssetId, AttachmentPoint, AvatarAppearance, AvatarVisualParamIndex, FaceAppearance, GltfMaterialOverride, LinearMotion,
-    ObjectMedia, PropertiesProvenance, RenderMaterials, SitTarget, SurfaceAppearance, Transform,
+    Entity, GltfMaterialOverrides, Kind, LocalAddress, Parent, PoseError, PoseState, Properties, Region, RegionInfo, Shape, WorldRevision,
+    WorldTransformState,
 };
 
 /// Maximum number of objects returned in one page.
@@ -202,7 +205,7 @@ pub struct WorldChangeRecord {
     /// Revision that produced this change.
     pub revision: WorldRevision,
     /// Ordered invalidation or lifecycle fact.
-    pub change: Change,
+    pub change: WorldChange,
 }
 
 /// A bounded page of journal changes.
@@ -329,13 +332,12 @@ impl World {
         let mut regions = Vec::with_capacity(limit);
         let mut after = cursor.map(|cursor| cursor.after);
         let mut iter = match after {
-            Some(region) => self.region_ids.range((Excluded(region), Unbounded)),
-            None => self.region_ids.range(..),
+            Some(region) => self.regions.range((Excluded(region), Unbounded)),
+            None => self.regions.range(..),
         };
         let mut bytes = 0usize;
         let mut oversized_item = false;
-        for region in iter.by_ref().take(limit) {
-            let info = self.regions.get(region).expect("region ordering index contains only active regions");
+        for (region, info) in iter.by_ref().take(limit) {
             let charge = region_summary_bytes(info);
             if bytes.saturating_add(charge) > MAX_REGION_PAGE_BYTES {
                 if regions.is_empty() {
@@ -413,13 +415,14 @@ impl World {
         let world_transform = object.world_transform();
         let pose = match world_transform {
             Ok(WorldTransformState::Resolved(transform)) => Ok(PoseState::Resolved(transform.pose)),
-            Ok(WorldTransformState::Unresolved(pose)) => Ok(pose),
+            Ok(WorldTransformState::Provisional { pose, reason }) => Ok(PoseState::Provisional { pose, reason }),
+            Ok(WorldTransformState::Unresolved(reason)) => Ok(PoseState::Unresolved(reason)),
             Ok(WorldTransformState::MissingScale(pose)) => Ok(PoseState::Resolved(pose)),
             Err(error) => Err(error),
         };
         let summary = ObjectSummary {
             entity,
-            id: object.identity().id(),
+            id: object.id(),
             kind: object.kind(),
             address: object.address(),
             parent: object.parent(),
@@ -427,7 +430,7 @@ impl World {
             pose,
         };
         let parent_id = match summary.parent {
-            Parent::Resolved(parent) => self.object(parent).map(|object| object.identity().id()),
+            Parent::Resolved(parent) => self.object(parent).map(|object| object.id()),
             Parent::Unknown | Parent::Root | Parent::Pending { .. } => None,
         };
         if object_detail_bytes(&object) > MAX_OBJECT_DETAIL_BYTES {
@@ -534,23 +537,23 @@ impl World {
         if entity.1 != self.id {
             return Err(WorldReadError::StaleSession);
         }
-        let object = self.object(entity).ok_or(WorldReadError::StaleIdentity)?;
-        Ok(ObjectListItem { entity, id: object.identity().id(), kind: object.kind(), address: object.address() })
+        let object = self.record(entity).ok_or(WorldReadError::StaleIdentity)?;
+        Ok(ObjectListItem { entity, id: object.id, kind: object.kind, address: object.state.binding.address })
     }
 
     fn summary_for_entity(&self, entity: Entity) -> Result<ObjectSummary, WorldReadError> {
         if entity.1 != self.id {
             return Err(WorldReadError::StaleSession);
         }
-        let object = self.object(entity).ok_or(WorldReadError::StaleIdentity)?;
+        let object = self.record(entity).ok_or(WorldReadError::StaleIdentity)?;
         Ok(ObjectSummary {
             entity,
-            id: object.identity().id(),
-            kind: object.kind(),
-            address: object.address(),
-            parent: object.parent(),
-            local_transform: object.transform(),
-            pose: object.world_pose(),
+            id: object.id,
+            kind: object.kind,
+            address: object.state.binding.address,
+            parent: object.state.parent,
+            local_transform: object.state.transform,
+            pose: self.resolve_pose(entity),
         })
     }
 }
@@ -572,6 +575,7 @@ fn object_detail_bytes(object: &Object<'_>) -> usize {
     let avatar_bytes = object.avatar_appearance().map_or(0, |value| {
         size_of::<AvatarAppearance>()
             .saturating_add(value.visual_params().count().saturating_mul(size_of::<(AvatarVisualParamIndex, u8)>()))
+            .saturating_add(value.texture_slots().map_or(0, |_| size_of::<AvatarTextureSlots>()))
     });
 
     size_of::<ObjectDetail>()
@@ -580,20 +584,4 @@ fn object_detail_bytes(object: &Object<'_>) -> usize {
         .saturating_add(gltf_bytes)
         .saturating_add(avatar_bytes)
         .saturating_add(object.object_media().map_or(0, |media| media.retained_bytes().saturating_sub(size_of::<ObjectMedia>())))
-}
-
-impl Journal {
-    fn entry_index(&self, revision: WorldRevision) -> usize {
-        let mut low = 0;
-        let mut high = self.entries.len();
-        while low < high {
-            let middle = low + (high - low) / 2;
-            if self.entries[middle].revision < revision {
-                low = middle + 1;
-            } else {
-                high = middle;
-            }
-        }
-        low
-    }
 }

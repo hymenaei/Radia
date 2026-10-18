@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     future::Future,
-    num::NonZeroU32,
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
@@ -16,8 +15,8 @@ use network::{
 };
 use tokio::sync::watch;
 use world::{
-    Entity, LocalAddress, MAX_MEDIA_DIMENSION, MAX_MEDIA_URL_BYTES, MAX_MEDIA_WHITELIST_BYTES, MAX_MEDIA_WHITELIST_ENTRIES,
-    MAX_SURFACE_FACES, MediaControls, MediaEntry, ObjectMediaError, ObjectMediaUpdate, OrderEvidence, UpdateSource,
+    LocalAddress, MAX_MEDIA_DIMENSION, MAX_MEDIA_URL_BYTES, MAX_MEDIA_WHITELIST_BYTES, MAX_MEDIA_WHITELIST_ENTRIES, MAX_SURFACE_FACES,
+    MediaControls, MediaEntry, ObjectBindingTarget, ObjectMediaError, ObjectMediaUpdate, OrderEvidence, UpdateSource,
 };
 
 const REQUEST_QUEUE_CAPACITY: usize = 64;
@@ -30,20 +29,14 @@ const RETRY_DELAY: Duration = Duration::from_millis(250);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ObjectMediaTarget {
     pub(super) simulator_id: SimulatorId,
-    pub(super) entity: Entity,
+    pub(super) binding: ObjectBindingTarget,
     pub(super) source: UpdateSource,
-    pub(super) object_id: UUID,
-    pub(super) local_id: NonZeroU32,
     pub(super) version: u32,
 }
 
 impl ObjectMediaTarget {
     fn key(self) -> MediaKey {
-        MediaKey {
-            simulator_id: self.simulator_id,
-            address: LocalAddress::new(self.source.region(), self.local_id),
-            object_id: self.object_id,
-        }
+        MediaKey { simulator_id: self.simulator_id, address: self.binding.address(), object_id: self.binding.object_id() }
     }
 
     pub(super) fn is_newer_than(self, other: Self) -> bool {
@@ -73,7 +66,7 @@ struct PendingMedia {
 impl PendingMedia {
     fn coalesce(&mut self, target: ObjectMediaTarget) {
         let latest = self.retry.unwrap_or(self.active);
-        if target.entity != latest.entity || target.is_newer_than(latest) {
+        if target.binding != latest.binding || target.is_newer_than(latest) {
             self.retry = Some(target);
         }
     }
@@ -81,7 +74,7 @@ impl PendingMedia {
 
 pub(super) struct ObjectMediaResult {
     pub(super) target: ObjectMediaTarget,
-    pub(super) update: Result<ObjectMediaUpdate, ()>,
+    pub(super) update: Result<ObjectMediaUpdate, FetchError>,
 }
 
 #[derive(Default)]
@@ -257,7 +250,7 @@ async fn run<F>(
 enum FetchOutcome {
     Cancelled,
     Retired,
-    Complete(Result<ObjectMediaUpdate, ()>),
+    Complete(Result<ObjectMediaUpdate, FetchError>),
 }
 
 fn is_retired(retirement: &Mutex<RetirementState>, simulator_id: SimulatorId) -> bool {
@@ -273,24 +266,30 @@ async fn fetch_with_retries(
     capabilities: &mut HashMap<SimulatorId, CapabilityUrl>,
     cache_order: &mut VecDeque<SimulatorId>,
     background: &BackgroundExecutor,
-) -> Result<ObjectMediaUpdate, ()> {
+) -> Result<ObjectMediaUpdate, FetchError> {
+    let mut last_error = None;
     for attempt in 0..MAX_FETCH_ATTEMPTS {
         match fetch(request, capabilities, cache_order).await {
             Ok(update) if update.version() >= request.target.version => return Ok(update),
-            Ok(_) => {}
-            Err(FetchError::Transport) => {
-                capabilities.remove(&request.target.simulator_id);
-                cache_order.retain(|simulator_id| *simulator_id != request.target.simulator_id);
+            Ok(update) => {
+                last_error = Some(FetchError::StaleVersion { requested: request.target.version, received: update.version() });
             }
-            Err(FetchError::Capability) if attempt + 1 < MAX_FETCH_ATTEMPTS => {}
-            Err(FetchError::Malformed) => return Err(()),
-            Err(FetchError::Capability) => return Err(()),
+            Err(error) => {
+                if error == FetchError::Transport {
+                    capabilities.remove(&request.target.simulator_id);
+                    cache_order.retain(|simulator_id| *simulator_id != request.target.simulator_id);
+                }
+                if matches!(error, FetchError::Malformed | FetchError::ObjectMismatch | FetchError::Invalid(_)) {
+                    return Err(error);
+                }
+                last_error = Some(error);
+            }
         }
         if attempt + 1 < MAX_FETCH_ATTEMPTS {
             background.timer(RETRY_DELAY).await;
         }
     }
-    Err(())
+    Err(last_error.expect("ObjectMedia fetch attempts are non-empty"))
 }
 
 async fn fetch(
@@ -316,17 +315,30 @@ async fn fetch(
 
     let mut payload = Map::new();
     payload.insert("verb".into(), Value::String("GET".into()));
-    payload.insert("object_id".into(), Value::UUID(request.target.object_id));
+    payload.insert("object_id".into(), Value::UUID(request.target.binding.object_id()));
     let response =
         request.client.post_with_response_limit(&capability, &payload, RESPONSE_LIMIT_BYTES).await.map_err(|_| FetchError::Transport)?;
-    parse_response(&response, request.target.object_id).map_err(|_| FetchError::Malformed)
+    parse_response(&response, request.target.binding.object_id()).map_err(FetchError::from)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FetchError {
+pub(super) enum FetchError {
     Capability,
     Malformed,
+    ObjectMismatch,
+    Invalid(ObjectMediaError),
     Transport,
+    StaleVersion { requested: u32, received: u32 },
+}
+
+impl From<ParseError> for FetchError {
+    fn from(error: ParseError) -> Self {
+        match error {
+            ParseError::Malformed => Self::Malformed,
+            ParseError::ObjectMismatch => Self::ObjectMismatch,
+            ParseError::Invalid(error) => Self::Invalid(error),
+        }
+    }
 }
 
 fn parse_response(response: &Value, expected_id: UUID) -> Result<ObjectMediaUpdate, ParseError> {
@@ -456,8 +468,8 @@ mod tests {
     use llsd::{Map, Value};
     use network::testing::simulator_id;
     use world::{
-        Appearance, Kind, MAX_MEDIA_URL_BYTES, MAX_MEDIA_WHITELIST_BYTES, MediaControls, ObjectObservation, OrderEvidence, ParentUpdate,
-        Shape, UpdateSource,
+        Appearance, FieldUpdate, Kind, MAX_MEDIA_URL_BYTES, MAX_MEDIA_WHITELIST_BYTES, MediaControls, ObjectMediaError, ObjectObservation,
+        OrderEvidence, ParentUpdate, Shape, UpdateSource,
     };
 
     use crate::session::{
@@ -465,15 +477,18 @@ mod tests {
         world::{SessionWorld, viewer_world_limits},
     };
 
-    use super::{ObjectMediaTarget, PendingMedia, RetirementState, media_version, parse_entry, parse_response, response_is_stale};
+    use super::{
+        FetchError, ObjectMediaTarget, PendingMedia, RetirementState, media_version, parse_entry, parse_response, response_is_stale,
+    };
 
     fn replacement_targets() -> (ObjectMediaTarget, ObjectMediaTarget) {
         let simulator_id = simulator_id();
         let mut world = SessionWorld::new(viewer_world_limits());
         let region = world.register_simulator(simulator_id, None).expect("register simulator");
         let local_id = NonZeroU32::new(7).expect("nonzero local ID");
+        let other_local_id = NonZeroU32::new(8).expect("nonzero replacement local ID");
         let object_id = UUID::from_u128(7);
-        let observation = |order| ObjectObservation {
+        let observation = |order, local_id| ObjectObservation {
             source: UpdateSource::new(region, order, OrderEvidence::Ordered(u64::from(order)), 0),
             id: object_id,
             local_id,
@@ -483,9 +498,9 @@ mod tests {
             linear_motion: None,
             angular_velocity: None,
             scale: None,
-            attachment_point: None,
-            shape: Some(Some(Shape::Prim)),
-            appearance: Some(Some(Appearance::Surface)),
+            attachment_point: FieldUpdate::Keep,
+            shape: FieldUpdate::Set(Shape::Prim(Default::default())),
+            appearance: FieldUpdate::Set(Appearance::Surface),
             surface_appearance: None,
             render_materials: None,
         };
@@ -497,18 +512,18 @@ mod tests {
                 )
                 .expect("registered simulator")
         };
-        let request = |order| ObjectMediaRequest {
+        let request = |order, local_id| ObjectMediaRequest {
             source: UpdateSource::new(region, order, OrderEvidence::Ordered(u64::from(order)), 0),
             object_id,
             local_id,
             version: 5,
         };
 
-        apply(&mut world, ObjectOperation::Observe(observation(1)));
-        let active = world.prepare_object_media(simulator_id, request(2)).expect("current surface target");
-        apply(&mut world, ObjectOperation::Remove { source: UpdateSource::new(region, 3, OrderEvidence::Ordered(3), 0), local_id });
-        apply(&mut world, ObjectOperation::Observe(observation(4)));
-        let replacement = world.prepare_object_media(simulator_id, request(5)).expect("current replacement target");
+        apply(&mut world, ObjectOperation::Observe(observation(1, local_id)));
+        let active = world.prepare_object_media(simulator_id, request(2, local_id)).expect("current surface target");
+        apply(&mut world, ObjectOperation::Observe(observation(3, other_local_id)));
+        apply(&mut world, ObjectOperation::Observe(observation(4, local_id)));
+        let replacement = world.prepare_object_media(simulator_id, request(5, local_id)).expect("current rebound target");
         (active, replacement)
     }
 
@@ -536,7 +551,9 @@ mod tests {
     #[test]
     fn replacement_target_is_retried() {
         let (active, replacement) = replacement_targets();
-        assert_ne!(active.entity, replacement.entity);
+        assert_eq!(active.binding.entity(), replacement.binding.entity());
+        assert_eq!(active.key(), replacement.key());
+        assert_ne!(active.binding, replacement.binding);
         assert_eq!(active.version, replacement.version);
 
         let mut pending = PendingMedia { active, retry: None };
@@ -580,11 +597,11 @@ mod tests {
     fn response_checks_identity_and_faces() {
         let id = UUID::from_u128(7);
         assert_eq!(parse_response(&response(id), id).unwrap().version(), 8);
-        assert!(parse_response(&response(UUID::from_u128(9)), id).is_err());
+        assert_eq!(FetchError::from(parse_response(&response(UUID::from_u128(9)), id).unwrap_err()), FetchError::ObjectMismatch);
         let mut value = response(id);
         let Value::Map(fields) = &mut value else { panic!("test response is a map") };
         fields.insert("object_media_data".into(), Value::String("bad".into()));
-        assert!(parse_response(&value, id).is_err());
+        assert_eq!(FetchError::from(parse_response(&value, id).unwrap_err()), FetchError::Malformed);
     }
 
     #[test]
@@ -617,7 +634,7 @@ mod tests {
         let mut media = Map::new();
         media.insert("current_url".into(), Value::String("x".repeat(MAX_MEDIA_URL_BYTES + 1)));
         faces[0] = Value::Map(media);
-        assert!(parse_response(&value, id).is_err());
+        assert_eq!(FetchError::from(parse_response(&value, id).unwrap_err()), FetchError::Invalid(ObjectMediaError::UrlTooLong));
 
         let mut value = response(id);
         let Value::Map(fields) = &mut value else { panic!("test response is a map") };
@@ -625,6 +642,6 @@ mod tests {
         let mut media = Map::new();
         media.insert("whitelist".into(), Value::Array(vec![Value::String("x".repeat(MAX_MEDIA_WHITELIST_BYTES + 1))]));
         faces[0] = Value::Map(media);
-        assert!(parse_response(&value, id).is_err());
+        assert_eq!(FetchError::from(parse_response(&value, id).unwrap_err()), FetchError::Invalid(ObjectMediaError::WhitelistTooLarge));
     }
 }

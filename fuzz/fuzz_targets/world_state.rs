@@ -1,13 +1,13 @@
 #![no_main]
 
-use std::{collections::{HashMap, HashSet}, f32::consts::TAU, num::NonZeroU32};
+use std::{f32::consts::TAU, num::NonZeroU32};
 
 use base::UUID;
 use libfuzzer_sys::fuzz_target;
 use math::{Quat, Vec3};
 use world::{
-    AgentHandoff, ApplyError::RegionRetired, Kind, LinearMotion, ObjectObservation, ObjectPatch, OrderEvidence::Ordered, Parent,
-    ParentUpdate, Pose, Region, RegionHandle, RegionInfo, UpdateSource, World, WorldLimits,
+    AgentHandoff, ApplyError::RegionRetired, Kind, LinearMotion, ObjectObservation, ObjectPatch, OrderEvidence::Ordered, ParentUpdate,
+    Pose, Region, RegionHandle, RegionInfo, UpdateSource, World, WorldLimits,
 };
 
 const MAX_OPERATIONS: usize = 256;
@@ -61,42 +61,8 @@ fn parent(bytes: &[u8], local_id: NonZeroU32) -> ParentUpdate {
     if value == 0 { ParentUpdate::Root } else { ParentUpdate::Local(NonZeroU32::new(value).unwrap_or(local_id)) }
 }
 
-fn assert_world(world: &World, active_regions: &[Region], known_regions: &[Region]) {
-    let objects = world.objects().collect::<Vec<_>>();
-    assert_eq!(world.object_count(), objects.len());
-    assert_eq!(world.avatars().count(), objects.iter().filter(|object| object.kind() == Kind::Avatar).count());
-
-    let mut ids = HashSet::with_capacity(objects.len());
-    let mut addresses = HashSet::with_capacity(objects.len());
-    let mut expected_by_region = HashMap::<Region, HashSet<_>>::new();
-    let mut expected_children = HashMap::<_, HashSet<_>>::new();
-    for object in &objects {
-        assert!(ids.insert(object.identity().id()));
-        assert!(addresses.insert(object.address()));
-        assert_eq!(world.entity(object.identity().id()), Some(object.entity()));
-        assert_eq!(world.entity_at(object.address()), Some(object.entity()));
-        assert!(active_regions.contains(&object.address().region()));
-        assert!(world.region(object.address().region()).is_some());
-        expected_by_region.entry(object.address().region()).or_default().insert(object.entity());
-
-        if let Parent::Resolved(parent) = object.parent() {
-            let parent = world.object(parent).expect("resolved parent remains live");
-            assert_eq!(parent.address().region(), object.address().region());
-            expected_children.entry(parent.entity()).or_default().insert(object.entity());
-        }
-    }
-
-    for region in known_regions {
-        let indexed = world.objects_in_region(*region).map(|object| object.entity()).collect::<HashSet<_>>();
-        assert_eq!(indexed, expected_by_region.remove(region).unwrap_or_default());
-    }
-    assert!(expected_by_region.is_empty(), "every indexed region must have been seen by the fuzzer");
-
-    for object in &objects {
-        let indexed = world.children(object.entity()).map(|child| child.entity()).collect::<HashSet<_>>();
-        assert_eq!(indexed, expected_children.remove(&object.entity()).unwrap_or_default());
-    }
-    assert!(expected_children.is_empty(), "every resolved parent must be a live object");
+fn assert_world(world: &World) {
+    world.check_invariants().expect("World storage and indexes remain consistent");
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -109,21 +75,18 @@ fuzz_target!(|data: &[u8]| {
     let _ = world.adopt_region(first);
     let _ = world.adopt_region(second);
     let mut regions = vec![first, second];
-    let mut known_regions = regions.clone();
     let _ = world.set_self_agent(AGENT_ID);
-    let initial = ObjectObservation {
-        source: UpdateSource::new(first, 0, Ordered(0), 0),
-        id: AGENT_ID,
-        local_id: NonZeroU32::new(1).expect("nonzero local ID"),
-        kind: Kind::Avatar,
-        parent: ParentUpdate::Root,
-        pose: Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) }),
-        linear_motion: Some(LinearMotion::default()),
-        angular_velocity: None,
-        scale: None,
-        attachment_point: None,
-    };
+    let mut initial = ObjectObservation::new(
+        UpdateSource::new(first, 0, Ordered(0), 0),
+        AGENT_ID,
+        NonZeroU32::new(1).expect("nonzero local ID"),
+        Kind::Avatar,
+        ParentUpdate::Root,
+    );
+    initial.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) });
+    initial.linear_motion = Some(LinearMotion::default());
     let _ = world.observe_object(initial);
+    assert_world(&world);
 
     for (step, bytes) in data.chunks_exact(32).take(MAX_OPERATIONS).enumerate() {
         let region_index = usize::from(bytes[1]) % regions.len();
@@ -140,32 +103,30 @@ fuzz_target!(|data: &[u8]| {
                     1 => Kind::Avatar,
                     value => Kind::Unknown(value),
                 };
-                let observation = ObjectObservation {
-                    source,
-                    id,
-                    local_id,
-                    kind,
-                    parent: parent(bytes, local_id),
-                    pose: (bytes[3] & 1 != 0).then(|| pose(bytes)),
-                    linear_motion: (bytes[3] & 2 != 0).then_some(LinearMotion {
-                        velocity: Some(Vec3::new(f32::from(bytes[24]), f32::from(bytes[25]), f32::from(bytes[26]))),
-                        acceleration: Some(Vec3::new(f32::from(bytes[27]), f32::from(bytes[28]), f32::from(bytes[29]))),
-                    }),
-                    angular_velocity: None,
-                    scale: (bytes[3] & 4 != 0).then_some(Vec3::new(1.0, 1.0, 1.0)),
-                    attachment_point: None,
-                };
+                let mut observation = ObjectObservation::new(source, id, local_id, kind, parent(bytes, local_id));
+                observation.pose = (bytes[3] & 1 != 0).then(|| pose(bytes));
+                observation.linear_motion = (bytes[3] & 2 != 0).then_some(LinearMotion {
+                    velocity: Some(Vec3::new(f32::from(bytes[24]), f32::from(bytes[25]), f32::from(bytes[26]))),
+                    acceleration: Some(Vec3::new(f32::from(bytes[27]), f32::from(bytes[28]), f32::from(bytes[29]))),
+                });
+                observation.scale = (bytes[3] & 4 != 0).then_some(Vec3::new(1.0, 1.0, 1.0));
                 let _ = world.observe_object(observation);
             }
             1 => {
                 let mut patch = ObjectPatch::new(source, local_id);
-                if bytes[3] & 1 != 0 { patch.pose = Some(pose(bytes)) }
+                if bytes[3] & 1 != 0 {
+                    patch.pose = Some(pose(bytes))
+                }
                 if bytes[3] & 2 != 0 {
                     patch.linear_motion.velocity = Some(Vec3::new(f32::from(bytes[24]), f32::from(bytes[25]), f32::from(bytes[26])));
                     patch.linear_motion.acceleration = Some(Vec3::new(f32::from(bytes[27]), f32::from(bytes[28]), f32::from(bytes[29])));
                 }
-                if bytes[3] & 4 != 0 { patch.parent = Some(parent(bytes, local_id)) }
-                if bytes[3] & 8 != 0 { patch.scale = Some(Vec3::new(1.0, 1.0, 1.0)) }
+                if bytes[3] & 4 != 0 {
+                    patch.parent = Some(parent(bytes, local_id))
+                }
+                if bytes[3] & 8 != 0 {
+                    patch.scale = Some(Vec3::new(1.0, 1.0, 1.0))
+                }
                 let _ = world.patch_object(patch);
             }
             2 => {
@@ -173,7 +134,7 @@ fuzz_target!(|data: &[u8]| {
             }
             3 => {
                 if let Some(entity) = world.entity(id)
-                    && let Some(target) = world.properties_target(entity)
+                    && let Some(target) = world.object_binding_target(entity)
                 {
                     let _ = world.patch_properties(source, target, id, Default::default());
                 }
@@ -207,13 +168,12 @@ fuzz_target!(|data: &[u8]| {
                     next_region += 1;
                     if world.adopt_region(replacement).is_ok() {
                         regions.push(replacement);
-                        known_regions.push(replacement);
                     }
                 }
             }
             _ => {}
         }
 
-        assert_world(&world, &regions, &known_regions);
+        assert_world(&world);
     }
 });

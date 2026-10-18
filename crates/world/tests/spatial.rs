@@ -5,14 +5,16 @@ use math::{DVec3, Quat, Vec3};
 use world::{
     Applied,
     ApplyOutcome::{Introduced, Removed, Updated},
-    Entity, Kind,
+    Entity, FieldUpdate, Kind,
     Kind::Object,
-    MAX_QUERY_STATE_MAINTENANCE_WORK, MAX_WORLD_QUERY_RESULTS, MAX_WORLD_QUERY_WORK, ObjectObservation, ObjectPatch,
+    LinearMotion, MAX_QUERY_STATE_MAINTENANCE_WORK, MAX_WORLD_QUERY_RESULTS, MAX_WORLD_QUERY_WORK, MotionPatch, ObjectObservation,
+    ObjectPatch,
     OrderEvidence::Ordered,
     ParentUpdate,
     ParentUpdate::{Local, Root},
-    Pose, PoseState, QueryCompleteness, QueryIncompleteReason, Region, RegionInfo, UpdateSource, World, WorldLimits, WorldQuery,
-    WorldQueryBudget, WorldQueryItem,
+    Pose, PoseState, QueryCompleteness, QueryIncompleteReason, Region, RegionInfo, SitTarget, UpdateSource, World,
+    WorldChange::EntityUpdated,
+    WorldChangeClasses, WorldLimits, WorldQuery, WorldQueryBudget, WorldQueryItem,
 };
 
 fn world_limits() -> WorldLimits {
@@ -54,9 +56,9 @@ fn object(region: Region, order: u64, id: u128, local: u32, kind: Kind, parent: 
         linear_motion: None,
         angular_velocity: None,
         scale: None,
-        attachment_point: None,
-        shape: None,
-        appearance: None,
+        attachment_point: FieldUpdate::Keep,
+        shape: FieldUpdate::Keep,
+        appearance: FieldUpdate::Keep,
         surface_appearance: None,
         render_materials: None,
     }
@@ -67,7 +69,7 @@ fn entity(outcome: Applied) -> Entity {
     entity
 }
 
-fn apply_ok(result: Result<Applied, world::ApplyError>) {
+fn apply_ok<T>(result: Result<T, world::ApplyError>) {
     let _ = result.expect("World update");
 }
 
@@ -132,6 +134,9 @@ fn within_radius(position: DVec3, center: DVec3, radius: f64) -> bool {
 }
 
 fn assert_spatial_query_matches(world: &World, regions: [Region; 2], model: &SpatialModel) {
+    #[cfg(feature = "invariants")]
+    world.check_invariants().expect("World indexes remain consistent");
+
     for (index, region) in regions.iter().copied().enumerate() {
         let center = model.origins[index].unwrap_or(DVec3::ZERO);
         let query = WorldQuery::live().in_region(region).within(center, 256.0).unwrap();
@@ -155,8 +160,9 @@ fn assert_spatial_query_matches(world: &World, regions: [Region; 2], model: &Spa
             model.expected_positions(index),
             world
                 .objects()
+                .iter()
                 .filter(|object| object.address().region() == region)
-                .map(|object| (object.identity().id(), object.world_pose()))
+                .map(|object| (object.id(), object.world_pose()))
                 .collect::<Vec<_>>(),
         );
         assert_eq!(page.unresolved.objects, unresolved);
@@ -220,9 +226,10 @@ fn sparse_spatial_queries_match_oracle_with_small_work_budget() {
         let page = world.query(query, None, WorldQueryBudget { work: 16, results: 8 }).unwrap();
         let expected = world
             .objects()
+            .iter()
             .filter(|object| region.is_none_or(|region| object.address().region() == region))
             .filter_map(|object| match object.world_pose().unwrap() {
-                PoseState::Resolved(pose) if within_radius(pose.position, DVec3::ZERO, radius) => Some(object.identity().id()),
+                PoseState::Resolved(pose) if within_radius(pose.position, DVec3::ZERO, radius) => Some(object.id()),
                 PoseState::Resolved(_) | PoseState::Unresolved(_) | PoseState::Provisional { .. } => None,
             })
             .collect::<HashSet<_>>();
@@ -268,12 +275,264 @@ fn unrepresentable_positions_are_not_queryable() {
         panic!("expected a resolved pose outside the spatial index")
     };
     assert_eq!(pose.position, DVec3::splat(f64::from(f32::MAX)));
+    #[cfg(feature = "invariants")]
+    assert_eq!(world.check_invariants(), Ok(()));
 
     let page = world.query(WorldQuery::live().within(DVec3::ZERO, 10.0).unwrap(), None, WorldQueryBudget { work: 16, results: 8 }).unwrap();
     assert_eq!(page.completeness, QueryCompleteness::Exact);
     assert!(page.items.is_empty());
     assert_eq!(page.unresolved.objects, 0);
     assert!(matches!(WorldQuery::live().within(DVec3::new(f64::MAX, 0.0, 0.0), 0.0), Err(world::WorldQueryBuildError::OutOfRange)));
+}
+
+#[test]
+fn motion_and_scale_changes_do_not_dirty_spatial_state() {
+    for use_observation in [false, true] {
+        let region = Region::new(39);
+        let mut world = World::new(world_limits());
+        apply_ok(world.adopt_region(region));
+        apply_ok(world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }));
+        for local in 1..=2 {
+            let parent = if local == 1 { Root } else { Local(local_id(1)) };
+            let mut observation = object(region, u64::from(local), u128::from(local), local, Object, parent);
+            observation.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) });
+            apply_ok(world.observe_object(observation));
+        }
+        assert!(!world.maintain_query_state(4096).unwrap().has_dirty_pressure);
+        for (order, expected, work) in [
+            (3, WorldChangeClasses::MOTION, 0),
+            (4, WorldChangeClasses::SCALE, 0),
+            (5, WorldChangeClasses::POSE | WorldChangeClasses::MOTION | WorldChangeClasses::SCALE, 2),
+        ] {
+            let barrier = world.read_barrier();
+            let pose = (order == 5).then_some(Pose { position: Some(Vec3::splat(128.0)), rotation: None });
+            let velocity = (order != 4).then_some(Vec3::splat(order as f32));
+            let scale = (order != 3).then_some(Vec3::splat(order as f32));
+            if use_observation {
+                let mut observation = object(region, order, 1, 1, Object, Root);
+                observation.pose = pose;
+                observation.linear_motion = velocity.map(|velocity| LinearMotion { velocity: Some(velocity), acceleration: None });
+                observation.angular_velocity = velocity;
+                observation.scale = scale;
+                apply_ok(world.observe_object(observation));
+            } else {
+                let mut patch = ObjectPatch::new(source(region, order), local_id(1));
+                patch.pose = pose;
+                patch.linear_motion = MotionPatch { velocity, acceleration: None };
+                patch.angular_velocity = velocity;
+                patch.scale = scale;
+                apply_ok(world.patch_object(patch));
+            }
+            let changes = world.change_page(barrier.changes, 8).unwrap();
+            let classes = changes
+                .records
+                .iter()
+                .filter_map(|record| match record.change {
+                    EntityUpdated { classes, .. } => Some(classes),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(classes, [expected], "observation={use_observation}, order={order}");
+            let step = world.maintain_query_state(4096).unwrap();
+            assert_eq!(step.work_used, work, "observation={use_observation}, order={order}");
+            assert!(!step.has_dirty_pressure);
+            #[cfg(feature = "invariants")]
+            assert_eq!(world.check_invariants(), Ok(()));
+        }
+        let barrier = world.read_barrier();
+        apply_ok(world.patch_sit_target(source(region, 6), uuid(1), Some(SitTarget { position: Vec3::X, rotation: Quat::IDENTITY })));
+        let changes = world.change_page(barrier.changes, 8).unwrap();
+        assert!(matches!(changes.records.as_slice(), [record] if matches!(record.change,
+            EntityUpdated { classes, .. } if classes == WorldChangeClasses::RELATIONSHIP)));
+        assert_eq!(world.maintain_query_state(1).unwrap().work_used, 0);
+    }
+}
+
+#[test]
+fn isolated_object_repair_does_not_scan_its_region() {
+    let region = Region::new(36);
+    let mut world_limits = world_limits();
+    world_limits.max_entities = 32;
+    world_limits.max_entities_per_region = 32;
+    let mut world = World::new(world_limits);
+    apply_ok(world.adopt_region(region));
+    apply_ok(world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }));
+    for local in 1..=32 {
+        let mut observation = object(region, u64::from(local), u128::from(local), local, Object, Root);
+        observation.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) });
+        apply_ok(world.observe_object(observation));
+    }
+    while world.maintain_query_state(MAX_QUERY_STATE_MAINTENANCE_WORK).unwrap().has_dirty_pressure {}
+    for order in [33, 34] {
+        let mut patch = ObjectPatch::new(source(region, order), local_id(1));
+        patch.pose = Some(Pose { position: Some(Vec3::splat(order as f32)), rotation: None });
+        apply_ok(world.patch_object(patch));
+    }
+
+    let step = world.maintain_query_state(1).unwrap();
+    assert_eq!(step.work_used, 1);
+    assert_eq!(step.dirty_scopes, 0);
+    let query = WorldQuery::live().within(DVec3::splat(34.0), 0.25).unwrap();
+    let page = world.query(query, None, WorldQueryBudget { work: 4, results: 8 }).unwrap();
+    assert_eq!(page.completeness, QueryCompleteness::Exact);
+    assert_eq!(page.items.iter().map(|item| item.id()).collect::<Vec<_>>(), [uuid(1)]);
+    #[cfg(feature = "invariants")]
+    assert_eq!(world.check_invariants(), Ok(()));
+}
+
+#[test]
+fn subtree_repair_resumes_after_relationship_changes() {
+    let region = Region::new(37);
+    let mut limits = world_limits();
+    limits.max_entities = 131;
+    limits.max_entities_per_region = 131;
+    let mut world = World::new(limits);
+    apply_ok(world.adopt_region(region));
+    apply_ok(world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }));
+    for local in 1..=130 {
+        let (id, parent) = match local {
+            129 => (10, Local(local_id(1))),
+            130 => (20, Local(local_id(1))),
+            _ => (1000 + u128::from(local), Root),
+        };
+        let mut observation = object(region, u64::from(local), id, local, Object, parent);
+        observation.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) });
+        apply_ok(world.observe_object(observation));
+    }
+    assert!(!world.maintain_query_state(4096).unwrap().has_dirty_pressure);
+    let mut patch = ObjectPatch::new(source(region, 131), local_id(1));
+    patch.pose = Some(Pose { position: Some(Vec3::splat(128.0)), rotation: None });
+    apply_ok(world.patch_object(patch));
+    let query = WorldQuery::live().within(DVec3::splat(128.0), 0.25).unwrap();
+    let page = world.query(query, None, WorldQueryBudget { work: 32, results: 8 }).unwrap();
+    assert_eq!(page.completeness, QueryCompleteness::Exact);
+    assert_eq!(page.items.iter().map(|item| item.id()).collect::<HashSet<_>>(), HashSet::from([uuid(1001), uuid(10), uuid(20)]));
+    let step = world.maintain_query_state(2).unwrap();
+    assert_eq!(step.work_used, 2);
+    assert!(step.has_dirty_pressure);
+
+    apply_ok(world.observe_object(object(region, 132, 10, 129, Object, Root)));
+    let mut child = object(region, 133, 5, 131, Object, Local(local_id(1)));
+    child.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) });
+    apply_ok(world.observe_object(child));
+    let mut patch = ObjectPatch::new(source(region, 134), local_id(1));
+    patch.pose = Some(Pose { position: Some(Vec3::splat(256.0)), rotation: None });
+    apply_ok(world.patch_object(patch));
+
+    let mut work = 0;
+    let mut done = false;
+    for _ in 0..20 {
+        let step = world.maintain_query_state(1).unwrap();
+        assert!(step.work_used <= 1);
+        work += step.work_used;
+        #[cfg(feature = "invariants")]
+        assert_eq!(world.check_invariants(), Ok(()));
+        if !step.has_dirty_pressure {
+            done = true;
+            break;
+        }
+    }
+    assert!(done, "repair must finish without scanning unrelated objects");
+    assert!(work < 12, "only the affected subtree and detached child need repair");
+    let query = WorldQuery::live().within(DVec3::splat(256.0), 0.25).unwrap();
+    let page = world.query(query, None, WorldQueryBudget { work: 32, results: 8 }).unwrap();
+    assert_eq!(page.completeness, QueryCompleteness::Exact);
+    assert_eq!(page.items.iter().map(|item| item.id()).collect::<HashSet<_>>(), HashSet::from([uuid(1001), uuid(5), uuid(20)]));
+}
+
+#[test]
+fn transferring_a_dirty_root_below_a_deep_parent_clears_its_old_scope() {
+    for destination_dirty in [false, true] {
+        let first = Region::new(40);
+        let second = Region::new(41);
+        let mut limits = world_limits();
+        limits.max_entities = 19;
+        limits.max_entities_per_region = 19;
+        let mut world = World::new(limits);
+        for region in [first, second] {
+            apply_ok(world.adopt_region(region));
+            apply_ok(world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }));
+        }
+        let root = entity(world.observe_object(object(first, 1, 1000, 1, Object, Root)).unwrap());
+        for local in 1..=18 {
+            let parent = if local == 1 { Root } else { Local(local_id(local - 1)) };
+            let mut observation = object(second, u64::from(local), u128::from(local), local, Object, parent);
+            observation.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) });
+            apply_ok(world.observe_object(observation));
+        }
+        assert!(!world.maintain_query_state(4096).unwrap().has_dirty_pressure);
+        let mut patch = ObjectPatch::new(source(first, 2), local_id(1));
+        patch.pose = Some(Pose { position: Some(Vec3::X), rotation: Some(Quat::IDENTITY) });
+        apply_ok(world.patch_object(patch));
+        if destination_dirty {
+            let mut patch = ObjectPatch::new(source(second, 19), local_id(18));
+            patch.pose = Some(Pose { position: Some(Vec3::Y), rotation: None });
+            apply_ok(world.patch_object(patch));
+        }
+        apply_ok(world.observe_object(object(second, 20, 1000, 19, Object, Local(local_id(18)))));
+        assert_eq!(world.object(root).unwrap().address().region(), second);
+        #[cfg(feature = "invariants")]
+        assert_eq!(world.check_invariants(), Ok(()));
+        let step = world.maintain_query_state(4096).unwrap();
+        assert!(!step.has_dirty_pressure);
+        assert_eq!(step.work_used, 19, "only the destination region needs repair");
+        #[cfg(feature = "invariants")]
+        assert_eq!(world.check_invariants(), Ok(()));
+    }
+}
+
+#[test]
+fn subtree_repair_reaches_newly_resolvable_deep_descendants() {
+    let region = Region::new(38);
+    let mut limits = world_limits();
+    limits.max_entities = 34;
+    limits.max_entities_per_region = 34;
+    let mut world = World::new(limits);
+    apply_ok(world.adopt_region(region));
+    apply_ok(world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }));
+    for local in 1..=34 {
+        let parent = if local == 1 { Root } else { Local(local_id(local - 1)) };
+        let mut observation = object(region, u64::from(local), u128::from(local), local, Object, parent);
+        observation.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) });
+        apply_ok(world.observe_object(observation));
+    }
+    assert!(!world.maintain_query_state(4096).unwrap().has_dirty_pressure);
+    let mut patch = ObjectPatch::new(source(region, 35), local_id(1));
+    patch.pose = Some(Pose { position: Some(Vec3::splat(128.0)), rotation: None });
+    apply_ok(world.patch_object(patch));
+    let query = WorldQuery::live().within(DVec3::splat(128.0), 0.25).unwrap();
+    let page = world.query(query, None, WorldQueryBudget { work: 64, results: 64 }).unwrap();
+    assert_eq!(page.completeness, QueryCompleteness::Exact);
+    assert_eq!(page.items.iter().map(|item| item.id()).collect::<HashSet<_>>(), (1..=17).map(uuid).collect());
+    assert_eq!(page.unresolved.objects, 17);
+    assert!(page.unresolved.complete);
+    assert!(!world.maintain_query_state(4096).unwrap().has_dirty_pressure);
+
+    let mut root = object(region, 36, 17, 17, Object, Root);
+    root.pose = Some(Pose { position: Some(Vec3::splat(256.0)), rotation: Some(Quat::IDENTITY) });
+    apply_ok(world.observe_object(root));
+    let query = WorldQuery::live().within(DVec3::splat(256.0), 0.25).unwrap();
+    let page = world.query(query, None, WorldQueryBudget { work: 64, results: 64 }).unwrap();
+    assert_eq!(page.completeness, QueryCompleteness::Exact);
+    assert_eq!(page.items.iter().map(|item| item.id()).collect::<HashSet<_>>(), (17..=33).map(uuid).collect());
+    assert_eq!(page.unresolved.objects, 1);
+    assert!(page.unresolved.complete);
+    let mut work = 0;
+    for _ in 0..20 {
+        let step = world.maintain_query_state(1).unwrap();
+        work += step.work_used;
+        if !step.has_dirty_pressure {
+            break;
+        }
+    }
+    assert_eq!(work, 17, "only descendants within the pose depth limit need repair");
+    let query = WorldQuery::live().within(DVec3::splat(256.0), 0.25).unwrap();
+    let page = world.query(query, None, WorldQueryBudget { work: 128, results: 64 }).unwrap();
+    assert_eq!(page.completeness, QueryCompleteness::Exact);
+    assert_eq!(page.items.iter().map(|item| item.id()).collect::<HashSet<_>>(), (17..=33).map(uuid).collect());
+    assert_eq!(page.unresolved.objects, 1);
+    #[cfg(feature = "invariants")]
+    assert_eq!(world.check_invariants(), Ok(()));
 }
 
 #[test]

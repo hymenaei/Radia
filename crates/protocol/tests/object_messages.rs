@@ -6,7 +6,7 @@ use protocol::{
     messages::{
         CacheMissType, CachedObjectReference, ExtraParameter, KillObject, ObjectData, ObjectMotion, ObjectRequest, ObjectSound,
         ObjectSpecificData, ObjectText, ObjectUpdate, ObjectUpdateCached, RegionData, RequestAgentData, RequestMultipleObjects,
-        kill_object,
+        improved_terse_object_update, kill_object,
     },
     types::ObjectShape,
 };
@@ -21,6 +21,14 @@ fn unique_offset(bytes: &[u8], needle: &[u8]) -> usize {
     let offset = offsets.next().expect("fixture field is present");
     assert!(offsets.next().is_none(), "fixture field {needle:02x?} is unique");
     offset
+}
+
+fn terse_object(block: &improved_terse_object_update::ObjectBlock) -> &improved_terse_object_update::ObjectData {
+    block.as_decoded().expect("expected a decoded improved-terse object block")
+}
+
+fn terse_object_mut(block: &mut improved_terse_object_update::ObjectBlock) -> &mut improved_terse_object_update::ObjectData {
+    block.as_decoded_mut().expect("expected a decoded improved-terse object block")
 }
 
 fn write_nan(bytes: &mut [u8], offset: usize) {
@@ -536,16 +544,17 @@ fn terse_update_fixtures_are_partial() {
     };
     assert_eq!(update.region_data, RegionData { region_handle: 0x1122_3344_5566_7788, time_dilation: 0x8000 });
     assert_eq!(update.objects.len(), 1);
-    assert_eq!(update.objects[0].local_id, 0x1020_3040);
-    assert_eq!(update.objects[0].state, 5);
-    assert!(!update.objects[0].avatar);
-    assert_eq!(update.objects[0].collision_plane, None);
-    assert_eq!(update.objects[0].motion.position, Vec3::new(5.0, 6.0, 7.0));
-    assert_eq!(update.objects[0].motion.velocity, Vec3::new(-128.0, 0.0, 128.0));
-    assert_eq!(update.objects[0].motion.acceleration, Vec3::new(-64.0, 0.0, 64.0));
-    assert_eq!(update.objects[0].motion.rotation, Quat::from_xyzw(-1.0, 0.0, 1.0, 0.0));
-    assert_eq!(update.objects[0].motion.angular_velocity, Vec3::new(-64.0, 0.0, 64.0));
-    assert_eq!(update.objects[0].texture_entry.as_slice(), &[0x11, 0, 0x22]);
+    let object = terse_object(&update.objects[0]);
+    assert_eq!(object.local_id, 0x1020_3040);
+    assert_eq!(object.state, 5);
+    assert!(!object.avatar);
+    assert_eq!(object.collision_plane, None);
+    assert_eq!(object.motion.position, Vec3::new(5.0, 6.0, 7.0));
+    assert_eq!(object.motion.velocity, Vec3::new(-128.0, 0.0, 128.0));
+    assert_eq!(object.motion.acceleration, Vec3::new(-64.0, 0.0, 64.0));
+    assert_eq!(object.motion.rotation, Quat::from_xyzw(-1.0, 0.0, 1.0, 0.0));
+    assert_eq!(object.motion.angular_velocity, Vec3::new(-64.0, 0.0, 64.0));
+    assert_eq!(object.texture_entry.as_slice(), &[0x11, 0, 0x22]);
     let canonical = packet.encode().expect("re-encode terse object update");
     assert_ne!(canonical, bytes, "zero snap canonicalizes the near-zero quantized value");
     assert_eq!(Packet::decode(&canonical).expect("decode canonical terse update").message(), packet.message());
@@ -556,7 +565,7 @@ fn terse_update_fixtures_are_partial() {
     };
     assert_eq!(avatar_update.region_data, RegionData { region_handle: 0x1122_3344_5566_7788, time_dilation: 0x8000 });
     assert_eq!(avatar_update.objects.len(), 1);
-    let avatar = &avatar_update.objects[0];
+    let avatar = terse_object(&avatar_update.objects[0]);
     assert_eq!(avatar.local_id, 0x5566_7788);
     assert_eq!(avatar.state, 9);
     assert!(avatar.avatar);
@@ -576,23 +585,23 @@ fn terse_avatar_payload_constraints() {
     let Message::ImprovedTerseObjectUpdate(mut update) = packet.message().clone() else {
         panic!("expected terse object update");
     };
-    update.objects[0].texture_entry.clear();
+    terse_object_mut(&mut update.objects[0]).texture_entry.clear();
     let encoded =
         Packet::new(packet.sequence(), Message::ImprovedTerseObjectUpdate(update.clone())).encode().expect("encode empty texture entry");
     let decoded = Packet::decode(&encoded).expect("decode empty texture entry");
     let Message::ImprovedTerseObjectUpdate(decoded) = decoded.message() else {
         panic!("expected terse object update");
     };
-    assert!(decoded.objects[0].texture_entry.is_empty());
+    assert!(terse_object(&decoded.objects[0]).texture_entry.is_empty());
 
-    update.objects[0].avatar = true;
+    terse_object_mut(&mut update.objects[0]).avatar = true;
     assert_eq!(
         Packet::new(packet.sequence(), Message::ImprovedTerseObjectUpdate(update.clone())).encode(),
         Err(LLUdpError::InvalidMessage),
     );
 
-    update.objects[0].avatar = false;
-    update.objects[0].collision_plane = Some(Vec4::ZERO);
+    terse_object_mut(&mut update.objects[0]).avatar = false;
+    terse_object_mut(&mut update.objects[0]).collision_plane = Some(Vec4::ZERO);
     assert_eq!(Packet::new(packet.sequence(), Message::ImprovedTerseObjectUpdate(update)).encode(), Err(LLUdpError::InvalidMessage));
 }
 
@@ -607,7 +616,7 @@ fn terse_quantized_midpoint_decodes_as_exact_zero() {
     let Message::ImprovedTerseObjectUpdate(update) = packet.message() else {
         panic!("expected terse object update");
     };
-    let motion = &update.objects[0].motion;
+    let motion = &terse_object(&update.objects[0]).motion;
     assert_eq!(motion.velocity, Vec3::ZERO);
     assert_eq!(motion.acceleration, Vec3::ZERO);
     assert_eq!(motion.rotation, Quat::from_xyzw(0.0, 0.0, 0.0, 0.0));
@@ -618,10 +627,11 @@ fn terse_quantized_midpoint_decodes_as_exact_zero() {
     let Message::ImprovedTerseObjectUpdate(update) = decoded.message() else {
         panic!("expected terse object update");
     };
-    assert_eq!(update.objects[0].motion.velocity, Vec3::ZERO);
-    assert_eq!(update.objects[0].motion.acceleration, Vec3::ZERO);
-    assert_eq!(update.objects[0].motion.rotation, Quat::from_xyzw(0.0, 0.0, 0.0, 0.0));
-    assert_eq!(update.objects[0].motion.angular_velocity, Vec3::ZERO);
+    let object = terse_object(&update.objects[0]);
+    assert_eq!(object.motion.velocity, Vec3::ZERO);
+    assert_eq!(object.motion.acceleration, Vec3::ZERO);
+    assert_eq!(object.motion.rotation, Quat::from_xyzw(0.0, 0.0, 0.0, 0.0));
+    assert_eq!(object.motion.angular_velocity, Vec3::ZERO);
 }
 
 #[test]
@@ -799,20 +809,20 @@ fn decoder_keeps_non_finite_values() {
     write_nan(&mut terse, local_id_offset + 6);
     let decoded = Packet::decode(&terse).expect("decode terse update with a rejected world field");
     let Message::ImprovedTerseObjectUpdate(decoded) = decoded.message() else { panic!("expected terse object update") };
-    assert!(decoded.objects[0].motion.position.x.is_nan());
+    assert!(terse_object(&decoded.objects[0]).motion.position.x.is_nan());
 
     let (_, avatar_packet) = decode(vectors::IMPROVED_TERSE_OBJECT_UPDATE_AVATAR);
     let Message::ImprovedTerseObjectUpdate(avatar_update) = avatar_packet.message() else {
         panic!("expected terse avatar update");
     };
-    let local_id = avatar_update.objects[0].local_id.to_le_bytes();
+    let local_id = terse_object(&avatar_update.objects[0]).local_id.to_le_bytes();
     let mut avatar = fixture(vectors::IMPROVED_TERSE_OBJECT_UPDATE_AVATAR);
     let local_id_offset =
         avatar.windows(local_id.len()).rposition(|candidate| candidate == local_id.as_slice()).expect("avatar local ID is present");
     write_nan(&mut avatar, local_id_offset + 6);
     let decoded = Packet::decode(&avatar).expect("decode avatar update with a non-world collision field");
     let Message::ImprovedTerseObjectUpdate(decoded) = decoded.message() else { panic!("expected terse object update") };
-    assert!(decoded.objects[0].collision_plane.unwrap().x.is_nan());
+    assert!(terse_object(&decoded.objects[0]).collision_plane.unwrap().x.is_nan());
 }
 
 #[test]
@@ -879,13 +889,88 @@ fn unknown_wire_values_round_trip() {
 }
 
 #[test]
-fn terse_rejects_undocumented_data_suffix() {
-    let (_, packet) = decode(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
-    let mut wire = Packet::new(packet.sequence(), packet.message().clone()).with_zero_coding(false).encode().expect("encode terse fixture");
+fn terse_ignores_unknown_data_suffix() {
+    let mut wire = fixture(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
     let data_start = unique_offset(&wire, &0x1020_3040_u32.to_le_bytes());
     wire[data_start - 1] += 1;
     wire.insert(data_start + 44, 0xaa);
-    assert_eq!(Packet::decode(&wire), Err(LLUdpError::InvalidMessage));
+    let packet = Packet::decode(&wire).expect("ignore unknown packed-data suffix");
+    let Message::ImprovedTerseObjectUpdate(update) = packet.message() else {
+        panic!("expected terse object update");
+    };
+    assert_eq!(update.objects.len(), 1);
+    let object = terse_object(&update.objects[0]);
+    assert_eq!(object.local_id, 0x1020_3040);
+    assert_eq!(object.motion.position, Vec3::new(5.0, 6.0, 7.0));
+}
+
+#[test]
+fn malformed_terse_block_preserves_later_blocks() {
+    let original = fixture(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
+    let data_start = unique_offset(&original, &0x1020_3040_u32.to_le_bytes());
+    let packed_data = &original[data_start..data_start + 44];
+    let texture_entry = &original[data_start + 46..data_start + 49];
+
+    let mut wire = original[..18].to_vec();
+    wire[17] = 2;
+    wire.push(5);
+    wire.extend_from_slice(&packed_data[..5]);
+    wire.extend_from_slice(&0_u16.to_le_bytes());
+    wire.push(44);
+    wire.extend_from_slice(packed_data);
+    wire.extend_from_slice(&3_u16.to_le_bytes());
+    wire.extend_from_slice(texture_entry);
+
+    let packet = Packet::decode(&wire).expect("malformed framed block is isolated");
+    let Message::ImprovedTerseObjectUpdate(update) = packet.message() else {
+        panic!("expected terse object update");
+    };
+    assert!(matches!(
+        &update.objects[0],
+        improved_terse_object_update::ObjectBlock::Malformed { packed_data, texture_entry }
+            if packed_data.as_slice() == &original[data_start..data_start + 5] && texture_entry.is_empty()
+    ));
+    assert_eq!(terse_object(&update.objects[1]).local_id, 0x1020_3040);
+
+    let encoded = packet.encode().expect("malformed block remains encodable");
+    let decoded = Packet::decode(&encoded).expect("redecode preserved blocks");
+    let Message::ImprovedTerseObjectUpdate(decoded) = decoded.message() else {
+        panic!("expected terse object update");
+    };
+    assert!(matches!(&decoded.objects[0], improved_terse_object_update::ObjectBlock::Malformed { .. }));
+    assert_eq!(terse_object(&decoded.objects[1]).local_id, 0x1020_3040);
+}
+
+#[test]
+fn missing_terse_collision_plane_preserves_later_blocks() {
+    let original = fixture(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
+    let data_start = unique_offset(&original, &0x1020_3040_u32.to_le_bytes());
+    let mut packed_data = original[data_start..data_start + 44].to_vec();
+    packed_data[5] = 1;
+    let texture_entry = &original[data_start + 46..data_start + 49];
+
+    let mut wire = original[..18].to_vec();
+    wire[17] = 2;
+    wire.push(44);
+    wire.extend_from_slice(&packed_data);
+    wire.extend_from_slice(&0_u16.to_le_bytes());
+    wire.push(44);
+    wire.extend_from_slice(&original[data_start..data_start + 44]);
+    wire.extend_from_slice(&3_u16.to_le_bytes());
+    wire.extend_from_slice(texture_entry);
+
+    let preflight = Packet::preflight(&wire).expect("a malformed typed block remains framed");
+    let packet = Packet::decode(&wire).expect("a malformed typed block is isolated");
+    assert!(preflight.retained_capacity_upper_bound() >= packet.retained_capacity_bytes());
+    let Message::ImprovedTerseObjectUpdate(update) = packet.message() else {
+        panic!("expected terse object update");
+    };
+    assert!(matches!(
+        &update.objects[0],
+        improved_terse_object_update::ObjectBlock::Malformed { packed_data: actual, texture_entry }
+            if actual == &packed_data && texture_entry.is_empty()
+    ));
+    assert_eq!(terse_object(&update.objects[1]).local_id, 0x1020_3040);
 }
 
 #[test]
@@ -899,7 +984,7 @@ fn terse_texture_entry_is_owned() {
     let Message::ImprovedTerseObjectUpdate(update) = decoded.message() else {
         panic!("expected terse object update");
     };
-    assert_eq!(update.objects[0].texture_entry, [0x11, 0, 0x22]);
+    assert_eq!(terse_object(&update.objects[0]).texture_entry, [0x11, 0, 0x22]);
 }
 
 #[test]

@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 autobenches = false
 
+[features]
+invariants = []
+
 [lints]
 workspace = true
 

@@ -13,12 +13,12 @@ use protocol::{
         CachedObjectReference, ExtraParamUpdate, ExtraParameter, ObjectData, improved_terse_object_update, object_update,
         object_update_compressed,
     },
-    types::{TextureEntry, TextureFace, decode_render_material_bindings},
+    types::{ObjectShape, TextureEntry, TextureFace, decode_render_material_bindings},
 };
 use world::{
-    Appearance, AssetId, AttachmentPoint, FaceAppearance, Kind, LinearMotion, LocalAddress, MotionPatch, ObjectObservation, ObjectPatch,
-    OrderEvidence, ParentUpdate, Pose, Region, RegionHandle, RenderMaterials, SculptFlags, SculptType, Shape, SurfaceAppearance,
-    UpdateSource,
+    Appearance, AssetId, AttachmentPoint, FaceAppearance, FieldUpdate, Kind, LinearMotion, LocalAddress, MotionPatch, ObjectObservation,
+    ObjectPatch, OrderEvidence, ParentUpdate, Pose, PrimShape, Region, RegionHandle, RenderMaterials, SculptFlags, SculptType, Shape,
+    SurfaceAppearance, UpdateSource,
 };
 
 use super::super::object_media::media_version;
@@ -96,7 +96,7 @@ pub(crate) fn decode_object_message(region: Region, sequence: u32, order: OrderE
             map_blocks(region, sequence, order, &update.objects, compressed_observation, &mut invalid_blocks, &mut invalid_fields)
         }
         ImprovedTerseObjectUpdate(update) => {
-            map_blocks(region, sequence, order, &update.objects, terse_patch, &mut invalid_blocks, &mut invalid_fields)
+            map_terse_blocks(region, sequence, order, &update.objects, &mut invalid_blocks, &mut invalid_fields)
         }
         ObjectUpdateCached(update) => {
             map_blocks(region, sequence, order, &update.objects, cached_patch, &mut invalid_blocks, &mut invalid_fields)
@@ -230,13 +230,40 @@ fn map_blocks<'a, T: 'a>(
         .collect()
 }
 
+fn map_terse_blocks(
+    region: Region,
+    sequence: u32,
+    order: OrderEvidence,
+    blocks: &[improved_terse_object_update::ObjectBlock],
+    invalid_blocks: &mut usize,
+    invalid_fields: &mut usize,
+) -> Vec<Option<ObjectOperation>> {
+    blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            let operation = match block {
+                improved_terse_object_update::ObjectBlock::Decoded(block) => {
+                    let source = u32::try_from(index).ok().map(|ordinal| UpdateSource::new(region, sequence, order, ordinal));
+                    source.and_then(|source| terse_patch(block, source, invalid_fields).ok())
+                }
+                improved_terse_object_update::ObjectBlock::Malformed { .. } => None,
+            };
+            if operation.is_none() {
+                *invalid_blocks += 1;
+            }
+            operation
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy)]
 struct InvalidBlock;
 
 fn full_observation(block: &ObjectData, source: UpdateSource, invalid_fields: &mut usize) -> Result<ObjectOperation, InvalidBlock> {
     let id = non_nil_uuid(block.id)?;
     let local_id = local_id(block.local_id)?;
-    let classification = object_classification(block.pcode, &block.extra_parameters, invalid_fields);
+    let classification = object_classification(block.pcode, Some(block.shape), &block.extra_parameters, invalid_fields);
     let surface_appearance = if block.pcode == VOLUME_PCODE {
         let (value, invalid) = decoded_surface_appearance(object_update::decode_texture_entry(&block.texture_entry));
         *invalid_fields += usize::from(invalid);
@@ -271,7 +298,7 @@ fn compressed_observation(
     let id = non_nil_uuid(block.id)?;
     let local_id = local_id(block.local_id)?;
     let parent = parent(block.parent_local_id)?;
-    let classification = object_classification(block.pcode, &block.extra_parameters, invalid_fields);
+    let classification = object_classification(block.pcode, block.shape, &block.extra_parameters, invalid_fields);
     let surface_appearance = if block.pcode == VOLUME_PCODE {
         let decoded = block.texture_entry.as_deref().map(object_update_compressed::decode_texture_entry).unwrap_or(Ok(None));
         let (value, invalid) = decoded_surface_appearance(decoded);
@@ -400,9 +427,9 @@ fn non_nil_uuid(value: UUID) -> Result<UUID, InvalidBlock> {
     if value.is_nil() { Err(InvalidBlock) } else { Ok(value) }
 }
 
-fn attachment_point(state: u8) -> Option<Option<AttachmentPoint>> {
+fn attachment_point(state: u8) -> FieldUpdate<AttachmentPoint> {
     let point = state.rotate_left(4) & !0x80;
-    Some(NonZeroU8::new(point).map(AttachmentPoint::new))
+    NonZeroU8::new(point).map_or(FieldUpdate::Clear, |value| FieldUpdate::Set(AttachmentPoint::new(value)))
 }
 
 fn parent(raw_local_id: u32) -> Result<ParentUpdate, InvalidBlock> {
@@ -421,15 +448,45 @@ fn object_kind(pcode: u8) -> Kind {
 #[derive(Clone, Copy)]
 struct ObjectClassification {
     kind: Kind,
-    shape: Option<Option<Shape>>,
-    appearance: Option<Option<Appearance>>,
+    shape: FieldUpdate<Shape>,
+    appearance: FieldUpdate<Appearance>,
 }
 
-fn object_classification(pcode: u8, extra_parameters: &[ExtraParameter], invalid_fields: &mut usize) -> ObjectClassification {
+fn prim_shape(shape: ObjectShape) -> PrimShape {
+    PrimShape {
+        path_curve: shape.path_curve,
+        profile_curve: shape.profile_curve,
+        path_begin: shape.path_begin,
+        path_end: shape.path_end,
+        path_scale_x: shape.path_scale_x,
+        path_scale_y: shape.path_scale_y,
+        path_shear_x: i8::from_ne_bytes([shape.path_shear_x]),
+        path_shear_y: i8::from_ne_bytes([shape.path_shear_y]),
+        path_twist: shape.path_twist,
+        path_twist_begin: shape.path_twist_begin,
+        path_radius_offset: shape.path_radius_offset,
+        path_taper_x: shape.path_taper_x,
+        path_taper_y: shape.path_taper_y,
+        path_revolutions: shape.path_revolutions,
+        path_skew: shape.path_skew,
+        profile_begin: shape.profile_begin,
+        profile_end: shape.profile_end,
+        profile_hollow: shape.profile_hollow,
+    }
+}
+
+fn object_classification(
+    pcode: u8,
+    prim: Option<ObjectShape>,
+    extra_parameters: &[ExtraParameter],
+    invalid_fields: &mut usize,
+) -> ObjectClassification {
     match pcode {
-        LEGACY_AVATAR_PCODE => {
-            ObjectClassification { kind: Kind::Avatar, shape: Some(Some(Shape::Avatar)), appearance: Some(Some(Appearance::Avatar)) }
-        }
+        LEGACY_AVATAR_PCODE => ObjectClassification {
+            kind: Kind::Avatar,
+            shape: FieldUpdate::Set(Shape::Avatar),
+            appearance: FieldUpdate::Set(Appearance::Avatar),
+        },
         VOLUME_PCODE => {
             let mut sculpt_parameter = None;
             for parameter in extra_parameters {
@@ -442,38 +499,38 @@ fn object_classification(pcode: u8, extra_parameters: &[ExtraParameter], invalid
             }
 
             let shape = match sculpt_parameter {
-                Some(parameter) if parameter.data.len() != SCULPT_EXTRA_PARAM_LEN => None,
+                Some(parameter) if parameter.data.len() != SCULPT_EXTRA_PARAM_LEN => FieldUpdate::Keep,
                 Some(parameter) => {
                     let raw_type = parameter.data[16];
                     let sculpt_type = raw_type & SCULPT_TYPE_MASK;
                     if raw_type & SCULPT_RESERVED_TYPE_MASK != 0 || sculpt_type > 6 {
-                        Some(Some(Shape::Sculpt {
+                        FieldUpdate::Set(Shape::Sculpt {
                             asset_id: AssetId::new(UUID::from_u128(SCULPT_DEFAULT_TEXTURE)),
                             sculpt_type: SculptType::Sphere,
                             flags: SculptFlags::default(),
-                        }))
+                        })
                     } else {
                         let flags = SculptFlags { invert: raw_type & SCULPT_FLAG_INVERT != 0, mirror: raw_type & SCULPT_FLAG_MIRROR != 0 };
                         let asset_id =
                             AssetId::new(UUID::from_slice(&parameter.data[..16]).expect("sculpt parameter contains a complete asset UUID"));
                         match sculpt_type {
-                            0 => Some(Some(Shape::Prim)),
-                            1 => Some(Some(Shape::Sculpt { asset_id, sculpt_type: SculptType::Sphere, flags })),
-                            2 => Some(Some(Shape::Sculpt { asset_id, sculpt_type: SculptType::Torus, flags })),
-                            3 => Some(Some(Shape::Sculpt { asset_id, sculpt_type: SculptType::Plane, flags })),
-                            4 => Some(Some(Shape::Sculpt { asset_id, sculpt_type: SculptType::Cylinder, flags })),
-                            5 => Some(Some(Shape::Mesh { asset_id, flags })),
-                            6 => Some(None),
-                            _ => None,
+                            0 => prim.map_or(FieldUpdate::Keep, |shape| FieldUpdate::Set(Shape::Prim(prim_shape(shape)))),
+                            1 => FieldUpdate::Set(Shape::Sculpt { asset_id, sculpt_type: SculptType::Sphere, flags }),
+                            2 => FieldUpdate::Set(Shape::Sculpt { asset_id, sculpt_type: SculptType::Torus, flags }),
+                            3 => FieldUpdate::Set(Shape::Sculpt { asset_id, sculpt_type: SculptType::Plane, flags }),
+                            4 => FieldUpdate::Set(Shape::Sculpt { asset_id, sculpt_type: SculptType::Cylinder, flags }),
+                            5 => FieldUpdate::Set(Shape::Mesh { asset_id, flags }),
+                            6 => FieldUpdate::Clear,
+                            _ => FieldUpdate::Keep,
                         }
                     }
                 }
-                None => Some(Some(Shape::Prim)),
+                None => prim.map_or(FieldUpdate::Keep, |shape| FieldUpdate::Set(Shape::Prim(prim_shape(shape)))),
             };
 
-            ObjectClassification { kind: Kind::Object, shape, appearance: Some(Some(Appearance::Surface)) }
+            ObjectClassification { kind: Kind::Object, shape, appearance: FieldUpdate::Set(Appearance::Surface) }
         }
-        _ => ObjectClassification { kind: object_kind(pcode), shape: Some(None), appearance: Some(None) },
+        _ => ObjectClassification { kind: object_kind(pcode), shape: FieldUpdate::Clear, appearance: FieldUpdate::Clear },
     }
 }
 #[cfg(test)]

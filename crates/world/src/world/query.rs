@@ -1,16 +1,19 @@
+//! Typed filters and resumable, budgeted queries over live and recent objects.
+
 use std::{
-    collections::{Bound::Excluded, HashSet},
+    collections::{BTreeSet, Bound::Excluded, HashSet},
     time::Instant,
 };
 
 use base::UUID;
+use hecs::ViewBorrow;
 use math::DVec3;
 
 use super::{
-    AttachmentPoint, Entity, Kind, ObjectListItem, PoseState, Properties, PropertiesProvenance, RecentObject, Region, World, WorldId,
-    WorldPose, WorldReadError, WorldRevision,
-    spatial::{Cell, CellRange},
+    Object, ObjectContent, ObjectListItem, ObjectRecord, ObjectRecordRef, RecentObject, World, WorldId, WorldReadError,
+    spatial::{Cell, CellRange, SubtreeScan},
 };
+use crate::{AttachmentPoint, Entity, Kind, PoseState, Properties, PropertiesProvenance, Region, WorldPose, WorldRevision};
 
 pub const MAX_WORLD_QUERY_WORK: usize = 65_536;
 pub const MAX_WORLD_QUERY_RESULTS: usize = 256;
@@ -132,7 +135,7 @@ impl WorldQuery {
 
 /// Work and result bounds for one query call.
 ///
-/// Work counts inspected candidates, spatial cells, and region entries scanned for dirty objects.
+/// Work counts inspected candidates, spatial cells, and dirty scopes visited during fallback.
 /// Filtering, pose resolution, and copying a candidate's result are charged to that candidate. A
 /// full allowance can conservatively make item results incomplete when the scan cannot prove it
 /// has exhausted its candidates. The unresolved count has separate completeness and can be
@@ -216,7 +219,8 @@ pub struct WorldQueryPage {
     pub next: Option<WorldQueryCursor>,
 }
 
-struct QueryRun {
+struct QueryRun<'a> {
+    objects: Option<ViewBorrow<'a, (&'a ObjectRecord, &'a ObjectContent)>>,
     remaining: usize,
     result_limit: usize,
     incomplete: Option<QueryIncompleteReason>,
@@ -226,9 +230,10 @@ struct QueryRun {
     unresolved_complete: bool,
 }
 
-impl QueryRun {
-    fn new(budget: WorldQueryBudget) -> Self {
+impl<'a> QueryRun<'a> {
+    fn new(budget: WorldQueryBudget, world: Option<&'a World>) -> Self {
         Self {
+            objects: world.map(|world| world.ecs.view::<(&ObjectRecord, &ObjectContent)>()),
             remaining: budget.work,
             result_limit: budget.results,
             incomplete: None,
@@ -237,6 +242,14 @@ impl QueryRun {
             unresolved_ids: HashSet::new(),
             unresolved_complete: true,
         }
+    }
+
+    fn object<'b>(&'b self, world: &'b World, entity: Entity) -> Option<Object<'b>> {
+        if entity.1 != world.id {
+            return None;
+        }
+        let (record, content) = self.objects.as_ref()?.get(entity.0)?;
+        Some(Object { entity, record: ObjectRecordRef::Borrowed { record, content }, world })
     }
 
     fn spend(&mut self, amount: usize) -> bool {
@@ -315,7 +328,6 @@ impl World {
         validate_cursor(self, query, cursor, now)?;
 
         let revision = self.revision();
-        let mut run = QueryRun::new(budget);
         let mut next = None;
         let has_live = matches!(query.scope, QueryScope::Live | QueryScope::LiveAndRecent);
         let has_recent = matches!(query.scope, QueryScope::Recent | QueryScope::LiveAndRecent);
@@ -325,6 +337,7 @@ impl World {
             || if query.scope == QueryScope::Recent { QueryCursorPhase::Recent } else { QueryCursorPhase::Live },
             |cursor| cursor.phase,
         );
+        let mut run = QueryRun::new(budget, (has_live && phase == QueryCursorPhase::Live).then_some(self));
         let mut live_scope_scanned = false;
 
         if has_live && phase == QueryCursorPhase::Live {
@@ -355,13 +368,10 @@ impl World {
         after: Option<UUID>,
         revision: WorldRevision,
         recent_expires_at: Option<Instant>,
-        run: &mut QueryRun,
+        run: &mut QueryRun<'_>,
     ) -> Option<WorldQueryCursor> {
         let start = after;
-        let ids = match query.region {
-            Some(region) => self.region_entities.get(&region)?,
-            None => &self.object_ids,
-        };
+        let ids = self.live_ids(query)?;
         let mut ids = match start {
             Some(id) => ids.range((Excluded(id), std::ops::Bound::Unbounded)),
             None => ids.range(..),
@@ -422,11 +432,10 @@ impl World {
         page_continuation
     }
 
-    fn query_spatial_live(&self, query: WorldQuery, run: &mut QueryRun) -> bool {
+    fn query_spatial_live(&self, query: WorldQuery, run: &mut QueryRun<'_>) -> bool {
         let sphere = query.sphere.expect("spatial query has a sphere");
         let cells = Cell::range(sphere.center, sphere.radius).expect("query construction validated the sphere bounds");
-        let candidate_count =
-            query.region.map_or_else(|| self.object_ids.len(), |region| self.region_entities.get(&region).map_or(0, |ids| ids.len()));
+        let candidate_count = self.live_ids(query).map_or(0, BTreeSet::len);
         if cells.contains_more_than(candidate_count) {
             return self.query_spatial_entities(query, sphere, run);
         }
@@ -440,16 +449,20 @@ impl World {
         false
     }
 
-    fn query_spatial_entities(&self, query: WorldQuery, sphere: Sphere, run: &mut QueryRun) -> bool {
-        if let Some(region) = query.region {
-            let Some(ids) = self.region_entities.get(&region) else { return true };
-            self.query_spatial_entity_ids(ids.iter().copied(), query, sphere, run)
-        } else {
-            self.query_spatial_entity_ids(self.object_ids.iter().copied(), query, sphere, run)
-        }
+    fn query_spatial_entities(&self, query: WorldQuery, sphere: Sphere, run: &mut QueryRun<'_>) -> bool {
+        let Some(ids) = self.live_ids(query) else { return true };
+        self.query_spatial_entity_ids(ids.iter().copied(), query, sphere, run)
     }
 
-    fn query_spatial_entity_ids(&self, ids: impl Iterator<Item = UUID>, query: WorldQuery, sphere: Sphere, run: &mut QueryRun) -> bool {
+    fn live_ids(&self, query: WorldQuery) -> Option<&BTreeSet<UUID>> {
+        let ids = match query.region {
+            Some(region) => self.region_entities.get(&region)?,
+            None => &self.object_ids,
+        };
+        Some(if query.kind == Some(ValueFilter::Is(Kind::Avatar)) && self.avatars.len() < ids.len() { &self.avatars } else { ids })
+    }
+
+    fn query_spatial_entity_ids(&self, ids: impl Iterator<Item = UUID>, query: WorldQuery, sphere: Sphere, run: &mut QueryRun<'_>) -> bool {
         for id in ids {
             if !run.spend(1) {
                 return false;
@@ -469,8 +482,9 @@ impl World {
         true
     }
 
-    fn query_spatial_cells(&self, query: WorldQuery, sphere: Sphere, cells: CellRange, run: &mut QueryRun) {
+    fn query_spatial_cells(&self, query: WorldQuery, sphere: Sphere, cells: CellRange, run: &mut QueryRun<'_>) {
         let mut cells = cells;
+        let track_seen = self.spatial.has_dirty_scope_in(query.region);
         loop {
             if run.exhaust_work() {
                 return;
@@ -489,7 +503,9 @@ impl World {
                 if !run.spend(1) {
                     return;
                 }
-                run.seen_entities.insert(*entity);
+                if track_seen {
+                    run.seen_entities.insert(*entity);
+                }
                 if let Some(item) = self.live_item(*entity, query, Some(sphere), run) {
                     if run.items.len() == run.result_limit {
                         run.incomplete = Some(QueryIncompleteReason::ResultLimit);
@@ -504,7 +520,7 @@ impl World {
         }
     }
 
-    fn query_dirty_live(&self, query: WorldQuery, sphere: Sphere, run: &mut QueryRun) {
+    fn query_dirty_live(&self, query: WorldQuery, sphere: Sphere, run: &mut QueryRun<'_>) {
         if let Some(region) = query.region {
             self.query_dirty_region(region, query, sphere, run);
         } else {
@@ -521,12 +537,31 @@ impl World {
         }
     }
 
-    fn query_dirty_region(&self, region: Region, query: WorldQuery, sphere: Sphere, run: &mut QueryRun) -> bool {
+    fn query_dirty_region(&self, region: Region, query: WorldQuery, sphere: Sphere, run: &mut QueryRun<'_>) -> bool {
         if run.exhaust_work() {
             return false;
         }
         if !run.spend(1) {
             return false;
+        }
+        if !self.spatial.is_region_dirty(region) {
+            for root in self.spatial.dirty_roots_in(region) {
+                let mut scan = SubtreeScan::default();
+                loop {
+                    if run.exhaust_work() {
+                        return false;
+                    }
+                    let Some(entity) = scan.next(self, root) else { break };
+                    if !run.spend(1) {
+                        return false;
+                    }
+                    self.check_dirty_entity(entity, query, sphere, run);
+                    if run.incomplete.is_some() {
+                        return false;
+                    }
+                }
+            }
+            return true;
         }
         let Some(ids) = self.region_entities.get(&region) else { return true };
         let mut ids = ids.iter();
@@ -539,9 +574,7 @@ impl World {
                 return false;
             }
             let entity = *self.entities.get(id).expect("region index contains only live objects");
-            if self.spatial_is_dirty(entity) {
-                self.check_dirty_entity(entity, query, sphere, run);
-            }
+            self.check_dirty_entity(entity, query, sphere, run);
             if run.incomplete.is_some() {
                 return false;
             }
@@ -549,8 +582,8 @@ impl World {
         true
     }
 
-    fn check_dirty_entity(&self, entity: Entity, query: WorldQuery, sphere: Sphere, run: &mut QueryRun) {
-        if run.seen_entities.contains(&entity) {
+    fn check_dirty_entity(&self, entity: Entity, query: WorldQuery, sphere: Sphere, run: &mut QueryRun<'_>) {
+        if !run.seen_entities.insert(entity) {
             return;
         }
         if let Some(item) = self.live_item(entity, query, Some(sphere), run) {
@@ -562,7 +595,7 @@ impl World {
         }
     }
 
-    fn query_unresolved(&self, query: WorldQuery, run: &mut QueryRun) {
+    fn query_unresolved(&self, query: WorldQuery, run: &mut QueryRun<'_>) {
         if let Some(region) = query.region {
             self.query_unresolved_ids(self.spatial.unresolved_ids_in(region), query, run);
         } else {
@@ -570,7 +603,12 @@ impl World {
         }
     }
 
-    fn query_unresolved_ids(&self, mut unresolved: impl Iterator<Item = (Region, UUID, Entity)>, query: WorldQuery, run: &mut QueryRun) {
+    fn query_unresolved_ids(
+        &self,
+        mut unresolved: impl Iterator<Item = (Region, UUID, Entity)>,
+        query: WorldQuery,
+        run: &mut QueryRun<'_>,
+    ) {
         loop {
             if run.remaining == 0 {
                 run.unresolved_complete = false;
@@ -584,10 +622,10 @@ impl World {
             if query.region.is_some_and(|filter| filter != region) || self.spatial_is_dirty(entity) {
                 continue;
             }
-            if let Some(object) = self.object(entity)
-                && self.live_matches_without_pose(entity, query)
-            {
-                run.unresolved(object.identity().id());
+            let unresolved_id =
+                run.object(self, entity).filter(|object| live_matches_without_pose(object, query)).map(|object| object.id());
+            if let Some(id) = unresolved_id {
+                run.unresolved(id);
             }
             if run.remaining == 0 {
                 run.unresolved_complete = false;
@@ -603,7 +641,7 @@ impl World {
         revision: WorldRevision,
         recent_expires_at: Option<Instant>,
         now: Instant,
-        run: &mut QueryRun,
+        run: &mut QueryRun<'_>,
     ) -> Option<WorldQueryCursor> {
         let mut recent = self.recent.iter_after(after);
         let mut last_evaluated = after;
@@ -616,10 +654,6 @@ impl World {
                 break;
             }
             if self.recent.is_expired(entry, now) {
-                last_evaluated = Some(id);
-                continue;
-            }
-            if query.scope == QueryScope::LiveAndRecent && self.entities.contains_key(&id) {
                 last_evaluated = Some(id);
                 continue;
             }
@@ -641,7 +675,7 @@ impl World {
                     after: last_evaluated,
                 });
             }
-            run.items.push(super::WorldQueryItem::Recent(entry.object));
+            run.items.push(WorldQueryItem::Recent(entry.object));
             last_evaluated = Some(id);
             if run.exhaust_work() {
                 break;
@@ -657,10 +691,10 @@ impl World {
         })
     }
 
-    fn live_item(&self, entity: Entity, query: WorldQuery, sphere: Option<Sphere>, run: &mut QueryRun) -> Option<WorldQueryItem> {
-        let object = self.object(entity)?;
-        let id = object.identity().id();
-        if !self.live_matches_without_pose(entity, query) {
+    fn live_item(&self, entity: Entity, query: WorldQuery, sphere: Option<Sphere>, run: &mut QueryRun<'_>) -> Option<WorldQueryItem> {
+        let object = run.object(self, entity)?;
+        let id = object.id();
+        if !live_matches_without_pose(&object, query) {
             return None;
         }
 
@@ -673,6 +707,7 @@ impl World {
                 Ok(PoseState::Resolved(pose)) if within_radius(pose.position, sphere) => Some(pose),
                 Ok(PoseState::Resolved(_)) => return None,
                 Ok(PoseState::Unresolved(_)) | Ok(PoseState::Provisional { .. }) | Err(_) => {
+                    drop(object);
                     run.unresolved(id);
                     return None;
                 }
@@ -684,21 +719,20 @@ impl World {
         Some(WorldQueryItem::Live { object: item, pose, properties, properties_provenance: provenance })
     }
 
-    fn live_matches_without_pose(&self, entity: Entity, query: WorldQuery) -> bool {
-        let Some(object) = self.object(entity) else { return false };
-        matches_query_fields(
-            query,
-            object.address().region(),
-            object.kind(),
-            object.attachment_point(),
-            object.properties(),
-            object.properties_provenance(),
-        )
-    }
-
     fn spatial_has_dirty_scope(&self, region: Option<Region>) -> bool {
         self.spatial.has_dirty_scope_in(region)
     }
+}
+
+fn live_matches_without_pose(object: &Object<'_>, query: WorldQuery) -> bool {
+    matches_query_fields(
+        query,
+        object.address().region(),
+        object.kind(),
+        object.attachment_point(),
+        object.properties(),
+        object.properties_provenance(),
+    )
 }
 
 fn validate_budget(budget: WorldQueryBudget) -> Result<(), WorldReadError> {
@@ -793,8 +827,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        AttachmentPoint, MAX_QUERY_STATE_MAINTENANCE_WORK, ObjectObservation, OrderEvidence::Ordered, ParentUpdate, ParentUpdate::Root,
-        Pose, PropertiesPatch, RECENT_OBJECT_TTL, RegionInfo, UpdateSource, WorldEntityRemovalReason, WorldLimits,
+        AttachmentPoint, FieldUpdate, MAX_QUERY_STATE_MAINTENANCE_WORK, ObjectObservation, OrderEvidence::Ordered, ParentUpdate,
+        ParentUpdate::Root, Pose, PropertiesPatch, RECENT_OBJECT_TTL, RegionInfo, UpdateSource, WorldEntityRemovalReason, WorldLimits,
     };
 
     fn limits() -> WorldLimits {
@@ -824,9 +858,9 @@ mod tests {
             linear_motion: None,
             angular_velocity: None,
             scale: None,
-            attachment_point: None,
-            shape: None,
-            appearance: None,
+            attachment_point: FieldUpdate::Keep,
+            shape: FieldUpdate::Keep,
+            appearance: FieldUpdate::Keep,
             surface_appearance: None,
             render_materials: None,
         };
@@ -857,9 +891,9 @@ mod tests {
             linear_motion: None,
             angular_velocity: None,
             scale: None,
-            attachment_point: Some(attachment_point),
-            shape: None,
-            appearance: None,
+            attachment_point: attachment_point.map_or(FieldUpdate::Clear, FieldUpdate::Set),
+            shape: FieldUpdate::Keep,
+            appearance: FieldUpdate::Keep,
             surface_appearance: None,
             render_materials: None,
         };
@@ -867,7 +901,7 @@ mod tests {
         let crate::ApplyOutcome::Introduced(entity) = result.outcome else { panic!("query fixture object is introduced") };
 
         if owner_id.is_some() || creator_id.is_some() {
-            let target = world.properties_target(entity).expect("query fixture properties target");
+            let target = world.object_binding_target(entity).expect("query fixture properties target");
             let order = u64::from(local_id) + 100;
             let applied = world
                 .patch_properties(
@@ -1082,9 +1116,9 @@ mod tests {
             linear_motion: None,
             angular_velocity: None,
             scale: None,
-            attachment_point: None,
-            shape: None,
-            appearance: None,
+            attachment_point: FieldUpdate::Keep,
+            shape: FieldUpdate::Keep,
+            appearance: FieldUpdate::Keep,
             surface_appearance: None,
             render_materials: None,
         };
@@ -1116,9 +1150,9 @@ mod tests {
                 linear_motion: None,
                 angular_velocity: None,
                 scale: None,
-                attachment_point: None,
-                shape: None,
-                appearance: None,
+                attachment_point: FieldUpdate::Keep,
+                shape: FieldUpdate::Keep,
+                appearance: FieldUpdate::Keep,
                 surface_appearance: None,
                 render_materials: None,
             };
@@ -1139,9 +1173,9 @@ mod tests {
                 linear_motion: None,
                 angular_velocity: None,
                 scale: None,
-                attachment_point: None,
-                shape: None,
-                appearance: None,
+                attachment_point: FieldUpdate::Keep,
+                shape: FieldUpdate::Keep,
+                appearance: FieldUpdate::Keep,
                 surface_appearance: None,
                 render_materials: None,
             })
@@ -1165,9 +1199,9 @@ mod tests {
                 linear_motion: None,
                 angular_velocity: None,
                 scale: None,
-                attachment_point: None,
-                shape: None,
-                appearance: None,
+                attachment_point: FieldUpdate::Keep,
+                shape: FieldUpdate::Keep,
+                appearance: FieldUpdate::Keep,
                 surface_appearance: None,
                 render_materials: None,
             })

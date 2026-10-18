@@ -1,11 +1,12 @@
 use std::{hint::black_box, num::NonZeroU32};
 
 use base::UUID;
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput};
+use criterion::{BatchSize, BenchmarkGroup, BenchmarkId, Criterion, Throughput, measurement::WallTime};
 use world::{
-    ApplyOutcome::{Introduced, RegionAdopted},
+    ApplyOutcome::Introduced,
+    FieldUpdate,
     Kind::Object,
-    ObjectObservation,
+    ObjectObservation, ObjectPatch,
     ParentUpdate::{Local, Root},
     Region, World,
 };
@@ -47,6 +48,7 @@ pub(super) fn bench(c: &mut Criterion) {
             );
         });
     }
+    bench_deep_reparent(&mut group);
     group.finish();
 }
 
@@ -58,7 +60,7 @@ fn child_first_scene(count: usize) -> (World, Vec<RootCase>) {
 
     for region_index in 0..count.div_ceil(PER_REGION) {
         let region = Region::new(region_index as u64 + 1);
-        assert_eq!(world.adopt_region(region).expect("region adoption").outcome, RegionAdopted);
+        assert!(matches!(world.adopt_region(region).expect("region adoption").outcome, world::RegionOutcome::Adopted { .. }));
         let entity_count = remaining.min(PER_REGION);
         let child_count = entity_count - 1;
         for local_index in 0..child_count {
@@ -73,9 +75,9 @@ fn child_first_scene(count: usize) -> (World, Vec<RootCase>) {
                 linear_motion: None,
                 angular_velocity: None,
                 scale: None,
-                attachment_point: None,
-                shape: None,
-                appearance: None,
+                attachment_point: FieldUpdate::Keep,
+                shape: FieldUpdate::Keep,
+                appearance: FieldUpdate::Keep,
                 surface_appearance: None,
                 render_materials: None,
             };
@@ -101,10 +103,45 @@ fn root_observation(root: RootCase, order: u64) -> ObjectObservation {
         linear_motion: None,
         angular_velocity: None,
         scale: None,
-        attachment_point: None,
-        shape: None,
-        appearance: None,
+        attachment_point: FieldUpdate::Keep,
+        shape: FieldUpdate::Keep,
+        appearance: FieldUpdate::Keep,
         surface_appearance: None,
         render_materials: None,
+    }
+}
+
+fn bench_deep_reparent(group: &mut BenchmarkGroup<'_, WallTime>) {
+    group.throughput(Throughput::Elements(1));
+    for &count in SCENE_SIZES {
+        group.bench_with_input(BenchmarkId::new("deep_reparent", size_name(count)), &count, |b, &count| {
+            let mut bounds = limits();
+            bounds.max_entities_per_region = count;
+            let mut world = World::new(bounds);
+            let region = Region::new(1);
+            let _ = world.adopt_region(region).expect("adopt deep region");
+            for local in 1..=count as u32 {
+                let parent = if local == 1 { Root } else { Local(NonZeroU32::new(local - 1).unwrap()) };
+                let _ = world
+                    .observe_object(ObjectObservation::new(
+                        source(region, u64::from(local)),
+                        UUID::from_u128(u128::from(local)),
+                        NonZeroU32::new(local).unwrap(),
+                        Object,
+                        parent,
+                    ))
+                    .expect("deep child");
+            }
+            let mut order = count as u64 + 1;
+            let mut alternate = false;
+            b.iter(|| {
+                let parent = count as u32 - if alternate { 1 } else { 2 };
+                alternate = !alternate;
+                let mut patch = ObjectPatch::new(source(region, order), NonZeroU32::new(count as u32).unwrap());
+                order += 1;
+                patch.parent = Some(Local(NonZeroU32::new(parent).unwrap()));
+                let _ = black_box(world.patch_object(patch).expect("deep reparent"));
+            });
+        });
     }
 }

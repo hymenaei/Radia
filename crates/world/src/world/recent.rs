@@ -1,3 +1,5 @@
+//! Bounded metadata snapshots for removed objects, ordered by identity and expiry.
+
 use std::{
     collections::{BTreeMap, BTreeSet, Bound::Excluded, Bound::Unbounded},
     mem::size_of,
@@ -6,7 +8,8 @@ use std::{
 
 use base::UUID;
 
-use super::{AttachmentPoint, EntityRemovalReason, Kind, LocalAddress, Properties, PropertiesProvenance, WorldPose};
+use super::WorldEntityRemovalReason;
+use crate::{AttachmentPoint, Kind, LocalAddress, Properties, PropertiesProvenance, WorldPose};
 
 pub const RECENT_OBJECT_TTL: Duration = Duration::from_secs(5 * 60);
 pub const MAX_RECENT_OBJECTS: usize = 4096;
@@ -24,13 +27,33 @@ pub struct RecentObject {
     pub properties: Properties,
     pub properties_provenance: PropertiesProvenance,
     pub last_pose: Option<WorldPose>,
-    pub removal_reason: EntityRemovalReason,
+    pub removal_reason: WorldEntityRemovalReason,
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct RecentEntry {
     pub(super) object: RecentObject,
     expires_at: Instant,
+}
+
+/// Selects retained snapshots from one mutation, whose removed IDs are distinct.
+#[derive(Default)]
+pub(super) struct RecentBatch {
+    entries: BTreeMap<(Instant, UUID), RecentObject>,
+}
+
+impl RecentBatch {
+    pub(super) fn push(&mut self, object: RecentObject, now: Instant) {
+        let limit = MAX_RECENT_OBJECTS.min(MAX_RECENT_OBJECT_BYTES / RECENT_OBJECT_CHARGE);
+        if limit == 0 {
+            return;
+        }
+        let expires_at = now.checked_add(RECENT_OBJECT_TTL).unwrap_or(now);
+        self.entries.insert((expires_at, object.id), object);
+        if self.entries.len() > limit {
+            self.entries.pop_first();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -41,14 +64,26 @@ pub(super) struct RecentStore {
 }
 
 impl RecentStore {
+    #[cfg(test)]
     pub(super) fn insert(&mut self, object: RecentObject, now: Instant) {
         self.insert_with_limits(object, now, RECENT_OBJECT_TTL, MAX_RECENT_OBJECTS, MAX_RECENT_OBJECT_BYTES);
     }
 
+    pub(super) fn apply_batch(&mut self, batch: RecentBatch) {
+        for ((expires_at, _), object) in batch.entries {
+            self.insert_entry(RecentEntry { object, expires_at }, MAX_RECENT_OBJECTS, MAX_RECENT_OBJECT_BYTES);
+        }
+    }
+
+    #[cfg(test)]
     fn insert_with_limits(&mut self, object: RecentObject, now: Instant, ttl: Duration, max_objects: usize, max_bytes: usize) {
+        self.insert_entry(RecentEntry { object, expires_at: now.checked_add(ttl).unwrap_or(now) }, max_objects, max_bytes);
+    }
+
+    fn insert_entry(&mut self, entry: RecentEntry, max_objects: usize, max_bytes: usize) {
+        let RecentEntry { object, expires_at } = entry;
         self.remove(object.id);
-        let expires_at = now.checked_add(ttl).unwrap_or(now);
-        self.by_id.insert(object.id, RecentEntry { object, expires_at });
+        self.by_id.insert(object.id, entry);
         let inserted = self.by_expiry.insert((expires_at, object.id));
         assert!(inserted, "recent record expiry index contains a duplicate key");
         self.charged_bytes = self.charged_bytes.saturating_add(RECENT_OBJECT_CHARGE);
@@ -92,6 +127,15 @@ impl RecentStore {
         self.by_expiry.range((Excluded((now, UUID::from_u128(u128::MAX))), Unbounded)).next().map(|(expires_at, _)| *expires_at)
     }
 
+    #[cfg(feature = "invariants")]
+    pub(super) fn invariants_hold(&self) -> bool {
+        if self.by_id.len() != self.by_expiry.len() || self.charged_bytes != self.by_id.len().saturating_mul(RECENT_OBJECT_CHARGE) {
+            return false;
+        }
+        self.by_id.iter().all(|(id, entry)| entry.object.id == *id && self.by_expiry.contains(&(entry.expires_at, *id)))
+            && self.by_expiry.iter().all(|(expires_at, id)| self.by_id.get(id).is_some_and(|entry| entry.expires_at == *expires_at))
+    }
+
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.by_id.len()
@@ -120,6 +164,36 @@ mod tests {
             properties_provenance: PropertiesProvenance::default(),
             last_pose: None,
             removal_reason: Killed,
+        }
+    }
+
+    #[test]
+    fn batch_matches_sequential_retention() {
+        let start = Instant::now();
+        let capacity = MAX_RECENT_OBJECTS.min(MAX_RECENT_OBJECT_BYTES / RECENT_OBJECT_CHARGE);
+        let count = capacity * 2 + 17;
+        for tied_timestamps in [false, true] {
+            let mut expected = RecentStore::default();
+            let mut actual = RecentStore::default();
+            for id in count + 1..=count + capacity {
+                let now = start + Duration::from_secs((id % 5) as u64);
+                expected.insert(object(id as u128), now);
+                actual.insert(object(id as u128), now);
+            }
+            let mut batch = RecentBatch::default();
+            for id in (1..=count).rev() {
+                let now = start + Duration::from_secs(if tied_timestamps { 3 } else { (id % 7) as u64 });
+                let mut removed = object(id as u128);
+                removed.properties.owner_id = Some(UUID::from_u128(id as u128 + 1));
+                expected.insert(removed, now);
+                batch.push(removed, now);
+                assert!(batch.entries.len() <= capacity);
+            }
+            actual.apply_batch(batch);
+            let snapshots =
+                |store: &RecentStore| store.iter_after(None).map(|(id, entry)| (id, entry.expires_at, entry.object)).collect::<Vec<_>>();
+            assert_eq!(snapshots(&actual), snapshots(&expected));
+            assert_eq!(actual.charged_bytes(), expected.charged_bytes());
         }
     }
 

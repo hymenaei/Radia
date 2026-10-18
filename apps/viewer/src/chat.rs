@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 
-use gpui::{Context, IntoElement, Render, TitlebarOptions, Window, WindowBounds, WindowKind, WindowOptions, div, prelude::*, px, size};
+use gpui::{Context, IntoElement, Render, Window, div, prelude::*, px};
 use gpui_component::{
-    Disableable, IconName, Root, StyledExt, Theme,
+    Disableable, IconName, StyledExt, Theme,
     button::{Button, ButtonVariants as _},
     input::{Input, InputState},
 };
@@ -15,11 +15,7 @@ use protocol::{
     },
 };
 
-use crate::{
-    devtools::{DeveloperFloater, WorldSource},
-    session::{ChatMessage, WorldReader, format_avatar_name},
-    window_geometry,
-};
+use crate::session::{ChatMessage, format_avatar_name};
 
 const MAX_CHAT_HISTORY_MESSAGES: usize = 500;
 const MAX_CHAT_HISTORY_BYTES: usize = 1024 * 1024;
@@ -34,8 +30,6 @@ pub struct ChatScreen {
     message_input: gpui::Entity<InputState>,
     capture_stop_pending: bool,
     capture_generation: u64,
-    world_source: WorldSource,
-    developer_window: Option<gpui::WindowHandle<Root>>,
 }
 
 impl ChatScreen {
@@ -52,8 +46,6 @@ impl ChatScreen {
             message_input,
             capture_stop_pending: false,
             capture_generation: 0,
-            world_source: WorldSource::new(),
-            developer_window: None,
         }
     }
 
@@ -72,15 +64,6 @@ impl ChatScreen {
         self.messages.clear();
         self.message_bytes = 0;
         self.transcript_scroll = gpui::ScrollHandle::new();
-        self.world_source.set(None);
-        if let Some(window) = self.developer_window.take() {
-            let _ = window.update(cx, |_, window, _| window.remove_window());
-        }
-        cx.notify();
-    }
-
-    pub fn set_world_state(&mut self, state: WorldReader, cx: &mut Context<Self>) {
-        self.world_source.set(Some(state));
         cx.notify();
     }
 
@@ -119,51 +102,7 @@ impl ChatScreen {
                         .on_click(cx.listener(|this, _event, _window, cx| this.stop_capture(cx))),
                 )
             })
-            .child(
-                Button::new("open-developer-tools")
-                    .ghost()
-                    .compact()
-                    .h(px(24.))
-                    .relative()
-                    .top(px(-1.))
-                    .accessibility_label("Developer Tools")
-                    .child(div().text_sm().child("Developer Tools"))
-                    .on_click(cx.listener(|this, _event, window, cx| this.open_developer_tools(window, cx))),
-            )
             .into_any_element()
-    }
-
-    fn open_developer_tools(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(existing) = self.developer_window
-            && existing.update(cx, |_, window, _| window.activate_window()).is_ok()
-        {
-            return;
-        }
-
-        let minimum_size = size(px(900.), px(520.));
-        let display = window.display(cx).map(|display| display.id());
-        let bounds = window_geometry::restore_bounds("developer-tools", display, size(px(1080.), px(720.)), minimum_size, cx);
-        let world_source = self.world_source.clone();
-        match cx.open_window(
-            WindowOptions {
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Developer Tools".into()),
-                    appears_transparent: cfg!(target_os = "windows"),
-                    ..Default::default()
-                }),
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(minimum_size),
-                kind: WindowKind::Normal,
-                ..Default::default()
-            },
-            move |window, cx| {
-                let view = cx.new(|cx| DeveloperFloater::new(world_source, window, cx));
-                cx.new(|cx| Root::new(view, window, cx))
-            },
-        ) {
-            Ok(handle) => self.developer_window = Some(handle),
-            Err(error) => tracing::warn!(%error, "could not open developer tools"),
-        }
     }
 
     pub fn set_region_name(&mut self, region_name: String, cx: &mut Context<Self>) {
@@ -361,23 +300,9 @@ impl Render for ChatScreen {
 mod tests {
     use std::collections::VecDeque;
 
-    use gpui::{
-        AppContext, Context, Entity, IntoElement, Render, ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, Window, div,
-        point, prelude::*, px, size,
-    };
+    use gpui::{ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, point, px, size};
 
     use super::{ChatMessage, ChatScreen, MAX_CHAT_HISTORY_BYTES, MAX_CHAT_HISTORY_MESSAGES, retain_message};
-
-    struct ChatActionHarness {
-        chat: Entity<ChatScreen>,
-    }
-
-    impl Render for ChatActionHarness {
-        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let action = self.chat.update(cx, |chat, cx| chat.titlebar_action(cx));
-            div().size_full().child(div().debug_selector(|| "chat-titlebar-action".to_owned()).child(action))
-        }
-    }
 
     #[test]
     fn chat_history_keeps_recent_messages() {
@@ -420,33 +345,6 @@ mod tests {
         ));
         assert_eq!(messages.len(), 1);
         assert_eq!(messages.front().map(|message| message.from_name.as_str()), Some("Agent 1"));
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[gpui::test]
-    fn developer_action_activates_existing_window(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
-        let (harness, cx) = cx.add_window_view(|window, cx| {
-            let chat = cx.new(|cx| ChatScreen::new(window, cx));
-            ChatActionHarness { chat }
-        });
-        let chat = cx.update(|_, app| harness.read(app).chat.clone());
-        draw(cx);
-        let button = cx.debug_bounds("chat-titlebar-action").expect("titlebar action should render");
-        let click = point(button.origin.x + px(8.), button.origin.y + px(8.));
-
-        cx.simulate_click(click, Default::default());
-        assert_eq!(cx.windows().len(), 2);
-
-        let windows = cx.windows();
-        let main_window = windows[0];
-        let developer_window = windows.into_iter().find(|window| *window != main_window).expect("Developer Tools opens a second window");
-        cx.simulate_click(click, Default::default());
-        assert_eq!(cx.windows().len(), 2);
-        assert_eq!(cx.app.borrow().active_window(), Some(developer_window));
-
-        cx.update(|_, app| chat.update(app, |chat, cx| chat.clear_session(cx)));
-        assert_eq!(cx.windows().len(), 1);
     }
 
     fn draw(cx: &mut VisualTestContext) {

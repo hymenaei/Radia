@@ -36,6 +36,7 @@ const _: () = {
     assert!(size_of::<object_update::ObjectData>() <= 512);
     assert!(size_of::<object_update_compressed::ObjectData>() <= 512);
     assert!(size_of::<improved_terse_object_update::ObjectData>() <= 512);
+    assert!(size_of::<improved_terse_object_update::ObjectBlock>() <= 512);
     assert!(size_of::<object_update_cached::CachedObjectReference>() <= 512);
     assert!(size_of::<kill_object::ObjectData>() <= 512);
     assert!(size_of::<request_multiple_objects::ObjectRequest>() <= 512);
@@ -340,9 +341,17 @@ impl Message {
                 }
             }
             Self::ImprovedTerseObjectUpdate(message) => {
-                add_capacity(&mut bytes, message.objects.capacity(), size_of::<improved_terse_object_update::ObjectData>());
+                add_capacity(&mut bytes, message.objects.capacity(), size_of::<improved_terse_object_update::ObjectBlock>());
                 for object in &message.objects {
-                    add_capacity(&mut bytes, object.texture_entry.capacity(), size_of::<u8>());
+                    match object {
+                        improved_terse_object_update::ObjectBlock::Decoded(object) => {
+                            add_capacity(&mut bytes, object.texture_entry.capacity(), size_of::<u8>());
+                        }
+                        improved_terse_object_update::ObjectBlock::Malformed { packed_data, texture_entry } => {
+                            add_capacity(&mut bytes, packed_data.capacity(), size_of::<u8>());
+                            add_capacity(&mut bytes, texture_entry.capacity(), size_of::<u8>());
+                        }
+                    }
                 }
             }
             Self::ObjectUpdateCached(message) => {
@@ -660,29 +669,41 @@ impl Message {
                 message.region_data.encode(&mut writer);
                 let count = u8::try_from(message.objects.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?;
                 writer.u8(count);
-                for object in &message.objects {
-                    if object.avatar != object.collision_plane.is_some() {
-                        return Err(LLUdpError::InvalidMessage);
+                for block in &message.objects {
+                    match block {
+                        improved_terse_object_update::ObjectBlock::Decoded(object) => {
+                            if object.avatar != object.collision_plane.is_some() {
+                                return Err(LLUdpError::InvalidMessage);
+                            }
+                            let data_len = if object.collision_plane.is_some() { 60 } else { 44 };
+                            writer.u8(data_len);
+                            writer.u32(object.local_id);
+                            writer.u8(object.state);
+                            writer.u8(u8::from(object.avatar));
+                            if let Some(plane) = object.collision_plane {
+                                write_finite_vector4(&mut writer, plane)?;
+                            }
+                            write_finite_vector3(&mut writer, object.motion.position)?;
+                            write_quantized_vector3(&mut writer, object.motion.velocity, -128.0, 128.0)?;
+                            write_quantized_vector3(&mut writer, object.motion.acceleration, -64.0, 64.0)?;
+                            for value in
+                                [object.motion.rotation.x, object.motion.rotation.y, object.motion.rotation.z, object.motion.rotation.w]
+                            {
+                                writer.u16(encode_quantized(value, -1.0, 1.0)?);
+                            }
+                            write_quantized_vector3(&mut writer, object.motion.angular_velocity, -64.0, 64.0)?;
+                            let texture_entry = object.texture_entry.as_slice();
+                            let texture_len = u16::try_from(texture_entry.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?;
+                            writer.u16(texture_len);
+                            writer.bytes(texture_entry);
+                        }
+                        improved_terse_object_update::ObjectBlock::Malformed { packed_data, texture_entry } => {
+                            writer.u8(u8::try_from(packed_data.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?);
+                            writer.bytes(packed_data);
+                            writer.u16(u16::try_from(texture_entry.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?);
+                            writer.bytes(texture_entry);
+                        }
                     }
-                    let data_len = if object.collision_plane.is_some() { 60 } else { 44 };
-                    writer.u8(data_len);
-                    writer.u32(object.local_id);
-                    writer.u8(object.state);
-                    writer.u8(u8::from(object.avatar));
-                    if let Some(plane) = object.collision_plane {
-                        write_finite_vector4(&mut writer, plane)?;
-                    }
-                    write_finite_vector3(&mut writer, object.motion.position)?;
-                    write_quantized_vector3(&mut writer, object.motion.velocity, -128.0, 128.0)?;
-                    write_quantized_vector3(&mut writer, object.motion.acceleration, -64.0, 64.0)?;
-                    for value in [object.motion.rotation.x, object.motion.rotation.y, object.motion.rotation.z, object.motion.rotation.w] {
-                        writer.u16(encode_quantized(value, -1.0, 1.0)?);
-                    }
-                    write_quantized_vector3(&mut writer, object.motion.angular_velocity, -64.0, 64.0)?;
-                    let texture_entry = object.texture_entry.as_slice();
-                    let texture_len = u16::try_from(texture_entry.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?;
-                    writer.u16(texture_len);
-                    writer.bytes(texture_entry);
                 }
             }
             Self::ObjectUpdateCached(message) => {

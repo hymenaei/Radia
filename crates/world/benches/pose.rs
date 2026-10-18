@@ -4,9 +4,10 @@ use base::UUID;
 use criterion::{BenchmarkId, Criterion, Throughput};
 use math::{DVec3, Quat, Vec3};
 use world::{
-    ApplyOutcome::{Introduced, RegionAdopted, RegionPatched},
+    ApplyOutcome::Introduced,
     Entity, FieldGroup, FieldRejection,
     FieldRejectionReason::ParentCycle,
+    FieldUpdate,
     Kind::Object,
     ObjectObservation, ObjectPatch,
     OrderEvidence::Ordered,
@@ -40,11 +41,11 @@ fn world_with_chain(edge_depth: usize) -> (World, Entity) {
         max_recovery_targets: 0,
     });
     let region = Region::new(1);
-    assert_eq!(world.adopt_region(region).expect("region adoption").outcome, RegionAdopted);
-    assert_eq!(
+    assert!(matches!(world.adopt_region(region).expect("region adoption").outcome, world::RegionOutcome::Adopted { .. }));
+    assert!(matches!(
         world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).expect("region origin").outcome,
-        RegionPatched
-    );
+        world::RegionOutcome::Patched { .. }
+    ));
 
     let mut target = None;
     for index in 0..entity_count {
@@ -62,9 +63,9 @@ fn world_with_chain(edge_depth: usize) -> (World, Entity) {
             linear_motion: None,
             angular_velocity: None,
             scale: None,
-            attachment_point: None,
-            shape: None,
-            appearance: None,
+            attachment_point: FieldUpdate::Keep,
+            shape: FieldUpdate::Keep,
+            appearance: FieldUpdate::Keep,
             surface_appearance: None,
             render_materials: None,
         };

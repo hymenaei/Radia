@@ -1,14 +1,19 @@
-use std::hint::black_box;
+use std::{hint::black_box, num::NonZeroU32};
 
 use base::UUID;
 use criterion::{BatchSize, BenchmarkGroup, BenchmarkId, Criterion, Throughput, measurement::WallTime};
+use math::{Quat, Vec3};
 use world::{
     AgentHandoff,
-    ApplyOutcome::{AgentHandedOff, Introduced, RegionRetired, Removed},
-    ParentUpdate::Root,
+    ApplyOutcome::{AgentHandedOff, Introduced, Removed},
+    ObjectPatch,
+    ParentUpdate::{Local, Root},
+    Pose, World,
 };
 
-use super::support::{INITIAL_ORDER, PER_REGION, Row, SCENE_SIZES, empty_scene, observation, populated_scene, rows, size_name, source};
+use super::support::{
+    INITIAL_ORDER, PER_REGION, Row, SCENE_SIZES, Scene, empty_scene, limits, observation, populated_scene, rows, size_name, source,
+};
 
 pub(super) fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("world/lifecycle");
@@ -16,6 +21,7 @@ pub(super) fn bench(c: &mut Criterion) {
     bench_delete(&mut group);
     bench_local_id_reuse(&mut group);
     bench_region_reset(&mut group);
+    bench_linked_removal(&mut group);
     bench_agent_handoff(&mut group);
     group.finish();
 }
@@ -131,7 +137,9 @@ fn bench_region_reset(group: &mut BenchmarkGroup<'_, criterion::measurement::Wal
                     let mut removed = 0;
                     for region in &scene.regions {
                         let applied = scene.world.retire_region(*region).expect("region retirement");
-                        let RegionRetired { entities_removed } = &applied.outcome else { panic!("expected region retirement") };
+                        let world::RegionOutcome::Retired { entities_removed, .. } = &applied.outcome else {
+                            panic!("expected region retirement")
+                        };
                         removed += *entities_removed;
                         let _ = black_box(applied);
                     }
@@ -176,5 +184,71 @@ fn bench_agent_handoff(group: &mut BenchmarkGroup<'_, WallTime>) {
                 let _ = black_box(applied);
             });
         });
+    }
+}
+
+fn linked_scene(count: usize, linkset_size: usize) -> Scene {
+    let (mut rows, mut regions) = rows(count, 0);
+    regions.truncate(1);
+    let mut world_limits = limits();
+    world_limits.max_entities_per_region = count;
+    let mut world = World::new(world_limits);
+    let _ = world.adopt_region(regions[0]).expect("adopt linked region");
+    for (index, row) in rows.iter_mut().enumerate() {
+        row.region = regions[0];
+        row.local_id = NonZeroU32::new(index as u32 + 1).unwrap();
+        row.order = INITIAL_ORDER + u64::from(row.local_id.get());
+        let applied = world.observe_object(observation(*row)).expect("introduce linked object");
+        assert!(matches!(applied.outcome, Introduced(_)));
+    }
+    let mut scene = Scene { world, rows, regions };
+    for (index, row) in scene.rows.iter().enumerate() {
+        if index % linkset_size == 0 {
+            continue;
+        }
+        let root = scene.rows[index / linkset_size * linkset_size];
+        let mut patch = ObjectPatch::new(source(row.region, INITIAL_ORDER + count as u64 + u64::from(row.local_id.get())), row.local_id);
+        patch.parent = Some(Local(root.local_id));
+        patch.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) });
+        let _ = scene.world.patch_object(patch).expect("link child");
+    }
+    scene
+}
+
+fn bench_linked_removal(group: &mut BenchmarkGroup<'_, WallTime>) {
+    for (count, linkset_size) in [(10_000, 10_000), (65_536, 65_536), (65_536, 128)] {
+        group.throughput(Throughput::Elements(count as u64));
+        for retire in [false, true] {
+            if !retire && linkset_size != count {
+                continue;
+            }
+            let name = if !retire {
+                "delete_linkset"
+            } else if linkset_size == count {
+                "retire_linkset"
+            } else {
+                "retire_linksets"
+            };
+            group.bench_function(BenchmarkId::new(name, size_name(count)), |b| {
+                b.iter_batched_ref(
+                    || linked_scene(count, linkset_size),
+                    |scene| {
+                        let root = scene.rows[0];
+                        if retire {
+                            let _ = black_box(scene.world.retire_region(root.region).expect("retire linked region"));
+                        } else {
+                            let _ = black_box(
+                                scene
+                                    .world
+                                    .remove_object(source(root.region, INITIAL_ORDER + 3 * count as u64), root.local_id)
+                                    .expect("remove linked root"),
+                            );
+                        }
+                        assert_eq!(scene.world.object_count(), 0);
+                    },
+                    BatchSize::LargeInput,
+                );
+            });
+        }
     }
 }

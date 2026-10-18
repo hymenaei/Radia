@@ -1,10 +1,18 @@
+//! Derived spatial indexes with explicit, bounded maintenance.
+
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::ops::Bound::{Excluded, Unbounded};
 use std::time::Instant;
 
+#[cfg(feature = "invariants")]
+use std::collections::HashSet;
+
+use crate::PoseError;
 use base::UUID;
 use math::DVec3;
 
-use super::{Entity, Parent, PoseState, Region, World, pose::MAX_PARENT_EDGES};
+use super::{World, WorldChangeClasses, pose::MAX_PARENT_EDGES};
+use crate::{Entity, Parent, PoseState, Region};
 
 const CELL_SIZE: f64 = 32.0;
 const MAX_DIRTY_ROOTS_PER_REGION: usize = 48;
@@ -93,36 +101,76 @@ pub(super) struct SpatialIndex {
     unresolved_by_entity: HashMap<Entity, (UUID, Region)>,
 }
 
-#[derive(Clone, Copy)]
 struct DirtyRoot {
     region: Region,
-    scope: DirtyScope,
+    scope: DirtyScope<SubtreeScan>,
 }
 
-#[derive(Clone, Copy, Default)]
-struct DirtyScope {
-    cursor: Option<UUID>,
+#[derive(Default)]
+struct DirtyScope<C = Option<UUID>> {
+    cursor: C,
     generation: u64,
     scan_generation: u64,
 }
 
-impl DirtyScope {
+impl<C: Default> DirtyScope<C> {
     fn changed(&mut self) {
         self.generation = self.generation.wrapping_add(1);
     }
 
-    fn finish_pass(&mut self, cursor: Option<UUID>, complete: bool) -> bool {
+    fn finish_pass(&mut self, cursor: C, complete: bool) -> bool {
         if !complete {
             self.cursor = cursor;
             return false;
         }
         if self.generation != self.scan_generation {
-            self.cursor = None;
+            self.cursor = C::default();
             self.scan_generation = self.generation;
             false
         } else {
             true
         }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct SubtreeScan {
+    stack: Vec<SubtreeFrame>,
+    started: bool,
+}
+
+struct SubtreeFrame {
+    entity: Entity,
+    after_child: Option<UUID>,
+}
+
+impl SubtreeScan {
+    pub(super) fn next(&mut self, world: &World, root: Entity) -> Option<Entity> {
+        if !self.started {
+            self.started = true;
+            self.stack.push(SubtreeFrame { entity: root, after_child: None });
+            return Some(root);
+        }
+        while !self.stack.is_empty() {
+            let depth = self.stack.len() - 1;
+            let frame = self.stack.last_mut().expect("traversal has a current frame");
+            let next = if depth < MAX_PARENT_EDGES {
+                world
+                    .children
+                    .get(&frame.entity)
+                    .and_then(|children| children.range((frame.after_child.map_or(Unbounded, Excluded), Unbounded)).next())
+            } else {
+                None
+            };
+            if let Some((id, child)) = next {
+                frame.after_child = Some(*id);
+                self.stack.push(SubtreeFrame { entity: *child, after_child: None });
+                return Some(*child);
+            } else {
+                self.stack.pop();
+            }
+        }
+        None
     }
 }
 
@@ -188,7 +236,7 @@ impl SpatialIndex {
         }
     }
 
-    fn mark_entity(
+    fn mark_subtree(
         &mut self,
         entity: Entity,
         region: Region,
@@ -196,14 +244,6 @@ impl SpatialIndex {
         covered_roots: &[Option<Entity>],
         covering_roots: &[Option<Entity>],
     ) {
-        if self.dirty_roots.get(&entity).is_some_and(|dirty| dirty.region != region) {
-            self.remove_dirty_root(entity);
-        }
-        if let Some(scope) = self.dirty_regions.get_mut(&region) {
-            scope.changed();
-            return;
-        }
-
         for root in covered_roots.iter().flatten() {
             self.remove_dirty_root(*root);
         }
@@ -218,7 +258,7 @@ impl SpatialIndex {
 
         let roots_in_region = self.dirty_roots_by_region.get(&region).map_or(0, VecDeque::len);
         if roots_in_region >= MAX_DIRTY_ROOTS_PER_REGION {
-            self.promote_region(region);
+            self.mark_region(region);
             return;
         }
         self.dirty_roots
@@ -230,15 +270,6 @@ impl SpatialIndex {
         self.clear_dirty_roots(region);
         if let Some(scope) = self.dirty_regions.get_mut(&region) {
             scope.changed();
-            return;
-        }
-        self.dirty_regions.insert(region, DirtyScope { generation: 1, scan_generation: 1, ..DirtyScope::default() });
-    }
-
-    fn promote_region(&mut self, region: Region) {
-        self.clear_dirty_roots(region);
-        if self.dirty_regions.contains_key(&region) {
-            self.dirty_regions.get_mut(&region).expect("dirty region remains indexed").changed();
             return;
         }
         self.dirty_regions.insert(region, DirtyScope { generation: 1, scan_generation: 1, ..DirtyScope::default() });
@@ -259,7 +290,7 @@ impl SpatialIndex {
         }
     }
 
-    fn refresh(&mut self, entity: Entity, id: UUID, region: Region, pose: Result<PoseState, super::PoseError>) {
+    fn refresh(&mut self, entity: Entity, id: UUID, region: Region, pose: Result<PoseState, PoseError>) {
         self.remove_cached_position(entity);
         match pose {
             Ok(PoseState::Resolved(pose)) if pose.position.is_finite() => {
@@ -304,19 +335,19 @@ impl SpatialIndex {
         }
     }
 
-    fn is_region_dirty(&self, region: Region) -> bool {
+    pub(super) fn is_region_dirty(&self, region: Region) -> bool {
         self.dirty_regions.contains_key(&region)
     }
 
     fn next_task(&self) -> Option<DirtyTask> {
         let region = self
             .last_dirty_region
-            .and_then(|last| self.dirty_regions.range((std::ops::Bound::Excluded(last), std::ops::Bound::Unbounded)).next())
+            .and_then(|last| self.dirty_regions.range((Excluded(last), Unbounded)).next())
             .or_else(|| self.dirty_regions.first_key_value())
             .map(|(region, _)| DirtyTask::Region(*region));
         let root = self
             .last_dirty_root_region
-            .and_then(|last| self.dirty_roots_by_region.range((std::ops::Bound::Excluded(last), std::ops::Bound::Unbounded)).next())
+            .and_then(|last| self.dirty_roots_by_region.range((Excluded(last), Unbounded)).next())
             .or_else(|| self.dirty_roots_by_region.first_key_value())
             .and_then(|(_, roots)| roots.front().copied())
             .map(DirtyTask::Root);
@@ -327,62 +358,135 @@ impl SpatialIndex {
         }
     }
 
-    fn cursor(&self, task: DirtyTask) -> Option<UUID> {
-        match task {
-            DirtyTask::Root(root) => self.dirty_roots.get(&root).and_then(|dirty| dirty.scope.cursor),
-            DirtyTask::Region(region) => self.dirty_regions.get(&region).and_then(|scope| scope.cursor),
+    fn finish_root(&mut self, root: Entity) {
+        if let Some(region) = self.dirty_root_region(root) {
+            self.last_dirty_root_region = Some(region);
         }
+        self.remove_dirty_root(root);
+        self.prefer_region = true;
     }
 
-    fn finish_task_batch(&mut self, task: DirtyTask, cursor: Option<UUID>, complete: bool) {
-        match task {
-            DirtyTask::Root(root) => {
-                let region = self.dirty_root_region(root);
-                if complete {
-                    let done = self.dirty_roots.get_mut(&root).is_none_or(|dirty| dirty.scope.finish_pass(None, true));
-                    if done {
-                        self.remove_dirty_root(root);
-                    } else if let Some(queue) = region.and_then(|region| self.dirty_roots_by_region.get_mut(&region))
-                        && queue.front() == Some(&root)
-                    {
-                        queue.rotate_left(1);
-                    }
-                } else if let Some(dirty) = self.dirty_roots.get_mut(&root) {
-                    dirty.scope.finish_pass(cursor, false);
-                    if let Some(queue) = region.and_then(|region| self.dirty_roots_by_region.get_mut(&region))
-                        && queue.front() == Some(&root)
-                    {
-                        queue.rotate_left(1);
-                    }
-                }
-                if let Some(region) = region {
-                    self.last_dirty_root_region = Some(region);
-                }
-                self.prefer_region = true;
-            }
-            DirtyTask::Region(region) => {
-                if complete {
-                    let done = self.dirty_regions.get_mut(&region).is_none_or(|scope| scope.finish_pass(None, true));
-                    if done {
-                        self.dirty_regions.remove(&region);
-                    }
-                } else if self.dirty_regions.contains_key(&region) {
-                    self.dirty_regions.get_mut(&region).expect("dirty region remains indexed").finish_pass(cursor, false);
-                }
-                self.last_dirty_region = Some(region);
-                self.prefer_region = false;
-            }
+    fn finish_subtree_batch(&mut self, root: Entity, cursor: SubtreeScan, complete: bool) {
+        let region = self.dirty_root_region(root);
+        let done = self.dirty_roots.get_mut(&root).is_none_or(|dirty| dirty.scope.finish_pass(cursor, complete));
+        if done {
+            self.remove_dirty_root(root);
+        } else if let Some(queue) = region.and_then(|region| self.dirty_roots_by_region.get_mut(&region))
+            && queue.front() == Some(&root)
+        {
+            queue.rotate_left(1);
         }
+        if let Some(region) = region {
+            self.last_dirty_root_region = Some(region);
+        }
+        self.prefer_region = true;
+    }
+
+    fn finish_region_batch(&mut self, region: Region, cursor: Option<UUID>, complete: bool) {
+        let done = self.dirty_regions.get_mut(&region).is_none_or(|scope| scope.finish_pass(cursor, complete));
+        if done {
+            self.dirty_regions.remove(&region);
+        }
+        self.last_dirty_region = Some(region);
+        self.prefer_region = false;
     }
 
     fn dirty_scope_count(&self) -> usize {
         self.dirty_regions.len().saturating_add(self.dirty_roots.len())
     }
+
+    #[cfg(feature = "invariants")]
+    pub(super) fn invariant_error(&self, world: &World) -> Option<&'static str> {
+        let mut cached = HashSet::new();
+        for (cell, ids) in &self.cells {
+            for (id, entity) in ids {
+                if !cached.insert(*entity)
+                    || world.object(*entity).is_none_or(|object| object.id() != *id)
+                    || self.cell_by_entity.get(entity) != Some(&(*id, *cell))
+                {
+                    return Some("cell index and reverse entity index disagree");
+                }
+            }
+        }
+        if self.cell_by_entity.iter().any(|(entity, (id, cell))| !self.cells.get(cell).is_some_and(|ids| ids.get(id) == Some(entity))) {
+            return Some("reverse cell index points to a missing entity");
+        }
+
+        for (region, ids) in &self.unresolved {
+            for (id, entity) in ids {
+                if !cached.insert(*entity)
+                    || world.object(*entity).is_none_or(|object| {
+                        object.id() != *id || (!world.spatial_is_dirty(*entity) && object.address().region() != *region)
+                    })
+                    || self.unresolved_by_entity.get(entity) != Some(&(*id, *region))
+                {
+                    return Some("unresolved spatial index and reverse entity index disagree");
+                }
+            }
+        }
+        if self
+            .unresolved_by_entity
+            .iter()
+            .any(|(entity, (id, region))| !self.unresolved.get(region).is_some_and(|ids| ids.get(id) == Some(entity)))
+        {
+            return Some("reverse unresolved index points to a missing entity");
+        }
+
+        for object in world.objects().iter() {
+            let entity = object.entity();
+            if world.spatial_is_dirty(entity) {
+                continue;
+            }
+            match object.world_pose() {
+                Ok(PoseState::Resolved(pose)) if pose.position.is_finite() => {
+                    if let Some(cell) = Cell::for_position(pose.position) {
+                        if self.cell_by_entity.get(&entity) != Some(&(object.id(), cell)) {
+                            return Some("clean spatial position does not match the current pose");
+                        }
+                    } else if cached.contains(&entity) {
+                        return Some("unrepresentable position is present in the spatial index");
+                    }
+                }
+                _ => {
+                    if self.unresolved_by_entity.get(&entity) != Some(&(object.id(), object.address().region())) {
+                        return Some("unresolved spatial index does not match the current pose");
+                    }
+                }
+            }
+        }
+        if self.dirty_regions.keys().any(|region| world.region(*region).is_none()) {
+            return Some("dirty spatial scope references an inactive region");
+        }
+
+        let mut queued_roots = HashSet::with_capacity(self.dirty_roots.len());
+        for (region, roots) in &self.dirty_roots_by_region {
+            if roots.is_empty() || self.dirty_regions.contains_key(region) {
+                return Some("dirty root queue overlaps a whole-region scope or is empty");
+            }
+            for root in roots {
+                if !queued_roots.insert(*root)
+                    || self.dirty_roots.get(root).is_none_or(|dirty| dirty.region != *region)
+                    || world.object(*root).is_none_or(|object| object.address().region() != *region)
+                {
+                    return Some("dirty root queue and root index disagree");
+                }
+            }
+        }
+        if queued_roots.len() != self.dirty_roots.len()
+            || !self.dirty_roots.iter().all(|(root, dirty)| {
+                self.dirty_roots_by_region.get(&dirty.region).is_some_and(|roots| roots.contains(root))
+                    && world.object(*root).is_some_and(|object| object.address().region() == dirty.region)
+            })
+        {
+            return Some("dirty root index points to a missing queue entry");
+        }
+        None
+    }
 }
 
 impl World {
-    pub(super) fn update_spatial_state(&mut self, changes: &[super::Change]) {
-        use super::Change::{
+    pub(super) fn update_spatial_state(&mut self, changes: &[super::WorldChange]) {
+        use super::WorldChange::{
             EntityAdded, EntityRebound, EntityRemoved, EntityTransferred, EntityUpdated, RegionRetired, SubtreeInvalidated,
         };
 
@@ -391,9 +495,7 @@ impl World {
                 EntityAdded { entity, .. } | EntityRebound { entity, .. } | EntityTransferred { entity, .. } => {
                     self.mark_spatial_entity(entity);
                 }
-                EntityUpdated { entity, classes, .. }
-                    if classes.contains(super::ChangeClasses::TRANSFORM_MOTION) || classes.contains(super::ChangeClasses::RELATIONSHIP) =>
-                {
+                EntityUpdated { entity, classes, .. } if classes.contains(WorldChangeClasses::POSE) => {
                     self.mark_spatial_entity(entity);
                 }
                 SubtreeInvalidated { entity, .. } => self.mark_spatial_entity(entity),
@@ -410,6 +512,13 @@ impl World {
 
     fn mark_spatial_entity(&mut self, entity: Entity) {
         let Some(region) = self.object(entity).map(|object| object.address().region()) else { return };
+        if self.spatial.dirty_root_region(entity).is_some_and(|previous| previous != region) {
+            self.spatial.remove_dirty_root(entity);
+        }
+        if let Some(scope) = self.spatial.dirty_regions.get_mut(&region) {
+            scope.changed();
+            return;
+        }
         let ancestors = self.ancestor_chain(entity);
         if ancestors.truncated {
             self.spatial.mark_region(region);
@@ -433,7 +542,7 @@ impl World {
                 covered_count += 1;
             }
         }
-        self.spatial.mark_entity(entity, region, covered_by_root, &covered_roots[..covered_count], &covering_roots[..covering_count]);
+        self.spatial.mark_subtree(entity, region, covered_by_root, &covered_roots[..covered_count], &covering_roots[..covering_count]);
     }
 
     fn ancestor_chain(&self, mut entity: Entity) -> AncestorChain {
@@ -461,16 +570,38 @@ impl World {
             return true;
         }
         let ancestors = self.ancestor_chain(entity);
-        if ancestors.truncated && self.spatial.dirty_roots_in(region).next().is_some() {
-            return true;
-        }
         ancestors.iter().any(|ancestor| self.spatial.dirty_roots.contains_key(ancestor))
     }
 
     pub(super) fn refresh_spatial_entity(&mut self, entity: Entity) {
-        let Some((id, region)) = self.object(entity).map(|object| (object.identity().id(), object.address().region())) else { return };
+        let Some((id, region)) = self.object(entity).map(|object| (object.id(), object.address().region())) else { return };
         let pose = self.resolve_pose(entity);
         self.spatial.refresh(entity, id, region, pose);
+    }
+
+    fn repair_subtree(&mut self, root: Entity, limit: usize) -> usize {
+        if !self.children.contains_key(&root) {
+            self.refresh_spatial_entity(root);
+            self.spatial.finish_root(root);
+            return 1;
+        }
+        let scope = &mut self.spatial.dirty_roots.get_mut(&root).expect("scheduled root exists").scope;
+        if !scope.cursor.started {
+            scope.scan_generation = scope.generation;
+        }
+        let mut scan = std::mem::take(&mut scope.cursor);
+        let mut work = 0;
+        let mut complete = false;
+        while work < limit {
+            let Some(entity) = scan.next(self, root) else {
+                complete = true;
+                break;
+            };
+            self.refresh_spatial_entity(entity);
+            work += 1;
+        }
+        self.spatial.finish_subtree_batch(root, scan, complete);
+        work
     }
 
     /// Repairs the spatial query index and removes expired recent-object metadata.
@@ -484,51 +615,33 @@ impl World {
 
         let mut work_used = 0;
         let mut scopes_visited = 0;
-        let mut ids = Vec::with_capacity(work_limit);
+        let mut ids = Vec::new();
         while work_used < work_limit && scopes_visited < work_limit {
             let Some(task) = self.spatial.next_task() else { break };
             scopes_visited += 1;
-            ids.clear();
-            let after = self.spatial.cursor(task);
-            let root_region = match task {
-                DirtyTask::Root(root) => self.spatial.dirty_root_region(root),
-                DirtyTask::Region(region) => Some(region),
-            };
-            let candidates = match task {
-                DirtyTask::Root(_) | DirtyTask::Region(_) => root_region.and_then(|region| self.region_entities.get(&region)),
-            };
             let remaining = work_limit - work_used;
-            let has_more = if let Some(candidates) = candidates {
-                let lower = after.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
-                ids.extend(candidates.range((lower, std::ops::Bound::Unbounded)).take(remaining).copied());
-                ids.len() == remaining
-            } else {
-                false
-            };
-            let cursor = ids.last().copied().or(after);
-            work_used = work_used.saturating_add(ids.len());
-
-            for id in &ids {
-                let Some(entity) = self.entities.get(id).copied() else { continue };
-                let region = self.object(entity).expect("UUID index contains only live entities").address().region();
-                let refresh = match task {
-                    DirtyTask::Root(root) => {
-                        if root_region != Some(region) {
-                            false
-                        } else {
-                            let ancestors = self.ancestor_chain(entity);
-                            ancestors.truncated || ancestors.contains(root)
-                        }
+            match task {
+                DirtyTask::Root(root) => work_used += self.repair_subtree(root, remaining),
+                DirtyTask::Region(region) => {
+                    ids.clear();
+                    let scope = self.spatial.dirty_regions.get_mut(&region).expect("scheduled region exists");
+                    if scope.cursor.is_none() {
+                        scope.scan_generation = scope.generation;
                     }
-                    DirtyTask::Region(target) => region == target,
-                };
-                if refresh {
-                    self.refresh_spatial_entity(entity);
+                    let after = scope.cursor;
+                    if let Some(candidates) = self.region_entities.get(&region) {
+                        let lower = after.map_or(Unbounded, Excluded);
+                        ids.extend(candidates.range((lower, Unbounded)).take(remaining).copied());
+                    }
+                    let complete = ids.len() < remaining;
+                    let cursor = ids.last().copied().or(after);
+                    work_used += ids.len();
+                    for id in &ids {
+                        let entity = self.entities[id];
+                        self.refresh_spatial_entity(entity);
+                    }
+                    self.spatial.finish_region_batch(region, cursor, complete);
                 }
-            }
-            self.spatial.finish_task_batch(task, cursor, !has_more);
-            if !has_more {
-                continue;
             }
         }
 
@@ -577,7 +690,7 @@ mod tests {
     use math::{Quat, Vec3};
 
     use super::*;
-    use crate::{ObjectObservation, OrderEvidence::Ordered, Pose, UpdateSource, WorldLimits};
+    use crate::{FieldUpdate, ObjectObservation, OrderEvidence::Ordered, Pose, UpdateSource, WorldLimits};
 
     fn limits() -> WorldLimits {
         WorldLimits {
@@ -611,21 +724,22 @@ mod tests {
                 linear_motion: None,
                 angular_velocity: None,
                 scale: None,
-                attachment_point: None,
-                shape: None,
-                appearance: None,
+                attachment_point: FieldUpdate::Keep,
+                shape: FieldUpdate::Keep,
+                appearance: FieldUpdate::Keep,
                 surface_appearance: None,
                 render_materials: None,
             })
             .expect("add object");
 
-        let pressure = world.maintain_query_state(1).expect("bounded maintenance");
-        assert_eq!(pressure.dirty_scopes, 1);
-        assert!(pressure.has_dirty_pressure);
-
-        let repaired = world.maintain_query_state(1).expect("finish spatial repair");
+        let repaired = world.maintain_query_state(1).expect("bounded maintenance");
+        assert_eq!(repaired.work_used, 1);
         assert_eq!(repaired.dirty_scopes, 0);
         assert!(!repaired.has_dirty_pressure);
+
+        let idle = world.maintain_query_state(1).expect("maintenance after repair");
+        assert_eq!(idle.work_used, 0);
+        assert!(!idle.has_dirty_pressure);
     }
 
     #[test]

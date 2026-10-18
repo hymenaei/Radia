@@ -39,7 +39,32 @@ pub fn decode_texture_entry(bytes: &[u8]) -> Result<Option<TextureEntry>, LLUdpE
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImprovedTerseObjectUpdate {
     pub region_data: RegionData,
-    pub objects: Vec<ObjectData>,
+    pub objects: Vec<ObjectBlock>,
+}
+
+/// One independently framed object update in an improved-terse message.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ObjectBlock {
+    Decoded(ObjectData),
+    Malformed { packed_data: Vec<u8>, texture_entry: Vec<u8> },
+}
+
+impl ObjectBlock {
+    /// Returns decoded values for a structurally valid object block.
+    pub const fn as_decoded(&self) -> Option<&ObjectData> {
+        match self {
+            Self::Decoded(object) => Some(object),
+            Self::Malformed { .. } => None,
+        }
+    }
+
+    /// Returns mutable decoded values for a structurally valid object block.
+    pub fn as_decoded_mut(&mut self) -> Option<&mut ObjectData> {
+        match self {
+            Self::Decoded(object) => Some(object),
+            Self::Malformed { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -60,27 +85,10 @@ pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<ImprovedTerseObjectUpdat
     for _ in 0..count {
         let packed_data = read_variable1(reader)?;
         let texture_entry = read_variable2(reader)?;
-        let mut data = Reader::new(packed_data);
-        let local_id = data.u32()?;
-        let state = data.u8()?;
-        let avatar = data.u8()? != 0;
-        let collision_plane = if avatar { Some(read_vector4(&mut data)?) } else { None };
-        let position = data.vector3()?;
-        let velocity = decode_vector3(&mut data, -128.0, 128.0)?;
-        let acceleration = decode_vector3(&mut data, -64.0, 64.0)?;
-        let rotation = rotation_from_u16([data.u16()?, data.u16()?, data.u16()?, data.u16()?]);
-        let angular_velocity = decode_vector3(&mut data, -64.0, 64.0)?;
-        if !data.remaining().is_empty() {
-            return Err(LLUdpError::InvalidMessage);
+        match decode_object_data(packed_data, texture_entry) {
+            Ok(object) => objects.push(ObjectBlock::Decoded(object)),
+            Err(_) => objects.push(ObjectBlock::Malformed { packed_data: packed_data.to_vec(), texture_entry: texture_entry.to_vec() }),
         }
-        objects.push(ObjectData {
-            local_id,
-            state,
-            avatar,
-            collision_plane,
-            motion: ObjectMotion { position, velocity, acceleration, rotation, angular_velocity },
-            texture_entry: texture_entry.to_vec(),
-        });
     }
 
     Ok(ImprovedTerseObjectUpdate { region_data, objects })
@@ -90,24 +98,39 @@ pub(crate) fn preflight_allocation_bytes(payload: &[u8]) -> Result<usize, LLUdpE
     let mut reader = Reader::new(payload);
     RegionData::decode(&mut reader)?;
     let count = reader.terminal_variable_count()?;
-    let allocation_bytes = count.checked_mul(size_of::<ObjectData>()).ok_or(LLUdpError::AllocationBoundOverflow)?;
+    let mut allocation_bytes = count.checked_mul(size_of::<ObjectBlock>()).ok_or(LLUdpError::AllocationBoundOverflow)?;
 
     for _ in 0..count {
         let packed_data = read_variable1(&mut reader)?;
-        read_variable2(&mut reader)?;
-        let mut data = Reader::new(packed_data);
-        data.take(4 + 1)?;
-        let avatar = data.u8()? != 0;
-        if avatar {
-            data.take(16)?;
-        }
-        data.take(12 + 6 + 6 + 8 + 6)?;
-        if !data.is_empty() {
-            return Err(LLUdpError::InvalidMessage);
-        }
+        let texture_entry = read_variable2(&mut reader)?;
+        let malformed = packed_data.get(5).is_none_or(|avatar| packed_data.len() < if *avatar == 0 { 44 } else { 60 });
+        let nested_bytes = if malformed { packed_data.len().saturating_add(texture_entry.len()) } else { texture_entry.len() };
+        allocation_bytes = allocation_bytes.checked_add(nested_bytes).ok_or(LLUdpError::AllocationBoundOverflow)?;
     }
 
     Ok(allocation_bytes)
+}
+
+fn decode_object_data(packed_data: &[u8], texture_entry: &[u8]) -> Result<ObjectData, LLUdpError> {
+    let mut data = Reader::new(packed_data);
+    let local_id = data.u32()?;
+    let state = data.u8()?;
+    let avatar = data.u8()? != 0;
+    let collision_plane = if avatar { Some(read_vector4(&mut data)?) } else { None };
+    let position = data.vector3()?;
+    let velocity = decode_vector3(&mut data, -128.0, 128.0)?;
+    let acceleration = decode_vector3(&mut data, -64.0, 64.0)?;
+    let rotation = rotation_from_u16([data.u16()?, data.u16()?, data.u16()?, data.u16()?]);
+    let angular_velocity = decode_vector3(&mut data, -64.0, 64.0)?;
+    // The packed value is length-delimited, so unknown tail bytes can be skipped safely.
+    Ok(ObjectData {
+        local_id,
+        state,
+        avatar,
+        collision_plane,
+        motion: ObjectMotion { position, velocity, acceleration, rotation, angular_velocity },
+        texture_entry: texture_entry.to_vec(),
+    })
 }
 
 fn decode_vector3(reader: &mut Reader<'_>, lower: f32, upper: f32) -> Result<Vec3, LLUdpError> {

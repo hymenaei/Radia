@@ -60,7 +60,6 @@ fn bench_parent_churn(c: &mut Criterion) {
             .objects_in_region(child.region)
             .find(|object| object.address().local_id().get() == 1)
             .expect("linkset root")
-            .identity()
             .id();
         let root_entity = verification.world.entity(root_id).expect("root entity");
         let mut patch = ObjectPatch::new(source(child.region, verification.next_order), child.local_id);
@@ -68,13 +67,13 @@ fn bench_parent_churn(c: &mut Criterion) {
         patch.parent = Some(Root);
         assert_eq!(verification.world.patch_object(patch).expect("detach linkset child").outcome, Updated(child_entity));
         assert_eq!(verification.world.object(child_entity).unwrap().parent(), Parent::Root);
-        assert!(!verification.world.children(root_entity).any(|object| object.identity().id() == child.id));
+        assert!(!verification.world.children(root_entity).any(|object| object.id() == child.id));
         let mut patch = ObjectPatch::new(source(child.region, verification.next_order), child.local_id);
         verification.next_order += 1;
         patch.parent = Some(Local(NonZeroU32::new(1).expect("root local ID")));
         assert_eq!(verification.world.patch_object(patch).expect("reattach linkset child").outcome, Updated(child_entity));
         assert_eq!(verification.world.object(child_entity).unwrap().parent(), Parent::Resolved(root_entity));
-        assert!(verification.world.children(root_entity).any(|object| object.identity().id() == child.id));
+        assert!(verification.world.children(root_entity).any(|object| object.id() == child.id));
 
         group.bench_with_input(BenchmarkId::new("reparent_children", size_name(count)), &count, |b, _| {
             b.iter_batched_ref(

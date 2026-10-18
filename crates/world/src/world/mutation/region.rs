@@ -1,32 +1,50 @@
-use super::journal::Change::{RegionAdopted, RegionRetired, RegionUpdated};
-use super::{Applied, ApplyError, ApplyOutcome, EntityRemovalReason, Region, RegionInfo, World};
+//! Registration, metadata, and atomic retirement of simulator region lifetimes.
+
+use super::super::journal::WorldChange::{RegionAdopted, RegionRetired, RegionUpdated};
+use super::super::{RecentBatch, World};
+use super::lifecycle::RemovalCause;
+use crate::{ApplyError, Region, RegionApplied, RegionInfo, RegionOutcome};
 
 impl World {
-    pub fn adopt_region(&mut self, region: Region) -> Result<Applied, ApplyError> {
+    /// Registers a simulator connection lifetime before accepting its object updates.
+    ///
+    /// Repeated adoption of an active region is unchanged. A retired lifetime cannot be reused.
+    ///
+    /// # Errors
+    /// Returns an [`ApplyError`] for a retired lifetime or exhausted registration or revision
+    /// capacity. The World remains unchanged on error.
+    pub fn adopt_region(&mut self, region: Region) -> Result<RegionApplied, ApplyError> {
         if self.retired.contains(&region) {
             return Err(ApplyError::RegionRetired);
         }
         if self.regions.contains_key(&region) {
-            return Ok(Applied::unchanged());
+            return Ok(RegionApplied { outcome: RegionOutcome::Unchanged, recovery_cancellations: Vec::new() });
         }
-        if self.registration_count >= self.limits.max_region_registrations {
+        if self.regions.len().saturating_add(self.retired.len()) >= self.limits.max_region_registrations {
             return Err(ApplyError::RegistrationBudgetExhausted);
         }
         self.ensure_revision_available()?;
-        self.registration_count += 1;
         self.regions.insert(region, RegionInfo::default());
-        assert!(self.region_ids.insert(region), "region ordering index already contains a new region");
-        Ok(self.finish(ApplyOutcome::RegionAdopted, vec![RegionAdopted(region)], None))
+        let revision = self.publish_changes(vec![RegionAdopted(region)]).expect("adopting a region journals a change");
+        Ok(RegionApplied { outcome: RegionOutcome::Adopted { revision }, recovery_cancellations: Vec::new() })
     }
 
-    pub fn patch_region(&mut self, region: Region, info: RegionInfo) -> Result<Applied, ApplyError> {
+    /// Adds non-conflicting metadata to an active simulator region lifetime.
+    ///
+    /// Missing fields leave stored metadata unchanged. Changing the resolved origin invalidates
+    /// derived spatial state for the region.
+    ///
+    /// # Errors
+    /// Returns an [`ApplyError`] for invalid or conflicting metadata, an inactive region, or
+    /// exhausted revision capacity. The World remains unchanged on error.
+    pub fn patch_region(&mut self, region: Region, info: RegionInfo) -> Result<RegionApplied, ApplyError> {
         self.require_active_region(region)?;
         self.validate_region_info(&info)?;
         let current = self.regions.get(&region).expect("active region remains registered");
         let previous_origin = current.origin.or_else(|| current.handle.map(|handle| handle.origin()));
         let merged = self.merge_region_info(current, &info)?;
         if merged == *current {
-            return Ok(Applied::unchanged());
+            return Ok(RegionApplied { outcome: RegionOutcome::Unchanged, recovery_cancellations: Vec::new() });
         }
         let next_origin = merged.origin.or_else(|| merged.handle.map(|handle| handle.origin()));
         self.ensure_revision_available()?;
@@ -34,40 +52,49 @@ impl World {
         if previous_origin != next_origin {
             self.mark_spatial_region(region);
         }
-        Ok(self.finish(ApplyOutcome::RegionPatched, vec![RegionUpdated(region)], None))
+        let revision = self.publish_changes(vec![RegionUpdated(region)]).expect("patching a region journals a change");
+        Ok(RegionApplied { outcome: RegionOutcome::Patched { revision }, recovery_cancellations: Vec::new() })
     }
 
-    pub fn retire_region(&mut self, region: Region) -> Result<Applied, ApplyError> {
+    /// Atomically retires a region lifetime and removes its live objects.
+    ///
+    /// Identity, relationships, ordering evidence, and recovery cancellations are updated before
+    /// publishing one revision. Repeated retirement is unchanged. Work is proportional to the
+    /// region's live objects and affected relationships; this operation does not yield midway.
+    ///
+    /// # Errors
+    /// Returns an [`ApplyError`] for an unknown region or exhausted revision capacity. The World
+    /// remains unchanged on error.
+    pub fn retire_region(&mut self, region: Region) -> Result<RegionApplied, ApplyError> {
         if self.retired.contains(&region) {
-            return Ok(Applied::unchanged());
+            return Ok(RegionApplied { outcome: RegionOutcome::Unchanged, recovery_cancellations: Vec::new() });
         }
         self.require_active_region(region)?;
         self.ensure_revision_available()?;
-        let entities = self.objects_in_region(region).map(|object| object.entity()).collect::<Vec<_>>();
-        let removed = entities.len();
+        let removed = self.region_entities.get(&region).map_or(0, |ids| ids.len());
         let mut changes = Vec::with_capacity(removed.saturating_add(1));
         let mut recovery_cancellations = Vec::new();
-        for entity in entities {
+        let mut recent = RecentBatch::default();
+        while let Some(id) = self.region_entities.get(&region).and_then(|ids| ids.first()).copied() {
+            let entity = self.entities[&id];
             self.remove_entity(
                 entity,
-                None,
-                false,
-                EntityRemovalReason::RegionRetired,
+                RemovalCause::RegionRetired,
                 None,
                 &mut changes,
                 &mut Vec::new(),
                 &mut recovery_cancellations,
+                &mut recent,
             );
         }
+        self.recent.apply_batch(recent);
         self.regions.remove(&region);
-        assert!(self.region_ids.remove(&region), "region ordering index is missing an active region");
         self.retired.insert(region);
         self.tombstones.remove_region(region);
         self.floors.remove(&region);
         changes.push(RegionRetired { region, entities_removed: removed });
-        Ok(self
-            .finish(ApplyOutcome::RegionRetired { entities_removed: removed }, changes, None)
-            .with_recovery_cancellations(recovery_cancellations))
+        let revision = self.publish_changes(changes).expect("retiring a region journals a change");
+        Ok(RegionApplied { outcome: RegionOutcome::Retired { revision, entities_removed: removed }, recovery_cancellations })
     }
 
     fn validate_region_info(&self, info: &RegionInfo) -> Result<(), ApplyError> {

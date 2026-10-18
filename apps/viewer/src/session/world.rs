@@ -1,207 +1,29 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use base::UUID;
-use futures::{FutureExt, pin_mut, select_biased};
 use network::SimulatorId;
-use tokio::sync::{mpsc, oneshot};
 use world::{
     AgentHandoff, Appearance, Applied, ApplyError,
-    ApplyOutcome::{AgentHandedOff, Introduced, TombstoneRecorded, Unchanged, Updated},
-    Entity, FieldRejectionReason, Kind, LocalAddress, MAX_OBJECT_DETAIL_BATCH_ITEMS, MAX_QUERY_STATE_MAINTENANCE_WORK, ObjectDetailBatch,
-    ObjectListItemRead, ObjectListPage, ObjectMediaUpdate, ObjectObservation, ObjectPageCursor, ObjectPatch, OrderEvidence, Parent, Region,
-    RegionHandle, RegionInfo, RegionPage, RegionPageCursor, RegionSummaryRead, UpdateSource, World, WorldChangeCursor, WorldChangePage,
-    WorldLimits, WorldReadError, WorldRevision,
+    ApplyOutcome::{AgentHandedOff, Introduced, TombstoneRecorded},
+    FieldRejectionReason, Kind, LocalAddress, MAX_QUERY_STATE_MAINTENANCE_WORK, ObjectMediaUpdate, ObjectObservation, ObjectPatch,
+    OrderEvidence, Region, RegionHandle, RegionInfo, UpdateSource, World, WorldLimits,
 };
-#[cfg(test)]
-use world::{WorldQuery, WorldQueryBudget, WorldQueryCursor, WorldQueryPage};
 
 use super::{
-    coverage::{CoverageSnapshot, LocalCoverageLossReason, SessionCoverageState},
     inbound::{AvatarAppearanceMessage, ObjectBatch, ObjectMediaRequest, ObjectOperation, SitTargetUpdate},
     object_media::ObjectMediaTarget,
     recovery::MAX_RECOVERY_OBJECTS_PER_REQUEST,
 };
-
-#[cfg(test)]
-pub(crate) mod proxy_box;
-#[cfg(test)]
-mod stress;
 
 pub(super) const MAX_WORLD_ENTITIES: usize = 65_536;
 const MAX_WORLD_TOMBSTONES_PER_REGION: usize = 4_096;
 const MAX_WORLD_TOMBSTONES: usize = 16_384;
 const MAX_WORLD_JOURNAL_ENTRIES: usize = 4_096;
 const MAX_REGION_NAME_BYTES: usize = 256;
+const MAX_INGEST_DIAGNOSTIC_ADDRESSES: usize = 8;
 
-const WORLD_READ_QUEUE_CAPACITY: usize = 1;
-pub(super) const MAX_WORLD_EVENTS_BETWEEN_READS: usize = 16;
 const MAX_OBJECTS_PER_INTAKE_QUANTUM: usize = 32;
 const QUERY_STATE_MAINTENANCE_WORK_PER_QUANTUM: usize = MAX_QUERY_STATE_MAINTENANCE_WORK / 32;
-
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum WorldReaderError {
-    Busy,
-    Gone,
-    Read(WorldReadError),
-}
-
-#[derive(Clone)]
-pub(crate) struct WorldReader {
-    renderer_requests: mpsc::Sender<WorldReadRequest>,
-    inspector_requests: mpsc::Sender<WorldReadRequest>,
-    session: Arc<()>,
-    priority: WorldReadPriority,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SessionReadBarrier {
-    pub(crate) changes: WorldChangeCursor,
-    pub(crate) revision: WorldRevision,
-    pub(crate) object_count: usize,
-    pub(crate) coverage: CoverageSnapshot,
-}
-
-#[derive(Clone, Copy)]
-enum WorldReadPriority {
-    Renderer,
-    Inspector,
-}
-
-impl WorldReader {
-    pub(crate) fn same_session(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.session, &other.session)
-    }
-
-    pub(crate) fn inspector(&self) -> Self {
-        Self { priority: WorldReadPriority::Inspector, ..self.clone() }
-    }
-
-    pub(crate) async fn barrier(&self) -> Result<SessionReadBarrier, WorldReaderError> {
-        let (reply, response) = oneshot::channel();
-        self.try_send(WorldReadRequest::Barrier(reply))?;
-        response.await.map_err(|_| WorldReaderError::Gone)?.map_err(WorldReaderError::Read)
-    }
-
-    pub(crate) async fn object_list_page(
-        &self,
-        cursor: Option<ObjectPageCursor>,
-        limit: usize,
-    ) -> Result<ObjectListPage, WorldReaderError> {
-        let (reply, response) = oneshot::channel();
-        self.try_send(WorldReadRequest::ObjectListPage { cursor, limit, reply })?;
-        response.await.map_err(|_| WorldReaderError::Gone)?.map_err(WorldReaderError::Read)
-    }
-
-    pub(crate) async fn object_list_item(&self, entity: Entity) -> Result<ObjectListItemRead, WorldReaderError> {
-        let (reply, response) = oneshot::channel();
-        self.try_send(WorldReadRequest::ObjectListItem { entity, reply })?;
-        response.await.map_err(|_| WorldReaderError::Gone)?.map_err(WorldReaderError::Read)
-    }
-
-    pub(crate) async fn region_page(&self, cursor: Option<RegionPageCursor>, limit: usize) -> Result<RegionPage, WorldReaderError> {
-        let (reply, response) = oneshot::channel();
-        self.try_send(WorldReadRequest::RegionPage { cursor, limit, reply })?;
-        response.await.map_err(|_| WorldReaderError::Gone)?.map_err(WorldReaderError::Read)
-    }
-
-    pub(crate) async fn region_summary(&self, region: Region) -> Result<Option<RegionSummaryRead>, WorldReaderError> {
-        let (reply, response) = oneshot::channel();
-        self.try_send(WorldReadRequest::RegionSummary { region, reply })?;
-        response.await.map_err(|_| WorldReaderError::Gone)?.map_err(WorldReaderError::Read)
-    }
-
-    pub(crate) async fn object_details(&self, entities: &[Entity]) -> Result<ObjectDetailBatch, WorldReaderError> {
-        if entities.is_empty() || entities.len() > MAX_OBJECT_DETAIL_BATCH_ITEMS {
-            return Err(WorldReaderError::Read(WorldReadError::InvalidLimit));
-        }
-        let (reply, response) = oneshot::channel();
-        self.try_send(WorldReadRequest::ObjectDetails { entities: entities.to_vec(), reply })?;
-        response.await.map_err(|_| WorldReaderError::Gone)?.map_err(WorldReaderError::Read)
-    }
-
-    pub(crate) async fn changes(&self, cursor: WorldChangeCursor, limit: usize) -> Result<WorldChangePage, WorldReaderError> {
-        let (reply, response) = oneshot::channel();
-        self.try_send(WorldReadRequest::Changes { cursor, limit, reply })?;
-        response.await.map_err(|_| WorldReaderError::Gone)?.map_err(WorldReaderError::Read)
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn query(
-        &self,
-        query: WorldQuery,
-        cursor: Option<WorldQueryCursor>,
-        budget: WorldQueryBudget,
-    ) -> Result<WorldQueryPage, WorldReaderError> {
-        let (reply, response) = oneshot::channel();
-        self.try_send(WorldReadRequest::Query { query, cursor, budget, reply })?;
-        response.await.map_err(|_| WorldReaderError::Gone)?.map_err(WorldReaderError::Read)
-    }
-
-    fn try_send(&self, request: WorldReadRequest) -> Result<(), WorldReaderError> {
-        let requests = match self.priority {
-            WorldReadPriority::Renderer => &self.renderer_requests,
-            WorldReadPriority::Inspector => &self.inspector_requests,
-        };
-        requests.try_send(request).map_err(|error| match error {
-            mpsc::error::TrySendError::Full(_) => WorldReaderError::Busy,
-            mpsc::error::TrySendError::Closed(_) => WorldReaderError::Gone,
-        })
-    }
-}
-
-pub(super) enum WorldReadRequest {
-    Barrier(oneshot::Sender<Result<SessionReadBarrier, WorldReadError>>),
-    ObjectListPage {
-        cursor: Option<ObjectPageCursor>,
-        limit: usize,
-        reply: oneshot::Sender<Result<ObjectListPage, WorldReadError>>,
-    },
-    ObjectListItem {
-        entity: Entity,
-        reply: oneshot::Sender<Result<ObjectListItemRead, WorldReadError>>,
-    },
-    RegionPage {
-        cursor: Option<RegionPageCursor>,
-        limit: usize,
-        reply: oneshot::Sender<Result<RegionPage, WorldReadError>>,
-    },
-    RegionSummary {
-        region: Region,
-        reply: oneshot::Sender<Result<Option<RegionSummaryRead>, WorldReadError>>,
-    },
-    ObjectDetails {
-        entities: Vec<Entity>,
-        reply: oneshot::Sender<Result<ObjectDetailBatch, WorldReadError>>,
-    },
-    Changes {
-        cursor: WorldChangeCursor,
-        limit: usize,
-        reply: oneshot::Sender<Result<WorldChangePage, WorldReadError>>,
-    },
-    #[cfg(test)]
-    Query {
-        query: WorldQuery,
-        cursor: Option<WorldQueryCursor>,
-        budget: WorldQueryBudget,
-        reply: oneshot::Sender<Result<WorldQueryPage, WorldReadError>>,
-    },
-}
-
-#[derive(Default)]
-pub(super) struct WorldReadBatch {
-    renderer: Option<WorldReadRequest>,
-    inspector: Option<WorldReadRequest>,
-}
-
-impl WorldReadBatch {
-    pub(super) fn is_empty(&self) -> bool {
-        self.renderer.is_none() && self.inspector.is_none()
-    }
-
-    pub(super) fn into_iter(self) -> impl Iterator<Item = WorldReadRequest> {
-        self.renderer.into_iter().chain(self.inspector)
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum IngestStatus {
@@ -281,11 +103,7 @@ impl IngestSummary {
     pub(super) fn recovery_targets(&self) -> impl Iterator<Item = LocalAddress> + '_ {
         self.blocks.iter().flat_map(|block| {
             block.recovery_target.into_iter().chain(
-                block
-                    .result
-                    .iter()
-                    .filter_map(|result| result.as_ref().ok()?.recovery.as_ref())
-                    .flat_map(|recovery| recovery.targets.iter().copied()),
+                block.result.iter().filter_map(|result| result.as_ref().ok()).flat_map(|applied| applied.recovery.requests.iter().copied()),
             )
         })
     }
@@ -305,7 +123,7 @@ impl IngestSummary {
             .flat_map(|(result, address)| result.recovery_cancellations.iter().copied().chain(address))
     }
 
-    pub(super) fn record_coverage_losses(&self, coverage: &SessionCoverageState, simulator_id: SimulatorId) {
+    pub(super) fn log_incomplete_data(&self, simulator_id: SimulatorId) {
         use ApplyError::{
             AddressGenerationExhausted, EntityBudgetExhausted, FrameGenerationExhausted, InvalidValue, KindMismatch, RegionRetired,
             RegistrationBudgetExhausted, RevisionExhausted, StaleRegion,
@@ -315,38 +133,65 @@ impl IngestSummary {
             StaleVersion, UntrustedSource,
         };
 
-        if matches!(self.status, IngestStatus::RegionHandleMismatch | IngestStatus::RegionContextMismatch) {
-            coverage.record_local_loss(simulator_id, LocalCoverageLossReason::RegionMismatch, 1);
-        }
+        let region_mismatch = matches!(self.status, IngestStatus::RegionHandleMismatch | IngestStatus::RegionContextMismatch);
         let mut malformed = (self.invalid_blocks as u64).saturating_add(self.invalid_fields as u64);
         let mut resource_limits = 0_u64;
+        let mut rejected_addresses = [None; MAX_INGEST_DIAGNOSTIC_ADDRESSES];
+        let mut rejected_address_count = 0;
         for block in &self.blocks {
             let Some(result) = &block.result else { continue };
+            let mut rejected = false;
             match result {
-                Err(InvalidValue { .. } | KindMismatch { .. }) => malformed = malformed.saturating_add(1),
+                Err(InvalidValue { .. } | KindMismatch { .. }) => {
+                    malformed = malformed.saturating_add(1);
+                    rejected = true;
+                }
                 Err(
                     EntityBudgetExhausted
                     | RegistrationBudgetExhausted
                     | RevisionExhausted
                     | FrameGenerationExhausted
                     | AddressGenerationExhausted,
-                ) => resource_limits = resource_limits.saturating_add(1),
+                ) => {
+                    resource_limits = resource_limits.saturating_add(1);
+                    rejected = true;
+                }
                 Err(StaleRegion | RegionRetired) => {}
                 Ok(applied) => {
                     for rejection in applied.rejections.iter() {
                         match rejection.reason {
                             RejectedValue { .. } | InvalidRotation | ParentCycle | ParentDependsOnRejectedParent => {
                                 malformed = malformed.saturating_add(1);
+                                rejected = true;
                             }
-                            ResourceLimit { .. } => resource_limits = resource_limits.saturating_add(1),
+                            ResourceLimit { .. } => {
+                                resource_limits = resource_limits.saturating_add(1);
+                                rejected = true;
+                            }
                             StaleFrame | StaleVersion | UntrustedSource => {}
                         }
                     }
                 }
             }
+            if rejected
+                && rejected_address_count < MAX_INGEST_DIAGNOSTIC_ADDRESSES
+                && let Some(address) = block.address
+            {
+                rejected_addresses[rejected_address_count] = Some(address);
+                rejected_address_count += 1;
+            }
         }
-        coverage.record_local_loss(simulator_id, LocalCoverageLossReason::MalformedData, malformed);
-        coverage.record_local_loss(simulator_id, LocalCoverageLossReason::ResourceLimit, resource_limits);
+        if region_mismatch || malformed > 0 || resource_limits > 0 {
+            let rejected_addresses = rejected_addresses[..rejected_address_count].iter().flatten().collect::<Vec<_>>();
+            tracing::warn!(
+                ?simulator_id,
+                region_mismatch,
+                malformed,
+                resource_limits,
+                rejected_addresses = ?rejected_addresses,
+                "World update was partially rejected; world data may be incomplete"
+            );
+        }
     }
 }
 
@@ -360,124 +205,18 @@ struct SimulatorRegion {
 /// Owns the observed World and the simulator connection lifetimes for one session.
 pub(super) struct SessionWorld {
     world: World,
-    renderer_read_requests: mpsc::Receiver<WorldReadRequest>,
-    inspector_read_requests: mpsc::Receiver<WorldReadRequest>,
-    renderer_reader_requests: mpsc::Sender<WorldReadRequest>,
-    inspector_reader_requests: mpsc::Sender<WorldReadRequest>,
-    session: Arc<()>,
-    coverage: SessionCoverageState,
     regions: HashMap<SimulatorId, SimulatorRegion>,
 }
 
 impl SessionWorld {
-    #[cfg(test)]
     pub(super) fn new(limits: WorldLimits) -> Self {
-        Self::with_coverage(limits, SessionCoverageState::new())
-    }
-
-    pub(super) fn with_coverage(limits: WorldLimits, coverage: SessionCoverageState) -> Self {
         let world = World::new(limits);
-        let (renderer_reader_requests, renderer_read_requests) = mpsc::channel(WORLD_READ_QUEUE_CAPACITY);
-        let (inspector_reader_requests, inspector_read_requests) = mpsc::channel(WORLD_READ_QUEUE_CAPACITY);
-        Self {
-            world,
-            renderer_read_requests,
-            inspector_read_requests,
-            renderer_reader_requests,
-            inspector_reader_requests,
-            session: Arc::new(()),
-            coverage,
-            regions: HashMap::new(),
-        }
-    }
-
-    pub(super) fn reader(&self) -> WorldReader {
-        WorldReader {
-            renderer_requests: self.renderer_reader_requests.clone(),
-            inspector_requests: self.inspector_reader_requests.clone(),
-            session: Arc::clone(&self.session),
-            priority: WorldReadPriority::Renderer,
-        }
+        Self { world, regions: HashMap::new() }
     }
 
     #[cfg(test)]
     pub(super) fn world(&self) -> &World {
         &self.world
-    }
-
-    pub(super) async fn next_read_requests(&mut self) -> Option<WorldReadBatch> {
-        let (priority, request) = {
-            let renderer = self.renderer_read_requests.recv().fuse();
-            let inspector = self.inspector_read_requests.recv().fuse();
-            pin_mut!(renderer, inspector);
-            select_biased! {
-                request = renderer => (WorldReadPriority::Renderer, request),
-                request = inspector => (WorldReadPriority::Inspector, request),
-            }
-        };
-        let request = request?;
-        let mut batch = WorldReadBatch::default();
-        match priority {
-            WorldReadPriority::Renderer => {
-                batch.renderer = Some(request);
-                batch.inspector = self.inspector_read_requests.try_recv().ok();
-            }
-            WorldReadPriority::Inspector => {
-                batch.renderer = self.renderer_read_requests.try_recv().ok();
-                batch.inspector = Some(request);
-            }
-        }
-        Some(batch)
-    }
-
-    pub(super) fn try_read_requests(&mut self) -> WorldReadBatch {
-        WorldReadBatch { renderer: self.renderer_read_requests.try_recv().ok(), inspector: self.inspector_read_requests.try_recv().ok() }
-    }
-
-    pub(super) fn service_read_request(&self, request: WorldReadRequest) {
-        match request {
-            WorldReadRequest::Barrier(reply) if !reply.is_closed() => {
-                let barrier = self.world.read_barrier();
-                let coverage = self.coverage.snapshot(barrier.revision);
-                let _ = reply.send(Ok(SessionReadBarrier {
-                    changes: barrier.changes,
-                    revision: barrier.revision,
-                    object_count: barrier.object_count,
-                    coverage,
-                }));
-            }
-            WorldReadRequest::ObjectListPage { cursor, limit, reply } if !reply.is_closed() => {
-                let _ = reply.send(self.world.object_list_page(cursor, limit));
-            }
-            WorldReadRequest::ObjectListItem { entity, reply } if !reply.is_closed() => {
-                let _ = reply.send(self.world.object_list_item(entity));
-            }
-            WorldReadRequest::RegionPage { cursor, limit, reply } if !reply.is_closed() => {
-                let _ = reply.send(self.world.region_page(cursor, limit));
-            }
-            WorldReadRequest::RegionSummary { region, reply } if !reply.is_closed() => {
-                let _ = reply.send(self.world.region_summary(region));
-            }
-            WorldReadRequest::ObjectDetails { entities, reply } if !reply.is_closed() => {
-                let _ = reply.send(self.world.object_detail_batch(&entities));
-            }
-            WorldReadRequest::Changes { cursor, limit, reply } if !reply.is_closed() => {
-                let _ = reply.send(self.world.change_page(cursor, limit));
-            }
-            #[cfg(test)]
-            WorldReadRequest::Query { query, cursor, budget, reply } if !reply.is_closed() => {
-                let _ = reply.send(self.world.query(query, cursor, budget));
-            }
-            WorldReadRequest::Barrier(_)
-            | WorldReadRequest::ObjectListPage { .. }
-            | WorldReadRequest::ObjectListItem { .. }
-            | WorldReadRequest::RegionPage { .. }
-            | WorldReadRequest::RegionSummary { .. }
-            | WorldReadRequest::ObjectDetails { .. }
-            | WorldReadRequest::Changes { .. } => {}
-            #[cfg(test)]
-            WorldReadRequest::Query { .. } => {}
-        }
     }
 
     pub(super) fn maintain_query_state(&mut self) -> bool {
@@ -590,17 +329,8 @@ impl SessionWorld {
                 }
                 Some(operation) => {
                     let address = operation.address();
-                    let prior_parent =
-                        self.world.entity_at(address).and_then(|entity| self.world.object(entity)).map(|object| object.parent());
-                    let full_observation = matches!(&operation, ObjectOperation::Observe(_));
                     let result = apply_operation(&mut self.world, operation);
-                    let recovery_satisfied = result.as_ref().is_ok_and(|applied| {
-                        let accepted = matches!(applied.outcome, Introduced(_) | Updated(_) | Unchanged);
-                        let parent_was_pending = prior_parent.is_some_and(|parent| matches!(parent, Parent::Pending { .. }));
-                        let accepted_observation = full_observation && accepted && (!parent_was_pending || applied.parent_update_accepted);
-                        let accepted_parent_update = accepted && applied.parent_update_accepted;
-                        accepted_observation || accepted_parent_update
-                    });
+                    let recovery_satisfied = result.as_ref().is_ok_and(|applied| applied.recovery.satisfied);
                     (Some(address), Some(result), None, recovery_satisfied, true)
                 }
                 None => (None, None, None, false, false),
@@ -671,9 +401,6 @@ impl SessionWorld {
             }
             self.maintain_query_state();
             if has_more {
-                for request in self.try_read_requests().into_iter() {
-                    self.service_read_request(request);
-                }
                 tokio::task::yield_now().await;
             }
         }
@@ -688,21 +415,15 @@ impl SessionWorld {
         let address = LocalAddress::new(simulator.region, request.local_id);
         let entity = self.world.entity_at(address)?;
         let object = self.world.object(entity)?;
-        if object.identity().id() != request.object_id
+        if object.id() != request.object_id
             || object.kind() != Kind::Object
             || object.appearance() != Some(Appearance::Surface)
             || object.object_media().is_some_and(|media| media.version() >= request.version)
         {
             return None;
         }
-        Some(ObjectMediaTarget {
-            simulator_id,
-            entity,
-            source: request.source,
-            object_id: request.object_id,
-            local_id: request.local_id,
-            version: request.version,
-        })
+        let object_binding_target = self.world.object_binding_target(entity)?;
+        Some(ObjectMediaTarget { simulator_id, binding: object_binding_target, source: request.source, version: request.version })
     }
 
     pub(super) fn object_media_target_is_current(&self, target: ObjectMediaTarget) -> bool {
@@ -710,14 +431,11 @@ impl SessionWorld {
         if simulator.region != target.source.region() || !matches!(target.source.order(), OrderEvidence::Ordered(_)) {
             return false;
         }
-        let address = LocalAddress::new(simulator.region, target.local_id);
-        let Some(entity) = self.world.entity_at(address) else { return false };
-        if entity != target.entity {
+        if target.binding.address().region() != simulator.region || !self.world.object_binding_target_is_current(target.binding) {
             return false;
         }
-        self.world.object(entity).is_some_and(|object| {
-            object.identity().id() == target.object_id
-                && object.kind() == Kind::Object
+        self.world.object(target.binding.entity()).is_some_and(|object| {
+            object.kind() == Kind::Object
                 && object.appearance() == Some(Appearance::Surface)
                 && object.object_media().is_none_or(|media| media.version() < target.version)
         })
@@ -728,24 +446,10 @@ impl SessionWorld {
         target: ObjectMediaTarget,
         update: ObjectMediaUpdate,
     ) -> Option<Result<Applied, ApplyError>> {
-        if update.version() < target.version {
+        if update.version() < target.version || !self.object_media_target_is_current(target) {
             return None;
         }
-        let simulator = self.regions.get(&target.simulator_id)?;
-        let address = LocalAddress::new(simulator.region, target.local_id);
-        if simulator.region != target.source.region() || !matches!(target.source.order(), OrderEvidence::Ordered(_)) {
-            return None;
-        }
-        let entity = self.world.entity_at(address)?;
-        if entity != target.entity {
-            return None;
-        }
-        let object = self.world.object(entity)?;
-        if object.identity().id() != target.object_id || object.kind() != Kind::Object || object.appearance() != Some(Appearance::Surface) {
-            return None;
-        }
-        drop(object);
-        let mut patch = ObjectPatch::new(target.source, target.local_id);
+        let mut patch = ObjectPatch::new(target.source, target.binding.address().local_id());
         patch.object_media = Some(update);
         let result = self.world.patch_object(patch);
         Some(result)
@@ -777,7 +481,7 @@ impl SessionWorld {
         }
         let entity = self.world.entity(update.object_id)?;
         let object = self.world.object(entity)?;
-        if object.identity().id() != update.object_id || object.kind() != Kind::Avatar || object.address().region() != simulator.region {
+        if object.id() != update.object_id || object.kind() != Kind::Avatar || object.address().region() != simulator.region {
             return None;
         }
         let local_id = object.address().local_id();
@@ -915,36 +619,26 @@ pub(super) fn viewer_world_limits() -> WorldLimits {
 #[cfg(test)]
 mod tests {
     use std::{
-        future::Future as _,
         num::NonZeroU32,
         sync::{
             Arc,
-            atomic::{AtomicU64, Ordering as AtomicOrdering},
+            atomic::{AtomicBool, Ordering},
         },
-        task::Poll,
     };
 
     use base::UUID;
-    use futures::{executor::block_on, future::poll_fn, pin_mut};
-    use math::{DVec3, Quat, Vec3};
-    use network::{CoverageLossReason, CoverageSource, CoverageWatermark, SimulatorId, testing::simulator_id};
+    use math::Vec3;
+    use network::{SimulatorId, testing::simulator_id};
     use tokio::sync::oneshot::channel;
     use world::{
-        Appearance, AssetId, AvatarAppearanceUpdate, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex, Kind, LocalAddress,
-        MAX_AVATAR_TEXTURE_SLOTS, MAX_OBJECT_PAGE_ITEMS, MediaEntry, ObjectMediaUpdate, ObjectObservation, ObjectPatch, OrderEvidence,
-        Parent, ParentUpdate, Pose, QueryCompleteness, Region, RegionHandle, RegionInfo, RenderMaterials, Shape, UpdateSource, WorldQuery,
-        WorldQueryBudget,
+        Appearance, AssetId, AvatarAppearanceUpdate, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex, FieldUpdate, Kind,
+        LocalAddress, MAX_AVATAR_TEXTURE_SLOTS, MediaEntry, ObjectMediaUpdate, ObjectObservation, ObjectPatch, OrderEvidence, Parent,
+        ParentUpdate, Pose, Region, RenderMaterials, Shape, UpdateSource,
     };
 
-    use crate::session::{
-        coverage::{CoverageHealth, SessionCoverageState},
-        inbound::{AvatarAppearanceMessage, ObjectBatch, ObjectMediaRequest, ObjectOperation},
-    };
+    use crate::session::inbound::{AvatarAppearanceMessage, ObjectBatch, ObjectMediaRequest, ObjectOperation};
 
-    use super::{
-        IngestSummary, MAX_OBJECTS_PER_INTAKE_QUANTUM, MAX_WORLD_ENTITIES, SessionWorld, WorldReadError, WorldReadRequest, WorldReader,
-        WorldReaderError, viewer_world_limits,
-    };
+    use super::{IngestSummary, MAX_OBJECTS_PER_INTAKE_QUANTUM, MAX_WORLD_ENTITIES, SessionWorld, viewer_world_limits};
 
     fn observation(region: Region, order: u32, id: u128, local_id: NonZeroU32, parent: ParentUpdate) -> ObjectObservation {
         ObjectObservation {
@@ -957,9 +651,9 @@ mod tests {
             linear_motion: None,
             angular_velocity: None,
             scale: None,
-            attachment_point: None,
-            shape: None,
-            appearance: None,
+            attachment_point: FieldUpdate::Keep,
+            shape: FieldUpdate::Keep,
+            appearance: FieldUpdate::Keep,
             surface_appearance: None,
             render_materials: None,
         }
@@ -972,59 +666,6 @@ mod tests {
                 ObjectBatch { region, region_handle: None, blocks: vec![Some(operation)], invalid_blocks: 0, invalid_fields: 0 },
             )
             .expect("registered simulator")
-    }
-
-    fn read_barrier(session: &mut SessionWorld, reader: &WorldReader) -> super::SessionReadBarrier {
-        let (reply, response) = channel();
-        reader.try_send(WorldReadRequest::Barrier(reply)).expect("enqueue barrier");
-        for request in session.try_read_requests().into_iter() {
-            session.service_read_request(request);
-        }
-        block_on(response).expect("World reader response").expect("World read barrier")
-    }
-
-    fn drive_capture<T>(
-        session: &mut SessionWorld,
-        capture: impl Future<Output = T>,
-        mut before_request: impl FnMut(&mut SessionWorld, &WorldReadRequest),
-    ) -> T {
-        pin_mut!(capture);
-        block_on(poll_fn(|cx| {
-            if let Poll::Ready(result) = capture.as_mut().poll(cx) {
-                return Poll::Ready(result);
-            }
-            let requests = session.try_read_requests().into_iter().collect::<Vec<_>>();
-            assert!(!requests.is_empty(), "pending capture should have a queued reader request");
-            for request in requests {
-                before_request(session, &request);
-                session.service_read_request(request);
-            }
-            Poll::Pending
-        }))
-    }
-
-    #[tokio::test]
-    async fn reader_queries_current_world_state() {
-        let simulator_id = simulator_id();
-        let mut session = SessionWorld::new(viewer_world_limits());
-        let region = session.register_simulator(simulator_id, None).expect("register simulator");
-        session
-            .update_region_metadata(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() })
-            .expect("set region origin");
-        let mut object = observation(region, 1, 42, NonZeroU32::new(1).unwrap(), ParentUpdate::Root);
-        object.pose = Some(Pose { position: Some(Vec3::X), rotation: Some(Quat::IDENTITY) });
-        apply_one(&mut session, simulator_id, region, ObjectOperation::Observe(object));
-
-        let reader = session.reader();
-        let query = WorldQuery::live().within(DVec3::ZERO, 2.0).expect("valid radius");
-        let response = tokio::spawn(async move { reader.query(query, None, WorldQueryBudget { work: 64, results: 8 }).await });
-        for request in session.next_read_requests().await.expect("reader queue remains open").into_iter() {
-            session.service_read_request(request);
-        }
-
-        let page = response.await.expect("query task completes").expect("query request completes");
-        assert_eq!(page.completeness, QueryCompleteness::Exact);
-        assert_eq!(page.items.iter().map(|item| item.id()).collect::<Vec<_>>(), [UUID::from_u128(42)]);
     }
 
     #[test]
@@ -1049,20 +690,16 @@ mod tests {
             .expect("registered simulator");
 
         assert!(summary.blocks.iter().all(|block| block.result.as_ref().is_some_and(|result| result.is_ok())));
-        assert_eq!(world.world().objects().count(), 10_001);
+        assert_eq!(world.world().objects().iter().count(), 10_001);
         assert_eq!(viewer_world_limits().max_entities_per_region, MAX_WORLD_ENTITIES);
     }
 
     #[tokio::test]
     async fn batch_yields_between_chunks() {
         let simulator_id = simulator_id();
-        let coverage = SessionCoverageState::new();
-        let mut session = SessionWorld::with_coverage(viewer_world_limits(), coverage.clone());
+        let mut session = SessionWorld::new(viewer_world_limits());
         let region = session.register_simulator(simulator_id, None).expect("register simulator");
         let before_revision = session.world().revision().get();
-        let reader = session.reader();
-        let (reply, response) = channel();
-        reader.try_send(WorldReadRequest::Barrier(reply)).expect("queue barrier");
         let mut blocks = (1..=MAX_OBJECTS_PER_INTAKE_QUANTUM as u32)
             .map(|local_id| {
                 Some(ObjectOperation::Observe(observation(
@@ -1076,65 +713,41 @@ mod tests {
             .collect::<Vec<_>>();
         blocks.push(None);
 
+        let (first_chunk_tx, first_chunk_rx) = channel();
+        let observed_yield = Arc::new(AtomicBool::new(false));
+        let observer_state = Arc::clone(&observed_yield);
+        let observer = tokio::spawn(async move {
+            first_chunk_rx.await.expect("first batch chunk is observed");
+            observer_state.store(true, Ordering::Relaxed);
+        });
+        let mut first_chunk_tx = Some(first_chunk_tx);
         let worker = tokio::spawn(async move {
             let summary = session
                 .apply_object_batch_cooperatively(
                     simulator_id,
                     ObjectBatch { region, region_handle: None, blocks, invalid_blocks: 1, invalid_fields: 2 },
-                    |part, _, _| part.record_coverage_losses(&coverage, simulator_id),
+                    |_, _, _| {
+                        if let Some(sender) = first_chunk_tx.take() {
+                            sender.send(()).expect("observer waits for the first chunk");
+                        } else {
+                            assert!(observed_yield.load(Ordering::Relaxed), "the batch yields before processing another chunk");
+                        }
+                    },
                 )
                 .await
                 .expect("registered simulator");
             (session, summary)
         });
-        let barrier = response.await.expect("World read response").expect("World read barrier");
-        assert_eq!(barrier.object_count, MAX_OBJECTS_PER_INTAKE_QUANTUM);
-        assert_eq!(barrier.revision.get(), before_revision + MAX_OBJECTS_PER_INTAKE_QUANTUM as u64);
-        assert_eq!(barrier.coverage.health, CoverageHealth::Degraded);
-        assert_eq!(barrier.coverage.local_losses[0].reason, super::super::coverage::LocalCoverageLossReason::MalformedData);
-        assert_eq!(barrier.coverage.local_losses[0].count, 3);
-
         let (session, summary) = worker.await.expect("World worker");
-        assert_eq!(session.world().objects().count(), MAX_OBJECTS_PER_INTAKE_QUANTUM);
+        observer.await.expect("observer runs after the cooperative yield");
+        assert_eq!(session.world().objects().iter().count(), MAX_OBJECTS_PER_INTAKE_QUANTUM);
+        assert_eq!(session.world().revision().get(), before_revision + MAX_OBJECTS_PER_INTAKE_QUANTUM as u64);
         assert_eq!(summary.blocks.len(), MAX_OBJECTS_PER_INTAKE_QUANTUM + 1);
         assert_eq!(summary.invalid_blocks, 1);
         assert_eq!(summary.invalid_fields, 2);
         assert!(
             summary.blocks[..MAX_OBJECTS_PER_INTAKE_QUANTUM].iter().all(|block| block.result.as_ref().is_some_and(|result| result.is_ok()))
         );
-    }
-
-    #[test]
-    fn reader_lanes_are_bounded_and_close() {
-        let mut world = SessionWorld::new(viewer_world_limits());
-        let reader = world.reader();
-        let inspector = reader.inspector();
-        let (inspector_reply, inspector_response) = channel();
-        inspector.try_send(WorldReadRequest::Barrier(inspector_reply)).unwrap();
-        let (busy_inspector_reply, _busy_inspector_response) = channel();
-        assert_eq!(inspector.try_send(WorldReadRequest::Barrier(busy_inspector_reply)), Err(WorldReaderError::Busy));
-
-        let (renderer_reply, renderer_response) = channel();
-        reader.try_send(WorldReadRequest::ObjectListPage { cursor: None, limit: 1, reply: renderer_reply }).unwrap();
-        let (busy_renderer_reply, _busy_renderer_response) = channel();
-        assert_eq!(reader.try_send(WorldReadRequest::Barrier(busy_renderer_reply)), Err(WorldReaderError::Busy));
-
-        let requests = world.try_read_requests();
-        let requests = requests.into_iter().collect::<Vec<_>>();
-        assert_eq!(requests.len(), 2);
-        for request in requests {
-            world.service_read_request(request);
-        }
-
-        let _page = block_on(renderer_response).unwrap().unwrap();
-        let barrier = block_on(inspector_response).unwrap().unwrap();
-        assert_eq!(barrier.revision, world.world().revision());
-        assert_eq!(barrier.coverage.world_revision, barrier.revision);
-        assert_eq!(barrier.coverage.health, CoverageHealth::NoKnownLoss);
-        drop(world);
-
-        assert_eq!(block_on(reader.barrier()), Err(WorldReaderError::Gone));
-        assert_eq!(block_on(inspector.barrier()), Err(WorldReaderError::Gone));
     }
 
     #[test]
@@ -1151,55 +764,12 @@ mod tests {
     }
 
     #[test]
-    fn coverage_changes_keep_world_revision() {
-        let coverage = SessionCoverageState::new();
-        let mut session = SessionWorld::with_coverage(viewer_world_limits(), coverage.clone());
-        let reader = session.reader();
-        let before = read_barrier(&mut session, &reader);
-        assert_eq!(before.coverage.health, CoverageHealth::NoKnownLoss);
-
-        coverage.record_network_overflow(1);
-        let after = read_barrier(&mut session, &reader);
-
-        assert_eq!(after.revision, before.revision);
-        assert_eq!(after.coverage.world_revision, after.revision);
-        assert!(after.coverage.generation > before.coverage.generation);
-        assert_eq!(after.coverage.health, CoverageHealth::Degraded);
-    }
-
-    #[test]
-    fn loss_is_visible_before_dependent_world_update() {
+    fn local_intake_limits_preserve_existing_objects() {
         let simulator_id = simulator_id();
-        let coverage = SessionCoverageState::new();
-        let mut session = SessionWorld::with_coverage(viewer_world_limits(), coverage.clone());
-        let region = session.register_simulator(simulator_id, None).expect("register simulator");
-        let reader = session.reader();
-        let loss = CoverageWatermark { simulator_id, source: CoverageSource::Lludp, generation: 1, overflow_generation: 0 };
-        coverage.record_source_loss(loss, CoverageLossReason::DecodeRejected, false);
-        let lost = read_barrier(&mut session, &reader);
-        assert_eq!(lost.coverage.health, CoverageHealth::Degraded);
-        assert_eq!(lost.coverage.losses[0].watermark, loss);
-
-        apply_one(
-            &mut session,
-            simulator_id,
-            region,
-            ObjectOperation::Observe(observation(region, 1, 0x1001, NonZeroU32::new(1).expect("nonzero local ID"), ParentUpdate::Root)),
-        );
-        let applied = read_barrier(&mut session, &reader);
-        assert!(applied.revision > lost.revision);
-        assert_eq!(applied.coverage.health, CoverageHealth::Degraded);
-        assert_eq!(applied.coverage.losses[0].watermark.generation, 1);
-    }
-
-    #[test]
-    fn local_intake_failures_degrade_coverage_and_survive_later_success() {
-        let simulator_id = simulator_id();
-        let coverage = SessionCoverageState::new();
         let mut limits = viewer_world_limits();
         limits.max_entities = 1;
         limits.max_entities_per_region = 1;
-        let mut session = SessionWorld::with_coverage(limits, coverage);
+        let mut session = SessionWorld::new(limits);
         let region = session.register_simulator(simulator_id, None).expect("register simulator");
         let local_id = NonZeroU32::new(1).expect("nonzero local ID");
         let summary = session
@@ -1214,16 +784,9 @@ mod tests {
                 },
             )
             .expect("registered simulator");
-        summary.record_coverage_losses(&session.coverage, simulator_id);
-        assert_eq!(session.world().objects().count(), 1);
-        assert_eq!(
-            session.coverage.snapshot(session.world().revision()).local_losses,
-            [super::super::coverage::LocalCoverageLoss {
-                simulator_id,
-                reason: super::super::coverage::LocalCoverageLossReason::MalformedData,
-                count: 3,
-            }]
-        );
+        assert_eq!(session.world().objects().iter().count(), 1);
+        assert_eq!(summary.invalid_blocks, 1);
+        assert_eq!(summary.invalid_fields, 2);
 
         let rejected = session
             .apply_object_batch(
@@ -1245,7 +808,6 @@ mod tests {
             .expect("registered simulator");
         assert!(matches!(rejected.blocks[0].result, Some(Err(world::ApplyError::EntityBudgetExhausted))));
         assert!(rejected.recovery_targets().next().is_none());
-        rejected.record_coverage_losses(&session.coverage, simulator_id);
 
         let success = apply_one(
             &mut session,
@@ -1253,12 +815,8 @@ mod tests {
             region,
             ObjectOperation::Observe(observation(region, 3, 0x1001, local_id, ParentUpdate::Root)),
         );
-        success.record_coverage_losses(&session.coverage, simulator_id);
-        let snapshot = session.coverage.snapshot(session.world().revision());
-        assert_eq!(snapshot.health, CoverageHealth::Degraded);
-        assert_eq!(snapshot.local_losses.len(), 2);
-        assert_eq!(snapshot.local_losses[1].reason, super::super::coverage::LocalCoverageLossReason::ResourceLimit);
-        assert_eq!(snapshot.local_losses[1].count, 1);
+        assert!(success.blocks[0].result.as_ref().is_some_and(|result| result.is_ok()));
+        assert_eq!(session.world().objects().iter().count(), 1);
     }
 
     #[test]
@@ -1279,7 +837,7 @@ mod tests {
         let mut child = observation(region, 2, 0x1001, child_local_id, ParentUpdate::Local(parent_local_id));
         child.kind = Kind::Avatar;
         let introduced = apply_one(&mut session, simulator_id, region, ObjectOperation::Observe(child.clone()));
-        assert!(introduced.blocks[0].result.as_ref().unwrap().as_ref().unwrap().parent_update_accepted);
+        assert!(introduced.blocks[0].result.as_ref().unwrap().as_ref().unwrap().recovery.satisfied);
 
         apply_one(
             &mut session,
@@ -1301,453 +859,6 @@ mod tests {
     }
 
     #[test]
-    fn waiting_reads_prioritize_renderer() {
-        let mut world = SessionWorld::new(viewer_world_limits());
-        let reader = world.reader();
-        let inspector = reader.inspector();
-        let (inspector_reply, _inspector_response) = channel();
-        inspector.try_send(WorldReadRequest::Barrier(inspector_reply)).unwrap();
-        let (renderer_reply, _renderer_response) = channel();
-        reader.try_send(WorldReadRequest::ObjectListPage { cursor: None, limit: 1, reply: renderer_reply }).unwrap();
-
-        let mut requests = block_on(world.next_read_requests()).expect("queued read batch").into_iter();
-        assert!(matches!(requests.next(), Some(WorldReadRequest::ObjectListPage { .. })));
-        assert!(matches!(requests.next(), Some(WorldReadRequest::Barrier(_))));
-        assert!(requests.next().is_none());
-    }
-
-    #[test]
-    fn bootstrap_replays_changes() {
-        let simulator_id = simulator_id();
-        let mut session = SessionWorld::new(viewer_world_limits());
-        let region = session.register_simulator(simulator_id, None).expect("register simulator");
-        let blocks = (0..=MAX_OBJECT_PAGE_ITEMS)
-            .map(|index| {
-                let local_id = NonZeroU32::new(index as u32 + 1).expect("nonzero local ID");
-                Some(ObjectOperation::Observe(observation(
-                    region,
-                    index as u32 + 1,
-                    u128::from(1_000 + index as u32),
-                    local_id,
-                    ParentUpdate::Root,
-                )))
-            })
-            .collect();
-        session
-            .apply_object_batch(simulator_id, ObjectBatch { region, region_handle: None, blocks, invalid_blocks: 0, invalid_fields: 0 })
-            .expect("seed World");
-
-        let selected_id = UUID::from_u128(1_001);
-        let selected_entity = session.world().entity(selected_id).expect("selected object");
-        let removed_id = UUID::from_u128(1_000);
-        let removed_entity = session.world().entity(removed_id).expect("object to replace");
-        let reader = session.reader().inspector();
-        let capture = crate::devtools::capture_snapshot_for_test(&reader, Some((selected_id, selected_entity)));
-        pin_mut!(capture);
-        let mut changed_during_paging = false;
-
-        let snapshot = block_on(poll_fn(|cx| {
-            if let Poll::Ready(result) = capture.as_mut().poll(cx) {
-                return Poll::Ready(result);
-            }
-
-            let requests = session.try_read_requests().into_iter().collect::<Vec<_>>();
-            assert!(!requests.is_empty(), "pending capture should have a queued read");
-            for request in requests {
-                let change_now = !changed_during_paging && matches!(&request, WorldReadRequest::ObjectListPage { cursor: Some(_), .. });
-                if change_now {
-                    changed_during_paging = true;
-                    apply_one(
-                        &mut session,
-                        simulator_id,
-                        region,
-                        ObjectOperation::Observe(observation(
-                            region,
-                            258,
-                            5,
-                            NonZeroU32::new(258).expect("nonzero local ID"),
-                            ParentUpdate::Root,
-                        )),
-                    );
-                    apply_one(
-                        &mut session,
-                        simulator_id,
-                        region,
-                        ObjectOperation::Observe(observation(
-                            region,
-                            259,
-                            2_000,
-                            NonZeroU32::new(259).expect("nonzero local ID"),
-                            ParentUpdate::Root,
-                        )),
-                    );
-                    apply_one(
-                        &mut session,
-                        simulator_id,
-                        region,
-                        ObjectOperation::Remove {
-                            source: UpdateSource::new(region, 260, OrderEvidence::Ordered(260), 0),
-                            local_id: NonZeroU32::new(1).expect("nonzero local ID"),
-                        },
-                    );
-                    apply_one(
-                        &mut session,
-                        simulator_id,
-                        region,
-                        ObjectOperation::Observe(observation(
-                            region,
-                            261,
-                            1_000,
-                            NonZeroU32::new(300).expect("nonzero local ID"),
-                            ParentUpdate::Root,
-                        )),
-                    );
-                    let mut patch = ObjectPatch::new(
-                        UpdateSource::new(region, 262, OrderEvidence::Ordered(262), 0),
-                        NonZeroU32::new(2).expect("nonzero local ID"),
-                    );
-                    patch.parent = Some(ParentUpdate::Local(NonZeroU32::new(3).expect("nonzero parent local ID")));
-                    patch.pose = Some(Pose { position: Some(Vec3::new(9.0, 8.0, 7.0)), rotation: None });
-                    apply_one(&mut session, simulator_id, region, ObjectOperation::Patch(patch));
-                    let handle = RegionHandle::new((512_u64 << 32) | 768);
-                    session
-                        .update_region_metadata(
-                            region,
-                            RegionInfo { handle: Some(handle), origin: Some(handle.origin()), ..RegionInfo::default() },
-                        )
-                        .expect("update region origin");
-                }
-                session.service_read_request(request);
-            }
-            Poll::Pending
-        }))
-        .expect("capture and replay changes");
-
-        let inserted_entity = session.world().entity(UUID::from_u128(5)).expect("concurrent insertion");
-        let ahead_entity = session.world().entity(UUID::from_u128(2_000)).expect("ahead-of-cursor insertion");
-        let replacement_entity = session.world().entity(removed_id).expect("replacement incarnation");
-        let selected_parent = session.world().object(selected_entity).expect("selected object").parent();
-        let Parent::Resolved(parent_entity) = selected_parent else { panic!("selected object has a resolved parent") };
-        let parent_id = session.world().object(parent_entity).expect("parent object").identity().id();
-        let expected_parent = parent_id.to_string();
-        let expected_region = session.world().region(region).expect("current region metadata");
-        assert!(changed_during_paging);
-        assert_eq!(snapshot.object_count, MAX_OBJECT_PAGE_ITEMS + 3);
-        assert_eq!(snapshot.objects.len(), snapshot.object_count);
-        assert_eq!(snapshot.revision, Some(session.world().revision()));
-        assert_eq!(snapshot.selected_position, Some(Vec3::new(9.0, 8.0, 7.0)));
-        assert_eq!(snapshot.selected_parent, Some(expected_parent));
-        assert_eq!(snapshot.regions.iter().find(|summary| summary.region == region).map(|summary| &summary.info), Some(expected_region));
-        assert!(snapshot.objects.iter().any(|(id, entity, _, _)| *id == UUID::from_u128(5) && *entity == inserted_entity));
-        assert!(snapshot.objects.iter().any(|(id, entity, _, _)| *id == UUID::from_u128(2_000) && *entity == ahead_entity));
-        assert!(
-            snapshot
-                .objects
-                .iter()
-                .any(|(id, entity, _, local_id)| { *id == removed_id && *entity == replacement_entity && local_id.get() == 300 })
-        );
-        assert!(!snapshot.objects.iter().any(|(id, entity, _, _)| *id == removed_id && *entity == removed_entity));
-    }
-
-    #[test]
-    fn mirror_capture_continues_while_the_world_changes() {
-        const OBJECT_COUNT: usize = MAX_OBJECT_PAGE_ITEMS + 1;
-        const FIRST_OBJECT_ID: u128 = 0x2000;
-
-        let simulator_id = simulator_id();
-        let mut session = SessionWorld::new(viewer_world_limits());
-        let region = session.register_simulator(simulator_id, None).expect("register simulator");
-        let blocks = (0..OBJECT_COUNT)
-            .map(|index| {
-                Some(ObjectOperation::Observe(observation(
-                    region,
-                    index as u32 + 1,
-                    FIRST_OBJECT_ID + index as u128,
-                    NonZeroU32::new(index as u32 + 1).expect("nonzero local ID"),
-                    ParentUpdate::Root,
-                )))
-            })
-            .collect();
-        session
-            .apply_object_batch(simulator_id, ObjectBatch { region, region_handle: None, blocks, invalid_blocks: 0, invalid_fields: 0 })
-            .expect("seed paged World");
-
-        let reader = session.reader().inspector();
-        let mut mirror = crate::devtools::WorldMirrorForTest::default();
-        let mut changed_during_capture = false;
-        let snapshot = drive_capture(
-            &mut session,
-            crate::devtools::capture_snapshot_cancellable_for_test(&reader, &mut mirror, || false),
-            |session, request| {
-                if !changed_during_capture && matches!(request, WorldReadRequest::ObjectListPage { cursor: Some(_), .. }) {
-                    changed_during_capture = true;
-                    apply_one(
-                        session,
-                        simulator_id,
-                        region,
-                        ObjectOperation::Observe(observation(
-                            region,
-                            OBJECT_COUNT as u32 + 1,
-                            1,
-                            NonZeroU32::new(OBJECT_COUNT as u32 + 1).expect("nonzero local ID"),
-                            ParentUpdate::Root,
-                        )),
-                    );
-                }
-            },
-        )
-        .expect("capture mirror while intake continues");
-        let snapshot = snapshot.expect("capture completes without cancellation");
-
-        assert!(changed_during_capture);
-        assert_eq!(snapshot.object_count, OBJECT_COUNT + 1);
-        assert_eq!(snapshot.objects.len(), OBJECT_COUNT + 1);
-        assert!(snapshot.objects.iter().any(|(id, _, _, _)| *id == UUID::from_u128(1)));
-        let unique_objects = snapshot.objects.iter().map(|(id, ..)| *id).collect::<std::collections::HashSet<_>>();
-        assert_eq!(unique_objects.len(), OBJECT_COUNT + 1);
-
-        let current =
-            drive_capture(&mut session, crate::devtools::capture_snapshot_cancellable_for_test(&reader, &mut mirror, || false), |_, _| {})
-                .expect("finish at the current World revision");
-        let current = current.expect("capture completes without cancellation");
-        assert_eq!(current.object_count, OBJECT_COUNT + 1);
-        assert_eq!(current.objects.len(), OBJECT_COUNT + 1);
-    }
-    #[test]
-    fn pause_cancels_capture_before_page_commit() {
-        let simulator_id = simulator_id();
-        let mut session = SessionWorld::new(viewer_world_limits());
-        let region = session.register_simulator(simulator_id, None).expect("register simulator");
-        for index in 1..=3 {
-            apply_one(
-                &mut session,
-                simulator_id,
-                region,
-                ObjectOperation::Observe(observation(
-                    region,
-                    index,
-                    u128::from(index),
-                    NonZeroU32::new(index).expect("nonzero local ID"),
-                    ParentUpdate::Root,
-                )),
-            );
-        }
-
-        let reader = session.reader().inspector();
-        let mut mirror = crate::devtools::WorldMirrorForTest::default();
-        let generation = Arc::new(AtomicU64::new(0));
-        let capture_generation = Arc::clone(&generation);
-        let cancelled_capture = crate::devtools::capture_snapshot_cancellable_for_test(&reader, &mut mirror, move || {
-            capture_generation.load(AtomicOrdering::Relaxed) != 0
-        });
-        let cancelled = drive_capture(&mut session, cancelled_capture, |_, request| {
-            if matches!(request, WorldReadRequest::ObjectListPage { .. }) {
-                generation.fetch_add(1, AtomicOrdering::Relaxed);
-            }
-        });
-
-        assert!(cancelled.expect("cancelled capture has no reader error").is_none());
-        assert_eq!(mirror.captured_object_count(), 0);
-        assert!(!mirror.object_page_started());
-
-        let resumed =
-            drive_capture(&mut session, crate::devtools::capture_snapshot_cancellable_for_test(&reader, &mut mirror, || false), |_, _| {})
-                .expect("resumed capture completes")
-                .expect("capture was not cancelled");
-        let mut actual = resumed.objects.iter().map(|(id, _, _, _)| *id).collect::<Vec<_>>();
-        actual.sort_unstable();
-
-        assert_eq!(actual, [UUID::from_u128(1), UUID::from_u128(2), UUID::from_u128(3)]);
-        assert!(mirror.object_page_started());
-    }
-
-    #[test]
-    fn pause_keeps_committed_capture_pages() {
-        let simulator_id = simulator_id();
-        let mut session = SessionWorld::new(viewer_world_limits());
-        let region = session.register_simulator(simulator_id, None).expect("register simulator");
-        let blocks = (0..=MAX_OBJECT_PAGE_ITEMS)
-            .map(|index| {
-                let local_id = index as u32 + 1;
-                Some(ObjectOperation::Observe(observation(
-                    region,
-                    local_id,
-                    u128::from(local_id),
-                    NonZeroU32::new(local_id).expect("nonzero local ID"),
-                    ParentUpdate::Root,
-                )))
-            })
-            .collect();
-        session
-            .apply_object_batch(simulator_id, ObjectBatch { region, region_handle: None, blocks, invalid_blocks: 0, invalid_fields: 0 })
-            .expect("seed paged World capture");
-
-        let reader = session.reader().inspector();
-        let mut mirror = crate::devtools::WorldMirrorForTest::default();
-        let generation = Arc::new(AtomicU64::new(0));
-        let capture_generation = Arc::clone(&generation);
-        let cancelled_capture = crate::devtools::capture_snapshot_cancellable_for_test(&reader, &mut mirror, move || {
-            capture_generation.load(AtomicOrdering::Relaxed) != 0
-        });
-        let cancelled = drive_capture(&mut session, cancelled_capture, |_, request| {
-            if matches!(request, WorldReadRequest::ObjectListPage { cursor: Some(_), .. }) {
-                generation.fetch_add(1, AtomicOrdering::Relaxed);
-            }
-        });
-
-        assert!(cancelled.expect("cancelled capture has no reader error").is_none());
-        assert_eq!(mirror.captured_object_count(), MAX_OBJECT_PAGE_ITEMS);
-        assert!(mirror.object_page_started());
-
-        let resumed =
-            drive_capture(&mut session, crate::devtools::capture_snapshot_cancellable_for_test(&reader, &mut mirror, || false), |_, _| {})
-                .expect("resumed capture completes")
-                .expect("capture was not cancelled");
-        let mut actual = resumed.objects.iter().map(|(id, _, _, _)| *id).collect::<Vec<_>>();
-        actual.sort_unstable();
-        let expected = (1..=MAX_OBJECT_PAGE_ITEMS as u128 + 1).map(UUID::from_u128).collect::<Vec<_>>();
-
-        assert_eq!(actual, expected);
-        assert_eq!(mirror.captured_object_count(), MAX_OBJECT_PAGE_ITEMS + 1);
-    }
-
-    #[test]
-    fn stale_selection_is_cleared_on_session_change() {
-        let old_simulator = simulator_id();
-        let mut old_session = SessionWorld::new(viewer_world_limits());
-        let old_region = old_session.register_simulator(old_simulator, None).expect("register old simulator");
-        let old_id = UUID::from_u128(10);
-        apply_one(
-            &mut old_session,
-            old_simulator,
-            old_region,
-            ObjectOperation::Observe(observation(old_region, 1, 10, NonZeroU32::new(1).expect("nonzero local ID"), ParentUpdate::Root)),
-        );
-        let old_reader = old_session.reader().inspector();
-        let old_entity = old_session.world().entity(old_id).expect("old entity");
-
-        let new_simulator = simulator_id();
-        let mut new_session = SessionWorld::new(viewer_world_limits());
-        let new_region = new_session.register_simulator(new_simulator, None).expect("register new simulator");
-        let new_id = UUID::from_u128(20);
-        apply_one(
-            &mut new_session,
-            new_simulator,
-            new_region,
-            ObjectOperation::Observe(observation(new_region, 1, 20, NonZeroU32::new(1).expect("nonzero local ID"), ParentUpdate::Root)),
-        );
-        let reader = new_session.reader().inspector();
-        let capture = crate::devtools::capture_snapshot_after_session_change_for_test(&old_reader, &reader, (old_id, old_entity));
-        pin_mut!(capture);
-
-        let (snapshot, selection_invalidated) = block_on(poll_fn(|cx| {
-            if let Poll::Ready(result) = capture.as_mut().poll(cx) {
-                return Poll::Ready(result);
-            }
-            let requests = new_session.try_read_requests().into_iter().collect::<Vec<_>>();
-            assert!(!requests.is_empty(), "pending capture should have a queued read");
-            for request in requests {
-                new_session.service_read_request(request);
-            }
-            Poll::Pending
-        }));
-        let snapshot = snapshot.expect("capture new session");
-
-        assert!(selection_invalidated);
-        assert_eq!(snapshot.selected_id, None);
-        assert_eq!(snapshot.object_count, 1);
-        assert!(snapshot.objects.iter().any(|(id, _, _, _)| *id == new_id));
-    }
-
-    #[test]
-    fn busy_after_switch_clears_selection() {
-        let old_simulator = simulator_id();
-        let mut old_session = SessionWorld::new(viewer_world_limits());
-        let old_region = old_session.register_simulator(old_simulator, None).expect("register old simulator");
-        let old_id = UUID::from_u128(10);
-        apply_one(
-            &mut old_session,
-            old_simulator,
-            old_region,
-            ObjectOperation::Observe(observation(old_region, 1, 10, NonZeroU32::new(1).expect("nonzero local ID"), ParentUpdate::Root)),
-        );
-        let old_reader = old_session.reader().inspector();
-        let old_entity = old_session.world().entity(old_id).expect("old entity");
-
-        let mut new_session = SessionWorld::new(viewer_world_limits());
-        new_session.register_simulator(simulator_id(), None).expect("register new simulator");
-        let reader = new_session.reader().inspector();
-        let (reply, _response) = channel();
-        reader.try_send(WorldReadRequest::Barrier(reply)).expect("fill inspector queue");
-
-        let (result, selection_invalidated) =
-            block_on(crate::devtools::capture_snapshot_after_session_change_for_test(&old_reader, &reader, (old_id, old_entity)));
-
-        assert!(matches!(result, Err(WorldReaderError::Busy)));
-        assert!(selection_invalidated);
-    }
-
-    #[test]
-    fn resync_after_switch_clears_selection() {
-        let old_simulator = simulator_id();
-        let mut old_session = SessionWorld::new(viewer_world_limits());
-        let old_region = old_session.register_simulator(old_simulator, None).expect("register old simulator");
-        let old_id = UUID::from_u128(10);
-        apply_one(
-            &mut old_session,
-            old_simulator,
-            old_region,
-            ObjectOperation::Observe(observation(old_region, 1, 10, NonZeroU32::new(1).expect("nonzero local ID"), ParentUpdate::Root)),
-        );
-        let old_reader = old_session.reader().inspector();
-        let old_entity = old_session.world().entity(old_id).expect("old entity");
-
-        let mut limits = viewer_world_limits();
-        limits.max_journal_entries = 1;
-        let mut new_session = SessionWorld::new(limits);
-        let new_simulator = simulator_id();
-        let new_region = new_session.register_simulator(new_simulator, None).expect("register new simulator");
-        let reader = new_session.reader().inspector();
-        let capture = crate::devtools::capture_snapshot_after_session_change_for_test(&old_reader, &reader, (old_id, old_entity));
-        pin_mut!(capture);
-        let mut history_advanced = false;
-
-        let (result, selection_invalidated) = block_on(poll_fn(|cx| {
-            if let Poll::Ready(result) = capture.as_mut().poll(cx) {
-                return Poll::Ready(result);
-            }
-
-            let requests = new_session.try_read_requests().into_iter().collect::<Vec<_>>();
-            assert!(!requests.is_empty(), "pending capture should have a queued read");
-            for request in requests {
-                if !history_advanced && matches!(&request, WorldReadRequest::RegionPage { .. }) {
-                    for (order, id) in [(2, 21), (3, 22)] {
-                        apply_one(
-                            &mut new_session,
-                            new_simulator,
-                            new_region,
-                            ObjectOperation::Observe(observation(
-                                new_region,
-                                order,
-                                id,
-                                NonZeroU32::new(order).expect("nonzero local ID"),
-                                ParentUpdate::Root,
-                            )),
-                        );
-                    }
-                    history_advanced = true;
-                }
-                new_session.service_read_request(request);
-            }
-            Poll::Pending
-        }));
-
-        assert!(history_advanced);
-        assert!(matches!(result, Err(WorldReaderError::Read(WorldReadError::ResyncRequired))));
-        assert!(selection_invalidated);
-    }
-
-    #[test]
     fn render_materials_require_volume_and_region() {
         let first_simulator = simulator_id();
         let second_simulator = simulator_id();
@@ -1760,8 +871,8 @@ mod tests {
         apply_one(&mut session, first_simulator, first_region, ObjectOperation::Observe(non_volume));
 
         let mut volume = observation(second_region, 1, 0x702, local_id, ParentUpdate::Root);
-        volume.shape = Some(Some(Shape::Prim));
-        volume.appearance = Some(Some(Appearance::Surface));
+        volume.shape = FieldUpdate::Set(Shape::Prim(Default::default()));
+        volume.appearance = FieldUpdate::Set(Appearance::Surface);
         volume.render_materials = Some(RenderMaterials::new(vec![(0, AssetId::new(UUID::from_u128(0x720)))]).unwrap());
         apply_one(&mut session, second_simulator, second_region, ObjectOperation::Observe(volume));
 
@@ -1799,7 +910,7 @@ mod tests {
         let avatar_id = UUID::from_u128(0x801);
         let mut avatar = observation(region, 1, 0x801, local_id, ParentUpdate::Root);
         avatar.kind = Kind::Avatar;
-        avatar.appearance = Some(Some(Appearance::Avatar));
+        avatar.appearance = FieldUpdate::Set(Appearance::Avatar);
         apply_one(&mut session, first_simulator, region, ObjectOperation::Observe(avatar));
         let other = observation(other_region, 1, 0x802, local_id, ParentUpdate::Root);
         apply_one(&mut session, other_simulator, other_region, ObjectOperation::Observe(other));
@@ -1884,8 +995,8 @@ mod tests {
         let local_id = NonZeroU32::new(7).expect("nonzero local ID");
         let object_id = UUID::from_u128(0x703);
         let mut volume = observation(region, 1, 0x703, local_id, ParentUpdate::Root);
-        volume.shape = Some(Some(Shape::Prim));
-        volume.appearance = Some(Some(Appearance::Surface));
+        volume.shape = FieldUpdate::Set(Shape::Prim(Default::default()));
+        volume.appearance = FieldUpdate::Set(Appearance::Surface);
         apply_one(&mut session, sim_id, region, ObjectOperation::Observe(volume));
 
         let request =
@@ -1900,8 +1011,8 @@ mod tests {
         let remove = UpdateSource::new(region, 3, OrderEvidence::Ordered(3), 0);
         apply_one(&mut session, sim_id, region, ObjectOperation::Remove { source: remove, local_id });
         let mut replacement = observation(region, 4, 0x703, local_id, ParentUpdate::Root);
-        replacement.shape = Some(Some(Shape::Prim));
-        replacement.appearance = Some(Some(Appearance::Surface));
+        replacement.shape = FieldUpdate::Set(Shape::Prim(Default::default()));
+        replacement.appearance = FieldUpdate::Set(Appearance::Surface);
         apply_one(&mut session, sim_id, region, ObjectOperation::Observe(replacement));
 
         let late = ObjectMediaUpdate::new(6, vec![Some(MediaEntry::default())]).expect("valid late response");
@@ -1910,6 +1021,55 @@ mod tests {
         assert_eq!(state.entity_at(LocalAddress::new(other_region, local_id)), None);
         let current = state.object(state.entity_at(LocalAddress::new(region, local_id)).unwrap()).unwrap();
         assert_eq!(current.object_media(), None);
+    }
+
+    #[test]
+    fn media_results_reject_rebound_address_aba_targets() {
+        let simulator_id = simulator_id();
+        let mut session = SessionWorld::new(viewer_world_limits());
+        let region = session.register_simulator(simulator_id, None).expect("register simulator");
+        let local_id = NonZeroU32::new(7).expect("nonzero local ID");
+        let object_id = UUID::from_u128(0x704);
+        let mut volume = observation(region, 1, 0x704, local_id, ParentUpdate::Root);
+        volume.shape = FieldUpdate::Set(Shape::Prim(Default::default()));
+        volume.appearance = FieldUpdate::Set(Appearance::Surface);
+        apply_one(&mut session, simulator_id, region, ObjectOperation::Observe(volume));
+
+        let request =
+            ObjectMediaRequest { source: UpdateSource::new(region, 2, OrderEvidence::Ordered(2), 0), object_id, local_id, version: 5 };
+        let stale_target = session.prepare_object_media(simulator_id, request).expect("initial media target");
+
+        let other_local_id = NonZeroU32::new(8).expect("nonzero replacement local ID");
+        apply_one(
+            &mut session,
+            simulator_id,
+            region,
+            ObjectOperation::Observe(observation(region, 3, 0x704, other_local_id, ParentUpdate::Root)),
+        );
+        apply_one(
+            &mut session,
+            simulator_id,
+            region,
+            ObjectOperation::Observe(observation(region, 4, 0x704, local_id, ParentUpdate::Root)),
+        );
+
+        let rebound_target = session
+            .prepare_object_media(
+                simulator_id,
+                ObjectMediaRequest { source: UpdateSource::new(region, 5, OrderEvidence::Ordered(5), 0), ..request },
+            )
+            .expect("target after address is rebound");
+        assert_ne!(stale_target.binding, rebound_target.binding);
+
+        let late = ObjectMediaUpdate::new(5, vec![Some(MediaEntry::default())]).expect("valid media response");
+        assert!(session.apply_object_media(stale_target, late).is_none());
+        let current = ObjectMediaUpdate::new(5, vec![Some(MediaEntry::default())]).expect("valid media response");
+        assert!(matches!(session.apply_object_media(rebound_target, current), Some(Ok(_))));
+
+        let entity = session.world().entity_at(LocalAddress::new(region, local_id)).expect("rebound object");
+        let object = session.world().object(entity).expect("object is retained");
+        assert_eq!(object.id(), object_id);
+        assert_eq!(object.object_media().map(|media| media.version()), Some(5));
     }
 
     #[test]

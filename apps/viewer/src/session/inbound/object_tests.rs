@@ -2,22 +2,70 @@ use base::UUID;
 use math::{Quat, Vec3};
 use protocol::{
     lludp::{Message, Message::ImprovedTerseObjectUpdate, Message::ObjectUpdate, Message::ObjectUpdateCompressed, Packet},
-    messages::{ExtraParamUpdate, ExtraParameter, GenericStreamingMessage, ObjectExtraParams, StartPingCheck},
+    messages::{
+        ExtraParamUpdate, ExtraParameter, GenericStreamingMessage, ObjectExtraParams, StartPingCheck, improved_terse_object_update,
+    },
 };
 use std::num::{NonZeroU8, NonZeroU32};
 use testing::{lludp::vectors, parse_hex_fixture};
 use world::{
     Appearance,
-    ApplyOutcome::{Introduced, RegionAdopted, Updated},
+    ApplyOutcome::{Introduced, Updated},
     AssetId, AttachmentPoint,
     FieldRejectionReason::InvalidRotation,
-    Kind, ObjectObservation, ObjectPatch, OrderEvidence, ParentUpdate, Pose, Region, RenderMaterials, SculptFlags, SculptType, Shape,
-    UpdateSource, World, WorldLimits,
+    FieldUpdate, Kind, ObjectObservation, ObjectPatch, OrderEvidence, ParentUpdate, Pose, PrimShape, Region, RenderMaterials, SculptFlags,
+    SculptType, Shape, UpdateSource, World, WorldLimits,
 };
 
 use super::{ObjectOperation, attachment_point, decode_object_message, object_media_requests};
 
 const REGION: Region = Region::new(11);
+
+fn full_prim_shape() -> PrimShape {
+    PrimShape {
+        path_curve: 16,
+        profile_curve: 1,
+        path_begin: 0x1000,
+        path_end: 0xf000,
+        path_scale_x: 128,
+        path_scale_y: 129,
+        path_shear_x: 1,
+        path_shear_y: -1,
+        path_twist: 2,
+        path_twist_begin: -2,
+        path_radius_offset: 3,
+        path_taper_x: -3,
+        path_taper_y: 4,
+        path_revolutions: 252,
+        path_skew: 18,
+        profile_begin: 0x10fb,
+        profile_end: 0x3020,
+        profile_hollow: 0x5040,
+    }
+}
+
+fn compressed_prim_shape() -> PrimShape {
+    PrimShape {
+        path_curve: 1,
+        profile_curve: 16,
+        path_begin: 258,
+        path_end: 772,
+        path_scale_x: 5,
+        path_scale_y: 6,
+        path_shear_x: 7,
+        path_shear_y: 8,
+        path_twist: -9,
+        path_twist_begin: -10,
+        path_radius_offset: -11,
+        path_taper_x: -12,
+        path_taper_y: -13,
+        path_revolutions: 14,
+        path_skew: -15,
+        profile_begin: 4370,
+        profile_end: 4884,
+        profile_hollow: 5398,
+    }
+}
 
 fn asset_id(value: u128) -> AssetId {
     AssetId::new(UUID::from_u128(value))
@@ -76,9 +124,9 @@ fn media_observation(region: Region, id: UUID, initial_material: u128) -> Object
         linear_motion: None,
         angular_velocity: None,
         scale: Some(Vec3::ONE),
-        attachment_point: None,
-        shape: Some(Some(Shape::Prim)),
-        appearance: Some(Some(Appearance::Surface)),
+        attachment_point: FieldUpdate::Keep,
+        shape: FieldUpdate::Set(Shape::Prim(Default::default())),
+        appearance: FieldUpdate::Set(Appearance::Surface),
         surface_appearance: None,
         render_materials: Some(RenderMaterials::new(vec![(0, asset_id(initial_material))]).expect("valid initial material")),
     }
@@ -134,7 +182,7 @@ fn terse_patch(rotation: Quat, order: u64) -> ObjectPatch {
     let fixture_packet = packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
     let mut message = fixture_packet.message().clone();
     let ImprovedTerseObjectUpdate(update) = &mut message else { panic!("expected terse fixture") };
-    update.objects[0].motion.rotation = rotation;
+    update.objects[0].as_decoded_mut().expect("fixture block is structurally valid").motion.rotation = rotation;
     let encoded = Packet::new(fixture_packet.sequence(), message).with_zero_coding(false).encode().expect("encode terse rotation");
     let packet = Packet::decode(&encoded).expect("decode terse rotation");
     let batch = decode_object_message(REGION, packet.sequence(), OrderEvidence::Ordered(order), packet.message())
@@ -185,7 +233,7 @@ fn world_with_regions(max_region_registrations: usize) -> World {
         max_recovery_targets: 8,
     };
     let mut world = World::new(limits);
-    assert_eq!(world.adopt_region(REGION).unwrap().outcome, RegionAdopted);
+    assert!(matches!(world.adopt_region(REGION).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
     world
 }
 
@@ -239,9 +287,9 @@ fn terse_rotation_roundoff_is_accepted() {
         linear_motion: None,
         angular_velocity: None,
         scale: None,
-        attachment_point: None,
-        shape: None,
-        appearance: None,
+        attachment_point: FieldUpdate::Keep,
+        shape: FieldUpdate::Keep,
+        appearance: FieldUpdate::Keep,
         surface_appearance: None,
         render_materials: None,
     };
@@ -270,9 +318,9 @@ fn bad_terse_rotation_is_rejected() {
         linear_motion: None,
         angular_velocity: None,
         scale: None,
-        attachment_point: None,
-        shape: None,
-        appearance: None,
+        attachment_point: FieldUpdate::Keep,
+        shape: FieldUpdate::Keep,
+        appearance: FieldUpdate::Keep,
         surface_appearance: None,
         render_materials: None,
     };
@@ -298,13 +346,12 @@ fn fixture_mapping_preserves_packet_order() {
     assert_eq!(observation.source.sequence(), packet.sequence());
     assert_eq!(observation.source.order(), OrderEvidence::Ordered(17));
     assert_eq!(observation.kind, Kind::Object);
-    assert_eq!(observation.shape, Some(Some(Shape::Prim)));
-    assert_eq!(observation.appearance, Some(Some(Appearance::Surface)));
-
+    assert_eq!(observation.shape, FieldUpdate::Set(Shape::Prim(full_prim_shape())));
+    assert_eq!(observation.appearance, FieldUpdate::Set(Appearance::Surface));
     let Some(ObjectOperation::Observe(avatar)) = batch.blocks[1].as_ref() else { panic!("expected avatar observation") };
     assert_eq!(avatar.kind, Kind::Avatar);
-    assert_eq!(avatar.shape, Some(Some(Shape::Avatar)));
-    assert_eq!(avatar.appearance, Some(Some(Appearance::Avatar)));
+    assert_eq!(avatar.shape, FieldUpdate::Set(Shape::Avatar));
+    assert_eq!(avatar.appearance, FieldUpdate::Set(Appearance::Avatar));
 }
 
 #[test]
@@ -333,14 +380,14 @@ fn texture_entries_apply_to_volumes_only() {
 
     let mut terse = packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE).message().clone();
     let ImprovedTerseObjectUpdate(update) = &mut terse else { panic!("expected improved-terse fixture") };
-    update.objects[0].texture_entry = packed_texture_entry();
+    update.objects[0].as_decoded_mut().expect("fixture block is structurally valid").texture_entry = packed_texture_entry();
     let terse_batch = decode_object_message(REGION, 32, OrderEvidence::Ordered(32), &terse).expect("terse object batch");
     let Some(ObjectOperation::Patch(patch)) = terse_batch.blocks[0].as_ref() else { panic!("expected terse patch") };
     assert!(patch.surface_appearance.is_some());
 
     let mut terse_avatar = packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE_AVATAR).message().clone();
     let ImprovedTerseObjectUpdate(update) = &mut terse_avatar else { panic!("expected improved-terse avatar fixture") };
-    update.objects[0].texture_entry = packed_texture_entry();
+    update.objects[0].as_decoded_mut().expect("fixture block is structurally valid").texture_entry = packed_texture_entry();
     let avatar_batch = decode_object_message(REGION, 33, OrderEvidence::Ordered(33), &terse_avatar).expect("terse avatar batch");
     let Some(ObjectOperation::Patch(patch)) = avatar_batch.blocks[0].as_ref() else { panic!("expected terse avatar patch") };
     assert_eq!(patch.surface_appearance, None);
@@ -360,7 +407,27 @@ fn malformed_texture_entries_are_field_local() {
     assert_eq!(observation.surface_appearance, None);
     assert!(observation.pose.is_some());
     assert!(observation.scale.is_some());
-    assert_eq!(observation.shape, Some(Some(Shape::Prim)));
+    assert_eq!(observation.shape, FieldUpdate::Set(Shape::Prim(full_prim_shape())));
+}
+
+#[test]
+fn malformed_terse_block_does_not_discard_later_object() {
+    let fixture = packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
+    let Message::ImprovedTerseObjectUpdate(update) = fixture.message() else { panic!("expected terse fixture") };
+    let mut blocks = update.objects.clone();
+    blocks.insert(0, improved_terse_object_update::ObjectBlock::Malformed { packed_data: vec![1], texture_entry: Vec::new() });
+    let message = Message::ImprovedTerseObjectUpdate(improved_terse_object_update::ImprovedTerseObjectUpdate {
+        region_data: update.region_data,
+        objects: blocks,
+    });
+
+    let batch = decode_object_message(REGION, 52, OrderEvidence::Ordered(52), &message).expect("terse object batch");
+
+    assert_eq!(batch.invalid_blocks, 1);
+    assert_eq!(batch.blocks.len(), 2);
+    assert!(batch.blocks[0].is_none());
+    let Some(ObjectOperation::Patch(patch)) = batch.blocks[1].as_ref() else { panic!("valid sibling remains mapped") };
+    assert_eq!(patch.source.block_ordinal(), 1);
 }
 
 #[test]
@@ -413,7 +480,7 @@ fn embedded_materials_replace_and_clear() {
 
     let mut terse = packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE).message().clone();
     let ImprovedTerseObjectUpdate(update) = &mut terse else { panic!("expected terse fixture") };
-    update.objects[0].texture_entry = packed_texture_entry();
+    update.objects[0].as_decoded_mut().expect("fixture block is structurally valid").texture_entry = packed_texture_entry();
     let terse_batch = decode_object_message(REGION, 43, OrderEvidence::Ordered(43), &terse).expect("terse batch");
     let Some(ObjectOperation::Patch(patch)) = terse_batch.blocks[0].as_ref() else { panic!("expected terse patch") };
     assert!(patch.surface_appearance.is_some());
@@ -480,7 +547,7 @@ fn malformed_render_materials_are_field_local() {
         assert_eq!(observation.render_materials, None);
         assert!(observation.pose.is_some());
         assert!(observation.scale.is_some());
-        assert_eq!(observation.shape, Some(Some(Shape::Prim)));
+        assert_eq!(observation.shape, FieldUpdate::Set(Shape::Prim(full_prim_shape())));
     }
 }
 
@@ -551,7 +618,7 @@ fn incremental_materials_replace_and_clear() {
         let object = state.object(first_entity).expect("addressed object remains");
         assert_eq!(object.render_materials().unwrap().material(0), None);
         assert_eq!(object.render_materials().unwrap().material(44), Some(asset_id(0x630)));
-        assert_eq!(object.shape(), Some(Shape::Prim));
+        assert_eq!(object.shape(), Some(Shape::Prim(Default::default())));
         assert_eq!(object.appearance(), Some(Appearance::Surface));
     }
     assert_eq!(state.object(neighbor_entity).unwrap().render_materials().unwrap().material(0), Some(asset_id(0x620)));
@@ -562,7 +629,7 @@ fn incremental_materials_replace_and_clear() {
     {
         let object = state.object(first_entity).expect("addressed object remains");
         assert_eq!(object.render_materials(), None);
-        assert_eq!(object.shape(), Some(Shape::Prim));
+        assert_eq!(object.shape(), Some(Shape::Prim(Default::default())));
         assert_eq!(object.appearance(), Some(Appearance::Surface));
     }
     assert_eq!(state.object(neighbor_entity).unwrap().render_materials().unwrap().material(0), Some(asset_id(0x620)));
@@ -617,8 +684,63 @@ fn compressed_update_keeps_parent_and_angular() {
     assert_eq!(observation.parent, ParentUpdate::Local(NonZeroU32::new(0x0506_0708).expect("nonzero parent ID")));
     assert_eq!(observation.angular_velocity, Some(Vec3::new(0.5, 0.0, -0.5)));
     assert_eq!(observation.linear_motion, None);
-    assert_eq!(observation.shape, Some(Some(Shape::Prim)));
-    assert_eq!(observation.appearance, Some(Some(Appearance::Surface)));
+    assert_eq!(observation.shape, FieldUpdate::Set(Shape::Prim(compressed_prim_shape())));
+    assert_eq!(observation.appearance, FieldUpdate::Set(Appearance::Surface));
+}
+
+#[test]
+fn prim_parameters_follow_ordered_world_updates() {
+    let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
+    let ObjectUpdate(update) = &mut full else { panic!("expected full fixture") };
+    update.objects.truncate(1);
+    let id = update.objects[0].id;
+    let local_id = update.objects[0].local_id;
+    let mut world = world_with_regions(1);
+    let batch = decode_object_message(REGION, 1, OrderEvidence::Ordered(1), &full).unwrap();
+    let Some(ObjectOperation::Observe(observation)) = &batch.blocks[0] else { panic!("expected observation") };
+    let Introduced(entity) = world.observe_object(observation.clone()).unwrap().outcome else { panic!("expected introduction") };
+    assert_eq!(world.object(entity).unwrap().shape(), Some(Shape::Prim(full_prim_shape())));
+
+    let mut compressed = packet(vectors::OBJECT_UPDATE_COMPRESSED_TYPED).message().clone();
+    let ObjectUpdateCompressed(update) = &mut compressed else { panic!("expected compressed fixture") };
+    update.objects[0].id = id;
+    update.objects[0].local_id = local_id;
+    update.objects[0].shape = None;
+    let batch = decode_object_message(REGION, 2, OrderEvidence::Ordered(2), &compressed).unwrap();
+    let Some(ObjectOperation::Observe(observation)) = &batch.blocks[0] else { panic!("expected observation") };
+    assert_eq!(observation.shape, FieldUpdate::Keep);
+    let _ = world.observe_object(observation.clone()).unwrap();
+    assert_eq!(world.object(entity).unwrap().shape(), Some(Shape::Prim(full_prim_shape())));
+
+    let ObjectUpdateCompressed(update) = &mut compressed else { unreachable!() };
+    let ObjectUpdate(original) = &full else { unreachable!() };
+    let mut shape = original.objects[0].shape;
+    shape.path_curve = u8::MAX;
+    shape.profile_curve = u8::MAX;
+    shape.path_shear_x = 128;
+    shape.path_shear_y = 127;
+    shape.profile_hollow = u16::MAX;
+    update.objects[0].shape = Some(shape);
+    let expected = PrimShape {
+        path_curve: u8::MAX,
+        profile_curve: u8::MAX,
+        path_shear_x: i8::MIN,
+        path_shear_y: i8::MAX,
+        profile_hollow: u16::MAX,
+        ..full_prim_shape()
+    };
+    let batch = decode_object_message(REGION, 3, OrderEvidence::Ordered(3), &compressed).unwrap();
+    let Some(ObjectOperation::Observe(observation)) = &batch.blocks[0] else { panic!("expected observation") };
+    assert_eq!(observation.shape, FieldUpdate::Set(Shape::Prim(expected)));
+    let _ = world.observe_object(observation.clone()).unwrap();
+    assert_eq!(world.object(entity).unwrap().shape(), Some(Shape::Prim(expected)));
+
+    let revision = world.revision();
+    let batch = decode_object_message(REGION, 1, OrderEvidence::Ordered(1), &full).unwrap();
+    let Some(ObjectOperation::Observe(observation)) = &batch.blocks[0] else { panic!("expected observation") };
+    let _ = world.observe_object(observation.clone()).unwrap();
+    assert_eq!(world.object(entity).unwrap().shape(), Some(Shape::Prim(expected)));
+    assert_eq!(world.revision(), revision);
 }
 
 #[test]
@@ -671,7 +793,7 @@ fn compressed_shape_classification() {
                 flags: SculptFlags { invert: true, mirror: true },
             }),
         ),
-        (0x0030, 0, UUID::nil(), Some(Shape::Prim)),
+        (0x0030, 0, UUID::nil(), Some(Shape::Prim(compressed_prim_shape()))),
         (0x0030, 6, UUID::from_u128(0x333), None),
         (
             0x0030,
@@ -703,7 +825,11 @@ fn compressed_shape_classification() {
         let batch = decode_object_message(REGION, fixture_packet.sequence(), OrderEvidence::Ordered(19), &message)
             .expect("compressed object batch");
         let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected compressed observation") };
-        assert_eq!(observation.shape, Some(expected), "extra parameter type {parameter_type:#06x}, subtype {subtype}");
+        assert_eq!(
+            observation.shape,
+            expected.map_or(FieldUpdate::Clear, FieldUpdate::Set),
+            "extra parameter type {parameter_type:#06x}, subtype {subtype}"
+        );
         if subtype & 0x38 == 0
             && (1..=5).contains(&(subtype & 0x07))
             && let Some(Shape::Sculpt { asset_id, .. } | Shape::Mesh { asset_id, .. }) = expected
@@ -711,7 +837,7 @@ fn compressed_shape_classification() {
             assert_eq!(asset_id.uuid(), asset_uuid);
             assert_ne!(observation.id, asset_uuid);
         }
-        assert_eq!(observation.appearance, Some(Some(Appearance::Surface)));
+        assert_eq!(observation.appearance, FieldUpdate::Set(Appearance::Surface));
     }
 
     let mut message = fixture_packet.message().clone();
@@ -720,7 +846,7 @@ fn compressed_shape_classification() {
     let batch =
         decode_object_message(REGION, fixture_packet.sequence(), OrderEvidence::Ordered(20), &message).expect("compressed object batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected compressed observation") };
-    assert_eq!(observation.shape, None);
+    assert_eq!(observation.shape, FieldUpdate::Keep);
 
     let mut first_data = vec![0; 17];
     first_data[..16].copy_from_slice(UUID::from_u128(0x444).as_bytes());
@@ -735,7 +861,7 @@ fn compressed_shape_classification() {
     let batch =
         decode_object_message(REGION, fixture_packet.sequence(), OrderEvidence::Ordered(20), &message).expect("compressed object batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected compressed observation") };
-    assert_eq!(observation.shape, Some(Some(Shape::Mesh { asset_id: asset_id(0x555), flags: SculptFlags::default() })));
+    assert_eq!(observation.shape, FieldUpdate::Set(Shape::Mesh { asset_id: asset_id(0x555), flags: SculptFlags::default() }));
 
     let mut malformed_data = vec![0; 16];
     malformed_data[..16].copy_from_slice(UUID::from_u128(0x666).as_bytes());
@@ -751,7 +877,7 @@ fn compressed_shape_classification() {
     let batch =
         decode_object_message(REGION, fixture_packet.sequence(), OrderEvidence::Ordered(20), &message).expect("compressed object batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected compressed observation") };
-    assert_eq!(observation.shape, Some(Some(Shape::Mesh { asset_id: asset_id(0x777), flags: SculptFlags::default() })));
+    assert_eq!(observation.shape, FieldUpdate::Set(Shape::Mesh { asset_id: asset_id(0x777), flags: SculptFlags::default() }));
 
     let mut message = fixture_packet.message().clone();
     let ObjectUpdateCompressed(update) = &mut message else { panic!("expected compressed object fixture") };
@@ -760,7 +886,7 @@ fn compressed_shape_classification() {
     let batch =
         decode_object_message(REGION, fixture_packet.sequence(), OrderEvidence::Ordered(20), &message).expect("compressed object batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected compressed observation") };
-    assert_eq!(observation.shape, None);
+    assert_eq!(observation.shape, FieldUpdate::Keep);
 }
 
 #[test]
@@ -772,7 +898,7 @@ fn full_shape_classification() {
     update.objects[0].pcode = 9;
     let batch = decode_object_message(REGION, fixture_packet.sequence(), OrderEvidence::Ordered(18), &regular).expect("full batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected full observation") };
-    assert_eq!(observation.shape, Some(Some(Shape::Prim)));
+    assert_eq!(observation.shape, FieldUpdate::Set(Shape::Prim(full_prim_shape())));
 
     let mut message = fixture_packet.message().clone();
     let Message::ObjectUpdate(update) = &mut message else { panic!("expected full object fixture") };
@@ -788,9 +914,9 @@ fn full_shape_classification() {
 
     assert_eq!(
         observation.shape,
-        Some(Some(Shape::Sculpt { asset_id: asset_id(0x111), sculpt_type: SculptType::Sphere, flags: SculptFlags::default() }))
+        FieldUpdate::Set(Shape::Sculpt { asset_id: asset_id(0x111), sculpt_type: SculptType::Sphere, flags: SculptFlags::default() })
     );
-    assert_eq!(observation.appearance, Some(Some(Appearance::Surface)));
+    assert_eq!(observation.appearance, FieldUpdate::Set(Appearance::Surface));
 }
 
 #[test]
@@ -830,7 +956,7 @@ fn malformed_shape_params_preserve_shape() {
     let Some(ObjectOperation::Observe(malformed_observation)) = malformed_batch.blocks[0].as_ref() else {
         panic!("expected compressed observation")
     };
-    assert_eq!(malformed_observation.shape, None);
+    assert_eq!(malformed_observation.shape, FieldUpdate::Keep);
 
     let applied = world.observe_object(malformed_observation.clone()).expect("unrelated valid fields still apply");
     assert!(matches!(applied.outcome, Updated(_)));
@@ -850,8 +976,8 @@ fn terse_preserves_shape_and_appearance() {
     let packet = packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
     let batch = decode_object_message(REGION, packet.sequence(), OrderEvidence::Ordered(21), packet.message()).expect("terse batch");
     let Some(ObjectOperation::Patch(patch)) = batch.blocks[0].as_ref() else { panic!("expected terse patch") };
-    assert_eq!(patch.shape, None);
-    assert_eq!(patch.appearance, None);
+    assert_eq!(patch.shape, FieldUpdate::Keep);
+    assert_eq!(patch.appearance, FieldUpdate::Keep);
 }
 
 #[test]
@@ -926,11 +1052,11 @@ fn media_requests_require_volume_marker() {
 
 #[test]
 fn attachment_state_decodes_wire_nibbles() {
-    assert_eq!(attachment_point(0), Some(None));
-    assert_eq!(attachment_point(0x10), Some(Some(AttachmentPoint::new(NonZeroU8::new(1).unwrap()))));
-    assert_eq!(attachment_point(0x18), Some(Some(AttachmentPoint::new(NonZeroU8::new(1).unwrap()))));
-    assert_eq!(attachment_point(0x80), Some(Some(AttachmentPoint::new(NonZeroU8::new(8).unwrap()))));
-    assert_eq!(attachment_point(0x88), Some(Some(AttachmentPoint::new(NonZeroU8::new(8).unwrap()))));
+    assert_eq!(attachment_point(0), FieldUpdate::Clear);
+    assert_eq!(attachment_point(0x10), FieldUpdate::Set(AttachmentPoint::new(NonZeroU8::new(1).unwrap())));
+    assert_eq!(attachment_point(0x18), FieldUpdate::Set(AttachmentPoint::new(NonZeroU8::new(1).unwrap())));
+    assert_eq!(attachment_point(0x80), FieldUpdate::Set(AttachmentPoint::new(NonZeroU8::new(8).unwrap())));
+    assert_eq!(attachment_point(0x88), FieldUpdate::Set(AttachmentPoint::new(NonZeroU8::new(8).unwrap())));
 }
 
 fn message(method: u16, data: &[u8]) -> Message {
@@ -971,4 +1097,24 @@ fn empty_snapshot_is_an_explicit_clear() {
 
     let Some(ObjectOperation::Patch(patch)) = &batch.blocks[0] else { panic!("expected object patch") };
     assert!(patch.gltf_material_overrides.as_ref().unwrap().is_empty());
+}
+
+#[test]
+fn compressed_owner_metadata_does_not_populate_object_properties() {
+    let packet = packet(vectors::OBJECT_UPDATE_COMPRESSED_TYPED);
+    let message = packet.message().clone();
+    let Message::ObjectUpdateCompressed(update) = &message else { panic!("expected compressed object fixture") };
+    let first_owner = update.objects[0].owner_id;
+    assert_ne!(first_owner, UUID::from_u128(0));
+
+    let batch = decode_object_message(REGION, packet.sequence(), OrderEvidence::Ordered(100), &message)
+        .expect("compressed fixture has an object message");
+    let Some(ObjectOperation::Observe(observation)) = batch.blocks.first().and_then(Option::as_ref) else {
+        panic!("expected compressed observation")
+    };
+    let mut world = world();
+    let introduced = world.observe_object(observation.clone()).expect("decoded compressed observation applies");
+    let Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };
+    assert_eq!(world.object(entity).unwrap().properties().owner_id, None);
+    assert_eq!(world.object(entity).unwrap().properties().creator_id, None);
 }

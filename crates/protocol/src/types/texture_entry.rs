@@ -100,44 +100,48 @@ pub fn decode_texture_entry(bytes: &[u8]) -> Result<Option<TextureEntry>, Textur
     let mut reader = Reader::new(bytes);
     let mut faces = [TextureFace::default(); MAX_TEXTURE_FACES];
     let texture_id = required_field(&mut reader, &mut faces, read_uuid, |face, value| face.texture_id = value)?;
-    let color = required_field(&mut reader, &mut faces, read_color, |face, value| {
-        face.color = value.map(|byte| u8::MAX - byte);
-    })?;
+    let color = required_field(&mut reader, &mut faces, read_color, |face, value| face.color = value)?;
     let scale_s = required_field(&mut reader, &mut faces, read_finite_f32, |face, value| face.scale_s = value)?;
     let scale_t = required_field(&mut reader, &mut faces, read_finite_f32, |face, value| face.scale_t = value)?;
-    let offset_s = required_field(&mut reader, &mut faces, read_i16, |face, value| {
-        face.offset_s = f32::from(value) / 32767.0;
-    })?;
-    let offset_t = required_field(&mut reader, &mut faces, read_i16, |face, value| {
-        face.offset_t = f32::from(value) / 32767.0;
-    })?;
-    let rotation = required_field(&mut reader, &mut faces, read_i16, |face, value| {
-        face.rotation = (f32::from(value) / 32768.0) * std::f32::consts::TAU;
-    })?;
+    let offset_s = required_field(&mut reader, &mut faces, read_i16, |face, value| face.offset_s = f32::from(value))?;
+    let offset_t = required_field(&mut reader, &mut faces, read_i16, |face, value| face.offset_t = f32::from(value))?;
+    let rotation = required_field(&mut reader, &mut faces, read_i16, |face, value| face.rotation = f32::from(value))?;
     let bump_shiny_fullbright = required_field(&mut reader, &mut faces, read_u8, |face, value| {
         face.bump_shiny_fullbright = value;
     })?;
     let media_texgen = required_field(&mut reader, &mut faces, read_u8, |face, value| face.media_texgen = value)?;
-    let glow = required_field(&mut reader, &mut faces, read_u8, |face, value| face.glow = f32::from(value) / 255.0)?;
+    let glow = required_field(&mut reader, &mut faces, read_u8, |face, value| face.glow = f32::from(value))?;
     let mut default_face = TextureFace {
         texture_id,
-        color: color.map(|byte| u8::MAX - byte),
+        color,
         scale_s,
         scale_t,
-        offset_s: f32::from(offset_s) / 32767.0,
-        offset_t: f32::from(offset_t) / 32767.0,
-        rotation: (f32::from(rotation) / 32768.0) * std::f32::consts::TAU,
+        offset_s: f32::from(offset_s),
+        offset_t: f32::from(offset_t),
+        rotation: f32::from(rotation),
         bump_shiny_fullbright,
         media_texgen,
-        glow: f32::from(glow) / 255.0,
+        glow: f32::from(glow),
         material_id: UUID::nil(),
     };
 
     decode_material_ids(&mut reader, &mut faces, &mut default_face);
+    convert_wire_values(&mut default_face);
+    for face in &mut faces {
+        convert_wire_values(face);
+    }
     let overrides =
         faces.into_iter().enumerate().filter_map(|(index, face)| (face != default_face).then_some((index as u8, face))).collect();
 
     Ok(Some(TextureEntry { default_face, overrides }))
+}
+
+fn convert_wire_values(face: &mut TextureFace) {
+    face.color = face.color.map(|byte| u8::MAX - byte);
+    face.offset_s /= 32767.0;
+    face.offset_t /= 32767.0;
+    face.rotation = (face.rotation / 32768.0) * std::f32::consts::TAU;
+    face.glow /= 255.0;
 }
 
 fn required_field<'a, T: Copy>(

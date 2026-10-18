@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::AssetId;
 
 /// Number of avatar texture slots carried by the legacy TextureEntry format.
@@ -182,7 +184,7 @@ pub struct AvatarAppearance {
     appearance_version: Option<u8>,
     cof_version: Option<i32>,
     visual_params: Vec<(AvatarVisualParamIndex, u8)>,
-    texture_slots: Option<AvatarTextureSlots>,
+    texture_slots: Option<Arc<AvatarTextureSlots>>,
 }
 
 impl AvatarAppearance {
@@ -208,7 +210,7 @@ impl AvatarAppearance {
 
     /// Returns the last complete avatar texture table, if one was decoded.
     pub fn texture_slots(&self) -> Option<&AvatarTextureSlots> {
-        self.texture_slots.as_ref()
+        self.texture_slots.as_deref()
     }
 
     pub(crate) fn apply(&mut self, update: AvatarAppearanceUpdate) {
@@ -236,7 +238,7 @@ pub struct AvatarAppearanceUpdate {
     appearance_version: Option<u8>,
     cof_version: Option<i32>,
     visual_params: Vec<(AvatarVisualParamIndex, u8)>,
-    texture_slots: Option<AvatarTextureSlots>,
+    texture_slots: Option<Arc<AvatarTextureSlots>>,
 }
 
 impl AvatarAppearanceUpdate {
@@ -262,7 +264,7 @@ impl AvatarAppearanceUpdate {
         if visual_params.windows(2).any(|pair| pair[0].0 == pair[1].0) {
             return Err(AvatarAppearanceError::DuplicateVisualParam);
         }
-        Ok(Self { appearance_version, cof_version, visual_params, texture_slots })
+        Ok(Self { appearance_version, cof_version, visual_params, texture_slots: texture_slots.map(Arc::new) })
     }
 
     pub const fn appearance_version(&self) -> Option<u8> {
@@ -278,7 +280,7 @@ impl AvatarAppearanceUpdate {
     }
 
     pub fn texture_slots(&self) -> Option<&AvatarTextureSlots> {
-        self.texture_slots.as_ref()
+        self.texture_slots.as_deref()
     }
 }
 
@@ -346,7 +348,13 @@ mod tests {
         appearance.apply(AvatarAppearanceUpdate::new(None, None, Vec::new(), Some(set)).expect("valid update"));
         assert_eq!(appearance.texture_slots().and_then(|slots| slots.texture(slot)), Some(AssetId::new(UUID::from_u128(7))));
 
+        let retained = appearance.clone();
         appearance.apply(AvatarAppearanceUpdate::new(None, None, Vec::new(), Some(AvatarTextureSlots::default())).expect("valid clear"));
+        assert_eq!(appearance.texture_slots().and_then(|slots| slots.texture(slot)), None);
+        assert_eq!(retained.texture_slots().and_then(|slots| slots.texture(slot)), Some(AssetId::new(UUID::from_u128(7))));
+
+        appearance.apply(AvatarAppearanceUpdate::new(Some(1), None, Vec::new(), None).expect("partial update"));
+        assert!(appearance.texture_slots().is_some());
         assert_eq!(appearance.texture_slots().and_then(|slots| slots.texture(slot)), None);
     }
 }
